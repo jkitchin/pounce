@@ -424,7 +424,10 @@ impl OrigIpoptNlp {
                 None
             }
         } else {
-            None
+            // LPs and other problems with structurally zero Hessian: build an
+            // empty SymTMatrixSpace so eval_h_internal returns a zero matrix
+            // rather than panicking down the L-BFGS error path.
+            Some(SymTMatrixSpace::new(n_x_var, Vec::new(), Vec::new()))
         };
 
         Ok(Self {
