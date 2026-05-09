@@ -27,10 +27,23 @@ struct CutestResult {
     n: usize,
     m: usize,
     status: String,
+    #[serde(serialize_with = "ser_f64", deserialize_with = "de_f64")]
     objective: f64,
+    #[serde(serialize_with = "ser_f64", deserialize_with = "de_f64")]
     constraint_violation: f64,
     iterations: usize,
     solve_time: f64,
+}
+
+// JSON has no NaN/Inf; serialize as null and round-trip back to NaN. Without
+// this, an early-exit row that emits constraint_violation=NaN parses as JSON
+// null on the parent side, fails to deserialize into f64, and the row is
+// silently dropped from the aggregate.
+fn ser_f64<S: serde::Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+    if v.is_finite() { s.serialize_f64(*v) } else { s.serialize_none() }
+}
+fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
 }
 
 // ---- Native Ipopt FFI -------------------------------------------------------
