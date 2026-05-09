@@ -9,6 +9,7 @@
 
 use pounce_cutest::CutestProblem;
 use pounce_nlp::alg_types::SolverReturn;
+use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_algorithm::application::IpoptApplication;
 use pounce_nlp::tnlp::TNLP;
 use serde::{Deserialize, Serialize};
@@ -304,6 +305,33 @@ fn ipopt_status_label(status: i32) -> String {
     }
 }
 
+fn app_status_label(s: ApplicationReturnStatus) -> String {
+    use ApplicationReturnStatus::*;
+    match s {
+        SolveSucceeded => "Solve_Succeeded",
+        SolvedToAcceptableLevel => "Solved_To_Acceptable_Level",
+        InfeasibleProblemDetected => "Infeasible_Problem_Detected",
+        SearchDirectionBecomesTooSmall => "Search_Direction_Becomes_Too_Small",
+        DivergingIterates => "Diverging_Iterates",
+        UserRequestedStop => "User_Requested_Stop",
+        FeasiblePointFound => "Feasible_Point_Found",
+        MaximumIterationsExceeded => "Maximum_Iterations_Exceeded",
+        RestorationFailed => "Restoration_Failed",
+        ErrorInStepComputation => "Error_In_Step_Computation",
+        MaximumCpuTimeExceeded => "Maximum_CpuTime_Exceeded",
+        MaximumWallTimeExceeded => "Maximum_WallTime_Exceeded",
+        NotEnoughDegreesOfFreedom => "Not_Enough_Degrees_Of_Freedom",
+        InvalidProblemDefinition => "Invalid_Problem_Definition",
+        InvalidOption => "Invalid_Option",
+        InvalidNumberDetected => "Invalid_Number_Detected",
+        UnrecoverableException => "Unrecoverable_Exception",
+        NonIpoptExceptionThrown => "NonIpopt_Exception_Thrown",
+        InsufficientMemory => "Insufficient_Memory",
+        InternalError => "Internal_Error",
+    }
+    .to_string()
+}
+
 fn pounce_status_label(s: SolverReturn) -> String {
     match s {
         SolverReturn::Success => "Solve_Succeeded",
@@ -467,7 +495,7 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
     let final_status = p
         .final_status
         .map(pounce_status_label)
-        .unwrap_or_else(|| format!("AppStatus({:?})", app_status));
+        .unwrap_or_else(|| app_status_label(app_status));
     let final_obj = if p.final_obj.is_finite() {
         p.final_obj
     } else {

@@ -251,6 +251,17 @@ impl IpoptApplication {
             Err(_) => return ApplicationReturnStatus::InternalError,
         };
 
+        // Mirror upstream `OrigIpoptNLP::InitializeStructures` (IpOrigIpoptNLP.cpp:299):
+        // bail out with NotEnoughDegreesOfFreedom when there are fewer free
+        // variables than equality constraints. Without this gate, square /
+        // over-determined systems push the algorithm into restoration on
+        // iter 0 and exit Restoration_Failed instead of the cleaner DOF code.
+        let n_x_var = orig_nlp.x_space().dim();
+        let n_c = orig_nlp.c_space().dim();
+        if n_x_var > 0 && n_x_var < n_c {
+            return ApplicationReturnStatus::NotEnoughDegreesOfFreedom;
+        }
+
         // Relax `x_L / x_U / d_L / d_U` by `bound_relax_factor` (default
         // 1e-8), capped by `constr_viol_tol` (default 1e-4). Matches
         // `OrigIpoptNLP::InitializeStructures` lines 343-358.
