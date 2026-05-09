@@ -128,7 +128,28 @@ pub fn solve_unconstrained(
     }
     let nlp_lower = -1e19_f64;
     let nlp_upper = 1e19_f64;
-    let has_bounds = x_l.iter().any(|&v| v > nlp_lower) || x_u.iter().any(|&v| v < nlp_upper);
+    // A variable is "fixed" when its lower and upper bounds coincide
+    // (within a tight tolerance). Such variables have no degree of
+    // freedom and must be excluded from the barrier — otherwise
+    // `-mu/(x-l) + mu/(u-x)` evaluates to `-inf + inf = NaN`.
+    let fixed_eps = 1e-12;
+    let mut fixed = vec![false; n];
+    for i in 0..n {
+        if x_l[i] > nlp_lower
+            && x_u[i] < nlp_upper
+            && (x_u[i] - x_l[i]).abs() <= fixed_eps * x_l[i].abs().max(1.0)
+        {
+            fixed[i] = true;
+        }
+    }
+    let has_bounds = x_l
+        .iter()
+        .zip(fixed.iter())
+        .any(|(&v, &f)| !f && v > nlp_lower)
+        || x_u
+            .iter()
+            .zip(fixed.iter())
+            .any(|(&v, &f)| !f && v < nlp_upper);
 
     // Starting point.
     let mut x = vec![0.0; n];
@@ -151,10 +172,20 @@ pub fn solve_unconstrained(
     // strictly inside its bounds by `kappa` of the bound or `min_dist`
     // (whichever is larger). Mirrors the spirit of Ipopt's
     // bound_push / bound_frac in IpDefaultIterateInitializer.
+    // Clamp fixed variables to their bound and skip them in
+    // the push-to-interior pass.
+    for i in 0..n {
+        if fixed[i] {
+            x[i] = x_l[i];
+        }
+    }
     if has_bounds {
         let kappa1 = 1e-2;
         let kappa2 = 1e-2;
         for i in 0..n {
+            if fixed[i] {
+                continue;
+            }
             let lo = x_l[i];
             let hi = x_u[i];
             let lo_active = lo > nlp_lower;
@@ -244,8 +275,14 @@ pub fn solve_unconstrained(
         stats.num_obj_grad_evals += 1;
 
         // Add the gradient of the barrier term: -mu/(x-l) + mu/(u-x).
+        // Fixed variables have no barrier (their lo == hi would yield
+        // NaN); we zero their gradient instead so the step is zero.
         if has_bounds {
             for i in 0..n {
+                if fixed[i] {
+                    grad[i] = 0.0;
+                    continue;
+                }
                 let lo = x_l[i];
                 let hi = x_u[i];
                 if lo > nlp_lower {
@@ -253,6 +290,12 @@ pub fn solve_unconstrained(
                 }
                 if hi < nlp_upper {
                     grad[i] += mu / (hi - x[i]);
+                }
+            }
+        } else {
+            for i in 0..n {
+                if fixed[i] {
+                    grad[i] = 0.0;
                 }
             }
         }
@@ -360,6 +403,9 @@ pub fn solve_unconstrained(
         //   d²/dx²[-mu log(u-x)]  =  mu/(u-x)²
         if has_bounds {
             for i in 0..n {
+                if fixed[i] {
+                    continue;
+                }
                 let lo = x_l[i];
                 let hi = x_u[i];
                 if lo > nlp_lower {
@@ -372,6 +418,17 @@ pub fn solve_unconstrained(
                 }
             }
         }
+        // Decouple fixed variables from the linear system: zero the
+        // row/column and put 1 on the diagonal so step[i] = 0.
+        for i in 0..n {
+            if fixed[i] {
+                for j in 0..n {
+                    h_dense[i * n + j] = 0.0;
+                    h_dense[j * n + i] = 0.0;
+                }
+                h_dense[i * n + i] = 1.0;
+            }
+        }
 
         // Solve H * step = -grad, with diagonal Levenberg-style
         // damping if H is not PD.
@@ -380,9 +437,11 @@ pub fn solve_unconstrained(
             Err(()) => break ApplicationReturnStatus::ErrorInStepComputation,
         }
 
-        // Step direction check.
+        // Step direction check. Fall back to steepest descent if the
+        // computed step is not a strict descent direction (including
+        // the cases where it is zero or non-finite).
         let mut dir_deriv: Number = grad.iter().zip(step.iter()).map(|(g, s)| g * s).sum();
-        if dir_deriv >= 0.0 {
+        if !(dir_deriv < 0.0) || step.iter().any(|v| !v.is_finite()) {
             for i in 0..n {
                 step[i] = -grad[i];
             }
@@ -979,10 +1038,18 @@ fn barrier_term(
     if mu == 0.0 {
         return 0.0;
     }
+    let fixed_eps = 1e-12;
     let mut acc = 0.0;
     for i in 0..x.len() {
         let lo = x_l[i];
         let hi = x_u[i];
+        // Fixed variables (lo == hi) contribute no barrier term.
+        if lo > nlp_lower
+            && hi < nlp_upper
+            && (hi - lo).abs() <= fixed_eps * lo.abs().max(1.0)
+        {
+            continue;
+        }
         if lo > nlp_lower {
             let d = x[i] - lo;
             if d <= 0.0 {
@@ -1059,22 +1126,44 @@ fn finalize(
 /// mirrors the spirit of `PdPerturbationHandler::PerturbForWrongInertia`
 /// but on a single dense system rather than the augmented KKT.
 fn solve_with_damping(h: &[Number], grad: &[Number], n: usize, step: &mut [Number]) -> Result<(), ()> {
-    let mut lambda = 0.0_f64;
+    // If the Hessian contains non-finite entries (e.g. the user
+    // function reports an unbounded second derivative at the starting
+    // point), zero those entries and rely on Levenberg damping to
+    // produce a finite descent direction. This degrades Newton to
+    // scaled-gradient descent in the affected rows/columns rather
+    // than failing the entire solve.
+    let any_nonfinite = h.iter().any(|v| !v.is_finite());
+    let mut sanitized: Vec<Number>;
+    let h_use: &[Number] = if any_nonfinite {
+        sanitized = h.to_vec();
+        for v in sanitized.iter_mut() {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
+        &sanitized
+    } else {
+        h
+    };
+
+    let mut lambda = if any_nonfinite { 1.0_f64 } else { 0.0_f64 };
     let mut work = vec![0.0; n * n];
     let mut rhs = vec![0.0; n];
-    let max_attempts = 30;
+    let max_attempts = 40;
     for attempt in 0..max_attempts {
-        // Copy H + λI into work.
-        work.copy_from_slice(h);
+        work.copy_from_slice(h_use);
         for i in 0..n {
             work[i * n + i] += lambda;
         }
         for i in 0..n {
             rhs[i] = -grad[i];
         }
-        if cholesky_solve_in_place(&mut work, &mut rhs, n).is_ok() {
+        let ok = cholesky_solve_in_place(&mut work, &mut rhs, n).is_ok();
+        if ok {
             step.copy_from_slice(&rhs);
-            return Ok(());
+            if step.iter().all(|v| v.is_finite()) {
+                return Ok(());
+            }
         }
         lambda = if lambda == 0.0 { 1e-4 } else { lambda * 8.0 };
         if attempt == max_attempts - 1 {
@@ -1086,14 +1175,15 @@ fn solve_with_damping(h: &[Number], grad: &[Number], n: usize, step: &mut [Numbe
 
 /// Dense Cholesky `A = L L^T` with in-place factorization, then
 /// `solve L (L^T x) = b`. `a` is row-major n×n; on success the lower
-/// triangle holds `L`. Returns `Err` if any pivot is non-positive.
+/// triangle holds `L`. Returns `Err` if any pivot is non-positive,
+/// non-finite, or below a small threshold.
 fn cholesky_solve_in_place(a: &mut [Number], b: &mut [Number], n: usize) -> Result<(), ()> {
     for j in 0..n {
         let mut sum = a[j * n + j];
         for k in 0..j {
             sum -= a[j * n + k] * a[j * n + k];
         }
-        if sum <= 1e-14 {
+        if !sum.is_finite() || sum <= 1e-14 {
             return Err(());
         }
         let l_jj = sum.sqrt();
