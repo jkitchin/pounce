@@ -63,7 +63,10 @@ version = "0.1.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
+ "pounce-hsl",
+ "pounce-linsol",
  "pounce-nlp",
+ "pounce-restoration",
  "serde",
  "serde_json",
 ]

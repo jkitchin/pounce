@@ -10,8 +10,14 @@
 use pounce_cutest::CutestProblem;
 use pounce_nlp::alg_types::SolverReturn;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
+use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::tnlp::TNLP;
+use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
+use pounce_restoration::resto_inner_solver::{
+    make_default_restoration_factory, InnerBackendFactoryFactory,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::ffi::CString;
@@ -425,7 +431,11 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
         set_str(p, "mu_strategy", "adaptive");
         set_num(p, "tol", 1e-8);
         set_int(p, "max_iter", 3000);
-        set_int(p, "print_level", 0);
+        let ipl: i32 = std::env::var("IPOPT_PRINT_LEVEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        set_int(p, "print_level", ipl);
         SetIntermediateCallback(p, intermediate_cb);
 
         let user_data = &mut wrapper as *mut _ as *mut c_void;
@@ -459,6 +469,14 @@ fn solve_with_ipopt(problem: &mut CutestProblem) -> CutestResult {
     }
 }
 
+/// MA57 backend factory used by the restoration sub-IPM. Mirrors
+/// `pounce-cli`'s `ma57_backend_factory`.
+fn ma57_backend_factory() -> LinearBackendFactory {
+    Box::new(|_choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(pounce_hsl::Ma57SolverInterface::new())
+    })
+}
+
 fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
     let n = problem.n;
     let m = problem.m;
@@ -479,6 +497,17 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
             .unwrap_or(0);
         let _ = opts.set_integer_value("print_level", pl, true, false);
     }
+    // Wire the ℓ1-feasibility restoration sub-IPM. Without this, any
+    // line-search failure surfaces as `RestorationFailure` (the trait's
+    // default impl). Mirrors `pounce-cli` and what upstream's
+    // `IpAlgBuilder` does unconditionally.
+    let bff: InnerBackendFactoryFactory = Box::new(ma57_backend_factory);
+    let resto_factory = make_default_restoration_factory(
+        RestoAlgorithmBuilder::new(),
+        AlgorithmBuilder::new(),
+        bff,
+    );
+    app.set_restoration_factory(resto_factory);
     if let Err(e) = app.initialize() {
         let p = Rc::try_unwrap(problem_rc).ok().unwrap().into_inner();
         return (

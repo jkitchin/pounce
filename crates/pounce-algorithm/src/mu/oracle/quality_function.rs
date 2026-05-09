@@ -76,7 +76,15 @@ impl Default for QualityFunctionMuOracle {
             section_sigma_tol: 1e-2,
             section_qf_tol: 0.0,
             sigma_max: 100.0,
-            sigma_min: 1e-9,
+            // Upstream `IpQualityFunctionMuOracle.cpp:62-69`
+            // `RegisterOptions` default is 1e-6, not 1e-9. Setting it
+            // too low lets golden-section collapse σ all the way to
+            // the floor on outer iterations where q(σ) is nearly
+            // flat over the bracket — which then drives μ to ~1e-11
+            // in a single step and triggers a kappa_sigma blow-up
+            // that pushes the algorithm into restoration. (HS1NE
+            // and ~50 other CUTEst problems exhibited this.)
+            sigma_min: 1e-6,
             mu_min: 1e-11,
             mu_max: 1e5,
         }
