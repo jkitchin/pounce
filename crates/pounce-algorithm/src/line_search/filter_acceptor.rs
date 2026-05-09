@@ -51,6 +51,15 @@ pub struct FilterLsAcceptor {
     /// `IpFilterLSAcceptor.cpp:333-339`). `None` until the first call to
     /// [`Self::calc_alpha_min`] sees a reference theta.
     theta_min: Option<Number>,
+    /// Lazily initialised `theta_max_` (upstream
+    /// `IpFilterLSAcceptor.cpp:325-331`). Locked on first encounter to
+    /// `theta_max_fact * max(1, reference_theta)`. Any trial iterate
+    /// with `theta_trial > theta_max` is rejected outright by the
+    /// filter — this guards against the line search accepting a step
+    /// that catastrophically inflates constraint violation (e.g. a
+    /// Newton step from a poorly-scaled iterate landing far outside
+    /// the feasible basin).
+    theta_max: Option<Number>,
 }
 
 impl Default for FilterLsAcceptor {
@@ -69,6 +78,7 @@ impl Default for FilterLsAcceptor {
             max_soc: 4,
             alpha_min_frac: 0.05,
             theta_min: None,
+            theta_max: None,
         }
     }
 }
@@ -191,12 +201,25 @@ impl FilterLsAcceptor {
         theta_trial: Number,
         phi_trial: Number,
     ) -> AcceptDecision {
-        // theta_min may not yet have been initialised if the caller
-        // skipped `calc_alpha_min` for some reason; fall back to the
-        // same lazy formula upstream uses on first encounter.
+        // theta_min / theta_max may not yet have been initialised if
+        // the caller skipped `calc_alpha_min` for some reason; fall
+        // back to the same lazy formula upstream uses on first
+        // encounter (`IpFilterLSAcceptor.cpp:325-339`).
         let theta_min = self
             .theta_min
             .unwrap_or_else(|| self.theta_min_fact * theta.max(1.0));
+        let theta_max = self
+            .theta_max
+            .unwrap_or_else(|| self.theta_max_fact * theta.max(1.0));
+
+        // `IpFilterLSAcceptor.cpp:341-348`: any trial iterate above
+        // `theta_max` is rejected outright. Without this guard the
+        // line search may accept a step that inflates constraint
+        // violation by many orders of magnitude (POLAK6, ROSENMMX,
+        // ACOPR14: theta jumps from 8 to 1e12 on iter 1).
+        if theta_trial > theta_max {
+            return AcceptDecision::Reject;
+        }
 
         let f_type =
             alpha_primal > 0.0 && self.is_switching_condition(alpha_primal, d_phi, theta);
@@ -248,6 +271,15 @@ impl FilterLsAcceptor {
             self.theta_min_fact * reference_theta.max(1.0)
         })
     }
+
+    /// Lazy initialiser for `theta_max_` matching upstream
+    /// `IpFilterLSAcceptor.cpp:325-331`: locked once on first
+    /// encounter to `theta_max_fact * max(1, reference_theta)`.
+    fn ensure_theta_max(&mut self, reference_theta: Number) -> Number {
+        *self.theta_max.get_or_insert_with(|| {
+            self.theta_max_fact * reference_theta.max(1.0)
+        })
+    }
 }
 
 impl BacktrackingLsAcceptor for FilterLsAcceptor {
@@ -263,6 +295,7 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
     /// `theta <= theta_min`.
     fn calc_alpha_min(&mut self, d_phi: Number, theta: Number) -> Number {
         let theta_min = self.ensure_theta_min(theta);
+        let _ = self.ensure_theta_max(theta);
         let mut alpha_min = self.gamma_theta;
         if d_phi < 0.0 {
             alpha_min = alpha_min.min(self.gamma_phi * theta / (-d_phi));
