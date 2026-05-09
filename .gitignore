@@ -7,6 +7,10 @@
 # Benchmark inputs/outputs — large, regenerated
 /benchmarks
 
+# Python cache
+__pycache__/
+*.pyc
+
 # Claude Code local state
 .claude/
 
