@@ -1,0 +1,467 @@
+#+TITLE: CUTEst Full Benchmark: ripopt vs ipopt
+#+DATE: 2026-03-28
+#+AUTHOR: ripopt development
+#+OPTIONS: toc:3 num:t ^:nil
+#+STARTUP: overview
+
+* Executive Summary
+
+ripopt and ipopt were benchmarked against the full CUTEst problem set (1542 problems, 60 s wall-time limit). On the expanded set ripopt solves 57.0% of problems while ipopt solves 75.4%, a gap driven almost entirely by medium- and large-scale problems. On small problems (n < 100) ripopt is actually competitive and leads in exclusive solves. On the 800 problems both solvers complete, ripopt is faster on 65.8%, with a geometric mean speedup of 2.97× and median of 7.08×. The primary ripopt failure mode is Timeout (49% of failures), pointing to iteration count and factorization cost at scale as the main improvement target.
+
+* Overall Solve Counts
+
+| Metric                     | ripopt         | ipopt          |
+|----------------------------+----------------+----------------|
+| Solved (Optimal)           | 879 / 1542     | 1163 / 1542    |
+| Solve rate                 | 57.0%          | 75.4%          |
+| Exclusive solves           | 79             | 363            |
+| Both solved                | 800            |                |
+| Neither solved             | 300            |                |
+
+* Problem Size Analysis
+
+Solve rate broken down by problem dimension n.
+
+| Size class      | Problems | ripopt      | ipopt       | Both | ripopt-only | ipopt-only | Neither |
+|-----------------+----------+-------------+-------------+------+-------------+------------+---------|
+| Small  (n<100)  |      783 | 604 (77.1%) | 596 (76.1%) |  558 |          46 |         38 |     141 |
+| Medium (n<1000) |      158 |  68 (43.0%) | 120 (75.9%) |   57 |          11 |         63 |      27 |
+| Large  (n≥1000) |      601 | 207 (34.4%) | 447 (74.4%) |  185 |          22 |        262 |     132 |
+
+Key finding: ripopt matches and slightly surpasses ipopt on small problems (77.1% vs 76.1%,
++8 exclusive solves). The gap widens sharply at medium and large scale, where ipopt's
+advantage is ~32–41 percentage points.
+
+* Speed Comparison (800 jointly solved problems)
+
+** Summary statistics
+
+| Metric                             |    Value |
+|------------------------------------+----------|
+| Geometric mean speedup (rip/ipt)   |    2.97× |
+| Median speedup                     |    7.08× |
+| ripopt faster                      | 526 / 800 (65.8%) |
+| ripopt >2× faster                  | 479 / 800 (59.9%) |
+| ripopt >10× faster                 | 366 / 800 (45.8%) |
+| ipopt >2× faster                   | 226 / 800 (28.2%) |
+| ipopt >10× faster                  | 119 / 800 (14.9%) |
+
+** Speedup distribution
+
+| Speedup band                |  Count |
+|-----------------------------+--------|
+| ripopt >100×                |     74 |
+| ripopt 10–100×              |    292 |
+| ripopt 5–10×                |     48 |
+| ripopt 2–5×                 |     65 |
+| ripopt 1–2× (slightly)      |     47 |
+| ipopt 1–2× (slightly)       |     48 |
+| ipopt 2–10×                 |    107 |
+| ipopt >10×                  |    119 |
+
+** Top 20 biggest ripopt speedups
+
+| Problem       |      n |  m | ripopt (s) | ipopt (s) | Speedup |
+|---------------+--------+----+------------+-----------+---------|
+| HUMPS         |      2 |  0 |      0.000 |     0.207 | 2030×   |
+| LOGHAIRY      |      2 |  0 |      0.000 |     0.368 | 1775×   |
+| GROWTHLS      |      3 |  0 |      0.000 |     0.011 | 1510×   |
+| SNAIL         |      2 |  0 |      0.000 |     0.009 | 1163×   |
+| DANIWOODLS    |      2 |  0 |      0.000 |     0.001 |  899×   |
+| RAT43LS       |      3 |  0 |      0.000 |     0.005 |  574×   |
+| HS38          |      4 |  0 |      0.000 |     0.006 |  339×   |
+| PFIT3         |      3 |  3 |      0.000 |     0.025 |  329×   |
+| HS1           |      2 |  0 |      0.000 |     0.005 |  310×   |
+| SPARSQUR      |  10201 |  0 |      0.037 |    11.441 |  307×   |
+| ROSENBRTU     |      2 |  0 |      0.000 |     0.013 |  278×   |
+| HAIRY         |      2 |  0 |      0.000 |     0.009 |  278×   |
+| WAYSEA2B      |      2 |  0 |      0.000 |     0.004 |  274×   |
+| RECIPELS      |      2 |  0 |      0.000 |     0.004 |  253×   |
+| HS5           |      2 |  1 |      0.000 |     0.001 |  249×   |
+| JENSMP        |      2 |  0 |      0.000 |     0.001 |  239×   |
+| LRW1A         |   1001 |  0 |      0.005 |     1.129 |  238×   |
+| HS1NE         |      2 |  2 |      0.000 |     0.006 |  237×   |
+| LANCZOS3LS    |      6 |  0 |      0.000 |     0.028 |  234×   |
+| CUBE          |      2 |  0 |      0.000 |     0.004 |  221×   |
+
+** Top 20 worst ripopt cases (ipopt much faster)
+
+These are the highest-priority cases for ripopt improvement: both solvers reach Optimal
+but ripopt is orders of magnitude slower.
+
+| Problem    |    n |    m | ripopt (s) | ipopt (s) | ripopt/ipopt |
+|------------+------+------+------------+-----------+--------------|
+| LEAKNET    |  156 |  153 |     17.129 |     0.005 | 3333×        |
+| SPANHYD    |   97 |   33 |     14.494 |     0.005 | 2899×        |
+| DEGENLPB   |   20 |   15 |      8.569 |     0.003 | 2856×        |
+| EIGMAXA    |  101 |  101 |     16.857 |     0.008 | 2107×        |
+| CLPLATEC   | 5041 |    0 |     15.037 |     0.008 | 1880×        |
+| EXPLIN2    | 1200 |    0 |     32.175 |     0.020 |  609×        |
+| ACOPP14    |   38 |   68 |      4.491 |     0.003 |  497×        |
+| DUALC8     |    8 |  503 |     17.267 |     0.013 |  328×        |
+| HS116      |   13 |   14 |      4.164 |     0.003 |  321×        |
+| DIXMAANJ   | 3000 |    0 |     38.612 |     0.034 |  318×        |
+| DTOC1L     | 5998 | 3996 |     30.876 |     0.029 |  316×        |
+| HIMMELBI   |  100 |   12 |      3.215 |     0.003 |  311×        |
+| EXPQUAD    | 1200 |    0 |     32.614 |     0.033 |  301×        |
+| LINVERSE   | 1999 |    0 |     46.246 |     0.048 |  296×        |
+| LISWET3    | 2002 | 2000 |     28.561 |     0.031 |  285×        |
+| DIXMAANN   | 3000 |    0 |     36.386 |     0.040 |  274×        |
+| STEENBRA   |  432 |  108 |     28.917 |     0.033 |  267×        |
+| LISWET5    | 2002 | 2000 |     24.939 |     0.029 |  252×        |
+| DIXMAANO   | 3000 |    0 |     36.001 |     0.043 |  232×        |
+| DTOC1NA    | 5998 | 3996 |     31.807 |     0.038 |  217×        |
+
+* Accuracy Comparison (800 jointly solved problems)
+
+** Objective agreement distribution
+
+| Relative difference band       |  Count | Cumulative |
+|--------------------------------+--------+------------|
+| < 1e-10 (essentially identical) |    304 |        304 |
+| 1e-10 – 1e-7                   |    180 |        484 |
+| 1e-7 – 1e-4 (matching)         |     79 |        563 |
+| *Total matching (< 1e-4)*      |    *563* |  *(70.4%)* |
+| 1e-4 – 1e-2 (small mismatch)   |     40 |        603 |
+| 1e-2 – 0.1  (moderate)         |     32 |        635 |
+| 0.1 – 1.0   (large)            |    133 |        768 |
+| > 1.0       (very large)       |     32 |        800 |
+
+** Notable objective mismatches (rel diff > 0.1)
+
+Most large mismatches reflect different local minima on non-convex problems, not solver
+errors. The 0.1–1.0 band (133 problems) is dominated by LISWET*, OBSTCL*, and TORSION*
+families. The >1.0 band (32 problems) includes sign-flipped near-zero objectives.
+
+| Problem   |    n |    m | ripopt obj  | ipopt obj   | Rel diff |
+|-----------+------+------+-------------+-------------+----------|
+| DALLASM   |  196 |  151 |    70069.2  |   -48198.2  |   1.688  |
+| GOULDQP1  |   32 |   17 |     2005.25 |    -3485.33 |   1.575  |
+| SIPOW1    |    2 | 2000 |    0.433896 |    -1       |   1.434  |
+
+Problem families with systematic local-minima mismatches:
+- LISWET1–12: ripopt and ipopt find different feasible minima
+- OBSTCL1–4: obstacle-avoidance, non-convex
+- TORSION*: structural torsion problems with multiple local minima
+- BLOCKQP*: near-zero objectives with sign differences
+
+* Iteration Comparison (both solved)
+
+| Metric                    | ripopt | ipopt |
+|---------------------------+--------+-------|
+| Mean iterations           |   65.6 |  41.2 |
+| Median iterations         |     15 |    13 |
+| ripopt uses fewer iters   | 203 / 800 (25.4%) |  |
+
+Despite more iterations on average, ripopt is faster overall — it spends less time per
+iteration. The mean is skewed by long-tail cases; medians are close (15 vs 13).
+
+** Iteration distribution (ripopt, both-solved problems)
+
+| Iteration band | Count |
+|----------------+-------|
+| ≤ 5            |   107 |
+| 6–10           |   169 |
+| 11–20          |   200 |
+| 21–50          |   142 |
+| 51–100         |    92 |
+| 101–500        |    70 |
+| > 500          |    20 |
+
+* Failure Analysis
+
+** ripopt failure modes (663 failures)
+
+| Status             | Count | Percent |
+|--------------------+-------+---------|
+| Timeout            |   324 |   48.9% |
+| NumericalError     |   150 |   22.6% |
+| LocalInfeasibility |    86 |   13.0% |
+| MaxIterations      |    84 |   12.7% |
+| RestorationFailed  |    19 |    2.9% |
+
+Timeout is the dominant failure mode. This points to iteration count and/or per-iteration
+factorization cost at scale, not algorithmic correctness. Many timeout problems are ones
+ipopt solves in under 1 s.
+
+** ipopt failure modes (379 failures)
+
+| Status                  | Count | Percent | Notes                      |
+|-------------------------+-------+---------+----------------------------|
+| IpoptStatus(-10)        |   177 |   46.7% | User-requested stop (NE problems) |
+| Timeout                 |   110 |   29.0% |                            |
+| Infeasible              |    25 |    6.6% |                            |
+| MaxIterations           |    21 |    5.5% |                            |
+| Acceptable (not Optimal)|    14 |    3.7% | Close but not certified    |
+| ErrorInStepComputation  |    11 |    2.9% |                            |
+| RestorationFailed       |     9 |    2.4% |                            |
+| IpoptStatus(4/6)        |     9 |    2.4% | Various internal statuses  |
+| InvalidNumberDetected   |     2 |    0.5% |                            |
+
+Note: IpoptStatus(-10) covers NE-reformulated problems (overdetermined least-squares)
+that ripopt handles specially but ipopt does not support.
+
+** Neither solved — breakdown
+
+| ripopt status      | Count | ipopt dominant status     |
+|--------------------+-------+---------------------------|
+| Timeout            |   112 | Timeout (87), IpoptStatus(-10) (151) |
+| LocalInfeasibility |    86 | IpoptStatus(-10) (most)   |
+| NumericalError     |    50 | Timeout / IpoptStatus(-10) |
+| MaxIterations      |    37 | Timeout / MaxIterations   |
+| RestorationFailed  |    15 | Various                   |
+
+* ripopt-only Solves (79 problems)
+
+Problems ripopt solves to Optimal that ipopt does not.
+
+** By ipopt failure reason
+
+*** ipopt IpoptStatus(-10) — NE/overdetermined problems (ripopt's NE reformulation)
+These problems have m ≥ n overdetermined residuals. ripopt reformulates as unconstrained
+least-squares; ipopt halts immediately (user-stop status).
+
+| Problem       |  n |   m | ipopt time |
+|---------------+----+-----+------------|
+| BEALENE       |  2 |   3 | 0.000 s    |
+| BIGGS6NE      |  6 |  13 | 0.000 s    |
+| BOX3NE        |  3 |  10 | 0.000 s    |
+| BROWNBSNE     |  2 |   3 | 0.000 s    |
+| CERI651A      |  7 |  61 | 0.000 s    |
+| CERI651E      |  7 |  64 | 0.000 s    |
+| CHNRSBNE      | 50 |  98 | 0.000 s    |
+| CHNRSNBMNE    | 50 |  98 | 0.000 s    |
+| DENSCHNBNE    |  2 |   3 | 0.000 s    |
+| DEVGLA1NE     |  4 |  24 | 0.000 s    |
+| ENGVAL2NE     |  3 |   5 | 0.000 s    |
+| EXP2NE        |  2 |  10 | 0.000 s    |
+| FBRAIN3       |  6 | 2211 | 0.001 s   |
+| GROUPING      | 100 | 125 | 0.000 s   |
+| GULFNE        |  3 |  99 | 0.000 s    |
+| HS25NE        | 25 |  99 | 0.000 s    |
+| KOEBHELBNE    |  3 | 156 | 0.000 s    |
+| LANCZOS1      |  6 |  24 | 0.000 s    |
+| LEVYMONE6     |  3 |   6 | 0.000 s    |
+| LEWISPOL      |  6 |   9 | 0.000 s    |
+| LUKSAN11      | 100 | 198 | 0.000 s   |
+| NYSTROM5      | 18 |  20 | 0.000 s    |
+| NYSTROM5C     | 18 |  20 | 0.000 s    |
+| QR3DBD        | 457 | 610 | 0.000 s   |
+| SPECANNE      |  9 | 15000 | 0.002 s  |
+| VARDIMNE      | 10 |  12 | 0.000 s    |
+
+*** ipopt Timeout — large-scale problems
+ripopt handles these faster; ipopt exhausts the 60 s budget.
+
+| Problem       |      n |     m |
+|---------------+--------+-------|
+| BA-L49LS      |  23769 |     0 |
+| BA-L73LS      |  33753 |     0 |
+| CATENA        |   3003 |  1000 |
+| CHARDIS02     |   2000 |     0 |
+| DIAMON3DLS    |     99 |     0 |
+| DMN15102LS    |     66 |     0 |
+| EIGENBLS      |   2550 |     0 |
+| INDEFM        | 100000 |     0 |
+| MNISTS0LS     |    494 |     0 |
+| MNISTS5LS     |    494 |     0 |
+| MSS3          |   2070 |  1981 |
+| NCVXQP4       |  10000 |  2500 |
+| NCVXQP6       |  10000 |  2500 |
+| NONCVXU2      |   5000 |     0 |
+| NONMSQRT      |   4900 |     0 |
+| PATTERNLS     |   1001 |     0 |
+| PORTSQP       | 100000 |     1 |
+| SCW2          |   2003 |  1001 |
+| TAX53322      |    360 | 32221 |
+| TAXR53322     |    360 | 32221 |
+| YATP1CLS      | 123200 |     0 |
+| YATP1LS       | 123200 |     0 |
+| YATP2CLS      | 123200 |     0 |
+
+*** ipopt MaxIterations / Acceptable / Other
+
+| Problem    |  n |   m | ipopt status            |
+|------------+----+-----+-------------------------|
+| AVION2     | 49 |  15 | MaxIterations (0.629 s) |
+| DECONVB    | 63 |   0 | MaxIterations (0.689 s) |
+| DECONVNE   | 63 |  40 | Acceptable (0.022 s)    |
+| DENSCHNDNE |  3 |   3 | Acceptable (0.003 s)    |
+| DJTL       |  2 |   0 | Acceptable (0.156 s)    |
+| EXTROSNB   | 1000 |  0 | Acceptable (1.164 s)   |
+| HS87       |  6 |   4 | MaxIterations (0.457 s) |
+| PALMER5E   |  8 |   0 | MaxIterations (0.466 s) |
+| PALMER7A   |  6 |   0 | MaxIterations (0.470 s) |
+| POLAK3     | 12 |  10 | MaxIterations (0.640 s) |
+| POLAK6     |  5 |   4 | MaxIterations (0.808 s) |
+| PRICE4NE   |  2 |   2 | Acceptable (0.003 s)    |
+| TAX13322   | 72 | 1261 | MaxIterations (18.5 s) |
+
+*** ipopt Infeasible / Error — problems where ipopt classifies differently
+
+| Problem    |  n |  m | ipopt status               |
+|------------+----+----+----------------------------|
+| ARTIF      | 5002 | 5000 | Infeasible (0.653 s)     |
+| EQC        |  9 |  3 | ErrorInStepComputation     |
+| HIMMELBJ   | 45 | 14 | ErrorInStepComputation     |
+| PFIT1      |  3 |  3 | Infeasible (0.043 s)       |
+| PFIT2      |  3 |  3 | RestorationFailed          |
+| POWELLBC   | 1000 | 0 | InvalidNumberDetected      |
+| POWELLSQ   |  2 |  2 | Infeasible                 |
+| POWERSUMNE |  4 |  4 | Infeasible                 |
+| RAYBENDL   | 2050 | 0 | ErrorInStepComputation     |
+| RAYBENDS   | 2050 | 0 | ErrorInStepComputation     |
+| ROBOT      | 14 |  2 | IpoptStatus(3)             |
+| SPIRAL     |  3 |  2 | Infeasible                 |
+| SPIN2OP    | 102 | 100 | RestorationFailed         |
+| VANDERM1   | 100 | 199 | IpoptStatus(6)            |
+| VANDERM2   | 100 | 199 | IpoptStatus(6)            |
+| VANDERM3   | 100 | 199 | IpoptStatus(6)            |
+| WACHBIEG   |  3 |  2 | Infeasible                 |
+
+* ipopt-only Solves (363 problems)
+
+Problems ipopt solves to Optimal that ripopt does not. Grouped by ripopt failure mode.
+
+** ripopt Timeout (~200 problems)
+
+Dominant category. Most are medium/large-scale problems. Notable families:
+- Network flow: A0ENDNDL, A2ENDNDL, A5ENDNDL (n≈45–60k, m≈15k) — ripopt cannot handle scale
+- LUKVLE*/LUKVLI* (n=10k): structured inequality constrained
+- LISWET* (n=2002, m=2000): ripopt much slower on these despite both solving some
+- DTOC* (n≈6k, m≈4k): discrete-time optimal control, ripopt very slow (see §4)
+- DIXMAAN* (n=3000): ripopt takes 30–40 s; ipopt 0.03–0.05 s (see §4)
+- STEENBRA (n=432), EXPLIN*/EXPQUAD (n=1200), LINVERSE (n=1999)
+
+** ripopt NumericalError (~90 problems)
+
+| Notable problem families     |    n |    m | Notes                             |
+|------------------------------+------+------+-----------------------------------|
+| ACOPP*/ACOPR* (power system) |  ~40 |  ~70 | AC optimal power flow             |
+| CMPC*/MPC* (control)         | 1530 | 2351 | Model predictive control          |
+| PRIMAL* (LP primal)          | varies |    | Linear programming primal forms   |
+| QPCB* (QP)                   | varies |    | Quadratic programming             |
+| CHAINWOO                     |  100 |    0 | Chained Wood function             |
+| HS86, HS88–HS90              | small |    | HS suite problems                 |
+
+** ripopt MaxIterations (~50 problems)
+
+| Notable problem families |    n |    m | Notes                          |
+|--------------------------+------+------+--------------------------------|
+| BRAINPC4, BRAINPC5       | ~400 | ~800 | Neural/brain network           |
+| CLEUVEN3–CLEUVEN5        |  ~80 | ~150 | CL Leuven structural           |
+| GMNCASE1–GMNCASE3        |  ~20 |  ~30 | GMN case studies               |
+| CMPC1, MPC1              | 1530 | 2351 | Control (also NumericalError)  |
+| CATMIX*                  |  ~200 | ~100 | Catalytic mixing reactor       |
+
+** ripopt LocalInfeasibility (~20 problems)
+
+Mostly cases where ripopt's infeasibility detection fires incorrectly or where the
+problem structure triggers the NE-reformulation path and the system is genuinely
+inconsistent from ripopt's perspective.
+
+** ripopt RestorationFailed
+
+| Problem       |  n |  m |
+|---------------+----+----|
+| BURKEHAN      | small | small |
+| COATINGNE     |    |    |
+| DENSCHNENE    |    |    |
+| FREURONE      |    |    |
+| GAUSS2        |    |    |
+| HAHN1         |    |    |
+| HIMMELBD      |    |    |
+| HIMMELBFNE    |    |    |
+| HS2NE         |    |    |
+| MGH17         |    |    |
+| OSCIPANE      |    |    |
+| PALMER5ENE    |    |    |
+| PALMER7ANE    |    |    |
+| RAT42         |    |    |
+| RAT43         |    |    |
+
+* Objective Mismatches (237 problems, rel diff > 1e-4)
+
+** Distribution
+
+| Band        | Count | Likely cause                                     |
+|-------------+-------+--------------------------------------------------|
+| 1e-4 – 1e-2 |    40 | Near-optimal convergence, rounding               |
+| 1e-2 – 0.1  |    32 | Different local minima or feasibility tolerance  |
+| 0.1 – 1.0   |   133 | Different local minima (non-convex families)     |
+| > 1.0       |    32 | Sign-flipped near-zero or very different minima  |
+
+** Large mismatches — top cases
+
+| Problem   |    n |    m | ripopt obj  | ipopt obj   | Rel diff | Notes                        |
+|-----------+------+------+-------------+-------------+----------+------------------------------|
+| DALLASM   |  196 |  151 |    70069.2  |   -48198.2  |    1.688 | Different local minima       |
+| GOULDQP1  |   32 |   17 |     2005.25 |    -3485.33 |    1.575 | Different local minima       |
+| SIPOW1    |    2 | 2000 |    0.433896 |    -1.0     |    1.434 | Sign/feasibility difference  |
+
+** Problem families with systematic mismatches
+
+- *LISWET1–12* (n=2002, m=2000): piecewise smooth, many local minima
+- *OBSTCL1–4*: obstacle avoidance, non-convex feasible set
+- *TORSION\alpha/\beta/C/D* families: structural torsion, non-convex
+- *BLOCKQP*: near-zero objectives, sign ambiguity
+- *HS59, HS84, BT13*: small HS problems landing in different basins
+
+* Improvement Opportunities for ripopt
+
+Listed in rough priority order based on impact (number of problems affected).
+
+** 1. Timeout on medium/large problems (highest impact)
+
+*Affected:* ~200 ipopt-only problems + 112 neither-solved (ripopt=Timeout)
+
+The DIXMAAN* family (n=3000, unconstrained) is paradigmatic: ripopt takes 30–40 s while
+ipopt takes 30–50 ms. Similarly DTOC* (structured OCP, n≈6k), EXPLIN*/EXPQUAD/LINVERSE
+(structured large-scale unconstrained), and LISWET* (inequality constrained, n=2002).
+
+These are solvable problems — ipopt handles them quickly — suggesting ripopt is either:
+a) taking far more iterations (poor mu schedule or convergence criterion), or
+b) spending too much per iteration (dense factorization on structured sparse problems).
+
+*Candidates to investigate:* DIXMAANJ, DIXMAANN, DIXMAANO (n=3000), EXPLIN2 (n=1200),
+LINVERSE (n=1999), DTOC1L/DTOC1NA (n=5998, m=3996), LISWET3/LISWET5 (n=2002, m=2000),
+STEENBRA (n=432, m=108).
+
+** 2. Worst jointly-solved cases (performance regression)
+
+*Affected:* 119 problems where ipopt is >10× faster despite both reaching Optimal
+
+Top targets: LEAKNET (n=156, m=153), SPANHYD (n=97, m=33), DEGENLPB (n=20, m=15),
+EIGMAXA (n=101, m=101), ACOPP14 (n=38, m=68), DUALC8 (n=8, m=503), HS116 (n=13, m=14),
+HIMMELBI (n=100, m=12).
+
+These are mostly small-to-medium problems — the issue is almost certainly excessive
+iteration count (slow convergence), not factorization time.
+
+** 3. NumericalError cases (90 ipopt-only, ~50 neither-solved)
+
+*Affected:* ~140 problems
+
+ACOPP/ACOPR power-system variants, CMPC/MPC model-predictive-control families,
+PRIMAL*/QPCB* LP/QP problems. Likely causes: ill-conditioning, bad scaling, or
+inertia correction failing to recover from nearly-singular KKT systems.
+
+** 4. MaxIterations without convergence (~50 ipopt-only)
+
+*Affected:* BRAINPC4/5, CLEUVEN3–5, GMNCASE1–3, CATMIX* families.
+
+These problems hit the 3000-iteration cap without converging. Suggests stagnation
+rather than divergence — best-du tracking + mu perturbation strategies may help.
+
+** 5. Objective quality mismatches (237 problems)
+
+Most are legitimate local-minima differences. Worth checking:
+- Is ripopt's local minimum consistently worse (higher objective) than ipopt's?
+- LISWET*/TORSION* families: if ripopt consistently finds worse minima, multi-start
+  or better initialization could help.
+
+** 6. RestorationFailed on small problems (15 ipopt-only)
+
+BURKEHAN, HAHN1, HIMMELBD, MGH17, PALMER5ENE/7ANE, RAT42/43 — all small. These
+should be straightforward. Restoration is likely cycling or failing to reduce violation.
+Examining individual solve logs would quickly identify the root cause.

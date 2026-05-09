@@ -19,6 +19,8 @@
 #   make bench-gas        # GasLib pipelines (4 .nl files)
 #   make bench-water      # Water network (~7 .nl files)
 #   make bench-mittelmann # Mittelmann ampl-nlp suite (whatever's been translated)
+#   make bench-cutest     # CUTEst comparison harness (POUNCE vs native Ipopt)
+#   make bench-cutest-prepare  # compile SIF problem dylibs (one-time, ~7GB)
 #
 # Tunables — pass on the command line:
 #   make bench-cho LINEAR_SOLVER=ma57 MAX_ITER=2000 PRINT_LEVEL=5
@@ -75,7 +77,8 @@ BENCH_OPTIONS  ?=
 BENCH_ARGS     := linear_solver=$(LINEAR_SOLVER) max_iter=$(MAX_ITER) print_level=$(PRINT_LEVEL) $(BENCH_OPTIONS)
 
 .PHONY: all build debug test check clippy fmt fmt-check doc install uninstall clean help \
-        bench bench-cho bench-gas bench-water bench-mittelmann bench-clean
+        bench bench-cho bench-gas bench-water bench-mittelmann bench-cutest \
+        bench-cutest-prepare bench-cutest-smoke bench-cutest-report bench-clean
 
 all: build
 
@@ -184,6 +187,43 @@ bench: bench-cho bench-gas bench-water bench-mittelmann
 
 bench-clean:
 	rm -rf "$(BENCH_LOG_DIR)"
+
+# ---- CUTEst comparison harness ------------------------------------------
+# These recipes use bash process-substitution (`2> >(tee …)`) to copy stderr
+# to a log without buffering, so they need bash explicitly. (Other recipes
+# in this Makefile are POSIX-sh-compatible; SHELL is overridden only for
+# the cutest recipes via per-target assignment below.)
+bench-cutest bench-cutest-smoke bench-cutest-prepare: SHELL := /bin/bash
+
+# Drives the pounce-cutest workspace member, which runs each SIF problem
+# in a subprocess against POUNCE and native Ipopt and emits JSON.
+# Requirements: CUTEst installed under ~/.local/cutest/, libipopt
+# discoverable via pkg-config, gfortran on PATH.
+
+CUTEST_RESULTS ?= $(BENCH_DIR)/cutest/results.json
+
+bench-cutest-prepare:
+	@if ! command -v cutest2sif >/dev/null 2>&1 && [ ! -f "$$HOME/.local/cutest/env.sh" ]; then \
+	  echo "CUTEst not found at ~/.local/cutest/. See benchmarks/cutest/README.md."; exit 1; \
+	fi
+	source $$HOME/.local/cutest/env.sh && bash $(BENCH_DIR)/cutest/prepare.sh
+
+bench-cutest:
+	RESULTS_FILE=$(CUTEST_RESULTS) \
+	  $(CARGO) run --bin cutest_suite $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS) \
+	  2> >(tee $(BENCH_DIR)/cutest/benchmark_stderr.txt >&2)
+	@echo "CUTEst run complete. Results: $(CUTEST_RESULTS)"
+
+bench-cutest-smoke:
+	RESULTS_FILE=$(BENCH_DIR)/cutest/smoke_results.json \
+	  $(CARGO) run --bin cutest_suite $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS) -- \
+	    ROSENBR BEALE CUBE DENSCHNB BROWNBS \
+	    HS6 HS10 HS35 HS71 HS106 \
+	    MARATOS BT1 HS13 HS57 \
+	  2> >(tee $(BENCH_DIR)/cutest/smoke_stderr.txt >&2)
+
+bench-cutest-report:
+	@python $(BENCH_DIR)/cutest/compare.py $(CUTEST_RESULTS)
 
 # Build CLI before any bench target if it's missing.
 $(CLI_BIN):

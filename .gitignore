@@ -4,8 +4,17 @@
 # Upstream Ipopt source mirror — tracked separately (vendor as submodule if desired)
 /ref
 
-# Benchmark inputs/outputs — large, regenerated
-/benchmarks
+# Benchmark suite — only the cutest harness source is tracked. Everything
+# else is regenerated locally (large NL exports, compiled SIF .dylibs,
+# per-run logs and JSON results).
+/benchmarks/*
+!/benchmarks/cutest
+/benchmarks/cutest/problems/
+/benchmarks/cutest/*.json
+/benchmarks/cutest/*.jsonl
+/benchmarks/cutest/*_stderr.txt
+/benchmarks/cutest/*.log
+/benchmarks/logs/
 
 # Python cache
 __pycache__/
