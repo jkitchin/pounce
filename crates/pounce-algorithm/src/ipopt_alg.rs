@@ -69,6 +69,21 @@ pub struct IpoptAlgorithm {
     /// applied per-component when the line-search driver computes
     /// trial slacks; the simplification holds for non-degenerate runs.
     pub alpha_init: Number,
+    /// Tiny-step relative tolerance — port of upstream
+    /// `IpBacktrackingLineSearch::tiny_step_tol_` (default `10·EPSILON`).
+    /// Step is "tiny" when `max_i |δx_i|/(1+|x_i|) ≤ tiny_step_tol`
+    /// (and same for s, and `c_viol ≤ 1e-4`).
+    pub tiny_step_tol: Number,
+    /// Companion threshold on the dual step — when both primal and dual
+    /// steps are tiny in two consecutive iterations the algorithm
+    /// declares convergence at the best attainable accuracy. Default
+    /// `1e-2` matches upstream.
+    pub tiny_step_y_tol: Number,
+    /// Set true when the previous iterate was tagged tiny; on the
+    /// second consecutive tiny step the loop sets `data.tiny_step_flag`
+    /// so the mu update can attempt to terminate. Mirrors
+    /// `IpBacktrackingLineSearch::tiny_step_last_iteration_`.
+    pub tiny_step_last_iteration: bool,
 }
 
 impl IpoptAlgorithm {
@@ -87,6 +102,9 @@ impl IpoptAlgorithm {
             kappa_sigma: 1e10,
             max_iter: 3000,
             alpha_init: 1.0,
+            tiny_step_tol: 10.0 * Number::EPSILON,
+            tiny_step_y_tol: 1e-2,
+            tiny_step_last_iteration: false,
         }
     }
 
@@ -161,6 +179,13 @@ impl IpoptAlgorithm {
         // 3. Barrier parameter. Pass nlp + search_dir through so the
         // adaptive μ oracles (probing, quality-function) can drive
         // their own affine-step solves; monotone ignores them.
+        // Snapshot the tiny-step flag (set by the previous iteration's
+        // tiny-step branch) and the entry mu — if μ can't reduce while
+        // the flag is on, upstream `IpMonotoneMuUpdate.cpp:158-161`
+        // throws TINY_STEP_DETECTED → STOP_AT_TINY_STEP, which we
+        // realise as a clean termination here.
+        let tiny_at_entry = self.data.borrow().tiny_step_flag;
+        let mu_before = self.data.borrow().curr_mu;
         let next_mu = self.bundle.mu_update.update_barrier_parameter(
             &self.data,
             &self.cq,
@@ -168,6 +193,9 @@ impl IpoptAlgorithm {
             self.search_dir.as_mut(),
         );
         self.data.borrow_mut().curr_mu = next_mu;
+        if tiny_at_entry && (next_mu - mu_before).abs() < Number::EPSILON {
+            return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
+        }
 
         // 4. Hessian update.
         let _ = self.bundle.hess.update_hessian(&self.data, &self.cq);
@@ -351,25 +379,61 @@ impl IpoptAlgorithm {
                 .cq
                 .borrow()
                 .aff_step_alpha_dual_max(&delta, tau);
-            let alpha_init = self.alpha_init.min(alpha_p_max);
-            let alpha_dual = self.alpha_init.min(alpha_d_max);
-            let outcome = self.bundle.line_search.find_acceptable_trial_point(
-                &self.data,
-                &self.cq,
-                &delta,
-                alpha_init,
-                alpha_dual,
-                self.nlp.as_ref(),
-                self.search_dir.as_mut(),
-            );
-            match outcome {
-                Outcome::Accepted => {}
-                Outcome::TinyStep | Outcome::Failed => {
-                    // Upstream `IpBacktrackingLineSearch.cpp` raises
-                    // `LINE_SEARCH_FAILED` when α drops below
-                    // `alpha_min` or all retries reject, which in turn
-                    // triggers `ActivateLineSearch` → restoration.
-                    return self.invoke_restoration();
+
+            // Tiny-step gate — port of `IpBacktrackingLineSearch.cpp:363`
+            // and the handling block at lines 382-435. When the search
+            // direction is so small that any nonzero α would just
+            // bounce inside floating-point noise, take the FTB step
+            // unchecked and skip the line search; that's the only way
+            // to hit `STOP_AT_TINY_STEP` cleanly when the iterate is
+            // already at a converged point but `nlp_error > tol` due to
+            // scaling or unbounded duals.
+            if self.detect_tiny_step(&delta) {
+                let alpha_p = alpha_p_max;
+                let alpha_d = alpha_d_max;
+                let curr = match self.data.borrow().curr.clone() {
+                    Some(c) => c,
+                    None => return IterateOutcome::Terminate(SolverReturn::InternalError),
+                };
+                let trial_iv = scaled_step_unchecked(&curr, &delta, alpha_p, alpha_d);
+                {
+                    let mut d = self.data.borrow_mut();
+                    d.set_trial(trial_iv);
+                    d.info_alpha_primal = alpha_p;
+                    d.info_alpha_dual = alpha_d;
+                    d.info_ls_count = 0;
+                    if self.tiny_step_last_iteration {
+                        d.info_alpha_primal_char = 'T';
+                        d.tiny_step_flag = true;
+                    } else {
+                        d.info_alpha_primal_char = 't';
+                    }
+                }
+                let dy_amax = delta.y_c.amax().max(delta.y_d.amax());
+                self.tiny_step_last_iteration = dy_amax < self.tiny_step_y_tol;
+            } else {
+                self.tiny_step_last_iteration = false;
+                let alpha_init = self.alpha_init.min(alpha_p_max);
+                let alpha_dual = self.alpha_init.min(alpha_d_max);
+                let outcome = self.bundle.line_search.find_acceptable_trial_point(
+                    &self.data,
+                    &self.cq,
+                    &delta,
+                    alpha_init,
+                    alpha_dual,
+                    self.nlp.as_ref(),
+                    self.search_dir.as_mut(),
+                );
+                match outcome {
+                    Outcome::Accepted => {}
+                    Outcome::TinyStep | Outcome::Failed => {
+                        // Upstream `IpBacktrackingLineSearch.cpp` raises
+                        // `LINE_SEARCH_FAILED` when α drops below
+                        // `alpha_min` or all retries reject, which in
+                        // turn triggers `ActivateLineSearch` →
+                        // restoration.
+                        return self.invoke_restoration();
+                    }
                 }
             }
         }
@@ -385,6 +449,50 @@ impl IpoptAlgorithm {
         self.correct_bound_multiplier();
 
         IterateOutcome::Continue
+    }
+
+    /// Port of `IpBacktrackingLineSearch::DetectTinyStep`
+    /// (`IpBacktrackingLineSearch.cpp:1219-1278`). Returns true iff
+    /// `max_i |δx_i|/(1+|x_i|) ≤ tiny_step_tol`,
+    /// `max_i |δs_i|/(1+|s_i|) ≤ tiny_step_tol`, AND
+    /// `curr_constraint_violation ≤ 1e-4`. Disabled when
+    /// `tiny_step_tol == 0`.
+    fn detect_tiny_step(&self, delta: &crate::iterates_vector::IteratesVector) -> bool {
+        if self.tiny_step_tol == 0.0 {
+            return false;
+        }
+        let curr = match self.data.borrow().curr.clone() {
+            Some(c) => c,
+            None => return false,
+        };
+
+        // |x_i|+1
+        let mut tmp = curr.x.make_new_copy();
+        tmp.element_wise_abs();
+        tmp.add_scalar(1.0);
+        // |δx_i|/(|x_i|+1) ; checked via Amax of (δx ./ (|x|+1)).
+        let mut tmp2 = delta.x.make_new_copy();
+        tmp2.element_wise_divide(&*tmp);
+        if tmp2.amax() > self.tiny_step_tol {
+            return false;
+        }
+
+        if curr.s.dim() > 0 {
+            let mut tmp = curr.s.make_new_copy();
+            tmp.element_wise_abs();
+            tmp.add_scalar(1.0);
+            let mut tmp2 = delta.s.make_new_copy();
+            tmp2.element_wise_divide(&*tmp);
+            if tmp2.amax() > self.tiny_step_tol {
+                return false;
+            }
+        }
+
+        let cviol = self.cq.borrow().curr_constraint_violation();
+        if cviol > 1e-4 {
+            return false;
+        }
+        true
     }
 
     /// Drive the restoration phase after a line-search failure.
@@ -570,6 +678,30 @@ impl IpoptAlgorithm {
 enum IterateOutcome {
     Continue,
     Terminate(SolverReturn),
+}
+
+/// `out = curr + α_p · δ` for the primal/equality blocks and
+/// `out = curr + α_d · δ` for the bound multipliers, returned as a
+/// fresh frozen `IteratesVector`. Mirrors `scaled_step` in the line
+/// search; duplicated here for the tiny-step branch which bypasses
+/// the line-search driver.
+fn scaled_step_unchecked(
+    curr: &crate::iterates_vector::IteratesVector,
+    delta: &crate::iterates_vector::IteratesVector,
+    alpha_primal: Number,
+    alpha_dual: Number,
+) -> crate::iterates_vector::IteratesVector {
+    let mut out = curr.make_new_zeroed();
+    out.add_one_vector(1.0, curr, 0.0);
+    out.x.axpy(alpha_primal, &*delta.x);
+    out.s.axpy(alpha_primal, &*delta.s);
+    out.y_c.axpy(alpha_primal, &*delta.y_c);
+    out.y_d.axpy(alpha_primal, &*delta.y_d);
+    out.z_l.axpy(alpha_dual, &*delta.z_l);
+    out.z_u.axpy(alpha_dual, &*delta.z_u);
+    out.v_l.axpy(alpha_dual, &*delta.v_l);
+    out.v_u.axpy(alpha_dual, &*delta.v_u);
+    out.freeze()
 }
 
 /// Allocate a fresh `Rc<dyn Vector>` with `kappa_sigma_clamp`

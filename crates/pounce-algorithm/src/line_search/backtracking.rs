@@ -174,10 +174,14 @@ impl BacktrackingLineSearch {
             if alpha < alpha_min_eff {
                 let mut d = data.borrow_mut();
                 d.trial = None;
-                d.tiny_step_flag = true;
-                // Same info-field stamping as the Failed path so the
-                // tiny-step → restoration handoff prints a consistent
-                // row in the inner trace.
+                // NB: do NOT set `tiny_step_flag` here — that flag means
+                // "step direction is too small to make progress" and is
+                // checked by the main loop / mu update for clean
+                // termination at convergence. An LS that exhausted its
+                // alpha budget is a different condition and is handled
+                // by the caller via restoration. Conflating the two
+                // turns a recoverable LS failure into a premature
+                // STOP_AT_TINY_STEP at the next iteration.
                 d.info_alpha_primal = last_alpha;
                 d.info_alpha_dual = 0.0;
                 d.info_alpha_primal_char = 'R';
