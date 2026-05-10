@@ -335,9 +335,9 @@ impl MuUpdate for AdaptiveMuUpdate {
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         pd_search_dir: Option<&mut PdSearchDirCalc>,
     ) -> Number {
-        let (curr_mu, iter_count) = {
+        let (curr_mu, iter_count, tiny_step_flag) = {
             let d = data.borrow();
-            (d.curr_mu, d.iter_count)
+            (d.curr_mu, d.iter_count, d.tiny_step_flag)
         };
 
         // Bootstrap: at iter_count==0 the iterate is the unmodified
@@ -352,9 +352,19 @@ impl MuUpdate for AdaptiveMuUpdate {
             return curr_mu;
         }
 
+        // `tiny_step_flag` (and upstream's `CheckSkippedLineSearch()`,
+        // which is only set in non-rigorous resto mode) forces
+        // `sufficient_progress = false` when not in `NEVER_MONOTONE_MODE`
+        // — see `IpAdaptiveMuUpdate.cpp:347-351`. This is what lets a
+        // stalled outer iter drop into fixed-μ and re-seed μ via
+        // `new_fixed_mu` instead of the oracle re-driving μ further down.
+        let force_no_progress = tiny_step_flag
+            && self.adaptive_mu_globalization != AdaptiveMuGlobalization::NeverMonotoneMode;
+
         if !self.free_mu_mode {
             // Fixed-mu branch — `cpp:299-342`.
-            let sufficient_progress = self.check_sufficient_progress(cq);
+            let sufficient_progress =
+                !force_no_progress && self.check_sufficient_progress(cq);
             if sufficient_progress {
                 // Switch back to free mode; record the iterate.
                 self.free_mu_mode = true;
@@ -380,7 +390,8 @@ impl MuUpdate for AdaptiveMuUpdate {
             }
         } else {
             // Free-mu branch — `cpp:343-389`.
-            let sufficient_progress = self.check_sufficient_progress(cq);
+            let sufficient_progress =
+                !force_no_progress && self.check_sufficient_progress(cq);
             if sufficient_progress {
                 self.remember_current_point_as_accepted(data, cq);
                 // Fall through to the oracle call below.
@@ -462,14 +473,13 @@ impl MuUpdate for AdaptiveMuUpdate {
         // `linesearch_->CheckSkippedLineSearch()` hook
         // (`IpAdaptiveMuUpdate.cpp:347-350`). Upstream forces
         // `sufficient_progress = false` if the previous line search
-        // was skipped/tiny-stepped; that signal is not yet plumbed
-        // through to this trait. As a proxy, never let the free-mode
-        // oracle raise μ above the previous value: with LOQO's
-        // closed-form the candidate can swing 100× either direction
-        // on iterates with non-uniform complementarity, and an
-        // increase typically signals the filter line search will
-        // fail. This deviation from upstream is bounded — once the
-        // line-search-reset hook lands, this cap can be removed.
+        // was skipped/tiny-stepped; that signal is plumbed through
+        // `tiny_step_flag` above into the fixed/free mode switch
+        // (which can raise μ via `new_fixed_mu`). The free-mode
+        // oracle itself can swing 100× either direction on iterates
+        // with non-uniform complementarity, and an unconstrained
+        // increase tends to destabilise the filter line search on
+        // problems like HAIFAM. Keep the cap on the oracle path.
         if mu > curr_mu {
             mu = curr_mu;
         }
