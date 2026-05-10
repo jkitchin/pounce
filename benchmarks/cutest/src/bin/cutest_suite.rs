@@ -496,6 +496,9 @@ fn solve_with_pounce(problem: CutestProblem) -> (CutestResult, CutestProblem) {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let _ = opts.set_integer_value("print_level", pl, true, false);
+        if let Ok(h) = std::env::var("POUNCE_HESS_APPROX") {
+            let _ = opts.set_string_value("hessian_approximation", &h, true, false);
+        }
     }
     // Wire the ℓ1-feasibility restoration sub-IPM. Without this, any
     // line-search failure surfaces as `RestorationFailure` (the trait's
