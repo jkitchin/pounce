@@ -411,6 +411,36 @@ impl MuUpdate for AdaptiveMuUpdate {
                 self.remember_current_point_as_accepted(data, cq);
                 // Fall through to the oracle call below.
             } else {
+                if std::env::var("POUNCE_DBG_AMU").is_ok() {
+                    let cqr = cq.borrow();
+                    let theta = cqr.curr_constraint_violation();
+                    let f = cqr.curr_f();
+                    let nlp_err = cqr.curr_nlp_error();
+                    let avrg = cqr.curr_avrg_compl();
+                    drop(cqr);
+                    let margin =
+                        self.filter_margin_fact * self.filter_max_margin.min(nlp_err);
+                    let entries: Vec<(Number, Number, i32)> = self
+                        .filter
+                        .entries()
+                        .iter()
+                        .map(|e| (e.theta, e.phi, e.iter))
+                        .collect();
+                    eprintln!(
+                        "[AMU] iter={} free->fixed: curr_mu={:.3e} theta={:.3e} f={:.3e} nlp_err={:.3e} margin={:.3e} avrg_compl={:.3e} new_mu={:.3e} | filter={:?} | force_no_progress={} tiny={}",
+                        iter_count,
+                        curr_mu,
+                        theta,
+                        f,
+                        nlp_err,
+                        margin,
+                        avrg,
+                        self.adaptive_mu_monotone_init_factor * avrg,
+                        entries,
+                        force_no_progress,
+                        tiny_step_flag,
+                    );
+                }
                 // Switch into fixed mode.
                 self.free_mu_mode = false;
                 if self.restore_accepted_iterate {
