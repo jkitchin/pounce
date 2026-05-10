@@ -57,13 +57,79 @@ pub struct BacktrackingLineSearch {
     /// gradient-block variant. Both correspond to upstream's
     /// `soc_method` option.
     pub soc_method: i32,
+    /// Number of consecutive shortened iterations before the watchdog
+    /// procedure activates. Disabled when `<= 0`. Mirrors upstream's
+    /// `watchdog_shortened_iter_trigger` (default 10).
     pub watchdog_shortened_iter_trigger: i32,
+    /// Maximum number of outer iterations the watchdog will accept
+    /// non-decreasing trial points before reverting to the snapshot.
+    /// Mirrors upstream's `watchdog_trial_iter_max` (default 3).
     pub watchdog_trial_iter_max: i32,
     /// Lower bound on α; below this we declare a tiny step (mirrors
     /// `alpha_min_frac` flow, `IpBacktrackingLineSearch.cpp:CalculateAlphaMin`).
     pub alpha_min: Number,
     /// Maximum trial-iteration cap before declaring failure.
     pub max_trials: i32,
+
+    // ---- Watchdog state (port of `IpBacktrackingLineSearch.{hpp,cpp}`'s
+    //      `in_watchdog_`, `watchdog_iterate_`, `watchdog_delta_`,
+    //      `watchdog_alpha_primal_test_`, `watchdog_trial_iter_`,
+    //      `watchdog_shortened_iter_`, `last_mu_`).
+    //
+    // Watchdog mechanism: after `watchdog_shortened_iter_trigger`
+    // consecutive shortened (n_steps > 0) accepts, we snapshot the
+    // current iterate `(curr, delta, theta, phi, d_phi)` and enter
+    // watchdog mode. While in watchdog: the acceptor's reference
+    // values are FROZEN to the snapshot for up to
+    // `watchdog_trial_iter_max` outer iterations. Each iteration's
+    // alpha-loop runs against the frozen reference; if it accepts,
+    // watchdog terminates with success ("W"). If it rejects, we
+    // accept the last trial anyway (info char 'w') and let the next
+    // outer iteration try again. If `watchdog_trial_iter_max` outer
+    // iterations all reject, we revert to the snapshot and re-run
+    // the alpha-loop on the saved `delta` with `skip_first=true`.
+    /// True iff currently inside a watchdog window.
+    in_watchdog: bool,
+    /// Snapshot of the iterate at watchdog activation.
+    watchdog_iterate: Option<IteratesVector>,
+    /// Snapshot of the search direction at watchdog activation.
+    watchdog_delta: Option<IteratesVector>,
+    /// Snapshot of `primal_frac_to_the_bound(τ, δ)` at watchdog
+    /// activation. Currently unused inside the alpha loop (pounce's
+    /// driver passes `alpha_init` directly), but stored for parity
+    /// with upstream's iter-by-iter trace.
+    #[allow(dead_code)]
+    watchdog_alpha_primal_test: Number,
+    /// Number of outer iterations elapsed since watchdog activation.
+    watchdog_trial_iter: i32,
+    /// Number of consecutive shortened (n_steps > 0) accepts.
+    /// Reset on a full step (n_steps == 0), on mu change, on watchdog
+    /// success, and on watchdog stop-with-revert.
+    watchdog_shortened_iter: i32,
+    /// `mu` at the previous outer iteration. A change clears the
+    /// watchdog state (`IpBacktrackingLineSearch.cpp:259-270`).
+    last_mu: Number,
+    /// Frozen reference theta at watchdog activation.
+    watchdog_theta: Number,
+    /// Frozen reference phi at watchdog activation.
+    watchdog_phi: Number,
+    /// Frozen reference d_phi at watchdog activation.
+    watchdog_d_phi: Number,
+}
+
+/// Internal alpha-loop outcome. The watchdog wrapper translates this
+/// into the public [`Outcome`] after applying its state machine.
+enum AlphaResult {
+    /// Trial accepted at `alpha_used` after `n_steps` reductions.
+    Accepted { n_steps: i32 },
+    /// α dropped below `alpha_min_eff` ⇒ tiny step. `last_alpha` is
+    /// the smallest α actually evaluated; `n_steps` is the number of
+    /// reductions performed.
+    TinyStep { n_steps: i32, last_alpha: Number },
+    /// `max_trials` exhausted without acceptance. The last attempted
+    /// trial iterate is left in `data.trial` so the watchdog
+    /// "accept-anyway" path can promote it.
+    Failed { n_steps: i32, last_alpha: Number },
 }
 
 impl BacktrackingLineSearch {
@@ -78,7 +144,29 @@ impl BacktrackingLineSearch {
             watchdog_trial_iter_max: 3,
             alpha_min: 1e-12,
             max_trials: 50,
+            in_watchdog: false,
+            watchdog_iterate: None,
+            watchdog_delta: None,
+            watchdog_alpha_primal_test: 0.0,
+            watchdog_trial_iter: 0,
+            watchdog_shortened_iter: 0,
+            last_mu: -1.0,
+            watchdog_theta: 0.0,
+            watchdog_phi: 0.0,
+            watchdog_d_phi: 0.0,
         }
+    }
+
+    /// Test-only accessor for the watchdog active flag.
+    #[cfg(test)]
+    pub(crate) fn in_watchdog(&self) -> bool {
+        self.in_watchdog
+    }
+
+    /// Test-only accessor for the shortened-iter counter.
+    #[cfg(test)]
+    pub(crate) fn watchdog_shortened_iter(&self) -> i32 {
+        self.watchdog_shortened_iter
     }
 
     pub fn acceptor(&self) -> &dyn BacktrackingLsAcceptor {
@@ -94,19 +182,20 @@ impl BacktrackingLineSearch {
         self.acceptor.reset();
     }
 
-    /// Try `alpha`, then `alpha * alpha_red_factor`, etc. until the
-    /// acceptor returns `Accept` or α drops below `alpha_min`.
+    /// Drive the watchdog state machine + alpha-reduction loop.
+    /// Port of `IpBacktrackingLineSearch::FindAcceptableTrialPoint`
+    /// (`IpBacktrackingLineSearch.cpp:252-677`) restricted to the
+    /// non-soft-resto, filter-acceptor, exact-Hessian path that
+    /// pounce supports today.
     ///
-    /// On accept: writes the trial iterate to `data.trial`, records
-    /// the final α on `data.info_alpha_primal`, and returns
-    /// `Outcome::Accepted`. On tiny step / failure, leaves
-    /// `data.trial` cleared.
-    ///
-    /// The acceptor is consulted via [`FilterLsAcceptor::check_acceptability`]
-    /// when concrete; for any other `BacktrackingLsAcceptor` the loop
-    /// degenerates to "accept first α that produces a finite phi/theta"
-    /// (which lets non-filter acceptors land later without changing the
-    /// driver's signature).
+    /// Outcomes:
+    /// - `Accepted`: a trial point is in `data.trial`, info fields are
+    ///   stamped. The watchdog state has been advanced (success → "W",
+    ///   `accept-anyway` → 'w').
+    /// - `TinyStep`: α dropped below the dynamic alpha-min before any
+    ///   trial was accepted. Caller hands off to restoration.
+    /// - `Failed`: alpha-loop exhausted AND watchdog could not rescue.
+    ///   Caller hands off to restoration.
     pub fn find_acceptable_trial_point(
         &mut self,
         data: &IpoptDataHandle,
@@ -117,29 +206,288 @@ impl BacktrackingLineSearch {
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         search_dir: Option<&mut PdSearchDirCalc>,
     ) -> Outcome {
-        // Snapshot phi and theta at the current iterate.
-        let theta = cq.borrow().curr_constraint_violation();
-        let phi = cq.borrow().curr_barrier_obj();
-        let d_phi = self.compute_d_phi(cq, delta);
+        // ---- Watchdog: detect mu change → reset state.
+        // Mirrors `IpBacktrackingLineSearch.cpp:259-270`.
+        let curr_mu = data.borrow().curr_mu;
+        if self.last_mu < 0.0 || self.last_mu != curr_mu {
+            self.in_watchdog = false;
+            self.watchdog_iterate = None;
+            self.watchdog_delta = None;
+            self.watchdog_shortened_iter = 0;
+            self.last_mu = curr_mu;
+        }
 
-        // Per-outer-iteration acceptor hook (penalty acceptor uses it to
-        // bump ν and cache linearization vectors; filter acceptor: no-op).
+        // ---- Watchdog: maybe wake up.
+        // Mirrors `IpBacktrackingLineSearch.cpp:376-380`.
+        if !self.in_watchdog
+            && self.watchdog_shortened_iter_trigger > 0
+            && self.watchdog_shortened_iter >= self.watchdog_shortened_iter_trigger
+        {
+            self.start_watchdog(data, cq, delta);
+        }
+
+        // Per-outer-iteration acceptor hook.
         self.acceptor.init_this_line_search(data, cq, delta);
 
-        let curr = match data.borrow().curr.clone() {
-            Some(c) => c,
-            None => return Outcome::Failed,
+        // Decide reference (theta, phi, d_phi). Mirrors upstream's
+        // `FilterLSAcceptor::InitThisLineSearch(in_watchdog)` choice
+        // between `curr_*` and the saved `watchdog_*` snapshot.
+        let (theta, phi, d_phi) = if self.in_watchdog {
+            (self.watchdog_theta, self.watchdog_phi, self.watchdog_d_phi)
+        } else {
+            let theta = cq.borrow().curr_constraint_violation();
+            let phi = cq.borrow().curr_barrier_obj();
+            let d_phi = self.compute_d_phi(cq, delta);
+            (theta, phi, d_phi)
         };
 
-        // SOC plumbing — only when both the search-dir calc and the NLP
-        // are wired through (so we can re-solve the corrector system).
-        // SOC is attempted exactly once, after the *first* trial point
-        // (alpha == alpha_init) is rejected and `theta_trial >= theta`
-        // (constraint violation grew along the Newton step), mirroring
-        // upstream `IpBacktrackingLineSearch.cpp:813`.
+        // Run the alpha-loop on the caller's `delta`.
+        let result = self.run_alpha_loop(
+            data,
+            cq,
+            delta,
+            alpha_init,
+            alpha_dual,
+            nlp,
+            search_dir,
+            theta,
+            phi,
+            d_phi,
+            /*skip_first*/ false,
+        );
+
+        match result {
+            AlphaResult::Accepted { n_steps } => {
+                // Update the shortened-iter counter
+                // (`IpBacktrackingLineSearch.cpp:644-655`).
+                if n_steps == 0 {
+                    self.watchdog_shortened_iter = 0;
+                } else {
+                    self.watchdog_shortened_iter += 1;
+                }
+                if self.in_watchdog {
+                    // Watchdog success — clear state, info char already
+                    // stamped by the alpha loop's
+                    // `update_for_next_iteration` call. Upstream also
+                    // appends "W" to the info string here; pounce
+                    // doesn't track an info string yet.
+                    self.in_watchdog = false;
+                    self.watchdog_iterate = None;
+                    self.watchdog_delta = None;
+                    self.watchdog_shortened_iter = 0;
+                }
+                Outcome::Accepted
+            }
+            AlphaResult::TinyStep { n_steps, last_alpha } => {
+                let mut d = data.borrow_mut();
+                d.trial = None;
+                d.info_alpha_primal = last_alpha;
+                d.info_alpha_dual = 0.0;
+                d.info_alpha_primal_char = 'R';
+                d.info_ls_count = n_steps + 1;
+                Outcome::TinyStep
+            }
+            AlphaResult::Failed { n_steps, last_alpha } => {
+                if self.in_watchdog {
+                    self.handle_watchdog_failure(
+                        data, cq, alpha_init, alpha_dual, nlp, n_steps, last_alpha,
+                    )
+                } else {
+                    // Genuine failure → restoration.
+                    let mut d = data.borrow_mut();
+                    d.trial = None;
+                    d.info_alpha_primal = last_alpha;
+                    d.info_alpha_dual = 0.0;
+                    d.info_alpha_primal_char = 'R';
+                    d.info_ls_count = n_steps + 1;
+                    Outcome::Failed
+                }
+            }
+        }
+    }
+
+    /// Snapshot the current `(curr, delta, theta, phi, d_phi)` and
+    /// activate the watchdog. Mirrors upstream
+    /// `IpBacktrackingLineSearch::StartWatchDog`
+    /// (`IpBacktrackingLineSearch.cpp:855-869`) plus
+    /// `IpFilterLSAcceptor::StartWatchDog`
+    /// (`IpFilterLSAcceptor.cpp:506-513`) — pounce stores the
+    /// frozen reference values directly on the driver because the
+    /// acceptor is stateless w.r.t. reference values (the driver
+    /// passes them per call).
+    fn start_watchdog(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        delta: &IteratesVector,
+    ) {
+        let curr = data.borrow().curr.clone();
+        let Some(curr) = curr else {
+            return;
+        };
+        self.in_watchdog = true;
+        self.watchdog_iterate = Some(curr);
+        self.watchdog_delta = Some(delta.clone());
+        self.watchdog_trial_iter = 0;
+        let tau = data.borrow().curr_tau;
+        self.watchdog_alpha_primal_test = cq.borrow().aff_step_alpha_primal_max(delta, tau);
+        self.watchdog_theta = cq.borrow().curr_constraint_violation();
+        self.watchdog_phi = cq.borrow().curr_barrier_obj();
+        self.watchdog_d_phi = self.compute_d_phi(cq, delta);
+    }
+
+    /// Handle alpha-loop failure while in watchdog mode. Bumps
+    /// `watchdog_trial_iter`; if the cap is exceeded, reverts to the
+    /// snapshot (StopWatchDog) and re-runs the alpha-loop on the
+    /// saved `delta` with `skip_first=true`. Otherwise accepts the
+    /// current trial as 'w' and returns. Mirrors
+    /// `IpBacktrackingLineSearch.cpp:480-503` together with
+    /// `IpBacktrackingLineSearch.cpp:871-908`'s `StopWatchDog`.
+    fn handle_watchdog_failure(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        alpha_init: Number,
+        alpha_dual: Number,
+        nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
+        n_steps: i32,
+        last_alpha: Number,
+    ) -> Outcome {
+        self.watchdog_trial_iter += 1;
+        if self.watchdog_trial_iter > self.watchdog_trial_iter_max {
+            // StopWatchDog: revert curr to the snapshot, re-run on
+            // saved delta with `skip_first=true` (alpha starts at
+            // `alpha_init * alpha_red_factor`).
+            let snapshot_iter = self.watchdog_iterate.take();
+            let snapshot_delta = self.watchdog_delta.take();
+            self.in_watchdog = false;
+            self.watchdog_shortened_iter = 0;
+            let (Some(snap), Some(snap_delta)) = (snapshot_iter, snapshot_delta) else {
+                // Defensive — this should not happen if start_watchdog
+                // ran successfully. Fall through to genuine failure.
+                let mut d = data.borrow_mut();
+                d.trial = None;
+                d.info_alpha_primal = last_alpha;
+                d.info_alpha_dual = 0.0;
+                d.info_alpha_primal_char = 'R';
+                d.info_ls_count = n_steps + 1;
+                return Outcome::Failed;
+            };
+            {
+                let mut d = data.borrow_mut();
+                d.set_curr(snap);
+            }
+            let theta = cq.borrow().curr_constraint_violation();
+            let phi = cq.borrow().curr_barrier_obj();
+            let d_phi = self.compute_d_phi(cq, &snap_delta);
+            // SOC is disabled on the StopWatchDog retry. The original
+            // `search_dir` was consumed by the first alpha-loop call
+            // and we want a plain backtracking pass over the saved
+            // delta; mirrors upstream's behavior of not running the
+            // soc_method on the recovered search.
+            let result2 = self.run_alpha_loop(
+                data,
+                cq,
+                &snap_delta,
+                alpha_init,
+                alpha_dual,
+                nlp,
+                None,
+                theta,
+                phi,
+                d_phi,
+                /*skip_first*/ true,
+            );
+            match result2 {
+                AlphaResult::Accepted { n_steps: ns2 } => {
+                    if ns2 == 0 {
+                        self.watchdog_shortened_iter = 0;
+                    } else {
+                        self.watchdog_shortened_iter += 1;
+                    }
+                    Outcome::Accepted
+                }
+                AlphaResult::TinyStep {
+                    n_steps: ns2,
+                    last_alpha: la2,
+                } => {
+                    let mut d = data.borrow_mut();
+                    d.trial = None;
+                    d.info_alpha_primal = la2;
+                    d.info_alpha_dual = 0.0;
+                    d.info_alpha_primal_char = 'R';
+                    d.info_ls_count = ns2 + 1;
+                    Outcome::TinyStep
+                }
+                AlphaResult::Failed {
+                    n_steps: ns2,
+                    last_alpha: la2,
+                } => {
+                    let mut d = data.borrow_mut();
+                    d.trial = None;
+                    d.info_alpha_primal = la2;
+                    d.info_alpha_dual = 0.0;
+                    d.info_alpha_primal_char = 'R';
+                    d.info_ls_count = ns2 + 1;
+                    Outcome::Failed
+                }
+            }
+        } else {
+            // Accept the last attempted trial despite filter rejection
+            // — `accept-anyway` watchdog branch
+            // (`IpBacktrackingLineSearch.cpp:498-503`). The trial
+            // iterate from the final α attempt is already in
+            // `data.trial`. Crucially, we do NOT call
+            // `update_for_next_iteration`, so the filter is NOT
+            // augmented (matching upstream's char='w' branch at
+            // line 833-836 which skips `UpdateForNextIteration`).
+            let mut d = data.borrow_mut();
+            d.info_alpha_primal = last_alpha;
+            d.info_alpha_dual = alpha_dual;
+            d.info_alpha_primal_char = 'w';
+            d.info_ls_count = n_steps + 1;
+            Outcome::Accepted
+        }
+    }
+
+    /// Inner alpha-reduction loop. Tries
+    /// `alpha = alpha_init * alpha_red_factor^k` (or
+    /// `alpha_red_factor^(k+1)` when `skip_first=true`) and consults
+    /// the acceptor against the supplied reference `(theta, phi, d_phi)`.
+    /// On accept stamps the info fields and calls
+    /// `update_for_next_iteration`. On reject leaves the LAST trial in
+    /// `data.trial` so the watchdog `accept-anyway` path can promote
+    /// it.
+    #[allow(clippy::too_many_arguments)]
+    fn run_alpha_loop(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        delta: &IteratesVector,
+        alpha_init: Number,
+        alpha_dual: Number,
+        nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
+        search_dir: Option<&mut PdSearchDirCalc>,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        skip_first: bool,
+    ) -> AlphaResult {
+        let curr = match data.borrow().curr.clone() {
+            Some(c) => c,
+            None => {
+                return AlphaResult::Failed {
+                    n_steps: 0,
+                    last_alpha: 0.0,
+                }
+            }
+        };
+
         let mut soc_search_dir = search_dir;
-        // Allocate the persistent SOC accumulators only if SOC is wired.
-        let (mut c_soc_buf, mut dms_soc_buf) = if soc_search_dir.is_some() && nlp.is_some() && self.max_soc > 0
+        let (mut c_soc_buf, mut dms_soc_buf) = if soc_search_dir.is_some()
+            && nlp.is_some()
+            && self.max_soc > 0
+            && !skip_first
         {
             let cq_ref = cq.borrow();
             let curr_c = cq_ref.curr_c();
@@ -153,52 +501,26 @@ impl BacktrackingLineSearch {
             (None, None)
         };
 
-        // Try alpha = alpha_init * alpha_red_factor^k.
-        let mut alpha = alpha_init;
-        // Track the last α actually tested and how many steps were
-        // taken — used by the Failed branch to stamp `info_alpha_primal`
-        // / `info_ls_count` before the restoration phase reads them
-        // (mirrors `IpBacktrackingLineSearch.cpp:605-608`, which sets
-        // these on `IpData()` immediately before
-        // `resto_phase_->PerformRestoration()`).
-        let mut last_alpha = alpha_init;
+        let mut alpha = if skip_first {
+            alpha_init * self.alpha_red_factor
+        } else {
+            alpha_init
+        };
+        let mut last_alpha = alpha;
         let mut n_steps: i32 = 0;
-        // Acceptor-driven dynamic alpha-min (mirrors
-        // IpBacktrackingLineSearch.cpp:703 `CalculateAlphaMin`).
-        // Floor at the driver's absolute `alpha_min` so we never let
-        // the reduction loop run for ever on a problem where the
-        // acceptor's formula bottoms out near zero.
         let acceptor_alpha_min = self.acceptor.calc_alpha_min(d_phi, theta);
         let alpha_min_eff = self.alpha_min.max(acceptor_alpha_min);
+
         for trial in 0..self.max_trials {
             if alpha < alpha_min_eff {
-                let mut d = data.borrow_mut();
-                d.trial = None;
-                // NB: do NOT set `tiny_step_flag` here — that flag means
-                // "step direction is too small to make progress" and is
-                // checked by the main loop / mu update for clean
-                // termination at convergence. An LS that exhausted its
-                // alpha budget is a different condition and is handled
-                // by the caller via restoration. Conflating the two
-                // turns a recoverable LS failure into a premature
-                // STOP_AT_TINY_STEP at the next iteration.
-                d.info_alpha_primal = last_alpha;
-                d.info_alpha_dual = 0.0;
-                d.info_alpha_primal_char = 'R';
-                d.info_ls_count = n_steps + 1;
-                return Outcome::TinyStep;
+                return AlphaResult::TinyStep { n_steps, last_alpha };
             }
             last_alpha = alpha;
             n_steps = trial;
 
-            // Build trial = curr + alpha * delta and stash on data.
-            // Primal blocks (x, s, y_c, y_d) advance by `alpha`; dual
-            // bound multipliers (z, v) advance by `alpha_dual` per the
-            // upstream `PerformDualStep` split.
             let trial_iv = scaled_step(&curr, delta, alpha, alpha_dual);
             data.borrow_mut().set_trial(trial_iv);
 
-            // Evaluate trial phi/theta. If non-finite, treat as reject.
             let theta_trial = cq.borrow().trial_constraint_violation();
             let phi_trial = cq.borrow().trial_barrier_obj();
             if !theta_trial.is_finite() || !phi_trial.is_finite() {
@@ -210,12 +532,6 @@ impl BacktrackingLineSearch {
                 .acceptor
                 .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial);
             if decision == AcceptDecision::Accept {
-                // Mirrors upstream
-                // `IpBacktrackingLineSearch.cpp:839` — call
-                // `UpdateForNextIteration` once on the accepted alpha
-                // to (a) decide the info char and (b) conditionally
-                // augment the filter. Pounce's filter is *only*
-                // augmented here, never separately by the main loop.
                 let mode = self
                     .acceptor
                     .update_for_next_iteration(alpha, theta, phi, d_phi, phi_trial);
@@ -224,14 +540,14 @@ impl BacktrackingLineSearch {
                 d.info_alpha_dual = alpha_dual;
                 d.info_ls_count = trial + 1;
                 d.info_alpha_primal_char = mode;
-                return Outcome::Accepted;
+                return AlphaResult::Accepted { n_steps: trial };
             }
 
-            // Second-order correction: only after the *first* trial
-            // point is rejected and only when the constraint violation
-            // grew along the Newton step (theta_trial >= theta). Mirrors
-            // `IpBacktrackingLineSearch.cpp:809-824`.
+            // SOC: only on the first non-skipped trial when constraint
+            // violation grew. Disabled when `skip_first=true` (no SOC
+            // buffers were allocated).
             if trial == 0
+                && !skip_first
                 && self.max_soc > 0
                 && theta <= theta_trial
                 && c_soc_buf.is_some()
@@ -248,9 +564,6 @@ impl BacktrackingLineSearch {
                     && (count_soc == 0 || theta_trial_local <= self.kappa_soc * theta_soc_old)
                 {
                     theta_soc_old = theta_trial_local;
-                    // Upstream `IpFilterLSAcceptor.cpp:569`:
-                    // `c_soc->AddOneVector(1.0, *trial_c, alpha_primal_soc)`
-                    // i.e. `c_soc := trial_c + alpha_primal_soc · c_soc`.
                     {
                         let cq_ref = cq.borrow();
                         let trial_c = cq_ref.trial_c();
@@ -264,7 +577,6 @@ impl BacktrackingLineSearch {
                             dms_soc.axpy(1.0, &*trial_dms);
                         }
                     }
-                    // Solve the SOC system.
                     let delta_soc_opt = {
                         let sd = soc_search_dir
                             .as_deref_mut()
@@ -289,21 +601,11 @@ impl BacktrackingLineSearch {
                     let Some(delta_soc) = delta_soc_opt else {
                         break;
                     };
-                    // alpha_primal_soc = primal_frac_to_the_bound(tau, delta_soc)
                     let tau = data.borrow().curr_tau;
                     alpha_primal_soc = cq.borrow().aff_step_alpha_primal_max(&delta_soc, tau);
-                    // Build the SOC trial iterate. Per upstream
-                    // `IpFilterLSAcceptor.cpp:626`, only the primal
-                    // (x, s) blocks advance for the SOC retry; y and
-                    // bound multipliers stay at their first-trial
-                    // values from earlier in this same loop.
                     let mut trial_iv = curr.deep_copy();
                     trial_iv.x.axpy(alpha_primal_soc, &*delta_soc.x);
                     trial_iv.s.axpy(alpha_primal_soc, &*delta_soc.s);
-                    // Dual blocks track the original step (not the
-                    // SOC delta) so the multiplier values match what
-                    // upstream's `SetTrialPrimalVariablesFromStep` +
-                    // existing dual update produce.
                     trial_iv.y_c.axpy(alpha, &*delta.y_c);
                     trial_iv.y_d.axpy(alpha, &*delta.y_d);
                     trial_iv.z_l.axpy(alpha_dual, &*delta.z_l);
@@ -329,7 +631,7 @@ impl BacktrackingLineSearch {
                         d.info_alpha_dual = alpha_dual;
                         d.info_ls_count = trial + 1;
                         d.info_alpha_primal_char = mode.to_ascii_uppercase();
-                        return Outcome::Accepted;
+                        return AlphaResult::Accepted { n_steps: trial };
                     }
                     count_soc += 1;
                     theta_trial_local = theta_soc;
@@ -340,20 +642,7 @@ impl BacktrackingLineSearch {
             alpha *= self.alpha_red_factor;
         }
 
-        // Exhausted retries without acceptance. Mirror upstream
-        // `IpBacktrackingLineSearch.cpp:605-608`: stamp the failure α,
-        // dual=0, char='R', ls=n_steps+1 onto IpData so
-        // `RestoMinC_1Nrm::Set_info_*` (and pounce's equivalent in
-        // `resto_inner_solver.rs`) can copy them onto the nested
-        // IPM's data before the inner's first OutputIteration row
-        // prints.
-        let mut d = data.borrow_mut();
-        d.trial = None;
-        d.info_alpha_primal = last_alpha;
-        d.info_alpha_dual = 0.0;
-        d.info_alpha_primal_char = 'R';
-        d.info_ls_count = n_steps + 1;
-        Outcome::Failed
+        AlphaResult::Failed { n_steps, last_alpha }
     }
 
     /// Directional derivative of the barrier objective along the step
@@ -459,5 +748,39 @@ mod tests {
         assert_ne!(Outcome::Accepted, Outcome::Failed);
         assert_ne!(Outcome::Accepted, Outcome::TinyStep);
         assert_ne!(Outcome::Failed, Outcome::TinyStep);
+    }
+
+    #[test]
+    fn watchdog_state_starts_inactive() {
+        // Mirror upstream `IpBacktrackingLineSearch::InitializeImpl`
+        // (`IpBacktrackingLineSearch.cpp:240-249`): the watchdog is
+        // inactive at construction and `last_mu_` is initialised to
+        // a sentinel `-1` so the first iteration's mu always
+        // triggers the reset branch (which is harmless when the
+        // watchdog was never armed).
+        let bls = BacktrackingLineSearch::new(Box::new(FilterLsAcceptor::new()));
+        assert!(!bls.in_watchdog());
+        assert_eq!(bls.watchdog_shortened_iter(), 0);
+        assert!(bls.last_mu < 0.0);
+        assert_eq!(bls.watchdog_shortened_iter_trigger, 10);
+        assert_eq!(bls.watchdog_trial_iter_max, 3);
+    }
+
+    #[test]
+    fn alpha_result_failed_carries_n_steps_and_last_alpha() {
+        // Sanity check on the internal AlphaResult enum: the watchdog
+        // wrapper relies on `Failed { n_steps, last_alpha }` to stamp
+        // the info-* fields when handing off to restoration.
+        let r = AlphaResult::Failed {
+            n_steps: 7,
+            last_alpha: 1e-6,
+        };
+        match r {
+            AlphaResult::Failed { n_steps, last_alpha } => {
+                assert_eq!(n_steps, 7);
+                assert!((last_alpha - 1e-6).abs() < 1e-20);
+            }
+            _ => unreachable!(),
+        }
     }
 }
