@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Linear algebra primitives for POUNCE (port of Ipopt's src/LinAlg): BLAS-1, Vector and Matrix abstractions, dense vectors/matrices, compound vectors/matrices, expansion and scaling matrices, triplet storage, triplet→CSC conversion."
 
 [dependencies]

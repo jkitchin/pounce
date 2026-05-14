@@ -5,11 +5,21 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "NLP-side glue for POUNCE (port of Ipopt's src/Interfaces): TNLP trait, TNLPAdapter, NLP / IpoptNLP wrappers, return-code enums, IpoptApplication user-facing entry point."
 
 [dependencies]
 pounce-common = { path = "../pounce-common" }
 pounce-linalg = { path = "../pounce-linalg" }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# Derive `serde::{Serialize, Deserialize}` on the structured-output
+# types (`SolveStatistics`, `IterRecord`, `ApplicationReturnStatus`)
+# used by the JSON solve report (pounce#8). Off by default so library
+# consumers don't pay the serde compile-time cost when they don't need
+# machine-readable output.
+serde = ["dep:serde"]
 
 [lints]
 workspace = true

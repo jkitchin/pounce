@@ -1,0 +1,18 @@
+[package]
+name = "pounce-sensitivity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Sensitivity analysis / parametric NLP warm-start / reduced Hessian for POUNCE — port of upstream Ipopt's sIPOPT contrib (Pirnay, López-Negrete, Biegler 2012)."
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-linalg = { path = "../pounce-linalg" }
+pounce-algorithm = { path = "../pounce-algorithm" }
+pounce-nlp = { path = "../pounce-nlp" }
+
+[lints]
+workspace = true

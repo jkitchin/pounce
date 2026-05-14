@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Symmetric linear-solver trait layer for POUNCE (port of Ipopt's Algorithm/LinearSolvers/Ip{SymLinearSolver,SparseSymLinearSolverInterface,TSymLinearSolver,TSymScalingMethod,TripletToCSRConverter}). No FFI; concrete backends live in pounce-hsl, pounce-mumps (future), pounce-feral (future)."
 
 [dependencies]

@@ -535,5 +535,135 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.set_registering_category("MA28 Linear Solver");
     r.add_bounded_number_option("ma28_pivtol", "Pivot tolerance for linear solver MA28.", 0.0, true, 1.0, false, 0.01, "")?;
 
+    // ===== ℓ₁-exact penalty-barrier wrapper (pounce-l1penalty / pounce#10) =====
+    // Not in upstream Ipopt 3.14 — pounce extension porting Thierry &
+    // Biegler 2020 (originally implemented in ripopt#23). Default off;
+    // enabling reformulates the user NLP into an augmented form whose
+    // augmented variables satisfy LICQ by construction. Phase-3 / 3.5
+    // option keys land alongside the BNW dynamic-ρ + auto-fallback work.
+    r.set_registering_category("L1 Exact Penalty-Barrier Wrapper");
+    r.add_bool_option(
+        "l1_exact_penalty_barrier",
+        "Wrap the NLP in the Thierry-Biegler ℓ₁ penalty-barrier reformulation before solving.",
+        false,
+        "When set, every equality row c_i(x)=g_i is rewritten as c_i(x)-p_i+n_i=g_i with non-negative slack pair (p_i, n_i), and the objective is augmented by ρ·Σ(p+n). The augmented NLP automatically satisfies LICQ on the slack variables, which makes the standard interior-point machinery handle degenerate / MPCC-like cases that the stock filter line search thrashes on. Default off; the solve trajectory is byte-identical to pre-l1 pounce when off.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "l1_penalty_init",
+        "Initial value of the penalty weight ρ in the ℓ₁ wrapper.",
+        0.0,
+        true,
+        1.0,
+        "Initial ρ. After each inner solve the Byrd-Nocedal-Waltz steering rule escalates ρ until the slacks collapse or the maximum is reached.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "l1_penalty_max",
+        "Upper cap on the ℓ₁ penalty weight ρ.",
+        0.0,
+        true,
+        1.0e6,
+        "BNW steering increases ρ but never above this cap. If the cap is reached with non-collapsed slacks, the original problem is locally infeasible at the returned ℓ₁-best point and the status is upgraded to LocalInfeasibility / Infeasible_Problem_Detected.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "l1_penalty_increase_factor",
+        "Geometric ρ-escalation factor.",
+        1.0,
+        false,
+        8.0,
+        "Multiplicative floor on ρ growth between outer iterations. The BNW rule sets ρ_new = max(ρ·factor, τ·‖y_eq‖∞ + ε), so factor sets the slowest sustained growth rate.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "l1_penalty_max_outer_iter",
+        "Maximum number of outer ρ-escalation steps.",
+        1,
+        8,
+        "Caps the number of inner-solve cycles the wrapper runs. Slack-collapse termination is the usual exit; this is a safety bound for pathological problems where the BNW rule plateaus.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "l1_slack_tol",
+        "Slack-sum tolerance for termination and honest-infeasibility upgrade.",
+        0.0,
+        true,
+        1.0e-6,
+        "Σ(p+n) ≤ tol counts as the original constraints being satisfied. Σ(p+n) > tol after ρ saturates triggers the honest-infeasibility upgrade — the returned point is the ℓ₁-best least-infeasible iterate, status is overridden to Infeasible_Problem_Detected.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "l1_steering_factor",
+        "BNW steering factor τ relating ρ to ‖y_eq‖∞.",
+        0.0,
+        true,
+        10.0,
+        "BNW chooses ρ_new = max(ρ·factor, τ·‖y_eq‖∞ + ε). τ>1 ensures the augmented (p,n) bound multipliers z_p = ρ-y_eq, z_n = ρ+y_eq remain strictly positive and bounded away from 0, which is the property the slack-collapse argument relies on.",
+    )?;
+    r.add_bool_option(
+        "l1_fallback_on_restoration_failure",
+        "Auto-retry with the ℓ₁ wrapper when the standard solve hits a non-success terminal status.",
+        false,
+        "When set, optimize_tnlp first runs the standard solve. If it terminates in Restoration_Failed / Infeasible_Problem_Detected / Solved_To_Acceptable_Level / Maximum_Iterations_Exceeded / Not_Enough_Degrees_Of_Freedom, the wrapper is enabled and the solve is repeated. The retry's status replaces the original ONLY if the retry returns Solve_Succeeded (promotion); otherwise the original status is returned. NOTE: the user TNLP's finalize_solution is called once per attempt, so when the retry doesn't promote the user's captured fields hold the retry's iterate (the ℓ₁-best least-infeasible point) even though the returned status is the original's — pounce#10 Phase-4 note.",
+    )?;
+
+    register_sipopt_options(r)?;
+
+    Ok(())
+}
+
+/// sIPOPT (`pounce-sensitivity`) option keys — mirrors upstream
+/// `SensApplication::RegisterOptions`
+/// ([`ref/Ipopt/contrib/sIPOPT/src/SensApplication.cpp:53-117`](../../../ref/Ipopt/contrib/sIPOPT/src/SensApplication.cpp)).
+///
+/// Duplicated here (rather than imported from
+/// `pounce_sensitivity::register_options`) because `pounce-algorithm`
+/// cannot depend on `pounce-sensitivity` — the dep edge runs the
+/// other way. Keep this block in sync with
+/// [`pounce_sensitivity::sens_app::register_options`](../../pounce-sensitivity/src/sens_app.rs).
+fn register_sipopt_options(r: &RegisteredOptions) -> Result<(), SolverException> {
+    r.set_registering_category("sIPOPT");
+    r.add_lower_bounded_integer_option(
+        "n_sens_steps",
+        "Number of sensitivity steps to perform per converged solve.",
+        0,
+        1,
+        "Number of parameter perturbations to step through. Mirrors upstream `n_sens_steps` (SensApplication.cpp:60).",
+    )?;
+    r.add_bool_option(
+        "compute_red_hessian",
+        "Compute the reduced Hessian at the converged solution.",
+        false,
+        "When set, after the IPM converges pounce-sensitivity assembles `H_R = obj_scal · B K⁻¹ Bᵀ` with B selecting the free variables. Output is written to the user via the sIPOPT C ABI (Phase D follow-up). Mirrors upstream `compute_red_hessian` (SensApplication.cpp:73).",
+    )?;
+    r.add_bool_option(
+        "run_sens",
+        "Run the sensitivity step calc after convergence.",
+        false,
+        "When set, pounce-sensitivity computes a forward-sensitivity step for the parameter perturbation declared via TNLP suffixes. Mirrors upstream `run_sens` (SensApplication.cpp:80).",
+    )?;
+    r.add_bool_option(
+        "sens_boundcheck",
+        "Verify the sensitivity step does not violate bound multipliers.",
+        false,
+        "Mirrors upstream `sens_boundcheck` (SensApplication.cpp:63).",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sens_bound_eps",
+        "Safety margin enforced when sens_boundcheck is set.",
+        0.0,
+        true,
+        1.0e-3,
+        "Mirrors upstream `sens_bound_eps` (SensApplication.cpp:67).",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sens_max_pdpert",
+        "Maximum primal-dual perturbation accepted in the sensitivity step.",
+        0.0,
+        true,
+        1.0e-3,
+        "Mirrors upstream `sens_max_pdpert` (SensApplication.cpp:98).",
+    )?;
+    r.add_bool_option(
+        "rh_eigendecomp",
+        "Compute eigendecomposition of the reduced Hessian.",
+        false,
+        "Mirrors upstream `rh_eigendecomp` (SensApplication.cpp:106). Pounce ships the option key for ipopt.opt-compatibility; the eigendecomposition itself is a Phase-D follow-up.",
+    )?;
     Ok(())
 }

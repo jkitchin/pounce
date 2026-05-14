@@ -142,4 +142,30 @@ pub trait IpoptNlp: Nlp {
     fn n_full_g(&self) -> Index {
         0
     }
+
+    /// Lift the algorithm-side `(y_c, y_d)` multipliers back to the
+    /// user TNLP's `lambda` array (length `m_full = n_c + n_d`),
+    /// matching upstream `IpOrigIpoptNLP::FinalizeSolution`. Sibling
+    /// to `pack_lambda_for_user`; added by pounce#11 for the
+    /// `finalize_solution` path. Default returns empty; `OrigIpoptNlp`
+    /// overrides.
+    fn finalize_solution_lambda(
+        &self,
+        _y_c: &dyn Vector,
+        _y_d: &dyn Vector,
+    ) -> Vec<Number> {
+        Vec::new()
+    }
+
+    /// Lift compressed `z_l` back to full-x. Sibling to
+    /// `pack_z_l_for_user`; added by pounce#11. Default returns empty.
+    fn finalize_solution_z_l(&self, _z_l: &dyn Vector) -> Vec<Number> {
+        Vec::new()
+    }
+
+    /// Lift compressed `z_u` back to full-x. Sibling to
+    /// `pack_z_u_for_user`; added by pounce#11. Default returns empty.
+    fn finalize_solution_z_u(&self, _z_u: &dyn Vector) -> Vec<Number> {
+        Vec::new()
+    }
 }

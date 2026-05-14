@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "C ABI for POUNCE (port of Ipopt's Interfaces/IpStdCInterface.{h,cpp}). Provides IpoptCreate / IpoptSolve / IpoptFreeProblem so existing PyIpopt / cyipopt / JuMP / AMPL clients link without source changes. Phase 11 — scaffolded; full implementation lands when the algorithm-side optimizer is solving."
 
 [lib]

@@ -59,7 +59,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "feral"
-version = "0.4.0"
+version = "0.3.0"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -174,10 +174,10 @@ dependencies = [
  "pounce-common",
  "pounce-feral",
  "pounce-hsl",
+ "pounce-l1penalty",
  "pounce-linalg",
  "pounce-linsol",
  "pounce-nlp",
- "pounce-presolve",
 ]
 
 [[package]]
@@ -197,10 +197,13 @@ dependencies = [
  "pounce-common",
  "pounce-feral",
  "pounce-hsl",
+ "pounce-linalg",
  "pounce-linsol",
  "pounce-nlp",
- "pounce-presolve",
  "pounce-restoration",
+ "pounce-sensitivity",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -241,6 +244,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-l1penalty"
+version = "0.1.0"
+dependencies = [
+ "pounce-common",
+ "pounce-nlp",
+]
+
+[[package]]
 name = "pounce-linalg"
 version = "0.1.0"
 dependencies = [
@@ -261,14 +272,7 @@ version = "0.1.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
-]
-
-[[package]]
-name = "pounce-presolve"
-version = "0.1.0"
-dependencies = [
- "pounce-common",
- "pounce-nlp",
+ "serde",
 ]
 
 [[package]]
@@ -280,6 +284,16 @@ dependencies = [
  "pounce-feral",
  "pounce-linalg",
  "pounce-linsol",
+ "pounce-nlp",
+]
+
+[[package]]
+name = "pounce-sensitivity"
+version = "0.1.0"
+dependencies = [
+ "pounce-algorithm",
+ "pounce-common",
+ "pounce-linalg",
  "pounce-nlp",
 ]
 

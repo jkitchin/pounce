@@ -18,6 +18,15 @@ pub struct Args {
     /// CLI args override file values), mirroring upstream ipopt's
     /// `ipopt problem.nl print_level=8 ...` convention.
     pub set_options: Vec<(String, String)>,
+    /// `--json-output PATH` — when set, the binary writes a
+    /// machine-readable JSON solve report to PATH after the solve
+    /// completes. See [`crate::solve_report`] (pounce#8).
+    pub json_output: Option<PathBuf>,
+    /// `--json-detail summary|full` — controls how much detail the
+    /// JSON report carries. Defaults to `Summary`. `Full` adds
+    /// per-iteration history and suffix blocks; same scale as
+    /// upstream's `print_level` but on the JSON side.
+    pub json_detail: crate::solve_report::ReportDetail,
     pub help: bool,
     pub version: bool,
     /// `--about`: print build metadata, compiled-in features, available
@@ -57,6 +66,10 @@ Required (one of):
 
 Options:
   --options-file <path>     read solver options from an ipopt.opt-format file
+  --json-output <path>      write a JSON solve report to PATH after the solve
+                            (pounce#8 — machine-readable, FAIR-aligned)
+  --json-detail LEVEL       summary | full (default: summary). `full` adds
+                            per-iteration history + suffix blocks.
   --list-problems           print available built-in problems and exit
   --help, -h                print this message and exit
   --version, -V             print version and exit
@@ -78,6 +91,8 @@ Options:
         let mut problem: Option<ProblemSource> = None;
         let mut options_file: Option<PathBuf> = None;
         let mut set_options: Vec<(String, String)> = Vec::new();
+        let mut json_output: Option<PathBuf> = None;
+        let mut json_detail = crate::solve_report::ReportDetail::Summary;
         let mut help = false;
         let mut version = false;
         let mut about = false;
@@ -133,6 +148,18 @@ Options:
                         .ok_or_else(|| "--dump-format requires a value".to_string())?;
                     dump_format = Some(v);
                 }
+                "--json-output" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--json-output requires a value".to_string())?;
+                    json_output = Some(PathBuf::from(v));
+                }
+                "--json-detail" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--json-detail requires a value".to_string())?;
+                    json_detail = crate::solve_report::ReportDetail::parse(&v)?;
+                }
                 other if !other.starts_with('-') => {
                     // `key=value` forms an option pair (matches upstream
                     // ipopt CLI). Otherwise it's the positional .nl path.
@@ -162,6 +189,8 @@ Options:
                 problem,
                 options_file,
                 set_options,
+                json_output,
+                json_detail,
                 help,
                 version,
                 about,
@@ -175,6 +204,8 @@ Options:
             problem: ProblemSource::Builtin(String::new()),
             options_file,
             set_options,
+            json_output,
+            json_detail,
             help,
             version,
             about,

@@ -116,6 +116,11 @@ pub struct MinC1NormRestoration {
     /// acceptor doesn't expose a filter (penalty / cg-penalty) or when
     /// the test fixture didn't wire one up.
     pub(crate) orig_progress: Option<pounce_algorithm::restoration::OrigProgressCallback>,
+    /// Inner-IPM iteration count from the most recent
+    /// `perform_restoration` invocation. Read by the outer
+    /// `IpoptAlgorithm` for the pounce#12 restoration audit
+    /// counters in `SolveStatistics`. Reset on each call.
+    pub(crate) last_inner_iter_count: Index,
 }
 
 impl Default for MinC1NormRestoration {
@@ -129,6 +134,7 @@ impl Default for MinC1NormRestoration {
             eq_mult: Box::new(LeastSquareMults::new()),
             inner_solver: Box::new(|_, _, _, _| None),
             orig_progress: None,
+            last_inner_iter_count: 0,
         }
     }
 }
@@ -165,6 +171,10 @@ impl RestorationPhase for MinC1NormRestoration {
         self.orig_progress = cb;
     }
 
+    fn last_inner_iter_count(&self) -> Index {
+        self.last_inner_iter_count
+    }
+
     fn perform_restoration(
         &mut self,
         data: &IpoptDataHandle,
@@ -177,6 +187,10 @@ impl RestorationPhase for MinC1NormRestoration {
         //    can gate `Converged` on outer-filter acceptance per
         //    upstream `IpRestoFilterConvCheck.cpp:53-80`.
         let cb = self.orig_progress.take();
+        // Reset per-call audit counter (pounce#12). Stays 0 on the
+        // early-fail path below; populated from `result.iter_count`
+        // on the success path.
+        self.last_inner_iter_count = 0;
         // Upstream isolates the resto sub-IPM behind a separate
         // `IpoptData` (`IpRestoMinC_1Nrm.cpp:123`), so the outer's
         // `curr_mu` / `curr_tau` are untouched across the inner solve;
@@ -192,6 +206,7 @@ impl RestorationPhase for MinC1NormRestoration {
         let Some(result) = (self.inner_solver)(data, cq, nlp, cb) else {
             return RestorationOutcome::Failed;
         };
+        self.last_inner_iter_count = result.iter_count;
         {
             let mut d = data.borrow_mut();
             d.curr_mu = saved_mu;

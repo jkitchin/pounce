@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Command-line driver for POUNCE — solves built-in TNLPs and AMPL .nl files."
 
 build = "build.rs"
@@ -13,15 +14,23 @@ build = "build.rs"
 name = "pounce"
 path = "src/main.rs"
 
+[[bin]]
+name = "pounce_sens"
+path = "src/bin/pounce_sens.rs"
+
 [dependencies]
 pounce-common = { path = "../pounce-common" }
-pounce-nlp = { path = "../pounce-nlp" }
+pounce-nlp = { path = "../pounce-nlp", features = ["serde"] }
 pounce-algorithm = { path = "../pounce-algorithm" }
 pounce-restoration = { path = "../pounce-restoration" }
 pounce-feral = { path = "../pounce-feral" }
 pounce-hsl = { path = "../pounce-hsl", optional = true }
 pounce-linsol = { path = "../pounce-linsol" }
 pounce-presolve = { path = "../pounce-presolve" }
+pounce-linalg = { path = "../pounce-linalg" }
+pounce-sensitivity = { path = "../pounce-sensitivity" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
 default = []

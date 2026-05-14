@@ -173,6 +173,31 @@ pub struct IpoptAlgorithm {
     /// advances the state's iter counter and the augmented-system
     /// solver consults it to gate KKT dumps.
     diagnostics: Option<Rc<DiagnosticsState>>,
+
+    // ---- Restoration-phase audit counters (pounce#12). ----
+    //
+    // Drained into `SolveStatistics` by `IpoptApplication::optimize_constrained`
+    // after the solve completes. Counts are cumulative across the run.
+    /// Number of `invoke_restoration` entries.
+    pub resto_calls: Index,
+    /// Sum of inner-IPM iter counts across every restoration call.
+    pub resto_inner_iters: Index,
+    /// Number of outer iters that ran in restoration mode (R-line
+    /// equivalents in `print_level=5` output).
+    pub resto_outer_iters: Index,
+    /// Cumulative wall-clock seconds spent inside `perform_restoration`.
+    pub resto_wall_secs: Number,
+
+    // ---- Per-iteration history capture (pounce#8). ----
+    //
+    /// When `true`, [`Self::iterate`] appends an `IterRecord` to
+    /// `iter_history` each step. Off by default — the JSON output
+    /// path in `pounce-cli` opts in.
+    pub record_iter_history: bool,
+    /// Per-iteration trajectory captured when `record_iter_history`
+    /// is on. Drained into [`SolveStatistics::iterations`] by
+    /// `IpoptApplication::optimize_constrained` after the solve.
+    pub iter_history: Vec<pounce_nlp::solve_statistics::IterRecord>,
 }
 
 impl IpoptAlgorithm {
@@ -205,6 +230,12 @@ impl IpoptAlgorithm {
             acceptable_iterate: None,
             acceptable_iter_number: 0,
             diagnostics: None,
+            resto_calls: 0,
+            resto_inner_iters: 0,
+            resto_outer_iters: 0,
+            resto_wall_secs: 0.0,
+            record_iter_history: false,
+            iter_history: Vec::new(),
         }
     }
 
@@ -348,6 +379,44 @@ impl IpoptAlgorithm {
             println!("{row}");
         }
         timing.output_iteration.end();
+
+        // Optional per-iteration history capture (pounce#8 / JSON
+        // output). Fires alongside the console print so the records
+        // are always in lock-step with what the user sees on stdout.
+        if self.record_iter_history {
+            let d = self.data.borrow();
+            let c = self.cq.borrow();
+            let iter = d.iter_count;
+            let inf_pr = c.curr_primal_infeasibility_max();
+            let inf_du = c.curr_dual_infeasibility_max();
+            let mu = d.curr_mu;
+            let d_norm = match &d.delta {
+                Some(delta) => delta.x.amax().max(delta.s.amax()),
+                None => 0.0,
+            };
+            let regularization = d.info_regu_x;
+            let alpha_dual = d.info_alpha_dual;
+            let alpha_primal = d.info_alpha_primal;
+            let alpha_primal_char = d.info_alpha_primal_char;
+            let ls_trials = d.info_ls_count;
+            let objective = c.curr_f();
+            drop(d);
+            drop(c);
+            self.iter_history
+                .push(pounce_nlp::solve_statistics::IterRecord {
+                    iter,
+                    objective,
+                    inf_pr,
+                    inf_du,
+                    mu,
+                    d_norm,
+                    regularization,
+                    alpha_dual,
+                    alpha_primal,
+                    alpha_primal_char,
+                    ls_trials,
+                });
+        }
 
         // Reset per-iteration info on data (after printing previous
         // iter's accepted-step info; before the next line search).
@@ -994,7 +1063,19 @@ impl IpoptAlgorithm {
         };
         resto.set_orig_progress_check(orig_progress_cb);
         let aug = sd.pd_solver_mut().aug_solver_mut();
-        match resto.perform_restoration(&self.data, &self.cq, nlp, aug) {
+        // Audit counters (pounce#12). Increment call count + outer-iter
+        // count (one outer iter is consumed per restoration call) and
+        // wall-time around the inner call. Inner iter count is read
+        // after via the trait accessor.
+        self.resto_calls = self.resto_calls.saturating_add(1);
+        self.resto_outer_iters = self.resto_outer_iters.saturating_add(1);
+        let resto_t0 = std::time::Instant::now();
+        let outcome = resto.perform_restoration(&self.data, &self.cq, nlp, aug);
+        self.resto_wall_secs += resto_t0.elapsed().as_secs_f64();
+        self.resto_inner_iters = self
+            .resto_inner_iters
+            .saturating_add(resto.last_inner_iter_count());
+        match outcome {
             RestorationOutcome::Recovered => {
                 // The driver has staged the recovered point on
                 // `data.trial`; promote it and continue iterating.

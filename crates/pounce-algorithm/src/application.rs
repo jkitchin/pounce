@@ -38,6 +38,40 @@ use crate::restoration::RestorationPhase;
 /// factory is `FnMut` to allow callers to capture a builder that
 /// internally reuses caches across builds.
 pub type RestorationFactory = Box<dyn FnMut() -> Box<dyn RestorationPhase>>;
+
+/// Provider that mints fresh [`RestorationFactory`] instances on
+/// demand. Used by drivers that need to run the inner IPM more than
+/// once per `optimize_tnlp` call — notably the Phase-3 ℓ₁-exact
+/// penalty-barrier outer loop (pounce#10), which the existing
+/// `RestorationFactory` cannot support because pounce's default
+/// `make_default_restoration_factory` is a one-shot. Callers wire
+/// this via [`IpoptApplication::set_restoration_factory_provider`].
+pub type RestorationFactoryProvider = Box<dyn FnMut() -> RestorationFactory>;
+
+/// Callback fired by [`IpoptApplication::optimize_constrained`] once
+/// the IPM has converged (status `SolveSucceeded` or
+/// `SolvedToAcceptableLevel`) and before the user TNLP's
+/// `finalize_solution` runs. Receives borrowed handles into the
+/// algorithm's converged state.
+///
+/// **Use case**: post-optimal sensitivity analysis (pounce#7 /
+/// `pounce-sensitivity`). The callback receives a mutable reference
+/// to the PD solver so a `SensBacksolver` adapter can run backsolves
+/// against the converged KKT factor; receives the data / cq / nlp
+/// handles so the adapter can reproduce the augmented-system
+/// coefficient layout the IPM converged at.
+///
+/// **Not** the same as `set_intermediate_callback` (per-iteration
+/// progress notification) — this fires exactly once per `optimize_*`
+/// call, only on success.
+pub type ConvergedCallback = Box<
+    dyn FnMut(
+        &crate::ipopt_data::IpoptDataHandle,
+        &crate::ipopt_cq::IpoptCqHandle,
+        &Rc<RefCell<dyn pounce_nlp::ipopt_nlp::IpoptNlp>>,
+        &mut crate::kkt::pd_full_space_solver::PdFullSpaceSolver,
+    ),
+>;
 use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_common::diagnostics::DiagnosticsState;
 use pounce_common::exception::{ExceptionKind, SolverException};
@@ -89,6 +123,22 @@ pub struct IpoptApplication {
     /// via [`IpoptAlgorithm::with_diagnostics`] so the KKT solver and
     /// other dump sites can consult per-iter gating.
     diagnostics: Option<Rc<DiagnosticsState>>,
+    /// Provider for the BNW outer loop (pounce#10 Phase 3). When set,
+    /// `optimize_constrained` consults the provider before each inner
+    /// solve, replacing `restoration_factory` with a fresh one so
+    /// multi-pass drivers can run the inner IPM repeatedly without
+    /// tripping the default factory's one-shot guard.
+    restoration_factory_provider: Option<RestorationFactoryProvider>,
+    /// Optional hook fired once per `optimize_*` call on convergence,
+    /// before the user TNLP's `finalize_solution`. See
+    /// [`ConvergedCallback`].
+    on_converged: Option<ConvergedCallback>,
+    /// When `true`, the per-iteration `IterRecord` trajectory is
+    /// captured into [`SolveStatistics::iterations`] for downstream
+    /// consumers (the JSON solve report in pounce-cli, pounce#8). Off
+    /// by default so library callers that never read the iterations
+    /// vector don't pay the per-iter alloc.
+    record_iter_history: bool,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -129,6 +179,9 @@ impl IpoptApplication {
             linear_backend_factory: None,
             restoration_factory: None,
             diagnostics: None,
+            restoration_factory_provider: None,
+            on_converged: None,
+            record_iter_history: false,
         }
     }
 
@@ -181,6 +234,40 @@ impl IpoptApplication {
     /// the solve completes.
     pub fn diagnostics(&self) -> Option<Rc<DiagnosticsState>> {
         self.diagnostics.as_ref().map(Rc::clone)
+    }
+
+    /// Plug a restoration-phase **factory provider** for drivers that
+    /// need to run the inner IPM more than once per `optimize_tnlp`
+    /// call (notably the Phase-3 ℓ₁-exact penalty-barrier outer loop,
+    /// pounce#10). On each inner solve, the application consults the
+    /// provider to mint a fresh [`RestorationFactory`], replacing any
+    /// stale one, so the default one-shot restoration factory does
+    /// not panic on its second invocation. If both `set_restoration_factory`
+    /// and this are configured, the provider wins.
+    pub fn set_restoration_factory_provider(
+        &mut self,
+        provider: RestorationFactoryProvider,
+    ) {
+        self.restoration_factory_provider = Some(provider);
+    }
+
+    /// Register a callback to run once the IPM has converged (status
+    /// [`ApplicationReturnStatus::SolveSucceeded`] or
+    /// [`ApplicationReturnStatus::SolvedToAcceptableLevel`]) but before
+    /// `finalize_solution` flows back to the TNLP. See
+    /// [`ConvergedCallback`] for the use case (post-optimal sensitivity).
+    pub fn set_on_converged(&mut self, cb: ConvergedCallback) {
+        self.on_converged = Some(cb);
+    }
+
+    /// Enable per-iteration trajectory capture. After the solve
+    /// returns, [`Self::statistics()`] exposes
+    /// [`pounce_nlp::solve_statistics::SolveStatistics::iterations`]
+    /// populated with one [`pounce_nlp::solve_statistics::IterRecord`]
+    /// per accepted iterate. Off by default — the `pounce_sens` and
+    /// `pounce` binaries opt in when `--json-output` is passed.
+    pub fn enable_iter_history(&mut self) {
+        self.record_iter_history = true;
     }
 
     /// Read an `ipopt.opt`-format options file. Equivalent to
@@ -317,6 +404,35 @@ impl IpoptApplication {
             Some(info) => info,
             None => return ApplicationReturnStatus::InvalidProblemDefinition,
         };
+        // ℓ₁-exact penalty-barrier opt-in (pounce#10).
+        // Phase 3 wraps the user TNLP and runs an outer Byrd-Nocedal-
+        // Waltz ρ-escalation loop around the constrained IPM, with a
+        // honest-infeasibility status upgrade when the slacks fail to
+        // collapse at saturated ρ. Phase-1/2 one-shot use is preserved
+        // when `l1_penalty_max_outer_iter == 1`. The wrapper is a
+        // no-op for problems with no equality rows, so the
+        // unconstrained dispatch below is unaffected when there is
+        // nothing to wrap.
+        if info.m > 0 && self.is_l1_penalty_enabled() {
+            if let Some(status) = self.run_l1_penalty_outer_loop(Rc::clone(&tnlp)) {
+                return status;
+            }
+            // Falls through: wrapper construction failed (inner refused
+            // get_nlp_info / get_bounds_info) or no equality rows to
+            // slack. Standard dispatch runs unmodified.
+        }
+        // Phase 3.5 auto-fallback (pounce#10): if the standard solve
+        // ends in a trigger-class status, retry transparently with
+        // the wrapper. Promote the retry's status only if it returns
+        // SolveSucceeded — otherwise return the original. Skipped if
+        // the user already opted into the wrapper above (this avoids
+        // a double pass and keeps semantics predictable).
+        if info.m > 0
+            && self.is_l1_fallback_enabled()
+            && !self.is_l1_penalty_enabled()
+        {
+            return self.run_with_l1_fallback(tnlp, info);
+        }
         // Upstream Ipopt routes every problem through the same primal-dual
         // IPM regardless of `m` — there is no separate "unconstrained
         // Newton" path. Pounce historically dispatched `m == 0` to a dense
@@ -334,6 +450,289 @@ impl IpoptApplication {
             return status;
         }
         self.optimize_constrained(tnlp)
+    }
+
+    /// Read the ℓ₁ wrapper master switch from the OptionsList.
+    /// Default `false` when the option is not set.
+    fn is_l1_penalty_enabled(&self) -> bool {
+        self.options
+            .get_bool_value("l1_exact_penalty_barrier", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(false)
+    }
+
+    fn l1_penalty_init(&self) -> Number {
+        self.options
+            .get_numeric_value("l1_penalty_init", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(1.0)
+    }
+    fn l1_penalty_max(&self) -> Number {
+        self.options
+            .get_numeric_value("l1_penalty_max", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(1.0e6)
+    }
+    fn l1_penalty_increase_factor(&self) -> Number {
+        self.options
+            .get_numeric_value("l1_penalty_increase_factor", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(8.0)
+    }
+    fn l1_penalty_max_outer_iter(&self) -> usize {
+        self.options
+            .get_integer_value("l1_penalty_max_outer_iter", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(8) as usize
+    }
+    fn l1_slack_tol(&self) -> Number {
+        self.options
+            .get_numeric_value("l1_slack_tol", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(1.0e-6)
+    }
+    fn l1_steering_factor(&self) -> Number {
+        self.options
+            .get_numeric_value("l1_steering_factor", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(10.0)
+    }
+    fn is_l1_fallback_enabled(&self) -> bool {
+        self.options
+            .get_bool_value("l1_fallback_on_restoration_failure", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(false)
+    }
+
+    /// Phase 3.5 auto-fallback driver.
+    ///
+    /// Runs the standard solve (no wrapper) first. If it ends in a
+    /// trigger-class status (`Restoration_Failed`, `Infeasible_Problem_Detected`,
+    /// `Solved_To_Acceptable_Level`, `Maximum_Iterations_Exceeded`, or
+    /// `Not_Enough_Degrees_Of_Freedom`), retries transparently with
+    /// the ℓ₁ wrapper enabled. Promotes the retry's status only if
+    /// it returns `Solve_Succeeded`; otherwise returns the original
+    /// status.
+    ///
+    /// Caveat: the user TNLP's `finalize_solution` runs once per
+    /// attempt. When the retry doesn't promote, the user's captured
+    /// fields hold the retry's iterate (the ℓ₁-best least-infeasible
+    /// point) even though the returned status is the original's.
+    /// Documented on the option's help text; tightening this is a
+    /// Phase-4 follow-up.
+    fn run_with_l1_fallback(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+        info: NlpInfo,
+    ) -> ApplicationReturnStatus {
+        let first_status = self.run_standard_constrained_or_unconstrained(Rc::clone(&tnlp), info);
+        if !is_l1_fallback_trigger(first_status) {
+            return first_status;
+        }
+        // Trigger fired. Flip the wrapper option for the retry and
+        // restore it after — keeps the user's option-table view of the
+        // session exactly as they left it.
+        let prev = self
+            .options
+            .get_string_value("l1_exact_penalty_barrier", "")
+            .ok();
+        let _ = self.options.set_string_value(
+            "l1_exact_penalty_barrier",
+            "yes",
+            true,
+            false,
+        );
+        let retry_status = self.run_l1_penalty_outer_loop(Rc::clone(&tnlp))
+            .unwrap_or(ApplicationReturnStatus::InternalError);
+        let _ = self.options.set_string_value(
+            "l1_exact_penalty_barrier",
+            prev.as_ref().map(|(v, _)| v.as_str()).unwrap_or("no"),
+            true,
+            false,
+        );
+        if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
+            retry_status
+        } else {
+            first_status
+        }
+    }
+
+    /// Run the standard dispatch path (unconstrained Newton or
+    /// constrained IPM) without consulting the ℓ₁ wrapper. Used by
+    /// the Phase 3.5 auto-fallback driver to perform its first
+    /// attempt before deciding whether to retry.
+    fn run_standard_constrained_or_unconstrained(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+        info: NlpInfo,
+    ) -> ApplicationReturnStatus {
+        if info.m == 0 && info.n <= 1000 {
+            let mut borrow = tnlp.borrow_mut();
+            let opts = self.newton_options_from_options_list();
+            let (status, stats) = pounce_nlp::newton_driver::solve(&mut *borrow, opts);
+            *self.statistics.borrow_mut() = stats;
+            return status;
+        }
+        self.optimize_constrained(tnlp)
+    }
+
+    /// Phase-3 ℓ₁-exact penalty-barrier outer loop.
+    ///
+    /// Builds an [`L1PenaltyBarrierTnlp`] wrapper around the user
+    /// TNLP, runs the constrained IPM at the current ρ, escalates ρ
+    /// per Byrd-Nocedal-Waltz steering, and terminates on any of:
+    ///   - slack sum collapses (`Σ(p+n) ≤ l1_slack_tol`)
+    ///   - inner solve returns non-Optimal (escalation won't fix
+    ///     numerical / restoration failure at this ρ)
+    ///   - ρ already at `l1_penalty_max`
+    ///   - `l1_penalty_max_outer_iter` reached
+    ///
+    /// After the loop, if the inner status is `SolveSucceeded` or
+    /// `SolvedToAcceptableLevel` but slacks didn't collapse, override
+    /// to `Infeasible_Problem_Detected` — the returned point is the
+    /// ℓ₁-best least-infeasible iterate, which is informative even
+    /// though the original constraints are not satisfied.
+    ///
+    /// Returns `Some(status)` if the wrapper ran the solve, `None` if
+    /// wrapper construction failed (caller should fall through to the
+    /// standard dispatch path).
+    fn run_l1_penalty_outer_loop(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+    ) -> Option<ApplicationReturnStatus> {
+        let rho_init = self.l1_penalty_init();
+        let rho_max = self.l1_penalty_max().max(rho_init);
+        let factor = self.l1_penalty_increase_factor().max(1.0);
+        let tau = self.l1_steering_factor();
+        let slack_tol = self.l1_slack_tol();
+        let max_outer = self.l1_penalty_max_outer_iter().max(1);
+
+        let mut wrapper = pounce_l1penalty::L1PenaltyBarrierTnlp::new(
+            Rc::clone(&tnlp),
+            rho_init,
+        )?;
+        if wrapper.m_eq() == 0 {
+            // Nothing to slack — let the standard dispatch path handle
+            // this TNLP unmodified.
+            return None;
+        }
+        wrapper.set_defer_inner_finalize(true);
+        let wrapper_rc = Rc::new(RefCell::new(wrapper));
+
+        let mut rho = rho_init;
+        let mut last_status = ApplicationReturnStatus::InternalError;
+        for _outer in 0..max_outer {
+            wrapper_rc.borrow_mut().set_rho(rho);
+            let dyn_tnlp: Rc<RefCell<dyn TNLP>> = wrapper_rc.clone();
+            last_status = self.optimize_constrained(dyn_tnlp);
+
+            let w = wrapper_rc.borrow();
+            if !w.has_solution() {
+                // Inner solve aborted before producing an iterate.
+                drop(w);
+                break;
+            }
+            let slack_sum = w.last_slack_sum();
+            let y_eq_inf = w.last_y_eq_inf_norm();
+            drop(w);
+
+            // Termination decisions.
+            let inner_ok = matches!(
+                last_status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            );
+            if !inner_ok {
+                break;
+            }
+            if slack_sum.is_finite() && slack_sum <= slack_tol {
+                break;
+            }
+            if rho >= rho_max {
+                break;
+            }
+            // BNW steering: ρ_new = max(ρ·factor, τ·‖y_eq‖∞ + ε)
+            let geom = rho * factor;
+            let steer = tau * y_eq_inf + 1.0e-12;
+            rho = geom.max(steer).min(rho_max);
+        }
+
+        // Forward to the user's inner.finalize_solution exactly once.
+        let w = wrapper_rc.borrow();
+        if w.has_solution() {
+            let x_trunc: Vec<Number> = w.last_x_trunc().to_vec();
+            let lambda: Vec<Number> = w.last_lambda().to_vec();
+            let z_l: Vec<Number> = w.last_z_l_trunc().to_vec();
+            let z_u: Vec<Number> = w.last_z_u_trunc().to_vec();
+            let solver_status = w.last_status().unwrap_or(SolverReturn::InternalError);
+            let slack_sum = w.last_slack_sum();
+            drop(w);
+
+            // Honest-infeasibility upgrade (Phase 3): if the inner
+            // solve says SolveSucceeded / SolvedToAcceptableLevel but
+            // the slacks did not collapse, the original problem is
+            // locally infeasible at the returned point. Override the
+            // application status; the user-visible Solution.status is
+            // updated below to the matching SolverReturn so the inner
+            // TNLP sees a consistent picture.
+            let infeasible_certificate = matches!(
+                last_status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ) && slack_sum.is_finite()
+                && slack_sum > slack_tol;
+            let final_app_status = if infeasible_certificate {
+                ApplicationReturnStatus::InfeasibleProblemDetected
+            } else {
+                last_status
+            };
+            let final_solver_status = if infeasible_certificate {
+                SolverReturn::LocalInfeasibility
+            } else {
+                solver_status
+            };
+
+            // Recompute f(x*) and c(x*) on the inner.
+            let f_inner = tnlp
+                .borrow_mut()
+                .eval_f(&x_trunc, true)
+                .unwrap_or(Number::NAN);
+            let m = tnlp
+                .borrow_mut()
+                .get_nlp_info()
+                .map(|i| i.m as usize)
+                .unwrap_or(0);
+            let mut g_inner = vec![0.0; m];
+            if m > 0 {
+                let _ = tnlp
+                    .borrow_mut()
+                    .eval_g(&x_trunc, false, &mut g_inner);
+            }
+            tnlp.borrow_mut().finalize_solution(
+                Solution {
+                    status: final_solver_status,
+                    x: &x_trunc,
+                    z_l: &z_l,
+                    z_u: &z_u,
+                    g: &g_inner,
+                    lambda: &lambda,
+                    obj_value: f_inner,
+                },
+                &TnlpIpoptData::default(),
+                &TnlpIpoptCq::default(),
+            );
+            return Some(final_app_status);
+        }
+        // No solution captured at all — pass the inner status through.
+        Some(last_status)
     }
 
     /// **Stub.** Re-solve with a warm start. Phase 7+.
@@ -543,6 +942,14 @@ impl IpoptApplication {
         let mut alg = IpoptAlgorithm::new(data, cq, bundle)
             .with_nlp(Rc::clone(&nlp_handle))
             .with_tnlp(Rc::clone(&tnlp));
+        alg.record_iter_history = self.record_iter_history;
+        // Mint a fresh restoration factory per inner solve if a
+        // provider is configured (pounce#10 Phase 3). Falls back to
+        // the legacy one-shot `restoration_factory` slot when no
+        // provider is set, preserving single-shot caller behavior.
+        if let Some(provider) = self.restoration_factory_provider.as_mut() {
+            self.restoration_factory = Some(provider());
+        }
         if let Some(factory) = self.restoration_factory.as_mut() {
             alg = alg.with_restoration(factory());
         }
@@ -564,6 +971,14 @@ impl IpoptApplication {
             let mut stats = self.statistics.borrow_mut();
             stats.iteration_count = alg.data.borrow().iter_count;
             stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
+            // Restoration-phase audit counters (pounce#12). Zero on
+            // problems where restoration never fires; populated by
+            // `IpoptAlgorithm::invoke_restoration`.
+            stats.restoration_calls = alg.resto_calls;
+            stats.restoration_inner_iters = alg.resto_inner_iters;
+            stats.restoration_outer_iters = alg.resto_outer_iters;
+            stats.restoration_wall_secs = alg.resto_wall_secs;
+            stats.iterations = std::mem::take(&mut alg.iter_history);
             // Best-effort: capture final objective at the algorithm's
             // (compressed `x_var`-space) iterate via the NLP. The
             // fine-grained eval counters live on the concrete
@@ -600,6 +1015,23 @@ impl IpoptApplication {
         // Map SolverReturn → ApplicationReturnStatus per
         // MAIN_LOOP.md's exception table.
         let app_status = solver_return_to_app_status(solver_status);
+
+        // On convergence, fire the user-supplied callback (post-optimal
+        // sensitivity hook, pounce#16) before flowing back through
+        // `finalize_via_orig_nlp`. Borrowed handles into the converged
+        // KKT state stay alive for the duration of the closure.
+        if matches!(
+            app_status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ) {
+            if let Some(cb) = self.on_converged.as_mut() {
+                if let Some(sd) = alg.search_dir.as_mut() {
+                    let pd = sd.pd_solver_mut();
+                    cb(&alg.data, &alg.cq, &nlp_handle, pd);
+                }
+            }
+        }
 
         // Finalize: forward the final iterate to the user's TNLP.
         if let Err(()) = finalize_via_orig_nlp(&nlp_handle, &alg, solver_status, app_status, &tnlp)
@@ -967,6 +1399,23 @@ fn try_eval_curr_f(
     Ok(nlp_mut.eval_f(&**x))
 }
 
+/// Trigger predicate for the Phase-3.5 ℓ₁ auto-fallback path. Returns
+/// `true` when a status warrants a retry through the wrapper. Mirrors
+/// ripopt#23's trigger set, extended per the audit's Refinement B
+/// (pounce-side `Not_Enough_Degrees_Of_Freedom` is added because
+/// pounce's DOF early-exit blocks NE-suffix problems that ripopt's
+/// equivalent would let pass to the wrapper).
+fn is_l1_fallback_trigger(status: ApplicationReturnStatus) -> bool {
+    matches!(
+        status,
+        ApplicationReturnStatus::RestorationFailed
+            | ApplicationReturnStatus::InfeasibleProblemDetected
+            | ApplicationReturnStatus::SolvedToAcceptableLevel
+            | ApplicationReturnStatus::MaximumIterationsExceeded
+            | ApplicationReturnStatus::NotEnoughDegreesOfFreedom
+    )
+}
+
 /// Forward the final iterate back to the user's `TNLP::finalize_solution`.
 /// We pull `x` (compressed in `x_var`-space) off the algorithm's
 /// `data.curr`, lift it back to full TNLP indexing, and pass empty
@@ -992,6 +1441,9 @@ fn finalize_via_orig_nlp(
     let n = info.n as usize;
     let m = info.m as usize;
     debug_assert_eq!(x_vec.len(), n);
+    // Lift algorithm-side multipliers back into user-space (pounce#11).
+    // Backends without overrides return empty; fall back to zero stubs
+    // so the user sees a length-consistent vector.
     let mut z_l = nlp_borrow.pack_z_l_for_user(&*curr.z_l);
     if z_l.is_empty() {
         z_l = vec![0.0; n];
@@ -1005,6 +1457,8 @@ fn finalize_via_orig_nlp(
         lambda = vec![0.0; m];
     }
     drop(nlp_borrow);
+    // Compute g(x) via the user TNLP so the final residual is
+    // populated for the user.
     let mut g_final = vec![0.0; m];
     let _ = tnlp.borrow_mut().eval_g(&x_vec, true, &mut g_final);
     let f_final = tnlp

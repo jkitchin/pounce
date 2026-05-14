@@ -13,6 +13,9 @@ use pounce_cli::cli::{Args, ProblemSource};
 use pounce_cli::counting_tnlp::CountingTnlp;
 use pounce_cli::nl_reader;
 use pounce_cli::print;
+use pounce_cli::solve_report::{
+    InputDescriptor, ReportBuilder, ReportDetail, write_report_file,
+};
 use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::diagnostics::{
@@ -51,6 +54,13 @@ fn main() -> ExitCode {
     }
 
     let mut app = IpoptApplication::new();
+
+    // Opt into iter-history capture when the user asked for a JSON
+    // report at Full detail — saves the per-iter alloc when they
+    // didn't.
+    if args.json_output.is_some() && matches!(args.json_detail, ReportDetail::Full) {
+        app.enable_iter_history();
+    }
 
     if let Some(path) = &args.options_file {
         if let Err(e) = app.initialize_with_options_file(path) {
@@ -95,15 +105,44 @@ fn main() -> ExitCode {
     );
     app.set_restoration_factory(resto_factory);
 
-    // Snapshot the problem source before the `match` consumes
-    // `args.problem` — needed downstream by the diagnostics manifest.
+    // Snapshot the problem source as a string — needed downstream by
+    // the diagnostics manifest.
     let problem_desc: String = match &args.problem {
         ProblemSource::Builtin(s) => format!("builtin:{s}"),
         ProblemSource::NlFile(p) => format!("nl:{}", p.display()),
     };
 
-    let inner_tnlp: Rc<RefCell<dyn TNLP>> = match args.problem {
-        ProblemSource::Builtin(name) => match builtin::lookup(&name) {
+    // Capture the converged primal / dual into `nominal_capture` so
+    // the JSON report below can ship `solution.x` and
+    // `solution.lambda` (mirrors what `pounce_sens` does).
+    let nominal_capture: Rc<RefCell<Option<(Vec<pounce_common::types::Number>, Vec<pounce_common::types::Number>)>>> =
+        Rc::new(RefCell::new(None));
+    if args.json_output.is_some() {
+        let cap = Rc::clone(&nominal_capture);
+        app.set_on_converged(Box::new(move |data, _cq, _nlp, _pd| {
+            let curr = match data.borrow().curr.clone() {
+                Some(c) => c,
+                None => return,
+            };
+            let x = curr
+                .x
+                .as_any()
+                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                .map(|dv| dv.expanded_values())
+                .unwrap_or_default();
+            let mut lambda = Vec::with_capacity(curr.y_c.dim() as usize + curr.y_d.dim() as usize);
+            if let Some(dv) = curr.y_c.as_any().downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
+                lambda.extend_from_slice(&dv.expanded_values());
+            }
+            if let Some(dv) = curr.y_d.as_any().downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
+                lambda.extend_from_slice(&dv.expanded_values());
+            }
+            *cap.borrow_mut() = Some((x, lambda));
+        }));
+    }
+
+    let inner_tnlp: Rc<RefCell<dyn TNLP>> = match &args.problem {
+        ProblemSource::Builtin(name) => match builtin::lookup(name) {
             Some(t) => t,
             None => {
                 eprintln!("pounce: unknown builtin problem '{name}'");
@@ -114,7 +153,7 @@ fn main() -> ExitCode {
         ProblemSource::NlFile(path) => {
             println!("Reading {}...", path.display());
             let t0 = std::time::Instant::now();
-            match nl_reader::load_nl_as_tnlp(&path) {
+            match nl_reader::load_nl_as_tnlp(path) {
                 Ok(t) => {
                     let elapsed = t0.elapsed().as_secs_f64();
                     if let Some(info) = t.borrow_mut().get_nlp_info() {
@@ -243,10 +282,56 @@ fn main() -> ExitCode {
         app.set_diagnostics(Rc::clone(diag));
     }
 
+    // Snapshot NLP dimensions before the solve so we can use them in
+    // both the console summary and the JSON report. Borrowing here is
+    // safe because we hold no outstanding borrow on the counting
+    // wrapper yet.
+    let nlp_info_snapshot = tnlp.borrow_mut().get_nlp_info();
+
     let status = app.optimize_tnlp(Rc::clone(&tnlp));
     let solve_stats = app.statistics();
     let counters = counting.borrow();
     print::print_summary(status, &solve_stats, &counters);
+    drop(counters); // release before JSON block (which re-borrows the wrapped TNLP).
+
+    // Emit the JSON solve report, when requested. Written AFTER the
+    // console summary so a piped `pounce ... --json-output -` reader
+    // could be wired up later without disturbing stdout (today we
+    // write to a path; stdout-mode is a follow-up).
+    if let Some(json_path) = &args.json_output {
+        let input = match &args.problem {
+            ProblemSource::Builtin(name) => InputDescriptor::Builtin {
+                name: name.clone(),
+            },
+            ProblemSource::NlFile(p) => InputDescriptor::NlFile {
+                path: p.clone(),
+                size_bytes: std::fs::metadata(p).ok().map(|m| m.len()),
+            },
+        };
+        let mut builder = ReportBuilder::new(args.json_detail, input);
+        if let Some(info) = nlp_info_snapshot {
+            builder.problem.n_variables = info.n;
+            builder.problem.n_constraints = info.m;
+            builder.problem.n_objectives = 1; // pounce IPM uses obj 0; multi-obj is read but ignored
+            builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
+            builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
+        }
+        builder.solution.status = status;
+        builder.solution.solve_result_num = status_to_solve_result_num(status);
+        builder.solution.objective = solve_stats.final_objective;
+        if let Some((x, lambda)) = nominal_capture.borrow().clone() {
+            builder.solution.x = x;
+            builder.solution.lambda = lambda;
+        }
+        builder.ingest_stats(&solve_stats);
+
+        let report = builder.finish();
+        if let Err(e) = write_report_file(json_path, &report) {
+            eprintln!("pounce: failed to write JSON report to {}: {e}", json_path.display());
+        } else {
+            eprintln!("pounce: wrote {}", json_path.display());
+        }
+    }
 
     // After the solve, drop a manifest + timing summary at the dump
     // root so consumers (and humans) can tell which run produced
@@ -400,6 +485,36 @@ fn print_about() {
         "Report bugs at {}/issues",
         env!("CARGO_PKG_REPOSITORY")
     );
+}
+
+/// Map a pounce `ApplicationReturnStatus` onto an AMPL-style
+/// `solve_result_num` per Gay 2005 (Hooking Your Solver to AMPL §5,
+/// p. 23 table): 0 = solved, 100s = warning, 200s = infeasible,
+/// 400s = limit reached, 500s = failure.
+fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
+    use ApplicationReturnStatus::*;
+    match status {
+        SolveSucceeded => 0,
+        SolvedToAcceptableLevel => 100,
+        FeasiblePointFound => 100,
+        InfeasibleProblemDetected => 200,
+        SearchDirectionBecomesTooSmall => 400,
+        DivergingIterates => 401,
+        MaximumIterationsExceeded => 400,
+        MaximumCpuTimeExceeded => 400,
+        MaximumWallTimeExceeded => 400,
+        UserRequestedStop => 502,
+        RestorationFailed => 500,
+        ErrorInStepComputation => 500,
+        InvalidNumberDetected => 500,
+        InternalError => 500,
+        UnrecoverableException => 500,
+        NonIpoptExceptionThrown => 500,
+        InsufficientMemory => 503,
+        InvalidProblemDefinition => 504,
+        InvalidOption => 504,
+        NotEnoughDegreesOfFreedom => 504,
+    }
 }
 
 /// Default backend factory used by the restoration sub-IPM. Mirrors

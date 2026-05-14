@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Restoration phase for POUNCE (port of Ipopt's Algorithm/Resto*): RestoIpoptNLP, RestoMinC_1Nrm, RestoFilterConvCheck, etc. Phase 9 — currently scaffolded with trait surface and stubbed strategies; full implementation lands incrementally."
 
 [dependencies]

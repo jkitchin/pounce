@@ -20,7 +20,6 @@
 //! * Multiple objectives (we use only the first; per AMPL convention).
 //!
 //! Not supported (will return an error explaining what's missing):
-//! * Suffix segments (`S`).
 //! * Network / piecewise-linear constructs.
 //! * Complementarity rows.
 //! * Binary-format `.nl` files (`b…` header).
@@ -38,7 +37,7 @@ use pounce_nlp::tnlp::{
     StartingPoint, TNLP,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -106,6 +105,39 @@ pub struct NlProblem {
     pub g_u: Vec<Number>,
     pub x0: Vec<Number>,
     pub lambda0: Vec<Number>,
+    /// AMPL suffix dictionaries. Variable / constraint / objective
+    /// suffixes are stored as dense vectors (length n / m / num_obj)
+    /// with the sparse `.nl` `S`-segment entries scattered in, default
+    /// zero. The integer / real split matches the `S`-segment header's
+    /// kind bit (`0x4` ⇒ real, else integer). See
+    /// <https://ampl.com/REFS/hooking2.pdf> §6 and the upstream `.nl`
+    /// reader in `ref/Ipopt/src/Apps/AmplSolver/AmplTNLP.cpp`.
+    pub suffixes: NlSuffixes,
+}
+
+/// Suffix data parsed out of `S`-segments. Sparse entries are scattered
+/// into dense vectors at problem load time so callers can index by
+/// variable / constraint number directly. Empty maps when the `.nl`
+/// file declared no suffixes.
+#[derive(Debug, Clone, Default)]
+pub struct NlSuffixes {
+    /// Variable-level integer suffixes (kind = 0). Each vector has
+    /// length `n_full` (problem variables).
+    pub var_int: BTreeMap<String, Vec<Index>>,
+    /// Constraint-level integer suffixes (kind = 1). Length `m_full`.
+    pub con_int: BTreeMap<String, Vec<Index>>,
+    /// Objective-level integer suffixes (kind = 2). Length `num_obj`.
+    pub obj_int: BTreeMap<String, Vec<Index>>,
+    /// Problem-level integer suffixes (kind = 3). Single value per name.
+    pub problem_int: BTreeMap<String, Index>,
+    /// Variable-level real suffixes (kind = 4). Length `n_full`.
+    pub var_real: BTreeMap<String, Vec<Number>>,
+    /// Constraint-level real suffixes (kind = 5). Length `m_full`.
+    pub con_real: BTreeMap<String, Vec<Number>>,
+    /// Objective-level real suffixes (kind = 6). Length `num_obj`.
+    pub obj_real: BTreeMap<String, Vec<Number>>,
+    /// Problem-level real suffixes (kind = 7). Single value per name.
+    pub problem_real: BTreeMap<String, Number>,
 }
 
 /// Parse an `.nl` file from disk.
@@ -134,6 +166,7 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
     let mut g_u = vec![1e19; m];
     let mut x0 = vec![0.0; n];
     let mut lambda0 = vec![0.0; m];
+    let mut suffixes = NlSuffixes::default();
 
     while let Some(line) = p.peek_segment_line() {
         let tag = line
@@ -260,7 +293,9 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 }
             }
             'V' => p.parse_v_segment()?,
-            'S' => return Err("S (suffix) segments are not supported".into()),
+            'S' => {
+                parse_suffix_segment(&mut p, n, m, num_obj, &mut suffixes)?;
+            }
             'F' => return Err("F (imported function) segments are not supported".into()),
             other => return Err(format!("unknown .nl segment tag '{other}'")),
         }
@@ -282,7 +317,140 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         g_u,
         x0,
         lambda0,
+        suffixes,
     })
+}
+
+/// Parse a single `S`-segment. Format (Gay 2005, "Hooking Your Solver
+/// to AMPL", §6, and `ref/Ipopt/src/Apps/AmplSolver/AmplTNLP.cpp`):
+///
+/// ```text
+/// S<kind> <nentries> <suffix_name>
+/// <idx> <value>      ... nentries lines
+/// ```
+///
+/// `<kind>` is a 3-bit encoding:
+/// * Bits 0-1 select the suffix target: 0 = variables, 1 = constraints,
+///   2 = objectives, 3 = problem-level.
+/// * Bit 2 (`0x4`) selects the value type: 0 = integer, 1 = real.
+///
+/// Sparse entries scatter into a freshly-allocated dense vector (zero
+/// default), sized for the target dimension. Problem-level suffixes
+/// (kind = 3 / 7) carry a single value.
+fn parse_suffix_segment(
+    p: &mut Parser,
+    n: usize,
+    m: usize,
+    num_obj: usize,
+    out: &mut NlSuffixes,
+) -> Result<(), String> {
+    let (hdr, _) = p.eat_segment_header()?;
+    let parts: Vec<&str> = hdr.split_whitespace().collect();
+    if parts.len() < 3 {
+        return Err(format!(
+            "malformed S-segment header: '{hdr}' (expected `S<kind> <n> <name>`)"
+        ));
+    }
+    let kind_str = parts[0].trim_start_matches('S');
+    let kind: u32 = kind_str
+        .parse()
+        .map_err(|e| format!("S kind '{kind_str}': {e}"))?;
+    let nentries: usize = parts[1]
+        .parse()
+        .map_err(|e| format!("S nentries: {e}"))?;
+    let name = parts[2].to_string();
+
+    let is_real = (kind & 0x4) != 0;
+    let target = kind & 0x3;
+    let target_dim = match target {
+        0 => n,
+        1 => m,
+        2 => num_obj,
+        3 => 0, // problem-level — entries are single-valued (idx=0)
+        _ => unreachable!("kind & 0x3 is in 0..=3"),
+    };
+
+    // Pre-allocate dense buffers (default zero). Problem-level kinds
+    // (3 / 7) hold a single scalar — we still read the (idx, value)
+    // pairs but only the value field is meaningful.
+    let mut int_buf: Vec<Index> = if !is_real && target != 3 {
+        vec![0; target_dim]
+    } else {
+        Vec::new()
+    };
+    let mut real_buf: Vec<Number> = if is_real && target != 3 {
+        vec![0.0; target_dim]
+    } else {
+        Vec::new()
+    };
+    let mut problem_int: Index = 0;
+    let mut problem_real: Number = 0.0;
+
+    for _ in 0..nentries {
+        let line = p.next_data_line()?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Err(format!(
+                "malformed S-segment entry '{line}' (expected `<idx> <value>`)"
+            ));
+        }
+        let idx: usize = parts[0]
+            .parse()
+            .map_err(|e| format!("S entry idx '{}': {e}", parts[0]))?;
+        if target != 3 && idx >= target_dim {
+            return Err(format!(
+                "S-suffix '{name}' index {idx} out of range for target dim {target_dim}"
+            ));
+        }
+        if is_real {
+            let v: Number = parts[1]
+                .parse()
+                .map_err(|e| format!("S real entry value '{}': {e}", parts[1]))?;
+            if target == 3 {
+                problem_real = v;
+            } else {
+                real_buf[idx] = v;
+            }
+        } else {
+            let v: Index = parts[1]
+                .parse()
+                .map_err(|e| format!("S int entry value '{}': {e}", parts[1]))?;
+            if target == 3 {
+                problem_int = v;
+            } else {
+                int_buf[idx] = v;
+            }
+        }
+    }
+
+    match (target, is_real) {
+        (0, false) => {
+            out.var_int.insert(name, int_buf);
+        }
+        (1, false) => {
+            out.con_int.insert(name, int_buf);
+        }
+        (2, false) => {
+            out.obj_int.insert(name, int_buf);
+        }
+        (3, false) => {
+            out.problem_int.insert(name, problem_int);
+        }
+        (0, true) => {
+            out.var_real.insert(name, real_buf);
+        }
+        (1, true) => {
+            out.con_real.insert(name, real_buf);
+        }
+        (2, true) => {
+            out.obj_real.insert(name, real_buf);
+        }
+        (3, true) => {
+            out.problem_real.insert(name, problem_real);
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
 }
 
 fn parse_segment_index(s: &str, tag: char) -> Result<usize, String> {
@@ -1320,6 +1488,105 @@ b
         let mut vs = BTreeSet::new();
         collect_vars(&p.obj_nonlinear, &mut vs);
         assert_eq!(vs.into_iter().collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    /// `min (x0 - 1)^2` with three suffix segments attached: an
+    /// integer constraint-suffix (target=1, kind=1), an integer var-
+    /// suffix (target=0, kind=0), and a real var-suffix (target=0,
+    /// kind=4). The .nl format is `S<kind> <nentries> <name>` then
+    /// `<idx> <value>` lines.
+    const WITH_SUFFIXES: &str = "g3 0 1 0
+1 0 1 0 0
+0 1
+0 0
+0 1 0
+0 0 0 1
+0 0 0 0 0
+0 0
+0 0
+0 0 0 0 0
+O0 0
+o5
+o1
+v0
+n1
+n2
+b
+3
+S0 1 sens_state_1
+0 7
+S4 1 sens_state_value_1
+0 4.5
+";
+
+    #[test]
+    fn parses_var_int_and_var_real_suffixes() {
+        let p = parse_nl_text(WITH_SUFFIXES).expect("parse");
+        // Integer var-suffix: dense length 1, slot 0 = 7.
+        let v = p.suffixes.var_int.get("sens_state_1").expect("var_int");
+        assert_eq!(v.as_slice(), &[7]);
+        // Real var-suffix: dense length 1, slot 0 = 4.5.
+        let r = p.suffixes.var_real.get("sens_state_value_1").expect("var_real");
+        assert_eq!(r.len(), 1);
+        assert!((r[0] - 4.5).abs() < 1e-12);
+        // Other suffix slots stay empty.
+        assert!(p.suffixes.con_int.is_empty());
+        assert!(p.suffixes.con_real.is_empty());
+    }
+
+    /// Two-variable + two-constraint problem with a constraint-level
+    /// integer suffix (kind=1). Sparse entries scatter to dense length 2.
+    const WITH_CON_SUFFIX: &str = "g3 0 1 0
+2 2 1 0 0
+0 0
+0 0
+0 2 0
+0 0 0 1
+0 0 0 0 0
+2 0
+0 0
+0 0 0 0 0 0
+C0
+n0
+C1
+n0
+O0 0
+n0
+r
+4 0.0
+4 0.0
+b
+3
+3
+k1
+0
+J0 2
+0 1
+1 1
+J1 2
+0 1
+1 -1
+S1 2 sens_init_constr
+0 1
+1 2
+";
+
+    #[test]
+    fn parses_con_int_suffix() {
+        let p = parse_nl_text(WITH_CON_SUFFIX).expect("parse");
+        let s = p.suffixes.con_int.get("sens_init_constr").expect("con_int");
+        // Sparse {0:1, 1:2} → dense [1, 2] at length m=2.
+        assert_eq!(s.as_slice(), &[1, 2]);
+    }
+
+    #[test]
+    fn rejects_suffix_with_out_of_range_index() {
+        let bad = WITH_CON_SUFFIX.replace("1 2\n", "5 2\n"); // m=2, idx=5 invalid
+        let err = parse_nl_text(&bad).expect_err("must reject");
+        assert!(
+            err.contains("out of range"),
+            "expected out-of-range error, got: {err}"
+        );
     }
 
     #[test]

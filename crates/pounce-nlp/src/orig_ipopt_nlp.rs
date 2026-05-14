@@ -922,6 +922,87 @@ impl OrigIpoptNlp {
         full
     }
 
+    /// Lift the algorithm-side `(y_c, y_d)` multipliers to the user
+    /// TNLP's `lambda` array (length `m_full = n_c + n_d`, indexed
+    /// by original constraint-row order). Result matches the user's
+    /// **unscaled-Lagrangian** convention `min f + λ·g(x)` —
+    /// i.e. without the obj_factor that the algorithm threads through
+    /// `eval_h`. Mirror of upstream
+    /// `IpOrigIpoptNLP::FinalizeSolution`'s `mult_g` packing
+    /// (`lambda_user = c_scale * y_c / obj_scale_factor`,
+    /// `mu_user = d_scale * y_d / obj_scale_factor`). Used by
+    /// `application.rs::finalize_via_orig_nlp` to populate the
+    /// `Solution.lambda` slot — pounce#11.
+    pub fn finalize_solution_lambda(
+        &self,
+        y_c: &dyn Vector,
+        y_d: &dyn Vector,
+    ) -> Vec<Number> {
+        let cls = self.adapter.borrow().classification().clone();
+        let mut lambda = self.pack_lambda_for_user(y_c, y_d, &cls);
+        let obj_scal = self.obj_scale_factor.get();
+        if obj_scal != 0.0 && obj_scal != 1.0 {
+            let inv = 1.0 / obj_scal;
+            for v in lambda.iter_mut() {
+                *v *= inv;
+            }
+        }
+        lambda
+    }
+
+    /// Lift the algorithm-side compressed `z_l` (length `n_x_l`,
+    /// indexed via `x_l_map`) to the user's full-x bound multiplier
+    /// array (length `n_full_x`). Slots without a finite lower bound
+    /// — including fixed variables — are reported as `0.0`. Sign and
+    /// scale match upstream Ipopt: `z_l ≥ 0` for active lower
+    /// bounds, divided by `obj_scale_factor` so the user sees the
+    /// unscaled-Lagrangian dual.
+    pub fn finalize_solution_z_l(&self, z_l: &dyn Vector) -> Vec<Number> {
+        let cls = self.adapter.borrow().classification().clone();
+        let n_full_x = cls.n_full_x as usize;
+        let mut full_z_l = vec![0.0; n_full_x];
+        let n_x_l = self.x_l.dim() as usize;
+        if n_x_l == 0 {
+            return full_z_l;
+        }
+        let Some(dz) = z_l.as_any().downcast_ref::<DenseVector>() else {
+            panic!("OrigIpoptNlp::finalize_solution_z_l expects DenseVector");
+        };
+        let vals = dz.expanded_values();
+        let obj_scal = self.obj_scale_factor.get();
+        let inv = if obj_scal == 0.0 { 1.0 } else { 1.0 / obj_scal };
+        for i in 0..n_x_l {
+            let var_idx = cls.x_l_map[i] as usize;
+            let full_idx = cls.x_not_fixed_map[var_idx] as usize;
+            full_z_l[full_idx] = vals[i] * inv;
+        }
+        full_z_l
+    }
+
+    /// Mirror of [`Self::finalize_solution_z_l`] for the upper-bound
+    /// duals. Indexed via `x_u_map`.
+    pub fn finalize_solution_z_u(&self, z_u: &dyn Vector) -> Vec<Number> {
+        let cls = self.adapter.borrow().classification().clone();
+        let n_full_x = cls.n_full_x as usize;
+        let mut full_z_u = vec![0.0; n_full_x];
+        let n_x_u = self.x_u.dim() as usize;
+        if n_x_u == 0 {
+            return full_z_u;
+        }
+        let Some(dz) = z_u.as_any().downcast_ref::<DenseVector>() else {
+            panic!("OrigIpoptNlp::finalize_solution_z_u expects DenseVector");
+        };
+        let vals = dz.expanded_values();
+        let obj_scal = self.obj_scale_factor.get();
+        let inv = if obj_scal == 0.0 { 1.0 } else { 1.0 / obj_scal };
+        for i in 0..n_x_u {
+            let var_idx = cls.x_u_map[i] as usize;
+            let full_idx = cls.x_not_fixed_map[var_idx] as usize;
+            full_z_u[full_idx] = vals[i] * inv;
+        }
+        full_z_u
+    }
+
     /// Clone the user-provided multipliers (already in the
     /// algorithm's eq/ineq-split form) into a single `lambda` array of
     /// length `m_full = n_c + n_d` ordered by original g-index. Used
@@ -1587,6 +1668,22 @@ impl IpoptNlp for OrigIpoptNlp {
             full[full_idx] = vals[k];
         }
         full
+    }
+
+    fn finalize_solution_lambda(
+        &self,
+        y_c: &dyn Vector,
+        y_d: &dyn Vector,
+    ) -> Vec<Number> {
+        OrigIpoptNlp::finalize_solution_lambda(self, y_c, y_d)
+    }
+
+    fn finalize_solution_z_l(&self, z_l: &dyn Vector) -> Vec<Number> {
+        OrigIpoptNlp::finalize_solution_z_l(self, z_l)
+    }
+
+    fn finalize_solution_z_u(&self, z_u: &dyn Vector) -> Vec<Number> {
+        OrigIpoptNlp::finalize_solution_z_u(self, z_u)
     }
 }
 

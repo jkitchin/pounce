@@ -25,6 +25,9 @@ use std::rc::Rc;
 struct Hs071 {
     final_x: Option<[Number; 4]>,
     final_obj: Option<Number>,
+    final_lambda: Option<Vec<Number>>,
+    final_z_l: Option<Vec<Number>>,
+    final_z_u: Option<Vec<Number>>,
 }
 
 impl TNLP for Hs071 {
@@ -137,6 +140,9 @@ impl TNLP for Hs071 {
             self.final_x = Some([sol.x[0], sol.x[1], sol.x[2], sol.x[3]]);
         }
         self.final_obj = Some(sol.obj_value);
+        self.final_lambda = Some(sol.lambda.to_vec());
+        self.final_z_l = Some(sol.z_l.to_vec());
+        self.final_z_u = Some(sol.z_u.to_vec());
     }
 }
 
@@ -171,6 +177,21 @@ fn hs071_solves_via_application() {
         stats.iteration_count < 50,
         "iter_count = {} (expected < 50)",
         stats.iteration_count,
+    );
+
+    // Restoration audit counters (pounce#12) — HS071 is a well-behaved
+    // problem that does not enter restoration. All counters must be 0.
+    assert_eq!(
+        stats.restoration_calls, 0,
+        "HS071 unexpectedly entered restoration {} time(s)",
+        stats.restoration_calls,
+    );
+    assert_eq!(stats.restoration_outer_iters, 0);
+    assert_eq!(stats.restoration_inner_iters, 0);
+    assert!(
+        stats.restoration_wall_secs.abs() < 1e-9,
+        "wall_secs should be 0.0, got {}",
+        stats.restoration_wall_secs,
     );
 
     // Final objective at optimum is 17.0140173.
@@ -434,6 +455,7 @@ fn hs071_max_cpu_time_terminates() {
 }
 
 #[test]
+#[test]
 fn hs071_solves_with_adaptive_mu_probing_oracle() {
     let mut app = IpoptApplication::new();
     app.options_mut()
@@ -493,6 +515,81 @@ fn hs071_solves_with_nondefault_mu_init() {
         (stats.final_objective - 17.014017).abs() < 1e-4,
         "final_objective = {} (expected ~17.014017)",
         stats.final_objective,
+    );
+}
+
+/// Regression test for pounce#11. Before the fix,
+/// `Solution.lambda` / `z_l` / `z_u` were forwarded to the user as
+/// all-zero stubs (see the comment at `application.rs` ≈ line 640).
+/// After the fix `OrigIpoptNlp::finalize_solution_{lambda,z_l,z_u}`
+/// lift the algorithm-side compressed multipliers back to the user's
+/// constraint-row / full-x indexing.
+///
+/// HS071 has known multipliers at `x* = (1, 4.7430, 3.8211, 1.3794)`,
+/// `f* = 17.014`. x[0] sits on its lower bound; the other three are
+/// interior. lambda[0] (inequality `x0·x1·x2·x3 ≥ 25`, active) and
+/// lambda[1] (equality `Σxᵢ² = 40`) are both non-zero. Sign matches
+/// upstream Ipopt's `min f + λ·g(x)`.
+///
+/// Exact reference values vary with options / linear backend / scaling.
+/// We assert (a) multipliers are populated (non-zero, not the all-zero
+/// stub from pre-#11), and (b) the KKT residual recomposed from the
+/// user-visible quantities is small.
+#[test]
+fn hs071_reports_nonzero_multipliers_at_optimum() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+
+    let user = tnlp_concrete.borrow();
+    let lambda = user.final_lambda.as_ref().expect("lambda populated");
+    let z_l = user.final_z_l.as_ref().expect("z_l populated");
+    let z_u = user.final_z_u.as_ref().expect("z_u populated");
+
+    assert_eq!(lambda.len(), 2);
+    assert_eq!(z_l.len(), 4);
+    assert_eq!(z_u.len(), 4);
+
+    let lam_max = lambda.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    assert!(lam_max > 1e-3, "lambda must be non-zero at HS071 optimum; got {:?}", lambda);
+
+    // KKT stationarity recomposed from user-visible quantities:
+    //   ∇f + J_g^T λ − z_l + z_u ≈ 0  at the optimum.
+    let x = user.final_x.unwrap();
+    let mut grad_f = [0.0_f64; 4];
+    grad_f[0] = x[3] * (2.0 * x[0] + x[1] + x[2]);
+    grad_f[1] = x[0] * x[3];
+    grad_f[2] = x[0] * x[3] + 1.0;
+    grad_f[3] = x[0] * (x[0] + x[1] + x[2]);
+    let l0 = lambda[0];
+    let l1 = lambda[1];
+    let mut kkt = [0.0_f64; 4];
+    kkt[0] = grad_f[0] + l0 * (x[1] * x[2] * x[3]) + l1 * (2.0 * x[0]) - z_l[0] + z_u[0];
+    kkt[1] = grad_f[1] + l0 * (x[0] * x[2] * x[3]) + l1 * (2.0 * x[1]) - z_l[1] + z_u[1];
+    kkt[2] = grad_f[2] + l0 * (x[0] * x[1] * x[3]) + l1 * (2.0 * x[2]) - z_l[2] + z_u[2];
+    kkt[3] = grad_f[3] + l0 * (x[0] * x[1] * x[2]) + l1 * (2.0 * x[3]) - z_l[3] + z_u[3];
+    let kkt_inf = kkt.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        kkt_inf < 1e-3,
+        "KKT residual with lifted multipliers = {:.2e} (lambda={:?}, z_l={:?}, z_u={:?})",
+        kkt_inf, lambda, z_l, z_u,
+    );
+
+    eprintln!(
+        "HS071 multipliers — lambda = {:?}, z_l = {:?}, z_u = {:?}",
+        lambda, z_l, z_u,
     );
 }
 

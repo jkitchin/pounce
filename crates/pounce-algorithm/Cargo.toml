@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Algorithm-side core for POUNCE (port of Ipopt's src/Algorithm/): IteratesVector, IpoptData, CalculatedQuantities, KKT solvers, line search, mu update, conv check, initializer, IpoptAlg main loop, AlgBuilder."
 
 [dependencies]
@@ -14,6 +15,7 @@ pounce-linsol = { path = "../pounce-linsol" }
 pounce-nlp = { path = "../pounce-nlp" }
 pounce-feral = { path = "../pounce-feral" }
 pounce-presolve = { path = "../pounce-presolve" }
+pounce-l1penalty = { path = "../pounce-l1penalty" }
 pounce-hsl = { path = "../pounce-hsl", optional = true }
 
 [features]

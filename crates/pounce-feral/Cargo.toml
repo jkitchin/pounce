@@ -5,11 +5,14 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "FERAL pure-Rust sparse symmetric LDL^T backend for POUNCE. Implements pounce-linsol's SparseSymLinearSolverInterface."
 
 [dependencies]
 pounce-common = { path = "../pounce-common" }
 pounce-linsol = { path = "../pounce-linsol" }
+# Local path during issue-#8 perf evaluation; switch back to a crates.io
+# version once the FMA opt-in / cascade-break fixes are published.
 feral = { path = "/Users/jkitchin/projects/feral" }
 
 [lints]

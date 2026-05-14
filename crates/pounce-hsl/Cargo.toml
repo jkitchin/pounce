@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "HSL linear-solver backend for POUNCE: MA57 via libcoinhsl.dylib (port of Ipopt's IpMa57TSolverInterface). Implements pounce-linsol's SparseSymLinearSolverInterface."
 links = "coinhsl"
 build = "build.rs"

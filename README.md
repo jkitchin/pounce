@@ -108,6 +108,46 @@ Full help:
 pounce --help
 ```
 
+### Machine-readable output (JSON)
+
+Pass `--json-output PATH` to write a structured solve report alongside
+the regular console output:
+
+```sh
+pounce problem.nl --json-output result.json
+pounce problem.nl --json-output result.json --json-detail full
+```
+
+The report is FAIR-aligned (Wilkinson et al. 2016, DOI
+[10.1038/sdata.2016.18](https://doi.org/10.1038/sdata.2016.18)) — every
+field documented in [`docs/schema/solve-report-v1.md`](docs/schema/solve-report-v1.md).
+`--json-detail summary` (default) emits status, primal `x`, dual
+`lambda`, and aggregate statistics; `--json-detail full` adds the
+per-iteration trajectory (`iter`, `objective`, `inf_pr`, `inf_du`, `mu`,
+`||d||`, alphas, line-search trials) for debugging.
+
+The schema is versioned (`pounce.solve-report/v1`) so downstream
+tooling can pin against a major version. Consumers should tolerate
+unknown fields — additive changes don't bump the version.
+
+### Sensitivity analysis (sIPOPT-compatible)
+
+For parametric sensitivity analysis on AMPL `.nl` files declaring
+sIPOPT-style suffixes (`sens_state_1`, `sens_state_value_1`,
+`sens_init_constr`), use `pounce_sens`:
+
+```sh
+pounce_sens problem.nl              # writes problem.sol
+pounce_sens problem.nl out.sol --json-output result.json --json-detail full
+```
+
+The binary runs the IPM, then performs the post-optimal sensitivity
+step using `pounce-sensitivity` (port of upstream sIPOPT), writing the
+perturbed primal back into the `.sol` as a `sens_sol_state_1` suffix.
+The JSON report carries the same data plus FAIR metadata. See
+[`docs/schema/solve-report-v1.md`](docs/schema/solve-report-v1.md) for
+the full schema.
+
 ## Benchmarks
 
 `benchmarks/` contains comparison harnesses against upstream Ipopt

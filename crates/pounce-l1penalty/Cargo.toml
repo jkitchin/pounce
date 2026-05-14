@@ -1,0 +1,16 @@
+[package]
+name = "pounce-l1penalty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Thierry-Biegler ℓ₁-exact penalty-barrier TNLP wrapper for POUNCE — opt-in NLP reformulation for degenerate / LICQ-violating NLPs (port of ripopt#23)."
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-nlp = { path = "../pounce-nlp" }
+
+[lints]
+workspace = true

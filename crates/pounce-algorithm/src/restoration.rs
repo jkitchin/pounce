@@ -61,6 +61,15 @@ pub enum RestorationOutcome {
 }
 
 pub trait RestorationPhase {
+    /// Inner-IPM iteration count from the most recent
+    /// `perform_restoration` call. Read by `IpoptAlgorithm` for the
+    /// pounce#12 audit counters in `SolveStatistics`. Default 0; the
+    /// concrete `MinC1NormRestoration` impl stashes
+    /// `RestoSolveResult::iter_count` and returns it here.
+    fn last_inner_iter_count(&self) -> pounce_common::types::Index {
+        0
+    }
+
     /// Drive a feasibility-restoration sub-solve. The impl reads the
     /// outer iterate from `data.curr`, the original NLP from `nlp`,
     /// uses `aug_solver` for any post-success multiplier-recomputation

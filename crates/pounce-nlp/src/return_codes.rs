@@ -9,6 +9,7 @@ use pounce_common::types::Index;
 
 /// Mirrors `enum ApplicationReturnStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(i32)]
 pub enum ApplicationReturnStatus {
     SolveSucceeded = 0,
