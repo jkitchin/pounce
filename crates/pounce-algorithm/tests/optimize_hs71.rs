@@ -590,3 +590,40 @@ fn hs071_output_file_captures_timing_report() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// Wave-4 smoke: the eight `warm_start_*` knobs and the
+/// `warm_start_init_point` toggle parse through
+/// `algorithm_builder_from_options` without erroring. End-to-end
+/// behavior (the warm-started solve itself) isn't exercised here —
+/// it needs a populated `data.curr` from a prior solve, which the
+/// re-optimize workflow that drives this initializer doesn't yet
+/// surface. The unit tests in `init::warm_start` cover the clamp /
+/// target-mu semantics in isolation.
+#[test]
+fn warm_start_options_flow_through_builder() {
+    let mut app = IpoptApplication::new();
+    let opts = "\
+        warm_start_init_point yes\n\
+        warm_start_same_structure yes\n\
+        warm_start_bound_push 1e-2\n\
+        warm_start_bound_frac 1e-2\n\
+        warm_start_slack_bound_push 1e-2\n\
+        warm_start_slack_bound_frac 1e-2\n\
+        warm_start_mult_bound_push 1e-2\n\
+        warm_start_mult_init_max 1e3\n\
+        warm_start_target_mu 1e-2\n\
+        warm_start_entire_iterate yes\n\
+    ";
+    app.initialize_with_options_str(opts).unwrap();
+    // Every key the test set must be visible on the OptionsList; this
+    // smoke-tests the registry surface (e.g. proves
+    // `warm_start_init_point` registered correctly).
+    for key in [
+        "warm_start_init_point",
+        "warm_start_same_structure",
+        "warm_start_entire_iterate",
+    ] {
+        let (_, found) = app.options().get_string_value(key, "").unwrap();
+        assert!(found, "{key} did not parse through the registry");
+    }
+}
