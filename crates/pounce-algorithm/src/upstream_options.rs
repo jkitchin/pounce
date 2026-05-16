@@ -379,6 +379,21 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_lower_bounded_integer_option("ma57_node_amalgamation", "Node amalgamation parameter", 1, 16, "This is ICNTL(12) in MA57.")?;
     r.add_bounded_integer_option("ma57_small_pivot_flag", "Handling of small pivots", 0, 1, 0, "If set to 1, then when small entries defined by CNTL(2) are detected they are removed and the corresponding pivots placed at the end of the factorization. This can be particularly efficient if the matrix is highly rank deficient. This is ICNTL(16) in MA57.")?;
 
+    // ===== FeralSolverInterface::RegisterOptions (pounce extension; not in upstream Ipopt) =====
+    // The FERAL pure-Rust backend has three optional knobs that are
+    // not (yet) part of the upstream Ipopt linear-solver option set.
+    // They are surfaced here so that per-problem `.opt` files in the
+    // sweep harness can flip them without rebuilding pounce. Defaults
+    // mirror the construction-time defaults baked into
+    // `pounce_feral::FeralSolverInterface::new`; environment variables
+    // of the same name (without the `feral_` prefix removed) keep
+    // working as a legacy fallback when the option was not set
+    // explicitly in this OptionsList.
+    r.set_registering_category("FERAL Linear Solver");
+    r.add_bool_option("feral_cascade_break", "Whether to enable FERAL's cascade-break pivot heuristic.", false, "Cascade-break accelerates the dense trailing-update kernels in FERAL's supernodal LDL^T factor (e.g. ~30x per factor on the 64k x 64k pinene_3200 KKT), but introduces small per-pivot perturbations that can flip the negative-eigenvalue count on borderline iterates. Pounce reads that as WrongInertia and escalates delta_w, which corrupts the search direction on a few problem families (robot_1600, NARX_CFy). Default is off; flip to yes for IPM-style KKTs with dense supernodes where the per-factor speedup matters and the IPM trajectory is well-behaved. See crates/pounce-feral/src/lib.rs and pounce#31 / feral#17.")?;
+    r.add_bool_option("feral_fma", "Whether FERAL should dispatch dense kernels through fused multiply-add intrinsics.", false, "On aarch64 / x86_v3, FMA-dispatched panel and trailing-update kernels run at roughly 2x the throughput of the generic kernels. The downside is small per-pivot rounding drift that trips more WrongInertia checks and delayed pivots — the same failure mode that forced cascade-break off by default. Off by default; turn on for workloads where kernel throughput dominates and the IPM tolerates a slightly noisier inertia signal.")?;
+    r.add_bool_option("feral_refine", "Whether FERAL should run iterative refinement on every back-solve.", true, "Iterative refinement at solve time closes the residual floor produced by cascade-break's L-factor perturbation; without it, pinene_3200 and similar IPM tails stall as the per-pivot residual exceeds the duality gap. Enabled by default; set no only when timing the bare factor + back-solve in isolation.")?;
+
     // ===== Ma77SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa77SolverInterface.cpp) =====
     r.set_registering_category("MA77 Linear Solver");
     r.add_integer_option("ma77_print_level", "Debug printing level for the linear solver MA77", -1, "<0: no printing; 0: Error and warning messages only; 1: Limited diagnostic printing; >1 Additional diagnostic printing.")?;

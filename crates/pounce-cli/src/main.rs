@@ -72,7 +72,15 @@ fn main() -> ExitCode {
     // surfaces as `RestorationFailure` instead of falling back into the
     // ℓ1-feasibility sub-IPM. Mirrors what upstream's `IpAlgBuilder`
     // does unconditionally for every solve.
-    let bff: InnerBackendFactoryFactory = Box::new(default_backend_factory);
+    //
+    // Capture the feral config off the now-fully-loaded options so the
+    // restoration sub-IPM honors the same `feral_*` overrides (e.g.
+    // `feral_cascade_break yes` from an `--options-file`) as the main
+    // IPM. Snapshot, not borrow: the BFF outlives the option-mutation
+    // window we cleanly own here.
+    let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
+    let bff: InnerBackendFactoryFactory =
+        Box::new(move || default_backend_factory(feral_cfg));
     let resto_factory = make_default_restoration_factory(
         RestoAlgorithmBuilder::new(),
         AlgorithmBuilder::new(),
@@ -198,13 +206,18 @@ fn main() -> ExitCode {
 }
 
 /// Default backend factory used by the restoration sub-IPM. Mirrors
-/// the private `default_backend_factory` in `pounce-algorithm` (which
-/// is not re-exported): FERAL is the shipping default, with MA57
-/// available behind the `ma57` cargo feature.
-fn default_backend_factory() -> LinearBackendFactory {
-    Box::new(|choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+/// the `default_backend_factory` in `pounce-algorithm`: FERAL is the
+/// shipping default, with MA57 available behind the `ma57` cargo
+/// feature. The `feral_cfg` argument carries the `feral_*` extension
+/// options (cascade-break / FMA / iterative-refinement) captured from
+/// the application's options list, so per-problem `.opt` overrides
+/// flow into the resto sub-IPM as well.
+fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
+    Box::new(move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
         match choice {
-            LinearSolverChoice::Feral => Box::new(pounce_feral::FeralSolverInterface::new()),
+            LinearSolverChoice::Feral => {
+                Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+            }
             LinearSolverChoice::Ma57 => {
                 #[cfg(feature = "ma57")]
                 {
@@ -212,7 +225,7 @@ fn default_backend_factory() -> LinearBackendFactory {
                 }
                 #[cfg(not(feature = "ma57"))]
                 {
-                    Box::new(pounce_feral::FeralSolverInterface::new())
+                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
                 }
             }
         }

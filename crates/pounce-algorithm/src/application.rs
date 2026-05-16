@@ -368,11 +368,16 @@ impl IpoptApplication {
         // HS71-class problems.
         let builder = self.algorithm_builder_from_options();
 
-        // Linear-solver backend.
+        // Linear-solver backend. The default factory is option-aware
+        // — it reads the `feral_*` extension options off the same
+        // `OptionsList` that drove the IPM-level builder above so
+        // per-problem `.opt` files can flip backend knobs without
+        // rebuilding pounce.
+        let feral_cfg = feral_config_from_options(&self.options);
         let factory = self
             .linear_backend_factory
             .take()
-            .unwrap_or_else(|| default_backend_factory());
+            .unwrap_or_else(|| default_backend_factory(feral_cfg));
         let bundle = builder.build_with_backend(factory);
 
         // Wire the data / cq pair around the NLP. Install the shared
@@ -572,16 +577,20 @@ impl IpoptApplication {
     }
 }
 
-/// Default symmetric linear-solver factory.
+/// Default symmetric linear-solver factory, parameterized by the
+/// pounce-extension FERAL knobs read off the application's
+/// `OptionsList`.
 ///
 /// FERAL (pure-Rust) is the shipping default. The HSL MA57 backend is
 /// available when the `ma57` cargo feature is enabled; without it,
 /// requesting `linear_solver = ma57` falls back to FERAL with a
 /// warning printed by the journalist (see [`AlgorithmBuilder`]).
-fn default_backend_factory() -> LinearBackendFactory {
-    Box::new(|choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBackendFactory {
+    Box::new(move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
         match choice {
-            LinearSolverChoice::Feral => Box::new(pounce_feral::FeralSolverInterface::new()),
+            LinearSolverChoice::Feral => {
+                Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+            }
             LinearSolverChoice::Ma57 => {
                 #[cfg(feature = "ma57")]
                 {
@@ -590,11 +599,32 @@ fn default_backend_factory() -> LinearBackendFactory {
                 #[cfg(not(feature = "ma57"))]
                 {
                     // ma57 feature not compiled in — fall back to FERAL.
-                    Box::new(pounce_feral::FeralSolverInterface::new())
+                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
                 }
             }
         }
     })
+}
+
+/// Read the three `feral_*` extension options off `options`, falling
+/// back to the env-var defaults baked into [`pounce_feral::FeralConfig::from_env`]
+/// for any knob the caller did not set explicitly. The returned
+/// config is what every default-factory invocation (main IPM and
+/// restoration sub-IPM) consumes.
+pub fn feral_config_from_options(
+    options: &pounce_common::options_list::OptionsList,
+) -> pounce_feral::FeralConfig {
+    let mut cfg = pounce_feral::FeralConfig::from_env();
+    if let Ok((v, true)) = options.get_bool_value("feral_cascade_break", "") {
+        cfg.cascade_break = v;
+    }
+    if let Ok((v, true)) = options.get_bool_value("feral_fma", "") {
+        cfg.fma = v;
+    }
+    if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
+        cfg.refine = v;
+    }
+    cfg
 }
 
 /// Map upstream `SolverReturn` codes to `ApplicationReturnStatus`.

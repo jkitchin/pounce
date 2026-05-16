@@ -50,25 +50,79 @@ pub struct FeralSolverInterface {
     negevals: Index,
 }
 
+/// Construction-time configuration for [`FeralSolverInterface`].
+///
+/// Mirrors the three pounce-extension options registered in
+/// `pounce-algorithm`'s `upstream_options::register_all_options`
+/// (`feral_cascade_break`, `feral_fma`, `feral_refine`). The IPM
+/// caller reads those off its `OptionsList`, builds a `FeralConfig`,
+/// and passes it to [`FeralSolverInterface::with_config`]. For
+/// non-option callers (tests, standalone use, the env-only legacy
+/// path), [`FeralSolverInterface::new`] keeps reading the
+/// `POUNCE_FERAL_*` env vars to preserve the historic defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct FeralConfig {
+    pub cascade_break: bool,
+    pub fma: bool,
+    pub refine: bool,
+}
+
+impl Default for FeralConfig {
+    fn default() -> Self {
+        Self {
+            cascade_break: false,
+            fma: false,
+            refine: true,
+        }
+    }
+}
+
+impl FeralConfig {
+    /// Read the three knobs from `POUNCE_FERAL_CASCADE_BREAK`,
+    /// `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE` environment
+    /// variables. Used as a fallback when the IPM has no
+    /// `OptionsList` to consult (tests, legacy callers).
+    pub fn from_env() -> Self {
+        Self {
+            cascade_break: matches!(
+                std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref(),
+                Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
+            ),
+            fma: matches!(
+                std::env::var("POUNCE_FERAL_FMA").as_deref(),
+                Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
+            ),
+            refine: !matches!(
+                std::env::var("POUNCE_FERAL_REFINE").as_deref(),
+                Ok("0") | Ok("false") | Ok("off") | Ok("no"),
+            ),
+        }
+    }
+}
+
 impl FeralSolverInterface {
+    /// Construct with config read from environment variables. Retained
+    /// for legacy callers (tests, anything without an IPM options
+    /// list). Prefer [`Self::with_config`] from option-aware sites so
+    /// the `.opt`-file knobs take effect.
     pub fn new() -> Self {
-        // Cascade-break (ratio=0.5, eps=1e-10) was on by default until
-        // the issue-17/issue-18 inertia investigations: it accelerates
-        // some IPM KKT matrices with cascade-overloaded supernodes
-        // (pinene_3200_0009: 33ms with cb on vs 94s with cb off,
-        // feral 585d739) but introduces WrongInertia loops on others
-        // (robot_1600 iter-3; NARX_CFy iters 1+, ~250 spurious
-        // WrongInertia status records under cb=pounce vs correct
-        // inertia under cb=off — see feral journal 2026-05-16 21:30).
-        // Feral's C-API now defaults cb off (da23d13) for the same
-        // reason. Default here matches that. Opt in via
-        // POUNCE_FERAL_CASCADE_BREAK=on|1|true for the pinene-family
-        // problems where cb is a net win.
-        let cb_on = matches!(
-            std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref(),
-            Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
-        );
-        let mut solver = if cb_on {
+        Self::with_config(FeralConfig::from_env())
+    }
+
+    /// Construct with explicit configuration. Cascade-break
+    /// (`ratio=0.5, eps=1e-10`) was on by default until the
+    /// issue-17/issue-18 inertia investigations: it accelerates IPM
+    /// KKT matrices with cascade-overloaded supernodes
+    /// (pinene_3200_0009: 33ms with cb on vs 94s with cb off, feral
+    /// 585d739) but introduces WrongInertia loops on others
+    /// (robot_1600 iter-3; NARX_CFy iters 1+, ~250 spurious
+    /// WrongInertia status records — see feral journal 2026-05-16
+    /// 21:30). The C-API now defaults cb off (da23d13) for the same
+    /// reason. Default here matches that; per-problem `.opt` files
+    /// (e.g. `benchmarks/mittelmann/profiles/pinene_3200.opt`) flip
+    /// `feral_cascade_break yes` for problems where cb is a net win.
+    pub fn with_config(cfg: FeralConfig) -> Self {
+        let mut solver = if cfg.cascade_break {
             Solver::new()
                 .with_cascade_break(0.5)
                 .with_cascade_break_eps(1e-10)
@@ -81,36 +135,15 @@ impl FeralSolverInterface {
         ) {
             solver = solver.with_parallel(false);
         }
-        // FMA dispatch for dense trailing-update / panel-update
-        // kernels. Off by default: on the Mittelmann sweep the
-        // ~2× kernel throughput on aarch64/x86_v3 is outweighed by
-        // the per-pivot rounding drift, which trips more WrongInertia
-        // checks and delayed pivots in IPOPT (same failure mode that
-        // forced cascade-break off by default — see git log 84add74).
-        // Opt in via POUNCE_FERAL_FMA=on|1|true for workloads where
-        // the kernel speedup dominates.
-        if matches!(
-            std::env::var("POUNCE_FERAL_FMA").as_deref(),
-            Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
-        ) {
+        if cfg.fma {
             solver = solver.with_fma(true);
         }
-        // Iterative refinement at solve time closes the residual floor
-        // produced by cascade-break's L-factor perturbation; matches
-        // capi.rs default (`FERAL_REFINE`). Without refinement,
-        // pinene_3200 and similar IPM tails stall as the per-pivot
-        // residual exceeds the duality gap. Set
-        // `POUNCE_FERAL_REFINE=0`/`off`/`false` to disable.
-        let refine = !matches!(
-            std::env::var("POUNCE_FERAL_REFINE").as_deref(),
-            Ok("0") | Ok("false") | Ok("off") | Ok("no"),
-        );
         Self {
             solver,
             initialized: false,
             pivtol_changed: false,
             refactorize: false,
-            refine,
+            refine: cfg.refine,
             dim: 0,
             nonzeros: 0,
             rows_0: Vec::new(),
