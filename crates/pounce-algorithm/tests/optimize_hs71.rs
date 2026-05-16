@@ -464,3 +464,98 @@ fn hs071_solves_with_adaptive_mu_probing_oracle() {
         stats.final_objective,
     );
 }
+
+/// `mu_init` flowing through the builder reaches the monotone
+/// updater. Solve still converges to the HS71 optimum.
+#[test]
+fn hs071_solves_with_nondefault_mu_init() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_numeric_value("mu_init", 1e-3, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+
+    let stats = app.statistics();
+    assert!(
+        (stats.final_objective - 17.014017).abs() < 1e-4,
+        "final_objective = {} (expected ~17.014017)",
+        stats.final_objective,
+    );
+}
+
+/// `print_frequency_iter = 100` makes pounce skip per-iter output
+/// rows but the solve itself must still converge cleanly. Smokes the
+/// option wiring without trying to assert against captured stdout.
+#[test]
+fn hs071_solves_with_sparse_iter_output() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_frequency_iter", 100, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+}
+
+/// `output_file` opens a `FileJournal` under the configured name and
+/// the timing report — gated on `print_timing_statistics yes` — is
+/// fanned out to it. Per-iter rows are not yet routed through the
+/// journalist (pounce writes them straight to stdout), so the test
+/// asserts only that the timing-statistics block landed on disk.
+#[test]
+fn hs071_output_file_captures_timing_report() {
+    // Lowercase path under `/tmp` so the upstream-style filename
+    // handling (no case folding) and the pid-suffixed uniqueness both
+    // work on case-sensitive filesystems.
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/pounce-test-output-{}.log",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let mut app = IpoptApplication::new();
+    let opts = format!(
+        "output_file {}\nfile_print_level 5\nprint_timing_statistics yes\n",
+        path.display(),
+    );
+    app.initialize_with_options_str(&opts).unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+    let _ = app.optimize_tnlp(tnlp);
+    app.journalist().flush_buffer();
+
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("expected log at {}", path.display()));
+    assert!(
+        contents.contains("Timing Statistics"),
+        "output_file at {} missing timing-statistics block; got:\n{}",
+        path.display(),
+        contents,
+    );
+    let _ = std::fs::remove_file(&path);
+}

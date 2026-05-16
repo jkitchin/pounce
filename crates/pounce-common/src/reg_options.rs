@@ -99,10 +99,15 @@ impl RegisteredOption {
         self.is_valid_number(v as Number)
     }
 
-    /// Equivalent to `IsValidStringSetting`.
+    /// Equivalent to `IsValidStringSetting`. A registered entry of
+    /// `"*"` is treated as a wildcard: any string is accepted. This
+    /// mirrors upstream Ipopt's behavior for free-form options like
+    /// `output_file` and `linear_solver_options`.
     pub fn is_valid_string(&self, value: &str) -> bool {
         let v = value.to_ascii_lowercase();
-        self.valid_strings.iter().any(|e| e.value.eq_ignore_ascii_case(&v))
+        self.valid_strings
+            .iter()
+            .any(|e| e.value == "*" || e.value.eq_ignore_ascii_case(&v))
     }
 
     /// Returns the canonical (lowercase) form recorded at registration
