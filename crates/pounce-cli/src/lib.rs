@@ -6,6 +6,7 @@
 pub mod builtin;
 pub mod cli;
 pub mod counting_tnlp;
+pub mod nl_hessian_program;
 pub mod nl_reader;
 pub mod nl_tape;
 pub mod print;
