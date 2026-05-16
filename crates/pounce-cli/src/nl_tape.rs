@@ -522,6 +522,20 @@ fn build_recursive(
             idx
         }
         Expr::Binary(op, a, b) => {
+            // Pow(x, const) is the dominant libm/dispatch cost in
+            // transcendental-heavy AMPL tapes (henon, lane_emden, …):
+            // `powf` itself is ~30–50 cycles AND the reverse-mode arm
+            // for `Pow` carries an extra `ln(x)` branch. Rewriting
+            // small integer / half-integer exponents into mul/sqrt
+            // chains drops these calls entirely and reroutes the AD
+            // through the much cheaper `Mul`/`Sqrt` arms.
+            if let BinOp::Pow = op {
+                if let Some(c) = peek_const(b) {
+                    if let Some(idx) = try_emit_const_pow(a, c, ops, cache) {
+                        return idx;
+                    }
+                }
+            }
             let l = build_recursive(a, ops, cache);
             let r = build_recursive(b, ops, cache);
             let idx = ops.len();
@@ -580,6 +594,92 @@ fn build_recursive(
                 idx
             }
         }
+    }
+}
+
+/// Resolve `e` to a literal constant if it is one (transparently
+/// peering through `Cse` wrappers, which AMPL emits around shared
+/// constants in CSE-heavy problems).
+fn peek_const(e: &Expr) -> Option<f64> {
+    match e {
+        Expr::Const(c) => Some(*c),
+        Expr::Cse(body) => peek_const(body),
+        _ => None,
+    }
+}
+
+/// Try to rewrite `base ^ exponent_const` into cheaper ops. Returns
+/// the result tape-slot on success; `None` means "fall through to
+/// generic Pow." Handles the cases that account for the bulk of
+/// AMPL-emitted Pow nodes: integer exponents up to ±8 and the
+/// `Sqrt`/passthrough/one specials. Half-integer exponents (e.g.
+/// `^1.5`) and larger integers are left to generic `Pow` since the
+/// resulting mul chain grows the tape faster than it saves work.
+fn try_emit_const_pow(
+    base_expr: &Expr,
+    c: f64,
+    ops: &mut Vec<TapeOp>,
+    cache: &mut HashMap<*const Expr, usize>,
+) -> Option<usize> {
+    if c == 0.0 {
+        let idx = ops.len();
+        ops.push(TapeOp::Const(1.0));
+        return Some(idx);
+    }
+    if c == 1.0 {
+        return Some(build_recursive(base_expr, ops, cache));
+    }
+    if c == 0.5 {
+        let b = build_recursive(base_expr, ops, cache);
+        let idx = ops.len();
+        ops.push(TapeOp::Sqrt(b));
+        return Some(idx);
+    }
+    // Integer exponents: bounded so a bad tape can't blow up the
+    // op count. 8 covers everything AMPL typically emits for
+    // polynomial models; beyond that the binary-expansion mul
+    // chain (≥4 ops) starts to lose to a single `powf`.
+    if c.is_finite() && c.fract() == 0.0 && c.abs() <= 8.0 {
+        let n = c.abs() as u32;
+        if n == 0 {
+            // Already handled above, but guard.
+            let idx = ops.len();
+            ops.push(TapeOp::Const(1.0));
+            return Some(idx);
+        }
+        let b = build_recursive(base_expr, ops, cache);
+        let pos = emit_int_pow(b, n, ops);
+        if c < 0.0 {
+            // x^-n = 1 / x^n. Saves the powf and its ln branch in
+            // reverse mode; cost is one Div in their place.
+            let one_idx = ops.len();
+            ops.push(TapeOp::Const(1.0));
+            let idx = ops.len();
+            ops.push(TapeOp::Div(one_idx, pos));
+            return Some(idx);
+        }
+        return Some(pos);
+    }
+    None
+}
+
+/// Emit `base^n` for `n >= 1` as a binary-expansion mul chain.
+/// Worst-case op count is `2·floor(log2(n))` — i.e. 1 op for n=2, 2
+/// for n=3/4, 3 for n=5..8.
+fn emit_int_pow(base: usize, n: u32, ops: &mut Vec<TapeOp>) -> usize {
+    debug_assert!(n >= 1);
+    if n == 1 {
+        return base;
+    }
+    let half = emit_int_pow(base, n / 2, ops);
+    let squared = ops.len();
+    ops.push(TapeOp::Mul(half, half));
+    if n % 2 == 1 {
+        let idx = ops.len();
+        ops.push(TapeOp::Mul(squared, base));
+        idx
+    } else {
+        squared
     }
 }
 
@@ -751,6 +851,127 @@ mod tests {
         assert!(s.contains(&(2, 1)));
         assert!(!s.contains(&(1, 0)));
         assert!(!s.contains(&(2, 0)));
+    }
+
+    fn count_op<F: Fn(&TapeOp) -> bool>(t: &Tape, pred: F) -> usize {
+        t.ops.iter().filter(|o| pred(o)).count()
+    }
+
+    #[test]
+    fn pow_zero_const_folds_to_one() {
+        // x^0 → 1 (no Pow, no reference to x in the tape)
+        let e = pow(var(0), cnst(0.0));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Var(_))), 0);
+        assert!((t.eval(&[7.0]) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_one_passes_through() {
+        // x^1 → x (no Pow, no Const introduced for the exponent)
+        let e = pow(var(0), cnst(1.0));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Const(_))), 0);
+        assert!((t.eval(&[3.5]) - 3.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_half_lowers_to_sqrt() {
+        let e = pow(var(0), cnst(0.5));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Sqrt(_))), 1);
+        assert!((t.eval(&[16.0]) - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_two_lowers_to_single_mul() {
+        let e = pow(var(0), cnst(2.0));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Mul(..))), 1);
+        assert!((t.eval(&[3.0]) - 9.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_three_lowers_to_two_muls() {
+        let e = pow(var(0), cnst(3.0));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Mul(..))), 2);
+        assert!((t.eval(&[2.0]) - 8.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_eight_lowers_to_three_muls() {
+        // Binary expansion: x → x² → x⁴ → x⁸ (3 squarings)
+        let e = pow(var(0), cnst(8.0));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Mul(..))), 3);
+        assert!((t.eval(&[2.0]) - 256.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_negative_two_lowers_to_div() {
+        // x^-2 → 1 / (x*x)
+        let e = pow(var(0), cnst(-2.0));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Div(..))), 1);
+        assert!((t.eval(&[4.0]) - (1.0 / 16.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pow_large_const_stays_generic() {
+        // x^9 stays as Pow — beyond the cutoff, generic is cheaper.
+        let e = pow(var(0), cnst(9.0));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 1);
+    }
+
+    #[test]
+    fn pow_non_integer_const_stays_generic() {
+        // x^1.5 stays as Pow until half-integer handling is added.
+        let e = pow(var(0), cnst(1.5));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 1);
+    }
+
+    #[test]
+    fn pow_const_through_cse_const() {
+        // Exponent wrapped in Cse — peek_const should still see it.
+        let two = Rc::new(cnst(2.0));
+        let e = Expr::Binary(BinOp::Pow, Box::new(var(0)), Box::new(Expr::Cse(two)));
+        let t = Tape::build(&e);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
+        assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Mul(..))), 1);
+    }
+
+    #[test]
+    fn hessian_pow_three_matches_fd() {
+        // f = 5 * x0^3 + x0 * x1 — exercises the lowered cubic + cross term.
+        let e = add(mul(cnst(5.0), pow(var(0), cnst(3.0))), mul(var(0), var(1)));
+        let t = Tape::build(&e);
+        fd_check(&t, &[1.7, 0.8], 2, 1e-5);
+    }
+
+    #[test]
+    fn hessian_pow_negative_matches_fd() {
+        // f = 1/x0^2 + x1^2 — exercises lowered x^-2 and x^2.
+        let e = add(pow(var(0), cnst(-2.0)), pow(var(1), cnst(2.0)));
+        let t = Tape::build(&e);
+        fd_check(&t, &[1.3, 2.4], 2, 1e-5);
+    }
+
+    #[test]
+    fn hessian_pow_half_matches_fd() {
+        // f = sqrt(x0) + x0*x1 (via Pow(_, 0.5) → Sqrt)
+        let e = add(pow(var(0), cnst(0.5)), mul(var(0), var(1)));
+        let t = Tape::build(&e);
+        fd_check(&t, &[2.5, 1.1], 2, 1e-5);
     }
 
     #[test]
