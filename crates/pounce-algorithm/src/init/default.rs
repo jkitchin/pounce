@@ -295,7 +295,13 @@ fn push_x_into_interior(
     bound_push: Number,
     bound_frac: Number,
 ) {
-    let n = x.values().len();
+    // Use `dim()` (not `values().len()`): the iterate initializer is
+    // called before any user `x0` has been written, so `x` is still in
+    // its default homogeneous-zero state. `values()` carries a
+    // `debug_assert!(!self.homogeneous)` and trips in debug builds on
+    // clnlbeam.nl-class problems (n=59999, x_L/x_U packed). `values_mut()`
+    // below materializes the dense buffer before the per-element write.
+    let n = x.dim() as usize;
     // Expand x_l and x_u into full-length sentinel vectors:
     //   lower[i] = Some(x_l_packed[k]) if i is the k-th lower-bounded slot
     //   upper[i] = Some(x_u_packed[k]) similarly.
