@@ -109,6 +109,9 @@ impl IpoptApplication {
         register_all_upstream_options(&reg).unwrap_or_else(|e| {
             panic!("Upstream options registration failed: {e}")
         });
+        pounce_presolve::register_options(&reg).unwrap_or_else(|e| {
+            panic!("Presolve options registration failed: {e}")
+        });
         let reg = Rc::new(reg);
         Self {
             options: OptionsList::with_registered(Rc::clone(&reg)),

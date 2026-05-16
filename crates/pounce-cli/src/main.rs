@@ -111,8 +111,47 @@ fn main() -> ExitCode {
         }
     };
 
+    // Optionally wrap with presolve before counting so eval-call
+    // counts reflect what the solver actually issues.
+    let presolve_opts =
+        match pounce_presolve::PresolveOptions::from_options_list(app.options()) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("pounce: presolve setup failed: {e}");
+                return ExitCode::from(2);
+            }
+        };
+    let presolve_handle = if presolve_opts.enabled {
+        let p = Rc::new(RefCell::new(pounce_presolve::PresolveTnlp::new(
+            Rc::clone(&inner_tnlp),
+            presolve_opts,
+        )));
+        // Force the lazy init now so we can print a one-line summary.
+        let _ = p.borrow_mut().get_nlp_info();
+        {
+            let h = p.borrow();
+            let tr = h.tighten_report();
+            let dropped = h.n_dropped_rows();
+            let licq = h
+                .licq_verdict()
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_else(|| "off".into());
+            println!(
+                "Presolve: tightened {} bounds ({} newly-finite), dropped {} redundant rows, LICQ={}",
+                tr.n_tightened, tr.n_new_finite, dropped, licq
+            );
+        }
+        Some(p)
+    } else {
+        None
+    };
+    let post_presolve: Rc<RefCell<dyn TNLP>> = match &presolve_handle {
+        Some(p) => Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
+        None => Rc::clone(&inner_tnlp),
+    };
+
     // Wrap so we can pull eval-call counts out for the final summary.
-    let counting = Rc::new(RefCell::new(CountingTnlp::new(Rc::clone(&inner_tnlp))));
+    let counting = Rc::new(RefCell::new(CountingTnlp::new(Rc::clone(&post_presolve))));
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&counting) as Rc<RefCell<dyn TNLP>>;
 
     // Banner + problem-statistics block, before the iteration table.

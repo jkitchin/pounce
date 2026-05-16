@@ -19,6 +19,7 @@ pounce-restoration = { path = "../pounce-restoration" }
 pounce-feral = { path = "../pounce-feral" }
 pounce-hsl = { path = "../pounce-hsl", optional = true }
 pounce-linsol = { path = "../pounce-linsol" }
+pounce-presolve = { path = "../pounce-presolve" }
 
 [features]
 default = []

@@ -1,0 +1,15 @@
+[package]
+name = "pounce-presolve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Algorithmic NLP preprocessing as a TNLP wrapper for POUNCE: bound tightening, redundant-constraint removal, LICQ degeneracy detection."
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-nlp = { path = "../pounce-nlp" }
+
+[lints]
+workspace = true

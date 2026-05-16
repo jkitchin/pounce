@@ -34,8 +34,8 @@
 use crate::nl_tape::Tape;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
-    TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
+    StartingPoint, TNLP,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -1048,6 +1048,19 @@ impl TNLP for NlTnlp {
     fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
         self.final_x = Some(sol.x.to_vec());
         self.final_obj = sol.obj_value;
+    }
+
+    fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        // A row is linear iff its nonlinear-part expression is the
+        // identity zero left over from initial allocation (post-parse
+        // identity for "no `C<idx>` segment touched this row").
+        for (i, t) in types.iter_mut().enumerate() {
+            *t = match &self.prob.con_nonlinear[i] {
+                Expr::Const(c) if *c == 0.0 => Linearity::Linear,
+                _ => Linearity::NonLinear,
+            };
+        }
+        true
     }
 }
 

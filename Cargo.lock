@@ -177,6 +177,7 @@ dependencies = [
  "pounce-linalg",
  "pounce-linsol",
  "pounce-nlp",
+ "pounce-presolve",
 ]
 
 [[package]]
@@ -198,6 +199,7 @@ dependencies = [
  "pounce-hsl",
  "pounce-linsol",
  "pounce-nlp",
+ "pounce-presolve",
  "pounce-restoration",
 ]
 
@@ -259,6 +261,14 @@ version = "0.1.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
+]
+
+[[package]]
+name = "pounce-presolve"
+version = "0.1.0"
+dependencies = [
+ "pounce-common",
+ "pounce-nlp",
 ]
 
 [[package]]

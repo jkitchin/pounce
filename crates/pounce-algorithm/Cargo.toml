@@ -13,6 +13,7 @@ pounce-linalg = { path = "../pounce-linalg" }
 pounce-linsol = { path = "../pounce-linsol" }
 pounce-nlp = { path = "../pounce-nlp" }
 pounce-feral = { path = "../pounce-feral" }
+pounce-presolve = { path = "../pounce-presolve" }
 pounce-hsl = { path = "../pounce-hsl", optional = true }
 
 [features]
