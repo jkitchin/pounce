@@ -13,6 +13,11 @@ use pounce_common::types::Number;
 pub struct MonotoneMuUpdate {
     pub mu_init: Number,
     pub mu_min: Number,
+    /// Upper bound on μ from `IpMonotoneMuUpdate.cpp:RegisterOptions`.
+    /// Used to clamp `mu_init` at [`MuUpdate::initialize`] so the
+    /// barrier doesn't start above the registered ceiling regardless
+    /// of what the user set. Default `1e5` mirrors upstream.
+    pub mu_max: Number,
     pub mu_linear_decrease_factor: Number,
     pub mu_superlinear_decrease_power: Number,
     pub tau_min: Number,
@@ -23,6 +28,15 @@ pub struct MonotoneMuUpdate {
     /// `mu_target` floor — μ never goes below this regardless of the
     /// reduction formula. Defaults to 0 (the floor is `mu_min`).
     pub mu_target: Number,
+    /// `mu_allow_fast_monotone_decrease` from
+    /// `IpMonotoneMuUpdate.cpp:RegisterOptions`. When `true` (the
+    /// upstream default), the reduction loop keeps iterating while
+    /// the sub-error stays below `barrier_tol_factor · μ`, allowing
+    /// multiple consecutive μ reductions in one outer call. When
+    /// `false`, the loop exits after the first successful reduction —
+    /// useful on stiff problems where a runaway μ collapse destroys
+    /// the line search.
+    pub mu_allow_fast_monotone_decrease: bool,
     /// Complementarity tolerance — option `compl_inf_tol`, default 1e-4
     /// per `IpAlgorithmRegOp.cpp`. Enters the dynamic μ floor via
     /// `min(tol, compl_inf_tol) / (barrier_tol_factor + 1)` per
@@ -48,11 +62,13 @@ impl Default for MonotoneMuUpdate {
         Self {
             mu_init: 0.1,
             mu_min: 1e-11,
+            mu_max: 1e5,
             mu_linear_decrease_factor: 0.2,
             mu_superlinear_decrease_power: 1.5,
             tau_min: 0.99,
             barrier_tol_factor: 10.0,
             mu_target: 0.0,
+            mu_allow_fast_monotone_decrease: true,
             compl_inf_tol: 1e-4,
             first_iter_resto: false,
         }
@@ -108,11 +124,13 @@ impl MonotoneMuUpdate {
 
 impl MuUpdate for MonotoneMuUpdate {
     /// Port of `IpMonotoneMuUpdate.cpp:InitializeImpl`. Seeds
-    /// `curr_mu = mu_init`, `curr_tau = max(tau_min, 1 - mu_init)`.
+    /// `curr_mu = min(mu_init, mu_max)`,
+    /// `curr_tau = max(tau_min, 1 - curr_mu)`.
     fn initialize(&mut self, data: &IpoptDataHandle) {
+        let init_mu = self.mu_init.min(self.mu_max);
         let mut d = data.borrow_mut();
-        d.curr_mu = self.mu_init;
-        d.curr_tau = self.compute_tau(self.mu_init);
+        d.curr_mu = init_mu;
+        d.curr_tau = self.compute_tau(init_mu);
     }
 
     /// Port of `IpMonotoneMuUpdate.cpp:UpdateBarrierParameter`.
@@ -188,6 +206,13 @@ impl MuUpdate for MonotoneMuUpdate {
             // upstream which clears tiny_step_flag once consumed).
             if tiny_step {
                 data.borrow_mut().tiny_step_flag = false;
+                break;
+            }
+            // `mu_allow_fast_monotone_decrease=false` caps the loop at
+            // a single reduction. Mirrors upstream
+            // `IpMonotoneMuUpdate.cpp:CalcNewMuAndTau` when the option
+            // is off.
+            if !self.mu_allow_fast_monotone_decrease {
                 break;
             }
         }

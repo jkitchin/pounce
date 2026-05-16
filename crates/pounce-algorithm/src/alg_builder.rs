@@ -158,6 +158,77 @@ pub struct AlgorithmBuilder {
     pub nlp_scaling_method: NlpScalingChoice,
     pub warm_start_init_point: bool,
     pub conv_check: ConvCheckOptions,
+    pub mu: MuOptions,
+    pub line_search: LineSearchOptions,
+    pub output: OutputOptions,
+}
+
+/// Knobs read off `OptionsList` and baked into the assembled
+/// `MonotoneMuUpdate` or `AdaptiveMuUpdate`. Defaults mirror
+/// `IpMonotoneMuUpdate.cpp` / `IpAdaptiveMuUpdate.cpp:RegisterOptions`.
+/// `mu_max` defaults to the sentinel `-1`; positive values are baked
+/// into both updaters at build time (adaptive interprets `-1` as
+/// "lazy-init from `mu_max_fact * avrg_compl`").
+#[derive(Debug, Clone)]
+pub struct MuOptions {
+    pub mu_init: Number,
+    pub mu_max: Number,
+    pub mu_max_fact: Number,
+    pub mu_min: Number,
+    pub mu_target: Number,
+    pub mu_linear_decrease_factor: Number,
+    pub mu_superlinear_decrease_power: Number,
+    pub mu_allow_fast_monotone_decrease: bool,
+}
+
+impl Default for MuOptions {
+    fn default() -> Self {
+        Self {
+            mu_init: 0.1,
+            mu_max: -1.0,
+            mu_max_fact: 1e3,
+            mu_min: 1e-11,
+            mu_target: 0.0,
+            mu_linear_decrease_factor: 0.2,
+            mu_superlinear_decrease_power: 1.5,
+            mu_allow_fast_monotone_decrease: true,
+        }
+    }
+}
+
+/// Knobs baked into the assembled [`BacktrackingLineSearch`]. Defaults
+/// mirror `IpBacktrackingLineSearch.cpp:RegisterOptions`.
+#[derive(Debug, Clone)]
+pub struct LineSearchOptions {
+    pub watchdog_shortened_iter_trigger: Index,
+    pub watchdog_trial_iter_max: Index,
+}
+
+impl Default for LineSearchOptions {
+    fn default() -> Self {
+        Self {
+            watchdog_shortened_iter_trigger: 10,
+            watchdog_trial_iter_max: 3,
+        }
+    }
+}
+
+/// Knobs baked into the assembled [`OrigIterationOutput`]. Defaults
+/// mirror `IpOrigIterationOutput.cpp:RegisterOptions` /
+/// `IpAlgorithmRegOp.cpp`.
+#[derive(Debug, Clone)]
+pub struct OutputOptions {
+    pub print_frequency_iter: Index,
+    pub print_frequency_time: Number,
+}
+
+impl Default for OutputOptions {
+    fn default() -> Self {
+        Self {
+            print_frequency_iter: 1,
+            print_frequency_time: 0.0,
+        }
+    }
 }
 
 impl Default for AlgorithmBuilder {
@@ -172,6 +243,9 @@ impl Default for AlgorithmBuilder {
             nlp_scaling_method: NlpScalingChoice::GradientBased,
             warm_start_init_point: false,
             conv_check: ConvCheckOptions::default(),
+            mu: MuOptions::default(),
+            line_search: LineSearchOptions::default(),
+            output: OutputOptions::default(),
         }
     }
 }
@@ -203,10 +277,34 @@ impl AlgorithmBuilder {
 
     fn build_inner(&self, search_dir: Option<PdSearchDirCalc>) -> AlgorithmBundle {
         let mu_update: Box<dyn crate::mu::r#trait::MuUpdate> = match self.mu_strategy {
-            MuStrategyChoice::Monotone => Box::new(MonotoneMuUpdate::new()),
+            MuStrategyChoice::Monotone => {
+                let mut m = MonotoneMuUpdate::new();
+                m.mu_init = self.mu.mu_init;
+                // `mu_max` sentinel `-1` keeps the monotone default
+                // (1e5); only override on a user-supplied positive.
+                if self.mu.mu_max > 0.0 {
+                    m.mu_max = self.mu.mu_max;
+                }
+                m.mu_min = self.mu.mu_min;
+                m.mu_target = self.mu.mu_target;
+                m.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
+                m.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
+                m.mu_allow_fast_monotone_decrease = self.mu.mu_allow_fast_monotone_decrease;
+                m.compl_inf_tol = self.conv_check.compl_inf_tol;
+                Box::new(m)
+            }
             MuStrategyChoice::Adaptive => {
                 let mut adaptive = AdaptiveMuUpdate::new();
                 adaptive.mu_oracle = self.mu_oracle;
+                adaptive.mu_init = self.mu.mu_init;
+                // Adaptive treats `mu_max == -1` as "lazy init from
+                // `mu_max_fact * curr_avrg_compl`" — forward the
+                // sentinel as-is.
+                adaptive.mu_max = self.mu.mu_max;
+                adaptive.mu_max_fact = self.mu.mu_max_fact;
+                adaptive.mu_min = self.mu.mu_min;
+                adaptive.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
+                adaptive.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
                 Box::new(adaptive)
             }
         };
@@ -219,7 +317,10 @@ impl AlgorithmBuilder {
             // surface for now.
             LineSearchChoice::CgPenalty => Box::new(PenaltyLsAcceptor::default()),
         };
-        let line_search = BacktrackingLineSearch::new(acceptor);
+        let mut line_search = BacktrackingLineSearch::new(acceptor);
+        line_search.watchdog_shortened_iter_trigger =
+            self.line_search.watchdog_shortened_iter_trigger;
+        line_search.watchdog_trial_iter_max = self.line_search.watchdog_trial_iter_max;
 
         let conv_check: Box<dyn crate::conv_check::r#trait::ConvCheck> =
             Box::new(OptErrorConvCheck {
@@ -260,8 +361,12 @@ impl AlgorithmBuilder {
             }),
         };
 
-        let iter_output: Box<dyn crate::output::r#trait::IterationOutput> =
-            Box::new(OrigIterationOutput::new());
+        let iter_output: Box<dyn crate::output::r#trait::IterationOutput> = {
+            let mut o = OrigIterationOutput::new();
+            o.print_frequency_iter = self.output.print_frequency_iter;
+            o.print_frequency_time = self.output.print_frequency_time;
+            Box::new(o)
+        };
 
         let scaling: Box<dyn NlpScalingObject> = match self.nlp_scaling_method {
             NlpScalingChoice::None => Box::new(NoNlpScalingObject::new()),
@@ -353,6 +458,9 @@ mod tests {
                                 nlp_scaling_method,
                                 warm_start_init_point: false,
                                 conv_check: ConvCheckOptions::default(),
+                                mu: MuOptions::default(),
+                                line_search: LineSearchOptions::default(),
+                                output: OutputOptions::default(),
                             }
                             .build();
                         }
