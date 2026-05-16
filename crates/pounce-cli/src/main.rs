@@ -42,6 +42,10 @@ fn main() -> ExitCode {
         println!("pounce {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
+    if args.about {
+        print_about();
+        return ExitCode::SUCCESS;
+    }
 
     let mut app = IpoptApplication::new();
 
@@ -203,6 +207,62 @@ fn main() -> ExitCode {
         | ApplicationReturnStatus::SolvedToAcceptableLevel => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
     }
+}
+
+/// `--about` output: version, build provenance, compiled-in features,
+/// available linear-solver backends, and runtime paths. Intended for
+/// bug reports — every field that distinguishes one build from another
+/// should appear here.
+fn print_about() {
+    let pkg_ver = env!("CARGO_PKG_VERSION");
+    let git = env!("POUNCE_BUILD_GIT");
+    let when = env!("POUNCE_BUILD_TIME");
+    let profile = env!("POUNCE_BUILD_PROFILE");
+    let target = env!("POUNCE_BUILD_TARGET");
+    let host = env!("POUNCE_BUILD_HOST");
+    let rustc = env!("POUNCE_BUILD_RUSTC");
+
+    println!("pounce {pkg_ver} (commit {git}, built {when})");
+    println!();
+    println!("Build:");
+    println!("  profile:        {profile}");
+    println!("  target:         {target}");
+    if host != target {
+        println!("  host:           {host}");
+    }
+    println!("  rustc:          {rustc}");
+    println!();
+
+    println!("Features:");
+    #[cfg(feature = "ma57")]
+    println!("  ma57:           enabled");
+    #[cfg(not(feature = "ma57"))]
+    println!("  ma57:           disabled (rebuild with --features ma57 to enable HSL MA57)");
+    println!();
+
+    println!("Linear solvers:");
+    println!("  feral           FERAL pure-Rust sparse LDL^T  (always built-in)");
+    #[cfg(feature = "ma57")]
+    println!("  ma57            HSL MA57 via libcoinhsl       (compiled in)");
+    #[cfg(not(feature = "ma57"))]
+    println!("  ma57            HSL MA57 via libcoinhsl       (not compiled; resolves to FERAL at runtime)");
+    println!();
+
+    println!("Runtime paths:");
+    match std::env::current_exe() {
+        Ok(p) => println!("  executable:     {}", p.display()),
+        Err(e) => println!("  executable:     <unknown: {e}>"),
+    }
+    match std::env::current_dir() {
+        Ok(p) => println!("  cwd:            {}", p.display()),
+        Err(e) => println!("  cwd:            <unknown: {e}>"),
+    }
+    println!();
+
+    println!(
+        "Report bugs at {}/issues",
+        env!("CARGO_PKG_REPOSITORY")
+    );
 }
 
 /// Default backend factory used by the restoration sub-IPM. Mirrors

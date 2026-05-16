@@ -20,6 +20,9 @@ pub struct Args {
     pub set_options: Vec<(String, String)>,
     pub help: bool,
     pub version: bool,
+    /// `--about`: print build metadata, compiled-in features, available
+    /// linear solvers, and runtime paths. Used for bug reports.
+    pub about: bool,
 }
 
 impl Args {
@@ -46,6 +49,8 @@ Options:
   --list-problems           print available built-in problems and exit
   --help, -h                print this message and exit
   --version, -V             print version and exit
+  --about                   print version, build info, features,
+                            linear solvers, and runtime paths
 "
     }
 
@@ -55,6 +60,7 @@ Options:
         let mut set_options: Vec<(String, String)> = Vec::new();
         let mut help = false;
         let mut version = false;
+        let mut about = false;
         let mut list_problems = false;
 
         let mut it = argv.into_iter().skip(1);
@@ -62,6 +68,7 @@ Options:
             match arg.as_str() {
                 "-h" | "--help" => help = true,
                 "-V" | "--version" => version = true,
+                "--about" => about = true,
                 "--list-problems" => list_problems = true,
                 "--problem" => {
                     let v = it
@@ -103,7 +110,7 @@ Options:
             std::process::exit(0);
         }
 
-        if !help && !version {
+        if !help && !version && !about {
             let problem = problem
                 .ok_or_else(|| "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string())?;
             return Ok(Self {
@@ -112,6 +119,7 @@ Options:
                 set_options,
                 help,
                 version,
+                about,
             });
         }
 
@@ -121,6 +129,7 @@ Options:
             set_options,
             help,
             version,
+            about,
         })
     }
 }
@@ -159,6 +168,12 @@ mod tests {
     fn version_short_and_long() {
         assert!(Args::parse_argv(argv(&["-V"])).unwrap().version);
         assert!(Args::parse_argv(argv(&["--version"])).unwrap().version);
+    }
+
+    #[test]
+    fn about_flag_does_not_require_problem() {
+        let a = Args::parse_argv(argv(&["--about"])).unwrap();
+        assert!(a.about);
     }
 
     #[test]

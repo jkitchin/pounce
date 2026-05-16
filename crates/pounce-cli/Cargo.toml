@@ -7,6 +7,8 @@ authors.workspace = true
 repository.workspace = true
 description = "Command-line driver for POUNCE — solves built-in TNLPs and AMPL .nl files."
 
+build = "build.rs"
+
 [[bin]]
 name = "pounce"
 path = "src/main.rs"
