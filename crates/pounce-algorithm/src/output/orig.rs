@@ -98,7 +98,7 @@ impl IterationOutput for OrigIterationOutput {
         let alpha_char = d.info_alpha_primal_char;
         let ls_count = d.info_ls_count;
 
-        format!(
+        let mut row = format!(
             "{:>4} {:14.7e} {:7.2e} {:7.2e} {:5.1} {:7.2e} {:>5} {:7.2e} {:7.2e}{}{:>3}",
             iter,
             unscaled_f,
@@ -111,7 +111,18 @@ impl IterationOutput for OrigIterationOutput {
             alpha_primal,
             alpha_char,
             ls_count,
-        )
+        );
+        // `print_info_string` (upstream
+        // `IpOrigIterationOutput.cpp:WriteOutputImpl`): append the
+        // per-iter diagnostic-tag string accumulated on `IpoptData`
+        // (e.g. soft-resto / watchdog / corrector markers). The string
+        // is cleared by the algorithm at the start of each outer
+        // iteration via `clear_info_string`.
+        if self.print_info_string == PrintInfoString::Yes && !d.info_string.is_empty() {
+            row.push(' ');
+            row.push_str(&d.info_string);
+        }
+        row
     }
 }
 
