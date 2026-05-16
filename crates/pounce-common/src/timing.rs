@@ -84,6 +84,29 @@ impl TimedTask {
     pub fn total_sys_time(&self) -> Number { self.total_sys.get() }
     pub fn total_wallclock_time(&self) -> Number { self.total_wall.get() }
 
+    /// Running wallclock seconds since `start()` plus accumulated total
+    /// from prior start/end cycles. When the task is not currently
+    /// started this is the same as [`Self::total_wallclock_time`].
+    /// Used by `OptErrorConvCheck` to gate `max_wall_time` mid-solve
+    /// without forcing a `start()`/`end()` round-trip every iter.
+    pub fn live_wallclock_time(&self) -> Number {
+        if self.enabled.get() && self.start_called.get() {
+            self.total_wall.get() + wallclock_time() - self.start_wall.get()
+        } else {
+            self.total_wall.get()
+        }
+    }
+
+    /// Live counterpart of [`Self::total_cpu_time`]; see
+    /// [`Self::live_wallclock_time`] for the contract.
+    pub fn live_cpu_time(&self) -> Number {
+        if self.enabled.get() && self.start_called.get() {
+            self.total_cpu.get() + cpu_time() - self.start_cpu.get()
+        } else {
+            self.total_cpu.get()
+        }
+    }
+
     /// RAII-style guard: start the timer immediately, end it when the
     /// returned value is dropped (or when [`TimedGuard::stop`] is
     /// called). Survives early returns / `?` in the caller scope.

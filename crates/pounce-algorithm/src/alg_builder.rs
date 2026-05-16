@@ -21,6 +21,7 @@
 //! `IpoptAlgorithm` lands once each strategy's arithmetic does.
 
 use crate::conv_check::opt_error::OptErrorConvCheck;
+use pounce_common::types::{Index, Number};
 use crate::eq_mult::least_square::LeastSquareMults;
 use crate::hess::exact::ExactHessianUpdater;
 use crate::hess::lim_mem_quasi_newton::{LimMemQuasiNewtonUpdater, UpdateType};
@@ -103,6 +104,46 @@ pub struct AlgorithmBundle {
     pub search_dir: Option<PdSearchDirCalc>,
 }
 
+/// Knobs read off `OptionsList` and baked into the assembled
+/// `OptErrorConvCheck`. Defaults mirror
+/// `IpOptErrorConvCheck.cpp:RegisterOptions`.
+#[derive(Debug, Clone)]
+pub struct ConvCheckOptions {
+    pub tol: Number,
+    pub dual_inf_tol: Number,
+    pub constr_viol_tol: Number,
+    pub compl_inf_tol: Number,
+    pub acceptable_tol: Number,
+    pub acceptable_dual_inf_tol: Number,
+    pub acceptable_constr_viol_tol: Number,
+    pub acceptable_compl_inf_tol: Number,
+    pub acceptable_obj_change_tol: Number,
+    pub acceptable_iter: Index,
+    pub max_iter: Index,
+    pub max_cpu_time: Number,
+    pub max_wall_time: Number,
+}
+
+impl Default for ConvCheckOptions {
+    fn default() -> Self {
+        Self {
+            tol: 1e-8,
+            dual_inf_tol: 1.0,
+            constr_viol_tol: 1e-4,
+            compl_inf_tol: 1e-4,
+            acceptable_tol: 1e-6,
+            acceptable_dual_inf_tol: 1e10,
+            acceptable_constr_viol_tol: 1e-2,
+            acceptable_compl_inf_tol: 1e-2,
+            acceptable_obj_change_tol: 1e20,
+            acceptable_iter: 15,
+            max_iter: 3000,
+            max_cpu_time: 1e6,
+            max_wall_time: 1e6,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AlgorithmBuilder {
     pub linear_solver: LinearSolverChoice,
@@ -116,6 +157,7 @@ pub struct AlgorithmBuilder {
     pub line_search_method: LineSearchChoice,
     pub nlp_scaling_method: NlpScalingChoice,
     pub warm_start_init_point: bool,
+    pub conv_check: ConvCheckOptions,
 }
 
 impl Default for AlgorithmBuilder {
@@ -129,6 +171,7 @@ impl Default for AlgorithmBuilder {
             line_search_method: LineSearchChoice::Filter,
             nlp_scaling_method: NlpScalingChoice::GradientBased,
             warm_start_init_point: false,
+            conv_check: ConvCheckOptions::default(),
         }
     }
 }
@@ -179,7 +222,23 @@ impl AlgorithmBuilder {
         let line_search = BacktrackingLineSearch::new(acceptor);
 
         let conv_check: Box<dyn crate::conv_check::r#trait::ConvCheck> =
-            Box::new(OptErrorConvCheck::new());
+            Box::new(OptErrorConvCheck {
+                tol: self.conv_check.tol,
+                dual_inf_tol: self.conv_check.dual_inf_tol,
+                constr_viol_tol: self.conv_check.constr_viol_tol,
+                compl_inf_tol: self.conv_check.compl_inf_tol,
+                acceptable_tol: self.conv_check.acceptable_tol,
+                acceptable_dual_inf_tol: self.conv_check.acceptable_dual_inf_tol,
+                acceptable_constr_viol_tol: self.conv_check.acceptable_constr_viol_tol,
+                acceptable_compl_inf_tol: self.conv_check.acceptable_compl_inf_tol,
+                acceptable_obj_change_tol: self.conv_check.acceptable_obj_change_tol,
+                acceptable_iter: self.conv_check.acceptable_iter,
+                max_iter: self.conv_check.max_iter,
+                max_cpu_time: self.conv_check.max_cpu_time,
+                max_wall_time: self.conv_check.max_wall_time,
+                acceptable_count: 0,
+                last_acceptable_obj: None,
+            });
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point
         {
@@ -293,6 +352,7 @@ mod tests {
                                 line_search_method,
                                 nlp_scaling_method,
                                 warm_start_init_point: false,
+                                conv_check: ConvCheckOptions::default(),
                             }
                             .build();
                         }

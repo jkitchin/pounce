@@ -573,6 +573,61 @@ impl IpoptApplication {
                 _ => LinearSolverChoice::Feral,
             };
         }
+
+        // Convergence tolerances (port of `IpOptErrorConvCheck.cpp`'s
+        // `RegisterOptions` consumers). Defaults already match upstream
+        // — only override when the user set the key explicitly.
+        let read_num = |key: &str| -> Option<f64> {
+            self.options
+                .get_numeric_value(key, "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+        };
+        let read_int = |key: &str| -> Option<i32> {
+            self.options
+                .get_integer_value(key, "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+        };
+        if let Some(v) = read_num("tol") {
+            builder.conv_check.tol = v;
+        }
+        if let Some(v) = read_num("dual_inf_tol") {
+            builder.conv_check.dual_inf_tol = v;
+        }
+        if let Some(v) = read_num("constr_viol_tol") {
+            builder.conv_check.constr_viol_tol = v;
+        }
+        if let Some(v) = read_num("compl_inf_tol") {
+            builder.conv_check.compl_inf_tol = v;
+        }
+        if let Some(v) = read_int("max_iter") {
+            builder.conv_check.max_iter = v;
+        }
+        if let Some(v) = read_num("max_cpu_time") {
+            builder.conv_check.max_cpu_time = v;
+        }
+        if let Some(v) = read_num("max_wall_time") {
+            builder.conv_check.max_wall_time = v;
+        }
+        if let Some(v) = read_num("acceptable_tol") {
+            builder.conv_check.acceptable_tol = v;
+        }
+        if let Some(v) = read_num("acceptable_dual_inf_tol") {
+            builder.conv_check.acceptable_dual_inf_tol = v;
+        }
+        if let Some(v) = read_num("acceptable_constr_viol_tol") {
+            builder.conv_check.acceptable_constr_viol_tol = v;
+        }
+        if let Some(v) = read_num("acceptable_compl_inf_tol") {
+            builder.conv_check.acceptable_compl_inf_tol = v;
+        }
+        if let Some(v) = read_num("acceptable_obj_change_tol") {
+            builder.conv_check.acceptable_obj_change_tol = v;
+        }
+        if let Some(v) = read_int("acceptable_iter") {
+            builder.conv_check.acceptable_iter = v;
+        }
         builder
     }
 }
