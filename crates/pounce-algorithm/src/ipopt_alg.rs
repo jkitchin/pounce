@@ -303,19 +303,36 @@ impl IpoptAlgorithm {
                 timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::MaxiterExceeded);
             }
+            ConvergenceStatus::CpuTimeExceeded => {
+                timing.check_convergence.end();
+                return IterateOutcome::Terminate(SolverReturn::CpuTimeExceeded);
+            }
+            ConvergenceStatus::WallTimeExceeded => {
+                timing.check_convergence.end();
+                return IterateOutcome::Terminate(SolverReturn::WallTimeExceeded);
+            }
             ConvergenceStatus::Failed => {
                 timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::InternalError);
             }
         }
 
-        // Stash the iterate if it satisfies `acceptable_tol`. Mirrors
-        // upstream `IpBacktrackingLineSearch.cpp:282-289` — checked at
-        // the top of every line-search call so the most recent
-        // acceptable iterate is always available as a rollback target
-        // if restoration later fails.
-        if self.bundle.conv_check.current_is_acceptable(nlp_err) {
+        // Stash the iterate if it satisfies the per-component
+        // `acceptable_*_tol` triplet. Mirrors upstream
+        // `IpBacktrackingLineSearch.cpp:282-289` — checked at the top
+        // of every line-search call so the most recent acceptable
+        // iterate is always available as a rollback target if
+        // restoration later fails. The recorder feeds
+        // `acceptable_obj_change_tol`'s stability cross-check on
+        // subsequent iterates.
+        if self
+            .bundle
+            .conv_check
+            .current_is_acceptable_with_state(nlp_err, &self.data, &self.cq)
+        {
             self.store_acceptable_point();
+            let curr_f = self.cq.borrow().curr_f();
+            self.bundle.conv_check.set_curr_acceptable_obj(curr_f);
         }
         timing.check_convergence.end();
 

@@ -21,6 +21,12 @@ pub enum ConvergenceStatus {
     Continue,
     Converged,
     MaxIterExceeded,
+    /// `max_cpu_time` budget reached. Maps to
+    /// `SolverReturn::CpuTimeExceeded` → `MaximumCpuTimeExceeded`.
+    CpuTimeExceeded,
+    /// `max_wall_time` budget reached. Maps to
+    /// `SolverReturn::WallTimeExceeded` → `MaximumWallTimeExceeded`.
+    WallTimeExceeded,
     Failed,
 }
 
@@ -54,6 +60,29 @@ pub trait ConvCheck {
     fn current_is_acceptable(&self, _nlp_err: Number) -> bool {
         false
     }
+
+    /// State-aware acceptance check. Mirrors upstream
+    /// `OptimalityErrorConvergenceCheck::CurrentIsAcceptable` which
+    /// reads the per-component residuals and current `f` to gate the
+    /// `acceptable_dual_inf_tol` / `acceptable_constr_viol_tol` /
+    /// `acceptable_compl_inf_tol` / `acceptable_obj_change_tol`
+    /// triplet. Default delegates to the scalar [`Self::current_is_acceptable`].
+    fn current_is_acceptable_with_state(
+        &self,
+        nlp_err: Number,
+        _data: &IpoptDataHandle,
+        _cq: &IpoptCqHandle,
+    ) -> bool {
+        self.current_is_acceptable(nlp_err)
+    }
+
+    /// Record the current objective at the iterate the main loop just
+    /// stashed as the latest "acceptable point" — mirrors upstream
+    /// `OptimalityErrorConvergenceCheck::SetCurrAcceptableF`. The
+    /// recorded value feeds the `acceptable_obj_change_tol` stability
+    /// cross-check on subsequent iterates. Default no-op for policies
+    /// that don't track acceptable points.
+    fn set_curr_acceptable_obj(&mut self, _obj: Number) {}
 
     /// Outer NLP convergence tolerance, as used by the main loop's
     /// almost-feasible bypass guard (port of

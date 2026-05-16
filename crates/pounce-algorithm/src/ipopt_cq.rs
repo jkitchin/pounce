@@ -796,6 +796,21 @@ impl IpoptCalculatedQuantities {
         if acc.is_infinite() { 0.0 } else { acc }
     }
 
+    /// Max-norm of the unbarriered complementarity blocks
+    /// `max_i |s_i · z_i|` across all four `(x_L, x_U, s_L, s_U)`
+    /// pairs. Mirrors upstream
+    /// `IpIpoptCalculatedQuantities.cpp:CurrComplementarity(0., NORM_MAX)`
+    /// — used by `OptimalityErrorConvergenceCheck` to gate the
+    /// per-component `compl_inf_tol` test independently of the scaled
+    /// scalar `curr_nlp_error`.
+    pub fn curr_complementarity_max(&self) -> Number {
+        self.curr_compl_x_l()
+            .amax()
+            .max(self.curr_compl_x_u().amax())
+            .max(self.curr_compl_s_l().amax())
+            .max(self.curr_compl_s_u().amax())
+    }
+
     /// Centrality measure `ξ = min_i(s_i z_i) / avrg(s · z)`. Mirrors
     /// `IpIpoptCalculatedQuantities.cpp:CurrCentralityMeasure`. Used
     /// by [`crate::mu::oracle::loqo::LoqoMuOracle`] to bias σ toward

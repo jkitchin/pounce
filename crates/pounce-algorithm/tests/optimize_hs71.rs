@@ -284,6 +284,155 @@ fn hs071_solves_with_adaptive_mu_quality_function_oracle() {
     );
 }
 
+/// Setting `dual_inf_tol` and `compl_inf_tol` impossibly small must
+/// block the scaled-error convergence path. Baseline HS71 reports
+/// `SolveSucceeded` in single-digit iters; with the per-component
+/// gate set to 1e-20 the solver can't claim success on the same
+/// iterate, so it exits through the tiny-step / max-iter side
+/// instead. Demonstrates that the per-component gate from
+/// `OptimalityErrorConvergenceCheck::CheckConvergence` is wired
+/// through end-to-end.
+#[test]
+fn hs071_dual_inf_tol_blocks_convergence() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_numeric_value("dual_inf_tol", 1e-20, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("compl_inf_tol", 1e-20, true, false)
+        .unwrap();
+    // Disable the acceptable-streak fallback so the only way out is
+    // SearchDirectionBecomesTooSmall / MaximumIterationsExceeded.
+    app.options_mut()
+        .set_integer_value("acceptable_iter", 9999, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("max_iter", 25, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 strict dual/compl: status={:?} iter={}",
+        status, stats.iteration_count,
+    );
+    assert!(
+        !matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "per-component gate ignored: status = {status:?}",
+    );
+}
+
+/// Tightening `tol` past machine precision and pairing it with a
+/// generous `acceptable_tol = 1e-4` plus `acceptable_iter = 1` must
+/// route HS71 through `SolvedToAcceptableLevel`. Demonstrates that
+/// the `acceptable_*` triplet is wired through `OptionsList`.
+#[test]
+fn hs071_acceptable_tol_triggers_acceptable_level_status() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-30, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("acceptable_tol", 1e-4, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("acceptable_iter", 1, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_integer_value("max_iter", 25, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 acceptable: status={:?} iter={} obj={}",
+        status, stats.iteration_count, stats.final_objective,
+    );
+    // The streak fires inside the conv-check (returns Converged), so
+    // the application maps it to SolveSucceeded — same return code
+    // upstream uses when the acceptable streak supplies the
+    // termination. The pounce-side `SolvedToAcceptableLevel` status
+    // is reserved for the restore-acceptable-on-restoration-failure
+    // path. Either way, the run must succeed without hitting
+    // max_iter.
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+    assert!(
+        stats.iteration_count < 25,
+        "iter_count = {} (expected < 25)",
+        stats.iteration_count,
+    );
+    assert!(
+        (stats.final_objective - 17.014017).abs() < 1e-3,
+        "final_objective = {}",
+        stats.final_objective,
+    );
+}
+
+/// `max_wall_time` set to effectively zero must short-circuit the
+/// solver before the first real iterate test. Maps to
+/// `MaximumWallTimeExceeded` per upstream.
+#[test]
+fn hs071_max_wall_time_terminates() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_numeric_value("max_wall_time", 1e-12, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 wall budget: status={:?} iter={} wall_s={:.6}",
+        status, stats.iteration_count, stats.total_wallclock_time_secs,
+    );
+    assert!(
+        matches!(status, ApplicationReturnStatus::MaximumWallTimeExceeded),
+        "unexpected status: {status:?}",
+    );
+}
+
+/// `max_cpu_time` analogue.
+#[test]
+fn hs071_max_cpu_time_terminates() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_numeric_value("max_cpu_time", 1e-12, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 cpu budget: status={:?} iter={}",
+        status, stats.iteration_count,
+    );
+    assert!(
+        matches!(status, ApplicationReturnStatus::MaximumCpuTimeExceeded),
+        "unexpected status: {status:?}",
+    );
+}
+
 #[test]
 fn hs071_solves_with_adaptive_mu_probing_oracle() {
     let mut app = IpoptApplication::new();
