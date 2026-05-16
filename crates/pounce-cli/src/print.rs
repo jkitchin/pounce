@@ -146,7 +146,7 @@ pub fn print_banner(linear_solver: &str) {
         " Released under the Eclipse Public License (EPL) — drop-in compatible with Ipopt."
     );
     println!(
-        "         For more information visit https://github.com/coin-or/Ipopt"
+        "         For more information visit https://github.com/jkitchin/pounce"
     );
     println!(
         "******************************************************************************"
