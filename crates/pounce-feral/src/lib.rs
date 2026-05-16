@@ -52,30 +52,48 @@ pub struct FeralSolverInterface {
 
 impl FeralSolverInterface {
     pub fn new() -> Self {
-        // Cascade-break (ratio=0.5, eps=1e-10) is required for IPM KKT
-        // matrices with cascade-overloaded supernodes — e.g.
-        // pinene_3200_0009 factor: 33ms with cb on vs 94s with cb off
-        // (feral 585d739). Feral 585d739 made cb opt-in, so we set it
-        // explicitly here rather than relying on the constructor.
-        // POUNCE_FERAL_CASCADE_BREAK=off disables it for diagnostic runs
-        // (issue #17, inertia trajectory comparison on robot_1600 /
-        // rocket_12800).
-        let cb_off = matches!(
+        // Cascade-break (ratio=0.5, eps=1e-10) was on by default until
+        // the issue-17/issue-18 inertia investigations: it accelerates
+        // some IPM KKT matrices with cascade-overloaded supernodes
+        // (pinene_3200_0009: 33ms with cb on vs 94s with cb off,
+        // feral 585d739) but introduces WrongInertia loops on others
+        // (robot_1600 iter-3; NARX_CFy iters 1+, ~250 spurious
+        // WrongInertia status records under cb=pounce vs correct
+        // inertia under cb=off — see feral journal 2026-05-16 21:30).
+        // Feral's C-API now defaults cb off (da23d13) for the same
+        // reason. Default here matches that. Opt in via
+        // POUNCE_FERAL_CASCADE_BREAK=on|1|true for the pinene-family
+        // problems where cb is a net win.
+        let cb_on = matches!(
             std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref(),
-            Ok("0") | Ok("false") | Ok("off")
+            Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
         );
-        let mut solver = if cb_off {
-            Solver::new()
-        } else {
+        let mut solver = if cb_on {
             Solver::new()
                 .with_cascade_break(0.5)
                 .with_cascade_break_eps(1e-10)
+        } else {
+            Solver::new()
         };
         if matches!(
             std::env::var("FERAL_PARALLEL").as_deref(),
             Ok("0") | Ok("false") | Ok("off")
         ) {
             solver = solver.with_parallel(false);
+        }
+        // FMA dispatch for dense trailing-update / panel-update
+        // kernels. Off by default: on the Mittelmann sweep the
+        // ~2× kernel throughput on aarch64/x86_v3 is outweighed by
+        // the per-pivot rounding drift, which trips more WrongInertia
+        // checks and delayed pivots in IPOPT (same failure mode that
+        // forced cascade-break off by default — see git log 84add74).
+        // Opt in via POUNCE_FERAL_FMA=on|1|true for workloads where
+        // the kernel speedup dominates.
+        if matches!(
+            std::env::var("POUNCE_FERAL_FMA").as_deref(),
+            Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
+        ) {
+            solver = solver.with_fma(true);
         }
         // Iterative refinement at solve time closes the residual floor
         // produced by cascade-break's L-factor perturbation; matches
