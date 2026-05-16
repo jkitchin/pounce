@@ -184,6 +184,38 @@ impl TSymLinearSolver {
         debug_assert_eq!(vals.len(), self.nonzeros_triplet as usize);
         debug_assert_eq!(rhs_vals.len(), (self.dim * nrhs) as usize);
 
+        // One-shot KKT dump for backend-comparison testing. Triggered
+        // when POUNCE_DBG_KKT_DUMP is set to a file path; writes one
+        // binary record (dim, nnz, nrhs, ia[], ja[], vals[], rhs[]) on
+        // the first multi_solve call, then disables itself.
+        if let Ok(path) = std::env::var("POUNCE_DBG_KKT_DUMP") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::File::create(&path) {
+                let dim = self.dim as u64;
+                let nnz = self.nonzeros_triplet as u64;
+                let nrhs64 = nrhs as u64;
+                let _ = f.write_all(&dim.to_le_bytes());
+                let _ = f.write_all(&nnz.to_le_bytes());
+                let _ = f.write_all(&nrhs64.to_le_bytes());
+                for &i in &self.airn {
+                    let _ = f.write_all(&(i as i64).to_le_bytes());
+                }
+                for &j in &self.ajcn {
+                    let _ = f.write_all(&(j as i64).to_le_bytes());
+                }
+                for &v in vals {
+                    let _ = f.write_all(&v.to_le_bytes());
+                }
+                for &v in &*rhs_vals {
+                    let _ = f.write_all(&v.to_le_bytes());
+                }
+                let _ = f.flush();
+            }
+            // SAFETY: removing an env var is safe in single-threaded
+            // setup; this dump fires from the main IPM thread.
+            unsafe { std::env::remove_var("POUNCE_DBG_KKT_DUMP"); }
+        }
+
         // Push values + (optional) scaling into the backend.
         let mut new_matrix = new_matrix;
         if new_matrix || self.just_switched_on_scaling {
