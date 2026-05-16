@@ -220,6 +220,15 @@ impl Default for LineSearchOptions {
 pub struct OutputOptions {
     pub print_frequency_iter: Index,
     pub print_frequency_time: Number,
+    /// `print_info_string` (default `false`). When on, the iter row
+    /// ends with the contents of `IpoptData::info_string` so users
+    /// can read the per-iteration diagnostic tags.
+    pub print_info_string: bool,
+    /// `inf_pr_output` — `"original"` (default) prints the unscaled
+    /// NLP primal infeasibility; `"internal"` prints the internal
+    /// reformulated violation. Only meaningful once NLP-side scaling
+    /// is in play; until then both modes produce the same number.
+    pub inf_pr_output_internal: bool,
 }
 
 impl Default for OutputOptions {
@@ -227,6 +236,8 @@ impl Default for OutputOptions {
         Self {
             print_frequency_iter: 1,
             print_frequency_time: 0.0,
+            print_info_string: false,
+            inf_pr_output_internal: false,
         }
     }
 }
@@ -362,9 +373,20 @@ impl AlgorithmBuilder {
         };
 
         let iter_output: Box<dyn crate::output::r#trait::IterationOutput> = {
+            use crate::output::orig::{InfPrTag, PrintInfoString};
             let mut o = OrigIterationOutput::new();
             o.print_frequency_iter = self.output.print_frequency_iter;
             o.print_frequency_time = self.output.print_frequency_time;
+            o.print_info_string = if self.output.print_info_string {
+                PrintInfoString::Yes
+            } else {
+                PrintInfoString::No
+            };
+            o.inf_pr_output = if self.output.inf_pr_output_internal {
+                InfPrTag::Internal
+            } else {
+                InfPrTag::Original
+            };
             Box::new(o)
         };
 

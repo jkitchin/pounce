@@ -192,7 +192,18 @@ fn main() -> ExitCode {
             _ => "FERAL",
         }
     };
-    print::print_banner(backend_tag);
+    // `sb yes` skips the copyright banner. Mirrors upstream
+    // `IpoptApplication::Initialize` which also reads `sb` and gates
+    // the banner. Problem-stats and iter rows are unaffected.
+    let suppress_banner = app
+        .options()
+        .get_bool_value("sb", "")
+        .ok()
+        .and_then(|(v, f)| f.then_some(v))
+        .unwrap_or(false);
+    if !suppress_banner {
+        print::print_banner(backend_tag);
+    }
     if let Some(stats) = print::collect_stats(&tnlp) {
         print::print_problem_stats(&stats);
     }

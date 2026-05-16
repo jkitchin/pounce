@@ -310,6 +310,19 @@ impl IpoptApplication {
     fn optimize_constrained(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         let t_start = Instant::now();
 
+        // `print_user_options yes` — dump the OptionsList before the
+        // solve. Mirrors `IpoptApplication::call_optimize` (upstream
+        // calls `Jnlst().Printf(.., "%s", options_->PrintUserOptions())`).
+        let print_opts = self
+            .options
+            .get_bool_value("print_user_options", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(false);
+        if print_opts {
+            print!("\nList of user-set options:\n\n{}", self.options.print_user_options());
+        }
+
         // Mint a fresh `TimingStatistics` for this solve — shared (via
         // `Rc`) with the data and the NLP below so every `eval_*` and
         // every iterate-phase records into the same accumulator. The
@@ -726,6 +739,16 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("print_frequency_time") {
             builder.output.print_frequency_time = v;
+        }
+        if let Ok((v, found)) = self.options.get_bool_value("print_info_string", "") {
+            if found {
+                builder.output.print_info_string = v;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_string_value("inf_pr_output", "") {
+            if found {
+                builder.output.inf_pr_output_internal = v == "internal";
+            }
         }
         builder
     }

@@ -496,6 +496,37 @@ fn hs071_solves_with_nondefault_mu_init() {
     );
 }
 
+/// `print_info_string yes` + `inf_pr_output = internal` flow through
+/// `algorithm_builder_from_options` into `OrigIterationOutput`. The
+/// solve must still converge; this is a smoke test that the option
+/// wiring doesn't break the iter-row format.
+#[test]
+fn hs071_solves_with_iter_diagnostic_options() {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_bool_value("print_info_string", true, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("inf_pr_output", "internal", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_bool_value("print_user_options", true, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+
+    let tnlp_concrete = Rc::new(RefCell::new(Hs071::default()));
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp_concrete) as _;
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+}
+
 /// `print_frequency_iter = 100` makes pounce skip per-iter output
 /// rows but the solve itself must still converge cleanly. Smokes the
 /// option wiring without trying to assert against captured stdout.
