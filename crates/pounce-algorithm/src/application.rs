@@ -40,7 +40,7 @@ use crate::restoration::RestorationPhase;
 pub type RestorationFactory = Box<dyn FnMut() -> Box<dyn RestorationPhase>>;
 use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_common::exception::{ExceptionKind, SolverException};
-use pounce_common::journalist::Journalist;
+use pounce_common::journalist::{JournalLevel, Journalist};
 use pounce_common::options_list::OptionsList;
 use pounce_common::reg_options::RegisteredOptions;
 use pounce_common::timing::TimingStatistics;
@@ -171,13 +171,52 @@ impl IpoptApplication {
                 line!() as Index,
             )
         })?;
-        self.options.read_from_str(&txt, true)
+        self.options.read_from_str(&txt, true)?;
+        self.open_output_file_journal();
+        Ok(())
     }
 
     /// Read options from a string in `ipopt.opt` format. Useful for
     /// tests and embedded callers.
     pub fn initialize_with_options_str(&mut self, s: &str) -> Result<(), SolverException> {
-        self.options.read_from_str(s, true)
+        self.options.read_from_str(s, true)?;
+        self.open_output_file_journal();
+        Ok(())
+    }
+
+    /// Honor `output_file` / `file_print_level` / `file_append`: when
+    /// `output_file` is non-empty, attach a `FileJournal` named
+    /// `"OutputFile:<fname>"` at the requested level. Mirrors
+    /// `IpoptApplication::OpenOutputFile` (called from `Initialize`).
+    /// No-op if `output_file` is unset, empty, or could not be opened.
+    ///
+    /// NOTE: pounce's iteration output currently bypasses the
+    /// journalist and writes directly to stdout. The file journal is
+    /// attached and the timing report (gated by `print_timing_statistics`)
+    /// is mirrored to it; per-iter rows will start landing in the file
+    /// once the iter-output path is routed through the journalist.
+    fn open_output_file_journal(&self) {
+        let fname = match self.options.get_string_value("output_file", "") {
+            Ok((v, true)) if !v.is_empty() => v,
+            _ => return,
+        };
+        let level_int = self
+            .options
+            .get_integer_value("file_print_level", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(5);
+        let level = journal_level_from_int(level_int);
+        let append = self
+            .options
+            .get_bool_value("file_append", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(false);
+        let jname = format!("OutputFile:{}", fname);
+        let _ = self
+            .journalist
+            .add_file_journal(&jname, &fname, level, append);
     }
 
     /// No-op initialize (just succeeds). Mirrors
@@ -499,9 +538,10 @@ impl IpoptApplication {
         // End-of-solve timing report. Gated on `print_timing_statistics`
         // (default "no"); mirrors upstream's
         // `IpoptApplication::call_optimize` →
-        // `IpTimingStatistics::PrintAllValues` call site. Routed through
-        // stdout (not the journalist) for parity with the existing
-        // banner / iter-row output path.
+        // `IpTimingStatistics::PrintAllValues` call site. The report
+        // goes to stdout (for parity with the banner / iter-row output
+        // path) and is also fanned out to the journalist so an
+        // `output_file` attached via `Initialize` picks it up.
         let print_timing = self
             .options
             .get_bool_value("print_timing_statistics", "")
@@ -509,7 +549,14 @@ impl IpoptApplication {
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or(false);
         if print_timing {
-            print!("{}", timing.report());
+            let report = timing.report();
+            print!("{}", report);
+            use pounce_common::journalist::{JournalCategory, JournalLevel};
+            self.journalist.print(
+                JournalLevel::J_SUMMARY,
+                JournalCategory::J_TIMING_STATISTICS,
+                &report,
+            );
         }
 
         app_status
@@ -628,7 +675,80 @@ impl IpoptApplication {
         if let Some(v) = read_int("acceptable_iter") {
             builder.conv_check.acceptable_iter = v;
         }
+
+        // Barrier-parameter (μ) options — consumers in
+        // `IpMonotoneMuUpdate.cpp` / `IpAdaptiveMuUpdate.cpp`. Both
+        // updaters share the same option names; the builder forwards
+        // each into whichever strategy is assembled.
+        if let Some(v) = read_num("mu_init") {
+            builder.mu.mu_init = v;
+        }
+        if let Some(v) = read_num("mu_max") {
+            builder.mu.mu_max = v;
+        }
+        if let Some(v) = read_num("mu_max_fact") {
+            builder.mu.mu_max_fact = v;
+        }
+        if let Some(v) = read_num("mu_min") {
+            builder.mu.mu_min = v;
+        }
+        if let Some(v) = read_num("mu_target") {
+            builder.mu.mu_target = v;
+        }
+        if let Some(v) = read_num("mu_linear_decrease_factor") {
+            builder.mu.mu_linear_decrease_factor = v;
+        }
+        if let Some(v) = read_num("mu_superlinear_decrease_power") {
+            builder.mu.mu_superlinear_decrease_power = v;
+        }
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("mu_allow_fast_monotone_decrease", "")
+        {
+            if found {
+                builder.mu.mu_allow_fast_monotone_decrease = v == "yes";
+            }
+        }
+
+        // Watchdog options — consumers in
+        // `IpBacktrackingLineSearch.cpp:RegisterOptions`. Baked into
+        // the `BacktrackingLineSearch` at build time.
+        if let Some(v) = read_int("watchdog_shortened_iter_trigger") {
+            builder.line_search.watchdog_shortened_iter_trigger = v;
+        }
+        if let Some(v) = read_int("watchdog_trial_iter_max") {
+            builder.line_search.watchdog_trial_iter_max = v;
+        }
+
+        // Iteration-output options — consumed by `OrigIterationOutput`.
+        if let Some(v) = read_int("print_frequency_iter") {
+            builder.output.print_frequency_iter = v;
+        }
+        if let Some(v) = read_num("print_frequency_time") {
+            builder.output.print_frequency_time = v;
+        }
         builder
+    }
+}
+
+/// Map the integer `print_level` / `file_print_level` option to the
+/// matching [`JournalLevel`] variant. Mirrors upstream's
+/// `static_cast<EJournalLevel>(int_value)` with clamping.
+fn journal_level_from_int(v: i32) -> JournalLevel {
+    match v.clamp(0, 12) {
+        0 => JournalLevel::J_NONE,
+        1 => JournalLevel::J_ERROR,
+        2 => JournalLevel::J_STRONGWARNING,
+        3 => JournalLevel::J_SUMMARY,
+        4 => JournalLevel::J_WARNING,
+        5 => JournalLevel::J_ITERSUMMARY,
+        6 => JournalLevel::J_DETAILED,
+        7 => JournalLevel::J_MOREDETAILED,
+        8 => JournalLevel::J_VECTOR,
+        9 => JournalLevel::J_MOREVECTOR,
+        10 => JournalLevel::J_MATRIX,
+        11 => JournalLevel::J_MOREMATRIX,
+        _ => JournalLevel::J_ALL,
     }
 }
 
