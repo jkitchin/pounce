@@ -232,6 +232,15 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_bool_option("honor_original_bounds", "Indicates whether final points should be projected into original bounds.", false, "Ipopt might relax the bounds during the optimization (see, e.g., option \"bound_relax_factor\"). This option determines whether the final point should be projected back into the user-provide original bounds after the optimization. Note that violations of constraints and complementarity reported by Ipopt at the end of the solution process are for the non-projected point.")?;
     r.set_registering_category("Warm Start");
     r.add_bool_option("warm_start_same_structure", "Indicates whether a problem with a structure identical to the previous one is to be solved.", false, "If enabled, then the algorithm assumes that an NLP is now to be solved whose structure is identical to one that already was considered (with the same NLP object).")?;
+    // Upstream registers `warm_start_init_point` in
+    // `IpDefaultIterateInitializer.cpp:RegisterOptions`, alongside the
+    // regular (cold) initializer. Pounce's `DefaultIterateInitializer`
+    // doesn't pull it from `OptionsList` directly — `AlgBuilder` reads
+    // it to pick between `DefaultIterateInitializer` and
+    // `WarmStartIterateInitializer` — but the option still needs to
+    // appear in the registry so `--option warm_start_init_point=yes`
+    // type-checks.
+    r.add_bool_option("warm_start_init_point", "Warm-start for initial point", false, "Indicates whether this optimization should use a warm start initialization, where values of primal and dual variables are given (e.g., from a previous optimization of a related problem.)")?;
     r.set_registering_category("NLP");
     r.add_bool_option("check_derivatives_for_naninf", "Indicates whether it is desired to check for Nan/Inf in derivative matrices", false, "Activating this option will cause an error if an invalid number is detected in the constraint Jacobians or the Lagrangian Hessian. If this is not activated, the test is skipped, and the algorithm might proceed with invalid numbers and fail. If test is activated and an invalid number is detected, the matrix is written to output with print_level corresponding to J_MOREDETAILED (7); so beware of large output!")?;
     r.add_bool_option("grad_f_constant", "Indicates whether to assume that the objective function is linear", false, "Activating this option will cause Ipopt to ask for the Gradient of the objective function only once from the NLP and reuse this information later.")?;

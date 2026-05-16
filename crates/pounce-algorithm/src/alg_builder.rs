@@ -161,6 +161,48 @@ pub struct AlgorithmBuilder {
     pub mu: MuOptions,
     pub line_search: LineSearchOptions,
     pub output: OutputOptions,
+    pub warm: WarmStartOptions,
+}
+
+/// Knobs read off `OptionsList` and baked into
+/// [`WarmStartIterateInitializer`]. Defaults mirror
+/// `IpWarmStartIterateInitializer.cpp:RegisterOptions`.
+///
+/// Wired today: `mult_init_max` (clamps |y_c|, |y_d| and caps z/v
+/// blocks) and `target_mu` (overrides `data.curr_mu` at iter 0).
+/// The remaining knobs (`bound_push`, `bound_frac`, `slack_bound_push`,
+/// `slack_bound_frac`, `mult_bound_push`, `entire_iterate`,
+/// `same_structure`) are stored on the initializer but not yet
+/// consumed — `WarmStartIterateInitializer::set_initial_iterates`
+/// currently trusts the caller-populated `data.curr` rather than
+/// re-running the upstream `push_variables` machinery.
+#[derive(Debug, Clone)]
+pub struct WarmStartOptions {
+    pub bound_push: Number,
+    pub bound_frac: Number,
+    pub slack_bound_push: Number,
+    pub slack_bound_frac: Number,
+    pub mult_bound_push: Number,
+    pub mult_init_max: Number,
+    pub target_mu: Number,
+    pub entire_iterate: bool,
+    pub same_structure: bool,
+}
+
+impl Default for WarmStartOptions {
+    fn default() -> Self {
+        Self {
+            bound_push: 1e-3,
+            bound_frac: 1e-3,
+            slack_bound_push: 1e-3,
+            slack_bound_frac: 1e-3,
+            mult_bound_push: 1e-3,
+            mult_init_max: 1e6,
+            target_mu: 0.0,
+            entire_iterate: false,
+            same_structure: false,
+        }
+    }
 }
 
 /// Knobs read off `OptionsList` and baked into the assembled
@@ -257,6 +299,7 @@ impl Default for AlgorithmBuilder {
             mu: MuOptions::default(),
             line_search: LineSearchOptions::default(),
             output: OutputOptions::default(),
+            warm: WarmStartOptions::default(),
         }
     }
 }
@@ -354,7 +397,7 @@ impl AlgorithmBuilder {
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point
         {
-            Box::new(WarmStartIterateInitializer::new())
+            Box::new(WarmStartIterateInitializer::with_options(self.warm.clone()))
         } else {
             Box::new(DefaultIterateInitializer::with_eq_mult_calculator(
                 Box::new(LeastSquareMults::new()),
@@ -483,6 +526,7 @@ mod tests {
                                 mu: MuOptions::default(),
                                 line_search: LineSearchOptions::default(),
                                 output: OutputOptions::default(),
+                                warm: WarmStartOptions::default(),
                             }
                             .build();
                         }

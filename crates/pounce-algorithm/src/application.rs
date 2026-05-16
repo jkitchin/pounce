@@ -750,6 +750,48 @@ impl IpoptApplication {
                 builder.output.inf_pr_output_internal = v == "internal";
             }
         }
+
+        // Warm-start options — consumed by `WarmStartIterateInitializer`
+        // (port of `IpWarmStartIterateInitializer.cpp:RegisterOptions`).
+        // `warm_start_init_point` is the toggle that picks between the
+        // default (cold) and warm-start initializers; the remaining
+        // knobs are baked onto the chosen initializer at build time.
+        if let Ok((v, found)) = self.options.get_bool_value("warm_start_init_point", "") {
+            if found {
+                builder.warm_start_init_point = v;
+            }
+        }
+        if let Ok((v, found)) = self.options.get_bool_value("warm_start_same_structure", "") {
+            if found {
+                builder.warm.same_structure = v;
+            }
+        }
+        if let Some(v) = read_num("warm_start_bound_push") {
+            builder.warm.bound_push = v;
+        }
+        if let Some(v) = read_num("warm_start_bound_frac") {
+            builder.warm.bound_frac = v;
+        }
+        if let Some(v) = read_num("warm_start_slack_bound_push") {
+            builder.warm.slack_bound_push = v;
+        }
+        if let Some(v) = read_num("warm_start_slack_bound_frac") {
+            builder.warm.slack_bound_frac = v;
+        }
+        if let Some(v) = read_num("warm_start_mult_bound_push") {
+            builder.warm.mult_bound_push = v;
+        }
+        if let Some(v) = read_num("warm_start_mult_init_max") {
+            builder.warm.mult_init_max = v;
+        }
+        if let Some(v) = read_num("warm_start_target_mu") {
+            builder.warm.target_mu = v;
+        }
+        if let Ok((v, found)) = self.options.get_string_value("warm_start_entire_iterate", "") {
+            if found {
+                builder.warm.entire_iterate = v == "yes";
+            }
+        }
         builder
     }
 }
