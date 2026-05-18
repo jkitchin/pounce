@@ -279,7 +279,7 @@ impl IterateInitializer for DefaultIterateInitializer {
 /// through the `P_L`/`P_U` selection matrices. Bounds are packed
 /// (lower-bound vector `x_l` has dim equal to the number of
 /// lower-bounded components; `Px_L: n × n_lo` selects them).
-fn push_x_into_interior(
+pub(crate) fn push_x_into_interior(
     x: &mut DenseVector,
     px_l: &dyn pounce_linalg::Matrix,
     x_l: &dyn Vector,

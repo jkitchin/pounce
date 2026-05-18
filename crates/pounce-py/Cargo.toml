@@ -1,0 +1,35 @@
+[package]
+name = "pounce-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Python bindings for POUNCE — cyipopt-compatible Problem class, scipy-style minimize() facade, and JAX-friendly autodiff/implicit-differentiation helpers. Built with PyO3 + maturin."
+
+[lib]
+name = "_pounce"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `extension-module` is required when building the wheel via maturin (it
+# avoids linking libpython, which is wrong for a Python extension on
+# most platforms). It is *not* set in plain `cargo build` so workspace
+# CI keeps compiling without a Python interpreter on PATH.
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-nlp = { path = "../pounce-nlp" }
+pounce-algorithm = { path = "../pounce-algorithm" }
+pounce-restoration = { path = "../pounce-restoration" }
+pounce-feral = { path = "../pounce-feral" }
+pounce-linsol = { path = "../pounce-linsol" }
+pounce-sensitivity = { path = "../pounce-sensitivity" }
+pyo3 = { version = "0.22", features = ["abi3-py39"] }
+numpy = "0.22"
+
+[lints]
+workspace = true

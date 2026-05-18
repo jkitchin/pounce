@@ -198,6 +198,12 @@ pub struct IpoptAlgorithm {
     /// is on. Drained into [`SolveStatistics::iterations`] by
     /// `IpoptApplication::optimize_constrained` after the solve.
     pub iter_history: Vec<pounce_nlp::solve_statistics::IterRecord>,
+    /// When `false`, the per-iteration table that `iterate()` writes
+    /// straight to stdout is suppressed. Wired from
+    /// `IpoptApplication`'s `print_level` option: level 0 turns this
+    /// off (matches upstream's "no console output" contract). Default
+    /// `true` so CLI / direct-driver users keep the familiar trace.
+    pub print_iter_output: bool,
 }
 
 impl IpoptAlgorithm {
@@ -236,6 +242,7 @@ impl IpoptAlgorithm {
             resto_wall_secs: 0.0,
             record_iter_history: false,
             iter_history: Vec::new(),
+            print_iter_output: true,
         }
     }
 
@@ -370,7 +377,7 @@ impl IpoptAlgorithm {
         //    `IpIpoptAlgorithm::Optimize` ordering.
         timing.output_iteration.start();
         self.bundle.iter_output.write_output();
-        {
+        if self.print_iter_output {
             let iter_count = self.data.borrow().iter_count;
             if iter_count % 10 == 0 {
                 print!("{}", crate::output::orig::OrigIterationOutput::HEADER);

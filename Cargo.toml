@@ -13,13 +13,17 @@ members = [
     "crates/pounce-l1penalty",
     "crates/pounce-sensitivity",
     "crates/pounce-cinterface",
+    "crates/pounce-py",
     "crates/pounce-cli",
     "benchmarks/cutest",
     "tools/iter-diff",
 ]
 # Default `cargo build` / `cargo test` skip pounce-hsl so the pure-Rust
 # build needs no Fortran/HSL toolchain. To build with the HSL MA57
-# backend: `cargo build -p pounce-cli --features ma57`.
+# backend: `cargo build -p pounce-cli --features ma57`. The pounce-py
+# crate is in members so plain `cargo check -p pounce-py` works for
+# type-checking, but a wheel build still goes through `cd python &&
+# maturin develop` (which enables the `extension-module` feature).
 default-members = [
     "crates/pounce-common",
     "crates/pounce-linalg",

@@ -2,34 +2,34 @@
 //! `IpWarmStartIterateInitializer.{hpp,cpp}`. Used when a previous
 //! solve has left a trial point that should be reused.
 //!
-//! Trusts that the caller (typically `IpoptApplication::ReOptimizeTNLP`)
-//! has populated `data.curr` with the warm-start iterate. Beyond that,
-//! we honor two of the eight upstream `warm_start_*` options:
+//! There are two callers we serve:
 //!
-//! * `warm_start_mult_init_max` — caps the magnitude of every
-//!   multiplier block on `data.curr`. Equality multipliers (`y_c`,
-//!   `y_d`) are clipped to `[-cap, +cap]`; bound multipliers (`z_l`,
-//!   `z_u`, `v_l`, `v_u`) are clipped to `[0, cap]`. Mirrors the
-//!   per-block clamps at `IpWarmStartIterateInitializer.cpp:148-181`
-//!   (the `have_iterate` branch).
-//! * `warm_start_target_mu` — when positive, overrides `data.curr_mu`
-//!   at iter 0 so the barrier sub-problem starts at the user-requested
-//!   value rather than `mu_init`.
+//! * **`IpoptApplication::ReOptimizeTNLP`** (the upstream re-solve
+//!   path) populates `data.curr` with the previous solve's iterate.
+//!   We clamp multipliers and optionally override `mu`.
+//! * **First solves from `OptimizeTNLP`** that opt into
+//!   `warm_start_init_point=yes` to forward user-supplied
+//!   primal/dual seeds via `TNLP::get_starting_point`. Here
+//!   `data.curr` carries only dim metadata (uninitialized vectors);
+//!   we pull seeds from the NLP, push primals/slacks into the bound
+//!   interior with warm-start `bound_push`/`bound_frac`, and then
+//!   apply the same multiplier clamps.
 //!
-//! The remaining knobs (`bound_push`, `bound_frac`,
-//! `slack_bound_push`, `slack_bound_frac`, `mult_bound_push`,
-//! `entire_iterate`, `same_structure`) are stored on the initializer
-//! but not yet consumed — full `push_variables` semantics land with
-//! the rest of the warm-start path.
+//! Wired options today: `bound_push`, `bound_frac`,
+//! `slack_bound_push`, `slack_bound_frac`, `mult_init_max`,
+//! `target_mu`. The remaining knobs (`mult_bound_push`,
+//! `entire_iterate`, `same_structure`) are stored but not yet
+//! consumed.
 
 use crate::alg_builder::WarmStartOptions;
+use crate::init::default::push_x_into_interior;
 use crate::init::r#trait::IterateInitializer;
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
 use crate::kkt::aug_system_solver::AugSystemSolver;
-use pounce_linalg::dense_vector::DenseVector;
+use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::Vector;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -61,14 +61,25 @@ impl IterateInitializer for WarmStartIterateInitializer {
         &mut self,
         data: &IpoptDataHandle,
         _cq: &IpoptCqHandle,
-        _nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
         _aug_solver: &mut dyn AugSystemSolver,
     ) -> bool {
-        // The caller is expected to have placed the warm-start iterate
-        // on `data.curr`; bail out early if that hasn't happened.
-        let mut borrow = data.borrow_mut();
-        if borrow.curr.is_none() {
-            return false;
+        // Two entry points share this initializer: the re-optimize path
+        // (curr.x carries values from the prior solve) and the first
+        // OptimizeTNLP call that opted into warm_start_init_point=yes
+        // (curr.x is the application's placeholder seed — allocated but
+        // never written). Detect the latter and rebuild `curr` from the
+        // NLP's get_starting_x/y/z hooks before clamping.
+        let needs_seed_from_nlp = {
+            let borrow = data.borrow();
+            match borrow.curr.as_ref() {
+                None => return false,
+                Some(c) => !is_initialized(&c.x),
+            }
+        };
+
+        if needs_seed_from_nlp {
+            seed_from_nlp(data, nlp, &self.opts);
         }
 
         if self.opts.mult_init_max > 0.0 {
@@ -76,6 +87,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
             // shared via `Rc` with previous solves, so we make fresh
             // copies before mutating to avoid clobbering downstream
             // borrowers.
+            let mut borrow = data.borrow_mut();
             let curr = borrow.curr.as_ref().unwrap();
             let cap = self.opts.mult_init_max;
             let new_curr = IteratesVector::new(
@@ -92,11 +104,108 @@ impl IterateInitializer for WarmStartIterateInitializer {
         }
 
         if self.opts.target_mu > 0.0 {
-            borrow.curr_mu = self.opts.target_mu;
+            data.borrow_mut().curr_mu = self.opts.target_mu;
         }
 
         true
     }
+}
+
+/// Pull a fresh starting iterate from the NLP (which routes to
+/// `TNLP::get_starting_point` with `init_x` / `init_lambda` /
+/// `init_z` all true), push the primals and slacks into the bound
+/// interior using warm-start-specific `bound_push`/`bound_frac`, and
+/// install the result on `data.curr`. Mirrors steps 1-4 of
+/// `DefaultIterateInitializer::set_initial_iterates`, but with
+/// upstream's warm-start option block governing the push.
+fn seed_from_nlp(
+    data: &IpoptDataHandle,
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    opts: &WarmStartOptions,
+) {
+    let (n_x, n_s, n_yc, n_yd, n_zl, n_zu, n_vl, n_vu) = {
+        let borrow = data.borrow();
+        let c = borrow.curr.as_ref().unwrap();
+        (
+            c.x.dim(),
+            c.s.dim(),
+            c.y_c.dim(),
+            c.y_d.dim(),
+            c.z_l.dim(),
+            c.z_u.dim(),
+            c.v_l.dim(),
+            c.v_u.dim(),
+        )
+    };
+
+    let mut x = DenseVectorSpace::new(n_x).make_new_dense();
+    nlp.borrow_mut().get_starting_x(&mut x);
+    {
+        let nlp_ref = nlp.borrow();
+        push_x_into_interior(
+            &mut x,
+            &*nlp_ref.px_l(),
+            nlp_ref.x_l(),
+            &*nlp_ref.px_u(),
+            nlp_ref.x_u(),
+            opts.bound_push,
+            opts.bound_frac,
+        );
+    }
+
+    let mut s = DenseVectorSpace::new(n_s).make_new_dense();
+    nlp.borrow_mut().eval_d(&x, &mut s);
+    {
+        let nlp_ref = nlp.borrow();
+        push_x_into_interior(
+            &mut s,
+            &*nlp_ref.pd_l(),
+            nlp_ref.d_l(),
+            &*nlp_ref.pd_u(),
+            nlp_ref.d_u(),
+            opts.slack_bound_push,
+            opts.slack_bound_frac,
+        );
+    }
+
+    let mut y_c = DenseVectorSpace::new(n_yc).make_new_dense();
+    let mut y_d = DenseVectorSpace::new(n_yd).make_new_dense();
+    y_c.set(0.0);
+    y_d.set(0.0);
+    nlp.borrow_mut().get_starting_y(&mut y_c, &mut y_d);
+
+    let mut z_l = DenseVectorSpace::new(n_zl).make_new_dense();
+    let mut z_u = DenseVectorSpace::new(n_zu).make_new_dense();
+    let mut v_l = DenseVectorSpace::new(n_vl).make_new_dense();
+    let mut v_u = DenseVectorSpace::new(n_vu).make_new_dense();
+    z_l.set(0.0);
+    z_u.set(0.0);
+    v_l.set(0.0);
+    v_u.set(0.0);
+    nlp.borrow_mut()
+        .get_starting_z(&mut z_l, &mut z_u, &mut v_l, &mut v_u);
+
+    let iv = IteratesVector::new(
+        Rc::new(x),
+        Rc::new(s),
+        Rc::new(y_c),
+        Rc::new(y_d),
+        Rc::new(z_l),
+        Rc::new(z_u),
+        Rc::new(v_l),
+        Rc::new(v_u),
+    );
+    data.borrow_mut().set_curr(iv);
+}
+
+fn is_initialized(v: &Rc<dyn Vector>) -> bool {
+    if v.dim() == 0 {
+        return true;
+    }
+    v.as_any()
+        .downcast_ref::<DenseVector>()
+        .map(|d| d.is_initialized())
+        .unwrap_or(true)
 }
 
 /// Clone `v` into a fresh owned vector and clamp every entry to

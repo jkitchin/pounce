@@ -946,6 +946,15 @@ impl IpoptApplication {
             alg = alg.with_diagnostics(Rc::clone(diag));
         }
         alg.max_iter = max_iter;
+        // Honor `print_level == 0`: suppress the per-iteration table
+        // that the algorithm writes straight to stdout. (The Phase-7
+        // journalist surface respects `print_level` already; this is
+        // the legacy direct-print site that needs the same gate.)
+        if let Ok((v, found)) = self.options.get_integer_value("print_level", "") {
+            if found && v <= 0 {
+                alg.print_iter_output = false;
+            }
+        }
 
         let solver_status = alg.optimize();
         // Close the overall-algorithm timer on the success path. The

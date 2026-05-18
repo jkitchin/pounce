@@ -25,6 +25,14 @@
 __pycache__/
 *.pyc
 
+# Python build artifacts (maturin develop emits the .so next to the package)
+python/pounce/_pounce*.so
+python/pounce/_pounce*.pyd
+python/.pytest_cache/
+python/build/
+python/dist/
+python/*.egg-info/
+
 # Claude Code local state
 .claude/
 

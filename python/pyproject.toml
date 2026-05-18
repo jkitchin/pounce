@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pounce"
+version = "0.1.0"
+description = "Python interface to POUNCE — a pure-Rust port of the Ipopt interior-point NLP solver. cyipopt-style Problem class, scipy-style minimize() facade, and JAX-friendly autodiff / implicit differentiation."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "EPL-2.0" }
+authors = [{ name = "John Kitchin", email = "jkitchin@andrew.cmu.edu" }]
+classifiers = [
+    "License :: OSI Approved :: Eclipse Public License 2.0 (EPL-2.0)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+]
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
+scipy = ["scipy>=1.11"]
+dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30"]
+
+[project.urls]
+Homepage = "https://github.com/jkitchin/pounce"
+Issues = "https://github.com/jkitchin/pounce/issues"
+
+[tool.maturin]
+manifest-path = "../crates/pounce-py/Cargo.toml"
+python-source = "."
+module-name = "pounce._pounce"
+features = ["pyo3/extension-module"]
+strip = true
