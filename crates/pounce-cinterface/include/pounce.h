@@ -1,0 +1,311 @@
+/* pounce.h — C API for the POUNCE nonlinear interior-point solver.
+ *
+ * Drop-in replacement for Ipopt 3.14's `IpStdCInterface.h`. Every
+ * function name, argument list, and return code matches upstream so a
+ * caller linking against libipopt can swap to libpounce_cinterface
+ * without source changes.
+ *
+ * Quick-start (C):
+ *
+ *   #include "pounce.h"
+ *
+ *   IpoptProblem nlp = CreateIpoptProblem(
+ *       n, x_L, x_U, m, g_L, g_U,
+ *       nele_jac, nele_hess, 0,
+ *       eval_f, eval_g, eval_grad_f, eval_jac_g, eval_h);
+ *   AddIpoptNumOption(nlp, "tol", 1e-8);
+ *   AddIpoptIntOption(nlp, "max_iter", 500);
+ *   enum ApplicationReturnStatus status = IpoptSolve(
+ *       nlp, x, NULL, &obj, NULL, NULL, NULL, user_data);
+ *   FreeIpoptProblem(nlp);
+ *
+ * Build & link example (macOS):
+ *
+ *   cargo build --release -p pounce-cinterface
+ *   cc app.c -I crates/pounce-cinterface/include \
+ *       -L target/release -lpounce_cinterface \
+ *       -Wl,-rpath,target/release -o app
+ */
+
+#ifndef POUNCE_H
+#define POUNCE_H
+
+#include <stdbool.h>
+
+#include "IpoptReturnCodes.h"
+
+/* -----------------------------------------------------------------
+ * Version
+ * ----------------------------------------------------------------- */
+#define POUNCE_VERSION_MAJOR 0
+#define POUNCE_VERSION_MINOR 1
+#define POUNCE_VERSION_PATCH 0
+#define POUNCE_VERSION "0.1.0"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Scalar typedefs — match upstream Ipopt for binary compatibility. */
+typedef double ipnumber;
+typedef int    ipindex;
+
+/* Deprecated upstream aliases, kept for source-level compatibility. */
+typedef ipnumber Number;
+typedef ipindex  Index;
+typedef bool     Bool;
+#ifndef TRUE
+#  define TRUE  1
+#endif
+#ifndef FALSE
+#  define FALSE 0
+#endif
+
+/** Opaque handle to a pounce problem. */
+struct IpoptProblemInfo;
+typedef struct IpoptProblemInfo* IpoptProblem;
+
+/** Pointer for arbitrary caller state passed to every callback. */
+typedef void* UserDataPtr;
+
+/* -----------------------------------------------------------------
+ * Callback signatures (identical to Ipopt C API).
+ * All callbacks return true on success, false on error.
+ * `new_x` / `new_lambda` indicate whether x / lambda changed since
+ * the last call.
+ *
+ * Jacobian / Hessian callbacks are dispatched in two modes:
+ *   values == NULL  → fill iRow/jCol with the sparsity pattern
+ *   values != NULL  → fill values in the same element order
+ * ----------------------------------------------------------------- */
+
+typedef bool (*Eval_F_CB)(
+    ipindex     n,
+    ipnumber*   x,
+    bool        new_x,
+    ipnumber*   obj_value,
+    UserDataPtr user_data);
+
+typedef bool (*Eval_Grad_F_CB)(
+    ipindex     n,
+    ipnumber*   x,
+    bool        new_x,
+    ipnumber*   grad_f,
+    UserDataPtr user_data);
+
+typedef bool (*Eval_G_CB)(
+    ipindex     n,
+    ipnumber*   x,
+    bool        new_x,
+    ipindex     m,
+    ipnumber*   g,
+    UserDataPtr user_data);
+
+typedef bool (*Eval_Jac_G_CB)(
+    ipindex     n,
+    ipnumber*   x,
+    bool        new_x,
+    ipindex     m,
+    ipindex     nele_jac,
+    ipindex*    iRow,
+    ipindex*    jCol,
+    ipnumber*   values,
+    UserDataPtr user_data);
+
+typedef bool (*Eval_H_CB)(
+    ipindex     n,
+    ipnumber*   x,
+    bool        new_x,
+    ipnumber    obj_factor,
+    ipindex     m,
+    ipnumber*   lambda,
+    bool        new_lambda,
+    ipindex     nele_hess,
+    ipindex*    iRow,
+    ipindex*    jCol,
+    ipnumber*   values,
+    UserDataPtr user_data);
+
+typedef bool (*Intermediate_CB)(
+    ipindex     alg_mod,
+    ipindex     iter_count,
+    ipnumber    obj_value,
+    ipnumber    inf_pr,
+    ipnumber    inf_du,
+    ipnumber    mu,
+    ipnumber    d_norm,
+    ipnumber    regularization_size,
+    ipnumber    alpha_du,
+    ipnumber    alpha_pr,
+    ipindex     ls_trials,
+    UserDataPtr user_data);
+
+/* -----------------------------------------------------------------
+ * Lifecycle
+ * ----------------------------------------------------------------- */
+
+/** Allocate a new problem handle.
+ *
+ *   n           number of primal variables
+ *   x_L/x_U     variable lower/upper bounds (length n; ±1e19 for ±∞)
+ *   m           number of constraints
+ *   g_L/g_U     constraint lower/upper bounds (length m)
+ *   nele_jac    number of nonzeros in the Jacobian
+ *   nele_hess   number of nonzeros in the lower-triangular Hessian
+ *   index_style 0 = C (0-based indices), 1 = Fortran (1-based)
+ *   eval_*      callback function pointers
+ *
+ * Returns NULL on invalid arguments (negative dims, missing required
+ * callbacks, NULL bound pointers when the corresponding dim > 0). */
+IpoptProblem CreateIpoptProblem(
+    ipindex        n,
+    ipnumber*      x_L,
+    ipnumber*      x_U,
+    ipindex        m,
+    ipnumber*      g_L,
+    ipnumber*      g_U,
+    ipindex        nele_jac,
+    ipindex        nele_hess,
+    ipindex        index_style,
+    Eval_F_CB      eval_f,
+    Eval_G_CB      eval_g,
+    Eval_Grad_F_CB eval_grad_f,
+    Eval_Jac_G_CB  eval_jac_g,
+    Eval_H_CB      eval_h);
+
+/** Free a problem handle. After this call the pointer is invalid. */
+void FreeIpoptProblem(IpoptProblem ipopt_problem);
+
+/* -----------------------------------------------------------------
+ * Options
+ * Each Add*Option function returns true on success, false if the
+ * keyword is unknown or the value violates registered bounds.
+ * ----------------------------------------------------------------- */
+
+bool AddIpoptStrOption(IpoptProblem ipopt_problem, char* keyword, char* val);
+bool AddIpoptNumOption(IpoptProblem ipopt_problem, char* keyword, ipnumber val);
+bool AddIpoptIntOption(IpoptProblem ipopt_problem, char* keyword, ipindex val);
+
+/** Open a file to receive solver output at `print_level`. Equivalent
+ *  to setting the `output_file` and `file_print_level` options and
+ *  attaching a journalist FileJournal. */
+bool OpenIpoptOutputFile(
+    IpoptProblem ipopt_problem,
+    char*        file_name,
+    int          print_level);
+
+/** Install user-provided NLP scaling. Pass NULL for `x_scaling` or
+ *  `g_scaling` to leave that axis unscaled. Set option
+ *  `nlp_scaling_method = user-scaling` for the scaling to take
+ *  effect. */
+bool SetIpoptProblemScaling(
+    IpoptProblem ipopt_problem,
+    ipnumber     obj_scaling,
+    ipnumber*    x_scaling,
+    ipnumber*    g_scaling);
+
+/* -----------------------------------------------------------------
+ * Intermediate callback
+ * ----------------------------------------------------------------- */
+
+/** Install (or remove, with cb == NULL) a per-iteration callback.
+ *  Returning false from the callback signals
+ *  ApplicationReturnStatus::User_Requested_Stop. */
+bool SetIntermediateCallback(
+    IpoptProblem    ipopt_problem,
+    Intermediate_CB intermediate_cb);
+
+/* -----------------------------------------------------------------
+ * Solve
+ *
+ *   problem   handle from CreateIpoptProblem()
+ *   x         [in/out] initial point (length n) → primal solution
+ *   g         [out]    constraint values g(x*), or NULL to skip
+ *   obj_val   [out]    objective f(x*), or NULL to skip
+ *   mult_g    [out]    constraint multipliers λ (length m), or NULL
+ *   mult_x_L  [out]    lower-bound multipliers z_L (length n), or NULL
+ *   mult_x_U  [out]    upper-bound multipliers z_U (length n), or NULL
+ *   user_data forwarded unmodified to every callback
+ *
+ * Returns an ApplicationReturnStatus (see IpoptReturnCodes.h).
+ * ----------------------------------------------------------------- */
+enum ApplicationReturnStatus IpoptSolve(
+    IpoptProblem ipopt_problem,
+    ipnumber*    x,
+    ipnumber*    g,
+    ipnumber*    obj_val,
+    ipnumber*    mult_g,
+    ipnumber*    mult_x_L,
+    ipnumber*    mult_x_U,
+    UserDataPtr  user_data);
+
+/* -----------------------------------------------------------------
+ * Inspection (valid only during the intermediate callback)
+ *
+ * These mirror Ipopt 3.14's GetIpoptCurrent* functions. Pass NULL for
+ * any output buffer to skip retrieving it. They return false until
+ * pounce's algorithm core invokes the intermediate callback per
+ * iteration (currently a follow-up — the signature is here so callers
+ * can link against it today).
+ * ----------------------------------------------------------------- */
+
+bool GetIpoptCurrentIterate(
+    IpoptProblem ipopt_problem,
+    bool         scaled,
+    ipindex      n,
+    ipnumber*    x,
+    ipnumber*    z_L,
+    ipnumber*    z_U,
+    ipindex      m,
+    ipnumber*    g,
+    ipnumber*    lambda);
+
+bool GetIpoptCurrentViolations(
+    IpoptProblem ipopt_problem,
+    bool         scaled,
+    ipindex      n,
+    ipnumber*    x_L_violation,
+    ipnumber*    x_U_violation,
+    ipnumber*    compl_x_L,
+    ipnumber*    compl_x_U,
+    ipnumber*    grad_lag_x,
+    ipindex      m,
+    ipnumber*    nlp_constraint_violation,
+    ipnumber*    compl_g);
+
+/* -----------------------------------------------------------------
+ * Library info
+ * ----------------------------------------------------------------- */
+
+/** Get the pounce version as `major.minor.release`. Any pointer may
+ *  be NULL to skip that component. */
+void GetIpoptVersion(int* major, int* minor, int* release);
+
+/* -----------------------------------------------------------------
+ * Pounce extensions — post-solve statistics
+ *
+ * These match the `ripopt_get_*` accessors in ripopt.h. All are valid
+ * only after IpoptSolve() has returned; they yield zero before the
+ * first solve.
+ * ----------------------------------------------------------------- */
+
+/** Number of IPM iterations in the most recent solve. */
+ipindex  GetIpoptIterCount(IpoptProblem ipopt_problem);
+
+/** Wall-clock solve time in seconds from the most recent solve. */
+ipnumber GetIpoptSolveTime(IpoptProblem ipopt_problem);
+
+/** Final primal infeasibility from the most recent solve. */
+ipnumber GetIpoptPrimalInf(IpoptProblem ipopt_problem);
+
+/** Final dual infeasibility from the most recent solve. */
+ipnumber GetIpoptDualInf(IpoptProblem ipopt_problem);
+
+/** Final complementarity error from the most recent solve. */
+ipnumber GetIpoptComplInf(IpoptProblem ipopt_problem);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* POUNCE_H */

@@ -226,6 +226,37 @@ impl IpoptApplication {
         Ok(())
     }
 
+    /// Mirror `IpoptApplication::OpenOutputFile`. Sets the `output_file`
+    /// / `file_print_level` options and attaches a matching
+    /// `FileJournal` named `OutputFile:<fname>` to the journalist.
+    /// Returns `false` if the file could not be opened or the option
+    /// store rejected the request (e.g. clamped print level).
+    pub fn open_output_file(&mut self, fname: &str, print_level: i32) -> bool {
+        if self
+            .options
+            .set_string_value("output_file", fname, true, false)
+            .is_err()
+        {
+            return false;
+        }
+        if self
+            .options
+            .set_integer_value("file_print_level", print_level as Index, true, false)
+            .is_err()
+        {
+            return false;
+        }
+        let level = journal_level_from_int(print_level);
+        let jname = format!("OutputFile:{}", fname);
+        // Drop any previous file journal so a second call switches files
+        // cleanly. `add_file_journal` would otherwise refuse to attach
+        // a duplicate by name; remove-by-name isn't in the journalist
+        // API, so we settle for the name-collision case here.
+        self.journalist
+            .add_file_journal(&jname, fname, level, false)
+            .is_some()
+    }
+
     /// Wrap a TNLP and report problem dimensions. Used in tests until
     /// the full IPM path covers every entry shape.
     pub fn problem_dimensions(&self, tnlp: &mut dyn TNLP) -> Option<NlpInfo> {
