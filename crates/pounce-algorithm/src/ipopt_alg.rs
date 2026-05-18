@@ -24,8 +24,11 @@
 use crate::alg_builder::AlgorithmBundle;
 use crate::conv_check::r#trait::ConvergenceStatus;
 use crate::ipopt_cq::IpoptCqHandle;
+use crate::intermediate::{CtxGuard, IntermediateContext};
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
+use pounce_nlp::return_codes::AlgorithmMode;
+use pounce_nlp::tnlp::{IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, IterStats, TNLP};
 use crate::iter_dump::IterDumper;
 use crate::kkt::pd_search_dir_calc::PdSearchDirCalc;
 use crate::line_search::backtracking::Outcome;
@@ -45,6 +48,15 @@ pub struct IpoptAlgorithm {
     /// search direction, line-search trial-point evaluation). Absent
     /// in the structural unit tests of Phases 5-6.
     pub nlp: Option<Rc<RefCell<dyn IpoptNlp>>>,
+    /// Optional TNLP handle — the user-facing problem. When present,
+    /// `iterate()` fires `TNLP::intermediate_callback` once per outer
+    /// iteration so callers can monitor progress or request early
+    /// termination (returning `false` from the callback surfaces as
+    /// `SolverReturn::UserRequestedStop`). Kept separate from `nlp`
+    /// because the algorithm-side NLP is the *compressed* `OrigIpoptNlp`
+    /// view (fixed-variable elimination, c/d split) while the callback
+    /// payload needs to expose the original-coordinate iterate.
+    pub tnlp: Option<Rc<RefCell<dyn TNLP>>>,
     /// Search-direction calculator (`PdSearchDirCalc`). Lands once a
     /// concrete `SymLinearSolver` backend (MUMPS / FERAL) is wired
     /// through `AlgBuilder` in Phase 7's tail.
@@ -168,6 +180,7 @@ impl IpoptAlgorithm {
             cq,
             bundle,
             nlp: None,
+            tnlp: None,
             search_dir,
             restoration: None,
             kappa_sigma: 1e10,
@@ -219,6 +232,65 @@ impl IpoptAlgorithm {
     pub fn with_nlp(mut self, nlp: Rc<RefCell<dyn IpoptNlp>>) -> Self {
         self.nlp = Some(nlp);
         self
+    }
+
+    /// Install a user-facing TNLP handle. Enables per-iteration
+    /// `TNLP::intermediate_callback` invocation from `optimize()`.
+    pub fn with_tnlp(mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> Self {
+        self.tnlp = Some(tnlp);
+        self
+    }
+
+    /// Build an [`IterStats`] payload from the current `IpoptData` /
+    /// `IpoptCq` state. Mirrors the field set the upstream Ipopt main
+    /// loop hands to `IntermediateCallback` after each `AcceptTrialPoint`.
+    fn build_iter_stats(&self) -> IterStats {
+        let d = self.data.borrow();
+        let c = self.cq.borrow();
+        let dnrm = match d.delta.as_ref() {
+            Some(delta) => delta.x.amax().max(delta.s.amax()),
+            None => 0.0,
+        };
+        IterStats {
+            // alg_mod tracking (regular vs restoration) is a follow-up;
+            // every callback fire from the outer loop reports RegularMode.
+            mode: AlgorithmMode::RegularMode,
+            iter: d.iter_count,
+            obj_value: c.curr_f(),
+            inf_pr: c.curr_primal_infeasibility_max(),
+            inf_du: c.curr_dual_infeasibility_max(),
+            mu: d.curr_mu,
+            d_norm: dnrm,
+            regularization_size: d.info_regu_x,
+            alpha_du: d.info_alpha_dual,
+            alpha_pr: d.info_alpha_primal,
+            ls_trials: d.info_ls_count,
+        }
+    }
+
+    /// Fire `TNLP::intermediate_callback` if a TNLP handle and NLP
+    /// handle are installed. Wraps the call in an [`IntermediateContext`]
+    /// guard so downstream inspector entry points (the C API's
+    /// `GetIpoptCurrent*`) can read live state for the duration. Returns
+    /// `true` to continue, `false` if the user requested termination.
+    fn fire_intermediate(&self) -> bool {
+        let Some(tnlp) = self.tnlp.as_ref() else {
+            return true;
+        };
+        let Some(nlp) = self.nlp.as_ref() else {
+            return true;
+        };
+        let stats = self.build_iter_stats();
+        let _guard = CtxGuard::install(IntermediateContext {
+            data: Rc::clone(&self.data),
+            cq: Rc::clone(&self.cq),
+            nlp: Rc::clone(nlp),
+        });
+        tnlp.borrow_mut().intermediate_callback(
+            stats,
+            &TnlpIpoptData::default(),
+            &TnlpIpoptCq::default(),
+        )
     }
 
     pub fn with_search_dir(mut self, sd: PdSearchDirCalc) -> Self {
@@ -1085,6 +1157,13 @@ impl IpoptAlgorithm {
             d.write_record(&self.data, &self.cq);
         }
 
+        // Iter 0 intermediate callback — upstream fires once after
+        // `InitializeIterates` before the loop body starts so users
+        // observe the initial point.
+        if !self.fire_intermediate() {
+            return SolverReturn::UserRequestedStop;
+        }
+
         loop {
             match self.iterate() {
                 IterateOutcome::Terminate(ret) => return ret,
@@ -1111,6 +1190,14 @@ impl IpoptAlgorithm {
                     // emission, identical to upstream's writer.
                     if let Some(d) = dumper.as_mut() {
                         d.write_record(&self.data, &self.cq);
+                    }
+                    // Per-iteration intermediate callback — fired with
+                    // an `IntermediateContext` guard so downstream
+                    // inspector entry points (the C API
+                    // `GetIpoptCurrent*` family) see live state for the
+                    // duration of the user callback.
+                    if !self.fire_intermediate() {
+                        return SolverReturn::UserRequestedStop;
                     }
                 }
             }
