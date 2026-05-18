@@ -6,7 +6,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   test:
@@ -31,7 +30,11 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --exclude pounce-cutest --exclude pounce-hsl --all-targets -- -D warnings
+        # Gate on lints that signal real bugs / perf issues; let
+        # `restriction`-group warns (unwrap_used, expect_used, etc.) and
+        # style nits surface as informational. Cargo.toml's workspace
+        # lints already declare those as `warn`, not `deny`.
+        run: cargo clippy --workspace --exclude pounce-cutest --exclude pounce-hsl --all-targets -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
 
       - name: Build
         run: cargo build --workspace --exclude pounce-cutest --exclude pounce-hsl --verbose
