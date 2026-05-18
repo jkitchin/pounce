@@ -27,6 +27,7 @@
 //! flattening (used by L-BFGS in Phase 8) is deferred.
 
 use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSystemSolver};
+use pounce_common::diagnostics::{DiagCategory, DiagnosticsState};
 use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::compound_vector::CompoundVector;
@@ -79,6 +80,13 @@ pub struct StdAugSystemSolver {
     /// algorithm installs it via [`AugSystemSolver::set_timing_stats`];
     /// when `None`, both `solve` and `resolve` skip the timing bumps.
     timing: Option<Rc<TimingStatistics>>,
+
+    /// Shared per-solve diagnostics state. `None` unless the
+    /// application requested KKT dumps via the CLI's `--dump` flag.
+    /// When set, every successful `solve()` may emit a JSONL record
+    /// to `<dump_dir>/iter_NNN/kkt_solve_MMM.jsonl`, gated by the
+    /// configured iter-spec for [`DiagCategory::Kkt`].
+    diagnostics: Option<Rc<DiagnosticsState>>,
 }
 
 impl std::fmt::Debug for StdAugSystemSolver {
@@ -119,6 +127,7 @@ impl StdAugSystemSolver {
             last_status: None,
             have_factor: false,
             timing: None,
+            diagnostics: None,
         }
     }
 
@@ -389,10 +398,39 @@ impl AugSystemSolver for StdAugSystemSolver {
             self.have_factor = true;
         }
 
-        // Diagnostic dump: when POUNCE_DUMP_KKT is set, append the
-        // augmented system to that JSONL path. Used by the offline
-        // FERAL/MA57/LAPACK comparison tool.
+        // Diagnostic dump: structured `--dump kkt:...` surface, then
+        // the legacy `POUNCE_DUMP_KKT=<path>` env-var fallback. The
+        // two paths share `write_kkt_record` so the JSON line is bit-
+        // identical regardless of how the dump was requested.
+        if let Some(diag) = self.diagnostics.clone() {
+            if diag.want(DiagCategory::Kkt) {
+                let solve_idx = diag.next_solve_index();
+                let filename = format!("kkt_solve_{solve_idx:03}.jsonl");
+                if let Some(mut w) = diag.open_writer(&filename) {
+                    let _ = write_kkt_record(
+                        &mut w,
+                        self.dim,
+                        &self.irn,
+                        &self.jcn,
+                        &self.vals,
+                        &dump_rhs,
+                        &packed,
+                        check_neg_evals,
+                        num_neg_evals,
+                        status,
+                        self.last_neg_evals,
+                    );
+                }
+            }
+        }
         if let Ok(path) = std::env::var("POUNCE_DUMP_KKT") {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::SeqCst) {
+                eprintln!(
+                    "warning: POUNCE_DUMP_KKT is deprecated; prefer `--dump kkt:<iter-spec>` (see pounce --help)"
+                );
+            }
             dump_kkt(
                 &path,
                 self.dim,
@@ -449,6 +487,10 @@ impl AugSystemSolver for StdAugSystemSolver {
         status
     }
 
+    fn set_diagnostics(&mut self, diag: Rc<DiagnosticsState>) {
+        self.diagnostics = Some(diag);
+    }
+
     fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
         self.timing = Some(timing);
     }
@@ -457,8 +499,12 @@ impl AugSystemSolver for StdAugSystemSolver {
 // ---------------- helpers ----------------
 
 #[allow(clippy::too_many_arguments)]
-fn dump_kkt(
-    path: &str,
+/// Serialize one KKT solve as a single JSONL record. Shared by the
+/// `--dump kkt:...` path (one file per solve under `iter_NNN/`) and
+/// the legacy `POUNCE_DUMP_KKT` path (one append-mode file across
+/// the whole run).
+fn write_kkt_record(
+    w: &mut dyn std::io::Write,
     dim: Index,
     irn: &[Index],
     jcn: &[Index],
@@ -469,9 +515,8 @@ fn dump_kkt(
     num_neg_evals: Index,
     status: ESymSolverStatus,
     last_neg_evals: Index,
-) {
+) -> std::io::Result<()> {
     use std::fmt::Write as _;
-    use std::io::Write as _;
 
     let mut line = String::with_capacity(64 * vals.len());
     line.push('{');
@@ -508,12 +553,40 @@ fn dump_kkt(
     }
     line.push_str("]}\n");
 
+    w.write_all(line.as_bytes())
+}
+
+fn dump_kkt(
+    path: &str,
+    dim: Index,
+    irn: &[Index],
+    jcn: &[Index],
+    vals: &[Number],
+    rhs: &[Number],
+    sol: &[Number],
+    check_neg_evals: bool,
+    num_neg_evals: Index,
+    status: ESymSolverStatus,
+    last_neg_evals: Index,
+) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
     {
-        let _ = f.write_all(line.as_bytes());
+        let _ = write_kkt_record(
+            &mut f,
+            dim,
+            irn,
+            jcn,
+            vals,
+            rhs,
+            sol,
+            check_neg_evals,
+            num_neg_evals,
+            status,
+            last_neg_evals,
+        );
     }
 }
 

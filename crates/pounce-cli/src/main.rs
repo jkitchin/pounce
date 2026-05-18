@@ -15,6 +15,9 @@ use pounce_cli::nl_reader;
 use pounce_cli::print;
 use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
+use pounce_common::diagnostics::{
+    DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
+};
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
@@ -91,6 +94,13 @@ fn main() -> ExitCode {
         bff,
     );
     app.set_restoration_factory(resto_factory);
+
+    // Snapshot the problem source before the `match` consumes
+    // `args.problem` — needed downstream by the diagnostics manifest.
+    let problem_desc: String = match &args.problem {
+        ProblemSource::Builtin(s) => format!("builtin:{s}"),
+        ProblemSource::NlFile(p) => format!("nl:{}", p.display()),
+    };
 
     let inner_tnlp: Rc<RefCell<dyn TNLP>> = match args.problem {
         ProblemSource::Builtin(name) => match builtin::lookup(&name) {
@@ -208,16 +218,132 @@ fn main() -> ExitCode {
         print::print_problem_stats(&stats);
     }
 
+    // Build diagnostics state from `--dump …` flags. None of these
+    // flags is required, but `--dump-dir` / `--dump-format` on their
+    // own (no `--dump <cat>`) yields an empty config and we skip
+    // installation entirely — there's nothing to write.
+    let diagnostics_handle = match build_diagnostics(
+        &args.dump_specs,
+        args.dump_dir.as_ref(),
+        args.dump_format.as_deref(),
+    ) {
+        Ok(d) => d,
+        Err(msg) => {
+            eprintln!("pounce: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(diag) = diagnostics_handle.as_ref() {
+        println!(
+            "Diagnostics: dumping to {} ({} categor{} configured)",
+            diag.dump_dir().display(),
+            diag.config.categories.len(),
+            if diag.config.categories.len() == 1 { "y" } else { "ies" },
+        );
+        app.set_diagnostics(Rc::clone(diag));
+    }
+
     let status = app.optimize_tnlp(Rc::clone(&tnlp));
     let solve_stats = app.statistics();
     let counters = counting.borrow();
     print::print_summary(status, &solve_stats, &counters);
+
+    // After the solve, drop a manifest + timing summary at the dump
+    // root so consumers (and humans) can tell which run produced
+    // which artifacts without reading the iter_NNN/ tree.
+    if let Some(diag) = diagnostics_handle.as_ref() {
+        write_diagnostics_manifest(diag, &problem_desc, status);
+        write_diagnostics_timing(diag, &app);
+    }
 
     match status {
         ApplicationReturnStatus::SolveSucceeded
         | ApplicationReturnStatus::SolvedToAcceptableLevel => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
     }
+}
+
+/// Translate the CLI's `--dump …` flags into a live `DiagnosticsState`.
+/// Returns `Ok(None)` when no `--dump <cat>` was given (the `--dump-dir`
+/// / `--dump-format` flags alone don't activate dumping).
+fn build_diagnostics(
+    dump_specs: &[(String, String)],
+    dump_dir: Option<&std::path::PathBuf>,
+    dump_format: Option<&str>,
+) -> Result<Option<Rc<DiagnosticsState>>, String> {
+    if dump_specs.is_empty() {
+        if dump_dir.is_some() || dump_format.is_some() {
+            return Err(
+                "--dump-dir / --dump-format require at least one --dump <cat>[:spec]"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    }
+
+    let dump_dir = dump_dir.cloned().unwrap_or_else(|| {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        std::path::PathBuf::from(format!("pounce-dump-{secs}"))
+    });
+
+    let format = match dump_format {
+        Some(f) => DumpFormat::parse(f)?,
+        None => DumpFormat::Jsonl,
+    };
+
+    let mut config = DiagnosticsConfig::new(dump_dir);
+    config.format = format;
+    for (cat, spec) in dump_specs {
+        let cat = DiagCategory::parse(cat)?;
+        let spec = IterSpec::parse(spec)?;
+        config = config.with_category(cat, spec);
+    }
+
+    let state = DiagnosticsState::new(config)
+        .map_err(|e| format!("could not create dump directory: {e}"))?;
+    Ok(Some(Rc::new(state)))
+}
+
+/// Drop a minimal JSON manifest summarising the run. Lets downstream
+/// tools (and humans) join a dump directory back to its CLI args
+/// without re-reading the per-iter files.
+fn write_diagnostics_manifest(
+    diag: &DiagnosticsState,
+    problem_desc: &str,
+    status: ApplicationReturnStatus,
+) {
+    let mut cats: Vec<String> = diag
+        .config
+        .categories
+        .iter()
+        .map(|(c, s)| format!("\"{}\":\"{:?}\"", c.as_str(), s))
+        .collect();
+    cats.sort();
+    let manifest = format!(
+        "{{\n  \"pounce_version\": \"{ver}\",\n  \"git\": \"{git}\",\n  \"problem\": \"{problem}\",\n  \"status\": \"{status:?}\",\n  \"format\": \"{fmt:?}\",\n  \"categories\": {{ {cats} }}\n}}\n",
+        ver = env!("CARGO_PKG_VERSION"),
+        git = env!("POUNCE_BUILD_GIT"),
+        problem = problem_desc,
+        fmt = diag.config.format,
+        cats = cats.join(", "),
+    );
+    let _ = diag.write_top_level("manifest.json", &manifest);
+}
+
+/// Emit a sibling `timing.json` so dump consumers can correlate
+/// per-iter files with the solve's wall-clock budget.
+fn write_diagnostics_timing(diag: &DiagnosticsState, app: &IpoptApplication) {
+    let t = app.timing_stats();
+    let body = format!(
+        "{{\n  \"overall_alg_secs\": {a:.6},\n  \"linear_system_factorization_secs\": {f:.6},\n  \"linear_system_back_solve_secs\": {b:.6}\n}}\n",
+        a = t.overall_alg.total_wallclock_time(),
+        f = t.linear_system_factorization.total_wallclock_time(),
+        b = t.linear_system_back_solve.total_wallclock_time(),
+    );
+    let _ = diag.write_top_level("timing.json", &body);
 }
 
 /// `--about` output: version, build provenance, compiled-in features,

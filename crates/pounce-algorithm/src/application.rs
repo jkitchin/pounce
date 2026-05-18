@@ -39,6 +39,7 @@ use crate::restoration::RestorationPhase;
 /// internally reuses caches across builds.
 pub type RestorationFactory = Box<dyn FnMut() -> Box<dyn RestorationPhase>>;
 use pounce_linalg::dense_vector::DenseVectorSpace;
+use pounce_common::diagnostics::DiagnosticsState;
 use pounce_common::exception::{ExceptionKind, SolverException};
 use pounce_common::journalist::{JournalLevel, Journalist};
 use pounce_common::options_list::OptionsList;
@@ -82,6 +83,12 @@ pub struct IpoptApplication {
     /// `RestorationFailure` as soon as the line-search would otherwise
     /// jump into restoration.
     restoration_factory: Option<RestorationFactory>,
+    /// Shared diagnostic-dump state, installed by the CLI when the
+    /// user passes `--dump <cat>:<spec>`. When set, the application
+    /// propagates an `Rc<DiagnosticsState>` into [`IpoptAlgorithm`]
+    /// via [`IpoptAlgorithm::with_diagnostics`] so the KKT solver and
+    /// other dump sites can consult per-iter gating.
+    diagnostics: Option<Rc<DiagnosticsState>>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -121,6 +128,7 @@ impl IpoptApplication {
             timing: RefCell::new(Rc::new(TimingStatistics::new())),
             linear_backend_factory: None,
             restoration_factory: None,
+            diagnostics: None,
         }
     }
 
@@ -158,6 +166,21 @@ impl IpoptApplication {
     /// factory at the application boundary.
     pub fn set_restoration_factory(&mut self, factory: RestorationFactory) {
         self.restoration_factory = Some(factory);
+    }
+
+    /// Install the shared diagnostics state. Once set, every
+    /// subsequent `optimize_tnlp` call forwards the state into the
+    /// algorithm via [`IpoptAlgorithm::with_diagnostics`] so the KKT
+    /// solver can emit `--dump kkt:...` artifacts.
+    pub fn set_diagnostics(&mut self, diag: Rc<DiagnosticsState>) {
+        self.diagnostics = Some(diag);
+    }
+
+    /// Read-side accessor for the installed diagnostics state, if any.
+    /// Lets the CLI write the top-level manifest/timing files after
+    /// the solve completes.
+    pub fn diagnostics(&self) -> Option<Rc<DiagnosticsState>> {
+        self.diagnostics.as_ref().map(Rc::clone)
     }
 
     /// Read an `ipopt.opt`-format options file. Equivalent to
@@ -522,6 +545,9 @@ impl IpoptApplication {
             .with_tnlp(Rc::clone(&tnlp));
         if let Some(factory) = self.restoration_factory.as_mut() {
             alg = alg.with_restoration(factory());
+        }
+        if let Some(diag) = self.diagnostics.as_ref() {
+            alg = alg.with_diagnostics(Rc::clone(diag));
         }
         alg.max_iter = max_iter;
 

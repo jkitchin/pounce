@@ -33,6 +33,7 @@ use crate::iter_dump::IterDumper;
 use crate::kkt::pd_search_dir_calc::PdSearchDirCalc;
 use crate::line_search::backtracking::Outcome;
 use crate::restoration::{RestorationOutcome, RestorationPhase};
+use pounce_common::diagnostics::DiagnosticsState;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::Vector;
 use pounce_nlp::alg_types::SolverReturn;
@@ -167,6 +168,11 @@ pub struct IpoptAlgorithm {
     /// satisfies the acceptable predicate.
     acceptable_iterate: Option<crate::iterates_vector::IteratesVector>,
     acceptable_iter_number: Index,
+    /// Shared per-solve diagnostics state. `None` unless the CLI
+    /// requested `--dump <cat>:<spec>`. When set, the outer loop
+    /// advances the state's iter counter and the augmented-system
+    /// solver consults it to gate KKT dumps.
+    diagnostics: Option<Rc<DiagnosticsState>>,
 }
 
 impl IpoptAlgorithm {
@@ -198,6 +204,7 @@ impl IpoptAlgorithm {
             resto_near_feasible_count: 0,
             acceptable_iterate: None,
             acceptable_iter_number: 0,
+            diagnostics: None,
         }
     }
 
@@ -300,6 +307,14 @@ impl IpoptAlgorithm {
 
     pub fn with_restoration(mut self, resto: Box<dyn RestorationPhase>) -> Self {
         self.restoration = Some(resto);
+        self
+    }
+
+    /// Install the shared diagnostics state. The state is propagated
+    /// to the augmented-system solver at the top of [`Self::optimize`]
+    /// so dump sites can consult per-iter gating.
+    pub fn with_diagnostics(mut self, diag: Rc<DiagnosticsState>) -> Self {
+        self.diagnostics = Some(diag);
         self
     }
 
@@ -1099,10 +1114,17 @@ impl IpoptAlgorithm {
         // Install the shared accumulator on the augmented-system solver
         // so its factor / back-solve calls are attributed to
         // `linear_system_factorization` / `linear_system_back_solve`.
+        // Same pattern for the diagnostics state when present, so KKT
+        // dump sites can consult per-iter gating.
         if let Some(sd) = self.search_dir.as_mut() {
             sd.pd_solver_mut()
                 .aug_solver_mut()
                 .set_timing_stats(std::rc::Rc::clone(&timing));
+            if let Some(diag) = self.diagnostics.as_ref() {
+                sd.pd_solver_mut()
+                    .aug_solver_mut()
+                    .set_diagnostics(Rc::clone(diag));
+            }
         }
 
         // 0a. Strategy initialization — port of upstream's
@@ -1157,6 +1179,14 @@ impl IpoptAlgorithm {
             d.write_record(&self.data, &self.cq);
         }
 
+        // Advance the diagnostics iter counter so the first `iterate()`
+        // body reports as iter 0 (matches `data.iter_count`). Subsequent
+        // bumps live at the bottom of the loop alongside the iter_count
+        // bookkeeping.
+        if let Some(diag) = self.diagnostics.as_ref() {
+            diag.bump_iter();
+        }
+
         // Iter 0 intermediate callback — upstream fires once after
         // `InitializeIterates` before the loop body starts so users
         // observe the initial point.
@@ -1184,6 +1214,12 @@ impl IpoptAlgorithm {
                         return SolverReturn::MaxiterExceeded;
                     }
                     self.data.borrow_mut().iter_count = iter_count;
+                    // Keep the diagnostics counter in lock-step with
+                    // `data.iter_count` so KKT-dump gating reflects the
+                    // about-to-execute iteration.
+                    if let Some(diag) = self.diagnostics.as_ref() {
+                        diag.bump_iter();
+                    }
                     // Per-iteration record — emitted after the
                     // iter_count bump so the recorded `iter` field
                     // matches `IpData().iter_count()` at the moment of
