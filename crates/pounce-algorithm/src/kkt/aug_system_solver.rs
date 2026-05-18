@@ -92,6 +92,12 @@ pub trait AugSystemSolver {
     /// (LowRank) forward to their inner solver.
     fn set_timing_stats(&mut self, _timing: Rc<TimingStatistics>) {}
 
+    /// Install the shared per-solve diagnostics state so KKT-dump
+    /// sites can consult per-iter gating. Default impl is a no-op
+    /// (diagnostics disabled); the standard solver overrides to wire
+    /// in the dump path.
+    fn set_diagnostics(&mut self, _diag: Rc<pounce_common::diagnostics::DiagnosticsState>) {}
+
     /// One factor + back-substitution for the full 4×4 block system.
     /// `check_neg_evals=true` asks the linsol to verify that the
     /// observed inertia equals `num_neg_evals`; on mismatch the

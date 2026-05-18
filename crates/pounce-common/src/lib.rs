@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cached;
+pub mod diagnostics;
 pub mod exception;
 pub mod journalist;
 pub mod options_list;
@@ -17,6 +18,9 @@ pub mod types;
 pub mod utils;
 
 pub use cached::Cache;
+pub use diagnostics::{
+    DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
+};
 pub use exception::{ExceptionKind, SolverException};
 pub use journalist::{
     FileJournal, Journal, Journalist, JournalCategory, JournalLevel, StringJournal,

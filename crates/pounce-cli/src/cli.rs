@@ -23,6 +23,17 @@ pub struct Args {
     /// `--about`: print build metadata, compiled-in features, available
     /// linear solvers, and runtime paths. Used for bug reports.
     pub about: bool,
+    /// `--dump <cat>[:<iter-spec>]`, repeatable. Each entry asks the
+    /// solver to dump one diagnostic category at the specified iter
+    /// range (`all`, `N`, `N-M`, `N-`, `-M`); omitting the spec is
+    /// equivalent to `:all`. Forwarded to
+    /// [`pounce_common::diagnostics::DiagnosticsConfig`].
+    pub dump_specs: Vec<(String, String)>,
+    /// `--dump-dir <path>`: override the dump root. Defaults to
+    /// `./pounce-dump-<unix-secs>`, picked at solve-start time.
+    pub dump_dir: Option<PathBuf>,
+    /// `--dump-format <fmt>`: dump file format. Currently only `jsonl`.
+    pub dump_format: Option<String>,
 }
 
 impl Args {
@@ -51,6 +62,15 @@ Options:
   --version, -V             print version and exit
   --about                   print version, build info, features,
                             linear solvers, and runtime paths
+  --dump <cat>[:<spec>]     dump diagnostic category to per-iter files.
+                            Repeatable. Categories: kkt, iterate, step,
+                            mu, ls, resto, convergence, timing.
+                            Iter-spec grammar: all | N | N-M | N- | -M
+                            (default: all). Examples:
+                              --dump kkt:5
+                              --dump kkt:2-10 --dump iterate:all
+  --dump-dir <path>         override dump root (default ./pounce-dump-<ts>)
+  --dump-format <fmt>       dump format (default: jsonl)
 "
     }
 
@@ -62,6 +82,9 @@ Options:
         let mut version = false;
         let mut about = false;
         let mut list_problems = false;
+        let mut dump_specs: Vec<(String, String)> = Vec::new();
+        let mut dump_dir: Option<PathBuf> = None;
+        let mut dump_format: Option<String> = None;
 
         let mut it = argv.into_iter().skip(1);
         while let Some(arg) = it.next() {
@@ -87,6 +110,28 @@ Options:
                         .next()
                         .ok_or_else(|| "--options-file requires a value".to_string())?;
                     options_file = Some(PathBuf::from(v));
+                }
+                "--dump" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--dump requires a value (cat[:spec])".to_string())?;
+                    let (cat, spec) = match v.split_once(':') {
+                        Some((c, s)) => (c.to_string(), s.to_string()),
+                        None => (v, "all".to_string()),
+                    };
+                    dump_specs.push((cat, spec));
+                }
+                "--dump-dir" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--dump-dir requires a value".to_string())?;
+                    dump_dir = Some(PathBuf::from(v));
+                }
+                "--dump-format" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--dump-format requires a value".to_string())?;
+                    dump_format = Some(v);
                 }
                 other if !other.starts_with('-') => {
                     // `key=value` forms an option pair (matches upstream
@@ -120,6 +165,9 @@ Options:
                 help,
                 version,
                 about,
+                dump_specs,
+                dump_dir,
+                dump_format,
             });
         }
 
@@ -130,6 +178,9 @@ Options:
             help,
             version,
             about,
+            dump_specs,
+            dump_dir,
+            dump_format,
         })
     }
 }
@@ -261,6 +312,43 @@ mod tests {
             _ => panic!("expected positional .nl"),
         }
         assert_eq!(a.set_options, vec![("print_level".into(), "8".into())]);
+    }
+
+    #[test]
+    fn dump_flag_captures_cat_and_spec() {
+        let a = Args::parse_argv(argv(&[
+            "--problem",
+            "x",
+            "--dump",
+            "kkt:2-10",
+            "--dump",
+            "iterate",
+        ]))
+        .unwrap();
+        assert_eq!(
+            a.dump_specs,
+            vec![
+                ("kkt".into(), "2-10".into()),
+                ("iterate".into(), "all".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dump_dir_and_format_captured() {
+        let a = Args::parse_argv(argv(&[
+            "--problem",
+            "x",
+            "--dump",
+            "kkt",
+            "--dump-dir",
+            "/tmp/d",
+            "--dump-format",
+            "jsonl",
+        ]))
+        .unwrap();
+        assert_eq!(a.dump_dir.unwrap().to_str(), Some("/tmp/d"));
+        assert_eq!(a.dump_format.as_deref(), Some("jsonl"));
     }
 
     #[test]

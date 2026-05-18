@@ -189,9 +189,15 @@ impl TSymLinearSolver {
         // binary record (dim, nnz, nrhs, ia[], ja[], vals[], rhs[]) on
         // the Nth multi_solve call (N = POUNCE_DBG_KKT_DUMP_SKIP, default 0),
         // then disables itself.
+        //
+        // DEPRECATED: superseded by the unified `--dump kkt:<spec>` CLI
+        // surface (see `pounce_common::diagnostics`). Kept for the
+        // existing offline FERAL/MA57/LAPACK binary-comparison tool;
+        // the env var emits a one-shot warning on first observation.
         {
-            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+            static WARNED: AtomicBool = AtomicBool::new(false);
             let n_call = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
             let skip: usize = std::env::var("POUNCE_DBG_KKT_DUMP_SKIP")
                 .ok()
@@ -200,6 +206,11 @@ impl TSymLinearSolver {
             if n_call < skip {
                 // not yet
             } else if let Ok(path) = std::env::var("POUNCE_DBG_KKT_DUMP") {
+                if !WARNED.swap(true, Ordering::SeqCst) {
+                    eprintln!(
+                        "warning: POUNCE_DBG_KKT_DUMP is deprecated; prefer `--dump kkt:<iter-spec>` (see pounce --help)"
+                    );
+                }
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::File::create(&path) {
                     let dim = self.dim as u64;
