@@ -517,7 +517,9 @@ impl IpoptApplication {
             .unwrap_or(1e-8);
         data.borrow_mut().tol = tol;
 
-        let mut alg = IpoptAlgorithm::new(data, cq, bundle).with_nlp(Rc::clone(&nlp_handle));
+        let mut alg = IpoptAlgorithm::new(data, cq, bundle)
+            .with_nlp(Rc::clone(&nlp_handle))
+            .with_tnlp(Rc::clone(&tnlp));
         if let Some(factory) = self.restoration_factory.as_mut() {
             alg = alg.with_restoration(factory());
         }
@@ -958,24 +960,31 @@ fn finalize_via_orig_nlp(
     // Lift compressed x_var → full-x (length `info.n`) so the user
     // TNLP receives the same shape it provided. With `make_parameter`
     // the fixed components are spliced back in by the IpoptNlp.
-    let x_vec: Vec<Number> = nlp.borrow().lift_x_to_full(&*curr.x);
+    let nlp_borrow = nlp.borrow();
+    let x_vec: Vec<Number> = nlp_borrow.lift_x_to_full(&*curr.x);
     let info = tnlp.borrow_mut().get_nlp_info().ok_or(())?;
     let n = info.n as usize;
     let m = info.m as usize;
     debug_assert_eq!(x_vec.len(), n);
-    // For now we forward `x` only; the multiplier vectors come through
-    // as zeros until `OrigIpoptNlp` ships its
-    // `finalize_solution_lambda/z_l/z_u` accessors. Compute g(x) via
-    // the user TNLP so the final residual is at least populated.
+    let mut z_l = nlp_borrow.pack_z_l_for_user(&*curr.z_l);
+    if z_l.is_empty() {
+        z_l = vec![0.0; n];
+    }
+    let mut z_u = nlp_borrow.pack_z_u_for_user(&*curr.z_u);
+    if z_u.is_empty() {
+        z_u = vec![0.0; n];
+    }
+    let mut lambda = nlp_borrow.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+    if lambda.is_empty() {
+        lambda = vec![0.0; m];
+    }
+    drop(nlp_borrow);
     let mut g_final = vec![0.0; m];
     let _ = tnlp.borrow_mut().eval_g(&x_vec, true, &mut g_final);
     let f_final = tnlp
         .borrow_mut()
         .eval_f(&x_vec, true)
         .unwrap_or(Number::NAN);
-    let z_l = vec![0.0; n];
-    let z_u = vec![0.0; n];
-    let lambda = vec![0.0; m];
     tnlp.borrow_mut().finalize_solution(
         Solution {
             status: solver_status,

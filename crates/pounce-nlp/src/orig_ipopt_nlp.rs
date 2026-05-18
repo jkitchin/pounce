@@ -931,7 +931,7 @@ impl OrigIpoptNlp {
     /// factors so the result is in the user's unscaled-constraint
     /// multiplier space (`lambda_user_i = c_scale_i * y_c_i`). Used
     /// when invoking the user's `eval_h`.
-    fn pack_lambda_for_user(
+    pub fn pack_lambda_for_user(
         &self,
         y_c: &dyn Vector,
         y_d: &dyn Vector,
@@ -1508,6 +1508,85 @@ impl IpoptNlp for OrigIpoptNlp {
 
     fn lift_x_to_full(&self, x: &dyn Vector) -> Vec<Number> {
         OrigIpoptNlp::lift_x_to_full(self, x)
+    }
+
+    fn n_full_x(&self) -> Index {
+        self.adapter.borrow().classification().n_full_x
+    }
+
+    fn n_full_g(&self) -> Index {
+        self.adapter.borrow().classification().n_full_g
+    }
+
+    fn pack_lambda_for_user(&self, y_c: &dyn Vector, y_d: &dyn Vector) -> Vec<Number> {
+        let cls = self.adapter.borrow().classification().clone();
+        OrigIpoptNlp::pack_lambda_for_user(self, y_c, y_d, &cls)
+    }
+
+    fn pack_g_for_user(&self, c: &dyn Vector, d: &dyn Vector) -> Vec<Number> {
+        let cls = self.adapter.borrow().classification().clone();
+        let mut g = vec![0.0; cls.n_full_g as usize];
+        if cls.n_c > 0 {
+            let Some(dc) = c.as_any().downcast_ref::<DenseVector>() else {
+                panic!("OrigIpoptNlp expects DenseVector for c");
+            };
+            let cs = self.c_scale.borrow();
+            for (i, &g_idx) in cls.c_map.iter().enumerate() {
+                let v = dc.expanded_values()[i];
+                g[g_idx as usize] = match cs.as_ref() {
+                    Some(s) => v / s[i],
+                    None => v,
+                };
+            }
+        }
+        if cls.n_d > 0 {
+            let Some(dd) = d.as_any().downcast_ref::<DenseVector>() else {
+                panic!("OrigIpoptNlp expects DenseVector for d");
+            };
+            let ds = self.d_scale.borrow();
+            for (i, &g_idx) in cls.d_map.iter().enumerate() {
+                let v = dd.expanded_values()[i];
+                g[g_idx as usize] = match ds.as_ref() {
+                    Some(s) => v / s[i],
+                    None => v,
+                };
+            }
+        }
+        g
+    }
+
+    fn pack_z_l_for_user(&self, z_l: &dyn Vector) -> Vec<Number> {
+        let cls = self.adapter.borrow().classification().clone();
+        let mut full = vec![0.0; cls.n_full_x as usize];
+        if z_l.dim() == 0 {
+            return full;
+        }
+        let Some(dz) = z_l.as_any().downcast_ref::<DenseVector>() else {
+            panic!("OrigIpoptNlp expects DenseVector for z_l");
+        };
+        let vals = dz.expanded_values();
+        for (k, &var_idx) in cls.x_l_map.iter().enumerate() {
+            let full_idx = cls.x_not_fixed_map[var_idx as usize] as usize;
+            full[full_idx] = vals[k];
+        }
+        full
+    }
+
+    fn pack_z_u_for_user(&self, z_u: &dyn Vector) -> Vec<Number> {
+        let cls = self.adapter.borrow().classification().clone();
+        let mut full = vec![0.0; cls.n_full_x as usize];
+        if z_u.dim() == 0 {
+            return full;
+        }
+        let Some(dz) = z_u.as_any().downcast_ref::<DenseVector>() else {
+            panic!("OrigIpoptNlp expects DenseVector for z_u");
+        };
+        let vals = dz.expanded_values();
+        for (k, &var_idx) in cls.x_u_map.iter().enumerate() {
+            let full_idx = cls.x_not_fixed_map[var_idx as usize] as usize;
+            full[full_idx] = vals[k];
+        }
+        full
     }
 }
 

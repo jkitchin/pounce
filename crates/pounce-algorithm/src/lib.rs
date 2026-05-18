@@ -27,6 +27,7 @@ pub mod ipopt_alg;
 pub mod ipopt_cq;
 pub mod ipopt_data;
 pub mod ipopt_nlp;
+pub mod intermediate;
 pub mod iter_dump;
 pub mod iterates_vector;
 pub mod kkt;

@@ -95,4 +95,51 @@ pub trait IpoptNlp: Nlp {
             .expect("IpoptNlp::lift_x_to_full expects DenseVector");
         dx.expanded_values().to_vec()
     }
+
+    /// Pack the algorithm-side `(y_c, y_d)` constraint multipliers into
+    /// the user TNLP's `lambda` array (length `n_full_g`, ordered by
+    /// the original `g` index). Used by `GetIpoptCurrentIterate` and
+    /// `finalize_solution`. Default impl returns an empty vector — the
+    /// canonical `OrigIpoptNlp` implementation overrides it to perform
+    /// the c/d-split inverse and scaling unwind.
+    fn pack_lambda_for_user(&self, _y_c: &dyn Vector, _y_d: &dyn Vector) -> Vec<Number> {
+        Vec::new()
+    }
+
+    /// Pack the algorithm-side `(c, d)` constraint values into the user
+    /// TNLP's `g` array (length `n_full_g`, ordered by the original `g`
+    /// index, in user-unscaled space). Default impl returns an empty
+    /// vector; `OrigIpoptNlp` overrides.
+    fn pack_g_for_user(&self, _c: &dyn Vector, _d: &dyn Vector) -> Vec<Number> {
+        Vec::new()
+    }
+
+    /// Expand a compressed lower-bound-multiplier vector
+    /// (length = number of finite-lower-bound free variables) into the
+    /// user TNLP's full-`n` length `z_L` array. Default impl returns an
+    /// empty vector; `OrigIpoptNlp` overrides.
+    fn pack_z_l_for_user(&self, _z_l: &dyn Vector) -> Vec<Number> {
+        Vec::new()
+    }
+
+    /// Expand a compressed upper-bound-multiplier vector into the user
+    /// TNLP's full-`n` length `z_U` array. Default impl returns an
+    /// empty vector; `OrigIpoptNlp` overrides.
+    fn pack_z_u_for_user(&self, _z_u: &dyn Vector) -> Vec<Number> {
+        Vec::new()
+    }
+
+    /// Number of variables `n` as the user TNLP declared it (= `n_full_x`,
+    /// before fixed-variable elimination). Used by inspector entry
+    /// points that need to size full-`n` buffers. Default impl returns
+    /// 0; `OrigIpoptNlp` overrides.
+    fn n_full_x(&self) -> Index {
+        0
+    }
+
+    /// Number of constraints `m` as the user TNLP declared it (= `n_full_g`).
+    /// Default impl returns 0; `OrigIpoptNlp` overrides.
+    fn n_full_g(&self) -> Index {
+        0
+    }
 }

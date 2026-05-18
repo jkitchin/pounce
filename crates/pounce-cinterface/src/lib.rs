@@ -34,6 +34,7 @@
 pub mod fortran;
 
 use pounce_algorithm::application::IpoptApplication;
+use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -505,6 +506,7 @@ pub unsafe extern "C" fn IpoptSolve(
         eval_jac_g: info.eval_jac_g,
         eval_h: info.eval_h,
         user_data,
+        intermediate_cb: info.intermediate_cb,
         user_scaling: info.user_scaling.clone(),
         final_status: None,
         final_x: vec![0.0; n_us],
@@ -567,12 +569,17 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 /// `g`, and the constraint multipliers `lambda` at the current
 /// iterate.
 ///
-/// Pounce currently invokes the intermediate callback only at solve
-/// completion (per-iteration wiring is a follow-up), so calling this
-/// function outside of [`TNLP::finalize_solution`] context yields
-/// `FALSE`. Inside a future per-iteration callback the function will
-/// fill any non-NULL buffer with `n` / `m` doubles per the upstream
-/// contract.
+/// All output buffers are optional — pass NULL to skip. `n` and `m`
+/// must match the dimensions the problem was created with; mismatched
+/// sizes cause the function to return `FALSE` without writing.
+///
+/// `scaled` is currently ignored — quantities are reported in the
+/// user TNLP's unscaled space (matching upstream Ipopt's default
+/// caller behavior when scaling is unused). Honoring `scaled` for the
+/// `gradient-based` scaler is a follow-up.
+///
+/// Returns `FALSE` when called outside an active intermediate
+/// callback (no live iterate to inspect).
 ///
 /// # Safety
 ///
@@ -583,26 +590,83 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 pub unsafe extern "C" fn GetIpoptCurrentIterate(
     ipopt_problem: IpoptProblem,
     _scaled: Bool,
-    _n: Index,
-    _x: *mut Number,
-    _z_l: *mut Number,
-    _z_u: *mut Number,
-    _m: Index,
-    _g: *mut Number,
-    _lambda: *mut Number,
+    n: Index,
+    x: *mut Number,
+    z_l: *mut Number,
+    z_u: *mut Number,
+    m: Index,
+    g: *mut Number,
+    lambda: *mut Number,
 ) -> Bool {
     if ipopt_problem.is_null() {
         return FALSE;
     }
-    // TODO: wire to live IpoptData once intermediate callback is
-    // invoked per iteration. Outside an active callback there is no
-    // current iterate to return.
-    FALSE
+    let info = &*ipopt_problem;
+    if n != info.n || m != info.m {
+        return FALSE;
+    }
+    let result = ip_intermediate::with_current(|ctx| {
+        let data = ctx.data.borrow();
+        let Some(curr) = data.curr.as_ref() else {
+            return false;
+        };
+        let nlp = ctx.nlp.borrow();
+        let n_us = n as usize;
+        let m_us = m as usize;
+        if !x.is_null() && n_us > 0 {
+            let full_x = nlp.lift_x_to_full(&*curr.x);
+            if full_x.len() != n_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(full_x.as_ptr(), x, n_us);
+        }
+        if !z_l.is_null() && n_us > 0 {
+            let full = nlp.pack_z_l_for_user(&*curr.z_l);
+            if full.len() != n_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(full.as_ptr(), z_l, n_us);
+        }
+        if !z_u.is_null() && n_us > 0 {
+            let full = nlp.pack_z_u_for_user(&*curr.z_u);
+            if full.len() != n_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(full.as_ptr(), z_u, n_us);
+        }
+        if !g.is_null() && m_us > 0 {
+            let cq = ctx.cq.borrow();
+            let full = nlp.pack_g_for_user(&*cq.curr_c(), &*cq.curr_d());
+            if full.len() != m_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(full.as_ptr(), g, m_us);
+        }
+        if !lambda.is_null() && m_us > 0 {
+            let full = nlp.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+            if full.len() != m_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(full.as_ptr(), lambda, m_us);
+        }
+        true
+    });
+    if result.unwrap_or(false) {
+        TRUE
+    } else {
+        FALSE
+    }
 }
 
 /// Port of `IpStdCInterface.cpp:GetIpoptCurrentViolations` (Ipopt 3.14+).
-/// Same contract as [`GetIpoptCurrentIterate`]; returns `FALSE` until
-/// pounce invokes the intermediate callback per iteration.
+/// Same contract as [`GetIpoptCurrentIterate`]; returns `FALSE` when
+/// called outside an active intermediate callback.
+///
+/// `scaled` is currently ignored — see [`GetIpoptCurrentIterate`].
+/// Violations and complementarities are reported in the compressed
+/// algorithm-side space scattered out to full-`n`/`m`; this is the
+/// shape upstream callers consume (zero-fill for free positions /
+/// no-bound positions).
 ///
 /// # Safety
 ///
@@ -613,23 +677,109 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 pub unsafe extern "C" fn GetIpoptCurrentViolations(
     ipopt_problem: IpoptProblem,
     _scaled: Bool,
-    _n: Index,
-    _x_l_violation: *mut Number,
-    _x_u_violation: *mut Number,
-    _compl_x_l: *mut Number,
-    _compl_x_u: *mut Number,
-    _grad_lag_x: *mut Number,
-    _m: Index,
-    _nlp_constraint_violation: *mut Number,
-    _compl_g: *mut Number,
+    n: Index,
+    x_l_violation: *mut Number,
+    x_u_violation: *mut Number,
+    compl_x_l: *mut Number,
+    compl_x_u: *mut Number,
+    grad_lag_x: *mut Number,
+    m: Index,
+    nlp_constraint_violation: *mut Number,
+    compl_g: *mut Number,
 ) -> Bool {
     if ipopt_problem.is_null() {
         return FALSE;
     }
-    // TODO: wire to live IpoptCalculatedQuantities once intermediate
-    // callback is invoked per iteration.
-    FALSE
+    let info = &*ipopt_problem;
+    if n != info.n || m != info.m {
+        return FALSE;
+    }
+    let result = ip_intermediate::with_current(|ctx| {
+        let data = ctx.data.borrow();
+        let Some(_curr) = data.curr.as_ref() else {
+            return false;
+        };
+        drop(data);
+        let nlp = ctx.nlp.borrow();
+        let cq = ctx.cq.borrow();
+        let n_us = n as usize;
+        let m_us = m as usize;
+        // x_L / x_U violations: scatter the compressed slack-shortfalls
+        // up to full-`n`. Upstream defines `x_L_violation_i = max(0, x_L_i
+        // - x_i)`; the algorithm tracks `slack_x_l = P_L^T x - x_L`
+        // (always non-negative at feasible iterates), so reverse the
+        // sign and clamp.
+        if !x_l_violation.is_null() && n_us > 0 {
+            let mut v = vec![0.0; n_us];
+            let slack = cq.curr_slack_x_l();
+            let z_l_full = nlp.pack_z_l_for_user(&*slack);
+            // pack_z_l_for_user scatters by the same x_L mapping; the
+            // returned vector at full-x positions holds `slack_x_l[i]`
+            // which is `x_i - x_L_i`. Clamp the *negative* part to get
+            // the violation `max(0, x_L_i - x_i)`.
+            for (i, s) in z_l_full.iter().enumerate() {
+                v[i] = (-s).max(0.0);
+            }
+            std::ptr::copy_nonoverlapping(v.as_ptr(), x_l_violation, n_us);
+        }
+        if !x_u_violation.is_null() && n_us > 0 {
+            let mut v = vec![0.0; n_us];
+            let slack = cq.curr_slack_x_u();
+            let s_full = nlp.pack_z_u_for_user(&*slack);
+            for (i, s) in s_full.iter().enumerate() {
+                v[i] = (-s).max(0.0);
+            }
+            std::ptr::copy_nonoverlapping(v.as_ptr(), x_u_violation, n_us);
+        }
+        if !compl_x_l.is_null() && n_us > 0 {
+            let v = nlp.pack_z_l_for_user(&*cq.curr_compl_x_l());
+            if v.len() != n_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_l, n_us);
+        }
+        if !compl_x_u.is_null() && n_us > 0 {
+            let v = nlp.pack_z_u_for_user(&*cq.curr_compl_x_u());
+            if v.len() != n_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_u, n_us);
+        }
+        if !grad_lag_x.is_null() && n_us > 0 {
+            let glx = cq.curr_grad_lag_x();
+            // Scatter compressed x-var → full-x via lift_x_to_full
+            // (treats `glx` as if it were an x-vector). Fixed-variable
+            // slots remain zero.
+            let full = nlp.lift_x_to_full(&*glx);
+            if full.len() != n_us {
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(full.as_ptr(), grad_lag_x, n_us);
+        }
+        if !nlp_constraint_violation.is_null() && m_us > 0 {
+            // Per-row equality and range violation reconstruction in
+            // full-g coordinates is a follow-up. The scalar
+            // `curr_primal_infeasibility_max` (== `inf_pr` reported in
+            // `IterStats`) is the outer summary; populate per-row
+            // detail as a future refinement and zero-fill for now.
+            let zero = vec![0.0; m_us];
+            std::ptr::copy_nonoverlapping(zero.as_ptr(), nlp_constraint_violation, m_us);
+        }
+        if !compl_g.is_null() && m_us > 0 {
+            // Per-row constraint complementarity (`v_L .* s_L` /
+            // `v_U .* s_U` mapped back to full-g) is also a follow-up.
+            let zero = vec![0.0; m_us];
+            std::ptr::copy_nonoverlapping(zero.as_ptr(), compl_g, m_us);
+        }
+        true
+    });
+    if result.unwrap_or(false) {
+        TRUE
+    } else {
+        FALSE
+    }
 }
+
 
 /// Port of `IpStdCInterface.cpp:GetIpoptVersion` (Ipopt 3.14.18+).
 /// Writes the pounce crate's `major.minor.patch` into the buffers.
@@ -770,6 +920,9 @@ struct CCallbackTnlp {
     eval_jac_g: Option<Eval_Jac_G_CB>,
     eval_h: Option<Eval_H_CB>,
     user_data: *mut c_void,
+    /// User-installed intermediate callback, copied at solve time so the
+    /// TNLP-trait `intermediate_callback` impl can forward through to it.
+    intermediate_cb: Option<Intermediate_CB>,
     /// Snapshot of user-provided scaling captured at solve time.
     user_scaling: Option<UserScaling>,
     final_status: Option<pounce_nlp::alg_types::SolverReturn>,
@@ -994,6 +1147,34 @@ impl TNLP for CCallbackTnlp {
                     self.user_data,
                 )
             },
+        };
+        ok != FALSE
+    }
+
+    fn intermediate_callback(
+        &mut self,
+        stats: pounce_nlp::tnlp::IterStats,
+        _ip_data: &IpoptData,
+        _ip_cq: &IpoptCq,
+    ) -> bool {
+        let Some(cb) = self.intermediate_cb else {
+            return true;
+        };
+        let ok = unsafe {
+            cb(
+                stats.mode as Index,
+                stats.iter as Index,
+                stats.obj_value,
+                stats.inf_pr,
+                stats.inf_du,
+                stats.mu,
+                stats.d_norm,
+                stats.regularization_size,
+                stats.alpha_du,
+                stats.alpha_pr,
+                stats.ls_trials as Index,
+                self.user_data,
+            )
         };
         ok != FALSE
     }
@@ -1521,6 +1702,218 @@ mod tests {
             assert!(GetIpoptComplInf(p).is_finite());
             FreeIpoptProblem(p);
         }
+    }
+
+    // --- Intermediate-callback wiring (issue #19, follow-up) ---
+    //
+    // The callback only fires on the IPM path (`optimize_constrained`).
+    // Unconstrained problems short-circuit through the Newton driver,
+    // so these tests use a single-inequality problem to force the IPM.
+
+    unsafe extern "C" fn cb_quad_eval_g(
+        _n: Index,
+        x: *const Number,
+        _new_x: Bool,
+        _m: Index,
+        g: *mut Number,
+        _user_data: *mut c_void,
+    ) -> Bool {
+        *g.offset(0) = *x.offset(0);
+        TRUE
+    }
+    unsafe extern "C" fn cb_quad_eval_jac_g(
+        _n: Index,
+        _x: *const Number,
+        _new_x: Bool,
+        _m: Index,
+        nele_jac: Index,
+        irow: *mut Index,
+        jcol: *mut Index,
+        values: *mut Number,
+        _user_data: *mut c_void,
+    ) -> Bool {
+        assert_eq!(nele_jac, 1);
+        if !irow.is_null() {
+            *irow.offset(0) = 0;
+            *jcol.offset(0) = 0;
+        }
+        if !values.is_null() {
+            *values.offset(0) = 1.0;
+        }
+        TRUE
+    }
+    unsafe extern "C" fn cb_quad_eval_h(
+        _n: Index,
+        _x: *const Number,
+        _new_x: Bool,
+        obj_factor: Number,
+        _m: Index,
+        _lambda: *const Number,
+        _new_lambda: Bool,
+        _nele_hess: Index,
+        irow: *mut Index,
+        jcol: *mut Index,
+        values: *mut Number,
+        _user_data: *mut c_void,
+    ) -> Bool {
+        if !irow.is_null() {
+            *irow.offset(0) = 0;
+            *jcol.offset(0) = 0;
+        }
+        if !values.is_null() {
+            *values.offset(0) = 2.0 * obj_factor;
+        }
+        TRUE
+    }
+
+    fn create_callback_test_problem() -> IpoptProblem {
+        // min (x - 2)^2  s.t.  -10 <= x <= 10 (single inequality).
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        let gl = [-10.0];
+        let gu = [10.0];
+        unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                1,
+                gl.as_ptr(),
+                gu.as_ptr(),
+                1,
+                1,
+                0,
+                Some(quad_eval_f),
+                Some(cb_quad_eval_g),
+                Some(quad_eval_grad_f),
+                Some(cb_quad_eval_jac_g),
+                Some(cb_quad_eval_h),
+            )
+        }
+    }
+
+
+    static CB_ITER_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static CB_LAST_ITER: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(-1);
+    static CB_INSPECTOR_OK: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    unsafe extern "C" fn counting_cb(
+        _alg_mod: Index,
+        iter_count: Index,
+        _obj_value: Number,
+        _inf_pr: Number,
+        _inf_du: Number,
+        _mu: Number,
+        _d_norm: Number,
+        _regularization_size: Number,
+        _alpha_du: Number,
+        _alpha_pr: Number,
+        _ls_trials: Index,
+        user_data: *mut c_void,
+    ) -> Bool {
+        CB_ITER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        CB_LAST_ITER.store(iter_count, std::sync::atomic::Ordering::SeqCst);
+        // user_data carries the IpoptProblem so we can exercise the
+        // inspector from inside the callback.
+        let problem = user_data as IpoptProblem;
+        let mut x = [0.0_f64];
+        let rc = GetIpoptCurrentIterate(
+            problem,
+            FALSE,
+            1,
+            x.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        if rc == TRUE && x[0].is_finite() {
+            CB_INSPECTOR_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        TRUE
+    }
+
+    #[test]
+    fn intermediate_callback_fires_per_iteration_and_inspector_reads_x() {
+        CB_ITER_COUNTER.store(0, std::sync::atomic::Ordering::SeqCst);
+        CB_LAST_ITER.store(-1, std::sync::atomic::Ordering::SeqCst);
+        CB_INSPECTOR_OK.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let p = create_callback_test_problem();
+        assert!(!p.is_null());
+        let ok = unsafe { SetIntermediateCallback(p, Some(counting_cb)) };
+        assert_eq!(ok, TRUE);
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                p as *mut c_void,
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        // At least the iter-0 fire happened, plus one per accepted step.
+        let n_fires = CB_ITER_COUNTER.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(n_fires >= 2, "callback fired {n_fires} times, want >=2");
+        assert!(
+            CB_LAST_ITER.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "last iter should be >= 1 after at least one accepted step"
+        );
+        assert!(
+            CB_INSPECTOR_OK.load(std::sync::atomic::Ordering::SeqCst),
+            "GetIpoptCurrentIterate did not return a usable x"
+        );
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    unsafe extern "C" fn user_stop_cb(
+        _alg_mod: Index,
+        _iter_count: Index,
+        _obj_value: Number,
+        _inf_pr: Number,
+        _inf_du: Number,
+        _mu: Number,
+        _d_norm: Number,
+        _regularization_size: Number,
+        _alpha_du: Number,
+        _alpha_pr: Number,
+        _ls_trials: Index,
+        _user_data: *mut c_void,
+    ) -> Bool {
+        FALSE
+    }
+
+    #[test]
+    fn intermediate_callback_false_surfaces_user_requested_stop() {
+        let p = create_callback_test_problem();
+        assert!(!p.is_null());
+        let ok = unsafe { SetIntermediateCallback(p, Some(user_stop_cb)) };
+        assert_eq!(ok, TRUE);
+        let mut x = [0.0_f64];
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::UserRequestedStop as Index);
+        unsafe { FreeIpoptProblem(p) };
     }
 
     #[test]
