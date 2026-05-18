@@ -6,6 +6,11 @@
 //! parser end-to-end without depending on either upstream Ipopt or a
 //! constrained POUNCE solve.
 
+// Tests panic on setup failure rather than thread an extra error type
+// through every helper — the workspace-wide `unwrap_used`/`expect_used`
+// warns are aimed at production code paths, not integration tests.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use iter_diff::{compare, parse_file, Tolerance, MAGIC};
 use std::fs::File;
 use std::io::Write;
@@ -125,7 +130,7 @@ fn divergence_when_one_byte_differs() {
     let parsed = parse_file(&path).expect("parse");
     let _ = std::fs::remove_file(&path);
     let mut corrupted = parsed.clone();
-    corrupted.1[1].x[0] = corrupted.1[1].x[0] + 1.0;
+    corrupted.1[1].x[0] += 1.0;
     let divs = compare(&parsed, &corrupted, Tolerance::Bit, false, true);
     assert_eq!(divs.len(), 1, "expected exactly one divergence");
 }

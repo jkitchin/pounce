@@ -117,9 +117,7 @@ impl IterSpec {
         match self {
             IterSpec::All => true,
             IterSpec::Single(n) => iter == *n,
-            IterSpec::Range(lo, hi) => {
-                lo.map_or(true, |l| iter >= l) && hi.map_or(true, |h| iter <= h)
-            }
+            IterSpec::Range(lo, hi) => lo.is_none_or(|l| iter >= l) && hi.is_none_or(|h| iter <= h),
         }
     }
 
