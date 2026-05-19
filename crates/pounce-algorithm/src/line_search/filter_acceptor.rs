@@ -23,6 +23,16 @@ use crate::line_search::filter::Filter;
 use crate::line_search::ls_acceptor::BacktrackingLsAcceptor;
 use pounce_common::types::Number;
 
+/// `POUNCE_DBG_LS=1` toggle, cached so per-trial overhead is one
+/// atomic load instead of a syscall. Used by [`FilterLsAcceptor::check_acceptability`]
+/// to emit per-trial `(α, θ, φ, d_phi, θ_trial, φ_trial, rapid_inc_ok,
+/// suff_progress_ok)` for the pounce#21 W-B parity investigation.
+fn dbg_ls_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("POUNCE_DBG_LS").as_deref() == Ok("1"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptDecision {
     /// `(theta_trial, phi_trial)` is acceptable to the filter and
@@ -268,16 +278,36 @@ impl FilterLsAcceptor {
             } else {
                 true
             };
-            rapid_increase_ok
-                && (pounce_common::utils::compare_le(
-                    theta_trial,
-                    (1.0 - self.gamma_theta) * theta,
+            let suff_progress_ok = pounce_common::utils::compare_le(
+                theta_trial,
+                (1.0 - self.gamma_theta) * theta,
+                theta,
+            ) || pounce_common::utils::compare_le(
+                phi_trial - phi,
+                -self.gamma_phi * theta,
+                phi,
+            );
+            // pounce#21 diagnostic — env-gated. Emits one line per
+            // trial when POUNCE_DBG_LS=1 so the divergence-vs-Ipopt
+            // investigation can correlate which branch (rapid-increase
+            // guard vs sufficient-progress) was the rejection cause.
+            // Env lookup cached in a `OnceLock` so the disabled case
+            // costs one atomic load per trial.
+            if dbg_ls_enabled() {
+                eprintln!(
+                    "DBG_LS alpha={:.3e} theta={:.3e} phi={:.3e} d_phi={:.3e} theta_trial={:.3e} phi_trial={:.3e} theta_max={:.3e} rapid_inc_ok={} suff_progress_ok={}",
+                    alpha_primal,
                     theta,
-                ) || pounce_common::utils::compare_le(
-                    phi_trial - phi,
-                    -self.gamma_phi * theta,
                     phi,
-                ))
+                    d_phi,
+                    theta_trial,
+                    phi_trial,
+                    theta_max,
+                    rapid_increase_ok,
+                    suff_progress_ok,
+                );
+            }
+            rapid_increase_ok && suff_progress_ok
         };
 
         if !iterate_ok {
@@ -460,6 +490,11 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         let phi_add = reference_barr - self.gamma_phi * reference_theta;
         let theta_add = (1.0 - self.gamma_theta) * reference_theta;
         self.filter.add(theta_add, phi_add, 0);
+    }
+
+    fn set_theta_max_fact(&mut self, theta_max_fact: Number) {
+        self.theta_max_fact = theta_max_fact;
+        self.theta_max = None;
     }
 }
 

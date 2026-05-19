@@ -130,4 +130,15 @@ pub trait BacktrackingLsAcceptor {
     /// and re-enter restoration (observed on DECONVBNE: 323 R-accepts
     /// vs ipopt's 21). Default: no-op for non-filter acceptors.
     fn prepare_resto_phase_start(&mut self, _reference_theta: Number, _reference_barr: Number) {}
+
+    /// Override the filter acceptor's `theta_max_fact` (default 1e4).
+    /// Used by the resto sub-IPM wiring to bump the gate to 1e8, which
+    /// mirrors upstream `IpRestoMinC_1Nrm.cpp:91`
+    /// (`resto.theta_max_fact = 1e8`). Without this override the inner
+    /// IPM's first line search caps `theta_max = 1e4` (since reference
+    /// θ ≈ 0 after slack init), and the first non-trivial trial whose
+    /// resto-NLP θ_trial exceeds 1e4 is rejected at the `theta_max`
+    /// gate before reaching f-type/Armijo dispatch. Default: no-op for
+    /// non-filter acceptors.
+    fn set_theta_max_fact(&mut self, _theta_max_fact: Number) {}
 }
