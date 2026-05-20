@@ -250,6 +250,13 @@ impl Default for MuOptions {
 pub struct LineSearchOptions {
     pub watchdog_shortened_iter_trigger: Index,
     pub watchdog_trial_iter_max: Index,
+    /// `soft_resto_pderror_reduction_factor` — required relative
+    /// reduction in the primal-dual error for a soft-resto step.
+    /// `0` disables the soft restoration phase.
+    pub soft_resto_pderror_reduction_factor: Number,
+    /// `max_soft_resto_iters` — cap on consecutive soft-resto
+    /// iterations before full restoration is forced.
+    pub max_soft_resto_iters: Index,
 }
 
 impl Default for LineSearchOptions {
@@ -257,6 +264,8 @@ impl Default for LineSearchOptions {
         Self {
             watchdog_shortened_iter_trigger: 10,
             watchdog_trial_iter_max: 3,
+            soft_resto_pderror_reduction_factor: 1.0 - 1e-4,
+            max_soft_resto_iters: 10,
         }
     }
 }
@@ -381,6 +390,9 @@ impl AlgorithmBuilder {
         line_search.watchdog_shortened_iter_trigger =
             self.line_search.watchdog_shortened_iter_trigger;
         line_search.watchdog_trial_iter_max = self.line_search.watchdog_trial_iter_max;
+        line_search.soft_resto_pderror_reduction_factor =
+            self.line_search.soft_resto_pderror_reduction_factor;
+        line_search.max_soft_resto_iters = self.line_search.max_soft_resto_iters;
 
         let conv_check: Box<dyn crate::conv_check::r#trait::ConvCheck> =
             Box::new(OptErrorConvCheck {

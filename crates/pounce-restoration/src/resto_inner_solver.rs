@@ -217,7 +217,10 @@ pub fn run_inner_resto(
     // gets rejected at the `theta_max` gate before reaching f-type/Armijo
     // dispatch — qcqp750-2nc iter 2r α=2e-3 fails this way with
     // θ_trial = 1.5e7 > 1e4, forcing backtracking to α≈3e-5. pounce#21.
-    alg_bundle.line_search.acceptor_mut().set_theta_max_fact(1e8);
+    alg_bundle
+        .line_search
+        .acceptor_mut()
+        .set_theta_max_fact(1e8);
 
     // Replace the inner-bundle mu update with a fresh MonotoneMuUpdate
     // carrying `first_iter_resto = true` (upstream

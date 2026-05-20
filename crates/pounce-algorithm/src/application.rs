@@ -1230,6 +1230,12 @@ impl IpoptApplication {
         if let Some(v) = read_int("watchdog_trial_iter_max") {
             builder.line_search.watchdog_trial_iter_max = v;
         }
+        if let Some(v) = read_num("soft_resto_pderror_reduction_factor") {
+            builder.line_search.soft_resto_pderror_reduction_factor = v;
+        }
+        if let Some(v) = read_int("max_soft_resto_iters") {
+            builder.line_search.max_soft_resto_iters = v;
+        }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
         if let Some(v) = read_int("print_frequency_iter") {

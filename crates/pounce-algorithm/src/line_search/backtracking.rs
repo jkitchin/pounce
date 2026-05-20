@@ -115,6 +115,34 @@ pub struct BacktrackingLineSearch {
     watchdog_phi: Number,
     /// Frozen reference d_phi at watchdog activation.
     watchdog_d_phi: Number,
+
+    // ---- Soft restoration phase (port of `IpBacktrackingLineSearch`'s
+    //      `in_soft_resto_phase_`, `soft_resto_counter_`).
+    //
+    // When the regular filter line search fails, before handing off to
+    // the full (sub-NLP) restoration phase, the driver tries a single
+    // damped primal-dual step along the *same* search direction. The
+    // step is damped only by the fraction-to-the-boundary rule and is
+    // accepted if it either satisfies the original filter criterion
+    // ('S' — leave soft resto) or merely reduces the primal-dual KKT
+    // system error by `soft_resto_pderror_reduction_factor` ('s' —
+    // stay in soft resto). Subsequent outer iterations keep taking
+    // soft-resto steps until the original criterion is met, the step
+    // is rejected, or `max_soft_resto_iters` consecutive iterations
+    // elapse — any of which drops through to full restoration.
+    /// Required relative reduction in the primal-dual system error for
+    /// a soft-resto step to be accepted. `0` disables soft restoration.
+    /// Mirrors upstream `soft_resto_pderror_reduction_factor`
+    /// (default `1 - 1e-4`).
+    pub soft_resto_pderror_reduction_factor: Number,
+    /// Cap on consecutive soft-resto iterations before full
+    /// restoration is forced. Mirrors upstream `max_soft_resto_iters`
+    /// (default 10).
+    pub max_soft_resto_iters: i32,
+    /// True iff the driver is currently inside the soft-resto phase.
+    in_soft_resto_phase: bool,
+    /// Count of consecutive soft-resto iterations taken so far.
+    soft_resto_counter: i32,
 }
 
 /// Internal alpha-loop outcome. The watchdog wrapper translates this
@@ -168,6 +196,10 @@ impl BacktrackingLineSearch {
             watchdog_theta: 0.0,
             watchdog_phi: 0.0,
             watchdog_d_phi: 0.0,
+            soft_resto_pderror_reduction_factor: 1.0 - 1e-4,
+            max_soft_resto_iters: 10,
+            in_soft_resto_phase: false,
+            soft_resto_counter: 0,
         }
     }
 
@@ -196,11 +228,215 @@ impl BacktrackingLineSearch {
         self.acceptor.reset();
     }
 
+    /// Public line-search entry point. Wraps the regular filter line
+    /// search ([`Self::run_filter_line_search`]) with the soft
+    /// restoration phase — port of the `in_soft_resto_phase_` state
+    /// machine in `IpBacktrackingLineSearch::FindAcceptableTrialPoint`
+    /// (`IpBacktrackingLineSearch.cpp:439-465` for the in-phase
+    /// continuation, `:528-556` for entering the phase).
+    ///
+    /// Outcomes:
+    /// - `Accepted`: a trial point is in `data.trial` — either a
+    ///   regular filter/watchdog step or a soft-resto step (info char
+    ///   's' = stay in soft resto, 'S' = step also satisfies the
+    ///   original filter so soft resto is left).
+    /// - `TinyStep` / `Failed`: neither the regular line search nor a
+    ///   soft-resto step could make progress; the caller hands off to
+    ///   the full restoration phase.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_acceptable_trial_point(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        delta: &IteratesVector,
+        alpha_init: Number,
+        alpha_dual: Number,
+        nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
+        search_dir: Option<&mut PdSearchDirCalc>,
+    ) -> Outcome {
+        // ---- Soft-resto continuation. Already inside the phase: bump
+        // the counter, bail to full restoration once it exceeds
+        // `max_soft_resto_iters`, otherwise take another damped
+        // primal-dual step along the caller's `delta`
+        // (`IpBacktrackingLineSearch.cpp:439-465`).
+        if self.in_soft_resto_phase {
+            self.soft_resto_counter += 1;
+            if self.soft_resto_counter > self.max_soft_resto_iters {
+                self.in_soft_resto_phase = false;
+                self.soft_resto_counter = 0;
+                return self.fail_to_restoration(data);
+            }
+            // Per-outer-iteration acceptor hook (no-op for the filter
+            // acceptor; the penalty acceptor caches its reference here).
+            self.acceptor.init_this_line_search(data, cq, delta);
+            return match self.try_soft_resto_step(data, cq, delta) {
+                Some(satisfies_original) => {
+                    if satisfies_original {
+                        self.in_soft_resto_phase = false;
+                        self.soft_resto_counter = 0;
+                        data.borrow_mut().info_alpha_primal_char = 'S';
+                    } else {
+                        data.borrow_mut().info_alpha_primal_char = 's';
+                    }
+                    Outcome::Accepted
+                }
+                None => {
+                    self.in_soft_resto_phase = false;
+                    self.soft_resto_counter = 0;
+                    self.fail_to_restoration(data)
+                }
+            };
+        }
+
+        // ---- Regular filter line search (watchdog + alpha loop).
+        let outcome =
+            self.run_filter_line_search(data, cq, delta, alpha_init, alpha_dual, nlp, search_dir);
+        if outcome == Outcome::Accepted {
+            return Outcome::Accepted;
+        }
+
+        // ---- Regular line search failed. Before the (expensive) full
+        // restoration sub-NLP, try to *enter* the soft restoration
+        // phase with one damped primal-dual step
+        // (`IpBacktrackingLineSearch.cpp:528-556`). `prepare_resto_phase_start`
+        // augments the outer filter with the entry envelope — mirrors
+        // upstream's `acceptor_->PrepareRestoPhaseStart()` at line 537.
+        let reference_theta = cq.borrow().curr_constraint_violation();
+        let reference_barr = cq.borrow().curr_barrier_obj();
+        self.acceptor
+            .prepare_resto_phase_start(reference_theta, reference_barr);
+        match self.try_soft_resto_step(data, cq, delta) {
+            Some(satisfies_original) => {
+                if satisfies_original {
+                    data.borrow_mut().info_alpha_primal_char = 'S';
+                } else {
+                    self.in_soft_resto_phase = true;
+                    self.soft_resto_counter = 0;
+                    data.borrow_mut().info_alpha_primal_char = 's';
+                }
+                Outcome::Accepted
+            }
+            // Soft resto could not help — fall through to full
+            // restoration with the original failure outcome. The
+            // caller's `invoke_restoration` re-runs
+            // `prepare_resto_phase_start`; the duplicate filter
+            // augmentation is idempotent (same envelope).
+            None => outcome,
+        }
+    }
+
+    /// Stamp the info fields for a hand-off to the full restoration
+    /// phase and return `Outcome::Failed`. Used when the soft
+    /// restoration phase exhausts its iteration budget or its step is
+    /// rejected mid-phase.
+    fn fail_to_restoration(&self, data: &IpoptDataHandle) -> Outcome {
+        let mut d = data.borrow_mut();
+        d.trial = None;
+        d.info_alpha_primal = 0.0;
+        d.info_alpha_dual = 0.0;
+        d.info_alpha_primal_char = 'R';
+        d.info_ls_count = 0;
+        Outcome::Failed
+    }
+
+    /// Attempt a single damped primal-dual step for the soft
+    /// restoration phase — port of
+    /// `BacktrackingLineSearch::TrySoftRestoStep`
+    /// (`IpBacktrackingLineSearch.cpp:1112-1217`). The step along
+    /// `delta` is damped only by the fraction-to-the-boundary rule,
+    /// with an identical step length for primal and dual variables.
+    ///
+    /// Returns:
+    /// - `Some(true)`  — trial accepted *and* it satisfies the
+    ///   original filter criterion ⇒ caller leaves soft resto ('S').
+    /// - `Some(false)` — trial accepted only on the primal-dual error
+    ///   reduction test ⇒ caller stays in soft resto ('s').
+    /// - `None`        — trial rejected (or soft resto disabled / a
+    ///   non-finite evaluation) ⇒ caller falls through to the full
+    ///   restoration phase.
+    ///
+    /// On a `Some(_)` return the accepted trial is left in `data.trial`
+    /// and the numeric `info_*` fields are stamped; the caller stamps
+    /// `info_alpha_primal_char`.
+    fn try_soft_resto_step(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        delta: &IteratesVector,
+    ) -> Option<bool> {
+        // Soft restoration is disabled when the reduction factor is
+        // zero (`IpBacktrackingLineSearch.cpp:1124`).
+        if self.soft_resto_pderror_reduction_factor == 0.0 {
+            return None;
+        }
+        let curr = data.borrow().curr.clone()?;
+        let tau = data.borrow().curr_tau;
+
+        // Identical step length for primal and dual variables, damped
+        // only by the fraction-to-the-boundary rule
+        // (`IpBacktrackingLineSearch.cpp:1135-1140`).
+        let alpha = {
+            let cq_ref = cq.borrow();
+            cq_ref
+                .aff_step_alpha_primal_max(delta, tau)
+                .min(cq_ref.aff_step_alpha_dual_max(delta, tau))
+        };
+
+        let trial_iv = scaled_step(&curr, delta, alpha, alpha);
+        data.borrow_mut().set_trial(trial_iv);
+
+        let theta_trial = cq.borrow().trial_constraint_violation();
+        let phi_trial = cq.borrow().trial_barrier_obj();
+        if !theta_trial.is_finite() || !phi_trial.is_finite() {
+            // Upstream retries up to three times on `Eval_Error`; the
+            // step length is fixed, so a non-finite eval here is
+            // deterministic — treat it as a rejection.
+            return None;
+        }
+
+        let theta = cq.borrow().curr_constraint_violation();
+        let phi = cq.borrow().curr_barrier_obj();
+        let d_phi = self.compute_d_phi(cq, delta);
+
+        // First test: is the trial acceptable to the *original*
+        // backtracking globalization? Upstream
+        // `acceptor_->CheckAcceptabilityOfTrialPoint(0.)`.
+        if self
+            .acceptor
+            .check_trial_point(0.0, theta, phi, d_phi, theta_trial, phi_trial)
+            == AcceptDecision::Accept
+        {
+            let mut d = data.borrow_mut();
+            d.info_alpha_primal = alpha;
+            d.info_alpha_dual = alpha;
+            d.info_ls_count = 1;
+            return Some(true);
+        }
+
+        // Second test: sufficient reduction in the primal-dual KKT
+        // system error (`IpBacktrackingLineSearch.cpp:1184-1211`).
+        let mu = data.borrow().curr_mu;
+        let curr_pderror = cq.borrow().curr_primal_dual_system_error(mu);
+        let trial_pderror = cq.borrow().trial_primal_dual_system_error(mu);
+        if !trial_pderror.is_finite() {
+            return None;
+        }
+        if trial_pderror <= self.soft_resto_pderror_reduction_factor * curr_pderror {
+            let mut d = data.borrow_mut();
+            d.info_alpha_primal = alpha;
+            d.info_alpha_dual = alpha;
+            d.info_ls_count = 1;
+            return Some(false);
+        }
+        None
+    }
+
     /// Drive the watchdog state machine + alpha-reduction loop.
     /// Port of `IpBacktrackingLineSearch::FindAcceptableTrialPoint`
     /// (`IpBacktrackingLineSearch.cpp:252-677`) restricted to the
-    /// non-soft-resto, filter-acceptor, exact-Hessian path that
-    /// pounce supports today.
+    /// regular (non-soft-resto) filter-acceptor, exact-Hessian path.
+    /// The soft restoration phase is layered on top by
+    /// [`Self::find_acceptable_trial_point`].
     ///
     /// Outcomes:
     /// - `Accepted`: a trial point is in `data.trial`, info fields are
@@ -210,7 +446,8 @@ impl BacktrackingLineSearch {
     ///   trial was accepted. Caller hands off to restoration.
     /// - `Failed`: alpha-loop exhausted AND watchdog could not rescue.
     ///   Caller hands off to restoration.
-    pub fn find_acceptable_trial_point(
+    #[allow(clippy::too_many_arguments)]
+    fn run_filter_line_search(
         &mut self,
         data: &IpoptDataHandle,
         cq: &IpoptCqHandle,
