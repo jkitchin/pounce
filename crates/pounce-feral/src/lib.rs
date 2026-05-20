@@ -199,9 +199,40 @@ impl FeralSolverInterface {
     /// negative-eigenvalue count.
     fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
         let n = self.dim as usize;
-        let matrix = match CscMatrix::from_triplets(n, &self.rows_0, &self.cols_0, &self.values) {
+        let raw = match CscMatrix::from_triplets(n, &self.rows_0, &self.cols_0, &self.values) {
             Ok(m) => m,
             Err(_) => return ESymSolverStatus::FatalError,
+        };
+
+        // Drop explicitly-stored zeros before factoring. pounce's KKT
+        // structure is fixed once in `initialize_structure`, but where a
+        // constraint multiplier is zero (e.g. the initial point) the
+        // Hessian-of-Lagrangian contributions land as exact `0.0` values on
+        // structurally-present coordinates. feral >= b3e4d3e factors the
+        // matrix correctly either way, but an explicit-zero (2,2) diagonal is
+        // a present-but-unusable pivot: keeping it roughly doubles the solve
+        // (CHO parmest: 24.8s -> 12.3s) versus letting that diagonal be
+        // structurally absent. So this strip is now a performance step, not a
+        // correctness workaround (feral#45/#46).
+        let matrix = if raw.values.iter().any(|v| *v == 0.0) {
+            let mut rows = Vec::with_capacity(raw.values.len());
+            let mut cols = Vec::with_capacity(raw.values.len());
+            let mut vals = Vec::with_capacity(raw.values.len());
+            for j in 0..n {
+                for k in raw.col_ptr[j]..raw.col_ptr[j + 1] {
+                    if raw.values[k] != 0.0 {
+                        rows.push(raw.row_idx[k]);
+                        cols.push(j);
+                        vals.push(raw.values[k]);
+                    }
+                }
+            }
+            match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
+                Ok(m) => m,
+                Err(_) => return ESymSolverStatus::FatalError,
+            }
+        } else {
+            raw
         };
 
         let status = self.solver.factor(&matrix, None);
