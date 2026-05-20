@@ -1355,7 +1355,7 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
     )
 }
 
-/// Read the three `feral_*` extension options off `options`, falling
+/// Read the `feral_*` extension options off `options`, falling
 /// back to the env-var defaults baked into [`pounce_feral::FeralConfig::from_env`]
 /// for any knob the caller did not set explicitly. The returned
 /// config is what every default-factory invocation (main IPM and
@@ -1372,6 +1372,9 @@ pub fn feral_config_from_options(
     }
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
+        cfg.singular_pivot_floor = v;
     }
     cfg
 }
