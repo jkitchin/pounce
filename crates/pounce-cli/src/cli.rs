@@ -27,6 +27,15 @@ pub struct Args {
     /// per-iteration history and suffix blocks; same scale as
     /// upstream's `print_level` but on the JSON side.
     pub json_detail: crate::solve_report::ReportDetail,
+    /// `--sol-output PATH` — write an AMPL `.sol` solution file to
+    /// PATH. When unset, a positional `.nl` input still gets a sibling
+    /// `<stub>.sol` (the AMPL solver convention); `--no-sol` opts out
+    /// of that default. Builtin problems have no stub, so they only
+    /// produce a `.sol` when this flag is given explicitly.
+    pub sol_output: Option<PathBuf>,
+    /// `--no-sol` — suppress the default `<stub>.sol` write for `.nl`
+    /// inputs.
+    pub no_sol: bool,
     pub help: bool,
     pub version: bool,
     /// `--about`: print build metadata, compiled-in features, available
@@ -70,6 +79,10 @@ Options:
                             (pounce#8 — machine-readable, FAIR-aligned)
   --json-detail LEVEL       summary | full (default: summary). `full` adds
                             per-iteration history + suffix blocks.
+  --sol-output <path>       write an AMPL .sol solution file to PATH.
+                            A positional .nl input writes <stub>.sol
+                            next to it by default (AMPL convention).
+  --no-sol                  suppress the default <stub>.sol write
   --list-problems           print available built-in problems and exit
   --help, -h                print this message and exit
   --version, -V             print version and exit
@@ -93,6 +106,8 @@ Options:
         let mut set_options: Vec<(String, String)> = Vec::new();
         let mut json_output: Option<PathBuf> = None;
         let mut json_detail = crate::solve_report::ReportDetail::Summary;
+        let mut sol_output: Option<PathBuf> = None;
+        let mut no_sol = false;
         let mut help = false;
         let mut version = false;
         let mut about = false;
@@ -160,6 +175,13 @@ Options:
                         .ok_or_else(|| "--json-detail requires a value".to_string())?;
                     json_detail = crate::solve_report::ReportDetail::parse(&v)?;
                 }
+                "--sol-output" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--sol-output requires a value".to_string())?;
+                    sol_output = Some(PathBuf::from(v));
+                }
+                "--no-sol" => no_sol = true,
                 other if !other.starts_with('-') => {
                     // `key=value` forms an option pair (matches upstream
                     // ipopt CLI). Otherwise it's the positional .nl path.
@@ -192,6 +214,8 @@ Options:
                 set_options,
                 json_output,
                 json_detail,
+                sol_output,
+                no_sol,
                 help,
                 version,
                 about,
@@ -207,6 +231,8 @@ Options:
             set_options,
             json_output,
             json_detail,
+            sol_output,
+            no_sol,
             help,
             version,
             about,
@@ -381,6 +407,32 @@ mod tests {
         .unwrap();
         assert_eq!(a.dump_dir.unwrap().to_str(), Some("/tmp/d"));
         assert_eq!(a.dump_format.as_deref(), Some("jsonl"));
+    }
+
+    #[test]
+    fn sol_output_captured() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--sol-output", "/tmp/out.sol"])).unwrap();
+        assert_eq!(a.sol_output.unwrap().to_str(), Some("/tmp/out.sol"));
+        assert!(!a.no_sol);
+    }
+
+    #[test]
+    fn no_sol_flag() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--no-sol"])).unwrap();
+        assert!(a.no_sol);
+        assert!(a.sol_output.is_none());
+    }
+
+    #[test]
+    fn sol_output_defaults_unset() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl"])).unwrap();
+        assert!(a.sol_output.is_none());
+        assert!(!a.no_sol);
+    }
+
+    #[test]
+    fn sol_output_missing_value() {
+        assert!(Args::parse_argv(argv(&["/tmp/foo.nl", "--sol-output"])).is_err());
     }
 
     #[test]

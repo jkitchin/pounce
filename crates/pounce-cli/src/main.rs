@@ -14,6 +14,7 @@ use pounce_cli::builtin;
 use pounce_cli::cli::{Args, ProblemSource};
 use pounce_cli::counting_tnlp::CountingTnlp;
 use pounce_cli::nl_reader;
+use pounce_cli::nl_writer;
 use pounce_cli::print;
 use pounce_cli::solve_report::{write_report_file, InputDescriptor, ReportBuilder, ReportDetail};
 use pounce_common::diagnostics::{
@@ -27,6 +28,7 @@ use pounce_restoration::resto_inner_solver::{
     make_default_restoration_factory, InnerBackendFactoryFactory,
 };
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 
@@ -111,6 +113,25 @@ fn main() -> ExitCode {
         ProblemSource::NlFile(p) => format!("nl:{}", p.display()),
     };
 
+    // Resolve where (if anywhere) to write an AMPL `.sol` solution
+    // file. AMPL solver convention: a `.nl` input gets a sibling
+    // `<stub>.sol` unless suppressed. Builtins have no stub on disk,
+    // so they only produce a `.sol` when `--sol-output` is explicit.
+    let sol_path: Option<PathBuf> = if args.no_sol {
+        None
+    } else if let Some(p) = &args.sol_output {
+        Some(p.clone())
+    } else {
+        match &args.problem {
+            ProblemSource::NlFile(p) => {
+                let mut s = p.clone();
+                s.set_extension("sol");
+                Some(s)
+            }
+            ProblemSource::Builtin(_) => None,
+        }
+    };
+
     // Capture the converged primal / dual into `nominal_capture` so
     // the JSON report below can ship `solution.x` and
     // `solution.lambda` (mirrors what `pounce_sens` does).
@@ -122,26 +143,28 @@ fn main() -> ExitCode {
             )>,
         >,
     > = Rc::new(RefCell::new(None));
-    if args.json_output.is_some() {
+    if args.json_output.is_some() || sol_path.is_some() {
         let cap = Rc::clone(&nominal_capture);
-        app.set_on_converged(Box::new(move |data, _cq, _nlp, _pd| {
+        app.set_on_converged(Box::new(move |data, _cq, nlp, _pd| {
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,
                 None => return,
             };
-            let x = curr
-                .x
-                .as_any()
-                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-                .map(|dv| dv.expanded_values())
-                .unwrap_or_default();
-            let mut lambda = Vec::with_capacity(curr.y_c.dim() as usize + curr.y_d.dim() as usize);
+            // Lift to full length so a fixed / eliminated variable
+            // still occupies its slot — AMPL's `.sol` reader matches
+            // the x block against the originating `.nl`'s var count.
+            let x = nlp.borrow().lift_x_to_full(&*curr.x);
+            let n_c = curr.y_c.dim() as usize;
+            let n_d = curr.y_d.dim() as usize;
+            let mut lambda = Vec::with_capacity(n_c + n_d);
             if let Some(dv) = curr
                 .y_c
                 .as_any()
                 .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
             {
                 lambda.extend_from_slice(&dv.expanded_values());
+            } else {
+                lambda.extend(std::iter::repeat(0.0).take(n_c));
             }
             if let Some(dv) = curr
                 .y_d
@@ -149,6 +172,8 @@ fn main() -> ExitCode {
                 .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
             {
                 lambda.extend_from_slice(&dv.expanded_values());
+            } else {
+                lambda.extend(std::iter::repeat(0.0).take(n_d));
             }
             *cap.borrow_mut() = Some((x, lambda));
         }));
@@ -347,6 +372,35 @@ fn main() -> ExitCode {
             );
         } else {
             eprintln!("pounce: wrote {}", json_path.display());
+        }
+    }
+
+    // Emit the AMPL `.sol` file. Written unconditionally once a target
+    // path is resolved — even on a failed solve — so AMPL's reader
+    // always sees a `solve_result_num`, matching `pounce_sens` and
+    // upstream AMPL solver behaviour. When the solve never converged
+    // the capture is empty; fall back to zero blocks sized from the
+    // pre-solve NLP dimensions so the file still round-trips.
+    if let Some(sol_path) = &sol_path {
+        let (n, m) = nlp_info_snapshot
+            .as_ref()
+            .map(|i| (i.n as usize, i.m as usize))
+            .unwrap_or((0, 0));
+        let (x, lambda) = nominal_capture
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| (vec![0.0; n], vec![0.0; m]));
+        let message = format!("POUNCE {}: {status:?}", env!("CARGO_PKG_VERSION"));
+        let payload = nl_writer::SolutionFile {
+            message: &message,
+            x: &x,
+            lambda: &lambda,
+            solve_result_num: status_to_solve_result_num(status),
+            suffixes: &[],
+        };
+        match nl_writer::write_sol_file(sol_path, &payload) {
+            Ok(_) => eprintln!("pounce: wrote {}", sol_path.display()),
+            Err(e) => eprintln!("pounce: failed to write {}: {e}", sol_path.display()),
         }
     }
 

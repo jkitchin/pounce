@@ -19,11 +19,13 @@
 //! <nopts>                     (int — number of integer option-words to follow)
 //! <opt0>                      (... nopts lines)
 //! ...
+//! <n_dual>                    (number of dual values written below)
 //! <m>                         (constraint count)
+//! <n_primal>                  (number of primal values written below)
 //! <n>                         (variable count)
-//! <lambda[0]>                 (... m lines, dual values)
+//! <lambda[0]>                 (... n_dual lines, dual values)
 //! ...
-//! <x[0]>                      (... n lines, primal values)
+//! <x[0]>                      (... n_primal lines, primal values)
 //! ...
 //! objno <objno> <status>      (optional — selects which objective and the solver-return code)
 //! suffix <kind> <nentries> <name>  (optional — one block per exported suffix)
@@ -31,11 +33,13 @@
 //! ...
 //! ```
 //!
-//! The two-line `<m>\n<n>\n` block follows the canonical AMPL writer
-//! convention (later AMPL versions write the slack/dual counts on
-//! separate lines too, but for solvers that don't expose slacks the
-//! two-line form is what AMPL's reader expects when matching counts
-//! against the originating `.nl`).
+//! The four-integer count block is the canonical AMPL form: each
+//! dimension count is paired with a "values written" partner so the
+//! reader knows how many dual and primal lines to consume before
+//! reaching `objno`. We always write every dual and primal, so
+//! `n_dual == m` and `n_primal == n`. (Earlier pounce builds emitted
+//! only the two bare counts `<m>\n<n>\n`; AMPL's own reader and
+//! Pyomo's `.sol` reader both reject that short form.)
 //!
 //! # Scope
 //!
@@ -120,13 +124,18 @@ pub fn format_sol(payload: &SolutionFile<'_>) -> String {
     out.push_str("Options\n");
     out.push_str("0\n");
 
-    // Counts: m then n, one per line. (AMPL's writer also emits
-    // separate dual / primal slack counts in some variants; this
-    // two-line form matches the canonical reader's expected layout
-    // for solvers that don't surface slacks.)
+    // Count block: the canonical AMPL four-integer form
+    //   <n_dual_written> <n_con> <n_primal_written> <n_var>
+    // The "written" counts tell the reader how many value lines to
+    // consume; the bare counts are matched against the originating
+    // `.nl`. We write every dual and primal, so the pairs collapse to
+    // (m, m) and (n, n). Emitting only `m` and `n` (the two-integer
+    // short form) makes AMPL's and Pyomo's `.sol` readers fail.
     let m = payload.lambda.len();
     let n = payload.x.len();
     let _ = writeln!(out, "{m}");
+    let _ = writeln!(out, "{m}");
+    let _ = writeln!(out, "{n}");
     let _ = writeln!(out, "{n}");
 
     // Dual block, then primal block. AMPL writes doubles with at least
@@ -223,8 +232,8 @@ mod tests {
         // Header banner present.
         assert!(s.starts_with("POUNCE: SolveSucceeded\n"));
         assert!(s.contains("\nOptions\n0\n"));
-        // m=2 then n=3, one per line.
-        assert!(s.contains("\n2\n3\n"), "counts missing:\n{s}");
+        // Four-integer count block: n_dual=2, m=2, n_primal=3, n=3.
+        assert!(s.contains("\n2\n2\n3\n3\n"), "counts missing:\n{s}");
         // First dual line: 0.1 in exponent form.
         assert!(
             s.contains("1.00000000000000006e-1\n") || s.contains("1.0e-1\n"),
