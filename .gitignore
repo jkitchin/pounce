@@ -60,3 +60,7 @@ gams/*.sol
 # parked inside it for convenience.
 gams/nlpbench/
 gams/nlpbench.zip
+
+# AMPL .sol files written next to the .nl test fixtures when the CLI is
+# run on them — generated output, not fixtures.
+crates/pounce-cli/tests/fixtures/*.sol
