@@ -1,5 +1,5 @@
 //! `OrigIpoptNlp` — concrete `IpoptNlp` impl that wraps a [`TNLPAdapter`]
-//! and an `NlpScalingObject`. Port of
+//! and an [`NlpScaling`] object. Port of
 //! `Algorithm/IpOrigIpoptNLP.{hpp,cpp}` (Ipopt 3.14.19).
 //!
 //! # Design
@@ -77,9 +77,10 @@ use std::rc::Rc;
 /// `determine_scaling_from_starting_point` method) so that the runtime
 /// can compute gradient-based scaling without an upcall.
 ///
-/// We deliberately keep the trait local instead of pulling in
-/// `pounce_algorithm::scaling::NlpScalingObject` to avoid the
-/// `pounce-nlp → pounce-algorithm` dependency cycle.
+/// The trait is intentionally minimal and local to `pounce-nlp`: the
+/// gradient-based scaling arithmetic lives on `OrigIpoptNlp` itself
+/// (see `determine_scaling_from_starting_point`), so there is no
+/// algorithm-layer scaling strategy object.
 pub trait NlpScaling {
     /// Optional user-supplied multiplier on the objective scaling
     /// factor. Mirrors upstream's `obj_scaling_factor` option (default

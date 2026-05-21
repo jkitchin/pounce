@@ -37,10 +37,6 @@ use crate::line_search::penalty_acceptor::PenaltyLsAcceptor;
 use crate::mu::adaptive::{AdaptiveMuUpdate, MuOracleKind};
 use crate::mu::monotone::MonotoneMuUpdate;
 use crate::output::orig::OrigIterationOutput;
-use crate::scaling::{
-    equilibration::EquilibrationScaling, gradient::GradientScaling, none::NoNlpScalingObject,
-    r#trait::NlpScalingObject, user::UserScaling,
-};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{SparseSymLinearSolverInterface, TSymLinearSolver};
 use std::cell::RefCell;
@@ -79,14 +75,6 @@ pub enum LineSearchChoice {
     Penalty,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NlpScalingChoice {
-    None,
-    User,
-    GradientBased,
-    EquilibrationBased,
-}
-
 /// Assembled strategy bundle. Phase 7 ships the structural bundle;
 /// `IpoptAlgorithm::new` reads from this when it lands.
 pub struct AlgorithmBundle {
@@ -97,7 +85,6 @@ pub struct AlgorithmBundle {
     pub hess: Box<dyn crate::hess::r#trait::HessianUpdater>,
     pub line_search: BacktrackingLineSearch,
     pub iter_output: Box<dyn crate::output::r#trait::IterationOutput>,
-    pub scaling: Box<dyn NlpScalingObject>,
     /// `Some` when the builder was given a [`LinearBackendFactory`];
     /// `None` for the bare structural bundle that pre-Phase-6 unit
     /// tests still rely on.
@@ -155,7 +142,6 @@ pub struct AlgorithmBuilder {
     pub hessian_approximation: HessianApproxChoice,
     pub limited_memory_update_type: UpdateType,
     pub line_search_method: LineSearchChoice,
-    pub nlp_scaling_method: NlpScalingChoice,
     pub warm_start_init_point: bool,
     pub conv_check: ConvCheckOptions,
     pub mu: MuOptions,
@@ -293,7 +279,6 @@ impl Default for AlgorithmBuilder {
             hessian_approximation: HessianApproxChoice::Exact,
             limited_memory_update_type: UpdateType::Bfgs,
             line_search_method: LineSearchChoice::Filter,
-            nlp_scaling_method: NlpScalingChoice::GradientBased,
             warm_start_init_point: false,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
@@ -433,13 +418,6 @@ impl AlgorithmBuilder {
             Box::new(o)
         };
 
-        let scaling: Box<dyn NlpScalingObject> = match self.nlp_scaling_method {
-            NlpScalingChoice::None => Box::new(NoNlpScalingObject::new()),
-            NlpScalingChoice::User => Box::new(UserScaling::new()),
-            NlpScalingChoice::GradientBased => Box::new(GradientScaling::new()),
-            NlpScalingChoice::EquilibrationBased => Box::new(EquilibrationScaling::new()),
-        };
-
         AlgorithmBundle {
             mu_update,
             conv_check,
@@ -448,7 +426,6 @@ impl AlgorithmBuilder {
             hess,
             line_search,
             iter_output,
-            scaling,
             search_dir,
         }
     }
@@ -502,34 +479,25 @@ mod tests {
             LineSearchChoice::CgPenalty,
             LineSearchChoice::Penalty,
         ];
-        let scaling = [
-            NlpScalingChoice::None,
-            NlpScalingChoice::User,
-            NlpScalingChoice::GradientBased,
-            NlpScalingChoice::EquilibrationBased,
-        ];
         for &linear_solver in &solvers {
             for &mu_strategy in &mu {
                 for &hessian_approximation in &hess {
                     for &line_search_method in &ls {
-                        for &nlp_scaling_method in &scaling {
-                            let _ = AlgorithmBuilder {
-                                linear_solver,
-                                mu_strategy,
-                                mu_oracle: MuOracleKind::QualityFunction,
-                                hessian_approximation,
-                                limited_memory_update_type: UpdateType::Bfgs,
-                                line_search_method,
-                                nlp_scaling_method,
-                                warm_start_init_point: false,
-                                conv_check: ConvCheckOptions::default(),
-                                mu: MuOptions::default(),
-                                line_search: LineSearchOptions::default(),
-                                output: OutputOptions::default(),
-                                warm: WarmStartOptions::default(),
-                            }
-                            .build();
+                        let _ = AlgorithmBuilder {
+                            linear_solver,
+                            mu_strategy,
+                            mu_oracle: MuOracleKind::QualityFunction,
+                            hessian_approximation,
+                            limited_memory_update_type: UpdateType::Bfgs,
+                            line_search_method,
+                            warm_start_init_point: false,
+                            conv_check: ConvCheckOptions::default(),
+                            mu: MuOptions::default(),
+                            line_search: LineSearchOptions::default(),
+                            output: OutputOptions::default(),
+                            warm: WarmStartOptions::default(),
                         }
+                        .build();
                     }
                 }
             }

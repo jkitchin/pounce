@@ -29,8 +29,8 @@
 //! | `RestorationPhase` (nested) | [`crate::resto_resto::RestoRestorationPhase`] (rare)        |
 //!
 //! All other slots — perturbation handler, PdFullSpaceSolver,
-//! BacktrackingLineSearch, MuUpdate, EqMultCalculator, HessianUpdater,
-//! NlpScalingObject — are reused from the outer builder via the
+//! BacktrackingLineSearch, MuUpdate, EqMultCalculator, HessianUpdater
+//! — are reused from the outer builder via the
 //! [`RestoAlgorithmBuilder::outer_line_search`] selector below.
 //!
 //! Phase 9 follow-up ships the option-driven assembly surface and the

@@ -7,9 +7,12 @@
 //! line search (filter + backtracking), barrier-update strategies
 //! (monotone now, adaptive in Phase 10), convergence check, iterate
 //! initialization, equality-multiplier estimation, Hessian update
-//! strategies (exact + L-BFGS/SR1 in Phase 8), iteration output, NLP
-//! scaling, timing statistics, the algorithm builder, and the main
+//! strategies (exact + L-BFGS/SR1 in Phase 8), iteration output,
+//! timing statistics, the algorithm builder, and the main
 //! `IpoptAlgorithm::optimize()` loop.
+//!
+//! NLP scaling (gradient-based objective/constraint scaling) lives
+//! NLP-side in [`pounce_nlp::orig_ipopt_nlp`].
 //!
 //! Strategies are wired together by [`alg_builder::AlgorithmBuilder`]
 //! per the dependency order documented in
@@ -35,7 +38,6 @@ pub mod line_search;
 pub mod mu;
 pub mod output;
 pub mod restoration;
-pub mod scaling;
 pub mod strategy;
 pub mod timing_stats;
 pub mod upstream_options;
