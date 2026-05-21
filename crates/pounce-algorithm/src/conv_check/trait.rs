@@ -27,6 +27,11 @@ pub enum ConvergenceStatus {
     /// `max_wall_time` budget reached. Maps to
     /// `SolverReturn::WallTimeExceeded` → `MaximumWallTimeExceeded`.
     WallTimeExceeded,
+    /// Rapid infeasibility detection fired — the iterate is
+    /// converging to a stationary point of the constraint violation
+    /// with the violation bounded away from zero. Maps to
+    /// `SolverReturn::LocalInfeasibility`.
+    LocallyInfeasible,
     Failed,
 }
 

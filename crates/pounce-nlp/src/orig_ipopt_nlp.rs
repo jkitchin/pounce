@@ -1149,10 +1149,11 @@ impl OrigIpoptNlp {
         let unscaled = {
             let a = self.adapter.borrow();
             let mut t = a.tnlp().borrow_mut();
-            match t.eval_f(&full_x, true) {
-                Some(v) => v,
-                None => panic!("TNLP::eval_f returned None during OrigIpoptNlp::eval_f"),
-            }
+            // A failed user eval (domain error, e.g. log of a negative) is
+            // upstream Ipopt's `Eval_Error`. Return NaN so the line search's
+            // non-finite-trial path backtracks the step, rather than aborting
+            // — and a panic cannot unwind across the C FFI boundary anyway.
+            t.eval_f(&full_x, true).unwrap_or(f64::NAN)
         };
         let scaled = unscaled * self.obj_scale_factor.get();
         self.f_cache.borrow_mut().add_1dep(scaled, x.as_tagged());
@@ -1171,7 +1172,11 @@ impl OrigIpoptNlp {
             let mut t = a.tnlp().borrow_mut();
             t.eval_grad_f(&full_x, true, &mut full_g)
         };
-        assert!(ok, "TNLP::eval_grad_f returned false");
+        // Eval failure → NaN-filled gradient, which propagates a non-finite
+        // step the line search rejects (see `eval_f_internal`).
+        if !ok {
+            full_g.fill(f64::NAN);
+        }
         // Compress full_g → grad in x_var-space, scale by obj_scal.
         let cls = self.adapter.borrow().classification().clone();
         let mut g_compressed = self.x_space.make_new_dense();
@@ -1214,7 +1219,11 @@ impl OrigIpoptNlp {
             let mut t = a.tnlp().borrow_mut();
             t.eval_g(&full_x, true, &mut full_g)
         };
-        assert!(ok, "TNLP::eval_g returned false");
+        // Eval failure → NaN constraint values, so `theta_trial` goes
+        // non-finite and the line search backtracks (see `eval_f_internal`).
+        if !ok {
+            full_g.fill(f64::NAN);
+        }
         let mut c = self.c_space.make_new_dense();
         // c_i = g(g_idx) - g_l(g_idx)  (since g_l == g_u for equalities,
         // upstream subtracts the bound to make it a residual). Matches
@@ -1278,7 +1287,9 @@ impl OrigIpoptNlp {
             let mut t = a.tnlp().borrow_mut();
             t.eval_g(&full_x, true, &mut full_g)
         };
-        assert!(ok, "TNLP::eval_g returned false");
+        if !ok {
+            full_g.fill(f64::NAN);
+        }
         let mut d = self.d_space.make_new_dense();
         {
             let dv = d.values_mut();
@@ -1316,7 +1327,9 @@ impl OrigIpoptNlp {
                 },
             )
         };
-        assert!(ok, "TNLP::eval_jac_g(Values) returned false");
+        if !ok {
+            full_vals.fill(f64::NAN);
+        }
         let mut jac_c = GenTMatrix::new(Rc::clone(&self.jac_c_space));
         {
             let cs = self.c_scale.borrow();
@@ -1356,7 +1369,9 @@ impl OrigIpoptNlp {
                 },
             )
         };
-        assert!(ok, "TNLP::eval_jac_g(Values) returned false");
+        if !ok {
+            full_vals.fill(f64::NAN);
+        }
         let mut jac_d = GenTMatrix::new(Rc::clone(&self.jac_d_space));
         {
             let ds = self.d_scale.borrow();
@@ -1430,7 +1445,9 @@ impl OrigIpoptNlp {
                 },
             )
         };
-        assert!(ok, "TNLP::eval_h(Values) returned false");
+        if !ok {
+            full_vals.fill(f64::NAN);
+        }
         let mut h = SymTMatrix::new(Rc::clone(h_space));
         let kept = h_space.nonzeros() as usize;
         let h_vals = h.values_mut();

@@ -48,3 +48,15 @@ python/*.egg-info/
 # Local logo experiments
 /logos/pounce_B_trajectory.png
 /logos/pounce_C_cage_break.png
+
+# GAMS link build artifacts
+gams/libGamsPounce.dylib
+gams/libGamsPounce.so
+gams/*.lst
+gams/*.sol
+
+# Vendored nlpbench clone is private (GAMS-licensed); keep the whole subtree
+# out of version control, including any pounce-side reports/testsets/scripts
+# parked inside it for convenience.
+gams/nlpbench/
+gams/nlpbench.zip

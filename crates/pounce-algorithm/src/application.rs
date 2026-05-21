@@ -1126,6 +1126,15 @@ impl IpoptApplication {
         if let Some(v) = read_int("acceptable_iter") {
             builder.conv_check.acceptable_iter = v;
         }
+        if let Some(v) = read_num("infeas_stationarity_tol") {
+            builder.conv_check.infeas_stationarity_tol = v;
+        }
+        if let Some(v) = read_num("infeas_viol_kappa") {
+            builder.conv_check.infeas_viol_kappa = v;
+        }
+        if let Some(v) = read_int("infeas_max_streak") {
+            builder.conv_check.infeas_max_streak = v;
+        }
 
         // Barrier-parameter (μ) options — consumers in
         // `IpMonotoneMuUpdate.cpp` / `IpAdaptiveMuUpdate.cpp`. Both
@@ -1169,6 +1178,12 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("watchdog_trial_iter_max") {
             builder.line_search.watchdog_trial_iter_max = v;
+        }
+        if let Some(v) = read_num("soft_resto_pderror_reduction_factor") {
+            builder.line_search.soft_resto_pderror_reduction_factor = v;
+        }
+        if let Some(v) = read_int("max_soft_resto_iters") {
+            builder.line_search.max_soft_resto_iters = v;
         }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
@@ -1289,7 +1304,7 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
     )
 }
 
-/// Read the three `feral_*` extension options off `options`, falling
+/// Read the `feral_*` extension options off `options`, falling
 /// back to the env-var defaults baked into [`pounce_feral::FeralConfig::from_env`]
 /// for any knob the caller did not set explicitly. The returned
 /// config is what every default-factory invocation (main IPM and
@@ -1306,6 +1321,9 @@ pub fn feral_config_from_options(
     }
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
+        cfg.singular_pivot_floor = v;
     }
     cfg
 }

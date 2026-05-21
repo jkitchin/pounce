@@ -771,6 +771,26 @@ impl IpoptCalculatedQuantities {
         glx.amax().max(gls.amax())
     }
 
+    /// Scaled stationarity of the infeasibility measure `½‖(c, d−s)‖²`
+    /// — `‖J_cᵀ c + J_dᵀ (d−s)‖_∞ / max(1, ‖(c, d−s)‖_∞)`. The
+    /// numerator is the x-gradient of the squared constraint
+    /// violation; a value near zero with the violation itself bounded
+    /// away from zero marks an iterate converging to a stationary
+    /// point of the infeasibility — i.e. a locally infeasible problem.
+    /// No linear solve: two transpose-products. Mirrors the gradient
+    /// term behind Ipopt's `IpRestoConvCheck.cpp` `LOCALLY_INFEASIBLE`
+    /// test, applied here in the main loop.
+    pub fn curr_infeasibility_stationarity(&self) -> Number {
+        let c = self.curr_c();
+        let dms = self.curr_d_minus_s();
+        let jc_t_c = self.curr_jac_c_t_times_vec(&*c);
+        let jd_t_dms = self.curr_jac_d_t_times_vec(&*dms);
+        let mut grad = jc_t_c.make_new();
+        grad.add_two_vectors(1.0, &*jc_t_c, 1.0, &*jd_t_dms, 0.0);
+        let viol = c.amax().max(dms.amax());
+        grad.amax() / viol.max(1.0)
+    }
+
     // --------------------------------------------------------------
     // Average / scalar complementarity
     // --------------------------------------------------------------
@@ -949,6 +969,158 @@ impl IpoptCalculatedQuantities {
         };
 
         (s_d, s_c)
+    }
+
+    // --------------------------------------------------------------
+    // Trial-side Lagrangian gradient / complementarity — needed by
+    // the soft restoration phase's primal-dual error test. Each is a
+    // line-for-line analog of the `curr_*` method above, reading the
+    // `trial` iterate instead of `curr`.
+    // --------------------------------------------------------------
+
+    pub fn trial_jac_c(&self) -> Rc<dyn Matrix> {
+        let iv = self.trial_iv();
+        self.nlp.borrow_mut().eval_jac_c(&*iv.x)
+    }
+
+    pub fn trial_jac_d(&self) -> Rc<dyn Matrix> {
+        let iv = self.trial_iv();
+        self.nlp.borrow_mut().eval_jac_d(&*iv.x)
+    }
+
+    /// `∇_x L` at the trial iterate — analog of [`Self::curr_grad_lag_x`].
+    pub fn trial_grad_lag_x(&self) -> Rc<dyn Vector> {
+        let iv = self.trial_iv();
+        let grad_f = self.trial_grad_f();
+        let jac_c = self.trial_jac_c();
+        let jac_d = self.trial_jac_d();
+
+        let mut jc_t = iv.x.make_new();
+        jac_c.trans_mult_vector(1.0, &*iv.y_c, 0.0, &mut *jc_t);
+        let mut jd_t = iv.x.make_new();
+        jac_d.trans_mult_vector(1.0, &*iv.y_d, 0.0, &mut *jd_t);
+
+        let mut tmp = iv.x.make_new();
+        tmp.copy(&*grad_f);
+        tmp.add_two_vectors(1.0, &*jc_t, 1.0, &*jd_t, 1.0);
+
+        let nlp = self.nlp.borrow();
+        nlp.px_l().mult_vector(-1.0, &*iv.z_l, 1.0, &mut *tmp);
+        nlp.px_u().mult_vector(1.0, &*iv.z_u, 1.0, &mut *tmp);
+        rc_from(tmp)
+    }
+
+    /// `∇_s L` at the trial iterate — analog of [`Self::curr_grad_lag_s`].
+    pub fn trial_grad_lag_s(&self) -> Rc<dyn Vector> {
+        let iv = self.trial_iv();
+        let mut tmp = iv.y_d.make_new();
+        let nlp = self.nlp.borrow();
+        nlp.pd_u().mult_vector(1.0, &*iv.v_u, 0.0, &mut *tmp);
+        nlp.pd_l().mult_vector(-1.0, &*iv.v_l, 1.0, &mut *tmp);
+        tmp.axpy(-1.0, &*iv.y_d);
+        rc_from(tmp)
+    }
+
+    pub fn trial_compl_x_l(&self) -> Rc<dyn Vector> {
+        Self::calc_compl(&*self.trial_slack_x_l(), &*self.trial_iv().z_l)
+    }
+
+    pub fn trial_compl_x_u(&self) -> Rc<dyn Vector> {
+        Self::calc_compl(&*self.trial_slack_x_u(), &*self.trial_iv().z_u)
+    }
+
+    pub fn trial_compl_s_l(&self) -> Rc<dyn Vector> {
+        Self::calc_compl(&*self.trial_slack_s_l(), &*self.trial_iv().v_l)
+    }
+
+    pub fn trial_compl_s_u(&self) -> Rc<dyn Vector> {
+        Self::calc_compl(&*self.trial_slack_s_u(), &*self.trial_iv().v_u)
+    }
+
+    /// `||s ⊙ z − μ||₁` summed over the four complementarity blocks.
+    fn relaxed_compl_asum(blocks: &[Rc<dyn Vector>], mu: Number) -> Number {
+        let mut acc = 0.0;
+        for compl in blocks {
+            if compl.dim() == 0 {
+                continue;
+            }
+            let mut r = compl.make_new();
+            r.copy(&**compl);
+            r.add_scalar(-mu);
+            acc += r.asum();
+        }
+        acc
+    }
+
+    /// Unscaled primal-dual KKT system error at the current iterate —
+    /// port of
+    /// `IpIpoptCalculatedQuantities.cpp:curr_primal_dual_system_error`.
+    /// Each block uses the 1-norm scaled by its entry count; the result
+    /// is the sum of the dual-infeasibility, primal-infeasibility, and
+    /// complementarity terms. Used by the soft restoration phase's
+    /// sufficient-reduction test.
+    pub fn curr_primal_dual_system_error(&self, mu: Number) -> Number {
+        let iv = self.curr_iv();
+        let n_dual = iv.x.dim() + iv.s.dim();
+        let dual_inf =
+            (self.curr_grad_lag_x().asum() + self.curr_grad_lag_s().asum()) / Number::from(n_dual);
+
+        let n_primal = iv.y_c.dim() + iv.y_d.dim();
+        let primal_inf = if n_primal > 0 {
+            (self.curr_c().asum() + self.curr_d_minus_s().asum()) / Number::from(n_primal)
+        } else {
+            0.0
+        };
+
+        let n_cmpl = iv.z_l.dim() + iv.z_u.dim() + iv.v_l.dim() + iv.v_u.dim();
+        let cmpl = if n_cmpl > 0 {
+            Self::relaxed_compl_asum(
+                &[
+                    self.curr_compl_x_l(),
+                    self.curr_compl_x_u(),
+                    self.curr_compl_s_l(),
+                    self.curr_compl_s_u(),
+                ],
+                mu,
+            ) / Number::from(n_cmpl)
+        } else {
+            0.0
+        };
+
+        dual_inf + primal_inf + cmpl
+    }
+
+    /// Unscaled primal-dual KKT system error at the trial iterate —
+    /// trial-side analog of [`Self::curr_primal_dual_system_error`].
+    pub fn trial_primal_dual_system_error(&self, mu: Number) -> Number {
+        let iv = self.trial_iv();
+        let n_dual = iv.x.dim() + iv.s.dim();
+        let dual_inf = (self.trial_grad_lag_x().asum() + self.trial_grad_lag_s().asum())
+            / Number::from(n_dual);
+
+        let n_primal = iv.y_c.dim() + iv.y_d.dim();
+        let primal_inf = if n_primal > 0 {
+            (self.trial_c().asum() + self.trial_d_minus_s().asum()) / Number::from(n_primal)
+        } else {
+            0.0
+        };
+
+        let n_cmpl = iv.z_l.dim() + iv.z_u.dim() + iv.v_l.dim() + iv.v_u.dim();
+        let cmpl = if n_cmpl > 0 {
+            Self::relaxed_compl_asum(
+                &[
+                    self.trial_compl_x_l(),
+                    self.trial_compl_x_u(),
+                    self.trial_compl_s_l(),
+                    self.trial_compl_s_u(),
+                ],
+                mu,
+            ) / Number::from(n_cmpl)
+        } else {
+            0.0
+        };
+
+        dual_inf + primal_inf + cmpl
     }
 
     // --------------------------------------------------------------

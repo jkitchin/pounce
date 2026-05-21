@@ -472,6 +472,10 @@ impl IpoptAlgorithm {
                 timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::WallTimeExceeded);
             }
+            ConvergenceStatus::LocallyInfeasible => {
+                timing.check_convergence.end();
+                return IterateOutcome::Terminate(SolverReturn::LocalInfeasibility);
+            }
             ConvergenceStatus::Failed => {
                 timing.check_convergence.end();
                 return IterateOutcome::Terminate(SolverReturn::InternalError);

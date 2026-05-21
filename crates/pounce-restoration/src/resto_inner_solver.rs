@@ -209,6 +209,19 @@ pub fn run_inner_resto(
         crate::output::RestoIterationOutputAdapter::new().with_orig_nlp(Rc::clone(outer_nlp)),
     ) as Box<dyn pounce_algorithm::output::r#trait::IterationOutput>;
 
+    // Mirror upstream `IpRestoMinC_1Nrm.cpp:91`: set the resto sub-IPM's
+    // `theta_max_fact = 1e8` (vs the regular-phase default 1e4). Without
+    // this, the inner filter acceptor caps `theta_max = 1e4` on its first
+    // line search (resto θ ≈ 0 after slack-init, so
+    // `theta_max = 1e4·max(1, 0) = 1e4`); the first non-trivial trial then
+    // gets rejected at the `theta_max` gate before reaching f-type/Armijo
+    // dispatch — qcqp750-2nc iter 2r α=2e-3 fails this way with
+    // θ_trial = 1.5e7 > 1e4, forcing backtracking to α≈3e-5. pounce#21.
+    alg_bundle
+        .line_search
+        .acceptor_mut()
+        .set_theta_max_fact(1e8);
+
     // Replace the inner-bundle mu update with a fresh MonotoneMuUpdate
     // carrying `first_iter_resto = true` (upstream
     // `IpMonotoneMuUpdate.cpp:118-121`: prefix `"resto."` sets the

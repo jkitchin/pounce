@@ -15,6 +15,7 @@ crate-type = ["lib", "cdylib"]
 pounce-common = { path = "../pounce-common" }
 pounce-nlp = { path = "../pounce-nlp" }
 pounce-algorithm = { path = "../pounce-algorithm" }
+pounce-restoration = { path = "../pounce-restoration" }
 
 [lints]
 workspace = true

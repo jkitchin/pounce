@@ -22,7 +22,7 @@
 //! computes each CSE once and the reverse pass folds adjoints from
 //! every reference into a single slot — exact chain-rule behaviour.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use super::nl_reader::{BinOp, Expr, UnaryOp};
@@ -259,6 +259,259 @@ impl Tape {
                 TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
                 TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
             };
+        }
+    }
+
+    /// Forward sweep into a caller-supplied buffer. Avoids the
+    /// per-call allocation of `forward()` so hot paths can reuse
+    /// one scratch arena across many tapes.
+    pub fn forward_into(&self, x: &[f64], vals: &mut [f64]) {
+        let n = self.ops.len();
+        debug_assert!(vals.len() >= n);
+        for i in 0..n {
+            vals[i] = match &self.ops[i] {
+                TapeOp::Const(c) => *c,
+                TapeOp::Var(j) => x[*j],
+                TapeOp::Add(a, b) => vals[*a] + vals[*b],
+                TapeOp::Sub(a, b) => vals[*a] - vals[*b],
+                TapeOp::Mul(a, b) => vals[*a] * vals[*b],
+                TapeOp::Div(a, b) => vals[*a] / vals[*b],
+                TapeOp::Pow(a, b) => vals[*a].powf(vals[*b]),
+                TapeOp::Neg(a) => -vals[*a],
+                TapeOp::Abs(a) => vals[*a].abs(),
+                TapeOp::Sqrt(a) => vals[*a].sqrt(),
+                TapeOp::Exp(a) => vals[*a].exp(),
+                TapeOp::Log(a) => vals[*a].ln(),
+                TapeOp::Log10(a) => vals[*a].log10(),
+                TapeOp::Sin(a) => vals[*a].sin(),
+                TapeOp::Cos(a) => vals[*a].cos(),
+            };
+        }
+    }
+
+    /// Directional Hessian-vector product: emits
+    /// `weight * (∇²f · seed)[k]` into `out[k]` for every problem
+    /// variable `k` the tape references. Caller supplies the
+    /// forward-pass result `vals` (use [`forward_into`]) plus three
+    /// scratch buffers (`dot`, `adj`, `adj_dot`), each at least
+    /// `self.ops.len()` long. `out` must be at least one past the
+    /// largest variable index in the tape; the routine reads
+    /// `seed[k]` for each `Var(k)` and writes `out[k] += weight *
+    /// (Hess · seed)[k]`.
+    ///
+    /// This is one forward-over-reverse AD pass — O(n_ops) work —
+    /// regardless of how many variables the tape depends on, which
+    /// is what makes Hessian coloring efficient: a single
+    /// directional pass recovers a whole color group of columns.
+    ///
+    /// [`forward_into`]: Tape::forward_into
+    pub fn hessian_directional(
+        &self,
+        vals: &[f64],
+        seed: &[f64],
+        weight: f64,
+        out: &mut [f64],
+        dot: &mut [f64],
+        adj: &mut [f64],
+        adj_dot: &mut [f64],
+    ) {
+        let n = self.ops.len();
+        if n == 0 || weight == 0.0 {
+            return;
+        }
+        debug_assert!(vals.len() >= n);
+        debug_assert!(dot.len() >= n);
+        debug_assert!(adj.len() >= n);
+        debug_assert!(adj_dot.len() >= n);
+
+        // Forward tangent: dot[i] = (∂vals[i] / ∂x · seed). At
+        // Var(k) the seed entry feeds in; the rest of the chain
+        // rule matches `forward_tangent` exactly.
+        for i in 0..n {
+            dot[i] = match &self.ops[i] {
+                TapeOp::Const(_) => 0.0,
+                TapeOp::Var(k) => seed[*k],
+                TapeOp::Add(a, b) => dot[*a] + dot[*b],
+                TapeOp::Sub(a, b) => dot[*a] - dot[*b],
+                TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
+                TapeOp::Div(a, b) => {
+                    let vb = vals[*b];
+                    (dot[*a] * vb - vals[*a] * dot[*b]) / (vb * vb)
+                }
+                TapeOp::Pow(a, b) => {
+                    let u = vals[*a];
+                    let r = vals[*b];
+                    let du = dot[*a];
+                    let dr = dot[*b];
+                    let mut result = 0.0;
+                    if r != 0.0 && u != 0.0 {
+                        result += r * u.powf(r - 1.0) * du;
+                    }
+                    if u > 0.0 {
+                        result += vals[i] * u.ln() * dr;
+                    }
+                    result
+                }
+                TapeOp::Neg(a) => -dot[*a],
+                TapeOp::Abs(a) => {
+                    if vals[*a] >= 0.0 {
+                        dot[*a]
+                    } else {
+                        -dot[*a]
+                    }
+                }
+                TapeOp::Sqrt(a) => {
+                    let sv = vals[i];
+                    if sv > 0.0 {
+                        dot[*a] * 0.5 / sv
+                    } else {
+                        0.0
+                    }
+                }
+                TapeOp::Exp(a) => vals[i] * dot[*a],
+                TapeOp::Log(a) => dot[*a] / vals[*a],
+                TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+                TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
+                TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
+            };
+        }
+
+        // Reverse over tangent. adj[i] = ∂f/∂vals[i],
+        // adj_dot[i] = derivative of adj[i] along `seed`
+        // direction = (Hess · seed) projected onto slot i.
+        for slot in adj.iter_mut().take(n) {
+            *slot = 0.0;
+        }
+        for slot in adj_dot.iter_mut().take(n) {
+            *slot = 0.0;
+        }
+        adj[n - 1] = 1.0;
+
+        for i in (0..n).rev() {
+            let w = adj[i];
+            let wd = adj_dot[i];
+            if w == 0.0 && wd == 0.0 {
+                continue;
+            }
+            match &self.ops[i] {
+                TapeOp::Const(_) => {}
+                TapeOp::Var(k) => {
+                    if wd != 0.0 {
+                        out[*k] += weight * wd;
+                    }
+                }
+                TapeOp::Add(a, b) => {
+                    adj[*a] += w;
+                    adj[*b] += w;
+                    adj_dot[*a] += wd;
+                    adj_dot[*b] += wd;
+                }
+                TapeOp::Sub(a, b) => {
+                    adj[*a] += w;
+                    adj[*b] -= w;
+                    adj_dot[*a] += wd;
+                    adj_dot[*b] -= wd;
+                }
+                TapeOp::Mul(a, b) => {
+                    adj[*a] += w * vals[*b];
+                    adj[*b] += w * vals[*a];
+                    adj_dot[*a] += wd * vals[*b] + w * dot[*b];
+                    adj_dot[*b] += wd * vals[*a] + w * dot[*a];
+                }
+                TapeOp::Div(a, b) => {
+                    let vb = vals[*b];
+                    let vb2 = vb * vb;
+                    let vb3 = vb2 * vb;
+                    adj[*a] += w / vb;
+                    adj_dot[*a] += wd / vb + w * (-dot[*b] / vb2);
+                    adj[*b] += w * (-vals[*a] / vb2);
+                    adj_dot[*b] += wd * (-vals[*a] / vb2)
+                        + w * (-dot[*a] / vb2 + 2.0 * vals[*a] * dot[*b] / vb3);
+                }
+                TapeOp::Pow(a, b) => {
+                    let u = vals[*a];
+                    let r = vals[*b];
+                    let du = dot[*a];
+                    let dr = dot[*b];
+                    if r != 0.0 {
+                        if u != 0.0 {
+                            let p_a = r * u.powf(r - 1.0);
+                            adj[*a] += w * p_a;
+                            let mut dp_a = dr * u.powf(r - 1.0);
+                            if u > 0.0 {
+                                dp_a +=
+                                    r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
+                            } else {
+                                dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
+                            }
+                            adj_dot[*a] += wd * p_a + w * dp_a;
+                        } else if r >= 2.0 {
+                            let p_a = 0.0;
+                            adj[*a] += w * p_a;
+                            let dp_a = if r == 2.0 {
+                                2.0 * du
+                            } else {
+                                r * (r - 1.0) * (0.0_f64).powf(r - 2.0) * du
+                            };
+                            adj_dot[*a] += wd * p_a + w * dp_a;
+                        }
+                    }
+                    if u > 0.0 {
+                        let ln_u = u.ln();
+                        let p_b = vals[i] * ln_u;
+                        adj[*b] += w * p_b;
+                        let dur = vals[i] * (r * du / u + dr * ln_u);
+                        let dp_b = dur * ln_u + vals[i] * du / u;
+                        adj_dot[*b] += wd * p_b + w * dp_b;
+                    }
+                }
+                TapeOp::Neg(a) => {
+                    adj[*a] -= w;
+                    adj_dot[*a] -= wd;
+                }
+                TapeOp::Abs(a) => {
+                    let s = if vals[*a] >= 0.0 { 1.0 } else { -1.0 };
+                    adj[*a] += w * s;
+                    adj_dot[*a] += wd * s;
+                }
+                TapeOp::Sqrt(a) => {
+                    let sv = vals[i];
+                    if sv > 0.0 {
+                        let fp = 0.5 / sv;
+                        let fpp = -0.25 / (vals[*a] * sv);
+                        adj[*a] += w * fp;
+                        adj_dot[*a] += wd * fp + w * fpp * dot[*a];
+                    }
+                }
+                TapeOp::Exp(a) => {
+                    let ev = vals[i];
+                    adj[*a] += w * ev;
+                    adj_dot[*a] += wd * ev + w * ev * dot[*a];
+                }
+                TapeOp::Log(a) => {
+                    let u = vals[*a];
+                    adj[*a] += w / u;
+                    adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+                }
+                TapeOp::Log10(a) => {
+                    let u = vals[*a];
+                    let c = std::f64::consts::LN_10;
+                    adj[*a] += w / (u * c);
+                    adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+                }
+                TapeOp::Sin(a) => {
+                    let u = vals[*a];
+                    let cu = u.cos();
+                    adj[*a] += w * cu;
+                    adj_dot[*a] += wd * cu + w * (-u.sin()) * dot[*a];
+                }
+                TapeOp::Cos(a) => {
+                    let u = vals[*a];
+                    let su = u.sin();
+                    adj[*a] -= w * su;
+                    adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
+                }
+            }
         }
     }
 
@@ -682,6 +935,1160 @@ fn emit_int_pow(base: usize, n: u32, ops: &mut Vec<TapeOp>) -> usize {
     }
 }
 
+// ============================================================
+// HybridTape: per-summand local tapes + shared CSE prelude.
+//
+// Partial separability — the .nl Sum/Add structure — gets each
+// summand its own local Vec<SummandOp>. CSE bodies (V-segments
+// in .nl) that appear in two or more summands are promoted into
+// a single shared `prelude: Vec<TapeOp>`; per-summand references
+// to a promoted CSE are SummandOp::Shared(prelude_slot).
+//
+// This is strictly better than either extreme:
+//   - per-summand Tape (no cross-summand sharing): re-inlines
+//     every shared CSE, blows up tape size when many constraints
+//     share a stencil derivative (Mittelmann *120 problems).
+//   - GlobalTape (single shared Vec<TapeOp> for everything):
+//     per-root reverse sweeps scatter across a many-MB buffer,
+//     thrashing cache when no CSE is actually shared (lane_emden
+//     120: each constraint owns its own ops → 50% regression
+//     vs per-summand tapes).
+//
+// Forward: prelude once, then each summand's local pass.
+// Reverse / forward-over-reverse: per-summand sweep over local
+// reach (which propagates adjoints into prelude_adj at Shared
+// boundaries), then a small reverse pass over the summand's
+// prelude_reach to fold those into grad / Hessian.
+// ============================================================
+
+/// One slot in a per-summand local tape.
+#[derive(Debug, Clone)]
+pub enum SummandOp {
+    /// Local op — operand indices reference other slots in the
+    /// same per-summand vector.
+    Local(TapeOp),
+    /// Pull a value from the shared prelude at slot `usize`. No
+    /// downstream cost beyond the lookup; adjoints flowing into
+    /// this slot accumulate into the prelude adjoint buffer.
+    Shared(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct Summand {
+    pub ops: Vec<SummandOp>,
+    /// Local slot holding the summand's final value.
+    pub root_slot: usize,
+    /// Local slots reachable from `root_slot`, ascending (topo).
+    pub local_reach: Vec<usize>,
+    /// Prelude slots reachable from the summand's Shared refs,
+    /// ascending (topo in prelude's operand DAG).
+    pub prelude_reach: Vec<usize>,
+    /// Variables touched by Var ops inside `local_reach`.
+    pub local_vars: Vec<usize>,
+    /// Variables touched by Var ops inside `prelude_reach`.
+    pub prelude_vars: Vec<usize>,
+    /// `local_vars ∪ prelude_vars`, sorted. Hessian j-loop set.
+    pub all_vars: Vec<usize>,
+}
+
+#[derive(Debug)]
+pub struct HybridTape {
+    /// Shared CSE bodies. Slot indices in `SummandOp::Shared`
+    /// point here; this Vec is built bottom-up by `build_recursive`,
+    /// so operand indices are always less than the consumer's
+    /// index (topo in ascending order).
+    pub prelude: Vec<TapeOp>,
+    pub summands: Vec<Summand>,
+}
+
+impl HybridTape {
+    /// Build hybrid tape from a list of root expressions. CSE
+    /// bodies referenced from ≥ 2 roots are promoted into the
+    /// shared prelude; CSEs touched by only one root are inlined
+    /// into that summand's local ops.
+    pub fn build_multi(exprs: &[Expr]) -> Self {
+        // Pass 1: per-Cse-pointer count of how many roots reference
+        // it (each root contributes at most 1 to the count). The
+        // ≥2 threshold means a CSE is shared across summands.
+        let mut cse_count: HashMap<*const Expr, usize> = HashMap::new();
+        for e in exprs {
+            let mut seen_in_root: HashSet<*const Expr> = HashSet::new();
+            count_cse_appearances(e, &mut seen_in_root, &mut cse_count);
+        }
+
+        // Pass 2: build prelude + each summand. The summand builder
+        // hits the prelude path lazily — only when it encounters a
+        // promoted Cse — so the prelude grows only with bodies that
+        // are actually referenced from multiple summands.
+        let mut prelude: Vec<TapeOp> = Vec::new();
+        let mut prelude_map: HashMap<*const Expr, usize> = HashMap::new();
+        let mut summands: Vec<Summand> = Vec::with_capacity(exprs.len());
+        for e in exprs {
+            let mut local: Vec<SummandOp> = Vec::new();
+            let mut local_cache: HashMap<*const Expr, usize> = HashMap::new();
+            let root_slot = build_into_summand(
+                e,
+                &mut local,
+                &mut local_cache,
+                &mut prelude,
+                &mut prelude_map,
+                &cse_count,
+            );
+            summands.push(Summand {
+                ops: local,
+                root_slot,
+                local_reach: Vec::new(),
+                prelude_reach: Vec::new(),
+                local_vars: Vec::new(),
+                prelude_vars: Vec::new(),
+                all_vars: Vec::new(),
+            });
+        }
+
+        // Pass 3: per-summand reach / vars. Prelude reach uses an
+        // epoch-tagged shared visited buffer so total cost stays
+        // O(Σ |prelude_reach_i|) rather than O(n_summands × |prelude|).
+        let mut p_visited: Vec<u32> = vec![0; prelude.len()];
+        let mut p_epoch: u32 = 0;
+        let mut p_stack: Vec<usize> = Vec::new();
+        for s in &mut summands {
+            let (local_reach, shared_refs) = compute_local_reach(&s.ops, s.root_slot);
+            s.local_reach = local_reach;
+
+            let mut lv: BTreeSet<usize> = BTreeSet::new();
+            for &i in &s.local_reach {
+                if let SummandOp::Local(TapeOp::Var(j)) = &s.ops[i] {
+                    lv.insert(*j);
+                }
+            }
+            s.local_vars = lv.iter().copied().collect();
+
+            if !shared_refs.is_empty() {
+                p_epoch += 1;
+                let mut preach: Vec<usize> = Vec::new();
+                for &start in &shared_refs {
+                    bfs_prelude(
+                        &prelude,
+                        start,
+                        &mut p_visited,
+                        p_epoch,
+                        &mut p_stack,
+                        &mut preach,
+                    );
+                }
+                preach.sort_unstable();
+                s.prelude_vars = vars_in(&prelude, &preach);
+                s.prelude_reach = preach;
+            }
+
+            let mut av: BTreeSet<usize> = lv;
+            for &v in &s.prelude_vars {
+                av.insert(v);
+            }
+            s.all_vars = av.into_iter().collect();
+        }
+
+        HybridTape { prelude, summands }
+    }
+
+    pub fn n_prelude_ops(&self) -> usize {
+        self.prelude.len()
+    }
+    pub fn n_summands(&self) -> usize {
+        self.summands.len()
+    }
+    pub fn max_summand_ops(&self) -> usize {
+        self.summands.iter().map(|s| s.ops.len()).max().unwrap_or(0)
+    }
+    pub fn total_local_ops(&self) -> usize {
+        self.summands.iter().map(|s| s.ops.len()).sum()
+    }
+
+    /// Forward sweep over the shared prelude. `prelude_vals` must
+    /// have length `n_prelude_ops`.
+    pub fn forward_prelude(&self, x: &[f64], prelude_vals: &mut [f64]) {
+        debug_assert_eq!(prelude_vals.len(), self.prelude.len());
+        for i in 0..self.prelude.len() {
+            prelude_vals[i] = fwd_step(&self.prelude[i], x, prelude_vals);
+        }
+    }
+
+    /// Forward sweep over one summand. `local_vals` must hold at
+    /// least `s.ops.len()` entries.
+    pub fn forward_summand(
+        &self,
+        s: &Summand,
+        x: &[f64],
+        prelude_vals: &[f64],
+        local_vals: &mut [f64],
+    ) {
+        debug_assert!(local_vals.len() >= s.ops.len());
+        for i in 0..s.ops.len() {
+            local_vals[i] = match &s.ops[i] {
+                SummandOp::Local(op) => fwd_step(op, x, local_vals),
+                SummandOp::Shared(k) => prelude_vals[*k],
+            };
+        }
+    }
+
+    /// Value at the summand root after `forward_summand`.
+    #[inline]
+    pub fn root_value(&self, s: &Summand, local_vals: &[f64]) -> f64 {
+        local_vals[s.root_slot]
+    }
+
+    /// Reverse-mode gradient for one summand. Walks `local_reach`
+    /// in reverse — propagating adjoints into `prelude_adj` at
+    /// Shared boundaries — and then walks `prelude_reach` in
+    /// reverse to land contributions in `grad`. Scratch arrays
+    /// `local_adj` and `prelude_adj` are zeroed only at the slots
+    /// actually touched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gradient_summand(
+        &self,
+        s: &Summand,
+        prelude_vals: &[f64],
+        local_vals: &[f64],
+        seed: f64,
+        grad: &mut [f64],
+        local_adj: &mut [f64],
+        prelude_adj: &mut [f64],
+    ) {
+        if seed == 0.0 || s.local_reach.is_empty() {
+            return;
+        }
+        for &i in &s.local_reach {
+            local_adj[i] = 0.0;
+        }
+        for &i in &s.prelude_reach {
+            prelude_adj[i] = 0.0;
+        }
+        local_adj[s.root_slot] = seed;
+        for &i in s.local_reach.iter().rev() {
+            let a = local_adj[i];
+            if a == 0.0 {
+                continue;
+            }
+            match &s.ops[i] {
+                SummandOp::Local(op) => rev_step(op, i, local_vals, local_adj, a, grad),
+                SummandOp::Shared(k) => {
+                    prelude_adj[*k] += a;
+                }
+            }
+        }
+        for &i in s.prelude_reach.iter().rev() {
+            let a = prelude_adj[i];
+            if a == 0.0 {
+                continue;
+            }
+            rev_step(&self.prelude[i], i, prelude_vals, prelude_adj, a, grad);
+        }
+    }
+
+    /// Forward-over-reverse Hessian for one summand with multiplier
+    /// `weight`. Iterates over `s.all_vars`; for each seed variable
+    /// j: (1) forward tangent through prelude_reach then local_reach,
+    /// (2) reverse over local (folding adj/adj_dot into prelude at
+    /// Shared boundaries), (3) reverse over prelude_reach. All
+    /// scratch buffers are zeroed only at the touched slots inside
+    /// the per-j loop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hessian_summand(
+        &self,
+        s: &Summand,
+        prelude_vals: &[f64],
+        local_vals: &[f64],
+        weight: f64,
+        hess_map: &HashMap<(usize, usize), usize>,
+        values: &mut [f64],
+        local_dot: &mut [f64],
+        local_adj: &mut [f64],
+        local_adj_dot: &mut [f64],
+        prelude_dot: &mut [f64],
+        prelude_adj: &mut [f64],
+        prelude_adj_dot: &mut [f64],
+    ) {
+        if weight == 0.0 || s.local_reach.is_empty() {
+            return;
+        }
+        for &j in &s.all_vars {
+            for &i in &s.local_reach {
+                local_dot[i] = 0.0;
+                local_adj[i] = 0.0;
+                local_adj_dot[i] = 0.0;
+            }
+            for &i in &s.prelude_reach {
+                prelude_dot[i] = 0.0;
+                prelude_adj[i] = 0.0;
+                prelude_adj_dot[i] = 0.0;
+            }
+            for &i in &s.prelude_reach {
+                prelude_dot[i] = fwd_tan_step(&self.prelude[i], j, prelude_vals, prelude_dot, i);
+            }
+            for &i in &s.local_reach {
+                local_dot[i] = match &s.ops[i] {
+                    SummandOp::Local(op) => fwd_tan_step(op, j, local_vals, local_dot, i),
+                    SummandOp::Shared(k) => prelude_dot[*k],
+                };
+            }
+            local_adj[s.root_slot] = 1.0;
+            for &i in s.local_reach.iter().rev() {
+                let w = local_adj[i];
+                let wd = local_adj_dot[i];
+                if w == 0.0 && wd == 0.0 {
+                    continue;
+                }
+                match &s.ops[i] {
+                    SummandOp::Local(op) => {
+                        ror_step(
+                            op,
+                            i,
+                            j,
+                            local_vals,
+                            local_dot,
+                            local_adj,
+                            local_adj_dot,
+                            w,
+                            wd,
+                            weight,
+                            hess_map,
+                            values,
+                        );
+                    }
+                    SummandOp::Shared(k) => {
+                        prelude_adj[*k] += w;
+                        prelude_adj_dot[*k] += wd;
+                    }
+                }
+            }
+            for &i in s.prelude_reach.iter().rev() {
+                let w = prelude_adj[i];
+                let wd = prelude_adj_dot[i];
+                if w == 0.0 && wd == 0.0 {
+                    continue;
+                }
+                ror_step(
+                    &self.prelude[i],
+                    i,
+                    j,
+                    prelude_vals,
+                    prelude_dot,
+                    prelude_adj,
+                    prelude_adj_dot,
+                    w,
+                    wd,
+                    weight,
+                    hess_map,
+                    values,
+                );
+            }
+        }
+    }
+
+    /// Structural Hessian sparsity over the whole hybrid tape:
+    /// every pair the prelude or any summand can produce.
+    pub fn hessian_sparsity_all(&self) -> BTreeSet<(usize, usize)> {
+        let mut pairs = hessian_sparsity_impl(&self.prelude);
+
+        // Per-prelude-slot var-set, reused across summands as the
+        // var-set carrier for Shared refs.
+        let prelude_var_sets = compute_var_sets(&self.prelude);
+
+        for s in &self.summands {
+            summand_sparsity(&s.ops, &prelude_var_sets, &mut pairs);
+        }
+        pairs
+    }
+}
+
+/// Pass-1 helper: per-root walk that increments `counts[ptr]` the
+/// first time a Cse pointer is encountered in this root. Recursing
+/// into the body is gated on the first visit to avoid quadratic
+/// blowup on heavily shared CSE DAGs.
+fn count_cse_appearances(
+    e: &Expr,
+    seen_in_root: &mut HashSet<*const Expr>,
+    counts: &mut HashMap<*const Expr, usize>,
+) {
+    match e {
+        Expr::Const(_) | Expr::Var(_) => {}
+        Expr::Binary(_, a, b) => {
+            count_cse_appearances(a, seen_in_root, counts);
+            count_cse_appearances(b, seen_in_root, counts);
+        }
+        Expr::Unary(_, a) => count_cse_appearances(a, seen_in_root, counts),
+        Expr::Sum(args) => {
+            for a in args {
+                count_cse_appearances(a, seen_in_root, counts);
+            }
+        }
+        Expr::Cse(body) => {
+            let key = Rc::as_ptr(body) as *const Expr;
+            if seen_in_root.insert(key) {
+                *counts.entry(key).or_insert(0) += 1;
+                count_cse_appearances(body, seen_in_root, counts);
+            }
+        }
+    }
+}
+
+/// Recursive summand builder. CSEs that meet the promotion bar
+/// (≥ 2 roots reference them per `cse_count`) get a single prelude
+/// emission via `build_recursive`; the summand records a Shared op
+/// pointing at the prelude slot. Non-promoted CSEs are inlined
+/// into the summand with intra-summand Rc-pointer dedup.
+fn build_into_summand(
+    expr: &Expr,
+    local: &mut Vec<SummandOp>,
+    local_cache: &mut HashMap<*const Expr, usize>,
+    prelude: &mut Vec<TapeOp>,
+    prelude_map: &mut HashMap<*const Expr, usize>,
+    cse_count: &HashMap<*const Expr, usize>,
+) -> usize {
+    match expr {
+        Expr::Const(c) => {
+            let i = local.len();
+            local.push(SummandOp::Local(TapeOp::Const(*c)));
+            i
+        }
+        Expr::Var(j) => {
+            let i = local.len();
+            local.push(SummandOp::Local(TapeOp::Var(*j)));
+            i
+        }
+        Expr::Binary(op, a, b) => {
+            if let BinOp::Pow = op {
+                if let Some(c) = peek_const(b) {
+                    if let Some(i) = try_emit_const_pow_summand(
+                        a,
+                        c,
+                        local,
+                        local_cache,
+                        prelude,
+                        prelude_map,
+                        cse_count,
+                    ) {
+                        return i;
+                    }
+                }
+            }
+            let l = build_into_summand(a, local, local_cache, prelude, prelude_map, cse_count);
+            let r = build_into_summand(b, local, local_cache, prelude, prelude_map, cse_count);
+            let i = local.len();
+            local.push(SummandOp::Local(match op {
+                BinOp::Add => TapeOp::Add(l, r),
+                BinOp::Sub => TapeOp::Sub(l, r),
+                BinOp::Mul => TapeOp::Mul(l, r),
+                BinOp::Div => TapeOp::Div(l, r),
+                BinOp::Pow => TapeOp::Pow(l, r),
+            }));
+            i
+        }
+        Expr::Unary(op, a) => {
+            let v = build_into_summand(a, local, local_cache, prelude, prelude_map, cse_count);
+            let i = local.len();
+            local.push(SummandOp::Local(match op {
+                UnaryOp::Neg => TapeOp::Neg(v),
+                UnaryOp::Sqrt => TapeOp::Sqrt(v),
+                UnaryOp::Log => TapeOp::Log(v),
+                UnaryOp::Log10 => TapeOp::Log10(v),
+                UnaryOp::Exp => TapeOp::Exp(v),
+                UnaryOp::Abs => TapeOp::Abs(v),
+                UnaryOp::Sin => TapeOp::Sin(v),
+                UnaryOp::Cos => TapeOp::Cos(v),
+            }));
+            i
+        }
+        Expr::Sum(args) => {
+            if args.is_empty() {
+                let i = local.len();
+                local.push(SummandOp::Local(TapeOp::Const(0.0)));
+                return i;
+            }
+            let mut acc =
+                build_into_summand(&args[0], local, local_cache, prelude, prelude_map, cse_count);
+            for a in &args[1..] {
+                let nxt = build_into_summand(a, local, local_cache, prelude, prelude_map, cse_count);
+                let i = local.len();
+                local.push(SummandOp::Local(TapeOp::Add(acc, nxt)));
+                acc = i;
+            }
+            acc
+        }
+        Expr::Cse(body) => {
+            let key = Rc::as_ptr(body) as *const Expr;
+            if let Some(&li) = local_cache.get(&key) {
+                return li;
+            }
+            let promoted = cse_count.get(&key).copied().unwrap_or(0) >= 2;
+            if promoted {
+                // Build (or reuse) the prelude slot for this CSE.
+                // `build_recursive(expr, ...)` hits the Cse arm,
+                // emits the body once into prelude, and caches it
+                // in `prelude_map` keyed by this Rc pointer.
+                let pslot = build_recursive(expr, prelude, prelude_map);
+                let li = local.len();
+                local.push(SummandOp::Shared(pslot));
+                local_cache.insert(key, li);
+                li
+            } else {
+                let li = build_into_summand(
+                    body,
+                    local,
+                    local_cache,
+                    prelude,
+                    prelude_map,
+                    cse_count,
+                );
+                local_cache.insert(key, li);
+                li
+            }
+        }
+    }
+}
+
+/// Pow-lowering specialised for summand builds. Mirrors
+/// `try_emit_const_pow` but with summand-flavoured emission.
+fn try_emit_const_pow_summand(
+    base_expr: &Expr,
+    c: f64,
+    local: &mut Vec<SummandOp>,
+    local_cache: &mut HashMap<*const Expr, usize>,
+    prelude: &mut Vec<TapeOp>,
+    prelude_map: &mut HashMap<*const Expr, usize>,
+    cse_count: &HashMap<*const Expr, usize>,
+) -> Option<usize> {
+    if c == 0.0 {
+        let i = local.len();
+        local.push(SummandOp::Local(TapeOp::Const(1.0)));
+        return Some(i);
+    }
+    if c == 1.0 {
+        return Some(build_into_summand(
+            base_expr,
+            local,
+            local_cache,
+            prelude,
+            prelude_map,
+            cse_count,
+        ));
+    }
+    if c == 0.5 {
+        let b = build_into_summand(base_expr, local, local_cache, prelude, prelude_map, cse_count);
+        let i = local.len();
+        local.push(SummandOp::Local(TapeOp::Sqrt(b)));
+        return Some(i);
+    }
+    if c.is_finite() && c.fract() == 0.0 && c.abs() <= 8.0 {
+        let n = c.abs() as u32;
+        if n == 0 {
+            let i = local.len();
+            local.push(SummandOp::Local(TapeOp::Const(1.0)));
+            return Some(i);
+        }
+        let b = build_into_summand(base_expr, local, local_cache, prelude, prelude_map, cse_count);
+        let pos = emit_int_pow_summand(b, n, local);
+        if c < 0.0 {
+            let one_idx = local.len();
+            local.push(SummandOp::Local(TapeOp::Const(1.0)));
+            let i = local.len();
+            local.push(SummandOp::Local(TapeOp::Div(one_idx, pos)));
+            return Some(i);
+        }
+        return Some(pos);
+    }
+    None
+}
+
+fn emit_int_pow_summand(base: usize, n: u32, local: &mut Vec<SummandOp>) -> usize {
+    debug_assert!(n >= 1);
+    if n == 1 {
+        return base;
+    }
+    let half = emit_int_pow_summand(base, n / 2, local);
+    let squared = local.len();
+    local.push(SummandOp::Local(TapeOp::Mul(half, half)));
+    if n % 2 == 1 {
+        let i = local.len();
+        local.push(SummandOp::Local(TapeOp::Mul(squared, base)));
+        i
+    } else {
+        squared
+    }
+}
+
+/// Walk a summand's local op DAG from `root`, returning the
+/// reachable local slots (sorted ascending) plus the distinct
+/// prelude slots referenced by any Shared op along the way.
+fn compute_local_reach(ops: &[SummandOp], root: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut visited = vec![false; ops.len()];
+    let mut reach: Vec<usize> = Vec::new();
+    let mut shared: BTreeSet<usize> = BTreeSet::new();
+    let mut stack: Vec<usize> = Vec::with_capacity(16);
+    visited[root] = true;
+    reach.push(root);
+    stack.push(root);
+    while let Some(s) = stack.pop() {
+        match &ops[s] {
+            SummandOp::Local(op) => {
+                let (a, b) = op_operands(op);
+                if let Some(a) = a {
+                    if !visited[a] {
+                        visited[a] = true;
+                        reach.push(a);
+                        stack.push(a);
+                    }
+                }
+                if let Some(b) = b {
+                    if !visited[b] {
+                        visited[b] = true;
+                        reach.push(b);
+                        stack.push(b);
+                    }
+                }
+            }
+            SummandOp::Shared(k) => {
+                shared.insert(*k);
+            }
+        }
+    }
+    reach.sort_unstable();
+    (reach, shared.into_iter().collect())
+}
+
+/// Epoch-tagged BFS over the prelude operand DAG, accumulating
+/// reachable slots into `out`. Caller is responsible for sorting
+/// `out` after a batch of starts has been processed.
+fn bfs_prelude(
+    prelude: &[TapeOp],
+    start: usize,
+    visited: &mut [u32],
+    cur: u32,
+    stack: &mut Vec<usize>,
+    out: &mut Vec<usize>,
+) {
+    if visited[start] == cur {
+        return;
+    }
+    visited[start] = cur;
+    out.push(start);
+    stack.push(start);
+    while let Some(s) = stack.pop() {
+        let (a, b) = op_operands(&prelude[s]);
+        if let Some(a) = a {
+            if visited[a] != cur {
+                visited[a] = cur;
+                out.push(a);
+                stack.push(a);
+            }
+        }
+        if let Some(b) = b {
+            if visited[b] != cur {
+                visited[b] = cur;
+                out.push(b);
+                stack.push(b);
+            }
+        }
+    }
+}
+
+/// Per-op var-set for the prelude — every slot's transitive
+/// variable footprint. Used by `summand_sparsity` to expand
+/// `SummandOp::Shared(k)` into its var-set carrier.
+fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
+    let mut out: Vec<BTreeSet<usize>> = Vec::with_capacity(ops.len());
+    for op in ops {
+        let vs: BTreeSet<usize> = match op {
+            TapeOp::Const(_) => BTreeSet::new(),
+            TapeOp::Var(j) => {
+                let mut s = BTreeSet::new();
+                s.insert(*j);
+                s
+            }
+            TapeOp::Add(a, b)
+            | TapeOp::Sub(a, b)
+            | TapeOp::Mul(a, b)
+            | TapeOp::Div(a, b)
+            | TapeOp::Pow(a, b) => out[*a].union(&out[*b]).copied().collect(),
+            TapeOp::Neg(a)
+            | TapeOp::Abs(a)
+            | TapeOp::Sqrt(a)
+            | TapeOp::Exp(a)
+            | TapeOp::Log(a)
+            | TapeOp::Log10(a)
+            | TapeOp::Sin(a)
+            | TapeOp::Cos(a) => out[*a].clone(),
+        };
+        out.push(vs);
+    }
+    out
+}
+
+/// Per-op Hessian-sparsity propagation over a summand's mixed
+/// SummandOp slice. Shared refs contribute their prelude var-set
+/// but do not themselves emit pairs (those came from
+/// `hessian_sparsity_impl(&prelude)`).
+fn summand_sparsity(
+    ops: &[SummandOp],
+    prelude_var_sets: &[BTreeSet<usize>],
+    pairs: &mut BTreeSet<(usize, usize)>,
+) {
+    let mut var_sets: Vec<BTreeSet<usize>> = Vec::with_capacity(ops.len());
+    let emit_cross =
+        |s1: &BTreeSet<usize>, s2: &BTreeSet<usize>, pairs: &mut BTreeSet<(usize, usize)>| {
+            for &v1 in s1 {
+                for &v2 in s2 {
+                    let (r, c) = if v1 >= v2 { (v1, v2) } else { (v2, v1) };
+                    pairs.insert((r, c));
+                }
+            }
+        };
+    let emit_self = |s: &BTreeSet<usize>, pairs: &mut BTreeSet<(usize, usize)>| {
+        let vars: Vec<usize> = s.iter().copied().collect();
+        for (ai, &vi) in vars.iter().enumerate() {
+            for &vj in &vars[..=ai] {
+                let (r, c) = if vi >= vj { (vi, vj) } else { (vj, vi) };
+                pairs.insert((r, c));
+            }
+        }
+    };
+    for so in ops {
+        let vset: BTreeSet<usize> = match so {
+            SummandOp::Shared(k) => prelude_var_sets[*k].clone(),
+            SummandOp::Local(op) => match op {
+                TapeOp::Const(_) => BTreeSet::new(),
+                TapeOp::Var(j) => {
+                    let mut s = BTreeSet::new();
+                    s.insert(*j);
+                    s
+                }
+                TapeOp::Add(a, b) | TapeOp::Sub(a, b) => {
+                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                }
+                TapeOp::Neg(a) | TapeOp::Abs(a) => var_sets[*a].clone(),
+                TapeOp::Mul(a, b) => {
+                    emit_cross(&var_sets[*a], &var_sets[*b], pairs);
+                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                }
+                TapeOp::Div(a, b) => {
+                    emit_cross(&var_sets[*a], &var_sets[*b], pairs);
+                    emit_self(&var_sets[*b], pairs);
+                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                }
+                TapeOp::Pow(a, b) => {
+                    let combined: BTreeSet<usize> =
+                        var_sets[*a].union(&var_sets[*b]).copied().collect();
+                    emit_self(&combined, pairs);
+                    combined
+                }
+                TapeOp::Sqrt(a)
+                | TapeOp::Exp(a)
+                | TapeOp::Log(a)
+                | TapeOp::Log10(a)
+                | TapeOp::Sin(a)
+                | TapeOp::Cos(a) => {
+                    emit_self(&var_sets[*a], pairs);
+                    var_sets[*a].clone()
+                }
+            },
+        };
+        var_sets.push(vset);
+    }
+}
+
+/// Operand indices of a `TapeOp`, normalized into a fixed-length
+/// array so callers don't need to re-match every site.
+#[inline]
+fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
+    match op {
+        TapeOp::Const(_) | TapeOp::Var(_) => (None, None),
+        TapeOp::Add(a, b)
+        | TapeOp::Sub(a, b)
+        | TapeOp::Mul(a, b)
+        | TapeOp::Div(a, b)
+        | TapeOp::Pow(a, b) => (Some(*a), Some(*b)),
+        TapeOp::Neg(a)
+        | TapeOp::Abs(a)
+        | TapeOp::Sqrt(a)
+        | TapeOp::Exp(a)
+        | TapeOp::Log(a)
+        | TapeOp::Log10(a)
+        | TapeOp::Sin(a)
+        | TapeOp::Cos(a) => (Some(*a), None),
+    }
+}
+
+fn vars_in(ops: &[TapeOp], reach: &[usize]) -> Vec<usize> {
+    let mut s: BTreeSet<usize> = BTreeSet::new();
+    for &i in reach {
+        if let TapeOp::Var(j) = &ops[i] {
+            s.insert(*j);
+        }
+    }
+    s.into_iter().collect()
+}
+
+// ----- Free-function AD step kernels used by GlobalTape -----
+
+#[inline]
+fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
+    match op {
+        TapeOp::Const(c) => *c,
+        TapeOp::Var(i) => x[*i],
+        TapeOp::Add(a, b) => vals[*a] + vals[*b],
+        TapeOp::Sub(a, b) => vals[*a] - vals[*b],
+        TapeOp::Mul(a, b) => vals[*a] * vals[*b],
+        TapeOp::Div(a, b) => vals[*a] / vals[*b],
+        TapeOp::Pow(a, b) => vals[*a].powf(vals[*b]),
+        TapeOp::Neg(a) => -vals[*a],
+        TapeOp::Abs(a) => vals[*a].abs(),
+        TapeOp::Sqrt(a) => vals[*a].sqrt(),
+        TapeOp::Exp(a) => vals[*a].exp(),
+        TapeOp::Log(a) => vals[*a].ln(),
+        TapeOp::Log10(a) => vals[*a].log10(),
+        TapeOp::Sin(a) => vals[*a].sin(),
+        TapeOp::Cos(a) => vals[*a].cos(),
+    }
+}
+
+#[inline]
+fn rev_step(
+    op: &TapeOp,
+    i: usize,
+    vals: &[f64],
+    adj: &mut [f64],
+    a: f64,
+    grad: &mut [f64],
+) {
+    match op {
+        TapeOp::Const(_) => {}
+        TapeOp::Var(j) => {
+            grad[*j] += a;
+        }
+        TapeOp::Add(l, r) => {
+            adj[*l] += a;
+            adj[*r] += a;
+        }
+        TapeOp::Sub(l, r) => {
+            adj[*l] += a;
+            adj[*r] -= a;
+        }
+        TapeOp::Mul(l, r) => {
+            adj[*l] += a * vals[*r];
+            adj[*r] += a * vals[*l];
+        }
+        TapeOp::Div(l, r) => {
+            let rv = vals[*r];
+            adj[*l] += a / rv;
+            adj[*r] -= a * vals[*l] / (rv * rv);
+        }
+        TapeOp::Pow(l, r) => {
+            let lv = vals[*l];
+            let rv = vals[*r];
+            if rv != 0.0 {
+                adj[*l] += a * rv * lv.powf(rv - 1.0);
+            }
+            if lv > 0.0 {
+                adj[*r] += a * vals[i] * lv.ln();
+            }
+        }
+        TapeOp::Neg(j) => {
+            adj[*j] -= a;
+        }
+        TapeOp::Abs(j) => {
+            if vals[*j] >= 0.0 {
+                adj[*j] += a;
+            } else {
+                adj[*j] -= a;
+            }
+        }
+        TapeOp::Sqrt(j) => {
+            let sv = vals[i];
+            if sv > 0.0 {
+                adj[*j] += a * 0.5 / sv;
+            }
+        }
+        TapeOp::Exp(j) => {
+            adj[*j] += a * vals[i];
+        }
+        TapeOp::Log(j) => {
+            adj[*j] += a / vals[*j];
+        }
+        TapeOp::Log10(j) => {
+            adj[*j] += a / (vals[*j] * std::f64::consts::LN_10);
+        }
+        TapeOp::Sin(j) => {
+            adj[*j] += a * vals[*j].cos();
+        }
+        TapeOp::Cos(j) => {
+            adj[*j] -= a * vals[*j].sin();
+        }
+    }
+}
+
+#[inline]
+fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usize) -> f64 {
+    match op {
+        TapeOp::Const(_) => 0.0,
+        TapeOp::Var(k) => {
+            if *k == seed_var {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        TapeOp::Add(a, b) => dot[*a] + dot[*b],
+        TapeOp::Sub(a, b) => dot[*a] - dot[*b],
+        TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
+        TapeOp::Div(a, b) => {
+            let vb = vals[*b];
+            (dot[*a] * vb - vals[*a] * dot[*b]) / (vb * vb)
+        }
+        TapeOp::Pow(a, b) => {
+            let u = vals[*a];
+            let r = vals[*b];
+            let du = dot[*a];
+            let dr = dot[*b];
+            let mut result = 0.0;
+            if r != 0.0 && u != 0.0 {
+                result += r * u.powf(r - 1.0) * du;
+            }
+            if u > 0.0 {
+                result += vals[i] * u.ln() * dr;
+            }
+            result
+        }
+        TapeOp::Neg(a) => -dot[*a],
+        TapeOp::Abs(a) => {
+            if vals[*a] >= 0.0 {
+                dot[*a]
+            } else {
+                -dot[*a]
+            }
+        }
+        TapeOp::Sqrt(a) => {
+            let sv = vals[i];
+            if sv > 0.0 {
+                dot[*a] * 0.5 / sv
+            } else {
+                0.0
+            }
+        }
+        TapeOp::Exp(a) => dot[*a] * vals[i],
+        TapeOp::Log(a) => dot[*a] / vals[*a],
+        TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
+        TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
+        TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn ror_step(
+    op: &TapeOp,
+    i: usize,
+    seed_var: usize,
+    vals: &[f64],
+    dot: &[f64],
+    adj: &mut [f64],
+    adj_dot: &mut [f64],
+    w: f64,
+    wd: f64,
+    weight: f64,
+    hess_map: &HashMap<(usize, usize), usize>,
+    values: &mut [f64],
+) {
+    match op {
+        TapeOp::Const(_) => {}
+        TapeOp::Var(k) => {
+            if wd != 0.0 && *k >= seed_var {
+                if let Some(&pos) = hess_map.get(&(*k, seed_var)) {
+                    values[pos] += weight * wd;
+                }
+            }
+        }
+        TapeOp::Add(a, b) => {
+            adj[*a] += w;
+            adj[*b] += w;
+            adj_dot[*a] += wd;
+            adj_dot[*b] += wd;
+        }
+        TapeOp::Sub(a, b) => {
+            adj[*a] += w;
+            adj[*b] -= w;
+            adj_dot[*a] += wd;
+            adj_dot[*b] -= wd;
+        }
+        TapeOp::Mul(a, b) => {
+            adj[*a] += w * vals[*b];
+            adj[*b] += w * vals[*a];
+            adj_dot[*a] += wd * vals[*b] + w * dot[*b];
+            adj_dot[*b] += wd * vals[*a] + w * dot[*a];
+        }
+        TapeOp::Div(a, b) => {
+            let vb = vals[*b];
+            let vb2 = vb * vb;
+            let vb3 = vb2 * vb;
+            adj[*a] += w / vb;
+            adj_dot[*a] += wd / vb + w * (-dot[*b] / vb2);
+            adj[*b] += w * (-vals[*a] / vb2);
+            adj_dot[*b] += wd * (-vals[*a] / vb2)
+                + w * (-dot[*a] / vb2 + 2.0 * vals[*a] * dot[*b] / vb3);
+        }
+        TapeOp::Pow(a, b) => {
+            let u = vals[*a];
+            let r = vals[*b];
+            let du = dot[*a];
+            let dr = dot[*b];
+            if r != 0.0 {
+                if u != 0.0 {
+                    let p_a = r * u.powf(r - 1.0);
+                    adj[*a] += w * p_a;
+                    let mut dp_a = dr * u.powf(r - 1.0);
+                    if u > 0.0 {
+                        dp_a += r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
+                    } else {
+                        dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
+                    }
+                    adj_dot[*a] += wd * p_a + w * dp_a;
+                } else if r >= 2.0 {
+                    let p_a = 0.0;
+                    adj[*a] += w * p_a;
+                    let dp_a = if r == 2.0 {
+                        2.0 * du
+                    } else {
+                        r * (r - 1.0) * (0.0_f64).powf(r - 2.0) * du
+                    };
+                    adj_dot[*a] += wd * p_a + w * dp_a;
+                }
+            }
+            if u > 0.0 {
+                let ln_u = u.ln();
+                let p_b = vals[i] * ln_u;
+                adj[*b] += w * p_b;
+                let dur = vals[i] * (r * du / u + dr * ln_u);
+                let dp_b = dur * ln_u + vals[i] * du / u;
+                adj_dot[*b] += wd * p_b + w * dp_b;
+            }
+        }
+        TapeOp::Neg(a) => {
+            adj[*a] -= w;
+            adj_dot[*a] -= wd;
+        }
+        TapeOp::Abs(a) => {
+            let s = if vals[*a] >= 0.0 { 1.0 } else { -1.0 };
+            adj[*a] += w * s;
+            adj_dot[*a] += wd * s;
+        }
+        TapeOp::Sqrt(a) => {
+            let sv = vals[i];
+            if sv > 0.0 {
+                let fp = 0.5 / sv;
+                let fpp = -0.25 / (vals[*a] * sv);
+                adj[*a] += w * fp;
+                adj_dot[*a] += wd * fp + w * fpp * dot[*a];
+            }
+        }
+        TapeOp::Exp(a) => {
+            let ev = vals[i];
+            adj[*a] += w * ev;
+            adj_dot[*a] += wd * ev + w * ev * dot[*a];
+        }
+        TapeOp::Log(a) => {
+            let u = vals[*a];
+            adj[*a] += w / u;
+            adj_dot[*a] += wd / u + w * (-1.0 / (u * u)) * dot[*a];
+        }
+        TapeOp::Log10(a) => {
+            let u = vals[*a];
+            let c = std::f64::consts::LN_10;
+            adj[*a] += w / (u * c);
+            adj_dot[*a] += wd / (u * c) + w * (-1.0 / (u * u * c)) * dot[*a];
+        }
+        TapeOp::Sin(a) => {
+            let u = vals[*a];
+            let cu = u.cos();
+            adj[*a] += w * cu;
+            adj_dot[*a] += wd * cu + w * (-u.sin()) * dot[*a];
+        }
+        TapeOp::Cos(a) => {
+            let u = vals[*a];
+            let su = u.sin();
+            adj[*a] -= w * su;
+            adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
+        }
+    }
+}
+
+/// Per-op Hessian-sparsity propagation. Same algorithm as
+/// `Tape::hessian_sparsity` but as a free function so `GlobalTape`
+/// can call it over its shared `ops` slice.
+fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
+    let n = ops.len();
+    let mut var_sets: Vec<BTreeSet<usize>> = Vec::with_capacity(n);
+    let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+
+    let emit_cross =
+        |s1: &BTreeSet<usize>, s2: &BTreeSet<usize>, pairs: &mut BTreeSet<(usize, usize)>| {
+            for &v1 in s1 {
+                for &v2 in s2 {
+                    let (r, c) = if v1 >= v2 { (v1, v2) } else { (v2, v1) };
+                    pairs.insert((r, c));
+                }
+            }
+        };
+    let emit_self = |s: &BTreeSet<usize>, pairs: &mut BTreeSet<(usize, usize)>| {
+        let vars: Vec<usize> = s.iter().copied().collect();
+        for (ai, &vi) in vars.iter().enumerate() {
+            for &vj in &vars[..=ai] {
+                let (r, c) = if vi >= vj { (vi, vj) } else { (vj, vi) };
+                pairs.insert((r, c));
+            }
+        }
+    };
+
+    for op in ops {
+        let vset = match op {
+            TapeOp::Const(_) => BTreeSet::new(),
+            TapeOp::Var(j) => {
+                let mut s = BTreeSet::new();
+                s.insert(*j);
+                s
+            }
+            TapeOp::Add(a, b) | TapeOp::Sub(a, b) => {
+                var_sets[*a].union(&var_sets[*b]).copied().collect()
+            }
+            TapeOp::Neg(a) | TapeOp::Abs(a) => var_sets[*a].clone(),
+            TapeOp::Mul(a, b) => {
+                emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
+                var_sets[*a].union(&var_sets[*b]).copied().collect()
+            }
+            TapeOp::Div(a, b) => {
+                emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
+                emit_self(&var_sets[*b], &mut pairs);
+                var_sets[*a].union(&var_sets[*b]).copied().collect()
+            }
+            TapeOp::Pow(a, b) => {
+                let combined: BTreeSet<usize> =
+                    var_sets[*a].union(&var_sets[*b]).copied().collect();
+                emit_self(&combined, &mut pairs);
+                combined
+            }
+            TapeOp::Sqrt(a)
+            | TapeOp::Exp(a)
+            | TapeOp::Log(a)
+            | TapeOp::Log10(a)
+            | TapeOp::Sin(a)
+            | TapeOp::Cos(a) => {
+                emit_self(&var_sets[*a], &mut pairs);
+                var_sets[*a].clone()
+            }
+        };
+        var_sets.push(vset);
+    }
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,6 +2247,95 @@ mod tests {
         let e = add(div(var(0), var(1)), unary(UnaryOp::Cos, var(0)));
         let t = Tape::build(&e);
         fd_check(&t, &[0.5, 1.2], 2, 1e-5);
+    }
+
+    /// `hessian_directional` (one forward-over-reverse pass with
+    /// a seed vector) recovers `H · e_j` for each unit-vector seed,
+    /// matching column `j` of the dense Hessian computed by
+    /// `hessian_accumulate`.
+    fn directional_matches_accumulate(tape: &Tape, x: &[f64], n: usize) {
+        let vars = tape.variables();
+        let mut hess_map: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut pairs = Vec::new();
+        for (ai, &vi) in vars.iter().enumerate() {
+            for &vj in &vars[..=ai] {
+                let (r, c) = if vi >= vj { (vi, vj) } else { (vj, vi) };
+                hess_map.entry((r, c)).or_insert_with(|| {
+                    let p = pairs.len();
+                    pairs.push((r, c));
+                    p
+                });
+            }
+        }
+        let nnz = pairs.len();
+        let mut ad = vec![0.0; nnz];
+        tape.hessian_accumulate(x, 1.0, &hess_map, &mut ad);
+
+        let nops = tape.ops.len();
+        let mut vals = vec![0.0; nops];
+        tape.forward_into(x, &mut vals);
+        let mut dot = vec![0.0; nops];
+        let mut adj = vec![0.0; nops];
+        let mut adj_dot = vec![0.0; nops];
+
+        for &j in &vars {
+            let mut seed = vec![0.0; n];
+            seed[j] = 1.0;
+            let mut col = vec![0.0; n];
+            tape.hessian_directional(
+                &vals,
+                &seed,
+                1.0,
+                &mut col,
+                &mut dot,
+                &mut adj,
+                &mut adj_dot,
+            );
+            for &i in &vars {
+                let (r, c) = if i >= j { (i, j) } else { (j, i) };
+                let expect = ad[hess_map[&(r, c)]];
+                assert!(
+                    (col[i] - expect).abs() < 1e-10,
+                    "directional H[{i},{j}] = {} vs accumulate {}",
+                    col[i],
+                    expect
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn directional_quadratic_matches_accumulate() {
+        // f = 3 x0^2 + 2 x0 x1 + x1^2
+        let e = add(
+            add(
+                mul(cnst(3.0), pow(var(0), cnst(2.0))),
+                mul(mul(cnst(2.0), var(0)), var(1)),
+            ),
+            pow(var(1), cnst(2.0)),
+        );
+        let t = Tape::build(&e);
+        directional_matches_accumulate(&t, &[0.5, -0.3], 2);
+    }
+
+    #[test]
+    fn directional_transcendental_matches_accumulate() {
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Exp, var(0)),
+            unary(UnaryOp::Sin, var(1)),
+            unary(UnaryOp::Log, var(0)),
+            unary(UnaryOp::Sqrt, var(1)),
+            mul(var(0), var(1)),
+        ]);
+        let t = Tape::build(&e);
+        directional_matches_accumulate(&t, &[1.5, 2.0], 2);
+    }
+
+    #[test]
+    fn directional_with_division_matches_accumulate() {
+        let e = add(div(var(0), var(1)), unary(UnaryOp::Cos, var(0)));
+        let t = Tape::build(&e);
+        directional_matches_accumulate(&t, &[0.5, 1.2], 2);
     }
 
     #[test]

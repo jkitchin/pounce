@@ -49,13 +49,18 @@ pub struct FeralSolverInterface {
     matrix: Option<CscMatrix>,
 
     negevals: Index,
+
+    /// Absolute near-singularity floor; see
+    /// [`FeralConfig::singular_pivot_floor`].
+    singular_pivot_floor: f64,
 }
 
 /// Construction-time configuration for [`FeralSolverInterface`].
 ///
-/// Mirrors the three pounce-extension options registered in
+/// Mirrors the pounce-extension options registered in
 /// `pounce-algorithm`'s `upstream_options::register_all_options`
-/// (`feral_cascade_break`, `feral_fma`, `feral_refine`). The IPM
+/// (`feral_cascade_break`, `feral_fma`, `feral_refine`,
+/// `feral_singular_pivot_floor`). The IPM
 /// caller reads those off its `OptionsList`, builds a `FeralConfig`,
 /// and passes it to [`FeralSolverInterface::with_config`]. For
 /// non-option callers (tests, standalone use, the env-only legacy
@@ -66,6 +71,19 @@ pub struct FeralConfig {
     pub cascade_break: bool,
     pub fma: bool,
     pub refine: bool,
+    /// Near-singularity trigger: if the smallest accepted D-block pivot
+    /// magnitude `min|λ(D)|` (scaled space) falls below this absolute
+    /// floor, `factor()` returns [`ESymSolverStatus::Singular`] even
+    /// though feral force-accepted the pivot and reported `Success`.
+    /// This is pounce's analog of MA57's `CNTL(2)` small-pivot
+    /// threshold — an absolute magnitude on the *scaled* pivot, not a
+    /// ratio: a genuinely rank-deficient pivot sits at the working-
+    /// precision floor regardless of the rest of the spectrum, whereas
+    /// `min/max` ≈ 1/κ(D) collapses on any healthy interior-point KKT
+    /// as `μ→0`. Routes into the IPM's `PerturbForSingularity` branch
+    /// so `δ_w` is bumped. `0` disables the trigger. See
+    /// `dev/research/near-singularity-signal.md` (feral) §4.
+    pub singular_pivot_floor: f64,
 }
 
 impl Default for FeralConfig {
@@ -74,15 +92,20 @@ impl Default for FeralConfig {
             cascade_break: false,
             fma: false,
             refine: true,
+            // MA57 `CNTL(2)` default — an absolute small-pivot
+            // magnitude on the scaled matrix. Only pivots essentially
+            // at the working-precision floor are flagged singular.
+            singular_pivot_floor: 1e-20,
         }
     }
 }
 
 impl FeralConfig {
-    /// Read the three knobs from `POUNCE_FERAL_CASCADE_BREAK`,
-    /// `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE` environment
-    /// variables. Used as a fallback when the IPM has no
-    /// `OptionsList` to consult (tests, legacy callers).
+    /// Read the knobs from `POUNCE_FERAL_CASCADE_BREAK`,
+    /// `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE`,
+    /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR` environment variables.
+    /// Used as a fallback when the IPM has no `OptionsList` to
+    /// consult (tests, legacy callers).
     pub fn from_env() -> Self {
         Self {
             cascade_break: matches!(
@@ -97,6 +120,10 @@ impl FeralConfig {
                 std::env::var("POUNCE_FERAL_REFINE").as_deref(),
                 Ok("0") | Ok("false") | Ok("off") | Ok("no"),
             ),
+            singular_pivot_floor: std::env::var("POUNCE_FERAL_SINGULAR_PIVOT_FLOOR")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1e-20),
         }
     }
 }
@@ -164,6 +191,7 @@ impl FeralSolverInterface {
             values: Vec::new(),
             matrix: None,
             negevals: 0,
+            singular_pivot_floor: cfg.singular_pivot_floor,
         }
     }
 
@@ -171,9 +199,40 @@ impl FeralSolverInterface {
     /// negative-eigenvalue count.
     fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
         let n = self.dim as usize;
-        let matrix = match CscMatrix::from_triplets(n, &self.rows_0, &self.cols_0, &self.values) {
+        let raw = match CscMatrix::from_triplets(n, &self.rows_0, &self.cols_0, &self.values) {
             Ok(m) => m,
             Err(_) => return ESymSolverStatus::FatalError,
+        };
+
+        // Drop explicitly-stored zeros before factoring. pounce's KKT
+        // structure is fixed once in `initialize_structure`, but where a
+        // constraint multiplier is zero (e.g. the initial point) the
+        // Hessian-of-Lagrangian contributions land as exact `0.0` values on
+        // structurally-present coordinates. feral >= b3e4d3e factors the
+        // matrix correctly either way, but an explicit-zero (2,2) diagonal is
+        // a present-but-unusable pivot: keeping it roughly doubles the solve
+        // (CHO parmest: 24.8s -> 12.3s) versus letting that diagonal be
+        // structurally absent. So this strip is now a performance step, not a
+        // correctness workaround (feral#45/#46).
+        let matrix = if raw.values.iter().any(|v| *v == 0.0) {
+            let mut rows = Vec::with_capacity(raw.values.len());
+            let mut cols = Vec::with_capacity(raw.values.len());
+            let mut vals = Vec::with_capacity(raw.values.len());
+            for j in 0..n {
+                for k in raw.col_ptr[j]..raw.col_ptr[j + 1] {
+                    if raw.values[k] != 0.0 {
+                        rows.push(raw.row_idx[k]);
+                        cols.push(j);
+                        vals.push(raw.values[k]);
+                    }
+                }
+            }
+            match CscMatrix::from_triplets(n, &rows, &cols, &vals) {
+                Ok(m) => m,
+                Err(_) => return ESymSolverStatus::FatalError,
+            }
+        } else {
+            raw
         };
 
         let status = self.solver.factor(&matrix, None);
@@ -186,6 +245,25 @@ impl FeralSolverInterface {
                 self.negevals = self.solver.num_negative_eigenvalues() as Index;
                 if check_neg_evals && self.negevals != number_of_neg_evals {
                     return ESymSolverStatus::WrongInertia;
+                }
+                // Near-singularity (MA57 CNTL(2) analog). feral's default
+                // `ZeroPivotAction::ForceAccept` completes the factorization
+                // and reports `Success` even on a pivot at the working-
+                // precision floor. We flag `Singular` only when the smallest
+                // accepted D-block pivot magnitude drops below an absolute
+                // floor — the literal `CNTL(2)` quantity. A ratio test
+                // `min/max` ≈ 1/κ(D) is wrong here: an interior-point KKT
+                // is *designed* to become ill-conditioned as `μ→0`, so the
+                // ratio collapses on healthy full-rank systems near the
+                // solution. The absolute floor moves with neither `μ` nor
+                // the spectral spread. See
+                // `dev/research/near-singularity-signal.md` (feral) §4.
+                if self.singular_pivot_floor > 0.0 {
+                    if let Some(min_piv) = self.solver.min_pivot_magnitude() {
+                        if min_piv < self.singular_pivot_floor {
+                            return ESymSolverStatus::Singular;
+                        }
+                    }
                 }
                 ESymSolverStatus::Success
             }

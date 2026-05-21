@@ -917,32 +917,63 @@ pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
 // callback is a tape sweep, no expression-tree recursion.
 // --------------------------------------------------------------------
 
+/// Per-color decoding instruction for `eval_h` Hessian-coloring.
+/// After a directional Hessian-vector product `compressed = H · s_c`,
+/// the entry at row `row` came uniquely from column `col` (because
+/// no two columns of color `c` share any nonzero row), so we
+/// scatter `compressed[row]` into `values[hess_idx]`.
+#[derive(Debug, Clone)]
+struct ColorWrite {
+    row: u32,
+    hess_idx: u32,
+}
+
 #[derive(Debug)]
 pub struct NlTnlp {
     prob: NlProblem,
-    /// One tape per top-level summand of the objective's nonlinear
-    /// part. Variadic `o54` sums (and nested `o0` adds at the top of
-    /// the tree) are split into independent terms so that the
-    /// forward-over-reverse Hessian walks each small subgraph
-    /// separately instead of the full tape once per variable —
-    /// turning a separable obj's O(n²) Hessian cost into O(n).
+    /// Per-summand objective tapes (one `Tape` per top-level
+    /// summand after `split_top_sums`).
     obj_tapes: Vec<Tape>,
-    /// One tape per top-level summand of each constraint's nonlinear
-    /// part (length m). Same separable-Sum split as `obj_tapes`.
+    /// Per-constraint, per-summand tapes. Length `m`; row `i` holds
+    /// one `Tape` per summand of constraint `i`.
     con_tapes: Vec<Vec<Tape>>,
     /// Lower-triangle Hessian sparsity (row >= col), one entry per
-    /// structurally nonzero second derivative in the Lagrangian. The
-    /// `(row, col) -> values index` map lets each tape's
-    /// `hessian_accumulate` scatter into the right slot.
+    /// structurally nonzero second derivative in the Lagrangian.
     h_irow: Vec<i32>,
     h_jcol: Vec<i32>,
-    hess_map: HashMap<(usize, usize), usize>,
-    /// Per-row sorted variable indices for the constraint Jacobian
-    /// (union of nonlinear-tape vars and linear-segment vars).
+    /// Per-row sorted variable indices for the constraint Jacobian.
     jac_cols: Vec<Vec<usize>>,
     jac_nnz: usize,
+    /// Per-color seed vector: `seeds[c][k] = 1.0` iff variable `k`
+    /// is in color `c`, else `0.0`. Each color is a set of
+    /// variables whose Hessian columns have pairwise-disjoint
+    /// nonzero rows; one directional H·s product per color
+    /// recovers all those columns simultaneously. Dense for
+    /// O(1) lookup in the per-op forward tangent.
+    seeds: Vec<Vec<f64>>,
+    /// Per-color decoding table: for each `(row, hess_idx)` entry,
+    /// scatter `compressed_c[row] -> values[hess_idx]` after the
+    /// per-color directional product.
+    decoding: Vec<Vec<ColorWrite>>,
+    /// For each objective tape: the distinct colors of vars it
+    /// references. Lets us skip tape × color pairs where the tape
+    /// has zero overlap with the color's seed.
+    obj_tape_colors: Vec<Vec<u32>>,
+    /// Same as `obj_tape_colors` but per constraint × summand.
+    con_tape_colors: Vec<Vec<Vec<u32>>>,
     final_x: Option<Vec<Number>>,
     final_obj: Number,
+    /// Per-row Jacobian accumulator (length n).
+    scratch_row_grad: Vec<f64>,
+    /// Scratch buffers for `Tape::hessian_directional` (each sized
+    /// to `max_tape_n`).
+    vals_scratch: Vec<f64>,
+    dot_scratch: Vec<f64>,
+    adj_scratch: Vec<f64>,
+    adj_dot_scratch: Vec<f64>,
+    /// Per-color compressed Hessian-vector results, sized to
+    /// `prob.n`. Reused across `eval_h` calls but allocated once.
+    compressed: Vec<Vec<f64>>,
 }
 
 /// Recursively flatten top-level Sum and binary-Add nodes into a list
@@ -973,38 +1004,103 @@ fn split_top_sums(expr: &Expr) -> Vec<Expr> {
     out
 }
 
-impl NlTnlp {
-    pub fn new(prob: NlProblem) -> Self {
-        // Build tapes up front. The objective and each constraint's
-        // nonlinear part are split at top-level `Sum`/`Add` so each
-        // summand gets its own small tape — see `split_top_sums`.
-        let obj_tapes: Vec<Tape> = split_top_sums(&prob.obj_nonlinear)
-            .iter()
-            .map(Tape::build)
-            .collect();
-        let con_tapes: Vec<Vec<Tape>> = (0..prob.m)
-            .map(|k| {
-                split_top_sums(&prob.con_nonlinear[k])
-                    .iter()
-                    .map(Tape::build)
-                    .collect()
-            })
-            .collect();
+/// Greedy column coloring of a symmetric sparsity pattern stored
+/// as lower-triangle pairs.
+///
+/// Builds the column-intersection graph: columns `c1` and `c2` are
+/// adjacent iff there exists a row `r` with `H[r, c1] != 0` and
+/// `H[r, c2] != 0`. A distance-1 greedy coloring on this graph
+/// satisfies the direct-recovery condition for symmetric Hessians
+/// (Coleman-Moré): for any color, the columns it contains have
+/// pairwise disjoint row supports, so a single H·s product
+/// recovers them all unambiguously.
+///
+/// Returns `(var_color, n_colors)` where `var_color[k]` is the
+/// color assigned to variable `k`, or `u32::MAX` for variables
+/// not in any Hessian pair (they contribute nothing and don't
+/// need a color).
+fn greedy_hessian_coloring(n: usize, lower_pairs: &[(usize, usize)]) -> (Vec<u32>, usize) {
+    if n == 0 {
+        return (Vec::new(), 0);
+    }
 
-        // Structural Hessian sparsity: union of per-tape sparsities.
-        // Linear segments have zero 2nd derivative so they contribute
-        // nothing here.
-        let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for t in &obj_tapes {
-            for p in t.hessian_sparsity() {
-                pairs.insert(p);
+    // For each variable k, list of rows in which column k has a
+    // nonzero in the FULL (symmetric) Hessian. Built from lower
+    // pairs: (i, j) with i >= j contributes row i to column j and
+    // row j to column i (when i != j); diagonals contribute once.
+    let mut col_rows: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut row_cols: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for &(i, j) in lower_pairs {
+        col_rows[j].push(i as u32);
+        row_cols[i].push(j as u32);
+        if i != j {
+            col_rows[i].push(j as u32);
+            row_cols[j].push(i as u32);
+        }
+    }
+
+    let mut var_color = vec![u32::MAX; n];
+    let mut forbidden = vec![u32::MAX; n + 1];
+    let mut n_colors: u32 = 0;
+
+    for j in 0..n {
+        // Variable `j` has no Hessian entries → skip (no color).
+        if col_rows[j].is_empty() {
+            continue;
+        }
+        // Mark colors used by any column sharing a row with `j`.
+        // Row-of-col -> col-in-row visit pattern collects all
+        // distance-1 neighbors in the column-intersection graph.
+        for &r in &col_rows[j] {
+            for &c in &row_cols[r as usize] {
+                if c as usize == j {
+                    continue;
+                }
+                let cc = var_color[c as usize];
+                if cc != u32::MAX {
+                    forbidden[cc as usize] = j as u32;
+                }
             }
         }
-        for ts in &con_tapes {
-            for t in ts {
-                for p in t.hessian_sparsity() {
-                    pairs.insert(p);
-                }
+        // First color not stamped with `j as u32`.
+        let mut chosen: u32 = 0;
+        while (chosen as usize) < forbidden.len() && forbidden[chosen as usize] == j as u32 {
+            chosen += 1;
+        }
+        var_color[j] = chosen;
+        if chosen + 1 > n_colors {
+            n_colors = chosen + 1;
+        }
+    }
+
+    (var_color, n_colors as usize)
+}
+
+impl NlTnlp {
+    pub fn new(prob: NlProblem) -> Self {
+        // Flatten objective and each constraint into independent
+        // summands. Each summand becomes its own `Tape` (CSE bodies
+        // are deduplicated within a tape via Rc identity in
+        // `Tape::build`; bodies shared across summands are
+        // duplicated, which we accept as a simplicity tradeoff).
+        let obj_summands = split_top_sums(&prob.obj_nonlinear);
+        let obj_tapes: Vec<Tape> = obj_summands.iter().map(Tape::build).collect();
+
+        let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
+        for k in 0..prob.m {
+            let summands = split_top_sums(&prob.con_nonlinear[k]);
+            con_tapes.push(summands.iter().map(Tape::build).collect());
+        }
+
+        // Hessian-of-Lagrangian sparsity: union of each tape's own
+        // structural Hessian sparsity.
+        let mut pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for t in &obj_tapes {
+            pairs.extend(t.hessian_sparsity());
+        }
+        for row in &con_tapes {
+            for t in row {
+                pairs.extend(t.hessian_sparsity());
             }
         }
         let mut h_irow = Vec::with_capacity(pairs.len());
@@ -1016,8 +1112,58 @@ impl NlTnlp {
             hess_map.insert((*hi, *lo), k);
         }
 
-        // Per-row Jacobian sparsity = union over all summand tapes of
-        // their variables, plus the linear-segment vars for that row.
+        // Hessian column coloring. The chromatic number of the
+        // column-intersection graph bounds how many directional
+        // Hessian-vector products we need per `eval_h` call —
+        // typically O(stencil) for PDE-mesh problems.
+        let lower_pairs: Vec<(usize, usize)> = pairs.iter().copied().collect();
+        let (var_color, n_colors) = greedy_hessian_coloring(prob.n, &lower_pairs);
+
+        // Per-color seed vectors (dense for O(1) Var lookup in
+        // `Tape::hessian_directional`).
+        let mut seeds: Vec<Vec<f64>> = vec![vec![0.0; prob.n]; n_colors];
+        for (k, &c) in var_color.iter().enumerate() {
+            if c != u32::MAX {
+                seeds[c as usize][k] = 1.0;
+            }
+        }
+
+        // Per-color decoding table. For each lower-tri pair (i, j)
+        // with i >= j, the entry belongs to column j's color: after
+        // computing compressed_{c_j} = (H · s_{c_j}), the value at
+        // row i is exactly H[i, j] (coloring guarantees no other
+        // column in c_j has a nonzero at row i).
+        let mut decoding: Vec<Vec<ColorWrite>> = vec![Vec::new(); n_colors];
+        for (&(i, j), &idx) in hess_map.iter() {
+            let c = var_color[j];
+            debug_assert!(c != u32::MAX, "column {j} has Hessian pair {idx} but no color");
+            decoding[c as usize].push(ColorWrite {
+                row: i as u32,
+                hess_idx: idx as u32,
+            });
+        }
+
+        // Per-tape distinct color set: for each tape, the colors
+        // its variables fall into. `eval_h` loops over only these
+        // (tape, color) pairs instead of n_tapes × n_colors.
+        let tape_colors = |t: &Tape| -> Vec<u32> {
+            let mut s: BTreeSet<u32> = BTreeSet::new();
+            for v in t.variables() {
+                let c = var_color[v];
+                if c != u32::MAX {
+                    s.insert(c);
+                }
+            }
+            s.into_iter().collect()
+        };
+        let obj_tape_colors: Vec<Vec<u32>> = obj_tapes.iter().map(tape_colors).collect();
+        let con_tape_colors: Vec<Vec<Vec<u32>>> = con_tapes
+            .iter()
+            .map(|row| row.iter().map(tape_colors).collect())
+            .collect();
+
+        // Per-row Jacobian sparsity = union of tape vars plus
+        // linear-segment vars.
         let mut jac_cols: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
         let mut jac_nnz = 0;
         for i in 0..prob.m {
@@ -1035,17 +1181,63 @@ impl NlTnlp {
             jac_cols.push(cols);
         }
 
+        let mut max_tape_n: usize = 0;
+        for t in &obj_tapes {
+            max_tape_n = max_tape_n.max(t.ops.len());
+        }
+        for row in &con_tapes {
+            for t in row {
+                max_tape_n = max_tape_n.max(t.ops.len());
+            }
+        }
+
+        if std::env::var("POUNCE_DBG_TAPE_STATS").is_ok() {
+            let n_obj = obj_tapes.len();
+            let n_con: usize = con_tapes.iter().map(|r| r.len()).sum();
+            let total = n_obj + n_con;
+            let mut sum_ops: usize = 0;
+            for t in &obj_tapes {
+                sum_ops += t.ops.len();
+            }
+            for row in &con_tapes {
+                for t in row {
+                    sum_ops += t.ops.len();
+                }
+            }
+            let t = total.max(1);
+            let nnz_h = h_irow.len();
+            let avg_decode = decoding.iter().map(|d| d.len()).sum::<usize>() as f64
+                / n_colors.max(1) as f64;
+            eprintln!(
+                "[tape stats] summands={total} (obj={n_obj} con={n_con}) \
+                 total_ops={sum_ops} avg_ops={:.1} max_ops={max_tape_n} \
+                 n_colors={n_colors} avg_decode_per_color={avg_decode:.1} nnz_h={nnz_h}",
+                sum_ops as f64 / t as f64,
+            );
+        }
+
+        let compressed: Vec<Vec<f64>> = vec![vec![0.0; prob.n]; n_colors];
+
         Self {
             prob,
             obj_tapes,
             con_tapes,
             h_irow,
             h_jcol,
-            hess_map,
             jac_cols,
             jac_nnz,
+            seeds,
+            decoding,
+            obj_tape_colors,
+            con_tape_colors,
             final_x: None,
             final_obj: 0.0,
+            scratch_row_grad: Vec::new(),
+            vals_scratch: vec![0.0; max_tape_n],
+            dot_scratch: vec![0.0; max_tape_n],
+            adj_scratch: vec![0.0; max_tape_n],
+            adj_dot_scratch: vec![0.0; max_tape_n],
+            compressed,
         }
     }
 
@@ -1085,7 +1277,10 @@ impl TNLP for NlTnlp {
     }
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
-        let nl: Number = self.obj_tapes.iter().map(|t| t.eval(x)).sum();
+        let mut nl: Number = 0.0;
+        for t in &self.obj_tapes {
+            nl += t.eval(x);
+        }
         let lin: Number = self.prob.obj_linear.iter().map(|(i, c)| c * x[*i]).sum();
         let v = self.prob.obj_constant + nl + lin;
         let signed = if self.prob.minimize { v } else { -v };
@@ -1110,7 +1305,10 @@ impl TNLP for NlTnlp {
 
     fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
         for i in 0..self.prob.m {
-            let nl: Number = self.con_tapes[i].iter().map(|t| t.eval(x)).sum();
+            let mut nl: Number = 0.0;
+            for t in &self.con_tapes[i] {
+                nl += t.eval(x);
+            }
             let lin: Number = self.prob.con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
             g[i] = nl + lin;
         }
@@ -1138,26 +1336,22 @@ impl TNLP for NlTnlp {
             SparsityRequest::Values { values } => {
                 let n = self.prob.n;
                 let xs = x.unwrap_or(&self.prob.x0);
-                let mut row_grad = vec![0.0; n];
+                if self.scratch_row_grad.len() < n {
+                    self.scratch_row_grad.resize(n, 0.0);
+                }
                 let mut k = 0;
                 for i in 0..self.prob.m {
-                    // gradient_seed writes only to positions that appear
-                    // in the constraint's tape (its Var nodes); linear
-                    // contributions touch only `con_linear[i]`. Both
-                    // sets are subsets of `jac_cols[i]`, so clearing
-                    // just those entries is sufficient and avoids an
-                    // O(n) fill per row.
                     for &j in &self.jac_cols[i] {
-                        row_grad[j] = 0.0;
+                        self.scratch_row_grad[j] = 0.0;
                     }
                     for t in &self.con_tapes[i] {
-                        t.gradient_seed(xs, 1.0, &mut row_grad);
+                        t.gradient_seed(xs, 1.0, &mut self.scratch_row_grad);
                     }
                     for &(v, c) in &self.prob.con_linear[i] {
-                        row_grad[v] += c;
+                        self.scratch_row_grad[v] += c;
                     }
                     for &j in &self.jac_cols[i] {
-                        values[k] = row_grad[j];
+                        values[k] = self.scratch_row_grad[j];
                         k += 1;
                     }
                 }
@@ -1190,15 +1384,70 @@ impl TNLP for NlTnlp {
                 } else {
                     -obj_factor
                 };
-                for t in &self.obj_tapes {
-                    t.hessian_accumulate(x, obj_seed, &self.hess_map, values);
+                // Coloring path. For each (tape, weight) we do
+                // one forward pass into `vals_scratch`, then one
+                // forward-tangent+reverse-over-tangent per color
+                // touched by that tape. Each pass accumulates a
+                // weighted contribution of (H_tape · seed_c) into
+                // `compressed[c]`. After all tapes done, we
+                // decode each color's compressed vector into the
+                // sparse `values` array.
+                for buf in &mut self.compressed {
+                    buf.fill(0.0);
+                }
+
+                if obj_seed != 0.0 {
+                    for (ti, t) in self.obj_tapes.iter().enumerate() {
+                        if t.ops.is_empty() {
+                            continue;
+                        }
+                        t.forward_into(x, &mut self.vals_scratch);
+                        for &c in &self.obj_tape_colors[ti] {
+                            t.hessian_directional(
+                                &self.vals_scratch,
+                                &self.seeds[c as usize],
+                                obj_seed,
+                                &mut self.compressed[c as usize],
+                                &mut self.dot_scratch,
+                                &mut self.adj_scratch,
+                                &mut self.adj_dot_scratch,
+                            );
+                        }
+                    }
                 }
 
                 if let Some(lam) = lambda {
                     for k in 0..self.prob.m {
-                        for t in &self.con_tapes[k] {
-                            t.hessian_accumulate(x, lam[k], &self.hess_map, values);
+                        let w = lam[k];
+                        if w == 0.0 {
+                            continue;
                         }
+                        for (ti, t) in self.con_tapes[k].iter().enumerate() {
+                            if t.ops.is_empty() {
+                                continue;
+                            }
+                            t.forward_into(x, &mut self.vals_scratch);
+                            for &c in &self.con_tape_colors[k][ti] {
+                                t.hessian_directional(
+                                    &self.vals_scratch,
+                                    &self.seeds[c as usize],
+                                    w,
+                                    &mut self.compressed[c as usize],
+                                    &mut self.dot_scratch,
+                                    &mut self.adj_scratch,
+                                    &mut self.adj_dot_scratch,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Decode each color's compressed Hessian-vector
+                // result into the lower-triangle `values` array.
+                for (c, table) in self.decoding.iter().enumerate() {
+                    let comp = &self.compressed[c];
+                    for w in table {
+                        values[w.hess_idx as usize] += comp[w.row as usize];
                     }
                 }
                 true

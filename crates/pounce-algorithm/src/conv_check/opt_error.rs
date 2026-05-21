@@ -36,6 +36,22 @@ pub struct OptErrorConvCheck {
     /// `acceptable_obj_change_tol` cross-check. `None` until an
     /// acceptable point has been recorded.
     pub last_acceptable_obj: Option<Number>,
+    /// Tolerance on the scaled infeasibility stationarity
+    /// `‖Jᵀc‖/max(1,‖c‖)`. An iterate counts toward the infeasibility
+    /// streak when this ratio is at or below this value while the
+    /// constraint violation stays bounded away from zero. Rapid
+    /// infeasibility detection is disabled when this is non-positive.
+    pub infeas_stationarity_tol: Number,
+    /// Multiple of `constr_viol_tol` the constraint violation must
+    /// exceed before an iterate can count as infeasible-stationary —
+    /// keeps detection from firing on nearly-feasible flat spots.
+    pub infeas_viol_kappa: Number,
+    /// Consecutive infeasible-stationary iterations required before
+    /// terminating with `LocallyInfeasible`. Non-positive disables
+    /// rapid infeasibility detection.
+    pub infeas_max_streak: Index,
+    /// Running count of consecutive infeasible-stationary iterations.
+    pub infeas_streak: Index,
 }
 
 impl Default for OptErrorConvCheck {
@@ -57,6 +73,10 @@ impl Default for OptErrorConvCheck {
             max_wall_time: 1e6,
             acceptable_count: 0,
             last_acceptable_obj: None,
+            infeas_stationarity_tol: 1e-8,
+            infeas_viol_kappa: 1e2,
+            infeas_max_streak: 5,
+            infeas_streak: 0,
         }
     }
 }
@@ -122,6 +142,37 @@ impl OptErrorConvCheck {
         }
         true
     }
+
+    /// Pure predicate for a single infeasible-stationary iterate: the
+    /// constraint violation is bounded away from zero
+    /// (`constr_viol > infeas_viol_kappa · constr_viol_tol`) and the
+    /// scaled infeasibility gradient `‖Jᵀc‖/max(1,‖c‖)` is at or below
+    /// `infeas_stationarity_tol`. Returns `false` when rapid
+    /// infeasibility detection is disabled (either knob non-positive).
+    fn is_infeasible_stationary(&self, constr_viol: Number, stationarity: Number) -> bool {
+        if self.infeas_stationarity_tol <= 0.0 || self.infeas_max_streak <= 0 {
+            return false;
+        }
+        constr_viol > self.infeas_viol_kappa * self.constr_viol_tol
+            && stationarity <= self.infeas_stationarity_tol
+    }
+
+    /// Advance the rapid-infeasibility-detection streak by one
+    /// iteration. An infeasible-stationary iterate (see
+    /// [`Self::is_infeasible_stationary`]) increments the streak; any
+    /// other iterate resets it to zero. Returns `true` once the streak
+    /// reaches `infeas_max_streak`, signalling the caller to terminate
+    /// with `ConvergenceStatus::LocallyInfeasible`. The streak guards
+    /// against firing on a transient flat spot.
+    fn note_infeasible_stationary(&mut self, constr_viol: Number, stationarity: Number) -> bool {
+        if self.is_infeasible_stationary(constr_viol, stationarity) {
+            self.infeas_streak += 1;
+            self.infeas_streak >= self.infeas_max_streak
+        } else {
+            self.infeas_streak = 0;
+            false
+        }
+    }
 }
 
 impl ConvCheck for OptErrorConvCheck {
@@ -175,6 +226,20 @@ impl ConvCheck for OptErrorConvCheck {
         }
         if iter_count >= self.max_iter {
             return ConvergenceStatus::MaxIterExceeded;
+        }
+        // Rapid infeasibility detection — recognise an iterate
+        // converging to a stationary point of the constraint
+        // violation with the violation bounded away from zero, and
+        // exit with `LocallyInfeasible` instead of grinding to
+        // `max_iter` or thrashing restoration. Gated behind an
+        // `infeas_max_streak`-iteration streak to avoid firing on a
+        // transient flat spot. The outer guard skips the two
+        // transpose-products when detection is disabled.
+        if self.infeas_stationarity_tol > 0.0 && self.infeas_max_streak > 0 {
+            let stationarity = cq.borrow().curr_infeasibility_stationarity();
+            if self.note_infeasible_stationary(constr_viol, stationarity) {
+                return ConvergenceStatus::LocallyInfeasible;
+            }
         }
         // Time-budget gates. Upstream
         // `IpOptErrorConvCheck.cpp::CheckConvergence` reads the
@@ -327,6 +392,91 @@ mod tests {
         assert!(!c.passes_component_tols(1e-12, 0.0, 0.0, 1e-2));
         // constr_viol above its tolerance blocks.
         assert!(!c.passes_component_tols(1e-12, 0.0, 1e-2, 0.0));
+    }
+
+    #[test]
+    fn infeasible_stationary_requires_violation_and_flat_gradient() {
+        let c = OptErrorConvCheck {
+            constr_viol_tol: 1e-4,
+            infeas_viol_kappa: 1e2, // violation threshold = 1e-2
+            infeas_stationarity_tol: 1e-8,
+            infeas_max_streak: 5,
+            ..Default::default()
+        };
+        // Violation well above 1e-2 and the infeasibility gradient
+        // essentially zero → counts as infeasible-stationary.
+        assert!(c.is_infeasible_stationary(1e-1, 1e-9));
+        // Violation above threshold but the gradient is not flat →
+        // still making feasibility progress, does not count.
+        assert!(!c.is_infeasible_stationary(1e-1, 1e-3));
+        // Gradient flat but violation below threshold → nearly
+        // feasible, does not count.
+        assert!(!c.is_infeasible_stationary(1e-3, 1e-9));
+    }
+
+    #[test]
+    fn infeasible_stationary_disabled_by_nonpositive_knobs() {
+        let off_tol = OptErrorConvCheck {
+            infeas_stationarity_tol: 0.0,
+            infeas_max_streak: 5,
+            ..Default::default()
+        };
+        assert!(!off_tol.is_infeasible_stationary(1e9, 0.0));
+        let off_streak = OptErrorConvCheck {
+            infeas_stationarity_tol: 1e-8,
+            infeas_max_streak: 0,
+            ..Default::default()
+        };
+        assert!(!off_streak.is_infeasible_stationary(1e9, 0.0));
+    }
+
+    #[test]
+    fn infeasible_stationary_streak_fires_only_after_max_streak() {
+        let mut c = OptErrorConvCheck {
+            constr_viol_tol: 1e-4,
+            infeas_viol_kappa: 1e2, // violation threshold = 1e-2
+            infeas_stationarity_tol: 1e-8,
+            infeas_max_streak: 3,
+            ..Default::default()
+        };
+        // Infeasible-stationary iterate: violation 1e-1 > 1e-2, flat
+        // gradient. Streak accrues but does not fire until the third.
+        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(c.note_infeasible_stationary(1e-1, 1e-9));
+    }
+
+    #[test]
+    fn infeasible_stationary_streak_resets_on_feasibility_progress() {
+        let mut c = OptErrorConvCheck {
+            constr_viol_tol: 1e-4,
+            infeas_viol_kappa: 1e2,
+            infeas_stationarity_tol: 1e-8,
+            infeas_max_streak: 3,
+            ..Default::default()
+        };
+        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
+        // A non-stationary iterate (gradient not flat) resets the streak.
+        assert!(!c.note_infeasible_stationary(1e-1, 1e-3));
+        assert_eq!(c.infeas_streak, 0);
+        // The streak must rebuild from scratch — no carry-over credit.
+        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(!c.note_infeasible_stationary(1e-1, 1e-9));
+        assert!(c.note_infeasible_stationary(1e-1, 1e-9));
+    }
+
+    #[test]
+    fn infeasible_stationary_streak_never_fires_when_disabled() {
+        let mut c = OptErrorConvCheck {
+            infeas_stationarity_tol: 0.0,
+            infeas_max_streak: 5,
+            ..Default::default()
+        };
+        for _ in 0..20 {
+            assert!(!c.note_infeasible_stationary(1e9, 0.0));
+        }
+        assert_eq!(c.infeas_streak, 0);
     }
 
     #[test]
