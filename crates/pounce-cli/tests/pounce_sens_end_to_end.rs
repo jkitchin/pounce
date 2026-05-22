@@ -48,15 +48,27 @@ fn parse_sens_sol_state_1(sol: &str) -> Option<[f64; 5]> {
     let mut lines = sol.lines();
     while let Some(line) = lines.next() {
         if let Some(rest) = line.strip_prefix("suffix ") {
-            // header: "<kind> <count> <name>"
+            // Canonical AMPL `.sol` suffix header:
+            //   "<kind> <nvalues> <namelen> <tablen> <tabline>"
+            // followed by the suffix name on its own line, then any
+            // table lines, then `nvalues` "<idx> <value>" lines.
             let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            if parts[2] != "sens_sol_state_1" {
+            if parts.len() < 5 {
                 continue;
             }
             let count: usize = parts[1].parse().ok()?;
+            let tabline: usize = parts[4].parse().ok()?;
+            let name = lines.next()?.trim();
+            for _ in 0..tabline {
+                lines.next()?;
+            }
+            if name != "sens_sol_state_1" {
+                // Skip this block's value lines and keep scanning.
+                for _ in 0..count {
+                    lines.next()?;
+                }
+                continue;
+            }
             let mut out = [0.0; 5];
             for _ in 0..count {
                 let entry = lines.next()?;

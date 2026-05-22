@@ -100,15 +100,16 @@ for the field reference.
 Choose `summary` for production logs; `full` for debugging (parallel
 to upstream's `print_level=8`).
 
-### Sensitivity analysis: `pounce_sens`
+### Sensitivity analysis
 
 For AMPL `.nl` inputs declaring sIPOPT-style suffixes (`sens_state_1`,
-`sens_state_value_1`, `sens_init_constr`), the `pounce_sens` binary
-runs an IPM solve followed by a post-optimal sensitivity step:
+`sens_state_value_1`, `sens_init_constr`), `pounce` auto-detects the
+sensitivity request and runs a post-optimal sensitivity step after the
+IPM solve — no separate binary or flag needed:
 
 ```sh
-pounce_sens problem.nl                    # writes problem.sol
-pounce_sens problem.nl out.sol --json-output result.json --json-detail full
+pounce problem.nl                    # writes problem.sol
+pounce problem.nl out.sol --json-output result.json --json-detail full
 ```
 
 Output: an AMPL `.sol` file with the perturbed primal in a
@@ -117,6 +118,18 @@ mirroring everything in the `.sol` plus FAIR provenance + per-iter
 history. Matches upstream sIPOPT's golden output to ~6e-9 per
 component on `parametric_cpp` (see
 [`tests/pounce_sens_end_to_end.rs`](tests/pounce_sens_end_to_end.rs)).
+
+Related flags:
+
+* `--sens-boundcheck` / `--sens-bound-eps EPS` — clamp the perturbed
+  primal `x* + Δx` onto the declared `[x_l, x_u]` box.
+* `--compute-red-hessian` / `--rh-eigendecomp` — compute the reduced
+  Hessian (and its eigendecomposition) over the variables tagged by
+  the `red_hessian` integer var-suffix.
+
+The `pounce_sens` binary is retained as a thin backward-compatibility
+alias — `pounce_sens in.nl out.sol` is identical to `pounce in.nl
+out.sol` — so existing AMPL/solver scripts keep working unchanged.
 
 ### Built-in problems
 

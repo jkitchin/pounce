@@ -19,7 +19,10 @@ use pounce_cli::counting_tnlp::CountingTnlp;
 use pounce_cli::nl_reader;
 use pounce_cli::nl_writer;
 use pounce_cli::print;
-use pounce_cli::solve_report::{write_report_file, InputDescriptor, ReportBuilder, ReportDetail};
+use pounce_cli::sens;
+use pounce_cli::solve_report::{
+    write_report_file, InputDescriptor, ReportBuilder, ReportDetail, SolutionSuffix,
+};
 use pounce_common::diagnostics::{
     DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
 };
@@ -35,7 +38,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 
-fn main() -> ExitCode {
+pub fn main() -> ExitCode {
     let args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {
@@ -135,9 +138,60 @@ fn main() -> ExitCode {
         }
     };
 
-    // Capture the converged primal / dual into `nominal_capture` so
-    // the JSON report below can ship `solution.x` and
-    // `solution.lambda` (mirrors what `pounce_sens` does).
+    // Load the problem. For `.nl` inputs, keep the parsed suffixes and
+    // dimensions around: the sIPOPT-style suffixes (`sens_state_1` …)
+    // drive the post-optimal sensitivity step below, and they must be
+    // read off `NlProblem` before `NlTnlp` consumes it.
+    let mut nl_suffixes: Option<nl_reader::NlSuffixes> = None;
+    let mut nl_dims: Option<(usize, usize)> = None;
+    let inner_tnlp: Rc<RefCell<dyn TNLP>> = match &args.problem {
+        ProblemSource::Builtin(name) => match builtin::lookup(name) {
+            Some(t) => t,
+            None => {
+                eprintln!("pounce: unknown builtin problem '{name}'");
+                eprintln!("available: {}", builtin::list().join(", "));
+                return ExitCode::from(2);
+            }
+        },
+        ProblemSource::NlFile(path) => {
+            println!("Reading {}...", path.display());
+            let t0 = std::time::Instant::now();
+            match nl_reader::read_nl_file(path) {
+                Ok(prob) => {
+                    nl_suffixes = Some(prob.suffixes.clone());
+                    nl_dims = Some((prob.n, prob.m));
+                    let elapsed = t0.elapsed().as_secs_f64();
+                    let t: Rc<RefCell<dyn TNLP>> =
+                        Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
+                    if let Some(info) = t.borrow_mut().get_nlp_info() {
+                        println!(
+                            "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s",
+                            info.n, info.m, info.nnz_jac_g, info.nnz_h_lag, elapsed
+                        );
+                    }
+                    t
+                }
+                Err(e) => {
+                    eprintln!("pounce: failed to read {}: {e}", path.display());
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    };
+
+    // Does the `.nl` ask for a parametric sensitivity step? When it
+    // does, the post-optimal step runs inside `on_converged` below and
+    // its result is written back as the `sens_sol_state_1` suffix.
+    let sens_active = nl_suffixes
+        .as_ref()
+        .map(sens::is_sensitivity_input)
+        .unwrap_or(false);
+
+    // Capture the converged primal / dual into `nominal_capture` so the
+    // JSON report and `.sol` below can ship `solution.x` /
+    // `solution.lambda`. The same callback runs the suffix-driven
+    // post-processing: the parametric sensitivity step
+    // (`sens_sol_state_1`) and the reduced-Hessian computation.
     let nominal_capture: Rc<
         RefCell<
             Option<(
@@ -146,9 +200,20 @@ fn main() -> ExitCode {
             )>,
         >,
     > = Rc::new(RefCell::new(None));
-    if args.json_output.is_some() || sol_path.is_some() {
+    let sens_capture: Rc<RefCell<Option<Vec<pounce_common::types::Number>>>> =
+        Rc::new(RefCell::new(None));
+    let red_hessian_capture: Rc<RefCell<Option<sens::RedHessianResult>>> =
+        Rc::new(RefCell::new(None));
+    if args.json_output.is_some() || sol_path.is_some() || sens_active || args.compute_red_hessian {
         let cap = Rc::clone(&nominal_capture);
-        app.set_on_converged(Box::new(move |data, _cq, nlp, _pd| {
+        let sens_cap = Rc::clone(&sens_capture);
+        let rh_cap = Rc::clone(&red_hessian_capture);
+        let suffixes_cb = nl_suffixes.clone();
+        let dims_cb = nl_dims;
+        let compute_rh = args.compute_red_hessian;
+        let rh_eigen = args.rh_eigendecomp;
+        let boundcheck_eps = args.sens_boundcheck.then_some(args.sens_bound_eps);
+        app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,
                 None => return,
@@ -178,50 +243,62 @@ fn main() -> ExitCode {
             } else {
                 lambda.extend(std::iter::repeat(0.0).take(n_d));
             }
-            *cap.borrow_mut() = Some((x, lambda));
+            *cap.borrow_mut() = Some((x.clone(), lambda));
+
+            // Suffix-driven post-processing on the converged KKT
+            // system: the parametric sensitivity step and (on request)
+            // the reduced Hessian.
+            if let Some(suffixes) = &suffixes_cb {
+                let (n_full, m_full) = dims_cb.unwrap_or((x.len(), 0));
+                if sens_active {
+                    if let Some(xp) = sens::compute_sens_perturbed_x(
+                        data,
+                        cq,
+                        nlp,
+                        pd,
+                        suffixes,
+                        n_full,
+                        m_full,
+                        &x,
+                        boundcheck_eps,
+                    ) {
+                        *sens_cap.borrow_mut() = Some(xp);
+                    }
+                }
+                if compute_rh {
+                    match sens::try_compute_red_hessian(data, cq, nlp, pd, suffixes, rh_eigen) {
+                        Some(r) => *rh_cap.borrow_mut() = Some(r),
+                        None => eprintln!(
+                            "pounce: --compute-red-hessian requested but the `red_hessian` \
+                             suffix is missing or empty in the input .nl"
+                        ),
+                    }
+                }
+            }
         }));
     }
 
-    let inner_tnlp: Rc<RefCell<dyn TNLP>> = match &args.problem {
-        ProblemSource::Builtin(name) => match builtin::lookup(name) {
-            Some(t) => t,
-            None => {
-                eprintln!("pounce: unknown builtin problem '{name}'");
-                eprintln!("available: {}", builtin::list().join(", "));
-                return ExitCode::from(2);
-            }
-        },
-        ProblemSource::NlFile(path) => {
-            println!("Reading {}...", path.display());
-            let t0 = std::time::Instant::now();
-            match nl_reader::load_nl_as_tnlp(path) {
-                Ok(t) => {
-                    let elapsed = t0.elapsed().as_secs_f64();
-                    if let Some(info) = t.borrow_mut().get_nlp_info() {
-                        println!(
-                            "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s",
-                            info.n, info.m, info.nnz_jac_g, info.nnz_h_lag, elapsed
-                        );
-                    }
-                    t
-                }
-                Err(e) => {
-                    eprintln!("pounce: failed to read {}: {e}", path.display());
-                    return ExitCode::from(2);
-                }
-            }
-        }
-    };
-
     // Optionally wrap with presolve before counting so eval-call
     // counts reflect what the solver actually issues.
-    let presolve_opts = match pounce_presolve::PresolveOptions::from_options_list(app.options()) {
+    let mut presolve_opts = match pounce_presolve::PresolveOptions::from_options_list(app.options())
+    {
         Ok(o) => o,
         Err(e) => {
             eprintln!("pounce: presolve setup failed: {e}");
             return ExitCode::from(2);
         }
     };
+    // Sensitivity / reduced-Hessian post-processing reads the converged
+    // KKT system and indexes it with suffixes defined against the
+    // original `.nl`. Presolve tightens bounds and drops rows, which
+    // would shift that indexing — so disable it when either is active.
+    if (sens_active || args.compute_red_hessian) && presolve_opts.enabled {
+        eprintln!(
+            "pounce: disabling presolve — sensitivity / reduced-Hessian post-processing \
+             operates on the original (un-presolved) KKT system"
+        );
+        presolve_opts.enabled = false;
+    }
     let presolve_handle = if presolve_opts.enabled {
         let p = Rc::new(RefCell::new(pounce_presolve::PresolveTnlp::new(
             Rc::clone(&inner_tnlp),
@@ -338,6 +415,30 @@ fn main() -> ExitCode {
     print::print_summary(status, &solve_stats, &counters);
     drop(counters); // release before JSON block (which re-borrows the wrapped TNLP).
 
+    // Reduced Hessian: print to stderr (informational), mirroring
+    // upstream sIPOPT's RedHessian / Eigenvalues prints in
+    // `SensReducedHessianCalculator.cpp`.
+    if let Some(rh) = red_hessian_capture.borrow().as_ref() {
+        sens::print_red_hessian_to_stderr(rh);
+    } else if args.compute_red_hessian {
+        eprintln!(
+            "pounce: --compute-red-hessian requested but the reduced Hessian \
+             was not produced (see warnings above)."
+        );
+    }
+
+    // Assemble the AMPL `.sol` suffix blocks. The parametric
+    // sensitivity step contributes `sens_sol_state_1` (the perturbed
+    // primal) when the `.nl` declared the sIPOPT suffixes.
+    let mut sol_suffixes: Vec<nl_writer::SolSuffix> = Vec::new();
+    if let Some(xp) = sens_capture.borrow().clone() {
+        sol_suffixes.push(nl_writer::SolSuffix {
+            name: "sens_sol_state_1".to_string(),
+            target: nl_writer::SolSuffixTarget::Var,
+            values: nl_writer::SolSuffixValues::Real(xp),
+        });
+    }
+
     // Emit the JSON solve report, when requested. Written AFTER the
     // console summary so a piped `pounce ... --json-output -` reader
     // could be wired up later without disturbing stdout (today we
@@ -366,6 +467,52 @@ fn main() -> ExitCode {
             builder.solution.lambda = lambda;
         }
         builder.ingest_stats(&solve_stats);
+
+        // `Full` detail carries the suffix blocks: the sensitivity
+        // result and, when computed, the reduced Hessian (packed as
+        // problem-level suffixes — see `pounce-cli`'s sens module).
+        if matches!(args.json_detail, ReportDetail::Full) {
+            for s in &sol_suffixes {
+                builder
+                    .solution
+                    .suffixes
+                    .push(sens::sol_suffix_to_report(s));
+            }
+            if let Some(rh) = red_hessian_capture.borrow().as_ref() {
+                builder.solution.suffixes.push(SolutionSuffix {
+                    name: "_red_hessian".to_string(),
+                    target: "problem".to_string(),
+                    kind: "real".to_string(),
+                    values: rh.hr.clone(),
+                    int_values: Vec::new(),
+                });
+                builder.solution.suffixes.push(SolutionSuffix {
+                    name: "_red_hessian_vars".to_string(),
+                    target: "problem".to_string(),
+                    kind: "int".to_string(),
+                    values: Vec::new(),
+                    int_values: rh.var_indices.iter().map(|&v| v as i32).collect(),
+                });
+                if let Some(w) = &rh.eigenvalues {
+                    builder.solution.suffixes.push(SolutionSuffix {
+                        name: "_red_hessian_eigenvalues".to_string(),
+                        target: "problem".to_string(),
+                        kind: "real".to_string(),
+                        values: w.clone(),
+                        int_values: Vec::new(),
+                    });
+                }
+                if let Some(v) = &rh.eigenvectors {
+                    builder.solution.suffixes.push(SolutionSuffix {
+                        name: "_red_hessian_eigenvectors".to_string(),
+                        target: "problem".to_string(),
+                        kind: "real".to_string(),
+                        values: v.clone(),
+                        int_values: Vec::new(),
+                    });
+                }
+            }
+        }
 
         let report = builder.finish();
         if let Err(e) = write_report_file(json_path, &report) {
@@ -399,7 +546,7 @@ fn main() -> ExitCode {
             x: &x,
             lambda: &lambda,
             solve_result_num: status_to_solve_result_num(status),
-            suffixes: &[],
+            suffixes: &sol_suffixes,
         };
         match nl_writer::write_sol_file(sol_path, &payload) {
             Ok(_) => eprintln!("pounce: wrote {}", sol_path.display()),

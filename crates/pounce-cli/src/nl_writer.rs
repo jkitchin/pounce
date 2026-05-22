@@ -28,7 +28,8 @@
 //! <x[0]>                      (... n_primal lines, primal values)
 //! ...
 //! objno <objno> <status>      (optional — selects which objective and the solver-return code)
-//! suffix <kind> <nentries> <name>  (optional — one block per exported suffix)
+//! suffix <kind> <nvalues> <namelen> <tablen> <tabline>  (optional — one block per exported suffix)
+//! <name>                      (the suffix name, on its own line)
 //! <idx> <value>
 //! ...
 //! ```
@@ -173,7 +174,7 @@ fn write_suffix(out: &mut String, s: &SolSuffix) {
                 .filter(|(_, &v)| v != 0)
                 .map(|(i, &v)| (i, v))
                 .collect();
-            let _ = writeln!(out, "suffix {} {} {}", target_bits, entries.len(), s.name);
+            write_suffix_header(out, target_bits, entries.len(), &s.name);
             for (i, v) in entries {
                 let _ = writeln!(out, "{i} {v}");
             }
@@ -185,26 +186,34 @@ fn write_suffix(out: &mut String, s: &SolSuffix) {
                 .filter(|(_, &v)| v != 0.0)
                 .map(|(i, &v)| (i, v))
                 .collect();
-            let _ = writeln!(
-                out,
-                "suffix {} {} {}",
-                target_bits | 0x4,
-                entries.len(),
-                s.name
-            );
+            write_suffix_header(out, target_bits | 0x4, entries.len(), &s.name);
             for (i, v) in entries {
                 let _ = writeln!(out, "{i} {v:.17e}");
             }
         }
         SolSuffixValues::ProblemInt(v) => {
-            let _ = writeln!(out, "suffix {} 1 {}", target_bits, s.name);
+            write_suffix_header(out, target_bits, 1, &s.name);
             let _ = writeln!(out, "0 {v}");
         }
         SolSuffixValues::ProblemReal(v) => {
-            let _ = writeln!(out, "suffix {} 1 {}", target_bits | 0x4, s.name);
+            write_suffix_header(out, target_bits | 0x4, 1, &s.name);
             let _ = writeln!(out, "0 {v:.17e}");
         }
     }
+}
+
+/// Emit the canonical AMPL `.sol` suffix header: five integers
+/// `suffix <kind> <nvalues> <namelen> <tablen> <tabline>` followed by
+/// the suffix name on its own line. `namelen` is `strlen(name)+1` (the
+/// value ASL's `writesol.c` writes); `tablen`/`tabline` are 0 — pounce
+/// never emits a suffix value-table. AMPL's and Pyomo's `.sol` readers
+/// both require this five-integer form and read the name from the next
+/// line; the older three-token `suffix <kind> <nvalues> <name>` shape
+/// is rejected.
+fn write_suffix_header(out: &mut String, kind: u32, nvalues: usize, name: &str) {
+    let namelen = name.len() + 1;
+    let _ = writeln!(out, "suffix {kind} {nvalues} {namelen} 0 0");
+    let _ = writeln!(out, "{name}");
 }
 
 /// Convenience: write `payload` to `path` (truncating any existing
@@ -259,9 +268,11 @@ mod tests {
             }],
         };
         let s = format_sol(&payload);
-        // suffix line declares kind = 0|0x4 = 4 (real var), 2 entries.
+        // Canonical header: kind = 0|0x4 = 4 (real var), 2 values,
+        // namelen = 17 ("sens_sol_state_1" + NUL), no table; name on
+        // the following line.
         assert!(
-            s.contains("\nsuffix 4 2 sens_sol_state_1\n"),
+            s.contains("\nsuffix 4 2 17 0 0\nsens_sol_state_1\n"),
             "missing suffix header:\n{s}",
         );
         // entries present with correct indices.
@@ -286,8 +297,11 @@ mod tests {
             }],
         };
         let s = format_sol(&payload);
-        // kind = 1 (con, integer), 2 entries (indices 1, 2).
-        assert!(s.contains("\nsuffix 1 2 sens_init_constr\n"), "{s}");
+        // kind = 1 (con, integer), 2 values, namelen = 17.
+        assert!(
+            s.contains("\nsuffix 1 2 17 0 0\nsens_init_constr\n"),
+            "{s}"
+        );
         assert!(s.contains("\n1 1\n"));
         assert!(s.contains("\n2 2\n"));
     }
@@ -306,8 +320,8 @@ mod tests {
             }],
         };
         let s = format_sol(&payload);
-        // kind = 3 | 0x4 = 7 (problem-level, real).
-        assert!(s.contains("\nsuffix 7 1 wall_time\n"), "{s}");
+        // kind = 3 | 0x4 = 7 (problem-level, real), namelen = 10.
+        assert!(s.contains("\nsuffix 7 1 10 0 0\nwall_time\n"), "{s}");
         // Single entry at idx 0.
         assert!(s.contains("0 1.23"));
     }
@@ -332,7 +346,7 @@ mod tests {
             }],
         };
         let s = format_sol(&payload);
-        // kind = 0 (var int).
-        assert!(s.contains("\nsuffix 0 2 foo\n"), "{s}");
+        // kind = 0 (var int), 2 values, namelen = 4.
+        assert!(s.contains("\nsuffix 0 2 4 0 0\nfoo\n"), "{s}");
     }
 }

@@ -14,6 +14,12 @@ build = "build.rs"
 name = "pounce"
 path = "src/main.rs"
 
+# `pounce_sens` is a backward-compatibility alias for the older
+# `pounce_sens <in.nl> <out.sol>` invocation. The sensitivity step is
+# now part of the main `pounce` binary (auto-detected from the `.nl`
+# suffixes); this binary is a thin shim that re-exports `main.rs`,
+# kept only so existing AMPL/solver scripts that name `pounce_sens`
+# keep working.
 [[bin]]
 name = "pounce_sens"
 path = "src/bin/pounce_sens.rs"

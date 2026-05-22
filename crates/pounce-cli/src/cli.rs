@@ -61,14 +61,39 @@ pub struct Args {
     pub dump_dir: Option<PathBuf>,
     /// `--dump-format <fmt>`: dump file format. Currently only `jsonl`.
     pub dump_format: Option<String>,
+    /// `--sens-boundcheck` — clamp the perturbed primal `x* + Δx` onto
+    /// the declared `[x_l, x_u]` box after the sensitivity step. Only
+    /// has effect when the `.nl` declares the sIPOPT suffixes. Mirrors
+    /// upstream sIPOPT's `sens_boundcheck`.
+    pub sens_boundcheck: bool,
+    /// `--sens-bound-eps <eps>` — tolerance for `--sens-boundcheck`
+    /// (default `1e-3`). Setting it also enables `--sens-boundcheck`.
+    pub sens_bound_eps: f64,
+    /// `--compute-red-hessian` — after the solve, compute the reduced
+    /// Hessian over the variables tagged by the `red_hessian` integer
+    /// var-suffix in the input `.nl`. Mirrors upstream sIPOPT's
+    /// `compute_red_hessian`.
+    pub compute_red_hessian: bool,
+    /// `--rh-eigendecomp` — also compute the eigendecomposition of the
+    /// reduced Hessian. Implies `--compute-red-hessian`. Mirrors
+    /// upstream `rh_eigendecomp`.
+    pub rh_eigendecomp: bool,
 }
 
 impl Args {
     pub fn usage() -> &'static str {
         "\
-Usage: pounce [OPTIONS] [PATH] [KEY=VALUE ...]
+Usage: pounce [OPTIONS] [PATH] [SOL] [KEY=VALUE ...]
 
 PATH is an AMPL .nl file (positional). Equivalent: --nl-file <path>.
+SOL is an optional second positional naming the .sol output file
+(equivalent to --sol-output <path>); the AMPL `solver in.nl out.sol`
+convention.
+
+When the .nl declares the sIPOPT suffixes (sens_state_1,
+sens_state_value_1, sens_init_constr), pounce additionally runs the
+post-optimal parametric sensitivity step and writes the perturbed
+primal back into the .sol as a `sens_sol_state_1` suffix.
 
 Trailing KEY=VALUE pairs are forwarded to the solver's OptionsList
 (same syntax/semantics as the ipopt CLI). They override values loaded
@@ -92,6 +117,14 @@ Options:
                             A positional .nl input writes <stub>.sol
                             next to it by default (AMPL convention).
   --no-sol                  suppress the default <stub>.sol write
+  --sens-boundcheck         clamp the perturbed primal x* + Δx onto the
+                            declared [x_l, x_u] box (sIPOPT sens_boundcheck)
+  --sens-bound-eps EPS      tolerance for --sens-boundcheck (default 1e-3;
+                            setting it also enables --sens-boundcheck)
+  --compute-red-hessian     compute the reduced Hessian over the variables
+                            tagged by the `red_hessian` integer var-suffix
+  --rh-eigendecomp          also compute the reduced-Hessian eigendecomp;
+                            implies --compute-red-hessian
   --list-problems           print available built-in problems and exit
   -AMPL                     AMPL solver-protocol mode (for Pyomo / AMPL
                             drivers): convey termination via the .sol
@@ -128,6 +161,10 @@ Options:
         let mut dump_specs: Vec<(String, String)> = Vec::new();
         let mut dump_dir: Option<PathBuf> = None;
         let mut dump_format: Option<String> = None;
+        let mut sens_boundcheck = false;
+        let mut sens_bound_eps: f64 = 1e-3;
+        let mut compute_red_hessian = false;
+        let mut rh_eigendecomp = false;
 
         let mut it = argv.into_iter().skip(1);
         while let Some(arg) = it.next() {
@@ -197,13 +234,32 @@ Options:
                     sol_output = Some(PathBuf::from(v));
                 }
                 "--no-sol" => no_sol = true,
+                "--sens-boundcheck" => sens_boundcheck = true,
+                "--sens-bound-eps" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--sens-bound-eps requires a value".to_string())?;
+                    sens_bound_eps = v
+                        .parse::<f64>()
+                        .map_err(|e| format!("--sens-bound-eps: {e}"))?;
+                    sens_boundcheck = true;
+                }
+                "--compute-red-hessian" => compute_red_hessian = true,
+                "--rh-eigendecomp" => {
+                    rh_eigendecomp = true;
+                    compute_red_hessian = true;
+                }
                 other if !other.starts_with('-') => {
                     // `key=value` forms an option pair (matches upstream
-                    // ipopt CLI). Otherwise it's the positional .nl path.
+                    // ipopt CLI). Otherwise the first bare arg is the
+                    // positional .nl path, and a second bare arg is the
+                    // .sol output (AMPL `solver in.nl out.sol`).
                     if let Some((k, v)) = parse_kv(other) {
                         set_options.push((k, v));
                     } else if problem.is_none() {
                         problem = Some(ProblemSource::NlFile(PathBuf::from(other)));
+                    } else if sol_output.is_none() {
+                        sol_output = Some(PathBuf::from(other));
                     } else {
                         return Err(format!(
                             "unexpected positional argument '{other}' (expected KEY=VALUE)"
@@ -238,6 +294,10 @@ Options:
                 dump_specs,
                 dump_dir,
                 dump_format,
+                sens_boundcheck,
+                sens_bound_eps,
+                compute_red_hessian,
+                rh_eigendecomp,
             });
         }
 
@@ -256,6 +316,10 @@ Options:
             dump_specs,
             dump_dir,
             dump_format,
+            sens_boundcheck,
+            sens_bound_eps,
+            compute_red_hessian,
+            rh_eigendecomp,
         })
     }
 }
@@ -474,6 +538,50 @@ mod tests {
     #[test]
     fn sol_output_missing_value() {
         assert!(Args::parse_argv(argv(&["/tmp/foo.nl", "--sol-output"])).is_err());
+    }
+
+    #[test]
+    fn second_positional_is_sol_output() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "/tmp/out.sol"])).unwrap();
+        match a.problem {
+            ProblemSource::NlFile(p) => assert_eq!(p.to_str(), Some("/tmp/foo.nl")),
+            _ => panic!("expected positional .nl"),
+        }
+        assert_eq!(a.sol_output.unwrap().to_str(), Some("/tmp/out.sol"));
+    }
+
+    #[test]
+    fn third_positional_is_an_error() {
+        assert!(Args::parse_argv(argv(&["/tmp/a.nl", "/tmp/b.sol", "/tmp/c"])).is_err());
+    }
+
+    #[test]
+    fn sens_flags_default_off() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl"])).unwrap();
+        assert!(!a.sens_boundcheck);
+        assert!(!a.compute_red_hessian);
+        assert!(!a.rh_eigendecomp);
+        assert_eq!(a.sens_bound_eps, 1e-3);
+    }
+
+    #[test]
+    fn sens_boundcheck_flag() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--sens-boundcheck"])).unwrap();
+        assert!(a.sens_boundcheck);
+    }
+
+    #[test]
+    fn sens_bound_eps_sets_value_and_enables_boundcheck() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--sens-bound-eps", "1e-6"])).unwrap();
+        assert_eq!(a.sens_bound_eps, 1e-6);
+        assert!(a.sens_boundcheck);
+    }
+
+    #[test]
+    fn rh_eigendecomp_implies_compute_red_hessian() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--rh-eigendecomp"])).unwrap();
+        assert!(a.rh_eigendecomp);
+        assert!(a.compute_red_hessian);
     }
 
     #[test]
