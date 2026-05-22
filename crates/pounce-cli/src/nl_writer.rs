@@ -298,10 +298,7 @@ mod tests {
         };
         let s = format_sol(&payload);
         // kind = 1 (con, integer), 2 values, namelen = 17.
-        assert!(
-            s.contains("\nsuffix 1 2 17 0 0\nsens_init_constr\n"),
-            "{s}"
-        );
+        assert!(s.contains("\nsuffix 1 2 17 0 0\nsens_init_constr\n"), "{s}");
         assert!(s.contains("\n1 1\n"));
         assert!(s.contains("\n2 2\n"));
     }
