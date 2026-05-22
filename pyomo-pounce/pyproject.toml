@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyomo-pounce"
+version = "0.1.0"
+description = "Pyomo solver plugin for the POUNCE interior-point NLP solver"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "EPL-2.0"}
+authors = [{name = "John Kitchin", email = "jkitchin@andrew.cmu.edu"}]
+dependencies = ["pyomo>=6.0"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Eclipse Public License 2.0 (EPL-2.0)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/jkitchin/pounce"
+Repository = "https://github.com/jkitchin/pounce"
+Issues = "https://github.com/jkitchin/pounce/issues"
+
+[project.entry-points."pyomo.solvers"]
+pounce = "pyomo_pounce.pounce_solver"
+
+[tool.setuptools.packages.find]
+include = ["pyomo_pounce*"]
+
+[tool.setuptools.package-data]
+pyomo_pounce = ["bin/*"]

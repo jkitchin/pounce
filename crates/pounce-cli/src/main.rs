@@ -6,7 +6,10 @@
 //! used to reading `ipopt` output can drop in `pounce` without
 //! relearning where the numbers live.
 //!
-//! Exit status: 0 on `Solve_Succeeded`, non-zero otherwise.
+//! Exit status: 0 on `Solve_Succeeded`, non-zero otherwise. In AMPL
+//! solver mode (`-AMPL`) the exit code instead follows the AMPL
+//! contract — 0 for any solve that ran and produced a `.sol`, since
+//! the termination is carried by the file's `solve_result_num`.
 
 use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
@@ -415,6 +418,17 @@ fn main() -> ExitCode {
     match status {
         ApplicationReturnStatus::SolveSucceeded
         | ApplicationReturnStatus::SolvedToAcceptableLevel => ExitCode::SUCCESS,
+        // AMPL solver-protocol mode: the process exit code is not the
+        // status channel. AMPL and Pyomo's ASL interface read the
+        // termination from the `.sol` file's `solve_result_num`, and
+        // conventionally an AMPL solver exits 0 whenever it ran and
+        // produced a `.sol` — limit reached, infeasible, even a failed
+        // solve. A non-zero exit makes Pyomo raise `ApplicationError`
+        // and never parse the `.sol`. Genuine startup failures (bad
+        // `.nl`, bad option) already returned non-zero above, before
+        // the solve, so reaching here in `-AMPL` mode means a `.sol`
+        // was written and carries the verdict.
+        _ if args.ampl => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
     }
 }

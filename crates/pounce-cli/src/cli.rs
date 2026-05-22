@@ -36,6 +36,15 @@ pub struct Args {
     /// `--no-sol` — suppress the default `<stub>.sol` write for `.nl`
     /// inputs.
     pub no_sol: bool,
+    /// `-AMPL` — the AMPL solver-protocol flag. AMPL and Pyomo's ASL
+    /// interface invoke a solver as `solver problem.nl -AMPL`. It needs
+    /// no positional behavior (pounce already reads the `.nl` and
+    /// writes `<stub>.sol`), but it does switch the process exit-code
+    /// contract: in AMPL mode the termination is conveyed through the
+    /// `.sol` file's `solve_result_num`, so the process exits 0 for any
+    /// non-fatal solve outcome (limit reached, infeasible, etc.) rather
+    /// than the non-zero code the plain CLI uses.
+    pub ampl: bool,
     pub help: bool,
     pub version: bool,
     /// `--about`: print build metadata, compiled-in features, available
@@ -84,8 +93,11 @@ Options:
                             next to it by default (AMPL convention).
   --no-sol                  suppress the default <stub>.sol write
   --list-problems           print available built-in problems and exit
+  -AMPL                     AMPL solver-protocol mode (for Pyomo / AMPL
+                            drivers): convey termination via the .sol
+                            file and exit 0 for non-fatal outcomes
   --help, -h                print this message and exit
-  --version, -V             print version and exit
+  --version, -v, -V         print version and exit
   --about                   print version, build info, features,
                             linear solvers, and runtime paths
   --dump <cat>[:<spec>]     dump diagnostic category to per-iter files.
@@ -108,6 +120,7 @@ Options:
         let mut json_detail = crate::solve_report::ReportDetail::Summary;
         let mut sol_output: Option<PathBuf> = None;
         let mut no_sol = false;
+        let mut ampl = false;
         let mut help = false;
         let mut version = false;
         let mut about = false;
@@ -120,8 +133,10 @@ Options:
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "-h" | "--help" => help = true,
-                "-V" | "--version" => version = true,
+                "-v" | "-V" | "--version" => version = true,
                 "--about" => about = true,
+                // AMPL solver-protocol flag — see `Args::ampl`.
+                "-AMPL" => ampl = true,
                 "--list-problems" => list_problems = true,
                 "--problem" => {
                     let v = it
@@ -216,6 +231,7 @@ Options:
                 json_detail,
                 sol_output,
                 no_sol,
+                ampl,
                 help,
                 version,
                 about,
@@ -233,6 +249,7 @@ Options:
             json_detail,
             sol_output,
             no_sol,
+            ampl,
             help,
             version,
             about,
@@ -275,8 +292,32 @@ mod tests {
 
     #[test]
     fn version_short_and_long() {
+        assert!(Args::parse_argv(argv(&["-v"])).unwrap().version);
         assert!(Args::parse_argv(argv(&["-V"])).unwrap().version);
         assert!(Args::parse_argv(argv(&["--version"])).unwrap().version);
+    }
+
+    #[test]
+    fn ampl_flag_sets_mode_and_keeps_positional() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "-AMPL"])).unwrap();
+        assert!(a.ampl);
+        match a.problem {
+            ProblemSource::NlFile(p) => assert_eq!(p.to_str(), Some("/tmp/foo.nl")),
+            _ => panic!("expected positional .nl"),
+        }
+    }
+
+    #[test]
+    fn ampl_flag_defaults_off() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl"])).unwrap();
+        assert!(!a.ampl);
+    }
+
+    #[test]
+    fn ampl_flag_with_options() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "-AMPL", "max_iter=500"])).unwrap();
+        assert!(a.ampl);
+        assert_eq!(a.set_options, vec![("max_iter".into(), "500".into())]);
     }
 
     #[test]
