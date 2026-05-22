@@ -1,5 +1,7 @@
 # Cargo build artifacts
 /target
+# Alternate target dir for the MA57-linked build
+/target-ma57
 
 # Upstream Ipopt source mirror — tracked separately (vendor as submodule if desired)
 /ref
@@ -35,6 +37,10 @@ python/*.egg-info/
 
 # Claude Code local state
 .claude/
+
+# Crucible knowledge base — transient lock file (the .bib and graph db
+# are tracked; this lock is process-local state)
+.crucible/references.bib.lock
 
 # macOS
 .DS_Store
