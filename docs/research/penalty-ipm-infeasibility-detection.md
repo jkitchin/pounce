@@ -1,8 +1,9 @@
 # Design note — penalty-IPM with rapid infeasibility detection
 
-**Status: design / proposed. Not yet implemented.** This note is the
-research → plan half of a research → plan → implement workflow; it is
-written for review before any code lands.
+**Status: partially implemented.** §3 (rapid infeasibility detection)
+shipped in commit `fb50871` — see the status note at the head of §3.
+§4 (penalty-IPM) remains design / proposed. This note is the
+research → plan half of a research → plan → implement workflow.
 
 ## 1. What this is
 
@@ -57,7 +58,17 @@ change. This note recommends shipping detection first.
   infeasibility detection would make these guardrails largely
   redundant.
 
-## 3. Rapid infeasibility detection — the proposed first deliverable
+## 3. Rapid infeasibility detection — IMPLEMENTED
+
+**Status: shipped (commit `fb50871`).** Implemented as designed below:
+`IpoptCalculatedQuantities::curr_infeasibility_stationarity`
+(`ipopt_cq.rs:767`), `ConvergenceStatus::LocallyInfeasible`
+(`conv_check/trait.rs:34`), the streak fields and gate logic in
+`OptErrorConvCheck` (`conv_check/opt_error.rs`), the main-loop mapping
+to `SolverReturn::LocalInfeasibility` (`ipopt_alg.rs:475`), the options
+in `upstream_options.rs` / `application.rs` / `alg_builder.rs`, and a
+regression test (`tests/infeas_detection_benefit.rs`). The subsections
+below are the original design, kept for the rationale.
 
 ### 3.1 The test
 
@@ -142,12 +153,12 @@ they share the feasibility direction.
 
 ## 5. Open questions for review
 
-- **Default behavior.** Should rapid infeasibility detection be *on*
-  by default? Recommendation: yes — it can only convert a `max_iter` /
-  restoration-thrash outcome into an honest `LocalInfeasibility`, and
-  it is gated behind a 5-iteration streak. But it must be validated
-  that no currently-solving problem trips it (run the full CUTEst
-  curated suite both ways before flipping the default).
+- **Default behavior — resolved.** Rapid infeasibility detection
+  ships *on* by default: `infeas_stationarity_tol` defaults to `1e-8`
+  and `infeas_max_streak` to `5` (`upstream_options.rs:501,503`);
+  setting either to `0` is the disable switch. The 5-iteration streak
+  and the `infeas_viol_kappa` violation margin (default `1e2`) guard
+  against false positives on nearly-feasible flat spots.
 - **Retiring the cycle detectors.** Once §3 lands, do we delete the
   three `invoke_restoration` cycle detectors, or leave them as a
   belt-and-suspenders fallback? Recommendation: leave them for one
