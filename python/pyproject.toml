@@ -30,6 +30,15 @@ dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30"]
 Homepage = "https://github.com/jkitchin/pounce"
 Issues = "https://github.com/jkitchin/pounce/issues"
 
+[dependency-groups]
+notebooks = ["pyomo>=6.7", "pyomo-pounce", "ipykernel>=6"]
+
+[tool.uv]
+default-groups = ["notebooks"]
+
+[tool.uv.sources]
+pyomo-pounce = { path = "../pyomo-pounce", editable = true }
+
 [tool.maturin]
 manifest-path = "../crates/pounce-py/Cargo.toml"
 python-source = "."
