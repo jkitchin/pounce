@@ -134,17 +134,38 @@ parsing `.nl`:
 - `rosenbrock` — `min 100·(x[1]-x[0]²)² + (1-x[0])²` (unconstrained,
   exact Hessian, optimum `(1, 1)`).
 
+### AMPL / Pyomo solver mode
+
+AMPL drivers — and Pyomo's ASL interface — invoke a solver as
+`solver problem.nl -AMPL`. Pass `-AMPL` to run pounce that way:
+
+```sh
+pounce problem.nl -AMPL
+```
+
+It changes nothing about the solve itself; it switches the process to
+the AMPL exit-code contract (see [Exit codes](#exit-codes)), so the
+driver reads the termination from the `.sol` file rather than the exit
+status. The [`pyomo-pounce`](../../pyomo-pounce) package registers
+pounce as a Pyomo `SolverFactory` solver on top of this.
+
 ### Help
 
 ```sh
 pounce --help
-pounce --version
+pounce --version          # also -v, -V
 ```
 
 ## Exit codes
 
 - `0` — `Solve_Succeeded` (or `Solved_To_Acceptable_Level`).
 - non-zero — any other `ApplicationReturnStatus`.
+
+In AMPL solver mode (`-AMPL`) the exit code instead follows the AMPL
+contract: `0` for any solve that ran and produced a `.sol` file —
+limit-reached, infeasible, even a failed solve — since the termination
+is carried by the file's `solve_result_num`. Genuine startup failures
+(unreadable `.nl`, bad option) still exit non-zero.
 
 ## What's exposed as a library
 

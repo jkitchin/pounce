@@ -127,6 +127,26 @@ A `.sol` is written even when the solve fails, so the
 (`--problem …`) have no `.nl` stub, so they only produce a `.sol`
 when `--sol-output` is given explicitly.
 
+### Pyomo
+
+Because pounce speaks the AMPL NL/SOL protocol, it drops into
+[Pyomo](https://www.pyomo.org/) through the AMPL Solver Library
+interface — exactly how Pyomo drives Ipopt. The
+[`pyomo-pounce`](pyomo-pounce) package registers `pounce` as a Pyomo
+`SolverFactory` solver:
+
+```python
+import pyomo_pounce  # registers 'pounce'
+from pyomo.environ import *
+
+solver = SolverFactory('pounce')
+solver.solve(model)
+```
+
+To invoke pounce directly as an AMPL solver, pass `-AMPL`
+(`pounce problem.nl -AMPL`); in that mode the termination is conveyed
+through the `.sol` file rather than the process exit code.
+
 ### Machine-readable output (JSON)
 
 Pass `--json-output PATH` to write a structured solve report alongside
