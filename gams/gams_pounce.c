@@ -709,6 +709,17 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
                                      mult_g, mult_xl, mult_xu,
                                      (void *)data);
 
+        /* Always log the raw pounce return code so setup-time failures
+         * (which return immediately without any solver-side message) can be
+         * distinguished. Maps via map_status_to_gams below; this is the
+         * pre-mapping integer per IpoptReturnCodes.h. */
+        {
+            char rcmsg[128];
+            snprintf(rcmsg, sizeof(rcmsg),
+                     "POUNCE return code: %d", status);
+            gevLogStat(gev, rcmsg);
+        }
+
         /* -----------------------------------------------------------
          * Report solution back to GAMS
          * ----------------------------------------------------------- */
