@@ -34,6 +34,7 @@ pub mod factor;
 pub mod kkt;
 pub mod options;
 pub mod problem;
+pub mod qps;
 pub mod solver;
 pub mod working_set;
 
@@ -50,5 +51,6 @@ pub use kkt::{
 };
 pub use options::{AntiCyclingChoice, QpAlgorithm, QpOptions};
 pub use problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
+pub use qps::{parse_qps, QpsModel};
 pub use solver::{ParametricActiveSetSolver, QpSolver};
 pub use working_set::{BoundStatus, ConsStatus, WorkingSet};
