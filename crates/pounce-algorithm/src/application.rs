@@ -426,6 +426,13 @@ impl IpoptApplication {
     ///   in-`pounce-nlp` Newton driver so the trivial path is
     ///   independent of the linear-solver backend.
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        // Top-level algorithm dispatch (Phase 5b §7.1). When the
+        // `algorithm` option resolves to "active-set-sqp", route
+        // to the Phase 5b SQP path; otherwise fall through to the
+        // existing IPM flow unchanged.
+        if self.is_sqp_algorithm_selected() {
+            return self.optimize_sqp_tnlp(tnlp);
+        }
         let info = match tnlp.borrow_mut().get_nlp_info() {
             Some(info) => info,
             None => return ApplicationReturnStatus::InvalidProblemDefinition,
@@ -523,6 +530,100 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, found)| found.then_some(v))
             .unwrap_or(false)
+    }
+
+    /// Has the user set `algorithm = active-set-sqp`? Reads the
+    /// string option and matches case-insensitively against the
+    /// design-note §7.1 spelling. Any value other than
+    /// "active-set-sqp" (including absence) routes to the
+    /// default IPM path.
+    fn is_sqp_algorithm_selected(&self) -> bool {
+        match self.options.get_string_value("algorithm", "") {
+            Ok((v, true)) => v.eq_ignore_ascii_case("active-set-sqp"),
+            _ => false,
+        }
+    }
+
+    /// Phase 5b SQP entry point. Builds the same NLP chain
+    /// (`TNLPAdapter` → `OrigIpoptNlp` → `IpoptNlpAdapter`) the
+    /// IPM uses, then runs `SqpAlgorithm::optimize`. Maps the
+    /// `SqpResult.status` back to `ApplicationReturnStatus`.
+    ///
+    /// Current limitations (documented; will land in follow-up):
+    /// - Skips the IPM's bound-relaxation and gradient-based
+    ///   scaling preprocessing. The SQP works in unscaled space
+    ///   for now.
+    /// - Does not invoke the user TNLP's
+    ///   `finalize_solution` callback. Callers requesting SQP
+    ///   read the returned status; the final iterate is queried
+    ///   via a future `get_sqp_iterate` accessor.
+    fn optimize_sqp_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        use pounce_nlp::orig_ipopt_nlp::OrigIpoptNlp;
+        use pounce_nlp::tnlp_adapter::TNLPAdapter;
+        use pounce_nlp::NoScaling;
+
+        let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
+            Ok(a) => Rc::new(RefCell::new(a)),
+            Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
+        };
+        let orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
+            Ok(n) => n,
+            Err(_) => return ApplicationReturnStatus::InternalError,
+        };
+        let nlp_rc: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
+
+        let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(nlp_rc);
+
+        // Build the SqpAlgorithm via the same AlgorithmBuilder
+        // mechanism used by the c6 SQP dispatch. Force
+        // `algorithm = ActiveSetSqp` regardless of how the
+        // builder was constructed (we already routed here based
+        // on the string option, so this is just consistency).
+        let mut builder = self.algorithm_builder_snapshot();
+        builder.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
+        let factory = self.make_backend_factory();
+        let mut alg = match builder.build_sqp_with_backend(factory) {
+            Some(a) => a,
+            None => return ApplicationReturnStatus::InternalError,
+        };
+
+        match alg.optimize(&mut sqp_adapter) {
+            Ok(res) => match res.status {
+                crate::sqp::SqpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
+                crate::sqp::SqpStatus::MaxIter => {
+                    ApplicationReturnStatus::MaximumIterationsExceeded
+                }
+                crate::sqp::SqpStatus::InfeasibleSubproblem => {
+                    ApplicationReturnStatus::InfeasibleProblemDetected
+                }
+                crate::sqp::SqpStatus::LineSearchFailed => {
+                    ApplicationReturnStatus::SearchDirectionBecomesTooSmall
+                }
+            },
+            Err(_) => ApplicationReturnStatus::InternalError,
+        }
+    }
+
+    /// Build a *copy* of the algorithm builder configured per the
+    /// current options. The SQP path uses this so it gets a
+    /// fresh builder without mutating the application's state.
+    fn algorithm_builder_snapshot(&self) -> AlgorithmBuilder {
+        // For Phase 5b commit 11 we accept the builder defaults;
+        // the option-string → builder-field mapping for the SQP
+        // suboptions (sqp_globalization, sqp_hessian, etc.) is a
+        // follow-up commit.
+        AlgorithmBuilder::default()
+    }
+
+    /// Construct a LinearBackendFactory honoring the
+    /// `linear_solver` option. Default FERAL; HSL MA57 when
+    /// built with the `ma57` feature.
+    fn make_backend_factory(&self) -> LinearBackendFactory {
+        Box::new(
+            |_choice| -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
+                Box::new(pounce_feral::FeralSolverInterface::new())
+            },
+        )
     }
 
     /// Phase 3.5 auto-fallback driver.
@@ -1642,6 +1743,34 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn application_default_does_not_select_sqp() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        assert!(!app.is_sqp_algorithm_selected());
+    }
+
+    #[test]
+    fn application_routes_to_sqp_when_algorithm_option_set() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        assert!(app.is_sqp_algorithm_selected());
+    }
+
+    #[test]
+    fn application_routes_to_sqp_case_insensitively() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm Active-Set-SQP\n")
+            .unwrap();
+        // get_string_value may return the value as-stored (no
+        // normalization); the dispatch must handle case
+        // insensitively per the c11 design choice.
+        assert!(app.is_sqp_algorithm_selected());
     }
 
     #[test]

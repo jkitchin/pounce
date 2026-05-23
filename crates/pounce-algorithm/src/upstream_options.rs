@@ -212,6 +212,28 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "EXPERIMENTAL!",
     )?;
     r.add_string_option("linear_solver", "Linear solver used for step computations.", "ma57", &[("ma27", "use the Harwell routine MA27"), ("ma57", "use the Harwell routine MA57"), ("ma77", "use the Harwell routine HSL_MA77"), ("ma86", "use the Harwell routine HSL_MA86"), ("ma97", "use the Harwell routine HSL_MA97"), ("pardiso", "use the Pardiso package from pardiso-project.org"), ("pardisomkl", "use the Pardiso package from Intel MKL"), ("spral", "use the SPRAL package"), ("wsmp", "use WSMP package"), ("mumps", "use MUMPS package"), ("custom", "use custom linear solver (expert use)"), ("feral", "use FERAL pure-Rust sparse symmetric solver (pounce extension)")], "Determines which linear algebra package is to be used for the solution of the augmented linear system (for obtaining the search directions).")?;
+
+    // Pounce-extension: top-level algorithm selector (Phase 5b
+    // §7.1). The default `interior-point` runs the IPOPT-lineage
+    // IPM. `active-set-sqp` selects the Phase 5b SQP driver in
+    // `crate::sqp::SqpAlgorithm`, which uses pounce-qp for QP
+    // subproblem solves.
+    r.add_string_option(
+        "algorithm",
+        "Top-level optimization algorithm.",
+        "interior-point",
+        &[
+            (
+                "interior-point",
+                "primal-dual interior-point method (IPOPT-lineage; pounce default)",
+            ),
+            (
+                "active-set-sqp",
+                "active-set sequential quadratic programming via pounce-qp",
+            ),
+        ],
+        "Selects between the IPM (default) and the active-set SQP driver.",
+    )?;
     r.add_string_option("linear_system_scaling", "Method for scaling the linear system.", "none", &[("none", "no scaling will be performed"), ("mc19", "use the Harwell routine MC19"), ("slack-based", "use the slack values")], "Determines the method used to compute symmetric scaling factors for the augmented system (see also the \"linear_scaling_on_demand\" option). This scaling is independent of the NLP problem scaling.")?;
     r.add_string_option("nlp_scaling_method", "Select the technique used for scaling the NLP.", "gradient-based", &[("none", "no problem scaling will be performed"), ("user-scaling", "scaling parameters will come from the user"), ("gradient-based", "scale the problem so the maximum gradient at the starting point is nlp_scaling_max_gradient"), ("equilibration-based", "scale the problem so that first derivatives are of order 1 at random points (uses Harwell routine MC19)")], "Selects the technique used for scaling the problem internally before it is solved. For user-scaling, the parameters come from the NLP.")?;
 
