@@ -16,6 +16,7 @@
 
 pub mod ipopt_adapter;
 pub mod iterates;
+pub mod line_search;
 pub mod options;
 pub mod problem;
 pub mod qp_assembly;

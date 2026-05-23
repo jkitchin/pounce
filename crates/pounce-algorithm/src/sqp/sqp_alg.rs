@@ -16,6 +16,7 @@
 //! 6. Carry the QP's `WorkingSet` forward for warm-start.
 
 use crate::sqp::iterates::SqpIterates;
+use crate::sqp::line_search::l1_merit_line_search;
 use crate::sqp::options::SqpOptions;
 use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::SqpQpData;
@@ -90,10 +91,20 @@ impl SqpAlgorithm {
         let mut n_qp_solves: u32 = 0;
         let mut final_stationarity = 0.0;
         let mut final_constr_viol = 0.0;
+        // l1-merit penalty parameter ν, adapted across iterations
+        // by `l1_merit_line_search`. Initialized from
+        // `SqpOptions::l1_penalty`.
+        let mut nu = self.opts.l1_penalty;
+        // Cache the most recent f(x) and c(x) so we don't
+        // re-evaluate them after a successful line search (the
+        // LS already computed them at the new iterate).
+        let mut f_cached: Option<Number> = None;
+        let mut c_cached: Option<Vec<Number>> = None;
 
         for outer in 0..self.opts.max_iter {
             let grad_f = nlp.eval_grad_f(&iter.x);
-            let c_vals = nlp.eval_c(&iter.x);
+            let c_vals = c_cached.take().unwrap_or_else(|| nlp.eval_c(&iter.x));
+            let f_curr = f_cached.take().unwrap_or_else(|| nlp.eval_f(&iter.x));
             let jac_c = nlp.eval_jac_c(&iter.x);
             let hess_lag = nlp.eval_hess_lag(&iter.x, &iter.lambda_g);
 
@@ -104,16 +115,27 @@ impl SqpAlgorithm {
             final_stationarity = kkt.stationarity;
             final_constr_viol = kkt.constr_viol;
 
+            #[cfg(test)]
+            if self.opts.print_level >= 1 {
+                eprintln!(
+                    "[sqp k={outer:3}] x={:?} f={:.4e} ‖c‖={:.2e} stat={:.2e} ν={:.2e}",
+                    iter.x.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>(),
+                    f_curr,
+                    kkt.constr_viol,
+                    kkt.stationarity,
+                    nu,
+                );
+            }
+
             if kkt.stationarity <= self.opts.dual_inf_tol
                 && kkt.constr_viol <= self.opts.constr_viol_tol
             {
-                let obj = nlp.eval_f(&iter.x);
                 self.iterates = Some(iter.clone());
                 return Ok(SqpResult {
                     x: iter.x,
                     lambda_g: iter.lambda_g,
                     lambda_x: iter.lambda_x,
-                    obj,
+                    obj: f_curr,
                     status: SqpStatus::Optimal,
                     n_iter: outer,
                     n_qp_solves,
@@ -136,18 +158,19 @@ impl SqpAlgorithm {
             );
             let qp = qp_data.as_qp();
 
-            // Warm-start from the previous working set when the
-            // dimensions match — they do unless the user changed
-            // the NLP between solves (which the c3 loop doesn't
-            // support).
-            let ws_opt: Option<QpWarmStart> = iter.working.as_ref().map(|w| QpWarmStart {
-                x: vec![0.0; qp.n],
-                lambda_g: iter.lambda_g.clone(),
-                lambda_x: iter.lambda_x.clone(),
-                working: w.clone(),
-            });
-            let sol = self.qp_solver.solve(&qp, ws_opt.as_ref(), &self.qp_opts)?;
+            // Cold-start the QP at every SQP iteration. Carrying
+            // the previous QP's `ws.x = 0` would violate pounce-
+            // qp's warm-start contract (the supplied primal must
+            // satisfy the active constraints) because each SQP
+            // linearization shifts the QP's constraint RHS by
+            // `-c(x_k)`. The working-set warm-start path through
+            // pounce-qp requires a separately-supplied feasible
+            // x; a follow-up commit will extend the API.
+            let sol = self.qp_solver.solve(&qp, None, &self.qp_opts)?;
             n_qp_solves += 1;
+            // Track the working set anyway for the future warm-
+            // start integration.
+            let _ = &iter.working;
 
             match sol.status {
                 QpStatus::Optimal => {}
@@ -175,17 +198,65 @@ impl SqpAlgorithm {
                 }
             }
 
-            // Take the full QP step (Phase 5b commit 3 has no
-            // line search). The QP primal `sol.x` IS the step
-            // direction `p`; the QP multipliers become the new
-            // SQP multipliers (per Nocedal-Wright §18.4 — the
-            // QP duals are the linearized NLP duals).
-            for (xi, &pi) in iter.x.iter_mut().zip(sol.x.iter()) {
-                *xi += pi;
+            #[cfg(test)]
+            if self.opts.print_level >= 1 {
+                let p_inf = sol.x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                eprintln!(
+                    "         qp: ‖p‖_inf={:.3e} ‖λ_g_qp‖_inf={:.3e}",
+                    p_inf,
+                    sol.lambda_g.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
+                );
             }
-            iter.lambda_g = sol.lambda_g;
-            iter.lambda_x = sol.lambda_x;
+            // l1-merit backtracking line search. The QP primal
+            // `sol.x` is the step direction `p`; QP duals are the
+            // linearized NLP duals (Nocedal-Wright §18.4).
+            let ls = l1_merit_line_search(
+                nlp,
+                &iter.x,
+                &sol.x,
+                &sol.lambda_g,
+                &grad_f,
+                f_curr,
+                &c_vals,
+                &bl_c,
+                &bu_c,
+                &xl,
+                &xu,
+                nu,
+                &self.opts,
+            );
+            #[cfg(test)]
+            if self.opts.print_level >= 1 {
+                eprintln!(
+                    "         ls: α={:.3e} ν={:.3e} ok={} f_new={:.3e}",
+                    ls.alpha, ls.nu, ls.success, ls.f_new
+                );
+            }
+            if !ls.success {
+                self.iterates = Some(iter.clone());
+                return Ok(SqpResult {
+                    x: iter.x,
+                    lambda_g: iter.lambda_g,
+                    lambda_x: iter.lambda_x,
+                    obj: f_curr,
+                    status: SqpStatus::LineSearchFailed,
+                    n_iter: outer,
+                    n_qp_solves,
+                    final_stationarity,
+                    final_constr_viol,
+                });
+            }
+            iter.x = ls.x_new;
+            for (l, &lq) in iter.lambda_g.iter_mut().zip(sol.lambda_g.iter()) {
+                *l = (1.0 - ls.alpha) * *l + ls.alpha * lq;
+            }
+            for (l, &lq) in iter.lambda_x.iter_mut().zip(sol.lambda_x.iter()) {
+                *l = (1.0 - ls.alpha) * *l + ls.alpha * lq;
+            }
             iter.working = Some(sol.working);
+            nu = ls.nu;
+            f_cached = Some(ls.f_new);
+            c_cached = Some(ls.c_new);
         }
 
         let obj = nlp.eval_f(&iter.x);

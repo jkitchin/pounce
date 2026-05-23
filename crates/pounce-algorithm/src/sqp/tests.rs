@@ -444,7 +444,6 @@ fn sqp_via_ipopt_adapter_solves_convex_eq_nlp() {
 }
 
 #[test]
-#[ignore = "full-step SQP without globalization diverges on nonlinear problems; re-enable when c5 lands the filter line search"]
 fn sqp_optimize_nonlinear_eq_nlp_converges() {
     let qp_solver =
         ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
