@@ -1029,6 +1029,240 @@ impl ParametricActiveSetSolver {
             },
         })
     }
+
+    /// Schur-based variant of [`Self::solve_general`]. Opt-in via
+    /// `QpOptions::use_schur_updates`. Replaces the per-iteration
+    /// refactor with a cached factor of the fixed-dim K_max
+    /// matrix and Sherman-Morrison-Woodbury rank-2 updates per
+    /// working-set change. Resets the cached factor when the
+    /// Schur block reaches `max_schur_updates_before_refactor`.
+    ///
+    /// Behavior is algorithmically identical to the refactor-per-
+    /// iteration path: same drop / ratio-test logic, same exit
+    /// conditions. The difference is the inner-loop cost: one
+    /// cached resolve + small dense Schur solve per iteration,
+    /// plus two cached resolves per working-set change.
+    fn solve_general_schur(
+        &mut self,
+        qp: &QpProblem,
+        ws: Option<&QpWarmStart>,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        let started = Instant::now();
+        let n = qp.n;
+        let m = qp.m;
+        let m_total = m + n;
+        let mut n_refactor: u32 = 0;
+        let mut n_changes: u32 = 0;
+        let mut n_schur_updates: u32 = 0;
+
+        let (mut x, mut working) = if let Some(w) = ws {
+            (w.x.clone(), w.working.clone())
+        } else {
+            match self.cold_general_initial(qp, opts, &mut n_refactor)? {
+                Some(p) => p,
+                None => return self.solve_elastic(qp, opts),
+            }
+        };
+
+        for (i, &status) in working.bounds.iter().enumerate() {
+            match status {
+                BoundStatus::AtLower | BoundStatus::Fixed => x[i] = qp.xl[i],
+                BoundStatus::AtUpper => x[i] = qp.xu[i],
+                BoundStatus::Inactive => {}
+            }
+        }
+
+        // Initialize Schur and factor the base K_max.
+        let mut schur = crate::schur::SchurState::new(n, m);
+        let active_count = active_slot_count(&working);
+        schur.reset(&mut self.linsol, qp, &working, active_count as i32, opts)?;
+        n_refactor += 1;
+
+        for _iter in 0..opts.max_iter {
+            let hx = h_times_x(qp.h, &x);
+            let mut rhs = vec![0.0; n + m_total];
+            for (rhs_i, (hx_i, &g_i)) in rhs[..n].iter_mut().zip(hx.iter().zip(qp.g.iter())) {
+                *rhs_i = -(hx_i + g_i);
+            }
+            schur.solve(&mut self.linsol, &mut rhs)?;
+
+            let p: Vec<Number> = rhs[..n].to_vec();
+            let p_inf = p.iter().map(|pi| pi.abs()).fold(0.0, f64::max);
+
+            if p_inf <= opts.opt_tol {
+                let mut worst: Option<(DropTarget, Number)> = None;
+                for slot in 0..m_total {
+                    if !crate::schur::SchurState::slot_active(&working, slot) {
+                        continue;
+                    }
+                    let lam = rhs[n + slot];
+                    let (target, viol) = if slot < m {
+                        let v = match working.constraints[slot] {
+                            ConsStatus::AtLower => lam,
+                            ConsStatus::AtUpper => -lam,
+                            ConsStatus::Equality => 0.0,
+                            ConsStatus::Inactive => unreachable!(),
+                        };
+                        (DropTarget::Cons(slot), v)
+                    } else {
+                        let var = slot - m;
+                        let v = match working.bounds[var] {
+                            BoundStatus::AtLower => lam,
+                            BoundStatus::AtUpper => -lam,
+                            BoundStatus::Fixed => 0.0,
+                            BoundStatus::Inactive => unreachable!(),
+                        };
+                        (DropTarget::Bound(var), v)
+                    };
+                    if viol > worst.map(|(_, w)| w).unwrap_or(opts.opt_tol) {
+                        worst = Some((target, viol));
+                    }
+                }
+
+                if let Some((target, _)) = worst {
+                    let slot = match target {
+                        DropTarget::Cons(i) => {
+                            working.constraints[i] = ConsStatus::Inactive;
+                            i
+                        }
+                        DropTarget::Bound(i) => {
+                            working.bounds[i] = BoundStatus::Inactive;
+                            m + i
+                        }
+                    };
+                    schur.apply_change(&mut self.linsol, qp, slot, false)?;
+                    n_changes += 1;
+                    n_schur_updates += 1;
+                    if schur.needs_reset(opts) {
+                        let ac = active_slot_count(&working);
+                        schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                        n_refactor += 1;
+                    }
+                    continue;
+                }
+
+                // Optimal.
+                let mut lambda_g = vec![0.0; m];
+                for s in 0..m {
+                    if working.constraints[s].is_active() {
+                        lambda_g[s] = rhs[n + s];
+                    }
+                }
+                let mut lambda_x = vec![0.0; n];
+                for j in 0..n {
+                    if working.bounds[j].is_active() {
+                        lambda_x[j] = -rhs[n + m + j];
+                    }
+                }
+
+                return Ok(QpSolution {
+                    obj: quad_objective(qp, &x),
+                    x,
+                    lambda_g,
+                    lambda_x,
+                    working,
+                    status: QpStatus::Optimal,
+                    stats: QpStats {
+                        n_working_set_changes: n_changes,
+                        n_refactor,
+                        n_schur_updates,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
+
+            // Ratio test — identical to solve_general but tracking
+            // the slot index of the blocker for apply_change.
+            let ap = a_times_x(qp.a, &p, m);
+            let ax = a_times_x(qp.a, &x, m);
+
+            let mut candidates: Vec<(BlockerTarget, Number, Number)> = Vec::new();
+            for i in 0..n {
+                if working.bounds[i].is_active() {
+                    continue;
+                }
+                if p[i] < -opts.feas_tol && qp.xl[i] > NLP_LOWER_BOUND_INF {
+                    let r = (x[i] - qp.xl[i]) / -p[i];
+                    candidates.push((BlockerTarget::Bound(i, BoundStatus::AtLower), r, p[i].abs()));
+                }
+                if p[i] > opts.feas_tol && qp.xu[i] < NLP_UPPER_BOUND_INF {
+                    let r = (qp.xu[i] - x[i]) / p[i];
+                    candidates.push((BlockerTarget::Bound(i, BoundStatus::AtUpper), r, p[i].abs()));
+                }
+            }
+            for i in 0..m {
+                if working.constraints[i].is_active() {
+                    continue;
+                }
+                if qp.bl[i] == qp.bu[i] {
+                    continue;
+                }
+                if ap[i] < -opts.feas_tol && qp.bl[i] > NLP_LOWER_BOUND_INF {
+                    let r = (ax[i] - qp.bl[i]) / -ap[i];
+                    candidates.push((BlockerTarget::Cons(i, ConsStatus::AtLower), r, ap[i].abs()));
+                }
+                if ap[i] > opts.feas_tol && qp.bu[i] < NLP_UPPER_BOUND_INF {
+                    let r = (qp.bu[i] - ax[i]) / ap[i];
+                    candidates.push((BlockerTarget::Cons(i, ConsStatus::AtUpper), r, ap[i].abs()));
+                }
+            }
+            let (mut alpha, blocker) = select_blocker(&candidates, opts);
+            if alpha < 0.0 {
+                alpha = 0.0;
+            }
+            for (xi, &pi) in x.iter_mut().zip(p.iter()) {
+                *xi += alpha * pi;
+            }
+            if let Some(blk) = blocker {
+                let slot = match blk {
+                    BlockerTarget::Bound(i, status) => {
+                        match status {
+                            BoundStatus::AtLower => x[i] = qp.xl[i],
+                            BoundStatus::AtUpper => x[i] = qp.xu[i],
+                            _ => unreachable!(),
+                        }
+                        working.bounds[i] = status;
+                        m + i
+                    }
+                    BlockerTarget::Cons(i, status) => {
+                        working.constraints[i] = status;
+                        i
+                    }
+                };
+                schur.apply_change(&mut self.linsol, qp, slot, true)?;
+                n_changes += 1;
+                n_schur_updates += 1;
+                if schur.needs_reset(opts) {
+                    let ac = active_slot_count(&working);
+                    schur.reset(&mut self.linsol, qp, &working, ac as i32, opts)?;
+                    n_refactor += 1;
+                }
+            }
+        }
+
+        Ok(QpSolution {
+            obj: quad_objective(qp, &x),
+            x,
+            lambda_g: vec![0.0; m],
+            lambda_x: vec![0.0; n],
+            working,
+            status: QpStatus::MaxIter,
+            stats: QpStats {
+                n_working_set_changes: n_changes,
+                n_refactor,
+                n_schur_updates,
+                used_phase1: false,
+                time: started.elapsed(),
+            },
+        })
+    }
+}
+
+fn active_slot_count(working: &WorkingSet) -> usize {
+    working.constraints.iter().filter(|s| s.is_active()).count()
+        + working.bounds.iter().filter(|s| s.is_active()).count()
 }
 
 #[derive(Clone, Copy)]
@@ -1168,6 +1402,9 @@ impl QpSolver for ParametricActiveSetSolver {
         // Any of: caller provided a warm start, or the problem has at
         // least one one-sided / two-sided general inequality row.
         if ws.is_some() || has_general_inequality {
+            if opts.use_schur_updates {
+                return self.solve_general_schur(qp, ws, opts);
+            }
             return self.solve_general(qp, ws, opts);
         }
 

@@ -242,31 +242,73 @@ impl SchurState {
     }
 
     /// Reset: discard any cached SMW state, build the K_max for
-    /// the current working set, factor it via `linsol`.
+    /// the current working set, factor it via `linsol`. Runs
+    /// inertia-control retries on `WrongInertia` / `Singular`
+    /// per `QpOptions` (same δ-shift policy as the non-Schur
+    /// `factorize_with_inertia_control`).
     pub fn reset(
         &mut self,
         linsol: &mut LinearSolver,
         qp: &QpProblem,
         working: &WorkingSet,
         expected_neg: i32,
+        opts: &QpOptions,
     ) -> Result<(), QpError> {
         for slot in 0..self.m_total {
             self.base_active[slot] = Self::slot_active(working, slot);
         }
-        let kkt = self.build_k_max_triplet(qp, &self.base_active);
-
-        // Factor the base. We don't strictly need to solve with a
-        // particular RHS here; the factor itself is what we cache.
-        // Pass a zero RHS to share the existing API.
+        let mut kkt = self.build_k_max_triplet(qp, &self.base_active);
         let mut rhs = vec![0.0; self.dim];
-        linsol.factorize_and_solve(&kkt, &mut rhs, Some(expected_neg))?;
 
-        self.u_cols.clear();
-        self.v_cols.clear();
-        self.kinv_u_cols.clear();
-        self.s_matrix.clear();
-        self.s_dim = 0;
-        Ok(())
+        // First attempt: no shift.
+        let mut current = 0.0;
+        let mut last_err: Option<QpError>;
+        match linsol.factorize_and_solve(&kkt, &mut rhs, Some(expected_neg)) {
+            Ok(()) => {
+                self.u_cols.clear();
+                self.v_cols.clear();
+                self.kinv_u_cols.clear();
+                self.s_matrix.clear();
+                self.s_dim = 0;
+                return Ok(());
+            }
+            Err(QpError::LinearSolverFailure(ref msg))
+                if msg.contains("inertia") || msg.contains("singular") =>
+            {
+                last_err = Some(QpError::LinearSolverFailure(msg.clone()));
+            }
+            Err(e) => return Err(e),
+        }
+
+        let mut next = opts.inertia_shift_initial;
+        for _ in 0..opts.inertia_max_shifts {
+            kkt.add_h_diagonal_shift(self.n, next - current);
+            current = next;
+            let mut rhs_local = vec![0.0; self.dim];
+            match linsol.factorize_and_solve(&kkt, &mut rhs_local, Some(expected_neg)) {
+                Ok(()) => {
+                    self.u_cols.clear();
+                    self.v_cols.clear();
+                    self.kinv_u_cols.clear();
+                    self.s_matrix.clear();
+                    self.s_dim = 0;
+                    return Ok(());
+                }
+                Err(QpError::LinearSolverFailure(ref msg))
+                    if msg.contains("inertia") || msg.contains("singular") =>
+                {
+                    last_err = Some(QpError::LinearSolverFailure(msg.clone()));
+                    next *= opts.inertia_shift_factor;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            QpError::LinearSolverFailure(format!(
+                "Schur reset: inertia control exhausted {} shifts (final δ = {:.3e})",
+                opts.inertia_max_shifts, current
+            ))
+        }))
     }
 
     /// Apply a working-set flip on slot `slot`. Computes the rank-

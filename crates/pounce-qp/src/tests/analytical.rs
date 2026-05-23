@@ -889,6 +889,133 @@ fn warm_start_with_wrong_bound_in_working_set_drops_it() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// §4.2 Schur-complement path produces the same answer as the
+// refactor-per-iteration path. Opts.use_schur_updates flips the
+// dispatch; the solver's correctness must be invariant under the
+// switch.
+//
+//     min ½‖x‖² + x₁ + x₂   s.t.   x₁ + x₂ ≥ −1
+//
+// True optimum: x* = (−0.5, −0.5), λ_g = −0.5, obj = 0.25.
+// Warm-start at the optimum to keep the iteration count tiny and
+// to exercise both apply_change (for the initial slot activation
+// from warm-start consistency) and solve.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn schur_path_matches_refactor_path_on_binding_ineq() {
+    let n = 2;
+    let m = 1;
+    let h = identity_hessian(n);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [1.0, 1.0];
+    let bl = [-1.0];
+    let bu = [NLP_UPPER_BOUND_INF];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let ws = crate::QpWarmStart {
+        x: vec![-0.5, -0.5],
+        lambda_g: vec![-0.5],
+        lambda_x: vec![0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![crate::BoundStatus::Inactive; 2],
+            constraints: vec![crate::ConsStatus::AtLower],
+        },
+    };
+
+    // Default (refactor-per-iter):
+    let mut solver = new_solver();
+    let sol_default = solver.solve(&qp, Some(&ws), &QpOptions::default()).unwrap();
+    assert_eq!(sol_default.status, crate::QpStatus::Optimal);
+
+    // Schur:
+    let mut opts_schur = QpOptions::default();
+    opts_schur.use_schur_updates = true;
+    let sol_schur = solver.solve(&qp, Some(&ws), &opts_schur).unwrap();
+    assert_eq!(sol_schur.status, crate::QpStatus::Optimal);
+
+    // Both must agree on x, λ_g, working set, obj to 1e-9.
+    for (i, (&a, &b)) in sol_default.x.iter().zip(sol_schur.x.iter()).enumerate() {
+        assert!((a - b).abs() < 1e-9, "x[{i}] default={a} schur={b}",);
+    }
+    assert!((sol_default.lambda_g[0] - sol_schur.lambda_g[0]).abs() < 1e-9);
+    assert!((sol_default.obj - sol_schur.obj).abs() < 1e-9);
+    assert_eq!(sol_default.working, sol_schur.working);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Schur path agrees with refactor path on the drop-then-restep
+// case (warm_start_with_wrong_bound_in_working_set_drops_it
+// translated to use_schur_updates=true).
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn schur_path_matches_refactor_path_on_drop_test() {
+    let n = 2;
+    let h = identity_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [-0.5, 0.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [0.0, 0.0];
+    let xu = [1.0, 1.0];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let ws = crate::QpWarmStart {
+        x: vec![0.0, 0.0],
+        lambda_g: vec![],
+        lambda_x: vec![0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![crate::BoundStatus::AtLower, crate::BoundStatus::AtLower],
+            constraints: vec![],
+        },
+    };
+
+    let mut solver = new_solver();
+    let mut opts_schur = QpOptions::default();
+    opts_schur.use_schur_updates = true;
+    let sol = solver.solve(&qp, Some(&ws), &opts_schur).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 0.5).abs() < 1e-9, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 0.0).abs() < 1e-9, "x[1] = {}", sol.x[1]);
+    assert_eq!(sol.working.bounds[0], crate::BoundStatus::Inactive);
+    assert_eq!(sol.working.bounds[1], crate::BoundStatus::AtLower);
+    // Schur stats: at least one rank-2 update was applied.
+    assert!(
+        sol.stats.n_schur_updates > 0,
+        "expected ≥1 Schur update, got {}",
+        sol.stats.n_schur_updates
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // EXPAND (Harris-style two-pass) ratio-test selection.
 //
 // At a degenerate intersection where multiple constraints would

@@ -8,6 +8,7 @@
 
 use crate::factor::LinearSolver;
 use crate::kkt::a_times_x;
+use crate::options::QpOptions;
 use crate::problem::{HessianInertia, QpProblem};
 use crate::schur::SchurState;
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
@@ -88,7 +89,9 @@ fn schur_reset_factors_k_max_and_solves_with_no_updates() {
     // = 1 are positive, so they contribute positive eigenvalues.
     // Expected inertia of K_max with k active rows ⇒ k negative
     // for the saddle + 2 positive sentinels. Total negative = k.
-    state.reset(&mut ls, &qp, &working, 1).unwrap();
+    state
+        .reset(&mut ls, &qp, &working, 1, &QpOptions::default())
+        .unwrap();
     assert_eq!(state.n_schur_updates(), 0);
 
     // Solve K_max [x; λ_all] = [-g; 1; 0; 0]:
@@ -132,7 +135,9 @@ fn schur_apply_change_to_activate_bound_matches_fresh_factor() {
 
     let mut state = SchurState::new(2, 1);
     let mut ls = linsol();
-    state.reset(&mut ls, &qp, &working, 1).unwrap();
+    state
+        .reset(&mut ls, &qp, &working, 1, &QpOptions::default())
+        .unwrap();
 
     // Apply a flip: bound slot for x₀ goes active.
     // Slot index in the m_total=3 space: bound 0 → slot m + 0 = 1.
@@ -155,7 +160,9 @@ fn schur_apply_change_to_activate_bound_matches_fresh_factor() {
     let mut state_ref = SchurState::new(2, 1);
     let mut ls_ref = linsol();
     // Expected inertia: 2 active rows ⇒ 2 negative eigenvalues.
-    state_ref.reset(&mut ls_ref, &qp, &working_ref, 2).unwrap();
+    state_ref
+        .reset(&mut ls_ref, &qp, &working_ref, 2, &QpOptions::default())
+        .unwrap();
     let mut rhs_ref = vec![0.0, 0.0, 1.0, 0.0, 0.0];
     state_ref.solve(&mut ls_ref, &mut rhs_ref).unwrap();
 
@@ -192,7 +199,9 @@ fn schur_two_flips_match_fresh_factor() {
 
     let mut state = SchurState::new(2, 1);
     let mut ls = linsol();
-    state.reset(&mut ls, &qp, &working, 1).unwrap();
+    state
+        .reset(&mut ls, &qp, &working, 1, &QpOptions::default())
+        .unwrap();
     state.apply_change(&mut ls, &qp, 1, true).unwrap(); // bound x₀
     state.apply_change(&mut ls, &qp, 2, true).unwrap(); // bound x₁
     assert_eq!(state.n_schur_updates(), 2);
@@ -235,7 +244,9 @@ fn schur_reset_after_apply_change_clears_state() {
 
     let mut state = SchurState::new(2, 1);
     let mut ls = linsol();
-    state.reset(&mut ls, &qp, &working, 1).unwrap();
+    state
+        .reset(&mut ls, &qp, &working, 1, &QpOptions::default())
+        .unwrap();
     state.apply_change(&mut ls, &qp, 1, true).unwrap();
     assert_eq!(state.n_schur_updates(), 1);
 
@@ -243,7 +254,9 @@ fn schur_reset_after_apply_change_clears_state() {
     // should reset to zero updates.
     let mut working2 = working.clone();
     working2.bounds[0] = BoundStatus::AtLower;
-    state.reset(&mut ls, &qp, &working2, 2).unwrap();
+    state
+        .reset(&mut ls, &qp, &working2, 2, &QpOptions::default())
+        .unwrap();
     assert_eq!(state.n_schur_updates(), 0);
 }
 
@@ -268,7 +281,9 @@ fn schur_dot_helper_is_used_correctly() {
     working.constraints[0] = ConsStatus::Equality;
     let mut state = SchurState::new(2, 1);
     let mut ls = linsol();
-    state.reset(&mut ls, &qp, &working, 1).unwrap();
+    state
+        .reset(&mut ls, &qp, &working, 1, &QpOptions::default())
+        .unwrap();
     let mut rhs = vec![0.0, 0.0, 1.0, 0.0, 0.0];
     state.solve(&mut ls, &mut rhs).unwrap();
     let x = &rhs[..2];

@@ -62,6 +62,17 @@ pub struct QpOptions {
     pub inertia_shift_initial: Number,
     pub inertia_shift_factor: Number,
     pub inertia_max_shifts: u32,
+
+    /// Opt in to the §4.2 sparse Schur-complement update path in
+    /// `solve_general`. When `true`, the inner loop uses a cached
+    /// factor of the fixed-dim K_max matrix and absorbs working-
+    /// set changes as Sherman-Morrison-Woodbury rank-2 updates,
+    /// refactoring only when the Schur block reaches
+    /// `max_schur_updates_before_refactor`. When `false`
+    /// (default), each iteration assembles a fresh active-set
+    /// KKT and factors from scratch — algorithmically correct,
+    /// noticeably slower on large warm-started workloads.
+    pub use_schur_updates: bool,
 }
 
 impl Default for QpOptions {
@@ -78,6 +89,7 @@ impl Default for QpOptions {
             inertia_shift_initial: 1e-8,
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
+            use_schur_updates: false,
         }
     }
 }
