@@ -712,28 +712,211 @@ fn rejects_eq_plus_bounds_when_relaxed_solution_violates_bounds() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Mixed unsupported path: a QP with one-sided general inequality
-// constraints (bl ≠ bu on a general row) requires the elastic
-// mode and lands in the next commit.
+// General inequality, equality-relaxed solution is feasible at
+// the lower bound: commit 5's cold path solves it directly.
+//
+//     min ½‖x‖² + x₁ + x₂   s.t.   −2 ≤ x₁ + x₂ ≤ 5,  no bounds
+//
+// Eq-relaxed (no equality rows): H x = −g ⇒ x = (−1, −1).
+// Constraint: a·x = −2 = bl. Activated AtLower at init. Inner
+// loop confirms p = 0; multiplier check: x₁ + g₁ + λ = 0 ⇒
+// −1 + 1 + λ = 0 ⇒ λ = 0. Marginal, no drop. Optimal.
 // ─────────────────────────────────────────────────────────────────
 #[test]
-fn rejects_mixed_bounds_plus_general_inequality() {
+fn general_ineq_cold_eq_relaxed_at_lower_bound() {
     let n = 2;
+    let m = 1;
     let h = identity_hessian(n);
 
-    let a_space = GenTMatrixSpace::new(1, n as i32, vec![1, 1], vec![1, 2]);
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
     let mut a = GenTMatrix::new(a_space);
     a.set_values(&[1.0, 1.0]);
 
-    let g = [0.0, 0.0];
-    let bl = [0.0];
-    let bu = [1.0]; // strict inequality 0 ≤ x₁+x₂ ≤ 1
+    let g = [1.0, 1.0];
+    let bl = [-2.0];
+    let bu = [5.0];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] + 1.0).abs() < 1e-10);
+    assert!((sol.x[1] + 1.0).abs() < 1e-10);
+    assert_eq!(sol.working.constraints[0], crate::ConsStatus::AtLower);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Warm-start at the optimum of a binding-inequality QP — the
+// canonical case for commit 5's machinery.
+//
+//     min ½‖x‖² + x₁ + x₂   s.t.   x₁ + x₂ ≥ −1   (no bounds)
+//
+// Unconstrained min: (−1, −1). Inequality violated (−2 < −1) ⇒
+// constraint binds. True optimum on x₁+x₂ = −1:
+//   ∂L/∂xᵢ = xᵢ + 1 + λ = 0 ⇒ xᵢ = −1 − λ
+//   Eq:  2(−1 − λ) = −1 ⇒ λ = −0.5
+//   x* = (−0.5, −0.5),  λ_g = −0.5.
+//
+// Warm-starting at (x*, W = {cons AtLower}) should converge in
+// one inner-loop iteration with zero working-set changes.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn warm_start_general_ineq_at_optimum_returns_in_one_iter() {
+    let n = 2;
+    let m = 1;
+    let h = identity_hessian(n);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [1.0, 1.0];
+    let bl = [-1.0];
+    let bu = [NLP_UPPER_BOUND_INF];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let ws = crate::QpWarmStart {
+        x: vec![-0.5, -0.5],
+        lambda_g: vec![-0.5],
+        lambda_x: vec![0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![crate::BoundStatus::Inactive; 2],
+            constraints: vec![crate::ConsStatus::AtLower],
+        },
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, Some(&ws), &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+
+    assert!((sol.x[0] + 0.5).abs() < 1e-10, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] + 0.5).abs() < 1e-10, "x[1] = {}", sol.x[1]);
+    assert!(
+        (sol.lambda_g[0] + 0.5).abs() < 1e-10,
+        "lambda_g[0] = {}",
+        sol.lambda_g[0]
+    );
+    assert_eq!(sol.working.constraints[0], crate::ConsStatus::AtLower);
+    assert_eq!(sol.stats.n_working_set_changes, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Warm-start with an extra bound wrongly in the working set —
+// algorithm must drop it, then re-solve to the true optimum.
+// This is the "drop" path of the active-set inner loop, end-to-end.
+//
+//     min ½(x₁² + x₂²) − ½ x₁   s.t.   0 ≤ x_i ≤ 1
+//
+// Unconstrained min: (0.5, 0). Box-feasible (x₁ interior, x₂ at
+// xl_2). True optimum has W = {x₂ AtLower}.
+//
+// Warm-start at x = (0, 0) with W = {x₁ AtLower, x₂ AtLower}:
+//   Iter 1: p = 0, multipliers (0.5, 0). Drop x₁ (λ > 0 violates
+//           "≤ 0 at lower").
+//   Iter 2: W = {x₂}. Step p = (0.5, 0), full step, x → (0.5, 0).
+//   Iter 3: p = 0, multipliers OK. Optimal.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn warm_start_with_wrong_bound_in_working_set_drops_it() {
+    let n = 2;
+    let h = identity_hessian(n);
+    let a = empty_gen(0, n);
+
+    let g = [-0.5, 0.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
     let xl = [0.0, 0.0];
     let xu = [1.0, 1.0];
 
     let qp = QpProblem {
         n,
-        m: 1,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let ws = crate::QpWarmStart {
+        x: vec![0.0, 0.0],
+        lambda_g: vec![],
+        lambda_x: vec![0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![crate::BoundStatus::AtLower, crate::BoundStatus::AtLower],
+            constraints: vec![],
+        },
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, Some(&ws), &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 0.5).abs() < 1e-10, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 0.0).abs() < 1e-10, "x[1] = {}", sol.x[1]);
+    assert_eq!(sol.working.bounds[0], crate::BoundStatus::Inactive);
+    assert_eq!(sol.working.bounds[1], crate::BoundStatus::AtLower);
+    assert_eq!(sol.stats.n_working_set_changes, 1);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Rejection path: an inequality QP whose equality-relaxed
+// solution is infeasible w.r.t. the inequality. Without a warm-
+// start (and without the §4.3 elastic mode) commit 5 has no
+// feasible starting point and must reject.
+//
+//     min ½‖x‖²   s.t.   x₁ + x₂ ≥ 1,  no bounds
+//
+// Eq-relaxed: (0, 0). a·x = 0 < bl = 1 ⇒ UnsupportedFeature.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn rejects_general_ineq_when_eq_relaxed_violates_constraint() {
+    let n = 2;
+    let m = 1;
+    let h = identity_hessian(n);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0, 0.0];
+    let bl = [1.0];
+    let bu = [NLP_UPPER_BOUND_INF];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
         h: &h,
         g: &g,
         a: &a,

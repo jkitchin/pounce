@@ -214,6 +214,99 @@ pub fn h_times_x(h: &pounce_linalg::triplet::SymTMatrix, x: &[Number]) -> Vec<Nu
     out
 }
 
+/// `A · x` for a sparse general Jacobian.
+pub fn a_times_x(a: &pounce_linalg::triplet::GenTMatrix, x: &[Number], m: usize) -> Vec<Number> {
+    let mut out = vec![0.0; m];
+    let irows = a.irows();
+    let jcols = a.jcols();
+    let vals = a.values();
+    for k in 0..irows.len() {
+        let i = (irows[k] - 1) as usize;
+        let j = (jcols[k] - 1) as usize;
+        out[i] += vals[k] * x[j];
+    }
+    out
+}
+
+/// Assemble `[H Aᵀ_W Eᵀ_W; A_W 0 0; E_W 0 0]` for an arbitrary
+/// active set — both general constraints (`active_cons`, listing
+/// the row indices of `qp.a` currently in the working set) and
+/// variable bounds (`active_bounds`, listing the column indices
+/// currently active). Both lists must be in ascending index order;
+/// the order determines saddle-row layout.
+///
+/// This generalizes [`assemble_equality_plus_bounds`]: when every
+/// constraint is an equality `active_cons` lists all `m` rows; for
+/// general inequality QPs `active_cons` is a strict subset chosen
+/// by the active-set inner loop.
+pub fn assemble_active_set_kkt(
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> KktTriplet {
+    let n = qp.n;
+    let m = qp.m;
+    let k_c = active_cons.len();
+    let k_b = active_bounds.len();
+    let dim = n + k_c + k_b;
+
+    let nh = qp.h.nonzeros() as usize;
+    let na = qp.a.nonzeros() as usize;
+    let cap = nh + na + k_b;
+
+    let mut irn = Vec::with_capacity(cap);
+    let mut jcn = Vec::with_capacity(cap);
+    let mut vals = Vec::with_capacity(cap);
+
+    // ---- H block ----
+    let h_irows = qp.h.irows();
+    let h_jcols = qp.h.jcols();
+    let h_vals = qp.h.values();
+    for kk in 0..nh {
+        let i = h_irows[kk];
+        let j = h_jcols[kk];
+        let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
+        irn.push(hi);
+        jcn.push(lo);
+        vals.push(h_vals[kk]);
+    }
+
+    // ---- A_W block: only rows whose 0-based index appears in active_cons ----
+    // Build a row-map: for each problem-row, what's its saddle-row offset?
+    // (None ⇒ row not in working set, skip its entries entirely.)
+    let mut row_offset: Vec<Option<Index>> = vec![None; m];
+    let n_i = n as Index;
+    for (j, &row) in active_cons.iter().enumerate() {
+        row_offset[row] = Some(n_i + (j as Index) + 1);
+    }
+    let a_irows = qp.a.irows();
+    let a_jcols = qp.a.jcols();
+    let a_vals = qp.a.values();
+    for kk in 0..na {
+        let a_row = (a_irows[kk] - 1) as usize;
+        if let Some(saddle_row) = row_offset[a_row] {
+            irn.push(saddle_row);
+            jcn.push(a_jcols[kk]);
+            vals.push(a_vals[kk]);
+        }
+    }
+
+    // ---- E_W block: selection rows for active bounds ----
+    let nm_i = (n + k_c) as Index;
+    for (j, &var) in active_bounds.iter().enumerate() {
+        irn.push(nm_i + (j as Index) + 1);
+        jcn.push((var as Index) + 1);
+        vals.push(1.0);
+    }
+
+    KktTriplet {
+        dim,
+        irn,
+        jcn,
+        vals,
+    }
+}
+
 /// Assemble `[H Aᵀ_eq Eᵀ_W; A_eq 0 0; E_W 0 0]` for a QP whose
 /// general constraints are all equalities and whose currently
 /// active variable-bound working set is `active_bounds`
