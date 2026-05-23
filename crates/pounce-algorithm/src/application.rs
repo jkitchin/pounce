@@ -1183,6 +1183,9 @@ impl IpoptApplication {
                 builder.mu.mu_allow_fast_monotone_decrease = v == "yes";
             }
         }
+        if let Some(v) = read_num("barrier_tol_factor") {
+            builder.mu.barrier_tol_factor = v;
+        }
         if let Some(v) = read_num("sigma_max") {
             builder.mu.sigma_max = v;
         }

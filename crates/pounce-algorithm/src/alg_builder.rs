@@ -213,6 +213,7 @@ pub struct MuOptions {
     pub mu_linear_decrease_factor: Number,
     pub mu_superlinear_decrease_power: Number,
     pub mu_allow_fast_monotone_decrease: bool,
+    pub barrier_tol_factor: Number,
     /// `sigma_max` / `sigma_min` — clamp on the centering parameter σ
     /// chosen by `QualityFunctionMuOracle`. Only consumed when
     /// `mu_strategy=adaptive` and `mu_oracle=quality-function`.
@@ -232,6 +233,7 @@ impl Default for MuOptions {
             mu_linear_decrease_factor: 0.2,
             mu_superlinear_decrease_power: 1.5,
             mu_allow_fast_monotone_decrease: true,
+            barrier_tol_factor: 10.0,
             sigma_max: 1e2,
             sigma_min: 1e-6,
         }
@@ -352,6 +354,7 @@ impl AlgorithmBuilder {
                 m.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
                 m.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
                 m.mu_allow_fast_monotone_decrease = self.mu.mu_allow_fast_monotone_decrease;
+                m.barrier_tol_factor = self.mu.barrier_tol_factor;
                 m.compl_inf_tol = self.conv_check.compl_inf_tol;
                 Box::new(m)
             }
@@ -367,6 +370,7 @@ impl AlgorithmBuilder {
                 adaptive.mu_min = self.mu.mu_min;
                 adaptive.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
                 adaptive.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
+                adaptive.barrier_tol_factor = self.mu.barrier_tol_factor;
                 adaptive.sigma_min = self.mu.sigma_min;
                 adaptive.sigma_max = self.mu.sigma_max;
                 Box::new(adaptive)
