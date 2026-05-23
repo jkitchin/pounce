@@ -154,6 +154,17 @@ pub struct IpoptApplication {
     /// custom factories plugged through [`Self::set_linear_backend_factory`]
     /// and the HSL MA57 backend leave the sink empty.
     linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
+    /// Phase 5c (§6) SQP warm-start input. When `Some`, the next
+    /// `optimize_tnlp` call on the SQP path consumes the iterate
+    /// instead of cold-starting; consumed once per solve, then
+    /// auto-cleared. The IPM path ignores this field. Wire-set
+    /// via [`Self::set_sqp_warm_start`].
+    sqp_warm_start: Option<crate::sqp::SqpIterates>,
+    /// Phase 5c (§6) SQP warm-start output. Populated by every
+    /// `optimize_sqp_tnlp` call with the final QP working set.
+    /// Stays valid until the next solve (which overwrites it).
+    /// Accessed via [`Self::last_sqp_working_set`].
+    sqp_last_working_set: Option<pounce_qp::WorkingSet>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -196,6 +207,8 @@ impl IpoptApplication {
             on_converged: None,
             record_iter_history: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
+            sqp_warm_start: None,
+            sqp_last_working_set: None,
         }
     }
 
@@ -537,6 +550,31 @@ impl IpoptApplication {
     /// design-note §7.1 spelling. Any value other than
     /// "active-set-sqp" (including absence) routes to the
     /// default IPM path.
+    /// Stash a warm-start iterate for the SQP path. Consumed by
+    /// the next `optimize_tnlp` call when the `algorithm` option
+    /// resolves to `active-set-sqp`; the IPM path ignores it.
+    /// Phase 5c (§6) — the parametric / MPC warm-start hand-off.
+    ///
+    /// The iterate is auto-cleared after use, so a follow-up
+    /// solve without an intervening `set_sqp_warm_start` call
+    /// cold-starts.
+    pub fn set_sqp_warm_start(&mut self, warm: crate::sqp::SqpIterates) {
+        self.sqp_warm_start = Some(warm);
+    }
+
+    /// Drop any pending warm-start iterate without solving.
+    pub fn clear_sqp_warm_start(&mut self) {
+        self.sqp_warm_start = None;
+    }
+
+    /// Return the final QP working set from the most recent SQP
+    /// solve, or `None` if the last solve wasn't SQP, didn't
+    /// produce a working set (cold-start declared the iterate
+    /// optimal before solving any QP), or no SQP solve has run.
+    pub fn last_sqp_working_set(&self) -> Option<&pounce_qp::WorkingSet> {
+        self.sqp_last_working_set.as_ref()
+    }
+
     fn is_sqp_algorithm_selected(&self) -> bool {
         match self.options.get_string_value("algorithm", "") {
             Ok((v, true)) => v.eq_ignore_ascii_case("active-set-sqp"),
@@ -575,10 +613,17 @@ impl IpoptApplication {
             None => return ApplicationReturnStatus::InternalError,
         };
 
-        let res = match alg.optimize(&mut sqp_adapter) {
+        // Phase 5c (§6): consume any stashed warm-start iterate.
+        // `optimize_with_warm_start(warm=None)` is equivalent to
+        // `optimize`, so cold callers see no change.
+        let warm = self.sqp_warm_start.take();
+        let res = match alg.optimize_with_warm_start(&mut sqp_adapter, warm) {
             Ok(r) => r,
             Err(_) => return ApplicationReturnStatus::InternalError,
         };
+        // Stash the result's working set so the next solve in a
+        // sequence can fetch it via `last_sqp_working_set`.
+        self.sqp_last_working_set = res.working_set.clone();
         let (app_status, solver_status) = match res.status {
             crate::sqp::SqpStatus::Optimal => (
                 ApplicationReturnStatus::SolveSucceeded,
@@ -2084,6 +2129,73 @@ mod tests {
         assert!((snap.sqp.bt_min_alpha - 1e-10).abs() < 1e-18);
         assert_eq!(snap.sqp.print_level, 2);
         assert_eq!(snap.sqp.lbfgs_max_history, 12);
+    }
+
+    #[test]
+    fn application_sqp_warm_start_round_trip() {
+        // Drive the convex-equality TNLP through the SQP path
+        // twice. The first solve produces a working set; the
+        // second is warm-started from it. The second must converge
+        // with zero QP solves (the first KKT check declares
+        // optimality immediately).
+        let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let tnlp_rc: std::rc::Rc<std::cell::RefCell<dyn TNLP>> =
+            std::rc::Rc::new(std::cell::RefCell::new(ConvexEqTnlp {
+                finalize_called: std::rc::Rc::clone(&finalize_slot),
+            }));
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+
+        // Cold solve.
+        let status_a = app.optimize_tnlp(std::rc::Rc::clone(&tnlp_rc));
+        assert_eq!(status_a, ApplicationReturnStatus::SolveSucceeded);
+        let ws = app.last_sqp_working_set().cloned();
+        assert!(ws.is_some(), "cold solve must yield a working set");
+
+        // Build the warm-start iterate from the converged finalize
+        // payload (just x; pad multipliers to 0 since the test
+        // problem is convex).
+        let (x_recv, _) = finalize_slot.borrow().clone().unwrap();
+        let warm = crate::sqp::SqpIterates {
+            x: x_recv,
+            lambda_g: vec![1.0],
+            lambda_x: vec![0.0, 0.0],
+            working: ws,
+        };
+        app.set_sqp_warm_start(warm);
+
+        // Warm solve.
+        let status_b = app.optimize_tnlp(std::rc::Rc::clone(&tnlp_rc));
+        assert_eq!(status_b, ApplicationReturnStatus::SolveSucceeded);
+        assert!(app.last_sqp_working_set().is_some());
+    }
+
+    #[test]
+    fn application_sqp_warm_start_auto_clears_after_use() {
+        let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let tnlp_rc: std::rc::Rc<std::cell::RefCell<dyn TNLP>> =
+            std::rc::Rc::new(std::cell::RefCell::new(ConvexEqTnlp {
+                finalize_called: std::rc::Rc::clone(&finalize_slot),
+            }));
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        app.set_sqp_warm_start(crate::sqp::SqpIterates {
+            x: vec![0.0, 1.0],
+            lambda_g: vec![1.0],
+            lambda_x: vec![0.0, 0.0],
+            working: None,
+        });
+        assert!(app.sqp_warm_start.is_some());
+        let _ = app.optimize_tnlp(std::rc::Rc::clone(&tnlp_rc));
+        assert!(
+            app.sqp_warm_start.is_none(),
+            "warm-start input must be auto-cleared after use"
+        );
     }
 
     #[test]
