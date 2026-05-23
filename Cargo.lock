@@ -303,6 +303,7 @@ dependencies = [
  "pounce-algorithm",
  "pounce-common",
  "pounce-nlp",
+ "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",
 ]

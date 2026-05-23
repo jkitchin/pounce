@@ -304,6 +304,80 @@ ipnumber GetIpoptDualInf(IpoptProblem ipopt_problem);
 /** Final complementarity error from the most recent solve. */
 ipnumber GetIpoptComplInf(IpoptProblem ipopt_problem);
 
+/* -----------------------------------------------------------------
+ * Pounce extensions — active-set SQP working-set warm start
+ *
+ * Phase 5c (§7.2 of docs/research/active-set-sqp-warm-start.md).
+ * These functions are only meaningful when the `algorithm` option
+ * has been set to "active-set-sqp" via AddIpoptStrOption.
+ *
+ * Status enum values are stable across versions:
+ *   0 = Inactive,       1 = AtLower (active at lower bound),
+ *   2 = AtUpper,        3 = Fixed (variables) or Equality (constraints).
+ * ----------------------------------------------------------------- */
+
+typedef int IpoptBoundStatus;
+typedef int IpoptConsStatus;
+
+#define POUNCE_WS_INACTIVE     0
+#define POUNCE_WS_AT_LOWER     1
+#define POUNCE_WS_AT_UPPER     2
+#define POUNCE_WS_FIXED_OR_EQ  3
+
+/**
+ * Retrieve the QP working set produced by the most recent SQP solve.
+ * Pass NULL for either output buffer to skip that side; otherwise
+ * `bound_status_out` must hold at least `n` ints and
+ * `cons_status_out` at least `m` ints.
+ *
+ * Returns 1 (TRUE) on success, 0 (FALSE) when no working set is
+ * available — e.g. no SQP solve has been run, the IPM path was
+ * used, or the SQP solve converged at iter 0 (no QP solved).
+ */
+Bool IpoptGetWorkingSet(
+    IpoptProblem      ipopt_problem,
+    IpoptBoundStatus *bound_status_out,
+    IpoptConsStatus  *cons_status_out
+);
+
+/**
+ * Supply a warm-start working set consumed by the next IpoptSolve.
+ * `bound_status_in` must hold `n` valid status codes (or NULL to
+ * cold-start bounds); `cons_status_in` must hold `m` valid status
+ * codes (or NULL to cold-start constraints). Returns 1 on success,
+ * 0 on a NULL problem handle, an out-of-range status code, or
+ * both inputs NULL.
+ */
+Bool IpoptSetWarmStartWorkingSet(
+    IpoptProblem            ipopt_problem,
+    const IpoptBoundStatus *bound_status_in,
+    const IpoptConsStatus  *cons_status_in
+);
+
+/** Drop any pending warm-start working set without solving. */
+Bool IpoptClearWarmStartWorkingSet(IpoptProblem ipopt_problem);
+
+/**
+ * Convenience one-shot solve combining IpoptSetWarmStartWorkingSet,
+ * IpoptSolve, and IpoptGetWorkingSet. Any of the in/out buffers
+ * may be NULL to skip that side. Returns the
+ * ApplicationReturnStatus integer (same contract as IpoptSolve).
+ */
+enum ApplicationReturnStatus IpoptSolveWarmStart(
+    IpoptProblem            ipopt_problem,
+    ipnumber               *x,
+    ipnumber               *g,
+    ipnumber               *obj_val,
+    ipnumber               *mult_g,
+    ipnumber               *mult_x_L,
+    ipnumber               *mult_x_U,
+    const IpoptBoundStatus *bound_status_in,
+    const IpoptConsStatus  *cons_status_in,
+    IpoptBoundStatus       *bound_status_out,
+    IpoptConsStatus        *cons_status_out,
+    UserDataPtr             user_data
+);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
