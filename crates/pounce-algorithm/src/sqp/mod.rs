@@ -14,6 +14,7 @@
 //! The `InteriorPoint` choice (default) remains the
 //! `IpoptAlgorithm` path with no changes.
 
+pub mod ipopt_adapter;
 pub mod iterates;
 pub mod options;
 pub mod problem;
@@ -24,6 +25,7 @@ pub mod sqp_alg;
 #[cfg(test)]
 mod tests;
 
+pub use ipopt_adapter::IpoptNlpAdapter;
 pub use iterates::SqpIterates;
 pub use options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 pub use problem::SqpProblemSpec;

@@ -4,14 +4,20 @@
 //! enum. End-to-end optimize tests land in later commits.
 
 use crate::alg_builder::AlgorithmChoice;
+use crate::sqp::ipopt_adapter::IpoptNlpAdapter;
 use crate::sqp::iterates::SqpIterates;
 use crate::sqp::options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::SqpStatus;
 use crate::sqp::sqp_alg::SqpAlgorithm;
-use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_common::types::{Index, Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+use pounce_linalg::{Matrix, SymMatrix, Vector};
 use pounce_qp::{HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[test]
 fn algorithm_choice_default_is_interior_point() {
@@ -271,6 +277,170 @@ impl SqpProblemSpec for NonlinearEqNlp {
             vals: vec![diag, diag],
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Minimal `IpoptNlp` impl for the convex equality NLP. Exercises
+// the IpoptNlpAdapter end-to-end through SqpAlgorithm::optimize.
+//
+// Same problem as ConvexEqNlp above (closed-form x* = (0, 1),
+// λ_g = 1, obj = -1.5) but presented through the algorithm-side
+// IpoptNlp trait so the adapter path is fully exercised.
+// ─────────────────────────────────────────────────────────────────
+struct ConvexEqIpoptNlp {
+    x_l: DenseVector,
+    x_u: DenseVector,
+    d_l: DenseVector,
+    d_u: DenseVector,
+    jac_c_space: Rc<GenTMatrixSpace>,
+    jac_d_space: Rc<GenTMatrixSpace>,
+    hess_space: Rc<SymTMatrixSpace>,
+    px_space: Rc<GenTMatrixSpace>,
+    pd_space: Rc<GenTMatrixSpace>,
+}
+
+impl ConvexEqIpoptNlp {
+    fn new() -> Self {
+        let n_var = 2;
+        let x_space = DenseVectorSpace::new(n_var);
+        let d_space_inh = DenseVectorSpace::new(0);
+        let mut x_l = x_space.make_new_dense();
+        x_l.set_values(&[NLP_LOWER_BOUND_INF; 2]);
+        let mut x_u = x_space.make_new_dense();
+        x_u.set_values(&[NLP_UPPER_BOUND_INF; 2]);
+        let d_l = d_space_inh.make_new_dense();
+        let d_u = d_space_inh.make_new_dense();
+
+        // Jacobian of c (1 row × 2 cols, nnz = 2 at columns 1, 2).
+        let jac_c_space = GenTMatrixSpace::new(1, 2, vec![1, 1], vec![1, 2]);
+        // Empty jac_d (0 rows × 2 cols).
+        let jac_d_space = GenTMatrixSpace::new(0, 2, vec![], vec![]);
+        // Hessian (2 × 2 diag).
+        let hess_space = SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]);
+        // px_l, px_u, pd_l, pd_u — return dummy zero-sized matrices.
+        let px_space = GenTMatrixSpace::new(0, 2, vec![], vec![]);
+        let pd_space = GenTMatrixSpace::new(0, 0, vec![], vec![]);
+
+        Self {
+            x_l,
+            x_u,
+            d_l,
+            d_u,
+            jac_c_space,
+            jac_d_space,
+            hess_space,
+            px_space,
+            pd_space,
+        }
+    }
+}
+
+impl crate::ipopt_nlp::Nlp for ConvexEqIpoptNlp {
+    fn n(&self) -> Index {
+        2
+    }
+    fn m_eq(&self) -> Index {
+        1
+    }
+    fn m_ineq(&self) -> Index {
+        0
+    }
+
+    fn eval_f(&mut self, x: &dyn Vector) -> Number {
+        let dx = x.as_any().downcast_ref::<DenseVector>().unwrap();
+        let v = dx.expanded_values();
+        0.5 * (v[0] * v[0] + v[1] * v[1]) - v[0] - 2.0 * v[1]
+    }
+    fn eval_grad_f(&mut self, x: &dyn Vector, g: &mut dyn Vector) {
+        let dx = x.as_any().downcast_ref::<DenseVector>().unwrap();
+        let v = dx.expanded_values();
+        let dg = g.as_any_mut().downcast_mut::<DenseVector>().unwrap();
+        dg.set_values(&[v[0] - 1.0, v[1] - 2.0]);
+    }
+    fn eval_c(&mut self, x: &dyn Vector, c: &mut dyn Vector) {
+        let dx = x.as_any().downcast_ref::<DenseVector>().unwrap();
+        let v = dx.expanded_values();
+        let dc = c.as_any_mut().downcast_mut::<DenseVector>().unwrap();
+        dc.set_values(&[v[0] + v[1] - 1.0]);
+    }
+    fn eval_d(&mut self, _x: &dyn Vector, _d: &mut dyn Vector) {
+        // m_ineq = 0; no work.
+    }
+    fn eval_jac_c(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+        let mut jac = GenTMatrix::new(Rc::clone(&self.jac_c_space));
+        jac.set_values(&[1.0, 1.0]);
+        Rc::new(jac)
+    }
+    fn eval_jac_d(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+        Rc::new(GenTMatrix::new(Rc::clone(&self.jac_d_space)))
+    }
+    fn eval_h(
+        &mut self,
+        _x: &dyn Vector,
+        _obj_factor: Number,
+        _y_c: &dyn Vector,
+        _y_d: &dyn Vector,
+    ) -> Rc<dyn SymMatrix> {
+        let mut h = SymTMatrix::new(Rc::clone(&self.hess_space));
+        h.set_values(&[1.0, 1.0]);
+        Rc::new(h)
+    }
+}
+
+impl crate::ipopt_nlp::IpoptNlp for ConvexEqIpoptNlp {
+    fn x_l(&self) -> &dyn Vector {
+        &self.x_l
+    }
+    fn x_u(&self) -> &dyn Vector {
+        &self.x_u
+    }
+    fn d_l(&self) -> &dyn Vector {
+        &self.d_l
+    }
+    fn d_u(&self) -> &dyn Vector {
+        &self.d_u
+    }
+    fn px_l(&self) -> Rc<dyn Matrix> {
+        Rc::new(GenTMatrix::new(Rc::clone(&self.px_space)))
+    }
+    fn px_u(&self) -> Rc<dyn Matrix> {
+        Rc::new(GenTMatrix::new(Rc::clone(&self.px_space)))
+    }
+    fn pd_l(&self) -> Rc<dyn Matrix> {
+        Rc::new(GenTMatrix::new(Rc::clone(&self.pd_space)))
+    }
+    fn pd_u(&self) -> Rc<dyn Matrix> {
+        Rc::new(GenTMatrix::new(Rc::clone(&self.pd_space)))
+    }
+    fn get_starting_x(&mut self, x: &mut dyn Vector) -> bool {
+        let dx = x.as_any_mut().downcast_mut::<DenseVector>().unwrap();
+        dx.set_values(&[0.0, 0.0]);
+        true
+    }
+}
+
+#[test]
+fn sqp_via_ipopt_adapter_solves_convex_eq_nlp() {
+    let nlp: Rc<RefCell<dyn crate::ipopt_nlp::IpoptNlp>> =
+        Rc::new(RefCell::new(ConvexEqIpoptNlp::new()));
+    let mut adapter = IpoptNlpAdapter::new(nlp);
+
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg = SqpAlgorithm::new(qp_solver, SqpOptions::default());
+
+    let res = alg.optimize(&mut adapter).unwrap();
+    assert_eq!(res.status, SqpStatus::Optimal);
+    assert!((res.x[0] - 0.0).abs() < 1e-9, "x[0] = {}", res.x[0]);
+    assert!((res.x[1] - 1.0).abs() < 1e-9, "x[1] = {}", res.x[1]);
+    assert!(
+        (res.lambda_g[0] - 1.0).abs() < 1e-9,
+        "λ_g[0] = {}",
+        res.lambda_g[0]
+    );
+    assert!((res.obj - (-1.5)).abs() < 1e-9, "obj = {}", res.obj);
+    assert_eq!(res.n_iter, 1);
+    assert_eq!(res.n_qp_solves, 1);
 }
 
 #[test]
