@@ -6,6 +6,182 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches `1.0.0`. Pre-1.0 minor bumps may include breaking
 changes.
 
+
+## Unreleased
+
+### Added — Active-set SQP with working-set warm start (Phase 5b + 5c + 5d)
+
+A new sequential-quadratic-programming driver sits alongside the
+existing interior-point method, opt-in via a single option flip.
+Designed for **warm-started NLP sequences** (MPC, parametric
+continuation, homotopy sweeps), where the previous solve's active
+set is a strong starting point.
+
+**Tutorial:** `docs/tutorials/active-set-sqp.md`.
+**Python notebook:** `python/notebooks/06_sqp_parametric_continuation.ipynb`.
+**C example:** `crates/pounce-cinterface/examples/sqp_warm_start.c`.
+**GAMS example:** `gams/examples/parametric_sqp_warm_start.gms`.
+**Design note:** `docs/research/active-set-sqp-warm-start.md`.
+
+#### Algorithm selection (cross-cutting)
+
+- New top-level option `algorithm`, values `interior-point`
+  (default; existing IPM path) and `active-set-sqp` (new SQP driver).
+  Settable through every interface — `add_option` in Rust /
+  Python, `AddIpoptStrOption` in C, `pounce.opt` in GAMS — exactly
+  like `linear_solver` already is.
+
+#### SQP suboptions (`sqp_*` namespace)
+
+`sqp_globalization` (`filter` | `l1-elastic`),
+`sqp_hessian` (`exact` | `damped-bfgs` | `lbfgs`),
+`sqp_max_iter`, `sqp_tol`, `sqp_constr_viol_tol`,
+`sqp_dual_inf_tol`, `sqp_l1_penalty`, `sqp_l1_penalty_safety`,
+`sqp_l1_penalty_max`, `sqp_bt_reduction`, `sqp_bt_min_alpha`,
+`sqp_print_level`, `sqp_lbfgs_max_history`. Defaults mirror
+`SqpOptions::default()`. Each is "only consulted when `algorithm`
+is `active-set-sqp`"; the IPM path ignores them silently.
+
+#### Python — `pounce.Problem`
+
+New keyword argument and methods:
+
+```python
+prob.add_option("algorithm", "active-set-sqp")
+x, info = prob.solve(x0, working_set=ws)
+ws = info["working_set"]      # always present; None on the IPM path
+ws = prob.get_working_set()
+prob.set_working_set(ws)
+prob.clear_working_set()
+```
+
+The `working_set` value is a 2-tuple `(bounds, constraints)` of
+numpy int8 arrays with status codes 0..=3 (Inactive / AtLower /
+AtUpper / Fixed-or-Equality). Module-level helper
+`pounce.classify_working_set(x, x_l, x_u, g, g_l, g_u, lambda_g,
+z_l, z_u, m_eq, ...)` classifies an IPM-converged iterate
+into a WS suitable for `Problem.solve(working_set=…)`.
+
+#### C ABI — four new entry points
+
+```c
+Bool IpoptGetWorkingSet(IpoptProblem, IpoptBoundStatus*, IpoptConsStatus*);
+Bool IpoptSetWarmStartWorkingSet(IpoptProblem, const IpoptBoundStatus*, const IpoptConsStatus*);
+Bool IpoptClearWarmStartWorkingSet(IpoptProblem);
+enum ApplicationReturnStatus IpoptSolveWarmStart(
+    IpoptProblem, ipnumber *x, *g, *obj_val, *mult_g, *mult_x_L, *mult_x_U,
+    const IpoptBoundStatus *bound_in,
+    const IpoptConsStatus  *cons_in,
+    IpoptBoundStatus       *bound_out,
+    IpoptConsStatus        *cons_out,
+    UserDataPtr user_data);
+```
+
+Plus typedefs `IpoptBoundStatus`, `IpoptConsStatus` and the four
+status constants `POUNCE_WS_INACTIVE` (= 0), `POUNCE_WS_AT_LOWER`
+(= 1), `POUNCE_WS_AT_UPPER` (= 2), `POUNCE_WS_FIXED_OR_EQ` (= 3).
+**No existing C entry-point signature changed** — cyipopt / JuMP /
+AMPL clients link unchanged.
+
+#### GAMS solver link
+
+Two mechanisms ship in tandem:
+
+- **§7.4(a) marginal-based reconstruction** (default, no
+  configuration). The solver link reads variable and equation
+  marginals (`x.m`, `con.m`) at the top of every `pouCallSolver`
+  invocation and reconstructs the SQP working set automatically.
+  Lossy at degenerate active sets — same idiom as CONOPT, IPOPT,
+  KNITRO under GAMS.
+- **§7.4(b) persistent state file** (opt-in via
+  `sqp_state_file <path>` in `pounce.opt`). A small binary blob
+  with FNV-1a checksum keyed by `(n, m, x_l, x_u, g_l, g_u)` so
+  structural changes invalidate cleanly. Falls back to §7.4(a) on
+  any read failure.
+
+#### Sensitivity (`pounce-sensitivity`)
+
+`SensResult` now carries the converged user-space multipliers
+(`mult_g`, `mult_x_L`, `mult_x_U`) and constraint values (`g`),
+so the parametric "predictor + SQP corrector" pattern is a single
+`SensSolve::run` followed by one `classify_working_set` call.
+
+#### Hessian sources
+
+The `sqp_hessian` option selects between three implementations:
+
+- `exact` — uses `eval_h`; pounce-qp's inertia control handles
+  indefiniteness via diagonal-shift retry (§4.5).
+- `damped-bfgs` — Powell-damped rank-2 BFGS, dense `n×n`,
+  guaranteed PSD (Powell 1978).
+- `lbfgs` — limited-memory BFGS with circular history, default
+  6 pairs (matches IPOPT's `limited_memory_max_history`),
+  materialized to dense Triplet at QP-solve time.
+
+#### Globalizations
+
+`sqp_globalization` selects the SQP outer-loop step-acceptance
+test:
+
+- `filter` (default) — Fletcher-Leyffer 2002 Pareto-frontier
+  filter on `(constraint violation, objective)`. No penalty
+  parameter; recommended general default.
+- `l1-elastic` — Han-Powell merit `φ(x; ν) = f(x) + ν · violation(x)`
+  with adaptive ν clamped by `sqp_l1_penalty_safety` /
+  `sqp_l1_penalty_max`. SNOPT-style behaviour.
+
+### Added — Phase 5a `pounce-qp` crate
+
+Standalone sparse parametric active-set QP solver. Drives the
+SQP subproblem solves; also exposed as a standalone crate
+(`pounce_qp::ParametricActiveSetSolver`). Implements
+Gill-Murray-Saunders elastic mode (§4.3), full GMSW EXPAND
+anti-cycling (§4.4), Bunch-Kaufman inertia control via
+diagonal-shift retry (§4.5), iterative refinement (§4.7), and
+Sherman-Morrison-Woodbury Schur-complement factor updates (§4.2,
+opt-in via `QpOptions::use_schur_updates`).
+
+### Added — In-repo regression fixtures
+
+- `crates/pounce-algorithm/tests/hock_schittkowski_subset.rs` —
+  10 HS problems with published closed-form optima.
+- `crates/pounce-qp/tests/mm_published_optima.rs` —
+  Maros-Mészáros-flavoured framework with 5 fixtures + reusable
+  `compare_qps_to_published(text, x*, f*, …)` helper.
+- `crates/pounce-algorithm/tests/parametric_sqp_corrector.rs` —
+  IPM → classify_working_set → SQP corrector end-to-end.
+- `crates/pounce-algorithm/tests/sqp_filter_vs_l1_elastic.rs` —
+  parity between the two globalizations.
+
+### Changed
+
+- `pounce-qp::ParametricActiveSetSolver::solve_equality_plus_bounds`
+  now falls through to `solve_elastic` when the equality-relaxed
+  cold start violates a variable bound. Previously returned
+  `UnsupportedFeature`.
+- `optimize_sqp_tnlp` now populates `SolveStatistics`
+  (`iteration_count`, `final_dual_inf`, `final_constr_viol`,
+  `final_objective`) so `GetIpoptIterCount`, `info["iter_count"]`,
+  etc. report SQP-side numbers on the SQP path.
+
+### Fixed
+
+- SQP `check_kkt` stationarity formula: was `∇f + Jᵀ λ_g + λ_x`,
+  must be `∇f + Jᵀ λ_g − λ_x` (pounce-qp packs
+  `λ_x = z_l − z_u = −λ_sat`). Latent — only triggered by problems
+  with an active variable bound. Discovered on a 3-D simplex
+  projection.
+
+### Compatibility
+
+- All existing IPM users (`IpoptSolve`, `Problem.solve(x0=…)`,
+  `option nlp = pounce` without `algorithm` set) continue to
+  behave identically. Every Phase 5 addition is opt-in.
+- The C ABI is strictly additive — four new symbols, no signature
+  changes.
+- The Python `Problem.solve` signature gained one optional kwarg
+  (`working_set=None`); positional callers are unaffected.
+
 ## [0.2.0] — 2026-05-25
 
 First tagged release. The `0.1.0` work-in-progress version was never
