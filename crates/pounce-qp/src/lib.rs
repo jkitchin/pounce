@@ -35,6 +35,7 @@ pub mod kkt;
 pub mod options;
 pub mod problem;
 pub mod qps;
+pub mod schur;
 pub mod solver;
 pub mod working_set;
 
