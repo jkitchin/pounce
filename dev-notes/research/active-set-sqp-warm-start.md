@@ -713,52 +713,245 @@ session.
 
 ## 8. Test harness
 
-### 8.1 QP-level testing (Phase 5a)
+The harness is layered: cheap analytical smoke tests on every commit,
+fixed reference problems on every PR, scaling sweeps weekly, full
+regression suite on phase-gate. Each layer below names *specific*
+problems, *specific* size parameters where applicable, and *specific*
+reference numbers from published literature so a regression is
+detectable rather than handwaved.
 
-- **Maros-Mészáros QP test set** (138 problems, the canonical sparse
-  convex-and-indefinite QP benchmark). Format: `.qps` (a QP-extended
-  MPS). New reader in `pounce-qp/src/maros.rs`; the format is
-  closely related to the MPS reader already needed by pounce-cli for
-  CUTEst, so most code is shared.
-- **Reference oracle:** **qpOASES** for dense problems (Ferreau 2014;
-  exposes a C API we can FFI), **OSQP** for sparse convex problems
-  (Stellato 2020; widely available, sparse, Python bindings).
-  Tolerance: 1e-6 relative on objective, 1e-7 on KKT residual.
-- **Synthetic warm-start sequence:**
-  - 50 QPs from a randomized MPC quadrotor model (Frison-Diehl
-    2020 §6 spec, n=20, m=40, horizon=20).
-  - 50 QPs from a parametric Wachter-Biegler test (Wachter-Biegler
-    2006 problem set §5, perturbation of bounds).
-  - **Exit criterion:** ≥3× iteration-count reduction vs cold,
-    matching the qpOASES paper's reported speedup (Ferreau 2014
-    Tab. 3-4 reports 5–50× on similar MPC sequences).
+### 8.0 Analytical correctness ladder — CI smoke tests
 
-### 8.2 NLP-level testing (Phase 5b–5c)
+Closed-form problems with hand-computable answers. Run on every
+`cargo test`. Each catches a distinct class of bug in hour 1, not
+week 3. These are the unit-level equivalent of pounce-feral's
+"factor a 3×3" smoke tests.
 
-- **CUTEst small/medium NLP subset** (the existing pounce CUTEst
-  benchmark harness in `benchmarks/cutest/`). Compare iteration
-  counts and timing against filterSQP and SNOPT (published numbers
-  in Wachter-Biegler 2006 Tab. 5).
-- **Warm-start regression suite:**
-  - **MPC:** quadrotor / autonomous-vehicle test sequences from
-    `acados` example set (Verschueren et al. 2022). 100-step
-    closed-loop.
-  - **Parametric:** the Wachter-Biegler 2006 §5 parametric NLP
-    sequence.
-  - **MINLP:** the `minlplib` instances tagged "QP relaxation
-    sequence" (Bussieck et al. 2003).
+| # | Problem | Closed form | What it catches |
+|---|---|---|---|
+| 1 | Unconstrained QP, `H=I`, arbitrary `g` | `x* = −g`, one Newton step | KKT sign convention, gradient assembly |
+| 2 | Equality-only QP: `min ½xᵀHx + gᵀx` s.t. `Ax = b`, with `H`, `A` full rank | `[x*; λ*] = [H Aᵀ; A 0]⁻¹ [−g; b]` (one linear solve) | KKT factor block layout, multiplier sign |
+| 3 | Separable box-constrained QP: `H = diag(h)`, `xl ≤ x ≤ xu`, no general constraints | `x*_i = clip(−gᵢ/hᵢ, xlᵢ, xuᵢ)` per coordinate | Bound-multiplier sign, working-set add/drop |
+| 4 | Strictly convex QP with one redundant constraint | Same as without redundant; redundant row stays inactive | Degeneracy detection, EXPAND triggering |
+| 5 | Infeasible QP (`xl > xu` on one coord) | Elastic mode returns minimal-infeas point | §4.3 phase-1 elastic detection |
+| 6 | Indefinite Hessian, single equality, reduced Hessian PD | Solvable; reduced-Hessian inertia OK | §4.5 inertia-control trigger |
 
-Each test suite committed alongside the phase it gates.
+Implemented as `#[test]` functions in `pounce-qp/src/tests/analytical.rs`.
+Total runtime budget: < 50 ms across all six. **Exit:** all six pass
+to 1e-12 relative.
 
-### 8.3 Unit tests
+### 8.1 QP correctness — fixed reference set (Phase 5a, PR-level)
+
+- **Maros-Mészáros QP test set** (Maros-Mészáros 1999): 138 problems,
+  sizes `n ∈ [2, 12955]`. Format: `.qps` (QP-extended MPS); new
+  reader in `pounce-qp/src/maros.rs`, sharing infrastructure with
+  pounce-cli's MPS handling.
+- **Reference oracle:**
+  - **qpOASES** (Ferreau 2014) for dense problems — exposes a C API
+    we FFI.
+  - **OSQP** (Stellato 2020) for sparse convex problems — widely
+    available, sparse, Python bindings.
+  - **CPLEX/Gurobi via Python** as tiebreaker on indefinite cases
+    where qpOASES and OSQP disagree.
+- **Tolerance:** 1e-6 relative objective, 1e-7 KKT residual.
+- **Exit:** ≥ 95 % of Maros-Mészáros pass within tolerance. The
+  remaining ≤ 5 % are documented as "known indefinite hard" with the
+  per-problem reason. qpOASES itself reports ~97 % pass on its
+  reference table (Ferreau 2014 Tab. 2), so 95 % is the floor.
+
+### 8.2 QP scaling sweep — system size dependence (Phase 5a, weekly)
+
+The deliverable here is a plot — iteration count and wall time vs
+`n` — and a published reference curve to compare against. Three
+families, each with a single size axis:
+
+**(a) LASSO QP** (the canonical OSQP benchmark; Stellato 2020 Tab. 4).
+Formulation `min ½‖Ax − b‖² + λ‖x‖₁`, reformulated as a sparse QP of
+dimension `2n` with `2n` inequality constraints. Sweep
+`n ∈ {10², 10³, 10⁴, 10⁵}` with fixed sparsity 5 %.
+- **Reference:** OSQP paper Tab. 4 reports per-solve time
+  ~0.01s / 0.1s / 1s / 12s respectively on a 2.6 GHz Xeon.
+- **Exit:** within 3× of OSQP at every size; ideally within 2× by
+  Phase 5a end. (Active-set is slower than ADMM on cold convex
+  LASSO; the warm-start sequence in §8.4 reverses that.)
+
+**(b) MPC quadrotor scaling** (Frison-Diehl HPIPM 2020 §5; the
+acados reference). Linear-quadratic MPC with state dim 12, horizon
+`h ∈ {10, 20, 40, 80, 160}`. Sweep yields `n = 12·h, m = 12·h` sparse
+QPs with block-banded structure.
+- **Reference:** HPIPM paper reports ~0.1 ms / 0.4 ms / 1.6 ms /
+  6.4 ms / 25.6 ms cold solve (linear in `h`, as the block factor
+  is `O(h)`).
+- **Exit:** linear scaling in `h` (i.e., not super-linear) within
+  10× HPIPM at every horizon.
+
+**(c) Maros-Mészáros size buckets.** Same problems as §8.1, sliced by
+size. Bucket boundaries `n ∈ [1, 10²) ∪ [10², 10³) ∪ [10³, 10⁴) ∪
+[10⁴, ∞)`. Solve time per bucket reported as median + p95.
+- **Reference:** qpOASES reports total time for the full set; per-
+  bucket numbers are computed once during Phase 5a and committed as
+  `pounce-qp/benches/maros_baseline.json`. Regression alert if
+  median doubles or p95 quadruples between commits.
+
+### 8.3 NLP correctness — fixed reference set (Phase 5b)
+
+- **Hock-Schittkowski test set** (HS001-HS119; Hock-Schittkowski 1981).
+  The SQP-community gold standard. Tiny problems (`n ≤ 30` mostly)
+  with documented solutions. Every SQP paper reports HS results;
+  filterSQP (Fletcher-Leyffer) and SNOPT (Gill-Murray-Saunders) both
+  publish per-problem iteration tables.
+  - **Source:** the CUTEst harness already contains all HS problems
+    (`benchmarks/cutest/problem_list.txt` includes `HS001`–`HS119`).
+  - **Exit:** ≥ 117 of 119 converge; the two allowed failures are
+    `HS013` and `HS099` which most SQP solvers also fail (Wächter
+    2002 Tab. 6.1).
+- **CUTEst small NLP subset** (`n < 1000`, the default
+  `problem_list.txt` minus large-scale entries — roughly 500
+  problems).
+  - **Reference numbers:** Wächter-Biegler 2006 Tab. 5 and Fletcher-
+    Leyffer 1999 Tab. 6 publish per-problem iteration counts for
+    IPM and filter-SQP on CUTEst.
+  - **Exit:** total iteration count within 30 % of the median of
+    {filterSQP, SNOPT, IPOPT} published numbers; success rate ≥ 90 %.
+
+### 8.4 NLP scaling sweep — system size dependence (Phase 5b, monthly)
+
+Two families giving a single size axis to test scaling claims:
+
+**(a) AC OPF — pglib-OPF** (Babaeinejadsarookolaee 2019). Standard
+power-grid benchmark, scales 14 → 30000 buses. Pounce's CUTEst list
+already has `ACOPP14`, `ACOPP30`, `ACOPR14`, `ACOPR30`; extending to
+the full pglib-OPF set (14, 30, 57, 118, 200, 300, 1354, 2853, 9241,
+13659, 30000 buses) gives a clean two-order-of-magnitude sweep with
+real-world structure (sparse Jacobian, near-degenerate binding
+limits — exactly what active-set should be measured on).
+- **Reference:** the MATPOWER project publishes IPOPT solve times
+  for pglib-OPF on each instance; PowerModels.jl benchmarks
+  filterSQP and KNITRO on the same set.
+- **Exit:** ≤ 2× IPOPT time at every bus count for cold solve. The
+  warm-start advantage shows up in §8.5(a).
+
+**(b) Poisson boundary optimal control** (Biegler 2010, *Nonlinear
+Programming*, §11.3). PDE-constrained NLP: minimize tracking-cost
+on `u` subject to `−Δu = f + Bv` on `[0,1]² with` boundary-control
+`v`. Standard reference NLP scaling family. Mesh sweep
+`grid = 16 × 16, 64 × 64, 256 × 256, 1024 × 1024` gives
+`n ∈ {256, 4096, 65536, 10⁶}` with smooth, well-characterized
+continuous solution.
+- **Reference:** Biegler 2010 Ch. 11 publishes IPOPT iter counts for
+  exactly this family at each mesh.
+- **Exit:** mesh-independent iteration count (≤ 30 outer iters at
+  every mesh, as the continuous problem is well-posed).
+
+### 8.5 Warm-start sweep — the actual deliverable (Phase 5c)
+
+The headline result. A perturbation-magnitude axis × cold/warm
+comparison for each warm-start workload. Plotted as iteration count
+and active-set-change count vs perturbation size.
+
+**(a) MPC closed-loop with horizon shift.** Quadrotor or autonomous-
+vehicle model (acados examples; Verschueren 2022). 200-step
+closed-loop simulation. At each step, the NLP is the horizon-shifted
+neighbor of the previous; the warm-start carries the working set
+shifted by one stage.
+- **Metrics:**
+  - Mean SQP iterations per step (cold vs warm).
+  - Mean QP-subproblem active-set changes per SQP iteration (cold
+    vs warm).
+  - 99th-percentile per-step wall time (worst case for real-time
+    deployment).
+- **Reference:** qpOASES paper (Ferreau 2014 Tab. 3-4) reports
+  5–50× iteration speedup on closed-loop MPC; acados paper
+  (Verschueren 2022 Tab. 2) reports per-step times for HPIPM and
+  qpOASES. Beat HPIPM-warm-start on worst-case latency — that's the
+  whole point.
+- **Exit:** ≥ 5× iteration speedup, ≤ 3 active-set changes per
+  step in the steady-state regime.
+
+**(b) Parametric continuation.** Trace the solution of a parametric
+NLP `min f(x;t) s.t. g(x;t) ≤ 0` as `t` sweeps `[0, 1]` in 100
+steps. Use the Beltistos parametric NLP benchmark (Pirnay-López-
+Negrete-Wächter 2012) or a Wächter-Biegler 2006 §5 instance.
+- **Metrics:** total iterations across the full path; size of
+  largest discontinuous active-set jump.
+- **Reference:** the `pounce-sensitivity` (sIPOPT port) already has
+  a baseline number for IPM-warm-start on the same path. Beat it.
+- **Exit:** ≥ 3× total-iteration speedup over IPM-warm-start.
+
+**(c) MINLP B&B trace.** Record bound changes from a small MINLP
+B&B run (one of the `minlplib` instances with documented bound-
+tightening trace; Bussieck 2003). Replay the bound sequence,
+warm-starting each child from its parent.
+- **Metrics:** total iterations across the B&B trace.
+- **Reference:** the `minlplib` instances have published Bonmin
+  baselines; Bonmin uses IPOPT-warm-start internally.
+- **Exit:** ≥ 2× speedup vs Bonmin.
+
+**(d) Perturbation-size sweep.** A *synthetic* perturbation axis on a
+fixed problem: start from a solved QP, perturb (i) one bound by ε
+∈ {1e-6, 1e-3, 1e-1, 1}, (ii) ε of all bounds, (iii) drop one
+constraint, (iv) add one constraint. Plot iter count vs perturbation
+magnitude on log-x; the curve characterizes the "warm-start cliff"
+where active-set adaptation cost crosses cold-start cost.
+- **Reference:** no published baseline; this curve becomes
+  pounce-qp's own published characterization. It's what tells
+  prospective users when warm-start helps.
+- **Exit:** monotone in perturbation magnitude; sub-linear up to
+  10 % bound change.
+
+### 8.6 Cross-phase comparison — the headline plot
+
+One plot per benchmark family: iter count *and* wall time vs `n`, with
+four curves on each panel:
+
+- SQP cold
+- SQP warm (with prior solve at the same `n`)
+- IPM cold (pounce-default)
+- IPM warm (pounce-default + warm_start_init_point=yes)
+
+This is the deliverable that justifies the whole Phase-5 effort. The
+expected story: cold curves IPM ≤ SQP; warm curves SQP ≪ IPM at all
+sizes. Two-line summary in the eventual paper / README.
+
+Committed in `benchmarks/sqp_scaling/` alongside Phase 5c.
+
+### 8.7 Unit tests — per-module
 
 For each module in `pounce-qp/src/`:
-- **`schur.rs`:** Hadamard update validated against full refactor.
-- **`expand.rs`:** anti-cycling on Beale's cycling LP example.
-- **`elastic.rs`:** feasibility detection on infeasible Maros-
-  Mészáros subset.
-- **`working_set.rs`:** add/drop sequences validated against full
-  KKT solves.
+
+- **`factor.rs`** (sparse LDLᵀ wrapper): roundtrip factor-then-solve
+  on the 6 analytical-ladder problems.
+- **`schur.rs`** (Schur-complement updates): each rank-1 update
+  validated against a full refactor of the equivalent KKT matrix,
+  Frobenius-norm diff < 1e-10.
+- **`expand.rs`**: anti-cycling verified on Beale's cycling LP
+  example (Beale 1955), Hoffman's cycling LP (Hoffman 1953), and
+  Maros 1996 §4.2 degenerate QP.
+- **`elastic.rs`**: feasibility detection on the infeasible subset of
+  Maros-Mészáros (problems `QPCBOEI2`, `QSCAGR25`, `QSCFXM1` —
+  documented infeasible).
+- **`working_set.rs`**: random add/drop sequence (50 ops on a
+  random working set), validated against ground-truth full KKT
+  solves.
+- **`homotopy.rs`**: parametric trace from QP₀ to QP₁ with identical
+  optimal active set; verify zero working-set changes (the warm-
+  start sweet spot).
+- **`inertia.rs`**: indefinite-Hessian QP with reduced Hessian PD;
+  verify §4.5 path produces a stationary point.
+
+Total unit-test runtime budget: < 5 s; runs on every `cargo test`.
+
+### 8.8 Phase-gate matrix
+
+| Phase | Required passing |
+|---|---|
+| 5a (QP standalone) | §8.0 + §8.1 + §8.2 + §8.7 |
+| 5b (cold SQP NLP) | All 5a + §8.3 + §8.4 |
+| 5c (warm SQP) | All 5b + §8.5 + §8.6 |
+| 5d (l1-elastic opt) | All 5c + side-by-side §8.5 comparison filter vs l1-elastic |
+
+A phase is *not* declared shipped until every cell in its row passes
+the named exit criterion.
 
 ## 9. Per-workload notes
 
@@ -934,14 +1127,38 @@ are scope and policy:
 
 ### Test harness and benchmarks
 
+- Hock, Schittkowski, *Test Examples for Nonlinear Programming
+  Codes*, Lecture Notes in Economics and Mathematical Systems **187**
+  (Springer 1981) — the HS001–HS119 reference set used in §8.3.
 - Maros, Mészáros (1999), *Optim. Methods Softw.* **11/12** —
   Maros-Mészáros QP test set.
+- Maros (1996), *Computational Techniques of the Simplex Method*,
+  Springer — degenerate-QP cycling examples used in §8.7.
+- Beale (1955), "Cycling in the dual simplex algorithm", *Naval Res.
+  Logistics Quart.* **2** — cycling LP smoke-test instance.
+- Hoffman (1953), "Cycling in the simplex algorithm", National
+  Bureau of Standards Report 2974 — second cycling smoke-test.
+- Stellato, Banjac, Goulart, Bemporad, Boyd (2020), *Math. Prog.
+  Comp.* **12** — LASSO scaling reference numbers in §8.2(a).
+- Frison, Diehl (2020), "HPIPM: a high-performance quadratic
+  programming framework for model predictive control", *IFAC-
+  PapersOnLine* **53** — MPC scaling reference numbers in §8.2(b).
+- Babaeinejadsarookolaee et al. (2019), "The power grid library for
+  benchmarking AC optimal power flow algorithms", arXiv:1908.02788
+  — pglib-OPF used in §8.4(a).
+- Biegler, *Nonlinear Programming: Concepts, Algorithms, and
+  Applications to Chemical Processes*, SIAM (2010), §11.3 — Poisson
+  optimal-control scaling family used in §8.4(b).
 - Verschueren et al. (2022), *Math. Prog. Comp.* **14** — `acados`
-  MPC benchmark suite.
-- Bussieck, Drud, Meeraus (2003), *INFORMS J. Comp.* **15** —
-  MINLPLib.
+  MPC benchmark suite used in §8.5(a).
 - Pirnay, López-Negrete, Wächter (2012), *Math. Prog. Comp.* **4** —
-  warm-start within IPM (comparison baseline).
+  Beltistos parametric NLP and IPM warm-start comparison baseline
+  used in §8.5(b).
+- Bussieck, Drud, Meeraus (2003), *INFORMS J. Comp.* **15** —
+  MINLPLib instances used in §8.5(c).
+- Wächter (2002), *An Interior Point Algorithm for Large-Scale
+  Nonlinear Optimization with Inexact Step Computations*, PhD
+  thesis, CMU — HS failure documentation referenced in §8.3.
 
 ### Roadmap context
 
