@@ -360,12 +360,9 @@ impl ParametricActiveSetSolver {
     /// equality-relaxed KKT (ignoring bounds) and routes to the
     /// active-set inner loop when that solution is bound-feasible.
     ///
-    /// Bound-infeasible equality solutions are rejected with
-    /// [`QpError::UnsupportedFeature`] — recovering from that case
-    /// requires the §4.3 phase-1 elastic mode, which lands in the
-    /// next Phase 5a commit. Once it does, the elastic mode will
-    /// replace the rejection branch and produce a bound-and-
-    /// equality-feasible starting point.
+    /// Bound-infeasible equality solutions fall through to
+    /// [`Self::solve_elastic`] — the same §4.3 phase-1 recovery
+    /// `solve_general` uses via `cold_general_initial`.
     ///
     /// In the inner loop the equality rows live permanently in the
     /// working set (`ConsStatus::Equality`) and are never dropped;

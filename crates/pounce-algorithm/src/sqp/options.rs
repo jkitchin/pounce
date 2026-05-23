@@ -19,11 +19,12 @@ pub enum SqpGlobalization {
 ///
 /// - `Exact`: use `nlp.eval_h(x, 1.0, λ_g, 0)` directly. Indefinite
 ///   on nonconvex problems; the QP subproblem solver handles
-///   indefinite reduced Hessian via inertia control.
-/// - `DampedBfgs`: Powell-damped full BFGS, guaranteed PSD.
-///   Phase 5b.1 deliverable.
-/// - `Lbfgs`: limited-memory BFGS, reuses the existing
-///   `pounce-algorithm` L-BFGS implementation. Phase 5b.1.
+///   indefinite reduced Hessian via inertia control (§4.5).
+/// - `DampedBfgs`: dense `n×n` Powell-damped BFGS, guaranteed PSD
+///   (Powell 1978). See [`crate::sqp::bfgs::DampedBfgs`].
+/// - `Lbfgs`: limited-memory BFGS with a circular `(s, y)` buffer
+///   of `lbfgs_max_history` pairs (Nocedal-Wright §7.2; Byrd-
+///   Nocedal-Schnabel 1994). See [`crate::sqp::lbfgs::LBfgs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SqpHessianSource {
     #[default]

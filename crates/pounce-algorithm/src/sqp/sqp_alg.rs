@@ -1,8 +1,6 @@
 //! `SqpAlgorithm` — active-set SQP outer loop. Consumes an
 //! `SqpProblemSpec` for evaluation; delegates the QP subproblem
-//! solve to `pounce_qp::ParametricActiveSetSolver`. Globalization
-//! is full-step in commit 3; the filter line search lands in
-//! commit 5.
+//! solve to `pounce_qp::ParametricActiveSetSolver`.
 //!
 //! Outer loop (Nocedal-Wright §18 standard SQP):
 //! 1. Evaluate `f, ∇f, c, ∇c, ∇²L` at `x_k`.
@@ -11,9 +9,12 @@
 //!    `WorkingSet` when available).
 //! 4. KKT-error check on `x_k` (before stepping) — if all
 //!    component tolerances are met, declare optimal.
-//! 5. Take the QP step `p`; promote `(x_k + p, λ_g_qp, λ_x_qp)`
-//!    to the next iterate.
-//! 6. Carry the QP's `WorkingSet` forward for warm-start.
+//! 5. Globalization step acceptance via either the Fletcher-
+//!    Leyffer 2002 filter (`SqpGlobalization::Filter`, default)
+//!    or the Han-Powell l1-merit (`SqpGlobalization::L1Elastic`),
+//!    both backtracking on α.
+//! 6. Take `α·p`; promote `(x_k + α p, λ_g, λ_x)` to the next
+//!    iterate and carry the QP's `WorkingSet` for the next solve.
 
 use crate::sqp::bfgs::DampedBfgs;
 use crate::sqp::filter::{filter_line_search, SqpFilter};

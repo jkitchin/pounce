@@ -6,10 +6,11 @@
 //! evaluation surface — just what `SqpAlgorithm::optimize` calls
 //! per iteration.
 //!
-//! An adapter from `IpoptNlp` to `SqpProblemSpec` lands in a
-//! later commit so the same benchmarks (CUTEst, `.nl` files,
-//! `pounce-py`) can drive both algorithm paths via the
-//! `AlgorithmChoice` dispatch in `alg_builder`.
+//! The adapter from `IpoptNlp` to `SqpProblemSpec` lives in
+//! [`crate::sqp::ipopt_adapter::IpoptNlpAdapter`], so the same
+//! benchmarks (CUTEst, `.nl` files, `pounce-py`) drive both
+//! algorithm paths via the `AlgorithmChoice` dispatch in
+//! `alg_builder`.
 
 use crate::sqp::qp_assembly::Triplet;
 use pounce_common::Number;
