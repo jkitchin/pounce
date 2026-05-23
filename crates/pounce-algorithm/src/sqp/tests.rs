@@ -626,6 +626,50 @@ fn sqp_warm_start_skips_qp_solve_when_already_optimal() {
 }
 
 #[test]
+fn classify_working_set_reproduces_sqp_solver_output_on_convex_eq() {
+    // Run a cold SQP solve, then ask `classify_working_set` to
+    // reconstruct the active set from the converged primal/dual
+    // and bounds. The classifier output must match the QP
+    // solver's working set entry-by-entry — the cross-check that
+    // the IPM→SQP-corrector handoff produces the right WS.
+    use crate::sqp::classify_working_set;
+
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg = SqpAlgorithm::new(qp_solver, SqpOptions::default());
+    let mut nlp = ConvexEqNlp;
+    let res = alg.optimize(&mut nlp).unwrap();
+    assert_eq!(res.status, SqpStatus::Optimal);
+
+    // Use the SqpProblemSpec to fetch bounds + final g(x*).
+    let (xl, xu) = nlp.variable_bounds();
+    let (bl_c, bu_c) = nlp.constraint_bounds();
+    let g_final = nlp.eval_c(&res.x);
+
+    // `lambda_g` is m_eq + m_ineq stacked; for this fixture
+    // m_eq = m, m_ineq = 0, so all rows are equalities.
+    let ws_classified = classify_working_set(
+        &res.lambda_x,
+        &res.lambda_g,
+        nlp.m(),
+        &res.x,
+        &xl,
+        &xu,
+        &g_final,
+        &bl_c,
+        &bu_c,
+        1e-8,
+        1e-6,
+    );
+    let ws_solver = res.working_set.as_ref().unwrap();
+    // For this fixture both must classify the single equality
+    // row as Equality and both variables as Inactive (no finite
+    // bounds).
+    assert_eq!(ws_classified.bounds, ws_solver.bounds);
+    assert_eq!(ws_classified.constraints, ws_solver.constraints);
+}
+
+#[test]
 fn sqp_warm_start_rejects_wrong_dimension() {
     let qp_solver =
         ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));

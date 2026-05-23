@@ -2,6 +2,41 @@
 //! that don't want to write the [`set_on_converged`] callback +
 //! [`PdSensBacksolver`] + [`IndexSchurData`] plumbing by hand.
 //!
+//! ## Parametric continuation with the SQP corrector
+//!
+//! For parametric NLP sweeps the Phase 5c playbook is:
+//!
+//! 1. Solve the base problem `min f(x; p₀)` with the IPM. Capture
+//!    the converged primal `x*`, constraint multipliers `λ_g`, and
+//!    bound multipliers `z_l`, `z_u` via the user TNLP's
+//!    `finalize_solution`.
+//! 2. Run `SensSolve::with_deltas(Δp)` to get the linear predictor
+//!    `Δx ≈ ∂x*/∂p · Δp`.
+//! 3. Update the parameter inside the TNLP and construct the
+//!    SQP warm-start iterate:
+//!    ```ignore
+//!    use pounce_algorithm::sqp::{classify_working_set, SqpIterates};
+//!    let lambda_x: Vec<f64> = z_l.iter().zip(z_u.iter())
+//!        .map(|(l, u)| l - u).collect();
+//!    let ws = classify_working_set(
+//!        &lambda_x, &lambda_g, m_eq,
+//!        &x_predicted, &x_l, &x_u,
+//!        &g_at_predicted, &g_l, &g_u,
+//!        1e-8, 1e-6,
+//!    );
+//!    app.set_sqp_warm_start(SqpIterates {
+//!        x: x_predicted,
+//!        lambda_g,
+//!        lambda_x,
+//!        working: Some(ws),
+//!    });
+//!    app.options_mut().set_string_value("algorithm", "active-set-sqp", true, false)?;
+//!    let status = app.optimize_tnlp(tnlp);  // SQP corrector
+//!    ```
+//! 4. The SQP corrector polishes the predictor to first-order KKT
+//!    at the new parameter, typically in 0–3 outer iterations
+//!    with the warm-started working set.
+//!
 //! [`set_on_converged`]: pounce_algorithm::IpoptApplication::set_on_converged
 //! [`PdSensBacksolver`]: crate::PdSensBacksolver
 //! [`IndexSchurData`]: crate::IndexSchurData

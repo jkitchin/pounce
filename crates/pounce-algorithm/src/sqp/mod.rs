@@ -25,6 +25,7 @@ pub mod problem;
 pub mod qp_assembly;
 pub mod result;
 pub mod sqp_alg;
+pub mod warm_start;
 
 #[cfg(test)]
 mod tests;
@@ -39,3 +40,4 @@ pub use problem::SqpProblemSpec;
 pub use qp_assembly::{SqpQpData, Triplet};
 pub use result::{SqpError, SqpResult, SqpStatus};
 pub use sqp_alg::SqpAlgorithm;
+pub use warm_start::classify_working_set;
