@@ -429,6 +429,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-qp"
+version = "0.1.0"
+dependencies = [
+ "pounce-common",
+ "pounce-linalg",
+ "pounce-linsol",
+]
+
+[[package]]
 name = "pounce-restoration"
 version = "0.2.0"
 dependencies = [
