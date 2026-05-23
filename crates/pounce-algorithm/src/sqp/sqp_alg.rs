@@ -15,9 +15,10 @@
 //!    to the next iterate.
 //! 6. Carry the QP's `WorkingSet` forward for warm-start.
 
+use crate::sqp::filter::{filter_line_search, SqpFilter};
 use crate::sqp::iterates::SqpIterates;
 use crate::sqp::line_search::l1_merit_line_search;
-use crate::sqp::options::SqpOptions;
+use crate::sqp::options::{SqpGlobalization, SqpOptions};
 use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::SqpQpData;
 use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
@@ -30,6 +31,10 @@ pub struct SqpAlgorithm {
     qp_opts: QpOptions,
     opts: SqpOptions,
     iterates: Option<SqpIterates>,
+    /// Filter for Fletcher-Leyffer globalization; reset at the
+    /// top of each `optimize` call. Unused when
+    /// `opts.globalization = L1Elastic`.
+    filter: SqpFilter,
 }
 
 impl SqpAlgorithm {
@@ -39,6 +44,7 @@ impl SqpAlgorithm {
             qp_opts: QpOptions::default(),
             opts,
             iterates: None,
+            filter: SqpFilter::new(),
         }
     }
 
@@ -93,6 +99,8 @@ impl SqpAlgorithm {
         // by `l1_merit_line_search`. Initialized from
         // `SqpOptions::l1_penalty`.
         let mut nu = self.opts.l1_penalty;
+        // Reset filter state at the top of each optimize call.
+        self.filter = SqpFilter::new();
         // Cache the most recent f(x) and c(x) so we don't
         // re-evaluate them after a successful line search (the
         // LS already computed them at the new iterate).
@@ -205,24 +213,42 @@ impl SqpAlgorithm {
                     sol.lambda_g.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
                 );
             }
-            // l1-merit backtracking line search. The QP primal
-            // `sol.x` is the step direction `p`; QP duals are the
-            // linearized NLP duals (Nocedal-Wright §18.4).
-            let ls = l1_merit_line_search(
-                nlp,
-                &iter.x,
-                &sol.x,
-                &sol.lambda_g,
-                &grad_f,
-                f_curr,
-                &c_vals,
-                &bl_c,
-                &bu_c,
-                &xl,
-                &xu,
-                nu,
-                &self.opts,
-            );
+            // Globalization: l1-merit backtracking (Han-Powell)
+            // or filter (Fletcher-Leyffer 2002). The two share
+            // the same backtracking shell + acceptance API; the
+            // filter keeps state across iterations on
+            // `self.filter`.
+            let ls = match self.opts.globalization {
+                SqpGlobalization::L1Elastic => l1_merit_line_search(
+                    nlp,
+                    &iter.x,
+                    &sol.x,
+                    &sol.lambda_g,
+                    &grad_f,
+                    f_curr,
+                    &c_vals,
+                    &bl_c,
+                    &bu_c,
+                    &xl,
+                    &xu,
+                    nu,
+                    &self.opts,
+                ),
+                SqpGlobalization::Filter => filter_line_search(
+                    nlp,
+                    &mut self.filter,
+                    &iter.x,
+                    &sol.x,
+                    f_curr,
+                    &c_vals,
+                    &bl_c,
+                    &bu_c,
+                    &xl,
+                    &xu,
+                    nu,
+                    &self.opts,
+                ),
+            };
             #[cfg(test)]
             if self.opts.print_level >= 1 {
                 eprintln!(

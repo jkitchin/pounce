@@ -477,6 +477,38 @@ fn sqp_via_ipopt_adapter_solves_convex_eq_nlp() {
 }
 
 #[test]
+fn sqp_filter_globalization_matches_l1_on_nonlinear_nlp() {
+    // Same circle-projection NLP. With SqpGlobalization::Filter,
+    // the Fletcher-Leyffer acceptance criterion replaces the l1
+    // Armijo backtracking. Both should converge to the same
+    // closed-form optimum.
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut opts = SqpOptions::default();
+    opts.globalization = SqpGlobalization::Filter;
+    let mut alg = SqpAlgorithm::new(qp_solver, opts);
+    let mut nlp = NonlinearEqNlp;
+
+    let res = alg.optimize(&mut nlp).unwrap();
+    assert_eq!(
+        res.status,
+        SqpStatus::Optimal,
+        "filter SQP must converge; got {:?} after {} iters",
+        res.status,
+        res.n_iter
+    );
+    let scale = 2.0 / 13.0_f64.sqrt();
+    let expected = [3.0 * scale, 2.0 * scale];
+    for (i, (a, b)) in res.x.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-6,
+            "filter SQP x[{i}] = {a}, expected {b} (diff {:.2e})",
+            (a - b).abs(),
+        );
+    }
+}
+
+#[test]
 fn sqp_optimize_nonlinear_eq_nlp_converges() {
     let qp_solver =
         ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
