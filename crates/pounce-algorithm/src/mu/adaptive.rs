@@ -101,6 +101,11 @@ pub struct AdaptiveMuUpdate {
     pub adaptive_mu_monotone_init_factor: Number,
     /// `adaptive_mu_restore_previous_iterate` (default false).
     pub restore_accepted_iterate: bool,
+    /// `sigma_max` / `sigma_min` forwarded to
+    /// `QualityFunctionMuOracle` on every free-mode call. Defaults
+    /// from `IpQualityFunctionMuOracle.cpp:RegisterOptions`.
+    pub sigma_max: Number,
+    pub sigma_min: Number,
 
     /// Upstream tracks `init_*_inf` lazily — sentinel −1 means
     /// "not yet captured".
@@ -160,6 +165,8 @@ impl Default for AdaptiveMuUpdate {
             mu_superlinear_decrease_power: 1.5,
             adaptive_mu_monotone_init_factor: 0.8,
             restore_accepted_iterate: false,
+            sigma_max: 1e2,
+            sigma_min: 1e-6,
             init_dual_inf: -1.0,
             init_primal_inf: -1.0,
             free_mu_mode: true,
@@ -577,6 +584,8 @@ impl MuUpdate for AdaptiveMuUpdate {
                     let mut oracle = QualityFunctionMuOracle::new();
                     oracle.mu_min = self.mu_min;
                     oracle.mu_max = self.mu_max;
+                    oracle.sigma_min = self.sigma_min;
+                    oracle.sigma_max = self.sigma_max;
                     // Mirrors upstream's `quality_function_search` timer
                     // around `CalculateMu` in `IpQualityFunctionMuOracle.cpp`.
                     let timing = data.borrow().timing.clone();

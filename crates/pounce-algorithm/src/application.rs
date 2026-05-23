@@ -1183,6 +1183,12 @@ impl IpoptApplication {
                 builder.mu.mu_allow_fast_monotone_decrease = v == "yes";
             }
         }
+        if let Some(v) = read_num("sigma_max") {
+            builder.mu.sigma_max = v;
+        }
+        if let Some(v) = read_num("sigma_min") {
+            builder.mu.sigma_min = v;
+        }
 
         // Watchdog options — consumers in
         // `IpBacktrackingLineSearch.cpp:RegisterOptions`. Baked into

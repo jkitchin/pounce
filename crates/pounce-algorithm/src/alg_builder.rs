@@ -213,6 +213,12 @@ pub struct MuOptions {
     pub mu_linear_decrease_factor: Number,
     pub mu_superlinear_decrease_power: Number,
     pub mu_allow_fast_monotone_decrease: bool,
+    /// `sigma_max` / `sigma_min` — clamp on the centering parameter σ
+    /// chosen by `QualityFunctionMuOracle`. Only consumed when
+    /// `mu_strategy=adaptive` and `mu_oracle=quality-function`.
+    /// Defaults from `IpQualityFunctionMuOracle.cpp:RegisterOptions`.
+    pub sigma_max: Number,
+    pub sigma_min: Number,
 }
 
 impl Default for MuOptions {
@@ -226,6 +232,8 @@ impl Default for MuOptions {
             mu_linear_decrease_factor: 0.2,
             mu_superlinear_decrease_power: 1.5,
             mu_allow_fast_monotone_decrease: true,
+            sigma_max: 1e2,
+            sigma_min: 1e-6,
         }
     }
 }
@@ -359,6 +367,8 @@ impl AlgorithmBuilder {
                 adaptive.mu_min = self.mu.mu_min;
                 adaptive.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
                 adaptive.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
+                adaptive.sigma_min = self.mu.sigma_min;
+                adaptive.sigma_max = self.mu.sigma_max;
                 Box::new(adaptive)
             }
         };
