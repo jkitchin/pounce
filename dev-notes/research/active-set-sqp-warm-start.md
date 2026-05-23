@@ -1207,13 +1207,40 @@ phasing tightens to four shippable milestones:
     section showing the full IPM → SensSolve → classify_working_set
     → set_sqp_warm_start → optimize_tnlp pipeline.
 
+  **Phase 5c finishing-touch commits c24–c26:**
+  - c24 — Three bug fixes uncovered by the first end-to-end SQP
+    sweep with active variable bounds:
+    (i) pounce-qp's `solve_equality_plus_bounds` now falls
+        through to `solve_elastic` when the equality-relaxed cold
+        start violates a bound (the same recovery
+        `solve_general` already used);
+    (ii) the SQP KKT-stationarity formula was `∇f + Jᵀ λ_g + λ_x`
+        and should be `∇f + Jᵀ λ_g − λ_x` (pounce-qp packs
+        `λ_x = z_l − z_u = −λ_sat`, the negated saddle-KKT
+        multiplier). Bug was latent — no prior SQP test exercised
+        an active variable bound;
+    (iii) `optimize_sqp_tnlp` now populates `SolveStatistics` with
+        the SQP n_iter / final residuals so `GetIpoptIterCount`
+        and `info["iter_count"]` report correct values.
+    Plus a working `python/examples/sqp_warm_start_mpc.py`
+    end-to-end Python example, and matching
+    `gams/examples/parametric_sqp_warm_start.gms` + `pounce.opt`.
+  - c25 — Integration test `tests/parametric_sqp_corrector.rs`
+    end-to-end validates the §6 IPM → SQP-corrector pattern: cold
+    IPM solve, classify the active set with
+    `classify_working_set`, predictor step (closed form for the
+    simplex-projection fixture), SQP corrector consuming the
+    warm-start, exact perturbed optimum to 1e-8.
+  - c26 — Python module-level binding
+    `pounce.classify_working_set(...)` so parametric-continuation
+    Python users can wire IPM-converged multipliers into the SQP
+    `Problem.solve(working_set=…)` kwarg without dropping into
+    Rust. Three new Python tests; 23 Python tests pass.
+
   **Phase 5c remaining items — require external dependencies:**
   - **Exit:** measured ≥5× iteration-count drop on the §8.2 MPC
     and parametric regression suites. Requires HPIPM / qpOASES /
     acados reference numbers — those are external oracles.
-  - Functioning end-to-end demos in `python/examples/` and
-    `gams/examples/` are documentation work that can land at any
-    time; they don't gate the algorithmic surface.
 - **Phase 5d — l1-elastic globalization alternative (1–2 weeks,
   optional).** SNOPT-style globalization as an opt-in alongside the
   default filter, behind `sqp_globalization=l1-elastic`. Comparison
