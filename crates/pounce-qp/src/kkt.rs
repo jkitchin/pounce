@@ -110,7 +110,7 @@ pub fn rhs_equality_only(qp: &QpProblem) -> Vec<Number> {
 }
 
 /// Is this QP in the equality-only / no-variable-bounds subset that
-/// commit 2 can solve directly? Caller routes to this fast path
+/// the commit-2 fast path can solve directly? Caller routes to it
 /// when the predicate holds.
 ///
 /// Concretely:
@@ -130,4 +130,78 @@ pub fn is_pure_equality_no_bounds(qp: &QpProblem) -> bool {
         }
     }
     true
+}
+
+/// Is this QP a pure-box problem (no general constraints)? Caller
+/// routes to the box-constrained active-set path when this returns
+/// true and the pure-equality predicate did not.
+pub fn is_pure_box(qp: &QpProblem) -> bool {
+    qp.m == 0
+}
+
+/// Assemble `[H Eᵀ_W; E_W 0]` for a box-constrained QP where `E_W`
+/// is the selection matrix for the currently-active bounds. Each
+/// active bound contributes one unit row at the corresponding
+/// variable's column. `active_bounds` lists the variable indices in
+/// ascending order; the order determines the saddle-row order.
+pub fn assemble_box_with_active(qp: &QpProblem, active_bounds: &[usize]) -> KktTriplet {
+    let n = qp.n;
+    let k = active_bounds.len();
+    let dim = n + k;
+
+    let nh = qp.h.nonzeros() as usize;
+    let mut irn = Vec::with_capacity(nh + k);
+    let mut jcn = Vec::with_capacity(nh + k);
+    let mut vals = Vec::with_capacity(nh + k);
+
+    // ---- H block ----
+    let h_irows = qp.h.irows();
+    let h_jcols = qp.h.jcols();
+    let h_vals = qp.h.values();
+    for k_h in 0..nh {
+        let i = h_irows[k_h];
+        let j = h_jcols[k_h];
+        let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
+        irn.push(hi);
+        jcn.push(lo);
+        vals.push(h_vals[k_h]);
+    }
+
+    // ---- E_W block: row (n+j+1), col (var+1), value 1 ----
+    let n_i = n as Index;
+    for (j, &var) in active_bounds.iter().enumerate() {
+        irn.push(n_i + (j as Index) + 1);
+        jcn.push((var as Index) + 1);
+        vals.push(1.0);
+    }
+
+    KktTriplet {
+        dim,
+        irn,
+        jcn,
+        vals,
+    }
+}
+
+/// `H · x` for a symmetric Hessian stored with one of each pair
+/// (upper *or* lower triangle, never both — the pounce-linalg
+/// convention).
+pub fn h_times_x(h: &pounce_linalg::triplet::SymTMatrix, x: &[Number]) -> Vec<Number> {
+    let n = h.space().dim() as usize;
+    let mut out = vec![0.0; n];
+    let irows = h.irows();
+    let jcols = h.jcols();
+    let vals = h.values();
+    for k in 0..irows.len() {
+        let i = (irows[k] - 1) as usize;
+        let j = (jcols[k] - 1) as usize;
+        let v = vals[k];
+        if i == j {
+            out[i] += v * x[i];
+        } else {
+            out[i] += v * x[j];
+            out[j] += v * x[i];
+        }
+    }
+    out
 }

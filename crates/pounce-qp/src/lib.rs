@@ -41,7 +41,10 @@ mod tests;
 
 pub use error::{QpError, QpStatus};
 pub use factor::LinearSolver;
-pub use kkt::{is_pure_equality_no_bounds, rhs_equality_only, KktTriplet};
+pub use kkt::{
+    assemble_box_with_active, h_times_x, is_pure_box, is_pure_equality_no_bounds,
+    rhs_equality_only, KktTriplet,
+};
 pub use options::{AntiCyclingChoice, QpAlgorithm, QpOptions};
 pub use problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
 pub use solver::{ParametricActiveSetSolver, QpSolver};
