@@ -53,6 +53,28 @@ pub trait QpSolver {
         qp_new: &QpProblem,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError>;
+
+    /// Warm-start variant that takes ONLY the working set from a
+    /// previous solve (not a primal `x`). Useful when the caller
+    /// — e.g., the SQP outer loop — has a previous QP's working
+    /// set but no compatible primal, because the new QP's
+    /// constraint RHS has shifted (each SQP linearization
+    /// translates `bl ≤ Ax ≤ bu` by `-c(x_k)`).
+    ///
+    /// Internally: build the KKT for the active rows of
+    /// `working` and solve for a primal that exactly satisfies
+    /// those rows. Pass that primal plus the supplied working
+    /// set as a regular `QpWarmStart` to
+    /// [`Self::solve`].
+    ///
+    /// Returns the same `QpSolution` shape as
+    /// [`Self::solve`].
+    fn solve_with_working_set(
+        &mut self,
+        qp: &QpProblem,
+        working: &crate::working_set::WorkingSet,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError>;
 }
 
 /// The sparse parametric active-set QP solver (§4.2 of the design
@@ -1501,6 +1523,74 @@ impl QpSolver for ParametricActiveSetSolver {
     ) -> Result<QpSolution, QpError> {
         // No parametric path yet — fall back to a fresh cold solve.
         self.solve(qp_new, None, opts)
+    }
+
+    fn solve_with_working_set(
+        &mut self,
+        qp: &QpProblem,
+        working: &crate::working_set::WorkingSet,
+        opts: &QpOptions,
+    ) -> Result<QpSolution, QpError> {
+        qp.validate()?;
+        working.validate_dims(qp.n, qp.m)?;
+
+        // Build the active-row index lists from the supplied
+        // working set.
+        let active_cons: Vec<usize> = (0..qp.m)
+            .filter(|&i| working.constraints[i].is_active())
+            .collect();
+        let active_bounds: Vec<usize> = (0..qp.n)
+            .filter(|&i| working.bounds[i].is_active())
+            .collect();
+        let k_c = active_cons.len();
+        let k_b = active_bounds.len();
+
+        // Assemble [H Aᵀ_W Eᵀ_W; A_W 0 0; E_W 0 0]. RHS is
+        // [-g; β_cons; β_bounds] where β picks the
+        // appropriate target from the active side.
+        let kkt = assemble_active_set_kkt(qp, &active_cons, &active_bounds);
+        let mut rhs = vec![0.0; qp.n + k_c + k_b];
+        for (rhs_i, &g_i) in rhs[..qp.n].iter_mut().zip(qp.g.iter()) {
+            *rhs_i = -g_i;
+        }
+        for (j, &i) in active_cons.iter().enumerate() {
+            rhs[qp.n + j] = match working.constraints[i] {
+                ConsStatus::AtLower | ConsStatus::Equality => qp.bl[i],
+                ConsStatus::AtUpper => qp.bu[i],
+                ConsStatus::Inactive => unreachable!(),
+            };
+        }
+        for (j, &var) in active_bounds.iter().enumerate() {
+            rhs[qp.n + k_c + j] = match working.bounds[var] {
+                BoundStatus::AtLower | BoundStatus::Fixed => qp.xl[var],
+                BoundStatus::AtUpper => qp.xu[var],
+                BoundStatus::Inactive => unreachable!(),
+            };
+        }
+        self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
+
+        // Build a warm-start using the computed primal + the
+        // caller's working set. Multipliers come from the KKT
+        // solve as well (signed per the
+        // §5/§6 convention: lambda_x = z_l − z_u = −λ_sat for
+        // active bounds).
+        let mut x_init = vec![0.0; qp.n];
+        x_init.copy_from_slice(&rhs[..qp.n]);
+        let mut lambda_g = vec![0.0; qp.m];
+        for (j, &i) in active_cons.iter().enumerate() {
+            lambda_g[i] = rhs[qp.n + j];
+        }
+        let mut lambda_x = vec![0.0; qp.n];
+        for (j, &i) in active_bounds.iter().enumerate() {
+            lambda_x[i] = -rhs[qp.n + k_c + j];
+        }
+        let ws = QpWarmStart {
+            x: x_init,
+            lambda_g,
+            lambda_x,
+            working: working.clone(),
+        };
+        self.solve(qp, Some(&ws), opts)
     }
 }
 

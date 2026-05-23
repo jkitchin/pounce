@@ -164,19 +164,21 @@ impl SqpAlgorithm {
             );
             let qp = qp_data.as_qp();
 
-            // Cold-start the QP at every SQP iteration. Carrying
-            // the previous QP's `ws.x = 0` would violate pounce-
-            // qp's warm-start contract (the supplied primal must
-            // satisfy the active constraints) because each SQP
+            // Warm-start from the previous QP's working set when
+            // available. Pounce-qp's `solve_with_working_set`
+            // internally computes a feasible primal compatible
+            // with the supplied set (it satisfies every active
+            // row exactly) — necessary because each SQP
             // linearization shifts the QP's constraint RHS by
-            // `-c(x_k)`. The working-set warm-start path through
-            // pounce-qp requires a separately-supplied feasible
-            // x; a follow-up commit will extend the API.
-            let sol = self.qp_solver.solve(&qp, None, &self.qp_opts)?;
+            // `-c(x_k)`, so the previous QP's *primal* doesn't
+            // carry over even when the active set does.
+            let sol = if let Some(prev_w) = iter.working.as_ref() {
+                self.qp_solver
+                    .solve_with_working_set(&qp, prev_w, &self.qp_opts)?
+            } else {
+                self.qp_solver.solve(&qp, None, &self.qp_opts)?
+            };
             n_qp_solves += 1;
-            // Track the working set anyway for the future warm-
-            // start integration.
-            let _ = &iter.working;
 
             match sol.status {
                 QpStatus::Optimal => {}

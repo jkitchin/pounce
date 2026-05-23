@@ -1016,6 +1016,66 @@ fn schur_path_matches_refactor_path_on_drop_test() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// `solve_with_working_set` API: caller supplies just a working
+// set (not a primal `x`), pounce-qp computes a feasible primal
+// compatible with that set internally, then runs the standard
+// active-set loop. The §6 SQP integration uses this when each
+// outer iteration's QP has a fresh constraint RHS.
+//
+//     min ½(x² + y²) − x − 2y  s.t.  x + y = 1
+//
+// Closed form: x* = (0, 1), λ_g = 1. Working set: cons[0]
+// Equality.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn solve_with_working_set_recovers_optimum_from_active_set_seed() {
+    let n = 2;
+    let m = 1;
+    let h = identity_hessian(n);
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+    let g = [-1.0, -2.0];
+    let bl = [1.0];
+    let bu = [1.0];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let working = crate::WorkingSet {
+        bounds: vec![crate::BoundStatus::Inactive; 2],
+        constraints: vec![crate::ConsStatus::Equality],
+    };
+
+    let mut solver = new_solver();
+    let sol = solver
+        .solve_with_working_set(&qp, &working, &QpOptions::default())
+        .unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 0.0).abs() < 1e-10);
+    assert!((sol.x[1] - 1.0).abs() < 1e-10);
+    // KKT at x* = (0, 1): Hx + Aᵀλ = -g ⇒ (0, 1) + (λ, λ) = (1, 2)
+    // ⇒ λ = 1. The pounce-qp convention returns lambda_g with this
+    // sign (positive when the equality "pulls" upward).
+    assert!(
+        (sol.lambda_g[0] - 1.0).abs() < 1e-10,
+        "lambda_g[0] = {} (expected 1.0)",
+        sol.lambda_g[0]
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // EXPAND (Harris-style two-pass) ratio-test selection.
 //
 // At a degenerate intersection where multiple constraints would
