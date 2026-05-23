@@ -45,8 +45,14 @@ typedef struct {
     /* Jacobian CSR structure (from gmoGetMatrixRow) */
     int *jac_rowstart;  /* length m + 1 */
     int *jac_colidx;    /* length nnz_jac */
+    double *jac_values_init; /* length nnz_jac; linear coefs from gmoGetMatrixRow,
+                                used directly for entries with nlflag == 0 */
+    int *jac_nlflag;    /* length nnz_jac; 0 = linear entry, !=0 = nonlinear */
+    char *row_has_nl;   /* length m; nonzero if row has any nonlinear entries */
 
-    /* Dense gradient scratch buffer (length n) */
+    /* Dense gradient scratch buffer (length n).
+     * Only positions referenced by the current row are written/read each call,
+     * so the buffer is cleared sparsely via jac_colidx for that row. */
     double *grad_buf;
 
     /* Has analytical Hessian? */
@@ -120,8 +126,17 @@ static bool gams_eval_g(ipindex n, ipnumber *x, bool new_x,
 /* ---------------------------------------------------------------------------
  * Callback: Jacobian of constraints
  *
- * Structure mode (values == NULL): expand CSR to COO
- * Values mode: evaluate each row's dense gradient, extract sparse entries
+ * Structure mode (values == NULL): expand CSR to COO.
+ *
+ * Values mode: for each row,
+ *   - if the row has no nonlinear entries, copy the cached linear coefficients
+ *     directly (gmoGetMatrixRow already gave us those at setup);
+ *   - otherwise, sparse-clear grad_buf at the row's structural columns, call
+ *     gmoEvalGrad once, and pull out the sparse entries.
+ *
+ * The sparse clear (length = row_nnz) replaces a per-row memset of the full
+ * n-vector, which was O(m*n) per Jacobian evaluation. That O(m*n) was the
+ * dominant cost on large qcqp instances.
  * --------------------------------------------------------------------------- */
 
 static bool gams_eval_jac_g(ipindex n, ipnumber *x, bool new_x,
@@ -144,21 +159,29 @@ static bool gams_eval_jac_g(ipindex n, ipnumber *x, bool new_x,
             }
         }
     } else {
-        /* Values: evaluate gradient row by row */
-        int k = 0;
         for (int i = 0; i < m; i++) {
+            int rs = d->jac_rowstart[i];
+            int re = d->jac_rowstart[i + 1];
+
+            if (!d->row_has_nl[i]) {
+                /* Pure-linear row: constant gradient, just copy cached coefs. */
+                for (int j = rs; j < re; j++)
+                    values[j] = d->jac_values_init[j];
+                continue;
+            }
+
+            /* Sparse clear of only this row's structural columns. */
+            for (int j = rs; j < re; j++)
+                d->grad_buf[d->jac_colidx[j]] = 0.0;
+
             double fval, gx;
             int numerr;
-            memset(d->grad_buf, 0, d->n * sizeof(double));
-
             if (gmoEvalGrad(d->gmo, i, x, &fval, d->grad_buf, &gx, &numerr) != 0
                 || numerr > 0)
                 return false;
 
-            for (int j = d->jac_rowstart[i]; j < d->jac_rowstart[i + 1]; j++) {
-                values[k] = d->grad_buf[d->jac_colidx[j]];
-                k++;
-            }
+            for (int j = rs; j < re; j++)
+                values[j] = d->grad_buf[d->jac_colidx[j]];
         }
     }
     return true;
@@ -317,6 +340,9 @@ DllExport void STDCALL pouFree(void **Cptr)
         PounceGamsData *data = (PounceGamsData *)*Cptr;
         free(data->jac_rowstart);
         free(data->jac_colidx);
+        free(data->jac_values_init);
+        free(data->jac_nlflag);
+        free(data->row_has_nl);
         free(data->grad_buf);
         free(data);
         *Cptr = NULL;
@@ -568,28 +594,35 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     }
 
     /* ---------------------------------------------------------------
-     * Jacobian structure (CSR from GMO, stored for value callbacks)
+     * Jacobian structure (CSR from GMO, stored for value callbacks).
+     *
+     * We keep jacval (linear coefficients for entries with nlflag == 0)
+     * and nlflag itself so that gams_eval_jac_g can (a) copy linear-row
+     * values directly without calling the GMO evaluator, and (b) sparse-
+     * clear the dense gradient buffer at only the structural columns.
      * --------------------------------------------------------------- */
     if (m > 0 && data->nnz_jac > 0) {
-        data->jac_rowstart = (int *)malloc((m + 1) * sizeof(int));
-        data->jac_colidx   = (int *)malloc(data->nnz_jac * sizeof(int));
-        data->grad_buf     = (double *)calloc(n, sizeof(double));
-        if (!data->jac_rowstart || !data->jac_colidx || !data->grad_buf)
+        data->jac_rowstart    = (int *)malloc((m + 1) * sizeof(int));
+        data->jac_colidx      = (int *)malloc(data->nnz_jac * sizeof(int));
+        data->jac_values_init = (double *)malloc(data->nnz_jac * sizeof(double));
+        data->jac_nlflag      = (int *)malloc(data->nnz_jac * sizeof(int));
+        data->row_has_nl      = (char *)calloc(m, sizeof(char));
+        data->grad_buf        = (double *)calloc(n, sizeof(double));
+        if (!data->jac_rowstart || !data->jac_colidx || !data->jac_values_init
+            || !data->jac_nlflag || !data->row_has_nl || !data->grad_buf)
             goto oom;
-
-        /* Get CSR structure; jacval and nlflag are unused after setup */
-        double *jacval_tmp = (double *)malloc(data->nnz_jac * sizeof(double));
-        int    *nlflag_tmp = (int *)malloc(data->nnz_jac * sizeof(int));
-        if (!jacval_tmp || !nlflag_tmp) {
-            free(jacval_tmp);
-            free(nlflag_tmp);
-            goto oom;
-        }
 
         gmoGetMatrixRow(gmo, data->jac_rowstart, data->jac_colidx,
-                        jacval_tmp, nlflag_tmp);
-        free(jacval_tmp);
-        free(nlflag_tmp);
+                        data->jac_values_init, data->jac_nlflag);
+
+        for (int i = 0; i < m; i++) {
+            for (int j = data->jac_rowstart[i]; j < data->jac_rowstart[i + 1]; j++) {
+                if (data->jac_nlflag[j]) {
+                    data->row_has_nl[i] = 1;
+                    break;
+                }
+            }
+        }
     }
 
     /* ---------------------------------------------------------------
