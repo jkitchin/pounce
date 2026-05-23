@@ -33,15 +33,45 @@ use pounce_common::{Index, Number};
 ///
 /// `dim` is the dimension of the full symmetric matrix
 /// (`n + n_active`, where `n_active` is the number of active rows of
-/// `A` — currently equal to `m` since only equality QPs are
-/// supported). `irn`, `jcn`, `vals` are parallel arrays describing
-/// the lower-triangle nonzeros in 1-based indexing.
+/// `A` and active bound rows). `irn`, `jcn`, `vals` are parallel
+/// arrays describing the lower-triangle nonzeros in 1-based
+/// indexing.
 #[derive(Debug, Clone)]
 pub struct KktTriplet {
     pub dim: usize,
     pub irn: Vec<Index>,
     pub jcn: Vec<Index>,
     pub vals: Vec<Number>,
+}
+
+impl KktTriplet {
+    /// Add `delta` to every diagonal entry on the H block (rows
+    /// `1..=n_h_rows`). Existing diagonal entries are incremented in
+    /// place; missing ones are appended. Used by the §4.5 inertia-
+    /// control retry loop.
+    pub fn add_h_diagonal_shift(&mut self, n_h_rows: usize, delta: Number) {
+        if delta == 0.0 {
+            return;
+        }
+        let n_h = n_h_rows as Index;
+        let mut have_diag = vec![false; n_h_rows];
+        for k in 0..self.irn.len() {
+            let i = self.irn[k];
+            let j = self.jcn[k];
+            if i == j && i >= 1 && i <= n_h {
+                self.vals[k] += delta;
+                have_diag[(i - 1) as usize] = true;
+            }
+        }
+        for i in 0..n_h_rows {
+            if !have_diag[i] {
+                let i1 = (i + 1) as Index;
+                self.irn.push(i1);
+                self.jcn.push(i1);
+                self.vals.push(delta);
+            }
+        }
+    }
 }
 
 impl KktTriplet {

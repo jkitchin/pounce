@@ -49,6 +49,19 @@ pub struct QpOptions {
     /// 3+ = per-pivot detail. Matches pounce's existing
     /// `print_level` convention.
     pub print_level: u8,
+
+    /// §4.5 inertia control: when an LDLᵀ factor of the active-set
+    /// KKT reports the wrong inertia or near-singularity, retry
+    /// with `H ← H + δ·I` (only on the original-variable block).
+    /// `inertia_shift_initial` is the first δ tried; subsequent
+    /// retries multiply δ by `inertia_shift_factor`; the loop
+    /// gives up after `inertia_max_shifts` attempts.
+    ///
+    /// Default values match the IPOPT-style perturbation handler
+    /// in `pounce-algorithm/src/kkt/perturbation_handler.rs`.
+    pub inertia_shift_initial: Number,
+    pub inertia_shift_factor: Number,
+    pub inertia_max_shifts: u32,
 }
 
 impl Default for QpOptions {
@@ -62,6 +75,9 @@ impl Default for QpOptions {
             anti_cycling: AntiCyclingChoice::default(),
             elastic_gamma: 1e6,
             print_level: 0,
+            inertia_shift_initial: 1e-8,
+            inertia_shift_factor: 100.0,
+            inertia_max_shifts: 12,
         }
     }
 }

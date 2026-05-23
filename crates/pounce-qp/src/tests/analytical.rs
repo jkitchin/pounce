@@ -943,6 +943,131 @@ fn general_ineq_solved_via_l1_elastic_when_cold_infeasible() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Ladder #6 — indefinite H with PD reduced Hessian.
+//
+//     H = diag(-1, 2),  g = (0, 0),  A = [1 1],  b = 1   (equality)
+//
+// H is indefinite (eigenvalues -1, 2) but the reduced Hessian on
+// null(A) = span{(1, -1)} is
+//     dᵀ H d  =  (1)·(-1)·(1) + (-1)·(2)·(-1)  =  -1 + 2  =  1  > 0
+// so the saddle-point system [H Aᵀ; A 0] has the canonical
+// (n, m, 0) = (2, 1, 0) inertia by Wright's theorem and FERAL
+// reports `number_of_neg_evals = 1` — no shift needed.
+//
+// Closed form: ∇_x L = Hx + Aᵀλ = 0 ⇒ (-x₁ + λ, 2x₂ + λ) = 0
+// ⇒ x₁ = λ, x₂ = -λ/2. Eq: x₁ + x₂ = 1 ⇒ λ - λ/2 = λ/2 = 1
+// ⇒ λ = 2. So x = (2, -1), λ_g = 2.
+// Objective: ½·(-1·4 + 2·1) + 0 = ½·(-2) = -1.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn problem_6_indefinite_h_with_pd_reduced_hessian() {
+    let n = 2;
+    let m = 1;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2], vec![1, 2]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[-1.0, 2.0]);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0, 0.0];
+    let bl = [1.0];
+    let bu = [1.0];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    assert!((sol.x[0] - 2.0).abs() < 1e-10, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] + 1.0).abs() < 1e-10, "x[1] = {}", sol.x[1]);
+    assert!(
+        (sol.lambda_g[0] - 2.0).abs() < 1e-10,
+        "lambda_g[0] = {}",
+        sol.lambda_g[0]
+    );
+    assert!(
+        (sol.obj + 1.0).abs() < 1e-10,
+        "obj = {} but expected -1.0",
+        sol.obj
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Inertia-control shift path — H with a hard zero direction that
+// the saddle theorem doesn't cover. Without shift the KKT factor
+// reports `WrongInertia`; with shift `H ← H + δI` the reduced
+// Hessian becomes PD and the factor succeeds.
+//
+//     H = diag(0, 1),  g = (-1, -2),  no constraints
+//
+// H is PSD but not PD — the (1, 0) direction has zero curvature.
+// The unconstrained gradient `g + Hx = 0` requires `x₁ = -g₁/h₁
+// = -(-1)/0 = ∞`. With shift `δ` on the (1,1) diagonal, the
+// regularized solution is `x₁ = 1/δ`, `x₂ = 2`. As δ → 0, x₁
+// diverges — but for any finite δ, the factor succeeds and a
+// finite (regularized) answer is returned.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn inertia_control_shift_succeeds_on_psd_singular_hessian() {
+    let n = 2;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1, 2], vec![1, 2]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[0.0, 1.0]); // singular: zero in (1,1)
+
+    let a = empty_gen(0, n);
+    let g = [-1.0, -2.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(sol.status, crate::QpStatus::Optimal);
+    // The shift adds δI to the *whole* H-block, so x₂ becomes
+    // `2/(1 + δ) ≈ 2 - 2δ`. δ_initial = 1e-8 ⇒ error ≈ 2e-8.
+    // The 1e-6 tolerance is loose enough to accept this minor
+    // PD-direction perturbation (the standard cost of Tikhonov-
+    // style regularization).
+    assert!((sol.x[1] - 2.0).abs() < 1e-6, "x[1] = {}", sol.x[1]);
+    // x₁ should be a large positive value ≈ 1/δ_final, certifying
+    // that the singular direction was regularized.
+    assert!(
+        sol.x[0] > 1.0,
+        "x[0] = {} should be large (≈ 1/δ_final after shift)",
+        sol.x[0]
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Ladder #5 — infeasibility certification via l1-elastic.
 //
 //     min ½ x²   s.t.   x ≥ 5,  x ≤ 3,  x free

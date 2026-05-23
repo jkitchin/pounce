@@ -17,7 +17,7 @@ use crate::kkt::{
     rhs_equality_only, KktTriplet,
 };
 use crate::options::QpOptions;
-use crate::problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
+use crate::problem::{QpProblem, QpSolution, QpStats, QpWarmStart};
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::Number;
@@ -67,6 +67,70 @@ impl ParametricActiveSetSolver {
         Self {
             linsol: LinearSolver::new(backend),
         }
+    }
+
+    /// §4.5 inertia-controlled factorization. Tries the factor
+    /// without shift first; on `WrongInertia` or `Singular`, shifts
+    /// the H-block diagonal by progressively larger δ and re-tries.
+    /// Returns the final δ used (0.0 when no shift was needed) for
+    /// logging / diagnostics.
+    ///
+    /// `expected_neg` is required (no bypass) so the inertia signal
+    /// is always checked. The `HessianInertia::Indefinite` hint
+    /// merely tells the caller "shifts may be needed"; the
+    /// algorithm decides what to do based on the factor's report.
+    fn factorize_with_inertia_control(
+        &mut self,
+        mut kkt: KktTriplet,
+        rhs: &mut [Number],
+        expected_neg: i32,
+        n_h_rows: usize,
+        opts: &QpOptions,
+    ) -> Result<Number, QpError> {
+        // First attempt: no shift.
+        let rhs_snapshot = rhs.to_vec();
+        let mut rhs_local = rhs_snapshot.clone();
+        match self
+            .linsol
+            .factorize_and_solve(&kkt, &mut rhs_local, Some(expected_neg))
+        {
+            Ok(()) => {
+                rhs.copy_from_slice(&rhs_local);
+                return Ok(0.0);
+            }
+            Err(QpError::LinearSolverFailure(ref msg))
+                if msg.contains("inertia") || msg.contains("singular") => {}
+            Err(e) => return Err(e),
+        }
+
+        let mut current = 0.0;
+        let mut next = opts.inertia_shift_initial;
+        for _ in 0..opts.inertia_max_shifts {
+            kkt.add_h_diagonal_shift(n_h_rows, next - current);
+            current = next;
+            let mut rhs_local = rhs_snapshot.clone();
+            match self
+                .linsol
+                .factorize_and_solve(&kkt, &mut rhs_local, Some(expected_neg))
+            {
+                Ok(()) => {
+                    rhs.copy_from_slice(&rhs_local);
+                    return Ok(current);
+                }
+                Err(QpError::LinearSolverFailure(ref msg))
+                    if msg.contains("inertia") || msg.contains("singular") =>
+                {
+                    next *= opts.inertia_shift_factor;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(QpError::LinearSolverFailure(format!(
+            "inertia control exhausted {} shifts (final δ = {:.3e}); reduced Hessian \
+             remains non-PD on null(A_W) — consider an `HessianInertia::Indefinite` \
+             problem with no PD reduced direction, or relax `inertia_shift_factor`",
+            opts.inertia_max_shifts, current
+        )))
     }
 
     /// Primal active-set path for box-constrained QPs
@@ -147,13 +211,9 @@ impl ParametricActiveSetSolver {
 
             // Inertia expectation: k negative eigenvalues for full-
             // rank E_W (always full rank since selection rows pick
-            // distinct columns) and PD reduced H.
-            let expected_neg = match qp.hessian_inertia {
-                HessianInertia::Psd | HessianInertia::Unknown => Some(k as i32),
-                HessianInertia::Indefinite => None,
-            };
-            self.linsol
-                .factorize_and_solve(&kkt, &mut rhs, expected_neg)?;
+            // distinct columns) and PD reduced H. Inertia-control
+            // retry handles indefinite reduced H via §4.5.
+            self.factorize_with_inertia_control(kkt, &mut rhs, k as i32, qp.n, opts)?;
             n_refactor += 1;
 
             // ---- 3. Check ‖p‖ ----
@@ -302,12 +362,7 @@ impl ParametricActiveSetSolver {
         // ---- 1. Equality-relaxed initial point ----
         let kkt0 = KktTriplet::assemble_equality_only(qp);
         let mut rhs0 = rhs_equality_only(qp);
-        let expected_neg0 = match qp.hessian_inertia {
-            HessianInertia::Psd | HessianInertia::Unknown => Some(m as i32),
-            HessianInertia::Indefinite => None,
-        };
-        self.linsol
-            .factorize_and_solve(&kkt0, &mut rhs0, expected_neg0)?;
+        self.factorize_with_inertia_control(kkt0, &mut rhs0, m as i32, qp.n, opts)?;
         let mut n_refactor: u32 = 1;
         let mut n_changes: u32 = 0;
 
@@ -369,12 +424,7 @@ impl ParametricActiveSetSolver {
             }
             // rhs[n..n+m] and rhs[n+m..n+m+k] stay zero.
 
-            let expected_neg = match qp.hessian_inertia {
-                HessianInertia::Psd | HessianInertia::Unknown => Some((m + k) as i32),
-                HessianInertia::Indefinite => None,
-            };
-            self.linsol
-                .factorize_and_solve(&kkt, &mut rhs, expected_neg)?;
+            self.factorize_with_inertia_control(kkt, &mut rhs, (m + k) as i32, qp.n, opts)?;
             n_refactor += 1;
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -496,16 +546,10 @@ impl ParametricActiveSetSolver {
 
         // Inertia expectation for [H Aᵀ; A 0] with full-rank A and
         // reduced Hessian PD on null(A): exactly m negative
-        // eigenvalues (Gould-Hribar-Nocedal 2001 §3.2). Skip the
-        // check when the caller declared H indefinite — the
-        // §4.5 inertia-control path is required, and Phase 5a
-        // commit 2 doesn't ship it yet.
-        let expected_neg = match qp.hessian_inertia {
-            HessianInertia::Psd | HessianInertia::Unknown => Some(qp.m as i32),
-            HessianInertia::Indefinite => None,
-        };
-        self.linsol
-            .factorize_and_solve(&kkt, &mut rhs, expected_neg)?;
+        // eigenvalues (Gould-Hribar-Nocedal 2001 §3.2). The
+        // inertia-control retry handles indefinite reduced H via
+        // §4.5.
+        self.factorize_with_inertia_control(kkt, &mut rhs, qp.m as i32, qp.n, opts)?;
 
         // RHS now holds [x*; λ*].
         let mut x = vec![0.0; qp.n];
@@ -614,12 +658,7 @@ impl ParametricActiveSetSolver {
                 *rhs_i = -(hx_i + g_i);
             }
 
-            let expected_neg = match qp.hessian_inertia {
-                HessianInertia::Psd | HessianInertia::Unknown => Some((k_c + k_b) as i32),
-                HessianInertia::Indefinite => None,
-            };
-            self.linsol
-                .factorize_and_solve(&kkt, &mut rhs, expected_neg)?;
+            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
             n_refactor += 1;
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -816,12 +855,7 @@ impl ParametricActiveSetSolver {
             rhs[n + j] = qp.bl[row];
         }
 
-        let expected_neg = match qp.hessian_inertia {
-            HessianInertia::Psd | HessianInertia::Unknown => Some(m_eq as i32),
-            HessianInertia::Indefinite => None,
-        };
-        self.linsol
-            .factorize_and_solve(&kkt, &mut rhs, expected_neg)?;
+        self.factorize_with_inertia_control(kkt, &mut rhs, m_eq as i32, qp.n, opts)?;
         *n_refactor += 1;
 
         let x: Vec<Number> = rhs[..n].to_vec();
