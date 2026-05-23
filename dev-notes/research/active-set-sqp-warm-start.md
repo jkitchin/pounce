@@ -1094,30 +1094,43 @@ phasing tightens to four shippable milestones:
     `cargo clippy --workspace -D correctness -D suspicious`
     both clean.
 
-  **Remaining Phase 5b items** (do not block Phase 5c warm-start
-  integration; can land alongside benchmarking work):
-  - §4.1 filter globalization alternative
-    (Fletcher-Leyffer 2002). `SqpGlobalization::Filter` is
-    the default option value but currently aliases to the l1
-    line search; the real filter acceptor (reusing the
-    existing `FilterLsAcceptor`) is independent work.
-  - §4.6 damped BFGS / L-BFGS Hessian sources for problems
-    where `eval_h` is expensive or `∇²L` is indefinite. The
-    `SqpHessianSource` enum is in place; the actual updaters
-    are not.
-  - CUTEst small-NLP regression run for the §10 exit
-    criterion (iteration counts vs filterSQP / SNOPT). Needs
-    `pounce-cutest` harness updates to dispatch through
-    `build_sqp_with_backend`.
-  - QP warm-start contract extension (`pounce-qp` currently
-    requires the warm-start primal to satisfy the active
-    constraints; the SQP loop cold-starts every QP because
-    each linearization shifts the QP's constraint RHS). A
-    follow-up `pounce-qp` commit will add a
-    "working-set-only" warm-start variant.
-  - `IpoptApplication` integration so user-facing entry
-    points (`.add_option("algorithm", "active-set-sqp")`)
-    flow to `build_sqp_with_backend`.
+  **Phase 5b follow-up complete in c8–c11** (heads `366a7bf`
+  …`22de629`):
+  - c8 — §4.1 filter globalization (Fletcher-Leyffer 2002).
+    New `crate::sqp::filter` module with `SqpFilter` +
+    `filter_line_search`. Selected via
+    `SqpGlobalization::Filter`; verified equivalent to
+    l1-merit on the nonlinear circle-projection NLP.
+  - c9 — `pounce-qp` warm-start API extension:
+    `QpSolver::solve_with_working_set(qp, working, opts)` —
+    takes only the working set, internally computes a
+    feasible primal compatible with it. The SQP loop now
+    warm-starts via this entry point.
+  - c10 — §4.6 damped BFGS (Powell 1978). New
+    `crate::sqp::bfgs::DampedBfgs` module; selected via
+    `SqpHessianSource::DampedBfgs`. Powell-damped rank-2
+    update guarantees PD iterates so the QP solver doesn't
+    need inertia control.
+  - c11 — `IpoptApplication` option-string dispatch:
+    `add_option("algorithm", "active-set-sqp")` routes
+    through a new `optimize_sqp_tnlp(tnlp)` that builds the
+    NLP chain (TNLPAdapter → OrigIpoptNlp → IpoptNlpAdapter)
+    and runs `SqpAlgorithm`. Maps `SqpStatus` back to
+    `ApplicationReturnStatus`.
+
+  **Remaining items deferred to Phase 5c+** (not blockers for
+  the SQP path being shippable as the QP-subproblem-driven NLP
+  solver inside pounce-algorithm):
+  - CUTEst small-NLP regression vs filterSQP / SNOPT for the
+    §10 exit criterion (iteration-count comparison).
+  - `finalize_solution` callback for SQP — currently the SQP
+    path doesn't notify the user TNLP of the final iterate
+    through the standard hook.
+  - SQP-suboption parsing (`sqp_globalization`, `sqp_hessian`,
+    `sqp_max_iter`, etc.) from the `OptionsList` so users can
+    configure SQP entirely through `add_option`.
+  - L-BFGS Hessian source (returns `SqpError::DimensionMismatch`
+    when selected today).
 - **Phase 5c — Working-set warm start + integration (2–3 weeks).**
   - SQP warm-start API per §6.
   - C API additions per §7.2.
