@@ -6,7 +6,10 @@
 use crate::alg_builder::AlgorithmChoice;
 use crate::sqp::iterates::SqpIterates;
 use crate::sqp::options::{SqpGlobalization, SqpHessianSource, SqpOptions};
+use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::{SqpQpData, Triplet};
+use crate::sqp::result::SqpStatus;
+use crate::sqp::sqp_alg::SqpAlgorithm;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_qp::{HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus};
 
@@ -126,6 +129,180 @@ fn qp_assembly_one_sqp_iter_solves_convex_eq_nlp() {
         "λ_g[0] = {}",
         sol.lambda_g[0]
     );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Hand-coded NLP fixture used by the SqpAlgorithm tests below.
+//
+//     min ½(x₁² + x₂²) − x₁ − 2x₂  s.t. x₁ + x₂ = 1, no bounds.
+//
+// Closed form (Lagrangian): x* = (0, 1), λ_g = 1, obj* = −1.5.
+// Same problem as `qp_assembly_one_sqp_iter_solves_convex_eq_nlp`
+// but driven through the full SqpAlgorithm::optimize loop.
+// ─────────────────────────────────────────────────────────────────
+struct ConvexEqNlp;
+
+impl SqpProblemSpec for ConvexEqNlp {
+    fn n(&self) -> usize {
+        2
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.0, 0.0]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF; 2], vec![NLP_UPPER_BOUND_INF; 2])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0], vec![0.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        0.5 * (x[0] * x[0] + x[1] * x[1]) - x[0] - 2.0 * x[1]
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] - 1.0, x[1] - 2.0]
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] + x[1] - 1.0]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 2,
+            irow: vec![1, 1],
+            jcol: vec![1, 2],
+            vals: vec![1.0, 1.0],
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 2,
+            n_cols: 2,
+            irow: vec![1, 2],
+            jcol: vec![1, 2],
+            vals: vec![1.0, 1.0],
+        }
+    }
+}
+
+#[test]
+fn sqp_optimize_convex_eq_nlp_one_iter() {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg = SqpAlgorithm::new(qp_solver, SqpOptions::default());
+    let mut nlp = ConvexEqNlp;
+
+    let res = alg.optimize(&mut nlp).unwrap();
+    assert_eq!(res.status, SqpStatus::Optimal);
+
+    // Closed form: x* = (0, 1), λ_g = 1, obj* = −1.5.
+    assert!((res.x[0] - 0.0).abs() < 1e-9, "x[0] = {}", res.x[0]);
+    assert!((res.x[1] - 1.0).abs() < 1e-9, "x[1] = {}", res.x[1]);
+    assert!(
+        (res.lambda_g[0] - 1.0).abs() < 1e-9,
+        "λ_g[0] = {}",
+        res.lambda_g[0]
+    );
+    assert!((res.obj - (-1.5)).abs() < 1e-9, "obj = {}", res.obj);
+
+    // The QP is exact for this NLP (∇²L is constant; ∇f is
+    // linear) — convergence should take exactly one full SQP
+    // iteration: solve QP, take step, KKT-check on the new
+    // iterate, declare optimal.
+    assert_eq!(res.n_iter, 1);
+    assert_eq!(res.n_qp_solves, 1);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Nonlinear NLP:
+//
+//     min ½(x − 3)² + ½(y − 2)²   s.t.  x² + y² = 4
+//
+// True optimum on the circle of radius 2 closest to (3, 2). The
+// optimum is on the ray from origin to (3, 2), at distance 2:
+// scale (3, 2) by 2/√13. x* = 6/√13 ≈ 1.6641, y* = 4/√13 ≈ 1.1094.
+// ─────────────────────────────────────────────────────────────────
+struct NonlinearEqNlp;
+
+impl SqpProblemSpec for NonlinearEqNlp {
+    fn n(&self) -> usize {
+        2
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![1.0, 1.0] // on the feasible disk interior
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF; 2], vec![NLP_UPPER_BOUND_INF; 2])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0], vec![0.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        0.5 * ((x[0] - 3.0).powi(2) + (x[1] - 2.0).powi(2))
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] - 3.0, x[1] - 2.0]
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] * x[0] + x[1] * x[1] - 4.0]
+    }
+    fn eval_jac_c(&mut self, x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 2,
+            irow: vec![1, 1],
+            jcol: vec![1, 2],
+            vals: vec![2.0 * x[0], 2.0 * x[1]],
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], lambda_g: &[f64]) -> Triplet {
+        // ∇²f = I; ∇²c = 2I. So ∇²L = I + λ_g · 2I = (1 + 2λ_g) I.
+        let diag = 1.0 + 2.0 * lambda_g[0];
+        Triplet {
+            n_rows: 2,
+            n_cols: 2,
+            irow: vec![1, 2],
+            jcol: vec![1, 2],
+            vals: vec![diag, diag],
+        }
+    }
+}
+
+#[test]
+#[ignore = "full-step SQP without globalization diverges on nonlinear problems; re-enable when c5 lands the filter line search"]
+fn sqp_optimize_nonlinear_eq_nlp_converges() {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut alg = SqpAlgorithm::new(qp_solver, SqpOptions::default());
+    let mut nlp = NonlinearEqNlp;
+
+    let res = alg.optimize(&mut nlp).unwrap();
+    assert_eq!(
+        res.status,
+        SqpStatus::Optimal,
+        "status = {:?}, n_iter = {}",
+        res.status,
+        res.n_iter
+    );
+
+    // x* = (6/√13, 4/√13) ≈ (1.6641, 1.1094).
+    let scale = 2.0 / 13.0_f64.sqrt();
+    let expected = [3.0 * scale, 2.0 * scale];
+    for (i, (a, b)) in res.x.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-6,
+            "x[{i}] = {a}, expected {b}, diff = {}",
+            (a - b).abs(),
+        );
+    }
+    // Constraint violation should be < tol.
+    let cx = res.x[0] * res.x[0] + res.x[1] * res.x[1] - 4.0;
+    assert!(cx.abs() < 1e-6, "‖c(x*)‖ = {} but should be near zero", cx);
 }
 
 #[test]
