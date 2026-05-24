@@ -40,9 +40,16 @@ stdio.
 | `diagnose`            | Common Ipopt-failure heuristics with severity-tagged findings           |
 | `compare_runs`        | Side-by-side comparison of multiple reports                             |
 
-## Wire it into Claude Code
+## Wire it into an MCP client
 
-Add to `~/.claude/settings.json` (or the project's `.claude/settings.json`):
+The same server (`pounce-studio-mcp`) speaks stdio MCP and works with any
+client that follows the spec. The config object is identical across
+clients; only the file location differs.
+
+### Claude Code
+
+Add to `~/.claude/settings.json` (user-wide) or
+`.claude/settings.json` in a project:
 
 ```json
 {
@@ -54,7 +61,47 @@ Add to `~/.claude/settings.json` (or the project's `.claude/settings.json`):
 }
 ```
 
-Then in a session you can ask things like:
+### Claude Desktop
+
+Add to `claude_desktop_config.json`:
+
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "pounce-studio": {
+      "command": "pounce-studio-mcp"
+    }
+  }
+}
+```
+
+If `pounce-studio-mcp` is installed inside a venv that the desktop app
+can't see on `$PATH`, give the absolute path instead:
+
+```json
+{
+  "mcpServers": {
+    "pounce-studio": {
+      "command": "/abs/path/to/studio/mcp/.venv/bin/pounce-studio-mcp"
+    }
+  }
+}
+```
+
+Restart the app after editing the config.
+
+### Other MCP clients
+
+Cursor, Zed, and Continue all consume the same `mcpServers` object —
+check each client's docs for the file path. The `command` value is
+always `pounce-studio-mcp` (or an absolute path).
+
+### Example prompts
+
+Once wired up:
 
 - "Load `studio/mcp/fixtures/rosenbrock-stalled.json` and diagnose what went wrong."
 - "Compare `rosenbrock.json` against `rosenbrock-stalled.json` and tell me what changed."
@@ -87,3 +134,49 @@ python -m pytest tests/ -v
 
 The Rust side has its own tests covering the same logic at the source —
 run with `cargo test -p pounce-studio-core` from the repo root.
+
+## Troubleshooting
+
+**`ImportError: cannot import name '_native' from 'pounce_studio_mcp'`**
+The native extension hasn't been built. Activate the venv and run
+`maturin develop --release` inside `studio/mcp/`. If pytest still
+fails with this even after a successful build, you're probably running
+Python from a working directory that puts `studio/mcp/` on `sys.path`
+and shadows the installed wheel — activate the venv (`source
+.venv/bin/activate`) so the editable install wins.
+
+**`maturin: Couldn't find a virtualenv or conda environment`**
+`maturin develop` needs an active venv to know where to install. Create
+one with `python3 -m venv .venv && source .venv/bin/activate` and rerun.
+
+**Wheel install fails with `Cannot uninstall <pkg>, RECORD file not found`**
+A system-Python install is blocking pip's upgrade path. Always work
+inside a venv for this package; never `pip install` it against the
+system interpreter.
+
+**Rust toolchain too old**
+PyO3 0.22 requires rustc 1.75+. Update via `rustup update stable`.
+
+**`Error: unexpected schema "..." (expected "pounce.solve-report/v1")`**
+The JSON file isn't a pounce solve report — maybe an AMPL `.sol`, a
+different solver's output, or a hand-written file. Regenerate from the
+pounce CLI with `--json-output <path>`.
+
+**`load_solve_report` works but `convergence_trace` returns empty arrays**
+The report was written at `--json-detail summary` (the default), which
+omits per-iteration history. Rerun the solve with `--json-detail full`.
+
+**`pounce-studio-mcp: command not found` from an MCP client**
+Either the venv isn't activated for the client's environment, or the
+client doesn't inherit your shell `$PATH`. Use the absolute path to the
+venv-installed script (see the Claude Desktop snippet above).
+
+## See also
+
+- `crates/pounce-studio-core/README.md` — the Rust core that does the
+  actual analysis, plus the `pounce-studio inspect` CLI which renders
+  the same Markdown summary for shell / CI use without an MCP client.
+- `tools/iter-dump/FORMAT.md` — POUNCEIT v1 binary spec. The MCP tools
+  currently only consume JSON solve reports; the binary `.iterdump`
+  format is handled by `pounce-studio dump-summary <trace.bin>` on the
+  CLI side, and exposed to Python via `_native.IterDump.from_path`.
