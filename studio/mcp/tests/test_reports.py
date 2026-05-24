@@ -122,7 +122,7 @@ def test_render_markdown():
 def test_iter_dump_parses_real_trace():
     iterdump = FIXTURES / "eq-quadratic.iterdump"
     d = _native.IterDump.from_path(str(iterdump))
-    header = json.loads(d.header_json())
+    header = json.loads(d.header())
     assert header["format_version"] == 1
     assert header["name"] == "eq-quadratic"
     assert d.record_count() >= 1
@@ -139,3 +139,89 @@ def test_main_module_does_not_run_server_on_import():
     # presence of `main` is verified by the fact that the module
     # imports it from `.server`.
     assert hasattr(mod, "main")
+
+
+# --- MCP tool wrapper tests ------------------------------------------
+#
+# FastMCP's @mcp.tool() decorator returns the original function so the
+# wrapped function stays directly callable. We exercise each tool's
+# Python path here without going through the stdio protocol.
+
+
+def test_tool_load_solve_report():
+    from pounce_studio_mcp.server import load_solve_report
+
+    out = load_solve_report(str(ROSENBROCK))
+    assert out["status"] == "SolveSucceeded"
+
+
+def test_tool_convergence_trace_full_and_subset():
+    from pounce_studio_mcp.server import convergence_trace
+
+    full = convergence_trace(str(ROSENBROCK))
+    assert set(full) >= {"iter", "objective", "inf_pr", "inf_du", "mu"}
+    sub = convergence_trace(str(ROSENBROCK), columns=["iter", "mu"])
+    assert set(sub) == {"iter", "mu"}
+
+
+def test_tool_convergence_trace_rejects_unknown_column():
+    from pounce_studio_mcp.server import convergence_trace
+
+    with pytest.raises(ValueError):
+        convergence_trace(str(ROSENBROCK), columns=["bogus"])
+
+
+def test_tool_find_stalls_returns_count():
+    from pounce_studio_mcp.server import find_stalls
+
+    out = find_stalls(str(ROSENBROCK))
+    assert "windows" in out and "count" in out
+    assert out["count"] == len(out["windows"])
+
+
+def test_tool_diagnose_includes_findings_key():
+    from pounce_studio_mcp.server import diagnose
+
+    out = diagnose(str(ROSENBROCK))
+    assert "findings" in out and "n_findings" in out
+    assert out["n_findings"] == len(out["findings"])
+
+
+def test_tool_restoration_windows():
+    from pounce_studio_mcp.server import restoration_windows
+
+    out = restoration_windows(str(ROSENBROCK))
+    assert out["windows"] == [] and out["count"] == 0
+
+
+def test_tool_get_iterate():
+    from pounce_studio_mcp.server import get_iterate
+
+    out = get_iterate(str(ROSENBROCK), 0)
+    assert out["iter"] == 0
+
+
+def test_tool_compare_runs_label_mismatch_raises():
+    from pounce_studio_mcp.server import compare_runs
+
+    with pytest.raises(ValueError):
+        compare_runs([str(ROSENBROCK), str(STALLED)], labels=["only-one"])
+
+
+def test_tool_compare_runs():
+    from pounce_studio_mcp.server import compare_runs
+
+    out = compare_runs([str(ROSENBROCK), str(STALLED)], labels=["ok", "stalled"])
+    assert out["n_runs"] == 2
+
+
+def test_memoization_returns_consistent_results():
+    # The Rust side caches summarize/diagnose/etc.; call twice and
+    # verify the results match (the cache must return the same JSON).
+    r = R.load_report(ROSENBROCK)
+    a = R.diagnose(r)
+    b = R.diagnose(r)
+    assert a == b
+    a2 = R.summarize(r)
+    b2 = R.summarize(r)
+    assert a2 == b2

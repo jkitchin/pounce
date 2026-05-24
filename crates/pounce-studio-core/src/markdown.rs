@@ -26,13 +26,13 @@ fn render_inspect_into(report: &SolveReport, out: &mut String) -> std::fmt::Resu
 
     writeln!(out, "# Pounce solve report")?;
     writeln!(out)?;
-    writeln!(out, "- **status**: `{}`", summary.status)?;
+    writeln!(out, "- **status**: `{}`", safe_code(&summary.status))?;
     writeln!(
         out,
         "- **solver**: {} {}",
         summary.solver, summary.solver_version
     )?;
-    writeln!(out, "- **result_id**: `{}`", summary.result_id)?;
+    writeln!(out, "- **result_id**: `{}`", safe_code(&summary.result_id))?;
     writeln!(
         out,
         "- **problem**: {} vars, {} constraints",
@@ -81,7 +81,12 @@ fn render_inspect_into(report: &SolveReport, out: &mut String) -> std::fmt::Resu
                 Severity::Warning => "warning",
                 Severity::Error => "error",
             };
-            writeln!(out, "- **{tag}** `{}`: {}", f.code, f.message)?;
+            writeln!(
+                out,
+                "- **{tag}** `{}`: {}",
+                safe_code(f.code),
+                safe_text(&f.message),
+            )?;
         }
         writeln!(out)?;
     }
@@ -156,6 +161,28 @@ fn render_inspect_into(report: &SolveReport, out: &mut String) -> std::fmt::Resu
     Ok(())
 }
 
+/// Sanitise a string for use inside a `` `...` `` inline code span.
+///
+/// CommonMark forbids escaping inside code spans — a backtick simply
+/// terminates the span — so the only robust mitigation is to replace
+/// the offending characters. We swap backticks for U+02CB (`ˋ`,
+/// MODIFIER LETTER GRAVE ACCENT) which is visually similar and inert
+/// in markdown.
+fn safe_code(s: &str) -> String {
+    if s.contains('`') {
+        s.replace('`', "\u{02CB}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Sanitise free text that ends up at the end of a list item or other
+/// markdown context. Defends against breaking out of inline spans;
+/// currently just neutralises stray backticks.
+fn safe_text(s: &str) -> String {
+    safe_code(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +252,37 @@ mod tests {
         assert!(md.contains("# Pounce solve report"));
         assert!(md.contains("SolveSucceeded"));
         assert!(md.contains("pounce 0.1.0"));
+    }
+
+    /// Backticks in code-span interpolations would terminate the span
+    /// in CommonMark. `safe_code` replaces them with a modifier letter
+    /// grave so the rendered markdown stays well-formed even when a
+    /// status / result_id / finding code carries one.
+    #[test]
+    fn code_spans_escape_backticks() {
+        let mut r = minimal_report();
+        r.solution.status = "Weird`Status".into();
+        r.fair_metadata.result_id = "id-with-`-tick".into();
+        let md = render_inspect(&r);
+        // No backtick should appear inside the interpolated values.
+        let between = |md: &str, start: &str| {
+            md.split(start)
+                .nth(1)
+                .and_then(|s| s.split('`').next())
+                .unwrap_or("")
+                .to_string()
+        };
+        assert!(!between(&md, "status**: `").contains('`'));
+        assert!(!between(&md, "result_id**: `").contains('`'));
+    }
+
+    /// A report with no captured iterations should still render a
+    /// valid Markdown document, just without the trajectory tables.
+    #[test]
+    fn renders_with_empty_iterations() {
+        let md = render_inspect(&minimal_report());
+        assert!(!md.contains("## Convergence trajectory"));
+        assert!(!md.contains("## Stall windows"));
+        assert!(!md.contains("## Restoration windows"));
     }
 }

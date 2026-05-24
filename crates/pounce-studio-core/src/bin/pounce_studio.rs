@@ -78,7 +78,14 @@ fn cmd_dump_summary(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     use std::fmt::Write as _;
     writeln!(out, "# POUNCEIT v{} trace", trace.header.format_version)?;
     writeln!(out)?;
-    writeln!(out, "- **name**: `{}`", trace.header.name)?;
+    // header.name comes from the writer-side env var `IPOPT_ITER_DUMP_NAME`
+    // and could legitimately carry odd characters — sanitise before
+    // dropping it into an inline code span.
+    writeln!(
+        out,
+        "- **name**: `{}`",
+        trace.header.name.replace('`', "\u{02CB}"),
+    )?;
     writeln!(
         out,
         "- **n** (variables): {}, **m** (constraints): {}",
@@ -88,12 +95,29 @@ fn cmd_dump_summary(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     writeln!(out)?;
     writeln!(out, "| iter | mu | inf_pr | inf_du | α_pr | α_du | f |")?;
     writeln!(out, "|---|---|---|---|---|---|---|")?;
-    for r in &trace.records {
+    // Cap printed rows for readability; show first 20 and last 5 with
+    // an elision row in between when the trace is long. Matches the
+    // policy used by the JSON-side `inspect` Markdown renderer.
+    let n = trace.records.len();
+    let to_show: Vec<usize> = if n <= 30 {
+        (0..n).collect()
+    } else {
+        (0..20).chain((n - 5)..n).collect()
+    };
+    let mut last: Option<usize> = None;
+    for i in to_show {
+        if let Some(prev) = last {
+            if i != prev + 1 {
+                writeln!(out, "| ... | | | | | | |")?;
+            }
+        }
+        let r = &trace.records[i];
         writeln!(
             out,
             "| {} | {:.2e} | {:.2e} | {:.2e} | {:.3} | {:.3} | {:.6e} |",
             r.iter, r.mu, r.inf_pr, r.inf_du, r.alpha_pr, r.alpha_du, r.f,
         )?;
+        last = Some(i);
     }
     Ok(out)
 }

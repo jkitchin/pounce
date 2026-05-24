@@ -93,11 +93,19 @@ impl IterDumpTrace {
 
     /// Lazy iterator over records. Each call to `next` parses one
     /// record, so memory stays bounded by the largest single record.
-    /// Useful when the trace is hundreds of MB.
+    /// Useful when the trace is hundreds of MB. The iterator is
+    /// **fused**: after the first parse error it returns `None`
+    /// forever rather than retrying against an advanced cursor.
     pub fn lazy_iter(bytes: &[u8]) -> Result<(IterDumpHeader, LazyRecords<'_>), Error> {
         let mut cur = Cursor::new(bytes);
         let header = parse_header(&mut cur)?;
-        Ok((header, LazyRecords { cur }))
+        Ok((
+            header,
+            LazyRecords {
+                cur,
+                poisoned: false,
+            },
+        ))
     }
 }
 
@@ -285,16 +293,23 @@ fn parse_record(cur: &mut Cursor<'_>) -> Result<IterDumpRecord, Error> {
 
 pub struct LazyRecords<'a> {
     cur: Cursor<'a>,
+    poisoned: bool,
 }
 
 impl Iterator for LazyRecords<'_> {
     type Item = Result<IterDumpRecord, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur.remaining() == 0 {
+        if self.poisoned || self.cur.remaining() == 0 {
             return None;
         }
-        Some(parse_record(&mut self.cur))
+        match parse_record(&mut self.cur) {
+            Ok(rec) => Some(Ok(rec)),
+            Err(e) => {
+                self.poisoned = true;
+                Some(Err(e))
+            }
+        }
     }
 }
 
@@ -398,6 +413,30 @@ mod tests {
         let first = iter.next().expect("one rec").expect("ok");
         assert_eq!(first.iter, 0);
         assert!(iter.next().is_none());
+    }
+
+    /// After a parse error the lazy iterator must fuse — i.e. return
+    /// `None` from every subsequent call rather than retrying against
+    /// an advanced cursor.
+    #[test]
+    fn lazy_iter_fuses_after_error() {
+        // Build a stream with a valid header followed by garbage. The
+        // first `next()` should return Err, and every subsequent call
+        // should return None.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        for _ in 0..5 {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+        }
+        // No name. Then append a few bytes that don't form a record.
+        bytes.extend_from_slice(&[0xff; 7]);
+        let (_h, mut it) = IterDumpTrace::lazy_iter(&bytes).expect("hdr");
+        let first = it.next().expect("first call yields an item");
+        assert!(first.is_err(), "expected parse error, got {first:?}");
+        for _ in 0..3 {
+            assert!(it.next().is_none(), "iterator should fuse after error");
+        }
     }
 
     /// Truncation mid-record (after the scalar block, partway through

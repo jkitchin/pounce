@@ -10,9 +10,17 @@
 //! objects, and the Python wrapper does the `json.loads`. Trivial code
 //! on both sides, no `pythonize` dep, plenty fast at our data sizes
 //! (a Full-detail solve report is a few hundred KB).
+//!
+//! Method names intentionally do **not** carry a `_json` suffix: the
+//! Python wrapper hides marshalling, so from a caller's perspective
+//! `Report.summarize()` and `R.summarize(report)` are the same
+//! operation. The Rust-side return is a string; the Python wrapper
+//! returns the parsed dict.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![allow(unsafe_op_in_unsafe_fn)]
+
+use std::cell::OnceCell;
 
 use pounce_studio_core as core;
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -36,14 +44,52 @@ fn json_or_err<T: serde::Serialize>(value: T) -> PyResult<String> {
     serde_json::to_string(&value).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Cache that holds a computed JSON string for the lifetime of a
+/// [`PyReport`]. Uses `OnceCell` so successful caching is one-shot;
+/// errors are not cached (a future call re-tries the computation).
+type JsonCache = OnceCell<String>;
+
+fn cached<F>(cell: &JsonCache, compute: F) -> PyResult<String>
+where
+    F: FnOnce() -> PyResult<String>,
+{
+    if let Some(s) = cell.get() {
+        return Ok(s.clone());
+    }
+    let s = compute()?;
+    let _ = cell.set(s.clone()); // ignore "already set" race (GIL prevents it anyway)
+    Ok(s)
+}
+
 /// A parsed `pounce.solve-report/v1` JSON document.
 ///
 /// Construct via [`Report::from_bytes`] or [`Report::from_path`]. The
-/// instance owns the parsed [`core::SolveReport`]; the analysis methods
-/// borrow it without re-parsing.
-#[pyclass(name = "Report")]
+/// instance owns the parsed [`core::SolveReport`]; analysis methods
+/// borrow it without re-parsing, and parameter-less results
+/// (`summarize`, `convergence_trace`, `restoration_windows`,
+/// `diagnose`, `render_markdown`) are memoised per-instance for cheap
+/// repeat MCP-tool calls.
+#[pyclass(name = "Report", unsendable)]
 struct PyReport {
     inner: core::SolveReport,
+    summary_cache: JsonCache,
+    trace_cache: JsonCache,
+    restoration_cache: JsonCache,
+    diagnose_cache: JsonCache,
+    markdown_cache: OnceCell<String>,
+}
+
+impl PyReport {
+    fn from_inner(inner: core::SolveReport) -> Self {
+        Self {
+            inner,
+            summary_cache: JsonCache::new(),
+            trace_cache: JsonCache::new(),
+            restoration_cache: JsonCache::new(),
+            diagnose_cache: JsonCache::new(),
+            markdown_cache: OnceCell::new(),
+        }
+    }
 }
 
 #[pymethods]
@@ -51,33 +97,38 @@ impl PyReport {
     #[staticmethod]
     fn from_bytes(bytes: &Bound<'_, PyBytes>) -> PyResult<Self> {
         let inner = core::SolveReport::from_json_slice(bytes.as_bytes()).map_err(err_to_py)?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
     }
 
     #[staticmethod]
     fn from_path(path: &str) -> PyResult<Self> {
         let bytes = std::fs::read(path).map_err(|e| PyIOError::new_err(e.to_string()))?;
         let inner = core::SolveReport::from_json_slice(&bytes).map_err(err_to_py)?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
     }
 
-    fn summarize_json(&self) -> PyResult<String> {
-        json_or_err(core::summarize(&self.inner))
+    fn summarize(&self) -> PyResult<String> {
+        cached(&self.summary_cache, || {
+            json_or_err(core::summarize(&self.inner))
+        })
     }
 
-    fn convergence_trace_json(&self) -> PyResult<String> {
-        json_or_err(core::analysis::convergence_trace(&self.inner))
+    fn convergence_trace(&self) -> PyResult<String> {
+        cached(&self.trace_cache, || {
+            json_or_err(core::analysis::convergence_trace(&self.inner))
+        })
     }
 
     #[pyo3(signature = (min_window = None, max_log10_progress = None))]
-    fn find_stalls_json(
+    fn find_stalls(
         &self,
         min_window: Option<usize>,
         max_log10_progress: Option<f64>,
     ) -> PyResult<String> {
         // Partial overrides are honoured: passing only one of the two
         // tuneables substitutes the default for the other. Defaults
-        // mirror `core::find_stalls`.
+        // mirror `core::find_stalls`. Not memoised because results are
+        // parameter-dependent.
         let min_window = min_window.unwrap_or(5);
         let max_log10_progress = max_log10_progress.unwrap_or(0.3);
         json_or_err(core::analysis::find_stalls_with(
@@ -87,28 +138,50 @@ impl PyReport {
         ))
     }
 
-    fn restoration_windows_json(&self) -> PyResult<String> {
-        json_or_err(core::analysis::restoration_windows(&self.inner))
+    fn restoration_windows(&self) -> PyResult<String> {
+        cached(&self.restoration_cache, || {
+            json_or_err(core::analysis::restoration_windows(&self.inner))
+        })
     }
 
-    fn diagnose_json(&self) -> PyResult<String> {
-        json_or_err(core::diagnose(&self.inner))
+    fn diagnose(&self) -> PyResult<String> {
+        cached(&self.diagnose_cache, || {
+            json_or_err(core::diagnose(&self.inner))
+        })
     }
 
-    fn get_iterate_json(&self, k: usize) -> PyResult<String> {
+    fn get_iterate(&self, k: usize) -> PyResult<String> {
+        // Not memoised — parameter-dependent.
         let aug = core::get_iterate(&self.inner, k).map_err(err_to_py)?;
         json_or_err(aug)
     }
 
     fn render_markdown(&self) -> String {
-        core::markdown::render_inspect(&self.inner)
+        if let Some(s) = self.markdown_cache.get() {
+            return s.clone();
+        }
+        let s = core::markdown::render_inspect(&self.inner);
+        let _ = self.markdown_cache.set(s.clone());
+        s
     }
 }
 
 /// A parsed POUNCEIT v1 binary trace.
-#[pyclass(name = "IterDump")]
+#[pyclass(name = "IterDump", unsendable)]
 struct PyIterDump {
     inner: core::IterDumpTrace,
+    header_cache: JsonCache,
+    records_cache: JsonCache,
+}
+
+impl PyIterDump {
+    fn from_inner(inner: core::IterDumpTrace) -> Self {
+        Self {
+            inner,
+            header_cache: JsonCache::new(),
+            records_cache: JsonCache::new(),
+        }
+    }
 }
 
 #[pymethods]
@@ -116,22 +189,22 @@ impl PyIterDump {
     #[staticmethod]
     fn from_bytes(bytes: &Bound<'_, PyBytes>) -> PyResult<Self> {
         let inner = core::IterDumpTrace::from_bytes(bytes.as_bytes()).map_err(err_to_py)?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
     }
 
     #[staticmethod]
     fn from_path(path: &str) -> PyResult<Self> {
         let bytes = std::fs::read(path).map_err(|e| PyIOError::new_err(e.to_string()))?;
         let inner = core::IterDumpTrace::from_bytes(&bytes).map_err(err_to_py)?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
     }
 
-    fn header_json(&self) -> PyResult<String> {
-        json_or_err(&self.inner.header)
+    fn header(&self) -> PyResult<String> {
+        cached(&self.header_cache, || json_or_err(&self.inner.header))
     }
 
-    fn records_json(&self) -> PyResult<String> {
-        json_or_err(&self.inner.records)
+    fn records(&self) -> PyResult<String> {
+        cached(&self.records_cache, || json_or_err(&self.inner.records))
     }
 
     fn record_count(&self) -> usize {
@@ -148,7 +221,7 @@ impl PyIterDump {
 /// `RefCell` borrows. The actual borrow happens per-iteration and is
 /// dropped immediately after the inner `SolveReport` is cloned out.
 #[pyfunction]
-fn compare_reports_json(py: Python<'_>, pairs: Vec<(String, Py<PyReport>)>) -> PyResult<String> {
+fn compare_reports(py: Python<'_>, pairs: Vec<(String, Py<PyReport>)>) -> PyResult<String> {
     let owned: Vec<(String, core::SolveReport)> = pairs
         .iter()
         .map(|(label, handle)| {
@@ -165,7 +238,7 @@ fn compare_reports_json(py: Python<'_>, pairs: Vec<(String, Py<PyReport>)>) -> P
 fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReport>()?;
     m.add_class::<PyIterDump>()?;
-    m.add_function(wrap_pyfunction!(compare_reports_json, m)?)?;
+    m.add_function(wrap_pyfunction!(compare_reports, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add(
         "SOLVE_REPORT_SCHEMA",
