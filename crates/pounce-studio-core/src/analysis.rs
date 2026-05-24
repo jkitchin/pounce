@@ -302,9 +302,7 @@ pub fn diagnose(report: &SolveReport) -> Vec<Finding> {
                 "Restoration phase entered {} time(s); {} outer iters spent in \
                  restoration ({:.3}s). Indicates the line search couldn't make \
                  progress on the original problem.",
-                stats.restoration_calls,
-                stats.restoration_outer_iters,
-                stats.restoration_wall_secs,
+                stats.restoration_calls, stats.restoration_outer_iters, stats.restoration_wall_secs,
             ),
         });
     }
@@ -556,9 +554,7 @@ mod tests {
     #[test]
     fn stall_detection_progress_not_flagged() {
         // 5 iters where inf_du drops by orders of magnitude each step.
-        let iters = (0..5)
-            .map(|i| iter(i, 0.1, 10f64.powi(-i)))
-            .collect();
+        let iters = (0..5).map(|i| iter(i, 0.1, 10f64.powi(-i))).collect();
         let stalls = find_stalls(&report_with(iters));
         assert!(stalls.is_empty(), "got {stalls:?}");
     }

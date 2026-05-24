@@ -291,7 +291,9 @@ mod tests {
         // One iteration record.
         buf.extend_from_slice(&0u32.to_le_bytes()); // iter = 0
         buf.extend_from_slice(&0u32.to_le_bytes()); // status = 0
-        for v in [0.1, 0.99, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 2.0, 0.5, 2.0, 0.25, 17.0_f64] {
+        for v in [
+            0.1, 0.99, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 2.0, 0.5, 2.0, 0.25, 17.0_f64,
+        ] {
             buf.extend_from_slice(&v.to_le_bytes());
         }
         // x (n=4)

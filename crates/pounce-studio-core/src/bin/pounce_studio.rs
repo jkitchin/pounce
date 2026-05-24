@@ -12,9 +12,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use pounce_studio_core::{
-    iter_dump::IterDumpTrace, markdown::render_inspect, report::SolveReport,
-};
+use pounce_studio_core::{iter_dump::IterDumpTrace, markdown::render_inspect, report::SolveReport};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

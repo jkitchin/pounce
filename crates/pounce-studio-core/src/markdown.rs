@@ -43,9 +43,17 @@ fn render_inspect_into(report: &SolveReport, out: &mut String) -> std::fmt::Resu
         "- **iterations**: {} ({} captured in history)",
         summary.iteration_count, summary.iterations_captured
     )?;
-    writeln!(out, "- **final objective**: {:.6e}", summary.final_objective)?;
+    writeln!(
+        out,
+        "- **final objective**: {:.6e}",
+        summary.final_objective
+    )?;
     writeln!(out, "- **KKT error**: {:.2e}", summary.final_kkt_error)?;
-    writeln!(out, "- **dual infeasibility**: {:.2e}", summary.final_dual_inf)?;
+    writeln!(
+        out,
+        "- **dual infeasibility**: {:.2e}",
+        summary.final_dual_inf
+    )?;
     writeln!(
         out,
         "- **constraint violation**: {:.2e}",

@@ -77,11 +77,9 @@ impl PyReport {
     ) -> PyResult<String> {
         let stalls = match (min_window, max_log10_progress) {
             (None, None) => core::find_stalls(&self.inner),
-            (a, b) => core::analysis::find_stalls_with(
-                &self.inner,
-                a.unwrap_or(5),
-                b.unwrap_or(0.3),
-            ),
+            (a, b) => {
+                core::analysis::find_stalls_with(&self.inner, a.unwrap_or(5), b.unwrap_or(0.3))
+            }
         };
         json_or_err(stalls)
     }

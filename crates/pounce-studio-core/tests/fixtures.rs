@@ -79,9 +79,9 @@ fn diagnose_success_includes_converged() {
 fn diagnose_stalled_includes_max_iter_error() {
     let r = SolveReport::from_json_str(STALLED).unwrap();
     let findings = diagnose(&r);
-    assert!(findings.iter().any(|f| {
-        f.code == "max_iter_exceeded" && matches!(f.severity, Severity::Error)
-    }));
+    assert!(findings
+        .iter()
+        .any(|f| { f.code == "max_iter_exceeded" && matches!(f.severity, Severity::Error) }));
 }
 
 #[test]
