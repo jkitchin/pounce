@@ -1,0 +1,24 @@
+[package]
+name = "pounce-studio-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust parsers and analysis helpers for pounce solve reports and POUNCEIT iter-dumps."
+
+[lib]
+path = "src/lib.rs"
+
+# Inspector CLI. The library itself is WASM-clean (no fs); this binary
+# does the file I/O and is built only on native targets.
+[[bin]]
+name = "pounce-studio"
+path = "src/bin/pounce_studio.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

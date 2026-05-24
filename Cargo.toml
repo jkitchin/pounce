@@ -15,6 +15,7 @@ members = [
     "crates/pounce-cinterface",
     "crates/pounce-py",
     "crates/pounce-cli",
+    "crates/pounce-studio-core",
     "benchmarks/cutest",
     "tools/iter-diff",
 ]
@@ -37,6 +38,7 @@ default-members = [
     "crates/pounce-sensitivity",
     "crates/pounce-cinterface",
     "crates/pounce-cli",
+    "crates/pounce-studio-core",
     "benchmarks/cutest",
     "tools/iter-diff",
 ]
