@@ -119,15 +119,21 @@ impl<'a> Cursor<'a> {
     }
 
     fn read(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if self.off + n > self.buf.len() {
+        // Use checked arithmetic: an attacker-supplied length could
+        // overflow `self.off + n` on 32-bit targets.
+        let end = self
+            .off
+            .checked_add(n)
+            .ok_or_else(|| Error::IterDump(format!("length overflow: off={} + n={n}", self.off)))?;
+        if end > self.buf.len() {
             return Err(Error::IterDump(format!(
                 "truncated: wanted {n} bytes at offset {}, file is {} bytes",
                 self.off,
                 self.buf.len()
             )));
         }
-        let out = &self.buf[self.off..self.off + n];
-        self.off += n;
+        let out = &self.buf[self.off..end];
+        self.off = end;
         Ok(out)
     }
 
@@ -148,7 +154,21 @@ impl<'a> Cursor<'a> {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let bytes = self.read(len * 8)?;
+        // Cap allocation by the bytes actually left in the buffer
+        // before allocating. A corrupt 4-byte length field could
+        // otherwise ask for tens of GiB and either OOM-crash the
+        // process or DoS the parent. The subsequent `read()` would
+        // also catch this, but only *after* we've allocated.
+        let max_possible = self.remaining() / 8;
+        if len > max_possible {
+            return Err(Error::IterDump(format!(
+                "vector length {len} exceeds remaining stream capacity ({max_possible} f64s)",
+            )));
+        }
+        let byte_len = len
+            .checked_mul(8)
+            .ok_or_else(|| Error::IterDump(format!("vector byte-size overflow at len={len}")))?;
+        let bytes = self.read(byte_len)?;
         let mut out = Vec::with_capacity(len);
         for chunk in bytes.chunks_exact(8) {
             out.push(f64::from_le_bytes([
@@ -219,6 +239,14 @@ fn parse_record(cur: &mut Cursor<'_>) -> Result<IterDumpRecord, Error> {
     let v_u = cur.read_vec()?;
 
     let filter_count = cur.read_u32()? as usize;
+    // Each filter entry is two f64s (16 bytes); cap allocation by the
+    // remaining stream capacity before reserving.
+    let max_filter = cur.remaining() / 16;
+    if filter_count > max_filter {
+        return Err(Error::IterDump(format!(
+            "filter_count {filter_count} exceeds remaining stream capacity ({max_filter} entries)",
+        )));
+    }
     let mut filter = Vec::with_capacity(filter_count);
     for _ in 0..filter_count {
         let theta = cur.read_f64()?;
@@ -370,5 +398,51 @@ mod tests {
         let first = iter.next().expect("one rec").expect("ok");
         assert_eq!(first.iter, 0);
         assert!(iter.next().is_none());
+    }
+
+    /// Truncation mid-record (after the scalar block, partway through
+    /// the iterate-vector block) should error rather than panic.
+    #[test]
+    fn truncated_mid_record_errors_cleanly() {
+        let bytes = synth_trace();
+        // Header is 32+5 = 37 bytes; scalar block is 120 bytes. Cut
+        // partway into the first vector header.
+        let cut = 37 + 120 + 2;
+        let err = IterDumpTrace::from_bytes(&bytes[..cut]).expect_err("should fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("truncated"), "got: {msg}");
+    }
+
+    /// An attacker-supplied huge `len` for a vector must be rejected
+    /// before we allocate. Tamper a length field to claim 1B entries —
+    /// the parser should refuse, not OOM.
+    #[test]
+    fn rejects_oversized_vector_length() {
+        let mut bytes = synth_trace();
+        // x is the first vector after the 120-byte scalar block.
+        // Header = 37 bytes; x_len_offset = 37 + 120 = 157.
+        let x_len_offset = 37 + 120;
+        bytes[x_len_offset..x_len_offset + 4].copy_from_slice(&1_000_000_000_u32.to_le_bytes());
+        let err = IterDumpTrace::from_bytes(&bytes).expect_err("should fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("exceeds remaining stream capacity"),
+            "got: {msg}",
+        );
+    }
+
+    /// Same defence for the filter block.
+    #[test]
+    fn rejects_oversized_filter_count() {
+        let mut bytes = synth_trace();
+        // The last 4 bytes are filter_count=0; flip to a huge value.
+        let n = bytes.len();
+        bytes[n - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = IterDumpTrace::from_bytes(&bytes).expect_err("should fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("exceeds remaining stream capacity"),
+            "got: {msg}",
+        );
     }
 }

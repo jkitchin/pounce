@@ -55,9 +55,9 @@ def convergence_trace(path: str, columns: list[str] | None = None) -> dict[str, 
         return full
     unknown = [c for c in columns if c not in full]
     if unknown:
-        return {
-            "error": f"unknown trace column(s): {unknown}. valid: {list(full)}",
-        }
+        raise ValueError(
+            f"unknown trace column(s): {unknown}. valid: {list(full)}"
+        )
     return {c: full[c] for c in columns}
 
 
@@ -150,12 +150,10 @@ def compare_runs(paths: list[str], labels: list[str] | None = None) -> dict[str,
         labels: Optional labels for each report (defaults to the path).
     """
     if labels is not None and len(labels) != len(paths):
-        return {
-            "error": (
-                f"labels length ({len(labels)}) does not match paths length "
-                f"({len(paths)})"
-            )
-        }
+        raise ValueError(
+            f"labels length ({len(labels)}) does not match paths length "
+            f"({len(paths)})"
+        )
     use_labels = labels if labels is not None else paths
     return R.compare([
         (label, R.load_report(p)) for label, p in zip(use_labels, paths)

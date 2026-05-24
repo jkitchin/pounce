@@ -100,6 +100,19 @@ def test_compare_two_runs():
     assert labels == ["ok", "stalled"]
 
 
+def test_compare_accepts_aliased_handle():
+    # Regression: passing the same Report object twice used to panic
+    # because compare_reports_json took PyRef<Report> and two PyRefs
+    # to the same RefCell overlapped.
+    a = R.load_report(ROSENBROCK)
+    cmp = R.compare([("first", a), ("second", a)])
+    assert cmp["n_runs"] == 2
+    labels = [row["label"] for row in cmp["rows"]]
+    assert labels == ["first", "second"]
+    # Both rows must describe the same underlying run.
+    assert cmp["rows"][0]["status"] == cmp["rows"][1]["status"]
+
+
 def test_render_markdown():
     md = R.render_markdown(R.load_report(ROSENBROCK))
     assert "# Pounce solve report" in md
@@ -113,3 +126,16 @@ def test_iter_dump_parses_real_trace():
     assert header["format_version"] == 1
     assert header["name"] == "eq-quadratic"
     assert d.record_count() >= 1
+
+
+def test_main_module_does_not_run_server_on_import():
+    # Regression: __main__.py used to call main() at module top-level,
+    # which would spawn the stdio MCP server on any `import` of the
+    # package. Now guarded by `if __name__ == "__main__"`.
+    import importlib
+
+    mod = importlib.import_module("pounce_studio_mcp.__main__")
+    # Just confirm import returned without hanging or raising; the
+    # presence of `main` is verified by the fact that the module
+    # imports it from `.server`.
+    assert hasattr(mod, "main")

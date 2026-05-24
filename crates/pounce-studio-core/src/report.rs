@@ -6,11 +6,21 @@
 //! it should compile cleanly to `wasm32-unknown-unknown` for the
 //! VS Code webview shell.
 //!
-//! Field-level drift between this definition and the writer is
-//! caught by [`crate::tests`] / fixture round-trips: any new field
-//! added to the writer either deserializes here (we use
-//! `#[serde(default)]` and skip-empty where the writer does) or fails
-//! the schema-tag check.
+//! Drift handling:
+//!
+//! * **New writer fields**: silently ignored (serde's default
+//!   behaviour for unknown JSON keys is to drop them).
+//! * **Renamed or removed writer fields**: hard-fails with serde's
+//!   "missing field" error during deserialization, unless the field
+//!   here is marked `#[serde(default)]`. Additive fields like the
+//!   `restoration_*` counters carry the attribute so old reports
+//!   written before they existed still load.
+//! * **Schema version bump**: caught up front by the schema-tag check
+//!   in [`SolveReport::from_json_slice`] before any field-level
+//!   deserialization runs.
+//!
+//! When extending the writer with a non-additive change, bump the
+//! `schema` tag (`pounce.solve-report/v2`) and add a new branch here.
 
 use serde::{Deserialize, Serialize};
 
@@ -194,9 +204,16 @@ pub struct StatisticsInfo {
     pub num_constr_jac_evals: i32,
     pub num_hess_evals: i32,
     pub total_wallclock_time_secs: f64,
+    // Restoration counters were added to the writer in pounce#12 — let
+    // older reports written before that load with zeros rather than
+    // hard-failing with "missing field".
+    #[serde(default)]
     pub restoration_calls: i32,
+    #[serde(default)]
     pub restoration_inner_iters: i32,
+    #[serde(default)]
     pub restoration_outer_iters: i32,
+    #[serde(default)]
     pub restoration_wall_secs: f64,
 }
 
