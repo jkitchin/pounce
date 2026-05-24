@@ -1,4 +1,4 @@
-"""Smoke tests for the analysis helpers against bundled fixtures."""
+"""Smoke tests for the Rust-backed analysis helpers against bundled fixtures."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from pounce_studio_mcp import reports as R
+from pounce_studio_mcp import _native
 
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -14,10 +15,14 @@ ROSENBROCK = FIXTURES / "rosenbrock.json"
 STALLED = FIXTURES / "rosenbrock-stalled.json"
 
 
-def test_load_report_round_trip():
+def test_native_module_exposes_constants():
+    assert _native.SOLVE_REPORT_SCHEMA == "pounce.solve-report/v1"
+    assert R.SCHEMA == _native.SOLVE_REPORT_SCHEMA
+
+
+def test_load_report_returns_native_handle():
     r = R.load_report(ROSENBROCK)
-    assert r["schema"] == R.SCHEMA
-    assert r["solution"]["status"] == "SolveSucceeded"
+    assert isinstance(r, _native.Report)
 
 
 def test_load_report_rejects_unknown_schema(tmp_path: Path):
@@ -37,33 +42,25 @@ def test_summarize_keys():
     assert s["status"] == "SolveSucceeded"
     assert s["iteration_count"] >= 1
     assert s["iterations_captured"] >= 1
-    assert s["restoration"]["calls"] == 0
-    assert s["problem"]["n_variables"] == 2
+    assert s["restoration_calls"] == 0
+    assert s["n_variables"] == 2
 
 
 def test_convergence_trace_full():
     t = R.convergence_trace(R.load_report(ROSENBROCK))
     n = len(t["iter"])
     assert n >= 1
-    # all columns same length
     for k, v in t.items():
         assert len(v) == n, f"column {k} length mismatch"
 
 
-def test_convergence_trace_subset():
-    t = R.convergence_trace(R.load_report(ROSENBROCK), columns=["iter", "mu"])
-    assert set(t.keys()) == {"iter", "mu"}
-
-
-def test_convergence_trace_rejects_unknown_column():
-    with pytest.raises(R.ReportError):
-        R.convergence_trace(R.load_report(ROSENBROCK), columns=["bogus"])
-
-
 def test_get_iterate_in_range():
     row = R.get_iterate(R.load_report(ROSENBROCK), 0)
+    # `AugmentedIterate` flattens IterRecord fields onto the top level
+    # and appends log10_* derived fields alongside.
     assert row["iter"] == 0
     assert "log10_mu" in row
+    assert "log10_inf_pr" in row
 
 
 def test_get_iterate_out_of_range():
@@ -75,12 +72,23 @@ def test_diagnose_success_case():
     out = R.diagnose(R.load_report(ROSENBROCK))
     codes = {f["code"] for f in out["findings"]}
     assert "converged" in codes
+    # clean convergence shouldn't trip the stall warning
+    assert "convergence_stall" not in codes
 
 
 def test_diagnose_stalled_case():
     out = R.diagnose(R.load_report(STALLED))
     codes = {f["code"] for f in out["findings"]}
     assert "max_iter_exceeded" in codes
+
+
+def test_find_stalls_returns_list():
+    stalls = R.find_stalls(R.load_report(ROSENBROCK))
+    assert isinstance(stalls, list)
+
+
+def test_restoration_windows_empty_on_clean_run():
+    assert R.restoration_windows(R.load_report(ROSENBROCK)) == []
 
 
 def test_compare_two_runs():
@@ -90,3 +98,18 @@ def test_compare_two_runs():
     assert cmp["n_runs"] == 2
     labels = [row["label"] for row in cmp["rows"]]
     assert labels == ["ok", "stalled"]
+
+
+def test_render_markdown():
+    md = R.render_markdown(R.load_report(ROSENBROCK))
+    assert "# Pounce solve report" in md
+    assert "SolveSucceeded" in md
+
+
+def test_iter_dump_parses_real_trace():
+    iterdump = FIXTURES / "eq-quadratic.iterdump"
+    d = _native.IterDump.from_path(str(iterdump))
+    header = json.loads(d.header_json())
+    assert header["format_version"] == 1
+    assert header["name"] == "eq-quadratic"
+    assert d.record_count() >= 1

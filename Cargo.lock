@@ -439,6 +439,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-studio-pyo3"
+version = "0.1.0"
+dependencies = [
+ "pounce-studio-core",
+ "pyo3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -84,3 +84,7 @@ pyomo-pounce/pyomo_pounce.egg-info/
 /studio/**/__pycache__/
 /studio/**/*.egg-info/
 /studio/**/.pytest_cache/
+/studio/**/.venv/
+# maturin emits the native extension next to the package source
+/studio/**/_native*.so
+/studio/**/_native*.pyd

@@ -7,17 +7,26 @@ restoration, stalls, and per-iteration state.
 
 ## Status
 
-Phase 0 spike. Post-mortem analysis of solve-report JSON only — no live
-streaming, no binary `.iterdump` parser yet.
+Phase 0. Post-mortem analysis of solve-report JSON and POUNCEIT v1
+binary `.iterdump` traces. Backed by `pounce-studio-core` via PyO3 —
+the Rust core is the single source of truth, this package marshals
+across the FFI.
 
 ## Install
 
+A Rust toolchain (1.75+) is required because the package builds a
+native extension via maturin.
+
 ```bash
 cd studio/mcp
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+pip install maturin mcp
+maturin develop --release   # builds _native.*.so and installs editable
 ```
 
-This exposes a `pounce-studio-mcp` console script that speaks MCP over stdio.
+This exposes a `pounce-studio-mcp` console script that speaks MCP over
+stdio.
 
 ## Tools
 
@@ -72,5 +81,9 @@ return empty.
 
 ```bash
 cd studio/mcp
+source .venv/bin/activate
 python -m pytest tests/ -v
 ```
+
+The Rust side has its own tests covering the same logic at the source —
+run with `cargo test -p pounce-studio-core` from the repo root.

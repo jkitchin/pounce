@@ -1,0 +1,27 @@
+[package]
+name = "pounce-studio-pyo3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "PyO3 bindings for pounce-studio-core; built as the _native extension module of pounce-studio-mcp."
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Set by maturin when building the wheel; not set during `cargo build`
+# so workspace CI stays Python-toolchain-free.
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pounce-studio-core = { path = "../pounce-studio-core" }
+pyo3 = { version = "0.22", features = ["abi3-py39"] }
+serde = "1"
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -50,8 +50,15 @@ def convergence_trace(path: str, columns: list[str] | None = None) -> dict[str, 
         path: Path to the solve report.
         columns: Subset of column names to return; None means all.
     """
-    report = R.load_report(path)
-    return R.convergence_trace(report, columns)
+    full = R.convergence_trace(R.load_report(path))
+    if columns is None:
+        return full
+    unknown = [c for c in columns if c not in full]
+    if unknown:
+        return {
+            "error": f"unknown trace column(s): {unknown}. valid: {list(full)}",
+        }
+    return {c: full[c] for c in columns}
 
 
 @mcp.tool()
@@ -72,8 +79,8 @@ def get_iterate(path: str, k: int) -> dict[str, Any]:
 @mcp.tool()
 def find_stalls(
     path: str,
-    min_window: int = 3,
-    max_log10_progress: float = 0.5,
+    min_window: int = 5,
+    max_log10_progress: float = 0.3,
 ) -> dict[str, Any]:
     """Detect convergence-stall windows.
 

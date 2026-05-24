@@ -16,6 +16,7 @@ members = [
     "crates/pounce-py",
     "crates/pounce-cli",
     "crates/pounce-studio-core",
+    "crates/pounce-studio-pyo3",
     "benchmarks/cutest",
     "tools/iter-diff",
 ]
