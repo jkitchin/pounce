@@ -75,13 +75,16 @@ impl PyReport {
         min_window: Option<usize>,
         max_log10_progress: Option<f64>,
     ) -> PyResult<String> {
-        let stalls = match (min_window, max_log10_progress) {
-            (None, None) => core::find_stalls(&self.inner),
-            (a, b) => {
-                core::analysis::find_stalls_with(&self.inner, a.unwrap_or(5), b.unwrap_or(0.3))
-            }
-        };
-        json_or_err(stalls)
+        // Partial overrides are honoured: passing only one of the two
+        // tuneables substitutes the default for the other. Defaults
+        // mirror `core::find_stalls`.
+        let min_window = min_window.unwrap_or(5);
+        let max_log10_progress = max_log10_progress.unwrap_or(0.3);
+        json_or_err(core::analysis::find_stalls_with(
+            &self.inner,
+            min_window,
+            max_log10_progress,
+        ))
     }
 
     fn restoration_windows_json(&self) -> PyResult<String> {
@@ -138,9 +141,23 @@ impl PyIterDump {
 
 /// Compare a sequence of `(label, Report)` pairs side-by-side. Returns
 /// a JSON-encoded list of comparison rows.
+///
+/// Takes `Py<PyReport>` (owned reference) rather than `PyRef` so the
+/// same `Report` can appear in multiple entries — e.g.
+/// `compare([("a", r), ("b", r)])` — without panicking on overlapping
+/// `RefCell` borrows. The actual borrow happens per-iteration and is
+/// dropped immediately after the inner `SolveReport` is cloned out.
 #[pyfunction]
-fn compare_reports_json(pairs: Vec<(String, PyRef<'_, PyReport>)>) -> PyResult<String> {
-    let rows = core::compare_runs(pairs.iter().map(|(label, r)| (label.as_str(), &r.inner)));
+fn compare_reports_json(py: Python<'_>, pairs: Vec<(String, Py<PyReport>)>) -> PyResult<String> {
+    let owned: Vec<(String, core::SolveReport)> = pairs
+        .iter()
+        .map(|(label, handle)| {
+            let bound = handle.bind(py);
+            let r = bound.borrow();
+            (label.clone(), r.inner.clone())
+        })
+        .collect();
+    let rows = core::compare_runs(owned.iter().map(|(l, r)| (l.as_str(), r)));
     json_or_err(rows)
 }
 
