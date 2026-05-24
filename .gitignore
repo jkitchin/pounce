@@ -79,3 +79,8 @@ crates/pounce-cli/tests/fixtures/*.sol
 # pyomo-pounce plugin build artifacts.
 pyomo-pounce/build/
 pyomo-pounce/pyomo_pounce.egg-info/
+
+# Python build artifacts for studio packages.
+/studio/**/__pycache__/
+/studio/**/*.egg-info/
+/studio/**/.pytest_cache/

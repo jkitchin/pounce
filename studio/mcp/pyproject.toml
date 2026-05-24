@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pounce-studio-mcp"
+version = "0.0.1"
+description = "MCP server exposing pounce solve reports as Claude-callable tools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "EPL-2.0" }
+authors = [{ name = "pounce-studio contributors" }]
+dependencies = ["mcp>=1.0"]
+
+[project.scripts]
+pounce-studio-mcp = "pounce_studio_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["pounce_studio_mcp*"]

@@ -1,0 +1,86 @@
+{
+  "schema": "pounce.solve-report/v1",
+  "fair_metadata": {
+    "result_id": "1779636597437155776-7756",
+    "created_at_iso": "2026-05-24T15:29:57.437Z",
+    "created_at_unix_nanos": 1779636597437155776,
+    "elapsed_seconds": 1.039e-6,
+    "solver": {
+      "name": "pounce",
+      "version": "0.1.0",
+      "target_triple": "unknown"
+    },
+    "license": "EPL-2.0",
+    "input": {
+      "kind": "builtin",
+      "name": "eq-quadratic"
+    }
+  },
+  "problem": {
+    "n_variables": 2,
+    "n_constraints": 1,
+    "n_objectives": 1,
+    "minimize": true,
+    "nnz_jac_g": 2,
+    "nnz_h_lag": 2
+  },
+  "solution": {
+    "status": "SolveSucceeded",
+    "solve_result_num": 0,
+    "objective": 0.5,
+    "x": [
+      0.5,
+      0.5
+    ],
+    "lambda": [
+      -1.0
+    ]
+  },
+  "statistics": {
+    "iteration_count": 1,
+    "final_objective": 0.5,
+    "final_scaled_objective": 0.5,
+    "final_dual_inf": 0.0,
+    "final_constr_viol": 0.0,
+    "final_compl": 0.0,
+    "final_kkt_error": 0.0,
+    "num_obj_evals": 0,
+    "num_constr_evals": 0,
+    "num_obj_grad_evals": 0,
+    "num_constr_jac_evals": 0,
+    "num_hess_evals": 0,
+    "total_wallclock_time_secs": 0.000927926,
+    "restoration_calls": 0,
+    "restoration_inner_iters": 0,
+    "restoration_outer_iters": 0,
+    "restoration_wall_secs": 0.0
+  },
+  "iterations": [
+    {
+      "iter": 0,
+      "objective": 0.0,
+      "inf_pr": 1.0,
+      "inf_du": 0.0,
+      "mu": 0.1,
+      "d_norm": 0.0,
+      "regularization": 0.0,
+      "alpha_dual": 0.0,
+      "alpha_primal": 0.0,
+      "alpha_primal_char": " ",
+      "ls_trials": 0
+    },
+    {
+      "iter": 1,
+      "objective": 0.5,
+      "inf_pr": 0.0,
+      "inf_du": 0.0,
+      "mu": 0.020000000000000004,
+      "d_norm": 0.5,
+      "regularization": 0.0,
+      "alpha_dual": 1.0,
+      "alpha_primal": 1.0,
+      "alpha_primal_char": "h",
+      "ls_trials": 1
+    }
+  ]
+}

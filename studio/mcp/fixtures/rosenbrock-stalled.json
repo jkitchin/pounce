@@ -1,0 +1,118 @@
+{
+  "schema": "pounce.solve-report/v1",
+  "fair_metadata": {
+    "result_id": "1779636602681925634-8132",
+    "created_at_iso": "2026-05-24T15:30:02.681Z",
+    "created_at_unix_nanos": 1779636602681925634,
+    "elapsed_seconds": 2.016e-6,
+    "solver": {
+      "name": "pounce",
+      "version": "0.1.0",
+      "target_triple": "unknown"
+    },
+    "license": "EPL-2.0",
+    "input": {
+      "kind": "builtin",
+      "name": "rosenbrock"
+    }
+  },
+  "problem": {
+    "n_variables": 2,
+    "n_constraints": 0,
+    "n_objectives": 1,
+    "minimize": true,
+    "nnz_jac_g": 0,
+    "nnz_h_lag": 3
+  },
+  "solution": {
+    "status": "MaximumIterationsExceeded",
+    "solve_result_num": 400,
+    "objective": 1.9425854206216415
+  },
+  "statistics": {
+    "iteration_count": 4,
+    "final_objective": 1.9425854206216415,
+    "final_scaled_objective": 0.9010136459284053,
+    "final_dual_inf": 1.6191198052163407,
+    "final_constr_viol": 0.0,
+    "final_compl": 0.0,
+    "final_kkt_error": 1.6191198052163407,
+    "num_obj_evals": 0,
+    "num_constr_evals": 0,
+    "num_obj_grad_evals": 0,
+    "num_constr_jac_evals": 0,
+    "num_hess_evals": 0,
+    "total_wallclock_time_secs": 0.001891455,
+    "restoration_calls": 0,
+    "restoration_inner_iters": 0,
+    "restoration_outer_iters": 0,
+    "restoration_wall_secs": 0.0
+  },
+  "iterations": [
+    {
+      "iter": 0,
+      "objective": 24.199999999999996,
+      "inf_pr": 0.0,
+      "inf_du": 100.0,
+      "mu": 0.1,
+      "d_norm": 0.0,
+      "regularization": 0.0,
+      "alpha_dual": 0.0,
+      "alpha_primal": 0.0,
+      "alpha_primal_char": " ",
+      "ls_trials": 0
+    },
+    {
+      "iter": 1,
+      "objective": 4.731884325266608,
+      "inf_pr": 0.0,
+      "inf_du": 2.151120786003036,
+      "mu": 0.1,
+      "d_norm": 0.3806741573033708,
+      "regularization": 0.0,
+      "alpha_dual": 1.0,
+      "alpha_primal": 1.0,
+      "alpha_primal_char": "f",
+      "ls_trials": 1
+    },
+    {
+      "iter": 2,
+      "objective": 4.087398662072122,
+      "inf_pr": 0.0,
+      "inf_du": 12.047897625182236,
+      "mu": 0.1,
+      "d_norm": 4.555708012051217,
+      "regularization": 0.0,
+      "alpha_dual": 1.0,
+      "alpha_primal": 0.125,
+      "alpha_primal_char": "f",
+      "ls_trials": 4
+    },
+    {
+      "iter": 3,
+      "objective": 3.2286725886219707,
+      "inf_pr": 0.0,
+      "inf_du": 4.939446475620484,
+      "mu": 0.1,
+      "d_norm": 0.2214742799845988,
+      "regularization": 0.0,
+      "alpha_dual": 1.0,
+      "alpha_primal": 1.0,
+      "alpha_primal_char": "f",
+      "ls_trials": 1
+    },
+    {
+      "iter": 4,
+      "objective": 3.213898091446028,
+      "inf_pr": 0.0,
+      "inf_du": 10.232895720287253,
+      "mu": 0.1,
+      "d_norm": 0.48217298724145996,
+      "regularization": 0.0,
+      "alpha_dual": 1.0,
+      "alpha_primal": 1.0,
+      "alpha_primal_char": "f",
+      "ls_trials": 1
+    }
+  ]
+}
