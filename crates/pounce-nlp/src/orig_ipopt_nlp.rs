@@ -172,8 +172,9 @@ pub struct OrigIpoptNlp {
     /// `h_space.nonzeros()` when fixed variables drop entries.
     nnz_h_lag_full: Index,
     /// `h_entry_in_full[k]` = position in the full TNLP hessian's
-    /// values array of the k-th kept entry. Only populated when
-    /// `nnz_h_lag_full > h_space.nonzeros()`.
+    /// values array of the k-th kept entry. Always has length
+    /// `h_space.nonzeros()`; equals the identity `[0, 1, …, n-1]`
+    /// when no fixed-var filtering dropped any entries.
     h_entry_in_full: Vec<Index>,
 
     // ----- caches (one entry; key = input vector tag) -----
@@ -1451,15 +1452,11 @@ impl OrigIpoptNlp {
         let mut h = SymTMatrix::new(Rc::clone(h_space));
         let kept = h_space.nonzeros() as usize;
         let h_vals = h.values_mut();
-        if self.h_entry_in_full.is_empty() {
-            // Fast path — no fixed-var filtering, lengths match.
-            debug_assert_eq!(kept, full_vals.len());
-            h_vals.copy_from_slice(&full_vals);
-        } else {
-            debug_assert_eq!(kept, self.h_entry_in_full.len());
-            for (k, &src) in self.h_entry_in_full.iter().enumerate() {
-                h_vals[k] = full_vals[src as usize];
-            }
+        // `h_entry_in_full` always has length `kept` (identity when no
+        // fixed-var filtering, sparse selection otherwise).
+        debug_assert_eq!(kept, self.h_entry_in_full.len());
+        for (k, &src) in self.h_entry_in_full.iter().enumerate() {
+            h_vals[k] = full_vals[src as usize];
         }
         let result: Rc<dyn SymMatrix> = Rc::new(h);
         self.h_cache.borrow_mut().add(
@@ -2104,5 +2101,95 @@ mod tests {
         x_var.values_mut()[0] = 0.5;
         let lifted = nlp_dyn.lift_x_to_full(&x_var);
         assert_eq!(lifted, vec![7.0, 0.5]);
+    }
+
+    /// Regression: a TNLP with `x[0]` fixed and `nnz_h_lag = 1` whose
+    /// only Hessian entry is (0,0). After fixed-var filtering kept = 0
+    /// but `nnz_h_lag_full = 1`, which used to hit the broken
+    /// `h_entry_in_full.is_empty()` fast path and panic in
+    /// `copy_from_slice`.
+    struct FixedOnlyHess;
+    impl TNLP for FixedOnlyHess {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 1,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 7.0;
+            b.x_u[0] = 7.0; // fixed
+            b.x_l[1] = -1.0e19;
+            b.x_u[1] = 1.0e19;
+            b.g_l[0] = 0.0;
+            b.g_u[0] = 0.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 7.0;
+            sp.x[1] = 0.5;
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _: bool) -> Option<Number> {
+            Some(0.5 * x[0] * x[0] + x[1])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            g[1] = 1.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = x[1];
+            true
+        }
+        fn eval_jac_g(&mut self, _: Option<&[Number]>, _: bool, m: SparsityRequest<'_>) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 1;
+                }
+                SparsityRequest::Values { values } => values[0] = 1.0,
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _: Option<&[Number]>,
+            _: bool,
+            obj_factor: Number,
+            _: Option<&[Number]>,
+            _: bool,
+            m: SparsityRequest<'_>,
+        ) -> bool {
+            match m {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                SparsityRequest::Values { values } => values[0] = obj_factor,
+            }
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    #[test]
+    fn eval_h_with_all_entries_on_fixed_var_does_not_panic() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(FixedOnlyHess));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let mut nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+
+        // After filtering, the kept Hessian over var-x has 0 nonzeros,
+        // while the user's full Hessian has 1.
+        assert_eq!(nlp.h_space().unwrap().nonzeros(), 0);
+
+        let x = dense_x(&[0.5], &nlp.x_space().clone());
+        let yc = dense_x(&[0.0], &nlp.c_space().clone());
+        let yd = nlp.d_space().make_new_dense();
+        let h = nlp.eval_h(&x, 1.0, &yc, &yd);
+        assert_eq!(h.n_rows(), 1);
     }
 }
