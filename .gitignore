@@ -23,11 +23,19 @@
 !/benchmarks/BENCHMARK_REPORT.md
 !/benchmarks/BENCHMARK_REPORT.json
 !/benchmarks/cutest
+!/benchmarks/large_scale
 !/benchmarks/scripts
 !/benchmarks/*/
 /benchmarks/*/*
 !/benchmarks/*/README.md
 !/benchmarks/scripts/*
+# large_scale is a workspace member — its Cargo manifest and Rust
+# sources must be tracked even though `/benchmarks/*/*` excludes them
+# by default. Per-run results stay ignored.
+!/benchmarks/large_scale/Cargo.toml
+!/benchmarks/large_scale/build.rs
+!/benchmarks/large_scale/src
+!/benchmarks/large_scale/src/**
 /benchmarks/cutest/problems/
 /benchmarks/cutest/*.json
 /benchmarks/cutest/*.jsonl

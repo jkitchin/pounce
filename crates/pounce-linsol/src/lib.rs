@@ -29,7 +29,7 @@ pub use error::FactorizationError;
 pub use factorization::Factorization;
 pub use scaling::{IdentityScalingMethod, TSymScalingMethod};
 pub use sparse_sym_iface::{EMatrixFormat, SparseSymLinearSolverInterface};
-pub use summary::LinearSolverSummary;
 pub use status::ESymSolverStatus;
+pub use summary::LinearSolverSummary;
 pub use sym_solver::SymLinearSolver;
 pub use t_sym_solver::TSymLinearSolver;
