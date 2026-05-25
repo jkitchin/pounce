@@ -121,6 +121,15 @@ impl PdSensBacksolver {
         })
     }
 
+    /// Block dimensions of the compound KKT vector at convergence, in
+    /// `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)` order. Sum equals
+    /// [`SensBacksolver::dim`]. Useful when a caller needs to compute
+    /// the flat offset of a non-x block (e.g. `n_x + n_s` for the
+    /// start of the equality-multiplier `y_c` block).
+    pub fn block_dims(&self) -> [usize; 8] {
+        self.dims
+    }
+
     /// Cumulative block offsets: `offset(i)` is the start index of
     /// block `i` in the flat slice.
     fn offsets(&self) -> [usize; 9] {

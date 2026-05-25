@@ -72,11 +72,13 @@ pub mod reduced_hessian;
 pub mod schur_data;
 pub mod schur_driver;
 pub mod sens_app;
+pub mod solver;
 pub mod step_calc;
 
 pub use algorithm_backsolver::PdSensBacksolver;
 pub use backsolver::{DenseLuBacksolver, SensBacksolver};
 pub use convenience::{SensResult, SensSolve};
+pub use solver::{ConvergedState, Solver, SolverError};
 pub use eigen::symmetric_eigen;
 pub use p_calculator::{IndexPCalculator, PCalculator};
 pub use reduced_hessian::compute_reduced_hessian;
