@@ -31,11 +31,13 @@ export PKG_CONFIG_PATH := $(IPOPT_MA57_PKGCONFIG):$(COINHSL_PKGCONFIG):$(PKG_CON
 # water, gas, cho, mittelmann). Built by `make -C mittelmann build-ipopt-ma57`.
 IPOPT_MA57_BIN     ?= $(IPOPT_MA57_INSTALL)/bin/ipopt
 
-.PHONY: help benchmark benchmark-report \
+.PHONY: help benchmark benchmark-rerun benchmark-report \
 	check-ipopt-ma57-link build-ipopt-ma57 \
-	cutest cutest-ensure-toolchain cutest-prepare cutest-prepare-full cutest-run cutest-full cutest-report cutest-smoke cutest-large cutest-maxiter \
-	electrolyte-run grid-run cho-run large-scale mittelmann-run gas-run water-run \
-	gams-bench \
+	cutest cutest-ensure-toolchain cutest-prepare cutest-prepare-full cutest-run cutest-rerun cutest-full cutest-report cutest-smoke cutest-large cutest-maxiter \
+	electrolyte-run electrolyte-rerun grid-run grid-rerun cho-run cho-rerun \
+	large-scale large-scale-rerun mittelmann-run mittelmann-rerun \
+	gas-run gas-rerun water-run water-rerun \
+	gams-bench gams-rerun \
 	clean-bench clean-bench-cutest clean-bench-large-scale clean-bench-nl clean-bench-report
 
 # CUTEst toolchain auto-install guard. Used as a dependency for every
@@ -54,36 +56,39 @@ cutest-ensure-toolchain:
 help:
 	@echo "Benchmark suite targets (run from benchmarks/ or via root Makefile shims)."
 	@echo ""
-	@echo "  benchmark         Full sweep: CUTEst + electrolyte + grid + large-scale + mittelmann + report + gas + water + gams"
-	@echo "  benchmark-report  Regenerate benchmarks/BENCHMARK_REPORT.md"
+	@echo "  benchmark         Incremental sweep: only suites whose results.json is missing/stale rerun, then composite report"
+	@echo "  benchmark-rerun   Wipe all results then full rebuild (force everything)"
+	@echo "  benchmark-report  Regenerate benchmarks/BENCHMARK_REPORT.md only (no suites rerun)"
+	@echo ""
+	@echo "Per-suite targets (each *-run is incremental; *-rerun wipes its results.json then runs):"
 	@echo ""
 	@echo "  cutest            Full CUTEst pipeline: prepare, run, report"
 	@echo "  cutest-prepare    Compile SIF problems to .dylib/.so (problem_list.txt, 727)"
 	@echo "  cutest-prepare-full  Compile all SIF problems (problem_list_full.txt, 1542)"
-	@echo "  cutest-run        Run CUTEst benchmark (writes benchmarks/cutest/results.json)"
-	@echo "  cutest-full       Full CUTEst benchmark (all 1542 SIF problems)"
-	@echo "  cutest-smoke      Quick smoke test (~20 problems)"
-	@echo "  cutest-large      Large problems (n+m >= 100, sparse path)"
-	@echo "  cutest-maxiter    Re-run MaxIterations failures"
+	@echo "  cutest-run        Run CUTEst benchmark (skip if results.json is up-to-date)"
+	@echo "  cutest-rerun      Wipe cutest/results.json then run"
+	@echo "  cutest-full       Full CUTEst benchmark (all 1542 SIF problems; always rebuilds)"
+	@echo "  cutest-smoke      Quick smoke test (~20 problems; always rebuilds)"
+	@echo "  cutest-large      Large problems (n+m >= 100, sparse path; always rebuilds)"
+	@echo "  cutest-maxiter    Re-run MaxIterations failures (always rebuilds)"
 	@echo "  cutest-report     Generate comparison report from results.json"
 	@echo ""
-	@echo "  electrolyte-run   Electrolyte thermodynamics benchmark"
-	@echo "  grid-run          AC optimal power flow (electrical grid) benchmark"
-	@echo "  cho-run           CHO parameter estimation benchmark"
-	@echo "  large-scale       Hand-written synthetic large-scale NLPs (pure Rust, no .nl files)"
-	@echo "  mittelmann-run    Pounce sweep of the Mittelmann ampl-nlp .nl suite (delegates to benchmarks/mittelmann/Makefile)"
-	@echo "  gas-run           Gas pipeline NLPs (AMPL .nl files)"
-	@echo "  water-run         Water distribution network NLPs (AMPL .nl files)"
-	@echo "  gams-bench        GAMS NLP bench: clean-bench then bench-full (gams/nlpbench)"
+	@echo "  electrolyte-run / -rerun   Electrolyte thermodynamics benchmark"
+	@echo "  grid-run        / -rerun   AC optimal power flow (electrical grid) benchmark"
+	@echo "  cho-run         / -rerun   CHO parameter estimation benchmark"
+	@echo "  large-scale     / large-scale-rerun  Hand-written synthetic large-scale NLPs"
+	@echo "  mittelmann-run  / -rerun   Mittelmann ampl-nlp .nl suite (delegates to mittelmann/Makefile)"
+	@echo "  gas-run         / -rerun   Gas pipeline NLPs (AMPL .nl files)"
+	@echo "  water-run       / -rerun   Water distribution network NLPs (AMPL .nl files)"
+	@echo "  gams-bench      / gams-rerun  GAMS NLP bench (gams/nlpbench delegate)"
 	@echo ""
 	@echo "  clean-bench       Wipe all stale results/logs across every suite (keeps compiled SIF .dylibs)"
 	@echo "  clean-bench-cutest     Wipe cutest results JSON + stderr/log files only"
 	@echo "  clean-bench-large-scale Wipe large_scale_results.txt"
-	@echo "  clean-bench-nl         Wipe per-problem .sol outputs (gas/water/grid/electrolyte/cho)"
+	@echo "  clean-bench-nl         Wipe per-problem .sol outputs + results.json (gas/water/grid/electrolyte/cho)"
 	@echo "  clean-bench-report     Remove benchmarks/BENCHMARK_REPORT.md"
 	@echo ""
-	@echo "Most suites feed into benchmarks/BENCHMARK_REPORT.md. The gas and water"
-	@echo "suites are standalone (see benchmarks/{gas,water}/README.md)."
+	@echo "All suites feed into benchmarks/BENCHMARK_REPORT.md via benchmark_report.py."
 
 # ---- ipopt-ma57 plumbing ----
 # Verify pkg-config resolves `ipopt` to our MA57 install (not Homebrew).
@@ -110,10 +115,22 @@ cutest-prepare-full: cutest-ensure-toolchain
 	bash $(REPO_ROOT)/benchmarks/cutest/prepare.sh \
 		--from-file $(REPO_ROOT)/benchmarks/cutest/problem_list_full.txt
 
-cutest-run: cutest-ensure-toolchain cutest-prepare
-	RESULTS_FILE=$(REPO_ROOT)/benchmarks/cutest/results.json \
+# File target — the actual recipe. Rebuilds only if results.json is
+# missing or older than POUNCE_BIN, the problem list, or any compiled
+# .dylib/.so under problems/. `make cutest-rerun` forces by deleting first.
+$(REPO_ROOT)/benchmarks/cutest/results.json: $(POUNCE_BIN) \
+	$(REPO_ROOT)/benchmarks/cutest/problem_list.txt \
+	$(wildcard $(REPO_ROOT)/benchmarks/cutest/problems/lib*.dylib) \
+	$(wildcard $(REPO_ROOT)/benchmarks/cutest/problems/lib*.so)
+	RESULTS_FILE=$@ \
 	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin cutest_suite --release \
 		2> >(tee $(REPO_ROOT)/benchmarks/cutest/benchmark_stderr.txt >&2)
+
+cutest-run: cutest-ensure-toolchain cutest-prepare $(REPO_ROOT)/benchmarks/cutest/results.json
+
+cutest-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/cutest/results.json
+	$(MAKE) cutest-run
 
 cutest-full: cutest-ensure-toolchain cutest-prepare-full
 	PROBLEM_LIST=$(REPO_ROOT)/benchmarks/cutest/problem_list_full.txt \
@@ -190,23 +207,46 @@ BENCH_TIMELIMIT ?= 300
 $(POUNCE_BIN):
 	$(CARGO) build --release --manifest-path $(CARGO_MANIFEST) --bin pounce
 
-electrolyte-run: $(POUNCE_BIN)
+# .nl-driven suites: results.json is the file target; the *-run alias is
+# incremental (skip when up-to-date), *-rerun forces by wiping first.
+$(REPO_ROOT)/benchmarks/electrolyte/results.json: $(POUNCE_BIN) \
+	$(wildcard $(REPO_ROOT)/benchmarks/electrolyte/nl/*.nl)
 	$(NL_DRIVER) electrolyte \
 		$(REPO_ROOT)/benchmarks/electrolyte/nl \
-		$(REPO_ROOT)/benchmarks/electrolyte/results.json \
+		$@ \
 		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
 
-grid-run: $(POUNCE_BIN)
+electrolyte-run: $(REPO_ROOT)/benchmarks/electrolyte/results.json
+
+electrolyte-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/electrolyte/results.json
+	$(MAKE) electrolyte-run
+
+$(REPO_ROOT)/benchmarks/grid/results.json: $(POUNCE_BIN) \
+	$(wildcard $(REPO_ROOT)/benchmarks/grid/nl/*.nl)
 	$(NL_DRIVER) grid \
 		$(REPO_ROOT)/benchmarks/grid/nl \
-		$(REPO_ROOT)/benchmarks/grid/results.json \
+		$@ \
 		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
 
-cho-run: $(POUNCE_BIN)
+grid-run: $(REPO_ROOT)/benchmarks/grid/results.json
+
+grid-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/grid/results.json
+	$(MAKE) grid-run
+
+$(REPO_ROOT)/benchmarks/cho/results.json: $(POUNCE_BIN) \
+	$(wildcard $(REPO_ROOT)/benchmarks/cho/nl_export_results/*.nl)
 	$(NL_DRIVER) cho \
 		$(REPO_ROOT)/benchmarks/cho/nl_export_results \
-		$(REPO_ROOT)/benchmarks/cho/results.json \
+		$@ \
 		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+
+cho-run: $(REPO_ROOT)/benchmarks/cho/results.json
+
+cho-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/cho/results.json
+	$(MAKE) cho-run
 
 # ---- Large scale ----
 # Runs the hand-written synthetic NLP suite (`pounce-large-scale`). Five
@@ -214,24 +254,44 @@ cho-run: $(POUNCE_BIN)
 # sparse QP — exercise the pure-Rust IPM at scales the .nl-file suites
 # don't cover. Per-problem sizes can be overridden via env vars; see
 # benchmarks/large_scale/src/bin/large_scale_suite.rs.
-large-scale:
+$(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt: $(POUNCE_BIN)
 	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin large_scale_suite --release \
-		2>&1 | tee $(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt
+		2>&1 | tee $@
 	@echo "Large-scale synthetic suite complete. Output: benchmarks/large_scale/large_scale_results.txt"
 
+large-scale: $(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt
+
+large-scale-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt
+	$(MAKE) large-scale
+
 # ---- Gas pipeline ----
-gas-run: $(POUNCE_BIN)
+$(REPO_ROOT)/benchmarks/gas/results.json: $(POUNCE_BIN) \
+	$(wildcard $(REPO_ROOT)/benchmarks/gas/*.nl)
 	$(NL_DRIVER) gas \
 		$(REPO_ROOT)/benchmarks/gas \
-		$(REPO_ROOT)/benchmarks/gas/results.json \
+		$@ \
 		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
 
+gas-run: $(REPO_ROOT)/benchmarks/gas/results.json
+
+gas-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/gas/results.json
+	$(MAKE) gas-run
+
 # ---- Water network ----
-water-run: $(POUNCE_BIN)
+$(REPO_ROOT)/benchmarks/water/results.json: $(POUNCE_BIN) \
+	$(wildcard $(REPO_ROOT)/benchmarks/water/*.nl)
 	$(NL_DRIVER) water \
 		$(REPO_ROOT)/benchmarks/water \
-		$(REPO_ROOT)/benchmarks/water/results.json \
+		$@ \
 		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+
+water-run: $(REPO_ROOT)/benchmarks/water/results.json
+
+water-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/water/results.json
+	$(MAKE) water-run
 
 # ---- Mittelmann ampl-nlp sweep ----
 # Pounce-only sweep delegated to benchmarks/mittelmann/Makefile (the full
@@ -239,22 +299,32 @@ water-run: $(POUNCE_BIN)
 # pounce, ipopt-mumps, ipopt-ma57, ipopt-feral — lives there; this
 # wrapper runs only the pounce variant for inclusion in the composite
 # benchmark, same pattern as gams-bench).
+# Incremental — the mittelmann sub-Makefile skips problems with existing
+# .sol files. `mittelmann-rerun` cleans first to force a full sweep.
 mittelmann-run:
 	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann run-pounce
 
+mittelmann-rerun:
+	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann clean
+	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann run-pounce
+
 # ---- GAMS NLP bench ----
-# Wipes cached per-instance trace CSVs/logs and re-runs the full GAMS
-# nlpbench sweep (four curated sizes + four model libraries) for every
-# solver in REPORT_SOLVERS. Override with `make gams-bench REPORT_SOLVERS="..."`.
+# Incremental: runs the full GAMS nlpbench sweep (four curated sizes +
+# four model libraries) for every solver in REPORT_SOLVERS without
+# wiping cached trace CSVs first. `gams-rerun` cleans then runs.
+# Override with `make gams-bench REPORT_SOLVERS="..."`.
 gams-bench:
+	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench bench-full
+
+gams-rerun:
 	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench bench-full
 
 # ---- Aggregation ----
-# Full sweep. Each sub-target runs via `-$(MAKE)` so a single failure
-# (missing toolchain, broken instance) doesn't abort the whole run — the
-# report at the end always lands. All suites now feed the composite
-# BENCHMARK_REPORT.md, so the order is just "everything that produces
-# results, then generate the report".
+# Incremental sweep — each *-run target is now a file-target wrapper
+# that no-ops when its results.json is up-to-date. Use `benchmark-rerun`
+# to force a full rebuild. Each sub-target runs via `-$(MAKE)` so a
+# single failure (missing toolchain, broken instance) doesn't abort the
+# rest — the report at the end always lands.
 benchmark:
 	-$(MAKE) cutest-run
 	-$(MAKE) electrolyte-run
@@ -266,7 +336,11 @@ benchmark:
 	-$(MAKE) water-run
 	-$(MAKE) gams-bench
 	-$(MAKE) benchmark-report
-	@echo "Full benchmark complete. Report: benchmarks/BENCHMARK_REPORT.md"
+	@echo "Benchmark sweep complete. Report: benchmarks/BENCHMARK_REPORT.md"
+
+# Force a full rebuild — wipes every suite's outputs first, then runs
+# the incremental sweep (which now finds nothing cached).
+benchmark-rerun: clean-bench benchmark
 
 # Generate composite report from existing results JSONs.
 benchmark-report:

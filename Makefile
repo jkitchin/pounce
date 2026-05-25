@@ -68,7 +68,7 @@ endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book install uninstall clean help \
         install-mcp uninstall-mcp \
-        benchmark benchmark-report benchmark-gams
+        benchmark benchmark-rerun benchmark-report benchmark-gams
 
 all: build
 
@@ -117,21 +117,30 @@ help:
 	@sed -n 's/^# \{0,1\}//p' Makefile | sed -n '1,45p'
 
 # ---- Benchmarks ----------------------------------------------------------
-# Single source of truth: benchmarks/Makefile. These three shims forward
+# Single source of truth: benchmarks/Makefile. These shims forward
 # everything so users can drive runs from the repo root.
+#
+# All `*-run` targets are incremental (skip when results.json is fresh).
+# `*-rerun` variants wipe the results.json then run, forcing a rebuild.
 benchmark:
 	$(MAKE) -C benchmarks benchmark
+
+benchmark-rerun:
+	$(MAKE) -C benchmarks benchmark-rerun
 
 benchmark-report:
 	$(MAKE) -C benchmarks benchmark-report
 
-# Pattern-rule shim for any per-suite target. Examples:
-#   make benchmark-water     -> make -C benchmarks water-run
-#   make benchmark-cutest    -> make -C benchmarks cutest-run
-#   make benchmark-mittelmann -> make -C benchmarks mittelmann-run
-#   make benchmark-gams      -> make -C benchmarks gams-bench
+# Pattern-rule shims for per-suite targets. Examples:
+#   make benchmark-water         -> make -C benchmarks water-run
+#   make benchmark-water-rerun   -> make -C benchmarks water-rerun
+#   make benchmark-cutest        -> make -C benchmarks cutest-run
+#   make benchmark-gams          -> make -C benchmarks gams-bench
 benchmark-gams:
 	$(MAKE) -C benchmarks gams-bench
+
+benchmark-%-rerun:
+	$(MAKE) -C benchmarks $*-rerun
 
 benchmark-%:
 	$(MAKE) -C benchmarks $*-run

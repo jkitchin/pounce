@@ -38,14 +38,23 @@ All targets are driven through this directory's `Makefile`. The
 top-level `Makefile` provides three convenience shims (`make benchmark`,
 `make benchmark-report`, `make benchmark-<suite>`) that delegate here.
 
+All `*-run` targets are **incremental** — they skip work if the suite's
+`results.json` is newer than its inputs (the `.nl` files, problem list,
+or the `pounce` binary). To force a rerun, use the corresponding
+`*-rerun` target, which wipes the suite's `results.json` first.
+
 ```sh
-# Full sweep + composite report regeneration
+# Incremental sweep — only suites with stale/missing results.json rerun,
+# then the composite report regenerates
 make -C benchmarks benchmark
 
-# Just regenerate the composite report from existing JSONs
+# Force everything: wipes all results then full rebuild
+make -C benchmarks benchmark-rerun
+
+# Just regenerate the composite report from existing JSONs (no suite reruns)
 make -C benchmarks benchmark-report
 
-# One suite at a time
+# One suite at a time (incremental)
 make -C benchmarks cutest-run
 make -C benchmarks water-run
 make -C benchmarks gas-run
@@ -55,6 +64,11 @@ make -C benchmarks cho-run
 make -C benchmarks large-scale
 make -C benchmarks mittelmann-run
 make -C benchmarks gams-bench
+
+# Force a rerun of one suite (wipes its results.json first)
+make -C benchmarks water-rerun
+make -C benchmarks cutest-rerun
+# …etc for every suite
 
 # Or from the repo root via the shim
 make benchmark
