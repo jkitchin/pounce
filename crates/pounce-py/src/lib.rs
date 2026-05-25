@@ -20,9 +20,11 @@
 use pyo3::prelude::*;
 
 mod problem;
+mod solver;
 mod tnlp_bridge;
 
 pub use problem::PyProblem;
+pub use solver::PySolver;
 
 /// Python module entry point. The crate name (`_pounce`) and the
 /// `#[pymodule]` function name must agree; maturin uses the lib name
@@ -30,6 +32,7 @@ pub use problem::PyProblem;
 #[pymodule]
 fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProblem>()?;
+    m.add_class::<PySolver>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

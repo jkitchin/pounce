@@ -1093,7 +1093,8 @@ impl IpoptAlgorithm {
             return IterateOutcome::Terminate(SolverReturn::RestorationFailure);
         };
         resto.set_orig_progress_check(orig_progress_cb);
-        let aug = sd.pd_solver_mut().aug_solver_mut();
+        let mut pd_guard = sd.pd_solver_mut();
+        let aug = pd_guard.aug_solver_mut();
         // Audit counters (pounce#12). Increment call count + outer-iter
         // count (one outer iter is consumed per restoration call) and
         // wall-time around the inner call. Inner iter count is read
@@ -1102,6 +1103,7 @@ impl IpoptAlgorithm {
         self.resto_outer_iters = self.resto_outer_iters.saturating_add(1);
         let resto_t0 = std::time::Instant::now();
         let outcome = resto.perform_restoration(&self.data, &self.cq, nlp, aug);
+        drop(pd_guard);
         self.resto_wall_secs += resto_t0.elapsed().as_secs_f64();
         self.resto_inner_iters = self
             .resto_inner_iters
@@ -1257,11 +1259,13 @@ impl IpoptAlgorithm {
             // is responsible for not consulting it).
             if let Some(sd) = self.search_dir.as_mut() {
                 timing.initialize_iterates.start();
-                let aug_solver = sd.pd_solver_mut().aug_solver_mut();
+                let mut pd_guard = sd.pd_solver_mut();
+                let aug_solver = pd_guard.aug_solver_mut();
                 let ok = self
                     .bundle
                     .init
                     .set_initial_iterates(&self.data, &self.cq, nlp, aug_solver);
+                drop(pd_guard);
                 timing.initialize_iterates.end();
                 if !ok {
                     return SolverReturn::InternalError;

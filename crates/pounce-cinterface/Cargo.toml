@@ -18,6 +18,7 @@ pounce-common.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
 pounce-restoration.workspace = true
+pounce-sensitivity.workspace = true
 
 [lints]
 workspace = true

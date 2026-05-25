@@ -72,6 +72,7 @@ pub mod reduced_hessian;
 pub mod schur_data;
 pub mod schur_driver;
 pub mod sens_app;
+pub mod solver;
 pub mod step_calc;
 
 pub use algorithm_backsolver::PdSensBacksolver;
@@ -83,4 +84,5 @@ pub use reduced_hessian::compute_reduced_hessian;
 pub use schur_data::{IndexSchurData, SchurData};
 pub use schur_driver::{DenseGenSchurDriver, SchurDriver};
 pub use sens_app::{register_options, SensApplication, SensOptions};
+pub use solver::{ConvergedState, Solver, SolverError};
 pub use step_calc::{SensStepCalc, StdStepCalc, WithBacksolver};

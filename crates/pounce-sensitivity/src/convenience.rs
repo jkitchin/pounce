@@ -200,7 +200,7 @@ impl SensSolve {
             let param_rows: Vec<Index> = pin_indices.iter().map(|&i| y_c_offset + i).collect();
             let signs = vec![1; n_params];
 
-            let backsolver = match PdSensBacksolver::new(data, cq, nlp, pd) {
+            let backsolver = match PdSensBacksolver::new(data, cq, nlp, Rc::clone(&pd)) {
                 Ok(b) => b,
                 Err(e) => {
                     outbox_cb.borrow_mut().error =

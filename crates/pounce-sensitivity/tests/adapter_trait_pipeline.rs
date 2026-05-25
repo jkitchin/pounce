@@ -178,7 +178,7 @@ impl TNLP for ParametricTNLP {
 /// on_converged callback. The returned `R` is stashed via Rc<RefCell>;
 /// `Rc::try_unwrap` extracts it after the application drops the
 /// callback closure.
-fn with_converged_adapter<R: 'static>(f: impl Fn(&PdSensBacksolver<'_>) -> R + 'static) -> R {
+fn with_converged_adapter<R: 'static>(f: impl Fn(&PdSensBacksolver) -> R + 'static) -> R {
     let out: Rc<RefCell<Option<R>>> = Rc::new(RefCell::new(None));
     let out_clone = Rc::clone(&out);
 
@@ -351,7 +351,7 @@ fn adapter_drives_std_step_calc_pipeline() {
             IndexSchurData::from_parts(vec![Y_C_PARAM_ROW_ETA1, Y_C_PARAM_ROW_ETA2], vec![1, 1])
                 .unwrap();
         let pc = IndexPCalculator::new(backsolver.clone(), a.clone());
-        let mut driver = DenseGenSchurDriver::<_, PdSensBacksolver<'_>>::new(pc);
+        let mut driver = DenseGenSchurDriver::<_, PdSensBacksolver>::new(pc);
         let b =
             IndexSchurData::from_parts(vec![Y_C_PARAM_ROW_ETA1, Y_C_PARAM_ROW_ETA2], vec![1, 1])
                 .unwrap();

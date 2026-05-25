@@ -305,13 +305,18 @@ impl PyProblem {
 }
 
 impl PyProblem {
+    /// Number of constraints (m). Internal accessor for sibling Solver pyclass.
+    pub(crate) fn m_index(&self) -> Index {
+        self.m
+    }
+
     /// Shared setup for [`Self::solve`] / [`Self::solve_with_sens`]:
     /// decode warm-start vectors, materialize Jac/Hess sparsity, build
     /// and configure the application (options + restoration), and mint
     /// the Py↔Rust TNLP bridge. Returns the application ready for
     /// `optimize_tnlp` and the bridge whose `final_*` fields the
     /// callback writes into.
-    fn prepare(
+    pub(crate) fn prepare(
         &self,
         py: Python<'_>,
         x0: Py<PyAny>,
@@ -428,7 +433,7 @@ impl PyProblem {
     }
 }
 
-fn build_info_dict<'py>(
+pub(crate) fn build_info_dict<'py>(
     py: Python<'py>,
     bridge: &PyTnlp,
     status: ApplicationReturnStatus,

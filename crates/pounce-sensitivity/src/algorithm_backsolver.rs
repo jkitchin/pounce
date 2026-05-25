@@ -53,28 +53,34 @@ use pounce_nlp::ipopt_nlp::IpoptNlp;
 
 use crate::backsolver::SensBacksolver;
 
-/// Adapter from `PdFullSpaceSolver` to [`SensBacksolver`]. Borrows
-/// the four pieces of the algorithm's converged state, plus the
-/// 8-block iterate template used to allocate fresh RHS / LHS vectors.
+/// Adapter from `PdFullSpaceSolver` to [`SensBacksolver`]. Holds
+/// owning clones of the four pieces of the algorithm's converged
+/// state, plus the 8-block iterate template used to allocate fresh
+/// RHS / LHS vectors.
 ///
-/// The PD solver lives behind a [`RefCell`] because
+/// The PD solver lives behind an `Rc<RefCell<…>>` because
 /// [`SensBacksolver::solve`] is `&self` but the upstream signature
 /// for `PdFullSpaceSolver::solve` is `&mut self` (it caches the
 /// last-solve dependency tags and the augsys-improved flag). The
 /// `RefCell` is single-thread-only, single-borrow, exactly matching
 /// the call pattern from `pounce-sensitivity`'s pipeline.
+///
+/// Owning (rather than borrowing) the four handles is what lets a
+/// `PdSensBacksolver` outlive the `on_converged` callback frame —
+/// required by the public `Solver` session API in `pounce-algorithm`,
+/// which retains the backsolver for repeated `parametric_step` /
+/// `kkt_solve` / `compute_reduced_hessian` calls after the IPM has
+/// returned. The data, cq, and nlp handles are already
+/// `Rc<RefCell<…>>` cheap-clone handles upstream, so this carries no
+/// allocation overhead.
 #[derive(Clone)]
-pub struct PdSensBacksolver<'a> {
+pub struct PdSensBacksolver {
     /// Shared, interior-mutable handle to the converged PD solver.
-    /// `Rc<RefCell<…>>` (rather than a bare `RefCell<&mut …>`) so the
-    /// adapter is `Clone` — [`SensApplication`] internally clones the
-    /// backsolver to hand it to `IndexPCalculator`, and the
-    /// reduced-Hessian path may run multiple Schur builds against the
-    /// same factor.
-    pd: Rc<RefCell<&'a mut PdFullSpaceSolver>>,
-    data: &'a IpoptDataHandle,
-    cq: &'a IpoptCqHandle,
-    nlp: &'a Rc<RefCell<dyn IpoptNlp>>,
+    /// Cloned from `PdSearchDirCalc::pd_solver_rc()` at construction.
+    pd: Rc<RefCell<PdFullSpaceSolver>>,
+    data: IpoptDataHandle,
+    cq: IpoptCqHandle,
+    nlp: Rc<RefCell<dyn IpoptNlp>>,
     /// Block dimensions in `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)` order.
     dims: [usize; 8],
     /// 8-block prototype used to mint fresh vectors with the same
@@ -83,16 +89,16 @@ pub struct PdSensBacksolver<'a> {
     template: IteratesVector,
 }
 
-impl<'a> PdSensBacksolver<'a> {
+impl PdSensBacksolver {
     /// Construct from the four handles handed in by the `on_converged`
     /// callback. Returns `Err(())` if `data` has no `curr` (i.e. the
     /// algorithm never reached an iterate — should not happen on
     /// `SolveSucceeded`).
     pub fn new(
-        data: &'a IpoptDataHandle,
-        cq: &'a IpoptCqHandle,
-        nlp: &'a Rc<RefCell<dyn IpoptNlp>>,
-        pd: &'a mut PdFullSpaceSolver,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        pd: Rc<RefCell<PdFullSpaceSolver>>,
     ) -> Result<Self, ()> {
         let curr = data.borrow().curr.clone().ok_or(())?;
         let dims = [
@@ -106,13 +112,22 @@ impl<'a> PdSensBacksolver<'a> {
             curr.v_u.dim() as usize,
         ];
         Ok(Self {
-            pd: Rc::new(RefCell::new(pd)),
-            data,
-            cq,
-            nlp,
+            pd,
+            data: Rc::clone(data),
+            cq: Rc::clone(cq),
+            nlp: Rc::clone(nlp),
             dims,
             template: curr,
         })
+    }
+
+    /// Block dimensions of the compound KKT vector at convergence, in
+    /// `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)` order. Sum equals
+    /// [`SensBacksolver::dim`]. Useful when a caller needs to compute
+    /// the flat offset of a non-x block (e.g. `n_x + n_s` for the
+    /// start of the equality-multiplier `y_c` block).
+    pub fn block_dims(&self) -> [usize; 8] {
+        self.dims
     }
 
     /// Cumulative block offsets: `offset(i)` is the start index of
@@ -171,7 +186,7 @@ impl<'a> PdSensBacksolver<'a> {
     }
 }
 
-impl<'a> SensBacksolver for PdSensBacksolver<'a> {
+impl SensBacksolver for PdSensBacksolver {
     fn dim(&self) -> usize {
         self.dims.iter().sum()
     }
@@ -195,9 +210,9 @@ impl<'a> SensBacksolver for PdSensBacksolver<'a> {
         let ok = {
             let mut pd_ref = self.pd.borrow_mut();
             pd_ref.solve(
-                self.data,
-                self.cq,
-                self.nlp,
+                &self.data,
+                &self.cq,
+                &self.nlp,
                 1.0,
                 0.0,
                 &rhs_iv,

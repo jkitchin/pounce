@@ -303,6 +303,7 @@ dependencies = [
  "pounce-common",
  "pounce-nlp",
  "pounce-restoration",
+ "pounce-sensitivity",
 ]
 
 [[package]]
@@ -366,18 +367,6 @@ version = "0.1.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
-]
-
-[[package]]
-name = "pounce-large-scale"
-version = "0.1.0"
-dependencies = [
- "pounce-algorithm",
- "pounce-common",
- "pounce-feral",
- "pounce-linsol",
- "pounce-nlp",
- "pounce-restoration",
 ]
 
 [[package]]

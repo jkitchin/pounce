@@ -20,11 +20,16 @@ use crate::iterates_vector::{IteratesVector, IteratesVectorMut};
 use crate::kkt::pd_full_space_solver::PdFullSpaceSolver;
 use crate::kkt::search_dir_calc::SearchDirCalculator;
 use pounce_common::types::Number;
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 
 pub struct PdSearchDirCalc {
-    pd_solver: PdFullSpaceSolver,
+    /// Owned via `Rc<RefCell<…>>` so external callers (e.g. the
+    /// post-converged sensitivity callback) can retain a cloned handle
+    /// past the IPM call. During the IPM loop refcount is 1 and every
+    /// internal call goes through `borrow_mut`; the runtime borrow
+    /// check costs are negligible relative to the linear solve.
+    pd_solver: Rc<RefCell<PdFullSpaceSolver>>,
     /// Skip the residual check on the search direction. Mirrors
     /// `fast_step_computation` (default false).
     pub fast_step_computation: bool,
@@ -37,18 +42,24 @@ pub struct PdSearchDirCalc {
 impl PdSearchDirCalc {
     pub fn new(pd_solver: PdFullSpaceSolver) -> Self {
         Self {
-            pd_solver,
+            pd_solver: Rc::new(RefCell::new(pd_solver)),
             fast_step_computation: false,
             mehrotra_algorithm: false,
         }
     }
 
-    pub fn pd_solver(&self) -> &PdFullSpaceSolver {
-        &self.pd_solver
+    /// Clone the shared handle to the PD solver. Used by the
+    /// post-converged sensitivity callback to retain a factor handle
+    /// past the IPM call.
+    pub fn pd_solver_rc(&self) -> Rc<RefCell<PdFullSpaceSolver>> {
+        Rc::clone(&self.pd_solver)
     }
 
-    pub fn pd_solver_mut(&mut self) -> &mut PdFullSpaceSolver {
-        &mut self.pd_solver
+    /// Borrow the PD solver mutably. Caller is responsible for not
+    /// holding two mutable borrows at once (single-thread, single-
+    /// borrow access pattern — matches every existing call site).
+    pub fn pd_solver_mut(&self) -> RefMut<'_, PdFullSpaceSolver> {
+        self.pd_solver.borrow_mut()
     }
 
     /// Compute the search direction and write it back into
@@ -121,7 +132,7 @@ impl PdSearchDirCalc {
         }
 
         let allow_inexact = self.fast_step_computation;
-        let ok = self.pd_solver.solve(
+        let ok = self.pd_solver.borrow_mut().solve(
             data,
             cq,
             nlp,
@@ -192,7 +203,7 @@ impl PdSearchDirCalc {
         // `increase_quality()` cascade produces materially different
         // steps than upstream's single-shot MA57. Leaving as-is until
         // the MA57 backend lands in Phase 4.
-        let ok = self.pd_solver.solve(
+        let ok = self.pd_solver.borrow_mut().solve(
             data,
             cq,
             nlp,
@@ -258,7 +269,7 @@ impl PdSearchDirCalc {
         // `allow_inexact = true`. Same caveat as `compute_affine_step`
         // — flipping this on regresses TRO3X3 because the FERAL-backed
         // IR cascade differs from MA57's single-shot. Defer until MA57.
-        let ok = self.pd_solver.solve(
+        let ok = self.pd_solver.borrow_mut().solve(
             data,
             cq,
             nlp,
@@ -323,7 +334,7 @@ impl PdSearchDirCalc {
         }
         let frozen_rhs = rhs.freeze();
         let mut delta_soc = frozen_rhs.make_new_zeroed();
-        let ok = self.pd_solver.solve(
+        let ok = self.pd_solver.borrow_mut().solve(
             data,
             cq,
             nlp,

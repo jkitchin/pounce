@@ -255,7 +255,7 @@ pub fn main() -> ExitCode {
                         data,
                         cq,
                         nlp,
-                        pd,
+                        Rc::clone(&pd),
                         suffixes,
                         n_full,
                         m_full,
@@ -266,7 +266,14 @@ pub fn main() -> ExitCode {
                     }
                 }
                 if compute_rh {
-                    match sens::try_compute_red_hessian(data, cq, nlp, pd, suffixes, rh_eigen) {
+                    match sens::try_compute_red_hessian(
+                        data,
+                        cq,
+                        nlp,
+                        Rc::clone(&pd),
+                        suffixes,
+                        rh_eigen,
+                    ) {
                         Some(r) => *rh_cap.borrow_mut() = Some(r),
                         None => eprintln!(
                             "pounce: --compute-red-hessian requested but the `red_hessian` \

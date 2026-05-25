@@ -52,11 +52,13 @@ pub type RestorationFactoryProvider = Box<dyn FnMut() -> RestorationFactory>;
 /// algorithm's converged state.
 ///
 /// **Use case**: post-optimal sensitivity analysis (pounce#7 /
-/// `pounce-sensitivity`). The callback receives a mutable reference
-/// to the PD solver so a `SensBacksolver` adapter can run backsolves
-/// against the converged KKT factor; receives the data / cq / nlp
-/// handles so the adapter can reproduce the augmented-system
-/// coefficient layout the IPM converged at.
+/// `pounce-sensitivity`). The callback receives a shared handle to
+/// the PD solver so a `SensBacksolver` adapter can run backsolves
+/// against the converged KKT factor — and so that handle may outlive
+/// the call frame (e.g. the public `Solver` session API retains the
+/// factor for repeated `parametric_step` / `kkt_solve` calls);
+/// receives the data / cq / nlp handles so the adapter can reproduce
+/// the augmented-system coefficient layout the IPM converged at.
 ///
 /// **Not** the same as `set_intermediate_callback` (per-iteration
 /// progress notification) — this fires exactly once per `optimize_*`
@@ -66,7 +68,7 @@ pub type ConvergedCallback = Box<
         &crate::ipopt_data::IpoptDataHandle,
         &crate::ipopt_cq::IpoptCqHandle,
         &Rc<RefCell<dyn pounce_nlp::ipopt_nlp::IpoptNlp>>,
-        &mut crate::kkt::pd_full_space_solver::PdFullSpaceSolver,
+        Rc<RefCell<crate::kkt::pd_full_space_solver::PdFullSpaceSolver>>,
     ),
 >;
 use pounce_common::diagnostics::DiagnosticsState;
@@ -1020,7 +1022,7 @@ impl IpoptApplication {
         ) {
             if let Some(cb) = self.on_converged.as_mut() {
                 if let Some(sd) = alg.search_dir.as_mut() {
-                    let pd = sd.pd_solver_mut();
+                    let pd = sd.pd_solver_rc();
                     cb(&alg.data, &alg.cq, &nlp_handle, pd);
                 }
             }
