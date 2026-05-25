@@ -200,10 +200,10 @@ impl Solver {
     /// solve failed before reaching convergence.
     pub fn converged(&self) -> Option<Ref<'_, ConvergedState>> {
         let r = self.state.borrow();
-        if r.is_none() {
-            return None;
-        }
-        Some(Ref::map(r, |o| o.as_ref().expect("checked is_some")))
+        r.as_ref()?;
+        Some(Ref::map(r, |o| {
+            o.as_ref().unwrap_or_else(|| unreachable!("checked is_some above"))
+        }))
     }
 
     /// Total dimension of the compound KKT vector (sum of

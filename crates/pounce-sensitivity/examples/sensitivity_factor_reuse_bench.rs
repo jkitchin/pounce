@@ -6,7 +6,7 @@
 //!
 //! Not a regression test — numbers vary across machines and builds.
 //! Run with:
-//!   `cargo run --release --example factor_reuse_bench -p pounce-sensitivity`
+//!   `cargo run --release --example sensitivity_factor_reuse_bench -p pounce-sensitivity`
 
 use std::cell::RefCell;
 use std::rc::Rc;

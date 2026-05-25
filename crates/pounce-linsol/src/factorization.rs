@@ -284,10 +284,10 @@ mod tests {
                 }
                 perm.swap(k, p);
                 let pk = perm[k];
-                for i in (k + 1)..n {
-                    let pi = perm[i];
+                for &pi in &perm[(k + 1)..n] {
                     let factor = a[pi][k] / a[pk][k];
                     a[pi][k] = factor;
+                    #[allow(clippy::needless_range_loop)]
                     for j in (k + 1)..n {
                         a[pi][j] -= factor * a[pk][j];
                     }
