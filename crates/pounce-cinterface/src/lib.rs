@@ -32,6 +32,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod fortran;
+pub mod solver;
 
 use pounce_algorithm::alg_builder::AlgorithmBuilder;
 use pounce_algorithm::application::{
@@ -65,36 +66,36 @@ const FALSE: Bool = 0;
 /// Internal owned state behind the opaque `IpoptProblem` handle.
 /// `#[repr(C)]` is unnecessary because C only sees the pointer.
 pub struct IpoptProblemInfo {
-    app: IpoptApplication,
-    n: Index,
-    m: Index,
-    nele_jac: Index,
-    nele_hess: Index,
-    index_style: Index,
-    x_l: Vec<Number>,
-    x_u: Vec<Number>,
-    g_l: Vec<Number>,
-    g_u: Vec<Number>,
-    eval_f: Option<Eval_F_CB>,
-    eval_g: Option<Eval_G_CB>,
-    eval_grad_f: Option<Eval_Grad_F_CB>,
-    eval_jac_g: Option<Eval_Jac_G_CB>,
-    eval_h: Option<Eval_H_CB>,
-    intermediate_cb: Option<Intermediate_CB>,
+    pub(crate) app: IpoptApplication,
+    pub(crate) n: Index,
+    pub(crate) m: Index,
+    pub(crate) nele_jac: Index,
+    pub(crate) nele_hess: Index,
+    pub(crate) index_style: Index,
+    pub(crate) x_l: Vec<Number>,
+    pub(crate) x_u: Vec<Number>,
+    pub(crate) g_l: Vec<Number>,
+    pub(crate) g_u: Vec<Number>,
+    pub(crate) eval_f: Option<Eval_F_CB>,
+    pub(crate) eval_g: Option<Eval_G_CB>,
+    pub(crate) eval_grad_f: Option<Eval_Grad_F_CB>,
+    pub(crate) eval_jac_g: Option<Eval_Jac_G_CB>,
+    pub(crate) eval_h: Option<Eval_H_CB>,
+    pub(crate) intermediate_cb: Option<Intermediate_CB>,
     /// User-provided scaling installed by [`SetIpoptProblemScaling`].
     /// `obj_scaling` defaults to `1.0`. `x_scaling`/`g_scaling` are
     /// `None` when the user passed NULL.
-    user_scaling: Option<UserScaling>,
+    pub(crate) user_scaling: Option<UserScaling>,
     /// Final iterate and stats from the most recent [`IpoptSolve`].
     /// Used by `GetIpopt{IterCount,SolveTime,...}` accessors. Reset
     /// (cleared) by the next `IpoptSolve` call.
-    last_solve: Option<LastSolve>,
+    pub(crate) last_solve: Option<LastSolve>,
 }
 
 /// User-provided NLP scaling stored on the problem until
 /// [`IpoptSolve`] copies it into the [`CCallbackTnlp`] bridge.
 #[derive(Clone)]
-struct UserScaling {
+pub(crate) struct UserScaling {
     obj_scaling: Number,
     x_scaling: Option<Vec<Number>>,
     g_scaling: Option<Vec<Number>>,
@@ -103,8 +104,8 @@ struct UserScaling {
 /// Stats and final-iterate snapshot retained between
 /// [`IpoptSolve`] and the post-solve accessors.
 #[derive(Clone, Default)]
-struct LastSolve {
-    stats: SolveStatistics,
+pub(crate) struct LastSolve {
+    pub(crate) stats: SolveStatistics,
 }
 
 pub type IpoptProblem = *mut IpoptProblemInfo;
@@ -931,35 +932,35 @@ where
 /// finishes, `finalize_solution` is called by the algorithm layer; the
 /// adapter records the final iterate in `final_*` fields, which the
 /// outer [`IpoptSolve`] copies back into the caller's buffers.
-struct CCallbackTnlp {
-    n: Index,
-    m: Index,
-    nele_jac: Index,
-    nele_hess: Index,
-    index_style: Index,
-    x_l: Vec<Number>,
-    x_u: Vec<Number>,
-    g_l: Vec<Number>,
-    g_u: Vec<Number>,
-    initial_x: Vec<Number>,
-    eval_f: Option<Eval_F_CB>,
-    eval_grad_f: Option<Eval_Grad_F_CB>,
-    eval_g: Option<Eval_G_CB>,
-    eval_jac_g: Option<Eval_Jac_G_CB>,
-    eval_h: Option<Eval_H_CB>,
-    user_data: *mut c_void,
+pub(crate) struct CCallbackTnlp {
+    pub(crate) n: Index,
+    pub(crate) m: Index,
+    pub(crate) nele_jac: Index,
+    pub(crate) nele_hess: Index,
+    pub(crate) index_style: Index,
+    pub(crate) x_l: Vec<Number>,
+    pub(crate) x_u: Vec<Number>,
+    pub(crate) g_l: Vec<Number>,
+    pub(crate) g_u: Vec<Number>,
+    pub(crate) initial_x: Vec<Number>,
+    pub(crate) eval_f: Option<Eval_F_CB>,
+    pub(crate) eval_grad_f: Option<Eval_Grad_F_CB>,
+    pub(crate) eval_g: Option<Eval_G_CB>,
+    pub(crate) eval_jac_g: Option<Eval_Jac_G_CB>,
+    pub(crate) eval_h: Option<Eval_H_CB>,
+    pub(crate) user_data: *mut c_void,
     /// User-installed intermediate callback, copied at solve time so the
     /// TNLP-trait `intermediate_callback` impl can forward through to it.
-    intermediate_cb: Option<Intermediate_CB>,
+    pub(crate) intermediate_cb: Option<Intermediate_CB>,
     /// Snapshot of user-provided scaling captured at solve time.
-    user_scaling: Option<UserScaling>,
-    final_status: Option<pounce_nlp::alg_types::SolverReturn>,
-    final_x: Vec<Number>,
-    final_z_l: Vec<Number>,
-    final_z_u: Vec<Number>,
-    final_g: Vec<Number>,
-    final_lambda: Vec<Number>,
-    final_obj: Number,
+    pub(crate) user_scaling: Option<UserScaling>,
+    pub(crate) final_status: Option<pounce_nlp::alg_types::SolverReturn>,
+    pub(crate) final_x: Vec<Number>,
+    pub(crate) final_z_l: Vec<Number>,
+    pub(crate) final_z_u: Vec<Number>,
+    pub(crate) final_g: Vec<Number>,
+    pub(crate) final_lambda: Vec<Number>,
+    pub(crate) final_obj: Number,
 }
 
 impl TNLP for CCallbackTnlp {
@@ -1976,5 +1977,105 @@ mod tests {
         assert_eq!(parse_pkg_version("4.5"), (4, 5, 0));
         assert_eq!(parse_pkg_version(""), (0, 0, 0));
         assert_eq!(parse_pkg_version("1.x.3"), (1, 0, 3));
+    }
+
+    // ---- Solver-session C ABI (crate::solver) ----
+
+    use crate::solver::{
+        IpoptCreateSolver, IpoptFreeSolver, IpoptSolverGetKktDim, IpoptSolverKktSolve,
+        IpoptSolverSolve,
+    };
+
+    #[test]
+    fn solver_create_consumes_problem_handle() {
+        let mut p = create_unconstrained();
+        assert!(!p.is_null());
+        let s = unsafe { IpoptCreateSolver(&mut p) };
+        assert!(!s.is_null());
+        assert!(p.is_null(), "IpoptCreateSolver should NULL out the caller's handle");
+        unsafe { IpoptFreeSolver(s) };
+    }
+
+    #[test]
+    fn solver_create_null_inputs_return_null() {
+        // NULL pointer-to-handle.
+        let s = unsafe { IpoptCreateSolver(std::ptr::null_mut()) };
+        assert!(s.is_null());
+        // Pointer to a NULL handle.
+        let mut p: IpoptProblem = std::ptr::null_mut();
+        let s = unsafe { IpoptCreateSolver(&mut p) };
+        assert!(s.is_null());
+    }
+
+    #[test]
+    fn solver_free_null_is_safe() {
+        unsafe { IpoptFreeSolver(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn solver_solve_drives_quadratic_and_retains_factor() {
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        let mut p = unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
+            )
+        };
+        assert!(!p.is_null());
+        let s = unsafe { IpoptCreateSolver(&mut p) };
+        assert!(!s.is_null());
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolverSolve(
+                s,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        assert!((x[0] - 2.0).abs() < 1e-6);
+        assert!(obj.abs() < 1e-10);
+
+        // After convergence the factor is retained — kkt_dim is positive
+        // and a zero RHS back-solves to zero.
+        let dim = unsafe { IpoptSolverGetKktDim(s) };
+        assert!(dim > 0, "expected positive KKT dim, got {dim}");
+        let rhs = vec![0.0_f64; dim as usize];
+        let mut lhs = vec![1.0_f64; dim as usize];
+        let ok = unsafe {
+            IpoptSolverKktSolve(s, rhs.as_ptr(), lhs.as_mut_ptr())
+        };
+        assert_eq!(ok, TRUE);
+        for (i, v) in lhs.iter().enumerate() {
+            assert!(v.abs() < 1e-10, "lhs[{i}] = {v} not ~0");
+        }
+        unsafe { IpoptFreeSolver(s) };
+    }
+
+    #[test]
+    fn solver_kkt_dim_minus_one_before_solve() {
+        let mut p = create_unconstrained();
+        let s = unsafe { IpoptCreateSolver(&mut p) };
+        assert_eq!(unsafe { IpoptSolverGetKktDim(s) }, -1);
+        unsafe { IpoptFreeSolver(s) };
     }
 }
