@@ -4,6 +4,11 @@
 [![Docs](https://github.com/jkitchin/pounce/actions/workflows/docs.yml/badge.svg)](https://jkitchin.github.io/pounce/)
 [![DOI](https://zenodo.org/badge/DOI/PENDING-FIRST-RELEASE.svg)](https://doi.org/PENDING-FIRST-RELEASE)
 
+[![PyPI: pounce-solver](https://img.shields.io/pypi/v/pounce-solver.svg?label=pypi%3A%20pounce-solver)](https://pypi.org/project/pounce-solver/)
+[![Downloads: pounce-solver](https://static.pepy.tech/badge/pounce-solver)](https://pepy.tech/project/pounce-solver)
+[![PyPI: pyomo-pounce](https://img.shields.io/pypi/v/pyomo-pounce.svg?label=pypi%3A%20pyomo-pounce)](https://pypi.org/project/pyomo-pounce/)
+[![Downloads: pyomo-pounce](https://static.pepy.tech/badge/pyomo-pounce)](https://pepy.tech/project/pyomo-pounce)
+
 ![POUNCE](logos/pounce_A_pounce.png)
 
 POUNCE is a pure-Rust port of the [Ipopt](https://github.com/coin-or/Ipopt)
