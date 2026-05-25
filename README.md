@@ -231,6 +231,26 @@ perturbed step is available via `--sens-boundcheck [--sens-bound-eps EPS]`
 bound projection is a single-pass clamp; upstream's iterative Schur
 refinement (re-factorize on each violation) is intentionally not ported.
 
+### Sessions: factor-once / solve-many
+
+For workflows that issue several follow-up operations against the
+converged KKT factor — sensitivity sweeps, reduced Hessians over many
+pinned-row sets, raw KKT back-solves — the **session APIs** hold the
+factor alive between calls:
+
+* **Python** — `pounce.Solver(problem)` with `.solve(...)`,
+  `.parametric_step(...)`, `.reduced_hessian(...)`, `.kkt_solve(...)`.
+* **C** — `IpoptCreateSolver(&prob)` / `IpoptSolverSolve` /
+  `IpoptSolverParametricStep` / `IpoptSolverReducedHessian` /
+  `IpoptSolverKktSolve` / `IpoptFreeSolver`. The classic
+  `IpoptSolve` API is unchanged and unaffected.
+* **Rust** — `pounce_sensitivity::Solver`; or
+  `pounce_linsol::Factorization` for the underlying factor-only
+  primitive (no IPM in the loop).
+
+See [`docs/src/sessions.md`](docs/src/sessions.md) for the full
+walkthrough.
+
 ## Benchmarks
 
 `benchmarks/` contains comparison harnesses against upstream Ipopt
