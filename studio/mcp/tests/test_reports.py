@@ -215,6 +215,32 @@ def test_tool_compare_runs():
     assert out["n_runs"] == 2
 
 
+def test_tool_linear_solver_summary_present_for_feral_run():
+    from pounce_studio_mcp.server import linear_solver_summary
+
+    out = linear_solver_summary(str(ROSENBROCK))
+    assert out["available"] is True, out
+    s = out["summary"]
+    assert s["solver_name"] == "feral"
+    assert s["n_factors"] >= 1
+    # Pattern reuse + pattern changes should partition factors.
+    assert s["n_pattern_reuse"] + s["n_pattern_changes"] == s["n_factors"]
+    # Final inertia recorded as a 3-tuple.
+    assert len(s["last_inertia"]) == 3
+
+
+def test_tool_linear_solver_summary_absent_for_legacy_report(tmp_path):
+    """Reports written before the field existed deserialize with `linear_solver = null`."""
+    from pounce_studio_mcp.server import linear_solver_summary
+
+    legacy = json.loads(ROSENBROCK.read_text())
+    legacy.pop("linear_solver", None)
+    p = tmp_path / "legacy.json"
+    p.write_text(json.dumps(legacy))
+    out = linear_solver_summary(str(p))
+    assert out == {"available": False, "summary": None}
+
+
 # --- explain / citations ---------------------------------------------
 
 

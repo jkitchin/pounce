@@ -1,10 +1,10 @@
 {
   "schema": "pounce.solve-report/v1",
   "fair_metadata": {
-    "result_id": "1779636584066005596-7013",
-    "created_at_iso": "2026-05-24T15:29:44.066Z",
-    "created_at_unix_nanos": 1779636584066005596,
-    "elapsed_seconds": 3.029e-6,
+    "result_id": "1779730937633839000-18901",
+    "created_at_iso": "2026-05-25T17:42:17.633Z",
+    "created_at_unix_nanos": 1779730937633839000,
+    "elapsed_seconds": 1e-6,
     "solver": {
       "name": "pounce",
       "version": "0.1.0",
@@ -46,7 +46,7 @@
     "num_obj_grad_evals": 0,
     "num_constr_jac_evals": 0,
     "num_hess_evals": 0,
-    "total_wallclock_time_secs": 0.005099843,
+    "total_wallclock_time_secs": 0.002675875,
     "restoration_calls": 0,
     "restoration_inner_iters": 0,
     "restoration_outer_iters": 0,
@@ -339,5 +339,21 @@
       "alpha_primal_char": "f",
       "ls_trials": 1
     }
-  ]
+  ],
+  "linear_solver": {
+    "solver_name": "feral",
+    "n_factors": 21,
+    "n_pattern_reuse": 20,
+    "n_pattern_changes": 1,
+    "max_fill_ratio": 1.0,
+    "min_abs_pivot": 0.0020269747954159145,
+    "max_abs_pivot": 1.0000000000000004,
+    "last_inertia": [
+      2,
+      0,
+      0
+    ],
+    "last_nnz_a": 3,
+    "last_nnz_l": 3
+  }
 }

@@ -43,6 +43,7 @@ stdio.
 | `restoration_windows` | Contiguous runs of iters tagged as restoration                          |
 | `diagnose`            | Common Ipopt-failure heuristics with severity-tagged findings           |
 | `compare_runs`        | Side-by-side comparison of multiple reports                             |
+| `linear_solver_summary` | Aggregate FERAL backend post-mortem: factor counts, fill ratio, extremal pivots, final inertia |
 
 ### `run_problem` notes
 

@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use pounce_common::types::{Index, Number};
+use pounce_linsol::summary::LinearSolverSummary;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,57 @@ pub struct SolveReport {
     /// [`ReportDetail::Summary`] or iter history was never enabled.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub iterations: Vec<IterRecord>,
+    /// Aggregate linear-solver post-mortem. Populated when the
+    /// workspace-default FERAL backend ran (it self-instruments via
+    /// `feral::Solver::last_factor_stats()`); `None` for HSL MA57 and
+    /// for custom backends plugged through
+    /// [`pounce_algorithm::application::IpoptApplication::set_linear_backend_factory`].
+    /// Additive — older `pounce.solve-report/v1` JSON without this
+    /// field deserializes unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub linear_solver: Option<LinearSolverSummaryInfo>,
+}
+
+/// Serializable mirror of [`pounce_linsol::summary::LinearSolverSummary`].
+/// Lives in the CLI crate (rather than `pounce-linsol`) so the linsol
+/// trait crate stays serde-free. Field shape is identical; serde
+/// defaults keep it forward-compatible with future additions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinearSolverSummaryInfo {
+    pub solver_name: String,
+    pub n_factors: u64,
+    pub n_pattern_reuse: u64,
+    pub n_pattern_changes: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_fill_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub min_abs_pivot: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_abs_pivot: Option<f64>,
+    /// `(positive, negative, zero)` inertia of the final factorisation.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_inertia: Option<(usize, usize, usize)>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_nnz_a: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_nnz_l: Option<usize>,
+}
+
+impl From<LinearSolverSummary> for LinearSolverSummaryInfo {
+    fn from(s: LinearSolverSummary) -> Self {
+        Self {
+            solver_name: s.solver_name,
+            n_factors: s.n_factors,
+            n_pattern_reuse: s.n_pattern_reuse,
+            n_pattern_changes: s.n_pattern_changes,
+            max_fill_ratio: s.max_fill_ratio,
+            min_abs_pivot: s.min_abs_pivot,
+            max_abs_pivot: s.max_abs_pivot,
+            last_inertia: s.last_inertia,
+            last_nnz_a: s.last_nnz_a,
+            last_nnz_l: s.last_nnz_l,
+        }
+    }
 }
 
 /// FAIR-aligned provenance block. The four FAIR principles
@@ -236,6 +288,7 @@ pub struct ReportBuilder {
     pub solution: SolutionInfo,
     pub stats: StatisticsInfo,
     pub iterations: Vec<IterRecord>,
+    pub linear_solver: Option<LinearSolverSummaryInfo>,
 }
 
 impl ReportBuilder {
@@ -271,7 +324,14 @@ impl ReportBuilder {
             },
             stats: empty_stats(),
             iterations: Vec::new(),
+            linear_solver: None,
         }
+    }
+
+    /// Attach a linear-solver post-mortem. Called once per solve after
+    /// `optimize_tnlp` returns and before [`Self::finish`].
+    pub fn set_linear_solver_summary(&mut self, summary: LinearSolverSummary) {
+        self.linear_solver = Some(summary.into());
     }
 
     /// Pull `iteration_count`, `final_*`, and counters into the
@@ -330,6 +390,7 @@ impl ReportBuilder {
             solution: self.solution,
             statistics: self.stats,
             iterations: self.iterations,
+            linear_solver: self.linear_solver,
         }
     }
 }

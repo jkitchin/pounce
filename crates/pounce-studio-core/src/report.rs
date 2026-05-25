@@ -88,6 +88,11 @@ pub struct SolveReport {
     pub statistics: StatisticsInfo,
     #[serde(default)]
     pub iterations: Vec<IterRecord>,
+    /// Aggregate linear-solver post-mortem (factor counts, fill ratio,
+    /// extremal pivots, final inertia). Added in pounce#?? — older
+    /// reports loaded with `#[serde(default)] = None`.
+    #[serde(default)]
+    pub linear_solver: Option<LinearSolverSummaryInfo>,
 }
 
 impl SolveReport {
@@ -215,6 +220,33 @@ pub struct StatisticsInfo {
     pub restoration_outer_iters: i32,
     #[serde(default)]
     pub restoration_wall_secs: f64,
+}
+
+/// Aggregate linear-solver post-mortem mirror — schema-compatible
+/// with `pounce_cli::solve_report::LinearSolverSummaryInfo` and
+/// ultimately `pounce_linsol::summary::LinearSolverSummary`. Loaded
+/// from the report's optional `linear_solver` object. All numeric
+/// extremals are `Option` because the backend declines to populate
+/// them when no factor has run yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinearSolverSummaryInfo {
+    pub solver_name: String,
+    pub n_factors: u64,
+    pub n_pattern_reuse: u64,
+    pub n_pattern_changes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fill_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_abs_pivot: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_abs_pivot: Option<f64>,
+    /// `(positive, negative, zero)` inertia of the final factorisation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_inertia: Option<(usize, usize, usize)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_nnz_a: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_nnz_l: Option<usize>,
 }
 
 /// One row of per-iteration trajectory; mirrors

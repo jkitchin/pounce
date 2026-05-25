@@ -18,9 +18,12 @@
 //!   and uses MA57's `pivtol_changed` / `CallAgain` protocol so the
 //!   upper-layer reload-and-retry semantics line up.
 
+use std::sync::{Arc, Mutex};
+
 use feral::symbolic::SupernodeParams;
-use feral::{CscMatrix, FactorStatus, NumericParams, Solver};
+use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, Solver};
 use pounce_common::types::{Index, Number};
+use pounce_linsol::summary::LinearSolverSummary;
 use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
 
 /// FERAL solver implementing the IPM-side sparse symmetric backend
@@ -53,6 +56,19 @@ pub struct FeralSolverInterface {
     /// Absolute near-singularity floor; see
     /// [`FeralConfig::singular_pivot_floor`].
     singular_pivot_floor: f64,
+
+    /// Running aggregate updated after every successful `factor()`.
+    /// Exposed via [`Self::summary`] and (mirrored to) the optional
+    /// `sink` so an out-of-band consumer can read it post-solve
+    /// without plumbing through the algorithm's wrapper layers.
+    summary: LinearSolverSummary,
+
+    /// Optional shared sink updated alongside `summary`. Decouples
+    /// the algorithm-internal solver lifecycle from CLI / report
+    /// consumers — pounce-cli installs an `Arc<Mutex<...>>` via
+    /// [`Self::with_summary_sink`] and reads it after
+    /// `optimize_tnlp` returns.
+    sink: Option<Arc<Mutex<LinearSolverSummary>>>,
 }
 
 /// Construction-time configuration for [`FeralSolverInterface`].
@@ -192,6 +208,63 @@ impl FeralSolverInterface {
             matrix: None,
             negevals: 0,
             singular_pivot_floor: cfg.singular_pivot_floor,
+            summary: LinearSolverSummary {
+                solver_name: "feral".to_string(),
+                ..Default::default()
+            },
+            sink: None,
+        }
+    }
+
+    /// Install a shared summary sink. The interface updates the sink
+    /// (and the internal `summary`) after every successful
+    /// `factor()`. Default is no sink — calls then go only to the
+    /// internal `summary`.
+    pub fn with_summary_sink(mut self, sink: Arc<Mutex<LinearSolverSummary>>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Snapshot of the post-solve aggregate. Always populated (no
+    /// opt-in needed for the always-on Phase A stats from feral 0.7).
+    pub fn summary(&self) -> LinearSolverSummary {
+        self.summary.clone()
+    }
+
+    /// Fold a single feral `FactorStats` into the running summary,
+    /// then mirror the snapshot into the sink if one is installed.
+    fn record_factor_stats(&mut self, stats: FactorStats) {
+        let s = &mut self.summary;
+        s.n_factors += 1;
+        if stats.pattern_reused {
+            s.n_pattern_reuse += 1;
+        } else {
+            s.n_pattern_changes += 1;
+        }
+        s.max_fill_ratio = Some(match s.max_fill_ratio {
+            Some(prev) => prev.max(stats.fill_ratio),
+            None => stats.fill_ratio,
+        });
+        s.min_abs_pivot = Some(match s.min_abs_pivot {
+            Some(prev) => prev.min(stats.min_abs_pivot),
+            None => stats.min_abs_pivot,
+        });
+        s.max_abs_pivot = Some(match s.max_abs_pivot {
+            Some(prev) => prev.max(stats.max_abs_pivot),
+            None => stats.max_abs_pivot,
+        });
+        s.last_inertia = Some((
+            stats.inertia.positive,
+            stats.inertia.negative,
+            stats.inertia.zero,
+        ));
+        s.last_nnz_a = Some(stats.nnz_a);
+        s.last_nnz_l = Some(stats.nnz_l);
+
+        if let Some(sink) = self.sink.as_ref() {
+            if let Ok(mut guard) = sink.lock() {
+                *guard = s.clone();
+            }
         }
     }
 
@@ -219,6 +292,9 @@ impl FeralSolverInterface {
         self.matrix = Some(matrix);
         match status {
             FactorStatus::Success => {
+                if let Some(stats) = self.solver.last_factor_stats() {
+                    self.record_factor_stats(stats);
+                }
                 self.negevals = self.solver.num_negative_eigenvalues() as Index;
                 if check_neg_evals && self.negevals != number_of_neg_evals {
                     return ESymSolverStatus::WrongInertia;

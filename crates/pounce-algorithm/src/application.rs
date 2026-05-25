@@ -79,6 +79,7 @@ use pounce_common::reg_options::RegisteredOptions;
 use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::DenseVectorSpace;
+use pounce_linsol::summary::LinearSolverSummary;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_nlp::alg_types::SolverReturn;
 use pounce_nlp::orig_ipopt_nlp::{NoScaling, OrigIpoptNlp, ScalingMethod};
@@ -94,6 +95,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub struct IpoptApplication {
@@ -142,6 +144,16 @@ pub struct IpoptApplication {
     /// by default so library callers that never read the iterations
     /// vector don't pay the per-iter alloc.
     record_iter_history: bool,
+    /// Shared sink that the linear-solver backend writes a rolling
+    /// [`LinearSolverSummary`] into after every factor. Reset at the
+    /// top of every solve (so back-to-back `optimize_tnlp` calls don't
+    /// bleed stats across invocations) and read out via
+    /// [`Self::linear_solver_summary`] once the solve returns. Only
+    /// the workspace-default FERAL backend (via
+    /// [`default_backend_factory_with_sink`]) wires the sink today;
+    /// custom factories plugged through [`Self::set_linear_backend_factory`]
+    /// and the HSL MA57 backend leave the sink empty.
+    linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -183,6 +195,7 @@ impl IpoptApplication {
             restoration_factory_provider: None,
             on_converged: None,
             record_iter_history: false,
+            linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
         }
     }
 
@@ -383,6 +396,21 @@ impl IpoptApplication {
     /// re-solve will give you the previous solve's timings — by design.
     pub fn timing_stats(&self) -> Rc<TimingStatistics> {
         Rc::clone(&self.timing.borrow())
+    }
+
+    /// Aggregate linear-solver post-mortem from the most recent
+    /// `optimize_tnlp` call. `Some` when the workspace-default FERAL
+    /// backend ran at least one factor; `None` when no factors were
+    /// recorded (custom factory plugged via
+    /// [`Self::set_linear_backend_factory`], or solve aborted before
+    /// the first KKT factor). Reset at the top of every solve.
+    pub fn linear_solver_summary(&self) -> Option<LinearSolverSummary> {
+        let guard = self.linsol_summary_sink.lock().ok()?;
+        if guard.is_empty() {
+            None
+        } else {
+            Some(guard.clone())
+        }
     }
 
     /// Drive a solve.
@@ -730,6 +758,17 @@ impl IpoptApplication {
         *self.timing.borrow_mut() = Rc::clone(&timing);
         timing.overall_alg.start();
 
+        // Reset the linear-solver summary sink so back-to-back solves
+        // don't bleed factor counters / extremal pivots into each
+        // other. Surviving the lock failure with a debug-assert keeps
+        // a poisoned mutex from sinking a release build that doesn't
+        // even consume the summary.
+        if let Ok(mut guard) = self.linsol_summary_sink.lock() {
+            *guard = LinearSolverSummary::default();
+        } else {
+            debug_assert!(false, "linsol summary sink mutex poisoned");
+        }
+
         // Build adapter + Nlp. Honor `fixed_variable_treatment` (default
         // `make_parameter`; pounce additionally implements `relax_bounds`,
         // which the adapter also auto-selects as a fallback when
@@ -858,10 +897,9 @@ impl IpoptApplication {
         // per-problem `.opt` files can flip backend knobs without
         // rebuilding pounce.
         let feral_cfg = feral_config_from_options(&self.options);
-        let factory = self
-            .linear_backend_factory
-            .take()
-            .unwrap_or_else(|| default_backend_factory(feral_cfg));
+        let factory = self.linear_backend_factory.take().unwrap_or_else(|| {
+            default_backend_factory_with_sink(feral_cfg, Arc::clone(&self.linsol_summary_sink))
+        });
         let bundle = builder.build_with_backend(factory);
 
         // Wire the data / cq pair around the NLP. Install the shared
@@ -1358,6 +1396,41 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
                     {
                         // ma57 feature not compiled in — fall back to FERAL.
                         Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                    }
+                }
+            }
+        },
+    )
+}
+
+/// Sink-aware variant of [`default_backend_factory`]. Identical
+/// dispatch, but the FERAL backend is constructed with a
+/// `LinearSolverSummary` sink so [`IpoptApplication`] can read out
+/// aggregate post-mortem stats (factor counts, fill ratio, extremal
+/// pivots, final inertia) after the solve returns. MA57 ignores the
+/// sink — the HSL backend doesn't carry the same instrumentation yet.
+pub fn default_backend_factory_with_sink(
+    feral_cfg: pounce_feral::FeralConfig,
+    sink: Arc<Mutex<LinearSolverSummary>>,
+) -> LinearBackendFactory {
+    Box::new(
+        move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
+            match choice {
+                LinearSolverChoice::Feral => Box::new(
+                    pounce_feral::FeralSolverInterface::with_config(feral_cfg)
+                        .with_summary_sink(Arc::clone(&sink)),
+                ),
+                LinearSolverChoice::Ma57 => {
+                    #[cfg(feature = "ma57")]
+                    {
+                        Box::new(pounce_hsl::Ma57SolverInterface::new())
+                    }
+                    #[cfg(not(feature = "ma57"))]
+                    {
+                        Box::new(
+                            pounce_feral::FeralSolverInterface::with_config(feral_cfg)
+                                .with_summary_sink(Arc::clone(&sink)),
+                        )
                     }
                 }
             }

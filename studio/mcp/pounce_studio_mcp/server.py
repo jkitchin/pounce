@@ -627,6 +627,40 @@ def compare_runs(paths: list[str], labels: list[str] | None = None) -> dict[str,
     ])
 
 
+@mcp.tool()
+def linear_solver_summary(path: str) -> dict[str, Any]:
+    """Aggregate post-mortem from the symmetric linear solver.
+
+    Populated when the workspace-default FERAL backend ran the solve;
+    `null` (returned as `{"summary": null, "available": false}`) for
+    HSL MA57 / custom backends and for older reports written before
+    the field existed.
+
+    Fields when present:
+        solver_name        Backend identity ("feral").
+        n_factors          Total factor() calls completed.
+        n_pattern_reuse    Of those, how many reused the prior symbolic
+                           factorisation (cheap path). Healthy IPM
+                           workloads expect this to dominate.
+        n_pattern_changes  How many required a fresh symbolic factorisation.
+        max_fill_ratio     Largest nnz(L)/nnz(A) seen across factors;
+                           values >> 10 on KKT systems indicate ordering trouble.
+        min_abs_pivot      Smallest |pivot| seen; approaches the precision
+                           floor when the matrix is near-singular.
+        max_abs_pivot      Largest |pivot| seen.
+        last_inertia       (positive, negative, zero) inertia of the final
+                           factorisation. For a clean IPM at convergence
+                           this should be (n, m, 0).
+        last_nnz_a         nnz(A) at the final factor.
+        last_nnz_l         nnz(L) at the final factor.
+
+    Args:
+        path: Path to the solve report.
+    """
+    summary = R.linear_solver_summary(R.load_report(path))
+    return {"available": summary is not None, "summary": summary}
+
+
 def main() -> None:
     """Entry point used by `python -m pounce_studio_mcp`."""
     mcp.run()

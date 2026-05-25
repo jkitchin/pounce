@@ -69,7 +69,7 @@ pounce-restoration = { path = "crates/pounce-restoration", version = "0.1.0" }
 pounce-presolve = { path = "crates/pounce-presolve", version = "0.1.0" }
 pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.1.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.1.0" }
-feral = "0.6.0"
+feral = "0.7.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

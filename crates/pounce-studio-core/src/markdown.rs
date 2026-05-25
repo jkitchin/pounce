@@ -243,6 +243,7 @@ mod tests {
                 restoration_wall_secs: 0.0,
             },
             iterations: vec![],
+            linear_solver: None,
         }
     }
 

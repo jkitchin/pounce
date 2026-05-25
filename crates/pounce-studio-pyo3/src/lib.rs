@@ -164,6 +164,18 @@ impl PyReport {
         let _ = self.markdown_cache.set(s.clone());
         s
     }
+
+    /// Aggregate linear-solver post-mortem from the report's
+    /// `linear_solver` field, as a JSON object string. `None` when the
+    /// report carried no `linear_solver` block (older reports, or the
+    /// solve used a backend that doesn't self-instrument — HSL MA57 or
+    /// a custom factory).
+    fn linear_solver_summary(&self) -> PyResult<Option<String>> {
+        match &self.inner.linear_solver {
+            Some(s) => json_or_err(s).map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 /// A parsed POUNCEIT v1 binary trace.

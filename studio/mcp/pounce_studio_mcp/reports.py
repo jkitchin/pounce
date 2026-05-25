@@ -93,3 +93,15 @@ def compare(reports: list[tuple[str, _native.Report]]) -> dict[str, Any]:
 def render_markdown(report: _native.Report) -> str:
     """Render the same Markdown the `pounce-studio inspect` CLI emits."""
     return report.render_markdown()
+
+
+def linear_solver_summary(report: _native.Report) -> dict[str, Any] | None:
+    """Aggregate linear-solver post-mortem, or `None` when absent.
+
+    Populated when the workspace-default FERAL backend ran the solve
+    (it self-instruments via `feral::Solver::last_factor_stats`).
+    Absent for HSL MA57 / custom backends and for older reports
+    written before the field existed.
+    """
+    raw = report.linear_solver_summary()
+    return None if raw is None else json.loads(raw)

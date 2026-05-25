@@ -109,6 +109,83 @@ COLUMNS: dict[str, dict[str, Any]] = {
         "what_abnormal_means": "Plateaus → check Hessian regularization and step quality.",
         "see_also": [],
     },
+    # Linear-solver summary fields (surfaced by `linear_solver_summary`).
+    # Populated by the FERAL backend's self-instrumentation.
+    "n_factors": {
+        "definition": "Total successful symmetric factorisations across the solve.",
+        "typical_range": "≈ iteration_count for filter-line-search runs.",
+        "what_abnormal_means": "Much larger than iter count → repeated regularization retries.",
+        "see_also": ["n_pattern_reuse", "n_pattern_changes"],
+    },
+    "n_pattern_reuse": {
+        "definition": (
+            "Factors that reused the prior symbolic factorisation "
+            "(sparsity pattern unchanged → cheap)."
+        ),
+        "typical_range": "Should dominate n_factors after iter 1.",
+        "what_abnormal_means": (
+            "Low share → matrix structure changing per iter; analyse() runs "
+            "repeatedly, hurting throughput."
+        ),
+        "see_also": ["n_pattern_changes"],
+    },
+    "n_pattern_changes": {
+        "definition": "Factors that required a fresh symbolic factorisation.",
+        "typical_range": "1 (the first factor) for a healthy solve.",
+        "what_abnormal_means": (
+            "> 1 → KKT structure shifting; check inertia-correction regularization "
+            "policy or active-set churn."
+        ),
+        "see_also": ["n_pattern_reuse"],
+    },
+    "max_fill_ratio": {
+        "definition": "Max nnz(L) / nnz(A) observed across factors.",
+        "typical_range": "1–10 for well-ordered KKT systems.",
+        "what_abnormal_means": (
+            ">> 10 → AMD/METIS ordering struggled; expect memory + time spikes."
+        ),
+        "see_also": ["last_nnz_a", "last_nnz_l"],
+    },
+    "min_abs_pivot": {
+        "definition": "Smallest absolute pivot encountered during factorisation.",
+        "typical_range": "1e-8 .. 1e+6 depending on problem scaling.",
+        "what_abnormal_means": (
+            "Approaching working precision floor (~1e-16) → matrix near-singular; "
+            "regularization is probably kicking in."
+        ),
+        "see_also": ["max_abs_pivot", "regularization"],
+    },
+    "max_abs_pivot": {
+        "definition": "Largest absolute pivot encountered during factorisation.",
+        "typical_range": "Within ~6 orders of magnitude of min_abs_pivot.",
+        "what_abnormal_means": (
+            "max/min >> 1e8 → catastrophic conditioning; consider nlp_scaling_method."
+        ),
+        "see_also": ["min_abs_pivot"],
+    },
+    "last_inertia": {
+        "definition": (
+            "(positive, negative, zero) eigenvalue counts of the final factorisation, "
+            "from the LDLᵀ pivots."
+        ),
+        "typical_range": "(n, m, 0) at a converged primal-dual KKT system.",
+        "what_abnormal_means": (
+            "zero > 0 → singular; positive < n → indefinite, inertia correction failed."
+        ),
+        "see_also": ["regularization"],
+    },
+    "last_nnz_a": {
+        "definition": "nnz(A) at the final factorisation's input KKT matrix.",
+        "typical_range": "Problem-dependent.",
+        "what_abnormal_means": "n/a — informational.",
+        "see_also": ["last_nnz_l", "max_fill_ratio"],
+    },
+    "last_nnz_l": {
+        "definition": "nnz(L) at the final factorisation.",
+        "typical_range": "Problem-dependent.",
+        "what_abnormal_means": "n/a — informational; combine with last_nnz_a for fill.",
+        "see_also": ["last_nnz_a", "max_fill_ratio"],
+    },
 }
 
 

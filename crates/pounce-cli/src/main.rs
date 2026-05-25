@@ -474,6 +474,9 @@ pub fn main() -> ExitCode {
             builder.solution.lambda = lambda;
         }
         builder.ingest_stats(&solve_stats);
+        if let Some(linsol) = app.linear_solver_summary() {
+            builder.set_linear_solver_summary(linsol);
+        }
 
         // `Full` detail carries the suffix blocks: the sensitivity
         // result and, when computed, the reduced Hessian (packed as
