@@ -160,10 +160,18 @@ impl DefaultIterateInitializer {
             delta_s: 1.0,
             j_c: &*j_c,
             d_c: None,
-            delta_c: 0.0,
+            // Tiny δ_c, δ_d (upstream uses 0). pounce-feral's LDL^T
+            // mis-reports the inertia of an augmented system with a
+            // structurally-zero (3,3)/(4,4) block — it counted 0
+            // negative eigenvalues on nuffield2_trap where the true
+            // count is n_c+n_d, triggering WrongInertia. Perturbing
+            // by 1e-8 keeps the LS solution numerically identical
+            // (the constraint Jacobian dominates this term) while
+            // giving the diagonal something nonzero to pivot on.
+            delta_c: 1e-8,
             j_d: &*j_d,
             d_d: None,
-            delta_d: 0.0,
+            delta_d: 1e-8,
         };
         let aug_rhs = AugSysRhs {
             rhs_x: &rhs_x,
