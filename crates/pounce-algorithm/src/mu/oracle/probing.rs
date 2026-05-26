@@ -75,7 +75,14 @@ impl ProbingMuOracle {
         }
         let delta_aff: IteratesVector = data.borrow().delta_aff.clone()?;
         let cq_ref = cq.borrow();
-        let mu_curr = data.borrow().curr_mu;
+        // Upstream `IpProbingMuOracle.cpp:111` uses `curr_avrg_compl()`
+        // (the actual average s·z at the current iterate), NOT the
+        // stored barrier parameter `data.curr_mu`. Mehrotra's rule
+        // sigma = (mu_aff / mu_curr)^3 only makes sense when mu_curr
+        // is the present complementarity — using the barrier value
+        // produces sigma values orders of magnitude off and causes
+        // huge over-correction steps on iter 1 of LP-shaped problems.
+        let mu_curr = cq_ref.curr_avrg_compl();
         let alpha_pri = cq_ref.aff_step_alpha_primal_max(&delta_aff, tau);
         let alpha_du = cq_ref.aff_step_alpha_dual_max(&delta_aff, tau);
         let mu_aff = cq_ref.aff_step_compl_avrg(&delta_aff, alpha_pri, alpha_du);
