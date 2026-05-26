@@ -100,6 +100,14 @@ pub struct FeralConfig {
     /// so `δ_w` is bumped. `0` disables the trigger. See
     /// `dev/research/near-singularity-signal.md` (feral) §4.
     pub singular_pivot_floor: f64,
+    /// Relative Bunch-Kaufman partial-pivoting threshold `u`: a
+    /// candidate diagonal pivot is rejected when `|d| < u * col_max`.
+    /// Direct analog of Ipopt's `ma27_pivtol` / `ma57_pivtol`. Smaller
+    /// `u` preserves the AMD ordering and keeps `L` sparse; larger
+    /// `u` rejects more candidates, delaying pivots / forcing 2x2
+    /// blocks for accuracy. LAPACK's textbook maximum-stability value
+    /// is `0.5`. Default `1e-8` matches feral's `NumericParams`.
+    pub pivtol: f64,
 }
 
 impl Default for FeralConfig {
@@ -112,6 +120,7 @@ impl Default for FeralConfig {
             // magnitude on the scaled matrix. Only pivots essentially
             // at the working-precision floor are flagged singular.
             singular_pivot_floor: 1e-20,
+            pivtol: 1e-8,
         }
     }
 }
@@ -140,6 +149,10 @@ impl FeralConfig {
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(1e-20),
+            pivtol: std::env::var("FERAL_PIVTOL")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1e-8),
         }
     }
 }
@@ -178,22 +191,13 @@ impl FeralSolverInterface {
                 np.min_parallel_flops = Some(v);
             }
         }
-        // `FERAL_PIVTOL=<f64>` overrides the relative Bunch-Kaufman
-        // partial-pivoting threshold (the analog of ipopt's
-        // `ma27_pivtol`): a candidate diagonal pivot is rejected when
-        // `|d| < u * col_max`. Smaller u preserves the AMD ordering
-        // and keeps L sparse; larger u rejects more candidates,
-        // delaying pivots / forcing 2x2 blocks for accuracy. Feral
-        // reads the same variable in its C-API entry point, but
-        // pounce-feral builds the solver through the Rust API and
-        // would otherwise hardcode `NumericParams::default()`'s
-        // 1e-8. Honoring it here lets `pounce ... linear_solver=feral`
-        // be swept the same way the C-API binary can be.
-        if let Ok(s) = std::env::var("FERAL_PIVTOL") {
-            if let Ok(v) = s.parse::<f64>() {
-                np.bk.pivot_threshold = v;
-            }
-        }
+        // Relative Bunch-Kaufman partial-pivoting threshold — the
+        // analog of Ipopt's `ma27_pivtol` / `ma57_pivtol`. Surfaced as
+        // the `feral_pivtol` OptionsList option (registered in
+        // pounce-algorithm's `upstream_options::register_all_options`),
+        // with `FERAL_PIVTOL` env var as a fallback read in
+        // `FeralConfig::from_env`.
+        np.bk.pivot_threshold = cfg.pivtol;
         let mut solver = if cfg.cascade_break {
             Solver::with_params(np, SupernodeParams::default())
                 .with_cascade_break(0.5)

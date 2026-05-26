@@ -1015,6 +1015,16 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_bool_option("feral_fma", "Whether FERAL should dispatch dense kernels through fused multiply-add intrinsics.", false, "On aarch64 / x86_v3, FMA-dispatched panel and trailing-update kernels run at roughly 2x the throughput of the generic kernels. The downside is small per-pivot rounding drift that trips more WrongInertia checks and delayed pivots — the same failure mode that forced cascade-break off by default. Off by default; turn on for workloads where kernel throughput dominates and the IPM tolerates a slightly noisier inertia signal.")?;
     r.add_bool_option("feral_refine", "Whether FERAL should run iterative refinement on every back-solve.", true, "Iterative refinement at solve time closes the residual floor produced by cascade-break's L-factor perturbation; without it, pinene_3200 and similar IPM tails stall as the per-pivot residual exceeds the duality gap. Enabled by default; set no only when timing the bare factor + back-solve in isolation.")?;
     r.add_lower_bounded_number_option("feral_singular_pivot_floor", "Near-singularity trigger for the FERAL backend.", 0.0, false, 1e-20, "FERAL's default zero-pivot policy force-accepts a pivot at the working-precision floor and still reports a successful factorization, so a numerically rank-deficient KKT system that happens to land on the correct inertia produces a clean solve and the IPM never escalates delta_w. This option is pounce's analog of MA57's CNTL(2) small-pivot threshold: after a successful factor, the smallest accepted D-block pivot magnitude min|lambda(D)| (scaled space) is compared against this absolute floor, and if it falls below, the factor is reported Singular so PDPerturbationHandler::PerturbForSingularity bumps the Hessian perturbation. An absolute floor is used rather than the scale-free ratio min/max ~ 1/cond(D), because an interior-point KKT is designed to become ill-conditioned as mu->0 and the ratio collapses on healthy full-rank systems near the solution. Lower values are more permissive (fewer factors flagged singular); 0 disables the trigger. Default 1e-20 (MA57 CNTL(2)). See crates/pounce-feral/src/lib.rs and feral dev/research/near-singularity-signal.md.")?;
+    r.add_bounded_number_option(
+        "feral_pivtol",
+        "Pivot tolerance for the linear solver FERAL.",
+        0.0,
+        true,
+        0.5,
+        false,
+        1e-8,
+        "Relative Bunch-Kaufman partial-pivoting threshold u: a candidate diagonal pivot is rejected when |d| < u * col_max. Direct analog of ma27_pivtol / ma57_pivtol. A smaller number pivots for sparsity (preserves the AMD ordering, keeps L sparse, factors faster but is less stable); a larger number pivots for stability (rejects more candidates, delays pivots, forces more 2x2 blocks, denser L but better backward error). LAPACK's textbook maximum-stability value is 0.5. Falls back to the FERAL_PIVTOL environment variable when not set on the OptionsList.",
+    )?;
 
     // ===== Ma77SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa77SolverInterface.cpp) =====
     r.set_registering_category("MA77 Linear Solver");
