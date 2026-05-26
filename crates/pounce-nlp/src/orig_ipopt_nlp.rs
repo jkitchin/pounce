@@ -2308,7 +2308,10 @@ mod tests {
             "scaled d(x) mismatch; got {}",
             d.values()[0]
         );
-        assert!(d.values()[0] >= post, "starting point must be feasible in scaled space");
+        assert!(
+            d.values()[0] >= post,
+            "starting point must be feasible in scaled space"
+        );
     }
 
     #[test]

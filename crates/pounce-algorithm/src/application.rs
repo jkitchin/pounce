@@ -1360,7 +1360,10 @@ impl IpoptApplication {
                 };
             }
         }
-        if let Ok((v, found)) = self.options.get_string_value("adaptive_mu_globalization", "") {
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("adaptive_mu_globalization", "")
+        {
             if found {
                 use crate::mu::adaptive::AdaptiveMuGlobalization;
                 builder.mu.adaptive_mu_globalization = match v.as_str() {
@@ -1640,7 +1643,10 @@ impl IpoptApplication {
                 builder.init.bound_mult_init_method = v;
             }
         }
-        if let Ok((v, found)) = self.options.get_string_value("least_square_init_primal", "") {
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("least_square_init_primal", "")
+        {
             if found {
                 builder.init.least_square_init_primal = v == "yes";
             }
