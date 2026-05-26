@@ -87,3 +87,9 @@ lto = "thin"
 codegen-units = 1
 debug = 1
 
+# Temporary: point at the local feral checkout to pick up the SSIDS-
+# aligned strict-zero-pivot inertia policy (feral gh#54 / pounce gh#52,
+# nuffield2_trap). Revert once the fix ships on crates.io.
+[patch.crates-io]
+feral = { path = "../feral" }
+

@@ -289,7 +289,9 @@ impl FeralSolverInterface {
     }
 
     /// Build the lower-triangle CSC view, factor it, and stash the
-    /// negative-eigenvalue count.
+    /// strict-negative-eigenvalue count (IPOPT / MA57 `INFO(24)`
+    /// convention). Rank deficiency (zero pivots) is reported as
+    /// `Singular` so the outer loop routes to `perturb_for_singular`.
     fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
         let n = self.dim as usize;
         // Hand the KKT to feral with its structure intact. Where a
@@ -315,11 +317,34 @@ impl FeralSolverInterface {
                 if let Some(stats) = self.solver.last_factor_stats() {
                     self.record_factor_stats(stats);
                 }
-                self.negevals = self.solver.num_negative_eigenvalues() as Index;
+                // IPOPT / MA57 convention: `number_of_neg_evals` is the
+                // count of strict negative pivots (MA57's INFO(24)). Zero
+                // pivots are reported separately by signalling `Singular`,
+                // which routes the outer loop to `perturb_for_singular`
+                // (bumping δ_c on rank-deficient constraint rows) instead
+                // of `perturb_for_wrong_inertia` (bumping δ_x). Folding
+                // zero into negevals — the SSIDS bookkeeping convention —
+                // is correct for spectral accounting but breaks IPOPT's
+                // singularity branch on LP-shaped KKTs whose (3,3) block
+                // is structurally zero. See pounce gh#52 / feral gh#54.
+                let (neg, zero) = match self.solver.inertia() {
+                    Some(i) => (i.negative, i.zero),
+                    None => (self.solver.num_negative_eigenvalues(), 0),
+                };
+                self.negevals = neg as Index;
+                if zero > 0 {
+                    if std::env::var_os("POUNCE_DBG_INERTIA").is_some() {
+                        eprintln!(
+                            "[INERTIA] singular: neg={} zero={} expected={} dim={}",
+                            neg, zero, number_of_neg_evals, self.dim
+                        );
+                    }
+                    return ESymSolverStatus::Singular;
+                }
                 if check_neg_evals && self.negevals != number_of_neg_evals {
                     if std::env::var_os("POUNCE_DBG_INERTIA").is_some() {
                         eprintln!(
-                            "[INERTIA] mismatch: got_neg={} expected_neg={} dim={}",
+                            "[INERTIA] mismatch: got_neg={} expected={} dim={}",
                             self.negevals, number_of_neg_evals, self.dim
                         );
                     }
