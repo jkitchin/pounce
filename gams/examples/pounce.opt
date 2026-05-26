@@ -1,0 +1,11 @@
+* POUNCE options for the parametric SQP warm-start example.
+* Picked up automatically by GAMS when the model sets
+* `proj.optfile = 1` (or `2`, `3`, ... for `.op2`, `.op3`).
+*
+* Selects the Phase 5c active-set SQP driver. The GAMS solver
+* link automatically reads variable + equation marginals from
+* GMO between solves and forwards them as the SQP warm-start
+* working set (mechanism §7.4(a) — marginal-based reconstruction).
+algorithm        active-set-sqp
+sqp_tol          1e-9
+print_level      0

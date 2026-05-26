@@ -63,6 +63,19 @@ pub type Bool = c_int;
 const TRUE: Bool = 1;
 const FALSE: Bool = 0;
 
+/// C-ABI encoding of [`pounce_qp::BoundStatus`] (§7.2 of the
+/// active-set-SQP design note). Stable values:
+/// `0 = Inactive`, `1 = AtLower`, `2 = AtUpper`, `3 = Fixed`.
+pub type IpoptBoundStatus = c_int;
+/// C-ABI encoding of [`pounce_qp::ConsStatus`] (§7.2). Stable values:
+/// `0 = Inactive`, `1 = AtLower`, `2 = AtUpper`, `3 = Equality`.
+pub type IpoptConsStatus = c_int;
+
+const POUNCE_WS_INACTIVE: c_int = 0;
+const POUNCE_WS_AT_LOWER: c_int = 1;
+const POUNCE_WS_AT_UPPER: c_int = 2;
+const POUNCE_WS_FIXED_OR_EQ: c_int = 3;
+
 /// Internal owned state behind the opaque `IpoptProblem` handle.
 /// `#[repr(C)]` is unnecessary because C only sees the pointer.
 pub struct IpoptProblemInfo {
@@ -920,6 +933,239 @@ where
         return None;
     }
     (*ipopt_problem).last_solve.as_ref().map(|ls| f(&ls.stats))
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pounce extension: SQP working-set warm-start C ABI (§7.2 of
+// `docs/research/active-set-sqp-warm-start.md`).
+//
+// Three new entry points; all backward-compatible additions.
+// No existing signature changes — existing cyipopt / JuMP /
+// AMPL clients are unaffected.
+// ─────────────────────────────────────────────────────────────
+
+fn bound_status_to_int(s: pounce_qp::BoundStatus) -> c_int {
+    use pounce_qp::BoundStatus::*;
+    match s {
+        Inactive => POUNCE_WS_INACTIVE,
+        AtLower => POUNCE_WS_AT_LOWER,
+        AtUpper => POUNCE_WS_AT_UPPER,
+        Fixed => POUNCE_WS_FIXED_OR_EQ,
+    }
+}
+
+fn int_to_bound_status(v: c_int) -> Option<pounce_qp::BoundStatus> {
+    use pounce_qp::BoundStatus::*;
+    match v {
+        POUNCE_WS_INACTIVE => Some(Inactive),
+        POUNCE_WS_AT_LOWER => Some(AtLower),
+        POUNCE_WS_AT_UPPER => Some(AtUpper),
+        POUNCE_WS_FIXED_OR_EQ => Some(Fixed),
+        _ => None,
+    }
+}
+
+fn cons_status_to_int(s: pounce_qp::ConsStatus) -> c_int {
+    use pounce_qp::ConsStatus::*;
+    match s {
+        Inactive => POUNCE_WS_INACTIVE,
+        AtLower => POUNCE_WS_AT_LOWER,
+        AtUpper => POUNCE_WS_AT_UPPER,
+        Equality => POUNCE_WS_FIXED_OR_EQ,
+    }
+}
+
+fn int_to_cons_status(v: c_int) -> Option<pounce_qp::ConsStatus> {
+    use pounce_qp::ConsStatus::*;
+    match v {
+        POUNCE_WS_INACTIVE => Some(Inactive),
+        POUNCE_WS_AT_LOWER => Some(AtLower),
+        POUNCE_WS_AT_UPPER => Some(AtUpper),
+        POUNCE_WS_FIXED_OR_EQ => Some(Equality),
+        _ => None,
+    }
+}
+
+/// Retrieve the working set produced by the most recent SQP solve
+/// (`algorithm = active-set-sqp`). Buffer sizes are `n` for
+/// `bound_status_out` and `m` for `cons_status_out`. Pass `NULL`
+/// for either to skip that side.
+///
+/// Returns `TRUE` (1) on success, `FALSE` (0) if there is no
+/// working set to retrieve (e.g. no SQP solve has run, the IPM
+/// path was used, or the very first KKT check declared
+/// optimality before solving any QP).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem`. Output
+/// buffers (when non-NULL) must be sized at least `n` and `m`
+/// respectively.
+#[no_mangle]
+pub unsafe extern "C" fn IpoptGetWorkingSet(
+    ipopt_problem: IpoptProblem,
+    bound_status_out: *mut IpoptBoundStatus,
+    cons_status_out: *mut IpoptConsStatus,
+) -> Bool {
+    if ipopt_problem.is_null() {
+        return FALSE;
+    }
+    let info = &*ipopt_problem;
+    let ws = match info.app.last_sqp_working_set() {
+        Some(w) => w,
+        None => return FALSE,
+    };
+    if !bound_status_out.is_null() {
+        for (i, &s) in ws.bounds.iter().enumerate() {
+            *bound_status_out.add(i) = bound_status_to_int(s);
+        }
+    }
+    if !cons_status_out.is_null() {
+        for (i, &s) in ws.constraints.iter().enumerate() {
+            *cons_status_out.add(i) = cons_status_to_int(s);
+        }
+    }
+    TRUE
+}
+
+/// Supply a warm-start working set consumed by the next
+/// [`IpoptSolve`] on this problem. Pass `NULL` for either side to
+/// cold-start it. The caller-owned buffers are copied; reuse
+/// across calls is safe.
+///
+/// Returns `TRUE` on success, `FALSE` on (a) NULL problem, (b)
+/// an out-of-range status code in one of the buffers, or
+/// (c) both inputs NULL (which would equal a no-op
+/// — call [`IpoptClearWarmStartWorkingSet`] instead).
+///
+/// # Safety
+///
+/// `ipopt_problem` must be valid. `bound_status_in` (when
+/// non-NULL) must be sized `n`; `cons_status_in` (when non-NULL)
+/// must be sized `m`.
+#[no_mangle]
+pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
+    ipopt_problem: IpoptProblem,
+    bound_status_in: *const IpoptBoundStatus,
+    cons_status_in: *const IpoptConsStatus,
+) -> Bool {
+    if ipopt_problem.is_null() {
+        return FALSE;
+    }
+    if bound_status_in.is_null() && cons_status_in.is_null() {
+        return FALSE;
+    }
+    let info = &mut *ipopt_problem;
+    let n = info.n.max(0) as usize;
+    let m = info.m.max(0) as usize;
+    let mut bounds = vec![pounce_qp::BoundStatus::Inactive; n];
+    if !bound_status_in.is_null() {
+        for i in 0..n {
+            let v = *bound_status_in.add(i);
+            match int_to_bound_status(v) {
+                Some(s) => bounds[i] = s,
+                None => return FALSE,
+            }
+        }
+    }
+    let mut constraints = vec![pounce_qp::ConsStatus::Inactive; m];
+    if !cons_status_in.is_null() {
+        for i in 0..m {
+            let v = *cons_status_in.add(i);
+            match int_to_cons_status(v) {
+                Some(s) => constraints[i] = s,
+                None => return FALSE,
+            }
+        }
+    }
+    // We do *not* know the primal/dual iterate here — the caller
+    // either left them at default zeros (cold) or already wrote
+    // them into `x` before calling `IpoptSolve`. We seed
+    // `SqpIterates` with zeros; `IpoptSolve` will use its `x`
+    // argument as the starting point (the SqpProblemSpec adapter
+    // wraps `IpoptNlp::get_starting_x`, which the C path
+    // initializes from the user-supplied `x` buffer).
+    info.app
+        .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
+            x: vec![0.0; n],
+            lambda_g: vec![0.0; m],
+            lambda_x: vec![0.0; n],
+            working: Some(pounce_qp::WorkingSet {
+                bounds,
+                constraints,
+            }),
+        });
+    TRUE
+}
+
+/// Drop any pending warm-start working set without solving. The
+/// next [`IpoptSolve`] will cold-start.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn IpoptClearWarmStartWorkingSet(ipopt_problem: IpoptProblem) -> Bool {
+    if ipopt_problem.is_null() {
+        return FALSE;
+    }
+    (*ipopt_problem).app.clear_sqp_warm_start();
+    TRUE
+}
+
+/// Convenience one-shot: equivalent to
+/// `IpoptSetWarmStartWorkingSet` + `IpoptSolve` +
+/// `IpoptGetWorkingSet` in sequence. The input/output working-set
+/// buffers are independent (so a caller can read back the new
+/// working set into the same array used as input). Pass `NULL`
+/// for any in/out buffer to skip that side.
+///
+/// Returns the `ApplicationReturnStatus` integer, identical to
+/// [`IpoptSolve`].
+///
+/// # Safety
+///
+/// All pointer arguments follow the same contract as
+/// `IpoptSolve` plus the working-set buffer sizes documented on
+/// `IpoptSetWarmStartWorkingSet` / `IpoptGetWorkingSet`.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn IpoptSolveWarmStart(
+    ipopt_problem: IpoptProblem,
+    x: *mut Number,
+    g: *mut Number,
+    obj_val: *mut Number,
+    mult_g: *mut Number,
+    mult_x_L: *mut Number,
+    mult_x_U: *mut Number,
+    bound_status_in: *const IpoptBoundStatus,
+    cons_status_in: *const IpoptConsStatus,
+    bound_status_out: *mut IpoptBoundStatus,
+    cons_status_out: *mut IpoptConsStatus,
+    user_data: *mut c_void,
+) -> Index {
+    if ipopt_problem.is_null() {
+        return ApplicationReturnStatus::InternalError as Index;
+    }
+    // Best-effort set. Errors here (e.g. bad status code) are
+    // silently treated as cold-start; the caller can probe via
+    // `IpoptSetWarmStartWorkingSet` directly if they need to
+    // validate the input.
+    if !bound_status_in.is_null() || !cons_status_in.is_null() {
+        let _ = IpoptSetWarmStartWorkingSet(ipopt_problem, bound_status_in, cons_status_in);
+    }
+    let status = IpoptSolve(
+        ipopt_problem,
+        x,
+        g,
+        obj_val,
+        mult_g,
+        mult_x_L,
+        mult_x_U,
+        user_data,
+    );
+    let _ = IpoptGetWorkingSet(ipopt_problem, bound_status_out, cons_status_out);
+    status
 }
 
 /// Adapter that bridges the user-supplied C callback table to the
@@ -2078,5 +2324,129 @@ mod tests {
         let s = unsafe { IpoptCreateSolver(&mut p) };
         assert_eq!(unsafe { IpoptSolverGetKktDim(s) }, -1);
         unsafe { IpoptFreeSolver(s) };
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // §7.2 SQP working-set warm-start C ABI tests.
+    // ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn c_get_working_set_returns_false_before_any_solve() {
+        let p = create_unconstrained();
+        let mut bound_buf = [0; 4];
+        let rc = unsafe { IpoptGetWorkingSet(p, bound_buf.as_mut_ptr(), std::ptr::null_mut()) };
+        assert_eq!(rc, FALSE);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn c_set_warm_start_with_both_null_returns_false() {
+        let p = create_unconstrained();
+        let rc = unsafe { IpoptSetWarmStartWorkingSet(p, std::ptr::null(), std::ptr::null()) };
+        assert_eq!(rc, FALSE);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn c_set_warm_start_with_bad_status_code_returns_false() {
+        let p = create_unconstrained();
+        // Length n = 4; '7' is out of range (valid: 0..=3).
+        let bogus = [
+            POUNCE_WS_INACTIVE,
+            7,
+            POUNCE_WS_AT_LOWER,
+            POUNCE_WS_INACTIVE,
+        ];
+        let rc = unsafe { IpoptSetWarmStartWorkingSet(p, bogus.as_ptr(), std::ptr::null()) };
+        assert_eq!(rc, FALSE);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn c_set_warm_start_then_clear_succeeds() {
+        let p = create_unconstrained();
+        let in_buf = [POUNCE_WS_INACTIVE; 4];
+        let set_rc = unsafe { IpoptSetWarmStartWorkingSet(p, in_buf.as_ptr(), std::ptr::null()) };
+        assert_eq!(set_rc, TRUE);
+        let clr_rc = unsafe { IpoptClearWarmStartWorkingSet(p) };
+        assert_eq!(clr_rc, TRUE);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn c_set_warm_start_on_null_problem_returns_false() {
+        let in_buf = [POUNCE_WS_INACTIVE; 1];
+        let rc = unsafe {
+            IpoptSetWarmStartWorkingSet(std::ptr::null_mut(), in_buf.as_ptr(), std::ptr::null())
+        };
+        assert_eq!(rc, FALSE);
+    }
+
+    #[test]
+    fn c_solve_warm_start_round_trips_working_set_on_sqp_path() {
+        // Use the 1-D `(x − 2)²` quadratic from
+        // `create_callback_test_problem`. Set `algorithm
+        // active-set-sqp`, solve, then read the working set
+        // through `IpoptGetWorkingSet`. Pass it back via
+        // `IpoptSolveWarmStart` for a second solve.
+        let p = create_callback_test_problem();
+        let key = CString::new("algorithm").unwrap();
+        let val = CString::new("active-set-sqp").unwrap();
+        let ok = unsafe { AddIpoptStrOption(p, key.as_ptr(), val.as_ptr()) };
+        assert_eq!(ok, TRUE);
+
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc1 = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc1, ApplicationReturnStatus::SolveSucceeded as Index);
+
+        let mut bound_buf = [-1; 1];
+        let mut cons_buf = [-1; 1];
+        let got = unsafe { IpoptGetWorkingSet(p, bound_buf.as_mut_ptr(), cons_buf.as_mut_ptr()) };
+        assert_eq!(got, TRUE);
+        // Status codes must be in 0..=3.
+        assert!((0..=3).contains(&bound_buf[0]));
+        assert!((0..=3).contains(&cons_buf[0]));
+
+        // Second solve with the just-retrieved working set as
+        // input. Resets x to a non-optimal starting point so the
+        // SQP loop actually has work to do; the warm-start
+        // should still converge to the optimum.
+        x[0] = 0.0;
+        let mut obj2 = 0.0_f64;
+        let mut bound_out = [-1; 1];
+        let mut cons_out = [-1; 1];
+        let rc2 = unsafe {
+            IpoptSolveWarmStart(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj2,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                bound_buf.as_ptr(),
+                cons_buf.as_ptr(),
+                bound_out.as_mut_ptr(),
+                cons_out.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc2, ApplicationReturnStatus::SolveSucceeded as Index);
+        assert!((0..=3).contains(&bound_out[0]));
+        assert!((0..=3).contains(&cons_out[0]));
+
+        unsafe { FreeIpoptProblem(p) };
     }
 }

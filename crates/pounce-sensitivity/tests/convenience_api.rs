@@ -262,3 +262,28 @@ fn sens_solve_both_outputs_populated_together() {
     assert!(result.dx.is_some());
     assert!(result.reduced_hessian.is_some());
 }
+
+#[test]
+fn sens_solve_captures_user_space_multipliers_for_sqp_corrector() {
+    // Phase 5c §6 — after a converged sens solve the SensResult
+    // should expose the user-space multipliers and `g` so a caller
+    // can pass them straight into `classify_working_set` for the
+    // parametric corrector hand-off.
+    let mut app = make_app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+
+    let result = SensSolve::new(vec![2, 3])
+        .with_deltas(vec![-0.5, 0.0])
+        .run(&mut app, tnlp);
+
+    let n_full_x = 5; // ParametricTNLP's user-space n
+    let n_full_g = 4; // ParametricTNLP's user-space m
+    assert!(result.mult_g.is_some(), "mult_g must be captured");
+    assert!(result.mult_x_l.is_some(), "mult_x_l must be captured");
+    assert!(result.mult_x_u.is_some(), "mult_x_u must be captured");
+    assert!(result.g.is_some(), "g must be captured");
+    assert_eq!(result.mult_g.as_ref().unwrap().len(), n_full_g);
+    assert_eq!(result.mult_x_l.as_ref().unwrap().len(), n_full_x);
+    assert_eq!(result.mult_x_u.as_ref().unwrap().len(), n_full_x);
+    assert_eq!(result.g.as_ref().unwrap().len(), n_full_g);
+}

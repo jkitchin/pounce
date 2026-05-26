@@ -20,6 +20,7 @@
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
+#include <stdint.h>
 
 #include "pounce.h"
 #include "gmomcc.h"
@@ -240,11 +241,26 @@ static bool gams_eval_h(ipindex n, ipnumber *x, bool new_x,
  * Lines starting with '*' are comments. Blank lines are skipped.
  * --------------------------------------------------------------------------- */
 
+/* GAMS-link-specific option keys. Intercepted before forwarding
+ * to POUNCE's `AddIpopt*Option` so the rest of the .opt entries
+ * are handled identically to the IPM path.
+ *
+ *   sqp_state_file <path>   §7.4(b) persistent working-set state
+ *                           file (binary, see read_state_file /
+ *                           write_state_file below).
+ */
+static char g_sqp_state_file[512] = "";
+
 static void parse_option_file(IpoptProblem nlp, const char *filename,
                               gevHandle_t gev)
 {
     FILE *fp = fopen(filename, "r");
     if (!fp) return;
+
+    /* Reset the GAMS-link option state between solves (mechanism
+     * §7.4(b)). An absent `sqp_state_file` key falls back to the
+     * §7.4(a) marginal-based reconstruction. */
+    g_sqp_state_file[0] = '\0';
 
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
@@ -263,6 +279,14 @@ static void parse_option_file(IpoptProblem nlp, const char *filename,
         char key[256], val[256];
         if (sscanf(p, "%255s %255s", key, val) < 2)
             continue;
+
+        /* GAMS-link-specific keys intercepted here. */
+        if (strcmp(key, "sqp_state_file") == 0) {
+            strncpy(g_sqp_state_file, val, sizeof(g_sqp_state_file) - 1);
+            g_sqp_state_file[sizeof(g_sqp_state_file) - 1] = '\0';
+            gevLogStat(gev, line);
+            continue;
+        }
 
         /* Try integer first, then double, then string */
         char *endptr;
@@ -293,6 +317,159 @@ static void parse_option_file(IpoptProblem nlp, const char *filename,
         gevLogStat(gev, msgbuf);
     }
     fclose(fp);
+}
+
+/* §7.4(b) — persistent state-file binary format
+ * --------------------------------------------------------------------------
+ * Layout (little-endian, all integers signed 32-bit):
+ *
+ *    offset  size    field
+ *    ------  ----    -----
+ *      0      8      magic "POUNWS01"
+ *      8      8      checksum (CRC-style over n, m, x_l, x_u, g_l, g_u)
+ *     16      4      n          (variables)
+ *     20      4      m          (constraints)
+ *     24      n      bound_status[n]
+ *   24+n      m      cons_status[m]
+ *
+ * The checksum is computed from the same input the next solve
+ * sees, so a structural change (different n/m/bounds) invalidates
+ * the file cleanly — we silently fall back to marginal-based
+ * reconstruction.
+ *
+ * IpoptBoundStatus / IpoptConsStatus values live in 0..=3 each
+ * (POUNCE_WS_*), so one byte per slot is sufficient.
+ */
+
+static const char POUNCE_WS_MAGIC[8] = {'P','O','U','N','W','S','0','1'};
+
+/* Simple multiplicative hash. Good enough for "did the model
+ * shape change?" — not cryptographic. */
+static uint64_t compute_checksum(int n, int m,
+                                  const double *xl, const double *xu,
+                                  const double *gl, const double *gu)
+{
+    uint64_t h = 1469598103934665603ull; /* FNV-1a offset basis */
+    h = (h ^ (uint64_t)(uint32_t)n) * 1099511628211ull;
+    h = (h ^ (uint64_t)(uint32_t)m) * 1099511628211ull;
+    for (int i = 0; i < n; i++) {
+        uint64_t u;
+        memcpy(&u, &xl[i], sizeof u);
+        h = (h ^ u) * 1099511628211ull;
+        memcpy(&u, &xu[i], sizeof u);
+        h = (h ^ u) * 1099511628211ull;
+    }
+    for (int i = 0; i < m; i++) {
+        uint64_t u;
+        memcpy(&u, &gl[i], sizeof u);
+        h = (h ^ u) * 1099511628211ull;
+        memcpy(&u, &gu[i], sizeof u);
+        h = (h ^ u) * 1099511628211ull;
+    }
+    return h;
+}
+
+/* Returns 1 on a successful read (warm-start data installed via
+ * `IpoptSetWarmStartWorkingSet`), 0 on absence / mismatch /
+ * format error. Failure is silent — the §7.4(a) marginal path
+ * still runs as a backup. */
+static int read_state_file(const char *path, IpoptProblem nlp,
+                           int n, int m,
+                           const double *xl, const double *xu,
+                           const double *gl, const double *gu)
+{
+    if (!path || !*path) return 0;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+
+    char magic[8];
+    if (fread(magic, 1, 8, fp) != 8 ||
+        memcmp(magic, POUNCE_WS_MAGIC, 8) != 0) {
+        fclose(fp); return 0;
+    }
+    uint64_t checksum;
+    if (fread(&checksum, sizeof checksum, 1, fp) != 1) {
+        fclose(fp); return 0;
+    }
+    int32_t nn, mm;
+    if (fread(&nn, sizeof nn, 1, fp) != 1 ||
+        fread(&mm, sizeof mm, 1, fp) != 1) {
+        fclose(fp); return 0;
+    }
+    if (nn != n || mm != m) { fclose(fp); return 0; }
+    uint64_t expect = compute_checksum(n, m, xl, xu, gl, gu);
+    if (checksum != expect) { fclose(fp); return 0; }
+
+    IpoptBoundStatus *bound_in = (IpoptBoundStatus *)calloc(n > 0 ? (size_t)n : 1,
+                                                            sizeof(IpoptBoundStatus));
+    IpoptConsStatus  *cons_in  = m > 0 ? (IpoptConsStatus *)calloc((size_t)m,
+                                                            sizeof(IpoptConsStatus)) : NULL;
+    if (!bound_in || (m > 0 && !cons_in)) {
+        free(bound_in); free(cons_in); fclose(fp); return 0;
+    }
+    unsigned char tmp;
+    for (int i = 0; i < n; i++) {
+        if (fread(&tmp, 1, 1, fp) != 1) {
+            free(bound_in); free(cons_in); fclose(fp); return 0;
+        }
+        bound_in[i] = (IpoptBoundStatus)tmp;
+    }
+    for (int i = 0; i < m; i++) {
+        if (fread(&tmp, 1, 1, fp) != 1) {
+            free(bound_in); free(cons_in); fclose(fp); return 0;
+        }
+        cons_in[i] = (IpoptConsStatus)tmp;
+    }
+    fclose(fp);
+    int ok = IpoptSetWarmStartWorkingSet(nlp, bound_in, cons_in);
+    free(bound_in); free(cons_in);
+    return ok ? 1 : 0;
+}
+
+/* Writes the working set retrieved via `IpoptGetWorkingSet` to
+ * `path`. Best effort — failure is logged and the next solve
+ * falls back to §7.4(a). */
+static void write_state_file(const char *path, IpoptProblem nlp,
+                             int n, int m,
+                             const double *xl, const double *xu,
+                             const double *gl, const double *gu,
+                             gevHandle_t gev)
+{
+    if (!path || !*path) return;
+    IpoptBoundStatus *bound_out = (IpoptBoundStatus *)calloc(n > 0 ? (size_t)n : 1,
+                                                             sizeof(IpoptBoundStatus));
+    IpoptConsStatus  *cons_out  = m > 0 ? (IpoptConsStatus *)calloc((size_t)m,
+                                                             sizeof(IpoptConsStatus)) : NULL;
+    if (!bound_out || (m > 0 && !cons_out)) {
+        free(bound_out); free(cons_out); return;
+    }
+    if (!IpoptGetWorkingSet(nlp, bound_out, cons_out)) {
+        /* No SQP working set to persist (e.g. IPM solve). */
+        free(bound_out); free(cons_out); return;
+    }
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        char msg[512];
+        snprintf(msg, sizeof msg, "*** Warning: cannot write sqp_state_file %s", path);
+        gevLogStat(gev, msg);
+        free(bound_out); free(cons_out); return;
+    }
+    uint64_t checksum = compute_checksum(n, m, xl, xu, gl, gu);
+    int32_t nn = n, mm = m;
+    fwrite(POUNCE_WS_MAGIC, 1, 8, fp);
+    fwrite(&checksum, sizeof checksum, 1, fp);
+    fwrite(&nn, sizeof nn, 1, fp);
+    fwrite(&mm, sizeof mm, 1, fp);
+    for (int i = 0; i < n; i++) {
+        unsigned char b = (unsigned char)bound_out[i];
+        fwrite(&b, 1, 1, fp);
+    }
+    for (int i = 0; i < m; i++) {
+        unsigned char c = (unsigned char)cons_out[i];
+        fwrite(&c, 1, 1, fp);
+    }
+    fclose(fp);
+    free(bound_out); free(cons_out);
 }
 
 /* ---------------------------------------------------------------------------
@@ -701,6 +878,115 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     gmoGetVarL(gmo, x);
 
     /* ---------------------------------------------------------------
+     * Mechanism §7.4(b) — persistent state-file working-set carry.
+     *
+     * Opt-in via `sqp_state_file <path>` in pounce.opt. When the
+     * file exists and its checksum matches the current model
+     * shape, the working set is read and forwarded directly via
+     * IpoptSetWarmStartWorkingSet. Failure (no file / shape
+     * mismatch / I/O error) falls through to the §7.4(a)
+     * marginal-based reconstruction below.
+     * --------------------------------------------------------------- */
+    int state_file_used = 0;
+    if (g_sqp_state_file[0]) {
+        state_file_used = read_state_file(g_sqp_state_file, nlp, n, m,
+                                          x_l, x_u, g_l, g_u);
+        /* PR #50 review A2 — surface the warm-start outcome so
+         * operators can tell whether the persistent state file
+         * was usable or whether we silently fell back to §7.4(a)
+         * marginal reconstruction. */
+        if (state_file_used) {
+            snprintf(msg, sizeof(msg),
+                     "  Loaded SQP working set from %s", g_sqp_state_file);
+            gevLogStat(gev, msg);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "  SQP state file %s missing/mismatched; "
+                     "falling back to marginal-based warm start",
+                     g_sqp_state_file);
+            gevLogStat(gev, msg);
+        }
+    }
+
+    /* ---------------------------------------------------------------
+     * Mechanism §7.4(a) — marginal-based working-set reconstruction.
+     *
+     * GAMS persists variable marginals (.m) and equation marginals
+     * across `solve` statements. Translate them into a POUNCE
+     * working set and seed the next solve via
+     * IpoptSetWarmStartWorkingSet. The IPM path ignores this
+     * (the SQP `algorithm = active-set-sqp` is opt-in via
+     * pounce.opt), so the cost on the default IPM path is one
+     * setter call + a free of the buffers.
+     *
+     * Sign convention: POUNCE expects the standard `λ_g` (positive
+     * for tight lower side); GAMS persists the "pi" with the
+     * solver-link sign flip we apply on output (mult_g[i] =
+     * -mult_g[i]). So when *reading back* we flip again.
+     *
+     * Reconstruction is lossy on degenerate active sets — same
+     * limitation upstream's CONOPT, IPOPT, and KNITRO links have
+     * under GAMS. Mechanism §7.4(b) (persistent state file) is
+     * planned as opt-in for precision-critical workflows.
+     * --------------------------------------------------------------- */
+    if (!state_file_used) {
+        const double WS_TOL = 1e-8;
+        IpoptBoundStatus *bound_in = (IpoptBoundStatus *)calloc(
+            n > 0 ? (size_t)n : 1, sizeof(IpoptBoundStatus));
+        IpoptConsStatus  *cons_in = m > 0
+            ? (IpoptConsStatus *)calloc((size_t)m, sizeof(IpoptConsStatus))
+            : NULL;
+        double *var_marg_in = (double *)calloc(n > 0 ? (size_t)n : 1, sizeof(double));
+        double *equ_marg_in = m > 0
+            ? (double *)calloc((size_t)m, sizeof(double))
+            : NULL;
+        if (bound_in && var_marg_in && (m == 0 || (cons_in && equ_marg_in))) {
+            gmoGetVarM(gmo, var_marg_in);
+            if (m > 0) gmoGetEquM(gmo, equ_marg_in);
+            /* Variables: nonzero marginal ⇒ a bound is active.
+             * GAMS stores the bound-multiplier sign with our
+             * convention (we already negated when writing it on the
+             * previous solve), so a positive value flags lower-side,
+             * negative upper-side. */
+            for (int j = 0; j < n; j++) {
+                if (x_l[j] >= x_u[j] - WS_TOL) {
+                    bound_in[j] = POUNCE_WS_FIXED_OR_EQ;
+                } else if (var_marg_in[j] > WS_TOL) {
+                    bound_in[j] = POUNCE_WS_AT_LOWER;
+                } else if (var_marg_in[j] < -WS_TOL) {
+                    bound_in[j] = POUNCE_WS_AT_UPPER;
+                } else {
+                    bound_in[j] = POUNCE_WS_INACTIVE;
+                }
+            }
+            /* Constraints: declared equalities are always active.
+             * For inequalities we classify by sign of the marginal;
+             * the lossy nature is unchanged by sign conventions
+             * (pounce-qp re-detects the correct side in the first
+             * QP step regardless). */
+            for (int i = 0; i < m; i++) {
+                int etyp = gmoGetEquTypeOne(gmo, i);
+                if (etyp == gmoequ_E) {
+                    cons_in[i] = POUNCE_WS_FIXED_OR_EQ;
+                } else if (equ_marg_in[i] > WS_TOL) {
+                    cons_in[i] = POUNCE_WS_AT_LOWER;
+                } else if (equ_marg_in[i] < -WS_TOL) {
+                    cons_in[i] = POUNCE_WS_AT_UPPER;
+                } else {
+                    cons_in[i] = POUNCE_WS_INACTIVE;
+                }
+            }
+            /* Best effort; ignore failures (e.g. NULL handle, bad
+             * code). The IPM ignores warm-start input anyway. */
+            (void)IpoptSetWarmStartWorkingSet(nlp, bound_in, cons_in);
+        }
+        free(bound_in);
+        free(cons_in);
+        free(var_marg_in);
+        free(equ_marg_in);
+    }
+
+    /* ---------------------------------------------------------------
      * Solve
      * --------------------------------------------------------------- */
     {
@@ -768,6 +1054,15 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
                 gmoSetVarM(gmo, var_marg);
                 free(var_marg);
             }
+        }
+
+        /* §7.4(b) — persist the SQP working set to disk if a
+         * state-file path was configured. Best effort; no-op when
+         * `algorithm` is not active-set-sqp (IpoptGetWorkingSet
+         * returns FALSE). */
+        if (g_sqp_state_file[0]) {
+            write_state_file(g_sqp_state_file, nlp, n, m,
+                             x_l, x_u, g_l, g_u, gev);
         }
 
         /* Print post-solve summary (mirrors Ipopt's EXIT block) */

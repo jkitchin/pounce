@@ -1,0 +1,24 @@
+[package]
+name = "pounce-qp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Sparse parametric active-set quadratic programming subproblem solver for POUNCE (Phase 5a of the active-set SQP roadmap; see docs/research/active-set-sqp-warm-start.md)."
+
+[dependencies]
+pounce-common = { path = "../pounce-common" }
+pounce-linalg = { path = "../pounce-linalg" }
+pounce-linsol = { path = "../pounce-linsol" }
+
+[dev-dependencies]
+# FERAL backs the in-tree unit tests so the analytical ladder runs
+# end-to-end without external solvers. Production callers
+# (pounce-algorithm, pounce-sensitivity) construct their own backend
+# and pass it to `ParametricActiveSetSolver::new`.
+pounce-feral = { path = "../pounce-feral" }
+
+[lints]
+workspace = true

@@ -50,6 +50,15 @@ pub struct PyProblem {
     /// has `hessian` + `hessianstructure`. If absent, the solver runs
     /// with `hessian_approximation = limited-memory`.
     has_hessian: bool,
+    /// Phase 5c §7.3 — SQP warm-start working set queued for the
+    /// next solve. Set via `solve(..., working_set=…)`; consumed
+    /// once and cleared after the solve completes. The IPM path
+    /// ignores this.
+    pending_working_set: Option<pounce_qp::WorkingSet>,
+    /// Phase 5c §7.3 — most recent SQP working set, written by
+    /// `solve` when the SQP path produces one. Retrieved via
+    /// `get_working_set()`.
+    last_working_set: Option<pounce_qp::WorkingSet>,
 }
 
 #[pymethods]
@@ -70,6 +79,17 @@ impl PyProblem {
         }
         if m < 0 {
             return Err(PyValueError::new_err("m must be non-negative"));
+        }
+        // PR #50 review S3: guard against silent i64→i32 truncation.
+        if n > i32::MAX as i64 {
+            return Err(PyValueError::new_err(format!(
+                "n = {n} exceeds the solver's signed-32-bit Index range"
+            )));
+        }
+        if m > i32::MAX as i64 {
+            return Err(PyValueError::new_err(format!(
+                "m = {m} exceeds the solver's signed-32-bit Index range"
+            )));
         }
         let n_i = n as Index;
         let m_i = m as Index;
@@ -99,6 +119,8 @@ impl PyProblem {
             num_opts: Vec::new(),
             int_opts: Vec::new(),
             has_hessian,
+            pending_working_set: None,
+            last_working_set: None,
         })
     }
 
@@ -143,7 +165,16 @@ impl PyProblem {
     }
 
     /// Solve the problem. Returns `(x, info_dict)`.
-    #[pyo3(signature = (x0, lagrange=None, zl=None, zu=None))]
+    ///
+    /// The optional `working_set` kwarg (Phase 5c §7.3) accepts a
+    /// 2-tuple `(bounds, constraints)` of numpy int arrays
+    /// (length `n` and `m` respectively, status codes 0..=3).
+    /// Consumed only by the SQP path (`algorithm = active-set-sqp`);
+    /// the IPM ignores it. When provided, it overrides any value
+    /// previously stashed via `set_working_set`. After every SQP
+    /// solve `info_dict["working_set"]` holds the final working
+    /// set, and `get_working_set()` returns the same tuple.
+    #[pyo3(signature = (x0, lagrange=None, zl=None, zu=None, working_set=None))]
     fn solve<'py>(
         &mut self,
         py: Python<'py>,
@@ -151,14 +182,86 @@ impl PyProblem {
         lagrange: Option<Py<PyAny>>,
         zl: Option<Py<PyAny>>,
         zu: Option<Py<PyAny>>,
+        working_set: Option<Py<PyAny>>,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
         let (mut app, bridge) = self.prepare(py, x0, lagrange, zl, zu)?;
+        // Per-call working_set overrides any pending one set via
+        // `set_working_set`. Either path lands as
+        // `IpoptApplication::set_sqp_warm_start`.
+        let ws_for_solve = match working_set {
+            Some(obj) => Some(decode_working_set(
+                py,
+                &obj,
+                self.n as usize,
+                self.m as usize,
+            )?),
+            None => self.pending_working_set.take(),
+        };
+        if let Some(ws) = ws_for_solve {
+            // PR #50 review A3: warn if the caller supplied a
+            // working set but the algorithm wasn't switched to the
+            // SQP path. The IPM silently ignores `set_sqp_warm_start`,
+            // so users could otherwise lose their warm-start data
+            // without any hint that something was misconfigured.
+            let sqp_selected = self
+                .str_opts
+                .iter()
+                .any(|(k, v)| k == "algorithm" && v.eq_ignore_ascii_case("active-set-sqp"));
+            if !sqp_selected {
+                let warnings = py.import_bound("warnings")?;
+                let _ = warnings.call_method1(
+                    "warn",
+                    ("working_set was supplied but `algorithm` is not \
+                         \"active-set-sqp\"; the IPM path ignores working sets. \
+                         Either call add_option(\"algorithm\", \"active-set-sqp\") \
+                         before solve(), or drop the working_set argument.",),
+                );
+            }
+            app.set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
+                x: vec![0.0; self.n as usize],
+                lambda_g: vec![0.0; self.m as usize],
+                lambda_x: vec![0.0; self.n as usize],
+                working: Some(ws),
+            });
+        }
         let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
         let status: ApplicationReturnStatus = app.optimize_tnlp(bridge_for_solve);
         let stats = app.statistics();
+        // Pick up any working set the SQP path produced; surface
+        // it in the info dict and stash on the Problem instance.
+        self.last_working_set = app.last_sqp_working_set().cloned();
         let info = build_info_dict(py, &bridge.borrow(), status, stats.iteration_count)?;
+        let ws_obj: PyObject = match &self.last_working_set {
+            Some(ws) => encode_working_set(py, ws).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("working_set", ws_obj)?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))
+    }
+
+    /// Stash a warm-start working set consumed by the next
+    /// `solve()` call. Equivalent to passing `working_set=` to
+    /// `solve()`, but useful when configuring the problem ahead
+    /// of time. Only consulted by the SQP path.
+    fn set_working_set(&mut self, py: Python<'_>, working_set: Py<PyAny>) -> PyResult<()> {
+        let ws = decode_working_set(py, &working_set, self.n as usize, self.m as usize)?;
+        self.pending_working_set = Some(ws);
+        Ok(())
+    }
+
+    /// Drop any pending warm-start working set without solving.
+    fn clear_working_set(&mut self) {
+        self.pending_working_set = None;
+    }
+
+    /// Return the most recent SQP working set as a
+    /// `(bounds, constraints)` tuple of numpy int8 arrays, or
+    /// `None` when no SQP solve has run.
+    fn get_working_set<'py>(&self, py: Python<'py>) -> Option<Bound<'py, pyo3::types::PyTuple>> {
+        self.last_working_set
+            .as_ref()
+            .map(|ws| encode_working_set(py, ws))
     }
 
     /// Solve, then run a parametric sensitivity step at the converged
@@ -582,6 +685,125 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
             Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
         },
     )
+}
+
+// ─────────────────────────────────────────────────────────────
+// §7.3 SQP working-set encoding helpers. Python representation:
+// a 2-tuple `(bounds, constraints)` of numpy int8 arrays whose
+// element values are the same `POUNCE_WS_*` integer codes used
+// by the C ABI (0..=3). int8 (vs int64) keeps wire size minimal
+// for large `n`/`m`.
+// ─────────────────────────────────────────────────────────────
+
+fn encode_working_set<'py>(
+    py: Python<'py>,
+    ws: &pounce_qp::WorkingSet,
+) -> Bound<'py, pyo3::types::PyTuple> {
+    use pounce_qp::{BoundStatus, ConsStatus};
+    let bounds_vec: Vec<i8> = ws
+        .bounds
+        .iter()
+        .map(|s| match s {
+            BoundStatus::Inactive => 0,
+            BoundStatus::AtLower => 1,
+            BoundStatus::AtUpper => 2,
+            BoundStatus::Fixed => 3,
+        })
+        .collect();
+    let cons_vec: Vec<i8> = ws
+        .constraints
+        .iter()
+        .map(|s| match s {
+            ConsStatus::Inactive => 0,
+            ConsStatus::AtLower => 1,
+            ConsStatus::AtUpper => 2,
+            ConsStatus::Equality => 3,
+        })
+        .collect();
+    let b_arr = bounds_vec.into_pyarray_bound(py).into_any();
+    let c_arr = cons_vec.into_pyarray_bound(py).into_any();
+    pyo3::types::PyTuple::new_bound(py, &[b_arr, c_arr])
+}
+
+fn decode_working_set(
+    py: Python<'_>,
+    obj: &Py<PyAny>,
+    n: usize,
+    m: usize,
+) -> PyResult<pounce_qp::WorkingSet> {
+    let bound = obj.bind(py);
+    let tup: &Bound<'_, pyo3::types::PyTuple> = bound
+        .downcast::<pyo3::types::PyTuple>()
+        .map_err(|_| PyValueError::new_err("working_set must be a (bounds, constraints) tuple"))?;
+    if tup.len() != 2 {
+        return Err(PyValueError::new_err(
+            "working_set tuple must have exactly two elements",
+        ));
+    }
+    let bounds_obj = tup.get_item(0)?;
+    let cons_obj = tup.get_item(1)?;
+    let bounds_codes = extract_i8_vec(&bounds_obj.unbind(), n, "working_set[0] (bounds)")?;
+    let cons_codes = extract_i8_vec(&cons_obj.unbind(), m, "working_set[1] (constraints)")?;
+    let mut bounds = Vec::with_capacity(n);
+    for (i, &c) in bounds_codes.iter().enumerate() {
+        bounds.push(match c {
+            0 => pounce_qp::BoundStatus::Inactive,
+            1 => pounce_qp::BoundStatus::AtLower,
+            2 => pounce_qp::BoundStatus::AtUpper,
+            3 => pounce_qp::BoundStatus::Fixed,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "working_set bounds[{i}] = {c} not in 0..=3"
+                )))
+            }
+        });
+    }
+    let mut constraints = Vec::with_capacity(m);
+    for (i, &c) in cons_codes.iter().enumerate() {
+        constraints.push(match c {
+            0 => pounce_qp::ConsStatus::Inactive,
+            1 => pounce_qp::ConsStatus::AtLower,
+            2 => pounce_qp::ConsStatus::AtUpper,
+            3 => pounce_qp::ConsStatus::Equality,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "working_set constraints[{i}] = {c} not in 0..=3"
+                )))
+            }
+        });
+    }
+    Ok(pounce_qp::WorkingSet {
+        bounds,
+        constraints,
+    })
+}
+
+fn extract_i8_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<i8>> {
+    Python::with_gil(|py| {
+        // Best-effort decode: pull an i64 list out of the object,
+        // then narrow. Supports python lists, tuples, and numpy
+        // arrays of any integer dtype.
+        let bound = val.bind(py);
+        let vals: Vec<i64> = bound
+            .extract()
+            .map_err(|e| PyValueError::new_err(format!("{what}: cannot extract integers: {e}")))?;
+        if vals.len() != expected {
+            return Err(PyValueError::new_err(format!(
+                "{what}: length {} != expected {expected}",
+                vals.len()
+            )));
+        }
+        let mut out = Vec::with_capacity(expected);
+        for (i, &v) in vals.iter().enumerate() {
+            if !(-128..=127).contains(&v) {
+                return Err(PyValueError::new_err(format!(
+                    "{what}[{i}] = {v} outside int8 range"
+                )));
+            }
+            out.push(v as i8);
+        }
+        Ok(out)
+    })
 }
 
 fn status_message(status: ApplicationReturnStatus) -> &'static str {

@@ -11,6 +11,7 @@ members = [
     "crates/pounce-restoration",
     "crates/pounce-presolve",
     "crates/pounce-l1penalty",
+    "crates/pounce-qp",
     "crates/pounce-sensitivity",
     "crates/pounce-cinterface",
     "crates/pounce-py",
@@ -37,6 +38,7 @@ default-members = [
     "crates/pounce-restoration",
     "crates/pounce-presolve",
     "crates/pounce-l1penalty",
+    "crates/pounce-qp",
     "crates/pounce-sensitivity",
     "crates/pounce-cinterface",
     "crates/pounce-cli",
@@ -68,6 +70,7 @@ pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.2.0" }
 pounce-restoration = { path = "crates/pounce-restoration", version = "0.2.0" }
 pounce-presolve = { path = "crates/pounce-presolve", version = "0.2.0" }
 pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.2.0" }
+pounce-qp = { path = "crates/pounce-qp", version = "0.2.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.2.0" }
 feral = "0.7.0"
 

@@ -18,6 +18,7 @@ pounce-nlp.workspace = true
 pounce-feral.workspace = true
 pounce-presolve.workspace = true
 pounce-l1penalty.workspace = true
+pounce-qp.workspace = true
 pounce-hsl = { workspace = true, optional = true }
 
 [features]

@@ -2,6 +2,41 @@
 //! that don't want to write the [`set_on_converged`] callback +
 //! [`PdSensBacksolver`] + [`IndexSchurData`] plumbing by hand.
 //!
+//! ## Parametric continuation with the SQP corrector
+//!
+//! For parametric NLP sweeps the Phase 5c playbook is:
+//!
+//! 1. Solve the base problem `min f(x; p₀)` with the IPM. Capture
+//!    the converged primal `x*`, constraint multipliers `λ_g`, and
+//!    bound multipliers `z_l`, `z_u` via the user TNLP's
+//!    `finalize_solution`.
+//! 2. Run `SensSolve::with_deltas(Δp)` to get the linear predictor
+//!    `Δx ≈ ∂x*/∂p · Δp`.
+//! 3. Update the parameter inside the TNLP and construct the
+//!    SQP warm-start iterate:
+//!    ```ignore
+//!    use pounce_algorithm::sqp::{classify_working_set, SqpIterates};
+//!    let lambda_x: Vec<f64> = z_l.iter().zip(z_u.iter())
+//!        .map(|(l, u)| l - u).collect();
+//!    let ws = classify_working_set(
+//!        &lambda_x, &lambda_g, m_eq,
+//!        &x_predicted, &x_l, &x_u,
+//!        &g_at_predicted, &g_l, &g_u,
+//!        1e-8, 1e-6,
+//!    );
+//!    app.set_sqp_warm_start(SqpIterates {
+//!        x: x_predicted,
+//!        lambda_g,
+//!        lambda_x,
+//!        working: Some(ws),
+//!    });
+//!    app.options_mut().set_string_value("algorithm", "active-set-sqp", true, false)?;
+//!    let status = app.optimize_tnlp(tnlp);  // SQP corrector
+//!    ```
+//! 4. The SQP corrector polishes the predictor to first-order KKT
+//!    at the new parameter, typically in 0–3 outer iterations
+//!    with the warm-started working set.
+//!
 //! [`set_on_converged`]: pounce_algorithm::IpoptApplication::set_on_converged
 //! [`PdSensBacksolver`]: crate::PdSensBacksolver
 //! [`IndexSchurData`]: crate::IndexSchurData
@@ -84,6 +119,22 @@ pub struct SensResult {
     /// Present only when [`SensSolve::with_reduced_hessian_eigen`] was
     /// called and the solve converged.
     pub reduced_hessian_eigenvectors: Option<Vec<Number>>,
+    /// Phase 5c §6 — converged user-space constraint multipliers
+    /// `λ_g` (length `n_full_g`), suitable for direct hand-off to
+    /// the SQP-corrector via [`pounce_algorithm::sqp::classify_working_set`].
+    /// `None` when the solve didn't converge or the underlying NLP
+    /// didn't expose `pack_lambda_for_user`.
+    pub mult_g: Option<Vec<Number>>,
+    /// Converged user-space lower-bound multipliers `z_L`, length
+    /// `n_full_x`. Same convention as the C ABI / Python info dict.
+    pub mult_x_l: Option<Vec<Number>>,
+    /// Converged user-space upper-bound multipliers `z_U`, length
+    /// `n_full_x`. Same convention.
+    pub mult_x_u: Option<Vec<Number>>,
+    /// Converged constraint values `g(x*)` lifted to user-space
+    /// (length `n_full_g`). Used by `classify_working_set` to
+    /// classify inequality rows against their `[g_l, g_u]` bounds.
+    pub g: Option<Vec<Number>>,
 }
 
 impl SensSolve {
@@ -190,6 +241,40 @@ impl SensSolve {
             outbox_cb.borrow_mut().x = Some(dense_to_vec(&*curr.x));
             outbox_cb.borrow_mut().obj_val = Some(cq.borrow_mut().curr_f());
 
+            // Phase 5c §6 — also capture user-space multipliers +
+            // constraint values so callers can wire the parametric
+            // corrector via `classify_working_set` without a
+            // separate IPM solve. `pack_*_for_user` returns empty
+            // when the underlying NLP doesn't implement lifting
+            // (defaults on `IpoptNlp` trait); we treat that as
+            // "no user-space hand-off available".
+            //
+            // `curr_c`/`curr_d` cache results into the NLP via
+            // `eval_*` if not already computed; pull them BEFORE
+            // we hold an immutable borrow on `nlp` so the cache
+            // path has access to its own mut borrow.
+            let g_curr = cq.borrow_mut().curr_c();
+            let d_curr = cq.borrow_mut().curr_d();
+            {
+                let nlp_borrow = nlp.borrow();
+                let lambda = nlp_borrow.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                if !lambda.is_empty() {
+                    outbox_cb.borrow_mut().mult_g = Some(lambda);
+                }
+                let z_l = nlp_borrow.pack_z_l_for_user(&*curr.z_l);
+                if !z_l.is_empty() {
+                    outbox_cb.borrow_mut().mult_x_l = Some(z_l);
+                }
+                let z_u = nlp_borrow.pack_z_u_for_user(&*curr.z_u);
+                if !z_u.is_empty() {
+                    outbox_cb.borrow_mut().mult_x_u = Some(z_u);
+                }
+                let g_user = nlp_borrow.pack_g_for_user(&*g_curr, &*d_curr);
+                if !g_user.is_empty() {
+                    outbox_cb.borrow_mut().g = Some(g_user);
+                }
+            }
+
             let n_x = curr.x.dim() as usize;
             let n_s = curr.s.dim() as usize;
             // y_c rows live right after the (x, s) primal block in
@@ -284,6 +369,10 @@ impl SensSolve {
             reduced_hessian: out.reduced_hessian.clone(),
             reduced_hessian_eigenvalues: out.reduced_hessian_eigenvalues.clone(),
             reduced_hessian_eigenvectors: out.reduced_hessian_eigenvectors.clone(),
+            mult_g: out.mult_g.clone(),
+            mult_x_l: out.mult_x_l.clone(),
+            mult_x_u: out.mult_x_u.clone(),
+            g: out.g.clone(),
         }
     }
 }
@@ -297,6 +386,10 @@ struct CallbackOut {
     reduced_hessian: Option<Vec<Number>>,
     reduced_hessian_eigenvalues: Option<Vec<Number>>,
     reduced_hessian_eigenvectors: Option<Vec<Number>>,
+    mult_g: Option<Vec<Number>>,
+    mult_x_l: Option<Vec<Number>>,
+    mult_x_u: Option<Vec<Number>>,
+    g: Option<Vec<Number>>,
     #[allow(dead_code)]
     error: Option<String>,
 }

@@ -9,7 +9,14 @@ submodule and is only imported on demand to avoid pulling in JAX when
 it is not installed.
 """
 
-from ._pounce import Problem, Solver, __version__
+from ._pounce import Problem, Solver, classify_working_set, __version__
 from ._minimize import minimize, OptimizeResult
 
-__all__ = ["Problem", "Solver", "minimize", "OptimizeResult", "__version__"]
+__all__ = [
+    "Problem",
+    "Solver",
+    "minimize",
+    "OptimizeResult",
+    "classify_working_set",
+    "__version__",
+]

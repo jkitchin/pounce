@@ -293,6 +293,7 @@ dependencies = [
  "pounce-linsol",
  "pounce-nlp",
  "pounce-presolve",
+ "pounce-qp",
 ]
 
 [[package]]
@@ -302,6 +303,7 @@ dependencies = [
  "pounce-algorithm",
  "pounce-common",
  "pounce-nlp",
+ "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",
 ]
@@ -423,9 +425,20 @@ dependencies = [
  "pounce-feral",
  "pounce-linsol",
  "pounce-nlp",
+ "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",
  "pyo3",
+]
+
+[[package]]
+name = "pounce-qp"
+version = "0.2.0"
+dependencies = [
+ "pounce-common",
+ "pounce-feral",
+ "pounce-linalg",
+ "pounce-linsol",
 ]
 
 [[package]]

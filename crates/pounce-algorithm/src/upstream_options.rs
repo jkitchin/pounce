@@ -212,6 +212,151 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "EXPERIMENTAL!",
     )?;
     r.add_string_option("linear_solver", "Linear solver used for step computations.", "ma57", &[("ma27", "use the Harwell routine MA27"), ("ma57", "use the Harwell routine MA57"), ("ma77", "use the Harwell routine HSL_MA77"), ("ma86", "use the Harwell routine HSL_MA86"), ("ma97", "use the Harwell routine HSL_MA97"), ("pardiso", "use the Pardiso package from pardiso-project.org"), ("pardisomkl", "use the Pardiso package from Intel MKL"), ("spral", "use the SPRAL package"), ("wsmp", "use WSMP package"), ("mumps", "use MUMPS package"), ("custom", "use custom linear solver (expert use)"), ("feral", "use FERAL pure-Rust sparse symmetric solver (pounce extension)")], "Determines which linear algebra package is to be used for the solution of the augmented linear system (for obtaining the search directions).")?;
+
+    // Pounce-extension: top-level algorithm selector (Phase 5b
+    // §7.1). The default `interior-point` runs the IPOPT-lineage
+    // IPM. `active-set-sqp` selects the Phase 5b SQP driver in
+    // `crate::sqp::SqpAlgorithm`, which uses pounce-qp for QP
+    // subproblem solves.
+    r.add_string_option(
+        "algorithm",
+        "Top-level optimization algorithm.",
+        "interior-point",
+        &[
+            (
+                "interior-point",
+                "primal-dual interior-point method (IPOPT-lineage; pounce default)",
+            ),
+            (
+                "active-set-sqp",
+                "active-set sequential quadratic programming via pounce-qp",
+            ),
+        ],
+        "Selects between the IPM (default) and the active-set SQP driver.",
+    )?;
+    // SQP outer-loop options. Inactive when `algorithm =
+    // interior-point`. Defaults mirror `SqpOptions::default()`.
+    r.add_string_option(
+        "sqp_globalization",
+        "Globalization strategy for the active-set SQP outer loop.",
+        "filter",
+        &[
+            (
+                "filter",
+                "Fletcher-Leyffer filter line search (default; design note §4.1)",
+            ),
+            (
+                "l1-elastic",
+                "l1-merit (Han-Powell) backtracking line search",
+            ),
+        ],
+        "Selects how the SQP outer loop accepts or rejects a trial step. The filter strategy maintains a Pareto-frontier list of (constraint-violation, objective) pairs (Fletcher-Leyffer 2002); the l1-elastic strategy uses a weighted-sum merit (Han-Powell with fixed weight \"sqp_l1_penalty\"). Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_string_option(
+        "sqp_hessian",
+        "Hessian source for the SQP QP subproblem.",
+        "exact",
+        &[
+            ("exact", "use the NLP-supplied Lagrangian Hessian"),
+            (
+                "damped-bfgs",
+                "Powell-damped BFGS rank-2 update (guaranteed PSD)",
+            ),
+            (
+                "lbfgs",
+                "limited-memory BFGS approximation (Phase 5b.1)",
+            ),
+        ],
+        "Determines which Hessian feeds the QP subproblem. \"exact\" requires the NLP's eval_h and may be indefinite (pounce-qp handles inertia control). \"damped-bfgs\" maintains a dense PSD approximation via Powell damping (Powell 1978). \"lbfgs\" uses limited-memory storage suitable for large n. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "sqp_max_iter",
+        "Maximum number of SQP outer iterations.",
+        0,
+        200,
+        "Outer-iteration cap for the active-set SQP driver. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_tol",
+        "KKT stationarity tolerance (max-norm).",
+        0.0,
+        true,
+        1e-8,
+        "Maximum-norm tolerance on the SQP KKT stationarity residual. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_constr_viol_tol",
+        "Constraint-violation tolerance (max-norm).",
+        0.0,
+        true,
+        1e-6,
+        "Maximum-norm tolerance on the SQP constraint violation. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_dual_inf_tol",
+        "Dual-infeasibility tolerance (max-norm).",
+        0.0,
+        true,
+        1e-4,
+        "Maximum-norm tolerance on the SQP dual-infeasibility residual. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_l1_penalty",
+        "Initial l1-merit penalty weight.",
+        0.0,
+        true,
+        1.0,
+        "Penalty weight ν for the l1-merit line search (Han-Powell). Ignored when \"sqp_globalization\" is \"filter\". Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_l1_penalty_safety",
+        "Additive safety margin in the Han-Powell ν update.",
+        0.0,
+        false,
+        0.1,
+        "Each iteration the SQP driver sets `ν ← max(ν, ‖λ_qp‖_∞ + sqp_l1_penalty_safety)`. The default 0.1 follows Nocedal-Wright §18.4. Ignored when \"sqp_globalization\" is \"filter\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_l1_penalty_max",
+        "Upper clamp on the l1-merit penalty ν.",
+        0.0,
+        true,
+        1e10,
+        "Prevents catastrophic Armijo failure if `‖λ_qp‖` spikes. Ignored when \"sqp_globalization\" is \"filter\".",
+    )?;
+    r.add_bounded_number_option(
+        "sqp_bt_reduction",
+        "Backtracking step-reduction factor for the SQP line search.",
+        0.0,
+        true,
+        1.0,
+        true,
+        0.5,
+        "Multiplicative factor applied to the trial step at each backtracking-line-search iteration. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_bt_min_alpha",
+        "Smallest line-search step before declaring failure.",
+        0.0,
+        true,
+        1e-12,
+        "Minimum step length below which the SQP line search reports failure. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_bounded_integer_option(
+        "sqp_print_level",
+        "Print-level for the SQP outer loop.",
+        0,
+        12,
+        0,
+        "0 silences the SQP driver; 1 prints per-iteration summaries; 2+ enables trace output (planned). Only consulted when \"algorithm\" is \"active-set-sqp\".",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "sqp_lbfgs_max_history",
+        "Maximum number of (s, y) pairs stored by the SQP L-BFGS Hessian.",
+        1,
+        6,
+        "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
+    )?;
     r.add_string_option("linear_system_scaling", "Method for scaling the linear system.", "none", &[("none", "no scaling will be performed"), ("mc19", "use the Harwell routine MC19"), ("slack-based", "use the slack values")], "Determines the method used to compute symmetric scaling factors for the augmented system (see also the \"linear_scaling_on_demand\" option). This scaling is independent of the NLP problem scaling.")?;
     r.add_string_option("nlp_scaling_method", "Select the technique used for scaling the NLP.", "gradient-based", &[("none", "no problem scaling will be performed"), ("user-scaling", "scaling parameters will come from the user"), ("gradient-based", "scale the problem so the maximum gradient at the starting point is nlp_scaling_max_gradient"), ("equilibration-based", "scale the problem so that first derivatives are of order 1 at random points (uses Harwell routine MC19)")], "Selects the technique used for scaling the problem internally before it is solved. For user-scaling, the parameters come from the NLP.")?;
 

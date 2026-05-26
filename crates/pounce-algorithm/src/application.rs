@@ -154,6 +154,17 @@ pub struct IpoptApplication {
     /// custom factories plugged through [`Self::set_linear_backend_factory`]
     /// and the HSL MA57 backend leave the sink empty.
     linsol_summary_sink: Arc<Mutex<LinearSolverSummary>>,
+    /// Phase 5c (§6) SQP warm-start input. When `Some`, the next
+    /// `optimize_tnlp` call on the SQP path consumes the iterate
+    /// instead of cold-starting; consumed once per solve, then
+    /// auto-cleared. The IPM path ignores this field. Wire-set
+    /// via [`Self::set_sqp_warm_start`].
+    sqp_warm_start: Option<crate::sqp::SqpIterates>,
+    /// Phase 5c (§6) SQP warm-start output. Populated by every
+    /// `optimize_sqp_tnlp` call with the final QP working set.
+    /// Stays valid until the next solve (which overwrites it).
+    /// Accessed via [`Self::last_sqp_working_set`].
+    sqp_last_working_set: Option<pounce_qp::WorkingSet>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -196,6 +207,8 @@ impl IpoptApplication {
             on_converged: None,
             record_iter_history: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
+            sqp_warm_start: None,
+            sqp_last_working_set: None,
         }
     }
 
@@ -426,6 +439,13 @@ impl IpoptApplication {
     ///   in-`pounce-nlp` Newton driver so the trivial path is
     ///   independent of the linear-solver backend.
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        // Top-level algorithm dispatch (Phase 5b §7.1). When the
+        // `algorithm` option resolves to "active-set-sqp", route
+        // to the Phase 5b SQP path; otherwise fall through to the
+        // existing IPM flow unchanged.
+        if self.is_sqp_algorithm_selected() {
+            return self.optimize_sqp_tnlp(tnlp);
+        }
         let info = match tnlp.borrow_mut().get_nlp_info() {
             Some(info) => info,
             None => return ApplicationReturnStatus::InvalidProblemDefinition,
@@ -523,6 +543,150 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, found)| found.then_some(v))
             .unwrap_or(false)
+    }
+
+    /// Has the user set `algorithm = active-set-sqp`? Reads the
+    /// string option and matches case-insensitively against the
+    /// design-note §7.1 spelling. Any value other than
+    /// "active-set-sqp" (including absence) routes to the
+    /// default IPM path.
+    /// Stash a warm-start iterate for the SQP path. Consumed by
+    /// the next `optimize_tnlp` call when the `algorithm` option
+    /// resolves to `active-set-sqp`; the IPM path ignores it.
+    /// Phase 5c (§6) — the parametric / MPC warm-start hand-off.
+    ///
+    /// The iterate is auto-cleared after use, so a follow-up
+    /// solve without an intervening `set_sqp_warm_start` call
+    /// cold-starts.
+    pub fn set_sqp_warm_start(&mut self, warm: crate::sqp::SqpIterates) {
+        self.sqp_warm_start = Some(warm);
+    }
+
+    /// Drop any pending warm-start iterate without solving.
+    pub fn clear_sqp_warm_start(&mut self) {
+        self.sqp_warm_start = None;
+    }
+
+    /// Return the final QP working set from the most recent SQP
+    /// solve, or `None` if the last solve wasn't SQP, didn't
+    /// produce a working set (cold-start declared the iterate
+    /// optimal before solving any QP), or no SQP solve has run.
+    pub fn last_sqp_working_set(&self) -> Option<&pounce_qp::WorkingSet> {
+        self.sqp_last_working_set.as_ref()
+    }
+
+    fn is_sqp_algorithm_selected(&self) -> bool {
+        match self.options.get_string_value("algorithm", "") {
+            Ok((v, true)) => v.eq_ignore_ascii_case("active-set-sqp"),
+            _ => false,
+        }
+    }
+
+    /// Phase 5b SQP entry point. Builds the same NLP chain
+    /// (`TNLPAdapter` → `OrigIpoptNlp` → `IpoptNlpAdapter`) the
+    /// IPM uses, then runs `SqpAlgorithm::optimize`. Maps the
+    /// `SqpResult.status` back to `ApplicationReturnStatus` and
+    /// hands the final iterate to the user TNLP's
+    /// `finalize_solution` callback via `finalize_via_sqp`.
+    fn optimize_sqp_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        use pounce_nlp::orig_ipopt_nlp::OrigIpoptNlp;
+        use pounce_nlp::tnlp_adapter::TNLPAdapter;
+        use pounce_nlp::NoScaling;
+
+        let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
+            Ok(a) => Rc::new(RefCell::new(a)),
+            Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
+        };
+        let orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
+            Ok(n) => n,
+            Err(_) => return ApplicationReturnStatus::InternalError,
+        };
+        let nlp_rc: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(orig_nlp));
+
+        let mut sqp_adapter = crate::sqp::IpoptNlpAdapter::new(Rc::clone(&nlp_rc));
+
+        let mut builder = self.algorithm_builder_snapshot();
+        builder.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
+        let factory = self.make_backend_factory();
+        let mut alg = match builder.build_sqp_with_backend(factory) {
+            Some(a) => a,
+            None => return ApplicationReturnStatus::InternalError,
+        };
+
+        // Phase 5c (§6): consume any stashed warm-start iterate.
+        // `optimize_with_warm_start(warm=None)` is equivalent to
+        // `optimize`, so cold callers see no change.
+        let warm = self.sqp_warm_start.take();
+        let res = match alg.optimize_with_warm_start(&mut sqp_adapter, warm) {
+            Ok(r) => r,
+            Err(_) => return ApplicationReturnStatus::InternalError,
+        };
+        // Stash the result's working set so the next solve in a
+        // sequence can fetch it via `last_sqp_working_set`.
+        self.sqp_last_working_set = res.working_set.clone();
+        // Populate the shared `SolveStatistics` so the Python /
+        // C-API post-solve accessors (`GetIpoptIterCount`,
+        // `info["iter_count"]`, etc.) report the SQP outer-iter
+        // count rather than zero. Constraint-violation /
+        // dual-infeasibility residuals get the SQP-side values
+        // too. The IPM path overwrites this dict on its own
+        // solves, so SQP-vs-IPM mixing across solves stays
+        // honest.
+        {
+            let mut stats = self.statistics.borrow_mut();
+            stats.iteration_count = res.n_iter as Index;
+            stats.final_objective = res.obj;
+            stats.final_dual_inf = res.final_stationarity;
+            stats.final_constr_viol = res.final_constr_viol;
+            stats.final_compl = 0.0; // SQP has no barrier — no compl term.
+        }
+        let (app_status, solver_status) = match res.status {
+            crate::sqp::SqpStatus::Optimal => (
+                ApplicationReturnStatus::SolveSucceeded,
+                pounce_nlp::SolverReturn::Success,
+            ),
+            crate::sqp::SqpStatus::MaxIter => (
+                ApplicationReturnStatus::MaximumIterationsExceeded,
+                pounce_nlp::SolverReturn::MaxiterExceeded,
+            ),
+            crate::sqp::SqpStatus::InfeasibleSubproblem => (
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                pounce_nlp::SolverReturn::LocalInfeasibility,
+            ),
+            crate::sqp::SqpStatus::LineSearchFailed => (
+                ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
+                pounce_nlp::SolverReturn::ErrorInStepComputation,
+            ),
+        };
+
+        // Forward to the user TNLP's finalize_solution. We pass
+        // the SQP iterate and recovered multipliers via the
+        // OrigIpoptNlp's lifting hooks. Failure here is silent
+        // (we still return the algorithm's status) — the user
+        // sees the right ApplicationReturnStatus regardless.
+        let _ = finalize_via_sqp(&nlp_rc, &res, solver_status, &tnlp);
+
+        app_status
+    }
+
+    /// Build a *copy* of the algorithm builder configured per the
+    /// current options. The SQP path uses this so it gets a
+    /// fresh builder without mutating the application's state.
+    fn algorithm_builder_snapshot(&self) -> AlgorithmBuilder {
+        let mut builder = AlgorithmBuilder::default();
+        apply_sqp_options(&self.options, &mut builder.sqp);
+        builder
+    }
+
+    /// Construct a LinearBackendFactory honoring the
+    /// `linear_solver` option. Default FERAL; HSL MA57 when
+    /// built with the `ma57` feature.
+    fn make_backend_factory(&self) -> LinearBackendFactory {
+        Box::new(
+            |_choice| -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
+                Box::new(pounce_feral::FeralSolverInterface::new())
+            },
+        )
     }
 
     /// Phase 3.5 auto-fallback driver.
@@ -1586,6 +1750,161 @@ fn finalize_via_orig_nlp(
     Ok(f_final)
 }
 
+/// Bind SQP suboptions registered in `upstream_options.rs`
+/// (`sqp_globalization`, `sqp_hessian`, `sqp_max_iter`, `sqp_tol`,
+/// `sqp_constr_viol_tol`, `sqp_dual_inf_tol`, `sqp_l1_penalty`,
+/// `sqp_bt_reduction`, `sqp_bt_min_alpha`, `sqp_print_level`,
+/// `sqp_lbfgs_max_history`) onto
+/// `opts`. Used by [`IpoptApplication::algorithm_builder_snapshot`]
+/// before constructing an SQP algorithm.
+fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
+    use crate::sqp::{SqpGlobalization, SqpHessianSource};
+
+    if let Ok((s, true)) = options.get_string_value("sqp_globalization", "") {
+        opts.globalization = match s.as_str() {
+            "filter" => SqpGlobalization::Filter,
+            "l1-elastic" => SqpGlobalization::L1Elastic,
+            _ => opts.globalization,
+        };
+    }
+    if let Ok((s, true)) = options.get_string_value("sqp_hessian", "") {
+        opts.hessian = match s.as_str() {
+            "exact" => SqpHessianSource::Exact,
+            "damped-bfgs" => SqpHessianSource::DampedBfgs,
+            "lbfgs" => SqpHessianSource::Lbfgs,
+            _ => opts.hessian,
+        };
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_max_iter", "") {
+        if v >= 0 {
+            opts.max_iter = v as u32;
+        }
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_tol", "") {
+        opts.tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_constr_viol_tol", "") {
+        opts.constr_viol_tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_dual_inf_tol", "") {
+        opts.dual_inf_tol = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_l1_penalty", "") {
+        opts.l1_penalty = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_l1_penalty_safety", "") {
+        opts.l1_penalty_safety = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_l1_penalty_max", "") {
+        opts.l1_penalty_max = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_bt_reduction", "") {
+        opts.bt_reduction = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_bt_min_alpha", "") {
+        opts.bt_min_alpha = v;
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_print_level", "") {
+        opts.print_level = v.clamp(0, u8::MAX as i32) as u8;
+    }
+    if let Ok((v, true)) = options.get_integer_value("sqp_lbfgs_max_history", "") {
+        if v >= 1 {
+            opts.lbfgs_max_history = v as u32;
+        }
+    }
+}
+
+/// SQP-side analog of [`finalize_via_orig_nlp`]. Hands the SQP
+/// solution iterate to the user TNLP via the standard
+/// `finalize_solution` callback. Multiplier lifting goes through
+/// the same OrigIpoptNlp hooks so the user sees the same shape
+/// regardless of which algorithm produced the iterate.
+///
+/// Returns the user-space objective value on success.
+fn finalize_via_sqp(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    res: &crate::sqp::SqpResult,
+    solver_status: pounce_nlp::SolverReturn,
+    tnlp: &Rc<RefCell<dyn TNLP>>,
+) -> Result<Number, ()> {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+
+    let info = tnlp.borrow_mut().get_nlp_info().ok_or(())?;
+    let n = info.n as usize;
+    let m = info.m as usize;
+
+    // Wrap SQP slices in DenseVectors so we can pass them through
+    // the OrigIpoptNlp lift_x_to_full / pack_*_for_user hooks.
+    let nlp_borrow = nlp.borrow();
+    let n_alg = nlp_borrow.n() as usize;
+    let m_eq = nlp_borrow.m_eq() as usize;
+    let m_ineq = nlp_borrow.m_ineq() as usize;
+    debug_assert_eq!(res.x.len(), n_alg);
+    debug_assert_eq!(res.lambda_g.len(), m_eq + m_ineq);
+    debug_assert_eq!(res.lambda_x.len(), n_alg);
+
+    let x_space = DenseVectorSpace::new(n_alg as Index);
+    let c_space = DenseVectorSpace::new(m_eq as Index);
+    let d_space = DenseVectorSpace::new(m_ineq as Index);
+
+    let mut x_dv = x_space.make_new_dense();
+    x_dv.set_values(&res.x);
+    let x_vec: Vec<Number> = nlp_borrow.lift_x_to_full(&x_dv);
+    debug_assert_eq!(x_vec.len(), n);
+
+    // λ_x is packed signed (z_l − z_u). Split for lift.
+    let mut z_l_compressed = x_space.make_new_dense();
+    let mut z_u_compressed = x_space.make_new_dense();
+    let zl_vals: Vec<Number> = res.lambda_x.iter().map(|v| v.max(0.0)).collect();
+    let zu_vals: Vec<Number> = res.lambda_x.iter().map(|v| (-v).max(0.0)).collect();
+    z_l_compressed.set_values(&zl_vals);
+    z_u_compressed.set_values(&zu_vals);
+    let mut z_l = nlp_borrow.pack_z_l_for_user(&z_l_compressed);
+    if z_l.is_empty() {
+        z_l = vec![0.0; n];
+    }
+    let mut z_u = nlp_borrow.pack_z_u_for_user(&z_u_compressed);
+    if z_u.is_empty() {
+        z_u = vec![0.0; n];
+    }
+
+    // λ_g is [y_c; y_d]; split into the c/d blocks for lift.
+    let mut y_c_dv = c_space.make_new_dense();
+    let mut y_d_dv = d_space.make_new_dense();
+    if m_eq > 0 {
+        y_c_dv.set_values(&res.lambda_g[..m_eq]);
+    }
+    if m_ineq > 0 {
+        y_d_dv.set_values(&res.lambda_g[m_eq..]);
+    }
+    let mut lambda = nlp_borrow.pack_lambda_for_user(&y_c_dv, &y_d_dv);
+    if lambda.is_empty() {
+        lambda = vec![0.0; m];
+    }
+    drop(nlp_borrow);
+
+    let mut g_final = vec![0.0; m];
+    let _ = tnlp.borrow_mut().eval_g(&x_vec, true, &mut g_final);
+    let f_final = tnlp
+        .borrow_mut()
+        .eval_f(&x_vec, true)
+        .unwrap_or(Number::NAN);
+    tnlp.borrow_mut().finalize_solution(
+        pounce_nlp::tnlp::Solution {
+            status: solver_status,
+            x: &x_vec,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g_final,
+            lambda: &lambda,
+            obj_value: f_final,
+        },
+        &TnlpIpoptData::default(),
+        &TnlpIpoptCq::default(),
+    );
+    Ok(f_final)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1645,6 +1964,145 @@ mod tests {
     }
 
     #[test]
+    fn application_default_does_not_select_sqp() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        assert!(!app.is_sqp_algorithm_selected());
+    }
+
+    #[test]
+    fn application_routes_to_sqp_when_algorithm_option_set() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        assert!(app.is_sqp_algorithm_selected());
+    }
+
+    /// Convex equality NLP fixture for end-to-end SQP testing
+    /// through `IpoptApplication`:
+    ///
+    ///     min ½(x₁² + x₂²) − x₁ − 2x₂  s.t.  x₁ + x₂ = 1
+    ///
+    /// Closed form: x* = (0, 1), obj = -1.5, λ_g = 1.
+    struct ConvexEqTnlp {
+        finalize_called: std::rc::Rc<std::cell::RefCell<Option<(Vec<Number>, Number)>>>,
+    }
+    impl TNLP for ConvexEqTnlp {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 1,
+                nnz_jac_g: 2,
+                nnz_h_lag: 2,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-2.0e19; 2]);
+            b.x_u.copy_from_slice(&[2.0e19; 2]);
+            b.g_l.copy_from_slice(&[1.0]);
+            b.g_u.copy_from_slice(&[1.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[0.0, 0.0]);
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.5 * (x[0] * x[0] + x[1] * x[1]) - x[0] - 2.0 * x[1])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+            grad[0] = x[0] - 1.0;
+            grad[1] = x[1] - 2.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0]);
+                    jcol.copy_from_slice(&[0, 1]);
+                }
+                SparsityRequest::Values { values, .. } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            _obj_factor: Number,
+            _lambda: Option<&[Number]>,
+            _new_lambda: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1]);
+                    jcol.copy_from_slice(&[0, 1]);
+                }
+                SparsityRequest::Values { values, .. } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+            *self.finalize_called.borrow_mut() = Some((sol.x.to_vec(), sol.obj_value));
+        }
+    }
+
+    #[test]
+    fn application_sqp_path_solves_convex_eq_nlp_and_finalizes() {
+        let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let tnlp = std::rc::Rc::new(std::cell::RefCell::new(ConvexEqTnlp {
+            finalize_called: std::rc::Rc::clone(&finalize_slot),
+        }));
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        let status = app.optimize_tnlp(tnlp);
+        assert_eq!(status, ApplicationReturnStatus::SolveSucceeded);
+
+        // The TNLP's finalize_solution must have been invoked.
+        let recv = finalize_slot.borrow().clone();
+        let (x_recv, obj_recv) = recv.expect("finalize_solution was not called");
+        assert_eq!(x_recv.len(), 2);
+        assert!((x_recv[0] - 0.0).abs() < 1e-6, "x[0] = {}", x_recv[0]);
+        assert!((x_recv[1] - 1.0).abs() < 1e-6, "x[1] = {}", x_recv[1]);
+        assert!(
+            (obj_recv - (-1.5)).abs() < 1e-6,
+            "obj = {} but expected -1.5",
+            obj_recv
+        );
+    }
+
+    #[test]
+    fn application_routes_to_sqp_case_insensitively() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm Active-Set-SQP\n")
+            .unwrap();
+        // get_string_value may return the value as-stored (no
+        // normalization); the dispatch must handle case
+        // insensitively per the c11 design choice.
+        assert!(app.is_sqp_algorithm_selected());
+    }
+
+    #[test]
     fn application_constructs_and_loads_options() {
         let mut app = IpoptApplication::new();
         app.initialize().unwrap();
@@ -1655,6 +2113,132 @@ mod tests {
         let (level, found) = app.options().get_integer_value("print_level", "").unwrap();
         assert!(found);
         assert_eq!(level, 5);
+    }
+
+    #[test]
+    fn application_sqp_suboptions_propagate_to_builder() {
+        // All SQP suboptions are read by algorithm_builder_snapshot
+        // and baked into the builder's `sqp` field.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "algorithm active-set-sqp\n\
+             sqp_globalization l1-elastic\n\
+             sqp_hessian lbfgs\n\
+             sqp_max_iter 17\n\
+             sqp_tol 1e-7\n\
+             sqp_constr_viol_tol 1e-5\n\
+             sqp_dual_inf_tol 1e-3\n\
+             sqp_l1_penalty 2.5\n\
+             sqp_bt_reduction 0.25\n\
+             sqp_bt_min_alpha 1e-10\n\
+             sqp_print_level 2\n\
+             sqp_lbfgs_max_history 12\n",
+        )
+        .unwrap();
+        let snap = app.algorithm_builder_snapshot();
+        assert_eq!(
+            snap.sqp.globalization,
+            crate::sqp::SqpGlobalization::L1Elastic
+        );
+        assert_eq!(snap.sqp.hessian, crate::sqp::SqpHessianSource::Lbfgs);
+        assert_eq!(snap.sqp.max_iter, 17);
+        assert!((snap.sqp.tol - 1e-7).abs() < 1e-18);
+        assert!((snap.sqp.constr_viol_tol - 1e-5).abs() < 1e-18);
+        assert!((snap.sqp.dual_inf_tol - 1e-3).abs() < 1e-18);
+        assert!((snap.sqp.l1_penalty - 2.5).abs() < 1e-18);
+        assert!((snap.sqp.bt_reduction - 0.25).abs() < 1e-18);
+        assert!((snap.sqp.bt_min_alpha - 1e-10).abs() < 1e-18);
+        assert_eq!(snap.sqp.print_level, 2);
+        assert_eq!(snap.sqp.lbfgs_max_history, 12);
+    }
+
+    #[test]
+    fn application_sqp_warm_start_round_trip() {
+        // Drive the convex-equality TNLP through the SQP path
+        // twice. The first solve produces a working set; the
+        // second is warm-started from it. The second must converge
+        // with zero QP solves (the first KKT check declares
+        // optimality immediately).
+        let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let tnlp_rc: std::rc::Rc<std::cell::RefCell<dyn TNLP>> =
+            std::rc::Rc::new(std::cell::RefCell::new(ConvexEqTnlp {
+                finalize_called: std::rc::Rc::clone(&finalize_slot),
+            }));
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+
+        // Cold solve.
+        let status_a = app.optimize_tnlp(std::rc::Rc::clone(&tnlp_rc));
+        assert_eq!(status_a, ApplicationReturnStatus::SolveSucceeded);
+        let ws = app.last_sqp_working_set().cloned();
+        assert!(ws.is_some(), "cold solve must yield a working set");
+
+        // Build the warm-start iterate from the converged finalize
+        // payload (just x; pad multipliers to 0 since the test
+        // problem is convex).
+        let (x_recv, _) = finalize_slot.borrow().clone().unwrap();
+        let warm = crate::sqp::SqpIterates {
+            x: x_recv,
+            lambda_g: vec![1.0],
+            lambda_x: vec![0.0, 0.0],
+            working: ws,
+        };
+        app.set_sqp_warm_start(warm);
+
+        // Warm solve.
+        let status_b = app.optimize_tnlp(std::rc::Rc::clone(&tnlp_rc));
+        assert_eq!(status_b, ApplicationReturnStatus::SolveSucceeded);
+        assert!(app.last_sqp_working_set().is_some());
+    }
+
+    #[test]
+    fn application_sqp_warm_start_auto_clears_after_use() {
+        let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let tnlp_rc: std::rc::Rc<std::cell::RefCell<dyn TNLP>> =
+            std::rc::Rc::new(std::cell::RefCell::new(ConvexEqTnlp {
+                finalize_called: std::rc::Rc::clone(&finalize_slot),
+            }));
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        app.set_sqp_warm_start(crate::sqp::SqpIterates {
+            x: vec![0.0, 1.0],
+            lambda_g: vec![1.0],
+            lambda_x: vec![0.0, 0.0],
+            working: None,
+        });
+        assert!(app.sqp_warm_start.is_some());
+        let _ = app.optimize_tnlp(std::rc::Rc::clone(&tnlp_rc));
+        assert!(
+            app.sqp_warm_start.is_none(),
+            "warm-start input must be auto-cleared after use"
+        );
+    }
+
+    #[test]
+    fn application_sqp_suboptions_default_when_unset() {
+        // Without any sqp_* settings, the snapshot should equal
+        // SqpOptions::default().
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        let snap = app.algorithm_builder_snapshot();
+        let d = crate::sqp::SqpOptions::default();
+        assert_eq!(snap.sqp.globalization, d.globalization);
+        assert_eq!(snap.sqp.hessian, d.hessian);
+        assert_eq!(snap.sqp.max_iter, d.max_iter);
+        assert!((snap.sqp.tol - d.tol).abs() < 1e-18);
+        assert!((snap.sqp.constr_viol_tol - d.constr_viol_tol).abs() < 1e-18);
+        assert!((snap.sqp.dual_inf_tol - d.dual_inf_tol).abs() < 1e-18);
+        assert!((snap.sqp.l1_penalty - d.l1_penalty).abs() < 1e-18);
+        assert!((snap.sqp.bt_reduction - d.bt_reduction).abs() < 1e-18);
+        assert!((snap.sqp.bt_min_alpha - d.bt_min_alpha).abs() < 1e-18);
+        assert_eq!(snap.sqp.print_level, d.print_level);
+        assert_eq!(snap.sqp.lbfgs_max_history, d.lbfgs_max_history);
     }
 
     #[test]

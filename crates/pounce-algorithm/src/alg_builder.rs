@@ -50,6 +50,18 @@ use std::rc::Rc;
 pub type LinearBackendFactory =
     Box<dyn FnMut(LinearSolverChoice) -> Box<dyn SparseSymLinearSolverInterface>>;
 
+/// Top-level algorithm choice. `InteriorPoint` is pounce's default
+/// (the existing `IpoptAlgorithm`); `ActiveSetSqp` is the
+/// Phase 5b SQP driver in `crate::sqp::SqpAlgorithm`, which uses
+/// `pounce-qp` for QP subproblem solves and reuses
+/// `FilterLsAcceptor` for globalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlgorithmChoice {
+    #[default]
+    InteriorPoint,
+    ActiveSetSqp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinearSolverChoice {
     Ma57,
@@ -139,6 +151,14 @@ impl Default for ConvCheckOptions {
 
 #[derive(Debug, Clone)]
 pub struct AlgorithmBuilder {
+    /// Top-level algorithm dispatch. Default `InteriorPoint` ⇒
+    /// `build_with_backend` returns the existing `AlgorithmBundle`
+    /// (consumed by `IpoptAlgorithm`). `ActiveSetSqp` ⇒ caller
+    /// must use `build_sqp_with_backend` to assemble the Phase 5b
+    /// `SqpAlgorithm`. The two builder methods sit side by side
+    /// because the assembled algorithm shape differs (IPM bundle
+    /// vs SQP struct).
+    pub algorithm: AlgorithmChoice,
     pub linear_solver: LinearSolverChoice,
     pub mu_strategy: MuStrategyChoice,
     /// Selector forwarded to [`AdaptiveMuUpdate`] when
@@ -154,6 +174,9 @@ pub struct AlgorithmBuilder {
     pub line_search: LineSearchOptions,
     pub output: OutputOptions,
     pub warm: WarmStartOptions,
+    /// SQP-specific options (consulted only when
+    /// `algorithm = ActiveSetSqp`).
+    pub sqp: crate::sqp::SqpOptions,
 }
 
 /// Knobs read off `OptionsList` and baked into
@@ -298,6 +321,7 @@ impl Default for OutputOptions {
 impl Default for AlgorithmBuilder {
     fn default() -> Self {
         Self {
+            algorithm: AlgorithmChoice::default(),
             linear_solver: LinearSolverChoice::Feral,
             mu_strategy: MuStrategyChoice::Monotone,
             mu_oracle: MuOracleKind::QualityFunction,
@@ -310,6 +334,7 @@ impl Default for AlgorithmBuilder {
             line_search: LineSearchOptions::default(),
             output: OutputOptions::default(),
             warm: WarmStartOptions::default(),
+            sqp: crate::sqp::SqpOptions::default(),
         }
     }
 }
@@ -337,6 +362,27 @@ impl AlgorithmBuilder {
         let pd_solver = PdFullSpaceSolver::new(Box::new(aug_solver), perturb);
         let search_dir = PdSearchDirCalc::new(pd_solver);
         self.build_inner(Some(search_dir))
+    }
+
+    /// Phase 5b assembly path for the SQP algorithm. Consults
+    /// `self.algorithm`: when `ActiveSetSqp`, constructs an
+    /// `SqpAlgorithm` using the supplied backend factory for the
+    /// QP subproblem solver; otherwise returns `None` so the
+    /// caller can fall back to the IPM `build_with_backend`.
+    ///
+    /// Sister to `build_with_backend`: the SQP algorithm doesn't
+    /// share `AlgorithmBundle`'s shape (no mu_update / no IPM
+    /// line search), so the two paths return different types.
+    pub fn build_sqp_with_backend(
+        &self,
+        mut factory: LinearBackendFactory,
+    ) -> Option<crate::sqp::SqpAlgorithm> {
+        if !matches!(self.algorithm, AlgorithmChoice::ActiveSetSqp) {
+            return None;
+        }
+        let backend = factory(self.linear_solver);
+        let qp_solver = pounce_qp::ParametricActiveSetSolver::new(backend);
+        Some(crate::sqp::SqpAlgorithm::new(qp_solver, self.sqp.clone()))
     }
 
     fn build_inner(&self, search_dir: Option<PdSearchDirCalc>) -> AlgorithmBundle {
@@ -520,6 +566,7 @@ mod tests {
                 for &hessian_approximation in &hess {
                     for &line_search_method in &ls {
                         let _ = AlgorithmBuilder {
+                            algorithm: AlgorithmChoice::default(),
                             linear_solver,
                             mu_strategy,
                             mu_oracle: MuOracleKind::QualityFunction,
@@ -532,6 +579,7 @@ mod tests {
                             line_search: LineSearchOptions::default(),
                             output: OutputOptions::default(),
                             warm: WarmStartOptions::default(),
+                            sqp: crate::sqp::SqpOptions::default(),
                         }
                         .build();
                     }
