@@ -1274,12 +1274,39 @@ impl IpoptApplication {
 
     fn algorithm_builder_from_options(&self) -> AlgorithmBuilder {
         let mut builder = AlgorithmBuilder::new();
+
+        // `mehrotra_algorithm` is parsed first so its cascading
+        // defaults (mu_strategy=adaptive, mu_oracle=probing) can be
+        // overridden by an explicit user setting of those keys
+        // below. Mirrors `IpAlgBuilder.cpp:Mehrotra`.
+        let mut mehrotra_on = false;
+        if let Ok((v, found)) = self.options.get_string_value("mehrotra_algorithm", "") {
+            if found && v == "yes" {
+                mehrotra_on = true;
+                builder.mehrotra_algorithm = true;
+                builder.mu_strategy = MuStrategyChoice::Adaptive;
+                builder.mu_oracle = crate::mu::adaptive::MuOracleKind::Probing;
+            }
+        }
+
         if let Ok((v, found)) = self.options.get_string_value("mu_strategy", "") {
             if found {
-                builder.mu_strategy = match v.as_str() {
+                let parsed = match v.as_str() {
                     "adaptive" => MuStrategyChoice::Adaptive,
                     _ => MuStrategyChoice::Monotone,
                 };
+                if mehrotra_on && matches!(parsed, MuStrategyChoice::Monotone) {
+                    // Upstream Ipopt refuses this combination: Mehrotra
+                    // needs an affine step every iter, which only the
+                    // adaptive path computes. Keep adaptive and warn.
+                    eprintln!(
+                        "pounce: mehrotra_algorithm=yes requires \
+                         mu_strategy=adaptive; ignoring \
+                         mu_strategy=monotone."
+                    );
+                } else {
+                    builder.mu_strategy = parsed;
+                }
             }
         }
         if let Ok((v, found)) = self.options.get_string_value("mu_oracle", "") {

@@ -169,6 +169,15 @@ pub struct AlgorithmBuilder {
     pub limited_memory_update_type: UpdateType,
     pub line_search_method: LineSearchChoice,
     pub warm_start_init_point: bool,
+    /// `mehrotra_algorithm` — when true, [`PdSearchDirCalc`] folds
+    /// the Mehrotra second-order complementarity term into the
+    /// search-direction RHS. Mirrors upstream's
+    /// `IpAlgBuilder.cpp:Mehrotra` flag. Requires `mu_strategy =
+    /// Adaptive` so that an affine step is computed each iteration;
+    /// [`Self::build_with_backend`] does not enforce this — the
+    /// option-parser in `application.rs` is responsible for the
+    /// cascading defaults (`mu_oracle = probing` etc.).
+    pub mehrotra_algorithm: bool,
     pub conv_check: ConvCheckOptions,
     pub mu: MuOptions,
     pub line_search: LineSearchOptions,
@@ -329,6 +338,7 @@ impl Default for AlgorithmBuilder {
             limited_memory_update_type: UpdateType::Bfgs,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
+            mehrotra_algorithm: false,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
             line_search: LineSearchOptions::default(),
@@ -360,7 +370,8 @@ impl AlgorithmBuilder {
         let aug_solver = StdAugSystemSolver::new(linsol);
         let perturb = Rc::new(RefCell::new(PdPerturbationHandler::new()));
         let pd_solver = PdFullSpaceSolver::new(Box::new(aug_solver), perturb);
-        let search_dir = PdSearchDirCalc::new(pd_solver);
+        let mut search_dir = PdSearchDirCalc::new(pd_solver);
+        search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
         self.build_inner(Some(search_dir))
     }
 
@@ -574,6 +585,7 @@ mod tests {
                             limited_memory_update_type: UpdateType::Bfgs,
                             line_search_method,
                             warm_start_init_point: false,
+                            mehrotra_algorithm: false,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),
                             line_search: LineSearchOptions::default(),
