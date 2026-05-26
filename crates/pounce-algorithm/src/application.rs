@@ -1292,6 +1292,20 @@ impl IpoptApplication {
                 // the barrier objective is non-monotone along the
                 // corrector. Mirrors upstream `IpAlgBuilder.cpp:Mehrotra`.
                 builder.line_search.accept_every_trial_step = true;
+                // Aggressive iterate-push defaults (`SetNumericValueIfUnset`
+                // in upstream). The explicit user parses below will
+                // overwrite these if the user set them explicitly.
+                builder.init.bound_push = 10.0;
+                builder.init.bound_frac = 0.2;
+                builder.init.slack_bound_push = 10.0;
+                builder.init.slack_bound_frac = 0.2;
+                builder.init.bound_mult_init_val = 1.0;
+                // `alpha_for_y=bound_mult` — Mehrotra wants the
+                // equality multipliers to advance with the dual
+                // alpha so they stay in step with z/v. Mirrors
+                // upstream `IpAlgBuilder.cpp:Mehrotra`.
+                builder.line_search.alpha_for_y =
+                    crate::line_search::backtracking::AlphaForY::BoundMult;
             }
         }
 
@@ -1346,6 +1360,22 @@ impl IpoptApplication {
         if let Ok((v, found)) = self.options.get_string_value("accept_every_trial_step", "") {
             if found {
                 builder.line_search.accept_every_trial_step = v == "yes";
+            }
+        }
+        // `alpha_for_y` — direct user override. Parsed after the
+        // Mehrotra cascade so an explicit value still wins.
+        if let Ok((v, found)) = self.options.get_string_value("alpha_for_y", "") {
+            if found {
+                use crate::line_search::backtracking::AlphaForY;
+                builder.line_search.alpha_for_y = match v.as_str() {
+                    "primal" => AlphaForY::Primal,
+                    "bound-mult" | "bound_mult" => AlphaForY::BoundMult,
+                    "full" => AlphaForY::Full,
+                    "min" => AlphaForY::Min,
+                    "max" => AlphaForY::Max,
+                    "primal-and-full" | "dual-and-full" => AlphaForY::Primal,
+                    _ => AlphaForY::Primal,
+                };
             }
         }
         // `nlp_scaling_method` is consumed NLP-side in
@@ -1549,6 +1579,33 @@ impl IpoptApplication {
         {
             if found {
                 builder.warm.entire_iterate = v == "yes";
+            }
+        }
+
+        // `DefaultIterateInitializer` knobs — parsed after the Mehrotra
+        // cascade so explicit user values win
+        // (mirrors upstream's `SetNumericValueIfUnset` semantics).
+        if let Some(v) = read_num("bound_push") {
+            builder.init.bound_push = v;
+        }
+        if let Some(v) = read_num("bound_frac") {
+            builder.init.bound_frac = v;
+        }
+        if let Some(v) = read_num("slack_bound_push") {
+            builder.init.slack_bound_push = v;
+        }
+        if let Some(v) = read_num("slack_bound_frac") {
+            builder.init.slack_bound_frac = v;
+        }
+        if let Some(v) = read_num("constr_mult_init_max") {
+            builder.init.constr_mult_init_max = v;
+        }
+        if let Some(v) = read_num("bound_mult_init_val") {
+            builder.init.bound_mult_init_val = v;
+        }
+        if let Ok((v, found)) = self.options.get_string_value("bound_mult_init_method", "") {
+            if found {
+                builder.init.bound_mult_init_method = v;
             }
         }
         builder

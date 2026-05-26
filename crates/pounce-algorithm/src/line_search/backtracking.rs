@@ -45,6 +45,42 @@ pub enum Outcome {
     Failed,
 }
 
+/// Policy for the step length applied to the equality multipliers
+/// `y_c`, `y_d`. Mirrors upstream's `alpha_for_y` option (subset of
+/// the upstream enum — pounce only ports the variants that the
+/// Mehrotra cascade and default code paths exercise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaForY {
+    /// Use the primal step length (upstream default).
+    Primal,
+    /// Use the dual step length. Selected by the Mehrotra cascade
+    /// (`alpha_for_y=bound_mult`).
+    BoundMult,
+    /// Always take a full step on the equality multipliers.
+    Full,
+    /// Use the minimum of the primal and dual step lengths.
+    Min,
+    /// Use the maximum of the primal and dual step lengths.
+    Max,
+    /// Use the arithmetic mean of the primal and dual step lengths.
+    Average,
+}
+
+impl AlphaForY {
+    /// Compute the actual step length for `y_c`, `y_d` given the
+    /// already-selected primal and dual step lengths.
+    pub fn alpha_y(self, alpha_primal: Number, alpha_dual: Number) -> Number {
+        match self {
+            AlphaForY::Primal => alpha_primal,
+            AlphaForY::BoundMult => alpha_dual,
+            AlphaForY::Full => 1.0,
+            AlphaForY::Min => alpha_primal.min(alpha_dual),
+            AlphaForY::Max => alpha_primal.max(alpha_dual),
+            AlphaForY::Average => 0.5 * (alpha_primal + alpha_dual),
+        }
+    }
+}
+
 pub struct BacktrackingLineSearch {
     pub acceptor: Box<dyn BacktrackingLsAcceptor>,
     pub alpha_red_factor: Number,
@@ -150,6 +186,9 @@ pub struct BacktrackingLineSearch {
     /// upstream's `IpBacktrackingLineSearch.cpp:accept_every_trial_step_`
     /// short-circuit at the top of `FindAcceptableTrialPoint`.
     pub accept_every_trial_step: bool,
+    /// `alpha_for_y` policy applied to the equality multipliers `y_c`,
+    /// `y_d` when constructing the trial iterate. See [`AlphaForY`].
+    pub alpha_for_y: AlphaForY,
 }
 
 /// Internal alpha-loop outcome. The watchdog wrapper translates this
@@ -208,6 +247,7 @@ impl BacktrackingLineSearch {
             in_soft_resto_phase: false,
             soft_resto_counter: 0,
             accept_every_trial_step: false,
+            alpha_for_y: AlphaForY::Primal,
         }
     }
 
@@ -275,7 +315,8 @@ impl BacktrackingLineSearch {
                 Some(c) => c,
                 None => return Outcome::Failed,
             };
-            let trial_iv = scaled_step(&curr, delta, alpha_init, alpha_dual);
+            let alpha_y = self.alpha_for_y.alpha_y(alpha_init, alpha_dual);
+            let trial_iv = scaled_step(&curr, delta, alpha_init, alpha_y, alpha_dual);
             let mut d = data.borrow_mut();
             d.set_trial(trial_iv);
             d.info_alpha_primal = alpha_init;
@@ -413,7 +454,9 @@ impl BacktrackingLineSearch {
                 .min(cq_ref.aff_step_alpha_dual_max(delta, tau))
         };
 
-        let trial_iv = scaled_step(&curr, delta, alpha, alpha);
+        // Soft-resto uses the same scalar α for primal, equality
+        // multipliers, and bound multipliers (per upstream).
+        let trial_iv = scaled_step(&curr, delta, alpha, alpha, alpha);
         data.borrow_mut().set_trial(trial_iv);
 
         let theta_trial = cq.borrow().trial_constraint_violation();
@@ -816,7 +859,8 @@ impl BacktrackingLineSearch {
             last_alpha = alpha;
             n_steps = trial;
 
-            let trial_iv = scaled_step(&curr, delta, alpha, alpha_dual);
+            let alpha_y = self.alpha_for_y.alpha_y(alpha, alpha_dual);
+            let trial_iv = scaled_step(&curr, delta, alpha, alpha_y, alpha_dual);
             data.borrow_mut().set_trial(trial_iv);
 
             let theta_trial = cq.borrow().trial_constraint_violation();
@@ -1017,14 +1061,15 @@ fn scaled_step(
     curr: &IteratesVector,
     delta: &IteratesVector,
     alpha_primal: Number,
+    alpha_y: Number,
     alpha_dual: Number,
 ) -> IteratesVector {
     let mut out = curr.make_new_zeroed();
     out.add_one_vector(1.0, curr, 0.0); // out = curr
     out.x.axpy(alpha_primal, &*delta.x);
     out.s.axpy(alpha_primal, &*delta.s);
-    out.y_c.axpy(alpha_primal, &*delta.y_c);
-    out.y_d.axpy(alpha_primal, &*delta.y_d);
+    out.y_c.axpy(alpha_y, &*delta.y_c);
+    out.y_d.axpy(alpha_y, &*delta.y_d);
     out.z_l.axpy(alpha_dual, &*delta.z_l);
     out.z_u.axpy(alpha_dual, &*delta.z_u);
     out.v_l.axpy(alpha_dual, &*delta.v_l);
@@ -1075,7 +1120,7 @@ mod tests {
         // curr.x = (0,0), delta.x = (1,1) → at alpha=0.5, trial.x = (0.5, 0.5).
         let curr = iv_from(&[0.0, 0.0], &[0.0]);
         let delta = iv_from(&[1.0, 1.0], &[2.0]);
-        let trial = scaled_step(&curr, &delta, 0.5, 0.5);
+        let trial = scaled_step(&curr, &delta, 0.5, 0.5, 0.5);
         let xv = trial
             .x
             .as_any()

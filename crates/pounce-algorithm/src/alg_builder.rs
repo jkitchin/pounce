@@ -186,6 +186,40 @@ pub struct AlgorithmBuilder {
     /// SQP-specific options (consulted only when
     /// `algorithm = ActiveSetSqp`).
     pub sqp: crate::sqp::SqpOptions,
+    pub init: InitOptions,
+}
+
+/// Knobs read off `OptionsList` and baked into
+/// [`DefaultIterateInitializer`]. Defaults mirror
+/// `IpDefaultIterateInitializer.cpp:RegisterOptions`. The Mehrotra
+/// cascade in `application.rs` overrides `bound_push`, `bound_frac`,
+/// and `bound_mult_init_val` to upstream's more-aggressive values
+/// (`10`, `0.2`, `1.0`).
+#[derive(Debug, Clone)]
+pub struct InitOptions {
+    pub bound_push: Number,
+    pub bound_frac: Number,
+    pub slack_bound_push: Number,
+    pub slack_bound_frac: Number,
+    pub constr_mult_init_max: Number,
+    pub bound_mult_init_val: Number,
+    /// `bound_mult_init_method`: `"constant"` (default) or `"mu-based"`
+    /// (matches upstream's `IpDefaultIterateInitializer.cpp`).
+    pub bound_mult_init_method: String,
+}
+
+impl Default for InitOptions {
+    fn default() -> Self {
+        Self {
+            bound_push: 1e-2,
+            bound_frac: 1e-2,
+            slack_bound_push: 1e-2,
+            slack_bound_frac: 1e-2,
+            constr_mult_init_max: 1e3,
+            bound_mult_init_val: 1.0,
+            bound_mult_init_method: "constant".into(),
+        }
+    }
 }
 
 /// Knobs read off `OptionsList` and baked into
@@ -293,6 +327,10 @@ pub struct LineSearchOptions {
     /// Newton step is already a descent step (LPs, convex QPs). The
     /// Mehrotra cascade in `application.rs` flips this on.
     pub accept_every_trial_step: bool,
+    /// `alpha_for_y` — policy for the equality-multiplier (y_c / y_d)
+    /// step length. Upstream default is `Primal`; the Mehrotra cascade
+    /// switches to `BoundMult`.
+    pub alpha_for_y: crate::line_search::backtracking::AlphaForY,
 }
 
 impl Default for LineSearchOptions {
@@ -303,6 +341,7 @@ impl Default for LineSearchOptions {
             soft_resto_pderror_reduction_factor: 1.0 - 1e-4,
             max_soft_resto_iters: 10,
             accept_every_trial_step: false,
+            alpha_for_y: crate::line_search::backtracking::AlphaForY::Primal,
         }
     }
 }
@@ -354,6 +393,7 @@ impl Default for AlgorithmBuilder {
             output: OutputOptions::default(),
             warm: WarmStartOptions::default(),
             sqp: crate::sqp::SqpOptions::default(),
+            init: InitOptions::default(),
         }
     }
 }
@@ -459,6 +499,7 @@ impl AlgorithmBuilder {
             self.line_search.soft_resto_pderror_reduction_factor;
         line_search.max_soft_resto_iters = self.line_search.max_soft_resto_iters;
         line_search.accept_every_trial_step = self.line_search.accept_every_trial_step;
+        line_search.alpha_for_y = self.line_search.alpha_for_y;
 
         let conv_check: Box<dyn crate::conv_check::r#trait::ConvCheck> =
             Box::new(OptErrorConvCheck {
@@ -487,9 +528,17 @@ impl AlgorithmBuilder {
         {
             Box::new(WarmStartIterateInitializer::with_options(self.warm.clone()))
         } else {
-            Box::new(DefaultIterateInitializer::with_eq_mult_calculator(
-                Box::new(LeastSquareMults::new()),
-            ))
+            let mut d = DefaultIterateInitializer::with_eq_mult_calculator(Box::new(
+                LeastSquareMults::new(),
+            ));
+            d.bound_push = self.init.bound_push;
+            d.bound_frac = self.init.bound_frac;
+            d.slack_bound_push = self.init.slack_bound_push;
+            d.slack_bound_frac = self.init.slack_bound_frac;
+            d.constr_mult_init_max = self.init.constr_mult_init_max;
+            d.bound_mult_init_val = self.init.bound_mult_init_val;
+            d.bound_mult_init_method = self.init.bound_mult_init_method.clone();
+            Box::new(d)
         };
 
         let eq_mult: Box<dyn crate::eq_mult::r#trait::EqMultCalculator> =
@@ -602,6 +651,7 @@ mod tests {
                             output: OutputOptions::default(),
                             warm: WarmStartOptions::default(),
                             sqp: crate::sqp::SqpOptions::default(),
+                            init: InitOptions::default(),
                         }
                         .build();
                     }
