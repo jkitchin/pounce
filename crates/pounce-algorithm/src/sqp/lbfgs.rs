@@ -83,8 +83,13 @@ impl LBfgs {
     /// ∇L_prev)` if a prior iterate exists. The first call merely
     /// stores `(x_new, ∇L_new)`.
     pub fn update(&mut self, x_new: &[Number], grad_lag_new: &[Number]) {
-        debug_assert_eq!(x_new.len(), self.n);
-        debug_assert_eq!(grad_lag_new.len(), self.n);
+        // Hard assert (PR #50 review S5): see BFGS::update.
+        assert_eq!(x_new.len(), self.n, "LBFGS::update: x_new.len() != n");
+        assert_eq!(
+            grad_lag_new.len(),
+            self.n,
+            "LBFGS::update: grad_lag_new.len() != n"
+        );
 
         if let (Some(prev_x), Some(prev_grad_lag)) =
             (self.prev_x.as_ref(), self.prev_grad_lag.as_ref())

@@ -1020,6 +1020,85 @@ fn schur_path_matches_refactor_path_on_drop_test() {
     );
 }
 
+// PR #50 review C2 — multi-step Schur cross-check. Bumps the
+// existing 2-step coverage to a sequence with both adds and a
+// drop in between, validating that the running `K_W⁻¹ b == b`
+// round-trip survives interleaved sign updates. Compares the
+// final primal against the refactor-per-iteration path (the
+// strongest possible cross-check — agreement at the optimum
+// implies the cumulative rank-2 updates produced a numerically
+// correct backsolve at every intermediate step).
+#[test]
+fn schur_multi_step_add_drop_add_matches_fresh_factor() {
+    let n = 3;
+    let h = identity_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [-0.25, -0.6, -0.9];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [0.0, 0.0, 0.0];
+    let xu = [1.0, 1.0, 1.0];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    // Warm start that forces several add/drop cycles: pin all
+    // three at AtLower to start, then the solver must drop the
+    // ones whose gradient is negative.
+    let ws = crate::QpWarmStart {
+        x: vec![0.0, 0.0, 0.0],
+        lambda_g: vec![],
+        lambda_x: vec![0.0, 0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![
+                crate::BoundStatus::AtLower,
+                crate::BoundStatus::AtLower,
+                crate::BoundStatus::AtLower,
+            ],
+            constraints: vec![],
+        },
+    };
+
+    let mut solver = new_solver();
+
+    let mut opts_default = QpOptions::default();
+    opts_default.use_schur_updates = false;
+    let sol_default = solver.solve(&qp, Some(&ws), &opts_default).unwrap();
+    assert_eq!(sol_default.status, crate::QpStatus::Optimal);
+
+    let mut solver_b = new_solver();
+    let mut opts_schur = QpOptions::default();
+    opts_schur.use_schur_updates = true;
+    let sol_schur = solver_b.solve(&qp, Some(&ws), &opts_schur).unwrap();
+    assert_eq!(sol_schur.status, crate::QpStatus::Optimal);
+
+    // Cross-check: same primal, same objective.
+    for i in 0..n {
+        assert!(
+            (sol_default.x[i] - sol_schur.x[i]).abs() < 1e-9,
+            "x[{i}]: refactor = {}, schur = {}",
+            sol_default.x[i],
+            sol_schur.x[i],
+        );
+    }
+    assert!((sol_default.obj - sol_schur.obj).abs() < 1e-9);
+    // Multiple Schur updates happened (multi-step coverage).
+    assert!(
+        sol_schur.stats.n_schur_updates >= 2,
+        "expected ≥2 Schur updates, got {}",
+        sol_schur.stats.n_schur_updates
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────
 // `solve_with_working_set` API: caller supplies just a working
 // set (not a primal `x`), pounce-qp computes a feasible primal

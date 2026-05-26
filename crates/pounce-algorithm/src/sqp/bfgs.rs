@@ -90,8 +90,15 @@ impl DampedBfgs {
     /// first call just stores the pair; subsequent calls also
     /// modify `B`.
     pub fn update(&mut self, x_new: &[Number], grad_lag_new: &[Number]) {
-        debug_assert_eq!(x_new.len(), self.n);
-        debug_assert_eq!(grad_lag_new.len(), self.n);
+        // Hard assert (PR #50 review S5): a length mismatch here
+        // would silently mis-compute the rank-2 update in release
+        // builds with debug_assert.
+        assert_eq!(x_new.len(), self.n, "BFGS::update: x_new.len() != n");
+        assert_eq!(
+            grad_lag_new.len(),
+            self.n,
+            "BFGS::update: grad_lag_new.len() != n"
+        );
 
         if let (Some(prev_x), Some(prev_grad_lag)) = (self.prev_x.take(), self.prev_grad_lag.take())
         {

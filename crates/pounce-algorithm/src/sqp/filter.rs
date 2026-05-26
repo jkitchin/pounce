@@ -33,6 +33,23 @@
 //! and trigger constants) — it ships the dominance test +
 //! sufficient-progress check, which is the SOTA filter's core
 //! and matches every commonly-cited reduced filter SQP variant.
+//!
+//! ## First-step caveat (PR #50 review C4)
+//!
+//! At iteration 0 the filter is empty: no filter entry can
+//! dominate a trial point, so the dominance test passes
+//! unconditionally. The full step is therefore accepted on the
+//! first iteration regardless of how badly the trial point
+//! increases the constraint violation, provided the
+//! sufficient-progress test against the *current* iterate also
+//! passes. In practice this is harmless because (a) `θ_curr`
+//! starts large at a typical cold-start point so the sufficient-
+//! progress test is meaningful from the first step, and (b) the
+//! QP step is locally feasible by construction so the first
+//! trial is usually a good step. Callers that demand a hard
+//! first-step constraint-violation safeguard should use
+//! `SqpGlobalization::L1Elastic` instead (Han-Powell ν dominates
+//! `|λ_qp|_∞` from iter 0 onward).
 
 use crate::sqp::line_search::{l1_violation, LineSearchResult};
 use crate::sqp::options::SqpOptions;

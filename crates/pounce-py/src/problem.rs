@@ -80,6 +80,17 @@ impl PyProblem {
         if m < 0 {
             return Err(PyValueError::new_err("m must be non-negative"));
         }
+        // PR #50 review S3: guard against silent i64→i32 truncation.
+        if n > i32::MAX as i64 {
+            return Err(PyValueError::new_err(format!(
+                "n = {n} exceeds the solver's signed-32-bit Index range"
+            )));
+        }
+        if m > i32::MAX as i64 {
+            return Err(PyValueError::new_err(format!(
+                "m = {m} exceeds the solver's signed-32-bit Index range"
+            )));
+        }
         let n_i = n as Index;
         let m_i = m as Index;
         let x_l = decode_bounds(lb, n_i as usize, f64::NEG_INFINITY)?;
@@ -187,6 +198,25 @@ impl PyProblem {
             None => self.pending_working_set.take(),
         };
         if let Some(ws) = ws_for_solve {
+            // PR #50 review A3: warn if the caller supplied a
+            // working set but the algorithm wasn't switched to the
+            // SQP path. The IPM silently ignores `set_sqp_warm_start`,
+            // so users could otherwise lose their warm-start data
+            // without any hint that something was misconfigured.
+            let sqp_selected = self
+                .str_opts
+                .iter()
+                .any(|(k, v)| k == "algorithm" && v.eq_ignore_ascii_case("active-set-sqp"));
+            if !sqp_selected {
+                let warnings = py.import_bound("warnings")?;
+                let _ = warnings.call_method1(
+                    "warn",
+                    ("working_set was supplied but `algorithm` is not \
+                         \"active-set-sqp\"; the IPM path ignores working sets. \
+                         Either call add_option(\"algorithm\", \"active-set-sqp\") \
+                         before solve(), or drop the working_set argument.",),
+                );
+            }
             app.set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
                 x: vec![0.0; self.n as usize],
                 lambda_g: vec![0.0; self.m as usize],

@@ -891,6 +891,21 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     if (g_sqp_state_file[0]) {
         state_file_used = read_state_file(g_sqp_state_file, nlp, n, m,
                                           x_l, x_u, g_l, g_u);
+        /* PR #50 review A2 — surface the warm-start outcome so
+         * operators can tell whether the persistent state file
+         * was usable or whether we silently fell back to §7.4(a)
+         * marginal reconstruction. */
+        if (state_file_used) {
+            snprintf(msg, sizeof(msg),
+                     "  Loaded SQP working set from %s", g_sqp_state_file);
+            gevLogStat(gev, msg);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "  SQP state file %s missing/mismatched; "
+                     "falling back to marginal-based warm start",
+                     g_sqp_state_file);
+            gevLogStat(gev, msg);
+        }
     }
 
     /* ---------------------------------------------------------------

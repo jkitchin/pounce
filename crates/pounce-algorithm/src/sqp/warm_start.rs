@@ -10,6 +10,7 @@
 //! will detect and correct any misclassification in the first
 //! step of the next QP, so correctness is preserved.
 
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::Number;
 use pounce_qp::{BoundStatus, ConsStatus, WorkingSet};
 
@@ -67,10 +68,15 @@ pub fn classify_working_set(
     debug_assert_eq!(g_u.len(), m);
     debug_assert!(m_eq <= m);
 
+    // Bound-finiteness uses the same `NLP_*_BOUND_INF` sentinels
+    // pounce uses everywhere else (default ±1e19). Naive
+    // `.is_finite()` would falsely include `−1e19` as a real lower
+    // bound and tag any unbounded variable at that value as
+    // `AtLower` (PR #50 review A4).
     let mut bounds = Vec::with_capacity(n);
     for i in 0..n {
-        let lo_fin = x_l[i].is_finite();
-        let up_fin = x_u[i].is_finite();
+        let lo_fin = x_l[i] > NLP_LOWER_BOUND_INF;
+        let up_fin = x_u[i] < NLP_UPPER_BOUND_INF;
         if lo_fin && up_fin && (x_u[i] - x_l[i]).abs() < primal_tol {
             bounds.push(BoundStatus::Fixed);
             continue;
@@ -98,8 +104,8 @@ pub fn classify_working_set(
             constraints.push(ConsStatus::Equality);
             continue;
         }
-        let lo_fin = g_l[i].is_finite();
-        let up_fin = g_u[i].is_finite();
+        let lo_fin = g_l[i] > NLP_LOWER_BOUND_INF;
+        let up_fin = g_u[i] < NLP_UPPER_BOUND_INF;
         if lo_fin && up_fin && (g_u[i] - g_l[i]).abs() < primal_tol {
             constraints.push(ConsStatus::Equality);
             continue;
@@ -130,6 +136,29 @@ pub fn classify_working_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_treats_nlp_bound_inf_sentinel_as_unbounded() {
+        // PR #50 review A4 regression. Variables with `x_l =
+        // NLP_LOWER_BOUND_INF` (the −1e19 sentinel) are unbounded
+        // below; even a primal value at exactly that sentinel must
+        // be tagged `Inactive`, not `AtLower`. Prior to the fix
+        // `is_finite()` would treat `−1e19` as a real bound.
+        let ws = classify_working_set(
+            &[0.0],
+            &[],
+            0,
+            &[-1.0e19],
+            &[NLP_LOWER_BOUND_INF],
+            &[NLP_UPPER_BOUND_INF],
+            &[],
+            &[],
+            &[],
+            1e-8,
+            1e-6,
+        );
+        assert_eq!(ws.bounds[0], BoundStatus::Inactive);
+    }
 
     #[test]
     fn classify_all_inactive_when_strictly_interior() {

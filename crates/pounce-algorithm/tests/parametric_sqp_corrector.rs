@@ -261,3 +261,88 @@ fn ipm_then_sqp_corrector_recovers_exact_perturbed_optimum() {
     // for the next step in the sweep.
     assert!(app.last_sqp_working_set().is_some());
 }
+
+/// PR #50 review T3 — exercise the corrector across an
+/// **active-set flip**. At `p₀ = (0.5, 0.4, −0.1)` the lower bound
+/// `x₃ ≥ 0` is binding; at `p₁ = (0.5, 0.4,  0.1)` it is not. The
+/// SQP corrector starts from the previous working set (x₃ at
+/// lower) but lands at the new optimum where x₃ > 0 — the QP must
+/// detect the wrong-sign bound multiplier and drop x₃ from the
+/// active set in the first inner iteration.
+#[test]
+fn sqp_corrector_handles_active_set_flip_between_perturbations() {
+    let p0 = vec![0.5, 0.4, -0.1];
+    let tnlp = std::rc::Rc::new(std::cell::RefCell::new(SimplexProj::new(p0.clone())));
+    let p_handle = tnlp.borrow().p.clone();
+    let finalize_handle = tnlp.borrow().finalize_sink.clone();
+
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    app.initialize_with_options_str("print_level 0\n").unwrap();
+    let status = app.optimize_tnlp(tnlp.clone());
+    assert_eq!(status, ApplicationReturnStatus::SolveSucceeded);
+    let ipm = finalize_handle.borrow().clone().unwrap();
+
+    let n = 3;
+    let lambda_x: Vec<Number> = ipm
+        .z_l
+        .iter()
+        .zip(ipm.z_u.iter())
+        .map(|(l, u)| l - u)
+        .collect();
+    let x_l = vec![0.0; n];
+    let x_u = vec![1.0e20; n];
+    let g_l = vec![1.0];
+    let g_u = vec![1.0];
+    let ws = classify_working_set(
+        &lambda_x,
+        &ipm.lambda,
+        1,
+        &ipm.x,
+        &x_l,
+        &x_u,
+        &ipm.g,
+        &g_l,
+        &g_u,
+        1e-8,
+        1e-6,
+    );
+    use pounce_qp::BoundStatus;
+    assert_eq!(
+        ws.bounds[2],
+        BoundStatus::AtLower,
+        "WS must capture x₃ active"
+    );
+
+    // Big perturbation: flip p[2] from negative to positive
+    // enough that x₃ becomes interior at the new optimum.
+    *p_handle.borrow_mut() = vec![0.5, 0.4, 0.1];
+
+    // Stale predictor: just reuse the IPM primal. Predicting
+    // exactly x_ipm puts x₃ at the bound while the new optimum
+    // has x₃ > 0; the SQP corrector must detect the
+    // wrong-sign multiplier and drop the bound.
+    let warm = SqpIterates {
+        x: ipm.x.clone(),
+        lambda_g: ipm.lambda.clone(),
+        lambda_x: lambda_x.clone(),
+        working: Some(ws),
+    };
+    app.set_sqp_warm_start(warm);
+    app.options_mut()
+        .set_string_value("algorithm", "active-set-sqp", true, false)
+        .unwrap();
+    let status2 = app.optimize_tnlp(tnlp.clone());
+    assert_eq!(status2, ApplicationReturnStatus::SolveSucceeded);
+    let sqp = finalize_handle.borrow().clone().unwrap();
+
+    // New optimum: λ = (0.5 + 0.4 + 0.1 - 1)/3 = 0; x = p_new.
+    // x₃ = 0.1 > 0 (active set has flipped).
+    assert!((sqp.x[0] - 0.5).abs() < 1e-7, "x[0] = {}", sqp.x[0]);
+    assert!((sqp.x[1] - 0.4).abs() < 1e-7, "x[1] = {}", sqp.x[1]);
+    assert!((sqp.x[2] - 0.1).abs() < 1e-7, "x[2] = {}", sqp.x[2]);
+    // The corrector must have produced a new working set
+    // reflecting x₃ no longer binding.
+    let new_ws = app.last_sqp_working_set().expect("ws produced");
+    assert_eq!(new_ws.bounds[2], BoundStatus::Inactive);
+}

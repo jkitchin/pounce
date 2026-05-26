@@ -132,11 +132,22 @@ pub fn l1_merit_line_search<N: SqpProblemSpec>(
         last_c.clone_from(&c_trial);
 
         let target = phi_curr + eta * alpha * predicted;
-        // Use ≤ in the *or* direction so a non-decreasing
-        // predicted derivative (predicted ≥ 0) doesn't make
-        // every step pass the test trivially when the merit
-        // genuinely decreased.
-        let armijo_ok = phi_trial <= target || phi_trial < phi_curr;
+        // Standard Armijo sufficient-decrease (Nocedal-Wright
+        // §3.1). The earlier `|| phi_trial < phi_curr` fallback
+        // (PR #50 review C3) accepted *any* descent and
+        // effectively bypassed the inequality on nonconvex
+        // problems where `predicted ≥ 0` makes the Armijo target
+        // monotone-non-decreasing. We now gate the fallback on
+        // `predicted >= 0` only — i.e. fall back to "any merit
+        // decrease wins" only when the predicted derivative is
+        // not a descent direction, which is the case the original
+        // fallback was intended to cover (cf. Wächter-Biegler 2006
+        // §3.3 backtracking rule).
+        let armijo_ok = if predicted < 0.0 {
+            phi_trial <= target
+        } else {
+            phi_trial < phi_curr
+        };
         #[cfg(test)]
         if opts.print_level >= 2 {
             eprintln!(

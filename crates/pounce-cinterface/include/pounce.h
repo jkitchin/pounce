@@ -362,6 +362,12 @@ Bool IpoptClearWarmStartWorkingSet(IpoptProblem ipopt_problem);
  * IpoptSolve, and IpoptGetWorkingSet. Any of the in/out buffers
  * may be NULL to skip that side. Returns the
  * ApplicationReturnStatus integer (same contract as IpoptSolve).
+ *
+ * NOTE: an invalid warm-start input (out-of-range status code,
+ * dimension mismatch) is silently discarded — the solve proceeds
+ * with cold-start instead. Callers who need to detect this fall-
+ * back must invoke IpoptSetWarmStartWorkingSet directly first
+ * and check its Bool return value before calling IpoptSolve.
  */
 enum ApplicationReturnStatus IpoptSolveWarmStart(
     IpoptProblem            ipopt_problem,

@@ -714,14 +714,14 @@ impl ParametricActiveSetSolver {
                         }
                         let take = match *worst {
                             None => true,
-                            Some((_, prev_viol)) => {
+                            Some((prev_target, prev_viol)) => {
                                 if use_bland {
                                     // Smallest index wins. Compare
                                     // problem-space indices regardless
                                     // of cons-vs-bound; cons indices
                                     // come first.
                                     let new_key = drop_target_key(target);
-                                    let prev_key = drop_target_key(worst.unwrap().0);
+                                    let prev_key = drop_target_key(prev_target);
                                     new_key < prev_key
                                 } else {
                                     viol > prev_viol
@@ -871,11 +871,16 @@ impl ParametricActiveSetSolver {
                 n_changes += 1;
             }
 
-            // EXPAND τ growth / hard reset. The condition is a
-            // no-op when `anti_cycling != Expand` (select_blocker
-            // ignores τ in other modes) and when τ stays below
-            // expand_tol_max (the common case).
-            expand_tol += opts.expand_tol_growth;
+            // EXPAND τ growth / hard reset. Per Gill-Murray-
+            // Saunders-Wright 1989 §3, τ only grows when a
+            // constraint actually blocked (α < 1 with a blocker
+            // picked). Growing on every iteration regardless
+            // (PR #50 review C5) unnecessarily forces the hard
+            // reset on non-degenerate problems. No-op when
+            // `anti_cycling != Expand` (select_blocker ignores τ).
+            if matches!(opts.anti_cycling, AntiCyclingChoice::Expand) && blocker.is_some() {
+                expand_tol += opts.expand_tol_growth;
+            }
             if expand_tol > opts.expand_tol_max {
                 // Cycling-protection hard reset: snap every
                 // active-bound primal exactly to its bound to
@@ -1285,8 +1290,10 @@ impl ParametricActiveSetSolver {
             }
 
             // EXPAND τ growth / hard reset (same semantics as in
-            // solve_general).
-            expand_tol += opts.expand_tol_growth;
+            // solve_general; PR #50 C5 fix).
+            if matches!(opts.anti_cycling, AntiCyclingChoice::Expand) && blocker.is_some() {
+                expand_tol += opts.expand_tol_growth;
+            }
             if expand_tol > opts.expand_tol_max {
                 for (i, &status) in working.bounds.iter().enumerate() {
                     match status {
@@ -1410,7 +1417,7 @@ fn select_blocker(
             // `alpha_min` (encounter order ⇒ lowest index for ties).
             let mut best: Option<(BlockerTarget, f64)> = None;
             for &(target, r, _) in candidates {
-                if r > alpha_min + 0.0 {
+                if r > alpha_min {
                     continue;
                 }
                 if best.is_none() {
