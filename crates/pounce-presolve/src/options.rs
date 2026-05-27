@@ -62,6 +62,17 @@ pub struct PresolveOptions {
     /// `presolve_auxiliary_diagnostics` — emit the diagnostics struct
     /// via the journalist.
     pub auxiliary_diagnostics: bool,
+    /// `presolve_fbbt` — Feasibility-Based Bound Tightening over
+    /// nonlinear constraint expression DAGs (issue #62). Off by
+    /// default until benchmark evidence justifies a flip.
+    pub fbbt: bool,
+    /// `fbbt_tol` — minimum bound improvement to keep iterating.
+    pub fbbt_tol: Number,
+    /// `fbbt_max_iter` — outer sweep cap.
+    pub fbbt_max_iter: Index,
+    /// `fbbt_max_constraints` — cap on constraints examined per
+    /// sweep; `0` means unlimited.
+    pub fbbt_max_constraints: Index,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +119,10 @@ impl PresolveOptions {
             auxiliary_wall_time_fraction: 0.1,
             auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
             auxiliary_diagnostics: false,
+            fbbt: false,
+            fbbt_tol: 1e-6,
+            fbbt_max_iter: 10,
+            fbbt_max_constraints: 0,
         }
     }
 
@@ -155,6 +170,10 @@ impl PresolveOptions {
             _ => AuxiliaryCouplingPolicy::Safe,
         };
         let auxiliary_diagnostics = opts.get_bool_value("presolve_auxiliary_diagnostics", "")?.0;
+        let fbbt = opts.get_bool_value("presolve_fbbt", "")?.0;
+        let fbbt_tol = opts.get_numeric_value("fbbt_tol", "")?.0;
+        let fbbt_max_iter = opts.get_integer_value("fbbt_max_iter", "")?.0;
+        let fbbt_max_constraints = opts.get_integer_value("fbbt_max_constraints", "")?.0;
         Ok(Self {
             enabled,
             bound_tightening,
@@ -172,6 +191,10 @@ impl PresolveOptions {
             auxiliary_wall_time_fraction,
             auxiliary_coupling,
             auxiliary_diagnostics,
+            fbbt,
+            fbbt_tol,
+            fbbt_max_iter,
+            fbbt_max_constraints,
         })
     }
 }
@@ -353,6 +376,50 @@ pub fn register_options(reg: &RegisteredOptions) -> Result<(), SolverException> 
         "When yes, the diagnostics struct (block counts, timings, \
          rejection reasons) is published via the journalist after \
          Phase 0 runs.",
+    )?;
+
+    reg.add_bool_option(
+        "presolve_fbbt",
+        "Feasibility-Based Bound Tightening on nonlinear constraints.",
+        false,
+        "When yes, runs interval-arithmetic propagation through each \
+         constraint's expression DAG to tighten variable bounds before \
+         the IPM starts (issue #62). Off by default — only TNLPs that \
+         implement the `ExpressionProvider` trait (currently: `.nl` \
+         files via pounce-cli's `NlTnlp`) participate; others are no-op.",
+    )?;
+
+    reg.add_lower_bounded_number_option(
+        "fbbt_tol",
+        "Minimum bound improvement to keep FBBT iterating.",
+        0.0,
+        true,
+        1.0e-6,
+        "Per Belotti et al. (2010), FBBT may not converge finitely \
+         even on linear constraints, so termination is tolerance-based: \
+         a sweep that produces no per-variable improvement above this \
+         threshold stops the outer loop.",
+    )?;
+
+    reg.add_bounded_integer_option(
+        "fbbt_max_iter",
+        "Outer-sweep cap for FBBT.",
+        1,
+        100,
+        10,
+        "Hard ceiling on the number of FBBT sweeps over all \
+         constraints. The outer loop terminates earlier as soon as a \
+         sweep produces no tightening above `fbbt_tol`.",
+    )?;
+
+    reg.add_lower_bounded_integer_option(
+        "fbbt_max_constraints",
+        "Per-sweep cap on the number of constraints FBBT inspects.",
+        0,
+        0,
+        "Useful as a wall-time guard on very large problems where the \
+         first few constraints carry most of the tightening. `0` means \
+         unlimited.",
     )?;
 
     reg.set_registering_category("");
