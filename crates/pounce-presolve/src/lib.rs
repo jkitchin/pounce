@@ -439,6 +439,13 @@ impl PresolveTnlp {
                 }
                 reduction_stack.push(frame);
             }
+            // When `presolve_auxiliary_diagnostics=yes`, emit the
+            // summary to stderr. This is a low-overhead drop-in for
+            // the journalist wiring described in the design doc;
+            // upgrading to the real journalist is a follow-up.
+            if self.opts.auxiliary_diagnostics {
+                eprintln!("{}", plan.diagnostics);
+            }
             plan.diagnostics
         } else {
             AuxiliaryPreprocessingDiagnostics::default()
@@ -1305,5 +1312,25 @@ mod tests {
         assert_eq!(info.m, 2);
         let diag = wrapped.auxiliary_diagnostics();
         assert_eq!(diag.blocks_eliminated, 0);
+    }
+
+    /// Smoke test: turning on `presolve_auxiliary_diagnostics` still
+    /// produces a correct elimination. We can't easily capture
+    /// stderr from inside a #[test], but we can verify the option
+    /// path doesn't break the orchestrator.
+    #[test]
+    fn phase0_via_tnlp_diagnostics_flag_does_not_break_solve() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoVarSquareEq));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_diagnostics: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.m, 0);
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 1);
     }
 }

@@ -117,6 +117,15 @@ Per-stage timings (`stage_time_ms.incidence_ms` /
 `block_solve_ms` / `residual_check_ms`) and per-class accept counts
 are also available.
 
+From the command line, set `presolve_auxiliary_diagnostics=yes` to
+have the same summary emitted to stderr automatically after every
+Phase-0 pass:
+
+```sh
+pounce problem.nl presolve=yes presolve_auxiliary=yes \
+  presolve_auxiliary_diagnostics=yes
+```
+
 ## Limitations (v1)
 
 The current implementation eliminates **linear blocks only**. Blocks
