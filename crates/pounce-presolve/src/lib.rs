@@ -426,7 +426,13 @@ impl PresolveTnlp {
             let mut adapter = TnlpCallbackAdapter {
                 inner: Rc::clone(&self.inner),
             };
-            let plan = auxiliary::run_auxiliary_phase0(&self.opts, &probe_view, Some(&mut adapter));
+            let mut large_solver = block_solve::RelaxedNewtonSolver;
+            let plan = auxiliary::run_auxiliary_phase0(
+                &self.opts,
+                &probe_view,
+                Some(&mut adapter),
+                Some(&mut large_solver),
+            );
             if let Some(frame) = plan.frame {
                 // Clamp fixed variables.
                 for (k, &i) in frame.fixed_vars.iter().enumerate() {

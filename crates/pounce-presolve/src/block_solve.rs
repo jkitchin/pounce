@@ -90,6 +90,53 @@ pub trait BlockSolver {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DampedNewtonSolver;
 
+/// Solver for blocks exceeding `auxiliary_max_block_dim`. The
+/// orchestrator falls through to this when the lightweight Newton
+/// rejects a block as too large.
+///
+/// PR 11 ships [`RelaxedNewtonSolver`] as the default impl — same
+/// algorithm as `DampedNewtonSolver` but with a higher dimension
+/// cap and more iterations. The architectural seam is what matters:
+/// a future `pounce-algorithm`-side impl can drop in here without
+/// touching the orchestrator.
+pub trait LargeBlockSolver {
+    fn solve_large(
+        &mut self,
+        x0: &[Number],
+        eqs: &mut dyn BlockEquations,
+        options: &BlockSolveOptions,
+    ) -> Result<BlockSolveOutcome, BlockSolveError>;
+}
+
+/// Default [`LargeBlockSolver`]: same damped Newton, looser limits
+/// (`max_dim = 64`, `max_iter = 200`, `min_step = 1e-10`).
+/// Handles "well-behaved but too-big" blocks. Diverges-out-of-the-box
+/// blocks need the real IPM-backed solver from `pounce-algorithm`,
+/// tracked as a follow-up.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RelaxedNewtonSolver;
+
+impl LargeBlockSolver for RelaxedNewtonSolver {
+    fn solve_large(
+        &mut self,
+        x0: &[Number],
+        eqs: &mut dyn BlockEquations,
+        options: &BlockSolveOptions,
+    ) -> Result<BlockSolveOutcome, BlockSolveError> {
+        // Inherit the caller's `tol` but loosen the iteration and
+        // dimension caps. The `max_dim` ceiling on the relaxed path
+        // is the real switch; without bumping it, Newton would
+        // reject before the line-search budget matters.
+        let relaxed = BlockSolveOptions {
+            tol: options.tol,
+            max_iter: options.max_iter.max(200),
+            min_step: options.min_step.min(1e-10),
+            max_dim: options.max_dim.max(64),
+        };
+        DampedNewtonSolver.solve(x0, eqs, &relaxed)
+    }
+}
+
 impl BlockSolver for DampedNewtonSolver {
     /// Solve `F(x) = 0` for a small block, starting from `x0`.
     ///
@@ -313,6 +360,64 @@ mod tests {
         let mut a = vec![1.0, 2.0, 2.0, 4.0];
         let result = lu_factor_partial_pivot(&mut a, 2);
         assert!(result.is_err());
+    }
+
+    // -------- LargeBlockSolver -----------------------------------------
+
+    #[test]
+    fn relaxed_newton_solves_10_var_linear() {
+        // 10×10 identity-like system. The default DampedNewtonSolver
+        // rejects this with `TooLarge` because n=10 > max_dim=8;
+        // RelaxedNewtonSolver bumps max_dim and solves to within tol.
+        let n = 10;
+        let mut a = vec![0.0; n * n];
+        let mut b = vec![0.0; n];
+        for i in 0..n {
+            a[i * n + i] = 2.0;
+            b[i] = (i + 1) as Number;
+        }
+        struct Lin {
+            a: Vec<Number>,
+            b: Vec<Number>,
+            n: usize,
+        }
+        impl BlockEquations for Lin {
+            fn dim(&self) -> usize {
+                self.n
+            }
+            fn eval(&mut self, x: &[Number], f: &mut [Number]) -> bool {
+                for i in 0..self.n {
+                    let mut s = -self.b[i];
+                    for j in 0..self.n {
+                        s += self.a[i * self.n + j] * x[j];
+                    }
+                    f[i] = s;
+                }
+                true
+            }
+            fn jacobian(&mut self, _x: &[Number], j: &mut [Number]) -> bool {
+                j.copy_from_slice(&self.a);
+                true
+            }
+        }
+        let mut eqs = Lin { a, b, n };
+        // Caller-side options keep max_dim at 8 (the default);
+        // RelaxedNewtonSolver relaxes internally.
+        let opts = BlockSolveOptions::default();
+
+        // First: confirm the default solver rejects.
+        let lightweight_err = DampedNewtonSolver
+            .solve(&vec![0.0; n], &mut eqs, &opts)
+            .expect_err("default should reject 10-dim block");
+        assert_eq!(lightweight_err, BlockSolveError::TooLarge);
+
+        // Now: RelaxedNewtonSolver solves it.
+        let out = RelaxedNewtonSolver
+            .solve_large(&vec![0.0; n], &mut eqs, &opts)
+            .expect("relaxed solver handles 10-dim");
+        for i in 0..n {
+            assert!((out.x[i] - (i + 1) as Number / 2.0).abs() < 1e-10);
+        }
     }
 
     // -------- Newton solver --------------------------------------------
