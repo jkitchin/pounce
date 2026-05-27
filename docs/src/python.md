@@ -89,4 +89,6 @@ function theorem applied to the KKT conditions.
 The notebooks under
 [`python/notebooks/`](https://github.com/jkitchin/pounce/tree/main/python/notebooks)
 work through getting started, JAX autodiff, implicit differentiation,
-sensitivity analysis, and the Pyomo integration.
+sensitivity analysis, the Pyomo integration, and
+[NLP scaling](https://github.com/jkitchin/pounce/blob/main/python/notebooks/07_scaling.ipynb)
+(`set_problem_scaling` + `nlp_scaling_method=user-scaling`).

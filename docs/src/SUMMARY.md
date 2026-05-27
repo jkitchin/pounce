@@ -25,6 +25,7 @@
 # Reference
 
 - [Algorithm & Workspace](algorithm.md)
+- [Scaling](scaling.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)
 - [Benchmarks](benchmarks.md)
 

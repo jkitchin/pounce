@@ -26,9 +26,11 @@
 use numpy::{PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, ScalingRequest, Solution,
+    SparsityRequest, StartingPoint, TNLP,
 };
+
+use crate::problem::UserScaling;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -63,6 +65,11 @@ pub(crate) struct PyTnlpInit {
     /// `true` when the user provided an `hessian` method; otherwise the
     /// solver falls back to L-BFGS.
     pub has_hessian: bool,
+    /// User-supplied NLP scaling installed via
+    /// `Problem.set_problem_scaling`. Consulted by
+    /// [`TNLP::get_scaling_parameters`] only; the IPM picks it up when
+    /// `nlp_scaling_method=user-scaling` is set.
+    pub user_scaling: Option<UserScaling>,
     /// Final-iterate capture targets. Populated by
     /// [`TNLP::finalize_solution`].
     pub final_x: Vec<Number>,
@@ -177,6 +184,34 @@ impl TNLP for PyTnlp {
             if let Some(z) = &self.state.z_u0 {
                 sp.z_u.copy_from_slice(z);
             }
+        }
+        true
+    }
+
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        let Some(s) = self.state.user_scaling.as_ref() else {
+            return false;
+        };
+        *req.obj_scaling = s.obj;
+        if let Some(x) = s.x_scaling.as_ref() {
+            if x.len() == req.x_scaling.len() {
+                req.x_scaling.copy_from_slice(x);
+                *req.use_x_scaling = true;
+            } else {
+                *req.use_x_scaling = false;
+            }
+        } else {
+            *req.use_x_scaling = false;
+        }
+        if let Some(g) = s.g_scaling.as_ref() {
+            if g.len() == req.g_scaling.len() {
+                req.g_scaling.copy_from_slice(g);
+                *req.use_g_scaling = true;
+            } else {
+                *req.use_g_scaling = false;
+            }
+        } else {
+            *req.use_g_scaling = false;
         }
         true
     }

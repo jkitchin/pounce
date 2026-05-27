@@ -35,6 +35,10 @@ For the full upstream option catalogue, see the
 [Ipopt options reference](https://coin-or.github.io/Ipopt/OPTIONS.html);
 POUNCE reuses those names.
 
+For scaling-specific options (`nlp_scaling_method`, target-gradient
+overrides, `linear_system_scaling`), see the [Scaling](scaling.md)
+reference page.
+
 ## ℓ₁ penalty-barrier wrapper options
 
 These tune the degenerate-NLP wrapper described in

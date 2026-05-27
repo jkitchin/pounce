@@ -59,6 +59,21 @@ pub struct PyProblem {
     /// `solve` when the SQP path produces one. Retrieved via
     /// `get_working_set()`.
     last_working_set: Option<pounce_qp::WorkingSet>,
+    /// User-supplied scaling installed via `set_problem_scaling`.
+    /// Forwarded to `PyTnlpInit` on `prepare`, and from there into
+    /// `TNLP::get_scaling_parameters`. Only consulted by the IPM when
+    /// `nlp_scaling_method=user-scaling`.
+    user_scaling: Option<UserScaling>,
+}
+
+/// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
+/// in the C interface. `x_scaling` / `g_scaling` are `None` when the
+/// user wants that axis left unscaled.
+#[derive(Clone)]
+pub(crate) struct UserScaling {
+    pub(crate) obj: Number,
+    pub(crate) x_scaling: Option<Vec<Number>>,
+    pub(crate) g_scaling: Option<Vec<Number>>,
 }
 
 #[pymethods]
@@ -121,6 +136,7 @@ impl PyProblem {
             has_hessian,
             pending_working_set: None,
             last_working_set: None,
+            user_scaling: None,
         })
     }
 
@@ -288,6 +304,50 @@ impl PyProblem {
         self.last_working_set
             .as_ref()
             .map(|ws| encode_working_set(py, ws))
+    }
+
+    /// Install user-supplied NLP scaling. Mirrors
+    /// `SetIpoptProblemScaling` in the C interface.
+    ///
+    /// * `obj_scaling` — multiplier applied to the objective (and the
+    ///   final reported value is divided back out).
+    /// * `x_scaling` — length-`n` per-variable factors, or `None` to
+    ///   leave variable scaling off. (Note: the algorithm currently
+    ///   accepts this channel but does not yet act on it; only
+    ///   `obj_scaling` and `g_scaling` affect the IPM. See
+    ///   `docs/src/scaling.md`.)
+    /// * `g_scaling` — length-`m` per-constraint factors, or `None`
+    ///   to leave constraint scaling off.
+    ///
+    /// The scaling only takes effect when `nlp_scaling_method` is set
+    /// to `"user-scaling"`. Call once before `solve()`; cleared by
+    /// `clear_problem_scaling()`.
+    #[pyo3(signature = (obj_scaling, x_scaling=None, g_scaling=None))]
+    fn set_problem_scaling(
+        &mut self,
+        obj_scaling: Number,
+        x_scaling: Option<Py<PyAny>>,
+        g_scaling: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let x = x_scaling
+            .map(|v| extract_f64_vec(&v, self.n as usize, "x_scaling"))
+            .transpose()?;
+        let g = g_scaling
+            .map(|v| extract_f64_vec(&v, self.m as usize, "g_scaling"))
+            .transpose()?;
+        self.user_scaling = Some(UserScaling {
+            obj: obj_scaling,
+            x_scaling: x,
+            g_scaling: g,
+        });
+        Ok(())
+    }
+
+    /// Drop any installed user scaling. The next `solve()` will rely
+    /// on the active `nlp_scaling_method` (the default `"gradient-based"`
+    /// computes scales from the starting-point gradients).
+    fn clear_problem_scaling(&mut self) {
+        self.user_scaling = None;
     }
 
     /// Solve, then run a parametric sensitivity step at the converged
@@ -549,6 +609,7 @@ impl PyProblem {
             hess_rows,
             hess_cols,
             has_hessian: self.has_hessian,
+            user_scaling: self.user_scaling.clone(),
             final_x: vec![0.0; n],
             final_z_l: vec![0.0; n],
             final_z_u: vec![0.0; n],
