@@ -48,6 +48,10 @@ pub mod options;
 pub mod reduction_frame;
 pub mod redundant;
 
+pub use block_solve::{
+    BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
+    DampedNewtonSolver,
+};
 pub use bound_tighten::{tighten_bounds, LinearRow, TightenReport, INF_BOUND};
 pub use btf::{BlockTriangularBlock, BlockTriangularForm};
 pub use components::{SquareComponent, SquareComponents};
