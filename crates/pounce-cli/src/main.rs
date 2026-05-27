@@ -21,7 +21,8 @@ use pounce_cli::nl_writer;
 use pounce_cli::print;
 use pounce_cli::sens;
 use pounce_cli::solve_report::{
-    write_report_file, InputDescriptor, ReportBuilder, ReportDetail, SolutionSuffix,
+    status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
+    SolutionSuffix,
 };
 use pounce_common::diagnostics::{
     DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
@@ -726,36 +727,6 @@ fn print_about() {
     println!();
 
     println!("Report bugs at {}/issues", env!("CARGO_PKG_REPOSITORY"));
-}
-
-/// Map a pounce `ApplicationReturnStatus` onto an AMPL-style
-/// `solve_result_num` per Gay 2005 (Hooking Your Solver to AMPL §5,
-/// p. 23 table): 0 = solved, 100s = warning, 200s = infeasible,
-/// 400s = limit reached, 500s = failure.
-fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
-    use ApplicationReturnStatus::*;
-    match status {
-        SolveSucceeded => 0,
-        SolvedToAcceptableLevel => 100,
-        FeasiblePointFound => 100,
-        InfeasibleProblemDetected => 200,
-        SearchDirectionBecomesTooSmall => 400,
-        DivergingIterates => 401,
-        MaximumIterationsExceeded => 400,
-        MaximumCpuTimeExceeded => 400,
-        MaximumWallTimeExceeded => 400,
-        UserRequestedStop => 502,
-        RestorationFailed => 500,
-        ErrorInStepComputation => 500,
-        InvalidNumberDetected => 500,
-        InternalError => 500,
-        UnrecoverableException => 500,
-        NonIpoptExceptionThrown => 500,
-        InsufficientMemory => 503,
-        InvalidProblemDefinition => 504,
-        InvalidOption => 504,
-        NotEnoughDegreesOfFreedom => 504,
-    }
 }
 
 /// Default backend factory used by the restoration sub-IPM. Mirrors

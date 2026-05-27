@@ -304,10 +304,13 @@ version = "0.2.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
+ "pounce-linsol",
  "pounce-nlp",
  "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",
+ "pounce-solve-report",
+ "serde_json",
 ]
 
 [[package]]
@@ -326,6 +329,7 @@ dependencies = [
  "pounce-presolve",
  "pounce-restoration",
  "pounce-sensitivity",
+ "pounce-solve-report",
  "serde",
  "serde_json",
 ]
@@ -465,6 +469,17 @@ dependencies = [
  "pounce-common",
  "pounce-linalg",
  "pounce-nlp",
+]
+
+[[package]]
+name = "pounce-solve-report"
+version = "0.2.0"
+dependencies = [
+ "pounce-common",
+ "pounce-linsol",
+ "pounce-nlp",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ members = [
     "crates/pounce-l1penalty",
     "crates/pounce-qp",
     "crates/pounce-sensitivity",
+    "crates/pounce-solve-report",
     "crates/pounce-cinterface",
     "crates/pounce-py",
     "crates/pounce-cli",
@@ -40,6 +41,7 @@ default-members = [
     "crates/pounce-l1penalty",
     "crates/pounce-qp",
     "crates/pounce-sensitivity",
+    "crates/pounce-solve-report",
     "crates/pounce-cinterface",
     "crates/pounce-cli",
     "crates/pounce-studio-core",
@@ -72,6 +74,7 @@ pounce-presolve = { path = "crates/pounce-presolve", version = "0.2.0" }
 pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.2.0" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.2.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.2.0" }
+pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.2.0" }
 feral = "0.7.0"
 
 [workspace.lints.rust]

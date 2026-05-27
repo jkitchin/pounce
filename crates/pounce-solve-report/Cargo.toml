@@ -1,0 +1,20 @@
+[package]
+name = "pounce-solve-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Machine-readable `pounce.solve-report/v1` JSON writer (shared by pounce-cli and pounce-cinterface)."
+keywords = ["ipopt", "solver", "report", "json", "fair"]
+categories = ["mathematics", "science"]
+
+[dependencies]
+pounce-common.workspace = true
+pounce-linsol.workspace = true
+pounce-nlp = { workspace = true, features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
