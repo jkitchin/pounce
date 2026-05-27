@@ -79,6 +79,10 @@ ifeq ($(UNAME),Darwin)
 		@loader_path/$(POUNCE_LIB) \
 		$(GAMS_PATH)/$(TARGET)
 	install_name_tool -id @loader_path/$(TARGET) $(GAMS_PATH)/$(TARGET)
+	# install_name_tool invalidates the linker-signed ad-hoc signature, so
+	# macOS will SIGKILL on dlopen ("Code Signature Invalid"). Re-sign ad-hoc.
+	codesign --force --sign - $(GAMS_PATH)/$(TARGET)
+	codesign --force --sign - $(GAMS_PATH)/$(POUNCE_LIB)
 endif
 	@grep -q '^POUNCE ' $(GAMS_PATH)/gmscmpun.txt 2>/dev/null || \
 		(cp $(GAMS_PATH)/gmscmpun.txt $(GAMS_PATH)/gmscmpun.txt.bak && \

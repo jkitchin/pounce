@@ -248,8 +248,22 @@ static bool gams_eval_h(ipindex n, ipnumber *x, bool new_x,
  *   sqp_state_file <path>   §7.4(b) persistent working-set state
  *                           file (binary, see read_state_file /
  *                           write_state_file below).
+ *
+ *   json_output <path>      Where to write a `pounce.solve-report/v1`
+ *                           JSON file after the solve completes.
+ *                           Empty = no report. Routed to the new
+ *                           IpoptWriteSolveReport entrypoint in
+ *                           pounce-cinterface (gh: ex8_3_10 diag).
+ *
+ *   json_detail summary|full
+ *                           Verbosity for the JSON report. Defaults
+ *                           to "full" so the per-iter trajectory is
+ *                           captured; the studio MCP `diagnose` /
+ *                           `find_stalls` tools need that level.
  */
 static char g_sqp_state_file[512] = "";
+static char g_json_output[1024] = "";
+static char g_json_detail[16] = "full";
 
 static void parse_option_file(IpoptProblem nlp, const char *filename,
                               gevHandle_t gev)
@@ -261,6 +275,11 @@ static void parse_option_file(IpoptProblem nlp, const char *filename,
      * §7.4(b)). An absent `sqp_state_file` key falls back to the
      * §7.4(a) marginal-based reconstruction. */
     g_sqp_state_file[0] = '\0';
+    g_json_output[0] = '\0';
+    /* json_detail default is "full" — per-iter trajectory needed by
+     * the studio MCP post-mortem tools. */
+    strncpy(g_json_detail, "full", sizeof(g_json_detail) - 1);
+    g_json_detail[sizeof(g_json_detail) - 1] = '\0';
 
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
@@ -284,6 +303,26 @@ static void parse_option_file(IpoptProblem nlp, const char *filename,
         if (strcmp(key, "sqp_state_file") == 0) {
             strncpy(g_sqp_state_file, val, sizeof(g_sqp_state_file) - 1);
             g_sqp_state_file[sizeof(g_sqp_state_file) - 1] = '\0';
+            gevLogStat(gev, line);
+            continue;
+        }
+        if (strcmp(key, "json_output") == 0) {
+            strncpy(g_json_output, val, sizeof(g_json_output) - 1);
+            g_json_output[sizeof(g_json_output) - 1] = '\0';
+            gevLogStat(gev, line);
+            continue;
+        }
+        if (strcmp(key, "json_detail") == 0) {
+            if (strcmp(val, "summary") != 0 && strcmp(val, "full") != 0) {
+                char w[256];
+                snprintf(w, sizeof(w),
+                         "*** Warning: json_detail '%s' not in {summary,full}; using 'full'",
+                         val);
+                gevLogStat(gev, w);
+            } else {
+                strncpy(g_json_detail, val, sizeof(g_json_detail) - 1);
+                g_json_detail[sizeof(g_json_detail) - 1] = '\0';
+            }
             gevLogStat(gev, line);
             continue;
         }
@@ -864,6 +903,17 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     }
 
     /* ---------------------------------------------------------------
+     * Enable per-iteration trajectory capture when a JSON report has
+     * been requested. Must precede IpoptSolve; the per-iter trace is
+     * what `diagnose` / `find_stalls` / `convergence_trace` operate
+     * on. Skipping this when `json_output` is unset keeps the IPM
+     * core free of capture overhead on production runs.
+     * --------------------------------------------------------------- */
+    if (g_json_output[0]) {
+        IpoptEnableIterHistory(nlp);
+    }
+
+    /* ---------------------------------------------------------------
      * Allocate solution arrays and set initial point
      * --------------------------------------------------------------- */
     x       = (double *)malloc(n * sizeof(double));
@@ -1099,6 +1149,30 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
                      "Total seconds in POUNCE: %.3f", wall_time);
             gevLogStat(gev, msg);
             gevLogStat(gev, "");
+        }
+
+        /* -----------------------------------------------------------
+         * Emit pounce.solve-report/v1 JSON when requested.
+         *
+         * Opt-in via `json_output <path>` in pounce.opt. Reuses the
+         * same cinterface entrypoint the studio MCP server's post-
+         * mortem tools (diagnose / find_stalls / convergence_trace)
+         * expect — so a GAMS-driven failure can be inspected with
+         * the exact same workflow as a CLI run.
+         * ----------------------------------------------------------- */
+        if (g_json_output[0]) {
+            Bool wrote = IpoptWriteSolveReport(nlp, g_json_output,
+                                               g_json_detail);
+            if (wrote) {
+                snprintf(msg, sizeof(msg),
+                         "  Wrote JSON solve report to %s (detail=%s)",
+                         g_json_output, g_json_detail);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "*** Warning: failed to write JSON solve report to %s",
+                         g_json_output);
+            }
+            gevLogStat(gev, msg);
         }
 
         snprintf(msg, sizeof(msg),
