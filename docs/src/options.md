@@ -37,7 +37,9 @@ POUNCE reuses those names.
 
 For scaling-specific options (`nlp_scaling_method`, target-gradient
 overrides, `linear_system_scaling`), see the [Scaling](scaling.md)
-reference page.
+reference page. For nonlinear bound tightening (`presolve_fbbt`,
+`fbbt_tol`, `fbbt_max_iter`, `fbbt_max_constraints`), see the
+[FBBT](fbbt.md) reference page.
 
 ## ℓ₁ penalty-barrier wrapper options
 
@@ -74,6 +76,20 @@ structurally. All are off by default — set the master switch first:
 | `presolve_bound_mult_init_val`          | `1.0`   | Value used by Phase 4 for those warm-start hints.                              |
 | `presolve_max_passes`                   | `3`     | Fixed-point iteration cap across the bound-tightening passes.                  |
 | `presolve_print_level`                  | `0`     | Per-pass verbosity (0 silent, 5 per-pass, 8 per-transformation).               |
+
+### Feasibility-based bound tightening (Phase 1b)
+
+Interval-arithmetic propagation through nonlinear constraint
+expression DAGs (see [FBBT](fbbt.md)). Available today for
+`.nl`-loaded problems via `NlTnlp`; other TNLP sources opt out
+silently.
+
+| Option                  | Default | Meaning                                                                                  |
+|-------------------------|---------|------------------------------------------------------------------------------------------|
+| `presolve_fbbt`         | `no`    | Master switch. Requires `presolve=yes` and an `ExpressionProvider`.                      |
+| `fbbt_tol`              | `1e-6`  | Minimum per-variable bound improvement to keep iterating.                                |
+| `fbbt_max_iter`         | `10`    | Outer-sweep cap.                                                                         |
+| `fbbt_max_constraints`  | `0`     | Per-sweep cap on constraints inspected (`0` = unlimited).                                |
 
 ### Auxiliary-equality preprocessing (Phase 0)
 

@@ -26,6 +26,7 @@
 
 - [Algorithm & Workspace](algorithm.md)
 - [Scaling](scaling.md)
+- [Feasibility-Based Bound Tightening](fbbt.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)
 - [Benchmarks](benchmarks.md)
 
