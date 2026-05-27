@@ -84,7 +84,18 @@ pub struct FeralSolverInterface {
 /// `POUNCE_FERAL_*` env vars to preserve the historic defaults.
 #[derive(Debug, Clone, Copy)]
 pub struct FeralConfig {
-    pub cascade_break: bool,
+    /// Tri-state. `None` (the pounce default) inherits whatever FERAL's
+    /// `NumericParams::default()` ships with — as of FERAL Phase B
+    /// (issue #55, commit 7554a78) that is CB armed with
+    /// `ratio = 0.5, eps = 1e-10` and a symbolic-time delay budget.
+    /// `Some(true)` explicitly arms with the same constants (matches
+    /// the FERAL default; useful when a caller wants the intent
+    /// recorded). `Some(false)` explicitly disarms by setting both
+    /// `cascade_break_ratio` and `cascade_break_eps` to `None`; this
+    /// is what enables FERAL's `DelayBudgetExceeded` path for non-root
+    /// cascade victims and should only be used to reproduce the
+    /// pre-Phase-B behaviour.
+    pub cascade_break: Option<bool>,
     pub fma: bool,
     pub refine: bool,
     /// Near-singularity trigger: if the smallest accepted D-block pivot
@@ -113,7 +124,7 @@ pub struct FeralConfig {
 impl Default for FeralConfig {
     fn default() -> Self {
         Self {
-            cascade_break: false,
+            cascade_break: None,
             fma: false,
             refine: true,
             // MA57 `CNTL(2)` default — an absolute small-pivot
@@ -133,10 +144,11 @@ impl FeralConfig {
     /// consult (tests, legacy callers).
     pub fn from_env() -> Self {
         Self {
-            cascade_break: matches!(
-                std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref(),
-                Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
-            ),
+            cascade_break: match std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref() {
+                Ok("1") | Ok("on") | Ok("true") | Ok("yes") => Some(true),
+                Ok("0") | Ok("off") | Ok("false") | Ok("no") => Some(false),
+                _ => None,
+            },
             fma: matches!(
                 std::env::var("POUNCE_FERAL_FMA").as_deref(),
                 Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
@@ -167,17 +179,19 @@ impl FeralSolverInterface {
     }
 
     /// Construct with explicit configuration. Cascade-break
-    /// (`ratio=0.5, eps=1e-10`) was on by default until the
-    /// issue-17/issue-18 inertia investigations: it accelerates IPM
-    /// KKT matrices with cascade-overloaded supernodes
-    /// (pinene_3200_0009: 33ms with cb on vs 94s with cb off, feral
-    /// 585d739) but introduces WrongInertia loops on others
-    /// (robot_1600 iter-3; NARX_CFy iters 1+, ~250 spurious
-    /// WrongInertia status records — see feral journal 2026-05-16
-    /// 21:30). The C-API now defaults cb off (da23d13) for the same
-    /// reason. Default here matches that; per-problem `.opt` files
-    /// (e.g. `benchmarks/mittelmann/profiles/pinene_3200.opt`) flip
-    /// `feral_cascade_break yes` for problems where cb is a net win.
+    /// (`ratio=0.5, eps=1e-10`) was off by default in pounce for a
+    /// period after the issue-17/issue-18 inertia investigations,
+    /// when the FERAL Bunch-Kaufman heuristic could not bound the
+    /// per-supernode delayed-pivot catchment and spurious
+    /// `WrongInertia` returns on borderline iterates (robot_1600
+    /// iter-3, NARX_CFy iters 1+, ~250 spurious records — feral
+    /// journal 2026-05-16 21:30) cost more than CB's per-factor
+    /// speedup (pinene_3200_0009: 33 ms cb-on vs 94 s cb-off).
+    /// FERAL issue #55 Phase B (commit 7554a78) bounds the catchment
+    /// at symbolic-analysis time and arms CB out of the box, so
+    /// pounce now inherits the FERAL default (CB on) when the
+    /// `feral_cascade_break` option is left unset. See
+    /// [`FeralConfig::cascade_break`] for the tri-state semantics.
     pub fn with_config(cfg: FeralConfig) -> Self {
         // `POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` overrides feral's parallel-
         // dispatch flop gate (feral#19, default 10^8). `0` fires the
@@ -198,13 +212,31 @@ impl FeralSolverInterface {
         // with `FERAL_PIVTOL` env var as a fallback read in
         // `FeralConfig::from_env`.
         np.bk.pivot_threshold = cfg.pivtol;
-        let mut solver = if cfg.cascade_break {
-            Solver::with_params(np, SupernodeParams::default())
-                .with_cascade_break(0.5)
-                .with_cascade_break_eps(1e-10)
-        } else {
-            Solver::with_params(np, SupernodeParams::default())
-        };
+        // Cascade-break (FERAL issue #55 Phase B, commit 7554a78):
+        // `NumericParams::default()` now arms CB with `ratio = 0.5,
+        // eps = 1e-10` and bounds delayed-pivot catchment via a
+        // symbolic-time delay budget. Pounce no longer disables CB by
+        // default — the tri-state `cfg.cascade_break` only intervenes
+        // when the caller explicitly set the option:
+        //   None        — leave `np` alone (inherit FERAL default = on)
+        //   Some(true)  — explicit re-arm (matches the default; no-op
+        //                 in behaviour, but records caller intent)
+        //   Some(false) — explicit disarm (re-enables FERAL's
+        //                 `DelayBudgetExceeded` path on non-root
+        //                 cascade victims; only meaningful for
+        //                 reproducing pre-Phase-B behaviour)
+        match cfg.cascade_break {
+            None => {}
+            Some(true) => {
+                np.cascade_break_ratio = Some(0.5);
+                np.cascade_break_eps = Some(1e-10);
+            }
+            Some(false) => {
+                np.cascade_break_ratio = None;
+                np.cascade_break_eps = None;
+            }
+        }
+        let mut solver = Solver::with_params(np, SupernodeParams::default());
         if matches!(
             std::env::var("FERAL_PARALLEL").as_deref(),
             Ok("0") | Ok("false") | Ok("off")
