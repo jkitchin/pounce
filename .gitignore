@@ -24,10 +24,12 @@
 !/benchmarks/BENCHMARK_REPORT.json
 !/benchmarks/cutest
 !/benchmarks/large_scale
+!/benchmarks/preprocessing
 !/benchmarks/scripts
 !/benchmarks/*/
 /benchmarks/*/*
 !/benchmarks/*/README.md
+!/benchmarks/preprocessing/*
 !/benchmarks/scripts/*
 # large_scale is a workspace member — its Cargo manifest and Rust
 # sources must be tracked even though `/benchmarks/*/*` excludes them

@@ -40,6 +40,28 @@ pub struct PresolveOptions {
     pub warm_z_bounds: bool,
     /// `presolve_bound_mult_init_val` — value used for those hints.
     pub bound_mult_init_val: Number,
+    /// `presolve_auxiliary` — master switch for the Phase-0
+    /// auxiliary-equality preprocessing pass (issue #53). When
+    /// `false` (the default), Phase 0 is a no-op even if the outer
+    /// `enabled` master switch is on.
+    pub auxiliary: bool,
+    /// `presolve_auxiliary_tol` — residual tolerance for accepting a
+    /// candidate block solve (full-space KKT residual after the
+    /// reduction must stay within this).
+    pub auxiliary_tol: Number,
+    /// `presolve_auxiliary_max_block_dim` — the lightweight Newton
+    /// solver only handles blocks up to this dimension. PR 11 lifts
+    /// this by injecting an IPM-backed fallback.
+    pub auxiliary_max_block_dim: Index,
+    /// `presolve_auxiliary_wall_time_fraction` — fraction of the
+    /// solver's overall wall-time budget Phase 0 is allowed to spend.
+    pub auxiliary_wall_time_fraction: Number,
+    /// `presolve_auxiliary_coupling` — which coupling classes are
+    /// eligible for elimination.
+    pub auxiliary_coupling: AuxiliaryCouplingPolicy,
+    /// `presolve_auxiliary_diagnostics` — emit the diagnostics struct
+    /// via the journalist.
+    pub auxiliary_diagnostics: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +71,21 @@ pub enum LicqAction {
     /// Set `l1_exact_penalty_barrier=yes` so the ℓ₁ wrapper handles
     /// the rank-deficient block. Interlocks with pounce#10.
     AutoL1,
+}
+
+/// Coupling-class gate for the auxiliary preprocessing pass. Mirrors
+/// ripopt's defaults: `Safe` eliminates only pure-equality blocks;
+/// `Aggressive` adds objective-coupled blocks as post-solve
+/// candidates; `None` disables elimination entirely (Phase 0 still
+/// runs and collects diagnostics).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxiliaryCouplingPolicy {
+    /// No elimination; useful for collecting diagnostics only.
+    None,
+    /// PureEquality blocks only.
+    Safe,
+    /// PureEquality + ObjectiveCoupled (post-solve only).
+    Aggressive,
 }
 
 impl PresolveOptions {
@@ -65,6 +102,12 @@ impl PresolveOptions {
             licq_action: LicqAction::Warn,
             warm_z_bounds: true,
             bound_mult_init_val: 1.0,
+            auxiliary: false,
+            auxiliary_tol: 1e-8,
+            auxiliary_max_block_dim: 8,
+            auxiliary_wall_time_fraction: 0.1,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            auxiliary_diagnostics: false,
         }
     }
 
@@ -93,6 +136,25 @@ impl PresolveOptions {
         let bound_mult_init_val = opts
             .get_numeric_value("presolve_bound_mult_init_val", "")?
             .0;
+        let auxiliary = opts.get_bool_value("presolve_auxiliary", "")?.0;
+        let auxiliary_tol = opts.get_numeric_value("presolve_auxiliary_tol", "")?.0;
+        let auxiliary_max_block_dim = opts
+            .get_integer_value("presolve_auxiliary_max_block_dim", "")?
+            .0;
+        let auxiliary_wall_time_fraction = opts
+            .get_numeric_value("presolve_auxiliary_wall_time_fraction", "")?
+            .0;
+        let auxiliary_coupling = match opts
+            .get_string_value("presolve_auxiliary_coupling", "")?
+            .0
+            .as_str()
+        {
+            "none" => AuxiliaryCouplingPolicy::None,
+            "aggressive" => AuxiliaryCouplingPolicy::Aggressive,
+            // "safe" or anything else (including the registered default).
+            _ => AuxiliaryCouplingPolicy::Safe,
+        };
+        let auxiliary_diagnostics = opts.get_bool_value("presolve_auxiliary_diagnostics", "")?.0;
         Ok(Self {
             enabled,
             bound_tightening,
@@ -104,6 +166,12 @@ impl PresolveOptions {
             licq_action,
             warm_z_bounds,
             bound_mult_init_val,
+            auxiliary,
+            auxiliary_tol,
+            auxiliary_max_block_dim,
+            auxiliary_wall_time_fraction,
+            auxiliary_coupling,
+            auxiliary_diagnostics,
         })
     }
 }
@@ -213,6 +281,80 @@ pub fn register_options(reg: &RegisteredOptions) -> Result<(), SolverException> 
         "Only consulted when presolve_warm_z_bounds=yes.",
     )?;
 
+    // --- Auxiliary-equality preprocessing (Phase 0, issue #53) ------------
+
+    reg.add_bool_option(
+        "presolve_auxiliary",
+        "Master switch for auxiliary-equality preprocessing (Phase 0).",
+        false,
+        "Structural NLP preprocessing: incidence graph → bipartite \
+         matching → Dulmage-Mendelsohn → block-triangular form → \
+         per-block solve → postsolve multiplier recovery. Defaults \
+         off; will land incrementally across pounce#53.",
+    )?;
+
+    reg.add_lower_bounded_number_option(
+        "presolve_auxiliary_tol",
+        "Residual tolerance for accepting an auxiliary block solve.",
+        0.0,
+        true,
+        1e-8,
+        "Full-space KKT residual after the candidate reduction must \
+         stay within this; otherwise the reduction is rejected.",
+    )?;
+
+    reg.add_bounded_integer_option(
+        "presolve_auxiliary_max_block_dim",
+        "Largest block the lightweight Newton solver will attempt.",
+        1,
+        1024,
+        8,
+        "Blocks above this dimension fall through to the BlockSolver \
+         trait (IPM-backed fallback lands in PR 11 of pounce#53).",
+    )?;
+
+    reg.add_bounded_number_option(
+        "presolve_auxiliary_wall_time_fraction",
+        "Fraction of overall wall-time budget Phase 0 may spend.",
+        0.0,
+        true,
+        1.0,
+        false,
+        0.1,
+        "When the solver enforces a wall-time limit, Phase 0 is given \
+         this fraction of the budget; honoured by PR 8 onwards.",
+    )?;
+
+    reg.add_string_option(
+        "presolve_auxiliary_coupling",
+        "Coupling-class gate for auxiliary block elimination.",
+        "safe",
+        &[
+            (
+                "none",
+                "Run Phase 0 for diagnostics only; eliminate nothing.",
+            ),
+            (
+                "safe",
+                "Eliminate only PureEquality blocks (matches ripopt default).",
+            ),
+            (
+                "aggressive",
+                "Also accept ObjectiveCoupled blocks as postsolve candidates.",
+            ),
+        ],
+        "Only consulted when presolve_auxiliary=yes.",
+    )?;
+
+    reg.add_bool_option(
+        "presolve_auxiliary_diagnostics",
+        "Emit the auxiliary-preprocessing diagnostics summary.",
+        false,
+        "When yes, the diagnostics struct (block counts, timings, \
+         rejection reasons) is published via the journalist after \
+         Phase 0 runs.",
+    )?;
+
     reg.set_registering_category("");
     Ok(())
 }
@@ -266,6 +408,51 @@ mod tests {
         // Registered enum option only accepts "warn" / "auto_l1".
         let err = opts
             .set_string_value("presolve_licq_action", "bogus", true, false)
+            .err();
+        assert!(err.is_some(), "invalid enum should be rejected at set time");
+    }
+
+    #[test]
+    fn auxiliary_defaults_round_trip() {
+        let reg = reg_with_presolve();
+        let opts = OptionsList::with_registered(reg);
+        let p = PresolveOptions::from_options_list(&opts).unwrap();
+        assert!(!p.auxiliary);
+        assert_eq!(p.auxiliary_tol, 1e-8);
+        assert_eq!(p.auxiliary_max_block_dim, 8);
+        assert_eq!(p.auxiliary_wall_time_fraction, 0.1);
+        assert_eq!(p.auxiliary_coupling, AuxiliaryCouplingPolicy::Safe);
+        assert!(!p.auxiliary_diagnostics);
+    }
+
+    #[test]
+    fn auxiliary_master_switch_round_trips() {
+        let reg = reg_with_presolve();
+        let mut opts = OptionsList::with_registered(reg);
+        opts.set_string_value("presolve_auxiliary", "yes", true, false)
+            .unwrap();
+        opts.set_string_value("presolve_auxiliary_coupling", "aggressive", true, false)
+            .unwrap();
+        opts.set_numeric_value("presolve_auxiliary_tol", 1e-10, true, false)
+            .unwrap();
+        opts.set_integer_value("presolve_auxiliary_max_block_dim", 16, true, false)
+            .unwrap();
+        opts.set_string_value("presolve_auxiliary_diagnostics", "yes", true, false)
+            .unwrap();
+        let p = PresolveOptions::from_options_list(&opts).unwrap();
+        assert!(p.auxiliary);
+        assert_eq!(p.auxiliary_coupling, AuxiliaryCouplingPolicy::Aggressive);
+        assert_eq!(p.auxiliary_tol, 1e-10);
+        assert_eq!(p.auxiliary_max_block_dim, 16);
+        assert!(p.auxiliary_diagnostics);
+    }
+
+    #[test]
+    fn invalid_auxiliary_coupling_rejected_at_set_time() {
+        let reg = reg_with_presolve();
+        let mut opts = OptionsList::with_registered(reg);
+        let err = opts
+            .set_string_value("presolve_auxiliary_coupling", "bogus", true, false)
             .err();
         assert!(err.is_some(), "invalid enum should be rejected at set time");
     }

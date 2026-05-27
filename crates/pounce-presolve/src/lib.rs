@@ -33,14 +33,37 @@ use pounce_nlp::tnlp::{
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
+pub mod auxiliary;
+pub mod block_solve;
 pub mod bound_tighten;
+pub mod btf;
+pub mod components;
+pub mod coupling;
+pub mod diagnostics;
+pub mod dulmage_mendelsohn;
+pub mod incidence;
+pub mod inequality_projection;
 pub mod licq;
+pub mod matching;
 pub mod options;
+pub mod reduction_frame;
 pub mod redundant;
+pub mod trivial_elim;
 
+pub use block_solve::{
+    BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
+    DampedNewtonSolver,
+};
 pub use bound_tighten::{tighten_bounds, LinearRow, TightenReport, INF_BOUND};
+pub use btf::{BlockTriangularBlock, BlockTriangularForm};
+pub use components::{SquareComponent, SquareComponents};
+pub use coupling::{classify_block, objective_gradient_support, AuxiliaryCouplingClass};
+pub use diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReason};
+pub use dulmage_mendelsohn::{DMPart, DulmageMendelsohnPartition};
+pub use incidence::{EqualityIncidence, InequalityIncidence, ProbeView};
 pub use licq::{licq_check, EqRow, LicqVerdict};
-pub use options::{register_options, LicqAction, PresolveOptions};
+pub use options::{register_options, AuxiliaryCouplingPolicy, LicqAction, PresolveOptions};
+pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
 
 /// Errors that can arise while building a presolved TNLP.
@@ -141,6 +164,13 @@ struct PresolveState {
     scratch_g: Vec<Number>,
     scratch_jac: Vec<Number>,
     scratch_lambda: Vec<Number>,
+
+    /// Phase 0 (issue #53) diagnostics. Always present; defaulted to
+    /// zeros when the master switch is off.
+    aux_diagnostics: AuxiliaryPreprocessingDiagnostics,
+    /// Phase 0 postsolve stack. Empty until PR 7 wires real frames.
+    #[allow(dead_code)]
+    reduction_stack: ReductionStack,
 }
 
 impl PresolveTnlp {
@@ -188,6 +218,17 @@ impl PresolveTnlp {
         self.state
             .as_ref()
             .map(|s| (&s.z_l_warm[..], &s.z_u_warm[..]))
+    }
+
+    /// Phase 0 (issue #53) summary. Returns a zero-valued struct
+    /// until init has run; afterwards, populated by
+    /// [`auxiliary::run_auxiliary_phase0`]. PR 1 always returns
+    /// zeros even with the master switch on.
+    pub fn auxiliary_diagnostics(&self) -> AuxiliaryPreprocessingDiagnostics {
+        self.state
+            .as_ref()
+            .map(|s| s.aux_diagnostics.clone())
+            .unwrap_or_default()
     }
 
     /// Lazy initialization: pull inner dims, bounds, linearity tags,
@@ -313,12 +354,128 @@ impl PresolveTnlp {
                 }
             })
             .collect();
-        let linear_rows: Vec<LinearRow> = linear_row_map.iter().filter_map(|r| r.clone()).collect();
+        // NOTE: `linear_rows` is materialised AFTER Phase 0 so it
+        // can filter out rows Phase 0 dropped — propagating bounds
+        // through aux-eliminated rows lets tighten_bounds derive
+        // contradictions (see issue #53 PR review).
 
         // Snapshot inner bounds before Phase 1 mutates them; needed
-        // for Phase 4 warm-start hints.
+        // for Phase 4 warm-start hints AND for rolling back Phase 0
+        // if its clamps later prove infeasible against the kept
+        // linear rows.
         let inner_x_l = x_l.clone();
         let inner_x_u = x_u.clone();
+
+        // Phase 0 (issue #53): auxiliary-equality preprocessing.
+        // PR 8 wires the real pipeline (incidence → matching → DM →
+        // BTF → classify → linear block solve → frame). Variables it
+        // fixes are clamped via x_l/x_u; rows it drops are recorded
+        // in `row_kept_inner` so the existing remapping logic below
+        // picks them up.
+        let mut row_kept_inner: Vec<bool> = vec![true; m_in];
+        let mut reduction_stack = ReductionStack::default();
+        let aux_diagnostics = if self.opts.auxiliary && m_in > 0 {
+            // Probe extra quantities Phase 0 needs.
+            let mut g_at_probe = vec![0.0; m_in];
+            let g_ok = self
+                .inner
+                .borrow_mut()
+                .eval_g(&x_probe, true, &mut g_at_probe);
+            if !g_ok {
+                return None;
+            }
+            let mut grad_f_probe = vec![0.0; n];
+            let grad_ok = self
+                .inner
+                .borrow_mut()
+                .eval_grad_f(&x_probe, false, &mut grad_f_probe);
+            if !grad_ok {
+                return None;
+            }
+            // Plug everything into the orchestrator.
+            let linearity_for_phase0: Vec<Linearity> = if have_linearity {
+                linearity.clone()
+            } else {
+                vec![Linearity::NonLinear; m_in]
+            };
+            let probe_view = auxiliary::Phase0Probe {
+                n_vars: n,
+                n_rows: m_in,
+                jac_irow: &jac_irow_inner,
+                jac_jcol: &jac_jcol_inner,
+                jac_values: &jac_values_inner,
+                g_l: &g_l_inner,
+                g_u: &g_u_inner,
+                g_at_probe: &g_at_probe,
+                linearity: &linearity_for_phase0,
+                one_based,
+                eq_tol: 1e-12,
+                x_probe: &x_probe,
+                grad_f: &grad_f_probe,
+                x_l: &x_l,
+                x_u: &x_u,
+            };
+            // Adapter: wrap `self.inner` so the orchestrator can
+            // call eval_g / eval_jac_g for nonlinear blocks.
+            struct TnlpCallbackAdapter {
+                inner: Rc<RefCell<dyn TNLP>>,
+            }
+            impl auxiliary::Phase0TnlpCallback for TnlpCallbackAdapter {
+                fn eval_g_full(&mut self, x: &[Number], g: &mut [Number]) -> bool {
+                    self.inner.borrow_mut().eval_g(x, true, g)
+                }
+                fn eval_jac_g_values(&mut self, x: &[Number], values: &mut [Number]) -> bool {
+                    self.inner.borrow_mut().eval_jac_g(
+                        Some(x),
+                        true,
+                        SparsityRequest::Values { values },
+                    )
+                }
+            }
+            let mut adapter = TnlpCallbackAdapter {
+                inner: Rc::clone(&self.inner),
+            };
+            let mut large_solver = block_solve::RelaxedNewtonSolver;
+            let plan = auxiliary::run_auxiliary_phase0(
+                &self.opts,
+                &probe_view,
+                Some(&mut adapter),
+                Some(&mut large_solver),
+            );
+            if let Some(frame) = plan.frame {
+                // Clamp fixed variables.
+                for (k, &i) in frame.fixed_vars.iter().enumerate() {
+                    x_l[i] = frame.fixed_values[k];
+                    x_u[i] = frame.fixed_values[k];
+                }
+                // Drop dropped rows.
+                for &r in &frame.dropped_rows {
+                    row_kept_inner[r] = false;
+                }
+                reduction_stack.push(frame);
+            }
+            // When `presolve_auxiliary_diagnostics=yes`, emit the
+            // summary to stderr. This is a low-overhead drop-in for
+            // the journalist wiring described in the design doc;
+            // upgrading to the real journalist is a follow-up.
+            if self.opts.auxiliary_diagnostics {
+                eprintln!("{}", plan.diagnostics);
+            }
+            plan.diagnostics
+        } else {
+            AuxiliaryPreprocessingDiagnostics::default()
+        };
+
+        // Build `linear_rows` excluding rows Phase 0 dropped. This
+        // is the headline fix from the #53 PR review: propagating
+        // bounds through an aux-dropped row lets tighten_bounds
+        // derive `x_l[j] > x_u[j]` for an aux-clamped variable and
+        // then hand corrupted bounds to the IPM.
+        let linear_rows: Vec<LinearRow> = linear_row_map
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| if row_kept_inner[i] { r.clone() } else { None })
+            .collect();
 
         // Phase 1: bound tightening using linear rows.
         let mut tighten_report = TightenReport::default();
@@ -330,6 +487,42 @@ impl PresolveTnlp {
                 self.opts.max_passes,
                 1e-12,
             );
+        }
+
+        // Defence in depth: if Phase 1 still flags infeasibility AND
+        // Phase 0 made changes, those changes are presumed to blame
+        // (aux solved a block to a point inconsistent with bounds
+        // from kept rows). Roll back Phase 0 — restore bounds, undo
+        // row drops, clear the reduction stack — and re-run Phase 1
+        // on the un-filtered linear rows. Without this guard,
+        // `report.infeasible` was previously never inspected and
+        // corrupted bounds reached the IPM (#53 PR review).
+        if tighten_report.infeasible && !reduction_stack.is_empty() {
+            eprintln!(
+                "pounce-presolve: auxiliary-equality elimination produced \
+                 bounds inconsistent with kept linear rows; rolling back \
+                 the elimination for this solve."
+            );
+            x_l.copy_from_slice(&inner_x_l);
+            x_u.copy_from_slice(&inner_x_u);
+            for kept in row_kept_inner.iter_mut() {
+                *kept = true;
+            }
+            reduction_stack = ReductionStack::default();
+            // Re-run tighten on the unfiltered linear rows now that
+            // the aux clamps are gone.
+            let full_linear_rows: Vec<LinearRow> =
+                linear_row_map.iter().filter_map(|r| r.clone()).collect();
+            tighten_report = TightenReport::default();
+            if self.opts.bound_tightening && !full_linear_rows.is_empty() {
+                tighten_report = tighten_bounds(
+                    &full_linear_rows,
+                    &mut x_l,
+                    &mut x_u,
+                    self.opts.max_passes,
+                    1e-12,
+                );
+            }
         }
 
         // Phase 4: any variable whose lower (upper) bound moved
@@ -355,8 +548,8 @@ impl PresolveTnlp {
         };
 
         // Phase 2: detect redundant linear rows in the (possibly
-        // tightened) box. Non-linear rows are never dropped.
-        let mut row_kept_inner: Vec<bool> = vec![true; m_in];
+        // tightened) box. Non-linear rows are never dropped. The
+        // `row_kept_inner` mask was initialised above by Phase 0.
         let mut n_dropped_rows: Index = 0;
         if self.opts.redundant_constraint_removal {
             let redundant_mask = find_redundant_rows(&linear_rows, &x_l, &x_u, 1e-9);
@@ -472,6 +665,8 @@ impl PresolveTnlp {
             scratch_g: vec![0.0; m_in],
             scratch_jac: vec![0.0; nnz_in],
             scratch_lambda: vec![0.0; m_in],
+            aux_diagnostics,
+            reduction_stack,
         });
         self.state.as_ref()
     }
@@ -643,7 +838,7 @@ impl TNLP for PresolveTnlp {
             return;
         };
         // Reconstruct inner-sized g and lambda.
-        let (g_full, lambda_full) = {
+        let (g_full, mut lambda_full, n_inner, m_inner, nnz_inner, one_based) = {
             let s = self.state.as_mut().expect("inited");
             // Recompute g at sol.x — the solver gave us reduced g.
             self.inner
@@ -655,8 +850,87 @@ impl TNLP for PresolveTnlp {
             for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
                 s.scratch_lambda[i_inner] = sol.lambda[outer];
             }
-            (s.scratch_g.clone(), s.scratch_lambda.clone())
+            (
+                s.scratch_g.clone(),
+                s.scratch_lambda.clone(),
+                s.info_inner.n as usize,
+                s.info_inner.m as usize,
+                s.info_inner.nnz_jac_g as usize,
+                matches!(s.info_inner.index_style, IndexStyle::Fortran),
+            )
         };
+
+        // Phase-0 (issue #53) multiplier recovery for dropped rows.
+        // Walk the reduction stack top-down; for each frame, compute
+        // the full-space ∇f and J at sol.x, then solve the k×k LU
+        // system to recover λ for the frame's dropped rows. Splice
+        // the result into `lambda_full` at the dropped indices.
+        let frames: Vec<reduction_frame::ReductionFrame> = {
+            let s = self.state.as_ref().expect("inited");
+            s.reduction_stack.iter_top_down().cloned().collect()
+        };
+        if !frames.is_empty() && m_inner > 0 {
+            let mut grad_f = vec![0.0; n_inner];
+            let ok_grad = self
+                .inner
+                .borrow_mut()
+                .eval_grad_f(sol.x, true, &mut grad_f);
+            // Sparsity + values for the full inner Jacobian.
+            let mut jac_irow_inner = vec![0 as Index; nnz_inner];
+            let mut jac_jcol_inner = vec![0 as Index; nnz_inner];
+            let ok_struct = if nnz_inner > 0 {
+                self.inner.borrow_mut().eval_jac_g(
+                    None,
+                    false,
+                    SparsityRequest::Structure {
+                        irow: &mut jac_irow_inner,
+                        jcol: &mut jac_jcol_inner,
+                    },
+                )
+            } else {
+                true
+            };
+            let mut jac_values = vec![0.0; nnz_inner];
+            let ok_vals = if nnz_inner > 0 {
+                self.inner.borrow_mut().eval_jac_g(
+                    Some(sol.x),
+                    false,
+                    SparsityRequest::Values {
+                        values: &mut jac_values,
+                    },
+                )
+            } else {
+                true
+            };
+            if ok_grad && ok_struct && ok_vals {
+                // Densify the Jacobian (only needed for the recovery LU).
+                let mut jac_dense = vec![0.0; m_inner * n_inner];
+                for k in 0..nnz_inner {
+                    let i = if one_based {
+                        (jac_irow_inner[k] as isize - 1) as usize
+                    } else {
+                        jac_irow_inner[k] as usize
+                    };
+                    let j = if one_based {
+                        (jac_jcol_inner[k] as isize - 1) as usize
+                    } else {
+                        jac_jcol_inner[k] as usize
+                    };
+                    if i < m_inner && j < n_inner {
+                        jac_dense[i * n_inner + j] = jac_values[k];
+                    }
+                }
+                for frame in &frames {
+                    if let Ok(lam_dropped) =
+                        frame.recover_dropped_multipliers(&grad_f, &jac_dense, &lambda_full)
+                    {
+                        for (idx, &r) in frame.dropped_rows.iter().enumerate() {
+                            lambda_full[r] = lam_dropped[idx];
+                        }
+                    }
+                }
+            }
+        }
         self.inner.borrow_mut().finalize_solution(
             Solution {
                 status: sol.status,
@@ -941,5 +1215,228 @@ mod tests {
         register_options(&reg).unwrap();
         let opt = reg.get_option("presolve").expect("presolve registered");
         assert_eq!(opt.name, "presolve");
+    }
+
+    #[test]
+    fn auxiliary_phase0_noop_when_disabled() {
+        // Master switch off → Phase 0 returns zero diagnostics and
+        // does not perturb the inner problem's dimensions.
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Probe));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: false,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 1);
+        assert_eq!(info.m, 0);
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 0);
+        assert_eq!(diag.vars_eliminated, 0);
+        assert_eq!(diag.rows_eliminated, 0);
+    }
+
+    #[test]
+    fn auxiliary_phase0_noop_when_enabled_no_algos_yet() {
+        // For a 1-var, 0-row TNLP there are no candidate blocks; the
+        // orchestrator skips its work regardless of master-switch state.
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Probe));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Aggressive,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 1);
+        assert_eq!(info.m, 0);
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 0);
+        assert!(diag.rejection_reasons.is_empty());
+    }
+
+    /// 2-variable, 2-equality TNLP that PR 8's orchestrator should
+    /// reduce: `x + y = 3, x - y = 1` → unique solution `(2, 1)`.
+    /// Zero objective gradient → PureEquality, eligible under Safe.
+    struct TwoVarSquareEq;
+    impl TNLP for TwoVarSquareEq {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 4,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            for v in b.x_l.iter_mut() {
+                *v = -1e19;
+            }
+            for v in b.x_u.iter_mut() {
+                *v = 1e19;
+            }
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            b.g_l[1] = 1.0;
+            b.g_u[1] = 1.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn phase0_via_tnlp_eliminates_square_block() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoVarSquareEq));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        // Variable count unchanged (clamp, not reduce).
+        assert_eq!(info.n, 2);
+        // Both equality rows dropped.
+        assert_eq!(info.m, 0);
+
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 1);
+        assert_eq!(diag.vars_eliminated, 2);
+        assert_eq!(diag.rows_eliminated, 2);
+
+        let bounds = wrapped.cached_bounds().expect("inited");
+        assert!((bounds.x_l[0] - 2.0).abs() < 1e-12);
+        assert!((bounds.x_u[0] - 2.0).abs() < 1e-12);
+        assert!((bounds.x_l[1] - 1.0).abs() < 1e-12);
+        assert!((bounds.x_u[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn phase0_via_tnlp_disabled_is_pass_through() {
+        // Same inner TNLP, but presolve_auxiliary=no. Orchestrator
+        // is byte-identical to today; both rows remain.
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoVarSquareEq));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: false,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 2);
+        assert_eq!(info.m, 2);
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 0);
+    }
+
+    /// Smoke test: turning on `presolve_auxiliary_diagnostics` still
+    /// produces a correct elimination. We can't easily capture
+    /// stderr from inside a #[test], but we can verify the option
+    /// path doesn't break the orchestrator.
+    #[test]
+    fn phase0_via_tnlp_diagnostics_flag_does_not_break_solve() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoVarSquareEq));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_diagnostics: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.m, 0);
+        let diag = wrapped.auxiliary_diagnostics();
+        assert_eq!(diag.blocks_eliminated, 1);
+    }
+
+    /// Regression for the #60 PR review blocker. The original
+    /// `TwoVarSquareEq` TNLP, when wrapped with BOTH
+    /// `presolve_auxiliary=yes` AND `presolve_bound_tightening=yes`
+    /// (the new defaults), used to:
+    ///   (1) let aux clamp x_l[0..2] = x_u[0..2] = solved values;
+    ///   (2) let `tighten_bounds` re-propagate the (dropped)
+    ///       equality rows over the clamped bounds, derive a
+    ///       contradiction, and set `tighten_report.infeasible`;
+    ///   (3) hand `x_l > x_u` to the IPM (because `infeasible` was
+    ///       never inspected), crashing it with
+    ///       `Invalid Problem Definition`.
+    /// The fix: build `linear_rows` AFTER Phase 0, filtered by
+    /// `row_kept_inner`, so dropped rows don't propagate. With this
+    /// test we just confirm the wrapper init still succeeds and the
+    /// final bounds remain self-consistent.
+    #[test]
+    fn phase0_via_tnlp_no_infeasible_with_default_bound_tightening() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoVarSquareEq));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            // Both phases on — this is the combination that crashed
+            // on `gaslib11_steady.nl` before the fix.
+            bound_tightening: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.m, 0); // aux dropped both rows
+        let bounds = wrapped.cached_bounds().expect("inited");
+        // x_l ≤ x_u must hold for every variable.
+        for i in 0..(info.n as usize) {
+            assert!(
+                bounds.x_l[i] <= bounds.x_u[i] + 1e-12,
+                "x_l[{i}] = {} > x_u[{i}] = {}",
+                bounds.x_l[i],
+                bounds.x_u[i]
+            );
+        }
+        // tighten_report must NOT have flagged infeasibility.
+        let rpt = wrapped.tighten_report();
+        assert!(!rpt.infeasible, "Phase 1 falsely flagged infeasibility");
     }
 }
