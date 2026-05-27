@@ -1758,8 +1758,14 @@ pub fn feral_config_from_options(
     options: &pounce_common::options_list::OptionsList,
 ) -> pounce_feral::FeralConfig {
     let mut cfg = pounce_feral::FeralConfig::from_env();
+    // Tri-state: the `(_, true)` arm only fires when the user set the
+    // option explicitly. Leaving it unset keeps `cfg.cascade_break` at
+    // `None`, which inherits FERAL's `NumericParams::default()` (CB on
+    // as of FERAL Phase B / pounce#55). `Some(false)` explicitly
+    // disarms (reproduces pre-Phase-B behaviour, surfaces FERAL's
+    // `DelayBudgetExceeded` on non-root cascade victims).
     if let Ok((v, true)) = options.get_bool_value("feral_cascade_break", "") {
-        cfg.cascade_break = v;
+        cfg.cascade_break = Some(v);
     }
     if let Ok((v, true)) = options.get_bool_value("feral_fma", "") {
         cfg.fma = v;
