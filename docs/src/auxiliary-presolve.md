@@ -168,6 +168,34 @@ assume the IPM's variable and row indices match the user's
 original `.nl`. Lifting this restriction is tracked separately
 ([pounce#19](https://github.com/jkitchin/pounce/issues/19)).
 
+### Caveat: nonconvex problems can land at a different local optimum
+
+When the auxiliary pass eliminates a block, it pins the block's
+variables to a specific feasible point of the equality system —
+the one Newton converges to from the probe point. On *convex*
+problems this is the unique local optimum and the IPM would reach
+the same values anyway. On *nonconvex* problems with multiple
+feasible solutions to the equality system, the auxiliary pass may
+fix variables to a feasible point in a different basin of
+attraction than where the un-presolved IPM would eventually settle.
+The full-space objective then differs between
+`presolve_auxiliary=yes` and `presolve_auxiliary=no`, both
+solutions remain feasible and locally optimal.
+
+The vendored `gaslib11_steady.nl` benchmark in
+`crates/pounce-cli/tests/fixtures/aux_presolve/` exhibits exactly
+this — `presolve_auxiliary=yes` converges to objective ≈ 1.825e-02
+while the un-presolved path settles at ≈ 3.286e-02. Both points
+satisfy the model's KKT conditions; aux just lands in a different
+basin. The regression test for `gaslib11_steady` deliberately does
+NOT assert objective parity for this reason; the test name and
+comments document the constraint.
+
+If matching the un-presolved path's local optimum is important
+for your workflow, leave `presolve_auxiliary=no` until iterative
+re-elimination or a multiple-basin-aware policy lands (tracked on
+[pounce#53](https://github.com/jkitchin/pounce/issues/53)).
+
 ## Worked example
 
 Run any of these to see the pipeline in action:

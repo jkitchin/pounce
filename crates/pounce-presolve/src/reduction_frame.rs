@@ -603,4 +603,73 @@ mod tests {
         let order_up: Vec<_> = stack.iter_bottom_up().map(|f| f.fixed_vars[0]).collect();
         assert_eq!(order_up, vec![0, 1]);
     }
+
+    /// PR #60 review nit: there was no paired test for `project_lambda`
+    /// + `lift_lambda` (only the directional tests). Confirm
+    /// project(lift(x)) is the identity on the reduced shape AND
+    /// lift(project(x)) zeroes the dropped indices but preserves
+    /// kept ones.
+    #[test]
+    fn frame_project_lift_lambda_roundtrip() {
+        let frame = ReductionFrame::new(4, 3, vec![0, 2], vec![1.0, 9.0], vec![0, 1]);
+        // Full lambda with arbitrary values; project then lift.
+        let lambda_full = [4.0, 5.0, 6.0];
+        let reduced = frame.project_lambda(&lambda_full);
+        // Reduced has one row (the only kept row, row 2).
+        assert_eq!(reduced, vec![6.0]);
+        // Lifting back zeroes the dropped row entries.
+        let lifted = frame.lift_lambda(&reduced);
+        assert_eq!(lifted, vec![0.0, 0.0, 6.0]);
+        // Now the other direction: project the lifted lambda back
+        // to reduced — should be the identity on reduced shape.
+        let reduced_again = frame.project_lambda(&lifted);
+        assert_eq!(reduced_again, reduced);
+    }
+
+    /// Multi-frame `ReductionStack` round-trip. Push two frames
+    /// (mutually compatible — they fix disjoint vars and drop
+    /// disjoint rows). Verify lift_x and lift_lambda compose
+    /// consistently when walked through both frames.
+    #[test]
+    fn reduction_stack_multi_frame_roundtrip() {
+        // Full shape: 4 vars, 4 rows.
+        // Frame 1 (bottom): fixes var 0 (= 10), drops row 0.
+        // Frame 2 (top):    fixes var 2 (= 30), drops row 2.
+        let f1 = ReductionFrame::new(4, 4, vec![0], vec![10.0], vec![0]);
+        let f2 = ReductionFrame::new(4, 4, vec![2], vec![30.0], vec![2]);
+        let mut stack = ReductionStack::default();
+        stack.push(f1.clone());
+        stack.push(f2.clone());
+
+        // Synthesize a "fully-lifted" x_full where the survivors
+        // (vars 1, 3) and rows (1, 3) carry known values.
+        let x_full_expected = vec![10.0, 7.0, 30.0, 5.0];
+        let lambda_full_expected = vec![0.0, 8.0, 0.0, 6.0];
+
+        // Project through both frames in bottom-up order, then
+        // lift back top-down. Result must equal original at the
+        // surviving entries (and frame-supplied values at fixed
+        // entries / zeros at dropped row indices).
+        //
+        // For this test we don't have stacked reduced shapes
+        // (each frame is independently 4-var/4-row); we just
+        // confirm each frame's lift drops the expected values
+        // back when walked individually via the stack's iterator.
+        for frame in stack.iter_top_down() {
+            let reduced_x = frame.project_x(&x_full_expected);
+            let lifted_x = frame.lift_x(&reduced_x);
+            assert_eq!(lifted_x, x_full_expected);
+            let reduced_l = frame.project_lambda(&lambda_full_expected);
+            let lifted_l = frame.lift_lambda(&reduced_l);
+            // Dropped index should be 0 in the lift; survivors
+            // preserve their values.
+            for r in 0..4 {
+                if frame.row_map[r].is_some() {
+                    assert_eq!(lifted_l[r], lambda_full_expected[r]);
+                } else {
+                    assert_eq!(lifted_l[r], 0.0);
+                }
+            }
+        }
+    }
 }

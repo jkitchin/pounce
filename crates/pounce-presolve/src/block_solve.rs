@@ -15,7 +15,7 @@
 use pounce_common::types::Number;
 
 /// Tunables for the damped Newton loop.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct BlockSolveOptions {
     /// Maximum outer Newton iterations.
     pub max_iter: usize,
@@ -26,6 +26,12 @@ pub struct BlockSolveOptions {
     /// Refuse to solve blocks larger than this. Defaults to 8;
     /// PR 11 lifts it via an IPM-backed fallback impl.
     pub max_dim: usize,
+    /// PR #60 review nit: optional per-variable bounds on the
+    /// Newton iterate. When set, the solver rejects any final
+    /// solution with `x[i] < lower[i] - tol` or `x[i] > upper[i] +
+    /// tol`, returning `BlockSolveError::OutOfBounds` instead of
+    /// `Ok`. Lengths must equal the block dimension.
+    pub bounds: Option<(Vec<Number>, Vec<Number>)>,
 }
 
 impl Default for BlockSolveOptions {
@@ -35,6 +41,7 @@ impl Default for BlockSolveOptions {
             tol: 1e-8,
             min_step: 1e-6,
             max_dim: 8,
+            bounds: None,
         }
     }
 }
@@ -53,6 +60,11 @@ pub enum BlockSolveError {
     MaxIterReached,
     /// User callback returned `false` from `eval` or `jacobian`.
     EvalFailed,
+    /// PR #60 review nit: Newton converged but the final iterate
+    /// lies outside `BlockSolveOptions::bounds`. The orchestrator
+    /// converts this into `AuxiliaryRejectionReason::OutOfBounds`
+    /// so the block isn't applied.
+    OutOfBounds,
 }
 
 /// Successful block solve.
@@ -132,6 +144,7 @@ impl LargeBlockSolver for RelaxedNewtonSolver {
             max_iter: options.max_iter.max(200),
             min_step: options.min_step.min(1e-10),
             max_dim: options.max_dim.max(64),
+            bounds: options.bounds.clone(),
         };
         DampedNewtonSolver.solve(x0, eqs, &relaxed)
     }
@@ -197,6 +210,7 @@ impl BlockSolver for DampedNewtonSolver {
 
         for iter in 0..options.max_iter {
             if res < options.tol {
+                check_bounds(&x, options)?;
                 return Ok(BlockSolveOutcome {
                     x,
                     residual_norm: res,
@@ -240,6 +254,7 @@ impl BlockSolver for DampedNewtonSolver {
         }
         // Check one last time — if max_iter brought us to tol, accept.
         if res < options.tol {
+            check_bounds(&x, options)?;
             Ok(BlockSolveOutcome {
                 x,
                 residual_norm: res,
@@ -249,6 +264,23 @@ impl BlockSolver for DampedNewtonSolver {
             Err(BlockSolveError::MaxIterReached)
         }
     }
+}
+
+/// Check that every entry of `x` lies within the optional bounds
+/// from `BlockSolveOptions::bounds` (PR #60 review nit). Returns
+/// `Err(OutOfBounds)` on violation; `Ok(())` when no bounds were
+/// supplied or all entries pass.
+fn check_bounds(x: &[Number], options: &BlockSolveOptions) -> Result<(), BlockSolveError> {
+    if let Some((lo, hi)) = &options.bounds {
+        // Tolerate small slop for finite-precision tol.
+        let slop = options.tol.max(1e-12);
+        for (i, &xi) in x.iter().enumerate() {
+            if xi < lo[i] - slop || xi > hi[i] + slop {
+                return Err(BlockSolveError::OutOfBounds);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn inf_norm(v: &[Number]) -> Number {
@@ -848,5 +880,45 @@ mod tests {
             .solve(&[0.0], &mut eqs, &opt)
             .expect_err("eval fails");
         assert_eq!(err, BlockSolveError::EvalFailed);
+    }
+
+    /// PR #60 review nit: when Newton converges to a root outside
+    /// `BlockSolveOptions::bounds`, the solver returns
+    /// `OutOfBounds` rather than `Ok`. Use the linear 1-d system
+    /// `x - 3 = 0` (root at 3) with bounds [0, 2].
+    #[test]
+    fn newton_out_of_bounds_rejects() {
+        let mut eqs = LinearF {
+            a: vec![1.0],
+            b: vec![3.0],
+            n: 1,
+        };
+        let opt = BlockSolveOptions {
+            bounds: Some((vec![0.0], vec![2.0])),
+            ..Default::default()
+        };
+        let err = DampedNewtonSolver
+            .solve(&[0.0], &mut eqs, &opt)
+            .expect_err("root outside bounds");
+        assert_eq!(err, BlockSolveError::OutOfBounds);
+    }
+
+    /// Sanity check: with bounds that DO contain the root, the
+    /// solver accepts normally.
+    #[test]
+    fn newton_in_bounds_accepts() {
+        let mut eqs = LinearF {
+            a: vec![1.0],
+            b: vec![3.0],
+            n: 1,
+        };
+        let opt = BlockSolveOptions {
+            bounds: Some((vec![0.0], vec![10.0])),
+            ..Default::default()
+        };
+        let out = DampedNewtonSolver
+            .solve(&[0.0], &mut eqs, &opt)
+            .expect("root inside bounds");
+        assert!((out.x[0] - 3.0).abs() < 1e-10);
     }
 }

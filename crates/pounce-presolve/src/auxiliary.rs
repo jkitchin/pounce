@@ -349,9 +349,16 @@ pub fn run_auxiliary_phase0(
                 .map(|&kk| eq_inc.eq_row_inner_idx[kk])
                 .collect();
             let block_cols = &block.cols;
+            // PR #60 review nit: pass the block's variable bounds
+            // into Newton so a converged-but-out-of-box solution
+            // gets caught early as `OutOfBounds` rather than
+            // becoming an `x_l = x_u = bad_value` clamp.
+            let bounds_lo: Vec<Number> = block_cols.iter().map(|&c| probe.x_l[c]).collect();
+            let bounds_hi: Vec<Number> = block_cols.iter().map(|&c| probe.x_u[c]).collect();
             let bs_opts = BlockSolveOptions {
                 tol: opts.auxiliary_tol,
                 max_dim: opts.auxiliary_max_block_dim as usize,
+                bounds: Some((bounds_lo, bounds_hi)),
                 ..Default::default()
             };
             let t_solve = std::time::Instant::now();
@@ -401,6 +408,11 @@ pub fn run_auxiliary_phase0(
             diag.stage_time_ms.block_solve_ms += t_solve.elapsed().as_millis();
             let out = match solve_result {
                 Ok(o) => o,
+                Err(crate::block_solve::BlockSolveError::OutOfBounds) => {
+                    diag.rejection_reasons
+                        .push(AuxiliaryRejectionReason::OutOfBounds);
+                    continue;
+                }
                 Err(_) => {
                     diag.rejection_reasons
                         .push(AuxiliaryRejectionReason::BlockSolveDiverged);

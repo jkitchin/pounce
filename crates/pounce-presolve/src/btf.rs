@@ -89,6 +89,14 @@ impl BlockTriangularForm {
             component.cols.len(),
             "square component shapes must match"
         );
+        // PR #60 review nit: explicitly check the `SquareComponent`
+        // invariant — every row in the component must be matched.
+        // This converts a downstream `.expect("matched")` panic
+        // into a clearer assertion at the boundary.
+        debug_assert!(
+            component.eq_rows.iter().all(|&r| m.row_to_var[r].is_some()),
+            "SquareComponent invariant violated: unmatched row in eq_rows"
+        );
         if n == 0 {
             return Self::default();
         }

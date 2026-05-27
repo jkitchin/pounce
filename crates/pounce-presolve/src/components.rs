@@ -10,11 +10,24 @@ use crate::incidence::EqualityIncidence;
 use crate::matching::BipartiteMatching;
 
 /// One connected component of the square sub-graph.
+///
+/// # Invariant
+///
+/// Every row in `eq_rows` must be matched to some column in `cols`
+/// under the bipartite matching that produced this component.
+/// Downstream code (notably `crate::btf::BlockTriangularForm`)
+/// relies on `m.row_to_var[r]` being `Some` for every `r ∈
+/// eq_rows`. Construct only via `SquareComponents::of_square_part`,
+/// which preserves this invariant by filtering on `DMPart::Square`.
+/// Hand-constructing a `SquareComponent` with unmatched rows
+/// violates the invariant and causes `BlockTriangularForm` to
+/// panic.
 #[derive(Debug, Clone, Default)]
 pub struct SquareComponent {
     /// Equality-row indices (positions in `inc.eq_row_inner_idx`).
+    /// See struct-level invariant: must be matched.
     pub eq_rows: Vec<usize>,
-    /// Variable indices.
+    /// Variable indices. Same length as `eq_rows`.
     pub cols: Vec<usize>,
 }
 

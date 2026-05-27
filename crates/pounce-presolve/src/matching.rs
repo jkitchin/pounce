@@ -105,9 +105,10 @@ pub fn hopcroft_karp(inc: &EqualityIncidence) -> BipartiteMatching {
     }
 }
 
-/// BFS layering. Returns `true` when at least one augmenting path
-/// (an unmatched var reachable from an unmatched row via the layered
-/// graph) exists.
+/// BFS layering with the `dist[NIL]` sentinel. Records the
+/// shortest distance to *any* unmatched column and prunes BFS
+/// expansion past that layer, recovering the textbook O(√V)
+/// phase-count bound (PR #60 review nit).
 fn bfs(inc: &EqualityIncidence, pair_u: &[usize], pair_v: &[usize], dist: &mut [usize]) -> bool {
     let mut queue: VecDeque<usize> = VecDeque::new();
     for r in 0..inc.n_eq_rows() {
@@ -118,21 +119,30 @@ fn bfs(inc: &EqualityIncidence, pair_u: &[usize], pair_v: &[usize], dist: &mut [
             dist[r] = INF;
         }
     }
-    let mut found = false;
+    // `dist_nil` is the distance to the nearest unmatched column,
+    // used both as the augmenting-path-found signal and as a BFS
+    // pruning threshold.
+    let mut dist_nil = INF;
     while let Some(r) = queue.pop_front() {
+        if dist[r] >= dist_nil {
+            continue;
+        }
         for &v in inc.neighbors(r) {
             let next = pair_v[v];
             if next == NIL {
-                // Augmenting path discovered; record by leaving the
-                // dist of all matched-rows on this layer finite.
-                found = true;
+                // Reaching an unmatched column means an augmenting
+                // path ends here; pin `dist_nil` to the shortest
+                // such layer (and skip exploring further past it).
+                if dist_nil == INF {
+                    dist_nil = dist[r] + 1;
+                }
             } else if dist[next] == INF {
                 dist[next] = dist[r] + 1;
                 queue.push_back(next);
             }
         }
     }
-    found
+    dist_nil != INF
 }
 
 /// DFS along the layered graph, flipping any augmenting path it
