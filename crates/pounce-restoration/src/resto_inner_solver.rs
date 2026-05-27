@@ -226,12 +226,20 @@ pub fn run_inner_resto(
         .acceptor_mut()
         .set_theta_max_fact(1e8);
 
-    // Replace the inner-bundle mu update with a fresh MonotoneMuUpdate
-    // carrying `first_iter_resto = true` (upstream
-    // `IpMonotoneMuUpdate.cpp:118-121`: prefix `"resto."` sets the
-    // flag). The inner restoration IPM is monotone in upstream
-    // regardless of the outer `mu_strategy` selection — see
-    // `IpAlgBuilder.cpp:BuildRestoIpoptAlgorithm`.
+    // Replace the inner-bundle mu update with a resto-configured fresh
+    // copy. Upstream `IpAlgBuilder.cpp:929` looks up
+    // `options.GetStringValue("mu_strategy", _, "resto." + prefix)` and
+    // falls back to the outer `mu_strategy` when no `resto.mu_strategy`
+    // override is set — so the inner IPM inherits the outer's adaptive
+    // vs. monotone choice. We mirror that by branching on the inner
+    // alg builder's `mu_strategy`, which the caller populates from the
+    // same `OptionsList` the outer builder reads. The hardcoded
+    // monotone path that lived here previously diverged from upstream:
+    // when the outer is adaptive and μ has blown up to ~1e6 before
+    // entering restoration (ex8_3_10), monotone can only shrink μ by
+    // κ_μ per iter and exhausts the resto iter budget before recovery
+    // completes; the adaptive path's QF oracle resets μ to ~1.0 in one
+    // step.
     //
     // Conservative `mu_min` floor: upstream
     // `IpAdaptiveMuUpdate.cpp:206-211` applies `100 * mu_min` for the
@@ -243,13 +251,34 @@ pub fn run_inner_resto(
     // back up several orders of magnitude — kappa-reduction guard then
     // can never re-fire and the inner runs out of iters
     // (DECONVBNE: 479 iter Restoration_Failed → upstream's resto.mu_min
-    // = 1e-9 lets it converge in 484 outer iters).
-    let outer_mu_min = 1e-11_f64;
-    alg_bundle.mu_update = Box::new(
-        MonotoneMuUpdate::new()
-            .with_first_iter_resto(true)
-            .with_mu_min(100.0 * outer_mu_min),
-    ) as Box<dyn pounce_algorithm::mu::r#trait::MuUpdate>;
+    // = 1e-9 lets it converge in 484 outer iters). Applied to both
+    // branches.
+    let outer_mu_min = inner_alg_builder.mu.mu_min;
+    let resto_mu_min = 100.0 * outer_mu_min;
+    alg_bundle.mu_update = match inner_alg_builder.mu_strategy {
+        pounce_algorithm::alg_builder::MuStrategyChoice::Monotone => Box::new(
+            MonotoneMuUpdate::new()
+                .with_first_iter_resto(true)
+                .with_mu_min(resto_mu_min),
+        )
+            as Box<dyn pounce_algorithm::mu::r#trait::MuUpdate>,
+        pounce_algorithm::alg_builder::MuStrategyChoice::Adaptive => {
+            let mut adaptive = pounce_algorithm::mu::adaptive::AdaptiveMuUpdate::new();
+            adaptive.mu_oracle = inner_alg_builder.mu_oracle;
+            adaptive.mu_init = inner_alg_builder.mu.mu_init;
+            adaptive.mu_max = inner_alg_builder.mu.mu_max;
+            adaptive.mu_max_fact = inner_alg_builder.mu.mu_max_fact;
+            adaptive.mu_min = resto_mu_min;
+            adaptive.mu_linear_decrease_factor = inner_alg_builder.mu.mu_linear_decrease_factor;
+            adaptive.mu_superlinear_decrease_power =
+                inner_alg_builder.mu.mu_superlinear_decrease_power;
+            adaptive.barrier_tol_factor = inner_alg_builder.mu.barrier_tol_factor;
+            adaptive.sigma_min = inner_alg_builder.mu.sigma_min;
+            adaptive.sigma_max = inner_alg_builder.mu.sigma_max;
+            adaptive.adaptive_mu_globalization = inner_alg_builder.mu.adaptive_mu_globalization;
+            Box::new(adaptive) as Box<dyn pounce_algorithm::mu::r#trait::MuUpdate>
+        }
+    };
 
     // ---- 5. Construct inner cq (inner_data already built above). ----
     let inner_cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(

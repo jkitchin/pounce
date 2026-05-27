@@ -20,7 +20,6 @@
 //! becomes the sole owner. Calling [`crate::FreeIpoptProblem`] on the
 //! now-null handle is safe (it null-checks).
 
-use pounce_algorithm::alg_builder::AlgorithmBuilder;
 use pounce_algorithm::application::{
     default_backend_factory, feral_config_from_options, IpoptApplication,
 };
@@ -192,7 +191,7 @@ pub unsafe extern "C" fn IpoptSolverSolve(
     let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
     let resto_factory = make_default_restoration_factory(
         RestoAlgorithmBuilder::new(),
-        AlgorithmBuilder::new(),
+        info.problem.app.algorithm_builder_from_options(),
         bff,
     );
     info.problem.app.set_restoration_factory(resto_factory);

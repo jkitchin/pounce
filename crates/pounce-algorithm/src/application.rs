@@ -1277,7 +1277,14 @@ impl IpoptApplication {
         app_status
     }
 
-    fn algorithm_builder_from_options(&self) -> AlgorithmBuilder {
+    /// Build an [`AlgorithmBuilder`] populated from the app's
+    /// [`OptionsList`]. Public so callers wiring the restoration
+    /// factory can hand the *inner* IPM a builder that mirrors the
+    /// outer's `mu_strategy`/`mu_oracle`/line-search choices —
+    /// matching upstream `IpAlgBuilder::BuildRestoIpoptAlgorithm`,
+    /// which reads the same `mu_strategy` option with prefix `"resto."
+    /// + prefix` and falls back to the outer setting.
+    pub fn algorithm_builder_from_options(&self) -> AlgorithmBuilder {
         let mut builder = AlgorithmBuilder::new();
 
         // `mehrotra_algorithm` is parsed first so its cascading

@@ -11,7 +11,7 @@
 //! contract — 0 for any solve that ran and produced a `.sol`, since
 //! the termination is carried by the file's `solve_result_num`.
 
-use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
+use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
 use pounce_cli::builtin;
 use pounce_cli::cli::{Args, ProblemSource};
@@ -105,9 +105,12 @@ pub fn main() -> ExitCode {
     // window we cleanly own here.
     let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
     let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
+    // Hand the inner IPM a builder mirroring the outer options so its
+    // `mu_strategy` (adaptive vs. monotone) inherits the user's choice —
+    // matches upstream `IpAlgBuilder::BuildRestoIpoptAlgorithm`.
     let resto_factory = make_default_restoration_factory(
         RestoAlgorithmBuilder::new(),
-        AlgorithmBuilder::new(),
+        app.algorithm_builder_from_options(),
         bff,
     );
     app.set_restoration_factory(resto_factory);

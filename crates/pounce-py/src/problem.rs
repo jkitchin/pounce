@@ -7,7 +7,7 @@
 //! mult_g, mult_x_L, mult_x_U, iter_count, ...).
 
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
-use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
+use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
@@ -525,7 +525,7 @@ impl PyProblem {
         let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
         let resto_factory = make_default_restoration_factory(
             RestoAlgorithmBuilder::new(),
-            AlgorithmBuilder::new(),
+            app.algorithm_builder_from_options(),
             bff,
         );
         app.set_restoration_factory(resto_factory);

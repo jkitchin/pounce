@@ -34,7 +34,6 @@
 pub mod fortran;
 pub mod solver;
 
-use pounce_algorithm::alg_builder::AlgorithmBuilder;
 use pounce_algorithm::application::{
     default_backend_factory, feral_config_from_options, IpoptApplication,
 };
@@ -555,7 +554,7 @@ pub unsafe extern "C" fn IpoptSolve(
     let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
     let resto_factory = make_default_restoration_factory(
         RestoAlgorithmBuilder::new(),
-        AlgorithmBuilder::new(),
+        info.app.algorithm_builder_from_options(),
         bff,
     );
     info.app.set_restoration_factory(resto_factory);

@@ -263,10 +263,9 @@ impl PdSearchDirCalc {
         let frozen_rhs = rhs.freeze();
         let mut delta_cen = frozen_rhs.make_new_zeroed();
 
-        // Upstream `IpQualityFunctionMuOracle.cpp:243` passes
-        // `allow_inexact = true`. Same caveat as `compute_affine_step`
-        // — flipping this on regresses TRO3X3 because the FERAL-backed
-        // IR cascade differs from MA57's single-shot. Defer until MA57.
+        // Match upstream `IpQualityFunctionMuOracle.cpp:243`: IR is
+        // deferred until mu is known, so we allow a somewhat inexact
+        // centering solve here.
         let ok = self.pd_solver.borrow_mut().solve(
             data,
             cq,
@@ -275,7 +274,7 @@ impl PdSearchDirCalc {
             0.0,
             &frozen_rhs,
             &mut delta_cen,
-            false,
+            true,
             false,
         );
 
