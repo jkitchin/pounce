@@ -1547,8 +1547,7 @@ pub unsafe extern "C" fn IpoptWriteSolveReport(
     detail: *const c_char,
 ) -> Bool {
     use pounce_solve_report::{
-        status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder,
-        ReportDetail,
+        status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
     };
 
     if ipopt_problem.is_null() || path.is_null() {
@@ -2192,7 +2191,10 @@ mod tests {
         // Read it back and check the schema tag + that it parses with
         // the same struct shape pounce-cli uses.
         let txt = std::fs::read_to_string(&path).unwrap();
-        assert!(txt.contains("\"schema\": \"pounce.solve-report/v1\""), "{txt}");
+        assert!(
+            txt.contains("\"schema\": \"pounce.solve-report/v1\""),
+            "{txt}"
+        );
         assert!(txt.contains("\"kind\": \"tnlp-direct\""));
         let parsed: pounce_solve_report::SolveReport = serde_json::from_str(&txt).unwrap();
         assert_eq!(parsed.problem.n_variables, 1);
