@@ -51,3 +51,36 @@ overriding:
 | `l1_penalty_max_outer_iter`          | `8`     | Maximum penalty outer iterations.                          |
 | `l1_slack_tol`                       | `1e-6`  | Slack tolerance for "constraints satisfied".               |
 | `l1_steering_factor`                 | `10.0`  | Steering-rule factor for ρ escalation.                     |
+
+## NLP Presolve
+
+POUNCE's TNLP-wrapper presolve pipeline runs *before* the IPM
+starts. It tightens variable bounds, drops redundant rows, and
+(optionally) eliminates square auxiliary-equality sub-systems
+structurally. All are off by default — set the master switch first:
+
+| Option                                  | Default | Meaning                                                                        |
+|-----------------------------------------|---------|--------------------------------------------------------------------------------|
+| `presolve`                              | `no`    | Master switch for the whole presolve layer. Off → wrapper is a no-op.          |
+| `presolve_bound_tightening`             | `yes`   | Phase 1 — Andersen-style bound propagation from linear rows.                   |
+| `presolve_redundant_constraint_removal` | `yes`   | Phase 2 — drop linear constraints already implied by current bounds.           |
+| `presolve_licq_check`                   | `yes`   | Phase 3 — detect rank-deficient equality blocks before the IPM starts.         |
+| `presolve_licq_action`                  | `warn`  | What to do on degeneracy: `warn` (just report) or `auto_l1` (turn on ℓ₁).      |
+| `presolve_warm_z_bounds`                | `yes`   | Phase 4 — warm-start bound multipliers when bounds get tightened by Phase 1.   |
+| `presolve_bound_mult_init_val`          | `1.0`   | Value used by Phase 4 for those warm-start hints.                              |
+| `presolve_max_passes`                   | `3`     | Fixed-point iteration cap across the bound-tightening passes.                  |
+| `presolve_print_level`                  | `0`     | Per-pass verbosity (0 silent, 5 per-pass, 8 per-transformation).               |
+
+### Auxiliary-equality preprocessing (Phase 0)
+
+A separate set of options controls the structural elimination pass
+documented in [Auxiliary-Equality Preprocessing](auxiliary-presolve.md):
+
+| Option                                   | Default | Meaning                                                                                  |
+|------------------------------------------|---------|------------------------------------------------------------------------------------------|
+| `presolve_auxiliary`                     | `no`    | Master switch for the Phase-0 structural elimination pass.                               |
+| `presolve_auxiliary_coupling`            | `safe`  | Which coupling classes are eligible: `none` / `safe` / `aggressive`.                     |
+| `presolve_auxiliary_tol`                 | `1e-8`  | Residual tolerance for accepting a candidate block solve.                                |
+| `presolve_auxiliary_max_block_dim`       | `8`     | Largest block the lightweight Newton solver will attempt (larger blocks rejected in v1). |
+| `presolve_auxiliary_wall_time_fraction`  | `0.1`   | Fraction of the solver's wall-time budget the pass is allowed to spend.                  |
+| `presolve_auxiliary_diagnostics`         | `no`    | Emit the diagnostics summary via the journalist after Phase 0 runs.                      |

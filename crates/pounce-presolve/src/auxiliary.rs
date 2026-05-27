@@ -108,11 +108,23 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
         one_based: probe.one_based,
         eq_tol: probe.eq_tol,
     };
+    let t_inc = std::time::Instant::now();
     let eq_inc = EqualityIncidence::from_probe(&pv);
     let ineq_inc = InequalityIncidence::from_probe(&pv);
+    diag.stage_time_ms.incidence_ms = t_inc.elapsed().as_millis();
+
+    let t_match = std::time::Instant::now();
     let matching = hopcroft_karp(&eq_inc);
+    diag.stage_time_ms.matching_ms = t_match.elapsed().as_millis();
+
+    let t_dm = std::time::Instant::now();
     let dm = DulmageMendelsohnPartition::from_matching(&eq_inc, &matching);
+    diag.stage_time_ms.dm_ms = t_dm.elapsed().as_millis();
+
+    let t_comp = std::time::Instant::now();
     let comps = SquareComponents::of_square_part(&eq_inc, &matching, &dm);
+    diag.stage_time_ms.components_ms = t_comp.elapsed().as_millis();
+
     let obj_support = objective_gradient_support(probe.grad_f, 1e-12);
 
     // -- 2. Decide which dropped rows are linear --------------------
@@ -134,8 +146,11 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
     let mut x_running: Vec<Number> = probe.x_probe.to_vec();
 
     for comp in &comps.components {
+        let t_btf = std::time::Instant::now();
         let btf = BlockTriangularForm::of_component(&eq_inc, &matching, comp);
+        diag.stage_time_ms.btf_ms += t_btf.elapsed().as_millis();
         for block in &btf.blocks {
+            diag.candidate_blocks += 1;
             // -- 3a. Linearity gate --
             let all_linear = block
                 .eq_rows
@@ -157,6 +172,18 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
 
             // -- 3c. Coupling gate --
             let class = classify_block(block, &ineq_inc, &obj_support);
+            match class {
+                AuxiliaryCouplingClass::PureEquality => diag.class_counts.pure_equality += 1,
+                AuxiliaryCouplingClass::ObjectiveCoupled => {
+                    diag.class_counts.objective_coupled += 1
+                }
+                AuxiliaryCouplingClass::InequalityCoupled => {
+                    diag.class_counts.inequality_coupled += 1
+                }
+                AuxiliaryCouplingClass::ObjectiveAndInequalityCoupled => {
+                    diag.class_counts.objective_and_inequality_coupled += 1
+                }
+            }
             let allowed = match class {
                 AuxiliaryCouplingClass::PureEquality => true,
                 AuxiliaryCouplingClass::ObjectiveCoupled => aggressive,
@@ -259,7 +286,10 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
                 ..Default::default()
             };
             let x0 = vec![0.0; k];
-            let out = match DampedNewtonSolver.solve(&x0, &mut eqs, &bs_opts) {
+            let t_solve = std::time::Instant::now();
+            let solve_result = DampedNewtonSolver.solve(&x0, &mut eqs, &bs_opts);
+            diag.stage_time_ms.block_solve_ms += t_solve.elapsed().as_millis();
+            let out = match solve_result {
                 Ok(o) => o,
                 Err(crate::block_solve::BlockSolveError::Singular) => {
                     diag.rejection_reasons
@@ -274,6 +304,7 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
             };
 
             // -- 3f. Full-space residual check at the candidate x --
+            let t_resid = std::time::Instant::now();
             let mut candidate_x = x_running.clone();
             for (ii, &c) in block_cols.iter().enumerate() {
                 candidate_x[c] = out.x[ii];
@@ -308,6 +339,7 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
                 let residual = (s + const_r - probe.g_l[r_inner]).abs();
                 row_resid = row_resid.max(residual);
             }
+            diag.stage_time_ms.residual_check_ms += t_resid.elapsed().as_millis();
             if row_resid > opts.auxiliary_tol {
                 diag.rejection_reasons
                     .push(AuxiliaryRejectionReason::ResidualCheckFailed);
@@ -325,6 +357,9 @@ pub fn run_auxiliary_phase0(opts: &PresolveOptions, probe: &Phase0Probe<'_>) -> 
                 accepted_dropped_rows.push(r_inner);
             }
             diag.blocks_eliminated += 1;
+            if (k as Index) > diag.max_accepted_block_dim {
+                diag.max_accepted_block_dim = k as Index;
+            }
         }
     }
 
