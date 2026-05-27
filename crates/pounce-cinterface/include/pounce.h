@@ -384,6 +384,45 @@ enum ApplicationReturnStatus IpoptSolveWarmStart(
     UserDataPtr             user_data
 );
 
+/* -----------------------------------------------------------------
+ * Pounce extensions — JSON solve-report writing
+ *
+ * The CLI's `--json-output` path writes a `pounce.solve-report/v1`
+ * file. These two functions expose the same payload to embedders
+ * (GAMS solver link, custom drivers) so that downstream tools — the
+ * studio MCP server's `diagnose`, `find_stalls`, `convergence_trace`,
+ * etc. — work against any cinterface-driven solve.
+ * ----------------------------------------------------------------- */
+
+/**
+ * Enable per-iteration trajectory capture on the next IpoptSolve.
+ * Must be called BEFORE IpoptSolve for the per-iter trace to land in
+ * the report; off by default to avoid the (small) per-iter cost.
+ *
+ * Returns 1 (TRUE) on success, 0 (FALSE) when ipopt_problem is NULL.
+ */
+Bool IpoptEnableIterHistory(IpoptProblem ipopt_problem);
+
+/**
+ * Write the most recent IpoptSolve result to `path` as a
+ * `pounce.solve-report/v1` JSON file. `detail` is `"summary"` or
+ * `"full"`; pass NULL for the default ("summary"). At
+ * `"full"`, the per-iteration trajectory is included when
+ * IpoptEnableIterHistory was called before the solve.
+ *
+ * The `kind` of the input descriptor is recorded as `"tnlp-direct"`
+ * because the C API receives callbacks rather than an .nl file or
+ * builtin name.
+ *
+ * Returns 1 (TRUE) on a successful write, 0 (FALSE) for: NULL handle,
+ * no prior solve, an invalid `detail`, a bad path, or an I/O error.
+ */
+Bool IpoptWriteSolveReport(
+    IpoptProblem  ipopt_problem,
+    const char   *path,
+    const char   *detail
+);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

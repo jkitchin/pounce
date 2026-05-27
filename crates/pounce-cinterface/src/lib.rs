@@ -114,10 +114,31 @@ pub(crate) struct UserScaling {
 }
 
 /// Stats and final-iterate snapshot retained between
-/// [`IpoptSolve`] and the post-solve accessors.
-#[derive(Clone, Default)]
+/// [`IpoptSolve`] and the post-solve accessors. Everything needed to
+/// reconstruct a `pounce.solve-report/v1` JSON file lives here so
+/// [`IpoptWriteSolveReport`] doesn't have to ask the caller to thread
+/// `x`/`lambda`/`obj` back in.
+#[derive(Clone)]
 pub(crate) struct LastSolve {
     pub(crate) stats: SolveStatistics,
+    pub(crate) status: ApplicationReturnStatus,
+    pub(crate) linear_solver: Option<pounce_linsol::summary::LinearSolverSummary>,
+    pub(crate) final_x: Vec<Number>,
+    pub(crate) final_lambda: Vec<Number>,
+    pub(crate) final_obj: Number,
+}
+
+impl Default for LastSolve {
+    fn default() -> Self {
+        Self {
+            stats: SolveStatistics::default(),
+            status: ApplicationReturnStatus::InternalError,
+            linear_solver: None,
+            final_x: Vec::new(),
+            final_lambda: Vec::new(),
+            final_obj: 0.0,
+        }
+    }
 }
 
 pub type IpoptProblem = *mut IpoptProblemInfo;
@@ -561,11 +582,15 @@ pub unsafe extern "C" fn IpoptSolve(
 
     let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
     let status = info.app.optimize_tnlp(bridge_for_solve);
+    let bridge_ref = bridge.borrow();
     info.last_solve = Some(LastSolve {
         stats: info.app.statistics(),
+        status,
+        linear_solver: info.app.linear_solver_summary(),
+        final_x: bridge_ref.final_x.clone(),
+        final_lambda: bridge_ref.final_lambda.clone(),
+        final_obj: bridge_ref.final_obj,
     });
-
-    let bridge_ref = bridge.borrow();
     if !x.is_null() && n_us > 0 {
         std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
     }
@@ -1473,6 +1498,108 @@ impl TNLP for CCallbackTnlp {
     }
 }
 
+/// Enable per-iteration history capture on the underlying
+/// `IpoptApplication`. Must be called *before* [`IpoptSolve`] for the
+/// trajectory to appear in the report written by
+/// [`IpoptWriteSolveReport`]. Off by default — capturing each iterate
+/// has a small per-iter cost the IPM core skips otherwise.
+///
+/// Returns `TRUE` on success, `FALSE` if `ipopt_problem` is NULL.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid handle returned by
+/// [`CreateIpoptProblem`] (or `NULL`).
+#[no_mangle]
+pub unsafe extern "C" fn IpoptEnableIterHistory(ipopt_problem: IpoptProblem) -> Bool {
+    if ipopt_problem.is_null() {
+        return FALSE;
+    }
+    let info = unsafe { &mut *ipopt_problem };
+    info.app.enable_iter_history();
+    TRUE
+}
+
+/// Write a `pounce.solve-report/v1` JSON file capturing the most
+/// recent [`IpoptSolve`] result. `path` is a NUL-terminated UTF-8
+/// filesystem path. `detail` is one of `"summary"` or `"full"`
+/// (NUL-terminated); pass `NULL` for the default (`"summary"`).
+///
+/// When `detail = "full"` and [`IpoptEnableIterHistory`] was called
+/// pre-solve, the per-iteration trajectory is embedded so that
+/// downstream tools (`diagnose`, `find_stalls`, `convergence_trace`)
+/// see the same trace the `pounce` CLI's `--json-output` path
+/// produces. The input descriptor is recorded as `tnlp-direct`
+/// because the cinterface receives callbacks rather than a file.
+///
+/// Returns `TRUE` on a successful write, `FALSE` for NULL handle,
+/// no prior solve, an invalid `detail`, a bad path, or an I/O error.
+///
+/// # Safety
+///
+/// `ipopt_problem` must be a valid handle; `path` must be a valid
+/// NUL-terminated UTF-8 string; `detail` must be NULL or a valid
+/// NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn IpoptWriteSolveReport(
+    ipopt_problem: IpoptProblem,
+    path: *const c_char,
+    detail: *const c_char,
+) -> Bool {
+    use pounce_solve_report::{
+        status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder,
+        ReportDetail,
+    };
+
+    if ipopt_problem.is_null() || path.is_null() {
+        return FALSE;
+    }
+    let info = unsafe { &*ipopt_problem };
+    let Some(last) = info.last_solve.as_ref() else {
+        return FALSE;
+    };
+
+    let Ok(path_str) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+        return FALSE;
+    };
+
+    let detail_choice = if detail.is_null() {
+        ReportDetail::Summary
+    } else {
+        let Ok(detail_str) = (unsafe { CStr::from_ptr(detail) }).to_str() else {
+            return FALSE;
+        };
+        match ReportDetail::parse(detail_str) {
+            Ok(d) => d,
+            Err(_) => return FALSE,
+        }
+    };
+
+    let mut builder = ReportBuilder::new(detail_choice, InputDescriptor::TnlpDirect);
+    builder.problem.n_variables = info.n;
+    builder.problem.n_constraints = info.m;
+    builder.problem.n_objectives = 1;
+    builder.problem.nnz_jac_g = Some(info.nele_jac);
+    builder.problem.nnz_h_lag = Some(info.nele_hess);
+
+    builder.solution.status = last.status;
+    builder.solution.solve_result_num = status_to_solve_result_num(last.status);
+    builder.solution.objective = last.final_obj;
+    builder.solution.x = last.final_x.clone();
+    builder.solution.lambda = last.final_lambda.clone();
+
+    builder.ingest_stats(&last.stats);
+    if let Some(linsol) = last.linear_solver.clone() {
+        builder.set_linear_solver_summary(linsol);
+    }
+
+    let report = builder.finish();
+    match write_report_file(std::path::Path::new(path_str), &report) {
+        Ok(_) => TRUE,
+        Err(_) => FALSE,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2005,6 +2132,79 @@ mod tests {
             assert!(GetIpoptComplInf(p).is_finite());
             FreeIpoptProblem(p);
         }
+    }
+
+    #[test]
+    fn write_solve_report_emits_v1_json_with_iter_history() {
+        // Quadratic — Newton driver, single iter; just exercises the
+        // post-solve report path end-to-end.
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        let p = unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
+            )
+        };
+
+        // Write before any solve must fail.
+        let cpath = CString::new("/tmp/pounce_cinterface_no_solve.json").unwrap();
+        let bad = unsafe { IpoptWriteSolveReport(p, cpath.as_ptr(), std::ptr::null()) };
+        assert_eq!(bad, FALSE);
+
+        // Enable per-iter capture, solve, then write at detail = full.
+        assert_eq!(unsafe { IpoptEnableIterHistory(p) }, TRUE);
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("pounce_cinterface_report.json");
+        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        let cdetail = CString::new("full").unwrap();
+        let ok = unsafe { IpoptWriteSolveReport(p, cpath.as_ptr(), cdetail.as_ptr()) };
+        assert_eq!(ok, TRUE);
+
+        // Read it back and check the schema tag + that it parses with
+        // the same struct shape pounce-cli uses.
+        let txt = std::fs::read_to_string(&path).unwrap();
+        assert!(txt.contains("\"schema\": \"pounce.solve-report/v1\""), "{txt}");
+        assert!(txt.contains("\"kind\": \"tnlp-direct\""));
+        let parsed: pounce_solve_report::SolveReport = serde_json::from_str(&txt).unwrap();
+        assert_eq!(parsed.problem.n_variables, 1);
+        assert_eq!(parsed.problem.n_constraints, 0);
+
+        // Invalid detail string is rejected.
+        let bad_detail = CString::new("verbose").unwrap();
+        let bad = unsafe { IpoptWriteSolveReport(p, cpath.as_ptr(), bad_detail.as_ptr()) };
+        assert_eq!(bad, FALSE);
+
+        let _ = std::fs::remove_file(&path);
+        unsafe { FreeIpoptProblem(p) };
     }
 
     // --- Intermediate-callback wiring (issue #19, follow-up) ---

@@ -201,11 +201,15 @@ pub unsafe extern "C" fn IpoptSolverSolve(
     let bridge_for_solver: Rc<RefCell<dyn TNLP>> = bridge.clone();
     let mut rust_solver = RustSolver::new(app, bridge_for_solver);
     let status = rust_solver.solve();
+    let bridge_ref = bridge.borrow();
     info.problem.last_solve = Some(LastSolve {
         stats: rust_solver.app().statistics(),
+        status,
+        linear_solver: rust_solver.app().linear_solver_summary(),
+        final_x: bridge_ref.final_x.clone(),
+        final_lambda: bridge_ref.final_lambda.clone(),
+        final_obj: bridge_ref.final_obj,
     });
-
-    let bridge_ref = bridge.borrow();
     if !x.is_null() && n_us > 0 {
         std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
     }

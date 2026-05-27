@@ -20,6 +20,11 @@ pounce-algorithm.workspace = true
 pounce-qp.workspace = true
 pounce-restoration.workspace = true
 pounce-sensitivity.workspace = true
+pounce-linsol.workspace = true
+pounce-solve-report.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
 
 [lints]
 workspace = true
