@@ -156,6 +156,141 @@ impl EqualityIncidence {
     }
 }
 
+/// CSR-style bipartite adjacency: **inequality** rows ↔ variables.
+///
+/// Mirror of [`EqualityIncidence`] but for rows where
+/// `|g_u - g_l| > eq_tol` (any range or one-sided bound). Used by
+/// PR 5's coupling classifier: a candidate block is unsafe to
+/// eliminate if its variables also appear in any inequality row.
+#[derive(Debug, Clone, Default)]
+pub struct InequalityIncidence {
+    /// Number of variables (columns).
+    pub n_vars: usize,
+    /// Inner-row indices of the inequality rows, in ascending order.
+    pub ineq_row_inner_idx: Vec<usize>,
+    /// CSR row pointers.
+    pub adj_ptr: Vec<usize>,
+    /// Sorted, deduped column indices per row.
+    pub vars: Vec<usize>,
+    /// Reverse adjacency: for each variable, the list of inequality
+    /// rows that touch it (sorted ascending).
+    pub col_to_rows_ptr: Vec<usize>,
+    pub col_to_rows: Vec<usize>,
+}
+
+impl InequalityIncidence {
+    /// Build the inequality-incidence graph from the same probe
+    /// [`EqualityIncidence`] uses; we just invert the equality
+    /// filter.
+    pub fn from_probe(p: &ProbeView<'_>) -> Self {
+        // 1. Identify inequality rows.
+        let mut ineq_row_inner_idx: Vec<usize> = Vec::new();
+        let mut inner_to_ineq: Vec<Option<usize>> = vec![None; p.m_rows];
+        for (i, slot) in inner_to_ineq.iter_mut().enumerate() {
+            if (p.g_u[i] - p.g_l[i]).abs() > p.eq_tol {
+                *slot = Some(ineq_row_inner_idx.len());
+                ineq_row_inner_idx.push(i);
+            }
+        }
+        let n_ineq = ineq_row_inner_idx.len();
+
+        // 2. Bucket Jacobian entries by inequality-row index.
+        let mut per_row: Vec<Vec<usize>> = vec![Vec::new(); n_ineq];
+        let nnz = p.jac_irow.len();
+        for k in 0..nnz {
+            if let Some(vals) = p.jac_values {
+                if vals[k] == 0.0 {
+                    continue;
+                }
+            }
+            let i = if p.one_based {
+                (p.jac_irow[k] as isize - 1) as usize
+            } else {
+                p.jac_irow[k] as usize
+            };
+            if i >= p.m_rows {
+                continue;
+            }
+            let Some(ineq_k) = inner_to_ineq[i] else {
+                continue;
+            };
+            let j = if p.one_based {
+                (p.jac_jcol[k] as isize - 1) as usize
+            } else {
+                p.jac_jcol[k] as usize
+            };
+            if j >= p.n_vars {
+                continue;
+            }
+            per_row[ineq_k].push(j);
+        }
+
+        // 3. CSR pack.
+        let mut adj_ptr: Vec<usize> = Vec::with_capacity(n_ineq + 1);
+        let mut vars: Vec<usize> = Vec::new();
+        adj_ptr.push(0);
+        for row in per_row.iter_mut() {
+            row.sort_unstable();
+            row.dedup();
+            vars.extend_from_slice(row);
+            adj_ptr.push(vars.len());
+        }
+
+        // 4. Reverse adjacency for cheap "does var j touch an
+        // inequality?" queries.
+        let mut col_to_rows_ptr = vec![0usize; p.n_vars + 1];
+        for &v in &vars {
+            col_to_rows_ptr[v + 1] += 1;
+        }
+        for i in 1..=p.n_vars {
+            col_to_rows_ptr[i] += col_to_rows_ptr[i - 1];
+        }
+        let mut col_to_rows = vec![0usize; col_to_rows_ptr[p.n_vars]];
+        let mut cursor = col_to_rows_ptr[..p.n_vars].to_vec();
+        for (ineq_k, row) in per_row.iter().enumerate() {
+            for &v in row {
+                col_to_rows[cursor[v]] = ineq_k;
+                cursor[v] += 1;
+            }
+        }
+
+        Self {
+            n_vars: p.n_vars,
+            ineq_row_inner_idx,
+            adj_ptr,
+            vars,
+            col_to_rows_ptr,
+            col_to_rows,
+        }
+    }
+
+    /// Number of inequality rows.
+    pub fn n_ineq_rows(&self) -> usize {
+        self.ineq_row_inner_idx.len()
+    }
+
+    /// Sorted variable neighbours of inequality row `k`.
+    pub fn neighbors(&self, k: usize) -> &[usize] {
+        let lo = self.adj_ptr[k];
+        let hi = self.adj_ptr[k + 1];
+        &self.vars[lo..hi]
+    }
+
+    /// Sorted inequality-row neighbours of variable `j` (0-based into
+    /// `0..n_vars`). Returns an empty slice if no inequality touches
+    /// `j`.
+    pub fn rows_for_var(&self, j: usize) -> &[usize] {
+        let lo = self.col_to_rows_ptr[j];
+        let hi = self.col_to_rows_ptr[j + 1];
+        &self.col_to_rows[lo..hi]
+    }
+
+    /// True iff variable `j` appears in any inequality row.
+    pub fn var_in_inequality(&self, j: usize) -> bool {
+        !self.rows_for_var(j).is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +380,40 @@ mod tests {
         };
         let inc = EqualityIncidence::from_probe(&p);
         assert_eq!(inc.neighbors(0), &[0]);
+    }
+
+    #[test]
+    fn inequality_incidence_filters_equalities() {
+        // Row 0 is g = 1 (equality); row 1 is g ∈ [0, 5] (range).
+        // Only row 1 should appear in InequalityIncidence.
+        let p = probe(2, 2, &[0, 0, 1], &[0, 1, 0], &[1.0, 0.0], &[1.0, 5.0]);
+        let ineq = InequalityIncidence::from_probe(&p);
+        assert_eq!(ineq.n_ineq_rows(), 1);
+        assert_eq!(ineq.ineq_row_inner_idx, vec![1]);
+        assert_eq!(ineq.neighbors(0), &[0]);
+        assert!(ineq.var_in_inequality(0));
+        assert!(!ineq.var_in_inequality(1));
+    }
+
+    #[test]
+    fn inequality_incidence_range_row() {
+        // Single row, g ∈ [-2, 5] over both variables.
+        let p = probe(2, 1, &[0, 0], &[0, 1], &[-2.0], &[5.0]);
+        let ineq = InequalityIncidence::from_probe(&p);
+        assert_eq!(ineq.n_ineq_rows(), 1);
+        assert_eq!(ineq.neighbors(0), &[0, 1]);
+        // Reverse adjacency points each variable back to row 0.
+        assert_eq!(ineq.rows_for_var(0), &[0]);
+        assert_eq!(ineq.rows_for_var(1), &[0]);
+    }
+
+    #[test]
+    fn inequality_incidence_one_sided() {
+        // g(x) ≤ 5 (lower = -∞ in Ipopt land). Encoded with a very
+        // negative lower bound; abs gap >> eq_tol.
+        let p = probe(1, 1, &[0], &[0], &[-1e19], &[5.0]);
+        let ineq = InequalityIncidence::from_probe(&p);
+        assert_eq!(ineq.n_ineq_rows(), 1);
+        assert_eq!(ineq.neighbors(0), &[0]);
     }
 }
