@@ -661,6 +661,553 @@ def linear_solver_summary(path: str) -> dict[str, Any]:
     return {"available": summary is not None, "summary": summary}
 
 
+# ---- GAMS-link tools ------------------------------------------------
+
+# Suites shipped under gams/nlpbench/instances/<suite>/, plus the
+# stand-alone examples under gams/examples/ and the top-level smoke test.
+_GAMS_SUITES = (
+    "globallib.gms",
+    "mittelmann.gms",
+    "princetonlib.gms",
+    "powerflow.gms",
+)
+
+
+def _find_repo_root() -> Path:
+    """Walk up to find the pounce repo root (contains gams/ and Cargo.toml)."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "Cargo.toml").exists() and (parent / "gams").is_dir():
+            return parent
+    raise FileNotFoundError("could not locate pounce repo root from MCP server")
+
+
+def _find_gams_bin() -> str:
+    """Locate the gams CLI. GAMS_BIN env wins, then $PATH, then macOS framework."""
+    env = os.environ.get("GAMS_BIN")
+    if env and Path(env).exists():
+        return env
+    which = shutil.which("gams")
+    if which:
+        return which
+    mac = Path("/Library/Frameworks/GAMS.framework/Versions/Current/Resources/gams")
+    if mac.exists():
+        return str(mac)
+    raise FileNotFoundError(
+        "could not locate `gams`. Set GAMS_BIN or put gams on PATH."
+    )
+
+
+_GMS_HEADER_COUNTS = {
+    "equations":   ("Equation counts",   ("Total", "E", "G", "L", "N", "X")),
+    "variables":   ("Variable counts",   ("Total", "cont", "binary", "integer",
+                                          "sos1", "sos2", "scont", "sint")),
+    "nonzeros":    ("Nonzero counts",    ("Total", "const", "NL", "DLL")),
+}
+
+
+def _parse_gms_convert_header(text: str) -> dict[str, Any]:
+    """Parse the comment block emitted by `gams convert`.
+
+    Lines look like:
+        *  Equation counts
+        *     Total       E       G       L       N       X
+        *       109     108       0       1       0       0
+    Returns {} when the file wasn't produced by `convert`.
+    """
+    out: dict[str, Any] = {}
+    lines = [l for l in text.splitlines() if l.startswith("*")]
+    for key, (header, _cols) in _GMS_HEADER_COUNTS.items():
+        for i, line in enumerate(lines):
+            if header not in line:
+                continue
+            # Convert emits 1 or 2 column-header lines between the title and
+            # the actual count line. Scan the next 4 lines for the first
+            # one that's all numeric.
+            nums: list[str] = []
+            for j in range(i + 1, min(i + 5, len(lines))):
+                cand = [t for t in lines[j].lstrip("*").split() if t.lstrip("-").isdigit()]
+                if cand:
+                    nums = cand
+                    break
+            if not nums:
+                continue
+            if key == "equations":
+                out["n_equations_total"] = int(nums[0])
+                if len(nums) >= 2: out["n_equality_eqs"] = int(nums[1])
+                if len(nums) >= 3: out["n_ge_eqs"]       = int(nums[2])
+                if len(nums) >= 4: out["n_le_eqs"]       = int(nums[3])
+            elif key == "variables":
+                out["n_variables_total"] = int(nums[0])
+                if len(nums) >= 2: out["n_continuous_vars"] = int(nums[1])
+                if len(nums) >= 3: out["n_binary_vars"]     = int(nums[2])
+                if len(nums) >= 4: out["n_integer_vars"]    = int(nums[3])
+            elif key == "nonzeros":
+                out["nnz_total"] = int(nums[0])
+                if len(nums) >= 2: out["nnz_constant"] = int(nums[1])
+                if len(nums) >= 3: out["nnz_nonlinear"] = int(nums[2])
+            break
+    return out
+
+
+def _parse_gms_solve_directive(text: str) -> dict[str, Any]:
+    """Find the `Solve <model> using <TYPE> [minimizing|maximizing] <objvar>;` line."""
+    import re
+    pat = re.compile(
+        r"^\s*Solve\s+(\w+)\s+using\s+(\w+)"
+        r"(?:\s+(minimizing|maximizing)\s+(\w+))?",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    m = pat.search(text)
+    if not m:
+        return {}
+    return {
+        "model_name": m.group(1),
+        "model_type": m.group(2).upper(),
+        "direction": (m.group(3) or "").lower() or None,
+        "objective_var": m.group(4),
+    }
+
+
+def _gms_classify(model_type: str | None, dims: dict[str, Any]) -> str:
+    """Map GAMS model type + dims into a human description."""
+    if not model_type:
+        return "unknown"
+    table = {
+        "NLP":   "nonlinear program (continuous)",
+        "DNLP":  "non-differentiable NLP",
+        "RMINLP":"relaxed mixed-integer NLP",
+        "MINLP": "mixed-integer NLP",
+        "LP":    "linear program",
+        "MIP":   "mixed-integer linear",
+        "QCP":   "quadratically constrained program",
+        "CNS":   "constrained nonlinear system",
+    }
+    base = table.get(model_type, f"{model_type} model")
+    nnl = dims.get("nnz_nonlinear", 0)
+    if model_type in ("NLP", "DNLP") and nnl == 0:
+        base += " (linear in nonzero pattern — should solve trivially)"
+    return base
+
+
+def _suggest_gams_options(dims: dict[str, Any], model_type: str | None) -> list[dict[str, str]]:
+    """pounce.opt key/value suggestions for a GAMS NLP."""
+    suggestions: list[dict[str, str]] = []
+    n_var = dims.get("n_variables_total", 0)
+    n_eq  = dims.get("n_equations_total", 0)
+    nnl   = dims.get("nnz_nonlinear", 0)
+    size = n_var + n_eq
+
+    if model_type in ("MINLP", "MIP"):
+        suggestions.append({
+            "option": "(none)",
+            "value": "",
+            "why": (
+                f"model type is {model_type}; POUNCE handles only NLP/DNLP/RMINLP. "
+                "Either relax the integrality (RMINLP) or pick a different solver."
+            ),
+        })
+        return suggestions
+
+    suggestions.append({
+        "option": "mu_strategy",
+        "value": "adaptive",
+        "why": (
+            "matches GAMS-IPOPT's effective default (optipopt.def). pounce's "
+            "compile-time default is `monotone`, which stalls some hard NLPs."
+        ),
+    })
+    if size > 5_000:
+        suggestions.append({
+            "option": "linear_solver",
+            "value": "ma57",
+            "why": (
+                f"problem is medium/large ({n_var} vars, {n_eq} eqs); MA57 is much "
+                "faster than FERAL at this scale. Requires --features ma57 build."
+            ),
+        })
+    if nnl > 0 and nnl > 0.5 * dims.get("nnz_total", 1):
+        suggestions.append({
+            "option": "tol",
+            "value": "1e-6",
+            "why": (
+                "heavily nonlinear pattern: tightening below 1e-6 often leads "
+                "to dual stagnation on degenerate KKT systems."
+            ),
+        })
+    return suggestions
+
+
+def _parse_lst_solve_summary(text: str) -> dict[str, Any]:
+    """Parse the `S O L V E   S U M M A R Y` block of a GAMS .lst file.
+
+    Plus extracts the embedded `=C ...` solver-status block (where POUNCE
+    writes its termination one-liner).
+    """
+    import re
+
+    summary: dict[str, Any] = {}
+
+    pat_model = re.compile(r"MODEL\s+(\S+).*?OBJECTIVE\s+(\S+)", re.IGNORECASE)
+    pat_solver = re.compile(r"SOLVER\s+(\S+)\s+FROM LINE\s+(\d+)", re.IGNORECASE)
+    pat_status = re.compile(r"\*\*\*\*\s+SOLVER STATUS\s+(\d+)\s+(.+)")
+    pat_mstat  = re.compile(r"\*\*\*\*\s+MODEL STATUS\s+(\d+)\s+(.+)")
+    pat_obj    = re.compile(r"\*\*\*\*\s+OBJECTIVE VALUE\s+(\S+)")
+    pat_res    = re.compile(r"RESOURCE USAGE,\s*LIMIT\s+(\S+)\s+(\S+)")
+    pat_it     = re.compile(r"ITERATION COUNT,\s*LIMIT\s+(\S+)\s+(\S+)")
+    pat_eval   = re.compile(r"EVALUATION ERRORS\s+(\S+)\s+(\S+)")
+
+    for line in text.splitlines():
+        if m := pat_model.search(line):
+            summary["model"] = m.group(1)
+            summary["objective_var"] = m.group(2)
+        elif m := pat_solver.search(line):
+            summary["solver"] = m.group(1)
+            summary["from_line"] = int(m.group(2))
+        elif m := pat_status.search(line):
+            summary["solver_status_code"] = int(m.group(1))
+            summary["solver_status"] = m.group(2).strip()
+        elif m := pat_mstat.search(line):
+            summary["model_status_code"] = int(m.group(1))
+            summary["model_status"] = m.group(2).strip()
+        elif m := pat_obj.search(line):
+            v = m.group(1)
+            try:
+                summary["objective_value"] = float(v)
+            except ValueError:
+                summary["objective_value"] = v  # e.g. "NA"
+        elif m := pat_res.search(line):
+            try: summary["resource_used_secs"] = float(m.group(1))
+            except ValueError: summary["resource_used_secs"] = m.group(1)
+            try: summary["resource_limit_secs"] = float(m.group(2))
+            except ValueError: pass
+        elif m := pat_it.search(line):
+            try: summary["iteration_count"] = int(m.group(1))
+            except ValueError: summary["iteration_count"] = m.group(1)
+            try: summary["iteration_limit"] = int(m.group(2))
+            except ValueError: pass
+        elif m := pat_eval.search(line):
+            try: summary["evaluation_errors"] = int(m.group(1))
+            except ValueError: summary["evaluation_errors"] = m.group(1)
+
+    # Extract the embedded solver-status block. Two formats appear in the wild:
+    #   (a) `=C ...` lines wrapped by `SOLVER STATUS FILE LISTED BELOW/ABOVE`
+    #       (some solvelink modes / older GAMS).
+    #   (b) A plain block beginning with `--- POUNCE: ...` and ending just
+    #       before the `---- EQU` / `---- VAR` solution tables (current
+    #       in-process dylib path).
+    lines = text.splitlines()
+    solver_block_lines: list[str] = []
+    # (a) =C wrapped form
+    in_block = False
+    for line in lines:
+        if "SOLVER STATUS FILE LISTED BELOW" in line:
+            in_block = True
+            continue
+        if "SOLVER STATUS FILE LISTED ABOVE" in line:
+            in_block = False
+            continue
+        if in_block and line.startswith("=C"):
+            solver_block_lines.append(line[2:].rstrip())
+    # (b) `--- POUNCE:` form
+    if not solver_block_lines:
+        capturing = False
+        for line in lines:
+            if not capturing and line.startswith("--- POUNCE"):
+                capturing = True
+            if capturing:
+                if line.startswith("---- ") or line.startswith("EXECUTION TIME"):
+                    break
+                solver_block_lines.append(line.rstrip())
+    if solver_block_lines:
+        summary["solver_status_file"] = "\n".join(solver_block_lines).rstrip()
+
+    return summary
+
+
+@mcp.tool()
+def list_gams_examples(
+    suite: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Enumerate the GAMS .gms instances bundled under `gams/`.
+
+    Three sources are scanned: the four `nlpbench/instances/<suite>/` test
+    suites (globallib, mittelmann, princetonlib, powerflow), the
+    `gams/examples/` directory, and the top-level `gams/test_hs071.gms`
+    smoke problem. Pass `suite=None` to get counts across all of them;
+    pass a suite name to list files (offset/limit-paginated).
+
+    Args:
+        suite: One of "globallib.gms", "mittelmann.gms",
+            "princetonlib.gms", "powerflow.gms", "examples", "smoke",
+            or None for a high-level summary.
+        limit: Max files to return when `suite` is set.
+        offset: Skip this many files (for paging).
+
+    Returns:
+        When `suite` is None: `{"suites": [{name, count, root}, ...]}`.
+        Otherwise: `{"suite", "root", "count", "limit", "offset", "files": [...]}`.
+    """
+    root = _find_repo_root()
+    gams_dir = root / "gams"
+
+    def _suite_root(name: str) -> Path:
+        if name in _GAMS_SUITES:
+            return gams_dir / "nlpbench" / "instances" / name
+        if name == "examples":
+            return gams_dir / "examples"
+        if name == "smoke":
+            return gams_dir
+        raise ValueError(
+            f"unknown suite {name!r}; valid: {list(_GAMS_SUITES) + ['examples', 'smoke']}"
+        )
+
+    if suite is None:
+        suites = []
+        for s in _GAMS_SUITES:
+            d = gams_dir / "nlpbench" / "instances" / s
+            n = sum(1 for _ in d.glob("*.gms")) if d.is_dir() else 0
+            suites.append({"name": s, "count": n, "root": str(d)})
+        ex = gams_dir / "examples"
+        suites.append({
+            "name": "examples",
+            "count": sum(1 for _ in ex.glob("*.gms")) if ex.is_dir() else 0,
+            "root": str(ex),
+        })
+        suites.append({
+            "name": "smoke",
+            "count": 1 if (gams_dir / "test_hs071.gms").exists() else 0,
+            "root": str(gams_dir),
+        })
+        return {"suites": suites, "total": sum(s["count"] for s in suites)}
+
+    sroot = _suite_root(suite)
+    if suite == "smoke":
+        f = gams_dir / "test_hs071.gms"
+        files = [str(f)] if f.exists() else []
+    else:
+        if not sroot.is_dir():
+            return {"suite": suite, "root": str(sroot), "count": 0, "files": []}
+        files = sorted(str(p) for p in sroot.glob("*.gms"))
+
+    return {
+        "suite": suite,
+        "root": str(sroot),
+        "count": len(files),
+        "limit": limit,
+        "offset": offset,
+        "files": files[offset:offset + limit],
+    }
+
+
+@mcp.tool()
+def analyze_gams_problem(gms_file: str) -> dict[str, Any]:
+    """Inspect a .gms file without solving it.
+
+    Parses the comment-block header that `gams convert` emits (variable /
+    equation / nonzero counts) and the `Solve ... using <TYPE>` line.
+    Returns dimensions, model class, suggested pounce.opt entries, and
+    heuristic warnings. For .gms files that were hand-written rather than
+    convert-translated, the dimensions may be empty — pounce will still
+    solve, but pass `analyze=False` to `run_gams_problem` in that case.
+
+    Args:
+        gms_file: Path to a .gms file.
+    """
+    p = Path(gms_file).expanduser()
+    if not p.exists():
+        raise FileNotFoundError(f"no such .gms file: {p}")
+    text = p.read_text(errors="replace")
+
+    dims = _parse_gms_convert_header(text)
+    solve = _parse_gms_solve_directive(text)
+    model_type = solve.get("model_type")
+
+    warnings: list[str] = []
+    if not dims:
+        warnings.append(
+            "no `gams convert` header found — dimensions could not be parsed. "
+            "POUNCE will still solve the model; the suggestion list is conservative."
+        )
+    if not solve:
+        warnings.append("no `Solve` directive found in file — is this a complete model?")
+    if model_type in ("MINLP", "MIP"):
+        warnings.append(
+            f"model type {model_type} is not supported by POUNCE "
+            "(integer variables present)."
+        )
+    if dims.get("n_binary_vars", 0) or dims.get("n_integer_vars", 0):
+        warnings.append("discrete variables present; POUNCE solves the continuous relaxation only.")
+
+    return {
+        "path": str(p),
+        "dimensions": dims,
+        "solve_directive": solve,
+        "class": _gms_classify(model_type, dims),
+        "supported_by_pounce": model_type in ("NLP", "DNLP", "RMINLP") if model_type else None,
+        "suggestions": _suggest_gams_options(dims, model_type),
+        "warnings": warnings,
+    }
+
+
+@mcp.tool()
+def parse_gams_listing(lst_file: str) -> dict[str, Any]:
+    """Parse the SOLVE SUMMARY block from a GAMS .lst file.
+
+    Extracts model/solver identity, status codes (solver and model),
+    objective value, resource/iteration usage, and the embedded `=C ...`
+    solver status block (the per-solver one-liner GAMS echoes into the
+    listing — POUNCE writes its termination message there).
+
+    Args:
+        lst_file: Path to a GAMS `.lst` listing.
+
+    Returns:
+        Dict with parsed `summary` fields. Missing fields are simply
+        absent (the parser is tolerant). When the listing reports
+        "Could not spawn solver", `solver_status_code` will be 13 and
+        `solver_status_file` will be empty.
+    """
+    p = Path(lst_file).expanduser()
+    if not p.exists():
+        raise FileNotFoundError(f"no such .lst file: {p}")
+    return {"path": str(p), "summary": _parse_lst_solve_summary(p.read_text(errors="replace"))}
+
+
+@mcp.tool()
+def run_gams_problem(
+    gms_file: str,
+    options: dict[str, str] | None = None,
+    json_detail: str = "full",
+    workdir: str | None = None,
+    extra_pounce_opt_lines: list[str] | None = None,
+    timeout_seconds: float = 600.0,
+    analyze: bool = True,
+) -> dict[str, Any]:
+    """Run a .gms problem through GAMS with POUNCE and capture the JSON report.
+
+    Workflow:
+        1. Copy the .gms into a working directory (tempdir if omitted).
+        2. Write a `pounce.opt` containing user `options` plus the
+           `json_output` / `json_detail` keys that route a
+           pounce.solve-report/v1 JSON to disk.
+        3. Invoke `gams <stem>.gms NLP=POUNCE optfile=1`.
+        4. Parse the resulting `.lst` SOLVE SUMMARY block.
+        5. If the JSON report was written, parse and summarise it too.
+
+    The GAMS link must have been built and installed (see `gams/Makefile`)
+    with the JSON-report instrumentation present in pounce.h.
+
+    Args:
+        gms_file: Path to the .gms file to solve.
+        options: pounce.opt key/value pairs (e.g. {"tol": "1e-6",
+            "max_iter": "5000", "mu_strategy": "adaptive"}).
+        json_detail: "summary" or "full" (default "full"). Use "full"
+            so the post-mortem MCP tools (diagnose, find_stalls, etc.)
+            have iteration history to work on.
+        workdir: Directory to run in (created if missing). When None, a
+            tempdir is created and its path returned in `workdir`.
+        extra_pounce_opt_lines: Raw pounce.opt lines to append verbatim
+            (for options not in the simple key/value table).
+        timeout_seconds: Kill the GAMS subprocess after this many seconds.
+        analyze: When True (default), call `analyze_gams_problem` first
+            and embed the result under `analysis`.
+
+    Returns:
+        Dict with `workdir`, `gms_file`, `lst_file`, `log_file`,
+        `report_path`, `exit_code`, `elapsed_seconds`, `argv`, the
+        parsed `lst_summary`, and (when the JSON report was written)
+        a `report_summary` from `summarize`. Also includes `analysis`
+        when analyze=True.
+    """
+    if json_detail not in ("summary", "full"):
+        raise ValueError(
+            f"json_detail must be 'summary' or 'full', got {json_detail!r}"
+        )
+    src = Path(gms_file).expanduser()
+    if not src.exists():
+        raise FileNotFoundError(f"no such .gms file: {src}")
+
+    pre_analysis: dict[str, Any] | None = None
+    if analyze:
+        try:
+            pre_analysis = analyze_gams_problem(str(src))
+        except (ValueError, FileNotFoundError) as e:
+            pre_analysis = {"error": str(e)}
+
+    gams_bin = _find_gams_bin()
+
+    if workdir is None:
+        wd = Path(tempfile.mkdtemp(prefix=f"pounce-gams-{src.stem}-"))
+        wd_created = True
+    else:
+        wd = Path(workdir).expanduser()
+        wd.mkdir(parents=True, exist_ok=True)
+        wd_created = False
+
+    staged_gms = wd / src.name
+    shutil.copy2(src, staged_gms)
+    report_path = wd / f"{src.stem}.report.json"
+
+    opt_lines = [
+        "# pounce.opt generated by pounce-studio MCP run_gams_problem",
+        "print_level 0",
+    ]
+    if options:
+        for k, v in options.items():
+            opt_lines.append(f"{k} {v}")
+    if extra_pounce_opt_lines:
+        opt_lines.extend(extra_pounce_opt_lines)
+    opt_lines.append(f"json_output {report_path}")
+    opt_lines.append(f"json_detail {json_detail}")
+    (wd / "pounce.opt").write_text("\n".join(opt_lines) + "\n")
+
+    argv = [gams_bin, str(staged_gms), "NLP=POUNCE", "optfile=1", "lo=2"]
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout_seconds, cwd=wd,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(
+            f"gams did not finish within {timeout_seconds}s"
+        ) from e
+    elapsed = time.monotonic() - start
+
+    lst_file = wd / f"{src.stem}.lst"
+    log_file = wd / f"{src.stem}.log"
+
+    def tail(s: str, n: int = 4000) -> str:
+        return s if len(s) <= n else "...\n" + s[-n:]
+
+    result: dict[str, Any] = {
+        "workdir": str(wd),
+        "workdir_created": wd_created,
+        "gms_file": str(staged_gms),
+        "lst_file": str(lst_file) if lst_file.exists() else None,
+        "log_file": str(log_file) if log_file.exists() else None,
+        "report_path": str(report_path) if report_path.exists() else None,
+        "exit_code": proc.returncode,
+        "elapsed_seconds": round(elapsed, 3),
+        "argv": argv,
+        "stdout_tail": tail(proc.stdout),
+        "stderr_tail": tail(proc.stderr),
+    }
+    if pre_analysis is not None:
+        result["analysis"] = pre_analysis
+    if lst_file.exists():
+        result["lst_summary"] = _parse_lst_solve_summary(
+            lst_file.read_text(errors="replace")
+        )
+    if report_path.exists():
+        try:
+            result["report_summary"] = R.summarize(R.load_report(report_path))
+        except R.ReportError as e:
+            result["report_summary_error"] = str(e)
+    return result
+
+
 def main() -> None:
     """Entry point used by `python -m pounce_studio_mcp`."""
     mcp.run()

@@ -14,18 +14,46 @@ across the FFI.
 
 ## Install
 
-A Rust toolchain (1.75+) is required because the package builds a
-native extension via maturin.
+A Rust toolchain (1.75+) and Python 3.10+ are required.
+
+**One-liner — build, install, and register with Claude Code:**
+
+```bash
+cd studio/mcp
+./install.sh --register --user
+```
+
+This:
+1. Builds the `pounce` CLI (`cargo build --release -p pounce-cli`).
+2. Creates a venv at `studio/mcp/.venv` (override with `POUNCE_VENV=...`).
+3. Installs `maturin`, `mcp`, and the native extension (`maturin develop --release`).
+4. Runs the test suite to confirm the build is healthy.
+5. With `--register`: invokes `claude mcp add pounce-studio ...` so Claude
+   Code picks it up immediately. `--user` registers it at user scope so it's
+   available in every project. Drop `--user` for project-local scope.
+
+After install, `claude mcp list` should show `pounce-studio: ✓ Connected`.
+
+**Build without registering** (manual config or non-Claude-Code clients):
+
+```bash
+./install.sh
+```
+
+The script prints the absolute path to the installed binary and a copy-pasteable
+JSON snippet for Claude Desktop / Cursor / Zed at the end.
+
+**Manual install** (if you prefer step-by-step):
 
 ```bash
 cd studio/mcp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install maturin mcp
-maturin develop --release   # builds _native.*.so and installs editable
+maturin develop --release
 ```
 
-This exposes a `pounce-studio-mcp` console script that speaks MCP over
+Either path exposes a `pounce-studio-mcp` console script that speaks MCP over
 stdio.
 
 ## Tools
@@ -44,6 +72,10 @@ stdio.
 | `diagnose`            | Common Ipopt-failure heuristics with severity-tagged findings           |
 | `compare_runs`        | Side-by-side comparison of multiple reports                             |
 | `linear_solver_summary` | Aggregate FERAL backend post-mortem: factor counts, fill ratio, extremal pivots, final inertia |
+| `list_gams_examples`  | Enumerate bundled .gms instances (globallib, princetonlib, mittelmann, powerflow, examples, smoke) |
+| `analyze_gams_problem` | Inspect a .gms file: dims (vars/eqs/NL nnz), `Solve` directive, model class, option suggestions |
+| `parse_gams_listing`  | Parse a .lst SOLVE SUMMARY block + the embedded `--- POUNCE` solver status block |
+| `run_gams_problem`    | Run a .gms through `gams NLP=POUNCE` with JSON report capture; returns parsed lst + report summary |
 
 ### `run_problem` notes
 
@@ -65,18 +97,16 @@ clients; only the file location differs.
 
 ### Claude Code
 
-Add to `~/.claude/settings.json` (user-wide) or
-`.claude/settings.json` in a project:
+The fastest path is `./install.sh --register --user` (see [Install](#install)).
+That runs the equivalent of:
 
-```json
-{
-  "mcpServers": {
-    "pounce-studio": {
-      "command": "pounce-studio-mcp"
-    }
-  }
-}
+```bash
+claude mcp add pounce-studio --scope user \
+    --env "POUNCE_BIN=$PWD/../../target/release/pounce" \
+    -- "$PWD/.venv/bin/pounce-studio-mcp"
 ```
+
+Drop `--scope user` for project-local scope (writes `.mcp.json` in the cwd).
 
 ### Claude Desktop
 

@@ -1,0 +1,20 @@
+GAMS 53.2.0  test fixture
+G e n e r a l   A l g e b r a i c   M o d e l i n g   S y s t e m
+Solution Report     SOLVE m Using NLP From line 42
+
+
+               S O L V E      S U M M A R Y
+
+     MODEL   m                   OBJECTIVE  objvar
+     TYPE    NLP                 DIRECTION  MINIMIZE
+     SOLVER  POUNCE              FROM LINE  42
+
+**** SOLVER STATUS     13 System Failure
+**** MODEL STATUS      13 Error No Solution
+**** OBJECTIVE VALUE               NA
+
+ RESOURCE USAGE, LIMIT         NA     10000000000.000
+ ITERATION COUNT, LIMIT        NA    2147483647
+ EVALUATION ERRORS             NA             0
+
+No solution returned
