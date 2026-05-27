@@ -49,6 +49,7 @@ pub mod reduction_frame;
 pub mod redundant;
 
 pub use bound_tighten::{tighten_bounds, LinearRow, TightenReport, INF_BOUND};
+pub use btf::{BlockTriangularBlock, BlockTriangularForm};
 pub use components::{SquareComponent, SquareComponents};
 pub use diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReason};
 pub use dulmage_mendelsohn::{DMPart, DulmageMendelsohnPartition};
