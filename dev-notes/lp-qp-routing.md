@@ -376,8 +376,13 @@ minimum that justifies the `pounce-convex` crate.
 
 **Phase 3 — Mehrotra predictor-corrector + HSDE.** Add the
 predictor-corrector iteration and homogeneous self-dual embedding for
-infeasibility detection and a self-starting iterate. Should reduce
-iteration counts ~30-50% on convex QPs. Validate on Mittelmann LP
+infeasibility detection and a self-starting iterate. Note this must be
+the **quadratic-objective HSDE variant** (as in Clarabel; Goulart &
+Chen) that carries the `P` term inside the embedding — *not* the
+textbook LP/conic HSDE, which assumes a linear objective. Handling the
+quadratic objective in the embedding is the QP-specific part and does
+not transfer from LP-HSDE verbatim. Should reduce iteration counts
+~30-50% on convex QPs. Validate on Mittelmann LP
 subset and Maros-Mészáros QP set. After this phase `pounce-convex` is
 algorithmically competitive with Clarabel and HiGHS for the LP/QP
 problem class. This is *algorithmic* competitiveness (iteration count
