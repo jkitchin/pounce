@@ -547,6 +547,35 @@ impl IpoptAlgorithm {
             return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
 
+        // pounce#58 — iterate-quality guard for the probing oracle.
+        // The μ-update layer sets `request_resto` when the input
+        // iterate is too corrupted for the probing rule to produce a
+        // sane μ (see `mu/adaptive.rs` Probing dispatch). Restoration
+        // re-initialises the multipliers and gives the outer loop a
+        // clean iterate to continue from. When no restoration phase
+        // is configured (embedded callers, tests), emit a one-line
+        // notice and continue with the current μ — the guard has
+        // already prevented the destabilising 4-order μ jump.
+        let request_resto = {
+            let mut d = self.data.borrow_mut();
+            let f = d.request_resto;
+            d.request_resto = false;
+            f
+        };
+        if request_resto {
+            if self.restoration.is_some() {
+                return self.invoke_restoration();
+            } else {
+                eprintln!(
+                    "[POUNCE] probing-oracle iterate-quality guard fired \
+                     at iter {}, but no restoration phase is configured; \
+                     continuing with μ={:.3e}.",
+                    self.data.borrow().iter_count,
+                    next_mu,
+                );
+            }
+        }
+
         // Mirror upstream `IpAdaptiveMuUpdate.cpp:339, 386, 431` and
         // `IpMonotoneMuUpdate.cpp:165`: every code path that *changes*
         // μ calls `linesearch_->Reset()`, which clears the filter via

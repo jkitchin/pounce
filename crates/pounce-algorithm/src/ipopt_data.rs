@@ -73,6 +73,14 @@ pub struct IpoptData {
     /// the next pass to decide between "tiny step accept" and bail.
     pub tiny_step_flag: bool,
 
+    /// Emergency restoration request from the μ-update layer. Set by
+    /// [`AdaptiveMuUpdate`] when the probing oracle's input iterate
+    /// is corrupted (`curr_avrg_compl` ≫ `curr_mu`) so the main loop
+    /// invokes restoration instead of letting the oracle snap μ up
+    /// many orders of magnitude. Pounce-specific guard; no upstream
+    /// counterpart. See pounce#58.
+    pub request_resto: bool,
+
     /// One-char marker the iteration output puts in front of
     /// `alpha_primal` (e.g. `'f'` for filter, `'r'` for restoration,
     /// `'h'` for the very first iterate). Mirrors
@@ -128,6 +136,7 @@ impl IpoptData {
             info_skip_output: false,
             info_string: String::new(),
             tiny_step_flag: false,
+            request_resto: false,
             info_alpha_primal_char: ' ',
             info_ls_count: 0,
             info_last_output: -1.0,

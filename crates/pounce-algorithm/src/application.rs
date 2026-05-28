@@ -1637,6 +1637,17 @@ impl IpoptApplication {
             builder.mu.quality_function_section_qf_tol = v;
         }
 
+        // `probing_iterate_quality_factor` — pounce-specific guard
+        // (pounce#58) on the probing μ-oracle's input iterate. When
+        // `curr_avrg_compl / curr_mu` exceeds this factor, the
+        // μ-update layer signals restoration via
+        // `IpoptData::request_resto` instead of letting probing
+        // return `σ · mu_curr` ≫ previous μ. Default 1e4; set to ≤ 0
+        // to disable. No upstream Ipopt counterpart.
+        if let Some(v) = read_num("probing_iterate_quality_factor") {
+            builder.mu.probing_iterate_quality_factor = v;
+        }
+
         // Adaptive-μ extras — consumers in
         // `IpAdaptiveMuUpdate.cpp:RegisterOptions`. Only active when
         // `mu_strategy=adaptive`.

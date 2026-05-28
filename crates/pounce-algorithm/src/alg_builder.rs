@@ -370,6 +370,17 @@ pub struct MuOptions {
     /// `adaptive_mu_kkt_norm_type` — norm used to score the iterate
     /// in adaptive globalization decisions.
     pub adaptive_mu_kkt_norm_type: crate::mu::adaptive::AdaptiveMuKktNorm,
+    /// `probing_iterate_quality_factor` (default 1e4, pounce-specific
+    /// — see pounce#58). When the probing (Mehrotra) μ-oracle is
+    /// about to read `curr_avrg_compl()` for its `mu_curr` input, a
+    /// single imbalanced `(s_i, z_i)` pair can inflate the average
+    /// 5+ orders above the stored `data.curr_mu`. The oracle then
+    /// returns `σ · mu_curr` ≫ previous μ, throwing the iterate out
+    /// of the convergence neighborhood. This guard short-circuits
+    /// that case by signalling restoration when the ratio
+    /// `curr_avrg_compl / curr_mu` exceeds the factor. Set to 0 or
+    /// any non-positive value to disable.
+    pub probing_iterate_quality_factor: Number,
 }
 
 impl Default for MuOptions {
@@ -404,6 +415,7 @@ impl Default for MuOptions {
             adaptive_mu_kkterror_red_fact: 0.9999,
             adaptive_mu_kkt_norm_type:
                 crate::mu::adaptive::AdaptiveMuKktNorm::TwoNormSquared,
+            probing_iterate_quality_factor: 1e4,
         }
     }
 }
@@ -603,6 +615,8 @@ impl AlgorithmBuilder {
                 adaptive.qf_max_section_steps = self.mu.quality_function_max_section_steps;
                 adaptive.qf_section_sigma_tol = self.mu.quality_function_section_sigma_tol;
                 adaptive.qf_section_qf_tol = self.mu.quality_function_section_qf_tol;
+                adaptive.probing_iterate_quality_factor =
+                    self.mu.probing_iterate_quality_factor;
                 adaptive.adaptive_mu_safeguard_factor = self.mu.adaptive_mu_safeguard_factor;
                 adaptive.adaptive_mu_monotone_init_factor =
                     self.mu.adaptive_mu_monotone_init_factor;

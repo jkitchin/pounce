@@ -129,6 +129,19 @@ pub struct AdaptiveMuUpdate {
     /// flatness tolerance for the golden-section search.
     pub qf_section_qf_tol: Number,
 
+    /// `probing_iterate_quality_factor` (default 1e4, pounce-specific;
+    /// see pounce#58). When the probing (Mehrotra) μ-oracle is about
+    /// to read `curr_avrg_compl()` for its `mu_curr` input, a single
+    /// imbalanced `(s_i, z_i)` pair can inflate the average 5+ orders
+    /// above the stored `data.curr_mu`. Probing then mathematically
+    /// correctly returns `σ·mu_curr` ≫ previous μ, which throws the
+    /// iterate out of the convergence neighborhood. This guard
+    /// short-circuits that case: when `curr_avrg_compl / curr_mu >
+    /// probing_iterate_quality_factor`, we signal restoration via
+    /// [`IpoptData::request_resto`] and keep μ unchanged. Set to 0 or
+    /// any non-positive value to disable.
+    pub probing_iterate_quality_factor: Number,
+
     /// Upstream tracks `init_*_inf` lazily — sentinel −1 means
     /// "not yet captured".
     init_dual_inf: Number,
@@ -195,6 +208,7 @@ impl Default for AdaptiveMuUpdate {
             qf_max_section_steps: 8,
             qf_section_sigma_tol: 1e-2,
             qf_section_qf_tol: 0.0,
+            probing_iterate_quality_factor: 1e4,
             init_dual_inf: -1.0,
             init_primal_inf: -1.0,
             free_mu_mode: true,
@@ -209,6 +223,20 @@ impl Default for AdaptiveMuUpdate {
 impl AdaptiveMuUpdate {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Pure-arithmetic predicate behind the probing-oracle iterate-
+    /// quality guard (pounce#58). Returns `true` when the ratio
+    /// `avrg_compl / curr_mu` exceeds `factor`. The two non-strict
+    /// gates (`factor > 0`, `curr_mu > 0`) keep the predicate
+    /// well-defined when the guard is disabled or when an unusual
+    /// μ-strategy zeroes `curr_mu`.
+    pub fn probing_iterate_guard_fires(
+        factor: Number,
+        curr_mu: Number,
+        avrg_compl: Number,
+    ) -> bool {
+        factor > 0.0 && curr_mu > 0.0 && avrg_compl > factor * curr_mu
     }
 
     /// Scalar core of `AdaptiveMuUpdate::lower_mu_safeguard`
@@ -592,21 +620,55 @@ impl MuUpdate for AdaptiveMuUpdate {
 
         let candidate = match self.mu_oracle {
             MuOracleKind::Loqo => loqo_candidate(),
-            MuOracleKind::Probing => match (nlp, pd_search_dir) {
-                (Some(nlp), Some(sd)) => {
-                    let mut oracle = ProbingMuOracle {
-                        sigma_max: 100.0,
-                        mu_min: self.mu_min,
-                        mu_max: self.mu_max,
-                        mu_curr: curr_mu,
-                        mu_aff: curr_mu,
-                    };
-                    oracle
-                        .calculate_mu_with_affine_step(data, cq, nlp, sd, 1.0)
-                        .unwrap_or_else(loqo_candidate)
+            MuOracleKind::Probing => {
+                // Iterate-quality guard (pounce#58). The probing
+                // oracle uses `curr_avrg_compl()` for its `mu_curr`
+                // input (see `mu/oracle/probing.rs:85`). When a single
+                // imbalanced `(s_i, z_i)` pair inflates the average
+                // many orders above the stored `data.curr_mu`,
+                // probing's `σ·mu_curr` correctly returns the inflated
+                // value and the resulting search direction throws the
+                // iterate out of the convergence neighborhood. On
+                // arki0012 this manifests as μ jumping 5 orders at
+                // iter 155 followed by divergence to "Local
+                // Infeasibility" at iter 284. We short-circuit by
+                // signalling restoration and keeping μ unchanged; the
+                // main loop in `ipopt_alg.rs` consumes the flag
+                // before the search-direction step.
+                if Self::probing_iterate_guard_fires(
+                    self.probing_iterate_quality_factor,
+                    curr_mu,
+                    avrg_compl,
+                ) {
+                    if std::env::var("POUNCE_DBG_ORACLE").is_ok() {
+                        eprintln!(
+                            "[PN_PROBE_GUARD] iter={} curr_mu={:.3e} avrg_compl={:.3e} ratio={:.3e} > factor={:.3e} → request_resto",
+                            iter_count,
+                            curr_mu,
+                            avrg_compl,
+                            avrg_compl / curr_mu,
+                            self.probing_iterate_quality_factor,
+                        );
+                    }
+                    data.borrow_mut().request_resto = true;
+                    return curr_mu;
                 }
-                _ => loqo_candidate(),
-            },
+                match (nlp, pd_search_dir) {
+                    (Some(nlp), Some(sd)) => {
+                        let mut oracle = ProbingMuOracle {
+                            sigma_max: 100.0,
+                            mu_min: self.mu_min,
+                            mu_max: self.mu_max,
+                            mu_curr: curr_mu,
+                            mu_aff: curr_mu,
+                        };
+                        oracle
+                            .calculate_mu_with_affine_step(data, cq, nlp, sd, 1.0)
+                            .unwrap_or_else(loqo_candidate)
+                    }
+                    _ => loqo_candidate(),
+                }
+            }
             MuOracleKind::QualityFunction => match (nlp, pd_search_dir) {
                 (Some(nlp), Some(sd)) => {
                     let mut oracle = QualityFunctionMuOracle::new();
@@ -711,5 +773,68 @@ mod tests {
         assert_ne!(MuOracleKind::Loqo, MuOracleKind::Probing);
         assert_ne!(MuOracleKind::Probing, MuOracleKind::QualityFunction);
         assert_ne!(MuOracleKind::Loqo, MuOracleKind::QualityFunction);
+    }
+
+    // pounce#58 guard predicate. Numbers below come from the issue
+    // body's iter 154-155 trace on arki0012.
+    #[test]
+    fn probing_iterate_guard_fires_on_arki0012_iter155() {
+        let curr_mu = 1.98e-11;
+        let avrg_compl = 8.90e-6;
+        assert!(AdaptiveMuUpdate::probing_iterate_guard_fires(
+            1e4, curr_mu, avrg_compl
+        ));
+    }
+
+    #[test]
+    fn probing_iterate_guard_quiet_on_healthy_iter() {
+        // iter 154 in the same trace — ratio ≈ 2.2; ought not fire.
+        let curr_mu = 1.02e-11;
+        let avrg_compl = 2.24e-11;
+        assert!(!AdaptiveMuUpdate::probing_iterate_guard_fires(
+            1e4, curr_mu, avrg_compl
+        ));
+    }
+
+    #[test]
+    fn probing_iterate_guard_disabled_at_zero_factor() {
+        // factor=0 ⇒ guard off, even with extreme ratio.
+        assert!(!AdaptiveMuUpdate::probing_iterate_guard_fires(
+            0.0, 1e-11, 1.0
+        ));
+    }
+
+    #[test]
+    fn probing_iterate_guard_disabled_at_negative_factor() {
+        assert!(!AdaptiveMuUpdate::probing_iterate_guard_fires(
+            -1.0, 1e-11, 1.0
+        ));
+    }
+
+    #[test]
+    fn probing_iterate_guard_quiet_when_curr_mu_zero() {
+        // Pathological `curr_mu = 0` (no-bounds branch zeroes it out).
+        // Predicate must stay quiet rather than division-by-zero.
+        assert!(!AdaptiveMuUpdate::probing_iterate_guard_fires(
+            1e4, 0.0, 1e-6
+        ));
+    }
+
+    #[test]
+    fn probing_iterate_guard_threshold_at_factor_times_mu() {
+        // Boundary: equality does NOT fire (strict >).
+        let curr_mu = 1.0e-10;
+        let factor = 1e4;
+        assert!(!AdaptiveMuUpdate::probing_iterate_guard_fires(
+            factor,
+            curr_mu,
+            factor * curr_mu
+        ));
+        // Just above the boundary fires.
+        assert!(AdaptiveMuUpdate::probing_iterate_guard_fires(
+            factor,
+            curr_mu,
+            factor * curr_mu * (1.0 + 1e-12)
+        ));
     }
 }

@@ -133,4 +133,28 @@ fn defaults_match_upstream() {
         mu.adaptive_mu_kkt_norm_type,
         AdaptiveMuKktNorm::TwoNormSquared
     );
+    // Pounce-specific (pounce#58) probing-oracle iterate-quality guard.
+    assert!((mu.probing_iterate_quality_factor - 1e4).abs() < 1e-12);
+}
+
+#[test]
+fn probing_iterate_quality_factor_flows_through() {
+    let mu = mu_options_from(|app| {
+        app.options_mut()
+            .set_numeric_value("probing_iterate_quality_factor", 5e3, true, false)
+            .unwrap();
+    });
+    assert!((mu.probing_iterate_quality_factor - 5e3).abs() < 1e-12);
+}
+
+#[test]
+fn probing_iterate_quality_factor_disable_value_flows_through() {
+    // 0 means "guard disabled" — the value should still round-trip
+    // through the option registry without snap-back to the default.
+    let mu = mu_options_from(|app| {
+        app.options_mut()
+            .set_numeric_value("probing_iterate_quality_factor", 0.0, true, false)
+            .unwrap();
+    });
+    assert_eq!(mu.probing_iterate_quality_factor, 0.0);
 }
