@@ -353,9 +353,14 @@ algorithm.*
 
 **Phase 2 — IPM-QP in `pounce-convex` (+ Ruiz equilibration).** Bare
 IPM-QP (no Mehrotra yet); route LP and QP problems to it under `auto`.
-Bring in **Ruiz equilibration** here — it is a conditioning
-prerequisite for the IPM KKT solve, effectively part of the solver
-rather than deferrable presolve (see "Presolve integration"). Compare
+**Build the iteration over the `Cone` abstraction (`src/cones/`) from
+the start, with only `nonneg` implemented** — this is what makes
+Phases 4–6 cone *extensions* rather than a rewrite; a QP-specific solve
+retrofitted for cones later would make the Phase 4 "cheap incremental
+win" claim false. Bring in **Ruiz equilibration** here — it is a
+conditioning prerequisite for the IPM KKT solve, effectively part of the
+solver rather than deferrable presolve (see "Presolve integration").
+Compare
 iteration counts and wall-clock against the existing IPM-NLP path on the
 `quadratic`, `bounded-quadratic`, `eq-quadratic` builtins. This is the
 minimum that justifies the `pounce-convex` crate.
