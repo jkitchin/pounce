@@ -32,6 +32,7 @@ pub mod ipopt_cq;
 pub mod ipopt_data;
 pub mod ipopt_nlp;
 pub mod iter_dump;
+pub mod iterate_dump;
 pub mod iterates_vector;
 pub mod kkt;
 pub mod line_search;

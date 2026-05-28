@@ -134,12 +134,18 @@ Options:
   --about                   print version, build info, features,
                             linear solvers, and runtime paths
   --dump <cat>[:<spec>]     dump diagnostic category to per-iter files.
-                            Repeatable. Categories: kkt, iterate, step,
+                            Repeatable. Categories: kkt, iterate(s), step,
                             mu, ls, resto, convergence, timing.
                             Iter-spec grammar: all | N | N-M | N- | -M
-                            (default: all). Examples:
+                            (default: all). The `iterates` category also
+                            accepts a `:summary` (default) or `:full`
+                            variant suffix and streams one JSONL row
+                            per iter to <dump-dir>/iterates.jsonl.
+                            Examples:
                               --dump kkt:5
                               --dump kkt:2-10 --dump iterate:all
+                              --dump iterates:summary
+                              --dump iterates:5-:full
   --dump-dir <path>         override dump root (default ./pounce-dump-<ts>)
   --dump-format <fmt>       dump format (default: jsonl)
 "

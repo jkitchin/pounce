@@ -48,6 +48,7 @@
 //! `resto/parent_iter_NNN/` hierarchy keeps the restoration sub-IPM
 //! trace separate from the main solve trace.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -89,7 +90,10 @@ impl DiagCategory {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "kkt" => Ok(DiagCategory::Kkt),
-            "iterate" => Ok(DiagCategory::Iterate),
+            // Accept both "iterate" (legacy) and "iterates" (the
+            // public name from issue #68's contract). Internally one
+            // enum variant.
+            "iterate" | "iterates" => Ok(DiagCategory::Iterate),
             "step" => Ok(DiagCategory::Step),
             "mu" => Ok(DiagCategory::Mu),
             "ls" => Ok(DiagCategory::Ls),
@@ -198,6 +202,67 @@ impl DumpFormat {
     }
 }
 
+/// Payload-detail variant for the `iterate` dump category.
+///
+/// Iterate trajectories come in two sizes. `Summary` is small and
+/// always cheap (m bits of active-set bitmap + a handful of scalars
+/// per iteration); `Full` adds the full `x` and `slack` vectors per
+/// iteration, which is the studio-grade payload but can run into
+/// hundreds of MB on large problems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IterateVariant {
+    #[default]
+    Summary,
+    Full,
+}
+
+impl IterateVariant {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IterateVariant::Summary => "summary",
+            IterateVariant::Full => "full",
+        }
+    }
+}
+
+/// Parse the `iterate:` spec grammar — `[<iter-filter>[:<variant>]]`.
+///
+/// Recognised forms:
+///
+/// - empty / `all` / `5` / `5-10` / `5-` / `-10` → corresponding
+///   filter, variant defaults to `summary`.
+/// - `summary` / `full` → all iters, named variant.
+/// - `<filter>:summary` / `<filter>:full` → both.
+///
+/// This is the only `DiagCategory` whose spec carries more than an
+/// iter filter. Keeping the parser local to the iterate site avoids
+/// growing every category's grammar.
+pub fn parse_iterate_spec(s: &str) -> Result<(IterSpec, IterateVariant), String> {
+    let s = s.trim();
+    // Bare `summary` / `full` (no filter portion).
+    if s == "summary" {
+        return Ok((IterSpec::All, IterateVariant::Summary));
+    }
+    if s == "full" {
+        return Ok((IterSpec::All, IterateVariant::Full));
+    }
+    // `<filter>:summary` / `<filter>:full`.
+    let (filter_str, variant) = if let Some(rest) = s.strip_suffix(":summary") {
+        (rest, IterateVariant::Summary)
+    } else if let Some(rest) = s.strip_suffix(":full") {
+        (rest, IterateVariant::Full)
+    } else {
+        (s, IterateVariant::Summary)
+    };
+    let filter_str = if filter_str.is_empty() {
+        "all"
+    } else {
+        filter_str
+    };
+    let filter = IterSpec::parse(filter_str)?;
+    Ok((filter, variant))
+}
+
 /// Static configuration: where to dump, in what format, with what
 /// per-category iter filters. Constructed by the CLI, held by the
 /// application, frozen for the duration of a solve.
@@ -206,6 +271,9 @@ pub struct DiagnosticsConfig {
     pub dump_dir: PathBuf,
     pub format: DumpFormat,
     pub categories: HashMap<DiagCategory, IterSpec>,
+    /// Payload-detail for `DiagCategory::Iterate`. Only consulted
+    /// when `Iterate` is in `categories`.
+    pub iterate_variant: IterateVariant,
 }
 
 impl DiagnosticsConfig {
@@ -214,11 +282,17 @@ impl DiagnosticsConfig {
             dump_dir,
             format: DumpFormat::Jsonl,
             categories: HashMap::new(),
+            iterate_variant: IterateVariant::Summary,
         }
     }
 
     pub fn with_category(mut self, cat: DiagCategory, spec: IterSpec) -> Self {
         self.categories.insert(cat, spec);
+        self
+    }
+
+    pub fn with_iterate_variant(mut self, v: IterateVariant) -> Self {
+        self.iterate_variant = v;
         self
     }
 
@@ -240,6 +314,11 @@ pub struct DiagnosticsState {
     resto_parent_iter: AtomicI32,
     resto_inner_iter: AtomicI32,
     resto_solves_this_iter: AtomicI32,
+    /// Lazily-opened, persistent writer for the top-level
+    /// `iterates.jsonl` stream. Opened on the first iterate emit and
+    /// kept open across iterations (and through resto) so each
+    /// outer/inner iteration appends one line in order.
+    iterates_writer: RefCell<Option<BufWriter<fs::File>>>,
 }
 
 impl DiagnosticsState {
@@ -256,6 +335,7 @@ impl DiagnosticsState {
             resto_parent_iter: AtomicI32::new(-1),
             resto_inner_iter: AtomicI32::new(-1),
             resto_solves_this_iter: AtomicI32::new(0),
+            iterates_writer: RefCell::new(None),
         })
     }
 
@@ -315,6 +395,14 @@ impl DiagnosticsState {
         self.effective_iter()
     }
 
+    /// True if the solver is currently inside a restoration sub-IPM
+    /// run. Public, side-effect-free probe for emitters that need to
+    /// tag rows with the restoration flag without mkdir-ing the iter
+    /// directory (which `iter_dir` does).
+    pub fn in_restoration(&self) -> bool {
+        self.in_restoration.load(Ordering::SeqCst)
+    }
+
     /// The iter counter that gates current dumps — resto inner iter
     /// when in restoration, main outer iter otherwise.
     fn effective_iter(&self) -> i32 {
@@ -362,6 +450,32 @@ impl DiagnosticsState {
         let mut f = fs::File::create(path)?;
         f.write_all(contents.as_bytes())?;
         f.flush()
+    }
+
+    /// Append one JSONL line to the persistent top-level
+    /// `iterates.jsonl` stream, opening the file on first use. The
+    /// writer is held across iterations so the emitter doesn't
+    /// re-open the file every step (which would also truncate it).
+    ///
+    /// Caller supplies the already-encoded JSON record without a
+    /// trailing newline; this method appends `\n` and flushes the
+    /// buffer so a `SIGKILL`'d solve still leaves a parseable
+    /// partial trace.
+    pub fn append_iterate_line(&self, json: &str) -> std::io::Result<()> {
+        let mut slot = self.iterates_writer.borrow_mut();
+        if slot.is_none() {
+            let path = self.config.dump_dir.join("iterates.jsonl");
+            let f = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(path)?;
+            *slot = Some(BufWriter::new(f));
+        }
+        let w = slot.as_mut().expect("just initialized");
+        w.write_all(json.as_bytes())?;
+        w.write_all(b"\n")?;
+        w.flush()
     }
 
     pub fn dump_dir(&self) -> &Path {
@@ -424,6 +538,86 @@ mod tests {
             DiagCategory::Iterate
         );
         assert!(DiagCategory::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn iterate_spec_parses_all_combinations() {
+        // Bare variant words: "all" filter, named variant.
+        assert_eq!(
+            parse_iterate_spec("summary").unwrap(),
+            (IterSpec::All, IterateVariant::Summary)
+        );
+        assert_eq!(
+            parse_iterate_spec("full").unwrap(),
+            (IterSpec::All, IterateVariant::Full)
+        );
+        // Plain filter: defaults variant to Summary.
+        assert_eq!(
+            parse_iterate_spec("all").unwrap(),
+            (IterSpec::All, IterateVariant::Summary)
+        );
+        assert_eq!(
+            parse_iterate_spec("5").unwrap(),
+            (IterSpec::Single(5), IterateVariant::Summary)
+        );
+        assert_eq!(
+            parse_iterate_spec("5-10").unwrap(),
+            (IterSpec::Range(Some(5), Some(10)), IterateVariant::Summary)
+        );
+        // Filter + variant.
+        assert_eq!(
+            parse_iterate_spec("all:summary").unwrap(),
+            (IterSpec::All, IterateVariant::Summary)
+        );
+        assert_eq!(
+            parse_iterate_spec("all:full").unwrap(),
+            (IterSpec::All, IterateVariant::Full)
+        );
+        assert_eq!(
+            parse_iterate_spec("5-:full").unwrap(),
+            (IterSpec::Range(Some(5), None), IterateVariant::Full)
+        );
+        assert_eq!(
+            parse_iterate_spec("10-20:full").unwrap(),
+            (
+                IterSpec::Range(Some(10), Some(20)),
+                IterateVariant::Full
+            )
+        );
+    }
+
+    #[test]
+    fn append_iterate_line_streams_rows_to_top_level() {
+        let tmp = tempdir();
+        let cfg = DiagnosticsConfig::new(tmp.clone())
+            .with_category(DiagCategory::Iterate, IterSpec::All);
+        let state = DiagnosticsState::new(cfg).unwrap();
+        state.append_iterate_line("{\"iter\":0}").unwrap();
+        state.append_iterate_line("{\"iter\":1}").unwrap();
+        // Resto rows live inline in the same stream — the writer
+        // doesn't care about the iter-dir nesting that other dump
+        // sites use.
+        state.enter_restoration();
+        state.append_iterate_line("{\"iter\":0,\"restoration\":true}").unwrap();
+        state.exit_restoration();
+        state.append_iterate_line("{\"iter\":2}").unwrap();
+
+        let path = tmp.join("iterates.jsonl");
+        let contents = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "{\"iter\":0}");
+        assert_eq!(lines[2], "{\"iter\":0,\"restoration\":true}");
+        fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
+    fn iterate_spec_rejects_garbage_and_unknown_variants() {
+        // Unknown variant after the colon: the parser strips no
+        // suffix, falls back to whole-string filter parsing, which
+        // then fails because "5-:bogus" is not a valid iter spec.
+        assert!(parse_iterate_spec("5-:bogus").is_err());
+        assert!(parse_iterate_spec("abc").is_err());
     }
 
     #[test]

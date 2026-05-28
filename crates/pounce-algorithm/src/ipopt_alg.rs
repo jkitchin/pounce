@@ -28,6 +28,7 @@ use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iter_dump::IterDumper;
+use crate::iterate_dump::emit_record as emit_iterate_record;
 use crate::kkt::pd_search_dir_calc::PdSearchDirCalc;
 use crate::line_search::backtracking::Outcome;
 use crate::restoration::{RestorationOutcome, RestorationPhase};
@@ -1330,6 +1331,10 @@ impl IpoptAlgorithm {
         // bookkeeping.
         if let Some(diag) = self.diagnostics.as_ref() {
             diag.bump_iter();
+            // Iter-0 iterate row (issue #68). Same hook point as
+            // the binary IterDumper above; emits only when
+            // `--dump iterates:*` is configured.
+            emit_iterate_record(diag.as_ref(), &self.data, &self.cq);
         }
 
         // Iter 0 intermediate callback — upstream fires once after
@@ -1364,6 +1369,9 @@ impl IpoptAlgorithm {
                     // about-to-execute iteration.
                     if let Some(diag) = self.diagnostics.as_ref() {
                         diag.bump_iter();
+                        // Per-iter iterate row (issue #68). Mirrors
+                        // the binary IterDumper hook below.
+                        emit_iterate_record(diag.as_ref(), &self.data, &self.cq);
                     }
                     // Per-iteration record — emitted after the
                     // iter_count bump so the recorded `iter` field

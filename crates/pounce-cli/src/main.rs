@@ -654,10 +654,18 @@ fn build_diagnostics(
 
     let mut config = DiagnosticsConfig::new(dump_dir);
     config.format = format;
-    for (cat, spec) in dump_specs {
-        let cat = DiagCategory::parse(cat)?;
-        let spec = IterSpec::parse(spec)?;
-        config = config.with_category(cat, spec);
+    for (cat_str, spec_str) in dump_specs {
+        let cat = DiagCategory::parse(cat_str)?;
+        if cat == DiagCategory::Iterate {
+            // `iterate:` accepts an extra `:summary` / `:full` variant
+            // suffix after the iter filter. See parse_iterate_spec.
+            let (filter, variant) =
+                pounce_common::diagnostics::parse_iterate_spec(spec_str)?;
+            config = config.with_category(cat, filter).with_iterate_variant(variant);
+        } else {
+            let spec = IterSpec::parse(spec_str)?;
+            config = config.with_category(cat, spec);
+        }
     }
 
     let state = DiagnosticsState::new(config)
