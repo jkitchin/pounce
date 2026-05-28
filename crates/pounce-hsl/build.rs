@@ -15,16 +15,23 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-env-changed=COINHSL_DIR");
 
-    let coinhsl_dir = env::var("COINHSL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            panic!(
-                "the `ma57` feature requires the COINHSL_DIR environment variable to \
-                 point at a CoinHSL install whose `lib/` holds libcoinhsl.{{dylib,a}} \
-                 (build CoinHSL from https://www.hsl.rl.ac.uk/ipopt/). Omit \
-                 `--features ma57` to use the pure-Rust FERAL backend instead."
-            )
-        });
+    let Ok(coinhsl_dir) = env::var("COINHSL_DIR").map(PathBuf::from) else {
+        // No CoinHSL on this machine — compile pounce-hsl as a regular
+        // rlib without emitting any link directives. Downstream crates
+        // only pull pounce-hsl into a final binary when their `ma57`
+        // feature is enabled, and *that* path needs CoinHSL; if a
+        // downstream selects `ma57` here without COINHSL_DIR set, the
+        // linker will fail with a clear "library not found: coinhsl"
+        // error. The common `cargo build --workspace` (no `ma57`
+        // feature) just compiles this crate as an unlinked rlib.
+        println!(
+            "cargo:warning=COINHSL_DIR not set; pounce-hsl compiled without link directives. \
+             Selecting the `ma57` feature in a downstream crate without setting COINHSL_DIR will \
+             fail at link time. Build CoinHSL from https://www.hsl.rl.ac.uk/ipopt/ and set \
+             COINHSL_DIR to its install root to enable MA57."
+        );
+        return;
+    };
 
     let lib_dir = coinhsl_dir.join("lib");
     assert!(
