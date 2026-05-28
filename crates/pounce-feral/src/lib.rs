@@ -24,7 +24,9 @@ use feral::symbolic::SupernodeParams;
 use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, Solver};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::summary::LinearSolverSummary;
-use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
+use pounce_linsol::{
+    EMatrixFormat, ESymSolverStatus, FactorPattern, SparseSymLinearSolverInterface,
+};
 
 /// FERAL solver implementing the IPM-side sparse symmetric backend
 /// contract.
@@ -548,6 +550,75 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
     fn matrix_format(&self) -> EMatrixFormat {
         EMatrixFormat::TripletFormat
     }
+
+    /// Walk feral's per-supernode `NodeFactors` to assemble the LDLᵀ
+    /// factor's strict-lower nonzero pattern in *permuted*
+    /// coordinates. `perm` is feral's global fill-reducing
+    /// permutation (new-to-old). When `want_values` is true the
+    /// per-supernode `l` block is also gathered into `l_vals` —
+    /// indexed by the post-BK pivot perm so the order matches the
+    /// (irn, jcn) arrays.
+    ///
+    /// Returns `None` before the first successful factor (`factors()`
+    /// returns `None`).
+    fn factor_pattern(&self, want_values: bool) -> Option<FactorPattern> {
+        let factors = self.solver.factors()?;
+
+        // Conservative upper bound on nnz_L (strict-lower): per-supernode
+        //   nelim*(nelim-1)/2 + (nrow - nelim) * nelim
+        // (the diagonal is excluded). Doubles as a single allocation
+        // for both irn and jcn, plus l_vals when requested.
+        let mut nnz_upper: usize = 0;
+        for nf in &factors.node_factors {
+            let ff = &nf.frontal_factors;
+            let nelim = ff.nelim;
+            let nrow = ff.nrow;
+            let trailing = nrow.saturating_sub(nelim) * nelim;
+            nnz_upper += nelim * nelim.saturating_sub(1) / 2 + trailing;
+        }
+
+        let mut l_irn: Vec<Index> = Vec::with_capacity(nnz_upper);
+        let mut l_jcn: Vec<Index> = Vec::with_capacity(nnz_upper);
+        let mut l_vals: Option<Vec<Number>> = if want_values {
+            Some(Vec::with_capacity(nnz_upper))
+        } else {
+            None
+        };
+
+        for nf in &factors.node_factors {
+            let ff = &nf.frontal_factors;
+            let nelim = ff.nelim;
+            let nrow = ff.nrow;
+            // perm[i] = pre-BK supernode row that landed at post-BK
+            // pivot position i. Indices [nelim, nrow) are identity.
+            let perm = &ff.perm;
+            let l = &ff.l;
+            for j in 0..nelim {
+                // Column j of L: global col index in permuted coords.
+                let col_local = perm[j];
+                let col_global = nf.row_indices[col_local];
+                let col1 = (col_global as Index) + 1;
+                // Strict-lower entries: rows i in (j, nrow).
+                for i in (j + 1)..nrow {
+                    let row_local = if i < nelim { perm[i] } else { i };
+                    let row_global = nf.row_indices[row_local];
+                    l_irn.push((row_global as Index) + 1);
+                    l_jcn.push(col1);
+                    if let Some(vals) = l_vals.as_mut() {
+                        vals.push(l[j * nrow + i]);
+                    }
+                }
+            }
+        }
+
+        Some(FactorPattern {
+            n: factors.n,
+            perm: factors.perm.clone(),
+            l_irn,
+            l_jcn,
+            l_vals,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -682,6 +753,45 @@ mod tests {
         );
         assert!((rhs[0] - 1.0).abs() < 1e-12, "x0 = {}", rhs[0]);
         assert!((rhs[1] - 1.0).abs() < 1e-12, "x1 = {}", rhs[1]);
+    }
+
+    /// `factor_pattern` returns the L sparsity (strict-lower) after a
+    /// successful factor. For the SPD 2x2 above, L has exactly one
+    /// strict-lower entry (the single off-diagonal), and `perm` is a
+    /// permutation of `0..n`.
+    #[test]
+    fn factor_pattern_returns_l_after_factor() {
+        let mut s = FeralSolverInterface::new();
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        s.initialize_structure(2, 3, &irn, &jcn);
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+        let mut rhs = [3.0, 4.0];
+        s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0);
+
+        // Pattern-only.
+        let pat = s.factor_pattern(false).expect("factors present");
+        assert_eq!(pat.n, 2);
+        assert_eq!(pat.perm.len(), 2);
+        assert!(pat.perm.contains(&0) && pat.perm.contains(&1));
+        assert_eq!(pat.l_irn.len(), 1, "L strict-lower nnz = 1 for SPD 2x2");
+        assert_eq!(pat.l_jcn.len(), 1);
+        assert!(pat.l_vals.is_none(), "values not requested");
+
+        // With values.
+        let pat = s.factor_pattern(true).expect("factors present");
+        let vals = pat.l_vals.as_ref().expect("values requested");
+        assert_eq!(vals.len(), pat.l_irn.len());
+        // The single strict-lower L entry should be finite.
+        assert!(vals[0].is_finite());
+    }
+
+    /// Before any factor, `factor_pattern` returns `None`.
+    #[test]
+    fn factor_pattern_none_before_factor() {
+        let s = FeralSolverInterface::new();
+        assert!(s.factor_pattern(false).is_none());
+        assert!(s.factor_pattern(true).is_none());
     }
 
     /// Two-RHS solve via `solve_many`.

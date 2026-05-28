@@ -225,6 +225,99 @@ impl IterateVariant {
     }
 }
 
+/// Payload-detail variant for the `kkt` dump category.
+///
+/// `KOnly` (the default) emits only the K matrix and the solve's
+/// RHS/solution. `WithLPattern` additionally emits the LDLᵀ factor's
+/// strict-lower nonzero pattern (`L_irn` / `L_jcn`) and the fill-
+/// reducing permutation `perm`. `WithLValues` further adds `L_vals`
+/// in the same order as the pattern.
+///
+/// The L fields are emitted in *permuted* coordinates — the column /
+/// row indices reference the permuted system K' = Pᵀ K P, and the
+/// `perm` array carries the mapping back to original-variable space
+/// (`perm[k] = original_row` for the k-th permuted row).
+///
+/// Backends that don't expose the factor pattern (e.g. MA57) silently
+/// skip the L fields even when this variant requests them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KktVariant {
+    #[default]
+    KOnly,
+    WithLPattern,
+    WithLValues,
+}
+
+impl KktVariant {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KktVariant::KOnly => "k-only",
+            KktVariant::WithLPattern => "with-l-pattern",
+            KktVariant::WithLValues => "with-l-values",
+        }
+    }
+
+    /// True if the variant asks for the L pattern (with or without
+    /// values). Used by the dump site to short-circuit the
+    /// `factor_pattern()` call when only K is wanted.
+    pub fn wants_l_pattern(self) -> bool {
+        matches!(self, KktVariant::WithLPattern | KktVariant::WithLValues)
+    }
+
+    /// True if the variant asks for the L numerical values.
+    pub fn wants_l_values(self) -> bool {
+        matches!(self, KktVariant::WithLValues)
+    }
+}
+
+/// Parse the `kkt:` spec grammar — `[<iter-filter>][+L][+Lvals]`.
+///
+/// Recognised forms:
+///
+/// - empty / `all` / `5` / `5-10` / `5-` / `-10` → corresponding
+///   filter, K-only (no L pattern).
+/// - `<filter>+L` → K + LDLᵀ pattern + permutation.
+/// - `<filter>+L+Lvals` → K + L pattern + L values.
+/// - bare `+L` / `+L+Lvals` → all iters with the requested variant.
+///
+/// The suffixes are stripped *right-to-left* so the order
+/// `<filter>+L+Lvals` is the only accepted spelling for values; the
+/// reverse (`+Lvals+L`) is not recognised. `+Lvals` without `+L` is
+/// also rejected — values without a pattern is meaningless.
+pub fn parse_kkt_spec(s: &str) -> Result<(IterSpec, KktVariant), String> {
+    let s = s.trim();
+    // Strip `+Lvals` first (rightmost suffix), then `+L`. The order
+    // matters: `+L+Lvals` should parse as both, `+L` alone as pattern-
+    // only, `+Lvals` alone as an error.
+    let (rest, has_lvals) = match s.strip_suffix("+Lvals") {
+        Some(r) => (r, true),
+        None => (s, false),
+    };
+    let (filter_str, has_l) = match rest.strip_suffix("+L") {
+        Some(r) => (r, true),
+        None => (rest, false),
+    };
+    if has_lvals && !has_l {
+        return Err(format!(
+            "invalid kkt-spec '{s}': '+Lvals' requires '+L' (use '+L+Lvals' for L pattern with values)"
+        ));
+    }
+    let variant = if has_lvals {
+        KktVariant::WithLValues
+    } else if has_l {
+        KktVariant::WithLPattern
+    } else {
+        KktVariant::KOnly
+    };
+    let filter_str = if filter_str.is_empty() {
+        "all"
+    } else {
+        filter_str
+    };
+    let filter = IterSpec::parse(filter_str)?;
+    Ok((filter, variant))
+}
+
 /// Parse the `iterate:` spec grammar — `[<iter-filter>[:<variant>]]`.
 ///
 /// Recognised forms:
@@ -274,6 +367,9 @@ pub struct DiagnosticsConfig {
     /// Payload-detail for `DiagCategory::Iterate`. Only consulted
     /// when `Iterate` is in `categories`.
     pub iterate_variant: IterateVariant,
+    /// Payload-detail for `DiagCategory::Kkt`. Only consulted when
+    /// `Kkt` is in `categories`.
+    pub kkt_variant: KktVariant,
 }
 
 impl DiagnosticsConfig {
@@ -283,6 +379,7 @@ impl DiagnosticsConfig {
             format: DumpFormat::Jsonl,
             categories: HashMap::new(),
             iterate_variant: IterateVariant::Summary,
+            kkt_variant: KktVariant::KOnly,
         }
     }
 
@@ -293,6 +390,11 @@ impl DiagnosticsConfig {
 
     pub fn with_iterate_variant(mut self, v: IterateVariant) -> Self {
         self.iterate_variant = v;
+        self
+    }
+
+    pub fn with_kkt_variant(mut self, v: KktVariant) -> Self {
+        self.kkt_variant = v;
         self
     }
 
@@ -609,6 +711,51 @@ mod tests {
         assert_eq!(lines[0], "{\"iter\":0}");
         assert_eq!(lines[2], "{\"iter\":0,\"restoration\":true}");
         fs::remove_dir_all(tmp).ok();
+    }
+
+    #[test]
+    fn kkt_spec_parses_all_combinations() {
+        // Empty / bare filter → K-only.
+        assert_eq!(
+            parse_kkt_spec("").unwrap(),
+            (IterSpec::All, KktVariant::KOnly)
+        );
+        assert_eq!(
+            parse_kkt_spec("all").unwrap(),
+            (IterSpec::All, KktVariant::KOnly)
+        );
+        assert_eq!(
+            parse_kkt_spec("5-10").unwrap(),
+            (IterSpec::Range(Some(5), Some(10)), KktVariant::KOnly)
+        );
+        // +L pattern only.
+        assert_eq!(
+            parse_kkt_spec("+L").unwrap(),
+            (IterSpec::All, KktVariant::WithLPattern)
+        );
+        assert_eq!(
+            parse_kkt_spec("5-10+L").unwrap(),
+            (IterSpec::Range(Some(5), Some(10)), KktVariant::WithLPattern)
+        );
+        assert_eq!(
+            parse_kkt_spec("3+L").unwrap(),
+            (IterSpec::Single(3), KktVariant::WithLPattern)
+        );
+        // +L+Lvals.
+        assert_eq!(
+            parse_kkt_spec("+L+Lvals").unwrap(),
+            (IterSpec::All, KktVariant::WithLValues)
+        );
+        assert_eq!(
+            parse_kkt_spec("5-10+L+Lvals").unwrap(),
+            (IterSpec::Range(Some(5), Some(10)), KktVariant::WithLValues)
+        );
+    }
+
+    #[test]
+    fn kkt_spec_rejects_lvals_without_l() {
+        assert!(parse_kkt_spec("+Lvals").is_err());
+        assert!(parse_kkt_spec("5-10+Lvals").is_err());
     }
 
     #[test]

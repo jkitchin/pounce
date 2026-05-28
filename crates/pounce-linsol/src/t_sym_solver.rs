@@ -22,7 +22,7 @@
 //! upstream semantics intact.
 
 use crate::scaling::TSymScalingMethod;
-use crate::sparse_sym_iface::{EMatrixFormat, SparseSymLinearSolverInterface};
+use crate::sparse_sym_iface::{EMatrixFormat, FactorPattern, SparseSymLinearSolverInterface};
 use crate::status::ESymSolverStatus;
 use crate::sym_solver::SymLinearSolver;
 use pounce_common::types::{Index, Number};
@@ -370,6 +370,13 @@ impl TSymLinearSolver {
             let pa = self.backend.values_array_mut();
             conv.convert_values(&atriplet, &mut pa[..self.nonzeros_compressed as usize]);
         }
+    }
+
+    /// Pass-through to the backend's diagnostic factor-pattern
+    /// accessor. Returns `None` when the backend does not expose its
+    /// factor data (e.g. MA57). Consumed by the `--dump kkt:*+L` path.
+    pub fn factor_pattern(&self, want_values: bool) -> Option<FactorPattern> {
+        self.backend.factor_pattern(want_values)
     }
 }
 

@@ -140,10 +140,18 @@ Options:
                             (default: all). The `iterates` category also
                             accepts a `:summary` (default) or `:full`
                             variant suffix and streams one JSONL row
-                            per iter to <dump-dir>/iterates.jsonl.
+                            per iter to <dump-dir>/iterates.jsonl. The
+                            `kkt` category accepts `+L` / `+L+Lvals`
+                            suffixes that add the LDLᵀ factor's
+                            strict-lower pattern (and optional values)
+                            plus the fill-reducing permutation to each
+                            kkt_solve_NNN.jsonl record (feral backend
+                            only; MA57 silently omits the L fields).
                             Examples:
                               --dump kkt:5
                               --dump kkt:2-10 --dump iterate:all
+                              --dump kkt:5-10+L
+                              --dump kkt:5-10+L+Lvals
                               --dump iterates:summary
                               --dump iterates:5-:full
   --dump-dir <path>         override dump root (default ./pounce-dump-<ts>)

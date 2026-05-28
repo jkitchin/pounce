@@ -8,6 +8,39 @@
 use crate::status::ESymSolverStatus;
 use pounce_common::types::{Index, Number};
 
+/// Snapshot of the most recent LDLᵀ factor's sparsity pattern (and
+/// optionally values) plus the fill-reducing permutation. Backends
+/// produce this on demand from [`SparseSymLinearSolverInterface::factor_pattern`]
+/// — it is purely diagnostic and is not part of the solve / refine
+/// hot path.
+///
+/// All `irn` / `jcn` indices are **1-based** in *permuted* coordinates
+/// (i.e. they reference the matrix `Pᵀ K P` that the backend actually
+/// factored, not the original-variable ordering). The `perm` array
+/// closes the loop: `perm[k] = original_row` for the k-th permuted
+/// row, so a consumer can render the L pattern in either coordinate
+/// system. `perm` is **0-based** to keep the array directly indexable.
+///
+/// Only the **strict lower triangle** of L is populated — the unit
+/// diagonal is implicit (`L_ii = 1`).
+#[derive(Debug, Clone)]
+pub struct FactorPattern {
+    /// Matrix dimension (rows = cols).
+    pub n: usize,
+    /// Fill-reducing permutation, 0-based, length `n`. `perm[k]` is
+    /// the original-variable row that landed at permuted-row `k`.
+    pub perm: Vec<usize>,
+    /// Row indices of L's strict-lower nonzeros, 1-based, permuted
+    /// coordinates.
+    pub l_irn: Vec<Index>,
+    /// Column indices of L's strict-lower nonzeros, 1-based, permuted
+    /// coordinates. Same length as `l_irn`.
+    pub l_jcn: Vec<Index>,
+    /// Optional numerical values aligned with `l_irn` / `l_jcn`. `None`
+    /// when only the pattern was requested.
+    pub l_vals: Option<Vec<Number>>,
+}
+
 /// Sparse matrix format that a backend wants its triplet/CSR data in.
 /// Mirrors `SparseSymLinearSolverInterface::EMatrixFormat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,5 +134,15 @@ pub trait SparseSymLinearSolverInterface {
         _c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
         ESymSolverStatus::FatalError
+    }
+
+    /// Snapshot of the most recent factor's L pattern and permutation.
+    /// Backends that expose their factor data structures (e.g. feral)
+    /// return `Some(_)`; backends that don't (e.g. MA57, which keeps
+    /// its factors inside opaque Fortran work arrays) return `None`.
+    /// Diagnostic-only — consumed by the `--dump kkt:*+L` path. Set
+    /// `want_values=true` to populate [`FactorPattern::l_vals`].
+    fn factor_pattern(&self, _want_values: bool) -> Option<FactorPattern> {
+        None
     }
 }

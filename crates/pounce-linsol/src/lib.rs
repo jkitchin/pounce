@@ -30,7 +30,7 @@ pub use error::FactorizationError;
 pub use factorization::Factorization;
 pub use ruiz::RuizTSymScalingMethod;
 pub use scaling::{IdentityScalingMethod, TSymScalingMethod};
-pub use sparse_sym_iface::{EMatrixFormat, SparseSymLinearSolverInterface};
+pub use sparse_sym_iface::{EMatrixFormat, FactorPattern, SparseSymLinearSolverInterface};
 pub use status::ESymSolverStatus;
 pub use summary::LinearSolverSummary;
 pub use sym_solver::SymLinearSolver;

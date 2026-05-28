@@ -34,7 +34,7 @@ use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::triplet::{GenTMatrix, SymTMatrix};
 use pounce_linalg::Vector;
-use pounce_linsol::{ESymSolverStatus, SymLinearSolver, TSymLinearSolver};
+use pounce_linsol::{ESymSolverStatus, FactorPattern, SymLinearSolver, TSymLinearSolver};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -408,6 +408,20 @@ impl AugSystemSolver for StdAugSystemSolver {
             if diag.want(DiagCategory::Kkt) {
                 let solve_idx = diag.next_solve_index();
                 let filename = format!("kkt_solve_{solve_idx:03}.jsonl");
+                // Lift the L pattern off the backend only when the
+                // dump variant asks for it AND the factor succeeded —
+                // calling `factor_pattern` on a backend that hasn't
+                // factored yet returns `None`, but pulling it on
+                // every solve when the user only asked for K is pure
+                // overhead.
+                let variant = diag.config.kkt_variant;
+                let factor_pattern = if status == ESymSolverStatus::Success
+                    && variant.wants_l_pattern()
+                {
+                    self.linsol.factor_pattern(variant.wants_l_values())
+                } else {
+                    None
+                };
                 if let Some(mut w) = diag.open_writer(&filename) {
                     let _ = write_kkt_record(
                         &mut w,
@@ -421,6 +435,7 @@ impl AugSystemSolver for StdAugSystemSolver {
                         num_neg_evals,
                         status,
                         self.last_neg_evals,
+                        factor_pattern.as_ref(),
                     );
                 }
             }
@@ -515,6 +530,7 @@ fn write_kkt_record(
     num_neg_evals: Index,
     status: ESymSolverStatus,
     last_neg_evals: Index,
+    factor_pattern: Option<&FactorPattern>,
 ) -> std::io::Result<()> {
     use std::fmt::Write as _;
 
@@ -561,7 +577,48 @@ fn write_kkt_record(
         }
         let _ = write!(line, "{v:.17e}");
     }
-    line.push_str("]}\n");
+    line.push(']');
+
+    // Optional L pattern + permutation. Pounce#69 schema: emit
+    // `L_irn`, `L_jcn`, `perm` whenever a `FactorPattern` is supplied,
+    // and emit `L_vals` when the variant included `+Lvals` (the
+    // backend populates `l_vals` only in that case).
+    if let Some(fp) = factor_pattern {
+        line.push_str(",\"L_irn\":[");
+        for (i, v) in fp.l_irn.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            let _ = write!(line, "{v}");
+        }
+        line.push_str("],\"L_jcn\":[");
+        for (i, v) in fp.l_jcn.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            let _ = write!(line, "{v}");
+        }
+        line.push_str("],\"perm\":[");
+        for (i, v) in fp.perm.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            let _ = write!(line, "{v}");
+        }
+        line.push(']');
+        if let Some(vals) = fp.l_vals.as_ref() {
+            line.push_str(",\"L_vals\":[");
+            for (i, v) in vals.iter().enumerate() {
+                if i > 0 {
+                    line.push(',');
+                }
+                let _ = write!(line, "{v:.17e}");
+            }
+            line.push(']');
+        }
+    }
+
+    line.push_str("}\n");
 
     w.write_all(line.as_bytes())
 }
@@ -596,6 +653,7 @@ fn dump_kkt(
             num_neg_evals,
             status,
             last_neg_evals,
+            None, // legacy env-var path never carries the L pattern
         );
     }
 }
