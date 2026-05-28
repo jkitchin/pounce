@@ -208,6 +208,91 @@ via the `LinearBackendFactory` at
 - `pyomo-pounce` doesn't change at all; users get LP/QP routing
   transparently via the CLI dispatch.
 
+### Presolve integration
+
+Presolve is a 2–10× factor on the Mittelmann/Maros-Mészáros sets, so
+the Phase 3 "competitive with HiGHS/Clarabel" claim depends on it — it
+is *not* optional for that bar, even though it is not blocking for
+*correctness*. Two parts: the integration seam (favorable, mostly
+inherited) and the reduction work (largely net-new for LP/QP).
+
+**Integration seam — inherited for free.** `pounce-presolve` is already
+a *composable TNLP wrapper* (TNLP-in → reduced-TNLP-out, with a
+postsolve path that reinstates dropped rows and forwards multipliers;
+see `crates/pounce-presolve/src/lib.rs` Phases 0–5). Because the convex
+solvers also consume `TNLP`, `pounce-convex` sits *behind*
+`PresolveTnlp` exactly as the IPM does today — no new plumbing. This is
+the part that is genuinely "not blocking."
+
+**IPM-aware reduction policy — the seam differs from a simplex
+presolve.** Gondzio (1997) shows an IPM cares about Cholesky/LDLᵀ
+*fill-in*, not a basis: reductions that help simplex (aggressive
+variable substitution) can *hurt* an IPM by densifying the factor.
+Since `pounce-convex` factors through `pounce-linsol` LDLᵀ, substitution
+must be gated on fill growth (Mészáros & Suhl 2003 bound model-size
+increase before each elimination). This is a *policy*, not just a
+reduction set.
+
+**Reduction catalog to implement.** Grounded in the literature review
+(citations below):
+
+- *Core LP reductions (Andersen & Andersen 1995):* empty / singleton /
+  forcing / dominated rows; singleton / duplicate columns; bound
+  tightening. Most already exist in `pounce-presolve` for the NLP path
+  and carry over.
+- *Modern strengthening (Achterberg et al. 2020):* coefficient
+  strengthening, dual reductions, parallel/dominated row–column
+  detection. The modern bar; add incrementally.
+- *QP/Hessian-consistent reductions (Gould & Toint 2004) — net-new:*
+  variable substitution and duplicate-column detection must account for
+  the Hessian `Q` (elimination fills `Q` with cross-terms), and the
+  **postsolve must recover the dual consistently with the quadratic
+  term**. The existing NLP-shaped presolve has no notion of a `P`
+  block, so this is the genuinely new work for the convex-QP path.
+
+**Postsolve / restoration stack — the missing architectural piece.**
+Every reduction must carry its undo and recover *primal and dual* for
+the original problem (Andersen & Andersen 1995; PaPILO's
+transaction/reduction-stack design). The current crate does this for
+its NLP reductions; LP/QP variable substitution and bound shifts need
+their own dual-recovery transforms.
+
+**Equilibration front-end.** Ruiz (2001) row–column norm balancing
+(optionally + Pock–Chambolle), as used by OSQP/Clarabel, conditions the
+KKT system before the IPM solve. Adjacent to presolve proper; bundle it
+with the dispatch into `pounce-convex`.
+
+**Build vs. reuse — an explicit call to make.** PaPILO (Gleixner,
+Gottwald & Hoen 2023; INFORMS JOC; arXiv:2206.10709) is **Apache-2.0**,
+header-only C++, parallel, multiprecision, and *already presolves
+LP/MIP/QP* with a proper reduction-stack/postsolve. Before extending
+`pounce-presolve` in-house for the LP/QP reductions above, evaluate
+porting or wrapping PaPILO — it is the cleanest published
+solver-independent presolve architecture and permissively licensed.
+
+**Key references**
+
+- E. D. Andersen & K. D. Andersen, *Presolving in linear programming*,
+  Math. Prog. 71:221–245 (1995). — reduction catalog + restoration.
+- J. Gondzio, *Presolve analysis of linear programs prior to applying
+  an interior point method*, INFORMS JOC 9(1):73–91 (1997); Addendum
+  13(2):169 (2001). — IPM-specific (fill-in) presolve.
+- C. Mészáros & U. Suhl, *Advanced preprocessing techniques for linear
+  and quadratic programming*, OR Spectrum 25:575–595 (2003). —
+  fill-/row-growth control during elimination.
+- N. Gould & P. Toint, *Preprocessing for quadratic programming*,
+  Math. Prog. Ser. B 100:95–132 (2004). — QP/Hessian-aware reductions
+  and dual recovery.
+- T. Achterberg, R. Bixby, Z. Gu, E. Rothberg & D. Weninger, *Presolve
+  Reductions in Mixed Integer Programming*, INFORMS JOC 32(2):473–506
+  (2020). — modern taxonomy (Gurobi).
+- A. Gleixner, L. Gottwald & A. Hoen, *PaPILO: A Parallel Presolving
+  Library for Integer and Linear Optimization with Multiprecision
+  Support*, INFORMS JOC (2023); arXiv:2206.10709. — Apache-2.0
+  reference implementation (LP/MIP/QP).
+- D. Ruiz, *A scaling algorithm to equilibrate both rows and columns
+  norms in matrices*, RAL-TR-2001-034 (2001). — equilibration.
+
 ## Implementation phasing
 
 Each phase is independently shippable. The headline shift from the
@@ -422,8 +507,11 @@ both are weak (ADMM, AL), wrap or defer. When only one is strong
 - `crates/pounce-algorithm/src/options.rs` (or equivalent) — register
   `solver_selection`
 - `Cargo.toml` (workspace) — add `pounce-convex` as a member
-- `crates/pounce-presolve/` — LP-specific reductions over time
-  (singleton rows/cols, dual-bound tightening); not blocking
+- `crates/pounce-presolve/` — LP/QP reductions, IPM-aware reduction
+  policy, and per-reduction postsolve (or a PaPILO port/wrap); see the
+  "Presolve integration" section for the scoped catalog and references.
+  Not blocking for correctness, but required for the Phase 3 benchmark
+  bar.
 
 ### Add
 - `crates/pounce-cli/src/dispatch.rs` — `classify_problem(&NlProblem)
