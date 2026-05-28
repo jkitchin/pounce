@@ -119,9 +119,19 @@ share the IPM scaffolding.
 | Best for                        | one-shot convex QPs, LPs        | QP sequences, SQP inner solver,       |
 |                                 |                                 | MPC, MIP node QPs                     |
 
-Dispatch picks between them via `solver_selection`; `auto` defaults to
-IPM-QP for one-shot convex QPs and routes parametric / warm-startable
-calls (when that signal is exposed by the caller) to `pounce-qp`.
+Dispatch picks between them via `solver_selection`. Under `auto`,
+convex LP/QP always goes to IPM-LP/IPM-QP — **the active-set path is
+opt-in**, never auto-selected from the NL path. The reason: an `.nl`
+file describes a single instance, and neither the format nor
+`solver_selection` carries a "this is one of a parametric sequence,
+warm-start it" signal for the classifier to act on. So `pounce-qp` is
+reached only (a) explicitly via `solver_selection = qp-active-set`, or
+(b) programmatically via the Python/C warm-start API, where the caller
+holds state across solves and *is* the warm-start signal. A future
+extension could let a caller mark a problem as warm-startable through a
+`solver.options` hint, at which point `auto` could route it to
+`pounce-qp`; until that hint exists, auto-routing to active-set is not
+possible and is not claimed.
 
 ### What modeling languages see
 
