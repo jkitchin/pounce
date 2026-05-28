@@ -149,17 +149,34 @@ The NL format header (Gay 2005 §3) lines currently skipped at
 needed:
 
 - Line 2: `n_vars n_cons n_objs ranges eqns` (already parsed)
-- Line 4: `n_nl_cons n_nl_objs` — if both zero, problem is at-most
-  quadratic (could be LP or QP; need AST walk to decide)
+- Line 4: `n_nl_cons n_nl_objs` — count of constraints/objectives with
+  a *nonlinear part*. Zero means purely linear; see the LP/QP caveat
+  below.
 - Line 5: `n_nl_net n_lin_net` — network structure (future routing
   target)
 - Line 6: `n_nl_vars_in_both n_nl_vars_in_cons n_nl_vars_in_obj`
 
-If `n_nl_cons == 0` and `n_nl_objs == 0` → class is LP or QP.
-If furthermore the objective AST contains only linear terms → LP.
-If the objective AST has degree-2 `Mul` or `Pow` nodes only → QP
-(check positive-semidefiniteness for convex/nonconvex split via the
-Hessian-pattern computation already in `pounce-nlp`).
+The NL format has no dedicated quadratic section: each row's linear
+part lives in the `G`/`J` (gradient/Jacobian) coefficient segments,
+while *any* higher-order term — including the quadratic terms of a QP —
+is written into the nonlinear expression tree (`O`/`C` segments) as
+`Mul`/`Pow` nodes. Consequently a QP objective registers as nonlinear,
+so the header alone does **not** distinguish LP from QP:
+
+- `n_nl_cons == 0` and `n_nl_objs == 0` → class is **LP** (all
+  structure is in the linear `G`/`J` segments; no AST walk needed).
+- Otherwise walk the nonlinear AST of the rows that carry a nonlinear
+  part:
+  - if every nonlinear term is a degree-2 polynomial (`Mul`/`Pow`
+    nodes only, no transcendental/other ops) → **QP** — extract the
+    Hessian and check positive-semidefiniteness for the
+    convex/nonconvex split (a numerical factorization or attempted
+    Cholesky, not just the Hessian *pattern* from `pounce-nlp`);
+  - otherwise → **NLP**.
+
+This mirrors how QP-capable AMPL solvers detect QPs (ASL's `nqpcheck`
+walks the nonlinear tree to recover `Q`); the header is a fast reject
+for the LP case only.
 
 ### Option plumbing
 
