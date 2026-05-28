@@ -15,7 +15,7 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory, InnerBackendFactoryFactory,
+    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
 };
 use pounce_sensitivity::SensSolve;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -582,13 +582,15 @@ impl PyProblem {
             .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-        let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
-        let resto_factory = make_default_restoration_factory(
+        let bff_mint = move || -> InnerBackendFactoryFactory {
+            Box::new(move || default_backend_factory(feral_cfg))
+        };
+        let resto_provider = make_default_restoration_factory_provider(
             RestoAlgorithmBuilder::new(),
             app.algorithm_builder_from_options(),
-            bff,
+            bff_mint,
         );
-        app.set_restoration_factory(resto_factory);
+        app.set_restoration_factory_provider(resto_provider);
 
         let init = PyTnlpInit {
             n: self.n,

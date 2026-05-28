@@ -46,7 +46,7 @@ use pounce_nlp::tnlp::{
 };
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory, InnerBackendFactoryFactory,
+    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -566,19 +566,22 @@ pub unsafe extern "C" fn IpoptSolve(
     // Wire the restoration phase fresh for this solve. Without it, any
     // line-search failure surfaces as `RestorationFailure` instead of
     // falling back into the ℓ1-feasibility sub-IPM — exactly what the
-    // CLI driver does. `make_default_restoration_factory` is one-shot,
-    // so re-wire per `IpoptSolve` to stay correct across repeated
-    // solves on the same `IpoptProblem`. The feral config is snapshot
-    // from the now-fully-populated options so `feral_*` overrides flow
-    // into the restoration sub-IPM too.
+    // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
+    // repeated solves on the same `IpoptProblem`. The feral config is
+    // snapshot from the now-fully-populated options so `feral_*`
+    // overrides flow into the restoration sub-IPM too. Use the multi-pass
+    // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
+    // second inner solve (pounce#10 Phase 3 / pounce#24).
     let feral_cfg = feral_config_from_options(info.app.options());
-    let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
-    let resto_factory = make_default_restoration_factory(
+    let bff_mint = move || -> InnerBackendFactoryFactory {
+        Box::new(move || default_backend_factory(feral_cfg))
+    };
+    let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),
         info.app.algorithm_builder_from_options(),
-        bff,
+        bff_mint,
     );
-    info.app.set_restoration_factory(resto_factory);
+    info.app.set_restoration_factory_provider(resto_provider);
 
     let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
     let status = info.app.optimize_tnlp(bridge_for_solve);

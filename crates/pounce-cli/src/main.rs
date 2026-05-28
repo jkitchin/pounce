@@ -32,7 +32,7 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory, InnerBackendFactoryFactory,
+    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -105,16 +105,22 @@ pub fn main() -> ExitCode {
     // IPM. Snapshot, not borrow: the BFF outlives the option-mutation
     // window we cleanly own here.
     let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-    let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
+    // Use the multi-pass provider so the ℓ₁ wrapper (`l1_exact_penalty_barrier`)
+    // and the auto-fallback (`l1_fallback_on_restoration_failure`) don't
+    // panic with "restoration factory invoked more than once" on their
+    // second inner solve — see pounce#10 Phase 3 / pounce#24.
+    let bff_mint = move || -> InnerBackendFactoryFactory {
+        Box::new(move || default_backend_factory(feral_cfg))
+    };
     // Hand the inner IPM a builder mirroring the outer options so its
     // `mu_strategy` (adaptive vs. monotone) inherits the user's choice —
     // matches upstream `IpAlgBuilder::BuildRestoIpoptAlgorithm`.
-    let resto_factory = make_default_restoration_factory(
+    let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),
         app.algorithm_builder_from_options(),
-        bff,
+        bff_mint,
     );
-    app.set_restoration_factory(resto_factory);
+    app.set_restoration_factory_provider(resto_provider);
 
     // Snapshot the problem source as a string — needed downstream by
     // the diagnostics manifest.

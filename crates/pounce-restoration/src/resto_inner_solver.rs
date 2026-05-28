@@ -98,6 +98,13 @@ pub fn make_resto_inner_solver(
 /// [`make_resto_inner_solver`]. The closure returned has signature
 /// `FnMut() -> Box<dyn RestorationPhase>` so it slots straight into
 /// [`pounce_algorithm::application::IpoptApplication::set_restoration_factory`].
+///
+/// One-shot: the returned closure can only be called once per
+/// `optimize_constrained` invocation. Callers that need to run the
+/// inner IPM more than once per `optimize_tnlp` — the ℓ₁ outer loop,
+/// the ℓ₁-on-restoration-failure auto-fallback — must instead use
+/// [`make_default_restoration_factory_provider`] together with
+/// [`pounce_algorithm::application::IpoptApplication::set_restoration_factory_provider`].
 pub fn make_default_restoration_factory(
     resto_builder: RestoAlgorithmBuilder,
     inner_alg_builder: AlgorithmBuilder,
@@ -111,6 +118,41 @@ pub fn make_default_restoration_factory(
         let inner = make_resto_inner_solver(rb, ab, bff);
         let driver = crate::min_c_1nrm::MinC1NormRestoration::new().with_inner_solver(inner);
         Box::new(driver) as Box<dyn pounce_algorithm::restoration::RestorationPhase>
+    })
+}
+
+/// Multi-pass companion to [`make_default_restoration_factory`].
+///
+/// Returns a [`pounce_algorithm::application::RestorationFactoryProvider`]:
+/// a closure that mints a *fresh* one-shot restoration factory each
+/// time it is invoked. `IpoptApplication` re-invokes the provider once
+/// per [`pounce_algorithm::application::IpoptApplication::optimize_constrained`]
+/// call (see `application.rs:1155`), which is what the ℓ₁ wrapper's
+/// BNW outer loop and the `l1_fallback_on_restoration_failure` retry
+/// both need — they each run the inner IPM more than once and would
+/// otherwise hit the one-shot `restoration factory invoked more than once`
+/// panic on the second pass.
+///
+/// `bff_mint` is the "factory factory factory": invoked once per
+/// provider call to produce a fresh
+/// [`InnerBackendFactoryFactory`] (FERAL/MA57 backend), so each inner
+/// solve gets independent backend state. Callsites that capture a
+/// `FeralConfig` (which is `Copy`) can pass
+/// `move || Box::new(move || default_backend_factory(feral_cfg))`.
+pub fn make_default_restoration_factory_provider<F>(
+    resto_builder: RestoAlgorithmBuilder,
+    inner_alg_builder: AlgorithmBuilder,
+    mut bff_mint: F,
+) -> Box<dyn FnMut() -> Box<dyn FnMut() -> Box<dyn pounce_algorithm::restoration::RestorationPhase>>>
+where
+    F: FnMut() -> InnerBackendFactoryFactory + 'static,
+{
+    Box::new(move || {
+        make_default_restoration_factory(
+            resto_builder.clone(),
+            inner_alg_builder.clone(),
+            bff_mint(),
+        )
     })
 }
 

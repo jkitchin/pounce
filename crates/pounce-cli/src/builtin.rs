@@ -24,6 +24,7 @@ pub fn list() -> Vec<&'static str> {
         "bounded-quadratic",
         "eq-quadratic",
         "circle",
+        "infeasible-eq",
     ]
 }
 
@@ -34,6 +35,7 @@ pub fn lookup(name: &str) -> Option<Rc<RefCell<dyn TNLP>>> {
         "bounded-quadratic" => Some(Rc::new(RefCell::new(BoundedQuadratic::default()))),
         "eq-quadratic" => Some(Rc::new(RefCell::new(EqQuadratic::default()))),
         "circle" => Some(Rc::new(RefCell::new(Circle::default()))),
+        "infeasible-eq" => Some(Rc::new(RefCell::new(InfeasibleEq::default()))),
         _ => None,
     }
 }
@@ -490,6 +492,115 @@ impl TNLP for Circle {
                 let lam = lambda.map(|l| l[0]).unwrap_or(0.0);
                 values[0] = 2.0 * lam;
                 values[1] = 2.0 * lam;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+        self.final_x = Some([sol.x[0], sol.x[1]]);
+        self.final_obj = sol.obj_value;
+    }
+}
+
+// --------------------------------------------------------------------
+// InfeasibleEq: min x0^2 + x1^2
+//   s.t.  x0 + x1 = 1   (g_0)
+//         x0 + x1 = 2   (g_1)
+// The two equalities are mutually contradictory, so no feasible point
+// exists. The standard solve drives the restoration phase, which also
+// cannot achieve feasibility, returning Restoration_Failed. With
+// `l1_fallback_on_restoration_failure=yes` (or
+// `l1_exact_penalty_barrier=yes`), the CLI then performs a second
+// inner solve via the ℓ₁-exact penalty-barrier wrapper. That second
+// pass is what exercises the multi-pass restoration factory provider
+// path — the very path that previously panicked with
+// "restoration factory invoked more than once".
+// --------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+pub struct InfeasibleEq {
+    pub final_x: Option<[Number; 2]>,
+    pub final_obj: Number,
+}
+
+impl TNLP for InfeasibleEq {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 2,
+            nnz_jac_g: 4,
+            nnz_h_lag: 2,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.iter_mut().for_each(|v| *v = -2e19);
+        b.x_u.iter_mut().for_each(|v| *v = 2e19);
+        b.g_l[0] = 1.0;
+        b.g_u[0] = 1.0;
+        b.g_l[1] = 2.0;
+        b.g_u[1] = 2.0;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[0.0, 0.0]);
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some(x[0] * x[0] + x[1] * x[1])
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
+        grad[0] = 2.0 * x[0];
+        grad[1] = 2.0 * x[1];
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0] + x[1];
+        g[1] = x[0] + x[1];
+        true
+    }
+
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0, 1, 1]);
+                jcol.copy_from_slice(&[0, 1, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values.copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = 2.0 * obj_factor;
+                values[1] = 2.0 * obj_factor;
             }
         }
         true

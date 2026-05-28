@@ -27,7 +27,7 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory, InnerBackendFactoryFactory,
+    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
 };
 use pounce_sensitivity::Solver as RustSolver;
 use std::cell::RefCell;
@@ -186,15 +186,18 @@ pub unsafe extern "C" fn IpoptSolverSolve(
     }));
 
     // Re-wire restoration fresh for this solve (same pattern as
-    // IpoptSolve).
+    // IpoptSolve). Multi-pass provider so the ℓ₁ wrapper / auto-fallback
+    // don't panic on the second inner solve (pounce#10 / pounce#24).
     let feral_cfg = feral_config_from_options(info.problem.app.options());
-    let bff: InnerBackendFactoryFactory = Box::new(move || default_backend_factory(feral_cfg));
-    let resto_factory = make_default_restoration_factory(
+    let bff_mint = move || -> InnerBackendFactoryFactory {
+        Box::new(move || default_backend_factory(feral_cfg))
+    };
+    let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),
         info.problem.app.algorithm_builder_from_options(),
-        bff,
+        bff_mint,
     );
-    info.problem.app.set_restoration_factory(resto_factory);
+    info.problem.app.set_restoration_factory_provider(resto_provider);
 
     // Move the app out of the problem and into a fresh RustSolver.
     let app = std::mem::replace(&mut info.problem.app, IpoptApplication::new());
