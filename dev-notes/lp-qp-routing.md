@@ -628,10 +628,15 @@ Phase 1 (routing scaffolding, no behavior change):
 
 - `cargo test -p pounce-cli` covers new dispatcher with unit tests on
   `classify_problem`: feed it parsed `NlProblem` structs for known
-  LP / convex QP / convex QCQP / nonconvex QP / NLP cases (builtins +
-  Mittelmann fixtures already on disk), plus boundary cases that must
-  fall back to NLP (inconclusive PSD test, parse failure), and assert
-  the right `ProblemClass`.
+  LP / convex QP / convex QCQP / nonconvex QP / NLP cases, plus boundary
+  cases that must fall back to NLP (inconclusive PSD test, parse
+  failure), and assert the right `ProblemClass`. These use **small
+  committed `.nl` fixtures** (one per class) so the unit tests are
+  hermetic — they must run in CI and a fresh clone, not depend on the
+  gitignored Mittelmann/CUTEst caches that only exist after a local
+  `make fetch`/`make translate`. The full benchmark sets stay for the
+  wall-clock validation in Phases 2–3.5, where relying on the local
+  cache is fine.
 - `make benchmark-mittelmann` produces identical results to current
   behavior — `auto` routes everything to NLP-IPM until `pounce-convex`
   lands.
