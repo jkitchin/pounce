@@ -143,6 +143,40 @@ extension could let a caller mark a problem as warm-startable through a
 `pounce-qp`; until that hint exists, auto-routing to active-set is not
 possible and is not claimed.
 
+### Relationship to active-set SQP
+
+Two *orthogonal* solver-selection axes are in play; conflating them
+causes confusion:
+
+1. **`solver_selection`** (this note) — picks a solver by **problem
+   class**: LP / convex QP / convex QCQP / NLP. This is the dispatch
+   layer described above.
+2. **`algorithm`** — picks the **NLP algorithm strategy**: the
+   Wächter-Biegler filter-IPM (default) vs. an active-set SQP. Both
+   solve *general NLP*; they differ in warm-start behavior. Active-set
+   SQP is a new `AlgorithmStrategy` end-to-end (see the design note
+   [`research/active-set-sqp-warm-start.md`](research/active-set-sqp-warm-start.md)),
+   opt-in and parallel to the IPM, leaving the default loop untouched.
+
+Active-set **SQP** is therefore an *NLP* solver — it sits beside IPM-NLP
+at the top of the stack, **not** in the convex LP/QP layer.
+
+The two notes connect through one crate: **`pounce-qp` does double
+duty.** Its sparse parametric active-set QP solver is both
+
+- the **`qp-active-set` dispatch target** for a standalone convex QP
+  (this note), and
+- the **inner QP subproblem solver** inside the active-set SQP NLP
+  algorithm (the SQP note).
+
+Build it once, use it both ways — which is why both notes point at the
+same `crates/pounce-qp/` on `claude/active-set-sqp-warm-start-BnjLA`.
+Both target the same warm-start sweet spot (MPC, SQP inner solve, B&B
+node QPs, parametric homotopy), where IPM warm-starts badly because the
+barrier pushes iterates off the active boundary. This is the parallel
+track called out in the phasing: it is *not* phase-ordered against
+`pounce-convex` and ships on its own schedule.
+
 ### What modeling languages see
 
 - **AMPL / Pyomo (via NL files):** No change to the user-facing solver
@@ -753,7 +787,7 @@ land. Listed roughly in the order POUNCE should adopt them.
   Heinkenschloss optimal-control benchmarks; relevant for the NLP
   path, not for LP/QP routing.
 
-### What "competitive" means in 2025
+### What "competitive" means
 
 Reading Mittelmann's site sets expectations:
 
