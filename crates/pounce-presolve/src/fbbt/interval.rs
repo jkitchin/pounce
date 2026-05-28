@@ -170,9 +170,15 @@ impl Interval {
             // Conservative: any value is possible.
             return Self::ENTIRE;
         }
+        // Reciprocal endpoints must be outward-rounded before
+        // entering `mul`: `mul` rounds its four corner products by 1
+        // ULP, but that ±1 ULP does not compensate for an inward-
+        // rounded reciprocal (e.g. `1.0 / 3.0` evaluates one ULP
+        // below true 1/3 under IEEE round-to-nearest, so using it as
+        // the upper bound would exclude `1/3 + ε`).
         self.mul(Self {
-            lo: 1.0 / rhs.hi,
-            hi: 1.0 / rhs.lo,
+            lo: round_down(1.0 / rhs.hi),
+            hi: round_up(1.0 / rhs.lo),
         })
     }
 
@@ -653,6 +659,24 @@ mod tests {
         for &((a, b), (c, d), x, y) in &cases {
             let i = Interval::new(a, b).mul(Interval::new(c, d));
             assert!(i.contains(x * y), "{a},{b} × {c},{d} ∌ {x}×{y}");
+        }
+    }
+
+    #[test]
+    fn fuzz_div_contains_pointwise() {
+        // Reciprocal endpoints round inward under IEEE round-to-
+        // nearest, so `div` must explicitly outward-round them
+        // before entering `mul`. The `(0.1, 0.2) / (3.0, 4.0)` case
+        // hits a reciprocal-of-3 boundary; the second is a sanity
+        // check that the result still contains the exact midpoint.
+        let cases = [
+            ((0.1, 0.2), (3.0, 4.0), 0.15, 3.5),
+            ((1.0, 1.0), (3.0, 3.0), 1.0, 3.0),
+            ((-2.0, 5.0), (1.0, 7.0), 1.5, 3.0),
+        ];
+        for &((a, b), (c, d), x, y) in &cases {
+            let i = Interval::new(a, b).div(Interval::new(c, d));
+            assert!(i.contains(x / y), "{a},{b} / {c},{d} ∌ {x}/{y}");
         }
     }
 
