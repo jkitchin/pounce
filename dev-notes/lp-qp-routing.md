@@ -658,6 +658,13 @@ both are weak (ADMM, AL), wrap or defer. When only one is strong
 
 ## Verification
 
+The functional-correctness checks below cover *what* each phase must
+prove. The performance-engineering methodology that backs the
+"specialized path wins" claims — vectorization (SIMD), parallelism, the
+reproducibility-vs-performance decision, and the CI performance/numerical
+gates — lives in the companion note
+[`performance-engineering.md`](performance-engineering.md).
+
 Phase 1 (routing scaffolding, no behavior change):
 
 - `cargo test -p pounce-cli` covers new dispatcher with unit tests on
