@@ -22,7 +22,7 @@ correct (LP ⊂ convex QP ⊂ NLP) but leaves performance on the table:
    in `ipopt.opt`. Mirrors Gurobi/CPLEX UX; preserves a single Pyomo
    `SolverFactory('pounce')` entry.
 2. **One `pounce-convex` crate** for the IPM-based convex algorithms
-   (IPM-LP, IPM-QP, and a future simplex). Resists workspace sprawl;
+   (IPM-LP, IPM-QP, and the conic extensions). Resists workspace sprawl;
    related algorithms share warm-start logic, presolve adapters, and the
    predictor-corrector machinery.
 3. **Active-set QP stays in its own `pounce-qp` crate.** A sparse
@@ -50,17 +50,17 @@ It does three things:
    capture `n_nl_cons`, `n_nl_objs`, and the `n_nl_vars_*` triplet
    currently skipped at `nl_reader.rs:591`. Walks the parsed `Expr`
    AST (`nl_reader.rs:45-65`) to confirm linearity and detect
-   quadratic objectives. Produces:
+   quadratic objectives and constraints. Produces:
    ```rust
-   enum ProblemClass { Lp, ConvexQp, NonconvexQp, Nlp }
+   enum ProblemClass { Lp, ConvexQp, ConvexQcqp, NonconvexQp, Nlp }
    ```
 2. **Resolves the solver choice** by combining `ProblemClass` with the
    `solver_selection` option:
    - `auto` (default): most specialized solver matching the class
    - `nlp`: always IPM-NLP (current behavior)
-   - `lp-ipm`, `lp-simplex`, `qp-ipm`, `qp-active-set`: force; error
-     if the problem doesn't fit (e.g., `simplex` on a problem with a
-     quadratic objective).
+   - `lp-ipm`, `qp-ipm`, `qp-active-set`: force; error if the problem
+     doesn't fit (e.g., `qp-ipm` on a problem with a non-quadratic
+     objective).
 3. **Dispatches.** Each solver implements (or is wrapped behind) the
    existing `TNLP` trait (`crates/pounce-nlp/src/tnlp.rs:157`); the
    trait is already algorithm-agnostic and object-safe, so dispatch is
@@ -72,7 +72,7 @@ It does three things:
 ```
 crates/
   pounce-algorithm/    # existing — IPM-NLP, unchanged
-  pounce-convex/       # NEW — IPM-LP, IPM-QP, simplex
+  pounce-convex/       # NEW — IPM-LP, IPM-QP, conic (SOCP/exp/pow/SDP)
   pounce-qp/           # existing (on active-set-sqp-warm-start branch)
                        #   — sparse Schur-complement parametric active-set QP
   pounce-nlp/          # existing — TNLP trait, unchanged
@@ -82,12 +82,12 @@ crates/
   pounce-presolve/     # existing — extended with LP-specific reductions
 ```
 
-`pounce-convex` exposes per-algorithm entry points for the IPM family
-and (eventually) simplex:
+`pounce-convex` exposes per-algorithm entry points for the IPM family:
 ```rust
 pub fn solve_lp_ipm(tnlp: Rc<RefCell<dyn TNLP>>, opts: &OptionsList) -> Status;
 pub fn solve_qp_ipm(tnlp: Rc<RefCell<dyn TNLP>>, opts: &OptionsList) -> Status;
-pub fn solve_simplex(tnlp: Rc<RefCell<dyn TNLP>>, opts: &OptionsList) -> Status;
+// SOCP / exp / pow / SDP reuse solve_qp_ipm's cone-generic scaffolding
+// (see src/cones/), selected by the cone types present — not a new fn.
 ```
 
 `pounce-qp` already exposes its own active-set entry point; dispatch
@@ -101,9 +101,8 @@ All IPM solvers reuse `pounce-linsol` for the augmented-system
 factorization (`SparseSymLinearSolverInterface` — same trait feral and
 MA57 implement today). Mehrotra predictor-corrector and Gondzio
 higher-order correctors live inside `pounce-convex` because the same
-iteration scaffolding serves both IPM-LP and IPM-QP. Simplex grows its
-own LU-with-updates module (eventually a separate `pounce-lu` crate
-when justified). `pounce-qp` keeps its own Schur-complement KKT
+iteration scaffolding serves both IPM-LP and IPM-QP (and the conic
+extensions). `pounce-qp` keeps its own Schur-complement KKT
 machinery — different from the IPM augmented system — so it does not
 share the IPM scaffolding.
 
@@ -165,14 +164,35 @@ so the header alone does **not** distinguish LP from QP:
 
 - `n_nl_cons == 0` and `n_nl_objs == 0` → class is **LP** (all
   structure is in the linear `G`/`J` segments; no AST walk needed).
-- Otherwise walk the nonlinear AST of the rows that carry a nonlinear
-  part:
-  - if every nonlinear term is a degree-2 polynomial (`Mul`/`Pow`
-    nodes only, no transcendental/other ops) → **QP** — extract the
-    Hessian and check positive-semidefiniteness for the
-    convex/nonconvex split (a numerical factorization or attempted
-    Cholesky, not just the Hessian *pattern* from `pounce-nlp`);
-  - otherwise → **NLP**.
+- Otherwise walk the nonlinear AST of every row (objective *and*
+  constraints) that carries a nonlinear part. If any nonlinear term is
+  not a degree-2 polynomial (transcendental, higher-degree `Pow`, etc.)
+  → **NLP**. If all nonlinear terms are degree-2 polynomials, extract
+  the Hessians and split on convexity (PSD test via numerical
+  factorization / attempted Cholesky — *not* the Hessian *pattern* from
+  `pounce-nlp`):
+  - quadratic objective, **linear** constraints, objective Hessian PSD
+    → **ConvexQp** (→ IPM-QP);
+  - quadratic objective and/or **quadratic** constraints, all convex
+    (objective Hessian PSD and each ≤-inequality's constraint Hessian
+    PSD) → **ConvexQcqp** (→ SOCP / conic solver, Phase 4+). A convex
+    QCQP is SOCP-representable via the epigraph / rotated-second-order-
+    cone reformulation, so it routes to the same conic IPM as native
+    SOCP rather than to the dense NLP path;
+  - any indefinite Hessian (objective or a constraint) → **NonconvexQp**
+    (falls through to NLP-IPM for a local min).
+- **Conservative fallback (correctness guard).** Whenever the walk
+  cannot *prove* the stronger class — parse failure, an inconclusive /
+  near-singular PSD test, or a quadratic constraint whose sense is
+  incompatible with its curvature — fall back to the more general class,
+  ultimately **NLP**. Misclassifying an indefinite or non-quadratic
+  problem *into* a convex solver would return a spurious KKT point as if
+  globally optimal; falling back to NLP is always sound. The PSD test
+  therefore uses a tolerance, and "inconclusive within tolerance" routes
+  to NLP, never to the convex path.
+- Until Phase 4 (SOCP) lands, **ConvexQcqp** falls through to NLP-IPM;
+  the distinct class is the dispatch seam the conic solver later
+  intercepts (same pattern as `NonconvexQp`).
 
 This mirrors how QP-capable AMPL solvers detect QPs (ASL's `nqpcheck`
 walks the nonlinear tree to recover `Q`); the header is a fast reject
@@ -183,14 +203,12 @@ for the LP case only.
 Single new option on `OptionsList`:
 
 - Key: `solver_selection`
-- Values: `auto` (default), `nlp`, `lp-ipm`, `lp-simplex`, `qp-ipm`,
-  `qp-active-set`
+- Values: `auto` (default), `nlp`, `lp-ipm`, `qp-ipm`, `qp-active-set`
 - Validation: `auto` always works; explicit values error if the
   loaded problem doesn't match the class (with a message naming the
   detected class).
-- Routing: `lp-ipm` / `qp-ipm` / `lp-simplex` resolve into
-  `pounce-convex` entry points; `qp-active-set` resolves into the
-  existing `pounce-qp` crate.
+- Routing: `lp-ipm` / `qp-ipm` resolve into `pounce-convex` entry
+  points; `qp-active-set` resolves into the existing `pounce-qp` crate.
 
 Follows the precedent of `linear_solver`, which selects `Ma57`/`Feral`
 via the `LinearBackendFactory` at
@@ -566,8 +584,10 @@ Phase 1 (routing scaffolding, no behavior change):
 
 - `cargo test -p pounce-cli` covers new dispatcher with unit tests on
   `classify_problem`: feed it parsed `NlProblem` structs for known
-  LP / convex QP / nonconvex QP / NLP cases (builtins + Mittelmann
-  fixtures already on disk) and assert the right `ProblemClass`.
+  LP / convex QP / convex QCQP / nonconvex QP / NLP cases (builtins +
+  Mittelmann fixtures already on disk), plus boundary cases that must
+  fall back to NLP (inconclusive PSD test, parse failure), and assert
+  the right `ProblemClass`.
 - `make benchmark-mittelmann` produces identical results to current
   behavior — `auto` routes everything to NLP-IPM until `pounce-convex`
   lands.
@@ -583,6 +603,44 @@ Phase 2 (LP/QP actually dispatched):
 - `studio/mcp` MCP tools can render `compare_runs` between the two
   paths for any individual benchmark — `compare_runs` was built for
   exactly this kind of side-by-side analysis.
+
+Phase 3 (Mehrotra + HSDE):
+
+- Iteration-count regression: assert the predictor-corrector cuts
+  iterations vs the bare Phase-2 IPM on the same Mittelmann LP /
+  Maros-Mészáros QP instances — the ~30–50% claim is a checked
+  regression, not an aspiration.
+- Infeasibility / unboundedness: feed known-infeasible and
+  known-unbounded LP/QP fixtures and assert HSDE reports the correct
+  status instead of stalling or hitting the iteration cap.
+
+Phase 3.5 (presolve) — the highest correctness risk is postsolve dual
+recovery, so it gets the most coverage:
+
+- Round-trip primal *and* dual: for each Mittelmann / Maros-Mészáros
+  instance, solve with presolve on and off and assert the recovered
+  `x` *and* the duals (`λ`, bound multipliers) match to 1e-6 after
+  postsolve. Primal-only matching hides the most common postsolve bug.
+- Per-reduction unit tests: each reduction (singleton / doubleton /
+  forcing / dominated row; singleton / duplicate column; bound
+  tightening) gets a fixture where postsolve must reconstruct the
+  eliminated primal *and* dual entries exactly.
+- Detection: presolve-only infeasibility / unboundedness fixtures
+  (e.g. contradictory singleton bounds) assert the correct status
+  without invoking the IPM at all.
+- QP-specific: a fixture where a variable substitution fills the
+  Hessian, asserting `P` is transformed consistently and the dual is
+  recovered with the quadratic term (the net-new Gould–Toint path).
+
+Phases 4–6 (conic):
+
+- Objective-value cross-check against Clarabel / MOSEK on the matching
+  cone benchmark set (SOCP / GP-entropy / SDP) to 1e-6.
+- Regression guard: adding a cone must not change LP/QP results — re-run
+  the Phase-2/3 suite and assert stable iteration counts on the pure
+  LP/QP instances. Convex-QCQP fixtures route to the SOCP path and are
+  cross-checked against the NLP-IPM local solution (same optimum, since
+  the QCQP is convex).
 
 Python / C APIs:
 
@@ -762,7 +820,7 @@ crates/
   pounce-hsl/       # MA57 backend
   ┌─ consumers ─────────────────────────────────────┐
   pounce-algorithm/ # IPM-NLP (today)
-  pounce-convex/    # IPM-LP/QP, simplex (planned)
+  pounce-convex/    # IPM-LP/QP + conic (planned)
   pounce-qp/        # active-set QP (in flight)
   pounce-socp/      # SOCP / conic IPM (future)
   pounce-mcp/       # complementarity (future)
