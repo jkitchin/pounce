@@ -106,6 +106,16 @@ extensions). `pounce-qp` keeps its own Schur-complement KKT
 machinery — different from the IPM augmented system — so it does not
 share the IPM scaffolding.
 
+Unlike the NLP path, the convex entry points exploit the constant-matrix
+structure: for an LP/QP the Hessian `P` and constraint matrix `A` (and
+`c`, `b`) do *not* depend on `x`, so they are extracted **once** at
+setup via a single `eval_h` / `eval_jac_g` call and cached for the rest
+of the solve. The `TNLP` contract is built for nonlinear problems and
+suggests per-iteration re-evaluation; the convex solver must *not* be a
+thin per-iteration `TNLP` driver like the NLP path, or it forfeits the
+specialization that justifies it (and the Phase 2 "specialized path
+wins" benchmark claim).
+
 ### Active-set vs IPM-QP: why both
 
 | Property                        | IPM-QP (`pounce-convex`)        | Active-set (`pounce-qp`)              |
