@@ -320,9 +320,12 @@ banded/Riccati IPM, simplex) are explicitly *out of scope* — see the
 `nlp` (auto → nlp for now). Ship to verify no regression. *No new
 algorithm.*
 
-**Phase 2 — IPM-QP in `pounce-convex`.** Bare IPM-QP (no Mehrotra
-yet); route LP and QP problems to it under `auto`. Compare iteration
-counts and wall-clock against the existing IPM-NLP path on the
+**Phase 2 — IPM-QP in `pounce-convex` (+ Ruiz equilibration).** Bare
+IPM-QP (no Mehrotra yet); route LP and QP problems to it under `auto`.
+Bring in **Ruiz equilibration** here — it is a conditioning
+prerequisite for the IPM KKT solve, effectively part of the solver
+rather than deferrable presolve (see "Presolve integration"). Compare
+iteration counts and wall-clock against the existing IPM-NLP path on the
 `quadratic`, `bounded-quadratic`, `eq-quadratic` builtins. This is the
 minimum that justifies the `pounce-convex` crate.
 
@@ -333,6 +336,19 @@ iteration counts ~30-50% on convex QPs. Validate on Mittelmann LP
 subset and Maros-Mészáros QP set. After this phase `pounce-convex` is
 algorithmically competitive with Clarabel and HiGHS for the LP/QP
 problem class.
+
+**Phase 3.5 — Presolve (reduction catalog + postsolve stack).** Now
+that the iteration is algorithmically competitive, presolve is the
+multiplier that closes the benchmark gap to HiGHS/Clarabel (a 2–10×
+factor on the standard sets). Land the LP/QP reduction catalog, the
+IPM-aware reduction policy, and the pure-Rust transaction-based
+postsolve stack (PaPILO ideas, rayon for parallelism — not a wrap), per
+the "Presolve integration" section. Sequenced *after* Phase 3 on
+purpose: debugging the postsolve dual-recovery against a solver you
+already trust avoids chasing two unknowns at once. Benchmark-driven —
+add the reductions that actually move the Mittelmann / Maros-Mészáros
+numbers. Equilibration (Phase 2) is the prerequisite already in place;
+this phase adds the size-reducing transformations on top.
 
 **Phase 4 — SOCP via second-order cone.** Add the second-order cone as
 a constraint type. Nesterov-Todd scaling on the SOC block; rotated-SOC
@@ -371,16 +387,19 @@ and ships when its own phases 5a–d are complete.
 | Phase | Effort | Cumulative |
 |------|--------|-----------|
 | 1 — Dispatch | 2–4 weeks | 1 month |
-| 2 — Bare IPM-QP | 3–6 months | 4–7 months |
+| 2 — Bare IPM-QP (+ equilibration) | 3–6 months | 4–7 months |
 | 3 — Mehrotra + HSDE | 2–3 months | 6–10 months |
-| 4 — SOCP | 1–2 months | 7–12 months |
-| 5 — Exp/power cones | 2–4 months | 9–16 months |
-| 6 — SDP + chordal | 6+ months | 15+ months (optional) |
+| 3.5 — Presolve | 2–4 months | 8–14 months |
+| 4 — SOCP | 1–2 months | 9–16 months |
+| 5 — Exp/power cones | 2–4 months | 11–20 months |
+| 6 — SDP + chordal | 6+ months | 17+ months (optional) |
 
 Phases 1–3 are the minimum to justify the dispatch architecture and
-deliver a credible LP/QP solver. Phases 4–5 are the natural extension
-that closes most of the convex-conic-IPM gap to Clarabel. Phase 6 is
-gated on demand.
+deliver a *correct* LP/QP solver; Phase 3.5 (presolve) is what makes it
+*benchmark-competitive* with HiGHS/Clarabel — required for that bar,
+though not for correctness. Phases 4–5 are the natural extension that
+closes most of the convex-conic-IPM gap to Clarabel. Phase 6 is gated
+on demand.
 
 ## Out of scope and why
 
