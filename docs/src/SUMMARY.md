@@ -28,6 +28,7 @@
 - [Scaling](scaling.md)
 - [Feasibility-Based Bound Tightening](fbbt.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)
+- [Troubleshooting Recipes](troubleshooting.md)
 - [Benchmarks](benchmarks.md)
 
 ---

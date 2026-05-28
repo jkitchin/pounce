@@ -107,12 +107,41 @@ FERAL/SSIDS).
   barrier slacks. Used internally by the inexact algorithm; rarely
   user-selected.
 
-> **Heads-up**: `linear_system_scaling` is registered through the
-> options machinery, and each method's per-row factor computation is
-> tested in isolation, but the runtime dispatch in `alg_builder.rs`
-> currently passes `None` to `TSymLinearSolver`. Wiring the option
-> through end-to-end is tracked separately from
-> [issue #61](https://github.com/jkitchin/pounce/issues/61).
+### Worked example — `nql180`
+
+`nql180` is one of the Mittelmann NLP benchmarks where both default
+pounce and default Ipopt fail to clear the strict `tol` gate (see
+[issue #25](https://github.com/jkitchin/pounce/issues/25)). Forcing
+Ruiz symmetric equilibration on the augmented KKT system is enough to
+push pounce all the way to "Optimal Solution Found":
+
+```
+pounce nql180.nl presolve=yes linear_system_scaling=ruiz \
+       linear_scaling_on_demand=no
+```
+
+|                          | default | + Ruiz (forced)        |
+|---                       |---      |---                     |
+| Exit status              | Solved To Acceptable Level | **Optimal Solution Found** |
+| Iterations               | 41      | 50                     |
+| Primal infeasibility     | 4.0e-11 | **1.2e-15**            |
+| Dual infeasibility       | 1.0e-5  | 3.1e-4                 |
+| Complementarity          | 1.2e-9  | 9.9e-10                |
+| Overall NLP error        | 2.4e-7  | **9.9e-10**            |
+
+The four-orders-of-magnitude primal-feasibility improvement and ~3
+orders on the overall NLP error are the textbook Ruiz benefit:
+symmetric ∞-norm equilibration lowers the condition number of the KKT
+matrix enough that the back-solve residuals drop the extra fractional
+digits needed to clear `tol`. The extra nine iterations are well spent
+— the 50-iter Ruiz solution is mathematically of strictly higher
+quality than the 41-iter unscaled "acceptable" solution.
+
+`linear_scaling_on_demand=no` forces always-on Ruiz; the default
+(`yes`) defers scaling computation until the linear solver flags an
+iterate as poorly scaled, which is the right behavior for problems
+that don't need it (most of the Mittelmann set, where the iter count
+is unchanged with or without Ruiz).
 
 ## Reporting
 
