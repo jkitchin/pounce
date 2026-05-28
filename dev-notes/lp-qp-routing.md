@@ -230,9 +230,18 @@ via the `LinearBackendFactory` at
   object-safe (`crates/pounce-nlp/src/tnlp.rs:157-249`).
 - `.sol` writer (`crates/pounce-cli/src/nl_writer.rs`) is already
   problem-type-agnostic; takes `(x, lambda, status)`. No change.
-- `pounce-restoration`, `pounce-l1penalty`, `pounce-sensitivity`,
-  `pounce-mu` stay coupled to IPM-NLP only — convex solvers don't
-  need most of them.
+- `pounce-restoration`, `pounce-l1penalty`, `pounce-sensitivity` stay
+  coupled to IPM-NLP only — the convex solvers don't use them (no
+  filter restoration, no penalty reformulation; sensitivity stays
+  NLP-coupled for now, though it's the natural seam for differentiable
+  convex layers later).
+- A barrier parameter μ is *not* optional, though: every IPM has one.
+  The convex IPM supplies its own **Mehrotra adaptive σ·μ centering**
+  (in `pounce-convex`, Phase 3), which is distinct from the NLP
+  `mu_strategy` (Monotone / Adaptive) in `pounce-mu`. Open question for
+  Phase 2/3: reuse `pounce-mu`'s strategy abstraction if it fits, or
+  keep the convex μ logic local to `pounce-convex`. Either way it is a
+  required component, not a skipped one.
 - `pyomo-pounce` doesn't change at all; users get LP/QP routing
   transparently via the CLI dispatch.
 
