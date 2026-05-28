@@ -262,13 +262,24 @@ their own dual-recovery transforms.
 KKT system before the IPM solve. Adjacent to presolve proper; bundle it
 with the dispatch into `pounce-convex`.
 
-**Build vs. reuse — an explicit call to make.** PaPILO (Gleixner,
-Gottwald & Hoen 2023; INFORMS JOC; arXiv:2206.10709) is **Apache-2.0**,
-header-only C++, parallel, multiprecision, and *already presolves
-LP/MIP/QP* with a proper reduction-stack/postsolve. Before extending
-`pounce-presolve` in-house for the LP/QP reductions above, evaluate
-porting or wrapping PaPILO — it is the cleanest published
-solver-independent presolve architecture and permissively licensed.
+**Build in pure Rust; learn from PaPILO, don't wrap it.** POUNCE's
+default build is pure Rust by design (no Fortran/C/C++, no system BLAS —
+see README and `docs/src/introduction.md`), so wrapping PaPILO
+(header-only C++) is out: it would break the pure-Rust guarantee that
+`pounce-feral` exists to uphold. PaPILO (Gleixner, Gottwald & Hoen
+2023; INFORMS JOC; arXiv:2206.10709) is still the best *reference
+architecture* — its **transaction-based reduction stack** (each
+reduction is a transaction with an undo, conflict-checked so reductions
+can be applied in parallel) is exactly the postsolve design
+`pounce-presolve` needs, and it is Apache-2.0 so studying the source is
+unencumbered. The plan is therefore to extend `pounce-presolve`
+in-house, porting PaPILO's *ideas* (transaction model, the LP/QP
+reduction set) rather than its code. Parallelism uses **rayon** (the
+idiomatic Rust data-parallel crate; not yet a workspace dependency) for
+the same recursive/data-parallel routines PaPILO parallelizes with
+Intel TBB — probing, dominated-column detection, constraint
+sparsification — keeping the transaction model as the conflict-avoidance
+mechanism.
 
 **Key references**
 
@@ -508,10 +519,10 @@ both are weak (ADMM, AL), wrap or defer. When only one is strong
   `solver_selection`
 - `Cargo.toml` (workspace) — add `pounce-convex` as a member
 - `crates/pounce-presolve/` — LP/QP reductions, IPM-aware reduction
-  policy, and per-reduction postsolve (or a PaPILO port/wrap); see the
-  "Presolve integration" section for the scoped catalog and references.
-  Not blocking for correctness, but required for the Phase 3 benchmark
-  bar.
+  policy, and a pure-Rust transaction-based postsolve stack (PaPILO
+  ideas, rayon for parallelism — not a wrap); see the "Presolve
+  integration" section for the scoped catalog and references. Not
+  blocking for correctness, but required for the Phase 3 benchmark bar.
 
 ### Add
 - `crates/pounce-cli/src/dispatch.rs` — `classify_problem(&NlProblem)
