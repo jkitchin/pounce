@@ -37,23 +37,39 @@ vectorize, *if* we decide what level of determinism we actually require.
    *Keep for `pounce-algorithm` / `pounce-linalg` only*, where it is a
    validation asset. Do **not** impose it on the convex solver.
 2. **Run-to-run + cross-platform reproducible** — a fixed binary on
-   fixed inputs gives bit-identical output every run and across
-   machines: deterministic reduction order, FMA used consistently (not
-   conditionally), deterministic parallel reductions (fixed chunking).
-   Allows SIMD. Does *not* promise equality with reference BLAS.
+   fixed inputs gives bit-identical output every run: deterministic
+   reduction order, FMA used consistently (not conditionally),
+   deterministic parallel reductions (fixed chunking). Allows SIMD. Does
+   *not* promise equality with reference BLAS. Two sub-levels:
+   - **2a — same machine, run-to-run identical.** Cheap: mainly "use
+     fixed chunk sizes, don't let parallel reductions split adaptively."
+   - **2b — cross-platform / cross-SIMD-width identical.** Harder:
+     different lane widths (AVX2 4-wide vs AVX-512 8-wide vs NEON) force
+     different reduction trees, so 2b needs a canonical accumulation
+     scheme independent of hardware width, at some cost to speed.
 3. **Best-effort fast** — SIMD + FMA + nondeterministic parallel
    reductions; results vary in the last few ULPs run-to-run. Gated only
    by the solution-tolerance check (§5).
 
-**Recommendation.** Target **tier 2** for `pounce-convex` and feral's
-performance-critical paths: it unlocks SIMD/FMA/parallelism while
-keeping debugging and CI sane (a failing solve reproduces). Keep
-**tier 1** in `pounce-algorithm`/`pounce-linalg` for the Ipopt-validation
-story. Allow **tier 3** only behind an opt-in feature for users who want
-maximum throughput and accept ULP-level nondeterminism. In all tiers,
-**correctness is gated on the solution tolerance (§5), never on
-bit-identity** — an optimizer's answer is "correct" if it satisfies the
-KKT/feasibility tolerances, regardless of last-bit differences.
+**Decision.** `pounce-convex` and feral's performance-critical paths
+target **tier 2**: it unlocks SIMD/FMA/parallelism while keeping
+debugging and CI sane (a failing solve reproduces). Specifically, **2a
+(same-machine run-to-run identity) is the firm requirement** — enforced
+by the reproducibility test in §5 — and **2b (cross-platform identity)
+is aspirational**, pursued where it's cheap but not allowed to block
+performance. **Tier 1** stays in `pounce-algorithm`/`pounce-linalg` for
+the Ipopt-validation story. **Tier 3** is allowed only behind an opt-in
+feature for users who want maximum throughput and accept ULP-level
+nondeterminism. In all tiers, **correctness is gated on the solution
+tolerance (§5), never on bit-identity** — an optimizer's answer is
+"correct" if it satisfies the KKT/feasibility tolerances, regardless of
+last-bit differences.
+
+A Rust-specific point makes tier 2 cheaper than it would be in C/Fortran:
+**Rust does not auto-contract to FMA** (no `-ffp-contract=fast`
+equivalent on by default). FMA happens only where code explicitly calls
+`.mul_add()`, so FMA-determinism is controlled directly rather than
+fought out of the optimizer.
 
 ## 2. Vectorization (SIMD)
 
@@ -142,9 +158,10 @@ parallel and nested rayon pools must not oversubscribe.
 - **Cross-solver oracle.** Objective values cross-checked against
   Clarabel/HiGHS (LP/QP) and Ipopt (NLP), as the routing note's
   verification section already specifies.
-- **Reproducibility test (tier 2).** Same binary + same input ⇒
+- **Reproducibility test (tier 2a).** Same binary + same input ⇒
   bit-identical output, asserted in CI; catches an accidental
-  nondeterministic reduction sneaking into a tier-2 path.
+  nondeterministic reduction sneaking into a tier-2 path. (2b
+  cross-platform identity is aspirational and not asserted.)
 - **`clippy -D correctness`** stays as the existing static gate.
 
 ## 6. Gate checking (CI) — currently absent
