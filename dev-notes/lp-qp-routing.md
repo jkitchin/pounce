@@ -229,10 +229,13 @@ via the `LinearBackendFactory` at
 ### Presolve integration
 
 Presolve is a 2–10× factor on the Mittelmann/Maros-Mészáros sets, so
-the Phase 3 "competitive with HiGHS/Clarabel" claim depends on it — it
-is *not* optional for that bar, even though it is not blocking for
-*correctness*. Two parts: the integration seam (favorable, mostly
-inherited) and the reduction work (largely net-new for LP/QP).
+*wall-clock* competitiveness with HiGHS/Clarabel depends on it — Phase 3
+delivers an *algorithmically* competitive iteration (low iteration
+counts), and Phase 3.5 (presolve) is what turns that into competitive
+end-to-end wall-clock. Presolve is *not* optional for that bar, even
+though it is not blocking for *correctness*. Two parts: the integration
+seam (favorable, mostly inherited) and the reduction work (largely
+net-new for LP/QP).
 
 **Integration seam — inherited for free.** `pounce-presolve` is already
 a *composable TNLP wrapper* (TNLP-in → reduced-TNLP-out, with a
@@ -353,7 +356,9 @@ infeasibility detection and a self-starting iterate. Should reduce
 iteration counts ~30-50% on convex QPs. Validate on Mittelmann LP
 subset and Maros-Mészáros QP set. After this phase `pounce-convex` is
 algorithmically competitive with Clarabel and HiGHS for the LP/QP
-problem class.
+problem class. This is *algorithmic* competitiveness (iteration count
+and convergence); *wall-clock* competitiveness on the full benchmark
+sets additionally needs presolve (Phase 3.5).
 
 **Phase 3.5 — Presolve (reduction catalog + postsolve stack).** Now
 that the iteration is algorithmically competitive, presolve is the
@@ -482,11 +487,11 @@ sensitivity analysis on degenerate LPs). It needs LU-with-updates,
 which is a substantial engineering effort separate from the
 LDLᵀ-based IPM/conic scaffolding.
 
-*Escape hatch:* IPM-LP from Phase 2/3 covers the medium-to-large LP
-case and benchmarks competitively with HiGHS-IPM on the Mittelmann
-sets. For small LPs and warm-start LP sequences, defer simplex until
-a specific application forces it; alternative is to wrap HiGHS as a
-backend.
+*Escape hatch:* IPM-LP from Phases 2/3 plus presolve (Phase 3.5) covers
+the medium-to-large LP case and benchmarks competitively with HiGHS-IPM
+on the Mittelmann sets. For small LPs and warm-start LP sequences, defer
+simplex until a specific application forces it; alternative is to wrap
+HiGHS as a backend.
 
 ### Nonconvex QP / global optimization
 
