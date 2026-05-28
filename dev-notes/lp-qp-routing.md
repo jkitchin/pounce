@@ -357,12 +357,39 @@ backend.
 
 ### Nonconvex QP / global optimization
 
-Inherently combinatorial (branch-and-bound + SDP relaxation). Out of
-scope for the entire POUNCE direction — neither the NLP-IPM nor the
-convex-IPM addresses global optimization.
+Inherently combinatorial (spatial branch-and-bound + convex
+relaxation). Out of scope *for now* — neither the NLP-IPM nor the
+convex-IPM finds global optima today, and the B&B shell is substantial
+new engineering. But it is deliberately left *reachable*: the
+lower-bounding subproblem at each B&B node is itself a convex
+relaxation (Shor/SDP, RLT/LP, or convex-QP), which is precisely the
+conic family this note already plans to build. So the per-node solver
+is free; only the B&B shell is new.
 
-*Escape hatch:* none. Use BARON / Gurobi-nonconvex for problems with
-indefinite Hessians where local minima are insufficient.
+Architectural choices that keep global QP in scope for later, without
+redesign:
+
+1. **`NonconvexQp` stays a first-class `ProblemClass`**, never folded
+   into `Nlp`. It falls through to NLP-IPM (local min) today, but the
+   distinct class is the dispatch seam a future `qp-global` target
+   intercepts.
+2. **Reserve option space** — a future `solver_selection = qp-global`
+   value, or (cleaner) an orthogonal `require_global` flag, so the
+   dispatch `match` grows by one arm rather than being reworked.
+3. **Branching-rule-agnostic B&B shell.** The future `pounce-mip` B&B
+   shell (see "Mixed-integer" in the outlook) should parameterize the
+   branching rule and relaxation builder so that *spatial* branching
+   (continuous vars, for global QP) and *integer* branching (MIP) share
+   one tree / incumbent / pruning / node-queue core.
+4. **Preserve the classifier's Hessian factorization.** The PSD test in
+   the classifier already computes the eigenstructure of `P`; a global
+   solver reuses it for the DC split (`P = P⁺ − P⁻`) and relaxation
+   construction. Expose it rather than recomputing.
+5. **Factor-reuse / warm-start across nodes** (outlook items 1–2) is
+   what makes any B&B tractable — the same argument as MIP.
+
+*Escape hatch (until then):* use BARON / Gurobi-nonconvex for problems
+with indefinite Hessians where local minima are insufficient.
 
 ### Decision principle
 
