@@ -12,6 +12,7 @@ Usage:
     python benchmark_report.py --baseline old_report.json  # regression detection
 """
 
+import glob
 import json
 import math
 import os
@@ -296,9 +297,12 @@ def load_mittelmann_results():
     `rc`, `elapsed`, `objective`, `iterations`. POUNCE-only (no Ipopt
     counterpart in the same JSON).
     """
-    path = os.path.join(SCRIPT_DIR, 'mittelmann', 'results', 'pounce_v0.1.0.json')
-    if not os.path.exists(path):
+    results_dir = os.path.join(SCRIPT_DIR, 'mittelmann', 'results')
+    candidates = sorted(glob.glob(os.path.join(results_dir, 'pounce_*.json')),
+                        key=os.path.getmtime)
+    if not candidates:
         return None
+    path = candidates[-1]
     with open(path) as f:
         data = json.load(f)
 
