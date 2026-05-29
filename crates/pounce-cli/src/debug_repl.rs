@@ -81,6 +81,115 @@ impl CmdOut {
     }
 }
 
+/// Metric names accepted in `break if …` (and shown by `help`).
+const METRICS: &[&str] = &["mu", "inf_pr", "inf_du", "obj", "err", "iter"];
+
+/// A scalar the solver exposes for conditional breakpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Metric {
+    Mu,
+    InfPr,
+    InfDu,
+    Obj,
+    NlpError,
+    Iter,
+}
+
+impl Metric {
+    fn parse(s: &str) -> Option<Metric> {
+        Some(match s {
+            "mu" => Metric::Mu,
+            "inf_pr" => Metric::InfPr,
+            "inf_du" => Metric::InfDu,
+            "obj" | "objective" => Metric::Obj,
+            "err" | "nlp_error" => Metric::NlpError,
+            "iter" => Metric::Iter,
+            _ => return None,
+        })
+    }
+    fn eval(self, ctx: &DebugCtx) -> f64 {
+        match self {
+            Metric::Mu => ctx.mu(),
+            Metric::InfPr => ctx.inf_pr(),
+            Metric::InfDu => ctx.inf_du(),
+            Metric::Obj => ctx.objective(),
+            Metric::NlpError => ctx.nlp_error(),
+            Metric::Iter => ctx.iter() as f64,
+        }
+    }
+}
+
+/// Comparison operator for a conditional breakpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CmpOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+}
+
+impl CmpOp {
+    fn eval(self, lhs: f64, rhs: f64) -> bool {
+        match self {
+            CmpOp::Lt => lhs < rhs,
+            CmpOp::Le => lhs <= rhs,
+            CmpOp::Gt => lhs > rhs,
+            CmpOp::Ge => lhs >= rhs,
+            // Tolerant equality so float metrics aren't impossible to hit.
+            CmpOp::Eq => (lhs - rhs).abs() <= 1e-12 * rhs.abs().max(1.0),
+        }
+    }
+}
+
+/// A conditional breakpoint: pause when `metric op rhs` holds.
+#[derive(Clone, Debug)]
+struct Condition {
+    metric: Metric,
+    op: CmpOp,
+    rhs: f64,
+    /// Normalized source text, e.g. `inf_pr<1e-6`, for display / dedup.
+    raw: String,
+}
+
+impl Condition {
+    /// Parse a single `metric<op>value` expression (whitespace already
+    /// stripped by the caller). Operators: `<`, `<=`, `>`, `>=`, `==`.
+    fn parse(expr: &str) -> Result<Condition, String> {
+        let expr = expr.trim();
+        // Longest operators first so `<=` isn't truncated to `<`.
+        let (op, pos, oplen) = ["<=", ">=", "==", "<", ">"]
+            .iter()
+            .find_map(|o| expr.find(o).map(|p| (*o, p, o.len())))
+            .ok_or_else(|| format!("no comparison operator in `{expr}` (use < <= > >= ==)"))?;
+        let metric_s = expr[..pos].trim();
+        let rhs_s = expr[pos + oplen..].trim();
+        let metric = Metric::parse(metric_s)
+            .ok_or_else(|| format!("unknown metric `{metric_s}` (one of {METRICS:?})"))?;
+        let rhs = rhs_s
+            .parse::<f64>()
+            .map_err(|_| format!("bad threshold `{rhs_s}`"))?;
+        let cmp = match op {
+            "<" => CmpOp::Lt,
+            "<=" => CmpOp::Le,
+            ">" => CmpOp::Gt,
+            ">=" => CmpOp::Ge,
+            "==" => CmpOp::Eq,
+            _ => unreachable!(),
+        };
+        Ok(Condition {
+            metric,
+            op: cmp,
+            rhs,
+            raw: format!("{metric_s}{op}{rhs_s}"),
+        })
+    }
+
+    fn holds(&self, ctx: &DebugCtx) -> bool {
+        self.op.eval(self.metric.eval(ctx), self.rhs)
+    }
+}
+
 pub struct SolverDebugger {
     mode: DebugMode,
     reg: Option<Rc<RegisteredOptions>>,
@@ -90,6 +199,8 @@ pub struct SolverDebugger {
     run_to: Option<i32>,
     /// Iterations to break at.
     breaks: Vec<i32>,
+    /// Conditional breakpoints (`break if mu<1e-4`): pause when any holds.
+    conds: Vec<Condition>,
     /// Once true, never pause again (`detach`).
     detached: bool,
     /// Option edits accepted at the prompt. Validated against the
@@ -108,6 +219,7 @@ impl SolverDebugger {
             step: true,
             run_to: None,
             breaks: Vec::new(),
+            conds: Vec::new(),
             detached: false,
             staged: Vec::new(),
         }
@@ -133,6 +245,18 @@ impl SolverDebugger {
             }
         }
         self.breaks.contains(&iter)
+    }
+
+    /// First conditional breakpoint that holds at the current state, if
+    /// any. Returns its source text (for the pause banner / event).
+    fn matched_condition(&self, ctx: &DebugCtx) -> Option<String> {
+        if self.detached {
+            return None;
+        }
+        self.conds
+            .iter()
+            .find(|c| c.holds(ctx))
+            .map(|c| c.raw.clone())
     }
 
     // ---- command engine -----------------------------------------------
@@ -183,6 +307,8 @@ impl SolverDebugger {
             "  continue | c             run to the next breakpoint".into(),
             "  run | r <N>              run until iteration N".into(),
             "  break | b [N|clear|del N] set/list/clear breakpoints".into(),
+            "  break if <m><op><v>      conditional bp; m in mu|inf_pr|inf_du|obj|err|iter,".into(),
+            "                           op in < <= > >= ==  (e.g. break if inf_pr<1e-6)".into(),
             "  set mu <v>               overwrite the barrier parameter".into(),
             "  set <blk>[<i>] <v>       overwrite one component (e.g. set x[2] 1.5)".into(),
             "  set <blk> <v0,v1,...>    overwrite a whole block".into(),
@@ -277,15 +403,47 @@ impl SolverDebugger {
     }
 
     fn cmd_break(&mut self, rest: &[&str]) -> CmdOut {
+        // Conditional breakpoint: `break if <metric><op><value>`. Tokens
+        // after `if` are concatenated so `inf_pr < 1e-6` and `inf_pr<1e-6`
+        // parse the same.
+        if rest.first().copied() == Some("if") {
+            let expr: String = rest[1..].concat();
+            if expr.is_empty() {
+                return CmdOut::err(
+                    "usage: break if <metric><op><value>  (e.g. break if inf_pr<1e-6)",
+                );
+            }
+            return match Condition::parse(&expr) {
+                Ok(c) => {
+                    let raw = c.raw.clone();
+                    if !self.conds.iter().any(|e| e.raw == raw) {
+                        self.conds.push(c);
+                    }
+                    CmdOut::ok(vec![format!("conditional breakpoint: {raw}")])
+                        .with_data(serde_json::json!({"condition": raw}))
+                }
+                Err(e) => CmdOut::err(e),
+            };
+        }
         match rest {
             [] => {
                 let mut bs = self.breaks.clone();
                 bs.sort_unstable();
-                CmdOut::ok(vec![format!("breakpoints: {bs:?}")])
-                    .with_data(serde_json::json!({"breakpoints": bs}))
+                let conds: Vec<String> = self.conds.iter().map(|c| c.raw.clone()).collect();
+                let mut lines = vec![format!("breakpoints: {bs:?}")];
+                if !conds.is_empty() {
+                    lines.push(format!("conditions: {}", conds.join(", ")));
+                }
+                CmdOut::ok(lines)
+                    .with_data(serde_json::json!({"breakpoints": bs, "conditions": conds}))
+            }
+            ["clear", "cond"] | ["clear", "conditions"] => {
+                self.conds.clear();
+                CmdOut::ok(vec!["cleared conditional breakpoints".into()])
             }
             ["clear"] => {
                 self.breaks.clear();
+                self.conds.clear();
                 CmdOut::ok(vec!["cleared all breakpoints".into()])
             }
             ["del", n] | ["delete", n] => match n.parse::<i32>() {
@@ -304,7 +462,7 @@ impl SolverDebugger {
                 }
                 Err(_) => CmdOut::err("usage: break <iteration>"),
             },
-            _ => CmdOut::err("usage: break [N | clear | del N]"),
+            _ => CmdOut::err("usage: break [N | if <m><op><v> | clear | clear cond | del N]"),
         }
     }
 
@@ -505,7 +663,7 @@ impl SolverDebugger {
     // ---- front ends ----------------------------------------------------
 
     /// Emit the pause banner / state for the current front end.
-    fn emit_pause(&self, ctx: &DebugCtx) {
+    fn emit_pause(&self, ctx: &DebugCtx, reason: Option<&str>) {
         match self.mode {
             DebugMode::Repl => {
                 eprintln!(
@@ -516,6 +674,9 @@ impl SolverDebugger {
                     ctx.inf_pr(),
                     ctx.inf_du(),
                 );
+                if let Some(r) = reason {
+                    eprintln!("   ↳ hit condition: {r}");
+                }
             }
             DebugMode::Json => {
                 let dims: serde_json::Map<String, serde_json::Value> = ctx
@@ -523,6 +684,7 @@ impl SolverDebugger {
                     .into_iter()
                     .map(|(n, d)| (n.to_string(), serde_json::json!(d)))
                     .collect();
+                let conds: Vec<String> = self.conds.iter().map(|c| c.raw.clone()).collect();
                 let ev = serde_json::json!({
                     "event": "pause",
                     "checkpoint": ctx.checkpoint().as_str(),
@@ -534,6 +696,8 @@ impl SolverDebugger {
                     "nlp_error": ctx.nlp_error(),
                     "dims": dims,
                     "breakpoints": self.breaks,
+                    "conditions": conds,
+                    "reason": reason,
                 });
                 emit_json(&ev);
             }
@@ -577,12 +741,17 @@ impl SolverDebugger {
 impl DebugHook for SolverDebugger {
     fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction {
         let iter = ctx.iter();
-        if !self.should_pause(iter) {
+        // `should_pause` covers step / run / numeric breakpoints (and
+        // disarms `run_to`); conditional breakpoints are evaluated
+        // against the live state separately.
+        let num_hit = self.should_pause(iter);
+        let cond_hit = self.matched_condition(ctx);
+        if !num_hit && cond_hit.is_none() {
             return DebugAction::Resume;
         }
         // Consume the one-shot step arming; commands re-arm as needed.
         self.step = false;
-        self.emit_pause(ctx);
+        self.emit_pause(ctx, cond_hit.as_deref());
 
         let stdin = std::io::stdin();
         loop {
@@ -785,6 +954,43 @@ mod tests {
         assert!(d.should_pause(5));
         assert_eq!(d.run_to, None);
         assert!(!d.should_pause(6));
+    }
+
+    #[test]
+    fn condition_parses_metric_op_threshold() {
+        let c = Condition::parse("mu<1e-4").unwrap();
+        assert_eq!(c.metric, Metric::Mu);
+        assert_eq!(c.op, CmpOp::Lt);
+        assert_eq!(c.rhs, 1e-4);
+
+        // `<=` must not be truncated to `<`, and spaces are tolerated by
+        // the caller (tokens are concatenated before parse).
+        let c = Condition::parse("inf_pr<=1e-6").unwrap();
+        assert_eq!(c.metric, Metric::InfPr);
+        assert_eq!(c.op, CmpOp::Le);
+
+        let c = Condition::parse("iter==10").unwrap();
+        assert_eq!(c.metric, Metric::Iter);
+        assert_eq!(c.op, CmpOp::Eq);
+        assert_eq!(c.rhs, 10.0);
+    }
+
+    #[test]
+    fn condition_parse_rejects_garbage() {
+        assert!(Condition::parse("inf_pr 1e-6").is_err()); // no operator
+        assert!(Condition::parse("bogus<1").is_err()); // unknown metric
+        assert!(Condition::parse("mu<abc").is_err()); // bad threshold
+    }
+
+    #[test]
+    fn cmp_op_truth_table() {
+        assert!(CmpOp::Lt.eval(1.0, 2.0));
+        assert!(!CmpOp::Lt.eval(2.0, 2.0));
+        assert!(CmpOp::Le.eval(2.0, 2.0));
+        assert!(CmpOp::Gt.eval(3.0, 2.0));
+        assert!(CmpOp::Ge.eval(2.0, 2.0));
+        assert!(CmpOp::Eq.eval(2.0, 2.0));
+        assert!(!CmpOp::Eq.eval(2.0, 2.5));
     }
 
     #[test]

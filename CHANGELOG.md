@@ -29,6 +29,12 @@ program.
 - **Flow:** `step`, `continue`, `run N`, `break [N|clear|del N]`,
   `detach`, `quit`. Pauses at the first checkpoint so you start in
   control.
+- **Conditional breakpoints:** `break if <metric><op><value>` pauses
+  when a live quantity crosses a threshold — metrics
+  `mu|inf_pr|inf_du|obj|err|iter`, operators `< <= > >= ==`
+  (e.g. `break if inf_pr<1e-6`). `break` lists them, `break clear cond`
+  removes them; the firing condition is reported in the pause
+  banner / `"reason"` field.
 - **Mutate:** `set mu <v>`, `set x[i] <v>` (single component),
   `set x <v0,v1,…>` (whole block). Iterate edits rebuild the
   `IteratesVector` with a fresh tag so the tag-keyed CQ caches invalidate
