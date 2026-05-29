@@ -42,6 +42,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libloading = "0.8"
 log = "0.4"
+# Line editing for the interactive debugger REPL (`--debug`): history,
+# Ctrl-R search, and Tab completion. Only used on an interactive TTY;
+# piped input and `--debug-json` fall back to a plain line reader.
+rustyline = { version = "14", features = ["derive"] }
 
 [features]
 default = []

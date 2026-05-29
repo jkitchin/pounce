@@ -25,6 +25,7 @@
 //!       4. `{"event":"terminated",…}` — emitted by the CLI after the
 //!          solve, carrying the final status, iteration count, objective,
 //!          and eval counts.
+//!
 //!     Commands may be a bare string or `{"cmd":…,"args":[…],"id":…}`.
 //!
 //! Flow / exit model: the debugger pauses at the *first* checkpoint (so
@@ -36,12 +37,18 @@
 //!   * `quit`     — stop now (surfaces as `UserRequestedStop`).
 //!   * stdin EOF  — REPL (Ctrl-D) detaches and finishes; JSON (pipe
 //!     closed → client gone) aborts the solve.
+//!
 //! Every non-kill path ends with a `terminated` event in JSON mode.
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{DebugAction, DebugCtx, DebugHook, BLOCK_NAMES};
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
-use std::io::Write;
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::history::FileHistory;
+use rustyline::{Context, Editor, Helper, Highlighter, Hinter, Validator};
+use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 /// All command verbs, for `help` and `complete`.
@@ -204,6 +211,87 @@ impl Condition {
     }
 }
 
+/// Context-sensitive completion candidates for the REPL line editor (and
+/// the `complete` command). `before` is the line text up to the start of
+/// the word being completed; `word` is that partial word. Pure so it can
+/// be unit-tested without a terminal.
+fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &str) -> Vec<String> {
+    let toks: Vec<&str> = before.split_whitespace().collect();
+    let starts = |opts: &[&str]| -> Vec<String> {
+        opts.iter()
+            .filter(|c| c.starts_with(word))
+            .map(|c| c.to_string())
+            .collect()
+    };
+    let opt_names = || -> Vec<String> {
+        reg.map(|r| {
+            r.registered_options_in_order()
+                .iter()
+                .map(|o| o.name.clone())
+                .filter(|n| n.starts_with(word))
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+    match toks.as_slice() {
+        [] => starts(COMMANDS),
+        ["set"] => {
+            let mut v = starts(&["mu", "opt"]);
+            v.extend(starts(&BLOCK_NAMES));
+            v
+        }
+        ["set", "opt"] | ["opt"] | ["options"] => opt_names(),
+        ["break", "if"] | ["b", "if"] => starts(METRICS),
+        ["break"] | ["b"] => starts(&["if", "clear", "del"]),
+        ["print"] | ["p"] => {
+            let mut v = starts(&BLOCK_NAMES);
+            v.extend(starts(&["mu", "obj", "inf_pr", "inf_du", "err", "iter"]));
+            v
+        }
+        ["viz"] | ["plot"] => {
+            let mut v = starts(&BLOCK_NAMES);
+            v.extend(starts(&["kkt", "L"]));
+            v
+        }
+        ["complete"] => starts(COMMANDS),
+        _ => Vec::new(),
+    }
+}
+
+/// rustyline helper: supplies Tab completion against the live command /
+/// option vocabulary. Hinting / highlighting / validation are the
+/// no-op derived defaults.
+#[derive(Helper, Hinter, Highlighter, Validator)]
+struct DbgHelper {
+    reg: Option<Rc<RegisteredOptions>>,
+}
+
+impl Completer for DbgHelper {
+    type Candidate = Pair;
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let before = &line[..pos];
+        let start = before
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let word = &before[start..];
+        let cands = completion_candidates(self.reg.as_deref(), &before[..start], word);
+        let pairs = cands
+            .into_iter()
+            .map(|c| Pair {
+                display: c.clone(),
+                replacement: c,
+            })
+            .collect();
+        Ok((start, pairs))
+    }
+}
+
 pub struct SolverDebugger {
     mode: DebugMode,
     reg: Option<Rc<RegisteredOptions>>,
@@ -220,6 +308,12 @@ pub struct SolverDebugger {
     /// Whether the JSON `hello` handshake has been emitted (once per
     /// session, at the first checkpoint).
     hello_sent: bool,
+    /// rustyline editor for the human REPL on a TTY (history + Tab +
+    /// Ctrl-R). `None` for JSON mode or when stdin isn't a terminal, in
+    /// which case a plain line reader is used.
+    editor: Option<Editor<DbgHelper, FileHistory>>,
+    /// Where REPL history is persisted, if a home directory was found.
+    hist_path: Option<PathBuf>,
     /// Option edits accepted at the prompt. Validated against the
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
@@ -239,6 +333,8 @@ impl SolverDebugger {
             conds: Vec::new(),
             detached: false,
             hello_sent: false,
+            editor: None,
+            hist_path: None,
             staged: Vec::new(),
         }
     }
@@ -775,11 +871,68 @@ impl SolverDebugger {
         emit_json(&ev);
     }
 
-    fn prompt(&self) {
+    /// Lazily build the rustyline editor for an interactive REPL on a
+    /// TTY. No-op for JSON mode, non-terminal stdin, or if construction
+    /// fails — those paths fall back to a plain line reader.
+    fn ensure_editor(&mut self) {
+        if !matches!(self.mode, DebugMode::Repl)
+            || self.editor.is_some()
+            || !std::io::stdin().is_terminal()
+        {
+            return;
+        }
+        let mut ed: Editor<DbgHelper, FileHistory> = match Editor::new() {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        ed.set_helper(Some(DbgHelper {
+            reg: self.reg.clone(),
+        }));
+        let path = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| PathBuf::from(h).join(".pounce_dbg_history"));
+        if let Some(p) = &path {
+            let _ = ed.load_history(p);
+        }
+        self.hist_path = path;
+        self.editor = Some(ed);
+    }
+
+    /// Read one command line. Returns `None` on EOF. Uses rustyline when
+    /// an editor is active (history / Tab / Ctrl-R); otherwise a plain
+    /// reader with a stderr prompt (REPL) or no prompt (JSON).
+    fn next_command_line(&mut self) -> Option<String> {
         if let DebugMode::Repl = self.mode {
+            if let Some(ed) = self.editor.as_mut() {
+                return match ed.readline("pounce-dbg> ") {
+                    Ok(l) => {
+                        let _ = ed.add_history_entry(l.as_str());
+                        if let Some(p) = &self.hist_path {
+                            let _ = ed.save_history(p);
+                        }
+                        Some(l)
+                    }
+                    // Ctrl-C: abandon the current line, reprompt.
+                    Err(ReadlineError::Interrupted) => Some(String::new()),
+                    // Ctrl-D / closed input: EOF.
+                    Err(ReadlineError::Eof) => None,
+                    Err(_) => None,
+                };
+            }
             let _ = write!(std::io::stderr(), "pounce-dbg> ");
             let _ = std::io::stderr().flush();
         }
+        read_stdin_line()
+    }
+}
+
+/// Plain blocking line read from stdin; `None` on EOF.
+fn read_stdin_line() -> Option<String> {
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) => None,
+        Ok(_) => Some(line),
+        Err(_) => None,
     }
 }
 
@@ -802,14 +955,13 @@ impl DebugHook for SolverDebugger {
         }
         // Consume the one-shot step arming; commands re-arm as needed.
         self.step = false;
+        self.ensure_editor();
         self.emit_pause(ctx, cond_hit.as_deref());
 
-        let stdin = std::io::stdin();
         loop {
-            self.prompt();
-            let mut line = String::new();
-            match stdin.read_line(&mut line) {
-                Ok(0) => {
+            let line = match self.next_command_line() {
+                Some(l) => l,
+                None => {
                     // EOF on stdin. REPL (Ctrl-D) means "let it run" —
                     // detach and finish, pdb-style. In JSON mode a closed
                     // pipe means the controlling client went away, so
@@ -822,9 +974,7 @@ impl DebugHook for SolverDebugger {
                         DebugMode::Json => DebugAction::Stop,
                     };
                 }
-                Ok(_) => {}
-                Err(_) => return DebugAction::Resume,
-            }
+            };
             let parsed = parse_command(&line, self.mode);
             let cmd = parsed.command.trim().to_string();
             if cmd.is_empty() {
@@ -1059,6 +1209,32 @@ mod tests {
         assert!(Condition::parse("inf_pr 1e-6").is_err()); // no operator
         assert!(Condition::parse("bogus<1").is_err()); // unknown metric
         assert!(Condition::parse("mu<abc").is_err()); // bad threshold
+    }
+
+    #[test]
+    fn completion_is_context_sensitive() {
+        // First token completes command verbs.
+        let c = completion_candidates(None, "", "co");
+        assert!(c.contains(&"continue".to_string()));
+        assert!(c.contains(&"complete".to_string()));
+        assert!(!c.contains(&"step".to_string()));
+
+        // After `set`, both mu/opt and block names are offered.
+        let c = completion_candidates(None, "set ", "");
+        assert!(c.contains(&"mu".to_string()));
+        assert!(c.contains(&"opt".to_string()));
+        assert!(c.contains(&"x".to_string()));
+
+        // After `break if`, metric names.
+        let c = completion_candidates(None, "break if ", "inf");
+        assert!(c.contains(&"inf_pr".to_string()));
+        assert!(c.contains(&"inf_du".to_string()));
+        assert!(!c.contains(&"mu".to_string()));
+
+        // `print` completes blocks + scalar keywords.
+        let c = completion_candidates(None, "print ", "");
+        assert!(c.contains(&"x".to_string()));
+        assert!(c.contains(&"obj".to_string()));
     }
 
     #[test]

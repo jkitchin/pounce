@@ -43,6 +43,11 @@ program.
   options (name/type/default/short-desc, long-desc on exact match),
   `complete <prefix>` returns command/option candidates, and
   `set opt <name> <value>` validates against the registry.
+- **Line editing (rustyline):** on an interactive TTY the `--debug` REPL
+  gets persistent history (`~/.pounce_dbg_history`), Ctrl-R search, and
+  context-sensitive Tab completion — command verbs, block names, metric
+  names (after `break if`), and option names (after `set opt`/`opt`).
+  Piped input and `--debug-json` fall back to a plain line reader.
 - **Visualization:** `viz <block|dx>` writes the vector and opens it in
   an external viewer (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`).
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
