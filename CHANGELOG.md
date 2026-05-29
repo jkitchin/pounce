@@ -151,6 +151,9 @@ program.
   `watch`, which only displays.
 - **`mu_stalled` event:** `break on mu_stalled` fires when μ holds (to
   tolerance) for 3 consecutive iterations.
+- **Complementarity:** `print compl` shows the average complementarity
+  (the IPM's distance-from-the-central-path gauge); also a breakpoint
+  metric (`break if compl<1e-8`) and watchable.
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
   JSON channel — the banner, problem-stats block, and final summary are
   routed to stderr — so a GUI / IDE front end can consume it line by
