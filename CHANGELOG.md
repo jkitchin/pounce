@@ -45,6 +45,17 @@ program.
   `set opt <name> <value>` validates against the registry.
 - **Visualization:** `viz <block|dx>` writes the vector and opens it in
   an external viewer (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`).
+- **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
+  JSON channel — the banner, problem-stats block, and final summary are
+  routed to stderr — so a GUI / IDE front end can consume it line by
+  line. The session is framed by lifecycle events: `hello` (protocol
+  version + capabilities + command/metric/block vocabulary), `pause`,
+  `result` (echoing the client's `request_id` for async correlation),
+  and `terminated` (final status, iteration count, objective, eval
+  counts). Exit model: `quit` stops now (`UserRequestedStop`),
+  `continue`/`detach` run to completion, and a closed JSON stdin pipe
+  aborts the solve (REPL Ctrl-D detaches and finishes); every non-kill
+  path ends with a `terminated` event.
 
 Engine lives in `pounce-algorithm`'s `debug` module (`DebugHook` /
 `DebugCtx` / `Checkpoint`); the REPL/agent front end is

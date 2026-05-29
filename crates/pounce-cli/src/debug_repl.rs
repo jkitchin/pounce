@@ -12,17 +12,31 @@
 //!     output go to **stderr** so they never interleave with the
 //!     solver's iteration table on stdout.
 //!   * [`DebugMode::Json`] — a newline-delimited JSON protocol on
-//!     stdin/stdout for an LLM agent or any program. Each pause emits one
-//!     `{"event":"pause",…}` object; each command yields one
-//!     `{"event":"result",…}` object. The solver's own stdout table is
-//!     suppressed in this mode (the caller sets `print_level=0`).
+//!     stdin/stdout for an LLM agent, visual debugger, or any program.
+//!     stdout is a *pure* protocol channel (the CLI routes the banner /
+//!     problem stats / summary to stderr and forces `print_level 0`), so
+//!     a GUI can consume it line-by-line. Session lifecycle:
+//!       1. `{"event":"hello",…}`  — once, up front: protocol version,
+//!          advertised capabilities, command / metric / block vocabulary.
+//!       2. `{"event":"pause",…}`  — at each stop: iter, μ, residuals,
+//!          dims, active breakpoints/conditions, and the firing `reason`.
+//!       3. `{"event":"result",…}` — one per command, echoing the
+//!          client's `request_id` for async correlation.
+//!       4. `{"event":"terminated",…}` — emitted by the CLI after the
+//!          solve, carrying the final status, iteration count, objective,
+//!          and eval counts.
+//!     Commands may be a bare string or `{"cmd":…,"args":[…],"id":…}`.
 //!
-//! Flow model: the debugger pauses at the *first* checkpoint (so you get
-//! control at iter 0), then only when re-armed — by `step` (pause next
-//! iteration), `break N` (pause at iter N), or `run N` (pause at iter
-//! ≥ N). `continue` clears all one-shot arming and runs to the next
-//! breakpoint; `detach` disables pausing entirely; `quit` stops the
-//! solve.
+//! Flow / exit model: the debugger pauses at the *first* checkpoint (so
+//! you get control at iter 0), then only when re-armed — by `step` (pause
+//! next iteration), `break N` (pause at iter N), `break if …` (pause on a
+//! condition), or `run N` (pause at iter ≥ N). Exit paths:
+//!   * `continue` — run to the next breakpoint, else to completion.
+//!   * `detach`   — stop pausing; run to completion.
+//!   * `quit`     — stop now (surfaces as `UserRequestedStop`).
+//!   * stdin EOF  — REPL (Ctrl-D) detaches and finishes; JSON (pipe
+//!     closed → client gone) aborts the solve.
+//! Every non-kill path ends with a `terminated` event in JSON mode.
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{DebugAction, DebugCtx, DebugHook, BLOCK_NAMES};
@@ -203,6 +217,9 @@ pub struct SolverDebugger {
     conds: Vec<Condition>,
     /// Once true, never pause again (`detach`).
     detached: bool,
+    /// Whether the JSON `hello` handshake has been emitted (once per
+    /// session, at the first checkpoint).
+    hello_sent: bool,
     /// Option edits accepted at the prompt. Validated against the
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
@@ -221,6 +238,7 @@ impl SolverDebugger {
             breaks: Vec::new(),
             conds: Vec::new(),
             detached: false,
+            hello_sent: false,
             staged: Vec::new(),
         }
     }
@@ -704,8 +722,9 @@ impl SolverDebugger {
         }
     }
 
-    /// Emit a command result for the current front end.
-    fn emit_result(&self, command: &str, out: &CmdOut) {
+    /// Emit a command result for the current front end. `req_id` is the
+    /// client's request id (JSON mode), echoed for response correlation.
+    fn emit_result(&self, command: &str, out: &CmdOut, req_id: Option<&serde_json::Value>) {
         match self.mode {
             DebugMode::Repl => {
                 let stderr = std::io::stderr();
@@ -720,6 +739,7 @@ impl SolverDebugger {
             DebugMode::Json => {
                 let ev = serde_json::json!({
                     "event": "result",
+                    "request_id": req_id,
                     "command": command,
                     "ok": out.ok,
                     "output": out.lines,
@@ -728,6 +748,31 @@ impl SolverDebugger {
                 emit_json(&ev);
             }
         }
+    }
+
+    /// Emit the one-time JSON handshake: protocol version, the solver
+    /// version, advertised capabilities, and the command / metric
+    /// vocabulary — everything a visual debugger needs to configure its
+    /// UI before the first `pause`.
+    fn emit_hello(&self) {
+        let ev = serde_json::json!({
+            "event": "hello",
+            "protocol": "pounce-dbg/1",
+            "pounce_version": env!("CARGO_PKG_VERSION"),
+            "capabilities": {
+                "inspect": true,
+                "mutate_iterate": true,
+                "mutate_mu": true,
+                "conditional_breakpoints": true,
+                "request_ids": true,
+                "viz": ["block", "delta"],
+            },
+            "checkpoints": ["iter_start"],
+            "commands": COMMANDS,
+            "blocks": BLOCK_NAMES,
+            "metrics": METRICS,
+        });
+        emit_json(&ev);
     }
 
     fn prompt(&self) {
@@ -740,6 +785,12 @@ impl SolverDebugger {
 
 impl DebugHook for SolverDebugger {
     fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction {
+        // One-time handshake so a JSON client learns the protocol /
+        // capabilities before the first pause.
+        if matches!(self.mode, DebugMode::Json) && !self.hello_sent {
+            self.emit_hello();
+            self.hello_sent = true;
+        }
         let iter = ctx.iter();
         // `should_pause` covers step / run / numeric breakpoints (and
         // disarms `run_to`); conditional breakpoints are evaluated
@@ -759,20 +810,28 @@ impl DebugHook for SolverDebugger {
             let mut line = String::new();
             match stdin.read_line(&mut line) {
                 Ok(0) => {
-                    // EOF: detach and let the solve finish.
-                    self.detached = true;
-                    return DebugAction::Resume;
+                    // EOF on stdin. REPL (Ctrl-D) means "let it run" —
+                    // detach and finish, pdb-style. In JSON mode a closed
+                    // pipe means the controlling client went away, so
+                    // abort the solve rather than run on headless.
+                    return match self.mode {
+                        DebugMode::Repl => {
+                            self.detached = true;
+                            DebugAction::Resume
+                        }
+                        DebugMode::Json => DebugAction::Stop,
+                    };
                 }
                 Ok(_) => {}
                 Err(_) => return DebugAction::Resume,
             }
-            let cmd = parse_command(&line, self.mode);
-            let cmd = cmd.trim().to_string();
+            let parsed = parse_command(&line, self.mode);
+            let cmd = parsed.command.trim().to_string();
             if cmd.is_empty() {
                 continue;
             }
             let out = self.dispatch(&cmd, ctx);
-            self.emit_result(&cmd, &out);
+            self.emit_result(&cmd, &out, parsed.id.as_ref());
             match out.flow {
                 Flow::Stay => continue,
                 Flow::Resume => return DebugAction::Resume,
@@ -782,9 +841,18 @@ impl DebugHook for SolverDebugger {
     }
 }
 
+/// A command read from the input stream: the resolved command string
+/// plus an optional client-supplied request id (echoed back as
+/// `request_id` so an async client can correlate responses).
+struct ParsedCmd {
+    command: String,
+    id: Option<serde_json::Value>,
+}
+
 /// In JSON mode a command line may be a bare string or a JSON object
-/// `{"cmd": "...", "args": [...]}`. Returns the resolved command string.
-fn parse_command(line: &str, mode: DebugMode) -> String {
+/// `{"cmd": "...", "args": [...], "id": <any>}`. Returns the resolved
+/// command string and the request id (if the object carried one).
+fn parse_command(line: &str, mode: DebugMode) -> ParsedCmd {
     let trimmed = line.trim();
     if let DebugMode::Json = mode {
         if trimmed.starts_with('{') {
@@ -802,11 +870,17 @@ fn parse_command(line: &str, mode: DebugMode) -> String {
                         }
                     }
                 }
-                return s;
+                return ParsedCmd {
+                    command: s,
+                    id: v.get("id").cloned(),
+                };
             }
         }
     }
-    trimmed.to_string()
+    ParsedCmd {
+        command: trimmed.to_string(),
+        id: None,
+    }
 }
 
 fn emit_json(v: &serde_json::Value) {
@@ -914,19 +988,24 @@ mod tests {
     #[test]
     fn json_command_object_is_flattened() {
         assert_eq!(
-            parse_command("{\"cmd\":\"print x\"}", DebugMode::Json),
+            parse_command("{\"cmd\":\"print x\"}", DebugMode::Json).command,
             "print x"
         );
-        assert_eq!(
-            parse_command(
-                "{\"cmd\":\"set\",\"args\":[\"x[0]\",\"1.5\"]}",
-                DebugMode::Json
-            ),
-            "set x[0] 1.5"
+        let p = parse_command(
+            "{\"cmd\":\"set\",\"args\":[\"x[0]\",\"1.5\"],\"id\":7}",
+            DebugMode::Json,
         );
-        // Bare strings pass through in either mode.
-        assert_eq!(parse_command("step\n", DebugMode::Json), "step");
-        assert_eq!(parse_command("  print x \n", DebugMode::Repl), "print x");
+        assert_eq!(p.command, "set x[0] 1.5");
+        // Request id is captured for response correlation.
+        assert_eq!(p.id, Some(serde_json::json!(7)));
+        // Bare strings pass through in either mode, with no id.
+        let s = parse_command("step\n", DebugMode::Json);
+        assert_eq!(s.command, "step");
+        assert!(s.id.is_none());
+        assert_eq!(
+            parse_command("  print x \n", DebugMode::Repl).command,
+            "print x"
+        );
     }
 
     #[test]
