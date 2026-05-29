@@ -56,9 +56,9 @@ use std::rc::Rc;
 
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
-    "help", "info", "print", "step", "stepi", "continue", "run", "break", "stop-at", "set", "opt",
-    "complete", "viz", "save", "goto", "restart", "resolve", "ask", "watch", "diff", "source",
-    "progress", "detach", "quit",
+    "help", "info", "print", "step", "stepi", "continue", "run", "break", "tbreak", "watchpoint",
+    "stop-at", "set", "opt", "complete", "viz", "save", "goto", "restart", "resolve", "ask",
+    "watch", "diff", "source", "progress", "detach", "quit",
 ];
 
 /// Events a user can `break on` (advertised in `hello.events`). Each is
@@ -69,8 +69,26 @@ const EVENTS: &[&str] = &[
     "regularized",
     "tiny_step",
     "ls_rejected",
+    "mu_stalled",
     "nan",
 ];
+
+/// μ is "stalled" once it has held (to relative tolerance) for this many
+/// consecutive iterations.
+const MU_STALL_ITERS: u32 = 3;
+
+/// A data watchpoint: pause when a watched value changes by more than
+/// `threshold` between iterations.
+#[derive(Clone)]
+struct WatchPoint {
+    /// Source text, e.g. `x` or `x[3]`, for display.
+    raw: String,
+    block: String,
+    idx: Option<usize>,
+    threshold: f64,
+    /// Last observed value(s); `None` until first seen.
+    last: Option<Vec<f64>>,
+}
 
 /// Checkpoint names a user can `stop-at` (matches `Checkpoint::as_str`).
 const CHECKPOINTS: &[&str] = &[
@@ -430,6 +448,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["break", "if"] | ["b", "if"] => starts(METRICS),
         ["break", "on"] | ["b", "on"] => starts(EVENTS),
         ["break"] | ["b"] => starts(&["if", "on", "clear", "del"]),
+        ["watchpoint"] | ["wp"] => starts(&BLOCK_NAMES),
         ["print"] | ["p"] | ["watch"] | ["display"] => {
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
@@ -490,8 +509,15 @@ pub struct SolverDebugger {
     run_to: Option<i32>,
     /// Iterations to break at.
     breaks: Vec<i32>,
+    /// One-shot iteration breakpoints (`tbreak`), removed when hit.
+    temp_breaks: Vec<i32>,
     /// Conditional breakpoints (`break if mu<1e-4`): pause when any holds.
     conds: Vec<Condition>,
+    /// Data watchpoints (`watchpoint x[3]`): pause when a value changes.
+    watchpoints: Vec<WatchPoint>,
+    /// μ-stall tracking for the `mu_stalled` event.
+    last_mu: Option<f64>,
+    mu_stall: u32,
     /// Once true, never pause again (`detach`).
     detached: bool,
     /// Whether the JSON `hello` handshake has been emitted (once per
@@ -555,7 +581,11 @@ impl SolverDebugger {
             step: true,
             run_to: None,
             breaks: Vec::new(),
+            temp_breaks: Vec::new(),
             conds: Vec::new(),
+            watchpoints: Vec::new(),
+            last_mu: None,
+            mu_stall: 0,
             detached: false,
             hello_sent: false,
             pause_iters: true,
@@ -632,7 +662,15 @@ impl SolverDebugger {
                 return true;
             }
         }
-        self.breaks.contains(&iter)
+        if self.breaks.contains(&iter) {
+            return true;
+        }
+        // One-shot breakpoints fire once then delete themselves.
+        if let Some(pos) = self.temp_breaks.iter().position(|&b| b == iter) {
+            self.temp_breaks.remove(pos);
+            return true;
+        }
+        false
     }
 
     /// First conditional breakpoint that holds at the current state, if
@@ -673,10 +711,57 @@ impl SolverDebugger {
                                 .unwrap_or(false)
                     }
                     "ls_rejected" => cp == Checkpoint::AfterStep && ctx.ls_count() > 1,
+                    "mu_stalled" => cp == Checkpoint::IterStart && self.mu_stall >= MU_STALL_ITERS,
                     "nan" => !ctx.nlp_error().is_finite() || !ctx.objective().is_finite(),
                     _ => false,
                 }
         })
+    }
+
+    /// Update μ-stall tracking once per iteration (drives `mu_stalled`).
+    fn update_mu_stall(&mut self, mu: f64) {
+        if let Some(last) = self.last_mu {
+            if (mu - last).abs() <= 1e-12 * last.abs().max(1.0) {
+                self.mu_stall += 1;
+            } else {
+                self.mu_stall = 0;
+            }
+        }
+        self.last_mu = Some(mu);
+    }
+
+    /// First watchpoint whose value changed (beyond its threshold) since
+    /// the previous iteration. Updates the stored baselines.
+    fn matched_watchpoint(&mut self, ctx: &DebugCtx) -> Option<String> {
+        if self.detached {
+            return None;
+        }
+        let mut hit = None;
+        for wp in self.watchpoints.iter_mut() {
+            let Some(full) = ctx.block(&wp.block) else {
+                continue;
+            };
+            let cur: Vec<f64> = match wp.idx {
+                Some(i) => match full.get(i) {
+                    Some(&v) => vec![v],
+                    None => continue,
+                },
+                None => full,
+            };
+            if let Some(prev) = &wp.last {
+                if prev.len() == cur.len() {
+                    let changed = prev
+                        .iter()
+                        .zip(&cur)
+                        .any(|(p, c)| (p - c).abs() > wp.threshold);
+                    if changed && hit.is_none() {
+                        hit = Some(wp.raw.clone());
+                    }
+                }
+            }
+            wp.last = Some(cur);
+        }
+        hit
     }
 
     // ---- command engine -----------------------------------------------
@@ -719,6 +804,16 @@ impl SolverDebugger {
             }
             "run" | "r" => self.cmd_run(rest),
             "break" | "b" => self.cmd_break(rest),
+            "tbreak" | "tb" => match rest.first().and_then(|s| s.parse::<i32>().ok()) {
+                Some(n) => {
+                    if !self.temp_breaks.contains(&n) {
+                        self.temp_breaks.push(n);
+                    }
+                    CmdOut::ok(vec![format!("temporary breakpoint at iteration {n}")])
+                }
+                None => CmdOut::err("usage: tbreak <iteration>"),
+            },
+            "watchpoint" | "wp" => self.cmd_watchpoint(rest),
             "stop-at" | "stopat" => self.cmd_stop_at(rest),
             "progress" => match rest.first().copied() {
                 Some("on") | None => {
@@ -776,7 +871,9 @@ impl SolverDebugger {
             "  break if <m><op><v>      conditional bp; m in mu|inf_pr|inf_du|obj|err|iter,".into(),
             "                           op in < <= > >= ==  (e.g. break if inf_pr<1e-6)".into(),
             "  break on <event>         event bp: resto_entered|resto_exited|regularized|".into(),
-            "                           tiny_step|ls_rejected|nan".into(),
+            "                           tiny_step|ls_rejected|mu_stalled|nan".into(),
+            "  tbreak <N>               one-shot breakpoint (deletes after firing)".into(),
+            "  watchpoint <blk>[<i>] [τ] pause when a value changes by > τ (alias wp)".into(),
             "  set mu <v>               overwrite the barrier parameter".into(),
             "  set <blk>[<i>] <v>       overwrite one component (e.g. set x[2] 1.5)".into(),
             "  set <blk> <v0,v1,...>    overwrite a whole block".into(),
@@ -1342,6 +1439,58 @@ impl SolverDebugger {
         }
     }
 
+    /// `watchpoint <blk>[<i>] [threshold] | clear | del <spec>` — pause
+    /// when a watched value changes by more than `threshold` (default 0,
+    /// any change) between iterations.
+    fn cmd_watchpoint(&mut self, rest: &[&str]) -> CmdOut {
+        match rest {
+            [] => {
+                let v: Vec<&str> = self.watchpoints.iter().map(|w| w.raw.as_str()).collect();
+                CmdOut::ok(vec![format!("watchpoints: {v:?}")])
+                    .with_data(serde_json::json!({"watchpoints": v}))
+            }
+            ["clear"] => {
+                self.watchpoints.clear();
+                CmdOut::ok(vec!["cleared watchpoints".into()])
+            }
+            ["del", spec] | ["delete", spec] => {
+                self.watchpoints.retain(|w| w.raw != *spec);
+                CmdOut::ok(vec![format!("removed watchpoint {spec}")])
+            }
+            [spec, rest @ ..] => {
+                let threshold = rest
+                    .first()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                // Parse `block` or `block[idx]`.
+                let (block, idx) = match spec.find('[') {
+                    Some(open) if spec.ends_with(']') => {
+                        let b = &spec[..open];
+                        match spec[open + 1..spec.len() - 1].parse::<usize>() {
+                            Ok(i) => (b.to_string(), Some(i)),
+                            Err(_) => return CmdOut::err(format!("bad index in `{spec}`")),
+                        }
+                    }
+                    _ => (spec.to_string(), None),
+                };
+                if !BLOCK_NAMES.contains(&block.as_str()) {
+                    return CmdOut::err(format!("unknown block `{block}`"));
+                }
+                let raw = spec.to_string();
+                if !self.watchpoints.iter().any(|w| w.raw == raw) {
+                    self.watchpoints.push(WatchPoint {
+                        raw: raw.clone(),
+                        block,
+                        idx,
+                        threshold,
+                        last: None,
+                    });
+                }
+                CmdOut::ok(vec![format!("watchpoint on {raw} (Δ>{threshold:.3e})")])
+            }
+        }
+    }
+
     /// `diff` — what changed in the iterate since the previous captured
     /// iteration: per-block max |Δ| (and where), plus Δμ.
     fn cmd_diff(&self, ctx: &DebugCtx) -> CmdOut {
@@ -1847,6 +1996,8 @@ impl DebugHook for SolverDebugger {
                     self.snapshots.remove(&oldest);
                 }
             }
+            // Update μ-stall tracking before events are evaluated.
+            self.update_mu_stall(ctx.mu());
         }
 
         // Decide whether to pause. `stop-at` and a one-shot `stepi` apply
@@ -1884,6 +2035,12 @@ impl DebugHook for SolverDebugger {
                     pause = true;
                     reason = Some(c);
                 }
+            }
+            // Watchpoints fire regardless of pause_iters (explicit, like
+            // breakpoints); evaluated every iter to keep baselines fresh.
+            if let Some(w) = self.matched_watchpoint(ctx) {
+                pause = true;
+                reason = Some(format!("watchpoint: {w}"));
             }
         }
 

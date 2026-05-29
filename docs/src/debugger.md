@@ -136,10 +136,24 @@ Three kinds, all reported in `break` and surfaced as the pause `reason`.
 
 ```text
 break 12            # pause at iteration 12   (alias: b 12)
+tbreak 12           # one-shot: pause at 12, then delete itself (alias: tb)
 break               # list all breakpoints
 break del 12        # remove
 break clear         # remove everything (iters + conditions + events)
 ```
+
+### Watchpoints (data breakpoints)
+
+```text
+watchpoint x[3]        # pause when x[3] changes (alias: wp)
+watchpoint x 1e-3      # pause when any x component moves by > 1e-3
+watchpoint             # list; watchpoint del x[3]; watchpoint clear
+```
+
+Distinct from `watch` (which only *displays*): a watchpoint *pauses* the
+solve when the watched value changes by more than its threshold (default
+0 = any change) between iterations. Useful for a component expected to
+stay put (e.g. a variable pinned at a bound).
 
 ### Conditional (with compound predicates)
 
@@ -175,6 +189,7 @@ break clear events
 | `regularized` | the KKT system needed regularization (δ_w > 0 — inertia correction) |
 | `tiny_step` | the primal step is numerically negligible (‖dx‖∞ < 1e-10) |
 | `ls_rejected` | the line search tried more than one trial point |
+| `mu_stalled` | μ held (to tolerance) for 3 consecutive iterations |
 | `nan` | the NLP error or objective became non-finite |
 
 Events fire at whatever checkpoint makes them observable (e.g.
@@ -466,6 +481,9 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `viz <target>` | open an artifact in a viewer |
 | `save [path]` | dump the iterate to JSON |
 | `watch <target>` (`display`) | auto-print a target at every pause |
+| `tbreak N` (`tb`) | one-shot iteration breakpoint |
+| `watchpoint <blk>[<i>] [τ]` (`wp`) | pause when a value changes by > τ |
+| `diff` | what changed in the iterate since the last iteration |
 | `source <file>` | run debugger commands from a file |
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |

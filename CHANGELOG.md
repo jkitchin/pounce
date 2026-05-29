@@ -143,6 +143,14 @@ program.
 - **Context-sensitive completion:** the `complete` command (and TTY Tab)
   now completes option *values* after `set opt <name>` (from the
   registry's valid set), not just option names.
+- **Temporary breakpoints:** `tbreak N` (alias `tb`) pauses once at
+  iteration N then deletes itself.
+- **Watchpoints (data breakpoints):** `watchpoint <blk>[<i>] [threshold]`
+  (alias `wp`) pauses when a watched value changes by more than the
+  threshold (default any change) between iterations — distinct from
+  `watch`, which only displays.
+- **`mu_stalled` event:** `break on mu_stalled` fires when μ holds (to
+  tolerance) for 3 consecutive iterations.
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
   JSON channel — the banner, problem-stats block, and final summary are
   routed to stderr — so a GUI / IDE front end can consume it line by
