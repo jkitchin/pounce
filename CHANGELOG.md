@@ -57,6 +57,14 @@ program.
   a SIGINT handler that drops into the debugger at the next iteration; a
   second Ctrl-C aborts. Ctrl-C also breaks into any other debug mode
   mid-`continue` (at a rustyline prompt Ctrl-C stays a line-cancel).
+- **Progress events (pounce#72 §1):** in `--debug-json`, while running
+  between pauses the debugger emits one `{"event":"progress",iter,mu,
+  inf_pr,inf_du,obj}` per outer iteration, so a visual debugger isn't
+  blind during a long `continue`. Default on (JSON only); `progress
+  [on|off]` toggles it; advertised via `hello.capabilities.progress_events`.
+  `step sub` is accepted as a spelling of `stepi`, and `hello` advertises
+  `async_pause` (SIGINT → pause at next checkpoint) and the
+  `conditional_breakpoints` level.
 - **Sub-iteration checkpoints:** the main loop now fires the debugger at
   `after_mu`, `after_search_dir` (the Newton step `δ` + regularization
   are available), and `after_step` (α + the new iterate), in addition to

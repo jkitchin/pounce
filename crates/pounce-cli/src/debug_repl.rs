@@ -57,7 +57,7 @@ use std::rc::Rc;
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
     "help", "info", "print", "step", "stepi", "continue", "run", "break", "stop-at", "set", "opt",
-    "complete", "viz", "save", "goto", "restart", "resolve", "detach", "quit",
+    "complete", "viz", "save", "goto", "restart", "resolve", "progress", "detach", "quit",
 ];
 
 /// Checkpoint names a user can `stop-at` (matches `Checkpoint::as_str`).
@@ -402,6 +402,9 @@ pub struct SolverDebugger {
     terminal_only_on_error: bool,
     /// Honor a pending SIGINT (Ctrl-C) by pausing at the next iteration.
     interruptible: bool,
+    /// Emit a per-iteration `progress` event (JSON mode) when running
+    /// between pauses, so a visual debugger can show live progress.
+    emit_progress: bool,
     /// One-shot: pause at the very next checkpoint of *any* kind (set by
     /// `stepi`, for walking through sub-iteration phases).
     sub_step: bool,
@@ -444,6 +447,7 @@ impl SolverDebugger {
             pause_terminal: true,
             terminal_only_on_error: false,
             interruptible: true,
+            emit_progress: true,
             sub_step: false,
             stop_at: HashSet::new(),
             snapshots: BTreeMap::new(),
@@ -530,6 +534,15 @@ impl SolverDebugger {
             "help" | "h" | "?" => self.cmd_help(),
             "info" | "i" => self.cmd_info(ctx),
             "print" | "p" => self.cmd_print(rest, ctx),
+            // `step` → next iter_start; `step sub` (or `stepi`/`si`) →
+            // next checkpoint of any kind (issue #72's step ["sub"]).
+            "step" | "s" | "n" | "next" if rest.first() == Some(&"sub") => {
+                self.sub_step = true;
+                CmdOut::ok(vec![
+                    "stepping to the next checkpoint (sub-iteration)".into()
+                ])
+                .flow(Flow::Resume)
+            }
             "step" | "s" | "n" | "next" => {
                 self.step = true;
                 CmdOut::ok(vec!["stepping one iteration".into()]).flow(Flow::Resume)
@@ -550,6 +563,17 @@ impl SolverDebugger {
             "run" | "r" => self.cmd_run(rest),
             "break" | "b" => self.cmd_break(rest),
             "stop-at" | "stopat" => self.cmd_stop_at(rest),
+            "progress" => match rest.first().copied() {
+                Some("on") | None => {
+                    self.emit_progress = true;
+                    CmdOut::ok(vec!["progress events on".into()])
+                }
+                Some("off") => {
+                    self.emit_progress = false;
+                    CmdOut::ok(vec!["progress events off".into()])
+                }
+                _ => CmdOut::err("usage: progress [on|off]"),
+            },
             "set" => self.cmd_set(rest, ctx),
             "opt" | "options" => self.cmd_opt(rest),
             "complete" => self.cmd_complete(rest),
@@ -579,7 +603,8 @@ impl SolverDebugger {
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
             "                           mu|obj|inf_pr|inf_du|err|iter".into(),
             "  step | s | n             run one iteration, pause again".into(),
-            "  stepi | si               run to the next checkpoint (into sub-iteration phases)".into(),
+            "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
+            "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
             "  stop-at <cp>             always pause at a checkpoint: after_mu|after_search_dir|after_step".into(),
             "  continue | c             run to the next breakpoint".into(),
             "  run | r <N>              run until iteration N".into(),
@@ -1138,6 +1163,20 @@ impl SolverDebugger {
         }
     }
 
+    /// Emit a per-iteration `progress` event (JSON mode only). Same
+    /// scalars as `pause`; fired while running between pauses.
+    fn emit_progress_event(&self, ctx: &DebugCtx) {
+        let ev = serde_json::json!({
+            "event": "progress",
+            "iter": ctx.iter(),
+            "mu": ctx.mu(),
+            "inf_pr": ctx.inf_pr(),
+            "inf_du": ctx.inf_du(),
+            "obj": ctx.objective(),
+        });
+        emit_json(&ev);
+    }
+
     /// Emit a command result for the current front end. `req_id` is the
     /// client's request id (JSON mode), echoed for response correlation.
     fn emit_result(&self, command: &str, out: &CmdOut, req_id: Option<&serde_json::Value>) {
@@ -1179,7 +1218,8 @@ impl SolverDebugger {
                 "inspect": true,
                 "mutate_iterate": true,
                 "mutate_mu": true,
-                "conditional_breakpoints": true,
+                // "single" today; becomes "compound" once &&/|| land (#72 §4).
+                "conditional_breakpoints": "single",
                 "request_ids": true,
                 "viz": ["block", "delta"],
                 "save": true,
@@ -1187,6 +1227,9 @@ impl SolverDebugger {
                 "resolve": self.restart.is_some(),
                 "terminal_checkpoint": true,
                 "interruptible": self.interruptible,
+                // #72 §1 / §5.
+                "progress_events": self.emit_progress,
+                "async_pause": if self.interruptible { "checkpoint" } else { "none" },
             },
             "checkpoints": CHECKPOINTS,
             "commands": COMMANDS,
@@ -1325,6 +1368,12 @@ impl DebugHook for SolverDebugger {
         }
 
         if !pause {
+            // Not pausing: in JSON mode emit a per-iteration `progress`
+            // event (once per outer iter) so a visual debugger isn't blind
+            // during a long `continue`. Issue #72 §1.
+            if is_iter_start && self.emit_progress && matches!(self.mode, DebugMode::Json) {
+                self.emit_progress_event(ctx);
+            }
             return DebugAction::Resume;
         }
         // Consume one-shot arming; commands re-arm as needed.
