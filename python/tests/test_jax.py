@@ -837,26 +837,30 @@ def _pounce_77_pickle_g(x, p):
     return jnp.stack([jnp.sum(x) - 1.0])
 
 
-def test_jaxproblem_factor_reuse_not_picklable_pounce_77():
-    """Document the pickle gap left open by the pounce#77 fix.
+def test_jaxproblem_pickle_roundtrip_pounce_77():
+    """Round-trip a JaxProblem through pickle and verify numerical
+    agreement (pounce#77 follow-up).
 
-    The fix pins PySolver interactions to a ``ThreadPoolExecutor`` per
-    JaxProblem; the JaxProblem also holds a ``threading.Lock`` for the
-    bwd registry. Neither survives ``pickle.dumps``, which means
-    distributed-training paths that serialize a built JaxProblem
-    (``cloudpickle`` for Ray/Dask actors, ``multiprocessing`` with
-    ``start_method='spawn'``, naive checkpointing) will fail at the
-    pickle boundary.
+    Originally the JaxProblem held a ``threading.Lock``, a
+    ``threading.local`` cache, JAX JIT'd closures, and (with
+    ``factor_reuse=True``) a ``ThreadPoolExecutor`` — none of which
+    survive ``pickle.dumps``. That blocked the realistic distributed-
+    training paths (Ray / Dask actors via ``cloudpickle``,
+    ``multiprocessing(start_method='spawn')`` that ships a built
+    JaxProblem to its workers, checkpointing for resume) at the
+    serialization boundary.
 
-    The supported workaround today is to pickle the *construction
-    args* and rebuild the JaxProblem inside each worker — confirmed
-    working under ``multiprocessing.get_context('spawn')`` (probed
-    against ``_build_and_solve`` in the child).
+    The fix is ``__getstate__`` / ``__setstate__`` that drop the per-
+    process runtime state on the sending side and rebuild it on the
+    receiving side. JIT closures are rebuilt from ``self._f`` /
+    ``self._g`` (the user is responsible for ensuring those are
+    themselves picklable — module-level functions or cloudpickle-
+    compatible). Sparsity arrays are pickled so the receiving side
+    doesn't redo the one-shot probe. Held LDLᵀ factors and registry
+    ids reset (a fresh process has no history of forward solves).
 
-    This test locks in the current behaviour so we notice when someone
-    adds ``__reduce__`` / ``__getstate__`` support — at which point the
-    test should be rewritten to round-trip a JaxProblem through pickle
-    and assert that ``jp2.solve(...)`` matches ``jp.solve(...)``.
+    Verifies: forward / single-grad / batched-forward / batched-grad
+    all agree exactly between pre- and post-pickle instances.
     """
     import pickle
 
@@ -871,16 +875,45 @@ def test_jaxproblem_factor_reuse_not_picklable_pounce_77():
         factor_reuse=True,
     )
 
-    # Pickling fails at the threading.Lock first (registry lock /
-    # executor internals). Either of those is the same actionable
-    # signal for the user: rebuild in the child, don't ship a built
-    # JaxProblem across a process boundary.
-    with pytest.raises(TypeError, match=r"lock|thread"):
-        pickle.dumps(jp)
+    p_val = jnp.array([0.1, 0.2, 0.3, 0.4])
+    x0 = jnp.zeros(4)
+    p_batch = jnp.stack([p_val, p_val + 0.1, p_val - 0.1])
 
-    # And the dense path (factor_reuse=False) — no executor and no
-    # registry lock, but the threading.local pair cache is also
-    # unpicklable. Same story: rebuild in the child.
+    # Reference (pre-pickle).
+    x_before = jp.solve(p_val, x0)
+    grad_before = jax.grad(
+        lambda p: jnp.sum(jp.solve(p, x0) ** 2)
+    )(p_val)
+    X_before = jp.batched_solve(p_batch, x0)
+    grad_b_before = jax.grad(
+        lambda pb: jnp.sum(jp.batched_solve(pb, x0) ** 2)
+    )(p_batch)
+
+    # Round-trip and re-run.
+    blob = pickle.dumps(jp)
+    jp2 = pickle.loads(blob)
+    x_after = jp2.solve(p_val, x0)
+    grad_after = jax.grad(
+        lambda p: jnp.sum(jp2.solve(p, x0) ** 2)
+    )(p_val)
+    X_after = jp2.batched_solve(p_batch, x0)
+    grad_b_after = jax.grad(
+        lambda pb: jnp.sum(jp2.batched_solve(pb, x0) ** 2)
+    )(p_batch)
+
+    # JIT closures rebuild deterministically and the IPM is
+    # deterministic, so the round-trip should be exact. Allow a
+    # token tolerance against future numerical drift in JAX
+    # canonicalisation, but expect 0 in practice.
+    assert jnp.allclose(x_before, x_after, atol=1e-12)
+    assert jnp.allclose(grad_before, grad_after, atol=1e-10)
+    assert jnp.allclose(X_before, X_after, atol=1e-12)
+    assert jnp.allclose(grad_b_before, grad_b_after, atol=1e-10)
+
+    # And the dense path (factor_reuse=False) also round-trips. No
+    # executor or registry lock to drop, but the JIT closures and
+    # threading.local cache still aren't picklable without the
+    # __getstate__ hook.
     jp_dense = JaxProblem(
         f=_pounce_77_pickle_f, g=_pounce_77_pickle_g,
         n=4, m=1, p_example=jnp.zeros(4),
@@ -889,5 +922,7 @@ def test_jaxproblem_factor_reuse_not_picklable_pounce_77():
         options={"print_level": 0, "sb": "yes"},
         factor_reuse=False,
     )
-    with pytest.raises((TypeError, pickle.PicklingError)):
-        pickle.dumps(jp_dense)
+    x_dense_before = jp_dense.solve(p_val, x0)
+    jp_dense2 = pickle.loads(pickle.dumps(jp_dense))
+    x_dense_after = jp_dense2.solve(p_val, x0)
+    assert jnp.allclose(x_dense_before, x_dense_after, atol=1e-12)

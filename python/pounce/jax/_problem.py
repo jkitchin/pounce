@@ -835,32 +835,12 @@ class JaxProblem:
         # 128 × sizeof(factor). Users with non-typical patterns can
         # call :meth:`clear_solver_cache` to drop everything early.
         self._solver_registry_capacity = 128
-        self._solver_registry: "OrderedDict[int, Solver]" = OrderedDict()
-        self._solver_id_counter = itertools.count(1)
-        # Lock guards concurrent register/lookup against
-        # vmap_solve_parallel worker threads.
-        self._registry_lock = threading.Lock()
-
-        # JIT-compiled derivatives over (x, p). These are stateless and
-        # threadsafe — the JaxProblem is the canonical owner.
-        self._f_jit = jax.jit(f)
-        self._grad_f_jit = jax.jit(jax.grad(f, argnums=0))
-        if g is not None and m > 0:
-            self._g_jit = jax.jit(g)
-            self._jac_g_jit = jax.jit(jax.jacrev(g, argnums=0))
-
-            def lagrangian(x, lam, sigma, p):
-                return sigma * f(x, p) + jnp.dot(lam, g(x, p))
-
-            self._hess_lag_jit = jax.jit(jax.hessian(lagrangian, argnums=0))
-        else:
-            self._g_jit = None
-            self._jac_g_jit = None
-
-            def lagrangian_unc(x, sigma, p):
-                return sigma * f(x, p)
-
-            self._hess_lag_jit = jax.jit(jax.hessian(lagrangian_unc, argnums=0))
+        # JIT closures + per-process runtime state (lock / TLS / executor
+        # / registry / id counter) live behind helpers so pickle
+        # round-trips can drop and rebuild them — see
+        # :meth:`__getstate__` / :meth:`__setstate__`.
+        self._build_jit_closures()
+        self._init_runtime_state()
 
         # One-shot sparsity probe at random (x, p). The sparsity
         # *pattern* is assumed independent of p (true for smooth
@@ -885,34 +865,118 @@ class JaxProblem:
             hess_dense = _to_np(self._hess_lag_jit(x_probe, 1.0, p_probe))
         self._hess_rows, self._hess_cols = _detect_pattern_lower(hess_dense)
 
+    # ----- internal: rebuildable per-process state -----
+
+    def _build_jit_closures(self) -> None:
+        """(Re)build the JIT'd JAX callables from ``self._f`` /
+        ``self._g``. Called from ``__init__`` once and from
+        ``__setstate__`` after a pickle round-trip — JAX JIT closures
+        don't survive pickle, but ``self._f`` / ``self._g`` do (as long
+        as the user's callables are picklable, which is on them)."""
+        f = self._f
+        g = self._g
+        m = self._m
+        self._f_jit = jax.jit(f)
+        self._grad_f_jit = jax.jit(jax.grad(f, argnums=0))
+        if g is not None and m > 0:
+            self._g_jit = jax.jit(g)
+            self._jac_g_jit = jax.jit(jax.jacrev(g, argnums=0))
+
+            def lagrangian(x, lam, sigma, p):
+                return sigma * f(x, p) + jnp.dot(lam, g(x, p))
+
+            self._hess_lag_jit = jax.jit(jax.hessian(lagrangian, argnums=0))
+        else:
+            self._g_jit = None
+            self._jac_g_jit = None
+
+            def lagrangian_unc(x, sigma, p):
+                return sigma * f(x, p)
+
+            self._hess_lag_jit = jax.jit(jax.hessian(lagrangian_unc, argnums=0))
+
+    def _init_runtime_state(self) -> None:
+        """(Re)create per-process mutable state: bwd-registry id
+        counter and storage, registry lock, per-thread Problem cache,
+        and (if ``factor_reuse=True``) the dedicated single-thread
+        executor that pins all PySolver interactions to one thread
+        (pounce#77).
+
+        Called from ``__init__`` and again from ``__setstate__`` — both
+        arrive at a fresh process/thread context where every one of
+        these has to start empty. Pickling drops them on the sending
+        side (none are picklable: ``threading.Lock``,
+        ``threading.local``, ``ThreadPoolExecutor``'s internal
+        ``SimpleQueue``, and any held :class:`pounce.Solver` which
+        carries unsendable Rust state).
+
+        Dedicated single-thread executor for all PySolver interactions
+        on the factor-reuse path (pounce#77). PySolver is
+        ``#[pyclass(unsendable)]`` because the inner ``RustSolver``
+        holds ``Rc<RefCell<dyn TNLP>>``; PyO3 panics if a PySolver is
+        touched from any thread other than the one that constructed
+        it. JAX's ``pure_callback`` may dispatch ``host_call`` from XLA
+        worker threads, so we pin every solver creation / ``solve`` /
+        ``block_dims`` / ``kkt_dim`` / ``kkt_solve`` to one thread by
+        routing them through a single-worker pool. Only allocated when
+        the factor is held across calls (``factor_reuse=True``); the
+        dense path constructs the Solver, runs ``solve``, and drops it
+        inline on the calling thread, so unsendable never bites there.
+        Also bypassed by :meth:`vmap_solve_parallel` (it calls
+        :meth:`_host_solve` with ``register=False`` — the solver is
+        dropped inside ``_host_solve`` without crossing threads), so
+        the parallel batched path keeps its B-way concurrency.
+        """
+        self._solver_registry: "OrderedDict[int, Solver]" = OrderedDict()
+        self._solver_id_counter = itertools.count(1)
+        # Lock guards concurrent register/lookup against
+        # vmap_solve_parallel worker threads.
+        self._registry_lock = threading.Lock()
         # Per-thread (obj, Problem) cache. Built lazily on first solve
         # from the calling thread.
         self._tls = threading.local()
-
-        # Dedicated single-thread executor for all PySolver
-        # interactions on the factor-reuse path (pounce#77). PySolver
-        # is ``#[pyclass(unsendable)]`` because the inner ``RustSolver``
-        # holds ``Rc<RefCell<dyn TNLP>>``; PyO3 panics if a PySolver is
-        # touched from any thread other than the one that constructed
-        # it. JAX's ``pure_callback`` may dispatch ``host_call`` from
-        # XLA worker threads (training loops that run ``jax.grad``
-        # under ``jit`` or ``jax.lax.map``, dataloader workers, ...),
-        # so we pin every solver creation / ``solve`` / ``block_dims``
-        # / ``kkt_dim`` / ``kkt_solve`` to one thread by routing them
-        # through a single-worker pool. Only allocated when the factor
-        # is held across calls (``factor_reuse=True``); the dense path
-        # constructs the Solver, runs ``solve``, and drops it inline on
-        # the calling thread, so unsendable never bites there. Also
-        # bypassed by :meth:`vmap_solve_parallel` (it calls
-        # :meth:`_host_solve` with ``register=False`` — the solver is
-        # dropped inside ``_host_solve`` without crossing threads), so
-        # the parallel batched path keeps its B-way concurrency.
         self._factor_executor = (
             ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix=f"pounce-jp-factor-{id(self)}",
             ) if self._factor_reuse else None
         )
+
+    # Attributes that don't survive a process boundary: drop on
+    # __getstate__, rebuild on __setstate__. Kept as a single source of
+    # truth so the two hooks can't drift.
+    _PICKLE_DROP = (
+        "_f_jit", "_grad_f_jit", "_g_jit", "_jac_g_jit", "_hess_lag_jit",
+        "_registry_lock", "_tls", "_factor_executor",
+        "_solver_registry", "_solver_id_counter",
+    )
+
+    def __getstate__(self):
+        """Pickle support (pounce#77 follow-up): drop per-process
+        runtime state — JAX JIT closures (not picklable), the
+        ``threading.Lock`` / ``threading.local`` / ``ThreadPoolExecutor``
+        from the bwd factor-reuse path, the held LDLᵀ factor registry
+        (held :class:`pounce.Solver` instances are unsendable Rust
+        state), and the id counter (``itertools.count`` pickles with a
+        deprecation warning on 3.12+).
+
+        :meth:`__setstate__` rebuilds all of them. The JIT closures are
+        rebuilt from ``self._f`` / ``self._g``; the user's callables
+        themselves need to be picklable (module-level / cloudpickle-
+        compatible) for the round-trip to work at all.
+
+        The sparsity-pattern arrays (``_jac_rows`` etc.) *are* pickled,
+        so the receiving side does not redo the one-shot probe.
+        """
+        state = self.__dict__.copy()
+        for k in self._PICKLE_DROP:
+            state.pop(k, None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._build_jit_closures()
+        self._init_runtime_state()
 
     # ----- internal: per-thread cached Problem -----
 
