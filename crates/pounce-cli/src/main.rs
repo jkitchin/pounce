@@ -100,12 +100,13 @@ pub fn main() -> ExitCode {
     }
 
     // Interactive solver debugger (`--debug` / `--debug-json`). Installs
-    // a hook that pauses at each iteration. In JSON mode the solver's
-    // own per-iteration table on stdout would corrupt the protocol
-    // stream, so force `print_level 0` to silence it; the debugger emits
-    // structured pause/result events instead.
+    // a hook that pauses at each iteration. In JSON mode stdout becomes a
+    // pure protocol channel: the per-iteration table, banner, problem
+    // stats, and final summary are all silenced (the debugger and the
+    // post-solve `terminated` event carry that information instead).
+    let json_dbg = matches!(args.debug, Some(pounce_cli::cli::DebugMode::Json));
     if let Some(mode) = args.debug {
-        if matches!(mode, pounce_cli::cli::DebugMode::Json) {
+        if json_dbg {
             let _ = app.options_mut().read_from_str("print_level 0\n", true);
         }
         let reg = Some(std::rc::Rc::clone(app.registered_options()));
@@ -182,7 +183,7 @@ pub fn main() -> ExitCode {
         .ok()
         .and_then(|(v, f)| f.then_some(v))
         .unwrap_or(false);
-    if !suppress_banner {
+    if !suppress_banner && !json_dbg {
         print::print_logo();
         print::print_banner(backend_tag);
     }
@@ -236,7 +237,9 @@ pub fn main() -> ExitCode {
             }
         },
         ProblemSource::NlFile(path) => {
-            println!("Reading {}...", path.display());
+            if !json_dbg {
+                println!("Reading {}...", path.display());
+            }
             let t0 = std::time::Instant::now();
             match nl_reader::read_nl_file(path) {
                 Ok(prob) => {
@@ -248,10 +251,12 @@ pub fn main() -> ExitCode {
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
                     let t: Rc<RefCell<dyn TNLP>> = nl_rc;
                     if let Some(info) = t.borrow_mut().get_nlp_info() {
-                        println!(
-                            "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s",
-                            info.n, info.m, info.nnz_jac_g, info.nnz_h_lag, elapsed
-                        );
+                        if !json_dbg {
+                            println!(
+                                "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s",
+                                info.n, info.m, info.nnz_jac_g, info.nnz_h_lag, elapsed
+                            );
+                        }
                     }
                     t
                 }
@@ -409,15 +414,19 @@ pub fn main() -> ExitCode {
                 .licq_verdict()
                 .map(|v| format!("{v:?}"))
                 .unwrap_or_else(|| "off".into());
-            println!(
-                "Presolve: tightened {} bounds ({} newly-finite), dropped {} redundant rows, LICQ={}",
-                tr.n_tightened, tr.n_new_finite, dropped, licq
-            );
-            if let Some(fr) = h.fbbt_report() {
+            if !json_dbg {
                 println!(
-                    "Presolve FBBT: {} sweeps, {} variable tightenings (Σ|Δ|={:.3e})",
-                    fr.iterations, fr.bound_updates, fr.total_tightening
+                    "Presolve: tightened {} bounds ({} newly-finite), dropped {} redundant rows, LICQ={}",
+                    tr.n_tightened, tr.n_new_finite, dropped, licq
                 );
+            }
+            if let Some(fr) = h.fbbt_report() {
+                if !json_dbg {
+                    println!(
+                        "Presolve FBBT: {} sweeps, {} variable tightenings (Σ|Δ|={:.3e})",
+                        fr.iterations, fr.bound_updates, fr.total_tightening
+                    );
+                }
                 if let Some(witness) = fr.infeasibility_witness {
                     eprintln!("pounce: FBBT detected infeasibility (witness constraint {witness})");
                 }
@@ -438,8 +447,11 @@ pub fn main() -> ExitCode {
 
     // Problem statistics. (The branded logo + copyright banner print
     // up-front, before the problem is read — see near the top of `run`.)
-    if let Some(stats) = print::collect_stats(&tnlp) {
-        print::print_problem_stats(&stats);
+    // Suppressed in JSON-debug mode so stdout stays a pure protocol stream.
+    if !json_dbg {
+        if let Some(stats) = print::collect_stats(&tnlp) {
+            print::print_problem_stats(&stats);
+        }
     }
 
     // Build diagnostics state from `--dump …` flags. None of these
@@ -458,16 +470,18 @@ pub fn main() -> ExitCode {
         }
     };
     if let Some(diag) = diagnostics_handle.as_ref() {
-        println!(
-            "Diagnostics: dumping to {} ({} categor{} configured)",
-            diag.dump_dir().display(),
-            diag.config.categories.len(),
-            if diag.config.categories.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            },
-        );
+        if !json_dbg {
+            println!(
+                "Diagnostics: dumping to {} ({} categor{} configured)",
+                diag.dump_dir().display(),
+                diag.config.categories.len(),
+                if diag.config.categories.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+            );
+        }
         app.set_diagnostics(Rc::clone(diag));
     }
 
@@ -480,7 +494,28 @@ pub fn main() -> ExitCode {
     let status = app.optimize_tnlp(Rc::clone(&tnlp));
     let solve_stats = app.statistics();
     let counters = counting.borrow();
-    print::print_summary(status, &solve_stats, &counters);
+    if json_dbg {
+        // Pure protocol channel: emit a `terminated` lifecycle event in
+        // place of the human summary, so a visual debugger gets a clean
+        // end-of-session signal with the final status and stats.
+        let ev = serde_json::json!({
+            "event": "terminated",
+            "status": format!("{status:?}"),
+            "status_message": print::status_message(status),
+            "iterations": solve_stats.iteration_count,
+            "objective": solve_stats.final_objective,
+            "evals": {
+                "obj": counters.n_obj.get(),
+                "obj_grad": counters.n_grad_f.get(),
+                "constr": counters.n_g.get(),
+                "constr_jac": counters.n_jac_g.get(),
+                "hess": counters.n_h.get(),
+            },
+        });
+        println!("{ev}");
+    } else {
+        print::print_summary(status, &solve_stats, &counters);
+    }
     drop(counters); // release before JSON block (which re-borrows the wrapped TNLP).
 
     // Reduced Hessian: print to stderr (informational), mirroring
