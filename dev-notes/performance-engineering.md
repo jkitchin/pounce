@@ -36,8 +36,8 @@ vectorize, *if* we decide what level of determinism we actually require.
 1. **Bit-identical to upstream Ipopt** — scalar reference BLAS, no FMA.
    *Keep for `pounce-algorithm` / `pounce-linalg` only*, where it is a
    validation asset. Do **not** impose it on the convex solver.
-2. **Run-to-run + cross-platform reproducible** — a fixed binary on
-   fixed inputs gives bit-identical output every run: deterministic
+2. **Run-to-run reproducible (cross-platform aspirational)** — a fixed
+   binary on fixed inputs gives bit-identical output every run: deterministic
    reduction order, FMA used consistently (not conditionally),
    deterministic parallel reductions (fixed chunking). Allows SIMD. Does
    *not* promise equality with reference BLAS. Two sub-levels:
@@ -179,9 +179,9 @@ parallel and nested rayon pools must not oversubscribe.
 - **Deterministic counts:** `iai-callgrind` (Cachegrind/Callgrind) for
   instruction/cache-miss counts that are stable in noisy CI (§6).
 - **Discipline in hot loops:** no allocation (reuse scratch buffers
-  across IPM iterations — the matrices are constant for LP/QP, §
-  routing-note "constant P/A extraction"), cache-friendly CSC/CSR
-  layouts, `#[inline]` on the small kernels.
+  across IPM iterations — the matrices are constant for LP/QP, per the
+  routing note's "constant P/A extraction" point), cache-friendly
+  CSC/CSR layouts, `#[inline]` on the small kernels.
 
 ## 5. Correctness checks (the invariant every perf change must preserve)
 
@@ -213,10 +213,10 @@ Propose a **two-tier** scheme:
 - **Nightly / pre-release gate — wall-clock SGM.** Run the full
   Mittelmann/Maros-Mészáros suites and track the **shifted geometric
   mean (SGM)** of solve time across versions; fail if SGM regresses past
-  a threshold. The `benchmarks/mittelmann/` harness already emits SGM
-  reports — wire a regression threshold rather than only producing a
-  report. `critcmp` / a continuous-benchmarking service can track the
-  baseline.
+  a threshold. The `benchmarks/mittelmann/` harness already produces
+  per-version reports; add the SGM computation and a regression
+  threshold on top of it. `critcmp` / a continuous-benchmarking service
+  can track the baseline.
 - **Numerical-tolerance gate** (§5) runs in the *same* job as the
   wall-clock suite, so a "faster" change that breaks the 1e-6 tolerance
   fails even if it improves SGM.
