@@ -430,6 +430,57 @@ Existing top-level `solve` / `vmap_solve` / `vmap_solve_parallel` /
 `solve_with_warm` are unchanged (non-breaking) — `JaxProblem` is a
 new surface for performance-sensitive iterative use.
 
+### Added — `JaxProblem` factor-reuse backward (k_aug-style; pounce#76)
+
+The `custom_vjp` backward of `JaxProblem.solve` /
+`solve_with_warm` no longer assembles a dense
+`(n+m) × (n+m)` KKT block in JAX and runs `jnp.linalg.solve` on it.
+Instead it reuses the IPM's converged compound KKT factor through
+`pounce.Solver.kkt_solve` — the same factor [k_aug] uses for
+parametric sensitivity. Two wins:
+
+* **Perf.** The dense back-solve is O((n+m)³) on every bwd call;
+  reusing the held LDLᵀ factor makes it O(nnz(L)). For modest `n`
+  the absolute savings are small; for `n+m` in the hundreds-to-
+  thousands it dominates the bwd.
+* **Correctness.** The compound block's bound-multiplier rows
+  `(z_l, z_u)` already encode active-set behaviour — at convergence
+  active bounds have unbounded `z` (forces `Δx_i = 0` in the
+  back-solve), inactive bounds have `z ≈ 0` (leaves `Δx_i` free).
+  Slack inequality rows in the user's `g` are handled the same way
+  by `(v_l, v_u)`. The factor-reuse path therefore drops the
+  explicit active-set masking the dense path does on `H` / `J` / `v`;
+  accuracy is `O(μ)` at the IPM barrier parameter, well below `tol`
+  after convergence.
+
+Behaviour change: `JaxProblem(factor_reuse=True)` is the default. Set
+`factor_reuse=False` for a verbatim fallback to the pre-#76 dense
+backward (useful for higher-order differentiation, since the dense
+backward stays JAX-traced and is itself differentiable).
+
+Plumbing:
+
+* `pounce.Solver` exposes a new `block_dims` getter returning the
+  `(n_x, n_s, n_y_c, n_y_d, n_z_l, n_z_u, n_v_l, n_v_u)` layout of
+  the compound KKT vector so the JAX bwd can pack a partial RHS
+  (just the x-block) and unpack `u_x` / `u_y_c` / `u_y_d`.
+* Each fwd registers its converged `Solver` in a bounded-LRU cache
+  on the `JaxProblem` (default capacity 128, exposed as
+  `clear_solver_cache()` for early eviction). LRU rather than
+  pop-on-read because `jax.jacobian` calls the bwd N times per
+  fwd; pop semantics would crash from the second direction onward.
+* The back-solve `pure_callback` uses
+  `vmap_method="sequential"` so `jax.jacobian` / `jax.vmap` of a
+  loss-gradient correctly iterate one cotangent at a time across
+  the impure host call.
+
+The standalone `pounce.jax.solve` / `vmap_solve_parallel` /
+`solve_with_warm` keep the dense backward for now; the same wiring
+will land for them once the (A) stacked block-diagonal batched
+solve does.
+
+[k_aug]: https://github.com/dthierry/k_aug
+
 ### Changed
 
 - `pounce-qp::ParametricActiveSetSolver::solve_equality_plus_bounds`

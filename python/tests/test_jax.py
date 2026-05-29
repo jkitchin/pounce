@@ -433,3 +433,75 @@ def test_jax_problem_no_rebuild_on_repeat_solve_pounce_75():
     # was ~0.7s — assert under 0.5s to catch any regression that
     # silently re-rebuilds.
     assert dt_reused < 0.5, f"reused solves too slow: {dt_reused:.3f}s"
+
+
+def test_factor_reuse_matches_dense_pounce_76():
+    """Issue #76 (B): the k_aug-style factor-reuse backward must
+    produce gradients that agree with the dense ``jnp.linalg.solve``
+    backward to ~1e-8. We exercise three cases together because each
+    exercises a different part of the compound back-solve:
+
+    * pure equality constraint — primary y_c row coupling
+    * slack inequality (cl < cu, multiplier ≈ 0 at convergence) —
+      verifies the (v_l, v_u) barrier rows correctly drop the row
+      from the back-solve (k_aug's reason for existing on slack
+      ineqs is the same as the dense path's #73 active-set fix)
+    * active variable bound — verifies the (z_l, z_u) barrier rows
+      collapse ``dx_i/dp`` to zero on the active coordinate
+    """
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.1 * jnp.sum(x ** 4)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([
+            x[0] + x[1] + x[2] - 1.0,   # equality
+            x[2],                        # slack inequality (cl < cu)
+        ])
+
+    kwargs = dict(
+        f=f, g=g, n=3, m=2, p_example=jnp.zeros(3),
+        lb=jnp.array([0.4, -10.0, -10.0]),  # x[0] >= 0.4 — likely active
+        ub=jnp.full(3, 10.0),
+        cl=jnp.array([0.0, -1e20]),
+        cu=jnp.array([0.0, 1e20]),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    jp_new = JaxProblem(**kwargs, factor_reuse=True)
+    jp_old = JaxProblem(**kwargs, factor_reuse=False)
+
+    p = jnp.array([-0.2, 0.5, 0.4])
+
+    def loss(jp, p):
+        return jnp.sum(jp.solve(p, jnp.ones(3)) ** 2)
+
+    g_new = jax.grad(lambda p: loss(jp_new, p))(p)
+    g_old = jax.grad(lambda p: loss(jp_old, p))(p)
+    np.testing.assert_allclose(np.asarray(g_new), np.asarray(g_old), atol=1e-7)
+
+
+def test_factor_reuse_jacobian_pounce_76():
+    """The bwd is called once per output direction under
+    ``jax.jacobian``; verify the LRU lookup holds the factor across
+    repeated reads (pop-on-read would crash from the second direction
+    onward)."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] - x[1]])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -1e19), ub=jnp.full(2, 1e19),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    p = jnp.array([0.3, 0.7])
+    J = jax.jacobian(lambda p: jp.solve(p, jnp.zeros(2)))(p)
+    # x* projects p onto the line x[0] = x[1], so dx*/dp = 0.5 * (1 1; 1 1).
+    expected = 0.5 * np.ones((2, 2))
+    np.testing.assert_allclose(np.asarray(J), expected, atol=1e-6)

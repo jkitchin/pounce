@@ -158,6 +158,18 @@ impl PySolver {
         self.state.as_ref().and_then(|s| s.inner.kkt_dim())
     }
 
+    /// Per-block dimensions of the compound KKT vector in the flat
+    /// `x || s || y_c || y_d || z_l || z_u || v_l || v_u` packing
+    /// order. Returns an 8-tuple; `None` if no converged factor is
+    /// held. Useful for callers that need to pack a partial RHS for
+    /// `kkt_solve` (e.g. the JAX `custom_vjp` backward in
+    /// `pounce.jax`, which puts the upstream cotangent in the x-block
+    /// and reads back the y_c block).
+    #[getter]
+    fn block_dims(&self) -> Option<[usize; 8]> {
+        self.state.as_ref().and_then(|s| s.inner.block_dims())
+    }
+
     /// `True` iff a converged factor is currently held.
     #[getter]
     fn converged(&self) -> bool {

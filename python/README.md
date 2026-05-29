@@ -199,3 +199,12 @@ x = jp.solve(p0, x0=jnp.zeros(2))                       # differentiable
 x, warm = jp.solve_with_warm(p0, x0=x, warm_start=None) # trajectory
 X = jp.vmap_solve_parallel(p_batch, x0=jnp.zeros(2), workers=8)
 ```
+
+The `jp.solve` / `solve_with_warm` backward defaults to a k_aug-style
+factor-reuse path: instead of assembling a dense `(n+m) × (n+m)` KKT
+block in JAX and running `jnp.linalg.solve` on it, it reuses the IPM's
+converged LDLᵀ factor via `pounce.Solver.kkt_solve` (pounce#76). The
+compound block's barrier rows on `(z_l, z_u)` and `(v_l, v_u)`
+encode active bounds and slack inequalities exactly, so no explicit
+active-set masking is needed. Set `JaxProblem(..., factor_reuse=False)`
+for the verbatim dense path (needed for higher-order differentiation).

@@ -24,11 +24,36 @@ solve. To avoid races, each worker thread gets its own
 ``(problem_obj, Problem)`` pair via a :class:`threading.local`
 cache, so the per-thread build cost is paid at most once per worker
 (typically ``min(B, 8)`` total) instead of ``B`` times per batch.
+
+Factor-reuse backward (pounce#76 (B)). The classical IFT backward
+through an NLP requires solving a KKT linear system at ``x*``. The
+default pre-#76 path assembled ``[H J^T; J D]`` dense in JAX and
+dispatched ``jnp.linalg.solve``, plus did explicit active-set masking
+on bounds and slack inequality rows. The factor-reuse path now reuses
+the IPM's converged compound KKT factor (the same one ``k_aug`` uses
+for parametric sensitivity), which:
+
+* avoids an O((n+m)^3) dense back-solve in JAX — the LDLᵀ factor is
+  already sitting on the Rust side after the forward solve.
+* drops the active-set masking entirely: the bound multiplier
+  ``(z_l, z_u)`` rows in the compound block already encode active /
+  inactive bound behaviour exactly. Same for slack inequalities via
+  ``(v_l, v_u)``. The accuracy is O(μ) at the IPM barrier parameter,
+  which for default ``tol=1e-8`` is well below typical training-loop
+  noise.
+
+Each fwd registers its ``pounce.Solver`` (which owns the factor) in a
+bounded-LRU table on the JaxProblem keyed by an integer id that gets
+stashed in the ``custom_vjp`` residual. The bwd reads it back via
+``pure_callback``. See :meth:`JaxProblem._register_solver` for the
+rationale on the bounded LRU.
 """
 
 from __future__ import annotations
 
+import itertools
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
@@ -37,7 +62,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ._build import _detect_pattern_2d, _detect_pattern_lower, _to_np
-from .._pounce import Problem
+from .._pounce import Problem, Solver
 
 _ACTIVE_TOL = 1e-6
 
@@ -89,6 +114,198 @@ class _ReusableJaxNlp:
                 self._jp._hess_lag_jit(jnp.asarray(x), obj_factor, self._p)
             )
         return H[self._jp._hess_rows, self._jp._hess_cols]
+
+
+def _bwd_single_factor_reuse(
+    f: Callable,
+    g: Callable | None,
+    n: int,
+    m: int,
+    cl,
+    cu,
+    jp: "JaxProblem",
+    p,
+    x_star,
+    lam,
+    solver_id,
+    v,
+):
+    """k_aug-style VJP: reuse the converged compound IPM factor (pounce#76).
+
+    Replaces the dense ``jnp.linalg.solve`` on a hand-assembled
+    ``[H J^T; J D]`` block (the pre-#76 default) with a back-solve
+    against the IPM compound KKT factor held by the
+    :class:`pounce.Solver` registered in
+    ``jp._solver_registry[solver_id]``.
+
+    Why bother. Two reasons:
+
+    1. **Perf.** The dense back-solve is O((n+m)^3) every bwd call;
+       the LDLᵀ factor is already on the Rust side after the fwd, so
+       the bwd back-solve is O(nnz(L)). For modest n this is small
+       absolute savings; for n+m in the hundreds-to-thousands it
+       dominates.
+    2. **Correctness.** The compound block already encodes
+       active-set behaviour via the barrier rows on the bound
+       multipliers ``(z_l, z_u)``. At convergence active bounds
+       have unbounded ``z`` (forces ``Δx_i = 0`` in the back-solve)
+       and inactive bounds have ``z ≈ 0`` (leaves ``Δx_i`` free).
+       Slack inequality rows in the user's ``g`` are handled the
+       same way by the ``(v_l, v_u)`` rows. So this path drops the
+       explicit ``_ACTIVE_TOL`` masking that the dense path does on
+       ``H`` / ``J`` / ``v`` — that work falls out of the factor.
+       Accuracy is O(μ) at the IPM barrier parameter, which is
+       below ``tol`` after convergence.
+
+    Why we still call JAX-AD. We still need ``∂²L/∂x∂p`` (``dgradL_dp``)
+    and ``∂g/∂p`` (``dg_dp``) — those are the parameter sensitivities
+    of the KKT residual that get contracted with ``u`` to form
+    ``dL/dp``. They depend on how ``f`` and ``g`` were *written*, not
+    on the solve, so the IPM can't produce them; autodiff over the
+    user-supplied JAX callables is the right source.
+
+    Why ``lam`` (not just the host-side Solver state). We rebuild the
+    Lagrangian as a JAX-traced function to feed into ``jacrev``. The
+    Lagrangian needs the multipliers as a constant inside the trace,
+    so we close ``lam`` (already returned from the fwd in user g-order)
+    into ``lagrangian(x, p_)``.
+    """
+    def lagrangian(x, p_):
+        base = f(x, p_)
+        if g is not None and m > 0:
+            base = base + jnp.dot(lam, g(x, p_))
+        return base
+
+    grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star, p_)
+    dgradL_dp = jax.jacrev(grad_L_of_p)(p)
+
+    if g is not None and m > 0:
+        dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)
+    else:
+        dg_dp = jnp.zeros((0,) + jnp.shape(p))
+
+    # Compound back-solve via pure_callback to host. Returns (u_x, u_g)
+    # already permuted back to user g-order.
+    u_x, u_g = _kkt_backsolve_pure_callback(jp, solver_id, v, n, m)
+
+    dL_dp = -jnp.tensordot(u_x, dgradL_dp, axes=1)
+    if m > 0:
+        dL_dp = dL_dp - jnp.tensordot(u_g, dg_dp, axes=1)
+    return dL_dp
+
+
+def _kkt_backsolve_pure_callback(
+    jp: "JaxProblem",
+    solver_id: jnp.ndarray,
+    v: jnp.ndarray,
+    n: int,
+    m: int,
+):
+    """Pure-callback: pack ``[v; 0; ...; 0]`` into the compound RHS,
+    call ``Solver.kkt_solve``, scatter the y_c / y_d sub-blocks back
+    to user g-order. Returns ``(u_x, u_g)``.
+
+    Why a callback. ``Solver.kkt_solve`` is a Rust-side back-solve
+    against the held LDLᵀ factor — no way to express it in JAX. We
+    cross the host boundary via ``pure_callback``, which is opaque to
+    JAX tracing (fine for the bwd, which doesn't itself need to be
+    differentiable through the back-solve — second-order users on
+    this code path should set ``factor_reuse=False``).
+
+    Why the host scatter. Pounce's TNLP adapter classifies constraints
+    into equalities (``c_map``) and inequalities (``d_map``) based on
+    ``cl[i] == cu[i]``, preserving input order within each group
+    (see crates/pounce-nlp/src/tnlp_adapter.rs:388-413). The compound
+    KKT vector exposes them in that classified layout:
+    ``y_c`` lives at offset ``n_x + n_s`` and ``y_d`` at
+    ``n_x + n_s + n_y_c``. To make the bwd's contraction
+    ``u_g · dg/dp`` align with the user's row ordering of ``g``, we
+    scatter ``(u_y_c, u_y_d)`` back into a single length-``m`` vector
+    keyed off the ``cl == cu`` mask cached on the JaxProblem.
+    """
+    result_shapes = (
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((m,), jnp.float64),
+    )
+
+    def host_call(sid_h, v_h):
+        sid = int(np.asarray(sid_h))
+        solver = jp._lookup_solver(sid)
+        if solver is None:
+            # The registered Solver was evicted from the bounded LRU
+            # cache before the bwd ran. This is rare in normal use
+            # (jacobian, grad, vmap_solve) but possible in
+            # long-running training loops with very many distinct
+            # forward solves whose grads come back out of order.
+            # Easiest mitigation: increase
+            # `jp._solver_registry_capacity` or run the grad sooner
+            # after the fwd. The dense fallback path
+            # (`factor_reuse=False`) is unaffected.
+            raise RuntimeError(
+                f"pounce.jax: missing Solver for backward (id={sid}). "
+                "The factor was evicted from the LRU registry — bump "
+                "`_solver_registry_capacity`, run grads closer to the "
+                "fwd, or use `factor_reuse=False`."
+            )
+        dims = solver.block_dims  # [n_x, n_s, n_y_c, n_y_d, n_z_l, n_z_u, n_v_l, n_v_u]
+        n_x = dims[0]
+        n_s = dims[1]
+        n_y_c = dims[2]
+        n_y_d = dims[3]
+        kkt = solver.kkt_dim
+        rhs = np.zeros(kkt, dtype=np.float64)
+        v_np = np.asarray(v_h, dtype=np.float64)
+        # The JAX user-space n equals n_x exactly when no variables are
+        # fixed (which is the JaxProblem's contract — fixed-variable
+        # treatment isn't exposed). Assert and pack.
+        if v_np.shape[0] != n_x:
+            raise RuntimeError(
+                f"pounce.jax: cotangent length {v_np.shape[0]} != "
+                f"Solver n_x={n_x} (fixed-variable treatment is not "
+                "supported on the JaxProblem factor-reuse path)."
+            )
+        # Embed the cotangent into the compound KKT RHS:
+        # ``rhs = [v; 0_s; 0_yc; 0_yd; 0_zl; 0_zu; 0_vl; 0_vu]``.
+        # We're computing ``u = K^{-T} · e_x v`` (K is symmetric here),
+        # then contracting with ``∂R/∂p`` whose only nonzero blocks
+        # are the x-row (``dgradL_dp``), y_c-row (``dg_c/dp``), and
+        # y_d-row (``dg_d/dp``) — bounds and slacks don't depend on p
+        # in the JAX path, so the corresponding RHS blocks are zero.
+        rhs[:n_x] = v_np
+        u = np.asarray(solver.kkt_solve(rhs), dtype=np.float64)
+        u_x = u[:n_x].copy()
+        y_c_off = n_x + n_s
+        y_d_off = y_c_off + n_y_c
+        u_y_c = u[y_c_off : y_c_off + n_y_c]
+        u_y_d = u[y_d_off : y_d_off + n_y_d]
+
+        # Scatter (u_y_c, u_y_d) back to user-g order via the cl == cu
+        # mask. c_map and d_map preserve user order within each group,
+        # which matches pounce-nlp's classification (tnlp_adapter.rs:388-413).
+        u_g = np.zeros(m, dtype=np.float64)
+        if m > 0:
+            cl_arr = np.asarray(jp._cl_for_classify, dtype=np.float64)
+            cu_arr = np.asarray(jp._cu_for_classify, dtype=np.float64)
+            is_eq = cl_arr == cu_arr
+            c_idx = np.flatnonzero(is_eq)
+            d_idx = np.flatnonzero(~is_eq)
+            u_g[c_idx] = u_y_c
+            u_g[d_idx] = u_y_d
+        return u_x, u_g
+
+    # vmap_method="sequential" tells JAX to loop over the batch axis
+    # rather than calling our impure host function on a batched RHS.
+    # Needed for `jax.jacobian` (which vmaps the bwd over the n
+    # cotangents) and for plain `jax.vmap` of the loss-gradient. The
+    # host_call itself is single-direction: one v, one solver_id, one
+    # back-solve. The Solver's underlying LDLᵀ factor *could* fan out
+    # to multiple RHSes at once for true cost amortisation; doing
+    # that needs a `kkt_solve_many(rhs_mat)` on the Rust side, which
+    # is a worthwhile follow-up but out of scope for the initial
+    # factor-reuse landing.
+    return jax.pure_callback(
+        host_call, result_shapes, solver_id, v, vmap_method="sequential",
+    )
 
 
 def _bwd_single_kkt(
@@ -192,6 +409,15 @@ class JaxProblem:
         for every method call.
     seed : int
         Seed for the random sparsity probe.
+    factor_reuse : bool
+        When ``True`` (default), the differentiable backward reuses the
+        IPM's converged compound KKT factor for the implicit-function
+        back-solve (k_aug-style; pounce#76) — drops the
+        ``jnp.linalg.solve`` on a freshly assembled
+        ``(n+m) × (n+m)`` block and avoids the explicit active-set
+        masking. Set ``False`` to fall back to the original dense path
+        (useful for higher-order differentiation, since the dense path
+        stays inside JAX and is itself differentiable).
 
     Notes
     -----
@@ -216,6 +442,7 @@ class JaxProblem:
         cu=None,
         options: dict | None = None,
         seed: int = 0,
+        factor_reuse: bool = True,
     ):
         if m > 0 and g is None:
             raise ValueError("g must be provided when m > 0")
@@ -228,6 +455,45 @@ class JaxProblem:
         self._cl = cl
         self._cu = cu
         self._options = dict(options or {})
+        self._factor_reuse = bool(factor_reuse)
+        # Cached arrays the bwd host-side closure reads (cl == cu mask)
+        # to scatter the y_c / y_d sub-blocks back to user g-order.
+        # Stored on the JaxProblem so the pure_callback host_call can
+        # find them without re-marshalling per call.
+        if m > 0:
+            self._cl_for_classify = np.asarray(cl, dtype=np.float64)
+            self._cu_for_classify = np.asarray(cu, dtype=np.float64)
+        else:
+            self._cl_for_classify = np.zeros(0)
+            self._cu_for_classify = np.zeros(0)
+
+        # Registry of converged Solvers keyed by the integer id stashed
+        # in the custom_vjp residual. Bounded-LRU so we don't grow
+        # without bound in a training loop with many solve calls.
+        #
+        # Why bounded instead of pop-on-bwd:
+        #
+        # `jax.jacobian` (and any other transform that produces
+        # multiple cotangents per fwd) calls the bwd N times with the
+        # same residual. With ``vmap_method="sequential"`` on the
+        # back-solve pure_callback, JAX loops over the cotangents and
+        # invokes our host_call once per direction. Each call carries
+        # the same solver_id. If we popped on the first read we'd
+        # crash on the rest. So we hold the Solver across all reads
+        # and evict by LRU pressure instead.
+        #
+        # Why 128: ~all common patterns (single grad, jacobian up to
+        # ~n=128, vmap_solve over a batch) reuse the cache before
+        # evicting. Training loops walking past 128 distinct fwd calls
+        # without re-reading old ones still bound memory at
+        # 128 × sizeof(factor). Users with non-typical patterns can
+        # call :meth:`clear_solver_cache` to drop everything early.
+        self._solver_registry_capacity = 128
+        self._solver_registry: "OrderedDict[int, Solver]" = OrderedDict()
+        self._solver_id_counter = itertools.count(1)
+        # Lock guards concurrent register/lookup against
+        # vmap_solve_parallel worker threads.
+        self._registry_lock = threading.Lock()
 
         # JIT-compiled derivatives over (x, p). These are stateless and
         # threadsafe — the JaxProblem is the canonical owner.
@@ -309,10 +575,80 @@ class JaxProblem:
 
     # ----- host-side solves (called from pure_callback host_call) -----
 
-    def _host_solve(self, p_np: np.ndarray, x0_np: np.ndarray):
+    def _register_solver(self, solver: Solver) -> int:
+        """Register a converged Solver in the bwd registry. Returns a
+        unique integer id the bwd uses to look it up.
+
+        Why LRU instead of pop-on-read: ``jax.jacobian`` and friends
+        call the bwd N times with the same residual id (one per output
+        direction). We have to hold the factor across all of those
+        calls. We bound the registry at ``_solver_registry_capacity``
+        and evict the oldest entry on overflow so a long training
+        loop doesn't grow without bound.
+        """
+        sid = next(self._solver_id_counter)
+        with self._registry_lock:
+            self._solver_registry[sid] = solver
+            self._solver_registry.move_to_end(sid)
+            while len(self._solver_registry) > self._solver_registry_capacity:
+                # Pop the oldest entry. Its factor (held via Rc inside
+                # the Rust Solver) is freed when this reference drops.
+                self._solver_registry.popitem(last=False)
+        return sid
+
+    def _lookup_solver(self, sid: int) -> Solver | None:
+        """LRU-touching lookup. Refreshes the entry's recency so an
+        actively used factor doesn't get evicted while still in use."""
+        with self._registry_lock:
+            s = self._solver_registry.get(sid)
+            if s is not None:
+                self._solver_registry.move_to_end(sid)
+            return s
+
+    def clear_solver_cache(self) -> None:
+        """Drop all cached IPM factors held for backward passes.
+
+        The fwd path registers each converged factor for the bwd to
+        consume (see :meth:`_register_solver`). Cached factors stay
+        live until LRU eviction; if you want to free them earlier —
+        e.g. you know no more grads are coming for in-flight forwards
+        — call this between phases.
+        """
+        with self._registry_lock:
+            self._solver_registry.clear()
+
+    def _host_solve(self, p_np: np.ndarray, x0_np: np.ndarray, register: bool = True):
+        """Forward solve. Returns ``(x, info_with_solver_id)`` — info
+        carries a ``solver_id`` field that points into the per-JaxProblem
+        Solver registry. Always allocates a fresh :class:`pounce.Solver`
+        wrapping the per-thread cached :class:`pounce.Problem` so that
+        interleaved fwd/bwd pairs (e.g. ``jax.grad(f)(p1)`` then
+        ``jax.grad(f)(p2)``) don't clobber each other's factors.
+
+        ``pounce.Solver(prob)`` is just a PyO3 wrapper around the
+        Problem; the IPM build / factorization happens inside
+        ``solver.solve()``, which costs the same as ``prob.solve()`` —
+        so the only marginal cost of going through Solver is a tiny
+        PyO3 allocation. The win is that the converged factor is now
+        held and reusable in the bwd.
+
+        ``register=False`` skips the registry hand-off — used by paths
+        whose backward doesn't consume the factor (the parallel batched
+        bwd is JAX-vmapped over the dense kernel), so we don't pin
+        memory on factors nobody will read.
+        """
         obj, prob = self._thread_problem()
         obj._p = jnp.asarray(p_np)
-        return prob.solve(x0=np.asarray(x0_np, dtype=np.float64))
+        solver = Solver(prob)
+        x_np, info = solver.solve(x0=np.asarray(x0_np, dtype=np.float64))
+        sid = (
+            self._register_solver(solver)
+            if (self._factor_reuse and register)
+            else 0
+        )
+        info_out = dict(info)
+        info_out["solver_id"] = sid
+        return x_np, info_out
 
     def _host_solve_warm(
         self,
@@ -324,12 +660,17 @@ class JaxProblem:
     ):
         obj, prob = self._thread_problem_warm()
         obj._p = jnp.asarray(p_np)
-        return prob.solve(
+        solver = Solver(prob)
+        x_np, info = solver.solve(
             x0=np.asarray(x0_np, dtype=np.float64),
             lagrange=np.asarray(lam_np, dtype=np.float64),
             zl=np.asarray(zL_np, dtype=np.float64),
             zu=np.asarray(zU_np, dtype=np.float64),
         )
+        sid = self._register_solver(solver) if self._factor_reuse else 0
+        info_out = dict(info)
+        info_out["solver_id"] = sid
+        return x_np, info_out
 
     # ----- public: differentiable solve methods -----
 
@@ -398,6 +739,7 @@ class JaxProblem:
         f, g, n, m = self._f, self._g, self._n, self._m
         cl, cu = self._cl, self._cu
         jp = self
+        factor_reuse = self._factor_reuse
 
         @jax.custom_vjp
         def solve_fn(p, x0):
@@ -409,13 +751,19 @@ class JaxProblem:
             lam = jnp.asarray(info["mult_g"]) if m > 0 else jnp.zeros(0)
             mult_xL = jnp.asarray(info["mult_x_L"])
             mult_xU = jnp.asarray(info["mult_x_U"])
-            return x_star, (p, x_star, lam, mult_xL, mult_xU)
+            sid = jnp.asarray(info["solver_id"])
+            return x_star, (p, x_star, lam, mult_xL, mult_xU, sid)
 
         def bwd(residuals, v):
-            p, x_star, lam, mult_xL, mult_xU = residuals
-            dL_dp = _bwd_single_kkt(
-                f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
-            )
+            p, x_star, lam, mult_xL, mult_xU, sid = residuals
+            if factor_reuse:
+                dL_dp = _bwd_single_factor_reuse(
+                    f, g, n, m, cl, cu, jp, p, x_star, lam, sid, v,
+                )
+            else:
+                dL_dp = _bwd_single_kkt(
+                    f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
+                )
             return dL_dp, jnp.zeros((n,), dtype=jnp.float64)
 
         solve_fn.defvjp(fwd, bwd)
@@ -425,28 +773,35 @@ class JaxProblem:
         f, g, n, m = self._f, self._g, self._n, self._m
         cl, cu = self._cl, self._cu
         jp = self
+        factor_reuse = self._factor_reuse
 
         @jax.custom_vjp
         def solve_fn(p, x0, lam_warm, zL_warm, zU_warm):
-            return _pure_callback_warm_solve(
+            x_star, lam_out, zL_out, zU_out, _sid = _pure_callback_warm_solve(
                 jp, p, x0, lam_warm, zL_warm, zU_warm,
             )
+            return x_star, lam_out, zL_out, zU_out
 
         def fwd(p, x0, lam_warm, zL_warm, zU_warm):
-            x_star, lam_out, zL_out, zU_out = _pure_callback_warm_solve(
+            x_star, lam_out, zL_out, zU_out, sid = _pure_callback_warm_solve(
                 jp, p, x0, lam_warm, zL_warm, zU_warm,
             )
             return (
                 (x_star, lam_out, zL_out, zU_out),
-                (p, x_star, lam_out, zL_out, zU_out),
+                (p, x_star, lam_out, zL_out, zU_out, sid),
             )
 
         def bwd(residuals, cotangents):
-            p, x_star, lam, mult_xL, mult_xU = residuals
+            p, x_star, lam, mult_xL, mult_xU, sid = residuals
             v = cotangents[0]
-            dL_dp = _bwd_single_kkt(
-                f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
-            )
+            if factor_reuse:
+                dL_dp = _bwd_single_factor_reuse(
+                    f, g, n, m, cl, cu, jp, p, x_star, lam, sid, v,
+                )
+            else:
+                dL_dp = _bwd_single_kkt(
+                    f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
+                )
             return (
                 dL_dp,
                 jnp.zeros((n,), dtype=jnp.float64),
@@ -471,18 +826,31 @@ class JaxProblem:
             return x_star
 
         def fwd(p_batch, x0_batch):
-            x_star, lam, mult_xL, mult_xU = _pure_callback_parallel_solve(
+            x_star, lam, mult_xL, mult_xU, sids = _pure_callback_parallel_solve(
                 jp, p_batch, x0_batch, workers,
             )
-            return x_star, (p_batch, x_star, lam, mult_xL, mult_xU)
+            return x_star, (p_batch, x_star, lam, mult_xL, mult_xU, sids)
 
         def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
+            # Dense path in JAX so the per-element bwd can vmap. The
+            # factor-reuse path needs a per-element host callback,
+            # which can't ride inside a JAX-traced vmap without giving
+            # up the vectorisation. The batched compound back-solve is
+            # the (A)-track follow-up.
             return _bwd_single_kkt(
                 f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
             )
 
         def bwd(residuals, cot_x_batch):
-            p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch = residuals
+            (
+                p_batch, x_star_batch, lam_batch, mult_xL_batch,
+                mult_xU_batch, _sids,
+            ) = residuals
+            # `_sids` are all zero — the parallel host_call uses
+            # ``register=False`` (see _pure_callback_parallel_solve's
+            # host_call below). They're kept in the residual only so
+            # the residual-shape contract matches the single-solve fwd
+            # for future code sharing.
             dL_dp_batch = jax.vmap(bwd_single)(
                 p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch,
                 cot_x_batch,
@@ -491,7 +859,6 @@ class JaxProblem:
 
         solve_fn.defvjp(fwd, bwd)
         return solve_fn
-
 
 # ----- pure_callback wrappers (module-level, closed over a JaxProblem) -----
 
@@ -508,6 +875,7 @@ def _pure_callback_solve(jp: JaxProblem, p, x0):
             "mult_g": jax.ShapeDtypeStruct((m,), jnp.float64),
             "mult_x_L": jax.ShapeDtypeStruct((n,), jnp.float64),
             "mult_x_U": jax.ShapeDtypeStruct((n,), jnp.float64),
+            "solver_id": jax.ShapeDtypeStruct((), jnp.int64),
         },
     )
 
@@ -521,6 +889,7 @@ def _pure_callback_solve(jp: JaxProblem, p, x0):
             "mult_g": np.asarray(info["mult_g"], dtype=np.float64),
             "mult_x_L": np.asarray(info["mult_x_L"], dtype=np.float64),
             "mult_x_U": np.asarray(info["mult_x_U"], dtype=np.float64),
+            "solver_id": np.int64(info["solver_id"]),
         }
         return np.asarray(x_np, dtype=np.float64), info_out
 
@@ -534,6 +903,7 @@ def _pure_callback_warm_solve(jp: JaxProblem, p, x0, lam_warm, zL_warm, zU_warm)
         jax.ShapeDtypeStruct((m,), jnp.float64),
         jax.ShapeDtypeStruct((n,), jnp.float64),
         jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((), jnp.int64),
     )
 
     def host_call(p_h, x0_h, lam_h, zL_h, zU_h):
@@ -546,6 +916,7 @@ def _pure_callback_warm_solve(jp: JaxProblem, p, x0, lam_warm, zL_warm, zU_warm)
             np.asarray(info["mult_g"], dtype=np.float64),
             np.asarray(info["mult_x_L"], dtype=np.float64),
             np.asarray(info["mult_x_U"], dtype=np.float64),
+            np.int64(info["solver_id"]),
         )
 
     return jax.pure_callback(
@@ -561,6 +932,7 @@ def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):
         jax.ShapeDtypeStruct((B, m), jnp.float64),
         jax.ShapeDtypeStruct((B, n), jnp.float64),
         jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B,), jnp.int64),
     )
 
     def host_call(p_h, x0_h):
@@ -571,13 +943,20 @@ def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):
         lam_out = np.empty((B, m), dtype=np.float64)
         zL_out = np.empty((B, n), dtype=np.float64)
         zU_out = np.empty((B, n), dtype=np.float64)
+        sid_out = np.empty((B,), dtype=np.int64)
 
         def one(i):
-            x_np, info = jp._host_solve(p_np[i], x0_np[i])
+            # register=False: the parallel bwd is JAX-vmapped over the
+            # dense kernel and never consults the registry; skip the
+            # hand-off so we don't pin B factors in the registry for
+            # no benefit. The follow-up batched compound bwd (#76 (A))
+            # will need a different host-side surface anyway.
+            x_np, info = jp._host_solve(p_np[i], x0_np[i], register=False)
             x_out[i] = x_np
             lam_out[i] = np.asarray(info["mult_g"], dtype=np.float64)
             zL_out[i] = np.asarray(info["mult_x_L"], dtype=np.float64)
             zU_out[i] = np.asarray(info["mult_x_U"], dtype=np.float64)
+            sid_out[i] = np.int64(info["solver_id"])
 
         if n_workers <= 1 or B <= 1:
             for i in range(B):
@@ -585,6 +964,6 @@ def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):
         else:
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 list(pool.map(one, range(B)))
-        return x_out, lam_out, zL_out, zU_out
+        return x_out, lam_out, zL_out, zU_out, sid_out
 
     return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)

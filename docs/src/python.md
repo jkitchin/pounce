@@ -220,6 +220,40 @@ Each worker thread in `vmap_solve_parallel` keeps its own cached
 `pounce.Problem` via `threading.local`, so the per-thread build cost
 is paid at most once per worker rather than once per batch row.
 
+### Factor-reuse backward (`factor_reuse=`)
+
+`JaxProblem.solve` and `solve_with_warm` default to a k_aug-style
+backward that reuses the IPM's converged compound KKT factor
+(`pounce.Solver.kkt_solve`) instead of assembling a dense
+`(n+m) × (n+m)` block and running `jnp.linalg.solve` on it
+(pounce#76). The held LDLᵀ factor turns the bwd back-solve from
+O((n+m)³) into O(nnz(L)) and drops the explicit active-set masking
+that the dense path does — the barrier rows on the bound multipliers
+`(z_l, z_u)` already encode "active bounds force `Δx_i = 0`" exactly,
+and the `(v_l, v_u)` rows do the same for slack inequalities. The
+accuracy of the resulting gradient is `O(μ)` at the IPM barrier
+parameter, which sits well below `tol` after convergence.
+
+```python
+jp = JaxProblem(..., factor_reuse=True)   # default; reuse the IPM factor
+jp = JaxProblem(..., factor_reuse=False)  # legacy dense JAX backward
+```
+
+Pick `factor_reuse=False` when you want higher-order differentiation
+(`jax.grad(jax.grad(...))` through the solver) — the dense backward
+stays JAX-traced and is itself differentiable, the factor-reuse one
+crosses to the Rust host via `pure_callback` and is opaque to a
+second-order trace.
+
+Each fwd registers its converged factor in a bounded LRU on the
+`JaxProblem` (default capacity 128). For very long-running training
+loops with many distinct forward solves you can drop the cache
+explicitly:
+
+```python
+jp.clear_solver_cache()
+```
+
 ## Notebooks
 
 The notebooks under
