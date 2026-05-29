@@ -341,6 +341,10 @@ impl AugSystemSolver for StdAugSystemSolver {
         self.last_neg_evals
     }
 
+    fn system_dim(&self) -> Index {
+        self.dim
+    }
+
     fn increase_quality(&mut self) -> bool {
         // Quality bump → pivtol changed → next solve must refactor.
         // `resolve` would silently hand back stale numbers; force the

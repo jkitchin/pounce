@@ -78,6 +78,15 @@ program.
   derived solver event — `resto_entered`, `resto_exited`, `regularized`
   (inertia correction), `tiny_step`, `ls_rejected`, `nan` — surfacing as
   `reason:"event: …"`. Advertised in `hello.events`.
+- **KKT / inertia / regularization inspection:** `print kkt` (at/after
+  `after_search_dir`) reports the augmented-system dimension, the
+  factorization **inertia** (n₊ / n₋ vs the expected n₋ = #multipliers,
+  flagged correct / WRONG), the applied **regularization** (δ_w, δ_c), and
+  the factorization status — the numbers a solver expert reads to diagnose
+  a bad step. `viz kkt` writes that report to an external viewer.
+  Captured only when a debugger is attached (zero solve overhead
+  otherwise); advertised via `hello.capabilities.kkt_inspect`. The full
+  KKT-matrix / L-factor *heatmap* still comes from `--dump kkt:*+L`.
 - **Compound conditional breakpoints (pounce#72 §4):** `break if` now
   accepts `&&` / `||` between comparisons, evaluated left-to-right with no
   precedence (parentheses are stripped). E.g.

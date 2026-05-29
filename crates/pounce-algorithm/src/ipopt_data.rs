@@ -28,6 +28,22 @@ pub struct PdPerturbations {
     pub delta_d: Number,
 }
 
+/// KKT-factorization diagnostics captured for the interactive debugger
+/// after a search-direction solve. Only populated when a debugger is
+/// installed (see `IpoptAlgorithm`); inspected via `DebugCtx::kkt`.
+#[derive(Clone, Debug, Default)]
+pub struct KktDebug {
+    /// Dimension of the augmented system (n + m).
+    pub dim: i32,
+    /// Negative eigenvalues reported by the factorization (-1 if the
+    /// backend doesn't provide inertia).
+    pub n_neg: i32,
+    /// Whether the backend reports inertia at all.
+    pub provides_inertia: bool,
+    /// Debug string of the last factorization status.
+    pub status: String,
+}
+
 /// Mutable state passed down through the algorithm. Owned by
 /// `IpoptAlgorithm`; strategies access via `Rc<RefCell<IpoptData>>`.
 pub struct IpoptData {
@@ -52,6 +68,10 @@ pub struct IpoptData {
     pub tol: Number,
 
     pub perturbations: PdPerturbations,
+
+    /// KKT-factorization diagnostics for the debugger (set after a
+    /// search-direction solve when a debugger is installed).
+    pub kkt_debug: Option<KktDebug>,
 
     /// Set after a successful trial-acceptance step in the line
     /// search. Cleared on accept.
@@ -130,6 +150,7 @@ impl IpoptData {
             curr_tau: 0.99,
             tol: 1e-8,
             perturbations: PdPerturbations::default(),
+            kkt_debug: None,
             info_alpha_primal: 0.0,
             info_alpha_dual: 0.0,
             info_regu_x: 0.0,

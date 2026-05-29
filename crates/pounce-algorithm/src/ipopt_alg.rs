@@ -863,6 +863,24 @@ impl IpoptAlgorithm {
             }
         }
 
+        // Capture KKT-factorization diagnostics (dim, inertia, status)
+        // for the debugger before the line search runs. Only when a
+        // debugger is installed — pulls nothing otherwise.
+        if self.debug.is_some() {
+            let info = self.search_dir.as_ref().map(|sd| {
+                let pd = sd.pd_solver_mut();
+                let aug = pd.aug_solver();
+                let provides = aug.provides_inertia();
+                crate::ipopt_data::KktDebug {
+                    dim: aug.system_dim(),
+                    n_neg: if provides { aug.number_of_neg_evals() } else { -1 },
+                    provides_inertia: provides,
+                    status: format!("{:?}", aug.last_solve_status()),
+                }
+            });
+            self.data.borrow_mut().kkt_debug = info;
+        }
+
         // Sub-iteration checkpoint: the Newton step `δ` (data.delta) and
         // the applied regularization are now available, before the line
         // search consumes them.

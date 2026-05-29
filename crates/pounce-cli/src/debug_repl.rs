@@ -419,7 +419,9 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["break"] | ["b"] => starts(&["if", "on", "clear", "del"]),
         ["print"] | ["p"] => {
             let mut v = starts(&BLOCK_NAMES);
-            v.extend(starts(&["mu", "obj", "inf_pr", "inf_du", "err", "iter"]));
+            v.extend(starts(&[
+                "mu", "obj", "inf_pr", "inf_du", "err", "iter", "kkt",
+            ]));
             v
         }
         ["viz"] | ["plot"] => {
@@ -725,7 +727,7 @@ impl SolverDebugger {
             "commands:".into(),
             "  info | i                 summary of the current iterate".into(),
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
-            "                           mu|obj|inf_pr|inf_du|err|iter".into(),
+            "                           mu|obj|inf_pr|inf_du|err|iter | kkt (inertia+reg)".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
             "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
@@ -789,6 +791,9 @@ impl SolverDebugger {
         let Some(&what) = rest.first() else {
             return self.cmd_info(ctx);
         };
+        if what == "kkt" {
+            return self.cmd_print_kkt(ctx);
+        }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
         let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
         if BLOCK_NAMES.contains(&what) {
@@ -820,6 +825,49 @@ impl SolverDebugger {
             CmdOut::ok(vec![format!("{what} = {val:.10e}")])
                 .with_data(serde_json::json!({"name": what, "value": val}))
         }
+    }
+
+    /// `print kkt` — inertia + regularization of the factored augmented
+    /// system. Only meaningful at/after `after_search_dir`.
+    fn cmd_print_kkt(&self, ctx: &DebugCtx) -> CmdOut {
+        let Some(k) = ctx.kkt() else {
+            return CmdOut::err(
+                "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
+            );
+        };
+        let inertia = if k.provides_inertia {
+            format!(
+                "n+={} n-={} (expected n-={}) → {}",
+                k.n_pos,
+                k.n_neg,
+                k.expected_neg,
+                if k.inertia_correct {
+                    "correct"
+                } else {
+                    "WRONG (step stabilized)"
+                }
+            )
+        } else {
+            "n/a (backend reports no inertia)".to_string()
+        };
+        let lines = vec![
+            format!("dim       = {}", k.dim),
+            format!("inertia   = {inertia}"),
+            format!("delta_w   = {:.6e}   (primal regularization)", k.delta_w),
+            format!("delta_c   = {:.6e}   (dual regularization)", k.delta_c),
+            format!("status    = {}", k.status),
+        ];
+        CmdOut::ok(lines).with_data(serde_json::json!({
+            "dim": k.dim,
+            "n_pos": k.n_pos,
+            "n_neg": k.n_neg,
+            "expected_neg": k.expected_neg,
+            "provides_inertia": k.provides_inertia,
+            "inertia_correct": k.inertia_correct,
+            "delta_w": k.delta_w,
+            "delta_c": k.delta_c,
+            "status": k.status,
+        }))
     }
 
     fn cmd_run(&mut self, rest: &[&str]) -> CmdOut {
@@ -1220,14 +1268,35 @@ impl SolverDebugger {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
         };
-        // Live KKT / L factor are assembled inside the search-direction
-        // solver during compute_search_direction, not at the iteration
-        // checkpoint, so they are not reachable from here yet.
-        if target == "kkt" || target == "L" {
+        // KKT inertia/regularization are available at `after_search_dir`
+        // and viz'd as a small JSON report. The full matrix / L-factor
+        // *pattern* (a heatmap) still comes from the offline dump, which
+        // already extracts it from the backend.
+        if target == "kkt" {
+            let Some(k) = ctx.kkt() else {
+                return CmdOut::err(
+                    "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
+                );
+            };
+            let payload = serde_json::json!({
+                "label": "kkt", "iter": ctx.iter(),
+                "dim": k.dim, "n_pos": k.n_pos, "n_neg": k.n_neg,
+                "expected_neg": k.expected_neg, "inertia_correct": k.inertia_correct,
+                "delta_w": k.delta_w, "delta_c": k.delta_c, "status": k.status,
+            });
+            return match write_json_and_open("kkt", ctx.iter(), &payload) {
+                Ok((path, viewer)) => {
+                    CmdOut::ok(vec![format!("wrote {path}; opened with `{viewer}`")])
+                        .with_data(serde_json::json!({"path": path, "viewer": viewer}))
+                }
+                Err(e) => CmdOut::err(e),
+            };
+        }
+        if target == "L" {
             return CmdOut::err(
-                "live KKT/L visualization needs the factored augmented system, which isn't \
-                 exposed at the iteration checkpoint yet. For now, re-run with \
-                 `--dump kkt:<iter>+L+Lvals --dump-dir DIR` and open the per-iter dump.",
+                "the L-factor pattern (heatmap) isn't captured at the checkpoint; re-run with \
+                 `--dump kkt:<iter>+L+Lvals --dump-dir DIR` and open the per-iter dump. \
+                 `print kkt` / `viz kkt` give the inertia + regularization here.",
             );
         }
         // Resolve the vector to visualize.
@@ -1373,6 +1442,7 @@ impl SolverDebugger {
                 "request_ids": true,
                 "viz": ["block", "delta"],
                 "save": true,
+                "kkt_inspect": true,
                 "rewind": "primal_dual",
                 "resolve": self.restart.is_some(),
                 "terminal_checkpoint": true,
@@ -1672,9 +1742,19 @@ fn default_str(d: &DefaultValue) -> String {
 /// `{}` is replaced by the path; if absent, the path is appended), else
 /// the platform default (`xdg-open` on Linux, `open` on macOS).
 fn write_and_open(label: &str, iter: i32, vals: &[f64]) -> Result<(String, String), String> {
+    let payload = serde_json::json!({"label": label, "iter": iter, "values": vals});
+    write_json_and_open(label, iter, &payload)
+}
+
+/// Write a JSON artifact to a temp file and open it in an external viewer
+/// (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`). Shared by `viz`.
+fn write_json_and_open(
+    label: &str,
+    iter: i32,
+    payload: &serde_json::Value,
+) -> Result<(String, String), String> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("pounce-dbg-{label}-iter{iter}.json"));
-    let payload = serde_json::json!({"label": label, "iter": iter, "values": vals});
     std::fs::write(&path, payload.to_string()).map_err(|e| format!("write failed: {e}"))?;
     let path_s = path.to_string_lossy().to_string();
 
