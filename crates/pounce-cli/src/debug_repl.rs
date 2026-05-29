@@ -49,7 +49,7 @@ use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Context, Editor, Helper, Highlighter, Hinter, Validator};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -57,8 +57,8 @@ use std::rc::Rc;
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
     "help", "info", "print", "step", "stepi", "continue", "run", "break", "tbreak", "watchpoint",
-    "stop-at", "set", "opt", "complete", "viz", "save", "goto", "restart", "resolve", "ask",
-    "watch", "diff", "source", "progress", "detach", "quit",
+    "commands", "stop-at", "set", "opt", "complete", "viz", "save", "goto", "restart", "resolve",
+    "ask", "watch", "diff", "source", "progress", "detach", "quit",
 ];
 
 /// Events a user can `break on` (advertised in `hello.events`). Each is
@@ -514,6 +514,9 @@ pub struct SolverDebugger {
     breaks: Vec<i32>,
     /// One-shot iteration breakpoints (`tbreak`), removed when hit.
     temp_breaks: Vec<i32>,
+    /// Command lists attached to iteration breakpoints (`commands N …`):
+    /// run automatically when iteration N is paused at.
+    bp_commands: HashMap<i32, Vec<String>>,
     /// Conditional breakpoints (`break if mu<1e-4`): pause when any holds.
     conds: Vec<Condition>,
     /// Data watchpoints (`watchpoint x[3]`): pause when a value changes.
@@ -585,6 +588,7 @@ impl SolverDebugger {
             run_to: None,
             breaks: Vec::new(),
             temp_breaks: Vec::new(),
+            bp_commands: HashMap::new(),
             conds: Vec::new(),
             watchpoints: Vec::new(),
             last_mu: None,
@@ -817,6 +821,7 @@ impl SolverDebugger {
                 None => CmdOut::err("usage: tbreak <iteration>"),
             },
             "watchpoint" | "wp" => self.cmd_watchpoint(rest),
+            "commands" => self.cmd_commands(rest),
             "stop-at" | "stopat" => self.cmd_stop_at(rest),
             "progress" => match rest.first().copied() {
                 Some("on") | None => {
@@ -877,6 +882,7 @@ impl SolverDebugger {
             "                           tiny_step|ls_rejected|mu_stalled|nan".into(),
             "  tbreak <N>               one-shot breakpoint (deletes after firing)".into(),
             "  watchpoint <blk>[<i>] [τ] pause when a value changes by > τ (alias wp)".into(),
+            "  commands <N> <c>;<c>…    auto-run commands when iter N's breakpoint hits".into(),
             "  set mu <v>               overwrite the barrier parameter".into(),
             "  set <blk>[<i>] <v>       overwrite one component (e.g. set x[2] 1.5)".into(),
             "  set <blk> <v0,v1,...>    overwrite a whole block".into(),
@@ -1529,6 +1535,44 @@ impl SolverDebugger {
         }
     }
 
+    /// `commands <iter> <cmd> ; <cmd> …` — attach an auto-run command
+    /// list to the breakpoint at iteration `iter` (e.g.
+    /// `commands 5 set mu 0.1 ; continue`). `commands <iter> clear`
+    /// removes it; `commands` lists all.
+    fn cmd_commands(&mut self, rest: &[&str]) -> CmdOut {
+        let Some(iter) = rest.first().and_then(|s| s.parse::<i32>().ok()) else {
+            if rest.is_empty() {
+                let mut items: Vec<(i32, Vec<String>)> =
+                    self.bp_commands.iter().map(|(k, v)| (*k, v.clone())).collect();
+                items.sort_by_key(|(k, _)| *k);
+                let lines = if items.is_empty() {
+                    vec!["no breakpoint command lists".into()]
+                } else {
+                    items
+                        .iter()
+                        .map(|(k, v)| format!("iter {k}: {}", v.join(" ; ")))
+                        .collect()
+                };
+                return CmdOut::ok(lines);
+            }
+            return CmdOut::err("usage: commands <iter> <cmd> ; <cmd> …  (or: commands <iter> clear)");
+        };
+        let tail = rest[1..].join(" ");
+        let tail = tail.trim();
+        if tail.is_empty() || tail == "clear" {
+            self.bp_commands.remove(&iter);
+            return CmdOut::ok(vec![format!("cleared commands for iteration {iter}")]);
+        }
+        let cmds: Vec<String> = tail
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.bp_commands.insert(iter, cmds.clone());
+        CmdOut::ok(vec![format!("commands for iter {iter}: {}", cmds.join(" ; "))])
+            .with_data(serde_json::json!({"iter": iter, "commands": cmds}))
+    }
+
     /// `diff` — what changed in the iterate since the previous captured
     /// iteration: per-block max |Δ| (and where), plus Δμ.
     fn cmd_diff(&self, ctx: &DebugCtx) -> CmdOut {
@@ -2094,8 +2138,26 @@ impl DebugHook for SolverDebugger {
         // Consume one-shot arming; commands re-arm as needed.
         self.step = false;
         self.sub_step = false;
-        self.ensure_editor();
         self.emit_pause(ctx, reason.as_deref());
+
+        // Auto-run any command list attached to this iteration's
+        // breakpoint (`commands N …`). If it resumes/stops, honor that
+        // without dropping to the prompt.
+        if is_iter_start {
+            if let Some(cmds) = self.bp_commands.get(&ctx.iter()).cloned() {
+                for c in cmds {
+                    let out = self.dispatch(&c, ctx);
+                    self.emit_result(&c, &out, None);
+                    match out.flow {
+                        Flow::Resume => return DebugAction::Resume,
+                        Flow::Stop => return DebugAction::Stop,
+                        Flow::Stay => {}
+                    }
+                }
+            }
+        }
+
+        self.ensure_editor();
         self.prompt_loop(ctx)
     }
 }
