@@ -378,6 +378,21 @@ impl IpoptAlgorithm {
         hook.at_checkpoint(&mut ctx)
     }
 
+    /// Run the restoration phase, bracketed by the `PreRestoration` /
+    /// `PostRestoration` debug checkpoints so a debugger can inspect the
+    /// iterate just before entry and just after exit. With no debugger
+    /// installed this is exactly `invoke_restoration()`.
+    fn invoke_restoration_debugged(&mut self) -> IterateOutcome {
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::PreRestoration) {
+            return o;
+        }
+        let outcome = self.invoke_restoration();
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::PostRestoration) {
+            return o;
+        }
+        outcome
+    }
+
     /// Fire a sub-iteration checkpoint from inside [`Self::iterate`].
     /// Returns `Some(Terminate(UserRequestedStop))` if the debugger asked
     /// to stop, so the caller can `return` it; `None` to continue.
@@ -636,7 +651,7 @@ impl IpoptAlgorithm {
         };
         if request_resto {
             if self.restoration.is_some() {
-                return self.invoke_restoration();
+                return self.invoke_restoration_debugged();
             } else {
                 tracing::warn!(target: "pounce::algorithm",
                     "[POUNCE] probing-oracle iterate-quality guard fired \
@@ -709,7 +724,7 @@ impl IpoptAlgorithm {
                 // fallback is available does upstream throw
                 // `STEP_COMPUTATION_FAILED`.
                 if self.restoration.is_some() {
-                    return self.invoke_restoration();
+                    return self.invoke_restoration_debugged();
                 }
                 return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
             }
@@ -989,7 +1004,7 @@ impl IpoptAlgorithm {
                         // `alpha_min` or all retries reject, which in
                         // turn triggers `ActivateLineSearch` →
                         // restoration.
-                        return self.invoke_restoration();
+                        return self.invoke_restoration_debugged();
                     }
                 }
             }
