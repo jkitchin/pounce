@@ -114,6 +114,11 @@ program.
   the coordinate count.
 - **Visualization:** `viz <block|dx>` writes the vector and opens it in
   an external viewer (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`).
+- **AI-assisted debugging:** `ask [question]` packages the current paused
+  state (checkpoint, residuals, step lengths, dims, KKT inertia +
+  regularization) into a prompt and runs it through Claude Code
+  (`claude -p`, headless) — or any CLI set via `POUNCE_DBG_LLM` — printing
+  the reply inline (`data.reply` in JSON mode).
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
   JSON channel — the banner, problem-stats block, and final summary are
   routed to stderr — so a GUI / IDE front end can consume it line by

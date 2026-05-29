@@ -57,7 +57,7 @@ use std::rc::Rc;
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
     "help", "info", "print", "step", "stepi", "continue", "run", "break", "stop-at", "set", "opt",
-    "complete", "viz", "save", "goto", "restart", "resolve", "progress", "detach", "quit",
+    "complete", "viz", "save", "goto", "restart", "resolve", "ask", "progress", "detach", "quit",
 ];
 
 /// Events a user can `break on` (advertised in `hello.events`). Each is
@@ -711,6 +711,7 @@ impl SolverDebugger {
                 None => CmdOut::err("no snapshots captured yet"),
             },
             "resolve" | "re-solve" => self.cmd_resolve(ctx),
+            "ask" | "explain" | "claude" => self.cmd_ask(rest, ctx),
             "detach" => {
                 self.detached = true;
                 self.step = false;
@@ -749,6 +750,7 @@ impl SolverDebugger {
             "  save [path]              write the current iterate + residuals to JSON".into(),
             "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
+            "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
         ];
@@ -1264,6 +1266,29 @@ impl SolverDebugger {
         .flow(Flow::Stop)
     }
 
+    /// `ask [question]` — hand the current solver state to Claude Code
+    /// (headless `claude -p`, or `$POUNCE_DBG_LLM`) and print its reply.
+    /// "Ask why this step looks wrong without leaving the debugger."
+    fn cmd_ask(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+        let question = if rest.is_empty() {
+            "Explain the current state of this interior-point solve and suggest what to try next."
+                .to_string()
+        } else {
+            rest.join(" ")
+        };
+        let prompt = build_ask_prompt(ctx, &question);
+        match run_llm(&prompt) {
+            Ok(reply) => {
+                let lines: Vec<String> = reply.lines().map(|l| l.to_string()).collect();
+                CmdOut::ok(lines).with_data(serde_json::json!({
+                    "question": question,
+                    "reply": reply,
+                }))
+            }
+            Err(e) => CmdOut::err(e),
+        }
+    }
+
     fn cmd_viz(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
@@ -1443,6 +1468,7 @@ impl SolverDebugger {
                 "viz": ["block", "delta"],
                 "save": true,
                 "kkt_inspect": true,
+                "llm_assist": true,
                 "rewind": "primal_dual",
                 "resolve": self.restart.is_some(),
                 "terminal_checkpoint": true,
@@ -1746,6 +1772,125 @@ fn write_and_open(label: &str, iter: i32, vals: &[f64]) -> Result<(String, Strin
     write_json_and_open(label, iter, &payload)
 }
 
+/// Build the prompt handed to the LLM by `ask`: a compact, self-contained
+/// description of the paused interior-point state plus the user question.
+fn build_ask_prompt(ctx: &DebugCtx, question: &str) -> String {
+    use std::fmt::Write as _;
+    let mut p = String::new();
+    p.push_str(
+        "You are helping debug a paused run of POUNCE, a pure-Rust port of the Ipopt \
+         interior-point NLP solver. The solve is stopped at a debugger checkpoint. \
+         Use the state below to answer concisely and suggest concrete next steps \
+         (options to try, what to inspect). State:\n\n",
+    );
+    let _ = writeln!(p, "checkpoint = {}", ctx.checkpoint().as_str());
+    if let Some(s) = ctx.status() {
+        let _ = writeln!(p, "status     = {s}");
+    }
+    let _ = writeln!(p, "iter       = {}", ctx.iter());
+    let _ = writeln!(p, "mu         = {:.6e}", ctx.mu());
+    let _ = writeln!(p, "objective  = {:.8e}", ctx.objective());
+    let _ = writeln!(p, "inf_pr     = {:.6e}", ctx.inf_pr());
+    let _ = writeln!(p, "inf_du     = {:.6e}", ctx.inf_du());
+    let _ = writeln!(p, "nlp_error  = {:.6e}", ctx.nlp_error());
+    let (ap, ad) = ctx.alpha();
+    let _ = writeln!(p, "alpha_pr   = {ap:.4e}, alpha_du = {ad:.4e}");
+    let _ = writeln!(p, "ls_trials  = {}", ctx.ls_count());
+    let dims: Vec<String> = ctx
+        .block_dims()
+        .into_iter()
+        .map(|(n, d)| format!("{n}:{d}"))
+        .collect();
+    let _ = writeln!(p, "dims       = {}", dims.join(" "));
+    if let Some(k) = ctx.kkt() {
+        let _ = writeln!(
+            p,
+            "kkt        = dim {} inertia n+={} n-={} (expected n-={}, {}) delta_w={:.3e} delta_c={:.3e} status={}",
+            k.dim,
+            k.n_pos,
+            k.n_neg,
+            k.expected_neg,
+            if k.inertia_correct { "correct" } else { "WRONG" },
+            k.delta_w,
+            k.delta_c,
+            k.status
+        );
+    }
+    let _ = write!(p, "\nQuestion: {question}\n");
+    p
+}
+
+/// Resolve the LLM command from `$POUNCE_DBG_LLM` (whitespace-split; `{}`
+/// substitutes the prompt as an argument), defaulting to `claude -p`. The
+/// bool is whether the prompt goes on stdin (true) or was substituted
+/// into an argument (false).
+fn llm_command(prompt: &str) -> (String, Vec<String>, bool) {
+    let tmpl = std::env::var("POUNCE_DBG_LLM").unwrap_or_default();
+    let tmpl = tmpl.trim();
+    if tmpl.is_empty() {
+        return ("claude".to_string(), vec!["-p".to_string()], true);
+    }
+    let mut parts = tmpl
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let prog = parts.remove(0);
+    let mut substituted = false;
+    for a in parts.iter_mut() {
+        if a.contains("{}") {
+            *a = a.replace("{}", prompt);
+            substituted = true;
+        }
+    }
+    (prog, parts, !substituted)
+}
+
+/// Run the configured LLM command, feeding `prompt` on stdin (unless it
+/// was substituted into an argument), and return its stdout.
+fn run_llm(prompt: &str) -> Result<String, String> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let (prog, args, on_stdin) = llm_command(prompt);
+    let mut cmd = Command::new(&prog);
+    cmd.args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.stdin(if on_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "could not launch `{prog}`: {e} \
+             (set POUNCE_DBG_LLM to an LLM command, e.g. `claude -p` or `llm`)"
+        )
+    })?;
+    if on_stdin {
+        // Write the prompt and close stdin so the child sees EOF.
+        if let Some(mut si) = child.stdin.take() {
+            let _ = si.write_all(prompt.as_bytes());
+        }
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("`{prog}` failed: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "`{prog}` exited with {}: {}",
+            out.status,
+            err.trim()
+        ));
+    }
+    let reply = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if reply.is_empty() {
+        Err(format!("`{prog}` returned no output"))
+    } else {
+        Ok(reply)
+    }
+}
+
 /// Write a JSON artifact to a temp file and open it in an external viewer
 /// (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`). Shared by `viz`.
 fn write_json_and_open(
@@ -1965,6 +2110,29 @@ mod tests {
         // Clear empties the set.
         assert!(d.cmd_stop_at(&["clear"]).ok);
         assert!(d.stop_at.is_empty());
+    }
+
+    #[test]
+    fn llm_command_defaults_and_overrides() {
+        // Default is `claude -p`, prompt on stdin.
+        std::env::remove_var("POUNCE_DBG_LLM");
+        let (prog, args, on_stdin) = llm_command("hi");
+        assert_eq!(prog, "claude");
+        assert_eq!(args, vec!["-p".to_string()]);
+        assert!(on_stdin);
+
+        // `{}` substitution puts the prompt in an arg (no stdin).
+        std::env::set_var("POUNCE_DBG_LLM", "mytool --ask {}");
+        let (prog, args, on_stdin) = llm_command("why");
+        assert_eq!(prog, "mytool");
+        assert_eq!(args, vec!["--ask".to_string(), "why".to_string()]);
+        assert!(!on_stdin);
+
+        // No `{}` ⇒ prompt on stdin.
+        std::env::set_var("POUNCE_DBG_LLM", "llm -m gpt");
+        let (_, _, on_stdin) = llm_command("q");
+        assert!(on_stdin);
+        std::env::remove_var("POUNCE_DBG_LLM");
     }
 
     #[test]

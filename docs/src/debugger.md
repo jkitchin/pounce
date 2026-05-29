@@ -340,6 +340,36 @@ export POUNCE_DBG_VIEWER='python my_plot.py {}'
 
 ---
 
+## Ask Claude about the state
+
+`ask [question]` packages the current paused state — checkpoint,
+residuals, step lengths, dimensions, and the KKT inertia/regularization —
+into a prompt and runs it through **Claude Code** (`claude -p`, headless
+print mode), printing the reply inline. It's AI-assisted debugging
+without leaving the loop:
+
+```text
+pounce-dbg> stop-at kkt
+pounce-dbg> continue
+pounce-dbg> ask why is the dual infeasibility stalling?
+# → Claude's analysis of the state + suggested options to try
+```
+
+With no question it defaults to "explain the current state and suggest
+what to try next." The command is configurable via `$POUNCE_DBG_LLM`
+(default `claude -p`); the prompt is fed on the tool's stdin, or
+substituted into a `{}` placeholder if the template has one:
+
+```sh
+export POUNCE_DBG_LLM='claude -p'          # default
+export POUNCE_DBG_LLM='llm -m claude-opus' # any prompt-on-stdin CLI
+export POUNCE_DBG_LLM='mytool --ask {}'    # prompt as an argument
+```
+
+In JSON mode the reply comes back in the `result` event's `data.reply`.
+
+---
+
 ## Attaching to a run
 
 You don't have to single-step from iteration 0.
@@ -390,6 +420,7 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `save [path]` | dump the iterate to JSON |
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |
+| `ask [question]` | ask Claude Code (`claude -p` / `$POUNCE_DBG_LLM`) about the state |
 | `progress [on/off]` | toggle JSON progress events |
 | `detach` | stop pausing; run to completion |
 | `quit` (`q`, `exit`) | stop the solve |
