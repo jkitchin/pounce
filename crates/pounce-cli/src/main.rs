@@ -105,14 +105,22 @@ pub fn main() -> ExitCode {
             let _ = app.options_mut().read_from_str("print_level 0\n", true);
         }
         let reg = Some(std::rc::Rc::clone(app.registered_options()));
-        app.set_debug_hook(Box::new(pounce_cli::debug_repl::SolverDebugger::new(
-            mode, reg,
-        )));
+        let dbg = if args.debug_on_error {
+            pounce_cli::debug_repl::SolverDebugger::on_error(mode, reg)
+        } else {
+            pounce_cli::debug_repl::SolverDebugger::new(mode, reg)
+        };
+        app.set_debug_hook(Box::new(dbg));
         eprintln!(
-            "pounce: interactive debugger enabled ({}). Type `help` at the prompt.",
+            "pounce: interactive debugger enabled ({}{}). Type `help` at the prompt.",
             match mode {
                 pounce_cli::cli::DebugMode::Repl => "repl",
                 pounce_cli::cli::DebugMode::Json => "json",
+            },
+            if args.debug_on_error {
+                ", on-error"
+            } else {
+                ""
             }
         );
     }

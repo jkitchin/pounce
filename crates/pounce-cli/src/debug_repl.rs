@@ -41,12 +41,15 @@
 //! Every non-kill path ends with a `terminated` event in JSON mode.
 
 use crate::cli::DebugMode;
-use pounce_algorithm::debug::{DebugAction, DebugCtx, DebugHook, BLOCK_NAMES};
+use pounce_algorithm::debug::{
+    Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, BLOCK_NAMES,
+};
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Context, Editor, Helper, Highlighter, Hinter, Validator};
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -54,8 +57,18 @@ use std::rc::Rc;
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
     "help", "info", "print", "step", "continue", "run", "break", "set", "opt", "complete", "viz",
-    "detach", "quit",
+    "save", "goto", "restart", "detach", "quit",
 ];
+
+/// Cap on retained per-iteration snapshots (bounds rewind memory; oldest
+/// are evicted first).
+const SNAPSHOT_CAP: usize = 2000;
+
+/// SolverReturn debug strings that count as a successful solve (so
+/// `--debug-on-error` does *not* pause at the terminal checkpoint).
+fn is_success_status(s: &str) -> bool {
+    matches!(s, "Success" | "StopAtAcceptablePoint")
+}
 
 /// What to do after a command runs.
 enum Flow {
@@ -308,6 +321,16 @@ pub struct SolverDebugger {
     /// Whether the JSON `hello` handshake has been emitted (once per
     /// session, at the first checkpoint).
     hello_sent: bool,
+    /// Pause at iteration checkpoints (false for `--debug-on-error`,
+    /// which runs freely until the terminal checkpoint).
+    pause_iters: bool,
+    /// Pause at the terminal (post-mortem) checkpoint.
+    pause_terminal: bool,
+    /// At the terminal checkpoint, pause only when the solve failed.
+    terminal_only_on_error: bool,
+    /// Per-iteration primal-dual snapshots for `goto`/`restart`, keyed by
+    /// iteration index. Capped at [`SNAPSHOT_CAP`] (oldest evicted).
+    snapshots: BTreeMap<i32, IterateSnapshot>,
     /// rustyline editor for the human REPL on a TTY (history + Tab +
     /// Ctrl-R). `None` for JSON mode or when stdin isn't a terminal, in
     /// which case a plain line reader is used.
@@ -321,6 +344,8 @@ pub struct SolverDebugger {
 }
 
 impl SolverDebugger {
+    /// Fully interactive: pause at the first iteration and at the
+    /// terminal checkpoint.
     pub fn new(mode: DebugMode, reg: Option<Rc<RegisteredOptions>>) -> Self {
         Self {
             mode,
@@ -333,9 +358,24 @@ impl SolverDebugger {
             conds: Vec::new(),
             detached: false,
             hello_sent: false,
+            pause_iters: true,
+            pause_terminal: true,
+            terminal_only_on_error: false,
+            snapshots: BTreeMap::new(),
             editor: None,
             hist_path: None,
             staged: Vec::new(),
+        }
+    }
+
+    /// Post-mortem: run freely, then drop in at the terminal checkpoint
+    /// only if the solve did not succeed (`--debug-on-error`).
+    pub fn on_error(mode: DebugMode, reg: Option<Rc<RegisteredOptions>>) -> Self {
+        Self {
+            step: false,
+            pause_iters: false,
+            terminal_only_on_error: true,
+            ..Self::new(mode, reg)
         }
     }
 
@@ -400,6 +440,12 @@ impl SolverDebugger {
             "opt" | "options" => self.cmd_opt(rest),
             "complete" => self.cmd_complete(rest),
             "viz" | "plot" => self.cmd_viz(rest, ctx),
+            "save" => self.cmd_save(rest, ctx),
+            "goto" | "jump" => self.cmd_goto(rest, ctx),
+            "restart" => match self.snapshots.keys().next().copied() {
+                Some(k) => self.restore_to(k, ctx),
+                None => CmdOut::err("no snapshots captured yet"),
+            },
             "detach" => {
                 self.detached = true;
                 self.step = false;
@@ -430,6 +476,8 @@ impl SolverDebugger {
             "  opt [filter]             list solver options (name/type/default)".into(),
             "  complete <prefix>        completion candidates (commands + options)".into(),
             "  viz <x|s|dx|...|kkt|L>   open the artifact in an external viewer".into(),
+            "  save [path]              write the current iterate + residuals to JSON".into(),
+            "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
         ];
@@ -734,6 +782,84 @@ impl SolverDebugger {
         CmdOut::ok(vec![cands.join(" ")]).with_data(serde_json::json!({"candidates": cands}))
     }
 
+    /// `save [path]` — dump the full current iterate (all blocks +
+    /// search-direction blocks) and residual scalars to a JSON file for
+    /// external analysis. Defaults to a temp path keyed by iteration.
+    fn cmd_save(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+        let iter = ctx.iter();
+        let path = rest
+            .first()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("pounce-dbg-iter{iter}.json")));
+        let collect = |delta: bool| -> serde_json::Map<String, serde_json::Value> {
+            let mut m = serde_json::Map::new();
+            for &b in BLOCK_NAMES.iter() {
+                let v = if delta {
+                    ctx.delta_block(b)
+                } else {
+                    ctx.block(b)
+                };
+                if let Some(v) = v {
+                    if !v.is_empty() {
+                        let key = if delta {
+                            format!("d{b}")
+                        } else {
+                            b.to_string()
+                        };
+                        m.insert(key, serde_json::json!(v));
+                    }
+                }
+            }
+            m
+        };
+        let payload = serde_json::json!({
+            "iter": iter,
+            "mu": ctx.mu(),
+            "objective": ctx.objective(),
+            "inf_pr": ctx.inf_pr(),
+            "inf_du": ctx.inf_du(),
+            "nlp_error": ctx.nlp_error(),
+            "iterate": collect(false),
+            "delta": collect(true),
+        });
+        match std::fs::write(&path, format!("{payload}\n")) {
+            Ok(()) => {
+                let p = path.to_string_lossy().to_string();
+                CmdOut::ok(vec![format!("saved iterate to {p}")])
+                    .with_data(serde_json::json!({"path": p}))
+            }
+            Err(e) => CmdOut::err(format!("save failed: {e}")),
+        }
+    }
+
+    /// `goto <k>` — rewind to a captured iteration.
+    fn cmd_goto(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        match rest.first().and_then(|s| s.parse::<i32>().ok()) {
+            Some(k) => self.restore_to(k, ctx),
+            None => CmdOut::err("usage: goto <iteration>"),
+        }
+    }
+
+    /// Restore the snapshot for iteration `k` (primal-dual state only;
+    /// strategy history is not rewound). Stays paused so the user can
+    /// inspect / re-tune before `continue`/`step`.
+    fn restore_to(&mut self, k: i32, ctx: &mut DebugCtx) -> CmdOut {
+        match self.snapshots.get(&k) {
+            Some(snap) => {
+                ctx.restore(snap);
+                CmdOut::ok(vec![format!(
+                    "rewound to iter {k} (primal-dual only; strategy history not restored). \
+                     `continue`/`step` to resume."
+                )])
+                .with_data(serde_json::json!({"restored_iter": k}))
+            }
+            None => {
+                let have: Vec<i32> = self.snapshots.keys().copied().collect();
+                CmdOut::err(format!("no snapshot for iter {k} (captured: {have:?})"))
+            }
+        }
+    }
+
     fn cmd_viz(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
@@ -778,16 +904,28 @@ impl SolverDebugger {
 
     /// Emit the pause banner / state for the current front end.
     fn emit_pause(&self, ctx: &DebugCtx, reason: Option<&str>) {
+        let terminal = matches!(ctx.checkpoint(), Checkpoint::Terminated);
         match self.mode {
             DebugMode::Repl => {
-                eprintln!(
-                    "\n── pounce-dbg ── iter {}  mu={:.3e}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
-                    ctx.iter(),
-                    ctx.mu(),
-                    ctx.objective(),
-                    ctx.inf_pr(),
-                    ctx.inf_du(),
-                );
+                if terminal {
+                    eprintln!(
+                        "\n── pounce-dbg ── TERMINATED ({})  iter {}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
+                        ctx.status().unwrap_or("?"),
+                        ctx.iter(),
+                        ctx.objective(),
+                        ctx.inf_pr(),
+                        ctx.inf_du(),
+                    );
+                } else {
+                    eprintln!(
+                        "\n── pounce-dbg ── iter {}  mu={:.3e}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
+                        ctx.iter(),
+                        ctx.mu(),
+                        ctx.objective(),
+                        ctx.inf_pr(),
+                        ctx.inf_du(),
+                    );
+                }
                 if let Some(r) = reason {
                     eprintln!("   ↳ hit condition: {r}");
                 }
@@ -802,6 +940,7 @@ impl SolverDebugger {
                 let ev = serde_json::json!({
                     "event": "pause",
                     "checkpoint": ctx.checkpoint().as_str(),
+                    "status": ctx.status(),
                     "iter": ctx.iter(),
                     "mu": ctx.mu(),
                     "objective": ctx.objective(),
@@ -862,8 +1001,11 @@ impl SolverDebugger {
                 "conditional_breakpoints": true,
                 "request_ids": true,
                 "viz": ["block", "delta"],
+                "save": true,
+                "rewind": "primal_dual",
+                "terminal_checkpoint": true,
             },
-            "checkpoints": ["iter_start"],
+            "checkpoints": ["iter_start", "terminated"],
             "commands": COMMANDS,
             "blocks": BLOCK_NAMES,
             "metrics": METRICS,
@@ -944,12 +1086,43 @@ impl DebugHook for SolverDebugger {
             self.emit_hello();
             self.hello_sent = true;
         }
+        // Terminal post-mortem checkpoint: pause if configured (and, for
+        // `--debug-on-error`, only when the solve failed). Snapshots /
+        // rewinding don't apply — the solve is over.
+        if let Checkpoint::Terminated = ctx.checkpoint() {
+            let failed = ctx.status().map(|s| !is_success_status(s)).unwrap_or(false);
+            let should =
+                self.pause_terminal && !self.detached && (!self.terminal_only_on_error || failed);
+            if !should {
+                return DebugAction::Resume;
+            }
+            self.ensure_editor();
+            self.emit_pause(ctx, None);
+            return self.prompt_loop(ctx);
+        }
+
+        // IterStart: capture a snapshot every iteration (cheap — Rc
+        // clone) so `goto` can reach any seen iteration, not only paused
+        // ones. Bound memory by evicting the oldest beyond the cap.
+        if let Some(snap) = ctx.snapshot() {
+            self.snapshots.insert(snap.iter(), snap);
+            while self.snapshots.len() > SNAPSHOT_CAP {
+                let oldest = *self.snapshots.keys().next().unwrap();
+                self.snapshots.remove(&oldest);
+            }
+        }
+
         let iter = ctx.iter();
         // `should_pause` covers step / run / numeric breakpoints (and
         // disarms `run_to`); conditional breakpoints are evaluated
-        // against the live state separately.
-        let num_hit = self.should_pause(iter);
-        let cond_hit = self.matched_condition(ctx);
+        // against the live state separately. `--debug-on-error` keeps
+        // `pause_iters` false so we never stop here.
+        let num_hit = self.pause_iters && self.should_pause(iter);
+        let cond_hit = if self.pause_iters {
+            self.matched_condition(ctx)
+        } else {
+            None
+        };
         if !num_hit && cond_hit.is_none() {
             return DebugAction::Resume;
         }
@@ -957,7 +1130,13 @@ impl DebugHook for SolverDebugger {
         self.step = false;
         self.ensure_editor();
         self.emit_pause(ctx, cond_hit.as_deref());
+        self.prompt_loop(ctx)
+    }
+}
 
+impl SolverDebugger {
+    /// Read and dispatch commands until one resumes or stops the solve.
+    fn prompt_loop(&mut self, ctx: &mut DebugCtx) -> DebugAction {
         loop {
             let line = match self.next_command_line() {
                 Some(l) => l,

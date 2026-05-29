@@ -383,6 +383,24 @@ impl IpoptAlgorithm {
         hook.at_checkpoint(&mut ctx)
     }
 
+    /// Fire the terminal post-mortem checkpoint (if a debugger is set),
+    /// carrying the solve outcome so the hook can decide whether to pause
+    /// at the final iterate. The action is advisory — the loop returns
+    /// `result` regardless — so the hook just gets a last look.
+    fn fire_debug_terminal(&mut self, result: SolverReturn) {
+        use crate::debug::{Checkpoint, DebugCtx};
+        let Some(hook) = self.debug.as_mut() else {
+            return;
+        };
+        let mut ctx = DebugCtx::new(
+            Rc::clone(&self.data),
+            Rc::clone(&self.cq),
+            Checkpoint::Terminated,
+        )
+        .with_status(format!("{result:?}"));
+        let _ = hook.at_checkpoint(&mut ctx);
+    }
+
     /// One iteration body — port of `Optimize()`'s inner loop.
     /// Returns either `Continue` to keep iterating or a terminal
     /// [`SolverReturn`] mirroring upstream's exception → return-code
@@ -1373,9 +1391,9 @@ impl IpoptAlgorithm {
             return SolverReturn::UserRequestedStop;
         }
 
-        loop {
+        let result = loop {
             match self.iterate() {
-                IterateOutcome::Terminate(ret) => return ret,
+                IterateOutcome::Terminate(ret) => break ret,
                 IterateOutcome::Continue => {
                     // Source the local counter from `data.iter_count`
                     // each pass so a pre-seeded counter (e.g. the inner
@@ -1390,7 +1408,7 @@ impl IpoptAlgorithm {
                     let mut iter_count: Index = self.data.borrow().iter_count;
                     iter_count += 1;
                     if iter_count >= self.max_iter {
-                        return SolverReturn::MaxiterExceeded;
+                        break SolverReturn::MaxiterExceeded;
                     }
                     self.data.borrow_mut().iter_count = iter_count;
                     // Keep the diagnostics counter in lock-step with
@@ -1415,16 +1433,24 @@ impl IpoptAlgorithm {
                     // `GetIpoptCurrent*` family) see live state for the
                     // duration of the user callback.
                     if !self.fire_intermediate() {
-                        return SolverReturn::UserRequestedStop;
+                        break SolverReturn::UserRequestedStop;
                     }
                     if self.fire_debug(crate::debug::Checkpoint::IterStart)
                         == crate::debug::DebugAction::Stop
                     {
-                        return SolverReturn::UserRequestedStop;
+                        break SolverReturn::UserRequestedStop;
                     }
                 }
             }
+        };
+
+        // Terminal post-mortem checkpoint. Skipped when the user already
+        // asked to stop (they were just at a prompt); otherwise the
+        // debugger gets a last look at the final/failing iterate.
+        if !matches!(result, SolverReturn::UserRequestedStop) {
+            self.fire_debug_terminal(result);
         }
+        result
     }
 }
 

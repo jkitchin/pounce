@@ -34,12 +34,18 @@ pub enum Checkpoint {
     /// multipliers, and μ all reflect the *accepted* point from the
     /// previous iteration.
     IterStart,
+    /// The solve has finished (or is about to): fired once before
+    /// `optimize` returns, at the final iterate, carrying the outcome
+    /// via [`DebugCtx::status`]. Lets a debugger drop in for a
+    /// post-mortem at the failing (or final) point.
+    Terminated,
 }
 
 impl Checkpoint {
     pub fn as_str(self) -> &'static str {
         match self {
             Checkpoint::IterStart => "iter_start",
+            Checkpoint::Terminated => "terminated",
         }
     }
 }
@@ -68,6 +74,29 @@ pub struct DebugCtx {
     /// the CQ-derived scalar accessors report `NaN`.
     cq: Option<IpoptCqHandle>,
     cp: Checkpoint,
+    /// Solve outcome, set only for the [`Checkpoint::Terminated`] fire.
+    status: Option<String>,
+}
+
+/// A cheap, correct snapshot of the primal-dual state at one step.
+///
+/// Accepted iterates are immutable frozen [`IteratesVector`]s, so this is
+/// just an `Rc` clone plus a few scalars. It captures the iterate, μ, τ,
+/// and the iteration index — **not** strategy history (filter, adaptive-μ
+/// oracle, quasi-Newton memory), so restoring and continuing is an
+/// approximate "resume from here", not a bit-exact rewind.
+#[derive(Clone)]
+pub struct IterateSnapshot {
+    pub iter: i32,
+    pub mu: Number,
+    pub tau: Number,
+    curr: crate::iterates_vector::IteratesVector,
+}
+
+impl IterateSnapshot {
+    pub fn iter(&self) -> i32 {
+        self.iter
+    }
 }
 
 impl DebugCtx {
@@ -76,13 +105,54 @@ impl DebugCtx {
             data,
             cq: Some(cq),
             cp,
+            status: None,
         }
+    }
+
+    /// Attach a solve-outcome string (used for the terminal checkpoint).
+    pub fn with_status(mut self, status: String) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Solve outcome, present only at [`Checkpoint::Terminated`].
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
     }
 
     /// Test-only constructor without a CQ. CQ-derived scalars are `NaN`.
     #[cfg(test)]
     fn new_data_only(data: IpoptDataHandle, cp: Checkpoint) -> Self {
-        Self { data, cq: None, cp }
+        Self {
+            data,
+            cq: None,
+            cp,
+            status: None,
+        }
+    }
+
+    /// Capture the current primal-dual state for later [`Self::restore`].
+    /// `None` before the iterate is set.
+    pub fn snapshot(&self) -> Option<IterateSnapshot> {
+        let d = self.data.borrow();
+        let curr = d.curr.as_ref()?.clone();
+        Some(IterateSnapshot {
+            iter: d.iter_count,
+            mu: d.curr_mu,
+            tau: d.curr_tau,
+            curr,
+        })
+    }
+
+    /// Restore a previously captured snapshot: rewinds the iterate, μ, τ,
+    /// and iteration index so the next `iterate()` resumes from that
+    /// point. Strategy history is not rewound (see [`IterateSnapshot`]).
+    pub fn restore(&mut self, snap: &IterateSnapshot) {
+        let mut d = self.data.borrow_mut();
+        d.set_curr(snap.curr.clone());
+        d.curr_mu = snap.mu;
+        d.curr_tau = snap.tau;
+        d.iter_count = snap.iter;
     }
 
     fn cq_scalar(
@@ -333,6 +403,23 @@ mod tests {
         assert!(ctx.set_block("x", &[1.0, 2.0, 3.0]).is_err());
         assert!(ctx.set_block("x", &[3.0, 4.0]).is_ok());
         assert_eq!(ctx.block("x"), Some(vec![3.0, 4.0]));
+    }
+
+    #[test]
+    fn snapshot_then_restore_round_trips_iterate_and_mu() {
+        let mut ctx = ctx_with(&[1.0, 2.0]);
+        let snap = ctx.snapshot().expect("snapshot");
+        assert_eq!(snap.iter(), 0);
+        // Mutate away from the snapshot.
+        ctx.set_component("x", 0, 99.0).unwrap();
+        ctx.set_mu(0.5).unwrap();
+        assert_eq!(ctx.block("x"), Some(vec![99.0, 2.0]));
+        assert_eq!(ctx.mu(), 0.5);
+        // Restore brings back the captured state.
+        ctx.restore(&snap);
+        assert_eq!(ctx.block("x"), Some(vec![1.0, 2.0]));
+        assert_eq!(ctx.mu(), 0.1);
+        assert_eq!(ctx.iter(), 0);
     }
 
     #[test]

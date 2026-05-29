@@ -48,6 +48,22 @@ program.
   context-sensitive Tab completion — command verbs, block names, metric
   names (after `break if`), and option names (after `set opt`/`opt`).
   Piped input and `--debug-json` fall back to a plain line reader.
+- **Drop in on failure (`--debug-on-error`):** run freely and pause only
+  at a new terminal checkpoint, and only if the solve didn't succeed —
+  a post-mortem at the failing iterate. The terminal checkpoint also
+  fires in normal `--debug` (final-point inspect); JSON `pause` events
+  gain `checkpoint:"terminated"` + `status`.
+- **Soft rewind (`goto <k>` / `restart`):** the debugger snapshots the
+  primal-dual state (iterate + μ + τ) every iteration (cheap — the
+  iterate is an immutable `Rc`; capped at 2000, oldest evicted), and
+  `goto`/`restart` rewinds to a captured iteration so you can re-tune and
+  resume. Primal-dual only — strategy history (filter, adaptive-μ,
+  quasi-Newton memory) is not restored, so it's "resume from here," not a
+  bit-exact replay.
+- **Save artifacts (`save [path]`):** write the current iterate (all
+  primal/dual blocks + the search-direction blocks) and residual scalars
+  to a JSON file for external analysis; defaults to a temp path keyed by
+  iteration.
 - **Visualization:** `viz <block|dx>` writes the vector and opens it in
   an external viewer (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`).
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*

@@ -83,6 +83,11 @@ pub struct Args {
     /// front end; `Json` speaks newline-delimited JSON so an LLM agent
     /// (or any program) can drive the loop. `None` disables it.
     pub debug: Option<DebugMode>,
+    /// `--debug-on-error` — don't pause every iteration; instead run
+    /// freely and only drop into the debugger at the terminal checkpoint
+    /// *if the solve did not succeed*, for a post-mortem at the failing
+    /// iterate. Implies `--debug` (REPL) when no `--debug*` mode is given.
+    pub debug_on_error: bool,
 }
 
 /// Front end for the interactive solver debugger (`--debug*`).
@@ -147,6 +152,10 @@ Options:
   --debug-json              same loop, but speak newline-delimited JSON on
                             stdin/stdout so an LLM agent or program can
                             drive it (one JSON state object per pause).
+  --debug-on-error          don't pause every iteration; run freely and
+                            drop into the debugger only if the solve fails,
+                            for a post-mortem at the final iterate. Implies
+                            --debug when no --debug* mode is given.
   --list-problems           print available built-in problems and exit
   -AMPL                     AMPL solver-protocol mode (for Pyomo / AMPL
                             drivers): convey termination via the .sol
@@ -202,6 +211,7 @@ Options:
         let mut compute_red_hessian = false;
         let mut rh_eigendecomp = false;
         let mut debug: Option<DebugMode> = None;
+        let mut debug_on_error = false;
 
         let mut it = argv.into_iter().skip(1);
         while let Some(arg) = it.next() {
@@ -283,6 +293,7 @@ Options:
                 }
                 "--debug" => debug = Some(DebugMode::Repl),
                 "--debug-json" => debug = Some(DebugMode::Json),
+                "--debug-on-error" => debug_on_error = true,
                 "--compute-red-hessian" => compute_red_hessian = true,
                 "--rh-eigendecomp" => {
                     rh_eigendecomp = true;
@@ -314,6 +325,11 @@ Options:
             std::process::exit(0);
         }
 
+        // `--debug-on-error` without an explicit mode implies the REPL.
+        if debug_on_error && debug.is_none() {
+            debug = Some(DebugMode::Repl);
+        }
+
         if !help && !version && !about {
             let problem = problem.ok_or_else(|| {
                 "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string()
@@ -338,6 +354,7 @@ Options:
                 compute_red_hessian,
                 rh_eigendecomp,
                 debug,
+                debug_on_error,
             });
         }
 
@@ -361,6 +378,7 @@ Options:
             compute_red_hessian,
             rh_eigendecomp,
             debug,
+            debug_on_error,
         })
     }
 }
