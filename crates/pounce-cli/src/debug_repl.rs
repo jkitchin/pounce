@@ -60,6 +60,17 @@ const COMMANDS: &[&str] = &[
     "complete", "viz", "save", "goto", "restart", "resolve", "progress", "detach", "quit",
 ];
 
+/// Events a user can `break on` (advertised in `hello.events`). Each is
+/// derived from observable state at the relevant checkpoint.
+const EVENTS: &[&str] = &[
+    "resto_entered",
+    "resto_exited",
+    "regularized",
+    "tiny_step",
+    "ls_rejected",
+    "nan",
+];
+
 /// Checkpoint names a user can `stop-at` (matches `Checkpoint::as_str`).
 const CHECKPOINTS: &[&str] = &[
     "iter_start",
@@ -249,20 +260,18 @@ impl CmpOp {
     }
 }
 
-/// A conditional breakpoint: pause when `metric op rhs` holds.
+/// A single comparison `metric op rhs`.
 #[derive(Clone, Debug)]
-struct Condition {
+struct Atom {
     metric: Metric,
     op: CmpOp,
     rhs: f64,
-    /// Normalized source text, e.g. `inf_pr<1e-6`, for display / dedup.
-    raw: String,
 }
 
-impl Condition {
-    /// Parse a single `metric<op>value` expression (whitespace already
-    /// stripped by the caller). Operators: `<`, `<=`, `>`, `>=`, `==`.
-    fn parse(expr: &str) -> Result<Condition, String> {
+impl Atom {
+    /// Parse one `metric<op>value` (whitespace already stripped by the
+    /// caller). Operators: `<`, `<=`, `>`, `>=`, `==`.
+    fn parse(expr: &str) -> Result<Atom, String> {
         let expr = expr.trim();
         // Longest operators first so `<=` isn't truncated to `<`.
         let (op, pos, oplen) = ["<=", ">=", "==", "<", ">"]
@@ -284,16 +293,93 @@ impl Condition {
             "==" => CmpOp::Eq,
             _ => unreachable!(),
         };
-        Ok(Condition {
+        Ok(Atom {
             metric,
             op: cmp,
             rhs,
-            raw: format!("{metric_s}{op}{rhs_s}"),
         })
     }
 
     fn holds(&self, ctx: &DebugCtx) -> bool {
         self.op.eval(self.metric.eval(ctx), self.rhs)
+    }
+}
+
+/// Boolean join between atoms (#72 §4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Join {
+    And,
+    Or,
+}
+
+/// A conditional breakpoint: one or more [`Atom`]s joined by `&&`/`||`,
+/// evaluated strictly left-to-right (no operator precedence — matches the
+/// issue's minimal-viable spec; parentheses are stripped). Pause when the
+/// chain evaluates true.
+#[derive(Clone, Debug)]
+struct Condition {
+    first: Atom,
+    rest: Vec<(Join, Atom)>,
+    /// Normalized source text, for display / dedup.
+    raw: String,
+}
+
+impl Condition {
+    fn parse(expr: &str) -> Result<Condition, String> {
+        // Parentheses are advisory only (no precedence), so drop them.
+        let cleaned: String = expr.chars().filter(|c| !matches!(c, '(' | ')')).collect();
+        // Split into atoms, remembering the joiner before each.
+        let mut atoms: Vec<(Option<Join>, &str)> = Vec::new();
+        let bytes = cleaned.as_bytes();
+        let mut start = 0usize;
+        let mut i = 0usize;
+        let mut pending: Option<Join> = None;
+        while i + 1 < bytes.len() {
+            let two = &cleaned[i..i + 2];
+            let join = match two {
+                "&&" => Some(Join::And),
+                "||" => Some(Join::Or),
+                _ => None,
+            };
+            if let Some(j) = join {
+                atoms.push((pending, &cleaned[start..i]));
+                pending = Some(j);
+                i += 2;
+                start = i;
+            } else {
+                i += 1;
+            }
+        }
+        atoms.push((pending, &cleaned[start..]));
+
+        let mut iter = atoms.into_iter();
+        let Some((_, first_s)) = iter.next() else {
+            return Err("empty condition".into());
+        };
+        let first = Atom::parse(first_s)?;
+        let mut rest = Vec::new();
+        for (join, s) in iter {
+            let join = join.ok_or("malformed compound condition (dangling &&/||)")?;
+            rest.push((join, Atom::parse(s)?));
+        }
+        // The cleaned source (whitespace/parens removed) is the display form.
+        Ok(Condition {
+            first,
+            rest,
+            raw: cleaned,
+        })
+    }
+
+    fn holds(&self, ctx: &DebugCtx) -> bool {
+        let mut acc = self.first.holds(ctx);
+        for (join, atom) in &self.rest {
+            let v = atom.holds(ctx);
+            acc = match join {
+                Join::And => acc && v,
+                Join::Or => acc || v,
+            };
+        }
+        acc
     }
 }
 
@@ -329,7 +415,8 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["set", "opt"] | ["opt"] | ["options"] => opt_names(),
         ["stop-at"] | ["stopat"] => starts(CHECKPOINTS),
         ["break", "if"] | ["b", "if"] => starts(METRICS),
-        ["break"] | ["b"] => starts(&["if", "clear", "del"]),
+        ["break", "on"] | ["b", "on"] => starts(EVENTS),
+        ["break"] | ["b"] => starts(&["if", "on", "clear", "del"]),
         ["print"] | ["p"] => {
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&["mu", "obj", "inf_pr", "inf_du", "err", "iter"]));
@@ -412,6 +499,8 @@ pub struct SolverDebugger {
     sub_step: bool,
     /// Checkpoint kinds (by name) to always pause at (`stop-at`).
     stop_at: HashSet<&'static str>,
+    /// Events to break on (`break on <event>`), from [`EVENTS`].
+    break_events: HashSet<&'static str>,
     /// Per-iteration primal-dual snapshots for `goto`/`restart`, keyed by
     /// iteration index. Capped at [`SNAPSHOT_CAP`] (oldest evicted).
     snapshots: BTreeMap<i32, IterateSnapshot>,
@@ -452,6 +541,7 @@ impl SolverDebugger {
             emit_progress: true,
             sub_step: false,
             stop_at: HashSet::new(),
+            break_events: HashSet::new(),
             snapshots: BTreeMap::new(),
             restart: None,
             editor: None,
@@ -522,6 +612,38 @@ impl SolverDebugger {
             .iter()
             .find(|c| c.holds(ctx))
             .map(|c| c.raw.clone())
+    }
+
+    /// First armed event that fires at the current checkpoint/state, if
+    /// any. Events are derived from observable state, so they're evaluated
+    /// at the checkpoint where the relevant quantity is meaningful.
+    fn matched_event(&self, ctx: &DebugCtx) -> Option<&'static str> {
+        if self.detached || self.break_events.is_empty() {
+            return None;
+        }
+        let cp = ctx.checkpoint();
+        // Tiny-step threshold mirrors the solver's own scale.
+        let tiny = 1e-10;
+        EVENTS.iter().copied().find(|&e| {
+            self.break_events.contains(e)
+                && match e {
+                    "resto_entered" => cp == Checkpoint::PreRestoration,
+                    "resto_exited" => cp == Checkpoint::PostRestoration,
+                    "regularized" => {
+                        cp == Checkpoint::AfterSearchDirection && ctx.regularization() > 0.0
+                    }
+                    "tiny_step" => {
+                        cp == Checkpoint::AfterSearchDirection
+                            && ctx
+                                .delta_block("x")
+                                .map(|v| v.iter().fold(0.0_f64, |m, &x| m.max(x.abs())) < tiny)
+                                .unwrap_or(false)
+                    }
+                    "ls_rejected" => cp == Checkpoint::AfterStep && ctx.ls_count() > 1,
+                    "nan" => !ctx.nlp_error().is_finite() || !ctx.objective().is_finite(),
+                    _ => false,
+                }
+        })
     }
 
     // ---- command engine -----------------------------------------------
@@ -613,6 +735,8 @@ impl SolverDebugger {
             "  break | b [N|clear|del N] set/list/clear breakpoints".into(),
             "  break if <m><op><v>      conditional bp; m in mu|inf_pr|inf_du|obj|err|iter,".into(),
             "                           op in < <= > >= ==  (e.g. break if inf_pr<1e-6)".into(),
+            "  break on <event>         event bp: resto_entered|resto_exited|regularized|".into(),
+            "                           tiny_step|ls_rejected|nan".into(),
             "  set mu <v>               overwrite the barrier parameter".into(),
             "  set <blk>[<i>] <v>       overwrite one component (e.g. set x[2] 1.5)".into(),
             "  set <blk> <v0,v1,...>    overwrite a whole block".into(),
@@ -732,25 +856,48 @@ impl SolverDebugger {
                 Err(e) => CmdOut::err(e),
             };
         }
+        // Event breakpoint: `break on <event>` (#72 §3).
+        if rest.first().copied() == Some("on") {
+            let Some(&name) = rest.get(1) else {
+                return CmdOut::err(format!("usage: break on <event>  (one of {EVENTS:?})"));
+            };
+            let Some(&canon) = EVENTS.iter().find(|&&e| e == name) else {
+                return CmdOut::err(format!("unknown event `{name}` (one of {EVENTS:?})"));
+            };
+            self.break_events.insert(canon);
+            return CmdOut::ok(vec![format!("break on event `{canon}`")])
+                .with_data(serde_json::json!({"event": canon}));
+        }
         match rest {
             [] => {
                 let mut bs = self.breaks.clone();
                 bs.sort_unstable();
                 let conds: Vec<String> = self.conds.iter().map(|c| c.raw.clone()).collect();
+                let mut events: Vec<&str> = self.break_events.iter().copied().collect();
+                events.sort_unstable();
                 let mut lines = vec![format!("breakpoints: {bs:?}")];
                 if !conds.is_empty() {
                     lines.push(format!("conditions: {}", conds.join(", ")));
                 }
-                CmdOut::ok(lines)
-                    .with_data(serde_json::json!({"breakpoints": bs, "conditions": conds}))
+                if !events.is_empty() {
+                    lines.push(format!("events: {}", events.join(", ")));
+                }
+                CmdOut::ok(lines).with_data(
+                    serde_json::json!({"breakpoints": bs, "conditions": conds, "events": events}),
+                )
             }
             ["clear", "cond"] | ["clear", "conditions"] => {
                 self.conds.clear();
                 CmdOut::ok(vec!["cleared conditional breakpoints".into()])
             }
+            ["clear", "events"] => {
+                self.break_events.clear();
+                CmdOut::ok(vec!["cleared event breakpoints".into()])
+            }
             ["clear"] => {
                 self.breaks.clear();
                 self.conds.clear();
+                self.break_events.clear();
                 CmdOut::ok(vec!["cleared all breakpoints".into()])
             }
             ["del", n] | ["delete", n] => match n.parse::<i32>() {
@@ -1222,8 +1369,7 @@ impl SolverDebugger {
                 "inspect": true,
                 "mutate_iterate": true,
                 "mutate_mu": true,
-                // "single" today; becomes "compound" once &&/|| land (#72 §4).
-                "conditional_breakpoints": "single",
+                "conditional_breakpoints": "compound",
                 "request_ids": true,
                 "viz": ["block", "delta"],
                 "save": true,
@@ -1236,6 +1382,7 @@ impl SolverDebugger {
                 "async_pause": if self.interruptible { "checkpoint" } else { "none" },
             },
             "checkpoints": CHECKPOINTS,
+            "events": EVENTS,
             "commands": COMMANDS,
             "blocks": BLOCK_NAMES,
             "metrics": METRICS,
@@ -1354,6 +1501,14 @@ impl DebugHook for SolverDebugger {
         // Ctrl-C only at the iteration top.
         let mut reason: Option<String> = None;
         let mut pause = self.sub_step || self.stop_at.contains(cp.as_str());
+
+        // Event breakpoints fire at whatever checkpoint makes them
+        // observable (e.g. `regularized` at after_search_dir), so check
+        // them at every checkpoint, not just iter_start.
+        if let Some(ev) = self.matched_event(ctx) {
+            pause = true;
+            reason = Some(format!("event: {ev}"));
+        }
 
         if is_iter_start {
             if self.interruptible && interrupt::take() {
@@ -1620,29 +1775,46 @@ mod tests {
     }
 
     #[test]
-    fn condition_parses_metric_op_threshold() {
-        let c = Condition::parse("mu<1e-4").unwrap();
-        assert_eq!(c.metric, Metric::Mu);
-        assert_eq!(c.op, CmpOp::Lt);
-        assert_eq!(c.rhs, 1e-4);
+    fn atom_parses_metric_op_threshold() {
+        let a = Atom::parse("mu<1e-4").unwrap();
+        assert_eq!(a.metric, Metric::Mu);
+        assert_eq!(a.op, CmpOp::Lt);
+        assert_eq!(a.rhs, 1e-4);
 
-        // `<=` must not be truncated to `<`, and spaces are tolerated by
-        // the caller (tokens are concatenated before parse).
-        let c = Condition::parse("inf_pr<=1e-6").unwrap();
-        assert_eq!(c.metric, Metric::InfPr);
-        assert_eq!(c.op, CmpOp::Le);
+        // `<=` must not be truncated to `<`.
+        let a = Atom::parse("inf_pr<=1e-6").unwrap();
+        assert_eq!(a.metric, Metric::InfPr);
+        assert_eq!(a.op, CmpOp::Le);
 
-        let c = Condition::parse("iter==10").unwrap();
-        assert_eq!(c.metric, Metric::Iter);
-        assert_eq!(c.op, CmpOp::Eq);
-        assert_eq!(c.rhs, 10.0);
+        let a = Atom::parse("iter==10").unwrap();
+        assert_eq!(a.metric, Metric::Iter);
+        assert_eq!(a.op, CmpOp::Eq);
+        assert_eq!(a.rhs, 10.0);
     }
 
     #[test]
-    fn condition_parse_rejects_garbage() {
-        assert!(Condition::parse("inf_pr 1e-6").is_err()); // no operator
-        assert!(Condition::parse("bogus<1").is_err()); // unknown metric
-        assert!(Condition::parse("mu<abc").is_err()); // bad threshold
+    fn atom_parse_rejects_garbage() {
+        assert!(Atom::parse("inf_pr 1e-6").is_err()); // no operator
+        assert!(Atom::parse("bogus<1").is_err()); // unknown metric
+        assert!(Atom::parse("mu<abc").is_err()); // bad threshold
+    }
+
+    #[test]
+    fn compound_condition_parses_and_evaluates_left_to_right() {
+        // Chain length + joins.
+        let c = Condition::parse("mu<1e-4&&inf_pr>1e-3").unwrap();
+        assert_eq!(c.rest.len(), 1);
+        assert_eq!(c.rest[0].0, Join::And);
+
+        // Parens are stripped; `||` recognized.
+        let c = Condition::parse("iter>10&&(inf_du>1e-2||obj<0)").unwrap();
+        assert_eq!(c.rest.len(), 2);
+        assert_eq!(c.rest[0].0, Join::And);
+        assert_eq!(c.rest[1].0, Join::Or);
+        assert_eq!(c.raw, "iter>10&&inf_du>1e-2||obj<0");
+
+        // A bad atom anywhere fails the whole parse.
+        assert!(Condition::parse("mu<1e-4&&bogus>0").is_err());
     }
 
     #[test]

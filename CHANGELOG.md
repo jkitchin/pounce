@@ -65,14 +65,24 @@ program.
   `step sub` is accepted as a spelling of `stepi`, and `hello` advertises
   `async_pause` (SIGINT → pause at next checkpoint) and the
   `conditional_breakpoints` level.
-- **Sub-iteration checkpoints:** the main loop now fires the debugger at
-  `after_mu`, `after_search_dir` (the Newton step `δ` + regularization
-  are available), and `after_step` (α + the new iterate), in addition to
-  `iter_start` and `terminated`. `stepi`/`si` advances to the next
-  checkpoint of any kind (walk through an iteration's phases);
-  `stop-at <checkpoint>` always pauses there. The pause banner / JSON
-  `pause` event report which checkpoint fired. Zero overhead when no
-  debugger is attached.
+- **Sub-iteration checkpoints (pounce#72 §2):** the main loop now fires
+  the debugger at `after_mu`, `after_search_dir` (the Newton step `δ` +
+  regularization are available), `after_step` (α + the new iterate), and
+  `pre_restoration_entry` / `post_restoration_exit` — in addition to
+  `iter_start` and `terminated`. `stepi`/`si`/`step sub` advances to the
+  next checkpoint of any kind; `stop-at <checkpoint>` always pauses there
+  (aliases: `mu`, `kkt`, `step`, `resto`). The pause banner / JSON `pause`
+  event report which checkpoint fired. Zero overhead when no debugger is
+  attached.
+- **Event breakpoints (pounce#72 §3):** `break on <event>` pauses on a
+  derived solver event — `resto_entered`, `resto_exited`, `regularized`
+  (inertia correction), `tiny_step`, `ls_rejected`, `nan` — surfacing as
+  `reason:"event: …"`. Advertised in `hello.events`.
+- **Compound conditional breakpoints (pounce#72 §4):** `break if` now
+  accepts `&&` / `||` between comparisons, evaluated left-to-right with no
+  precedence (parentheses are stripped). E.g.
+  `break if mu<1e-4 && inf_pr>1e-3`. `hello.capabilities.conditional_
+  breakpoints` is now `"compound"`.
 - **Soft rewind (`goto <k>` / `restart`):** the debugger snapshots the
   primal-dual state (iterate + μ + τ) every iteration (cheap — the
   iterate is an immutable `Rc`; capped at 2000, oldest evicted), and
