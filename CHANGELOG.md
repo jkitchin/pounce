@@ -138,6 +138,11 @@ program.
   per line; `#`/`//` comments), and `--debug-script <file>` runs one at
   the first pause — reproducible debug sessions (set breakpoints +
   `continue`).
+- **`diff`:** show what changed in the iterate since the previous captured
+  iteration — per-block max |Δ| (and where) plus Δμ.
+- **Context-sensitive completion:** the `complete` command (and TTY Tab)
+  now completes option *values* after `set opt <name>` (from the
+  registry's valid set), not just option names.
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
   JSON channel — the banner, problem-stats block, and final summary are
   routed to stderr — so a GUI / IDE front end can consume it line by

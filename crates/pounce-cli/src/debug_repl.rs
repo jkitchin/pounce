@@ -57,8 +57,8 @@ use std::rc::Rc;
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
     "help", "info", "print", "step", "stepi", "continue", "run", "break", "stop-at", "set", "opt",
-    "complete", "viz", "save", "goto", "restart", "resolve", "ask", "watch", "source", "progress",
-    "detach", "quit",
+    "complete", "viz", "save", "goto", "restart", "resolve", "ask", "watch", "diff", "source",
+    "progress", "detach", "quit",
 ];
 
 /// Events a user can `break on` (advertised in `hello.events`). Each is
@@ -415,6 +415,17 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             v
         }
         ["set", "opt"] | ["opt"] | ["options"] => opt_names(),
+        // After `set opt <name>`, complete the option's valid values.
+        ["set", "opt", name] => reg
+            .and_then(|r| r.get_option(name))
+            .map(|o| {
+                o.valid_strings
+                    .iter()
+                    .map(|e| e.value.clone())
+                    .filter(|v| v.starts_with(word) && v != "*")
+                    .collect()
+            })
+            .unwrap_or_default(),
         ["stop-at"] | ["stopat"] => starts(CHECKPOINTS),
         ["break", "if"] | ["b", "if"] => starts(METRICS),
         ["break", "on"] | ["b", "on"] => starts(EVENTS),
@@ -733,6 +744,7 @@ impl SolverDebugger {
             "resolve" | "re-solve" => self.cmd_resolve(ctx),
             "ask" | "explain" | "claude" => self.cmd_ask(rest, ctx),
             "watch" | "display" => self.cmd_watch(rest),
+            "diff" => self.cmd_diff(ctx),
             "source" => self.cmd_source(rest, ctx),
             "detach" => {
                 self.detached = true;
@@ -777,6 +789,7 @@ impl SolverDebugger {
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
             "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
             "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
+            "  diff                     what changed in the iterate since the last iteration".into(),
             "  source <file>            run debugger commands from a file".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
@@ -1167,28 +1180,16 @@ impl SolverDebugger {
         CmdOut::ok(lines).with_data(serde_json::json!({"options": data}))
     }
 
+    /// `complete <line…>` — context-sensitive completion candidates for
+    /// the last token, using the same engine as TTY Tab. The preceding
+    /// tokens form the context (so `complete set opt mu` completes option
+    /// names, `complete set opt mu_strategy a` completes valid values).
     fn cmd_complete(&self, rest: &[&str]) -> CmdOut {
-        let prefix = rest.first().copied().unwrap_or("");
-        let mut cands: Vec<String> = COMMANDS
-            .iter()
-            .filter(|c| c.starts_with(prefix))
-            .map(|c| c.to_string())
-            .collect();
-        // Block names and option names also complete (handy after `set`).
-        for b in BLOCK_NAMES {
-            if b.starts_with(prefix) {
-                cands.push(b.to_string());
-            }
-        }
-        if let Some(reg) = self.reg.as_ref() {
-            if prefix.len() >= 2 {
-                for o in reg.registered_options_in_order() {
-                    if o.name.starts_with(prefix) {
-                        cands.push(o.name.clone());
-                    }
-                }
-            }
-        }
+        let (before, word) = match rest.split_last() {
+            Some((w, pre)) => (pre.join(" "), *w),
+            None => (String::new(), ""),
+        };
+        let mut cands = completion_candidates(self.reg.as_deref(), &before, word);
         cands.sort();
         cands.dedup();
         CmdOut::ok(vec![cands.join(" ")]).with_data(serde_json::json!({"candidates": cands}))
@@ -1339,6 +1340,52 @@ impl SolverDebugger {
             }
             _ => CmdOut::err("usage: watch [<target> | clear | del <target>]"),
         }
+    }
+
+    /// `diff` — what changed in the iterate since the previous captured
+    /// iteration: per-block max |Δ| (and where), plus Δμ.
+    fn cmd_diff(&self, ctx: &DebugCtx) -> CmdOut {
+        let iter = ctx.iter();
+        let Some((&piter, prev)) = self.snapshots.range(..iter).next_back() else {
+            return CmdOut::err("no previous iterate to diff against");
+        };
+        let mut lines = vec![format!("Δ since iter {piter}:")];
+        let dmu = ctx.mu() - prev.mu();
+        lines.push(format!("  mu  = {:.6e}  (Δ {:+.3e})", ctx.mu(), dmu));
+        let mut blocks = serde_json::Map::new();
+        for b in BLOCK_NAMES {
+            let (Some(cur), Some(old)) = (ctx.block(b), prev.block(b)) else {
+                continue;
+            };
+            if cur.is_empty() || cur.len() != old.len() {
+                continue;
+            }
+            let mut amax = 0.0_f64;
+            let mut imax = 0usize;
+            for (i, (c, o)) in cur.iter().zip(&old).enumerate() {
+                let d = (c - o).abs();
+                if d > amax {
+                    amax = d;
+                    imax = i;
+                }
+            }
+            if amax > 0.0 {
+                lines.push(format!(
+                    "  {b}: max|Δ|={amax:.3e} at [{imax}]  ({:.4e} → {:.4e})",
+                    old[imax], cur[imax]
+                ));
+                blocks.insert(
+                    b.to_string(),
+                    serde_json::json!({"max_abs_change": amax, "argmax": imax}),
+                );
+            }
+        }
+        if lines.len() == 2 {
+            lines.push("  (no change)".into());
+        }
+        CmdOut::ok(lines).with_data(
+            serde_json::json!({"from_iter": piter, "to_iter": iter, "dmu": dmu, "blocks": blocks}),
+        )
     }
 
     /// `source <file>` — run debugger commands from a file (one per line;

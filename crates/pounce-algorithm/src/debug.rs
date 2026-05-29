@@ -158,6 +158,16 @@ impl IterateSnapshot {
     pub fn iter(&self) -> i32 {
         self.iter
     }
+
+    pub fn mu(&self) -> Number {
+        self.mu
+    }
+
+    /// Read a named block of the snapshotted iterate as a flat `f64` vec.
+    pub fn block(&self, name: &str) -> Option<Vec<Number>> {
+        let v = block_ref(&self.curr, name)?;
+        Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
+    }
 }
 
 impl DebugCtx {
