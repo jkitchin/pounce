@@ -475,11 +475,51 @@ Plumbing:
   the impure host call.
 
 The standalone `pounce.jax.solve` / `vmap_solve_parallel` /
-`solve_with_warm` keep the dense backward for now; the same wiring
-will land for them once the (A) stacked block-diagonal batched
-solve does.
+`solve_with_warm` keep the dense backward for now.
 
 [k_aug]: https://github.com/dthierry/k_aug
+
+### Added — `JaxProblem.batched_solve` stacked block-diagonal solve (pounce#76 (A))
+
+`JaxProblem.batched_solve(p_batch, x0)` runs one IPM solve over a
+single NLP whose variables are `[x^(1); ...; x^(B)]`, constraints are
+`concat(g(x^(k), p^(k)))`, and objective is `Σ_k f(x^(k), p^(k))`.
+The Jacobian and Lagrangian Hessian are block-diagonal (no
+cross-block coupling, since each block-`k` constraint touches only
+the block-`k` slice of `X` and the objective is a pure sum), so the
+IPM sees one big sparse problem but spends linear-system work
+proportional to `B × (per-block factor cost)`.
+
+Complementary to the existing batched surfaces:
+
+* `vmap_solve` — sequential `jax.lax.map`, one solve per iterate.
+* `vmap_solve_parallel` — B independent IPMs in a
+  `ThreadPoolExecutor` (GIL released per solve). Wins when batch
+  elements have very different convergence behaviour.
+* `batched_solve` — one stacked IPM. Wins when blocks have similar
+  convergence behaviour (shared barrier homotopy and shared
+  symbolic factorisation amortise across the batch) and when B is
+  large enough that the per-call Python overhead of B fwd
+  dispatches becomes visible — one Rust crossing instead of B.
+
+`custom_vjp`-wrapped: `jax.grad` / `jax.jacobian` through
+`batched_solve` work end-to-end. The bwd vmaps the per-element
+dense KKT back-solve, which is exact because the block-diagonal
+coupling means `∂x^(k)*/∂p^(j) = 0` for `k ≠ j`.
+
+Plumbing:
+
+* `_StackedJaxNlp` lifts the per-block sparsity pattern (cached on
+  the parent `JaxProblem` from the one-shot probe) to the stacked
+  problem's block-diagonal pattern at construction time, so the
+  per-solve `jacobianstructure` / `hessianstructure` callbacks are
+  O(1).
+* Stacked Problems are built per (thread, B) with a tiny LRU on
+  the `JaxProblem` (cap 4) keyed by batch size — guards against
+  cycling between a couple of sizes (e.g. eval batch ≠ train
+  batch).
+* Per-block bounds `lb`/`ub`/`cl`/`cu` are tiled across the batch;
+  per-block bounds aren't exposed on this surface.
 
 ### Changed
 

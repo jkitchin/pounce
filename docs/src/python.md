@@ -254,6 +254,50 @@ explicitly:
 jp.clear_solver_cache()
 ```
 
+### Stacked block-diagonal batched solve (`batched_solve`)
+
+`JaxProblem.batched_solve(p_batch, x0)` runs *one* IPM solve over a
+single NLP whose variables are `[x^(1); ...; x^(B)]`, constraints are
+`concat(g(x^(k), p^(k)))`, and objective is `Σ_k f(x^(k), p^(k))`.
+The Jacobian and Lagrangian Hessian are block-diagonal — each block-`k`
+constraint touches only the block-`k` slice of `X`, and the objective
+is a pure sum, so there's no cross-block coupling. The IPM sees one
+big sparse problem but does only `B × (per-block factor cost)` work
+on the linear system.
+
+```python
+p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5], [-0.1, 0.4]])
+x_batch = jp.batched_solve(p_batch, x0=jnp.zeros(2))    # (B, n)
+```
+
+`custom_vjp`-wrapped, so `jax.grad`/`jax.jacobian` through the
+batched solve work end-to-end:
+
+```python
+def loss(P):
+    return jnp.sum(jp.batched_solve(P, x0=jnp.zeros(2)) ** 2)
+
+dloss_dP = jax.grad(loss)(p_batch)                       # (B, p_shape)
+```
+
+The backward `vmap`s the per-element dense KKT back-solve — exact
+because block-diagonal coupling means `∂x^(k)*/∂p^(j) = 0` for
+`k ≠ j`.
+
+When to pick `batched_solve` vs the existing batched surfaces:
+
+| Surface | Wins when |
+|---------|-----------|
+| `vmap_solve` | Long batches, want one solve per iterate sequentially. |
+| `vmap_solve_parallel` | Batch elements have very different convergence behaviour — slow blocks don't drag fast ones (B independent IPMs in worker threads, GIL released per solve). |
+| `batched_solve` | Blocks have similar convergence behaviour (shared barrier homotopy and symbolic factorisation amortise) *and* B is large enough that the per-call Python overhead of B fwd dispatches becomes visible (one Rust crossing instead of B). |
+
+Per-block `lb`/`ub`/`cl`/`cu` are tiled across the batch; the
+parameter `p` is what varies, not the feasible region. Stacked
+Problems are cached per (thread, B) in a tiny LRU (cap 4), so
+calls in a loop with one or two batch sizes pay the build cost at
+most once per worker.
+
 ## Notebooks
 
 The notebooks under

@@ -505,3 +505,91 @@ def test_factor_reuse_jacobian_pounce_76():
     # x* projects p onto the line x[0] = x[1], so dx*/dp = 0.5 * (1 1; 1 1).
     expected = 0.5 * np.ones((2, 2))
     np.testing.assert_allclose(np.asarray(J), expected, atol=1e-6)
+
+
+def test_batched_solve_matches_vmap_parallel_pounce_76():
+    """Issue #76 (A): the stacked block-diagonal solve must produce
+    the same per-block ``x*`` as :meth:`vmap_solve_parallel` (within
+    IPM convergence tolerance). The stacked path runs one IPM with a
+    shared barrier homotopy over a size ``B*(n+m)`` block-diagonal KKT;
+    the parallel path runs B independent IPMs. At convergence both
+    sit on the same per-block KKT manifold, so the answers should
+    agree to ~``tol``.
+    """
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5], [-0.1, 0.4], [1.0, 2.0]])
+    x_b = jp.batched_solve(p_batch, x0=jnp.zeros(2))
+    x_p = jp.vmap_solve_parallel(p_batch, x0=jnp.zeros(2), workers=2)
+    np.testing.assert_allclose(np.asarray(x_b), np.asarray(x_p), atol=1e-8)
+
+
+def test_batched_solve_grad_pounce_76():
+    """Issue #76 (A): ``jax.grad`` through ``batched_solve`` must
+    agree with ``jax.grad`` through ``vmap_solve_parallel`` — block-
+    diagonal coupling means the per-element bwd is exact, and we vmap
+    it over the batch.
+    """
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5], [-0.1, 0.4]])
+
+    def loss_b(P):
+        return jnp.sum(jp.batched_solve(P, x0=jnp.zeros(2)) ** 2)
+
+    def loss_p(P):
+        return jnp.sum(
+            jp.vmap_solve_parallel(P, x0=jnp.zeros(2), workers=2) ** 2
+        )
+
+    g_b = jax.grad(loss_b)(p_batch)
+    g_p = jax.grad(loss_p)(p_batch)
+    np.testing.assert_allclose(np.asarray(g_b), np.asarray(g_p), atol=1e-7)
+
+
+def test_batched_solve_unconstrained_pounce_76():
+    """Issue #76 (A): the m=0 path takes the no-constraints branch of
+    the stacked Hessian (signature ``(x, sigma, p)`` instead of
+    ``(x, lam, sigma, p)``). Verifies it works and agrees with the
+    closed-form ``x* = p``.
+    """
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    jp = JaxProblem(
+        f=f, g=None, n=3, m=0, p_example=jnp.zeros(3),
+        lb=jnp.full(3, -10.0), ub=jnp.full(3, 10.0),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+
+    p_batch = jnp.array([[0.1, 0.2, 0.3], [-1.0, 0.5, 2.0]])
+    x_b = jp.batched_solve(p_batch, x0=jnp.zeros(3))
+    np.testing.assert_allclose(np.asarray(x_b), np.asarray(p_batch), atol=1e-7)

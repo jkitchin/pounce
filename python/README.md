@@ -198,7 +198,17 @@ jp = JaxProblem(f=f_p, g=g_p, n=2, m=1, p_example=jnp.zeros(2),
 x = jp.solve(p0, x0=jnp.zeros(2))                       # differentiable
 x, warm = jp.solve_with_warm(p0, x0=x, warm_start=None) # trajectory
 X = jp.vmap_solve_parallel(p_batch, x0=jnp.zeros(2), workers=8)
+X = jp.batched_solve(p_batch, x0=jnp.zeros(2))          # one stacked IPM (pounce#76)
 ```
+
+`batched_solve` runs *one* IPM over a stacked block-diagonal NLP
+(variables `[x^(1); ...; x^(B)]`, constraints
+`concat(g(x^(k), p^(k)))`, objective `Σ_k f(x^(k), p^(k))`). One
+shared barrier homotopy and symbolic factorisation across the batch
+— complementary to `vmap_solve_parallel`, which runs B independent
+IPMs in worker threads. `jax.grad` through it works end-to-end (the
+backward vmaps the per-element dense KKT back-solve, exact because
+the block-diagonal coupling makes `∂x^(k)*/∂p^(j) = 0` for `k ≠ j`).
 
 The `jp.solve` / `solve_with_warm` backward defaults to a k_aug-style
 factor-reuse path: instead of assembling a dense `(n+m) × (n+m)` KKT

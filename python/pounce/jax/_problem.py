@@ -67,6 +67,145 @@ from .._pounce import Problem, Solver
 _ACTIVE_TOL = 1e-6
 
 
+class _StackedJaxNlp:
+    """Cyipopt-shaped problem object that wraps B replicas of a parent
+    :class:`JaxProblem` into a single block-diagonal NLP (pounce#76 (A)).
+
+    The stacked problem has variables ``X = [x^(1); ...; x^(B)]`` of
+    size ``B*n``, constraints ``G(X, P) = concat(g(x^(k), p^(k)))`` of
+    size ``B*m``, and objective ``F(X, P) = Σ_k f(x^(k), p^(k))``.
+    The Jacobian and Hessian-of-Lagrangian are block-diagonal — every
+    block-`k` row of ``G`` touches only the block-`k` slice of ``X``,
+    and ``F`` is a pure sum so the Hessian has no cross-block coupling.
+
+    Why a single stacked solve, vs ``vmap_solve_parallel``: the parallel
+    path runs B independent IPM solves in worker threads; total cost is
+    ``B / n_workers`` solves. The stacked path runs one IPM solve over
+    a size-``B*n`` problem whose linear-system structure is exactly the
+    same B blocks the parallel path would solve — but they share the
+    barrier homotopy (a single ``μ`` schedule), the symbolic LDLᵀ
+    factorisation, and one set of fill-reducing permutations. When
+    convergence behaviour is similar across the batch this can be
+    faster than the parallel path; when it isn't (one block needs many
+    more iterations than the rest) the parallel path wins. Both stay
+    available — they're complementary.
+
+    Closes over a mutable ``_P`` (shape ``(B,) + p_shape``) that the
+    parent updates between solves so the same Rust :class:`Problem` can
+    serve a sequence of batched solves at different ``p_batch``.
+
+    Not threadsafe on its own. Each :class:`JaxProblem` keeps a small
+    LRU of these per worker thread via a ``threading.local``, keyed by
+    batch size ``B`` (since ``B`` determines the problem dimensions and
+    the block-tiled sparsity pattern — both fixed at Problem-build
+    time).
+    """
+
+    __slots__ = ("_jp", "_B", "_P", "_jac_rows_per", "_jac_cols_per",
+                 "_hess_rows_per", "_hess_cols_per", "_jac_rows_stacked",
+                 "_jac_cols_stacked", "_hess_rows_stacked",
+                 "_hess_cols_stacked")
+
+    def __init__(self, jp: "JaxProblem", B: int):
+        self._jp = jp
+        self._B = B
+        self._P = None  # set by JaxProblem before every solve
+        # Per-block sparsity (cached on the parent JaxProblem from the
+        # one-shot probe), promoted to int64 so the stacked-index arith
+        # below doesn't overflow on huge B.
+        self._jac_rows_per = np.asarray(jp._jac_rows, dtype=np.int64)
+        self._jac_cols_per = np.asarray(jp._jac_cols, dtype=np.int64)
+        self._hess_rows_per = np.asarray(jp._hess_rows, dtype=np.int64)
+        self._hess_cols_per = np.asarray(jp._hess_cols, dtype=np.int64)
+        # Lift to the stacked problem: block-`k` Jacobian nonzero at
+        # per-block (i, j) lives at stacked (k*m + i, k*n + j). Same for
+        # the Hessian with row/col offsets of k*n. Computed once at
+        # construction so the per-solve `jacobianstructure` /
+        # `hessianstructure` callbacks are O(1).
+        n, m = jp._n, jp._m
+        block_idx = np.arange(B, dtype=np.int64)[:, None]
+        if self._jac_rows_per.size > 0 and m > 0:
+            self._jac_rows_stacked = (
+                self._jac_rows_per[None, :] + block_idx * m
+            ).reshape(-1)
+            self._jac_cols_stacked = (
+                self._jac_cols_per[None, :] + block_idx * n
+            ).reshape(-1)
+        else:
+            self._jac_rows_stacked = np.zeros(0, dtype=np.int64)
+            self._jac_cols_stacked = np.zeros(0, dtype=np.int64)
+        self._hess_rows_stacked = (
+            self._hess_rows_per[None, :] + block_idx * n
+        ).reshape(-1)
+        self._hess_cols_stacked = (
+            self._hess_cols_per[None, :] + block_idx * n
+        ).reshape(-1)
+
+    def objective(self, X):
+        # Sum of per-block objectives — vmap then jnp.sum stays inside
+        # JAX so the JIT-compiled per-block ``_f_jit`` is reused.
+        n = self._jp._n
+        X_2d = jnp.asarray(X).reshape(self._B, n)
+        return float(
+            jnp.sum(jax.vmap(self._jp._f_jit, in_axes=(0, 0))(X_2d, self._P))
+        )
+
+    def gradient(self, X):
+        # Stacked gradient is just the per-block grads concatenated:
+        # ∂F/∂x^(k) = ∂f(x^(k), p^(k))/∂x^(k) (no cross-block terms
+        # because F is a sum).
+        n = self._jp._n
+        X_2d = jnp.asarray(X).reshape(self._B, n)
+        G_2d = jax.vmap(self._jp._grad_f_jit, in_axes=(0, 0))(X_2d, self._P)
+        return _to_np(G_2d).reshape(-1)
+
+    def constraints(self, X):
+        n, m = self._jp._n, self._jp._m
+        X_2d = jnp.asarray(X).reshape(self._B, n)
+        G_2d = jax.vmap(self._jp._g_jit, in_axes=(0, 0))(X_2d, self._P)
+        return _to_np(G_2d).reshape(self._B * m)
+
+    def jacobianstructure(self):
+        return (self._jac_rows_stacked, self._jac_cols_stacked)
+
+    def jacobian(self, X):
+        # Compute per-block dense Jacobians via vmap, then gather the
+        # nonzeros at the per-block sparsity pattern. We never assemble
+        # the dense stacked Jacobian (would be (B*m, B*n)); the gather
+        # below is order ``B * nnz_per_block`` work.
+        n = self._jp._n
+        X_2d = jnp.asarray(X).reshape(self._B, n)
+        J_3d = jax.vmap(self._jp._jac_g_jit, in_axes=(0, 0))(X_2d, self._P)
+        # J_3d: (B, m, n). Gather across the (m, n) axes via the cached
+        # per-block index arrays, then flatten so the result is in
+        # block-major order to match the stacked structure.
+        vals = J_3d[:, self._jac_rows_per, self._jac_cols_per]  # (B, nnz_per_block)
+        return _to_np(vals).reshape(-1)
+
+    def hessianstructure(self):
+        return (self._hess_rows_stacked, self._hess_cols_stacked)
+
+    def hessian(self, X, lam, obj_factor):
+        # Stacked Lagrangian factorises across blocks:
+        #   L(X, λ, σ, P) = Σ_k [σ f(x^(k), p^(k))
+        #                       + λ^(k)ᵀ g(x^(k), p^(k))]
+        # so its Hessian is block-diagonal. Compute the per-block
+        # Hessian via vmap and gather the lower-triangular pattern.
+        n, m = self._jp._n, self._jp._m
+        X_2d = jnp.asarray(X).reshape(self._B, n)
+        if m > 0:
+            Lam_2d = jnp.asarray(lam).reshape(self._B, m)
+            H_3d = jax.vmap(
+                self._jp._hess_lag_jit, in_axes=(0, 0, None, 0),
+            )(X_2d, Lam_2d, obj_factor, self._P)
+        else:
+            H_3d = jax.vmap(
+                self._jp._hess_lag_jit, in_axes=(0, None, 0),
+            )(X_2d, obj_factor, self._P)
+        vals = H_3d[:, self._hess_rows_per, self._hess_cols_per]
+        return _to_np(vals).reshape(-1)
+
+
 class _ReusableJaxNlp:
     """Cyipopt-shaped problem object whose JAX callables are owned by
     a parent :class:`JaxProblem`. Closes over a mutable ``_p`` that the
@@ -562,6 +701,54 @@ class JaxProblem:
             self._tls.pair = cached
         return cached
 
+    def _build_stacked_problem(self, B: int) -> tuple[_StackedJaxNlp, Problem]:
+        """Build the stacked Rust :class:`Problem` for batch size ``B``.
+
+        Bounds are tiled B times. The per-block bounds (``lb``/``ub``/
+        ``cl``/``cu``) are the same for every block — the parameter
+        ``p`` is what varies across blocks, not the feasible region. If
+        a future use-case wants per-block bounds, that's a separate
+        public surface (``batched_solve_with_bounds`` etc.).
+        """
+        def tile(v, count):
+            if v is None:
+                return None
+            arr = np.asarray(v, dtype=np.float64)
+            return np.tile(arr, B) if count > 0 else np.zeros(0)
+
+        n, m = self._n, self._m
+        obj = _StackedJaxNlp(self, B)
+        prob = Problem(
+            n=B * n, m=B * m, problem_obj=obj,
+            lb=tile(self._lb, n), ub=tile(self._ub, n),
+            cl=tile(self._cl, m), cu=tile(self._cu, m),
+        )
+        for k, v in self._options.items():
+            prob.add_option(k, v)
+        return obj, prob
+
+    def _thread_stacked_problem(self, B: int) -> tuple[_StackedJaxNlp, Problem]:
+        """Per-thread LRU of stacked Problems keyed by batch size B.
+
+        Cap is small (4) because in typical use a single training loop
+        sticks to one batch size — the LRU is just a guard against
+        cycling between two or three sizes (e.g. evaluation batch
+        differs from training batch).
+        """
+        cache = getattr(self._tls, "stacked", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._tls.stacked = cache
+        if B in cache:
+            cache.move_to_end(B)
+            return cache[B]
+        pair = self._build_stacked_problem(B)
+        cache[B] = pair
+        cache.move_to_end(B)
+        while len(cache) > 4:
+            cache.popitem(last=False)
+        return pair
+
     def _thread_problem_warm(self) -> tuple[_ReusableJaxNlp, Problem]:
         cached = getattr(self._tls, "pair_warm", None)
         if cached is None:
@@ -672,6 +859,41 @@ class JaxProblem:
         info_out["solver_id"] = sid
         return x_np, info_out
 
+    def _host_batched_solve(self, p_batch_np: np.ndarray, x0_batch_np: np.ndarray):
+        """Forward solve for the stacked block-diagonal problem
+        (pounce#76 (A)).
+
+        Returns per-block residuals reshaped to leading-batch axis:
+        ``x_batch: (B, n)``, ``lam_batch: (B, m)``, ``mult_xL_batch /
+        mult_xU_batch: (B, n)``. The IPM under the hood factors a
+        single ``(B*(n+m))^2`` block-diagonal KKT once and runs the
+        barrier homotopy across all blocks together — i.e. one
+        ``μ``-schedule for the whole batch.
+
+        We don't register the stacked Solver in the factor-reuse
+        registry: the per-element bwd path uses ``_bwd_single_kkt``
+        vmapped over the batch, which doesn't consume a held compound
+        factor. A future variant that back-solves the stacked LDLᵀ
+        factor with a per-block-permuted RHS could land as ``(A)+(B)``
+        composition, but it's out of scope for the initial landing
+        (the wins overlap and isolating each track helps reasoning).
+        """
+        B = p_batch_np.shape[0]
+        n, m = self._n, self._m
+        obj, prob = self._thread_stacked_problem(B)
+        obj._P = jnp.asarray(p_batch_np)
+        # Initial X is the per-block ``x0`` tiled / concatenated.
+        X0 = np.asarray(x0_batch_np, dtype=np.float64).reshape(B * n)
+        X_np, info = prob.solve(x0=X0)
+        x_batch = np.asarray(X_np, dtype=np.float64).reshape(B, n)
+        lam_batch = (
+            np.asarray(info["mult_g"], dtype=np.float64).reshape(B, m)
+            if m > 0 else np.zeros((B, 0), dtype=np.float64)
+        )
+        mult_xL_batch = np.asarray(info["mult_x_L"], dtype=np.float64).reshape(B, n)
+        mult_xU_batch = np.asarray(info["mult_x_U"], dtype=np.float64).reshape(B, n)
+        return x_batch, lam_batch, mult_xL_batch, mult_xU_batch
+
     # ----- public: differentiable solve methods -----
 
     def solve(self, p, x0):
@@ -731,6 +953,48 @@ class JaxProblem:
         if x0_arr.ndim == 1:
             x0_arr = jnp.broadcast_to(x0_arr, (B, self._n))
         fn = self._vmap_solve_parallel_fn(workers)
+        return fn(p_batch, x0_arr)
+
+    def batched_solve(self, p_batch, x0):
+        """Stacked block-diagonal batched solve (pounce#76 (A)).
+
+        Build a single NLP with variables ``[x^(1); ...; x^(B)]``,
+        constraints ``concat(g(x^(k), p^(k)))``, and objective
+        ``Σ_k f(x^(k), p^(k))``, then solve once. The KKT matrix is
+        block-diagonal, so the IPM gets all the per-block independence
+        of :meth:`vmap_solve_parallel`, *plus* one shared barrier
+        homotopy and one shared symbolic factorisation across the
+        batch.
+
+        Returns ``x_batch`` of shape ``(B, n)``. Differentiable via
+        ``custom_vjp`` — the backward vmaps the dense per-element KKT
+        back-solve, exploiting the block-diagonal coupling (each
+        ``∂x^(k)*/∂p^(j)`` is zero for ``k ≠ j``).
+
+        ``x0`` may be ``(n,)`` (broadcast over the batch) or ``(B, n)``.
+
+        When to use which batched surface:
+
+        * :meth:`vmap_solve` — sequential ``jax.lax.map``; safest for
+          long batches where you want one solve per iterate without
+          tying up host threads.
+        * :meth:`vmap_solve_parallel` — ``ThreadPoolExecutor``; B
+          independent IPM solves, GIL released per solve. Wins when
+          batch elements have very different convergence behaviour
+          (slow blocks don't drag fast ones).
+        * :meth:`batched_solve` — one stacked IPM solve. Wins when
+          blocks have similar convergence behaviour (shared
+          homotopy and symbolic factorisation amortise) and when B is
+          large enough that the per-call Python overhead of multiple
+          fwd dispatches becomes visible (one Rust crossing instead
+          of B).
+        """
+        p_batch = jnp.asarray(p_batch)
+        B = p_batch.shape[0]
+        x0_arr = jnp.asarray(x0)
+        if x0_arr.ndim == 1:
+            x0_arr = jnp.broadcast_to(x0_arr, (B, self._n))
+        fn = self._batched_solve_fn(B)
         return fn(p_batch, x0_arr)
 
     # ----- custom_vjp factories -----
@@ -860,6 +1124,60 @@ class JaxProblem:
         solve_fn.defvjp(fwd, bwd)
         return solve_fn
 
+    def _batched_solve_fn(self, B: int):
+        """custom_vjp factory for :meth:`batched_solve` (pounce#76 (A)).
+
+        The bwd is ``jax.vmap`` over the per-element dense KKT
+        back-solve. Block-diagonal coupling in the stacked KKT means
+        ``∂x^(k)*/∂p^(j) = 0`` for ``k ≠ j``, so vmapping the
+        single-block bwd is exact — there's no cross-block correction
+        to assemble.
+
+        Why not reuse the stacked LDLᵀ factor (the ``(B)`` k_aug-style
+        path) here? The stacked factor *would* work — back-solve once
+        against the block-diagonal RHS ``diag(v^(1), ..., v^(B))`` —
+        but plumbing per-block RHS packing through the Rust
+        ``Solver.kkt_solve`` host_call is a separate surface, and the
+        per-element dense bwd is already fast for the block sizes
+        ``(A)`` is meant to win on (small per-block ``n``, large ``B``).
+        We can compose ``(A)+(B)`` later without changing the public
+        surface — the choice lives behind ``factor_reuse=``.
+        """
+        f, g, n, m = self._f, self._g, self._n, self._m
+        cl, cu = self._cl, self._cu
+        jp = self
+
+        @jax.custom_vjp
+        def solve_fn(p_batch, x0_batch):
+            x_star, *_ = _pure_callback_batched_solve(jp, B, p_batch, x0_batch)
+            return x_star
+
+        def fwd(p_batch, x0_batch):
+            x_star, lam, mult_xL, mult_xU = _pure_callback_batched_solve(
+                jp, B, p_batch, x0_batch,
+            )
+            return x_star, (p_batch, x_star, lam, mult_xL, mult_xU)
+
+        def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
+            return _bwd_single_kkt(
+                f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
+            )
+
+        def bwd(residuals, cot_x_batch):
+            (
+                p_batch, x_star_batch, lam_batch,
+                mult_xL_batch, mult_xU_batch,
+            ) = residuals
+            dL_dp_batch = jax.vmap(bwd_single)(
+                p_batch, x_star_batch, lam_batch,
+                mult_xL_batch, mult_xU_batch, cot_x_batch,
+            )
+            return dL_dp_batch, jnp.zeros_like(x_star_batch)
+
+        solve_fn.defvjp(fwd, bwd)
+        return solve_fn
+
+
 # ----- pure_callback wrappers (module-level, closed over a JaxProblem) -----
 
 
@@ -922,6 +1240,28 @@ def _pure_callback_warm_solve(jp: JaxProblem, p, x0, lam_warm, zL_warm, zU_warm)
     return jax.pure_callback(
         host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm,
     )
+
+
+def _pure_callback_batched_solve(jp: JaxProblem, B: int, p_batch, x0_batch):
+    """Host-side dispatch for the stacked block-diagonal solve.
+
+    The shapes in ``result_shapes`` are unconditionally ``(B, ·)`` — the
+    custom_vjp factory bakes ``B`` in at construction time, so JAX
+    tracing sees concrete shapes here even though ``B`` is a Python
+    argument from the user's caller.
+    """
+    n, m = jp._n, jp._m
+    result_shapes = (
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, m), jnp.float64),
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+    )
+
+    def host_call(p_h, x0_h):
+        return jp._host_batched_solve(np.asarray(p_h), np.asarray(x0_h))
+
+    return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)
 
 
 def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):
