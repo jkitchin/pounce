@@ -155,6 +155,23 @@ solve when the watched value changes by more than its threshold (default
 0 = any change) between iterations. Useful for a component expected to
 stay put (e.g. a variable pinned at a bound).
 
+### Breakpoint command lists
+
+Attach commands to a breakpoint that run automatically when it hits —
+semicolon-separated, ending with a flow command to auto-resume:
+
+```text
+break 5
+commands 5 print kkt ; set mu 0.1 ; continue   # at iter 5: inspect, tweak μ, go
+commands 5 clear                               # remove
+commands                                       # list all
+```
+
+When iteration 5 is reached, the debugger emits the `pause`, runs the
+attached commands (each `result` is reported), and if one of them
+resumes/stops, honors it without dropping to the prompt — otherwise it
+falls through to the interactive prompt as usual.
+
 ### Conditional (with compound predicates)
 
 ```text

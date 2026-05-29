@@ -158,6 +158,10 @@ program.
   `s_l`/`s_u`) — per category, how many are near-active (slack below the
   tolerance) and the minimum slack — showing which bounds the iterate is
   pressing on.
+- **Breakpoint command lists:** `commands <N> <cmd> ; <cmd> …` attaches an
+  auto-run command list to the breakpoint at iteration N (e.g.
+  `commands 5 set mu 0.1 ; continue`). On hit, the list runs automatically
+  and a flow command (`continue`/`step`) resumes without prompting.
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
   JSON channel — the banner, problem-stats block, and final summary are
   routed to stderr — so a GUI / IDE front end can consume it line by
