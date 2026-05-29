@@ -204,7 +204,7 @@ Events fire at whatever checkpoint makes them observable (e.g.
 info                 # one-line summary: iter, mu, obj, inf_pr, inf_du, nlp_error, dims
 print x              # a primal/dual block (alias: p x)
 print dx             # a search-direction block (d + block name)
-print mu             # a scalar: mu|obj|inf_pr|inf_du|err|iter
+print mu             # a scalar: mu|obj|inf_pr|inf_du|err|compl|iter
 print kkt            # KKT inertia + regularization (see below)
 watch mu             # auto-print a target at every pause (alias: display)
 watch                # list watches; watch del mu; watch clear

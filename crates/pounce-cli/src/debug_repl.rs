@@ -220,7 +220,7 @@ impl CmdOut {
 }
 
 /// Metric names accepted in `break if …` (and shown by `help`).
-const METRICS: &[&str] = &["mu", "inf_pr", "inf_du", "obj", "err", "iter"];
+const METRICS: &[&str] = &["mu", "inf_pr", "inf_du", "obj", "err", "compl", "iter"];
 
 /// A scalar the solver exposes for conditional breakpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +230,7 @@ enum Metric {
     InfDu,
     Obj,
     NlpError,
+    Compl,
     Iter,
 }
 
@@ -241,6 +242,7 @@ impl Metric {
             "inf_du" => Metric::InfDu,
             "obj" | "objective" => Metric::Obj,
             "err" | "nlp_error" => Metric::NlpError,
+            "compl" | "complementarity" => Metric::Compl,
             "iter" => Metric::Iter,
             _ => return None,
         })
@@ -252,6 +254,7 @@ impl Metric {
             Metric::InfDu => ctx.inf_du(),
             Metric::Obj => ctx.objective(),
             Metric::NlpError => ctx.nlp_error(),
+            Metric::Compl => ctx.complementarity(),
             Metric::Iter => ctx.iter() as f64,
         }
     }
@@ -452,7 +455,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["print"] | ["p"] | ["watch"] | ["display"] => {
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
-                "mu", "obj", "inf_pr", "inf_du", "err", "iter", "kkt",
+                "mu", "obj", "inf_pr", "inf_du", "err", "compl", "iter", "kkt",
             ]));
             v
         }
@@ -954,10 +957,11 @@ impl SolverDebugger {
                 "inf_pr" => ctx.inf_pr(),
                 "inf_du" => ctx.inf_du(),
                 "err" | "nlp_error" => ctx.nlp_error(),
+                "compl" | "complementarity" => ctx.complementarity(),
                 "iter" => ctx.iter() as f64,
                 _ => {
                     return CmdOut::err(format!(
-                        "don't know how to print `{what}` (try a block name or mu|obj|inf_pr|inf_du|err|iter)"
+                        "don't know how to print `{what}` (try a block name or mu|obj|inf_pr|inf_du|err|compl|iter)"
                     ))
                 }
             };

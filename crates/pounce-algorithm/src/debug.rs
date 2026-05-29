@@ -273,6 +273,12 @@ impl DebugCtx {
         self.cq_scalar(|c| c.curr_nlp_error())
     }
 
+    /// Average complementarity (mean slack·multiplier over all bounds) —
+    /// the IPM's "distance from the central path" gauge; should track μ.
+    pub fn complementarity(&self) -> Number {
+        self.cq_scalar(|c| c.curr_avrg_compl())
+    }
+
     /// Primal regularization δ_w applied to the KKT system this
     /// iteration (0 when none was needed). Nonzero ⇒ inertia correction.
     pub fn regularization(&self) -> Number {
