@@ -66,6 +66,8 @@ const CHECKPOINTS: &[&str] = &[
     "after_mu",
     "after_search_dir",
     "after_step",
+    "pre_restoration_entry",
+    "post_restoration_exit",
     "terminated",
 ];
 
@@ -780,6 +782,8 @@ impl SolverDebugger {
                 "mu" | "after_mu" => Some("after_mu"),
                 "kkt" | "search_dir" | "after_search_dir" => Some("after_search_dir"),
                 "step" | "after_step" => Some("after_step"),
+                "resto" | "restoration" | "pre_restoration_entry" => Some("pre_restoration_entry"),
+                "resto_exit" | "post_restoration_exit" => Some("post_restoration_exit"),
                 "iter" | "iter_start" => Some("iter_start"),
                 "terminated" => Some("terminated"),
                 _ => None,

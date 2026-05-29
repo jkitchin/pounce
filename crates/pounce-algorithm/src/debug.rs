@@ -44,6 +44,13 @@ pub enum Checkpoint {
     /// After the line search chose a step length and the trial point was
     /// accepted — α (`info_alpha_*`) and the new iterate are in place.
     AfterStep,
+    /// Just before the algorithm switches into the restoration phase —
+    /// the iterate that tripped restoration is intact. The most-requested
+    /// "why did this go to restoration?" stop.
+    PreRestoration,
+    /// Just after the restoration phase returns, so its effect on the
+    /// iterate can be inspected.
+    PostRestoration,
     /// The solve has finished (or is about to): fired once before
     /// `optimize` returns, at the final iterate, carrying the outcome
     /// via [`DebugCtx::status`]. Lets a debugger drop in for a
@@ -58,6 +65,8 @@ impl Checkpoint {
             Checkpoint::AfterBarrierUpdate => "after_mu",
             Checkpoint::AfterSearchDirection => "after_search_dir",
             Checkpoint::AfterStep => "after_step",
+            Checkpoint::PreRestoration => "pre_restoration_entry",
+            Checkpoint::PostRestoration => "post_restoration_exit",
             Checkpoint::Terminated => "terminated",
         }
     }
@@ -70,6 +79,8 @@ impl Checkpoint {
             Checkpoint::AfterBarrierUpdate
                 | Checkpoint::AfterSearchDirection
                 | Checkpoint::AfterStep
+                | Checkpoint::PreRestoration
+                | Checkpoint::PostRestoration
         )
     }
 }
