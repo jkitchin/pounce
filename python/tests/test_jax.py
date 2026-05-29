@@ -593,3 +593,40 @@ def test_batched_solve_unconstrained_pounce_76():
     p_batch = jnp.array([[0.1, 0.2, 0.3], [-1.0, 0.5, 2.0]])
     x_b = jp.batched_solve(p_batch, x0=jnp.zeros(3))
     np.testing.assert_allclose(np.asarray(x_b), np.asarray(p_batch), atol=1e-7)
+
+
+def test_factor_reuse_raises_clean_error_when_no_factor():
+    """The factor-reuse backward must raise a clear, actionable
+    ``RuntimeError`` (not crash with a low-level ``TypeError`` on
+    ``NoneType.__getitem__``) when the forward solve terminated without
+    a converged factor. Caught early during the pounce#76 (A) bench:
+    a poorly-conditioned problem hit infeasibility and the bwd
+    surfaced as a confusing crash deep inside the pure_callback.
+    """
+    import pytest
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        # Infeasible: requires sum(x) == 100 but bounds force x in [-1, 1]
+        # so the feasible set is empty.
+        return jnp.stack([jnp.sum(x) - 100.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=3, m=1, p_example=jnp.zeros(3),
+        lb=jnp.full(3, -1.0), ub=jnp.full(3, 1.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes", "max_iter": 30},
+        factor_reuse=True,
+    )
+
+    p_val = jnp.array([0.1, 0.2, 0.3])
+    with pytest.raises(Exception) as excinfo:
+        jax.grad(lambda p: jnp.sum(jp.solve(p, jnp.zeros(3)) ** 2))(p_val)
+    msg = str(excinfo.value)
+    # The error gets wrapped by JAX's callback machinery; we just want
+    # the actionable text to land somewhere in the chain.
+    chain = msg + " " + str(excinfo.value.__cause__ or "")
+    assert "factor_reuse=False" in chain, f"missing fallback hint in: {chain}"

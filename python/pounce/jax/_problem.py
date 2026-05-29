@@ -387,6 +387,30 @@ def _kkt_backsolve_pure_callback(
                 "fwd, or use `factor_reuse=False`."
             )
         dims = solver.block_dims  # [n_x, n_s, n_y_c, n_y_d, n_z_l, n_z_u, n_v_l, n_v_u]
+        if dims is None:
+            # The Solver exists but its inner state holds no converged
+            # factor — the IPM didn't converge to acceptable accuracy.
+            # The factor-reuse bwd has no way forward here: kkt_solve
+            # would crash on a missing factor, and silently returning
+            # zeros (or NaNs) would mask the divergence in upstream
+            # training loops. Raise loudly so the caller either
+            # tightens the solve (loosen tol / better x0 / scale the
+            # problem) or switches to `factor_reuse=False` — the dense
+            # JAX backward assembles `(n+m) × (n+m)` from `f`, `g` at
+            # `x*` without needing the held factor, so it still
+            # produces *a* gradient (of whatever the IPM terminated
+            # at, possibly poor quality) instead of crashing.
+            raise RuntimeError(
+                "pounce.jax: factor-reuse backward requires a "
+                "converged IPM factor, but the forward solve did not "
+                "produce one (the IPM terminated without an "
+                "acceptable factorisation). Either tighten the solve "
+                "(check `info['status']` from `JaxProblem` callbacks, "
+                "loosen `tol`, supply a better `x0`, or rescale the "
+                "problem), or build the `JaxProblem` with "
+                "`factor_reuse=False` to fall back to the dense JAX "
+                "backward, which doesn't depend on the held factor."
+            )
         n_x = dims[0]
         n_s = dims[1]
         n_y_c = dims[2]
