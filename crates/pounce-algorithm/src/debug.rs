@@ -98,6 +98,32 @@ pub enum DebugAction {
 /// The eight primal/dual blocks of an iterate, addressable by name.
 pub const BLOCK_NAMES: [&str; 8] = ["x", "s", "y_c", "y_d", "z_l", "z_u", "v_l", "v_u"];
 
+/// KKT-factorization report (see [`DebugCtx::kkt`]). The inertia of a
+/// well-posed primal-dual system is `(n_pos = n, n_neg = m, n_zero = 0)`;
+/// a mismatch (or nonzero regularization) is the classic signal that the
+/// step is being stabilized.
+#[derive(Clone, Debug)]
+pub struct KktReport {
+    /// Augmented-system dimension (n + m).
+    pub dim: i32,
+    /// Negative eigenvalues reported (-1 if the backend has no inertia).
+    pub n_neg: i32,
+    /// Positive eigenvalues = `dim − n_neg` (-1 if unknown).
+    pub n_pos: i32,
+    /// Expected negatives = number of equality + inequality multipliers.
+    pub expected_neg: i32,
+    /// Whether the backend reports inertia.
+    pub provides_inertia: bool,
+    /// `true` when reported inertia matches the expected `(n, m, 0)`.
+    pub inertia_correct: bool,
+    /// Primal regularization δ_w applied to the (1,1) block.
+    pub delta_w: Number,
+    /// Dual regularization δ_c applied to the (3,3)/(4,4) blocks.
+    pub delta_c: Number,
+    /// Factorization status (debug string).
+    pub status: String,
+}
+
 /// Live, mutable view of solver state handed to a [`DebugHook`].
 ///
 /// Cheap to construct (two `Rc` clones); every accessor borrows the
@@ -253,6 +279,38 @@ impl DebugCtx {
     pub fn alpha(&self) -> (Number, Number) {
         let d = self.data.borrow();
         (d.info_alpha_primal, d.info_alpha_dual)
+    }
+
+    /// KKT-factorization report for the current iteration, if a search
+    /// direction has been computed this iteration (i.e. at/after the
+    /// `after_search_dir` checkpoint). Combines the captured inertia with
+    /// the applied regularization and the *expected* inertia derived from
+    /// the multiplier dimensions.
+    pub fn kkt(&self) -> Option<KktReport> {
+        let d = self.data.borrow();
+        let k = d.kkt_debug.as_ref()?;
+        let curr = d.curr.as_ref();
+        let expected_neg = curr
+            .map(|c| c.y_c.dim() + c.y_d.dim())
+            .unwrap_or(0);
+        // n+ = dim − n− (assuming a non-singular KKT, n0 = 0).
+        let n_pos = if k.n_neg >= 0 {
+            k.dim - k.n_neg
+        } else {
+            -1
+        };
+        let inertia_correct = k.provides_inertia && k.n_neg == expected_neg;
+        Some(KktReport {
+            dim: k.dim,
+            n_neg: k.n_neg,
+            n_pos,
+            expected_neg,
+            provides_inertia: k.provides_inertia,
+            inertia_correct,
+            delta_w: d.perturbations.delta_x,
+            delta_c: d.perturbations.delta_c,
+            status: k.status.clone(),
+        })
     }
 
     // ---- vector reads --------------------------------------------------

@@ -78,6 +78,13 @@ pub trait AugSystemSolver {
     /// factorization. Caller checks `provides_inertia()` first.
     fn number_of_neg_evals(&self) -> Index;
 
+    /// Dimension of the assembled augmented (KKT) system. Used by the
+    /// interactive debugger to report inertia; default 0 for backends
+    /// that don't track it.
+    fn system_dim(&self) -> Index {
+        0
+    }
+
     /// Ask the underlying solver for higher-quality pivoting.
     fn increase_quality(&mut self) -> bool;
 
