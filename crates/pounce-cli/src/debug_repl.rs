@@ -1375,25 +1375,28 @@ impl SolverDebugger {
         }
     }
 
-    fn cmd_viz(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_viz(&self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
         };
-        // KKT inertia/regularization are available at `after_search_dir`
-        // and viz'd as a small JSON report. The full matrix / L-factor
-        // *pattern* (a heatmap) still comes from the offline dump, which
-        // already extracts it from the backend.
+        // `viz kkt` writes the assembled augmented-system matrix (triplets
+        // → heatmap) plus the inertia/regularization summary.
         if target == "kkt" {
             let Some(k) = ctx.kkt() else {
                 return CmdOut::err(
                     "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
                 );
             };
+            let matrix = ctx.kkt_matrix().map(|(dim, irn, jcn, vals)| {
+                serde_json::json!({"dim": dim, "irn": irn, "jcn": jcn, "vals": vals,
+                                   "format": "triplet_1based_lower"})
+            });
             let payload = serde_json::json!({
                 "label": "kkt", "iter": ctx.iter(),
                 "dim": k.dim, "n_pos": k.n_pos, "n_neg": k.n_neg,
                 "expected_neg": k.expected_neg, "inertia_correct": k.inertia_correct,
                 "delta_w": k.delta_w, "delta_c": k.delta_c, "status": k.status,
+                "matrix": matrix,
             });
             return match write_json_and_open("kkt", ctx.iter(), &payload) {
                 Ok((path, viewer)) => {
@@ -1403,12 +1406,32 @@ impl SolverDebugger {
                 Err(e) => CmdOut::err(e),
             };
         }
+        // `viz L` writes the LDLᵀ factor triplets. Capture is opt-in (the
+        // factor is the expensive piece), so the first call arms it.
         if target == "L" {
-            return CmdOut::err(
-                "the L-factor pattern (heatmap) isn't captured at the checkpoint; re-run with \
-                 `--dump kkt:<iter>+L+Lvals --dump-dir DIR` and open the per-iter dump. \
-                 `print kkt` / `viz kkt` give the inertia + regularization here.",
-            );
+            match ctx.kkt_l_factor() {
+                Some((n, perm, l_irn, l_jcn, l_vals)) => {
+                    let payload = serde_json::json!({
+                        "label": "L", "iter": ctx.iter(), "n": n, "perm": perm,
+                        "l_irn": l_irn, "l_jcn": l_jcn, "l_vals": l_vals,
+                        "format": "strict_lower_1based_permuted",
+                    });
+                    return match write_json_and_open("L", ctx.iter(), &payload) {
+                        Ok((path, viewer)) => {
+                            CmdOut::ok(vec![format!("wrote {path}; opened with `{viewer}`")])
+                                .with_data(serde_json::json!({"path": path, "viewer": viewer}))
+                        }
+                        Err(e) => CmdOut::err(e),
+                    };
+                }
+                None => {
+                    ctx.request_l_factor();
+                    return CmdOut::err(
+                        "L-factor capture enabled — re-run `viz L` after the next \
+                         `after_search_dir` stop (`stepi` or `continue`).",
+                    );
+                }
+            }
         }
         // Resolve the vector to visualize.
         let (label, vals) = if BLOCK_NAMES.contains(&target) {

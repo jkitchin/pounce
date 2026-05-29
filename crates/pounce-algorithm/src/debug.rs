@@ -313,6 +313,40 @@ impl DebugCtx {
         })
     }
 
+    /// The assembled KKT matrix triplets `(dim, irn, jcn, vals)` (1-based
+    /// lower triangle) for `viz kkt`, if captured this iteration.
+    pub fn kkt_matrix(&self) -> Option<(i32, Vec<i32>, Vec<i32>, Vec<Number>)> {
+        self.data.borrow().kkt_debug.as_ref()?.matrix.clone()
+    }
+
+    /// The `LDLᵀ` factor (`n`, `perm`, strict-lower `l_irn`/`l_jcn` and
+    /// optional `l_vals`) for `viz L`, if captured. Capture is opt-in —
+    /// call [`Self::request_l_factor`] first (it's the expensive piece).
+    #[allow(clippy::type_complexity)]
+    pub fn kkt_l_factor(&self) -> Option<(usize, Vec<usize>, Vec<i32>, Vec<i32>, Option<Vec<Number>>)> {
+        let d = self.data.borrow();
+        let f = d.kkt_debug.as_ref()?.l_factor.as_ref()?;
+        Some((
+            f.n,
+            f.perm.clone(),
+            f.l_irn.clone(),
+            f.l_jcn.clone(),
+            f.l_vals.clone(),
+        ))
+    }
+
+    /// Ask the solver to capture the `LDLᵀ` factor on subsequent solves
+    /// (so `viz L` has data). Returns whether it's already available now.
+    pub fn request_l_factor(&mut self) -> bool {
+        self.data.borrow_mut().want_l_factor = true;
+        self.data
+            .borrow()
+            .kkt_debug
+            .as_ref()
+            .map(|k| k.l_factor.is_some())
+            .unwrap_or(false)
+    }
+
     // ---- vector reads --------------------------------------------------
 
     /// Dimensions of every named block, in [`BLOCK_NAMES`] order.

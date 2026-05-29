@@ -235,8 +235,22 @@ The augmented (KKT) system has expected inertia `(n₊ = n, n₋ = m,
 n₀ = 0)` where `m` is the number of equality + inequality multipliers.
 A mismatch — or a nonzero `delta_w`/`delta_c` — is the classic signal
 that the step is being stabilized (the solver added regularization to
-fix the inertia). The full KKT-matrix and L-factor *heatmap* aren't
-captured here; see [Limitations](#limitations).
+fix the inertia).
+
+For the matrix and factor themselves:
+
+```text
+viz kkt     # the assembled augmented-system matrix (triplets) + inertia
+viz L       # the LDLᵀ factor (strict-lower triplets + values)
+```
+
+`viz kkt` writes the KKT matrix as 1-based lower-triangle triplets
+(`dim`, `irn`, `jcn`, `vals`) alongside the inertia summary — point
+`$POUNCE_DBG_VIEWER` at a heatmap script. `viz L` writes the `LDLᵀ`
+factor (`n`, fill-reducing `perm`, strict-lower `l_irn`/`l_jcn`/`l_vals`
+in permuted coordinates). Because reconstructing the factor is the
+expensive piece, **`viz L` capture is opt-in**: the first call arms it
+and the factor is available at the next `after_search_dir` stop.
 
 ---
 
@@ -639,11 +653,6 @@ for line in p.stdout:                # progress … pause … terminated
 
 ## Limitations
 
-- **No live KKT-matrix / L-factor heatmap.** `print kkt` / `viz kkt`
-  give the inertia and regularization *scalars*; the full sparse matrix
-  and its `LDLᵀ` factor pattern are not captured at the checkpoint. Use
-  the offline dump for those: `--dump kkt:<iter>+L+Lvals --dump-dir DIR`
-  (see [Running Solves](cli.md)).
 - **Soft rewind only.** `goto`/`restart` restore the primal-dual state,
   not strategy history (see the caveat above).
 - **`set opt` is staged, not hot-applied** to a running solve; it takes

@@ -89,10 +89,15 @@ program.
   factorization **inertia** (n₊ / n₋ vs the expected n₋ = #multipliers,
   flagged correct / WRONG), the applied **regularization** (δ_w, δ_c), and
   the factorization status — the numbers a solver expert reads to diagnose
-  a bad step. `viz kkt` writes that report to an external viewer.
-  Captured only when a debugger is attached (zero solve overhead
-  otherwise); advertised via `hello.capabilities.kkt_inspect`. The full
-  KKT-matrix / L-factor *heatmap* still comes from `--dump kkt:*+L`.
+  a bad step. Captured only when a debugger is attached (zero solve
+  overhead otherwise); advertised via `hello.capabilities.kkt_inspect`.
+- **KKT matrix / L-factor heatmap:** `viz kkt` writes the assembled
+  augmented-system matrix as 1-based lower-triangle triplets (+ inertia
+  summary), and `viz L` writes the `LDLᵀ` factor (`perm` + strict-lower
+  triplets / values) — point `POUNCE_DBG_VIEWER` at a heatmap script.
+  `viz L` capture is opt-in (factor reconstruction is the expensive
+  piece): the first call arms it; the factor is available at the next
+  `after_search_dir` stop.
 - **Compound conditional breakpoints (pounce#72 §4):** `break if` now
   accepts `&&` / `||` between comparisons, evaluated left-to-right with no
   precedence (parentheses are stripped). E.g.

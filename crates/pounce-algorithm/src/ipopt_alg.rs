@@ -867,6 +867,7 @@ impl IpoptAlgorithm {
         // for the debugger before the line search runs. Only when a
         // debugger is installed — pulls nothing otherwise.
         if self.debug.is_some() {
+            let want_l = self.data.borrow().want_l_factor;
             let info = self.search_dir.as_ref().map(|sd| {
                 let pd = sd.pd_solver_mut();
                 let aug = pd.aug_solver();
@@ -876,6 +877,9 @@ impl IpoptAlgorithm {
                     n_neg: if provides { aug.number_of_neg_evals() } else { -1 },
                     provides_inertia: provides,
                     status: format!("{:?}", aug.last_solve_status()),
+                    matrix: aug.kkt_triplets(),
+                    // The factor is the expensive piece — only when asked.
+                    l_factor: if want_l { aug.l_factor(true) } else { None },
                 }
             });
             self.data.borrow_mut().kkt_debug = info;

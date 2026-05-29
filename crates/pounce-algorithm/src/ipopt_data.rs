@@ -42,6 +42,12 @@ pub struct KktDebug {
     pub provides_inertia: bool,
     /// Debug string of the last factorization status.
     pub status: String,
+    /// Assembled KKT triplets `(dim, irn, jcn, vals)`, 1-based lower
+    /// triangle — for `viz kkt`. Captured when a debugger is attached.
+    pub matrix: Option<(i32, Vec<i32>, Vec<i32>, Vec<f64>)>,
+    /// `LDLᵀ` factor pattern (+ values) — for `viz L`. Captured only
+    /// after the debugger opts in (it's the expensive piece).
+    pub l_factor: Option<pounce_linsol::FactorPattern>,
 }
 
 /// Mutable state passed down through the algorithm. Owned by
@@ -72,6 +78,9 @@ pub struct IpoptData {
     /// KKT-factorization diagnostics for the debugger (set after a
     /// search-direction solve when a debugger is installed).
     pub kkt_debug: Option<KktDebug>,
+    /// Set by the debugger to request the (expensive) `LDLᵀ` factor be
+    /// captured into `kkt_debug.l_factor` on the next solve.
+    pub want_l_factor: bool,
 
     /// Set after a successful trial-acceptance step in the line
     /// search. Cleared on accept.
@@ -151,6 +160,7 @@ impl IpoptData {
             tol: 1e-8,
             perturbations: PdPerturbations::default(),
             kkt_debug: None,
+            want_l_factor: false,
             info_alpha_primal: 0.0,
             info_alpha_dual: 0.0,
             info_regu_x: 0.0,
