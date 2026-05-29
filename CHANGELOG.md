@@ -57,6 +57,12 @@ program.
   a SIGINT handler that drops into the debugger at the next iteration; a
   second Ctrl-C aborts. Ctrl-C also breaks into any other debug mode
   mid-`continue` (at a rustyline prompt Ctrl-C stays a line-cancel).
+- **In-band async pause (pounce#72 §5):** a JSON client can also request a
+  pause by sending `{"cmd":"pause"}` on stdin *during* a `continue` (no
+  signals — works on Windows); the solve pauses at the next checkpoint
+  with `reason:"pause (requested)"`. A background stdin reader feeds the
+  command queue so the running loop can peek for it. Advertised via
+  `hello.capabilities.pause_command`.
 - **Progress events (pounce#72 §1):** in `--debug-json`, while running
   between pauses the debugger emits one `{"event":"progress",iter,mu,
   inf_pr,inf_du,obj}` per outer iteration, so a visual debugger isn't

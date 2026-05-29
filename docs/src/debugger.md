@@ -518,11 +518,17 @@ command.
 
 ### Async pause
 
-A running `continue` is interrupted by sending **SIGINT** to the process
-(`process.kill(pid, "SIGINT")`); the debugger pauses at the next
-checkpoint with `reason: "interrupt (Ctrl-C)"`. This is what a Debug
-Adapter's pause button maps to. (`hello.capabilities.async_pause` is
-`"checkpoint"`.)
+A running `continue` can be interrupted two ways, both pausing at the
+next checkpoint with a `reason`:
+
+- **SIGINT** — `process.kill(pid, "SIGINT")` (or Ctrl-C). This is what a
+  Debug Adapter's pause button maps to. Reason: `"interrupt (Ctrl-C)"`.
+- **In-band command** — send `{"cmd":"pause"}` on stdin while the solve
+  is running (JSON mode). No signals, so it works on Windows. Reason:
+  `"pause (requested)"`.
+
+`hello.capabilities.async_pause` is `"checkpoint"`, and
+`pause_command` is `true`.
 
 ---
 
@@ -605,7 +611,5 @@ for line in p.stdout:                # progress … pause … terminated
   (see [Running Solves](cli.md)).
 - **Soft rewind only.** `goto`/`restart` restore the primal-dual state,
   not strategy history (see the caveat above).
-- **Async pause is SIGINT-based.** An in-band `{"cmd":"pause"}` (for
-  platforms without convenient signals) is not yet wired.
 - **`set opt` is staged, not hot-applied** to a running solve; it takes
   effect on `resolve` / the next solve.
