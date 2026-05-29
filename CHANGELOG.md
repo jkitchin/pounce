@@ -325,17 +325,6 @@ End-to-end wiring of the upstream `nlp_scaling_*` and
   `analyze_gams_problem`, `parse_gams_listing`,
   `list_gams_examples`) plus an install script.
 
-### Changed
-
-- `pounce-qp::ParametricActiveSetSolver::solve_equality_plus_bounds`
-  now falls through to `solve_elastic` when the equality-relaxed
-  cold start violates a variable bound. Previously returned
-  `UnsupportedFeature`.
-- `optimize_sqp_tnlp` now populates `SolveStatistics`
-  (`iteration_count`, `final_dual_inf`, `final_constr_viol`,
-  `final_objective`) so `GetIpoptIterCount`, `info["iter_count"]`,
-  etc. report SQP-side numbers on the SQP path.
-
 ### Added — Parallel batched `pounce.jax.vmap_solve_parallel` + GIL release (pounce#74)
 
 `pounce_py::Problem::solve` now releases the Python GIL across the
@@ -395,6 +384,17 @@ Differentiable w.r.t. `p` via the same implicit-function rule as
 inputs are dropped (zero) — at the optimum the duals are a
 function of `p` and the active set, not an independent input to
 `dx*/dp`. `solve` itself is unchanged (non-breaking).
+
+### Changed
+
+- `pounce-qp::ParametricActiveSetSolver::solve_equality_plus_bounds`
+  now falls through to `solve_elastic` when the equality-relaxed
+  cold start violates a variable bound. Previously returned
+  `UnsupportedFeature`.
+- `optimize_sqp_tnlp` now populates `SolveStatistics`
+  (`iteration_count`, `final_dual_inf`, `final_constr_viol`,
+  `final_objective`) so `GetIpoptIterCount`, `info["iter_count"]`,
+  etc. report SQP-side numbers on the SQP path.
 
 ### Fixed
 
