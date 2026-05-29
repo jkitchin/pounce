@@ -254,6 +254,52 @@ explicitly:
 jp.clear_solver_cache()
 ```
 
+#### Off-thread dispatch (training loops, `jit(value_and_grad(...))`)
+
+`pounce.Solver` is a `!Send` PyO3 type (it holds an
+`Rc<RefCell<dyn TNLP>>` interior), so any attempt to touch the held
+factor from a thread other than the one that built it raises a PyO3
+panic. JAX hits this whenever the bwd `pure_callback` lands on an XLA
+worker thread — typical for `jax.jit(jax.value_and_grad(...))` inside
+a training step.
+
+`JaxProblem(factor_reuse=True)` defends against this by routing every
+`pounce.Solver` interaction (fwd register, warm-start solve, batched
+solve, bwd `kkt_solve`) through a dedicated single-thread
+`ThreadPoolExecutor` owned by the `JaxProblem` (pounce#77). All solver
+touches are pinned to that one worker thread regardless of which
+thread JAX dispatches from. `vmap_solve_parallel` bypasses the pin
+(it doesn't register with the factor cache), so its B-way thread
+concurrency is preserved.
+
+#### Pickle / distributed training
+
+`JaxProblem` round-trips through `pickle.dumps` / `pickle.loads`, so
+it works with the realistic distributed-training paths:
+
+* `multiprocessing(start_method='spawn')` — the default on macOS and
+  what `torch.utils.data.DataLoader(num_workers>0)` uses;
+* Ray and Dask actors via `cloudpickle`;
+* Naive checkpointing for resume.
+
+The per-process runtime state (JIT'd closures, `threading.Lock`,
+`threading.local`, the factor-reuse executor, the held LDLᵀ factor
+registry) is dropped from the pickle and rebuilt on the receiving
+side. The sparsity-pattern arrays survive the round trip, so the
+worker doesn't redo the one-shot JAX probe. Held factors do not
+survive — a fresh process has no history of fwd solves, so the
+receiver's registry starts empty and the bwd factor-reuse path picks
+up from the next solve.
+
+User-side requirement: `f` and `g` must themselves be picklable.
+Module-level functions work with stdlib pickle; lambdas / inner
+functions need `cloudpickle` (which is what Ray, Dask, and
+`torch.multiprocessing` use by default anyway).
+
+`multiprocessing(start_method='fork')` is *not* supported — JAX
+itself warns that `os.fork()` is incompatible with its threading;
+use `spawn` instead.
+
 ### Stacked block-diagonal batched solve (`batched_solve`)
 
 `JaxProblem.batched_solve(p_batch, x0)` runs *one* IPM solve over a
