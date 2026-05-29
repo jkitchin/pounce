@@ -92,6 +92,10 @@ pub struct Args {
     /// that drops into the debugger at the next iteration. No automatic
     /// pauses. Implies `--debug` (REPL) when no `--debug*` mode is given.
     pub debug_on_interrupt: bool,
+    /// `--debug-script <file>` — run debugger commands from a file at the
+    /// first pause (e.g. set breakpoints then `continue`). Implies
+    /// `--debug` when no `--debug*` mode is given.
+    pub debug_script: Option<PathBuf>,
 }
 
 /// Front end for the interactive solver debugger (`--debug*`).
@@ -164,6 +168,9 @@ Options:
                             drops into the debugger at the next iteration
                             (second Ctrl-C aborts). Implies --debug when no
                             --debug* mode is given.
+  --debug-script <file>     run debugger commands from a file at the first
+                            pause (e.g. set breakpoints then continue).
+                            Implies --debug when no --debug* mode is given.
   --list-problems           print available built-in problems and exit
   -AMPL                     AMPL solver-protocol mode (for Pyomo / AMPL
                             drivers): convey termination via the .sol
@@ -221,6 +228,7 @@ Options:
         let mut debug: Option<DebugMode> = None;
         let mut debug_on_error = false;
         let mut debug_on_interrupt = false;
+        let mut debug_script: Option<PathBuf> = None;
 
         let mut it = argv.into_iter().skip(1);
         while let Some(arg) = it.next() {
@@ -304,6 +312,12 @@ Options:
                 "--debug-json" => debug = Some(DebugMode::Json),
                 "--debug-on-error" => debug_on_error = true,
                 "--debug-on-interrupt" => debug_on_interrupt = true,
+                "--debug-script" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--debug-script requires a value".to_string())?;
+                    debug_script = Some(PathBuf::from(v));
+                }
                 "--compute-red-hessian" => compute_red_hessian = true,
                 "--rh-eigendecomp" => {
                     rh_eigendecomp = true;
@@ -335,9 +349,9 @@ Options:
             std::process::exit(0);
         }
 
-        // `--debug-on-error` / `--debug-on-interrupt` without an explicit
-        // mode imply the REPL.
-        if (debug_on_error || debug_on_interrupt) && debug.is_none() {
+        // `--debug-on-error` / `--debug-on-interrupt` / `--debug-script`
+        // without an explicit mode imply the REPL.
+        if (debug_on_error || debug_on_interrupt || debug_script.is_some()) && debug.is_none() {
             debug = Some(DebugMode::Repl);
         }
 
@@ -367,6 +381,7 @@ Options:
                 debug,
                 debug_on_error,
                 debug_on_interrupt,
+                debug_script,
             });
         }
 
@@ -392,6 +407,7 @@ Options:
             debug,
             debug_on_error,
             debug_on_interrupt,
+            debug_script,
         })
     }
 }

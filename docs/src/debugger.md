@@ -191,7 +191,14 @@ print x              # a primal/dual block (alias: p x)
 print dx             # a search-direction block (d + block name)
 print mu             # a scalar: mu|obj|inf_pr|inf_du|err|iter
 print kkt            # KKT inertia + regularization (see below)
+watch mu             # auto-print a target at every pause (alias: display)
+watch                # list watches; watch del mu; watch clear
 ```
+
+`watch <target>` registers any `print` target (block, `dx`, scalar,
+`kkt`) to be shown automatically at every subsequent pause — the
+debugger's equivalent of gdb's `display`. In JSON mode the values arrive
+in the pause event's `watches` array.
 
 **Blocks** (the eight components of the primal-dual iterate):
 
@@ -386,6 +393,32 @@ You don't have to single-step from iteration 0.
 
 ---
 
+## Scripting
+
+Run a sequence of debugger commands from a file — one per line, `#` and
+`//` comments and blank lines skipped:
+
+```text
+# warmup.pdbg
+break if inf_pr<1e-6
+watch mu
+stop-at after_search_dir
+continue
+```
+
+```sh
+pounce problem.nl --debug-script warmup.pdbg        # run at the first pause
+```
+
+```text
+pounce-dbg> source warmup.pdbg                       # or interactively
+```
+
+A script runs top-to-bottom and stops early if a command resumes or
+stops the solve (so ending with `continue` hands control back at the
+first breakpoint). `--debug-script` implies `--debug` when no `--debug*`
+mode is given, and runs once at the first pause (not on a `resolve`).
+
 ## Exit model
 
 | Path | Result |
@@ -418,6 +451,8 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `complete <prefix>` | completion candidates |
 | `viz <target>` | open an artifact in a viewer |
 | `save [path]` | dump the iterate to JSON |
+| `watch <target>` (`display`) | auto-print a target at every pause |
+| `source <file>` | run debugger commands from a file |
 | `goto N` / `restart` | soft-rewind to a captured iteration |
 | `resolve` | re-solve from current x with staged options |
 | `ask [question]` | ask Claude Code (`claude -p` / `$POUNCE_DBG_LLM`) about the state |

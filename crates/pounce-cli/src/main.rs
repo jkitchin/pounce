@@ -112,6 +112,7 @@ pub fn main() -> ExitCode {
             mode,
             args.debug_on_error,
             args.debug_on_interrupt,
+            args.debug_script.as_deref(),
             reg,
             restart_cell.clone(),
         )));
@@ -523,10 +524,13 @@ pub fn main() -> ExitCode {
         )));
         if let Some(mode) = args.debug {
             let reg = Some(std::rc::Rc::clone(app.registered_options()));
+            // No script on re-solve — it ran once at the original first
+            // pause; the user now drives the re-solve interactively.
             app.set_debug_hook(Box::new(build_debugger(
                 mode,
                 args.debug_on_error,
                 args.debug_on_interrupt,
+                None,
                 reg,
                 restart_cell.clone(),
             )));
@@ -736,6 +740,7 @@ fn build_debugger(
     mode: pounce_cli::cli::DebugMode,
     on_error: bool,
     on_interrupt: bool,
+    script: Option<&std::path::Path>,
     reg: Option<Rc<pounce_common::reg_options::RegisteredOptions>>,
     cell: pounce_cli::debug_repl::RestartCell,
 ) -> pounce_cli::debug_repl::SolverDebugger {
@@ -746,8 +751,12 @@ fn build_debugger(
         SolverDebugger::on_interrupt(mode, reg)
     } else {
         SolverDebugger::new(mode, reg)
-    };
-    dbg.with_restart(cell)
+    }
+    .with_restart(cell);
+    match script {
+        Some(p) => dbg.with_script(p.to_string_lossy().into_owned()),
+        None => dbg,
+    }
 }
 
 /// Translate the CLI's `--dump …` flags into a live `DiagnosticsState`.

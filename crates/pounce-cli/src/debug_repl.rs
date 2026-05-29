@@ -57,7 +57,8 @@ use std::rc::Rc;
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
     "help", "info", "print", "step", "stepi", "continue", "run", "break", "stop-at", "set", "opt",
-    "complete", "viz", "save", "goto", "restart", "resolve", "ask", "progress", "detach", "quit",
+    "complete", "viz", "save", "goto", "restart", "resolve", "ask", "watch", "source", "progress",
+    "detach", "quit",
 ];
 
 /// Events a user can `break on` (advertised in `hello.events`). Each is
@@ -155,6 +156,7 @@ pub mod interrupt {
 }
 
 /// What to do after a command runs.
+#[derive(Clone, Copy)]
 enum Flow {
     /// Stay paused; keep reading commands.
     Stay,
@@ -417,7 +419,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["break", "if"] | ["b", "if"] => starts(METRICS),
         ["break", "on"] | ["b", "on"] => starts(EVENTS),
         ["break"] | ["b"] => starts(&["if", "on", "clear", "del"]),
-        ["print"] | ["p"] => {
+        ["print"] | ["p"] | ["watch"] | ["display"] => {
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
                 "mu", "obj", "inf_pr", "inf_du", "err", "iter", "kkt",
@@ -518,6 +520,12 @@ pub struct SolverDebugger {
     /// Background stdin reader (JSON mode) enabling async `{"cmd":"pause"}`
     /// during a run. `None` in REPL mode.
     pump: Option<StdinPump>,
+    /// Expressions to auto-print at every pause (`watch`). Each is a
+    /// `print` target (block, `dx`, scalar, `kkt`).
+    watches: Vec<String>,
+    /// A debugger script (file path) to run once at the first pause
+    /// (`--debug-script`); consumed on use.
+    pending_script: Option<String>,
     /// Option edits accepted at the prompt. Validated against the
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
@@ -552,8 +560,16 @@ impl SolverDebugger {
             editor: None,
             hist_path: None,
             pump: None,
+            watches: Vec::new(),
+            pending_script: None,
             staged: Vec::new(),
         }
+    }
+
+    /// Queue a debugger script to run once at the first pause.
+    pub fn with_script(mut self, path: String) -> Self {
+        self.pending_script = Some(path);
+        self
     }
 
     /// Enable the `resolve` command, wiring the shared restart slot the
@@ -716,6 +732,8 @@ impl SolverDebugger {
             },
             "resolve" | "re-solve" => self.cmd_resolve(ctx),
             "ask" | "explain" | "claude" => self.cmd_ask(rest, ctx),
+            "watch" | "display" => self.cmd_watch(rest),
+            "source" => self.cmd_source(rest, ctx),
             "detach" => {
                 self.detached = true;
                 self.step = false;
@@ -758,6 +776,8 @@ impl SolverDebugger {
             "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
             "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
+            "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
+            "  source <file>            run debugger commands from a file".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
         ];
@@ -1296,6 +1316,65 @@ impl SolverDebugger {
         }
     }
 
+    /// `watch [target|clear|del <target>]` — auto-print a `print` target
+    /// (block, `dx`, scalar, `kkt`) at every pause.
+    fn cmd_watch(&mut self, rest: &[&str]) -> CmdOut {
+        match rest {
+            [] => CmdOut::ok(vec![format!("watches: {:?}", self.watches)])
+                .with_data(serde_json::json!({"watches": self.watches})),
+            ["clear"] => {
+                self.watches.clear();
+                CmdOut::ok(vec!["cleared watches".into()])
+            }
+            ["del", w] | ["delete", w] => {
+                self.watches.retain(|x| x != w);
+                CmdOut::ok(vec![format!("unwatched {w}")])
+            }
+            [w] => {
+                let w = w.to_string();
+                if !self.watches.contains(&w) {
+                    self.watches.push(w.clone());
+                }
+                CmdOut::ok(vec![format!("watching {w}")])
+            }
+            _ => CmdOut::err("usage: watch [<target> | clear | del <target>]"),
+        }
+    }
+
+    /// `source <file>` — run debugger commands from a file (one per line;
+    /// `#` comments and blank lines skipped). Stops early if a command
+    /// resumes or stops the solve, propagating that control flow.
+    fn cmd_source(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        let Some(&path) = rest.first() else {
+            return CmdOut::err("usage: source <file>");
+        };
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return CmdOut::err(format!("cannot read `{path}`: {e}")),
+        };
+        let mut lines = Vec::new();
+        let mut flow = Flow::Stay;
+        for raw in content.lines() {
+            let cmd = raw.trim();
+            if cmd.is_empty() || cmd.starts_with('#') || cmd.starts_with("//") {
+                continue;
+            }
+            lines.push(format!("[source] {cmd}"));
+            let out = self.dispatch(cmd, ctx);
+            lines.extend(out.lines);
+            if !matches!(out.flow, Flow::Stay) {
+                flow = out.flow;
+                break;
+            }
+        }
+        CmdOut {
+            ok: true,
+            lines,
+            data: None,
+            flow,
+        }
+    }
+
     fn cmd_viz(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
@@ -1387,8 +1466,22 @@ impl SolverDebugger {
                 if let Some(r) = reason {
                     eprintln!("   ↳ {r}");
                 }
+                for w in &self.watches {
+                    let out = self.cmd_print(&[w.as_str()], ctx);
+                    for l in &out.lines {
+                        eprintln!("   watch {l}");
+                    }
+                }
             }
             DebugMode::Json => {
+                let watches: Vec<serde_json::Value> = self
+                    .watches
+                    .iter()
+                    .map(|w| {
+                        let out = self.cmd_print(&[w.as_str()], ctx);
+                        serde_json::json!({"expr": w, "ok": out.ok, "output": out.lines, "data": out.data})
+                    })
+                    .collect();
                 let dims: serde_json::Map<String, serde_json::Value> = ctx
                     .block_dims()
                     .into_iter()
@@ -1409,6 +1502,7 @@ impl SolverDebugger {
                     "breakpoints": self.breaks,
                     "conditions": conds,
                     "reason": reason,
+                    "watches": watches,
                 });
                 emit_json(&ev);
             }
@@ -1618,7 +1712,11 @@ impl StdinPump {
         let mut q = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             match q.front() {
-                None => q = cv.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner),
+                None => {
+                    q = cv
+                        .wait(q)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                }
                 Some(None) => return None, // EOF — leave sentinel in place
                 Some(Some(_)) => return q.pop_front().flatten(),
             }
@@ -1740,6 +1838,17 @@ impl DebugHook for SolverDebugger {
 impl SolverDebugger {
     /// Read and dispatch commands until one resumes or stops the solve.
     fn prompt_loop(&mut self, ctx: &mut DebugCtx) -> DebugAction {
+        // Run a `--debug-script` once, at the first pause, before reading
+        // any interactive command. It may itself resume / stop the solve.
+        if let Some(path) = self.pending_script.take() {
+            let out = self.cmd_source(&[path.as_str()], ctx);
+            self.emit_result("source", &out, None);
+            match out.flow {
+                Flow::Resume => return DebugAction::Resume,
+                Flow::Stop => return DebugAction::Stop,
+                Flow::Stay => {}
+            }
+        }
         loop {
             let line = match self.next_command_line() {
                 Some(l) => l,

@@ -125,6 +125,14 @@ program.
   regularization) into a prompt and runs it through Claude Code
   (`claude -p`, headless) — or any CLI set via `POUNCE_DBG_LLM` — printing
   the reply inline (`data.reply` in JSON mode).
+- **Watch expressions:** `watch <target>` (alias `display`) auto-prints a
+  `print` target (block, `dx`, scalar, `kkt`) at every pause — gdb's
+  `display`. In JSON mode the values arrive in the pause event's
+  `watches` array.
+- **Scripting:** `source <file>` runs debugger commands from a file (one
+  per line; `#`/`//` comments), and `--debug-script <file>` runs one at
+  the first pause — reproducible debug sessions (set breakpoints +
+  `continue`).
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
   JSON channel — the banner, problem-stats block, and final summary are
   routed to stderr — so a GUI / IDE front end can consume it line by
