@@ -53,6 +53,10 @@ program.
   a post-mortem at the failing iterate. The terminal checkpoint also
   fires in normal `--debug` (final-point inspect); JSON `pause` events
   gain `checkpoint:"terminated"` + `status`.
+- **Attach via Ctrl-C (`--debug-on-interrupt`):** run normally but install
+  a SIGINT handler that drops into the debugger at the next iteration; a
+  second Ctrl-C aborts. Ctrl-C also breaks into any other debug mode
+  mid-`continue` (at a rustyline prompt Ctrl-C stays a line-cancel).
 - **Soft rewind (`goto <k>` / `restart`):** the debugger snapshots the
   primal-dual state (iterate + μ + τ) every iteration (cheap — the
   iterate is an immutable `Rc`; capped at 2000, oldest evicted), and

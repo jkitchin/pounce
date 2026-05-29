@@ -70,6 +70,54 @@ fn is_success_status(s: &str) -> bool {
     matches!(s, "Success" | "StopAtAcceptablePoint")
 }
 
+/// SIGINT → "break into the debugger at the next iteration". A first
+/// Ctrl-C sets a pending flag the hook consumes at the next checkpoint;
+/// a second Ctrl-C before that (or any Ctrl-C once detached) hard-exits,
+/// preserving the usual "abort" escape hatch.
+///
+/// At a rustyline prompt the terminal is in raw mode, so Ctrl-C arrives
+/// as input (handled as `Interrupted`, reprompt) rather than as SIGINT —
+/// this handler only fires while the solve is running.
+pub mod interrupt {
+    use nix::sys::signal::{self, SigHandler, Signal};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn handler(_sig: nix::libc::c_int) {
+        // `swap` returns the previous value: if a break was already
+        // pending and unconsumed, the user pressed Ctrl-C twice — abort.
+        if PENDING.swap(true, Ordering::SeqCst) {
+            // _exit is async-signal-safe; 130 = 128 + SIGINT.
+            unsafe { nix::libc::_exit(130) };
+        }
+    }
+
+    /// Install the handler once (idempotent). Call only when a debugger
+    /// is active, so a normal run keeps default Ctrl-C behavior.
+    pub fn install() {
+        if INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // SAFETY: `handler` only touches an atomic and `_exit`.
+        unsafe {
+            let _ = signal::signal(Signal::SIGINT, SigHandler::Handler(handler));
+        }
+    }
+
+    /// Consume a pending break request (clears it).
+    pub fn take() -> bool {
+        PENDING.swap(false, Ordering::SeqCst)
+    }
+
+    /// Test-only: simulate a Ctrl-C without raising a real signal.
+    #[cfg(test)]
+    pub fn set_pending_for_test() {
+        PENDING.store(true, Ordering::SeqCst);
+    }
+}
+
 /// What to do after a command runs.
 enum Flow {
     /// Stay paused; keep reading commands.
@@ -328,6 +376,8 @@ pub struct SolverDebugger {
     pause_terminal: bool,
     /// At the terminal checkpoint, pause only when the solve failed.
     terminal_only_on_error: bool,
+    /// Honor a pending SIGINT (Ctrl-C) by pausing at the next iteration.
+    interruptible: bool,
     /// Per-iteration primal-dual snapshots for `goto`/`restart`, keyed by
     /// iteration index. Capped at [`SNAPSHOT_CAP`] (oldest evicted).
     snapshots: BTreeMap<i32, IterateSnapshot>,
@@ -361,6 +411,7 @@ impl SolverDebugger {
             pause_iters: true,
             pause_terminal: true,
             terminal_only_on_error: false,
+            interruptible: true,
             snapshots: BTreeMap::new(),
             editor: None,
             hist_path: None,
@@ -375,6 +426,18 @@ impl SolverDebugger {
             step: false,
             pause_iters: false,
             terminal_only_on_error: true,
+            ..Self::new(mode, reg)
+        }
+    }
+
+    /// Attach-on-demand: run normally and only drop in when the user
+    /// presses Ctrl-C (`--debug-on-interrupt`). No automatic iter or
+    /// terminal pauses.
+    pub fn on_interrupt(mode: DebugMode, reg: Option<Rc<RegisteredOptions>>) -> Self {
+        Self {
+            step: false,
+            pause_iters: false,
+            pause_terminal: false,
             ..Self::new(mode, reg)
         }
     }
@@ -1107,29 +1170,40 @@ impl DebugHook for SolverDebugger {
         if let Some(snap) = ctx.snapshot() {
             self.snapshots.insert(snap.iter(), snap);
             while self.snapshots.len() > SNAPSHOT_CAP {
-                let oldest = *self.snapshots.keys().next().unwrap();
+                let Some(&oldest) = self.snapshots.keys().next() else {
+                    break;
+                };
                 self.snapshots.remove(&oldest);
             }
         }
 
+        // A pending Ctrl-C forces a pause regardless of `pause_iters`.
+        let interrupted = self.interruptible && interrupt::take();
+
         let iter = ctx.iter();
         // `should_pause` covers step / run / numeric breakpoints (and
         // disarms `run_to`); conditional breakpoints are evaluated
-        // against the live state separately. `--debug-on-error` keeps
-        // `pause_iters` false so we never stop here.
+        // against the live state separately. `--debug-on-error` /
+        // `--debug-on-interrupt` keep `pause_iters` false so we only
+        // stop here on a Ctrl-C.
         let num_hit = self.pause_iters && self.should_pause(iter);
         let cond_hit = if self.pause_iters {
             self.matched_condition(ctx)
         } else {
             None
         };
-        if !num_hit && cond_hit.is_none() {
+        if !interrupted && !num_hit && cond_hit.is_none() {
             return DebugAction::Resume;
         }
         // Consume the one-shot step arming; commands re-arm as needed.
         self.step = false;
         self.ensure_editor();
-        self.emit_pause(ctx, cond_hit.as_deref());
+        let reason = cond_hit.as_deref().or(if interrupted {
+            Some("interrupt (Ctrl-C)")
+        } else {
+            None
+        });
+        self.emit_pause(ctx, reason);
         self.prompt_loop(ctx)
     }
 }
@@ -1425,6 +1499,22 @@ mod tests {
         assert!(CmpOp::Ge.eval(2.0, 2.0));
         assert!(CmpOp::Eq.eval(2.0, 2.0));
         assert!(!CmpOp::Eq.eval(2.0, 2.5));
+    }
+
+    #[test]
+    fn interrupt_is_consumed_once() {
+        interrupt::set_pending_for_test();
+        assert!(interrupt::take(), "first take sees the pending Ctrl-C");
+        assert!(!interrupt::take(), "second take is clear (consumed once)");
+    }
+
+    #[test]
+    fn on_interrupt_constructor_runs_free_but_interruptible() {
+        let d = SolverDebugger::on_interrupt(DebugMode::Repl, None);
+        assert!(!d.pause_iters, "on-interrupt does not pause each iter");
+        assert!(!d.pause_terminal, "on-interrupt does not pause at terminal");
+        assert!(d.interruptible, "on-interrupt honors Ctrl-C");
+        assert!(!d.step, "on-interrupt starts un-armed");
     }
 
     #[test]

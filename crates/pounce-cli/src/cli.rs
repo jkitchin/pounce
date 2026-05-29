@@ -88,6 +88,10 @@ pub struct Args {
     /// *if the solve did not succeed*, for a post-mortem at the failing
     /// iterate. Implies `--debug` (REPL) when no `--debug*` mode is given.
     pub debug_on_error: bool,
+    /// `--debug-on-interrupt` — run normally but install a Ctrl-C handler
+    /// that drops into the debugger at the next iteration. No automatic
+    /// pauses. Implies `--debug` (REPL) when no `--debug*` mode is given.
+    pub debug_on_interrupt: bool,
 }
 
 /// Front end for the interactive solver debugger (`--debug*`).
@@ -156,6 +160,10 @@ Options:
                             drop into the debugger only if the solve fails,
                             for a post-mortem at the final iterate. Implies
                             --debug when no --debug* mode is given.
+  --debug-on-interrupt      run normally but install a Ctrl-C handler that
+                            drops into the debugger at the next iteration
+                            (second Ctrl-C aborts). Implies --debug when no
+                            --debug* mode is given.
   --list-problems           print available built-in problems and exit
   -AMPL                     AMPL solver-protocol mode (for Pyomo / AMPL
                             drivers): convey termination via the .sol
@@ -212,6 +220,7 @@ Options:
         let mut rh_eigendecomp = false;
         let mut debug: Option<DebugMode> = None;
         let mut debug_on_error = false;
+        let mut debug_on_interrupt = false;
 
         let mut it = argv.into_iter().skip(1);
         while let Some(arg) = it.next() {
@@ -294,6 +303,7 @@ Options:
                 "--debug" => debug = Some(DebugMode::Repl),
                 "--debug-json" => debug = Some(DebugMode::Json),
                 "--debug-on-error" => debug_on_error = true,
+                "--debug-on-interrupt" => debug_on_interrupt = true,
                 "--compute-red-hessian" => compute_red_hessian = true,
                 "--rh-eigendecomp" => {
                     rh_eigendecomp = true;
@@ -325,8 +335,9 @@ Options:
             std::process::exit(0);
         }
 
-        // `--debug-on-error` without an explicit mode implies the REPL.
-        if debug_on_error && debug.is_none() {
+        // `--debug-on-error` / `--debug-on-interrupt` without an explicit
+        // mode imply the REPL.
+        if (debug_on_error || debug_on_interrupt) && debug.is_none() {
             debug = Some(DebugMode::Repl);
         }
 
@@ -355,6 +366,7 @@ Options:
                 rh_eigendecomp,
                 debug,
                 debug_on_error,
+                debug_on_interrupt,
             });
         }
 
@@ -379,6 +391,7 @@ Options:
             rh_eigendecomp,
             debug,
             debug_on_error,
+            debug_on_interrupt,
         })
     }
 }

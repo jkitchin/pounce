@@ -46,6 +46,9 @@ log = "0.4"
 # Ctrl-R search, and Tab completion. Only used on an interactive TTY;
 # piped input and `--debug-json` fall back to a plain line reader.
 rustyline = { version = "14", features = ["derive"] }
+# SIGINT handler so Ctrl-C during a debug run breaks into the debugger
+# at the next iteration (second Ctrl-C aborts). Already in the tree.
+nix = { version = "0.28", features = ["signal"] }
 
 [features]
 default = []

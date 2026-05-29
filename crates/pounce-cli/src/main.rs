@@ -107,21 +107,30 @@ pub fn main() -> ExitCode {
         let reg = Some(std::rc::Rc::clone(app.registered_options()));
         let dbg = if args.debug_on_error {
             pounce_cli::debug_repl::SolverDebugger::on_error(mode, reg)
+        } else if args.debug_on_interrupt {
+            pounce_cli::debug_repl::SolverDebugger::on_interrupt(mode, reg)
         } else {
             pounce_cli::debug_repl::SolverDebugger::new(mode, reg)
         };
         app.set_debug_hook(Box::new(dbg));
+        // Install the Ctrl-C → break-into-debugger handler. All debug
+        // modes are interruptible; this only changes Ctrl-C behavior
+        // when a debugger is active.
+        pounce_cli::debug_repl::interrupt::install();
+        let extra = if args.debug_on_error {
+            ", on-error"
+        } else if args.debug_on_interrupt {
+            ", on-interrupt"
+        } else {
+            ""
+        };
         eprintln!(
-            "pounce: interactive debugger enabled ({}{}). Type `help` at the prompt.",
+            "pounce: interactive debugger enabled ({}{}). Type `help` at the prompt; Ctrl-C breaks in.",
             match mode {
                 pounce_cli::cli::DebugMode::Repl => "repl",
                 pounce_cli::cli::DebugMode::Json => "json",
             },
-            if args.debug_on_error {
-                ", on-error"
-            } else {
-                ""
-            }
+            extra
         );
     }
 

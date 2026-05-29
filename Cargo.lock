@@ -417,6 +417,7 @@ version = "0.2.0"
 dependencies = [
  "libloading",
  "log",
+ "nix",
  "pounce-algorithm",
  "pounce-common",
  "pounce-feral",
