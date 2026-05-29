@@ -174,11 +174,11 @@ pub struct IpoptAlgorithm {
     /// advances the state's iter counter and the augmented-system
     /// solver consults it to gate KKT dumps.
     diagnostics: Option<Rc<DiagnosticsState>>,
-    /// Optional interactive debugger. When installed, the outer loop
-    /// fires it at every [`crate::debug::Checkpoint`] (today: the top
-    /// of each iteration) so a REPL or agent can inspect and mutate
-    /// live state before the next Newton step. See `crate::debug`.
-    debug: Option<Box<dyn crate::debug::DebugHook>>,
+    /// Optional interactive debugger. Shared (`Rc<RefCell<…>>`) so the
+    /// same debugger instance also drives the restoration inner IPM —
+    /// one debugger sees both levels. Fired at every
+    /// [`crate::debug::Checkpoint`]. See `crate::debug`.
+    debug: Option<Rc<RefCell<dyn crate::debug::DebugHook>>>,
 
     // ---- Restoration-phase audit counters (pounce#12). ----
     //
@@ -366,9 +366,15 @@ impl IpoptAlgorithm {
     /// Install an interactive debugger hook. Fired at each checkpoint
     /// in [`Self::optimize`]; returning [`crate::debug::DebugAction::Stop`]
     /// ends the solve with `SolverReturn::UserRequestedStop`.
-    pub fn with_debug_hook(mut self, hook: Box<dyn crate::debug::DebugHook>) -> Self {
+    pub fn with_debug_hook(mut self, hook: Rc<RefCell<dyn crate::debug::DebugHook>>) -> Self {
         self.debug = Some(hook);
         self
+    }
+
+    /// Shared handle to the installed debugger, if any — used to forward
+    /// it into the restoration inner IPM.
+    pub fn debug_hook(&self) -> Option<Rc<RefCell<dyn crate::debug::DebugHook>>> {
+        self.debug.as_ref().map(Rc::clone)
     }
 
     /// Fire the debugger hook (if installed) at `cp`, building a live
@@ -376,11 +382,11 @@ impl IpoptAlgorithm {
     /// requested action, defaulting to `Resume` when no hook is set.
     fn fire_debug(&mut self, cp: crate::debug::Checkpoint) -> crate::debug::DebugAction {
         use crate::debug::{DebugAction, DebugCtx};
-        let Some(hook) = self.debug.as_mut() else {
+        let Some(hook) = self.debug.as_ref() else {
             return DebugAction::Resume;
         };
         let mut ctx = DebugCtx::new(Rc::clone(&self.data), Rc::clone(&self.cq), cp);
-        hook.at_checkpoint(&mut ctx)
+        hook.borrow_mut().at_checkpoint(&mut ctx)
     }
 
     /// Run the restoration phase, bracketed by the `PreRestoration` /
@@ -418,7 +424,7 @@ impl IpoptAlgorithm {
     /// `result` regardless — so the hook just gets a last look.
     fn fire_debug_terminal(&mut self, result: SolverReturn) {
         use crate::debug::{Checkpoint, DebugCtx};
-        let Some(hook) = self.debug.as_mut() else {
+        let Some(hook) = self.debug.as_ref() else {
             return;
         };
         let mut ctx = DebugCtx::new(
@@ -427,7 +433,7 @@ impl IpoptAlgorithm {
             Checkpoint::Terminated,
         )
         .with_status(format!("{result:?}"));
-        let _ = hook.at_checkpoint(&mut ctx);
+        let _ = hook.borrow_mut().at_checkpoint(&mut ctx);
     }
 
     /// One iteration body — port of `Optimize()`'s inner loop.
@@ -874,7 +880,11 @@ impl IpoptAlgorithm {
                 let provides = aug.provides_inertia();
                 crate::ipopt_data::KktDebug {
                     dim: aug.system_dim(),
-                    n_neg: if provides { aug.number_of_neg_evals() } else { -1 },
+                    n_neg: if provides {
+                        aug.number_of_neg_evals()
+                    } else {
+                        -1
+                    },
                     provides_inertia: provides,
                     status: format!("{:?}", aug.last_solve_status()),
                     matrix: aug.kkt_triplets(),
@@ -1238,6 +1248,8 @@ impl IpoptAlgorithm {
             return IterateOutcome::Terminate(SolverReturn::RestorationFailure);
         };
         resto.set_orig_progress_check(orig_progress_cb);
+        // Forward the shared debugger so it can step the inner solve.
+        resto.set_debug_hook(self.debug.as_ref().map(Rc::clone));
         let mut pd_guard = sd.pd_solver_mut();
         let aug = pd_guard.aug_solver_mut();
         // Audit counters (pounce#12). Increment call count + outer-iter

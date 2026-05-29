@@ -349,7 +349,12 @@ impl AugSystemSolver for StdAugSystemSolver {
         if self.irn.is_empty() {
             return None;
         }
-        Some((self.dim, self.irn.clone(), self.jcn.clone(), self.vals.clone()))
+        Some((
+            self.dim,
+            self.irn.clone(),
+            self.jcn.clone(),
+            self.vals.clone(),
+        ))
     }
 
     fn l_factor(&self, want_values: bool) -> Option<FactorPattern> {

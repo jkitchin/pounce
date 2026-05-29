@@ -77,7 +77,7 @@ pub fn make_resto_inner_solver(
     mut backend_factory_factory: InnerBackendFactoryFactory,
 ) -> crate::min_c_1nrm::RestoInnerSolver {
     Box::new(
-        move |outer_data, outer_cq, outer_nlp, orig_progress_cb, print_iter_output| {
+        move |outer_data, outer_cq, outer_nlp, orig_progress_cb, print_iter_output, debug_hook| {
             run_inner_resto(
                 outer_data,
                 outer_cq,
@@ -87,6 +87,7 @@ pub fn make_resto_inner_solver(
                 backend_factory_factory(),
                 orig_progress_cb,
                 print_iter_output,
+                debug_hook,
             )
         },
     )
@@ -168,6 +169,7 @@ pub fn run_inner_resto(
     backend_factory: LinearBackendFactory,
     orig_progress_cb: Option<pounce_algorithm::restoration::OrigProgressCallback>,
     print_iter_output: bool,
+    debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
 ) -> Option<RestoSolveResult> {
     // ---- 1. Snapshot outer iterate. ---------------------------------
     let snap = build_outer_snapshot(outer_data, outer_cq)?;
@@ -403,6 +405,11 @@ pub fn run_inner_resto(
     let mut alg = IpoptAlgorithm::new(inner_data, inner_cq, alg_bundle)
         .with_nlp(Rc::clone(&resto_nlp_rc))
         .with_restoration(resto_of_resto);
+    // Forward the shared debugger so the same session can step the inner
+    // restoration solve (its DebugCtx exposes the resto sub-NLP iterate).
+    if let Some(h) = debug_hook {
+        alg = alg.with_debug_hook(h);
+    }
     // Forward the outer `print_level == 0` gate. Suppresses the
     // restoration `r`-suffixed iter table; the resto-of-resto level
     // also inherits the same flag (its `RestorationPhase` impl is the

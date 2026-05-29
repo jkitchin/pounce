@@ -162,6 +162,12 @@ program.
   auto-run command list to the breakpoint at iteration N (e.g.
   `commands 5 set mu 0.1 ; continue`). On hit, the list runs automatically
   and a flow command (`continue`/`step`) resumes without prompting.
+- **Restoration inner-loop stepping:** the debugger hook is now shared
+  (`Rc<RefCell<…>>`) with the restoration inner IPM, so the same session
+  steps *into* the restoration sub-solve. Inner pauses are flagged
+  `in_restoration: true` (REPL `[restoration]` tag); `print x` there
+  shows the restoration sub-NLP iterate. Purely additive — no debugger,
+  no change to the restoration path (regression suites unchanged).
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*
   JSON channel — the banner, problem-stats block, and final summary are
   routed to stderr — so a GUI / IDE front end can consume it line by

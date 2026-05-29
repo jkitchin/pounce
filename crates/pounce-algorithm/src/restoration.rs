@@ -87,6 +87,14 @@ pub trait RestorationPhase {
         RestorationOutcome::Failed
     }
 
+    /// Forward the outer interactive debugger onto the restoration inner
+    /// IPM so the same debugger can step the sub-solve. Default no-op.
+    fn set_debug_hook(
+        &mut self,
+        _hook: Option<std::rc::Rc<std::cell::RefCell<dyn crate::debug::DebugHook>>>,
+    ) {
+    }
+
     /// Inject the orig-progress callback the inner IPM should consult at
     /// every iteration. Mirrors upstream
     /// `IpRestoFilterConvCheck::SetOrigLSAcceptor` (the outer line

@@ -18,9 +18,11 @@
 //!     transparently invalidates every derived quantity — exactly as if
 //!     the line search had produced the new point.
 //!
-//! Only the [`Checkpoint::IterStart`] site is wired today; the enum is
-//! deliberately open so finer-grained stops (post-search-direction,
-//! pre-line-search) can be added without touching the trait.
+//! Checkpoints fire at the iteration top, the sub-iteration phases
+//! (`after_mu` / `after_search_dir` / `after_step`), around restoration
+//! entry/exit, and at termination. The same hook is shared
+//! (`Rc<RefCell<…>>`) with the restoration inner IPM, so one debugger
+//! steps both the outer and inner solves.
 
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
@@ -321,15 +323,9 @@ impl DebugCtx {
         let d = self.data.borrow();
         let k = d.kkt_debug.as_ref()?;
         let curr = d.curr.as_ref();
-        let expected_neg = curr
-            .map(|c| c.y_c.dim() + c.y_d.dim())
-            .unwrap_or(0);
+        let expected_neg = curr.map(|c| c.y_c.dim() + c.y_d.dim()).unwrap_or(0);
         // n+ = dim − n− (assuming a non-singular KKT, n0 = 0).
-        let n_pos = if k.n_neg >= 0 {
-            k.dim - k.n_neg
-        } else {
-            -1
-        };
+        let n_pos = if k.n_neg >= 0 { k.dim - k.n_neg } else { -1 };
         let inertia_correct = k.provides_inertia && k.n_neg == expected_neg;
         Some(KktReport {
             dim: k.dim,
@@ -354,7 +350,9 @@ impl DebugCtx {
     /// optional `l_vals`) for `viz L`, if captured. Capture is opt-in —
     /// call [`Self::request_l_factor`] first (it's the expensive piece).
     #[allow(clippy::type_complexity)]
-    pub fn kkt_l_factor(&self) -> Option<(usize, Vec<usize>, Vec<i32>, Vec<i32>, Option<Vec<Number>>)> {
+    pub fn kkt_l_factor(
+        &self,
+    ) -> Option<(usize, Vec<usize>, Vec<i32>, Vec<i32>, Option<Vec<Number>>)> {
         let d = self.data.borrow();
         let f = d.kkt_debug.as_ref()?.l_factor.as_ref()?;
         Some((

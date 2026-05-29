@@ -134,7 +134,7 @@ fn line_search_failure_invokes_user_supplied_restoration_phase() {
 
     let factory: RestorationFactory = Box::new(move || {
         let count = Rc::clone(&count_for_factory);
-        let hook: RestoInnerSolver = Box::new(move |_, _, _, _, _| {
+        let hook: RestoInnerSolver = Box::new(move |_, _, _, _, _, _| {
             *count.borrow_mut() += 1;
             // Returning `None` makes `MinC1NormRestoration` surface
             // `RestorationOutcome::Failed`, so the outer algorithm

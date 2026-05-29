@@ -108,14 +108,14 @@ pub fn main() -> ExitCode {
             let _ = app.options_mut().read_from_str("print_level 0\n", true);
         }
         let reg = Some(std::rc::Rc::clone(app.registered_options()));
-        app.set_debug_hook(Box::new(build_debugger(
+        app.set_debug_hook(std::rc::Rc::new(std::cell::RefCell::new(build_debugger(
             mode,
             args.debug_on_error,
             args.debug_on_interrupt,
             args.debug_script.as_deref(),
             reg,
             restart_cell.clone(),
-        )));
+        ))));
         // Install the Ctrl-C → break-into-debugger handler. All debug
         // modes are interruptible; this only changes Ctrl-C behavior
         // when a debugger is active.
@@ -526,14 +526,14 @@ pub fn main() -> ExitCode {
             let reg = Some(std::rc::Rc::clone(app.registered_options()));
             // No script on re-solve — it ran once at the original first
             // pause; the user now drives the re-solve interactively.
-            app.set_debug_hook(Box::new(build_debugger(
+            app.set_debug_hook(std::rc::Rc::new(std::cell::RefCell::new(build_debugger(
                 mode,
                 args.debug_on_error,
                 args.debug_on_interrupt,
                 None,
                 reg,
                 restart_cell.clone(),
-            )));
+            ))));
         }
         eprintln!(
             "pounce: re-solving from saved point with {} option override(s)…",

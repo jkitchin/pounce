@@ -100,6 +100,9 @@ pub type RestoInnerSolver = Box<
         // false. Outer driver forwards `print_level == 0` via
         // `RestorationPhase::set_print_iter_output`.
         bool,
+        // Shared interactive debugger, forwarded onto the inner IPM so the
+        // same debugger can step the restoration sub-solve.
+        Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
     ) -> Option<RestoSolveResult>,
 >;
 
@@ -130,6 +133,9 @@ pub struct MinC1NormRestoration {
     /// `print_level == 0` actually silences the restoration `r`-row
     /// table instead of leaking it to stdout.
     pub(crate) print_iter_output: bool,
+    /// Shared debugger forwarded onto the inner IPM (set by the outer
+    /// driver via `RestorationPhase::set_debug_hook`).
+    pub(crate) debug_hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
 }
 
 impl Default for MinC1NormRestoration {
@@ -141,10 +147,11 @@ impl Default for MinC1NormRestoration {
             expect_infeasible_problem: false,
             start_with_resto: false,
             eq_mult: Box::new(LeastSquareMults::new()),
-            inner_solver: Box::new(|_, _, _, _, _| None),
+            inner_solver: Box::new(|_, _, _, _, _, _| None),
             orig_progress: None,
             last_inner_iter_count: 0,
             print_iter_output: true,
+            debug_hook: None,
         }
     }
 }
@@ -189,6 +196,13 @@ impl RestorationPhase for MinC1NormRestoration {
         self.print_iter_output = enabled;
     }
 
+    fn set_debug_hook(
+        &mut self,
+        hook: Option<Rc<RefCell<dyn pounce_algorithm::debug::DebugHook>>>,
+    ) {
+        self.debug_hook = hook;
+    }
+
     fn perform_restoration(
         &mut self,
         data: &IpoptDataHandle,
@@ -217,7 +231,14 @@ impl RestorationPhase for MinC1NormRestoration {
         // mu/tau, matching upstream.
         let saved_mu = data.borrow().curr_mu;
         let saved_tau = data.borrow().curr_tau;
-        let Some(result) = (self.inner_solver)(data, cq, nlp, cb, self.print_iter_output) else {
+        let Some(result) = (self.inner_solver)(
+            data,
+            cq,
+            nlp,
+            cb,
+            self.print_iter_output,
+            self.debug_hook.clone(),
+        ) else {
             return RestorationOutcome::Failed;
         };
         self.last_inner_iter_count = result.iter_count;

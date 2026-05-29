@@ -101,6 +101,14 @@ By default the debugger only *stops* at `iter_start` (and `terminated`).
 The sub-iteration checkpoints fire every iteration but resume immediately
 unless you ask to stop at them.
 
+**Stepping into restoration.** The same debugger drives the restoration
+*inner* IPM: when the solve enters restoration, the inner solve's
+checkpoints fire too. A `step`/`stepi` that lands on an inner iteration
+pauses there with `in_restoration: true` (REPL banner shows
+`[restoration]`), and `print x` shows the restoration sub-NLP iterate.
+`stop-at resto` (`pre_restoration_entry`) is the easy way to catch the
+hand-off and then step inward.
+
 ### Stepping
 
 | Command | Effect |

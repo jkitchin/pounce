@@ -56,9 +56,33 @@ use std::rc::Rc;
 
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
-    "help", "info", "print", "step", "stepi", "continue", "run", "break", "tbreak", "watchpoint",
-    "commands", "stop-at", "set", "opt", "complete", "viz", "save", "goto", "restart", "resolve",
-    "ask", "watch", "diff", "source", "progress", "detach", "quit",
+    "help",
+    "info",
+    "print",
+    "step",
+    "stepi",
+    "continue",
+    "run",
+    "break",
+    "tbreak",
+    "watchpoint",
+    "commands",
+    "stop-at",
+    "set",
+    "opt",
+    "complete",
+    "viz",
+    "save",
+    "goto",
+    "restart",
+    "resolve",
+    "ask",
+    "watch",
+    "diff",
+    "source",
+    "progress",
+    "detach",
+    "quit",
 ];
 
 /// Events a user can `break on` (advertised in `hello.events`). Each is
@@ -524,6 +548,9 @@ pub struct SolverDebugger {
     /// μ-stall tracking for the `mu_stalled` event.
     last_mu: Option<f64>,
     mu_stall: u32,
+    /// True while between `pre_restoration_entry` and
+    /// `post_restoration_exit` — marks pauses fired by the inner IPM.
+    in_restoration: bool,
     /// Once true, never pause again (`detach`).
     detached: bool,
     /// Whether the JSON `hello` handshake has been emitted (once per
@@ -593,6 +620,7 @@ impl SolverDebugger {
             watchpoints: Vec::new(),
             last_mu: None,
             mu_stall: 0,
+            in_restoration: false,
             detached: false,
             hello_sent: false,
             pause_iters: true,
@@ -1542,8 +1570,11 @@ impl SolverDebugger {
     fn cmd_commands(&mut self, rest: &[&str]) -> CmdOut {
         let Some(iter) = rest.first().and_then(|s| s.parse::<i32>().ok()) else {
             if rest.is_empty() {
-                let mut items: Vec<(i32, Vec<String>)> =
-                    self.bp_commands.iter().map(|(k, v)| (*k, v.clone())).collect();
+                let mut items: Vec<(i32, Vec<String>)> = self
+                    .bp_commands
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect();
                 items.sort_by_key(|(k, _)| *k);
                 let lines = if items.is_empty() {
                     vec!["no breakpoint command lists".into()]
@@ -1555,7 +1586,9 @@ impl SolverDebugger {
                 };
                 return CmdOut::ok(lines);
             }
-            return CmdOut::err("usage: commands <iter> <cmd> ; <cmd> …  (or: commands <iter> clear)");
+            return CmdOut::err(
+                "usage: commands <iter> <cmd> ; <cmd> …  (or: commands <iter> clear)",
+            );
         };
         let tail = rest[1..].join(" ");
         let tail = tail.trim();
@@ -1569,8 +1602,11 @@ impl SolverDebugger {
             .filter(|s| !s.is_empty())
             .collect();
         self.bp_commands.insert(iter, cmds.clone());
-        CmdOut::ok(vec![format!("commands for iter {iter}: {}", cmds.join(" ; "))])
-            .with_data(serde_json::json!({"iter": iter, "commands": cmds}))
+        CmdOut::ok(vec![format!(
+            "commands for iter {iter}: {}",
+            cmds.join(" ; ")
+        )])
+        .with_data(serde_json::json!({"iter": iter, "commands": cmds}))
     }
 
     /// `diff` — what changed in the iterate since the previous captured
@@ -1754,10 +1790,16 @@ impl SolverDebugger {
                         ctx.inf_du(),
                     );
                 } else {
+                    let resto = if self.in_restoration {
+                        " [restoration]"
+                    } else {
+                        ""
+                    };
                     eprintln!(
-                        "\n── pounce-dbg ── iter {} @{}  mu={:.3e}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
+                        "\n── pounce-dbg ── iter {} @{}{}  mu={:.3e}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
                         ctx.iter(),
                         ctx.checkpoint().as_str(),
+                        resto,
                         ctx.mu(),
                         ctx.objective(),
                         ctx.inf_pr(),
@@ -1793,6 +1835,7 @@ impl SolverDebugger {
                     "event": "pause",
                     "checkpoint": ctx.checkpoint().as_str(),
                     "status": ctx.status(),
+                    "in_restoration": self.in_restoration,
                     "iter": ctx.iter(),
                     "mu": ctx.mu(),
                     "objective": ctx.objective(),
@@ -2063,6 +2106,12 @@ impl DebugHook for SolverDebugger {
         }
 
         let cp = ctx.checkpoint();
+        // Track the restoration bracket so inner-IPM pauses are flagged.
+        match cp {
+            Checkpoint::PreRestoration => self.in_restoration = true,
+            Checkpoint::PostRestoration => self.in_restoration = false,
+            _ => {}
+        }
         let is_iter_start = matches!(cp, Checkpoint::IterStart);
 
         // At each iteration top, snapshot the primal-dual state (cheap —

@@ -133,7 +133,7 @@ pub struct IpoptApplication {
     /// [`IpoptAlgorithm::with_debug_hook`], so a REPL or agent can pause
     /// at each iteration to inspect / mutate live state. Consumed on use
     /// (one solve per installed hook).
-    debug_hook: Option<Box<dyn crate::debug::DebugHook>>,
+    debug_hook: Option<std::rc::Rc<std::cell::RefCell<dyn crate::debug::DebugHook>>>,
     /// Provider for the BNW outer loop (pounce#10 Phase 3). When set,
     /// `optimize_constrained` consults the provider before each inner
     /// solve, replacing `restoration_factory` with a fresh one so
@@ -266,7 +266,10 @@ impl IpoptApplication {
     /// Install an interactive debugger hook for the next `optimize_*`
     /// call. The hook is moved into the main [`IpoptAlgorithm`] and
     /// consumed by that solve; reinstall it to debug a subsequent solve.
-    pub fn set_debug_hook(&mut self, hook: Box<dyn crate::debug::DebugHook>) {
+    pub fn set_debug_hook(
+        &mut self,
+        hook: std::rc::Rc<std::cell::RefCell<dyn crate::debug::DebugHook>>,
+    ) {
         self.debug_hook = Some(hook);
     }
 
