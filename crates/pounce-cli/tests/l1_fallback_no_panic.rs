@@ -122,7 +122,9 @@ fn l1_fallback_with_infeasible_problem_drives_second_inner_solve() {
     // the multi-pass codepath was actually exercised.
     assert!(
         stdout.lines().any(|l| l.contains('r')
-            && l.split_whitespace().next().is_some_and(|t| t.ends_with('r'))),
+            && l.split_whitespace()
+                .next()
+                .is_some_and(|t| t.ends_with('r'))),
         "expected a restoration iteration in stdout, fixture did not \
          exercise the multi-pass path:\n{stdout}",
     );

@@ -659,15 +659,15 @@ fn build_diagnostics(
         if cat == DiagCategory::Iterate {
             // `iterate:` accepts an extra `:summary` / `:full` variant
             // suffix after the iter filter. See parse_iterate_spec.
-            let (filter, variant) =
-                pounce_common::diagnostics::parse_iterate_spec(spec_str)?;
-            config = config.with_category(cat, filter).with_iterate_variant(variant);
+            let (filter, variant) = pounce_common::diagnostics::parse_iterate_spec(spec_str)?;
+            config = config
+                .with_category(cat, filter)
+                .with_iterate_variant(variant);
         } else if cat == DiagCategory::Kkt {
             // `kkt:` accepts `+L` / `+L+Lvals` suffixes that pick up
             // the LDLᵀ factor's pattern (and optionally values). See
             // parse_kkt_spec.
-            let (filter, variant) =
-                pounce_common::diagnostics::parse_kkt_spec(spec_str)?;
+            let (filter, variant) = pounce_common::diagnostics::parse_kkt_spec(spec_str)?;
             config = config.with_category(cat, filter).with_kkt_variant(variant);
         } else {
             let spec = IterSpec::parse(spec_str)?;

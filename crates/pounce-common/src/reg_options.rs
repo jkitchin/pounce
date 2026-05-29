@@ -514,8 +514,10 @@ fn format_option_text(out: &mut String, opt: &RegisteredOption) {
         }
     }
     out.push('\n');
-    if matches!(opt.option_type, OptionType::OT_Number | OptionType::OT_Integer)
-        && (opt.has_lower || opt.has_upper)
+    if matches!(
+        opt.option_type,
+        OptionType::OT_Number | OptionType::OT_Integer
+    ) && (opt.has_lower || opt.has_upper)
     {
         out.push_str("   range:   ");
         if opt.has_lower {
@@ -608,10 +610,7 @@ mod tests {
             "mode",
             "How to do it.",
             "auto",
-            &[
-                ("auto", "Decide for me."),
-                ("manual", "I will choose."),
-            ],
+            &[("auto", "Decide for me."), ("manual", "I will choose.")],
             "Long description that explains the trade-off between auto and manual selection.",
         )
         .unwrap();
@@ -624,7 +623,10 @@ mod tests {
         assert!(out.contains("### Catty ###"), "category header missing");
         assert!(out.contains("mode:"), "option name missing");
         assert!(out.contains("default: \"auto\""), "default missing");
-        assert!(out.contains("- auto: Decide for me."), "valid string missing");
+        assert!(
+            out.contains("- auto: Decide for me."),
+            "valid string missing"
+        );
         assert!(out.contains("tol:"), "second option missing");
         assert!(out.contains("range:   (0, 1]"), "range formatting missing");
         // The undocumented `internal` stub (empty short+long) is skipped.

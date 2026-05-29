@@ -415,13 +415,12 @@ impl AugSystemSolver for StdAugSystemSolver {
                 // every solve when the user only asked for K is pure
                 // overhead.
                 let variant = diag.config.kkt_variant;
-                let factor_pattern = if status == ESymSolverStatus::Success
-                    && variant.wants_l_pattern()
-                {
-                    self.linsol.factor_pattern(variant.wants_l_values())
-                } else {
-                    None
-                };
+                let factor_pattern =
+                    if status == ESymSolverStatus::Success && variant.wants_l_pattern() {
+                        self.linsol.factor_pattern(variant.wants_l_values())
+                    } else {
+                        None
+                    };
                 if let Some(mut w) = diag.open_writer(&filename) {
                     let _ = write_kkt_record(
                         &mut w,

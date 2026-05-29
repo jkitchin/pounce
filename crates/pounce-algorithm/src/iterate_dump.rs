@@ -37,11 +37,7 @@ use std::fmt::Write as _;
 /// the binary `IterDumper::write_record` (post-init for iter 0,
 /// post-`accept_trial_point` for the per-iter case) so the captured
 /// `iter` field matches `IpData().iter_count()`.
-pub(crate) fn emit_record(
-    diag: &DiagnosticsState,
-    data: &IpoptDataHandle,
-    cq: &IpoptCqHandle,
-) {
+pub(crate) fn emit_record(diag: &DiagnosticsState, data: &IpoptDataHandle, cq: &IpoptCqHandle) {
     if !diag.want(DiagCategory::Iterate) {
         return;
     }
@@ -97,7 +93,12 @@ fn build_record(
     write!(out, ",\"alpha_pr\":{}", json_f64(alpha_pr)).ok()?;
     write!(out, ",\"alpha_du\":{}", json_f64(alpha_du)).ok()?;
     write!(out, ",\"tag\":\"{}\"", escape_tag(tag)).ok()?;
-    write!(out, ",\"restoration\":{}", if restoration { "true" } else { "false" }).ok()?;
+    write!(
+        out,
+        ",\"restoration\":{}",
+        if restoration { "true" } else { "false" }
+    )
+    .ok()?;
     write!(out, ",\"active_mask\":\"{}\"", active_mask_b64).ok()?;
     write!(out, ",\"x_norm\":{}", json_f64(x_norm)).ok()?;
     write!(out, ",\"slack_norm_inf\":{}", json_f64(slack_norm_inf)).ok()?;
@@ -239,8 +240,7 @@ fn escape_tag(c: char) -> String {
 /// Standard base64 (RFC 4648 §4) with `+ /` and `=` padding. Inlined
 /// to avoid adding a `base64` crate dep for ~40 lines of code.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(((bytes.len() + 2) / 3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {

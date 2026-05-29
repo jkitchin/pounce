@@ -339,8 +339,7 @@ pub struct MuOptions {
     /// `quality_function_balancing_term` — balancing penalty term in
     /// the quality function (kicks in when complementarity is far
     /// below infeasibilities).
-    pub quality_function_balancing_term:
-        crate::mu::oracle::quality_function::BalancingTermType,
+    pub quality_function_balancing_term: crate::mu::oracle::quality_function::BalancingTermType,
     /// `quality_function_max_section_steps` — cap on golden-section
     /// iterations when picking σ. Default 8.
     pub quality_function_max_section_steps: i32,
@@ -401,8 +400,7 @@ impl Default for MuOptions {
                 crate::mu::adaptive::AdaptiveMuGlobalization::ObjConstrFilter,
             quality_function_norm_type:
                 crate::mu::oracle::quality_function::NormType::TwoNormSquared,
-            quality_function_centrality:
-                crate::mu::oracle::quality_function::CentralityType::None,
+            quality_function_centrality: crate::mu::oracle::quality_function::CentralityType::None,
             quality_function_balancing_term:
                 crate::mu::oracle::quality_function::BalancingTermType::None,
             quality_function_max_section_steps: 8,
@@ -413,8 +411,7 @@ impl Default for MuOptions {
             adaptive_mu_restore_previous_iterate: false,
             adaptive_mu_kkterror_red_iters: 4,
             adaptive_mu_kkterror_red_fact: 0.9999,
-            adaptive_mu_kkt_norm_type:
-                crate::mu::adaptive::AdaptiveMuKktNorm::TwoNormSquared,
+            adaptive_mu_kkt_norm_type: crate::mu::adaptive::AdaptiveMuKktNorm::TwoNormSquared,
             probing_iterate_quality_factor: 1e4,
         }
     }
@@ -615,17 +612,13 @@ impl AlgorithmBuilder {
                 adaptive.qf_max_section_steps = self.mu.quality_function_max_section_steps;
                 adaptive.qf_section_sigma_tol = self.mu.quality_function_section_sigma_tol;
                 adaptive.qf_section_qf_tol = self.mu.quality_function_section_qf_tol;
-                adaptive.probing_iterate_quality_factor =
-                    self.mu.probing_iterate_quality_factor;
+                adaptive.probing_iterate_quality_factor = self.mu.probing_iterate_quality_factor;
                 adaptive.adaptive_mu_safeguard_factor = self.mu.adaptive_mu_safeguard_factor;
                 adaptive.adaptive_mu_monotone_init_factor =
                     self.mu.adaptive_mu_monotone_init_factor;
-                adaptive.restore_accepted_iterate =
-                    self.mu.adaptive_mu_restore_previous_iterate;
-                adaptive.adaptive_mu_kkterror_red_iters =
-                    self.mu.adaptive_mu_kkterror_red_iters;
-                adaptive.adaptive_mu_kkterror_red_fact =
-                    self.mu.adaptive_mu_kkterror_red_fact;
+                adaptive.restore_accepted_iterate = self.mu.adaptive_mu_restore_previous_iterate;
+                adaptive.adaptive_mu_kkterror_red_iters = self.mu.adaptive_mu_kkterror_red_iters;
+                adaptive.adaptive_mu_kkterror_red_fact = self.mu.adaptive_mu_kkterror_red_fact;
                 adaptive.adaptive_mu_kkt_norm = self.mu.adaptive_mu_kkt_norm_type;
                 Box::new(adaptive)
             }

@@ -681,18 +681,15 @@ mod tests {
         );
         assert_eq!(
             parse_iterate_spec("10-20:full").unwrap(),
-            (
-                IterSpec::Range(Some(10), Some(20)),
-                IterateVariant::Full
-            )
+            (IterSpec::Range(Some(10), Some(20)), IterateVariant::Full)
         );
     }
 
     #[test]
     fn append_iterate_line_streams_rows_to_top_level() {
         let tmp = tempdir();
-        let cfg = DiagnosticsConfig::new(tmp.clone())
-            .with_category(DiagCategory::Iterate, IterSpec::All);
+        let cfg =
+            DiagnosticsConfig::new(tmp.clone()).with_category(DiagCategory::Iterate, IterSpec::All);
         let state = DiagnosticsState::new(cfg).unwrap();
         state.append_iterate_line("{\"iter\":0}").unwrap();
         state.append_iterate_line("{\"iter\":1}").unwrap();
@@ -700,7 +697,9 @@ mod tests {
         // doesn't care about the iter-dir nesting that other dump
         // sites use.
         state.enter_restoration();
-        state.append_iterate_line("{\"iter\":0,\"restoration\":true}").unwrap();
+        state
+            .append_iterate_line("{\"iter\":0,\"restoration\":true}")
+            .unwrap();
         state.exit_restoration();
         state.append_iterate_line("{\"iter\":2}").unwrap();
 

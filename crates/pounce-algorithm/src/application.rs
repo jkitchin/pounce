@@ -1625,7 +1625,9 @@ impl IpoptApplication {
         // Quality-function oracle knobs — consumers in
         // `IpQualityFunctionMuOracle.cpp:RegisterOptions`. Forwarded
         // to the oracle on every free-mode call.
-        if let Ok((v, found)) = self.options.get_string_value("quality_function_norm_type", "")
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("quality_function_norm_type", "")
         {
             if found {
                 use crate::mu::oracle::quality_function::NormType;
@@ -1637,7 +1639,9 @@ impl IpoptApplication {
                 };
             }
         }
-        if let Ok((v, found)) = self.options.get_string_value("quality_function_centrality", "")
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("quality_function_centrality", "")
         {
             if found {
                 use crate::mu::oracle::quality_function::CentralityType;

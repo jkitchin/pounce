@@ -197,7 +197,9 @@ pub unsafe extern "C" fn IpoptSolverSolve(
         info.problem.app.algorithm_builder_from_options(),
         bff_mint,
     );
-    info.problem.app.set_restoration_factory_provider(resto_provider);
+    info.problem
+        .app
+        .set_restoration_factory_provider(resto_provider);
 
     // Move the app out of the problem and into a fresh RustSolver.
     let app = std::mem::replace(&mut info.problem.app, IpoptApplication::new());

@@ -10,11 +10,11 @@
 use pounce_algorithm::alg_builder::MuOptions;
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::mu::adaptive::AdaptiveMuKktNorm;
-use pounce_algorithm::mu::oracle::quality_function::{
-    BalancingTermType, CentralityType, NormType,
-};
+use pounce_algorithm::mu::oracle::quality_function::{BalancingTermType, CentralityType, NormType};
 
-fn mu_options_from(setup: impl FnOnce(&mut pounce_algorithm::application::IpoptApplication)) -> MuOptions {
+fn mu_options_from(
+    setup: impl FnOnce(&mut pounce_algorithm::application::IpoptApplication),
+) -> MuOptions {
     let mut app = IpoptApplication::new();
     setup(&mut app);
     app.algorithm_builder_from_options().mu
@@ -84,12 +84,7 @@ fn adaptive_mu_extra_knobs_flow_through() {
             .set_numeric_value("adaptive_mu_monotone_init_factor", 0.5, true, false)
             .unwrap();
         app.options_mut()
-            .set_string_value(
-                "adaptive_mu_restore_previous_iterate",
-                "yes",
-                true,
-                false,
-            )
+            .set_string_value("adaptive_mu_restore_previous_iterate", "yes", true, false)
             .unwrap();
         app.options_mut()
             .set_integer_value("adaptive_mu_kkterror_red_iters", 7, true, false)
@@ -117,10 +112,7 @@ fn defaults_match_upstream() {
     let mu = mu_options_from(|_| {});
     assert_eq!(mu.quality_function_norm_type, NormType::TwoNormSquared);
     assert_eq!(mu.quality_function_centrality, CentralityType::None);
-    assert_eq!(
-        mu.quality_function_balancing_term,
-        BalancingTermType::None
-    );
+    assert_eq!(mu.quality_function_balancing_term, BalancingTermType::None);
     assert_eq!(mu.quality_function_max_section_steps, 8);
     assert!((mu.quality_function_section_sigma_tol - 1e-2).abs() < 1e-12);
     assert_eq!(mu.quality_function_section_qf_tol, 0.0);
