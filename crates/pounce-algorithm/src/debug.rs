@@ -237,6 +237,24 @@ impl DebugCtx {
         self.cq_scalar(|c| c.curr_nlp_error())
     }
 
+    /// Primal regularization δ_w applied to the KKT system this
+    /// iteration (0 when none was needed). Nonzero ⇒ inertia correction.
+    pub fn regularization(&self) -> Number {
+        self.data.borrow().info_regu_x
+    }
+
+    /// Number of line-search trial points tried for the accepted step
+    /// (1 ⇒ full step accepted first try).
+    pub fn ls_count(&self) -> i32 {
+        self.data.borrow().info_ls_count
+    }
+
+    /// Accepted primal / dual step lengths (α_pr, α_du).
+    pub fn alpha(&self) -> (Number, Number) {
+        let d = self.data.borrow();
+        (d.info_alpha_primal, d.info_alpha_dual)
+    }
+
     // ---- vector reads --------------------------------------------------
 
     /// Dimensions of every named block, in [`BLOCK_NAMES`] order.
