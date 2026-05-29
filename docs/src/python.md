@@ -280,9 +280,17 @@ def loss(P):
 dloss_dP = jax.grad(loss)(p_batch)                       # (B, p_shape)
 ```
 
-The backward `vmap`s the per-element dense KKT back-solve — exact
-because block-diagonal coupling means `∂x^(k)*/∂p^(j) = 0` for
-`k ≠ j`.
+The backward path follows `factor_reuse=`:
+
+* `factor_reuse=True` (default) — one `Solver.kkt_solve` against the
+  *stacked* held LDLᵀ factor; the per-block `∂²L/∂x∂p` / `∂g/∂p` are
+  `jax.vmap`'d autodiff over the user's `f` / `g`, then contracted
+  with the per-block `u_x` / `u_g` slices of the single back-solve.
+  Composes (A) and (B) — one factor for both forward and per-batch
+  sensitivities (pounce#76).
+* `factor_reuse=False` — `jax.vmap` of the per-element dense
+  `(n+m) × (n+m)` JAX KKT solve. Exact for the same reason: block-
+  diagonal coupling means `∂x^(k)*/∂p^(j) = 0` for `k ≠ j`.
 
 When to pick `batched_solve` vs the existing batched surfaces:
 
