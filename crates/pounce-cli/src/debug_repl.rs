@@ -49,7 +49,7 @@ use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Context, Editor, Helper, Highlighter, Hinter, Validator};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -515,6 +515,9 @@ pub struct SolverDebugger {
     editor: Option<Editor<DbgHelper, FileHistory>>,
     /// Where REPL history is persisted, if a home directory was found.
     hist_path: Option<PathBuf>,
+    /// Background stdin reader (JSON mode) enabling async `{"cmd":"pause"}`
+    /// during a run. `None` in REPL mode.
+    pump: Option<StdinPump>,
     /// Option edits accepted at the prompt. Validated against the
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
@@ -548,6 +551,7 @@ impl SolverDebugger {
             restart: None,
             editor: None,
             hist_path: None,
+            pump: None,
             staged: Vec::new(),
         }
     }
@@ -718,6 +722,9 @@ impl SolverDebugger {
                 self.run_to = None;
                 CmdOut::ok(vec!["detached — solving to completion".into()]).flow(Flow::Resume)
             }
+            // A `pause` received while already paused is a no-op; the
+            // meaningful use is async, consumed mid-run by `try_take_pause`.
+            "pause" => CmdOut::ok(vec!["already paused".into()]),
             "quit" | "q" | "exit" => CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop),
             other => CmdOut::err(format!("unknown command `{other}` (try `help`)")),
         }
@@ -1475,7 +1482,10 @@ impl SolverDebugger {
                 "interruptible": self.interruptible,
                 // #72 §1 / §5.
                 "progress_events": self.emit_progress,
-                "async_pause": if self.interruptible { "checkpoint" } else { "none" },
+                "async_pause": "checkpoint",
+                // Both transports for async pause: SIGINT and the in-band
+                // `{"cmd":"pause"}` (JSON mode).
+                "pause_command": true,
             },
             "checkpoints": CHECKPOINTS,
             "events": EVENTS,
@@ -1536,8 +1546,11 @@ impl SolverDebugger {
             }
             let _ = write!(std::io::stderr(), "pounce-dbg> ");
             let _ = std::io::stderr().flush();
+            return read_stdin_line();
         }
-        read_stdin_line()
+        // JSON mode reads through the background pump (so async pause can
+        // peek the same stream); lazily start it.
+        self.pump.get_or_insert_with(StdinPump::start).next()
     }
 }
 
@@ -1548,6 +1561,82 @@ fn read_stdin_line() -> Option<String> {
         Ok(0) => None,
         Ok(_) => Some(line),
         Err(_) => None,
+    }
+}
+
+/// Whether a command line is an in-band pause request (`pause`, or a JSON
+/// `{"cmd":"pause"}`), used for the async-pause-while-running path.
+fn is_pause_command(line: &str) -> bool {
+    parse_command(line, DebugMode::Json).command.trim() == "pause"
+}
+
+/// Background stdin reader for JSON mode. A thread reads newline-delimited
+/// commands into a shared queue so the running loop can *peek* for an
+/// async `{"cmd":"pause"}` between iterations (no signals — the
+/// Windows-friendly path) while the prompt still pops commands blocking.
+struct StdinPump {
+    inner: std::sync::Arc<(
+        std::sync::Mutex<VecDeque<Option<String>>>,
+        std::sync::Condvar,
+    )>,
+}
+
+impl StdinPump {
+    fn start() -> Self {
+        let inner = std::sync::Arc::new((
+            std::sync::Mutex::new(VecDeque::new()),
+            std::sync::Condvar::new(),
+        ));
+        let w = std::sync::Arc::clone(&inner);
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            let mut lock = stdin.lock();
+            let (m, cv) = &*w;
+            loop {
+                let mut line = String::new();
+                let item = match lock.read_line(&mut line) {
+                    Ok(0) | Err(_) => None, // EOF / error sentinel
+                    Ok(_) => Some(line),
+                };
+                let done = item.is_none();
+                m.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_back(item);
+                cv.notify_one();
+                if done {
+                    break;
+                }
+            }
+        });
+        Self { inner }
+    }
+
+    /// Blocking pop of the next command line; `None` on EOF (sticky).
+    fn next(&self) -> Option<String> {
+        let (m, cv) = &*self.inner;
+        let mut q = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            match q.front() {
+                None => q = cv.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner),
+                Some(None) => return None, // EOF — leave sentinel in place
+                Some(Some(_)) => return q.pop_front().flatten(),
+            }
+        }
+    }
+
+    /// Non-blocking: if a queued `pause` request is at the front, consume
+    /// it and return true. Leaves any other queued command in place.
+    fn try_take_pause(&self) -> bool {
+        let (m, _) = &*self.inner;
+        let mut q = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(Some(front)) = q.front() {
+            if is_pause_command(front) {
+                q.pop_front();
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -1610,6 +1699,14 @@ impl DebugHook for SolverDebugger {
             if self.interruptible && interrupt::take() {
                 pause = true;
                 reason = Some("interrupt (Ctrl-C)".into());
+            }
+            // In-band async pause: a `{"cmd":"pause"}` that arrived on
+            // stdin during the run (JSON mode, #72 §5 option b).
+            if let Some(p) = self.pump.as_ref() {
+                if p.try_take_pause() {
+                    pause = true;
+                    reason = Some("pause (requested)".into());
+                }
             }
             if self.pause_iters {
                 if self.should_pause(ctx.iter()) {
