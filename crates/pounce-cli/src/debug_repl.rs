@@ -49,15 +49,24 @@ use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Context, Editor, Helper, Highlighter, Hinter, Validator};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
-    "help", "info", "print", "step", "continue", "run", "break", "set", "opt", "complete", "viz",
-    "save", "goto", "restart", "resolve", "detach", "quit",
+    "help", "info", "print", "step", "stepi", "continue", "run", "break", "stop-at", "set", "opt",
+    "complete", "viz", "save", "goto", "restart", "resolve", "detach", "quit",
+];
+
+/// Checkpoint names a user can `stop-at` (matches `Checkpoint::as_str`).
+const CHECKPOINTS: &[&str] = &[
+    "iter_start",
+    "after_mu",
+    "after_search_dir",
+    "after_step",
+    "terminated",
 ];
 
 /// Request to re-run the solve from a captured point with new options.
@@ -316,6 +325,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             v
         }
         ["set", "opt"] | ["opt"] | ["options"] => opt_names(),
+        ["stop-at"] | ["stopat"] => starts(CHECKPOINTS),
         ["break", "if"] | ["b", "if"] => starts(METRICS),
         ["break"] | ["b"] => starts(&["if", "clear", "del"]),
         ["print"] | ["p"] => {
@@ -392,6 +402,11 @@ pub struct SolverDebugger {
     terminal_only_on_error: bool,
     /// Honor a pending SIGINT (Ctrl-C) by pausing at the next iteration.
     interruptible: bool,
+    /// One-shot: pause at the very next checkpoint of *any* kind (set by
+    /// `stepi`, for walking through sub-iteration phases).
+    sub_step: bool,
+    /// Checkpoint kinds (by name) to always pause at (`stop-at`).
+    stop_at: HashSet<&'static str>,
     /// Per-iteration primal-dual snapshots for `goto`/`restart`, keyed by
     /// iteration index. Capped at [`SNAPSHOT_CAP`] (oldest evicted).
     snapshots: BTreeMap<i32, IterateSnapshot>,
@@ -429,6 +444,8 @@ impl SolverDebugger {
             pause_terminal: true,
             terminal_only_on_error: false,
             interruptible: true,
+            sub_step: false,
+            stop_at: HashSet::new(),
             snapshots: BTreeMap::new(),
             restart: None,
             editor: None,
@@ -517,13 +534,22 @@ impl SolverDebugger {
                 self.step = true;
                 CmdOut::ok(vec!["stepping one iteration".into()]).flow(Flow::Resume)
             }
+            "stepi" | "si" => {
+                self.sub_step = true;
+                CmdOut::ok(vec![
+                    "stepping to the next checkpoint (sub-iteration)".into()
+                ])
+                .flow(Flow::Resume)
+            }
             "continue" | "c" | "cont" => {
                 self.step = false;
+                self.sub_step = false;
                 self.run_to = None;
                 CmdOut::ok(vec!["continuing".into()]).flow(Flow::Resume)
             }
             "run" | "r" => self.cmd_run(rest),
             "break" | "b" => self.cmd_break(rest),
+            "stop-at" | "stopat" => self.cmd_stop_at(rest),
             "set" => self.cmd_set(rest, ctx),
             "opt" | "options" => self.cmd_opt(rest),
             "complete" => self.cmd_complete(rest),
@@ -553,6 +579,8 @@ impl SolverDebugger {
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
             "                           mu|obj|inf_pr|inf_du|err|iter".into(),
             "  step | s | n             run one iteration, pause again".into(),
+            "  stepi | si               run to the next checkpoint (into sub-iteration phases)".into(),
+            "  stop-at <cp>             always pause at a checkpoint: after_mu|after_search_dir|after_step".into(),
             "  continue | c             run to the next breakpoint".into(),
             "  run | r <N>              run until iteration N".into(),
             "  break | b [N|clear|del N] set/list/clear breakpoints".into(),
@@ -715,6 +743,47 @@ impl SolverDebugger {
                 Err(_) => CmdOut::err("usage: break <iteration>"),
             },
             _ => CmdOut::err("usage: break [N | if <m><op><v> | clear | clear cond | del N]"),
+        }
+    }
+
+    /// `stop-at [name|clear]` — pause at a sub-iteration checkpoint every
+    /// time it fires. Names: after_mu, after_search_dir, after_step
+    /// (also iter_start / terminated). Aliases: mu, kkt/search_dir, step.
+    fn cmd_stop_at(&mut self, rest: &[&str]) -> CmdOut {
+        let canon = |s: &str| -> Option<&'static str> {
+            match s {
+                "mu" | "after_mu" => Some("after_mu"),
+                "kkt" | "search_dir" | "after_search_dir" => Some("after_search_dir"),
+                "step" | "after_step" => Some("after_step"),
+                "iter" | "iter_start" => Some("iter_start"),
+                "terminated" => Some("terminated"),
+                _ => None,
+            }
+        };
+        match rest {
+            [] => {
+                let mut v: Vec<&str> = self.stop_at.iter().copied().collect();
+                v.sort_unstable();
+                CmdOut::ok(vec![format!(
+                    "stop-at: {v:?}  (available: {CHECKPOINTS:?})"
+                )])
+                .with_data(serde_json::json!({"stop_at": v, "available": CHECKPOINTS}))
+            }
+            ["clear"] => {
+                self.stop_at.clear();
+                CmdOut::ok(vec!["cleared stop-at checkpoints".into()])
+            }
+            [name] => match canon(name) {
+                Some(c) => {
+                    self.stop_at.insert(c);
+                    CmdOut::ok(vec![format!("will stop at checkpoint `{c}`")])
+                        .with_data(serde_json::json!({"stop_at_added": c}))
+                }
+                None => CmdOut::err(format!(
+                    "unknown checkpoint `{name}` (one of {CHECKPOINTS:?})"
+                )),
+            },
+            _ => CmdOut::err("usage: stop-at [<checkpoint> | clear]"),
         }
     }
 
@@ -1029,8 +1098,9 @@ impl SolverDebugger {
                     );
                 } else {
                     eprintln!(
-                        "\n── pounce-dbg ── iter {}  mu={:.3e}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
+                        "\n── pounce-dbg ── iter {} @{}  mu={:.3e}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
                         ctx.iter(),
+                        ctx.checkpoint().as_str(),
                         ctx.mu(),
                         ctx.objective(),
                         ctx.inf_pr(),
@@ -1038,7 +1108,7 @@ impl SolverDebugger {
                     );
                 }
                 if let Some(r) = reason {
-                    eprintln!("   ↳ hit condition: {r}");
+                    eprintln!("   ↳ {r}");
                 }
             }
             DebugMode::Json => {
@@ -1118,7 +1188,7 @@ impl SolverDebugger {
                 "terminal_checkpoint": true,
                 "interruptible": self.interruptible,
             },
-            "checkpoints": ["iter_start", "terminated"],
+            "checkpoints": CHECKPOINTS,
             "commands": COMMANDS,
             "blocks": BLOCK_NAMES,
             "metrics": METRICS,
@@ -1214,46 +1284,54 @@ impl DebugHook for SolverDebugger {
             return self.prompt_loop(ctx);
         }
 
-        // IterStart: capture a snapshot every iteration (cheap — Rc
-        // clone) so `goto` can reach any seen iteration, not only paused
-        // ones. Bound memory by evicting the oldest beyond the cap.
-        if let Some(snap) = ctx.snapshot() {
-            self.snapshots.insert(snap.iter(), snap);
-            while self.snapshots.len() > SNAPSHOT_CAP {
-                let Some(&oldest) = self.snapshots.keys().next() else {
-                    break;
-                };
-                self.snapshots.remove(&oldest);
+        let cp = ctx.checkpoint();
+        let is_iter_start = matches!(cp, Checkpoint::IterStart);
+
+        // At each iteration top, snapshot the primal-dual state (cheap —
+        // Rc clone) so `goto` can reach any seen iteration. Bound memory
+        // by evicting the oldest beyond the cap.
+        if is_iter_start {
+            if let Some(snap) = ctx.snapshot() {
+                self.snapshots.insert(snap.iter(), snap);
+                while self.snapshots.len() > SNAPSHOT_CAP {
+                    let Some(&oldest) = self.snapshots.keys().next() else {
+                        break;
+                    };
+                    self.snapshots.remove(&oldest);
+                }
             }
         }
 
-        // A pending Ctrl-C forces a pause regardless of `pause_iters`.
-        let interrupted = self.interruptible && interrupt::take();
+        // Decide whether to pause. `stop-at` and a one-shot `stepi` apply
+        // at every checkpoint; step / run / breakpoints / conditions /
+        // Ctrl-C only at the iteration top.
+        let mut reason: Option<String> = None;
+        let mut pause = self.sub_step || self.stop_at.contains(cp.as_str());
 
-        let iter = ctx.iter();
-        // `should_pause` covers step / run / numeric breakpoints (and
-        // disarms `run_to`); conditional breakpoints are evaluated
-        // against the live state separately. `--debug-on-error` /
-        // `--debug-on-interrupt` keep `pause_iters` false so we only
-        // stop here on a Ctrl-C.
-        let num_hit = self.pause_iters && self.should_pause(iter);
-        let cond_hit = if self.pause_iters {
-            self.matched_condition(ctx)
-        } else {
-            None
-        };
-        if !interrupted && !num_hit && cond_hit.is_none() {
+        if is_iter_start {
+            if self.interruptible && interrupt::take() {
+                pause = true;
+                reason = Some("interrupt (Ctrl-C)".into());
+            }
+            if self.pause_iters {
+                if self.should_pause(ctx.iter()) {
+                    pause = true;
+                }
+                if let Some(c) = self.matched_condition(ctx) {
+                    pause = true;
+                    reason = Some(c);
+                }
+            }
+        }
+
+        if !pause {
             return DebugAction::Resume;
         }
-        // Consume the one-shot step arming; commands re-arm as needed.
+        // Consume one-shot arming; commands re-arm as needed.
         self.step = false;
+        self.sub_step = false;
         self.ensure_editor();
-        let reason = cond_hit.as_deref().or(if interrupted {
-            Some("interrupt (Ctrl-C)")
-        } else {
-            None
-        });
-        self.emit_pause(ctx, reason);
+        self.emit_pause(ctx, reason.as_deref());
         self.prompt_loop(ctx)
     }
 }
@@ -1565,6 +1643,23 @@ mod tests {
         assert!(!d.pause_terminal, "on-interrupt does not pause at terminal");
         assert!(d.interruptible, "on-interrupt honors Ctrl-C");
         assert!(!d.step, "on-interrupt starts un-armed");
+    }
+
+    #[test]
+    fn stop_at_accepts_names_and_aliases() {
+        let mut d = SolverDebugger::new(DebugMode::Repl, None);
+        assert!(d.cmd_stop_at(&["after_search_dir"]).ok);
+        assert!(d.stop_at.contains("after_search_dir"));
+        // Aliases canonicalize.
+        assert!(d.cmd_stop_at(&["mu"]).ok);
+        assert!(d.stop_at.contains("after_mu"));
+        assert!(d.cmd_stop_at(&["kkt"]).ok);
+        assert!(d.stop_at.contains("after_search_dir"));
+        // Unknown name is rejected.
+        assert!(!d.cmd_stop_at(&["bogus"]).ok);
+        // Clear empties the set.
+        assert!(d.cmd_stop_at(&["clear"]).ok);
+        assert!(d.stop_at.is_empty());
     }
 
     #[test]

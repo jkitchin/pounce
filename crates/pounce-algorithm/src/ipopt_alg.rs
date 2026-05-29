@@ -383,6 +383,20 @@ impl IpoptAlgorithm {
         hook.at_checkpoint(&mut ctx)
     }
 
+    /// Fire a sub-iteration checkpoint from inside [`Self::iterate`].
+    /// Returns `Some(Terminate(UserRequestedStop))` if the debugger asked
+    /// to stop, so the caller can `return` it; `None` to continue.
+    fn debug_stop(&mut self, cp: crate::debug::Checkpoint) -> Option<IterateOutcome> {
+        if self.debug.is_none() {
+            return None;
+        }
+        if self.fire_debug(cp) == crate::debug::DebugAction::Stop {
+            Some(IterateOutcome::Terminate(SolverReturn::UserRequestedStop))
+        } else {
+            None
+        }
+    }
+
     /// Fire the terminal post-mortem checkpoint (if a debugger is set),
     /// carrying the solve outcome so the hook can decide whether to pause
     /// at the final iterate. The action is advisory — the loop returns
@@ -635,6 +649,11 @@ impl IpoptAlgorithm {
             self.bundle.line_search.reset();
         }
 
+        // Sub-iteration checkpoint: μ has been updated for this iteration.
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::AfterBarrierUpdate) {
+            return o;
+        }
+
         // 5. Search direction. Skipped without an NLP + search_dir.
         // (Hessian was updated in step 3 above before the barrier-μ
         // oracle so that adaptive-μ uses W(curr_N), not stale W.)
@@ -829,6 +848,13 @@ impl IpoptAlgorithm {
             }
         }
 
+        // Sub-iteration checkpoint: the Newton step `δ` (data.delta) and
+        // the applied regularization are now available, before the line
+        // search consumes them.
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::AfterSearchDirection) {
+            return o;
+        }
+
         // 6. Acceptable trial point — run the line search if we have a
         //    primal/dual step on `data.delta`. Wrap in a guard so all
         //    early-return paths (ErrorInStepComputation, InternalError,
@@ -949,6 +975,14 @@ impl IpoptAlgorithm {
 
         // 8. Bound multiplier kappa_sigma reset.
         self.correct_bound_multiplier();
+
+        // Sub-iteration checkpoint: the trial point was accepted; α and
+        // the new iterate are in place (before the loop's iter bookkeeping
+        // and the next `IterStart`).
+        drop(_accept_guard);
+        if let Some(o) = self.debug_stop(crate::debug::Checkpoint::AfterStep) {
+            return o;
+        }
 
         IterateOutcome::Continue
     }

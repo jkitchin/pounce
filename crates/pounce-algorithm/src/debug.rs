@@ -34,6 +34,16 @@ pub enum Checkpoint {
     /// multipliers, and μ all reflect the *accepted* point from the
     /// previous iteration.
     IterStart,
+    /// After the barrier parameter μ was updated for this iteration
+    /// (before the search direction is computed).
+    AfterBarrierUpdate,
+    /// After the primal-dual Newton step was computed — the search
+    /// direction `δ` (`data.delta`), the applied regularization, and the
+    /// KKT factorization are available.
+    AfterSearchDirection,
+    /// After the line search chose a step length and the trial point was
+    /// accepted — α (`info_alpha_*`) and the new iterate are in place.
+    AfterStep,
     /// The solve has finished (or is about to): fired once before
     /// `optimize` returns, at the final iterate, carrying the outcome
     /// via [`DebugCtx::status`]. Lets a debugger drop in for a
@@ -45,8 +55,22 @@ impl Checkpoint {
     pub fn as_str(self) -> &'static str {
         match self {
             Checkpoint::IterStart => "iter_start",
+            Checkpoint::AfterBarrierUpdate => "after_mu",
+            Checkpoint::AfterSearchDirection => "after_search_dir",
+            Checkpoint::AfterStep => "after_step",
             Checkpoint::Terminated => "terminated",
         }
+    }
+
+    /// Sub-iteration checkpoints (everything between `IterStart` and the
+    /// next `IterStart`).
+    pub fn is_sub_iteration(self) -> bool {
+        matches!(
+            self,
+            Checkpoint::AfterBarrierUpdate
+                | Checkpoint::AfterSearchDirection
+                | Checkpoint::AfterStep
+        )
     }
 }
 

@@ -57,6 +57,14 @@ program.
   a SIGINT handler that drops into the debugger at the next iteration; a
   second Ctrl-C aborts. Ctrl-C also breaks into any other debug mode
   mid-`continue` (at a rustyline prompt Ctrl-C stays a line-cancel).
+- **Sub-iteration checkpoints:** the main loop now fires the debugger at
+  `after_mu`, `after_search_dir` (the Newton step `δ` + regularization
+  are available), and `after_step` (α + the new iterate), in addition to
+  `iter_start` and `terminated`. `stepi`/`si` advances to the next
+  checkpoint of any kind (walk through an iteration's phases);
+  `stop-at <checkpoint>` always pauses there. The pause banner / JSON
+  `pause` event report which checkpoint fired. Zero overhead when no
+  debugger is attached.
 - **Soft rewind (`goto <k>` / `restart`):** the debugger snapshots the
   primal-dual state (iterate + μ + τ) every iteration (cheap — the
   iterate is an immutable `Rc`; capped at 2000, oldest evicted), and
