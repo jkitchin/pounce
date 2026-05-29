@@ -68,6 +68,15 @@ program.
   primal/dual blocks + the search-direction blocks) and residual scalars
   to a JSON file for external analysis; defaults to a temp path keyed by
   iteration.
+- **Re-solve from a saved point (`resolve`):** capture the current primal
+  `x` and the `set opt` edits staged this session, then re-run the solve
+  from that point with the new options applied (a primal warm start). The
+  CLI loops: apply staged options, seed the next solve via a starting-point
+  wrapper, re-install a fresh debugger, run again. Because each solve
+  rebuilds its strategies from options, option changes do take effect on
+  the re-solve. The primal seed is dropped (with a fall-back to the
+  problem's own start) if presolve / fixed-variable elimination changed
+  the coordinate count.
 - **Visualization:** `viz <block|dx>` writes the vector and opens it in
   an external viewer (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`).
 - **Visual-debugger protocol (`--debug-json`).** stdout is now a *pure*

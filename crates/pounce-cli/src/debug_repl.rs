@@ -57,8 +57,22 @@ use std::rc::Rc;
 /// All command verbs, for `help` and `complete`.
 const COMMANDS: &[&str] = &[
     "help", "info", "print", "step", "continue", "run", "break", "set", "opt", "complete", "viz",
-    "save", "goto", "restart", "detach", "quit",
+    "save", "goto", "restart", "resolve", "detach", "quit",
 ];
+
+/// Request to re-run the solve from a captured point with new options.
+/// Written by the `resolve` command into the shared [`RestartCell`] and
+/// read by the CLI after the solve unwinds.
+pub struct RestartRequest {
+    /// Primal seed (the algorithm-space `x` at the time of `resolve`).
+    pub seed_x: Vec<f64>,
+    /// `set opt` edits staged during the session, to apply before re-solve.
+    pub options: Vec<(String, String)>,
+}
+
+/// Shared slot the debugger uses to hand a [`RestartRequest`] back to the
+/// CLI's re-solve loop.
+pub type RestartCell = Rc<std::cell::RefCell<Option<RestartRequest>>>;
 
 /// Cap on retained per-iteration snapshots (bounds rewind memory; oldest
 /// are evicted first).
@@ -381,6 +395,9 @@ pub struct SolverDebugger {
     /// Per-iteration primal-dual snapshots for `goto`/`restart`, keyed by
     /// iteration index. Capped at [`SNAPSHOT_CAP`] (oldest evicted).
     snapshots: BTreeMap<i32, IterateSnapshot>,
+    /// Shared slot for `resolve` to request a fresh solve from the
+    /// current point with staged options. `None` disables `resolve`.
+    restart: Option<RestartCell>,
     /// rustyline editor for the human REPL on a TTY (history + Tab +
     /// Ctrl-R). `None` for JSON mode or when stdin isn't a terminal, in
     /// which case a plain line reader is used.
@@ -413,10 +430,18 @@ impl SolverDebugger {
             terminal_only_on_error: false,
             interruptible: true,
             snapshots: BTreeMap::new(),
+            restart: None,
             editor: None,
             hist_path: None,
             staged: Vec::new(),
         }
+    }
+
+    /// Enable the `resolve` command, wiring the shared restart slot the
+    /// CLI's re-solve loop reads.
+    pub fn with_restart(mut self, cell: RestartCell) -> Self {
+        self.restart = Some(cell);
+        self
     }
 
     /// Post-mortem: run freely, then drop in at the terminal checkpoint
@@ -509,6 +534,7 @@ impl SolverDebugger {
                 Some(k) => self.restore_to(k, ctx),
                 None => CmdOut::err("no snapshots captured yet"),
             },
+            "resolve" | "re-solve" => self.cmd_resolve(ctx),
             "detach" => {
                 self.detached = true;
                 self.step = false;
@@ -541,6 +567,7 @@ impl SolverDebugger {
             "  viz <x|s|dx|...|kkt|L>   open the artifact in an external viewer".into(),
             "  save [path]              write the current iterate + residuals to JSON".into(),
             "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
+            "  resolve                  re-solve from the current x with staged `set opt`s".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
         ];
@@ -923,6 +950,27 @@ impl SolverDebugger {
         }
     }
 
+    /// `resolve` — capture the current primal `x` and the staged option
+    /// edits, then stop this solve so the CLI re-runs from that point with
+    /// the new options applied (a primal warm start). Needs a restart cell
+    /// (wired by the CLI); a no-op error otherwise.
+    fn cmd_resolve(&mut self, ctx: &DebugCtx) -> CmdOut {
+        let Some(cell) = self.restart.as_ref() else {
+            return CmdOut::err("re-solve is not available in this context");
+        };
+        let Some(seed_x) = ctx.block("x") else {
+            return CmdOut::err("no current iterate to seed from");
+        };
+        let options = self.staged.clone();
+        let n_opt = options.len();
+        *cell.borrow_mut() = Some(RestartRequest { seed_x, options });
+        CmdOut::ok(vec![format!(
+            "re-solving from current x with {n_opt} staged option override(s)…"
+        )])
+        .with_data(serde_json::json!({"resolve": true, "options": n_opt}))
+        .flow(Flow::Stop)
+    }
+
     fn cmd_viz(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
@@ -1066,7 +1114,9 @@ impl SolverDebugger {
                 "viz": ["block", "delta"],
                 "save": true,
                 "rewind": "primal_dual",
+                "resolve": self.restart.is_some(),
                 "terminal_checkpoint": true,
+                "interruptible": self.interruptible,
             },
             "checkpoints": ["iter_start", "terminated"],
             "commands": COMMANDS,

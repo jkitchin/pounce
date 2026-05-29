@@ -14,5 +14,6 @@ pub mod nl_reader;
 pub mod nl_tape;
 pub mod nl_writer;
 pub mod print;
+pub mod seeded_tnlp;
 pub mod sens;
 pub mod solve_report;

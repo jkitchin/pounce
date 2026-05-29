@@ -100,19 +100,21 @@ pub fn main() -> ExitCode {
     // stats, and final summary are all silenced (the debugger and the
     // post-solve `terminated` event carry that information instead).
     let json_dbg = matches!(args.debug, Some(pounce_cli::cli::DebugMode::Json));
+    // Shared slot the debugger's `resolve` command writes to; the
+    // post-solve loop below reads it to re-run with new options.
+    let restart_cell: pounce_cli::debug_repl::RestartCell = Rc::new(RefCell::new(None));
     if let Some(mode) = args.debug {
         if json_dbg {
             let _ = app.options_mut().read_from_str("print_level 0\n", true);
         }
         let reg = Some(std::rc::Rc::clone(app.registered_options()));
-        let dbg = if args.debug_on_error {
-            pounce_cli::debug_repl::SolverDebugger::on_error(mode, reg)
-        } else if args.debug_on_interrupt {
-            pounce_cli::debug_repl::SolverDebugger::on_interrupt(mode, reg)
-        } else {
-            pounce_cli::debug_repl::SolverDebugger::new(mode, reg)
-        };
-        app.set_debug_hook(Box::new(dbg));
+        app.set_debug_hook(Box::new(build_debugger(
+            mode,
+            args.debug_on_error,
+            args.debug_on_interrupt,
+            reg,
+            restart_cell.clone(),
+        )));
         // Install the Ctrl-C → break-into-debugger handler. All debug
         // modes are interruptible; this only changes Ctrl-C behavior
         // when a debugger is active.
@@ -500,7 +502,40 @@ pub fn main() -> ExitCode {
     // wrapper yet.
     let nlp_info_snapshot = tnlp.borrow_mut().get_nlp_info();
 
-    let status = app.optimize_tnlp(Rc::clone(&tnlp));
+    // Solve, with a re-solve loop: the debugger's `resolve` command stops
+    // the current solve and leaves a `RestartRequest` in `restart_cell`.
+    // We then apply the staged option overrides, seed the next solve from
+    // the captured `x` (via `SeededTnlp`), re-install a fresh debugger,
+    // and run again. Without `resolve`, this runs exactly once.
+    let mut solve_tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp);
+    let status = loop {
+        let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
+        let req = restart_cell.borrow_mut().take();
+        let Some(req) = req else { break st };
+        for (k, v) in &req.options {
+            if let Err(e) = app.options_mut().read_from_str(&format!("{k} {v}\n"), true) {
+                eprintln!("pounce: re-solve could not set {k}={v}: {e}");
+            }
+        }
+        solve_tnlp = Rc::new(RefCell::new(pounce_cli::seeded_tnlp::SeededTnlp::new(
+            Rc::clone(&tnlp),
+            req.seed_x,
+        )));
+        if let Some(mode) = args.debug {
+            let reg = Some(std::rc::Rc::clone(app.registered_options()));
+            app.set_debug_hook(Box::new(build_debugger(
+                mode,
+                args.debug_on_error,
+                args.debug_on_interrupt,
+                reg,
+                restart_cell.clone(),
+            )));
+        }
+        eprintln!(
+            "pounce: re-solving from saved point with {} option override(s)…",
+            req.options.len()
+        );
+    };
     let solve_stats = app.statistics();
     let counters = counting.borrow();
     if json_dbg {
@@ -693,6 +728,26 @@ pub fn main() -> ExitCode {
         _ if args.ampl => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
     }
+}
+
+/// Build a `SolverDebugger` for the requested mode/flags, wired to the
+/// shared restart cell. Used for the first install and each re-solve.
+fn build_debugger(
+    mode: pounce_cli::cli::DebugMode,
+    on_error: bool,
+    on_interrupt: bool,
+    reg: Option<Rc<pounce_common::reg_options::RegisteredOptions>>,
+    cell: pounce_cli::debug_repl::RestartCell,
+) -> pounce_cli::debug_repl::SolverDebugger {
+    use pounce_cli::debug_repl::SolverDebugger;
+    let dbg = if on_error {
+        SolverDebugger::on_error(mode, reg)
+    } else if on_interrupt {
+        SolverDebugger::on_interrupt(mode, reg)
+    } else {
+        SolverDebugger::new(mode, reg)
+    };
+    dbg.with_restart(cell)
 }
 
 /// Translate the CLI's `--dump …` flags into a live `DiagnosticsState`.
