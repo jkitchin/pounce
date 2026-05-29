@@ -279,6 +279,21 @@ impl DebugCtx {
         self.cq_scalar(|c| c.curr_avrg_compl())
     }
 
+    /// Slacks to a bound category — `x_l` / `x_u` / `s_l` / `s_u` — i.e.
+    /// the distance of each (lower/upper-bounded) variable or inequality
+    /// slack from its bound. A small entry ⇒ that bound is near-active.
+    pub fn bound_slack(&self, which: &str) -> Option<Vec<Number>> {
+        let c = self.cq.as_ref()?.borrow();
+        let v = match which {
+            "x_l" => c.curr_slack_x_l(),
+            "x_u" => c.curr_slack_x_u(),
+            "s_l" => c.curr_slack_s_l(),
+            "s_u" => c.curr_slack_s_u(),
+            _ => return None,
+        };
+        Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
+    }
+
     /// Primal regularization δ_w applied to the KKT system this
     /// iteration (0 when none was needed). Nonzero ⇒ inertia correction.
     pub fn regularization(&self) -> Number {

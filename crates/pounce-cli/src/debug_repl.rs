@@ -455,7 +455,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["print"] | ["p"] | ["watch"] | ["display"] => {
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
-                "mu", "obj", "inf_pr", "inf_du", "err", "compl", "iter", "kkt",
+                "mu", "obj", "inf_pr", "inf_du", "err", "compl", "iter", "kkt", "active",
             ]));
             v
         }
@@ -863,7 +863,7 @@ impl SolverDebugger {
             "commands:".into(),
             "  info | i                 summary of the current iterate".into(),
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
-            "                           mu|obj|inf_pr|inf_du|err|iter | kkt (inertia+reg)".into(),
+            "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
             "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
@@ -936,6 +936,9 @@ impl SolverDebugger {
         if what == "kkt" {
             return self.cmd_print_kkt(ctx);
         }
+        if what == "active" {
+            return self.cmd_print_active(ctx);
+        }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
         let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
         if BLOCK_NAMES.contains(&what) {
@@ -968,6 +971,37 @@ impl SolverDebugger {
             CmdOut::ok(vec![format!("{what} = {val:.10e}")])
                 .with_data(serde_json::json!({"name": what, "value": val}))
         }
+    }
+
+    /// `print active` — bound-slack classification: how many of each
+    /// bound category are near-active (slack below `tol`), and the min
+    /// slack. Small slacks mark the bounds the iterate is pressing on.
+    fn cmd_print_active(&self, ctx: &DebugCtx) -> CmdOut {
+        let tol = 1e-6;
+        let mut lines = Vec::new();
+        let mut cats = serde_json::Map::new();
+        for cat in ["x_l", "x_u", "s_l", "s_u"] {
+            let Some(sl) = ctx.bound_slack(cat) else {
+                continue;
+            };
+            if sl.is_empty() {
+                continue;
+            }
+            let n = sl.len();
+            let min = sl.iter().copied().fold(f64::INFINITY, f64::min);
+            let near = sl.iter().filter(|&&s| s.abs() < tol).count();
+            lines.push(format!(
+                "{cat}: {n} bound(s), {near} near-active (slack<{tol:.0e}), min slack {min:.3e}"
+            ));
+            cats.insert(
+                cat.to_string(),
+                serde_json::json!({"n": n, "near_active": near, "min_slack": min}),
+            );
+        }
+        if lines.is_empty() {
+            lines.push("no bounded variables or inequality slacks".into());
+        }
+        CmdOut::ok(lines).with_data(serde_json::json!({"tol": tol, "categories": cats}))
     }
 
     /// `print kkt` — inertia + regularization of the factored augmented
