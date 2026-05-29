@@ -78,6 +78,20 @@ pub struct Args {
     /// reduced Hessian. Implies `--compute-red-hessian`. Mirrors
     /// upstream `rh_eigendecomp`.
     pub rh_eigendecomp: bool,
+    /// `--debug` / `--debug-json` — drop into the interactive solver
+    /// debugger at each iteration. `Repl` is the human line-oriented
+    /// front end; `Json` speaks newline-delimited JSON so an LLM agent
+    /// (or any program) can drive the loop. `None` disables it.
+    pub debug: Option<DebugMode>,
+}
+
+/// Front end for the interactive solver debugger (`--debug*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugMode {
+    /// Human-facing line REPL on stdin/stdout.
+    Repl,
+    /// Newline-delimited JSON protocol for an agent / program.
+    Json,
 }
 
 impl Args {
@@ -125,6 +139,14 @@ Options:
                             tagged by the `red_hessian` integer var-suffix
   --rh-eigendecomp          also compute the reduced-Hessian eigendecomp;
                             implies --compute-red-hessian
+  --debug                   drop into the interactive solver debugger (a
+                            pdb-for-the-IPM): pause each iteration to
+                            inspect/mutate x, multipliers, mu, set
+                            breakpoints, step/continue. Type `help` at
+                            the pounce-dbg> prompt for commands.
+  --debug-json              same loop, but speak newline-delimited JSON on
+                            stdin/stdout so an LLM agent or program can
+                            drive it (one JSON state object per pause).
   --list-problems           print available built-in problems and exit
   -AMPL                     AMPL solver-protocol mode (for Pyomo / AMPL
                             drivers): convey termination via the .sol
@@ -179,6 +201,7 @@ Options:
         let mut sens_bound_eps: f64 = 1e-3;
         let mut compute_red_hessian = false;
         let mut rh_eigendecomp = false;
+        let mut debug: Option<DebugMode> = None;
 
         let mut it = argv.into_iter().skip(1);
         while let Some(arg) = it.next() {
@@ -258,6 +281,8 @@ Options:
                         .map_err(|e| format!("--sens-bound-eps: {e}"))?;
                     sens_boundcheck = true;
                 }
+                "--debug" => debug = Some(DebugMode::Repl),
+                "--debug-json" => debug = Some(DebugMode::Json),
                 "--compute-red-hessian" => compute_red_hessian = true,
                 "--rh-eigendecomp" => {
                     rh_eigendecomp = true;
@@ -312,6 +337,7 @@ Options:
                 sens_bound_eps,
                 compute_red_hessian,
                 rh_eigendecomp,
+                debug,
             });
         }
 
@@ -334,6 +360,7 @@ Options:
             sens_bound_eps,
             compute_red_hessian,
             rh_eigendecomp,
+            debug,
         })
     }
 }

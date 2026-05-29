@@ -1,0 +1,799 @@
+//! Interactive solver debugger front end — "pdb for the IPM".
+//!
+//! Implements [`pounce_algorithm::debug::DebugHook`]. The core fires us
+//! at every checkpoint (today: the top of each outer iteration); we
+//! pause, hand the user (or an agent) a command prompt, and apply
+//! inspect / mutate / flow commands against the live [`DebugCtx`] before
+//! returning [`DebugAction::Resume`] or [`DebugAction::Stop`].
+//!
+//! Two front ends share one command engine ([`SolverDebugger::dispatch`]):
+//!
+//!   * [`DebugMode::Repl`] — a human line REPL. Prompts and command
+//!     output go to **stderr** so they never interleave with the
+//!     solver's iteration table on stdout.
+//!   * [`DebugMode::Json`] — a newline-delimited JSON protocol on
+//!     stdin/stdout for an LLM agent or any program. Each pause emits one
+//!     `{"event":"pause",…}` object; each command yields one
+//!     `{"event":"result",…}` object. The solver's own stdout table is
+//!     suppressed in this mode (the caller sets `print_level=0`).
+//!
+//! Flow model: the debugger pauses at the *first* checkpoint (so you get
+//! control at iter 0), then only when re-armed — by `step` (pause next
+//! iteration), `break N` (pause at iter N), or `run N` (pause at iter
+//! ≥ N). `continue` clears all one-shot arming and runs to the next
+//! breakpoint; `detach` disables pausing entirely; `quit` stops the
+//! solve.
+
+use crate::cli::DebugMode;
+use pounce_algorithm::debug::{DebugAction, DebugCtx, DebugHook, BLOCK_NAMES};
+use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
+use std::io::Write;
+use std::rc::Rc;
+
+/// All command verbs, for `help` and `complete`.
+const COMMANDS: &[&str] = &[
+    "help", "info", "print", "step", "continue", "run", "break", "set", "opt", "complete", "viz",
+    "detach", "quit",
+];
+
+/// What to do after a command runs.
+enum Flow {
+    /// Stay paused; keep reading commands.
+    Stay,
+    /// Resume solving.
+    Resume,
+    /// Stop the solve.
+    Stop,
+}
+
+/// Outcome of one command: human lines + optional structured payload.
+struct CmdOut {
+    ok: bool,
+    lines: Vec<String>,
+    data: Option<serde_json::Value>,
+    flow: Flow,
+}
+
+impl CmdOut {
+    fn ok(lines: Vec<String>) -> Self {
+        Self {
+            ok: true,
+            lines,
+            data: None,
+            flow: Flow::Stay,
+        }
+    }
+    fn err(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            lines: vec![msg.into()],
+            data: None,
+            flow: Flow::Stay,
+        }
+    }
+    fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+    fn flow(mut self, flow: Flow) -> Self {
+        self.flow = flow;
+        self
+    }
+}
+
+pub struct SolverDebugger {
+    mode: DebugMode,
+    reg: Option<Rc<RegisteredOptions>>,
+    /// Pause at the next checkpoint (one-shot, re-armed by `step`).
+    step: bool,
+    /// Pause once iteration ≥ this value.
+    run_to: Option<i32>,
+    /// Iterations to break at.
+    breaks: Vec<i32>,
+    /// Once true, never pause again (`detach`).
+    detached: bool,
+    /// Option edits accepted at the prompt. Validated against the
+    /// registry; surfaced to the caller after the solve. Not applied to
+    /// already-built strategies mid-solve (see `staged_options`).
+    staged: Vec<(String, String)>,
+}
+
+impl SolverDebugger {
+    pub fn new(mode: DebugMode, reg: Option<Rc<RegisteredOptions>>) -> Self {
+        Self {
+            mode,
+            reg,
+            // Pause at the very first checkpoint so the user has control
+            // before iteration 0's step is computed.
+            step: true,
+            run_to: None,
+            breaks: Vec::new(),
+            detached: false,
+            staged: Vec::new(),
+        }
+    }
+
+    /// Option edits accepted at the prompt (validated). The caller may
+    /// re-run the solve with these applied.
+    pub fn staged_options(&self) -> &[(String, String)] {
+        &self.staged
+    }
+
+    fn should_pause(&mut self, iter: i32) -> bool {
+        if self.detached {
+            return false;
+        }
+        if self.step {
+            return true;
+        }
+        if let Some(t) = self.run_to {
+            if iter >= t {
+                self.run_to = None;
+                return true;
+            }
+        }
+        self.breaks.contains(&iter)
+    }
+
+    // ---- command engine -----------------------------------------------
+
+    fn dispatch(&mut self, line: &str, ctx: &mut DebugCtx) -> CmdOut {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let Some(&verb) = toks.first() else {
+            return CmdOut::ok(vec![]); // empty line: reprompt
+        };
+        let rest = &toks[1..];
+        match verb {
+            "help" | "h" | "?" => self.cmd_help(),
+            "info" | "i" => self.cmd_info(ctx),
+            "print" | "p" => self.cmd_print(rest, ctx),
+            "step" | "s" | "n" | "next" => {
+                self.step = true;
+                CmdOut::ok(vec!["stepping one iteration".into()]).flow(Flow::Resume)
+            }
+            "continue" | "c" | "cont" => {
+                self.step = false;
+                self.run_to = None;
+                CmdOut::ok(vec!["continuing".into()]).flow(Flow::Resume)
+            }
+            "run" | "r" => self.cmd_run(rest),
+            "break" | "b" => self.cmd_break(rest),
+            "set" => self.cmd_set(rest, ctx),
+            "opt" | "options" => self.cmd_opt(rest),
+            "complete" => self.cmd_complete(rest),
+            "viz" | "plot" => self.cmd_viz(rest, ctx),
+            "detach" => {
+                self.detached = true;
+                self.step = false;
+                self.run_to = None;
+                CmdOut::ok(vec!["detached — solving to completion".into()]).flow(Flow::Resume)
+            }
+            "quit" | "q" | "exit" => CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop),
+            other => CmdOut::err(format!("unknown command `{other}` (try `help`)")),
+        }
+    }
+
+    fn cmd_help(&self) -> CmdOut {
+        let lines = vec![
+            "commands:".into(),
+            "  info | i                 summary of the current iterate".into(),
+            "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
+            "                           mu|obj|inf_pr|inf_du|err|iter".into(),
+            "  step | s | n             run one iteration, pause again".into(),
+            "  continue | c             run to the next breakpoint".into(),
+            "  run | r <N>              run until iteration N".into(),
+            "  break | b [N|clear|del N] set/list/clear breakpoints".into(),
+            "  set mu <v>               overwrite the barrier parameter".into(),
+            "  set <blk>[<i>] <v>       overwrite one component (e.g. set x[2] 1.5)".into(),
+            "  set <blk> <v0,v1,...>    overwrite a whole block".into(),
+            "  set opt <name> <value>   stage a solver option (validated)".into(),
+            "  opt [filter]             list solver options (name/type/default)".into(),
+            "  complete <prefix>        completion candidates (commands + options)".into(),
+            "  viz <x|s|dx|...|kkt|L>   open the artifact in an external viewer".into(),
+            "  detach                   stop pausing; solve to completion".into(),
+            "  quit | q                 stop the solve now".into(),
+        ];
+        CmdOut::ok(lines)
+    }
+
+    fn cmd_info(&self, ctx: &DebugCtx) -> CmdOut {
+        let dims: Vec<_> = ctx.block_dims();
+        let dims_json: serde_json::Map<String, serde_json::Value> = dims
+            .iter()
+            .map(|(n, d)| ((*n).to_string(), serde_json::json!(d)))
+            .collect();
+        let lines = vec![
+            format!("iter      = {}", ctx.iter()),
+            format!("mu        = {:.6e}", ctx.mu()),
+            format!("objective = {:.8e}", ctx.objective()),
+            format!("inf_pr    = {:.6e}", ctx.inf_pr()),
+            format!("inf_du    = {:.6e}", ctx.inf_du()),
+            format!("nlp_error = {:.6e}", ctx.nlp_error()),
+            format!(
+                "dims      = {}",
+                dims.iter()
+                    .map(|(n, d)| format!("{n}:{d}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ];
+        CmdOut::ok(lines).with_data(serde_json::json!({
+            "iter": ctx.iter(),
+            "mu": ctx.mu(),
+            "objective": ctx.objective(),
+            "inf_pr": ctx.inf_pr(),
+            "inf_du": ctx.inf_du(),
+            "nlp_error": ctx.nlp_error(),
+            "dims": dims_json,
+        }))
+    }
+
+    fn cmd_print(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+        let Some(&what) = rest.first() else {
+            return self.cmd_info(ctx);
+        };
+        // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
+        let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
+        if BLOCK_NAMES.contains(&what) {
+            match ctx.block(what) {
+                Some(v) => CmdOut::ok(vec![fmt_vec(what, &v)])
+                    .with_data(serde_json::json!({"name": what, "values": v})),
+                None => CmdOut::err(format!("no iterate yet for block `{what}`")),
+            }
+        } else if let Some(blk) = delta {
+            match ctx.delta_block(blk) {
+                Some(v) => CmdOut::ok(vec![fmt_vec(&format!("d{blk}"), &v)])
+                    .with_data(serde_json::json!({"name": format!("d{blk}"), "values": v})),
+                None => CmdOut::err(format!("no search direction available for `d{blk}` yet")),
+            }
+        } else {
+            let val = match what {
+                "mu" => ctx.mu(),
+                "obj" | "objective" => ctx.objective(),
+                "inf_pr" => ctx.inf_pr(),
+                "inf_du" => ctx.inf_du(),
+                "err" | "nlp_error" => ctx.nlp_error(),
+                "iter" => ctx.iter() as f64,
+                _ => {
+                    return CmdOut::err(format!(
+                        "don't know how to print `{what}` (try a block name or mu|obj|inf_pr|inf_du|err|iter)"
+                    ))
+                }
+            };
+            CmdOut::ok(vec![format!("{what} = {val:.10e}")])
+                .with_data(serde_json::json!({"name": what, "value": val}))
+        }
+    }
+
+    fn cmd_run(&mut self, rest: &[&str]) -> CmdOut {
+        match rest.first().and_then(|s| s.parse::<i32>().ok()) {
+            Some(n) => {
+                self.run_to = Some(n);
+                self.step = false;
+                CmdOut::ok(vec![format!("running until iteration {n}")]).flow(Flow::Resume)
+            }
+            None => CmdOut::err("usage: run <iteration>"),
+        }
+    }
+
+    fn cmd_break(&mut self, rest: &[&str]) -> CmdOut {
+        match rest {
+            [] => {
+                let mut bs = self.breaks.clone();
+                bs.sort_unstable();
+                CmdOut::ok(vec![format!("breakpoints: {bs:?}")])
+                    .with_data(serde_json::json!({"breakpoints": bs}))
+            }
+            ["clear"] => {
+                self.breaks.clear();
+                CmdOut::ok(vec!["cleared all breakpoints".into()])
+            }
+            ["del", n] | ["delete", n] => match n.parse::<i32>() {
+                Ok(n) => {
+                    self.breaks.retain(|&b| b != n);
+                    CmdOut::ok(vec![format!("removed breakpoint {n}")])
+                }
+                Err(_) => CmdOut::err("usage: break del <iteration>"),
+            },
+            [n] => match n.parse::<i32>() {
+                Ok(n) => {
+                    if !self.breaks.contains(&n) {
+                        self.breaks.push(n);
+                    }
+                    CmdOut::ok(vec![format!("breakpoint at iteration {n}")])
+                }
+                Err(_) => CmdOut::err("usage: break <iteration>"),
+            },
+            _ => CmdOut::err("usage: break [N | clear | del N]"),
+        }
+    }
+
+    fn cmd_set(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        match rest {
+            ["mu", v] => match v.parse::<f64>() {
+                Ok(mu) => match ctx.set_mu(mu) {
+                    Ok(()) => CmdOut::ok(vec![format!("mu := {mu:.6e}")]),
+                    Err(e) => CmdOut::err(e),
+                },
+                Err(_) => CmdOut::err("usage: set mu <value>"),
+            },
+            ["opt", name, value] => self.cmd_set_opt(name, value),
+            [target, value] => self.cmd_set_block(target, value, ctx),
+            _ => CmdOut::err(
+                "usage: set mu <v> | set <blk>[<i>] <v> | set <blk> <v0,v1,..> | set opt <name> <v>",
+            ),
+        }
+    }
+
+    /// `set x[2] 1.5` (component) or `set x 1,2,3` (whole block).
+    fn cmd_set_block(&mut self, target: &str, value: &str, ctx: &mut DebugCtx) -> CmdOut {
+        // Component form: name[idx]
+        if let Some(open) = target.find('[') {
+            if !target.ends_with(']') {
+                return CmdOut::err("malformed component target (expected name[idx])");
+            }
+            let name = &target[..open];
+            let idx_str = &target[open + 1..target.len() - 1];
+            let Ok(idx) = idx_str.parse::<usize>() else {
+                return CmdOut::err(format!("bad index `{idx_str}`"));
+            };
+            let Ok(val) = value.parse::<f64>() else {
+                return CmdOut::err(format!("bad value `{value}`"));
+            };
+            return match ctx.set_component(name, idx, val) {
+                Ok(()) => CmdOut::ok(vec![format!("{name}[{idx}] := {val:.6e}")]),
+                Err(e) => CmdOut::err(e),
+            };
+        }
+        // Whole-block form: comma-separated values.
+        let parsed: Result<Vec<f64>, _> =
+            value.split(',').map(|s| s.trim().parse::<f64>()).collect();
+        match parsed {
+            Ok(vals) => match ctx.set_block(target, &vals) {
+                Ok(()) => CmdOut::ok(vec![format!("{target} := {} value(s)", vals.len())]),
+                Err(e) => CmdOut::err(e),
+            },
+            Err(_) => CmdOut::err("could not parse comma-separated values"),
+        }
+    }
+
+    fn cmd_set_opt(&mut self, name: &str, value: &str) -> CmdOut {
+        let Some(reg) = self.reg.as_ref() else {
+            return CmdOut::err("no options registry available");
+        };
+        let Some(opt) = reg.get_option(name) else {
+            return CmdOut::err(format!("unknown option `{name}` (try `opt {name}`)"));
+        };
+        // Validate against the registered type/bounds.
+        let valid = match opt.option_type {
+            OptionType::OT_Number => value
+                .parse::<f64>()
+                .map(|v| opt.is_valid_number(v))
+                .unwrap_or(false),
+            OptionType::OT_Integer => value
+                .parse::<i32>()
+                .map(|v| opt.is_valid_integer(v))
+                .unwrap_or(false),
+            OptionType::OT_String => opt.is_valid_string(value),
+            OptionType::OT_Unknown => true,
+        };
+        if !valid {
+            return CmdOut::err(format!("`{value}` is not a valid value for `{name}`"));
+        }
+        self.staged.retain(|(k, _)| k != name);
+        self.staged.push((name.to_string(), value.to_string()));
+        CmdOut::ok(vec![format!(
+            "staged {name} = {value}  (validated; applied on next solve — built strategies don't re-read mid-solve)"
+        )])
+        .with_data(serde_json::json!({"option": name, "value": value, "staged": true}))
+    }
+
+    fn cmd_opt(&self, rest: &[&str]) -> CmdOut {
+        let Some(reg) = self.reg.as_ref() else {
+            return CmdOut::err("no options registry available");
+        };
+        let filter = rest.first().copied().unwrap_or("");
+        let mut lines = Vec::new();
+        let mut data = Vec::new();
+        for o in reg.registered_options_in_order() {
+            if !filter.is_empty()
+                && !o.name.contains(filter)
+                && !o
+                    .category
+                    .to_ascii_lowercase()
+                    .contains(&filter.to_ascii_lowercase())
+            {
+                continue;
+            }
+            let ty = type_str(o.option_type);
+            let def = default_str(&o.default);
+            lines.push(format!(
+                "  {:<28} {:<7} default={:<12} {}",
+                o.name, ty, def, o.short_description
+            ));
+            data.push(serde_json::json!({
+                "name": o.name,
+                "type": ty,
+                "default": def,
+                "category": o.category,
+                "short": o.short_description,
+                "valid": o.valid_strings.iter().map(|e| e.value.clone()).collect::<Vec<_>>(),
+            }));
+        }
+        if lines.is_empty() {
+            return CmdOut::ok(vec![format!("no options match `{filter}`")]);
+        }
+        // For a single exact match, also show the long description.
+        if data.len() == 1 {
+            if let Some(o) = reg.get_option(filter) {
+                if !o.long_description.is_empty() {
+                    lines.push(String::new());
+                    lines.push(o.long_description.clone());
+                }
+            }
+        }
+        CmdOut::ok(lines).with_data(serde_json::json!({"options": data}))
+    }
+
+    fn cmd_complete(&self, rest: &[&str]) -> CmdOut {
+        let prefix = rest.first().copied().unwrap_or("");
+        let mut cands: Vec<String> = COMMANDS
+            .iter()
+            .filter(|c| c.starts_with(prefix))
+            .map(|c| c.to_string())
+            .collect();
+        // Block names and option names also complete (handy after `set`).
+        for b in BLOCK_NAMES {
+            if b.starts_with(prefix) {
+                cands.push(b.to_string());
+            }
+        }
+        if let Some(reg) = self.reg.as_ref() {
+            if prefix.len() >= 2 {
+                for o in reg.registered_options_in_order() {
+                    if o.name.starts_with(prefix) {
+                        cands.push(o.name.clone());
+                    }
+                }
+            }
+        }
+        cands.sort();
+        cands.dedup();
+        CmdOut::ok(vec![cands.join(" ")]).with_data(serde_json::json!({"candidates": cands}))
+    }
+
+    fn cmd_viz(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+        let Some(&target) = rest.first() else {
+            return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
+        };
+        // Live KKT / L factor are assembled inside the search-direction
+        // solver during compute_search_direction, not at the iteration
+        // checkpoint, so they are not reachable from here yet.
+        if target == "kkt" || target == "L" {
+            return CmdOut::err(
+                "live KKT/L visualization needs the factored augmented system, which isn't \
+                 exposed at the iteration checkpoint yet. For now, re-run with \
+                 `--dump kkt:<iter>+L+Lvals --dump-dir DIR` and open the per-iter dump.",
+            );
+        }
+        // Resolve the vector to visualize.
+        let (label, vals) = if BLOCK_NAMES.contains(&target) {
+            match ctx.block(target) {
+                Some(v) => (target.to_string(), v),
+                None => return CmdOut::err(format!("no data for block `{target}`")),
+            }
+        } else if let Some(blk) = target.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b)) {
+            match ctx.delta_block(blk) {
+                Some(v) => (format!("d{blk}"), v),
+                None => return CmdOut::err(format!("no search direction for `d{blk}`")),
+            }
+        } else {
+            return CmdOut::err(format!("don't know how to visualize `{target}`"));
+        };
+        match write_and_open(&label, ctx.iter(), &vals) {
+            Ok((path, viewer)) => CmdOut::ok(vec![format!(
+                "wrote {} ({} values); opened with `{}`",
+                path,
+                vals.len(),
+                viewer
+            )])
+            .with_data(serde_json::json!({"path": path, "viewer": viewer, "n": vals.len()})),
+            Err(e) => CmdOut::err(e),
+        }
+    }
+
+    // ---- front ends ----------------------------------------------------
+
+    /// Emit the pause banner / state for the current front end.
+    fn emit_pause(&self, ctx: &DebugCtx) {
+        match self.mode {
+            DebugMode::Repl => {
+                eprintln!(
+                    "\n── pounce-dbg ── iter {}  mu={:.3e}  obj={:.6e}  inf_pr={:.2e}  inf_du={:.2e}",
+                    ctx.iter(),
+                    ctx.mu(),
+                    ctx.objective(),
+                    ctx.inf_pr(),
+                    ctx.inf_du(),
+                );
+            }
+            DebugMode::Json => {
+                let dims: serde_json::Map<String, serde_json::Value> = ctx
+                    .block_dims()
+                    .into_iter()
+                    .map(|(n, d)| (n.to_string(), serde_json::json!(d)))
+                    .collect();
+                let ev = serde_json::json!({
+                    "event": "pause",
+                    "checkpoint": ctx.checkpoint().as_str(),
+                    "iter": ctx.iter(),
+                    "mu": ctx.mu(),
+                    "objective": ctx.objective(),
+                    "inf_pr": ctx.inf_pr(),
+                    "inf_du": ctx.inf_du(),
+                    "nlp_error": ctx.nlp_error(),
+                    "dims": dims,
+                    "breakpoints": self.breaks,
+                });
+                emit_json(&ev);
+            }
+        }
+    }
+
+    /// Emit a command result for the current front end.
+    fn emit_result(&self, command: &str, out: &CmdOut) {
+        match self.mode {
+            DebugMode::Repl => {
+                let stderr = std::io::stderr();
+                let mut h = stderr.lock();
+                for l in &out.lines {
+                    let _ = writeln!(h, "{l}");
+                }
+                if !out.ok {
+                    let _ = writeln!(h, "(error)");
+                }
+            }
+            DebugMode::Json => {
+                let ev = serde_json::json!({
+                    "event": "result",
+                    "command": command,
+                    "ok": out.ok,
+                    "output": out.lines,
+                    "data": out.data,
+                });
+                emit_json(&ev);
+            }
+        }
+    }
+
+    fn prompt(&self) {
+        if let DebugMode::Repl = self.mode {
+            let _ = write!(std::io::stderr(), "pounce-dbg> ");
+            let _ = std::io::stderr().flush();
+        }
+    }
+}
+
+impl DebugHook for SolverDebugger {
+    fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction {
+        let iter = ctx.iter();
+        if !self.should_pause(iter) {
+            return DebugAction::Resume;
+        }
+        // Consume the one-shot step arming; commands re-arm as needed.
+        self.step = false;
+        self.emit_pause(ctx);
+
+        let stdin = std::io::stdin();
+        loop {
+            self.prompt();
+            let mut line = String::new();
+            match stdin.read_line(&mut line) {
+                Ok(0) => {
+                    // EOF: detach and let the solve finish.
+                    self.detached = true;
+                    return DebugAction::Resume;
+                }
+                Ok(_) => {}
+                Err(_) => return DebugAction::Resume,
+            }
+            let cmd = parse_command(&line, self.mode);
+            let cmd = cmd.trim().to_string();
+            if cmd.is_empty() {
+                continue;
+            }
+            let out = self.dispatch(&cmd, ctx);
+            self.emit_result(&cmd, &out);
+            match out.flow {
+                Flow::Stay => continue,
+                Flow::Resume => return DebugAction::Resume,
+                Flow::Stop => return DebugAction::Stop,
+            }
+        }
+    }
+}
+
+/// In JSON mode a command line may be a bare string or a JSON object
+/// `{"cmd": "...", "args": [...]}`. Returns the resolved command string.
+fn parse_command(line: &str, mode: DebugMode) -> String {
+    let trimmed = line.trim();
+    if let DebugMode::Json = mode {
+        if trimmed.starts_with('{') {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                let cmd = v.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
+                let mut s = cmd.to_string();
+                if let Some(args) = v.get("args").and_then(|a| a.as_array()) {
+                    for a in args {
+                        if let Some(a) = a.as_str() {
+                            s.push(' ');
+                            s.push_str(a);
+                        } else {
+                            s.push(' ');
+                            s.push_str(&a.to_string());
+                        }
+                    }
+                }
+                return s;
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+fn emit_json(v: &serde_json::Value) {
+    let stdout = std::io::stdout();
+    let mut h = stdout.lock();
+    let _ = writeln!(h, "{v}");
+    let _ = h.flush();
+}
+
+fn fmt_vec(name: &str, v: &[f64]) -> String {
+    const MAX: usize = 12;
+    if v.len() <= MAX {
+        format!(
+            "{name} = [{}]",
+            v.iter()
+                .map(|x| format!("{x:.6e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        let head = v[..MAX]
+            .iter()
+            .map(|x| format!("{x:.6e}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{name} = [{head}, … ({} total)]", v.len())
+    }
+}
+
+fn type_str(t: OptionType) -> &'static str {
+    match t {
+        OptionType::OT_Number => "Number",
+        OptionType::OT_Integer => "Integer",
+        OptionType::OT_String => "String",
+        OptionType::OT_Unknown => "Unknown",
+    }
+}
+
+fn default_str(d: &DefaultValue) -> String {
+    match d {
+        DefaultValue::None => "-".into(),
+        DefaultValue::Number(v) => format!("{v}"),
+        DefaultValue::Integer(v) => format!("{v}"),
+        DefaultValue::String(s) => s.clone(),
+    }
+}
+
+/// Write `vals` to a temp JSON file and open it in an external viewer.
+/// The viewer command comes from `POUNCE_DBG_VIEWER` (a template where
+/// `{}` is replaced by the path; if absent, the path is appended), else
+/// the platform default (`xdg-open` on Linux, `open` on macOS).
+fn write_and_open(label: &str, iter: i32, vals: &[f64]) -> Result<(String, String), String> {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("pounce-dbg-{label}-iter{iter}.json"));
+    let payload = serde_json::json!({"label": label, "iter": iter, "values": vals});
+    std::fs::write(&path, payload.to_string()).map_err(|e| format!("write failed: {e}"))?;
+    let path_s = path.to_string_lossy().to_string();
+
+    let (program, args): (String, Vec<String>) = match std::env::var("POUNCE_DBG_VIEWER") {
+        Ok(tmpl) if !tmpl.trim().is_empty() => {
+            let mut parts = tmpl
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            let prog = parts.remove(0);
+            let mut replaced = false;
+            for a in parts.iter_mut() {
+                if a.contains("{}") {
+                    *a = a.replace("{}", &path_s);
+                    replaced = true;
+                }
+            }
+            if !replaced {
+                parts.push(path_s.clone());
+            }
+            (prog, parts)
+        }
+        _ => {
+            let prog = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            (prog.to_string(), vec![path_s.clone()])
+        }
+    };
+    let viewer = format!("{program} {}", args.join(" "));
+    match std::process::Command::new(&program).args(&args).spawn() {
+        Ok(_) => Ok((path_s, viewer)),
+        Err(e) => Err(format!(
+            "wrote {path_s} but could not launch `{program}`: {e} \
+             (set POUNCE_DBG_VIEWER to a command, e.g. `python my_plot.py {{}}`)"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dbg(mode: DebugMode) -> SolverDebugger {
+        SolverDebugger::new(mode, None)
+    }
+
+    #[test]
+    fn json_command_object_is_flattened() {
+        assert_eq!(
+            parse_command("{\"cmd\":\"print x\"}", DebugMode::Json),
+            "print x"
+        );
+        assert_eq!(
+            parse_command(
+                "{\"cmd\":\"set\",\"args\":[\"x[0]\",\"1.5\"]}",
+                DebugMode::Json
+            ),
+            "set x[0] 1.5"
+        );
+        // Bare strings pass through in either mode.
+        assert_eq!(parse_command("step\n", DebugMode::Json), "step");
+        assert_eq!(parse_command("  print x \n", DebugMode::Repl), "print x");
+    }
+
+    #[test]
+    fn pauses_at_first_checkpoint_then_only_when_rearmed() {
+        let mut d = dbg(DebugMode::Repl);
+        // Fresh debugger is armed (step=true) so it pauses at iter 0.
+        assert!(d.should_pause(0));
+        // After consuming the arming (as at_checkpoint does), no pause.
+        d.step = false;
+        assert!(!d.should_pause(1));
+        assert!(!d.should_pause(2));
+    }
+
+    #[test]
+    fn breakpoints_and_run_to_arm_pauses() {
+        let mut d = dbg(DebugMode::Repl);
+        d.step = false;
+        d.breaks = vec![3, 7];
+        assert!(!d.should_pause(2));
+        assert!(d.should_pause(3));
+        assert!(d.should_pause(7));
+        // run_to fires once at/after target, then disarms.
+        d.run_to = Some(5);
+        assert!(!d.should_pause(4));
+        assert!(d.should_pause(5));
+        assert_eq!(d.run_to, None);
+        assert!(!d.should_pause(6));
+    }
+
+    #[test]
+    fn detach_disables_all_pausing() {
+        let mut d = dbg(DebugMode::Repl);
+        d.detached = true;
+        d.step = true;
+        d.breaks = vec![1];
+        assert!(!d.should_pause(0));
+        assert!(!d.should_pause(1));
+    }
+}

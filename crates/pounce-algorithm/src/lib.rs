@@ -23,6 +23,7 @@
 pub mod alg_builder;
 pub mod application;
 pub mod conv_check;
+pub mod debug;
 pub mod eq_mult;
 pub mod hess;
 pub mod init;

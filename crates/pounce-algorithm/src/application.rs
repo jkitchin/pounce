@@ -128,6 +128,12 @@ pub struct IpoptApplication {
     /// via [`IpoptAlgorithm::with_diagnostics`] so the KKT solver and
     /// other dump sites can consult per-iter gating.
     diagnostics: Option<Rc<DiagnosticsState>>,
+    /// Optional interactive debugger hook. When set, it is moved into
+    /// the main [`IpoptAlgorithm`] for the next `optimize_*` call via
+    /// [`IpoptAlgorithm::with_debug_hook`], so a REPL or agent can pause
+    /// at each iteration to inspect / mutate live state. Consumed on use
+    /// (one solve per installed hook).
+    debug_hook: Option<Box<dyn crate::debug::DebugHook>>,
     /// Provider for the BNW outer loop (pounce#10 Phase 3). When set,
     /// `optimize_constrained` consults the provider before each inner
     /// solve, replacing `restoration_factory` with a fresh one so
@@ -203,6 +209,7 @@ impl IpoptApplication {
             linear_backend_factory: None,
             restoration_factory: None,
             diagnostics: None,
+            debug_hook: None,
             restoration_factory_provider: None,
             on_converged: None,
             record_iter_history: false,
@@ -254,6 +261,13 @@ impl IpoptApplication {
     /// solver can emit `--dump kkt:...` artifacts.
     pub fn set_diagnostics(&mut self, diag: Rc<DiagnosticsState>) {
         self.diagnostics = Some(diag);
+    }
+
+    /// Install an interactive debugger hook for the next `optimize_*`
+    /// call. The hook is moved into the main [`IpoptAlgorithm`] and
+    /// consumed by that solve; reinstall it to debug a subsequent solve.
+    pub fn set_debug_hook(&mut self, hook: Box<dyn crate::debug::DebugHook>) {
+        self.debug_hook = Some(hook);
     }
 
     /// Read-side accessor for the installed diagnostics state, if any.
@@ -1194,6 +1208,12 @@ impl IpoptApplication {
         }
         if let Some(diag) = self.diagnostics.as_ref() {
             alg = alg.with_diagnostics(Rc::clone(diag));
+        }
+        // Move the interactive debugger hook (if any) into the main
+        // algorithm. Taken — not cloned — so it drives exactly this
+        // solve; a subsequent solve must reinstall it.
+        if let Some(hook) = self.debug_hook.take() {
+            alg = alg.with_debug_hook(hook);
         }
         alg.max_iter = max_iter;
         // Honor `print_level == 0`: suppress the per-iteration table

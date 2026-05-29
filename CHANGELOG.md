@@ -9,6 +9,42 @@ changes.
 
 ## Unreleased
 
+### Added — Interactive solver debugger (`--debug` / `--debug-json`)
+
+A "pdb for the interior-point loop." The CLI can now pause the solve at
+each outer iteration, drop into a prompt to inspect and *mutate* live
+state, then continue — driven either by a human or by an LLM agent /
+program.
+
+- **Two front ends, one command engine.** `pounce <problem> --debug`
+  gives a line REPL (`pounce-dbg>` prompt on stderr). `--debug-json`
+  speaks newline-delimited JSON on stdin/stdout — each pause emits one
+  `{"event":"pause",…}` object and each command one
+  `{"event":"result",…}` object — so an agent can drive the loop
+  programmatically (JSON mode forces `print_level 0` to keep the channel
+  clean). Commands accept either a bare string or
+  `{"cmd":"…","args":[…]}`.
+- **Inspect:** `info`, `print x|s|y_c|y_d|z_l|z_u|v_l|v_u`, `print dx`
+  (search-direction blocks), `print mu|obj|inf_pr|inf_du|err|iter`.
+- **Flow:** `step`, `continue`, `run N`, `break [N|clear|del N]`,
+  `detach`, `quit`. Pauses at the first checkpoint so you start in
+  control.
+- **Mutate:** `set mu <v>`, `set x[i] <v>` (single component),
+  `set x <v0,v1,…>` (whole block). Iterate edits rebuild the
+  `IteratesVector` with a fresh tag so the tag-keyed CQ caches invalidate
+  correctly — the new point feeds straight back into the solve.
+- **Option discovery + completion:** `opt [filter]` lists registered
+  options (name/type/default/short-desc, long-desc on exact match),
+  `complete <prefix>` returns command/option candidates, and
+  `set opt <name> <value>` validates against the registry.
+- **Visualization:** `viz <block|dx>` writes the vector and opens it in
+  an external viewer (`POUNCE_DBG_VIEWER`, else `xdg-open`/`open`).
+
+Engine lives in `pounce-algorithm`'s `debug` module (`DebugHook` /
+`DebugCtx` / `Checkpoint`); the REPL/agent front end is
+`pounce-cli::debug_repl`. Only the `IterStart` checkpoint is wired today;
+the `Checkpoint` enum is open for finer-grained stops.
+
 ### Added — Active-set SQP with working-set warm start (Phase 5b + 5c + 5d)
 
 A new sequential-quadratic-programming driver sits alongside the

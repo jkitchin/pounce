@@ -174,6 +174,11 @@ pub struct IpoptAlgorithm {
     /// advances the state's iter counter and the augmented-system
     /// solver consults it to gate KKT dumps.
     diagnostics: Option<Rc<DiagnosticsState>>,
+    /// Optional interactive debugger. When installed, the outer loop
+    /// fires it at every [`crate::debug::Checkpoint`] (today: the top
+    /// of each iteration) so a REPL or agent can inspect and mutate
+    /// live state before the next Newton step. See `crate::debug`.
+    debug: Option<Box<dyn crate::debug::DebugHook>>,
 
     // ---- Restoration-phase audit counters (pounce#12). ----
     //
@@ -237,6 +242,7 @@ impl IpoptAlgorithm {
             acceptable_iterate: None,
             acceptable_iter_number: 0,
             diagnostics: None,
+            debug: None,
             resto_calls: 0,
             resto_inner_iters: 0,
             resto_outer_iters: 0,
@@ -355,6 +361,26 @@ impl IpoptAlgorithm {
     pub fn with_diagnostics(mut self, diag: Rc<DiagnosticsState>) -> Self {
         self.diagnostics = Some(diag);
         self
+    }
+
+    /// Install an interactive debugger hook. Fired at each checkpoint
+    /// in [`Self::optimize`]; returning [`crate::debug::DebugAction::Stop`]
+    /// ends the solve with `SolverReturn::UserRequestedStop`.
+    pub fn with_debug_hook(mut self, hook: Box<dyn crate::debug::DebugHook>) -> Self {
+        self.debug = Some(hook);
+        self
+    }
+
+    /// Fire the debugger hook (if installed) at `cp`, building a live
+    /// [`crate::debug::DebugCtx`] over cheap handle clones. Returns the
+    /// requested action, defaulting to `Resume` when no hook is set.
+    fn fire_debug(&mut self, cp: crate::debug::Checkpoint) -> crate::debug::DebugAction {
+        use crate::debug::{DebugAction, DebugCtx};
+        let Some(hook) = self.debug.as_mut() else {
+            return DebugAction::Resume;
+        };
+        let mut ctx = DebugCtx::new(Rc::clone(&self.data), Rc::clone(&self.cq), cp);
+        hook.at_checkpoint(&mut ctx)
     }
 
     /// One iteration body — port of `Optimize()`'s inner loop.
@@ -1343,6 +1369,9 @@ impl IpoptAlgorithm {
         if !self.fire_intermediate() {
             return SolverReturn::UserRequestedStop;
         }
+        if self.fire_debug(crate::debug::Checkpoint::IterStart) == crate::debug::DebugAction::Stop {
+            return SolverReturn::UserRequestedStop;
+        }
 
         loop {
             match self.iterate() {
@@ -1386,6 +1415,11 @@ impl IpoptAlgorithm {
                     // `GetIpoptCurrent*` family) see live state for the
                     // duration of the user callback.
                     if !self.fire_intermediate() {
+                        return SolverReturn::UserRequestedStop;
+                    }
+                    if self.fire_debug(crate::debug::Checkpoint::IterStart)
+                        == crate::debug::DebugAction::Stop
+                    {
                         return SolverReturn::UserRequestedStop;
                     }
                 }
@@ -1468,7 +1502,7 @@ fn clamp_against_slack(
     Rc::from(out)
 }
 
-fn flat_read_into(v: &dyn Vector, dst: &mut [Number]) {
+pub(crate) fn flat_read_into(v: &dyn Vector, dst: &mut [Number]) {
     if let Some(dv) = v
         .as_any()
         .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
@@ -1495,13 +1529,13 @@ fn flat_read_into(v: &dyn Vector, dst: &mut [Number]) {
     panic!("clamp_against_slack: unsupported Vector kind");
 }
 
-fn flat_read_owned(v: &dyn Vector) -> Vec<Number> {
+pub(crate) fn flat_read_owned(v: &dyn Vector) -> Vec<Number> {
     let mut out = vec![0.0; v.dim() as usize];
     flat_read_into(v, &mut out);
     out
 }
 
-fn flat_write_into(v: &mut dyn Vector, src: &[Number]) {
+pub(crate) fn flat_write_into(v: &mut dyn Vector, src: &[Number]) {
     if let Some(dv) = v
         .as_any_mut()
         .downcast_mut::<pounce_linalg::dense_vector::DenseVector>()

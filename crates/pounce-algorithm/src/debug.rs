@@ -1,0 +1,346 @@
+//! Interactive solver debugger — a "pdb for the interior-point loop".
+//!
+//! The main loop ([`crate::ipopt_alg::IpoptAlgorithm::optimize`]) fires
+//! a [`DebugHook`] at well-defined checkpoints. A hook receives a
+//! [`DebugCtx`] — a live, *mutable* view of the algorithm state — and
+//! returns a [`DebugAction`] telling the loop whether to keep solving
+//! or stop. This is the engine; the user-facing REPL / agent protocol
+//! lives in the CLI (`pounce --debug`), which implements [`DebugHook`].
+//!
+//! Two design points make mutation safe:
+//!
+//!   * [`DebugCtx`] holds cheap `Rc` clones of the same `IpoptData` /
+//!     `IpoptCq` handles the loop uses, so reads and writes go through
+//!     the identical `RefCell` path — there is no shadow copy to drift.
+//!   * Overwriting the iterate rebuilds a *fresh* [`IteratesVector`]
+//!     (via `deep_copy().freeze()`), which mints a new vector tag. The
+//!     CQ caches are tag-keyed (see `ipopt_cq.rs`), so a mutated iterate
+//!     transparently invalidates every derived quantity — exactly as if
+//!     the line search had produced the new point.
+//!
+//! Only the [`Checkpoint::IterStart`] site is wired today; the enum is
+//! deliberately open so finer-grained stops (post-search-direction,
+//! pre-line-search) can be added without touching the trait.
+
+use crate::ipopt_cq::IpoptCqHandle;
+use crate::ipopt_data::IpoptDataHandle;
+use pounce_common::types::Number;
+
+/// Where in the main loop a checkpoint fired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Checkpoint {
+    /// Top of an outer iteration — after the intermediate callback,
+    /// before this iteration's Newton step is computed. The iterate,
+    /// multipliers, and μ all reflect the *accepted* point from the
+    /// previous iteration.
+    IterStart,
+}
+
+impl Checkpoint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Checkpoint::IterStart => "iter_start",
+        }
+    }
+}
+
+/// What the algorithm should do after a [`DebugHook`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugAction {
+    /// Keep solving.
+    Resume,
+    /// Stop the solve now. Surfaces to the caller as
+    /// `SolverReturn::UserRequestedStop`.
+    Stop,
+}
+
+/// The eight primal/dual blocks of an iterate, addressable by name.
+pub const BLOCK_NAMES: [&str; 8] = ["x", "s", "y_c", "y_d", "z_l", "z_u", "v_l", "v_u"];
+
+/// Live, mutable view of solver state handed to a [`DebugHook`].
+///
+/// Cheap to construct (two `Rc` clones); every accessor borrows the
+/// shared `RefCell`s on demand.
+pub struct DebugCtx {
+    data: IpoptDataHandle,
+    /// Always `Some` in production (the main loop has a live CQ). Left
+    /// `None` only by the data-only unit-test constructor, in which case
+    /// the CQ-derived scalar accessors report `NaN`.
+    cq: Option<IpoptCqHandle>,
+    cp: Checkpoint,
+}
+
+impl DebugCtx {
+    pub fn new(data: IpoptDataHandle, cq: IpoptCqHandle, cp: Checkpoint) -> Self {
+        Self {
+            data,
+            cq: Some(cq),
+            cp,
+        }
+    }
+
+    /// Test-only constructor without a CQ. CQ-derived scalars are `NaN`.
+    #[cfg(test)]
+    fn new_data_only(data: IpoptDataHandle, cp: Checkpoint) -> Self {
+        Self { data, cq: None, cp }
+    }
+
+    fn cq_scalar(
+        &self,
+        f: impl FnOnce(&crate::ipopt_cq::IpoptCalculatedQuantities) -> Number,
+    ) -> Number {
+        match self.cq.as_ref() {
+            Some(cq) => f(&cq.borrow()),
+            None => Number::NAN,
+        }
+    }
+
+    /// Which checkpoint we are paused at.
+    pub fn checkpoint(&self) -> Checkpoint {
+        self.cp
+    }
+
+    // ---- scalar reads --------------------------------------------------
+
+    /// Current outer iteration counter.
+    pub fn iter(&self) -> i32 {
+        self.data.borrow().iter_count
+    }
+
+    /// Current barrier parameter μ.
+    pub fn mu(&self) -> Number {
+        self.data.borrow().curr_mu
+    }
+
+    /// Unscaled objective at the current iterate.
+    pub fn objective(&self) -> Number {
+        self.cq_scalar(|c| c.unscaled_curr_f())
+    }
+
+    /// Max-norm primal infeasibility.
+    pub fn inf_pr(&self) -> Number {
+        self.cq_scalar(|c| c.curr_primal_infeasibility_max())
+    }
+
+    /// Max-norm dual infeasibility.
+    pub fn inf_du(&self) -> Number {
+        self.cq_scalar(|c| c.curr_dual_infeasibility_max())
+    }
+
+    /// Scaled overall NLP error driving convergence.
+    pub fn nlp_error(&self) -> Number {
+        self.cq_scalar(|c| c.curr_nlp_error())
+    }
+
+    // ---- vector reads --------------------------------------------------
+
+    /// Dimensions of every named block, in [`BLOCK_NAMES`] order.
+    pub fn block_dims(&self) -> Vec<(&'static str, usize)> {
+        let d = self.data.borrow();
+        let Some(curr) = d.curr.as_ref() else {
+            return BLOCK_NAMES.iter().map(|&n| (n, 0)).collect();
+        };
+        BLOCK_NAMES
+            .iter()
+            .map(|&n| (n, block_ref(curr, n).map(|v| v.dim() as usize).unwrap_or(0)))
+            .collect()
+    }
+
+    /// Read a named block of the current iterate as a flat `f64` vec.
+    /// Returns `None` for an unknown name or before the iterate is set.
+    pub fn block(&self, name: &str) -> Option<Vec<Number>> {
+        let d = self.data.borrow();
+        let curr = d.curr.as_ref()?;
+        let v = block_ref(curr, name)?;
+        Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
+    }
+
+    /// Read a named block of the most recent search direction δ.
+    pub fn delta_block(&self, name: &str) -> Option<Vec<Number>> {
+        let d = self.data.borrow();
+        let delta = d.delta.as_ref()?;
+        let v = block_ref(delta, name)?;
+        Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
+    }
+
+    // ---- mutation ------------------------------------------------------
+
+    /// Overwrite the barrier parameter μ. Takes effect on the next
+    /// `update_barrier_parameter` consult (the monotone updater treats
+    /// it as the current value; adaptive updaters re-derive from it).
+    pub fn set_mu(&mut self, mu: Number) -> Result<(), String> {
+        if !mu.is_finite() || mu <= 0.0 {
+            return Err(format!("mu must be finite and positive, got {mu}"));
+        }
+        self.data.borrow_mut().curr_mu = mu;
+        Ok(())
+    }
+
+    /// Overwrite an entire named block of the current iterate.
+    ///
+    /// Rebuilds `curr` from a deep copy with a fresh vector tag, so all
+    /// tag-keyed CQ caches invalidate and downstream quantities recompute
+    /// from the new point.
+    pub fn set_block(&mut self, name: &str, vals: &[Number]) -> Result<(), String> {
+        if !BLOCK_NAMES.contains(&name) {
+            return Err(format!(
+                "unknown block `{name}` (expected one of {BLOCK_NAMES:?})"
+            ));
+        }
+        let mut d = self.data.borrow_mut();
+        let curr = d.curr.as_ref().ok_or("no current iterate yet")?;
+        let mut m = curr.deep_copy();
+        let blk = block_ref_mut(&mut m, name).expect("name checked above");
+        let dim = blk.dim() as usize;
+        if vals.len() != dim {
+            return Err(format!(
+                "block `{name}` has dimension {dim}, got {} value(s)",
+                vals.len()
+            ));
+        }
+        crate::ipopt_alg::flat_write_into(blk.as_mut(), vals);
+        let frozen = m.freeze();
+        d.set_curr(frozen);
+        Ok(())
+    }
+
+    /// Overwrite a single component of a named block.
+    pub fn set_component(&mut self, name: &str, idx: usize, val: Number) -> Result<(), String> {
+        let mut vals = self
+            .block(name)
+            .ok_or_else(|| format!("unknown block `{name}` or no iterate yet"))?;
+        if idx >= vals.len() {
+            return Err(format!(
+                "index {idx} out of range for block `{name}` (dimension {})",
+                vals.len()
+            ));
+        }
+        vals[idx] = val;
+        self.set_block(name, &vals)
+    }
+}
+
+/// Borrow a named block of an [`IteratesVector`].
+fn block_ref<'a>(
+    iv: &'a crate::iterates_vector::IteratesVector,
+    name: &str,
+) -> Option<&'a std::rc::Rc<dyn pounce_linalg::Vector>> {
+    Some(match name {
+        "x" => &iv.x,
+        "s" => &iv.s,
+        "y_c" => &iv.y_c,
+        "y_d" => &iv.y_d,
+        "z_l" => &iv.z_l,
+        "z_u" => &iv.z_u,
+        "v_l" => &iv.v_l,
+        "v_u" => &iv.v_u,
+        _ => return None,
+    })
+}
+
+/// Borrow a named block of a mutable [`IteratesVectorMut`].
+fn block_ref_mut<'a>(
+    iv: &'a mut crate::iterates_vector::IteratesVectorMut,
+    name: &str,
+) -> Option<&'a mut Box<dyn pounce_linalg::Vector>> {
+    Some(match name {
+        "x" => &mut iv.x,
+        "s" => &mut iv.s,
+        "y_c" => &mut iv.y_c,
+        "y_d" => &mut iv.y_d,
+        "z_l" => &mut iv.z_l,
+        "z_u" => &mut iv.z_u,
+        "v_l" => &mut iv.v_l,
+        "v_u" => &mut iv.v_u,
+        _ => return None,
+    })
+}
+
+/// A consumer that the main loop pauses at each checkpoint. The CLI's
+/// REPL / agent driver is the production implementation.
+pub trait DebugHook {
+    /// Called at every [`Checkpoint`]. Inspect and/or mutate via `ctx`,
+    /// then return whether to keep solving.
+    fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipopt_data::IpoptData;
+    use crate::iterates_vector::IteratesVector;
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+    use pounce_linalg::Vector;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn iv(xvals: &[f64]) -> IteratesVector {
+        let dense = |vals: &[f64]| {
+            let mut v = DenseVectorSpace::new(vals.len() as i32).make_new_dense();
+            v.set_values(vals);
+            Rc::new(v) as Rc<dyn Vector>
+        };
+        let z = |n| dense(&vec![0.0; n]);
+        IteratesVector::new(dense(xvals), z(1), z(1), z(1), z(2), z(2), z(1), z(1))
+    }
+
+    fn ctx_with(xvals: &[f64]) -> DebugCtx {
+        let mut data = IpoptData::new();
+        data.set_curr(iv(xvals));
+        data.curr_mu = 0.1;
+        let data = Rc::new(RefCell::new(data));
+        DebugCtx::new_data_only(data, Checkpoint::IterStart)
+    }
+
+    #[test]
+    fn reads_block_and_mu() {
+        let ctx = ctx_with(&[1.0, 2.0]);
+        assert_eq!(ctx.mu(), 0.1);
+        assert_eq!(ctx.block("x"), Some(vec![1.0, 2.0]));
+        assert_eq!(ctx.block("nope"), None);
+    }
+
+    #[test]
+    fn set_component_rebuilds_iterate_with_fresh_tag() {
+        let mut ctx = ctx_with(&[1.0, 2.0]);
+        let before = ctx
+            .data
+            .borrow()
+            .curr
+            .as_ref()
+            .unwrap()
+            .x
+            .as_tagged()
+            .get_tag();
+        ctx.set_component("x", 1, 9.0).unwrap();
+        let after = ctx
+            .data
+            .borrow()
+            .curr
+            .as_ref()
+            .unwrap()
+            .x
+            .as_tagged()
+            .get_tag();
+        assert_eq!(ctx.block("x"), Some(vec![1.0, 9.0]));
+        assert_ne!(before, after, "mutating the iterate must mint a new tag");
+    }
+
+    #[test]
+    fn set_block_dim_mismatch_is_rejected() {
+        let mut ctx = ctx_with(&[1.0, 2.0]);
+        assert!(ctx.set_block("x", &[1.0]).is_err());
+        assert!(ctx.set_block("x", &[1.0, 2.0, 3.0]).is_err());
+        assert!(ctx.set_block("x", &[3.0, 4.0]).is_ok());
+        assert_eq!(ctx.block("x"), Some(vec![3.0, 4.0]));
+    }
+
+    #[test]
+    fn set_mu_rejects_nonpositive() {
+        let mut ctx = ctx_with(&[1.0]);
+        assert!(ctx.set_mu(-1.0).is_err());
+        assert!(ctx.set_mu(0.0).is_err());
+        assert!(ctx.set_mu(1e-3).is_ok());
+        assert_eq!(ctx.mu(), 1e-3);
+    }
+}

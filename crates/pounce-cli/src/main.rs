@@ -94,6 +94,28 @@ pub fn main() -> ExitCode {
         }
     }
 
+    // Interactive solver debugger (`--debug` / `--debug-json`). Installs
+    // a hook that pauses at each iteration. In JSON mode the solver's
+    // own per-iteration table on stdout would corrupt the protocol
+    // stream, so force `print_level 0` to silence it; the debugger emits
+    // structured pause/result events instead.
+    if let Some(mode) = args.debug {
+        if matches!(mode, pounce_cli::cli::DebugMode::Json) {
+            let _ = app.options_mut().read_from_str("print_level 0\n", true);
+        }
+        let reg = Some(std::rc::Rc::clone(app.registered_options()));
+        app.set_debug_hook(Box::new(pounce_cli::debug_repl::SolverDebugger::new(
+            mode, reg,
+        )));
+        eprintln!(
+            "pounce: interactive debugger enabled ({}). Type `help` at the prompt.",
+            match mode {
+                pounce_cli::cli::DebugMode::Repl => "repl",
+                pounce_cli::cli::DebugMode::Json => "json",
+            }
+        );
+    }
+
     // Wire the restoration phase. Without this, any line-search failure
     // surfaces as `RestorationFailure` instead of falling back into the
     // ℓ1-feasibility sub-IPM. Mirrors what upstream's `IpAlgBuilder`
