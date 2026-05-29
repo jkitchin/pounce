@@ -71,6 +71,41 @@ equivalent on by default). FMA happens only where code explicitly calls
 `.mul_add()`, so FMA-determinism is controlled directly rather than
 fought out of the optimizer.
 
+**How to hold tier 2 in practice.** The requirement reduces to a small
+set of rules on every reduction (dot products, norms, matrix-vector,
+the KKT residual sums):
+
+- **Fixed reduction order, independent of runtime.** Pick a lane count
+  and chunk size as *compile-time constants*, not from
+  `is_x86_feature_detected!` width or the current thread count. A sum is
+  always `k` partial accumulators combined in a fixed tree, padding the
+  tail deterministically. This is what makes the result independent of
+  scheduling and load (2a); making `k` independent of the hardware SIMD
+  width is the extra step for 2b.
+- **No adaptive parallel splits in reductions.** Use rayon with an
+  explicit fixed `chunk_size` (e.g. `par_chunks(N)` then a deterministic
+  serial combine), never `fold`/`reduce` whose split points depend on
+  work-stealing. Map-only parallelism (independent per-cone updates,
+  assembly) needs no special care — only the *combine* must be fixed.
+- **FMA is all-or-nothing per kernel.** Decide once whether a kernel
+  uses `.mul_add()` and never branch on it; a kernel that uses FMA on
+  one path and `a*b + c` on another is not reproducible. Since Rust
+  never contracts implicitly, "never call `.mul_add()`" is itself a
+  valid, simple tier-2 policy if a kernel doesn't need the extra
+  accuracy.
+- **Single accumulation scheme across the SIMD/scalar tail.** The
+  vectorized body and the scalar remainder must accumulate into the same
+  tree (e.g. reduce the SIMD lanes into the running scalar accumulators
+  in a fixed order), so an input whose length isn't a multiple of the
+  lane count still reproduces.
+- **Don't depend on `-ffast-math`-style flags.** Keep the default
+  codegen; never enable fast-math/reassociation, which would let LLVM
+  reorder sums behind our back and silently break 2a.
+
+These rules cost little — they mostly constrain *how* a kernel is
+written, not whether it vectorizes — and the §5 reproducibility test is
+what catches a violation.
+
 ## 2. Vectorization (SIMD)
 
 **Landscape (2025).**
