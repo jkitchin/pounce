@@ -59,9 +59,9 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "feral"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17270668ca85a440db5a71622bf4c43c23e9fd8feff20bec0bb675fe69654ac8"
+checksum = "7e9b9f9c29560eec91e498cf70f73903e6bc413937f2598c29e5691c9d07495d"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "iter-diff"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
 ]
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-algorithm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-feral",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-cinterface"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libloading",
  "log",
@@ -350,11 +350,11 @@ dependencies = [
 
 [[package]]
 name = "pounce-common"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "pounce-cutest"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-feral"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "feral",
  "pounce-common",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-hsl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-l1penalty"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-large-scale"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -407,14 +407,14 @@ dependencies = [
 
 [[package]]
 name = "pounce-linalg"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
 ]
 
 [[package]]
 name = "pounce-linsol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-nlp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-presolve"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-py"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "numpy",
  "pounce-algorithm",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-qp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-feral",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-restoration"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -477,7 +477,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-sensitivity"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-solve-report"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-linsol",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-studio-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-studio-pyo3"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pounce-studio-core",
  "pyo3",
@@ -760,7 +760,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[patch.unused]]
-name = "feral"
-version = "0.8.0"

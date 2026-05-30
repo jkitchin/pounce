@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Machine-readable `pounce.solve-report/v1` JSON writer (shared by pounce-cli and pounce-cinterface)."
 keywords = ["ipopt", "solver", "report", "json", "fair"]
 categories = ["mathematics", "science"]

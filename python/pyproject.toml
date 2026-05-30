@@ -9,7 +9,7 @@ build-backend = "maturin"
 # because maturin's `module-name = "pounce._pounce"` and
 # `python-source = "."` keep the package folder named `pounce`.
 name = "pounce-solver"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python interface to POUNCE — a pure-Rust port of the Ipopt interior-point NLP solver. cyipopt-style Problem class, scipy-style minimize() facade, and JAX-friendly autodiff / implicit differentiation."
 readme = "README.md"
 requires-python = ">=3.9"

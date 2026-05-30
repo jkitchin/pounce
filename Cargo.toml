@@ -51,7 +51,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "EPL-2.0"
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
@@ -62,19 +62,19 @@ repository = "https://github.com/jkitchin/pounce"
 # deps lack a registry version). Crates pick these up via
 # `pounce-foo.workspace = true`.
 [workspace.dependencies]
-pounce-common = { path = "crates/pounce-common", version = "0.2.0" }
-pounce-linalg = { path = "crates/pounce-linalg", version = "0.2.0" }
-pounce-linsol = { path = "crates/pounce-linsol", version = "0.2.0" }
-pounce-nlp = { path = "crates/pounce-nlp", version = "0.2.0" }
-pounce-hsl = { path = "crates/pounce-hsl", version = "0.2.0" }
-pounce-feral = { path = "crates/pounce-feral", version = "0.2.0" }
-pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.2.0" }
-pounce-restoration = { path = "crates/pounce-restoration", version = "0.2.0" }
-pounce-presolve = { path = "crates/pounce-presolve", version = "0.2.0" }
-pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.2.0" }
-pounce-qp = { path = "crates/pounce-qp", version = "0.2.0" }
-pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.2.0" }
-pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.2.0" }
+pounce-common = { path = "crates/pounce-common", version = "0.3.0" }
+pounce-linalg = { path = "crates/pounce-linalg", version = "0.3.0" }
+pounce-linsol = { path = "crates/pounce-linsol", version = "0.3.0" }
+pounce-nlp = { path = "crates/pounce-nlp", version = "0.3.0" }
+pounce-hsl = { path = "crates/pounce-hsl", version = "0.3.0" }
+pounce-feral = { path = "crates/pounce-feral", version = "0.3.0" }
+pounce-algorithm = { path = "crates/pounce-algorithm", version = "0.3.0" }
+pounce-restoration = { path = "crates/pounce-restoration", version = "0.3.0" }
+pounce-presolve = { path = "crates/pounce-presolve", version = "0.3.0" }
+pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.3.0" }
+pounce-qp = { path = "crates/pounce-qp", version = "0.3.0" }
+pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.3.0" }
+pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.0" }
 feral = "0.8.0"
 
 [workspace.lints.rust]
