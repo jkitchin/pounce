@@ -8,8 +8,9 @@ LP/QP routing already designed in
 plan has landed: a `pounce-convex` IPM family, the `pounce-qp`
 active-set solver, and the `solver_selection` dispatch seam.
 
-Two scope decisions drive everything below and depart from the LP/QP
-note's stated boundaries:
+Three scope decisions drive everything below. The first two depart from
+the LP/QP note's stated boundaries; the third is the *thesis* — the
+reason to build any of this.
 
 1. **Pure Rust, no wrapping.** The LP/QP note's escape hatch — "wrap
    HiGHS / SCIP / OSQP / BARON behind the dispatch layer" — is *off the
@@ -21,6 +22,18 @@ note's stated boundaries:
    lp-qp-routing.md "Nonconvex QP / global optimization"). This note
    reverses that: deterministic global optimization via spatial
    branch-and-bound becomes a first-class POUNCE algorithm family.
+3. **Differentiability, JAX, and Python are the point — not a
+   follow-on.** The goal is *not* to beat Gurobi/BARON on the Mittelmann
+   sheets. It is **vertical integration**: a pure-Rust, JAX-native,
+   `vmap`-batched *differentiable* solver stack spanning LP → QP → NLP →
+   MIP → global, so that any of these solves can sit inside an ML model
+   and pass gradients. Competitiveness is a *constraint* ("credible, not
+   embarrassing"), not the objective. This is the thing that does not
+   exist anywhere — cvxpylayers / diffcp is convex-only; there is no
+   differentiable MINLP or global-optimization layer, commercial or
+   open. See "Differentiability and the JAX/Python surface" below; it is
+   a **hard requirement on every solver**, not a fast-follow.
+
 
 ## The central reframe
 
@@ -101,6 +114,35 @@ linear algebra.
    cannot build the global layer without first running a B&B tree over
    convex relaxations. The phasing below is therefore forced, not a
    soft preference.
+6. **Differentiability is a hard requirement — definition of done, not
+   a fast-follow.** A solver does not "land" until its `jax.custom_vjp`
+   backward pass and its `vmap`/batched wrapper exist and pass tests.
+   This is deliberate: differentiable-optimization projects fail when
+   the backward pass is retrofitted onto a forward solver that wasn't
+   designed to expose `(x*, λ*, multipliers, active set)`. Designing it
+   in from the first commit of each phase keeps the residual hand-off
+   (Seam 5 below) a first-class output of every solve. The cost is real
+   — each phase carries its JAX work — and it is paid on purpose.
+7. **LP/polyhedral relaxations for global.** Node lower bounds come from
+   *linearized* McCormick/αBB envelopes solved as LPs on the dual
+   simplex, not from convex-NLP relaxations. Three reasons, in priority
+   order: (a) **one** warm-startable engine serves MILP nodes, MIQP
+   relaxation LPs, and global nodes; (b) LP relaxations are themselves
+   differentiable through the *same* KKT machinery, so relaxation-gap
+   gradients come for free if ever wanted; (c) it matches Couenne, the
+   EPL-2.0 reference. Cost: `pounce-relax` must emit linear cuts of the
+   envelopes and re-linearize as boxes tighten. The hybrid (convex-NLP
+   root bound, LP nodes below) is a Phase-6+ refinement, not the
+   starting architecture.
+8. **MILP is "degenerate MIQP," not a HiGHS challenger.** Pure-MILP
+   works correctly via the zero-Hessian path; cut/heuristic effort
+   concentrates where POUNCE differentiates (MIQP / MINLP / global /
+   *differentiability*). The simplex still gets exercised hard — the
+   global LP-relaxation path (decision 7) drives it — so it becomes good
+   out of necessity, not out of chasing MIPLIB. Bounds are **numerical**
+   (BARON/Couenne-style floating point); rigorous interval-validated
+   bounds are explicitly *not* a goal — ML wants gradients, not
+   certified optima.
 
 ## Architecture
 
@@ -364,6 +406,49 @@ pub trait IncumbentSearch {
 }
 ```
 
+### Seam 5 — `DiffHandoff`: the differentiable backward pass
+
+The seam that makes differentiability a definition-of-done (decision 6)
+rather than a retrofit. When B&B finishes, the winning leaf is a
+*continuous* problem — the original with integers fixed to the optimal
+assignment (and, for global, with the box pinned to the winning basin).
+Its KKT data is exactly what the existing `pounce.jax.solve` backward
+consumes (`python/pounce/jax/_diff.py:128`): `(x*, λ*, mult_x_L,
+mult_x_U)` plus the active set. **Integer variables differentiate like
+active bounds** — `dx/dp = 0` on their columns, via the same
+identity-augment trick the active-set handling already uses (the
+pounce#73 fix). So the `SolveReport` from B&B must surface this hand-off
+as a first-class output, and `pounce-sensitivity` consumes it unchanged.
+
+```rust
+/// Everything the implicit-function-theorem backward pass needs, emitted
+/// by every solve (continuous or B&B-leaf). Fed to pounce-sensitivity
+/// and, above it, the jax.custom_vjp residual.
+pub struct DiffHandoff {
+    pub x: Vec<f64>,              // primal solution
+    pub lambda: Vec<f64>,        // constraint multipliers
+    pub mult_x_lower: Vec<f64>,  // bound multipliers → active-set mask
+    pub mult_x_upper: Vec<f64>,
+    /// Variables pinned in the backward (dx/dp = 0): active bounds, AND
+    /// the integer variables fixed at the optimal assignment.
+    pub pinned: BitVec,
+    /// Converged KKT factor of the fixed-integer / final continuous
+    /// problem, reused across back-solves (pounce_linsol::Factorization).
+    pub factor: Option<Factorization>,
+}
+```
+
+The gradient this yields is **correct conditional on the discrete
+solution being locally stable** — the optimal integer assignment and
+active set do not change under the infinitesimal parameter perturbation.
+That is the right and useful object for decision-focused learning when
+the assignment is stable (most of training). It carries *no* signal
+*through* the combinatorial switch itself; for learning that must flow
+gradient through the discrete decision, a smoothing layer
+(perturbed-optimizer / blackbox-combinatorial — see references) wraps
+the solver on the JAX side as an alternative `custom_vjp` rule. **The
+Rust core is unchanged either way**; smoothing is a Python/JAX concern.
+
 ### The engine loop
 
 `pounce-mip` owns the tree, queue, incumbent, and gap; everything
@@ -452,60 +537,164 @@ crates/pounce-lu/       # Phase 2: sparse LU + Bartels-Golub/Forrest-Tomlin
 crates/pounce-simplex/  # Phase 2: dual simplex, bound-flipping ratio test
 ```
 
+## Differentiability and the JAX/Python surface
+
+This is the thesis (scope decision 3), so it gets first-class treatment
+rather than a closing paragraph. The headline is that **the hard
+machinery already exists** — the MIP/global differentiability story is
+an *integration* of shipped infrastructure, not new differentiation
+theory.
+
+### What already ships
+
+POUNCE already differentiates continuous solves end-to-end through JAX:
+
+- `pounce.jax.solve` / `solve_with_warm` — `jax.custom_vjp` wrappers
+  whose backward is KKT implicit-function-theorem differentiation with
+  active-set handling (`python/pounce/jax/_diff.py:128`): active bounds
+  → `dx/dp = 0`; active constraint rows form the KKT block; inactive
+  rows drop out (the pounce#73 slack-inequality fix).
+- `vmap_solve` / `vmap_solve_parallel` / `batched_solve` — batched and
+  GIL-released parallel solves with the per-element KKT backward
+  `vmap`-ed (pounce#74).
+- `JaxProblem` — build-once / solve-many handle with factor reuse across
+  the backward (pounce#75–#77).
+- `pounce-sensitivity` — the Rust-side converged-KKT-factor reuse the
+  backward stands on (`pounce_linsol::Factorization`).
+
+### The forward/backward split
+
+| Pass | Does | Differentiable? |
+|---|---|---|
+| **Forward** | B&B / spatial search — finds the optimal integer assignment and winning basin | No (combinatorial / global) — but it runs entirely in Rust |
+| **Backward** | implicit-diff through the *winning leaf*: original problem with integers fixed + box pinned | **Yes** — reuses `_diff.py` `bwd` unchanged, integers pinned like active bounds (Seam 5) |
+
+So the new Python surface mirrors the existing one exactly:
+
+```python
+import pounce.jax as pj
+
+x_star = pj.solve_mip(params, x0)          # custom_vjp: fwd = B&B,
+                                           #   bwd = fixed-integer KKT
+x_star = pj.solve_global(params, x0)       # same, winning local basin
+grads  = jax.grad(loss)(params)            # flows through the solve
+batch  = pj.vmap_solve_mip(param_batch)    # decision-focused learning
+                                           #   over a whole dataset
+```
+
+`vmap_solve_mip` is the ML payoff: a *batch* of mixed-integer / global
+programs, each differentiated w.r.t. the (neural-net-produced) parameters
+that defined it, solved and back-propagated in parallel. That is
+end-to-end **decision-focused learning** (predict-then-optimize) for a
+problem class — MINLP / global — that no existing differentiable-layer
+library reaches.
+
+### Exact vs. smoothed gradients (the honest boundary)
+
+The implicit-diff gradient is **exact, conditional on the discrete
+solution being locally stable** (optimal assignment + active set
+invariant under the infinitesimal perturbation). The argmin of a MIP is
+piecewise-constant in its parameters: the true gradient is zero almost
+everywhere and undefined at the switching surfaces. Two regimes:
+
+- **Assignment stable (most of training):** the conditional gradient is
+  the right object; it is what OptNet-style layers and differentiable
+  MPC with a fixed active set already use. Cheap, exact, reuses
+  everything.
+- **Learning *through* the discrete switch:** wrap the solver in a
+  smoothing rule on the JAX side — perturbed optimizers (Berthet et al.
+  2020), blackbox-combinatorial interpolation (Vlastelica et al. 2020),
+  or an SPO+ surrogate loss (Elmachtoub & Grigas 2022). These are
+  alternative `custom_vjp` rules in `_diff.py`; **the Rust core does not
+  change.**
+
+Designing Seam 5 in from each solver's first commit (decision 6) is what
+keeps both regimes available without a forward-solver rewrite.
+
 ## Implementation phasing
 
 The ordering is forced: convex MI (Phases 0–3) is the substrate the
 global layer (Phases 4–6) stands on. Each phase is independently
 shippable.
 
+**Definition of done (every phase that ships a solver).** Per decision
+6, a phase is not complete until: (i) the forward solver passes its
+numerical tests; (ii) it emits the Seam-5 `DiffHandoff`; (iii) a
+`pounce.jax.solve_*` `custom_vjp` wraps it and passes a finite-
+difference gradient check; and (iv) a `vmap_*` batched form exists. The
+JAX work is *part of* each phase, not a trailing phase — that is the
+whole point of making differentiability first-class.
+
 **Phase 0 — Integer plumbing.** Parse integer-var counts from the `.nl`
 header; extend `ProblemClass`; carry `is_integer: BitVec` on the
 problem. Dispatch errors cleanly on integrality / nonconvexity it
-cannot yet handle. Mirrors LP/QP Phase 1. *No new algorithm.*
+cannot yet handle. Mirrors LP/QP Phase 1. *No new algorithm, no JAX
+surface yet.*
 
-**Phase 1 — B&B shell + first convex MI.** The unified tree with
-integer branching only. Drive it with **MIQP over `pounce-qp`** first
-(native warm-starts, weakest open-source competition). Most-fractional
-branching, depth-first, incumbent + gap. Minimum that justifies
-`pounce-mip`.
+**Phase 1 — B&B shell + first convex MI + `solve_mip` VJP.** The unified
+tree with integer branching only, driven by **MIQP over `pounce-qp`**
+first (native warm-starts, weakest competition). Most-fractional
+branching, depth-first, incumbent + gap. **DoD:** the leaf emits
+`DiffHandoff`; `pj.solve_mip` differentiates with integers pinned;
+`vmap_solve_mip` batches. This is the first end-to-end differentiable
+mixed-integer solve and the minimum that justifies `pounce-mip`.
 
 **Phase 2 — Pure-Rust simplex (`pounce-lu` + `pounce-simplex`).** Dual
 simplex with bound-flipping ratio test and LU-with-updates. Native
-node-to-node warm-starts — the reason simplex re-enters scope. Unlocks
-MILP and fast LP relaxations for the later spatial path.
+node-to-node warm-starts. Unlocks MILP and the LP relaxations the
+spatial path needs. **DoD:** the LP solve emits `DiffHandoff` (LP KKT is
+trivially differentiable), so `solve_mip` over LP relaxations
+differentiates too.
 
 **Phase 3 — Cuts + node presolve.** Gomory / MIR / cover cuts; probing;
 coefficient tightening reusing `pounce-presolve`. Pseudocost /
 reliability branching. Closes the gap to real solvers for convex MI.
-Mostly combinatorial engineering, independent of the linear algebra.
+Cuts must preserve the leaf's active-set hand-off so the backward stays
+valid. Mostly combinatorial engineering.
 
 **Phase 4 — `pounce-relax`.** Factorable decomposition, McCormick
-envelopes, αBB, OBBT. The multi-quarter research lift; the heart of the
-global capability. Validates by reproducing known global optima on
-small MINLPLib instances.
+envelopes (linearized to LP cuts per decision 7), αBB, OBBT. The
+multi-quarter research lift; the heart of the global capability.
+Validates by reproducing known global optima on small MINLPLib
+instances. **DoD:** the relaxation LP is differentiable (free, via the
+simplex hand-off) — relaxation-gap gradients available if wanted.
 
-**Phase 5 — Spatial branch-and-bound.** Continuous branching on the
-relaxation-gap variable; relaxation lower bounds from Phase 4;
+**Phase 5 — Spatial B&B + `solve_global` VJP.** Continuous branching on
+the relaxation-gap variable; relaxation lower bounds from Phase 4;
 multi-start local NLP upper bounds; convergence by global-gap closure.
-This is a genuine deterministic global solver.
+**DoD:** `pj.solve_global` differentiates through the winning local
+basin (box pinned); `vmap_solve_global` batches. A genuine
+*differentiable* deterministic global solver.
 
 **Phase 6 — MINLP-global unified.** Both branching modes active at once
-— the BARON / Couenne capability, end to end, pure Rust.
+— the BARON / Couenne capability, end to end, pure Rust, and
+differentiable / batched throughout.
+
+**Phase 7 (optional, JAX-side) — smoothed/through-the-switch gradients.**
+Perturbed-optimizer and blackbox-combinatorial `custom_vjp` rules in
+`_diff.py` for learning that must flow gradient *through* the discrete
+decision. No Rust changes; gated on an ML workload that needs it.
 
 ### Cost summary (rough, single engineer)
+
+Each solver phase's effort below *includes* its JAX backward + `vmap`
+wrapper (decision 6) — roughly a +15–25% tax over a forward-only solver,
+already folded into the ranges.
 
 | Phase | Effort | Cumulative |
 |---|---|---|
 | 0 — Integer plumbing | 2–4 weeks | 1 month |
-| 1 — B&B shell + MIQP | 2–4 months | 3–5 months |
-| 2 — Simplex + LU | 4–8 months | 7–13 months |
-| 3 — Cuts + node presolve | 3–6 months | 10–19 months |
-| 4 — Relaxation engine | 6–12 months | 16–31 months |
-| 5 — Spatial B&B | 4–8 months | 20–39 months |
-| 6 — MINLP-global | 3–6 months | 23–45 months |
+| 1 — B&B shell + MIQP + VJP | 3–5 months | 4–6 months |
+| 2 — Simplex + LU (+ VJP) | 5–9 months | 9–15 months |
+| 3 — Cuts + node presolve | 3–6 months | 12–21 months |
+| 4 — Relaxation engine | 6–12 months | 18–33 months |
+| 5 — Spatial B&B + VJP | 5–9 months | 23–42 months |
+| 6 — MINLP-global | 3–6 months | 26–48 months |
+| 7 — Smoothed gradients (opt) | 1–2 months | gated on demand |
 
-Phases 0–3 are the convex-MI deliverable — incremental and shippable on
-top of LP/QP. Phases 4–6 are a flagship, multi-year, BARON-class effort.
+Phases 0–3 are the differentiable convex-MI deliverable — incremental
+and shippable on top of LP/QP. Phases 4–6 are a flagship, multi-year,
+BARON-class effort whose differentiability has no existing analog.
 
 ## Limitations to design around
 
@@ -564,12 +753,14 @@ To validate against once each layer lands (listed in adoption order):
 
 ### What "competitive" means
 
-For convex MI, HiGHS / SCIP are the open bar to clear; Gurobi / COPT
-lead by a wide margin. For nonconvex global, BARON and the commercial
-solvers lead, and **a pure-Rust deterministic global optimizer
-essentially does not exist today** — so the bar is "correct and
-credible on MINLPLib," with competitiveness against Couenne / SCIP as
-the realistic medium-term target.
+Competitiveness here is a *constraint, not the objective* (scope
+decision 3). For convex MI, HiGHS / SCIP are the open bar; Gurobi / COPT
+lead by a wide margin and POUNCE deliberately does not chase them. For
+nonconvex global, BARON / commercial solvers lead. The bar POUNCE
+actually sets for itself is **"correct and credible on MINLPLib"** — and
+then the differentiator no benchmark sheet measures: the *same* solves
+are JAX-differentiable and `vmap`-batched. The competitive claim is not
+"fastest MINLP solver" but "the only **differentiable** one."
 
 ## What does not change
 
@@ -581,6 +772,12 @@ the realistic medium-term target.
   absent explicit global opt-in.
 - `pyomo-pounce` gets MIP / global routing transparently via CLI
   dispatch; integer variables already round-trip through the NL format.
+- The `jax.custom_vjp` pattern in `python/pounce/jax/_diff.py` is
+  *extended, not redesigned* — `solve_mip` / `solve_global` reuse the
+  existing KKT-implicit-diff backward and the `vmap`/batching machinery
+  (pounce#73–#77) wholesale. The Rust-side `pounce-sensitivity`
+  factor-reuse seam is unchanged; integers are just one more class of
+  pinned variable in the active-set mask.
 
 ## Literature references
 
@@ -753,3 +950,41 @@ down the design choices. Canonical / foundational entries are marked ★.
 - Neumaier, A. (2004). "Complete search in continuous global optimization
   and constraint satisfaction." *Acta Numerica* 13:271–369. Survey
   connecting interval methods, constraint propagation, and global B&B.
+
+### Differentiable optimization layers & decision-focused learning (the thesis)
+
+The literature behind scope decision 3 — putting a solve inside an ML
+model. The convex-layer entries are what POUNCE's existing
+`pounce.jax.solve` already implements via KKT implicit diff; the
+combinatorial entries are the Phase-7 smoothing escape hatches.
+
+- ★ Amos, B. & Kolter, J.Z. (2017). "OptNet: differentiable optimization
+  as a layer in neural networks." *ICML 2017.* The QP-as-a-layer
+  founding paper; KKT implicit differentiation — the exact mechanism
+  `_diff.py` generalizes.
+- ★ Agrawal, A., Amos, B., Barratt, S., Boyd, S., Diamond, S. & Kolter,
+  J.Z. (2019). "Differentiable convex optimization layers." *NeurIPS
+  2019.* cvxpylayers / diffcp — **convex-only**, the boundary this note's
+  MIP/global layer crosses.
+- Berthet, Q., Blondel, M., Teboul, O., Cuturi, M., Vert, J.-P. & Bach,
+  F. (2020). "Learning with differentiable perturbed optimizers."
+  *NeurIPS 2020.* Perturbed-optimizer smoothing for through-the-switch
+  gradients (Phase 7).
+- Vlastelica, M., Paulus, A., Musil, V., Martius, G. & Rolínek, M.
+  (2020). "Differentiation of blackbox combinatorial solvers." *ICLR
+  2020.* arXiv:1912.02175. Informative gradients through a blackbox
+  combinatorial solver via loss interpolation (Phase 7).
+- Paulus, A., Rolínek, M., Musil, V., Amos, B. & Martius, G. (2021).
+  "CombOptNet: fit the right NP-hard problem by learning integer
+  programming constraints." *ICML 2021.*
+- ★ Elmachtoub, A.N. & Grigas, P. (2022). "Smart 'Predict, then
+  Optimize'." *Management Science* 68(1):9–26. The SPO+ surrogate loss
+  for predict-then-optimize. doi:10.1287/mnsc.2020.3922
+- Ferber, A., Wilder, B., Dilkina, B. & Tambe, M. (2020). "MIPaaL: mixed
+  integer program as a layer." *AAAI 2020*, 34(02):1504–1511. Closest
+  prior art to differentiable MIP — but MILP-only and built on a
+  commercial solver, not a pure-Rust differentiable stack.
+- Wilder, B., Dilkina, B. & Tambe, M. (2019). "Melding the data-decisions
+  pipeline: decision-focused learning for combinatorial optimization."
+  *AAAI 2019.* The decision-focused-learning framing that motivates the
+  `vmap_solve_mip` batched payoff.
