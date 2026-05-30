@@ -1056,10 +1056,14 @@ fn run_convex_qp(
     // dropped constant term: f_user = sign * (½xᵀPx + cᵀx) + const.
     let reported_obj = sign * sol.obj + obj_const;
 
-    let (msg, ok) = match sol.status {
-        QpStatus::Optimal => ("Optimal Solution Found.", true),
-        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false),
-        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false),
+    // AMPL `.sol` convention: 0 solved, 200–299 infeasible, 300–399
+    // unbounded, 400–499 limit, 500–599 failure.
+    let (msg, ok, srn) = match sol.status {
+        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
+        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
+        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
+        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
+        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
     };
     println!(
         "POUNCE ({} IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
@@ -1076,7 +1080,7 @@ fn run_convex_qp(
             message: &format!("POUNCE {} IPM (pounce-convex): {msg}", class.name()),
             x: &sol.x,
             lambda: &lambda,
-            solve_result_num: if ok { 0 } else { 400 },
+            solve_result_num: srn,
             suffixes: &[],
         };
         if let Err(e) = nl_writer::write_sol_file(path, &payload) {

@@ -105,6 +105,31 @@ impl QpProblem {
             y[t.col] += t.val * v[t.row];
         }
     }
+
+    /// Public `y += A x` (alias of [`Self::a_mul_add`]).
+    pub fn a_mul(&self, x: &[f64], y: &mut [f64]) {
+        self.a_mul_add(x, y);
+    }
+
+    /// Public `y += G x` (alias of [`Self::g_mul_add`]).
+    pub fn g_mul(&self, x: &[f64], y: &mut [f64]) {
+        self.g_mul_add(x, y);
+    }
+
+    /// Public `y += Aᵀ v` (alias of [`Self::at_mul_add`]).
+    pub fn at_mul(&self, v: &[f64], y: &mut [f64]) {
+        self.at_mul_add(v, y);
+    }
+
+    /// Public `y += Gᵀ v` (alias of [`Self::gt_mul_add`]).
+    pub fn gt_mul(&self, v: &[f64], y: &mut [f64]) {
+        self.gt_mul_add(v, y);
+    }
+
+    /// Public `y += P x` (alias of [`Self::p_mul_add`]).
+    pub fn p_mul(&self, x: &[f64], y: &mut [f64]) {
+        self.p_mul_add(x, y);
+    }
 }
 
 /// Termination status of an IPM solve.
@@ -112,6 +137,13 @@ impl QpProblem {
 pub enum QpStatus {
     /// Converged: KKT residuals and duality gap below tolerance.
     Optimal,
+    /// Primal infeasible: no `x` satisfies `Ax = b, Gx ≤ h`. A Farkas
+    /// certificate `(y, z ≥ 0)` with `Aᵀy + Gᵀz ≈ 0` and `bᵀy + hᵀz < 0`
+    /// was detected and verified.
+    PrimalInfeasible,
+    /// Dual infeasible / unbounded below: a recession direction `d` with
+    /// `Pd ≈ 0, Ad = 0, Gd ≤ 0, cᵀd < 0` was detected and verified.
+    DualInfeasible,
     /// Iteration limit reached before convergence.
     IterationLimit,
     /// The KKT factorization failed (e.g. structurally singular system).

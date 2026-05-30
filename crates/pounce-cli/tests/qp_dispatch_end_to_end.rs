@@ -18,11 +18,34 @@ fn pounce_exe() -> PathBuf {
 }
 
 fn fixture() -> PathBuf {
+    fixture_named("convex_qp.nl")
+}
+
+fn fixture_named(name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("tests");
     p.push("fixtures");
-    p.push("convex_qp.nl");
+    p.push(name);
     p
+}
+
+/// A primal-infeasible convex QP (`x0+x1=1` and `x0+x1=2`) routed to the
+/// convex IPM must report infeasible — the HSDE-style verified
+/// detection, surfaced end-to-end — and exit non-zero.
+#[test]
+fn infeasible_qp_reports_infeasible() {
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("infeasible_qp.nl"))
+        .arg("--no-sol")
+        .arg("solver_selection=qp-ipm")
+        .output()
+        .expect("spawn pounce");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.to_lowercase().contains("infeasible"),
+        "expected infeasible status; stdout=\n{stdout}"
+    );
+    assert_ne!(out.status.code(), Some(0), "infeasible must exit non-zero");
 }
 
 #[test]

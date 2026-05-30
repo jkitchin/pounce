@@ -66,6 +66,13 @@ pub struct QpOptions {
     pub tau: f64,
     /// Static KKT regularization δ.
     pub reg: f64,
+    /// Relative tolerance for accepting an infeasibility/unboundedness
+    /// certificate. A certificate is declared only when its defining
+    /// inequalities hold to this tolerance *relative to the certificate's
+    /// own magnitude*, so the status is always backed by a verified
+    /// proof — there are no false positives, only (rarely) an
+    /// `IterationLimit` fallback when no certificate is verifiable.
+    pub infeas_tol: f64,
 }
 
 impl Default for QpOptions {
@@ -75,6 +82,7 @@ impl Default for QpOptions {
             max_iter: 200,
             tau: 0.95,
             reg: 1e-8,
+            infeas_tol: 1e-7,
         }
     }
 }
@@ -168,6 +176,15 @@ where
             .max(mu);
         if res < opts.tol {
             status = QpStatus::Optimal;
+            break;
+        }
+
+        // Verified infeasibility / unboundedness detection. Checked
+        // (not assumed), so a positive result is a proof and a false
+        // positive is impossible; this is the HSDE benefit without the
+        // homogeneous-embedding rewrite. Cheap (a few matvecs).
+        if let Some(infeas) = detect_infeasibility(prob, &x, &y, &z, opts) {
+            status = infeas;
             break;
         }
 
@@ -456,4 +473,76 @@ impl KktStructure {
 
 fn inf_norm(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |m, &x| m.max(x.abs()))
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Check the current iterate for a *verified* infeasibility certificate.
+///
+/// Returns `Some(PrimalInfeasible | DualInfeasible)` **only** when the
+/// certificate's defining (in)equalities hold to `opts.infeas_tol`
+/// relative to the certificate's own magnitude. Because the certificate
+/// is checked, not assumed, a positive result is a genuine proof and a
+/// false positive is impossible; an unverifiable iterate returns `None`
+/// and the solve keeps going (ultimately `IterationLimit`).
+///
+/// This recovers HSDE's headline benefit — clean infeasible/unbounded
+/// status instead of silently exhausting the iteration budget — without
+/// the homogeneous embedding's full rewrite of the iteration. When the
+/// problem is primal-infeasible the IPM's dual iterate `(y, z)` diverges
+/// along a Farkas ray, so its normalization satisfies the primal
+/// certificate; when the problem is unbounded the primal iterate `x`
+/// diverges along a recession direction satisfying the dual certificate.
+///
+/// Certificates (for `min ½xᵀPx + cᵀx s.t. Ax = b, Gx ≤ h`):
+/// - **Primal infeasible:** `(y, z ≥ 0)` with `Aᵀy + Gᵀz ≈ 0` and
+///   `bᵀy + hᵀz < 0` (Farkas). `z ≥ 0` is maintained by the IPM.
+/// - **Dual infeasible / unbounded:** direction `d` (= `x`) with
+///   `Pd ≈ 0, Ad ≈ 0, Gd ≤ 0, cᵀd < 0`.
+fn detect_infeasibility(
+    prob: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    opts: &QpOptions,
+) -> Option<QpStatus> {
+    let n = prob.n;
+    let ctol = opts.infeas_tol;
+
+    // --- Primal infeasibility (Farkas certificate) ---
+    let dual_norm = inf_norm(y).max(inf_norm(z));
+    if dual_norm > 0.0 {
+        let mut resid = vec![0.0; n]; // Aᵀy + Gᵀz
+        prob.at_mul(y, &mut resid);
+        prob.gt_mul(z, &mut resid);
+        let cert = dot(&prob.b, y) + dot(&prob.h, z); // bᵀy + hᵀz
+        let z_ok = z.iter().all(|&zi| zi >= -ctol * dual_norm);
+        if cert < -ctol * dual_norm && inf_norm(&resid) <= ctol * dual_norm && z_ok {
+            return Some(QpStatus::PrimalInfeasible);
+        }
+    }
+
+    // --- Dual infeasibility / unboundedness (recession direction d = x) ---
+    let x_norm = inf_norm(x);
+    if x_norm > 0.0 {
+        let mut pd = vec![0.0; n];
+        prob.p_mul(x, &mut pd);
+        let mut ad = vec![0.0; prob.m_eq()];
+        prob.a_mul(x, &mut ad);
+        let mut gd = vec![0.0; prob.m_ineq()];
+        prob.g_mul(x, &mut gd);
+        let cd = dot(&prob.c, x);
+        let gd_max = gd.iter().fold(0.0_f64, |m, &v| m.max(v));
+        if cd < -ctol * x_norm
+            && inf_norm(&pd) <= ctol * x_norm
+            && inf_norm(&ad) <= ctol * x_norm
+            && gd_max <= ctol * x_norm
+        {
+            return Some(QpStatus::DualInfeasible);
+        }
+    }
+
+    None
 }

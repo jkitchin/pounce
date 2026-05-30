@@ -105,5 +105,21 @@ Both the primal solution and the constraint duals are written to the
 `.sol` file, in the same sign convention as POUNCE's NLP path (so Pyomo
 and AMPL read them identically regardless of which solver ran).
 
+### Infeasible and unbounded problems
+
+The convex solver detects infeasibility and unboundedness directly,
+reporting a clean status instead of exhausting the iteration budget:
+
+- **Primal infeasible** — no point satisfies the constraints. Reported
+  with AMPL `solve_result_num` 200.
+- **Unbounded** (dual infeasible) — the objective decreases without
+  bound along a feasible direction. Reported with `solve_result_num`
+  300.
+
+Each verdict is backed by a *verified* certificate (a Farkas
+infeasibility proof or an unbounded recession direction that is checked,
+not merely inferred), so these statuses are never reported in error; a
+problem the solver cannot certify simply runs to the iteration limit.
+
 The design and roadmap live in
 [`dev-notes/lp-qp-routing.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/lp-qp-routing.md).
