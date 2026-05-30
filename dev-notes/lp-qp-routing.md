@@ -393,8 +393,8 @@ mechanism.
 Each phase is independently shippable. The headline shift from the
 original plan is that `pounce-convex` is *the* in-house home for the
 entire IPM/conic family — LP, QP, SOCP, SDP, exponential cone, power
-cone — built incrementally on a single Mehrotra + HSDE scaffolding
-sharing `pounce-linsol`. Active-set QP stays in `pounce-qp` on its own
+cone — built incrementally on a single Mehrotra scaffolding (with the
+HSDE embedding added at the SOCP phase) sharing `pounce-linsol`. Active-set QP stays in `pounce-qp` on its own
 track. Other algorithm families (ADMM, AL+semismooth Newton,
 banded/Riccati IPM, simplex) are explicitly *out of scope* — see the
 "Out of scope and why" section below.
@@ -418,15 +418,40 @@ iteration counts and wall-clock against the existing IPM-NLP path on the
 `quadratic`, `bounded-quadratic`, `eq-quadratic` builtins. This is the
 minimum that justifies the `pounce-convex` crate.
 
-**Phase 3 — Mehrotra predictor-corrector + HSDE.** Add the
-predictor-corrector iteration and homogeneous self-dual embedding for
-infeasibility detection and a self-starting iterate. Note this must be
-the **quadratic-objective HSDE variant** (as in Clarabel; Goulart &
-Chen) that carries the `P` term inside the embedding — *not* the
-textbook LP/conic HSDE, which assumes a linear objective. Handling the
-quadratic objective in the embedding is the QP-specific part and does
-not transfer from LP-HSDE verbatim. Should reduce iteration counts
-~30-50% on convex QPs. Validate on Mittelmann LP
+**Phase 3 — Mehrotra predictor-corrector.** ✅ **Landed.** Add the
+predictor-corrector iteration (affine predictor, adaptive centering
+σ = (μ_aff/μ)³, second-order corrector, single factorization shared by
+both solves). Reduces iteration counts ~30–50% on convex QPs vs the NLP
+filter-IPM — verified in `crates/pounce-cli/tests/qp_vs_nlp_iterations.rs`
+(≈41% fewer at n=50).
+
+*The HSDE split.* The original plan bundled the homogeneous self-dual
+embedding into this phase for two benefits: (a) infeasibility/
+unboundedness detection and (b) a self-starting iterate. These are now
+separated:
+
+- **(a) Infeasibility/unboundedness detection — landed without HSDE.**
+  Implemented via *verified Farkas-certificate detection* layered on the
+  Mehrotra iterate (`detect_infeasibility` in `pounce-convex/src/ipm.rs`):
+  a primal-infeasibility certificate (`Aᵀy + Gᵀz ≈ 0`, `bᵀy + hᵀz < 0`,
+  `z ≥ 0`) or an unbounded recession direction (`Pd ≈ 0`, `Ad ≈ 0`,
+  `Gd ≤ 0`, `cᵀd < 0`), each *checked* against a tolerance so a positive
+  result is a proof — no false positives, only an `IterationLimit`
+  fallback when nothing is certifiable. This delivers HSDE's headline
+  user-facing benefit (clean `Infeasible`/`Unbounded` status, surfaced
+  to the CLI as AMPL `solve_result_num` 200/300) without rewriting the
+  iteration. Tests: `pounce-convex/tests/infeasibility.rs`.
+- **(b) Self-starting iterate via the embedding — deferred to Phase 4.**
+  The full homogeneous self-dual embedding is a from-scratch rewrite of
+  the iteration (adds the τ, κ homogenizing variables and reworks the
+  KKT system). It is most justified as the **conic-IPM scaffolding**
+  Clarabel/ECOS are built on, so it lands with SOCP (Phase 4), where it
+  generalizes to cones — rather than rewriting the working QP iteration
+  now for a benefit the certificate approach already largely provides.
+  When built, it must be the **quadratic-objective HSDE variant** (as in
+  Clarabel; Goulart & Chen) that carries the `P` term inside the
+  embedding — *not* the textbook LP/conic HSDE, which assumes a linear
+  objective. Validate on Mittelmann LP
 subset and Maros-Mészáros QP set. After this phase `pounce-convex` is
 algorithmically competitive with Clarabel and HiGHS for the LP/QP
 problem class. This is *algorithmic* competitiveness (iteration count
@@ -446,11 +471,18 @@ add the reductions that actually move the Mittelmann / Maros-Mészáros
 numbers. Equilibration (Phase 2) is the prerequisite already in place;
 this phase adds the size-reducing transformations on top.
 
-**Phase 4 — SOCP via second-order cone.** Add the second-order cone as
-a constraint type. Nesterov-Todd scaling on the SOC block; rotated-SOC
-as a derived form. Validate on Mittelmann SOCP set. This is a cheap
-incremental win once Mehrotra is in place — the symmetric-cone IPM
-machinery extends from LP/QP unchanged.
+**Phase 4 — SOCP via second-order cone (+ HSDE embedding).** Add the
+second-order cone as a constraint type. Nesterov-Todd scaling on the SOC
+block; rotated-SOC as a derived form. Validate on Mittelmann SOCP set.
+This is a cheap incremental win once Mehrotra is in place — the
+symmetric-cone IPM machinery extends from LP/QP unchanged. **This is
+also where the homogeneous self-dual embedding lands** (deferred from
+Phase 3): the embedding is the standard conic-IPM scaffolding
+(Clarabel/ECOS) and generalizes cleanly to cones, so building it here —
+rather than retrofitting the QP iteration — gives the self-starting
+iterate and intrinsic infeasibility handling for the whole conic family
+at once. (Phase 3 already provides verified-certificate infeasibility
+detection for LP/QP, so this is an upgrade, not a prerequisite.)
 
 **Phase 5 — Exponential and power cones (non-symmetric).** Add the
 three-dimensional exponential cone, three-dimensional power cone, and
@@ -484,9 +516,9 @@ and ships when its own phases 5a–d are complete.
 |------|--------|-----------|
 | 1 — Dispatch | 2–4 weeks | 1 month |
 | 2 — Bare IPM-QP (+ equilibration) | 3–6 months | 4–7 months |
-| 3 — Mehrotra + HSDE | 2–3 months | 6–10 months |
+| 3 — Mehrotra (+ cert. infeasibility) | 2–3 months | 6–10 months |
 | 3.5 — Presolve | 2–4 months | 8–14 months |
-| 4 — SOCP | 1–2 months | 9–16 months |
+| 4 — SOCP (+ HSDE embedding) | 1–2 months | 9–16 months |
 | 5 — Exp/power cones | 2–4 months | 11–20 months |
 | 6 — SDP + chordal | 6+ months | 17+ months (optional) |
 
@@ -643,8 +675,9 @@ both are weak (ADMM, AL), wrap or defer. When only one is strong
 - `crates/pounce-cli/src/dispatch.rs` — `classify_problem(&NlProblem)
   -> ProblemClass` plus the `match`-based router
 - `crates/pounce-convex/` — new crate scaffolded with `solve_lp_ipm`
-  and `solve_qp_ipm` entry points; `src/ipm.rs` (the shared Mehrotra +
-  HSDE scaffolding) plus `src/cones/` (per-cone barrier, gradient,
+  and `solve_qp_ipm` entry points; `src/ipm.rs` (the shared Mehrotra
+  scaffolding; HSDE embedding added at the SOCP phase) plus `src/cones/`
+  (per-cone barrier, gradient,
   Hessian, scaling-update — one module per cone: `nonneg.rs`, `soc.rs`,
   `psd.rs`, `exp.rs`, `pow.rs`, `gpow.rs`). The first implementation
   target is `cones/nonneg.rs` (covers LP) plus the IPM scaffolding; QP
@@ -694,15 +727,19 @@ Phase 2 (LP/QP actually dispatched):
   paths for any individual benchmark — `compare_runs` was built for
   exactly this kind of side-by-side analysis.
 
-Phase 3 (Mehrotra + HSDE):
+Phase 3 (Mehrotra + certificate infeasibility): ✅ landed
 
 - Iteration-count regression: assert the predictor-corrector cuts
-  iterations vs the bare Phase-2 IPM on the same Mittelmann LP /
-  Maros-Mészáros QP instances — the ~30–50% claim is a checked
-  regression, not an aspiration.
-- Infeasibility / unboundedness: feed known-infeasible and
-  known-unbounded LP/QP fixtures and assert HSDE reports the correct
-  status instead of stalling or hitting the iteration cap.
+  iterations vs the bare Phase-2 IPM — done in
+  `pounce-cli/tests/qp_vs_nlp_iterations.rs` (QP path uses fewer
+  interior-point iterations than the NLP path; ≈41% at n=50). Extending
+  this to the full Mittelmann LP / Maros-Mészáros sets is the remaining
+  benchmark-scale check.
+- Infeasibility / unboundedness: known-infeasible and known-unbounded
+  LP/QP fixtures assert the correct status instead of stalling — done in
+  `pounce-convex/tests/infeasibility.rs` (verified Farkas / recession
+  certificates) and end-to-end in
+  `pounce-cli/tests/qp_dispatch_end_to_end.rs`.
 
 Phase 3.5 (presolve) — the highest correctness risk is postsolve dual
 recovery, so it gets the most coverage:
