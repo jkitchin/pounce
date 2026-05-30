@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import itertools
 import threading
+import warnings
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -822,28 +823,32 @@ class JaxProblem:
         builds the per-block ``(n+m) × (n+m)`` KKT at pounce's
         converged ``(x*, λ*, μ_l*, μ_u*)`` (saved in the custom_vjp
         residual) and solves it under ``jax.vmap`` / ``jax.jacrev``
-        with a JIT-fused per-block ``jnp.linalg.solve``. Choose by
-        access pattern:
+        with a JIT-fused per-block ``jnp.linalg.solve``. The right
+        setting depends on both the AD shape and the per-block size:
 
-        * **Single solve + many sensitivities** —
-          ``jp.solve(p, x0)`` followed by ``jax.grad`` /
-          ``jax.jacrev`` over ``p`` — use ``factor_reuse=True``. One
-          stacked LDLᵀ back-solve per cotangent against the held
-          factor is cheaper than JAX assembling and dense-solving the
-          full ``(n+m) × (n+m)`` block.
-        * **Batched solve + jacrev / vmap** —
-          ``jax.jacrev(lambda P: jp.batched_solve(P, x0))(pb)`` and
-          similar minibatch projections — use ``factor_reuse=False``.
-          On a batch of B problems with ``n+m`` ≲ 100 per block, JAX's
-          fused per-block dense solve beats back-solving the full
-          stacked LDLᵀ at every measured scale (n=3 through n=48,
-          B=64). The crossover never lands inside the regime where
-          ``batched_solve`` is competitive against a pure-JAX
-          implementation, because dense linalg at small per-block
-          dimension is already optimal.
+        ============================================  ==========================  ==============================================
+        Regime                                        Right setting               Why
+        ============================================  ==========================  ==============================================
+        Small ``n+m`` (≲200), full ``jacrev``         ``factor_reuse=False``      XLA fuses the dense ``vmap``'d solve; no FFI
+        Small ``n+m`` (≲200), ``value_and_grad``      either (≈ tie)              single-cotangent; both lower to ~one solve
+        Large or sparse ``n+m`` (≳200), anything      ``factor_reuse=True``       only end-to-end sparse path; ``_bwd_single_kkt``
+                                                                                  builds a dense ``(n+m)²`` per block
+        ============================================  ==========================  ==============================================
 
-        If you are using ``batched_solve`` and notice the backward is
-        slower than you expect, try ``factor_reuse=False`` first.
+        Above ``n+m`` ≳ 200, ``factor_reuse=False`` materializes a
+        dense ``(n+m) × (n+m)`` matrix per block and calls
+        ``jnp.linalg.solve`` — ``O((n+m)³)``. JAX has no sparse direct
+        solver (``jax.scipy.sparse.linalg`` exposes only ``cg`` /
+        ``bicgstab`` / ``gmres``; ``jnp.linalg.solve`` does not accept
+        ``BCOO``; XLA does not detect numerical zeros and switch
+        algorithms), so pounce's sparse LDLᵀ inside the
+        ``factor_reuse=True`` path is the only sparse-aware route. A
+        ``UserWarning`` is emitted at construction when
+        ``n + m > 200`` and ``factor_reuse=False`` to flag this.
+
+        Always benchmark wrapped in ``jax.jit`` — eager-mode numbers
+        run 5–6× slower than the same code under ``jit`` and don't
+        reflect a real training-loop shape.
 
     Notes
     -----
@@ -882,6 +887,22 @@ class JaxProblem:
         self._cu = cu
         self._options = dict(options or {})
         self._factor_reuse = bool(factor_reuse)
+        # Above this per-block KKT size, the dense JAX bwd path
+        # materializes a dense (n+m)² matrix per block and falls off
+        # an O((n+m)³) cliff. Warn the user to switch to
+        # factor_reuse=True (Rust sparse LDLᵀ). Threshold from
+        # python/benchmarks/verify_issue77_claims.py — the dense
+        # kernel crosses ~150 µs/block at d=128 and ~420 µs at d=256.
+        if (n + m) > 200 and not self._factor_reuse:
+            warnings.warn(
+                f"JaxProblem(factor_reuse=False) with n+m={n + m} > 200: the "
+                "dense JAX backward materializes a dense (n+m)x(n+m) matrix "
+                "per block and scales O((n+m)^3). For problems this large, "
+                "prefer factor_reuse=True so the backward goes through "
+                "pounce's sparse LDL^T factor. See JaxProblem docstring.",
+                UserWarning,
+                stacklevel=2,
+            )
         # Cached arrays the bwd host-side closure reads (cl == cu mask)
         # to scatter the y_c / y_d sub-blocks back to user g-order.
         # Stored on the JaxProblem so the pure_callback host_call can
@@ -978,9 +999,8 @@ class JaxProblem:
     def _init_runtime_state(self) -> None:
         """(Re)create per-process mutable state: bwd-registry id
         counter and storage, registry lock, per-thread Problem cache,
-        and (if ``factor_reuse=True``) the dedicated single-thread
-        executor that pins all PySolver interactions to one thread
-        (pounce#77).
+        and the dedicated single-thread executor that pins every
+        ``pure_callback`` host_call to one thread (pounce#77).
 
         Called from ``__init__`` and again from ``__setstate__`` — both
         arrive at a fresh process/thread context where every one of
@@ -990,22 +1010,29 @@ class JaxProblem:
         ``SimpleQueue``, and any held :class:`pounce.Solver` which
         carries unsendable Rust state).
 
-        Dedicated single-thread executor for all PySolver interactions
-        on the factor-reuse path (pounce#77). PySolver is
+        Dedicated single-thread executor for every host-side solve and
+        bwd dispatch (pounce#77). PySolver is
         ``#[pyclass(unsendable)]`` because the inner ``RustSolver``
         holds ``Rc<RefCell<dyn TNLP>>``; PyO3 panics if a PySolver is
         touched from any thread other than the one that constructed
-        it. JAX's ``pure_callback`` may dispatch ``host_call`` from XLA
-        worker threads, so we pin every solver creation / ``solve`` /
-        ``block_dims`` / ``kkt_dim`` / ``kkt_solve`` to one thread by
-        routing them through a single-worker pool. Only allocated when
-        the factor is held across calls (``factor_reuse=True``); the
-        dense path constructs the Solver, runs ``solve``, and drops it
-        inline on the calling thread, so unsendable never bites there.
-        Also bypassed by :meth:`vmap_solve_parallel` (it calls
-        :meth:`_host_solve` with ``register=False`` — the solver is
-        dropped inside ``_host_solve`` without crossing threads), so
-        the parallel batched path keeps its B-way concurrency.
+        it. JAX's ``pure_callback`` dispatches ``host_call`` on XLA
+        worker threads whose identity is unstable across calls — so
+        the per-instance ``threading.local`` cache of
+        ``(JaxNlp, Problem)`` would miss almost every dispatch under
+        ``jit`` (observed: 8 unique thread ids over 10 dispatches).
+        Routing every host_call body through this single-worker pool
+        gives a stable thread, which means the TLS cache hits by
+        construction and we pay the build cost once per problem (per
+        batch size B for the stacked path) for the whole process
+        lifetime. Single code path for ``factor_reuse`` ∈ {True, False}.
+
+        The one documented exception is :meth:`vmap_solve_parallel` /
+        :func:`_pure_callback_parallel_solve`: that API's whole point
+        is host-side B-way concurrency, so it spins up its own
+        ``ThreadPoolExecutor`` inside the host_call and intentionally
+        builds one Problem per worker thread. That path calls
+        :meth:`_host_solve` with ``register=False`` to opt out of
+        pinning.
         """
         self._solver_registry: "OrderedDict[int, Solver]" = OrderedDict()
         self._solver_id_counter = itertools.count(1)
@@ -1015,11 +1042,9 @@ class JaxProblem:
         # Per-thread (obj, Problem) cache. Built lazily on first solve
         # from the calling thread.
         self._tls = threading.local()
-        self._factor_executor = (
-            ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix=f"pounce-jp-factor-{id(self)}",
-            ) if self._factor_reuse else None
+        self._factor_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"pounce-jp-factor-{id(self)}",
         )
 
     # Attributes that don't survive a process boundary: drop on
@@ -1063,10 +1088,16 @@ class JaxProblem:
     def _run_pinned(self, fn):
         """Run ``fn()`` on the dedicated single-thread executor (pounce#77).
 
-        Use for any block that touches a held :class:`pounce.Solver`
-        (creation, ``solve``, ``block_dims``, ``kkt_dim``, or
-        ``kkt_solve``). Only valid when ``factor_reuse=True``; callers
-        on the dense path must branch and call ``fn()`` inline.
+        The default for every ``pure_callback`` host_call body, both
+        ``factor_reuse=True`` and ``factor_reuse=False``: it pins the
+        TLS Problem cache to a stable thread (so it never misses
+        under XLA's worker-thread fanout) and keeps any held
+        :class:`pounce.Solver` on the thread that constructed it
+        (PySolver is ``#[pyclass(unsendable)]``). The one exception
+        is :meth:`vmap_solve_parallel`, which intentionally calls
+        ``_host_solve(..., register=False)`` inline on its own
+        worker pool so its B-way concurrency isn't serialized
+        through this single thread.
         """
         return self._factor_executor.submit(fn).result()
 
@@ -1205,31 +1236,35 @@ class JaxProblem:
         PyO3 allocation. The win is that the converged factor is now
         held and reusable in the bwd.
 
-        ``register=False`` skips the registry hand-off — used by paths
-        whose backward doesn't consume the factor (the parallel batched
-        bwd is JAX-vmapped over the dense kernel), so we don't pin
-        memory on factors nobody will read.
+        ``register=False`` skips the registry hand-off **and** the
+        single-thread pin — used by :meth:`vmap_solve_parallel` whose
+        backward is JAX-vmapped over the dense kernel (so no factor
+        is ever read), and which spins up its own B-way executor
+        inside the host_call. Pinning that path through the
+        single-thread executor would defeat the API's whole purpose.
 
-        When ``factor_reuse=True and register=True`` the solver is
-        constructed and run on the dedicated single-thread executor
-        (pounce#77) so the held PySolver — and any later
-        :meth:`Solver.kkt_solve` call from the bwd — stay on one
-        thread. Otherwise the solver lives and dies on the calling
-        thread (no cross-thread access, no unsendable concern), so we
-        skip the executor hop to keep ``vmap_solve_parallel``'s B-way
-        concurrency.
+        ``register=True`` (the default for every differentiable
+        surface) pins the solve onto :attr:`_factor_executor` so the
+        TLS ``(JaxNlp, Problem)`` cache lives on a stable thread and
+        never misses under XLA's worker-thread fanout (pounce#77).
+        When ``factor_reuse=True`` the converged Solver is then
+        registered for the bwd to back-solve against; otherwise the
+        Solver is dropped inside the pinned closure so its
+        unsendable Rust state never crosses thread boundaries.
         """
-        use_pin = self._factor_reuse and register
+        do_register = register and self._factor_reuse
 
         def _do():
             obj, prob = self._thread_problem()
             obj._p = jnp.asarray(p_np)
             solver = Solver(prob)
             x_np, info = solver.solve(x0=np.asarray(x0_np, dtype=np.float64))
-            return solver, x_np, info
+            # Register or drop the unsendable Solver while we still
+            # hold the pinned thread; never let it escape.
+            sid = self._register_solver(solver) if do_register else 0
+            return x_np, info, sid
 
-        solver, x_np, info = self._run_pinned(_do) if use_pin else _do()
-        sid = self._register_solver(solver) if use_pin else 0
+        x_np, info, sid = self._run_pinned(_do) if register else _do()
         info_out = dict(info)
         info_out["solver_id"] = sid
         return x_np, info_out
@@ -1242,6 +1277,8 @@ class JaxProblem:
         zL_np: np.ndarray,
         zU_np: np.ndarray,
     ):
+        do_register = self._factor_reuse
+
         def _do():
             obj, prob = self._thread_problem_warm()
             obj._p = jnp.asarray(p_np)
@@ -1252,14 +1289,15 @@ class JaxProblem:
                 zl=np.asarray(zL_np, dtype=np.float64),
                 zu=np.asarray(zU_np, dtype=np.float64),
             )
-            return solver, x_np, info
+            sid = self._register_solver(solver) if do_register else 0
+            return x_np, info, sid
 
-        # Warm-start path always registers when factor_reuse=True, so
-        # pin together with the bwd kkt_solve (pounce#77).
-        solver, x_np, info = (
-            self._run_pinned(_do) if self._factor_reuse else _do()
-        )
-        sid = self._register_solver(solver) if self._factor_reuse else 0
+        # Warm-start path is always a differentiable surface entry
+        # point, so pin every call (pounce#77) — TLS cache stability
+        # at minimum, and the bwd's kkt_solve when factor_reuse=True.
+        # Register/drop happens inside the pinned closure so the
+        # unsendable Solver never crosses thread boundaries.
+        x_np, info, sid = self._run_pinned(_do)
         info_out = dict(info)
         info_out["solver_id"] = sid
         return x_np, info_out
@@ -1290,19 +1328,22 @@ class JaxProblem:
         # Initial X is the per-block ``x0`` tiled / concatenated.
         X0 = np.asarray(x0_batch_np, dtype=np.float64).reshape(B * n)
 
+        do_register = self._factor_reuse
+
         def _do():
             obj, prob = self._thread_stacked_problem(B)
             obj._P = jnp.asarray(p_batch_np)
             solver = Solver(prob)
             X_np, info = solver.solve(x0=X0)
-            return solver, X_np, info
+            sid = self._register_solver(solver) if do_register else 0
+            return X_np, info, sid
 
-        # Stacked solve registers when factor_reuse=True, so pin
-        # together with the bwd's stacked kkt_solve (pounce#77).
-        solver, X_np, info = (
-            self._run_pinned(_do) if self._factor_reuse else _do()
-        )
-        sid = self._register_solver(solver) if self._factor_reuse else 0
+        # Pin every batched_solve dispatch (pounce#77) — TLS cache
+        # stability at minimum, and the bwd's stacked kkt_solve when
+        # factor_reuse=True. Register/drop happens inside the pinned
+        # closure so the unsendable Solver never crosses thread
+        # boundaries.
+        X_np, info, sid = self._run_pinned(_do)
         x_batch = np.asarray(X_np, dtype=np.float64).reshape(B, n)
         lam_batch = (
             np.asarray(info["mult_g"], dtype=np.float64).reshape(B, m)

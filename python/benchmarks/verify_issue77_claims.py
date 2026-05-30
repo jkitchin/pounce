@@ -325,10 +325,17 @@ for _ in range(10):
 
 pm.JaxProblem._build_stacked_problem = orig_build_stacked
 
-report("[8] TLS cache misses on ≥3 distinct worker threads under jit",
-       len(seen_tids) >= 3,
+# Post-#77 hardening (this commit): every host_callback is pinned
+# through JaxProblem._factor_executor, so the TLS cache lives on a
+# stable thread and never misses under XLA fanout. Pre-fix this
+# observed 6-8 unique thread ids and 10 rebuilds; post-fix it
+# observes 0 (the executor's worker keeps its cache warm across all
+# dispatches in the timing window).
+report("[8] TLS cache hits on every jit dispatch (≤1 tid, 0 rebuilds)",
+       len(seen_tids) <= 1 and build_count[0] == 0,
        f"observed {len(seen_tids)} unique thread IDs and "
-       f"{build_count[0]} rebuilds over 10 jit dispatches")
+       f"{build_count[0]} rebuilds over 10 jit dispatches "
+       "(post-#77-hardening expected: 0, 0)")
 
 
 # ============================================================

@@ -926,3 +926,58 @@ def test_jaxproblem_pickle_roundtrip_pounce_77():
     jp_dense2 = pickle.loads(pickle.dumps(jp_dense))
     x_dense_after = jp_dense2.solve(p_val, x0)
     assert jnp.allclose(x_dense_before, x_dense_after, atol=1e-12)
+
+
+def test_dense_path_warns_on_large_n_plus_m_pounce_77():
+    """factor_reuse=False on a problem with n+m > 200 must emit a
+    UserWarning steering the user to factor_reuse=True (pounce#77).
+
+    The dense JAX bwd materialises a dense (n+m)x(n+m) per block and
+    scales O((n+m)^3); above ~200 it falls off a cliff and the sparse
+    LDL^T path (factor_reuse=True) is the only viable route.
+    """
+    import warnings
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):
+        return jnp.array([jnp.sum(x) - p[0]])
+
+    n, m = 250, 1
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        JaxProblem(
+            f=f, g=g, n=n, m=m, p_example=jnp.zeros(n),
+            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+            cl=jnp.zeros(m), cu=jnp.zeros(m),
+            options={"print_level": 0, "sb": "yes"},
+            factor_reuse=False,
+        )
+    matched = [
+        w for w in caught
+        if issubclass(w.category, UserWarning) and "factor_reuse=False" in str(w.message)
+    ]
+    assert matched, (
+        f"expected UserWarning about factor_reuse=False at n+m={n + m}, "
+        f"got {[str(w.message) for w in caught]}"
+    )
+
+    # And factor_reuse=True (or n+m <= 200) must NOT warn.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        JaxProblem(
+            f=f, g=g, n=n, m=m, p_example=jnp.zeros(n),
+            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+            cl=jnp.zeros(m), cu=jnp.zeros(m),
+            options={"print_level": 0, "sb": "yes"},
+            factor_reuse=True,
+        )
+    matched_reuse = [
+        w for w in caught
+        if issubclass(w.category, UserWarning) and "factor_reuse" in str(w.message)
+    ]
+    assert not matched_reuse, (
+        f"factor_reuse=True must not warn, got {[str(w.message) for w in matched_reuse]}"
+    )
