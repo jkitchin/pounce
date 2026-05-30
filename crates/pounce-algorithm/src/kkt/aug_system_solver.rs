@@ -157,4 +157,32 @@ pub trait AugSystemSolver {
         }
         ESymSolverStatus::Success
     }
+
+    /// Back-substitution only against the cached factor for
+    /// `nrhs` right-hand sides, packed in **column-major** layout in
+    /// `packed_rhs`. Each column has length `dim = n_x + n_s + n_y_c +
+    /// n_y_d` (the aug-system dim — z/v blocks are not part of this
+    /// path; callers expand them via `expand_bound_multipliers` after
+    /// the fact). Solutions overwrite `packed_rhs` in place.
+    ///
+    /// Returns `None` when the backend does not support this fast
+    /// path; the caller should then fall back to a per-RHS loop over
+    /// [`resolve`]. The contract on `coeffs` and `have_factor` matches
+    /// [`resolve`]'s.
+    ///
+    /// `StdAugSystemSolver` overrides this to forward to
+    /// `pounce_linsol::TSymLinearSolver::multi_solve` with `nrhs > 1`,
+    /// which lets the underlying backend (FERAL / MA57 / LAPACK)
+    /// amortize per-call setup and, where supported, block the
+    /// triangular solves. Used by `pounce-sensitivity` for the JaxProblem
+    /// `jacrev` backward, where every cotangent re-solves against the
+    /// same converged factor (pounce#77 follow-up).
+    fn try_resolve_many_flat(
+        &mut self,
+        _coeffs: &AugSysCoeffs<'_>,
+        _packed_rhs: &mut [Number],
+        _nrhs: usize,
+    ) -> Option<ESymSolverStatus> {
+        None
+    }
 }

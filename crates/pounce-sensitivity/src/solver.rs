@@ -248,6 +248,43 @@ impl Solver {
         }
     }
 
+    /// Batched-RHS back-solve. `rhs_flat` and `lhs_flat` are row-major
+    /// `(n_rhs, kkt_dim)` buffers; each row is solved against the
+    /// same converged factor. Equivalent in result to looping
+    /// [`Self::kkt_solve`] but reuses one `IteratesVector` for the
+    /// RHS and one for the result across all `n_rhs` calls — see
+    /// [`crate::algorithm_backsolver::PdSensBacksolver::solve_many`].
+    pub fn kkt_solve_many(
+        &self,
+        rhs_flat: &[Number],
+        lhs_flat: &mut [Number],
+        n_rhs: usize,
+    ) -> Result<(), SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let total = state.backsolver.dim();
+        let expected = n_rhs * total;
+        if rhs_flat.len() != expected {
+            return Err(SolverError::BadShape {
+                what: "rhs",
+                got: rhs_flat.len(),
+                expected,
+            });
+        }
+        if lhs_flat.len() != expected {
+            return Err(SolverError::BadShape {
+                what: "lhs",
+                got: lhs_flat.len(),
+                expected,
+            });
+        }
+        if state.backsolver.solve_many(rhs_flat, lhs_flat, n_rhs) {
+            Ok(())
+        } else {
+            Err(SolverError::BacksolveFailed)
+        }
+    }
+
     /// First-order parametric step `Δx ≈ ∂x*/∂p · Δp` for a set of
     /// pinned equality constraints. `pin_constraint_indices` are
     /// 0-based indices into the user's `g(x)`; `deltas` is the

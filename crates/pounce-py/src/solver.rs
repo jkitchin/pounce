@@ -138,14 +138,9 @@ impl PySolver {
             )));
         }
         let mut lhs_flat = vec![0.0; n_rhs * dim];
-        let mut scratch = vec![0.0; dim];
-        for i in 0..n_rhs {
-            let rhs_row = &rhs_flat[i * dim..(i + 1) * dim];
-            s.inner
-                .kkt_solve(rhs_row, &mut scratch)
-                .map_err(solver_error_to_py)?;
-            lhs_flat[i * dim..(i + 1) * dim].copy_from_slice(&scratch);
-        }
+        s.inner
+            .kkt_solve_many(&rhs_flat, &mut lhs_flat, n_rhs)
+            .map_err(solver_error_to_py)?;
         Ok(lhs_flat.into_pyarray_bound(py))
     }
 

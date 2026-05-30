@@ -1209,6 +1209,34 @@ class JaxProblem:
             self._tls.pair_warm = cached
         return cached
 
+    def _thread_stacked_problem_warm(self, B: int) -> tuple[_StackedJaxNlp, Problem]:
+        """Per-thread LRU of *warm-started* stacked Problems keyed by
+        batch size B (pounce#78). Mirrors :meth:`_thread_stacked_problem`
+        but the cached Problem has ``warm_start_init_point="yes"`` set
+        once at build time, so :meth:`_host_batched_solve_warm` can pass
+        per-block ``(lam, zL, zU)`` through to the underlying Solver in
+        the same single-Rust-crossing shape as the cold batched path.
+
+        Warm- and cold-cached pairs live in separate caches so a training
+        loop that interleaves warm and cold batched solves doesn't flip
+        the warm-start option mid-life (which isn't reliable across the
+        C boundary, same constraint that motivates :meth:`_thread_problem_warm`).
+        """
+        cache = getattr(self._tls, "stacked_warm", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._tls.stacked_warm = cache
+        if B in cache:
+            cache.move_to_end(B)
+            return cache[B]
+        obj, prob = self._build_stacked_problem(B)
+        prob.add_option("warm_start_init_point", "yes")
+        cache[B] = (obj, prob)
+        cache.move_to_end(B)
+        while len(cache) > 4:
+            cache.popitem(last=False)
+        return cache[B]
+
     # ----- host-side solves (called from pure_callback host_call) -----
 
     def _register_solver(self, solver: Solver) -> int:
@@ -1385,6 +1413,64 @@ class JaxProblem:
         mult_xU_batch = np.asarray(info["mult_x_U"], dtype=np.float64).reshape(B, n)
         return x_batch, lam_batch, mult_xL_batch, mult_xU_batch, sid
 
+    def _host_batched_solve_warm(
+        self,
+        p_batch_np: np.ndarray,
+        x0_batch_np: np.ndarray,
+        lam_batch_np: np.ndarray,
+        zL_batch_np: np.ndarray,
+        zU_batch_np: np.ndarray,
+    ):
+        """Warm-started stacked block-diagonal solve (pounce#78).
+
+        The stacked NLP packs variables block-major
+        (``[x^(1); ...; x^(B)]``) and constraints block-major
+        (``[g^(1); ...; g^(B)]``), so per-block warm vectors flatten
+        block-major via a simple ``reshape(-1)``:
+        ``lam_stack[k*m:(k+1)*m] = lam_batch[k]``, same for
+        ``zL_stack`` / ``zU_stack`` (size ``B*n`` each). One stacked
+        Solver call covers the whole batch in a single barrier-homotopy
+        run, mirroring the cold :meth:`_host_batched_solve` shape.
+
+        Returns ``(x_batch, lam_batch, mult_xL_batch, mult_xU_batch, sid)``
+        in the same shape as the cold path, so the warm and cold
+        callback wrappers share the rest of the bwd plumbing.
+        """
+        B = p_batch_np.shape[0]
+        n, m = self._n, self._m
+        X0 = np.asarray(x0_batch_np, dtype=np.float64).reshape(B * n)
+        lam_stack = (
+            np.asarray(lam_batch_np, dtype=np.float64).reshape(B * m)
+            if m > 0 else np.zeros(0, dtype=np.float64)
+        )
+        zL_stack = np.asarray(zL_batch_np, dtype=np.float64).reshape(B * n)
+        zU_stack = np.asarray(zU_batch_np, dtype=np.float64).reshape(B * n)
+
+        do_register = self._factor_reuse
+
+        def _do():
+            obj, prob = self._thread_stacked_problem_warm(B)
+            obj._P = jnp.asarray(p_batch_np)
+            solver = Solver(prob)
+            X_np, info = solver.solve(
+                x0=X0,
+                lagrange=lam_stack,
+                zl=zL_stack,
+                zu=zU_stack,
+            )
+            sid = self._register_solver(solver) if do_register else 0
+            return X_np, info, sid
+
+        X_np, info, sid = self._run_pinned(_do)
+        x_batch = np.asarray(X_np, dtype=np.float64).reshape(B, n)
+        lam_batch = (
+            np.asarray(info["mult_g"], dtype=np.float64).reshape(B, m)
+            if m > 0 else np.zeros((B, 0), dtype=np.float64)
+        )
+        mult_xL_batch = np.asarray(info["mult_x_L"], dtype=np.float64).reshape(B, n)
+        mult_xU_batch = np.asarray(info["mult_x_U"], dtype=np.float64).reshape(B, n)
+        return x_batch, lam_batch, mult_xL_batch, mult_xU_batch, sid
+
     # ----- public: differentiable solve methods -----
 
     def solve(self, p, x0):
@@ -1487,6 +1573,68 @@ class JaxProblem:
             x0_arr = jnp.broadcast_to(x0_arr, (B, self._n))
         fn = self._batched_solve_fn(B)
         return fn(p_batch, x0_arr)
+
+    def batched_solve_with_warm(
+        self,
+        p_batch,
+        x0,
+        warm_start: tuple | None = None,
+    ):
+        """Warm-started stacked block-diagonal batched solve (pounce#78).
+
+        Combines :meth:`batched_solve`'s single-Rust-crossing /
+        shared-symbolic-factorisation / factor-reuse-backward shape with
+        :meth:`solve_with_warm`'s per-block ``(lam, zL, zU)`` warm
+        threading. Intended for differentiable constrained projection
+        layers inside a training loop, where the parameter ``p`` drifts
+        only slightly per step and the previous step's converged primal +
+        dual state is a near-optimal seed for the whole batch.
+
+        Parameters
+        ----------
+        p_batch : ``(B,) + p_shape``
+            Per-block parameters.
+        x0 : ``(n,)`` or ``(B, n)``
+            Primal initial point; ``(n,)`` is broadcast across the batch
+            to match :meth:`batched_solve`.
+        warm_start : tuple ``(lam_batch, zL_batch, zU_batch)`` or None
+            Per-block warm vectors of shapes ``(B, m)``, ``(B, n)``,
+            ``(B, n)``. Pass ``None`` for an uninformed first call (warm
+            buffers default to zeros, matching the cold-batch behaviour
+            of :meth:`batched_solve` modulo the warm-start option flip).
+
+        Returns
+        -------
+        ``(x_batch, (lam_batch_out, zL_batch_out, zU_batch_out))``
+            Stacked primal + dual outputs reshaped per-block.
+            ``x_batch`` is ``(B, n)``; the dual outputs are ``(B, m)``,
+            ``(B, n)``, ``(B, n)`` so the caller can thread them straight
+            into the next step's ``warm_start``.
+
+        The custom-VJP treats the warm inputs and ``x0`` as stop-gradient
+        — only ``p_batch`` gets a gradient — matching the convention
+        :meth:`solve_with_warm` already uses on the single-sample path.
+        """
+        p_batch = jnp.asarray(p_batch)
+        B = p_batch.shape[0]
+        n, m = self._n, self._m
+        x0_arr = jnp.asarray(x0)
+        if x0_arr.ndim == 1:
+            x0_arr = jnp.broadcast_to(x0_arr, (B, n))
+        if warm_start is None:
+            lam_warm = jnp.zeros((B, m), dtype=jnp.float64)
+            zL_warm = jnp.zeros((B, n), dtype=jnp.float64)
+            zU_warm = jnp.zeros((B, n), dtype=jnp.float64)
+        else:
+            lam_warm, zL_warm, zU_warm = warm_start
+            lam_warm = jnp.asarray(lam_warm, dtype=jnp.float64).reshape(B, m)
+            zL_warm = jnp.asarray(zL_warm, dtype=jnp.float64).reshape(B, n)
+            zU_warm = jnp.asarray(zU_warm, dtype=jnp.float64).reshape(B, n)
+        fn = self._batched_solve_with_warm_fn(B)
+        x_star, lam_out, zL_out, zU_out = fn(
+            p_batch, x0_arr, lam_warm, zL_warm, zU_warm,
+        )
+        return x_star, (lam_out, zL_out, zU_out)
 
     # ----- custom_vjp factories -----
 
@@ -1676,6 +1824,85 @@ class JaxProblem:
         solve_fn.defvjp(fwd, bwd)
         return solve_fn
 
+    def _batched_solve_with_warm_fn(self, B: int):
+        """custom_vjp factory for :meth:`batched_solve_with_warm` (pounce#78).
+
+        Shares both bwd paths with :meth:`_batched_solve_fn`:
+
+        * ``factor_reuse=True`` — :func:`_bwd_batched_factor_reuse` over
+          the held stacked LDLᵀ factor. The warm-start path doesn't
+          change the converged KKT structure (same primal stationarity
+          + active-set encoding), so the same one-stacked-back-solve
+          machinery applies unmodified.
+        * ``factor_reuse=False`` — ``jax.vmap`` of the per-element dense
+          KKT bwd; block-diagonal coupling makes vmapping exact.
+
+        Warm inputs and ``x0`` are treated as stop-gradient — only
+        ``p_batch`` gets a gradient — matching :meth:`solve_with_warm`'s
+        convention on the single-sample warm path.
+        """
+        f, g, n, m = self._f, self._g, self._n, self._m
+        cl, cu = self._cl, self._cu
+        jp = self
+        factor_reuse = self._factor_reuse
+
+        @jax.custom_vjp
+        def solve_fn(p_batch, x0_batch, lam_warm, zL_warm, zU_warm):
+            x_star, lam_out, zL_out, zU_out, _sid = (
+                _pure_callback_batched_warm_solve(
+                    jp, B, p_batch, x0_batch, lam_warm, zL_warm, zU_warm,
+                )
+            )
+            return x_star, lam_out, zL_out, zU_out
+
+        def fwd(p_batch, x0_batch, lam_warm, zL_warm, zU_warm):
+            x_star, lam_out, zL_out, zU_out, sid = (
+                _pure_callback_batched_warm_solve(
+                    jp, B, p_batch, x0_batch, lam_warm, zL_warm, zU_warm,
+                )
+            )
+            return (
+                (x_star, lam_out, zL_out, zU_out),
+                (p_batch, x_star, lam_out, zL_out, zU_out, sid),
+            )
+
+        def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
+            return _bwd_single_kkt(
+                f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v,
+            )
+
+        def bwd(residuals, cotangents):
+            (
+                p_batch, x_star_batch, lam_batch,
+                mult_xL_batch, mult_xU_batch, sid,
+            ) = residuals
+            # Only the x* cotangent is used — dual cotangents are
+            # dropped, same as :meth:`solve_with_warm`'s single-sample
+            # bwd does (the user almost always pulls grad only through
+            # ``x_star``, and the dual outputs are there so the next
+            # step can warm-start from them).
+            cot_x_batch = cotangents[0]
+            if factor_reuse:
+                dL_dp_batch = _bwd_batched_factor_reuse(
+                    f, g, n, m, jp, B,
+                    p_batch, x_star_batch, lam_batch, sid, cot_x_batch,
+                )
+            else:
+                dL_dp_batch = jax.vmap(bwd_single)(
+                    p_batch, x_star_batch, lam_batch,
+                    mult_xL_batch, mult_xU_batch, cot_x_batch,
+                )
+            return (
+                dL_dp_batch,
+                jnp.zeros_like(x_star_batch),
+                jnp.zeros((B, m), dtype=jnp.float64),
+                jnp.zeros((B, n), dtype=jnp.float64),
+                jnp.zeros((B, n), dtype=jnp.float64),
+            )
+
+        solve_fn.defvjp(fwd, bwd)
+        return solve_fn
+
 
 # ----- pure_callback wrappers (module-level, closed over a JaxProblem) -----
 
@@ -1768,6 +1995,43 @@ def _pure_callback_batched_solve(jp: JaxProblem, B: int, p_batch, x0_batch):
         return jp._host_batched_solve(np.asarray(p_h), np.asarray(x0_h))
 
     return jax.pure_callback(host_call, result_shapes, p_batch, x0_batch)
+
+
+def _pure_callback_batched_warm_solve(
+    jp: JaxProblem,
+    B: int,
+    p_batch,
+    x0_batch,
+    lam_warm,
+    zL_warm,
+    zU_warm,
+):
+    """Host-side dispatch for the warm-started stacked solve (pounce#78).
+
+    Wraps :meth:`JaxProblem._host_batched_solve_warm`. Output shapes
+    match :func:`_pure_callback_batched_solve` so the bwd plumbing is
+    identical — the only difference upstream is that this surface
+    threads per-block ``(lam, zL, zU)`` into the stacked solver.
+    """
+    n, m = jp._n, jp._m
+    result_shapes = (
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, m), jnp.float64),
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((B, n), jnp.float64),
+        jax.ShapeDtypeStruct((), jnp.int64),
+    )
+
+    def host_call(p_h, x0_h, lam_h, zL_h, zU_h):
+        return jp._host_batched_solve_warm(
+            np.asarray(p_h), np.asarray(x0_h),
+            np.asarray(lam_h), np.asarray(zL_h), np.asarray(zU_h),
+        )
+
+    return jax.pure_callback(
+        host_call, result_shapes,
+        p_batch, x0_batch, lam_warm, zL_warm, zU_warm,
+    )
 
 
 def _pure_callback_parallel_solve(jp: JaxProblem, p_batch, x0_batch, workers):

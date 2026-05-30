@@ -991,3 +991,125 @@ def test_dense_path_warns_on_large_n_plus_m_pounce_77():
             f"factor_reuse={fr} at n+m={small_n + small_m} must not warn, "
             f"got {[str(w.message) for w in matched]}"
         )
+
+
+def _build_warm_qp(reuse: bool):
+    """Shared fixture for the pounce#78 batched-warm tests: simple
+    parametric QP per block (min 0.5 ||x - p||² s.t. sum(x)=0)."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return 0.5 * jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.array([jnp.sum(x)])
+
+    n, m = 5, 1
+    return JaxProblem(
+        f=f, g=g, n=n, m=m, p_example=jnp.zeros(n),
+        lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
+        cl=jnp.zeros(m), cu=jnp.zeros(m),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+        factor_reuse=reuse,
+    )
+
+
+def test_batched_solve_with_warm_matches_loop_pounce_78():
+    """Issue #78: the stacked warm-batched forward must agree with
+    looping ``solve_with_warm`` per sample. Same KKT system per block;
+    only the dispatch shape (one stacked solve vs B loose solves)
+    differs.
+    """
+    for reuse in (True, False):
+        jp = _build_warm_qp(reuse)
+        n, m = jp._n, jp._m
+        B = 3
+        rng = np.random.default_rng(0)
+        p_batch = jnp.asarray(rng.standard_normal((B, n)))
+        x0 = jnp.zeros((B, n))
+
+        # Cold warm-batched: no warm vectors supplied.
+        x_b, (lam_b, zL_b, zU_b) = jp.batched_solve_with_warm(p_batch, x0)
+
+        # Reference: loop solve_with_warm per sample, cold.
+        x_ref = []
+        lam_ref = []
+        for k in range(B):
+            x_k, (lam_k, _, _) = jp.solve_with_warm(p_batch[k], x0[k])
+            x_ref.append(x_k)
+            lam_ref.append(lam_k)
+        x_ref = jnp.stack(x_ref)
+        lam_ref = jnp.stack(lam_ref)
+
+        np.testing.assert_allclose(np.asarray(x_b), np.asarray(x_ref), atol=1e-7)
+        np.testing.assert_allclose(
+            np.asarray(lam_b), np.asarray(lam_ref), atol=1e-7,
+        )
+
+        # Hot warm-batched: thread converged duals back in. Must still
+        # land at the same x* (warm-start should not change the
+        # solution, only the iteration count).
+        x_b2, _ = jp.batched_solve_with_warm(
+            p_batch, x0, warm_start=(lam_b, zL_b, zU_b),
+        )
+        np.testing.assert_allclose(np.asarray(x_b2), np.asarray(x_ref), atol=1e-7)
+
+
+def test_batched_solve_with_warm_grad_matches_batched_solve_pounce_78():
+    """Issue #78: gradient through the warm-batched forward must match
+    the gradient through plain ``batched_solve`` — same KKT system, and
+    the warm path treats ``warm_start`` / ``x0`` as stop-gradient so the
+    only differentiable input is ``p_batch``.
+    """
+    for reuse in (True, False):
+        jp = _build_warm_qp(reuse)
+        n, m = jp._n, jp._m
+        B = 4
+        rng = np.random.default_rng(1)
+        p_batch = jnp.asarray(rng.standard_normal((B, n)))
+        x0 = jnp.zeros((B, n))
+
+        def loss_warm(P):
+            x, _ = jp.batched_solve_with_warm(P, x0)
+            return 0.5 * jnp.sum(x ** 2)
+
+        def loss_cold(P):
+            x = jp.batched_solve(P, x0)
+            return 0.5 * jnp.sum(x ** 2)
+
+        g_warm = jax.grad(loss_warm)(p_batch)
+        g_cold = jax.grad(loss_cold)(p_batch)
+        np.testing.assert_allclose(
+            np.asarray(g_warm), np.asarray(g_cold), atol=1e-7,
+        )
+
+
+def test_batched_solve_with_warm_warm_inputs_are_stop_gradient_pounce_78():
+    """Issue #78: per the docstring, the warm-batched custom_vjp treats
+    ``warm_start`` and ``x0`` as stop-gradient — same convention
+    ``solve_with_warm`` uses on the single-sample path. Verifies the
+    bwd returns zero cotangents for those four arguments.
+    """
+    jp = _build_warm_qp(reuse=True)
+    n, m = jp._n, jp._m
+    B = 2
+    p_batch = jnp.asarray(np.random.default_rng(2).standard_normal((B, n)))
+    x0 = jnp.zeros((B, n))
+    lam_w = jnp.zeros((B, m))
+    zL_w = jnp.zeros((B, n))
+    zU_w = jnp.zeros((B, n))
+
+    fn = jp._batched_solve_with_warm_fn(B)
+
+    def loss(P, X0, L, ZL, ZU):
+        x, _, _, _ = fn(P, X0, L, ZL, ZU)
+        return 0.5 * jnp.sum(x ** 2)
+
+    grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(p_batch, x0, lam_w, zL_w, zU_w)
+    g_p, g_x0, g_lam, g_zL, g_zU = grads
+    # p gradient is nonzero (this is the differentiable input).
+    assert float(jnp.max(jnp.abs(g_p))) > 0.0
+    # Stop-gradient inputs return exact zeros.
+    for arr, name in [(g_x0, "x0"), (g_lam, "lam_warm"),
+                       (g_zL, "zL_warm"), (g_zU, "zU_warm")]:
+        np.testing.assert_array_equal(np.asarray(arr), np.zeros_like(np.asarray(arr)))

@@ -60,8 +60,6 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 [[package]]
 name = "feral"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e9b9f9c29560eec91e498cf70f73903e6bc413937f2598c29e5691c9d07495d"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -78,8 +76,6 @@ dependencies = [
 [[package]]
 name = "feral-amd"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "363d1f8038ad30f115b56330770fa075444251d49259de7b9f60852f18a0a3f5"
 dependencies = [
  "feral-ordering-core",
 ]
@@ -87,8 +83,6 @@ dependencies = [
 [[package]]
 name = "feral-amf"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0414fac45abb5acec0d7ea9e82d125dba35ac0919491cbe5343ee6176eee8394"
 dependencies = [
  "feral-ordering-core",
 ]
@@ -96,8 +90,6 @@ dependencies = [
 [[package]]
 name = "feral-kahip"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36709fbe0273267511c0b164f3b93d16e62451ae7872bd0390cf073ced1f81d9"
 dependencies = [
  "feral-amd",
  "feral-metis",
@@ -107,8 +99,6 @@ dependencies = [
 [[package]]
 name = "feral-metis"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a90e908946db5c7f03e5fd9fb51f7af18e917deb245be583157ba41635792139"
 dependencies = [
  "feral-amd",
  "feral-ordering-core",
@@ -117,14 +107,10 @@ dependencies = [
 [[package]]
 name = "feral-ordering-core"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c22774549d1d1209ae367ad4ce1c094151c43c9981b2009ae4c0b55a03387dbb"
 
 [[package]]
 name = "feral-scotch"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80c7b693523b6ef86bde0258983b6d3b12ef25b2979024927af5b47d2a7c7c61"
 dependencies = [
  "feral-amd",
  "feral-metis",
@@ -353,21 +339,6 @@ name = "pounce-common"
 version = "0.3.0"
 
 [[package]]
-name = "pounce-cutest"
-version = "0.3.0"
-dependencies = [
- "pounce-algorithm",
- "pounce-common",
- "pounce-feral",
- "pounce-hsl",
- "pounce-linsol",
- "pounce-nlp",
- "pounce-restoration",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "pounce-feral"
 version = "0.3.0"
 dependencies = [
@@ -391,18 +362,6 @@ version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
-]
-
-[[package]]
-name = "pounce-large-scale"
-version = "0.3.0"
-dependencies = [
- "pounce-algorithm",
- "pounce-common",
- "pounce-feral",
- "pounce-linsol",
- "pounce-nlp",
- "pounce-restoration",
 ]
 
 [[package]]

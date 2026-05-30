@@ -19,8 +19,6 @@ members = [
     "crates/pounce-cli",
     "crates/pounce-studio-core",
     "crates/pounce-studio-pyo3",
-    "benchmarks/cutest",
-    "benchmarks/large_scale",
     "tools/iter-diff",
 ]
 # Default `cargo build` / `cargo test` skip pounce-hsl so the pure-Rust
@@ -45,8 +43,6 @@ default-members = [
     "crates/pounce-cinterface",
     "crates/pounce-cli",
     "crates/pounce-studio-core",
-    "benchmarks/cutest",
-    "benchmarks/large_scale",
     "tools/iter-diff",
 ]
 
@@ -75,7 +71,7 @@ pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.3.0" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.3.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.3.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.0" }
-feral = "0.8.0"
+feral = { path = "/Users/jkitchin/projects/feral", version = "0.8.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

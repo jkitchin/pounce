@@ -508,6 +508,39 @@ impl AugSystemSolver for StdAugSystemSolver {
     fn set_timing_stats(&mut self, timing: Rc<TimingStatistics>) {
         self.timing = Some(timing);
     }
+
+    fn try_resolve_many_flat(
+        &mut self,
+        _coeffs: &AugSysCoeffs<'_>,
+        packed_rhs: &mut [Number],
+        nrhs: usize,
+    ) -> Option<ESymSolverStatus> {
+        // Caller must have already populated the cached factor via
+        // `solve`. If we're cold (no factor) bail out and let the
+        // caller take the per-RHS path — `try_*` semantics, not
+        // silent-fallback semantics.
+        if !self.have_factor {
+            return None;
+        }
+        if packed_rhs.len() != (self.dim as usize) * nrhs {
+            return Some(ESymSolverStatus::FatalError);
+        }
+        let _back_guard = self
+            .timing
+            .as_deref()
+            .map(|t| t.linear_system_back_solve.guard());
+        let status = self.linsol.multi_solve(
+            &self.vals,
+            false,
+            nrhs as Index,
+            packed_rhs,
+            false,
+            0,
+        );
+        drop(_back_guard);
+        self.last_status = Some(status);
+        Some(status)
+    }
 }
 
 // ---------------- helpers ----------------

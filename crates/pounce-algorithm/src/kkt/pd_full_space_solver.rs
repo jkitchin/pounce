@@ -16,6 +16,8 @@ use crate::kkt::pd_system_solver::PdSystemSolver;
 use crate::kkt::perturbation_handler::PdPerturbationHandler;
 use pounce_common::tagged::Tag;
 use pounce_common::types::{Index, Number};
+use pounce_linalg::dense_vector::DenseVector;
+use pounce_linalg::expansion_matrix::ExpansionMatrix;
 use pounce_linalg::{Matrix, SymMatrix, Vector};
 use pounce_linsol::ESymSolverStatus;
 use std::cell::RefCell;
@@ -362,6 +364,476 @@ impl PdFullSpaceSolver {
 
         self.last_status = Some(ESymSolverStatus::Success);
         true
+    }
+
+    /// Batched back-substitution against the cached KKT factor for
+    /// `n_rhs` right-hand sides, sharing one
+    /// `pounce_linsol::TSymLinearSolver::multi_solve` call with
+    /// `nrhs > 1`. Each column k pulls its RHS through `write_rhs(k,
+    /// &mut iv)` and emits its solution through `write_lhs(k, &iv)` —
+    /// closures over the caller's flat / strided buffer keep the
+    /// rhs/sol `IteratesVectorMut` scratch out of the API surface.
+    ///
+    /// Returns:
+    /// - `Some(true)`  — fast path executed against the cached factor.
+    /// - `Some(false)` — fast path was attempted but the linsol
+    ///   reported a back-solve failure.
+    /// - `None`        — fast path not taken. Either the matrix tags
+    ///   differ from the last successful [`Self::solve`] (cache miss),
+    ///   the matrix has not been considered yet, or the underlying
+    ///   `AugSystemSolver` does not implement
+    ///   [`AugSystemSolver::try_resolve_many_flat`]. The caller should
+    ///   fall back to looping [`Self::solve`].
+    ///
+    /// Used by `pounce_sensitivity::PdSensBacksolver::solve_many` for
+    /// the JaxProblem `jacrev` backward path, where every cotangent
+    /// re-solves against the same converged factor (pounce#77 follow-up).
+    pub fn solve_many_cached<F1, F2>(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        n_rhs: usize,
+        mut write_rhs: F1,
+        mut write_lhs: F2,
+    ) -> Option<bool>
+    where
+        F1: FnMut(usize, &mut IteratesVectorMut),
+        F2: FnMut(usize, &IteratesVectorMut),
+    {
+        if n_rhs == 0 {
+            return Some(true);
+        }
+
+        // Pull all blocks (same shape as `solve()`).
+        let w = data.borrow().w.clone()?;
+        let cq_ref = cq.borrow();
+        let j_c = cq_ref.curr_jac_c();
+        let j_d = cq_ref.curr_jac_d();
+        let sigma_x = cq_ref.curr_sigma_x();
+        let sigma_s = cq_ref.curr_sigma_s();
+        let slack_x_l = cq_ref.curr_slack_x_l();
+        let slack_x_u = cq_ref.curr_slack_x_u();
+        let slack_s_l = cq_ref.curr_slack_s_l();
+        let slack_s_u = cq_ref.curr_slack_s_u();
+        drop(cq_ref);
+
+        let nlp_ref = nlp.borrow();
+        let px_l = nlp_ref.px_l();
+        let px_u = nlp_ref.px_u();
+        let pd_l = nlp_ref.pd_l();
+        let pd_u = nlp_ref.pd_u();
+        drop(nlp_ref);
+
+        let curr = data.borrow().curr.clone()?;
+
+        let blocks = SolveBlocks {
+            w: &*w,
+            j_c: &*j_c,
+            j_d: &*j_d,
+            px_l: &*px_l,
+            px_u: &*px_u,
+            pd_l: &*pd_l,
+            pd_u: &*pd_u,
+            z_l: &*curr.z_l,
+            z_u: &*curr.z_u,
+            v_l: &*curr.v_l,
+            v_u: &*curr.v_u,
+            slack_x_l: &*slack_x_l,
+            slack_x_u: &*slack_x_u,
+            slack_s_l: &*slack_s_l,
+            slack_s_u: &*slack_s_u,
+            sigma_x: &*sigma_x,
+            sigma_s: &*sigma_s,
+        };
+
+        // Cache-tag check (same 13 tags as `solve()`). If the matrix
+        // has changed since the last successful solve, or we never
+        // marked it as considered, bail and let the caller take the
+        // per-RHS path.
+        let cur_tags: [Tag; 13] = [
+            blocks.w.as_tagged().get_tag(),
+            blocks.j_c.as_tagged().get_tag(),
+            blocks.j_d.as_tagged().get_tag(),
+            blocks.z_l.as_tagged().get_tag(),
+            blocks.z_u.as_tagged().get_tag(),
+            blocks.v_l.as_tagged().get_tag(),
+            blocks.v_u.as_tagged().get_tag(),
+            blocks.slack_x_l.as_tagged().get_tag(),
+            blocks.slack_x_u.as_tagged().get_tag(),
+            blocks.slack_s_l.as_tagged().get_tag(),
+            blocks.slack_s_u.as_tagged().get_tag(),
+            blocks.sigma_x.as_tagged().get_tag(),
+            blocks.sigma_s.as_tagged().get_tag(),
+        ];
+        if !self.matrix_considered
+            || !self.last_dep_tags.map_or(false, |prev| prev == cur_tags)
+        {
+            return None;
+        }
+
+        // Coeffs reuse the perturbation stashed by the most recent
+        // `solve_once`. `current_perturbation()` returns the same
+        // values that solve_once wrote into `data.perturbations`.
+        let d = self.perturb.borrow().current_perturbation();
+        let coeffs = AugSysCoeffs {
+            w: Some(blocks.w),
+            w_factor: 1.0,
+            d_x: Some(blocks.sigma_x),
+            delta_x: d.delta_x,
+            d_s: Some(blocks.sigma_s),
+            delta_s: d.delta_s,
+            j_c: blocks.j_c,
+            d_c: None,
+            delta_c: d.delta_c,
+            j_d: blocks.j_d,
+            d_d: None,
+            delta_d: d.delta_d,
+        };
+
+        let n_x = curr.x.dim() as usize;
+        let n_s = curr.s.dim() as usize;
+        let n_y_c = curr.y_c.dim() as usize;
+        let n_y_d = curr.y_d.dim() as usize;
+        let aug_dim = n_x + n_s + n_y_c + n_y_d;
+
+        // Scratch — one set of Box allocs, reused across every column.
+        let mut rhs_iv = curr.make_new_zeroed();
+        let mut sol_iv = curr.make_new_zeroed();
+        let mut aug_rhs_x_box: Box<dyn Vector> = curr.x.make_new();
+        let mut aug_rhs_s_box: Box<dyn Vector> = curr.s.make_new();
+
+        // Column-major `(aug_dim, n_rhs)` packed buffer — single
+        // allocation that the linsol's `multi_solve` writes solutions
+        // back into in place.
+        let mut aug_packed = vec![0.0 as Number; aug_dim * n_rhs];
+
+        // Phase 1: populate aug_packed column-by-column. The aug-system
+        // RHS is `[aug_rhs_x | aug_rhs_s | rhs.y_c | rhs.y_d]`, where
+        //   aug_rhs_x = rhs.x + Px_L·S_xL⁻¹·z_L − Px_U·S_xU⁻¹·z_U
+        //   aug_rhs_s = rhs.s + Pd_L·S_sL⁻¹·v_L − Pd_U·S_sU⁻¹·v_U
+        // matching `solve_once`'s aug-RHS build.
+        for k in 0..n_rhs {
+            write_rhs(k, &mut rhs_iv);
+
+            aug_rhs_x_box.copy(&*rhs_iv.x);
+            blocks
+                .px_l
+                .add_m_sinv_z(1.0, blocks.slack_x_l, &*rhs_iv.z_l, &mut *aug_rhs_x_box);
+            blocks
+                .px_u
+                .add_m_sinv_z(-1.0, blocks.slack_x_u, &*rhs_iv.z_u, &mut *aug_rhs_x_box);
+
+            aug_rhs_s_box.copy(&*rhs_iv.s);
+            blocks
+                .pd_l
+                .add_m_sinv_z(1.0, blocks.slack_s_l, &*rhs_iv.v_l, &mut *aug_rhs_s_box);
+            blocks
+                .pd_u
+                .add_m_sinv_z(-1.0, blocks.slack_s_u, &*rhs_iv.v_u, &mut *aug_rhs_s_box);
+
+            let col = &mut aug_packed[k * aug_dim..(k + 1) * aug_dim];
+            copy_vector_to_slice(&*aug_rhs_x_box, &mut col[..n_x]);
+            copy_vector_to_slice(&*aug_rhs_s_box, &mut col[n_x..n_x + n_s]);
+            copy_vector_to_slice(
+                &*rhs_iv.y_c,
+                &mut col[n_x + n_s..n_x + n_s + n_y_c],
+            );
+            copy_vector_to_slice(&*rhs_iv.y_d, &mut col[n_x + n_s + n_y_c..]);
+        }
+
+        // Phase 2: single batched back-substitution.
+        let status = self
+            .aug_solver
+            .try_resolve_many_flat(&coeffs, &mut aug_packed, n_rhs)?;
+        if status != ESymSolverStatus::Success {
+            self.last_status = Some(status);
+            return Some(false);
+        }
+        self.last_status = Some(status);
+
+        // Phase 3: unpack each column into `sol_iv`, run the bound-
+        // multiplier expansion, hand the result to the caller. We have
+        // to re-invoke `write_rhs` because expand_bound_multipliers
+        // reads `rhs.z_l/z_u/v_l/v_u` and we re-used `rhs_iv` across
+        // all columns in phase 1.
+        for k in 0..n_rhs {
+            write_rhs(k, &mut rhs_iv);
+
+            let col = &aug_packed[k * aug_dim..(k + 1) * aug_dim];
+            set_vector_from_slice(&mut *sol_iv.x, &col[..n_x]);
+            set_vector_from_slice(&mut *sol_iv.s, &col[n_x..n_x + n_s]);
+            set_vector_from_slice(
+                &mut *sol_iv.y_c,
+                &col[n_x + n_s..n_x + n_s + n_y_c],
+            );
+            set_vector_from_slice(&mut *sol_iv.y_d, &col[n_x + n_s + n_y_c..]);
+
+            // Inline expand_bound_multipliers — that helper takes
+            // `&IteratesVector` (Rc-backed) but our `rhs_iv` is
+            // `IteratesVectorMut` (Box-backed). The four
+            // `sinv_blrm_zmt_dbr` calls work on `&dyn Vector` either
+            // way.
+            blocks.px_l.sinv_blrm_zmt_dbr(
+                -1.0,
+                blocks.slack_x_l,
+                &*rhs_iv.z_l,
+                blocks.z_l,
+                &*sol_iv.x,
+                &mut *sol_iv.z_l,
+            );
+            blocks.px_u.sinv_blrm_zmt_dbr(
+                1.0,
+                blocks.slack_x_u,
+                &*rhs_iv.z_u,
+                blocks.z_u,
+                &*sol_iv.x,
+                &mut *sol_iv.z_u,
+            );
+            blocks.pd_l.sinv_blrm_zmt_dbr(
+                -1.0,
+                blocks.slack_s_l,
+                &*rhs_iv.v_l,
+                blocks.v_l,
+                &*sol_iv.s,
+                &mut *sol_iv.v_l,
+            );
+            blocks.pd_u.sinv_blrm_zmt_dbr(
+                1.0,
+                blocks.slack_s_u,
+                &*rhs_iv.v_u,
+                blocks.v_u,
+                &*sol_iv.s,
+                &mut *sol_iv.v_u,
+            );
+
+            write_lhs(k, &sol_iv);
+        }
+
+        Some(true)
+    }
+
+    /// Flat-slice cached-factor multi-RHS path. Same cache-check
+    /// semantics as [`Self::solve_many_cached`] but operates on
+    /// row-major `(n_rhs, total)` flat buffers without going through
+    /// `IteratesVectorMut` or any `dyn Vector` / `dyn Matrix` dispatch
+    /// in the per-RHS inner loops — the eight source blocks
+    /// (`slack_{x,s}_{l,u}`, `z_{l,u}`, `v_{l,u}`) get downcast to
+    /// `DenseVector` once at the top, the four bound-expansion matrices
+    /// (`px_l`, `px_u`, `pd_l`, `pd_u`) get downcast to
+    /// `ExpansionMatrix` once, and Phase 1 / Phase 3 then run as raw
+    /// `&[Number]` / `&mut [Number]` arithmetic on the flat buffers.
+    ///
+    /// `total` is the sum of the eight `block_dims` entries (in the
+    /// same `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)` order that
+    /// `IteratesVector` uses); `rhs_flat.len() == lhs_flat.len() ==
+    /// n_rhs * total`.
+    ///
+    /// Returns `None` (caller should fall back to
+    /// [`Self::solve_many_cached`]) when:
+    /// - the cache check fails (matrix tags differ),
+    /// - any block source vector is not a `DenseVector` or is
+    ///   homogeneous (uniform-scalar) on a non-empty block,
+    /// - any bound-expansion matrix is not an `ExpansionMatrix`,
+    /// - the underlying `AugSystemSolver` doesn't implement
+    ///   [`AugSystemSolver::try_resolve_many_flat`].
+    ///
+    /// Returns `Some(true)` on success, `Some(false)` on linsol back-
+    /// solve failure.
+    ///
+    /// Used by `pounce_sensitivity::PdSensBacksolver::solve_many` as
+    /// the fastest tier of the JaxProblem `jacrev` backward path
+    /// (pounce#77 follow-up).
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_many_cached_flat(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        n_rhs: usize,
+        rhs_flat: &[Number],
+        lhs_flat: &mut [Number],
+        block_dims: [usize; 8],
+    ) -> Option<bool> {
+        if n_rhs == 0 {
+            return Some(true);
+        }
+        let total: usize = block_dims.iter().sum();
+        if rhs_flat.len() != n_rhs * total || lhs_flat.len() != n_rhs * total {
+            return Some(false);
+        }
+        let mut off = [0usize; 9];
+        for i in 0..8 {
+            off[i + 1] = off[i] + block_dims[i];
+        }
+        let n_x = block_dims[0];
+        let n_s = block_dims[1];
+        let n_y_c = block_dims[2];
+        let n_y_d = block_dims[3];
+
+        // Pull all blocks (same shape as `solve()`).
+        let w = data.borrow().w.clone()?;
+        let cq_ref = cq.borrow();
+        let j_c = cq_ref.curr_jac_c();
+        let j_d = cq_ref.curr_jac_d();
+        let sigma_x = cq_ref.curr_sigma_x();
+        let sigma_s = cq_ref.curr_sigma_s();
+        let slack_x_l = cq_ref.curr_slack_x_l();
+        let slack_x_u = cq_ref.curr_slack_x_u();
+        let slack_s_l = cq_ref.curr_slack_s_l();
+        let slack_s_u = cq_ref.curr_slack_s_u();
+        drop(cq_ref);
+
+        let nlp_ref = nlp.borrow();
+        let px_l = nlp_ref.px_l();
+        let px_u = nlp_ref.px_u();
+        let pd_l = nlp_ref.pd_l();
+        let pd_u = nlp_ref.pd_u();
+        drop(nlp_ref);
+
+        let curr = data.borrow().curr.clone()?;
+
+        // Cache-tag check (same 13 tags as `solve()`).
+        let cur_tags: [Tag; 13] = [
+            w.as_tagged().get_tag(),
+            j_c.as_tagged().get_tag(),
+            j_d.as_tagged().get_tag(),
+            curr.z_l.as_tagged().get_tag(),
+            curr.z_u.as_tagged().get_tag(),
+            curr.v_l.as_tagged().get_tag(),
+            curr.v_u.as_tagged().get_tag(),
+            slack_x_l.as_tagged().get_tag(),
+            slack_x_u.as_tagged().get_tag(),
+            slack_s_l.as_tagged().get_tag(),
+            slack_s_u.as_tagged().get_tag(),
+            sigma_x.as_tagged().get_tag(),
+            sigma_s.as_tagged().get_tag(),
+        ];
+        if !self.matrix_considered
+            || !self.last_dep_tags.map_or(false, |prev| prev == cur_tags)
+        {
+            return None;
+        }
+
+        // Concrete downcasts. Bail to closure-based fallback on any
+        // type mismatch (homogeneous-on-non-empty included — the math
+        // below assumes a real `[Number]` slice for slack / z / v).
+        let slack_x_l_d = dense_slice_or_none(&*slack_x_l, block_dims[4])?;
+        let slack_x_u_d = dense_slice_or_none(&*slack_x_u, block_dims[5])?;
+        let slack_s_l_d = dense_slice_or_none(&*slack_s_l, block_dims[6])?;
+        let slack_s_u_d = dense_slice_or_none(&*slack_s_u, block_dims[7])?;
+        let blocks_z_l_d = dense_slice_or_none(&*curr.z_l, block_dims[4])?;
+        let blocks_z_u_d = dense_slice_or_none(&*curr.z_u, block_dims[5])?;
+        let blocks_v_l_d = dense_slice_or_none(&*curr.v_l, block_dims[6])?;
+        let blocks_v_u_d = dense_slice_or_none(&*curr.v_u, block_dims[7])?;
+
+        let exp_x_l = exp_pos_or_none(&*px_l)?;
+        let exp_x_u = exp_pos_or_none(&*px_u)?;
+        let exp_s_l = exp_pos_or_none(&*pd_l)?;
+        let exp_s_u = exp_pos_or_none(&*pd_u)?;
+
+        // Coeffs reuse the perturbation stashed by the most recent
+        // `solve_once`.
+        let d = self.perturb.borrow().current_perturbation();
+        let coeffs = AugSysCoeffs {
+            w: Some(&*w),
+            w_factor: 1.0,
+            d_x: Some(&*sigma_x),
+            delta_x: d.delta_x,
+            d_s: Some(&*sigma_s),
+            delta_s: d.delta_s,
+            j_c: &*j_c,
+            d_c: None,
+            delta_c: d.delta_c,
+            j_d: &*j_d,
+            d_d: None,
+            delta_d: d.delta_d,
+        };
+
+        let aug_dim = n_x + n_s + n_y_c + n_y_d;
+        // Column-major `(aug_dim, n_rhs)` packed buffer, single alloc.
+        let mut aug_packed = vec![0.0 as Number; aug_dim * n_rhs];
+
+        // ---------------- Phase 1 ----------------
+        // For each k: build the aug-system RHS into column k of
+        // aug_packed, all inline against raw slices.
+        for k in 0..n_rhs {
+            let r_base = k * total;
+            let rhs_x = &rhs_flat[r_base + off[0]..r_base + off[1]];
+            let rhs_s = &rhs_flat[r_base + off[1]..r_base + off[2]];
+            let rhs_y_c = &rhs_flat[r_base + off[2]..r_base + off[3]];
+            let rhs_y_d = &rhs_flat[r_base + off[3]..r_base + off[4]];
+            let rhs_z_l = &rhs_flat[r_base + off[4]..r_base + off[5]];
+            let rhs_z_u = &rhs_flat[r_base + off[5]..r_base + off[6]];
+            let rhs_v_l = &rhs_flat[r_base + off[6]..r_base + off[7]];
+            let rhs_v_u = &rhs_flat[r_base + off[7]..r_base + off[8]];
+
+            let aug_col = &mut aug_packed[k * aug_dim..(k + 1) * aug_dim];
+            let (aug_x, rest) = aug_col.split_at_mut(n_x);
+            let (aug_s, rest) = rest.split_at_mut(n_s);
+            let (aug_y_c, aug_y_d) = rest.split_at_mut(n_y_c);
+
+            // aug_x = rhs_x + Px_L · S_xL⁻¹ · z_L − Px_U · S_xU⁻¹ · z_U
+            aug_x.copy_from_slice(rhs_x);
+            scatter_add_div(aug_x, exp_x_l, rhs_z_l, slack_x_l_d, 1.0);
+            scatter_add_div(aug_x, exp_x_u, rhs_z_u, slack_x_u_d, -1.0);
+            // aug_s = rhs_s + Pd_L · S_sL⁻¹ · v_L − Pd_U · S_sU⁻¹ · v_U
+            aug_s.copy_from_slice(rhs_s);
+            scatter_add_div(aug_s, exp_s_l, rhs_v_l, slack_s_l_d, 1.0);
+            scatter_add_div(aug_s, exp_s_u, rhs_v_u, slack_s_u_d, -1.0);
+            aug_y_c.copy_from_slice(rhs_y_c);
+            aug_y_d.copy_from_slice(rhs_y_d);
+        }
+
+        // ---------------- Phase 2 ----------------
+        let status = self
+            .aug_solver
+            .try_resolve_many_flat(&coeffs, &mut aug_packed, n_rhs)?;
+        if status != ESymSolverStatus::Success {
+            self.last_status = Some(status);
+            return Some(false);
+        }
+        self.last_status = Some(status);
+
+        // ---------------- Phase 3 ----------------
+        // For each k: copy sol_x/s/y_c/y_d into lhs_flat, then build
+        // sol_z_l/z_u/v_l/v_u from the bound-multiplier expansion.
+        for k in 0..n_rhs {
+            let r_base = k * total;
+            let rhs_z_l = &rhs_flat[r_base + off[4]..r_base + off[5]];
+            let rhs_z_u = &rhs_flat[r_base + off[5]..r_base + off[6]];
+            let rhs_v_l = &rhs_flat[r_base + off[6]..r_base + off[7]];
+            let rhs_v_u = &rhs_flat[r_base + off[7]..r_base + off[8]];
+
+            let aug_col = &aug_packed[k * aug_dim..(k + 1) * aug_dim];
+            let sol_x = &aug_col[..n_x];
+            let sol_s = &aug_col[n_x..n_x + n_s];
+            let sol_y_c = &aug_col[n_x + n_s..n_x + n_s + n_y_c];
+            let sol_y_d = &aug_col[n_x + n_s + n_y_c..];
+
+            let l_base = k * total;
+            let (lhs_xs, lhs_zv) = lhs_flat[l_base..l_base + total].split_at_mut(off[4]);
+            let (lhs_x, rest) = lhs_xs.split_at_mut(n_x);
+            let (lhs_s, rest) = rest.split_at_mut(n_s);
+            let (lhs_y_c, lhs_y_d) = rest.split_at_mut(n_y_c);
+            lhs_x.copy_from_slice(sol_x);
+            lhs_s.copy_from_slice(sol_s);
+            lhs_y_c.copy_from_slice(sol_y_c);
+            lhs_y_d.copy_from_slice(sol_y_d);
+
+            let (lhs_z_l, rest) = lhs_zv.split_at_mut(block_dims[4]);
+            let (lhs_z_u, rest) = rest.split_at_mut(block_dims[5]);
+            let (lhs_v_l, lhs_v_u) = rest.split_at_mut(block_dims[6]);
+
+            // sol_z_l[i] = (rhs_z_l[i] − z_l[i] · sol_x[exp_x_l[i]]) / slack_x_l[i]
+            expand_bound_mult(lhs_z_l, rhs_z_l, blocks_z_l_d, sol_x, exp_x_l, slack_x_l_d, -1.0);
+            // sol_z_u[i] = (rhs_z_u[i] + z_u[i] · sol_x[exp_x_u[i]]) / slack_x_u[i]
+            expand_bound_mult(lhs_z_u, rhs_z_u, blocks_z_u_d, sol_x, exp_x_u, slack_x_u_d, 1.0);
+            expand_bound_mult(lhs_v_l, rhs_v_l, blocks_v_l_d, sol_s, exp_s_l, slack_s_l_d, -1.0);
+            expand_bound_mult(lhs_v_u, rhs_v_u, blocks_v_u_d, sol_s, exp_s_u, slack_s_u_d, 1.0);
+        }
+
+        Some(true)
     }
 
     /// One outer back-solve through the augmented system, including
@@ -793,6 +1265,134 @@ fn expand_bound_multipliers(
         .sinv_blrm_zmt_dbr(-1.0, b.slack_s_l, &*rhs.v_l, b.v_l, &*sol.s, &mut *sol.v_l);
     b.pd_u
         .sinv_blrm_zmt_dbr(1.0, b.slack_s_u, &*rhs.v_u, b.v_u, &*sol.s, &mut *sol.v_u);
+}
+
+/// Copy a `DenseVector`'s materialized values into `dst`. Used by
+/// `solve_many_cached` to pack the aug-system RHS into a column of the
+/// flat `aug_packed` buffer.
+fn copy_vector_to_slice(src: &dyn Vector, dst: &mut [Number]) {
+    if dst.is_empty() {
+        return;
+    }
+    let dv = src
+        .as_any()
+        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+        .expect("solve_many_cached requires DenseVector blocks");
+    if dv.is_homogeneous() {
+        let v = dv.scalar();
+        dst.iter_mut().for_each(|x| *x = v);
+    } else {
+        dst.copy_from_slice(dv.values());
+    }
+}
+
+/// Inverse of [`copy_vector_to_slice`]: write `src` into a
+/// `DenseVector` in place.
+fn set_vector_from_slice(dst: &mut dyn Vector, src: &[Number]) {
+    if src.is_empty() {
+        return;
+    }
+    let dv = dst
+        .as_any_mut()
+        .downcast_mut::<pounce_linalg::dense_vector::DenseVector>()
+        .expect("solve_many_cached requires DenseVector blocks");
+    dv.set_values(src);
+}
+
+/// Downcast a `dyn Vector` block to its concrete `DenseVector` slice.
+/// Returns `None` if the block is not a `DenseVector`, or if the block
+/// is non-empty but stored as a homogeneous scalar (the
+/// `solve_many_cached_flat` fast path needs a real slice for its
+/// inline scatter loops; the closure-based fallback handles
+/// homogeneous-on-non-empty correctly via `add_m_sinv_z` / `sinv_blrm_zmt_dbr`).
+fn dense_slice_or_none(v: &dyn Vector, expected_dim: usize) -> Option<&[Number]> {
+    if expected_dim == 0 {
+        // An empty block doesn't need a slice — the scatter loops below
+        // simply don't iterate when exp_pos is empty. Return an empty
+        // slice so the caller can pass it through unconditionally.
+        return Some(&[]);
+    }
+    let dv = v.as_any().downcast_ref::<DenseVector>()?;
+    if dv.is_homogeneous() {
+        return None;
+    }
+    Some(dv.values())
+}
+
+/// Downcast a `dyn Matrix` to its concrete `ExpansionMatrix`'s
+/// expanded-position index slice. Returns `None` if the matrix is not
+/// an `ExpansionMatrix`.
+fn exp_pos_or_none(m: &dyn Matrix) -> Option<&[Index]> {
+    let em = m.as_any().downcast_ref::<ExpansionMatrix>()?;
+    Some(em.expanded_pos_indices())
+}
+
+/// Phase-1 inner kernel: `out[exp_pos[i]] += alpha · src[i] / denom[i]`.
+/// Hot loop in `solve_many_cached_flat`. Specialised on `alpha = ±1`
+/// to skip the multiply.
+#[inline]
+fn scatter_add_div(
+    out: &mut [Number],
+    exp_pos: &[Index],
+    src: &[Number],
+    denom: &[Number],
+    alpha: Number,
+) {
+    if exp_pos.is_empty() {
+        return;
+    }
+    debug_assert_eq!(src.len(), exp_pos.len());
+    debug_assert_eq!(denom.len(), exp_pos.len());
+    if alpha == 1.0 {
+        for i in 0..exp_pos.len() {
+            out[exp_pos[i] as usize] += src[i] / denom[i];
+        }
+    } else if alpha == -1.0 {
+        for i in 0..exp_pos.len() {
+            out[exp_pos[i] as usize] -= src[i] / denom[i];
+        }
+    } else {
+        for i in 0..exp_pos.len() {
+            out[exp_pos[i] as usize] += alpha * src[i] / denom[i];
+        }
+    }
+}
+
+/// Phase-3 inner kernel: bound-multiplier expansion,
+/// `out[i] = (r[i] + alpha · z[i] · sol[exp_pos[i]]) / s[i]`.
+/// Mirrors `ExpansionMatrix::sinv_blrm_zmt_dbr_impl` (the non-
+/// homogeneous specialisation) inlined against raw slices.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn expand_bound_mult(
+    out: &mut [Number],
+    r: &[Number],
+    z: &[Number],
+    sol: &[Number],
+    exp_pos: &[Index],
+    s: &[Number],
+    alpha: Number,
+) {
+    if exp_pos.is_empty() {
+        return;
+    }
+    debug_assert_eq!(out.len(), exp_pos.len());
+    debug_assert_eq!(r.len(), exp_pos.len());
+    debug_assert_eq!(z.len(), exp_pos.len());
+    debug_assert_eq!(s.len(), exp_pos.len());
+    if alpha == 1.0 {
+        for i in 0..exp_pos.len() {
+            out[i] = (r[i] + z[i] * sol[exp_pos[i] as usize]) / s[i];
+        }
+    } else if alpha == -1.0 {
+        for i in 0..exp_pos.len() {
+            out[i] = (r[i] - z[i] * sol[exp_pos[i] as usize]) / s[i];
+        }
+    } else {
+        for i in 0..exp_pos.len() {
+            out[i] = (r[i] + alpha * z[i] * sol[exp_pos[i] as usize]) / s[i];
+        }
+    }
 }
 
 fn thaw(iv: IteratesVector) -> IteratesVectorMut {
