@@ -16,7 +16,13 @@ reason to build any of this.
    HiGHS / SCIP / OSQP / BARON behind the dispatch layer" — is *off the
    table*. Every algorithm here is in-house. This re-promotes simplex
    from "out of scope, use HiGHS" to a *required dependency* (see
-   "Simplex is back" below).
+   "Simplex is back" below). The payoff is **distribution**: no Fortran,
+   no HSL, no system BLAS, no C++ solver to build means a single
+   `pip install` of a `manylinux` / macOS / Windows wheel — it works in
+   Colab, locked-down CI, and air-gapped clusters out of the box. That
+   is a direct adoption edge over the differentiable-convex incumbents
+   (cvxpylayers needs the SCS / diffcp C stack), and it matters most for
+   exactly the Python/ML audience this note targets.
 2. **Nonconvex global optimization is in scope.** The LP/QP note
    explicitly excludes it ("Use BARON / Gurobi-nonconvex",
    lp-qp-routing.md "Nonconvex QP / global optimization"). This note
@@ -27,12 +33,43 @@ reason to build any of this.
    sheets. It is **vertical integration**: a pure-Rust, JAX-native,
    `vmap`-batched *differentiable* solver stack spanning LP → QP → NLP →
    MIP → global, so that any of these solves can sit inside an ML model
-   and pass gradients. Competitiveness is a *constraint* ("credible, not
-   embarrassing"), not the objective. This is the thing that does not
-   exist anywhere — cvxpylayers / diffcp is convex-only; there is no
-   differentiable MINLP or global-optimization layer, commercial or
-   open. See "Differentiability and the JAX/Python surface" below; it is
-   a **hard requirement on every solver**, not a fast-follow.
+   and pass gradients. This is the thing that does not exist anywhere —
+   cvxpylayers / diffcp is convex-only; there is no differentiable MINLP
+   or global-optimization layer, commercial or open. It is a **hard
+   requirement on every solver**, not a fast-follow (see
+   "Differentiability and the JAX/Python surface" below).
+
+## Positioning
+
+Four claims, in priority order. Each later one supports the one above it.
+
+1. **Differentiability is the primary differentiator.** The reason to
+   reach for POUNCE rather than Gurobi / BARON / HiGHS is that the solve
+   is a differentiable, batched JAX primitive — a layer you can train
+   through. No other solver across this problem class (MIP, MINLP,
+   global) offers this.
+2. **Competitive performance is the credible reason to *trust* it.**
+   Differentiability is worthless if the forward solve is a toy. The bar
+   is "good enough that a practitioner would pick it on the merits even
+   without the gradient" — credible on MIPLIB / MINLPLib, not
+   embarrassing next to HiGHS / SCIP. Performance is *table stakes that
+   make the differentiator believable*, not the headline.
+3. **The architecture gives a long runway for performance.** The
+   trait seams (NodeSolver, Brancher, Relaxation, DiffHandoff) decouple
+   *algorithm quality* from the *differentiable surface*. Better cuts,
+   branching, pricing, relaxations, and parallel B&B all land behind
+   stable interfaces without touching the JAX-facing API. POUNCE does
+   not need to be fastest on day one; it needs a design where every year
+   of work closes the gap and *none of it breaks the gradient*. The
+   performance ceiling is high and approached incrementally.
+4. **Pure Rust makes distribution frictionless.** `pip install`, no
+   system dependencies, every platform — the lowest-friction path into a
+   Python/ML workflow, and a standing advantage over C/C++/Fortran-backed
+   competitors. (Decision 1.)
+
+The synthesis: *lead with the capability nobody else has, back it with
+performance good enough to trust, on an architecture that keeps
+improving without API churn, delivered as a one-line install.*
 
 
 ## The central reframe
