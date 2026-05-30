@@ -116,6 +116,30 @@ where
     let mut ds_aff = vec![0.0; m_ineq];
     let mut dz_aff = vec![0.0; m_ineq];
 
+    // Build the fixed KKT pattern and the factorization *once*. The
+    // pattern never changes across iterations — only the (z,z) scaling
+    // diagonal — so each iteration recomputes O(m_ineq) values and
+    // `refactor`s (numeric-only, reusing the symbolic factor / ordering)
+    // instead of paying repeated symbolic analysis. This is what keeps
+    // the per-iteration cost tracking the sparse factor rather than
+    // blowing up on large sparse QPs.
+    let kkt = KktStructure::build(prob, opts.reg);
+    let mut kkt_vals = kkt.values.clone();
+    cone.scaling_diag(&s, &z, &mut scaling);
+    kkt.update_scaling(&scaling, opts.reg, &mut kkt_vals);
+    let mut fact = match Factorization::new(
+        dim as Index,
+        kkt.airn.clone(),
+        kkt.ajcn.clone(),
+        kkt_vals.clone(),
+        make_backend(),
+    ) {
+        Ok(f) => f,
+        Err(_) => {
+            return failed_solution(prob, x, y, z, 0);
+        }
+    };
+
     let mut iters = 0;
     let mut status = QpStatus::IterationLimit;
 
@@ -147,19 +171,16 @@ where
             break;
         }
 
-        // --- assemble the symmetric KKT lower triangle and factor once.
-        // The same factor backs both the predictor and corrector solves
-        // (this single-factor / two-solve reuse is what makes Mehrotra
-        // cheaper per iteration than two independent steps). ---
+        // --- update only the (z,z) scaling diagonal and refactor
+        // (numeric-only; the symbolic factor / ordering is reused). The
+        // one factorization then backs both the predictor and corrector
+        // solves this iteration. ---
         cone.scaling_diag(&s, &z, &mut scaling);
-        let (airn, ajcn, vals) = assemble_kkt(prob, &scaling, opts.reg, dim);
-        let mut fact = match Factorization::new(dim as Index, airn, ajcn, vals, make_backend()) {
-            Ok(f) => f,
-            Err(_) => {
-                status = QpStatus::NumericalFailure;
-                break;
-            }
-        };
+        kkt.update_scaling(&scaling, opts.reg, &mut kkt_vals);
+        if fact.refactor(&kkt_vals).is_err() {
+            status = QpStatus::NumericalFailure;
+            break;
+        }
 
         // === Predictor (affine-scaling) step: σ = 0 ===
         // r_c = s∘z (affine target).
@@ -241,6 +262,31 @@ where
     }
 }
 
+/// Build a `NumericalFailure` solution from the current iterate (used
+/// when the *initial* factorization fails before the loop starts).
+fn failed_solution(
+    prob: &QpProblem,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    iters: usize,
+) -> QpSolution {
+    let mut px = vec![0.0; prob.n];
+    prob.p_mul_add(&x, &mut px);
+    let mut obj = 0.0;
+    for i in 0..prob.n {
+        obj += 0.5 * x[i] * px[i] + prob.c[i] * x[i];
+    }
+    QpSolution {
+        status: QpStatus::NumericalFailure,
+        x,
+        y,
+        z,
+        obj,
+        iters,
+    }
+}
+
 /// Build the Newton RHS `[−r_d; −r_p; −r_g + r_c ⊘ z]` for a given
 /// complementarity residual `r_c` (predictor or corrector).
 #[allow(clippy::too_many_arguments)]
@@ -299,63 +345,113 @@ fn step_lengths(
     (cone.max_step(s, ds, tau), cone.max_step(z, dz, tau))
 }
 
-/// Assemble the lower triangle of the symmetric KKT matrix in 1-based
-/// triplet form, summing duplicates via a `BTreeMap` so the caller never
-/// relies on backend duplicate-summing. Variable layout: `x` then `y`
-/// (equality) then `z` (inequality).
-fn assemble_kkt(
+/// Bench-only re-export of the KKT assembly so the `scaling` example can
+/// time it in isolation. Not part of the public solving API.
+#[doc(hidden)]
+pub fn assemble_kkt_for_bench(
     prob: &QpProblem,
     scaling: &[f64],
     reg: f64,
-    dim: usize,
+    _dim: usize,
 ) -> (Vec<Index>, Vec<Index>, Vec<Number>) {
-    let n = prob.n;
-    let m_eq = prob.m_eq();
-    let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-    let mut add = |r: usize, c: usize, v: f64| {
-        // lower triangle only (r ≥ c)
-        let (r, c) = if r >= c { (r, c) } else { (c, r) };
-        *entries.entry((r, c)).or_insert(0.0) += v;
-    };
+    let kkt = KktStructure::build(prob, reg);
+    let mut vals = kkt.values.clone();
+    kkt.update_scaling(scaling, reg, &mut vals);
+    (kkt.airn, kkt.ajcn, vals)
+}
 
-    // (x,x): P + δI (lower triangle of P as given).
-    for t in &prob.p_lower {
-        add(t.row, t.col, t.val);
-    }
-    for i in 0..n {
-        add(i, i, reg);
+/// Fixed-pattern KKT structure for the QP augmented system.
+///
+/// The KKT *sparsity pattern* is identical across all IPM iterations —
+/// only the `(z, z)` diagonal (the cone scaling block) changes from step
+/// to step. This struct captures the pattern (`airn`/`ajcn`, 1-based
+/// lower triangle) and the constant part of the values once, plus the
+/// positions of the scaling-dependent diagonal entries, so each
+/// iteration recomputes only `O(m_ineq)` values and the solver can
+/// `refactor` (numeric-only, reusing the symbolic factor / fill-reducing
+/// ordering) instead of rebuilding the factorization from scratch. This
+/// is the constant-pattern symbolic reuse called for in
+/// `dev-notes/performance-engineering.md`; without it the per-iteration
+/// cost is dominated by repeated symbolic analysis on large sparse QPs.
+struct KktStructure {
+    airn: Vec<Index>,
+    ajcn: Vec<Index>,
+    /// Constant values (everything except the scaling block; the
+    /// `(z, z)` diagonal entries hold their `-reg` term here).
+    values: Vec<Number>,
+    /// `z_diag_pos[i]` = index into `values` of inequality `i`'s
+    /// `(z, z)` diagonal entry.
+    z_diag_pos: Vec<usize>,
+}
+
+impl KktStructure {
+    /// Build the pattern and constant values once. The `(z, z)` diagonal
+    /// entries are seeded with `-reg`; [`Self::update_scaling`] adds the
+    /// per-iteration `-scaling[i]` on top.
+    fn build(prob: &QpProblem, reg: f64) -> Self {
+        let n = prob.n;
+        let m_eq = prob.m_eq();
+        let m_ineq = prob.m_ineq();
+        let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+        let mut add = |r: usize, c: usize, v: f64| {
+            let (r, c) = if r >= c { (r, c) } else { (c, r) };
+            *entries.entry((r, c)).or_insert(0.0) += v;
+        };
+
+        // (x,x): P + δI.
+        for t in &prob.p_lower {
+            add(t.row, t.col, t.val);
+        }
+        for i in 0..n {
+            add(i, i, reg);
+        }
+        // (y,x): A; (y,y): −δI.
+        for t in &prob.a {
+            add(n + t.row, t.col, t.val);
+        }
+        for i in 0..m_eq {
+            add(n + i, n + i, -reg);
+        }
+        // (z,x): G; (z,z): seed −δI (scaling added per iteration).
+        for t in &prob.g {
+            add(n + m_eq + t.row, t.col, t.val);
+        }
+        for i in 0..m_ineq {
+            add(n + m_eq + i, n + m_eq + i, -reg);
+        }
+
+        let nnz = entries.len();
+        let mut airn = Vec::with_capacity(nnz);
+        let mut ajcn = Vec::with_capacity(nnz);
+        let mut values = Vec::with_capacity(nnz);
+        // Map (z,z) diagonal coordinates → output position.
+        let mut coord_to_pos: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for (pos, ((r, c), v)) in entries.into_iter().enumerate() {
+            airn.push((r + 1) as Index);
+            ajcn.push((c + 1) as Index);
+            values.push(v);
+            coord_to_pos.insert((r, c), pos);
+        }
+        let z_diag_pos: Vec<usize> = (0..m_ineq)
+            .map(|i| coord_to_pos[&(n + m_eq + i, n + m_eq + i)])
+            .collect();
+
+        KktStructure {
+            airn,
+            ajcn,
+            values,
+            z_diag_pos,
+        }
     }
 
-    // (y,x): A  (rows n.., cols 0..n) — these are lower triangle.
-    for t in &prob.a {
-        add(n + t.row, t.col, t.val);
+    /// Write the per-iteration scaling into `out` (which must start as a
+    /// copy of `self.values`): sets each `(z, z)` diagonal entry to
+    /// `-scaling[i] - reg`.
+    fn update_scaling(&self, scaling: &[f64], reg: f64, out: &mut [Number]) {
+        for (i, &pos) in self.z_diag_pos.iter().enumerate() {
+            out[pos] = -scaling[i] - reg;
+        }
     }
-    // (y,y): −δI.
-    for i in 0..m_eq {
-        add(n + i, n + i, -reg);
-    }
-
-    // (z,x): G.
-    for t in &prob.g {
-        add(n + m_eq + t.row, t.col, t.val);
-    }
-    // (z,z): −(S⊘Z) − δI.
-    for i in 0..prob.m_ineq() {
-        add(n + m_eq + i, n + m_eq + i, -scaling[i] - reg);
-    }
-
-    debug_assert!(entries.keys().all(|(r, _)| *r < dim));
-    let _ = dim;
-
-    let mut airn = Vec::with_capacity(entries.len());
-    let mut ajcn = Vec::with_capacity(entries.len());
-    let mut vals = Vec::with_capacity(entries.len());
-    for ((r, c), v) in entries {
-        airn.push((r + 1) as Index); // 1-based
-        ajcn.push((c + 1) as Index);
-        vals.push(v);
-    }
-    (airn, ajcn, vals)
 }
 
 fn inf_norm(v: &[f64]) -> f64 {
