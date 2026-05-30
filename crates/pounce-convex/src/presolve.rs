@@ -313,7 +313,9 @@ impl Presolve {
         for (newr, &oldr) in self.kept_eq.iter().enumerate() {
             y[oldr] = red.y[newr];
         }
-        for (newr, &oldr) in self.kept_ineq.iter().enumerate() {}
+        for (newr, &oldr) in self.kept_ineq.iter().enumerate() {
+            z[oldr] = red.z[newr];
+        }
 
         // Replay the stack in reverse to restore fixed primals and the
         // fixing-row duals. Empty rows already have dual 0.
