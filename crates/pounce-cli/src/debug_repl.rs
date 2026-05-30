@@ -2485,12 +2485,15 @@ fn write_json_and_open(
     std::fs::write(&path, payload.to_string()).map_err(|e| format!("write failed: {e}"))?;
     let path_s = path.to_string_lossy().to_string();
 
-    let (program, args): (String, Vec<String>) = match std::env::var("POUNCE_DBG_VIEWER") {
+    // Candidate viewers, tried in order until one launches:
+    //   1. $POUNCE_DBG_VIEWER (a command template; `{}` ← the path),
+    //   2. `pounce-dbg-viz` — the bundled interactive Plotly viewer
+    //      (`pip install 'pounce-solver[viz]'`), when on PATH,
+    //   3. the OS opener (xdg-open / open) on the raw JSON.
+    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    match std::env::var("POUNCE_DBG_VIEWER") {
         Ok(tmpl) if !tmpl.trim().is_empty() => {
-            let mut parts = tmpl
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>();
+            let mut parts = tmpl.split_whitespace().map(String::from).collect::<Vec<_>>();
             let prog = parts.remove(0);
             let mut replaced = false;
             for a in parts.iter_mut() {
@@ -2502,25 +2505,31 @@ fn write_json_and_open(
             if !replaced {
                 parts.push(path_s.clone());
             }
-            (prog, parts)
+            candidates.push((prog, parts));
         }
         _ => {
-            let prog = if cfg!(target_os = "macos") {
+            candidates.push(("pounce-dbg-viz".to_string(), vec![path_s.clone()]));
+            let opener = if cfg!(target_os = "macos") {
                 "open"
             } else {
                 "xdg-open"
             };
-            (prog.to_string(), vec![path_s.clone()])
+            candidates.push((opener.to_string(), vec![path_s.clone()]));
         }
-    };
-    let viewer = format!("{program} {}", args.join(" "));
-    match std::process::Command::new(&program).args(&args).spawn() {
-        Ok(_) => Ok((path_s, viewer)),
-        Err(e) => Err(format!(
-            "wrote {path_s} but could not launch `{program}`: {e} \
-             (set POUNCE_DBG_VIEWER to a command, e.g. `python my_plot.py {{}}`)"
-        )),
     }
+
+    let mut last_err = String::new();
+    for (program, args) in &candidates {
+        match std::process::Command::new(program).args(args).spawn() {
+            Ok(_) => return Ok((path_s, format!("{program} {}", args.join(" ")))),
+            Err(e) => last_err = format!("`{program}`: {e}"),
+        }
+    }
+    Err(format!(
+        "wrote {path_s} but could not launch a viewer ({last_err}). \
+         Install the interactive viewer (`pip install 'pounce-solver[viz]'`) \
+         or set POUNCE_DBG_VIEWER, e.g. `python my_plot.py {{}}`."
+    ))
 }
 
 #[cfg(test)]

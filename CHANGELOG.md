@@ -162,6 +162,14 @@ program.
   auto-run command list to the breakpoint at iteration N (e.g.
   `commands 5 set mu 0.1 ; continue`). On hit, the list runs automatically
   and a flow command (`continue`/`step`) resumes without prompting.
+- **Interactive `viz` (Plotly):** the Python package ships a
+  `pounce-dbg-viz` console script that renders the debugger's `viz`/`save`
+  artifacts as interactive Plotly figures — a spy/heatmap for `viz kkt`
+  (matrix colored by value, inertia/regularization in the title) and
+  `viz L` (LDLᵀ factor), bar charts for vector blocks. The Rust `viz`
+  auto-uses it when on `PATH` (launch order: `$POUNCE_DBG_VIEWER` →
+  `pounce-dbg-viz` → OS opener). Install with
+  `pip install 'pounce-solver[viz]'`.
 - **Restoration inner-loop stepping:** the debugger hook is now shared
   (`Rc<RefCell<…>>`) with the restoration inner IPM, so the same session
   steps *into* the restoration sub-solve. Inner pauses are flagged

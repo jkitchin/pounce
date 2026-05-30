@@ -392,13 +392,30 @@ viz kkt              # the KKT inertia/regularization report
 residual scalars (`iter`, `mu`, `objective`, `inf_pr`, `inf_du`,
 `nlp_error`) — a self-contained artifact for external analysis.
 
-`viz` opens the artifact with `$POUNCE_DBG_VIEWER` (a command template
-where `{}` is replaced by the file path) if set, otherwise the platform
-opener (`xdg-open` / `open`). For a plot, point it at a script:
+### Interactive figures (`pounce-dbg-viz`)
+
+`viz` writes a JSON artifact and hands it to a viewer. The Python package
+ships an interactive **Plotly** viewer that renders these properly —
+a spy/heatmap for `viz kkt` (the augmented matrix, colored by value, with
+the inertia/regularization in the title) and `viz L` (the LDLᵀ factor),
+and a bar chart for vector blocks (`viz x`, `viz dx`):
 
 ```sh
-export POUNCE_DBG_VIEWER='python my_plot.py {}'
+pip install 'pounce-solver[viz]'    # installs the `pounce-dbg-viz` script
 ```
+
+When `pounce-dbg-viz` is on `PATH`, `viz` uses it automatically (opening
+an interactive figure in your browser). The launch order is:
+
+1. `$POUNCE_DBG_VIEWER` — a command template (`{}` ← the artifact path),
+   if set;
+2. `pounce-dbg-viz` — the bundled Plotly viewer, if installed;
+3. the OS opener (`xdg-open` / `open`) on the raw JSON.
+
+So `export POUNCE_DBG_VIEWER='python my_plot.py {}'` overrides with your
+own plotter, and with nothing set + the `viz` extra installed it just
+works. The same `pounce-dbg-viz <file.json>` also renders a `save`
+artifact (the full iterate).
 
 ---
 

@@ -34,11 +34,15 @@ dependencies = ["numpy>=1.23"]
 # shim prints a helpful message in that case.
 [project.scripts]
 pounce = "pounce._cli:main"
+# Interactive viewer for the debugger's `viz`/`save` artifacts. Point the
+# debugger at it with: export POUNCE_DBG_VIEWER='pounce-dbg-viz {}'
+pounce-dbg-viz = "pounce._debug_viz:main"
 
 [project.optional-dependencies]
 jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
 scipy = ["scipy>=1.11"]
-dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30"]
+viz = ["plotly>=5"]
+dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30", "plotly>=5"]
 
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"
