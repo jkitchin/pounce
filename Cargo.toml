@@ -71,7 +71,7 @@ pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.3.0" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.3.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.3.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.0" }
-feral = { path = "/Users/jkitchin/projects/feral", version = "0.8.0" }
+feral = { git = "https://github.com/jkitchin/feral", branch = "main", version = "0.8.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
