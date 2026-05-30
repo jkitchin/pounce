@@ -818,33 +818,55 @@ class JaxProblem:
         (useful for higher-order differentiation, since the dense path
         stays inside JAX and is itself differentiable).
 
-        **When to pick which (pounce#77 follow-up).** The dense path
-        ``factor_reuse=False`` is itself a form of factor reuse: it
-        builds the per-block ``(n+m) × (n+m)`` KKT at pounce's
-        converged ``(x*, λ*, μ_l*, μ_u*)`` (saved in the custom_vjp
-        residual) and solves it under ``jax.vmap`` / ``jax.jacrev``
-        with a JIT-fused per-block ``jnp.linalg.solve``. The right
-        setting depends on both the AD shape and the per-block size:
+        **When to pick which (pounce#77 follow-up).** The right
+        setting depends on two independent axes: the AD shape (how
+        many cotangents the backward sees per forward) and the
+        per-block KKT size ``n+m``.
 
-        ============================================  ==========================  ==============================================
-        Regime                                        Right setting               Why
-        ============================================  ==========================  ==============================================
-        Small ``n+m`` (≲200), full ``jacrev``         ``factor_reuse=False``      XLA fuses the dense ``vmap``'d solve; no FFI
-        Small ``n+m`` (≲200), ``value_and_grad``      either (≈ tie)              single-cotangent; both lower to ~one solve
-        Large or sparse ``n+m`` (≳200), anything      ``factor_reuse=True``       only end-to-end sparse path; ``_bwd_single_kkt``
-                                                                                  builds a dense ``(n+m)²`` per block
-        ============================================  ==========================  ==============================================
+        ===============================  ==========================  ==========================
+        ``n+m``                          single cotangent            many cotangents
+                                         (``value_and_grad``, grad,  (``jacrev``, ``jacfwd``)
+                                          single ``jvp``/``vjp``)
+        ===============================  ==========================  ==========================
+        ≲ 100                            either (≈ tie)              ``factor_reuse=False``
+        ~100 – ~5000                     ``factor_reuse=True``       ``factor_reuse=False``
+        ≳ 10000                          ``factor_reuse=True``       *no good option today*
+                                                                     (MINRES/GMRES bwd not
+                                                                     implemented — file an
+                                                                     issue if you need it)
+        ===============================  ==========================  ==========================
 
-        Above ``n+m`` ≳ 200, ``factor_reuse=False`` materializes a
-        dense ``(n+m) × (n+m)`` matrix per block and calls
-        ``jnp.linalg.solve`` — ``O((n+m)³)``. JAX has no sparse direct
+        Mechanism. The dense path (``factor_reuse=False``) assembles
+        ``(n+m) × (n+m)`` per block at pounce's converged
+        ``(x*, λ*, μ_l*, μ_u*)`` (saved in the custom_vjp residual)
+        and lets XLA JIT fuse the per-block ``jnp.linalg.solve``.
+        Crucially, XLA shares the LAPACK factorization across every
+        cotangent in a ``jacrev`` / ``jacfwd``, so the per-cotangent
+        cost is one vectorized BLAS back-substitution — that's why
+        the dense path wins at many-cotangent shapes until the dense
+        matrix runs out of RAM (at f64, ``(n+m)² × 8`` bytes per
+        block; ≳ n+m ~ 10000 on typical hardware).
+
+        The reuse path (``factor_reuse=True``) skips the dense
+        factorization entirely and back-solves through pounce's
+        sparse LDLᵀ via ``Solver.kkt_solve_many``. With no factor to
+        pay for, it wins outright on single-cotangent shapes as soon
+        as the dense factor costs anything (``n+m`` above a few
+        hundred). On many-cotangent shapes the sparse back-subs are
+        scalar / cache-unfriendly and the vectorized dense path
+        beats them even at large ``n+m``, until the dense matrix
+        won't fit.
+
+        Above ``n+m`` ≳ 10000 with a ``jacrev`` / ``jacfwd`` shape,
+        neither path is good: dense exhausts memory, sparse LDLᵀ on
+        N cotangents runs into ``O(N · kkt_dim)`` sequential
+        back-subs. The matrix-free MINRES/GMRES bwd that would cover
+        this regime isn't implemented yet — JAX has no sparse direct
         solver (``jax.scipy.sparse.linalg`` exposes only ``cg`` /
-        ``bicgstab`` / ``gmres``; ``jnp.linalg.solve`` does not accept
-        ``BCOO``; XLA does not detect numerical zeros and switch
-        algorithms), so pounce's sparse LDLᵀ inside the
-        ``factor_reuse=True`` path is the only sparse-aware route. A
-        ``UserWarning`` is emitted at construction when
-        ``n + m > 200`` and ``factor_reuse=False`` to flag this.
+        ``bicgstab`` / ``gmres``; ``jnp.linalg.solve`` does not
+        accept ``BCOO``; XLA does not detect numerical zeros and
+        switch algorithms). A ``UserWarning`` is emitted at
+        construction when ``n + m > 10000`` to flag this gap.
 
         Always benchmark wrapped in ``jax.jit`` — eager-mode numbers
         run 5–6× slower than the same code under ``jit`` and don't
@@ -887,19 +909,29 @@ class JaxProblem:
         self._cu = cu
         self._options = dict(options or {})
         self._factor_reuse = bool(factor_reuse)
-        # Above this per-block KKT size, the dense JAX bwd path
-        # materializes a dense (n+m)² matrix per block and falls off
-        # an O((n+m)³) cliff. Warn the user to switch to
-        # factor_reuse=True (Rust sparse LDLᵀ). Threshold from
-        # python/benchmarks/verify_issue77_claims.py — the dense
-        # kernel crosses ~150 µs/block at d=128 and ~420 µs at d=256.
-        if (n + m) > 200 and not self._factor_reuse:
+        # Above this per-block KKT size, neither bwd path is great:
+        # factor_reuse=False materializes a dense (n+m)x(n+m) KKT per
+        # block (O((n+m)^3) and O((n+m)^2) memory), and factor_reuse=
+        # True still hops FFI per cotangent so jacrev/jacfwd loses the
+        # XLA factor-sharing the dense path gets. The right pick
+        # depends on AD shape — see the JaxProblem.factor_reuse
+        # docstring for the regime table. The matrix-free MINRES/
+        # GMRES bwd that would close the gap for many-cotangent AD at
+        # this scale is not implemented (pounce#77).
+        if (n + m) > 10000:
             warnings.warn(
-                f"JaxProblem(factor_reuse=False) with n+m={n + m} > 200: the "
-                "dense JAX backward materializes a dense (n+m)x(n+m) matrix "
-                "per block and scales O((n+m)^3). For problems this large, "
-                "prefer factor_reuse=True so the backward goes through "
-                "pounce's sparse LDL^T factor. See JaxProblem docstring.",
+                f"JaxProblem with n+m={n + m} > 10000: both backward "
+                "paths have known scaling limits at this size. "
+                "factor_reuse=False scales O((n+m)^3) per block in time "
+                "and O((n+m)^2) in memory; factor_reuse=True is FFI-"
+                "bound per cotangent so jax.jacrev / jax.jacfwd lose "
+                "the LAPACK factor sharing that helps the dense path. "
+                "Pick based on AD shape: single cotangent (value_and_"
+                "grad) -> factor_reuse=True; many cotangents (jacrev/"
+                "jacfwd) -> factor_reuse=False as the lesser evil. "
+                "See the JaxProblem.factor_reuse docstring for the "
+                "full regime table; file pounce#77 if you need the "
+                "matrix-free MINRES/GMRES bwd.",
                 UserWarning,
                 stacklevel=2,
             )

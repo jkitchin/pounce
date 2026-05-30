@@ -929,12 +929,15 @@ def test_jaxproblem_pickle_roundtrip_pounce_77():
 
 
 def test_dense_path_warns_on_large_n_plus_m_pounce_77():
-    """factor_reuse=False on a problem with n+m > 200 must emit a
-    UserWarning steering the user to factor_reuse=True (pounce#77).
+    """n+m > 10000 must emit a UserWarning regardless of factor_reuse
+    (pounce#77).
 
-    The dense JAX bwd materialises a dense (n+m)x(n+m) per block and
-    scales O((n+m)^3); above ~200 it falls off a cliff and the sparse
-    LDL^T path (factor_reuse=True) is the only viable route.
+    Both bwd paths have scaling limits at this size: factor_reuse=False
+    is O((n+m)^3)/O((n+m)^2) per block; factor_reuse=True is FFI-bound
+    per cotangent so jacrev/jacfwd loses LAPACK factor sharing. The
+    matrix-free MINRES/GMRES bwd that would close the gap is not yet
+    implemented. The warning steers users to the regime table in the
+    JaxProblem.factor_reuse docstring.
     """
     import warnings
     from pounce.jax import JaxProblem
@@ -945,39 +948,46 @@ def test_dense_path_warns_on_large_n_plus_m_pounce_77():
     def g(x, p):
         return jnp.array([jnp.sum(x) - p[0]])
 
-    n, m = 250, 1
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        JaxProblem(
-            f=f, g=g, n=n, m=m, p_example=jnp.zeros(n),
-            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
-            cl=jnp.zeros(m), cu=jnp.zeros(m),
-            options={"print_level": 0, "sb": "yes"},
-            factor_reuse=False,
+    big_n, big_m = 10500, 1
+    for fr in (False, True):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            JaxProblem(
+                f=f, g=g, n=big_n, m=big_m, p_example=jnp.zeros(big_n),
+                lb=jnp.full(big_n, -1e19), ub=jnp.full(big_n, 1e19),
+                cl=jnp.zeros(big_m), cu=jnp.zeros(big_m),
+                options={"print_level": 0, "sb": "yes"},
+                factor_reuse=fr,
+            )
+        matched = [
+            w for w in caught
+            if issubclass(w.category, UserWarning)
+            and "n+m=" in str(w.message)
+            and "10000" in str(w.message)
+        ]
+        assert matched, (
+            f"expected UserWarning at n+m={big_n + big_m} with "
+            f"factor_reuse={fr}, got {[str(w.message) for w in caught]}"
         )
-    matched = [
-        w for w in caught
-        if issubclass(w.category, UserWarning) and "factor_reuse=False" in str(w.message)
-    ]
-    assert matched, (
-        f"expected UserWarning about factor_reuse=False at n+m={n + m}, "
-        f"got {[str(w.message) for w in caught]}"
-    )
 
-    # And factor_reuse=True (or n+m <= 200) must NOT warn.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        JaxProblem(
-            f=f, g=g, n=n, m=m, p_example=jnp.zeros(n),
-            lb=jnp.full(n, -1e19), ub=jnp.full(n, 1e19),
-            cl=jnp.zeros(m), cu=jnp.zeros(m),
-            options={"print_level": 0, "sb": "yes"},
-            factor_reuse=True,
+    # Below the threshold, neither setting should warn.
+    small_n, small_m = 200, 1
+    for fr in (False, True):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            JaxProblem(
+                f=f, g=g, n=small_n, m=small_m,
+                p_example=jnp.zeros(small_n),
+                lb=jnp.full(small_n, -1e19), ub=jnp.full(small_n, 1e19),
+                cl=jnp.zeros(small_m), cu=jnp.zeros(small_m),
+                options={"print_level": 0, "sb": "yes"},
+                factor_reuse=fr,
+            )
+        matched = [
+            w for w in caught
+            if issubclass(w.category, UserWarning) and "10000" in str(w.message)
+        ]
+        assert not matched, (
+            f"factor_reuse={fr} at n+m={small_n + small_m} must not warn, "
+            f"got {[str(w.message) for w in matched]}"
         )
-    matched_reuse = [
-        w for w in caught
-        if issubclass(w.category, UserWarning) and "factor_reuse" in str(w.message)
-    ]
-    assert not matched_reuse, (
-        f"factor_reuse=True must not warn, got {[str(w.message) for w in matched_reuse]}"
-    )
