@@ -101,3 +101,44 @@ fn sol_primal_matches_known_optimum() {
         "expected two primal values ≈ 1.0 in .sol:\n{text}"
     );
 }
+
+/// The convex QP path's recovered constraint dual must match the NLP
+/// path's dual on the same `.nl` file (the reference convention). For
+/// `min x0²+x1² s.t. x0+x1=2` the equality multiplier is −2.
+#[test]
+fn qp_and_nlp_duals_agree() {
+    let dir = std::env::temp_dir();
+
+    let run = |sel: &str, out: &std::path::Path| {
+        let _ = std::fs::remove_file(out);
+        let status = Command::new(pounce_exe())
+            .arg(fixture())
+            .arg("--sol-output")
+            .arg(out)
+            .arg(format!("solver_selection={sel}"))
+            .output()
+            .expect("spawn pounce");
+        assert_eq!(status.status.code(), Some(0), "{sel} failed");
+        std::fs::read_to_string(out).expect("read .sol")
+    };
+
+    // The single constraint dual is the value closest to −2 in each
+    // `.sol`'s float block.
+    let dual_near = |text: &str| -> f64 {
+        text.lines()
+            .filter_map(|l| l.trim().parse::<f64>().ok())
+            .min_by(|a, b| (a - (-2.0)).abs().partial_cmp(&(b - (-2.0)).abs()).unwrap())
+            .expect("a float in .sol")
+    };
+
+    let qp_sol = run("qp-ipm", &dir.join("pounce_dual_qp.sol"));
+    let nlp_sol = run("nlp", &dir.join("pounce_dual_nlp.sol"));
+
+    let qp_dual = dual_near(&qp_sol);
+    let nlp_dual = dual_near(&nlp_sol);
+    assert!((qp_dual - (-2.0)).abs() < 1e-5, "QP dual {qp_dual} != −2");
+    assert!(
+        (qp_dual - nlp_dual).abs() < 1e-5,
+        "QP dual {qp_dual} disagrees with NLP dual {nlp_dual}"
+    );
+}

@@ -100,9 +100,10 @@ POUNCE (convex QP IPM, pounce-convex): Optimal Solution Found.
 - **Convex QCQP** (quadratic constraints) is detected as its own class
   but currently routes to the NLP path; a second-order-cone solver is
   planned.
-- **Constraint duals** from the convex QP path are still being wired
-  through to the `.sol` file; the primal solution is complete and
-  correct today. (See the release notes for the current status.)
+
+Both the primal solution and the constraint duals are written to the
+`.sol` file, in the same sign convention as POUNCE's NLP path (so Pyomo
+and AMPL read them identically regardless of which solver ran).
 
 The design and roadmap live in
 [`dev-notes/lp-qp-routing.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/lp-qp-routing.md).

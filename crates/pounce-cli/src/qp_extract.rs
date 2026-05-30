@@ -42,6 +42,27 @@ fn is_finite_bound(v: f64) -> bool {
 /// degree-≤2 polynomial (should not happen for a problem the classifier
 /// routed here, but the conversion is total and falls back gracefully).
 pub fn extract_qp(prob: &NlProblem) -> Option<QpProblem> {
+    Some(extract_qp_with_map(prob)?.0)
+}
+
+/// Where each `.nl` constraint's rows landed in the standard-form QP, so
+/// the QP's multipliers can be mapped back to a per-`.nl`-constraint
+/// dual for the `.sol`. One entry per original constraint, in order.
+#[derive(Debug, Clone)]
+pub enum ConRowMap {
+    /// Equality constraint → row `a_row` of `A` (multiplier `y[a_row]`).
+    Eq { a_row: usize },
+    /// Inequality / range constraint → up to two rows of `G`: the
+    /// `row ≤ g_u` upper bound and/or the `−row ≤ −g_l` lower bound
+    /// (multipliers `z[..]`, each ≥ 0).
+    Ineq {
+        upper: Option<usize>,
+        lower: Option<usize>,
+    },
+}
+
+/// Extract the QP and the constraint→row provenance map together.
+pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap>)> {
     let n = prob.n;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
@@ -66,6 +87,7 @@ pub fn extract_qp(prob: &NlProblem) -> Option<QpProblem> {
     let mut b: Vec<f64> = Vec::new();
     let mut g: Vec<Triplet> = Vec::new();
     let mut h: Vec<f64> = Vec::new();
+    let mut con_map: Vec<ConRowMap> = Vec::with_capacity(prob.con_linear.len());
 
     for (row, lin) in prob.con_linear.iter().enumerate() {
         let lo = prob.g_l[row];
@@ -77,27 +99,35 @@ pub fn extract_qp(prob: &NlProblem) -> Option<QpProblem> {
                 a.push(Triplet::new(eq_row, *var, *coef));
             }
             b.push(lo);
+            con_map.push(ConRowMap::Eq { a_row: eq_row });
         } else {
             // Upper bound: row ≤ hi.
-            if is_finite_bound(hi) {
+            let upper = if is_finite_bound(hi) {
                 let gr = next_row(&h);
                 for (var, coef) in lin {
                     g.push(Triplet::new(gr, *var, *coef));
                 }
                 h.push(hi);
-            }
+                Some(gr)
+            } else {
+                None
+            };
             // Lower bound: row ≥ lo  ⇔  −row ≤ −lo.
-            if is_finite_bound(lo) {
+            let lower = if is_finite_bound(lo) {
                 let gr = next_row(&h);
                 for (var, coef) in lin {
                     g.push(Triplet::new(gr, *var, -*coef));
                 }
                 h.push(-lo);
-            }
+                Some(gr)
+            } else {
+                None
+            };
+            con_map.push(ConRowMap::Ineq { upper, lower });
         }
     }
 
-    // --- variable bounds as G rows ---
+    // --- variable bounds as G rows (not part of the constraint map) ---
     for i in 0..n {
         let xl = prob.x_l[i];
         let xu = prob.x_u[i];
@@ -113,15 +143,50 @@ pub fn extract_qp(prob: &NlProblem) -> Option<QpProblem> {
         }
     }
 
-    Some(QpProblem {
-        n,
-        p_lower,
-        c,
-        a,
-        b,
-        g,
-        h,
-    })
+    Some((
+        QpProblem {
+            n,
+            p_lower,
+            c,
+            a,
+            b,
+            g,
+            h,
+        },
+        con_map,
+    ))
+}
+
+/// Map the QP solver's multipliers `(y, z)` back to a per-`.nl`-
+/// constraint dual vector (length `prob.m`), in the AMPL `.sol`
+/// convention used by POUNCE's NLP path.
+///
+/// The QP solver enforces stationarity `∇f + Aᵀy + Gᵀz = 0` with
+/// `z ≥ 0`, where each inequality `.nl` row contributes a `row ≤ g_u`
+/// (`+row`) and/or `−row ≤ −g_l` (`−row`) `G` row. The per-constraint
+/// `.nl`/Ipopt multiplier `λ` is recovered as:
+/// - equality: `λ = sign · y[a_row]`;
+/// - inequality: `λ = sign · (z_upper − z_lower)` — at most one of the
+///   two bound rows is active at a solution.
+///
+/// The inequality sign (`z_upper − z_lower`, *not* `z_lower − z_upper`)
+/// is fixed to match POUNCE's NLP path, which is the reference for what
+/// a POUNCE `.sol` carries; this is verified empirically against the NLP
+/// solve in the crate tests. `sign` undoes the maximize→minimize
+/// negation so the reported dual is in the user's original sense.
+pub fn recover_duals(prob: &NlProblem, con_map: &[ConRowMap], y: &[f64], z: &[f64]) -> Vec<f64> {
+    let sign = if prob.minimize { 1.0 } else { -1.0 };
+    con_map
+        .iter()
+        .map(|m| match m {
+            ConRowMap::Eq { a_row } => sign * y[*a_row],
+            ConRowMap::Ineq { upper, lower } => {
+                let zu = upper.map(|r| z[r]).unwrap_or(0.0);
+                let zl = lower.map(|r| z[r]).unwrap_or(0.0);
+                sign * (zu - zl)
+            }
+        })
+        .collect()
 }
 
 /// The next 0-based row index for a constraint block keyed by its RHS
@@ -172,7 +237,7 @@ mod tests {
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
         };
-        let qp = extract_qp(&prob).expect("extract");
+        let (qp, con_map) = extract_qp_with_map(&prob).expect("extract");
         // P = 2I → two diagonal entries.
         assert_eq!(qp.p_lower.len(), 2);
         assert_eq!(qp.m_eq(), 1);
@@ -183,6 +248,51 @@ mod tests {
         assert!((sol.x[0] - 1.0).abs() < 1e-6, "x0={}", sol.x[0]);
         assert!((sol.x[1] - 1.0).abs() < 1e-6, "x1={}", sol.x[1]);
         assert!((sol.obj - 2.0).abs() < 1e-6, "obj={}", sol.obj);
+
+        // KKT for the equality: ∇f + y·∇g = 0 → 2x_i + y = 0 at x=1 → y=−2.
+        let lambda = recover_duals(&prob, &con_map, &sol.y, &sol.z);
+        assert_eq!(lambda.len(), 1);
+        assert!(
+            (lambda[0] - (-2.0)).abs() < 1e-5,
+            "equality dual={}",
+            lambda[0]
+        );
+    }
+
+    /// Inequality dual sign/magnitude. min x0² s.t. x0 ≥ 1 (a one-sided
+    /// inequality g_l=1, g_u=+inf). Optimum x0=1, active. The expected
+    /// dual −2.0 is the value POUNCE's *NLP* path writes for this exact
+    /// problem (verified by running `solver_selection=nlp` on the same
+    /// `.nl`); recover_duals must match that reference convention.
+    #[test]
+    fn inequality_dual_recovered() {
+        let prob = NlProblem {
+            n: 1,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: pow2(0),
+            obj_linear: vec![],
+            obj_constant: 0.0,
+            con_nonlinear: vec![Expr::Const(0.0)],
+            con_linear: vec![vec![(0, 1.0)]], // g(x) = x0
+            x_l: vec![-2e19],
+            x_u: vec![2e19],
+            g_l: vec![1.0], // x0 ≥ 1
+            g_u: vec![2e19],
+            x0: vec![0.0],
+            lambda0: vec![0.0],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+        };
+        let (qp, con_map) = extract_qp_with_map(&prob).expect("extract");
+        // One inequality row (the lower bound row −x0 ≤ −1); no upper.
+        assert_eq!(qp.m_ineq(), 1);
+        let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((sol.x[0] - 1.0).abs() < 1e-6, "x0={}", sol.x[0]);
+        let lambda = recover_duals(&prob, &con_map, &sol.y, &sol.z);
+        assert!((lambda[0] - (-2.0)).abs() < 1e-5, "ineq dual={}", lambda[0]);
     }
 
     /// Bound-constrained: min (x0-3)^2 = x0^2 - 6 x0 + 9, 0 ≤ x0 ≤ 1.

@@ -1020,11 +1020,10 @@ fn build_debugger(
 /// and return the process exit code. This is the LP/QP dispatch target
 /// (see `dev-notes/lp-qp-routing.md`).
 ///
-/// The primal solution `x` is the deliverable here; constraint duals are
-/// written as zeros for now (mapping the QP's `(y, z)` — including the
-/// bound-row split — back to per-`.nl`-constraint multipliers is a
-/// follow-up). The objective is reported including the `.nl`'s constant
-/// term, which the standard-form QP drops.
+/// Writes the primal solution `x` and the constraint duals recovered
+/// from the QP multipliers (`pounce_cli::qp_extract::recover_duals`).
+/// The objective is reported in the user's original sense, including the
+/// `.nl`'s constant term, which the standard-form QP drops.
 fn run_convex_qp(
     prob: &nl_reader::NlProblem,
     class: pounce_cli::dispatch::ProblemClass,
@@ -1032,7 +1031,7 @@ fn run_convex_qp(
 ) -> ExitCode {
     use pounce_convex::{solve_qp_ipm, QpOptions, QpStatus};
 
-    let qp = match pounce_cli::qp_extract::extract_qp(prob) {
+    let (qp, con_map) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
         Some(q) => q,
         None => {
             eprintln!(
@@ -1068,9 +1067,11 @@ fn run_convex_qp(
         sol.iters,
     );
 
-    // Write a `.sol` if requested: primal x, zero duals.
+    // Write a `.sol` if requested: primal x and recovered constraint
+    // duals (mapped from the QP multipliers back to per-`.nl`-constraint
+    // order in the AMPL `.sol` convention).
     if let Some(path) = sol_path {
-        let lambda = vec![0.0; prob.m];
+        let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
         let payload = nl_writer::SolutionFile {
             message: &format!("POUNCE {} IPM (pounce-convex): {msg}", class.name()),
             x: &sol.x,
