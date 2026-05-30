@@ -135,6 +135,53 @@ solver crates are — it consumes *solvers*, which in turn consume
 `pounce-linsol`. It is a thinner, combinatorial crate, with
 `pounce-relax` carrying the genuinely new numerical/symbolic weight.
 
+### Dependency graph and phase gating
+
+Arrows are "depends on / calls into". The two anchors at the bottom are
+the existing consistency wins; everything new is a consumer of one or
+both. `[Pn]` tags the phase that introduces each new crate.
+
+```text
+                         pounce-mip  [P1]
+            ┌──────────────┬───────┴───────┬──────────────┐
+            ▼              ▼               ▼              ▼
+      pounce-relax   pounce-simplex   pounce-qp      pounce-convex
+         [P4]         [P2]            (existing,      (LP/QP plan)
+            │              │           MIQP node)         │
+            │              ▼               │              │
+            │         pounce-lu [P2]       │              │
+            │                              │              │
+            ▼                              ▼              ▼
+       ┌─────────────────┐          ┌──────────────────────────┐
+       │ Expr DAG +       │          │ sparse symmetric          │
+       │ interval arith   │          │ augmented system          │
+       │ (fbbt/, auxiliary)│         │ (pounce-linsol + feral)   │
+       │  ── anchor #1 ──  │          │  ── anchor #2 ──          │
+       └─────────────────┘          └──────────────────────────┘
+   (also: pounce-algorithm IPM-NLP — incumbent upper bounds, anchor #2)
+```
+
+Phase gating (what must exist before what):
+
+```text
+P0 plumbing ─▶ P1 B&B shell + MIQP ─▶ P2 simplex/LU ─▶ P3 cuts+presolve
+                                                              │
+                          convex-MI deliverable ◀────────────┘
+                                                              │
+                                   P4 pounce-relax ◀──────────┘ (needs a
+                                          │                      working node
+                                          ▼                      solver + B&B)
+                                   P5 spatial B&B
+                                          │
+                                          ▼
+                                   P6 MINLP-global
+```
+
+The crossbar is the whole point: **P4–P6 (global) cannot start until the
+convex-MI substrate (P1–P3) can run a B&B tree over convex relaxations.**
+`pounce-relax` only produces those relaxations; something has to bound
+and branch on them.
+
 ### Dispatch and classification
 
 Extends the `solver_selection` / `ProblemClass` seam from LP/QP
@@ -197,6 +244,213 @@ Upper bounds come from multi-start local NLP solves
 (`pounce-algorithm`); the global gap is `upper − lower`, and spatial
 branching subdivides the box on the variable contributing most to the
 relaxation gap until the gap closes to tolerance.
+
+## Interfaces and crate skeletons
+
+The whole design rests on four trait seams. They are sketched here so
+the phasing below builds against fixed interfaces, and so the
+"one engine, pluggable parts" claim is concrete rather than aspirational.
+Names are illustrative, not final.
+
+### Seam 1 — `NodeSolver`: warm-startable relaxation solve
+
+The single integration point with the continuous solvers. Thin adapters
+implement it over `pounce-simplex` (dual simplex), `pounce-qp`
+(active-set), `pounce-convex` (IPM), and `pounce-algorithm` (NLP). The
+associated `WarmState` is what threads node-to-node — a simplex basis,
+an active set, or a (symbolic) factor. The engine is generic over
+`S: NodeSolver`, so dispatch monomorphizes one B&B per solver arm; no
+`dyn` and no object-safety constraint on the warm state.
+
+```rust
+pub trait NodeSolver {
+    /// Carried parent→child: basis (simplex), active set (pounce-qp),
+    /// or symbolic factor (IPM). `Clone` so siblings can both inherit.
+    type WarmState: Clone;
+
+    /// Solve the relaxation at this node (branching-narrowed bounds plus
+    /// any cuts in scope), optionally warm-started from the parent.
+    fn solve_node(
+        &mut self,
+        node: &NodeData<'_>,
+        parent: Option<&Self::WarmState>,
+    ) -> NodeResult<Self::WarmState>;
+}
+
+pub struct NodeData<'a> {
+    pub var_lb: &'a [f64],   // branching narrows these
+    pub var_ub: &'a [f64],
+    pub cuts: &'a [CutRef],  // global cut-pool handles in scope (Phase 3)
+    pub depth: u32,
+}
+
+pub enum NodeStatus { Optimal, Infeasible, Unbounded, IterLimit }
+
+pub struct NodeResult<W> {
+    pub status: NodeStatus,
+    pub objective: f64,      // the node LOWER bound (relaxation optimum)
+    pub x: Vec<f64>,         // relaxation solution (in relaxed-var space)
+    pub warm: Option<W>,
+}
+```
+
+### Seam 2 — `Brancher`: integer *and* spatial branching, one type
+
+The unification claim made concrete: `BranchDecision` carries both
+modes, so the same engine drives MILP, spatial global, and MINLP-global
+by swapping the brancher (or letting one brancher emit both kinds).
+
+```rust
+pub trait Brancher {
+    /// `None` ⇒ node solution already feasible for the ORIGINAL problem
+    /// (integer-feasible and, for global, within relaxation tolerance):
+    /// a leaf / candidate incumbent.
+    fn select(&mut self, node: &NodeData<'_>, x: &[f64], info: &ProblemInfo)
+        -> Option<BranchDecision>;
+
+    /// Feedback after children are bounded — pseudocost / reliability
+    /// statistics (Achterberg–Koch–Martin). No-op for most-fractional.
+    fn observe(&mut self, decision: &BranchDecision, child_bounds: [f64; 2]);
+}
+
+pub enum BranchDecision {
+    /// x_j ≤ ⌊v⌋  |  x_j ≥ ⌈v⌉
+    Integer { var: usize, value: f64 },
+    /// box split at `point` on a continuous nonconvex variable
+    Spatial { var: usize, point: f64 },
+}
+```
+
+### Seam 3 — `Relaxation`: the `pounce-relax` boundary
+
+What converts a (possibly nonconvex) problem into something a
+`NodeSolver` can bound. For convex MI it is a near-identity wrapper that
+just drops integrality; for global it is the factorable McCormick/αBB
+construction over the `Expr` DAG. Same engine consumes both.
+
+```rust
+pub trait Relaxation {
+    /// Re-derive envelope coefficients for a node's narrowed box
+    /// (McCormick/αBB depend on the bounds). Cheap; called per node.
+    fn tighten(&mut self, var_lb: &[f64], var_ub: &[f64]);
+
+    /// The current convex relaxation, as a problem the node solver reads.
+    /// LP for polyhedral relaxations; convex TNLP otherwise.
+    fn as_problem(&self) -> Rc<RefCell<dyn TNLP>>;
+
+    /// Drop the auxiliary variables introduced by factorable
+    /// decomposition, mapping a relaxation point to original-var space.
+    fn project(&self, x_relaxed: &[f64]) -> Vec<f64>;
+}
+
+/// Convex-MI path: no relaxation construction, integrality handled by
+/// the brancher. `tighten` only updates bounds; `project` is identity.
+pub struct PassthroughRelaxation { /* wraps the original TNLP */ }
+
+/// Global path (Phase 4): factorable decomposition + envelopes.
+pub struct FactorableRelaxation { /* Expr DAG, aux vars, McCormick/αBB */ }
+```
+
+### Seam 4 — `IncumbentSearch`: upper bounds / primal heuristics
+
+Decouples "find a feasible point for the original problem" from the
+bounding loop. MILP uses rounding / diving / RINS; global uses
+multi-start local NLP via `pounce-algorithm`.
+
+```rust
+pub trait IncumbentSearch {
+    fn improve(&mut self, node: &NodeData<'_>, relaxed_x: &[f64])
+        -> Option<Incumbent>;
+}
+```
+
+### The engine loop
+
+`pounce-mip` owns the tree, queue, incumbent, and gap; everything
+problem-specific is behind the four seams above.
+
+```rust
+pub fn branch_and_bound<S, B, R, H>(
+    mut solver: S, mut brancher: B, mut relax: R, mut heur: H,
+    info: ProblemInfo, opts: &OptionsList,
+) -> SolveReport
+where S: NodeSolver, B: Brancher, R: Relaxation, H: IncumbentSearch
+{
+    // best-bound queue; incumbent = best original-feasible point so far
+    while let Some(node) = queue.pop_best_bound() {
+        if node.lower >= incumbent.value - gap_tol { continue; }  // prune
+
+        relax.tighten(node.var_lb, node.var_ub);   // Seam 3: per-box envelopes
+        fbbt_and_obbt(&mut node, &relax);          // reuse pounce-presolve
+        let r = solver.solve_node(&node.data,      // Seam 1: warm-started solve
+                                  node.parent_warm.as_ref());
+
+        match r.status {
+            NodeStatus::Infeasible | NodeStatus::Unbounded => continue,
+            _ => {}
+        }
+        if r.objective >= incumbent.value - gap_tol { continue; }  // bound prune
+
+        if let Some(inc) = heur.improve(&node.data, &r.x) {        // Seam 4
+            incumbent.update(inc);
+        }
+        match brancher.select(&node.data, &r.x, &info) {          // Seam 2
+            None => incumbent.update_from_leaf(&relax.project(&r.x), r.objective),
+            Some(decision) => {
+                let (lo, hi) = split(&node, &decision);   // integer or spatial
+                lo.parent_warm = r.warm.clone();          // inherit warm state
+                hi.parent_warm = r.warm;
+                brancher.observe(&decision, [lo.lower, hi.lower]);
+                queue.push(lo); queue.push(hi);
+            }
+        }
+    }
+    report_from(incumbent, global_lower_bound, gap)
+}
+```
+
+The warm-state inheritance on the two `parent_warm` lines is the single
+most performance-critical detail: it is why the MIQP-over-`pounce-qp`
+front door (native active-set homotopy) is the cheapest first target,
+and why IPM node solves need the symbolic-factor-reuse seam
+(lp-qp-routing.md "Session-style factorization reuse") before they are
+competitive node engines.
+
+### Crate skeletons
+
+```text
+crates/pounce-mip/
+  Cargo.toml            # deps: pounce-common, pounce-nlp, pounce-presolve,
+                        #       pounce-convex, pounce-qp, pounce-algorithm,
+                        #       pounce-relax, pounce-simplex
+  src/
+    lib.rs              # branch_and_bound<S,B,R,H> + the four seam traits
+    tree.rs            # Node, best-bound / depth-first queue, gap accounting
+    node.rs            # NodeData, NodeResult, NodeStatus
+    branch/
+      mod.rs            # Brancher trait, BranchDecision
+      most_fractional.rs# Phase 1
+      pseudocost.rs     # Phase 3 (reliability — Achterberg et al. 2005)
+      spatial.rs        # Phase 5 (gap-driven continuous split)
+    incumbent.rs        # IncumbentSearch trait + rounding/diving (Phase 3)
+    cuts/               # Phase 3: pool + Gomory/MIR/cover separators
+      mod.rs  gomory.rs  mir.rs  cover.rs
+    adapters/           # NodeSolver impls (thin wrappers)
+      simplex.rs  active_set.rs  ipm.rs  nlp.rs
+
+crates/pounce-relax/    # the heavy symbolic crate (Phase 4)
+  Cargo.toml            # deps: pounce-common, pounce-nlp, pounce-presolve (fbbt)
+  src/
+    lib.rs              # Relaxation trait, PassthroughRelaxation
+    factorable.rs       # Expr-DAG → aux-var defining constraints
+    mccormick.rs        # bilinear / univariate envelopes
+    alpha_bb.rs         # αBB underestimator (interval Hessian eigenvalues)
+    obbt.rs             # optimization-based bound tightening loop
+    project.rs          # aux-var → original-var projection
+
+crates/pounce-lu/       # Phase 2: sparse LU + Bartels-Golub/Forrest-Tomlin
+crates/pounce-simplex/  # Phase 2: dual simplex, bound-flipping ratio test
+```
 
 ## Implementation phasing
 
