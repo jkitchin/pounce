@@ -229,8 +229,9 @@ ready hook for convex-QP perf benchmarking once `pounce-convex` lands.
 - **Phase 2** (bare IPM-QP + equilibration): stand up the tier-2
   determinism decision and the iai-callgrind PR gate on the first hot
   kernels; reuse-vs-vectorize feral here.
-- **Phase 3** (Mehrotra/HSDE): vectorize the cone scaling/step kernels
-  with pulp; add the wall-clock SGM nightly gate.
+- **Phase 3** (Mehrotra + certificate infeasibility): vectorize the cone
+  scaling/step kernels with pulp; add the wall-clock SGM nightly gate.
+  (The HSDE embedding moved to Phase 4 — see the routing note.)
 - **Phase 3.5** (presolve): rayon parallelism per the routing note.
 - **Phases 4–6** (conic): per-cone parallelism; the cone kernels are the
   new hot paths each phase adds.
