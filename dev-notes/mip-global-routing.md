@@ -327,3 +327,175 @@ the realistic medium-term target.
   absent explicit global opt-in.
 - `pyomo-pounce` gets MIP / global routing transparently via CLI
   dispatch; integer variables already round-trip through the NL format.
+
+## Literature references
+
+Organized to mirror the sections above. These are the algorithms to
+reimplement (pure Rust — study, don't link) and the sources that pin
+down the design choices. Canonical / foundational entries are marked ★.
+
+### Branch-and-bound and MILP foundations
+
+- ★ Land, A.H. & Doig, A.G. (1960). "An automatic method of solving
+  discrete programming problems." *Econometrica* 28(3):497–520. The
+  original branch-and-bound.
+- ★ Dakin, R.J. (1965). "A tree-search algorithm for mixed integer
+  programming problems." *The Computer Journal* 8(3):250–255. Branching
+  on fractional variables — the scheme `pounce-mip` Phase 1 implements.
+- Nemhauser, G.L. & Wolsey, L.A. (1988). *Integer and Combinatorial
+  Optimization.* Wiley. The standard reference.
+- Conforti, M., Cornuéjols, G. & Zambelli, G. (2014). *Integer
+  Programming.* Springer GTM 271. Modern textbook.
+- Achterberg, T. & Wunderling, R. (2013). "Mixed integer programming:
+  analyzing 12 years of progress." In *Facets of Combinatorial
+  Optimization*, Springer, 449–481. What actually moved the needle in
+  practice — the prioritization input for Phase 3.
+- Lodi, A. (2010). "Mixed integer programming computation." In *50 Years
+  of Integer Programming*, Springer, 619–645.
+
+### Cutting planes (Phase 3)
+
+- ★ Gomory, R.E. (1958). "Outline of an algorithm for integer solutions
+  to linear programs." *Bulletin of the AMS* 64(5):275–278. Gomory cuts.
+- Marchand, H. & Wolsey, L.A. (2001). "Aggregation and mixed integer
+  rounding to solve MIPs." *Operations Research* 49(3):363–371. MIR cuts.
+- Balas, E., Ceria, S. & Cornuéjols, G. (1993). "A lift-and-project
+  cutting plane algorithm for mixed 0–1 programs." *Mathematical
+  Programming* 58:295–324.
+- Cornuéjols, G. (2008). "Valid inequalities for mixed integer linear
+  programs." *Mathematical Programming* 112:3–44. Survey.
+
+### Branching and node selection (Phases 1, 3)
+
+- Bénichou, M. et al. (1971). "Experiments in mixed-integer linear
+  programming." *Mathematical Programming* 1:76–94. Pseudocost branching.
+- ★ Achterberg, T., Koch, T. & Martin, A. (2005). "Branching rules
+  revisited." *Operations Research Letters* 33(1):42–54. Reliability
+  branching — the Phase 3 default. doi:10.1016/j.orl.2004.04.002
+- Linderoth, J.T. & Savelsbergh, M.W.P. (1999). "A computational study
+  of search strategies for mixed integer programming." *INFORMS Journal
+  on Computing* 11(2):173–187. Node-selection strategies.
+- Achterberg, T. (2009). "SCIP: solving constraint integer programs."
+  *Mathematical Programming Computation* 1(1):1–41. The
+  constraint-integer-programming framework this design echoes.
+
+### Simplex and basis factorization (Phase 2 — `pounce-lu`, `pounce-simplex`)
+
+- ★ Dantzig, G.B. (1963). *Linear Programming and Extensions.*
+  Princeton University Press.
+- ★ Bartels, R.H. & Golub, G.H. (1969). "The simplex method of linear
+  programming using LU decomposition." *Communications of the ACM*
+  12(5):266–268. The `pounce-lu` update scheme (already named in
+  `pounce-simplex` crate comments).
+- ★ Forrest, J.J.H. & Tomlin, J.A. (1972). "Updated triangular factors
+  of the basis to maintain sparsity in the product form simplex method."
+  *Mathematical Programming* 2:263–278. The sparsity-preserving
+  alternative update.
+- Goldfarb, D. & Reid, J.K. (1977). "A practicable steepest-edge simplex
+  algorithm." *Mathematical Programming* 12:361–371. Steepest-edge
+  pricing.
+- Maros, I. (2003). *Computational Techniques of the Simplex Method.*
+  Kluwer. The implementation reference for a from-scratch simplex.
+- Koberstein, A. (2008). "Progress in the dual simplex algorithm for
+  solving large scale LP problems: techniques for a fast and stable
+  implementation." *Computational Optimization and Applications*
+  41(2):185–204. Dual simplex + bound-flipping ratio test.
+- Huangfu, Q. & Hall, J.A.J. (2018). "Parallelizing the dual revised
+  simplex method." *Mathematical Programming Computation* 10(1):119–142.
+  The HiGHS dual simplex — the open-source bar for the node LP.
+  doi:10.1007/s12532-017-0130-5
+
+### Presolve and bound tightening (reuses `pounce-presolve`)
+
+- Brearley, A.L., Mitra, G. & Williams, H.P. (1975). "Analysis of
+  mathematical programming problems prior to applying the simplex
+  algorithm." *Mathematical Programming* 8:54–83. Classic LP presolve.
+- Savelsbergh, M.W.P. (1994). "Preprocessing and probing techniques for
+  mixed integer programming problems." *ORSA Journal on Computing*
+  6(4):445–454. Probing and coefficient tightening for Phase 3.
+- ★ Belotti, P., Cafieri, S., Lee, J. & Liberti, L. (2010). "Feasibility-
+  based bound tightening via fixed points." In *Combinatorial
+  Optimization and Applications*, LNCS 6508, 65–76. The FBBT this repo
+  already ships (issue #62, `docs/src/fbbt.md`).
+- Gleixner, A.M., Berthold, T., Müller, B. & Weltge, S. (2017). "Three
+  enhancements for optimization-based bound tightening." *Journal of
+  Global Optimization* 67(4):731–757. OBBT made affordable — the Phase 4
+  OBBT loop. doi:10.1007/s10898-016-0450-4
+
+### Convex MINLP (Phases 1, 4 upper layer)
+
+- ★ Duran, M.A. & Grossmann, I.E. (1986). "An outer-approximation
+  algorithm for a class of mixed-integer nonlinear programs."
+  *Mathematical Programming* 36:307–339. Outer approximation.
+- Geoffrion, A.M. (1972). "Generalized Benders decomposition." *Journal
+  of Optimization Theory and Applications* 10:237–260.
+- Fletcher, R. & Leyffer, S. (1994). "Solving mixed integer nonlinear
+  programs by outer approximation." *Mathematical Programming*
+  66:327–349.
+- ★ Quesada, I. & Grossmann, I.E. (1992). "An LP/NLP based branch and
+  bound algorithm for convex MINLP problems." *Computers & Chemical
+  Engineering* 16(10–11):937–947. The LP/NLP-BB single-tree scheme.
+- Bonami, P. et al. (2008). "An algorithmic framework for convex mixed
+  integer nonlinear programs." *Discrete Optimization* 5(2):186–204.
+  Bonmin.
+- Kronqvist, J., Bernal, D.E., Lundell, A. & Grossmann, I.E. (2019). "A
+  review and comparison of solvers for convex MINLP." *Optimization and
+  Engineering* 20:397–455. The current survey of the convex-MINLP
+  landscape; use it to pick Phase-1/3 defaults.
+
+### Deterministic global optimization — factorable relaxations (Phases 4–6)
+
+- ★ McCormick, G.P. (1976). "Computability of global solutions to
+  factorable nonconvex programs: Part I — Convex underestimating
+  problems." *Mathematical Programming* 10:147–175. The foundation of
+  the `pounce-relax` envelopes.
+- Falk, J.E. & Soland, R.M. (1969). "An algorithm for separable
+  nonconvex programming problems." *Management Science* 15(9):550–569.
+  Early spatial branch-and-bound.
+- ★ Smith, E.M.B. & Pantelides, C.C. (1999). "A symbolic reformulation/
+  spatial branch-and-bound algorithm for the global optimisation of
+  nonconvex MINLPs." *Computers & Chemical Engineering* 23(4–5):457–478.
+  The auxiliary-variable factorable reformulation `pounce-relax` Phase 4
+  implements.
+- ★ Adjiman, C.S., Dallwig, S., Floudas, C.A. & Neumaier, A. (1998). "A
+  global optimization method, αBB, for general twice-differentiable
+  constrained NLPs — I. Theoretical advances." *Computers & Chemical
+  Engineering* 22(9):1137–1158. The αBB underestimator.
+- Androulakis, I.P., Maranas, C.D. & Floudas, C.A. (1995). "αBB: A global
+  optimization method for general constrained nonconvex problems."
+  *Journal of Global Optimization* 7:337–363.
+- Ryoo, H.S. & Sahinidis, N.V. (1996). "A branch-and-reduce approach to
+  global optimization." *Journal of Global Optimization* 8:107–138.
+  Range reduction / OBBT inside the spatial tree.
+- ★ Tawarmalani, M. & Sahinidis, N.V. (2002). *Convexification and Global
+  Optimization in Continuous and Mixed-Integer Nonlinear Programming.*
+  Kluwer. The BARON monograph.
+- Tawarmalani, M. & Sahinidis, N.V. (2005). "A polyhedral branch-and-cut
+  approach to global optimization." *Mathematical Programming*
+  103:225–249. The polyhedral-relaxation BARON design.
+- ★ Belotti, P., Lee, J., Liberti, L., Margot, F. & Wächter, A. (2009).
+  "Branching and bounds tightening techniques for non-convex MINLP."
+  *Optimization Methods and Software* 24(4–5):597–634. The Couenne paper
+  — closest published analog of this whole note, and EPL-2.0 lineage.
+- Misener, R. & Floudas, C.A. (2014). "ANTIGONE: Algorithms for
+  coNTinuous / Integer Global Optimization of Nonlinear Equations."
+  *Journal of Global Optimization* 59:503–526.
+
+### McCormick relaxation theory (for a correct, convergent `pounce-relax`)
+
+- Mitsos, A., Chachuat, B. & Barton, P.I. (2009). "McCormick-based
+  relaxations of algorithms." *SIAM Journal on Optimization*
+  20(2):573–601. Generalized/propagated McCormick — the form a DAG
+  implementation needs. doi:10.1137/080717341
+- Scott, J.K., Stuber, M.D. & Barton, P.I. (2011). "Generalized
+  McCormick relaxations." *Journal of Global Optimization* 51:569–606.
+- Bompadre, A. & Mitsos, A. (2012). "Convergence rate of McCormick
+  relaxations." *Journal of Global Optimization* 52:1–28. Why
+  branch-and-bound on these envelopes converges — and how fast.
+
+### Interval arithmetic (reuses `pounce-presolve/src/fbbt/interval.rs`)
+
+- ★ Moore, R.E. (1966). *Interval Analysis.* Prentice-Hall.
+- Neumaier, A. (2004). "Complete search in continuous global optimization
+  and constraint satisfaction." *Acta Numerica* 13:271–369. Survey
+  connecting interval methods, constraint propagation, and global B&B.
