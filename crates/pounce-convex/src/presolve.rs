@@ -5,7 +5,7 @@
 //! the primal `x` and the duals `(y, z)`. The contract is correctness of
 //! the recovered KKT point: a presolved-then-postsolved solve yields a
 //! valid primal–dual solution of the *original* problem (see
-//! `tests/presolve_roundtrip.rs` and `tests/presolve_kkt.rs`).
+//! `tests/presolve_roundtrip.rs` and `tests/presolve_reductions.rs`).
 //!
 //! This is the architectural seam the dev note calls the "missing
 //! piece": a **transaction stack** of [`Reduction`]s, each carrying the
