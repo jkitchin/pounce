@@ -18,10 +18,14 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod batch;
 pub mod cones;
 pub mod ipm;
 pub mod presolve;
 pub mod qp;
 
+pub use batch::{
+    solve_qp_batch, solve_qp_batch_parallel, solve_qp_multi_rhs, solve_qp_multi_rhs_parallel,
+};
 pub use ipm::{solve_qp_ipm, QpOptions};
 pub use qp::{QpProblem, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
