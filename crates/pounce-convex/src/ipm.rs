@@ -365,13 +365,19 @@ where
 /// 1. Keep the warm primal `x` and equality multipliers `y`.
 /// 2. Take the implied slacks `s̃ = h − Gx` (their signs encode which
 ///    inequalities the warm `x` makes active/violated) and the warm `z`.
-/// 3. Shift both into the strict interior by
-///    `δ = max(−1.5·min(·), 0.1·scale)` with
-///    `scale = max(1, ‖s̃‖∞, ‖z‖∞)`. The `0.1·scale` floor is the crucial
-///    part for warm starting *from a converged solution*: such a point is
-///    on the complementarity boundary (`s̃ᵢ` or `zᵢ ≈ 0`), and the floor
-///    guarantees a genuinely interior, well-scaled restart instead of a
-///    boundary-hugging one.
+/// 3. Shift both into the strict interior by `δ = max(−1.5·min(·), floor)`.
+///    The `floor` is **adaptive**: it is the warm point's KKT residual `ρ`
+///    on *this* problem, clamped to `[1e-9·scale, 0.1·scale]` with
+///    `scale = max(1, ‖s̃‖∞, ‖z‖∞)`. A converged warm point sits on the
+///    complementarity boundary (`s̃ᵢ` or `zᵢ ≈ 0`), so a floor is required
+///    to keep the restart interior — but a *fixed* floor overwrites the
+///    warm dual structure and degrades to a primal-only warm start.
+///    Sizing the floor to `ρ` keeps `s`/`z` near their warm (correctly
+///    structured) values when the problem is nearby (small `ρ`), so the
+///    IPM exploits the warm duals — and softens toward the conservative
+///    `0.1·scale` when the active set has moved (large `ρ`). This both
+///    deepens the benefit on nearby problems and keeps it from ever doing
+///    worse than a centered start.
 /// 4. A final centering shift `½(s·z)/Σz`, `½(s·z)/Σs` balances `s` and
 ///    `z` (Mehrotra's second step).
 ///
@@ -423,15 +429,34 @@ fn init_iterate(
     prob.g_mul(&x, &mut gx);
     let mut s: Vec<f64> = (0..m_ineq).map(|i| prob.h[i] - gx[i]).collect();
 
-    let scale = 1.0_f64
-        .max(inf_norm(&s))
-        .max(inf_norm(&z));
+    let scale = 1.0_f64.max(inf_norm(&s)).max(inf_norm(&z));
     let s_min = s.iter().cloned().fold(f64::INFINITY, f64::min);
     let z_min = z.iter().cloned().fold(f64::INFINITY, f64::min);
-    // Positivity shift with a scale-aware floor (keeps a near-optimal warm
-    // point off the boundary).
-    let ds = (-1.5 * s_min).max(0.1 * scale);
-    let dz = (-1.5 * z_min).max(0.1 * scale);
+
+    // Adaptive interior floor sized to the warm point's KKT residual ρ on
+    // *this* problem. ρ measures how far the warm point is from satisfying
+    // the new KKT system: a small ρ (nearby problem, stable active set)
+    // lets the slacks/multipliers stay near their warm — correctly
+    // structured — values, so the IPM exploits the warm duals and needs
+    // few steps; a large ρ (the active set moved, so the warm point is
+    // badly infeasible) softens the floor toward the conservative cold
+    // level `0.1·scale`. This self-corrects: warm starting never does
+    // worse than a centered start, and gains the most when it can.
+    let floor = {
+        let mut rd = prob.c.clone();
+        prob.p_mul_add(&x, &mut rd);
+        prob.at_mul_add(&y, &mut rd);
+        prob.gt_mul_add(&z, &mut rd);
+        let mut rp: Vec<f64> = prob.b.iter().map(|b| -b).collect();
+        prob.a_mul_add(&x, &mut rp);
+        // Inequality infeasibility of the warm point: max(0, Gx − h) = −s̃.
+        let viol = s.iter().fold(0.0_f64, |m, &si| m.max((-si).max(0.0)));
+        let rho = inf_norm(&rd).max(inf_norm(&rp)).max(viol);
+        rho.clamp(1e-9 * scale, 0.1 * scale)
+    };
+    // Positivity shift: lift s and z off the boundary by at least `floor`.
+    let ds = (-1.5 * s_min).max(floor);
+    let dz = (-1.5 * z_min).max(floor);
     for i in 0..m_ineq {
         s[i] += ds;
         z[i] += dz;

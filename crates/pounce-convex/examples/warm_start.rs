@@ -18,19 +18,30 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
 }
 
-/// `min ½·2‖x‖² + cᵀx s.t. Σx ≤ cap` (P = 2I, one capacity row).
+/// An ill-conditioned QP: `min ½ xᵀ diag(d) x + cᵀx s.t. Σx ≤ cap,
+/// 0 ≤ x ≤ 10`, with a wide eigenvalue spread `d ∈ [1, cond]` so the cold
+/// solve takes enough interior-point iterations to leave room for warm
+/// starting to matter (trivially easy QPs converge in ~7 iters cold,
+/// hiding the benefit).
 fn capped_qp(c: &[f64], cap: f64) -> QpProblem {
     let n = c.len();
+    let cond = 1e4_f64;
+    let p_lower: Vec<Triplet> = (0..n)
+        .map(|i| {
+            let t = i as f64 / (n.max(2) as f64 - 1.0);
+            Triplet::new(i, i, 2.0 * cond.powf(t))
+        })
+        .collect();
     QpProblem {
         n,
-        p_lower: (0..n).map(|i| Triplet::new(i, i, 2.0)).collect(),
+        p_lower,
         c: c.to_vec(),
         a: vec![],
         b: vec![],
         g: (0..n).map(|i| Triplet::new(0, i, 1.0)).collect(),
         h: vec![cap],
-        lb: vec![],
-        ub: vec![],
+        lb: vec![0.0; n],
+        ub: vec![10.0; n],
     }
 }
 
@@ -39,7 +50,9 @@ fn main() {
     let n = 40;
     let base_c: Vec<f64> = (0..n).map(|i| -1.0 - (i as f64) * 0.05).collect();
 
-    // A path of 8 problems, each a small perturbation of the previous.
+    // A path of 8 problems, each a small (~0.5%) perturbation of the
+    // previous — the parametric / receding-horizon regime where the active
+    // set is stable and warm starting helps most.
     let steps = 8;
     let mut cold_total = 0usize;
     let mut warm_total = 0usize;
@@ -49,9 +62,9 @@ fn main() {
 
     println!("{:<6} {:>10} {:>10}", "step", "cold_iters", "warm_iters");
     for k in 0..steps {
-        let scale = 1.0 + 0.02 * (k as f64 + 1.0);
+        let scale = 1.0 + 0.005 * (k as f64 + 1.0);
         let c: Vec<f64> = base_c.iter().map(|v| v * scale).collect();
-        let cap = 5.0 + 0.1 * (k as f64 + 1.0);
+        let cap = 5.0 + 0.02 * (k as f64 + 1.0);
         let prob = capped_qp(&c, cap);
 
         let cold = solve_qp_ipm(&prob, &opts, backend);
