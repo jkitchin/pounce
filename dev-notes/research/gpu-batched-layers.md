@@ -343,7 +343,69 @@ the load-bearing element, and the §5 phasing should treat the f64
 refinement tail as mandatory, not optional. The remaining measurement
 (the §9.2 untested quadrant) is the next concrete experiment.
 
-## 10. References
+## 10. Determinism — the contract
+
+A reviewer will ask whether f32/GPU makes solves nondeterministic —
+"sometimes it solves, sometimes not." The answer hinges on a
+distinction between two things that both get called nondeterminism, of
+which only one is GPU-specific.
+
+1. **Deterministic f32 inaccuracy.** f32 has fewer bits, so it computes
+   a less accurate answer — but for a *fixed* computation it is the
+   *same* less-accurate answer every run. This is what every §9
+   experiment measured (`rustc -O` f32 and the f32-emulated FERAL path
+   are both fully deterministic). It produces an accuracy *ceiling*
+   (≈1e-6, §9.1), not run-to-run variation. It does **not** mean
+   "sometimes solves, sometimes not."
+2. **Run-to-run GPU reduction reordering.** Parallel reductions (dot
+   products, matrix products) and atomic accumulation sum in an order
+   set by GPU scheduling, and f32 addition is non-associative — so the
+   *same* problem on the *same* device can give bitwise-different
+   results across runs. This is the only source that can make a solve
+   nondeterministic.
+
+**Can (2) flip the outcome? Mechanically yes, but bounded.** The IPM
+has discrete branches — the inertia count drives the perturbation
+handler, the filter accepts/rejects, fraction-to-boundary and
+active-set membership gate the step. Near a decision boundary a
+rounding-level run-to-run wobble can flip a branch and send two runs
+down different iteration paths, so in principle one run could converge
+where another stalls or invokes restoration. Three facts bound this:
+
+- **The machinery self-corrects.** §9.2 showed pounce absorbs
+  f32-magnitude perturbation with ±3% iteration noise and no
+  convergence failures: a flipped inertia decision just bumps `δ_w` and
+  refactors; a rejected filter step backtracks. Noise changes the
+  *path and iteration count*, not the *outcome*. (That test perturbs
+  deterministically, so it bounds robustness to the *magnitude*; the
+  re-correction works regardless of the noise's direction.)
+- **The delivered result is f64-refined, hence deterministic.** The
+  Phase-4 f64 tail converges to the same f64 solution no matter which
+  f32 trajectory reached its neighbourhood. The nondeterminism lives
+  entirely in the throwaway f32 warm-start; the **output is
+  reproducible to f64 tolerance.** Path-nondeterministic,
+  result-deterministic — that is the contract.
+- **It can be removed at the source.** Deterministic reduction kernels
+  (fixed reduction trees, no `atomicAdd` for sums) give bitwise-
+  reproducible GPU results at some throughput cost. Nondeterminism is a
+  *choice* here, not forced.
+
+**Where it is a genuine concern.** The ill-conditioned / μ→0 /
+active-inequality quadrant (the §9.2 untested one) has genuinely
+near-degenerate decision boundaries — near-active constraints,
+near-singular inertia — so run-to-run f32 noise is most likely to flip
+outcomes *there specifically*. That is also where f32 is weakest, and
+the reason the GPU path is conditioning-gated and leans on f64
+refinement.
+
+**Cultural note.** pounce deliberately keeps its CPU BLAS scalar and
+SIMD-free *for bit-reproducibility* (§3). A GPU f32 path runs against
+that grain, so it is explicitly a separate, opt-in, non-bit-reproducible
+path whose guarantee is "deterministic *result* via f64 refinement," not
+"deterministic *trajectory*." It must never be the default, and the
+returned solution must always be f64-refined.
+
+## 11. References
 
 - Amos & Kolter, "OptNet: Differentiable Optimization as a Layer in
   Neural Networks," *ICML* 2017 — batched dense QP layer on GPU (qpth);
