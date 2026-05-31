@@ -604,8 +604,30 @@ impl IpoptAlgorithm {
         // oracle so that adaptive-μ uses W(curr_N), not stale W.)
         if let (Some(nlp), Some(sd)) = (self.nlp.as_ref(), self.search_dir.as_mut()) {
             timing.compute_search_direction.start();
-            let _ls_span = tracing::info_span!("linear_solve").entered();
+            // Fields are declared `Empty` and filled by the linear
+            // solver (matrix size, factor nnz, inertia, ordering — see
+            // `pounce_feral::record_factor_stats`) and below
+            // (regularization), so the `linear_solve` span carries the
+            // KKT-solve characteristics for the JSON sink (pounce#71).
+            let ls_span = tracing::info_span!(
+                target: "pounce::linsol",
+                "linear_solve",
+                n = tracing::field::Empty,
+                matrix_nnz = tracing::field::Empty,
+                factor_nnz = tracing::field::Empty,
+                inertia_neg = tracing::field::Empty,
+                fill_ratio = tracing::field::Empty,
+                ordering = tracing::field::Empty,
+                regularization = tracing::field::Empty,
+            );
+            let ls_enter = ls_span.enter();
             let ok = sd.compute_search_direction(&self.data, &self.cq, nlp);
+            ls_span.record("regularization", self.data.borrow().info_regu_x);
+            // Within-span marker so the enriched `linear_solve` fields
+            // (filled by the solver above) surface to the JSON sink at
+            // debug level; off at the default `info` level.
+            tracing::debug!(target: "pounce::linsol", "kkt solve complete");
+            drop(ls_enter);
             timing.compute_search_direction.end();
             if !ok {
                 // Mirror upstream `IpIpoptAlg.cpp:417-430`: a failed
