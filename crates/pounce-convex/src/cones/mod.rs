@@ -17,12 +17,56 @@
 //! with their Nesterov–Todd scaling.
 
 pub mod composite;
+pub mod exp;
 pub mod nonneg;
 pub mod soc;
 
 pub use composite::{CompositeCone, ConeKind, ConeSpec};
+pub use exp::ExponentialCone;
 pub use nonneg::NonnegCone;
 pub use soc::SecondOrderCone;
+
+/// Barrier oracles for a convex cone — the interface a **non-symmetric**
+/// cone (exponential, power) exposes to the homogeneous self-dual embedding
+/// driver ([`crate::hsde`]).
+///
+/// Symmetric cones (orthant, second-order, PSD) are self-scaled and the IPM
+/// drives them with a single Nesterov–Todd scaling point (`W²`, via
+/// [`Cone::kkt_block`]). Non-symmetric cones have **no** such point; the
+/// path-following method instead uses the logarithmically-homogeneous
+/// self-concordant barrier `f` directly (Nesterov–Todd 1997; Skajaa–Ye
+/// 2015): the central path is `z = −μ ∇f(s)`, and the Hessian `∇²f` plays
+/// the role `W²` plays for symmetric cones.
+///
+/// A valid degree-`ν` log-homogeneous barrier satisfies, for all `t > 0`
+/// and interior `p`:
+/// - `f(t·p) = f(p) − ν·log t`,
+/// - `⟨∇f(p), p⟩ = −ν`,
+/// - `∇²f(p)·p = −∇f(p)`.
+///
+/// These identities are exact and are used as validation invariants
+/// (see the `exp` cone tests) in addition to finite-difference checks.
+pub trait BarrierCone {
+    /// Barrier parameter `ν` (the exponential cone's is 3).
+    fn barrier_degree(&self) -> f64;
+
+    /// The barrier value `f(p)`. `NAN`/`+∞` outside the (open) cone.
+    fn barrier(&self, point: &[f64]) -> f64;
+
+    /// Gradient `∇f(p)` (writes `dim` values).
+    fn barrier_grad(&self, point: &[f64], out: &mut [f64]);
+
+    /// Hessian `∇²f(p)`, lower triangle row-major
+    /// (`[ (0,0); (1,0),(1,1); … ]`, `dim·(dim+1)/2` values).
+    fn barrier_hess_lower(&self, point: &[f64], out: &mut [f64]);
+
+    /// Whether `point` is in the strict interior of the primal cone, to a
+    /// relative tolerance `tol`.
+    fn in_primal_cone(&self, point: &[f64], tol: f64) -> bool;
+
+    /// Whether `point` is in the strict interior of the dual cone.
+    fn in_dual_cone(&self, point: &[f64], tol: f64) -> bool;
+}
 
 /// The `(z, z)` scaling block a cone contributes to the symmetric KKT
 /// system. The driver places `-(block) - reg·I` at the cone's diagonal /
