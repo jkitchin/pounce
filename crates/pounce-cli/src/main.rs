@@ -1094,8 +1094,8 @@ fn run_convex_qp(
                 let st = ps.stats();
                 if st.reduced_anything() {
                     println!(
-                        "Presolve: {} → {} vars, {} → {} rows \
-                         (fixed {}, free-fixed {}, substituted {}, forcing {}, dominated {})",
+                        "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
+                         free-fixed {}, substituted {}, forcing {}, dominated {}, tightened {})",
                         st.orig_vars,
                         st.reduced_vars,
                         st.orig_rows,
@@ -1105,6 +1105,7 @@ fn run_convex_qp(
                         st.free_col_singletons,
                         st.forcing_rows,
                         st.dominated_cols,
+                        st.tightened_bounds,
                     );
                 }
                 let red = solve_qp_ipm(&ps.reduced, &QpOptions::default(), backend);

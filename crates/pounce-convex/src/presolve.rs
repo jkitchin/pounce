@@ -102,20 +102,29 @@
 //! forcing row is exactly a model-changing bound deduction whose dual
 //! re-attributes to the source row.
 //!
-//! Parallel-row detection (scalar multiples) and **dominated columns**
-//! (a sign-definite column optimal at a bound, with a sign-guaranteed
-//! dual) are implemented above.
+//! - **Bound tightening** (domain propagation): each live row implies
+//!   bounds on its variables (`a_k x_k ≤ h − amin_{−k}`, etc.); where one
+//!   is strictly tighter than the declared box, the box is shrunk in the
+//!   reduced problem (the variable is *kept*). The subtle dual — when a
+//!   tightened bound is active at the optimum while the original bound is
+//!   slack, its multiplier is not a real bound multiplier but belongs to
+//!   the row that implied it — is handled in postsolve by **global bound
+//!   recovery**: every row multiplier is recovered first (re-attributing
+//!   each active tightened bound to its source row), then every variable's
+//!   bound multipliers are read off the complete reduced cost by
+//!   complementarity. To keep the re-attributions independent, tightening
+//!   sources are restricted to column-disjoint rows untouched by other
+//!   reductions (the same conservative rule as forcing). A single pass
+//!   (not iterated to a fixpoint), validated by randomized KKT roundtrips
+//!   (`tests/presolve_bound_tightening.rs`).
 //!
-//! Still deferred for a genuine dual-recovery reason: **standalone bound
-//! tightening** that replaces a variable's bound without pinning it. When
-//! such a tightened bound is active at the optimum, its multiplier must be
-//! re-attributed — split between the variable and the *source* row in
-//! proportion to the binding — which is strictly more general than the
-//! forcing case (where the whole row is consumed and the re-attribution is
-//! clean). Forcing already captures the dual-safe, model-changing slice of
-//! bound reasoning; the remaining standalone form needs PaPILO's
-//! provenance-tracking postsolve and is left out rather than shipped with
-//! a fragile dual.
+//! The full deferred catalog — forcing constraints, parallel rows,
+//! dominated columns, and bound tightening — is now implemented, each with
+//! a dual recovery proven correct (and KKT-validated in tests). The main
+//! remaining *enhancement* (not a missing reduction) is iterating the
+//! passes to a fixpoint so deductions cascade — bound tightening here is
+//! single-pass — and lifting the disjoint-source restriction on forcing /
+//! tightening via a coupled re-attribution solve.
 
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
@@ -191,12 +200,24 @@ enum Reduction {
     /// coefficients that match the sign of its cost, so pushing it to one
     /// bound never hurts the objective *or* feasibility — it is optimal
     /// there. Fixed and dropped; its bound multiplier is its reduced cost,
-    /// which the sign conditions make valid by construction.
-    DominatedColumn {
+    /// which the sign conditions make valid by construction (recovered in
+    /// the global bound pass from where the variable lands).
+    DominatedColumn { col: usize, value: f64 },
+    /// A **tightened bound**: row `row` implies a bound on `col` strictly
+    /// inside its declared box, so the box is shrunk in the reduced problem
+    /// (the variable is *kept*, not removed). Postsolve handles the dual:
+    /// if the tightened bound is active at the optimum while the original
+    /// bound is slack, its multiplier is re-attributed to the source row
+    /// (the multiplier on a non-real bound belongs to the constraint that
+    /// implied it). See [`Presolve::postsolve`]'s global bound recovery.
+    BoundTightening {
         col: usize,
-        value: f64,
-        /// Fixed at its upper bound? (else lower.)
-        at_upper: bool,
+        row: usize,
+        is_equality: bool,
+        /// Source-row coefficient `a_{row,col}`.
+        coef: f64,
+        /// Tightened the upper bound? (else lower.)
+        is_upper: bool,
     },
 }
 
@@ -230,6 +251,11 @@ const ZERO_TOL: f64 = 0.0;
 const BOUND_FEAS_TOL: f64 = 1e-9;
 /// Slack allowed in activity-bound comparisons (redundancy / feasibility).
 const ACTIVITY_TOL: f64 = 1e-9;
+/// How close `x_i` must be to a box bound to count it *active* when
+/// recovering bound multipliers. Looser than [`BOUND_FEAS_TOL`] because an
+/// interior-point solve only drives a variable to within ~1e-8 of a bound,
+/// not to machine zero; interior variables sit far further away.
+const ACTIVE_BOUND_TOL: f64 = 1e-6;
 
 /// Group nonzero entries by row index: `out[row] = [(col, val), …]`.
 fn group_by_row(triplets: &[Triplet], m: usize) -> Vec<Vec<(usize, f64)>> {
@@ -605,17 +631,187 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
             let ub = prob.ub_of(col);
             if g_all_nonneg[col] && c_k >= 0.0 && lb > -BOUND_INF {
                 fixed[col] = Some(lb);
-                stack.push(Reduction::DominatedColumn {
-                    col,
-                    value: lb,
-                    at_upper: false,
-                });
+                stack.push(Reduction::DominatedColumn { col, value: lb });
             } else if g_all_nonpos[col] && c_k <= 0.0 && ub < BOUND_INF {
                 fixed[col] = Some(ub);
-                stack.push(Reduction::DominatedColumn {
-                    col,
-                    value: ub,
-                    at_upper: true,
+                stack.push(Reduction::DominatedColumn { col, value: ub });
+            }
+        }
+    }
+
+    // --- bound tightening (domain propagation, single pass) ---
+    // From each live row, derive implied bounds on its variables and shrink
+    // the box where strictly tighter. The variable is *kept* (only its box
+    // changes); the subtle dual — re-attributing an active tightened
+    // bound's multiplier to the source row — is handled by postsolve's
+    // global bound recovery. A single pass (not iterated to a fixpoint),
+    // so it tightens but does not cascade into further reductions here.
+    let mut tlb: Vec<f64> = (0..n).map(|c| prob.lb_of(c)).collect();
+    let mut tub: Vec<f64> = (0..n).map(|c| prob.ub_of(c)).collect();
+    for c in 0..n {
+        if let Some(v) = fixed[c] {
+            tlb[c] = v;
+            tub[c] = v;
+        }
+    }
+    // Source row (and its coef / kind) of each variable's tightened bound.
+    let mut ub_src: Vec<Option<(usize, f64, bool)>> = vec![None; n];
+    let mut lb_src: Vec<Option<(usize, f64, bool)>> = vec![None; n];
+
+    // Re-attributing an active tightened bound's multiplier to its source
+    // row is only *independent* when source rows share no columns (and
+    // touch no already-reduced column); otherwise the re-attributions
+    // couple. So a row may serve as a tightening source only if all its
+    // columns are kept (not fixed/substituted) and disjoint from every
+    // other accepted source row — a conservative but always-correct
+    // restriction, exactly like forcing's disjoint-column rule.
+    let reduction_touched: Vec<bool> =
+        (0..n).map(|c| fixed[c].is_some() || substituted[c]).collect();
+    let mut bt_col_used = vec![false; n];
+    let row_is_clean = |entries: &[(usize, f64)], used: &[bool]| {
+        entries
+            .iter()
+            .all(|&(c, _)| !reduction_touched[c] && !used[c])
+    };
+
+    // Tighten variable boxes from one row whose activity lies in `[lo, hi]`
+    // (inequality `≤ h`: `lo = −∞, hi = h`; equality: `lo = hi = b`).
+    // Returns true on a detected empty domain (infeasible).
+    let tighten_from_row =
+        |entries: &[(usize, f64)],
+         lo: f64,
+         hi: f64,
+         row_idx: usize,
+         is_eq: bool,
+         tlb: &mut [f64],
+         tub: &mut [f64],
+         ub_src: &mut [Option<(usize, f64, bool)>],
+         lb_src: &mut [Option<(usize, f64, bool)>]|
+         -> bool {
+            let (amin, amax) = activity(entries, &|c| tlb[c], &|c| tub[c]);
+            // Compute all implied bounds against the row-start state, then
+            // apply (so within-row order doesn't matter).
+            let mut updates: Vec<(usize, bool, f64, f64)> = Vec::new(); // (col,is_upper,val,coef)
+            for &(k, a) in entries {
+                if fixed[k].is_some() || a == 0.0 {
+                    continue;
+                }
+                let contrib_min = if a > 0.0 { a * tlb[k] } else { a * tub[k] };
+                let contrib_max = if a > 0.0 { a * tub[k] } else { a * tlb[k] };
+                let amin_mk = amin - contrib_min;
+                let amax_mk = amax - contrib_max;
+                if hi.is_finite() {
+                    let val = (hi - amin_mk) / a;
+                    if val.is_finite() {
+                        if a > 0.0 {
+                            if val < tub[k] - BOUND_FEAS_TOL {
+                                updates.push((k, true, val, a));
+                            }
+                        } else if val > tlb[k] + BOUND_FEAS_TOL {
+                            updates.push((k, false, val, a));
+                        }
+                    }
+                }
+                if lo.is_finite() {
+                    let val = (lo - amax_mk) / a;
+                    if val.is_finite() {
+                        if a > 0.0 {
+                            if val > tlb[k] + BOUND_FEAS_TOL {
+                                updates.push((k, false, val, a));
+                            }
+                        } else if val < tub[k] - BOUND_FEAS_TOL {
+                            updates.push((k, true, val, a));
+                        }
+                    }
+                }
+            }
+            for (k, is_upper, val, a) in updates {
+                if is_upper {
+                    if val < tub[k] - BOUND_FEAS_TOL {
+                        tub[k] = val;
+                        ub_src[k] = Some((row_idx, a, is_eq));
+                    }
+                } else if val > tlb[k] + BOUND_FEAS_TOL {
+                    tlb[k] = val;
+                    lb_src[k] = Some((row_idx, a, is_eq));
+                }
+                if tlb[k] > tub[k] + BOUND_FEAS_TOL {
+                    return true;
+                }
+            }
+            false
+        };
+
+    for row in 0..m_ineq {
+        if ineq_dropped[row] || g_by_row[row].is_empty() || !row_is_clean(&g_by_row[row], &bt_col_used)
+        {
+            continue;
+        }
+        if tighten_from_row(
+            &g_by_row[row],
+            f64::NEG_INFINITY,
+            prob.h[row],
+            row,
+            false,
+            &mut tlb,
+            &mut tub,
+            &mut ub_src,
+            &mut lb_src,
+        ) {
+            return PresolveOutcome::Infeasible;
+        }
+        for &(c, _) in &g_by_row[row] {
+            bt_col_used[c] = true;
+        }
+    }
+    for row in 0..m_eq {
+        if eq_dropped[row] || a_by_row[row].is_empty() || !row_is_clean(&a_by_row[row], &bt_col_used)
+        {
+            continue;
+        }
+        let b = prob.b[row];
+        if tighten_from_row(
+            &a_by_row[row],
+            b,
+            b,
+            row,
+            true,
+            &mut tlb,
+            &mut tub,
+            &mut ub_src,
+            &mut lb_src,
+        ) {
+            return PresolveOutcome::Infeasible;
+        }
+        for &(c, _) in &a_by_row[row] {
+            bt_col_used[c] = true;
+        }
+    }
+
+    // Record a reduction for each variable whose box was strictly tightened.
+    for k in 0..n {
+        if fixed[k].is_some() {
+            continue;
+        }
+        if tub[k] < prob.ub_of(k) - BOUND_FEAS_TOL {
+            if let Some((row, coef, is_eq)) = ub_src[k] {
+                stack.push(Reduction::BoundTightening {
+                    col: k,
+                    row,
+                    is_equality: is_eq,
+                    coef,
+                    is_upper: true,
+                });
+            }
+        }
+        if tlb[k] > prob.lb_of(k) + BOUND_FEAS_TOL {
+            if let Some((row, coef, is_eq)) = lb_src[k] {
+                stack.push(Reduction::BoundTightening {
+                    col: k,
+                    row,
+                    is_equality: is_eq,
+                    coef,
+                    is_upper: false,
                 });
             }
         }
@@ -751,12 +947,17 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         }
     }
 
-    // Carry the kept columns' bounds into the reduced problem (empty if
-    // none of the kept variables is bounded).
-    let (new_lb, new_ub) = if prob.has_bounds() {
+    // Carry the kept columns' (possibly tightened) bounds into the reduced
+    // problem. Emit bounds when the original had them or bound tightening
+    // produced a finite bound on a kept variable; otherwise leave empty.
+    let need_bounds = prob.has_bounds()
+        || kept_cols
+            .iter()
+            .any(|&c| tlb[c] > -BOUND_INF || tub[c] < BOUND_INF);
+    let (new_lb, new_ub) = if need_bounds {
         (
-            kept_cols.iter().map(|&c| prob.lb_of(c)).collect(),
-            kept_cols.iter().map(|&c| prob.ub_of(c)).collect(),
+            kept_cols.iter().map(|&c| tlb[c]).collect(),
+            kept_cols.iter().map(|&c| tub[c]).collect(),
         )
     } else {
         (Vec::new(), Vec::new())
@@ -1029,6 +1230,8 @@ pub struct PresolveStats {
     pub forcing_rows: usize,
     /// Dominated columns fixed to a bound and dropped.
     pub dominated_cols: usize,
+    /// Variable bounds tightened by domain propagation.
+    pub tightened_bounds: usize,
 }
 
 impl PresolveStats {
@@ -1055,6 +1258,7 @@ impl Presolve {
                 Reduction::FreeColSingleton { .. } => s.free_col_singletons += 1,
                 Reduction::ForcingRow { .. } => s.forcing_rows += 1,
                 Reduction::DominatedColumn { .. } => s.dominated_cols += 1,
+                Reduction::BoundTightening { .. } => s.tightened_bounds += 1,
             }
         }
         s
@@ -1110,6 +1314,9 @@ impl Presolve {
                     }
                 }
                 Reduction::DominatedColumn { col, value, .. } => x[*col] = *value,
+                // The variable is kept; only its box changed, so its primal
+                // comes from the reduced solution (already mapped above).
+                Reduction::BoundTightening { .. } => {}
             }
         }
 
@@ -1150,43 +1357,14 @@ impl Presolve {
             }
         }
 
-        // Bound multipliers: map the reduced kept-column bound duals back,
-        // then attribute each free/linear-only fixed column's reduced cost
-        // (= c_k) to whichever bound it was pinned at.
-        let mut z_lb = vec![0.0; n];
-        let mut z_ub = vec![0.0; n];
-        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
-            if newc < red.z_lb.len() {
-                z_lb[oldc] = red.z_lb[newc];
-            }
-            if newc < red.z_ub.len() {
-                z_ub[oldc] = red.z_ub[newc];
-            }
-        }
-        for r in &self.stack {
-            if let Reduction::FreeColumnFixed { col, value } = r {
-                let ck = self.orig.c[*col];
-                // Stationarity for a linear-only var at a bound:
-                //   c_k − z_lb + z_ub = 0. At lb: z_lb = c_k (c_k ≥ 0);
-                //   at ub: z_ub = −c_k (c_k ≤ 0).
-                if (*value - self.orig.lb_of(*col)).abs() <= (*value - self.orig.ub_of(*col)).abs()
-                {
-                    z_lb[*col] = ck.max(0.0);
-                } else {
-                    z_ub[*col] = (-ck).max(0.0);
-                }
-            }
-        }
-
-        // Forcing-row multipliers and the pinned variables' bound
-        // multipliers. `grad[col]` (above) is each forced variable's reduced
-        // cost *excluding* the forcing row (its multiplier is still 0 in
-        // `grad`). Pick the row multiplier as the tightest value that makes
-        // every pinned variable's bound multiplier correctly signed:
+        // Forcing-row multipliers. `grad` (above, = grad0) is each pinned
+        // variable's reduced cost *excluding* the forcing row (its
+        // multiplier is still 0). The row multiplier is the tightest value
+        // making every pinned variable's bound multiplier correctly signed:
         //   min-vertex  ⇒ mult = maxⱼ(−gradⱼ/coefⱼ)  (clamped ≥ 0 if ≤-row);
         //   max-vertex  ⇒ mult = minⱼ(−gradⱼ/coefⱼ)  (equalities only).
-        // Each pinned variable's full reduced cost `gradⱼ + coefⱼ·mult` is
-        // then its active bound multiplier — nonnegative by construction.
+        // (The pinned variables' bound multipliers themselves come out of
+        // the global recovery below.)
         for r in &self.stack {
             if let Reduction::ForcingRow {
                 row,
@@ -1211,28 +1389,80 @@ impl Presolve {
                 } else {
                     z[*row] = mult;
                 }
-                for &(col, coef, _, at_upper) in cols {
-                    let dcost = grad[col] + coef * mult;
-                    if at_upper {
-                        z_ub[col] = (-dcost).max(0.0);
+            }
+        }
+
+        // Re-attribute active tightened-bound multipliers to their source
+        // rows. A tightened bound that is active in the reduced solve while
+        // the *original* bound is slack is not a real bound — its
+        // multiplier belongs to the row that implied it. Because tightening
+        // sources are column-disjoint, these moves are independent.
+        let mut col_reduced = vec![usize::MAX; n];
+        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+            col_reduced[oldc] = newc;
+        }
+        for r in &self.stack {
+            if let Reduction::BoundTightening {
+                col,
+                row,
+                is_equality,
+                coef,
+                is_upper,
+            } = r
+            {
+                let newc = col_reduced[*col];
+                if newc == usize::MAX {
+                    continue;
+                }
+                let delta = if *is_upper {
+                    let m = red.z_ub.get(newc).copied().unwrap_or(0.0);
+                    if m > 0.0 && x[*col] < self.orig.ub_of(*col) - BOUND_FEAS_TOL {
+                        m / coef
                     } else {
-                        z_lb[col] = dcost.max(0.0);
+                        0.0
                     }
+                } else {
+                    let m = red.z_lb.get(newc).copied().unwrap_or(0.0);
+                    if m > 0.0 && x[*col] > self.orig.lb_of(*col) + BOUND_FEAS_TOL {
+                        -m / coef
+                    } else {
+                        0.0
+                    }
+                };
+                if *is_equality {
+                    y[*row] += delta;
+                } else {
+                    z[*row] += delta;
                 }
             }
         }
 
-        // Dominated columns: the variable's bound multiplier is its full
-        // reduced cost `grad[col]` (= c_k + Σ aᵢₖ zᵢ, since it has no P/A
-        // terms), nonnegative by the sign conditions that triggered the
-        // reduction.
-        for r in &self.stack {
-            if let Reduction::DominatedColumn { col, at_upper, .. } = r {
-                if *at_upper {
-                    z_ub[*col] = (-grad[*col]).max(0.0);
-                } else {
-                    z_lb[*col] = grad[*col].max(0.0);
-                }
+        // Global bound-multiplier recovery. With every row multiplier now in
+        // place, recompute the full reduced cost and read off each
+        // variable's bound multipliers by complementarity against its
+        // *original* box: at the lower bound `z_lb = max(0, grad)`, at the
+        // upper `z_ub = max(0, −grad)`, interior ⇒ both 0. This single rule
+        // subsumes the per-reduction bound recovery (fixed, free-fixed,
+        // forcing, dominated — each lands at a real bound or interior with
+        // the right reduced cost) and correctly zeroes a tightened
+        // variable's bound dual (it sits interior to its real box, the force
+        // having moved to the source row above).
+        let mut grad = vec![0.0; n];
+        grad[..n].copy_from_slice(&self.orig.c[..n]);
+        self.orig.p_mul(&x, &mut grad);
+        self.orig.at_mul(&y, &mut grad);
+        self.orig.gt_mul(&z, &mut grad);
+        let mut z_lb = vec![0.0; n];
+        let mut z_ub = vec![0.0; n];
+        for i in 0..n {
+            let lb = self.orig.lb_of(i);
+            let ub = self.orig.ub_of(i);
+            let at_lb = lb > -BOUND_INF && (x[i] - lb).abs() <= ACTIVE_BOUND_TOL;
+            let at_ub = ub < BOUND_INF && (ub - x[i]).abs() <= ACTIVE_BOUND_TOL;
+            if at_lb && grad[i] > 0.0 {
+                z_lb[i] = grad[i];
+            } else if at_ub && grad[i] < 0.0 {
+                z_ub[i] = -grad[i];
             }
         }
 

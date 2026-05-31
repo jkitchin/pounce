@@ -201,6 +201,23 @@ fn main() {
         },
     );
 
+    // Bound tightening: `2·x0 ≤ 3` implies x0 ≤ 1.5, tighter than the box
+    // [0,10]; the reduced box is shrunk (the variable is kept).
+    report(
+        "bound tightening (shrink box)",
+        &QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+            c: vec![-10.0, -10.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 2.0)],
+            h: vec![3.0],
+            lb: vec![0.0, 0.0],
+            ub: vec![10.0, 10.0],
+        },
+    );
+
     // Dominated column: x2 is not in P, appears only in the `≤` row with a
     // nonnegative coefficient, and has cost ≥ 0 — so x2 = lb is optimal;
     // it is fixed and dropped.
