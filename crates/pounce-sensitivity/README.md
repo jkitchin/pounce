@@ -35,7 +35,7 @@ Phase-A files mapped:
 | pounce-sensitivity                        | upstream                                                                                          |
 |-------------------------------------------|---------------------------------------------------------------------------------------------------|
 | `src/schur_data.rs` — `SchurData` trait   | [`SensSchurData.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensSchurData.hpp) (lines 17–177)        |
-| `src/schur_data/index.rs` — `IndexSchurData` | [`SensIndexSchurData.{hpp,cpp}`](../../ref/Ipopt/contrib/sIPOPT/src/SensIndexSchurData.hpp)       |
+| `src/schur_data.rs` — `IndexSchurData` | [`SensIndexSchurData.{hpp,cpp}`](../../ref/Ipopt/contrib/sIPOPT/src/SensIndexSchurData.hpp)       |
 | `src/p_calculator.rs` — `PCalculator` trait | [`SensPCalculator.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensPCalculator.hpp) (lines 17–133)   |
 | `src/backsolver.rs` — `SensBacksolver` trait | [`SensBacksolver.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensBacksolver.hpp)                    |
 

@@ -4,8 +4,7 @@ Pure-Rust parsers and analysis helpers for pounce solve reports and
 POUNCEIT iter-dumps. Foundation crate for the `pounce-studio` GUI work
 (VS Code extension + desktop app + MCP server).
 
-Phase 0 of the studio roadmap. See `/root/.claude/plans/i-want-to-explore-linear-narwhal.md`
-for the broader context.
+Phase 0 of the studio roadmap.
 
 ## What it does
 
@@ -63,6 +62,6 @@ let findings = analysis::diagnose(&report);
 cargo test -p pounce-studio-core
 ```
 
-22 tests (11 unit + 11 integration) covering JSON parsing, schema
+43 tests (31 unit + 12 integration) covering JSON parsing, schema
 validation, binary parsing, stall detection, diagnose heuristics, and
 Markdown rendering against real solver-produced fixtures.

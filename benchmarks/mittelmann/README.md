@@ -39,13 +39,14 @@ mittelmann/
 ## Usage
 
 ```
-make fetch       # download .mod files from plato (cached, ~1 min)
-make translate   # ampl: .mod -> .nl (cached, ~30 s)
-make run-pounce  # run pounce on every .nl, write results/pounce_<version>.json
-make run-ipopt   # run ipopt on every .nl, write results/ipopt_<version>.json
-make report      # regenerate reports/BENCHMARK_REPORT_<version>.md
+make fetch              # download .mod files from plato (cached, ~1 min)
+make translate          # ampl: .mod -> .nl (cached, ~30 s)
+make run-pounce         # run pounce on every .nl, write results/pounce_<version>.json
+make run-ipopt-feral    # run ipopt (FERAL) on every .nl  (also: run-ipopt-mumps, run-ipopt-ma57)
+make run-all            # run every solver variant
+make report             # regenerate reports/BENCHMARK_REPORT_<version>.md
 
-make all         # fetch + translate + run-pounce + run-ipopt + report
+make all         # fetch + translate + run-all + report
 ```
 
 Default per-instance timeout is 7200s, matching Mittelmann's published convention.

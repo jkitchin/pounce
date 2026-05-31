@@ -99,25 +99,29 @@ let model = parse_qps(qps_text)?;
 
 ## Tests
 
-59 tests across 7 test modules:
+76 tests: 70 unit tests across 8 modules under `src/tests/`, plus 6
+integration tests under `tests/`.
 
-- `tests/analytical.rs` (~19) — §8.0 ladder + integration tests for
+- `src/tests/analytical.rs` (26) — §8.0 ladder + integration tests for
   every problem class, with hand-derived expected values.
-- `tests/api.rs` (11) — type-plumbing invariants for `WorkingSet`,
+- `src/tests/api.rs` (11) — type-plumbing invariants for `WorkingSet`,
   `QpProblem::validate`, default `QpOptions`.
-- `tests/kkt_unit.rs` (5) — §8.7 unit tests for
+- `src/tests/kkt_unit.rs` (5) — §8.7 unit tests for
   `KktTriplet::add_h_diagonal_shift`.
-- `tests/elastic_unit.rs` (7) — §8.7 unit tests for
+- `src/tests/elastic_unit.rs` (7) — §8.7 unit tests for
   `ElasticReformulation::build` and `initial_seed`.
-- `tests/refinement_unit.rs` (4) — §4.7 pin that FERAL's iterative
+- `src/tests/refinement_unit.rs` (4) — §4.7 pin that FERAL's iterative
   refinement is on by default and delivers near-machine-precision;
   plus c16 cached-`resolve` contract tests.
-- `tests/qps_unit.rs` (9) — QPS parser + round-trip solve + RANGES
+- `src/tests/qps_unit.rs` (8) — QPS parser + round-trip solve + RANGES
   semantics for each row sense.
-- `tests/scaling_unit.rs` (3) — §8.2 scaling-sweep diagnostics at
+- `src/tests/scaling_unit.rs` (3) — §8.2 scaling-sweep diagnostics at
   `n ∈ {10, 50, 100, 200}` and a warm-restart speedup test
   (cold: ~30 refactors / ~20 ws changes; warm at optimum:
   1 refactor / 0 ws changes — the §8.5 payoff in microcosm).
+- `src/tests/schur_unit.rs` (6) — Schur-complement update unit tests.
+- `tests/` (6) — `cold_general_initial_regression.rs` and
+  `mm_published_optima.rs` integration regressions.
 
 Run with: `cargo test -p pounce-qp`. For per-test timings,
 `cargo test -p pounce-qp --release -- --nocapture`.

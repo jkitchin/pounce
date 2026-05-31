@@ -34,7 +34,7 @@ solvers see the exact same problem.
 - `generate_nl.py` — Pyomo generator; writes one `.nl` (plus matching
   `.row`/`.col` name maps) per problem into `nl/`
 - `nl/` — generated `.nl` files (gitignored; regenerated locally)
-- `results.json` — latest dual-solver results (gitignored)
+- `pounce.json` / `ipopt_ma57.json` — latest POUNCE and Ipopt/MA57 results
 
 ## Prerequisites
 
@@ -62,7 +62,8 @@ python3 generate_nl.py optcontrol --optcontrol-t 1000
 ## Output
 
 - `nl/*.nl` — generated problems
-- `results.json` — POUNCE and Ipopt per-problem results in the canonical
+- `pounce.json` / `ipopt_ma57.json` — POUNCE and Ipopt per-problem results
+  in the canonical
   `{solver,name,n,m,status,objective,iterations,solve_time}` schema
 
 This suite feeds the composite `benchmarks/BENCHMARK_REPORT.md` via

@@ -102,6 +102,23 @@ limit-reached, infeasible, even a failed solve — since the termination
 is carried by the file's `solve_result_num`. Genuine startup failures
 (unreadable `.nl`, bad option) still exit non-zero.
 
+## Diagnostics & introspection
+
+```sh
+pounce --about                                   # version, build info, features, backends
+pounce problem.nl --dump kkt:5-10 --dump iterate # dump per-iteration diagnostics
+pounce problem.nl --dump kkt --dump-dir /tmp/d   # override the dump root
+```
+
+- `--about` — print version, build info, enabled features, and linear-solver
+  backends, then exit.
+- `--dump <cat>[:<spec>]` — write the diagnostic category to per-iteration
+  files (JSONL). Wired categories are `kkt` and `iterate`; an optional
+  `:<spec>` selects iterations (e.g. `kkt:5`, `kkt:2-10`, `iterate:all`).
+- `--dump-dir <path>` — override the dump root (default
+  `./pounce-dump-<timestamp>`).
+- `--dump-format <fmt>` — dump format (default `jsonl`).
+
 ## Help
 
 ```sh

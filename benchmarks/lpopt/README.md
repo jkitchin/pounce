@@ -11,7 +11,7 @@ handle. We take the smaller disclosed instances under a size cap.
 Like every other suite, this is `.nl`-driven through
 `benchmarks/scripts/run_nl_bench.sh`, so each problem is recorded in the
 standard schema — `{solver, name, n, m, status, objective, iterations,
-solve_time}` — in `lp/pounce.json`, and merged into the composite
+solve_time}` — in `lpopt/pounce.json`, and merged into the composite
 `BENCHMARK_REPORT.md`. That is the per-problem **iterations / solve time /
 status / objective** tracking.
 
@@ -78,5 +78,5 @@ make -C benchmarks ipopt-ref-lpopt
 The shared driver runs any AMPL-protocol solver; the `ipopt-ma57`
 reference column is produced exactly that way. To compare POUNCE against
 another solver (e.g. a dedicated QP/LP solver or HiGHS), run that solver's
-AMPL executable over `lp/nl/*.nl` through `run_nl_bench.sh` and merge its
+AMPL executable over `lpopt/nl/*.nl` through `run_nl_bench.sh` and merge its
 JSON the same way the Ipopt reference is merged.

@@ -371,7 +371,7 @@ python parametric_demo.py
 For an executable variant see
 `python/examples/sqp_warm_start_mpc.py` (a 20-step parametric
 sweep) and the Jupyter notebook in
-`python/notebooks/sqp_parametric_continuation.ipynb`.
+`python/notebooks/06_sqp_parametric_continuation.ipynb`.
 
 ## 5. Choosing a globalization
 

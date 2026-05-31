@@ -151,7 +151,7 @@ corresponding one-shot APIs:
   `Problem.solve_with_sens(compute_reduced_hessian=True)['reduced_hessian']`
   (1e-10).
 * `pounce_sensitivity::Solver::parametric_step` ≡
-  `SensSolveBuilder::with_deltas` (1e-10).
+  `SensSolve::with_deltas` (1e-10).
 
 See `python/tests/test_solver_session.py` and
 `crates/pounce-sensitivity/tests/solver_session.rs` for the full test

@@ -21,6 +21,8 @@ here surface in those public APIs.
 | `cached`        | `Cache<T>` — tagged-key lookup for `IpoptCalculatedQuantities`           | `IpCachedResults.hpp`       |
 | `timing`        | `TimedTask` — wall-clock accumulator                                     | `IpTimingStatistics.{hpp,cpp}` |
 | `utils`         | small helpers (string parsing, etc.)                                     | `IpUtils.{hpp,cpp}`         |
+| `diagnostics`   | `DiagCategory` — per-iteration dump category flags                       | (pounce-only)               |
+| `style`         | tiger/rust color palette for the CLI banner + iteration table            | (pounce-only)               |
 
 ## Conventions
 

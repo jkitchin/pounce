@@ -16,7 +16,7 @@ The script discovers a `pounce` binary at
 `target/release/pounce` or `target/debug/pounce`, falling back to
 `cargo run --release -p pounce-cli` if neither is built.
 
-## Expected results once ripopt fixtures are vendored
+## Expected results on the auxiliary-presolve fixtures
 
 The acceptance criteria from
 [pounce#53](https://github.com/jkitchin/pounce/issues/53) target:
@@ -27,9 +27,8 @@ The acceptance criteria from
 | `tutorial_flow_density_perturbed.nl`   | 6–7 iters | 0 iters                                    |
 | `gaslib11_steady.nl`                   | converges | same objective ± tol, 140/136 vars/cons    |
 
-Vendoring those fixtures is tracked in
-`crates/pounce-cli/tests/fixtures/aux_presolve/README.md`. Once
-present, run:
+Those fixtures are vendored in
+`crates/pounce-cli/tests/fixtures/aux_presolve/`; run:
 
 ```sh
 python benchmarks/preprocessing/run_preprocessing_benchmark.py \
