@@ -12,8 +12,8 @@
 //!    iterations than cold (and typically fewer).
 
 use pounce_convex::{
-    solve_qp_ipm, solve_qp_ipm_warm, QpFactorization, QpOptions, QpProblem, QpStatus,
-    QpWarmStart, Triplet,
+    solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_warm,
+    QpFactorization, QpOptions, QpProblem, QpStatus, QpWarmStart, Triplet,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -186,6 +186,55 @@ fn primal_only_warm_start_is_accepted() {
     for i in 0..pert.n {
         assert!((cold.x[i] - warm.x[i]).abs() < 1e-6);
     }
+}
+
+#[test]
+fn parallel_batch_warm_matches_cold_and_helps() {
+    let opts = QpOptions::default();
+    // A batch of base problems, then a perturbed batch warm-started from
+    // the base solutions.
+    let base: Vec<QpProblem> = (0..6)
+        .map(|k| capped_qp(&[-1.0 - 0.1 * k as f64, -2.0, -0.5], 1.0))
+        .collect();
+    let base_sols = solve_qp_batch_parallel(&base, &opts, backend);
+
+    let pert: Vec<QpProblem> = (0..6)
+        .map(|k| capped_qp(&[-1.05 - 0.1 * k as f64, -1.95, -0.55], 1.05))
+        .collect();
+    let warms: Vec<QpWarmStart> = base_sols.iter().map(QpWarmStart::from_solution).collect();
+
+    let cold = solve_qp_batch_parallel(&pert, &opts, backend);
+    let warm = solve_qp_batch_parallel_warm(&pert, &warms, &opts, backend);
+
+    assert_eq!(cold.len(), 6);
+    assert_eq!(warm.len(), 6);
+    for k in 0..6 {
+        assert_eq!(warm[k].status, QpStatus::Optimal);
+        for i in 0..pert[k].n {
+            assert!(
+                (cold[k].x[i] - warm[k].x[i]).abs() < 1e-6,
+                "batch[{k}] x[{i}]: cold={} warm={}",
+                cold[k].x[i],
+                warm[k].x[i]
+            );
+        }
+        // Per-instance warm start should not regress iterations.
+        assert!(
+            warm[k].iters <= cold[k].iters,
+            "batch[{k}] iters: warm={} cold={}",
+            warm[k].iters,
+            cold[k].iters
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "must equal")]
+fn parallel_batch_warm_mismatched_lengths_panics() {
+    let opts = QpOptions::default();
+    let probs = vec![capped_qp(&[-1.0, -2.0, -0.5], 1.0)];
+    let warms: Vec<QpWarmStart> = Vec::new(); // wrong length
+    let _ = solve_qp_batch_parallel_warm(&probs, &warms, &opts, backend);
 }
 
 #[test]

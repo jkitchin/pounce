@@ -238,6 +238,24 @@ def test_warm_start_same_solution_and_grad():
     np.testing.assert_allclose(np.asarray(g_cold), np.asarray(g_warm), atol=1e-6)
 
 
+def test_solve_qp_batch_warm_same_solution_and_grad():
+    # Batch warm start: same xs and same ∇c as cold; only iterations differ.
+    G = jnp.array([[1.0, 1.0]])
+    cs = jnp.array([[-1.0, -1.0], [-4.0, -4.0], [0.5, 0.5]])
+    hs = jnp.array([[5.0], [1.0], [5.0]])
+
+    cold = solve_qp_batch(P=P, c=cs, G=G, h=hs)
+    warm = solve_qp_batch(P=P, c=cs, G=G, h=hs, warm_start=cold)
+    np.testing.assert_allclose(np.asarray(cold), np.asarray(warm), atol=1e-6)
+
+    def loss(cs_, ws=None):
+        return jnp.sum(solve_qp_batch(P=P, c=cs_, G=G, h=hs, warm_start=ws) ** 2)
+
+    g_cold = jax.grad(lambda cs_: loss(cs_))(cs)
+    g_warm = jax.grad(lambda cs_: loss(cs_, ws=np.asarray(cold)))(cs)
+    np.testing.assert_allclose(np.asarray(g_cold), np.asarray(g_warm), atol=1e-6)
+
+
 def test_solve_qp_batch_grad_shared_P_sums():
     # Gradient w.r.t. the shared P equals the sum of per-instance ∇P.
     cs = jnp.array([[-1.0, -2.0], [-3.0, 0.5]])

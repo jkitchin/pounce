@@ -37,10 +37,32 @@
 //! parallelize on its own. The `make_backend` factory is shared by
 //! reference and called once per instance, so it must be `Sync`.
 
-use crate::ipm::{solve_qp_ipm, QpOptions};
+use crate::ipm::{solve_qp_ipm, solve_qp_ipm_warm, QpOptions, QpWarmStart};
 use crate::qp::{QpProblem, QpSolution};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use rayon::prelude::*;
+
+/// Run `run` under the batch's outer-parallel / inner-serial regime: a
+/// dedicated rayon pool with a 64 MiB worker stack and feral's internal
+/// parallelism disabled (via the process-wide `FERAL_PARALLEL`, saved and
+/// restored). Shared by the cold and warm parallel batch entry points.
+fn with_outer_parallel<R, G>(run: G) -> R
+where
+    G: Fn() -> R + Send,
+    R: Send,
+{
+    let prev = std::env::var("FERAL_PARALLEL").ok();
+    std::env::set_var("FERAL_PARALLEL", "off");
+    let out = match rayon::ThreadPoolBuilder::new().stack_size(64 << 20).build() {
+        Ok(pool) => pool.install(run),
+        Err(_) => run(),
+    };
+    match prev {
+        Some(v) => std::env::set_var("FERAL_PARALLEL", v),
+        None => std::env::remove_var("FERAL_PARALLEL"),
+    }
+    out
+}
 
 /// Solve a batch of convex QPs in parallel, returning one solution per
 /// input in the same order.
@@ -96,28 +118,47 @@ pub fn solve_qp_batch_parallel<F>(
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
 {
-    // Outer-parallel, inner-serial: disable feral's internal rayon use so
-    // the only parallelism is across instances. Saved/restored around the
-    // region. (feral reads FERAL_PARALLEL at backend construction.)
-    let prev = std::env::var("FERAL_PARALLEL").ok();
-    std::env::set_var("FERAL_PARALLEL", "off");
-
-    let run = || -> Vec<QpSolution> {
+    with_outer_parallel(|| {
         probs
             .par_iter()
             .map(|prob| solve_qp_ipm(prob, opts, &make_backend))
             .collect()
-    };
-    let out = match rayon::ThreadPoolBuilder::new().stack_size(64 << 20).build() {
-        Ok(pool) => pool.install(run),
-        Err(_) => run(),
-    };
+    })
+}
 
-    match prev {
-        Some(v) => std::env::set_var("FERAL_PARALLEL", v),
-        None => std::env::remove_var("FERAL_PARALLEL"),
-    }
-    out
+/// Warm-started parallel batch: like [`solve_qp_batch_parallel`] but each
+/// instance is seeded from the corresponding entry of `warms` (typically
+/// the previous step's solutions for a sequence of nearby batches, as in
+/// receding-horizon / training-loop solving). See [`QpWarmStart`] for the
+/// recentering strategy; a warm start only affects an instance's iteration
+/// count, not its solution, and a per-instance dimension mismatch falls
+/// back to that instance's cold start.
+///
+/// # Panics
+/// Panics if `warms.len() != probs.len()`.
+pub fn solve_qp_batch_parallel_warm<F>(
+    probs: &[QpProblem],
+    warms: &[QpWarmStart],
+    opts: &QpOptions,
+    make_backend: F,
+) -> Vec<QpSolution>
+where
+    F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
+{
+    assert_eq!(
+        warms.len(),
+        probs.len(),
+        "warms.len() ({}) must equal probs.len() ({})",
+        warms.len(),
+        probs.len()
+    );
+    with_outer_parallel(|| {
+        probs
+            .par_iter()
+            .zip(warms.par_iter())
+            .map(|(prob, warm)| solve_qp_ipm_warm(prob, opts, warm, &make_backend))
+            .collect()
+    })
 }
 
 /// Solve one QP structure against many linear objectives `c`

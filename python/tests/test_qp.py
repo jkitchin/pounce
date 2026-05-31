@@ -96,6 +96,22 @@ def test_solve_qp_batch_order_and_status():
     assert all(r["status"] == "optimal" for r in res)
 
 
+def test_solve_qp_batch_warm_start():
+    # Per-instance warm starts: same solutions as cold, no iter regression.
+    base_probs = [_box_qp([-float(k), -1.0]) for k in range(4)]
+    base = p.solve_qp_batch(base_probs)
+    pert_probs = [_box_qp([-float(k) - 0.1, -1.05]) for k in range(4)]
+    cold = p.solve_qp_batch(pert_probs)
+    warm = p.solve_qp_batch(pert_probs, warm_starts=base)
+    assert len(warm) == 4
+    for c, w in zip(cold, warm):
+        assert w["status"] == "optimal"
+        np.testing.assert_allclose(
+            np.asarray(w["x"]), np.asarray(c["x"]), atol=1e-6
+        )
+        assert int(w["iters"]) <= int(c["iters"])
+
+
 def test_solve_qp_detects_unbounded():
     # min −x0 with x0 ≥ 0, no upper bound  → unbounded below.
     prob = p.QpProblem(

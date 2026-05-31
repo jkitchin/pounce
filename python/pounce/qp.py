@@ -228,12 +228,17 @@ def solve_qp_batch(
     *,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    warm_starts: Optional[Sequence] = None,
 ) -> list[QpResult]:
     """Solve a batch of convex QPs in parallel (across instances).
 
     ``problems`` is a sequence of kwarg dicts, each accepted by
     :func:`solve_qp` (keys ``P, c, A, b, G, h, lb, ub``). Returns one
     :class:`QpResult` per input, in order.
+
+    ``warm_starts`` (optional) is a sequence — one per problem — of prior
+    :class:`QpResult`\\ s or mappings (for a sequence of nearby batches).
+    Each seeds its instance's iteration; mismatched entries are ignored.
     """
     built = [
         _build(
@@ -248,7 +253,14 @@ def solve_qp_batch(
         )
         for pr in problems
     ]
-    dicts = _pounce.solve_qp_batch(built, tol=tol, max_iter=max_iter)
+    ws = None
+    if warm_starts is not None:
+        if len(warm_starts) != len(built):
+            raise ValueError(
+                f"warm_starts has length {len(warm_starts)}, expected {len(built)}"
+            )
+        ws = [_warm_dict(w) or {} for w in warm_starts]
+    dicts = _pounce.solve_qp_batch(built, tol=tol, max_iter=max_iter, warm_starts=ws)
     return [_to_result(d) for d in dicts]
 
 

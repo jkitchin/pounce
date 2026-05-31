@@ -18,8 +18,8 @@
 
 use numpy::IntoPyArray;
 use pounce_convex::{
-    solve_qp_batch_parallel, solve_qp_ipm, solve_qp_ipm_warm, QpFactorization, QpOptions,
-    QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet,
+    solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_warm,
+    QpFactorization, QpOptions, QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -238,17 +238,39 @@ pub fn solve_qp<'py>(
 
 /// Solve a batch of convex QPs in parallel (across instances). Returns a
 /// list of result dicts in input order. Releases the GIL for the solve.
+///
+/// `warm_starts` (optional) is a list of warm-start mappings (one per
+/// problem, same length as `probs`) — e.g. the previous batch's result
+/// dicts for a sequence of nearby batches. Each only affects its
+/// instance's iteration count; a per-instance mismatch is ignored.
 #[pyfunction]
-#[pyo3(signature = (probs, tol=None, max_iter=None))]
+#[pyo3(signature = (probs, tol=None, max_iter=None, warm_starts=None))]
 pub fn solve_qp_batch<'py>(
     py: Python<'py>,
     probs: Vec<PyQpProblem>,
     tol: Option<f64>,
     max_iter: Option<usize>,
+    warm_starts: Option<Vec<Bound<'py, PyDict>>>,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
     let o = opts(tol, max_iter);
     let inners: Vec<QpProblem> = probs.into_iter().map(|p| p.inner).collect();
-    let sols = py.allow_threads(|| solve_qp_batch_parallel(&inners, &o, backend));
+    let warms: Option<Vec<QpWarmStart>> = match warm_starts {
+        Some(ws) => {
+            if ws.len() != inners.len() {
+                return Err(PyValueError::new_err(format!(
+                    "warm_starts has length {}, expected {} (one per problem)",
+                    ws.len(),
+                    inners.len()
+                )));
+            }
+            Some(ws.iter().map(warm_from_dict).collect::<PyResult<_>>()?)
+        }
+        None => None,
+    };
+    let sols = py.allow_threads(|| match &warms {
+        Some(w) => solve_qp_batch_parallel_warm(&inners, w, &o, backend),
+        None => solve_qp_batch_parallel(&inners, &o, backend),
+    });
     sols.into_iter().map(|s| solution_dict(py, s)).collect()
 }
 

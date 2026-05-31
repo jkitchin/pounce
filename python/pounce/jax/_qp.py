@@ -162,14 +162,20 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     return x, lam, nu
 
 
-def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter):
+def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None):
     """Parallel host-side batch solve. Shared ``P``/``G``/``A``; per-row
-    ``cs``/``hs``/``bs``. Returns stacked (xs, lams, nus)."""
+    ``cs``/``hs``/``bs``. Returns stacked (xs, lams, nus). ``warm_xs`` (if
+    shaped ``(B, n)``) seeds each instance's primal."""
     m_g = G.shape[0]
     m_a = A.shape[0]
     b_sz = cs.shape[0]
+    n = cs.shape[1]
     probs = [_build_problem(P, cs[i], G, hs[i], A, bs[i]) for i in range(b_sz)]
-    dicts = _pounce.solve_qp_batch(probs, tol=tol, max_iter=max_iter)
+    warms = None
+    if warm_xs is not None and np.asarray(warm_xs).shape == (b_sz, n):
+        wx = np.asarray(warm_xs, dtype=np.float64)
+        warms = [{"x": wx[i].tolist()} for i in range(b_sz)]
+    dicts = _pounce.solve_qp_batch(probs, tol=tol, max_iter=max_iter, warm_starts=warms)
     xs = np.stack([np.asarray(d["x"], dtype=np.float64) for d in dicts])
     if m_g:
         lams = np.stack([np.asarray(d["z"], dtype=np.float64) for d in dicts])
@@ -269,25 +275,26 @@ def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter):
     per-row."""
 
     @jax.custom_vjp
-    def qp(P, cs, G, hs, A, bs):
+    def qp(P, cs, G, hs, A, bs, warm_xs):
         xs, _, _ = _pure_forward_batch(
-            P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter
+            P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter
         )
         return xs
 
-    def fwd(P, cs, G, hs, A, bs):
+    def fwd(P, cs, G, hs, A, bs, warm_xs):
         xs, lams, nus = _pure_forward_batch(
-            P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter
+            P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter
         )
-        return xs, (P, G, A, hs, xs, lams, nus)
+        return xs, (P, G, A, hs, xs, lams, nus, warm_xs)
 
     def bwd(res, gxs):
-        P, G, A, hs, xs, lams, nus = res
+        P, G, A, hs, xs, lams, nus, warm_xs = res
         per = jax.vmap(
             lambda h, x, lam, nu, gx: _kkt_backward(P, G, A, h, x, lam, nu, gx)
         )(hs, xs, lams, nus, gxs)
         gP, gc, gG, gh, gA, gb = per
-        # Shared matrices: sum cotangents over the batch axis.
+        # Shared matrices: sum cotangents over the batch axis. Warm start is
+        # not differentiated (start-independent solution).
         return (
             jnp.sum(gP, axis=0),
             gc,
@@ -295,6 +302,7 @@ def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter):
             gh,
             jnp.sum(gA, axis=0),
             gb,
+            jnp.zeros_like(warm_xs),
         )
 
     qp.defvjp(fwd, bwd)
@@ -336,9 +344,10 @@ def _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter):
         return jax.pure_callback(host, shapes, P, c, G, h, A, b, warm_x)
 
 
-def _pure_forward_batch(P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter):
+def _pure_forward_batch(P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter):
     """Parallel-batch forward via a single host callback. Returns stacked
-    (xs, lams, nus)."""
+    (xs, lams, nus). ``warm_xs`` is a non-differentiated warm-start operand
+    (empty trailing dim ⇒ cold)."""
     b_sz = cs.shape[0]
     shapes = (
         jax.ShapeDtypeStruct((b_sz, n), jnp.float64),
@@ -346,7 +355,7 @@ def _pure_forward_batch(P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter):
         jax.ShapeDtypeStruct((b_sz, m_a), jnp.float64),
     )
 
-    def host(P_h, cs_h, G_h, hs_h, A_h, bs_h):
+    def host(P_h, cs_h, G_h, hs_h, A_h, bs_h, w_h):
         return _forward_solve_batch(
             np.asarray(P_h),
             np.asarray(cs_h),
@@ -356,9 +365,10 @@ def _pure_forward_batch(P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter):
             np.asarray(bs_h),
             tol,
             max_iter,
+            warm_xs=np.asarray(w_h),
         )
 
-    return jax.pure_callback(host, shapes, P, cs, G, hs, A, bs)
+    return jax.pure_callback(host, shapes, P, cs, G, hs, A, bs, warm_xs)
 
 
 def _warm_primal(warm_start, n):
@@ -422,6 +432,25 @@ def solve_qp(
     return fn(P, c, G_full, h_full, A0, b0, warm_x)
 
 
+def _warm_primal_batch(warm_start, b_sz, n):
+    """Extract a ``(B, n)`` warm-start primal from a batch result
+    (a ``(B, n)`` array, or a sequence of per-row results/vectors),
+    returning an empty ``(B, 0)`` array (cold) when absent or mismatched."""
+    if warm_start is None:
+        return jnp.zeros((b_sz, 0))
+    arr = warm_start
+    if isinstance(warm_start, (list, tuple)):
+        rows = []
+        for w in warm_start:
+            wx = getattr(w, "x", None)
+            if wx is None:
+                wx = w.get("x") if hasattr(w, "get") else w
+            rows.append(jnp.asarray(wx, dtype=jnp.float64).ravel())
+        arr = jnp.stack(rows) if rows else jnp.zeros((b_sz, 0))
+    arr = jnp.asarray(arr, dtype=jnp.float64)
+    return arr if arr.shape == (b_sz, n) else jnp.zeros((b_sz, 0))
+
+
 def solve_qp_batch(
     *,
     P,
@@ -434,6 +463,7 @@ def solve_qp_batch(
     ub=None,
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    warm_start=None,
 ):
     """Differentiable **parallel** batch of convex QPs sharing structure.
 
@@ -448,6 +478,11 @@ def solve_qp_batch(
     differentiates each instance independently: gradients to the shared
     ``P``/``G``/``A`` sum over the batch; gradients to ``c``/``h``/``b``
     stay per-row. ``∇P`` is the symmetric gradient.
+
+    ``warm_start`` (optional) seeds each instance's iteration: a ``(B, n)``
+    array of primals (e.g. a previous batch's returned ``xs``) or a
+    sequence of per-row results/vectors. It is not differentiated and does
+    not change the solution or its gradients — only the iteration count.
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     cs = jnp.asarray(c, dtype=jnp.float64)
@@ -485,8 +520,9 @@ def solve_qp_batch(
         b_arr = jnp.asarray(b, dtype=jnp.float64)
         bs = jnp.broadcast_to(b_arr, (b_sz, m_a)) if b_arr.ndim == 1 else b_arr
 
+    warm_xs = _warm_primal_batch(warm_start, b_sz, n)
     fn = _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter)
-    return fn(P, cs, G_full, hs, A0, bs)
+    return fn(P, cs, G_full, hs, A0, bs, warm_xs)
 
 
 class QpLayer:
@@ -527,11 +563,12 @@ class QpLayer:
             warm_start=warm_start,
         )
 
-    def batch(self, cs, *, b=None, h=None):
+    def batch(self, cs, *, b=None, h=None, warm_start=None):
         """Solve a parallel batch (rayon) sharing this layer's structure.
 
         ``cs`` has shape ``(B, n)``; ``h``/``b`` may be batched or shared.
-        Differentiable; see :func:`solve_qp_batch`.
+        Pass ``warm_start`` (a ``(B, n)`` array of primals) to seed each
+        instance. Differentiable; see :func:`solve_qp_batch`.
         """
         return solve_qp_batch(
             P=self._P,
@@ -544,4 +581,5 @@ class QpLayer:
             ub=self._ub,
             tol=self._tol,
             max_iter=self._max_iter,
+            warm_start=warm_start,
         )

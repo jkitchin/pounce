@@ -25,7 +25,8 @@ pub mod presolve;
 pub mod qp;
 
 pub use batch::{
-    solve_qp_batch, solve_qp_batch_parallel, solve_qp_multi_rhs, solve_qp_multi_rhs_parallel,
+    solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
+    solve_qp_multi_rhs_parallel,
 };
 pub use ipm::{solve_qp_ipm, solve_qp_ipm_warm, QpFactorization, QpOptions, QpWarmStart};
 pub use qp::{QpProblem, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
