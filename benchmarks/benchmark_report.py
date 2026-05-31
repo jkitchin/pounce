@@ -2,17 +2,17 @@
 """
 Unified benchmark report for POUNCE vs Ipopt.
 
-Reads results from:
-  - benchmarks/cutest/results.json             (CUTEst 727 suite)
-
-Produces a single BENCHMARK_REPORT.md with per-suite and combined statistics.
+For each suite it merges the per-release POUNCE run
+(benchmarks/<suite>/pounce.json) with the committed Ipopt-MA57 reference
+(benchmarks/<suite>/ipopt_ma57.json), both emitted by the shared
+benchmarks/scripts/run_nl_bench.sh .nl driver, and produces a single
+BENCHMARK_REPORT.md with per-suite and combined statistics.
 
 Usage:
     python benchmark_report.py [--output BENCHMARK_REPORT.md]
     python benchmark_report.py --baseline old_report.json  # regression detection
 """
 
-import glob
 import json
 import math
 import os
@@ -33,10 +33,9 @@ def normalize_status(status):
     """Map raw POUNCE/Ipopt status strings to the short labels used in the
     report ('Optimal', 'Acceptable', or the raw status for failures).
 
-    Different suites emit different status conventions: cutest uses the
-    long Ipopt-style enum names (`Solve_Succeeded`,
-    `Solved_To_Acceptable_Level`), while the domain suites already emit
-    the short labels.
+    Suites may emit either the long Ipopt-style enum names
+    (`Solve_Succeeded`, `Solved_To_Acceptable_Level`) or the short
+    labels; both are normalized here.
     """
     if status in _OPTIMAL_STATUSES:
         return 'Optimal'
@@ -103,72 +102,21 @@ def compute_stats(diffs):
 
 # ---- Load results ----
 
-def load_cutest_results(path=None):
-    """Load CUTEst results (single file with solver field)."""
-    if path is None:
-        path = os.path.join(SCRIPT_DIR, 'cutest', 'results.json')
-
+def _read_records(path):
+    """Read a results JSON array, or [] when the file is absent/empty."""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return None
-
+        return []
     with open(path) as f:
-        data = json.load(f)
+        return json.load(f)
 
+
+def _build_comparisons(records, suite_name):
+    """Build the canonical comparison list from a flat list of
+    {solver,name,n,m,status,objective,iterations,solve_time} records
+    (any mix of pounce and ipopt rows)."""
     pounce_by_name = {}
     ipopt_by_name = {}
-    for r in data:
-        if r['solver'] == 'pounce':
-            pounce_by_name[r['name']] = r
-        elif r['solver'] == 'ipopt':
-            ipopt_by_name[r['name']] = r
-
-    comparisons = []
-    for name in sorted(set(pounce_by_name.keys()) | set(ipopt_by_name.keys())):
-        rr = pounce_by_name.get(name, {})
-        cr = ipopt_by_name.get(name, {})
-
-        r_solved = is_solved(rr.get('status', ''))
-        c_solved = is_solved(cr.get('status', ''))
-        both = r_solved and c_solved
-        od = obj_diff(rr.get('objective'), cr.get('objective')) if both else float('nan')
-
-        comparisons.append({
-            'name': name,
-            'suite': 'CUTEst',
-            'n': rr.get('n', cr.get('n', 0)),
-            'm': rr.get('m', cr.get('m', 0)),
-            'pounce_status': normalize_status(rr.get('status', 'N/A')),
-            'ipopt_status': normalize_status(cr.get('status', 'N/A')),
-            'pounce_obj': rr.get('objective', float('nan')),
-            'ipopt_obj': cr.get('objective', float('nan')),
-            'obj_diff': od,
-            'pounce_iters': rr.get('iterations', 0),
-            'ipopt_iters': cr.get('iterations', 0),
-            'pounce_time': rr.get('solve_time', 0),
-            'ipopt_time': cr.get('solve_time', 0),
-            'pounce_solved': r_solved,
-            'ipopt_solved': c_solved,
-            'both_solved': both,
-            'passed': both and not math.isnan(od) and od < 1e-4,
-        })
-
-    return comparisons
-
-
-def load_domain_results(path, suite_name):
-    """Load domain-specific benchmark results (electrolyte, Grid, CHO).
-
-    These use the same JSON format as CUTEst: [{solver, name, n, m, status, objective, iterations, solve_time}].
-    """
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return None
-
-    with open(path) as f:
-        data = json.load(f)
-
-    pounce_by_name = {}
-    ipopt_by_name = {}
-    for r in data:
+    for r in records:
         if r['solver'] == 'pounce':
             pounce_by_name[r['name']] = r
         elif r['solver'] == 'ipopt':
@@ -204,7 +152,25 @@ def load_domain_results(path, suite_name):
             'passed': both and not math.isnan(od) and od < 1e-4,
         })
 
-    return comparisons if comparisons else None
+    return comparisons
+
+
+def load_suite(suite_name, dirname):
+    """Load one .nl suite by merging its per-release pounce run with the
+    saved ipopt-ma57 reference.
+
+    Reads benchmarks/<dirname>/pounce.json (regenerated every release) and
+    benchmarks/<dirname>/ipopt_ma57.json (committed reference, run rarely).
+    Returns (comparisons, has_pounce, has_ipopt); comparisons is None when
+    neither file is present.
+    """
+    base = os.path.join(SCRIPT_DIR, dirname)
+    pounce = _read_records(os.path.join(base, 'pounce.json'))
+    ipopt = _read_records(os.path.join(base, 'ipopt_ma57.json'))
+    if not pounce and not ipopt:
+        return None, False, False
+    comps = _build_comparisons(pounce + ipopt, suite_name)
+    return (comps if comps else None), bool(pounce), bool(ipopt)
 
 
 def _make_comparison(name, suite, n, m, p_status, i_status, p_obj, i_obj,
@@ -235,223 +201,6 @@ def _make_comparison(name, suite, n, m, p_status, i_status, p_obj, i_obj,
         'both_solved': both,
         'passed': both and not math.isnan(od) and od < 1e-4,
     }
-
-
-def load_large_scale_results():
-    """Parse large_scale_results.txt.
-
-    The harness emits human-readable log lines of the form
-
-        ChainedRosenbrock (n=200, m=0) ... Solve_Succeeded iters=146 obj=1.000000e0 (34.0 ms)
-
-    repeated for each problem at each ramp scale. POUNCE-only — the
-    suite does not currently run Ipopt.
-    """
-    path = os.path.join(SCRIPT_DIR, 'large_scale', 'large_scale_results.txt')
-    if not os.path.exists(path):
-        return None
-
-    import re
-    line_re = re.compile(
-        r'^\s*(\w+)\s+\(n=(\d+),\s*m=(\d+)\)\s*\.\.\.\s*'
-        r'(\w+)\s+iters=(\d+)\s+obj=([-\d.eE+]+)\s+\(([\d.]+)\s*ms\)\s*$'
-    )
-    scale_re = re.compile(r'^----\s*scale\s*=\s*([\d.]+)')
-
-    results = []
-    current_scale = None
-    with open(path) as f:
-        for line in f:
-            sm = scale_re.match(line)
-            if sm:
-                current_scale = sm.group(1)
-                continue
-            m = line_re.match(line)
-            if not m:
-                continue
-            name = m.group(1)
-            if current_scale is not None:
-                name = f'{name}@s{current_scale}'
-            n = int(m.group(2))
-            mm = int(m.group(3))
-            results.append(_make_comparison(
-                name=name, suite='LargeScale',
-                n=n, m=mm,
-                p_status=m.group(4),
-                i_status='N/A',
-                p_obj=float(m.group(6)),
-                i_obj=None,
-                p_iters=int(m.group(5)),
-                i_iters=0,
-                p_time=float(m.group(7)) / 1000.0,
-                i_time=0,
-            ))
-
-    return results if results else None
-
-
-def load_mittelmann_results():
-    """Load mittelmann results JSON.
-
-    Uses an LP/QP-specific schema: `problem`, `solver`, `status` ('OK'),
-    `rc`, `elapsed`, `objective`, `iterations`. POUNCE-only (no Ipopt
-    counterpart in the same JSON).
-    """
-    results_dir = os.path.join(SCRIPT_DIR, 'mittelmann', 'results')
-    candidates = sorted(glob.glob(os.path.join(results_dir, 'pounce_*.json')),
-                        key=os.path.getmtime)
-    if not candidates:
-        return None
-    path = candidates[-1]
-    with open(path) as f:
-        data = json.load(f)
-
-    results = []
-    for r in data:
-        if r.get('solver') != 'pounce':
-            continue
-        raw = r.get('status', 'N/A')
-        # mittelmann driver writes 'OK' for success
-        status = 'Optimal' if raw == 'OK' else raw
-        results.append(_make_comparison(
-            name=r['problem'], suite='Mittelmann',
-            n=0, m=0,
-            p_status=status,
-            i_status='N/A',
-            p_obj=r.get('objective'),
-            i_obj=None,
-            p_iters=r.get('iterations', 0),
-            i_iters=0,
-            p_time=r.get('elapsed', 0.0),
-            i_time=0,
-        ))
-    return results if results else None
-
-
-# ---- GAMS nlpbench loader ----
-
-# GAMS trace CSV column indices (zero-based) for the GamsSolve format
-# used by `gams/nlpbench/runsolver/*.csv`.
-_GAMS_COL_NAME = 0
-_GAMS_COL_NEQ = 7
-_GAMS_COL_NVAR = 8
-_GAMS_COL_MSTAT = 13
-_GAMS_COL_SSTAT = 14
-_GAMS_COL_OBJ = 15
-_GAMS_COL_TIME = 17
-_GAMS_COL_ITERS = 18
-
-
-def _parse_gams_csv(path):
-    """Return {name -> (n, m, mstat, sstat, obj, time, iters)} for one
-    GAMS trace CSV.
-    """
-    rows = {}
-    if not os.path.exists(path):
-        return rows
-    with open(path) as f:
-        for raw in f:
-            line = raw.rstrip('\n')
-            if not line or line.startswith('*'):
-                continue
-            parts = line.split(',')
-            if len(parts) <= _GAMS_COL_ITERS:
-                continue
-            name = parts[_GAMS_COL_NAME]
-            def _num(s, cast):
-                s = s.strip()
-                if not s or s == 'NA':
-                    return cast(0) if cast is int else float('nan')
-                try:
-                    return cast(s)
-                except ValueError:
-                    return cast(0) if cast is int else float('nan')
-            rows[name] = {
-                'n': _num(parts[_GAMS_COL_NVAR], int),
-                'm': _num(parts[_GAMS_COL_NEQ], int),
-                'mstat': _num(parts[_GAMS_COL_MSTAT], int),
-                'sstat': _num(parts[_GAMS_COL_SSTAT], int),
-                'obj': _num(parts[_GAMS_COL_OBJ], float),
-                'time': _num(parts[_GAMS_COL_TIME], float),
-                'iters': _num(parts[_GAMS_COL_ITERS], int),
-            }
-    return rows
-
-
-def _gams_solved(mstat, sstat):
-    """GAMS 'solved' predicate from the nlpbench reports:
-    ModelStatus in {1,2} (optimal / locally optimal) AND
-    SolverStatus in {1,2} (normal / iteration interrupt).
-    """
-    return mstat in (1, 2) and sstat in (1, 2)
-
-
-def _gams_status_label(mstat, sstat):
-    if _gams_solved(mstat, sstat):
-        return 'Optimal'
-    if sstat == 3:
-        return 'Timeout'
-    if sstat == 4:
-        return 'TerminatedBySolver'
-    return f'GAMS_ms{mstat}_ss{sstat}'
-
-
-def load_gams_results():
-    """Load all paired pounce+ipopt GAMS trace CSVs from
-    `gams/nlpbench/runsolver/`.
-
-    Returns one combined GAMS suite (all testsets concatenated) so it
-    appears as a single row in the per-suite summary, mirroring how
-    CUTEst is presented.
-    """
-    base = os.path.join(os.path.dirname(SCRIPT_DIR), 'gams', 'nlpbench', 'runsolver')
-    if not os.path.isdir(base):
-        return None
-
-    import glob
-    pounce_files = sorted(glob.glob(os.path.join(base, '*_pounce.csv')))
-    if not pounce_files:
-        return None
-
-    results = []
-    for pp in pounce_files:
-        base_name = os.path.basename(pp)[:-len('_pounce.csv')]
-        ip = os.path.join(base, base_name + '_ipopt.csv')
-        p_rows = _parse_gams_csv(pp)
-        i_rows = _parse_gams_csv(ip)
-        all_names = sorted(set(p_rows) | set(i_rows))
-        for name in all_names:
-            p = p_rows.get(name)
-            i = i_rows.get(name)
-            if p is None and i is None:
-                continue
-            if p is None:
-                p_status, p_obj, p_iters, p_time, n, m = 'N/A', None, 0, 0, 0, 0
-            else:
-                p_status = _gams_status_label(p['mstat'], p['sstat'])
-                p_obj = p['obj']
-                p_iters = p['iters']
-                p_time = p['time']
-                n, m = p['n'], p['m']
-            if i is None:
-                i_status, i_obj, i_iters, i_time = 'N/A', None, 0, 0
-            else:
-                i_status = _gams_status_label(i['mstat'], i['sstat'])
-                i_obj = i['obj']
-                i_iters = i['iters']
-                i_time = i['time']
-                if n == 0: n = i['n']
-                if m == 0: m = i['m']
-            results.append(_make_comparison(
-                name=f'{base_name}/{name}',
-                suite='GAMS',
-                n=n, m=m,
-                p_status=p_status, i_status=i_status,
-                p_obj=p_obj, i_obj=i_obj,
-                p_iters=p_iters, i_iters=i_iters,
-                p_time=p_time, i_time=i_time,
-            ))
-    return results if results else None
 
 
 def is_solved_norm(status):
@@ -564,29 +313,155 @@ def collect_provenance():
     if git_dirty:
         git_sha = f'{git_sha}-dirty'
 
-    # ipopt-ma57 from the install-ma57 prefix (preferred); fall back to
-    # whatever ipopt is on PATH.
-    ipopt_bin = os.path.join(os.path.dirname(SCRIPT_DIR), 'ref', 'Ipopt',
-                             'install-ma57', 'bin', 'ipopt')
-    if not os.path.exists(ipopt_bin):
-        ipopt_bin = 'ipopt'
-    ipopt_version_line = _run([ipopt_bin, '--version']).splitlines()
-    ipopt_version = ipopt_version_line[0] if ipopt_version_line else 'unknown'
+    # Ipopt is no longer run during a release — its results come from the
+    # committed reference. Read that reference's provenance stamp
+    # (benchmarks/ipopt_ma57.provenance.json, written by
+    # `make ipopt-reference`) so the report attributes the Ipopt column to
+    # the machine/binary that actually produced it, not the current host.
+    ipopt_version = 'no saved reference'
+    ipopt_linear_solver = 'ma57 (via ref/Ipopt/install-ma57)'
+    ipopt_reference = None
+    prov_path = os.path.join(SCRIPT_DIR, 'ipopt_ma57.provenance.json')
+    if os.path.exists(prov_path):
+        try:
+            with open(prov_path) as f:
+                ref = json.load(f)
+            ipopt_version = ref.get('ipopt_version', 'unknown')
+            ipopt_linear_solver = ref.get('linear_solver', ipopt_linear_solver)
+            ipopt_reference = (f"generated {ref.get('generated', '?')} on "
+                               f"{ref.get('host', '?')} ({ref.get('platform', '?')}), "
+                               f"git {ref.get('git_sha', '?')}, "
+                               f"timelimit {ref.get('timelimit', '?')}s")
+        except (OSError, ValueError):
+            pass
 
-    # Linear-solver labels for the Ipopt route. The MA57 install links
-    # libcoinhsl directly, so any Ipopt run goes through MA57. Pounce
-    # default is FERAL — pounce-ma57 is the MA57-feature build (not the
-    # default).
+    # Pounce default linear solver is FERAL — pounce-ma57 is the
+    # MA57-feature build (not the default).
     return {
         'pounce_version': pounce_version,
         'pounce_linear_solver': 'feral (default)',
         'ipopt_version': ipopt_version,
-        'ipopt_linear_solver': 'ma57 (via ref/Ipopt/install-ma57)',
+        'ipopt_linear_solver': ipopt_linear_solver,
+        'ipopt_reference': ipopt_reference,
         'git_sha': git_sha,
         'git_branch': git_branch,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z').strip(),
         'platform': _run(['uname', '-srm']),
     }
+
+
+def load_cute_status():
+    """Per-problem reference status for the Vanderbei suite, from
+    vanderbei/cute_table_status.json (derived from cute_table.pdf).
+    Returns {name -> entry} or None."""
+    path = os.path.join(SCRIPT_DIR, 'vanderbei', 'cute_table_status.json')
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f).get('problems', {})
+
+
+# cute_table status → display order for the cross-check table.
+_CUTE_ORDER = ['optimum', 'hard', 'infeasible', 'unbounded', 'untabulated']
+
+
+def vanderbei_crosscheck_lines(comps):
+    """Cross-check the Vanderbei POUNCE results against cute_table.pdf:
+    report the expected-solvable denominator (problems with a documented
+    finite optimum), break out the known hard / infeasible / unbounded /
+    untabulated problems, and flag objectives that disagree with the
+    literature reference."""
+    status = load_cute_status()
+    if not status:
+        return []
+
+    buckets = {k: [] for k in _CUTE_ORDER}
+    for c in comps:
+        s = status.get(c['name'], {}).get('status', 'untabulated')
+        buckets.setdefault(s, []).append(c)
+
+    expected = buckets['optimum']
+    n_exp = len(expected)
+    solved_exp = [c for c in expected if c['pounce_solved']]
+    missed_exp = [c for c in expected if not c['pounce_solved']]
+
+    # Objective cross-check: only flag when the three reference solvers
+    # agreed among themselves (a single basin) and POUNCE landed elsewhere —
+    # otherwise a difference just means multiple local optima.
+    mism = []
+    for c in solved_exp:
+        e = status.get(c['name'], {})
+        ref = e.get('ref_obj')
+        if ref is None or not e.get('solvers_agree'):
+            continue
+        po = c['pounce_obj']
+        if po is None or (isinstance(po, float) and math.isnan(po)):
+            continue
+        rel = abs(po - ref) / max(1.0, abs(ref))
+        if rel > 1e-3:
+            mism.append((c['name'], po, ref, rel))
+
+    lines = []
+    lines.append("## Vanderbei Reference Cross-Check")
+    lines.append("")
+    lines.append("Per-problem status from R. Vanderbei's `cute_table.pdf` "
+                 "(`vanderbei/cute_table_status.json`). The meaningful "
+                 "denominator is the **expected-solvable** set — problems with a "
+                 "documented finite optimum — not all 733: the CUTE collection "
+                 "deliberately includes unbounded, infeasible, and no-solver-finishes "
+                 "problems.")
+    lines.append("")
+    lines.append("| cute_table status | problems | POUNCE solved | meaning |")
+    lines.append("|---|---|---|---|")
+    meanings = {
+        'optimum': 'finite reference optimum exists (expected-solvable)',
+        'hard': 'in table, but SNOPT+NITRO+LOQO all hit time/iter limits',
+        'infeasible': 'a reference solver declared infeasibility',
+        'unbounded': 'unbounded below',
+        'untabulated': 'not in cute_table — no reference datum',
+    }
+    for s in _CUTE_ORDER:
+        b = buckets.get(s, [])
+        if not b:
+            continue
+        ns = sum(1 for c in b if c['pounce_solved'])
+        lines.append(f"| {s} | {len(b)} | {ns} | {meanings[s]} |")
+    lines.append("")
+
+    pct = 100.0 * len(solved_exp) / n_exp if n_exp else 0.0
+    lines.append(f"**POUNCE solved {len(solved_exp)} / {n_exp} expected-solvable "
+                 f"({pct:.1f}%).** The hard / infeasible / unbounded / untabulated "
+                 "rows above are excluded from this denominator — a POUNCE failure "
+                 "there is shared with the commercial reference solvers and is not "
+                 "counted as a miss.")
+    lines.append("")
+
+    if missed_exp:
+        names = " ".join(sorted(c['name'] for c in missed_exp))
+        lines.append(f"**Genuine misses — expected-solvable but POUNCE did not "
+                     f"reach Optimal ({len(missed_exp)}):**")
+        lines.append("")
+        lines.append(f"> {names}")
+        lines.append("")
+
+    if mism:
+        lines.append(f"**Objective disagreements vs. cute_table reference "
+                     f"({len(mism)})** — POUNCE converged but to a different value "
+                     "than the agreed reference optimum (possible wrong basin or "
+                     "misread problem):")
+        lines.append("")
+        lines.append("| Problem | POUNCE obj | reference obj | rel. diff |")
+        lines.append("|---|---|---|---|")
+        for name, po, ref, rel in sorted(mism, key=lambda x: -x[3]):
+            lines.append(f"| {name} | {po:.6e} | {ref:.6e} | {rel:.1e} |")
+        lines.append("")
+    else:
+        lines.append("All solved expected-solvable objectives agree with the "
+                     "cute_table reference (where the reference solvers themselves "
+                     "agreed).")
+        lines.append("")
+
+    return lines
 
 
 def generate_report(suites, output_path, baseline=None):
@@ -607,10 +482,19 @@ def generate_report(suites, output_path, baseline=None):
     lines.append(f"| Ipopt linear solver | {prov['ipopt_linear_solver']} |")
     lines.append(f"| Platform | {prov['platform']} |")
     lines.append("")
-    lines.append("Suites in this report were each produced by their respective")
-    lines.append("`make -C benchmarks <suite>-run` target. GAMS results are sourced from")
-    lines.append("`gams/nlpbench/runsolver/*.csv` and use GAMS's bundled linear solver,")
-    lines.append("not the Ipopt install above.")
+    lines.append("POUNCE results were produced this run by `make -C benchmarks")
+    lines.append("<suite>-run` (pounce only). The Ipopt column is a saved reference")
+    lines.append("(`make -C benchmarks ipopt-reference`), rerun only when explicitly")
+    if prov.get('ipopt_reference'):
+        lines.append(f"regenerated — {prov['ipopt_reference']}. Ipopt solve *times* are")
+        lines.append("from that reference machine and only comparable to POUNCE when this")
+        lines.append("report is generated on the same host.")
+    else:
+        lines.append("regenerated. No saved reference is present, so suites without one")
+        lines.append("are reported POUNCE-only.")
+    lines.append("")
+    lines.append("The GAMS solver-link path is exercised separately as a liveness")
+    lines.append("smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.")
     lines.append("")
 
     # Combined summary
@@ -661,6 +545,12 @@ def generate_report(suites, output_path, baseline=None):
             f"| {s['passed']}/{max(s['both'],1)} |"
         )
     lines.append("")
+
+    # Vanderbei cross-check against the cute_table reference (if present).
+    for name, comps in suites:
+        if name == 'Vanderbei':
+            lines.extend(vanderbei_crosscheck_lines(comps))
+            break
 
     # Per-suite speed and iteration stats
     for name, comps in suites:
@@ -929,52 +819,52 @@ def main():
     # Load all suites
     suites = []
 
-    cutest = load_cutest_results()
-    if cutest:
-        suites.append(("CUTEst", cutest))
-        print(f"CUTEst suite: {len(cutest)} problems loaded")
-    else:
-        print("CUTEst suite: no results found (run `make cutest-run` first)")
-
-    # The .nl-driven suites all emit results.json via the shared
-    # benchmarks/scripts/run_nl_bench.sh driver. Same canonical
-    # {solver,name,n,m,status,objective,iterations,solve_time} shape.
+    # Every suite is .nl-driven. load_suite() merges the per-release
+    # pounce.json with the committed ipopt_ma57.json reference, both in the
+    # canonical {solver,name,n,m,status,objective,iterations,solve_time}
+    # shape. Vanderbei (the AMPL transliteration of CUTE) replaces the
+    # retired compiled CUTEst suite; large_scale is now generated as .nl by
+    # benchmarks/large_scale/generate_nl.py rather than a Rust harness.
+    missing_reference = []
     for suite_name, dirname, make_target in (
+        ('Vanderbei',   'vanderbei',   'vanderbei-run'),
         ('Electrolyte', 'electrolyte', 'electrolyte-run'),
         ('Grid',        'grid',        'grid-run'),
         ('CHO',         'cho',         'cho-run'),
         ('Water',       'water',       'water-run'),
         ('Gas',         'gas',         'gas-run'),
+        ('LargeScale',  'large_scale', 'large-scale'),
+        ('Mittelmann',  'mittelmann',  'mittelmann-run'),
+        ('QP',          'qp',          'qp-run'),
+        ('LP',          'lp',          'lp-run'),
+        ('LPopt',       'lpopt',       'lpopt-run'),
     ):
-        path = os.path.join(SCRIPT_DIR, dirname, 'results.json')
-        suite = load_domain_results(path, suite_name)
+        suite, has_pounce, has_ipopt = load_suite(suite_name, dirname)
         if suite:
             suites.append((suite_name, suite))
-            print(f"{suite_name} suite: {len(suite)} records loaded")
+            ref = 'pounce + ipopt-ma57 reference' if has_ipopt else 'POUNCE-only (no ipopt reference)'
+            print(f"{suite_name} suite: {len(suite)} records loaded — {ref}")
+            if has_pounce and not has_ipopt:
+                missing_reference.append((suite_name, dirname))
         else:
-            print(f"{suite_name} suite: no results at {path} "
+            print(f"{suite_name} suite: no results "
                   f"(run `make -C benchmarks {make_target}` first)")
 
-    mitt = load_mittelmann_results()
-    if mitt:
-        suites.append(("Mittelmann", mitt))
-        print(f"Mittelmann suite: {len(mitt)} problems loaded")
-    else:
-        print("Mittelmann suite: no results found (run `make mittelmann-run` first)")
+    if missing_reference:
+        print()
+        print("NOTE: no saved ipopt-ma57 reference for: "
+              + ", ".join(n for n, _ in missing_reference) + ".")
+        print("      These suites are reported POUNCE-only. Generate the "
+              "reference once with `make -C benchmarks ipopt-reference` "
+              "(or per suite, `ipopt-ref-<suite>`) and commit it.")
 
-    ls = load_large_scale_results()
-    if ls:
-        suites.append(("LargeScale", ls))
-        print(f"LargeScale suite: {len(ls)} problems loaded")
-    else:
-        print("LargeScale suite: no results found (run `make large-scale` first)")
-
-    gams = load_gams_results()
-    if gams:
-        suites.append(("GAMS", gams))
-        print(f"GAMS suite: {len(gams)} problems loaded")
-    else:
-        print("GAMS suite: no nlpbench CSVs found")
+    # GAMS nlpbench is no longer aggregated as a benchmark suite. Its
+    # problem coverage duplicates the .nl suites (princetonlib ≈ vanderbei,
+    # GAMS mittelmann ≈ ampl-nlp mittelmann/, powerflow ≈ grid/) and it was
+    # compared on the same pounce-vs-ipopt axis as everything else. The
+    # GAMS solver-link path is now exercised only as a liveness smoke check
+    # via `make -C benchmarks gams-bench` (gams/nlpbench `bench-smoke`),
+    # which does not feed this report.
 
     if not suites:
         print("No benchmark results found. Run `make benchmark` first.")

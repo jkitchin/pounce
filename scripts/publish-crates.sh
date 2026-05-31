@@ -19,7 +19,8 @@
 # workspace-deps refactor (Cargo.toml: [workspace.dependencies] with
 # version= entries) means cargo accepts the path deps for registry
 # publication. Crates already marked `publish = false` (pounce-py,
-# pounce-cutest, pounce-large-scale, iter-diff) are not in this list.
+# iter-diff) are not in this list. (The benchmark crates pounce-cutest
+# and pounce-large-scale were retired when those suites moved to .nl.)
 
 set -euo pipefail
 

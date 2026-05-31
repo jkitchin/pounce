@@ -13,311 +13,347 @@ REPO_ROOT := $(shell cd .. && pwd)
 CARGO_MANIFEST := $(REPO_ROOT)/Cargo.toml
 CARGO := cargo
 
-# ---- libipopt for FFI harnesses (cutest, large_scale) --------------------
-# Both crates' build.rs scripts call `pkg-config --libs-only-L ipopt`. The
-# default Homebrew install resolves to a MUMPS-linked Ipopt, which mixes
-# linear solvers when we benchmark against POUNCE-MA57. Override here to
-# pick up the locally-built MA57 install at ref/Ipopt/install-ma57/. The
-# CoinHSL pkgconfig dir is also added so `Requires: coinhsl` in ipopt.pc
-# resolves. Both build.rs scripts declare `rerun-if-env-changed=PKG_CONFIG_PATH`
-# so flipping this variable triggers a rebuild.
+# ---- ipopt-ma57 for the .nl-driven suites --------------------------------
+# Every suite is now .nl-driven and compares against the locally-built
+# MA57 Ipopt AMPL executable at ref/Ipopt/install-ma57/bin/ipopt (built
+# by `make -C mittelmann build-ipopt-ma57`). This matches POUNCE-MA57
+# against the same linear-solver family. No pkg-config / libipopt FFI is
+# needed any more — the compiled CUTEst and large_scale Rust harnesses
+# that linked libipopt have been retired.
 IPOPT_MA57_INSTALL ?= $(REPO_ROOT)/ref/Ipopt/install-ma57
-COINHSL_DIR        ?= /Users/jkitchin/Dropbox/projects/CoinHSL.v2023.11.17.aarch64-apple-darwin-libgfortran5
-IPOPT_MA57_PKGCONFIG := $(IPOPT_MA57_INSTALL)/lib/pkgconfig
-COINHSL_PKGCONFIG    := $(COINHSL_DIR)/lib/pkgconfig
-# Prepend our two dirs; preserve any caller-supplied PKG_CONFIG_PATH.
-export PKG_CONFIG_PATH := $(IPOPT_MA57_PKGCONFIG):$(COINHSL_PKGCONFIG):$(PKG_CONFIG_PATH)
-# ipopt-ma57 AMPL executable for .nl-driven suites (electrolyte, grid,
-# water, gas, cho, mittelmann). Built by `make -C mittelmann build-ipopt-ma57`.
 IPOPT_MA57_BIN     ?= $(IPOPT_MA57_INSTALL)/bin/ipopt
+# Ipopt's compiled default linear solver is ma27 even in this HSL build,
+# so the driver passes `linear_solver=$(IPOPT_LINEAR_SOLVER)` explicitly —
+# otherwise the "ma57" reference would silently run ma27. Exported so the
+# run_nl_bench.sh sub-shells pick it up.
+IPOPT_LINEAR_SOLVER ?= ma57
+export IPOPT_LINEAR_SOLVER
 
-.PHONY: help benchmark benchmark-rerun benchmark-report \
-	check-ipopt-ma57-link build-ipopt-ma57 \
-	cutest cutest-ensure-toolchain cutest-prepare cutest-prepare-full cutest-run cutest-rerun cutest-full cutest-report cutest-smoke cutest-large cutest-maxiter \
+.PHONY: help benchmark benchmark-rerun benchmark-report build-ipopt-ma57 \
+	vanderbei-run vanderbei-rerun \
 	electrolyte-run electrolyte-rerun grid-run grid-rerun cho-run cho-rerun \
-	large-scale large-scale-rerun mittelmann-run mittelmann-rerun \
+	large-scale large-scale-generate large-scale-rerun \
+	mittelmann-run mittelmann-rerun mittelmann-translate \
 	gas-run gas-rerun water-run water-rerun \
+	qp-run qp-rerun qp-generate \
+	lp-run lp-rerun lp-generate \
+	lpopt-run lpopt-rerun lpopt-generate \
+	ipopt-reference ipopt-reference-provenance \
+	$(addprefix ipopt-ref-,$(REF_SUITES)) \
 	gams-bench gams-rerun \
-	clean-bench clean-bench-cutest clean-bench-large-scale clean-bench-nl clean-bench-report
-
-# CUTEst toolchain auto-install guard. Used as a dependency for every
-# cutest-* target so a fresh clone "just works": missing toolchain
-# triggers setup_cutest.sh, present toolchain is a no-op.
-CUTEST_ROOT_DIR := $(if $(CUTEST_ROOT),$(CUTEST_ROOT),$(HOME)/.local/cutest)
-CUTEST_TRAMPOLINE := $(CUTEST_ROOT_DIR)/cutest/src/tools/cutest_trampoline.f90
-
-cutest-ensure-toolchain:
-	@if [ ! -f "$(CUTEST_TRAMPOLINE)" ]; then \
-		echo "CUTEst toolchain not found at $(CUTEST_ROOT_DIR); running setup_cutest.sh..."; \
-		bash $(REPO_ROOT)/benchmarks/cutest/setup_cutest.sh; \
-	fi
+	clean-bench clean-bench-large-scale clean-bench-nl clean-bench-report
 
 # Show available targets
 help:
 	@echo "Benchmark suite targets (run from benchmarks/ or via root Makefile shims)."
 	@echo ""
-	@echo "  benchmark         Incremental sweep: only suites whose results.json is missing/stale rerun, then composite report"
-	@echo "  benchmark-rerun   Wipe all results then full rebuild (force everything)"
+	@echo "  benchmark         Release sweep: rerun pounce on each suite (incremental), then composite report"
+	@echo "  benchmark-rerun   Wipe all pounce results then full rebuild (force everything)"
 	@echo "  benchmark-report  Regenerate benchmarks/BENCHMARK_REPORT.md only (no suites rerun)"
 	@echo ""
-	@echo "Per-suite targets (each *-run is incremental; *-rerun wipes its results.json then runs):"
+	@echo "The ipopt-ma57 reference is decoupled from releases — run it once and commit it:"
+	@echo "  ipopt-reference        Run ipopt-ma57 on every suite -> committed <suite>/ipopt_ma57.json + provenance"
+	@echo "  ipopt-ref-<suite>      Refresh the ipopt reference for one suite only"
+	@echo "  (releases run pounce only; the report compares against the saved reference)"
 	@echo ""
-	@echo "  cutest            Full CUTEst pipeline: prepare, run, report"
-	@echo "  cutest-prepare    Compile SIF problems to .dylib/.so (problem_list.txt, 727)"
-	@echo "  cutest-prepare-full  Compile all SIF problems (problem_list_full.txt, 1542)"
-	@echo "  cutest-run        Run CUTEst benchmark (skip if results.json is up-to-date)"
-	@echo "  cutest-rerun      Wipe cutest/results.json then run"
-	@echo "  cutest-full       Full CUTEst benchmark (all 1542 SIF problems; always rebuilds)"
-	@echo "  cutest-smoke      Quick smoke test (~20 problems; always rebuilds)"
-	@echo "  cutest-large      Large problems (n+m >= 100, sparse path; always rebuilds)"
-	@echo "  cutest-maxiter    Re-run MaxIterations failures (always rebuilds)"
-	@echo "  cutest-report     Generate comparison report from results.json"
+	@echo "Per-suite pounce targets (each *-run is incremental; *-rerun wipes its pounce.json then runs):"
 	@echo ""
+	@echo "  vanderbei-run   / -rerun   Vanderbei CUTE-in-AMPL .nl suite (733 problems)"
 	@echo "  electrolyte-run / -rerun   Electrolyte thermodynamics benchmark"
 	@echo "  grid-run        / -rerun   AC optimal power flow (electrical grid) benchmark"
 	@echo "  cho-run         / -rerun   CHO parameter estimation benchmark"
-	@echo "  large-scale     / large-scale-rerun  Hand-written synthetic large-scale NLPs"
-	@echo "  mittelmann-run  / -rerun   Mittelmann ampl-nlp .nl suite (delegates to mittelmann/Makefile)"
+	@echo "  large-scale     / large-scale-rerun  Synthetic large-scale NLPs (.nl from generate_nl.py)"
+	@echo "  large-scale-generate       (Re)generate the large_scale .nl files only (needs pyomo)"
+	@echo "  mittelmann-run  / -rerun   Mittelmann ampl-nlp .nl suite (shared driver; .nl via mittelmann-translate)"
 	@echo "  gas-run         / -rerun   Gas pipeline NLPs (AMPL .nl files)"
 	@echo "  water-run       / -rerun   Water distribution network NLPs (AMPL .nl files)"
-	@echo "  gams-bench      / gams-rerun  GAMS NLP bench (gams/nlpbench delegate)"
+	@echo "  qp-run          / -rerun   Maros-Meszaros convex QP suite (.nl from generate_nl.py)"
+	@echo "  qp-generate                (Re)generate the qp .nl files only (needs pyomo/scipy; downloads .mat)"
+	@echo "  lp-run          / -rerun   Netlib + small Meszaros LP validation set (.nl from generate_nl.py)"
+	@echo "  lp-generate                (Re)generate the lp .nl files only (needs highspy/pyomo; downloads MPS)"
+	@echo "  lpopt-run       / -rerun   HARD Mittelmann lpopt LP subset (stress tier; use BENCH_TIMELIMIT=1800)"
+	@echo "  lpopt-generate             (Re)generate the lpopt .nl files only (downloads MPS from plato lptestset)"
+	@echo "  gams-bench      / gams-rerun  GAMS solver-link smoke check (10 problems; not in the report)"
 	@echo ""
-	@echo "  clean-bench       Wipe all stale results/logs across every suite (keeps compiled SIF .dylibs)"
-	@echo "  clean-bench-cutest     Wipe cutest results JSON + stderr/log files only"
-	@echo "  clean-bench-large-scale Wipe large_scale_results.txt"
-	@echo "  clean-bench-nl         Wipe per-problem .sol outputs + results.json (gas/water/grid/electrolyte/cho)"
+	@echo "  clean-bench       Wipe pounce results/logs across every suite (keeps the committed ipopt reference)"
+	@echo "  clean-bench-large-scale Wipe large_scale pounce.json"
+	@echo "  clean-bench-nl         Wipe per-problem .sol outputs + pounce.json (.nl suites)"
 	@echo "  clean-bench-report     Remove benchmarks/BENCHMARK_REPORT.md"
 	@echo ""
 	@echo "All suites feed into benchmarks/BENCHMARK_REPORT.md via benchmark_report.py."
-
-# ---- ipopt-ma57 plumbing ----
-# Verify pkg-config resolves `ipopt` to our MA57 install (not Homebrew).
-# Both Rust FFI build.rs scripts use this same pkg-config query.
-check-ipopt-ma57-link:
-	@echo "PKG_CONFIG_PATH=$$PKG_CONFIG_PATH"
-	@libdir=$$(pkg-config --variable libdir ipopt 2>/dev/null); \
-	  if [ "$$libdir" != "$(IPOPT_MA57_INSTALL)/lib" ]; then \
-	    echo "FAIL: pkg-config resolved ipopt libdir to '$$libdir', expected '$(IPOPT_MA57_INSTALL)/lib'"; \
-	    echo "       (did you run 'make build-ipopt-ma57'?)"; exit 1; \
-	  fi
-	@pkg-config --libs ipopt
-	@echo "OK: ipopt FFI route resolves to $(IPOPT_MA57_INSTALL)"
 
 # Convenience shim — the actual recipe lives in benchmarks/mittelmann/Makefile.
 build-ipopt-ma57:
 	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann build-ipopt-ma57
 
-# ---- CUTEst ----
-cutest-prepare: cutest-ensure-toolchain
-	bash $(REPO_ROOT)/benchmarks/cutest/prepare.sh
-
-cutest-prepare-full: cutest-ensure-toolchain
-	bash $(REPO_ROOT)/benchmarks/cutest/prepare.sh \
-		--from-file $(REPO_ROOT)/benchmarks/cutest/problem_list_full.txt
-
-# File target — the actual recipe. Rebuilds only if results.json is
-# missing or older than POUNCE_BIN, the problem list, or any compiled
-# .dylib/.so under problems/. `make cutest-rerun` forces by deleting first.
-$(REPO_ROOT)/benchmarks/cutest/results.json: $(POUNCE_BIN) \
-	$(REPO_ROOT)/benchmarks/cutest/problem_list.txt \
-	$(wildcard $(REPO_ROOT)/benchmarks/cutest/problems/lib*.dylib) \
-	$(wildcard $(REPO_ROOT)/benchmarks/cutest/problems/lib*.so)
-	RESULTS_FILE=$@ \
-	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin cutest_suite --release \
-		2> >(tee $(REPO_ROOT)/benchmarks/cutest/benchmark_stderr.txt >&2)
-
-cutest-run: cutest-ensure-toolchain cutest-prepare $(REPO_ROOT)/benchmarks/cutest/results.json
-
-cutest-rerun:
-	rm -f $(REPO_ROOT)/benchmarks/cutest/results.json
-	$(MAKE) cutest-run
-
-cutest-full: cutest-ensure-toolchain cutest-prepare-full
-	PROBLEM_LIST=$(REPO_ROOT)/benchmarks/cutest/problem_list_full.txt \
-	RESULTS_FILE=$(REPO_ROOT)/benchmarks/cutest/full_results.json \
-	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin cutest_suite --release \
-		2> >(tee $(REPO_ROOT)/benchmarks/cutest/full_stderr.txt >&2)
-
-cutest-report:
-	python $(REPO_ROOT)/benchmarks/cutest/compare.py $(REPO_ROOT)/benchmarks/cutest/results.json
-
-# Problem lists are defined once and reused by both prepare.sh and the
-# cutest_suite binary so they cannot drift.
-SMOKE_PROBLEMS := \
-	ROSENBR BEALE CUBE DENSCHNB BROWNBS \
-	HS6 HS10 HS35 HS71 HS106 \
-	MARATOS BT1 HS13 HS57 S316-322 \
-	BEALENE BROWNBSNE ENGVAL2NE \
-	PALMER1D PALMER5D
-
-LARGE_PROBLEMS := \
-	HIMMELBI AIRPORT LAKES SWOPF QPCBLEND QPNBLEND SPANHYD LINSPANH \
-	ACOPP14 ACOPR14 ACOPP30 ACOPR30 BATCH CORE1 MSS1 HAIFAM FEEDLOC \
-	DISCS DECONVBNE DECONVNE NET1 HYDCAR20 \
-	TFI1 TFI2 TFI3 EXPFITB ELATTAR CRESC50 EXPFITC \
-	DUALC1 DUALC2 DUALC5 DUALC8 \
-	PT HET-Z OET1 OET2 OET3 OET4 KSIP \
-	SIPOW1 SIPOW1M SIPOW2 SIPOW2M SIPOW3 SIPOW4 \
-	TAXR13322 GOFFIN
-
-MAXITER_PROBLEMS := \
-	AIRCRFTB ALLINIT BENNETT5LS BIGGS3 BIGGS5 BOX2 BQPGABIM CHWIRUT2LS \
-	DJTL HAHN1LS MEYER3 MGH10LS MINSURF OSBORNEA RAT43LS SIM2BQP THURBERLS \
-	AIRCRFTA CONCON DECONVC DECONVNE DECONVU DNIEPER HS109 HS67 HS83 HS84 \
-	HS85 HS99EXP MCONCON OPTCNTRL QC QCNEW SSINE TRIGGER
-
-cutest-smoke: cutest-ensure-toolchain
-	bash $(REPO_ROOT)/benchmarks/cutest/prepare.sh $(SMOKE_PROBLEMS)
-	RESULTS_FILE=$(REPO_ROOT)/benchmarks/cutest/smoke_results.json \
-	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin cutest_suite --release -- \
-		$(SMOKE_PROBLEMS) \
-		2> >(tee $(REPO_ROOT)/benchmarks/cutest/smoke_stderr.txt >&2)
-	@echo "Smoke test complete."
-
-cutest-large: cutest-ensure-toolchain
-	bash $(REPO_ROOT)/benchmarks/cutest/prepare.sh $(LARGE_PROBLEMS)
-	RESULTS_FILE=$(REPO_ROOT)/benchmarks/cutest/large_results.json \
-	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin cutest_suite --release -- \
-		$(LARGE_PROBLEMS) \
-		2> >(tee $(REPO_ROOT)/benchmarks/cutest/large_stderr.txt >&2)
-	@echo "Large problem benchmark complete."
-
-cutest-maxiter: cutest-ensure-toolchain
-	bash $(REPO_ROOT)/benchmarks/cutest/prepare.sh $(MAXITER_PROBLEMS)
-	RESULTS_FILE=$(REPO_ROOT)/benchmarks/cutest/maxiter_results.json \
-	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin cutest_suite --release -- \
-		$(MAXITER_PROBLEMS) \
-		2> >(tee $(REPO_ROOT)/benchmarks/cutest/maxiter_stderr.txt >&2)
-
-cutest: cutest-prepare cutest-run cutest-report
-	@echo "CUTEst benchmark complete. Report: benchmarks/cutest/CUTEST_REPORT.md"
-
 # ---- Domain benchmarks ----
-# All .nl-file suites use the shared dual-solver driver
-# (benchmarks/scripts/run_nl_bench.sh), which runs both pounce and
-# ipopt-ma57 on every problem and emits the standard
-# {solver,name,n,m,status,objective,iterations,solve_time} JSON shape
-# consumed by benchmark_report.py's load_domain_results() loader.
+# Every suite is .nl-driven through the shared driver
+# (benchmarks/scripts/run_nl_bench.sh). The ipopt-ma57 reference and the
+# per-release pounce run are DECOUPLED:
+#
+#   * <suite>-run                 runs ONLY pounce  -> benchmarks/<suite>/pounce.json
+#                                 (regenerated every release; gitignored)
+#   * ipopt-reference / ipopt-ref-<suite>
+#                                 runs ONLY ipopt-ma57 -> benchmarks/<suite>/ipopt_ma57.json
+#                                 (committed; run rarely — see below)
+#
+# benchmark_report.py merges the fresh pounce.json with the saved
+# ipopt_ma57.json per suite. ipopt-ma57 is slow and its results don't
+# change between pounce iterations, so the reference is generated once
+# (per machine / ipopt build) and committed; releases rerun only pounce.
 NL_DRIVER       := bash $(REPO_ROOT)/benchmarks/scripts/run_nl_bench.sh
 POUNCE_BIN      := $(REPO_ROOT)/target/release/pounce
 BENCH_TIMELIMIT ?= 300
+LS_DIR          := $(REPO_ROOT)/benchmarks/large_scale
+MITT_DIR        := $(REPO_ROOT)/benchmarks/mittelmann
+QP_DIR          := $(REPO_ROOT)/benchmarks/qp
+LP_DIR          := $(REPO_ROOT)/benchmarks/lp
+LPOPT_DIR       := $(REPO_ROOT)/benchmarks/lpopt
 
 # Ensure POUNCE_BIN exists; helps when a target is run before any cargo
 # build. Cheap when already built.
 $(POUNCE_BIN):
 	$(CARGO) build --release --manifest-path $(CARGO_MANIFEST) --bin pounce
 
-# .nl-driven suites: results.json is the file target; the *-run alias is
-# incremental (skip when up-to-date), *-rerun forces by wiping first.
-$(REPO_ROOT)/benchmarks/electrolyte/results.json: $(POUNCE_BIN) \
-	$(wildcard $(REPO_ROOT)/benchmarks/electrolyte/nl/*.nl)
-	$(NL_DRIVER) electrolyte \
-		$(REPO_ROOT)/benchmarks/electrolyte/nl \
-		$@ \
-		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+# Suite -> .nl directory map, shared by the pounce file-targets and the
+# ipopt-ref-% reference targets.
+nldir_vanderbei   := $(REPO_ROOT)/benchmarks/vanderbei/nl
+nldir_electrolyte := $(REPO_ROOT)/benchmarks/electrolyte/nl
+nldir_grid        := $(REPO_ROOT)/benchmarks/grid/nl
+nldir_cho         := $(REPO_ROOT)/benchmarks/cho/nl_export_results
+nldir_large_scale := $(LS_DIR)/nl
+nldir_gas         := $(REPO_ROOT)/benchmarks/gas
+nldir_water       := $(REPO_ROOT)/benchmarks/water
+nldir_mittelmann  := $(MITT_DIR)/nl
+nldir_qp          := $(QP_DIR)/nl
+nldir_lp          := $(LP_DIR)/nl
+nldir_lpopt       := $(LPOPT_DIR)/nl
 
-electrolyte-run: $(REPO_ROOT)/benchmarks/electrolyte/results.json
+# --- pounce release runs (incremental, pounce-only) ---
+# Each <suite>/pounce.json rebuilds when the pounce binary or the suite's
+# .nl change; <suite>-rerun forces by wiping first.
+
+# Vanderbei CUTE-in-AMPL suite (733 .nl problems) — the canonical NLP
+# collection, replacing the retired compiled CUTEst suite. See
+# benchmarks/vanderbei/README.md for how the .nl were produced.
+$(REPO_ROOT)/benchmarks/vanderbei/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_vanderbei)/*.nl)
+	$(NL_DRIVER) vanderbei $(nldir_vanderbei) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+vanderbei-run: $(REPO_ROOT)/benchmarks/vanderbei/pounce.json
+
+vanderbei-rerun:
+	rm -f $(REPO_ROOT)/benchmarks/vanderbei/pounce.json
+	$(MAKE) vanderbei-run
+
+$(REPO_ROOT)/benchmarks/electrolyte/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_electrolyte)/*.nl)
+	$(NL_DRIVER) electrolyte $(nldir_electrolyte) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+electrolyte-run: $(REPO_ROOT)/benchmarks/electrolyte/pounce.json
 
 electrolyte-rerun:
-	rm -f $(REPO_ROOT)/benchmarks/electrolyte/results.json
+	rm -f $(REPO_ROOT)/benchmarks/electrolyte/pounce.json
 	$(MAKE) electrolyte-run
 
-$(REPO_ROOT)/benchmarks/grid/results.json: $(POUNCE_BIN) \
-	$(wildcard $(REPO_ROOT)/benchmarks/grid/nl/*.nl)
-	$(NL_DRIVER) grid \
-		$(REPO_ROOT)/benchmarks/grid/nl \
-		$@ \
-		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+$(REPO_ROOT)/benchmarks/grid/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_grid)/*.nl)
+	$(NL_DRIVER) grid $(nldir_grid) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
-grid-run: $(REPO_ROOT)/benchmarks/grid/results.json
+grid-run: $(REPO_ROOT)/benchmarks/grid/pounce.json
 
 grid-rerun:
-	rm -f $(REPO_ROOT)/benchmarks/grid/results.json
+	rm -f $(REPO_ROOT)/benchmarks/grid/pounce.json
 	$(MAKE) grid-run
 
-$(REPO_ROOT)/benchmarks/cho/results.json: $(POUNCE_BIN) \
-	$(wildcard $(REPO_ROOT)/benchmarks/cho/nl_export_results/*.nl)
-	$(NL_DRIVER) cho \
-		$(REPO_ROOT)/benchmarks/cho/nl_export_results \
-		$@ \
-		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+$(REPO_ROOT)/benchmarks/cho/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_cho)/*.nl)
+	$(NL_DRIVER) cho $(nldir_cho) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
-cho-run: $(REPO_ROOT)/benchmarks/cho/results.json
+cho-run: $(REPO_ROOT)/benchmarks/cho/pounce.json
 
 cho-rerun:
-	rm -f $(REPO_ROOT)/benchmarks/cho/results.json
+	rm -f $(REPO_ROOT)/benchmarks/cho/pounce.json
 	$(MAKE) cho-run
 
-# ---- Large scale ----
-# Runs the hand-written synthetic NLP suite (`pounce-large-scale`). Five
-# problems — Chained Rosenbrock, Bratu, optimal control, Poisson control,
-# sparse QP — exercise the pure-Rust IPM at scales the .nl-file suites
-# don't cover. Per-problem sizes can be overridden via env vars; see
-# benchmarks/large_scale/src/bin/large_scale_suite.rs.
-$(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt: $(POUNCE_BIN)
-	$(CARGO) run --manifest-path $(CARGO_MANIFEST) --bin large_scale_suite --release \
-		2>&1 | tee $@
-	@echo "Large-scale synthetic suite complete. Output: benchmarks/large_scale/large_scale_results.txt"
+# Large scale: five large, sparse synthetic NLPs (chained Rosenbrock,
+# Bratu, optimal control, Poisson control, sparse QP) emitted as .nl by
+# generate_nl.py (Pyomo). The sparseqp stub stands in as the generation
+# stamp. Resize/regenerate via `make large-scale-generate`.
+$(LS_DIR)/nl/sparseqp.nl: $(LS_DIR)/generate_nl.py
+	python3 $(LS_DIR)/generate_nl.py --out-dir $(LS_DIR)/nl
 
-large-scale: $(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt
+large-scale-generate: $(LS_DIR)/nl/sparseqp.nl
+
+$(LS_DIR)/pounce.json: $(POUNCE_BIN) $(LS_DIR)/nl/sparseqp.nl
+	$(NL_DRIVER) large_scale $(nldir_large_scale) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+large-scale: $(LS_DIR)/pounce.json
 
 large-scale-rerun:
-	rm -f $(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt
+	rm -f $(LS_DIR)/pounce.json
 	$(MAKE) large-scale
 
-# ---- Gas pipeline ----
-$(REPO_ROOT)/benchmarks/gas/results.json: $(POUNCE_BIN) \
-	$(wildcard $(REPO_ROOT)/benchmarks/gas/*.nl)
-	$(NL_DRIVER) gas \
-		$(REPO_ROOT)/benchmarks/gas \
-		$@ \
-		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+$(REPO_ROOT)/benchmarks/gas/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_gas)/*.nl)
+	$(NL_DRIVER) gas $(nldir_gas) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
-gas-run: $(REPO_ROOT)/benchmarks/gas/results.json
+gas-run: $(REPO_ROOT)/benchmarks/gas/pounce.json
 
 gas-rerun:
-	rm -f $(REPO_ROOT)/benchmarks/gas/results.json
+	rm -f $(REPO_ROOT)/benchmarks/gas/pounce.json
 	$(MAKE) gas-run
 
-# ---- Water network ----
-$(REPO_ROOT)/benchmarks/water/results.json: $(POUNCE_BIN) \
-	$(wildcard $(REPO_ROOT)/benchmarks/water/*.nl)
-	$(NL_DRIVER) water \
-		$(REPO_ROOT)/benchmarks/water \
-		$@ \
-		$(POUNCE_BIN) $(IPOPT_MA57_BIN) $(BENCH_TIMELIMIT)
+$(REPO_ROOT)/benchmarks/water/pounce.json: $(POUNCE_BIN) \
+	$(wildcard $(nldir_water)/*.nl)
+	$(NL_DRIVER) water $(nldir_water) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
 
-water-run: $(REPO_ROOT)/benchmarks/water/results.json
+water-run: $(REPO_ROOT)/benchmarks/water/pounce.json
 
 water-rerun:
-	rm -f $(REPO_ROOT)/benchmarks/water/results.json
+	rm -f $(REPO_ROOT)/benchmarks/water/pounce.json
 	$(MAKE) water-run
 
-# ---- Mittelmann ampl-nlp sweep ----
-# Pounce-only sweep delegated to benchmarks/mittelmann/Makefile (the full
-# multi-solver comparison harness — fetch / translate / compare across
-# pounce, ipopt-mumps, ipopt-ma57, ipopt-feral — lives there; this
-# wrapper runs only the pounce variant for inclusion in the composite
-# benchmark, same pattern as gams-bench).
-# Incremental — the mittelmann sub-Makefile skips problems with existing
-# .sol files. `mittelmann-rerun` cleans first to force a full sweep.
-mittelmann-run:
-	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann run-pounce
+# Maros-Meszaros convex QP suite (~138 problems) emitted as .nl by
+# generate_nl.py, which downloads the qpsolvers .mat mirror of the
+# Maros-Meszaros set and converts each QP (1/2 x'Px + q'x + r s.t. linear
+# rows and bounds) into a Pyomo model written as .nl. QPTEST.nl stands in
+# as the generation stamp (like large_scale's sparseqp.nl). Regenerate via
+# `make qp-generate`.
+$(QP_DIR)/nl/QPTEST.nl: $(QP_DIR)/generate_nl.py
+	python3 $(QP_DIR)/generate_nl.py --out-dir $(QP_DIR)/nl --data-dir $(QP_DIR)/data
+
+qp-generate: $(QP_DIR)/nl/QPTEST.nl
+
+$(QP_DIR)/pounce.json: $(POUNCE_BIN) $(QP_DIR)/nl/QPTEST.nl
+	$(NL_DRIVER) qp $(nldir_qp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+qp-run: $(QP_DIR)/pounce.json
+
+qp-rerun:
+	rm -f $(QP_DIR)/pounce.json
+	$(MAKE) qp-run
+
+# LP validation suite — the classic Netlib LP set plus a size-filtered
+# subset of Hans Mészáros's LP test set: small LPs with published optima
+# that pounce should solve to optimality quickly. generate_nl.py fetches
+# the sources, size-screens, and converts to .nl (HiGHS parse -> Pyomo ->
+# .nl, see mps_to_nl.py). afiro.nl (the canonical smallest LP) stands in
+# as the generation stamp. Regenerate via `make lp-generate`.
+$(LP_DIR)/nl/afiro.nl: $(LP_DIR)/generate_nl.py $(LP_DIR)/mps_to_nl.py
+	python3 $(LP_DIR)/generate_nl.py
+
+lp-generate: $(LP_DIR)/nl/afiro.nl
+
+$(LP_DIR)/pounce.json: $(POUNCE_BIN) $(LP_DIR)/nl/afiro.nl
+	$(NL_DRIVER) lp $(nldir_lp) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+lp-run: $(LP_DIR)/pounce.json
+
+lp-rerun:
+	rm -f $(LP_DIR)/pounce.json
+	$(MAKE) lp-run
+
+# Mittelmann lpopt LP suite — the curated HARD subset of Hans Mittelmann's
+# lpopt benchmark (https://plato.asu.edu/ftp/lpopt.html). These are large,
+# degenerate LPs (a stress tier; even HiGHS/ipopt time out at short
+# limits). build_subset.py fetches the smaller disclosed instances as
+# bzip2'd MPS from the plato lptestset mirror and converts each (HiGHS ->
+# Pyomo -> .nl), size-gating anything too large. qap15.nl is the
+# generation stamp. Run with a long time limit (e.g. BENCH_TIMELIMIT=1800).
+$(LPOPT_DIR)/nl/qap15.nl: $(LPOPT_DIR)/build_subset.py $(LPOPT_DIR)/mps_to_nl.py
+	python3 $(LPOPT_DIR)/build_subset.py
+
+lpopt-generate: $(LPOPT_DIR)/nl/qap15.nl
+
+$(LPOPT_DIR)/pounce.json: $(POUNCE_BIN) $(LPOPT_DIR)/nl/qap15.nl
+	$(NL_DRIVER) lpopt $(nldir_lpopt) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+lpopt-run: $(LPOPT_DIR)/pounce.json
+
+lpopt-rerun:
+	rm -f $(LPOPT_DIR)/pounce.json
+	$(MAKE) lpopt-run
+
+# Mittelmann ampl-nlp suite. The .nl are translated from .mod by the
+# mittelmann sub-Makefile (`fetch translate`, needs AMPL; incremental).
+# The sub-Makefile's broader multi-solver comparison harness still lives
+# in benchmarks/mittelmann/Makefile for on-demand use.
+mittelmann-translate:
+	$(MAKE) -C $(MITT_DIR) fetch translate
+
+$(MITT_DIR)/pounce.json: $(POUNCE_BIN) $(wildcard $(MITT_DIR)/nl/*.nl)
+	$(NL_DRIVER) mittelmann $(nldir_mittelmann) $@ $(POUNCE_BIN) - $(BENCH_TIMELIMIT) pounce
+
+mittelmann-run: mittelmann-translate $(MITT_DIR)/pounce.json
 
 mittelmann-rerun:
-	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann clean
-	$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann run-pounce
+	rm -f $(MITT_DIR)/pounce.json
+	$(MAKE) mittelmann-run
 
-# ---- GAMS NLP bench ----
-# Incremental: runs the full GAMS nlpbench sweep (four curated sizes +
-# four model libraries) for every solver in REPORT_SOLVERS without
-# wiping cached trace CSVs first. `gams-rerun` cleans then runs.
-# Override with `make gams-bench REPORT_SOLVERS="..."`.
+# --- ipopt-ma57 reference (run rarely; committed) ---
+# `make ipopt-reference` runs ipopt-ma57 across every suite and writes the
+# committed benchmarks/<suite>/ipopt_ma57.json plus a provenance stamp.
+# Run it once per machine / ipopt build (and after adding problems), then
+# commit the results — every release thereafter reruns only pounce and the
+# report compares against this saved reference. `make ipopt-ref-<suite>`
+# refreshes a single suite. Override the per-instance cap with
+# `make ipopt-reference REF_TIMELIMIT=120`.
+REF_SUITES    := vanderbei electrolyte grid cho large_scale gas water mittelmann qp lp lpopt
+REF_TIMELIMIT ?= $(BENCH_TIMELIMIT)
+IPOPT_PROVENANCE := $(REPO_ROOT)/benchmarks/ipopt_ma57.provenance.json
+
+ipopt-ref-%:
+	$(NL_DRIVER) $* $(nldir_$*) \
+		$(REPO_ROOT)/benchmarks/$*/ipopt_ma57.json \
+		- $(IPOPT_MA57_BIN) $(REF_TIMELIMIT) ipopt
+
+# Suites whose .nl must be produced before ipopt can run on them.
+ipopt-ref-large_scale: $(LS_DIR)/nl/sparseqp.nl
+ipopt-ref-mittelmann:  mittelmann-translate
+ipopt-ref-qp:          $(QP_DIR)/nl/QPTEST.nl
+ipopt-ref-lp:          $(LP_DIR)/nl/afiro.nl
+ipopt-ref-lpopt:       $(LPOPT_DIR)/nl/qap15.nl
+
+ipopt-reference: $(addprefix ipopt-ref-,$(REF_SUITES)) ipopt-reference-provenance
+	@echo "ipopt-ma57 reference written."
+	@echo "Commit benchmarks/*/ipopt_ma57.json + benchmarks/ipopt_ma57.provenance.json."
+
+# Record which ipopt produced the saved reference, on what machine and
+# when, so the report can attribute its Ipopt column honestly.
+ipopt-reference-provenance:
+	@{ \
+	  echo '{'; \
+	  printf '  "generated": "%s",\n' "$$(date '+%Y-%m-%d %H:%M:%S %Z')"; \
+	  printf '  "host": "%s",\n'      "$$(uname -n)"; \
+	  printf '  "platform": "%s",\n'  "$$(uname -srm)"; \
+	  printf '  "ipopt_bin": "%s",\n' "$(IPOPT_MA57_BIN)"; \
+	  printf '  "ipopt_version": "%s",\n' "$$($(IPOPT_MA57_BIN) --version 2>/dev/null | head -1)"; \
+	  printf '  "linear_solver": "%s (via ref/Ipopt/install-ma57)",\n' "$(IPOPT_LINEAR_SOLVER)"; \
+	  printf '  "timelimit": %s,\n'   "$(REF_TIMELIMIT)"; \
+	  printf '  "git_sha": "%s"\n'    "$$(git -C $(REPO_ROOT) rev-parse --short HEAD 2>/dev/null)"; \
+	  echo '}'; \
+	} > $(IPOPT_PROVENANCE)
+	@echo "wrote benchmarks/ipopt_ma57.provenance.json"
+
+# ---- GAMS solver-link smoke check ----
+# The GAMS nlpbench suite is no longer aggregated into the composite
+# report: its problem coverage duplicates the .nl suites (princetonlib ≈
+# vanderbei, GAMS mittelmann ≈ ampl-nlp mittelmann/, powerflow ≈ grid/)
+# and it was compared on the same pounce-vs-ipopt axis as everything
+# else. What it *uniquely* exercises is the GAMS solver-link path
+# (pounce-cinterface + libGamsPounce via the GMO/GEV protocol), so this
+# target keeps only a 10-problem liveness check (bench-smoke, seconds)
+# proving that path still works. It does not feed benchmark_report.py.
+#
+# For a fuller GAMS comparison run on demand:
+#   make -C gams/nlpbench bench-release   # globallib + powerflow, ~2h
+#   make -C gams/nlpbench bench-full      # all eight testsets, ~14h
 gams-bench:
-	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench bench-full
+	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench bench-smoke
 
 gams-rerun:
-	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench bench-full
+	$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench-smoke bench-smoke
 
 # ---- Aggregation ----
 # Incremental sweep — each *-run target is now a file-target wrapper
@@ -326,7 +362,7 @@ gams-rerun:
 # single failure (missing toolchain, broken instance) doesn't abort the
 # rest — the report at the end always lands.
 benchmark:
-	-$(MAKE) cutest-run
+	-$(MAKE) vanderbei-run
 	-$(MAKE) electrolyte-run
 	-$(MAKE) grid-run
 	-$(MAKE) cho-run
@@ -334,6 +370,9 @@ benchmark:
 	-$(MAKE) mittelmann-run
 	-$(MAKE) gas-run
 	-$(MAKE) water-run
+	-$(MAKE) qp-run
+	-$(MAKE) lp-run
+	-$(MAKE) lpopt-run
 	-$(MAKE) gams-bench
 	-$(MAKE) benchmark-report
 	@echo "Benchmark sweep complete. Report: benchmarks/BENCHMARK_REPORT.md"
@@ -348,47 +387,45 @@ benchmark-report:
 	@echo "Report: benchmarks/BENCHMARK_REPORT.md"
 
 # ---- Cleanup ----
-# `clean-bench` wipes every suite's outputs and the composite report so the
-# next `make benchmark` starts from a clean slate. Compiled SIF .dylibs
-# under benchmarks/cutest/problems/ are preserved (expensive to rebuild,
-# safe across runs); delete that dir manually for a true cold start.
-# Sub-makefiles for mittelmann and gams own their own clean targets and
-# are delegated to with `-$(MAKE)` so a missing toolchain there does not
-# abort the rest of the cleanup.
-clean-bench: clean-bench-cutest clean-bench-large-scale clean-bench-nl clean-bench-report
+# `clean-bench` wipes the per-release pounce outputs and the composite
+# report so the next `make benchmark` starts from a clean slate. It does
+# NOT touch the committed ipopt-ma57 reference (benchmarks/*/ipopt_ma57.json
+# + provenance) — that is regenerated only by `make ipopt-reference`.
+# Generated large_scale .nl are also preserved (use `make
+# large-scale-generate` to refresh). Sub-makefiles for mittelmann and
+# gams own their own clean targets and are delegated to with `-$(MAKE)`
+# so a missing toolchain there does not abort the rest of the cleanup.
+clean-bench: clean-bench-large-scale clean-bench-nl clean-bench-report
 	-$(MAKE) -C $(REPO_ROOT)/benchmarks/mittelmann clean
 	-$(MAKE) -C $(REPO_ROOT)/gams/nlpbench clean-bench
-	@echo "clean-bench complete."
-
-clean-bench-cutest:
-	rm -f $(REPO_ROOT)/benchmarks/cutest/results.json
-	rm -f $(REPO_ROOT)/benchmarks/cutest/results.jsonl
-	rm -f $(REPO_ROOT)/benchmarks/cutest/smoke_results.json
-	rm -f $(REPO_ROOT)/benchmarks/cutest/large_results.json
-	rm -f $(REPO_ROOT)/benchmarks/cutest/maxiter_results.json
-	rm -f $(REPO_ROOT)/benchmarks/cutest/full_results.json
-	rm -f $(REPO_ROOT)/benchmarks/cutest/benchmark_stderr.txt
-	rm -f $(REPO_ROOT)/benchmarks/cutest/smoke_stderr.txt
-	rm -f $(REPO_ROOT)/benchmarks/cutest/large_stderr.txt
-	rm -f $(REPO_ROOT)/benchmarks/cutest/maxiter_stderr.txt
-	rm -f $(REPO_ROOT)/benchmarks/cutest/full_stderr.txt
-	rm -f $(REPO_ROOT)/benchmarks/cutest/*.log
+	@echo "clean-bench complete (committed ipopt-ma57 reference preserved)."
 
 clean-bench-large-scale:
-	rm -f $(REPO_ROOT)/benchmarks/large_scale/large_scale_results.txt
+	rm -f $(REPO_ROOT)/benchmarks/large_scale/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/large_scale/pounce.json
 
 clean-bench-nl:
+	rm -f $(REPO_ROOT)/benchmarks/vanderbei/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/vanderbei/pounce.json
 	rm -f $(REPO_ROOT)/benchmarks/electrolyte/nl/*.sol \
-	      $(REPO_ROOT)/benchmarks/electrolyte/results.json
+	      $(REPO_ROOT)/benchmarks/electrolyte/pounce.json
 	rm -f $(REPO_ROOT)/benchmarks/grid/nl/*.sol \
-	      $(REPO_ROOT)/benchmarks/grid/results.json
+	      $(REPO_ROOT)/benchmarks/grid/pounce.json
 	rm -f $(REPO_ROOT)/benchmarks/gas/*.sol \
-	      $(REPO_ROOT)/benchmarks/gas/results.json
+	      $(REPO_ROOT)/benchmarks/gas/pounce.json
 	rm -f $(REPO_ROOT)/benchmarks/water/*.sol \
-	      $(REPO_ROOT)/benchmarks/water/results.json
+	      $(REPO_ROOT)/benchmarks/water/pounce.json
 	rm -f $(REPO_ROOT)/benchmarks/cho/nl_export_results/*.sol \
-	      $(REPO_ROOT)/benchmarks/cho/results.json
+	      $(REPO_ROOT)/benchmarks/cho/pounce.json
 	rm -f $(REPO_ROOT)/benchmarks/cho/cho_stderr.txt
+	rm -f $(REPO_ROOT)/benchmarks/mittelmann/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/mittelmann/pounce.json
+	rm -f $(REPO_ROOT)/benchmarks/qp/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/qp/pounce.json
+	rm -f $(REPO_ROOT)/benchmarks/lp/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/lp/pounce.json
+	rm -f $(REPO_ROOT)/benchmarks/lpopt/nl/*.sol \
+	      $(REPO_ROOT)/benchmarks/lpopt/pounce.json
 	rm -rf $(REPO_ROOT)/benchmarks/logs
 
 clean-bench-report:

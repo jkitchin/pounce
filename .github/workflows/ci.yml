@@ -44,13 +44,13 @@ jobs:
         # buffers); revisit if a real perf-relevant lint surfaces. Other
         # groups (style, restriction, pedantic) stay as informational
         # warns, matching Cargo.toml's workspace lint policy.
-        run: cargo clippy --workspace --exclude pounce-cutest --exclude pounce-hsl --exclude pounce-large-scale --all-targets -- -D clippy::correctness -D clippy::suspicious
+        run: cargo clippy --workspace --exclude pounce-hsl --all-targets -- -D clippy::correctness -D clippy::suspicious
 
       - name: Build
-        run: cargo build --workspace --exclude pounce-cutest --exclude pounce-hsl --exclude pounce-large-scale --verbose
+        run: cargo build --workspace --exclude pounce-hsl --verbose
 
       - name: Test
-        run: cargo test --workspace --exclude pounce-cutest --exclude pounce-hsl --exclude pounce-large-scale --verbose
+        run: cargo test --workspace --exclude pounce-hsl --verbose
 
   # Smoke-build the `pounce-solver` wheel on every PR so packaging
   # regressions surface here, not at tag time. Runs only on Linux

@@ -13,17 +13,15 @@
 # Upstream Ipopt source mirror — tracked separately (vendor as submodule if desired)
 /ref
 
-# Benchmark suite — only the cutest harness source is tracked. Everything
-# else is regenerated locally (large NL exports, compiled SIF .dylibs,
-# per-run logs and JSON results).
+# Benchmark suite — only the harness sources, per-suite READMEs, and the
+# composite report are tracked. The .nl problem inputs and per-run outputs
+# (logs, JSON results, .sol files) are regenerated locally.
 /benchmarks/*
 !/benchmarks/README.md
 !/benchmarks/Makefile
 !/benchmarks/benchmark_report.py
 !/benchmarks/BENCHMARK_REPORT.md
 !/benchmarks/BENCHMARK_REPORT.json
-!/benchmarks/cutest
-!/benchmarks/large_scale
 !/benchmarks/preprocessing
 !/benchmarks/scripts
 !/benchmarks/*/
@@ -31,23 +29,38 @@
 !/benchmarks/*/README.md
 !/benchmarks/preprocessing/*
 !/benchmarks/scripts/*
-# large_scale is a workspace member — its Cargo manifest and Rust
-# sources must be tracked even though `/benchmarks/*/*` excludes them
-# by default. Per-run results stay ignored.
-!/benchmarks/large_scale/Cargo.toml
-!/benchmarks/large_scale/build.rs
-!/benchmarks/large_scale/src
-!/benchmarks/large_scale/src/**
-/benchmarks/cutest/problems/
-/benchmarks/cutest/*.json
-/benchmarks/cutest/*.jsonl
-/benchmarks/cutest/*_stderr.txt
-/benchmarks/cutest/*.stderr
-/benchmarks/cutest/*.log
-/benchmarks/cutest/*.csv
-/benchmarks/cutest/CUTEST_REPORT*.md
-/benchmarks/cutest/FERAL_DELTA*.md
-/benchmarks/cutest/l1_audit/
+# The large_scale suite is now .nl-driven: its problems are emitted by a
+# Pyomo generator rather than a compiled Rust crate. Track the generator
+# (and README, via the rule above); the generated .nl and per-run results
+# stay ignored like every other suite.
+!/benchmarks/large_scale/generate_nl.py
+# The qp (Maros-Meszaros convex QP) suite is likewise .nl-driven: its
+# problems are downloaded as .mat from the qpsolvers mirror and converted
+# to .nl by a Pyomo generator. Track the generator (and README +
+# ipopt_ma57.json via the rules above); the downloaded .mat, generated
+# .nl, and per-run results stay ignored like every other suite.
+!/benchmarks/qp/generate_nl.py
+# The lp suite is the small-LP validation set (Netlib + size-filtered
+# Mészáros), and lpopt is the hard lpopt stress tier. Both fetch MPS and
+# convert to .nl; track their generator + the MPS->nl converter so each is
+# reproducible. Downloaded MPS, generated .nl, and per-run results stay
+# ignored like every other suite.
+!/benchmarks/lp/generate_nl.py
+!/benchmarks/lp/mps_to_nl.py
+!/benchmarks/lpopt/build_subset.py
+!/benchmarks/lpopt/mps_to_nl.py
+# Vanderbei reference status (derived once from cute_table.pdf): which
+# problems have a documented feasible optimum vs. are hard/infeasible/
+# unbounded/untabulated. Tracked so we never have to re-derive it.
+!/benchmarks/vanderbei/cute_table_status.json
+!/benchmarks/vanderbei/cute_table_status.py
+# The Ipopt-MA57 reference is decoupled from the per-release POUNCE run:
+# it is generated once (`make ipopt-reference`) and committed so release
+# reports compare against it without rerunning Ipopt. Per-suite reference
+# files + the provenance stamp are tracked; the per-release pounce.json is
+# not (regenerated every release).
+!/benchmarks/*/ipopt_ma57.json
+!/benchmarks/ipopt_ma57.provenance.json
 /benchmarks/logs/
 
 # Python cache
