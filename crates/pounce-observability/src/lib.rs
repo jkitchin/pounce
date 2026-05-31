@@ -213,6 +213,20 @@ where
     }
 }
 
+/// Per-layer filter for [`IterCollectorLayer`]: admit spans (so the
+/// collector's `event_scope` can see the `restoration` ancestor for
+/// scoping) plus the iteration event itself.
+///
+/// A per-layer filter is required so the collector does not force every
+/// callsite globally enabled; without admitting spans here the filtered
+/// `Context` would hide span ancestry. Defined once and reused at every
+/// `with_filter` site — note the `with_filter` *call* must still live in
+/// each branch, because the resulting `Filtered` type carries the
+/// per-branch subscriber type parameter.
+fn collector_admits(m: &tracing::Metadata<'_>) -> bool {
+    m.is_span() || m.target() == ITER_TARGET
+}
+
 // ---- Tiger/rust themed text formatter ----
 
 /// Foreground style for a log level in the tiger/rust theme.
@@ -311,14 +325,7 @@ fn install() {
     // it carries its own target filter. It is constructed inside each
     // branch so its subscriber type parameter is inferred per-branch.
     if want_json {
-        let collector = IterCollectorLayer.with_filter(filter_fn(|m| {
-            // Admit spans (so `event_scope` can see the `restoration`
-            // ancestor for scoping) plus the iteration event itself.
-            // A per-layer filter is required so the collector does not
-            // force every callsite globally enabled; without admitting
-            // spans here the filtered Context would hide span ancestry.
-            m.is_span() || m.target() == ITER_TARGET
-        }));
+        let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let json_layer = tracing_subscriber::fmt::layer()
             .json()
             .with_writer(std::io::stderr)
@@ -328,14 +335,7 @@ fn install() {
             .with(collector)
             .try_init();
     } else {
-        let collector = IterCollectorLayer.with_filter(filter_fn(|m| {
-            // Admit spans (so `event_scope` can see the `restoration`
-            // ancestor for scoping) plus the iteration event itself.
-            // A per-layer filter is required so the collector does not
-            // force every callsite globally enabled; without admitting
-            // spans here the filtered Context would hide span ancestry.
-            m.is_span() || m.target() == ITER_TARGET
-        }));
+        let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let ansi = ansi_enabled();
         let text_layer = tracing_subscriber::fmt::layer()
             .event_format(TigerFormat)
@@ -471,7 +471,7 @@ mod tests {
         // a `target`-only filter hid span ancestry and let inner
         // restoration iterations leak into the report.
         let collector =
-            IterCollectorLayer.with_filter(filter_fn(|m| m.is_span() || m.target() == ITER_TARGET));
+            IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let subscriber = tracing_subscriber::registry().with(collector);
 
         let captured = tracing::subscriber::with_default(subscriber, || {
