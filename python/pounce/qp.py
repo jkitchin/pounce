@@ -38,7 +38,14 @@ import numpy as np
 
 from . import _pounce
 
-__all__ = ["QpProblem", "QpResult", "QpFactorization", "solve_qp", "solve_qp_batch"]
+__all__ = [
+    "QpProblem",
+    "QpResult",
+    "QpFactorization",
+    "solve_qp",
+    "solve_socp",
+    "solve_qp_batch",
+]
 
 
 @dataclass
@@ -221,6 +228,57 @@ def solve_qp(
             prob, tol=tol, max_iter=max_iter, warm_start=_warm_dict(warm_start)
         )
     )
+
+
+def _normalize_cones(cones):
+    """Coerce a cone partition into the binding's ``[(kind, dim), …]``.
+
+    Accepts ``("soc", 3)`` / ``("nonneg", 2)`` tuples, or the shorthands
+    ``3`` (a second-order cone of that dim), and case-insensitive kind
+    strings (``"soc"``/``"q"``, ``"nonneg"``/``"nn"``/``"+"``)."""
+    out = []
+    for spec in cones:
+        if isinstance(spec, (tuple, list)) and len(spec) == 2:
+            out.append((str(spec[0]), int(spec[1])))
+        elif isinstance(spec, int):
+            out.append(("soc", int(spec)))
+        else:
+            raise ValueError(f"bad cone spec {spec!r}; use (kind, dim) or an int")
+    return out
+
+
+def solve_socp(
+    P=None,
+    c=None,
+    A=None,
+    b=None,
+    G=None,
+    h=None,
+    *,
+    cones,
+    tol: Optional[float] = None,
+    max_iter: Optional[int] = None,
+) -> QpResult:
+    """Solve a standard-form SOCP (or mixed LP/QP + second-order cones).
+
+    Same form as :func:`solve_qp` minus variable bounds, but the inequality
+    block ``Gx ≤ h`` is partitioned by ``cones`` — a sequence of
+    ``(kind, dim)`` specs (``"nonneg"`` or ``"soc"``) covering the rows of
+    ``G`` in order. Each slack block ``s = h − Gx`` must lie in its cone; a
+    second-order cone is ``{ (t, x) : t ≥ ‖x‖₂ }``. An int is shorthand for
+    a second-order cone of that dimension.
+
+    Example
+    -------
+    >>> # min t  s.t.  (t, x − x*) ∈ SOC   (minimize ‖x − x*‖)
+    >>> r = solve_socp(c=[1, 0, 0], G=-np.eye(3), h=[0, -2, 1],
+    ...                cones=[("soc", 3)])
+    """
+    if c is None:
+        raise ValueError("solve_socp: `c` is required")
+    prob = _build(P, c, A, b, G, h, None, None)
+    specs = _normalize_cones(cones)
+    return _to_result(_pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter))
 
 
 def solve_qp_batch(

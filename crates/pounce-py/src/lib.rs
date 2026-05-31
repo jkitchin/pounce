@@ -49,6 +49,7 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQpProblem>()?;
     m.add_class::<PyQpFactorization>()?;
     m.add_function(wrap_pyfunction!(qp::solve_qp, m)?)?;
+    m.add_function(wrap_pyfunction!(qp::solve_socp, m)?)?;
     m.add_function(wrap_pyfunction!(qp::solve_qp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(qp::solve_qp_multi_rhs, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

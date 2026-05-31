@@ -19,7 +19,8 @@
 use numpy::IntoPyArray;
 use pounce_convex::{
     solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_warm,
-    QpFactorization, QpOptions, QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet,
+    solve_socp_ipm, ConeSpec, QpFactorization, QpOptions, QpProblem, QpSolution, QpStatus,
+    QpWarmStart, Triplet,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
@@ -206,6 +207,21 @@ fn warm_from_dict(warm: &Bound<'_, PyDict>) -> PyResult<QpWarmStart> {
     })
 }
 
+/// Parse `(kind, dim)` tuples into [`ConeSpec`]s. `kind` is
+/// case-insensitive: `"nonneg"`/`"nn"`/`"+"` or `"soc"`/`"q"`.
+fn parse_cones(specs: Vec<(String, usize)>) -> PyResult<Vec<ConeSpec>> {
+    specs
+        .into_iter()
+        .map(|(kind, d)| match kind.to_ascii_lowercase().as_str() {
+            "nonneg" | "nn" | "+" => Ok(ConeSpec::Nonneg(d)),
+            "soc" | "q" | "secondorder" => Ok(ConeSpec::SecondOrder(d)),
+            other => Err(PyValueError::new_err(format!(
+                "unknown cone kind '{other}' (use 'nonneg' or 'soc')"
+            ))),
+        })
+        .collect()
+}
+
 fn opts(tol: Option<f64>, max_iter: Option<usize>) -> QpOptions {
     let mut o = QpOptions::default();
     if let Some(t) = tol {
@@ -240,6 +256,27 @@ pub fn solve_qp<'py>(
         Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
         None => solve_qp_ipm(&prob.inner, &o, backend),
     });
+    solution_dict(py, sol)
+}
+
+/// Solve a standard-form SOCP (or mixed LP/QP + second-order cones). The
+/// inequality block `Gx ≤ h` is partitioned by `cones`, a list of
+/// `(kind, dim)` tuples (`"nonneg"` / `"soc"`) covering the `m_ineq` rows
+/// in order; each `s = h − Gx` block must lie in its cone. Variable bounds
+/// are appended as a trailing nonnegative block. Returns the usual result
+/// dict.
+#[pyfunction]
+#[pyo3(signature = (prob, cones, tol=None, max_iter=None))]
+pub fn solve_socp<'py>(
+    py: Python<'py>,
+    prob: &PyQpProblem,
+    cones: Vec<(String, usize)>,
+    tol: Option<f64>,
+    max_iter: Option<usize>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let o = opts(tol, max_iter);
+    let specs = parse_cones(cones)?;
+    let sol = py.allow_threads(|| solve_socp_ipm(&prob.inner, &specs, &o, backend));
     solution_dict(py, sol)
 }
 
