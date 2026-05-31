@@ -471,6 +471,21 @@ add the reductions that actually move the Mittelmann / Maros-Mészáros
 numbers. Equilibration (Phase 2) is the prerequisite already in place;
 this phase adds the size-reducing transformations on top.
 
+*Status (implemented in `pounce-convex/src/presolve.rs`).* The
+transaction-stack architecture with reversible primal+dual postsolve is
+in place, plus an explicit variable-bound form (`lb`/`ub` on
+`QpProblem`, bound duals `z_lb`/`z_ub`) and these reductions: empty
+rows/columns, fixed-variable (singleton equality), free / linear-only
+columns, free column singleton substitution, duplicate-row removal
+(rayon-parallel hashing), and activity-bound redundancy + infeasibility
+detection. Presolve is wired into the CLI dispatch, so `.nl` LP/QP
+inputs run through it end-to-end. Each reduction has round-trip / KKT
+tests and an example. Deferred (harder dual postsolve — an active
+reduced bound's multiplier must be re-attributed to its source row):
+bound *tightening*, forcing constraints, dominated columns; and the
+MIP-leaning coefficient strengthening / probing. Benchmark-scale tuning
+against the Mittelmann / Maros-Mészáros sets remains.
+
 **Phase 4 — SOCP via second-order cone (+ HSDE embedding).** Add the
 second-order cone as a constraint type. Nesterov-Todd scaling on the SOC
 block; rotated-SOC as a derived form. Validate on Mittelmann SOCP set.
