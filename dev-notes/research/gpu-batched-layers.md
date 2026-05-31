@@ -136,6 +136,9 @@ opt-in, never the default.
   size `B` and dimension `n` at which the GPU crosses over the
   `vmap_solve_parallel` CPU-thread baseline, and confirm the f32
   accuracy envelope. Throwaway-friendly; pure decision-gathering.
+  **The numerical half of Phase 0 is already done as a CPU proxy — see
+  §10; it resolves the f32 risk in §8 with data. What remains for Phase
+  0 is the GPU throughput crossover, which needs hardware.**
 - **Phase 1 — batched condensed-KKT solve, fixed active set.** Wire the
   Phase-0 kernel as the inner solve of a batched IPM that assumes a
   fixed active set per element (valid for the convex-QP-layer case).
@@ -193,16 +196,18 @@ that runs on **any** GPU and ships as one static binary.
 
 ## 8. Open questions for review
 
-- **The f32 wall is the central risk, not a footnote.** The JAX path
-  today forces `jax_enable_x64` precisely because "Newton convergence
-  stalls in float32" (`python/pounce/jax/__init__.py:36`). The batched
-  GPU IPM must converge in f32. The OptNet answer (f32 forward is fine
-  for the *gradient* at training tolerance) is plausible but unproven
-  for pounce's filter-line-search IPM on nonconvex `g`. Phase 0 must
-  measure convergence-in-f32 on representative layer problems before
-  Phase 2 is committed; if f32 IPM convergence is unreliable, the
-  fallback is f32-warm-start → f64-CPU-finish, which changes the value
-  proposition (GPU warm-starts rather than solves).
+- **The f32 wall is the central risk — now measured on a CPU proxy
+  (§10).** The JAX path today forces `jax_enable_x64` precisely because
+  "Newton convergence stalls in float32" (`python/pounce/jax/__init__.py:36`).
+  The §10 study confirms the stall is real (a plain f32 IPM cannot reach
+  1e-8 and breaks down near the solution, worse as `n` grows) **but
+  bounded**: f32 reaches 1e-6 on 100% of instances at every size, and a
+  short f64 refinement (median 3 iterations) recovers 1e-8 on 100%. So
+  the value proposition is **not** "GPU warm-starts rather than solves"
+  — it is "GPU f32 solves to moderate accuracy, CPU f64 finishes
+  cheaply," which keeps almost all the work on the GPU. The open part:
+  the proxy is convex QP; pounce's nonconvex filter-line-search IPM (and
+  worse conditioning) must still be measured for real.
 - **Lockstep vs compaction.** Running `B` IPMs to the slowest element's
   iteration count wastes work on early-converging elements. Mask-only
   is simplest; periodic compaction recovers throughput at the cost of
@@ -219,7 +224,61 @@ that runs on **any** GPU and ships as one static binary.
   select when the layer detects a homogeneous batch above a width
   threshold, or only on explicit request?
 
-## 9. References
+## 9. Phase-0 preliminary evidence — f32 convergence (CPU proxy)
+
+The numerical go/no-go question — *does an interior-point method
+converge in f32, and to what accuracy?* — is independent of the GPU: the
+GPU runs the same arithmetic, only elsewhere. It can therefore be
+answered on CPU before any GPU code exists. The experiment
+(`experiments/f32_qp_ipm_study.rs`, a dependency-free `rustc -O` program;
+run with `rustc -O f32_qp_ipm_study.rs && ./f32_qp_ipm_study`) implements
+a Mehrotra predictor-corrector solver for the canonical layer QP
+`min ½xᵀQx + qᵀx s.t. Gx ≤ h`, generic over the float type, with the
+condensed SPD Cholesky inner solve this note proposes for the GPU
+kernel (§3). Each problem is solved in f64 and f32; accuracy is always
+the **f64-recomputed** duality gap of the iterate, so we measure the
+true accuracy of the f32 point, not f32's rounded self-assessment.
+60 instances per size, well-conditioned `Q = (1/n)MᵀM + I`.
+
+**Achievable accuracy (fraction of instances reaching a gap threshold):**
+
+| size | prec | <1e-2 | <1e-4 | <1e-6 | <1e-8 | med best gap |
+|---|---|---|---|---|---|---|
+| 8×8 | f64 | 100% | 100% | 100% | 100% | 1.1e-9 |
+| 8×8 | **f32** | 100% | 100% | **100%** | 65% | 6.1e-9 |
+| 32×32 | f64 | 100% | 100% | 100% | 100% | 1.6e-9 |
+| 32×32 | **f32** | 100% | 100% | **100%** | 17% | 2.4e-8 |
+| 128×128 | f64 | 100% | 100% | 100% | 100% | 2.8e-9 |
+| 128×128 | **f32** | 100% | 100% | **100%** | 0% | 1.1e-7 |
+
+f32 reaches **1e-6 on 100% of instances at every size**, but the last
+mile to 1e-8 collapses as `n` grows (65% → 0%) because the condensed
+matrix's condition number scales like 1/μ and exceeds f32 epsilon near
+the solution (the Cholesky loses positive-definiteness — a breakdown).
+
+**Mixed-precision recovery (f32 forward → short f64 refinement):**
+
+| size | f32 alone <1e-8 | f32→f64 hybrid <1e-8 | med f64 refine iters |
+|---|---|---|---|
+| 8×8 | 65% | **100%** | 3 |
+| 32×32 | 17% | **100%** | 3 |
+| 128×128 | 0% | **100%** | 3 |
+
+Warm-starting an f64 pass from the f32 solution recovers full 1e-8
+accuracy on **100% of instances at every size, in a median of 3 f64
+iterations.** This is the §5 Phase-4 design validated: the GPU does the
+bulk f32 work; a cheap CPU f64 tail cleans up.
+
+**Caveats.** Convex QP, well-conditioned `Q`, plain Cholesky, no
+inertia correction, no in-solve refinement. pounce's real IPM is a
+nonconvex filter-line-search method where the condensed system is not
+guaranteed SPD (needs inertia handling, likely harder in f32), and
+worse conditioning lowers the f32 floor. The *qualitative* finding —
+f32 to ≈1e-6, mixed-precision to recover — is robust and matches the
+mixed-precision IPM literature; the f32 floor on pounce proper still
+needs measuring on representative nonconvex layer problems.
+
+## 10. References
 
 - Amos & Kolter, "OptNet: Differentiable Optimization as a Layer in
   Neural Networks," *ICML* 2017 — batched dense QP layer on GPU (qpth);
