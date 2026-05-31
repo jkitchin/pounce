@@ -165,3 +165,25 @@ fn qp_and_nlp_duals_agree() {
         "QP dual {qp_dual} disagrees with NLP dual {nlp_dual}"
     );
 }
+
+/// The `qp_presolve` option toggles presolve on the convex path; both
+/// settings must solve the fixture to the same optimum.
+#[test]
+fn qp_presolve_option_on_and_off_agree() {
+    let run = |presolve: &str| -> i32 {
+        let out = Command::new(pounce_exe())
+            .arg(fixture())
+            .arg("--no-sol")
+            .arg("solver_selection=qp-ipm")
+            .arg(format!("qp_presolve={presolve}"))
+            .output()
+            .expect("spawn pounce");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("Optimal Solution Found"),
+            "qp_presolve={presolve} should solve"
+        );
+        out.status.code().unwrap_or(-1)
+    };
+    assert_eq!(run("yes"), 0);
+    assert_eq!(run("no"), 0);
+}

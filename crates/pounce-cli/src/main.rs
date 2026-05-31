@@ -114,6 +114,24 @@ pub fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // Toggle presolve on the convex LP/QP path. Default on.
+    if let Err(e) = app.registered_options().add_string_option(
+        "qp_presolve",
+        "Run presolve before the convex LP/QP interior-point solve.",
+        "yes",
+        &[
+            ("yes", "Reduce the problem (and detect trivial infeasibility / unboundedness) before solving."),
+            ("no", "Solve the extracted problem directly, without presolve."),
+        ],
+        "Only affects the convex LP/QP path (`solver_selection` routing to \
+         pounce-convex). When on, presolve removes empty / duplicate / \
+         redundant rows, fixes and substitutes structural columns, and may \
+         report infeasible / unbounded without invoking the solver.",
+    ) {
+        eprintln!("pounce: failed to register qp_presolve option: {e}");
+        return ExitCode::from(2);
+    }
+
     // Opt into iter-history capture when the user asked for a JSON
     // report at Full detail — saves the per-iter alloc when they
     // didn't.
@@ -444,7 +462,12 @@ pub fn main() -> ExitCode {
         // `LpIpm` and `QpIpm` both use the convex solver (LP is P = 0).
         if matches!(choice, SolverChoice::LpIpm | SolverChoice::QpIpm) {
             if let Some(prob) = reparsed {
-                return run_convex_qp(&prob, class, sol_path.as_deref());
+                let presolve_on = app
+                    .options()
+                    .get_string_value("qp_presolve", "")
+                    .map(|(v, _)| v != "no")
+                    .unwrap_or(true);
+                return run_convex_qp(&prob, class, sol_path.as_deref(), presolve_on);
             }
             // Should not happen (only `.nl` classifies non-NLP), but be
             // safe: fall through to NLP rather than mis-dispatch.
@@ -1028,7 +1051,9 @@ fn run_convex_qp(
     prob: &nl_reader::NlProblem,
     class: pounce_cli::dispatch::ProblemClass,
     sol_path: Option<&std::path::Path>,
+    presolve_on: bool,
 ) -> ExitCode {
+    use pounce_convex::presolve::{presolve, PresolveOutcome};
     use pounce_convex::{solve_qp_ipm, QpOptions, QpStatus};
 
     let (qp, con_map) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
@@ -1049,12 +1074,46 @@ fn run_convex_qp(
         Box::new(pounce_feral::FeralSolverInterface::new())
     };
     let t0 = std::time::Instant::now();
-    // Run presolve, then the IPM on the reduced problem, then postsolve.
-    // The returned solution is in the extracted-QP space (same dims as
-    // `qp`), so `con_map`-based dual recovery below still applies.
-    let sol = pounce_convex::presolve::solve_with_presolve(&qp, |reduced| {
-        solve_qp_ipm(reduced, &QpOptions::default(), backend)
-    });
+    // With presolve on, reduce the problem (logging what was removed),
+    // solve the reduced problem, then postsolve back to the extracted-QP
+    // space — so the `con_map`-based dual recovery below still applies.
+    // Trivial infeasibility / unboundedness is reported without solving.
+    let trivial = |status| pounce_convex::QpSolution {
+        status,
+        x: vec![0.0; qp.n],
+        y: vec![0.0; qp.m_eq()],
+        z: vec![0.0; qp.m_ineq()],
+        z_lb: vec![0.0; qp.n],
+        z_ub: vec![0.0; qp.n],
+        obj: 0.0,
+        iters: 0,
+    };
+    let sol = if presolve_on {
+        match presolve(&qp) {
+            PresolveOutcome::Reduced(ps) => {
+                let st = ps.stats();
+                if st.reduced_anything() {
+                    println!(
+                        "Presolve: {} → {} vars, {} → {} rows \
+                         (fixed {}, free-fixed {}, substituted {})",
+                        st.orig_vars,
+                        st.reduced_vars,
+                        st.orig_rows,
+                        st.reduced_rows,
+                        st.fixed_vars,
+                        st.free_cols_fixed,
+                        st.free_col_singletons,
+                    );
+                }
+                let red = solve_qp_ipm(&ps.reduced, &QpOptions::default(), backend);
+                ps.postsolve(&red)
+            }
+            PresolveOutcome::Infeasible => trivial(QpStatus::PrimalInfeasible),
+            PresolveOutcome::Unbounded => trivial(QpStatus::DualInfeasible),
+        }
+    } else {
+        solve_qp_ipm(&qp, &QpOptions::default(), backend)
+    };
     let elapsed = t0.elapsed().as_secs_f64();
 
     // Report the objective in the user's original sense, including the

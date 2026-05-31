@@ -488,3 +488,66 @@ fn bounded_variable_not_substituted() {
     // *non*-substitution above, not solver precision.
     assert_kkt(&prob, &sol, 1e-3);
 }
+
+// --- presolve statistics ---
+
+/// `Presolve::stats()` reports the reduction sizes and counts by type.
+#[test]
+fn presolve_stats_report() {
+    // x2 (free singleton) is substituted out → removes a var and a row;
+    // x3 (free, zero cost) is dropped as a free column.
+    let prob = QpProblem {
+        n: 4,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![0.0, 0.0, 0.0, 0.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0), // x2 free singleton in this row
+        ],
+        b: vec![3.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![NEG_INF, NEG_INF, NEG_INF, NEG_INF],
+        ub: vec![POS_INF, POS_INF, POS_INF, POS_INF],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            let s = ps.stats();
+            assert!(s.reduced_anything());
+            assert_eq!(s.orig_vars, 4);
+            assert_eq!(s.orig_rows, 1);
+            // x2 substituted (removes var+row), x3 dropped as free column.
+            assert_eq!(s.free_col_singletons, 1, "stats={s:?}");
+            assert_eq!(s.free_cols_fixed, 1, "stats={s:?}");
+            assert_eq!(s.reduced_rows, 0, "the row is consumed; stats={s:?}");
+            assert_eq!(s.reduced_vars, 2, "x2,x3 removed; stats={s:?}");
+        }
+        other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+}
+
+/// A no-op presolve reports `reduced_anything() == false`.
+#[test]
+fn presolve_stats_noop() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-1.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+        h: vec![1.0],
+        lb: vec![0.0, 0.0],
+        ub: vec![10.0, 10.0],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            let s = ps.stats();
+            assert!(!s.reduced_anything(), "stats={s:?}");
+            assert_eq!(s.reduced_vars, s.orig_vars);
+            assert_eq!(s.reduced_rows, s.orig_rows);
+        }
+        other => panic!("expected Reduced, got {:?}", status_of(&other)),
+    }
+}

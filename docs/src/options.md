@@ -31,6 +31,7 @@ file.
 | `linear_solver` | KKT linear-solver backend. `ma57` requires the `ma57` feature build. |
 | `mu_strategy`   | Barrier-parameter update strategy (`monotone` / `adaptive`).         |
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
+| `qp_presolve`   | Presolve on the convex LP/QP path (`yes` / `no`, default `yes`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
 
 For the full upstream option catalogue, see the
 [Ipopt options reference](https://coin-or.github.io/Ipopt/OPTIONS.html);

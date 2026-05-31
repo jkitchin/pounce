@@ -92,6 +92,28 @@ POUNCE (convex QP IPM, pounce-convex): Optimal Solution Found.
         obj=2.00000000  iters=2
 ```
 
+## Presolve
+
+Before the convex interior-point solve, POUNCE runs a **presolve** pass
+that shrinks the problem and can detect trivial infeasibility or
+unboundedness without solving. It removes empty, duplicate, and
+activity-redundant rows; fixes and substitutes structural columns
+(singleton-row fixings, free columns, free column singletons); and
+recovers both the primal and dual of the eliminated pieces so the
+reported solution is for your original problem. When it reduces the
+model, it logs a one-line summary:
+
+```text
+Presolve: 40 → 32 vars, 12 → 8 rows (fixed 3, free-fixed 2, substituted 3)
+```
+
+Presolve is on by default. Turn it off with `qp_presolve=no` (e.g. to
+compare timings or isolate a solver issue):
+
+```sh
+pounce model.nl qp_presolve=no
+```
+
 ## Scope and limitations
 
 - **Convex QP only.** Nonconvex (indefinite-Hessian) QPs are solved by

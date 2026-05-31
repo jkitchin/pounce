@@ -734,7 +734,52 @@ fn dedup_rows(rows: Vec<Row>, is_equality: bool) -> Result<Vec<Row>, ()> {
         .collect())
 }
 
+/// Summary of what presolve removed, for logging and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PresolveStats {
+    /// Variables in the original problem.
+    pub orig_vars: usize,
+    /// Variables in the reduced problem.
+    pub reduced_vars: usize,
+    /// Equality + inequality rows in the original problem.
+    pub orig_rows: usize,
+    /// Equality + inequality rows in the reduced problem.
+    pub reduced_rows: usize,
+    /// Variables fixed by a singleton equality row.
+    pub fixed_vars: usize,
+    /// Free / linear-only columns pinned to a bound and dropped.
+    pub free_cols_fixed: usize,
+    /// Free column singletons substituted out (each also removes a row).
+    pub free_col_singletons: usize,
+}
+
+impl PresolveStats {
+    /// Did presolve remove anything?
+    pub fn reduced_anything(&self) -> bool {
+        self.reduced_vars < self.orig_vars || self.reduced_rows < self.orig_rows
+    }
+}
+
 impl Presolve {
+    /// Reduction summary (sizes before/after and counts by reduction).
+    pub fn stats(&self) -> PresolveStats {
+        let mut s = PresolveStats {
+            orig_vars: self.orig_n,
+            reduced_vars: self.reduced.n,
+            orig_rows: self.orig_m_eq + self.orig_m_ineq,
+            reduced_rows: self.reduced.m_eq() + self.reduced.m_ineq(),
+            ..Default::default()
+        };
+        for r in &self.stack {
+            match r {
+                Reduction::FixedVar { .. } => s.fixed_vars += 1,
+                Reduction::FreeColumnFixed { .. } => s.free_cols_fixed += 1,
+                Reduction::FreeColSingleton { .. } => s.free_col_singletons += 1,
+            }
+        }
+        s
+    }
+
     /// Expand a reduced-problem solution back to the original space,
     /// recovering primal `x` and duals `(y, z)`.
     pub fn postsolve(&self, red: &QpSolution) -> QpSolution {
