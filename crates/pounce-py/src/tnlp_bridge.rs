@@ -220,7 +220,7 @@ impl TNLP for PyTnlp {
         match call1(&self.state.py_obj, "objective", x) {
             Ok(v) => Python::with_gil(|py| v.bind(py).extract::<Number>().ok()),
             Err(e) => {
-                eprintln!("pounce-py: objective(): {e}");
+                tracing::error!(target: "pounce::py", "pounce-py: objective(): {e}");
                 None
             }
         }
@@ -230,7 +230,7 @@ impl TNLP for PyTnlp {
         let res = match call1(&self.state.py_obj, "gradient", x) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("pounce-py: gradient(): {e}");
+                tracing::error!(target: "pounce::py", "pounce-py: gradient(): {e}");
                 return false;
             }
         };
@@ -244,7 +244,7 @@ impl TNLP for PyTnlp {
         let res = match call1(&self.state.py_obj, "constraints", x) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("pounce-py: constraints(): {e}");
+                tracing::error!(target: "pounce::py", "pounce-py: constraints(): {e}");
                 return false;
             }
         };
@@ -271,7 +271,7 @@ impl TNLP for PyTnlp {
                 let res = match call1(&self.state.py_obj, "jacobian", xx) {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("pounce-py: jacobian(): {e}");
+                        tracing::error!(target: "pounce::py", "pounce-py: jacobian(): {e}");
                         return false;
                     }
                 };
@@ -321,7 +321,7 @@ impl TNLP for PyTnlp {
                 let res = match res {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("pounce-py: hessian(): {e}");
+                        tracing::error!(target: "pounce::py", "pounce-py: hessian(): {e}");
                         return false;
                     }
                 };

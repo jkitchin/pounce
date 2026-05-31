@@ -34,6 +34,8 @@ pounce-restoration.workspace = true
 pounce-feral.workspace = true
 pounce-linsol.workspace = true
 pounce-sensitivity.workspace = true
+pounce-observability.workspace = true
+tracing.workspace = true
 pyo3 = { version = "0.22", features = ["abi3-py39"] }
 numpy = "0.22"
 

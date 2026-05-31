@@ -304,7 +304,7 @@ impl IterateInitializer for RestoIterateInitializer {
         if std::env::var_os("POUNCE_DBG_RESTO_INIT").is_some() {
             use pounce_linalg::Vector;
             fn dump3(label: &str, v: &dyn Vector) {
-                eprintln!(
+                tracing::debug!(target: "pounce::restoration",
                     "[PN_RESTO_INIT] {} amax={:.17e} asum={:.17e} nrm2={:.17e}",
                     label,
                     v.amax(),
@@ -313,7 +313,7 @@ impl IterateInitializer for RestoIterateInitializer {
                 );
             }
             fn dump2(label: &str, v: &dyn Vector) {
-                eprintln!(
+                tracing::debug!(target: "pounce::restoration",
                     "[PN_RESTO_INIT] {} amax={:.17e} asum={:.17e}",
                     label,
                     v.amax(),
@@ -322,7 +322,7 @@ impl IterateInitializer for RestoIterateInitializer {
             }
             let cx = iv.x.as_any().downcast_ref::<CompoundVector>().unwrap();
             let czl = iv.z_l.as_any().downcast_ref::<CompoundVector>().unwrap();
-            eprintln!(
+            tracing::debug!(target: "pounce::restoration",
                 "[PN_RESTO_INIT] resto_mu={:.17e} rho={:.17e}",
                 resto_mu, self.rho
             );
@@ -336,7 +336,7 @@ impl IterateInitializer for RestoIterateInitializer {
             dump2("zL_pc   ", &*czl.comp(2));
             dump2("zL_nd   ", &*czl.comp(3));
             dump2("zL_pd   ", &*czl.comp(4));
-            eprintln!(
+            tracing::debug!(target: "pounce::restoration",
                 "[PN_RESTO_INIT] y_c amax={:.17e} y_d amax={:.17e}",
                 iv.y_c.amax(),
                 iv.y_d.amax()

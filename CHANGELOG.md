@@ -9,6 +9,51 @@ changes.
 
 ## Unreleased
 
+### Added — Structured logging + colored iteration table (pounce#71)
+
+POUNCE now emits diagnostics through the
+[`tracing`](https://docs.rs/tracing) ecosystem and renders the
+per-iteration table in a tiger/rust branded color theme.
+
+- **Colored iteration table.** Restoration lines take a background that
+  varies by restoration kind (soft-stay → tan, soft-exit → amber, hard →
+  deep rust); the row text shades smoothly from black toward red as the
+  primal step length `alpha` shrinks (a visual stalling cue, shifted to
+  cream → bright-yellow on the dark restoration backgrounds). Color is
+  emitted only when stdout is a terminal — redirected output and
+  `NO_COLOR` get plain text with identical column alignment.
+- **Structured logs.** Solver-internal diagnostics, warnings, and
+  developer instrumentation are now `tracing` events under namespaced
+  targets (`pounce::algorithm`, `pounce::linsol`, `pounce::mu`,
+  `pounce::sqp`, `pounce::linesearch`, `pounce::restoration`,
+  `pounce::presolve`, `pounce::py`). Logs go to **stderr**; program
+  output (iteration table, summary, `--dump`) stays on **stdout**.
+- **Spans.** `solve`, `iteration`, `linear_solve`, and `restoration`
+  spans tag nested events with context.
+- **New environment variables:** `RUST_LOG` (verbosity / per-target
+  filtering, default `info`), `POUNCE_LOG_FORMAT=text|json` (JSON sink on
+  stderr, including the per-iteration `pounce::iteration` stream for
+  Studio / CI), `NO_COLOR` / `CLICOLOR_FORCE` (color policy). Documented
+  in `docs/src/options.md` and `docs/src/troubleshooting.md`.
+- New `pounce-observability` crate (subscriber install + iteration
+  collector) and a `pounce-common::style` palette module.
+- A `log` → `tracing` bridge (`tracing_log::LogTracer`) so any remaining
+  `log::*` call sites — chiefly transitive dependencies — surface through
+  the subscriber and obey `RUST_LOG`.
+
+### Changed
+
+- Per-iteration JSON solve-report data is now sourced from the
+  `pounce::iteration` tracing event (via an in-process collector layer)
+  rather than an in-loop accumulation; the report contents are
+  unchanged. Capturing iteration history requires the tracing subscriber
+  installed by the CLI / Python / C frontends (or
+  `pounce_observability::init_for_tests()` in tests).
+
+### Removed
+
+- Dropped the direct `log` crate dependency in favor of `tracing`.
+
 ## [0.3.0] — 2026-05-29
 
 ### Added — Active-set SQP with working-set warm start (Phase 5b + 5c + 5d)

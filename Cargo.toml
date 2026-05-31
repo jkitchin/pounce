@@ -14,6 +14,7 @@ members = [
     "crates/pounce-qp",
     "crates/pounce-sensitivity",
     "crates/pounce-solve-report",
+    "crates/pounce-observability",
     "crates/pounce-cinterface",
     "crates/pounce-py",
     "crates/pounce-cli",
@@ -40,6 +41,7 @@ default-members = [
     "crates/pounce-qp",
     "crates/pounce-sensitivity",
     "crates/pounce-solve-report",
+    "crates/pounce-observability",
     "crates/pounce-cinterface",
     "crates/pounce-cli",
     "crates/pounce-studio-core",
@@ -71,7 +73,19 @@ pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.3.0" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.3.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.3.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.0" }
+pounce-observability = { path = "crates/pounce-observability", version = "0.3.0" }
 feral = "0.9.0"
+
+# Observability / colored-output stack (pounce#71). `anstyle` is the
+# style/color vocabulary, `anstyle-query` detects terminal capability
+# (truecolor, NO_COLOR, …), `anstream` is the auto-stripping stdout
+# wrapper. `tracing` + `tracing-subscriber` provide structured logging.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi", "json"] }
+tracing-log = "0.2"
+anstyle = "1"
+anstyle-query = "1"
+anstream = "0.6"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

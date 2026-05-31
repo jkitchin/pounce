@@ -198,3 +198,49 @@ When in doubt: leave `feral_ordering` at the default. When a hard
 problem looks linear-solver-bound, try `feral_ordering auto_race`
 before per-variant manual sweeping — it's the safe choice when the
 per-problem winner is uncertain.
+
+## Logging and colored output
+
+POUNCE emits structured logs and a colored iteration table through the
+[`tracing`](https://docs.rs/tracing) ecosystem. Behavior is governed by
+environment variables (not solver options), so they apply to the `pounce`
+CLI, the C/Python frontends, and anything embedding the library.
+
+| Variable | Values | Effect |
+|---|---|---|
+| `RUST_LOG` | e.g. `info`, `debug`, `pounce::restoration=debug` | Log verbosity / per-target filtering. Default `info`. Logs go to **stderr**. |
+| `POUNCE_LOG_FORMAT` | `text` (default) · `json` | `json` emits line-delimited JSON on stderr (incl. the per-iteration `pounce::iteration` stream) for Studio / CI ingestion. |
+| `NO_COLOR` | set to any value | Disables ANSI color in the iteration table **and** logs (see <https://no-color.org>). |
+| `CLICOLOR_FORCE` | set to any value | Forces color even when stdout is not a terminal. |
+
+**Filtering by subsystem.** Solver internals log under namespaced targets
+— `pounce::algorithm`, `pounce::linsol`, `pounce::mu`, `pounce::sqp`,
+`pounce::linesearch`, `pounce::restoration`, `pounce::presolve`,
+`pounce::py`. For example, to trace only the restoration phase:
+
+```sh
+RUST_LOG=pounce::restoration=debug pounce problem.nl
+```
+
+**Program output vs. logs.** The iteration table, the final summary, and
+`--dump` diagnostics are *program output* on **stdout**; diagnostic and
+progress messages are *logs* on **stderr**. Redirecting one does not
+affect the other:
+
+```sh
+pounce problem.nl > result.txt 2> solve.log
+```
+
+**Color.** The iteration table is colored with a tiger/rust theme:
+restoration lines take a background that varies by restoration kind
+(soft-stay → tan, soft-exit → amber, hard → deep rust), and the row text
+shades from black toward red as the primal step length `alpha` shrinks
+(stalling). Color is emitted only when stdout is a terminal; redirected
+output and `NO_COLOR` get plain text with identical column alignment.
+
+**Machine-readable iterations.** `POUNCE_LOG_FORMAT=json` turns the
+per-iteration records into JSON on stderr:
+
+```sh
+POUNCE_LOG_FORMAT=json pounce problem.nl 2> iters.jsonl
+```

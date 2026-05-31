@@ -207,8 +207,9 @@ impl TSymLinearSolver {
                 // not yet
             } else if let Ok(path) = std::env::var("POUNCE_DBG_KKT_DUMP") {
                 if !WARNED.swap(true, Ordering::SeqCst) {
-                    eprintln!(
-                        "warning: POUNCE_DBG_KKT_DUMP is deprecated; prefer `--dump kkt:<iter-spec>` (see pounce --help)"
+                    tracing::warn!(
+                        target: "pounce::linsol",
+                        "POUNCE_DBG_KKT_DUMP is deprecated; prefer `--dump kkt:<iter-spec>` (see pounce --help)"
                     );
                 }
                 use std::io::Write;

@@ -10,5 +10,13 @@ description = "Common primitives for POUNCE (port of Ipopt's src/Common): types,
 keywords = ["optimization", "nlp", "ipopt", "solver"]
 categories = ["mathematics", "algorithms"]
 
+[dependencies]
+# Color vocabulary + terminal-capability detection for the tiger/rust
+# branded output (pounce#71). Kept dependency-light so this leaf crate
+# does not drag `tracing-subscriber` into every downstream build; the
+# subscriber wiring lives in `pounce-observability`.
+anstyle.workspace = true
+anstyle-query.workspace = true
+
 [lints]
 workspace = true

@@ -68,7 +68,7 @@ impl IterDumper {
         let file = match File::create(&pb) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!(
+                tracing::warn!(target: "pounce::diagnostics",
                     "iter_dump: failed to open `{}` for writing: {} — dumping disabled",
                     path, e
                 );
@@ -158,7 +158,7 @@ impl IterDumper {
     /// `curr` iterate).
     pub(crate) fn write_record(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) {
         if let Err(e) = self.write_record_inner(data, cq) {
-            eprintln!(
+            tracing::warn!(target: "pounce::diagnostics",
                 "iter_dump: failed to write iteration record: {} — dumping aborted",
                 e
             );
@@ -261,7 +261,7 @@ impl Drop for IterDumper {
         // BufWriter flushes on drop, but surface any error rather than
         // swallowing it silently.
         if let Err(e) = self.writer.flush() {
-            eprintln!("iter_dump: failed to flush trace file on drop: {}", e);
+            tracing::warn!(target: "pounce::diagnostics", "iter_dump: failed to flush trace file on drop: {}", e);
         }
     }
 }
@@ -275,6 +275,16 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    /// Serializes tests that mutate the process-global `ENV_DUMP_PATH` /
+    /// `ENV_DUMP_NAME` env vars. Without this, parallel tests interleave
+    /// `set_var`/`remove_var` and one test's `from_env()` observes
+    /// another's path. Poison is ignored — a panicking test still
+    /// releases the critical section for the rest.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn dense(n: i32, vals: Option<&[Number]>) -> Rc<dyn Vector> {
         let space = DenseVectorSpace::new(n);
         let mut dv = space.make_new_dense();
@@ -286,6 +296,7 @@ mod tests {
 
     #[test]
     fn write_vec_emits_len_then_values_little_endian() {
+        let _env = env_guard();
         // Round-trip a small vector through write_vec → in-memory buffer.
         // We don't have IpoptDataHandle here, so we test write_vec
         // directly via a tempfile + manual byte-level check.
@@ -309,12 +320,14 @@ mod tests {
 
     #[test]
     fn from_env_returns_none_when_unset() {
+        let _env = env_guard();
         std::env::remove_var(ENV_DUMP_PATH);
         assert!(IterDumper::from_env().is_none());
     }
 
     #[test]
     fn header_writes_magic_and_version() {
+        let _env = env_guard();
         let path =
             std::env::temp_dir().join(format!("pounce_iter_dump_hdr_{}.bin", std::process::id()));
         std::env::set_var(ENV_DUMP_PATH, &path);

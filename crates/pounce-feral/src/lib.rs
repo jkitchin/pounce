@@ -59,6 +59,11 @@ pub struct FeralSolverInterface {
 
     negevals: Index,
 
+    /// Fill-reducing ordering configured at construction; surfaced on
+    /// the `linear_solve` tracing span after each factorization
+    /// (pounce#71).
+    ordering: OrderingMethod,
+
     /// Absolute near-singularity floor; see
     /// [`FeralConfig::singular_pivot_floor`].
     singular_pivot_floor: f64,
@@ -305,6 +310,7 @@ impl FeralSolverInterface {
             values: Vec::new(),
             matrix: None,
             negevals: 0,
+            ordering: cfg.ordering,
             singular_pivot_floor: cfg.singular_pivot_floor,
             summary: LinearSolverSummary {
                 solver_name: "feral".to_string(),
@@ -364,6 +370,20 @@ impl FeralSolverInterface {
                 *guard = s.clone();
             }
         }
+
+        // Surface the linear-solve characteristics on the enclosing
+        // `linear_solve` tracing span (pounce#71). A no-op unless that
+        // span is active and declared these fields, so non-IPM callers
+        // and the no-subscriber case pay nothing. Re-factorizations
+        // (regularization retries) overwrite with last-wins, so the
+        // span reflects the accepted factorization.
+        let span = tracing::Span::current();
+        span.record("n", self.dim);
+        span.record("matrix_nnz", stats.nnz_a);
+        span.record("factor_nnz", stats.nnz_l);
+        span.record("inertia_neg", stats.inertia.negative);
+        span.record("fill_ratio", stats.fill_ratio);
+        span.record("ordering", tracing::field::debug(self.ordering));
     }
 
     /// Build the lower-triangle CSC view, factor it, and stash the
@@ -411,21 +431,19 @@ impl FeralSolverInterface {
                 };
                 self.negevals = neg as Index;
                 if zero > 0 {
-                    if std::env::var_os("POUNCE_DBG_INERTIA").is_some() {
-                        eprintln!(
-                            "[INERTIA] singular: neg={} zero={} expected={} dim={}",
-                            neg, zero, number_of_neg_evals, self.dim
-                        );
-                    }
+                    tracing::debug!(
+                        target: "pounce::linsol",
+                        neg, zero, expected = number_of_neg_evals, dim = self.dim,
+                        "inertia singular"
+                    );
                     return ESymSolverStatus::Singular;
                 }
                 if check_neg_evals && self.negevals != number_of_neg_evals {
-                    if std::env::var_os("POUNCE_DBG_INERTIA").is_some() {
-                        eprintln!(
-                            "[INERTIA] mismatch: got_neg={} expected={} dim={}",
-                            self.negevals, number_of_neg_evals, self.dim
-                        );
-                    }
+                    tracing::debug!(
+                        target: "pounce::linsol",
+                        got_neg = self.negevals, expected = number_of_neg_evals, dim = self.dim,
+                        "inertia mismatch"
+                    );
                     return ESymSolverStatus::WrongInertia;
                 }
                 // Near-singularity (MA57 CNTL(2) analog). feral's default

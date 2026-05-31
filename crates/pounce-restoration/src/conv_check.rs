@@ -366,7 +366,7 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
                     eval_orig_inf_pr_and_f(data, &orig_rc)
                 {
                     if std::env::var_os("POUNCE_DBG_RESTO_KAPPA").is_some() {
-                        eprintln!(
+                        tracing::debug!(target: "pounce::restoration",
                             "[PN_RESTO_KAPPA] iter={} orig_trial_inf_pr={:.6e} orig_curr_inf_pr={:.6e} kappa_resto={:.3e} threshold={:.6e} guard_passes={}",
                             iter_count,
                             orig_trial_inf_pr,

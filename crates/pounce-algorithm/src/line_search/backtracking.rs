@@ -893,7 +893,7 @@ impl BacktrackingLineSearch {
                     .update_for_next_iteration(alpha, theta, phi, d_phi, phi_trial);
                 if std::env::var_os("POUNCE_DBG_LS").is_some() {
                     let d = data.borrow();
-                    eprintln!(
+                    tracing::debug!(target: "pounce::linesearch",
                         "[PN_LS] iter={} mu={:.3e} alpha={:.3e} alpha_d={:.3e} mode={} theta={:.6e} theta_trial={:.6e} phi={:.6e} phi_trial={:.6e} n_steps={}",
                         d.iter_count, d.curr_mu, alpha, alpha_dual, mode, theta, theta_trial, phi, phi_trial, trial
                     );

@@ -13,6 +13,7 @@ categories = ["mathematics", "algorithms"]
 [dependencies]
 pounce-common.workspace = true
 pounce-linalg.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

@@ -621,7 +621,7 @@ impl IpoptApplication {
             Ok(r) => r,
             Err(e) => {
                 if std::env::var_os("POUNCE_DBG_SQP").is_some() {
-                    eprintln!("[SQP] optimize_with_warm_start error: {e:?}");
+                    tracing::warn!(target: "pounce::sqp", "[SQP] optimize_with_warm_start error: {e:?}");
                 }
                 return ApplicationReturnStatus::InternalError;
             }
@@ -1181,7 +1181,6 @@ impl IpoptApplication {
         let mut alg = IpoptAlgorithm::new(data, cq, bundle)
             .with_nlp(Rc::clone(&nlp_handle))
             .with_tnlp(Rc::clone(&tnlp));
-        alg.record_iter_history = self.record_iter_history;
         // Mint a fresh restoration factory per inner solve if a
         // provider is configured (pounce#10 Phase 3). Falls back to
         // the legacy one-shot `restoration_factory` slot when no
@@ -1212,7 +1211,23 @@ impl IpoptApplication {
             }
         }
 
+        // Per-iteration history (pounce#71): when requested, capture the
+        // `pounce::iteration` events emitted during the solve into an
+        // `IterRecord` trajectory via the observability collector layer.
+        // This replaces the old in-loop `iter_history` accumulation; it
+        // requires the collector to be installed in the active
+        // subscriber (the CLI / Python / C frontends install it via
+        // `pounce_observability::init_subscriber`; tests call
+        // `init_for_tests`). The collector scopes out restoration
+        // sub-solve iterations via the `restoration` span, so the
+        // trajectory matches the previous behavior (outer iters only).
+        let iter_capture = self
+            .record_iter_history
+            .then(pounce_observability::IterCaptureGuard::start);
+
         let solver_status = alg.optimize();
+
+        let captured_iters = iter_capture.map(|g| g.finish()).unwrap_or_default();
         // Close the overall-algorithm timer on the success path. The
         // early-return arms above end it themselves before bailing out;
         // this one matches upstream `IpoptApplication::call_optimize`
@@ -1232,7 +1247,7 @@ impl IpoptApplication {
             stats.restoration_inner_iters = alg.resto_inner_iters;
             stats.restoration_outer_iters = alg.resto_outer_iters;
             stats.restoration_wall_secs = alg.resto_wall_secs;
-            stats.iterations = std::mem::take(&mut alg.iter_history);
+            stats.iterations = captured_iters;
             // Capture the final *scaled* objective at the algorithm's
             // (compressed `x_var`-space) iterate via the NLP: the
             // algorithm-side `eval_f` returns `f * obj_scale_factor`.
@@ -1402,7 +1417,7 @@ impl IpoptApplication {
                     // Upstream Ipopt refuses this combination: Mehrotra
                     // needs an affine step every iter, which only the
                     // adaptive path computes. Keep adaptive and warn.
-                    eprintln!(
+                    tracing::warn!(target: "pounce::algorithm",
                         "pounce: mehrotra_algorithm=yes requires \
                          mu_strategy=adaptive; ignoring \
                          mu_strategy=monotone."

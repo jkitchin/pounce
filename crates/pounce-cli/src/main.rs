@@ -40,6 +40,11 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 pub fn main() -> ExitCode {
+    // Install the tracing subscriber first so even argument-parse
+    // diagnostics and the iteration collector are active (pounce#71).
+    // Honors RUST_LOG, NO_COLOR, and POUNCE_LOG_FORMAT.
+    pounce_observability::init_subscriber();
+
     let args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {

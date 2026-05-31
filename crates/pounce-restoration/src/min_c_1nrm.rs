@@ -196,6 +196,13 @@ impl RestorationPhase for MinC1NormRestoration {
         nlp: &Rc<RefCell<dyn IpoptNlp>>,
         aug_solver: &mut dyn AugSystemSolver,
     ) -> RestorationOutcome {
+        // Restoration span (pounce#71): the inner sub-IPM's `optimize()`
+        // runs inside this span, so its `pounce::iteration` events carry
+        // a `restoration` ancestor. `IterCollectorLayer` uses that to
+        // exclude inner restoration iterations from the solve report,
+        // matching the pre-tracing behavior (outer trajectory only).
+        let _resto_span = tracing::info_span!("restoration").entered();
+
         // 1. Run the nested IPM via the inner hook. Hand the
         //    orig-progress callback to the hook so the inner conv check
         //    can gate `Converged` on outer-filter acceptance per

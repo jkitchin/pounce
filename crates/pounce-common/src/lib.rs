@@ -12,6 +12,7 @@ pub mod exception;
 pub mod journalist;
 pub mod options_list;
 pub mod reg_options;
+pub mod style;
 pub mod tagged;
 pub mod timing;
 pub mod types;

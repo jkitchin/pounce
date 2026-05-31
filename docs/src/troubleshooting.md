@@ -404,6 +404,38 @@ The Studio MCP (`pounce-studio`) wraps these dumps in higher-level
 diagnostic queries (`diagnose`, `find_stalls`, `restoration_windows`),
 which is the recommended workflow when iterating on options.
 
+## Logs, colors, and machine-readable output
+
+POUNCE routes diagnostics through [`tracing`](https://docs.rs/tracing).
+The knobs are environment variables (see
+[Options › Logging and colored output](options.md#logging-and-colored-output)),
+not solver options.
+
+### When to try it
+- You want more detail than the iteration table shows (which phase fired,
+  why restoration triggered, linear-solver fallbacks).
+- A downstream tool (Studio, CI) needs to parse per-iteration data.
+- Color is garbling a log file, or you want color forced through a pipe.
+
+### The knobs
+
+| Goal | Invocation |
+|---|---|
+| Verbose, everything | `RUST_LOG=debug pounce problem.nl` |
+| Just the restoration phase | `RUST_LOG=pounce::restoration=debug pounce problem.nl` |
+| Separate logs from results | `pounce problem.nl > result.txt 2> solve.log` |
+| Plain text (no color) | `NO_COLOR=1 pounce problem.nl` |
+| Force color through a pipe | `CLICOLOR_FORCE=1 pounce problem.nl | less -R` |
+| Line-delimited JSON iterations | `POUNCE_LOG_FORMAT=json pounce problem.nl 2> iters.jsonl` |
+
+Logs go to **stderr**; the iteration table, final summary, and `--dump`
+output are program output on **stdout**. The colored table uses a
+tiger/rust theme — restoration lines get a kind-dependent background and
+the row text reddens as the step length `alpha` shrinks, so a stalling or
+restoration-heavy solve is visible at a glance. When stdout is not a
+terminal (or `NO_COLOR` is set) the table is emitted as plain text with
+the same column layout.
+
 ## Contributing a new recipe
 
 A recipe earns a place here when:

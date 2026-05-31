@@ -674,7 +674,7 @@ unsafe extern "C" fn trampoline_addfunc(
 /// Stub — some libraries ask us to register an AtReset callback. Pyomo logs a
 /// warning and does nothing. We do the same.
 unsafe extern "C" fn trampoline_atreset(_ae: *mut AmplExports, _f: *mut c_void, _v: *mut c_void) {
-    log::debug!("external library registered an AtReset callback; ignoring");
+    tracing::debug!("external library registered an AtReset callback; ignoring");
 }
 
 /// Stub — invoked by libraries that use random-valued externals. We just

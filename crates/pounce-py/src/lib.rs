@@ -32,6 +32,10 @@ pub use solver::PySolver;
 /// from Cargo.toml to find this symbol.
 #[pymodule]
 fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Install the tracing subscriber on import so Python consumers get
+    // logging and the iteration collector (pounce#71). Idempotent, so
+    // re-imports / sub-interpreters are safe.
+    pounce_observability::init_subscriber();
     m.add_class::<PyProblem>()?;
     m.add_class::<PySolver>()?;
     m.add_function(wrap_pyfunction!(warm_start::classify_working_set, m)?)?;

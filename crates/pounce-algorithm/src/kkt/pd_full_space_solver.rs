@@ -237,9 +237,9 @@ impl PdFullSpaceSolver {
                             ));
                         }
                     }
-                    eprintln!("[PN_PD_TAGS] cache_miss diffs:{}", diffs);
+                    tracing::debug!(target: "pounce::linsol", "[PN_PD_TAGS] cache_miss diffs:{}", diffs);
                 } else {
-                    eprintln!("[PN_PD_TAGS] cache_miss first_solve");
+                    tracing::debug!(target: "pounce::linsol", "[PN_PD_TAGS] cache_miss first_solve");
                 }
             }
             self.last_dep_tags = Some(cur_tags);

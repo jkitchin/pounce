@@ -1,0 +1,27 @@
+[package]
+name = "pounce-observability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Observability for POUNCE (pounce#71): tracing subscriber install, tiger/rust themed text formatter, and the per-iteration collector layer that feeds the JSON solve report from the `pounce::iteration` event."
+keywords = ["optimization", "tracing", "logging", "ipopt", "solver"]
+categories = ["mathematics", "development-tools::debugging"]
+
+[dependencies]
+pounce-common.workspace = true
+# `serde` enabled so the collected `IterRecord`s round-trip into the
+# JSON solve report.
+pounce-nlp = { workspace = true, features = ["serde"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-log.workspace = true
+anstyle.workspace = true
+anstyle-query.workspace = true
+
+[dev-dependencies]
+log = "0.4"
+
+[lints]
+workspace = true

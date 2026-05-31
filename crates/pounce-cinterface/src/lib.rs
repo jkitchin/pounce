@@ -240,6 +240,11 @@ pub unsafe extern "C" fn CreateIpoptProblem(
     eval_jac_g: Option<Eval_Jac_G_CB>,
     eval_h: Option<Eval_H_CB>,
 ) -> IpoptProblem {
+    // Install the tracing subscriber on first use so C consumers
+    // (cyipopt, AMPL, …) get logging and the iteration collector that
+    // backs `IpoptEnableIterHistory` (pounce#71). Idempotent.
+    pounce_observability::init_subscriber();
+
     if n < 0 || m < 0 || nele_jac < 0 || nele_hess < 0 {
         return std::ptr::null_mut();
     }

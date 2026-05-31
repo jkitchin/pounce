@@ -16,6 +16,7 @@ pounce-linalg.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
 pounce-linsol.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 pounce-feral.workspace = true

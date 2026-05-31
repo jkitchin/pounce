@@ -564,7 +564,7 @@ impl MuUpdate for AdaptiveMuUpdate {
                         .iter()
                         .map(|e| (e.theta, e.phi, e.iter))
                         .collect();
-                    eprintln!(
+                    tracing::debug!(target: "pounce::mu",
                         "[AMU] iter={} free->fixed: curr_mu={:.3e} theta={:.3e} f={:.3e} nlp_err={:.3e} margin={:.3e} avrg_compl={:.3e} new_mu={:.3e} | filter={:?} | force_no_progress={} tiny={}",
                         iter_count,
                         curr_mu,
@@ -641,7 +641,7 @@ impl MuUpdate for AdaptiveMuUpdate {
                     avrg_compl,
                 ) {
                     if std::env::var("POUNCE_DBG_ORACLE").is_ok() {
-                        eprintln!(
+                        tracing::debug!(target: "pounce::mu",
                             "[PN_PROBE_GUARD] iter={} curr_mu={:.3e} avrg_compl={:.3e} ratio={:.3e} > factor={:.3e} → request_resto",
                             iter_count,
                             curr_mu,

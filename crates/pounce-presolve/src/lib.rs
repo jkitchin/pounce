@@ -513,11 +513,9 @@ impl PresolveTnlp {
                 reduction_stack.push(frame);
             }
             // When `presolve_auxiliary_diagnostics=yes`, emit the
-            // summary to stderr. This is a low-overhead drop-in for
-            // the journalist wiring described in the design doc;
-            // upgrading to the real journalist is a follow-up.
+            // summary through tracing (pounce#71).
             if self.opts.auxiliary_diagnostics {
-                eprintln!("{}", plan.diagnostics);
+                tracing::info!(target: "pounce::presolve", "{}", plan.diagnostics);
             }
             plan.diagnostics
         } else {
@@ -556,10 +554,10 @@ impl PresolveTnlp {
         // `report.infeasible` was previously never inspected and
         // corrupted bounds reached the IPM (#53 PR review).
         if tighten_report.infeasible && !reduction_stack.is_empty() {
-            eprintln!(
-                "pounce-presolve: auxiliary-equality elimination produced \
-                 bounds inconsistent with kept linear rows; rolling back \
-                 the elimination for this solve."
+            tracing::warn!(
+                target: "pounce::presolve",
+                "auxiliary-equality elimination produced bounds inconsistent \
+                 with kept linear rows; rolling back the elimination for this solve."
             );
             x_l.copy_from_slice(&inner_x_l);
             x_u.copy_from_slice(&inner_x_u);
