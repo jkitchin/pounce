@@ -256,6 +256,51 @@ fn many_duplicate_rows_parallel_path() {
     assert_kkt(&prob, &sol, 1e-4);
 }
 
+// --- fixpoint cascade ---
+
+/// A chain of fixings that only a *fixpoint* presolve fully unwinds: only
+/// one singleton exists initially, but fixing it exposes the next, and so
+/// on. Iteration fixes the whole chain (reduced problem empty); a single
+/// pass would stop after the first.
+#[test]
+fn fixpoint_cascades_chain_of_fixings() {
+    // x3 = 3 (singleton) → x2 = 5−x3 = 2 → x1 = 7−x2 = 5 → x0 = 9−x1 = 4.
+    let prob = QpProblem {
+        n: 4,
+        p_lower: (0..4).map(|i| Triplet::new(i, i, 2.0)).collect(),
+        c: vec![0.0; 4],
+        a: vec![
+            Triplet::new(0, 2, 1.0),
+            Triplet::new(0, 3, 1.0), // x2 + x3 = 5
+            Triplet::new(1, 1, 1.0),
+            Triplet::new(1, 2, 1.0), // x1 + x2 = 7
+            Triplet::new(2, 0, 1.0),
+            Triplet::new(2, 1, 1.0), // x0 + x1 = 9
+            Triplet::new(3, 3, 1.0), // x3 = 3   (the only initial singleton)
+        ],
+        b: vec![5.0, 7.0, 9.0, 3.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![],
+        ub: vec![],
+    };
+    match presolve(&prob) {
+        PresolveOutcome::Reduced(ps) => {
+            // Whole chain fixed ⇒ nothing left to solve.
+            assert_eq!(ps.reduced.n, 0, "fixpoint should fix all four variables");
+            assert!(ps.stats().fixed_vars >= 4 || ps.stats().free_col_singletons >= 1);
+        }
+        other => panic!("expected Reduced, got {}", status_of(&other)),
+    }
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    let expect = [4.0, 5.0, 2.0, 3.0];
+    for i in 0..4 {
+        assert!((sol.x[i] - expect[i]).abs() < 1e-6, "x[{i}]={} want {}", sol.x[i], expect[i]);
+    }
+    assert_kkt(&prob, &sol, 1e-5);
+}
+
 // --- parallel rows (scalar multiples, not just exact duplicates) ---
 
 /// Parallel equality rows: `x0 + x1 = 2` and `3x0 + 3x1 = 6` are the same
@@ -522,7 +567,9 @@ fn dominated_column_lp() {
         ub: vec![3.0, 3.0],
     };
     match presolve(&prob) {
-        PresolveOutcome::Reduced(ps) => assert_eq!(ps.stats().dominated_cols, 1),
+        // x1 is dominated; fixpoint iteration then cascades (x0's row
+        // becomes redundant, leaving x0 dominated too) — ≥ 1 dominated.
+        PresolveOutcome::Reduced(ps) => assert!(ps.stats().dominated_cols >= 1),
         other => panic!("expected Reduced, got {}", status_of(&other)),
     }
     let sol = with_presolve(&prob);

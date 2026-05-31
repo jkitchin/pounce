@@ -119,12 +119,18 @@
 //!   (`tests/presolve_bound_tightening.rs`).
 //!
 //! The full deferred catalog — forcing constraints, parallel rows,
-//! dominated columns, and bound tightening — is now implemented, each with
-//! a dual recovery proven correct (and KKT-validated in tests). The main
-//! remaining *enhancement* (not a missing reduction) is iterating the
-//! passes to a fixpoint so deductions cascade — bound tightening here is
-//! single-pass — and lifting the disjoint-source restriction on forcing /
-//! tightening via a coupled re-attribution solve.
+//! dominated columns, and bound tightening — is implemented, each with a
+//! dual recovery proven correct (and KKT-validated in tests).
+//!
+//! [`presolve`] iterates the single-pass catalog ([`presolve_once`]) to a
+//! **fixpoint**, so deductions cascade across rounds (a fixing exposes a
+//! new singleton; a tightened bound makes a row forcing; a forcing that
+//! shares a column with another — disallowed in one round — fires the next
+//! once the shared variable is gone). Because each pass is a correct
+//! solution-space transform, the iterate is their composition and reuses
+//! every pass's proven dual recovery. The disjoint-source restriction on
+//! forcing / tightening within a single round therefore costs little: the
+//! fixpoint progressively handles overlaps that a single round defers.
 
 use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
 use rayon::prelude::*;
@@ -243,6 +249,12 @@ pub struct Presolve {
     /// Original problem data, retained for fixing-row dual recovery.
     orig: QpProblem,
     stack: Vec<Reduction>,
+    /// For an *iterated* presolve, the ordered single-pass layers
+    /// (`L0, L1, …`) whose composition this object represents; empty for a
+    /// single pass. `reduced` is then the final layer's reduced problem and
+    /// `postsolve` folds the layers in reverse. The single-pass fields
+    /// above are unused in that case.
+    chain: Vec<Presolve>,
 }
 
 /// Coefficients are treated as nonzero unless exactly 0.0.
@@ -300,8 +312,59 @@ struct Row {
     orig: usize,
 }
 
-/// Run presolve on `prob`.
+/// Run presolve on `prob`, iterating the reduction passes to a **fixpoint**
+/// so deductions cascade (a fixing exposes a new singleton, a tightened
+/// bound makes a row forcing, …). Each pass is a correct solution-space
+/// transform, so the iterate is the composition of the per-pass transforms
+/// — postsolve folds them back in reverse — and inherits each pass's proven
+/// dual recovery with no new dual math.
 pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
+    // Cap rounds defensively; in practice it converges in a few.
+    const MAX_ROUNDS: usize = 32;
+    let mut chain: Vec<Presolve> = Vec::new();
+    let mut current = prob.clone();
+    loop {
+        match presolve_once(&current) {
+            PresolveOutcome::Infeasible => return PresolveOutcome::Infeasible,
+            PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
+            PresolveOutcome::Reduced(ps) => {
+                if !ps.changed() {
+                    // Fixpoint: this round did nothing.
+                    if chain.is_empty() {
+                        return PresolveOutcome::Reduced(ps); // plain single pass
+                    }
+                    break;
+                }
+                current = ps.reduced.clone();
+                chain.push(ps);
+                if chain.len() >= MAX_ROUNDS {
+                    break;
+                }
+            }
+        }
+    }
+    if chain.len() == 1 {
+        return PresolveOutcome::Reduced(chain.pop().unwrap());
+    }
+    let reduced = chain.last().expect("chain non-empty").reduced.clone();
+    PresolveOutcome::Reduced(Presolve {
+        reduced,
+        obj_offset: 0.0,
+        orig_n: prob.n,
+        orig_m_eq: prob.m_eq(),
+        orig_m_ineq: prob.m_ineq(),
+        kept_cols: Vec::new(),
+        kept_eq: Vec::new(),
+        kept_ineq: Vec::new(),
+        orig: prob.clone(),
+        stack: Vec::new(),
+        chain,
+    })
+}
+
+/// A single presolve pass (the reduction catalog applied once). [`presolve`]
+/// iterates this to a fixpoint.
+fn presolve_once(prob: &QpProblem) -> PresolveOutcome {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
@@ -986,6 +1049,7 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
         kept_ineq,
         orig: prob.clone(),
         stack,
+        chain: Vec::new(),
     })
 }
 
@@ -1242,8 +1306,40 @@ impl PresolveStats {
 }
 
 impl Presolve {
-    /// Reduction summary (sizes before/after and counts by reduction).
+    /// Did this single pass change anything (a reduction, or a dropped
+    /// row)? Used by [`presolve`] to detect the fixpoint.
+    fn changed(&self) -> bool {
+        !self.stack.is_empty()
+            || self.reduced.n < self.orig_n
+            || self.reduced.m_eq() + self.reduced.m_ineq() < self.orig_m_eq + self.orig_m_ineq
+    }
+
+    /// Reduction summary (sizes before/after and counts by reduction). For
+    /// an iterated presolve, counts aggregate over the rounds.
     pub fn stats(&self) -> PresolveStats {
+        if self.chain.is_empty() {
+            return self.stats_once();
+        }
+        let mut s = PresolveStats {
+            orig_vars: self.orig_n,
+            reduced_vars: self.reduced.n,
+            orig_rows: self.orig_m_eq + self.orig_m_ineq,
+            reduced_rows: self.reduced.m_eq() + self.reduced.m_ineq(),
+            ..Default::default()
+        };
+        for layer in &self.chain {
+            let ls = layer.stats_once();
+            s.fixed_vars += ls.fixed_vars;
+            s.free_cols_fixed += ls.free_cols_fixed;
+            s.free_col_singletons += ls.free_col_singletons;
+            s.forcing_rows += ls.forcing_rows;
+            s.dominated_cols += ls.dominated_cols;
+            s.tightened_bounds += ls.tightened_bounds;
+        }
+        s
+    }
+
+    fn stats_once(&self) -> PresolveStats {
         let mut s = PresolveStats {
             orig_vars: self.orig_n,
             reduced_vars: self.reduced.n,
@@ -1265,8 +1361,21 @@ impl Presolve {
     }
 
     /// Expand a reduced-problem solution back to the original space,
-    /// recovering primal `x` and duals `(y, z)`.
+    /// recovering primal `x` and duals `(y, z)`. For an iterated presolve,
+    /// folds the per-round postsolves in reverse.
     pub fn postsolve(&self, red: &QpSolution) -> QpSolution {
+        if self.chain.is_empty() {
+            return self.postsolve_once(red);
+        }
+        let mut sol = red.clone();
+        for layer in self.chain.iter().rev() {
+            sol = layer.postsolve_once(&sol);
+        }
+        sol
+    }
+
+    /// Expand a single pass's reduced solution back to its original space.
+    fn postsolve_once(&self, red: &QpSolution) -> QpSolution {
         let mut x = vec![0.0; self.orig_n];
         let mut y = vec![0.0; self.orig_m_eq];
         let mut z = vec![0.0; self.orig_m_ineq];
