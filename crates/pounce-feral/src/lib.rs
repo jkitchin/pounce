@@ -32,6 +32,13 @@ use pounce_linsol::{
     EMatrixFormat, ESymSolverStatus, FactorPattern, SparseSymLinearSolverInterface,
 };
 
+/// EXPERIMENT helper (gpu-batched-layers §9, step 1): is f32-precision
+/// inner-solve emulation requested? Env-gated, default off, read per call
+/// so it can be toggled per process without touching any production path.
+fn emulate_f32() -> bool {
+    std::env::var_os("POUNCE_FERAL_EMULATE_F32").is_some()
+}
+
 /// FERAL solver implementing the IPM-side sparse symmetric backend
 /// contract.
 pub struct FeralSolverInterface {
@@ -392,6 +399,16 @@ impl FeralSolverInterface {
     /// `Singular` so the outer loop routes to `perturb_for_singular`.
     fn factor(&mut self, check_neg_evals: bool, number_of_neg_evals: Index) -> ESymSolverStatus {
         let n = self.dim as usize;
+        // EXPERIMENT (gpu-batched-layers §9, step 1): emulate an f32-precision
+        // inner solve through pounce's real IPM. Round the KKT values to f32
+        // before factoring so FERAL factors the f32-representable matrix and
+        // reads inertia from f32 pivots — exactly what a GPU f32 batched solve
+        // would see. Env-gated (`POUNCE_FERAL_EMULATE_F32`), default off.
+        if emulate_f32() {
+            for v in self.values.iter_mut() {
+                *v = (*v as f32) as Number;
+            }
+        }
         // Hand the KKT to feral with its structure intact. Where a
         // constraint multiplier is zero (e.g. the initial point) the
         // (2,2) diagonal lands as structurally-present exact `0.0`
@@ -481,14 +498,30 @@ impl FeralSolverInterface {
         let nrhs = nrhs as usize;
         debug_assert_eq!(rhs_vals.len(), n * nrhs);
 
-        let solved = match (self.refine, self.matrix.as_ref(), nrhs == 1) {
+        // EXPERIMENT (gpu-batched-layers §9, step 1): under f32 emulation,
+        // round the RHS to f32 and skip f64 iterative refinement so nothing
+        // recovers accuracy the f32 GPU solve would not have. The solution is
+        // rounded back to f32 below.
+        let emulate = emulate_f32();
+        if emulate {
+            for r in rhs_vals.iter_mut() {
+                *r = (*r as f32) as Number;
+            }
+        }
+        let use_refine = self.refine && !emulate;
+        let solved = match (use_refine, self.matrix.as_ref(), nrhs == 1) {
             (true, Some(m), true) => self.solver.solve_refined(m, rhs_vals),
             (true, Some(m), false) => self.solver.solve_many_refined(m, rhs_vals, nrhs),
             (_, _, true) => self.solver.solve(rhs_vals),
             (_, _, false) => self.solver.solve_many(rhs_vals, nrhs),
         };
         match solved {
-            Ok(x) => {
+            Ok(mut x) => {
+                if emulate {
+                    for v in x.iter_mut() {
+                        *v = (*v as f32) as Number;
+                    }
+                }
                 rhs_vals.copy_from_slice(&x);
                 ESymSolverStatus::Success
             }

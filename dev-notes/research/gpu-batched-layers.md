@@ -136,9 +136,10 @@ opt-in, never the default.
   size `B` and dimension `n` at which the GPU crosses over the
   `vmap_solve_parallel` CPU-thread baseline, and confirm the f32
   accuracy envelope. Throwaway-friendly; pure decision-gathering.
-  **The numerical half of Phase 0 is already done as a CPU proxy — see
-  §10; it resolves the f32 risk in §8 with data. What remains for Phase
-  0 is the GPU throughput crossover, which needs hardware.**
+  **The numerical half of Phase 0 is already done on CPU — see §9 (a
+  true-f32 proxy and a real-pounce f32-inner-solve run); it resolves
+  the f32 risk in §8 with data. What remains for Phase 0 is the GPU
+  throughput crossover, which needs hardware.**
 - **Phase 1 — batched condensed-KKT solve, fixed active set.** Wire the
   Phase-0 kernel as the inner solve of a batched IPM that assumes a
   fixed active set per element (valid for the convex-QP-layer case).
@@ -196,18 +197,21 @@ that runs on **any** GPU and ships as one static binary.
 
 ## 8. Open questions for review
 
-- **The f32 wall is the central risk — now measured on a CPU proxy
-  (§10).** The JAX path today forces `jax_enable_x64` precisely because
-  "Newton convergence stalls in float32" (`python/pounce/jax/__init__.py:36`).
-  The §10 study confirms the stall is real (a plain f32 IPM cannot reach
-  1e-8 and breaks down near the solution, worse as `n` grows) **but
-  bounded**: f32 reaches 1e-6 on 100% of instances at every size, and a
-  short f64 refinement (median 3 iterations) recovers 1e-8 on 100%. So
-  the value proposition is **not** "GPU warm-starts rather than solves"
-  — it is "GPU f32 solves to moderate accuracy, CPU f64 finishes
-  cheaply," which keeps almost all the work on the GPU. The open part:
-  the proxy is convex QP; pounce's nonconvex filter-line-search IPM (and
-  worse conditioning) must still be measured for real.
+- **The f32 wall is the central risk — now measured on CPU (§9).** The
+  JAX path today forces `jax_enable_x64` precisely because "Newton
+  convergence stalls in float32" (`python/pounce/jax/__init__.py:36`).
+  The §9.1 true-f32 proxy confirms the stall is real (a plain f32 IPM
+  cannot reach 1e-8 and breaks down near the solution, worse as `n`
+  grows) **but bounded**: f32 reaches 1e-6 on 100% of instances at every
+  size, and a short f64 refinement (median 3 iterations) recovers 1e-8
+  on 100%. The §9.2 real-pounce run adds that the *algorithm* (inertia
+  correction, scaling, filter) does not amplify f32 inexactness — the
+  nonconvex case converges with ~±3% iteration noise. So the value
+  proposition is **not** "GPU warm-starts rather than solves" — it is
+  "GPU f32 solves to moderate accuracy, CPU f64 finishes cheaply." The
+  open part (§9.2): the untested quadrant — many iterations *and* active
+  inequality constraints driving μ→0 — still needs a real-pounce
+  measurement (the `electrolyte` family is the natural probe).
 - **Lockstep vs compaction.** Running `B` IPMs to the slowest element's
   iteration count wastes work on early-converging elements. Mask-only
   is simplest; periodic compaction recovers throughput at the cost of
@@ -224,12 +228,19 @@ that runs on **any** GPU and ships as one static binary.
   select when the layer detects a homogeneous batch above a width
   threshold, or only on explicit request?
 
-## 9. Phase-0 preliminary evidence — f32 convergence (CPU proxy)
+## 9. Phase-0 preliminary evidence — f32 convergence
 
 The numerical go/no-go question — *does an interior-point method
 converge in f32, and to what accuracy?* — is independent of the GPU: the
 GPU runs the same arithmetic, only elsewhere. It can therefore be
-answered on CPU before any GPU code exists. The experiment
+answered on CPU before any GPU code exists. Two experiments bracket the
+answer: a standalone proxy that runs **true f32 arithmetic** on the
+worst-case regime (§9.1), and real pounce with an f32-precision inner
+solve on its actual nonconvex IPM (§9.2). The synthesis is in §9.3.
+
+### 9.1 Standalone proxy — true f32 arithmetic, inequality QP
+
+The experiment
 (`experiments/f32_qp_ipm_study.rs`, a dependency-free `rustc -O` program;
 run with `rustc -O f32_qp_ipm_study.rs && ./f32_qp_ipm_study`) implements
 a Mehrotra predictor-corrector solver for the canonical layer QP
@@ -269,14 +280,68 @@ accuracy on **100% of instances at every size, in a median of 3 f64
 iterations.** This is the §5 Phase-4 design validated: the GPU does the
 bulk f32 work; a cheap CPU f64 tail cleans up.
 
-**Caveats.** Convex QP, well-conditioned `Q`, plain Cholesky, no
-inertia correction, no in-solve refinement. pounce's real IPM is a
-nonconvex filter-line-search method where the condensed system is not
-guaranteed SPD (needs inertia handling, likely harder in f32), and
-worse conditioning lowers the f32 floor. The *qualitative* finding —
-f32 to ≈1e-6, mixed-precision to recover — is robust and matches the
-mixed-precision IPM literature; the f32 floor on pounce proper still
-needs measuring on representative nonconvex layer problems.
+This proxy is a bare Mehrotra solver (no inertia correction, no
+scaling, no filter) on the *worst* regime for f32: inequality
+constraints whose barrier drives `z/s → ∞`, pushing the condensed
+matrix's condition number to ~1/μ. It isolates the f32 conditioning
+wall; it says nothing about whether pounce's *algorithm* tolerates an
+inexact step. §9.2 tests that.
+
+### 9.2 Real pounce — f32-precision inner solve, nonconvex IPM
+
+To test the actual solver, the FERAL adapter gained an env-gated f32
+emulation (`POUNCE_FERAL_EMULATE_F32`, `crates/pounce-feral/src/lib.rs`,
+default off): the KKT values are rounded to f32 before factoring (so
+FERAL factors the f32-representable matrix and reads **inertia from f32
+pivots**), the RHS is rounded to f32, f64 iterative refinement is
+disabled, and the solution is rounded back to f32. The full nonconvex
+filter-line-search IPM — inertia correction, scaling, filter,
+restoration — then runs on top. Measured on the `large_scale` suite
+(`tol=1e-8`), f64 baseline vs f32-emulated inner solve:
+
+| problem | constraints | f64 iters | f32 iters | both reach 1e-8? |
+|---|---|---|---|---|
+| ChainedRosenbrock n=500 | unconstrained | 387 | 390 | yes |
+| ChainedRosenbrock n=1000 | unconstrained | 765 | 734 | yes |
+| ChainedRosenbrock n=2000 | unconstrained | 1484 | 1528 | yes |
+| BratuProblem n=2000 | 1998 eq | 2 | 2 | yes |
+| OptimalControl n=4001 | 2001 eq | 1 | 1 | yes |
+| SparseQP n=3000 | 3000 ineq | 7 | 7 | yes |
+
+Every problem still converges to the full 1e-8 tolerance; the nonconvex
+case (Rosenbrock, 1500+ iterations of active inertia correction)
+absorbs the f32 perturbation with only ~±3% iteration noise and an
+identical objective. **pounce's robustness machinery does not amplify
+f32-level inexactness in the step** — a real and reassuring finding the
+bare proxy could not give.
+
+Two honest limits keep this from being the whole story:
+
+1. **Optimistic on arithmetic.** FERAL's factorization still runs in
+   f64; only the *data* (matrix, RHS, solution) is f32. A real GPU f32
+   kernel does f32 *arithmetic*, accumulating the error §9.1 exhibits.
+   This bounds the good side; §9.1 bounds the binding side.
+2. **Misses the worst regime.** The only long-running case here
+   (Rosenbrock) is *unconstrained* — inertia correction keeps its KKT
+   well-conditioned, so f32-data rounding is benign. The
+   constraint-heavy problems converge in 1–7 iterations, never driving
+   μ small enough to reach the §9.1 wall. The untested quadrant —
+   **many iterations *and* active inequality constraints driving
+   μ→0** — is exactly where f32 should bite hardest (e.g. the
+   ill-conditioned `electrolyte` family).
+
+### 9.3 Synthesis
+
+The truth for a GPU f32 batched solve of a constrained layer NLP sits
+between the two: it does true f32 arithmetic (§9.1's wall is real and
+size-dependent) but benefits from pounce's inertia/scaling/filter
+machinery (§9.2 shows that machinery is not fragile to inexact steps).
+The binding constraint is §9.1's conditioning wall, and its mitigation
+— **f32 forward to ≈1e-6, short f64 refinement to recover 1e-8** — is
+validated. So the Phase-4 mixed-precision design is not a hedge; it is
+the load-bearing element, and the §5 phasing should treat the f64
+refinement tail as mandatory, not optional. The remaining measurement
+(the §9.2 untested quadrant) is the next concrete experiment.
 
 ## 10. References
 
