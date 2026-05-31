@@ -470,8 +470,7 @@ mod tests {
         // ancestor. Regression guard for the per-layer-filter bug where
         // a `target`-only filter hid span ancestry and let inner
         // restoration iterations leak into the report.
-        let collector =
-            IterCollectorLayer.with_filter(filter_fn(collector_admits));
+        let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let subscriber = tracing_subscriber::registry().with(collector);
 
         let captured = tracing::subscriber::with_default(subscriber, || {
