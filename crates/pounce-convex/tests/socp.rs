@@ -211,6 +211,45 @@ fn soc_warm_start_matches_cold() {
     assert!(warm.iters <= cold.iters, "warm {} cold {}", warm.iters, cold.iters);
 }
 
+/// A larger second-order cone (dim 12) — exercises the sparse
+/// diagonal-plus-rank-1 KKT representation (one auxiliary variable carries
+/// the rank-1 update; the `(z,z)` block stays diagonal instead of dense).
+/// Projection of a point outside the cone has a known closed form.
+#[test]
+fn larger_soc_projection_sparse_kkt() {
+    let m = 12;
+    // p = (t, x₁) with t < ‖x₁‖ ⇒ outside the cone. Project:
+    // scale = (‖x₁‖+t)/(2‖x₁‖); proj = scale·(‖x₁‖, x₁).
+    let mut p = vec![1.0; m];
+    p[0] = 1.0; // t
+    let nx: f64 = p[1..].iter().map(|v| v * v).sum::<f64>().sqrt(); // ‖x₁‖
+    let scale = (nx + p[0]) / (2.0 * nx);
+    let mut expect = vec![0.0; m];
+    expect[0] = scale * nx;
+    for k in 1..m {
+        expect[k] = scale * p[k];
+    }
+
+    let prob = QpProblem {
+        n: m,
+        p_lower: (0..m).map(|i| Triplet::new(i, i, 1.0)).collect(),
+        c: p.iter().map(|v| -v).collect(),
+        a: vec![],
+        b: vec![],
+        g: (0..m).map(|i| Triplet::new(i, i, -1.0)).collect(),
+        h: vec![0.0; m],
+        lb: vec![],
+        ub: vec![],
+    };
+    let opts = QpOptions::default();
+    let sol = solve_socp_ipm(&prob, &[ConeSpec::SecondOrder(m)], &opts, backend);
+    assert_eq!(sol.status, QpStatus::Optimal, "iters={}", sol.iters);
+    for k in 0..m {
+        assert!((sol.x[k] - expect[k]).abs() < 1e-5, "x[{k}]={} want {}", sol.x[k], expect[k]);
+    }
+    assert_socp_kkt(&prob, &sol, 1e-6);
+}
+
 /// Mixed cone: a nonnegative-orthant block and a second-order block in one
 /// problem (exercises the composite KKT assembly with both shapes).
 /// min −x0 − x1  s.t.  x0 ≤ 1 (orthant),  (1, x1) ∈ SOC(2) ⇒ |x1| ≤ 1.

@@ -73,28 +73,6 @@ impl SecondOrderCone {
         (eta, w_bar)
     }
 
-    /// Dense lower triangle (row-major) of `W² = η²(2 w̄ w̄ᵀ − J)`.
-    fn w2_lower(eta: f64, w_bar: &[f64]) -> Vec<f64> {
-        let m = w_bar.len();
-        let eta2 = eta * eta;
-        let mut lower = Vec::with_capacity(m * (m + 1) / 2);
-        for i in 0..m {
-            for j in 0..=i {
-                let j_ij = if i == j {
-                    if i == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
-                } else {
-                    0.0
-                };
-                lower.push(eta2 * (2.0 * w_bar[i] * w_bar[j] - j_ij));
-            }
-        }
-        lower
-    }
-
     /// Apply the scaling block `W² = η²(2 w̄ w̄ᵀ − J)` to a vector — the
     /// matrix-free form of the dense block returned by [`Self::kkt_block`],
     /// used in `recover_ds` so the recovered slack step is *exactly*
@@ -143,11 +121,16 @@ impl Cone for SecondOrderCone {
     }
 
     fn kkt_block(&self, s: &[f64], z: &[f64]) -> ConeBlock {
+        // Diagonal-plus-rank-1 form of W² = η²(2 w̄w̄ᵀ − J)
+        //   = diag(η²·(−J)) + (√2 η w̄)(√2 η w̄)ᵀ,
+        // so the KKT assembly can keep it sparse via one auxiliary variable.
         let (eta, w_bar) = Self::nt_scaling(s, z);
-        ConeBlock::DenseLower {
-            dim: self.m,
-            lower: Self::w2_lower(eta, &w_bar),
-        }
+        let eta2 = eta * eta;
+        let mut diag = vec![eta2; self.m];
+        diag[0] = -eta2; // −J = diag(−1, 1, …, 1) ⇒ η²·(−J)₀ = −η²
+        let scale = (2.0_f64).sqrt() * eta;
+        let u: Vec<f64> = w_bar.iter().map(|w| scale * w).collect();
+        ConeBlock::DiagPlusRank1 { diag, u }
     }
 
     fn comp_residual(&self, s: &[f64], z: &[f64], sigma_mu: f64, out: &mut [f64]) {
@@ -264,22 +247,20 @@ mod tests {
         u[0] > 0.0 && SecondOrderCone::det(u) > 0.0
     }
 
-    /// Reconstruct the dense symmetric `W²` from its lower triangle.
+    /// Reconstruct the dense symmetric `W² = diag(d) + u uᵀ` from the
+    /// cone's diagonal-plus-rank-1 block.
     fn dense(block: &ConeBlock, m: usize) -> Vec<Vec<f64>> {
-        let lower = match block {
-            ConeBlock::DenseLower { dim, lower } => {
-                assert_eq!(*dim, m);
-                lower
+        let (diag, u) = match block {
+            ConeBlock::DiagPlusRank1 { diag, u } => {
+                assert_eq!(diag.len(), m);
+                (diag, u)
             }
-            _ => panic!("expected dense block"),
+            _ => panic!("expected diag-plus-rank-1 block"),
         };
         let mut w = vec![vec![0.0; m]; m];
-        let mut idx = 0;
         for i in 0..m {
-            for j in 0..=i {
-                w[i][j] = lower[idx];
-                w[j][i] = lower[idx];
-                idx += 1;
+            for j in 0..m {
+                w[i][j] = u[i] * u[j] + if i == j { diag[i] } else { 0.0 };
             }
         }
         w
@@ -425,9 +406,9 @@ mod tests {
         let s = [2.0];
         let z = [5.0];
         match c.kkt_block(&s, &z) {
-            ConeBlock::DenseLower { dim, lower } => {
-                assert_eq!(dim, 1);
-                assert!((lower[0] - s[0] / z[0]).abs() < 1e-12);
+            ConeBlock::DiagPlusRank1 { diag, u } => {
+                // 1-D: W²[0] = diag + u² = −η² + 2η² = η² = s/z.
+                assert!((diag[0] + u[0] * u[0] - s[0] / z[0]).abs() < 1e-12);
             }
             _ => panic!(),
         }

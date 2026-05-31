@@ -36,6 +36,13 @@ pub enum ConeBlock {
     /// Dense symmetric `dim × dim` block, lower triangle row-major
     /// (`[ (0,0); (1,0),(1,1); (2,0),(2,1),(2,2); … ]`).
     DenseLower { dim: usize, lower: Vec<f64> },
+    /// A `diag(d) + u uᵀ` block — the second-order cone's Nesterov–Todd
+    /// Hessian in **diagonal-plus-rank-1** form (`d = η²·diag(−1,1,…,1)`,
+    /// `u = √2 η w̄`). The KKT assembly represents the rank-1 update with a
+    /// single auxiliary variable per cone (the ECOS/Clarabel "sparse SOC"
+    /// trick), keeping the factorization sparse for large cones instead of
+    /// an `O(m²)` dense block.
+    DiagPlusRank1 { diag: Vec<f64>, u: Vec<f64> },
 }
 
 /// A symmetric cone over which the IPM maintains a primal slack `s` and

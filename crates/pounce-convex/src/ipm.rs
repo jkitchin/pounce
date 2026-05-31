@@ -394,12 +394,12 @@ fn build_factorization<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    let dim = prob.n + prob.m_eq() + prob.m_ineq();
     // Seed the scaling at the cone identity (s = z = e ⇒ block = I).
     let mut e = vec![0.0; prob.m_ineq()];
     cone.identity(&mut e);
 
     let kkt = KktStructure::build(prob, cone, opts.reg);
+    let dim = kkt.dim; // base rows + per-SOC auxiliary variables
     let mut kkt_vals = kkt.values.clone();
     kkt.update_blocks(cone, &e, &e, opts.reg, &mut kkt_vals);
     let fact = Factorization::new(
@@ -545,7 +545,9 @@ fn run_ipm(
     let mut r_g = vec![0.0; m_ineq];
     let mut r_c = vec![0.0; m_ineq];
     let mut rhs_term = vec![0.0; m_ineq];
-    let mut rhs = vec![0.0; n + m_eq + m_ineq];
+    // The KKT system carries one auxiliary variable per second-order cone;
+    // the rhs is sized to it (auxiliary rows are zero).
+    let mut rhs = vec![0.0; kkt.dim];
     let mut dx = vec![0.0; n];
     let mut dy = vec![0.0; m_eq];
     let mut dz = vec![0.0; m_ineq];
@@ -848,6 +850,12 @@ fn build_rhs(
     for i in 0..m_ineq {
         rhs[n + m_eq + i] = -r_g[i] + comp_term[i];
     }
+    // Auxiliary-variable rows (per second-order cone, appended after the
+    // base rows) have zero right-hand side; re-zero them since `solve_one`
+    // overwrote the buffer with the previous step.
+    for v in rhs.iter_mut().skip(n + m_eq + m_ineq) {
+        *v = 0.0;
+    }
 }
 
 /// Copy the solved RHS into the (dx, dy, dz) step components.
@@ -917,11 +925,18 @@ pub fn assemble_kkt_for_bench(
 /// Value-array positions of one cone's `(z, z)` scaling block, aligned with
 /// the cone's [`CompositeCone::blocks`] order.
 enum ZBlockPos {
-    /// One position per row (orthant diagonal).
+    /// One value position per row (orthant diagonal).
     Diagonal(Vec<usize>),
-    /// Row-major lower-triangle positions of a dense block (SOC); the
-    /// dimension is the cone block's `dim()`.
-    Dense { lower_pos: Vec<usize> },
+    /// A second-order cone in **diagonal + rank-1** form, represented with
+    /// one auxiliary variable `ξ`: the `(z,z)` diagonal entries, the
+    /// coupling column `(z_i, ξ) = u_i`, and the `(ξ,ξ) = +1` entry. Its
+    /// Schur complement reproduces the dense block `diag(d) + uuᵀ`, keeping
+    /// the factorization sparse (ECOS/Clarabel sparse-SOC trick).
+    DiagRank1 {
+        diag_pos: Vec<usize>,
+        u_pos: Vec<usize>,
+        aux_pos: usize,
+    },
 }
 
 struct KktStructure {
@@ -930,8 +945,9 @@ struct KktStructure {
     /// Constant values (everything except the scaling block; the `(z, z)`
     /// diagonal entries hold their `-reg` term here).
     values: Vec<Number>,
-    /// Per-cone `(z, z)` block positions (orthant: diagonal; SOC: dense),
-    /// in `cone.blocks()` order. [`Self::update_blocks`] fills them.
+    /// Total KKT dimension, including the per-SOC auxiliary variables.
+    dim: usize,
+    /// Per-cone `(z, z)` block positions, in `cone.blocks()` order.
     z_blocks: Vec<ZBlockPos>,
 }
 
@@ -969,25 +985,28 @@ impl KktStructure {
         for t in &prob.g {
             add(n + m_eq + t.row, t.col, t.val);
         }
-        // (z,z): per cone block, seeded with −δI. The scaling is written
-        // per iteration by `update_blocks`.
+        // (z,z): per cone block, seeded with −δI. SOC blocks get an
+        // auxiliary variable (appended after the base rows) carrying the
+        // rank-1 term. The scaling values are written by `update_blocks`.
+        let base_dim = n + m_eq + prob.m_ineq();
         let shapes = block_shapes(cone);
+        let mut aux = base_dim; // next auxiliary-variable index
         for ((off, k), dense) in cone.blocks().iter().zip(&shapes) {
             let d = k.dim();
-            let base = n + m_eq + off;
+            let zbase = n + m_eq + off;
+            for i in 0..d {
+                add(zbase + i, zbase + i, -reg); // diagonal (filled per iter)
+            }
             if *dense {
+                // Aux: coupling (z_i, ξ) = u_i and (ξ, ξ) = +1.
                 for i in 0..d {
-                    for j in 0..=i {
-                        let v = if i == j { -reg } else { 0.0 };
-                        add(base + i, base + j, v);
-                    }
+                    add(aux, zbase + i, 0.0);
                 }
-            } else {
-                for i in 0..d {
-                    add(base + i, base + i, -reg);
-                }
+                add(aux, aux, 1.0);
+                aux += 1;
             }
         }
+        let dim = aux;
 
         let nnz = entries.len();
         let mut airn = Vec::with_capacity(nnz);
@@ -1003,20 +1022,23 @@ impl KktStructure {
 
         // Record each cone block's positions in `blocks()` order.
         let mut z_blocks = Vec::with_capacity(cone.blocks().len());
+        let mut aux = base_dim;
         for ((off, k), dense) in cone.blocks().iter().zip(&shapes) {
             let d = k.dim();
-            let base = n + m_eq + off;
+            let zbase = n + m_eq + off;
+            let diag_pos: Vec<usize> =
+                (0..d).map(|i| coord_to_pos[&(zbase + i, zbase + i)]).collect();
             if *dense {
-                let mut lower_pos = Vec::with_capacity(d * (d + 1) / 2);
-                for i in 0..d {
-                    for j in 0..=i {
-                        lower_pos.push(coord_to_pos[&(base + i, base + j)]);
-                    }
-                }
-                z_blocks.push(ZBlockPos::Dense { lower_pos });
+                let u_pos = (0..d).map(|i| coord_to_pos[&(aux, zbase + i)]).collect();
+                let aux_pos = coord_to_pos[&(aux, aux)];
+                z_blocks.push(ZBlockPos::DiagRank1 {
+                    diag_pos,
+                    u_pos,
+                    aux_pos,
+                });
+                aux += 1;
             } else {
-                let diag = (0..d).map(|i| coord_to_pos[&(base + i, base + i)]).collect();
-                z_blocks.push(ZBlockPos::Diagonal(diag));
+                z_blocks.push(ZBlockPos::Diagonal(diag_pos));
             }
         }
 
@@ -1024,6 +1046,7 @@ impl KktStructure {
             airn,
             ajcn,
             values,
+            dim,
             z_blocks,
         }
     }
@@ -1048,15 +1071,23 @@ impl KktStructure {
                         out[p] = -vals[i] - reg;
                     }
                 }
-                (ZBlockPos::Dense { lower_pos }, ConeBlock::DenseLower { lower, .. }) => {
-                    let mut idx = 0;
+                (
+                    ZBlockPos::DiagRank1 {
+                        diag_pos,
+                        u_pos,
+                        aux_pos,
+                    },
+                    ConeBlock::DiagPlusRank1 { diag, u },
+                ) => {
+                    // (z,z) block = −(diag(d) + uuᵀ) − reg, with the rank-1
+                    // carried by the aux variable ξ: diagonal −dᵢ − reg, the
+                    // coupling (z_i, ξ) = uᵢ, and (ξ, ξ) = +1. Its Schur
+                    // complement is −diag(d) − reg − uuᵀ = −(W²) − reg.
                     for i in 0..d {
-                        for j in 0..=i {
-                            let reg_ij = if i == j { reg } else { 0.0 };
-                            out[lower_pos[idx]] = -lower[idx] - reg_ij;
-                            idx += 1;
-                        }
+                        out[diag_pos[i]] = -diag[i] - reg;
+                        out[u_pos[i]] = u[i];
                     }
+                    out[*aux_pos] = 1.0;
                 }
                 _ => unreachable!("cone block shape changed between build and update"),
             }
@@ -1073,7 +1104,7 @@ fn block_shapes(cone: &CompositeCone) -> Vec<bool> {
             let d = k.dim();
             let mut e = vec![0.0; d];
             k.identity(&mut e);
-            matches!(k.kkt_block(&e, &e), ConeBlock::DenseLower { .. })
+            matches!(k.kkt_block(&e, &e), ConeBlock::DiagPlusRank1 { .. })
         })
         .collect()
 }
