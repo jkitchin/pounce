@@ -41,14 +41,14 @@ From the repo root:
 make cho-run
 ```
 
-or directly:
+Or solve the exported model directly:
 
 ```bash
-cargo run --release --features ipopt-native --example cho_benchmark
+pounce benchmarks/cho/nl_export_results/cho_parmest.nl print_level=5
 ```
 
-The example reads `benchmarks/cho/nl_export_results/cho_parmest.nl` by
-default; override with `CHO_NL_PATH=/path/to/other.nl`.
+The `.nl` files are produced by `parmest_nl_export.py`; rerun it if the
+parameter-estimation model changes.
 
 ## Output
 

@@ -33,8 +33,8 @@ The wrapper mirrors `pounce-hsl::Ma57SolverInterface`:
 FERAL is the default. MA57 is generally faster for very large sparse
 KKT systems (≳ 50k variables) and remains the option of choice when
 `libcoinhsl` is available; enable it with `--features ma57` on
-`pounce-cli`. See `benchmarks/cutest/CUTEST_REPORT.md` for a head-to-
-head comparison.
+`pounce-cli`. See `benchmarks/BENCHMARK_REPORT.md` for a head-to-head
+comparison across the `.nl` benchmark suites.
 
 ## License
 

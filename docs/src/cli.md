@@ -30,6 +30,15 @@ pounce --problem rosenbrock
   `(3, 4)`).
 - `rosenbrock` — `min 100·(x[1]-x[0]²)² + (1-x[0])²` (unconstrained,
   optimum `(1, 1)`).
+- `bounded-quadratic` — `quadratic` with box bounds `0 ≤ x ≤ 2`
+  (optimum at the upper corner `(2, 2)`).
+- `eq-quadratic` — `min x[0]² + x[1]²` s.t. `x[0] + x[1] = 1`
+  (a single equality).
+- `circle` — `min x[0]` s.t. `x[0]² + x[1]² = 1` (a nonlinear equality).
+- `infeasible-eq` — two contradictory equalities (`x[0]+x[1]=1` and
+  `=2`); exercises the infeasibility-detection path.
+
+Run `pounce --list-problems` for the authoritative list.
 
 Built-in problems have no `.nl` stub, so they only write a `.sol` file
 when `--sol-output` is given explicitly.

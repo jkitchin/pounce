@@ -384,21 +384,22 @@ Before trying recipes, dump the per-iter diagnostic categories that
 pounce supports:
 
 ```
-pounce problem.nl --dump kkt --dump iterate --dump mu \
+pounce problem.nl --dump kkt --dump iterate \
        --dump-dir /tmp/dump-problem
 ```
 
-The dumps land as JSONL under `/tmp/dump-problem/`. Categories
-relevant to the recipes on this page:
+The dumps land as JSONL under `/tmp/dump-problem/`. Two categories
+have wired dump sites today:
 
-- `--dump mu` — μ trajectory; spikes correlate with the recipes in
-  [μ-strategy](#μ-strategy).
 - `--dump kkt` — KKT residuals and condition-number proxy; large
   values motivate [Ruiz scaling](#ruiz-scaling-on-the-augmented-kkt-system).
 - `--dump iterate` — primal/dual values; needed to spot whether a
   small step is bound-snapping or infeasibility-driven.
-- `--dump resto` — restoration entries/exits; repeated entries
-  motivate the [ℓ₁ wrapper](#restoration--ℓ1-exact-penalty-wrapper).
+
+> The `--dump mu` and `--dump resto` categories are accepted by the CLI
+> but not yet wired to a dump site, so they currently emit no data. For
+> the μ trajectory and restoration entries/exits, use the Studio queries
+> below (which read the iteration stream from the solve report).
 
 The Studio MCP (`pounce-studio`) wraps these dumps in higher-level
 diagnostic queries (`diagnose`, `find_stalls`, `restoration_windows`),

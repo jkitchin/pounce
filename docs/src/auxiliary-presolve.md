@@ -218,8 +218,8 @@ elimination + multiplier recovery.
 - Upstream: [ripopt PR #32][ripopt32] by David Bernal Neira
   ([@bernalde][bernalde]). The
   `tutorial_flow_density{,_perturbed}.nl` and `gaslib11_steady.nl`
-  fixtures vendored into `benchmarks/preprocessing/` originate
-  from that ripopt PR.
+  fixtures vendored into `crates/pounce-cli/tests/fixtures/aux_presolve/`
+  originate from that ripopt PR.
 - Design notes: `dev-notes/auxiliary-equality-preprocessing.md` in
   the pounce repo.
 

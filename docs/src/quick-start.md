@@ -25,8 +25,9 @@ See [Solver Options](options.md) for details.
 
 ## Try a built-in problem
 
-POUNCE ships two self-contained test problems that exercise the full
-pipeline without parsing a `.nl` file:
+POUNCE ships several self-contained test problems that exercise the
+full pipeline without parsing a `.nl` file (run `pounce --list-problems`
+for the full set):
 
 ```sh
 pounce --list-problems

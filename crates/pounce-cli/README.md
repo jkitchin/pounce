@@ -157,13 +157,17 @@ pounce --problem quadratic
 pounce --problem rosenbrock
 ```
 
-`builtin.rs` ships two TNLPs that exercise the full pipeline without
-parsing `.nl`:
+`builtin.rs` ships several TNLPs that exercise the full pipeline
+without parsing `.nl` (`--list-problems` is authoritative):
 
 - `quadratic` — `min (x[0]-3)² + (x[1]-4)²` (unconstrained, exact
   Hessian, optimum `(3, 4)`).
 - `rosenbrock` — `min 100·(x[1]-x[0]²)² + (1-x[0])²` (unconstrained,
   exact Hessian, optimum `(1, 1)`).
+- `bounded-quadratic` — `quadratic` with box bounds `0 ≤ x ≤ 2`.
+- `eq-quadratic` — `min x[0]² + x[1]²` s.t. `x[0] + x[1] = 1`.
+- `circle` — `min x[0]` s.t. `x[0]² + x[1]² = 1`.
+- `infeasible-eq` — two contradictory equalities (infeasibility path).
 
 ### AMPL / Pyomo solver mode
 

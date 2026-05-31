@@ -40,6 +40,9 @@ per-iteration table in a tiger/rust branded color theme.
 - A `log` → `tracing` bridge (`tracing_log::LogTracer`) so any remaining
   `log::*` call sites — chiefly transitive dependencies — surface through
   the subscriber and obey `RUST_LOG`.
+- **Branded CLI header.** The `pounce` banner now renders a molten
+  tiger/rust POUNCE logo (terminal-only; `NO_COLOR` / non-TTY get plain
+  text).
 
 ### Changed
 
@@ -49,6 +52,7 @@ per-iteration table in a tiger/rust branded color theme.
   unchanged. Capturing iteration history requires the tracing subscriber
   installed by the CLI / Python / C frontends (or
   `pounce_observability::init_for_tests()` in tests).
+- Bumped the `feral` linear-algebra dependency from 0.8.0 to 0.9.0.
 
 ### Removed
 
