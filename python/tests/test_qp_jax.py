@@ -12,7 +12,7 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from pounce.jax import QpLayer, solve_qp  # noqa: E402
+from pounce.jax import QpLayer, solve_qp, solve_qp_batch  # noqa: E402
 
 
 def _fd(fn, x, eps=1e-6):
@@ -24,6 +24,45 @@ def _fd(fn, x, eps=1e-6):
         xm = x.copy()
         xm[i] -= eps
         g[i] = (float(fn(jnp.array(xp))) - float(fn(jnp.array(xm)))) / (2 * eps)
+    return g
+
+
+def _fd_mat(fn, M, eps=1e-6):
+    """Finite-difference gradient of a scalar ``fn`` over a dense matrix."""
+    M = np.asarray(M, float)
+    g = np.zeros_like(M)
+    for i in range(M.shape[0]):
+        for j in range(M.shape[1]):
+            mp = M.copy()
+            mp[i, j] += eps
+            mm = M.copy()
+            mm[i, j] -= eps
+            g[i, j] = (float(fn(jnp.array(mp))) - float(fn(jnp.array(mm)))) / (2 * eps)
+    return g
+
+
+def _fd_mat_sym(fn, M, eps=1e-6):
+    """Finite-difference gradient over a *symmetric* matrix: perturb the
+    (i, j) and (j, i) entries together so the symmetry is preserved. The
+    returned array matches the symmetrized analytic gradient."""
+    M = np.asarray(M, float)
+    g = np.zeros_like(M)
+    for i in range(M.shape[0]):
+        for j in range(i, M.shape[1]):
+            mp = M.copy()
+            mm = M.copy()
+            mp[i, j] += eps
+            mm[i, j] -= eps
+            if i != j:
+                mp[j, i] += eps
+                mm[j, i] -= eps
+            d = (float(fn(jnp.array(mp))) - float(fn(jnp.array(mm)))) / (2 * eps)
+            # d is ∂/∂(symmetric pair); split across the two entries.
+            if i == j:
+                g[i, j] = d
+            else:
+                g[i, j] = d / 2
+                g[j, i] = d / 2
     return g
 
 
@@ -99,3 +138,97 @@ def test_qp_layer_and_vmap():
     for i in range(3):
         xi = solve_qp(P=P, c=cs[i], G=G, h=hs[i])
         np.testing.assert_allclose(np.asarray(xs[i]), np.asarray(xi), atol=1e-5)
+
+
+# --- Matrix gradients (P, G, A) ---------------------------------------
+
+
+# Matrix-perturbation finite differences amplify the solver's residual
+# tolerance (≈ noise/eps), so tighten the IPM tolerance for these checks.
+_TIGHT = dict(tol=1e-11, max_iter=200)
+
+
+def test_grad_P_symmetric():
+    # ∇P on an active-inequality QP, checked with symmetric perturbations.
+    G = jnp.array([[1.0, 2.0]])
+    h = jnp.array([1.0])
+    c0 = jnp.array([-4.0, -1.0])
+    target = jnp.array([0.2, 0.3])
+
+    def loss(Pm):
+        return jnp.sum((solve_qp(P=Pm, c=c0, G=G, h=h, **_TIGHT) - target) ** 2)
+
+    P0 = jnp.array([[3.0, 0.5], [0.5, 2.0]])
+    g = jax.grad(loss)(P0)
+    np.testing.assert_allclose(np.asarray(g), _fd_mat_sym(loss, P0), atol=1e-4)
+
+
+def test_grad_G_active_inequality():
+    # ∇G with an active inequality: gradient flows through the constraint
+    # matrix.
+    h = jnp.array([1.0])
+    c0 = jnp.array([-4.0, -4.0])
+
+    def loss(Gm):
+        return jnp.sum(solve_qp(P=P, c=c0, G=Gm, h=h, **_TIGHT) ** 2)
+
+    G0 = jnp.array([[1.0, 1.0]])
+    g = jax.grad(loss)(G0)
+    np.testing.assert_allclose(np.asarray(g), _fd_mat(loss, G0), atol=1e-4)
+
+
+def test_grad_A_equality():
+    # ∇A with an equality constraint.
+    b = jnp.array([1.0])
+    c0 = jnp.array([-1.0, -3.0])
+
+    def loss(Am):
+        return jnp.sum(solve_qp(P=P, c=c0, A=Am, b=b, **_TIGHT) ** 2)
+
+    A0 = jnp.array([[1.0, 2.0]])
+    g = jax.grad(loss)(A0)
+    np.testing.assert_allclose(np.asarray(g), _fd_mat(loss, A0), atol=1e-4)
+
+
+# --- Parallel differentiable batch ------------------------------------
+
+
+def test_solve_qp_batch_matches_single():
+    G = jnp.array([[1.0, 1.0]])
+    cs = jnp.array([[-1.0, -1.0], [-4.0, -4.0], [0.5, 0.5]])
+    hs = jnp.array([[5.0], [1.0], [5.0]])
+    xs = solve_qp_batch(P=P, c=cs, G=G, h=hs)
+    assert xs.shape == (3, 2)
+    for i in range(3):
+        xi = solve_qp(P=P, c=cs[i], G=G, h=hs[i])
+        np.testing.assert_allclose(np.asarray(xs[i]), np.asarray(xi), atol=1e-5)
+
+
+def test_solve_qp_batch_grad_c_per_row():
+    # Per-row gradient w.r.t. c matches summing each instance's grad.
+    G = jnp.array([[1.0, 1.0]])
+    hs = jnp.array([[5.0], [5.0]])  # inactive → interior, dx/dc = -½I
+
+    def loss(cs):
+        return jnp.sum(solve_qp_batch(P=P, c=cs, G=G, h=hs) ** 2)
+
+    cs0 = jnp.array([[-0.5, -0.7], [0.3, -0.2]])
+    g = jax.grad(loss)(cs0)
+    # Interior: x = -c/2, loss row = ‖c/2‖², dloss/dc = c/2.
+    np.testing.assert_allclose(np.asarray(g), np.asarray(cs0) / 2.0, atol=1e-5)
+
+
+def test_solve_qp_batch_grad_shared_P_sums():
+    # Gradient w.r.t. the shared P equals the sum of per-instance ∇P.
+    cs = jnp.array([[-1.0, -2.0], [-3.0, 0.5]])
+
+    def loss_batch(Pm):
+        return jnp.sum(solve_qp_batch(P=Pm, c=cs) ** 2)
+
+    def loss_single(Pm, c):
+        return jnp.sum(solve_qp(P=Pm, c=c) ** 2)
+
+    P0 = jnp.array([[3.0, 0.5], [0.5, 2.0]])
+    g_batch = jax.grad(loss_batch)(P0)
+    g_sum = sum(jax.grad(lambda Pm, c=c: loss_single(Pm, c))(P0) for c in cs)
+    np.testing.assert_allclose(np.asarray(g_batch), np.asarray(g_sum), atol=1e-5)

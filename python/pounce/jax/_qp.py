@@ -14,16 +14,36 @@ theorem on the KKT system at the optimum (Amos & Kolter, *OptNet*, 2017):
 the same KKT matrix that defines the solution also yields its
 sensitivities, so a single linear solve gives the cotangents.
 
-Scope. Gradients are provided w.r.t. the **right-hand-side / linear
-parameters** ``c``, ``b``, ``h`` — the parametric case (varying
-objective / constraint levels over a fixed structure) that the batched
-and multiple-RHS entry points target. Gradients w.r.t. the matrices
-``P``, ``G``, ``A`` (the full OptNet matrix derivatives) are a documented
-follow-up; passing those as differentiable arguments raises.
+Differentiable parameters. Gradients are provided w.r.t. **all** the
+parameters that enter the QP linearly through the optimum:
+
+* the linear / right-hand-side vectors ``c``, ``b``, ``h``; and
+* the matrices ``P``, ``G``, ``A`` (full OptNet matrix derivatives).
+
+``P`` is differentiated as a **symmetric** matrix — the solver reads its
+lower triangle and treats it as symmetric, so ``∇P`` is the symmetrized
+gradient ``½(d_x xᵀ + x d_xᵀ)``; perturb ``P`` symmetrically when checking
+it against finite differences.
 
 Bounds ``lb ≤ x ≤ ub`` are supported in the *forward* solve by folding
 them into ``G``/``h`` before differentiation, so the IFT sees a single
-inequality block.
+inequality block. The folded bound rows are constants, so they carry no
+gradient back to ``lb``/``ub`` (differentiate bound *levels* by passing
+them through ``G``/``h`` explicitly instead).
+
+Batching. :func:`solve_qp` is usable under ``jax.vmap`` (each instance is
+an independent, sequential host solve). For a *parallel* batch over many
+instances that share matrix structure, use :func:`solve_qp_batch`, which
+routes the forward solves to the rayon-parallel ``solve_qp_batch`` binding
+and differentiates each instance independently.
+
+Warm starting. The interior-point core does not currently accept a warm
+*iterate* (a seeded ``x``/``λ``/``ν``); IPMs need a well-centered interior
+start, so naive iterate seeding is not generally beneficial and is a
+deferred core-solver item. What *is* available for repeated solves on a
+fixed structure is **symbolic-factor reuse** (skip the AMD analysis /
+KKT-pattern setup) via :class:`pounce.qp.QpFactorization` on the host
+side; see that class for the parametric (``c``/``b``/``h`` varying) case.
 """
 
 from __future__ import annotations
@@ -36,7 +56,7 @@ import numpy as np
 
 from .. import _pounce
 
-__all__ = ["solve_qp", "QpLayer"]
+__all__ = ["solve_qp", "solve_qp_batch", "QpLayer"]
 
 # Active-set tolerance for the backward pass: an inequality counts as
 # active when its multiplier is above this (complementarity slackness).
@@ -70,28 +90,26 @@ def _expand_bounds(G, h, lb, ub, n):
     return jnp.concatenate(rows, axis=0), jnp.concatenate(rhs, axis=0)
 
 
-def _forward_solve(P, c, G, h, A, b, tol, max_iter):
-    """Host-side forward solve via pounce-convex. Returns (x, lam, nu).
+def _to_coo_lower(M):
+    """COO ``(rows, cols, vals)`` of the lower triangle of dense ``M``."""
+    r, cc = np.nonzero(M)
+    keep = r >= cc
+    return r[keep].tolist(), cc[keep].tolist(), M[r[keep], cc[keep]].tolist()
 
-    ``lam`` are the inequality (``G``) multipliers, ``nu`` the equality
-    (``A``) multipliers."""
+
+def _to_coo(M):
+    """COO ``(rows, cols, vals)`` of dense ``M``."""
+    r, cc = np.nonzero(M)
+    return r.tolist(), cc.tolist(), M[r, cc].tolist()
+
+
+def _build_problem(P, c, G, h, A, b):
+    """Assemble a ``_pounce.QpProblem`` from dense numpy arrays."""
     n = c.shape[0]
-    m_g = G.shape[0]
-    m_a = A.shape[0]
-
-    def to_coo_lower(M):
-        r, cc = np.nonzero(M)
-        keep = r >= cc
-        return r[keep].tolist(), cc[keep].tolist(), M[r[keep], cc[keep]].tolist()
-
-    def to_coo(M):
-        r, cc = np.nonzero(M)
-        return r.tolist(), cc.tolist(), M[r, cc].tolist()
-
-    pr, pc, pv = to_coo_lower(np.asarray(P))
-    gr, gc, gv = to_coo(np.asarray(G))
-    ar, ac, av = to_coo(np.asarray(A))
-    prob = _pounce.QpProblem(
+    pr, pc, pv = _to_coo_lower(np.asarray(P))
+    gr, gc, gv = _to_coo(np.asarray(G))
+    ar, ac, av = _to_coo(np.asarray(A))
+    return _pounce.QpProblem(
         n=n,
         c=np.asarray(c).tolist(),
         p_rows=pr,
@@ -106,8 +124,10 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter):
         g_vals=gv,
         h=np.asarray(h).tolist(),
     )
-    d = _pounce.solve_qp(prob, tol=tol, max_iter=max_iter)
-    x = np.asarray(d["x"], dtype=np.float64)
+
+
+def _split_duals(d, m_g, m_a):
+    """Extract (lam, nu) from a solver result dict, padding empty blocks."""
     lam = (
         np.asarray(d["z"], dtype=np.float64)
         if m_g
@@ -118,7 +138,97 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter):
         if m_a
         else np.zeros((0,), dtype=np.float64)
     )
+    return lam, nu
+
+
+def _forward_solve(P, c, G, h, A, b, tol, max_iter):
+    """Host-side forward solve via pounce-convex. Returns (x, lam, nu).
+
+    ``lam`` are the inequality (``G``) multipliers, ``nu`` the equality
+    (``A``) multipliers."""
+    m_g = G.shape[0]
+    m_a = A.shape[0]
+    prob = _build_problem(P, c, G, h, A, b)
+    d = _pounce.solve_qp(prob, tol=tol, max_iter=max_iter)
+    x = np.asarray(d["x"], dtype=np.float64)
+    lam, nu = _split_duals(d, m_g, m_a)
     return x, lam, nu
+
+
+def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter):
+    """Parallel host-side batch solve. Shared ``P``/``G``/``A``; per-row
+    ``cs``/``hs``/``bs``. Returns stacked (xs, lams, nus)."""
+    m_g = G.shape[0]
+    m_a = A.shape[0]
+    b_sz = cs.shape[0]
+    probs = [_build_problem(P, cs[i], G, hs[i], A, bs[i]) for i in range(b_sz)]
+    dicts = _pounce.solve_qp_batch(probs, tol=tol, max_iter=max_iter)
+    xs = np.stack([np.asarray(d["x"], dtype=np.float64) for d in dicts])
+    if m_g:
+        lams = np.stack([np.asarray(d["z"], dtype=np.float64) for d in dicts])
+    else:
+        lams = np.zeros((b_sz, 0), dtype=np.float64)
+    if m_a:
+        nus = np.stack([np.asarray(d["y"], dtype=np.float64) for d in dicts])
+    else:
+        nus = np.zeros((b_sz, 0), dtype=np.float64)
+    return xs, lams, nus
+
+
+def _kkt_backward(P, G, A, h, x, lam, nu, gx):
+    """One OptNet implicit-diff backward (Amos & Kolter 2017, §3).
+
+    At the optimum ``(x, λ, ν)`` of ``min ½xᵀPx+cᵀx s.t. Gx≤h, Ax=b`` the
+    KKT differential system is
+
+    .. code-block:: text
+
+        [ P        Gᵀ        Aᵀ ] [d_x]     [ g_x ]
+        [ D(λ)G    D(Gx−h)   0  ] [d_λ] = − [  0  ]
+        [ A        0         0  ] [d_ν]     [  0  ]
+
+    with ``D(·) = diag(·)``. Solving for ``(d_x, d_λ, d_ν)``, the loss
+    gradients are
+
+    .. code-block:: text
+
+        ∇_c = d_x          ∇_P = ½(d_x xᵀ + x d_xᵀ)
+        ∇_b = −d_ν         ∇_A = d_ν xᵀ + ν d_xᵀ
+        ∇_h = −d_λ         ∇_G = d_λ xᵀ + λ d_xᵀ
+
+    (The matrix forms follow from the standard OptNet result; in this
+    scaling ``d_λ`` already absorbs ``D(λ)``, so e.g. ``∇_h = −d_λ`` rather
+    than ``−D(λ)d_λ``. All six are checked against finite differences.)
+    """
+    n = x.shape[0]
+    m_g = G.shape[0]
+    m_a = A.shape[0]
+
+    slack = G @ x - h  # ≤ 0 at feasibility; 0 on active rows
+    dlam_scale = jnp.diag(lam)
+    zero_ga = jnp.zeros((m_g, m_a))
+    zero_ag = jnp.zeros((m_a, m_g))
+    zero_aa = jnp.zeros((m_a, m_a))
+
+    top = jnp.concatenate([P, G.T, A.T], axis=1)
+    mid = jnp.concatenate([dlam_scale @ G, jnp.diag(slack), zero_ga], axis=1)
+    bot = jnp.concatenate([A, zero_ag, zero_aa], axis=1)
+    kkt = jnp.concatenate([top, mid, bot], axis=0)
+
+    rhs = -jnp.concatenate([gx, jnp.zeros(m_g), jnp.zeros(m_a)])
+    d = jnp.linalg.solve(kkt, rhs)
+    d_x = d[:n]
+    d_lam = d[n : n + m_g]
+    d_nu = d[n + m_g :]
+
+    grad_c = d_x
+    grad_h = -d_lam
+    grad_b = -d_nu
+    # Matrix gradients (full OptNet). ∇_P symmetrized (P is symmetric).
+    grad_P = 0.5 * (jnp.outer(d_x, x) + jnp.outer(x, d_x))
+    grad_G = jnp.outer(d_lam, x) + jnp.outer(lam, d_x)
+    grad_A = jnp.outer(d_nu, x) + jnp.outer(nu, d_x)
+    return grad_P, grad_c, grad_G, grad_h, grad_A, grad_b
 
 
 def _make_qp_vjp(n, m_g, m_a, tol, max_iter):
@@ -133,42 +243,46 @@ def _make_qp_vjp(n, m_g, m_a, tol, max_iter):
 
     def bwd(res, gx):
         P, G, A, h, x, lam, nu = res
-        # OptNet implicit-differentiation backward (Amos & Kolter 2017,
-        # §3). At the optimum (x, λ, ν) of  min ½xᵀPx+cᵀx  s.t. Gx≤h, Ax=b
-        # the KKT differential system is
-        #   [ P        Gᵀ        Aᵀ ] [d_x]     [ g_x ]
-        #   [ D(λ)G    D(Gx−h)   0  ] [d_λ] = − [  0  ]
-        #   [ A        0         0  ] [d_ν]     [  0  ]
-        # with D(·) = diag(·). Solving for (d_x, d_λ, d_ν), the gradients
-        # of the loss w.r.t. the *linear* parameters are
-        #   ∇_c = d_x,   ∇_b = −d_ν,   ∇_h = −d_λ.
-        # (Verified against finite differences on active-constraint QPs.)
-        slack = G @ x - h  # ≤ 0 at feasibility; 0 on active rows
-        dlam_scale = jnp.diag(lam)
-        zero_ga = jnp.zeros((m_g, m_a))
-        zero_ag = jnp.zeros((m_a, m_g))
-        zero_aa = jnp.zeros((m_a, m_a))
+        return _kkt_backward(P, G, A, h, x, lam, nu, gx)
 
-        top = jnp.concatenate([P, G.T, A.T], axis=1)
-        mid = jnp.concatenate([dlam_scale @ G, jnp.diag(slack), zero_ga], axis=1)
-        bot = jnp.concatenate([A, zero_ag, zero_aa], axis=1)
-        kkt = jnp.concatenate([top, mid, bot], axis=0)
+    qp.defvjp(fwd, bwd)
+    return qp
 
-        rhs = -jnp.concatenate([gx, jnp.zeros(m_g), jnp.zeros(m_a)])
-        d = jnp.linalg.solve(kkt, rhs)
-        d_x = d[:n]
-        d_lam = d[n : n + m_g]
-        d_nu = d[n + m_g :]
 
-        # Linear-parameter gradients. P/G/A are treated as constants here
-        # (matrix-derivative support is a documented follow-up).
-        grad_c = d_x
-        grad_h = -d_lam
-        grad_b = -d_nu
-        grad_P = jnp.zeros_like(P)
-        grad_G = jnp.zeros_like(G)
-        grad_A = jnp.zeros_like(A)
-        return (grad_P, grad_c, grad_G, grad_h, grad_A, grad_b)
+def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter):
+    """custom_vjp for a parallel batch. Differentiable args are the shared
+    ``P``/``G``/``A`` and the per-row ``cs``/``hs``/``bs`` (all leading
+    axis ``B``). Matrix gradients sum over the batch; RHS gradients stay
+    per-row."""
+
+    @jax.custom_vjp
+    def qp(P, cs, G, hs, A, bs):
+        xs, _, _ = _pure_forward_batch(
+            P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter
+        )
+        return xs
+
+    def fwd(P, cs, G, hs, A, bs):
+        xs, lams, nus = _pure_forward_batch(
+            P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter
+        )
+        return xs, (P, G, A, hs, xs, lams, nus)
+
+    def bwd(res, gxs):
+        P, G, A, hs, xs, lams, nus = res
+        per = jax.vmap(
+            lambda h, x, lam, nu, gx: _kkt_backward(P, G, A, h, x, lam, nu, gx)
+        )(hs, xs, lams, nus, gxs)
+        gP, gc, gG, gh, gA, gb = per
+        # Shared matrices: sum cotangents over the batch axis.
+        return (
+            jnp.sum(gP, axis=0),
+            gc,
+            jnp.sum(gG, axis=0),
+            gh,
+            jnp.sum(gA, axis=0),
+            gb,
+        )
 
     qp.defvjp(fwd, bwd)
     return qp
@@ -205,6 +319,31 @@ def _pure_forward(P, c, G, h, A, b, n, m_g, m_a, tol, max_iter):
         return jax.pure_callback(host, shapes, P, c, G, h, A, b)
 
 
+def _pure_forward_batch(P, cs, G, hs, A, bs, n, m_g, m_a, tol, max_iter):
+    """Parallel-batch forward via a single host callback. Returns stacked
+    (xs, lams, nus)."""
+    b_sz = cs.shape[0]
+    shapes = (
+        jax.ShapeDtypeStruct((b_sz, n), jnp.float64),
+        jax.ShapeDtypeStruct((b_sz, m_g), jnp.float64),
+        jax.ShapeDtypeStruct((b_sz, m_a), jnp.float64),
+    )
+
+    def host(P_h, cs_h, G_h, hs_h, A_h, bs_h):
+        return _forward_solve_batch(
+            np.asarray(P_h),
+            np.asarray(cs_h),
+            np.asarray(G_h),
+            np.asarray(hs_h),
+            np.asarray(A_h),
+            np.asarray(bs_h),
+            tol,
+            max_iter,
+        )
+
+    return jax.pure_callback(host, shapes, P, cs, G, hs, A, bs)
+
+
 def solve_qp(
     *,
     P,
@@ -218,17 +357,15 @@ def solve_qp(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
 ):
-    """Differentiable convex-QP solve ``x*(c, b, h)``.
+    """Differentiable convex-QP solve ``x*(P, c, G, h, A, b)``.
 
     Solves ``min ½xᵀPx+cᵀx s.t. Gx≤h, Ax=b, lb≤x≤ub`` and is
-    differentiable w.r.t. ``c``, ``b``, and ``h`` (the linear / RHS
-    parameters) via the OptNet implicit-function rule. ``P``, ``G``, ``A``
-    are treated as constants (matrix-derivative support is a follow-up).
+    differentiable w.r.t. ``P``, ``c``, ``G``, ``h``, ``A``, ``b`` via the
+    OptNet implicit-function rule (``∇P`` is the symmetric gradient).
 
     All array args are dense jnp/np arrays. Bounds are folded into the
-    inequality block, so ``h`` gradients cover any finite bound levels
-    too only when bounds are passed via ``G``/``h`` directly; ``lb``/``ub``
-    here are constants used in the forward solve.
+    inequality block as constant rows (no gradient flows to ``lb``/``ub``;
+    pass differentiable bound levels through ``G``/``h`` instead).
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     c = jnp.asarray(c, dtype=jnp.float64)
@@ -245,12 +382,85 @@ def solve_qp(
     return fn(P, c, G_full, h_full, A0, b0)
 
 
+def solve_qp_batch(
+    *,
+    P,
+    c,
+    G=None,
+    h=None,
+    A=None,
+    b=None,
+    lb=None,
+    ub=None,
+    tol: Optional[float] = None,
+    max_iter: Optional[int] = None,
+):
+    """Differentiable **parallel** batch of convex QPs sharing structure.
+
+    ``c`` is required and batched with shape ``(B, n)``. The matrices
+    ``P``, ``G``, ``A`` are shared across the batch (2-D). The RHS vectors
+    ``h`` and ``b`` may be batched (``(B, ·)``) or shared (``(·,)`` /
+    ``None``, broadcast over the batch). Returns ``xs`` of shape
+    ``(B, n)``.
+
+    Forward solves run on the rayon-parallel ``solve_qp_batch`` path
+    (outer-parallel across instances, serial within). The backward
+    differentiates each instance independently: gradients to the shared
+    ``P``/``G``/``A`` sum over the batch; gradients to ``c``/``h``/``b``
+    stay per-row. ``∇P`` is the symmetric gradient.
+    """
+    P = jnp.asarray(P, dtype=jnp.float64)
+    cs = jnp.asarray(c, dtype=jnp.float64)
+    if cs.ndim != 2:
+        raise ValueError(f"solve_qp_batch: `c` must be 2-D (B, n), got {cs.shape}")
+    b_sz, n = cs.shape
+
+    G0 = jnp.zeros((0, n)) if G is None else jnp.asarray(G, dtype=jnp.float64)
+    A0 = jnp.zeros((0, n)) if A is None else jnp.asarray(A, dtype=jnp.float64)
+
+    # Fold shared finite bounds into the (shared) inequality block. The
+    # per-instance h block only spans the user G rows; the bound rows are
+    # constant and broadcast across the batch.
+    G_full, h_bounds = _expand_bounds(G0, jnp.zeros((G0.shape[0],)), lb, ub, n)
+    m_g = G_full.shape[0]
+    n_user_rows = G0.shape[0]
+    bound_rows = m_g - n_user_rows
+
+    if h is None:
+        hs_user = jnp.zeros((b_sz, n_user_rows))
+    else:
+        h_arr = jnp.asarray(h, dtype=jnp.float64)
+        hs_user = (
+            jnp.broadcast_to(h_arr, (b_sz, n_user_rows))
+            if h_arr.ndim == 1
+            else h_arr
+        )
+    hs_bounds = jnp.broadcast_to(h_bounds[n_user_rows:], (b_sz, bound_rows))
+    hs = jnp.concatenate([hs_user, hs_bounds], axis=1)
+
+    m_a = A0.shape[0]
+    if b is None:
+        bs = jnp.zeros((b_sz, m_a))
+    else:
+        b_arr = jnp.asarray(b, dtype=jnp.float64)
+        bs = jnp.broadcast_to(b_arr, (b_sz, m_a)) if b_arr.ndim == 1 else b_arr
+
+    fn = _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter)
+    return fn(P, cs, G_full, hs, A0, bs)
+
+
 class QpLayer:
     """A reusable differentiable QP layer with fixed structure.
 
     Captures ``P, G, A`` (and bounds) once; calling the layer with
-    ``c``/``b``/``h`` solves and is differentiable w.r.t. those. Suitable
-    for use inside a larger JAX model (``jax.grad``/``jacrev``/``vmap``).
+    ``c``/``b``/``h`` solves and is differentiable w.r.t. those (and, via
+    :func:`solve_qp`, w.r.t. the captured matrices too). Suitable for use
+    inside a larger JAX model (``jax.grad`` / ``jacrev`` / ``vmap``).
+
+    Note on warm starting: for many sequential same-structure solves, the
+    win comes from reusing the symbolic factorization rather than seeding
+    the iterate. That reuse lives in :class:`pounce.qp.QpFactorization`
+    (host API); the IPM core does not yet accept a warm iterate.
     """
 
     def __init__(self, P, G=None, A=None, lb=None, ub=None, *, tol=None, max_iter=None):
@@ -266,6 +476,25 @@ class QpLayer:
         return solve_qp(
             P=self._P,
             c=c,
+            G=self._G,
+            h=h,
+            A=self._A,
+            b=b,
+            lb=self._lb,
+            ub=self._ub,
+            tol=self._tol,
+            max_iter=self._max_iter,
+        )
+
+    def batch(self, cs, *, b=None, h=None):
+        """Solve a parallel batch (rayon) sharing this layer's structure.
+
+        ``cs`` has shape ``(B, n)``; ``h``/``b`` may be batched or shared.
+        Differentiable; see :func:`solve_qp_batch`.
+        """
+        return solve_qp_batch(
+            P=self._P,
+            c=cs,
             G=self._G,
             h=h,
             A=self._A,
