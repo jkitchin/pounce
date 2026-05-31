@@ -65,6 +65,22 @@
 # not (regenerated every release).
 !/benchmarks/*/ipopt_ma57.json
 !/benchmarks/ipopt_ma57.provenance.json
+# gpu_spike is a standalone Phase-0 spike crate — track its manifest,
+# lockfile, and Rust sources. Per-run output stays ignored.
+!/benchmarks/gpu_spike/Cargo.toml
+!/benchmarks/gpu_spike/Cargo.lock
+!/benchmarks/gpu_spike/src
+!/benchmarks/gpu_spike/src/**
+/benchmarks/cutest/problems/
+/benchmarks/cutest/*.json
+/benchmarks/cutest/*.jsonl
+/benchmarks/cutest/*_stderr.txt
+/benchmarks/cutest/*.stderr
+/benchmarks/cutest/*.log
+/benchmarks/cutest/*.csv
+/benchmarks/cutest/CUTEST_REPORT*.md
+/benchmarks/cutest/FERAL_DELTA*.md
+/benchmarks/cutest/l1_audit/
 /benchmarks/logs/
 
 # Python cache

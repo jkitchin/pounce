@@ -138,8 +138,14 @@ opt-in, never the default.
   accuracy envelope. Throwaway-friendly; pure decision-gathering.
   **The numerical half of Phase 0 is already done on CPU — see §9 (a
   true-f32 proxy and a real-pounce f32-inner-solve run); it resolves
-  the f32 risk in §8 with data. What remains for Phase 0 is the GPU
-  throughput crossover, which needs hardware.**
+  the f32 risk in §8 with data. The harnesses themselves are built and
+  runnable in `benchmarks/gpu_spike` (standalone crate, `wgpu` behind a
+  `gpu` feature, runtime `--device cpu|gpu|both` A/B toggle): `baseline`
+  (CPU throughput bar), `microbench` (GPU↔CPU crossover), `accuracy`
+  (on-device f32 + run-to-run determinism + f64 tail). The CPU sides
+  run anywhere; what remains is to run the GPU sides on an actual
+  M-series (or other GPU) box to read the throughput crossover and the
+  on-device f32/determinism numbers.**
 - **Phase 1 — batched condensed-KKT solve, fixed active set.** Wire the
   Phase-0 kernel as the inner solve of a batched IPM that assumes a
   fixed active set per element (valid for the convex-QP-layer case).

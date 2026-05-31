@@ -1,0 +1,33 @@
+[package]
+name = "pounce-gpu-spike"
+version = "0.1.0"
+edition = "2021"
+license = "EPL-2.0"
+publish = false
+description = "Apple-Silicon / cross-vendor GPU spike harnesses (Phase-0) for the pounce gpu-batched-layers roadmap. Standalone; not a workspace member."
+
+# Standalone: do NOT inherit the pounce root workspace (keeps the spike
+# buildable on its own and avoids pulling the full solver toolchain).
+[workspace]
+
+[features]
+default = []
+# Turn the GPU path on with `--features gpu`. Without it the crate builds
+# pure-Rust CPU-only (no wgpu dependency at all) and the GPU steps report
+# "built without --features gpu". This is the compile-time on/off switch.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+wgpu = { version = "0.20", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+
+[[bin]]
+name = "gpu_spike"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
