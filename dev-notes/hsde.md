@@ -164,3 +164,78 @@ plus randomized KKT-residual checks, and the orthant/SOC results stay
 identical to the current solver (the cross-check that guards H2–H4). The
 existing direct driver stays in place until H4 flips the default, so there
 is no window where the crate regresses.
+
+## Non-symmetric cones on HSDE (H5 — exponential cone)
+
+The exponential and power cones are **not** self-scaled: there is no
+Nesterov–Todd point `W` with `W²z = s`, no Jordan product `s∘z`. The
+path-following method instead uses the primal barrier `F` directly
+(Skajaa–Ye 2015; Dahl–Andersen 2021, the MOSEK exponential-cone
+algorithm). `pounce-convex` already has the validated barrier oracles
+(`BarrierCone`: `F`, `∇F`, `∇²F`, membership — see `cones/exp.rs`).
+
+### Central path and the scaling block
+
+The central path of the homogeneous model is, at parameter `μ`,
+```text
+  z = −μ ∇F(s),   τκ = μ,   μ = (sᵀz + τκ)/(ν + 1),
+```
+with `ν` the total barrier degree (exp cone: 3). `−∇F(s) ∈ int K*` for
+`s ∈ int K`, so `z` stays dual-feasible. The Newton step toward the path at
+a centered target `σμ` linearizes `z + σμ∇F(s) = 0`:
+```text
+  dz + σμ H(s) ds = −(z + σμ ∇F(s)),     H = ∇²F(s).
+```
+Eliminating `ds` (so the cone contributes a `(z,z)` block exactly as the
+symmetric path does) gives
+```text
+  (z,z) block      :  −(1/σμ) H(s)⁻¹          [dense; exp cone is 3×3]
+  r_c              :  z + σμ ∇F(s)
+  rhs_comp_term    :  (1/σμ) H(s)⁻¹ r_c
+  recover_ds       :  ds = −rhs_comp_term − (1/σμ)H(s)⁻¹ dz
+```
+**Orthant-reduction check (the correctness anchor).** For the orthant,
+`F = −Σ log sᵢ`, `H⁻¹ = diag(sᵢ²)`, and on the path `zᵢ = σμ/sᵢ`, so the
+block `(1/σμ)sᵢ² = sᵢ/zᵢ = W²` — it reduces *exactly* to the orthant
+scaling. The whole derivation collapses to the symmetric one in 1-D, the
+same anchor that de-risked the SOC reduced system.
+
+### Why a separate loop (fixed-σ single step, not Mehrotra)
+
+The block carries `1/σμ`, so the Mehrotra **predictor** (`σ = 0`) is
+singular for a non-symmetric cone. Skajaa–Ye therefore use a
+predictor (tangent to the path) **plus** a distinct centering corrector,
+not a single combined `σ→σμ` step. The minimal robust version is a
+**fixed-σ single-step path-follower**: each iteration pick `σ ∈ (0,1)`,
+assemble the `(z,z)` block `−(1/σμ)H⁻¹`, solve the *same* bordered HSDE
+system (two solves + the τ scalar, reused verbatim from H2/H3), then take a
+**backtracking** step — there is no closed-form `max_step`, so shrink `α`
+until `s+αds ∈ int K`, `z+αdz ∈ int K*` (via `BarrierCone` membership) and
+the barrier decreases. More iterations than Mehrotra, but correctness
+first; a Mehrotra/RK corrector is a later optimization.
+
+### Implementation steps
+
+1. **Dense `(z,z)` block in `KktStructure`.** Today's assembly handles
+   `Diagonal` (orthant) and `DiagRank1` (SOC). Add a `DenseLower` path that
+   reserves a `dim×dim` lower triangle at the cone's `(z,z)` position and
+   fills it from `−(1/σμ)H⁻¹` each iteration. (This is the "Tier-A dense
+   block" the SOC note deferred; the exp cone is only 3×3, so fill is
+   trivial.)
+2. **A non-symmetric HSDE loop** (`hsde::solve_conic_hsde_nonsym`, or a
+   branch) sharing the residuals, the two-solve τ handling, and
+   un-homogenizing — but with the fixed-σ step and barrier line search.
+   Routed to when the cone product contains a non-symmetric block.
+3. **`ExponentialCone` becomes a `Cone`/`ConeKind`** providing the
+   `(z,z)`-block (dense `−(1/σμ)H⁻¹`), `r_c`, `recover_ds`, the central-ray
+   identity start, `mu`, and a membership-based `max_step`.
+4. **Validate** on known optima: an entropy maximization / `log-sum-exp`
+   epigraph and a tiny geometric program (posynomial), plus a randomized
+   KKT-residual check, all to intrinsic tolerance; the orthant/SOC paths
+   stay byte-identical.
+
+Sources for the non-symmetric algorithm:
+[Skajaa & Ye, *A homogeneous interior-point algorithm for nonsymmetric
+convex conic optimization*, Math. Prog. 2015](https://link.springer.com/article/10.1007/s10107-014-0773-1);
+[Dahl & Andersen, *A primal-dual interior-point algorithm for nonsymmetric
+exponential-cone optimization*, Math. Prog. 2021](https://link.springer.com/article/10.1007/s10107-021-01631-4).
