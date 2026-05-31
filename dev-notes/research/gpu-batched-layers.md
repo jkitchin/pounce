@@ -405,7 +405,59 @@ path whose guarantee is "deterministic *result* via f64 refinement," not
 "deterministic *trajectory*." It must never be the default, and the
 returned solution must always be f64-refined.
 
-## 11. References
+## 11. Portability & runtime selection
+
+The GPU path is one codebase with one f32 kernel; it **falls back to
+plain CPU where no usable, eligible GPU exists, and uses the GPU when
+one does** — from a single binary. Selection happens in three
+independent layers.
+
+1. **Compile-time (cargo feature).** wgpu lives behind a `gpu` feature.
+   The default `cargo build` is the existing pure-Rust CPU solver with
+   **no wgpu dependency** — the pure-Rust story is untouched.
+   `--features gpu` compiles the backend in. Whether the binary contains
+   GPU code at all is opt-in.
+2. **Runtime adapter detection (probe-and-verify).** Even with the
+   feature on, wgpu enumerates adapters at startup; none — or init
+   failure — routes to CPU. It must *run a tiny known kernel and fall
+   back on error*, not merely check that an adapter is listed: some
+   Linux/Vulkan setups enumerate a flaky adapter. "Use a GPU if it
+   exists" means "if it exists *and* actually works."
+3. **Per-call workload eligibility.** Even with a working GPU, route to
+   it only for a **batch** of structure-identical, size/conditioning-
+   eligible problems (§2–§3). A single small solve always stays on CPU.
+   It is "GPU if present *and* the workload suits it," not "GPU for
+   everything."
+
+**One kernel, many backends.** wgpu runs the same WGSL on Metal
+(macOS/iOS), Vulkan (Linux/Windows/Android), DX12 (Windows), and
+WebGPU. Because f32 is WGSL's native type there is **no per-platform
+kernel fork** (an f64 kernel would have fractured by backend). So
+*correctness* is broadly portable; *performance* is not uniform —
+backend maturity and limits (max workgroup size, shared-memory budget)
+differ, so the batched-Cholesky tiling may need per-backend tuning.
+"Runs everywhere" ≠ "fast everywhere"; that is a measure-and-tune item,
+not a correctness risk.
+
+**Cross-platform result consistency comes from the f64 tail.** Different
+vendors/backends reduce and contract (FMA) differently, so the f32
+forward solve is platform-dependent at the bit level. The f64 CPU
+refinement tail (§5 Phase 4) makes the *final* answer agree to f64
+tolerance regardless of which GPU/vendor/backend produced the
+warm-start — so §10's determinism contract is also the *cross-platform*
+reproducibility mechanism. Without the tail the same problem would
+answer subtly differently on a Mac vs a Linux+NVIDIA box; with it they
+agree. One more reason the tail is mandatory.
+
+**Consequences for testing and shipping.** The GPU path stays opt-in
+and non-default, so any platform where it is untested or flaky simply
+leaves it off and nothing regresses. The CPU path is always the
+reference oracle: GPU results are validated against it within tolerance
+where hardware exists, and GPU-less CI still exercises the CPU path
+fully. One feature-on binary detects and adapts at runtime; no
+per-platform builds.
+
+## 12. References
 
 - Amos & Kolter, "OptNet: Differentiable Optimization as a Layer in
   Neural Networks," *ICML* 2017 — batched dense QP layer on GPU (qpth);
