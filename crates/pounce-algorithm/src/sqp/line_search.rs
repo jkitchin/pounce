@@ -150,7 +150,7 @@ pub fn l1_merit_line_search<N: SqpProblemSpec>(
         };
         #[cfg(test)]
         if opts.print_level >= 2 {
-            tracing::debug!(target: "pounce::sqp", 
+            tracing::debug!(target: "pounce::sqp",
                 "         ls trial α={alpha:.3e} phi_t={phi_trial:.4e} \
                  phi_c={phi_curr:.4e} target={target:.4e} pred={predicted:.3e} \
                  grad_p={grad_p:.3e} viol_c={viol_curr:.3e} viol_t={viol_trial:.3e} \

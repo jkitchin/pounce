@@ -47,7 +47,7 @@ pub(crate) fn emit_record(diag: &DiagnosticsState, data: &IpoptDataHandle, cq: &
         None => return,
     };
     if let Err(e) = diag.append_iterate_line(&json) {
-        tracing::warn!(target: "pounce::diagnostics", 
+        tracing::warn!(target: "pounce::diagnostics",
             "iterate_dump: failed to append iterate row to iterates.jsonl: {} — continuing",
             e
         );

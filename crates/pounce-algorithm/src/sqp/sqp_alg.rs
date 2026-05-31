@@ -210,7 +210,7 @@ impl SqpAlgorithm {
 
             #[cfg(test)]
             if self.opts.print_level >= 1 {
-                tracing::debug!(target: "pounce::sqp", 
+                tracing::debug!(target: "pounce::sqp",
                     "[sqp k={outer:3}] x={:?} f={:.4e} ‖c‖={:.2e} stat={:.2e} ν={:.2e}",
                     iter.x.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>(),
                     f_curr,
@@ -298,7 +298,7 @@ impl SqpAlgorithm {
             #[cfg(test)]
             if self.opts.print_level >= 1 {
                 let p_inf = sol.x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-                tracing::debug!(target: "pounce::sqp", 
+                tracing::debug!(target: "pounce::sqp",
                     "         qp: ‖p‖_inf={:.3e} ‖λ_g_qp‖_inf={:.3e}",
                     p_inf,
                     sol.lambda_g.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
@@ -342,7 +342,7 @@ impl SqpAlgorithm {
             };
             #[cfg(test)]
             if self.opts.print_level >= 1 {
-                tracing::debug!(target: "pounce::sqp", 
+                tracing::debug!(target: "pounce::sqp",
                     "         ls: α={:.3e} ν={:.3e} ok={} f_new={:.3e}",
                     ls.alpha, ls.nu, ls.success, ls.f_new
                 );

@@ -535,7 +535,7 @@ impl AlgorithmBuilder {
                     Some(Box::new(pounce_linsol::RuizTSymScalingMethod::new()))
                 }
                 LinearSystemScalingChoice::Mc19 => {
-                    tracing::warn!(target: "pounce::algorithm", 
+                    tracing::warn!(target: "pounce::algorithm",
                         "pounce: linear_system_scaling=mc19 not yet implemented; using no scaling"
                     );
                     None

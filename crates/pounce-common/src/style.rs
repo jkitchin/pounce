@@ -89,9 +89,17 @@ fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
 /// so that α = 1 is "cool" (black / cream) and α → 0 is "hot"
 /// (red / bright-yellow).
 pub fn alpha_gradient_rgb(alpha: f64, in_resto: bool) -> RgbColor {
-    let alpha = if alpha.is_finite() { alpha.clamp(0.0, 1.0) } else { 1.0 };
+    let alpha = if alpha.is_finite() {
+        alpha.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let t = 1.0 - alpha;
-    let (cool, hot) = if in_resto { (CREAM, BRIGHT_YEL) } else { (ALPHA_COOL, ALPHA_HOT) };
+    let (cool, hot) = if in_resto {
+        (CREAM, BRIGHT_YEL)
+    } else {
+        (ALPHA_COOL, ALPHA_HOT)
+    };
     RgbColor(
         lerp_u8(cool.0, hot.0, t),
         lerp_u8(cool.1, hot.1, t),
@@ -255,9 +263,15 @@ mod tests {
     #[test]
     fn nearest_ansi256_snaps_pure_colors() {
         // Pure white → cube corner 231 (16 + 36*5 + 6*5 + 5).
-        assert_eq!(nearest_ansi256(RgbColor(0xff, 0xff, 0xff)), Ansi256Color(231));
+        assert_eq!(
+            nearest_ansi256(RgbColor(0xff, 0xff, 0xff)),
+            Ansi256Color(231)
+        );
         // Pure black → cube origin 16.
-        assert_eq!(nearest_ansi256(RgbColor(0x00, 0x00, 0x00)), Ansi256Color(16));
+        assert_eq!(
+            nearest_ansi256(RgbColor(0x00, 0x00, 0x00)),
+            Ansi256Color(16)
+        );
     }
 
     #[test]

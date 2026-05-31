@@ -366,7 +366,7 @@ impl QualityFunctionMuOracle {
             };
 
             if std::env::var("POUNCE_DBG_QF_AGGR").is_ok() {
-                tracing::debug!(target: "pounce::mu", 
+                tracing::debug!(target: "pounce::mu",
                     "[QF_AGGR] σ={:.6e} α_pri={:.6e} α_du={:.6e} xi={:.6e} dual_aggr={:.6e} primal_aggr={:.6e} compl_aggr={:.6e} n_dual={} n_pri={} n_comp={}",
                     sigma, alpha_pri, alpha_du, xi,
                     dual_aggr, primal_aggr, compl_aggr,
@@ -402,7 +402,7 @@ impl QualityFunctionMuOracle {
                     let q1 = eval_q(1.0);
                     let s1m = 1.0 - self.section_sigma_tol.max(1e-4);
                     let q1m = eval_q(s1m);
-                    tracing::debug!(target: "pounce::mu", 
+                    tracing::debug!(target: "pounce::mu",
                         "[QF_SWEEP] σ=1.0 q={:.10e}  σ={:.6e} q={:.10e}  (q_1minus>q_1: {})",
                         q1,
                         s1m,
@@ -434,7 +434,7 @@ impl QualityFunctionMuOracle {
             let sigma_up_dn = sigma_floor
                 .max(1.0 - self.section_sigma_tol.max(1e-4))
                 .min(self.mu_max / avrg_compl);
-            tracing::debug!(target: "pounce::mu", 
+            tracing::debug!(target: "pounce::mu",
                 "[QF] iter={} curr_mu={:.3e} avrg_compl={:.3e} sigma={:.3e} mu_new={:.3e} mu_clamped={:.3e} | sigma_min={:.3e} mu_min={:.3e} sigma_lo_dn={:.3e} sigma_up_dn={:.3e} mu_min/avrg={:.3e}",
                 iter_count, curr_mu, avrg_compl, sigma, mu_new, mu_clamped,
                 self.sigma_min, self.mu_min, sigma_floor, sigma_up_dn,

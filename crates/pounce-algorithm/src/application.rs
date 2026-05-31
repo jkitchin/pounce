@@ -1417,7 +1417,7 @@ impl IpoptApplication {
                     // Upstream Ipopt refuses this combination: Mehrotra
                     // needs an affine step every iter, which only the
                     // adaptive path computes. Keep adaptive and warn.
-                    tracing::warn!(target: "pounce::algorithm", 
+                    tracing::warn!(target: "pounce::algorithm",
                         "pounce: mehrotra_algorithm=yes requires \
                          mu_strategy=adaptive; ignoring \
                          mu_strategy=monotone."

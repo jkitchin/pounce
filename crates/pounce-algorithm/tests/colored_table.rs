@@ -27,7 +27,10 @@ fn styled_row_strips_back_to_plain() {
     // Restoration row with a mid-range alpha — exercises both fg
     // gradient and bg.
     let styled = style_row(PLAIN_ROW, 0.4, 'R', true);
-    assert!(styled.contains('\u{1b}'), "expected ANSI escapes: {styled:?}");
+    assert!(
+        styled.contains('\u{1b}'),
+        "expected ANSI escapes: {styled:?}"
+    );
     let stripped = anstream::adapter::strip_str(&styled).to_string();
     assert_eq!(stripped, PLAIN_ROW, "stripping must recover the plain row");
 }

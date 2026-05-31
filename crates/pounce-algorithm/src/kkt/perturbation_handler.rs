@@ -360,7 +360,7 @@ impl PdPerturbationHandler {
     ) -> Option<Deltas> {
         if std::env::var_os("POUNCE_DBG_PERT").is_some() {
             let it = ip_data.map(|d| d.borrow().iter_count).unwrap_or(-1);
-            tracing::debug!(target: "pounce::linsol", 
+            tracing::debug!(target: "pounce::linsol",
                 "[PERT] iter={} WRONG_INERTIA mu={:.2e} dx_last={:.2e} dx_curr={:.2e}",
                 it, mu, self.delta_x_last, self.delta_x_curr
             );

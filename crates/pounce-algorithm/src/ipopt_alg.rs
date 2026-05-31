@@ -364,8 +364,8 @@ impl IpoptAlgorithm {
         // Per-iteration span so every event emitted in this body (the
         // structured iteration record, restoration/linear-solve spans)
         // is tagged with the iteration index.
-        let _iter_span = tracing::info_span!("iteration", iter = self.data.borrow().iter_count)
-            .entered();
+        let _iter_span =
+            tracing::info_span!("iteration", iter = self.data.borrow().iter_count).entered();
 
         // 1. Output iteration row. Header every 10 iters; the row itself
         //    is built plain by the strategy (so the column widths stay
@@ -577,7 +577,7 @@ impl IpoptAlgorithm {
             if self.restoration.is_some() {
                 return self.invoke_restoration();
             } else {
-                tracing::warn!(target: "pounce::algorithm", 
+                tracing::warn!(target: "pounce::algorithm",
                     "[POUNCE] probing-oracle iterate-quality guard fired \
                      at iter {}, but no restoration phase is configured; \
                      continuing with μ={:.3e}.",
@@ -654,14 +654,14 @@ impl IpoptAlgorithm {
                     use crate::iterates_vector::IteratesVector;
                     use pounce_linalg::{compound_vector::CompoundVector, Vector};
                     let dv: &IteratesVector = delta;
-                    tracing::debug!(target: "pounce::algorithm", 
+                    tracing::debug!(target: "pounce::algorithm",
                         "[PN_DELTA] iter={} mu={:.6e} dx_amax={:.6e} ds_amax={:.6e} dyc_amax={:.6e} dyd_amax={:.6e} dzL_amax={:.6e} dzU_amax={:.6e} dvL_amax={:.6e} dvU_amax={:.6e}",
                         it, d.curr_mu,
                         dv.x.amax(), dv.s.amax(), dv.y_c.amax(), dv.y_d.amax(),
                         dv.z_l.amax(), dv.z_u.amax(), dv.v_l.amax(), dv.v_u.amax()
                     );
                     if let Some(cdx) = dv.x.as_any().downcast_ref::<CompoundVector>() {
-                        tracing::debug!(target: "pounce::algorithm", 
+                        tracing::debug!(target: "pounce::algorithm",
                             "[PN_DELTA] iter={} dx_blocks_amax: orig={:.6e} nc={:.6e} pc={:.6e} nd={:.6e} pd={:.6e}",
                             it,
                             cdx.comp(0).amax(),
@@ -670,7 +670,7 @@ impl IpoptAlgorithm {
                             cdx.comp(3).amax(),
                             cdx.comp(4).amax(),
                         );
-                        tracing::debug!(target: "pounce::algorithm", 
+                        tracing::debug!(target: "pounce::algorithm",
                             "[PN_DELTA] iter={} dx_blocks_nrm2: orig={:.6e} nc={:.6e} pc={:.6e} nd={:.6e} pd={:.6e}",
                             it,
                             cdx.comp(0).nrm2(),
@@ -679,7 +679,7 @@ impl IpoptAlgorithm {
                             cdx.comp(3).nrm2(),
                             cdx.comp(4).nrm2(),
                         );
-                        tracing::debug!(target: "pounce::algorithm", 
+                        tracing::debug!(target: "pounce::algorithm",
                             "[PN_DELTA] iter={} dx_blocks_asum: orig={:.6e} nc={:.6e} pc={:.6e} nd={:.6e} pd={:.6e}",
                             it,
                             cdx.comp(0).asum(),
@@ -703,7 +703,7 @@ impl IpoptAlgorithm {
                                     imax = i;
                                 }
                             }
-                            tracing::debug!(target: "pounce::algorithm", 
+                            tracing::debug!(target: "pounce::algorithm",
                                 "[PN_DELTA] iter={} dx_orig argmax: i={} v={:.17e} (n={})",
                                 it,
                                 imax,
@@ -713,7 +713,7 @@ impl IpoptAlgorithm {
                         }
                     }
                     let p = &d.perturbations;
-                    tracing::debug!(target: "pounce::algorithm", 
+                    tracing::debug!(target: "pounce::algorithm",
                         "[PN_DELTA] iter={} pert: dx={:.6e} ds={:.6e} dc={:.6e} dd={:.6e}",
                         it, p.delta_x, p.delta_s, p.delta_c, p.delta_d
                     );
@@ -725,7 +725,7 @@ impl IpoptAlgorithm {
                     let cd = cq.curr_d_minus_s();
                     let sx = cq.curr_sigma_x();
                     let ss = cq.curr_sigma_s();
-                    tracing::debug!(target: "pounce::algorithm", 
+                    tracing::debug!(target: "pounce::algorithm",
                         "[PN_DELTA] iter={} cq: gradf_amax={:.6e} gradf_nrm2={:.6e} gradlag_amax={:.6e} gradlag_nrm2={:.6e} c_amax={:.6e} c_nrm2={:.6e} d_amax={:.6e} d_nrm2={:.6e} sigx_amax={:.6e} sigx_nrm2={:.6e} sigs_amax={:.6e} sigs_nrm2={:.6e}",
                         it,
                         gf.amax(), gf.nrm2(),
@@ -736,7 +736,7 @@ impl IpoptAlgorithm {
                         ss.amax(), ss.nrm2(),
                     );
                     if let Some(cgf) = gf.as_any().downcast_ref::<CompoundVector>() {
-                        tracing::debug!(target: "pounce::algorithm", 
+                        tracing::debug!(target: "pounce::algorithm",
                             "[PN_DELTA] iter={} gradf_blocks_amax: orig={:.6e} nc={:.6e} pc={:.6e} nd={:.6e} pd={:.6e}",
                             it,
                             cgf.comp(0).amax(),
@@ -747,7 +747,7 @@ impl IpoptAlgorithm {
                         );
                     }
                     if let Some(curr) = self.data.borrow().curr.clone() {
-                        tracing::debug!(target: "pounce::algorithm", 
+                        tracing::debug!(target: "pounce::algorithm",
                             "[PN_DELTA] iter={} bound_mults: zL_amax={:.6e} zU_amax={:.6e} vL_amax={:.6e} vU_amax={:.6e} s_amax={:.6e} s_nrm2={:.6e} x_amax={:.6e} x_nrm2={:.6e}",
                             it,
                             curr.z_l.amax(), curr.z_u.amax(),
@@ -756,7 +756,7 @@ impl IpoptAlgorithm {
                             curr.x.amax(), curr.x.nrm2(),
                         );
                         if let Some(czl) = curr.z_l.as_any().downcast_ref::<CompoundVector>() {
-                            tracing::debug!(target: "pounce::algorithm", 
+                            tracing::debug!(target: "pounce::algorithm",
                                 "[PN_DELTA] iter={} zL_blocks_amax: orig={:.6e} nc={:.6e} pc={:.6e} nd={:.6e} pd={:.6e}",
                                 it,
                                 czl.comp(0).amax(),
@@ -769,7 +769,7 @@ impl IpoptAlgorithm {
                         if let Some(czu) = curr.z_u.as_any().downcast_ref::<CompoundVector>() {
                             tracing::debug!(target: "pounce::algorithm", "[PN_DELTA] iter={} zU_ncomps={}", it, czu.n_comps());
                             for ic in 0..czu.n_comps() {
-                                tracing::debug!(target: "pounce::algorithm", 
+                                tracing::debug!(target: "pounce::algorithm",
                                     "[PN_DELTA] iter={} zU_block[{}]_amax={:.6e} dim={}",
                                     it,
                                     ic,
@@ -780,7 +780,7 @@ impl IpoptAlgorithm {
                         }
                     }
                     if let Some(csx) = sx.as_any().downcast_ref::<CompoundVector>() {
-                        tracing::debug!(target: "pounce::algorithm", 
+                        tracing::debug!(target: "pounce::algorithm",
                             "[PN_DELTA] iter={} sigx_blocks_amax: orig={:.6e} nc={:.6e} pc={:.6e} nd={:.6e} pd={:.6e}",
                             it,
                             csx.comp(0).amax(),
@@ -1004,7 +1004,7 @@ impl IpoptAlgorithm {
 
         if std::env::var("POUNCE_DBG_RESTO").is_ok() {
             let iter = self.data.borrow().iter_count;
-            tracing::debug!(target: "pounce::algorithm", 
+            tracing::debug!(target: "pounce::algorithm",
                 "RESTO_ENTRY iter={} theta={:.6e} barr={:.6e} near_feas_ct={}",
                 iter, reference_theta, reference_barr, self.resto_near_feasible_count,
             );
@@ -1063,7 +1063,7 @@ impl IpoptAlgorithm {
             let dx_rel = relative_distance(&*curr.x, &**prev_x);
             let ds_rel = relative_distance(&*curr.s, &**prev_s);
             if std::env::var_os("POUNCE_DBG_RESTO_CYCLE").is_some() {
-                tracing::debug!(target: "pounce::algorithm", 
+                tracing::debug!(target: "pounce::algorithm",
                     "[PN_RESTO_CYCLE] entry-vs-entry dx_rel={:.6e} ds_rel={:.6e}",
                     dx_rel, ds_rel
                 );
@@ -1079,7 +1079,7 @@ impl IpoptAlgorithm {
             let dx_rel = relative_distance(&*curr.x, &**prev_x);
             let ds_rel = relative_distance(&*curr.s, &**prev_s);
             if std::env::var_os("POUNCE_DBG_RESTO_CYCLE").is_some() {
-                tracing::debug!(target: "pounce::algorithm", 
+                tracing::debug!(target: "pounce::algorithm",
                     "[PN_RESTO_CYCLE] entry-vs-recovery dx_rel={:.6e} ds_rel={:.6e} count={}",
                     dx_rel, ds_rel, self.resto_no_outer_progress_count
                 );

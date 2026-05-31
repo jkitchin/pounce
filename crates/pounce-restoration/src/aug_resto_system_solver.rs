@@ -229,7 +229,7 @@ impl AugSystemSolver for AugRestoSystemSolver {
 
         let dbg = std::env::var("POUNCE_RESTO_DBG").is_ok();
         if dbg {
-            tracing::debug!(target: "pounce::restoration", 
+            tracing::debug!(target: "pounce::restoration",
                 "[resto-aug] n_orig={} m_eq={} m_ineq={} W.nz={} J_c.nz={} J_d.nz={} delta_x={:.3e} delta_c={:.3e} delta_d={:.3e}",
                 self.n_orig, self.m_eq, self.m_ineq,
                 w.nonzeros(), j_c.nonzeros(), j_d.nonzeros(),
@@ -411,17 +411,17 @@ impl AugSystemSolver for AugRestoSystemSolver {
             let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
             let sol_x_r = sol_x_compound.comp(0);
             let sol_x_orig_vals = dense_values(sol_x_r);
-            tracing::debug!(target: "pounce::restoration", 
+            tracing::debug!(target: "pounce::restoration",
                 "[resto-aug]   ||sigma_orig||={:.3e} ||sigma_n_c||={:.3e} ||sigma_p_c||={:.3e} ||sigma_n_d||={:.3e} ||sigma_p_d||={:.3e}",
                 inf_norm(&sigma_orig_vals),
                 inf_norm(&sigma_n_c), inf_norm(&sigma_p_c), inf_norm(&sigma_n_d), inf_norm(&sigma_p_d),
             );
-            tracing::debug!(target: "pounce::restoration", 
+            tracing::debug!(target: "pounce::restoration",
                 "[resto-aug]   ||rhs_x_orig||={:.3e} ||rhs_n_c||={:.3e} ||rhs_p_c||={:.3e} ||rhs_n_d||={:.3e} ||rhs_p_d||={:.3e} ||rhs_c||={:.3e} ||rhs_d||={:.3e}",
                 inf_norm(&rhs_x_orig_vals), inf_norm(&rhs_n_c), inf_norm(&rhs_p_c),
                 inf_norm(&rhs_n_d), inf_norm(&rhs_p_d), inf_norm(&rhs_c_vals), inf_norm(&rhs_d_vals),
             );
-            tracing::debug!(target: "pounce::restoration", 
+            tracing::debug!(target: "pounce::restoration",
                 "[resto-aug]   ||rhs_cR||={:.3e} ||rhs_dR||={:.3e} ||D_cR||={:.3e} ||D_dR||={:.3e} ||sol_x_orig||={:.3e} ||sol_y_c||={:.3e} ||sol_y_d||={:.3e}",
                 inf_norm(&rhs_c_r), inf_norm(&rhs_d_r),
                 inf_norm(&d_c_r), inf_norm(&d_d_r),

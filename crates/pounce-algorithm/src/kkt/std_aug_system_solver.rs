@@ -443,7 +443,7 @@ impl AugSystemSolver for StdAugSystemSolver {
             use std::sync::atomic::{AtomicBool, Ordering};
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::SeqCst) {
-                tracing::warn!(target: "pounce::linsol", 
+                tracing::warn!(target: "pounce::linsol",
                     "warning: POUNCE_DUMP_KKT is deprecated; prefer `--dump kkt:<iter-spec>` (see pounce --help)"
                 );
             }

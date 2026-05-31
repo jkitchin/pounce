@@ -305,7 +305,7 @@ impl FilterLsAcceptor {
             // Env lookup cached in a `OnceLock` so the disabled case
             // costs one atomic load per trial.
             if dbg_ls_enabled() {
-                tracing::debug!(target: "pounce::linesearch", 
+                tracing::debug!(target: "pounce::linesearch",
                     "DBG_LS alpha={:.3e} theta={:.3e} phi={:.3e} d_phi={:.3e} theta_trial={:.3e} phi_trial={:.3e} theta_max={:.3e} rapid_inc_ok={} suff_progress_ok={}",
                     alpha_primal,
                     theta,

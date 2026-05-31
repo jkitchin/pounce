@@ -68,7 +68,7 @@ impl IterDumper {
         let file = match File::create(&pb) {
             Ok(f) => f,
             Err(e) => {
-                tracing::warn!(target: "pounce::diagnostics", 
+                tracing::warn!(target: "pounce::diagnostics",
                     "iter_dump: failed to open `{}` for writing: {} — dumping disabled",
                     path, e
                 );
@@ -158,7 +158,7 @@ impl IterDumper {
     /// `curr` iterate).
     pub(crate) fn write_record(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) {
         if let Err(e) = self.write_record_inner(data, cq) {
-            tracing::warn!(target: "pounce::diagnostics", 
+            tracing::warn!(target: "pounce::diagnostics",
                 "iter_dump: failed to write iteration record: {} — dumping aborted",
                 e
             );

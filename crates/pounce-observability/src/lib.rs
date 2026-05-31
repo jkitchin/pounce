@@ -239,7 +239,13 @@ where
         let level = *meta.level();
         if writer.has_ansi_escapes() {
             let style = level_style(level);
-            write!(writer, "{}{:>5}{} ", style.render(), level, style.render_reset())?;
+            write!(
+                writer,
+                "{}{:>5}{} ",
+                style.render(),
+                level,
+                style.render_reset()
+            )?;
         } else {
             write!(writer, "{level:>5} ")?;
         }
@@ -385,7 +391,10 @@ mod tests {
         let guard = IterCaptureGuard::start();
         assert!(iteration_event_wanted(), "capture active → event wanted");
         let _ = guard.finish();
-        assert!(!iteration_event_wanted(), "capture ended → event suppressed");
+        assert!(
+            !iteration_event_wanted(),
+            "capture ended → event suppressed"
+        );
     }
 
     #[test]
@@ -448,8 +457,8 @@ mod tests {
         // ancestor. Regression guard for the per-layer-filter bug where
         // a `target`-only filter hid span ancestry and let inner
         // restoration iterations leak into the report.
-        let collector = IterCollectorLayer
-            .with_filter(filter_fn(|m| m.is_span() || m.target() == ITER_TARGET));
+        let collector =
+            IterCollectorLayer.with_filter(filter_fn(|m| m.is_span() || m.target() == ITER_TARGET));
         let subscriber = tracing_subscriber::registry().with(collector);
 
         let captured = tracing::subscriber::with_default(subscriber, || {
@@ -466,7 +475,11 @@ mod tests {
         });
 
         let iters: Vec<i32> = captured.iter().map(|r| r.iter).collect();
-        assert_eq!(iters, vec![0, 1], "inner restoration iteration leaked: {iters:?}");
+        assert_eq!(
+            iters,
+            vec![0, 1],
+            "inner restoration iteration leaked: {iters:?}"
+        );
     }
 
     #[test]

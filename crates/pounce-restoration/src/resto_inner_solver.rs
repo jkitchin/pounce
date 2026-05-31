@@ -554,7 +554,7 @@ pub fn run_inner_resto(
         || step_failure_locally_infeasible;
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
-        tracing::debug!(target: "pounce::restoration", 
+        tracing::debug!(target: "pounce::restoration",
             "[PN_RESTO_LOCINF] status={:?} iter={} inner_kkt_err={:.6e} orig_inf_pr={:.6e} outer_tol={:.6e} strict={} alt={} cycle={} step_fail={} → loc_inf={}",
             status,
             inner_iter_count,
