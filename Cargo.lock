@@ -948,6 +948,7 @@ dependencies = [
  "pounce-common",
  "pounce-feral",
  "pounce-linsol",
+ "rayon",
 ]
 
 [[package]]
