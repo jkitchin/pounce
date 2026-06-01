@@ -447,6 +447,39 @@ fn parallel_obbt_matches_serial() {
 }
 
 #[test]
+fn parallel_node_pool_certifies_optimum() {
+    // The parallel node pool explores nodes in a non-deterministic order, but
+    // must still certify the same global optimum. Six-hump camel on 4 workers.
+    let x = var(0);
+    let y = var(1);
+    let f = 4.0 * x.clone().powi(2) - 2.1 * x.clone().powi(4)
+        + (1.0 / 3.0) * x.clone().powi(6)
+        + x.clone() * y.clone()
+        - 4.0 * y.clone().powi(2)
+        + 4.0 * y.powi(4);
+    let prob = GlobalProblem::new(vec![-2.0, -1.5], vec![2.0, 1.5], &f);
+    let opts = GlobalOptions {
+        abs_gap: 1e-4,
+        rel_gap: 1e-4,
+        max_nodes: 200_000,
+        threads: 4,
+        ..GlobalOptions::default()
+    };
+    let sol = solve_global(&prob, &opts, backend);
+    assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+    assert!(
+        (sol.objective + 1.031_628).abs() < 1e-2,
+        "obj = {}",
+        sol.objective
+    );
+    assert!(
+        sol.x[0].abs() < 0.2 && sol.x[1].abs() > 0.5,
+        "x = {:?}",
+        sol.x
+    );
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

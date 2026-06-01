@@ -110,8 +110,16 @@ pub struct GlobalOptions {
     /// Run OBBT's `2n` per-node bound-tightening solves on a thread pool. The
     /// result is identical to the serial sweep (the solves are independent),
     /// only faster; pays off when `n` and the relaxation are large enough to
-    /// amortize threading overhead.
+    /// amortize threading overhead. (Ignored when `threads > 1`, where whole
+    /// nodes run in parallel instead and OBBT stays serial within a worker.)
     pub parallel: bool,
+    /// Worker threads for the parallel **node pool**: `> 1` processes whole
+    /// frontier nodes concurrently (coarse-grained, the bigger speedup) at the
+    /// cost of determinism — node counts vary run to run, but the certified
+    /// optimum and gap do not. `1` (default) is the deterministic serial driver
+    /// and uses most-violation/reliability branching; the pool uses
+    /// most-violation (pseudocosts are not shared across workers).
+    pub threads: usize,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -132,6 +140,7 @@ impl Default for GlobalOptions {
             multilinear: true,
             branching: BranchRule::MostViolation,
             parallel: false,
+            threads: 1,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -187,9 +196,232 @@ fn feasible_objective(prob: &GlobalProblem, x: &[f64], tol: f64) -> Option<f64> 
     obj.is_finite().then_some(obj)
 }
 
+fn gap_ok(lb: f64, ub: f64, opts: &GlobalOptions) -> bool {
+    let g = ub - lb;
+    g <= opts.abs_gap || g <= opts.rel_gap * ub.abs().max(1.0)
+}
+
+/// The bounding result for one node: its lower bound, the (FBBT/OBBT-tightened)
+/// box, the relaxation point and branch terms for branching, and a feasible
+/// incumbent candidate found while probing. `None` from [`process_node`] means
+/// the node was pruned (proven infeasible / dominated).
+struct Bounded {
+    node_lb: f64,
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+    relax_pt: Vec<f64>,
+    branch_terms: Vec<crate::relax::BranchTerm>,
+    sol_x: Vec<f64>,
+    incumbent: Option<(Vec<f64>, f64)>,
+}
+
+/// All the per-node work that is independent of the shared frontier: FBBT +
+/// OBBT bound tightening, the relaxation lower bound (with αBB / RLT cuts and
+/// sandwich refinement), and upper-bound probing. Pure given the box and an
+/// incumbent snapshot, so it runs unsynchronized in both the serial and the
+/// parallel drivers. `obbt_parallel` is forced off in the parallel pool to
+/// avoid nesting thread pools.
+#[allow(clippy::too_many_arguments)]
+fn process_node<F>(
+    prob: &GlobalProblem,
+    opts: &GlobalOptions,
+    mut lo: Vec<f64>,
+    mut hi: Vec<f64>,
+    parent_key: f64,
+    incumbent_ub: f64,
+    g_lo: &[f64],
+    g_hi: &[f64],
+    qp_opts: &QpOptions,
+    obbt_parallel: bool,
+    make_backend: &F,
+) -> Option<Bounded>
+where
+    F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
+{
+    let n = prob.n_vars;
+    let mut mk = || make_backend();
+
+    // 1. FBBT bound tightening (prune on infeasibility witness).
+    if !prob.constraints.is_empty() {
+        let provider = ConstraintProvider::new(&prob.constraints);
+        let report = run_fbbt(
+            &provider,
+            n,
+            prob.constraints.len(),
+            &mut lo,
+            &mut hi,
+            g_lo,
+            g_hi,
+            &opts.fbbt,
+        );
+        if report.infeasibility_witness.is_some() {
+            return None;
+        }
+    }
+    if (0..n).any(|i| lo[i] > hi[i] + 1e-12) {
+        return None; // empty box
+    }
+
+    // 1b. Optimization-based bound tightening (with the incumbent cutoff).
+    if opts.obbt_passes > 0 {
+        let cutoff = incumbent_ub.is_finite().then_some(incumbent_ub);
+        if !crate::obbt::tighten(
+            prob,
+            &mut lo,
+            &mut hi,
+            cutoff,
+            opts.obbt_passes,
+            obbt_parallel,
+            qp_opts,
+            make_backend,
+        ) {
+            return None;
+        }
+    }
+
+    // 2. Relaxation lower bound + αBB / RLT cuts + sandwich refinement.
+    let relax = build_relaxation(prob, &lo, &hi, opts.multilinear);
+    if relax.trivially_infeasible {
+        return None;
+    }
+    let mut qp = relax.qp;
+    let atoms = relax.atoms;
+    let branch_terms = relax.branch_terms;
+    let (col_lo, col_hi) = (qp.lb.clone(), qp.ub.clone());
+    if opts.alphabb_cuts > 0 {
+        if let Some(oc) = relax.obj_col {
+            let cuts =
+                crate::alphabb::objective_cuts(&prob.objective, &lo, &hi, oc, opts.alphabb_cuts);
+            crate::relax::append_cuts(&mut qp, &cuts);
+        }
+    }
+    if opts.rlt {
+        crate::rlt::augment(&mut qp, prob, &lo, &hi);
+    }
+    let sol = solve_qp_ipm(&qp, qp_opts, &mut mk);
+    let mut node_lb = match sol.status {
+        QpStatus::Optimal => sol.obj,
+        QpStatus::PrimalInfeasible => return None,
+        _ => parent_key, // numerical trouble: keep the inherited bound
+    };
+    // Branch from / probe at the original relaxation point (loosest there);
+    // cuts only sharpen the bound.
+    let relax_pt: Vec<f64> = (0..n).map(|i| sol.x[i].clamp(lo[i], hi[i])).collect();
+    if sol.status == QpStatus::Optimal {
+        let mut cut_x = sol.x.clone();
+        for _ in 0..opts.sandwich_rounds {
+            let cuts = crate::relax::sandwich_cuts(&atoms, &col_lo, &col_hi, &cut_x, 1e-7);
+            if cuts.is_empty() {
+                break;
+            }
+            crate::relax::append_cuts(&mut qp, &cuts);
+            let s = solve_qp_ipm(&qp, qp_opts, &mut mk);
+            if s.status != QpStatus::Optimal || s.obj <= node_lb + 1e-9 {
+                break;
+            }
+            node_lb = s.obj;
+            cut_x = s.x;
+        }
+    }
+
+    // 3. Upper bound: probe the relaxation point, the box center, and (when
+    // enabled) a local NLP polish; return the best feasible point found.
+    let mut incumbent: Option<(Vec<f64>, f64)> = None;
+    let center: Vec<f64> = (0..n).map(|i| 0.5 * (lo[i] + hi[i])).collect();
+    let mut candidates = vec![relax_pt.clone(), center];
+    if opts.local_solve_iters > 0 {
+        if let Some(polished) =
+            crate::nlp::local_solve(prob, &lo, &hi, &relax_pt, opts.local_solve_iters)
+        {
+            candidates.push(polished);
+        }
+    }
+    for cand in &candidates {
+        if let Some(val) = feasible_objective(prob, cand, opts.feas_tol) {
+            if incumbent.as_ref().is_none_or(|(_, o)| val < *o) {
+                incumbent = Some((cand.clone(), val));
+            }
+        }
+    }
+
+    Some(Bounded {
+        node_lb,
+        lo,
+        hi,
+        relax_pt,
+        branch_terms,
+        sol_x: sol.x,
+        incumbent,
+    })
+}
+
+/// Most-violation branching variable for a bounded node (stateless — used by
+/// the parallel pool, where pseudocosts are not shared). `None` ⇒ caller falls
+/// back to the widest side.
+fn select_most_violation(b: &Bounded, box_tol: f64, n: usize) -> Option<usize> {
+    let scores = crate::relax::branch_scores(&b.branch_terms, &b.sol_x, n);
+    (0..n)
+        .filter(|&i| b.hi[i] - b.lo[i] > box_tol)
+        .max_by(|&i, &j| scores[i].partial_cmp(&scores[j]).unwrap_or(Ordering::Equal))
+        .filter(|&i| scores[i] > 1e-9)
+}
+
+/// Build the two child nodes from a branched bounded node.
+fn children(b: &Bounded, k: usize, lb_for_children: f64) -> [Node; 2] {
+    let split = crate::branching::split_point(b.relax_pt[k], b.lo[k], b.hi[k]);
+    let f_down = (split - b.lo[k]).max(1e-12);
+    let f_up = (b.hi[k] - split).max(1e-12);
+    let mut left_hi = b.hi.clone();
+    left_hi[k] = split;
+    let mut right_lo = b.lo.clone();
+    right_lo[k] = split;
+    [
+        Node {
+            key: lb_for_children,
+            lo: b.lo.clone(),
+            hi: left_hi,
+            branch: Some(BranchInfo {
+                var: k,
+                down: true,
+                frac: f_down,
+                parent_lb: b.node_lb,
+            }),
+        },
+        Node {
+            key: lb_for_children,
+            lo: right_lo,
+            hi: b.hi.clone(),
+            branch: Some(BranchInfo {
+                var: k,
+                down: false,
+                frac: f_up,
+                parent_lb: b.node_lb,
+            }),
+        },
+    ]
+}
+
 /// Globally minimize `prob`. `make_backend` supplies a fresh sparse symmetric
 /// linear solver for each relaxation LP (e.g. `FeralSolverInterface::new`).
+/// `opts.threads > 1` runs the [parallel node pool](solve_parallel); otherwise
+/// the deterministic serial driver.
 pub fn solve_global<F>(
+    prob: &GlobalProblem,
+    opts: &GlobalOptions,
+    make_backend: F,
+) -> GlobalSolution
+where
+    F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
+{
+    if opts.threads > 1 {
+        solve_parallel(prob, opts, &make_backend, opts.threads)
+    } else {
+        solve_serial(prob, opts, make_backend)
+    }
+}
+
+/// Deterministic best-first serial driver.
+fn solve_serial<F>(
     prob: &GlobalProblem,
     opts: &GlobalOptions,
     mut make_backend: F,
@@ -209,29 +441,18 @@ where
         branch: None,
     });
     let mut pseudo = crate::branching::PseudoCosts::new(n);
-
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut incumbent_ub = f64::INFINITY;
     let mut global_lb = f64::NEG_INFINITY;
     let mut nodes = 0usize;
 
-    let gap_ok = |lb: f64, ub: f64| -> bool {
-        let g = ub - lb;
-        g <= opts.abs_gap || g <= opts.rel_gap * ub.abs().max(1.0)
-    };
-
     while let Some(node) = heap.pop() {
-        // Best-first: this node's key is the minimum over the whole frontier,
-        // hence a valid global lower bound at this moment.
         if node.key.is_finite() {
             global_lb = node.key;
         }
-        // Everything remaining has key ≥ node.key, so once that clears the
-        // incumbent the global optimum is pinned to the incumbent.
-        if incumbent_ub.is_finite() && gap_ok(node.key, incumbent_ub) {
-            // The frontier minimum `node.key` already meets the incumbent, so
-            // nothing unexplored can beat it. A valid global lower bound never
-            // exceeds the achievable incumbent, so clamp.
+        // Best-first: this node's key is the frontier minimum, so once it meets
+        // the incumbent nothing unexplored can beat it.
+        if incumbent_ub.is_finite() && gap_ok(node.key, incumbent_ub, opts) {
             let lb = if node.key.is_finite() {
                 node.key
             } else {
@@ -261,162 +482,56 @@ where
         }
         nodes += 1;
 
-        // 1. FBBT bound tightening (prune on infeasibility witness).
-        let mut lo = node.lo.clone();
-        let mut hi = node.hi.clone();
-        if !prob.constraints.is_empty() {
-            let provider = ConstraintProvider::new(&prob.constraints);
-            let report = run_fbbt(
-                &provider,
-                n,
-                prob.constraints.len(),
-                &mut lo,
-                &mut hi,
-                &g_lo,
-                &g_hi,
-                &opts.fbbt,
-            );
-            if report.infeasibility_witness.is_some() {
-                continue;
-            }
-        }
-        if (0..n).any(|i| lo[i] > hi[i] + 1e-12) {
-            continue; // empty box
-        }
-
-        // 1b. Optimization-based bound tightening (with the incumbent cutoff),
-        // a stronger box reducer than FBBT — prune if it collapses the box.
-        if opts.obbt_passes > 0 {
-            let cutoff = incumbent_ub.is_finite().then_some(incumbent_ub);
-            if !crate::obbt::tighten(
-                prob,
-                &mut lo,
-                &mut hi,
-                cutoff,
-                opts.obbt_passes,
-                opts.parallel,
-                &qp_opts,
-                &make_backend,
-            ) {
-                continue;
-            }
-        }
-
-        // 2. Relaxation lower bound, tightened by cutting-plane (sandwich)
-        // rounds: re-solve with tangent cuts added at the LP point for loose
-        // convex/concave atoms until the bound stops improving.
-        let relax = build_relaxation(prob, &lo, &hi, opts.multilinear);
-        if relax.trivially_infeasible {
+        let Some(b) = process_node(
+            prob,
+            opts,
+            node.lo.clone(),
+            node.hi.clone(),
+            node.key,
+            incumbent_ub,
+            &g_lo,
+            &g_hi,
+            &qp_opts,
+            opts.parallel,
+            &make_backend,
+        ) else {
             continue;
-        }
-        let mut qp = relax.qp;
-        let atoms = relax.atoms;
-        let branch_terms = relax.branch_terms;
-        let (col_lo, col_hi) = (qp.lb.clone(), qp.ub.clone());
-        // αBB tangent-plane underestimators of the objective as a whole,
-        // complementing the factorable relaxation of its individual atoms.
-        if opts.alphabb_cuts > 0 {
-            if let Some(oc) = relax.obj_col {
-                let cuts = crate::alphabb::objective_cuts(
-                    &prob.objective,
-                    &lo,
-                    &hi,
-                    oc,
-                    opts.alphabb_cuts,
-                );
-                crate::relax::append_cuts(&mut qp, &cuts);
-            }
-        }
-        // RLT cuts (affine constraints × bound factors): appends product columns
-        // + McCormick + the linearized cuts. No-op without affine constraints.
-        if opts.rlt {
-            crate::rlt::augment(&mut qp, prob, &lo, &hi);
-        }
-        let sol = solve_qp_ipm(&qp, &qp_opts, &mut make_backend);
-        let mut node_lb = match sol.status {
-            QpStatus::Optimal => sol.obj,
-            QpStatus::PrimalInfeasible => continue, // box is infeasible → prune
-            // Dual-infeasible (unbounded relaxation) or numerical trouble: keep
-            // the inherited bound and keep branching rather than prune wrongly.
-            _ => node.key,
         };
-        // Branch from and probe at the *original* relaxation point — it marks
-        // where the relaxation is loosest; the cuts only sharpen the bound.
-        let relax_pt: Vec<f64> = (0..n).map(|i| sol.x[i].clamp(lo[i], hi[i])).collect();
-        if sol.status == QpStatus::Optimal {
-            let mut cut_x = sol.x.clone();
-            for _ in 0..opts.sandwich_rounds {
-                let cuts = crate::relax::sandwich_cuts(&atoms, &col_lo, &col_hi, &cut_x, 1e-7);
-                if cuts.is_empty() {
-                    break;
-                }
-                crate::relax::append_cuts(&mut qp, &cuts);
-                let s = solve_qp_ipm(&qp, &qp_opts, &mut make_backend);
-                if s.status != QpStatus::Optimal || s.obj <= node_lb + 1e-9 {
-                    break;
-                }
-                node_lb = s.obj;
-                cut_x = s.x;
+
+        // Learn the branched variable's pseudocost from the realized gain.
+        if let Some(bi) = node.branch {
+            pseudo.update(bi.var, bi.down, b.node_lb - bi.parent_lb, bi.frac);
+        }
+        if let Some((x, obj)) = &b.incumbent {
+            if *obj < incumbent_ub {
+                incumbent_ub = *obj;
+                incumbent_x = x.clone();
             }
         }
-        // Learn: update the branched variable's pseudocost with the realized
-        // lower-bound gain of this child over its parent.
-        if let Some(bi) = node.branch {
-            pseudo.update(bi.var, bi.down, node_lb - bi.parent_lb, bi.frac);
-        }
-        if incumbent_ub.is_finite() && gap_ok(node_lb, incumbent_ub) {
+        if incumbent_ub.is_finite() && gap_ok(b.node_lb, incumbent_ub, opts) {
             continue;
         }
 
-        // 3. Upper bound: probe the relaxation point and box center, and (when
-        // enabled) polish the relaxation point with a local NLP solve over the
-        // node box for a much sharper feasible incumbent.
-        let center: Vec<f64> = (0..n).map(|i| 0.5 * (lo[i] + hi[i])).collect();
-        let mut candidates = vec![relax_pt.clone(), center];
-        if opts.local_solve_iters > 0 {
-            if let Some(polished) =
-                crate::nlp::local_solve(prob, &lo, &hi, &relax_pt, opts.local_solve_iters)
-            {
-                candidates.push(polished);
-            }
-        }
-        for cand in &candidates {
-            if let Some(val) = feasible_objective(prob, cand, opts.feas_tol) {
-                if val < incumbent_ub {
-                    incumbent_ub = val;
-                    incumbent_x = cand.clone();
-                }
-            }
-        }
-
-        // 4. Leaf test, else branch. The leaf test is on the overall widest
-        // side; the branching variable comes from the configured rule. Split at
-        // the relaxation point — where the relaxation is loosest.
-        let (widest_k, width) = widest(&lo, &hi);
-        let lb_for_children = node_lb.max(node.key);
+        let (widest_k, width) = widest(&b.lo, &b.hi);
+        let lb_for_children = b.node_lb.max(node.key);
         if width <= opts.box_tol
-            || (incumbent_ub.is_finite() && gap_ok(lb_for_children, incumbent_ub))
+            || (incumbent_ub.is_finite() && gap_ok(lb_for_children, incumbent_ub, opts))
         {
             continue;
         }
         let k = match opts.branching {
             BranchRule::Widest => widest_k,
             BranchRule::MostViolation => {
-                let scores = crate::relax::branch_scores(&branch_terms, &sol.x, n);
-                (0..n)
-                    .filter(|&i| hi[i] - lo[i] > opts.box_tol)
-                    .max_by(|&i, &j| scores[i].partial_cmp(&scores[j]).unwrap_or(Ordering::Equal))
-                    .filter(|&i| scores[i] > 1e-9)
-                    .unwrap_or(widest_k)
+                select_most_violation(&b, opts.box_tol, n).unwrap_or(widest_k)
             }
             BranchRule::Reliability => crate::branching::select_reliability(
                 prob,
-                &lo,
-                &hi,
-                &relax_pt,
-                &branch_terms,
-                &sol.x,
-                node_lb,
+                &b.lo,
+                &b.hi,
+                &b.relax_pt,
+                &b.branch_terms,
+                &b.sol_x,
+                b.node_lb,
                 &mut pseudo,
                 opts.box_tol,
                 opts.multilinear,
@@ -425,40 +540,12 @@ where
             )
             .unwrap_or(widest_k),
         };
-        let split = crate::branching::split_point(relax_pt[k], lo[k], hi[k]);
-        let f_down = (split - lo[k]).max(1e-12);
-        let f_up = (hi[k] - split).max(1e-12);
-        let mut left_hi = hi.clone();
-        left_hi[k] = split;
-        let mut right_lo = lo.clone();
-        right_lo[k] = split;
-        heap.push(Node {
-            key: lb_for_children,
-            lo: lo.clone(),
-            hi: left_hi,
-            branch: Some(BranchInfo {
-                var: k,
-                down: true,
-                frac: f_down,
-                parent_lb: node_lb,
-            }),
-        });
-        heap.push(Node {
-            key: lb_for_children,
-            lo: right_lo,
-            hi: hi.clone(),
-            branch: Some(BranchInfo {
-                var: k,
-                down: false,
-                frac: f_up,
-                parent_lb: node_lb,
-            }),
-        });
+        for child in children(&b, k, lb_for_children) {
+            heap.push(child);
+        }
     }
 
-    // Frontier exhausted: every region was resolved by pruning or shrunk to a
-    // leaf, so nothing unexplored can beat the incumbent — it is global.
-    let _ = global_lb;
+    // Frontier exhausted: everything was pruned or shrunk to a leaf.
     if incumbent_ub.is_finite() {
         GlobalSolution {
             status: GlobalStatus::Optimal,
@@ -475,6 +562,178 @@ where
             lower_bound: global_lb,
             nodes,
         }
+    }
+}
+
+/// Shared state for the parallel node pool.
+struct Shared {
+    heap: BinaryHeap<Node>,
+    incumbent_ub: f64,
+    incumbent_x: Vec<f64>,
+    global_lb: f64,
+    nodes: usize,
+    active: usize,
+    stop: bool,
+    node_limit: bool,
+}
+
+/// Parallel best-first driver: a pool of `threads` workers pulls nodes from a
+/// shared frontier, processes them unsynchronized ([`process_node`]), and under
+/// the lock updates the incumbent and pushes children. **Non-deterministic** in
+/// which nodes are explored and in what order (so node counts vary run to run),
+/// but the certified optimum value and gap are correct: a node is processed
+/// only if its inherited bound cannot already meet the incumbent, and children
+/// inherit a valid lower bound, so the incumbent on exhaustion is global.
+// The `lock().unwrap()`s propagate mutex poisoning, which can only arise if a
+// worker panics — a bug we want surfaced, not swallowed.
+#[allow(clippy::unwrap_used)]
+fn solve_parallel<F>(
+    prob: &GlobalProblem,
+    opts: &GlobalOptions,
+    make_backend: &F,
+    threads: usize,
+) -> GlobalSolution
+where
+    F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
+{
+    use std::sync::{Condvar, Mutex};
+
+    let n = prob.n_vars;
+    let (g_lo, g_hi) = prob.constraint_bounds();
+    let qp_opts = QpOptions::default();
+
+    let mut root_heap = BinaryHeap::new();
+    root_heap.push(Node {
+        key: f64::NEG_INFINITY,
+        lo: prob.x_lo.clone(),
+        hi: prob.x_hi.clone(),
+        branch: None,
+    });
+    let shared = Mutex::new(Shared {
+        heap: root_heap,
+        incumbent_ub: f64::INFINITY,
+        incumbent_x: Vec::new(),
+        global_lb: f64::NEG_INFINITY,
+        nodes: 0,
+        active: 0,
+        stop: false,
+        node_limit: false,
+    });
+    let cv = Condvar::new();
+
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                // --- acquire a node (or terminate) ---
+                let (node, inc) = {
+                    let mut s = shared.lock().unwrap();
+                    loop {
+                        if s.stop {
+                            return;
+                        }
+                        if s.nodes >= opts.max_nodes {
+                            s.node_limit = true;
+                            s.stop = true;
+                            let peek = s.heap.peek().map(|x| x.key).unwrap_or(s.incumbent_ub);
+                            s.global_lb = peek.min(s.incumbent_ub);
+                            cv.notify_all();
+                            return;
+                        }
+                        if let Some(node) = s.heap.pop() {
+                            // Skip a node whose own bound already meets the
+                            // incumbent — it (and its children) cannot improve.
+                            if s.incumbent_ub.is_finite() && gap_ok(node.key, s.incumbent_ub, opts)
+                            {
+                                continue;
+                            }
+                            s.nodes += 1;
+                            s.active += 1;
+                            let inc = s.incumbent_ub;
+                            break (node, inc);
+                        } else if s.active == 0 {
+                            // Frontier empty and nobody is producing children.
+                            if s.incumbent_ub.is_finite() {
+                                s.global_lb = s.incumbent_ub;
+                            }
+                            s.stop = true;
+                            cv.notify_all();
+                            return;
+                        } else {
+                            s = cv.wait(s).unwrap();
+                        }
+                    }
+                };
+
+                // --- process unsynchronized ---
+                let outcome = process_node(
+                    prob,
+                    opts,
+                    node.lo.clone(),
+                    node.hi.clone(),
+                    node.key,
+                    inc,
+                    &g_lo,
+                    &g_hi,
+                    &qp_opts,
+                    false, // OBBT serial inside a worker (no nested pools)
+                    make_backend,
+                );
+
+                // --- commit under the lock ---
+                {
+                    let mut s = shared.lock().unwrap();
+                    if let Some(b) = outcome {
+                        if let Some((x, obj)) = &b.incumbent {
+                            if *obj < s.incumbent_ub {
+                                s.incumbent_ub = *obj;
+                                s.incumbent_x = x.clone();
+                            }
+                        }
+                        let ub = s.incumbent_ub;
+                        let leaf = ub.is_finite() && gap_ok(b.node_lb, ub, opts);
+                        if !leaf {
+                            let (widest_k, width) = widest(&b.lo, &b.hi);
+                            let lb_for_children = b.node_lb.max(node.key);
+                            let dominated = ub.is_finite() && gap_ok(lb_for_children, ub, opts);
+                            if width > opts.box_tol && !dominated {
+                                let k =
+                                    select_most_violation(&b, opts.box_tol, n).unwrap_or(widest_k);
+                                for child in children(&b, k, lb_for_children) {
+                                    s.heap.push(child);
+                                }
+                            }
+                        }
+                    }
+                    s.active -= 1;
+                    cv.notify_all();
+                }
+            });
+        }
+    });
+
+    let s = shared.into_inner().unwrap();
+    let status = if s.node_limit {
+        if s.incumbent_ub.is_finite() && (s.incumbent_ub - s.global_lb) <= opts.abs_gap {
+            GlobalStatus::Optimal
+        } else {
+            GlobalStatus::NodeLimit
+        }
+    } else if s.incumbent_ub.is_finite() {
+        GlobalStatus::Optimal
+    } else {
+        GlobalStatus::Infeasible
+    };
+    let lower_bound = if s.incumbent_ub.is_finite() {
+        s.global_lb.min(s.incumbent_ub)
+    } else {
+        s.global_lb
+    };
+    GlobalSolution {
+        status,
+        x: s.incumbent_x,
+        objective: s.incumbent_ub,
+        lower_bound,
+        nodes: s.nodes,
     }
 }
 

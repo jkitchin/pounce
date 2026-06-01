@@ -91,10 +91,15 @@ A complete, correct continuous global solver. Current limits:
   With OBBT tightening every node the relaxation is usually tight enough that
   the branching rule is second-order; reliability targets larger problems
   where variable choice dominates.
-- **Parallelism** (`GlobalOptions.parallel`, opt-in): OBBT's `2n` per-node
-  solves run on a thread pool. It is *deterministic* — identical nodes and
-  optimum to the serial sweep, only faster (≈2.3× wall-clock on a 7-variable
-  problem on 14 cores; sub-linear because the rest of the node is serial).
+- **Parallelism**, two opt-in forms:
+  - `parallel` (deterministic): OBBT's `2n` per-node solves run on a thread
+    pool — identical nodes and optimum to serial, only faster (≈2.3× on a
+    7-variable problem on 14 cores).
+  - `threads > 1` (node pool): whole frontier nodes are processed
+    concurrently — coarser-grained, the bigger speedup, but *non-deterministic*
+    in node order (the certified optimum and gap are unchanged; node counts vary
+    run to run). ≈2.6× on 14 cores on a small 5-variable problem; scales further
+    as the tree widens.
 - The Lagrangian Hessian used by the local NLP upper bound is finite-
   differenced (a usable Newton direction, not exact second order).
 - `sin`/`cos` over a box wider than π, division by an interval straddling

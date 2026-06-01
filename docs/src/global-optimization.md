@@ -129,6 +129,7 @@ nodes; adding sandwich cuts brings it to ~220, and OBBT to ~60.
 | `multilinear` | `true` | multi-grouping trilinear relaxation |
 | `branching` | `MostViolation` | branching rule: `Widest`, `MostViolation`, or `Reliability` |
 | `parallel` | `false` | run OBBT's `2n` solves on a thread pool (deterministic) |
+| `threads` | `1` | `> 1` runs the parallel node pool (non-deterministic order) |
 | `fbbt` | — | FBBT configuration |
 
 The branching rule (`BranchRule`) chooses the variable to split: `Widest` (box
@@ -143,11 +144,20 @@ The defaults aim for robustness on small problems. OBBT dominates the per-node
 cost; turn `obbt_passes` down (or off) on larger problems where the LP solves
 outweigh the node savings.
 
-Because OBBT's `2n` solves per pass are independent, `parallel = true` runs them
-on a thread pool — *deterministically* (the same nodes and optimum as the serial
-sweep, only faster). On a 7-variable problem it cut wall-clock ≈2.3× on 14
-cores; the speedup is sub-linear because the relaxation build, sandwich cuts,
-αBB, RLT, the local NLP solve, and branching remain serial within a node.
+There are two opt-in forms of parallelism:
+
+- **`parallel = true`** parallelizes OBBT's `2n` independent solves per pass on a
+  thread pool — *deterministically* (the same nodes and optimum as serial, only
+  faster). On a 7-variable problem it cut wall-clock ≈2.3× on 14 cores; the
+  speedup is sub-linear because the relaxation build, sandwich cuts, αBB, RLT,
+  the local NLP solve, and branching remain serial within a node.
+- **`threads > 1`** runs the **node pool**: workers pull whole frontier nodes
+  and process them concurrently (OBBT stays serial inside each worker). This is
+  coarser-grained and the larger speedup, but **non-deterministic** — the
+  certified optimum and gap are unchanged, yet the node count varies run to run
+  (parallel best-first explores some nodes a serial run would have pruned). On a
+  small 5-variable problem it was ≈2.6× on 14 cores (≈40 nodes — too few to
+  saturate the cores); it scales further as the tree widens.
 
 ## The SOS / Lasserre path (polynomials)
 
