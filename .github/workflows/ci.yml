@@ -52,6 +52,45 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude pounce-hsl --verbose
 
+  # Exercise the Python surface (the `pounce.jax` differentiable /
+  # sensitivity / path-following APIs) on every PR. The Rust `test` job
+  # above covers the solver core, and `wheel-smoke` only imports the
+  # package — neither runs pytest, so without this job the entire
+  # Python feature surface lands untested in CI. Builds the wheel the
+  # same way wheel-smoke does, then installs the jax + diffrax extras
+  # and runs the test suite.
+  python-test:
+    name: Python tests (jax)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout feral sibling
+        run: git clone --depth 1 https://github.com/jkitchin/feral.git ../feral
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: x86_64
+          manylinux: manylinux2014
+          args: --release --out dist
+          sccache: "true"
+          # Same feral sibling bind-mount as wheel-smoke so cargo
+          # resolves the `[patch.crates-io] feral = { path = "../feral" }`
+          # entry inside the manylinux container.
+          docker-options: |
+            -v ${{ github.workspace }}/../feral:${{ github.workspace }}/../feral
+      - name: Install wheel + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install python/dist/*.whl pytest scipy "jax[cpu]" diffrax
+      - name: Run Python tests
+        run: python -m pytest python/tests -q
+
   # Smoke-build the `pounce-solver` wheel on every PR so packaging
   # regressions surface here, not at tag time. Runs only on Linux
   # x86_64; the full multi-platform matrix lives in release-pounce.yml

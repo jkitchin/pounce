@@ -36,6 +36,8 @@ scipy) does the stepping — *no NLP inversion*.
   extra (`pip install pounce[diffrax]`); the example falls back to RK4
   if it's absent.
 - Switch to `PathFollower` when the path folds or the active set changes.
+- Worked notebook `python/notebooks/14_path_following.ipynb` tours the
+  whole family (sensitivity → margin → continuation → fold → inverse map).
 
 Also fixes the build-once / stacked path for **unconstrained** problems
 (``g=None``, ``m=0``): the constraint callbacks no longer dereference the
