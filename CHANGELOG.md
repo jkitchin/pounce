@@ -9,6 +9,47 @@ changes.
 
 ## Unreleased
 
+### Added — Predictor–corrector path-following engine (pounce#90)
+
+`pounce.jax.PathFollower` traces a solution path of a parametric NLP by
+*composing* the post-solve sensitivity primitives instead of re-solving
+at every step:
+
+```python
+from pounce.jax import PathFollower
+pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.05)
+trace = pf.follow(theta_of_s, (0.0, 1.0), x0)   # parameter continuation
+# trace.x, trace.theta, trace.s, trace.lam,
+# trace.n_correctors, trace.n_accepts, trace.active_set_changes
+```
+
+- **predict** — extrapolate primal *and duals* along the held-factor
+  sensitivity (`jvp_from_state(..., with_duals=True)`); **monitor**
+  (no solve) — KKT residual + active-set margin (#89) at the predicted
+  point; **correct** — only when the monitor trips, a warm-μ re-solve
+  that also re-anchors the factor in one solve (`warm_anchor`, #86).
+- Adaptive step size; detects and records active-set changes and
+  re-anchors on the new active set.
+- `PathFollower.trace_arclength(...)` — pseudo-arclength continuation for
+  a scalar-parameter, equality/unconstrained family, tracing **past
+  folds** where `∂x*/∂θ` is singular (parameter continuation cannot).
+  Reports turning points. Bifurcation/branch-switching and
+  inequality-active folds are out of scope for v1.
+- On a linear-response NLP the predictor is exact, so the whole path is
+  traced with **zero correctors** (one anchor solve vs one cold solve
+  per step); nonlinear paths correct adaptively and still trace to
+  tolerance.
+
+New supporting public surface:
+
+- `JaxProblem.warm_anchor(p, x0, *, duals=None, mu=None)` — a warm-started,
+  μ-seeded re-solve that pins the converged factor and returns a `B=1`
+  `AnchorState` (the corrector + anchor in one solve). Threads μ through
+  the reusable build-once path (the #86 follow-up).
+- `JaxProblem.jvp_from_state(..., with_duals=True)` /
+  `batched_jvp_from_state(..., with_duals=True)` — also return the dual
+  sensitivity `∂λ*/∂θ · dp` from the same held-factor back-solve.
+
 ### Added — Active-set-proximity monitor (pounce#89)
 
 `JaxProblem.active_set_margin(state)` reports the distance to an

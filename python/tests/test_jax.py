@@ -1709,3 +1709,227 @@ def test_batched_jvp_rejects_closed_and_foreign_state_pounce_82():
     with jp1.anchor(p_batch, x0) as state:
         with pytest.raises(ValueError, match="different"):
             jp2.batched_jvp_from_state(state, jnp.zeros((2, 2)))
+
+
+# ----- predictor–corrector path following (pounce#90) -----
+
+
+def _circle_theta(s, c=0.5, r=0.4):
+    import jax.numpy as _jnp
+    ang = 2.0 * _jnp.pi * s
+    return _jnp.array([c + r * _jnp.cos(ang), r * _jnp.sin(ang)])
+
+
+def test_pathfollower_linear_qp_zero_correctors_pounce_90():
+    """Issue #90: on a linear-response NLP the sensitivity predictor is
+    exact, so the monitor accepts every step and the engine traces the
+    whole path with ZERO correctors (one anchor solve vs one cold solve
+    per step). Closes the loop and matches the per-point solver."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.05)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert tr.n_correctors == 0          # predictor exact → no re-solves
+    assert tr.n_accepts == tr.n_steps
+    # Closed loop: end returns to start.
+    np.testing.assert_allclose(tr.x[0], tr.x[-1], atol=1e-9)
+    # Every traced point is the true optimum at its θ.
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=1e-7)
+
+
+def test_pathfollower_nonlinear_traces_accurately_pounce_90():
+    """Issue #90: a nonlinear NLP traces accurately via correction; the
+    engine never does more solves than one-per-step."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.1 * jnp.sum(x ** 4)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-5, ds0=0.02, ds_max=0.1)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert tr.n_correctors <= tr.n_steps
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=1e-6)
+
+
+def test_pathfollower_skips_solves_pounce_90():
+    """Issue #90: with a loose monitor tolerance the predictor carries
+    several steps between corrections — strictly fewer solves than the
+    naive one-cold-solve-per-step baseline."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.02 * jnp.sum(x ** 4)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-3, ds0=0.05, ds_max=0.1)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert tr.n_accepts > 0
+    # Total NLP solves = 1 anchor + n_correctors; naive = n_steps + 1.
+    assert (1 + tr.n_correctors) < (tr.n_steps + 1)
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=2e-3)
+
+
+def test_pathfollower_active_set_change_pounce_90():
+    """Issue #90: a path that drives a bound in and out of the active set
+    is traced correctly, the change is detected/recorded, and the engine
+    re-anchors on the new active set (no stepping through the
+    discontinuity)."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    # Upper bound on x0 binds over part of the circle.
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.array([0.6, 10.0]),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-6, active_margin_tol=1e-3, ds0=0.03)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+
+    assert tr.status == "ok"
+    assert len(tr.active_set_changes) >= 2   # bound activates then releases
+    for k in range(len(tr.s)):
+        x_true, *_ = jp.solve_with_jacobian(jnp.asarray(tr.theta[k]), jnp.zeros(2))
+        np.testing.assert_allclose(tr.x[k], np.asarray(x_true), atol=1e-6)
+        assert tr.x[k][0] <= 0.6 + 1e-7      # respects the bound
+
+
+def test_trace_arclength_cubic_fold_pounce_90():
+    """Issue #90: pseudo-arclength continuation traces a cubic fold curve
+    past both turning points (where ∂x*/∂θ is singular), which parameter
+    continuation cannot. Stationarity of f = x⁴/4 − x²/2 − θx gives
+    θ = x³ − x, folds at x = ±1/√3 → θ = ∓0.3849."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        th = p[0]
+        return x[0] ** 4 / 4.0 - x[0] ** 2 / 2.0 - th * x[0]
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp)
+    tr = pf.trace_arclength(jnp.array([-1.3]), -0.4, ds=0.05, n_steps=120,
+                            direction=1.0)
+
+    assert tr.status == "ok"
+    # Two folds detected near |θ| = 1/√3·(2/3) = 0.3849.
+    assert len(tr.turning_points) == 2
+    fold_mag = sorted(abs(t) for t in tr.turning_points)
+    np.testing.assert_allclose(fold_mag, [0.3849, 0.3849], atol=5e-3)
+    # The traced curve actually satisfies stationarity θ = x³ − x.
+    resid = tr.theta - (tr.x[:, 0] ** 3 - tr.x[:, 0])
+    assert float(np.max(np.abs(resid))) < 1e-7
+    # It passes the fold: x sweeps from below −1/√3 to above +1/√3.
+    assert tr.x[:, 0].min() < -0.7 and tr.x[:, 0].max() > 0.7
+
+
+def test_jvp_from_state_with_duals_pounce_90():
+    """Issue #90: jvp_from_state(with_duals=True) returns the dual
+    sensitivity ∂λ*/∂θ·dp. For f=Σ(x−p)² s.t. x0+x1=1, λ*(p)=p0+p1−1, so
+    ∂λ/∂p=[1,1] and the dual step equals dp0+dp1."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    state, _ = jp.warm_anchor(jnp.array([0.3, 0.7]), jnp.zeros(2))
+    dp = jnp.array([0.1, -0.05])
+    dx, dlam = jp.jvp_from_state(state, dp, with_duals=True)
+    assert dx.shape == (2,) and dlam.shape == (1,)
+    np.testing.assert_allclose(np.asarray(dlam), [float(dp[0] + dp[1])], atol=1e-6)
+    # Primal-only call still returns just dx (backward compatible).
+    dx_only = jp.jvp_from_state(state, dp)
+    np.testing.assert_allclose(np.asarray(dx_only), np.asarray(dx), atol=1e-12)
+    state.close()
+
+
+def test_warm_anchor_corrector_uses_mu_pounce_90():
+    """Issue #90/#86: warm_anchor seeds μ and warm duals; a corrector
+    from a near-optimal point with the previous μ converges in fewer
+    iterations than a cold anchor."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2) + 0.05 * jnp.sum(x ** 4)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    st0, i0 = jp.warm_anchor(jnp.array([0.3, 0.7]), jnp.zeros(2))
+    duals0 = tuple(np.asarray(d[0]) for d in st0.duals)
+    # Corrector at a nearby θ from the (near-optimal) previous primal +
+    # duals + μ.
+    st1, i1 = jp.warm_anchor(
+        jnp.array([0.32, 0.68]), st0.x_star[0],
+        duals=duals0, mu=i0["mu"],
+    )
+    assert i1["status_msg"] in ("Solve_Succeeded", "Solved_To_Acceptable_Level")
+    assert i1["iter_count"] <= i0["iter_count"]
+    # The corrected point is the true optimum.
+    x_true, *_ = jp.solve_with_jacobian(jnp.array([0.32, 0.68]), jnp.zeros(2))
+    np.testing.assert_allclose(np.asarray(st1.x_star[0]), np.asarray(x_true), atol=1e-6)
+    st0.close(); st1.close()
