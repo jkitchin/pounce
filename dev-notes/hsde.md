@@ -524,10 +524,22 @@ The semidefinite cone is **self-scaled**, so unlike exp/power it lives on the
   Validated end to end on `max λ s.t. M − λI ⪰ 0 ⇒ λ_min(M)` for a diagonal
   and a non-diagonal `M` (the latter exercising the off-diagonal scaling).
 
-Remaining for PSD: Python/CBF (`DCOORD`) exposure, the dense block is `O(m²)`
-in the KKT (chordal/low-rank sparsity for large SDPs is the scaling follow-up),
-and PSD cannot currently be mixed with exp/power cones in one problem (the two
-cone families use different drivers; the mix fails cleanly).
+- **Python** — exposed via `pounce.qp.solve_socp(cones=[("psd", n)])` (the
+  value is the matrix size `n`; the slack block is `svec(X)`). The
+  PSD-with-exp/power mix raises a clear `ValueError`.
+- **Sparsity (block-diagonal)** — `decompose_psd` splits a block-diagonal
+  `Psd(n)` cone into independent PSD cones over the connected components of
+  its sparsity graph (one dense `O(m²)` KKT block → several small ones,
+  exploited by the sparse factorization). Solution-equivalent: the primal /
+  objective are unchanged and the dropped (structurally-zero) cross rows have
+  empty `G` rows, so their dual is `0`. This is the first (non-overlapping)
+  rung of chordal sparsity.
+
+Remaining for PSD: **overlapping-clique chordal decomposition** (general
+sparse — not just block-diagonal — SDPs) is the larger scaling follow-up;
+CBF `DCOORD` (read SDP instances from `.cbf`) is unexposed; and PSD cannot be
+mixed with exp/power cones in one problem (different drivers; the mix fails
+cleanly).
 
 Remaining (overall): only — if a need emerges — embedded factor-reuse for the
 non-symmetric path. The CBLIB exp- and power-cone tiers, the cross-check,
