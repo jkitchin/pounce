@@ -604,16 +604,47 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         // (`eq_mult`) drive this same solver with their own zero W block
         // and `w_factor = 0` — there is no low-rank update to apply, so
         // bypass the SMW machinery and solve directly through the inner
-        // augmented-system solver with the original coefficients.
-        // `data.w` only carries a `LowRankUpdateSymMatrix` for the main
-        // primal-dual solves (always `w_factor = 1`).
+        // augmented-system solver. `data.w` only carries a
+        // `LowRankUpdateSymMatrix` for the main primal-dual solves
+        // (always `w_factor = 1`).
         let lr_w_opt = coeffs
             .w
             .and_then(|w| w.as_any().downcast_ref::<LowRankUpdateSymMatrix>());
         let Some(lr_w) = lr_w_opt else {
-            let status = self
-                .inner
-                .solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
+            // Stable-W-structure optimization. These Hessian-free solves
+            // carry `w_factor = 0`, so their W block contributes nothing.
+            // Rather than forward the original `zero_w` — whose sparsity
+            // (the declared/empty exact-Hessian pattern) differs from the
+            // `n`-diagonal `B0` the SMW main solves feed the inner — we
+            // substitute a zero `n`-diagonal `DiagMatrix`. The inner
+            // solver then sees one unchanging triplet structure across the
+            // whole iteration and factorizes the symbolic pattern *once*,
+            // instead of re-running the symbolic analysis every time the
+            // W pattern alternates between `zero_w` and `B0`. Numerically
+            // identical (W·0 = 0); purely a performance fix.
+            let n_x = rhs.rhs_x.dim();
+            let zspace = DenseVectorSpace::new(n_x);
+            let mut zdiag = zspace.make_new_dense();
+            zdiag.set(0.0);
+            let mut zero_w = DiagMatrix::new(n_x);
+            zero_w.set_diag(Rc::new(zdiag) as Rc<dyn Vector>);
+            let stable_coeffs = AugSysCoeffs {
+                w: Some(&zero_w as &dyn SymMatrix),
+                w_factor: 0.0,
+                d_x: coeffs.d_x,
+                delta_x: coeffs.delta_x,
+                d_s: coeffs.d_s,
+                delta_s: coeffs.delta_s,
+                j_c: coeffs.j_c,
+                d_c: coeffs.d_c,
+                delta_c: coeffs.delta_c,
+                j_d: coeffs.j_d,
+                d_d: coeffs.d_d,
+                delta_d: coeffs.delta_d,
+            };
+            let status =
+                self.inner
+                    .solve(&stable_coeffs, rhs, sol, check_neg_evals, num_neg_evals);
             if self.inner.provides_inertia() {
                 self.num_neg_evals = self.inner.number_of_neg_evals();
             }
