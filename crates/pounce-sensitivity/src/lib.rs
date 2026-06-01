@@ -29,7 +29,8 @@
 //!   `full_g_to_c_block` trait methods (which delegate to
 //!   `BoundClassification.x_not_fixed_map` / `c_map`).
 //! * **Reduced-Hessian eigendecomposition** ✔ — pure-Rust cyclic Jacobi
-//!   in [`eigen::symmetric_eigen`]; surfaced via
+//!   in [`pounce_linalg::symmetric_eigen`] (shared with the convex QP
+//!   sensitivity path); surfaced via
 //!   [`SensApplication::compute_reduced_hessian_eigen`],
 //!   [`SensSolve::with_reduced_hessian_eigen`], the `pounce_sens
 //!   --rh-eigendecomp` flag, and the Python `solve_with_sens(rh_eigendecomp=True)`
@@ -66,7 +67,6 @@ pub mod algorithm_backsolver;
 pub mod backsolver;
 pub mod boundcheck;
 pub mod convenience;
-pub mod eigen;
 pub mod p_calculator;
 pub mod reduced_hessian;
 pub mod schur_data;
@@ -78,8 +78,10 @@ pub mod step_calc;
 pub use algorithm_backsolver::PdSensBacksolver;
 pub use backsolver::{DenseLuBacksolver, SensBacksolver};
 pub use convenience::{SensResult, SensSolve};
-pub use eigen::symmetric_eigen;
+// Hoisted to pounce-linalg so the convex QP sensitivity path can share it;
+// re-exported here to preserve `pounce_sensitivity::symmetric_eigen`.
 pub use p_calculator::{IndexPCalculator, PCalculator};
+pub use pounce_linalg::symmetric_eigen;
 pub use reduced_hessian::compute_reduced_hessian;
 pub use schur_data::{IndexSchurData, SchurData};
 pub use schur_driver::{DenseGenSchurDriver, SchurDriver};

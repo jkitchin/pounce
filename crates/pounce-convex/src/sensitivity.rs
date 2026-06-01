@@ -33,6 +33,7 @@
 use crate::ipm::QpOptions;
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 use pounce_common::types::{Index, Number};
+use pounce_linalg::symmetric_eigen;
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
 
@@ -58,6 +59,12 @@ pub struct QpSensitivity {
     /// KKT dimension `n + m_eq + n_active`.
     dim: usize,
     fact: Factorization,
+    /// Problem data, retained for the reduced-Hessian projection.
+    prob: QpProblem,
+    /// Active inequality rows (indices into `G`).
+    active_ineq: Vec<usize>,
+    /// Variables whose bound is active (one `eⱼᵀ` row each).
+    active_bound_vars: Vec<usize>,
 }
 
 impl QpSensitivity {
@@ -151,7 +158,15 @@ impl QpSensitivity {
         let fact = Factorization::new(dim as Index, airn, ajcn, values, make_backend())
             .map_err(|_| SensError::FactorizationFailed)?;
 
-        Ok(QpSensitivity { n, m_eq, dim, fact })
+        Ok(QpSensitivity {
+            n,
+            m_eq,
+            dim,
+            fact,
+            prob: prob.clone(),
+            active_ineq,
+            active_bound_vars,
+        })
     }
 
     /// [`build`](Self::build) with the QP's default options and an active-set
@@ -224,6 +239,143 @@ impl QpSensitivity {
     pub fn kkt_dim(&self) -> usize {
         self.dim
     }
+
+    /// Reduced Hessian of the QP at the optimum: the objective Hessian `P`
+    /// projected onto the null space of the **active constraints**
+    /// `B = [A; active G rows; active bound rows]`. If `Z` is an
+    /// orthonormal basis of `null(B)` (the feasible directions / degrees of
+    /// freedom), the reduced Hessian is `H_R = Zᵀ P Z`. Its eigenvalues are
+    /// the objective's curvatures along feasible directions: all positive
+    /// ⟺ a strict second-order minimizer (always so for a strictly convex
+    /// `P`), and their spread is the conditioning of the QP on the active
+    /// manifold. This mirrors the NLP `Solver.reduced_hessian` /
+    /// `solve_with_sens(compute_reduced_hessian=True)`.
+    ///
+    /// The basis `Z` is the null space of `B`, obtained from the
+    /// eigenvectors of `BᵀB` whose eigenvalue is below `rank_tol · λ_max`
+    /// (squared singular values; the count above the threshold is
+    /// `rank(B)`, so the degrees of freedom are `n − rank(B)`). The
+    /// computation densifies `B` and `P`, so it is `O(n³)` — intended, like
+    /// sIPOPT's reduced Hessian, for QPs with a modest number of variables
+    /// (the parametric step stays sparse and is the workhorse for large
+    /// problems).
+    pub fn reduced_hessian(&self, rank_tol: f64) -> ReducedHessian {
+        let n = self.n;
+
+        // Active Jacobian B (m_act × n), dense row-major: equality rows,
+        // then active inequality rows, then active variable-bound rows.
+        let m_act = self.m_eq + self.active_ineq.len() + self.active_bound_vars.len();
+        let mut b = vec![0.0; m_act * n];
+        for t in &self.prob.a {
+            b[t.row * n + t.col] += t.val;
+        }
+        let mut row = self.m_eq;
+        for &i in &self.active_ineq {
+            for t in self.prob.g.iter().filter(|t| t.row == i) {
+                b[row * n + t.col] += t.val;
+            }
+            row += 1;
+        }
+        for &j in &self.active_bound_vars {
+            b[row * n + j] += 1.0;
+            row += 1;
+        }
+
+        // Null space of B from the eigenvectors of BᵀB (symmetric, n×n,
+        // column-major for `symmetric_eigen`). BᵀB[a,c] = Σ_r B[r,a]·B[r,c].
+        let mut btb = vec![0.0; n * n];
+        for r in 0..m_act {
+            for a in 0..n {
+                let bra = b[r * n + a];
+                if bra == 0.0 {
+                    continue;
+                }
+                for c in 0..n {
+                    btb[a * n + c] += bra * b[r * n + c];
+                }
+            }
+        }
+        let mut sv = vec![0.0; n];
+        let mut vecs = vec![0.0; n * n];
+        symmetric_eigen(&btb, n, &mut sv, &mut vecs); // ascending eigenvalues
+
+        // rank(B) = # squared-singular-values above the relative threshold;
+        // the null space is spanned by the eigenvectors of the rest (the
+        // smallest, ≈ 0). With ascending order those are the first columns.
+        let max_sv = sv.last().copied().unwrap_or(0.0).max(0.0);
+        let thresh = rank_tol * max_sv;
+        let rank = sv.iter().filter(|&&l| l > thresh).count();
+        let n_dof = n - rank;
+
+        // Dense symmetric P (n×n) from its lower triangle.
+        let mut p = vec![0.0; n * n];
+        for t in &self.prob.p_lower {
+            p[t.row * n + t.col] += t.val;
+            if t.row != t.col {
+                p[t.col * n + t.row] += t.val;
+            }
+        }
+
+        // H_R = Zᵀ P Z, with Z = first `n_dof` columns of `vecs` (the null
+        // space). Column-major throughout: column j of Z is vecs[j*n + ·].
+        let z = |j: usize, r: usize| vecs[j * n + r];
+        // PZ (n × n_dof), column-major.
+        let mut pz = vec![0.0; n * n_dof];
+        for j in 0..n_dof {
+            for (r, pzr) in pz[j * n..(j + 1) * n].iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for c in 0..n {
+                    acc += p[r * n + c] * z(j, c);
+                }
+                *pzr = acc;
+            }
+        }
+        // H_R (n_dof × n_dof), column-major: H_R[i,j] = z_iᵀ (P z_j).
+        let mut hr = vec![0.0; n_dof * n_dof];
+        for j in 0..n_dof {
+            for i in 0..n_dof {
+                let mut acc = 0.0;
+                for r in 0..n {
+                    acc += z(i, r) * pz[j * n + r];
+                }
+                hr[j * n_dof + i] = acc;
+            }
+        }
+
+        // Eigendecompose the (small) reduced Hessian.
+        let mut eigenvalues = vec![0.0; n_dof];
+        let mut eigenvectors = vec![0.0; n_dof * n_dof];
+        symmetric_eigen(&hr, n_dof, &mut eigenvalues, &mut eigenvectors);
+
+        ReducedHessian {
+            n_dof,
+            matrix: hr,
+            eigenvalues,
+            eigenvectors,
+        }
+    }
+
+    /// [`reduced_hessian`](Self::reduced_hessian) with a relative rank
+    /// tolerance of `1e-9`.
+    pub fn reduced_hessian_default(&self) -> ReducedHessian {
+        self.reduced_hessian(1e-9)
+    }
+}
+
+/// The reduced Hessian `H_R = Zᵀ P Z` of a QP on its active manifold, with
+/// its eigendecomposition. All matrices are column-major and `n_dof × n_dof`
+/// (`n_dof` = degrees of freedom = `n − rank` of the active Jacobian).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReducedHessian {
+    /// Degrees of freedom: the dimension of every field here.
+    pub n_dof: usize,
+    /// The reduced Hessian `H_R`, column-major `n_dof × n_dof` (symmetric).
+    pub matrix: Vec<f64>,
+    /// Eigenvalues of `H_R`, ascending (length `n_dof`).
+    pub eigenvalues: Vec<f64>,
+    /// Eigenvectors, column-major `n_dof × n_dof`; column `j` pairs with
+    /// `eigenvalues[j]`.
+    pub eigenvectors: Vec<f64>,
 }
 
 #[cfg(test)]
@@ -319,5 +471,108 @@ mod tests {
             QpSensitivity::build_default(&prob, &sol, backend),
             Err(SensError::NotOptimal)
         ));
+    }
+
+    /// Unconstrained-direction reduced Hessian equals `P` itself: with no
+    /// active constraints the null space is all of ℝⁿ, so `H_R = ZᵀPZ = P`
+    /// (up to an orthonormal rotation, hence the eigenvalues match `P`).
+    /// `min ½(2x₀² + 3x₁²)` has no binding constraints; eigenvalues = {2, 3}.
+    #[test]
+    fn reduced_hessian_unconstrained_is_p() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 3.0)],
+            c: vec![0.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+        let rh = sens.reduced_hessian_default();
+        assert_eq!(rh.n_dof, 2);
+        assert!(
+            (rh.eigenvalues[0] - 2.0).abs() < 1e-9,
+            "{:?}",
+            rh.eigenvalues
+        );
+        assert!(
+            (rh.eigenvalues[1] - 3.0).abs() < 1e-9,
+            "{:?}",
+            rh.eigenvalues
+        );
+    }
+
+    /// One equality constraint removes one degree of freedom. `min ½‖x‖²`
+    /// (P = I) on the 3-D space with `x₀ + x₁ + x₂ = b` leaves a 2-D null
+    /// space; the reduced Hessian is the 2×2 identity (both curvatures = 1).
+    #[test]
+    fn reduced_hessian_drops_one_dof_per_active_constraint() {
+        let prob = QpProblem {
+            n: 3,
+            p_lower: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(1, 1, 1.0),
+                Triplet::new(2, 2, 1.0),
+            ],
+            c: vec![0.0, 0.0, 0.0],
+            a: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(0, 2, 1.0),
+            ],
+            b: vec![1.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+        let rh = sens.reduced_hessian_default();
+        assert_eq!(rh.n_dof, 2, "one equality ⇒ 2 DOF");
+        for &ev in &rh.eigenvalues {
+            assert!((ev - 1.0).abs() < 1e-9, "eig {ev}");
+        }
+    }
+
+    /// A non-identity reduced Hessian: `min ½xᵀPx` with a coupled `P` and an
+    /// equality that pins the sum, cross-checked against the hand-computed
+    /// `ZᵀPZ` for the unit null-space direction `z = (1,−1)/√2`.
+    #[test]
+    fn reduced_hessian_value_matches_hand_projection() {
+        // P = [[3, 1], [1, 2]]; constraint x₀ + x₁ = 0 ⇒ Z = (1,−1)/√2.
+        // zᵀPz = (3 − 1 − 1 + 2)/2 = 3/2.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![
+                Triplet::new(0, 0, 3.0),
+                Triplet::new(1, 0, 1.0),
+                Triplet::new(1, 1, 2.0),
+            ],
+            c: vec![0.0, 0.0],
+            a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            b: vec![0.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+        let rh = sens.reduced_hessian_default();
+        assert_eq!(rh.n_dof, 1);
+        assert!(
+            (rh.eigenvalues[0] - 1.5).abs() < 1e-9,
+            "H_R = {:?}",
+            rh.eigenvalues
+        );
+        assert!((rh.matrix[0] - 1.5).abs() < 1e-9);
     }
 }

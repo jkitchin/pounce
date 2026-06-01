@@ -22,13 +22,13 @@
 //! a synthetic dense LU.
 
 use crate::backsolver::SensBacksolver;
-use crate::eigen::symmetric_eigen;
 use crate::p_calculator::IndexPCalculator;
 use crate::reduced_hessian::compute_reduced_hessian;
 use crate::schur_data::{IndexSchurData, SchurData};
 use crate::schur_driver::{DenseGenSchurDriver, SchurDriver};
 use crate::step_calc::{SensStepCalc, StdStepCalc};
 use pounce_common::types::Number;
+use pounce_linalg::symmetric_eigen;
 
 /// User-facing entry point for sensitivity analysis on a converged
 /// pounce solve.

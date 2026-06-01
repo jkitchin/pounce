@@ -13,6 +13,9 @@ categories = ["mathematics", "science"]
 [dependencies]
 pounce-common.workspace = true
 pounce-linsol.workspace = true
+# Dense symmetric eigensolver (cyclic Jacobi) for the QP reduced Hessian,
+# shared with the NLP sensitivity path.
+pounce-linalg.workspace = true
 # Data-parallel presolve (duplicate-row hashing); already a transitive
 # workspace dependency via feral, so no new external crate is pulled in.
 rayon = "1"

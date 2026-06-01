@@ -563,6 +563,22 @@ impl PyQpSensitivity {
         Ok(dx.into_pyarray_bound(py))
     }
 
+    /// Reduced Hessian of the QP on its active manifold (`Zᵀ P Z`) with its
+    /// eigendecomposition. Returns a dict with `n_dof` (degrees of freedom),
+    /// `matrix` and `eigenvectors` (flat, column-major `n_dof × n_dof`), and
+    /// `eigenvalues` (ascending). `rank_tol` (default `1e-9`) is the relative
+    /// threshold for the rank of the active Jacobian.
+    #[pyo3(signature = (rank_tol = 1e-9))]
+    fn reduced_hessian<'py>(&self, py: Python<'py>, rank_tol: f64) -> PyResult<Bound<'py, PyDict>> {
+        let rh = self.inner.reduced_hessian(rank_tol);
+        let d = PyDict::new_bound(py);
+        d.set_item("n_dof", rh.n_dof)?;
+        d.set_item("matrix", rh.matrix.into_pyarray_bound(py))?;
+        d.set_item("eigenvalues", rh.eigenvalues.into_pyarray_bound(py))?;
+        d.set_item("eigenvectors", rh.eigenvectors.into_pyarray_bound(py))?;
+        Ok(d)
+    }
+
     /// The optimal primal solution `x*`.
     #[getter]
     fn x<'py>(&self, py: Python<'py>) -> Bound<'py, numpy::PyArray1<f64>> {

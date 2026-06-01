@@ -42,6 +42,7 @@ __all__ = [
     "QpResult",
     "QpFactorization",
     "QpSensitivity",
+    "ReducedHessian",
     "solve_qp",
     "solve_socp",
     "solve_qp_batch",
@@ -104,6 +105,38 @@ class QpResult:
     def kkt_error(self) -> Optional[float]:
         """Overall KKT error (max residual), or ``None`` for conic solves."""
         return None if self.residuals is None else self.residuals["kkt_error"]
+
+
+@dataclass
+class ReducedHessian:
+    """Reduced Hessian of a QP on its active manifold, with eigendecomposition.
+
+    Attributes
+    ----------
+    n_dof:
+        Degrees of freedom — the dimension of every array here. Equals
+        ``n`` minus the rank of the active-constraint Jacobian.
+    matrix:
+        The reduced Hessian ``H_R = Zᵀ P Z``, shape ``(n_dof, n_dof)``.
+    eigenvalues:
+        Eigenvalues of ``H_R`` in ascending order, shape ``(n_dof,)``. All
+        positive ⟺ a strict second-order minimizer; the smallest gives the
+        weakest curvature, and the spread is the conditioning on the active
+        manifold.
+    eigenvectors:
+        Eigenvectors as columns, shape ``(n_dof, n_dof)``; column ``j``
+        pairs with ``eigenvalues[j]``.
+    """
+
+    n_dof: int
+    matrix: np.ndarray
+    eigenvalues: np.ndarray
+    eigenvectors: np.ndarray
+
+    @property
+    def is_positive_definite(self) -> bool:
+        """Whether every eigenvalue is positive (strict second-order min)."""
+        return self.n_dof == 0 or bool(self.eigenvalues[0] > 0.0)
 
 
 def _coo(mat, n_cols: int, what: str):
@@ -560,3 +593,29 @@ class QpSensitivity:
         pins = [int(i) for i in pin_constraint_indices]
         ds = [float(d) for d in deltas]
         return np.asarray(self._inner.parametric_step(pins, ds))
+
+    def reduced_hessian(self, rank_tol: float = 1e-9) -> ReducedHessian:
+        """Reduced Hessian ``Zᵀ P Z`` on the active manifold + eigendecomp.
+
+        Projects the objective Hessian ``P`` onto the null space of the
+        active constraints (equalities, active inequalities, and active
+        variable bounds), then eigendecomposes it. The eigenvalues are the
+        objective's curvatures along feasible directions — all positive
+        confirms a strict (well-conditioned) minimizer. Mirrors the NLP
+        ``solve_with_sens(compute_reduced_hessian=True, rh_eigendecomp=True)``.
+
+        ``rank_tol`` is the relative threshold used to determine the rank of
+        the active Jacobian (hence the degrees of freedom). The computation
+        densifies ``P``, so it is meant for QPs with a modest variable count.
+        """
+        d = self._inner.reduced_hessian(rank_tol)
+        n = int(d["n_dof"])
+        # The Rust side returns column-major flat arrays.
+        matrix = np.asarray(d["matrix"]).reshape((n, n), order="F")
+        eigvecs = np.asarray(d["eigenvectors"]).reshape((n, n), order="F")
+        return ReducedHessian(
+            n_dof=n,
+            matrix=matrix,
+            eigenvalues=np.asarray(d["eigenvalues"]),
+            eigenvectors=eigvecs,
+        )

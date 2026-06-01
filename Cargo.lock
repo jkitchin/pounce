@@ -947,6 +947,7 @@ version = "0.3.0"
 dependencies = [
  "pounce-common",
  "pounce-feral",
+ "pounce-linalg",
  "pounce-linsol",
  "rayon",
 ]

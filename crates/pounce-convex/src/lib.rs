@@ -37,4 +37,4 @@ pub use ipm::{
     QpOptions, QpWarmStart,
 };
 pub use qp::{QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
-pub use sensitivity::{QpSensitivity, SensError};
+pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};
