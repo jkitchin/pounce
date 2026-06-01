@@ -378,9 +378,11 @@ class PathFollower:
                 continue
 
             # CORRECT: warm-μ re-solve from the predicted point, which
-            # also re-anchors the held factor for the next predictor.
+            # also re-anchors the held factor for the next predictor. Seed
+            # the duals with the *predicted* multipliers (lam_pred) — a
+            # better warm start than the pre-prediction lam.
             new_state, cinfo = jp.warm_anchor(
-                th_new, x_pred, duals=(lam, zL, zU), mu=mu,
+                th_new, x_pred, duals=(lam_pred, zL, zU), mu=mu,
             )
             if cinfo["status_msg"] not in _OK_STATUS:
                 # Back off and retry a shorter step from the same anchor.

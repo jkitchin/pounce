@@ -2050,3 +2050,75 @@ def test_inverse_map_rhs_is_jittable_pounce_91():
     eager = rhs(0.3, theta)
     jitted = jax.jit(rhs)(0.3, theta)
     np.testing.assert_allclose(np.asarray(jitted), np.asarray(eager), atol=1e-9)
+
+
+def test_pathfollower_unconstrained_follow_pounce_90():
+    """Issue #90: follow() works for an unconstrained (m=0) problem —
+    the m=0 branch of the predictor (no dual step) and the corrector."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)        # x*(θ) = θ, J = I
+
+    jp = JaxProblem(
+        f=f, g=None, n=2, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.05)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+    assert tr.status == "ok"
+    assert tr.n_correctors == 0             # predictor exact (J = I)
+    # x*(θ) = θ, so the traced primal equals the parameter path.
+    np.testing.assert_allclose(tr.x, tr.theta, atol=1e-6)
+
+
+def test_pathfollower_max_steps_status_pounce_90():
+    """Issue #90: hitting the step cap before s1 reports status
+    'max_steps' and a partial trace."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -5.0), ub=jnp.full(2, 5.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp, ds0=0.05, max_steps=2)
+    tr = pf.follow(_circle_theta, (0.0, 1.0), jnp.zeros(2))
+    assert tr.status == "max_steps"
+    assert tr.n_steps == 2
+    assert tr.s[-1] < 1.0
+
+
+def test_pathfollower_corrector_failed_status_pounce_90():
+    """Issue #90: a step into an infeasible region whose corrector can't
+    converge backs off to ds_min and reports 'corrector_failed'."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    # Equality x0 = θ0 with x0 ≤ 1 → infeasible once θ0 > 1.
+    def g(x, p):
+        return jnp.stack([x[0] - p[0]])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -5.0), ub=jnp.array([1.0, 5.0]),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-9, "print_level": 0, "sb": "yes"},
+    )
+
+    def theta(s):                       # θ0: 0.5 (feasible) → 2.5 (infeasible)
+        return jnp.array([0.5 + 2.0 * s, 0.0])
+
+    # ds_min high + shrink so the first failed corrector trips the floor.
+    pf = PathFollower(jp, monitor_tol=1e-6, ds0=0.5, ds_min=0.4, shrink=0.5)
+    tr = pf.follow(theta, (0.0, 1.0), jnp.zeros(2))
+    assert tr.status == "corrector_failed"

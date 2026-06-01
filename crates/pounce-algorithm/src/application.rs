@@ -1238,11 +1238,14 @@ impl IpoptApplication {
         // Drain counters / iter count off the algorithm.
         {
             let mut stats = self.statistics.borrow_mut();
-            stats.iteration_count = alg.data.borrow().iter_count;
-            // Converged barrier parameter μ — threaded forward into a
-            // warm-started corrector's `mu_init` / `warm_start_target_mu`
-            // for predictor–corrector path following (pounce#86).
-            stats.final_mu = alg.data.borrow().curr_mu;
+            {
+                let d = alg.data.borrow();
+                stats.iteration_count = d.iter_count;
+                // Converged barrier parameter μ — threaded forward into a
+                // warm-started corrector's `mu_init` / `warm_start_target_mu`
+                // for predictor–corrector path following (pounce#86).
+                stats.final_mu = d.curr_mu;
+            }
             stats.total_wallclock_time_secs = t_start.elapsed().as_secs_f64();
             // Restoration-phase audit counters (pounce#12). Zero on
             // problems where restoration never fires; populated by
