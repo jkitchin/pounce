@@ -396,6 +396,51 @@ Problems are cached per (thread, B) in a tiny LRU (cap 4), so
 calls in a loop with one or two batch sizes pay the build cost at
 most once per worker.
 
+### Post-solve Jacobian and sensitivities (`batched_solve_with_jacobian`)
+
+When you need the explicit per-block Jacobian `J[k] = ∂x^(k)*/∂p^(k)`
+as a first-class result — for validation, linear-update layers, or
+diagnostics — `batched_solve_with_jacobian` returns it directly from
+the held KKT factor instead of wrapping `batched_solve` in
+`jax.jacrev`:
+
+```python
+x_star, (lam, zL, zU), J = jp.batched_solve_with_jacobian(p_batch, x0)
+# x_star : (B, n)   J : (B, n, p_dim)   duals match batched_solve_with_warm
+```
+
+`J`'s row `i` is the reverse-mode VJP at cotangent `e_i` (the KKT
+system is symmetric), so the whole Jacobian is one multi-RHS back-solve
+against the held LDLᵀ factor — no NLP re-solve, no repeated public
+`jax.vjp` calls. Pass `wrt_cols` (1-D `p` only) to keep just the
+parameter columns you care about, e.g. `wrt_cols=slice(0, ny)` to drop
+context columns; `J` then has trailing dim `len(wrt_cols)`.
+
+For the linear-update pattern — anchor once, then apply several nearby
+sensitivity products — pin the factor with an `AnchorState` and reuse it:
+
+```python
+with jp.anchor(p_batch, x0, wrt_cols=slice(0, ny)) as state:
+    dp_bar = jp.batched_vjp_from_state(state, x_bar)   # J^T @ x_bar
+```
+
+`anchor(...)` (and `batched_solve_with_jacobian(..., return_state=True)`)
+return an `AnchorState` that holds the factor across calls. Prefer the
+context-manager form; for handles that must outlive a single block
+(e.g. stored on a projection layer), use explicit ownership:
+
+```python
+state = jp.anchor(p_batch, x0)
+...                          # later calls reuse `state`
+state.reanchor(p_new, x0)    # swap the solve in place (closes prior pin)
+state.close()                # release the held factor
+```
+
+Pinned factors are exempt from the backward LRU but capped
+(`_pinned_capacity`, default 16) so a missed `close()` fails loudly
+rather than leaking; a `weakref` finalizer reclaims the factor if a
+handle is garbage-collected without `close()`.
+
 ## Notebooks
 
 The notebooks under

@@ -1113,3 +1113,254 @@ def test_batched_solve_with_warm_warm_inputs_are_stop_gradient_pounce_78():
     for arr, name in [(g_x0, "x0"), (g_lam, "lam_warm"),
                        (g_zL, "zL_warm"), (g_zU, "zU_warm")]:
         np.testing.assert_array_equal(np.asarray(arr), np.zeros_like(np.asarray(arr)))
+
+
+# --------------------------------------------------------------------------
+# pounce#82: post-solve Jacobian / sensitivity API from the held KKT factor
+# --------------------------------------------------------------------------
+
+
+def _build_jac_qp(reuse=True, bounded=False):
+    """min ||x - p||² s.t. x[0] + x[1] = 1, optionally with a binding
+    upper bound (to exercise the zU multiplier block)."""
+    from pounce.jax import JaxProblem
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([x[0] + x[1] - 1.0])
+
+    ub = jnp.array([0.2, 10.0]) if bounded else jnp.full(2, 10.0)
+    return JaxProblem(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=ub,
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+        factor_reuse=reuse,
+    )
+
+
+def _jacrev_block_diag(jp, p_batch, x0):
+    """Reference per-block Jacobian via jax.jacrev over batched_solve."""
+    J_full = jax.jacrev(lambda P: jp.batched_solve(P, x0))(p_batch)
+    B = p_batch.shape[0]
+    return jnp.stack([J_full[k, :, k, :] for k in range(B)])
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+@pytest.mark.parametrize("reuse", [True, False])
+def test_batched_solve_with_jacobian_matches_jacrev_pounce_82(bounded, reuse):
+    """Issue #82: the full Jacobian from the held factor must equal
+    ``jax.jacrev`` over ``batched_solve`` (the KKT system is symmetric,
+    so J's row i is the VJP at cotangent e_i). Covers a binding upper
+    bound (zU block participates) and both ``factor_reuse`` settings —
+    the anchor path forces a held factor regardless."""
+    jp = _build_jac_qp(reuse=reuse, bounded=bounded)
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5], [-0.1, 0.4]])
+    x0 = jnp.zeros(2)
+
+    x_star, (lam, zL, zU), J = jp.batched_solve_with_jacobian(p_batch, x0)
+
+    # Forward agrees with batched_solve.
+    np.testing.assert_allclose(
+        np.asarray(x_star), np.asarray(jp.batched_solve(p_batch, x0)), atol=1e-9
+    )
+    # Jacobian agrees with jacrev.
+    Jref = _jacrev_block_diag(jp, p_batch, x0)
+    np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+    # Duals have the documented shapes.
+    assert lam.shape == (3, 1)
+    assert zL.shape == (3, 2)
+    assert zU.shape == (3, 2)
+
+
+def test_batched_solve_with_jacobian_wrt_cols_pounce_82():
+    """Issue #82: ``wrt_cols`` selects parameter columns and matches the
+    corresponding slice of the full Jacobian."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    _, _, J = jp.batched_solve_with_jacobian(p_batch, x0)
+    _, _, J0 = jp.batched_solve_with_jacobian(p_batch, x0, wrt_cols=slice(0, 1))
+    assert J0.shape == (2, 2, 1)
+    np.testing.assert_allclose(np.asarray(J0), np.asarray(J[..., :1]), atol=1e-12)
+
+    # Index-array form selects the same column.
+    _, _, Jidx = jp.batched_solve_with_jacobian(p_batch, x0, wrt_cols=[0])
+    np.testing.assert_allclose(np.asarray(Jidx), np.asarray(J0), atol=1e-12)
+
+
+def test_batched_vjp_from_state_matches_jax_vjp_pounce_82():
+    """Issue #82: ``batched_vjp_from_state`` equals ``jax.vjp`` over
+    ``batched_solve`` (J^T @ x_bar), and equals J^T @ x_bar from the
+    materialised Jacobian."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5], [-0.1, 0.4]])
+    x0 = jnp.zeros(2)
+    x_bar = jnp.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]])
+
+    x_star, duals, J, state = jp.batched_solve_with_jacobian(
+        p_batch, x0, return_state=True
+    )
+    try:
+        dp = jp.batched_vjp_from_state(state, x_bar)
+
+        _, vjp_fn = jax.vjp(lambda P: jp.batched_solve(P, x0), p_batch)
+        dp_ref = vjp_fn(x_bar)[0]
+        np.testing.assert_allclose(np.asarray(dp), np.asarray(dp_ref), atol=1e-6)
+
+        dp_fromJ = jnp.einsum("knp,kn->kp", J, x_bar)
+        np.testing.assert_allclose(np.asarray(dp), np.asarray(dp_fromJ), atol=1e-9)
+    finally:
+        state.close()
+
+
+def test_vjp_from_state_respects_wrt_cols_pounce_82():
+    """Issue #82: a state anchored with ``wrt_cols`` returns the reduced
+    parameter cotangent from ``batched_vjp_from_state``."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+    x_bar = jnp.array([[1.0, 0.0], [0.0, 1.0]])
+
+    with jp.anchor(p_batch, x0, wrt_cols=slice(0, 1)) as state:
+        dp = jp.batched_vjp_from_state(state, x_bar)
+    assert dp.shape == (2, 1)
+
+    with jp.anchor(p_batch, x0) as state_full:
+        dp_full = jp.batched_vjp_from_state(state_full, x_bar)
+    np.testing.assert_allclose(np.asarray(dp), np.asarray(dp_full[..., :1]), atol=1e-9)
+
+
+def test_jacobian_duals_match_batched_solve_with_warm_pounce_82():
+    """Issue #82: the (lam, zL, zU) contract matches
+    ``batched_solve_with_warm`` on the same problem."""
+    jp = _build_jac_qp(bounded=True)
+    p_batch = jnp.array([[0.3, 0.7], [0.9, 0.1]])
+    x0 = jnp.zeros(2)
+
+    _, (lam, zL, zU) = jp.batched_solve_with_warm(p_batch, x0)
+    _, (lam2, zL2, zU2), _J = jp.batched_solve_with_jacobian(p_batch, x0)
+    np.testing.assert_allclose(np.asarray(lam2), np.asarray(lam), atol=1e-7)
+    np.testing.assert_allclose(np.asarray(zL2), np.asarray(zL), atol=1e-7)
+    np.testing.assert_allclose(np.asarray(zU2), np.asarray(zU), atol=1e-7)
+
+
+def test_anchor_lifetime_context_manager_pounce_82():
+    """Issue #82: context manager releases the pinned factor on exit."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    with jp.anchor(p_batch, x0) as state:
+        assert not state.closed
+        assert len(jp._pinned_solvers) == 1
+    assert state.closed
+    assert len(jp._pinned_solvers) == 0
+
+
+def test_anchor_explicit_close_idempotent_and_raises_when_closed_pounce_82():
+    """Issue #82: explicit close frees the pin, is idempotent, and a
+    from-state op on a closed handle raises."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+    x_bar = jnp.zeros((2, 2))
+
+    state = jp.anchor(p_batch, x0)
+    assert len(jp._pinned_solvers) == 1
+    state.close()
+    assert len(jp._pinned_solvers) == 0
+    state.close()  # idempotent
+    assert state.closed
+    with pytest.raises(RuntimeError, match="closed"):
+        jp.batched_vjp_from_state(state, x_bar)
+
+
+def test_anchor_survives_beyond_lru_capacity_pounce_82():
+    """Issue #82 core requirement: a pinned anchor outlives LRU eviction.
+    With the LRU bounded at 1, many intervening batched_solve calls would
+    evict an ordinary cached factor — the pinned one must remain usable."""
+    jp = _build_jac_qp()
+    jp._solver_registry_capacity = 1  # force aggressive LRU eviction
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+    x_bar = jnp.array([[1.0, 0.0], [0.0, 1.0]])
+
+    with jp.anchor(p_batch, x0) as state:
+        # Hammer the LRU with unrelated forward+backward solves.
+        for _ in range(5):
+            jax.grad(lambda P: jnp.sum(jp.batched_solve(P, x0) ** 2))(p_batch)
+        # The pinned factor is still resolvable.
+        dp = jp.batched_vjp_from_state(state, x_bar)
+        _, vjp_fn = jax.vjp(lambda P: jp.batched_solve(P, x0), p_batch)
+        np.testing.assert_allclose(
+            np.asarray(dp), np.asarray(vjp_fn(x_bar)[0]), atol=1e-6
+        )
+
+
+def test_anchor_gc_finalizer_reclaims_pounce_82():
+    """Issue #82: dropping a handle without close() still reclaims the
+    pinned factor via the weakref finalizer."""
+    import gc
+
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    state = jp.anchor(p_batch, x0)
+    assert len(jp._pinned_solvers) == 1
+    del state
+    gc.collect()
+    assert len(jp._pinned_solvers) == 0
+
+
+def test_anchor_reanchor_swaps_without_leak_pounce_82():
+    """Issue #82: reanchor closes the prior pin before taking a new one,
+    so the pinned count stays at 1 (no overwrite leak)."""
+    jp = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    state = jp.anchor(p_batch, x0)
+    sid1 = state.sid
+    state.reanchor(p_batch * 1.1, x0)
+    assert state.sid != sid1
+    assert len(jp._pinned_solvers) == 1
+    state.close()
+    assert len(jp._pinned_solvers) == 0
+
+
+def test_anchor_capacity_raises_loudly_pounce_82():
+    """Issue #82: exceeding the pinned-handle cap raises rather than
+    growing unbounded, and does not leak a factor on the failed call."""
+    jp = _build_jac_qp()
+    jp._pinned_capacity = 3
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    states = [jp.anchor(p_batch, x0) for _ in range(3)]
+    try:
+        assert len(jp._pinned_solvers) == 3
+        with pytest.raises(RuntimeError, match="too many live anchored"):
+            jp.anchor(p_batch, x0)
+        # Failed anchor did not add a pin.
+        assert len(jp._pinned_solvers) == 3
+    finally:
+        for s in states:
+            s.close()
+    assert len(jp._pinned_solvers) == 0
+
+
+def test_vjp_from_state_rejects_foreign_state_pounce_82():
+    """Issue #82: a state from one JaxProblem can't be used with another."""
+    jp1 = _build_jac_qp()
+    jp2 = _build_jac_qp()
+    p_batch = jnp.array([[0.3, 0.7], [0.5, 0.5]])
+    x0 = jnp.zeros(2)
+
+    with jp1.anchor(p_batch, x0) as state:
+        with pytest.raises(ValueError, match="different"):
+            jp2.batched_vjp_from_state(state, jnp.zeros((2, 2)))

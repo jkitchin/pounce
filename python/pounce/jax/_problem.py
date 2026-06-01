@@ -54,6 +54,7 @@ from __future__ import annotations
 import itertools
 import threading
 import warnings
+import weakref
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -778,6 +779,118 @@ def _bwd_single_kkt(
     return dL_dp
 
 
+class AnchorState:
+    """Caller-owned handle to a held FERAL stacked KKT factor (pounce#82).
+
+    Returned by :meth:`JaxProblem.anchor` and (with ``return_state=True``)
+    :meth:`JaxProblem.batched_solve_with_jacobian`. Pins the converged
+    stacked LDLᵀ factor so several post-solve sensitivity calls
+    (:meth:`JaxProblem.batched_vjp_from_state` and, once landed, the
+    JVP-from-state forward path) reuse one factorisation without a
+    re-solve and without risking LRU eviction between calls.
+
+    Lifetime. The factor is held until :meth:`close` (or, as a safety
+    net, until the handle is garbage-collected — a :func:`weakref.finalize`
+    releases the pin). Prefer the context-manager form, which closes
+    deterministically on block exit::
+
+        with jp.anchor(p_batch, x0) as state:
+            dp_bar = jp.batched_vjp_from_state(state, x_bar)
+
+    The explicit form is for the cross-call case where the handle must
+    outlive a single lexical block (e.g. stored on a projection layer
+    across several user-level calls)::
+
+        state = jp.anchor(p_batch, x0)
+        ...                                   # later calls reuse `state`
+        state.close()                         # on re-anchor / reset
+
+    Re-anchoring by overwrite (``self.state = jp.anchor(...)``) without
+    closing the prior handle would leak its factor; use :meth:`reanchor`
+    to swap the underlying solve in place, which closes the old pin
+    first.
+    """
+
+    __slots__ = (
+        "_jp", "_sid", "_B", "_p_batch", "_x_star", "_lam",
+        "_duals", "_wrt_cols", "_finalize", "__weakref__",
+    )
+
+    def __init__(self, jp, sid, B, p_batch, x_star, lam, duals, wrt_cols):
+        self._jp = jp
+        self._sid = sid
+        self._B = B
+        self._p_batch = p_batch
+        self._x_star = x_star
+        self._lam = lam
+        self._duals = duals
+        self._wrt_cols = wrt_cols
+        # Reclaim the pin if the handle is dropped without close(). The
+        # finalizer must not close over `self` (that would keep it
+        # alive), so it captures only (jp, sid).
+        self._finalize = weakref.finalize(self, jp._release_pinned, sid)
+
+    @property
+    def sid(self) -> int:
+        """Integer id of the held factor in the pinned registry."""
+        return self._sid
+
+    @property
+    def x_star(self):
+        """Primal solution ``(B, n)`` captured at anchor time."""
+        return self._x_star
+
+    @property
+    def duals(self):
+        """``(lam, zL, zU)`` captured at anchor time."""
+        return self._duals
+
+    @property
+    def closed(self) -> bool:
+        """Whether the held factor has been released."""
+        return not self._finalize.alive
+
+    def _check_open(self) -> None:
+        if self.closed:
+            raise RuntimeError(
+                "pounce.jax: AnchorState is closed; its held factor has "
+                "been released. Re-anchor with jp.anchor(...) / "
+                "jp.batched_solve_with_jacobian(..., return_state=True)."
+            )
+
+    def close(self) -> None:
+        """Release the held factor. Idempotent; safe to call repeatedly
+        and via the context manager."""
+        # finalize() runs the release exactly once and then reports
+        # ``alive == False`` — so this is naturally idempotent.
+        self._finalize()
+
+    def reanchor(self, p_batch, x0) -> "AnchorState":
+        """Swap the held factor to a fresh solve in place, closing the
+        prior pin first. Avoids the overwrite-leak trap when an anchor is
+        stored on a long-lived object and periodically re-solved.
+        Returns ``self`` for chaining."""
+        self.close()
+        x_star, duals, sid, (pb, xs, lam) = self._jp._anchor_forward(
+            p_batch, x0,
+        )
+        self._sid = sid
+        self._p_batch, self._x_star, self._lam = pb, xs, lam
+        self._duals = duals
+        self._finalize = weakref.finalize(self, self._jp._release_pinned, sid)
+        return self
+
+    def __enter__(self) -> "AnchorState":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        state = "closed" if self.closed else f"open sid={self._sid}"
+        return f"AnchorState(B={self._B}, {state})"
+
+
 class JaxProblem:
     """Reusable, differentiable parametric solve (pounce#75).
 
@@ -1067,6 +1180,19 @@ class JaxProblem:
         pinning.
         """
         self._solver_registry: "OrderedDict[int, Solver]" = OrderedDict()
+        # Pinned registry for caller-owned :class:`AnchorState` handles
+        # (pounce#82). Unlike ``_solver_registry``, entries here are
+        # *exempt from LRU eviction* — they survive across arbitrarily
+        # many post-solve sensitivity calls until the owning handle is
+        # ``close()``d (or GC-reclaimed via its weakref finalizer). The
+        # ownership inversion (caller holds lifetime, not the bounded
+        # cache) means a missed close would leak the held factor, so the
+        # count is capped at ``_pinned_capacity`` and overflow raises
+        # loudly rather than growing without bound. Shares the integer
+        # id space with ``_solver_registry`` (same counter) so a single
+        # ``_lookup_solver`` resolves either.
+        self._pinned_solvers: dict[int, Solver] = {}
+        self._pinned_capacity = 16
         self._solver_id_counter = itertools.count(1)
         # Lock guards concurrent register/lookup against
         # vmap_solve_parallel worker threads.
@@ -1074,9 +1200,10 @@ class JaxProblem:
         # Per-thread (obj, Problem) cache. Built lazily on first solve
         # from the calling thread.
         self._tls = threading.local()
+        self._factor_thread_prefix = f"pounce-jp-factor-{id(self)}"
         self._factor_executor = ThreadPoolExecutor(
             max_workers=1,
-            thread_name_prefix=f"pounce-jp-factor-{id(self)}",
+            thread_name_prefix=self._factor_thread_prefix,
         )
 
     # Attributes that don't survive a process boundary: drop on
@@ -1085,7 +1212,7 @@ class JaxProblem:
     _PICKLE_DROP = (
         "_f_jit", "_grad_f_jit", "_g_jit", "_jac_g_jit", "_hess_lag_jit",
         "_registry_lock", "_tls", "_factor_executor",
-        "_solver_registry", "_solver_id_counter",
+        "_solver_registry", "_pinned_solvers", "_solver_id_counter",
     )
 
     def __getstate__(self):
@@ -1262,12 +1389,82 @@ class JaxProblem:
 
     def _lookup_solver(self, sid: int) -> Solver | None:
         """LRU-touching lookup. Refreshes the entry's recency so an
-        actively used factor doesn't get evicted while still in use."""
+        actively used factor doesn't get evicted while still in use.
+
+        Falls back to the pinned registry (pounce#82) so a back-solve
+        driven from a caller-owned :class:`AnchorState` resolves the
+        same way as one driven from a ``custom_vjp`` residual."""
         with self._registry_lock:
             s = self._solver_registry.get(sid)
             if s is not None:
                 self._solver_registry.move_to_end(sid)
-            return s
+                return s
+            return self._pinned_solvers.get(sid)
+
+    def _check_pinned_capacity(self) -> None:
+        """Raise if the pinned registry is full (pounce#82). Called as a
+        pre-check *before* the anchor solve so we never build a factor
+        only to reject it — building then raising would strand the
+        unsendable Solver on the executor thread's frame and drop it on
+        the caller's thread when the traceback is collected. A missed
+        ``close()`` should fail loudly rather than leak factors unbounded
+        in a long loop."""
+        with self._registry_lock:
+            if len(self._pinned_solvers) >= self._pinned_capacity:
+                raise RuntimeError(
+                    "pounce.jax: too many live anchored factors "
+                    f"({len(self._pinned_solvers)} >= "
+                    f"{self._pinned_capacity}). An AnchorState was likely "
+                    "re-anchored or dropped without close(); use a `with "
+                    "jp.anchor(...) as state:` block, call state.close() "
+                    "when done, or raise jp._pinned_capacity if you truly "
+                    "need this many simultaneous anchors."
+                )
+
+    def _register_pinned_solver(self, solver: Solver) -> int:
+        """Pin a converged Solver for a caller-owned :class:`AnchorState`
+        (pounce#82). Returns a unique integer id, shared with the LRU id
+        space. The entry is exempt from LRU eviction and only dropped by
+        :meth:`_release_pinned`. Runs inside :meth:`_run_pinned` so the
+        unsendable Solver stays on its creating thread. Capacity is
+        enforced by :meth:`_check_pinned_capacity` before the solve."""
+        with self._registry_lock:
+            sid = next(self._solver_id_counter)
+            self._pinned_solvers[sid] = solver
+        return sid
+
+    def _release_pinned(self, sid: int) -> None:
+        """Drop a pinned factor (see :meth:`_register_pinned_solver`).
+        The Rust ``Rc`` frees the factor when this last reference drops.
+        Idempotent: releasing an already-gone id is a no-op.
+
+        The held :class:`pounce.Solver` is ``#[pyclass(unsendable)]`` and
+        must be *dropped on the thread that built it* — the factor
+        executor (same constraint LRU eviction satisfies by running
+        inside :meth:`_run_pinned`). So the ``pop`` (and the decref/drop
+        of the popped Solver) is routed onto the executor thread. Handles
+        two edge cases the weakref finalizer can hit:
+
+        * re-entrancy — if a GC-triggered finalizer fires while we are
+          already on the executor thread, run inline rather than
+          deadlocking on the single worker;
+        * interpreter teardown — if the executor is already shut down,
+          a leaked pin is moot, so swallow the failure.
+        """
+        def _drop():
+            with self._registry_lock:
+                # Bare statement: the popped Solver (if any) is decref'd
+                # here, on this thread.
+                self._pinned_solvers.pop(sid, None)
+
+        if threading.current_thread().name.startswith(self._factor_thread_prefix):
+            _drop()
+            return
+        try:
+            self._factor_executor.submit(_drop).result()
+        except RuntimeError:
+            # Executor already shut down (interpreter teardown).
+            pass
 
     def clear_solver_cache(self) -> None:
         """Drop all cached IPM factors held for backward passes.
@@ -1362,7 +1559,13 @@ class JaxProblem:
         info_out["solver_id"] = sid
         return x_np, info_out
 
-    def _host_batched_solve(self, p_batch_np: np.ndarray, x0_batch_np: np.ndarray):
+    def _host_batched_solve(
+        self,
+        p_batch_np: np.ndarray,
+        x0_batch_np: np.ndarray,
+        *,
+        pin: bool = False,
+    ):
         """Forward solve for the stacked block-diagonal problem
         (pounce#76 (A), composes with (B) when ``factor_reuse=True``).
 
@@ -1388,14 +1591,23 @@ class JaxProblem:
         # Initial X is the per-block ``x0`` tiled / concatenated.
         X0 = np.asarray(x0_batch_np, dtype=np.float64).reshape(B * n)
 
-        do_register = self._factor_reuse
+        # ``pin=True`` (pounce#82 anchor path) always holds the factor in
+        # the eviction-exempt pinned registry, regardless of
+        # ``factor_reuse`` — the whole point of an anchor is to reuse the
+        # held factor for post-solve sensitivities.
+        do_register = self._factor_reuse or pin
 
         def _do():
             obj, prob = self._thread_stacked_problem(B)
             obj._P = jnp.asarray(p_batch_np)
             solver = Solver(prob)
             X_np, info = solver.solve(x0=X0)
-            sid = self._register_solver(solver) if do_register else 0
+            if not do_register:
+                sid = 0
+            elif pin:
+                sid = self._register_pinned_solver(solver)
+            else:
+                sid = self._register_solver(solver)
             return X_np, info, sid
 
         # Pin every batched_solve dispatch (pounce#77) — TLS cache
@@ -1635,6 +1847,181 @@ class JaxProblem:
             p_batch, x0_arr, lam_warm, zL_warm, zU_warm,
         )
         return x_star, (lam_out, zL_out, zU_out)
+
+    # ----- post-solve Jacobian / sensitivity API (pounce#82) -----
+
+    def _normalize_cols(self, wrt_cols):
+        """Resolve a ``wrt_cols`` selector into either ``None`` (full
+        parameter space) or a 1-D int index array over the (flat)
+        parameter axis. Column selection is only defined for 1-D ``p``;
+        a multi-axis ``p`` with ``wrt_cols`` is rejected rather than
+        guessed at."""
+        if wrt_cols is None:
+            return None
+        if len(self._p_shape) != 1:
+            raise ValueError(
+                "pounce.jax: wrt_cols is only supported for 1-D p "
+                f"(got p_shape={self._p_shape}). Pass wrt_cols=None and "
+                "slice the returned Jacobian yourself."
+            )
+        p_dim = self._p_shape[0]
+        idx = np.arange(p_dim)[wrt_cols] if isinstance(wrt_cols, slice) \
+            else np.asarray(wrt_cols, dtype=np.int64)
+        return jnp.asarray(np.atleast_1d(idx))
+
+    def _anchor_forward(self, p_batch, x0):
+        """Run the stacked forward and pin the converged factor
+        (pounce#82). Returns ``(x_star, (lam, zL, zU), sid, residuals)``
+        where ``residuals = (p_batch, x_star, lam)`` are the jnp arrays
+        the from-state back-solves contract against."""
+        # Pre-check before solving so a full registry never strands a
+        # freshly built (unsendable) factor on the wrong thread.
+        self._check_pinned_capacity()
+        p_arr = jnp.asarray(p_batch, dtype=jnp.float64)
+        B = p_arr.shape[0]
+        x0_arr = jnp.asarray(x0, dtype=jnp.float64)
+        if x0_arr.ndim == 1:
+            x0_arr = jnp.broadcast_to(x0_arr, (B, self._n))
+        x_batch, lam_batch, mxL_batch, mxU_batch, sid = self._host_batched_solve(
+            np.asarray(p_arr), np.asarray(x0_arr), pin=True,
+        )
+        x_star = jnp.asarray(x_batch)
+        lam = jnp.asarray(lam_batch)
+        duals = (lam, jnp.asarray(mxL_batch), jnp.asarray(mxU_batch))
+        return x_star, duals, sid, (p_arr, x_star, lam)
+
+    def _slice_cols(self, arr, cols):
+        """Slice the trailing parameter axis of a sensitivity array by a
+        resolved ``cols`` index array (no-op when ``cols is None``)."""
+        if cols is None:
+            return arr
+        return jnp.take(arr, cols, axis=-1)
+
+    def anchor(self, p_batch, x0, *, wrt_cols=None) -> AnchorState:
+        """Solve once and pin the held FERAL stacked KKT factor for
+        reuse across post-solve sensitivity calls (pounce#82).
+
+        Unlike :meth:`batched_solve_with_jacobian`, this does *not*
+        materialise the full Jacobian — it is the lightweight entry point
+        for the linear-update pattern where you only need products
+        against the held factor (e.g. :meth:`batched_vjp_from_state`).
+
+        Returns an :class:`AnchorState` handle. Prefer the context
+        manager (``with jp.anchor(...) as state:``); see
+        :class:`AnchorState` for the explicit-lifetime form.
+
+        ``wrt_cols`` (1-D ``p`` only) restricts the parameter space of
+        subsequent from-state products to the selected columns, e.g.
+        ``slice(0, ny)`` to keep only the predicted block and drop
+        context columns.
+        """
+        cols = self._normalize_cols(wrt_cols)
+        x_star, duals, sid, (pb, xs, lam) = self._anchor_forward(p_batch, x0)
+        return AnchorState(self, sid, pb.shape[0], pb, xs, lam, duals, cols)
+
+    def batched_solve_with_jacobian(
+        self,
+        p_batch,
+        x0,
+        *,
+        wrt_cols=None,
+        return_state=False,
+    ):
+        """Solve the stacked batch and return the full primal Jacobian
+        from the held FERAL KKT factor (pounce#82).
+
+        Computes ``J[k] = ∂x^(k)*/∂p^(k)`` for every block by reusing the
+        held stacked LDLᵀ factor: the Jacobian's row ``i`` is exactly the
+        reverse-mode VJP with cotangent ``e_i`` (the KKT system is
+        symmetric), so ``J`` is the existing factor-reuse backward
+        (:func:`_bwd_batched_factor_reuse`) evaluated over the ``n×n``
+        identity output basis — packed into one multi-RHS back-solve via
+        ``Solver.kkt_solve_many`` rather than an NLP re-solve or repeated
+        public ``jax.vjp`` calls.
+
+        Parameters
+        ----------
+        p_batch : ``(B,) + p_shape``
+        x0 : ``(n,)`` or ``(B, n)``
+        wrt_cols : slice / index array / None
+            Parameter columns to keep (1-D ``p`` only). ``optlayer``
+            passes ``slice(0, ny)`` to keep only the predicted block. When
+            given, ``J`` has trailing dim ``len(wrt_cols)`` instead of
+            ``p_dim``; when ``None`` the full ``p`` axis is returned.
+        return_state : bool
+            If True, also pin the factor and return an
+            :class:`AnchorState` for follow-up from-state products.
+
+        Returns
+        -------
+        ``(x_star, (lam, zL, zU), J)`` or, if ``return_state``,
+        ``(x_star, (lam, zL, zU), J, state)``.
+
+        * ``x_star`` : ``(B, n)``
+        * duals : ``(lam (B, m), zL (B, n), zU (B, n))`` — same contract
+          as :meth:`batched_solve_with_warm`.
+        * ``J`` : ``(B, n, p_dim)`` (or ``(B, n, len(wrt_cols))``).
+        """
+        f, g, n, m = self._f, self._g, self._n, self._m
+        cols = self._normalize_cols(wrt_cols)
+        # Always pin for the duration of the Jacobian build so the
+        # back-solve resolves regardless of ``factor_reuse``; if the
+        # caller does not want the handle, release the pin before
+        # returning.
+        x_star, duals, sid, (p_arr, xs, lam) = self._anchor_forward(p_batch, x0)
+        B = p_arr.shape[0]
+
+        # J[:, i, :] = (e_i)^T J = VJP at cotangent e_i (broadcast over
+        # blocks). vmapping the held-factor backward over the identity
+        # output basis packs all n directions into one kkt_solve_many.
+        basis = jnp.eye(n, dtype=jnp.float64)
+
+        def jac_row(e_i):
+            v = jnp.broadcast_to(e_i, (B, n))
+            return _bwd_batched_factor_reuse(
+                f, g, n, m, self, B, p_arr, xs, lam, sid, v,
+            )
+
+        J_rows = jax.vmap(jac_row)(basis)          # (n, B, p_dim)
+        J = jnp.transpose(J_rows, (1, 0, 2))        # (B, n, p_dim)
+        J = self._slice_cols(J, cols)
+
+        if return_state:
+            state = AnchorState(self, sid, B, p_arr, xs, lam, duals, cols)
+            return x_star, duals, J, state
+        self._release_pinned(sid)
+        return x_star, duals, J
+
+    def batched_vjp_from_state(self, state: AnchorState, x_bar_batch):
+        """Vector-Jacobian product ``J^T @ x_bar`` against a held factor
+        (pounce#82). Public form of the reverse-mode path the
+        ``custom_vjp`` backward already uses internally — one multi-RHS
+        back-solve against the pinned LDLᵀ factor, no NLP re-solve.
+
+        Parameters
+        ----------
+        state : AnchorState
+        x_bar_batch : ``(B, n)``
+            Output-space cotangent per block.
+
+        Returns
+        -------
+        ``(B, p_dim)`` (or ``(B, len(wrt_cols))`` if the state was
+        anchored with ``wrt_cols``) — the parameter-space cotangent.
+        """
+        if state._jp is not self:
+            raise ValueError(
+                "pounce.jax: AnchorState belongs to a different "
+                "JaxProblem."
+            )
+        state._check_open()
+        f, g, n, m = self._f, self._g, self._n, self._m
+        x_bar = jnp.asarray(x_bar_batch, dtype=jnp.float64).reshape(state._B, n)
+        dp = _bwd_batched_factor_reuse(
+            f, g, n, m, self, state._B,
+            state._p_batch, state._x_star, state._lam, state._sid, x_bar,
+        )
+        return self._slice_cols(dp, state._wrt_cols)
 
     # ----- custom_vjp factories -----
 
