@@ -9,6 +9,48 @@ changes.
 
 ## Unreleased
 
+### Added — Post-solve Jacobian / sensitivity API from the held KKT factor (pounce#82)
+
+`JaxProblem` now exposes a first-class post-solve sensitivity surface
+that reuses the held FERAL stacked KKT factor instead of round-tripping
+through `jax.vjp` / `jax.jacrev`:
+
+```python
+x_star, (lam, zL, zU), J, state = jp.batched_solve_with_jacobian(
+    p_batch, x0,
+    wrt_cols=slice(0, ny),   # optional parameter-column selection (1-D p)
+    return_state=True,
+)
+dp_bar = jp.batched_vjp_from_state(state, x_bar)   # J^T @ x_bar
+state.close()
+```
+
+- **`batched_solve_with_jacobian(...)`** returns the full per-block
+  primal Jacobian `J` of shape `(B, n, p_dim)` (or `(B, n, len(wrt_cols))`)
+  alongside `x_star` and the `(lam, zL, zU)` duals (same contract as
+  `batched_solve_with_warm`). The Jacobian is assembled by evaluating the
+  existing factor-reuse backward over the `n×n` identity output basis —
+  one multi-RHS `Solver.kkt_solve_many` against the held LDLᵀ factor, no
+  NLP re-solve.
+- **`anchor(p_batch, x0, *, wrt_cols=None)`** solves once and pins the
+  factor, returning an **`AnchorState`** handle for reuse across several
+  post-solve sensitivity calls (linear-update pattern).
+- **`batched_vjp_from_state(state, x_bar)`** is the public reverse-mode
+  product `Jᵀ x̄` against a held factor.
+- **`batched_jvp_from_state(state, dp)`** is the forward-mode product
+  `J @ dp` — the cheap path for linear updates that never materialise the
+  full `J`. It assembles the parameter-side RHS `[∂²L/∂x∂p · dp;
+  ∂g/∂p · dp]` into the compound x- and constraint-blocks and back-solves
+  once against the held factor. Accepts a reduced `dp` when the state was
+  anchored with `wrt_cols`.
+- **`AnchorState`** lifetime: works as a context manager
+  (`with jp.anchor(...) as state:`) *and* supports explicit ownership
+  (`state.close()`, `state.reanchor(...)`) for handles that outlive a
+  lexical block. Pinned factors are exempt from the LRU but capped
+  (`_pinned_capacity`, default 16) with a loud overflow error, and a
+  `weakref` finalizer reclaims the factor if a handle is dropped without
+  `close()`.
+
 ### Added — Structured logging + colored iteration table (pounce#71)
 
 POUNCE now emits diagnostics through the
