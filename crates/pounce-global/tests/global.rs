@@ -294,6 +294,31 @@ fn alphabb_cuts_toggle() {
 }
 
 #[test]
+fn rlt_affine_constraint_toggle() {
+    // min x·y  s.t.  x + y = 4 (affine),  (x, y) ∈ [0, 4]². On the segment
+    // xy = x(4−x) ∈ [0, 4], so the global minimum is 0 (at a segment end).
+    // The affine equality drives RLT (linear constraint × bound factors); both
+    // RLT on (default) and off must certify the optimum.
+    let obj = var(0) * var(1);
+    let g = var(0) + var(1);
+    let prob = GlobalProblem::new(vec![0.0, 0.0], vec![4.0, 4.0], &obj).equality(&g, 4.0);
+
+    let on = solve_global(&prob, &GlobalOptions::default(), backend);
+    let off = solve_global(
+        &prob,
+        &GlobalOptions {
+            rlt: false,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&on, &off] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(sol.objective.abs() < 1e-2, "obj = {}", sol.objective);
+    }
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

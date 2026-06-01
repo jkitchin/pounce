@@ -43,6 +43,7 @@ mod nlp;
 mod obbt;
 pub mod problem;
 mod relax;
+mod rlt;
 
 pub use bnb::{solve_global, GlobalOptions, GlobalSolution, GlobalStatus};
 pub use expr::Expr;

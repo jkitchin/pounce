@@ -83,6 +83,10 @@ pub struct GlobalOptions {
     /// a whole via an interval-Hessian spectral shift, complementing the
     /// factorable relaxation. `0` disables.
     pub alphabb_cuts: usize,
+    /// Add level-1 RLT cuts (affine constraints × variable bound factors,
+    /// linearized with shared product columns). Tightens bilinearly coupled
+    /// problems; a no-op when there are no affine constraints.
+    pub rlt: bool,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -99,6 +103,7 @@ impl Default for GlobalOptions {
             sandwich_rounds: 4,
             obbt_passes: 2,
             alphabb_cuts: 1,
+            rlt: true,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -278,6 +283,11 @@ where
                 );
                 crate::relax::append_cuts(&mut qp, &cuts);
             }
+        }
+        // RLT cuts (affine constraints × bound factors): appends product columns
+        // + McCormick + the linearized cuts. No-op without affine constraints.
+        if opts.rlt {
+            crate::rlt::augment(&mut qp, prob, &lo, &hi);
         }
         let sol = solve_qp_ipm(&qp, &qp_opts, &mut make_backend);
         let mut node_lb = match sol.status {
