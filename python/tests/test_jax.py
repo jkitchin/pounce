@@ -1244,6 +1244,63 @@ def test_batched_solve_with_jacobian_wrt_cols_pounce_82():
     np.testing.assert_allclose(np.asarray(Jidx), np.asarray(J0), atol=1e-12)
 
 
+@pytest.mark.parametrize("bounded", [False, True])
+def test_sensitivity_at_matches_jacobian_pounce_87(bounded):
+    """Issue #87: exact ``∂x*/∂θ`` re-factored at a supplied point must
+    equal the ground-truth ``jax.jacobian`` over a fresh solve — at the
+    solver's own converged point and at *other* parameter values along a
+    path. Covers a binding upper bound so the active-set read off the
+    supplied bound multipliers is exercised."""
+    jp = _build_jac_qp(bounded=bounded)
+    x0 = jnp.zeros(2)
+
+    # Sweep several θ as if walking a path. For each, get the converged
+    # primal + duals, then re-factor the sensitivity at that supplied
+    # point with no held factor in play.
+    for theta in (jnp.array([0.3, 0.7]),
+                  jnp.array([0.5, 0.5]),
+                  jnp.array([-0.1, 0.4])):
+        x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(
+            theta[None, :], x0,
+        )
+        J = jp.sensitivity_at(
+            x_star[0], theta, (lam[0], zL[0], zU[0]),
+        )
+        # Ground truth: jacobian through a single solve at this θ.
+        Jref = jax.jacobian(lambda p: jp.solve(p, x0))(theta)
+        assert J.shape == (2, 2)
+        np.testing.assert_allclose(np.asarray(J), np.asarray(Jref), atol=1e-6)
+
+
+def test_sensitivity_at_wrt_cols_pounce_87():
+    """Issue #87: ``wrt_cols`` selects parameter columns of the
+    re-factored sensitivity, matching the corresponding slice."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.3, 0.7])
+    x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(theta[None, :], x0)
+    duals = (lam[0], zL[0], zU[0])
+
+    J = jp.sensitivity_at(x_star[0], theta, duals)
+    J0 = jp.sensitivity_at(x_star[0], theta, duals, wrt_cols=slice(0, 1))
+    assert J0.shape == (2, 1)
+    np.testing.assert_allclose(np.asarray(J0), np.asarray(J[:, :1]), atol=1e-12)
+
+    Jidx = jp.sensitivity_at(x_star[0], theta, duals, wrt_cols=[1])
+    np.testing.assert_allclose(np.asarray(Jidx), np.asarray(J[:, 1:2]), atol=1e-12)
+
+
+def test_sensitivity_at_requires_dual_triple_pounce_87():
+    """Issue #87: the duals argument must be the full ``(lam, zL, zU)``
+    triple — the active set is read from the bound multipliers."""
+    jp = _build_jac_qp()
+    x0 = jnp.zeros(2)
+    theta = jnp.array([0.3, 0.7])
+    x_star, (lam, zL, zU), _ = jp.batched_solve_with_jacobian(theta[None, :], x0)
+    with pytest.raises(ValueError, match="lam, zL, zU"):
+        jp.sensitivity_at(x_star[0], theta, (lam[0], zL[0]))
+
+
 def test_batched_vjp_from_state_matches_jax_vjp_pounce_82():
     """Issue #82: ``batched_vjp_from_state`` equals ``jax.vjp`` over
     ``batched_solve`` (J^T @ x_bar), and equals J^T @ x_bar from the

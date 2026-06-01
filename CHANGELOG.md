@@ -9,6 +9,35 @@ changes.
 
 ## Unreleased
 
+### Added — Exact post-solve sensitivity at a supplied point (pounce#87)
+
+`JaxProblem.sensitivity_at(x_star, theta, duals, *, wrt_cols=None)`
+returns the exact primal sensitivity `∂x*/∂θ` evaluated at a
+caller-supplied primal-dual point, by re-assembling and factoring the
+KKT system *there* — no IPM re-solve.
+
+```python
+J = jp.sensitivity_at(x_star, theta, (lam, zL, zU))   # (n, p_dim)
+```
+
+- **Re-factor, not reuse.** A held FERAL factor encodes the anchor
+  point's `H` / `J`, so back-solving it at a moved `x_star` gives a
+  first-order-stale sensitivity. `sensitivity_at` assembles the dense
+  `(n+m)×(n+m)` KKT at the supplied point, which is exact there
+  (assuming a KKT point for `theta`). The cheap-but-local reuse path
+  stays as the predictor `batched_jvp_from_state`; this is its
+  exact-refresh complement.
+- Active set is read from the supplied bound multipliers `(zL, zU)`,
+  exactly like the `custom_vjp` backward — the caller passes the duals
+  the anchoring solve / `solve_with_warm` returned at this point.
+- Pure-JAX, so itself differentiable (second-order sensitivities work);
+  matches `jax.jacobian` over a fresh solve to ~1e-6 at every point
+  along a swept path, including a binding bound.
+
+This is the exact-refresh primitive for the inverse map, where `x*`
+traces a known output boundary and the sensitivity must be evaluated at
+the known point without paying a full re-solve per RK stage.
+
 ### Added — Barrier-μ warm start for predictor–corrector correctors (pounce#86)
 
 The interior-point barrier parameter μ is now reported on every solve and

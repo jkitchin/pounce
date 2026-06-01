@@ -2214,6 +2214,85 @@ class JaxProblem:
         )
         return -w_x
 
+    def sensitivity_at(self, x_star, theta, duals, *, wrt_cols=None):
+        """Exact ``∂x*/∂θ`` at a **supplied** primal-dual point — by
+        re-assembling and factoring the KKT *there*, with no IPM
+        re-solve (pounce#87).
+
+        Use this to refresh the sensitivity at a known point along a
+        path — e.g. the inverse map where ``x*`` traces a known output
+        boundary — where the requested point is not the one the solver
+        last converged at.
+
+        Why re-factor rather than reuse a held factor. The held FERAL
+        factor from :meth:`anchor` / :meth:`batched_solve_with_jacobian`
+        encodes the Hessian / Jacobian at the *anchor* point, so
+        back-solving it at a moved ``x_star`` returns a first-order-stale
+        sensitivity. This method instead assembles the dense
+        ``(n+m)×(n+m)`` KKT block at the supplied ``(x_star, duals,
+        theta)`` and solves it, which is **exact** at that point
+        (assuming it is a KKT point for ``theta``). The cost is one
+        dense factorisation per call — fine for the small/medium NLPs
+        path-following targets. It stays pure-JAX, so it is itself
+        differentiable (second-order sensitivities work).
+
+        The reuse path (cheap, locally valid, stale once the point
+        moves) is the predictor :meth:`batched_jvp_from_state` against a
+        held factor; this method is the exact-refresh complement.
+
+        Parameters
+        ----------
+        x_star : ``(n,)``
+            Primal point to evaluate at — must be (within the backward's
+            ``active_tol``) a KKT point for ``theta``.
+        theta : ``p_shape``
+            Parameter value.
+        duals : ``(lam, zL, zU)``
+            Multipliers at ``x_star``: equality/inequality multipliers
+            ``lam`` ``(m,)`` and bound multipliers ``zL`` / ``zU``
+            ``(n,)``. The active set is read from ``zL`` / ``zU`` exactly
+            as the ``custom_vjp`` backward does, so pass the values the
+            anchoring solve / :func:`solve_with_warm` returned at this
+            point.
+        wrt_cols : slice / index array / None
+            Parameter-column selection (1-D ``theta`` only), same
+            contract as :meth:`batched_solve_with_jacobian`.
+
+        Returns
+        -------
+        ``(n, p_dim)`` (or ``(n, len(wrt_cols))``) — the primal
+        sensitivity ``∂x*/∂θ`` at the supplied point.
+        """
+        f, g, n, m = self._f, self._g, self._n, self._m
+        cl, cu = self._cl, self._cu
+        cols = self._normalize_cols(wrt_cols)
+        x_star = jnp.asarray(x_star, dtype=jnp.float64)
+        theta = jnp.asarray(theta, dtype=jnp.float64)
+        if len(duals) != 3:
+            raise ValueError(
+                "pounce.jax: sensitivity_at requires duals=(lam, zL, zU); "
+                f"got a {len(duals)}-tuple."
+            )
+        lam, zL, zU = duals
+        lam = jnp.asarray(lam, dtype=jnp.float64)
+        zL = jnp.asarray(zL, dtype=jnp.float64)
+        zU = jnp.asarray(zU, dtype=jnp.float64)
+
+        # Row i of J is the VJP with cotangent e_i (the KKT is
+        # symmetric), so vmapping the single-point KKT backward over the
+        # identity output basis recovers the full Jacobian. XLA shares
+        # the dense factorisation across the n right-hand sides — one
+        # assemble-and-factor, n back-substitutions.
+        basis = jnp.eye(n, dtype=jnp.float64)
+
+        def jac_row(e_i):
+            return _bwd_single_kkt(
+                f, g, n, m, cl, cu, theta, x_star, lam, zL, zU, e_i,
+            )
+
+        J = jax.vmap(jac_row)(basis)          # (n,) + p_shape
+        return self._slice_cols(J, cols)
+
     # ----- custom_vjp factories -----
 
     def _solve_fn(self):
