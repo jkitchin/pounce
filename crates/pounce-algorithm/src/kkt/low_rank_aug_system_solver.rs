@@ -37,6 +37,7 @@ use pounce_linalg::{Matrix, SymMatrix, Vector};
 use pounce_linsol::ESymSolverStatus;
 use std::rc::Rc;
 
+
 pub struct LowRankAugSystemSolver {
     /// Inner solver that owns the diagonal factorization.
     inner: Box<dyn AugSystemSolver>,
@@ -386,7 +387,10 @@ impl LowRankAugSystemSolver {
                 ut_d.add_right_mult_matrix(-1.0, vt1_d, &c_mat, 1.0);
             }
 
-            // 6. M2 = I − Utilde2_x^T · U_x; J2 = chol(M2).
+            // 6. M2 = I − Utilde2_x^T · U_x; J2 = chol(M2). A non-positive
+            //    pivot means the `−UUᵀ` correction drove the reduced
+            //    Hessian indefinite: a genuine wrong-inertia signal that
+            //    the perturbation handler should act on.
             let m2_space = DenseSymMatrixSpace::new(n_u);
             let mut m2 = m2_space.make_new_dense_sym();
             m2.fill_identity(1.0);
@@ -595,14 +599,29 @@ impl AugSystemSolver for LowRankAugSystemSolver {
             check_neg_evals = false;
         }
 
+        // Hessian-free / non-low-rank W: the least-square-multiplier
+        // initialization (`init`) and the equality-multiplier estimates
+        // (`eq_mult`) drive this same solver with their own zero W block
+        // and `w_factor = 0` — there is no low-rank update to apply, so
+        // bypass the SMW machinery and solve directly through the inner
+        // augmented-system solver with the original coefficients.
+        // `data.w` only carries a `LowRankUpdateSymMatrix` for the main
+        // primal-dual solves (always `w_factor = 1`).
+        let lr_w_opt = coeffs
+            .w
+            .and_then(|w| w.as_any().downcast_ref::<LowRankUpdateSymMatrix>());
+        let Some(lr_w) = lr_w_opt else {
+            let status = self
+                .inner
+                .solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
+            if self.inner.provides_inertia() {
+                self.num_neg_evals = self.inner.number_of_neg_evals();
+            }
+            return status;
+        };
+
         let needs_rebuild = self.first_call || self.augmented_system_requires_change(coeffs);
         if needs_rebuild {
-            let lr_w = match coeffs.w {
-                Some(w) => w.as_any().downcast_ref::<LowRankUpdateSymMatrix>().expect(
-                    "LowRankAugSystemSolver requires a LowRankUpdateSymMatrix as its W block",
-                ),
-                None => panic!("LowRankAugSystemSolver requires a non-None W"),
-            };
             let status =
                 self.update_factorization(lr_w, coeffs, rhs, check_neg_evals, num_neg_evals);
             if status != ESymSolverStatus::Success {

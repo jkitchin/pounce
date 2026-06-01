@@ -4,18 +4,25 @@
 //! Update strategy is selected by the `limited_memory_update_type`
 //! option (`bfgs` or `sr1`) per `MAIN_LOOP.md`.
 //!
-//! Phase 8a (this cut) ships a **dense-rebuild** assembler: at every
+//! Phase 8 publishes the limited-memory Hessian as `data.w` via the
+//! **low-rank** assembler, for every problem size. At each
 //! `update_hessian` call we walk the curvature-pair history (oldest to
-//! newest) applying the rank-2 BFGS / rank-1 SR1 formulas in place on a
-//! dense `n×n` work buffer, then project the result onto the
-//! [`SymTMatrixSpace`] sparsity that [`crate::kkt::std_aug_system_solver`]
-//! pinned at the first solve. The dense walk is `O(m · n²)` per
-//! iteration (with `m = max_history`); for the small-NLP gold suite
-//! that's negligible. The Sherman-Morrison-Woodbury / `LowRankUpdateSymMatrix`
-//! shortcut wired through [`crate::kkt::low_rank_aug_system_solver`] is
-//! the Phase-8b optimisation; mathematically the two paths agree on the
-//! action of `B`, so HS071-class problems converge identically with
-//! either backend.
+//! newest) applying the rank-2 BFGS / rank-1 SR1 formulas to build the
+//! compact factors of `B = σ I + V Vᵀ − U Uᵀ`, then publish a
+//! [`pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrix`]
+//! as `data.w`. No dense `n×n` buffer is ever formed: the walk is
+//! `O(n · m)` per pair and `O(n · m²)` total (with `m = max_history`),
+//! and storage is `O(n · m)`, so the limited-memory path scales to
+//! arbitrarily large `n`. [`crate::kkt::low_rank_aug_system_solver`]
+//! applies the Hessian's inverse action via the Sherman-Morrison-Woodbury
+//! identity, factorizing only the diagonal `B0`. This removes the
+//! `eval_h` requirement (the user no longer needs to declare a Hessian
+//! sparsity pattern) and the former `O(n²)` memory cliff.
+//!
+//! `LowRankAugSystemSolver` wraps the standard augmented-system solver and
+//! forwards the Hessian-free init / equality-multiplier solves (which
+//! carry a non-low-rank `W`) straight through, so a single solver
+//! instance serves the whole iteration.
 //!
 //! Update kernels:
 //!   - [`initial_hessian_scalar`] (sigma per `LIM_MEM_INIT`)
@@ -27,8 +34,9 @@ use crate::hess::r#trait::HessianUpdater;
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::{Index, Number};
-use pounce_linalg::dense_vector::DenseVector;
-use pounce_linalg::triplet::{SymTMatrix, SymTMatrixSpace};
+use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrixSpace;
+use pounce_linalg::multi_vector_matrix::{MultiVectorMatrix, MultiVectorMatrixSpace};
 use pounce_linalg::Vector;
 use std::rc::Rc;
 
@@ -82,15 +90,6 @@ pub struct LimMemQuasiNewtonUpdater {
     /// (NOT `y_c_prev`).
     pub last_jac_c: Option<Rc<dyn pounce_linalg::matrix::Matrix>>,
     pub last_jac_d: Option<Rc<dyn pounce_linalg::matrix::Matrix>>,
-    /// Cached `SymTMatrixSpace` we reuse to publish `data.w`. Filled
-    /// lazily on the first `update_hessian` call by snapshotting the
-    /// space of `cq.curr_exact_hessian()` so our matrices share the
-    /// sparsity that the aug-system solver pinned during the
-    /// least-square-multipliers init pass. Phase-8a limitation: when
-    /// the user-declared sparsity is sparser than full-dense, the
-    /// dense L-BFGS approximation is projected onto it (entries
-    /// outside the declared pattern are dropped).
-    pub h_space: Option<Rc<SymTMatrixSpace>>,
 }
 
 impl Default for LimMemQuasiNewtonUpdater {
@@ -106,7 +105,6 @@ impl Default for LimMemQuasiNewtonUpdater {
             last_grad_f: None,
             last_jac_c: None,
             last_jac_d: None,
-            h_space: None,
         }
     }
 }
@@ -161,11 +159,10 @@ impl LimMemQuasiNewtonUpdater {
 impl HessianUpdater for LimMemQuasiNewtonUpdater {
     /// Snapshot the current `(x, ∇_x L)` pair, build `s = x − x_prev`
     /// and `y = ∇L − ∇L_prev`, ingest into history (skip per the
-    /// BFGS / SR1 acceptance criterion), then rebuild `B = σ I + Σ
-    /// rank-2 updates` from the rolling history and publish it as
-    /// `data.w`. Mirrors `IpLimMemQuasiNewtonUpdater::Update` minus the
-    /// SMW shortcut (Phase-8a; the `LowRankUpdateSymMatrix` path lands
-    /// in Phase-8b).
+    /// BFGS / SR1 acceptance criterion), then build the low-rank factors
+    /// of `B = σ I + V Vᵀ − U Uᵀ` from the rolling history and publish a
+    /// [`pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrix`]
+    /// as `data.w`. Mirrors `IpLimMemQuasiNewtonUpdater::Update`.
     fn update_hessian(&mut self, data: &IpoptDataHandle, cq: &IpoptCqHandle) -> bool {
         let (curr_x, curr_y_c, curr_y_d) = match data.borrow().curr.as_ref() {
             Some(c) => (c.x.clone(), c.y_c.clone(), c.y_d.clone()),
@@ -174,19 +171,6 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
         let curr_grad_f = cq.borrow().curr_grad_f();
         let curr_jac_c = cq.borrow().curr_jac_c();
         let curr_jac_d = cq.borrow().curr_jac_d();
-
-        // Lazily snapshot the SymTMatrix space pinned by upstream's
-        // first aug-system call (least-square-multipliers init), so our
-        // rebuilt `W` matrices reuse exactly the irow/jcol pattern the
-        // solver already committed to.
-        if self.h_space.is_none() {
-            let h = cq.borrow().curr_exact_hessian();
-            if let Some(symt) = h.as_any().downcast_ref::<SymTMatrix>() {
-                self.h_space = Some(Rc::clone(symt.space()));
-            } else {
-                self.h_space = Some(make_full_lower_triangle_space(curr_x.dim()));
-            }
-        }
 
         // Upstream y formula (`IpLimMemQuasiNewtonUpdater.cpp:284-308`):
         //   y = (∇f_curr − ∇f_last)
@@ -223,36 +207,38 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
         self.last_jac_c = Some(Rc::clone(&curr_jac_c));
         self.last_jac_d = Some(Rc::clone(&curr_jac_d));
 
-        let n = curr_x.dim() as usize;
+        let n_idx = curr_x.dim();
+        let nu = n_idx as usize;
         let sigma = match self.update_type {
             UpdateType::Bfgs => self.compute_sigma_bfgs(),
-            // SR1 always uses identity start unless the user picked
-            // `Scalar1`/`Scalar2`. Upstream's SR1 path matches BFGS for
-            // the `LIM_MEM_INIT` sigma source.
+            // SR1 uses the same `LIM_MEM_INIT` sigma source as BFGS for
+            // the diagonal `B0`; the rank-1 corrections carry the sign.
             UpdateType::Sr1 => self.compute_sigma_bfgs(),
         };
-        let mut dense = vec![0.0_f64; n * n];
-        for i in 0..n {
-            dense[i * n + i] = sigma;
+
+        // Build the compact factors of  B = σ I + V Vᵀ − U Uᵀ  by walking
+        // the curvature history. No dense `n×n` is ever formed: the walk
+        // is `O(n · history_len)` per pair. Publishing a
+        // `LowRankUpdateSymMatrix` lets `LowRankAugSystemSolver` apply the
+        // Hessian via Sherman-Morrison-Woodbury with `O(n · m)` storage
+        // for arbitrarily large `n`.
+        let (v_cols, u_cols) = self.build_low_rank(sigma, nu);
+
+        let col_space = DenseVectorSpace::new(n_idx);
+        let mut diag = col_space.make_new_dense();
+        diag.set_values(&vec![sigma; nu]);
+
+        let lr_space = LowRankUpdateSymMatrixSpace::new(n_idx, None, false);
+        let mut lr = lr_space.make_new_low_rank();
+        lr.set_diag(Rc::new(diag) as Rc<dyn Vector>);
+        if let Some(mvm) = build_multi_vector(&col_space, &v_cols) {
+            lr.set_v(Rc::new(mvm));
         }
-        match self.update_type {
-            UpdateType::Bfgs => apply_bfgs_history(&mut dense, n, &self.history),
-            UpdateType::Sr1 => apply_sr1_history(&mut dense, n, &self.history),
+        if let Some(mvm) = build_multi_vector(&col_space, &u_cols) {
+            lr.set_u(Rc::new(mvm));
         }
 
-        let space = Rc::clone(self.h_space.as_ref().unwrap());
-        let mut mat = SymTMatrix::new(Rc::clone(&space));
-        let irows = space.irows();
-        let jcols = space.jcols();
-        let mut vals = vec![0.0_f64; irows.len()];
-        for k in 0..irows.len() {
-            // Triplet indices are 1-based per upstream / MUMPS convention.
-            let i = (irows[k] - 1) as usize;
-            let j = (jcols[k] - 1) as usize;
-            vals[k] = dense[i * n + j];
-        }
-        mat.set_values(&vals);
-        data.borrow_mut().w = Some(Rc::new(mat));
+        data.borrow_mut().w = Some(Rc::new(lr));
         true
     }
 }
@@ -274,23 +260,106 @@ impl LimMemQuasiNewtonUpdater {
             self.init_val_max,
         )
     }
+
+    /// Walk the curvature-pair history oldest→newest, applying the BFGS
+    /// rank-2 / SR1 rank-1 recurrences against the running approximation
+    /// `B = σ I + V Vᵀ − U Uᵀ` to grow the dense column lists `V` and
+    /// `U`. Returns `(v_cols, u_cols)` in full primal space.
+    ///
+    /// For BFGS, each accepted pair `(s, y)` appends one positive column
+    /// `r/√(sᵀr)` (the `r rᵀ/(sᵀr)` term, `r = θ y + (1−θ) Bs` after
+    /// Powell damping) and one negative column `Bs/√(sᵀBs)` (the
+    /// `−(Bs)(Bs)ᵀ/(sᵀBs)` term). For SR1 each pair appends a single
+    /// column `(y−Bs)/√|denom|` to `V` (denom > 0) or `U` (denom < 0).
+    /// This reproduces, column for column, the action of the former
+    /// dense rebuild while never materializing an `n×n` buffer.
+    fn build_low_rank(&self, sigma: Number, n: usize) -> (Vec<Vec<Number>>, Vec<Vec<Number>>) {
+        let mut v_cols: Vec<Vec<Number>> = Vec::new();
+        let mut u_cols: Vec<Vec<Number>> = Vec::new();
+        if n == 0 {
+            return (v_cols, u_cols);
+        }
+        for pair in &self.history {
+            let s = dense_from_vec(pair.s.as_ref(), n);
+            let y = dense_from_vec(pair.y.as_ref(), n);
+
+            // bs = B s = σ s + Σ_v (vᵀs) v − Σ_u (uᵀs) u.
+            let mut bs: Vec<Number> = s.iter().map(|&si| sigma * si).collect();
+            for v in &v_cols {
+                let c: Number = (0..n).map(|i| v[i] * s[i]).sum();
+                for i in 0..n {
+                    bs[i] += c * v[i];
+                }
+            }
+            for u in &u_cols {
+                let c: Number = (0..n).map(|i| u[i] * s[i]).sum();
+                for i in 0..n {
+                    bs[i] -= c * u[i];
+                }
+            }
+
+            match self.update_type {
+                UpdateType::Bfgs => {
+                    let s_bs: Number = (0..n).map(|i| s[i] * bs[i]).sum();
+                    if s_bs <= 0.0 {
+                        continue;
+                    }
+                    let sy = pair.s_dot_y;
+                    let theta = powell_damping_theta(sy, s_bs);
+                    let sr = theta * sy + (1.0 - theta) * s_bs;
+                    if sr <= 0.0 {
+                        continue;
+                    }
+                    let r_scale = 1.0 / sr.sqrt();
+                    let bs_scale = 1.0 / s_bs.sqrt();
+                    // r rᵀ / sr  →  positive column r/√sr.
+                    v_cols.push(
+                        (0..n)
+                            .map(|i| (theta * y[i] + (1.0 - theta) * bs[i]) * r_scale)
+                            .collect(),
+                    );
+                    // −(Bs)(Bs)ᵀ / s_bs  →  negative column Bs/√s_bs.
+                    u_cols.push(bs.iter().map(|&bi| bi * bs_scale).collect());
+                }
+                UpdateType::Sr1 => {
+                    let yms: Vec<Number> = (0..n).map(|i| y[i] - bs[i]).collect();
+                    let denom: Number = (0..n).map(|i| yms[i] * s[i]).sum();
+                    let yms_norm: Number = yms.iter().map(|&w| w * w).sum::<Number>().sqrt();
+                    if !sr1_denominator_ok(denom, pair.s_norm, yms_norm) {
+                        continue;
+                    }
+                    let scale = 1.0 / denom.abs().sqrt();
+                    let col: Vec<Number> = yms.iter().map(|&w| w * scale).collect();
+                    if denom > 0.0 {
+                        v_cols.push(col);
+                    } else {
+                        u_cols.push(col);
+                    }
+                }
+            }
+        }
+        (v_cols, u_cols)
+    }
 }
 
-/// Construct a `SymTMatrixSpace` whose pattern is the full lower
-/// triangle (1-based) of an `n × n` matrix. Used as a fallback when
-/// `cq.curr_exact_hessian()` cannot supply a `SymTMatrix` (e.g. the
-/// TNLP elects not to implement `eval_h`).
-fn make_full_lower_triangle_space(n: Index) -> Rc<SymTMatrixSpace> {
-    let nz = (n as usize) * ((n as usize) + 1) / 2;
-    let mut irows: Vec<Index> = Vec::with_capacity(nz);
-    let mut jcols: Vec<Index> = Vec::with_capacity(nz);
-    for i in 1..=n {
-        for j in 1..=i {
-            irows.push(i);
-            jcols.push(j);
-        }
+/// Pack dense column data into a [`MultiVectorMatrix`] over `col_space`.
+/// Returns `None` when there are no columns, so the caller leaves the
+/// corresponding V/U slot of the [`LowRankUpdateSymMatrix`] unset.
+fn build_multi_vector(
+    col_space: &Rc<DenseVectorSpace>,
+    cols: &[Vec<Number>],
+) -> Option<MultiVectorMatrix> {
+    if cols.is_empty() {
+        return None;
     }
-    SymTMatrixSpace::new(n, irows, jcols)
+    let space = MultiVectorMatrixSpace::new(cols.len() as Index, Rc::clone(col_space));
+    let mut mvm = space.make_new_multi_vector();
+    for (k, col) in cols.iter().enumerate() {
+        let mut cv = col_space.make_new_dense();
+        cv.set_values(col);
+        mvm.set_vector(k as Index, Rc::new(cv) as Rc<dyn Vector>);
+    }
+    Some(mvm)
 }
 
 fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
@@ -302,94 +371,6 @@ fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
     panic!("LimMemQuasiNewtonUpdater: curvature pairs must be DenseVector-backed");
 }
 
-/// In-place BFGS history walk on a column-major-or-row-major (it
-/// doesn't matter; B is symmetric) dense `n × n` buffer. For each
-/// curvature pair `(s, y)`, applies Powell damping when the curvature
-/// is too negative, then writes
-/// `B ← B + (r r^T)/(s^T r) − (B s)(B s)^T / (s^T B s)`
-/// where `r = θ y + (1−θ) B s`. Mirrors
-/// `IpLimMemQuasiNewtonUpdater.cpp::Update_BFGS` semantics.
-fn apply_bfgs_history(b: &mut [Number], n: usize, history: &[CurvaturePair]) {
-    if n == 0 {
-        return;
-    }
-    let mut bs = vec![0.0_f64; n];
-    let mut r = vec![0.0_f64; n];
-    for pair in history {
-        let s = dense_from_vec(pair.s.as_ref(), n);
-        let y = dense_from_vec(pair.y.as_ref(), n);
-        // bs = B s.
-        for i in 0..n {
-            let row = &b[i * n..(i + 1) * n];
-            let mut acc = 0.0;
-            for j in 0..n {
-                acc += row[j] * s[j];
-            }
-            bs[i] = acc;
-        }
-        let s_bs: Number = (0..n).map(|i| s[i] * bs[i]).sum();
-        if s_bs <= 0.0 {
-            continue;
-        }
-        let sy = pair.s_dot_y;
-        let theta = powell_damping_theta(sy, s_bs);
-        for i in 0..n {
-            r[i] = theta * y[i] + (1.0 - theta) * bs[i];
-        }
-        let sr: Number = theta * sy + (1.0 - theta) * s_bs;
-        if sr <= 0.0 {
-            continue;
-        }
-        for i in 0..n {
-            let r_i = r[i];
-            let bs_i = bs[i];
-            let row = &mut b[i * n..(i + 1) * n];
-            for j in 0..n {
-                row[j] += r_i * r[j] / sr - bs_i * bs[j] / s_bs;
-            }
-        }
-    }
-}
-
-/// In-place SR1 history walk: applies the rank-1 update
-/// `B ← B + ((y − Bs)(y − Bs)^T) / ((y − Bs)^T s)` for each curvature
-/// pair, skipping when `|denom|` falls below `1e-8 ||s|| ||y − Bs||`
-/// per [`sr1_denominator_ok`]. Mirrors
-/// `IpLimMemQuasiNewtonUpdater.cpp::Update_SR1`.
-fn apply_sr1_history(b: &mut [Number], n: usize, history: &[CurvaturePair]) {
-    if n == 0 {
-        return;
-    }
-    let mut bs = vec![0.0_f64; n];
-    let mut yms = vec![0.0_f64; n];
-    for pair in history {
-        let s = dense_from_vec(pair.s.as_ref(), n);
-        let y = dense_from_vec(pair.y.as_ref(), n);
-        for i in 0..n {
-            let row = &b[i * n..(i + 1) * n];
-            let mut acc = 0.0;
-            for j in 0..n {
-                acc += row[j] * s[j];
-            }
-            bs[i] = acc;
-        }
-        for i in 0..n {
-            yms[i] = y[i] - bs[i];
-        }
-        let denom: Number = (0..n).map(|i| yms[i] * s[i]).sum();
-        let yms_norm: Number = (0..n).map(|i| yms[i] * yms[i]).sum::<Number>().sqrt();
-        if !sr1_denominator_ok(denom, pair.s_norm, yms_norm) {
-            continue;
-        }
-        for i in 0..n {
-            let yms_i = yms[i];
-            let row = &mut b[i * n..(i + 1) * n];
-            for j in 0..n {
-                row[j] += yms_i * yms[j] / denom;
-            }
-        }
-    }
-}
 
 /// Initial Hessian scalar used as the diagonal of `B_0` before the
 /// rank-2 updates are applied. Mirrors upstream's three options
@@ -603,60 +584,85 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bfgs_quadratic_recovers_hessian() {
-        // For a strictly-convex quadratic f(x) = ½ xᵀ A x with A SPD,
-        // a single BFGS update from B₀ = I along a curvature pair
-        // (s, y = A s) reproduces A on the s-direction:
-        //   B₁ s = y = A s.
-        // Use A = diag(2, 5), s = (1, 1), so y = (2, 5).
-        let mut b = vec![1.0, 0.0, 0.0, 1.0]; // 2x2 identity
-        let p = pair(&[1.0, 1.0], &[2.0, 5.0]);
-        apply_bfgs_history(&mut b, 2, std::slice::from_ref(&p));
-        // (B s)[0] should equal y[0]=2, (B s)[1] should equal y[1]=5.
-        let bs0 = b[0] * 1.0 + b[1] * 1.0;
-        let bs1 = b[2] * 1.0 + b[3] * 1.0;
-        assert!((bs0 - 2.0).abs() < 1e-12, "Bs[0]={}", bs0);
-        assert!((bs1 - 5.0).abs() < 1e-12, "Bs[1]={}", bs1);
+    /// Reconstruct the dense `B = σ I + V Vᵀ − U Uᵀ` from the low-rank
+    /// factors so we can check the Hessian *action* the SMW solver sees.
+    fn reconstruct_b(n: usize, sigma: Number, v: &[Vec<Number>], u: &[Vec<Number>]) -> Vec<Number> {
+        let mut b = vec![0.0_f64; n * n];
+        for i in 0..n {
+            b[i * n + i] = sigma;
+        }
+        for col in v {
+            for i in 0..n {
+                for j in 0..n {
+                    b[i * n + j] += col[i] * col[j];
+                }
+            }
+        }
+        for col in u {
+            for i in 0..n {
+                for j in 0..n {
+                    b[i * n + j] -= col[i] * col[j];
+                }
+            }
+        }
+        b
+    }
+
+    fn mat_vec(b: &[Number], n: usize, x: &[Number]) -> Vec<Number> {
+        (0..n)
+            .map(|i| (0..n).map(|j| b[i * n + j] * x[j]).sum())
+            .collect()
     }
 
     #[test]
-    fn bfgs_history_keeps_symmetry() {
-        let mut b = vec![3.0, 0.0, 0.0, 3.0];
-        let pairs = vec![
-            pair(&[1.0, 0.5], &[2.0, 1.0]),
-            pair(&[0.7, 1.2], &[1.0, 2.5]),
-        ];
-        apply_bfgs_history(&mut b, 2, &pairs);
+    fn bfgs_low_rank_recovers_hessian_action() {
+        // For a strictly-convex quadratic f(x) = ½ xᵀ A x with A SPD,
+        // a single BFGS update from B₀ = I along a curvature pair
+        // (s, y = A s) reproduces A on the s-direction:  B₁ s = y = A s.
+        // Use A = diag(2, 5), s = (1, 1), so y = (2, 5).
+        let mut up = LimMemQuasiNewtonUpdater::new();
+        up.history.push(pair(&[1.0, 1.0], &[2.0, 5.0]));
+        let (v, u) = up.build_low_rank(1.0, 2);
+        let b = reconstruct_b(2, 1.0, &v, &u);
+        let bs = mat_vec(&b, 2, &[1.0, 1.0]);
+        assert!((bs[0] - 2.0).abs() < 1e-12, "Bs[0]={}", bs[0]);
+        assert!((bs[1] - 5.0).abs() < 1e-12, "Bs[1]={}", bs[1]);
+    }
+
+    #[test]
+    fn bfgs_low_rank_keeps_symmetry() {
+        let mut up = LimMemQuasiNewtonUpdater::new();
+        up.history.push(pair(&[1.0, 0.5], &[2.0, 1.0]));
+        up.history.push(pair(&[0.7, 1.2], &[1.0, 2.5]));
+        let (v, u) = up.build_low_rank(3.0, 2);
+        let b = reconstruct_b(2, 3.0, &v, &u);
+        // VVᵀ and UUᵀ are symmetric by construction, so B must be too.
         assert!((b[1] - b[2]).abs() < 1e-12);
     }
 
     #[test]
-    fn sr1_quadratic_one_pair_recovers_hessian_action() {
+    fn sr1_low_rank_recovers_hessian_action() {
         // SR1 update with B₀ = I, s = (1, 1), y = (2, 5):
-        // y - B s = (1, 4); denom = (1, 4)·(1, 1) = 5;
-        // ΔB = (1, 4)(1, 4)ᵀ / 5 = [[0.2, 0.8], [0.8, 3.2]]
-        // B₁ = [[1.2, 0.8], [0.8, 4.2]]; B₁ s = (2.0, 5.0) = y. ✓
-        let mut b = vec![1.0, 0.0, 0.0, 1.0];
-        let p = pair(&[1.0, 1.0], &[2.0, 5.0]);
-        apply_sr1_history(&mut b, 2, std::slice::from_ref(&p));
-        let bs0 = b[0] + b[1];
-        let bs1 = b[2] + b[3];
-        assert!((bs0 - 2.0).abs() < 1e-12);
-        assert!((bs1 - 5.0).abs() < 1e-12);
+        // y - B s = (1, 4); denom = (1, 4)·(1, 1) = 5 > 0 → one V column.
+        // ΔB = (1, 4)(1, 4)ᵀ / 5; B₁ s = (2.0, 5.0) = y. ✓
+        let mut up = LimMemQuasiNewtonUpdater {
+            update_type: UpdateType::Sr1,
+            ..LimMemQuasiNewtonUpdater::default()
+        };
+        up.history.push(pair(&[1.0, 1.0], &[2.0, 5.0]));
+        let (v, u) = up.build_low_rank(1.0, 2);
+        assert_eq!(v.len(), 1, "positive denom routes to V");
+        assert!(u.is_empty());
+        let b = reconstruct_b(2, 1.0, &v, &u);
+        let bs = mat_vec(&b, 2, &[1.0, 1.0]);
+        assert!((bs[0] - 2.0).abs() < 1e-12);
+        assert!((bs[1] - 5.0).abs() < 1e-12);
     }
 
     #[test]
-    fn full_lower_triangle_space_has_n_n_plus_1_over_2() {
-        let s = make_full_lower_triangle_space(4);
-        assert_eq!(s.dim(), 4);
-        assert_eq!(s.nonzeros(), 10);
-        // First few entries: (1,1), (2,1), (2,2), (3,1), ...
-        assert_eq!(s.irows()[0], 1);
-        assert_eq!(s.jcols()[0], 1);
-        assert_eq!(s.irows()[1], 2);
-        assert_eq!(s.jcols()[1], 1);
-        assert_eq!(s.irows()[2], 2);
-        assert_eq!(s.jcols()[2], 2);
+    fn empty_history_yields_no_columns() {
+        let up = LimMemQuasiNewtonUpdater::new();
+        let (v, u) = up.build_low_rank(1.0, 4);
+        assert!(v.is_empty() && u.is_empty());
     }
 }

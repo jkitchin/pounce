@@ -26,6 +26,8 @@ use crate::hess::exact::ExactHessianUpdater;
 use crate::hess::lim_mem_quasi_newton::{LimMemQuasiNewtonUpdater, UpdateType};
 use crate::init::default::DefaultIterateInitializer;
 use crate::init::warm_start::WarmStartIterateInitializer;
+use crate::kkt::aug_system_solver::AugSystemSolver;
+use crate::kkt::low_rank_aug_system_solver::LowRankAugSystemSolver;
 use crate::kkt::pd_full_space_solver::PdFullSpaceSolver;
 use crate::kkt::pd_search_dir_calc::PdSearchDirCalc;
 use crate::kkt::perturbation_handler::PdPerturbationHandler;
@@ -542,9 +544,20 @@ impl AlgorithmBuilder {
                 }
             };
         let linsol = TSymLinearSolver::new(backend, scaling, self.linear_scaling_on_demand);
-        let aug_solver = StdAugSystemSolver::new(linsol);
+        let inner_aug = StdAugSystemSolver::new(linsol);
+        // Limited-memory mode publishes the Hessian as a
+        // `LowRankUpdateSymMatrix`; wrap the standard solver in the
+        // Sherman-Morrison-Woodbury low-rank solver so the augmented
+        // system factorizes only the diagonal `B0` and the quasi-Newton
+        // update is applied as a rank-`m` correction (`O(n·m)` memory).
+        let aug_solver: Box<dyn AugSystemSolver> =
+            if matches!(self.hessian_approximation, HessianApproxChoice::LimitedMemory) {
+                Box::new(LowRankAugSystemSolver::new(Box::new(inner_aug)))
+            } else {
+                Box::new(inner_aug)
+            };
         let perturb = Rc::new(RefCell::new(PdPerturbationHandler::new()));
-        let pd_solver = PdFullSpaceSolver::new(Box::new(aug_solver), perturb);
+        let pd_solver = PdFullSpaceSolver::new(aug_solver, perturb);
         let mut search_dir = PdSearchDirCalc::new(pd_solver);
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
         self.build_inner(Some(search_dir))
