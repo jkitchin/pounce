@@ -494,3 +494,96 @@ fn exp_log_atoms() {
     );
     assert!(sol.x[0].abs() < 1e-2, "x = {}", sol.x[0]);
 }
+
+#[test]
+fn mixed_equality_and_inequality_three_vars() {
+    // min ‖x‖²  s.t.  x₀+x₁+x₂ = 3  and  x₀−x₁ ≥ 0.75,  on [0,3]³.
+    //
+    // The unconstrained-on-the-equality minimizer (1,1,1) violates the
+    // inequality (x₀−x₁ = 0 < 0.75), so it binds. With both active the convex
+    // problem has the unique KKT (= global) point (1.375, 0.625, 1.0), value
+    // 1.375² + 0.625² + 1.0² = 3.28125. Exercises a general linear equality and
+    // a variable-coupling inequality together in 3-D.
+    let obj = var(0).powi(2) + var(1).powi(2) + var(2).powi(2);
+    let prob = GlobalProblem::new(vec![0.0, 0.0, 0.0], vec![3.0, 3.0, 3.0], &obj)
+        .equality(&(var(0) + var(1) + var(2)), 3.0)
+        .ge(&(var(0) - var(1)), 0.75);
+    let sol = solve_global(&prob, &GlobalOptions::default(), backend);
+    assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+    assert!(
+        (sol.objective - 3.281_25).abs() < 1e-3,
+        "obj = {}",
+        sol.objective
+    );
+    assert!(
+        (sol.x[0] - 1.375).abs() < 1e-2
+            && (sol.x[1] - 0.625).abs() < 1e-2
+            && (sol.x[2] - 1.0).abs() < 1e-2,
+        "x = {:?}",
+        sol.x
+    );
+    // Constraints are honored at the returned incumbent.
+    assert!(prob.max_violation(&sol.x) < 1e-5, "violation {:?}", sol.x);
+    assert!(sol.lower_bound <= sol.objective + 1e-6);
+}
+
+#[test]
+fn ratio_term_objective() {
+    // min x / y  on [1, 2]²: the ratio is increasing in x, decreasing in y, so
+    // the optimum sits at the corner (1, 2) with value 0.5. End-to-end exercise
+    // of the `Div` op and its bilinear (w·y = x) relaxation / Ratio branch term.
+    let f = var(0) / var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![2.0, 2.0], &f);
+    let sol = solve_global(&prob, &GlobalOptions::default(), backend);
+    assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+    assert!(
+        (sol.objective - 0.5).abs() < 1e-3,
+        "obj = {}",
+        sol.objective
+    );
+    assert!(
+        (sol.x[0] - 1.0).abs() < 1e-2 && (sol.x[1] - 2.0).abs() < 1e-2,
+        "x = {:?}",
+        sol.x
+    );
+    assert!(sol.lower_bound <= sol.objective + 1e-6);
+}
+
+#[test]
+fn sos_and_bnb_agree_on_polynomial() {
+    // The SOS/Lasserre path and spatial branch-and-bound must certify the same
+    // global minimum of a shared polynomial: p(x, y) = x⁴ − 3x² + y², coercive
+    // with global minimum −9/4 at (±√(3/2), 0). SOS minimizes over ℝⁿ; the
+    // minimizers lie inside [−2, 2]², so sBB over that box agrees.
+    use pounce_convex::{sos_minimize, PolyProblem, Polynomial, QpStatus};
+
+    let poly = Polynomial::new(
+        2,
+        vec![
+            (vec![4, 0], 1.0),  // x⁴
+            (vec![2, 0], -3.0), // −3x²
+            (vec![0, 2], 1.0),  // y²
+        ],
+    );
+    let sos = sos_minimize(&PolyProblem::new(poly), None, backend);
+    assert_eq!(sos.status, QpStatus::Optimal, "SOS status {:?}", sos.status);
+
+    let f = var(0).powi(4) - 3.0 * var(0).powi(2) + var(1).powi(2);
+    let prob = GlobalProblem::new(vec![-2.0, -2.0], vec![2.0, 2.0], &f);
+    let bb = solve_global(&prob, &GlobalOptions::default(), backend);
+    assert_eq!(bb.status, GlobalStatus::Optimal, "{bb:?}");
+
+    // Both reach −2.25, and the two certificates agree to solver tolerance.
+    assert!(
+        (sos.lower_bound + 2.25).abs() < 1e-4,
+        "SOS = {}",
+        sos.lower_bound
+    );
+    assert!((bb.objective + 2.25).abs() < 1e-3, "B&B = {}", bb.objective);
+    assert!(
+        (sos.lower_bound - bb.objective).abs() < 2e-3,
+        "SOS {} vs B&B {}",
+        sos.lower_bound,
+        bb.objective
+    );
+}
