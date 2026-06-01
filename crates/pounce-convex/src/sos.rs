@@ -28,6 +28,7 @@ use crate::cones::psd::svec_index;
 use crate::ipm::{solve_socp_ipm, QpOptions};
 use crate::qp::{QpProblem, QpStatus, Triplet};
 use crate::ConeSpec;
+use pounce_linalg::symmetric_eigen;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use std::collections::HashMap;
 
@@ -168,16 +169,23 @@ where
     sos_constrained_lower_bound_opts(prob, order, &QpOptions::default(), make_backend)
 }
 
-/// [`sos_constrained_lower_bound`] with explicit solver options.
-pub fn sos_constrained_lower_bound_opts<F>(
+/// The moment-side bookkeeping needed to recover the solution from the SDP
+/// dual: the σ₀ monomial basis (= the moment-matrix index set) and the map
+/// from a monomial `α` to the coefficient-matching equality whose dual
+/// multiplier is the moment `y_α`.
+struct MomentInfo {
+    n_vars: usize,
+    d: usize,
+    basis0: Vec<Vec<usize>>,
+    row_of: HashMap<Vec<usize>, usize>,
+}
+
+/// Build the SOS / Putinar SDP for `prob` at the given (clamped) order,
+/// returning the conic program, its cones, and the moment bookkeeping.
+fn build_sos_sdp(
     prob: &PolyProblem,
     order: Option<usize>,
-    opts: &QpOptions,
-    make_backend: F,
-) -> SosBound
-where
-    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
-{
+) -> (QpProblem, Vec<ConeSpec>, MomentInfo) {
     let n = prob.n_vars;
     let r2 = std::f64::consts::SQRT_2;
 
@@ -190,6 +198,7 @@ where
         d_min = d_min.max(h.degree().div_ceil(2));
     }
     let d = order.map_or(d_min, |o| o.max(d_min));
+    let basis0 = monomials(n, d); // σ₀ basis = moment-matrix index set
 
     // Column layout: x = (γ, svec(Q₀), svec(Q₁)…, free λ coefficients…).
     let mut col = 1usize;
@@ -210,8 +219,6 @@ where
         let basis = monomials(n, deg);
         let bn = basis.len();
         let col_base = col;
-        // Cone rows s = svec(Qₖ) ⪰ 0, and the Gram contributions to each
-        // product monomial (× the weight polynomial's terms).
         for i in 0..bn {
             for j in 0..=i {
                 let coef0 = if i == j { 1.0 } else { r2 };
@@ -248,12 +255,13 @@ where
     }
     let n_x = col;
 
-    // One coefficient-matching equality per distinct monomial: the SOS/Putinar
-    // certificate's coefficient must equal p's, with the constant carrying −γ.
+    // One coefficient-matching equality per distinct monomial; record the
+    // monomial→row map so the equality duals can be read back as moments.
     let pc = prob.objective.coeff_map();
     let zero_exp = vec![0usize; n];
     let mut a: Vec<Triplet> = Vec::new();
     let mut b: Vec<f64> = Vec::new();
+    let mut row_of: HashMap<Vec<usize>, usize> = HashMap::new();
     for (alpha, terms) in &by_mono {
         let row = b.len();
         for &(c, coef) in terms {
@@ -263,6 +271,7 @@ where
             a.push(Triplet::new(row, 0, 1.0)); // + γ
         }
         b.push(pc.get(alpha).copied().unwrap_or(0.0));
+        row_of.insert(alpha.clone(), row);
     }
 
     // Objective: maximize γ  ⇔  minimize −γ.
@@ -280,11 +289,155 @@ where
         lb: Vec::new(),
         ub: Vec::new(),
     };
+    (
+        qp,
+        cones,
+        MomentInfo {
+            n_vars: n,
+            d,
+            basis0,
+            row_of,
+        },
+    )
+}
+
+/// [`sos_constrained_lower_bound`] with explicit solver options.
+pub fn sos_constrained_lower_bound_opts<F>(
+    prob: &PolyProblem,
+    order: Option<usize>,
+    opts: &QpOptions,
+    make_backend: F,
+) -> SosBound
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let (qp, cones, _moments) = build_sos_sdp(prob, order);
     let sol = solve_socp_ipm(&qp, &cones, opts, make_backend);
     SosBound {
         lower_bound: sol.x.first().copied().unwrap_or(f64::NEG_INFINITY),
         status: sol.status,
     }
+}
+
+/// The result of [`sos_minimize`]: the certified bound plus, when the moment
+/// matrix is **flat** (exact relaxation), the global minimizer(s).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SosSolution {
+    /// Certified global lower bound `γ*` (= the global minimum when `is_exact`).
+    pub lower_bound: f64,
+    pub status: QpStatus,
+    /// `true` when the moment matrix is flat (`rank M_d = rank M_{d-1}`): the
+    /// relaxation is then exact, so `lower_bound` is the global minimum.
+    pub is_exact: bool,
+    /// Number of global minimizers (the flat moment-matrix rank) when exact.
+    pub num_minimizers: usize,
+    /// Extracted global minimizers. Populated when the minimizer is unique
+    /// (`num_minimizers == 1`); multi-atom extraction (which needs a
+    /// nonsymmetric eigensolver) is a follow-up, so this is empty when
+    /// `num_minimizers > 1`.
+    pub minimizers: Vec<Vec<f64>>,
+}
+
+/// Solve `prob` by the SOS/Lasserre relaxation **and** recover the solution
+/// from the moment matrix: certify exactness via flat truncation and extract
+/// the global minimizer when it is unique. See [`SosSolution`].
+pub fn sos_minimize<F>(prob: &PolyProblem, order: Option<usize>, make_backend: F) -> SosSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let (qp, cones, mi) = build_sos_sdp(prob, order);
+    let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), make_backend);
+    let lower_bound = sol.x.first().copied().unwrap_or(f64::NEG_INFINITY);
+    if sol.status != QpStatus::Optimal {
+        return SosSolution {
+            lower_bound,
+            status: sol.status,
+            is_exact: false,
+            num_minimizers: 0,
+            minimizers: Vec::new(),
+        };
+    }
+
+    // Moments are the equality duals: y_α = sol.y[row_of(α)]. The constant
+    // moment y_0 = 1 by γ-stationarity; flip the sign convention if needed.
+    let moment = |alpha: &[usize]| -> f64 { sol.y[mi.row_of[alpha]] };
+    let zero = vec![0usize; mi.n_vars];
+    let sign = if moment(&zero) < 0.0 { -1.0 } else { 1.0 };
+
+    // Moment matrix M_d[i][j] = y_{basis0ᵢ + basis0ⱼ} (row-major).
+    let big_n = mi.basis0.len();
+    let mut m = vec![0.0; big_n * big_n];
+    for i in 0..big_n {
+        for j in 0..big_n {
+            let a: Vec<usize> = mi.basis0[i]
+                .iter()
+                .zip(&mi.basis0[j])
+                .map(|(p, q)| p + q)
+                .collect();
+            m[i * big_n + j] = sign * moment(&a);
+        }
+    }
+    let rank_full = psd_rank(&m, big_n);
+
+    // Flat truncation: compare with the rank on the degree-≤(d−1) sub-basis.
+    let lower_idx: Vec<usize> = (0..big_n)
+        .filter(|&i| mi.basis0[i].iter().sum::<usize>() < mi.d)
+        .collect();
+    let is_exact = if mi.d == 0 {
+        true // a constant objective is trivially exact
+    } else {
+        let sub_n = lower_idx.len();
+        let mut sub = vec![0.0; sub_n * sub_n];
+        for (a, &ia) in lower_idx.iter().enumerate() {
+            for (b, &ib) in lower_idx.iter().enumerate() {
+                sub[a * sub_n + b] = m[ia * big_n + ib];
+            }
+        }
+        psd_rank(&sub, sub_n) == rank_full
+    };
+
+    let num_minimizers = if is_exact { rank_full } else { 0 };
+
+    // Unique minimizer (rank 1): the first-order moments are the point,
+    // x*_k = y_{x_k} / y_0.
+    let mut minimizers = Vec::new();
+    if is_exact && num_minimizers == 1 && mi.d >= 1 {
+        let y0 = m[0]; // basis0[0] is the constant monomial
+        let mut x = vec![0.0; mi.n_vars];
+        for (k, xk) in x.iter_mut().enumerate() {
+            // Index of the degree-1 monomial e_k in basis0 (always present
+            // for d ≥ 1). x*_k = y_{x_k} / y_0 = M[0][idx] / M[0][0].
+            let e_k: Vec<usize> = (0..mi.n_vars).map(|t| usize::from(t == k)).collect();
+            if let Some(idx) = mi.basis0.iter().position(|b| *b == e_k) {
+                *xk = m[idx] / y0;
+            }
+        }
+        minimizers.push(x);
+    }
+
+    SosSolution {
+        lower_bound,
+        status: sol.status,
+        is_exact,
+        num_minimizers,
+        minimizers,
+    }
+}
+
+/// Numerical rank of a symmetric PSD matrix (row-major `n×n`): the number of
+/// eigenvalues exceeding `1e-6 · λ_max`.
+fn psd_rank(mat: &[f64], n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let mut vals = vec![0.0; n];
+    let mut vecs = vec![0.0; n * n];
+    if !symmetric_eigen(mat, n, &mut vals, &mut vecs) {
+        return n;
+    }
+    let max = vals.iter().cloned().fold(0.0_f64, f64::max);
+    let tol = 1e-6 * max.max(1e-12);
+    vals.iter().filter(|&&l| l > tol).count()
 }
 
 #[cfg(test)]
@@ -408,5 +561,61 @@ mod tests {
             "bound = {}",
             r.lower_bound
         );
+    }
+
+    #[test]
+    fn extract_unique_minimizer_1d() {
+        // p(x) = x² − 4x + 5 = (x−2)² + 1.  Unique min x* = 2, value 1.
+        let p = Polynomial::new(1, vec![(vec![2], 1.0), (vec![1], -4.0), (vec![0], 5.0)]);
+        let s = sos_minimize(&PolyProblem::new(p), None, backend);
+        assert_eq!(s.status, QpStatus::Optimal);
+        assert!(s.is_exact, "should be flat/exact");
+        assert_eq!(s.num_minimizers, 1);
+        assert_eq!(s.minimizers.len(), 1);
+        assert!(
+            (s.minimizers[0][0] - 2.0).abs() < 1e-4,
+            "x* = {:?}",
+            s.minimizers[0]
+        );
+        assert!((s.lower_bound - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn extract_unique_minimizer_2d() {
+        // p(x,y) = (x−1)² + (y−2)².  Unique min (1, 2), value 0.
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![2, 0], 1.0),
+                (vec![1, 0], -2.0),
+                (vec![0, 2], 1.0),
+                (vec![0, 1], -4.0),
+                (vec![0, 0], 5.0),
+            ],
+        );
+        let s = sos_minimize(&PolyProblem::new(p), None, backend);
+        assert_eq!(s.status, QpStatus::Optimal);
+        assert!(s.is_exact);
+        assert_eq!(s.num_minimizers, 1);
+        let x = &s.minimizers[0];
+        assert!(
+            (x[0] - 1.0).abs() < 1e-4 && (x[1] - 2.0).abs() < 1e-4,
+            "x* = {x:?}"
+        );
+    }
+
+    #[test]
+    fn detects_two_global_minimizers() {
+        // p(x) = x⁴ − 2x² + 3 has TWO global minimizers x = ±1 (value 2).
+        // The relaxation is exact (flat) with moment-matrix rank 2; the points
+        // themselves need multi-atom extraction (a follow-up), so only the
+        // exactness + count are reported.
+        let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 3.0)]);
+        let s = sos_minimize(&PolyProblem::new(p), None, backend);
+        assert_eq!(s.status, QpStatus::Optimal);
+        assert!(s.is_exact, "flat truncation should hold");
+        assert_eq!(s.num_minimizers, 2, "two atoms at ±1");
+        assert!(s.minimizers.is_empty(), "multi-atom extraction deferred");
+        assert!((s.lower_bound - 2.0).abs() < 1e-5);
     }
 }
