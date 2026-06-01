@@ -4,6 +4,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod builtin;
+pub mod cbf;
 pub mod citations;
 pub mod cli;
 pub mod counting_tnlp;
