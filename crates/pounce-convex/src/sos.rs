@@ -321,6 +321,15 @@ where
 
 /// The result of [`sos_minimize`]: the certified bound plus, when the moment
 /// matrix is **flat** (exact relaxation), the global minimizer(s).
+///
+/// `is_exact` is a *sufficient* exactness certificate: when it holds,
+/// `lower_bound` is provably the global minimum and `minimizers` are the
+/// global optimizers. It can be `false` even when the relaxation is in fact
+/// exact, because an interior-point solver returns the **maximum-rank**
+/// (analytic-center) optimal moment matrix, which is flat only when the
+/// optimal moment matrix is unique (always so for a unique minimizer;
+/// not necessarily so when the optimum is non-unique). `lower_bound` is a
+/// valid lower bound regardless.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SosSolution {
     /// Certified global lower bound `γ*` (= the global minimum when `is_exact`).
@@ -331,10 +340,9 @@ pub struct SosSolution {
     pub is_exact: bool,
     /// Number of global minimizers (the flat moment-matrix rank) when exact.
     pub num_minimizers: usize,
-    /// Extracted global minimizers. Populated when the minimizer is unique
-    /// (`num_minimizers == 1`); multi-atom extraction (which needs a
-    /// nonsymmetric eigensolver) is a follow-up, so this is empty when
-    /// `num_minimizers > 1`.
+    /// The extracted global minimizers (all `num_minimizers` atoms) when the
+    /// moment matrix is flat; recovered via the self-adjoint multiplication
+    /// operators in the moment inner product (symmetric eigensolver only).
     pub minimizers: Vec<Vec<f64>>,
 }
 
@@ -398,22 +406,12 @@ where
 
     let num_minimizers = if is_exact { rank_full } else { 0 };
 
-    // Unique minimizer (rank 1): the first-order moments are the point,
-    // x*_k = y_{x_k} / y_0.
-    let mut minimizers = Vec::new();
-    if is_exact && num_minimizers == 1 && mi.d >= 1 {
-        let y0 = m[0]; // basis0[0] is the constant monomial
-        let mut x = vec![0.0; mi.n_vars];
-        for (k, xk) in x.iter_mut().enumerate() {
-            // Index of the degree-1 monomial e_k in basis0 (always present
-            // for d ≥ 1). x*_k = y_{x_k} / y_0 = M[0][idx] / M[0][0].
-            let e_k: Vec<usize> = (0..mi.n_vars).map(|t| usize::from(t == k)).collect();
-            if let Some(idx) = mi.basis0.iter().position(|b| *b == e_k) {
-                *xk = m[idx] / y0;
-            }
-        }
-        minimizers.push(x);
-    }
+    // Extract all global minimizers from the (flat) moment matrix.
+    let minimizers = if is_exact && rank_full >= 1 && mi.d >= 1 {
+        extract_atoms(&mi, rank_full, |alpha| sign * sol.y[mi.row_of[alpha]])
+    } else {
+        Vec::new()
+    };
 
     SosSolution {
         lower_bound,
@@ -422,6 +420,127 @@ where
         num_minimizers,
         minimizers,
     }
+}
+
+/// Extract the `r` global minimizers (atoms of the optimal measure) from a
+/// flat moment matrix, using only the symmetric eigensolver.
+///
+/// Multiplication by a real variable `x_k` is **self-adjoint** in the moment
+/// inner product `⟨f,g⟩ = L(fg)`, so whitening the degree-≤(d−1) moment
+/// matrix `M` (`Wᵀ M W = I_r`) turns each multiplication operator into a
+/// symmetric `r×r` matrix `B_k = Wᵀ M^{(k)} W`, where `M^{(k)}_{ij} =
+/// y_{βᵢ+βⱼ+eₖ}` (a shifted moment matrix, available because flatness keeps
+/// the degree ≤ 2d−1). The `B_k` commute, so a generic combination
+/// `Σ cₖ Bₖ` is symmetric with the *common* eigenvectors `q_t`; the atoms'
+/// coordinates are the Rayleigh quotients `x*_{t,k} = q_tᵀ Bₖ q_t`.
+fn extract_atoms(mi: &MomentInfo, r: usize, moment: impl Fn(&[usize]) -> f64) -> Vec<Vec<f64>> {
+    let n = mi.n_vars;
+    // Quotient basis: monomials of degree ≤ d−1 (flatness ⇒ these span it).
+    let sub: Vec<Vec<usize>> = mi
+        .basis0
+        .iter()
+        .filter(|b| b.iter().sum::<usize>() < mi.d)
+        .cloned()
+        .collect();
+    let s = sub.len();
+    if s < r || r == 0 {
+        return Vec::new();
+    }
+    let mono = |i: usize, j: usize, shift: Option<usize>| -> Vec<usize> {
+        (0..n)
+            .map(|t| sub[i][t] + sub[j][t] + usize::from(shift == Some(t)))
+            .collect()
+    };
+
+    // M (s×s) and its top-r eigenpairs → whitening W (s×r), Wᵀ M W = I_r.
+    let mut m = vec![0.0; s * s];
+    for i in 0..s {
+        for j in 0..s {
+            m[i * s + j] = moment(&mono(i, j, None));
+        }
+    }
+    let mut vals = vec![0.0; s];
+    let mut vecs = vec![0.0; s * s]; // column-major eigenvectors, ascending
+    if !symmetric_eigen(&m, s, &mut vals, &mut vecs) {
+        return Vec::new();
+    }
+    // W column t ← eigenvector (s−1−t) scaled by 1/√λ.
+    let mut w = vec![0.0; s * r]; // row-major s×r
+    for t in 0..r {
+        let e = s - 1 - t;
+        let scale = 1.0 / vals[e].max(1e-12).sqrt();
+        for i in 0..s {
+            w[i * r + t] = vecs[e * s + i] * scale;
+        }
+    }
+
+    // Whitened multiplication matrices B_k = Wᵀ M^{(k)} W  (r×r, symmetric).
+    let mut bk: Vec<Vec<f64>> = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut mk = vec![0.0; s * s];
+        for i in 0..s {
+            for j in 0..s {
+                mk[i * s + j] = moment(&mono(i, j, Some(k)));
+            }
+        }
+        // B = Wᵀ Mk W.
+        let mut mw = vec![0.0; s * r]; // Mk · W
+        for i in 0..s {
+            for t in 0..r {
+                let mut acc = 0.0;
+                for j in 0..s {
+                    acc += mk[i * s + j] * w[j * r + t];
+                }
+                mw[i * r + t] = acc;
+            }
+        }
+        let mut b = vec![0.0; r * r];
+        for a in 0..r {
+            for c in 0..r {
+                let mut acc = 0.0;
+                for i in 0..s {
+                    acc += w[i * r + a] * mw[i * r + c];
+                }
+                b[a * r + c] = acc;
+            }
+        }
+        bk.push(b);
+    }
+
+    // Generic combination Σ cₖ Bₖ; its eigenvectors are the common atoms'
+    // directions (cₖ = √(k+1) generically separates the combined eigenvalues).
+    let mut comb = vec![0.0; r * r];
+    for (k, b) in bk.iter().enumerate() {
+        let ck = ((k + 1) as f64).sqrt();
+        for idx in 0..r * r {
+            comb[idx] += ck * b[idx];
+        }
+    }
+    let mut cvals = vec![0.0; r];
+    let mut cvecs = vec![0.0; r * r];
+    if !symmetric_eigen(&comb, r, &mut cvals, &mut cvecs) {
+        return Vec::new();
+    }
+
+    // Atom t: coordinate k = q_tᵀ B_k q_t (q_t orthonormal).
+    let mut atoms = Vec::with_capacity(r);
+    for t in 0..r {
+        let q: Vec<f64> = (0..r).map(|i| cvecs[t * r + i]).collect();
+        let atom: Vec<f64> = bk
+            .iter()
+            .map(|b| {
+                let mut acc = 0.0;
+                for a in 0..r {
+                    for c in 0..r {
+                        acc += q[a] * b[a * r + c] * q[c];
+                    }
+                }
+                acc
+            })
+            .collect();
+        atoms.push(atom);
+    }
+    atoms
 }
 
 /// Numerical rank of a symmetric PSD matrix (row-major `n×n`): the number of
@@ -605,17 +724,47 @@ mod tests {
     }
 
     #[test]
-    fn detects_two_global_minimizers() {
+    fn extracts_two_global_minimizers() {
         // p(x) = x⁴ − 2x² + 3 has TWO global minimizers x = ±1 (value 2).
-        // The relaxation is exact (flat) with moment-matrix rank 2; the points
-        // themselves need multi-atom extraction (a follow-up), so only the
-        // exactness + count are reported.
+        // The relaxation is flat (moment-matrix rank 2) and the multi-atom
+        // extraction recovers both points.
         let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 3.0)]);
         let s = sos_minimize(&PolyProblem::new(p), None, backend);
         assert_eq!(s.status, QpStatus::Optimal);
         assert!(s.is_exact, "flat truncation should hold");
         assert_eq!(s.num_minimizers, 2, "two atoms at ±1");
-        assert!(s.minimizers.is_empty(), "multi-atom extraction deferred");
+        assert_eq!(s.minimizers.len(), 2);
+        let mut roots: Vec<f64> = s.minimizers.iter().map(|m| m[0]).collect();
+        roots.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((roots[0] + 1.0).abs() < 1e-3, "min root {}", roots[0]);
+        assert!((roots[1] - 1.0).abs() < 1e-3, "max root {}", roots[1]);
         assert!((s.lower_bound - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn nonunique_optimum_still_bounds() {
+        // p(x,y) = (x²−1)² + y², global min 0 at (±1, 0). The objective is
+        // SOS, so the bound is exact (0); but the optimum is non-unique (the
+        // y-moments are free), so the interior-point solver's max-rank moment
+        // matrix need not be flat — `is_exact` may be false even though the
+        // bound is correct. We assert the certified bound regardless.
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 0], 1.0),
+                (vec![2, 0], -2.0),
+                (vec![0, 0], 1.0),
+                (vec![0, 2], 1.0),
+            ],
+        );
+        let s = sos_minimize(&PolyProblem::new(p), None, backend);
+        assert_eq!(s.status, QpStatus::Optimal);
+        assert!(s.lower_bound.abs() < 1e-5, "bound = {}", s.lower_bound);
+        // If the (central) moment matrix happened to be flat, the extracted
+        // atoms must be consistent (x ≈ ±1, y ≈ 0).
+        for atom in &s.minimizers {
+            assert!((atom[0].abs() - 1.0).abs() < 1e-2, "x = {}", atom[0]);
+            assert!(atom[1].abs() < 1e-2, "y = {}", atom[1]);
+        }
     }
 }
