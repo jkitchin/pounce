@@ -182,9 +182,22 @@ struct MomentInfo {
 
 /// Build the SOS / Putinar SDP for `prob` at the given (clamped) order,
 /// returning the conic program, its cones, and the moment bookkeeping.
+///
+/// `refine` selects the objective. `None` builds the ordinary lower-bound SDP
+/// (`max γ` s.t. `p − γ` is in the Putinar cone) whose dual moments are the
+/// analytic-center optimum. `Some(ε)` builds the **facial-reduction** SDP: the
+/// objective polynomial is perturbed to `p + ε·θ` with the trace polynomial
+/// `θ = Σ_{|β|≤d} x^{2β}`. Its dual moments then minimize `L(p) + ε·L(θ)` —
+/// i.e. they pick the minimum-trace (lowest-rank) moment matrix among the
+/// near-optimal ones, a standard nuclear-norm/low-rank surrogate. Because
+/// `p + ε·θ` is coercive this stays as well-conditioned as the unperturbed
+/// solve (unlike pinning `L(p)=γ*`, which is degenerate when `γ*≈0`), and the
+/// recovered moment matrix is flat even when the optimum is non-unique. The
+/// reported bound still comes from the unperturbed solve.
 fn build_sos_sdp(
     prob: &PolyProblem,
     order: Option<usize>,
+    refine: Option<f64>,
 ) -> (QpProblem, Vec<ConeSpec>, MomentInfo) {
     let n = prob.n_vars;
     let r2 = std::f64::consts::SQRT_2;
@@ -253,11 +266,22 @@ fn build_sos_sdp(
             }
         }
     }
+
     let n_x = col;
+
+    // Coefficient-matching RHS: the objective `p`, perturbed by `ε·θ` (with the
+    // trace polynomial `θ = Σ_b x^{2b}`) when doing the facial-reduction solve.
+    let pc = prob.objective.coeff_map();
+    let mut rhs = pc.clone();
+    if let Some(eps) = refine {
+        for b in &basis0 {
+            let dbl: Vec<usize> = b.iter().map(|e| 2 * e).collect();
+            *rhs.entry(dbl).or_insert(0.0) += eps;
+        }
+    }
 
     // One coefficient-matching equality per distinct monomial; record the
     // monomial→row map so the equality duals can be read back as moments.
-    let pc = prob.objective.coeff_map();
     let zero_exp = vec![0usize; n];
     let mut a: Vec<Triplet> = Vec::new();
     let mut b: Vec<f64> = Vec::new();
@@ -270,11 +294,12 @@ fn build_sos_sdp(
         if *alpha == zero_exp {
             a.push(Triplet::new(row, 0, 1.0)); // + γ
         }
-        b.push(pc.get(alpha).copied().unwrap_or(0.0));
+        b.push(rhs.get(alpha).copied().unwrap_or(0.0));
         row_of.insert(alpha.clone(), row);
     }
 
-    // Objective: maximize γ  ⇔  minimize −γ.
+    // Objective: maximize γ  ⇔  minimize −γ. (The refinement biases the dual
+    // moments toward low trace purely through the perturbed RHS above.)
     let mut c = vec![0.0; n_x];
     c[0] = -1.0;
 
@@ -311,7 +336,7 @@ pub fn sos_constrained_lower_bound_opts<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    let (qp, cones, _moments) = build_sos_sdp(prob, order);
+    let (qp, cones, _moments) = build_sos_sdp(prob, order, None);
     let sol = solve_socp_ipm(&qp, &cones, opts, make_backend);
     SosBound {
         lower_bound: sol.x.first().copied().unwrap_or(f64::NEG_INFINITY),
@@ -324,12 +349,19 @@ where
 ///
 /// `is_exact` is a *sufficient* exactness certificate: when it holds,
 /// `lower_bound` is provably the global minimum and `minimizers` are the
-/// global optimizers. It can be `false` even when the relaxation is in fact
-/// exact, because an interior-point solver returns the **maximum-rank**
-/// (analytic-center) optimal moment matrix, which is flat only when the
-/// optimal moment matrix is unique (always so for a unique minimizer;
-/// not necessarily so when the optimum is non-unique). `lower_bound` is a
-/// valid lower bound regardless.
+/// global optimizers.
+///
+/// An interior-point solver returns the **maximum-rank** (analytic-center)
+/// optimal moment matrix, which is flat only when the optimal moment matrix is
+/// unique — so a non-unique optimum would defeat flat truncation. To recover
+/// these cases [`sos_minimize`] applies **facial reduction**: when the central
+/// moment matrix is not flat it re-solves with a small trace penalty (a
+/// low-rank surrogate) that collapses the spurious rank, so a non-unique but
+/// exact optimum still certifies and all of its minimizers are extracted.
+/// `is_exact` can still be `false` — e.g. when the relaxation order is too low
+/// for flatness to be attainable (the moment-matrix rank exceeds the lower
+/// basis dimension), or for a genuinely non-SOS-exact relaxation — but
+/// `lower_bound` is a valid lower bound regardless.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SosSolution {
     /// Certified global lower bound `γ*` (= the global minimum when `is_exact`).
@@ -349,12 +381,12 @@ pub struct SosSolution {
 /// Solve `prob` by the SOS/Lasserre relaxation **and** recover the solution
 /// from the moment matrix: certify exactness via flat truncation and extract
 /// the global minimizer when it is unique. See [`SosSolution`].
-pub fn sos_minimize<F>(prob: &PolyProblem, order: Option<usize>, make_backend: F) -> SosSolution
+pub fn sos_minimize<F>(prob: &PolyProblem, order: Option<usize>, mut make_backend: F) -> SosSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    let (qp, cones, mi) = build_sos_sdp(prob, order);
-    let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), make_backend);
+    let (qp, cones, mi) = build_sos_sdp(prob, order, None);
+    let sol = solve_socp_ipm(&qp, &cones, &QpOptions::default(), &mut make_backend);
     let lower_bound = sol.x.first().copied().unwrap_or(f64::NEG_INFINITY);
     if sol.status != QpStatus::Optimal {
         return SosSolution {
@@ -366,9 +398,49 @@ where
         };
     }
 
-    // Moments are the equality duals: y_α = sol.y[row_of(α)]. The constant
-    // moment y_0 = 1 by γ-stationarity; flip the sign convention if needed.
-    let moment = |alpha: &[usize]| -> f64 { sol.y[mi.row_of[alpha]] };
+    let mut rec = recover_from_moments(&mi, &sol.y);
+
+    // Facial reduction. The interior-point solver lands on the analytic-center
+    // (maximum-rank) optimal moment matrix, which is flat only when the optimum
+    // is unique; a non-unique optimum (free moment directions, or spurious
+    // pseudo-moments invisible to a finite relaxation) inflates the rank and
+    // defeats flat truncation. Re-solve with a small trace penalty `ε·θ` on the
+    // objective (a low-rank / nuclear-norm surrogate): its moments collapse the
+    // spurious rank, so an exact relaxation now certifies and the minimizers
+    // can be extracted. The reported bound stays the unperturbed `γ*`.
+    if !rec.is_exact {
+        const TRACE_EPS: f64 = 1e-4;
+        let (qp2, cones2, mi2) = build_sos_sdp(prob, order, Some(TRACE_EPS));
+        let sol2 = solve_socp_ipm(&qp2, &cones2, &QpOptions::default(), &mut make_backend);
+        if sol2.status == QpStatus::Optimal {
+            let rec2 = recover_from_moments(&mi2, &sol2.y);
+            if rec2.is_exact {
+                rec = rec2;
+            }
+        }
+    }
+
+    SosSolution {
+        lower_bound,
+        status: sol.status,
+        is_exact: rec.is_exact,
+        num_minimizers: rec.num_minimizers,
+        minimizers: rec.minimizers,
+    }
+}
+
+/// Flat-truncation test + minimizer extraction from an SDP solution's moments.
+struct Recovery {
+    is_exact: bool,
+    num_minimizers: usize,
+    minimizers: Vec<Vec<f64>>,
+}
+
+/// Read the moment matrix out of the equality duals `y` (`y_α = y[row_of(α)]`,
+/// with `y_0 = 1` by γ-stationarity up to a global sign), test flat truncation
+/// (`rank M_d = rank M_{d−1}`), and extract the global minimizers when flat.
+fn recover_from_moments(mi: &MomentInfo, y: &[f64]) -> Recovery {
+    let moment = |alpha: &[usize]| -> f64 { y[mi.row_of[alpha]] };
     let zero = vec![0usize; mi.n_vars];
     let sign = if moment(&zero) < 0.0 { -1.0 } else { 1.0 };
 
@@ -388,12 +460,12 @@ where
     let rank_full = psd_rank(&m, big_n);
 
     // Flat truncation: compare with the rank on the degree-≤(d−1) sub-basis.
-    let lower_idx: Vec<usize> = (0..big_n)
-        .filter(|&i| mi.basis0[i].iter().sum::<usize>() < mi.d)
-        .collect();
     let is_exact = if mi.d == 0 {
         true // a constant objective is trivially exact
     } else {
+        let lower_idx: Vec<usize> = (0..big_n)
+            .filter(|&i| mi.basis0[i].iter().sum::<usize>() < mi.d)
+            .collect();
         let sub_n = lower_idx.len();
         let mut sub = vec![0.0; sub_n * sub_n];
         for (a, &ia) in lower_idx.iter().enumerate() {
@@ -405,17 +477,13 @@ where
     };
 
     let num_minimizers = if is_exact { rank_full } else { 0 };
-
-    // Extract all global minimizers from the (flat) moment matrix.
     let minimizers = if is_exact && rank_full >= 1 && mi.d >= 1 {
-        extract_atoms(&mi, rank_full, |alpha| sign * sol.y[mi.row_of[alpha]])
+        extract_atoms(mi, rank_full, |alpha| sign * y[mi.row_of[alpha]])
     } else {
         Vec::new()
     };
 
-    SosSolution {
-        lower_bound,
-        status: sol.status,
+    Recovery {
         is_exact,
         num_minimizers,
         minimizers,
@@ -742,12 +810,14 @@ mod tests {
     }
 
     #[test]
-    fn nonunique_optimum_still_bounds() {
+    fn facial_reduction_recovers_nonunique_minimizers() {
         // p(x,y) = (x²−1)² + y², global min 0 at (±1, 0). The objective is
-        // SOS, so the bound is exact (0); but the optimum is non-unique (the
-        // y-moments are free), so the interior-point solver's max-rank moment
-        // matrix need not be flat — `is_exact` may be false even though the
-        // bound is correct. We assert the certified bound regardless.
+        // SOS so the bound is exact (0), but the optimum is non-unique: the
+        // interior-point solver lands on the analytic-center moment matrix,
+        // whose rank is inflated by a spurious pseudo-moment direction
+        // (L(y⁴) > 0 while L(y²) = 0), so plain flat truncation fails. The
+        // facial-reduction (minimum-trace) re-solve collapses that rank and
+        // recovers both minimizers.
         let p = Polynomial::new(
             2,
             vec![
@@ -760,10 +830,13 @@ mod tests {
         let s = sos_minimize(&PolyProblem::new(p), None, backend);
         assert_eq!(s.status, QpStatus::Optimal);
         assert!(s.lower_bound.abs() < 1e-5, "bound = {}", s.lower_bound);
-        // If the (central) moment matrix happened to be flat, the extracted
-        // atoms must be consistent (x ≈ ±1, y ≈ 0).
+        assert!(s.is_exact, "facial reduction should certify exactness");
+        assert_eq!(s.num_minimizers, 2, "two atoms at (±1, 0)");
+        let mut xs: Vec<f64> = s.minimizers.iter().map(|m| m[0]).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((xs[0] + 1.0).abs() < 1e-2, "x⁻ = {}", xs[0]);
+        assert!((xs[1] - 1.0).abs() < 1e-2, "x⁺ = {}", xs[1]);
         for atom in &s.minimizers {
-            assert!((atom[0].abs() - 1.0).abs() < 1e-2, "x = {}", atom[0]);
             assert!(atom[1].abs() < 1e-2, "y = {}", atom[1]);
         }
     }

@@ -49,10 +49,12 @@ class SosResult:
         Underlying SDP solve status (``"optimal"`` on success).
     is_exact:
         ``True`` when the moment matrix is flat — a *sufficient* certificate
-        that ``lower_bound`` is the global minimum. It can be ``False`` even
-        for an exact relaxation: an interior-point solver returns the
-        maximum-rank optimal moment matrix, which is flat only when the
-        optimal moment matrix is unique. ``lower_bound`` is valid either way.
+        that ``lower_bound`` is the global minimum. Non-unique optima (which an
+        interior-point solver would otherwise return at inflated rank) are
+        handled by a facial-reduction re-solve, so all global minimizers are
+        recovered in that case too. It can still be ``False`` — e.g. when the
+        relaxation order is too low for flatness, or the relaxation is not
+        exact — but ``lower_bound`` is a valid lower bound either way.
     num_minimizers:
         Number of global minimizers detected (the flat moment-matrix rank).
     minimizers:

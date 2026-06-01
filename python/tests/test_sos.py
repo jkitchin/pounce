@@ -27,6 +27,20 @@ def test_univariate_quartic_two_minimizers():
     assert abs(roots[0] + 1.0) < 1e-3 and abs(roots[1] - 1.0) < 1e-3
 
 
+def test_facial_reduction_nonunique_minimizers():
+    # (x²−1)² + y² → min 0 at (±1, 0). Non-unique optimum: the interior-point
+    # solver's central moment matrix is rank-inflated, so flat truncation only
+    # succeeds via the facial-reduction (trace-penalty) re-solve.
+    p = {(4, 0): 1.0, (2, 0): -2.0, (0, 0): 1.0, (0, 2): 1.0}
+    r = sos_minimize(p)
+    assert r.success
+    assert abs(r.lower_bound) < 1e-5
+    assert r.is_exact and r.num_minimizers == 2
+    xs = sorted(float(m[0]) for m in r.minimizers)
+    assert abs(xs[0] + 1.0) < 1e-2 and abs(xs[1] - 1.0) < 1e-2
+    assert all(abs(float(m[1])) < 1e-2 for m in r.minimizers)
+
+
 def test_unique_minimizer_2d():
     # (x−1)² + (y−2)² → min 0 at (1, 2).
     p = {(2, 0): 1.0, (1, 0): -2.0, (0, 2): 1.0, (0, 1): -4.0, (0, 0): 5.0}
