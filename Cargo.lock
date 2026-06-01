@@ -1060,6 +1060,7 @@ dependencies = [
  "pounce-common",
  "pounce-convex",
  "pounce-feral",
+ "pounce-global",
  "pounce-linsol",
  "pounce-nl",
  "pounce-nlp",

@@ -19,6 +19,7 @@
 
 use pyo3::prelude::*;
 
+mod global_opt;
 mod nl_problem;
 mod problem;
 mod qp;
@@ -56,6 +57,8 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(qp::solve_qp_multi_rhs, m)?)?;
     // SOS polynomial global optimizer (pounce-convex::sos).
     m.add_function(wrap_pyfunction!(sos::sos_minimize, m)?)?;
+    // Spatial branch-and-bound global optimizer (pounce-global).
+    m.add_function(wrap_pyfunction!(global_opt::solve_global, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

@@ -29,6 +29,7 @@ from .qp import (
     solve_qp_multi_rhs,
 )
 from .sos import sos_minimize, SosResult
+from .global_opt import minimize_global, GlobalResult
 
 __all__ = [
     # Nonlinear programming (cyipopt-compatible)
@@ -60,5 +61,8 @@ __all__ = [
     # Polynomial global optimization (SOS / Lasserre)
     "sos_minimize",
     "SosResult",
+    # Spatial branch-and-bound global optimization (general factorable nonconvex)
+    "minimize_global",
+    "GlobalResult",
     "__version__",
 ]

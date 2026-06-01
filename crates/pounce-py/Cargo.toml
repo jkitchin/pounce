@@ -32,6 +32,7 @@ pounce-nl.workspace = true
 pounce-algorithm.workspace = true
 pounce-qp.workspace = true
 pounce-convex.workspace = true
+pounce-global.workspace = true
 pounce-restoration.workspace = true
 pounce-feral.workspace = true
 pounce-linsol.workspace = true
