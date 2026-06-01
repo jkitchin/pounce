@@ -2155,3 +2155,84 @@ def test_inverse_map_rhs_warm_matches_cold_pounce_91():
     rhs_w = inverse_map_rhs(jp, dy_ds, warm=True)
     jit_val = jax.jit(rhs_w)(0.3, theta0)
     assert np.all(np.isfinite(np.asarray(jit_val)))
+
+
+def test_inverse_map_rhs_nonidentity_output_pounce_91():
+    """Issue #91: a NON-identity output exercises the
+    ``∂y/∂θ = ∂h/∂x · J + ∂h/∂θ`` branch — the general case the identity
+    round-trip test never touches (and a non-square ``n != p``: here ``n=1``,
+    ``p=2``, output dim ``k=2``).
+
+    Inner ``min_x (x − θ0)²`` ⇒ ``x*(θ) = θ0`` (so ``J = ∂x*/∂θ = [1, 0]``).
+    Output ``h = [x + θ1, x − θ1]`` ⇒ ``y = [θ0+θ1, θ0−θ1] = A θ`` with
+    ``A = [[1,1],[1,−1]]`` (and ``∂y/∂θ = A``), so the inverse map is the
+    constant linear solve ``θ(s) = A⁻¹ y(s)`` — an exact analytic check that
+    both the ``∂h/∂x · J`` and the ``∂h/∂θ`` terms are formed correctly.
+    """
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return (x[0] - p[0]) ** 2
+
+    jp = JaxProblem(
+        f=f, g=None, n=1, m=0, p_example=jnp.zeros(2),
+        options={"tol": 1e-11, "print_level": 0, "sb": "yes"},
+    )
+
+    def output(x, theta):
+        return jnp.array([x[0] + theta[1], x[0] - theta[1]])
+
+    A = np.array([[1.0, 1.0], [1.0, -1.0]])
+    Ainv = np.linalg.inv(A)
+    y0 = np.array([0.3, -0.2])
+    y1 = np.array([1.0, 0.4])
+
+    # Straight-line output path y(s) = y0 + s (y1 − y0) ⇒ dy/ds constant.
+    rhs = inverse_map_rhs(jp, jnp.asarray(y1 - y0), output=output)
+    TH = _rk4(rhs, jnp.asarray(Ainv @ y0), n_steps=80)        # (K, 2)
+
+    S = np.linspace(0.0, 1.0, TH.shape[0])
+    ys = y0[None, :] + S[:, None] * (y1 - y0)                 # (K, 2)
+    theta_analytic = ys @ Ainv.T                              # θ = A⁻¹ y
+    assert float(np.max(np.abs(TH - theta_analytic))) < 1e-6
+    assert float(np.max(np.abs(TH[-1] - Ainv @ y1))) < 1e-6
+
+
+def test_inverse_map_rhs_requires_square_output_pounce_91():
+    """Issue #91: ``∂y/∂θ`` must be square (output dim ``k == p``). The default
+    identity output with ``n != p`` is non-square and is rejected up front with
+    a clear error, rather than a low-level LinAlgError inside the callback."""
+    from pounce.jax import JaxProblem, inverse_map_rhs
+
+    def f(x, p):
+        return jnp.sum((x - p[0]) ** 2)
+
+    jp = JaxProblem(
+        f=f, g=None, n=3, m=0, p_example=jnp.zeros(2),
+        options={"print_level": 0, "sb": "yes"},
+    )
+    with pytest.raises(ValueError, match="square"):
+        inverse_map_rhs(jp, jnp.zeros(3))               # identity ⇒ k=n=3 ≠ p=2
+
+
+def test_follow_rejects_inequality_constraints_pounce_90():
+    """Issue #90: ``follow`` / ``trace_arclength`` assume a fixed active set of
+    equalities; a two-sided inequality (``cl != cu``) makes the monitor's
+    ``max|g|`` residual invalid, so it is rejected explicitly."""
+    from pounce.jax import JaxProblem, PathFollower
+
+    def f(x, p):
+        return jnp.sum((x - p) ** 2)
+
+    def g(x, p):
+        return jnp.array([x[0] + x[1]])
+
+    jp = JaxProblem(
+        f=f, g=g, n=2, m=1,
+        cl=jnp.array([-1.0]), cu=jnp.array([1.0]),     # inequality: cl != cu
+        p_example=jnp.zeros(2),
+        options={"print_level": 0, "sb": "yes"},
+    )
+    pf = PathFollower(jp)
+    with pytest.raises(ValueError, match="inequality"):
+        pf.follow(lambda s: jnp.array([s, s]), (0.0, 1.0), jnp.zeros(2))

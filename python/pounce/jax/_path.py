@@ -46,6 +46,26 @@ import numpy as np
 _OK_STATUS = ("Solve_Succeeded", "Solved_To_Acceptable_Level")
 
 
+def _require_equality_constraints(jp, where):
+    """Guard: path continuation here assumes a fixed active set in which every
+    general constraint is an equality (``cl == cu``). For a two-sided
+    inequality (``cl != cu``) the smooth-drift monitor's constraint residual
+    (``max|g|``, valid only at ``g = 0``) and the arclength system ``R`` (which
+    treats every row as ``g = 0``) are wrong, so reject it explicitly rather
+    than silently over-correct / mis-trace."""
+    if jp._m > 0:
+        cl = np.asarray(jp._cl_for_classify)
+        cu = np.asarray(jp._cu_for_classify)
+        if np.any(cl != cu):
+            raise ValueError(
+                f"{where} supports equality constraints (cl == cu) and "
+                "variable bounds only; this problem has two-sided inequality "
+                "constraints (cl != cu), for which the active-set monitor and "
+                "KKT residual are not yet valid. Reformulate the inequalities "
+                "with slack equalities, or remove them."
+            )
+
+
 def inverse_map_rhs(jp, dy_ds, *, output=None, x0=None, warm=False):
     """Build the right-hand side of the inverse / uncertainty-mapping ODE
     (Alves–Kitchin–Lima, pounce#84 Eq. 3; pounce#91):
@@ -142,6 +162,33 @@ def inverse_map_rhs(jp, dy_ds, *, output=None, x0=None, warm=False):
     x0_arr = jnp.zeros(n, dtype=jnp.float64) if x0 is None \
         else jnp.asarray(x0, dtype=jnp.float64)
     h = output if output is not None else (lambda x, theta: x)
+
+    # ∂y/∂θ must be square (output dim k == parameter dim p) for the linear
+    # solve dθ/ds = (∂y/∂θ)^{-1} dy/ds to be well-posed. Check the output
+    # dimension up front (via shape inference — no NLP solve) so a mismatch
+    # raises a clear error here, not an opaque LinAlgError inside the callback.
+    if output is None:
+        k = n
+    else:
+        out_shape = jax.eval_shape(
+            h, jnp.zeros(n, dtype=jnp.float64), jnp.zeros(p, dtype=jnp.float64)
+        )
+        if len(out_shape.shape) != 1:
+            raise ValueError(
+                "inverse_map_rhs output h(x, θ) must be 1-D; got shape "
+                f"{out_shape.shape}."
+            )
+        k = out_shape.shape[0]
+    if k != p:
+        detail = (
+            " (the default identity output ⇒ k = n, so this needs n == p)"
+            if output is None else ""
+        )
+        raise ValueError(
+            "inverse_map_rhs requires a square output sensitivity ∂y/∂θ: the "
+            f"output dimension k={k} must equal the parameter dimension "
+            f"p={p}{detail}."
+        )
     result_shape = jax.ShapeDtypeStruct((p,), jnp.float64)
 
     # Mutable warm cache (perf-only): last converged primal / duals / μ.
@@ -353,6 +400,7 @@ class PathFollower:
         PathTrace
         """
         jp = self._jp
+        _require_equality_constraints(jp, "PathFollower.follow")
         s0, s1 = float(s_span[0]), float(s_span[1])
         if not (s1 > s0):
             raise ValueError("s_span must have s1 > s0")
@@ -539,6 +587,7 @@ class PathFollower:
                 "trace_arclength supports a scalar parameter only "
                 f"(p_shape={jp._p_shape}); use follow(...) for a path."
             )
+        _require_equality_constraints(jp, "PathFollower.trace_arclength")
         d = n + m  # number of equations in R
 
         def _theta_arg(theta_scalar):
