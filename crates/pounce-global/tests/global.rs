@@ -266,6 +266,34 @@ fn obbt_reduces_nodes() {
 }
 
 #[test]
+fn alphabb_cuts_toggle() {
+    // f(x, y) = x·y on [−1, 1]² (global min −1). The objective is nonconvex
+    // (indefinite Hessian), so αBB applies a positive spectral shift. Solve with
+    // αBB cuts on (default) and off — both certify the optimum, exercising the
+    // interval-Hessian / spectral-shift path and the validity of its cuts.
+    let f = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![-1.0, -1.0], vec![1.0, 1.0], &f);
+
+    let on = solve_global(&prob, &GlobalOptions::default(), backend);
+    let off = solve_global(
+        &prob,
+        &GlobalOptions {
+            alphabb_cuts: 0,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    for sol in [&on, &off] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective + 1.0).abs() < 1e-3,
+            "obj = {}",
+            sol.objective
+        );
+    }
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).

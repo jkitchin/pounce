@@ -78,6 +78,11 @@ pub struct GlobalOptions {
     /// solves that minimize/maximize every variable over the relaxation, with an
     /// incumbent cutoff). The strongest box reducer, but costly — `0` disables.
     pub obbt_passes: usize,
+    /// Number of αBB tangent-plane underestimator cuts added to the objective
+    /// per node (sample points across the box). αBB convexifies the objective as
+    /// a whole via an interval-Hessian spectral shift, complementing the
+    /// factorable relaxation. `0` disables.
+    pub alphabb_cuts: usize,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -93,6 +98,7 @@ impl Default for GlobalOptions {
             local_solve_iters: 50,
             sandwich_rounds: 4,
             obbt_passes: 2,
+            alphabb_cuts: 1,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -259,6 +265,20 @@ where
         let mut qp = relax.qp;
         let atoms = relax.atoms;
         let (col_lo, col_hi) = (qp.lb.clone(), qp.ub.clone());
+        // αBB tangent-plane underestimators of the objective as a whole,
+        // complementing the factorable relaxation of its individual atoms.
+        if opts.alphabb_cuts > 0 {
+            if let Some(oc) = relax.obj_col {
+                let cuts = crate::alphabb::objective_cuts(
+                    &prob.objective,
+                    &lo,
+                    &hi,
+                    oc,
+                    opts.alphabb_cuts,
+                );
+                crate::relax::append_cuts(&mut qp, &cuts);
+            }
+        }
         let sol = solve_qp_ipm(&qp, &qp_opts, &mut make_backend);
         let mut node_lb = match sol.status {
             QpStatus::Optimal => sol.obj,

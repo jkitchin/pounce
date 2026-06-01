@@ -35,6 +35,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod ad;
+mod alphabb;
 pub mod bnb;
 mod envelope;
 pub mod expr;
