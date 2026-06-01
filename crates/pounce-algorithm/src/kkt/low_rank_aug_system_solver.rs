@@ -921,6 +921,76 @@ mod tests {
     }
 
     #[test]
+    fn smw_reports_wrong_inertia_on_indefinite_negative_update() {
+        // 1×1 system: W = b0 − u² with u² > b0, so B = 2 − 4 = −2 is
+        // genuinely indefinite — the SR1 negative-curvature regime. The
+        // SMW middle matrix M2 = 1 − Utilde2ᵀU = 1 − u²/b0 = −1 is then
+        // not positive definite, so its Cholesky must fail and the solver
+        // must report `WrongInertia` — the signal the perturbation handler
+        // keys on to correct the step — rather than silently returning a
+        // garbage solve. (`number_of_neg_evals` is not asserted here: with
+        // a real inertia-providing inner solver it delegates to the inner;
+        // the mock reports 0.)
+        let space_x = DenseVectorSpace::new(1);
+        let space_zero = DenseVectorSpace::new(0);
+        let lr_space = LowRankUpdateSymMatrixSpace::new(1, None, false);
+        let mut lr = lr_space.make_new_low_rank();
+        lr.set_diag(dvec_rc(&space_x, &[2.0]));
+        let u_space = MultiVectorMatrixSpace::new(1, Rc::clone(&space_x));
+        let mut u_mvm = u_space.make_new_multi_vector();
+        u_mvm.set_vector(0, dvec_rc(&space_x, &[2.0]) as Rc<dyn Vector>);
+        lr.set_u(Rc::new(u_mvm));
+        let lr_rc: Rc<LowRankUpdateSymMatrix> = Rc::new(lr);
+
+        let mut solver = LowRankAugSystemSolver::new(Box::new(DiagInner {
+            calls: Cell::new(0),
+        }));
+
+        let j_c_space = pounce_linalg::dense_gen_matrix::DenseGenMatrixSpace::new(0, 1);
+        let j_d_space = pounce_linalg::dense_gen_matrix::DenseGenMatrixSpace::new(0, 1);
+        let j_c = j_c_space.make_new_dense_gen();
+        let j_d = j_d_space.make_new_dense_gen();
+
+        let coeffs = AugSysCoeffs {
+            w: Some(lr_rc.as_ref() as &dyn SymMatrix),
+            w_factor: 1.0,
+            d_x: None,
+            delta_x: 0.0,
+            d_s: None,
+            delta_s: 0.0,
+            j_c: &j_c as &dyn Matrix,
+            d_c: None,
+            delta_c: 0.0,
+            j_d: &j_d as &dyn Matrix,
+            d_d: None,
+            delta_d: 0.0,
+        };
+
+        let rhs_x = dvec(&space_x, &[1.0]);
+        let rhs_s = dvec(&space_zero, &[]);
+        let rhs_c = dvec(&space_zero, &[]);
+        let rhs_d = dvec(&space_zero, &[]);
+        let rhs = AugSysRhs {
+            rhs_x: &rhs_x,
+            rhs_s: &rhs_s,
+            rhs_c: &rhs_c,
+            rhs_d: &rhs_d,
+        };
+        let mut sol_x = dvec(&space_x, &[0.0]);
+        let mut sol_s = dvec(&space_zero, &[]);
+        let mut sol_c = dvec(&space_zero, &[]);
+        let mut sol_d = dvec(&space_zero, &[]);
+        let mut sol = AugSysSol {
+            sol_x: &mut sol_x,
+            sol_s: &mut sol_s,
+            sol_c: &mut sol_c,
+            sol_d: &mut sol_d,
+        };
+        let status = solver.solve(&coeffs, &rhs, &mut sol, false, 0);
+        assert_eq!(status, ESymSolverStatus::WrongInertia);
+    }
+
+    #[test]
     fn smw_with_v_and_u_combines_corrections() {
         // 1×1 system: W = b0 + v² − u² (rank-2 update). Solve checks
         // both correction passes compose correctly.
