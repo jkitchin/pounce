@@ -12,7 +12,7 @@
 //! previous bare [`NonnegCone`] path; the seam exists so SOC (and later
 //! cones) plug in as new [`ConeKind`] variants without touching the driver.
 
-use super::{Cone, ConeBlock, NonnegCone, SecondOrderCone};
+use super::{Cone, ConeBlock, NonnegCone, PsdCone, SecondOrderCone};
 
 /// Declarative description of one cone block in a problem's inequality
 /// partition (the data form; [`ConeKind`] is the runtime form). The blocks
@@ -33,6 +33,10 @@ pub enum ConeSpec {
     /// `α ∈ (0, 1)`. **Non-symmetric** — routes to the non-symmetric HSDE
     /// driver like [`ConeSpec::Exponential`].
     Power(f64),
+    /// Positive-semidefinite cone over symmetric `n×n` matrices (the stored
+    /// `usize` is the matrix size `n`). Self-scaled, so it stays on the
+    /// symmetric driver; it spans `n(n+1)/2` rows in `svec` coordinates.
+    Psd(usize),
 }
 
 impl ConeSpec {
@@ -41,6 +45,7 @@ impl ConeSpec {
         match self {
             ConeSpec::Nonneg(n) | ConeSpec::SecondOrder(n) => *n,
             ConeSpec::Exponential | ConeSpec::Power(_) => 3,
+            ConeSpec::Psd(n) => n * (n + 1) / 2,
         }
     }
 }
@@ -53,6 +58,8 @@ pub enum ConeKind {
     Nonneg(NonnegCone),
     /// Second-order (Lorentz) cone.
     SecondOrder(SecondOrderCone),
+    /// Positive-semidefinite cone (self-scaled; dense `W⊗ₛW` KKT block).
+    Psd(PsdCone),
 }
 
 /// Dispatch a `Cone` call to whichever concrete cone this variant wraps.
@@ -61,6 +68,7 @@ macro_rules! dispatch {
         match $self {
             ConeKind::Nonneg($c) => $body,
             ConeKind::SecondOrder($c) => $body,
+            ConeKind::Psd($c) => $body,
         }
     };
 }
@@ -156,6 +164,7 @@ impl CompositeCone {
             .map(|s| match s {
                 ConeSpec::Nonneg(n) => ConeKind::Nonneg(NonnegCone::new(*n)),
                 ConeSpec::SecondOrder(m) => ConeKind::SecondOrder(SecondOrderCone::new(*m)),
+                ConeSpec::Psd(n) => ConeKind::Psd(PsdCone::new(*n)),
                 ConeSpec::Exponential | ConeSpec::Power(_) => unreachable!(
                     "non-symmetric cones (exponential/power) must route to \
                      hsde_nonsym before CompositeCone assembly"

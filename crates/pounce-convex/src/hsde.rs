@@ -623,4 +623,52 @@ mod tests {
         let sol = solve_conic_hsde(&prob, &cone, &opts(), backend);
         assert_eq!(sol.status, QpStatus::DualInfeasible);
     }
+
+    /// SDP `max λ s.t. M − λI ⪰ 0` ⇒ `λ = λ_min(M)`. Diagonal `M = diag(2,5)`
+    /// (λ_min = 2): the PSD slack `s = svec(M − λI)` exercises the dense
+    /// `(z,z)` block on a diagonal matrix. Solved through the public conic
+    /// entry `solve_socp_ipm` with a `Psd(2)` cone.
+    #[test]
+    fn psd_min_eigenvalue_diagonal() {
+        // x = (λ); minimize −λ. G·x places λ on the diagonal svec entries
+        // (positions 0 and 2 for a 2×2), h = svec(M), s = svec(M − λI) ⪰ 0.
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(2, 0, 1.0)],
+            h: vec![2.0, 0.0, 5.0], // svec(diag(2,5))
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_socp_ipm(&prob, &[ConeSpec::Psd(2)], &opts(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.status);
+        assert!((sol.x[0] - 2.0).abs() < 1e-5, "λ = {}", sol.x[0]);
+        assert!((sol.obj + 2.0).abs() < 1e-5, "obj = {}", sol.obj);
+    }
+
+    /// Same SDP with a **non-diagonal** `M = [[2,1],[1,2]]` (λ_min = 1), so
+    /// the PSD slack has a nonzero off-diagonal — exercising the off-diagonal
+    /// entries of the dense `W ⊗ₛ W` scaling block.
+    #[test]
+    fn psd_min_eigenvalue_offdiagonal() {
+        let r2 = std::f64::consts::SQRT_2;
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(2, 0, 1.0)],
+            h: vec![2.0, r2, 2.0], // svec([[2,1],[1,2]])
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_socp_ipm(&prob, &[ConeSpec::Psd(2)], &opts(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.status);
+        assert!((sol.x[0] - 1.0).abs() < 1e-5, "λ = {}", sol.x[0]);
+        assert!((sol.obj + 1.0).abs() < 1e-5, "obj = {}", sol.obj);
+    }
 }

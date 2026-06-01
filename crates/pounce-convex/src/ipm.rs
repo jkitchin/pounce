@@ -188,11 +188,23 @@ where
             0,
         );
     }
-    // Non-symmetric cones (exponential) route to the dedicated HSDE driver.
-    if cones
+    // Non-symmetric cones (exponential / power) route to the dedicated HSDE
+    // driver; self-scaled cones (orthant / SOC / PSD) stay on the symmetric
+    // path below. Mixing the two families in one problem is not supported.
+    let has_nonsym = cones
         .iter()
-        .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)))
-    {
+        .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)));
+    let has_psd = cones.iter().any(|c| matches!(c, ConeSpec::Psd(_)));
+    if has_nonsym && has_psd {
+        return failed_solution(
+            prob,
+            vec![0.0; prob.n],
+            vec![0.0; prob.m_eq()],
+            vec![0.0; prob.m_ineq()],
+            0,
+        );
+    }
+    if has_nonsym {
         return solve_nonsym(prob, cones, opts, make_backend);
     }
     if !prob.has_bounds() {
@@ -269,6 +281,12 @@ where
                 ConeSpec::SecondOrder(m) => blocks.push(NsBlock::SecondOrder(*m)),
                 ConeSpec::Exponential => blocks.push(NsBlock::exp()),
                 ConeSpec::Power(a) => blocks.push(NsBlock::power(*a)),
+                // PSD is self-scaled and runs on the symmetric driver; the
+                // PSD-with-exp/power mix is rejected upstream in
+                // `solve_socp_ipm`, so this arm is never reached.
+                ConeSpec::Psd(_) => {
+                    unreachable!("PSD cone routes to the symmetric driver, not hsde_nonsym")
+                }
             }
         }
         if extra_orthant > 0 {
@@ -1071,6 +1089,21 @@ enum ZBlockPos {
         u_pos: Vec<usize>,
         aux_pos: usize,
     },
+    /// A fully dense symmetric block (the PSD cone's `W ⊗ₛ W`): the
+    /// value-array positions of its lower triangle, row-major
+    /// `[(0,0),(1,0),(1,1),…]`, aligned with [`ConeBlock::DenseLower`].
+    Dense { pos: Vec<usize> },
+}
+
+/// How a cone block enters the `(z,z)` position of the KKT system.
+#[derive(Clone, Copy, PartialEq)]
+enum BlockShape {
+    /// Orthant: one diagonal entry per row.
+    Diagonal,
+    /// Second-order cone: diagonal + rank-1 via an auxiliary variable.
+    DiagRank1,
+    /// PSD cone: a fully dense symmetric lower-triangle block.
+    Dense,
 }
 
 pub(crate) struct KktStructure {
@@ -1125,19 +1158,31 @@ impl KktStructure {
         let base_dim = n + m_eq + prob.m_ineq();
         let shapes = block_shapes(cone);
         let mut aux = base_dim; // next auxiliary-variable index
-        for ((off, k), dense) in cone.blocks().iter().zip(&shapes) {
+        for ((off, k), shape) in cone.blocks().iter().zip(&shapes) {
             let d = k.dim();
             let zbase = n + m_eq + off;
             for i in 0..d {
                 add(zbase + i, zbase + i, -reg); // diagonal (filled per iter)
             }
-            if *dense {
-                // Aux: coupling (z_i, ξ) = u_i and (ξ, ξ) = +1.
-                for i in 0..d {
-                    add(aux, zbase + i, 0.0);
+            match shape {
+                BlockShape::Diagonal => {}
+                BlockShape::DiagRank1 => {
+                    // Aux: coupling (z_i, ξ) = u_i and (ξ, ξ) = +1.
+                    for i in 0..d {
+                        add(aux, zbase + i, 0.0);
+                    }
+                    add(aux, aux, 1.0);
+                    aux += 1;
                 }
-                add(aux, aux, 1.0);
-                aux += 1;
+                BlockShape::Dense => {
+                    // Reserve the strict lower triangle of the (z,z) block;
+                    // the diagonal was already added above.
+                    for i in 0..d {
+                        for j in 0..i {
+                            add(zbase + i, zbase + j, 0.0);
+                        }
+                    }
+                }
             }
         }
         let dim = aux;
@@ -1157,23 +1202,39 @@ impl KktStructure {
         // Record each cone block's positions in `blocks()` order.
         let mut z_blocks = Vec::with_capacity(cone.blocks().len());
         let mut aux = base_dim;
-        for ((off, k), dense) in cone.blocks().iter().zip(&shapes) {
+        for ((off, k), shape) in cone.blocks().iter().zip(&shapes) {
             let d = k.dim();
             let zbase = n + m_eq + off;
-            let diag_pos: Vec<usize> = (0..d)
-                .map(|i| coord_to_pos[&(zbase + i, zbase + i)])
-                .collect();
-            if *dense {
-                let u_pos = (0..d).map(|i| coord_to_pos[&(aux, zbase + i)]).collect();
-                let aux_pos = coord_to_pos[&(aux, aux)];
-                z_blocks.push(ZBlockPos::DiagRank1 {
-                    diag_pos,
-                    u_pos,
-                    aux_pos,
-                });
-                aux += 1;
-            } else {
-                z_blocks.push(ZBlockPos::Diagonal(diag_pos));
+            match shape {
+                BlockShape::Diagonal => {
+                    let diag_pos = (0..d)
+                        .map(|i| coord_to_pos[&(zbase + i, zbase + i)])
+                        .collect();
+                    z_blocks.push(ZBlockPos::Diagonal(diag_pos));
+                }
+                BlockShape::DiagRank1 => {
+                    let diag_pos = (0..d)
+                        .map(|i| coord_to_pos[&(zbase + i, zbase + i)])
+                        .collect();
+                    let u_pos = (0..d).map(|i| coord_to_pos[&(aux, zbase + i)]).collect();
+                    let aux_pos = coord_to_pos[&(aux, aux)];
+                    z_blocks.push(ZBlockPos::DiagRank1 {
+                        diag_pos,
+                        u_pos,
+                        aux_pos,
+                    });
+                    aux += 1;
+                }
+                BlockShape::Dense => {
+                    // Lower triangle, row-major — matching ConeBlock::DenseLower.
+                    let mut pos = Vec::with_capacity(d * (d + 1) / 2);
+                    for i in 0..d {
+                        for j in 0..=i {
+                            pos.push(coord_to_pos[&(zbase + i, zbase + j)]);
+                        }
+                    }
+                    z_blocks.push(ZBlockPos::Dense { pos });
+                }
             }
         }
 
@@ -1224,22 +1285,38 @@ impl KktStructure {
                     }
                     out[*aux_pos] = 1.0;
                 }
+                (ZBlockPos::Dense { pos }, ConeBlock::DenseLower { dim: _, lower }) => {
+                    // (z,z) block = −H − reg·I, H = W⊗ₛW dense. Lower triangle
+                    // row-major; reg only on the diagonal (i == j).
+                    let mut idx = 0;
+                    for i in 0..d {
+                        for j in 0..=i {
+                            out[pos[idx]] = -lower[idx] - if i == j { reg } else { 0.0 };
+                            idx += 1;
+                        }
+                    }
+                }
                 _ => unreachable!("cone block shape changed between build and update"),
             }
         }
     }
 }
 
-/// Whether each cone block contributes a dense `(z, z)` block (SOC) vs a
-/// diagonal one (orthant), probed via `kkt_block` at the cone identity.
-fn block_shapes(cone: &CompositeCone) -> Vec<bool> {
+/// How each cone block enters the `(z,z)` position — diagonal (orthant),
+/// diag-plus-rank-1 (SOC), or fully dense (PSD) — probed via `kkt_block` at
+/// the cone identity.
+fn block_shapes(cone: &CompositeCone) -> Vec<BlockShape> {
     cone.blocks()
         .iter()
         .map(|(_, k)| {
             let d = k.dim();
             let mut e = vec![0.0; d];
             k.identity(&mut e);
-            matches!(k.kkt_block(&e, &e), ConeBlock::DiagPlusRank1 { .. })
+            match k.kkt_block(&e, &e) {
+                ConeBlock::Diagonal(_) => BlockShape::Diagonal,
+                ConeBlock::DiagPlusRank1 { .. } => BlockShape::DiagRank1,
+                ConeBlock::DenseLower { .. } => BlockShape::Dense,
+            }
         })
         .collect()
 }

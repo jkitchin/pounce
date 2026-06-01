@@ -1436,6 +1436,9 @@ impl Presolve {
                 // merged by presolve.
                 ConeSpec::Exponential => ConeSpec::Exponential,
                 ConeSpec::Power(a) => ConeSpec::Power(a),
+                // PSD blocks are structurally coupled (svec of a fixed n×n)
+                // and likewise pass through unchanged.
+                ConeSpec::Psd(n) => ConeSpec::Psd(n),
             });
             i = j;
         }
