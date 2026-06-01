@@ -966,6 +966,7 @@ dependencies = [
 name = "pounce-global"
 version = "0.3.0"
 dependencies = [
+ "pounce-algorithm",
  "pounce-common",
  "pounce-convex",
  "pounce-feral",

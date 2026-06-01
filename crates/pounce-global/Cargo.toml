@@ -19,6 +19,8 @@ pounce-presolve.workspace = true
 pounce-convex.workspace = true
 # The sparse symmetric linear-solver trait the LP backend is supplied as.
 pounce-linsol.workspace = true
+# Local NLP solves (filter line-search IPM) for upper bounds at a node.
+pounce-algorithm.workspace = true
 
 [dev-dependencies]
 # FERAL backs the relaxation LP solves end-to-end in the in-tree tests.

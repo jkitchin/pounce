@@ -66,6 +66,10 @@ pub struct GlobalOptions {
     pub box_tol: f64,
     /// Maximum branch-and-bound nodes.
     pub max_nodes: usize,
+    /// Interior-point iteration cap for the per-node local NLP upper-bound
+    /// solve. `0` disables local solves (upper bounds then come only from
+    /// probing the relaxation point and box center).
+    pub local_solve_iters: usize,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -78,6 +82,7 @@ impl Default for GlobalOptions {
             feas_tol: 1e-6,
             box_tol: 1e-7,
             max_nodes: 5000,
+            local_solve_iters: 50,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -234,10 +239,20 @@ where
             continue;
         }
 
-        // 3. Upper bound: probe the relaxation point and the box center.
+        // 3. Upper bound: probe the relaxation point and box center, and (when
+        // enabled) polish the relaxation point with a local NLP solve over the
+        // node box for a much sharper feasible incumbent.
         let relax_pt: Vec<f64> = (0..n).map(|i| sol.x[i].clamp(lo[i], hi[i])).collect();
         let center: Vec<f64> = (0..n).map(|i| 0.5 * (lo[i] + hi[i])).collect();
-        for cand in [&relax_pt, &center] {
+        let mut candidates = vec![relax_pt.clone(), center];
+        if opts.local_solve_iters > 0 {
+            if let Some(polished) =
+                crate::nlp::local_solve(prob, &lo, &hi, &relax_pt, opts.local_solve_iters)
+            {
+                candidates.push(polished);
+            }
+        }
+        for cand in &candidates {
             if let Some(val) = feasible_objective(prob, cand, opts.feas_tol) {
                 if val < incumbent_ub {
                     incumbent_ub = val;

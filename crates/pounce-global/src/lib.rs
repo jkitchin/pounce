@@ -32,8 +32,10 @@
 //! assert!((sol.objective - (-2.25)).abs() < 1e-4);
 //! ```
 
+mod ad;
 pub mod bnb;
 pub mod expr;
+mod nlp;
 pub mod problem;
 mod relax;
 

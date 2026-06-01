@@ -128,6 +128,42 @@ fn six_hump_camel_global_minimum() {
 }
 
 #[test]
+fn local_nlp_upper_bounds_toggle() {
+    // min x + y  s.t.  x·y ≥ 4 on [1, 5]² (optimum 4 at (2, 2)). Solve with the
+    // local NLP polish on (default) and off — both must certify the global
+    // optimum, exercising the tape→TNLP bridge against the relaxation-only path.
+    let obj = var(0) + var(1);
+    let g = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
+
+    let with_nlp = solve_global(&prob, &GlobalOptions::default(), backend);
+    assert_eq!(with_nlp.status, GlobalStatus::Optimal, "{with_nlp:?}");
+    assert!(
+        (with_nlp.objective - 4.0).abs() < 1e-3,
+        "obj = {}",
+        with_nlp.objective
+    );
+    // The NLP polish lands essentially on the true minimizer (2, 2).
+    assert!(
+        (with_nlp.x[0] - 2.0).abs() < 1e-2 && (with_nlp.x[1] - 2.0).abs() < 1e-2,
+        "x = {:?}",
+        with_nlp.x
+    );
+
+    let no_nlp_opts = GlobalOptions {
+        local_solve_iters: 0,
+        ..GlobalOptions::default()
+    };
+    let without = solve_global(&prob, &no_nlp_opts, backend);
+    assert_eq!(without.status, GlobalStatus::Optimal, "{without:?}");
+    assert!(
+        (without.objective - 4.0).abs() < 1e-2,
+        "obj = {}",
+        without.objective
+    );
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).
