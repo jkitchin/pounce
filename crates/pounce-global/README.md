@@ -47,8 +47,9 @@ Best-first spatial branch-and-bound over variable boxes. At each node:
 3. **Upper bound** — probe feasible points (the relaxation solution, the box
    center) and polish with a local NLP solve (`pounce-algorithm`) for a sharp
    incumbent.
-4. **Branch** — bisect the widest variable; the frontier is ordered by node
-   lower bound.
+4. **Branch** — split the **most-violated** variable (whose nonconvexity drives
+   the relaxation gap), falling back to the widest box side; the frontier is
+   ordered by node lower bound.
 
 Every relaxation cut is a *verified global* under/over-estimator, so adding
 any of them only tightens the bound — the certified optimum never changes.
@@ -85,8 +86,8 @@ there. For polynomial problems specifically, the SOS/Lasserre optimizer in
 A complete, correct continuous global solver. Current limits:
 
 - **Continuous variables only** — no integer branching (MINLP) yet.
-- **Branching** is widest-variable bisection (pseudocost/reliability branching
-  would cut node counts further).
+- **Branching** is most-violation (falling back to widest); pseudocost /
+  reliability branching would cut node counts further still.
 - The Lagrangian Hessian used by the local NLP upper bound is finite-
   differenced (a usable Newton direction, not exact second order).
 - `sin`/`cos` over a box wider than π, division by an interval straddling

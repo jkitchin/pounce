@@ -50,8 +50,10 @@ For each node — a box `[lo, hi]` — the solver:
 3. **Improves the incumbent.** Feasible points are probed (the relaxation
    solution, the box center) and polished with a local NLP solve
    (`pounce-algorithm`), giving a sharp upper bound.
-4. **Branches.** The widest variable is bisected, and the two child boxes join
-   a best-first frontier ordered by node lower bound.
+4. **Branches.** The variable with the largest **relaxation violation** (the
+   one whose nonconvexity is driving the gap) is split at the relaxation point
+   — falling back to the widest box side when nothing is violated — and the two
+   child boxes join a best-first frontier ordered by node lower bound.
 
 The search stops when the frontier's lowest bound meets the incumbent within
 tolerance — at which point the incumbent is the certified global optimum.
@@ -125,6 +127,7 @@ nodes; adding sandwich cuts brings it to ~220, and OBBT to ~60.
 | `alphabb_cuts` | `1` | αBB tangent planes added to the objective (`0` off) |
 | `rlt` | `true` | level-1 RLT cuts |
 | `multilinear` | `true` | multi-grouping trilinear relaxation |
+| `most_violation_branching` | `true` | branch the most-violated variable, not the widest |
 | `fbbt` | — | FBBT configuration |
 
 The defaults aim for robustness on small problems. OBBT dominates the per-node
@@ -169,8 +172,8 @@ When to prefer which: **SOS** for polynomials of modest degree and dimension
 yet at commercial-solver scale:
 
 - **Continuous only** — no integer branching (MINLP).
-- **Branching** is widest-variable bisection; pseudocost/reliability branching
-  would cut node counts further.
+- **Branching** is most-violation (falling back to widest); pseudocost /
+  reliability branching would cut node counts further still.
 - The local upper-bound solve uses a finite-differenced Lagrangian Hessian (a
   usable Newton direction, not exact second order).
 - Atoms outside the supported set, `sin`/`cos` over a box wider than π, and

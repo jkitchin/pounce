@@ -90,6 +90,10 @@ pub struct GlobalOptions {
     /// Use the tighter multi-grouping relaxation of 3-way products (intersect
     /// all three bilinear groupings instead of one nested grouping).
     pub multilinear: bool,
+    /// Branch on the variable with the largest relaxation violation (which
+    /// variable's nonconvexity drives the gap), instead of simply the widest
+    /// box side. Falls back to widest when no term is violated.
+    pub most_violation_branching: bool,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -108,6 +112,7 @@ impl Default for GlobalOptions {
             alphabb_cuts: 1,
             rlt: true,
             multilinear: true,
+            most_violation_branching: true,
             fbbt: FbbtConfig::default(),
         }
     }
@@ -273,6 +278,7 @@ where
         }
         let mut qp = relax.qp;
         let atoms = relax.atoms;
+        let branch_terms = relax.branch_terms;
         let (col_lo, col_hi) = (qp.lb.clone(), qp.ub.clone());
         // αBB tangent-plane underestimators of the objective as a whole,
         // complementing the factorable relaxation of its individual atoms.
@@ -305,7 +311,7 @@ where
         // where the relaxation is loosest; the cuts only sharpen the bound.
         let relax_pt: Vec<f64> = (0..n).map(|i| sol.x[i].clamp(lo[i], hi[i])).collect();
         if sol.status == QpStatus::Optimal {
-            let mut cut_x = sol.x;
+            let mut cut_x = sol.x.clone();
             for _ in 0..opts.sandwich_rounds {
                 let cuts = crate::relax::sandwich_cuts(&atoms, &col_lo, &col_hi, &cut_x, 1e-7);
                 if cuts.is_empty() {
@@ -345,14 +351,28 @@ where
             }
         }
 
-        // 4. Leaf test, else branch on the widest variable.
-        let (k, width) = widest(&lo, &hi);
+        // 4. Leaf test, else branch. The leaf test is on the overall widest
+        // side; the branching variable is chosen by **most relaxation
+        // violation** (which variable's nonconvexity drives the gap), falling
+        // back to the widest when no term is violated (e.g. a linear/exact
+        // node). Split at the relaxation point — where the relaxation is loose.
+        let (widest_k, width) = widest(&lo, &hi);
         let lb_for_children = node_lb.max(node.key);
         if width <= opts.box_tol
             || (incumbent_ub.is_finite() && gap_ok(lb_for_children, incumbent_ub))
         {
             continue;
         }
+        let k = if opts.most_violation_branching {
+            let scores = crate::relax::branch_scores(&branch_terms, &sol.x, n);
+            (0..n)
+                .filter(|&i| hi[i] - lo[i] > opts.box_tol)
+                .max_by(|&i, &j| scores[i].partial_cmp(&scores[j]).unwrap_or(Ordering::Equal))
+                .filter(|&i| scores[i] > 1e-9)
+                .unwrap_or(widest_k)
+        } else {
+            widest_k
+        };
         let split = split_point(relax_pt[k], lo[k], hi[k]);
         let mut left_hi = hi.clone();
         left_hi[k] = split;

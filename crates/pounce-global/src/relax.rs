@@ -102,12 +102,85 @@ impl AtomKind {
     }
 }
 
+/// A nonconvex term, tagged with the original variables it depends on, used to
+/// score branching candidates by relaxation violation. `w` is the term's LP
+/// column; the violation is `|x_w − (true value)|` at the LP solution.
+pub(crate) enum BranchTerm {
+    Unary {
+        w: usize,
+        a: usize,
+        kind: AtomKind,
+        vars: Vec<usize>,
+    },
+    Bilinear {
+        w: usize,
+        u: usize,
+        v: usize,
+        vars: Vec<usize>,
+    },
+    Ratio {
+        w: usize,
+        a: usize,
+        c: usize,
+        vars: Vec<usize>,
+    },
+}
+
+impl BranchTerm {
+    fn vars(&self) -> &[usize] {
+        match self {
+            BranchTerm::Unary { vars, .. }
+            | BranchTerm::Bilinear { vars, .. }
+            | BranchTerm::Ratio { vars, .. } => vars,
+        }
+    }
+
+    /// Relaxation violation `|x_w − (true value of the term)|` at point `x`.
+    fn violation(&self, x: &[f64]) -> f64 {
+        let v = match *self {
+            BranchTerm::Unary { w, a, kind, .. } => x[w] - kind.f(x[a]),
+            BranchTerm::Bilinear { w, u, v, .. } => x[w] - x[u] * x[v],
+            BranchTerm::Ratio { w, a, c, .. } => {
+                if x[c].abs() < 1e-12 {
+                    return 0.0;
+                }
+                x[w] - x[a] / x[c]
+            }
+        };
+        if v.is_finite() {
+            v.abs()
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Per-variable relaxation violation: each nonconvex term credits its violation
+/// to every original variable it depends on. The largest score is the
+/// most-violation branching variable.
+pub(crate) fn branch_scores(terms: &[BranchTerm], x: &[f64], n: usize) -> Vec<f64> {
+    let mut s = vec![0.0; n];
+    for t in terms {
+        let viol = t.violation(x);
+        if viol > 0.0 {
+            for &i in t.vars() {
+                if i < n {
+                    s[i] += viol;
+                }
+            }
+        }
+    }
+    s
+}
+
 /// The relaxation LP plus the bookkeeping to read a solution back. The first
 /// `n_vars` LP columns are the original problem variables.
 pub(crate) struct Relaxation {
     pub qp: QpProblem,
     /// Univariate atoms for cutting-plane refinement.
     pub atoms: Vec<Atom>,
+    /// Nonconvex terms for most-violation branching.
+    pub branch_terms: Vec<BranchTerm>,
     /// LP column holding the objective value (for an incumbent cutoff row in
     /// OBBT). `None` for a constant/empty objective.
     pub obj_col: Option<usize>,
@@ -125,6 +198,7 @@ struct Builder {
     ineq: Vec<Triplet>,
     ineq_rhs: Vec<f64>,
     atoms: Vec<Atom>,
+    branch_terms: Vec<BranchTerm>,
     infeasible: bool,
 }
 
@@ -142,6 +216,7 @@ impl Builder {
             ineq: Vec::new(),
             ineq_rhs: Vec::new(),
             atoms: Vec::new(),
+            branch_terms: Vec::new(),
             infeasible: false,
         }
     }
@@ -293,6 +368,56 @@ impl Builder {
             self.emit_le(&[(wh, 1.0), (a, -c.slope)], c.intercept);
         }
     }
+}
+
+/// Sorted union of two ascending, deduplicated index lists.
+fn union(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
+}
+
+/// For each tape slot, the set of original variables (ascending) it depends on.
+fn slot_support(tape: &FbbtTape) -> Vec<Vec<usize>> {
+    let mut sup: Vec<Vec<usize>> = Vec::with_capacity(tape.ops.len());
+    for op in &tape.ops {
+        let s = match *op {
+            FbbtOp::Const(_) | FbbtOp::Opaque => Vec::new(),
+            FbbtOp::Var(i) => vec![i],
+            FbbtOp::Add(a, b) | FbbtOp::Sub(a, b) | FbbtOp::Mul(a, b) | FbbtOp::Div(a, b) => {
+                union(&sup[a], &sup[b])
+            }
+            FbbtOp::Neg(a)
+            | FbbtOp::Sqrt(a)
+            | FbbtOp::Exp(a)
+            | FbbtOp::Ln(a)
+            | FbbtOp::Abs(a)
+            | FbbtOp::Sin(a)
+            | FbbtOp::Cos(a)
+            | FbbtOp::PowInt(a, _) => sup[a].clone(),
+        };
+        sup.push(s);
+    }
+    sup
 }
 
 /// Detect a 3-way product `Mul(a, c)` where one operand is itself a `Mul` of
@@ -494,6 +619,57 @@ fn process_tape(
         };
         handle.push(h);
     }
+
+    // Record nonconvex terms with the original variables they depend on, for
+    // most-violation branching. A separate pass over the tape keeps this
+    // independent of the relaxation arms above.
+    let sup = slot_support(tape);
+    let col_of = |s: usize| match handle[s] {
+        Handle::Col(c) => Some(c),
+        Handle::Const(_) => None,
+    };
+    for (k, op) in tape.ops.iter().enumerate() {
+        let Handle::Col(w) = handle[k] else { continue };
+        let unary = |kind: AtomKind, a: usize| {
+            col_of(a).map(|ac| BranchTerm::Unary {
+                w,
+                a: ac,
+                kind,
+                vars: sup[a].clone(),
+            })
+        };
+        let term = match *op {
+            FbbtOp::PowInt(a, n) if n >= 2 => unary(AtomKind::Pow(n), a),
+            FbbtOp::Exp(a) => unary(AtomKind::Exp, a),
+            FbbtOp::Ln(a) => unary(AtomKind::Ln, a),
+            FbbtOp::Sqrt(a) => unary(AtomKind::Sqrt, a),
+            FbbtOp::Sin(a) => unary(AtomKind::Sin, a),
+            FbbtOp::Cos(a) => unary(AtomKind::Cos, a),
+            FbbtOp::Mul(a, c) => match (col_of(a), col_of(c)) {
+                (Some(u), Some(v)) => Some(BranchTerm::Bilinear {
+                    w,
+                    u,
+                    v,
+                    vars: union(&sup[a], &sup[c]),
+                }),
+                _ => None,
+            },
+            FbbtOp::Div(a, c) => match (col_of(a), col_of(c)) {
+                (Some(u), Some(v)) => Some(BranchTerm::Ratio {
+                    w,
+                    a: u,
+                    c: v,
+                    vars: union(&sup[a], &sup[c]),
+                }),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(t) = term {
+            b.branch_terms.push(t);
+        }
+    }
+
     handle.last().copied()
 }
 
@@ -557,6 +733,7 @@ pub(crate) fn build_relaxation(
     Relaxation {
         qp,
         atoms: b.atoms,
+        branch_terms: b.branch_terms,
         obj_col,
         trivially_infeasible: b.infeasible,
     }

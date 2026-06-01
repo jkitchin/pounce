@@ -346,6 +346,50 @@ fn trilinear_product_toggle() {
 }
 
 #[test]
+fn most_violation_branching_reduces_nodes() {
+    // Six-hump camel. Branching on the most-violated variable (default) should
+    // certify the global optimum in no more nodes than widest-variable bisection.
+    let x = var(0);
+    let y = var(1);
+    let f = 4.0 * x.clone().powi(2) - 2.1 * x.clone().powi(4)
+        + (1.0 / 3.0) * x.clone().powi(6)
+        + x.clone() * y.clone()
+        - 4.0 * y.clone().powi(2)
+        + 4.0 * y.powi(4);
+    let prob = GlobalProblem::new(vec![-2.0, -1.5], vec![2.0, 1.5], &f);
+    let base = GlobalOptions {
+        abs_gap: 1e-4,
+        rel_gap: 1e-4,
+        max_nodes: 200_000,
+        ..GlobalOptions::default()
+    };
+
+    let most = solve_global(&prob, &base, backend);
+    let widest = solve_global(
+        &prob,
+        &GlobalOptions {
+            most_violation_branching: false,
+            ..base.clone()
+        },
+        backend,
+    );
+    for sol in [&most, &widest] {
+        assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.objective + 1.031_628).abs() < 1e-2,
+            "obj = {}",
+            sol.objective
+        );
+    }
+    assert!(
+        most.nodes <= widest.nodes,
+        "most-violation {} should be ≤ widest {}",
+        most.nodes,
+        widest.nodes
+    );
+}
+
+#[test]
 fn exp_log_atoms() {
     // min eˣ − x on [−2, 2]: convex, optimum 1 at x = 0 (exercises the exp
     // envelope through the global path).
