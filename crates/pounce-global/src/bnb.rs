@@ -1,12 +1,12 @@
 //! Spatial branch-and-bound driver.
 //!
-//! Best-first search over boxes. Each node: tighten the box with FBBT (prune on
-//! an infeasibility witness), build and solve the McCormick relaxation LP for a
+//! Best-first search over boxes. Each node: tighten the box with FBBT and OBBT
+//! (prune on infeasibility), build and solve the McCormick relaxation LP for a
 //! lower bound (prune against the incumbent), probe for a feasible point to
-//! improve the incumbent upper bound, then branch by bisecting the widest
-//! variable. Because the relaxation is exact in the limit of a zero-width box,
-//! the incumbent and the frontier lower bound squeeze together and the search
-//! returns a globally optimal point with a certified optimality gap.
+//! improve the incumbent upper bound, then branch (see [`BranchRule`]). Because
+//! the relaxation is exact in the limit of a zero-width box, the incumbent and
+//! the frontier lower bound squeeze together and the search returns a globally
+//! optimal point with a certified optimality gap.
 
 use crate::expr::eval;
 use crate::problem::{ConstraintProvider, GlobalProblem};
@@ -16,6 +16,21 @@ use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_presolve::fbbt::{run_fbbt, FbbtConfig};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+
+/// Which variable to branch on at a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchRule {
+    /// The widest box side. Simplest; geometry-only.
+    Widest,
+    /// The variable with the largest relaxation violation (its nonconvexity
+    /// drives the gap), falling back to widest.
+    MostViolation,
+    /// Reliability branching: pseudocosts learned from child solves, with
+    /// strong branching until a variable's pseudocost is reliable. The MINLP
+    /// SOTA rule; most useful on larger problems where variable choice
+    /// dominates the node count.
+    Reliability,
+}
 
 /// Termination status of a global solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +105,8 @@ pub struct GlobalOptions {
     /// Use the tighter multi-grouping relaxation of 3-way products (intersect
     /// all three bilinear groupings instead of one nested grouping).
     pub multilinear: bool,
-    /// Branch on the variable with the largest relaxation violation (which
-    /// variable's nonconvexity drives the gap), instead of simply the widest
-    /// box side. Falls back to widest when no term is violated.
-    pub most_violation_branching: bool,
+    /// Which branching rule to use.
+    pub branching: BranchRule,
     /// FBBT configuration for per-node bound tightening.
     pub fbbt: FbbtConfig,
 }
@@ -112,10 +125,20 @@ impl Default for GlobalOptions {
             alphabb_cuts: 1,
             rlt: true,
             multilinear: true,
-            most_violation_branching: true,
+            branching: BranchRule::MostViolation,
             fbbt: FbbtConfig::default(),
         }
     }
+}
+
+/// How a child node was branched from its parent — used to update pseudocosts
+/// once the child is solved (observed lb gain over the parent).
+#[derive(Clone, Copy)]
+struct BranchInfo {
+    var: usize,
+    down: bool,
+    frac: f64,
+    parent_lb: f64,
 }
 
 /// A frontier node: a box and the (valid) lower bound inherited from its
@@ -124,6 +147,7 @@ struct Node {
     key: f64,
     lo: Vec<f64>,
     hi: Vec<f64>,
+    branch: Option<BranchInfo>,
 }
 
 // BinaryHeap is a max-heap; invert so the smallest `key` is popped first.
@@ -176,7 +200,9 @@ where
         key: f64::NEG_INFINITY,
         lo: prob.x_lo.clone(),
         hi: prob.x_hi.clone(),
+        branch: None,
     });
+    let mut pseudo = crate::branching::PseudoCosts::new(n);
 
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut incumbent_ub = f64::INFINITY;
@@ -326,6 +352,11 @@ where
                 cut_x = s.x;
             }
         }
+        // Learn: update the branched variable's pseudocost with the realized
+        // lower-bound gain of this child over its parent.
+        if let Some(bi) = node.branch {
+            pseudo.update(bi.var, bi.down, node_lb - bi.parent_lb, bi.frac);
+        }
         if incumbent_ub.is_finite() && gap_ok(node_lb, incumbent_ub) {
             continue;
         }
@@ -352,10 +383,8 @@ where
         }
 
         // 4. Leaf test, else branch. The leaf test is on the overall widest
-        // side; the branching variable is chosen by **most relaxation
-        // violation** (which variable's nonconvexity drives the gap), falling
-        // back to the widest when no term is violated (e.g. a linear/exact
-        // node). Split at the relaxation point — where the relaxation is loose.
+        // side; the branching variable comes from the configured rule. Split at
+        // the relaxation point — where the relaxation is loosest.
         let (widest_k, width) = widest(&lo, &hi);
         let lb_for_children = node_lb.max(node.key);
         if width <= opts.box_tol
@@ -363,17 +392,35 @@ where
         {
             continue;
         }
-        let k = if opts.most_violation_branching {
-            let scores = crate::relax::branch_scores(&branch_terms, &sol.x, n);
-            (0..n)
-                .filter(|&i| hi[i] - lo[i] > opts.box_tol)
-                .max_by(|&i, &j| scores[i].partial_cmp(&scores[j]).unwrap_or(Ordering::Equal))
-                .filter(|&i| scores[i] > 1e-9)
-                .unwrap_or(widest_k)
-        } else {
-            widest_k
+        let k = match opts.branching {
+            BranchRule::Widest => widest_k,
+            BranchRule::MostViolation => {
+                let scores = crate::relax::branch_scores(&branch_terms, &sol.x, n);
+                (0..n)
+                    .filter(|&i| hi[i] - lo[i] > opts.box_tol)
+                    .max_by(|&i, &j| scores[i].partial_cmp(&scores[j]).unwrap_or(Ordering::Equal))
+                    .filter(|&i| scores[i] > 1e-9)
+                    .unwrap_or(widest_k)
+            }
+            BranchRule::Reliability => crate::branching::select_reliability(
+                prob,
+                &lo,
+                &hi,
+                &relax_pt,
+                &branch_terms,
+                &sol.x,
+                node_lb,
+                &mut pseudo,
+                opts.box_tol,
+                opts.multilinear,
+                &qp_opts,
+                &mut make_backend,
+            )
+            .unwrap_or(widest_k),
         };
-        let split = split_point(relax_pt[k], lo[k], hi[k]);
+        let split = crate::branching::split_point(relax_pt[k], lo[k], hi[k]);
+        let f_down = (split - lo[k]).max(1e-12);
+        let f_up = (hi[k] - split).max(1e-12);
         let mut left_hi = hi.clone();
         left_hi[k] = split;
         let mut right_lo = lo.clone();
@@ -382,11 +429,23 @@ where
             key: lb_for_children,
             lo: lo.clone(),
             hi: left_hi,
+            branch: Some(BranchInfo {
+                var: k,
+                down: true,
+                frac: f_down,
+                parent_lb: node_lb,
+            }),
         });
         heap.push(Node {
             key: lb_for_children,
             lo: right_lo,
             hi: hi.clone(),
+            branch: Some(BranchInfo {
+                var: k,
+                down: false,
+                frac: f_up,
+                parent_lb: node_lb,
+            }),
         });
     }
 
@@ -423,16 +482,4 @@ fn widest(lo: &[f64], hi: &[f64]) -> (usize, f64) {
         }
     }
     (k, w)
-}
-
-/// Split strictly inside `(lo, hi)`: the relaxation point when it is interior,
-/// else the midpoint.
-fn split_point(x: f64, lo: f64, hi: f64) -> f64 {
-    let w = hi - lo;
-    let margin = 1e-4 * w;
-    if x.is_finite() && x > lo + margin && x < hi - margin {
-        x
-    } else {
-        0.5 * (lo + hi)
-    }
 }

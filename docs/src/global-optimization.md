@@ -127,8 +127,16 @@ nodes; adding sandwich cuts brings it to ~220, and OBBT to ~60.
 | `alphabb_cuts` | `1` | αBB tangent planes added to the objective (`0` off) |
 | `rlt` | `true` | level-1 RLT cuts |
 | `multilinear` | `true` | multi-grouping trilinear relaxation |
-| `most_violation_branching` | `true` | branch the most-violated variable, not the widest |
+| `branching` | `MostViolation` | branching rule: `Widest`, `MostViolation`, or `Reliability` |
 | `fbbt` | — | FBBT configuration |
+
+The branching rule (`BranchRule`) chooses the variable to split: `Widest` (box
+geometry), `MostViolation` (the variable whose nonconvexity drives the
+relaxation gap — the default), or `Reliability` (pseudocosts learned from child
+solves, with strong branching until a variable's pseudocost is reliable — the
+MILP/MINLP SOTA rule). Because OBBT tightens every node here, the relaxation is
+usually tight enough that the rule is second-order; reliability is most useful
+on larger problems where variable choice dominates the node count.
 
 The defaults aim for robustness on small problems. OBBT dominates the per-node
 cost; turn `obbt_passes` down (or off) on larger problems where the LP solves
@@ -172,8 +180,9 @@ When to prefer which: **SOS** for polynomials of modest degree and dimension
 yet at commercial-solver scale:
 
 - **Continuous only** — no integer branching (MINLP).
-- **Branching** is most-violation (falling back to widest); pseudocost /
-  reliability branching would cut node counts further still.
+- **Branching** offers widest, most-violation (default), and reliability
+  (pseudocost + strong branching) rules; with OBBT every node the rule is
+  usually second-order here, so it is a tunable knob rather than a fixed win.
 - The local upper-bound solve uses a finite-differenced Lagrangian Hessian (a
   usable Newton direction, not exact second order).
 - Atoms outside the supported set, `sin`/`cos` over a box wider than π, and

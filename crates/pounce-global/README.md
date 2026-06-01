@@ -86,8 +86,11 @@ there. For polynomial problems specifically, the SOS/Lasserre optimizer in
 A complete, correct continuous global solver. Current limits:
 
 - **Continuous variables only** — no integer branching (MINLP) yet.
-- **Branching** is most-violation (falling back to widest); pseudocost /
-  reliability branching would cut node counts further still.
+- **Branching** offers three rules (`GlobalOptions.branching`): widest,
+  most-violation (default), and reliability (pseudocosts + strong branching).
+  With OBBT tightening every node the relaxation is usually tight enough that
+  the branching rule is second-order; reliability targets larger problems
+  where variable choice dominates.
 - The Lagrangian Hessian used by the local NLP upper bound is finite-
   differenced (a usable Newton direction, not exact second order).
 - `sin`/`cos` over a box wider than π, division by an interval straddling

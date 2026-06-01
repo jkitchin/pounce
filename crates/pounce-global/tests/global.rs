@@ -1,7 +1,9 @@
 //! End-to-end spatial branch-and-bound on classic nonconvex problems.
 
 use pounce_feral::FeralSolverInterface;
-use pounce_global::{expr::var, solve_global, GlobalOptions, GlobalProblem, GlobalStatus};
+use pounce_global::{
+    expr::var, solve_global, BranchRule, GlobalOptions, GlobalProblem, GlobalStatus,
+};
 use pounce_linsol::SparseSymLinearSolverInterface;
 
 fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
@@ -364,11 +366,18 @@ fn most_violation_branching_reduces_nodes() {
         ..GlobalOptions::default()
     };
 
-    let most = solve_global(&prob, &base, backend);
+    let most = solve_global(
+        &prob,
+        &GlobalOptions {
+            branching: BranchRule::MostViolation,
+            ..base.clone()
+        },
+        backend,
+    );
     let widest = solve_global(
         &prob,
         &GlobalOptions {
-            most_violation_branching: false,
+            branching: BranchRule::Widest,
             ..base.clone()
         },
         backend,
@@ -386,6 +395,30 @@ fn most_violation_branching_reduces_nodes() {
         "most-violation {} should be ≤ widest {}",
         most.nodes,
         widest.nodes
+    );
+}
+
+#[test]
+fn reliability_branching_certifies_optimum() {
+    // Reliability branching (pseudocosts + strong branching) must certify the
+    // global optimum like any rule. min x + y s.t. x·y ≥ 4 on [1, 5]² → 4 at
+    // (2, 2). Exercises the strong-branching probes and pseudocost updates.
+    let obj = var(0) + var(1);
+    let g = var(0) * var(1);
+    let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
+    let sol = solve_global(
+        &prob,
+        &GlobalOptions {
+            branching: BranchRule::Reliability,
+            ..GlobalOptions::default()
+        },
+        backend,
+    );
+    assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+    assert!(
+        (sol.objective - 4.0).abs() < 1e-2,
+        "obj = {}",
+        sol.objective
     );
 }
 
