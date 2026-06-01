@@ -364,6 +364,48 @@ Upper bounds come from multi-start local NLP solves
 branching subdivides the box on the variable contributing most to the
 relaxation gap until the gap closes to tolerance.
 
+### Conic vs. factorable relaxations — and why the branch makes this free
+
+The factorable-McCormick stack above is the *general* lower-bounding
+route (it handles `exp`, `log`, trig, arbitrary C² terms). But for the
+**quadratic** structured classes — nonconvex QP, QCQP, and the quadratic
+parts of MINLP — a second, often *tighter* lower bound is available:
+**conic (SDP/SOCP) relaxation**. And the LP/QP branch
+`claude/amazing-mayer-Xd0ag` is landing exactly the cone machinery this
+needs (SOCP with NT scaling, the HSDE driver, composite cones), so it
+costs little to add as an alternative relaxation backend.
+
+The contrast, for the global lower bound on a quadratic term:
+
+| | Factorable / McCormick-LP | Conic (SDP / SOCP) |
+|---|---|---|
+| Generality | any C² expression | quadratic (QP/QCQP) only |
+| Bound tightness on quadratics | looser (separable envelopes) | tighter (Shor SDP dominates RLT — Anstreicher 2009) |
+| Node solver | the dual simplex (decision 7) | `pounce-convex` cone IPM (on the branch) |
+| Warm-start in B&B | excellent (simplex basis) | weaker (IPM reseed) |
+| Differentiable | yes, via simplex KKT | yes — the branch already ships a `cone-aware OptNet` layer |
+| Cost to add | the planned `pounce-relax` | mostly *reuse* of the landing cone solver |
+
+So they are **complementary, not competing**, and the `Relaxation` seam
+(Seam 3) is exactly where the choice plugs in — a `FactorableRelaxation`
+(LP, general) and a `ConicRelaxation` (SDP/SOCP, quadratic-only)
+implement the same trait, and dispatch picks per problem structure or
+runs both and takes the tighter bound. The Shor/RLT and
+completely-positive reformulations (Burer 2009 lineage) are the standard
+constructions; SOCP relaxation is the cheaper, weaker cousin that
+warm-starts better inside the tree.
+
+**Phasing implication.** Conic relaxations are a *Phase 5+ enhancement*,
+not a prerequisite — `pounce-relax`'s factorable-LP path (decision 7) is
+the baseline that makes the global solver work at all. The conic
+backend is the natural "tighten the bound on quadratic structure"
+follow-on, and it is unusually cheap here precisely because the cone IPM
+and its differentiable layer are landing for the convex-conic family
+anyway. Crucially, it does **not** reverse decision 7: LP relaxations
+stay the default node engine (warm-start throughput); conic is the
+opt-in tighter bound for hard quadratic instances where node count, not
+per-node cost, dominates.
+
 ## Presolve: the highest-ROI performance lever
 
 Presolve is the single largest practical speedup in modern MIP
@@ -1076,6 +1118,30 @@ down the design choices. Canonical / foundational entries are marked ★.
 - Misener, R. & Floudas, C.A. (2014). "ANTIGONE: Algorithms for
   coNTinuous / Integer Global Optimization of Nonlinear Equations."
   *Journal of Global Optimization* 59:503–526.
+
+### Conic relaxations for quadratic structure (`ConicRelaxation`, Phase 5+)
+
+The tighter-bound alternative for QP / QCQP, cheap because the LP/QP
+branch lands the cone IPM and its differentiable layer anyway.
+
+- ★ Shor, N.Z. (1987). "Quadratic optimization problems." *Soviet
+  Journal of Computer and Systems Sciences* 25:1–11. The SDP relaxation
+  of nonconvex QP.
+- ★ Anstreicher, K.M. (2009). "Semidefinite programming versus the
+  reformulation-linearization technique for nonconvex quadratically
+  constrained quadratic programming." *Journal of Global Optimization*
+  43:471–484. Shows the SDP relaxation dominates RLT — the reason to add
+  a conic bound. doi:10.1007/s10898-008-9372-0
+- Burer, S. (2009). "On the copositive representation of binary and
+  continuous nonconvex quadratic programs." *Mathematical Programming*
+  120:479–495. The completely-positive reformulation lineage.
+- Chen, J. & Burer, S. (2012). "Globally solving nonconvex quadratic
+  programming problems via completely positive programming."
+  *Mathematical Programming Computation* 4:33–52. CP-based global QP.
+- Kim, S. & Kojima, M. (2003). "Exact solutions of some nonconvex
+  quadratic optimization problems via SDP and SOCP relaxations."
+  *Computational Optimization and Applications* 26:143–154. The cheaper
+  SOCP relaxation that warm-starts better in B&B.
 
 ### McCormick relaxation theory (for a correct, convergent `pounce-relax`)
 
