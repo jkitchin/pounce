@@ -75,3 +75,36 @@ orders of magnitude below that. The library exposes both:
   problem could exhaust memory;
 - `GlobalSolution::{peak_frontier, peak_memory_bytes}` — the measured peak after
   the solve (the CLI prints `peak_frontier=… (~…)` in its summary line).
+
+## Parallel scaling — and why the frontier is a single heap
+
+The node pool is one `Mutex<BinaryHeap>`. Before investing in a sharded /
+work-stealing frontier, we measured where the parallel speedup actually leaks,
+by instrumenting the pool to split each worker's non-compute time into
+**lock-wait** (contention on the shared heap — what sharding fixes) and
+**idle-wait** (frontier starvation / ramp-up — what it doesn't). Double camel,
+M4 Pro (14 cores):
+
+| threads | wall (s) | speedup | lock-wait % | idle-wait % |
+|--:|--:|--:|--:|--:|
+| 1 | 211.6 | 1.0× | — | — |
+| 2 | 109.0 | 1.9× | 0.0 | 0.2 |
+| 4 | 76.4 | 2.8× | 0.0 | 0.6 |
+| 8 | 47.5 | 4.5× | 0.0 | 2.0 |
+| 14 | 35.7 | 5.9× | 0.0 | 3.6 |
+
+**Lock-wait is 0.0 % at every thread count** — and stayed 0.0 % even in a
+cheap-node regime (OBBT/NLP/sandwich/αBB off, ~5500 tiny FBBT+LP nodes), where
+heap traffic per second is far higher. The shared frontier mutex is simply not
+contended at these core counts, so **a sharded frontier (issue #7) would buy
+almost nothing here.**
+
+The sub-linear speedup instead comes from **per-node work dilation**: the total
+useful CPU summed across workers grows from ~212 s (serial) to ~481 s at 14
+threads for the *same* ~1685 nodes. Concurrent sparse LDLᵀ factorizations
+contend for memory bandwidth, and the high-thread runs spill onto the slower
+efficiency cores — neither of which a frontier rework addresses. The lever for
+better scaling is reducing per-node allocation/bandwidth (a per-worker reusable
+backend and scratch buffers), not the queue. So #7 is **parked with evidence**,
+not on the roadmap.
+
