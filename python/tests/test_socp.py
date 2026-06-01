@@ -130,3 +130,32 @@ def test_power_cone_bad_alpha_raises():
 
     with pytest.raises(Exception):
         solve_socp(c=[-1.0, 0.0, 0.0], G=-np.eye(3), h=[0, 0, 0], cones=[("pow", 1.5)])
+
+
+def test_psd_min_eigenvalue_diagonal():
+    # max λ s.t. M − λI ⪰ 0  ⇒  λ = λ_min(M). M = diag(2, 5) → 2.
+    # x = (λ); G's column is svec(I) = [1, 0, 1], h = svec(M) = [2, 0, 5].
+    r = solve_socp(c=[-1.0], G=[[1.0], [0.0], [1.0]], h=[2.0, 0.0, 5.0],
+                   cones=[("psd", 2)])
+    assert r.status == "optimal"
+    assert abs(r.x[0] - 2.0) < 1e-5
+    assert abs(r.obj + 2.0) < 1e-5
+
+
+def test_psd_min_eigenvalue_offdiagonal():
+    # M = [[2,1],[1,2]] → λ_min = 1; svec(M) = [2, √2, 2] exercises the
+    # off-diagonal of the dense W⊗ₛW scaling block.
+    r = solve_socp(c=[-1.0], G=[[1.0], [0.0], [1.0]],
+                   h=[2.0, 2.0 ** 0.5, 2.0], cones=[("psd", 2)])
+    assert r.status == "optimal"
+    assert abs(r.x[0] - 1.0) < 1e-5
+    assert abs(r.obj + 1.0) < 1e-5
+
+
+def test_psd_cannot_mix_with_exp():
+    import numpy as np
+    import pytest
+
+    with pytest.raises(ValueError):
+        solve_socp(c=[1.0, 0.0, 0.0, 0.0], G=-np.eye(4), h=[0.0] * 4,
+                   cones=[("psd", 2), ("exp", 3)])

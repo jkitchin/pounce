@@ -248,10 +248,11 @@ fn warm_from_dict(warm: &Bound<'_, PyDict>) -> PyResult<QpWarmStart> {
 
 /// Parse `(kind, value)` tuples into [`ConeSpec`]s. `kind` is
 /// case-insensitive. The float `value` means the **dimension** for
-/// `"nonneg"`/`"nn"`/`"+"` and `"soc"`/`"q"` (rounded to an integer), and the
-/// **exponent α** for `"pow"`/`"power"` (the 3-D power cone, `α ∈ (0,1)`).
-/// `"exp"`/`"exponential"` is the fixed-dimension-3 exponential cone (its
-/// `value` is ignored).
+/// `"nonneg"`/`"nn"`/`"+"` and `"soc"`/`"q"` (rounded to an integer), the
+/// **exponent α** for `"pow"`/`"power"` (the 3-D power cone, `α ∈ (0,1)`),
+/// and the **matrix size n** for `"psd"`/`"sdp"` (which spans `n(n+1)/2`
+/// svec rows). `"exp"`/`"exponential"` is the fixed-dimension-3 exponential
+/// cone (its `value` is ignored).
 fn parse_cones(specs: Vec<(String, f64)>) -> PyResult<Vec<ConeSpec>> {
     specs
         .into_iter()
@@ -263,8 +264,9 @@ fn parse_cones(specs: Vec<(String, f64)>) -> PyResult<Vec<ConeSpec>> {
             "pow" | "power" | "p" => Err(PyValueError::new_err(format!(
                 "power-cone exponent α must be in (0, 1), got {v}"
             ))),
+            "psd" | "sdp" | "s" => Ok(ConeSpec::Psd(v.round() as usize)),
             other => Err(PyValueError::new_err(format!(
-                "unknown cone kind '{other}' (use 'nonneg', 'soc', 'exp', or 'pow')"
+                "unknown cone kind '{other}' (use 'nonneg', 'soc', 'exp', 'pow', or 'psd')"
             ))),
         })
         .collect()
@@ -335,9 +337,22 @@ pub fn solve_socp<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let o = opts(tol, max_iter, collect_iterates);
     let specs = parse_cones(cones)?;
+    // PSD (self-scaled, symmetric driver) cannot be mixed with the
+    // exponential/power cones (non-symmetric driver) in one problem.
+    let has_nonsym = specs
+        .iter()
+        .any(|c| matches!(c, ConeSpec::Exponential | ConeSpec::Power(_)));
+    let has_psd = specs.iter().any(|c| matches!(c, ConeSpec::Psd(_)));
+    if has_nonsym && has_psd {
+        return Err(PyValueError::new_err(
+            "the PSD cone cannot be combined with exponential/power cones in \
+             one problem (they use different drivers)",
+        ));
+    }
     // The cones must partition the rows of G exactly (an exp/power cone is
-    // always 3 rows). Catch the mismatch here with a clear, catchable error
-    // rather than letting the conic driver index past the slack vector.
+    // always 3 rows; a PSD(n) cone is n(n+1)/2 svec rows). Catch the mismatch
+    // here with a clear, catchable error rather than letting the conic driver
+    // index past the slack vector.
     let cone_rows: usize = specs.iter().map(|c| c.dim()).sum();
     if cone_rows != prob.inner.m_ineq() {
         return Err(PyValueError::new_err(format!(

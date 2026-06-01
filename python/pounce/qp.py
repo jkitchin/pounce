@@ -298,11 +298,13 @@ def _normalize_cones(cones):
     """Coerce a cone partition into the binding's ``[(kind, dim), …]``.
 
     Accepts ``("soc", 3)`` / ``("nonneg", 2)`` / ``("exp", 3)`` /
-    ``("pow", 0.5)`` tuples, or the shorthand ``3`` (a second-order cone of
-    that dim). Kind strings are case-insensitive (``"soc"``/``"q"``,
-    ``"nonneg"``/``"nn"``/``"+"``, ``"exp"``/``"exponential"``,
-    ``"pow"``/``"power"``). The second element is the dimension for
-    ``soc``/``nonneg`` and the exponent ``α`` for ``pow``."""
+    ``("pow", 0.5)`` / ``("psd", 3)`` tuples, or the shorthand ``3`` (a
+    second-order cone of that dim). Kind strings are case-insensitive
+    (``"soc"``/``"q"``, ``"nonneg"``/``"nn"``/``"+"``,
+    ``"exp"``/``"exponential"``, ``"pow"``/``"power"``, ``"psd"``/``"sdp"``).
+    The second element is the dimension for ``soc``/``nonneg``, the exponent
+    ``α`` for ``pow``, and the **matrix size n** for ``psd`` (spanning
+    ``n(n+1)/2`` svec rows)."""
     out = []
     for spec in cones:
         if isinstance(spec, (tuple, list)) and len(spec) == 2:
@@ -348,9 +350,16 @@ def solve_socp(
       ``{ (x, y, z) : |x| ≤ y^α z^{1−α}, y,z ≥ 0 }`` with ``α ∈ (0, 1)``
       (the second tuple element is the **exponent**, not a dimension); the
       building block for ``p``-norm and general geometric constraints.
+    - ``("psd", n)`` — the positive-semidefinite cone over symmetric
+      ``n×n`` matrices (small dense SDPs). Its slack block is the
+      **symmetric vectorization** ``svec(X)`` (length ``n(n+1)/2``; lower
+      triangle, column by column, off-diagonals scaled by ``√2`` so that
+      ``⟨X,Y⟩ = svec(X)·svec(Y)``), and ``smat(s) ⪰ 0`` is enforced.
 
     A second-order cone may be freely mixed with an exp/power cone (the
-    non-symmetric driver handles both).
+    non-symmetric driver handles both). The PSD cone is self-scaled and runs
+    on the symmetric driver, so it **cannot** be combined with exp/power
+    cones in one problem (a clear error is raised if you try).
 
     Examples
     --------
