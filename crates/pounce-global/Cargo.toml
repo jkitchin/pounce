@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Deterministic global optimization for factorable nonconvex NLPs in POUNCE: spatial branch-and-bound with McCormick polyhedral relaxations (lower bounds via the convex LP solver), feasibility-based bound tightening, and local upper bounds."
 keywords = ["global-optimization", "branch-and-bound", "mccormick", "nonconvex", "solver"]
 categories = ["mathematics", "science"]
+readme = "README.md"
 
 [dependencies]
 pounce-common.workspace = true

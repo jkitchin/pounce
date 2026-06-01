@@ -6,11 +6,12 @@ reach for it, and how they fit together.
 
 ![POUNCE solver landscape](images/solver-landscape.svg)
 
-The one-sentence version: **convex and conic problems are solved to the
-global optimum; general nonlinear problems are solved to a local (KKT)
-point.** Every solver, whatever its flavor, ultimately factorizes a
-symmetric KKT system through the shared `pounce-linsol` layer, which in
-turn drives a pluggable backend (FERAL by default, HSL MA57 optionally).
+The one-sentence version: **convex and conic problems are solved to the global
+optimum; nonconvex problems are solved locally by default, or to a certified
+global optimum via the SOS (polynomial) and spatial branch-and-bound (general)
+paths.** Every solver, whatever its flavor, ultimately factorizes a symmetric
+KKT system through the shared `pounce-linsol` layer, which in turn drives a
+pluggable backend (FERAL by default, HSL MA57 optionally).
 
 ## The solvers at a glance
 
@@ -21,6 +22,8 @@ turn drives a pluggable backend (FERAL by default, HSL MA57 optionally).
 | **Convex IPM (LP/QP)** | LP, convex QP | **global** | `pounce-convex` | `solve_qp_ipm`; `pounce.qp.solve_qp`; `--solver lp-ipm`/`qp-ipm` |
 | **Convex IPM (conic)** | SOCP, exponential, power, PSD (small) cones | **global** | `pounce-convex` | `solve_socp_ipm`; `pounce.qp.solve_socp`; `pounce <file>.cbf` |
 | **Active-set QP** | QP, convex *or* indefinite | local | `pounce-qp` | `ParametricActiveSetSolver`; `--solver qp-active-set` |
+| **SOS / Lasserre** | polynomial (nonconvex) | **global** | `pounce-convex` | `sos_minimize`; `pounce.sos_minimize` |
+| **Spatial branch-and-bound** | general factorable nonconvex NLP | **global** | `pounce-global` | `solve_global` |
 
 ## When to choose each
 
@@ -73,6 +76,26 @@ mixed in one problem.)
 - Python: `pounce.qp.solve_socp(..., cones=[("exp", 3), ("pow", 0.5), ...])`.
 - CLI: a Conic Benchmark Format file, `pounce model.cbf` (see the CBLIB
   benchmark tier).
+
+### Nonconvex problem, global optimum required → **SOS** or **spatial branch-and-bound**
+
+When the problem is genuinely nonconvex and a *local* optimum is not good
+enough, two paths certify the **global** optimum:
+
+- **Polynomial** objective/constraints → **SOS / Lasserre** (`sos_minimize`,
+  or `pounce.sos_minimize`). A single semidefinite program certifies the global
+  minimum (the largest `γ` with `p − γ` in the Putinar cone), and the global
+  minimizers are recovered from the moment matrix — even multiple ones, via a
+  facial-reduction step. Best for modest degree and dimension; the SDP grows
+  with the relaxation order.
+- **General factorable** problems (including `exp`/`ln`/trig), or polynomials
+  too large for the SDP → **spatial branch-and-bound** (`pounce-global`,
+  `solve_global`). It brackets the optimum between a McCormick relaxation lower
+  bound and a local-solve upper bound, subdividing until they meet — returning a
+  feasible point and a certified optimality gap. Continuous variables only (no
+  MINLP yet).
+
+See [Global Optimization](global-optimization.md) for both in depth.
 
 ### Indefinite QP, or a QP inner-solver → **Active-set QP**
 
@@ -140,15 +163,22 @@ These are not solvers you select, but stages and tools the solvers share:
 
 ## Global vs. local — the honest summary
 
-POUNCE does not (yet) do *deterministic global optimization of nonconvex
-problems* — there is no spatial branch-and-bound. What it offers is:
+POUNCE settles a problem globally along three routes, and locally along one:
 
-- **Global optima for convex problems** — LP, convex QP, SOCP, and the
-  exponential / power cone classes. For these, local *is* global, so a
-  convex or conic reformulation buys you a global guarantee.
-- **Local optima for general nonlinear problems** — the filter-IPM and SQP
-  paths converge to a KKT point.
+- **Global by convexity** — LP, convex QP, SOCP, and the exponential / power /
+  PSD cone classes. Local *is* global, so a convex or conic reformulation buys
+  the guarantee outright.
+- **Global by certificate (polynomials)** — the SOS / Lasserre optimizer
+  certifies the global minimum of a nonconvex polynomial from a single SDP.
+- **Global by branch-and-bound (general nonconvex)** — `pounce-global` does
+  deterministic spatial branch-and-bound with McCormick relaxations, FBBT/OBBT
+  bound tightening, and local upper bounds, returning a certified optimality
+  gap. Continuous variables only for now (no MINLP); see
+  [Global Optimization](global-optimization.md).
+- **Local for general NLP** — the filter-IPM and SQP paths converge to a KKT
+  point, which for a nonconvex problem carries no global guarantee.
 
-So the practical lever for "global" answers today is **modeling**: the more
-of a problem you can express in the convex cone library, the more of it the
-convex solver settles globally.
+Two practical levers for a "global" answer: **modeling** (cast as much as you
+can into the convex cone library) and, when that is not possible, the
+**global solvers** above — SOS for polynomials, spatial branch-and-bound for
+everything factorable.
