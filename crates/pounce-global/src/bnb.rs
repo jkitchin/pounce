@@ -59,6 +59,14 @@ pub struct GlobalSolution {
     pub lower_bound: f64,
     /// Branch-and-bound nodes processed.
     pub nodes: usize,
+    /// Peak number of open nodes held on the best-first frontier at once. The
+    /// frontier is the dominant memory consumer; this is its high-water mark.
+    pub peak_frontier: usize,
+    /// Estimated peak frontier memory in bytes (`peak_frontier ×`
+    /// [`estimate_node_bytes`]). The transient per-node relaxation LP is freed
+    /// each node and not counted; this is the resident-set term that grows with
+    /// the search.
+    pub peak_memory_bytes: usize,
 }
 
 impl GlobalSolution {
@@ -66,6 +74,13 @@ impl GlobalSolution {
     pub fn gap(&self) -> f64 {
         self.objective - self.lower_bound
     }
+}
+
+/// Estimated heap bytes one frontier node occupies for an `n_vars`-variable
+/// problem: the node struct plus its two owned length-`n` box vectors. Used to
+/// project frontier memory before and after a solve.
+pub fn estimate_node_bytes(n_vars: usize) -> usize {
+    std::mem::size_of::<Node>() + 2 * n_vars * std::mem::size_of::<f64>()
 }
 
 /// Tuning for the global solve.
@@ -445,6 +460,8 @@ where
     let mut incumbent_ub = f64::INFINITY;
     let mut global_lb = f64::NEG_INFINITY;
     let mut nodes = 0usize;
+    let node_bytes = estimate_node_bytes(n);
+    let mut peak_frontier = heap.len();
 
     while let Some(node) = heap.pop() {
         if node.key.is_finite() {
@@ -464,6 +481,8 @@ where
                 objective: incumbent_ub,
                 lower_bound: lb.min(incumbent_ub),
                 nodes,
+                peak_frontier,
+                peak_memory_bytes: peak_frontier * node_bytes,
             };
         }
         if nodes >= opts.max_nodes {
@@ -478,6 +497,8 @@ where
                 objective: incumbent_ub,
                 lower_bound: global_lb.min(incumbent_ub),
                 nodes,
+                peak_frontier,
+                peak_memory_bytes: peak_frontier * node_bytes,
             };
         }
         nodes += 1;
@@ -543,6 +564,7 @@ where
         for child in children(&b, k, lb_for_children) {
             heap.push(child);
         }
+        peak_frontier = peak_frontier.max(heap.len());
     }
 
     // Frontier exhausted: everything was pruned or shrunk to a leaf.
@@ -553,6 +575,8 @@ where
             objective: incumbent_ub,
             lower_bound: incumbent_ub,
             nodes,
+            peak_frontier,
+            peak_memory_bytes: peak_frontier * node_bytes,
         }
     } else {
         GlobalSolution {
@@ -561,6 +585,8 @@ where
             objective: f64::INFINITY,
             lower_bound: global_lb,
             nodes,
+            peak_frontier,
+            peak_memory_bytes: peak_frontier * node_bytes,
         }
     }
 }
@@ -575,6 +601,7 @@ struct Shared {
     active: usize,
     stop: bool,
     node_limit: bool,
+    peak_frontier: usize,
 }
 
 /// Parallel best-first driver: a pool of `threads` workers pulls nodes from a
@@ -618,6 +645,7 @@ where
         active: 0,
         stop: false,
         node_limit: false,
+        peak_frontier: 1,
     });
     let cv = Condvar::new();
 
@@ -701,6 +729,7 @@ where
                                 for child in children(&b, k, lb_for_children) {
                                     s.heap.push(child);
                                 }
+                                s.peak_frontier = s.peak_frontier.max(s.heap.len());
                             }
                         }
                     }
@@ -734,6 +763,8 @@ where
         objective: s.incumbent_ub,
         lower_bound,
         nodes: s.nodes,
+        peak_frontier: s.peak_frontier,
+        peak_memory_bytes: s.peak_frontier * estimate_node_bytes(n),
     }
 }
 

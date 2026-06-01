@@ -1287,6 +1287,21 @@ fn run_convex_qp(
 }
 
 /// Map a global-solver status to the report's `ApplicationReturnStatus`.
+/// Human-readable byte count (`KiB`/`MiB`/`GiB`), for memory reporting.
+fn format_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= KIB * KIB * KIB {
+        format!("{:.2} GiB", b / (KIB * KIB * KIB))
+    } else if b >= KIB * KIB {
+        format!("{:.1} MiB", b / (KIB * KIB))
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn global_status_to_ars(s: pounce_global::GlobalStatus) -> ApplicationReturnStatus {
     use pounce_global::GlobalStatus;
     match s {
@@ -1367,11 +1382,28 @@ fn run_global(
         constraints,
     };
 
+    let opts = GlobalOptions::default();
+
+    // Warn up front when the worst-case frontier memory (every node of the
+    // budget held open at once) could be large, so a big `max_nodes` × wide
+    // problem doesn't surprise the user with an OOM mid-solve.
+    const MEM_WARN: usize = 1 << 30; // 1 GiB
+    let worst_case = gp.estimated_peak_memory_bytes(&opts);
+    if worst_case > MEM_WARN {
+        eprintln!(
+            "pounce: warning: with max_nodes={} on {} variables the search frontier could reach \
+             ~{} in the worst case; reduce max_nodes if memory is tight.",
+            opts.max_nodes,
+            gp.n_vars,
+            format_bytes(worst_case),
+        );
+    }
+
     let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(pounce_feral::FeralSolverInterface::new())
     };
     let t0 = std::time::Instant::now();
-    let sol = solve_global(&gp, &GlobalOptions::default(), backend);
+    let sol = solve_global(&gp, &opts, backend);
     let elapsed = t0.elapsed().as_secs_f64();
 
     let sign = if prob.minimize { 1.0 } else { -1.0 };
@@ -1385,8 +1417,10 @@ fn run_global(
     };
     println!(
         "POUNCE (global B&B, pounce-global): {msg}  obj={reported_obj:.8}  gap={gap:.3e}  \
-         nodes={}  ({elapsed:.3}s)",
+         nodes={}  peak_frontier={} (~{})  ({elapsed:.3}s)",
         sol.nodes,
+        sol.peak_frontier,
+        format_bytes(sol.peak_memory_bytes),
     );
 
     // Branch-and-bound does not produce constraint duals.

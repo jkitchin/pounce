@@ -78,6 +78,19 @@ impl GlobalProblem {
         self.constraints.iter().map(|c| (c.lo, c.hi)).unzip()
     }
 
+    /// Worst-case estimate, **before** solving, of the peak frontier memory in
+    /// bytes for the given options. Each processed node pushes at most two
+    /// children and pops one, so the best-first frontier holds at most
+    /// `max_nodes + 1` open nodes; multiplied by the per-node footprint
+    /// ([`crate::estimate_node_bytes`]) this bounds the search's resident
+    /// memory. The actual peak (usually far smaller, since most nodes are
+    /// pruned) is reported back in [`crate::GlobalSolution::peak_memory_bytes`].
+    pub fn estimated_peak_memory_bytes(&self, opts: &crate::GlobalOptions) -> usize {
+        opts.max_nodes
+            .saturating_add(1)
+            .saturating_mul(crate::estimate_node_bytes(self.n_vars))
+    }
+
     /// The maximum constraint violation of a point `x` — `0` for a feasible
     /// point, else the largest `max(lo − g, g − hi)` over the constraints. The
     /// branch-and-bound analog of a primal-infeasibility residual: it measures

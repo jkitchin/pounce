@@ -46,6 +46,8 @@ pub mod problem;
 mod relax;
 mod rlt;
 
-pub use bnb::{solve_global, BranchRule, GlobalOptions, GlobalSolution, GlobalStatus};
+pub use bnb::{
+    estimate_node_bytes, solve_global, BranchRule, GlobalOptions, GlobalSolution, GlobalStatus,
+};
 pub use expr::Expr;
 pub use problem::{Constraint, GlobalProblem};
