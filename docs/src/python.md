@@ -66,6 +66,82 @@ res = minimize(lambda x: (x - 1) @ (x - 1) + 1, x0=np.zeros(5))
 print(res.fun, res.x)
 ```
 
+`minimize` is a thin facade over `pounce.Problem` shaped after
+`scipy.optimize.minimize`, so SciPy code ports with few changes. It returns a
+SciPy-`OptimizeResult`-shaped object (`res.x`, `res.fun`, `res.success`,
+`res.status`, `res.message`, `res.nit`, plus `res.info` and dict-style
+`res["x"]`).
+
+### Compatibility with `scipy.optimize.minimize`
+
+```python
+minimize(fun, x0, jac=None, hess=None, bounds=None,
+         constraints=None, options=None)
+```
+
+| Argument | Status | Notes |
+|---|---|---|
+| `fun`, `x0` | ✅ | objective callable and start point |
+| `jac` | ✅ | callable; **omitted → forward finite differences** (`√eps` step). Provide one for production. |
+| `hess` | ⚠️ | used **only when there are no constraints**; with constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
+| `bounds` | ✅ | a sequence of `(lo, hi)` pairs; a `None` element or a `None` endpoint means ±∞ |
+| `constraints` | ✅ | SciPy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}`; multiple are concatenated; `"jac"` optional (finite-diff fallback) |
+| `options` | ⚠️ | forwarded to `Problem.add_option` — keys are **pounce/Ipopt option names** (`tol`, `max_iter`, `hessian_approximation`), **not** SciPy's (`maxiter`, `ftol`) |
+| `args` | ❌ | not supported — close over extra arguments in `fun`/`jac` |
+| `method` | ❌ | always the filter-IPM (see below for why there is no `method=`) |
+| `hessp` | ❌ | no Hessian-vector-product mode |
+| `tol` | ❌ | pass it via `options={"tol": …}` |
+| `callback` | ❌ | not supported |
+
+**Conventions that match SciPy** (so constraint dicts port directly):
+
+- Inequalities use the SciPy sign convention **`g(x) ≥ 0`**; equalities are
+  **`g(x) = 0`**.
+- The result object is SciPy-`OptimizeResult`-shaped (subset of fields + an
+  `info` map).
+
+**Gaps worth knowing:**
+
+- **Only the dict form of `constraints`** is accepted — a SciPy `Bounds`,
+  `LinearConstraint`, or `NonlinearConstraint` *object* will not work, and
+  `bounds` must be `(lo, hi)` pairs (not a `Bounds` object).
+- The constraint **Jacobian is dense**; for large sparse Jacobians use the
+  `Problem` class directly (it takes a sparse Jacobian and structure).
+- The most common porting snag is `options`: `options={"maxiter": 100}` is a
+  no-op — it is `options={"max_iter": 100}`.
+
+### Why `minimize` is NLP-only (and the other solvers have their own entry points)
+
+`minimize` deliberately covers exactly what SciPy's does: a **general,
+black-box nonlinear** problem solved to a **local** optimum. It cannot route
+to the specialized solvers, and that is a soundness decision, not an omission:
+
+- **It only sees an opaque callable.** `minimize` receives `fun` as a Python
+  function. It cannot extract the matrices of a QP, recognize a cone, or
+  *prove* convexity from a black box — so it cannot safely decide "this is an
+  LP/QP, send it to the convex IPM." (The **CLI** *can* auto-route with
+  `solver_selection=auto`, because it classifies a parsed `.nl` model and has
+  the full algebraic structure; a Python callable has none of that.)
+- **The specialized solvers need structure, not a callable.** A convex/conic
+  guarantee requires the problem *as data* (matrices, cone definitions); a
+  certified global optimum requires a *symbolic* objective the solver can
+  relax and bound. Those don't fit the `minimize(fun, x0, …)` shape, so each
+  has a typed entry point that asks you to supply the structure:
+
+| Want | Entry point | You provide | Optimum |
+|---|---|---|---|
+| General nonlinear, fast local solve | `minimize(fun, x0, …)` | callables (`fun`/`jac`/`hess`) | local |
+| LP / convex QP | `solve_qp(P, c, A, b, G, h, lb, ub, …)` | matrices | **global** |
+| SOCP / exp / power / PSD cones | `solve_socp(P, c, A, b, G, h, *, cones, …)` | matrices + cone list | **global** |
+| Polynomial, certified global | `sos_minimize(objective, *, inequalities, equalities, …)` | a polynomial | **global** |
+| Factorable nonconvex, certified global | `minimize_global(objective, *, constraints, lo, hi, …)` | a symbolic `Expr` + box | **global** |
+
+The `solve_qp` / `solve_socp` / `sos_minimize` / `minimize_global` functions
+are pounce-native (not SciPy-shaped) by necessity — e.g. `minimize_global`
+takes a symbolic `Expr` objective with keyword-only `lo`/`hi` box arrays and
+`(Expr, lo, hi)` constraint triples, *not* callables and SciPy dicts. See
+[Choosing a Solver](choosing-a-solver.md) for the full map.
+
 ## Finding multiple minima
 
 `pounce.find_minima` is the global-search companion to `minimize`: it drives
