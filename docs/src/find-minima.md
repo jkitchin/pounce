@@ -182,6 +182,64 @@ minimum while collecting the distinct minima it visits.
 
 See [`python/notebooks/17_find_minima_hopping.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/17_find_minima_hopping.ipynb).
 
+## Beyond minima: saddle points and critical points
+
+The same ideas extend to *every* stationary point of `f` — saddles
+(transition states) and maxima included. A critical point has `∇f(x) = 0`;
+its **Morse index** (the number of negative Hessian eigenvalues) classifies
+it: `0` = minimum, `1` = transition state, …, `n` = maximum. Two entry
+points are provided.
+
+### `find_critical_points` — enumerate and classify
+
+Stationary points are the roots of `∇f(x) = 0`, which are exactly the minima
+of the gradient-norm merit `½‖∇f(x)‖²` (zero there). So `find_critical_points`
+runs `find_minima` on that merit — using any enumeration `method`
+(`"deflation"`, `"multistart"`, …) — then keeps the points where `‖∇f‖` is
+truly zero and labels each by its Morse index. This treats pounce as a
+root-finder and reuses the whole `find_minima` machine.
+
+```python
+r = pounce.find_critical_points(
+    fun, x0, grad=grad, hess=hess, bounds=bounds,
+    method="deflation", n_points=12, dedup=1e-2,
+)
+r.minima      # index 0
+r.saddles     # 0 < index < n  (transition states)
+r.maxima      # index n
+for p in r.points:
+    print(p.kind, p.x, p.f, p.index)
+```
+
+### `find_saddles` — eigenvector following
+
+A saddle is a *minimum* in most directions and a *maximum* along a few. By
+walking uphill along the `index` softest Hessian eigenvectors and Newton-
+downhill in the rest, eigenvector following lands directly on an
+index-`index` saddle; multistart enumerates several.
+
+```python
+s = pounce.find_saddles(fun, x0, grad=grad, hess=hess, bounds=bounds,
+                        index=1, n_saddles=4)
+```
+
+Together with the minima, the index-1 saddles between them form the
+transition-state network / disconnectivity graph — flooding fills the
+basins, and the saddles are the barriers crossed between filled basins.
+
+* **References.** Cerjan, C.J. & Miller, W.H. "On finding transition
+  states." *J. Chem. Phys.* **75**, 2800 (1981). Henkelman, G. & Jónsson, H.
+  "A dimer method for finding saddle points…" *J. Chem. Phys.* **111**,
+  7010 (1999). [doi:10.1063/1.480097](https://doi.org/10.1063/1.480097).
+  Henkelman, G., Uberuaga, B.P. & Jónsson, H. "A climbing image nudged
+  elastic band method…" *J. Chem. Phys.* **113**, 9901 (2000).
+  [doi:10.1063/1.1329672](https://doi.org/10.1063/1.1329672). E, W. & Zhou,
+  X. "The gentlest ascent dynamics." *Nonlinearity* **24**, 1831 (2011).
+  [doi:10.1088/0951-7715/24/6/008](https://doi.org/10.1088/0951-7715/24/6/008).
+
+A runnable demo on a landscape with 4 minima, 4 saddles, and 1 maximum is in
+[`python/examples/critical_points.py`](https://github.com/jkitchin/pounce/blob/main/python/examples/critical_points.py).
+
 ## Termination
 
 The search stops on whichever fires first, reported in `result.status`:
