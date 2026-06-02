@@ -29,6 +29,173 @@ def test_from_jax_hs071():
     np.testing.assert_allclose(info["obj_val"], 17.0140172, rtol=1e-5)
 
 
+def _banded_problem(n):
+    """Tridiagonal-coupled constraints + a smooth objective. The
+    Jacobian and Lagrangian Hessian are genuinely sparse, so colored
+    compression has something to compress."""
+    def f(x):
+        return jnp.sum(x ** 2) + jnp.sum(jnp.sin(x))
+
+    def g(x):  # m = n - 1, each row couples x[i] and x[i+1]
+        return x[:-1] * x[1:] - 1.0
+
+    return f, g, n, n - 1
+
+
+def test_from_jax_sparse_matches_dense_pounce_83():
+    """Issue #83 option B: the colored/compressed Jacobian and Hessian
+    must return exactly the same nonzero values (and the same reported
+    structure) as the dense slice path — on a fully dense small problem
+    (hs071, worst case for compression) and a genuinely banded one."""
+    from pounce.jax._build import _JaxProblem
+
+    # hs071: Jacobian is fully dense (every entry nonzero), so coloring
+    # gives no compression — exercises the no-win path stays correct.
+    def f_hs(x):
+        return x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2]
+
+    def g_hs(x):
+        return jnp.stack([jnp.prod(x), jnp.dot(x, x)])
+
+    cases = [(f_hs, g_hs, 4, 2), _banded_problem(60)]
+    for f, g, n, m in cases:
+        dense = _JaxProblem(f, g, n=n, m=m, sparse=False)
+        sparse = _JaxProblem(f, g, n=n, m=m, sparse=True, n_probes=3)
+
+        # Reported structure must be identical.
+        for a, b in zip(dense.jacobianstructure(), sparse.jacobianstructure()):
+            np.testing.assert_array_equal(a, b)
+        for a, b in zip(dense.hessianstructure(), sparse.hessianstructure()):
+            np.testing.assert_array_equal(a, b)
+
+        rng = np.random.default_rng(11)
+        for _ in range(3):
+            x = rng.standard_normal(n)
+            lam = rng.standard_normal(m)
+            np.testing.assert_allclose(
+                dense.jacobian(x), sparse.jacobian(x), rtol=1e-12, atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                dense.hessian(x, lam, 0.7),
+                sparse.hessian(x, lam, 0.7),
+                rtol=1e-12, atol=1e-12,
+            )
+
+
+def test_color_columns_is_valid_and_compresses_pounce_83():
+    """The greedy coloring must (a) be a valid distance-1 coloring of the
+    column-intersection graph — columns sharing a row get distinct
+    colors — and (b) actually compress a banded pattern to a handful of
+    colors rather than ``n``."""
+    from pounce.jax._build import _JaxProblem, _color_columns
+
+    f, g, n, m = _banded_problem(100)
+    jp = _JaxProblem(f, g, n=n, m=m, sparse=False)
+
+    colors, k = _color_columns(jp._jac_rows, jp._jac_cols, n)
+    # Tridiagonal Jacobian colors with very few colors, never ~n.
+    assert k <= 4, f"banded Jacobian should compress, got {k} colors"
+
+    # Validity: no two columns sharing a nonzero row share a color.
+    from collections import defaultdict
+    cols_in_row = defaultdict(list)
+    for r, c in zip(jp._jac_rows.tolist(), jp._jac_cols.tolist()):
+        cols_in_row[r].append(c)
+    for cs in cols_in_row.values():
+        seen = [colors[c] for c in cs]
+        assert len(seen) == len(set(seen)), (
+            f"columns {cs} share a row but got colors {seen}"
+        )
+
+
+def test_from_jax_sparse_solves_match_dense_pounce_83():
+    """End-to-end: a solve built with ``sparse=True`` reaches the same
+    optimum as the dense build. Same KKT data, just a cheaper way to
+    produce the derivative values."""
+    from pounce.jax import from_jax
+
+    def f(x):
+        return x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2]
+
+    def g(x):
+        return jnp.stack([jnp.prod(x), jnp.dot(x, x)])
+
+    results = {}
+    for sparse in (False, True):
+        prob = from_jax(
+            f, g, n=4, m=2,
+            lb=np.array([1.0] * 4), ub=np.array([5.0] * 4),
+            cl=np.array([25.0, 40.0]), cu=np.array([2e19, 40.0]),
+            sparse=sparse,
+        )
+        prob.add_option("tol", 1e-8)
+        prob.add_option("print_level", 0)
+        x, info = prob.solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
+        assert info["status_msg"] == "Solve_Succeeded"
+        results[sparse] = (np.asarray(x), info["obj_val"])
+
+    np.testing.assert_allclose(results[True][0], results[False][0], atol=1e-7)
+    np.testing.assert_allclose(results[True][1], results[False][1], rtol=1e-9)
+
+
+def test_jacfwd_mode_selection_correct_pounce_83():
+    """Issue #83 option A: a tall/skinny constraint Jacobian (m > n) is
+    built with ``jacfwd``; verify the dense values are still correct.
+    A wide one (n > m) keeps ``jacrev``. Both must match a finite-ish
+    reference (here: closed-form for a bilinear map)."""
+    from pounce.jax._build import _JaxProblem
+
+    # m = 6 > n = 3 → jacfwd branch. g_k(x) = x[a]*x[b] for index pairs.
+    pairs = [(0, 1), (1, 2), (0, 2), (0, 0), (1, 1), (2, 2)]
+
+    def g(x):
+        return jnp.stack([x[a] * x[b] for a, b in pairs])
+
+    def f(x):
+        return jnp.sum(x ** 2)
+
+    jp = _JaxProblem(f, g, n=3, m=6, sparse=False)
+    x = np.array([1.5, -2.0, 0.5])
+    J = np.zeros((6, 3))
+    J[jp._jac_rows, jp._jac_cols] = jp.jacobian(x)
+
+    # Closed form d(x[a]*x[b])/dx[c].
+    ref = np.zeros((6, 3))
+    for k, (a, b) in enumerate(pairs):
+        ref[k, a] += x[b]
+        ref[k, b] += x[a]
+    np.testing.assert_allclose(J, ref, rtol=1e-12, atol=1e-12)
+
+
+def test_multi_probe_union_recovers_pattern_pounce_83():
+    """The unioned multi-probe detection must keep a structural entry
+    that any single probe could miss by numerical cancellation. We test
+    the union helper directly with hand-built dense probes so the result
+    is deterministic (not dependent on which random x hits a root)."""
+    from pounce.jax._build import (
+        _detect_pattern_2d_multi,
+        _detect_pattern_lower_multi,
+    )
+
+    # Two probes, each with a different entry exactly zero. The union
+    # must report both as structurally nonzero.
+    p1 = np.array([[1.0, 0.0], [3.0, 4.0]])
+    p2 = np.array([[1.0, 2.0], [3.0, 0.0]])
+    rows, cols = _detect_pattern_2d_multi([p1, p2])
+    got = set(zip(rows.tolist(), cols.tolist()))
+    assert got == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+    # Single probe alone would drop (0, 1).
+    rows1, cols1 = _detect_pattern_2d_multi([p1])
+    assert (0, 1) not in set(zip(rows1.tolist(), cols1.tolist()))
+
+    # Lower-triangle union (symmetric Hessian pattern).
+    h1 = np.array([[5.0, 0.0], [0.0, 7.0]])
+    h2 = np.array([[5.0, 9.0], [9.0, 7.0]])
+    hr, hc = _detect_pattern_lower_multi([h1, h2])
+    assert set(zip(hr.tolist(), hc.tolist())) == {(0, 0), (1, 0), (1, 1)}
+
+
 def test_implicit_diff_parametric_qp():
     """Differentiate x*(p) for  min ||x - p||²   →   x*(p) = p,   dx*/dp = I.
 

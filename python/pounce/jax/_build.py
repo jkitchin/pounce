@@ -3,21 +3,41 @@
 The user supplies the problem in mathematical form and we derive:
 
 * ``gradient`` = ``jax.grad(f)``
-* ``jacobian`` = ``jax.jacrev(g)`` (returns a dense ``(m, n)`` matrix
-  which we project onto the precomputed sparsity pattern of nonzero
-  entries)
-* ``hessian`` = ``jax.hessian`` of the Lagrangian
+* ``jacobian`` = derivative of ``g`` projected onto the precomputed
+  sparsity pattern of nonzero entries
+* ``hessian`` = Hessian of the Lagrangian
   ``L(x, λ, σ) = σ f(x) + λᵀ g(x)``
 
-Sparsity is detected by a single random probe: evaluate the dense
-Jacobian / Hessian at a random ``x`` (and ``λ`` for the Hessian) and
-record the indices where the magnitude exceeds a threshold. This is
-fast and works for the common case where the *structure* doesn't depend
-on the value, which is true for any composition of smooth pointwise
-operations. Users with value-dependent sparsity should hand-roll the
-pattern via the :class:`Problem` API.
+There are two ways the Jacobian / Hessian get computed per evaluation,
+selected by the ``sparse`` flag on :func:`from_jax`:
 
-All five eval methods are JIT-compiled with ``jax.jit`` and return
+* **dense (default).** ``jax.jacrev`` / ``jax.jacfwd`` / ``jax.hessian``
+  produce the full dense matrix, which we then slice to the nonzeros.
+  The *direction* (``jacrev`` vs ``jacfwd``) is chosen to minimise the
+  number of AD passes: ``jacrev`` costs ~``m`` passes, ``jacfwd`` ~``n``,
+  so we pick ``jacfwd`` when ``n < m`` (issue #83, option A). The work
+  and memory are still ``O(m·n)`` / ``O(n²)`` regardless of sparsity.
+
+* **compressed (``sparse=True``).** CPR-style colored AD (issue #83,
+  option B). Structurally-orthogonal columns are colored, one
+  JVP/HVP is taken per color (``k ≪ n`` colors), ``vmap``'d over the
+  seeds, and the result scattered back to the known nonzeros. The cost
+  drops from ``O(n)`` to ``O(k)`` AD passes. This mirrors the colored
+  Hessian path the Rust ``.nl`` tape already uses.
+
+Sparsity is detected by random probes: evaluate the dense Jacobian /
+Hessian at ``n_probes`` random ``x`` (and ``λ`` for the Hessian) and
+record the *union* of indices where the magnitude exceeds a threshold.
+A single probe is fine for the common case where the *structure*
+doesn't depend on the value (any composition of smooth pointwise
+operations); the union of several probes hardens against branchy /
+value-dependent structure (``where`` / ``abs``), which matters more
+under ``sparse=True`` because a mis-probe there corrupts the
+compression seed, not just a reported nonzero. Users with truly
+value-dependent sparsity should hand-roll the pattern via the
+:class:`Problem` API.
+
+All eval methods are JIT-compiled with ``jax.jit`` and return
 ``numpy.ndarray`` (via ``np.asarray(jnp_result)``) so the Rust bridge
 receives a contiguous CPU buffer.
 """
@@ -33,29 +53,110 @@ import numpy as np
 from .._pounce import Problem
 
 # Threshold below which a Jacobian/Hessian entry is treated as
-# structurally zero during the one-shot pattern probe. Tight enough to
-# reject genuine zeros from constant terms, loose enough that random
-# probe values don't accidentally hit a numerical cancellation that
-# would drop a real entry.
+# structurally zero during the pattern probe. Tight enough to reject
+# genuine zeros from constant terms, loose enough that random probe
+# values don't accidentally hit a numerical cancellation that would
+# drop a real entry.
 _SPARSITY_EPS = 1e-12
 
 
-def _detect_pattern_2d(dense: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    rows, cols = np.nonzero(np.abs(dense) > _SPARSITY_EPS)
+def _union_mask(denses) -> np.ndarray:
+    """Boolean nonzero mask over one or more dense probe matrices.
+
+    A nonzero in *any* probe is treated as structurally nonzero, so a
+    value-dependent zero that a single probe happens to hit doesn't
+    drop a real entry from the pattern.
+    """
+    mask = None
+    for dense in denses:
+        m = np.abs(np.asarray(dense)) > _SPARSITY_EPS
+        mask = m if mask is None else (mask | m)
+    return mask
+
+
+def _detect_pattern_2d_multi(denses) -> tuple[np.ndarray, np.ndarray]:
+    rows, cols = np.nonzero(_union_mask(denses))
     return rows.astype(np.int64), cols.astype(np.int64)
 
 
-def _detect_pattern_lower(dense: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Lower-triangle sparsity pattern of a symmetric matrix."""
-    n = dense.shape[0]
-    mask = np.abs(dense) > _SPARSITY_EPS
+def _detect_pattern_lower_multi(denses) -> tuple[np.ndarray, np.ndarray]:
+    """Lower-triangle sparsity pattern of a symmetric matrix, unioned
+    across probes."""
+    mask = _union_mask(denses)
+    n = mask.shape[0]
     rows, cols = np.tril_indices(n)
     keep = mask[rows, cols]
     return rows[keep].astype(np.int64), cols[keep].astype(np.int64)
 
 
+def _detect_pattern_2d(dense: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    return _detect_pattern_2d_multi([dense])
+
+
+def _detect_pattern_lower(dense: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Lower-triangle sparsity pattern of a symmetric matrix."""
+    return _detect_pattern_lower_multi([dense])
+
+
 def _to_np(a) -> np.ndarray:
     return np.asarray(a, dtype=np.float64)
+
+
+def _color_columns(
+    rows: np.ndarray, cols: np.ndarray, n: int,
+) -> tuple[np.ndarray, int]:
+    """Greedy distance-1 coloring of the column-intersection graph.
+
+    Two columns *conflict* (must get different colors) when they share
+    a nonzero row. Columns that share a color are therefore structurally
+    orthogonal: a single directional derivative seeded on all of them at
+    once recovers each column's entries unambiguously by row, because no
+    row receives a contribution from more than one of them.
+
+    This is the CPR (Curtis–Powell–Reid) compression used for both the
+    sparse Jacobian and (on the symmetrized pattern) the sparse Hessian.
+    Greedy coloring is not optimal but is cheap and gives ``k`` close to
+    the maximum number of nonzeros in any row, which is what bounds the
+    AD-pass count.
+
+    Returns ``(colors, num_colors)`` where ``colors[j]`` is the color of
+    column ``j`` (columns with no nonzeros get color 0).
+    """
+    from collections import defaultdict
+
+    cols_in_row: dict[int, list[int]] = defaultdict(list)
+    rows_of_col: dict[int, list[int]] = defaultdict(list)
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        cols_in_row[r].append(c)
+        rows_of_col[c].append(r)
+
+    colors = np.full(int(n), -1, dtype=np.int64)
+    num_colors = 0
+    for j in range(int(n)):
+        forbidden: set[int] = set()
+        for r in rows_of_col.get(j, ()):
+            for c2 in cols_in_row[r]:
+                cc = colors[c2]
+                if c2 != j and cc >= 0:
+                    forbidden.add(int(cc))
+        c = 0
+        while c in forbidden:
+            c += 1
+        colors[j] = c
+        if c + 1 > num_colors:
+            num_colors = c + 1
+    # Empty matrix: still report one (unused) color so seed shapes are
+    # well-defined.
+    return colors, max(num_colors, 1)
+
+
+def _seed_matrix(colors: np.ndarray, num_colors: int, n: int) -> jnp.ndarray:
+    """``(num_colors, n)`` 0/1 seed matrix: row ``c`` selects every
+    column assigned color ``c``. Seeding a JVP/HVP with row ``c`` sums
+    the structurally-orthogonal columns of that color."""
+    S = np.zeros((num_colors, int(n)), dtype=np.float64)
+    S[colors, np.arange(int(n))] = 1.0
+    return jnp.asarray(S)
 
 
 class _JaxProblem:
@@ -68,18 +169,28 @@ class _JaxProblem:
         n: int,
         m: int,
         seed: int = 0,
+        sparse: bool = False,
+        n_probes: int = 1,
     ):
         self._f = jax.jit(f)
         self._grad_f = jax.jit(jax.grad(f))
+        self._n = n
+        self._m = m
+        self._sparse = sparse
+
+        # --- dense AD callables (always built; used for the probe and,
+        # when sparse=False, for per-eval Jacobian/Hessian) ---
         if g is not None and m > 0:
             self._g = jax.jit(g)
-            jac_g_dense = jax.jit(jax.jacrev(g))
-            self._jac_g_dense = jac_g_dense
+            # Option A: jacrev costs ~m passes, jacfwd ~n. Pick the
+            # cheaper direction for the dense path.
+            jac_g = jax.jacfwd(g) if n < m else jax.jacrev(g)
+            self._jac_g_dense = jax.jit(jac_g)
 
-            # Lagrangian Hessian: σ f(x) + λᵀ g(x).
             def lagrangian(x, lam, sigma):
                 return sigma * f(x) + jnp.dot(lam, g(x))
 
+            self._lagrangian = lagrangian
             self._hess_lag_dense = jax.jit(jax.hessian(lagrangian, argnums=0))
         else:
             self._g = None
@@ -88,25 +199,83 @@ class _JaxProblem:
             def lagrangian_unc(x, sigma):
                 return sigma * f(x)
 
+            self._lagrangian = lagrangian_unc
             self._hess_lag_dense = jax.jit(jax.hessian(lagrangian_unc, argnums=0))
 
-        self._n = n
-        self._m = m
-
-        # Detect sparsity once. Use a random probe so we don't sit on
-        # structural zeros that happen to be valid for x=0 / λ=0.
+        # --- detect sparsity from a union of random probes ---
         rng = np.random.default_rng(seed)
-        x_probe = jnp.asarray(rng.standard_normal(n))
+        n_probes = max(1, int(n_probes))
+        x_probes = [jnp.asarray(rng.standard_normal(n)) for _ in range(n_probes)]
         if m > 0:
-            lam_probe = jnp.asarray(rng.standard_normal(m))
-            jac_dense = _to_np(self._jac_g_dense(x_probe))
-            self._jac_rows, self._jac_cols = _detect_pattern_2d(jac_dense)
-            hess_dense = _to_np(self._hess_lag_dense(x_probe, lam_probe, 1.0))
+            lam_probes = [
+                jnp.asarray(rng.standard_normal(m)) for _ in range(n_probes)
+            ]
+            jac_denses = [_to_np(self._jac_g_dense(xp)) for xp in x_probes]
+            self._jac_rows, self._jac_cols = _detect_pattern_2d_multi(jac_denses)
+            hess_denses = [
+                _to_np(self._hess_lag_dense(xp, lp, 1.0))
+                for xp, lp in zip(x_probes, lam_probes)
+            ]
         else:
             self._jac_rows = np.zeros(0, dtype=np.int64)
             self._jac_cols = np.zeros(0, dtype=np.int64)
-            hess_dense = _to_np(self._hess_lag_dense(x_probe, 1.0))
-        self._hess_rows, self._hess_cols = _detect_pattern_lower(hess_dense)
+            hess_denses = [_to_np(self._hess_lag_dense(xp, 1.0)) for xp in x_probes]
+        self._hess_rows, self._hess_cols = _detect_pattern_lower_multi(hess_denses)
+
+        # --- compressed (colored) AD callables, when requested ---
+        if sparse:
+            self._build_compressed()
+
+    def _build_compressed(self) -> None:
+        """Build the colored JVP (Jacobian) and HVP (Hessian) callables
+        and the scatter indices that map compressed columns back to the
+        stored ``(rows, cols)`` nonzeros (issue #83, option B)."""
+        n = self._n
+
+        # Jacobian: color columns of the (m, n) pattern, one JVP per
+        # color. J @ S has shape (m, k); for nonzero (i, j) the value
+        # lives at compressed[i, color[j]].
+        if self._m > 0:
+            jac_colors, k_jac = _color_columns(self._jac_rows, self._jac_cols, n)
+            S_jac = _seed_matrix(jac_colors, k_jac, n)
+            # color of each stored nonzero's column → its compressed col.
+            self._jac_seed_cols = jac_colors[self._jac_cols]
+            g = self._g
+
+            def jac_compressed(x):
+                # vmap one forward-mode JVP per seed column → (k, m).
+                return jax.vmap(lambda s: jax.jvp(g, (x,), (s,))[1])(S_jac)
+
+            self._jac_compressed = jax.jit(jac_compressed)
+        else:
+            self._jac_seed_cols = np.zeros(0, dtype=np.int64)
+            self._jac_compressed = None
+
+        # Hessian: symmetric, so color the *full* pattern (both
+        # triangles) — a column's compressed value sums contributions
+        # from every row, including the upper triangle we don't store.
+        full_rows = np.concatenate([self._hess_rows, self._hess_cols])
+        full_cols = np.concatenate([self._hess_cols, self._hess_rows])
+        hess_colors, k_hess = _color_columns(full_rows, full_cols, n)
+        S_hess = _seed_matrix(hess_colors, k_hess, n)
+        self._hess_seed_cols = hess_colors[self._hess_cols]
+
+        # HVP via jvp of the Lagrangian gradient: H @ s. (k, n).
+        lag = self._lagrangian
+        if self._m > 0:
+            grad_L = jax.grad(lag, argnums=0)
+
+            def hess_compressed(x, lam, sigma):
+                gl = lambda xx: grad_L(xx, lam, sigma)
+                return jax.vmap(lambda s: jax.jvp(gl, (x,), (s,))[1])(S_hess)
+        else:
+            grad_L = jax.grad(lag, argnums=0)
+
+            def hess_compressed(x, sigma):
+                gl = lambda xx: grad_L(xx, sigma)
+                return jax.vmap(lambda s: jax.jvp(gl, (x,), (s,))[1])(S_hess)
+
+        self._hess_compressed = jax.jit(hess_compressed)
 
     # --- cyipopt-shaped methods ---
 
@@ -123,6 +292,11 @@ class _JaxProblem:
         return (self._jac_rows, self._jac_cols)
 
     def jacobian(self, x):
+        if self._sparse:
+            # Compressed (k, m); scatter back: J[rows, cols] lives at
+            # comp[color(cols), rows].
+            comp = _to_np(self._jac_compressed(jnp.asarray(x)))
+            return comp[self._jac_seed_cols, self._jac_rows]
         J = _to_np(self._jac_g_dense(jnp.asarray(x)))
         return J[self._jac_rows, self._jac_cols]
 
@@ -130,6 +304,15 @@ class _JaxProblem:
         return (self._hess_rows, self._hess_cols)
 
     def hessian(self, x, lam, obj_factor):
+        if self._sparse:
+            # Compressed (k, n); H[r, c] lives at comp[color(c), r].
+            if self._m > 0:
+                comp = _to_np(
+                    self._hess_compressed(jnp.asarray(x), jnp.asarray(lam), obj_factor)
+                )
+            else:
+                comp = _to_np(self._hess_compressed(jnp.asarray(x), obj_factor))
+            return comp[self._hess_seed_cols, self._hess_rows]
         if self._m > 0:
             H = _to_np(self._hess_lag_dense(jnp.asarray(x), jnp.asarray(lam), obj_factor))
         else:
@@ -148,6 +331,8 @@ def from_jax(
     cl=None,
     cu=None,
     seed: int = 0,
+    sparse: bool = False,
+    n_probes: int | None = None,
 ) -> Problem:
     """Build a pounce :class:`Problem` from JAX-traced functions.
 
@@ -165,9 +350,25 @@ def from_jax(
         Variable bounds and constraint bounds; same convention as
         :class:`Problem`.
     seed : int
-        Seed for the random probe used to detect sparsity patterns.
+        Seed for the random probe(s) used to detect sparsity patterns.
         Change only if your problem has structural zeros that happen to
         align with the default probe.
+    sparse : bool
+        When ``True``, compute the Jacobian and Lagrangian Hessian with
+        CPR-style colored AD (one JVP/HVP per color) instead of forming
+        the dense matrix and slicing (issue #83). This drops the per-eval
+        cost from ``O(n)`` to ``O(k)`` AD passes, where ``k`` is the
+        number of colors — a large win on genuinely sparse problems and a
+        small loss on dense ones (extra coloring + scatter bookkeeping).
+        The reported structure is identical either way. Defaults to
+        ``False`` (dense, with forward/reverse mode chosen by shape).
+    n_probes : int or None
+        Number of random probes whose nonzero patterns are unioned to
+        detect sparsity. ``None`` (default) uses 1 probe for the dense
+        path and 3 for ``sparse=True`` (a mis-probe under compression
+        corrupts the seed structure, not just a reported nonzero, so
+        hardening detection matters more there). Pass an explicit integer
+        to override.
 
     Returns
     -------
@@ -177,7 +378,11 @@ def from_jax(
     """
     if m > 0 and g is None:
         raise ValueError("g must be provided when m > 0")
-    obj = _JaxProblem(f=f, g=g, n=n, m=m, seed=seed)
+    if n_probes is None:
+        n_probes = 3 if sparse else 1
+    obj = _JaxProblem(
+        f=f, g=g, n=n, m=m, seed=seed, sparse=sparse, n_probes=n_probes,
+    )
     return Problem(
         n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu,
     )
