@@ -237,8 +237,12 @@ basins, and the saddles are the barriers crossed between filled basins.
   X. "The gentlest ascent dynamics." *Nonlinearity* **24**, 1831 (2011).
   [doi:10.1088/0951-7715/24/6/008](https://doi.org/10.1088/0951-7715/24/6/008).
 
-A runnable demo on a landscape with 4 minima, 4 saddles, and 1 maximum is in
-[`python/examples/critical_points.py`](https://github.com/jkitchin/pounce/blob/main/python/examples/critical_points.py).
+Runnable demos: a landscape with 4 minima, 4 saddles, and 1 maximum in
+[`python/examples/critical_points.py`](https://github.com/jkitchin/pounce/blob/main/python/examples/critical_points.py),
+and a **molecular reaction barrier** on the Müller-Brown potential —
+locating the stable states and the transition states between them, then
+reading off barrier heights and the minimum-energy path — in
+[`python/examples/reaction_barrier.py`](https://github.com/jkitchin/pounce/blob/main/python/examples/reaction_barrier.py).
 
 ## Termination
 

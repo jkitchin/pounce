@@ -67,6 +67,61 @@ def test_route_b_finds_index1_saddles():
         assert got == pytest.approx(exp, abs=1e-2)
 
 
+def test_muller_brown_reaction_barriers():
+    """The Müller-Brown PES: 3 minima + 2 transition states, known energies.
+
+    Mirrors python/examples/reaction_barrier.py.
+    """
+    A = np.array([-200.0, -100.0, -170.0, 15.0])
+    a = np.array([-1.0, -1.0, -6.5, 0.7])
+    b = np.array([0.0, 0.0, 11.0, 0.6])
+    c = np.array([-10.0, -10.0, -6.5, 0.7])
+    x0 = np.array([1.0, 0.0, -0.5, -1.0])
+    y0 = np.array([0.0, 0.5, 1.5, 1.0])
+
+    def V(z):
+        x, y = z
+        dx, dy = x - x0, y - y0
+        return float(np.sum(A * np.exp(a * dx**2 + b * dx * dy + c * dy**2)))
+
+    def grad(z):
+        x, y = z
+        dx, dy = x - x0, y - y0
+        e = A * np.exp(a * dx**2 + b * dx * dy + c * dy**2)
+        return np.array([np.sum(e * (2 * a * dx + b * dy)),
+                         np.sum(e * (b * dx + 2 * c * dy))])
+
+    def hess(z):
+        x, y = z
+        dx, dy = x - x0, y - y0
+        e = A * np.exp(a * dx**2 + b * dx * dy + c * dy**2)
+        px, py = 2 * a * dx + b * dy, b * dx + 2 * c * dy
+        return np.array([[np.sum(e * (px * px + 2 * a)), np.sum(e * (px * py + b))],
+                         [np.sum(e * (px * py + b)), np.sum(e * (py * py + 2 * c))]])
+
+    bounds = [(-1.5, 1.2), (-0.5, 2.2)]
+
+    states = pounce.find_minima(
+        V, [-0.5, 1.4], method="flooding", jac=grad, hess=hess, bounds=bounds,
+        n_minima=3, max_solves=120, patience=40, dedup=1e-2, seed=0,
+        strategy_kw={"sigma": 0.4, "amplitude": 150.0},
+        options={"print_level": 0, "tol": 1e-8},
+    )
+    assert len(states) == 3
+    # Literature minima energies (Müller & Brown 1979).
+    assert sorted(round(v, 1) for v in states.values) == [-146.7, -108.2, -80.8]
+
+    ts = pounce.find_saddles(
+        V, [0.0, 0.5], grad=grad, hess=hess, bounds=bounds, index=1,
+        n_saddles=2, max_solves=120, patience=50, dedup=1e-2, seed=0,
+        max_step=0.05, grad_tol=1e-5,
+    )
+    assert len(ts) == 2
+    assert all(p.index == 1 for p in ts.points)
+    # Literature transition-state energies.
+    assert sorted(round(p.f, 1) for p in ts.points) == [-72.2, -40.7]
+
+
 def test_kind_labels():
     r = pounce.find_critical_points(
         fun, [0.3, 0.4], grad=grad, hess=hess, bounds=BOUNDS,
