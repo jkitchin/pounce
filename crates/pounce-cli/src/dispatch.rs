@@ -486,10 +486,16 @@ fn to_poly(e: &Expr) -> Option<Poly> {
                         None
                     }
                 }
+                // atan2 and any other binary opcodes are non-polynomial.
+                _ => None,
             }
         }
         // External function calls are opaque ⇒ not provably polynomial.
         Expr::Funcall { .. } => None,
+        // Comparisons, logicals, conditionals, and n-ary min/max (the
+        // smooth-/control-flow `.nl` opcodes) are non-polynomial ⇒ not a
+        // convex QP, so the classifier routes them to the NLP solver.
+        _ => None,
     }
 }
 
