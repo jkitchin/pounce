@@ -1123,6 +1123,14 @@ impl IpoptAlgorithm {
         if reference_theta <= outer_tol {
             self.resto_near_feasible_count = self.resto_near_feasible_count.saturating_add(1);
             if self.resto_near_feasible_count >= 3 {
+                // Constraint feasibility is met, but a near-feasible iterate is
+                // only "acceptable" if its objective is finite. CUTE `himmelbj`
+                // reaches a point with cv ≈ 2e-9 where f evaluates to NaN; that
+                // must surface as Invalid_Number_Detected rather than be
+                // reported as Solved_To_Acceptable_Level with a `nan` objective.
+                if !self.cq.borrow().curr_f().is_finite() {
+                    return IterateOutcome::Terminate(SolverReturn::InvalidNumberDetected);
+                }
                 return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
             }
         } else {

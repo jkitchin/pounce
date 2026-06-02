@@ -115,7 +115,13 @@ impl OptErrorConvCheck {
         compl_inf: Number,
         curr_f: Number,
     ) -> bool {
-        if !overall.is_finite() {
+        // A point is never acceptable if the scaled error metric or the
+        // objective itself is non-finite. Without the `curr_f` guard a NaN/Inf
+        // objective with otherwise-small infeasibility (e.g. CUTE `himmelbj`,
+        // where f evaluates to NaN at a near-feasible point) would be recorded
+        // as the acceptable rollback point and reported under
+        // `Solved_To_Acceptable_Level` with a `nan` objective.
+        if !overall.is_finite() || !curr_f.is_finite() {
             return false;
         }
         let component_ok = overall <= self.acceptable_tol

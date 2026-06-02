@@ -113,11 +113,21 @@ extract_iters() {
   grep -oE '^[[:space:]]*[0-9]+r?[[:space:]]' "$1" | tail -1 | grep -oE '[0-9]+' | head -1
 }
 extract_obj() {
-  # Prefer the "Objective..." line; fall back to "Final objective value: V".
-  local v
-  v=$(grep -oE 'Objective[. :]+[-+0-9.eE]+' "$1" | tail -1 | grep -oE '[-+0-9.eE]+$')
-  if [ -n "$v" ]; then echo "$v"; return; fi
-  grep -oE 'Final objective[. :]+[-+0-9.eE]+' "$1" | tail -1 | grep -oE '[-+0-9.eE]+$'
+  # Prefer the "Objective..." summary line; fall back to "Final objective
+  # value: V". Returns a JSON-valid number, or "null" when the solver reported
+  # a non-numeric objective (nan/inf) or none. We take the first field after
+  # the label's colon rather than a trailing char-class match, because a value
+  # like "nan" otherwise causes the old regex to scrape the label text itself
+  # (e.g. the "e" of "Objective" + dot-fill) and emit invalid JSON.
+  local line v
+  line=$(grep -E 'Objective[. :]+' "$1" | tail -1)
+  [ -z "$line" ] && line=$(grep -E 'Final objective[. :]+' "$1" | tail -1)
+  v=$(printf '%s\n' "$line" | sed -E 's/^.*://' | awk '{print $1}')
+  if printf '%s' "$v" | grep -qE '^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$'; then
+    printf '%s' "$v"
+  else
+    printf 'null'
+  fi
 }
 
 # Run one solver on one .nl. $1=label, $2=binary, $3=nl path, $4=ampl_protocol
