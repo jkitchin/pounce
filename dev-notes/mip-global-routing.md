@@ -72,6 +72,75 @@ performance good enough to trust, on an architecture that keeps
 improving without API churn, delivered as a one-line install.*
 
 
+## Relationship to discopt — division of labor, not duplication
+
+[`discopt`](https://github.com/jkitchin/discopt) (same author, same
+EPL-2.0 license) is a hybrid MINLP solver that **already implements much
+of this thesis**: a Python-modeled, JAX-differentiated, Rust-backed
+spatial branch-and-bound for MINLP/global, with a McCormick envelope
+library (21 functions incl. NN activations), piecewise-McCormick, αBB,
+AMP (adaptive multivariate partitioning), FBBT/OBBT presolve, and KKT
+implicit-differentiation sensitivity. It is **prior art that validates
+the design** — and it is what POUNCE composes *with*, not against. This
+note's `pounce-mip` / `pounce-relax` are therefore **not a from-scratch
+reimplementation**; the plan is reframed as the Rust/performance layer
+under discopt's modeling/orchestration layer.
+
+The dividing principle is **where the work is best done**:
+
+| Concern | Home | Why |
+|---|---|---|
+| Modeling, problem setup, user intent | **discopt (Python)** | Users model in Python; the algebraic API, GDP, NN embedding, ONNX import, DAE collocation live here |
+| **Modeling-language presolve** — reformulation that needs symbolic structure / user intent | **discopt (Python)** | Big-M / disjunction handling, NN-embedding reductions, expression-level simplification: best done where the model semantics are still visible, before lowering to numerics |
+| B&B orchestration (tree, branching, fathoming) | **discopt today**, optionally lifted to Rust later | Already working; the hot loop is the *node solve*, not the tree bookkeeping |
+| **Performance-heavy numeric presolve** — FBBT sweeps, OBBT LPs, activity/bound reductions, coefficient strengthening | **pounce (Rust)** | Thousands of repetitions per solve; this is the `pounce-presolve` + `pounce-convex` presolve already landing on `claude/amazing-mayer-Xd0ag` |
+| Node relaxation solves (LP/QP/NLP/conic) | **pounce (Rust)** | The wall-clock-dominant inner loop; pure-Rust, warm-started, differentiable |
+| Single-problem NLP backend | **pounce (Rust)** | Directly replaces discopt's `ripopt` — see below |
+
+### Two presolve layers, by design
+
+This is the heart of why the two projects fit. Presolve is not one thing
+done in one place — it is **two layers** that belong in two languages:
+
+1. **Symbolic / modeling-language presolve (discopt, Python).** Done
+   once, on the rich model representation, while user intent and
+   structure (disjunctions, indicator constraints, NN blocks, problem
+   templates) are still legible. Lowering loses this information, so it
+   *must* happen upstream. discopt is the right home.
+2. **Numeric presolve (pounce, Rust).** Done on the lowered numeric
+   problem and repeated at every B&B node — FBBT propagation, OBBT,
+   activity-bound reductions, coefficient strengthening. Hot-loop,
+   allocation-sensitive, pure-Rust. This is the "highest-ROI performance
+   lever" section below, and it is what POUNCE owns.
+
+The handoff is one-directional and clean: discopt does symbolic
+reductions, lowers to a numeric problem (`.nl` or a direct Rust
+problem), and POUNCE does the numeric presolve + solves from there. No
+reduction is implemented twice.
+
+### ripopt → pounce
+
+discopt's `ripopt` is "a custom Rust IPM via PyO3, distinct from Ipopt"
+— its fastest single-problem NLP backend. POUNCE *is* a mature pure-Rust
+Ipopt port (filter line search, restoration, `feral` linsol,
+`pounce-sensitivity`, a `custom_vjp` JAX layer, and the convex-conic
+family landing now). The natural consolidation: **POUNCE replaces
+ripopt** as discopt's single-problem NLP/LP/QP/conic backend. discopt
+gains a more complete, better-tested solver and the conic family for
+free; POUNCE gains a real downstream consumer that drives its
+requirements. This is the first concrete integration step and removes
+the most obvious duplication (two Rust IPMs).
+
+### What this note becomes
+
+Read `pounce-mip` / `pounce-relax` throughout this note as **the
+pure-Rust performance layer that discopt orchestrates**, not a competing
+MINLP product. The differentiable JAX surface (Seam 5, the
+"Differentiability" section) is the shared contract: discopt already
+differentiates via KKT implicit differentiation, and POUNCE's
+`custom_vjp` layer is the same mechanism — so the gradient flows through
+the language boundary, not just within one side of it.
+
 ## The central reframe
 
 Mixed-integer programming is a **branch-and-bound shell**, not a new
@@ -883,6 +952,15 @@ Phases 0–3 are the differentiable convex-MI deliverable — incremental
 and shippable on top of LP/QP. Phases 4–6 are a flagship, multi-year,
 BARON-class effort whose differentiability has no existing analog.
 
+**Effort caveat given discopt.** These estimates assume a from-scratch
+build. Because discopt already implements the spatial-B&B, McCormick/αBB,
+and AMP machinery (see "Relationship to discopt"), the realistic path is
+much shorter: the Rust phases narrow to *porting/optimizing* the
+hot-loop pieces under discopt's orchestration and replacing `ripopt`,
+rather than reinventing the algorithms. Treat the table as the ceiling
+for an independent pure-Rust product; the compose-with-discopt path is
+the floor.
+
 ## Limitations to design around
 
 1. **Global optimization requires the symbolic expression graph.** Only
@@ -1199,3 +1277,14 @@ combinatorial entries are the Phase-7 smoothing escape hatches.
   pipeline: decision-focused learning for combinatorial optimization."
   *AAAI 2019.* The decision-focused-learning framing that motivates the
   `vmap_solve_mip` batched payoff.
+
+### Prior art in this lineage (the sibling project)
+
+- ★ **discopt** — <https://github.com/jkitchin/discopt>. Same author,
+  EPL-2.0. A hybrid Python/JAX/Rust MINLP solver: spatial B&B, McCormick
+  (21 functions incl. NN activations), piecewise-McCormick, αBB, AMP
+  (adaptive multivariate partitioning), FBBT/OBBT, and KKT
+  implicit-differentiation sensitivity. The working implementation this
+  note's Rust layer composes under (see "Relationship to discopt"); also
+  the reference for AMP and the NN-activation envelope library, neither
+  of which the classic global-optimization references cover.
