@@ -32,6 +32,7 @@ use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::DenseVector;
+use pounce_linalg::diag_matrix::DiagMatrix;
 use pounce_linalg::triplet::{GenTMatrix, SymTMatrix};
 use pounce_linalg::Vector;
 use pounce_linsol::{ESymSolverStatus, FactorPattern, SymLinearSolver, TSymLinearSolver};
@@ -44,6 +45,15 @@ pub struct StdAugSystemSolver {
 
     /// `true` once the triplet structure has been pinned.
     initialized: bool,
+    /// Structural fingerprint `(w_nnz, jc_nnz, jd_nnz, n_x, n_c, n_d)` of
+    /// the coefficients the current pinned structure was built from. When
+    /// the next solve presents a different fingerprint — e.g. the
+    /// limited-memory `LowRankAugSystemSolver` driving this same inner
+    /// solver alternately with a Hessian-free `zero_w` block and an
+    /// `n`-diagonal quasi-Newton `B0`, which have different W nnz — the
+    /// triplet structure (and the backend's symbolic factor) is rebuilt
+    /// rather than silently reusing a stale pattern.
+    struct_sig: Option<(usize, usize, usize, Index, Index, Index)>,
     n_x: Index,
     n_s: Index,
     n_c: Index,
@@ -107,6 +117,7 @@ impl StdAugSystemSolver {
         Self {
             linsol,
             initialized: false,
+            struct_sig: None,
             n_x: 0,
             n_s: 0,
             n_c: 0,
@@ -140,7 +151,7 @@ impl StdAugSystemSolver {
 
         let w_nnz = match coeffs.w {
             None => 0_usize,
-            Some(w) => sym_t_downcast(w).nonzeros() as usize,
+            Some(w) => w_nonzeros(w),
         };
         let jc_nnz = gen_t_downcast(coeffs.j_c).nonzeros() as usize;
         let jd_nnz = gen_t_downcast(coeffs.j_d).nonzeros() as usize;
@@ -161,9 +172,20 @@ impl StdAugSystemSolver {
         // ---- (1,1) block: W ----
         let w_start = self.irn.len();
         if let Some(w) = coeffs.w {
-            let w = sym_t_downcast(w);
-            self.irn.extend_from_slice(w.irows());
-            self.jcn.extend_from_slice(w.jcols());
+            if let Some(t) = w.as_any().downcast_ref::<SymTMatrix>() {
+                self.irn.extend_from_slice(t.irows());
+                self.jcn.extend_from_slice(t.jcols());
+            } else if let Some(dm) = w.as_any().downcast_ref::<DiagMatrix>() {
+                // Diagonal W (e.g. the quasi-Newton `B0` substituted by
+                // `LowRankAugSystemSolver`): one (i, i) entry per row.
+                let n = w_diag_dim(dm);
+                for i in 0..n {
+                    self.irn.push(i + 1);
+                    self.jcn.push(i + 1);
+                }
+            } else {
+                unreachable!("StdAugSystemSolver: W must be a SymTMatrix or DiagMatrix in v1.0")
+            }
         }
         self.w_range = w_start..self.irn.len();
 
@@ -256,10 +278,18 @@ impl StdAugSystemSolver {
             let Some(w_dyn) = coeffs.w else {
                 unreachable!("structure pinned with W; W cannot be None now")
             };
-            let w = sym_t_downcast(w_dyn);
             let dst = &mut self.vals[self.w_range.clone()];
-            for (d, &v) in dst.iter_mut().zip(w.values().iter()) {
-                *d = coeffs.w_factor * v;
+            if let Some(t) = w_dyn.as_any().downcast_ref::<SymTMatrix>() {
+                for (d, &v) in dst.iter_mut().zip(t.values().iter()) {
+                    *d = coeffs.w_factor * v;
+                }
+            } else if let Some(dm) = w_dyn.as_any().downcast_ref::<DiagMatrix>() {
+                let diag = w_diag_values(dm);
+                for (d, &v) in dst.iter_mut().zip(diag.iter()) {
+                    *d = coeffs.w_factor * v;
+                }
+            } else {
+                unreachable!("StdAugSystemSolver: W must be a SymTMatrix or DiagMatrix in v1.0")
             }
         }
         // (1,1) diag: D_x + δ_x
@@ -361,12 +391,33 @@ impl AugSystemSolver for StdAugSystemSolver {
         check_neg_evals: bool,
         num_neg_evals: Index,
     ) -> ESymSolverStatus {
-        if !self.initialized {
+        // Rebuild the triplet structure (and the backend symbolic factor)
+        // whenever the coefficients' structural fingerprint changes, not
+        // just on the first call. The limited-memory low-rank solver
+        // drives this inner solver with W blocks of different sparsity
+        // (`zero_w` for Hessian-free init/multiplier solves vs an
+        // `n`-diagonal `B0` for the main solves); reusing a stale pinned
+        // structure would drop the W block entirely.
+        let sig = {
+            let w_nnz = coeffs.w.map(w_nonzeros).unwrap_or(0);
+            let jc_nnz = gen_t_downcast(coeffs.j_c).nonzeros() as usize;
+            let jd_nnz = gen_t_downcast(coeffs.j_d).nonzeros() as usize;
+            (
+                w_nnz,
+                jc_nnz,
+                jd_nnz,
+                coeffs.j_c.n_cols(),
+                coeffs.j_c.n_rows(),
+                coeffs.j_d.n_rows(),
+            )
+        };
+        if !self.initialized || self.struct_sig != Some(sig) {
             let s = self.build_structure(coeffs);
             if s != ESymSolverStatus::Success {
                 self.last_status = Some(s);
                 return s;
             }
+            self.struct_sig = Some(sig);
         }
         self.refill_values(coeffs);
 
@@ -685,11 +736,32 @@ fn dump_kkt(
     }
 }
 
-fn sym_t_downcast(m: &dyn pounce_linalg::SymMatrix) -> &SymTMatrix {
-    let Some(t) = m.as_any().downcast_ref::<SymTMatrix>() else {
-        unreachable!("StdAugSystemSolver: W must be a SymTMatrix in v1.0")
-    };
-    t
+/// Triplet-entry count the (1,1) `W` block contributes, supporting both
+/// an explicit [`SymTMatrix`] and a diagonal [`DiagMatrix`] (the latter
+/// is what [`crate::kkt::low_rank_aug_system_solver`] substitutes for the
+/// limited-memory quasi-Newton `B0`).
+fn w_nonzeros(w: &dyn pounce_linalg::SymMatrix) -> usize {
+    if let Some(t) = w.as_any().downcast_ref::<SymTMatrix>() {
+        t.nonzeros() as usize
+    } else if let Some(dm) = w.as_any().downcast_ref::<DiagMatrix>() {
+        w_diag_dim(dm) as usize
+    } else {
+        unreachable!("StdAugSystemSolver: W must be a SymTMatrix or DiagMatrix in v1.0")
+    }
+}
+
+fn w_diag_dim(dm: &DiagMatrix) -> Index {
+    dm.get_diag()
+        .expect("DiagMatrix W has no diagonal set")
+        .dim()
+}
+
+fn w_diag_values(dm: &DiagMatrix) -> Vec<Number> {
+    let diag = dm.get_diag().expect("DiagMatrix W has no diagonal set");
+    diag.as_any()
+        .downcast_ref::<DenseVector>()
+        .expect("StdAugSystemSolver: DiagMatrix W diagonal must be DenseVector in v1.0")
+        .expanded_values()
 }
 
 fn gen_t_downcast(m: &dyn pounce_linalg::Matrix) -> &GenTMatrix {
@@ -1012,6 +1084,191 @@ mod tests {
         }
         for v in sd.values() {
             assert!((v - 1.0).abs() < 1e-10, "sol_d = {v}");
+        }
+    }
+
+    /// End-to-end equivalence: solving the augmented system with an
+    /// explicit dense `W = σ I + v vᵀ − u uᵀ` (a `SymTMatrix`) through
+    /// `StdAugSystemSolver` must produce the *same* solution as solving
+    /// it with the matching `LowRankUpdateSymMatrix` through
+    /// `LowRankAugSystemSolver` wrapping `StdAugSystemSolver`. This is
+    /// the integration the limited-memory path relies on: it exercises
+    /// the constrained SMW path with both a positive (V) and a negative
+    /// (U) curvature column, and the `DiagMatrix`-W branch of
+    /// `StdAugSystemSolver`. `DenseMock` gives an exact LU oracle.
+    #[test]
+    fn lowrank_smw_matches_dense_w_on_constrained_system() {
+        use crate::kkt::low_rank_aug_system_solver::LowRankAugSystemSolver;
+        use pounce_linalg::diag_matrix::DiagMatrix;
+        use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrixSpace;
+        use pounce_linalg::multi_vector_matrix::MultiVectorMatrixSpace;
+
+        let n = 4usize;
+        let sigma = 2.0;
+        // Three V columns and three U columns in R⁴ — six vectors in
+        // 4-space, the exact L-BFGS situation (2·history columns) that
+        // the single-column-only mock tests never exercised. Magnitudes
+        // kept modest so B = σI + Σvvᵀ − Σuuᵀ stays SPD.
+        let vcols = [
+            vec![0.6, 0.1, -0.2, 0.3],
+            vec![0.2, 0.5, 0.1, -0.1],
+            vec![-0.1, 0.2, 0.4, 0.2],
+            vec![0.3, -0.2, 0.1, 0.4],
+            vec![0.15, 0.25, -0.3, 0.1],
+            vec![-0.2, 0.1, 0.2, 0.35],
+        ];
+        let ucols = [
+            vec![0.3, -0.1, 0.2, 0.1],
+            vec![0.1, 0.3, -0.2, 0.2],
+            vec![0.2, 0.1, 0.1, -0.3],
+            vec![-0.1, 0.2, 0.15, 0.1],
+            vec![0.25, -0.15, 0.1, 0.2],
+            vec![0.1, 0.2, -0.25, 0.15],
+        ];
+        // Dense W = σI + Σ vᵢvᵢᵀ − Σ uᵢuᵢᵀ (full lower triangle triplet).
+        let mut wfull = vec![0.0_f64; n * n];
+        for i in 0..n {
+            wfull[i * n + i] = sigma;
+        }
+        for c in vcols.iter() {
+            for i in 0..n {
+                for j in 0..n {
+                    wfull[i * n + j] += c[i] * c[j];
+                }
+            }
+        }
+        for c in ucols.iter() {
+            for i in 0..n {
+                for j in 0..n {
+                    wfull[i * n + j] -= c[i] * c[j];
+                }
+            }
+        }
+
+        // J_c = [1 1 1 1]; no inequalities (n_d = n_s = 0).
+        let make_jc = || {
+            let sp = GenTMatrixSpace::new(1, 4, vec![1, 1, 1, 1], vec![1, 2, 3, 4]);
+            let mut m = GenTMatrix::new(sp);
+            m.set_values(&[1.0, 1.0, 1.0, 1.0]);
+            m
+        };
+        // One inequality row → n_d = n_s = 1 (a slack block), matching
+        // HS071's structure. The mock + single-column tests never had a
+        // slack block; the SMW s/d-block path went uncovered.
+        let make_jd = || {
+            let sp = GenTMatrixSpace::new(1, 4, vec![1, 1], vec![1, 3]);
+            let mut m = GenTMatrix::new(sp);
+            m.set_values(&[1.0, 1.0]);
+            m
+        };
+
+        let xs = DenseVectorSpace::new(4);
+        let cs = DenseVectorSpace::new(1);
+        let mk = |sp: &Rc<DenseVectorSpace>, vals: &[Number]| {
+            let mut d = sp.make_new_dense();
+            d.set_values(vals);
+            d
+        };
+
+        let solve_with = |w: &dyn pounce_linalg::SymMatrix,
+                          aug: &mut dyn AugSystemSolver|
+         -> (Vec<Number>, Vec<Number>) {
+            let j_c = make_jc();
+            let j_d = make_jd();
+            let rx = mk(&xs, &[1.0, 2.0, -1.0, 0.5]);
+            let rs = mk(&cs, &[0.4]);
+            let rc = mk(&cs, &[3.0]);
+            let rd = mk(&cs, &[0.7]);
+            let mut sx = mk(&xs, &[0.0, 0.0, 0.0, 0.0]);
+            let mut ss = mk(&cs, &[0.0]);
+            let mut sc = mk(&cs, &[0.0]);
+            let mut sd = mk(&cs, &[0.0]);
+            let d_s = mk(&cs, &[1.5]);
+            let coeffs = AugSysCoeffs {
+                w: Some(w),
+                w_factor: 1.0,
+                d_x: None,
+                delta_x: 0.0,
+                d_s: Some(&d_s),
+                delta_s: 0.0,
+                j_c: &j_c,
+                d_c: None,
+                delta_c: 0.0,
+                j_d: &j_d,
+                d_d: None,
+                delta_d: 0.0,
+            };
+            let rhs = AugSysRhs {
+                rhs_x: &rx,
+                rhs_s: &rs,
+                rhs_c: &rc,
+                rhs_d: &rd,
+            };
+            let mut sol = AugSysSol {
+                sol_x: &mut sx,
+                sol_s: &mut ss,
+                sol_c: &mut sc,
+                sol_d: &mut sd,
+            };
+            let status = aug.solve(&coeffs, &rhs, &mut sol, false, 1);
+            assert_eq!(status, ESymSolverStatus::Success);
+            (sx.expanded_values(), sc.expanded_values())
+        };
+
+        // Dense reference: full lower-triangle triplet of `wfull`.
+        let mut wi = Vec::new();
+        let mut wj = Vec::new();
+        let mut wv = Vec::new();
+        for i in 0..n {
+            for j in 0..=i {
+                wi.push(i as Index + 1);
+                wj.push(j as Index + 1);
+                wv.push(wfull[i * n + j]);
+            }
+        }
+        let w_space = SymTMatrixSpace::new(4, wi, wj);
+        let mut w_dense = SymTMatrix::new(w_space);
+        w_dense.set_values(&wv);
+        let mut std_solver = StdAugSystemSolver::new(TSymLinearSolver::new(
+            Box::new(pounce_feral::FeralSolverInterface::new()),
+            None,
+            false,
+        ));
+        let (ref_x, ref_c) = solve_with(&w_dense, &mut std_solver);
+
+        // Low-rank SMW path: same B as a LowRankUpdateSymMatrix.
+        let lr_space = LowRankUpdateSymMatrixSpace::new(4, None, false);
+        let mut lr = lr_space.make_new_low_rank();
+        let mut diag = xs.make_new_dense();
+        diag.set_values(&[sigma; 4]);
+        lr.set_diag(Rc::new(diag) as Rc<dyn Vector>);
+        let build_mvm = |cols: &[Vec<Number>]| {
+            let sp = MultiVectorMatrixSpace::new(cols.len() as Index, Rc::clone(&xs));
+            let mut mvm = sp.make_new_multi_vector();
+            for (k, c) in cols.iter().enumerate() {
+                let mut cv = xs.make_new_dense();
+                cv.set_values(c);
+                mvm.set_vector(k as Index, Rc::new(cv) as Rc<dyn Vector>);
+            }
+            mvm
+        };
+        lr.set_v(Rc::new(build_mvm(&vcols)));
+        lr.set_u(Rc::new(build_mvm(&ucols)));
+        let _ = DiagMatrix::new(4); // ensure DiagMatrix path is linked
+
+        let mut lr_solver =
+            LowRankAugSystemSolver::new(Box::new(StdAugSystemSolver::new(TSymLinearSolver::new(
+                Box::new(pounce_feral::FeralSolverInterface::new()),
+                None,
+                false,
+            ))));
+        let (lr_x, lr_c) = solve_with(&lr, &mut lr_solver);
+
+        for (a, b) in ref_x.iter().zip(lr_x.iter()) {
+            assert!((a - b).abs() < 1e-9, "sol_x mismatch: dense={a} smw={b}");
+        }
+        for (a, b) in ref_c.iter().zip(lr_c.iter()) {
+            assert!((a - b).abs() < 1e-9, "sol_c mismatch: dense={a} smw={b}");
         }
     }
 }

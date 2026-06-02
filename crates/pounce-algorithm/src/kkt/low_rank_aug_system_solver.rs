@@ -386,7 +386,10 @@ impl LowRankAugSystemSolver {
                 ut_d.add_right_mult_matrix(-1.0, vt1_d, &c_mat, 1.0);
             }
 
-            // 6. M2 = I − Utilde2_x^T · U_x; J2 = chol(M2).
+            // 6. M2 = I − Utilde2_x^T · U_x; J2 = chol(M2). A non-positive
+            //    pivot means the `−UUᵀ` correction drove the reduced
+            //    Hessian indefinite: a genuine wrong-inertia signal that
+            //    the perturbation handler should act on.
             let m2_space = DenseSymMatrixSpace::new(n_u);
             let mut m2 = m2_space.make_new_dense_sym();
             m2.fill_identity(1.0);
@@ -595,14 +598,29 @@ impl AugSystemSolver for LowRankAugSystemSolver {
             check_neg_evals = false;
         }
 
+        // Hessian-free / non-low-rank W: the least-square-multiplier
+        // initialization (`init`) and the equality-multiplier estimates
+        // (`eq_mult`) drive this same solver with their own zero W block
+        // and `w_factor = 0` — there is no low-rank update to apply, so
+        // bypass the SMW machinery and solve directly through the inner
+        // augmented-system solver with the original coefficients.
+        // `data.w` only carries a `LowRankUpdateSymMatrix` for the main
+        // primal-dual solves (always `w_factor = 1`).
+        let lr_w_opt = coeffs
+            .w
+            .and_then(|w| w.as_any().downcast_ref::<LowRankUpdateSymMatrix>());
+        let Some(lr_w) = lr_w_opt else {
+            let status = self
+                .inner
+                .solve(coeffs, rhs, sol, check_neg_evals, num_neg_evals);
+            if self.inner.provides_inertia() {
+                self.num_neg_evals = self.inner.number_of_neg_evals();
+            }
+            return status;
+        };
+
         let needs_rebuild = self.first_call || self.augmented_system_requires_change(coeffs);
         if needs_rebuild {
-            let lr_w = match coeffs.w {
-                Some(w) => w.as_any().downcast_ref::<LowRankUpdateSymMatrix>().expect(
-                    "LowRankAugSystemSolver requires a LowRankUpdateSymMatrix as its W block",
-                ),
-                None => panic!("LowRankAugSystemSolver requires a non-None W"),
-            };
             let status =
                 self.update_factorization(lr_w, coeffs, rhs, check_neg_evals, num_neg_evals);
             if status != ESymSolverStatus::Success {
@@ -899,6 +917,76 @@ mod tests {
         let got = sol_x.expanded_values()[0];
         let want = 7.0 / 2.75;
         assert!((got - want).abs() < 1e-12, "got {} want {}", got, want);
+    }
+
+    #[test]
+    fn smw_reports_wrong_inertia_on_indefinite_negative_update() {
+        // 1×1 system: W = b0 − u² with u² > b0, so B = 2 − 4 = −2 is
+        // genuinely indefinite — the SR1 negative-curvature regime. The
+        // SMW middle matrix M2 = 1 − Utilde2ᵀU = 1 − u²/b0 = −1 is then
+        // not positive definite, so its Cholesky must fail and the solver
+        // must report `WrongInertia` — the signal the perturbation handler
+        // keys on to correct the step — rather than silently returning a
+        // garbage solve. (`number_of_neg_evals` is not asserted here: with
+        // a real inertia-providing inner solver it delegates to the inner;
+        // the mock reports 0.)
+        let space_x = DenseVectorSpace::new(1);
+        let space_zero = DenseVectorSpace::new(0);
+        let lr_space = LowRankUpdateSymMatrixSpace::new(1, None, false);
+        let mut lr = lr_space.make_new_low_rank();
+        lr.set_diag(dvec_rc(&space_x, &[2.0]));
+        let u_space = MultiVectorMatrixSpace::new(1, Rc::clone(&space_x));
+        let mut u_mvm = u_space.make_new_multi_vector();
+        u_mvm.set_vector(0, dvec_rc(&space_x, &[2.0]) as Rc<dyn Vector>);
+        lr.set_u(Rc::new(u_mvm));
+        let lr_rc: Rc<LowRankUpdateSymMatrix> = Rc::new(lr);
+
+        let mut solver = LowRankAugSystemSolver::new(Box::new(DiagInner {
+            calls: Cell::new(0),
+        }));
+
+        let j_c_space = pounce_linalg::dense_gen_matrix::DenseGenMatrixSpace::new(0, 1);
+        let j_d_space = pounce_linalg::dense_gen_matrix::DenseGenMatrixSpace::new(0, 1);
+        let j_c = j_c_space.make_new_dense_gen();
+        let j_d = j_d_space.make_new_dense_gen();
+
+        let coeffs = AugSysCoeffs {
+            w: Some(lr_rc.as_ref() as &dyn SymMatrix),
+            w_factor: 1.0,
+            d_x: None,
+            delta_x: 0.0,
+            d_s: None,
+            delta_s: 0.0,
+            j_c: &j_c as &dyn Matrix,
+            d_c: None,
+            delta_c: 0.0,
+            j_d: &j_d as &dyn Matrix,
+            d_d: None,
+            delta_d: 0.0,
+        };
+
+        let rhs_x = dvec(&space_x, &[1.0]);
+        let rhs_s = dvec(&space_zero, &[]);
+        let rhs_c = dvec(&space_zero, &[]);
+        let rhs_d = dvec(&space_zero, &[]);
+        let rhs = AugSysRhs {
+            rhs_x: &rhs_x,
+            rhs_s: &rhs_s,
+            rhs_c: &rhs_c,
+            rhs_d: &rhs_d,
+        };
+        let mut sol_x = dvec(&space_x, &[0.0]);
+        let mut sol_s = dvec(&space_zero, &[]);
+        let mut sol_c = dvec(&space_zero, &[]);
+        let mut sol_d = dvec(&space_zero, &[]);
+        let mut sol = AugSysSol {
+            sol_x: &mut sol_x,
+            sol_s: &mut sol_s,
+            sol_c: &mut sol_c,
+            sol_d: &mut sol_d,
+        };
+        let status = solver.solve(&coeffs, &rhs, &mut sol, false, 0);
+        assert_eq!(status, ESymSolverStatus::WrongInertia);
     }
 
     #[test]
