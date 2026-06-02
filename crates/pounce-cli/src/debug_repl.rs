@@ -1045,6 +1045,20 @@ impl SolverDebugger {
         }
     }
 
+    /// A debugger that stays **quiet** (never pauses) until [`arm`]ed. Used as
+    /// the on-demand sub-solve hook for the branch-and-bound tree debugger:
+    /// it sees a node's relaxation solve only when the user steps into it.
+    ///
+    /// [`arm`]: DebugHook::arm
+    pub fn quiet(mode: DebugMode, reg: Option<Rc<RegisteredOptions>>) -> Self {
+        let mut d = Self::new(mode, reg);
+        d.step = false;
+        d.pause_iters = false;
+        d.pause_terminal = false;
+        d.detached = true;
+        d
+    }
+
     /// Queue a debugger script to run once at the first pause.
     pub fn with_script(mut self, path: String) -> Self {
         self.pending_script = Some(path);
@@ -3757,6 +3771,16 @@ impl DebugHook for SolverDebugger {
     /// no reason to pay the O(nnz) assembly every iteration.
     fn wants_kkt_capture(&self) -> bool {
         !self.detached
+    }
+
+    /// Re-arm a [`quiet`](SolverDebugger::quiet) debugger to drop in at the
+    /// next checkpoint of the next sub-solve (the tree debugger's
+    /// step-into-relaxation).
+    fn arm(&mut self) {
+        self.step = true;
+        self.detached = false;
+        self.pause_iters = true;
+        self.pause_terminal = true;
     }
 
     fn at_checkpoint(&mut self, ctx: &mut dyn DebugState) -> DebugAction {

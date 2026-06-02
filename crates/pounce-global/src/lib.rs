@@ -48,8 +48,8 @@ mod relax;
 mod rlt;
 
 pub use bnb::{
-    estimate_node_bytes, solve_global, solve_global_debug, BranchRule, GlobalOptions,
-    GlobalSolution, GlobalStatus,
+    estimate_node_bytes, solve_global, solve_global_debug, solve_global_debug_into, BranchRule,
+    GlobalOptions, GlobalSolution, GlobalStatus,
 };
 pub use expr::Expr;
 pub use problem::{Constraint, GlobalProblem};

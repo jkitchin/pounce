@@ -419,6 +419,13 @@ pub trait DebugHook {
     fn wants_kkt_capture(&self) -> bool {
         true
     }
+
+    /// Arm the hook to pause at the next checkpoint. Used to debug a
+    /// sub-solve **on demand** — e.g. the branch-and-bound tree debugger
+    /// re-arms this interior-point hook just before a node's relaxation
+    /// solve, so the same hook stays quiet otherwise but drops in for that
+    /// one solve. Default: no-op (always-on hooks ignore it).
+    fn arm(&mut self) {}
 }
 
 // ===========================================================================
@@ -554,6 +561,12 @@ pub trait TreeDebugState {
     fn status(&self) -> Option<&str> {
         None
     }
+
+    /// Request that the *next* node's relaxation sub-solve be run under the
+    /// interior-point debugger (the tree debugger's "step into" command).
+    /// Meaningful at [`TreeCheckpoint::NodeSelected`]; a no-op by default
+    /// and when the solver was not given a sub-solve hook.
+    fn request_subsolve_debug(&mut self) {}
 }
 
 /// A consumer that a branch-and-bound solver pauses at each

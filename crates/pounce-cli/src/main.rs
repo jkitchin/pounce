@@ -1426,13 +1426,18 @@ fn run_global(
     };
     let t0 = std::time::Instant::now();
     let sol = if let Some(mode) = debug {
-        // Interactive tree debugger: step the branch-and-bound search.
+        // Interactive tree debugger: step the branch-and-bound search. A
+        // quiet interior-point debugger rides along so `into` can step into a
+        // node's relaxation solve (it stays silent until the tree REPL arms
+        // it).
+        use pounce_cli::debug_repl::SolverDebugger;
         use pounce_cli::tree_debug::TreeDebugger;
         let mut dbg = TreeDebugger::new(mode);
         if let Some(p) = debug_script {
             dbg = dbg.with_script(p);
         }
-        pounce_global::solve_global_debug(&gp, &opts, &mut dbg, backend)
+        let mut subsolve = SolverDebugger::quiet(mode, None);
+        pounce_global::solve_global_debug_into(&gp, &opts, &mut dbg, &mut subsolve, backend)
     } else {
         solve_global(&gp, &opts, backend)
     };

@@ -12,8 +12,8 @@ use crate::debug::{fire_tree, BnbDebugState};
 use crate::expr::eval;
 use crate::problem::{ConstraintProvider, GlobalProblem};
 use crate::relax::build_relaxation;
-use pounce_common::debug::{DebugAction, PruneReason, TreeCheckpoint, TreeDebugHook};
-use pounce_convex::{solve_qp_ipm, QpOptions, QpStatus};
+use pounce_common::debug::{DebugAction, DebugHook, PruneReason, TreeCheckpoint, TreeDebugHook};
+use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_presolve::fbbt::{run_fbbt, FbbtConfig};
 use std::cmp::Ordering;
@@ -253,6 +253,7 @@ fn process_node<F>(
     qp_opts: &QpOptions,
     obbt_parallel: bool,
     make_backend: &F,
+    mut subsolve_hook: Option<&mut dyn DebugHook>,
 ) -> Option<Bounded>
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
@@ -317,7 +318,14 @@ where
     if opts.rlt {
         crate::rlt::augment(&mut qp, prob, &lo, &hi);
     }
-    let sol = solve_qp_ipm(&qp, qp_opts, &mut mk);
+    // The node's relaxation lower bound. When the tree debugger stepped into
+    // this node, `subsolve_hook` is armed and we run it under the
+    // interior-point debugger; `take` keeps the later sandwich re-solves
+    // un-debugged.
+    let sol = match subsolve_hook.take() {
+        Some(h) => solve_qp_ipm_debug(&qp, qp_opts, h, &mut mk),
+        None => solve_qp_ipm(&qp, qp_opts, &mut mk),
+    };
     let mut node_lb = match sol.status {
         QpStatus::Optimal => sol.obj,
         QpStatus::PrimalInfeasible => return None,
@@ -438,7 +446,7 @@ where
     if opts.threads > 1 {
         solve_parallel(prob, opts, &make_backend, opts.threads)
     } else {
-        solve_serial(prob, opts, make_backend, None)
+        solve_serial(prob, opts, make_backend, None, None)
     }
 }
 
@@ -459,7 +467,24 @@ pub fn solve_global_debug<F>(
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
 {
-    solve_serial(prob, opts, make_backend, Some(hook))
+    solve_serial(prob, opts, make_backend, Some(hook), None)
+}
+
+/// Like [`solve_global_debug`], but also threads an interior-point
+/// [`DebugHook`] that the tree debugger arms on demand to **step into** a
+/// node's relaxation solve. The `subsolve_hook` stays quiet until a
+/// `request_subsolve_debug` (the REPL's "step into") arms it for one node.
+pub fn solve_global_debug_into<F>(
+    prob: &GlobalProblem,
+    opts: &GlobalOptions,
+    hook: &mut dyn TreeDebugHook,
+    subsolve_hook: &mut dyn DebugHook,
+    make_backend: F,
+) -> GlobalSolution
+where
+    F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
+{
+    solve_serial(prob, opts, make_backend, Some(hook), Some(subsolve_hook))
 }
 
 /// Deterministic best-first serial driver. `hook`, when present, is fired at
@@ -470,6 +495,7 @@ fn solve_serial<F>(
     opts: &GlobalOptions,
     mut make_backend: F,
     mut hook: Option<&mut dyn TreeDebugHook>,
+    mut subsolve_hook: Option<&mut dyn DebugHook>,
 ) -> GlobalSolution
 where
     F: Fn() -> Box<dyn SparseSymLinearSolverInterface> + Sync,
@@ -522,6 +548,7 @@ where
                     branch_var: $bvar,
                     prune_reason: $prune,
                     status: None,
+                    arm: None,
                 };
                 matches!(fire_tree(&mut hook, &mut st), DebugAction::Stop)
             } else {
@@ -544,19 +571,36 @@ where
             global_lb = node.key;
         }
 
-        if fire_cp!(
-            TreeCheckpoint::NodeSelected,
-            &node.lo,
-            &node.hi,
-            f64::NAN,
-            node.depth,
-            None,
-            None
-        ) {
-            status = stop_status(incumbent_ub);
-            final_lb = global_lb.min(incumbent_ub);
-            exited = true;
-            break 'search;
+        // NodeSelected is fired inline (not via `fire_cp!`) so the hook can
+        // arm the next relaxation's interior-point sub-solve via `arm`.
+        let mut arm_next = false;
+        if hook.is_some() {
+            let stop = {
+                let mut st = BnbDebugState {
+                    cp: TreeCheckpoint::NodeSelected,
+                    node_id,
+                    depth: node.depth,
+                    nodes: nodes as u64,
+                    frontier_len: heap.len(),
+                    lo: &node.lo,
+                    hi: &node.hi,
+                    node_lb: f64::NAN,
+                    global_lb,
+                    incumbent: incumbent_ub.is_finite().then_some(incumbent_ub),
+                    incumbent_x: (!incumbent_x.is_empty()).then_some(incumbent_x.as_slice()),
+                    branch_var: None,
+                    prune_reason: None,
+                    status: None,
+                    arm: Some(&mut arm_next),
+                };
+                matches!(fire_tree(&mut hook, &mut st), DebugAction::Stop)
+            };
+            if stop {
+                status = stop_status(incumbent_ub);
+                final_lb = global_lb.min(incumbent_ub);
+                exited = true;
+                break 'search;
+            }
         }
 
         // Best-first: this node's key is the frontier minimum, so once it meets
@@ -584,6 +628,21 @@ where
         }
         nodes += 1;
 
+        // If the user stepped into this node, arm the interior-point hook and
+        // hand it to the relaxation solve; otherwise the relaxation runs
+        // un-debugged.
+        let node_subsolve: Option<&mut dyn DebugHook> = if arm_next {
+            match subsolve_hook.as_deref_mut() {
+                Some(h) => {
+                    h.arm();
+                    Some(h)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
         let Some(b) = process_node(
             prob,
             opts,
@@ -596,6 +655,7 @@ where
             &qp_opts,
             opts.parallel,
             &make_backend,
+            node_subsolve,
         ) else {
             if fire_cp!(
                 TreeCheckpoint::NodePruned,
@@ -764,6 +824,7 @@ where
             branch_var: None,
             prune_reason: None,
             status: Some(&status_str),
+            arm: None,
         };
         let _ = fire_tree(&mut hook, &mut st);
     }
@@ -894,6 +955,7 @@ where
                     &qp_opts,
                     false, // OBBT serial inside a worker — nesting oversubscribes
                     make_backend,
+                    None, // the parallel pool is not debuggable
                 );
 
                 // --- commit under the lock ---

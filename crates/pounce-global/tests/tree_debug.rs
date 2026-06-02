@@ -120,6 +120,62 @@ fn attaching_a_tree_hook_does_not_change_the_result() {
     );
 }
 
+/// Step-into composability: a tree hook that requests `into` at the first
+/// node causes that node's relaxation to run under the interior-point
+/// sub-solve hook — proving the two debug surfaces compose.
+#[test]
+fn step_into_runs_the_relaxation_under_the_ip_hook() {
+    use pounce_common::debug::{Checkpoint, DebugHook, DebugState};
+
+    // Tree hook: arm the sub-solve at the very first node, then resume.
+    struct StepInto {
+        armed_once: bool,
+    }
+    impl TreeDebugHook for StepInto {
+        fn at_node(&mut self, st: &mut dyn TreeDebugState) -> DebugAction {
+            if !self.armed_once && st.checkpoint() == TreeCheckpoint::NodeSelected {
+                st.request_subsolve_debug();
+                self.armed_once = true;
+            }
+            DebugAction::Resume
+        }
+    }
+
+    // Interior-point sub-hook: records that it was armed and saw checkpoints.
+    #[derive(Default)]
+    struct SubRecorder {
+        arm_calls: usize,
+        checkpoints: usize,
+        saw_iter_start: bool,
+    }
+    impl DebugHook for SubRecorder {
+        fn arm(&mut self) {
+            self.arm_calls += 1;
+        }
+        fn at_checkpoint(&mut self, st: &mut dyn DebugState) -> DebugAction {
+            self.checkpoints += 1;
+            if st.checkpoint() == Checkpoint::IterStart {
+                self.saw_iter_start = true;
+            }
+            DebugAction::Resume
+        }
+    }
+
+    let prob = quartic();
+    let opts = GlobalOptions::default();
+    let mut tree = StepInto { armed_once: false };
+    let mut sub = SubRecorder::default();
+    let sol = pounce_global::solve_global_debug_into(&prob, &opts, &mut tree, &mut sub, backend);
+
+    // The solve still reaches the optimum.
+    assert_eq!(sol.status, GlobalStatus::Optimal, "{sol:?}");
+    // The sub-solve hook was armed exactly once and the relaxation's IPM
+    // iterations flowed through it (so a REPL would have dropped in).
+    assert_eq!(sub.arm_calls, 1, "armed once for the stepped-into node");
+    assert!(sub.checkpoints > 0, "relaxation ran under the IP hook");
+    assert!(sub.saw_iter_start, "saw an IPM iteration checkpoint");
+}
+
 /// A hook that stops at the first node halts the search early.
 #[test]
 fn tree_stop_action_halts_the_search() {

@@ -30,6 +30,10 @@ pub(crate) struct BnbDebugState<'a> {
     pub branch_var: Option<usize>,
     pub prune_reason: Option<PruneReason>,
     pub status: Option<&'a str>,
+    /// Flag the loop reads after `at_node` to decide whether to run this
+    /// node's relaxation under the interior-point debugger. `request_subsolve_debug`
+    /// sets it; only wired (and only meaningful) at `NodeSelected`.
+    pub arm: Option<&'a mut bool>,
 }
 
 impl TreeDebugState for BnbDebugState<'_> {
@@ -71,6 +75,11 @@ impl TreeDebugState for BnbDebugState<'_> {
     }
     fn status(&self) -> Option<&str> {
         self.status
+    }
+    fn request_subsolve_debug(&mut self) {
+        if let Some(f) = self.arm.as_deref_mut() {
+            *f = true;
+        }
     }
 }
 

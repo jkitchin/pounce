@@ -139,7 +139,7 @@ impl TreeDebugger {
         }
     }
 
-    fn dispatch(&mut self, line: &str, st: &dyn TreeDebugState) -> Flow {
+    fn dispatch(&mut self, line: &str, st: &mut dyn TreeDebugState) -> Flow {
         let mut toks = line.split_whitespace();
         let Some(cmd) = toks.next() else {
             return Flow::Stay;
@@ -150,6 +150,18 @@ impl TreeDebugger {
                 Flow::Resume
             }
             "c" | "continue" => Flow::Resume,
+            "into" => {
+                // Step into this node's relaxation solve with the
+                // interior-point debugger (only meaningful at NodeSelected).
+                if st.checkpoint() == TreeCheckpoint::NodeSelected {
+                    st.request_subsolve_debug();
+                    println!("stepping into node #{}'s relaxation solve…", st.node_id());
+                    Flow::Resume
+                } else {
+                    println!("`into` works at a node_selected pause (before the relaxation)");
+                    Flow::Stay
+                }
+            }
             "q" | "quit" => Flow::Stop,
             "node" => {
                 let (lo, hi) = st.node_box();
@@ -339,6 +351,7 @@ fn print_help() {
         "tree-debugger commands:\n\
          \x20 s|step            run to the next checkpoint\n\
          \x20 c|continue        run until a breakpoint or the end\n\
+         \x20 into              step into this node's relaxation (IP debugger)\n\
          \x20 node              current node box and bound\n\
          \x20 bounds            global lower bound, incumbent, gap\n\
          \x20 gap               optimality gap\n\
