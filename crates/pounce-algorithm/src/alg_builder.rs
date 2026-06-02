@@ -550,12 +550,14 @@ impl AlgorithmBuilder {
         // Sherman-Morrison-Woodbury low-rank solver so the augmented
         // system factorizes only the diagonal `B0` and the quasi-Newton
         // update is applied as a rank-`m` correction (`O(n·m)` memory).
-        let aug_solver: Box<dyn AugSystemSolver> =
-            if matches!(self.hessian_approximation, HessianApproxChoice::LimitedMemory) {
-                Box::new(LowRankAugSystemSolver::new(Box::new(inner_aug)))
-            } else {
-                Box::new(inner_aug)
-            };
+        let aug_solver: Box<dyn AugSystemSolver> = if matches!(
+            self.hessian_approximation,
+            HessianApproxChoice::LimitedMemory
+        ) {
+            Box::new(LowRankAugSystemSolver::new(Box::new(inner_aug)))
+        } else {
+            Box::new(inner_aug)
+        };
         let perturb = Rc::new(RefCell::new(PdPerturbationHandler::new()));
         let pd_solver = PdFullSpaceSolver::new(aug_solver, perturb);
         let mut search_dir = PdSearchDirCalc::new(pd_solver);

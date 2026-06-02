@@ -132,7 +132,11 @@ fn large_separable_qp_solves_with_lbfgs_lowrank() {
     let obj = tnlp_concrete.borrow().final_obj.unwrap();
     assert!(obj < 1e-6, "final objective {obj} not near 0");
     let x0 = tnlp_concrete.borrow().final_x0.unwrap();
-    assert!((x0 - target(0)).abs() < 1e-3, "x[0]={x0} expected {}", target(0));
+    assert!(
+        (x0 - target(0)).abs() < 1e-3,
+        "x[0]={x0} expected {}",
+        target(0)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +248,10 @@ fn large_bound_active_qp_solves_with_lbfgs_lowrank() {
     );
 
     // Closed-form optimum: xᵢ* = clamp(aᵢ, 0, 1).
-    let obj_star: Number = 0.5 * (0..M).map(|i| (clamp01(a_of(i)) - a_of(i)).powi(2)).sum::<Number>();
+    let obj_star: Number = 0.5
+        * (0..M)
+            .map(|i| (clamp01(a_of(i)) - a_of(i)).powi(2))
+            .sum::<Number>();
     let obj = tnlp_concrete.borrow().final_obj.unwrap();
     assert!(
         (obj - obj_star).abs() < 1e-4,
@@ -258,6 +265,16 @@ fn large_bound_active_qp_solves_with_lbfgs_lowrank() {
     // i=10: a≈1.78  → upper-active, x*≈1.
     // i=35: a≈-0.88 → lower-active, x*≈0.
     assert!((x[0] - clamp01(a_of(0))).abs() < 1e-3, "x[0]={}", x[0]);
-    assert!(x[10] > 1.0 - 1e-4, "upper-active x[10]={} (a={})", x[10], a_of(10));
-    assert!(x[35] < 1e-4, "lower-active x[35]={} (a={})", x[35], a_of(35));
+    assert!(
+        x[10] > 1.0 - 1e-4,
+        "upper-active x[10]={} (a={})",
+        x[10],
+        a_of(10)
+    );
+    assert!(
+        x[35] < 1e-4,
+        "lower-active x[35]={} (a={})",
+        x[35],
+        a_of(35)
+    );
 }

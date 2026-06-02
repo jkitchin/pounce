@@ -371,7 +371,6 @@ fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
     panic!("LimMemQuasiNewtonUpdater: curvature pairs must be DenseVector-backed");
 }
 
-
 /// Initial Hessian scalar used as the diagonal of `B_0` before the
 /// rank-2 updates are applied. Mirrors upstream's three options
 /// (`limited_memory_initialization` in

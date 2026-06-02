@@ -37,7 +37,6 @@ use pounce_linalg::{Matrix, SymMatrix, Vector};
 use pounce_linsol::ESymSolverStatus;
 use std::rc::Rc;
 
-
 pub struct LowRankAugSystemSolver {
     /// Inner solver that owns the diagonal factorization.
     inner: Box<dyn AugSystemSolver>,
