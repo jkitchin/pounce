@@ -9,7 +9,7 @@ Notes
 * When ``jac`` is omitted (or ``False``) we fall back to forward finite
   differences (step ``sqrt(eps)``). Production callers should provide
   a Jacobian.
-* When ``jac=True`` (BoTorch convention) ``fun(x, *args)`` must return
+* When ``jac=True``, ``fun(x, *args)`` must return
   ``(f, grad)``; the pair is cached so each Ipopt iterate triggers only
   one forward pass.
 * When ``hess`` is omitted, or when constraints are present, the solver
@@ -81,7 +81,11 @@ class _FunAndGradCache:
         self._g: np.ndarray | None = None
 
     def _ensure(self, x: np.ndarray) -> None:
-        if self._x is None or self._x.shape != x.shape or not np.array_equal(self._x, x):
+        if (
+            self._x is None
+            or self._x.shape != x.shape
+            or not np.array_equal(self._x, x)
+        ):
             f, g = self._fun(x, *self._args)
             self._x = x.copy()
             self._f = float(f)
