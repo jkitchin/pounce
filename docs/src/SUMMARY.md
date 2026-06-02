@@ -31,6 +31,7 @@
 # Reference
 
 - [Algorithm & Workspace](algorithm.md)
+- [Color Theme](color-theme.md)
 - [Scaling](scaling.md)
 - [Feasibility-Based Bound Tightening](fbbt.md)
 - [Auxiliary-Equality Preprocessing](auxiliary-presolve.md)
