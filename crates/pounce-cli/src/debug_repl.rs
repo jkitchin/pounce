@@ -120,6 +120,7 @@ const CHECKPOINTS: &[&str] = &[
     "after_mu",
     "after_search_dir",
     "after_step",
+    "step_rejected",
     "pre_restoration_entry",
     "post_restoration_exit",
     "terminated",
@@ -301,7 +302,11 @@ impl CmpOp {
             CmpOp::Le => lhs <= rhs,
             CmpOp::Gt => lhs > rhs,
             CmpOp::Ge => lhs >= rhs,
-            // Tolerant equality so float metrics aren't impossible to hit.
+            // Tolerant equality so float metrics aren't impossible to hit:
+            // |lhs − rhs| ≤ 1e-12·max(1, |rhs|). Note this is relative for
+            // large rhs but collapses to an absolute 1e-12 when rhs == 0, so
+            // `obj==0` means "|obj| ≤ 1e-12" and `iter==N` is exact for the
+            // integer-valued metrics.
             CmpOp::Eq => (lhs - rhs).abs() <= 1e-12 * rhs.abs().max(1.0),
         }
     }
@@ -1201,6 +1206,7 @@ impl SolverDebugger {
                 "mu" | "after_mu" => Some("after_mu"),
                 "kkt" | "search_dir" | "after_search_dir" => Some("after_search_dir"),
                 "step" | "after_step" => Some("after_step"),
+                "rejected" | "ls_rejected" | "step_rejected" => Some("step_rejected"),
                 "resto" | "restoration" | "pre_restoration_entry" => Some("pre_restoration_entry"),
                 "resto_exit" | "post_restoration_exit" => Some("post_restoration_exit"),
                 "iter" | "iter_start" => Some("iter_start"),
@@ -1831,8 +1837,15 @@ impl SolverDebugger {
                 }
                 for w in &self.watches {
                     let out = self.cmd_print(&[w.as_str()], ctx);
-                    for l in &out.lines {
-                        eprintln!("   watch {l}");
+                    if out.ok {
+                        for l in &out.lines {
+                            eprintln!("   watch {l}");
+                        }
+                    } else {
+                        // Don't spam the full error every pause for a target
+                        // that isn't available yet (e.g. `kkt` before a
+                        // factorization) — a compact note instead.
+                        eprintln!("   watch {w}: (n/a)");
                     }
                 }
             }

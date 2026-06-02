@@ -19,8 +19,9 @@ Full guide in `docs/src/debugger.md`. Zero effect on the solve when not
 attached.
 
 - **Checkpoints & stepping:** pauses at `iter_start`, the sub-iteration
-  phases (`after_mu` / `after_search_dir` / `after_step`), around
-  restoration (`pre_/post_restoration_entry/exit`), and `terminated`.
+  phases (`after_mu` / `after_search_dir` / `after_step`), `step_rejected`
+  (line search gave up, before restoration), around restoration
+  (`pre_/post_restoration_entry/exit`), and `terminated`.
   `step` / `stepi` / `continue` / `run N` / `stop-at <cp>` / `detach` /
   `quit`. The same debugger **steps into the restoration inner IPM**
   (pauses flagged `in_restoration`).

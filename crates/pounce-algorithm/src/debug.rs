@@ -46,6 +46,13 @@ pub enum Checkpoint {
     /// After the line search chose a step length and the trial point was
     /// accepted — α (`info_alpha_*`) and the new iterate are in place.
     AfterStep,
+    /// The line search *rejected* this iteration's step — it hit the tiny-step
+    /// floor or exhausted its backtracks without an acceptable point, and the
+    /// solver is about to fall into restoration. The search direction `δ` and
+    /// the un-accepted current iterate are intact for inspection. The "why did
+    /// the line search give up here?" stop, distinct from the restoration entry
+    /// that follows.
+    StepRejected,
     /// Just before the algorithm switches into the restoration phase —
     /// the iterate that tripped restoration is intact. The most-requested
     /// "why did this go to restoration?" stop.
@@ -56,17 +63,25 @@ pub enum Checkpoint {
     /// The solve has finished (or is about to): fired once before
     /// `optimize` returns, at the final iterate, carrying the outcome
     /// via [`DebugCtx::status`]. Lets a debugger drop in for a
-    /// post-mortem at the failing (or final) point.
+    /// post-mortem at the failing (or final) point. The [`DebugAction`]
+    /// returned at this checkpoint is **ignored** — the solve is already
+    /// over, so there is nothing left to resume or stop.
     Terminated,
 }
 
 impl Checkpoint {
+    /// The stable wire/CLI protocol name for this checkpoint. These strings
+    /// are intentionally **not** the variant identifiers (`AfterBarrierUpdate`
+    /// → `"after_mu"`, `PreRestoration` → `"pre_restoration_entry"`) — they're
+    /// the names the JSON protocol and `stop-at` use, so match on the variant,
+    /// not the string. Locked by the `checkpoint_as_str_is_stable` test.
     pub fn as_str(self) -> &'static str {
         match self {
             Checkpoint::IterStart => "iter_start",
             Checkpoint::AfterBarrierUpdate => "after_mu",
             Checkpoint::AfterSearchDirection => "after_search_dir",
             Checkpoint::AfterStep => "after_step",
+            Checkpoint::StepRejected => "step_rejected",
             Checkpoint::PreRestoration => "pre_restoration_entry",
             Checkpoint::PostRestoration => "post_restoration_exit",
             Checkpoint::Terminated => "terminated",
@@ -81,6 +96,7 @@ impl Checkpoint {
             Checkpoint::AfterBarrierUpdate
                 | Checkpoint::AfterSearchDirection
                 | Checkpoint::AfterStep
+                | Checkpoint::StepRejected
                 | Checkpoint::PreRestoration
                 | Checkpoint::PostRestoration
         )
@@ -610,6 +626,39 @@ mod tests {
         assert!(ctx.set_block("x", &[1.0, 2.0, 3.0]).is_err());
         assert!(ctx.set_block("x", &[3.0, 4.0]).is_ok());
         assert_eq!(ctx.block("x"), Some(vec![3.0, 4.0]));
+    }
+
+    #[test]
+    fn block_names_all_resolve_in_block_ref() {
+        // Locks `BLOCK_NAMES` to the `block_ref` / `block_ref_mut` match arms:
+        // every name must resolve in both, or `set_block`'s
+        // `expect("name checked above")` could panic on a name that's in the
+        // array but missing from a match arm.
+        let mut ctx = ctx_with(&[1.0, 2.0]);
+        for name in BLOCK_NAMES {
+            let cur = ctx
+                .block(name)
+                .unwrap_or_else(|| panic!("block_ref does not resolve `{name}`"));
+            // Round-trips through `block_ref_mut` (dimension-correct values).
+            ctx.set_block(name, &cur)
+                .unwrap_or_else(|e| panic!("block_ref_mut does not resolve `{name}`: {e}"));
+        }
+    }
+
+    #[test]
+    fn checkpoint_as_str_is_stable() {
+        // These strings are the wire/CLI protocol names — intentionally
+        // distinct from the variant identifiers (e.g. `AfterBarrierUpdate` →
+        // `"after_mu"`). Locked here so a rename is a deliberate,
+        // protocol-breaking change rather than a silent one.
+        assert_eq!(Checkpoint::IterStart.as_str(), "iter_start");
+        assert_eq!(Checkpoint::AfterBarrierUpdate.as_str(), "after_mu");
+        assert_eq!(Checkpoint::AfterSearchDirection.as_str(), "after_search_dir");
+        assert_eq!(Checkpoint::AfterStep.as_str(), "after_step");
+        assert_eq!(Checkpoint::StepRejected.as_str(), "step_rejected");
+        assert_eq!(Checkpoint::PreRestoration.as_str(), "pre_restoration_entry");
+        assert_eq!(Checkpoint::PostRestoration.as_str(), "post_restoration_exit");
+        assert_eq!(Checkpoint::Terminated.as_str(), "terminated");
     }
 
     #[test]

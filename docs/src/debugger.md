@@ -93,6 +93,7 @@ via its `checkpoint` field):
 | `after_mu` | μ updated for this iteration | the new barrier parameter |
 | `after_search_dir` | Newton step `δ` solved | the step (`dx` …), regularization, **KKT inertia** |
 | `after_step` | trial accepted | the step lengths α, the new iterate |
+| `step_rejected` | line search gave up (tiny step / all backtracks failed), before restoration | the search direction `δ` and the un-accepted iterate |
 | `pre_restoration_entry` | just before restoration | the iterate that tripped restoration |
 | `post_restoration_exit` | restoration returned | what restoration produced |
 | `terminated` | once, before the solve returns | the final / failing iterate + status |

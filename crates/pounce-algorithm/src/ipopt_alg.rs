@@ -1036,6 +1036,16 @@ impl IpoptAlgorithm {
                         // the limit.
                     }
                     Outcome::TinyStep | Outcome::Failed => {
+                        // Debugger stop: the line search rejected the step
+                        // (tiny-step floor or all backtracks failed), before
+                        // we fall into restoration. Lets a "why did the line
+                        // search give up?" inspection happen at the failing
+                        // point distinctly from the restoration entry.
+                        if let Some(o) =
+                            self.debug_stop(crate::debug::Checkpoint::StepRejected)
+                        {
+                            return o;
+                        }
                         // Upstream `IpBacktrackingLineSearch.cpp` raises
                         // `LINE_SEARCH_FAILED` when α drops below
                         // `alpha_min` or all retries reject, which in
