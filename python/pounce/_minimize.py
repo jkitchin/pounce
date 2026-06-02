@@ -6,8 +6,12 @@ Thin wrapper that adapts SciPy conventions (functional ``fun``, ``jac``,
 
 Notes
 -----
-* When ``jac`` is omitted we fall back to forward finite differences
-  (step ``sqrt(eps)``). Production callers should provide a Jacobian.
+* When ``jac`` is omitted (or ``False``) we fall back to forward finite
+  differences (step ``sqrt(eps)``). Production callers should provide
+  a Jacobian.
+* When ``jac=True`` (BoTorch convention) ``fun(x, *args)`` must return
+  ``(f, grad)``; the pair is cached so each Ipopt iterate triggers only
+  one forward pass.
 * When ``hess`` is omitted, or when constraints are present, the solver
   is driven with ``hessian_approximation = limited-memory``.
 * Equality / inequality dicts are concatenated into a single ``g(x)``
@@ -58,6 +62,40 @@ def _finite_diff_grad(fun: Callable, x: np.ndarray) -> np.ndarray:
         xp[i] += h
         g[i] = (float(fun(xp)) - f0) / h
     return g
+
+
+class _FunAndGradCache:
+    """Memoize ``(f, g) = fun(x, *args)`` on the most recent ``x``.
+
+    Ipopt evaluates ``objective`` and ``gradient`` as separate calls
+    (often at the same point). When ``jac=True``, the user-supplied
+    ``fun`` returns both in one forward pass — caching here preserves
+    that single-pass guarantee across the two Ipopt callbacks.
+    """
+
+    def __init__(self, fun: Callable, args: tuple):
+        self._fun = fun
+        self._args = args
+        self._x: np.ndarray | None = None
+        self._f: float | None = None
+        self._g: np.ndarray | None = None
+
+    def _ensure(self, x: np.ndarray) -> None:
+        if self._x is None or self._x.shape != x.shape or not np.array_equal(self._x, x):
+            f, g = self._fun(x, *self._args)
+            self._x = x.copy()
+            self._f = float(f)
+            self._g = _to_array(g).ravel()
+
+    def f(self, x: np.ndarray) -> float:
+        self._ensure(x)
+        assert self._f is not None
+        return self._f
+
+    def g(self, x: np.ndarray) -> np.ndarray:
+        self._ensure(x)
+        assert self._g is not None
+        return self._g
 
 
 def _finite_diff_jac(g_fun: Callable, x: np.ndarray, m: int) -> np.ndarray:
@@ -139,7 +177,8 @@ def _build_problem_obj(
     fun: Callable,
     n: int,
     m: int,
-    jac: Callable | None,
+    args: tuple,
+    jac: Callable | bool | None,
     hess: Callable | None,
     g: Callable | None,
     jac_g: Callable | None,
@@ -150,13 +189,23 @@ def _build_problem_obj(
 
     members: dict[str, Any] = {}
 
-    def objective(self, x):
-        return float(fun(x))
+    if jac is True:
+        cache = _FunAndGradCache(fun, args)
 
-    def gradient(self, x):
-        if jac is None:
-            return _finite_diff_grad(fun, x)
-        return _to_array(jac(x)).ravel()
+        def objective(self, x, _c=cache):
+            return _c.f(x)
+
+        def gradient(self, x, _c=cache):
+            return _c.g(x)
+    else:
+
+        def objective(self, x):
+            return float(fun(x, *args))
+
+        def gradient(self, x):
+            if jac is None or jac is False:
+                return _finite_diff_grad(lambda x: fun(x, *args), x)
+            return _to_array(jac(x, *args)).ravel()
 
     members["objective"] = objective
     members["gradient"] = gradient
@@ -199,7 +248,8 @@ def _build_problem_obj(
 def minimize(
     fun: Callable[[np.ndarray], float],
     x0: np.ndarray,
-    jac: Callable | None = None,
+    args: tuple = (),
+    jac: Callable | bool | None = None,
     hess: Callable | None = None,
     bounds: Sequence | None = None,
     constraints: Sequence | dict | None = None,
@@ -215,6 +265,7 @@ def minimize(
         fun=fun,
         n=n,
         m=m,
+        args=args,
         jac=jac,
         hess=hess,
         g=g_combined,
