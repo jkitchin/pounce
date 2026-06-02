@@ -496,6 +496,18 @@ def generate_report(suites, output_path, baseline=None):
     lines.append("The GAMS solver-link path is exercised separately as a liveness")
     lines.append("smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.")
     lines.append("")
+    lines.append("> **Threading & timing.** The reference and POUNCE runs are pinned to a")
+    lines.append("> single compute thread (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,")
+    lines.append("> `VECLIB_MAXIMUM_THREADS`, `RAYON_NUM_THREADS` all = 1) and run")
+    lines.append("> sequentially so pounce and Ipopt solve times are directly comparable")
+    lines.append("> on one host.")
+    lines.append("> POUNCE's dense linear algebra (via `faer`/`rayon`) parallelizes across")
+    lines.append("> cores, so its *multi-threaded* wall-clock is up to ~2x faster on the")
+    lines.append("> larger dense problems (e.g. Mittelmann `cont*`/`qcqp*`, QP); the")
+    lines.append("> single-threaded times reported here are therefore a controlled lower")
+    lines.append("> bound, not pounce's real-world speed, and should not be compared")
+    lines.append("> against multi-threaded runs of this report.")
+    lines.append("")
 
     # Combined summary
     all_comps = []

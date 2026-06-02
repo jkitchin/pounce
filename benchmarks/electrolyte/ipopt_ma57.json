@@ -1,15 +1,15 @@
 [
-  {"solver":"ipopt","name":"butanol_water_lle","n":2,"m":2,"status":"Solve_Succeeded","objective":7.8258405871016847e-10,"iterations":4,"solve_time":0.031625},
-  {"solver":"ipopt","name":"cacl2_nacl_mixed","n":6,"m":4,"status":"Solve_Succeeded","objective":-7.7237135825983727e-01,"iterations":12,"solve_time":0.030274},
-  {"solver":"ipopt","name":"co2_water","n":5,"m":2,"status":"Solve_Succeeded","objective":-6.9333749945101157e-03,"iterations":37,"solve_time":0.034111},
-  {"solver":"ipopt","name":"enrtl_tdep_fit","n":4,"m":0,"status":"Solve_Succeeded","objective":1.1511059016349691e-17,"iterations":10,"solve_time":0.031736},
-  {"solver":"ipopt","name":"hcl_mean_activity","n":1,"m":0,"status":"Solve_Succeeded","objective":6.5282547222186866e-19,"iterations":7,"solve_time":0.031180},
-  {"solver":"ipopt","name":"multisalt_dh_fit","n":8,"m":0,"status":"Solve_Succeeded","objective":3.7734935396447371e-15,"iterations":18,"solve_time":0.032335},
-  {"solver":"ipopt","name":"nacl_solubility","n":1,"m":0,"status":"Solve_Succeeded","objective":1.2163590088013141e-20,"iterations":7,"solve_time":0.031629},
-  {"solver":"ipopt","name":"nacl_speciation","n":4,"m":3,"status":"Solve_Succeeded","objective":-4.8326824223936515e-01,"iterations":6,"solve_time":0.031538},
-  {"solver":"ipopt","name":"phosphoric_acid","n":6,"m":2,"status":"Solve_Succeeded","objective":-5.5313145424030798e-02,"iterations":11,"solve_time":0.031461},
-  {"solver":"ipopt","name":"pitzer_nacl_fit","n":3,"m":0,"status":"Solve_Succeeded","objective":4.1501611643214239e-18,"iterations":6,"solve_time":0.031049},
-  {"solver":"ipopt","name":"saturated_brine","n":3,"m":3,"status":"Solve_Succeeded","objective":0.0000000000000000e+00,"iterations":4,"solve_time":0.031036},
-  {"solver":"ipopt","name":"seawater","n":15,"m":8,"status":"Solve_Succeeded","objective":-1.3482746804150167e+00,"iterations":25,"solve_time":0.032797},
-  {"solver":"ipopt","name":"water_autoionization","n":1,"m":0,"status":"Solve_Succeeded","objective":-7.3390678357526858e-08,"iterations":11,"solve_time":0.031522}
+  {"solver":"ipopt","name":"butanol_water_lle","n":2,"m":2,"status":"Solve_Succeeded","objective":7.8258405871016847e-10,"iterations":4,"solve_time":0.032445},
+  {"solver":"ipopt","name":"cacl2_nacl_mixed","n":6,"m":4,"status":"Solve_Succeeded","objective":-7.7237135825983727e-01,"iterations":12,"solve_time":0.032380},
+  {"solver":"ipopt","name":"co2_water","n":5,"m":2,"status":"Solve_Succeeded","objective":-6.9333749945101157e-03,"iterations":37,"solve_time":0.033395},
+  {"solver":"ipopt","name":"enrtl_tdep_fit","n":4,"m":0,"status":"Solve_Succeeded","objective":1.1511059016349691e-17,"iterations":10,"solve_time":0.036974},
+  {"solver":"ipopt","name":"hcl_mean_activity","n":1,"m":0,"status":"Solve_Succeeded","objective":6.5282547222186866e-19,"iterations":7,"solve_time":0.032392},
+  {"solver":"ipopt","name":"multisalt_dh_fit","n":8,"m":0,"status":"Solve_Succeeded","objective":3.7734935396447371e-15,"iterations":18,"solve_time":0.036739},
+  {"solver":"ipopt","name":"nacl_solubility","n":1,"m":0,"status":"Solve_Succeeded","objective":1.2163590088013141e-20,"iterations":7,"solve_time":0.031648},
+  {"solver":"ipopt","name":"nacl_speciation","n":4,"m":3,"status":"Solve_Succeeded","objective":-4.8326824223936515e-01,"iterations":6,"solve_time":0.033600},
+  {"solver":"ipopt","name":"phosphoric_acid","n":6,"m":2,"status":"Solve_Succeeded","objective":-5.5313145424030798e-02,"iterations":11,"solve_time":0.033068},
+  {"solver":"ipopt","name":"pitzer_nacl_fit","n":3,"m":0,"status":"Solve_Succeeded","objective":4.1501611643214239e-18,"iterations":6,"solve_time":0.033446},
+  {"solver":"ipopt","name":"saturated_brine","n":3,"m":3,"status":"Solve_Succeeded","objective":0.0000000000000000e+00,"iterations":4,"solve_time":0.032877},
+  {"solver":"ipopt","name":"seawater","n":15,"m":8,"status":"Solve_Succeeded","objective":-1.3482746804150167e+00,"iterations":25,"solve_time":0.033885},
+  {"solver":"ipopt","name":"water_autoionization","n":1,"m":0,"status":"Solve_Succeeded","objective":-7.3390678357526858e-08,"iterations":11,"solve_time":0.032743}
 ]

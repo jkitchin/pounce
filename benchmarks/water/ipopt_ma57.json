@@ -1,8 +1,8 @@
 [
-  {"solver":"ipopt","name":"water","n":41,"m":25,"status":"Solve_Succeeded","objective":1.0011632592686777e+03,"iterations":88,"solve_time":0.042336},
-  {"solver":"ipopt","name":"water3","n":195,"m":137,"status":"Solve_Succeeded","objective":2.4904182241162775e+02,"iterations":209,"solve_time":0.075553},
-  {"solver":"ipopt","name":"water4","n":195,"m":137,"status":"Solve_Succeeded","objective":3.0301684277224581e+02,"iterations":137,"solve_time":0.061388},
-  {"solver":"ipopt","name":"watersbp","n":195,"m":137,"status":"Solve_Succeeded","objective":2.0725631681040468e+02,"iterations":155,"solve_time":0.055879},
-  {"solver":"ipopt","name":"waterx","n":70,"m":54,"status":"Solve_Succeeded","objective":9.4455121928642745e+02,"iterations":248,"solve_time":0.070070},
-  {"solver":"ipopt","name":"waterz","n":195,"m":137,"status":"Solve_Succeeded","objective":2.0751463968176941e+02,"iterations":394,"solve_time":0.107681}
+  {"solver":"ipopt","name":"water","n":41,"m":25,"status":"Solve_Succeeded","objective":1.0011632592686777e+03,"iterations":88,"solve_time":0.035761},
+  {"solver":"ipopt","name":"water3","n":195,"m":137,"status":"Solve_Succeeded","objective":2.4904182241162775e+02,"iterations":209,"solve_time":0.064281},
+  {"solver":"ipopt","name":"water4","n":195,"m":137,"status":"Solve_Succeeded","objective":3.0301684277224581e+02,"iterations":137,"solve_time":0.052478},
+  {"solver":"ipopt","name":"watersbp","n":195,"m":137,"status":"Solve_Succeeded","objective":2.0725631681040468e+02,"iterations":155,"solve_time":0.051000},
+  {"solver":"ipopt","name":"waterx","n":70,"m":54,"status":"Solve_Succeeded","objective":9.4455121928642745e+02,"iterations":248,"solve_time":0.052151},
+  {"solver":"ipopt","name":"waterz","n":195,"m":137,"status":"Solve_Succeeded","objective":2.0751463968176941e+02,"iterations":394,"solve_time":0.088273}
 ]

@@ -583,11 +583,11 @@
     "name": "brainpc5",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.0003750387395218699,
-    "ipopt_obj": 0.00037504028977766046,
+    "ipopt_obj": 0.00037504028977856246,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "brainpc6",
@@ -603,11 +603,11 @@
     "name": "brainpc7",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.0003927054071936731,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.00039270653326480215,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "brainpc8",
@@ -1352,12 +1352,12 @@
   {
     "name": "cvxqp3",
     "suite": "Vanderbei",
-    "pounce_status": "Acceptable",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 220402.138341865,
-    "ipopt_obj": 204622.48037053377,
+    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
+    "pounce_obj": null,
+    "ipopt_obj": 220402.10316436566,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "dallasl",
@@ -1745,7 +1745,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 2.6517443229676957e-14,
-    "ipopt_obj": 4.71290364770901e-14,
+    "ipopt_obj": 2.2692375408494903e-14,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -1753,9 +1753,9 @@
     "name": "drcav2lq",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 0.001104453253344302,
-    "ipopt_obj": 9.651689944434265,
+    "ipopt_obj": 0.001072229201379606,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -1763,9 +1763,9 @@
     "name": "drcav3lq",
     "suite": "Vanderbei",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": 0.0028970525351529144,
+    "ipopt_obj": 0.00020702099149785052,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -1773,19 +1773,19 @@
     "name": "drcavty1",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.6517443229676957e-14,
-    "ipopt_obj": 1.9018203280720938,
+    "ipopt_obj": 2.2692375408494903e-14,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "drcavty2",
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 0.001104453253344302,
-    "ipopt_obj": 11.701718076667042,
+    "ipopt_obj": 0.001072229201379606,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -1793,9 +1793,9 @@
     "name": "drcavty3",
     "suite": "Vanderbei",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": 28.718282858490145,
+    "ipopt_obj": 0.00020702099149785052,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -7635,7 +7635,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.09947002322808285,
-    "ipopt_obj": 0.09947002322808185,
+    "ipopt_obj": 0.09947002322808178,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7663,11 +7663,11 @@
     "name": "NARX_CFy",
     "suite": "Mittelmann",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": null,
-    "ipopt_obj": 0.009091137195809715,
+    "ipopt_obj": 0.008675495668633269,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "WM_CFy",
@@ -7675,7 +7675,7 @@
     "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": 27.74966050783909,
+    "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -7735,7 +7735,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 2.7209747977699505,
-    "ipopt_obj": 2.7209747977699883,
+    "ipopt_obj": 2.7209747976434064,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7745,7 +7745,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.0006627471557097377,
-    "ipopt_obj": 0.000662747155522909,
+    "ipopt_obj": 0.0006627471551313084,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7755,7 +7755,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.0005199974520846504,
-    "ipopt_obj": 0.0005199974520845755,
+    "ipopt_obj": 0.0005199974520846647,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7765,7 +7765,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.0005207820832758245,
-    "ipopt_obj": 0.00052078208327224,
+    "ipopt_obj": 0.0005207820832729023,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7775,7 +7775,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.06637143022867485,
-    "ipopt_obj": 0.06637130830389396,
+    "ipopt_obj": 0.06637130830389411,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7793,11 +7793,11 @@
     "name": "dirichlet120",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.03503608563159524,
-    "ipopt_obj": 0.23013342441413503,
+    "ipopt_obj": 0.035036085631595236,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "dtoc1nd",
@@ -7835,7 +7835,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.06386126036688702,
-    "ipopt_obj": 0.06389670128604541,
+    "ipopt_obj": 0.06389670128604544,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7843,11 +7843,11 @@
     "name": "ex1_320",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.06541996852283284,
-    "ipopt_obj": 0.06761620422195315,
+    "ipopt_obj": 0.06543514582308746,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ex4_2_160",
@@ -7855,7 +7855,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
     "pounce_obj": 3.646117061675751,
-    "ipopt_obj": 3.646117061675551,
+    "ipopt_obj": 3.6461170616757244,
     "pounce_solved": true,
     "ipopt_solved": true
   },
@@ -7863,11 +7863,11 @@
     "name": "ex4_2_320",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 3.639167960369219,
-    "ipopt_obj": 3.656949565022914,
+    "ipopt_obj": 3.6391673276079475,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ex8_2_2",
@@ -7903,21 +7903,21 @@
     "name": "henon120",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 133.29473763061802,
-    "ipopt_obj": 1131.2147758339624,
+    "ipopt_obj": 133.29473763147269,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "lane_emden120",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 9.340250713623568,
-    "ipopt_obj": 7.4542611229102045,
+    "ipopt_obj": 9.340250718411813,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "marine_1600",
@@ -7973,11 +7973,11 @@
     "name": "qcqp1000-2c",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 11129.49485441776,
-    "ipopt_obj": 11129.445744161338,
+    "ipopt_obj": 11129.494854423863,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "qcqp1000-2nc",
@@ -7995,7 +7995,7 @@
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 17518.29033074751,
-    "ipopt_obj": 2410.7626011094067,
+    "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -8005,7 +8005,7 @@
     "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
-    "ipopt_obj": 4892.438484988219,
+    "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -8053,11 +8053,11 @@
     "name": "qssp180",
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": -6.639447222846839,
-    "ipopt_obj": -6.541410475697529,
+    "ipopt_obj": -6.639447264497423,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "robot_1600",
@@ -8243,61 +8243,61 @@
     "name": "CONT-100",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": -4.64439787480047,
-    "ipopt_obj": -4.626990434964912,
+    "ipopt_obj": -4.644397874835652,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CONT-101",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.19552732835231323,
-    "ipopt_obj": 0.32266777666232693,
+    "ipopt_obj": 0.19552732835231487,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CONT-200",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": -4.684875926222779,
-    "ipopt_obj": -0.18591719457585315,
+    "ipopt_obj": -4.684875926222778,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CONT-201",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.19248337719089392,
-    "ipopt_obj": -0.019371197163364693,
+    "ipopt_obj": 0.19248337719089154,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CONT-300",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.19151229230382216,
-    "ipopt_obj": -0.003551759498809464,
+    "ipopt_obj": 0.19151229230382402,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CVXQP1_L",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1035283.8042393972,
-    "ipopt_obj": 1035656.1429042153,
+    "ipopt_obj": 1035283.804239388,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CVXQP1_M",
@@ -8323,11 +8323,11 @@
     "name": "CVXQP2_L",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 779451.9788509005,
-    "ipopt_obj": 415323.194334612,
+    "ipopt_obj": 779451.9788509028,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CVXQP2_M",
@@ -8353,11 +8353,11 @@
     "name": "CVXQP3_L",
     "suite": "QP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1102010.546495961,
-    "ipopt_obj": 25931.15957095735,
+    "ipopt_obj": 1102010.5157746142,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "CVXQP3_M",
@@ -8483,11 +8483,11 @@
     "name": "EXDATA",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": -141.84343084912166,
-    "ipopt_obj": 23.746318831006974,
+    "ipopt_obj": -141.84343084904606,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "GENHS28",
@@ -9443,11 +9443,11 @@
     "name": "STCQP1",
     "suite": "QP",
     "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Optimal",
     "pounce_obj": 155143.55462704753,
-    "ipopt_obj": 27339.073692727714,
+    "ipopt_obj": 155143.55462704544,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "STCQP2",
@@ -9513,59 +9513,59 @@
     "name": "25fv47",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 5501.845763397496,
-    "ipopt_obj": null,
+    "ipopt_obj": 5501.8457633975995,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "80bau3b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 29483.460035692577,
-    "ipopt_obj": null,
+    "ipopt_obj": 29483.460050615286,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "aa01",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2459.494878718783,
-    "ipopt_obj": null,
+    "ipopt_obj": 2459.4948923996626,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "aa03",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2668.9797288574186,
-    "ipopt_obj": null,
+    "ipopt_obj": 2668.979741519269,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "aa3",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2668.9797184576737,
-    "ipopt_obj": null,
+    "ipopt_obj": 2668.9797176696106,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "aa4",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 965.941964787469,
-    "ipopt_obj": null,
+    "ipopt_obj": 965.9419647876945,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -9573,99 +9573,99 @@
     "name": "aa5",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2441.430998391165,
-    "ipopt_obj": null,
+    "ipopt_obj": 2441.4310115594444,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "aa6",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2882.1769047060666,
-    "ipopt_obj": null,
+    "ipopt_obj": 2882.1769047028083,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "adlittle",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 6812.536604319065,
-    "ipopt_obj": null,
+    "ipopt_obj": 6812.536604319655,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "afiro",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -464.7531476131196,
-    "ipopt_obj": null,
+    "ipopt_obj": -464.7531476131196,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "agg",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -35880379.12157613,
-    "ipopt_obj": null,
+    "ipopt_obj": -35962998.09774861,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "agg2",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -20075262.11726432,
-    "ipopt_obj": null,
+    "ipopt_obj": -20223073.953654595,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "agg3",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 10303872.73180214,
-    "ipopt_obj": null,
+    "ipopt_obj": 10303872.731802143,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "air02",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 79.51535508349468,
-    "ipopt_obj": null,
+    "ipopt_obj": 79.51535508066095,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "air04",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2459.494878718783,
-    "ipopt_obj": null,
+    "ipopt_obj": 2459.4948923996626,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "air05",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 965.9419651383419,
-    "ipopt_obj": null,
+    "ipopt_obj": 965.9419651486322,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -9673,99 +9673,99 @@
     "name": "air06",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2668.9797288574186,
-    "ipopt_obj": null,
+    "ipopt_obj": 2668.979741519269,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "aircraft",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1567.0423567836035,
-    "ipopt_obj": null,
+    "ipopt_obj": 1567.0423567836035,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "bandm",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -158.62801946180792,
-    "ipopt_obj": null,
+    "ipopt_obj": -158.62801946180784,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "beaconfd",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 30818.794318418466,
-    "ipopt_obj": null,
+    "ipopt_obj": 30818.794318418466,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "blend",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -30.812150421278485,
-    "ipopt_obj": null,
+    "ipopt_obj": -30.81215035260256,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "bnl1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1977.629180694593,
-    "ipopt_obj": null,
+    "ipopt_obj": 1977.6291795614775,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "bnl2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1811.2365235500329,
-    "ipopt_obj": null,
+    "ipopt_obj": 1811.2365205644903,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "boeing1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -335.21357464258466,
-    "ipopt_obj": null,
+    "ipopt_obj": -335.21357464412364,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "boeing2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -315.0187324054186,
-    "ipopt_obj": null,
+    "ipopt_obj": -315.0187324122294,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "bore3d",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 409.4409664018889,
-    "ipopt_obj": null,
+    "ipopt_obj": 409.4409662623843,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -9773,59 +9773,59 @@
     "name": "brandy",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1518.5098913415059,
-    "ipopt_obj": null,
+    "ipopt_obj": 1518.5098915287044,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "capri",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2690.012861164264,
-    "ipopt_obj": null,
+    "ipopt_obj": 2690.0128611642604,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "cari",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 581.893049799329,
-    "ipopt_obj": null,
+    "ipopt_obj": 581.8930497993287,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "cep1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 355160.064954562,
-    "ipopt_obj": null,
+    "ipopt_obj": 355160.0649545624,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ch",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 5981.401226330912,
-    "ipopt_obj": null,
+    "ipopt_obj": 5981.401235228861,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "co5",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 5075.137783525051,
-    "ipopt_obj": null,
+    "ipopt_obj": 5075.137778527942,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -9833,9 +9833,9 @@
     "name": "complex",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": -99.66667327161747,
-    "ipopt_obj": null,
+    "ipopt_obj": -99.66666819456985,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -9843,9 +9843,9 @@
     "name": "cq5",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 2842.2963628952084,
-    "ipopt_obj": null,
+    "ipopt_obj": 2842.2963648680548,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -9853,69 +9853,69 @@
     "name": "cr42",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 28.018499881507392,
-    "ipopt_obj": null,
+    "ipopt_obj": 28.018499881530065,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "crew1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 20.555562014434972,
-    "ipopt_obj": null,
+    "ipopt_obj": 20.555562013781696,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "cycle",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -5.226389466134759,
-    "ipopt_obj": null,
+    "ipopt_obj": -5.2263920121070635,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "czprob",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 711141.8532188913,
-    "ipopt_obj": null,
+    "ipopt_obj": 711141.8532151897,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "d2q06c",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 122784.21052464176,
-    "ipopt_obj": null,
+    "ipopt_obj": 122784.21052466711,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "d6cube",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 315.49163964080554,
-    "ipopt_obj": null,
+    "ipopt_obj": 315.4916396314827,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "de063155",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Restoration_Failed",
     "pounce_obj": 988309434.2464713,
-    "ipopt_obj": null,
+    "ipopt_obj": 989185475.9786541,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -9923,489 +9923,489 @@
     "name": "de080285",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1.3923903925267898,
-    "ipopt_obj": null,
+    "ipopt_obj": 1.3923903936426505,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "degen2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1435.1780172731042,
-    "ipopt_obj": null,
+    "ipopt_obj": -1435.1780165666119,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "degen3",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -985.3701491422439,
-    "ipopt_obj": null,
+    "ipopt_obj": -987.2940110081616,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf000",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.30738723959110503,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.3073872394802225,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf001",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 235.86029423603486,
-    "ipopt_obj": null,
+    "ipopt_obj": 235.8602942316121,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf002",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.2830332518322118,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.2830333808590499,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf003",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 911.5537949802664,
-    "ipopt_obj": null,
+    "ipopt_obj": 911.5537949802527,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf004",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.869122436041671,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.869122435544037,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf005",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 228.73007414321106,
-    "ipopt_obj": null,
+    "ipopt_obj": 228.7300741432111,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf006",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 22.842866270300263,
-    "ipopt_obj": null,
+    "ipopt_obj": 22.842866270289292,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf007",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 37.99532167377562,
-    "ipopt_obj": null,
+    "ipopt_obj": 37.99532167322533,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf008",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24.12330107570609,
-    "ipopt_obj": null,
+    "ipopt_obj": 24.123301075701264,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf009",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 48.41221298234007,
-    "ipopt_obj": null,
+    "ipopt_obj": 48.41221298234007,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf010",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 22.910419662182967,
-    "ipopt_obj": null,
+    "ipopt_obj": 22.910419662226722,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf011",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 47.34915247026845,
-    "ipopt_obj": null,
+    "ipopt_obj": 47.34915246617903,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf012",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 17.867759515313537,
-    "ipopt_obj": null,
+    "ipopt_obj": 17.867759441282658,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf013",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 261.6673554309112,
-    "ipopt_obj": null,
+    "ipopt_obj": 261.66735541111825,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf014",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.349609275803587,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.349609413869187,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf015",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 73.70339873587277,
-    "ipopt_obj": null,
+    "ipopt_obj": 73.70339892437285,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf017",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 46.15156395065071,
-    "ipopt_obj": null,
+    "ipopt_obj": 46.15156395533338,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf018",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 14.213136389866055,
-    "ipopt_obj": null,
+    "ipopt_obj": 14.21313638986606,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf019",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 234.21243222361556,
-    "ipopt_obj": null,
+    "ipopt_obj": 234.2124271280423,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf020",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.1678785555634,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.16787855579795,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf021",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 39.470177711378675,
-    "ipopt_obj": null,
+    "ipopt_obj": 39.4701777118328,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf022",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 36.499044519143645,
-    "ipopt_obj": null,
+    "ipopt_obj": 36.49904451915008,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf023",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.411459832104086,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.41145983210402,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf024",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.14143440617571,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.141434406175726,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf025",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.029435634994336,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.02943580784302,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf026",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.1610896232441,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.16108961677229,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf027",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 31.94531330456293,
-    "ipopt_obj": null,
+    "ipopt_obj": 31.94531329902159,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf028",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 29.72431994656721,
-    "ipopt_obj": null,
+    "ipopt_obj": 29.724319947475124,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf029",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 27.522320828759252,
-    "ipopt_obj": null,
+    "ipopt_obj": 27.52232082594732,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf030",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 25.383778412471017,
-    "ipopt_obj": null,
+    "ipopt_obj": 25.38377842422121,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf031",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 23.42960788193015,
-    "ipopt_obj": null,
+    "ipopt_obj": 23.429607831417922,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf032",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 21.603677659348268,
-    "ipopt_obj": null,
+    "ipopt_obj": 21.603677659829494,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf033",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 20.026921873326497,
-    "ipopt_obj": null,
+    "ipopt_obj": 20.02692187332542,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf034",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 18.94350445446548,
-    "ipopt_obj": null,
+    "ipopt_obj": 18.94350445445208,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf035",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 17.69463908230839,
-    "ipopt_obj": null,
+    "ipopt_obj": 17.694639082308424,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "delf036",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 16.445687916493064,
-    "ipopt_obj": null,
+    "ipopt_obj": 16.4456879883691,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "deter0",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -2.045907543589836,
-    "ipopt_obj": null,
+    "ipopt_obj": -2.045907544472701,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "deter4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1.4280150912634215,
-    "ipopt_obj": null,
+    "ipopt_obj": -1.4280150918228256,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "df2177",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 90.99995740314992,
-    "ipopt_obj": null,
+    "ipopt_obj": 90.99995740314986,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "disp3",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 80831.78069789021,
-    "ipopt_obj": null,
+    "ipopt_obj": 80831.78069787443,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "dsbmip",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -305.19820267158696,
-    "ipopt_obj": null,
+    "ipopt_obj": -305.1982026818099,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "e226",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -11.638931415304214,
-    "ipopt_obj": null,
+    "ipopt_obj": -11.638931415304254,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "etamacro",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -96.93757708771871,
-    "ipopt_obj": null,
+    "ipopt_obj": -96.93757708771862,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "farm",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 4385.964908243803,
-    "ipopt_obj": null,
+    "ipopt_obj": 4385.964908259772,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "fffff800",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 555679.5609233623,
-    "ipopt_obj": null,
+    "ipopt_obj": 555679.5609233516,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "finnis",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 4288.35969745719,
-    "ipopt_obj": null,
+    "ipopt_obj": 4288.373796362922,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -10413,149 +10413,149 @@
     "name": "fit1d",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -635.1652124327446,
-    "ipopt_obj": null,
+    "ipopt_obj": -635.1652124327446,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "fit1p",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 9146.377998334716,
-    "ipopt_obj": null,
+    "ipopt_obj": 9146.37799833472,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "forplan",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -664.218966442034,
-    "ipopt_obj": null,
+    "ipopt_obj": -664.2189664420353,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "fxm2-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 18416.758991228588,
-    "ipopt_obj": null,
+    "ipopt_obj": 18416.75899115862,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "fxm2-6",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 18417.065527488194,
-    "ipopt_obj": null,
+    "ipopt_obj": 18417.065529688058,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "fxm3_6",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 18616.04206084056,
-    "ipopt_obj": null,
+    "ipopt_obj": 18616.042060618187,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "gams10a",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1.0,
-    "ipopt_obj": null,
+    "ipopt_obj": 1.0,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "gams30a",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1.0,
-    "ipopt_obj": null,
+    "ipopt_obj": 1.0,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ganges",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -109585.73664181631,
-    "ipopt_obj": null,
+    "ipopt_obj": -109585.73664181864,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "gen",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1.3305228156876229e-05,
-    "ipopt_obj": null,
+    "ipopt_obj": -1.0975079079540514e-05,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "gen1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1.3305228156876229e-05,
-    "ipopt_obj": null,
+    "ipopt_obj": -1.0975079079540514e-05,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "gen2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 3.2927907839999966,
-    "ipopt_obj": null,
+    "ipopt_obj": 3.2927907839999984,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "gen4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -2.2133256669548042e-05,
-    "ipopt_obj": null,
+    "ipopt_obj": -2.2214005025010733e-05,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "gfrd-pnc",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 8412.34739812264,
-    "ipopt_obj": null,
+    "ipopt_obj": 8412.347398118847,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "greenbea",
     "suite": "LP",
     "pounce_status": "Maximum_Iterations_Exceeded",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Maximum_Iterations_Exceeded",
     "pounce_obj": -56029808.940274574,
-    "ipopt_obj": null,
+    "ipopt_obj": -55651822.50980404,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -10563,9 +10563,9 @@
     "name": "greenbeb",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": -4302260.317909975,
-    "ipopt_obj": null,
+    "ipopt_obj": -4302260.302458597,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -10573,49 +10573,49 @@
     "name": "grow15",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -106870941.38262098,
-    "ipopt_obj": null,
+    "ipopt_obj": -106870941.38262118,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "grow22",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -160834336.6267416,
-    "ipopt_obj": null,
+    "ipopt_obj": -160834336.6267415,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "grow7",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -47787811.85585012,
-    "ipopt_obj": null,
+    "ipopt_obj": -47787811.85585012,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "iiasa",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 627848.2385673192,
-    "ipopt_obj": null,
+    "ipopt_obj": 627848.2385673206,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "iprob",
     "suite": "LP",
     "pounce_status": "Infeasible_Problem_Detected",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Infeasible_Problem_Detected",
     "pounce_obj": 2714.404051808282,
-    "ipopt_obj": null,
+    "ipopt_obj": 2714.404056580304,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -10623,489 +10623,489 @@
     "name": "israel",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -29818.584395734884,
-    "ipopt_obj": null,
+    "ipopt_obj": -29818.584395734928,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "jendrec1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1566.5790522605625,
-    "ipopt_obj": null,
+    "ipopt_obj": 1566.579052260564,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "kb2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1749.9001473499568,
-    "ipopt_obj": null,
+    "ipopt_obj": -1749.9001473518597,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "kleemin3",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -10000.000101097272,
-    "ipopt_obj": null,
+    "ipopt_obj": -10000.000101092483,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "kleemin4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -100000.00001110637,
-    "ipopt_obj": null,
+    "ipopt_obj": -100000.00001109997,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "kleemin5",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1000000.0000021067,
-    "ipopt_obj": null,
+    "ipopt_obj": -1000000.0000020984,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "kleemin6",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -10000000.000001162,
-    "ipopt_obj": null,
+    "ipopt_obj": -10000000.000001194,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "kleemin7",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -100000000.00000113,
-    "ipopt_obj": null,
+    "ipopt_obj": -100000000.00000109,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "kleemin8",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1000000000.0000012,
-    "ipopt_obj": null,
+    "ipopt_obj": -1000000000.0000012,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "l9",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.998214553555884,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.9982145535448673,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large000",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 7.260545673955363,
-    "ipopt_obj": null,
+    "ipopt_obj": 7.260545668272333,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large001",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 3318.1389557296543,
-    "ipopt_obj": null,
+    "ipopt_obj": 3318.138955729655,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large002",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.2878457588789433,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.28784575684122016,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large003",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2459.54713791113,
-    "ipopt_obj": null,
+    "ipopt_obj": 2459.5471379111186,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large004",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 17.47032403449465,
-    "ipopt_obj": null,
+    "ipopt_obj": 17.47032403546812,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large005",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 41.18495695735153,
-    "ipopt_obj": null,
+    "ipopt_obj": 41.184956958234466,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large006",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24.74460940903549,
-    "ipopt_obj": null,
+    "ipopt_obj": 24.744609411026477,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large007",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 50.26082178322211,
-    "ipopt_obj": null,
+    "ipopt_obj": 50.260821782776524,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large008",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 26.811088150526473,
-    "ipopt_obj": null,
+    "ipopt_obj": 26.81108815052772,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large009",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 50.28209116674941,
-    "ipopt_obj": null,
+    "ipopt_obj": 50.28209116704279,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large010",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 25.624722798971888,
-    "ipopt_obj": null,
+    "ipopt_obj": 25.624722799052872,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large011",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 49.35814057909629,
-    "ipopt_obj": null,
+    "ipopt_obj": 49.35814060381475,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large012",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 19.969805248193186,
-    "ipopt_obj": null,
+    "ipopt_obj": 19.96980543532817,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large013",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 57.100279784156875,
-    "ipopt_obj": null,
+    "ipopt_obj": 57.10027971564581,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large014",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 17.157292887733515,
-    "ipopt_obj": null,
+    "ipopt_obj": 17.157292887320803,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large015",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 67.2527127288949,
-    "ipopt_obj": null,
+    "ipopt_obj": 67.25271263957016,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large016",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 16.348384713428715,
-    "ipopt_obj": null,
+    "ipopt_obj": 16.34838471343139,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large017",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 62.56793019098114,
-    "ipopt_obj": null,
+    "ipopt_obj": 62.567930167929525,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large018",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 21.461313387644317,
-    "ipopt_obj": null,
+    "ipopt_obj": 21.46131313909894,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large019",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 52.55244134902816,
-    "ipopt_obj": null,
+    "ipopt_obj": 52.55244119272409,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large020",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 37.75156151431225,
-    "ipopt_obj": null,
+    "ipopt_obj": 37.75156151431231,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large021",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 42.212769018945465,
-    "ipopt_obj": null,
+    "ipopt_obj": 42.21276901927424,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large022",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 37.748230787938304,
-    "ipopt_obj": null,
+    "ipopt_obj": 37.74823078822544,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large023",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 36.24435605155471,
-    "ipopt_obj": null,
+    "ipopt_obj": 36.24435605155477,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large024",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.6028345414432,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.6028345414432,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large025",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.5442875083269,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.54428749921387,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large026",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 35.63724092241273,
-    "ipopt_obj": null,
+    "ipopt_obj": 35.637240916559726,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large027",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 33.37025751897413,
-    "ipopt_obj": null,
+    "ipopt_obj": 33.370257518974384,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large028",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 31.136197855641186,
-    "ipopt_obj": null,
+    "ipopt_obj": 31.136197855639093,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large029",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 28.74745314144016,
-    "ipopt_obj": null,
+    "ipopt_obj": 28.747453141480726,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large030",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 26.51229166214476,
-    "ipopt_obj": null,
+    "ipopt_obj": 26.51229166228277,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large031",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24.502455617225962,
-    "ipopt_obj": null,
+    "ipopt_obj": 24.502455595806282,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large032",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 22.614251836972482,
-    "ipopt_obj": null,
+    "ipopt_obj": 22.614251836972503,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large033",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 20.983497936249172,
-    "ipopt_obj": null,
+    "ipopt_obj": 20.983497936249236,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large034",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 19.87645230784278,
-    "ipopt_obj": null,
+    "ipopt_obj": 19.876452307835102,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large035",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 18.560358047794562,
-    "ipopt_obj": null,
+    "ipopt_obj": 18.560358047784668,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "large036",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 17.106230536023457,
-    "ipopt_obj": null,
+    "ipopt_obj": 17.106230536089416,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "lotfi",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -25.264705857111796,
-    "ipopt_obj": null,
+    "ipopt_obj": -25.264705854846458,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "maros",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": -47206.29598563758,
-    "ipopt_obj": null,
+    "ipopt_obj": -47206.2959827275,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -11113,77 +11113,77 @@
     "name": "maros-r7",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1497185.1664050838,
-    "ipopt_obj": null,
+    "ipopt_obj": 1497185.166405081,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "model1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.0,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.0,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "model2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -3524.042510674828,
-    "ipopt_obj": null,
+    "ipopt_obj": -3524.0425091899083,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "model3",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1750.656601654824,
-    "ipopt_obj": null,
+    "ipopt_obj": 1750.656601654723,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "model4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 158957.49193085876,
-    "ipopt_obj": null,
+    "ipopt_obj": 158957.49192620677,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "model6",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 117507.69106627018,
-    "ipopt_obj": null,
+    "ipopt_obj": 117507.69106628485,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "model7",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 4942.951131328523,
-    "ipopt_obj": null,
+    "ipopt_obj": 4942.95113202564,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "model8",
     "suite": "LP",
     "pounce_status": "Solver_Error",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Unknown_Error",
     "pounce_obj": 0.0,
     "ipopt_obj": null,
     "pounce_solved": false,
@@ -11193,399 +11193,399 @@
     "name": "modszk1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 8.720823544818344,
-    "ipopt_obj": null,
+    "ipopt_obj": 8.720823544819995,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "multi",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 444.0471727011849,
-    "ipopt_obj": null,
+    "ipopt_obj": 444.0471727011847,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nemsafm",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -6792.374490512507,
-    "ipopt_obj": null,
+    "ipopt_obj": -6792.374490512165,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nemscem",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 89772.33209535784,
-    "ipopt_obj": null,
+    "ipopt_obj": 89772.33209538597,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nemspmm1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -327415.8368564938,
-    "ipopt_obj": null,
+    "ipopt_obj": -327415.8368564889,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nemspmm2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -291794.83678717236,
-    "ipopt_obj": null,
+    "ipopt_obj": -291794.83678711316,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nesm",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1407603.621075137,
-    "ipopt_obj": null,
+    "ipopt_obj": 1407603.6210751375,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nl",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 19617.180890969117,
-    "ipopt_obj": null,
+    "ipopt_obj": 19617.180905431207,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nsic1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -9168554.013361499,
-    "ipopt_obj": null,
+    "ipopt_obj": -9168554.013361499,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nsic2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -8203512.029245039,
-    "ipopt_obj": null,
+    "ipopt_obj": -8203512.029245055,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nsir1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -28909033.249858208,
-    "ipopt_obj": null,
+    "ipopt_obj": -28909033.24985821,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nsir2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -27175593.906056944,
-    "ipopt_obj": null,
+    "ipopt_obj": -27175593.906056955,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nug05",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 49.999997718527,
-    "ipopt_obj": null,
+    "ipopt_obj": 49.99999771852724,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nug06",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 85.99999086589699,
-    "ipopt_obj": null,
+    "ipopt_obj": 85.99999086652407,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nug07",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 147.99997957196194,
-    "ipopt_obj": null,
+    "ipopt_obj": 147.99997957246072,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nug08",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 203.49994396507117,
-    "ipopt_obj": null,
+    "ipopt_obj": 203.49994396507114,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "nug12",
     "suite": "LP",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "N/A",
-    "pounce_obj": null,
-    "ipopt_obj": null,
+    "pounce_status": "Acceptable",
+    "ipopt_status": "Optimal",
+    "pounce_obj": 522.8939778899834,
+    "ipopt_obj": 522.8939869556042,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "orna1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -18.314260774379676,
-    "ipopt_obj": null,
+    "ipopt_obj": -18.314262926605828,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "orna2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -21.22479544944942,
-    "ipopt_obj": null,
+    "ipopt_obj": -21.22479761192991,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "orna3",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -21.199904730354845,
-    "ipopt_obj": null,
+    "ipopt_obj": -21.199906890064245,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "orna4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 565.5257045378756,
-    "ipopt_obj": null,
+    "ipopt_obj": 565.5257023885534,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "orna7",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -21.23632605699753,
-    "ipopt_obj": null,
+    "ipopt_obj": -21.23632822057707,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "orswq2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4847427607736057,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.48474276056987575,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p0033",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 487.5380460831291,
-    "ipopt_obj": null,
+    "ipopt_obj": 487.5380461139414,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p0040",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 757.2177958820743,
-    "ipopt_obj": null,
+    "ipopt_obj": 757.2177958820799,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p0201",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 71.61458194658601,
-    "ipopt_obj": null,
+    "ipopt_obj": 71.61458194921107,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p0282",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 110.09766379452074,
-    "ipopt_obj": null,
+    "ipopt_obj": 110.0976637948016,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p0291",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 4.26281448769048,
-    "ipopt_obj": null,
+    "ipopt_obj": 4.262814487672457,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p05",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 463333.5620244607,
-    "ipopt_obj": null,
+    "ipopt_obj": 463333.56202435924,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p0548",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.8659461614035746,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.865946160381726,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p19",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2539.645890111858,
-    "ipopt_obj": null,
+    "ipopt_obj": 2539.645890111858,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p2756",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24.443157832343836,
-    "ipopt_obj": null,
+    "ipopt_obj": 24.443157831702578,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "p6000",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -2581.354208373111,
-    "ipopt_obj": null,
+    "ipopt_obj": -2581.3542081756377,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pcb1000",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 19794.23572377076,
-    "ipopt_obj": null,
+    "ipopt_obj": 19794.235726178766,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pcb3000",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 32953.57763177727,
-    "ipopt_obj": null,
+    "ipopt_obj": 32953.57763181934,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "perold",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -9380.755546566335,
-    "ipopt_obj": null,
+    "ipopt_obj": -9380.755546567043,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pf2177",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 90.00000000000014,
-    "ipopt_obj": null,
+    "ipopt_obj": 90.00000000000011,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pgp2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 447.32428931218936,
-    "ipopt_obj": null,
+    "ipopt_obj": 447.3242893695042,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pilot",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -557.4897468584852,
-    "ipopt_obj": null,
+    "ipopt_obj": -557.4897468585752,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pilot.ja",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": -6113.1372377242515,
-    "ipopt_obj": null,
+    "ipopt_obj": -6113.137237724252,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -11593,39 +11593,39 @@
     "name": "pilot.we",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1274.0550603295549,
-    "ipopt_obj": null,
+    "ipopt_obj": -1274.0550603295032,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pilot4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -2581.1395378945667,
-    "ipopt_obj": null,
+    "ipopt_obj": -2581.139538918964,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pilot87",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 301.71035063100265,
-    "ipopt_obj": null,
+    "ipopt_obj": 301.71035063475375,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pilotnov",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": -4497.27623379416,
-    "ipopt_obj": null,
+    "ipopt_obj": -4497.27623367919,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -11633,219 +11633,219 @@
     "name": "pldd000b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.274067690489137,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.27406768937292947,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd001b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.3808764278056651,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.38087642721459414,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd002b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.40625230086244485,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.4062522996534635,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd003b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4032280847837984,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.40322808605600724,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd004b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4179594949477301,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.4179594961093672,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd005b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.41513843435426356,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.41513843632089253,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd006b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4179809041811622,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.4179808938252714,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd007b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4041209007591804,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.4041208911049876,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd008b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4169518123494771,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.41695181339234033,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd009b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4540568330078002,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.4540568319300852,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd010b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4824974069585675,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.48249740417449677,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd011b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4965518026302646,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.4965518026476352,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pldd012b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.461072188237897,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.46107218989046705,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pltexpa2-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -4.8316578821681695,
-    "ipopt_obj": null,
+    "ipopt_obj": -4.831657847143091,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "pltexpa2-6",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -4.739684274847032,
-    "ipopt_obj": null,
+    "ipopt_obj": -4.739686004994376,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "problem",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -1.5912396982771806e-05,
-    "ipopt_obj": null,
+    "ipopt_obj": -1.599699145425591e-05,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "progas",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 760773.15881049,
-    "ipopt_obj": null,
+    "ipopt_obj": 760773.1588104952,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "qiulp",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -816.9834440535928,
-    "ipopt_obj": null,
+    "ipopt_obj": -816.9834440694156,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "r05",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 464859.88071116846,
-    "ipopt_obj": null,
+    "ipopt_obj": 464859.8807185488,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "rat1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1999531.6628207783,
-    "ipopt_obj": null,
+    "ipopt_obj": 1999531.6628207783,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "rat5",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 3083707.010380326,
-    "ipopt_obj": null,
+    "ipopt_obj": 3083707.0103803272,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "recipe",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": -266.6160026376282,
-    "ipopt_obj": null,
+    "ipopt_obj": -266.6160026376282,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -11853,419 +11853,419 @@
     "name": "refine",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -392691.80135542504,
-    "ipopt_obj": null,
+    "ipopt_obj": -392691.801355425,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "rosen1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -27612.737008540866,
-    "ipopt_obj": null,
+    "ipopt_obj": -27612.737006905736,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "rosen10",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -174215.4581165062,
-    "ipopt_obj": null,
+    "ipopt_obj": -174215.45811650626,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "rosen2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -54417.51042616024,
-    "ipopt_obj": null,
+    "ipopt_obj": -54417.51042616023,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "rosen7",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -20329.701999982946,
-    "ipopt_obj": null,
+    "ipopt_obj": -20329.701999982946,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "rosen8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -42122.679946580916,
-    "ipopt_obj": null,
+    "ipopt_obj": -42122.67994658092,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc105",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -52.202061569646446,
-    "ipopt_obj": null,
+    "ipopt_obj": -52.202061569646446,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -52.202061436110405,
-    "ipopt_obj": null,
+    "ipopt_obj": -52.2020614361104,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-100",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -10.070494013546973,
-    "ipopt_obj": null,
+    "ipopt_obj": -10.070494013331594,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -55.38771432496558,
-    "ipopt_obj": null,
+    "ipopt_obj": -55.387714324965586,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-200",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -10.0704940284829,
-    "ipopt_obj": null,
+    "ipopt_obj": -10.070494028482905,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-27",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -15.105740761924505,
-    "ipopt_obj": null,
+    "ipopt_obj": -15.105740761924503,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-32",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -55.38771420311722,
-    "ipopt_obj": null,
+    "ipopt_obj": -55.38771420311721,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -60.42296117683814,
-    "ipopt_obj": null,
+    "ipopt_obj": -60.42296117683813,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-400",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -10.070493985232218,
-    "ipopt_obj": null,
+    "ipopt_obj": -10.07049390045534,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-50",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -30.76411471858907,
-    "ipopt_obj": null,
+    "ipopt_obj": -30.764114718589067,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -55.387713818144604,
-    "ipopt_obj": null,
+    "ipopt_obj": -55.387713818144604,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc205-2r-8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -60.42296101665612,
-    "ipopt_obj": null,
+    "ipopt_obj": -60.422961016656124,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc50a",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -64.57507764193295,
-    "ipopt_obj": null,
+    "ipopt_obj": -64.57507764193295,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sc50b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -70.00000064800619,
-    "ipopt_obj": null,
+    "ipopt_obj": -70.00000064800619,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr25",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -2228615.2674754662,
-    "ipopt_obj": null,
+    "ipopt_obj": -2228615.2674754653,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -352173.689774033,
-    "ipopt_obj": null,
+    "ipopt_obj": -352173.6897740329,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2b-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125816.03508699566,
-    "ipopt_obj": null,
+    "ipopt_obj": -125816.0350869956,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2b-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125821.9530016156,
-    "ipopt_obj": null,
+    "ipopt_obj": -125821.95300161676,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2c-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125719.03862102269,
-    "ipopt_obj": null,
+    "ipopt_obj": -125719.03862102286,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2c-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125719.03862168241,
-    "ipopt_obj": null,
+    "ipopt_obj": -125719.0386215602,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2c-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -123673.6566346532,
-    "ipopt_obj": null,
+    "ipopt_obj": -123673.65663465354,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-108",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125987.74179233922,
-    "ipopt_obj": null,
+    "ipopt_obj": -125987.74179233925,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125816.0351462163,
-    "ipopt_obj": null,
+    "ipopt_obj": -125816.0351462163,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-216",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125987.74178799186,
-    "ipopt_obj": null,
+    "ipopt_obj": -125987.74178799185,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-27",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125912.96351237614,
-    "ipopt_obj": null,
+    "ipopt_obj": -125912.96351237615,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-32",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125816.02644475576,
-    "ipopt_obj": null,
+    "ipopt_obj": -125816.0264447616,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125816.03508748597,
-    "ipopt_obj": null,
+    "ipopt_obj": -125816.03508748597,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-54",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125956.81349510892,
-    "ipopt_obj": null,
+    "ipopt_obj": -125956.81349510887,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125816.01885790285,
-    "ipopt_obj": null,
+    "ipopt_obj": -125816.01885790285,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scagr7-2r-8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -125816.03508732302,
-    "ipopt_obj": null,
+    "ipopt_obj": -125816.035087323,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 18416.758982766893,
-    "ipopt_obj": null,
+    "ipopt_obj": 18416.75898277045,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1-2b-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2877.5638470600456,
-    "ipopt_obj": null,
+    "ipopt_obj": 2877.56384705845,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1-2b-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2875.9833437804446,
-    "ipopt_obj": null,
+    "ipopt_obj": 2875.9833437809943,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1-2c-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2875.983343781528,
-    "ipopt_obj": null,
+    "ipopt_obj": 2875.9833437819893,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1-2r-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2877.5638470578115,
-    "ipopt_obj": null,
+    "ipopt_obj": 2877.5638470588024,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1-2r-27",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 2886.9645953144536,
-    "ipopt_obj": null,
+    "ipopt_obj": 2886.964595318261,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -12273,59 +12273,59 @@
     "name": "scfxm1-2r-32",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2877.5638457849154,
-    "ipopt_obj": null,
+    "ipopt_obj": 2877.563851432123,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1-2r-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2877.563843003337,
-    "ipopt_obj": null,
+    "ipopt_obj": 2877.5638437807247,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm1-2r-8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2877.563844873994,
-    "ipopt_obj": null,
+    "ipopt_obj": 2877.5638448739955,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 36660.2614732657,
-    "ipopt_obj": null,
+    "ipopt_obj": 36660.261473263534,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scfxm3",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 54901.25441190678,
-    "ipopt_obj": null,
+    "ipopt_obj": 54901.25441190871,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scorpion",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 934.576378529808,
-    "ipopt_obj": null,
+    "ipopt_obj": 934.5763931572659,
     "pounce_solved": true,
     "ipopt_solved": false
   },
@@ -12333,119 +12333,119 @@
     "name": "scrs8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 17.04489685915646,
-    "ipopt_obj": null,
+    "ipopt_obj": 17.044896856314097,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2b-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.113027401341257,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.1130285745510657,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2b-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.11302731786694,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.1130272842518543,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2b-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 21.137998952426383,
-    "ipopt_obj": null,
+    "ipopt_obj": 21.138000770975083,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2c-16",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.119200185531295,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.1192006056983312,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2c-32",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.1140077549914946,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.114008580205443,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2c-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.1130273178622354,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.1130272863890296,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2c-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.1088236373154703,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.1088255519756713,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2c-8",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.1189019476781756,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.1189021662062357,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-128",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 22.19152150613596,
-    "ipopt_obj": null,
+    "ipopt_obj": 22.191524787833814,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.3217269118352157,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.32172773446252,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-256",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Acceptable",
     "pounce_obj": 21.56603742891331,
-    "ipopt_obj": null,
+    "ipopt_obj": 21.56603742894372,
     "pounce_solved": false,
     "ipopt_solved": false
   },
@@ -12453,777 +12453,777 @@
     "name": "scrs8-2r-27",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 11.067370188948304,
-    "ipopt_obj": null,
+    "ipopt_obj": 11.067370837850984,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-32",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.3217275478356627,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.3217283358591105,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.3217264589287634,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.321726463648612,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-64",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.3217286986030037,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.321730248505835,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-64b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 25.37227806148582,
-    "ipopt_obj": null,
+    "ipopt_obj": 25.37227870927293,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scrs8-2r-8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 21.166631828067462,
-    "ipopt_obj": null,
+    "ipopt_obj": 21.16663236143242,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 8.666650996087505,
-    "ipopt_obj": null,
+    "ipopt_obj": 8.666650996031688,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd6",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 50.49997327831423,
-    "ipopt_obj": null,
+    "ipopt_obj": 50.49997327831414,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 904.9999499527887,
-    "ipopt_obj": null,
+    "ipopt_obj": 904.9999499528782,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2b-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 27.49999847970303,
-    "ipopt_obj": null,
+    "ipopt_obj": 27.499998479761395,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2b-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.249997272923707,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.249997272930615,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2c-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.000001306938332,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.000001306994328,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2c-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 14.999997272795145,
-    "ipopt_obj": null,
+    "ipopt_obj": 14.999997272920869,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.999501306565747,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.999501306625813,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-27",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24.00000499679841,
-    "ipopt_obj": null,
+    "ipopt_obj": 24.000004996798406,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-32",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.999006691628692,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.99900669164452,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.499997272905095,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.499997272915426,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-54",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 23.850011874268603,
-    "ipopt_obj": null,
+    "ipopt_obj": 23.8500118742686,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.842767468942897,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.842767468942897,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.99999861722893,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.999998617246726,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "scsd8-2r-8b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 15.99999861722893,
-    "ipopt_obj": null,
+    "ipopt_obj": 15.999998617246726,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1412.2499507425043,
-    "ipopt_obj": null,
+    "ipopt_obj": 1412.2499511250353,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2b-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 280.79999692178467,
-    "ipopt_obj": null,
+    "ipopt_obj": 280.7999961637804,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2b-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 239.24999661054304,
-    "ipopt_obj": null,
+    "ipopt_obj": 239.24999661054417,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2c-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 326.39999507026954,
-    "ipopt_obj": null,
+    "ipopt_obj": 326.3999950702165,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2c-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 236.2499965136361,
-    "ipopt_obj": null,
+    "ipopt_obj": 236.24999651362546,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2c-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 200.39062651867536,
-    "ipopt_obj": null,
+    "ipopt_obj": 200.39062326204467,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-16",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 358.99999630097636,
-    "ipopt_obj": null,
+    "ipopt_obj": 358.9999962966484,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-27",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 247.49999784045752,
-    "ipopt_obj": null,
+    "ipopt_obj": 247.49999784301545,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-32",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 353.9999971363978,
-    "ipopt_obj": null,
+    "ipopt_obj": 353.9999971387736,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-4",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 280.49999653692174,
-    "ipopt_obj": null,
+    "ipopt_obj": 280.4999965367959,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-54",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 249.2499992587636,
-    "ipopt_obj": null,
+    "ipopt_obj": 249.24999926276402,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-64",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 343.99999899078495,
-    "ipopt_obj": null,
+    "ipopt_obj": 343.9999989795677,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-8",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 360.49999592876094,
-    "ipopt_obj": null,
+    "ipopt_obj": 360.4999959294843,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap1-2r-8b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 249.99999684193997,
-    "ipopt_obj": null,
+    "ipopt_obj": 249.99999684129278,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1724.8070934465193,
-    "ipopt_obj": null,
+    "ipopt_obj": 1724.8070934467557,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sctap3",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1423.9999488828425,
-    "ipopt_obj": null,
+    "ipopt_obj": 1423.9999488834765,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "seba",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 3265.0872682765994,
-    "ipopt_obj": null,
+    "ipopt_obj": 3265.0872682765958,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "seymourl",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 403.8464713788763,
-    "ipopt_obj": null,
+    "ipopt_obj": 403.84647137887623,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "share1b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -76589.31858771537,
-    "ipopt_obj": null,
+    "ipopt_obj": -76589.31858771516,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "share2b",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -415.73224775328197,
-    "ipopt_obj": null,
+    "ipopt_obj": -415.73224775327964,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "shell",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 29810736.02182632,
-    "ipopt_obj": null,
+    "ipopt_obj": 29810736.021826312,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ship04l",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24345.97519806028,
-    "ipopt_obj": null,
+    "ipopt_obj": 24345.975198060278,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ship04s",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24419.151462771675,
-    "ipopt_obj": null,
+    "ipopt_obj": 24419.15146277168,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ship08l",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 23536.619384051108,
-    "ipopt_obj": null,
+    "ipopt_obj": 23536.619384051104,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ship08s",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 23672.767879939256,
-    "ipopt_obj": null,
+    "ipopt_obj": 23672.767879939263,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ship12l",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 26118.101095250844,
-    "ipopt_obj": null,
+    "ipopt_obj": 26118.101095238042,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ship12s",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 26456.495456366814,
-    "ipopt_obj": null,
+    "ipopt_obj": 26456.49545636681,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "sierra",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 24387.88104681979,
-    "ipopt_obj": null,
+    "ipopt_obj": 24387.881044178186,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "slptsk",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 29.895365609972792,
-    "ipopt_obj": null,
+    "ipopt_obj": 29.895365609972774,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small000",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.1282206444040472,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.128220644434902,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small001",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 200.76311845234397,
-    "ipopt_obj": null,
+    "ipopt_obj": 200.76311845234397,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small002",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 3.7657131020005696,
-    "ipopt_obj": null,
+    "ipopt_obj": 3.7657131103948114,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small003",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 18.5436148739007,
-    "ipopt_obj": null,
+    "ipopt_obj": 18.543614874001836,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small004",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 5.468392899429316,
-    "ipopt_obj": null,
+    "ipopt_obj": 5.468392899429311,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small005",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 3.417117091192962,
-    "ipopt_obj": null,
+    "ipopt_obj": 3.417117091192962,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small006",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 2.4430842989034574,
-    "ipopt_obj": null,
+    "ipopt_obj": 2.443084298903416,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small007",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1.3881966356288715,
-    "ipopt_obj": null,
+    "ipopt_obj": 1.3881966356288675,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small008",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.8053324823400247,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.8053324679241615,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small009",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.4907637521836259,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.49076375258371097,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small010",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.22624096281206316,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.226240962812077,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small011",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.08861409501389066,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.08861409501388931,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small012",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.06225608298524326,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.06225608298524781,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small013",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.0962545202798662,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.0962545202798653,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small014",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.12293349217386794,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.1229334921738692,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small015",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.16799801478288737,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.1679980147829401,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "small016",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.22025761036176622,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.22025759109009255,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "stair",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -251.26695182663647,
-    "ipopt_obj": null,
+    "ipopt_obj": -251.26695182663642,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "standata",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1257.6994274317601,
-    "ipopt_obj": null,
+    "ipopt_obj": 1257.699427419868,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "standmps",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1406.0174258857617,
-    "ipopt_obj": null,
+    "ipopt_obj": 1406.017425879394,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "stocfor1",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -13875.031622510025,
-    "ipopt_obj": null,
+    "ipopt_obj": -13875.031622509357,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "stocfor2",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -39024.40856348263,
-    "ipopt_obj": null,
+    "ipopt_obj": -39024.408563482706,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "tuff",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 0.29214872091226435,
-    "ipopt_obj": null,
+    "ipopt_obj": 0.29214872091226196,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "vtp.base",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 129831.46158943362,
-    "ipopt_obj": null,
+    "ipopt_obj": 129831.46158943299,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "wood1p",
     "suite": "LP",
     "pounce_status": "Acceptable",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1.4430410052804181,
-    "ipopt_obj": null,
+    "ipopt_obj": 1.442835272805348,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "woodw",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": 1.3044381441422293,
-    "ipopt_obj": null,
+    "ipopt_obj": 1.304438144142272,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "zed",
     "suite": "LP",
     "pounce_status": "Optimal",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": -357.68405820842855,
-    "ipopt_obj": null,
+    "ipopt_obj": -357.6840582105742,
     "pounce_solved": true,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "ex10",
     "suite": "LPopt",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
     "ipopt_obj": null,
     "pounce_solved": false,
@@ -13232,9 +13232,9 @@
   {
     "name": "irish-electricity",
     "suite": "LPopt",
-    "pounce_status": "Maximum_Iterations_Exceeded",
-    "ipopt_status": "N/A",
-    "pounce_obj": 2456971.20335552,
+    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "pounce_obj": null,
     "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -13243,17 +13243,17 @@
     "name": "qap15",
     "suite": "LPopt",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Optimal",
     "pounce_obj": null,
-    "ipopt_obj": null,
+    "ipopt_obj": 867.4941333882293,
     "pounce_solved": false,
-    "ipopt_solved": false
+    "ipopt_solved": true
   },
   {
     "name": "supportcase10",
     "suite": "LPopt",
     "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "N/A",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": null,
     "ipopt_obj": null,
     "pounce_solved": false,
