@@ -25,6 +25,12 @@ how they leave a minimum once found. Use this page to pick one.
 * **No bounds?** `multistart`/`mlsl` fall back to jittering around `x0`
   (give a `bounds` box for genuine global coverage). `flooding`/`deflation`
   and `basinhopping` work without bounds.
+* **Variables on very different scales?** Handled automatically. The
+  repulsion bump widths (`sigma` / `length`) are per-dimension and `"auto"`
+  by default — sized to each variable's bounds range — and the default dedup
+  metric measures distance in that same scaled space, so a single `dedup`
+  tolerance is scale-free. Give `bounds` so the scales can be inferred; pass
+  an explicit scalar or length-`n` vector to override.
 * **Symmetric or periodic coordinates** (e.g. a periodic box): pass a custom
   `distance=` metric so that images of the same minimum de-duplicate
   correctly.
@@ -33,8 +39,8 @@ how they leave a minimum once found. Use this page to pick one.
 
 | method | key knobs | rule of thumb |
 |---|---|---|
-| `flooding` | `sigma`, `amplitude` | `sigma` ≈ spacing between minima; `amplitude` a few × basin depth |
-| `deflation` | `eta`, `power`, `soft` | raise `eta` if the solver returns to a known minimum |
+| `flooding` | `sigma`, `amplitude` | `sigma` is per-dimension and `"auto"` (a fraction of each variable's bounds range) by default — leave it; `amplitude` a few × basin depth |
+| `deflation` | `eta`, `power`, `soft`, `length` | `length` is per-dimension `"auto"` by default; raise `eta` if the solver returns to a known minimum |
 | `tunneling` | `eta`, `power` | increase `patience`; it descends in a chain |
 | `multistart` | `sobol` | leave Sobol on for coverage |
 | `mlsl` | `samples_per_round`, `gamma` | more samples/round on rugged landscapes |

@@ -55,45 +55,82 @@ __all__ = ["find_minima", "MinimaResult"]
 # Repulsion kernels (analytic value / gradient / Hessian).
 # --------------------------------------------------------------------------
 def _gauss_terms(x, centers, amplitude, sigma):
-    """Σ A·exp(−‖x−c‖²/2σ²) and its gradient / Hessian contributions."""
+    """Σ A·exp(−½‖(x−c)/σ‖²) and its gradient / Hessian contributions.
+
+    ``sigma`` is a per-dimension width vector (anisotropic Gaussian), so the
+    bump is scaled independently in each variable.
+    """
     n = x.size
     val = 0.0
     grad = np.zeros(n)
     hess = np.zeros((n, n))
-    s2 = sigma * sigma
+    m = 1.0 / (np.asarray(sigma, float) ** 2)   # per-dimension 1/σ²
     for c in centers:
         d = x - c
-        g = amplitude * np.exp(-(d @ d) / (2.0 * s2))
+        g = amplitude * np.exp(-0.5 * float(np.sum(m * d * d)))
+        md = m * d
         val += g
-        grad += g * (-d / s2)
-        hess += g * (np.outer(d, d) / (s2 * s2) - np.eye(n) / s2)
+        grad += -g * md
+        hess += g * (np.outer(md, md) - np.diag(m))
     return val, grad, hess
 
 
-def _pole_terms(x, centers, eta, power, soft):
-    """Σ η·(‖x−c‖²+soft)^(−p/2) and its gradient / Hessian contributions.
+def _pole_terms(x, centers, eta, power, soft, length):
+    """Σ η·(‖(x−c)/ℓ‖²+soft)^(−p/2) and its gradient / Hessian contributions.
 
-    A softened singular pole: huge near a found minimum, decaying like
-    1/r^p away from it. ``soft`` keeps everything finite for the solver.
+    ``length`` is a per-dimension scale vector, so the pole is anisotropic.
+    A softened singular pole: huge near a found minimum, decaying like 1/r^p
+    away from it; ``soft`` keeps everything finite for the solver.
     """
     n = x.size
     q = power / 2.0
     val = 0.0
     grad = np.zeros(n)
     hess = np.zeros((n, n))
+    m = 1.0 / (np.asarray(length, float) ** 2)   # per-dimension 1/ℓ²
     for c in centers:
         d = x - c
-        r2 = d @ d + soft
-        base = eta * r2 ** (-q)
-        val += base
-        # d/dx r2^{-q} = -q r2^{-q-1} · 2d
+        r2 = float(np.sum(m * d * d)) + soft
+        p = m * d
+        val += eta * r2 ** (-q)
         coef1 = -2.0 * q * eta * r2 ** (-q - 1.0)
-        grad += coef1 * d
-        # Hessian of η r2^{-q}
-        hess += coef1 * np.eye(n) + (
-            4.0 * q * (q + 1.0) * eta * r2 ** (-q - 2.0)
-        ) * np.outer(d, d)
+        grad += coef1 * p
+        hess += (4.0 * q * (q + 1.0) * eta * r2 ** (-q - 2.0)) * np.outer(p, p) \
+            - 2.0 * q * eta * r2 ** (-q - 1.0) * np.diag(m)
     return val, grad, hess
+
+
+# --------------------------------------------------------------------------
+# Per-dimension length scales (anisotropic widths + scaled dedup metric).
+# --------------------------------------------------------------------------
+def _scale_from_bounds(bounds, n):
+    """Per-dimension length scale L (box width per variable) and whether a
+    finite box was available."""
+    if bounds is not None and all(
+        b is not None and b[0] is not None and b[1] is not None for b in bounds
+    ):
+        lo = np.array([b[0] for b in bounds], float)
+        hi = np.array([b[1] for b in bounds], float)
+        L = hi - lo
+        L[L <= 0] = 1.0
+        return L, True
+    return np.ones(n), False
+
+
+def _resolve_lengths(spec, L, has_box, frac, fallback):
+    """Turn a width spec into a per-dimension vector.
+
+    ``"auto"`` -> ``frac * L`` (a fraction of each variable's range) when a
+    box is known, else ``fallback``; a scalar -> isotropic; a vector -> used
+    as given.
+    """
+    n = L.size
+    if isinstance(spec, str) and spec == "auto":
+        return frac * L if has_box else np.full(n, fallback)
+    arr = np.asarray(spec, float)
+    if arr.ndim == 0:
+        return np.full(n, float(arr))
+    return arr
 
 
 # --------------------------------------------------------------------------
@@ -333,7 +370,9 @@ def _augment(ctx, kernel):
 
 
 def _run_flooding(ctx, state, x0, rng, kw):
-    sigma = kw.get("sigma", 0.5)
+    L, has_box = kw["_L"], kw["_has_box"]
+    sigma = _resolve_lengths(kw.get("sigma", "auto"), L, has_box,
+                             frac=kw.get("sigma_frac", 0.1), fallback=0.5)
     amplitude = kw.get("amplitude", 2.0)
     jitter = kw.get("restart_jitter", 0.5)
     sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
@@ -350,20 +389,23 @@ def _run_flooding(ctx, state, x0, rng, kw):
 
 
 def _run_deflation(ctx, state, x0, rng, kw):
+    L, has_box = kw["_L"], kw["_has_box"]
     eta = kw.get("eta", 1.0)
     power = kw.get("power", 2.0)
     soft = kw.get("soft", 1e-3)
+    length = _resolve_lengths(kw.get("length", "auto"), L, has_box,
+                              frac=kw.get("length_frac", 0.1), fallback=0.5)
     jitter = kw.get("restart_jitter", 0.5)
     sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
     start = x0.copy()
     while True:
         centers = list(state.archive.centers)
-        kernel = lambda x: _pole_terms(x, centers, eta, power, soft)
+        kernel = lambda x: _pole_terms(x, centers, eta, power, soft, length)
         f2, j2, h2 = _augment(ctx, kernel)
         # Start a small step off the pole so the first gradient is finite.
         s = start
         if centers and state.archive.is_known(s):
-            s = s + 0.1 * (kw.get("sigma", 0.5)) * rng.standard_normal(s.shape)
+            s = s + 0.1 * length * rng.standard_normal(s.shape)
         res = ctx.solve(f2, s, j2, h2)
         if state.consider(res.x, res.success, polish=bool(centers)):
             start = state.archive.xs[-1].copy()
@@ -372,9 +414,12 @@ def _run_deflation(ctx, state, x0, rng, kw):
 
 
 def _run_tunneling(ctx, state, x0, rng, kw):
+    L, has_box = kw["_L"], kw["_has_box"]
     eta = kw.get("eta", 1.0)
     power = kw.get("power", 2.0)
     soft = kw.get("soft", 1e-3)
+    length = _resolve_lengths(kw.get("length", "auto"), L, has_box,
+                              frac=kw.get("length_frac", 0.1), fallback=0.5)
     jitter = kw.get("restart_jitter", 0.75)
     sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
     # Seed: one clean descent.
@@ -387,7 +432,7 @@ def _run_tunneling(ctx, state, x0, rng, kw):
         f_ref = state.archive.fs[-1] if state.archive.fs else float(ctx.fun(x0))
 
         def T(x, _c=centers, _r=f_ref):
-            pole = _pole_terms(x, _c, eta, power, soft)[0]
+            pole = _pole_terms(x, _c, eta, power, soft, length)[0]
             return (float(ctx.fun(x)) - _r) ** 2 + pole
 
         # Start by stepping outward from the latest minimum.
@@ -417,11 +462,11 @@ def _run_mlsl(ctx, state, x0, rng, kw):
     n = x0.size
     pool_x: list[np.ndarray] = []
     pool_f: list[float] = []
-    if _has_box(ctx.bounds):
-        lo, hi = _box(ctx.bounds)
-        diag = float(np.linalg.norm(hi - lo))
-    else:
-        diag = 10.0
+    # Work in the per-dimension scaled metric: the box is unit width per
+    # variable, so its diagonal is sqrt(n) and distances are scale-free.
+    L = kw["_L"]
+    sdist = lambda a, b: float(np.linalg.norm((a - b) / L))
+    diag = float(np.sqrt(n))
     # Seed from x0.
     res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
     state.consider(res.x, res.success, polish=False)
@@ -437,10 +482,10 @@ def _run_mlsl(ctx, state, x0, rng, kw):
         order = np.argsort(pool_f)
         for i in order:
             si, fi = pool_x[i], pool_f[i]
-            # Single-linkage: skip if a *better* sample is within radius.
+            # Single-linkage: skip if a *better* sample is within radius
+            # (distances in the scaled metric).
             better_near = any(
-                pool_f[j] < fi
-                and float(np.linalg.norm(si - pool_x[j])) < radius
+                pool_f[j] < fi and sdist(si, pool_x[j]) < radius
                 for j in range(N) if j != i
             )
             if better_near or state.archive.near_any(si, radius):
@@ -513,18 +558,27 @@ def find_minima(
     n_minima
         Target: stop once this many distinct minima are found.
     max_solves
-        Budget: hard cap on solver calls (default ``4 * n_minima``).
+        Budget: hard cap on solver calls (default ``8 * n_minima``).
     patience
         Give-up: stop after this many solves in a row that find nothing new
         — the graceful exit when fewer minima exist than requested.
     dedup
-        Two minima within this distance are treated as the same.
+        Two minima within this distance are treated as the same. With the
+        default metric this is measured in the **per-dimension scaled** space
+        (each variable divided by its bounds range), so ``dedup`` is
+        scale-free.
     strategy_kw
-        Method-specific knobs, e.g. ``sigma``/``amplitude`` (flooding),
-        ``eta``/``power`` (deflation), ``step``/``temperature``
-        (basinhopping), ``samples_per_round``/``gamma`` (mlsl).
+        Method-specific knobs. Repulsion widths are **per-dimension and
+        ``"auto"`` by default** — sized to a fraction (``sigma_frac`` /
+        ``length_frac``, default 0.1) of each variable's bounds range, so
+        disparate variable scales are handled automatically. Override with a
+        scalar (isotropic) or a length-``n`` vector. Examples:
+        ``sigma``/``amplitude`` (flooding), ``eta``/``power``/``length``
+        (deflation), ``step``/``temperature`` (basinhopping),
+        ``samples_per_round``/``gamma`` (mlsl).
     distance
         Custom metric ``d(a, b) -> float`` for dedup (e.g. periodic boxes).
+        Defaults to Euclidean distance in the per-dimension scaled space.
 
     Returns
     -------
@@ -540,9 +594,20 @@ def find_minima(
     x0 = np.asarray(x0, dtype=float)
     rng = np.random.default_rng(seed)
     if max_solves is None:
-        max_solves = 4 * n_minima
+        # Generous default: repulsion methods spend a polish solve per
+        # accepted minimum, so the effective attempt budget is ~half this.
+        max_solves = 8 * n_minima
     kw = dict(strategy_kw or {})
     kw.setdefault("seed", seed)
+
+    # Per-dimension length scale (box width per variable). Drives the
+    # anisotropic bump widths and, unless the caller supplies its own
+    # ``distance``, the dedup metric — so flooding and de-duplication agree
+    # and ``dedup`` is in scale-free (fraction-of-range) units.
+    L, has_box = _scale_from_bounds(bounds, x0.size)
+    kw["_L"], kw["_has_box"] = L, has_box
+    if distance is None:
+        distance = lambda a, b: float(np.linalg.norm((a - b) / L))
 
     ctx = _Context(fun, jac, hess, bounds, constraints, options, psd_tol)
     ctx.max_solves = max_solves

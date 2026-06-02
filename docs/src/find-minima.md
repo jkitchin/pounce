@@ -14,7 +14,7 @@ result = pounce.find_minima(
     jac=jac, hess=hess,     # same as minimize; analytic derivatives recommended
     bounds=bounds,
     n_minima=6,             # target number of distinct minima
-    max_solves=None,        # budget; default 4 * n_minima
+    max_solves=None,        # budget; default 8 * n_minima
     patience=8,             # give up after this many solves with nothing new
     dedup=1e-3,             # minima closer than this are "the same"
     seed=0,
@@ -61,8 +61,11 @@ taller than the basin's curvature — precisely when
 basin. The bump is smooth with an analytic gradient and Hessian, so the
 flooded problem is as solvable as the original.
 
-* **Knobs** (`strategy_kw`): `sigma` (≈ spacing between minima), `amplitude`
-  (taller than a basin is deep).
+* **Knobs** (`strategy_kw`): `sigma` (width) and `amplitude` (taller than a
+  basin is deep). `sigma` is **per-dimension and `"auto"` by default** —
+  sized to a fraction (`sigma_frac`, default 0.1) of each variable's bounds
+  range, so variables on very different scales are handled automatically.
+  Override with a scalar (isotropic) or a length-`n` vector.
 * **Best for** broad enumeration of all minima of a smooth objective.
 * **References.** Ge, R. "A filled function method for finding a global
   minimizer of a function of several variables." *Mathematical Programming*
@@ -92,7 +95,9 @@ form multiplies the residual of a nonlinear system by a deflation operator
 to exclude known roots for a Newton iteration.
 
 * **Knobs**: `eta` (penalty strength), `power` `p`, `soft` `s` (softening
-  that keeps the pole finite for the solver).
+  that keeps the pole finite), and `length` — the per-dimension pole scale,
+  also `"auto"` from the bounds range by default (scalar or vector to
+  override).
 * **Best for** enumeration on problems where the longer-reach repulsion
   helps; the most Newton/IPM-native of the repulsion methods.
 * **References.** Brown, K.M. & Gearhart, W.B. "Deflation techniques for the

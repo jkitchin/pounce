@@ -127,7 +127,7 @@ def test_callback_invoked_per_minimum():
     seen = []
     pounce.find_minima(
         fun, [0.5, 0.5], method="deflation", jac=jac, hess=hess, bounds=bounds,
-        n_minima=4, dedup=1e-3, seed=0, options=OPTS,
+        n_minima=4, max_solves=80, dedup=1e-3, seed=0, options=OPTS,
         callback=lambda x, f: seen.append((x.copy(), f)),
     )
     assert len(seen) == 4
