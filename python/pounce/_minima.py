@@ -289,8 +289,13 @@ class _State:
             res_p = None
 
         fval = float(ctx.fun(cand))
+        # Reject non-finite candidates/values: a NaN point would never be
+        # "known" (NaN distance never compares <= dedup) and would flood the
+        # archive with duplicates; NaN also breaks the Hessian eigendecomp.
+        finite = bool(np.all(np.isfinite(cand)) and np.isfinite(fval))
         accepted = (
             success
+            and finite
             and ctx.in_bounds(cand)
             and ctx.is_minimum(cand)
             and not self.archive.is_known(cand)
@@ -470,7 +475,6 @@ def _run_tunneling(ctx, state, x0, rng, kw):
     length = _resolve_lengths(kw.get("length", "auto"), L, has_box,
                               frac=kw.get("length_frac", 0.1), fallback=0.5)
     jitter = kw.get("restart_jitter", 0.75)
-    sobol = _make_sobol(x0.size, kw.get("seed"), kw.get("sobol", True))
     # Seed: one clean descent.
     res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
     state.consider(res.x, res.success, polish=False)
@@ -527,7 +531,9 @@ def _run_mlsl(ctx, state, x0, rng, kw):
             pool_f.append(float(ctx.fun(s)))
         N = len(pool_x)
         # Reduced radius shrinks as the pool grows (MLSL clustering rule).
-        radius = gamma * diag * (np.log(N) / N) ** (1.0 / n)
+        # Guard N>=2: log(1)=0 would give radius 0 (no clustering at all).
+        Ne = max(N, 2)
+        radius = gamma * diag * (np.log(Ne) / Ne) ** (1.0 / n)
         order = np.argsort(pool_f)
         for i in order:
             si, fi = pool_x[i], pool_f[i]
@@ -632,6 +638,11 @@ def find_minima(
     distance
         Custom metric ``d(a, b) -> float`` for dedup (e.g. periodic boxes).
         Defaults to Euclidean distance in the per-dimension scaled space.
+    psd_tol
+        Smallest Hessian eigenvalue tolerated by the saddle-rejection check.
+        Note this is an **absolute** tolerance (scale-sensitive), unlike the
+        scale-free dedup metric; scale ``psd_tol`` with your objective's
+        curvature if needed.
 
     Returns
     -------

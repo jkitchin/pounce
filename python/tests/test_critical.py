@@ -181,3 +181,16 @@ def test_kind_labels():
     assert "minimum" in kinds
     assert "saddle(index=1)" in kinds
     assert "maximum" in kinds
+
+
+def test_morse_index_degenerate_flag():
+    from pounce._critical import _morse_index
+    idx, _, deg = _morse_index(np.diag([1.0, 2.0]), 1e-8)
+    assert idx == 0 and not deg
+    idx, _, deg = _morse_index(np.diag([1.0, -1.0]), 1e-8)
+    assert idx == 1 and not deg
+    # An eigenvalue at ~0 flags the point as degenerate (non-Morse).
+    idx, _, deg = _morse_index(np.diag([1.0, 0.0]), 1e-8)
+    assert deg
+    idx, _, deg = _morse_index(np.diag([1.0, 1e-12]), 1e-8)
+    assert deg

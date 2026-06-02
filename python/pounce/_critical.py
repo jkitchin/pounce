@@ -35,7 +35,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from ._minima import find_minima
+from ._minima import find_minima, _scale_from_bounds
 
 __all__ = [
     "find_critical_points", "find_saddles", "reaction_network",
@@ -51,9 +51,12 @@ class CriticalPoint:
     index: int            # Morse index = # negative Hessian eigenvalues
     eigvalues: np.ndarray
     grad_norm: float
+    degenerate: bool = False   # a Hessian eigenvalue is ~0 (non-Morse point)
 
     @property
     def kind(self) -> str:
+        if self.degenerate:
+            return f"degenerate(index>={self.index})"
         if self.index == 0:
             return "minimum"
         if self.index == self.x.size:
@@ -88,16 +91,20 @@ class CriticalPointResult:
 
 
 def _morse_index(H, eig_tol):
+    """Morse index, eigenvalues, and a degeneracy flag (an eigenvalue ~0,
+    so the point is non-Morse and the min/saddle/max label is unreliable)."""
     H = 0.5 * (H + H.T)
     eig = np.linalg.eigvalsh(H)
-    return int(np.sum(eig < -eig_tol)), eig
+    index = int(np.sum(eig < -eig_tol))
+    degenerate = bool(np.any(np.abs(eig) <= eig_tol))
+    return index, eig, degenerate
 
 
 def _critical_point(fun, grad, hess, x, eig_tol):
     x = np.asarray(x, float)
     gn = float(np.linalg.norm(np.asarray(grad(x), float).ravel()))
-    index, eig = _morse_index(np.asarray(hess(x), float), eig_tol)
-    return CriticalPoint(x, float(fun(x)), index, eig, gn)
+    index, eig, degen = _morse_index(np.asarray(hess(x), float), eig_tol)
+    return CriticalPoint(x, float(fun(x)), index, eig, gn, degen)
 
 
 # --------------------------------------------------------------------------
@@ -129,9 +136,6 @@ def find_critical_points(
     eigenvalues. ``method`` selects the enumeration strategy passed to
     ``find_minima`` (``"multistart"``, ``"deflation"``, ``"flooding"`` …).
     """
-    grad = grad
-    hess = hess
-
     def merit(x):
         g = np.asarray(grad(x), float).ravel()
         return 0.5 * float(g @ g)
@@ -155,11 +159,15 @@ def find_critical_points(
     points: list[CriticalPoint] = []
     for x in r.minima:
         x = np.asarray(x, float)
-        gn = float(np.linalg.norm(np.asarray(grad(x), float).ravel()))
-        if gn > grad_tol:
-            continue                      # spurious merit minimum, ∇f ≠ 0
-        index, eig = _morse_index(np.asarray(hess(x), float), eig_tol)
-        points.append(CriticalPoint(x, float(fun(x)), index, eig, gn))
+        g = np.asarray(grad(x), float).ravel()
+        gn = float(np.linalg.norm(g))
+        if not np.isfinite(gn) or gn > grad_tol:
+            continue                      # non-finite or spurious (∇f ≠ 0)
+        H = np.asarray(hess(x), float)
+        if not np.all(np.isfinite(H)):
+            continue                      # guard the eigendecomposition
+        index, eig, degen = _morse_index(H, eig_tol)
+        points.append(CriticalPoint(x, float(fun(x)), index, eig, gn, degen))
 
     points.sort(key=lambda p: (p.index, p.f))
     return CriticalPointResult(points, r.status, r.n_solves, r.trace)
@@ -168,15 +176,28 @@ def find_critical_points(
 # --------------------------------------------------------------------------
 # Route B: eigenvector-following local search for index-k saddles.
 # --------------------------------------------------------------------------
-def _eigvec_follow(grad, hess, x0, k, max_iter, tol, max_step):
+def _clip_to_bounds(x, bounds):
+    if bounds is None:
+        return x
+    lo = np.array([(-np.inf if b is None or b[0] is None else b[0]) for b in bounds])
+    hi = np.array([(np.inf if b is None or b[1] is None else b[1]) for b in bounds])
+    return np.clip(x, lo, hi)
+
+
+def _eigvec_follow(grad, hess, x0, k, max_iter, tol, max_step, bounds=None):
     """Walk to an index-k saddle: ascend the k softest modes, Newton-descend
-    the rest (Cerjan-Miller eigenvector following)."""
-    x = np.asarray(x0, float).copy()
+    the rest (Cerjan-Miller eigenvector following). Steps are clipped to the
+    bounds box so the walk stays feasible."""
+    x = _clip_to_bounds(np.asarray(x0, float).copy(), bounds)
     for _ in range(max_iter):
         g = np.asarray(grad(x), float).ravel()
+        if not np.all(np.isfinite(g)):
+            break
         if np.linalg.norm(g) < tol:
             break
         H = 0.5 * (np.asarray(hess(x), float) + np.asarray(hess(x), float).T)
+        if not np.all(np.isfinite(H)):
+            break
         w, U = np.linalg.eigh(H)          # eigenvalues ascending
         gu = U.T @ g
         denom = np.maximum(np.abs(w), 1e-8)
@@ -186,7 +207,7 @@ def _eigvec_follow(grad, hess, x0, k, max_iter, tol, max_step):
         nrm = np.linalg.norm(dx)
         if nrm > max_step:
             dx *= max_step / nrm
-        x = x + dx
+        x = _clip_to_bounds(x + dx, bounds)
     return x, float(np.linalg.norm(np.asarray(grad(x), float).ravel()))
 
 
@@ -219,6 +240,10 @@ def find_saddles(
     n = x0.size
     if max_solves is None:
         max_solves = 6 * n_saddles
+    # Dedup in the same per-dimension scaled metric find_minima uses, so a
+    # single `dedup` tolerance means the same thing across routes.
+    L, _ = _scale_from_bounds(bounds, n)
+    sdist = lambda a, b: float(np.linalg.norm((a - b) / L))
 
     def in_bounds(x):
         if bounds is None:
@@ -246,14 +271,20 @@ def find_saddles(
     stagnant = 0
     start = x0.copy()
     while len(found) < n_saddles and n_solves < max_solves and stagnant < patience:
-        x, gn = _eigvec_follow(grad, hess, start, index, local_max_iter, grad_tol, max_step)
+        x, gn = _eigvec_follow(grad, hess, start, index, local_max_iter,
+                               grad_tol, max_step, bounds)
         n_solves += 1
-        idx, eig = _morse_index(np.asarray(hess(x), float), eig_tol)
-        known = any(np.linalg.norm(x - p.x) <= dedup for p in found)
-        ok = gn <= grad_tol and idx == index and in_bounds(x) and not known
+        # Short-circuit on the gradient before any eigendecomposition, so a
+        # diverged / non-finite iterate never reaches eigh.
+        ok = bool(np.all(np.isfinite(x))) and gn <= grad_tol and in_bounds(x)
+        idx = -1
+        if ok:
+            idx, eig, degen = _morse_index(np.asarray(hess(x), float), eig_tol)
+            known = any(sdist(x, p.x) <= dedup for p in found)
+            ok = idx == index and not known
         trace.append({"x": x, "grad_norm": gn, "index": idx, "accepted": ok})
         if ok:
-            found.append(CriticalPoint(x, float(fun(x)), idx, eig, gn))
+            found.append(CriticalPoint(x, float(fun(x)), idx, eig, gn, degen))
             stagnant = 0
         else:
             stagnant += 1
@@ -299,9 +330,9 @@ class ReactionNetwork:
         out = set()
         for c in self.connections:
             a, b = c.minima
-            if a == i and b >= 0:
+            if a == i and b >= 0 and b != i:
                 out.add(b)
-            if b == i and a >= 0:
+            if b == i and a >= 0 and a != i:
                 out.add(a)
         return sorted(out)
 
@@ -403,10 +434,14 @@ def reaction_network(
     basin — and tabulates the barrier heights.
 
     Parameters mirror :func:`find_minima` / :func:`find_saddles`. Use
-    ``minima_method`` and ``minima_kw`` to tune the state search (e.g.
-    ``minima_kw={"sigma": 0.4, "amplitude": 150.0}`` for flooding), and
+    ``minima_method`` and ``minima_kw`` to tune the state search, and
     ``saddle_kw`` for the transition-state search (e.g.
-    ``{"max_step": 0.05, "grad_tol": 1e-5}``).
+    ``{"max_step": 0.05, "grad_tol": 1e-5}``). The eigenvector-following
+    saddle search rarely tightens below ~1e-5, so ``grad_tol`` for the
+    transition-state phase is floored at ``1e-5`` unless ``saddle_kw``
+    sets it explicitly. A transition state whose two descent directions land
+    in the *same* basin is recorded with ``minima == (i, i)`` but is not
+    reported as an edge by :meth:`ReactionNetwork.neighbors`.
 
     Returns
     -------
