@@ -76,9 +76,11 @@ pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.1-de
 pounce-observability = { path = "crates/pounce-observability", version = "0.3.1-dev" }
 # Temporarily pinned to the latest feral main (post-0.9.0) to pick up the
 # issue-63 diagnosis work (feral PR #68), the #67 thin-large ordering fix
-# (feral PR #70), and the #72 diagnostics-crate split (build-only refactor).
+# (feral PR #70), the #72 diagnostics-crate split (build-only refactor),
+# and the #73 ordering change (PR #75: route Auto to AMF at every size,
+# drop AMF_BAND_MAX) plus the #76/#77 triage docs.
 # Revert to a crates.io version once feral cuts a release.
-feral = { git = "https://github.com/jkitchin/feral", rev = "2ef751fe4660" }
+feral = { git = "https://github.com/jkitchin/feral", rev = "d144ade6c169" }
 
 # Observability / colored-output stack (pounce#71). `anstyle` is the
 # style/color vocabulary, `anstyle-query` detects terminal capability
