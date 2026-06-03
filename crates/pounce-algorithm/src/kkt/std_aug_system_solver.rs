@@ -463,10 +463,28 @@ impl AugSystemSolver for StdAugSystemSolver {
         );
         drop(_factor_guard);
         self.last_status = Some(status);
+        // Refresh the cached neg-eval count on every outcome where the backend
+        // computed an inertia (Success/WrongInertia/Singular), matching IPOPT's
+        // `StdAugSystemSolver::NumberOfNegEVals()`, which is a pure pass-through
+        // to the linear solver. Refreshing only on Success (as we did before)
+        // pins the cache to `num_neg_evals` after the first successful factor,
+        // which makes PdFullSpaceSolver's "too-few-negatives → δ_c" routing
+        // branch dead code: every WrongInertia then falls through to δ_x, which
+        // cannot raise the negative-eigenvalue count. On problems where feral
+        // reports too few negatives on the near-singular KKT (e.g. nug12), that
+        // sent us thrashing δ_x to its 1e20 ceiling before the δ_c fallback
+        // finally engaged. See pounce#99.
+        if self.linsol.provides_inertia()
+            && matches!(
+                status,
+                ESymSolverStatus::Success
+                    | ESymSolverStatus::WrongInertia
+                    | ESymSolverStatus::Singular
+            )
+        {
+            self.last_neg_evals = self.linsol.number_of_neg_evals();
+        }
         if status == ESymSolverStatus::Success {
-            if self.linsol.provides_inertia() {
-                self.last_neg_evals = self.linsol.number_of_neg_evals();
-            }
             self.unpack_sol(&packed, sol);
             self.have_factor = true;
         }
