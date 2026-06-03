@@ -11,7 +11,8 @@
 //! * Constraint and objective expression segments using opcodes
 //!   `o0` (add), `o1` (sub), `o2` (mul), `o3` (div), `o5` (pow),
 //!   `o16` (unary minus), `o39` (sqrt), `o42` (log10), `o43` (log),
-//!   `o44` (exp), `o15` (abs), `o41` (sin), `o46` (cos), plus
+//!   `o44` (exp), `o15` (abs), `o41` (sin), `o46` (cos), `o38` (tan),
+//!   `o49` (atan), `o53` (acos), plus
 //!   `n<num>` constants and `v<idx>` variables.
 //! * Linear-Jacobian (`J`) and linear-objective (`G`) segments.
 //! * Variable bounds (`b`) and constraint bounds (`r`).
@@ -66,6 +67,44 @@ pub enum Expr {
     /// `NlProblem.imported_funcs`; resolution to a live shared library
     /// happens when the tape is built (see `nl_external::ExternalResolver`).
     Funcall { id: usize, args: Vec<FuncallArg> },
+    /// Relational comparison (`o22`/`o23`/`o24`/`o28`/`o29`/`o30`).
+    /// Evaluates to `1.0` when the comparison holds, else `0.0`. The
+    /// result is piecewise-constant, so it has zero derivative
+    /// everywhere (the kink at equality is ignored — standard
+    /// subgradient-free treatment, matching ASL).
+    Compare(CmpOp, Box<Expr>, Box<Expr>),
+    /// Logical AND (`o21`). `1.0` iff both operands are nonzero.
+    /// Zero derivative (piecewise constant).
+    And(Box<Expr>, Box<Expr>),
+    /// Logical OR (`o20`). `1.0` iff either operand is nonzero.
+    /// Zero derivative (piecewise constant).
+    Or(Box<Expr>, Box<Expr>),
+    /// Logical NOT (`o34`). `1.0` iff the operand is zero.
+    /// Zero derivative (piecewise constant).
+    Not(Box<Expr>),
+    /// `if-then-else` (`o35` OPIFnl). Evaluates `cond`; when it is
+    /// nonzero the value and all derivatives flow through `then_`,
+    /// otherwise through `else_`. The branch switch is a non-smooth
+    /// event the derivative ignores (it differentiates only the
+    /// active branch), exactly as ASL/IPOPT does for `if`.
+    Cond {
+        cond: Box<Expr>,
+        then_: Box<Expr>,
+        else_: Box<Expr>,
+    },
+}
+
+/// Relational operator carried by [`Expr::Compare`]. The variants map
+/// 1:1 onto AMPL opcodes `o22 LT`, `o23 LE`, `o24 EQ`, `o28 GE`,
+/// `o29 GT`, `o30 NE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Lt,
+    Le,
+    Eq,
+    Ge,
+    Gt,
+    Ne,
 }
 
 /// One positional argument to an AMPL imported function call. AMPL splits
@@ -96,6 +135,8 @@ pub enum BinOp {
     Mul,
     Div,
     Pow,
+    /// Two-argument arctangent `atan2(a, b)` with operands `(y, x)`.
+    Atan2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +149,16 @@ pub enum UnaryOp {
     Sin,
     Cos,
     Log10,
+    Tan,
+    Atan,
+    Acos,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asin,
+    Acosh,
+    Asinh,
+    Atanh,
 }
 
 /// Parsed `.nl` problem in the form needed by `NlTnlp`.
@@ -795,6 +846,53 @@ impl<'a> Parser<'a> {
             43 => Ok(Expr::Unary(UnaryOp::Log, Box::new(self.parse_expr()?))),
             44 => Ok(Expr::Unary(UnaryOp::Exp, Box::new(self.parse_expr()?))),
             46 => Ok(Expr::Unary(UnaryOp::Cos, Box::new(self.parse_expr()?))),
+            38 => Ok(Expr::Unary(UnaryOp::Tan, Box::new(self.parse_expr()?))),
+            49 => Ok(Expr::Unary(UnaryOp::Atan, Box::new(self.parse_expr()?))),
+            53 => Ok(Expr::Unary(UnaryOp::Acos, Box::new(self.parse_expr()?))),
+            40 => Ok(Expr::Unary(UnaryOp::Sinh, Box::new(self.parse_expr()?))),
+            45 => Ok(Expr::Unary(UnaryOp::Cosh, Box::new(self.parse_expr()?))),
+            37 => Ok(Expr::Unary(UnaryOp::Tanh, Box::new(self.parse_expr()?))),
+            51 => Ok(Expr::Unary(UnaryOp::Asin, Box::new(self.parse_expr()?))),
+            52 => Ok(Expr::Unary(UnaryOp::Acosh, Box::new(self.parse_expr()?))),
+            50 => Ok(Expr::Unary(UnaryOp::Asinh, Box::new(self.parse_expr()?))),
+            47 => Ok(Expr::Unary(UnaryOp::Atanh, Box::new(self.parse_expr()?))),
+            // atan2(y, x): binary, operand order `y` then `x`.
+            48 => {
+                let a = self.parse_expr()?;
+                let b = self.parse_expr()?;
+                Ok(Expr::Binary(BinOp::Atan2, Box::new(a), Box::new(b)))
+            }
+            // Relational comparisons (binary). Operand order is
+            // `left OP right`.
+            22 => self.parse_compare(CmpOp::Lt),
+            23 => self.parse_compare(CmpOp::Le),
+            24 => self.parse_compare(CmpOp::Eq),
+            28 => self.parse_compare(CmpOp::Ge),
+            29 => self.parse_compare(CmpOp::Gt),
+            30 => self.parse_compare(CmpOp::Ne),
+            // Logical connectives.
+            20 => {
+                let a = self.parse_expr()?;
+                let b = self.parse_expr()?;
+                Ok(Expr::Or(Box::new(a), Box::new(b)))
+            }
+            21 => {
+                let a = self.parse_expr()?;
+                let b = self.parse_expr()?;
+                Ok(Expr::And(Box::new(a), Box::new(b)))
+            }
+            34 => Ok(Expr::Not(Box::new(self.parse_expr()?))),
+            // if-then-else: condition, then-value, else-value.
+            35 => {
+                let cond = self.parse_expr()?;
+                let then_ = self.parse_expr()?;
+                let else_ = self.parse_expr()?;
+                Ok(Expr::Cond {
+                    cond: Box::new(cond),
+                    then_: Box::new(then_),
+                    else_: Box::new(else_),
+                })
+            }
             54 => {
                 // Variadic sum: next data line gives the count.
                 let count_line = self.next_data_line()?;
@@ -812,6 +910,14 @@ impl<'a> Parser<'a> {
             }
             other => Err(format!("unsupported opcode o{other}")),
         }
+    }
+
+    /// Parse the two operands of a relational opcode into an
+    /// [`Expr::Compare`]. Operand order is `left OP right`.
+    fn parse_compare(&mut self, op: CmpOp) -> Result<Expr, String> {
+        let a = self.parse_expr()?;
+        let b = self.parse_expr()?;
+        Ok(Expr::Compare(op, Box::new(a), Box::new(b)))
     }
 
     /// Resolve a `v<i>` token into either a plain variable reference
@@ -913,6 +1019,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 BinOp::Mul => va * vb,
                 BinOp::Div => va / vb,
                 BinOp::Pow => va.powf(vb),
+                BinOp::Atan2 => va.atan2(vb),
             }
         }
         Expr::Unary(op, a) => {
@@ -926,9 +1033,64 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 UnaryOp::Abs => va.abs(),
                 UnaryOp::Sin => va.sin(),
                 UnaryOp::Cos => va.cos(),
+                UnaryOp::Tan => va.tan(),
+                UnaryOp::Atan => va.atan(),
+                UnaryOp::Acos => va.acos(),
+                UnaryOp::Sinh => va.sinh(),
+                UnaryOp::Cosh => va.cosh(),
+                UnaryOp::Tanh => va.tanh(),
+                UnaryOp::Asin => va.asin(),
+                UnaryOp::Acosh => va.acosh(),
+                UnaryOp::Asinh => va.asinh(),
+                UnaryOp::Atanh => va.atanh(),
             }
         }
         Expr::Sum(args) => args.iter().map(|a| eval_expr(a, x)).sum(),
+        Expr::Compare(op, a, b) => {
+            let va = eval_expr(a, x);
+            let vb = eval_expr(b, x);
+            let truth = match op {
+                CmpOp::Lt => va < vb,
+                CmpOp::Le => va <= vb,
+                CmpOp::Eq => va == vb,
+                CmpOp::Ge => va >= vb,
+                CmpOp::Gt => va > vb,
+                CmpOp::Ne => va != vb,
+            };
+            if truth {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Expr::And(a, b) => {
+            if eval_expr(a, x) != 0.0 && eval_expr(b, x) != 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Expr::Or(a, b) => {
+            if eval_expr(a, x) != 0.0 || eval_expr(b, x) != 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Expr::Not(a) => {
+            if eval_expr(a, x) == 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Expr::Cond { cond, then_, else_ } => {
+            if eval_expr(cond, x) != 0.0 {
+                eval_expr(then_, x)
+            } else {
+                eval_expr(else_, x)
+            }
+        }
         Expr::Cse(body) => eval_expr(body, x),
         Expr::Funcall { .. } => panic!(
             "eval_expr: AMPL imported function called without an external resolver; \
@@ -972,6 +1134,12 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                         grad_expr(b, x, seed * dpb, grad);
                     }
                 }
+                BinOp::Atan2 => {
+                    // atan2(y=a, x=b): d/dy = x/(x²+y²), d/dx = -y/(x²+y²)
+                    let d = va * va + vb * vb;
+                    grad_expr(a, x, seed * vb / d, grad);
+                    grad_expr(b, x, -seed * va / d, grad);
+                }
             }
         }
         Expr::Unary(op, a) => {
@@ -993,12 +1161,40 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 }
                 UnaryOp::Sin => va.cos(),
                 UnaryOp::Cos => -va.sin(),
+                UnaryOp::Tan => {
+                    let t = va.tan();
+                    1.0 + t * t
+                }
+                UnaryOp::Atan => 1.0 / (1.0 + va * va),
+                UnaryOp::Acos => -1.0 / (1.0 - va * va).sqrt(),
+                UnaryOp::Sinh => va.cosh(),
+                UnaryOp::Cosh => va.sinh(),
+                UnaryOp::Tanh => {
+                    let t = va.tanh();
+                    1.0 - t * t
+                }
+                UnaryOp::Asin => 1.0 / (1.0 - va * va).sqrt(),
+                UnaryOp::Acosh => 1.0 / (va * va - 1.0).sqrt(),
+                UnaryOp::Asinh => 1.0 / (va * va + 1.0).sqrt(),
+                UnaryOp::Atanh => 1.0 / (1.0 - va * va),
             };
             grad_expr(a, x, seed * d, grad);
         }
         Expr::Sum(args) => {
             for arg in args {
                 grad_expr(arg, x, seed, grad);
+            }
+        }
+        // Comparisons and logical connectives are piecewise constant:
+        // zero derivative, so no seed propagates into their operands.
+        Expr::Compare(_, _, _) | Expr::And(_, _) | Expr::Or(_, _) | Expr::Not(_) => {}
+        // if-then-else: differentiate only the active branch. The
+        // branch-switch discontinuity contributes no derivative.
+        Expr::Cond { cond, then_, else_ } => {
+            if eval_expr(cond, x) != 0.0 {
+                grad_expr(then_, x, seed, grad);
+            } else {
+                grad_expr(else_, x, seed, grad);
             }
         }
         Expr::Cse(body) => grad_expr(body, x, seed, grad),
@@ -1024,6 +1220,21 @@ pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
             for a in args {
                 collect_vars(a, out);
             }
+        }
+        // Collect from every child, including the condition: even
+        // though the comparison/branch-test contributes no derivative,
+        // the variables it reads are genuinely "used" by the problem,
+        // and being conservative here only ever adds structural zeros
+        // to the Jacobian/Hessian (never drops a real nonzero).
+        Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            collect_vars(a, out);
+            collect_vars(b, out);
+        }
+        Expr::Not(a) => collect_vars(a, out),
+        Expr::Cond { cond, then_, else_ } => {
+            collect_vars(cond, out);
+            collect_vars(then_, out);
+            collect_vars(else_, out);
         }
         Expr::Cse(body) => collect_vars(body, out),
         Expr::Funcall { args, .. } => {

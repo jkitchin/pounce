@@ -27,7 +27,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::nl_external::{ExternalArg, ExternalLibrary, ExternalResolver};
-use super::nl_reader::{BinOp, Expr, FuncallArg, UnaryOp};
+use super::nl_reader::{BinOp, CmpOp, Expr, FuncallArg, UnaryOp};
 
 /// One operation in the flattened tape. Operand fields are tape-slot
 /// indices into the same tape; `Var(i)` references problem variable
@@ -49,6 +49,35 @@ pub enum TapeOp {
     Log10(usize),
     Sin(usize),
     Cos(usize),
+    Tan(usize),
+    Atan(usize),
+    Acos(usize),
+    Sinh(usize),
+    Cosh(usize),
+    Tanh(usize),
+    Asin(usize),
+    Acosh(usize),
+    Asinh(usize),
+    Atanh(usize),
+    /// Two-argument arctangent `atan2(vals[a], vals[b])` (operands are
+    /// `(y, x)`, matching AMPL's `atan2(y, x)` / `.nl` opcode o48).
+    Atan2(usize, usize),
+    /// Relational comparison `vals[a] OP vals[b]` → `1.0`/`0.0`.
+    /// Piecewise constant, so its derivative is identically zero — the
+    /// AD passes treat it as a constant w.r.t. its operands.
+    Cmp(CmpOp, usize, usize),
+    /// Logical AND: `1.0` iff both operands are nonzero. Zero derivative.
+    And(usize, usize),
+    /// Logical OR: `1.0` iff either operand is nonzero. Zero derivative.
+    Or(usize, usize),
+    /// Logical NOT: `1.0` iff the operand is zero. Zero derivative.
+    Not(usize),
+    /// `if-then-else`: operands `(cond, then, else)`. The value is
+    /// `vals[then]` when `vals[cond] != 0` else `vals[else]`, and the
+    /// value/tangent/adjoint all route through the active branch only.
+    /// The condition contributes no derivative (the branch switch is a
+    /// non-smooth event the AD ignores).
+    Select(usize, usize, usize),
     /// AMPL imported (external) function call. The library is kept alive by
     /// the `Arc`; `name` is the registered function name; `args` carries
     /// positional arguments where real-valued args reference earlier tape
@@ -67,6 +96,20 @@ pub enum TapeOp {
 pub enum TapeFuncallArg {
     Tape(usize),
     Str(String),
+}
+
+/// Evaluate a relational opcode on two scalar values, returning the
+/// boolean truth (callers map it to `1.0`/`0.0`).
+#[inline]
+fn cmp_holds(op: CmpOp, a: f64, b: f64) -> bool {
+    match op {
+        CmpOp::Lt => a < b,
+        CmpOp::Le => a <= b,
+        CmpOp::Eq => a == b,
+        CmpOp::Ge => a >= b,
+        CmpOp::Gt => a > b,
+        CmpOp::Ne => a != b,
+    }
 }
 
 fn funcall_to_ext_args<'a>(args: &'a [TapeFuncallArg], vals: &[f64]) -> Vec<ExternalArg<'a>> {
@@ -125,6 +168,28 @@ impl Tape {
                 TapeOp::Log10(a) => vals[*a].log10(),
                 TapeOp::Sin(a) => vals[*a].sin(),
                 TapeOp::Cos(a) => vals[*a].cos(),
+                TapeOp::Tan(a) => vals[*a].tan(),
+                TapeOp::Atan(a) => vals[*a].atan(),
+                TapeOp::Acos(a) => vals[*a].acos(),
+                TapeOp::Sinh(a) => vals[*a].sinh(),
+                TapeOp::Cosh(a) => vals[*a].cosh(),
+                TapeOp::Tanh(a) => vals[*a].tanh(),
+                TapeOp::Asin(a) => vals[*a].asin(),
+                TapeOp::Acosh(a) => vals[*a].acosh(),
+                TapeOp::Asinh(a) => vals[*a].asinh(),
+                TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
+                TapeOp::Cmp(op, a, b) => f64::from(cmp_holds(*op, vals[*a], vals[*b])),
+                TapeOp::And(a, b) => f64::from(vals[*a] != 0.0 && vals[*b] != 0.0),
+                TapeOp::Or(a, b) => f64::from(vals[*a] != 0.0 || vals[*b] != 0.0),
+                TapeOp::Not(a) => f64::from(vals[*a] == 0.0),
+                TapeOp::Select(c, t, e) => {
+                    if vals[*c] != 0.0 {
+                        vals[*t]
+                    } else {
+                        vals[*e]
+                    }
+                }
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, &vals);
                     let res = lib
@@ -230,6 +295,63 @@ impl Tape {
                 TapeOp::Cos(j) => {
                     adj[*j] -= a * vals[*j].sin();
                 }
+                TapeOp::Tan(j) => {
+                    let t = vals[i];
+                    adj[*j] += a * (1.0 + t * t);
+                }
+                TapeOp::Atan(j) => {
+                    let u = vals[*j];
+                    adj[*j] += a / (1.0 + u * u);
+                }
+                TapeOp::Acos(j) => {
+                    let u = vals[*j];
+                    adj[*j] -= a / (1.0 - u * u).sqrt();
+                }
+                TapeOp::Sinh(j) => {
+                    adj[*j] += a * vals[*j].cosh();
+                }
+                TapeOp::Cosh(j) => {
+                    adj[*j] += a * vals[*j].sinh();
+                }
+                TapeOp::Tanh(j) => {
+                    let t = vals[i];
+                    adj[*j] += a * (1.0 - t * t);
+                }
+                TapeOp::Asin(j) => {
+                    let u = vals[*j];
+                    adj[*j] += a / (1.0 - u * u).sqrt();
+                }
+                TapeOp::Acosh(j) => {
+                    let u = vals[*j];
+                    adj[*j] += a / (u * u - 1.0).sqrt();
+                }
+                TapeOp::Asinh(j) => {
+                    let u = vals[*j];
+                    adj[*j] += a / (u * u + 1.0).sqrt();
+                }
+                TapeOp::Atanh(j) => {
+                    let u = vals[*j];
+                    adj[*j] += a / (1.0 - u * u);
+                }
+                TapeOp::Atan2(l, r) => {
+                    let y = vals[*l];
+                    let x = vals[*r];
+                    let d = y * y + x * x;
+                    adj[*l] += a * (x / d);
+                    adj[*r] += a * (-y / d);
+                }
+                // Comparisons and logical connectives are piecewise
+                // constant: zero derivative, so no adjoint propagates.
+                TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => {}
+                // if-then-else: the adjoint flows entirely into the
+                // active branch; the condition gets none.
+                TapeOp::Select(c, t, e) => {
+                    if vals[*c] != 0.0 {
+                        adj[*t] += a;
+                    } else {
+                        adj[*e] += a;
+                    }
+                }
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, vals);
                     let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
@@ -318,6 +440,54 @@ impl Tape {
                 TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
                 TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
                 TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
+                TapeOp::Tan(a) => {
+                    let t = vals[i];
+                    dot[*a] * (1.0 + t * t)
+                }
+                TapeOp::Atan(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (1.0 + u * u)
+                }
+                TapeOp::Acos(a) => {
+                    let u = vals[*a];
+                    -dot[*a] / (1.0 - u * u).sqrt()
+                }
+                TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
+                TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
+                TapeOp::Tanh(a) => {
+                    let t = vals[i];
+                    dot[*a] * (1.0 - t * t)
+                }
+                TapeOp::Asin(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (1.0 - u * u).sqrt()
+                }
+                TapeOp::Acosh(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (u * u - 1.0).sqrt()
+                }
+                TapeOp::Asinh(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (u * u + 1.0).sqrt()
+                }
+                TapeOp::Atanh(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (1.0 - u * u)
+                }
+                TapeOp::Atan2(a, b) => {
+                    let y = vals[*a];
+                    let x = vals[*b];
+                    let d = y * y + x * x;
+                    (x * dot[*a] - y * dot[*b]) / d
+                }
+                TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => 0.0,
+                TapeOp::Select(c, t, e) => {
+                    if vals[*c] != 0.0 {
+                        dot[*t]
+                    } else {
+                        dot[*e]
+                    }
+                }
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, vals);
                     let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
@@ -361,6 +531,28 @@ impl Tape {
                 TapeOp::Log10(a) => vals[*a].log10(),
                 TapeOp::Sin(a) => vals[*a].sin(),
                 TapeOp::Cos(a) => vals[*a].cos(),
+                TapeOp::Tan(a) => vals[*a].tan(),
+                TapeOp::Atan(a) => vals[*a].atan(),
+                TapeOp::Acos(a) => vals[*a].acos(),
+                TapeOp::Sinh(a) => vals[*a].sinh(),
+                TapeOp::Cosh(a) => vals[*a].cosh(),
+                TapeOp::Tanh(a) => vals[*a].tanh(),
+                TapeOp::Asin(a) => vals[*a].asin(),
+                TapeOp::Acosh(a) => vals[*a].acosh(),
+                TapeOp::Asinh(a) => vals[*a].asinh(),
+                TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
+                TapeOp::Cmp(op, a, b) => f64::from(cmp_holds(*op, vals[*a], vals[*b])),
+                TapeOp::And(a, b) => f64::from(vals[*a] != 0.0 && vals[*b] != 0.0),
+                TapeOp::Or(a, b) => f64::from(vals[*a] != 0.0 || vals[*b] != 0.0),
+                TapeOp::Not(a) => f64::from(vals[*a] == 0.0),
+                TapeOp::Select(c, t, e) => {
+                    if vals[*c] != 0.0 {
+                        vals[*t]
+                    } else {
+                        vals[*e]
+                    }
+                }
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, &*vals);
                     let res = lib
@@ -458,6 +650,54 @@ impl Tape {
                 TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
                 TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
                 TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
+                TapeOp::Tan(a) => {
+                    let t = vals[i];
+                    (1.0 + t * t) * dot[*a]
+                }
+                TapeOp::Atan(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (1.0 + u * u)
+                }
+                TapeOp::Acos(a) => {
+                    let u = vals[*a];
+                    -dot[*a] / (1.0 - u * u).sqrt()
+                }
+                TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
+                TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
+                TapeOp::Tanh(a) => {
+                    let t = vals[i];
+                    (1.0 - t * t) * dot[*a]
+                }
+                TapeOp::Asin(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (1.0 - u * u).sqrt()
+                }
+                TapeOp::Acosh(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (u * u - 1.0).sqrt()
+                }
+                TapeOp::Asinh(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (u * u + 1.0).sqrt()
+                }
+                TapeOp::Atanh(a) => {
+                    let u = vals[*a];
+                    dot[*a] / (1.0 - u * u)
+                }
+                TapeOp::Atan2(a, b) => {
+                    let y = vals[*a];
+                    let x = vals[*b];
+                    let d = y * y + x * x;
+                    (x * dot[*a] - y * dot[*b]) / d
+                }
+                TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => 0.0,
+                TapeOp::Select(c, t, e) => {
+                    if vals[*c] != 0.0 {
+                        dot[*t]
+                    } else {
+                        dot[*e]
+                    }
+                }
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, vals);
                     let res = lib.eval(name, &call_args, true, false).unwrap_or_else(|e| {
@@ -610,6 +850,110 @@ impl Tape {
                     let su = u.sin();
                     adj[*a] -= w * su;
                     adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
+                }
+                TapeOp::Tan(a) => {
+                    let t = vals[i];
+                    let gp = 1.0 + t * t;
+                    let gpp = 2.0 * t * gp;
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Atan(a) => {
+                    let u = vals[*a];
+                    let d = 1.0 + u * u;
+                    let gp = 1.0 / d;
+                    let gpp = -2.0 * u / (d * d);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Acos(a) => {
+                    let u = vals[*a];
+                    let s = 1.0 - u * u;
+                    let r = s.sqrt();
+                    let gp = -1.0 / r;
+                    let gpp = -u / (s * r);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Sinh(a) => {
+                    let u = vals[*a];
+                    let gp = u.cosh();
+                    let gpp = u.sinh();
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Cosh(a) => {
+                    let u = vals[*a];
+                    let gp = u.sinh();
+                    let gpp = u.cosh();
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Tanh(a) => {
+                    let t = vals[i];
+                    let gp = 1.0 - t * t;
+                    let gpp = -2.0 * t * gp;
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Asin(a) => {
+                    let u = vals[*a];
+                    let s = 1.0 - u * u;
+                    let r = s.sqrt();
+                    let gp = 1.0 / r;
+                    let gpp = u / (s * r);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Acosh(a) => {
+                    let u = vals[*a];
+                    let s = u * u - 1.0;
+                    let r = s.sqrt();
+                    let gp = 1.0 / r;
+                    let gpp = -u / (s * r);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Asinh(a) => {
+                    let u = vals[*a];
+                    let s = u * u + 1.0;
+                    let r = s.sqrt();
+                    let gp = 1.0 / r;
+                    let gpp = -u / (s * r);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Atanh(a) => {
+                    let u = vals[*a];
+                    let d = 1.0 - u * u;
+                    let gp = 1.0 / d;
+                    let gpp = 2.0 * u / (d * d);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Atan2(a, b) => {
+                    let y = vals[*a];
+                    let x = vals[*b];
+                    let d = y * y + x * x;
+                    let d2 = d * d;
+                    let fa = x / d;
+                    let fb = -y / d;
+                    let faa = -2.0 * y * x / d2;
+                    let fab = (y * y - x * x) / d2;
+                    let fbb = 2.0 * y * x / d2;
+                    adj[*a] += w * fa;
+                    adj[*b] += w * fb;
+                    adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
+                    adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                }
+                // Zero derivative: no first- or second-order adjoint.
+                TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => {}
+                // Route both the adjoint and its tangent into the
+                // active branch; the condition contributes nothing.
+                TapeOp::Select(c, t, e) => {
+                    let br = if vals[*c] != 0.0 { *t } else { *e };
+                    adj[br] += w;
+                    adj_dot[br] += wd;
                 }
                 TapeOp::Funcall { lib, name, args } => {
                     let call_args = funcall_to_ext_args(args, vals);
@@ -806,6 +1150,113 @@ impl Tape {
                         adj[*a] -= w * su;
                         adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
                     }
+                    TapeOp::Tan(a) => {
+                        let t = v[i];
+                        let gp = 1.0 + t * t;
+                        let gpp = 2.0 * t * gp;
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Atan(a) => {
+                        let u = v[*a];
+                        let d = 1.0 + u * u;
+                        let gp = 1.0 / d;
+                        let gpp = -2.0 * u / (d * d);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Acos(a) => {
+                        let u = v[*a];
+                        let s = 1.0 - u * u;
+                        let r = s.sqrt();
+                        let gp = -1.0 / r;
+                        let gpp = -u / (s * r);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Sinh(a) => {
+                        let u = v[*a];
+                        let gp = u.cosh();
+                        let gpp = u.sinh();
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Cosh(a) => {
+                        let u = v[*a];
+                        let gp = u.sinh();
+                        let gpp = u.cosh();
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Tanh(a) => {
+                        let t = v[i];
+                        let gp = 1.0 - t * t;
+                        let gpp = -2.0 * t * gp;
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Asin(a) => {
+                        let u = v[*a];
+                        let s = 1.0 - u * u;
+                        let r = s.sqrt();
+                        let gp = 1.0 / r;
+                        let gpp = u / (s * r);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Acosh(a) => {
+                        let u = v[*a];
+                        let s = u * u - 1.0;
+                        let r = s.sqrt();
+                        let gp = 1.0 / r;
+                        let gpp = -u / (s * r);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Asinh(a) => {
+                        let u = v[*a];
+                        let s = u * u + 1.0;
+                        let r = s.sqrt();
+                        let gp = 1.0 / r;
+                        let gpp = -u / (s * r);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Atanh(a) => {
+                        let u = v[*a];
+                        let d = 1.0 - u * u;
+                        let gp = 1.0 / d;
+                        let gpp = 2.0 * u / (d * d);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
+                    TapeOp::Atan2(a, b) => {
+                        let y = v[*a];
+                        let x = v[*b];
+                        let d = y * y + x * x;
+                        let d2 = d * d;
+                        let fa = x / d;
+                        let fb = -y / d;
+                        let faa = -2.0 * y * x / d2;
+                        let fab = (y * y - x * x) / d2;
+                        let fbb = 2.0 * y * x / d2;
+                        adj[*a] += w * fa;
+                        adj[*b] += w * fb;
+                        adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
+                        adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                    }
+                    // Zero derivative: no first- or second-order adjoint.
+                    TapeOp::Cmp(_, _, _)
+                    | TapeOp::And(_, _)
+                    | TapeOp::Or(_, _)
+                    | TapeOp::Not(_) => {}
+                    // Route adjoint and its tangent into the active
+                    // branch only; the condition contributes nothing.
+                    TapeOp::Select(c, t, e) => {
+                        let br = if v[*c] != 0.0 { *t } else { *e };
+                        adj[br] += w;
+                        adj_dot[br] += wd;
+                    }
                     TapeOp::Funcall { lib, name, args } => {
                         let call_args = funcall_to_ext_args(args, &v);
                         let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
@@ -896,10 +1347,44 @@ impl Tape {
                 | TapeOp::Log(a)
                 | TapeOp::Log10(a)
                 | TapeOp::Sin(a)
-                | TapeOp::Cos(a) => {
+                | TapeOp::Cos(a)
+                | TapeOp::Tan(a)
+                | TapeOp::Atan(a)
+                | TapeOp::Acos(a)
+                | TapeOp::Sinh(a)
+                | TapeOp::Cosh(a)
+                | TapeOp::Tanh(a)
+                | TapeOp::Asin(a)
+                | TapeOp::Acosh(a)
+                | TapeOp::Asinh(a)
+                | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], &mut pairs);
                     var_sets[*a].clone()
                 }
+                // atan2(y, x) is nonlinear in both operands with a full
+                // 2×2 second-derivative block; the structural superset is
+                // every self/cross pair within the combined operand set.
+                TapeOp::Atan2(a, b) => {
+                    let combined: BTreeSet<usize> =
+                        var_sets[*a].union(&var_sets[*b]).copied().collect();
+                    emit_self(&combined, &mut pairs);
+                    combined
+                }
+                // Comparisons / logical connectives are piecewise
+                // constant: identically-zero derivative, so they
+                // introduce no second-derivative pairs and carry no
+                // variable dependence downstream (their result is a
+                // constant as far as AD is concerned).
+                TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => {
+                    BTreeSet::new()
+                }
+                // Select passes through the active branch's value with
+                // unit derivative, so it emits no pairs of its own; its
+                // dependence set is the union of *both* branches
+                // (either may become active as x varies — conservative
+                // and correct for a structural superset). The condition
+                // contributes no derivative and is excluded.
+                TapeOp::Select(_c, t, e) => var_sets[*t].union(&var_sets[*e]).copied().collect(),
                 TapeOp::Funcall { args, .. } => {
                     let mut combined: BTreeSet<usize> = BTreeSet::new();
                     for arg in args {
@@ -960,6 +1445,7 @@ fn build_recursive(
                 BinOp::Mul => TapeOp::Mul(l, r),
                 BinOp::Div => TapeOp::Div(l, r),
                 BinOp::Pow => TapeOp::Pow(l, r),
+                BinOp::Atan2 => TapeOp::Atan2(l, r),
             });
             idx
         }
@@ -975,6 +1461,16 @@ fn build_recursive(
                 UnaryOp::Abs => TapeOp::Abs(v),
                 UnaryOp::Sin => TapeOp::Sin(v),
                 UnaryOp::Cos => TapeOp::Cos(v),
+                UnaryOp::Tan => TapeOp::Tan(v),
+                UnaryOp::Atan => TapeOp::Atan(v),
+                UnaryOp::Acos => TapeOp::Acos(v),
+                UnaryOp::Sinh => TapeOp::Sinh(v),
+                UnaryOp::Cosh => TapeOp::Cosh(v),
+                UnaryOp::Tanh => TapeOp::Tanh(v),
+                UnaryOp::Asin => TapeOp::Asin(v),
+                UnaryOp::Acosh => TapeOp::Acosh(v),
+                UnaryOp::Asinh => TapeOp::Asinh(v),
+                UnaryOp::Atanh => TapeOp::Atanh(v),
             });
             idx
         }
@@ -1008,6 +1504,41 @@ fn build_recursive(
                 cache.insert(key, idx);
                 idx
             }
+        }
+        Expr::Compare(op, a, b) => {
+            let l = build_recursive(a, ops, cache, resolver);
+            let r = build_recursive(b, ops, cache, resolver);
+            let idx = ops.len();
+            ops.push(TapeOp::Cmp(*op, l, r));
+            idx
+        }
+        Expr::And(a, b) => {
+            let l = build_recursive(a, ops, cache, resolver);
+            let r = build_recursive(b, ops, cache, resolver);
+            let idx = ops.len();
+            ops.push(TapeOp::And(l, r));
+            idx
+        }
+        Expr::Or(a, b) => {
+            let l = build_recursive(a, ops, cache, resolver);
+            let r = build_recursive(b, ops, cache, resolver);
+            let idx = ops.len();
+            ops.push(TapeOp::Or(l, r));
+            idx
+        }
+        Expr::Not(a) => {
+            let v = build_recursive(a, ops, cache, resolver);
+            let idx = ops.len();
+            ops.push(TapeOp::Not(v));
+            idx
+        }
+        Expr::Cond { cond, then_, else_ } => {
+            let c = build_recursive(cond, ops, cache, resolver);
+            let t = build_recursive(then_, ops, cache, resolver);
+            let e = build_recursive(else_, ops, cache, resolver);
+            let idx = ops.len();
+            ops.push(TapeOp::Select(c, t, e));
+            idx
         }
         Expr::Funcall { id, args } => {
             let (lib, name) = resolver
@@ -1508,6 +2039,16 @@ fn count_cse_appearances(
                 count_cse_appearances(a, seen_in_root, counts);
             }
         }
+        Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            count_cse_appearances(a, seen_in_root, counts);
+            count_cse_appearances(b, seen_in_root, counts);
+        }
+        Expr::Not(a) => count_cse_appearances(a, seen_in_root, counts),
+        Expr::Cond { cond, then_, else_ } => {
+            count_cse_appearances(cond, seen_in_root, counts);
+            count_cse_appearances(then_, seen_in_root, counts);
+            count_cse_appearances(else_, seen_in_root, counts);
+        }
         Expr::Cse(body) => {
             let key = Rc::as_ptr(body) as *const Expr;
             if seen_in_root.insert(key) {
@@ -1574,6 +2115,7 @@ fn build_into_summand(
                 BinOp::Mul => TapeOp::Mul(l, r),
                 BinOp::Div => TapeOp::Div(l, r),
                 BinOp::Pow => TapeOp::Pow(l, r),
+                BinOp::Atan2 => TapeOp::Atan2(l, r),
             }));
             i
         }
@@ -1589,6 +2131,16 @@ fn build_into_summand(
                 UnaryOp::Abs => TapeOp::Abs(v),
                 UnaryOp::Sin => TapeOp::Sin(v),
                 UnaryOp::Cos => TapeOp::Cos(v),
+                UnaryOp::Tan => TapeOp::Tan(v),
+                UnaryOp::Atan => TapeOp::Atan(v),
+                UnaryOp::Acos => TapeOp::Acos(v),
+                UnaryOp::Sinh => TapeOp::Sinh(v),
+                UnaryOp::Cosh => TapeOp::Cosh(v),
+                UnaryOp::Tanh => TapeOp::Tanh(v),
+                UnaryOp::Asin => TapeOp::Asin(v),
+                UnaryOp::Acosh => TapeOp::Acosh(v),
+                UnaryOp::Asinh => TapeOp::Asinh(v),
+                UnaryOp::Atanh => TapeOp::Atanh(v),
             }));
             i
         }
@@ -1638,6 +2190,17 @@ fn build_into_summand(
                 local_cache.insert(key, li);
                 li
             }
+        }
+        Expr::Compare(_, _, _)
+        | Expr::And(_, _)
+        | Expr::Or(_, _)
+        | Expr::Not(_)
+        | Expr::Cond { .. } => {
+            panic!(
+                "HybridTape: conditional / logical opcodes (comparisons, AND/OR/NOT, \
+                 if-then-else) are not supported on the hybrid (partial-separability) \
+                 tape path. Build with Tape::build_with_externals instead."
+            );
         }
         Expr::Funcall { .. } => {
             panic!(
@@ -1825,7 +2388,8 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Sub(a, b)
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
-            | TapeOp::Pow(a, b) => out[*a].union(&out[*b]).copied().collect(),
+            | TapeOp::Pow(a, b)
+            | TapeOp::Atan2(a, b) => out[*a].union(&out[*b]).copied().collect(),
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
             | TapeOp::Sqrt(a)
@@ -1833,7 +2397,25 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Log(a)
             | TapeOp::Log10(a)
             | TapeOp::Sin(a)
-            | TapeOp::Cos(a) => out[*a].clone(),
+            | TapeOp::Cos(a)
+            | TapeOp::Tan(a)
+            | TapeOp::Atan(a)
+            | TapeOp::Acos(a)
+            | TapeOp::Sinh(a)
+            | TapeOp::Cosh(a)
+            | TapeOp::Tanh(a)
+            | TapeOp::Asin(a)
+            | TapeOp::Acosh(a)
+            | TapeOp::Asinh(a)
+            | TapeOp::Atanh(a) => out[*a].clone(),
+            TapeOp::Cmp(_, _, _)
+            | TapeOp::And(_, _)
+            | TapeOp::Or(_, _)
+            | TapeOp::Not(_)
+            | TapeOp::Select(_, _, _) => unreachable!(
+                "HybridTape prelude cannot contain conditional / logical TapeOps; \
+                 build_into_summand panics on those Expr variants."
+            ),
             TapeOp::Funcall { .. } => unreachable!(
                 "HybridTape prelude cannot contain TapeOp::Funcall; \
                  build_into_summand panics on Expr::Funcall."
@@ -1895,7 +2477,7 @@ fn summand_sparsity(
                     emit_self(&var_sets[*b], pairs);
                     var_sets[*a].union(&var_sets[*b]).copied().collect()
                 }
-                TapeOp::Pow(a, b) => {
+                TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) => {
                     let combined: BTreeSet<usize> =
                         var_sets[*a].union(&var_sets[*b]).copied().collect();
                     emit_self(&combined, pairs);
@@ -1906,10 +2488,28 @@ fn summand_sparsity(
                 | TapeOp::Log(a)
                 | TapeOp::Log10(a)
                 | TapeOp::Sin(a)
-                | TapeOp::Cos(a) => {
+                | TapeOp::Cos(a)
+                | TapeOp::Tan(a)
+                | TapeOp::Atan(a)
+                | TapeOp::Acos(a)
+                | TapeOp::Sinh(a)
+                | TapeOp::Cosh(a)
+                | TapeOp::Tanh(a)
+                | TapeOp::Asin(a)
+                | TapeOp::Acosh(a)
+                | TapeOp::Asinh(a)
+                | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], pairs);
                     var_sets[*a].clone()
                 }
+                TapeOp::Cmp(_, _, _)
+                | TapeOp::And(_, _)
+                | TapeOp::Or(_, _)
+                | TapeOp::Not(_)
+                | TapeOp::Select(_, _, _) => unreachable!(
+                    "HybridTape summand cannot contain conditional / logical TapeOps; \
+                     build_into_summand panics on those Expr variants."
+                ),
                 TapeOp::Funcall { .. } => unreachable!(
                     "HybridTape summand cannot contain TapeOp::Funcall; \
                      build_into_summand panics on Expr::Funcall."
@@ -1930,7 +2530,8 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Sub(a, b)
         | TapeOp::Mul(a, b)
         | TapeOp::Div(a, b)
-        | TapeOp::Pow(a, b) => (Some(*a), Some(*b)),
+        | TapeOp::Pow(a, b)
+        | TapeOp::Atan2(a, b) => (Some(*a), Some(*b)),
         TapeOp::Neg(a)
         | TapeOp::Abs(a)
         | TapeOp::Sqrt(a)
@@ -1938,7 +2539,28 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Log(a)
         | TapeOp::Log10(a)
         | TapeOp::Sin(a)
-        | TapeOp::Cos(a) => (Some(*a), None),
+        | TapeOp::Cos(a)
+        | TapeOp::Tan(a)
+        | TapeOp::Atan(a)
+        | TapeOp::Acos(a)
+        | TapeOp::Sinh(a)
+        | TapeOp::Cosh(a)
+        | TapeOp::Tanh(a)
+        | TapeOp::Asin(a)
+        | TapeOp::Acosh(a)
+        | TapeOp::Asinh(a)
+        | TapeOp::Atanh(a) => (Some(*a), None),
+        // Conditional / logical TapeOps never reach the HybridTape
+        // operand-walk (build_into_summand rejects them). Cmp/And/Or
+        // have two operands; Not has one; Select's three can't be
+        // expressed in this two-slot shape, so it would be a bug to
+        // see it here.
+        TapeOp::Cmp(_, a, b) | TapeOp::And(a, b) | TapeOp::Or(a, b) => (Some(*a), Some(*b)),
+        TapeOp::Not(a) => (Some(*a), None),
+        TapeOp::Select(_, _, _) => unreachable!(
+            "op_operands: TapeOp::Select has three operands and is unsupported on \
+             the HybridTape path"
+        ),
         TapeOp::Funcall { .. } => (None, None),
     }
 }
@@ -1973,6 +2595,25 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
         TapeOp::Log10(a) => vals[*a].log10(),
         TapeOp::Sin(a) => vals[*a].sin(),
         TapeOp::Cos(a) => vals[*a].cos(),
+        TapeOp::Tan(a) => vals[*a].tan(),
+        TapeOp::Atan(a) => vals[*a].atan(),
+        TapeOp::Acos(a) => vals[*a].acos(),
+        TapeOp::Sinh(a) => vals[*a].sinh(),
+        TapeOp::Cosh(a) => vals[*a].cosh(),
+        TapeOp::Tanh(a) => vals[*a].tanh(),
+        TapeOp::Asin(a) => vals[*a].asin(),
+        TapeOp::Acosh(a) => vals[*a].acosh(),
+        TapeOp::Asinh(a) => vals[*a].asinh(),
+        TapeOp::Atanh(a) => vals[*a].atanh(),
+        TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
+        TapeOp::Cmp(_, _, _)
+        | TapeOp::And(_, _)
+        | TapeOp::Or(_, _)
+        | TapeOp::Not(_)
+        | TapeOp::Select(_, _, _) => panic!(
+            "GlobalTape free-function kernels do not implement conditional / logical \
+             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+        ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib
@@ -2048,6 +2689,59 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
         TapeOp::Cos(j) => {
             adj[*j] -= a * vals[*j].sin();
         }
+        TapeOp::Tan(j) => {
+            let t = vals[i];
+            adj[*j] += a * (1.0 + t * t);
+        }
+        TapeOp::Atan(j) => {
+            let u = vals[*j];
+            adj[*j] += a / (1.0 + u * u);
+        }
+        TapeOp::Acos(j) => {
+            let u = vals[*j];
+            adj[*j] -= a / (1.0 - u * u).sqrt();
+        }
+        TapeOp::Sinh(j) => {
+            adj[*j] += a * vals[*j].cosh();
+        }
+        TapeOp::Cosh(j) => {
+            adj[*j] += a * vals[*j].sinh();
+        }
+        TapeOp::Tanh(j) => {
+            let t = vals[i];
+            adj[*j] += a * (1.0 - t * t);
+        }
+        TapeOp::Asin(j) => {
+            let u = vals[*j];
+            adj[*j] += a / (1.0 - u * u).sqrt();
+        }
+        TapeOp::Acosh(j) => {
+            let u = vals[*j];
+            adj[*j] += a / (u * u - 1.0).sqrt();
+        }
+        TapeOp::Asinh(j) => {
+            let u = vals[*j];
+            adj[*j] += a / (u * u + 1.0).sqrt();
+        }
+        TapeOp::Atanh(j) => {
+            let u = vals[*j];
+            adj[*j] += a / (1.0 - u * u);
+        }
+        TapeOp::Atan2(l, r) => {
+            let y = vals[*l];
+            let x = vals[*r];
+            let d = y * y + x * x;
+            adj[*l] += a * (x / d);
+            adj[*r] += a * (-y / d);
+        }
+        TapeOp::Cmp(_, _, _)
+        | TapeOp::And(_, _)
+        | TapeOp::Or(_, _)
+        | TapeOp::Not(_)
+        | TapeOp::Select(_, _, _) => panic!(
+            "GlobalTape free-function kernels do not implement conditional / logical \
+             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+        ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib
@@ -2120,6 +2814,54 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
         TapeOp::Log10(a) => dot[*a] / (vals[*a] * std::f64::consts::LN_10),
         TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
         TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
+        TapeOp::Tan(a) => {
+            let t = vals[i];
+            dot[*a] * (1.0 + t * t)
+        }
+        TapeOp::Atan(a) => {
+            let u = vals[*a];
+            dot[*a] / (1.0 + u * u)
+        }
+        TapeOp::Acos(a) => {
+            let u = vals[*a];
+            -dot[*a] / (1.0 - u * u).sqrt()
+        }
+        TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
+        TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
+        TapeOp::Tanh(a) => {
+            let t = vals[i];
+            dot[*a] * (1.0 - t * t)
+        }
+        TapeOp::Asin(a) => {
+            let u = vals[*a];
+            dot[*a] / (1.0 - u * u).sqrt()
+        }
+        TapeOp::Acosh(a) => {
+            let u = vals[*a];
+            dot[*a] / (u * u - 1.0).sqrt()
+        }
+        TapeOp::Asinh(a) => {
+            let u = vals[*a];
+            dot[*a] / (u * u + 1.0).sqrt()
+        }
+        TapeOp::Atanh(a) => {
+            let u = vals[*a];
+            dot[*a] / (1.0 - u * u)
+        }
+        TapeOp::Atan2(a, b) => {
+            let y = vals[*a];
+            let x = vals[*b];
+            let d = y * y + x * x;
+            (x * dot[*a] - y * dot[*b]) / d
+        }
+        TapeOp::Cmp(_, _, _)
+        | TapeOp::And(_, _)
+        | TapeOp::Or(_, _)
+        | TapeOp::Not(_)
+        | TapeOp::Select(_, _, _) => panic!(
+            "GlobalTape free-function kernels do not implement conditional / logical \
+             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+        ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib
@@ -2275,6 +3017,109 @@ fn ror_step(
             adj[*a] -= w * su;
             adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
         }
+        TapeOp::Tan(a) => {
+            let t = vals[i];
+            let gp = 1.0 + t * t;
+            let gpp = 2.0 * t * gp;
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Atan(a) => {
+            let u = vals[*a];
+            let d = 1.0 + u * u;
+            let gp = 1.0 / d;
+            let gpp = -2.0 * u / (d * d);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Acos(a) => {
+            let u = vals[*a];
+            let s = 1.0 - u * u;
+            let r = s.sqrt();
+            let gp = -1.0 / r;
+            let gpp = -u / (s * r);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Sinh(a) => {
+            let u = vals[*a];
+            let gp = u.cosh();
+            let gpp = vals[i]; // sinh(u)
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Cosh(a) => {
+            let u = vals[*a];
+            let gp = u.sinh();
+            let gpp = vals[i]; // cosh(u)
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Tanh(a) => {
+            let t = vals[i];
+            let gp = 1.0 - t * t;
+            let gpp = -2.0 * t * gp;
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Asin(a) => {
+            let u = vals[*a];
+            let s = 1.0 - u * u;
+            let r = s.sqrt();
+            let gp = 1.0 / r;
+            let gpp = u / (s * r);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Acosh(a) => {
+            let u = vals[*a];
+            let s = u * u - 1.0;
+            let r = s.sqrt();
+            let gp = 1.0 / r;
+            let gpp = -u / (s * r);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Asinh(a) => {
+            let u = vals[*a];
+            let s = u * u + 1.0;
+            let r = s.sqrt();
+            let gp = 1.0 / r;
+            let gpp = -u / (s * r);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Atanh(a) => {
+            let u = vals[*a];
+            let d = 1.0 - u * u;
+            let gp = 1.0 / d;
+            let gpp = 2.0 * u / (d * d);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
+        TapeOp::Atan2(a, b) => {
+            let y = vals[*a];
+            let x = vals[*b];
+            let d = y * y + x * x;
+            let d2 = d * d;
+            let fa = x / d;
+            let fb = -y / d;
+            let faa = -2.0 * x * y / d2;
+            let fab = (y * y - x * x) / d2;
+            let fbb = 2.0 * x * y / d2;
+            adj[*a] += w * fa;
+            adj[*b] += w * fb;
+            adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
+            adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+        }
+        TapeOp::Cmp(_, _, _)
+        | TapeOp::And(_, _)
+        | TapeOp::Or(_, _)
+        | TapeOp::Not(_)
+        | TapeOp::Select(_, _, _) => panic!(
+            "GlobalTape free-function kernels do not implement conditional / logical \
+             TapeOps; use the Tape (build_with_externals) interpreter path instead."
+        ),
         TapeOp::Funcall { lib, name, args } => {
             let call_args = funcall_to_ext_args(args, vals);
             let res = lib.eval(name, &call_args, true, true).unwrap_or_else(|e| {
@@ -2356,7 +3201,7 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
                 emit_self(&var_sets[*b], &mut pairs);
                 var_sets[*a].union(&var_sets[*b]).copied().collect()
             }
-            TapeOp::Pow(a, b) => {
+            TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) => {
                 let combined: BTreeSet<usize> =
                     var_sets[*a].union(&var_sets[*b]).copied().collect();
                 emit_self(&combined, &mut pairs);
@@ -2367,7 +3212,17 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             | TapeOp::Log(a)
             | TapeOp::Log10(a)
             | TapeOp::Sin(a)
-            | TapeOp::Cos(a) => {
+            | TapeOp::Cos(a)
+            | TapeOp::Tan(a)
+            | TapeOp::Atan(a)
+            | TapeOp::Acos(a)
+            | TapeOp::Sinh(a)
+            | TapeOp::Cosh(a)
+            | TapeOp::Tanh(a)
+            | TapeOp::Asin(a)
+            | TapeOp::Acosh(a)
+            | TapeOp::Asinh(a)
+            | TapeOp::Atanh(a) => {
                 emit_self(&var_sets[*a], &mut pairs);
                 var_sets[*a].clone()
             }
@@ -2382,6 +3237,16 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
                 }
                 emit_self(&combined, &mut pairs);
                 combined
+            }
+            TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => {
+                // Comparisons / logical ops have identically-zero derivative, so
+                // they contribute no Hessian structure.
+                BTreeSet::new()
+            }
+            TapeOp::Select(_, t, e) => {
+                // Either branch may be active; the structural superset is the
+                // union of both branches' variable sets.
+                var_sets[*t].union(&var_sets[*e]).copied().collect()
             }
         };
         var_sets.push(vset);
@@ -2413,6 +3278,16 @@ mod tests {
     }
     fn unary(op: UnaryOp, a: Expr) -> Expr {
         Expr::Unary(op, Box::new(a))
+    }
+    fn cmp(op: CmpOp, a: Expr, b: Expr) -> Expr {
+        Expr::Compare(op, Box::new(a), Box::new(b))
+    }
+    fn cond(c: Expr, t: Expr, e: Expr) -> Expr {
+        Expr::Cond {
+            cond: Box::new(c),
+            then_: Box::new(t),
+            else_: Box::new(e),
+        }
     }
 
     #[test]
@@ -2542,11 +3417,180 @@ mod tests {
     }
 
     #[test]
+    fn inverse_trig_grad_and_hessian_match_fd() {
+        // f = tan(x0) + atan(x1) + acos(x2) + x0*x1
+        // Point chosen so every op is in its smooth domain:
+        // tan away from pi/2, acos arg in (-1, 1).
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Tan, var(0)),
+            unary(UnaryOp::Atan, var(1)),
+            unary(UnaryOp::Acos, var(2)),
+            mul(var(0), var(1)),
+        ]);
+        let t = Tape::build(&e);
+        let x = [0.5, 1.3, 0.3];
+
+        // Gradient vs central finite difference of the value. This
+        // pins the first derivatives independently of the Hessian
+        // (fd_check only ties the Hessian to the AD gradient).
+        let mut g = vec![0.0; 3];
+        t.gradient_seed(&x, 1.0, &mut g);
+        for j in 0..3 {
+            let h = (1e-7_f64).max(x[j].abs() * 1e-7);
+            let mut xp = x;
+            let mut xm = x;
+            xp[j] += h;
+            xm[j] -= h;
+            let fd = (t.eval(&xp) - t.eval(&xm)) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (g[j] - fd).abs() / scale < 1e-5,
+                "grad[{j}]: AD={:.6e} FD={:.6e}",
+                g[j],
+                fd
+            );
+        }
+
+        // Hessian (forward-over-reverse) vs FD of the gradient.
+        fd_check(&t, &x, 3, 1e-5);
+    }
+
+    /// Shared helper: check AD gradient vs central FD of the value at
+    /// `x`, then the Hessian via `fd_check`.
+    fn grad_and_hess_match_fd(e: &Expr, x: &[f64], tol: f64) {
+        let n = x.len();
+        let t = Tape::build(e);
+        let mut g = vec![0.0; n];
+        t.gradient_seed(x, 1.0, &mut g);
+        for j in 0..n {
+            let h = (1e-7_f64).max(x[j].abs() * 1e-7);
+            let mut xp = x.to_vec();
+            let mut xm = x.to_vec();
+            xp[j] += h;
+            xm[j] -= h;
+            let fd = (t.eval(&xp) - t.eval(&xm)) / (2.0 * h);
+            let scale = fd.abs().max(1.0);
+            assert!(
+                (g[j] - fd).abs() / scale < tol,
+                "grad[{j}]: AD={:.6e} FD={:.6e}",
+                g[j],
+                fd
+            );
+        }
+        fd_check(&t, x, n, tol);
+    }
+
+    #[test]
+    fn hyperbolic_grad_and_hessian_match_fd() {
+        // f = sinh(x0) + cosh(x1) + tanh(x2) + asinh(x3) + x0*x1 + x2*x3
+        // sinh/cosh/tanh/asinh are smooth on all of R.
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Sinh, var(0)),
+            unary(UnaryOp::Cosh, var(1)),
+            unary(UnaryOp::Tanh, var(2)),
+            unary(UnaryOp::Asinh, var(3)),
+            mul(var(0), var(1)),
+            mul(var(2), var(3)),
+        ]);
+        grad_and_hess_match_fd(&e, &[0.5, 0.7, 0.3, 1.1], 1e-5);
+    }
+
+    #[test]
+    fn restricted_inverse_grad_and_hessian_match_fd() {
+        // f = asin(x0) + acosh(x1) + atanh(x2) + x0*x2
+        // Point chosen in each op's smooth domain:
+        // asin/atanh need |arg| < 1; acosh needs arg > 1.
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Asin, var(0)),
+            unary(UnaryOp::Acosh, var(1)),
+            unary(UnaryOp::Atanh, var(2)),
+            mul(var(0), var(2)),
+        ]);
+        grad_and_hess_match_fd(&e, &[0.4, 1.8, 0.3], 1e-5);
+    }
+
+    #[test]
+    fn atan2_grad_and_hessian_match_fd() {
+        // f = atan2(x0, x1) + x0*x1, away from the origin.
+        let atan2 = |a: Expr, b: Expr| Expr::Binary(BinOp::Atan2, Box::new(a), Box::new(b));
+        let e = Expr::Sum(vec![atan2(var(0), var(1)), mul(var(0), var(1))]);
+        grad_and_hess_match_fd(&e, &[1.2, 0.7], 1e-5);
+    }
+
+    #[test]
     fn hessian_division_matches_fd() {
         // f = x0/x1 + cos(x0)
         let e = add(div(var(0), var(1)), unary(UnaryOp::Cos, var(0)));
         let t = Tape::build(&e);
         fd_check(&t, &[0.5, 1.2], 2, 1e-5);
+    }
+
+    #[test]
+    fn conditional_value_grad_hessian_active_branch() {
+        // f = if x0 >= 1 then x0*x1 else x1^2
+        // The if-then-else differentiates only the active branch; the
+        // condition (a comparison) contributes no derivative.
+        let e = cond(
+            cmp(CmpOp::Ge, var(0), cnst(1.0)),
+            mul(var(0), var(1)),
+            pow(var(1), cnst(2.0)),
+        );
+        let t = Tape::build(&e);
+
+        // x0 = 2 (>= 1) -> "then" branch x0*x1 is active.
+        let x = [2.0, 5.0];
+        assert!((t.eval(&x) - 10.0).abs() < 1e-12);
+        let mut g = vec![0.0; 2];
+        t.gradient_seed(&x, 1.0, &mut g);
+        // d(x0*x1) = (x1, x0) = (5, 2)
+        assert!((g[0] - 5.0).abs() < 1e-10);
+        assert!((g[1] - 2.0).abs() < 1e-10);
+        // H[0,1] = 1, diagonals 0. (Stay clear of the x0 = 1 kink.)
+        fd_check(&t, &x, 2, 1e-5);
+
+        // x0 = 0 (< 1) -> "else" branch x1^2 is active; x0 drops out.
+        let x2 = [0.0, 5.0];
+        assert!((t.eval(&x2) - 25.0).abs() < 1e-12);
+        let mut g2 = vec![0.0; 2];
+        t.gradient_seed(&x2, 1.0, &mut g2);
+        assert!(g2[0].abs() < 1e-10);
+        assert!((g2[1] - 10.0).abs() < 1e-10);
+        fd_check(&t, &x2, 2, 1e-5);
+    }
+
+    #[test]
+    fn comparison_and_logical_have_zero_derivative() {
+        // f = (x0 < x1) + (x0 > 0 && x1 > 0) + !(x0 == x1)
+        // Every term is piecewise-constant in the variables, so the
+        // gradient must be identically zero away from the kinks.
+        let lt = cmp(CmpOp::Lt, var(0), var(1));
+        let and = Expr::And(
+            Box::new(cmp(CmpOp::Gt, var(0), cnst(0.0))),
+            Box::new(cmp(CmpOp::Gt, var(1), cnst(0.0))),
+        );
+        let notc = Expr::Not(Box::new(cmp(CmpOp::Eq, var(0), var(1))));
+        let e = add(add(lt, and), notc);
+        let t = Tape::build(&e);
+
+        let x = [1.0, 2.0];
+        // 1 (1<2) + 1 (both > 0) + 1 (1 != 2) = 3
+        assert!((t.eval(&x) - 3.0).abs() < 1e-12);
+        let mut g = vec![0.0; 2];
+        t.gradient_seed(&x, 1.0, &mut g);
+        assert!(g[0].abs() < 1e-12, "d/dx0 should be 0, got {}", g[0]);
+        assert!(g[1].abs() < 1e-12, "d/dx1 should be 0, got {}", g[1]);
+    }
+
+    #[test]
+    fn logical_or_value() {
+        // f = (x0 > 0 || x1 > 0)
+        let e = Expr::Or(
+            Box::new(cmp(CmpOp::Gt, var(0), cnst(0.0))),
+            Box::new(cmp(CmpOp::Gt, var(1), cnst(0.0))),
+        );
+        let t = Tape::build(&e);
+        assert!((t.eval(&[-1.0, 3.0]) - 1.0).abs() < 1e-12);
+        assert!((t.eval(&[-1.0, -3.0]) - 0.0).abs() < 1e-12);
     }
 
     /// `hessian_directional` (one forward-over-reverse pass with

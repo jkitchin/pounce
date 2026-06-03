@@ -457,6 +457,27 @@ impl HessianProgram {
                     "HessianProgram path does not support AMPL external functions; \
                      use the Tape (build_with_externals) path instead."
                 ),
+                TapeOp::Tan(_)
+                | TapeOp::Atan(_)
+                | TapeOp::Acos(_)
+                | TapeOp::Sinh(_)
+                | TapeOp::Cosh(_)
+                | TapeOp::Tanh(_)
+                | TapeOp::Asin(_)
+                | TapeOp::Acosh(_)
+                | TapeOp::Asinh(_)
+                | TapeOp::Atanh(_)
+                | TapeOp::Atan2(_, _)
+                | TapeOp::Cmp(_, _, _)
+                | TapeOp::And(_, _)
+                | TapeOp::Or(_, _)
+                | TapeOp::Not(_)
+                | TapeOp::Select(_, _, _) => panic!(
+                    "HessianProgram path does not yet support tan/atan/acos, the \
+                     other transcendental opcodes, atan2, or \
+                     conditional / logical opcodes; use the Tape \
+                     (build_with_externals) interpreter path instead."
+                ),
             };
             ops.push(op);
         }
@@ -571,6 +592,27 @@ impl HessianProgram {
                     TapeOp::Funcall { .. } => panic!(
                         "HessianProgram path does not support AMPL external functions; \
                          use the Tape (build_with_externals) path instead."
+                    ),
+                    TapeOp::Tan(_)
+                    | TapeOp::Atan(_)
+                    | TapeOp::Acos(_)
+                    | TapeOp::Sinh(_)
+                    | TapeOp::Cosh(_)
+                    | TapeOp::Tanh(_)
+                    | TapeOp::Asin(_)
+                    | TapeOp::Acosh(_)
+                    | TapeOp::Asinh(_)
+                    | TapeOp::Atanh(_)
+                    | TapeOp::Atan2(_, _)
+                    | TapeOp::Cmp(_, _, _)
+                    | TapeOp::And(_, _)
+                    | TapeOp::Or(_, _)
+                    | TapeOp::Not(_)
+                    | TapeOp::Select(_, _, _) => panic!(
+                        "HessianProgram path does not yet support tan/atan/acos, the \
+                         other transcendental opcodes, atan2, or \
+                         conditional / logical opcodes; use the Tape \
+                         (build_with_externals) interpreter path instead."
                     ),
                 };
                 ops.push(dot_op);
@@ -720,6 +762,27 @@ impl HessianProgram {
                     TapeOp::Funcall { .. } => panic!(
                         "HessianProgram path does not support AMPL external functions; \
                          use the Tape (build_with_externals) path instead."
+                    ),
+                    TapeOp::Tan(_)
+                    | TapeOp::Atan(_)
+                    | TapeOp::Acos(_)
+                    | TapeOp::Sinh(_)
+                    | TapeOp::Cosh(_)
+                    | TapeOp::Tanh(_)
+                    | TapeOp::Asin(_)
+                    | TapeOp::Acosh(_)
+                    | TapeOp::Asinh(_)
+                    | TapeOp::Atanh(_)
+                    | TapeOp::Atan2(_, _)
+                    | TapeOp::Cmp(_, _, _)
+                    | TapeOp::And(_, _)
+                    | TapeOp::Or(_, _)
+                    | TapeOp::Not(_)
+                    | TapeOp::Select(_, _, _) => panic!(
+                        "HessianProgram path does not yet support tan/atan/acos, the \
+                         other transcendental opcodes, atan2, or \
+                         conditional / logical opcodes; use the Tape \
+                         (build_with_externals) interpreter path instead."
                     ),
                 };
                 ops.push(rev_op);
@@ -1178,7 +1241,8 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Sub(a, b)
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
-            | TapeOp::Pow(a, b) => {
+            | TapeOp::Pow(a, b)
+            | TapeOp::Atan2(a, b) => {
                 r[a] = true;
                 r[b] = true;
             }
@@ -1189,12 +1253,30 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Log(a)
             | TapeOp::Log10(a)
             | TapeOp::Sin(a)
-            | TapeOp::Cos(a) => {
+            | TapeOp::Cos(a)
+            | TapeOp::Tan(a)
+            | TapeOp::Atan(a)
+            | TapeOp::Acos(a)
+            | TapeOp::Sinh(a)
+            | TapeOp::Cosh(a)
+            | TapeOp::Tanh(a)
+            | TapeOp::Asin(a)
+            | TapeOp::Acosh(a)
+            | TapeOp::Asinh(a)
+            | TapeOp::Atanh(a) => {
                 r[a] = true;
             }
             TapeOp::Funcall { .. } => panic!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."
+            ),
+            TapeOp::Cmp(_, _, _)
+            | TapeOp::And(_, _)
+            | TapeOp::Or(_, _)
+            | TapeOp::Not(_)
+            | TapeOp::Select(_, _, _) => panic!(
+                "HessianProgram path does not support conditional / logical \
+                 opcodes; use the Tape (build_with_externals) path instead."
             ),
         }
     }
@@ -1216,7 +1298,8 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Sub(a, b)
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
-            | TapeOp::Pow(a, b) => d[a] || d[b],
+            | TapeOp::Pow(a, b)
+            | TapeOp::Atan2(a, b) => d[a] || d[b],
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
             | TapeOp::Sqrt(a)
@@ -1224,10 +1307,28 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Log(a)
             | TapeOp::Log10(a)
             | TapeOp::Sin(a)
-            | TapeOp::Cos(a) => d[a],
+            | TapeOp::Cos(a)
+            | TapeOp::Tan(a)
+            | TapeOp::Atan(a)
+            | TapeOp::Acos(a)
+            | TapeOp::Sinh(a)
+            | TapeOp::Cosh(a)
+            | TapeOp::Tanh(a)
+            | TapeOp::Asin(a)
+            | TapeOp::Acosh(a)
+            | TapeOp::Asinh(a)
+            | TapeOp::Atanh(a) => d[a],
             TapeOp::Funcall { .. } => panic!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."
+            ),
+            TapeOp::Cmp(_, _, _)
+            | TapeOp::And(_, _)
+            | TapeOp::Or(_, _)
+            | TapeOp::Not(_)
+            | TapeOp::Select(_, _, _) => panic!(
+                "HessianProgram path does not support conditional / logical \
+                 opcodes; use the Tape (build_with_externals) path instead."
             ),
         };
     }
