@@ -238,7 +238,7 @@ def _build_problem_obj(
             return (r, c)
 
         def hessian(self, x, lam, obj_factor):
-            H = obj_factor * _to_array(hess(x))
+            H = obj_factor * _to_array(hess(x, *args))
             r, c = np.tril_indices(n)
             return H[r, c]
 
