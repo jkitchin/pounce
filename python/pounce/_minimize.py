@@ -136,29 +136,32 @@ def _wrap_constraints(constraints, n: int):
     if isinstance(constraints, dict):
         constraints = [constraints]
 
-    funs, jacs = [], []
+    funs, jacs, cargs = [], [], []
     for c in constraints:
         kind = c["type"]
         if kind not in ("eq", "ineq"):
             raise ValueError(f"unknown constraint type {kind!r}")
         funs.append(c["fun"])
         jacs.append(c.get("jac"))
+        cargs.append(tuple(c.get("args", ())))
 
     probe = np.zeros(n)
-    sizes = [int(_to_array(fn(probe)).size) for fn in funs]
+    sizes = [int(_to_array(fn(probe, *ca)).size) for fn, ca in zip(funs, cargs)]
     m_total = int(sum(sizes))
 
     def g_combined(x):
-        return np.concatenate([_to_array(fn(x)).ravel() for fn in funs])
+        return np.concatenate(
+            [_to_array(fn(x, *ca)).ravel() for fn, ca in zip(funs, cargs)]
+        )
 
     def jac_combined(x):
         rows = []
-        for fn, jc in zip(funs, jacs):
+        for fn, jc, ca in zip(funs, jacs, cargs):
             if jc is not None:
-                rows.append(np.atleast_2d(_to_array(jc(x))))
+                rows.append(np.atleast_2d(_to_array(jc(x, *ca))))
             else:
-                m_i = _to_array(fn(x)).size
-                rows.append(_finite_diff_jac(fn, x, m_i))
+                m_i = _to_array(fn(x, *ca)).size
+                rows.append(_finite_diff_jac(lambda xx, fn=fn, ca=ca: fn(xx, *ca), x, m_i))
         return np.vstack(rows)
 
     cl = np.empty(m_total)
