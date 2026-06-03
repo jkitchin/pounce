@@ -640,7 +640,8 @@ impl PyProblem {
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
         let bff_mint = move || -> InnerBackendFactoryFactory {
-            Box::new(move || default_backend_factory(feral_cfg))
+            let feral_cfg = feral_cfg.clone();
+            Box::new(move || default_backend_factory(feral_cfg.clone()))
         };
         let resto_provider = make_default_restoration_factory_provider(
             RestoAlgorithmBuilder::new(),
@@ -834,7 +835,7 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
             // Only FERAL is wired into the wheel build; the `_choice`
             // argument is honored by the CLI build (which can route to
             // MA57) but ignored here.
-            Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+            Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
         },
     )
 }

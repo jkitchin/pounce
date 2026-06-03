@@ -579,7 +579,8 @@ pub unsafe extern "C" fn IpoptSolve(
     // second inner solve (pounce#10 Phase 3 / pounce#24).
     let feral_cfg = feral_config_from_options(info.app.options());
     let bff_mint = move || -> InnerBackendFactoryFactory {
-        Box::new(move || default_backend_factory(feral_cfg))
+        let feral_cfg = feral_cfg.clone();
+        Box::new(move || default_backend_factory(feral_cfg.clone()))
     };
     let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),

@@ -25,6 +25,7 @@ use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, Solver};
 
 /// Re-export so option-aware callers can construct a
 /// [`FeralConfig`] without taking a direct dependency on `feral`.
+pub use feral::scaling::ScalingStrategy;
 pub use feral::symbolic::OrderingMethod;
 use pounce_common::types::{Index, Number};
 use pounce_linsol::summary::LinearSolverSummary;
@@ -93,7 +94,7 @@ pub struct FeralSolverInterface {
 /// non-option callers (tests, standalone use, the env-only legacy
 /// path), [`FeralSolverInterface::new`] keeps reading the
 /// `POUNCE_FERAL_*` env vars to preserve the historic defaults.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FeralConfig {
     /// Tri-state. `None` (the pounce default) inherits whatever FERAL's
     /// `NumericParams::default()` ships with — as of FERAL Phase B
@@ -142,6 +143,19 @@ pub struct FeralConfig {
     /// `feral/src/symbolic/mod.rs::OrderingMethod` for the
     /// per-variant rationale.
     pub ordering: OrderingMethod,
+    /// Diagonal scaling strategy passed to
+    /// [`feral::Solver::with_scaling`]. Default
+    /// [`ScalingStrategy::Auto`]: FERAL's adaptive shape-based router
+    /// picks `Mc64Symmetric` on arrow-KKT signatures and `InfNorm`
+    /// otherwise. Override via the `feral_scaling` OptionsList option
+    /// or the `POUNCE_FERAL_SCALING` env var. The opt-in choices are
+    /// `infnorm` (Knight-Ruiz ∞-norm equilibration), `mc64`
+    /// (MC64-style symmetric matching — MUMPS SYM=2 / SSIDS default,
+    /// recovers exact inertia on some ill-conditioned KKTs where
+    /// `Auto` mis-pivots; see feral#65), and `identity` (no-op, for
+    /// regression testing). See `feral/src/scaling/mod.rs::
+    /// ScalingStrategy` for the per-variant rationale.
+    pub scaling: ScalingStrategy,
 }
 
 impl Default for FeralConfig {
@@ -156,6 +170,7 @@ impl Default for FeralConfig {
             singular_pivot_floor: 1e-20,
             pivtol: 1e-8,
             ordering: OrderingMethod::Auto,
+            scaling: ScalingStrategy::Auto,
         }
     }
 }
@@ -163,9 +178,10 @@ impl Default for FeralConfig {
 impl FeralConfig {
     /// Read the knobs from `POUNCE_FERAL_CASCADE_BREAK`,
     /// `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE`,
-    /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR`, `POUNCE_FERAL_ORDERING`
-    /// environment variables. Used as a fallback when the IPM has no
-    /// `OptionsList` to consult (tests, legacy callers).
+    /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR`, `POUNCE_FERAL_ORDERING`,
+    /// `POUNCE_FERAL_SCALING` environment variables. Used as a fallback
+    /// when the IPM has no `OptionsList` to consult (tests, legacy
+    /// callers).
     pub fn from_env() -> Self {
         Self {
             cascade_break: match std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref() {
@@ -194,6 +210,11 @@ impl FeralConfig {
                 .as_deref()
                 .and_then(parse_ordering_method)
                 .unwrap_or(OrderingMethod::Auto),
+            scaling: std::env::var("POUNCE_FERAL_SCALING")
+                .ok()
+                .as_deref()
+                .and_then(parse_scaling_strategy)
+                .unwrap_or(ScalingStrategy::Auto),
         }
     }
 }
@@ -211,6 +232,22 @@ pub fn parse_ordering_method(s: &str) -> Option<OrderingMethod> {
         "metis" | "metis_nd" | "metisnd" => Some(OrderingMethod::MetisND),
         "scotch" | "scotch_nd" | "scotchnd" => Some(OrderingMethod::ScotchND),
         "kahip" | "kahip_nd" | "kahipnd" => Some(OrderingMethod::KahipND),
+        _ => None,
+    }
+}
+
+/// Parse a case-insensitive scaling tag (the values accepted by the
+/// `feral_scaling` OptionsList option and the `POUNCE_FERAL_SCALING`
+/// env var) into the corresponding [`ScalingStrategy`]. Returns `None`
+/// for unrecognized tags (and for `external`, which carries a vector
+/// that cannot be supplied via a string option) so the caller can fall
+/// back to the default.
+pub fn parse_scaling_strategy(s: &str) -> Option<ScalingStrategy> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(ScalingStrategy::Auto),
+        "infnorm" | "inf_norm" | "inf" => Some(ScalingStrategy::InfNorm),
+        "mc64" | "mc64symmetric" | "mc64_symmetric" => Some(ScalingStrategy::Mc64Symmetric),
+        "identity" | "none" => Some(ScalingStrategy::Identity),
         _ => None,
     }
 }
@@ -297,6 +334,12 @@ impl FeralSolverInterface {
         // pattern features. Override via the `feral_ordering`
         // OptionsList option or `POUNCE_FERAL_ORDERING` env var.
         solver = solver.with_ordering(cfg.ordering);
+        // Diagonal scaling. `ScalingStrategy::Auto` is pounce's default
+        // — FERAL's adaptive shape-based router. Override via the
+        // `feral_scaling` OptionsList option or `POUNCE_FERAL_SCALING`
+        // env var (e.g. `mc64` recovers exact inertia on some
+        // ill-conditioned KKTs where `Auto` mis-pivots — feral#65).
+        solver = solver.with_scaling(cfg.scaling.clone());
         Self {
             solver,
             initialized: false,
@@ -879,6 +922,80 @@ mod tests {
         assert!((rhs[1] - 1.0).abs() < 1e-10);
         assert!((rhs[2] - 7.0 / 5.0).abs() < 1e-10);
         assert!((rhs[3] - 6.0 / 5.0).abs() < 1e-10);
+    }
+
+    /// `parse_scaling_strategy` accepts every documented tag (in either
+    /// case / with aliases) and rejects unknown ones. `external` is not
+    /// reachable from a string tag (it carries a vector).
+    #[test]
+    fn parse_scaling_strategy_accepts_documented_tags() {
+        use ScalingStrategy::*;
+        let cases: &[(&str, ScalingStrategy)] = &[
+            ("auto", Auto),
+            ("AUTO", Auto),
+            ("infnorm", InfNorm),
+            ("inf_norm", InfNorm),
+            ("inf", InfNorm),
+            ("mc64", Mc64Symmetric),
+            ("MC64", Mc64Symmetric),
+            ("mc64symmetric", Mc64Symmetric),
+            ("mc64_symmetric", Mc64Symmetric),
+            ("identity", Identity),
+            ("none", Identity),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(
+                parse_scaling_strategy(tag),
+                Some(expected.clone()),
+                "tag {tag:?} should parse"
+            );
+        }
+        assert_eq!(parse_scaling_strategy("external"), None);
+        assert_eq!(parse_scaling_strategy("not_a_strategy"), None);
+        assert_eq!(parse_scaling_strategy(""), None);
+    }
+
+    /// The pounce default is FERAL's default — `ScalingStrategy::Auto` —
+    /// so behaviour is unchanged when the option is left unset.
+    #[test]
+    fn default_scaling_is_auto() {
+        assert_eq!(FeralConfig::default().scaling, ScalingStrategy::Auto);
+    }
+
+    /// `with_config` actually propagates the configured scaling strategy
+    /// into the underlying FERAL solver (and each variant still
+    /// constructs + factors a tiny SPD system).
+    #[test]
+    fn every_scaling_propagates_and_factors() {
+        use ScalingStrategy::*;
+        for strategy in [Auto, InfNorm, Mc64Symmetric, Identity] {
+            let cfg = FeralConfig {
+                scaling: strategy.clone(),
+                ..FeralConfig::default()
+            };
+            let mut s = FeralSolverInterface::with_config(cfg);
+            assert_eq!(
+                s.solver.scaling_strategy(),
+                &strategy,
+                "configured strategy should reach the solver for {strategy:?}"
+            );
+            let irn: [Index; 3] = [1, 2, 2];
+            let jcn: [Index; 3] = [1, 1, 2];
+            assert_eq!(
+                s.initialize_structure(2, 3, &irn, &jcn),
+                ESymSolverStatus::Success,
+                "structure init for {strategy:?}"
+            );
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success,
+                "solve for {strategy:?}"
+            );
+            assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for {strategy:?}");
+            assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for {strategy:?}");
+        }
     }
 
     /// `parse_ordering_method` accepts every documented tag (in either

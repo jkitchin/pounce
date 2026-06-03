@@ -167,7 +167,8 @@ pub fn main() -> ExitCode {
     // panic with "restoration factory invoked more than once" on their
     // second inner solve — see pounce#10 Phase 3 / pounce#24.
     let bff_mint = move || -> InnerBackendFactoryFactory {
-        Box::new(move || default_backend_factory(feral_cfg))
+        let feral_cfg = feral_cfg.clone();
+        Box::new(move || default_backend_factory(feral_cfg.clone()))
     };
     // Hand the inner IPM a builder mirroring the outer options so its
     // `mu_strategy` (adaptive vs. monotone) inherits the user's choice —
@@ -932,7 +933,7 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
                 LinearSolverChoice::Feral => {
-                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
                 }
                 LinearSolverChoice::Ma57 => {
                     #[cfg(feature = "ma57")]
@@ -941,7 +942,7 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
                     }
                     #[cfg(not(feature = "ma57"))]
                     {
-                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
                     }
                 }
             }

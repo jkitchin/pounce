@@ -1922,7 +1922,7 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
                 LinearSolverChoice::Feral => {
-                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
                 }
                 LinearSolverChoice::Ma57 => {
                     #[cfg(feature = "ma57")]
@@ -1932,7 +1932,7 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
                     #[cfg(not(feature = "ma57"))]
                     {
                         // ma57 feature not compiled in — fall back to FERAL.
-                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
                     }
                 }
             }
@@ -1954,7 +1954,7 @@ pub fn default_backend_factory_with_sink(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
                 LinearSolverChoice::Feral => Box::new(
-                    pounce_feral::FeralSolverInterface::with_config(feral_cfg)
+                    pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
                         .with_summary_sink(Arc::clone(&sink)),
                 ),
                 LinearSolverChoice::Ma57 => {
@@ -1965,7 +1965,7 @@ pub fn default_backend_factory_with_sink(
                     #[cfg(not(feature = "ma57"))]
                     {
                         Box::new(
-                            pounce_feral::FeralSolverInterface::with_config(feral_cfg)
+                            pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
                                 .with_summary_sink(Arc::clone(&sink)),
                         )
                     }
@@ -2012,6 +2012,14 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_string_value("feral_ordering", "") {
         if let Some(m) = pounce_feral::parse_ordering_method(&v) {
             cfg.ordering = m;
+        }
+    }
+    // Same explicit-set discipline as `feral_ordering`: `from_env`
+    // defaults to ScalingStrategy::Auto (FERAL's current default), so
+    // leaving the option unset preserves existing behaviour exactly.
+    if let Ok((v, true)) = options.get_string_value("feral_scaling", "") {
+        if let Some(s) = pounce_feral::parse_scaling_strategy(&v) {
+            cfg.scaling = s;
         }
     }
     cfg
