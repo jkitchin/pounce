@@ -846,8 +846,29 @@ impl BacktrackingLineSearch {
         };
         let mut last_alpha = alpha;
         let mut n_steps: i32 = 0;
-        let acceptor_alpha_min = self.acceptor.calc_alpha_min(d_phi, theta);
-        let alpha_min_eff = self.alpha_min.max(acceptor_alpha_min);
+        // Smallest step allowed before the loop bails. Upstream
+        // `DoBacktrackingLineSearch` sets `alpha_min = alpha_primal_max`
+        // (the FTB max step) while in the watchdog window, *bypassing*
+        // the acceptor's `CalculateAlphaMin`
+        // (`IpBacktrackingLineSearch.cpp:700-704`). Together with the
+        // `|| n_steps == 0` loop guard (cpp:740) this guarantees the
+        // single full-step watchdog trial always runs, is rejected, and
+        // is then routed through the watchdog handler (accept-anyway 'w'
+        // or `StopWatchDog` revert). If pounce instead applied the
+        // acceptor floor here, a tiny FTB step under watchdog (e.g.
+        // scon1dls iter 50, alpha ~6e-13 << acceptor min) would trip the
+        // `alpha < alpha_min_eff` early-out below with zero trials and
+        // return `TinyStep`, which `run_filter_line_search` hands back
+        // directly — bypassing `handle_watchdog_failure`. The watchdog
+        // would never revert, `curr` would stay at the diverged iterate,
+        // and the solve would die with `ErrorInStepComputation` while
+        // upstream IPOPT converges.
+        let alpha_min_eff = if self.in_watchdog {
+            alpha_init
+        } else {
+            let acceptor_alpha_min = self.acceptor.calc_alpha_min(d_phi, theta);
+            self.alpha_min.max(acceptor_alpha_min)
+        };
 
         for trial in 0..self.max_trials {
             if alpha < alpha_min_eff {
