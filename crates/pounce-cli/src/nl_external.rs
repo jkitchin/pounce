@@ -106,10 +106,20 @@ pub fn collect_funcall_ids(e: &Expr, out: &mut std::collections::BTreeSet<usize>
             collect_funcall_ids(b, out);
         }
         Expr::Unary(_, a) => collect_funcall_ids(a, out),
-        Expr::Sum(args) => {
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
             for a in args {
                 collect_funcall_ids(a, out);
             }
+        }
+        Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            collect_funcall_ids(a, out);
+            collect_funcall_ids(b, out);
+        }
+        Expr::Not(a) => collect_funcall_ids(a, out),
+        Expr::Cond { cond, then_, else_ } => {
+            collect_funcall_ids(cond, out);
+            collect_funcall_ids(then_, out);
+            collect_funcall_ids(else_, out);
         }
         Expr::Cse(body) => collect_funcall_ids(body, out),
         Expr::Funcall { id, args } => {

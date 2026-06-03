@@ -89,6 +89,12 @@ impl Builder {
                             self.emit(FbbtOp::Opaque)
                         }
                     }
+                    // atan2 has no interval-arithmetic support in FbbtOp —
+                    // treat as opaque (no bound propagation through it).
+                    BinOp::Atan2 => {
+                        let _ = (a, b);
+                        self.emit(FbbtOp::Opaque)
+                    }
                 }
             }
             Expr::Unary(op, x) => {
@@ -108,6 +114,25 @@ impl Builder {
                         let denom = self.emit(FbbtOp::Const(std::f64::consts::LN_10));
                         self.emit(FbbtOp::Div(ln, denom))
                     }
+                    // tan / atan / acos have no interval-arithmetic
+                    // support in FbbtOp yet — treat them as opaque so
+                    // bound tightening simply doesn't propagate through
+                    // them (correct, just not tightened) rather than
+                    // emitting a wrong interval. `a` is left as a dead
+                    // sub-tree in the tape, which the evaluator ignores.
+                    UnaryOp::Tan
+                    | UnaryOp::Atan
+                    | UnaryOp::Acos
+                    | UnaryOp::Sinh
+                    | UnaryOp::Cosh
+                    | UnaryOp::Tanh
+                    | UnaryOp::Asin
+                    | UnaryOp::Acosh
+                    | UnaryOp::Asinh
+                    | UnaryOp::Atanh => {
+                        let _ = a;
+                        self.emit(FbbtOp::Opaque)
+                    }
                 }
             }
             Expr::Sum(parts) => {
@@ -121,6 +146,39 @@ impl Builder {
                     acc = self.emit(FbbtOp::Add(acc, next));
                 }
                 acc
+            }
+            // Comparisons, logical connectives, and if-then-else have
+            // no interval-arithmetic support in FbbtOp. Translating
+            // their operands and emitting `Opaque` keeps bound
+            // tightening sound (it simply doesn't propagate through
+            // them) without asserting a wrong interval. The operand
+            // sub-trees are left dead in the tape; the evaluator
+            // ignores them.
+            Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+                let _ = (self.translate(a), self.translate(b));
+                self.emit(FbbtOp::Opaque)
+            }
+            Expr::Not(a) => {
+                let _ = self.translate(a);
+                self.emit(FbbtOp::Opaque)
+            }
+            Expr::Cond { cond, then_, else_ } => {
+                let _ = (
+                    self.translate(cond),
+                    self.translate(then_),
+                    self.translate(else_),
+                );
+                self.emit(FbbtOp::Opaque)
+            }
+            // n-ary min/max have no FbbtOp interval form yet. Translate
+            // the operands (so they remain well-formed sub-trees) and
+            // emit Opaque, keeping bound tightening sound without
+            // asserting a wrong interval.
+            Expr::MinList(args) | Expr::MaxList(args) => {
+                for a in args {
+                    let _ = self.translate(a);
+                }
+                self.emit(FbbtOp::Opaque)
             }
             Expr::Funcall { .. } => {
                 // External / imported functions are opaque to FBBT.
@@ -238,6 +296,17 @@ mod tests {
             let e = Expr::Unary(op, inner.clone());
             let tape = translate_constraint(&e, &[]).unwrap();
             assert_eq!(tape.ops.last().unwrap(), &expected);
+        }
+    }
+
+    #[test]
+    fn inverse_trig_translate_to_opaque() {
+        // tan/atan/acos have no interval-arithmetic FbbtOp yet, so the
+        // translator emits Opaque (FBBT won't tighten through them).
+        for op in [UnaryOp::Tan, UnaryOp::Atan, UnaryOp::Acos] {
+            let e = Expr::Unary(op, Box::new(Expr::Var(0)));
+            let tape = translate_constraint(&e, &[]).unwrap();
+            assert_eq!(tape.ops.last().unwrap(), &FbbtOp::Opaque, "{op:?}");
         }
     }
 
