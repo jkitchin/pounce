@@ -17,10 +17,16 @@ Notes
 * Equality / inequality dicts are concatenated into a single ``g(x)``
   with bound vectors ``cl`` / ``cu``. Constraint Jacobian is dense by
   design — sparse Jacobians belong on the :class:`Problem` API.
+* ``callback`` accepts both scipy signatures (chosen by parameter-name
+  introspection): ``callback(intermediate_result=OptimizeResult)`` or
+  ``callback(xk)``. Raise ``StopIteration`` to terminate early.
+  ``intermediate_result.x`` is read from a cache populated by the
+  objective evaluation that precedes Ipopt's intermediate hook.
 """
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -102,6 +108,52 @@ class _FunAndGradCache:
         return self._g
 
 
+class _LastXCache:
+    """Stash the most recent ``x`` seen by ``objective`` for the callback shim.
+
+    Pounce's Rust ``intermediate`` hook doesn't pass the primal iterate to
+    python. Ipopt evaluates the objective at the accepted iterate just
+    before firing ``intermediate``, so the latest cached ``x`` is the right
+    point to surface as ``OptimizeResult.x`` to a scipy-style callback.
+    """
+
+    def __init__(self) -> None:
+        self.x: np.ndarray | None = None
+
+    def remember(self, x: np.ndarray) -> None:
+        self.x = np.asarray(x, dtype=np.float64).copy()
+
+
+def _wrap_callback(callback: Callable | None) -> Callable | None:
+    """Normalize a scipy-style callback to ``(OptimizeResult) -> bool``.
+
+    Returned shim returns ``True`` to continue, ``False`` to stop. Raising
+    ``StopIteration`` inside the user callback also stops the solve.
+    Mirrors ``scipy.optimize._minimize._wrap_callback`` introspection: a
+    single parameter literally named ``intermediate_result`` selects the
+    new-style signature; anything else gets the old-style ``xk``.
+    """
+    if callback is None:
+        return None
+    try:
+        sig = inspect.signature(callback)
+        use_new = set(sig.parameters) == {"intermediate_result"}
+    except (TypeError, ValueError):
+        use_new = False
+
+    def wrapped(res: OptimizeResult) -> bool:
+        try:
+            if use_new:
+                callback(intermediate_result=res)
+            else:
+                callback(np.copy(res.x))
+        except StopIteration:
+            return False
+        return True
+
+    return wrapped
+
+
 def _finite_diff_jac(g_fun: Callable, x: np.ndarray, m: int) -> np.ndarray:
     g0 = _to_array(g_fun(x))
     J = np.empty((m, x.size))
@@ -161,7 +213,9 @@ def _wrap_constraints(constraints, n: int):
                 rows.append(np.atleast_2d(_to_array(jc(x, *ca))))
             else:
                 m_i = _to_array(fn(x, *ca)).size
-                rows.append(_finite_diff_jac(lambda xx, fn=fn, ca=ca: fn(xx, *ca), x, m_i))
+                rows.append(
+                    _finite_diff_jac(lambda xx, fn=fn, ca=ca: fn(xx, *ca), x, m_i)
+                )
         return np.vstack(rows)
 
     cl = np.empty(m_total)
@@ -189,24 +243,30 @@ def _build_problem_obj(
     hess: Callable | None,
     g: Callable | None,
     jac_g: Callable | None,
+    callback: Callable | None,
 ):
     """Build a problem-object-with-methods on the fly. Only attaches
     ``hessian`` / ``hessianstructure`` when ``hess`` is provided so
-    Problem's ``hasattr`` probe correctly falls back to L-BFGS."""
+    Problem's ``hasattr`` probe correctly falls back to L-BFGS. Likewise,
+    ``intermediate`` is only attached when ``callback`` is provided so the
+    no-callback case has zero per-iter Python overhead."""
 
     members: dict[str, Any] = {}
+    xcache = _LastXCache()
 
     if jac is True:
         cache = _FunAndGradCache(fun, args)
 
-        def objective(self, x, _c=cache):
+        def objective(self, x, _c=cache, _xc=xcache):
+            _xc.remember(x)
             return _c.f(x)
 
         def gradient(self, x, _c=cache):
             return _c.g(x)
     else:
 
-        def objective(self, x):
+        def objective(self, x, _xc=xcache):
+            _xc.remember(x)
             return float(fun(x, *args))
 
         def gradient(self, x):
@@ -216,6 +276,52 @@ def _build_problem_obj(
 
     members["objective"] = objective
     members["gradient"] = gradient
+
+    if callback is not None:
+        wrapped_cb = _wrap_callback(callback)
+        assert wrapped_cb is not None
+
+        def intermediate(
+            self,
+            *,
+            alg_mod,
+            iter_count,
+            obj_value,
+            inf_pr,
+            inf_du,
+            mu,
+            d_norm,
+            regularization_size,
+            alpha_du,
+            alpha_pr,
+            ls_trials,
+            _cb=wrapped_cb,
+            _xc=xcache,
+            _n=n,
+        ):
+            x = _xc.x if _xc.x is not None else np.full(_n, np.nan)
+            res = OptimizeResult(
+                x=x,
+                fun=float(obj_value),
+                success=False,
+                status=0,
+                message="intermediate",
+                nit=int(iter_count),
+                info={
+                    "alg_mod": int(alg_mod),
+                    "inf_pr": float(inf_pr),
+                    "inf_du": float(inf_du),
+                    "mu": float(mu),
+                    "d_norm": float(d_norm),
+                    "regularization_size": float(regularization_size),
+                    "alpha_du": float(alpha_du),
+                    "alpha_pr": float(alpha_pr),
+                    "ls_trials": int(ls_trials),
+                },
+            )
+            return _cb(res)
+
+        members["intermediate"] = intermediate
 
     if m > 0:
 
@@ -260,6 +366,7 @@ def minimize(
     hess: Callable | None = None,
     bounds: Sequence | None = None,
     constraints: Sequence | dict | None = None,
+    callback: Callable | None = None,
     options: Mapping[str, Any] | None = None,
 ) -> OptimizeResult:
     """scipy.optimize.minimize-style facade over pounce."""
@@ -277,6 +384,7 @@ def minimize(
         hess=hess,
         g=g_combined,
         jac_g=jac_combined,
+        callback=callback,
     )
 
     problem = Problem(
