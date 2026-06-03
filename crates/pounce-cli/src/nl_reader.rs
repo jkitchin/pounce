@@ -1391,23 +1391,78 @@ pub struct NlTnlp {
 /// single-element vector. This lets `NlTnlp` build one small tape per
 /// term so the per-variable Hessian sweep only walks the term that
 /// actually depends on that variable.
+/// Flatten an additive expression tree into independent summand
+/// expressions, each of which becomes its own Hessian tape.
+///
+/// This is the linchpin of the colored-AD Hessian: `eval_h` walks
+/// each summand tape once *per color the summand touches*, so the
+/// cost is `Σ_summand (tape_len · colors_touched)`. Keeping summands
+/// small (few variables → few colors) is what makes a sparse Hessian
+/// cheap. A single fused tape spanning all `n` variables, by
+/// contrast, is walked once per color → `O(n · tape_len)`, which on a
+/// dense `n`-variable objective is `O(n³)` (observed: 47 s on the
+/// 1000-var `sensors`, whose objective is `-(Σ 10⁶ pairwise terms)`).
+///
+/// We therefore descend through the *affine* envelope of the sum, not
+/// just `+`/`Sum`:
+///   * `Neg(x)`            → split `x`, negate each summand
+///   * `Sub(l, r)`         → split `l`; split `r`, negate each summand
+///   * `c * x` / `x * c`   → split `x`, scale each summand by `c`
+///   * `x / c`             → split `x`, scale each summand by `1/c`
+/// so that an objective like `-(Σ …)` or `0.5·(Σ …)` (the usual
+/// least-squares / max-entropy shapes) still decomposes to its leaf
+/// terms instead of collapsing into one giant tape. The carried
+/// `factor` is materialised onto each leaf only when it differs from
+/// `1` (as `Neg` for `-1`, else a `Const·term` multiply), so the math
+/// is unchanged and the per-summand op count grows by at most one.
 fn split_top_sums(expr: &Expr) -> Vec<Expr> {
     let mut out = Vec::new();
-    fn go(e: &Expr, out: &mut Vec<Expr>) {
+    fn push_leaf(e: &Expr, factor: f64, out: &mut Vec<Expr>) {
+        if factor == 1.0 {
+            out.push(e.clone());
+        } else if factor == -1.0 {
+            out.push(Expr::Unary(UnaryOp::Neg, Box::new(e.clone())));
+        } else {
+            out.push(Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(factor)),
+                Box::new(e.clone()),
+            ));
+        }
+    }
+    fn go(e: &Expr, factor: f64, out: &mut Vec<Expr>) {
         match e {
             Expr::Sum(terms) => {
                 for t in terms {
-                    go(t, out);
+                    go(t, factor, out);
                 }
             }
             Expr::Binary(BinOp::Add, l, r) => {
-                go(l, out);
-                go(r, out);
+                go(l, factor, out);
+                go(r, factor, out);
             }
-            _ => out.push(e.clone()),
+            Expr::Binary(BinOp::Sub, l, r) => {
+                go(l, factor, out);
+                go(r, -factor, out);
+            }
+            Expr::Unary(UnaryOp::Neg, x) => {
+                go(x, -factor, out);
+            }
+            // Affine scaling: distribute a constant coefficient into
+            // the summands so a leading `c·(Σ …)` still splits.
+            Expr::Binary(BinOp::Mul, l, r) => match (l.as_ref(), r.as_ref()) {
+                (Expr::Const(c), _) => go(r, factor * c, out),
+                (_, Expr::Const(c)) => go(l, factor * c, out),
+                _ => push_leaf(e, factor, out),
+            },
+            Expr::Binary(BinOp::Div, l, r) => match r.as_ref() {
+                Expr::Const(c) if *c != 0.0 => go(l, factor / c, out),
+                _ => push_leaf(e, factor, out),
+            },
+            _ => push_leaf(e, factor, out),
         }
     }
-    go(expr, &mut out);
+    go(expr, 1.0, &mut out);
     if out.is_empty() {
         out.push(Expr::Const(0.0));
     }
