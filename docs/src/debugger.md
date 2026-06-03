@@ -290,9 +290,17 @@ viz L       # the LDLᵀ factor (strict-lower triplets + values)
 (`dim`, `irn`, `jcn`, `vals`) alongside the inertia summary — point
 `$POUNCE_DBG_VIEWER` at a heatmap script. `viz L` writes the `LDLᵀ`
 factor (`n`, fill-reducing `perm`, strict-lower `l_irn`/`l_jcn`/`l_vals`
-in permuted coordinates). Because reconstructing the factor is the
-expensive piece, **`viz L` capture is opt-in**: the first call arms it
-and the factor is available at the next `after_search_dir` stop.
+in permuted coordinates), read out of the factor the solver actually
+computed.
+
+Both are read-only and always show the **most recent factorization**:
+the current iteration's system at an `after_search_dir` stop, or the
+**previous** iteration's at the default `iter_start` pause (the step
+that produced where you're standing). The matrix and factor are captured
+every iteration while the debugger is *stepping*; once you `detach` (run
+free) the capture is dropped — so on a large problem a free run doesn't
+pay the O(nnz) assembly. If you `viz kkt`/`viz L` right after a free run,
+`step` once to re-capture.
 
 ---
 

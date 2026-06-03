@@ -122,6 +122,9 @@ pub const BLOCK_NAMES: [&str; 8] = ["x", "s", "y_c", "y_d", "z_l", "z_u", "v_l",
 /// step is being stabilized.
 #[derive(Clone, Debug)]
 pub struct KktReport {
+    /// The outer iteration this factorization was assembled at — may be the
+    /// previous iteration when paused at `iter_start` (look-back).
+    pub iter: i32,
     /// Augmented-system dimension (n + m).
     pub dim: i32,
     /// Negative eigenvalues reported (-1 if the backend has no inertia).
@@ -140,6 +143,52 @@ pub struct KktReport {
     pub delta_c: Number,
     /// Factorization status (debug string).
     pub status: String,
+}
+
+/// Which residual space a [`Residual`] entry comes from.
+///
+/// Primal entries are the per-constraint violations whose max-norm is
+/// `inf_pr`; dual entries are the per-variable Lagrangian-gradient
+/// components whose max-norm is `inf_du`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidKind {
+    /// Equality constraint residual `c_i(x)`.
+    Eq,
+    /// Inequality residual `d_i(x) − s_i` (the IPM slack reformulation).
+    Ineq,
+    /// `x`-space stationarity component `(∇_x L)_i`.
+    DualX,
+    /// `s`-space stationarity component `(∇_s L)_i`.
+    DualS,
+}
+
+impl ResidKind {
+    /// Short label used in the debugger's `print residuals` output and
+    /// the JSON `space` field. Stable — readers may match on it.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ResidKind::Eq => "c",
+            ResidKind::Ineq => "d-s",
+            ResidKind::DualX => "grad_x_L",
+            ResidKind::DualS => "grad_s_L",
+        }
+    }
+
+    /// `true` for the primal (constraint) spaces, `false` for the dual
+    /// (stationarity) spaces.
+    pub fn is_primal(self) -> bool {
+        matches!(self, ResidKind::Eq | ResidKind::Ineq)
+    }
+}
+
+/// One signed residual component at the current iterate: its space, its
+/// index within that space, and its value. See
+/// [`DebugCtx::constraint_residuals`] / [`DebugCtx::dual_residuals`].
+#[derive(Clone, Copy, Debug)]
+pub struct Residual {
+    pub kind: ResidKind,
+    pub index: usize,
+    pub value: Number,
 }
 
 /// Live, mutable view of solver state handed to a [`DebugHook`].
@@ -312,6 +361,54 @@ impl DebugCtx {
         Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
     }
 
+    /// Per-constraint signed primal residuals at the current iterate,
+    /// equality constraints ([`ResidKind::Eq`], `c_i(x)`) then inequality
+    /// constraints ([`ResidKind::Ineq`], `d_i(x) − s_i`). These are the
+    /// same quantities the studio iterate-dump emits as `slack`, and the
+    /// largest `|value|` over the returned vector equals [`Self::inf_pr`].
+    /// `None` only in the CQ-less test context.
+    pub fn constraint_residuals(&self) -> Option<Vec<Residual>> {
+        let cq = self.cq.as_ref()?.borrow();
+        let c = crate::ipopt_alg::flat_read_owned(cq.curr_c().as_ref());
+        let dms = crate::ipopt_alg::flat_read_owned(cq.curr_d_minus_s().as_ref());
+        let mut out = Vec::with_capacity(c.len() + dms.len());
+        out.extend(c.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::Eq,
+            index,
+            value,
+        }));
+        out.extend(dms.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::Ineq,
+            index,
+            value,
+        }));
+        Some(out)
+    }
+
+    /// Per-variable signed dual residuals (Lagrangian-gradient
+    /// components) at the current iterate, `x`-space
+    /// ([`ResidKind::DualX`], `(∇_x L)_i`) then `s`-space
+    /// ([`ResidKind::DualS`], `(∇_s L)_i`). The largest `|value|` over
+    /// the returned vector equals [`Self::inf_du`]. `None` only in the
+    /// CQ-less test context.
+    pub fn dual_residuals(&self) -> Option<Vec<Residual>> {
+        let cq = self.cq.as_ref()?.borrow();
+        let gx = crate::ipopt_alg::flat_read_owned(cq.curr_grad_lag_x().as_ref());
+        let gs = crate::ipopt_alg::flat_read_owned(cq.curr_grad_lag_s().as_ref());
+        let mut out = Vec::with_capacity(gx.len() + gs.len());
+        out.extend(gx.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::DualX,
+            index,
+            value,
+        }));
+        out.extend(gs.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::DualS,
+            index,
+            value,
+        }));
+        Some(out)
+    }
+
     /// Primal regularization δ_w **as recorded for this iteration's info**
     /// (`info_regu_x`) — the value reported in the iteration table's `lg(rg)`
     /// column, reset to 0 at the start of each iteration. This is distinct
@@ -351,6 +448,7 @@ impl DebugCtx {
         let n_pos = if k.n_neg >= 0 { k.dim - k.n_neg } else { -1 };
         let inertia_correct = k.provides_inertia && k.n_neg == expected_neg;
         Some(KktReport {
+            iter: k.iter,
             dim: k.dim,
             n_neg: k.n_neg,
             n_pos,
@@ -369,9 +467,16 @@ impl DebugCtx {
         self.data.borrow().kkt_debug.as_ref()?.matrix.clone()
     }
 
+    /// The outer iteration the captured KKT system / factor came from —
+    /// the previous iteration at an `iter_start` pause (look-back). For
+    /// labeling `viz kkt` / `viz L` with the right iteration.
+    pub fn kkt_captured_iter(&self) -> Option<i32> {
+        Some(self.data.borrow().kkt_debug.as_ref()?.iter)
+    }
+
     /// The `LDLᵀ` factor (`n`, `perm`, strict-lower `l_irn`/`l_jcn` and
-    /// optional `l_vals`) for `viz L`, if captured. Capture is opt-in —
-    /// call [`Self::request_l_factor`] first (it's the expensive piece).
+    /// optional `l_vals`) for `viz L`, if captured this iteration (i.e.
+    /// the debugger was stepping — see `DebugHook::wants_kkt_capture`).
     #[allow(clippy::type_complexity)]
     pub fn kkt_l_factor(
         &self,
@@ -385,32 +490,6 @@ impl DebugCtx {
             f.l_jcn.clone(),
             f.l_vals.clone(),
         ))
-    }
-
-    /// Ask the solver to capture the `LDLᵀ` factor on subsequent solves
-    /// (so `viz L` has data). Returns whether it's already available now.
-    pub fn request_l_factor(&mut self) -> bool {
-        self.data.borrow_mut().want_l_factor = true;
-        self.data
-            .borrow()
-            .kkt_debug
-            .as_ref()
-            .map(|k| k.l_factor.is_some())
-            .unwrap_or(false)
-    }
-
-    /// Ask the solver to assemble the KKT matrix triplets on subsequent
-    /// solves (so `viz kkt`/`save` has the matrix). Off by default so an
-    /// attached debugger doesn't pay the O(nnz) assembly every iteration.
-    /// Returns whether the triplets are already available now.
-    pub fn request_kkt_matrix(&mut self) -> bool {
-        self.data.borrow_mut().want_matrix = true;
-        self.data
-            .borrow()
-            .kkt_debug
-            .as_ref()
-            .map(|k| k.matrix.is_some())
-            .unwrap_or(false)
     }
 
     // ---- vector reads --------------------------------------------------
@@ -555,6 +634,17 @@ pub trait DebugHook {
     /// Called at every [`Checkpoint`]. Inspect and/or mutate via `ctx`,
     /// then return whether to keep solving.
     fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction;
+
+    /// Whether the main loop should capture the (heavier) KKT matrix
+    /// triplets and `LDLᵀ` factor into `kkt_debug` this iteration, so
+    /// `viz kkt` / `viz L` can look back at the previous iteration's
+    /// system. True while the debugger is stepping interactively; an
+    /// implementation that has detached (running free) returns false so
+    /// the O(nnz) assembly isn't paid every iteration. Defaults to true
+    /// — the cheap inertia/status fields are captured regardless.
+    fn wants_kkt_capture(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -643,6 +733,27 @@ mod tests {
             ctx.set_block(name, &cur)
                 .unwrap_or_else(|e| panic!("block_ref_mut does not resolve `{name}`: {e}"));
         }
+    }
+
+    #[test]
+    fn residuals_are_none_without_cq() {
+        // The data-only test ctx has no CQ, so both residual accessors
+        // report `None` (mirrors the documented NaN-scalar contract).
+        let ctx = ctx_with(&[1.0, 2.0]);
+        assert!(ctx.constraint_residuals().is_none());
+        assert!(ctx.dual_residuals().is_none());
+    }
+
+    #[test]
+    fn resid_kind_tags_and_primal_classification_are_stable() {
+        assert_eq!(ResidKind::Eq.tag(), "c");
+        assert_eq!(ResidKind::Ineq.tag(), "d-s");
+        assert_eq!(ResidKind::DualX.tag(), "grad_x_L");
+        assert_eq!(ResidKind::DualS.tag(), "grad_s_L");
+        assert!(ResidKind::Eq.is_primal());
+        assert!(ResidKind::Ineq.is_primal());
+        assert!(!ResidKind::DualX.is_primal());
+        assert!(!ResidKind::DualS.is_primal());
     }
 
     #[test]

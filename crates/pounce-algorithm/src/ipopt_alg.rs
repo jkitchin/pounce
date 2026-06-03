@@ -905,17 +905,24 @@ impl IpoptAlgorithm {
             }
         }
 
-        // Capture KKT-factorization diagnostics (dim, inertia, status)
-        // for the debugger before the line search runs. Only when a
-        // debugger is installed — pulls nothing otherwise.
-        if self.debug.is_some() {
-            let want_l = self.data.borrow().want_l_factor;
-            let want_matrix = self.data.borrow().want_matrix;
+        // Capture KKT-factorization diagnostics for the debugger before
+        // the line search runs. Only when a debugger is installed. The
+        // inertia/status fields are cheap and always captured; the matrix
+        // triplets and `LDLᵀ` factor are O(nnz) assemblies, so they're
+        // captured only while the debugger is stepping (`wants_kkt_capture`)
+        // — a detached/free-running debugger drops them to keep the run
+        // cheap. `kkt_debug` is overwritten every iteration and never
+        // cleared at `iter_start`, so a stepping session always has the
+        // previous iteration's system to look back at via `viz kkt`/`viz L`.
+        if let Some(hook) = self.debug.as_ref() {
+            let capture_heavy = hook.borrow().wants_kkt_capture();
+            let captured_iter = self.data.borrow().iter_count;
             let info = self.search_dir.as_ref().map(|sd| {
                 let pd = sd.pd_solver_mut();
                 let aug = pd.aug_solver();
                 let provides = aug.provides_inertia();
                 crate::ipopt_data::KktDebug {
+                    iter: captured_iter,
                     dim: aug.system_dim(),
                     n_neg: if provides {
                         aug.number_of_neg_evals()
@@ -924,17 +931,16 @@ impl IpoptAlgorithm {
                     },
                     provides_inertia: provides,
                     status: format!("{:?}", aug.last_solve_status()),
-                    // Triplet assembly is O(nnz) — only when `viz kkt`/`save`
-                    // armed it, so attaching the debugger to a big problem
-                    // doesn't tax every iteration. (Inertia/status above are
-                    // cheap and always captured.)
-                    matrix: if want_matrix {
+                    matrix: if capture_heavy {
                         aug.kkt_triplets()
                     } else {
                         None
                     },
-                    // The factor is the expensive piece — only when asked.
-                    l_factor: if want_l { aug.l_factor(true) } else { None },
+                    l_factor: if capture_heavy {
+                        aug.l_factor(true)
+                    } else {
+                        None
+                    },
                 }
             });
             self.data.borrow_mut().kkt_debug = info;

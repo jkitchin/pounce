@@ -42,7 +42,7 @@
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{
-    Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, BLOCK_NAMES,
+    Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, Residual, BLOCK_NAMES,
 };
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
 use rustyline::completion::{Completer, Pair};
@@ -498,6 +498,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
                 "mu", "obj", "inf_pr", "inf_du", "err", "compl", "iter", "kkt", "active",
+                "residuals",
             ]));
             v
         }
@@ -915,6 +916,7 @@ impl SolverDebugger {
             "  info | i                 summary of the current iterate".into(),
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
             "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active".into(),
+            "  print residuals [pr|du] [k]  top-k largest-magnitude residuals (default k=10)".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
             "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
@@ -991,6 +993,9 @@ impl SolverDebugger {
         if what == "active" {
             return self.cmd_print_active(ctx);
         }
+        if what == "residuals" || what == "resid" {
+            return self.cmd_print_residuals(&rest[1..], ctx);
+        }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
         let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
         if BLOCK_NAMES.contains(&what) {
@@ -1054,6 +1059,80 @@ impl SolverDebugger {
             lines.push("no bounded variables or inequality slacks".into());
         }
         CmdOut::ok(lines).with_data(serde_json::json!({"tol": tol, "categories": cats}))
+    }
+
+    /// `print residuals [primal|dual] [k]` — the `k` largest-magnitude
+    /// residuals at this step, ranked. With no filter, primal
+    /// (constraint) and dual (∇L) residuals are pooled and ranked
+    /// together; `primal`/`dual` restrict to one space. Default `k=10`.
+    /// The top primal entry equals `inf_pr`; the top dual equals
+    /// `inf_du`. Args may appear in either order.
+    fn cmd_print_residuals(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+        let mut k: Option<usize> = None;
+        let mut filter: Option<bool> = None; // Some(true)=primal, Some(false)=dual
+        for &arg in rest {
+            if let Ok(n) = arg.parse::<usize>() {
+                k = Some(n);
+            } else {
+                match arg {
+                    "primal" | "pr" => filter = Some(true),
+                    "dual" | "du" => filter = Some(false),
+                    other => {
+                        return CmdOut::err(format!(
+                            "usage: print residuals [primal|dual] [k] (got `{other}`)"
+                        ))
+                    }
+                }
+            }
+        }
+        let k = k.unwrap_or(10);
+
+        let mut all = Vec::new();
+        if filter != Some(false) {
+            let Some(primal) = ctx.constraint_residuals() else {
+                return CmdOut::err("no iterate yet — residuals unavailable");
+            };
+            all.extend(primal);
+        }
+        if filter != Some(true) {
+            let Some(dual) = ctx.dual_residuals() else {
+                return CmdOut::err("no iterate yet — residuals unavailable");
+            };
+            all.extend(dual);
+        }
+
+        let total = all.len();
+        let top = rank_residuals(all, k);
+        if top.is_empty() {
+            return CmdOut::ok(vec!["no residuals at this iterate".into()])
+                .with_data(serde_json::json!({"k": k, "total": total, "top": []}));
+        }
+
+        let lines = top
+            .iter()
+            .map(|r| {
+                format!(
+                    "{:>8}[{}] = {:+.6e}   |{:.3e}|",
+                    r.kind.tag(),
+                    r.index,
+                    r.value,
+                    r.value.abs()
+                )
+            })
+            .collect();
+        let data: Vec<_> = top
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "space": r.kind.tag(),
+                    "primal": r.kind.is_primal(),
+                    "index": r.index,
+                    "value": r.value,
+                })
+            })
+            .collect();
+        CmdOut::ok(lines)
+            .with_data(serde_json::json!({"k": k, "total": total, "top": data}))
     }
 
     /// `print kkt` — inertia + regularization of the factored augmented
@@ -1717,58 +1796,66 @@ impl SolverDebugger {
         if target == "kkt" {
             let Some(k) = ctx.kkt() else {
                 return CmdOut::err(
-                    "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
+                    "no KKT factorization captured yet — nothing has been factored (iter 0), \
+                     or the debugger is detached. `step` once to capture.",
                 );
             };
-            // Triplet capture is opt-in (O(nnz) assembly), so the first call
-            // arms it — same dance as `viz L`.
+            // The matrix triplets are captured into `kkt_debug` whenever the
+            // debugger is stepping, so once anything has been factored they're
+            // here — this is the previous iteration's system at `iter_start`,
+            // the current one at `after_search_dir`.
             let Some((dim, irn, jcn, vals)) = ctx.kkt_matrix() else {
-                ctx.request_kkt_matrix();
                 return CmdOut::err(
-                    "KKT matrix capture enabled — re-run `viz kkt` after the next \
-                     `after_search_dir` stop (`stepi` or `continue`).",
+                    "KKT matrix not captured here — the debugger is detached \
+                     (running free). `step` once to capture and re-run `viz kkt`.",
                 );
             };
+            // Label with the iteration the factorization came from — at an
+            // `iter_start` pause that's the previous iteration, not `ctx.iter()`.
+            let kiter = k.iter;
             let matrix = serde_json::json!({"dim": dim, "irn": irn, "jcn": jcn, "vals": vals,
                                             "format": "triplet_1based_lower"});
             let payload = serde_json::json!({
-                "label": "kkt", "iter": ctx.iter(),
+                "label": "kkt", "iter": kiter,
                 "dim": k.dim, "n_pos": k.n_pos, "n_neg": k.n_neg,
                 "expected_neg": k.expected_neg, "inertia_correct": k.inertia_correct,
                 "delta_w": k.delta_w, "delta_c": k.delta_c, "status": k.status,
                 "matrix": matrix,
             });
-            return match write_json_and_open("kkt", ctx.iter(), &payload) {
-                Ok((path, viewer)) => {
-                    CmdOut::ok(vec![format!("wrote {path}; opened with `{viewer}`")])
-                        .with_data(serde_json::json!({"path": path, "viewer": viewer}))
-                }
+            return match write_json_and_open("kkt", kiter, &payload) {
+                Ok((path, viewer)) => CmdOut::ok(vec![format!(
+                    "wrote {path} (KKT system, iter {kiter}); opened with `{viewer}`"
+                )])
+                .with_data(serde_json::json!({"path": path, "viewer": viewer})),
                 Err(e) => CmdOut::err(e),
             };
         }
-        // `viz L` writes the LDLᵀ factor triplets. Capture is opt-in (the
-        // factor is the expensive piece), so the first call arms it.
+        // `viz L` writes the LDLᵀ factor triplets, read out of the factor
+        // the solver actually computed. Captured into `kkt_debug` whenever
+        // the debugger is stepping (same as the matrix), so it shows the
+        // previous iteration's factorization at `iter_start`.
         if target == "L" {
             match ctx.kkt_l_factor() {
                 Some((n, perm, l_irn, l_jcn, l_vals)) => {
+                    // Iteration the factor came from (previous iter at `iter_start`).
+                    let kiter = ctx.kkt_captured_iter().unwrap_or_else(|| ctx.iter());
                     let payload = serde_json::json!({
-                        "label": "L", "iter": ctx.iter(), "n": n, "perm": perm,
+                        "label": "L", "iter": kiter, "n": n, "perm": perm,
                         "l_irn": l_irn, "l_jcn": l_jcn, "l_vals": l_vals,
                         "format": "strict_lower_1based_permuted",
                     });
-                    return match write_json_and_open("L", ctx.iter(), &payload) {
-                        Ok((path, viewer)) => {
-                            CmdOut::ok(vec![format!("wrote {path}; opened with `{viewer}`")])
-                                .with_data(serde_json::json!({"path": path, "viewer": viewer}))
-                        }
+                    return match write_json_and_open("L", kiter, &payload) {
+                        Ok((path, viewer)) => CmdOut::ok(vec![format!(
+                            "wrote {path} (L factor, iter {kiter}); opened with `{viewer}`"
+                        )])
+                        .with_data(serde_json::json!({"path": path, "viewer": viewer})),
                         Err(e) => CmdOut::err(e),
                     };
                 }
                 None => {
-                    ctx.request_l_factor();
                     return CmdOut::err(
-                        "L-factor capture enabled — re-run `viz L` after the next \
-                         `after_search_dir` stop (`stepi` or `continue`).",
+                        "L factor not captured here — nothing factored yet (iter 0), \
+                         or the debugger is detached. `step` once to capture.",
                     );
                 }
             }
@@ -2035,6 +2122,24 @@ fn read_stdin_line() -> Option<String> {
     }
 }
 
+/// Rank residuals by descending magnitude and keep the top `k`.
+///
+/// Pure (no solver state) so it can be unit-tested directly. Ties on
+/// `|value|` keep input order (stable sort), so within equal magnitudes
+/// equality constraints precede inequalities precede dual components —
+/// the order [`DebugCtx::constraint_residuals`]/`dual_residuals` emit.
+/// `k == 0` returns empty.
+fn rank_residuals(mut entries: Vec<Residual>, k: usize) -> Vec<Residual> {
+    entries.sort_by(|a, b| {
+        b.value
+            .abs()
+            .partial_cmp(&a.value.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries.truncate(k);
+    entries
+}
+
 /// Print the branded open banner (human REPL only): the project POUNCE
 /// wordmark (shared with the solve header) over a brief command cheat
 /// sheet. Colour only on a TTY and unless `NO_COLOR` is set.
@@ -2187,6 +2292,13 @@ impl StdinPump {
 }
 
 impl DebugHook for SolverDebugger {
+    /// Capture the heavy KKT matrix / `LDLᵀ` factor only while attached:
+    /// once detached the debugger runs free and won't `viz`, so there's
+    /// no reason to pay the O(nnz) assembly every iteration.
+    fn wants_kkt_capture(&self) -> bool {
+        !self.detached
+    }
+
     fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction {
         // One-time handshake so a JSON client learns the protocol /
         // capabilities before the first pause.
@@ -2642,6 +2754,7 @@ fn write_json_and_open(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pounce_algorithm::debug::ResidKind;
 
     fn dbg(mode: DebugMode) -> SolverDebugger {
         SolverDebugger::new(mode, None)
@@ -2841,5 +2954,64 @@ mod tests {
         d.breaks = vec![1];
         assert!(!d.should_pause(0));
         assert!(!d.should_pause(1));
+    }
+
+    #[test]
+    fn kkt_capture_tracks_attached_state() {
+        // Heavy KKT/L capture is on while stepping (attached), off once
+        // detached so a free run doesn't pay the per-iteration assembly.
+        let mut d = dbg(DebugMode::Repl);
+        assert!(d.wants_kkt_capture());
+        d.detached = true;
+        assert!(!d.wants_kkt_capture());
+    }
+
+    fn resid(kind: ResidKind, index: usize, value: f64) -> Residual {
+        Residual { kind, index, value }
+    }
+
+    #[test]
+    fn rank_residuals_sorts_by_magnitude_and_truncates() {
+        use ResidKind::*;
+        let entries = vec![
+            resid(Eq, 0, -0.5),
+            resid(Ineq, 1, 3.0),
+            resid(DualX, 2, -7.0),
+            resid(DualS, 3, 1.0),
+        ];
+        let top = rank_residuals(entries, 2);
+        assert_eq!(top.len(), 2);
+        // Largest |value| first: |-7|, then |3|.
+        assert_eq!(top[0].value, -7.0);
+        assert_eq!(top[0].kind, DualX);
+        assert_eq!(top[1].value, 3.0);
+        assert_eq!(top[1].kind, Ineq);
+    }
+
+    #[test]
+    fn rank_residuals_k_zero_and_k_over_len() {
+        use ResidKind::*;
+        let entries = vec![resid(Eq, 0, 1.0), resid(Ineq, 1, 2.0)];
+        assert!(rank_residuals(entries.clone(), 0).is_empty());
+        // k larger than the input just returns everything, ranked.
+        let all = rank_residuals(entries, 99);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].value, 2.0);
+    }
+
+    #[test]
+    fn rank_residuals_is_stable_on_magnitude_ties() {
+        use ResidKind::*;
+        // Equal |value|: input order preserved (Eq before Ineq before dual).
+        let entries = vec![
+            resid(Ineq, 5, -2.0),
+            resid(Eq, 1, 2.0),
+            resid(DualX, 9, -2.0),
+        ];
+        let top = rank_residuals(entries, 3);
+        assert_eq!(
+            top.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            vec![Ineq, Eq, DualX]
+        );
     }
 }
