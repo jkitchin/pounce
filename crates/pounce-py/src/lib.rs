@@ -19,11 +19,13 @@
 
 use pyo3::prelude::*;
 
+mod nl_problem;
 mod problem;
 mod solver;
 mod tnlp_bridge;
 mod warm_start;
 
+pub use nl_problem::{read_nl, PyNlProblem};
 pub use problem::PyProblem;
 pub use solver::PySolver;
 
@@ -38,6 +40,8 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     pounce_observability::init_subscriber();
     m.add_class::<PyProblem>()?;
     m.add_class::<PySolver>()?;
+    m.add_class::<PyNlProblem>()?;
+    m.add_function(wrap_pyfunction!(read_nl, m)?)?;
     m.add_function(wrap_pyfunction!(warm_start::classify_working_set, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

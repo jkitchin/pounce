@@ -9,7 +9,9 @@ submodule and is only imported on demand to avoid pulling in JAX when
 it is not installed.
 """
 
-from ._pounce import Problem, Solver, classify_working_set, __version__
+from ._pounce import (
+    Problem, Solver, NlProblem, read_nl, classify_working_set, __version__,
+)
 from ._minimize import minimize, OptimizeResult
 from ._minima import find_minima, MinimaResult
 from ._critical import (
@@ -20,6 +22,8 @@ from ._critical import (
 __all__ = [
     "Problem",
     "Solver",
+    "NlProblem",
+    "read_nl",
     "minimize",
     "OptimizeResult",
     "find_minima",

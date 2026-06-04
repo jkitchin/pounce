@@ -652,6 +652,7 @@ dependencies = [
  "pounce-common",
  "pounce-feral",
  "pounce-linsol",
+ "pounce-nl",
  "pounce-nlp",
  "pounce-observability",
  "pounce-qp",
