@@ -27,6 +27,7 @@
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::Number;
+use pounce_linalg::{Matrix, Vector};
 
 /// Where in the main loop a checkpoint fired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +205,33 @@ pub struct DebugCtx {
     cp: Checkpoint,
     /// Solve outcome, set only for the [`Checkpoint::Terminated`] fire.
     status: Option<String>,
+    /// Convergence-tolerance changes the debugger asked to apply *in
+    /// place* (so the next `step` honors them). The main loop drains
+    /// these after the hook returns and writes them into the live
+    /// convergence-check policy — see [`Self::take_live_tolerances`].
+    pending_tol: Vec<(String, Number)>,
+}
+
+/// Solver options the debugger can apply in place at the next checkpoint:
+/// the convergence-check tolerances [`crate::conv_check`]'s policy
+/// re-reads each iteration. Anything not listed here is baked into a
+/// strategy at build time and needs a `resolve` to take effect.
+pub const LIVE_TOLERANCE_OPTS: &[&str] = &[
+    "tol",
+    "dual_inf_tol",
+    "constr_viol_tol",
+    "compl_inf_tol",
+    "acceptable_tol",
+    "acceptable_dual_inf_tol",
+    "acceptable_constr_viol_tol",
+    "acceptable_compl_inf_tol",
+    "acceptable_obj_change_tol",
+];
+
+/// Whether `name` is a tolerance the debugger can hot-swap live (next
+/// `step`), as opposed to a structural option that needs `resolve`.
+pub fn is_live_tolerance(name: &str) -> bool {
+    LIVE_TOLERANCE_OPTS.contains(&name)
 }
 
 /// A cheap, correct snapshot of the primal-dual state at one step.
@@ -244,7 +272,22 @@ impl DebugCtx {
             cq: Some(cq),
             cp,
             status: None,
+            pending_tol: Vec::new(),
         }
+    }
+
+    /// Stage a live convergence-tolerance change (e.g. `tol`,
+    /// `acceptable_tol`). Accumulated across all commands at one pause and
+    /// applied by the main loop after the hook returns, so the next
+    /// iteration's convergence test uses the new value. No effect for
+    /// names outside [`LIVE_TOLERANCE_OPTS`].
+    pub fn set_live_tolerance(&mut self, name: &str, value: Number) {
+        self.pending_tol.push((name.to_string(), value));
+    }
+
+    /// Drain the staged live-tolerance changes (main loop only).
+    pub fn take_live_tolerances(&mut self) -> Vec<(String, Number)> {
+        std::mem::take(&mut self.pending_tol)
     }
 
     /// Attach a solve-outcome string (used for the terminal checkpoint).
@@ -266,6 +309,7 @@ impl DebugCtx {
             cq: None,
             cp,
             status: None,
+            pending_tol: Vec::new(),
         }
     }
 
@@ -359,6 +403,27 @@ impl DebugCtx {
             _ => return None,
         };
         Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
+    }
+
+    /// Full-length variable bounds in algorithm space — `(x_L, x_U)`, each
+    /// of length `n`, with `-∞` / `+∞` in slots that have no lower / upper
+    /// bound. Reconstructed from the NLP's *reduced* bound vectors
+    /// (`x_l`/`x_u`, indexed over only the bounded variables) and their
+    /// expansion matrices, so the result lines up with the `x` block and
+    /// with a `set x` / `resolve` seed. `None` in the CQ-less test context
+    /// or before the iterate exists.
+    ///
+    /// These are the bounds the *algorithm* sees — post-scaling and after
+    /// any `bound_relax_factor` — which is exactly the space a box-sampled
+    /// start must live in to be a valid seed.
+    pub fn var_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        let cq = self.cq.as_ref()?.borrow();
+        let nlp = cq.nlp().borrow();
+        let d = self.data.borrow();
+        let x = &d.curr.as_ref()?.x; // full x-space template
+        let lower = expand_bound(&*nlp.px_l(), nlp.x_l(), &**x, Number::NEG_INFINITY);
+        let upper = expand_bound(&*nlp.px_u(), nlp.x_u(), &**x, Number::INFINITY);
+        Some((lower, upper))
     }
 
     /// Per-constraint signed primal residuals at the current iterate,
@@ -590,6 +655,29 @@ impl DebugCtx {
         vals[idx] = val;
         self.set_block(name, &vals)
     }
+}
+
+/// Expand a *reduced* bound vector (one entry per bounded variable) into a
+/// full-length `Vec<Number>`, placing `absent` in slots that variable has
+/// no such bound. `p` is the bound's expansion matrix (full × reduced),
+/// `template` any full x-space vector (for the right dimension/space).
+///
+/// `P · 1` marks which full slots are bounded; `P · bound` scatters the
+/// bound values into them. Anything the mask leaves untouched gets `absent`
+/// (`±∞`).
+fn expand_bound(p: &dyn Matrix, reduced: &dyn Vector, template: &dyn Vector, absent: Number) -> Vec<Number> {
+    let mut ones = reduced.make_new();
+    ones.set(1.0);
+    let mut mask = template.make_new();
+    p.mult_vector(1.0, &*ones, 0.0, &mut *mask);
+    let mut vals = template.make_new();
+    p.mult_vector(1.0, reduced, 0.0, &mut *vals);
+    let mask = crate::ipopt_alg::flat_read_owned(&*mask);
+    let vals = crate::ipopt_alg::flat_read_owned(&*vals);
+    mask.iter()
+        .zip(vals)
+        .map(|(&m, v)| if m > 0.5 { v } else { absent })
+        .collect()
 }
 
 /// Borrow a named block of an [`IteratesVector`].

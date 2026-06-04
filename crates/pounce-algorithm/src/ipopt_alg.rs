@@ -377,11 +377,20 @@ impl IpoptAlgorithm {
     /// requested action, defaulting to `Resume` when no hook is set.
     fn fire_debug(&mut self, cp: crate::debug::Checkpoint) -> crate::debug::DebugAction {
         use crate::debug::{DebugAction, DebugCtx};
-        let Some(hook) = self.debug.as_ref() else {
+        // Clone the Rc so the hook borrow is released before we touch
+        // `self.bundle` to apply any live option changes below.
+        let Some(hook) = self.debug.as_ref().map(Rc::clone) else {
             return DebugAction::Resume;
         };
         let mut ctx = DebugCtx::new(Rc::clone(&self.data), Rc::clone(&self.cq), cp);
-        hook.borrow_mut().at_checkpoint(&mut ctx)
+        let action = hook.borrow_mut().at_checkpoint(&mut ctx);
+        // Drain any tolerances the hook asked to hot-swap and write them
+        // into the live convergence-check policy, so the next iteration's
+        // termination test uses the new value (no `resolve` needed).
+        for (name, value) in ctx.take_live_tolerances() {
+            self.bundle.conv_check.set_tolerance(&name, value);
+        }
+        action
     }
 
     /// Run the restoration phase, bracketed by the `PreRestoration` /

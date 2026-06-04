@@ -343,8 +343,12 @@ complete pri         # completion candidates for a prefix
 
 `opt <exact-name>` also prints the long description. In the REPL, **Tab**
 completes command verbs, block names, metric names (after `break if`),
-checkpoint names (after `stop-at`), event names (after `break on`), and
-option names (after `set opt` / `opt`).
+checkpoint names (after `stop-at`), event names (after `break on`),
+option names (after `set opt` / `opt`), and **filesystem paths** (after
+`load` / `sweep` / `save` / `source` — directories get a trailing `/`).
+The same contexts are available programmatically via the `complete
+<prefix…>` command (JSON `complete`), so an agent or GUI can offer the
+same completions.
 
 ---
 
@@ -401,6 +405,34 @@ viz kkt              # the KKT inertia/regularization report
 residual scalars (`iter`, `mu`, `objective`, `inf_pr`, `inf_du`,
 `nlp_error`) — a self-contained artifact for external analysis.
 
+### `load` — the inverse of `save`
+
+Typing a start point by hand is fine for a 2-variable toy and miserable for
+anything real. `load` reads a block straight into the live iterate, so you
+generate the point once (a prior solve, a surrogate, a sampler) and pull it
+in:
+
+```text
+load /tmp/it0.json       # a `save` artifact: every block it contains is loaded
+load start.csv           # a plain numeric file → x (comma/space/newline sep)
+load start.csv s         # … into a named block instead of x
+```
+
+Two input shapes are accepted:
+
+- **A `save` artifact** (JSON). Blocks are read from the top level or from
+  an `iterate` object; every block present (`x`, `s`, multipliers, …) is
+  written, each validated against the current dimension. So
+  `save`→`load` round-trips a full point, and you can lift just the part
+  that fits if dimensions changed.
+- **A plain numeric file** — values separated by commas, whitespace, or
+  newlines — written into the named block (default `x`). This is the
+  many-variable escape hatch: `numpy.savetxt("start.csv", x0)` then
+  `load start.csv`.
+
+A loaded `x` becomes the seed for the next step (or for `resolve` — a
+warm start from an externally-computed point with no typing).
+
 ### Interactive figures (`pounce-dbg-viz`)
 
 `viz` writes a JSON artifact and hands it to a viewer. The Python package
@@ -425,6 +457,101 @@ So `export POUNCE_DBG_VIEWER='python my_plot.py {}'` overrides with your
 own plotter, and with nothing set + the `viz` extra installed it just
 works. The same `pounce-dbg-viz <file.json>` also renders a `save`
 artifact (the full iterate).
+
+---
+
+## Multi-start and initialization sensitivity
+
+Interior-point methods find a *local* solution, and which one depends on
+where you start. Two commands turn the debugger into an
+initialization-sensitivity probe: they run many full solves — each from a
+different start — and tabulate where each one ends up. Both build on the
+same re-solve machinery as [`resolve`](#re-solve-from-a-saved-point) (so
+they need the restart cell the CLI wires by default; they error in
+contexts without it), and both leave you at a normal prompt on the final
+solve afterward.
+
+### `sweep <file>` — explicit starts
+
+Run one solve per start point listed in a file (one start per line,
+comma/whitespace-separated; `#`/`//` comments and blank lines skipped):
+
+```text
+pounce-dbg> sweep starts.txt
+   sweep 1/4: Success                iters=21   obj=3.743990e-21 inf_pr=0.00e0
+   sweep 2/4: Success                iters=15   obj=1.233088e-28 inf_pr=0.00e0
+   sweep 3/4: Success                iters=14   obj=1.328861e-28 inf_pr=0.00e0
+   sweep 4/4: Success                iters=29   obj=2.982346e-18 inf_pr=0.00e0
+
+── sweep complete ── 4 solves, 4 succeeded, 1 distinct minima
+     #  status                 iters       objective     inf_pr
+     0  Success                   21    3.743990e-21     0.00e0
+     1  Success                   15    1.233088e-28     0.00e0
+     2  Success                   14    1.328861e-28     0.00e0
+     3  Success                   29    2.982346e-18     0.00e0
+   best: solve #2  obj=1.32886077e-28
+```
+
+Each start must have the same length as `x` (mismatches are reported with
+the line number). The summary clusters successful objectives to a relative
+`1e-6` to count **distinct minima** and flags the best (lowest-objective)
+solve. This is the "is this solve fragile to its start, and to which basins
+does it fall?" diagnostic — and unlike a black-box global search it leaves
+every solve's *trajectory* observable: set a `break on resto_entered` or a
+`stop-at kkt` first and the sweep will pause inside whichever solve trips
+it.
+
+### `multistart <N> [rel]` — sampled restarts
+
+When you don't have a file of starts, `multistart` generates `N` of them:
+
+```text
+pounce-dbg> multistart 8          # 8 starts
+pounce-dbg> multistart 8 0.3      # wider jitter on any unbounded vars
+```
+
+Each variable that has a **finite box** `[x_Lᵢ, x_Uᵢ]` is sampled
+**uniformly inside it** — a genuine box multistart. Variables that are
+unbounded on either side fall back to a relative jitter `±rel·(|xᵢ|+1)`
+around the current point (`rel` default 0.1, with a floor so components at
+zero still move). The command reports the split, e.g.
+`multistart 8 (box 5/7 vars; 2 unbounded → jitter rel=0.1)`.
+
+Start 0 is always the *unperturbed* current `x` (so the run includes where
+you already are), and the sampler is a fixed-seed PRNG, so a `multistart`
+run **reproduces exactly**.
+
+The bounds are the ones the *algorithm* sees — full-length, post-scaling,
+after any `bound_relax_factor` — so every sampled start is a valid seed.
+For a problem with no finite bounds (a pure unconstrained NLP) `multistart`
+degrades to jitter around `x`; `sweep` an external sample if you want a
+specific spread there.
+
+### Driving a sweep from a file with `load`
+
+The pieces compose. To seed a sweep from points computed elsewhere, write
+them with `numpy.savetxt` and `sweep` the file directly — or, for a single
+externally-computed warm start, `load` it and `resolve`:
+
+```python
+import numpy as np
+np.savetxt("starts.txt", sampler(n=32), delimiter=",")   # 32 starts, one per row
+```
+
+```text
+pounce-dbg> sweep starts.txt
+```
+
+### sweep vs. `find_minima`
+
+`sweep`/`multistart` are *diagnostics*: they show you how a handful of
+starts behave, with full visibility into each solve's path. For an
+automated global search — Sobol sampling, deduplication, minimum
+certification (PSD Hessian), redundant-descent avoidance — reach for the
+Python [`pounce.find_minima`](./find-minima.md), whose `multistart` and
+`mlsl` methods are the production tools. Rule of thumb: **debugger sweep**
+when you're asking *why* a solve is start-sensitive; **`find_minima`** when
+you want the minima themselves.
 
 ---
 
@@ -469,8 +596,15 @@ You don't have to single-step from iteration 0.
 - **Attach with Ctrl-C** — `--debug-on-interrupt` runs normally but
   installs a SIGINT handler; a first Ctrl-C drops you in at the next
   iteration (`reason: "interrupt (Ctrl-C)"`), a second Ctrl-C aborts.
-  Ctrl-C also breaks into any other debug mode mid-`continue`. (At a
-  rustyline prompt, Ctrl-C is an ordinary line-cancel, not a signal.)
+  Ctrl-C also breaks into any other debug mode mid-`continue`.
+
+**Ctrl-C at the prompt.** At a rustyline prompt Ctrl-C arrives as input,
+not a signal, so it has its own analogous double-tap: the **first** Ctrl-C
+cancels the current input line (readline convention), a **second** in a row
+**stops the solve** (a clean `UserRequestedStop`, same as `quit`). So
+whether you are running or sitting at the prompt, two Ctrl-Cs always get you
+out; `quit`/`q` and Ctrl-D (EOF, which *detaches* and finishes) remain the
+explicit exits.
 
 ---
 
@@ -500,11 +634,80 @@ stops the solve (so ending with `continue` hands control back at the
 first breakpoint). `--debug-script` implies `--debug` when no `--debug*`
 mode is given, and runs once at the first pause (not on a `resolve`).
 
+### Example: a scripted initialization-sensitivity run
+
+Because `load`, `sweep`, and `set opt` are ordinary commands, a whole
+diagnostic fits in a script file. This one watches each solve's path and
+sweeps a set of externally-generated starts:
+
+```text
+# sensitivity.pdbg — generate starts.txt first (e.g. numpy.savetxt)
+break on resto_entered      # surface any start that falls into restoration
+sweep starts.txt            # one solve per row; tabulated at the end
+```
+
+```sh
+pounce model.nl --debug-script sensitivity.pdbg
+```
+
+Or compare a baseline against a what-if on the same starts by staging an
+option before the sweep:
+
+```text
+# adaptive-vs-monotone.pdbg
+set opt mu_strategy adaptive
+multistart 16 0.2           # 16 sampled restarts, all under adaptive μ
+```
+
+### Example: drive a multistart from a program (JSON protocol)
+
+For many variables and many starts, hold the `x0`s as arrays in a driver
+program and let it assemble the commands — no point is ever typed. The
+`--debug-json` protocol emits a `sweep_result` per solve and a final
+`sweep_summary`:
+
+```python
+import subprocess, json, numpy as np
+
+p = subprocess.Popen(["pounce", "big.nl", "--debug-json"],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+send = lambda c, **k: (p.stdin.write(json.dumps({"cmd": c, **k}) + "\n"), p.stdin.flush())
+
+recv = lambda: json.loads(p.stdout.readline())
+recv()                                   # hello
+recv()                                   # initial pause
+
+# Option A — let the debugger sample: N restarts (uniform in finite boxes).
+send("multistart", args=["32", "0.25"])
+
+# Option B — supply your own starts via a file and sweep it:
+# np.savetxt("starts.txt", my_sampler(n=32), delimiter=",")
+# send("sweep", args=["starts.txt"])
+
+results = []
+for line in p.stdout:
+    ev = json.loads(line)
+    if ev.get("event") == "sweep_result":
+        results.append((ev["status"], ev["objective"]))
+    elif ev.get("event") == "sweep_summary":
+        print(f"{ev['succeeded']}/{ev['solves']} ok, "
+              f"{ev['distinct_minima']} distinct minima, "
+              f"best obj {ev['best_objective']:.6e}")
+        break
+```
+
+Each `sweep_result` carries `index`, `status`, `iters`, `objective`,
+`inf_pr`, and the `seed` it started from; the `sweep_summary` adds
+`distinct_minima`, `best_index`, and `best_objective`. A client can
+feature-detect support via `hello.capabilities.sweep`.
+
 ## Exit model
 
 | Path | Result |
 |---|---|
 | `quit` | stops now → `UserRequestedStop` |
+| Ctrl-C ×2 at the prompt | cancel line, then stop → `UserRequestedStop` |
+| Ctrl-C ×2 mid-`continue` | break in, then abort (exit 130) |
 | `continue` / `detach` | run to natural completion |
 | stdin EOF, REPL (Ctrl-D) | detach and finish (pdb convention) |
 | stdin EOF, JSON (pipe closed) | abort — the controlling client is gone |
@@ -532,6 +735,9 @@ Every non-kill path ends with a `terminated` event in JSON mode.
 | `complete <prefix>` | completion candidates |
 | `viz <target>` | open an artifact in a viewer |
 | `save [path]` | dump the iterate to JSON |
+| `load <file> [block]` | read a block (default `x`) from a save artifact / numeric file |
+| `sweep <file>` | one solve per start in `<file>`; tabulate outcomes |
+| `multistart <N> [rel]` | `N` restarts (uniform in each finite box; jitter elsewhere); tabulate |
 | `watch <target>` (`display`) | auto-print a target at every pause |
 | `tbreak N` (`tb`) | one-shot iteration breakpoint |
 | `watchpoint <blk>[<i>] [τ]` (`wp`) | pause when a value changes by > τ |
@@ -559,7 +765,9 @@ object per line.
 2. `pause` — at each stop.
 3. `result` — one per command, echoing the client's `request_id`.
 4. `progress` — one per iteration while running between pauses.
-5. `terminated` — once, after the solve.
+5. `sweep_result` / `sweep_summary` — during a `sweep`/`multistart`: one
+   `sweep_result` per completed solve, then a `sweep_summary` at the end.
+6. `terminated` — once, after the solve.
 
 ### Commands
 
@@ -580,7 +788,8 @@ Write one per line to stdin, either a bare string or an object:
 {"event":"hello","protocol":"pounce-dbg/1","pounce_version":"0.2.0",
  "capabilities":{"inspect":true,"mutate_iterate":true,"mutate_mu":true,
    "conditional_breakpoints":"compound","request_ids":true,
-   "viz":["block","delta"],"save":true,"kkt_inspect":true,
+   "viz":["block","delta"],"save":true,"load":true,"sweep":true,
+   "kkt_inspect":true,
    "rewind":"primal_dual","resolve":true,"terminal_checkpoint":true,
    "interruptible":true,"progress_events":true,"async_pause":"checkpoint"},
  "checkpoints":["iter_start","after_mu","after_search_dir","after_step",
@@ -719,6 +928,18 @@ for line in p.stdout:                # progress … pause … terminated
     if ev["event"] == "terminated": break
 ```
 
+### 6. Is this solve sensitive to its start?
+
+```text
+break on resto_entered       # flag any start that falls into restoration
+multistart 16                # 16 restarts (uniform in each finite box)
+# → per-solve lines, then a table: succeeded / distinct minima / best
+```
+
+Swap `multistart 16` for `sweep starts.txt` to run your own start
+points (`numpy.savetxt("starts.txt", X0, delimiter=",")`). See
+[Multi-start and initialization sensitivity](#multi-start-and-initialization-sensitivity).
+
 ---
 
 ## Limitations
@@ -727,3 +948,6 @@ for line in p.stdout:                # progress … pause … terminated
   not strategy history (see the caveat above).
 - **`set opt` is staged, not hot-applied** to a running solve; it takes
   effect on `resolve` / the next solve.
+
+<!-- Stuck on a hard solve at 2am? There may be a `coffee` waiting at the prompt. -->
+

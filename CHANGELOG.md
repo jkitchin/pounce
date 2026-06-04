@@ -9,6 +9,52 @@ changes.
 
 ## Unreleased
 
+### Added — Debugger `load` / `sweep` / `multistart`
+
+The interactive solver debugger gained three commands for seeding solves
+from externally-computed points and for initialization-sensitivity
+diagnostics:
+
+- `load <file> [block]` — the inverse of `save`. Reads a block (default
+  `x`) into the live iterate from either a `save` artifact (JSON; every
+  block present is loaded) or a plain numeric file
+  (comma/whitespace/newline-separated). The many-variable escape hatch:
+  generate a start once (`numpy.savetxt`) and `load` it instead of typing
+  it. A loaded `x` becomes the seed for the next step / `resolve`.
+- `sweep <file>` — run one full solve per start in a file (one per line),
+  then tabulate each terminal status / objective, count distinct minima
+  (objectives clustered to a relative `1e-6`), and flag the best solve.
+- `multistart <N> [rel]` — `N` solves from sampled restarts: each variable
+  with a finite box `[x_Lᵢ, x_Uᵢ]` is drawn **uniformly in that box**;
+  unbounded variables fall back to a relative jitter `±rel·(|xᵢ|+1)`
+  around `x`. Start 0 is the unperturbed point; deterministic (fixed-seed
+  PRNG), so runs reproduce. Backed by a new `DebugCtx::var_bounds()` that
+  reconstructs full-length algorithm-space bounds (post-scaling, with `±∞`
+  for absent bounds) from the NLP's reduced bound vectors + expansion
+  matrices.
+
+Tab completion now also covers **filesystem paths** (after
+`load`/`sweep`/`save`/`source`, with a trailing `/` on directories) and
+block names for `load`'s optional second argument — available both at the
+REPL Tab key and via the programmatic `complete` command.
+
+**Ctrl-C at the prompt** is now a working escape hatch: the first press
+cancels the current input line (readline convention), a second in a row
+stops the solve (a clean `UserRequestedStop`) — mirroring the running-mode
+double-tap, so two Ctrl-Cs always exit whether running or paused.
+
+And a little something for the 2am debugging sessions: an undocumented
+`coffee` command at the prompt. ☕
+
+Both sweep commands build on the existing re-solve machinery and keep each
+solve's trajectory observable (breakpoints/events still fire inside a
+sweep). JSON mode emits `sweep_result` per solve and a final
+`sweep_summary`; `hello.capabilities` advertises `load` and `sweep`. For
+automated global search with dedup and minimum certification, the Python
+`find_minima` remains the production path. Docs: `docs/src/debugger.md`
+(new "Multi-start and initialization sensitivity" section + scripting
+examples).
+
 ### Added — Sparse (colored) AD for the JAX front-ends (`sparse=`)
 
 `from_jax` and `JaxProblem` gained a `sparse=True` flag that computes the

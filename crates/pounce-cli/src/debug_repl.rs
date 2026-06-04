@@ -42,7 +42,8 @@
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{
-    Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, Residual, BLOCK_NAMES,
+    is_live_tolerance, Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, Residual,
+    BLOCK_NAMES,
 };
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
 use rustyline::completion::{Completer, Pair};
@@ -69,10 +70,14 @@ const COMMANDS: &[&str] = &[
     "commands",
     "stop-at",
     "set",
+    "get",
     "opt",
     "complete",
     "viz",
     "save",
+    "load",
+    "sweep",
+    "multistart",
     "goto",
     "restart",
     "resolve",
@@ -140,6 +145,41 @@ pub struct RestartRequest {
 /// CLI's re-solve loop.
 pub type RestartCell = Rc<std::cell::RefCell<Option<RestartRequest>>>;
 
+/// One completed solve in a `sweep` / `multistart` run.
+#[derive(Clone)]
+struct SweepRecord {
+    /// 0-based index in the sweep.
+    idx: usize,
+    /// The primal seed this solve started from.
+    seed: Vec<f64>,
+    /// Terminal `SolverReturn` (debug string).
+    status: String,
+    /// Final objective.
+    objective: f64,
+    /// Final primal infeasibility.
+    inf_pr: f64,
+    /// Iteration count at termination.
+    iters: i32,
+}
+
+/// In-flight `sweep` state, carried across the CLI's re-solve loop (the
+/// same debugger instance is re-armed each solve, so this persists). Each
+/// queued seed is run as a full solve; the terminal checkpoint records the
+/// outcome and launches the next.
+struct SweepState {
+    /// Starts not yet run.
+    queue: VecDeque<Vec<f64>>,
+    /// The seed of the solve currently running (recorded at its terminal).
+    current: Option<Vec<f64>>,
+    /// Completed solves, in order.
+    records: Vec<SweepRecord>,
+    /// Total starts requested (for progress display).
+    total: usize,
+    /// `pause_iters` to restore when the sweep finishes (a sweep runs each
+    /// solve free, so it disables per-iteration pausing for the duration).
+    saved_pause_iters: bool,
+}
+
 /// Cap on retained per-iteration snapshots (bounds rewind memory; oldest
 /// are evicted first).
 const SNAPSHOT_CAP: usize = 2000;
@@ -150,14 +190,75 @@ fn is_success_status(s: &str) -> bool {
     matches!(s, "Success" | "StopAtAcceptablePoint")
 }
 
+/// Parse a free-form numeric blob — values separated by commas, whitespace,
+/// or newlines — into `f64`s (used by `load` and `sweep` for plain start
+/// files). Errors on the first unparsable token.
+fn parse_floats(s: &str) -> Result<Vec<f64>, String> {
+    s.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse::<f64>().map_err(|_| format!("bad number `{t}`")))
+        .collect()
+}
+
+/// A `splitmix64` step — a tiny deterministic PRNG (no `rand` dependency).
+/// Returns a uniform draw in `[-1, 1]` and advances the state.
+fn splitmix_unit(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Top 53 bits → [0,1), then map to [-1,1).
+    ((z >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+}
+
+/// Per-start PRNG seed: deterministic in `k` so a `multistart` reproduces.
+fn seed_for(k: usize) -> u64 {
+    0x9E37_79B9_7F4A_7C15u64 ^ (k as u64).wrapping_mul(0xD1B5_4A32_D192_ED03).wrapping_add(1)
+}
+
+/// Sample `multistart` start `k`. Start 0 is the unperturbed `base` (so the
+/// run always covers the current point). For `k ≥ 1`, each component is
+/// drawn **uniformly in its box** `[loᵢ, hiᵢ]` when both bounds are finite;
+/// where a bound is missing (`±∞`), it falls back to a relative jitter
+/// `±rel·(|baseᵢ|+1)` around the base. Deterministic in `k`.
+fn sample_start(base: &[f64], bounds: Option<(&[f64], &[f64])>, rel: f64, k: usize) -> Vec<f64> {
+    if k == 0 {
+        return base.to_vec();
+    }
+    let mut state = seed_for(k);
+    base.iter()
+        .enumerate()
+        .map(|(i, &xi)| {
+            let unit = splitmix_unit(&mut state); // [-1, 1)
+            if let Some((lo, hi)) = bounds {
+                let (l, u) = (lo[i], hi[i]);
+                if l.is_finite() && u.is_finite() && u > l {
+                    // [-1,1) → [l, u).
+                    return l + (u - l) * (unit * 0.5 + 0.5);
+                }
+            }
+            xi + rel * (xi.abs() + 1.0) * unit
+        })
+        .collect()
+}
+
+/// `multistart` with no bounds — pure relative jitter around `base`.
+#[cfg(test)]
+fn jitter(base: &[f64], rel: f64, k: usize) -> Vec<f64> {
+    sample_start(base, None, rel, k)
+}
+
 /// SIGINT → "break into the debugger at the next iteration". A first
 /// Ctrl-C sets a pending flag the hook consumes at the next checkpoint;
 /// a second Ctrl-C before that (or any Ctrl-C once detached) hard-exits,
 /// preserving the usual "abort" escape hatch.
 ///
 /// At a rustyline prompt the terminal is in raw mode, so Ctrl-C arrives
-/// as input (handled as `Interrupted`, reprompt) rather than as SIGINT —
-/// this handler only fires while the solve is running.
+/// as input (handled as `Interrupted`) rather than as SIGINT — this handler
+/// only fires while the solve is running. The prompt has its own analogous
+/// double-tap: the first Ctrl-C cancels the line, a second quits the solve
+/// (see [`SolverDebugger::on_prompt_interrupt`]).
 pub mod interrupt {
     use nix::sys::signal::{self, SigHandler, Signal};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -452,6 +553,41 @@ impl Condition {
 /// the `complete` command). `before` is the line text up to the start of
 /// the word being completed; `word` is that partial word. Pure so it can
 /// be unit-tested without a terminal.
+/// Filesystem completions for a path argument (`save`/`load`/`sweep`/
+/// `source`). `word` is the whole path token typed so far; the returned
+/// candidates carry its directory prefix (so they replace the token whole),
+/// directories get a trailing `/`, and dotfiles are hidden unless the
+/// prefix opens with a dot.
+fn path_candidates(word: &str) -> Vec<String> {
+    // Split into the directory to list and the basename prefix to match.
+    let (dir, prefix) = match word.rfind('/') {
+        Some(i) => (&word[..=i], &word[i + 1..]), // dir keeps its trailing '/'
+        None => ("", word),
+    };
+    let read_from = if dir.is_empty() { "." } else { dir };
+    let Ok(entries) = std::fs::read_dir(read_from) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        if name.starts_with('.') && !prefix.starts_with('.') {
+            continue;
+        }
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let mut cand = format!("{dir}{name}");
+        if is_dir {
+            cand.push('/');
+        }
+        out.push(cand);
+    }
+    out.sort();
+    out
+}
+
 fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &str) -> Vec<String> {
     let toks: Vec<&str> = before.split_whitespace().collect();
     let starts = |opts: &[&str]| -> Vec<String> {
@@ -477,7 +613,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             v.extend(starts(&BLOCK_NAMES));
             v
         }
-        ["set", "opt"] | ["opt"] | ["options"] => opt_names(),
+        ["set", "opt"] | ["get", "opt"] | ["get"] | ["opt"] | ["options"] => opt_names(),
         // After `set opt <name>`, complete the option's valid values.
         ["set", "opt", name] => reg
             .and_then(|r| r.get_option(name))
@@ -498,7 +634,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
                 "mu", "obj", "inf_pr", "inf_du", "err", "compl", "iter", "kkt", "active",
-                "residuals",
+                "inactive", "residuals",
             ]));
             v
         }
@@ -508,6 +644,10 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             v
         }
         ["complete"] => starts(COMMANDS),
+        // Path arguments: complete against the filesystem.
+        ["save"] | ["load"] | ["sweep"] | ["source"] => path_candidates(word),
+        // `load <file> [block]` — the optional second arg names a block.
+        ["load", _] => starts(&BLOCK_NAMES),
         _ => Vec::new(),
     }
 }
@@ -619,6 +759,14 @@ pub struct SolverDebugger {
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
     staged: Vec<(String, String)>,
+    /// Active `sweep` / `multistart` run, if any. Driven at the terminal
+    /// checkpoint across re-solves (see [`SolverDebugger::drive_sweep`]).
+    sweep: Option<SweepState>,
+    /// Consecutive Ctrl-C presses at the REPL prompt with no command in
+    /// between. The first cancels the line (readline convention); a second
+    /// quits the solve — a discoverable Ctrl-C escape hatch that mirrors the
+    /// running-mode double-tap. Reset whenever a real line is entered.
+    prompt_interrupts: u8,
 }
 
 impl SolverDebugger {
@@ -658,6 +806,8 @@ impl SolverDebugger {
             watches: Vec::new(),
             pending_script: None,
             staged: Vec::new(),
+            sweep: None,
+            prompt_interrupts: 0,
         }
     }
 
@@ -882,10 +1032,14 @@ impl SolverDebugger {
                 _ => CmdOut::err("usage: progress [on|off]"),
             },
             "set" => self.cmd_set(rest, ctx),
+            "get" => self.cmd_get(rest),
             "opt" | "options" => self.cmd_opt(rest),
             "complete" => self.cmd_complete(rest),
             "viz" | "plot" => self.cmd_viz(rest, ctx),
             "save" => self.cmd_save(rest, ctx),
+            "load" => self.cmd_load(rest, ctx),
+            "sweep" => self.cmd_sweep(rest, ctx),
+            "multistart" => self.cmd_multistart(rest, ctx),
             "goto" | "jump" => self.cmd_goto(rest, ctx),
             "restart" => match self.snapshots.keys().next().copied() {
                 Some(k) => self.restore_to(k, ctx),
@@ -905,9 +1059,46 @@ impl SolverDebugger {
             // A `pause` received while already paused is a no-op; the
             // meaningful use is async, consumed mid-run by `try_take_pause`.
             "pause" => CmdOut::ok(vec!["already paused".into()]),
+            // Easter egg — not in COMMANDS / help / Tab, so it stays hidden.
+            "coffee" | "brew" | "espresso" => self.cmd_coffee(),
             "quit" | "q" | "exit" => CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop),
             other => CmdOut::err(format!("unknown command `{other}` (try `help`)")),
         }
+    }
+
+    /// `coffee` — a hidden treat. Prints a steaming mug in colour (TTY +
+    /// `NO_COLOR`-respecting, like the banner). Pure output, no solver
+    /// effect; every IPM deserves a coffee break.
+    fn cmd_coffee(&self) -> CmdOut {
+        let color = matches!(self.mode, DebugMode::Repl)
+            && std::io::stderr().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none();
+        let paint = |r: u8, g: u8, b: u8, s: &str| -> String {
+            if color {
+                format!("\x1b[38;2;{r};{g};{b}m{s}\x1b[0m")
+            } else {
+                s.to_string()
+            }
+        };
+        // Palette: ceramic white, dark-roast & medium brown, gray steam.
+        let cup = |s: &str| paint(0xEC, 0xEC, 0xEF, s);
+        let dark = |s: &str| paint(0x5A, 0x32, 0x1E, s);
+        let brew = |s: &str| paint(0x96, 0x5F, 0x37, s);
+        let steam = |s: &str| paint(0xB4, 0xB9, 0xC3, s);
+        let lines = vec![
+            String::new(),
+            format!("     {}", steam(") )  )")),
+            format!("    {}", steam("( (  (")),
+            format!("   {}", cup("._________.")),
+            format!("   {}{}{}", cup("|"), dark("~~~~~~~~"), cup("|_")),
+            format!("   {}{}{}", cup("|  "), brew("COFFEE"), cup("| |")),
+            format!("   {}{}{}", cup("|  "), dark("~~~~~~"), cup("| |")),
+            format!("   {}", cup("|________|_|")),
+            format!("    {}", cup("\\________/")),
+            format!("      {}", brew("a fresh cup for a stuck solve")),
+            String::new(),
+        ];
+        CmdOut::ok(lines).with_data(serde_json::json!({"easter_egg": "coffee"}))
     }
 
     fn cmd_help(&self) -> CmdOut {
@@ -915,7 +1106,7 @@ impl SolverDebugger {
             "commands:".into(),
             "  info | i                 summary of the current iterate".into(),
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
-            "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active".into(),
+            "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active | inactive".into(),
             "  print residuals [pr|du] [k]  top-k largest-magnitude residuals (default k=10)".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
@@ -935,10 +1126,14 @@ impl SolverDebugger {
             "  set <blk>[<i>] <v>       overwrite one component (e.g. set x[2] 1.5)".into(),
             "  set <blk> <v0,v1,...>    overwrite a whole block".into(),
             "  set opt <name> <value>   stage a solver option (validated)".into(),
+            "  get opt <name>           show an option's effective value (staged or default)".into(),
             "  opt [filter]             list solver options (name/type/default)".into(),
             "  complete <prefix>        completion candidates (commands + options)".into(),
             "  viz <x|s|dx|...|kkt|L>   open the artifact in an external viewer".into(),
             "  save [path]              write the current iterate + residuals to JSON".into(),
+            "  load <file> [block]      read a block (default x) from a save artifact / numeric file".into(),
+            "  sweep <file>             one solve per start in <file>; tabulate outcomes".into(),
+            "  multistart <N> [rel]     N restarts (uniform in each finite box; jitter else)".into(),
             "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
             "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
@@ -991,7 +1186,10 @@ impl SolverDebugger {
             return self.cmd_print_kkt(ctx);
         }
         if what == "active" {
-            return self.cmd_print_active(ctx);
+            return self.cmd_print_bounds(ctx, true);
+        }
+        if what == "inactive" {
+            return self.cmd_print_bounds(ctx, false);
         }
         if what == "residuals" || what == "resid" {
             return self.cmd_print_residuals(&rest[1..], ctx);
@@ -1030,10 +1228,12 @@ impl SolverDebugger {
         }
     }
 
-    /// `print active` — bound-slack classification: how many of each
-    /// bound category are near-active (slack below `tol`), and the min
-    /// slack. Small slacks mark the bounds the iterate is pressing on.
-    fn cmd_print_active(&self, ctx: &DebugCtx) -> CmdOut {
+    /// `print active` / `print inactive` — bound-slack classification per
+    /// category. `active` counts bounds the iterate is pressing on (slack
+    /// below `tol`) and reports the min slack; `inactive` is the mirror —
+    /// it counts the bounds with room to spare (slack ≥ `tol`) and reports
+    /// the max slack, the variables furthest from their bound.
+    fn cmd_print_bounds(&self, ctx: &DebugCtx, active: bool) -> CmdOut {
         let tol = 1e-6;
         let mut lines = Vec::new();
         let mut cats = serde_json::Map::new();
@@ -1045,15 +1245,27 @@ impl SolverDebugger {
                 continue;
             }
             let n = sl.len();
-            let min = sl.iter().copied().fold(f64::INFINITY, f64::min);
-            let near = sl.iter().filter(|&&s| s.abs() < tol).count();
-            lines.push(format!(
-                "{cat}: {n} bound(s), {near} near-active (slack<{tol:.0e}), min slack {min:.3e}"
-            ));
-            cats.insert(
-                cat.to_string(),
-                serde_json::json!({"n": n, "near_active": near, "min_slack": min}),
-            );
+            if active {
+                let min = sl.iter().copied().fold(f64::INFINITY, f64::min);
+                let near = sl.iter().filter(|&&s| s.abs() < tol).count();
+                lines.push(format!(
+                    "{cat}: {n} bound(s), {near} near-active (slack<{tol:.0e}), min slack {min:.3e}"
+                ));
+                cats.insert(
+                    cat.to_string(),
+                    serde_json::json!({"n": n, "near_active": near, "min_slack": min}),
+                );
+            } else {
+                let max = sl.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let far = sl.iter().filter(|&&s| s.abs() >= tol).count();
+                lines.push(format!(
+                    "{cat}: {n} bound(s), {far} inactive (slack≥{tol:.0e}), max slack {max:.3e}"
+                ));
+                cats.insert(
+                    cat.to_string(),
+                    serde_json::json!({"n": n, "inactive": far, "max_slack": max}),
+                );
+            }
         }
         if lines.is_empty() {
             lines.push("no bounded variables or inequality slacks".into());
@@ -1329,7 +1541,7 @@ impl SolverDebugger {
                 },
                 Err(_) => CmdOut::err("usage: set mu <value>"),
             },
-            ["opt", name, value] => self.cmd_set_opt(name, value),
+            ["opt", name, value] => self.cmd_set_opt(name, value, ctx),
             [target, value] => self.cmd_set_block(target, value, ctx),
             _ => CmdOut::err(
                 "usage: set mu <v> | set <blk>[<i>] <v> | set <blk> <v0,v1,..> | set opt <name> <v>",
@@ -1369,7 +1581,7 @@ impl SolverDebugger {
         }
     }
 
-    fn cmd_set_opt(&mut self, name: &str, value: &str) -> CmdOut {
+    fn cmd_set_opt(&mut self, name: &str, value: &str, ctx: &mut DebugCtx) -> CmdOut {
         let Some(reg) = self.reg.as_ref() else {
             return CmdOut::err("no options registry available");
         };
@@ -1392,12 +1604,66 @@ impl SolverDebugger {
         if !valid {
             return CmdOut::err(format!("`{value}` is not a valid value for `{name}`"));
         }
+        // Record it on the staged list either way, so `get opt` reflects
+        // it and a later `resolve` re-applies it from scratch.
         self.staged.retain(|(k, _)| k != name);
         self.staged.push((name.to_string(), value.to_string()));
+        // Convergence tolerances are re-read by the conv-check policy each
+        // iteration, so we can hot-swap them in place: hand the value to
+        // the live `DebugCtx`, which the main loop drains after this hook
+        // returns. The next `step` honors it — no `resolve` required.
+        if is_live_tolerance(name) {
+            if let Ok(v) = value.parse::<f64>() {
+                ctx.set_live_tolerance(name, v);
+                return CmdOut::ok(vec![format!(
+                    "{name} = {value}  (applied live — the next `step` uses it)"
+                )])
+                .with_data(serde_json::json!({
+                    "option": name, "value": value, "live": true
+                }));
+            }
+        }
         CmdOut::ok(vec![format!(
-            "staged {name} = {value}  (validated; applied on next solve — built strategies don't re-read mid-solve)"
+            "staged {name} = {value}  (validated; takes effect on `resolve` — built strategies don't re-read mid-solve)"
         )])
         .with_data(serde_json::json!({"option": name, "value": value, "staged": true}))
+    }
+
+    /// `get opt <name>` (or the shorthand `get <name>`) — show the value
+    /// an option would take on the next solve: the value you staged this
+    /// session with `set opt`, if any, else the registered default. The
+    /// debugger holds the staged overrides and the option registry, not
+    /// the running solver's live `OptionsList`, so this is the *configured*
+    /// value, not a mid-solve internal.
+    fn cmd_get(&self, rest: &[&str]) -> CmdOut {
+        // Accept both `get opt <name>` and the shorthand `get <name>`.
+        let name = match rest {
+            ["opt", n] => *n,
+            [n] => *n,
+            _ => return CmdOut::err("usage: get opt <name>"),
+        };
+        let Some(reg) = self.reg.as_ref() else {
+            return CmdOut::err("no options registry available");
+        };
+        let Some(o) = reg.get_option(name) else {
+            return CmdOut::err(format!("unknown option `{name}` (try `opt {name}`)"));
+        };
+        let def = default_str(&o.default);
+        let staged = self
+            .staged
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone());
+        let (value, source) = match &staged {
+            Some(v) => (v.clone(), "staged"),
+            None => (def.clone(), "default"),
+        };
+        CmdOut::ok(vec![format!("{name} = {value}  ({source}; default={def})")]).with_data(
+            serde_json::json!({
+                "option": name, "value": value, "source": source,
+                "default": def, "staged": staged,
+            }),
+        )
     }
 
     fn cmd_opt(&self, rest: &[&str]) -> CmdOut {
@@ -1509,6 +1775,317 @@ impl SolverDebugger {
                     .with_data(serde_json::json!({"path": p}))
             }
             Err(e) => CmdOut::err(format!("save failed: {e}")),
+        }
+    }
+
+    /// `load <file> [block]` — the inverse of `save`. Read a block (by
+    /// default `x`) into the live iterate from either a `save` artifact
+    /// (JSON: top-level or under `iterate`, every block found is loaded) or
+    /// a plain numeric file (comma/whitespace/newline-separated values →
+    /// the named block, default `x`). The point that a many-variable start
+    /// is awkward to type by hand — generate it once, `load` it here.
+    fn cmd_load(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        let Some(&path) = rest.first() else {
+            return CmdOut::err("usage: load <file> [block]   (inverse of `save`)");
+        };
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return CmdOut::err(format!("cannot read `{path}`: {e}")),
+        };
+        // JSON path: a `save` artifact (blocks at top level or under
+        // `iterate`). Load every block present; report dims and any
+        // dimension mismatches per block.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(content.trim()) {
+            let obj = v
+                .get("iterate")
+                .and_then(|o| o.as_object())
+                .or_else(|| v.as_object());
+            if let Some(obj) = obj {
+                let mut loaded: Vec<(String, usize)> = Vec::new();
+                let mut errs: Vec<String> = Vec::new();
+                for &b in BLOCK_NAMES.iter() {
+                    let Some(arr) = obj.get(b).and_then(|a| a.as_array()) else {
+                        continue;
+                    };
+                    let vals: Option<Vec<f64>> = arr.iter().map(|x| x.as_f64()).collect();
+                    let Some(vals) = vals else {
+                        errs.push(format!("{b}: non-numeric entries"));
+                        continue;
+                    };
+                    match ctx.set_block(b, &vals) {
+                        Ok(()) => loaded.push((b.to_string(), vals.len())),
+                        Err(e) => errs.push(format!("{b}: {e}")),
+                    }
+                }
+                if loaded.is_empty() && errs.is_empty() {
+                    return CmdOut::err(
+                        "no recognizable blocks in JSON (expected `x`, `s`, … at top level or under `iterate`)",
+                    );
+                }
+                let mut lines: Vec<String> = loaded
+                    .iter()
+                    .map(|(b, n)| format!("loaded {b} ({n} values)"))
+                    .collect();
+                lines.extend(errs.iter().map(|e| format!("skipped {e}")));
+                return CmdOut::ok(lines).with_data(serde_json::json!({
+                    "loaded": loaded.iter().map(|(b, n)| serde_json::json!({"block": b, "n": n})).collect::<Vec<_>>(),
+                    "skipped": errs,
+                }));
+            }
+        }
+        // Raw numeric path: parse floats and set the named block (default x).
+        let block = rest.get(1).copied().unwrap_or("x");
+        let vals = match parse_floats(&content) {
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) => return CmdOut::err("file held no numbers"),
+            Err(e) => return CmdOut::err(e),
+        };
+        match ctx.set_block(block, &vals) {
+            Ok(()) => CmdOut::ok(vec![format!("loaded {block} ({} values)", vals.len())])
+                .with_data(serde_json::json!({"block": block, "n": vals.len()})),
+            Err(e) => CmdOut::err(e),
+        }
+    }
+
+    /// `sweep <file>` — run one full solve per start point in `file` (one
+    /// start per line, comma/whitespace-separated; `#` comments skipped),
+    /// then tabulate the terminal status / objective of each. An
+    /// initialization-sensitivity probe: which starts converge, and to
+    /// which minima. Needs the re-solve machinery (a restart cell).
+    fn cmd_sweep(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        if self.restart.is_none() {
+            return CmdOut::err("sweep needs re-solve, which is not available in this context");
+        }
+        let Some(&path) = rest.first() else {
+            return CmdOut::err("usage: sweep <file>   (one start per line, comma-separated)");
+        };
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return CmdOut::err(format!("cannot read `{path}`: {e}")),
+        };
+        let dim = ctx.block("x").map(|x| x.len()).unwrap_or(0);
+        let mut seeds: Vec<Vec<f64>> = Vec::new();
+        for (lineno, raw) in content.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+                continue;
+            }
+            match parse_floats(line) {
+                Ok(v) if v.len() == dim => seeds.push(v),
+                Ok(v) => {
+                    return CmdOut::err(format!(
+                        "line {}: got {} values, expected {dim} (= dim x)",
+                        lineno + 1,
+                        v.len()
+                    ));
+                }
+                Err(e) => return CmdOut::err(format!("line {}: {e}", lineno + 1)),
+            }
+        }
+        self.start_sweep(seeds, &format!("sweep `{path}`"))
+    }
+
+    /// `multistart <N> [rel]` — run `N` full solves from sampled starts,
+    /// then tabulate the outcomes. Each variable with a finite box
+    /// `[x_Lᵢ, x_Uᵢ]` is sampled **uniformly in that box**; variables that
+    /// are unbounded on either side fall back to a relative jitter
+    /// `±rel·(|xᵢ|+1)` around the current point (`rel` default 0.1). Start 0
+    /// is always the current `x`. Deterministic (a fixed-seed PRNG), so runs
+    /// reproduce.
+    fn cmd_multistart(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        if self.restart.is_none() {
+            return CmdOut::err("multistart needs re-solve, which is not available in this context");
+        }
+        let Some(n) = rest.first().and_then(|s| s.parse::<usize>().ok()) else {
+            return CmdOut::err("usage: multistart <N> [rel]   (N sampled restarts)");
+        };
+        if n == 0 {
+            return CmdOut::err("N must be ≥ 1");
+        }
+        let rel = rest.get(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.1);
+        let Some(base) = ctx.block("x") else {
+            return CmdOut::err("no current iterate to sample from");
+        };
+        // Full-length algorithm-space bounds, if available and aligned.
+        let bounds = ctx
+            .var_bounds()
+            .filter(|(lo, hi)| lo.len() == base.len() && hi.len() == base.len());
+        let n_box = bounds
+            .as_ref()
+            .map(|(lo, hi)| {
+                lo.iter()
+                    .zip(hi)
+                    .filter(|(l, u)| l.is_finite() && u.is_finite() && u > l)
+                    .count()
+            })
+            .unwrap_or(0);
+        let seeds: Vec<Vec<f64>> = (0..n)
+            .map(|k| {
+                let b = bounds.as_ref().map(|(lo, hi)| (lo.as_slice(), hi.as_slice()));
+                sample_start(&base, b, rel, k)
+            })
+            .collect();
+        let n_var = base.len();
+        let label = if n_box == n_var {
+            format!("multistart {n} (box-sampled, {n_box}/{n_var} vars bounded)")
+        } else if n_box > 0 {
+            format!("multistart {n} (box {n_box}/{n_var} vars; {} unbounded → jitter rel={rel})", n_var - n_box)
+        } else {
+            format!("multistart {n} (no finite boxes → jitter rel={rel})")
+        };
+        self.start_sweep(seeds, &label)
+    }
+
+    /// Launch a sweep: stop the current solve and re-solve from the first
+    /// seed; the rest are driven from the terminal checkpoint
+    /// ([`Self::drive_sweep`]). Each solve runs free (`pause_iters` off,
+    /// restored when the sweep ends).
+    fn start_sweep(&mut self, seeds: Vec<Vec<f64>>, label: &str) -> CmdOut {
+        if seeds.is_empty() {
+            return CmdOut::err("no start points");
+        }
+        let Some(cell) = self.restart.as_ref() else {
+            return CmdOut::err("sweep needs re-solve, which is not available in this context");
+        };
+        let total = seeds.len();
+        let mut queue: VecDeque<Vec<f64>> = seeds.into();
+        let first = queue.pop_front().expect("non-empty");
+        *cell.borrow_mut() = Some(RestartRequest {
+            seed_x: first.clone(),
+            options: self.staged.clone(),
+        });
+        // Run each sweep solve free; we intercept only at the terminal
+        // checkpoint. Clear any one-shot arming so the re-solve doesn't pause.
+        let saved_pause_iters = self.pause_iters;
+        self.pause_iters = false;
+        self.step = false;
+        self.sub_step = false;
+        self.run_to = None;
+        self.sweep = Some(SweepState {
+            queue,
+            current: Some(first),
+            records: Vec::new(),
+            total,
+            saved_pause_iters,
+        });
+        CmdOut::ok(vec![format!("{label}: running {total} start(s)…")])
+            .with_data(serde_json::json!({"sweep": label, "starts": total}))
+            .flow(Flow::Stop)
+    }
+
+    /// Drive an in-flight sweep at the terminal checkpoint: record the
+    /// solve that just finished, then either launch the next seed (returns
+    /// `Some(Resume)` — the CLI re-solve loop picks up the queued
+    /// [`RestartRequest`]) or, when the queue drains, print the summary,
+    /// restore state, and return `None` so the caller falls through to the
+    /// normal terminal handling.
+    fn drive_sweep(&mut self, ctx: &DebugCtx) -> Option<DebugAction> {
+        let mut sweep = self.sweep.take()?;
+        let rec = SweepRecord {
+            idx: sweep.records.len(),
+            seed: sweep.current.clone().unwrap_or_default(),
+            status: ctx.status().unwrap_or("?").to_string(),
+            objective: ctx.objective(),
+            inf_pr: ctx.inf_pr(),
+            iters: ctx.iter(),
+        };
+        self.emit_sweep_progress(&rec, sweep.total);
+        sweep.records.push(rec);
+        if let Some(next) = sweep.queue.pop_front() {
+            sweep.current = Some(next.clone());
+            if let Some(cell) = self.restart.as_ref() {
+                *cell.borrow_mut() = Some(RestartRequest {
+                    seed_x: next,
+                    options: self.staged.clone(),
+                });
+            }
+            self.sweep = Some(sweep);
+            return Some(DebugAction::Resume);
+        }
+        // Sweep complete: restore per-iteration pausing and report.
+        self.pause_iters = sweep.saved_pause_iters;
+        self.emit_sweep_summary(&sweep);
+        None
+    }
+
+    /// One-line-per-solve progress as a sweep runs (REPL → stderr; JSON →
+    /// a `sweep_result` event).
+    fn emit_sweep_progress(&self, rec: &SweepRecord, total: usize) {
+        match self.mode {
+            DebugMode::Repl => eprintln!(
+                "   sweep {}/{}: {:<22} iters={:<4} obj={:.6e} inf_pr={:.2e}",
+                rec.idx + 1,
+                total,
+                rec.status,
+                rec.iters,
+                rec.objective,
+                rec.inf_pr,
+            ),
+            DebugMode::Json => emit_json(&serde_json::json!({
+                "event": "sweep_result",
+                "index": rec.idx,
+                "total": total,
+                "status": rec.status,
+                "iters": rec.iters,
+                "objective": rec.objective,
+                "inf_pr": rec.inf_pr,
+                "seed": rec.seed,
+            })),
+        }
+    }
+
+    /// Final sweep summary: a table of every solve plus a distinct-minima
+    /// count and the best (lowest-objective) successful solve.
+    fn emit_sweep_summary(&self, sweep: &SweepState) {
+        let succeeded: Vec<&SweepRecord> = sweep
+            .records
+            .iter()
+            .filter(|r| is_success_status(&r.status))
+            .collect();
+        // Distinct minima: successful objectives clustered to a relative 1e-6.
+        let mut distinct: Vec<f64> = Vec::new();
+        for r in &succeeded {
+            if !distinct
+                .iter()
+                .any(|&o| (o - r.objective).abs() <= 1e-6 * o.abs().max(1.0))
+            {
+                distinct.push(r.objective);
+            }
+        }
+        let best = succeeded
+            .iter()
+            .min_by(|a, b| a.objective.partial_cmp(&b.objective).unwrap_or(std::cmp::Ordering::Equal));
+        match self.mode {
+            DebugMode::Repl => {
+                eprintln!(
+                    "\n── sweep complete ── {} solves, {} succeeded, {} distinct minima",
+                    sweep.records.len(),
+                    succeeded.len(),
+                    distinct.len()
+                );
+                eprintln!("   {:>3}  {:<22} {:>5}  {:>14}  {:>9}", "#", "status", "iters", "objective", "inf_pr");
+                for r in &sweep.records {
+                    eprintln!(
+                        "   {:>3}  {:<22} {:>5}  {:>14.6e}  {:>9.2e}",
+                        r.idx, r.status, r.iters, r.objective, r.inf_pr
+                    );
+                }
+                if let Some(b) = best {
+                    eprintln!("   best: solve #{}  obj={:.8e}", b.idx, b.objective);
+                }
+            }
+            DebugMode::Json => emit_json(&serde_json::json!({
+                "event": "sweep_summary",
+                "solves": sweep.records.len(),
+                "succeeded": succeeded.len(),
+                "distinct_minima": distinct.len(),
+                "best_index": best.map(|b| b.idx),
+                "best_objective": best.map(|b| b.objective),
+                "records": sweep.records.iter().map(|r| serde_json::json!({
+                    "index": r.idx, "status": r.status, "iters": r.iters,
+                    "objective": r.objective, "inf_pr": r.inf_pr,
+                })).collect::<Vec<_>>(),
+            })),
         }
     }
 
@@ -2032,6 +2609,8 @@ impl SolverDebugger {
                 "request_ids": true,
                 "viz": ["block", "delta"],
                 "save": true,
+                "load": true,
+                "sweep": self.restart.is_some(),
                 "kkt_inspect": true,
                 "llm_assist": true,
                 "rewind": "primal_dual",
@@ -2081,6 +2660,22 @@ impl SolverDebugger {
         self.editor = Some(ed);
     }
 
+    /// Handle a Ctrl-C received at the prompt. Returns the command line to
+    /// feed the loop: the first interrupt in a row cancels the line (empty
+    /// string → reprompt) with a hint; a second quits the solve. The
+    /// counter resets when any real line is entered (see `next_command_line`).
+    fn on_prompt_interrupt(&mut self) -> String {
+        self.prompt_interrupts += 1;
+        if self.prompt_interrupts >= 2 {
+            self.prompt_interrupts = 0;
+            eprintln!("(quitting — Ctrl-C)");
+            "quit".to_string()
+        } else {
+            eprintln!("(Ctrl-C — press again, or `quit`/Ctrl-D, to stop the solve)");
+            String::new()
+        }
+    }
+
     /// Read one command line. Returns `None` on EOF. Uses rustyline when
     /// an editor is active (history / Tab / Ctrl-R); otherwise a plain
     /// reader with a stderr prompt (REPL) or no prompt (JSON).
@@ -2089,14 +2684,18 @@ impl SolverDebugger {
             if let Some(ed) = self.editor.as_mut() {
                 return match ed.readline("pounce-dbg> ") {
                     Ok(l) => {
+                        self.prompt_interrupts = 0;
                         let _ = ed.add_history_entry(l.as_str());
                         if let Some(p) = &self.hist_path {
                             let _ = ed.save_history(p);
                         }
                         Some(l)
                     }
-                    // Ctrl-C: abandon the current line, reprompt.
-                    Err(ReadlineError::Interrupted) => Some(String::new()),
+                    // Ctrl-C at the prompt: the first cancels the current
+                    // line (readline convention); a second in a row quits the
+                    // solve, so Ctrl-C is a working escape hatch here too —
+                    // matching the running-mode double-tap.
+                    Err(ReadlineError::Interrupted) => Some(self.on_prompt_interrupt()),
                     // Ctrl-D / closed input: EOF.
                     Err(ReadlineError::Eof) => None,
                     Err(_) => None,
@@ -2310,6 +2909,14 @@ impl DebugHook for SolverDebugger {
         // `--debug-on-error`, only when the solve failed). Snapshots /
         // rewinding don't apply — the solve is over.
         if let Checkpoint::Terminated = ctx.checkpoint() {
+            // An in-flight `sweep`/`multistart` records this solve and
+            // launches the next; `Some` means "re-solving from the next
+            // seed", `None` means the sweep finished (fall through).
+            if self.sweep.is_some() {
+                if let Some(action) = self.drive_sweep(ctx) {
+                    return action;
+                }
+            }
             let failed = ctx.status().map(|s| !is_success_status(s)).unwrap_or(false);
             let should =
                 self.pause_terminal && !self.detached && (!self.terminal_only_on_error || failed);
@@ -2701,12 +3308,16 @@ fn write_json_and_open(
     std::fs::write(&path, payload.to_string()).map_err(|e| format!("write failed: {e}"))?;
     let path_s = path.to_string_lossy().to_string();
 
-    // Candidate viewers, tried in order until one launches:
-    //   1. $POUNCE_DBG_VIEWER (a command template; `{}` ← the path),
+    // Candidate viewers, tried in order until one launches. Each carries
+    // the artifact path we report on success (JSON for the data consumers,
+    // the rendered HTML for the OS opener):
+    //   1. $POUNCE_DBG_VIEWER (a command template; `{}` ← the JSON path),
     //   2. `pounce-dbg-viz` — the bundled interactive Plotly viewer
     //      (`pip install 'pounce-solver[viz]'`), when on PATH,
-    //   3. the OS opener (xdg-open / open) on the raw JSON.
-    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    //   3. the OS opener (xdg-open / open) on a self-contained HTML
+    //      visualization — NOT the raw JSON, which a text editor (VS Code)
+    //      would just display instead of plotting.
+    let mut candidates: Vec<(String, Vec<String>, String)> = Vec::new();
     match std::env::var("POUNCE_DBG_VIEWER") {
         Ok(tmpl) if !tmpl.trim().is_empty() => {
             let mut parts = tmpl
@@ -2724,23 +3335,30 @@ fn write_json_and_open(
             if !replaced {
                 parts.push(path_s.clone());
             }
-            candidates.push((prog, parts));
+            candidates.push((prog, parts, path_s.clone()));
         }
         _ => {
-            candidates.push(("pounce-dbg-viz".to_string(), vec![path_s.clone()]));
+            candidates.push((
+                "pounce-dbg-viz".to_string(),
+                vec![path_s.clone()],
+                path_s.clone(),
+            ));
             let opener = if cfg!(target_os = "macos") {
                 "open"
             } else {
                 "xdg-open"
             };
-            candidates.push((opener.to_string(), vec![path_s.clone()]));
+            // Render the HTML spy/bar plot; if that write fails for any
+            // reason, fall back to opening the raw JSON.
+            let artifact = write_html_viz(label, iter, payload).unwrap_or_else(|_| path_s.clone());
+            candidates.push((opener.to_string(), vec![artifact.clone()], artifact));
         }
     }
 
     let mut last_err = String::new();
-    for (program, args) in &candidates {
+    for (program, args, artifact) in &candidates {
         match std::process::Command::new(program).args(args).spawn() {
-            Ok(_) => return Ok((path_s, format!("{program} {}", args.join(" ")))),
+            Ok(_) => return Ok((artifact.clone(), format!("{program} {}", args.join(" ")))),
             Err(e) => last_err = format!("`{program}`: {e}"),
         }
     }
@@ -2750,6 +3368,140 @@ fn write_json_and_open(
          or set POUNCE_DBG_VIEWER, e.g. `python my_plot.py {{}}`."
     ))
 }
+
+/// Render a self-contained HTML visualization (no external assets, no pip
+/// install) for a `viz` payload and write it next to the JSON. A KKT/L
+/// matrix becomes a sign-colored sparsity (spy) plot; a plain vector
+/// becomes a zero-centered bar chart. Opening this in the OS default
+/// handler pops a browser window that actually draws the artifact —
+/// unlike the raw JSON, which a text editor (VS Code) would just display.
+fn write_html_viz(
+    label: &str,
+    iter: i32,
+    payload: &serde_json::Value,
+) -> Result<String, String> {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("pounce-dbg-{label}-iter{iter}.html"));
+    let html = VIZ_HTML_TEMPLATE.replace("__PAYLOAD__", &payload.to_string());
+    std::fs::write(&path, html).map_err(|e| format!("write failed: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Self-contained HTML viewer for `viz` artifacts. `__PAYLOAD__` is
+/// replaced with the JSON payload; an inline canvas renderer picks the
+/// plot type from the payload shape (`matrix` → KKT spy, `l_irn` → L-factor
+/// spy, `values` → vector bar chart).
+const VIZ_HTML_TEMPLATE: &str = r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>pounce-dbg viz</title>
+<style>
+ html,body{margin:0;background:#0e1116;color:#d6dae0;
+   font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,monospace}
+ .wrap{padding:18px 20px;max-width:880px;margin:0 auto}
+ h1{font-size:15px;margin:0 0 4px;font-weight:600}
+ .sub{color:#7d8694;margin:0 0 12px}
+ .stats{color:#9aa4b2;white-space:pre-wrap;margin:0 0 14px;
+   background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px 12px}
+ canvas{background:#161b22;border:1px solid #30363d;border-radius:6px;
+   max-width:100%;height:auto;image-rendering:pixelated}
+ .legend{margin-top:10px;color:#9aa4b2}
+ .pos{color:#4ea1ff}.neg{color:#ff6b6b}.bad{color:#ff6b6b;font-weight:600}
+ .ok{color:#56d364;font-weight:600}
+</style></head><body><div class="wrap">
+<h1 id="title">pounce-dbg</h1>
+<div class="sub" id="sub"></div>
+<div class="stats" id="stats"></div>
+<canvas id="c" width="820" height="820"></canvas>
+<div class="legend" id="legend"></div>
+</div>
+<script>
+const D = __PAYLOAD__;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const fmt = x => (x===null||x===undefined) ? '—'
+  : (Math.abs(x) >= 1e4 || (x!==0 && Math.abs(x) < 1e-3) ? x.toExponential(3) : (+x).toPrecision(6));
+
+function clearCanvas(){ ctx.fillStyle='#161b22'; ctx.fillRect(0,0,cv.width,cv.height); }
+
+function spy(irn, jcn, vals, dim, symmetric, title){
+  $('sub').textContent = title;
+  clearCanvas();
+  const W=cv.width, H=cv.height, pad=42;
+  const span=Math.max(1, dim);
+  const cell=(Math.min(W,H)-2*pad)/span;
+  const px=Math.max(0.7, cell);
+  // frame + light grid ticks
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=1;
+  ctx.strokeRect(pad-0.5, pad-0.5, span*cell+1, span*cell+1);
+  ctx.fillStyle='#6e7681'; ctx.font='11px monospace';
+  ctx.fillText('0', pad-12, pad+9);
+  ctx.fillText(String(dim), pad+span*cell-8, pad-8);
+  ctx.fillText('row', pad-34, pad+span*cell/2);
+  ctx.fillText('col', pad+span*cell/2-8, pad-22);
+  let nnz=0;
+  for(let k=0;k<irn.length;k++){
+    const i=irn[k]-1, j=jcn[k]-1, v=vals?vals[k]:1;
+    ctx.fillStyle = v>=0 ? 'rgba(78,161,255,0.92)' : 'rgba(255,107,107,0.92)';
+    ctx.fillRect(pad+j*cell, pad+i*cell, px, px); nnz++;
+    if(symmetric && i!==j){ ctx.fillRect(pad+i*cell, pad+j*cell, px, px); nnz++; }
+  }
+  $('legend').innerHTML =
+    `<span class="pos">■</span> positive&nbsp;&nbsp;<span class="neg">■</span> negative`
+    + `&nbsp;&nbsp;·&nbsp;&nbsp;${dim}×${dim}, ${nnz} plotted nonzeros`
+    + (symmetric ? ' (lower triangle mirrored)' : '');
+}
+
+function bars(values, title){
+  $('sub').textContent = title;
+  clearCanvas();
+  const W=cv.width, H=cv.height, pad=42;
+  const n=values.length;
+  const maxAbs=Math.max(1e-300, ...values.map(v=>Math.abs(v)));
+  const x0=pad, y0=H-pad, plotW=W-2*pad, plotH=H-2*pad, mid=pad+plotH/2;
+  const bw=Math.max(0.7, plotW/Math.max(1,n));
+  // zero axis
+  ctx.strokeStyle='#30363d'; ctx.beginPath();
+  ctx.moveTo(pad, mid); ctx.lineTo(W-pad, mid); ctx.stroke();
+  ctx.fillStyle='#6e7681'; ctx.font='11px monospace';
+  ctx.fillText('+'+fmt(maxAbs), 4, pad+10);
+  ctx.fillText('-'+fmt(maxAbs), 4, H-pad-2);
+  ctx.fillText('0', 4, mid+4);
+  for(let k=0;k<n;k++){
+    const v=values[k], h=(Math.abs(v)/maxAbs)*(plotH/2);
+    ctx.fillStyle = v>=0 ? 'rgba(78,161,255,0.92)' : 'rgba(255,107,107,0.92)';
+    if(v>=0) ctx.fillRect(pad+k*bw, mid-h, bw, h);
+    else     ctx.fillRect(pad+k*bw, mid, bw, h);
+  }
+  $('legend').innerHTML = `${n} components · max |val| = ${fmt(maxAbs)}`;
+}
+
+const lbl = D.label || 'viz';
+const iter = (D.iter!==undefined) ? D.iter : '?';
+$('title').textContent = `pounce-dbg · viz ${lbl} · iter ${iter}`;
+
+if(D.matrix && D.matrix.irn){
+  const m=D.matrix;
+  const inertia = (D.inertia_correct===false)
+    ? `<span class="bad">WRONG</span>` : `<span class="ok">correct</span>`;
+  $('stats').innerHTML =
+    `KKT augmented system   dim=${D.dim}\n`+
+    `inertia  n+=${D.n_pos}  n-=${D.n_neg}  (expected n-=${D.expected_neg}, ${inertia})\n`+
+    `regularization  delta_w=${fmt(D.delta_w)}  delta_c=${fmt(D.delta_c)}\n`+
+    `factorization status: ${D.status}`;
+  spy(m.irn, m.jcn, m.vals, m.dim, true, 'sparsity pattern (sign-colored)');
+} else if(D.l_irn){
+  $('stats').textContent =
+    `LDLᵀ factor   n=${D.n}   nnz(L)=${D.l_irn.length}   format=${D.format||''}`;
+  spy(D.l_irn, D.l_jcn, D.l_vals, D.n, false, 'L factor sparsity (permuted, strict lower)');
+} else if(D.values){
+  $('stats').textContent = `vector ${lbl}   length=${D.values.length}`;
+  bars(D.values, 'component magnitudes (zero-centered)');
+} else {
+  $('stats').textContent = 'unrecognized payload — raw JSON:\n'+JSON.stringify(D,null,2);
+}
+</script></body></html>
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -2907,6 +3659,40 @@ mod tests {
     }
 
     #[test]
+    fn coffee_easter_egg_prints_art_but_stays_hidden() {
+        let d = SolverDebugger::new(DebugMode::Repl, None);
+        let out = d.cmd_coffee();
+        assert!(out.ok);
+        assert!(out.lines.len() > 5, "multi-line art");
+        assert!(
+            out.lines.iter().any(|l| l.contains("COFFEE")),
+            "the mug says COFFEE"
+        );
+        // Easter egg: not advertised anywhere discoverable.
+        assert!(!COMMANDS.contains(&"coffee"), "hidden from help/complete/Tab");
+        // Output is plain in the (non-TTY) test context — no escape codes.
+        assert!(
+            out.lines.iter().all(|l| !l.contains('\x1b')),
+            "no color when stderr isn't a TTY"
+        );
+    }
+
+    #[test]
+    fn double_ctrl_c_at_prompt_quits_single_cancels_line() {
+        let mut d = SolverDebugger::new(DebugMode::Repl, None);
+        // First Ctrl-C in a row cancels the line (empty → reprompt).
+        assert_eq!(d.on_prompt_interrupt(), "");
+        // Second in a row quits the solve.
+        assert_eq!(d.on_prompt_interrupt(), "quit");
+        // Counter reset after quitting, so the next single press cancels again.
+        assert_eq!(d.on_prompt_interrupt(), "");
+        // A real command in between resets the streak (simulating the
+        // `Ok(l)` branch of `next_command_line`).
+        d.prompt_interrupts = 0;
+        assert_eq!(d.on_prompt_interrupt(), "", "fresh streak after a command");
+    }
+
+    #[test]
     fn stop_at_accepts_names_and_aliases() {
         let mut d = SolverDebugger::new(DebugMode::Repl, None);
         assert!(d.cmd_stop_at(&["after_search_dir"]).ok);
@@ -3013,5 +3799,86 @@ mod tests {
             top.iter().map(|r| r.kind).collect::<Vec<_>>(),
             vec![Ineq, Eq, DualX]
         );
+    }
+
+    #[test]
+    fn parse_floats_accepts_commas_whitespace_and_newlines() {
+        assert_eq!(parse_floats("1, 2 ,3").unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(parse_floats("1\n2\n-3.5").unwrap(), vec![1.0, 2.0, -3.5]);
+        assert_eq!(parse_floats("  1.0   2e-1 ").unwrap(), vec![1.0, 0.2]);
+        assert!(parse_floats("1, nope, 3").is_err());
+        assert_eq!(parse_floats("").unwrap(), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn jitter_start_zero_is_the_unperturbed_base_and_is_deterministic() {
+        let base = vec![1.0, -2.0, 0.0];
+        // k=0 reproduces the base exactly, so a multistart always covers x0.
+        assert_eq!(jitter(&base, 0.1, 0), base);
+        // k>0 perturbs, bounded by rel·(|xᵢ|+1), and reproduces run-to-run.
+        let a = jitter(&base, 0.1, 1);
+        let b = jitter(&base, 0.1, 1);
+        assert_eq!(a, b);
+        assert_ne!(a, base);
+        for (j, (&p, &x)) in a.iter().zip(&base).enumerate() {
+            let bound = 0.1 * (x.abs() + 1.0);
+            assert!(
+                (p - x).abs() <= bound + 1e-12,
+                "component {j} moved {} > bound {bound}",
+                (p - x).abs()
+            );
+        }
+        // Different start index → different point.
+        assert_ne!(jitter(&base, 0.1, 1), jitter(&base, 0.1, 2));
+    }
+
+    #[test]
+    fn sample_start_draws_inside_finite_boxes_and_jitters_unbounded() {
+        let base = vec![1.0, 1.0, 0.5];
+        // var 0: box [0,2]; var 1: lower-only (upper = +inf); var 2: box [-1,1].
+        let lo = vec![0.0, 0.0, -1.0];
+        let hi = vec![2.0, f64::INFINITY, 1.0];
+        let b = Some((lo.as_slice(), hi.as_slice()));
+        // Start 0 is always the base, regardless of bounds.
+        assert_eq!(sample_start(&base, b, 0.1, 0), base);
+        for k in 1..50 {
+            let s = sample_start(&base, b, 0.1, k);
+            // Boxed components land strictly inside their box.
+            assert!((0.0..=2.0).contains(&s[0]), "var0 {} out of [0,2]", s[0]);
+            assert!((-1.0..=1.0).contains(&s[2]), "var2 {} out of [-1,1]", s[2]);
+            // The half-bounded component falls back to jitter around base.
+            let bound = 0.1 * (base[1].abs() + 1.0);
+            assert!((s[1] - base[1]).abs() <= bound + 1e-12, "var1 jitter exceeded");
+        }
+        // Deterministic in k.
+        assert_eq!(sample_start(&base, b, 0.1, 7), sample_start(&base, b, 0.1, 7));
+    }
+
+    #[test]
+    fn path_completion_lists_matching_files_with_dir_prefix() {
+        let dir = std::env::temp_dir().join("pounce_dbg_complete_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("starts.txt"), "0,0\n").unwrap();
+        std::fs::write(dir.join("start2.txt"), "1,1\n").unwrap();
+        std::fs::write(dir.join("other.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+
+        let p = dir.to_string_lossy().to_string();
+        // Prefix filters; the dir prefix is preserved so the token replaces whole.
+        let mut got = path_candidates(&format!("{p}/start"));
+        got.sort();
+        assert_eq!(got, vec![format!("{p}/start2.txt"), format!("{p}/starts.txt")]);
+        // Directories get a trailing slash.
+        let got = path_candidates(&format!("{p}/sub"));
+        assert_eq!(got, vec![format!("{p}/subdir/")]);
+        // Listing a directory with an empty basename returns all entries.
+        assert_eq!(path_candidates(&format!("{p}/")).len(), 4);
+        // Verb-context routing: `load <file>` arg yields path candidates.
+        assert!(completion_candidates(None, "load", &format!("{p}/star"))
+            .iter()
+            .all(|c| c.contains("start")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
