@@ -675,7 +675,12 @@ impl DebugCtx {
 /// `P · 1` marks which full slots are bounded; `P · bound` scatters the
 /// bound values into them. Anything the mask leaves untouched gets `absent`
 /// (`±∞`).
-fn expand_bound(p: &dyn Matrix, reduced: &dyn Vector, template: &dyn Vector, absent: Number) -> Vec<Number> {
+fn expand_bound(
+    p: &dyn Matrix,
+    reduced: &dyn Vector,
+    template: &dyn Vector,
+    absent: Number,
+) -> Vec<Number> {
     let mut ones = reduced.make_new();
     ones.set(1.0);
     let mut mask = template.make_new();

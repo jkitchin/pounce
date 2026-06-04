@@ -1992,9 +1992,9 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
     Box::new(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
-                LinearSolverChoice::Feral => {
-                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
-                }
+                LinearSolverChoice::Feral => Box::new(
+                    pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()),
+                ),
                 LinearSolverChoice::Ma57 => {
                     #[cfg(feature = "ma57")]
                     {
@@ -2003,7 +2003,9 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
                     #[cfg(not(feature = "ma57"))]
                     {
                         // ma57 feature not compiled in — fall back to FERAL.
-                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
+                        Box::new(pounce_feral::FeralSolverInterface::with_config(
+                            feral_cfg.clone(),
+                        ))
                     }
                 }
             }

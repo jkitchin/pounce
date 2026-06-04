@@ -312,28 +312,32 @@ impl IpoptCalculatedQuantities {
         let iv = self.trial_iv();
         let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        self.safe_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l(), &*mult.z_l).0
+        self.safe_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l(), &*mult.z_l)
+            .0
     }
 
     pub fn trial_slack_x_u(&self) -> Rc<dyn Vector> {
         let iv = self.trial_iv();
         let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        self.safe_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u(), &*mult.z_u).0
+        self.safe_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u(), &*mult.z_u)
+            .0
     }
 
     pub fn trial_slack_s_l(&self) -> Rc<dyn Vector> {
         let iv = self.trial_iv();
         let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        self.safe_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l(), &*mult.v_l).0
+        self.safe_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l(), &*mult.v_l)
+            .0
     }
 
     pub fn trial_slack_s_u(&self) -> Rc<dyn Vector> {
         let iv = self.trial_iv();
         let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        self.safe_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u(), &*mult.v_u).0
+        self.safe_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u(), &*mult.v_u)
+            .0
     }
 
     /// Compute the four trial slacks with safe-slack flooring and, if any
@@ -360,19 +364,23 @@ impl IpoptCalculatedQuantities {
 
         // new_x_L = Px_L^T x - safe_slack_x_L
         let mut new_x_l = nlp.x_l().make_new();
-        nlp.px_l().trans_mult_vector(1.0, &*iv.x, 0.0, &mut *new_x_l);
+        nlp.px_l()
+            .trans_mult_vector(1.0, &*iv.x, 0.0, &mut *new_x_l);
         new_x_l.axpy(-1.0, &*s_x_l);
         // new_x_U = Px_U^T x + safe_slack_x_U
         let mut new_x_u = nlp.x_u().make_new();
-        nlp.px_u().trans_mult_vector(1.0, &*iv.x, 0.0, &mut *new_x_u);
+        nlp.px_u()
+            .trans_mult_vector(1.0, &*iv.x, 0.0, &mut *new_x_u);
         new_x_u.axpy(1.0, &*s_x_u);
         // new_d_L = Pd_L^T s - safe_slack_s_L
         let mut new_d_l = nlp.d_l().make_new();
-        nlp.pd_l().trans_mult_vector(1.0, &*iv.s, 0.0, &mut *new_d_l);
+        nlp.pd_l()
+            .trans_mult_vector(1.0, &*iv.s, 0.0, &mut *new_d_l);
         new_d_l.axpy(-1.0, &*s_s_l);
         // new_d_U = Pd_U^T s + safe_slack_s_U
         let mut new_d_u = nlp.d_u().make_new();
-        nlp.pd_u().trans_mult_vector(1.0, &*iv.s, 0.0, &mut *new_d_u);
+        nlp.pd_u()
+            .trans_mult_vector(1.0, &*iv.s, 0.0, &mut *new_d_u);
         new_d_u.axpy(1.0, &*s_s_u);
 
         Some(AdjustedBounds {

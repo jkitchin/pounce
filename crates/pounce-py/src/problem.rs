@@ -835,7 +835,9 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
             // Only FERAL is wired into the wheel build; the `_choice`
             // argument is honored by the CLI build (which can route to
             // MA57) but ignored here.
-            Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
+            Box::new(pounce_feral::FeralSolverInterface::with_config(
+                feral_cfg.clone(),
+            ))
         },
     )
 }

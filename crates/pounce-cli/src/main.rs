@@ -627,7 +627,9 @@ pub fn main() -> ExitCode {
             ApplicationReturnStatus::SolveSucceeded
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
         ) {
-            eprintln!("pounce: MC64 re-solve recovered the problem — promoting ({retry_status:?}).");
+            eprintln!(
+                "pounce: MC64 re-solve recovered the problem — promoting ({retry_status:?})."
+            );
             status = retry_status;
         } else {
             eprintln!(
@@ -1018,9 +1020,9 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
     Box::new(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
-                LinearSolverChoice::Feral => {
-                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
-                }
+                LinearSolverChoice::Feral => Box::new(
+                    pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()),
+                ),
                 LinearSolverChoice::Ma57 => {
                     #[cfg(feature = "ma57")]
                     {
@@ -1028,7 +1030,9 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
                     }
                     #[cfg(not(feature = "ma57"))]
                     {
-                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()))
+                        Box::new(pounce_feral::FeralSolverInterface::with_config(
+                            feral_cfg.clone(),
+                        ))
                     }
                 }
             }

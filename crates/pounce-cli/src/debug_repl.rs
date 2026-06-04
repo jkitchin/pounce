@@ -221,7 +221,10 @@ fn splitmix_unit(state: &mut u64) -> f64 {
 
 /// Per-start PRNG seed: deterministic in `k` so a `multistart` reproduces.
 fn seed_for(k: usize) -> u64 {
-    0x9E37_79B9_7F4A_7C15u64 ^ (k as u64).wrapping_mul(0xD1B5_4A32_D192_ED03).wrapping_add(1)
+    0x9E37_79B9_7F4A_7C15u64
+        ^ (k as u64)
+            .wrapping_mul(0xD1B5_4A32_D192_ED03)
+            .wrapping_add(1)
 }
 
 /// Sample `multistart` start `k`. Start 0 is the unperturbed `base` (so the
@@ -640,8 +643,17 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["print"] | ["p"] | ["watch"] | ["display"] => {
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
-                "mu", "obj", "inf_pr", "inf_du", "err", "compl", "iter", "kkt", "active",
-                "inactive", "residuals",
+                "mu",
+                "obj",
+                "inf_pr",
+                "inf_du",
+                "err",
+                "compl",
+                "iter",
+                "kkt",
+                "active",
+                "inactive",
+                "residuals",
             ]));
             v
         }
@@ -1350,8 +1362,7 @@ impl SolverDebugger {
                 })
             })
             .collect();
-        CmdOut::ok(lines)
-            .with_data(serde_json::json!({"k": k, "total": total, "top": data}))
+        CmdOut::ok(lines).with_data(serde_json::json!({"k": k, "total": total, "top": data}))
     }
 
     /// `print kkt` — inertia + regularization of the factored augmented
@@ -1901,7 +1912,9 @@ impl SolverDebugger {
     /// reproduce.
     fn cmd_multistart(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
         if self.restart.is_none() {
-            return CmdOut::err("multistart needs re-solve, which is not available in this context");
+            return CmdOut::err(
+                "multistart needs re-solve, which is not available in this context",
+            );
         }
         let Some(n) = rest.first().and_then(|s| s.parse::<usize>().ok()) else {
             return CmdOut::err("usage: multistart <N> [rel]   (N sampled restarts)");
@@ -1909,7 +1922,10 @@ impl SolverDebugger {
         if n == 0 {
             return CmdOut::err("N must be ≥ 1");
         }
-        let rel = rest.get(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.1);
+        let rel = rest
+            .get(1)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.1);
         let Some(base) = ctx.block("x") else {
             return CmdOut::err("no current iterate to sample from");
         };
@@ -1928,7 +1944,9 @@ impl SolverDebugger {
             .unwrap_or(0);
         let seeds: Vec<Vec<f64>> = (0..n)
             .map(|k| {
-                let b = bounds.as_ref().map(|(lo, hi)| (lo.as_slice(), hi.as_slice()));
+                let b = bounds
+                    .as_ref()
+                    .map(|(lo, hi)| (lo.as_slice(), hi.as_slice()));
                 sample_start(&base, b, rel, k)
             })
             .collect();
@@ -1936,7 +1954,10 @@ impl SolverDebugger {
         let label = if n_box == n_var {
             format!("multistart {n} (box-sampled, {n_box}/{n_var} vars bounded)")
         } else if n_box > 0 {
-            format!("multistart {n} (box {n_box}/{n_var} vars; {} unbounded → jitter rel={rel})", n_var - n_box)
+            format!(
+                "multistart {n} (box {n_box}/{n_var} vars; {} unbounded → jitter rel={rel})",
+                n_var - n_box
+            )
         } else {
             format!("multistart {n} (no finite boxes → jitter rel={rel})")
         };
@@ -2061,9 +2082,11 @@ impl SolverDebugger {
                 distinct.push(r.objective);
             }
         }
-        let best = succeeded
-            .iter()
-            .min_by(|a, b| a.objective.partial_cmp(&b.objective).unwrap_or(std::cmp::Ordering::Equal));
+        let best = succeeded.iter().min_by(|a, b| {
+            a.objective
+                .partial_cmp(&b.objective)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         match self.mode {
             DebugMode::Repl => {
                 eprintln!(
@@ -2072,7 +2095,10 @@ impl SolverDebugger {
                     succeeded.len(),
                     distinct.len()
                 );
-                eprintln!("   {:>3}  {:<22} {:>5}  {:>14}  {:>9}", "#", "status", "iters", "objective", "inf_pr");
+                eprintln!(
+                    "   {:>3}  {:<22} {:>5}  {:>14}  {:>9}",
+                    "#", "status", "iters", "objective", "inf_pr"
+                );
                 for r in &sweep.records {
                     eprintln!(
                         "   {:>3}  {:<22} {:>5}  {:>14.6e}  {:>9.2e}",
@@ -3405,11 +3431,7 @@ fn write_json_and_open(
 /// becomes a zero-centered bar chart. Opening this in the OS default
 /// handler pops a browser window that actually draws the artifact —
 /// unlike the raw JSON, which a text editor (VS Code) would just display.
-fn write_html_viz(
-    label: &str,
-    iter: i32,
-    payload: &serde_json::Value,
-) -> Result<String, String> {
+fn write_html_viz(label: &str, iter: i32, payload: &serde_json::Value) -> Result<String, String> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("pounce-dbg-{label}-iter{iter}.html"));
     let html = VIZ_HTML_TEMPLATE.replace("__PAYLOAD__", &payload.to_string());
@@ -3699,7 +3721,10 @@ mod tests {
             "the mug says COFFEE"
         );
         // Easter egg: not advertised anywhere discoverable.
-        assert!(!COMMANDS.contains(&"coffee"), "hidden from help/complete/Tab");
+        assert!(
+            !COMMANDS.contains(&"coffee"),
+            "hidden from help/complete/Tab"
+        );
         // Output is plain in the (non-TTY) test context — no escape codes.
         assert!(
             out.lines.iter().all(|l| !l.contains('\x1b')),
@@ -3878,10 +3903,16 @@ mod tests {
             assert!((-1.0..=1.0).contains(&s[2]), "var2 {} out of [-1,1]", s[2]);
             // The half-bounded component falls back to jitter around base.
             let bound = 0.1 * (base[1].abs() + 1.0);
-            assert!((s[1] - base[1]).abs() <= bound + 1e-12, "var1 jitter exceeded");
+            assert!(
+                (s[1] - base[1]).abs() <= bound + 1e-12,
+                "var1 jitter exceeded"
+            );
         }
         // Deterministic in k.
-        assert_eq!(sample_start(&base, b, 0.1, 7), sample_start(&base, b, 0.1, 7));
+        assert_eq!(
+            sample_start(&base, b, 0.1, 7),
+            sample_start(&base, b, 0.1, 7)
+        );
     }
 
     #[test]
@@ -3898,7 +3929,10 @@ mod tests {
         // Prefix filters; the dir prefix is preserved so the token replaces whole.
         let mut got = path_candidates(&format!("{p}/start"));
         got.sort();
-        assert_eq!(got, vec![format!("{p}/start2.txt"), format!("{p}/starts.txt")]);
+        assert_eq!(
+            got,
+            vec![format!("{p}/start2.txt"), format!("{p}/starts.txt")]
+        );
         // Directories get a trailing slash.
         let got = path_candidates(&format!("{p}/sub"));
         assert_eq!(got, vec![format!("{p}/subdir/")]);
