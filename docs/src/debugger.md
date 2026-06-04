@@ -256,6 +256,60 @@ in the pause event's `watches` array.
 Prefix any block with `d` (`dx`, `dz_l`, …) to print the corresponding
 block of the most recent Newton step.
 
+### Model names (`.col` / `.row`)
+
+A solver-internal diagnostic that says *"variable 132 in equation 3 looks
+singular"* is far less actionable than one that says *"`T_reactor` in
+`energy_balance`"*. Lee et al. (2024) identify this gap — between
+detecting an issue numerically and tracing it back to a *named* equation
+in the modeling environment — as a central roadblock for debugging
+equation-oriented models.[^lee2024]
+
+AMPL `.nl` files carry no names, but AMPL emits two optional sibling
+files when the modeler sets `option auxfiles rc;`:
+
+| File | Contents |
+|---|---|
+| `stub.col` | one **variable** name per line, in column order |
+| `stub.row` | one **constraint** name per line, in row order |
+
+When these sit next to the `.nl`, pounce captures them
+(`NlProblem::var_names` / `con_names`) and exposes them through the
+`ExpressionProvider::variable_name` / `constraint_name` seam. Missing or
+malformed name files are non-fatal — names are a diagnostic aid, never
+load-blocking, so the debugger simply falls back to index labels.
+
+`print residuals` uses these names directly. Residual values live in the
+solver's *split* space (equalities and inequalities separated, fixed
+variables removed), so a name only labels the right row if it is carried
+through the same permutations. The TNLP publishes its `.col`/`.row` names
+under the conventional `idx_names` metadata key, and `OrigIpoptNlp`
+projects them into split space (`x_not_fixed_map` for variables, `c_map`
+for equalities, `d_map` for inequalities) — the debugger reads the result
+via `DebugCtx::split_names`. So a near-singular equality residual prints as
+
+```
+c[energy_balance] = +3.142e-04   |3.142e-04|
+```
+
+instead of `c[3]`. The same `idx_names` pool labels `grad_x_L[...]`
+(variable names) and `grad_s_L[...]` / `d-s[...]` (inequality names). The
+JSON payload keeps the numeric `index` and adds a `name` field.
+
+> **Status.** Capture, exposure, and `print residuals` labeling are live
+> on the AMPL `.nl` path with names projected through the bound /
+> c-d-split permutations. **Presolve** renumbers rows, so `PresolveTnlp`
+> declines `idx_names` rather than risk mislabeling a permuted row — under
+> presolve the debugger safely falls back to index labels. Carrying names
+> through the presolve map, decorating `print active`, and a tape
+> pretty-printer for `print equation` are the next steps built on this
+> foundation.
+
+[^lee2024]: A. Lee, R. B. Parker, S. Poon, D. Gunter, A. W. Dowling, and
+    B. Nicholson, "Model Diagnostics for Equation-Oriented Models:
+    Roadblocks and the Path Forward," *Systems and Control Transactions*
+    3:966–974 (2024). <https://doi.org/10.69997/sct.147875>
+
 ### `print kkt` — inertia and regularization
 
 Available at/after `after_search_dir` (use `stop-at kkt`). This is the

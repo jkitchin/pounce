@@ -14,6 +14,46 @@ use pounce_common::types::{Index, Number};
 use pounce_linalg::{DenseVector, Matrix, SymMatrix, Vector};
 use std::rc::Rc;
 
+/// Human-readable names projected into the algorithm's *split* space —
+/// the index space the debugger reports residuals in, where equality and
+/// inequality constraints are separated and fixed variables are removed.
+///
+/// Each vector is indexed by the split-space position (`x_var[j]` is the
+/// `j`-th free variable, `eq[k]` the `k`-th equality constraint, `ineq[k]`
+/// the `k`-th inequality), and each entry is `Some(name)` when the model
+/// carried one or `None` to fall back to an index label. Producing this
+/// requires composing the TNLP's original-order names with the
+/// fixed-variable and c/d-split permutations, which is why it lives on
+/// the NLP rather than being read directly off the TNLP.
+///
+/// Names are what turn "variables 1, 132, 439 in equations 3, 15" into a
+/// model-level diagnosis — the gap Lee et al. (2024,
+/// <https://doi.org/10.69997/sct.147875>) call out for equation-oriented
+/// model debugging.
+#[derive(Debug, Clone, Default)]
+pub struct SplitNames {
+    /// Names of the free variables, in algorithm-side `x` order (`n()`).
+    pub x_var: Vec<Option<String>>,
+    /// Names of the equality constraints, in `c` order (`m_eq()`).
+    pub eq: Vec<Option<String>>,
+    /// Names of the inequality constraints, in `d` order (`m_ineq()`).
+    pub ineq: Vec<Option<String>>,
+}
+
+impl SplitNames {
+    /// Whether any entry carries a name. An all-`None` projection (e.g.
+    /// the model shipped no `.col`/`.row` files, or presolve declined to
+    /// forward names) is reported as "no names available" so the debugger
+    /// falls back to index labels rather than printing blanks.
+    pub fn any_present(&self) -> bool {
+        self.x_var
+            .iter()
+            .chain(self.eq.iter())
+            .chain(self.ineq.iter())
+            .any(Option::is_some)
+    }
+}
+
 /// Lower-level NLP interface (post-`TNLPAdapter`). Equality and
 /// inequality constraints are already separated; bounds are already
 /// classified into `x_l_map` / `x_u_map` / etc.
@@ -222,5 +262,19 @@ pub trait IpoptNlp: Nlp {
     /// `OrigIpoptNlp` overrides.
     fn obj_scaling_factor(&self) -> Number {
         1.0
+    }
+
+    /// Human-readable variable / constraint names projected into the
+    /// algorithm's split space (free variables, equalities, inequalities),
+    /// or `None` when the model carries no names. The debugger uses this to
+    /// label residuals by model name (`mass_balance`) rather than index
+    /// (`c[3]`) — see [`SplitNames`] and Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    ///
+    /// Default returns `None`; `OrigIpoptNlp` overrides by pulling
+    /// `idx_names` metadata from the underlying TNLP and composing it with
+    /// the bound / c-d-split permutations.
+    fn split_space_names(&self) -> Option<SplitNames> {
+        None
     }
 }

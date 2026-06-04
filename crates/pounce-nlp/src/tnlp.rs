@@ -56,6 +56,16 @@ pub struct MetaData {
     pub numerics: BTreeMap<String, Vec<Number>>,
 }
 
+/// Conventional [`MetaData::strings`] key for per-index human-readable
+/// names (one entry per variable, or per constraint, in original
+/// problem order). Mirrors upstream Ipopt's `"idx_names"` metadata
+/// key. Carrying names this far lets the debugger report a near-singular
+/// Jacobian row as the `mass_balance` equation instead of "row 3" —
+/// the model-vs-index gap Lee et al. (2024,
+/// <https://doi.org/10.69997/sct.147875>) flag as a key roadblock for
+/// debugging equation-oriented models.
+pub const IDX_NAMES: &str = "idx_names";
+
 /// Bound-data target buffers passed into [`TNLP::get_bounds_info`].
 #[derive(Debug)]
 pub struct BoundsInfo<'a> {

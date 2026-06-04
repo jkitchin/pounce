@@ -34,8 +34,8 @@
 use crate::nl_tape::Tape;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, Solution,
+    SparsityRequest, StartingPoint, IDX_NAMES, TNLP,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -202,6 +202,21 @@ pub struct NlProblem {
     /// Empty unless the `.nl` file calls compiled-C user functions (typically
     /// emitted by IDAES property packages — see issue #49).
     pub imported_funcs: Vec<ImportedFunc>,
+    /// Variable names from the sibling `.col` file, index-aligned to `x`
+    /// (one name per line, column order). Empty when no `.col` file was
+    /// found — AMPL only emits it under `option auxfiles rc;`.
+    ///
+    /// Carrying names lets diagnostics report `flow_balance` / `T_reactor`
+    /// instead of `c[3]` / `x[132]`. Lee et al. (2024) identify the gap
+    /// between detecting an issue and tracing it to a *named* equation as a
+    /// central roadblock for equation-oriented model debugging; threading
+    /// names through to the solver/debugger is the prerequisite for closing
+    /// it. See <https://doi.org/10.69997/sct.147875>.
+    pub var_names: Vec<String>,
+    /// Constraint names from the sibling `.row` file, index-aligned to `g`
+    /// (one name per line, row order). Empty when no `.row` file was found.
+    /// See [`NlProblem::var_names`] for why names are captured.
+    pub con_names: Vec<String>,
 }
 
 /// Suffix data parsed out of `S`-segments. Sparse entries are scattered
@@ -230,10 +245,43 @@ pub struct NlSuffixes {
 }
 
 /// Parse an `.nl` file from disk.
+///
+/// After parsing the `.nl` body, this also looks for AMPL's optional
+/// sibling name files — `stub.col` (variable names) and `stub.row`
+/// (constraint names), emitted only when the modeler sets
+/// `option auxfiles rc;`. When present and well-formed they populate
+/// [`NlProblem::var_names`] / [`NlProblem::con_names`]; when absent or
+/// malformed the names stay empty and every downstream consumer falls
+/// back to indices. Names are a diagnostic nicety, never load-blocking
+/// (cf. Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
 pub fn read_nl_file(path: &Path) -> Result<NlProblem, String> {
     let txt = std::fs::read_to_string(path)
         .map_err(|e| format!("could not read {}: {}", path.display(), e))?;
-    parse_nl_text(&txt)
+    let mut prob = parse_nl_text(&txt)?;
+    prob.var_names = read_name_file(&path.with_extension("col"), prob.n);
+    prob.con_names = read_name_file(&path.with_extension("row"), prob.m);
+    Ok(prob)
+}
+
+/// Read an AMPL name file (`.col` / `.row`): one name per line, in index
+/// order. Returns the first `expected` names, or an empty vector when the
+/// file is missing, unreadable, or has fewer than `expected` lines.
+///
+/// Returning empty (rather than erroring) on any mismatch is deliberate:
+/// names are an optional diagnostic aid, so a missing or truncated file
+/// must never block a solve. The `.take(expected)` also drops AMPL's
+/// convention of appending the objective name after the constraint names
+/// in `.row`, keeping the result aligned 1:1 with `g`.
+fn read_name_file(path: &Path, expected: usize) -> Vec<String> {
+    let Ok(txt) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = txt.lines().take(expected).map(str::to_owned).collect();
+    if names.len() == expected {
+        names
+    } else {
+        Vec::new()
+    }
 }
 
 /// Parse `.nl` text content. Public so tests can use string literals.
@@ -427,6 +475,10 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
         lambda0,
         suffixes,
         imported_funcs,
+        // `.nl` text carries no names; `read_nl_file` fills these from the
+        // sibling `.col`/`.row` files when present.
+        var_names: Vec::new(),
+        con_names: Vec::new(),
     })
 }
 
@@ -1761,6 +1813,18 @@ impl pounce_nlp::expression_provider::ExpressionProvider for NlTnlp {
             .unwrap_or(&[]);
         crate::nl_fbbt_translate::translate_constraint(nonlinear, linear)
     }
+
+    /// Variable name from the sibling `.col` file, if one was loaded.
+    /// Index is original `.nl` column order.
+    fn variable_name(&self, i: usize) -> Option<&str> {
+        self.prob.var_names.get(i).map(String::as_str)
+    }
+
+    /// Constraint name from the sibling `.row` file, if one was loaded.
+    /// Index is original `.nl` row order.
+    fn constraint_name(&self, i: usize) -> Option<&str> {
+        self.prob.con_names.get(i).map(String::as_str)
+    }
 }
 
 impl TNLP for NlTnlp {
@@ -1971,6 +2035,30 @@ impl TNLP for NlTnlp {
     fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
         self.final_x = Some(sol.x.to_vec());
         self.final_obj = sol.obj_value;
+    }
+
+    /// Publish the `.col` / `.row` names (captured at load time) under the
+    /// conventional `idx_names` metadata key, in original `.nl` order. The
+    /// adapter permutes these into split space (see
+    /// `OrigIpoptNlp::split_space_names`) so the debugger can report a
+    /// near-singular Jacobian row as the `mass_balance` equation rather
+    /// than "row 3" — the model-vs-index gap Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) flag for equation-oriented
+    /// model debugging. Declines (returns false) when the model shipped no
+    /// name files so callers fall back to index labels.
+    fn get_var_con_metadata(&mut self, var: &mut MetaData, con: &mut MetaData) -> bool {
+        let mut any = false;
+        if !self.prob.var_names.is_empty() {
+            var.strings
+                .insert(IDX_NAMES.to_string(), self.prob.var_names.clone());
+            any = true;
+        }
+        if !self.prob.con_names.is_empty() {
+            con.strings
+                .insert(IDX_NAMES.to_string(), self.prob.con_names.clone());
+            any = true;
+        }
+        any
     }
 
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
@@ -2362,5 +2450,92 @@ S1 2 sens_init_constr
         // d/dx0 at x=0: 2*(0-1) = -2; d/dx1: 2*(0-2) = -4
         assert!((g[0] - (-2.0)).abs() < 1e-12);
         assert!((g[1] - (-4.0)).abs() < 1e-12);
+    }
+
+    // ---- Sibling `.col` / `.row` name-file capture --------------------
+    //
+    // Names let diagnostics name the offending equation instead of "row 3"
+    // (Lee et al. 2024, https://doi.org/10.69997/sct.147875). These cover
+    // the read path and the documented fallback-to-empty behavior.
+
+    use pounce_nlp::expression_provider::ExpressionProvider;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Unique scratch dir for one test (no `tempfile` dev-dep available).
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let seq = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pounce_nlnames_{}_{}_{}",
+            std::process::id(),
+            tag,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn read_name_file_reads_in_order() {
+        let dir = scratch_dir("col_order");
+        let p = dir.join("m.col");
+        std::fs::write(&p, "x_in\nT_reactor\nflow\n").unwrap();
+        assert_eq!(read_name_file(&p, 3), vec!["x_in", "T_reactor", "flow"]);
+    }
+
+    #[test]
+    fn read_name_file_truncates_extra_lines() {
+        // `.row` conventionally appends the objective name after the m
+        // constraint names; `.take(expected)` must drop it so names stay
+        // 1:1 with `g`.
+        let dir = scratch_dir("row_obj");
+        let p = dir.join("m.row");
+        std::fs::write(&p, "mass_balance\nenergy_balance\nobj\n").unwrap();
+        assert_eq!(
+            read_name_file(&p, 2),
+            vec!["mass_balance", "energy_balance"]
+        );
+    }
+
+    #[test]
+    fn read_name_file_empty_on_short_or_missing() {
+        let dir = scratch_dir("short");
+        let short = dir.join("m.col");
+        std::fs::write(&short, "only_one\n").unwrap();
+        // Fewer lines than expected ⇒ empty (never a partial mapping).
+        assert!(read_name_file(&short, 3).is_empty());
+        // Missing file ⇒ empty, no error.
+        assert!(read_name_file(&dir.join("absent.col"), 2).is_empty());
+    }
+
+    #[test]
+    fn read_nl_file_captures_sibling_names() {
+        // SIMPLE is n=2, m=0. Drop a `.col` next to it and confirm the
+        // names ride through onto the TNLP's ExpressionProvider.
+        let dir = scratch_dir("sibling");
+        let nl = dir.join("m.nl");
+        std::fs::write(&nl, SIMPLE).unwrap();
+        std::fs::write(dir.join("m.col"), "alpha\nbeta\n").unwrap();
+
+        let prob = read_nl_file(&nl).expect("parse + name capture");
+        assert_eq!(prob.var_names, vec!["alpha", "beta"]);
+        assert!(prob.con_names.is_empty()); // no `.row` written, m=0 anyway
+
+        let tnlp = NlTnlp::new(prob);
+        assert_eq!(tnlp.variable_name(0), Some("alpha"));
+        assert_eq!(tnlp.variable_name(1), Some("beta"));
+        assert_eq!(tnlp.variable_name(2), None); // out of range ⇒ index fallback
+    }
+
+    #[test]
+    fn read_nl_file_without_names_yields_empty() {
+        let dir = scratch_dir("noname");
+        let nl = dir.join("m.nl");
+        std::fs::write(&nl, SIMPLE).unwrap();
+        let prob = read_nl_file(&nl).expect("parse");
+        assert!(prob.var_names.is_empty());
+        assert!(prob.con_names.is_empty());
+        let tnlp = NlTnlp::new(prob);
+        assert_eq!(tnlp.variable_name(0), None);
     }
 }

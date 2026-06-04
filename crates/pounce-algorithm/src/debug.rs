@@ -28,6 +28,7 @@ use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::Number;
 use pounce_linalg::{Matrix, Vector};
+use pounce_nlp::ipopt_nlp::SplitNames;
 
 /// Where in the main loop a checkpoint fired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,6 +483,20 @@ impl DebugCtx {
             value,
         }));
         Some(out)
+    }
+
+    /// Model names for the residual index spaces, projected into the
+    /// solver's split space (free variables, equalities, inequalities), or
+    /// `None` when the problem carries no names (or in the CQ-less test
+    /// context). The REPL pairs these with [`Residual::kind`] /
+    /// [`Residual::index`] to print `mass_balance` instead of `c[3]` —
+    /// closing the model-vs-index reporting gap Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) identify for equation-oriented
+    /// model debugging.
+    pub fn split_names(&self) -> Option<SplitNames> {
+        let cq = self.cq.as_ref()?.borrow();
+        let names = cq.nlp().borrow().split_space_names();
+        names
     }
 
     /// Primal regularization δ_w **as recorded for this iteration's info**

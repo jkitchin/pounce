@@ -42,8 +42,8 @@
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{
-    is_live_tolerance, Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, Residual,
-    BLOCK_NAMES,
+    is_live_tolerance, Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, ResidKind,
+    Residual, BLOCK_NAMES,
 };
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
 use rustyline::completion::{Completer, Pair};
@@ -1339,16 +1339,34 @@ impl SolverDebugger {
                 .with_data(serde_json::json!({"k": k, "total": total, "top": []}));
         }
 
+        // Model names projected into the solver's split space, when the
+        // problem carries them (`.col`/`.row`, no presolve). Lets a residual
+        // print as `mass_balance` rather than `c[3]` — the model-vs-index
+        // gap Lee et al. (2024, <https://doi.org/10.69997/sct.147875>) flag
+        // for equation-oriented debugging. `None` ⇒ index labels throughout.
+        let names = ctx.split_names();
+        // Look up the model name for one residual, by its kind + split
+        // index. Equality residuals index the `eq` pool, inequality and
+        // `s`-space dual residuals share the `ineq` pool (one slack per
+        // inequality), and `x`-space dual residuals index `x_var`.
+        let name_of = |r: &Residual| -> Option<&str> {
+            let n = names.as_ref()?;
+            let pool = match r.kind {
+                ResidKind::Eq => &n.eq,
+                ResidKind::Ineq | ResidKind::DualS => &n.ineq,
+                ResidKind::DualX => &n.x_var,
+            };
+            pool.get(r.index).and_then(|o| o.as_deref())
+        };
+
         let lines = top
             .iter()
             .map(|r| {
-                format!(
-                    "{:>8}[{}] = {:+.6e}   |{:.3e}|",
-                    r.kind.tag(),
-                    r.index,
-                    r.value,
-                    r.value.abs()
-                )
+                let label = match name_of(r) {
+                    Some(name) => format!("{}[{}]", r.kind.tag(), name),
+                    None => format!("{}[{}]", r.kind.tag(), r.index),
+                };
+                format!("{:>8} = {:+.6e}   |{:.3e}|", label, r.value, r.value.abs())
             })
             .collect();
         let data: Vec<_> = top
@@ -1358,6 +1376,7 @@ impl SolverDebugger {
                     "space": r.kind.tag(),
                     "primal": r.kind.is_primal(),
                     "index": r.index,
+                    "name": name_of(r),
                     "value": r.value,
                 })
             })
@@ -3558,7 +3577,6 @@ if(D.matrix && D.matrix.irn){
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pounce_algorithm::debug::ResidKind;
 
     fn dbg(mode: DebugMode) -> SolverDebugger {
         SolverDebugger::new(mode, None)
