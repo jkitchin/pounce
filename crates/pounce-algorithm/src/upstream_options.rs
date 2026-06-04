@@ -1055,6 +1055,12 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         ],
         "Pounce reads this option only when set explicitly. When unset, FeralConfig defaults to Auto, FERAL's current built-in default, so behaviour is unchanged. Falls back to the POUNCE_FERAL_SCALING environment variable (same tag set) when not set on the OptionsList. The External(Vec<f64>) strategy is not reachable from this string option. See `crates/pounce-feral/src/lib.rs` (FeralConfig::scaling) and `feral/src/scaling/mod.rs` (ScalingStrategy) for per-variant rationale.",
     )?;
+    r.add_bool_option(
+        "feral_infeasibility_scaling_retry",
+        "Re-solve once with MC64 scaling if the solve declares local infeasibility under Auto/InfNorm.",
+        true,
+        "Some interior-point KKT trajectories are hypersensitive: under two different (equally backward-stable) linear-solver scalings the iterates stay bit-identical for many iterations, then diverge by ~1 ULP and fall into different basins — one reaching the optimum, the other a spurious stationary point of the constraint violation that the IPM reports as Infeasible_Problem_Detected (discs.nl is the canonical case: InfNorm → local infeasibility, MC64/Identity/MA57/IPOPT → optimal). This is sensitive dependence, not a bad solve, so the a-priori scaling router cannot distinguish the two and no per-factor backward-error signal flags it; the only reliable signal is the whole-solve verdict. When this option is set (default), a solve that ends in Infeasible_Problem_Detected under a non-MC64 effective scaling is re-run once with feral_scaling=mc64 (main IPM and restoration sub-IPM both). The MC64 result is promoted only if it returns Solve_Succeeded / Solved_To_Acceptable_Level; otherwise the original infeasibility verdict stands (now corroborated by a second independent scaling). Skipped when the effective scaling is already MC64, and when the interactive debugger is active. Set to no to keep behaviour bit-for-bit faithful to upstream IPOPT (which does not retry). Driven by the pounce CLI; library embedders that inject their own restoration provider implement the retry themselves.",
+    )?;
 
     // ===== Ma77SolverInterface::RegisterOptions (Algorithm/LinearSolvers/IpMa77SolverInterface.cpp) =====
     r.set_registering_category("MA77 Linear Solver");

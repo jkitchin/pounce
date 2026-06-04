@@ -527,7 +527,7 @@ pub fn main() -> ExitCode {
     // the captured `x` (via `SeededTnlp`), re-install a fresh debugger,
     // and run again. Without `resolve`, this runs exactly once.
     let mut solve_tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&tnlp);
-    let status = loop {
+    let mut status = loop {
         let st = app.optimize_tnlp(Rc::clone(&solve_tnlp));
         let req = restart_cell.borrow_mut().take();
         let Some(req) = req else { break st };
@@ -570,6 +570,74 @@ pub fn main() -> ExitCode {
             req.options.len()
         );
     };
+
+    // Hypersensitivity scaling fallback (`feral_infeasibility_scaling_retry`,
+    // on by default). Some interior-point KKT trajectories are chaotic: under
+    // two equally backward-stable linear-solver scalings the iterates stay
+    // bit-identical for many iterations, then diverge by ~1 ULP and fall into
+    // different basins — one optimal, the other a spurious stationary point of
+    // the constraint violation reported as local infeasibility (discs.nl:
+    // InfNorm → infeasible, MC64/Identity/MA57/IPOPT → optimal). It is
+    // sensitive dependence, not a bad solve, so the a-priori scaling router
+    // can't tell the two apart and no per-factor residual flags it; the only
+    // reliable signal is the whole-solve verdict. So: on a local-infeasibility
+    // verdict under a non-MC64 effective scaling, re-solve ONCE with MC64
+    // before believing it, and promote only if MC64 actually succeeds.
+    let scaling_retry_enabled = app
+        .options()
+        .get_bool_value("feral_infeasibility_scaling_retry", "")
+        .map(|(v, _found)| v)
+        .unwrap_or(true);
+    let already_mc64 = matches!(
+        pounce_algorithm::application::feral_config_from_options(app.options()).scaling,
+        pounce_feral::ScalingStrategy::Mc64Symmetric
+    );
+    if scaling_retry_enabled
+        && debug_hook.is_none()
+        && !already_mc64
+        && status == ApplicationReturnStatus::InfeasibleProblemDetected
+    {
+        eprintln!(
+            "pounce: local infeasibility under the current FERAL scaling — re-solving once with \
+             MC64 before believing it (discs-class hypersensitivity guard; \
+             feral_infeasibility_scaling_retry)…"
+        );
+        // Flip the scaling for the retry. The main IPM rereads `feral_scaling`
+        // fresh each solve, but the restoration sub-IPM uses the provider we
+        // snapshotted above at the original scaling — so rebuild it too, or the
+        // restoration leg would stay on the failing scaling.
+        let _ = app
+            .options_mut()
+            .read_from_str("feral_scaling mc64\n", true);
+        let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
+        let bff_mint = move || -> InnerBackendFactoryFactory {
+            let feral_cfg = feral_cfg.clone();
+            Box::new(move || default_backend_factory(feral_cfg.clone()))
+        };
+        let resto_provider = make_default_restoration_factory_provider(
+            RestoAlgorithmBuilder::new(),
+            app.algorithm_builder_from_options(),
+            bff_mint,
+        );
+        app.set_restoration_factory_provider(resto_provider);
+
+        let retry_status = app.optimize_tnlp(Rc::clone(&tnlp));
+        if matches!(
+            retry_status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ) {
+            eprintln!("pounce: MC64 re-solve recovered the problem — promoting ({retry_status:?}).");
+            status = retry_status;
+        } else {
+            eprintln!(
+                "pounce: MC64 re-solve did not recover ({retry_status:?}); keeping the original \
+                 local-infeasibility verdict (now corroborated by a second scaling)."
+            );
+            status = ApplicationReturnStatus::InfeasibleProblemDetected;
+        }
+    }
+
     let solve_stats = app.statistics();
     let counters = counting.borrow();
     if json_dbg {
