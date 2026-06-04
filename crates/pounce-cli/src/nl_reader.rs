@@ -1740,6 +1740,37 @@ pub fn render_all_constraint_equations(prob: &NlProblem) -> Vec<String> {
         .collect()
 }
 
+/// Structural sparsity of the constraint Jacobian as flat 0-based
+/// triplets `(irow, jcol)`: one pair per variable that constraint `k`
+/// structurally depends on — the union of its linear support and the
+/// `Var(i)` indices appearing anywhere in its nonlinear tree
+/// ([`collect_vars`]). Sorted and deduplicated within each row.
+///
+/// This is the input to the debugger's Dulmage–Mendelsohn
+/// structural-rank check (`diagnose`), which names the over-determined
+/// (candidate redundant / inconsistent) equations and under-determined
+/// variables. Naming the dependent rows — rather than reporting
+/// "equations 3, 15, …" — is the roadblock Lee et al. (2024) flag for
+/// equation-oriented model debugging. See
+/// <https://doi.org/10.69997/sct.147875>.
+pub fn constraint_jacobian_sparsity(prob: &NlProblem) -> (Vec<Index>, Vec<Index>) {
+    let mut irow: Vec<Index> = Vec::new();
+    let mut jcol: Vec<Index> = Vec::new();
+    let mut support: BTreeSet<usize> = BTreeSet::new();
+    for k in 0..prob.m {
+        support.clear();
+        for &(j, _coef) in &prob.con_linear[k] {
+            support.insert(j);
+        }
+        collect_vars(&prob.con_nonlinear[k], &mut support);
+        for &j in &support {
+            irow.push(k as Index);
+            jcol.push(j as Index);
+        }
+    }
+    (irow, jcol)
+}
+
 /// Flatten an additive expression tree into independent summand
 /// expressions, each of which becomes its own Hessian tape.
 ///
@@ -2956,5 +2987,26 @@ S1 2 sens_init_constr
         let all = render_all_constraint_equations(&prob);
         assert_eq!(all.len(), 2);
         assert_eq!(all[1], "0 <= mass_in <= 500");
+    }
+
+    #[test]
+    fn constraint_jacobian_sparsity_unions_linear_and_nonlinear() {
+        let mut prob = parse_nl_text(SIMPLE).unwrap();
+        prob.n = 3;
+        prob.m = 2;
+        // Row 0: linear in x1, nonlinear in x0 and x2 → support {0,1,2}.
+        // Row 1: linear in x2 only → support {2}.
+        prob.con_linear = vec![vec![(1, 4.0)], vec![(2, 1.0)]];
+        prob.con_nonlinear = vec![
+            Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(2))),
+            Expr::Const(0.0),
+        ];
+        prob.g_l = vec![0.0, 0.0];
+        prob.g_u = vec![0.0, 0.0];
+
+        let (irow, jcol) = constraint_jacobian_sparsity(&prob);
+        // Sorted, deduped per row: row 0 → cols 0,1,2; row 1 → col 2.
+        assert_eq!(irow, vec![0, 0, 0, 1]);
+        assert_eq!(jcol, vec![0, 1, 2, 2]);
     }
 }

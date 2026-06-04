@@ -290,7 +290,35 @@ pub fn main() -> ExitCode {
                             prob.con_names.clone(),
                             nl_reader::render_all_constraint_equations(&prob),
                         );
-                        hook.borrow_mut().set_equation_book(book);
+                        // Structural rank analysis of the equality Jacobian
+                        // (Dulmage–Mendelsohn) so `diagnose` can name the
+                        // dependent equations behind a singular system —
+                        // Lee et al. (2024,
+                        // https://doi.org/10.69997/sct.147875).
+                        let (jac_irow, jac_jcol) = nl_reader::constraint_jacobian_sparsity(&prob);
+                        let probe = pounce_presolve::incidence::ProbeView {
+                            n_vars: prob.n,
+                            m_rows: prob.m,
+                            jac_irow: &jac_irow,
+                            jac_jcol: &jac_jcol,
+                            jac_values: None,
+                            g_l: &prob.g_l,
+                            g_u: &prob.g_u,
+                            linearity: None,
+                            one_based: false,
+                            eq_tol: 1e-12,
+                            excluded_vars: None,
+                            excluded_rows: None,
+                        };
+                        let inc = pounce_presolve::incidence::EqualityIncidence::from_probe(&probe);
+                        let structure = pounce_cli::debug_repl::StructureBook::new(
+                            inc,
+                            prob.con_names.clone(),
+                            prob.var_names.clone(),
+                        );
+                        let mut h = hook.borrow_mut();
+                        h.set_equation_book(book);
+                        h.set_structure_book(structure);
                     }
                     let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
                     nl_expr_provider = Some(Rc::clone(&nl_rc)

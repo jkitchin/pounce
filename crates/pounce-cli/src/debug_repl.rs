@@ -47,6 +47,9 @@ use pounce_algorithm::debug::{
 };
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
 use pounce_nlp::ipopt_nlp::SplitNames;
+use pounce_presolve::dulmage_mendelsohn::DulmageMendelsohnPartition;
+use pounce_presolve::incidence::EqualityIncidence;
+use pounce_presolve::matching::hopcroft_karp;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
@@ -763,6 +766,138 @@ impl EquationBook {
     }
 }
 
+/// Maximum number of named culprits listed inline in a structural
+/// finding before it switches to a "+N more" tail. Keeps a pathological
+/// model (hundreds of redundant rows) from flooding the report while
+/// still reporting the full count — no silent truncation.
+const MAX_STRUCT_NAMES: usize = 10;
+
+/// Structural rank analysis of the *equality* constraint Jacobian,
+/// after the Dulmage–Mendelsohn decomposition used by IDAES's
+/// `DiagnosticsToolbox`. The Hessian-free, iterate-independent sparsity
+/// pattern alone tells us whether a subset of equations is
+/// over-determined — more equations than the variables they jointly
+/// touch — which forces at least one of them to be redundant or
+/// mutually inconsistent (a structurally singular Jacobian, LICQ
+/// failure).
+///
+/// The payoff is *naming* those rows. The solver's δ_c dual
+/// regularization and wrong-inertia flags detect rank deficiency but
+/// report it as a scalar; this book maps the dependent rows back to the
+/// model's equation names so `diagnose` can say `mass_balance` instead
+/// of "equation 13". Tracing a singular system to *named* equations is
+/// exactly the roadblock Lee et al. (2024) identify for
+/// equation-oriented model debugging. See
+/// <https://doi.org/10.69997/sct.147875>.
+pub struct StructureBook {
+    /// Equality-row × variable incidence graph (built from the source
+    /// model's Jacobian sparsity).
+    inc: EqualityIncidence,
+    /// Constraint names in original `.nl` row order (empty `String`
+    /// when a row has no name).
+    con_names: Vec<String>,
+    /// Variable names in original column order (empty `String` when a
+    /// column has no name).
+    var_names: Vec<String>,
+}
+
+impl StructureBook {
+    /// Build from the equality incidence graph plus the model's
+    /// constraint and variable name vectors (original order). The
+    /// incidence rows index into `con_names` via
+    /// `inc.eq_row_inner_idx`; the incidence columns index `var_names`
+    /// directly.
+    pub fn new(inc: EqualityIncidence, con_names: Vec<String>, var_names: Vec<String>) -> Self {
+        Self {
+            inc,
+            con_names,
+            var_names,
+        }
+    }
+
+    /// Label for equality-incidence row `eq_row`: the source model's
+    /// constraint name if present, else `c[<orig row>]`.
+    fn con_label(&self, eq_row: usize) -> String {
+        let orig = self.inc.eq_row_inner_idx[eq_row];
+        match self.con_names.get(orig) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("c[{orig}]"),
+        }
+    }
+
+    /// Label for variable column `v`: the source model's variable name
+    /// if present, else `x[v]`.
+    fn var_label(&self, v: usize) -> String {
+        match self.var_names.get(v) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("x[{v}]"),
+        }
+    }
+
+    /// Join up to [`MAX_STRUCT_NAMES`] labels, appending an explicit
+    /// "+N more" tail when truncated so nothing is dropped silently.
+    fn join_capped(labels: &[String]) -> String {
+        if labels.len() <= MAX_STRUCT_NAMES {
+            labels.join(", ")
+        } else {
+            let head = labels[..MAX_STRUCT_NAMES].join(", ");
+            let more = labels.len() - MAX_STRUCT_NAMES;
+            format!("{head}, … (+{more} more)")
+        }
+    }
+
+    /// Run the structural pass and return `diagnose` findings.
+    ///
+    /// Only the *over-determined* block is reported: it names the
+    /// candidate dependent (redundant / inconsistent) equations behind
+    /// a singular Jacobian. The under-determined block is deliberately
+    /// suppressed — an NLP with more variables than equality
+    /// constraints is the normal, well-posed case (the remaining
+    /// degrees of freedom are pinned by the objective, bounds, and
+    /// inequalities), so flagging it would fire on nearly every model.
+    fn findings(&self) -> Vec<(&'static str, &'static str, String)> {
+        let mut out = Vec::new();
+        if self.inc.n_eq_rows() == 0 {
+            return out;
+        }
+        let matching = hopcroft_karp(&self.inc);
+        let dm = DulmageMendelsohnPartition::from_matching(&self.inc, &matching);
+        if dm.over_rows.is_empty() {
+            return out;
+        }
+
+        // over_rows.len() == over_cols.len() + (unmatched rows); the
+        // unmatched count is the minimum number of structurally
+        // redundant equations.
+        let excess = dm.over_rows.len().saturating_sub(dm.over_cols.len());
+        let eq_labels: Vec<String> = dm.over_rows.iter().map(|&r| self.con_label(r)).collect();
+        let var_labels: Vec<String> = dm.over_cols.iter().map(|&v| self.var_label(v)).collect();
+        let eqs = Self::join_capped(&eq_labels);
+        let shared = if var_labels.is_empty() {
+            "no variables".to_string()
+        } else {
+            Self::join_capped(&var_labels)
+        };
+        out.push((
+            "warning",
+            "structural_singularity",
+            format!(
+                "Constraint Jacobian is structurally singular (Dulmage–Mendelsohn): {} equation(s) \
+                 over-determine the {} variable(s) they jointly touch ({}), so ≥{} of them must be \
+                 redundant or mutually inconsistent (LICQ fails on this block). Candidate \
+                 dependent equations: {}. Inspect them with `print equation <name>`; this names \
+                 the rows behind any δ_c dual-regularization / wrong-inertia signal.",
+                dm.over_rows.len(),
+                dm.over_cols.len(),
+                shared,
+                excess.max(1),
+                eqs
+            ),
+        ));
+        out
+    }
+}
+
 pub struct SolverDebugger {
     mode: DebugMode,
     reg: Option<Rc<RegisteredOptions>>,
@@ -849,6 +984,11 @@ pub struct SolverDebugger {
     /// (e.g. a non-`.nl` entry point). See Lee et al. (2024,
     /// <https://doi.org/10.69997/sct.147875>) on naming culprit equations.
     equation_book: Option<EquationBook>,
+    /// Structural rank analysis of the source model's equality Jacobian,
+    /// for the `diagnose` command's `structural_singularity` finding.
+    /// `None` when no `.nl` model was wired in. See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    structure_book: Option<StructureBook>,
 }
 
 impl SolverDebugger {
@@ -891,6 +1031,7 @@ impl SolverDebugger {
             sweep: None,
             prompt_interrupts: 0,
             equation_book: None,
+            structure_book: None,
         }
     }
 
@@ -905,6 +1046,15 @@ impl SolverDebugger {
     /// (see Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
     pub fn set_equation_book(&mut self, book: EquationBook) {
         self.equation_book = Some(book);
+    }
+
+    /// Attach the source model's structural rank analysis, enabling the
+    /// `diagnose` command's `structural_singularity` finding (named
+    /// dependent equations). Wired in on the `.nl` entry path alongside
+    /// the equation book. See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    pub fn set_structure_book(&mut self, book: StructureBook) {
+        self.structure_book = Some(book);
     }
 
     /// Enable the `resolve` command, wiring the shared restart slot the
@@ -1583,6 +1733,13 @@ impl SolverDebugger {
                 ),
                 ));
             }
+        }
+
+        // --- Structural rank: name the dependent equations (DM). ---
+        // Iterate-independent; localizes the δ_c / wrong-inertia signal
+        // above to the specific over-determined rows by model name.
+        if let Some(book) = self.structure_book.as_ref() {
+            f.extend(book.findings());
         }
 
         // --- Multiplier magnitude: constraint-qualification / scaling. ---
@@ -3012,6 +3169,9 @@ impl SolverDebugger {
                 "equations": self.equation_book.is_some(),
                 // Live `diagnose` — point-in-time named health findings.
                 "diagnose": true,
+                // `diagnose`'s structural rank pass (Dulmage–Mendelsohn)
+                // names dependent equations; available with a `.nl` model.
+                "structural_diagnose": self.structure_book.is_some(),
                 "llm_assist": true,
                 "rewind": "primal_dual",
                 "resolve": self.restart.is_some(),
@@ -4313,6 +4473,88 @@ mod tests {
         let out = d.cmd_print_equation(&["nope"]);
         assert!(!out.ok);
         assert!(out.lines[0].contains("no constraint named or indexed"));
+    }
+
+    /// Build an `EqualityIncidence` from an explicit row→vars adjacency,
+    /// carrying the original-row indices so `con_label`'s `c[orig]`
+    /// fallback can be exercised.
+    fn eq_inc(n_vars: usize, eq_row_inner_idx: Vec<usize>, rows: &[&[usize]]) -> EqualityIncidence {
+        let mut adj_ptr = vec![0usize];
+        let mut vars = Vec::new();
+        for r in rows {
+            let mut v = r.to_vec();
+            v.sort_unstable();
+            v.dedup();
+            vars.extend_from_slice(&v);
+            adj_ptr.push(vars.len());
+        }
+        EqualityIncidence {
+            n_vars,
+            eq_row_inner_idx,
+            adj_ptr,
+            vars,
+        }
+    }
+
+    #[test]
+    fn structural_singularity_names_overdetermined_equations() {
+        // 3 equality rows over 2 vars, each touching both → a maximum
+        // matching saturates the 2 columns, leaving 1 row unmatched;
+        // the alternating walk pulls all 3 rows into the over-determined
+        // block. The finding must name every candidate equation, the
+        // shared variables, and the ≥1 redundancy excess.
+        let inc = eq_inc(2, vec![0, 1, 2], &[&[0, 1], &[0, 1], &[0, 1]]);
+        let book = StructureBook::new(
+            inc,
+            vec!["balance_a".into(), "balance_b".into(), "balance_c".into()],
+            vec!["flow".into(), "temp".into()],
+        );
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let (sev, code, msg) = &f[0];
+        assert_eq!(*sev, "warning");
+        assert_eq!(*code, "structural_singularity");
+        assert!(msg.contains("balance_a"), "msg: {msg}");
+        assert!(msg.contains("balance_b"), "msg: {msg}");
+        assert!(msg.contains("balance_c"), "msg: {msg}");
+        assert!(msg.contains("flow") && msg.contains("temp"), "msg: {msg}");
+        assert!(msg.contains("≥1"), "msg: {msg}");
+    }
+
+    #[test]
+    fn structural_findings_silent_when_well_posed_and_fall_back_to_indices() {
+        // Square 2×2 with a perfect matching → structurally sound, no
+        // finding (and the normal "more vars than eqs" case is never
+        // flagged either, since we only report the over-determined side).
+        let inc = eq_inc(2, vec![0, 1], &[&[0], &[1]]);
+        let book = StructureBook::new(inc, vec![], vec![]);
+        assert!(book.findings().is_empty());
+
+        // Over-determined but unnamed: 3 rows over 1 var, with the
+        // original row indices skipping 2 (e.g. an interleaved
+        // inequality) → labels fall back to `c[<orig>]`.
+        let inc = eq_inc(1, vec![0, 1, 3], &[&[0], &[0], &[0]]);
+        let book = StructureBook::new(inc, vec![], vec![]);
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let msg = &f[0].2;
+        assert!(
+            msg.contains("c[0]") && msg.contains("c[1]") && msg.contains("c[3]"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn structural_singularity_handles_empty_row_with_no_variables() {
+        // An empty equality row (no variable support) is unmatched and
+        // touches no columns → over-determined with no shared variables.
+        let inc = eq_inc(1, vec![0, 1], &[&[0], &[]]);
+        let book = StructureBook::new(inc, vec!["real".into(), "ghost".into()], vec!["x".into()]);
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let msg = &f[0].2;
+        assert!(msg.contains("ghost"), "msg: {msg}");
+        assert!(msg.contains("no variables"), "msg: {msg}");
     }
 
     #[test]

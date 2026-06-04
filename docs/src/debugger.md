@@ -427,6 +427,7 @@ finding. The checks:
 | `inertia_wrong` | warning | KKT inertia ≠ expected (rank-deficient Jacobian / indefinite Hessian) |
 | `heavy_regularization` | info | primal δ_w applied (Hessian indefinite) |
 | `dual_regularization` | warning | dual δ_c applied (linearly dependent / redundant equalities) |
+| `structural_singularity` | warning | a subset of equalities is over-determined → **names the dependent equations** |
 | `large_multipliers` | warning | a multiplier exceeds 1e8 (constraint-qualification / scaling) |
 | `bounds_pinned` | info | variables pressed against their bounds |
 | `tiny_step` | warning | accepted α_pr collapsed |
@@ -439,6 +440,42 @@ search direction, so they appear at/after `after_search_dir`. Names follow
 the same rule as `print residuals`: present on the `.nl` path with
 `.col`/`.row` files, index labels (`c[13]`) under presolve. The JSON payload
 is `{iter, findings: [{severity, code, message}], n_findings}`.
+
+#### Structural rank: naming the dependent equations
+
+`inertia_wrong` and `dual_regularization` *detect* a rank-deficient
+Jacobian, but only as a scalar — they tell you a redundancy exists, not
+*which* equations are redundant. `structural_singularity` closes that gap
+with a **Dulmage–Mendelsohn decomposition** of the equality Jacobian's
+sparsity pattern (the same structural check at the heart of IDAES's
+`DiagnosticsToolbox`). A maximum bipartite matching between equality rows
+and variables partitions the system; any **over-determined block** — more
+equations than the variables they jointly touch — forces at least one of
+those equations to be redundant or mutually inconsistent (LICQ fails). The
+finding lists those equations *by model name*, e.g.:
+
+```text
+pounce-dbg> diagnose
+[warning] structural_singularity: Constraint Jacobian is structurally singular
+         (Dulmage–Mendelsohn): 2 equation(s) over-determine the 1 variable(s)
+         they jointly touch (flow_rate), so ≥1 of them must be redundant or
+         mutually inconsistent (LICQ fails on this block). Candidate dependent
+         equations: mass_balance, mass_balance_dup. Inspect them with
+         `print equation <name>`; this names the rows behind any δ_c
+         dual-regularization / wrong-inertia signal.
+```
+
+This is the **named-culprit** payoff of Lee et al. (2024):[^lee2024]
+reporting *"`mass_balance` and `mass_balance_dup` are linearly dependent"*
+rather than *"the Jacobian is singular."* The check is iterate-independent
+(it reads only the sparsity pattern), so unlike the KKT-derived findings it
+fires from iteration 0 — it can flag a structurally broken model before the
+solver ever stalls on it. It is suppressed for well-posed problems: an NLP
+with more variables than equality constraints is the normal case (the spare
+degrees of freedom are pinned by the objective, bounds, and inequalities),
+so only the over-determined side is reported, never the under-determined
+one. Available on the `.nl` path; names fall back to `c[i]`/`x[i]` when no
+`.col`/`.row` auxiliary files were emitted.
 
 ---
 
