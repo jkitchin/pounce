@@ -557,6 +557,46 @@ impl DebugCtx {
         self.data.borrow().kkt_debug.as_ref()?.matrix.clone()
     }
 
+    /// Numerical rank diagnosis of the equality-constraint Jacobian `J_c`
+    /// at the current iterate. `J_c` is the block whose (near) rank
+    /// deficiency drives the `δ_c` dual regularization and wrong-inertia
+    /// signals; this assembles it densely (with the constraint scaling the
+    /// solver factorizes), runs a rank-revealing SVD, and localizes any
+    /// dependency to specific equation rows by their model name (see
+    /// [`crate::debug_rank`]). `None` in the CQ-less test context, when the
+    /// problem has no equality constraints, or if the SVD fails.
+    ///
+    /// Unlike the structural Dulmage–Mendelsohn pass (which works on the
+    /// sparsity pattern alone), this catches dependencies that are
+    /// *numerical* — values that cancel over a structurally full-rank
+    /// pattern at this point.
+    pub fn rank_report(&self) -> Option<crate::debug_rank::RankReport> {
+        use crate::debug_rank::RankRow;
+        use pounce_linalg::triplet::GenTMatrix;
+        let cq = self.cq.as_ref()?.borrow();
+        let jac = cq.curr_jac_c();
+        let g = jac.as_any().downcast_ref::<GenTMatrix>()?;
+        let m = g.n_rows() as usize;
+        let n = g.n_cols() as usize;
+        if m == 0 || n == 0 {
+            return None;
+        }
+        // Dense row-major from the 1-based triplets. Values already carry
+        // the constraint scaling, so this is the matrix the linear solver
+        // actually factorizes.
+        let mut dense = vec![0.0; m * n];
+        for ((&ir, &jc), &v) in g.irows().iter().zip(g.jcols()).zip(g.values()) {
+            dense[(ir - 1) as usize * n + (jc - 1) as usize] += v;
+        }
+        let rows: Vec<RankRow> = (0..m)
+            .map(|index| RankRow {
+                kind: ResidKind::Eq,
+                index,
+            })
+            .collect();
+        crate::debug_rank::svd_rank(m, n, &dense, rows)
+    }
+
     /// The outer iteration the captured KKT system / factor came from —
     /// the previous iteration at an `iter_start` pause (look-back). For
     /// labeling `viz kkt` / `viz L` with the right iteration.

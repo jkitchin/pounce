@@ -21,6 +21,7 @@ pounce-l1penalty.workspace = true
 pounce-qp.workspace = true
 pounce-observability.workspace = true
 pounce-hsl = { workspace = true, optional = true }
+faer.workspace = true
 tracing.workspace = true
 anstream.workspace = true
 anstyle.workspace = true

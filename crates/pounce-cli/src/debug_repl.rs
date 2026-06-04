@@ -45,6 +45,7 @@ use pounce_algorithm::debug::{
     is_live_tolerance, Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, ResidKind,
     Residual, BLOCK_NAMES,
 };
+use pounce_algorithm::debug_rank::{RankReport, RankRow};
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
 use pounce_nlp::ipopt_nlp::SplitNames;
 use pounce_presolve::dulmage_mendelsohn::DulmageMendelsohnPartition;
@@ -660,6 +661,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
                 "inactive",
                 "residuals",
                 "equation",
+                "rank",
             ]));
             v
         }
@@ -771,6 +773,14 @@ impl EquationBook {
 /// model (hundreds of redundant rows) from flooding the report while
 /// still reporting the full count — no silent truncation.
 const MAX_STRUCT_NAMES: usize = 10;
+
+/// Maximum singular values echoed inline by `print rank` before the tail
+/// is elided (the full spectrum is always in the JSON payload).
+const MAX_SINGULAR_VALUES_SHOWN: usize = 16;
+
+/// Maximum implicated rows listed inline by `print rank` before a
+/// "+N more" tail. Same no-silent-truncation rule as [`MAX_STRUCT_NAMES`].
+const MAX_RANK_CULPRITS: usize = 12;
 
 /// Structural rank analysis of the *equality* constraint Jacobian,
 /// after the Dulmage–Mendelsohn decomposition used by IDAES's
@@ -1350,6 +1360,7 @@ impl SolverDebugger {
             "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active | inactive".into(),
             "  print residuals [pr|du] [k]  top-k largest-magnitude residuals (default k=10)".into(),
             "  print equation [name|row]    source algebra of a constraint, by model name or row".into(),
+            "  print rank                   SVD rank of the equality Jacobian; names dependent equations".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
             "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
@@ -1439,6 +1450,9 @@ impl SolverDebugger {
         }
         if what == "equation" || what == "eqn" || what == "eq" {
             return self.cmd_print_equation(&rest[1..]);
+        }
+        if what == "rank" {
+            return self.cmd_print_rank(ctx);
         }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
         let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
@@ -1742,6 +1756,42 @@ impl SolverDebugger {
             f.extend(book.findings());
         }
 
+        // --- Numerical rank: SVD of the equality Jacobian at this point. ---
+        // The numerical complement to the structural pass above: catches
+        // *value* dependencies a full sparsity pattern hides, and localizes
+        // the δ_c signal to specific equations even when the structure is
+        // nominally full rank. Iterate-dependent (it factors J_c at x).
+        if let Some(rep) = ctx.rank_report() {
+            if rep.is_rank_deficient() {
+                let culprits: Vec<String> = rep
+                    .culprits
+                    .iter()
+                    .take(MAX_RANK_CULPRITS)
+                    .map(|c| rank_row_label(&rep.rows[c.row], &names))
+                    .collect();
+                let named = if culprits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Implicated equations: {}.", culprits.join(", "))
+                };
+                f.push((
+                    "warning",
+                    "rank_deficient_jacobian",
+                    format!(
+                        "Equality Jacobian J_c is numerically rank-deficient at this iterate: \
+                         rank {}/{} (deficiency {}), σ_min={:.2e}, cond={}. Linearly dependent \
+                         or redundant equality constraints — the root cause behind δ_c \
+                         regularization / wrong inertia.{named}",
+                        rep.rank,
+                        rep.n_rows(),
+                        rep.deficiency(),
+                        rep.sigma_min(),
+                        fmt_cond(rep.cond),
+                    ),
+                ));
+            }
+        }
+
         // --- Multiplier magnitude: constraint-qualification / scaling. ---
         let mut max_mult = 0.0_f64;
         for blk in ["y_c", "y_d", "z_l", "z_u", "v_l", "v_u"] {
@@ -1902,6 +1952,26 @@ impl SolverDebugger {
             "delta_c": k.delta_c,
             "status": k.status,
         }))
+    }
+
+    /// `print rank` — numerical rank diagnosis of the equality-constraint
+    /// Jacobian `J_c` at the current iterate. Runs a rank-revealing SVD,
+    /// reports the numerical rank / condition number, and — when the block
+    /// is rank-deficient — names the equations participating in the
+    /// near-null space (the dependency the `δ_c` regularization is papering
+    /// over). The numerical complement to the structural `diagnose` /
+    /// Dulmage–Mendelsohn pass: it also catches *value* dependencies a
+    /// full sparsity pattern hides.
+    fn cmd_print_rank(&self, ctx: &DebugCtx) -> CmdOut {
+        let Some(rep) = ctx.rank_report() else {
+            return CmdOut::err(
+                "no equality-constraint Jacobian to analyze (the problem has no equality \
+                 constraints, or there is no iterate yet)",
+            );
+        };
+        let names = ctx.split_names();
+        let (lines, data) = render_rank_report(&rep, &names, ctx.iter());
+        CmdOut::ok(lines).with_data(data)
     }
 
     fn cmd_run(&mut self, rest: &[&str]) -> CmdOut {
@@ -3304,6 +3374,149 @@ fn rank_residuals(mut entries: Vec<Residual>, k: usize) -> Vec<Residual> {
 /// inequality and `s`-space dual residuals share the `ineq` pool (one
 /// slack per inequality); `x`-space dual residuals index `x_var`. Returns
 /// `None` when the problem carries no names or the index is out of range.
+/// Render a [`RankReport`] into the human-readable REPL lines and the JSON
+/// payload for the agent interface. Pure (no solver access) so it can be
+/// unit-tested with a synthetic report and a name pool. Shared by the
+/// `print rank` command; the `diagnose` finding builds its own one-line
+/// summary directly from the report.
+fn render_rank_report(
+    rep: &RankReport,
+    names: &Option<SplitNames>,
+    iter: i32,
+) -> (Vec<String>, serde_json::Value) {
+    let m = rep.n_rows();
+    let n = rep.n_cols;
+    let mut lines = vec![
+        format!("equality Jacobian J_c: {m} row(s) × {n} column(s)"),
+        format!(
+            "numerical rank = {} / {}  (deficiency {})",
+            rep.rank,
+            m,
+            rep.deficiency()
+        ),
+        format!(
+            "σ_max = {:.3e}   σ_min = {:.3e}   cond = {}   (rank tol τ = {:.3e})",
+            rep.sigma_max(),
+            rep.sigma_min(),
+            fmt_cond(rep.cond),
+            rep.tol
+        ),
+    ];
+
+    // Singular-value spectrum, capped so a large block stays readable.
+    let shown: Vec<String> = rep
+        .singular_values
+        .iter()
+        .take(MAX_SINGULAR_VALUES_SHOWN)
+        .map(|s| format!("{s:.3e}"))
+        .collect();
+    let tail = if rep.singular_values.len() > MAX_SINGULAR_VALUES_SHOWN {
+        " …"
+    } else {
+        ""
+    };
+    lines.push(format!("singular values: [{}{tail}]", shown.join(", ")));
+
+    if rep.is_rank_deficient() {
+        lines.push(format!(
+            "rank-deficient: {} equation(s) lie in the near-null space \
+             (linearly dependent / redundant) — the source of δ_c regularization:",
+            rep.deficiency()
+        ));
+        for c in rep.culprits.iter().take(MAX_RANK_CULPRITS) {
+            let label = rank_row_label(&rep.rows[c.row], names);
+            lines.push(format!("  {label}   (participation {:.2})", c.weight));
+        }
+        if rep.culprits.len() > MAX_RANK_CULPRITS {
+            lines.push(format!(
+                "  … and {} more",
+                rep.culprits.len() - MAX_RANK_CULPRITS
+            ));
+        }
+        lines.push(
+            "inspect a row with `print equation <name>` to see its terms and current residual"
+                .to_string(),
+        );
+    } else {
+        lines.push("J_c has full row rank at this iterate.".to_string());
+    }
+
+    let culprits_json: Vec<serde_json::Value> = rep
+        .culprits
+        .iter()
+        .map(|c| {
+            let row = &rep.rows[c.row];
+            serde_json::json!({
+                "row": c.row,
+                "kind": row.kind.tag(),
+                "index": row.index,
+                "name": rank_row_name(row, names),
+                "label": rank_row_label(row, names),
+                "weight": c.weight,
+            })
+        })
+        .collect();
+
+    let data = serde_json::json!({
+        "iter": iter,
+        "n_rows": m,
+        "n_cols": n,
+        "rank": rep.rank,
+        "deficiency": rep.deficiency(),
+        "rank_deficient": rep.is_rank_deficient(),
+        "sigma_max": rep.sigma_max(),
+        "sigma_min": rep.sigma_min(),
+        "cond": cond_json(rep.cond),
+        "tol": rep.tol,
+        "singular_values": rep.singular_values,
+        "culprits": culprits_json,
+    });
+
+    (lines, data)
+}
+
+/// Model name of a rank-report row, if the problem carries names — the
+/// bare name (e.g. `mass_balance`), no `kind[..]` wrapper. `None` when
+/// unnamed. Routes through [`resid_name`] so equality/inequality rows hit
+/// the same name pools as the rest of the debugger.
+fn rank_row_name(row: &RankRow, names: &Option<SplitNames>) -> Option<String> {
+    let r = Residual {
+        kind: row.kind,
+        index: row.index,
+        value: 0.0,
+    };
+    resid_name(&r, names).map(|s| s.to_string())
+}
+
+/// Display label for a rank-report row: `c[mass_balance]` when named, else
+/// `c[3]` by split index — matching [`worst_named`]'s convention.
+fn rank_row_label(row: &RankRow, names: &Option<SplitNames>) -> String {
+    match rank_row_name(row, names) {
+        Some(name) => format!("{}[{}]", row.kind.tag(), name),
+        None => format!("{}[{}]", row.kind.tag(), row.index),
+    }
+}
+
+/// Human rendering of a condition number, spelling out a non-finite ratio
+/// (`σ_min == 0`) as `inf` rather than `NaN`/`inf` float formatting.
+fn fmt_cond(cond: f64) -> String {
+    if cond.is_finite() {
+        format!("{cond:.3e}")
+    } else {
+        "inf (σ_min = 0)".to_string()
+    }
+}
+
+/// JSON rendering of a condition number — `null` for a non-finite ratio,
+/// since JSON has no infinity.
+fn cond_json(cond: f64) -> serde_json::Value {
+    if cond.is_finite() {
+        serde_json::json!(cond)
+    } else {
+        serde_json::Value::Null
+    }
+}
+
 fn resid_name<'a>(r: &Residual, names: &'a Option<SplitNames>) -> Option<&'a str> {
     let n = names.as_ref()?;
     let pool = match r.kind {
@@ -4439,6 +4652,96 @@ mod tests {
         );
         // Empty input ⇒ None.
         assert_eq!(worst_named(vec![], &names), None);
+    }
+
+    use pounce_algorithm::debug_rank::RankCulprit;
+
+    fn rank_report_fixture() -> RankReport {
+        // 2×3 equality block, row 1 redundant: rank 1, deficiency 1, with
+        // both equality rows sharing the single null direction.
+        RankReport {
+            rows: vec![
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 0,
+                },
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 1,
+                },
+            ],
+            n_cols: 3,
+            singular_values: vec![2.0, 0.0],
+            tol: 1e-15,
+            rank: 1,
+            cond: f64::INFINITY,
+            culprits: vec![
+                RankCulprit {
+                    row: 0,
+                    weight: 0.5,
+                },
+                RankCulprit {
+                    row: 1,
+                    weight: 0.5,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn render_rank_report_names_culprits_and_builds_json() {
+        let names = Some(split_names_fixture());
+        let rep = rank_report_fixture();
+        let (lines, data) = render_rank_report(&rep, &names, 7);
+
+        let text = lines.join("\n");
+        assert!(text.contains("2 row(s) × 3 column(s)"), "{text}");
+        assert!(text.contains("numerical rank = 1 / 2"), "{text}");
+        // cond is non-finite (σ_min = 0) ⇒ spelled out, not "inf"/"NaN".
+        assert!(text.contains("inf (σ_min = 0)"), "{text}");
+        // Culprits resolved to model names from the eq pool.
+        assert!(text.contains("c[mass_balance]"), "{text}");
+        assert!(text.contains("c[energy_balance]"), "{text}");
+        assert!(text.contains("participation 0.50"), "{text}");
+
+        // JSON payload: cond is null (non-finite), culprits carry names.
+        assert_eq!(data["iter"], 7);
+        assert_eq!(data["rank"], 1);
+        assert_eq!(data["deficiency"], 1);
+        assert_eq!(data["rank_deficient"], true);
+        assert!(data["cond"].is_null(), "non-finite cond ⇒ null: {data}");
+        assert_eq!(data["culprits"][0]["name"], "mass_balance");
+        assert_eq!(data["culprits"][0]["label"], "c[mass_balance]");
+        assert_eq!(data["culprits"][1]["name"], "energy_balance");
+    }
+
+    #[test]
+    fn render_rank_report_full_rank_reports_positive_signal() {
+        let rep = RankReport {
+            rows: vec![
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 0,
+                },
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 1,
+                },
+            ],
+            n_cols: 3,
+            singular_values: vec![2.0, 1.0],
+            tol: 1e-15,
+            rank: 2,
+            cond: 2.0,
+            culprits: vec![],
+        };
+        let (lines, data) = render_rank_report(&rep, &None, 3);
+        let text = lines.join("\n");
+        assert!(text.contains("full row rank"), "{text}");
+        assert!(!text.contains("rank-deficient"), "{text}");
+        assert_eq!(data["rank_deficient"], false);
+        assert_eq!(data["cond"], 2.0);
+        assert_eq!(data["culprits"].as_array().map(|a| a.len()), Some(0));
     }
 
     #[test]

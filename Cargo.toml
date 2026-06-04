@@ -79,6 +79,10 @@ pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.3.1-de
 pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.3.1-dev" }
 pounce-observability = { path = "crates/pounce-observability", version = "0.3.1-dev" }
 feral = "0.10.0"
+# Dense linear algebra for the debugger's numerical rank diagnosis
+# (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
+# the dense `std` core — no rayon/sparse/rand/npy.
+faer = { version = "0.24.0", default-features = false, features = ["std"] }
 
 # Observability / colored-output stack (pounce#71). `anstyle` is the
 # style/color vocabulary, `anstyle-query` detects terminal capability
