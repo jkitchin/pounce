@@ -229,6 +229,22 @@ class _Context:
         self.psd_tol = psd_tol
         self.n_solves = 0
         self.max_solves = None
+        # Sampling budget: strategies whose expensive work is *sampling*
+        # rather than solving (MLSL) count each drawn sample here, so the
+        # search is bounded even on rounds that trigger no local solve.
+        self.n_samples = 0
+        self.max_samples = None
+
+    def note_sample(self):
+        """Count one sampled point against the sampling budget.
+
+        MLSL grows a sample pool and runs an O(N²) single-linkage scan per
+        round; on a problem where almost every sample is filtered out, no
+        solve fires, so ``max_solves`` never bounds the loop (pounce#103).
+        Counting samples gives that loop a hard ceiling."""
+        if self.max_samples is not None and self.n_samples >= self.max_samples:
+            raise _Stop("budget_exhausted")
+        self.n_samples += 1
 
     def solve(self, fun, x0, jac=None, hess=None):
         if self.max_solves is not None and self.n_solves >= self.max_solves:
@@ -535,8 +551,10 @@ def _run_mlsl(ctx, state, x0, rng, kw):
     res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
     state.consider(res.x, res.success, polish=False)
     while True:
-        # Grow the sample pool.
+        # Grow the sample pool (each draw counts against the sample budget,
+        # so a round that solves nothing still makes the loop terminate).
         for _ in range(batch):
+            ctx.note_sample()
             s = _sample(ctx.bounds, x0, rng, jitter, sobol)
             pool_x.append(s)
             pool_f.append(float(ctx.fun(s)))
@@ -686,6 +704,14 @@ def find_minima(
 
     ctx = _Context(fun, jac, hess, bounds, constraints, options, psd_tol)
     ctx.max_solves = max_solves
+    # Hard ceiling on sampled points for solve-gated strategies (MLSL): the
+    # natural envelope is one round of samples per unit of solve budget.
+    # Termination is otherwise solve-gated, so a round whose clustering filter
+    # rejects every sample never advances `max_solves` or `patience`; this cap
+    # guarantees `max_solves` bounds wall-clock even when no solve ever fires
+    # (pounce#103). Overridable via strategy_kw["max_samples"].
+    batch = max(int(kw.get("samples_per_round", 20)), 1)
+    ctx.max_samples = int(kw.get("max_samples", max_solves * batch))
     archive = MinimaArchive(dedup, distance)
     state = _State(ctx, archive, n_minima, patience, callback)
 

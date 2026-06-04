@@ -112,6 +112,40 @@ def test_patience_terminates_when_few_minima():
     assert r.x == pytest.approx([1.0, -2.0], abs=1e-5)
 
 
+def test_mlsl_terminates_and_respects_budget():
+    """pounce#103: MLSL must not spin on solve-less rounds.
+
+    In moderate dimension the clustering radius ``γ·√n·(ln N/N)^(1/n)``
+    barely shrinks, so once the single minimum of this bowl is found almost
+    every later sample is filtered out and no local solve fires. Before the
+    fix, termination was solve-gated — neither ``max_solves`` nor
+    ``patience`` advanced on those rounds — and the loop spun forever while
+    the pool grew under an O(N²) scan. A sample budget
+    (``max_solves`` × ``samples_per_round``) now bounds the loop directly,
+    independent of whether any solve fires.
+    """
+    n = 8
+    target = np.arange(1, n + 1) / (n + 1)  # interior optimum, well inside box
+    fun = lambda z: float(np.sum((np.asarray(z, float) - target) ** 2))
+    jac = lambda z: 2 * (np.asarray(z, float) - target)
+    hess = lambda z: 2 * np.eye(n)
+    bounds = [(-1.0, 1.0)] * n
+    r = pounce.find_minima(
+        fun, np.zeros(n), method="mlsl", jac=jac, hess=hess, bounds=bounds,
+        n_minima=6, max_solves=20, patience=8,
+        strategy_kw={"samples_per_round": 20},
+        seed=0, options=OPTS,
+    )
+    # It returns at all (no hang) with a valid terminal status...
+    assert r.status in ("converged", "budget_exhausted")
+    # ...having located the single minimum...
+    assert len(r) >= 1
+    assert r.fun == pytest.approx(0.0, abs=1e-6)
+    # ...and stayed within both budgets (solves, and the derived sample
+    # ceiling max_solves * samples_per_round).
+    assert r.n_solves <= 20
+
+
 def test_budget_is_respected():
     fun, jac, hess, bounds = rastrigin()
     r = pounce.find_minima(

@@ -93,6 +93,12 @@ struct Driver<'a> {
     stagnant: usize,
     n_solves: usize,
     max_solves: usize,
+    /// Sampled points drawn so far (only MLSL counts against this).
+    n_samples: usize,
+    /// Hard ceiling on sampled points for solve-gated strategies (MLSL),
+    /// so `--max-solves` bounds wall-clock even when the clustering filter
+    /// rejects every sample (pounce#103).
+    max_samples: usize,
     psd_skipped_logged: bool,
 }
 
@@ -371,6 +377,19 @@ impl<'a> Driver<'a> {
         Ok(false)
     }
 
+    /// Count one drawn sample against the sampling budget. MLSL's expensive
+    /// work is *sampling* (an O(N²) single-linkage scan over a growing pool),
+    /// not solving, so on a problem where the clustering filter rejects
+    /// almost every sample no solve ever fires and `max_solves` cannot bound
+    /// the loop (pounce#103). The sample budget gives it a hard ceiling.
+    fn note_sample(&mut self) -> Result<(), Stop> {
+        if self.n_samples >= self.max_samples {
+            return Err(Stop::BudgetExhausted);
+        }
+        self.n_samples += 1;
+        Ok(())
+    }
+
     // ---- strategy loops (each runs until a Stop) ---------------------
 
     fn run(&mut self) -> Stop {
@@ -410,7 +429,10 @@ impl<'a> Driver<'a> {
         let r = self.solve_seeded(&x0, true)?;
         self.consider(r.x, r.success, false)?;
         loop {
+            // Grow the pool; each draw counts against the sample budget, so a
+            // round that solves nothing still drives the loop to terminate.
             for _ in 0..batch {
+                self.note_sample()?;
                 let s = self.sample(jitter);
                 let f = self.clean_f(&s).unwrap_or(f64::INFINITY);
                 pool_x.push(s);
@@ -706,6 +728,12 @@ pub fn run(
     }
 
     let max_solves = cfg.max_solves.unwrap_or(8 * cfg.n_minima);
+    // Sample ceiling for solve-gated strategies (MLSL): one round of samples
+    // per unit of solve budget. The patience-on-stall rule normally
+    // terminates first; this guarantees `--max-solves` bounds wall-clock even
+    // when the clustering filter rejects everything (pounce#103).
+    let batch = cfg.samples_per_round.unwrap_or(20).max(1);
+    let max_samples = max_solves.saturating_mul(batch);
 
     println!(
         "Searching for up to {} minima via `{}` (max {} solves, seed {})...",
@@ -734,6 +762,8 @@ pub fn run(
         stagnant: 0,
         n_solves: 0,
         max_solves,
+        n_samples: 0,
+        max_samples,
         psd_skipped_logged: false,
     };
 
