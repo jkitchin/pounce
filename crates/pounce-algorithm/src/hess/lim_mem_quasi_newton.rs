@@ -34,6 +34,7 @@ use crate::hess::r#trait::HessianUpdater;
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::{Index, Number};
+use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrixSpace;
 use pounce_linalg::multi_vector_matrix::{MultiVectorMatrix, MultiVectorMatrixSpace};
@@ -224,17 +225,27 @@ impl HessianUpdater for LimMemQuasiNewtonUpdater {
         // for arbitrarily large `n`.
         let (v_cols, u_cols) = self.build_low_rank(sigma, nu);
 
+        // Build `D`, `V`, `U` in `curr_x`'s *native* vector space rather
+        // than a fabricated flat `DenseVectorSpace`. For an ordinary
+        // (dense-primal) solve this is the same dense space as before; in
+        // the feasibility-restoration sub-IPM the primal is a 5-block
+        // `CompoundVector` `[orig | n_c | p_c | n_d | p_d]`, and a flat
+        // dense `W` cannot be multiplied against those compound iterates —
+        // `LowRankUpdateSymMatrix::mult_vector` panics in
+        // `element_wise_multiply`/`lr_mult_vector` the moment restoration
+        // runs (pounce#102). Cloning `curr_x` keeps `W` type-consistent
+        // with the space it operates on.
         let col_space = DenseVectorSpace::new(n_idx);
-        let mut diag = col_space.make_new_dense();
-        diag.set_values(&vec![sigma; nu]);
+        let mut diag = curr_x.make_new();
+        diag.set(sigma);
 
         let lr_space = LowRankUpdateSymMatrixSpace::new(n_idx, None, false);
         let mut lr = lr_space.make_new_low_rank();
-        lr.set_diag(Rc::new(diag) as Rc<dyn Vector>);
-        if let Some(mvm) = build_multi_vector(&col_space, &v_cols) {
+        lr.set_diag(Rc::from(diag));
+        if let Some(mvm) = build_multi_vector(&col_space, curr_x.as_ref(), &v_cols) {
             lr.set_v(Rc::new(mvm));
         }
-        if let Some(mvm) = build_multi_vector(&col_space, &u_cols) {
+        if let Some(mvm) = build_multi_vector(&col_space, curr_x.as_ref(), &u_cols) {
             lr.set_u(Rc::new(mvm));
         }
 
@@ -342,11 +353,15 @@ impl LimMemQuasiNewtonUpdater {
     }
 }
 
-/// Pack dense column data into a [`MultiVectorMatrix`] over `col_space`.
-/// Returns `None` when there are no columns, so the caller leaves the
-/// corresponding V/U slot of the [`LowRankUpdateSymMatrix`] unset.
+/// Pack flat column data into a [`MultiVectorMatrix`] whose columns are
+/// allocated in `template`'s native vector space (so the resulting
+/// low-rank `W` is type-consistent with the primal iterates — dense for
+/// an ordinary solve, a 5-block resto `CompoundVector` under restoration;
+/// see pounce#102). Returns `None` when there are no columns, so the
+/// caller leaves the corresponding V/U slot unset.
 fn build_multi_vector(
     col_space: &Rc<DenseVectorSpace>,
+    template: &dyn Vector,
     cols: &[Vec<Number>],
 ) -> Option<MultiVectorMatrix> {
     if cols.is_empty() {
@@ -355,20 +370,54 @@ fn build_multi_vector(
     let space = MultiVectorMatrixSpace::new(cols.len() as Index, Rc::clone(col_space));
     let mut mvm = space.make_new_multi_vector();
     for (k, col) in cols.iter().enumerate() {
-        let mut cv = col_space.make_new_dense();
-        cv.set_values(col);
-        mvm.set_vector(k as Index, Rc::new(cv) as Rc<dyn Vector>);
+        let mut cv = template.make_new();
+        set_expanded(cv.as_mut(), col);
+        mvm.set_vector(k as Index, Rc::from(cv));
     }
     Some(mvm)
 }
 
-fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
+/// Flatten a primal vector to its dense expanded values, handling both a
+/// plain [`DenseVector`] and a (possibly nested) restoration
+/// [`CompoundVector`].
+fn expanded_of(v: &dyn Vector) -> Vec<Number> {
     if let Some(dv) = v.as_any().downcast_ref::<DenseVector>() {
-        let ev = dv.expanded_values();
-        debug_assert_eq!(ev.len(), n);
-        return ev;
+        return dv.expanded_values();
     }
-    panic!("LimMemQuasiNewtonUpdater: curvature pairs must be DenseVector-backed");
+    if let Some(cv) = v.as_any().downcast_ref::<CompoundVector>() {
+        let mut out = Vec::with_capacity(cv.dim() as usize);
+        for i in 0..cv.n_comps() {
+            out.extend(expanded_of(cv.comp(i)));
+        }
+        return out;
+    }
+    panic!("LimMemQuasiNewtonUpdater: unsupported primal vector type for expansion");
+}
+
+/// Inverse of [`expanded_of`]: scatter a flat slice back into a primal
+/// vector of the same structure (dense or compound).
+fn set_expanded(dst: &mut dyn Vector, flat: &[Number]) {
+    if let Some(dv) = dst.as_any_mut().downcast_mut::<DenseVector>() {
+        dv.set_values(flat);
+        return;
+    }
+    if let Some(cv) = dst.as_any_mut().downcast_mut::<CompoundVector>() {
+        let n = cv.n_comps();
+        let dims: Vec<usize> = (0..n).map(|i| cv.comp(i).dim() as usize).collect();
+        let mut off = 0usize;
+        for (i, &d) in dims.iter().enumerate() {
+            set_expanded(cv.comp_mut(i as Index), &flat[off..off + d]);
+            off += d;
+        }
+        return;
+    }
+    panic!("LimMemQuasiNewtonUpdater: unsupported primal vector type for set_expanded");
+}
+
+fn dense_from_vec(v: &dyn Vector, n: usize) -> Vec<Number> {
+    let ev = expanded_of(v);
+    debug_assert_eq!(ev.len(), n);
+    ev
 }
 
 /// Initial Hessian scalar used as the diagonal of `B_0` before the
