@@ -23,6 +23,7 @@
 
 - [Pyomo](pyomo.md)
 - [Python API](python.md)
+- [Curve Fitting](curve-fitting.md)
 
 # Global Search
 
