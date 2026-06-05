@@ -251,6 +251,14 @@ SOL is an optional second positional naming the .sol output file
 (equivalent to --sol-output <path>); the AMPL `solver in.nl out.sol`
 convention.
 
+Subcommand:
+  pounce verify <problem.nl> <claim.sol> [--feas-tol T] [--json-output P]
+                            independently check that a .sol solution
+                            satisfies the canonical .nl's constraints and
+                            bounds, without trusting the solver/agent that
+                            produced it. Exit 0 = feasible, 20 = violated.
+                            Run `pounce verify --help` for details.
+
 When the .nl declares the sIPOPT suffixes (sens_state_1,
 sens_state_value_1, sens_init_constr), pounce additionally runs the
 post-optimal parametric sensitivity step and writes the perturbed

@@ -69,6 +69,7 @@ stdio.
 |-----------------------|-------------------------------------------------------------------------|
 | `analyze_problem`     | Inspect a builtin or `.nl` file: dimensions, class, option suggestions  |
 | `run_problem`         | Shell out to the `pounce` CLI; return parsed report + embedded analysis |
+| `verify_solution`     | Independently check a `.sol` against a canonical `.nl` (feasibility + optional KKT); returns a content-addressed, optionally HMAC-signed receipt — see note below |
 | `explain`             | Glossary lookup for per-iter columns and diagnose finding codes         |
 | `citations`           | Curated paper references by subsystem topic or bib key                  |
 | `load_solve_report`   | Validate a JSON report and return a headline summary                    |
@@ -95,6 +96,30 @@ By default, `analyze=True` runs `analyze_problem` first and embeds the
 result under `analysis`. Suggestions there are **advisory** — they are
 never auto-applied; the agent decides whether to re-run with them
 forwarded via the `options` arg.
+
+### `verify_solution` notes — proof of concept
+
+`verify_solution` lets an agent *request* an independent feasibility check it
+cannot fake: the verdict comes from the `pounce verify` binary recomputing
+`g(x*)` against the canonical `.nl`, not from the agent's claim. The
+**feasibility check itself is solid**.
+
+The **trust layer** around it is a **proof of concept**, not hardened:
+
+* It signs the receipt (HMAC-SHA256) only when this server process holds
+  `POUNCE_VERIFY_KEY`. That key only stays out of the agent's reach if the
+  server runs in a **separate trust boundary** (different user / container /
+  host). Over plain stdio on the same user as the agent, the signature adds
+  nothing — the agent can read the env. Prefer the consumer simply
+  re-running `pounce verify`, which needs no key.
+* Tools take file **paths**, so remote use assumes a shared filesystem.
+* Running this server remotely (`mcp.run("streamable-http")`) turns it into a
+  network service that needs TLS, authn, sandboxing, and rate limits.
+
+See [`docs/src/verify.md`](../../docs/src/verify.md) — "Status and
+hardening" — for the full trust model and the checklist of what production
+hardening would require, and `examples/signer_service.py` for a standalone
+reference signer.
 
 ## Wire it into an MCP client
 

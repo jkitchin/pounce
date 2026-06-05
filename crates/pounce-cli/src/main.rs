@@ -45,6 +45,15 @@ pub fn main() -> ExitCode {
     // Honors RUST_LOG, NO_COLOR, and POUNCE_LOG_FORMAT.
     pounce_observability::init_subscriber();
 
+    // `pounce verify <problem.nl> <claim.sol>` — an independent solution
+    // checker that re-derives feasibility from the canonical problem. It is
+    // a distinct subcommand (not a solve), so dispatch it before the normal
+    // argv parser and solve path. See `pounce_cli::verify`.
+    let raw_argv: Vec<String> = std::env::args().collect();
+    if raw_argv.get(1).map(|s| s == "verify").unwrap_or(false) {
+        return pounce_cli::verify::run_from_argv(&raw_argv[2..]);
+    }
+
     let args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {

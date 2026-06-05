@@ -20,3 +20,4 @@ pub mod print;
 pub mod seeded_tnlp;
 pub mod sens;
 pub mod solve_report;
+pub mod verify;

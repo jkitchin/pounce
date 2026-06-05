@@ -35,6 +35,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import glossary as G
 from . import reports as R
+from .verify_sig import check_signature
 
 
 mcp = FastMCP("pounce-studio")
@@ -417,6 +418,134 @@ def run_problem(
         except R.ReportError as e:
             result["summary_error"] = str(e)
     return result
+
+
+# ---- verify (independent solution check) ----------------------------
+
+
+@mcp.tool()
+def verify_solution(
+    nl_file: str,
+    sol_file: str,
+    feas_tol: float = 1e-6,
+    opt_tol: float = 1e-6,
+    require_optimal: bool = False,
+    expected_problem_sha256: str | None = None,
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    """Independently verify that a `.sol` satisfies a `.nl`'s constraints.
+
+    This is the trust anchor for agent workflows: it re-derives feasibility
+    from the **canonical** problem rather than trusting the `.sol`'s status
+    line or the agent's claim. Use it to confirm a solution before acting on
+    it. The agent can *request* a check but cannot fake its result — the
+    verdict comes from the `pounce verify` binary, and (when this server
+    holds `POUNCE_VERIFY_KEY`) the receipt's HMAC-SHA256 signature is
+    re-checked here.
+
+    Args:
+        nl_file: Path to the canonical AMPL `.nl` problem (the source of
+            truth). Verification runs against THIS model's constraints and
+            bounds, not whatever produced the `.sol`.
+        sol_file: Path to the claimed AMPL `.sol` solution to check.
+        feas_tol: Feasibility tolerance for constraints and bounds.
+        opt_tol: Stationarity tolerance for the optimality check.
+        require_optimal: If True, also reject a feasible-but-not-stationary
+            point (needs duals in the `.sol`).
+        expected_problem_sha256: If given, assert the canonical `.nl` hashes
+            to this value. Use it to bind the check to a specific, pinned
+            problem so a swapped/relaxed model is caught.
+        timeout_seconds: Kill the check after this many seconds.
+
+    Returns:
+        Dict with `verified` (the bottom line), `verdict`, `exit_code`,
+        `max_constraint_violation`, `max_bound_violation`, `problem_sha256`,
+        `solution_sha256`, `signature_present`, `signature_valid`
+        (True/False/None), `problem_matches_expected`, and `receipt` (the
+        full parsed JSON). `verified` is only trustworthy when, for your use
+        case, `signature_valid` is True (if you sign) and
+        `problem_matches_expected` is True (if you pin a hash).
+    """
+    binary = _find_pounce_bin()
+    nl = Path(nl_file).expanduser()
+    sol = Path(sol_file).expanduser()
+    if not nl.exists():
+        raise FileNotFoundError(f"no such .nl file: {nl}")
+    if not sol.exists():
+        raise FileNotFoundError(f"no such .sol file: {sol}")
+
+    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="pounce-verify-")
+    os.close(fd)
+    receipt_path = Path(tmp)
+
+    argv: list[str] = [
+        binary, "verify", str(nl), str(sol),
+        "--feas-tol", repr(feas_tol),
+        "--opt-tol", repr(opt_tol),
+        "--json-output", str(receipt_path),
+    ]
+    if require_optimal:
+        argv.append("--require-optimal")
+
+    # The binary inherits this process's environment, so if the server holds
+    # POUNCE_VERIFY_KEY the receipt is signed. NOTE: that key only stays out
+    # of the agent's reach if this server runs in a SEPARATE trust boundary
+    # (different user/container/host). If the agent has a shell on the same
+    # user/host, it can read this process's environment and the signature is
+    # not a real protection — fall back to the consumer recomputing `pounce
+    # verify`. See docs/src/verify.md ("Out-of-process signing").
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(
+            f"pounce verify did not finish within {timeout_seconds}s"
+        ) from e
+
+    receipt: dict[str, Any] = {}
+    if receipt_path.exists():
+        try:
+            receipt = json.loads(receipt_path.read_text())
+        except json.JSONDecodeError:
+            receipt = {}
+        finally:
+            receipt_path.unlink(missing_ok=True)
+
+    key = os.environ.get("POUNCE_VERIFY_KEY") or ""
+    signature_present = "signature" in receipt
+    signature_valid: bool | None
+    if not key:
+        signature_valid = None  # not signing in this deployment
+    elif not signature_present:
+        signature_valid = False  # we expected a signature but got none
+    else:
+        signature_valid = check_signature(receipt, key)
+
+    problem_sha256 = receipt.get("problem", {}).get("sha256")
+    problem_matches_expected: bool | None
+    if expected_problem_sha256 is None:
+        problem_matches_expected = None
+    else:
+        problem_matches_expected = problem_sha256 == expected_problem_sha256
+
+    feas = receipt.get("feasibility", {})
+    return {
+        "verified": bool(receipt.get("verified")) and proc.returncode == 0,
+        "verdict": receipt.get("verdict"),
+        "exit_code": proc.returncode,
+        "max_constraint_violation": feas.get("max_constraint_violation"),
+        "max_bound_violation": feas.get("max_bound_violation"),
+        "worst_constraint": feas.get("worst_constraint"),
+        "problem_sha256": problem_sha256,
+        "solution_sha256": receipt.get("solution", {}).get("sha256"),
+        "signature_present": signature_present,
+        "signature_valid": signature_valid,
+        "problem_matches_expected": problem_matches_expected,
+        "stdout_tail": proc.stdout[-2000:],
+        "stderr_tail": proc.stderr[-2000:],
+        "receipt": receipt,
+    }
 
 
 # ---- explain / citations --------------------------------------------
