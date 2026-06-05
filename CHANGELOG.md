@@ -42,13 +42,26 @@ defaulting to a flat vector of ones — so badly-scaled problems get a far bette
 seed, while `ones` (clipped into the bounds) is always among the scored
 candidates so the choice is never worse than the old default.
 
-`curve_fit_minima` finds **multiple** parameter sets by driving
-`pounce.find_minima` over the very same fitting objective (same weighting,
-robust loss, constraints, and resolved Jacobian), reusing the model Jacobian as
-the search gradient and the Gauss-Newton matrix as the search Hessian. It
-returns a list of full `CurveFitResult`s, one per distinct local minimum,
-ranked by SSE — for surfacing alternative fits on non-convex problems
-(peak-assignment ambiguity, frequency aliasing, label symmetry, …).
+### Added — `pounce.curve_fit_minima` (Python)
+
+`curve_fit_minima` finds **multiple** parameter sets that each explain the
+data, for the non-convex problems where one fit isn't the whole story
+(peak-assignment ambiguity, frequency aliasing in sinusoids, amplitude/decay
+trade-offs in sums of exponentials, sign/label symmetry, …).
+
+- drives `pounce.find_minima` over the *very same* fitting objective as
+  `curve_fit` — identical `sigma` weighting, robust `loss`, `f_scale`,
+  `constraints`, and resolved Jacobian — so the enumerated minima are true
+  optima of the actual fit, not a separate surrogate;
+- reuses the model Jacobian as the search **gradient** and the Gauss-Newton
+  matrix as the search **Hessian**, which sharpens the basin escapes and lets
+  `find_minima` certify each point as a minimum (rejecting saddles);
+- refines every distinct minimum into a full `CurveFitResult` (covariance,
+  CIs, optional `dpopt/ddata`) and returns them ranked by SSE, best first;
+- the `method`, `n_minima`, `max_solves`, `patience`, `dedup`, `seed`, and
+  `find_minima_kw` arguments pass straight through to `find_minima`; finite
+  `bounds` define the box it samples / repels within. Docs:
+  `docs/src/curve-fitting.md`.
 
 ### Added — `pounce verify` subcommand + signed receipts
 
