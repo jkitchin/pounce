@@ -247,6 +247,8 @@ mod tests {
             lambda0: vec![0.0],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         };
         let (qp, con_map) = extract_qp_with_map(&prob).expect("extract");
         // P = 2I → two diagonal entries.
@@ -304,6 +306,8 @@ mod tests {
             lambda0: vec![],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         };
         let qp = extract_qp(&prob).expect("extract");
         assert_eq!(qp.c.len(), 1);
@@ -349,6 +353,8 @@ mod tests {
             lambda0: vec![0.0],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         };
         let (qp, con_map) = extract_qp_with_map(&prob).expect("extract");
         // One inequality row (the lower bound row −x0 ≤ −1); no upper.
@@ -382,6 +388,8 @@ mod tests {
             lambda0: vec![],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         };
         let qp = extract_qp(&prob).expect("extract");
         // Two var-bound rows (x0 ≤ 1, −x0 ≤ 0).
@@ -412,6 +420,8 @@ mod tests {
             lambda0: vec![],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         };
         let qp = extract_qp(&prob).expect("extract");
         assert!(qp.p_lower.is_empty(), "LP has no Hessian");
@@ -444,6 +454,8 @@ mod tests {
             lambda0: vec![],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         };
         let qp = extract_qp(&prob).expect("extract");
         // minimize −x0.

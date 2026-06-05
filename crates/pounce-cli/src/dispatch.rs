@@ -810,6 +810,8 @@ mod tests {
             lambda0: vec![0.0],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         };
         assert_eq!(classify_problem(&prob), ProblemClass::Lp);
     }
@@ -955,6 +957,8 @@ mod tests {
             lambda0: vec![0.0; m],
             suffixes: Default::default(),
             imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
         }
     }
 
