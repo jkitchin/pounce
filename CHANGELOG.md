@@ -39,7 +39,8 @@ factor-based covariance and sensitivity exact. Docs:
 read from the model signature and the starting point is chosen data-drivenly
 (a bound-aware, data-scale candidate sweep scored by the objective) instead of
 defaulting to a flat vector of ones — so badly-scaled problems get a far better
-seed, while `ones` remains a candidate so the choice is never worse.
+seed, while `ones` (clipped into the bounds) is always among the scored
+candidates so the choice is never worse than the old default.
 
 `curve_fit_minima` finds **multiple** parameter sets by driving
 `pounce.find_minima` over the very same fitting objective (same weighting,

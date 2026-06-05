@@ -318,7 +318,10 @@ def _initial_guess(model, xdata, ydata, w, lb, ub, n, loss_fn, fs2):
     # its reciprocal) so neither very large nor very small true values are
     # systematically out of reach. The same scalar is applied to all free
     # parameters per candidate, keeping the count linear rather than n-D.
-    yscale = float(np.nanmax(np.abs(ydata))) if ydata.size else 1.0
+    # Use only the finite data to set the scale; an all-NaN/empty ``ydata``
+    # falls through to 1.0 without tripping numpy's "All-NaN slice" warning.
+    finite_y = np.abs(ydata[np.isfinite(ydata)]) if ydata.size else ydata[:0]
+    yscale = float(finite_y.max()) if finite_y.size else 1.0
     if not np.isfinite(yscale) or yscale == 0.0:
         yscale = 1.0
     mags = {1.0, 0.1, yscale, 1.0 / yscale}
@@ -749,6 +752,23 @@ f_scale, jac, alpha, sensitivity, options
         f, xdata, ydata, p0, sigma, bounds, constraints, loss, f_scale, jac
     )
 
+    # ``find_minima_kw`` is for knobs without a dedicated parameter here
+    # (``strategy_kw``, ``psd_tol``, ``distance``, …). Reject keys that collide
+    # with the arguments we already forward, so the failure is a clear message
+    # rather than a cryptic duplicate-keyword ``TypeError``.
+    extra_kw = dict(find_minima_kw or {})
+    forwarded = {
+        "method", "jac", "hess", "bounds", "constraints", "n_minima",
+        "max_solves", "patience", "dedup", "seed", "options",
+    }
+    clash = forwarded & extra_kw.keys()
+    if clash:
+        raise TypeError(
+            "find_minima_kw must not contain "
+            f"{sorted(clash)}; pass {'them' if len(clash) > 1 else 'it'} as the "
+            "dedicated curve_fit_minima argument(s) instead."
+        )
+
     # Keep the inner local solves quiet by default; the user's options win.
     search_options = {"print_level": 0, "sb": "yes"}
     search_options.update(options or {})
@@ -766,7 +786,7 @@ f_scale, jac, alpha, sensitivity, options
         dedup=dedup,
         seed=seed,
         options=search_options,
-        **dict(find_minima_kw or {}),
+        **extra_kw,
     )
 
     # Refine every distinct minimum into a full CurveFitResult, then rank by
