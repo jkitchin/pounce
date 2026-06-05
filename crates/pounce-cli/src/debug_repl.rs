@@ -362,7 +362,13 @@ impl CmdOut {
 }
 
 /// Metric names accepted in `break if …` (and shown by `help`).
-const METRICS: &[&str] = &["mu", "inf_pr", "inf_du", "obj", "err", "compl", "iter"];
+// The streamed scalar field names, in the exact form they appear on `pause` /
+// `progress` / `terminated` events — so a client can read `hello.metrics` and
+// index those keys directly off the event objects. Command input additionally
+// accepts the short aliases `obj`/`err`/`compl` (see `Metric::parse`); these are
+// the canonical advertised names.
+const METRICS: &[&str] =
+    &["iter", "mu", "objective", "inf_pr", "inf_du", "nlp_error", "complementarity"];
 
 /// A scalar the solver exposes for conditional breakpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3162,6 +3168,7 @@ impl SolverDebugger {
                     "inf_pr": ctx.inf_pr(),
                     "inf_du": ctx.inf_du(),
                     "nlp_error": ctx.nlp_error(),
+                    "complementarity": ctx.complementarity(),
                     "dims": dims,
                     "breakpoints": self.breaks,
                     "conditions": conds,
@@ -3173,8 +3180,10 @@ impl SolverDebugger {
         }
     }
 
-    /// Emit a per-iteration `progress` event (JSON mode only). Same
-    /// scalars as `pause`; fired while running between pauses.
+    /// Emit a per-iteration `progress` event (JSON mode only). Carries the
+    /// same scalar fields, under the same names, as `pause` (minus the
+    /// per-pause `dims` / `breakpoints` / `watches`); fired while running
+    /// between pauses.
     fn emit_progress_event(&self, ctx: &DebugCtx) {
         let ev = serde_json::json!({
             "event": "progress",
@@ -3182,7 +3191,9 @@ impl SolverDebugger {
             "mu": ctx.mu(),
             "inf_pr": ctx.inf_pr(),
             "inf_du": ctx.inf_du(),
-            "obj": ctx.objective(),
+            "objective": ctx.objective(),
+            "nlp_error": ctx.nlp_error(),
+            "complementarity": ctx.complementarity(),
         });
         emit_json(&ev);
     }

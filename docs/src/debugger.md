@@ -1076,8 +1076,9 @@ the debugger grows.
 ```json
 {"event":"pause","checkpoint":"iter_start","status":null,
  "iter":3,"mu":2.0e-2,"objective":5.05,"inf_pr":0.0,"inf_du":2.7e-14,
- "nlp_error":0.0237,"dims":{"x":2,"s":0,"y_c":0,"y_d":0,"z_l":2,"z_u":2,
- "v_l":0,"v_u":0},"breakpoints":[],"conditions":[],"reason":"mu<0.05"}
+ "nlp_error":0.0237,"complementarity":1.9e-2,"dims":{"x":2,"s":0,"y_c":0,
+ "y_d":0,"z_l":2,"z_u":2,"v_l":0,"v_u":0},"breakpoints":[],"conditions":[],
+ "reason":"mu<0.05"}
 ```
 
 `status` is non-null only at the `terminated` checkpoint. `reason`
@@ -1096,12 +1097,14 @@ carries the firing breakpoint / condition / event / interrupt.
 ### `progress`
 
 ```json
-{"event":"progress","iter":42,"mu":1.0e-5,"inf_pr":3.2e-7,"inf_du":1.1e-6,"obj":12.34}
+{"event":"progress","iter":42,"mu":1.0e-5,"inf_pr":3.2e-7,"inf_du":1.1e-6,
+ "objective":12.34,"nlp_error":1.1e-6,"complementarity":9.0e-6}
 ```
 
 Emitted once per outer iteration during a `continue`, so a UI can show
-live progress instead of a hang. Default on; toggle with the `progress`
-command.
+live progress instead of a hang. Carries the same scalar fields, under
+the same names, as `pause` — so `hello.metrics` names index directly off
+either event. Default on; toggle with the `progress` command.
 
 ### `terminated`
 
