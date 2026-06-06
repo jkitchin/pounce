@@ -39,7 +39,7 @@ use crate::debug::{fire, ConvexDebugState};
 use crate::ipm::{
     build_factorization, build_rhs, detect_infeasibility, dot, inf_norm, split_step, QpOptions,
 };
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -121,6 +121,10 @@ where
 
     let mut status = QpStatus::IterationLimit;
     let mut iters = 0;
+    // Opt-in per-iteration convergence trace (mirrors the direct path's
+    // `collect_iterates`): one record per stepping iteration plus a terminal
+    // record at the converged iterate (α = 0).
+    let mut trace: Vec<QpIterate> = Vec::new();
 
     for it in 0..opts.max_iter {
         iters = it;
@@ -164,12 +168,14 @@ where
         let dres = inf_norm(&rho_x) / tau;
         let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
         let res = pres.max(dres).max(gap);
+        // Un-homogenized objective `½x̂ᵀPx̂ + cᵀx̂` (x̂ = x/τ) — what the
+        // trace and debugger report.
+        let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
 
         // Debugger checkpoint: top of iteration. Blocks expose the
         // homogeneous iterate `(x, s, y, z, τ, κ)`; the objective is the
         // un-homogenized `½x̂ᵀPx̂ + cᵀx̂` with `x̂ = x/τ` (what the user reads).
         if hook.is_some() {
-            let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
             let mut st = ConvexDebugState {
                 cp: Checkpoint::IterStart,
                 iter: it as i32,
@@ -198,6 +204,18 @@ where
 
         if pres < opts.tol && dres < opts.tol && gap < opts.tol {
             status = QpStatus::Optimal;
+            // Terminal record at the converged iterate (no step taken).
+            if opts.collect_iterates {
+                trace.push(QpIterate {
+                    iter: it,
+                    objective: obj_hat,
+                    primal_infeasibility: pres,
+                    dual_infeasibility: dres,
+                    mu,
+                    alpha_primal: 0.0,
+                    alpha_dual: 0.0,
+                });
+            }
             break;
         }
 
@@ -315,8 +333,21 @@ where
         // Debugger checkpoint: the combined Newton direction and the single
         // symmetric step length are known but not yet applied (α reported
         // in both the primal and dual slots).
+        // Stepping record: the residuals/μ/objective at the start of this
+        // iteration, paired with the symmetric step length just computed.
+        if opts.collect_iterates {
+            trace.push(QpIterate {
+                iter: it,
+                objective: obj_hat,
+                primal_infeasibility: pres,
+                dual_infeasibility: dres,
+                mu,
+                alpha_primal: alpha,
+                alpha_dual: alpha,
+            });
+        }
+
         if hook.is_some() {
-            let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
             let mut st = ConvexDebugState {
                 cp: Checkpoint::AfterSearchDirection,
                 iter: it as i32,
@@ -436,7 +467,7 @@ where
         z_ub: vec![0.0; n],
         obj,
         iters,
-        iterates: Vec::new(),
+        iterates: trace,
     }
 }
 

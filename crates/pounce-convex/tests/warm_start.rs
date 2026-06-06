@@ -117,7 +117,16 @@ fn warm_start_matches_cold_with_bounds() {
 
 #[test]
 fn warm_start_reduces_iterations_on_nearby_problem() {
-    let opts = QpOptions::default();
+    // This test isolates the *warm-start mechanism*, so it holds the problem
+    // conditioning fixed by disabling equilibration. Ruiz equilibration is an
+    // independent iteration-count improvement; on a problem this small and
+    // well-scaled it makes the cold solve converge so well (here, 7 iters) that
+    // it absorbs the warm-start margin, conflating the two effects. The
+    // equilibrated warm path is exercised by `parallel_batch_warm_*`.
+    let opts = QpOptions {
+        equilibrate: false,
+        ..QpOptions::default()
+    };
     // Larger problem so the iteration difference is meaningful.
     let n = 30;
     let c0: Vec<f64> = (0..n).map(|i| -1.0 - (i as f64) * 0.1).collect();

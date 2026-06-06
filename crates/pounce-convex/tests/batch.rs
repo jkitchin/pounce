@@ -157,8 +157,20 @@ use pounce_convex::QpFactorization;
 fn factorization_handle_matches_one_shot() {
     // Fixed structure (P = 2I, 0 ≤ x ≤ 1), many objectives; the handle's
     // reused symbolic factor must give the same answers as one-shot solves.
+    //
+    // This test is about the *factorization-reuse* mechanism, so it compares
+    // against the identical algorithm: the build-once handle path runs the
+    // direct (non-HSDE) IPM on a captured factorization and does not
+    // Ruiz-equilibrate (it preserves the captured structure across instances),
+    // so both `use_hsde` and `equilibrate` are disabled on the one-shot too —
+    // otherwise the two would be different solves and only agree to solver
+    // tolerance, not the bit-tight match the reuse correctness check wants.
     let base = boxed_qp(vec![0.0, 0.0]);
-    let opts = QpOptions::default();
+    let opts = QpOptions {
+        use_hsde: false,
+        equilibrate: false,
+        ..QpOptions::default()
+    };
     let mut handle = QpFactorization::build(&base, &opts, backend).expect("build");
 
     for c in [

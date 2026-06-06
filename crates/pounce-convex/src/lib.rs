@@ -21,6 +21,7 @@
 pub mod batch;
 pub mod cones;
 pub(crate) mod debug;
+pub(crate) mod equilibrate;
 pub mod hsde;
 pub mod hsde_nonsym;
 pub mod ipm;

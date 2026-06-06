@@ -84,19 +84,39 @@ pub struct QpOptions {
     /// proof — there are no false positives, only (rarely) an
     /// `IterationLimit` fallback when no certificate is verifiable.
     pub infeas_tol: f64,
-    /// Use the homogeneous self-dual embedding driver ([`crate::hsde`])
-    /// instead of the default infeasible-start primal–dual method. The HSDE
-    /// driver self-starts, produces infeasibility certificates natively, and
-    /// is the substrate for the non-symmetric cones (exp/power). It does not
-    /// (yet) exploit warm starts or reuse an external factorization, so the
-    /// default path keeps those advantages for symmetric cones; this opts a
-    /// single solve into the embedding. Default `false`.
+    /// Use the homogeneous self-dual embedding driver ([`crate::hsde`]) rather
+    /// than the infeasible-start primal–dual method. HSDE self-starts, produces
+    /// infeasibility/unboundedness certificates natively, and stays stable on
+    /// badly-conditioned problems where the infeasible-start method diverges
+    /// (its duality measure blows up — e.g. NETLIB `nl`, where the direct path
+    /// runs `mu` to ~1e11 and trips a spurious `NumericalFailure`, while HSDE
+    /// converges). It is also the substrate for the non-symmetric cones
+    /// (exp/power). This matches Clarabel/ECOS/SCS, which embed precisely for
+    /// that robustness. **Default `true`.**
+    ///
+    /// HSDE does not (yet) exploit warm starts or reuse an external
+    /// factorization, so the advanced performance paths — [`QpWarmStart`] and
+    /// the build-once [`QpFactorization`] handle — set this `false` to opt back
+    /// into the direct solver, which they require. Their callers are doing
+    /// *nearby reoptimization* (a known-solvable neighborhood), where the
+    /// direct path's fragility is not a concern.
     pub use_hsde: bool,
     /// Collect a per-iteration convergence trace into
     /// [`crate::QpSolution::iterates`]. Off by default so a normal solve has
     /// no recording overhead; turn on when a solve report or benchmark
     /// harness wants the per-iteration history. Default `false`.
     pub collect_iterates: bool,
+    /// Ruiz-equilibrate the problem data before solving (see
+    /// [`crate::equilibrate`]). A conditioning aid for the **direct**
+    /// infeasible-start IPM, which factorizes the raw KKT system and is fragile
+    /// on badly-scaled data. It is applied only when [`Self::use_hsde`] is
+    /// `false` (the direct one-shot path and the warm-start path); the default
+    /// HSDE driver skips it, conditioning the system internally through its
+    /// per-cone NT scaling. Applied only on the LP/QP orthant entry points
+    /// ([`solve_qp_ipm`] / [`solve_qp_ipm_warm`]), where per-row scaling
+    /// preserves the cone; the SOCP/conic driver never equilibrates, since
+    /// per-row scaling is unsound for non-orthant cones. Default `true`.
+    pub equilibrate: bool,
 }
 
 impl Default for QpOptions {
@@ -114,8 +134,9 @@ impl Default for QpOptions {
             // LP/QP benchmark suites; 1e-10 is centered in it.
             reg: 1e-10,
             infeas_tol: 1e-7,
-            use_hsde: false,
+            use_hsde: true,
             collect_iterates: false,
+            equilibrate: true,
         }
     }
 }
@@ -129,6 +150,38 @@ impl Default for QpOptions {
 /// back into the original `z` and the bound multipliers `z_lb`/`z_ub`.
 /// The iteration math is unchanged by the presence of bounds.
 pub fn solve_qp_ipm<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // Ruiz-equilibrate the data first — but only for the *direct* driver.
+    // Solving the scaled problem and unscaling the result keeps the direct
+    // infeasible-start IPM well-conditioned without changing the recovered KKT
+    // point. The HSDE driver does NOT need (and must not get) this: the
+    // self-dual embedding conditions the system internally through its per-cone
+    // NT scaling — exactly as Clarabel/ECOS do, neither of which Ruiz-pre-scales
+    // — so it solves even badly-scaled data (NETLIB `nl`, ‖c‖~1e6) directly.
+    // Layering Ruiz on top is not only redundant for HSDE, it composes badly
+    // with presolve: presolve's reductions plus Ruiz's σ=1/‖c‖ cost scaling
+    // over-condition the reduced KKT system and trip the factorization near the
+    // boundary (a `NumericalFailure` that neither transform produces alone).
+    // See `crate::equilibrate`.
+    if opts.equilibrate && !opts.use_hsde {
+        let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
+        let inner = QpOptions {
+            equilibrate: false,
+            ..*opts
+        };
+        let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend);
+        scaling.unscale_solution(prob, &mut sol);
+        return sol;
+    }
+    solve_qp_ipm_unscaled(prob, opts, make_backend)
+}
+
+/// The bounds-aware orthant solve without equilibration (the historical
+/// [`solve_qp_ipm`] body). Factored out so [`solve_qp_ipm`] can wrap it with
+/// Ruiz scaling.
+fn solve_qp_ipm_unscaled<F>(prob: &QpProblem, opts: &QpOptions, make_backend: F) -> QpSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
@@ -208,6 +261,27 @@ pub fn solve_qp_ipm_warm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // Warm-starting requires the direct infeasible-start solver: HSDE
+    // self-starts and ignores a warm point (see `QpOptions::use_hsde`). So this
+    // path always runs the direct method, independent of the (HSDE) default —
+    // otherwise the warm start would silently do nothing. A caller that
+    // warm-starts is doing nearby reoptimization (a known-solvable
+    // neighborhood), where the direct path's fragility is not a concern.
+    let direct = QpOptions {
+        use_hsde: false,
+        equilibrate: false,
+        ..*opts
+    };
+    // Equilibrate (default on) just as the cold path does, mapping the
+    // warm-start point into the scaled coordinates so the warm benefit is
+    // preserved and the two paths run on identically-conditioned data.
+    if opts.equilibrate {
+        let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
+        let scaled_warm = scaling.scale_warm_start(warm);
+        let mut sol = solve_qp_ipm_warm(&scaled, &direct, &scaled_warm, make_backend);
+        scaling.unscale_solution(prob, &mut sol);
+        return sol;
+    }
     if !prob.has_bounds() {
         let w = WarmStart {
             x: warm.x.clone(),
@@ -215,7 +289,7 @@ where
             z: warm.z.clone(),
         };
         let cone = CompositeCone::single_nonneg(prob.m_ineq());
-        return solve_qp_core(prob, &cone, opts, Some(&w), make_backend);
+        return solve_qp_core(prob, &cone, &direct, Some(&w), make_backend);
     }
     let (expanded, bound_rows) = expand_bounds(prob);
     let w = WarmStart {
@@ -224,7 +298,7 @@ where
         z: merge_bound_duals(prob, &bound_rows, warm),
     };
     let cone = CompositeCone::single_nonneg(expanded.m_ineq());
-    let sol = solve_qp_core(&expanded, &cone, opts, Some(&w), make_backend);
+    let sol = solve_qp_core(&expanded, &cone, &direct, Some(&w), make_backend);
     split_bound_duals(prob, &bound_rows, sol)
 }
 
