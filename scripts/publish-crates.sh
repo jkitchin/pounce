@@ -85,7 +85,27 @@ fi
 
 cd "$(git rev-parse --show-toplevel)"
 
-echo "publish-crates.sh: ${#CRATES[@]} crate(s) to publish ${DRY_RUN:+(dry run)}"
+# Version being published. Every publishable crate inherits the workspace
+# version (`version.workspace = true`), so the single [workspace.package]
+# version in the root Cargo.toml is what each crate will publish as.
+TARGET_VERSION="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml \
+  | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+
+# True if <crate>@<version> already exists on crates.io. Used to make real
+# uploads idempotent: a version can never be re-published, so a CI run (or a
+# resumed run after a mid-batch failure) must skip what is already up rather
+# than erroring. NB: crates.io rejects requests without a User-Agent, so a
+# missing UA looks like "not published" — always send one.
+UA="pounce-crates-publish (https://github.com/jkitchin/pounce)"
+crate_version_published() {
+  local c="$1" v="$2" code
+  code="$(curl -fsS -o /dev/null -w '%{http_code}' \
+    -H "User-Agent: $UA" \
+    "https://crates.io/api/v1/crates/$c/$v" 2>/dev/null || true)"
+  [[ "$code" == "200" ]]
+}
+
+echo "publish-crates.sh: ${#CRATES[@]} crate(s) to publish ${DRY_RUN:+(dry run)} @ ${TARGET_VERSION}"
 echo "  inter-crate sleep: ${SLEEP}s"
 printf "  order: %s\n" "${CRATES[*]}"
 echo
@@ -94,6 +114,12 @@ for i in "${!CRATES[@]}"; do
   c="${CRATES[$i]}"
   n=$((i+1))
   total="${#CRATES[@]}"
+  # Idempotency: on a real upload, skip a crate already live at this version
+  # (dry runs still package every crate so packaging stays fully validated).
+  if [[ -z "$DRY_RUN" ]] && crate_version_published "$c" "$TARGET_VERSION"; then
+    echo "[${n}/${total}] $c ${TARGET_VERSION} already on crates.io — skipping"
+    continue
+  fi
   echo "[${n}/${total}] cargo publish -p $c $DRY_RUN"
   if ! cargo publish -p "$c" $DRY_RUN; then
     echo
