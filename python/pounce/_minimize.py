@@ -23,8 +23,19 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from ._pounce import Problem
+from ._route import classify_and_extract
 
 _EPS = float(np.finfo(np.float64).eps) ** 0.5
+
+# Convex-solver status string → scipy-style integer status (0 == success),
+# matching the NLP path's convention.
+_QP_STATUS_CODE = {
+    "optimal": 0,
+    "primal_infeasible": 2,
+    "dual_infeasible": 3,
+    "iteration_limit": 1,
+    "numerical_failure": 4,
+}
 
 
 @dataclass
@@ -241,6 +252,43 @@ def _build_problem_obj(
     return cls()
 
 
+def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
+    """Adapt a routed convex LP/QP solve back into an :class:`OptimizeResult`.
+
+    The convex solver minimizes ``½xᵀPx + cᵀx`` and never sees the objective's
+    degree-0 term, so we add ``ex.obj_const`` back to the reported value (the
+    same constant the CLI threads through ``run_convex_qp``). The result shape
+    is identical to the NLP path so the router is transparent to callers.
+    """
+    from .qp import solve_qp
+
+    res = solve_qp(
+        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, lb=ex.lb, ub=ex.ub,
+        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+    )
+    fun_val = float(res.obj) + ex.obj_const
+    success = res.status == "optimal"
+    selector = "lp-ipm" if ex.kind == "lp" else "qp-ipm"
+    return OptimizeResult(
+        x=np.asarray(res.x),
+        fun=fun_val,
+        success=success,
+        status=_QP_STATUS_CODE.get(res.status, 1),
+        message=res.status,
+        nit=int(res.iters),
+        info={
+            "solver": selector,
+            "problem_class": ex.kind,
+            "obj_val": fun_val,
+            "obj_constant": ex.obj_const,
+            "status": res.status,
+            "status_msg": res.status,
+            "iter_count": int(res.iters),
+            "residuals": res.residuals,
+        },
+    )
+
+
 def minimize(
     fun: Callable[[np.ndarray], float],
     x0: np.ndarray,
@@ -250,13 +298,52 @@ def minimize(
     constraints: Sequence | dict | None = None,
     options: Mapping[str, Any] | None = None,
 ) -> OptimizeResult:
-    """scipy.optimize.minimize-style facade over pounce."""
+    """scipy.optimize.minimize-style facade over pounce.
+
+    Solver routing mirrors the CLI's ``solver_selection``. By default
+    (``options={"solver_selection": "auto"}``) the problem is probed for
+    structure: a linear or convex-quadratic objective with only linear
+    constraints is dispatched to the specialized convex LP/QP interior-point
+    solver (``pounce.solve_qp``), and everything else falls through to the
+    general NLP filter-IPM. Detection is conservative and validated against
+    the true callables at held-out points, so a nonlinear problem is never
+    silently sent to the QP solver. Override with ``"solver_selection"``:
+
+    * ``"auto"`` (default) — route LP/convex-QP to the convex solver, else NLP;
+    * ``"nlp"`` — always use the NLP solver (the pre-routing behavior);
+    * ``"lp-ipm"`` / ``"qp-ipm"`` — force the convex solver, raising
+      ``ValueError`` if the problem is not detected as an LP / convex QP.
+    """
     # Promote a scalar / 0-d x0 to 1-D, matching scipy.optimize.minimize, so a
     # single-variable problem can be written ``minimize(f, 1.5)``.
     x0 = np.atleast_1d(_to_array(x0))
     n = x0.size
     lb, ub = _normalize_bounds(bounds, n)
     m, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
+
+    # Solver routing (mirrors the CLI's `solver_selection`). Pop the routing
+    # keys so the remainder of `options` still flows to the NLP solver.
+    opts = dict(options) if options else {}
+    selection = str(opts.pop("solver_selection", "auto")).lower()
+    route_tol = float(opts.pop("route_tol", 1e-5))
+    if selection in ("auto", "lp-ipm", "qp-ipm"):
+        extract = classify_and_extract(
+            fun=fun, jac=jac, hess=hess, lb=lb, ub=ub, m=m,
+            g_combined=g_combined, jac_combined=jac_combined,
+            cl=cl, cu=cu, x0=x0, rtol=route_tol,
+        )
+        if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
+            raise ValueError(
+                "solver_selection='lp-ipm' but the problem was not detected as "
+                "a linear program (linear objective + linear constraints)"
+            )
+        if selection == "qp-ipm" and extract is None:
+            raise ValueError(
+                "solver_selection='qp-ipm' but the problem was not detected as "
+                "a convex LP/QP (convex-quadratic objective + linear constraints)"
+            )
+        if extract is not None:
+            return _solve_via_convex(extract, opts)
 
     problem_obj = _build_problem_obj(
         fun=fun,
@@ -277,9 +364,10 @@ def minimize(
         cl=cl,
         cu=cu,
     )
-    if options:
-        for k, v in options.items():
-            problem.add_option(k, v)
+    # `opts` is `options` minus the routing keys (`solver_selection`,
+    # `route_tol`), so only genuine solver options reach the NLP backend.
+    for k, v in opts.items():
+        problem.add_option(k, v)
 
     x, info = problem.solve(x0=x0)
     return OptimizeResult(
