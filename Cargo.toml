@@ -84,7 +84,12 @@ pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.4.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.4.0" }
 pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.4.0" }
 pounce-observability = { path = "crates/pounce-observability", version = "0.4.0" }
-feral = "0.10.0"
+# feral HEAD past the 0.10.0 release checkpoint: issue #80 — MC64/scaling
+# perf work (Hungarian-heap reuse across columns, localized dense-column
+# cost, ldlt_compress profiling). Not yet on crates.io; pinned by rev for
+# reproducibility. NOTE: this git pin blocks the crates.io publish of the
+# pounce crates until feral cuts a release carrying these commits.
+feral = { git = "https://github.com/jkitchin/feral.git", rev = "bb7482124ffda79bd546a3a39ab3d8418b20c460" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.

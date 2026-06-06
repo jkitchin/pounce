@@ -306,8 +306,7 @@ dependencies = [
 [[package]]
 name = "feral"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c7bcc7e829a9454749e80f3aa3fe88c95f8483ec9b7a365ff88c0612ad51a3"
+source = "git+https://github.com/jkitchin/feral.git?rev=bb7482124ffda79bd546a3a39ab3d8418b20c460#bb7482124ffda79bd546a3a39ab3d8418b20c460"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -324,8 +323,7 @@ dependencies = [
 [[package]]
 name = "feral-amd"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "363d1f8038ad30f115b56330770fa075444251d49259de7b9f60852f18a0a3f5"
+source = "git+https://github.com/jkitchin/feral.git?rev=bb7482124ffda79bd546a3a39ab3d8418b20c460#bb7482124ffda79bd546a3a39ab3d8418b20c460"
 dependencies = [
  "feral-ordering-core",
 ]
@@ -333,8 +331,7 @@ dependencies = [
 [[package]]
 name = "feral-amf"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0414fac45abb5acec0d7ea9e82d125dba35ac0919491cbe5343ee6176eee8394"
+source = "git+https://github.com/jkitchin/feral.git?rev=bb7482124ffda79bd546a3a39ab3d8418b20c460#bb7482124ffda79bd546a3a39ab3d8418b20c460"
 dependencies = [
  "feral-ordering-core",
 ]
@@ -342,8 +339,7 @@ dependencies = [
 [[package]]
 name = "feral-kahip"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36709fbe0273267511c0b164f3b93d16e62451ae7872bd0390cf073ced1f81d9"
+source = "git+https://github.com/jkitchin/feral.git?rev=bb7482124ffda79bd546a3a39ab3d8418b20c460#bb7482124ffda79bd546a3a39ab3d8418b20c460"
 dependencies = [
  "feral-amd",
  "feral-metis",
@@ -353,8 +349,7 @@ dependencies = [
 [[package]]
 name = "feral-metis"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a90e908946db5c7f03e5fd9fb51f7af18e917deb245be583157ba41635792139"
+source = "git+https://github.com/jkitchin/feral.git?rev=bb7482124ffda79bd546a3a39ab3d8418b20c460#bb7482124ffda79bd546a3a39ab3d8418b20c460"
 dependencies = [
  "feral-amd",
  "feral-ordering-core",
@@ -363,14 +358,12 @@ dependencies = [
 [[package]]
 name = "feral-ordering-core"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c22774549d1d1209ae367ad4ce1c094151c43c9981b2009ae4c0b55a03387dbb"
+source = "git+https://github.com/jkitchin/feral.git?rev=bb7482124ffda79bd546a3a39ab3d8418b20c460#bb7482124ffda79bd546a3a39ab3d8418b20c460"
 
 [[package]]
 name = "feral-scotch"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80c7b693523b6ef86bde0258983b6d3b12ef25b2979024927af5b47d2a7c7c61"
+source = "git+https://github.com/jkitchin/feral.git?rev=bb7482124ffda79bd546a3a39ab3d8418b20c460#bb7482124ffda79bd546a3a39ab3d8418b20c460"
 dependencies = [
  "feral-amd",
  "feral-metis",
