@@ -106,7 +106,7 @@ both inputs by SHA-256** — so a downstream consumer can confirm exactly
 ```json
 {
   "pounce_verify_version": 1,
-  "solver": "pounce 0.3.1-dev",
+  "solver": "pounce 0.4.0",
   "problem":  { "path": "…", "sha256": "4bb435a3…", "n_vars": 1694, "n_cons": 1682 },
   "solution": { "path": "…", "sha256": "b77d9e7b…", "duals_present": true },
   "tolerances": { "feasibility": 1e-6, "optimality": 1e-6 },
