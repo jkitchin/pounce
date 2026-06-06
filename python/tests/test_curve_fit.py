@@ -478,3 +478,48 @@ def test_curve_fit_rejects_wrong_length_bounds():
     r2 = pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0],
                           bounds=[(-10, 10), (-10, 10), (-10, 10)])
     np.testing.assert_allclose(r1.popt, r2.popt, rtol=1e-6)
+
+
+def test_curve_fit_validates_data_sigma_fscale_p0():
+    """Imperfect-but-plausible inputs that used to fail cryptically (LinAlgError,
+    ZeroDivisionError, broadcast errors, a silent garbage fit) now raise clear
+    ValueErrors up front, like scipy's validation."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.2, 5, 20)
+    y = 3.0 * np.exp(-0.9 * x) + 0.5 + 0.02 * rng.standard_normal(x.size)
+
+    # sigma must be positive and finite (was: SVD/LinAlgError on 0, silent on <0)
+    with pytest.raises(ValueError, match="sigma must be positive"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0], sigma=np.r_[0.0, np.ones(19)])
+    with pytest.raises(ValueError, match="sigma must be positive"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0], sigma=-np.ones(20))
+
+    # f_scale must be positive and finite (was: LinAlgError on 0, silent on <0)
+    with pytest.raises(ValueError, match="f_scale must be a positive"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0], loss="huber", f_scale=0.0)
+    with pytest.raises(ValueError, match="f_scale must be a positive"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0], loss="huber", f_scale=-1.0)
+
+    # p0 length must match the model arity (was: TypeError deep in the solve)
+    with pytest.raises(ValueError, match="p0 has 2 value.* but the model takes 3"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1])
+    with pytest.raises(ValueError, match="p0 has 4 value.* but the model takes 3"):
+        pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0, 0])
+
+    # xdata / ydata length mismatch (was: cryptic broadcast ValueError)
+    with pytest.raises(ValueError, match="length mismatch"):
+        pounce.curve_fit(expdecay, x[:10], y, p0=[1, 1, 0])
+
+    # empty data (was: ZeroDivisionError)
+    with pytest.raises(ValueError, match="ydata is empty"):
+        pounce.curve_fit(expdecay, np.array([]), np.array([]), p0=[1, 1, 0])
+
+    # non-finite data (was: RuntimeError: back-solve failed)
+    with pytest.raises(ValueError, match="ydata contains non-finite"):
+        pounce.curve_fit(expdecay, x, np.r_[np.nan, y[1:]], p0=[1, 1, 0])
+    with pytest.raises(ValueError, match="xdata contains non-finite"):
+        pounce.curve_fit(expdecay, np.r_[np.inf, x[1:]], y, p0=[1, 1, 0])
+
+    # the well-formed call still fits
+    r = pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0])
+    np.testing.assert_allclose(r.popt, [3.0, 0.9, 0.5], atol=0.1)

@@ -304,6 +304,21 @@ with FD-verified first/second derivatives on the smooth interior.
   clear `ValueError` immediately, like scipy; `curve_fit`'s scipy-style
   `(lo, hi)` tuple form is likewise checked so array sides must be scalar or
   length-`n_params`.
+- **Input validation hardened** so imperfect-but-plausible arguments raise a
+  clear `ValueError` up front instead of failing cryptically deep in the solve:
+  - `minimize` / `find_minima` / `find_saddles` now **promote a scalar / 0-d
+    `x0` to 1-D** (matching scipy), so `minimize(f, 1.5)` works instead of
+    raising `iteration over a 0-d array`;
+  - a **reversed bound** (`low > high`) is rejected instead of silently
+    producing an infeasible box (a fixed `low == high` is still allowed);
+  - **malformed constraint dicts** (not a dict, or missing `type` / `fun`, or a
+    non-callable `fun`) raise a descriptive error instead of a bare `KeyError`;
+  - `curve_fit` validates its data and weights: `xdata`/`ydata` length must
+    match and be non-empty and finite, `sigma` must be positive and finite,
+    `f_scale` must be positive and finite, and an explicit `p0` must have one
+    start per model parameter — each previously surfaced as a `LinAlgError`,
+    `ZeroDivisionError`, back-solve `RuntimeError`, broadcast error, or a
+    silently wrong fit.
 
 ## [0.3.0] — 2026-06-02
 

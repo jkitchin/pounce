@@ -517,6 +517,19 @@ def _build_fit_problem(
     ydata = _to_array(ydata).ravel()
     m_data = ydata.size
 
+    # --- data sanity ---------------------------------------------------
+    if m_data == 0:
+        raise ValueError("ydata is empty; need at least one data point to fit")
+    if xdata.ndim == 1 and xdata.size != m_data:
+        raise ValueError(
+            f"xdata and ydata length mismatch: len(xdata)={xdata.size}, "
+            f"len(ydata)={m_data}"
+        )
+    if not np.all(np.isfinite(ydata)):
+        raise ValueError("ydata contains non-finite values (nan/inf)")
+    if not np.all(np.isfinite(xdata)):
+        raise ValueError("xdata contains non-finite values (nan/inf)")
+
     param_names = _infer_param_names(f)
 
     # --- parameter count -----------------------------------------------
@@ -533,6 +546,12 @@ def _build_fit_problem(
         p0 = _to_array(p0).ravel()
         n = p0.size
         auto_p0 = False
+        if param_names is not None and n != len(param_names):
+            raise ValueError(
+                f"p0 has {n} value(s) but the model takes {len(param_names)} "
+                f"parameter(s) ({', '.join(param_names)}); pass one start per "
+                f"parameter"
+            )
 
     # --- weights -------------------------------------------------------
     if sigma is None:
@@ -542,6 +561,11 @@ def _build_fit_problem(
         sigma_arr = _to_array(sigma).ravel()
         if sigma_arr.shape != (m_data,):
             raise ValueError("sigma must be a 1-D array matching ydata")
+        if not np.all(np.isfinite(sigma_arr)) or np.any(sigma_arr <= 0.0):
+            raise ValueError(
+                "sigma must be positive and finite (it is a per-point standard "
+                "deviation, so 1/sigma is the weight)"
+            )
         w = 1.0 / sigma_arr  # residual weight 1/sigma
 
     # --- loss ----------------------------------------------------------
@@ -554,7 +578,10 @@ def _build_fit_problem(
         loss_fn = _LOSSES[loss]
         loss_name = loss
     is_robust = (not callable(loss)) and loss in _ROBUST
-    fs2 = float(f_scale) ** 2
+    f_scale = float(f_scale)
+    if not np.isfinite(f_scale) or f_scale <= 0.0:
+        raise ValueError("f_scale must be a positive, finite scale")
+    fs2 = f_scale ** 2
 
     # --- model in parameter-vector form --------------------------------
     def model(x, p):

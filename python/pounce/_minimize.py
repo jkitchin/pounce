@@ -109,6 +109,13 @@ def _normalize_bounds(bounds, n: int):
             lb[i] = lo
         if hi is not None:
             ub[i] = hi
+    bad = np.where(lb > ub)[0]
+    if bad.size:
+        i = int(bad[0])
+        raise ValueError(
+            f"bounds[{i}] is reversed: lower {lb[i]} > upper {ub[i]}; "
+            f"each bound must be (low, high) with low <= high"
+        )
     return lb, ub
 
 
@@ -121,9 +128,22 @@ def _wrap_constraints(constraints, n: int):
 
     funs, jacs = [], []
     for c in constraints:
+        if not isinstance(c, dict):
+            raise ValueError(
+                f"each constraint must be a dict with 'type' and 'fun', got "
+                f"{type(c).__name__}"
+            )
+        if "type" not in c or "fun" not in c:
+            missing = sorted({"type", "fun"} - set(c))
+            raise ValueError(
+                f"constraint dict is missing required key(s) {missing}; a "
+                f"constraint needs {{'type': 'eq'|'ineq', 'fun': callable}}"
+            )
         kind = c["type"]
         if kind not in ("eq", "ineq"):
-            raise ValueError(f"unknown constraint type {kind!r}")
+            raise ValueError(f"unknown constraint type {kind!r}; use 'eq' or 'ineq'")
+        if not callable(c["fun"]):
+            raise ValueError("constraint 'fun' must be callable")
         funs.append(c["fun"])
         jacs.append(c.get("jac"))
 
@@ -231,7 +251,9 @@ def minimize(
     options: Mapping[str, Any] | None = None,
 ) -> OptimizeResult:
     """scipy.optimize.minimize-style facade over pounce."""
-    x0 = _to_array(x0)
+    # Promote a scalar / 0-d x0 to 1-D, matching scipy.optimize.minimize, so a
+    # single-variable problem can be written ``minimize(f, 1.5)``.
+    x0 = np.atleast_1d(_to_array(x0))
     n = x0.size
     lb, ub = _normalize_bounds(bounds, n)
     m, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)

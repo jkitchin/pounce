@@ -684,7 +684,7 @@ def find_minima(
         raise ValueError(
             f"unknown method {method!r}; choose from {sorted(_STRATEGIES)}"
         )
-    x0 = np.asarray(x0, dtype=float)
+    x0 = np.atleast_1d(np.asarray(x0, dtype=float))
     _validate_bounds_length(bounds, x0.size)
     rng = np.random.default_rng(seed)
     if max_solves is None:

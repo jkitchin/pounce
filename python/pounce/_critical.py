@@ -236,7 +236,7 @@ def find_saddles(
     the requested Morse index, a converged gradient, and within bounds are
     de-duplicated and collected.
     """
-    x0 = np.asarray(x0, float)
+    x0 = np.atleast_1d(np.asarray(x0, float))
     _validate_bounds_length(bounds, x0.size)
     rng = np.random.default_rng(seed)
     n = x0.size

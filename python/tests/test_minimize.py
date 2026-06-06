@@ -89,3 +89,51 @@ def test_minimize_rejects_wrong_length_bounds():
                           options={"tol": 1e-10, "print_level": 0})
     assert res.success
     np.testing.assert_allclose(res.x, [0.0, 0.0], atol=1e-6)
+
+
+def test_minimize_promotes_scalar_x0():
+    """A scalar / 0-d ``x0`` is promoted to 1-D (like scipy), so a
+    single-variable problem can be written ``minimize(f, 1.5)`` instead of
+    tripping ``TypeError: iteration over a 0-d array``."""
+    f = lambda x: float(x[0]) ** 2
+    g = lambda x: np.array([2.0 * x[0]])
+    for x0 in (1.5, np.array(1.5)):
+        res = pounce.minimize(f, x0=x0, jac=g, options={"tol": 1e-10, "print_level": 0})
+        assert res.success
+        assert res.x.shape == (1,)
+        np.testing.assert_allclose(res.x, [0.0], atol=1e-6)
+
+
+def test_minimize_rejects_reversed_bounds():
+    """A reversed ``(low, high)`` pair (low > high) used to silently produce an
+    infeasible box; it now raises a clear ValueError. A fixed bound (low ==
+    high) is still allowed."""
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+    with pytest.raises(ValueError, match=r"bounds\[0\] is reversed"):
+        pounce.minimize(f, x0=np.zeros(2), jac=g, bounds=[(1.0, -1.0), (-2, 2)],
+                        options={"print_level": 0})
+    # low == high (a fixed variable) is permitted
+    res = pounce.minimize(f, x0=np.array([0.3, 0.3]), jac=g,
+                          bounds=[(0.5, 0.5), (-2, 2)],
+                          options={"tol": 1e-10, "print_level": 0})
+    np.testing.assert_allclose(res.x[0], 0.5, atol=1e-6)
+
+
+def test_minimize_rejects_malformed_constraint_dicts():
+    """Malformed constraint dicts used to raise a bare ``KeyError``; they now
+    raise a clear ValueError naming the problem."""
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+    opts = {"print_level": 0}
+    with pytest.raises(ValueError, match="missing required key"):
+        pounce.minimize(f, np.ones(2), jac=g,
+                        constraints={"fun": lambda x: x[0] - x[1]}, options=opts)
+    with pytest.raises(ValueError, match="missing required key"):
+        pounce.minimize(f, np.ones(2), jac=g,
+                        constraints={"type": "eq"}, options=opts)
+    with pytest.raises(ValueError, match="must be a dict"):
+        pounce.minimize(f, np.ones(2), jac=g, constraints=["bad"], options=opts)
+    with pytest.raises(ValueError, match="must be callable"):
+        pounce.minimize(f, np.ones(2), jac=g,
+                        constraints={"type": "eq", "fun": 3.0}, options=opts)
