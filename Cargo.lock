@@ -967,6 +967,7 @@ dependencies = [
  "pounce-linsol",
  "pounce-nlp",
  "pounce-presolve",
+ "pounce-simplex",
  "rayon",
 ]
 
@@ -1097,6 +1098,13 @@ dependencies = [
  "pounce-common",
  "pounce-linalg",
  "pounce-nlp",
+]
+
+[[package]]
+name = "pounce-simplex"
+version = "0.4.0"
+dependencies = [
+ "faer",
 ]
 
 [[package]]
