@@ -19,7 +19,7 @@
 //! an interval straddling zero, and `Opaque` — fall back to the interval box
 //! bound on `w_k`: valid, just weak, which branching then sharpens.
 
-use crate::envelope::{self, Envelope};
+use crate::envelope::{self, Cut, Envelope};
 use crate::problem::GlobalProblem;
 use pounce_convex::{QpProblem, Triplet};
 use pounce_nlp::{FbbtOp, FbbtTape};
@@ -361,14 +361,44 @@ impl Builder {
             return; // declined: box bound only
         };
         for c in &env.under {
+            if !cut_is_finite(c) {
+                continue; // skip a near-singular tangent (see `cut_is_finite`)
+            }
             // w ≥ slope·a + intercept  ⇔  slope·a − w ≤ −intercept
             self.emit_le(&[(wh, -1.0), (a, c.slope)], -c.intercept);
         }
         for c in &env.over {
+            if !cut_is_finite(c) {
+                continue;
+            }
             // w ≤ slope·a + intercept  ⇔  w − slope·a ≤ intercept
             self.emit_le(&[(wh, 1.0), (a, -c.slope)], c.intercept);
         }
     }
+}
+
+/// Largest cut slope/intercept magnitude allowed into the relaxation LP.
+///
+/// The polyhedral envelopes ([`crate::envelope`]) are always *valid* global
+/// bounds, but a tangent sampled at the singular endpoint of a function with an
+/// unbounded derivative (`√` and `ln` at `t → 0⁺`, where `f'(t) → +∞`) carries
+/// an astronomically large slope (e.g. `0.5/√1e-300 ≈ 5e149`). Such a row is
+/// mathematically valid yet wrecks the conditioning of the relaxation LP's
+/// constraint matrix `G`, so the HSDE interior-point solver either stalls
+/// (`IterationLimit`) or — worse — produces a *spurious* Farkas infeasibility
+/// certificate and the node (here, the whole problem) is wrongly pruned as
+/// infeasible. Dropping a cut only *loosens* the relaxation, so it is always
+/// sound; branching then re-tightens around the singularity with a finite box.
+const MAX_CUT_MAGNITUDE: f64 = 1e8;
+
+/// Whether an envelope cut is numerically safe to add to the relaxation LP —
+/// both coefficients finite and within [`MAX_CUT_MAGNITUDE`]. See that constant
+/// for why near-singular (huge-slope) tangents must be dropped.
+fn cut_is_finite(c: &Cut) -> bool {
+    c.slope.is_finite()
+        && c.intercept.is_finite()
+        && c.slope.abs() <= MAX_CUT_MAGNITUDE
+        && c.intercept.abs() <= MAX_CUT_MAGNITUDE
 }
 
 /// Sorted union of two ascending, deduplicated index lists.
@@ -768,6 +798,12 @@ pub(crate) fn sandwich_cuts(
             continue;
         }
         let intercept = ft - slope * t;
+        // Same near-singular-tangent guard as `emit_univariate`: a huge but
+        // finite slope (√/ln as the operand → 0) is a valid cut that wrecks the
+        // relaxation LP's conditioning. Dropping it only loosens the bound.
+        if !cut_is_finite(&Cut { slope, intercept }) {
+            continue;
+        }
         let w = x[atom.w];
         if convex && w < ft - tol {
             // w ≥ slope·a + intercept  ⇔  slope·a − w ≤ −intercept
@@ -788,5 +824,82 @@ pub(crate) fn append_cuts(qp: &mut QpProblem, cuts: &[(Vec<(usize, f64)>, f64)])
             qp.g.push(Triplet::new(row, c, v));
         }
         qp.h.push(*rhs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::{con, var};
+    use crate::{solve_global, GlobalOptions, GlobalProblem, GlobalStatus};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linsol::SparseSymLinearSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    /// A near-singular envelope tangent must be dropped, not added to the LP.
+    /// `√` at the left endpoint `t = 0` has derivative `+∞` (clamped to a
+    /// ~5e149 slope); such a cut is valid but wrecks the relaxation LP's
+    /// conditioning.
+    #[test]
+    fn drops_astronomical_sqrt_tangent() {
+        // sqrt over [0, 4]: the over-estimator tangents include the t=0 sample.
+        let env = envelope::sqrt(0.0, 4.0);
+        // At least one raw over-cut is astronomically steep (the t→0 tangent)…
+        assert!(
+            env.over.iter().any(|c| c.slope.abs() > MAX_CUT_MAGNITUDE),
+            "expected a near-singular sqrt tangent in the raw envelope"
+        );
+        // …and it must be rejected by the conditioning guard.
+        assert!(env.over.iter().any(|c| !cut_is_finite(c)));
+        // A finite, well-scaled tangent (interior sample) survives.
+        assert!(env.over.iter().any(cut_is_finite));
+    }
+
+    /// Regression for the GLOBALLib `chance` false-infeasible: a constraint
+    /// `−c·√(Σ aᵢ xᵢ²) + (linear) ≥ rhs` whose √ argument bottoms out at 0 over
+    /// the box. Before the singular-tangent guard, the ~5e149-slope √ tangent
+    /// destroyed the relaxation LP's conditioning, the HSDE IPM emitted a
+    /// spurious Farkas certificate, and the root node was pruned — certifying a
+    /// feasible problem as infeasible. It must now solve to the optimum.
+    #[test]
+    fn chance_constraint_is_not_falsely_infeasible() {
+        // minimize 24.55 x0 + 26.75 x1 + 39 x2 + 40.5 x3
+        // s.t. x0+x1+x2+x3 = 1
+        //      12 x0 − 1.645 √(0.28 x0² + 0.19 x1² + 20.5 x2² + 0.62 x3²)
+        //              + 11.9 x1 + 41.8 x2 + 52.1 x3 ≥ 21
+        //      2.3 x0 + 5.6 x1 + 11.1 x2 + 1.3 x3 ≥ 5
+        //      x ≥ 0  (boxed [0, 1] by the equality)
+        let q = con(0.28) * var(0).powi(2)
+            + con(0.19) * var(1).powi(2)
+            + con(20.5) * var(2).powi(2)
+            + con(0.62) * var(3).powi(2);
+        let e3 = con(12.0) * var(0) - con(1.645) * q.sqrt()
+            + con(11.9) * var(1)
+            + con(41.8) * var(2)
+            + con(52.1) * var(3);
+        let e4 = con(2.3) * var(0) + con(5.6) * var(1) + con(11.1) * var(2) + con(1.3) * var(3);
+        let obj =
+            con(24.55) * var(0) + con(26.75) * var(1) + con(39.0) * var(2) + con(40.5) * var(3);
+
+        let prob = GlobalProblem::new(vec![0.0; 4], vec![1e6; 4], &obj)
+            .equality(&(var(0) + var(1) + var(2) + var(3)), 1.0)
+            .ge(&e3, 21.0)
+            .ge(&e4, 5.0);
+
+        let sol = solve_global(&prob, &GlobalOptions::default(), backend);
+        assert_eq!(
+            sol.status,
+            GlobalStatus::Optimal,
+            "chance must solve, not certify infeasible (status={:?})",
+            sol.status
+        );
+        assert!(
+            (sol.objective - 29.894_378).abs() < 1e-3,
+            "expected proven optimum 29.894378, got {}",
+            sol.objective
+        );
     }
 }
