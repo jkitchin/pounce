@@ -168,6 +168,15 @@ where
         let dres = inf_norm(&rho_x) / tau;
         let gap = (xpx / tau + ctx + bty + htz).abs() / tau;
         let res = pres.max(dres).max(gap);
+        // "Acceptable level": near the cone boundary the scaling/factorization
+        // can break down a hair short of `tol`. If the unregularized KKT
+        // residuals are already tiny (within `~1e3·tol`) when that happens, the
+        // current iterate *is* essentially optimal — accept it rather than
+        // reporting a spurious `NumericalFailure`. This mirrors the
+        // non-symmetric HSDE driver (`hsde_nonsym.rs`), which already does this;
+        // the two drivers were inconsistent (the symmetric one discarded usable
+        // SOC/orthant iterates that the non-symmetric one would have accepted).
+        let near_opt = res < 1e3 * opts.tol;
         // Un-homogenized objective `½x̂ᵀPx̂ + cᵀx̂` (x̂ = x/τ) — what the
         // trace and debugger report.
         let obj_hat = 0.5 * xpx / (tau * tau) + ctx / tau;
@@ -232,14 +241,22 @@ where
         // --- refactor M with the current cone scaling ---
         kkt.update_blocks(cone, &s, &z, opts.reg, &mut kkt_vals);
         if fact.refactor(&kkt_vals).is_err() {
-            status = QpStatus::NumericalFailure;
+            status = if near_opt {
+                QpStatus::Optimal
+            } else {
+                QpStatus::NumericalFailure
+            };
             break;
         }
 
         // --- constant direction p: M p = (−c, b, h) ---
         build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = QpStatus::NumericalFailure;
+            status = if near_opt {
+                QpStatus::Optimal
+            } else {
+                QpStatus::NumericalFailure
+            };
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut p_x, &mut p_y, &mut p_z);
@@ -258,7 +275,11 @@ where
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = QpStatus::NumericalFailure;
+            status = if near_opt {
+                QpStatus::Optimal
+            } else {
+                QpStatus::NumericalFailure
+            };
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
@@ -298,7 +319,11 @@ where
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = QpStatus::NumericalFailure;
+            status = if near_opt {
+                QpStatus::Optimal
+            } else {
+                QpStatus::NumericalFailure
+            };
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
