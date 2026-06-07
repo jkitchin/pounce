@@ -1536,29 +1536,28 @@ impl Presolve {
             z[oldr] = red.z[newr];
         }
 
-        // Restore eliminated primals (reverse order, so a substitution's
-        // dependencies are already in place). Fixed and free-fixed columns
-        // take their stored value; a free-column-singleton is recovered
-        // from its consumed equality row using the other variables.
+        // Restore eliminated primals in two passes, ordered by dependency.
+        //
+        // A free-column-singleton recovers `x_col = (b_r − Σ_{j≠col} a_jr
+        // x_j) / a_col`, so it *reads* the values of the other variables in
+        // its consumed row. Those neighbours may themselves have been
+        // eliminated by a **constant-valued** reduction (a fixed / free-fixed
+        // / dominated / forced variable) earlier in the same pass — earlier,
+        // hence *lower* on the stack. A plain reverse-LIFO replay would
+        // restore the singleton (higher on the stack) before its constant
+        // neighbour, reading a stale 0 for it and producing an infeasible
+        // recovered point (the capri LP wrong-answer bug). The neighbours are
+        // never themselves singletons (a free-column-singleton variable
+        // appears in exactly one equality row — its own consumed row — so it
+        // cannot appear in another singleton's row), so two passes suffice:
+        //   1. all constant-valued primal restorations (any order — they
+        //      depend on nothing); then
+        //   2. the formula-based free-column-singletons, which now read fully
+        //      restored neighbours.
         for r in self.stack.iter().rev() {
             match r {
                 Reduction::FixedVar { col, value, .. } => x[*col] = *value,
                 Reduction::FreeColumnFixed { col, value } => x[*col] = *value,
-                Reduction::FreeColSingleton {
-                    col,
-                    eq_row,
-                    a_coef,
-                    ..
-                } => {
-                    // x_col = (b_r − Σ_{j≠col} a_jr x_j) / a_col.
-                    let mut acc = self.orig.b[*eq_row];
-                    for t in &self.orig.a {
-                        if t.row == *eq_row && t.col != *col {
-                            acc -= t.val * x[t.col];
-                        }
-                    }
-                    x[*col] = acc / a_coef;
-                }
                 Reduction::ForcingRow { cols, .. } => {
                     // Each forced variable sits at the stored bound value.
                     for &(col, _, value, _) in cols {
@@ -1566,9 +1565,29 @@ impl Presolve {
                     }
                 }
                 Reduction::DominatedColumn { col, value, .. } => x[*col] = *value,
+                // Restored in the second pass (depends on its neighbours).
+                Reduction::FreeColSingleton { .. } => {}
                 // The variable is kept; only its box changed, so its primal
                 // comes from the reduced solution (already mapped above).
                 Reduction::BoundTightening { .. } => {}
+            }
+        }
+        for r in &self.stack {
+            if let Reduction::FreeColSingleton {
+                col,
+                eq_row,
+                a_coef,
+                ..
+            } = r
+            {
+                // x_col = (b_r − Σ_{j≠col} a_jr x_j) / a_col.
+                let mut acc = self.orig.b[*eq_row];
+                for t in &self.orig.a {
+                    if t.row == *eq_row && t.col != *col {
+                        acc -= t.val * x[t.col];
+                    }
+                }
+                x[*col] = acc / a_coef;
             }
         }
 

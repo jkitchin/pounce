@@ -848,6 +848,57 @@ fn free_column_singleton_shifts_cost() {
     assert_kkt(&prob, &p, 1e-5);
 }
 
+/// Regression for the capri LP wrong-answer bug: a free column singleton
+/// whose consumed equality row also contains a variable fixed by a
+/// *separate* singleton equality row. Postsolve restores the free
+/// singleton from the formula `x_col = (b_r − Σ_{j≠col} a_j x_j)/a_col`,
+/// which reads the fixed variable's value — so the fixed variable must be
+/// restored *before* the free singleton. Naive reverse-LIFO replay (the
+/// old code) restored them in push order, leaving the free singleton
+/// computed against the fixed var's zero-initialized value and producing a
+/// point that violates the consumed row (the silent capri 2625 vs 2690
+/// wrong answer).
+///
+/// min x2²  s.t.  x0 + x1 + x2 = 10,  x1 = 3,  x2 ≥ 0,  x0 free.
+/// x1 fixes to 3 (singleton row), the first row becomes x0 + x2 = 7, and
+/// x0 (free, now a singleton there) is substituted as x0 = 10 − x1 − x2.
+/// Reduced problem: min x2², x2 ≥ 0 → x2 = 0, then x0 = 7, x1 = 3.
+#[test]
+fn free_singleton_depends_on_fixed_var_postsolve_order() {
+    let prob = QpProblem {
+        n: 3,
+        p_lower: vec![Triplet::new(2, 2, 2.0)], // only x2 in the objective
+        c: vec![0.0, 0.0, 0.0],
+        a: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0), // x0 + x1 + x2 = 10
+            Triplet::new(1, 1, 1.0), // x1 = 3   (singleton → FixedVar)
+        ],
+        b: vec![10.0, 3.0],
+        g: vec![],
+        h: vec![],
+        lb: vec![NEG_INF, NEG_INF, 0.0], // x0 free; x2 ≥ 0
+        ub: vec![POS_INF, POS_INF, POS_INF],
+    };
+    let sol = with_presolve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    // The recovered point must satisfy *both* equality rows. Before the
+    // two-pass postsolve fix, row 0 was violated by 3 (x0 restored as 10
+    // instead of 7 because x1 was still 0 when the formula was applied).
+    let mut ax = vec![0.0; prob.m_eq()];
+    prob.a_mul(&sol.x, &mut ax);
+    for (i, (&axi, &bi)) in ax.iter().zip(&prob.b).enumerate() {
+        assert!((axi - bi).abs() < 1e-6, "Ax=b row {i}: {axi} vs {bi}");
+    }
+    // x2 only approaches its active bound asymptotically (near-boundary
+    // IPM slack), so values are checked to 1e-4; feasibility above is the
+    // tight regression guard.
+    assert!((sol.x[0] - 7.0).abs() < 1e-4, "x0={} (want 7)", sol.x[0]);
+    assert!((sol.x[1] - 3.0).abs() < 1e-4, "x1={} (want 3)", sol.x[1]);
+    assert!((sol.x[2] - 0.0).abs() < 1e-4, "x2={} (want 0)", sol.x[2]);
+}
+
 /// A bounded variable in one row is *not* a free column singleton (its
 /// box can bind), so it must not be substituted.
 #[test]

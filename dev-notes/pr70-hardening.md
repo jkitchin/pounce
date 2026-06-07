@@ -171,6 +171,26 @@ This file is the **state** for the PR #70 hardening loop. Plan:
     status) on it. `--check` (and `--check --from-json`) exits 1 naming `capri`,
     so this is now a standing regression gate.
 
+  **RESOLVED (fix landed).** Root cause was **not** in the IPM — it was a
+  postsolve primal-recovery ordering bug in `presolve.rs`. capri's presolve
+  emits a `FreeColSingleton` reduction whose substitution formula
+  `x_col = (b_r − Σ_{j≠col} a_j x_j)/a_col` reads the value of a variable that a
+  *separate* `FixedVar` (singleton equality row) reduction sets. The old
+  postsolve did a single reverse-LIFO replay, so the free singleton was restored
+  from the formula *before* its fixed-var dependency had a value — yielding a
+  point that violates the consumed equality row, hence the 2625 vs 2690 wrong
+  answer reported as optimal. Fix: two-pass primal recovery in `postsolve_once`
+  — pass 1 (reverse) restores all constant-valued reductions (FixedVar,
+  FreeColumnFixed, ForcingRow, DominatedColumn); pass 2 (forward) restores
+  formula-based FreeColSingleton values against the now-restored neighbours.
+  Verified: capri → **2690.012914** on all paths (NLP, lp-ipm, default routing),
+  postsolved point fully feasible (all violations 0); adlittle/afiro/blend/
+  sc50a/sc105 unchanged and correct. Permanent regression test
+  `free_singleton_depends_on_fixed_var_postsolve_order` added to
+  `crates/pounce-convex/tests/presolve_reductions.rs` (minimal repro of the
+  free-singleton-depends-on-fixed-var pattern, asserts Ax=b holds). Full
+  pounce-convex suite green.
+
   **Other disagreements — triaged, all benign:**
   - `YAO` (QP): pounce 197.70 vs clarabel 91.02, but clarabel only reached
     `AlmostSolved` (uncertified) and pounce's 197.70 matches the published
