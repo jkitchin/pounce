@@ -70,6 +70,7 @@ endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill \
+        python-ext python-test \
         benchmark benchmark-rerun benchmark-report benchmark-gams
 
 all: build
@@ -117,6 +118,20 @@ clean:
 
 help:
 	@sed -n 's/^# \{0,1\}//p' Makefile | sed -n '1,45p'
+
+# ---- Python extension + tests -------------------------------------------
+# Rebuild the native extension in place, then run the Python test suite.
+# This is the safe way to run pytest: a stale in-place `_pounce*.so` (left
+# by an earlier `maturin develop`) silently shadows the current binding and
+# makes the suite fail with confusing errors. `python-ext` rebuilds it, and
+# `python/tests/conftest.py` additionally guards against running pytest
+# against a stale artifact. Requires `maturin` and the test extras in the
+# active environment (`pip install -e 'python[dev]'`).
+python-ext:
+	cd python && maturin develop
+
+python-test: python-ext
+	cd python && python -m pytest tests -q
 
 # ---- Benchmarks ----------------------------------------------------------
 # Single source of truth: benchmarks/Makefile. These shims forward

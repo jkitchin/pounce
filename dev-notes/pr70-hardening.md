@@ -520,6 +520,25 @@ This file is the **state** for the PR #70 hardening loop. Plan:
      anyone running pytest against a stale `.so` hits these 7 failures — a CI
      "rebuild before pytest" step would prevent it.
 
+     **RESOLVED (build-hygiene guard added).** CI was already safe — the
+     `python-test` job in `.github/workflows/ci.yml` builds a fresh wheel via
+     `maturin-action` and installs it every run, so it never imports an
+     in-repo `.so`. The real gap was *local development*: a stale in-place
+     `python/pounce/_pounce*.so` left by an earlier `maturin develop` silently
+     shadows the current binding. Two changes close it:
+     - `python/tests/conftest.py` — a `pytest_configure` guard that, for an
+       in-repo editable build, compares the extension's mtime against the
+       newest Rust source under `crates/` and **fails fast with an actionable
+       message** ("the extension is STALE — run `maturin develop`") instead of
+       letting the suite die with cryptic `TypeError`s. Skipped automatically
+       for wheel/site-packages installs (no in-repo `.so`); bypass with
+       `POUNCE_SKIP_EXT_STALE_CHECK=1`.
+     - `make python-test` (+ `python-ext`) — rebuilds the extension in place,
+       then runs pytest, so the documented local path always rebuilds first.
+     Verified: with the current (deliberately stale) `.so` the guard aborts
+     collection with the rebuild instructions; after `touch`ing the artifact
+     fresh, all 281 tests collect; `POUNCE_SKIP_EXT_STALE_CHECK=1` bypasses.
+
   2. **Over-tight test tolerance — LOW (not a wrong answer).**
      `test_qp.py::test_qp_factorization_build_once_solve_many` then failed with
      a 1.10e-5 mismatch (atol was 1e-6). Isolated by stashing all clippy edits
