@@ -93,15 +93,35 @@ This file is the **state** for the PR #70 hardening loop. Plan:
     curvature. **Severity: none** (recommend only tightening the doc wording to
     match `>= -PSD_TOL`). No misclassification found.
 
-## [ ] A2 — Forced `solver_selection` mismatch must error, not mis-solve
+## [x] A2 — Forced `solver_selection` mismatch must error, not mis-solve
 - Scope: `qp-ipm`/`lp-ipm`/`qp-active-set` forced on a non-matching/nonconvex
   `.nl` returns a clear error (nonzero exit / error status), never a wrong
   "optimal." `auto` on the same routes safely (NLP/global).
 - Files: `crates/pounce-cli/tests/qp_dispatch_end_to_end.rs`,
-  `resolve_solver` mismatch arms in `dispatch.rs` (L298–320).
+  `crates/pounce-cli/tests/dispatch_routing.rs`, new fixture
+  `crates/pounce-cli/tests/fixtures/nonconvex_qp.nl`.
 - Run: `cargo test -p pounce-cli`
 - Done: mismatch cases assert error; green.
 - Findings:
+  - **New fixture** `nonconvex_qp.nl`: `min x0·x1 s.t. x0+x1=2, 0≤xᵢ≤4`
+    (indefinite Hessian; classifies `nonconvex QP`). Box bounds keep the NLP
+    fallback bounded (local optimum 0 at a corner) so `auto` exits 0 cleanly.
+  - **Tests added (6, all green; full `pounce-cli` suite 0 failures):**
+    - `forced_qp_ipm_on_nonconvex_qp_errors` — the headline case: convex QP IPM
+      forced on a nonconvex QP exits 2, names the class + solver, and **does NOT
+      print "Optimal Solution Found"** (the confident-wrong-answer failure mode
+      is asserted absent).
+    - `forced_qp_active_set_on_nonconvex_qp_errors` — same for the active-set QP.
+    - `forced_lp_ipm_on_convex_qp_errors` — LP IPM forced on a convex QP errors
+      (QP ≠ LP).
+    - `auto_routes_nonconvex_qp_to_nlp_safely` — `auto` on the nonconvex QP
+      routes to pounce-nlp (NOT pounce-convex), solves, exit 0.
+    - `forced_qp_solvers_on_nlp_error` (dispatch_routing) — qp-ipm & qp-active-set
+      forced on a general NLP (rosenbrock) both exit 2 with a naming message.
+  - **Behavior confirmed manually** before writing tests: every mismatch exits 2
+    with `problem class <X> does not match forced solver <Y> (expected <Z>)`;
+    the error is raised at routing (before any solve), so no wrong objective is
+    ever produced. No defect found.
 
 ## [ ] B — Objective validation vs known optima + Clarabel
 - Scope: netlib LP + Maros–Mészáros QP objectives from pounce match Clarabel /

@@ -49,6 +49,110 @@ fn infeasible_qp_reports_infeasible() {
     assert_ne!(out.status.code(), Some(0), "infeasible must exit non-zero");
 }
 
+// --- A2: a forced solver_selection that does not match the detected
+// class must error end-to-end (nonzero exit, clear message) and NEVER
+// silently mis-solve to a wrong "optimal". `auto` on the same file must
+// route safely instead. ---
+
+/// The highest-risk mis-route: forcing the convex QP IPM onto a genuinely
+/// *nonconvex* QP (`min x0·x1`, indefinite Hessian). It must error, naming
+/// the detected class and the forced solver, and must NOT print an
+/// "Optimal Solution Found" — a confident wrong answer is the failure mode
+/// this whole effort exists to prevent.
+#[test]
+fn forced_qp_ipm_on_nonconvex_qp_errors() {
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("nonconvex_qp.nl"))
+        .arg("--no-sol")
+        .arg("solver_selection=qp-ipm")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(2), "forced mismatch must exit 2");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("nonconvex QP") && combined.contains("qp-ipm"),
+        "error must name detected class and forced solver:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Optimal Solution Found"),
+        "a mismatch must never report a solve:\n{combined}"
+    );
+}
+
+/// Same nonconvex QP forced to the active-set QP solver: also a mismatch,
+/// also must error rather than mis-solve.
+#[test]
+fn forced_qp_active_set_on_nonconvex_qp_errors() {
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("nonconvex_qp.nl"))
+        .arg("--no-sol")
+        .arg("solver_selection=qp-active-set")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(2));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("nonconvex QP") && combined.contains("qp-active-set"),
+        "error must name detected class and forced solver:\n{combined}"
+    );
+    assert!(!combined.contains("Optimal Solution Found"), "{combined}");
+}
+
+/// Forcing the LP IPM onto a convex *QP* (not an LP): the QP IPM accepts a
+/// QP but the LP entry point does not, so this must error too.
+#[test]
+fn forced_lp_ipm_on_convex_qp_errors() {
+    let out = Command::new(pounce_exe())
+        .arg(fixture())
+        .arg("--no-sol")
+        .arg("solver_selection=lp-ipm")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(2));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("convex QP") && combined.contains("lp-ipm"),
+        "error must name detected class and forced solver:\n{combined}"
+    );
+    assert!(!combined.contains("Optimal Solution Found"), "{combined}");
+}
+
+/// The safe counterpart: `auto` on the same nonconvex QP must NOT route to
+/// the convex IPM. It falls back to the general NLP path and solves to a
+/// local optimum (exit 0), so the user gets a sound answer rather than an
+/// error or a wrong "global" one.
+#[test]
+fn auto_routes_nonconvex_qp_to_nlp_safely() {
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("nonconvex_qp.nl"))
+        .arg("--no-sol")
+        .arg("solver_selection=auto")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(0), "auto should solve via NLP");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("pounce-nlp") && !stdout.contains("pounce-convex"),
+        "auto must fall back to the NLP path, not the convex IPM:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Optimal Solution Found"),
+        "NLP fallback should solve to a local optimum:\n{stdout}"
+    );
+}
+
 #[test]
 fn auto_routes_convex_qp_to_pounce_convex() {
     let out = Command::new(pounce_exe())

@@ -71,6 +71,31 @@ fn forced_lp_on_nlp_errors() {
 }
 
 #[test]
+fn forced_qp_solvers_on_nlp_error() {
+    // The qp-family entry points (qp-ipm, qp-active-set) forced onto a
+    // general NLP must error just like lp-ipm does — never fall through to
+    // a wrong solve. The error names the detected class and forced solver.
+    for sel in ["qp-ipm", "qp-active-set"] {
+        let output = Command::new(pounce_exe())
+            .arg("--problem")
+            .arg("rosenbrock")
+            .arg(format!("solver_selection={sel}"))
+            .output()
+            .expect("spawn pounce");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{sel} on an NLP should exit 2"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("NLP") && stderr.contains(sel),
+            "{sel}: error should name detected class and forced solver: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn unknown_solver_selection_rejected() {
     // `lp-simplex` was removed from scope; it must be rejected, not
     // silently accepted.
