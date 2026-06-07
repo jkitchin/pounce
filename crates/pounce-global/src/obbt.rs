@@ -38,26 +38,29 @@ pub enum ObbtLp {
     /// is a cold central-path walk. The long-standing default.
     #[default]
     Ipm,
-    /// **PARKED — not sound; gated behind the off-by-default `simplex-obbt`
-    /// feature.** The warm-started revised simplex (`pounce-simplex`): one basis
-    /// built per pass and warm-started across all `2n` objective flips. Serial
-    /// within a pass (the basis is threaded sequentially), so `parallel` does not
-    /// apply to it.
+    /// **Gated behind the off-by-default `simplex-obbt` feature, pending broader
+    /// validation.** The warm-started revised simplex (`pounce-simplex`): one
+    /// basis built per pass and warm-started across all `2n` objective flips.
+    /// Serial within a pass (the basis is threaded sequentially), so `parallel`
+    /// does not apply to it.
     ///
-    /// On a GLOBALLib timeout sweep this rescued several models but also
-    /// returned **wrong** certified optima on others — the dense explicit basis
-    /// inverse is too ill-conditioned on badly-scaled relaxation LPs, so it can
-    /// report an LP optimum that is not the true min/max, which makes OBBT
-    /// tighten a box past the true bound and cut off the global optimum (observed
-    /// as wrong certified values and a false infeasibility). The default [`Ipm`]
-    /// does not do this.
+    /// History: an earlier dense explicit-inverse engine returned **wrong**
+    /// certified optima on badly-scaled relaxation LPs (it reported an LP optimum
+    /// that was not the true min/max, so OBBT tightened a box past the true bound
+    /// and cut the global optimum). Phase 6.2 replaced that with a factored
+    /// sparse LU (faer) plus geometric-mean equilibration, and two distinct
+    /// scaling failure modes have since been found and fixed with regression
+    /// guards: GLOBALLib `ex4_1_2` (`tests/ill_scaled_obbt.rs`) and a collapsed
+    /// McCormick coefficient on a quartic child box
+    /// (`tests/degenerate_mccormick_scaling.rs`). The 0-WRONG gate
+    /// (`simplex_obbt_matches_ipm_certified_optimum`) now passes: simplex OBBT
+    /// certifies the same optima as [`Ipm`] across the test spread.
     ///
-    /// Because of that, this variant is **inert without the `simplex-obbt`
-    /// feature**: [`tighten`] transparently runs the [`Ipm`] sweep instead (and
-    /// `pounce-simplex` is not even linked). The real fix — a factored sparse LU
-    /// with proper scaling and a Harris ratio test, the representation commercial
-    /// simplex codes use — is tracked for a future pass; only then should the
-    /// feature graduate to a selectable, sound engine.
+    /// It stays gated because each fix so far has been a scaling-robustness
+    /// patch, so a wider GLOBALLib cross-check against [`Ipm`] is wanted before
+    /// graduating it to the default. Without the feature this variant is inert:
+    /// [`tighten`] transparently runs the [`Ipm`] sweep instead (and
+    /// `pounce-simplex` is not even linked).
     Simplex,
 }
 
@@ -172,10 +175,11 @@ where
 
         // Engine selection. A `Simplex` request degrades to the IPM sweep when
         // either (a) the `simplex-obbt` feature is off — the default; the engine
-        // is PARKED as unsound and is not even linked, so every request runs the
-        // sound IPM path — or (b) the relaxation exceeds `SIMPLEX_DENSE_MAX_ROWS`,
-        // where the dense basis would stall. Both fall back to the same polytope's
-        // IPM sweep: same valid bounds, just a different (sound, scalable) engine.
+        // is gated pending broader validation and is not even linked, so every
+        // request runs the IPM path — or (b) the relaxation exceeds
+        // `SIMPLEX_DENSE_MAX_ROWS`, where the simplex is slower than the IPM on
+        // these larger systems. Both fall back to the same polytope's IPM sweep:
+        // same valid bounds, just a different (sound, scalable) engine.
         let engine = if matches!(lp, ObbtLp::Simplex)
             && (cfg!(not(feature = "simplex-obbt"))
                 || qp.m_eq() + qp.m_ineq() > SIMPLEX_DENSE_MAX_ROWS)

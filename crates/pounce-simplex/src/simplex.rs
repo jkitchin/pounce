@@ -26,6 +26,15 @@ const INF: f64 = f64::INFINITY;
 /// `O(nnz)`; a handful collapses the row/column dynamic range enough to keep the
 /// dense basis inverse well-conditioned. See [`equilibrate`].
 const SCALE_SWEEPS: usize = 6;
+/// In geometric-mean equilibration, an entry smaller than `row/col max ×
+/// EQUILIBRATE_DROP` is treated as a structural zero. A relaxation can carry a
+/// coefficient that has collapsed to numerical noise (e.g. a McCormick secant
+/// slope that goes to ~1e-44 at a degenerate box edge); without this guard such
+/// an entry drags the row/column geometric mean to zero and inflates the scale
+/// by 1e10–1e20, which then distorts the reduced-cost tolerances enough to make
+/// the simplex declare a *wrong* vertex optimal (observed on the quartic OBBT
+/// child box `[-2, ~0]`).
+const EQUILIBRATE_DROP: f64 = 1e-12;
 /// A basis column entry smaller than this is treated as a structural zero in
 /// the ratio test (can't be a pivot).
 const PIV_TOL: f64 = 1e-9;
@@ -128,13 +137,20 @@ fn equilibrate(prob: &LpProblem, sweeps: usize) -> (Vec<f64>, Vec<f64>) {
     let mut r = vec![1.0_f64; m];
     let mut c = vec![1.0_f64; n];
     for _ in 0..sweeps {
-        let mut rmin = vec![INF; m];
+        // Row pass. Two sub-passes: first the row maxima, then the row minima
+        // over only the *significant* entries (≥ rmax · EQUILIBRATE_DROP), so a
+        // collapsed near-zero coefficient cannot drag the geometric mean to zero
+        // and blow up the scale.
         let mut rmax = vec![0.0_f64; m];
         for t in &prob.a {
             let a = (r[t.row] * t.val * c[t.col]).abs();
-            if a > 0.0 {
+            rmax[t.row] = rmax[t.row].max(a);
+        }
+        let mut rmin = vec![INF; m];
+        for t in &prob.a {
+            let a = (r[t.row] * t.val * c[t.col]).abs();
+            if a > rmax[t.row] * EQUILIBRATE_DROP {
                 rmin[t.row] = rmin[t.row].min(a);
-                rmax[t.row] = rmax[t.row].max(a);
             }
         }
         for i in 0..m {
@@ -142,13 +158,17 @@ fn equilibrate(prob: &LpProblem, sweeps: usize) -> (Vec<f64>, Vec<f64>) {
                 r[i] /= (rmin[i] * rmax[i]).sqrt();
             }
         }
-        let mut cmin = vec![INF; n];
+        // Column pass, same significant-entry rule.
         let mut cmax = vec![0.0_f64; n];
         for t in &prob.a {
             let a = (r[t.row] * t.val * c[t.col]).abs();
-            if a > 0.0 {
+            cmax[t.col] = cmax[t.col].max(a);
+        }
+        let mut cmin = vec![INF; n];
+        for t in &prob.a {
+            let a = (r[t.row] * t.val * c[t.col]).abs();
+            if a > cmax[t.col] * EQUILIBRATE_DROP {
                 cmin[t.col] = cmin[t.col].min(a);
-                cmax[t.col] = cmax[t.col].max(a);
             }
         }
         for j in 0..n {
