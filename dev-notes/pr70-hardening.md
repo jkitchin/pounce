@@ -346,7 +346,7 @@ This file is the **state** for the PR #70 hardening loop. Plan:
   all problems, node caps, and per-relaxation configurations; serial and parallel
   agree. The global solver's soundness invariants hold.
 
-## [ ] F — Presolve round-trip (primal AND dual)
+## [x] F — Presolve round-trip (primal AND dual)
 - Scope: presolve + postsolve recovers true primal and **dual** solution,
   including on heavily-reduced problems.
 - Files: `crates/pounce-convex/src/presolve.rs`,
@@ -355,6 +355,37 @@ This file is the **state** for the PR #70 hardening loop. Plan:
 - Run: `cargo test -p pounce-convex presolve`
 - Done: primal+dual recovery asserted; green.
 - Findings:
+
+  **Pre-existing coverage (verified green):** the presolve suite already asserts
+  primal+dual round-trip *per individual reduction* — `presolve_roundtrip.rs`
+  (fixed-var, Hessian coupling, inequality-RHS adjust with z, empty-row with
+  zero dual, infeasibility), `presolve_reductions.rs` (26 tests: free/dominated
+  columns with `z_lb`/`z_ub`, duplicate/parallel rows via KKT, free-column
+  singleton with `y`, fixpoint cascades), `presolve_forcing.rs` (6),
+  `presolve_bound_tightening.rs` (4), `presolve_conic.rs` (2). The dual was
+  checked, but only one reduction fired per test.
+
+  **Test added** — `heavily_reduced_mixed_reductions_recovers_primal_and_dual`
+  (`presolve_roundtrip.rs`, 6 → 7 tests). The gap was a *heavily-reduced* problem
+  where several distinct reductions fire **at once**. One 6-var / 2-eq / 1-ineq
+  QP that simultaneously triggers a fixed variable (equality singleton `x3=1`), a
+  free-column singleton (`x4` substituted out of `x0+x1+x4=4`), a dominated column
+  (`x5` fixed to its bound), and a binding inequality — collapsing to a ≤3-var
+  core (asserted via `stats()`). Verifies full recovery against a direct
+  no-presolve solve: all six primal `x` (incl. substituted `x4`, fixed `x3`,
+  dominated `x5`), the objective, and the **complete dual** — equality `y`,
+  inequality `z`, and bound multipliers `z_lb`/`z_ub` — each matched to 1e-5.
+  Added a new `assert_original_kkt` helper that re-checks the recovered
+  `(x,y,z,z_lb,z_ub)` against the ORIGINAL problem's KKT system (stationarity
+  `∇L + z_ub − z_lb = 0`, feasibility, sign, complementarity), so a mis-recovered
+  dual on any reduced/substituted variable would surface as a nonzero stationarity
+  residual. Confirms the inequality multiplier and the dominated column's bound
+  dual are both recovered nonzero. (Helper guards complementarity to finite bounds
+  — `0·∞` on the free var's infinite bound would be NaN.)
+
+  **No defects.** Postsolve reconstructs the full primal and dual exactly on the
+  heavily-reduced problem. Suite: roundtrip 7, reductions 26, forcing 6,
+  bound_tightening 4, conic 2 — all green.
 
 ## [ ] G — FFI / Python surface
 - Scope: `minimize()` auto-routing picks the right solver; JAX differentiable-QP
