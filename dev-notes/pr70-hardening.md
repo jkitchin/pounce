@@ -387,7 +387,7 @@ This file is the **state** for the PR #70 hardening loop. Plan:
   heavily-reduced problem. Suite: roundtrip 7, reductions 26, forcing 6,
   bound_tightening 4, conic 2 — all green.
 
-## [ ] G — FFI / Python surface
+## [x] G — FFI / Python surface
 - Scope: `minimize()` auto-routing picks the right solver; JAX differentiable-QP
   gradients match finite differences; `--json-output` schema uniform across all
   solver paths.
@@ -396,6 +396,45 @@ This file is the **state** for the PR #70 hardening loop. Plan:
 - Run: `pytest python/tests -q` (build the extension first per repo norm).
 - Done: pytest green; gradient finite-diff check within tol.
 - Findings:
+  Broke the scope into its three concerns and verified each.
+
+  **(1) `minimize()` auto-routing — already well-covered.**
+  `python/tests/test_minimize_autoroute.py` (8 tests) exercises: a convex QP
+  routes to the convex IPM, an LP routes to the LP path, an NLP stays on the
+  NLP solver, a forced solver/class mismatch raises rather than mis-solves,
+  and finite-difference routing on objectives without analytic structure.
+  All pass. No new gaps.
+
+  **(2) JAX differentiable-QP gradients vs finite differences — already
+  well-covered.** `python/tests/test_qp_jax.py` checks reverse-mode gradients
+  through `solve_qp` against finite differences for every QP datum that flows
+  through the layer (`c`, `b`, `h`, `P`, `G`, `A`). `test_qp_sensitivity.py`
+  covers the underlying sensitivity path. 38 tests across the three G-relevant
+  files pass.
+
+  **(3) `--json-output` schema uniform across solver paths — NEW coverage; this
+  was the real gap.** Before this item the JSON report was tested on the NLP
+  path only (`json_report.rs`, on `parametric.nl`) plus the convex QP-IPM path
+  (`qp_dispatch_end_to_end.rs::qp_path_emits_json_report`). Nothing asserted the
+  schema was *identical in shape across paths*, and the **LP-IPM path had no
+  JSON coverage at all**. Added `json_report.rs::json_schema_is_uniform_across_
+  solver_paths` (4 -> 5 tests): runs one set of invariants over three distinct
+  dispatch paths — NLP (`parametric.nl`), convex QP-IPM (`convex_qp.nl`,
+  `solver_selection=qp-ipm`), and convex LP-IPM (`lp_afiro.nl`, `lp-ipm`) —
+  asserting for each: `schema == "pounce.solve-report/v1"`,
+  `fair_metadata.solver.name == "pounce"`, non-empty `result_id`, non-empty +
+  all-finite `solution.x`, finite `solution.objective` that equals
+  `statistics.final_objective` (rel 1e-9), and `problem.n_variables ==
+  x.len()`. A path emitting a divergent or placeholder report (objective
+  disagreeing with `final_objective`, or an `x` whose length contradicts
+  `n_variables`) would now fail here.
+
+  Added fixture `crates/pounce-cli/tests/fixtures/lp_afiro.nl` (netlib afiro,
+  32 vars, f* = -464.753) — the LP-IPM path's first end-to-end JSON fixture.
+
+  No defects: all three paths emit the identical schema; `cargo test -p
+  pounce-cli --test json_report` green (5 tests), and the 38 G-relevant pytest
+  cases pass.
 
 ## [ ] H — Hygiene (build / clippy / full suite)
 - Scope: clean `cargo build` + `cargo clippy` across the feature matrix (fix the
