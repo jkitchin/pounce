@@ -21,9 +21,21 @@ Usage:
   python3 benchmarks/scripts/compare_pounce_clarabel.py [--class lp|qp|both]
                                                         [--limit N]
                                                         [--time-limit SECS]
+                                                        [--from-json]
+                                                        [--check]
 Out:
   benchmarks/clarabel_compare_{lp,qp}.json   per-problem records
   benchmarks/clarabel_compare.md             side-by-side markdown report
+
+--from-json   skip the live run; load the per-problem records from the existing
+              benchmarks/clarabel_compare_{lp,qp}.json (regression gate / CI).
+--check       exit nonzero if any *genuine* objective disagreement remains. A
+              disagreement counts only when BOTH solvers report a hard solve
+              (pounce SolveSucceeded AND clarabel Solved -- AlmostSolved and
+              SolvedToAcceptableLevel are excluded as not-certified) yet their
+              objectives differ by more than the numpy-isclose band
+              |a-b| > atol + rtol*max(|a|,|b|) (rtol=atol=1e-3). This flags real
+              wrong-answer bugs while tolerating convergence-point slack.
 """
 import argparse
 import glob
@@ -221,6 +233,34 @@ def reldiff(a, b):
     return abs(a - b) / max(abs(a), abs(b), 1e-10)
 
 
+# Strict objective-agreement gate for --check. Statuses that count as a
+# *certified* solve for each solver (AlmostSolved / SolvedToAcceptableLevel are
+# deliberately excluded: an uncertified point may legitimately differ).
+POUNCE_STRICT = {"SolveSucceeded"}
+CLARABEL_STRICT = {"Solved"}
+CHECK_RTOL = 1e-3
+CHECK_ATOL = 1e-3
+
+
+def isclose(a, b, rtol=CHECK_RTOL, atol=CHECK_ATOL):
+    """numpy-isclose style absolute+relative tolerance."""
+    if a is None or b is None:
+        return False
+    return abs(a - b) <= atol + rtol * max(abs(a), abs(b))
+
+
+def check_disagreements(rows):
+    """Return the rows where both solvers certify a solve yet objectives differ
+    beyond the isclose band -- the genuine wrong-answer set the gate fails on."""
+    bad = []
+    for r in rows:
+        if (r["pounce"]["status"] in POUNCE_STRICT
+                and r["clarabel"]["status"] in CLARABEL_STRICT
+                and not isclose(r["pounce"]["objective"], r["clarabel"]["objective"])):
+            bad.append(r)
+    return bad
+
+
 # ----------------------------------------------------------------------------
 # POUNCE, run live on a freshly generated .nl (same problem Clarabel solves).
 # ----------------------------------------------------------------------------
@@ -379,6 +419,12 @@ def main():
     ap.add_argument("--class", dest="cls", choices=["lp", "qp", "both"], default="both")
     ap.add_argument("--limit", type=int, default=0, help="cap problems per class (debug)")
     ap.add_argument("--time-limit", type=float, default=120.0)
+    ap.add_argument("--from-json", action="store_true",
+                    help="load existing clarabel_compare_{kind}.json instead of "
+                         "running both solvers live")
+    ap.add_argument("--check", action="store_true",
+                    help="exit nonzero on any genuine objective disagreement "
+                         "(strict-solved gate, isclose rtol=atol=1e-3)")
     args = ap.parse_args()
 
     kinds = ["lp", "qp"] if args.cls == "both" else [args.cls]
@@ -391,16 +437,45 @@ def main():
           "favor it on larger problems). Both minimize; objectives joined by "
           "problem name.",
           ""]
+    all_bad = []
     for kind in kinds:
-        rows = run_class(kind, args.limit, args.time_limit)
-        with open(os.path.join(BENCH, f"clarabel_compare_{kind}.json"), "w") as fh:
-            json.dump(rows, fh, indent=2)
+        json_path = os.path.join(BENCH, f"clarabel_compare_{kind}.json")
+        if args.from_json:
+            with open(json_path) as fh:
+                rows = json.load(fh)
+            print(f"\n=== {kind.upper()}  (loaded {len(rows)} records from "
+                  f"{os.path.relpath(json_path, ROOT)}) ===")
+        else:
+            rows = run_class(kind, args.limit, args.time_limit)
+            with open(json_path, "w") as fh:
+                json.dump(rows, fh, indent=2)
         md.append(summarize(kind, rows))
         print("\n" + summarize(kind, rows))
 
-    with open(os.path.join(BENCH, "clarabel_compare.md"), "w") as fh:
-        fh.write("\n".join(md))
-    print(f"\nwrote {os.path.join(BENCH, 'clarabel_compare.md')}")
+        if args.check:
+            bad = check_disagreements(rows)
+            if bad:
+                print(f"--check {kind.upper()}: {len(bad)} genuine "
+                      f"disagreement(s) (both certified-solved, "
+                      f"|Δobj| > {CHECK_ATOL}+{CHECK_RTOL}·max):")
+                for r in bad:
+                    print(f"  {r['name']:<16} pounce={r['pounce']['objective']!r} "
+                          f"clarabel={r['clarabel']['objective']!r} "
+                          f"reldiff={r['reldiff']}")
+            else:
+                print(f"--check {kind.upper()}: PASS "
+                      f"(no certified-solve objective disagreements)")
+            all_bad.extend((kind, r) for r in bad)
+
+    if not args.from_json:
+        with open(os.path.join(BENCH, "clarabel_compare.md"), "w") as fh:
+            fh.write("\n".join(md))
+        print(f"\nwrote {os.path.join(BENCH, 'clarabel_compare.md')}")
+
+    if args.check and all_bad:
+        print(f"\nFAIL: {len(all_bad)} genuine objective disagreement(s) across "
+              f"{', '.join(sorted(set(k.upper() for k, _ in all_bad)))}.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

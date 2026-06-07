@@ -123,7 +123,7 @@ This file is the **state** for the PR #70 hardening loop. Plan:
     the error is raised at routing (before any solve), so no wrong objective is
     ever produced. No defect found.
 
-## [ ] B — Objective validation vs known optima + Clarabel
+## [x] B — Objective validation vs known optima + Clarabel
 - Scope: netlib LP + Maros–Mészáros QP objectives from pounce match Clarabel /
   published optima within tol (rel < 1e-4); disagreements triaged. **Regenerate
   the stale `benchmarks/lp/pounce.json`** from live pounce. Conic/CBLIB covered
@@ -135,6 +135,68 @@ This file is the **state** for the PR #70 hardening loop. Plan:
 - Done: all problems agree within tol or each disagreement is explained;
   `pounce.json` no longer stale.
 - Findings:
+
+  **Harness added.** `compare_pounce_clarabel.py` gained two flags:
+  - `--from-json` — re-evaluate the committed `clarabel_compare_{lp,qp}.json`
+    records without re-running both solvers (regression gate / CI).
+  - `--check` — exit nonzero on any *genuine* objective disagreement. A
+    disagreement counts only when BOTH solvers report a **certified** solve
+    (pounce `SolveSucceeded` AND clarabel `Solved`; `AlmostSolved` /
+    `SolvedToAcceptableLevel` are excluded as uncertified) yet objectives differ
+    beyond the numpy-isclose band `|a−b| > atol + rtol·max(|a|,|b|)`,
+    rtol=atol=1e-3. Helpers `isclose` / `check_disagreements`,
+    `POUNCE_STRICT={SolveSucceeded}`, `CLARABEL_STRICT={Solved}`.
+
+  **Coverage (live, 60s/solver):** LP 467 problems, both-certified-solved 413;
+  QP 138, both-certified-solved 112. Under the strict gate exactly **one**
+  hard-fail across both suites: `capri` (LP). `make`-driven default routing on
+  the whole LP suite uses the same pounce-convex IPM the live `lp-ipm` run
+  exercised (confirmed: `pounce capri.nl` with no flags → `auto` → convex LP IPM
+  → identical 2625.01), so the live LP records *are* the default-routing results.
+
+  **HIGH-SEVERITY DEFECT — `capri` silent wrong answer (MERGE-BLOCKER).**
+  - Repro (identical generated `.nl`, only `solver_selection` differs):
+    - `solver_selection=nlp`    → obj **2690.012861**, 192 it — CORRECT
+      (matches Clarabel `Solved` 2690.0129, the documented netlib optimum, and
+      the previous stored value).
+    - `solver_selection=lp-ipm` → obj **2625.011804**, 25 it, status
+      `SolveSucceeded` — **WRONG by 2.4%**, reported as optimal.
+  - Same `.nl` on both paths ⇒ this is the **pounce-convex LP IPM**, NOT a
+    conversion bug.
+  - **Hit by DEFAULT routing**: `pounce capri.nl` (no flags) classifies LP and
+    routes to the convex IPM, printing `Optimal Solution Found. obj=2625.01`. A
+    user gets a confident wrong optimum with zero opt-in — this is not gated
+    behind an expert flag. Severity: **HIGH, blocks merge** until the convex
+    LP/QP IPM either solves `capri` correctly or fails honestly (non-optimal
+    status) on it. `--check` (and `--check --from-json`) exits 1 naming `capri`,
+    so this is now a standing regression gate.
+
+  **Other disagreements — triaged, all benign:**
+  - `YAO` (QP): pounce 197.70 vs clarabel 91.02, but clarabel only reached
+    `AlmostSolved` (uncertified) and pounce's 197.70 matches the published
+    Maros–Mészáros optimum — pounce correct; excluded by the strict gate.
+  - Near-zero optima (S268/HS268 opt 0, model11, etc.): agree under the absolute
+    tolerance; the relative metric is meaningless at 0.
+  - Borderline-tolerance LPs (lpl2, pltexpa3_16, pltexpa4_6, large001, UBH1):
+    differ only at ~1e-3 convergence-point slack, inside the isclose band; not
+    flagged.
+  - Clarabel-`AlmostSolved` cases (fxm3_16, etc.): excluded from the strict gate
+    as uncertified.
+
+  **`benchmarks/lp/pounce.json` regenerated (de-staled).** Rebuilt from the live
+  LP records, mapping CamelCase → the file's underscored Ipopt convention
+  (`SolveSucceeded`→`Solve_Succeeded`, `MaximumIterationsExceeded`→
+  `Maximum_Iterations_Exceeded`, `InfeasibleProblemDetected`→
+  `Infeasible_Problem_Detected`, `TimeOut`→`Maximum_CpuTime_Exceeded`,
+  `InternalError`→`Solver_Error`). 465 records (the 2 `.nl`-generation harness
+  failures de063157/stoprobs excluded — pounce never ran them). Confirmed the
+  previously-stale objectives are now correct: `adlittle` 6812.5→**225494.96**,
+  `stocfor1` −13875→**−41131.98**. `summarize_pounce.py lp` parses it cleanly
+  (422/465 solved). NOTE: `capri` is stored as its actual buggy default output
+  (2625.01, `Solve_Succeeded`) — the file faithfully records what pounce *does*;
+  the wrongness is the defect above, not a staleness of this file. CAVEAT: live
+  numbers are from a 60s/problem limit, so the 19 `Maximum_CpuTime_Exceeded`
+  entries are time-limit artifacts of this run, not solver verdicts.
 
 ## [ ] C — Status / edge-case honesty
 - Scope: Infeasible, Unbounded, and limit cases (iteration/time/node) report the
