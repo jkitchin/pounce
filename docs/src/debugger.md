@@ -19,11 +19,10 @@ It has two front ends sharing one command engine:
 No production NLP solver ships anything like this; if you have used
 `ipopt` you have had `print_level` and a log. This is a live debugger.
 
-The same debugger spans **every** POUNCE solver: the NLP filter-IPM, the
-convex / conic interior-point solver, and the spatial branch-and-bound
-global optimizer — and you can **step from a branch-and-bound node into the
-interior-point debugger for that node's relaxation**. See [Beyond the
-interior-point loop](#beyond-the-interior-point-loop).
+The same debugger spans **every** POUNCE solver — the NLP filter-IPM and the
+convex / conic interior-point solver share one command engine and one REPL.
+See [Beyond the interior-point loop](#beyond-the-interior-point-loop) for the
+small set of commands whose availability is backend-conditional.
 
 > The debugger has **zero effect on the solve when it is not attached**.
 > The checkpoint fire-sites short-circuit when no debugger is installed,
@@ -1324,14 +1323,45 @@ pounce_cblib model.cbf --debug          # SOCP / exp / power / PSD (conic) — I
 pounce_cblib model.cbf --debug-script s.pdbg
 ```
 
-### The branch-and-bound tree
+### Capability matrix
 
-> An interactive **branch-and-bound tree debugger** — stepping over nodes,
-> breaking on incumbents/gap/depth, and `into`-stepping a node's relaxation
-> solve — ships with the spatial branch-and-bound solver (`pounce-global`).
-> That solver is in development on the `feature/global` branch and is **not
-> part of this release**, so `solver_selection=global --debug` is not available
-> here. The convex/conic and NLP debuggers above are the shipped backends.
+The flow-control core — checkpoints, stepping, breakpoints, watchpoints,
+block/scalar inspection, `diff`, `goto`/`restart`, `save`, `ask`, and the
+JSON protocol — works identically on **every** backend. The table below is
+just the commands whose availability is **backend- or model-conditional**;
+anything not listed is universal. A command that isn't available on the
+current backend returns an explicit *"not available for this solver"* error
+(it never silently no-ops), and a JSON client should feature-detect off
+`hello.capabilities` rather than this table.
+
+| Command | NLP filter-IPM | Convex / conic IPM | Notes |
+|---|:---:|:---:|---|
+| `print kkt` | ✅ | ➖ | convex IPM exposes no augmented-system inertia |
+| `print rank` | ✅ | ➖ | SVD rank of the equality Jacobian — NLP only |
+| `print residuals` | ✅ | ➖ | per-component primal/dual residuals — NLP only |
+| `print active` / `inactive` | ✅ | ➖ | needs a bound-slack notion |
+| `print equation <name\|row>` | ⚠️ | ⚠️ | needs a source `.nl` model (`capabilities.equations`) |
+| `viz kkt` / `viz L` | ✅ | ➖ | depends on a captured KKT matrix / factor |
+| `diagnose` | ✅ | ➖ | live health report — NLP only |
+| `resolve` | ✅ | ➖ | warm re-solve from the current iterate — NLP only |
+| `sweep` / `multistart` / `load` | ✅ | ➖ | initialization-sensitivity tools — NLP only |
+| `set opt <name> <val>` | ✅ | ➖ | staged option edits — NLP only |
+| `set mu` | ✅ | ❌ | rejected on convex: μ is *derived* from `⟨s, z⟩` (edit `s`/`z`) |
+| `set <block>` / `goto` / `restart` | ✅ | ✅ | snapshots are supported on both |
+
+✅ available · ⚠️ model-conditional · ➖ reports "not available for this
+solver" · ❌ explicitly rejected with an explanation
+
+The streamed scalar **metric vocabulary** (`iter`, `mu`, `objective`,
+`inf_pr`, `inf_du`, `nlp_error`, `complementarity`) is the same on every
+backend — see `hello.metrics`. Each backend maps its native quantities onto
+these NLP-centric names; the convex IPM, for instance, reports
+`nlp_error = max(pinf, dinf, μ)`. A backend that has no value for a metric
+reports it as JSON `null` (never a dropped field), and a test pins the
+emitted set to that single advertised vocabulary so it can't drift.
+
+> A third backend — an interactive **branch-and-bound tree debugger** for a
+> spatial global solver — is not part of this release.
 
 ---
 

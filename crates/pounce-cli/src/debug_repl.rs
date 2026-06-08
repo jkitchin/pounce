@@ -425,6 +425,46 @@ impl Metric {
     }
 }
 
+/// The single source of truth for the streamed scalar-metric block.
+///
+/// Builds the `(name, value)` pairs that go on every `pause` / `progress`
+/// event and the `info` command's `data`, in [`METRICS`] order and driven
+/// *by* [`METRICS`] — so the advertised `hello.metrics` vocabulary and the
+/// fields that actually appear on events can never drift apart. Add a name
+/// to `METRICS` (with a matching [`Metric`] arm) and it shows up everywhere
+/// at once.
+///
+/// Every interior-point backend necessarily answers each entry: the metric
+/// accessors (`mu`/`objective`/`inf_pr`/…) are *required* [`DebugState`]
+/// methods, and the one optional metric (`nlp_error`) defaults to `NaN`,
+/// which `serde_json` renders as `null` — so a backend without that scalar
+/// reports it explicitly rather than dropping the field. `iter` is emitted
+/// as an integer; the rest as JSON numbers.
+fn metric_fields(ctx: &dyn DebugState) -> Vec<(&'static str, serde_json::Value)> {
+    METRICS
+        .iter()
+        .map(|&name| {
+            let value = if name == "iter" {
+                serde_json::json!(ctx.iter())
+            } else {
+                let metric = Metric::parse(name)
+                    .expect("every METRICS entry must have a matching Metric arm");
+                serde_json::json!(metric.eval(ctx))
+            };
+            (name, value)
+        })
+        .collect()
+}
+
+/// Merge the canonical [`metric_fields`] into a JSON object event in place.
+fn insert_metric_fields(ev: &mut serde_json::Value, ctx: &dyn DebugState) {
+    if let serde_json::Value::Object(map) = ev {
+        for (name, value) in metric_fields(ctx) {
+            map.insert(name.to_string(), value);
+        }
+    }
+}
+
 /// Comparison operator for a conditional breakpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CmpOp {
@@ -1498,15 +1538,12 @@ impl SolverDebugger {
                     .join(" ")
             ),
         ];
-        CmdOut::ok(lines).with_data(serde_json::json!({
-            "iter": ctx.iter(),
-            "mu": ctx.mu(),
-            "objective": ctx.objective(),
-            "inf_pr": ctx.inf_pr(),
-            "inf_du": ctx.inf_du(),
-            "nlp_error": ctx.nlp_error(),
-            "dims": dims_json,
-        }))
+        let mut data = serde_json::json!({ "dims": dims_json });
+        // The same canonical metric block as the streamed events, so `info`'s
+        // `data` matches `hello.metrics` (this adds `complementarity`, which
+        // the human-readable lines above omit for brevity).
+        insert_metric_fields(&mut data, ctx);
+        CmdOut::ok(lines).with_data(data)
     }
 
     fn cmd_print(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
@@ -3251,24 +3288,20 @@ impl SolverDebugger {
                     .map(|(n, d)| (n.to_string(), serde_json::json!(d)))
                     .collect();
                 let conds: Vec<String> = self.conds.iter().map(|c| c.raw.clone()).collect();
-                let ev = serde_json::json!({
+                let mut ev = serde_json::json!({
                     "event": "pause",
                     "checkpoint": ctx.checkpoint().as_str(),
                     "status": ctx.status(),
                     "in_restoration": self.in_restoration,
-                    "iter": ctx.iter(),
-                    "mu": ctx.mu(),
-                    "objective": ctx.objective(),
-                    "inf_pr": ctx.inf_pr(),
-                    "inf_du": ctx.inf_du(),
-                    "nlp_error": ctx.nlp_error(),
-                    "complementarity": ctx.complementarity(),
                     "dims": dims,
                     "breakpoints": self.breaks,
                     "conditions": conds,
                     "reason": reason,
                     "watches": watches,
                 });
+                // iter / mu / objective / inf_pr / inf_du / nlp_error /
+                // complementarity — from the single METRICS source of truth.
+                insert_metric_fields(&mut ev, ctx);
                 emit_json(&ev);
             }
         }
@@ -3279,16 +3312,9 @@ impl SolverDebugger {
     /// per-pause `dims` / `breakpoints` / `watches`); fired while running
     /// between pauses.
     fn emit_progress_event(&self, ctx: &dyn DebugState) {
-        let ev = serde_json::json!({
-            "event": "progress",
-            "iter": ctx.iter(),
-            "mu": ctx.mu(),
-            "inf_pr": ctx.inf_pr(),
-            "inf_du": ctx.inf_du(),
-            "objective": ctx.objective(),
-            "nlp_error": ctx.nlp_error(),
-            "complementarity": ctx.complementarity(),
-        });
+        let mut ev = serde_json::json!({ "event": "progress" });
+        // Same scalar metric block as `pause`, from the single METRICS source.
+        insert_metric_fields(&mut ev, ctx);
         emit_json(&ev);
     }
 
@@ -4134,7 +4160,7 @@ fn emit_json(v: &serde_json::Value) {
 /// Downcast a generic [`DebugState`] to the NLP solver's concrete
 /// [`DebugCtx`], for the NLP-only REPL commands (rank diagnosis, model-name
 /// resolution, warm `resolve`, sweep/multistart). `None` for the
-/// convex/conic and global solvers, whose REPL reports "not supported".
+/// convex/conic solver, whose REPL reports "not supported".
 fn as_nlp<'a>(ctx: &'a dyn DebugState) -> Option<&'a DebugCtx> {
     ctx.as_any().and_then(|a| a.downcast_ref::<DebugCtx>())
 }
@@ -4144,10 +4170,10 @@ fn as_nlp_mut<'a>(ctx: &'a mut dyn DebugState) -> Option<&'a mut DebugCtx> {
     ctx.as_any_mut().and_then(|a| a.downcast_mut::<DebugCtx>())
 }
 
-/// Standard "command needs the NLP solver" error for the convex/global REPL.
+/// Standard "command needs the NLP solver" error for the convex/conic REPL.
 fn nlp_only(cmd: &str) -> CmdOut {
     CmdOut::err(format!(
-        "`{cmd}` is only available for the NLP solver (not the convex/conic or global solvers)"
+        "`{cmd}` is only available for the NLP solver (not the convex/conic solver)"
     ))
 }
 
@@ -4656,6 +4682,79 @@ mod tests {
         assert_eq!(a.metric, Metric::Iter);
         assert_eq!(a.op, CmpOp::Eq);
         assert_eq!(a.rhs, 10.0);
+    }
+
+    /// A bare-minimum [`DebugState`] that implements only the required
+    /// methods and leaves every optional one (including `nlp_error`) at its
+    /// trait default. Stands in for "a new backend with no solver-specific
+    /// extras", so the metric-vocabulary test below exercises the
+    /// default-`NaN` (unsupported-metric) path.
+    struct MinimalState;
+    impl DebugState for MinimalState {
+        fn checkpoint(&self) -> Checkpoint {
+            Checkpoint::IterStart
+        }
+        fn iter(&self) -> i32 {
+            7
+        }
+        fn mu(&self) -> f64 {
+            1e-3
+        }
+        fn objective(&self) -> f64 {
+            42.0
+        }
+        fn inf_pr(&self) -> f64 {
+            1e-4
+        }
+        fn inf_du(&self) -> f64 {
+            2e-4
+        }
+        fn complementarity(&self) -> f64 {
+            5e-4
+        }
+        fn alpha(&self) -> (f64, f64) {
+            (1.0, 1.0)
+        }
+        fn block_dims(&self) -> Vec<(&'static str, usize)> {
+            vec![]
+        }
+        fn block(&self, _name: &str) -> Option<Vec<f64>> {
+            None
+        }
+        fn delta_block(&self, _name: &str) -> Option<Vec<f64>> {
+            None
+        }
+    }
+
+    /// The streamed scalar block is driven by the single `METRICS` source of
+    /// truth: `metric_fields` emits *exactly* the advertised `hello.metrics`
+    /// names, every backend answers each (required accessors), and an
+    /// unsupported metric surfaces explicitly as JSON `null` (default `NaN`)
+    /// rather than a dropped field — so the protocol can't silently drift.
+    #[test]
+    fn metric_fields_match_advertised_vocabulary() {
+        let fields = metric_fields(&MinimalState);
+
+        // Same names, same order as the advertised `hello.metrics`.
+        let names: Vec<&str> = fields.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, METRICS);
+
+        // Every METRICS name parses to a Metric arm (except `iter`, the
+        // integer counter) — the invariant `metric_fields` relies on.
+        for &name in METRICS {
+            assert!(
+                name == "iter" || Metric::parse(name).is_some(),
+                "METRICS entry `{name}` has no matching Metric arm"
+            );
+        }
+
+        let map: std::collections::HashMap<_, _> = fields.into_iter().collect();
+        // `iter` is an integer, not a float.
+        assert_eq!(map["iter"], serde_json::json!(7));
+        assert_eq!(map["objective"], serde_json::json!(42.0));
+        // The one optional metric, left at its `NaN` default, is reported
+        // explicitly as `null` — present, not silently omitted.
+        assert_eq!(map["nlp_error"], serde_json::Value::Null);
     }
 
     #[test]

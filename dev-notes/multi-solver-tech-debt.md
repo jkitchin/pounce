@@ -70,6 +70,17 @@ reach the concrete `DebugCtx` through `as_nlp()` / `as_nlp_mut()` downcasts.
 - Re-evaluate whether `TreeDebugState` can fold into `DebugState` (or a shared
   supertrait) once a second tree-like solver is on the horizon.
 
+**Status (issue #105).** `pounce-global` and its `TreeDebugState`/`TreeDebugHook`
+tree debugger were stripped from this release (commits `36f50bf`, `9a4c908`), so
+there are now exactly two backends behind one `DebugState` trait + REPL — the NLP
+filter-IPM and the convex/conic IPM — and the second-trait-hierarchy debt is moot
+until a tree-like solver returns. The remaining recommendations are now done:
+the [capability matrix](../docs/src/debugger.md) lists every backend-conditional
+command, unsupported commands return an explicit error (`nlp_only`) rather than a
+silent no-op, and the streamed metric set is built from one `METRICS` source via
+`metric_fields` with a test (`metric_fields_match_advertised_vocabulary`) pinning
+the emitted fields to the advertised `hello.metrics` vocabulary.
+
 ### 2. Python routing facade (designed, not built)
 
 **State.** `dev-notes/lp-qp-routing.md` (this PR's headline design doc) specifies
