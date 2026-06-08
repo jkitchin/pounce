@@ -14,7 +14,6 @@ members = [
     "crates/pounce-l1penalty",
     "crates/pounce-qp",
     "crates/pounce-convex",
-    "crates/pounce-simplex",
     "crates/pounce-sensitivity",
     "crates/pounce-solve-report",
     "crates/pounce-observability",
@@ -44,7 +43,6 @@ default-members = [
     "crates/pounce-l1penalty",
     "crates/pounce-qp",
     "crates/pounce-convex",
-    "crates/pounce-simplex",
     "crates/pounce-sensitivity",
     "crates/pounce-solve-report",
     "crates/pounce-observability",
@@ -79,8 +77,6 @@ pounce-presolve = { path = "crates/pounce-presolve", version = "0.4.0" }
 pounce-l1penalty = { path = "crates/pounce-l1penalty", version = "0.4.0" }
 pounce-qp = { path = "crates/pounce-qp", version = "0.4.0" }
 pounce-convex = { path = "crates/pounce-convex", version = "0.4.0" }
-pounce-simplex = { path = "crates/pounce-simplex", version = "0.4.0" }
-pounce-global = { path = "crates/pounce-global", version = "0.4.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.4.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.4.0" }
 pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.4.0" }
