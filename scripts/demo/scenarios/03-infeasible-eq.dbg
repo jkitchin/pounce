@@ -1,0 +1,11 @@
+# problem: infeasible-eq
+# title:   Break when the solver enters restoration on an infeasible problem
+#
+# The failure case is where a debugger earns its keep. Set an event
+# breakpoint on restoration entry, inspect the state when it fires, then let
+# it run to the "local infeasibility" exit.
+break on resto_entered
+c
+i
+p inf_pr
+c

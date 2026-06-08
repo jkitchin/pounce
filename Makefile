@@ -68,7 +68,7 @@ else
   CARGO_PROFILE_FLAG :=
 endif
 
-.PHONY: all build debug test check clippy fmt fmt-check doc book install uninstall clean help \
+.PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill \
         python-ext python-test \
         benchmark benchmark-rerun benchmark-report benchmark-gams
@@ -101,6 +101,12 @@ doc:
 
 book:
 	mdbook build docs
+
+# Record asciinema screencasts of `pounce --debug` (one per scenario in
+# scripts/demo/scenarios/) into docs/demo/*.{cast,gif}. Requires asciinema,
+# python pexpect, and pounce on PATH; agg is optional (cast -> gif).
+screencast:
+	scripts/demo/record.sh
 
 install: build
 	@echo "Installing pounce into $(PREFIX)"

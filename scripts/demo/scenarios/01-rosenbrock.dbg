@@ -1,0 +1,10 @@
+# problem: rosenbrock
+# title:   Step the interior-point method one iteration at a time, inspect the iterate
+#
+# The happy path: pounce-dbg is a pdb for the IPM. Step a couple of
+# iterations, look at the current point and the KKT state, then let it run.
+s
+s
+p x
+i
+c
