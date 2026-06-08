@@ -34,7 +34,7 @@ This chapter covers the **Python API** (`pounce.qp` and the differentiable
 `pounce.jax` layers). For automatic CLI/Pyomo routing of `.nl` LPs/QPs, see
 [LP / QP Solver Routing](lp-qp-routing.md). Runnable, progressive notebooks
 live in [`python/notebooks/`](https://github.com/jkitchin/pounce/tree/main/python/notebooks):
-`13_convex_qp.ipynb`, `14_socp.ipynb`, `15_differentiable_convex.ipynb`.
+`15_convex_qp.ipynb`, `16_socp.ipynb`, `17_differentiable_convex.ipynb`.
 
 ## Quadratic programs
 

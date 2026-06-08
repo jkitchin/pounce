@@ -126,7 +126,7 @@ repelled from all known minima, and then re-minimizes there. The result is a
   15–29 (1985). [doi:10.1137/0906002](https://doi.org/10.1137/0906002).
 
 A worked example of all three is in
-[`python/notebooks/15_find_minima_repulsion.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/15_find_minima_repulsion.ipynb).
+[`python/notebooks/19_find_minima_repulsion.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/19_find_minima_repulsion.ipynb).
 
 ## Restart — choose the next start cleverly
 
@@ -159,7 +159,7 @@ instead of many times as plain multistart re-discovers knowns.
   Programming* **39**, 57–78 (1987).
   [doi:10.1007/BF02592071](https://doi.org/10.1007/BF02592071).
 
-See [`python/notebooks/16_find_minima_restart.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/16_find_minima_restart.ipynb),
+See [`python/notebooks/20_find_minima_restart.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/20_find_minima_restart.ipynb),
 which shows multistart spending ~15 solves (9 redundant) to find all six
 camel minima where MLSL needs ~6 (0 redundant).
 
@@ -186,7 +186,7 @@ minimum while collecting the distinct minima it visits.
   **120**(21), 9911–9917 (2004).
   [doi:10.1063/1.1724816](https://doi.org/10.1063/1.1724816).
 
-See [`python/notebooks/17_find_minima_hopping.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/17_find_minima_hopping.ipynb).
+See [`python/notebooks/21_find_minima_hopping.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/21_find_minima_hopping.ipynb).
 
 ## Beyond minima: saddle points and critical points
 

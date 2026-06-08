@@ -217,5 +217,7 @@ fewer than `n_minima` entries when the landscape has fewer minima.
 > [Choosing a Method](find-minima-choosing.md).
 
 See `python/examples/curve_fit_demo.py` and the
-[`18_curve_fit.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/18_curve_fit.ipynb)
-notebook for complete, runnable walkthroughs.
+[`22_curve_fit.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/22_curve_fit.ipynb)
+and
+[`23_curve_fit_minima.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/23_curve_fit_minima.ipynb)
+notebooks for complete, runnable walkthroughs.

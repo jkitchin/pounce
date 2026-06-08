@@ -211,9 +211,9 @@ deflation, tunneling, multistart, MLSL, basin-hopping). See
 [Finding Multiple Minima](find-minima.md) for the methods and references,
 [Choosing a Method](find-minima-choosing.md) for selection guidance
 (including high-dimensional behavior), and notebooks
-[15](https://github.com/jkitchin/pounce/blob/main/python/notebooks/15_find_minima_repulsion.ipynb),
-[16](https://github.com/jkitchin/pounce/blob/main/python/notebooks/16_find_minima_restart.ipynb),
-[17](https://github.com/jkitchin/pounce/blob/main/python/notebooks/17_find_minima_hopping.ipynb)
+[19](https://github.com/jkitchin/pounce/blob/main/python/notebooks/19_find_minima_repulsion.ipynb),
+[20](https://github.com/jkitchin/pounce/blob/main/python/notebooks/20_find_minima_restart.ipynb),
+[21](https://github.com/jkitchin/pounce/blob/main/python/notebooks/21_find_minima_hopping.ipynb)
 for the three families.
 
 ```python
