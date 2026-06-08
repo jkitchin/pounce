@@ -48,33 +48,6 @@ use std::collections::BTreeMap;
 /// errs toward the safe (more general) class.
 const PSD_TOL: f64 = 1e-9;
 
-/// Magnitude at or beyond which an `.nl` bound is AMPL's "infinity"
-/// sentinel rather than a real numeric limit. AMPL (and Ipopt) write a
-/// missing bound as `±1e19`, not an IEEE infinity.
-pub const NL_INF_SENTINEL: f64 = 1e19;
-
-/// Map an `.nl` constraint bound onto the convention pounce-global's
-/// relaxation and FBBT expect: a *missing* side must be a true `±∞`, not
-/// the `±1e19` sentinel AMPL writes. pounce-global decides whether a
-/// constraint side is active with `f64::is_finite`, so leaving the
-/// sentinel in place would turn a one-sided constraint (`g ≤ hi`) into a
-/// spurious two-sided one (`-1e19 ≤ g ≤ hi`). At GLOBALLib scale — a
-/// bilinear body of order `1e7` against a `1e19` bound — that bogus side
-/// makes the node relaxation report infeasible and the root gets pruned,
-/// so a feasible problem is certified infeasible. Mapping the sentinel
-/// back to `±∞` keeps a one-sided constraint one-sided. (Variable box
-/// bounds are handled separately: the relaxation needs a *finite* box, so
-/// those sentinels are capped to a large finite value, not `±∞`.)
-pub fn nl_constraint_bound(raw: f64) -> f64 {
-    if raw >= NL_INF_SENTINEL {
-        f64::INFINITY
-    } else if raw <= -NL_INF_SENTINEL {
-        f64::NEG_INFINITY
-    } else {
-        raw
-    }
-}
-
 /// The mathematical class of a loaded problem, from most to least
 /// specialized. See the module docs and `dev-notes/lp-qp-routing.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,8 +99,6 @@ pub enum SolverChoice {
     QpIpm,
     /// Active-set QP in `pounce-qp` (parallel track).
     QpActiveSet,
-    /// Spatial branch-and-bound global optimizer (`pounce-global`).
-    Global,
 }
 
 impl SolverChoice {
@@ -141,7 +112,6 @@ impl SolverChoice {
             SolverChoice::LpIpm => "LP interior-point (pounce-convex)",
             SolverChoice::QpIpm => "convex QP interior-point (pounce-convex)",
             SolverChoice::QpActiveSet => "active-set QP (pounce-qp)",
-            SolverChoice::Global => "spatial branch-and-bound global (pounce-global)",
         }
     }
 }
@@ -159,8 +129,6 @@ pub enum SolverSelection {
     QpIpm,
     /// Force active-set QP; error if the problem is not LP/convex-QP.
     QpActiveSet,
-    /// Force the spatial branch-and-bound global solver (any class).
-    Global,
 }
 
 impl SolverSelection {
@@ -173,14 +141,13 @@ impl SolverSelection {
             "lp-ipm" => Some(SolverSelection::LpIpm),
             "qp-ipm" => Some(SolverSelection::QpIpm),
             "qp-active-set" => Some(SolverSelection::QpActiveSet),
-            "global" => Some(SolverSelection::Global),
             _ => None,
         }
     }
 
     /// The accepted values, for error messages and option registration.
     pub const VALUES: &'static [&'static str] =
-        &["auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set", "global"];
+        &["auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set"];
 }
 
 /// Classify a parsed `.nl` problem.
@@ -320,9 +287,6 @@ pub fn resolve_solver(
                 Err(mismatch_msg(class, "qp-active-set", "an LP or convex QP"))
             }
         }
-        // The global solver handles any factorable class (it just needs finite
-        // variable bounds); `auto` never selects it, so this is opt-in only.
-        S::Global => Ok(SolverChoice::Global),
     }
 }
 
@@ -667,29 +631,6 @@ fn smallest_eigenvalue_symmetric(a: &mut [f64], k: usize) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::nl_reader::parse_nl_text;
-
-    // --- `.nl` constraint-bound sentinel mapping (global-solver regression) ---
-
-    #[test]
-    fn nl_constraint_bound_maps_sentinels_to_infinity() {
-        // A one-sided `.nl` constraint writes the missing side as ±1e19. That
-        // must become a true ±∞ so pounce-global treats the side as inactive;
-        // leaving the sentinel in place certified feasible GLOBALLib problems
-        // (ex3_1_1, dispatch, ex2_1_10, ex7_2_1) as infeasible at the root.
-        assert_eq!(nl_constraint_bound(-1e19), f64::NEG_INFINITY);
-        assert_eq!(nl_constraint_bound(1e19), f64::INFINITY);
-        assert_eq!(nl_constraint_bound(-1e20), f64::NEG_INFINITY);
-        assert_eq!(nl_constraint_bound(1e25), f64::INFINITY);
-    }
-
-    #[test]
-    fn nl_constraint_bound_preserves_real_limits() {
-        // Genuine numeric bounds must pass through untouched — including large
-        // but sub-sentinel ones like ex3_1_1's -1_250_000 and 83_333.333.
-        for b in [0.0, 1.0, -1250000.0, 83333.333, 1e18, -9.99e18] {
-            assert_eq!(nl_constraint_bound(b), b, "bound {b} should be preserved");
-        }
-    }
 
     // --- SolverSelection parsing ---
 

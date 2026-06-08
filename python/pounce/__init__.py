@@ -7,9 +7,7 @@ intentionally cyipopt-compatible: Problem class construction,
 same shape of result, with a scipy-style ``minimize`` facade alongside.
 Convex and conic programs (LP, QP, SOCP, exponential / power cones, small
 SDP) are exposed through ``solve_qp`` / ``solve_socp``; polynomial global
-optimization through ``sos_minimize``; certified global optimization of
-factorable nonconvex problems through ``minimize_global`` (spatial
-branch-and-bound). JAX integration (autodiff-built
+optimization through ``sos_minimize``. JAX integration (autodiff-built
 derivatives, implicit differentiation through ``x*(p)``) lives in the
 ``pounce.jax`` submodule and is only imported on demand to avoid pulling
 in JAX when it is not installed.
@@ -36,7 +34,6 @@ from .qp import (
     solve_qp_multi_rhs,
 )
 from .sos import sos_minimize, SosResult
-from .global_opt import minimize_global, GlobalResult
 
 __all__ = [
     # Nonlinear programming (cyipopt-compatible)
@@ -71,8 +68,5 @@ __all__ = [
     # Polynomial global optimization (SOS / Lasserre)
     "sos_minimize",
     "SosResult",
-    # Spatial branch-and-bound global optimization (general factorable nonconvex)
-    "minimize_global",
-    "GlobalResult",
     "__version__",
 ]

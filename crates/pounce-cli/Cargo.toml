@@ -51,8 +51,6 @@ pounce-observability.workspace = true
 # Specialized convex LP/QP interior-point solver, dispatched to for
 # classified LP / convex-QP `.nl` inputs.
 pounce-convex.workspace = true
-# Spatial branch-and-bound global optimizer, dispatched to for `--solver global`.
-pounce-global.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing.workspace = true
@@ -79,11 +77,6 @@ default = []
 # turns on the matching feature in pounce-algorithm so the option
 # `linear_solver = ma57` resolves to MA57 instead of falling back to FERAL.
 ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
-# Compile in the PARKED revised-simplex OBBT engine (development only). Off by
-# default — the engine is numerically unsound on badly-scaled relaxation LPs
-# (see pounce-global's `simplex-obbt` feature / `obbt::ObbtLp::Simplex`). With
-# this off, `obbt_lp=simplex` warns and falls back to the sound IPM engine.
-simplex-obbt = ["pounce-global/simplex-obbt"]
 
 [lints]
 workspace = true

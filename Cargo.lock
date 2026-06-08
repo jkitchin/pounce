@@ -906,7 +906,6 @@ dependencies = [
  "pounce-common",
  "pounce-convex",
  "pounce-feral",
- "pounce-global",
  "pounce-hsl",
  "pounce-linalg",
  "pounce-linsol",
@@ -954,21 +953,6 @@ dependencies = [
  "pounce-common",
  "pounce-linsol",
  "tracing",
-]
-
-[[package]]
-name = "pounce-global"
-version = "0.4.0"
-dependencies = [
- "pounce-algorithm",
- "pounce-common",
- "pounce-convex",
- "pounce-feral",
- "pounce-linsol",
- "pounce-nlp",
- "pounce-presolve",
- "pounce-simplex",
- "rayon",
 ]
 
 [[package]]
@@ -1055,7 +1039,6 @@ dependencies = [
  "pounce-common",
  "pounce-convex",
  "pounce-feral",
- "pounce-global",
  "pounce-linsol",
  "pounce-nl",
  "pounce-nlp",
