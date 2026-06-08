@@ -180,13 +180,16 @@ pounce-native entry point:
 | LP / convex QP | `minimize` (auto) or `solve_qp(P, c, A, b, G, h, lb, ub, …)` | callables / matrices | **global** |
 | SOCP / exp / power / PSD cones | `solve_socp(P, c, A, b, G, h, *, cones, …)` | matrices + cone list | **global** |
 | Polynomial, certified global | `sos_minimize(objective, *, inequalities, equalities, …)` | a polynomial | **global** |
-| Factorable nonconvex, certified global | `minimize_global(objective, *, constraints, lo, hi, …)` | a symbolic `Expr` + box | **global** |
 
-The `solve_qp` / `solve_socp` / `sos_minimize` / `minimize_global` functions
-are pounce-native (not SciPy-shaped) by necessity — e.g. `minimize_global`
-takes a symbolic `Expr` objective with keyword-only `lo`/`hi` box arrays and
-`(Expr, lo, hi)` constraint triples, *not* callables and SciPy dicts. See
+The `solve_qp` / `solve_socp` / `sos_minimize` functions are pounce-native (not
+SciPy-shaped) by necessity — e.g. `sos_minimize` takes a polynomial as a
+coefficient dict and returns a certificate, *not* callables and SciPy dicts. See
 [Choosing a Solver](choosing-a-solver.md) for the full map.
+
+> A `minimize_global` entry point for factorable nonconvex problems (spatial
+> branch-and-bound) is in development on the `feature/global` branch and is not
+> exposed in this release; today the certified-global Python path is
+> `sos_minimize`, for polynomials.
 
 ## Curve fitting
 

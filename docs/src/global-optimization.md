@@ -2,18 +2,84 @@
 
 Most of POUNCE settles a problem at a **local** optimum (the NLP filter-IPM and
 SQP) or exploits convexity so that local *is* global (the convex/conic IPM).
-This chapter covers the two paths that certify a **global** optimum of a
-genuinely **nonconvex** problem:
+For a genuinely **nonconvex** problem, the path to a *certified* global optimum
+that **ships in this release** is for polynomials:
 
-- **Spatial branch-and-bound** (`pounce-global`) — for general factorable
-  nonconvex NLPs.
-- **The SOS / Lasserre hierarchy** (`pounce-convex`) — for polynomial problems,
-  via a single semidefinite program.
+- **The SOS / Lasserre hierarchy** (`pounce-convex`) — for **polynomial**
+  problems, via a single semidefinite program. Callable from Rust
+  (`sos_minimize`) and Python (`pounce.sos_minimize`).
 
-Both return a result that is *certified*: a feasible point together with a
-proof (an optimality gap, or a moment certificate) that no better point exists.
+It returns a result that is *certified*: a lower bound together with a moment
+certificate that, when exact, pins the global minimum and recovers its
+minimizer(s).
 
-## Spatial branch-and-bound
+> A second path — general-purpose **spatial branch-and-bound** (`pounce-global`)
+> for factorable nonconvex NLPs with `exp`/`ln`/trig — is **in development on
+> the `feature/global` branch and is not part of this release**. It is described
+> at the end of this chapter for context, but there is no `pounce-global` crate
+> in the shipped workspace, no `pounce.minimize_global` Python entry point, and
+> no `--solver global` CLI route here.
+
+## The SOS / Lasserre path (polynomials)
+
+When the objective and constraints are **polynomials**, the
+sum-of-squares / moment approach in `pounce-convex` certifies the global
+minimum from a *single* semidefinite program — no branching — by searching for
+the largest `γ` such that `p(x) − γ` lies in the Putinar cone (a sum of squares
+plus constraint multipliers). The SDP is solved by POUNCE's own convex conic
+interior-point method; flat truncation of the resulting moment matrix certifies
+when the bound is exact, and a **facial-reduction** step recovers every global
+minimizer — even when the optimum is attained at several points.
+
+From Python, a polynomial is a **dict mapping an exponent tuple to its
+coefficient** (the all-zeros key is the constant term):
+
+```python
+from pounce.sos import sos_minimize
+
+# x**4 - 2 x**2 + 3  ->  global minimum 2, attained at BOTH x = +1 and x = -1
+r = sos_minimize({(4,): 1.0, (2,): -2.0, (0,): 3.0})
+r.lower_bound       # ≈ 2.0
+r.is_exact          # True — flat-truncation certificate: the bound is the minimum
+r.minimizers        # both x = +1 and x = -1
+```
+
+Constraints are polynomials too, passed as `inequalities` (`g_i(x) ≥ 0`) and
+`equalities` (`h_j(x) = 0`); raise the relaxation `order` to tighten the bound
+(the Lasserre hierarchy) at the cost of a larger SDP. A runnable walkthrough —
+double well, a constrained problem, and a 2-D example — is in
+[`18_sos_global_optimization.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/18_sos_global_optimization.ipynb).
+
+The same solver from Rust:
+
+```rust
+use pounce_convex::{sos_minimize, PolyProblem, Polynomial};
+# use pounce_feral::FeralSolverInterface;
+# use pounce_linsol::SparseSymLinearSolverInterface;
+# fn backend() -> Box<dyn SparseSymLinearSolverInterface> { Box::new(FeralSolverInterface::new()) }
+// x⁴ − 2x² + 3 → global minimum 2 at x = ±1.
+let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 3.0)]);
+let sol = sos_minimize(&PolyProblem::new(p), None, backend);
+// sol.lower_bound ≈ 2; when the moment matrix is flat, sol.minimizers holds
+// the global minimizer(s) — here both x = +1 and x = −1.
+```
+
+The full treatment lives in the `pounce_convex::sos` module documentation.
+
+**When SOS fits:** polynomials of modest degree and dimension — one SDP,
+recovers all global minimizers, but the SDP grows with the relaxation order.
+For general factorable problems (`exp`/`ln`/trig), or polynomials where the SDP
+would be too large, the tool is spatial branch-and-bound — which is still in
+development (below).
+
+## Spatial branch-and-bound (in development)
+
+> **Not in this release.** Everything in this section describes the
+> `pounce-global` crate as it exists on the `feature/global` branch. It is not
+> in the shipped workspace, and the Rust snippets below will not compile against
+> the published crates. There is no Python or CLI binding for it in this
+> release. The section is kept for design context and to set expectations for
+> what the general nonconvex path will look like.
 
 ### The problem
 
@@ -58,7 +124,8 @@ For each node — a box `[lo, hi]` — the solver:
 The search stops when the frontier's lowest bound meets the incumbent within
 tolerance — at which point the incumbent is the certified global optimum.
 
-```rust
+```rust,ignore
+// On the `feature/global` branch — not in this release.
 use pounce_global::{expr::var, solve_global, GlobalProblem, GlobalOptions, GlobalStatus};
 use pounce_feral::FeralSolverInterface;
 
@@ -78,39 +145,16 @@ assert_eq!(sol.status, GlobalStatus::Optimal);
 // branch-and-bound node count.
 ```
 
-Build constraints with the same expression DSL:
+Constraints use the same expression DSL — `.ge`, `.le`, `.equality`, and
+`.subject_to(g, lo, hi)`; an infeasible problem returns
+`GlobalStatus::Infeasible` with a proof:
 
-```rust
+```rust,ignore
 let obj = var(0) + var(1);
 let g = var(0) * var(1);
 // min x + y  s.t.  x·y ≥ 4 on [1,5]²  → 4 at (2,2)
 let prob = GlobalProblem::new(vec![1.0, 1.0], vec![5.0, 5.0], &obj).ge(&g, 4.0);
 ```
-
-`.ge`, `.le`, `.equality`, and `.subject_to(g, lo, hi)` add constraints; an
-infeasible problem returns `GlobalStatus::Infeasible` with a proof.
-
-### From Python and the CLI
-
-The solver is reachable beyond the Rust API:
-
-- **Python** — `pounce.minimize_global` with an ergonomic expression DSL:
-
-  ```python
-  from pounce.global_opt import var, minimize_global, ge
-  x, y = var(0), var(1)
-  f = (4 - 2.1 * x**2 + x**4 / 3) * x**2 + x * y + (-4 + 4 * y**2) * y**2
-  r = minimize_global(f, lo=[-2, -1.5], hi=[2, 1.5])   # r.objective ≈ −1.0316
-  ```
-
-  All `GlobalOptions` knobs are keyword arguments (`obbt_passes`, `threads`, …);
-  constraints are `[ge(g, lb), le(g, ub), eq(g, rhs)]`.
-
-- **CLI** — `pounce model.nl solver_selection=global` runs the solver on an
-  AMPL `.nl` model. Because the relaxation needs a **finite box**, variables
-  left unbounded in the `.nl` are capped to a large default (with a warning),
-  and the certified optimum is then global only within that box — so the global
-  solver is most useful on `.nl` models with sensible finite variable bounds.
 
 ### The relaxation suite
 
@@ -181,42 +225,11 @@ There are two opt-in forms of parallelism:
   small 5-variable problem it was ≈2.6× on 14 cores (≈40 nodes — too few to
   saturate the cores); it scales further as the tree widens.
 
-## The SOS / Lasserre path (polynomials)
+### Honest limits
 
-When the objective and constraints are **polynomials**, the
-sum-of-squares / moment approach in `pounce-convex` is often the better tool:
-it certifies the global minimum from a *single* semidefinite program — no
-branching — by searching for the largest `γ` such that `p(x) − γ` lies in the
-Putinar cone (a sum of squares plus constraint multipliers).
-
-```rust
-use pounce_convex::{sos_minimize, PolyProblem, Polynomial};
-# use pounce_feral::FeralSolverInterface;
-# use pounce_linsol::SparseSymLinearSolverInterface;
-# fn backend() -> Box<dyn SparseSymLinearSolverInterface> { Box::new(FeralSolverInterface::new()) }
-// x⁴ − 2x² + 3 → global minimum 2 at x = ±1.
-let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 3.0)]);
-let sol = sos_minimize(&PolyProblem::new(p), None, backend);
-// sol.lower_bound ≈ 2; when the moment matrix is flat, sol.minimizers holds
-// the global minimizer(s) — here both x = +1 and x = −1.
-```
-
-The relaxation order can be raised to tighten the bound (the Lasserre
-hierarchy), and the solution is recovered from the moment matrix: flat
-truncation certifies exactness and a **facial-reduction** step recovers the
-minimizers even when the optimum is non-unique. From Python this is
-`pounce.sos_minimize`. The full treatment lives in the `pounce_convex::sos`
-module documentation.
-
-When to prefer which: **SOS** for polynomials of modest degree and dimension
-(one SDP, recovers all global minimizers, but the SDP grows with degree);
-**spatial branch-and-bound** for general factorable problems including
-`exp`/`ln`/trig, or polynomials where the SDP would be too large.
-
-## Honest limits
-
-`pounce-global` is a complete, correct *continuous* global solver. It is not
-yet at commercial-solver scale:
+On the `feature/global` branch, `pounce-global` is a complete, correct
+*continuous* global solver. It is not yet at commercial-solver scale (and, as
+noted, not yet wired into a shipped release):
 
 - **Continuous only** — no integer branching (MINLP).
 - **Branching** offers widest, most-violation (default), and reliability

@@ -97,10 +97,10 @@
   <text x="285" y="409" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#111827">SOS / Lasserre</text>
   <text x="285" y="425" text-anchor="middle" font-size="9.5" font-style="italic" fill="#4b5563">pounce-convex</text>
   <text x="285" y="440" text-anchor="middle" font-size="9.5" fill="#374151">polynomial → one SDP</text>
-  <rect x="610" y="388" width="180" height="60" rx="7" fill="#ffedd5" stroke="#ea580c" stroke-width="1.4"/>
-  <text x="700" y="409" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#111827">Spatial branch &amp; bound</text>
-  <text x="700" y="425" text-anchor="middle" font-size="9.5" font-style="italic" fill="#4b5563">pounce-global</text>
-  <text x="700" y="440" text-anchor="middle" font-size="9.5" fill="#374151">McCormick LP + FBBT/OBBT + NLP</text>
+  <rect x="610" y="388" width="180" height="60" rx="7" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 3"/>
+  <text x="700" y="409" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#6b7280">Spatial branch &amp; bound</text>
+  <text x="700" y="425" text-anchor="middle" font-size="9.5" font-style="italic" fill="#9ca3af">pounce-global · in development</text>
+  <text x="700" y="440" text-anchor="middle" font-size="9.5" fill="#9ca3af">not in this release (feature branch)</text>
   <text x="500" y="468" text-anchor="middle" font-size="9.5" font-style="italic" fill="#6b7280">SOS solves an SDP via the Convex IPM; branch-and-bound calls the Convex IPM (LP relaxations) and the NLP filter-IPM (upper bounds)</text>
 
   <!-- core, backends, and support layers shifted down to make room for the

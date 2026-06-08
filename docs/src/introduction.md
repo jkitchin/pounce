@@ -21,9 +21,10 @@ into a *family* of solvers sharing one numerical backbone:
 - **Conic & quadratic** — LP, convex QP, second-order (SOCP),
   positive-semidefinite (SDP), and the non-symmetric exponential and power
   cones, each solved to the global optimum.
-- **Global optimization** — certified global optima for nonconvex problems
-  via SOS / Lasserre relaxations (polynomials) and spatial branch-and-bound
-  (`pounce-global`, general factorable NLPs).
+- **Global optimization** — certified global optima for nonconvex
+  **polynomial** problems via SOS / Lasserre relaxations. (A general-purpose
+  spatial branch-and-bound solver, `pounce-global`, is in development on the
+  `feature/global` branch and not part of this release.)
 
 See [Choosing a Solver](choosing-a-solver.md) for which solver fits which
 problem.
@@ -55,9 +56,11 @@ The conic and global solvers are wired end-to-end alongside the NLP
 core: the convex interior-point solver (`pounce-convex`) handles
 LP / QP, SOCP, exponential / power cones, and small SDPs — with a Conic
 Benchmark Format (`.cbf`) reader cross-checked against the CBLIB tier —
-while the global path adds SOS / Lasserre polynomial optimization and a
-deterministic spatial branch-and-bound solver (`pounce-global`). All are
-reachable from the CLI, the Python package, and the JSON solve report.
+and adds SOS / Lasserre polynomial global optimization (`sos_minimize`).
+These are reachable from the CLI, the Python package, and the JSON solve
+report. A deterministic spatial branch-and-bound solver for general
+factorable nonconvex problems (`pounce-global`) is in development on the
+`feature/global` branch and not part of this release.
 
 ## License
 

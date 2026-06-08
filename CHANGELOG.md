@@ -69,30 +69,15 @@ the new PSD cone. When the relaxation is exact it extracts the global
 minimizer(s) with an exactness certificate (multi-atom extraction without a
 non-symmetric eig, plus facial reduction for degenerate solves).
 
-### Added — Spatial branch-and-bound global optimizer (`pounce-global`;
-`minimize_global` / `--solver global`)
-
-A new `pounce-global` crate solves **factorable nonconvex NLPs to a certified
-global optimum** by spatial branch-and-bound: αBB convex underestimators,
-polyhedral envelopes for univariate atoms, level-1 RLT cuts, multi-grouping
-trilinear relaxations, optimization-based bound tightening (OBBT), and
-cutting-plane bound refinement, with local NLP upper bounds. Branching is
-reliability-based (pseudocost + strong branching); the node pool and OBBT run in
-parallel (deterministic, ~2.3–2.6× wall-clock). Exposed as
-`minimize_global(objective, *, constraints, lo, hi, …)` in Python (a symbolic
-`Expr` + box) and `pounce --solver global` on `.nl` models, with frontier
-memory estimation and a pre-solve warning.
-
-### Added — Multi-backend interactive debugger (convex IPM + B&B tree)
+### Added — Multi-backend interactive debugger (convex/conic IPM)
 
 The interactive debugger was generalized over a `DebugState` trait so one REPL
-drives all three solvers. New backends: a **convex/conic** debugger
-(`pounce_cblib --debug`, wired through the symmetric and non-symmetric HSDE
-drivers) and an **interactive branch-and-bound tree debugger** that can `step`
-through nodes and `into` a node's relaxation — handing off to the interior-point
-REPL via a shared command queue (tree ↔ interior-point). This composes with the
-0.4.0 debugger features below (quote-aware tokenization, `ask` provider presets,
-`--debug-json` protocol, Ctrl-C escape hatch).
+drives the convex solver as well as the NLP loop. New backend: a
+**convex/conic** debugger (`pounce_cblib --debug`, wired through the symmetric
+and non-symmetric HSDE drivers), exposing the same checkpoints and commands as
+the NLP path. This composes with the 0.4.0 debugger features below (quote-aware
+tokenization, `ask` provider presets, `--debug-json` protocol, Ctrl-C escape
+hatch).
 
 ### Added — `pounce.curve_fit` (Python)
 

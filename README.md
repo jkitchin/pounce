@@ -26,13 +26,14 @@ numerical backbone:
   second-order (SOCP), positive-semidefinite (SDP), and the non-symmetric
   exponential and power cones — each solved to the global optimum, with
   infeasibility certificates, warm starts, and post-optimal sensitivity.
-- **Global optimization** — certified global optima for nonconvex problems:
-  SOS / Lasserre relaxations for polynomials, and a deterministic spatial
-  branch-and-bound solver (`pounce-global`) for general factorable NLPs.
+- **Global optimization** — certified global optima for nonconvex
+  **polynomial** problems via SOS / Lasserre relaxations. (A general-purpose
+  spatial branch-and-bound solver, `pounce-global`, is in development on the
+  `feature/global` branch and not part of this release.)
 
 Convex and conic problems are solved to global optimality; nonconvex problems
-are solved locally by default, or to a certified global optimum via the SOS
-and branch-and-bound paths. See **[Choosing a Solver](https://jkitchin.github.io/pounce/choosing-a-solver.html)**
+are solved locally by default, or — for polynomials — to a certified global
+optimum via the SOS path. See **[Choosing a Solver](https://jkitchin.github.io/pounce/choosing-a-solver.html)**
 for the full map of which solver fits which problem.
 
 The default build is pure Rust — no Fortran, no HSL, no system BLAS required.
@@ -64,13 +65,15 @@ against external suites:
   `p`-norms), and small dense SDPs, with a Conic Benchmark Format (`.cbf`)
   reader cross-checked against the CBLIB tier. The CLI's `auto` routing
   classifies an `.nl` and sends LP / convex-QP problems here automatically.
-- **Global** — SOS / Lasserre polynomial optimization (`sos_minimize`) and
-  deterministic spatial branch-and-bound (`pounce-global`, `--solver global`)
-  with McCormick relaxations, OBBT/FBBT bound tightening, and a certified
-  optimality gap.
+- **Global (polynomials)** — SOS / Lasserre polynomial optimization
+  (`sos_minimize` / `pounce.sos_minimize`): a single SDP certifies the global
+  minimum and recovers the global minimizers. A general-purpose spatial
+  branch-and-bound solver (`pounce-global`, with McCormick relaxations,
+  OBBT/FBBT bound tightening, and a certified optimality gap) is in development
+  on the `feature/global` branch and not part of this release.
 
-All of it — NLP, conic, and global — is reachable from the CLI, the Python
-package, and the JSON solve report.
+The shipped solvers — NLP, conic, and SOS — are reachable from the CLI, the
+Python package, and the JSON solve report.
 
 See `benchmarks/` for the comparison harness against upstream Ipopt.
 
@@ -103,7 +106,6 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-sensitivity`](crates/pounce-sensitivity) | Post-optimal sensitivity + reduced-Hessian (port of upstream sIPOPT).                                                         |
 | [`pounce-qp`](crates/pounce-qp)                   | Sparse parametric active-set QP subproblem solver — drives the SQP path and the sensitivity corrector.                        |
 | [`pounce-convex`](crates/pounce-convex)           | Convex/conic interior-point solver — LP, QP, SOCP, exponential/power cones, small SDP, and SOS polynomial optimization.       |
-| [`pounce-global`](crates/pounce-global)           | Deterministic spatial branch-and-bound for nonconvex factorable NLPs (McCormick relaxations, OBBT/FBBT, certified gap).       |
 | [`pounce-solve-report`](crates/pounce-solve-report) | `pounce.solve-report/v1` JSON writer (shared by `pounce-cli --json-output` and `IpoptWriteSolveReport`).                     |
 | [`pounce-observability`](crates/pounce-observability) | `tracing` subscriber install + per-iteration collector layer that feeds the iteration stream into the solve report.       |
 | [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem` / `IpoptWriteSolveReport`.                              |
