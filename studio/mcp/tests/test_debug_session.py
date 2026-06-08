@@ -204,3 +204,19 @@ def test_close_reports_final_status(session):
     # idempotent: second close is a clean error
     with pytest.raises(ValueError):
         debug_close(sid)
+
+
+def test_global_solver_rejected_fast(tmp_path):
+    """The spatial B&B global solver speaks a `kind: "tree"` protocol variant
+    the proxy can't drive (tree_pause, no request/result loop). `debug_start`
+    must reject it *immediately* with actionable guidance — not block the full
+    startup_timeout waiting for an iteration-loop `hello`+`pause`."""
+    import time
+    nl = "crates/pounce-cli/tests/fixtures/tame.nl"
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError, match="global"):
+        # A generous startup_timeout: if the guard is missing this would block
+        # the whole 8s; the guard should fire in well under a second.
+        debug_start(nl_file=nl, extra_args=["solver_selection=global"],
+                    startup_timeout=8.0)
+    assert time.monotonic() - t0 < 5.0, "guard should reject fast, not time out"

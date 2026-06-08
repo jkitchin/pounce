@@ -807,6 +807,13 @@ def debug_session_guide() -> dict[str, Any]:
             "nlp_error",
             "complementarity",
         ],
+        "global_solver": "The spatial branch-and-bound global solver "
+        "(`solver_selection=global`) speaks a DIFFERENT protocol variant: its "
+        "`hello` carries `kind: \"tree\"`, pauses arrive as `tree_pause` "
+        "(node/depth/global_lb/incumbent/gap/frontier/nodes — no iterate "
+        "metrics), and there is no request/result loop. `debug_start` rejects "
+        "it; drive it from the CLI: `pounce <model> solver_selection=global "
+        "--debug` (or `--debug-json` for the raw tree_pause stream).",
         "docs": "docs/src/debugger.md",
     }
 
@@ -929,6 +936,21 @@ class _DebugSession:
                 continue
             e = ev.get("event")
             if e == "hello":
+                # The spatial branch-and-bound solver speaks a *distinct*
+                # protocol variant (`kind: "tree"`): pauses arrive as
+                # `tree_pause` and there is no request/result command loop, so
+                # this proxy cannot drive it. Fail fast with guidance instead
+                # of blocking the full startup timeout on a `pause` that never
+                # comes.
+                if ev.get("kind") == "tree":
+                    raise RuntimeError(
+                        "this problem routes to the global branch-and-bound "
+                        "solver, whose tree debugger is not drivable via "
+                        "debug_start (it speaks a different protocol). Drive it "
+                        "from the CLI instead: "
+                        "`pounce <model> solver_selection=global --debug` "
+                        "(or `--debug-json` for the raw tree_pause stream)."
+                    )
                 self.hello = ev
             elif e == "pause":
                 self.last_pause = ev
