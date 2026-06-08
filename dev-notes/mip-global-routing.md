@@ -93,7 +93,7 @@ The dividing principle is **where the work is best done**:
 | Modeling, problem setup, user intent | **discopt (Python)** | Users model in Python; the algebraic API, GDP, NN embedding, ONNX import, DAE collocation live here |
 | **Modeling-language presolve** — reformulation that needs symbolic structure / user intent | **discopt (Python)** | Big-M / disjunction handling, NN-embedding reductions, expression-level simplification: best done where the model semantics are still visible, before lowering to numerics |
 | B&B orchestration (tree, branching, fathoming) | **discopt today**, optionally lifted to Rust later | Already working; the hot loop is the *node solve*, not the tree bookkeeping |
-| **Performance-heavy numeric presolve** — FBBT sweeps, OBBT LPs, activity/bound reductions, coefficient strengthening | **pounce (Rust)** | Thousands of repetitions per solve; this is the `pounce-presolve` + `pounce-convex` presolve already landing on `claude/amazing-mayer-Xd0ag` |
+| **Performance-heavy numeric presolve** — FBBT sweeps, OBBT LPs, activity/bound reductions, coefficient strengthening | **pounce (Rust)** | Thousands of repetitions per solve; this is the `pounce-presolve` + `pounce-convex` presolve merged in PR #70 |
 | Node relaxation solves (LP/QP/NLP/conic) | **pounce (Rust)** | The wall-clock-dominant inner loop; pure-Rust, warm-started, differentiable |
 | Single-problem NLP backend | **pounce (Rust)** | Directly replaces discopt's `ripopt` — see below |
 
@@ -174,7 +174,7 @@ it:
 Three things make this *one* solver, not a bundle:
 
 1. **Global's upper bound *is* the local solver.** The `IncumbentSearch`
-   seam inside spatial B&B (Phase 5) gets its feasible points from
+   seam inside spatial B&B (Phase 4) gets its feasible points from
    multi-start `pounce-algorithm` NLP solves. "Local solve" is therefore
    a *component* of the global solver, not a throwaway path — building
    the local tier well builds half the global tier. Likewise `multistart`
@@ -235,15 +235,25 @@ linear algebra.
    spatial branching share the tree, node queue, incumbent, and gap
    machinery. Branching mode and lower-bound source are pluggable.
    Resists building two near-duplicate B&B drivers.
-2. **Simplex is back, as a dependency.** Pure-Rust means no HiGHS to
-   wrap for warm-started node LPs. B&B throughput lives or dies on
-   warm-starting node relaxations, and IPM-LP warm-starts poorly (must
-   reseed the barrier — lp-qp-routing.md "Active-set vs IPM-QP"). A
-   pure-Rust **dual simplex with LU-with-updates** becomes the node
-   engine for MILP and for the LP relaxations inside spatial B&B. This
-   reverses the LP/QP note's "Simplex (LP) — was Phase 4, removed"
-   decision; it was removed *because* HiGHS was the fallback, and that
-   fallback is now disallowed.
+2. **Simplex is deferred to the global-optimization work, and its LU
+   lives in feral — not a separate crate.** Pure-Rust means no HiGHS to
+   wrap for warm-started node LPs, so a dual simplex *is* eventually
+   needed — but **only where it pays off: warm-started LP-relaxation
+   nodes inside spatial B&B (global)**. The convex-MI deliverable
+   (Phases 0–2) does *not* need it: those nodes solve on the existing
+   symmetric path (IPM `pounce-convex`, active-set `pounce-qp`). This
+   matches the repo history — a simplex (`Harris two-pass + EXPAND`) was
+   built and then deliberately *stripped* from the merged LP/QP path
+   (PR #70), i.e. parked until global needs it. Two consequences:
+   - **No `pounce-lu` / `pounce-simplex` crates.** The robust sparse LU
+     (Bartels-Golub / Forrest-Tomlin updates) is landing **inside
+     feral**, alongside its symmetric LDLᵀ — one sparse-factorization
+     backend serving both the symmetric (IPM/QP) and unsymmetric
+     (simplex) systems behind `pounce-linsol`. The simplex driver itself
+     becomes a module in `pounce-convex`, not a standalone crate.
+   - This **reconciles the old "Simplex is back" reversal with decision
+     8** ("not chasing MILP"): you do not build the hardest numerical
+     component on the convex-MI critical path. It arrives with global.
 3. **The relaxation engine is its own crate (`pounce-relax`).** It is
    symbolic, not linear-algebra — factorable decomposition, McCormick
    envelopes, αBB, OBBT. It is the research-grade analog of
@@ -301,22 +311,29 @@ crates/
                    #   variable reformulation. Builds a convex LP/NLP
                    #   relaxation from the Expr DAG. Reuses fbbt/interval.rs.
                    #   Symbolic analog of pounce-convex.
-  pounce-lu/       # NEW: sparse LU with Bartels-Golub / Forrest-Tomlin
-                   #   updates — the simplex factorization.
-  pounce-simplex/  # NEW (or a module in pounce-convex): dual simplex with
-                   #   bound-flipping ratio test, warm-startable node LP.
   pounce-mip/      # NEW: unified branch-and-bound engine — tree, node
                    #   management, incumbent, gap. Branching: integer
                    #   (pseudocost / reliability) AND spatial (continuous,
                    #   on the var driving the relaxation gap). Consumes
-                   #   pounce-relax for bounds and pounce-{simplex,convex,
+                   #   pounce-relax for bounds and pounce-{convex,
                    #   algorithm,qp} for node solves.
-  ── existing ──
-  pounce-convex/   # IPM-LP/QP (from the LP/QP plan)
+  ── existing / in flight ──
+  pounce-convex/   # IPM-LP/QP + the conic family (merged, PR #70). Later
+                   #   gains a dual-simplex MODULE (not a crate) for the
+                   #   global LP-relaxation nodes — gated on the global work.
   pounce-qp/       # active-set QP — the MIQP node engine
   pounce-algorithm/# IPM-NLP — upper-bound / incumbent local solves
   pounce-presolve/ # bound-tightening, FBBT, BTF, DM, components, auxiliary
+  feral/           # sparse symmetric LDLᵀ today; sparse LU (Bartels-Golub
+                   #   / Forrest-Tomlin updates) landing now → the one
+                   #   backend behind pounce-linsol for BOTH the symmetric
+                   #   (IPM/QP) and unsymmetric (simplex) node systems.
 ```
+
+There is no `pounce-lu` and no `pounce-simplex` crate: the robust sparse
+LU lives in **feral** next to its LDLᵀ, and the simplex driver is a
+later **module in `pounce-convex`**. Both are gated on the
+global-optimization work (Phases 3–5), not the convex-MI deliverable.
 
 Note `pounce-mip` is **not** a `pounce-linsol` consumer the way the
 solver crates are — it consumes *solvers*, which in turn consume
@@ -331,44 +348,55 @@ both. `[Pn]` tags the phase that introduces each new crate.
 
 ```text
                          pounce-mip  [P1]
-            ┌──────────────┬───────┴───────┬──────────────┐
+            ┌──────────────┬───────────────┬──────────────┐
             ▼              ▼               ▼              ▼
-      pounce-relax   pounce-simplex   pounce-qp      pounce-convex
-         [P4]         [P2]            (existing,      (LP/QP plan)
-            │              │           MIQP node)         │
-            │              ▼               │              │
-            │         pounce-lu [P2]       │              │
-            │                              │              │
-            ▼                              ▼              ▼
-       ┌─────────────────┐          ┌──────────────────────────┐
-       │ Expr DAG +       │          │ sparse symmetric          │
-       │ interval arith   │          │ augmented system          │
-       │ (fbbt/, auxiliary)│         │ (pounce-linsol + feral)   │
-       │  ── anchor #1 ──  │          │  ── anchor #2 ──          │
-       └─────────────────┘          └──────────────────────────┘
+      pounce-relax       (simplex      pounce-qp      pounce-convex
+         [P3]         module of         (existing,    (merged, PR #70)
+            │         pounce-convex,    MIQP node)         │
+            │         global-gated)         │              │
+            ▼              └───────┬────────┴──────────────┘
+       ┌─────────────────┐        ▼
+       │ Expr DAG +       │   ┌──────────────────────────────────┐
+       │ interval arith   │   │ feral behind pounce-linsol:        │
+       │ (fbbt/, auxiliary)│  │  symmetric LDLᵀ (IPM/QP) +          │
+       │  ── anchor #1 ──  │  │  sparse LU (simplex, landing now)   │
+       └─────────────────┘   │  ── anchor #2 ──                    │
+                             └──────────────────────────────────┘
    (also: pounce-algorithm IPM-NLP — incumbent upper bounds, anchor #2)
 ```
+
+Note anchor #2 now hosts *both* factorization kinds in one backend: the
+symmetric LDLᵀ that IPM/QP nodes use, and the sparse LU the simplex needs
+— so the simplex, when it arrives with the global work, adds no new
+linear-algebra crate, just a new factorization mode in feral.
 
 Phase gating (what must exist before what):
 
 ```text
-P0 plumbing ─▶ P1 B&B shell + MIQP ─▶ P2 simplex/LU ─▶ P3 cuts+presolve
-                                                              │
-                          convex-MI deliverable ◀────────────┘
-                                                              │
-                                   P4 pounce-relax ◀──────────┘ (needs a
-                                          │                      working node
-                                          ▼                      solver + B&B)
-                                   P5 spatial B&B
-                                          │
-                                          ▼
-                                   P6 MINLP-global
+P0 plumbing ─▶ P1 B&B shell + MIQP ─▶ P2 cuts + MIP presolve
+                                            │
+                        convex-MI deliverable ◀──┘   (IPM/active-set
+                                            │          node solves only —
+                                            │          NO simplex, NO LU)
+                                            ▼
+                       P3 pounce-relax (McCormick/αBB) ──┐
+                                            │            │
+              feral sparse LU + simplex ────┤  (both     │
+              module in pounce-convex       │   land here, with global)
+                                            ▼            │
+                                   P4 spatial B&B ◀───────┘
+                                            │
+                                            ▼
+                                   P5 MINLP-global
 ```
 
-The crossbar is the whole point: **P4–P6 (global) cannot start until the
-convex-MI substrate (P1–P3) can run a B&B tree over convex relaxations.**
-`pounce-relax` only produces those relaxations; something has to bound
-and branch on them.
+Two crossbars now matter:
+1. **Global gates on convex-MI:** P3–P5 cannot start until the convex-MI
+   substrate (P1–P2) can run a B&B tree over convex relaxations.
+2. **Simplex/LU gates on global, not convex-MI:** the dual simplex and
+   feral's sparse LU arrive *with* the global LP-relaxation nodes — the
+   convex-MI deliverable never touches them. This is the deferral
+   recorded in decision 2, matching the PR-#70 strip of the built simplex.
 
 ### Dispatch and classification
 
@@ -439,10 +467,10 @@ The factorable-McCormick stack above is the *general* lower-bounding
 route (it handles `exp`, `log`, trig, arbitrary C² terms). But for the
 **quadratic** structured classes — nonconvex QP, QCQP, and the quadratic
 parts of MINLP — a second, often *tighter* lower bound is available:
-**conic (SDP/SOCP) relaxation**. And the LP/QP branch
-`claude/amazing-mayer-Xd0ag` is landing exactly the cone machinery this
-needs (SOCP with NT scaling, the HSDE driver, composite cones), so it
-costs little to add as an alternative relaxation backend.
+**conic (SDP/SOCP) relaxation**. And PR #70 already merged exactly the
+cone machinery this needs (SOCP with NT scaling, the HSDE driver,
+composite cones), so it costs little to add as an alternative relaxation
+backend.
 
 The contrast, for the global lower bound on a quadratic term:
 
@@ -450,7 +478,7 @@ The contrast, for the global lower bound on a quadratic term:
 |---|---|---|
 | Generality | any C² expression | quadratic (QP/QCQP) only |
 | Bound tightness on quadratics | looser (separable envelopes) | tighter (Shor SDP dominates RLT — Anstreicher 2009) |
-| Node solver | the dual simplex (decision 7) | `pounce-convex` cone IPM (on the branch) |
+| Node solver | the dual simplex (decision 7) | `pounce-convex` cone IPM (merged, PR #70) |
 | Warm-start in B&B | excellent (simplex basis) | weaker (IPM reseed) |
 | Differentiable | yes, via simplex KKT | yes — the branch already ships a `cone-aware OptNet` layer |
 | Cost to add | the planned `pounce-relax` | mostly *reuse* of the landing cone solver |
@@ -464,7 +492,7 @@ completely-positive reformulations (Burer 2009 lineage) are the standard
 constructions; SOCP relaxation is the cheaper, weaker cousin that
 warm-starts better inside the tree.
 
-**Phasing implication.** Conic relaxations are a *Phase 5+ enhancement*,
+**Phasing implication.** Conic relaxations are a *Phase 4+ enhancement*,
 not a prerequisite — `pounce-relax`'s factorable-LP path (decision 7) is
 the baseline that makes the global solver work at all. The conic
 backend is the natural "tighten the bound on quadratic structure"
@@ -493,8 +521,8 @@ would assume. There are **two** systems, and MIP builds on both:
   (issue #62), redundant-row removal, BTF, Dulmage–Mendelsohn, connected
   components, auxiliary-equality preprocessing (issue #53), incidence /
   matching.
-- **Convex presolve in `pounce-convex` (PaPILO-style, landing on the
-  LP/QP branch `claude/amazing-mayer-Xd0ag`):** LP/QP activity-bound
+- **Convex presolve in `pounce-convex` (PaPILO-style, merged in PR
+  #70):** LP/QP activity-bound
   reductions, free-column singleton substitution, forcing constraints,
   parallel-row detection, dominated columns, dual bound tightening, all
   iterated to a fixpoint — with **transaction-stack postsolve** and
@@ -524,9 +552,9 @@ OptNet`, JAX QP matrix gradients P/G/A). MIP/global inherits all of it.
 
 Presolve transforms the problem, so the backward pass must map gradients
 back through every reduction to the *original* variables. The
-**transaction-stack postsolve already on the branch is exactly this
+**transaction-stack postsolve merged in PR #70 is exactly this
 mechanism for the solution**; MIP extends it from solution-mapping to
-gradient-mapping, and the branch's differentiable cone layer
+gradient-mapping, and the merged differentiable cone layer
 (`cone-aware OptNet`) already demonstrates differentiating through a
 presolved-then-solved convex problem. Reductions that fix or substitute
 a variable contribute a known/zero gradient (pinned, like integers and
@@ -544,8 +572,8 @@ Names are illustrative, not final.
 ### Seam 1 — `NodeSolver`: warm-startable relaxation solve
 
 The single integration point with the continuous solvers. Thin adapters
-implement it over `pounce-simplex` (dual simplex), `pounce-qp`
-(active-set), `pounce-convex` (IPM), and `pounce-algorithm` (NLP). The
+implement it over `pounce-qp` (active-set), `pounce-convex` (IPM, and
+later its dual-simplex module), and `pounce-algorithm` (NLP). The
 associated `WarmState` is what threads node-to-node — a simplex basis,
 an active set, or a (symbolic) factor. The engine is generic over
 `S: NodeSolver`, so dispatch monomorphizes one B&B per solver arm; no
@@ -569,7 +597,7 @@ pub trait NodeSolver {
 pub struct NodeData<'a> {
     pub var_lb: &'a [f64],   // branching narrows these
     pub var_ub: &'a [f64],
-    pub cuts: &'a [CutRef],  // global cut-pool handles in scope (Phase 3)
+    pub cuts: &'a [CutRef],  // global cut-pool handles in scope (Phase 2)
     pub depth: u32,
 }
 
@@ -636,7 +664,7 @@ pub trait Relaxation {
 /// the brancher. `tighten` only updates bounds; `project` is identity.
 pub struct PassthroughRelaxation { /* wraps the original TNLP */ }
 
-/// Global path (Phase 4): factorable decomposition + envelopes.
+/// Global path (Phase 3): factorable decomposition + envelopes.
 pub struct FactorableRelaxation { /* Expr DAG, aux vars, McCormick/αBB */ }
 ```
 
@@ -754,7 +782,7 @@ competitive node engines.
 crates/pounce-mip/
   Cargo.toml            # deps: pounce-common, pounce-nlp, pounce-presolve,
                         #       pounce-convex, pounce-qp, pounce-algorithm,
-                        #       pounce-relax, pounce-simplex
+                        #       pounce-relax
   src/
     lib.rs              # branch_and_bound<S,B,R,H> + the four seam traits
     tree.rs            # Node, best-bound / depth-first queue, gap accounting
@@ -762,15 +790,15 @@ crates/pounce-mip/
     branch/
       mod.rs            # Brancher trait, BranchDecision
       most_fractional.rs# Phase 1
-      pseudocost.rs     # Phase 3 (reliability — Achterberg et al. 2005)
-      spatial.rs        # Phase 5 (gap-driven continuous split)
-    incumbent.rs        # IncumbentSearch trait + rounding/diving (Phase 3)
-    cuts/               # Phase 3: pool + Gomory/MIR/cover separators
+      pseudocost.rs     # Phase 2 (reliability — Achterberg et al. 2005)
+      spatial.rs        # Phase 4 (gap-driven continuous split)
+    incumbent.rs        # IncumbentSearch trait + rounding/diving (Phase 2)
+    cuts/               # Phase 2: pool + Gomory/MIR/cover separators
       mod.rs  gomory.rs  mir.rs  cover.rs
     adapters/           # NodeSolver impls (thin wrappers)
-      simplex.rs  active_set.rs  ipm.rs  nlp.rs
+      active_set.rs  ipm.rs  nlp.rs   # simplex.rs added in Phase 4
 
-crates/pounce-relax/    # the heavy symbolic crate (Phase 4)
+crates/pounce-relax/    # the heavy symbolic crate (Phase 3)
   Cargo.toml            # deps: pounce-common, pounce-nlp, pounce-presolve (fbbt)
   src/
     lib.rs              # Relaxation trait, PassthroughRelaxation
@@ -780,8 +808,10 @@ crates/pounce-relax/    # the heavy symbolic crate (Phase 4)
     obbt.rs             # optimization-based bound tightening loop
     project.rs          # aux-var → original-var projection
 
-crates/pounce-lu/       # Phase 2: sparse LU + Bartels-Golub/Forrest-Tomlin
-crates/pounce-simplex/  # Phase 2: dual simplex, bound-flipping ratio test
+# Phase 4 (with the global LP-relaxation nodes):
+#   feral             — sparse LU (Bartels-Golub / Forrest-Tomlin) beside LDLᵀ
+#   pounce-convex     — gains a dual-simplex module (bound-flipping ratio test)
+# No pounce-lu / pounce-simplex crates.
 ```
 
 ## Differentiability and the JAX/Python surface
@@ -860,9 +890,11 @@ keeps both regimes available without a forward-solver rewrite.
 
 ## Implementation phasing
 
-The ordering is forced: convex MI (Phases 0–3) is the substrate the
-global layer (Phases 4–6) stands on. Each phase is independently
-shippable.
+The ordering is forced: convex MI (Phases 0–2) is the substrate the
+global layer (Phases 3–5) stands on. Each phase is independently
+shippable. **Simplex and feral's sparse LU are not a convex-MI phase —
+they land with the global LP-relaxation nodes (Phase 4), per decision
+2.**
 
 **Definition of done (every phase that ships a solver).** Per decision
 6, a phase is not complete until: (i) the forward solver passes its
@@ -872,16 +904,15 @@ difference gradient check; and (iv) a `vmap_*` batched form exists. The
 JAX work is *part of* each phase, not a trailing phase — that is the
 whole point of making differentiability first-class.
 
-**Phase 0 — Integer plumbing (mostly already landing).** The
+**Phase 0 — Integer plumbing (mostly already done).** The
 `ProblemClass` classifier, NL-header parsing, and `solver_selection`
-routing are arriving on the LP/QP branch `claude/amazing-mayer-Xd0ag`.
-Phase 0 is therefore *additive*: extend the landing classifier with
-integer and nonconvexity flags, parse the integer-var counts from the
-`.nl` header, carry `is_integer: BitVec` on the problem, and run **root
-presolve** (the full `pounce-presolve` pipeline plus the LP reductions
-landing on that branch). Dispatch errors cleanly on integrality /
-nonconvexity it cannot yet handle. *No new algorithm, no JAX surface
-yet.*
+routing merged in PR #70. Phase 0 is therefore *additive*: extend the
+existing classifier with integer and nonconvexity flags, parse the
+integer-var counts from the `.nl` header, carry `is_integer: BitVec` on
+the problem, and run **root presolve** (the full `pounce-presolve`
+pipeline plus the LP reductions merged in PR #70). Dispatch errors
+cleanly on integrality / nonconvexity it cannot yet handle. *No new
+algorithm, no JAX surface yet.*
 
 **Phase 1 — B&B shell + first convex MI + `solve_mip` VJP.** The unified
 tree with integer branching only, driven by **MIQP over `pounce-qp`**
@@ -891,42 +922,40 @@ branching, depth-first, incumbent + gap. **DoD:** the leaf emits
 `vmap_solve_mip` batches. This is the first end-to-end differentiable
 mixed-integer solve and the minimum that justifies `pounce-mip`.
 
-**Phase 2 — Pure-Rust simplex (`pounce-lu` + `pounce-simplex`).** Dual
-simplex with bound-flipping ratio test and LU-with-updates. Native
-node-to-node warm-starts. Unlocks MILP and the LP relaxations the
-spatial path needs. **DoD:** the LP solve emits `DiffHandoff` (LP KKT is
-trivially differentiable), so `solve_mip` over LP relaxations
-differentiates too.
-
-**Phase 3 — Cuts + MIP presolve.** Gomory / MIR / cover cuts; the
+**Phase 2 — Cuts + MIP presolve.** Gomory / MIR / cover cuts; the
 MIP-specific **root presolve** reductions (probing, coefficient
 strengthening, clique/implication, GCD on integer rows) and cheap
 **node presolve** (FBBT every node, selective OBBT) — all extending
-`pounce-presolve` on top of the LP reductions from the LP/QP branch, not
-a new crate. Pseudocost / reliability branching. This is where the
+`pounce-presolve` on top of the LP reductions merged in PR #70, not a
+new crate. Pseudocost / reliability branching. This is where the
 "table-stakes performance" (Positioning #2) is actually earned. Cuts and
 reductions must preserve the leaf's active-set hand-off so the backward
-stays valid. Mostly combinatorial engineering.
+stays valid. Mostly combinatorial engineering. **This completes the
+convex-MI deliverable — still no simplex, no LU.**
 
-**Phase 4 — `pounce-relax`.** Factorable decomposition, McCormick
+**Phase 3 — `pounce-relax`.** Factorable decomposition, McCormick
 envelopes (linearized to LP cuts per decision 7), αBB, OBBT. The
 multi-quarter research lift; the heart of the global capability.
 Validates by reproducing known global optima on small MINLPLib
-instances. **DoD:** the relaxation LP is differentiable (free, via the
-simplex hand-off) — relaxation-gap gradients available if wanted.
+instances. **DoD:** the relaxation is differentiable — relaxation-gap
+gradients available if wanted.
 
-**Phase 5 — Spatial B&B + `solve_global` VJP.** Continuous branching on
-the relaxation-gap variable; relaxation lower bounds from Phase 4;
-multi-start local NLP upper bounds; convergence by global-gap closure.
-**DoD:** `pj.solve_global` differentiates through the winning local
-basin (box pinned); `vmap_solve_global` batches. A genuine
-*differentiable* deterministic global solver.
+**Phase 4 — Spatial B&B + simplex/LU + `solve_global` VJP.** Continuous
+branching on the relaxation-gap variable; relaxation lower bounds from
+Phase 3; multi-start local NLP upper bounds; convergence by global-gap
+closure. **This is where the warm-started LP-relaxation nodes finally
+need the dual simplex** — so feral's sparse LU (Bartels-Golub /
+Forrest-Tomlin updates, landing now) and the simplex driver (a module in
+`pounce-convex`) come online here, *not* earlier. **DoD:**
+`pj.solve_global` differentiates through the winning local basin (box
+pinned); `vmap_solve_global` batches. A genuine *differentiable*
+deterministic global solver.
 
-**Phase 6 — MINLP-global unified.** Both branching modes active at once
+**Phase 5 — MINLP-global unified.** Both branching modes active at once
 — the BARON / Couenne capability, end to end, pure Rust, and
 differentiable / batched throughout.
 
-**Phase 7 (optional, JAX-side) — smoothed/through-the-switch gradients.**
+**Phase 6 (optional, JAX-side) — smoothed/through-the-switch gradients.**
 Perturbed-optimizer and blackbox-combinatorial `custom_vjp` rules in
 `_diff.py` for learning that must flow gradient *through* the discrete
 decision. No Rust changes; gated on an ML workload that needs it.
@@ -937,20 +966,26 @@ Each solver phase's effort below *includes* its JAX backward + `vmap`
 wrapper (decision 6) — roughly a +15–25% tax over a forward-only solver,
 already folded into the ranges.
 
+Simplex + feral sparse LU is *not* a convex-MI line item — its effort
+folds into Phase 4 (spatial B&B), where the warm-started LP-relaxation
+nodes first need it. feral's LU is landing independently of this plan, so
+the Phase-4 range below assumes the LU backend already exists and counts
+only the simplex driver + integration.
+
 | Phase | Effort | Cumulative |
 |---|---|---|
 | 0 — Integer plumbing | 2–4 weeks | 1 month |
 | 1 — B&B shell + MIQP + VJP | 3–5 months | 4–6 months |
-| 2 — Simplex + LU (+ VJP) | 5–9 months | 9–15 months |
-| 3 — Cuts + node presolve | 3–6 months | 12–21 months |
-| 4 — Relaxation engine | 6–12 months | 18–33 months |
-| 5 — Spatial B&B + VJP | 5–9 months | 23–42 months |
-| 6 — MINLP-global | 3–6 months | 26–48 months |
-| 7 — Smoothed gradients (opt) | 1–2 months | gated on demand |
+| 2 — Cuts + MIP presolve | 3–6 months | 7–12 months |
+| 3 — Relaxation engine (`pounce-relax`) | 6–12 months | 13–24 months |
+| 4 — Spatial B&B + simplex driver + VJP | 6–10 months | 19–34 months |
+| 5 — MINLP-global | 3–6 months | 22–40 months |
+| 6 — Smoothed gradients (opt) | 1–2 months | gated on demand |
 
-Phases 0–3 are the differentiable convex-MI deliverable — incremental
-and shippable on top of LP/QP. Phases 4–6 are a flagship, multi-year,
-BARON-class effort whose differentiability has no existing analog.
+Phases 0–2 are the differentiable convex-MI deliverable — incremental,
+shippable on top of LP/QP, and **free of the hardest numerics** (no
+simplex, no LU). Phases 3–5 are a flagship, multi-year, BARON-class
+effort whose differentiability has no existing analog.
 
 **Effort caveat given discopt.** These estimates assume a from-scratch
 build. Because discopt already implements the spatial-B&B, McCormick/αBB,
@@ -989,7 +1024,7 @@ Pure Rust means reimplementing, not linking. The blueprints:
 - **BARON** (Tawarmalani–Sahinidis) — the commercial bar for nonconvex
   global; the factorable-relaxation + range-reduction literature.
 - **αBB** (Adjiman–Floudas) — the general-C² convex-underestimator
-  construction for Phase 4.
+  construction for Phase 3.
 
 ## Benchmark suites
 
@@ -1005,7 +1040,7 @@ To validate against once each layer lands (listed in adoption order):
 ### Convex MINLP
 
 - **MINLPLib** — the standard MINLP library; tag the convex subset for
-  Phases 1/3/4 validation.
+  Phases 1/2/3 validation.
 - **CMU-IBM / Bonmin convex-MINLP test set** — classic convex MINLP
   instances (process synthesis, layout).
 
@@ -1087,7 +1122,7 @@ down the design choices. Canonical / foundational entries are marked ★.
   programming." *Mathematical Programming* 1:76–94. Pseudocost branching.
 - ★ Achterberg, T., Koch, T. & Martin, A. (2005). "Branching rules
   revisited." *Operations Research Letters* 33(1):42–54. Reliability
-  branching — the Phase 3 default. doi:10.1016/j.orl.2004.04.002
+  branching — the Phase 2 default. doi:10.1016/j.orl.2004.04.002
 - Linderoth, J.T. & Savelsbergh, M.W.P. (1999). "A computational study
   of search strategies for mixed integer programming." *INFORMS Journal
   on Computing* 11(2):173–187. Node-selection strategies.
@@ -1095,14 +1130,14 @@ down the design choices. Canonical / foundational entries are marked ★.
   *Mathematical Programming Computation* 1(1):1–41. The
   constraint-integer-programming framework this design echoes.
 
-### Simplex and basis factorization (Phase 2 — `pounce-lu`, `pounce-simplex`)
+### Simplex and basis factorization (Phase 4 — feral sparse LU + `pounce-convex` simplex module)
 
 - ★ Dantzig, G.B. (1963). *Linear Programming and Extensions.*
   Princeton University Press.
 - ★ Bartels, R.H. & Golub, G.H. (1969). "The simplex method of linear
   programming using LU decomposition." *Communications of the ACM*
-  12(5):266–268. The `pounce-lu` update scheme (already named in
-  `pounce-simplex` crate comments).
+  12(5):266–268. The feral sparse-LU update scheme (landing in feral
+  beside its LDLᵀ, gated on the global work).
 - ★ Forrest, J.J.H. & Tomlin, J.A. (1972). "Updated triangular factors
   of the basis to maintain sparsity in the product form simplex method."
   *Mathematical Programming* 2:263–278. The sparsity-preserving
@@ -1135,10 +1170,10 @@ down the design choices. Canonical / foundational entries are marked ★.
   already ships (issue #62, `docs/src/fbbt.md`).
 - Gleixner, A.M., Berthold, T., Müller, B. & Weltge, S. (2017). "Three
   enhancements for optimization-based bound tightening." *Journal of
-  Global Optimization* 67(4):731–757. OBBT made affordable — the Phase 4
+  Global Optimization* 67(4):731–757. OBBT made affordable — the Phase 3
   OBBT loop. doi:10.1007/s10898-016-0450-4
 
-### Convex MINLP (Phases 1, 4 upper layer)
+### Convex MINLP (Phases 1, 3 upper layer)
 
 - ★ Duran, M.A. & Grossmann, I.E. (1986). "An outer-approximation
   algorithm for a class of mixed-integer nonlinear programs."
@@ -1159,7 +1194,7 @@ down the design choices. Canonical / foundational entries are marked ★.
   Engineering* 20:397–455. The current survey of the convex-MINLP
   landscape; use it to pick Phase-1/3 defaults.
 
-### Deterministic global optimization — factorable relaxations (Phases 4–6)
+### Deterministic global optimization — factorable relaxations (Phases 3–5)
 
 - ★ McCormick, G.P. (1976). "Computability of global solutions to
   factorable nonconvex programs: Part I — Convex underestimating
@@ -1171,7 +1206,7 @@ down the design choices. Canonical / foundational entries are marked ★.
 - ★ Smith, E.M.B. & Pantelides, C.C. (1999). "A symbolic reformulation/
   spatial branch-and-bound algorithm for the global optimisation of
   nonconvex MINLPs." *Computers & Chemical Engineering* 23(4–5):457–478.
-  The auxiliary-variable factorable reformulation `pounce-relax` Phase 4
+  The auxiliary-variable factorable reformulation `pounce-relax` Phase 3
   implements.
 - ★ Adjiman, C.S., Dallwig, S., Floudas, C.A. & Neumaier, A. (1998). "A
   global optimization method, αBB, for general twice-differentiable
@@ -1197,7 +1232,7 @@ down the design choices. Canonical / foundational entries are marked ★.
   coNTinuous / Integer Global Optimization of Nonlinear Equations."
   *Journal of Global Optimization* 59:503–526.
 
-### Conic relaxations for quadratic structure (`ConicRelaxation`, Phase 5+)
+### Conic relaxations for quadratic structure (`ConicRelaxation`, Phase 4+)
 
 The tighter-bound alternative for QP / QCQP, cheap because the LP/QP
 branch lands the cone IPM and its differentiable layer anyway.
@@ -1258,11 +1293,11 @@ combinatorial entries are the Phase-7 smoothing escape hatches.
 - Berthet, Q., Blondel, M., Teboul, O., Cuturi, M., Vert, J.-P. & Bach,
   F. (2020). "Learning with differentiable perturbed optimizers."
   *NeurIPS 2020.* Perturbed-optimizer smoothing for through-the-switch
-  gradients (Phase 7).
+  gradients (Phase 6).
 - Vlastelica, M., Paulus, A., Musil, V., Martius, G. & Rolínek, M.
   (2020). "Differentiation of blackbox combinatorial solvers." *ICLR
   2020.* arXiv:1912.02175. Informative gradients through a blackbox
-  combinatorial solver via loss interpolation (Phase 7).
+  combinatorial solver via loss interpolation (Phase 6).
 - Paulus, A., Rolínek, M., Musil, V., Amos, B. & Martius, G. (2021).
   "CombOptNet: fit the right NP-hard problem by learning integer
   programming constraints." *ICML 2021.*
