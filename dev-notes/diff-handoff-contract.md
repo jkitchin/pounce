@@ -195,29 +195,43 @@ Status tags reflect the build-and-test sweep recorded above.
 
 0. **[DONE] Consolidate the in-file NLP backward.** `jax/_diff.py`'s
    three copies → one `_kkt_implicit_backward`. `test_jax.py` 85 passed.
-1. **[NEXT] Name the struct in Rust.** Introduce `DiffHandoff` (a thin
-   re-shape of `pounce_sensitivity::ConvergedState` + the multiplier
-   vectors and the precomputed active-set masks); expose a Python view.
-   No behavior change — the existing `info` dict keeps working; the
-   handoff is an additional, typed view.
-2. **Move active-set computation into the producer.** Compute
-   `active_constraints` / `pinned_vars` once on the Rust side and expose
-   them; switch the NLP frontends to *read* them instead of recomputing
-   `|mult| > tol`. Lock with the finite-difference gradient tests.
+1. **[DONE] Name the struct in Rust.** `pounce_sensitivity::DiffHandoff`
+   (`from_solution` / `from_sens_result`, the precomputed
+   `active_constraints` / `pinned_vars` masks, `DEFAULT_ACTIVE_TOL`, and
+   `pin()` for B&B-leaf integer fixing). 3 unit tests; crate green.
+2. **[DONE, producer side] Compute the active set once in the producer.**
+   `build_info_dict` (PyO3) emits `pinned_vars` / `active_constraints` /
+   `active_tol` on every NLP solve, computed via `DiffHandoff`. The masks
+   now ride the info dict — so `nlp_pounce.py` / discopt already receive
+   them (this is also most of step 6). `test_problem.py` asserts them
+   against HS071's known active set; `test_jax.py` 85 passed (the
+   producer addition is behavior-neutral on gradients).
+   *Consumer side not done:* the JAX/torch backwards still recompute the
+   mask. That rewiring is behavior-neutral by construction (same tol,
+   same rule), so it has no test signal and was intentionally skipped —
+   do it only when a *non-AD* consumer needs the mask it can't recompute.
 3. **Unify the multiplier naming at the boundary.** NLP and QP frontends
    consume `lambda`/`mult_x_*`; the `lam`/`nu`/`mult_g` names become
    internal mapping detail. (QP keeps its *OptNet backward* — only the
    handoff field names unify, not the algorithm.) Small, low-risk.
-4. **Surface the factor uniformly.** Route every backward through
-   `factor.solve` / `kkt_solve_many` (batched), so `vmap`/batched
-   backward is one code path. (NLP already does factor-reuse; bring QP
-   onto the same handle.)
+4. **[ALREADY DONE — pounce#76/#77] Factor-reuse / batched backward.**
+   `JaxProblem` already routes both the single (`_bwd_single_factor_reuse`)
+   and batched (`_bwd_batched_factor_reuse`) backward through
+   `Solver.kkt_solve_many` against the held LDLᵀ factor (default
+   `factor_reuse=True`), avoiding the dense `O((n+m)³)` re-solve. Gradient-
+   tested sparse-vs-dense in `test_jax.py`. The module-level *functional*
+   API (`_diff.py` `solve` / `vmap_solve_parallel`) intentionally stays on
+   the dense path: it holds no `Solver`, and `JaxProblem` is the
+   documented path when backward performance matters. Bringing QP onto a
+   uniform factor handle is the only remaining sub-item, low priority.
 5. **[deferred] Cross-framework jax↔torch NLP merge.** Only behind an
    array-API shim; gated on the two-port maintenance burden actually
    biting. Parity is already tested, so this is pure de-duplication with
    no correctness upside — do it last, or not at all.
-6. **Expose across the seam.** `nlp_pounce.py` returns the handoff;
-   document it as the stable contract discopt differentiates against.
+6. **[mostly DONE via step 2] Expose across the seam.** The masks are in
+   the info dict `nlp_pounce.py` reads, so the contract data already
+   crosses the language boundary. Remaining: *document* the info-dict
+   mask keys as the stable contract discopt differentiates against.
 
 ## Verification
 
