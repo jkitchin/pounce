@@ -18,6 +18,12 @@ bindings: it accepts dense vectors and (optionally) scipy-sparse or dense
 matrices, and returns a small :class:`QpResult`. For differentiable QP
 layers (JAX), see :mod:`pounce.jax` (``solve_qp`` / ``QpLayer``).
 
+For problems with more than ~1000 variables, pass ``P`` **and** the
+constraint matrices ``A``/``G`` as **scipy-sparse** matrices (e.g.
+``scipy.sparse.csc_matrix``): the dense path is 60-80x slower and far
+heavier on memory at that size, and a large dense matrix triggers a
+one-time :class:`PounceSparsityWarning`.
+
 Example
 -------
 >>> import numpy as np
@@ -31,6 +37,7 @@ Example
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -43,11 +50,42 @@ __all__ = [
     "QpFactorization",
     "QpSensitivity",
     "ReducedHessian",
+    "PounceSparsityWarning",
     "solve_qp",
     "solve_socp",
     "solve_qp_batch",
     "solve_qp_multi_rhs",
 ]
+
+
+class PounceSparsityWarning(UserWarning):
+    """A large *dense* matrix was passed to a convex solver where a scipy-sparse
+    matrix would be dramatically faster and smaller (issue #116). Silence with
+    ``warnings.filterwarnings("ignore", category=pounce.qp.PounceSparsityWarning)``."""
+
+
+# Dense matrices at/above this element count put the convex solver on its dense
+# path, which at a few thousand variables is 60-80x slower and far heavier than
+# the scipy-sparse path (issue #116). ~1e6 ≈ a 1000x1000 dense matrix.
+_DENSE_WARN_ELEMS = 1_000_000
+_dense_input_warned = False
+
+
+def _warn_large_dense(what: str, shape) -> None:
+    """Emit a one-time :class:`PounceSparsityWarning` for a large dense input."""
+    global _dense_input_warned
+    if _dense_input_warned:
+        return
+    _dense_input_warned = True
+    warnings.warn(
+        f"a large dense `{what}` ({shape[0]}x{shape[1]}) was passed to the "
+        "convex solver. At this size the dense path can be 60-80x slower and use "
+        "far more memory than scipy-sparse inputs; if the matrix is sparse, pass "
+        "a scipy.sparse matrix (e.g. scipy.sparse.csc_matrix(M)) for both `P` and "
+        "the constraint blocks. This warning is emitted once per process.",
+        PounceSparsityWarning,
+        stacklevel=4,
+    )
 
 
 @dataclass
@@ -155,6 +193,8 @@ def _coo(mat, n_cols: int, what: str):
     arr = np.asarray(mat, dtype=np.float64)
     if arr.ndim != 2:
         raise ValueError(f"{what}: expected a 2-D matrix, got shape {arr.shape}")
+    if arr.size >= _DENSE_WARN_ELEMS:
+        _warn_large_dense(what, arr.shape)
     rows, cols = np.nonzero(arr)
     return (
         rows.astype(np.int64).tolist(),

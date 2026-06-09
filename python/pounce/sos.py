@@ -26,6 +26,7 @@ Example
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -36,6 +37,35 @@ from . import _pounce
 __all__ = ["sos_minimize", "SosResult"]
 
 
+def _check_poly(poly, what: str) -> None:
+    """Reject a non-polynomial-dict ``objective``/constraint with a clear
+    message instead of a cryptic ``TypeError`` from deep inside the term
+    normalizer (issue #117). A polynomial is a dict ``{exp_tuple: coeff}`` or an
+    iterable of ``(exp_tuple, coeff)`` pairs."""
+    if isinstance(poly, Mapping):
+        return
+    # A SymPy expression is the natural first attempt for a *polynomial*
+    # optimizer — give a targeted conversion hint rather than a generic error.
+    if hasattr(poly, "free_symbols") or type(poly).__module__.split(".")[0] == "sympy":
+        raise TypeError(
+            f"{what} must be a dict {{exponent_tuple: coefficient}}, not a SymPy "
+            "expression. Convert it first, e.g. "
+            "`{m: float(c) for m, c in sympy.Poly(expr, *syms).terms()}` "
+            "(Poly.terms() yields (exponent_tuple, coefficient) pairs)."
+        )
+    # Otherwise it must be a sequence of (exponent_tuple, coefficient) pairs.
+    try:
+        ok = all(len(item) == 2 for item in poly)
+    except TypeError:
+        ok = False
+    if not ok:
+        raise TypeError(
+            f"{what} must be a dict {{exponent_tuple: coefficient}} or a sequence "
+            f"of (exponent_tuple, coefficient) pairs; got {type(poly).__name__}. "
+            "See the pounce.sos module docstring for the polynomial format."
+        )
+
+
 @dataclass
 class SosResult:
     """Result of an SOS/Lasserre solve.
@@ -44,7 +74,8 @@ class SosResult:
     ----------
     lower_bound:
         Certified global lower bound ``γ* ≤ min p`` (the global minimum when
-        ``is_exact``).
+        ``is_exact``). ``nan`` when ``status`` is not ``"optimal"`` (a failed
+        relaxation has no valid bound).
     status:
         Underlying SDP solve status (``"optimal"`` on success).
     is_exact:
@@ -113,6 +144,12 @@ def sos_minimize(
     ``order`` raises the relaxation order above the minimum to tighten the
     bound (the Lasserre hierarchy). Returns an :class:`SosResult`.
     """
+    _check_poly(objective, "objective")
+    for g in inequalities:
+        _check_poly(g, "inequality")
+    for h in equalities:
+        _check_poly(h, "equality")
+
     polys = [objective, *inequalities, *equalities]
     if n_vars is None:
         n_vars = _infer_n_vars(*polys)
@@ -120,9 +157,14 @@ def sos_minimize(
     ineq = [_terms(g, n_vars, "inequality") for g in inequalities]
     eq = [_terms(h, n_vars, "equality") for h in equalities]
     d = _pounce.sos_minimize(n_vars, obj, ineq, eq, order=order)
+    status = d["status"]
+    # On a failed/non-optimal relaxation the raw bound is meaningless (it can be
+    # ~5e9 for a problem whose minimum is 1.0); report NaN so a garbage bound
+    # can't be mistaken for a real certificate (issue #117, F7).
+    lower_bound = float(d["lower_bound"]) if status == "optimal" else float("nan")
     return SosResult(
-        lower_bound=float(d["lower_bound"]),
-        status=d["status"],
+        lower_bound=lower_bound,
+        status=status,
         is_exact=bool(d["is_exact"]),
         num_minimizers=int(d["num_minimizers"]),
         minimizers=[np.asarray(m) for m in d["minimizers"]],

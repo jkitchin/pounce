@@ -116,6 +116,41 @@ def test_warm_start_fewer_iters_same_optimum():
     assert np.max(np.abs(cold.x - warm.x)) < 1e-8   # same optimum
 
 
+def test_large_dense_input_warns_sparsity(recwarn):
+    # #116: a large dense P/G should steer the user to scipy-sparse via a
+    # one-time PounceSparsityWarning (the dense path is 60-80x slower at size).
+    import warnings
+    import pounce.qp as qpmod
+    from pounce.qp import PounceSparsityWarning
+    qpmod._dense_input_warned = False           # reset the once-per-process latch
+    n = 1100                                     # 1100x1100 dense > 1e6 elements
+    P = np.diag(np.linspace(1.0, 3.0, n))
+    c = np.zeros(n)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        r = solve_qp(P, c, lb=-np.ones(n), ub=np.ones(n), check_psd=False)
+    assert r.status == "optimal"
+    assert any(issubclass(x.category, PounceSparsityWarning) for x in w)
+    msg = str(next(x.message for x in w
+                   if issubclass(x.category, PounceSparsityWarning)))
+    assert "scipy.sparse" in msg
+
+
+def test_small_and_sparse_inputs_do_not_warn():
+    # No warning for small dense inputs or for scipy-sparse inputs of any size.
+    import warnings
+    import pounce.qp as qpmod
+    from pounce.qp import PounceSparsityWarning
+    sparse = pytest.importorskip("scipy.sparse")
+    qpmod._dense_input_warned = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PounceSparsityWarning)
+        solve_qp(np.diag([2.0, 2.0]), [-3.0, -4.0], lb=[0, 0], ub=[1, 1])  # small dense
+        n = 2000                                                            # large, but sparse
+        P = sparse.diags(np.linspace(1.0, 3.0, n)).tocsc()
+        solve_qp(P, np.zeros(n), lb=-np.ones(n), ub=np.ones(n), check_psd=False)
+
+
 # ---------------------------------------------------------------------------
 # Green: edge cases that are handled correctly
 # ---------------------------------------------------------------------------
@@ -302,15 +337,17 @@ def test_minimize_silent_by_default(tmp_path):
     assert _fd1_bytes(options={"print_level": 5}) > 0        # explicit level
 
 
-@pytest.mark.xfail(reason="#117: cryptic TypeError on SymPy input", strict=False)
 def test_sos_clear_error_on_sympy_input():
+    # Fixed in #117 (F5): a SymPy expression now gets a clear message naming the
+    # dict format, not a cryptic "'Add' object is not iterable" from deep inside.
     sp = pytest.importorskip("sympy")
     from pounce.sos import sos_minimize
     x = sp.symbols("x")
     with pytest.raises((TypeError, ValueError)) as ei:
         sos_minimize((x - 1) ** 2 + 2)
-    # Desired: a message naming the dict format, not "'Add' object is not iterable".
-    assert "iterable" not in str(ei.value)
+    msg = str(ei.value)
+    assert "iterable" not in msg
+    assert "dict" in msg and "SymPy" in msg
 
 # Note: F7 (garbage `lower_bound` on a `numerical_failure` SOS relaxation) is
 # tracked in #117 and the QA report but is NOT unit-tested here — reproducing it
