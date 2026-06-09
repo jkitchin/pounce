@@ -16,7 +16,8 @@ Optional extras:
 
 ```sh
 pip install -e .[jax]        # JAX integration
-pip install -e .[dev]        # tests + jax + scipy
+pip install -e .[torch]      # PyTorch integration
+pip install -e .[dev]        # tests + jax + torch + scipy
 ```
 
 ## cyipopt-style interface
@@ -681,6 +682,83 @@ handle is garbage-collected without `close()`. A worked example —
 projection layer, full Jacobian, JVP/VJP-from-state, and the lifetime
 patterns — is in
 [`notebooks/13_post_solve_jacobian.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/13_post_solve_jacobian.ipynb).
+
+## PyTorch integration
+
+The `pounce.torch` subpackage is a PyTorch frontend mirroring
+`pounce.jax`, one-for-one. It is a thin **adapter**, not a second solver:
+the numerical core (the Rust IPM) and the implicit-function-theorem
+backward are framework-agnostic — only the array namespace differs. A
+solve is a `torch.autograd.Function` you can drop inside a `torch.nn`
+model and backprop through, with the same constraint-satisfaction
+guarantee the JAX path gives. Install with `pip install pounce[torch]`
+(`torch.func` requires torch ≥ 2.2).
+
+Because PyTorch is eager, the adapter is *smaller* than the JAX one:
+there is no `pure_callback` / `ShapeDtypeStruct` machinery (the forward
+calls `problem.solve(...)` directly), no host-callback registry or
+single-thread executor (the converged `Solver` is stashed on the
+autograd `ctx` / `AnchorState` and read back in the backward on the same
+thread), and no global `jax_enable_x64` flag — float64 tensors are
+requested explicitly (`torch.set_default_dtype(torch.float64)` or
+`.double()` your inputs; the implicit-diff and KKT solves need double
+precision and the layers validate it).
+
+| JAX surface | PyTorch equivalent |
+|---|---|
+| `from_jax(f, g, …)` | `from_torch(f, g, …)` |
+| `solve(p, …)` | `solve(p, …)` (`torch.autograd.Function` + KKT backward) |
+| `solve_with_warm(p, …, warm_start=)` | `solve_with_warm(…)` (dual triple + barrier-μ, pounce#86) |
+| `vmap_solve` / `vmap_solve_parallel` | `vmap_solve` / `vmap_solve_parallel` |
+| `JaxProblem(…)` | `TorchProblem(…)` (build-once, factor-reuse backward) |
+| `solve_qp` / `solve_qp_batch` / `solve_socp` / `QpLayer` | same names |
+| `PathFollower` / `inverse_map_rhs` | same names |
+
+```python
+import torch
+torch.set_default_dtype(torch.float64)
+from pounce.torch import solve as psolve
+
+def f(x, p): return torch.sum((x - p) ** 2)
+def g(x, p): return torch.stack([x[0] + x[1] - 1.0])   # equality
+
+p = torch.tensor([0.3, 0.7], requires_grad=True)
+x_star = psolve(
+    p, f=f, g=g, x0=torch.zeros(2), n=2, m=1,
+    lb=torch.full((2,), -10.0), ub=torch.full((2,), 10.0),
+    cl=torch.zeros(1), cu=torch.zeros(1),
+    options={"tol": 1e-10, "print_level": 0},
+)
+(x_star ** 2).sum().backward()   # dL/dp via the implicit function theorem
+print(p.grad)
+```
+
+The differentiable conic layers are feasible-by-construction (the same
+"one roof" as cvxpylayers/theseus, off one core):
+
+```python
+from pounce.torch import solve_qp
+P = torch.eye(2); c = torch.tensor([-4.0, -4.0], requires_grad=True)
+G = torch.tensor([[1.0, 1.0]]); h = torch.tensor([0.5])
+x = solve_qp(P=P, c=c, G=G, h=h)   # min ½xᵀPx+cᵀx s.t. Gx ≤ h
+x.sum().backward()                  # OptNet implicit-diff gradients
+```
+
+Validation. Every layer is checked with `torch.autograd.gradcheck`
+against finite differences, and a JAX↔Torch **parity** suite asserts both
+frontends agree on `x*` and `dL/dp` to tolerance on shared fixtures
+(`python/tests/test_torch.py`, `test_qp_torch.py`, `test_socp_torch.py`,
+`test_parity_jax_torch.py`).
+
+> Thread-safety note. `torch.func` transforms share a process-global
+> layer stack and are not thread-safe; `vmap_solve_parallel` therefore
+> serializes the (already GIL-bound) Python derivative callbacks with a
+> lock while the Rust IPM linear algebra still runs concurrently
+> (GIL released). Double-backward is supported on the conic layers but
+> not guaranteed on the NLP implicit-diff path (the parameter
+> sensitivities are taken with `torch.func`, outside the autograd graph)
+> — set `factor_reuse=False` on `TorchProblem` for the in-framework dense
+> backward if you need higher-order behaviour.
 
 ## Notebooks
 

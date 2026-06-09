@@ -40,12 +40,16 @@ pounce-dbg-viz = "pounce._debug_viz:main"
 
 [project.optional-dependencies]
 jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
+# torch.func (functorch, merged into core) requires torch >= 2.0; pin
+# >= 2.2 for a stable torch.func surface (pounce#109). CPU wheels are
+# sufficient — pounce solves on the host.
+torch = ["torch>=2.2"]
 scipy = ["scipy>=1.11"]
 # diffrax is only needed to run the inverse-map ODE example/recipe
 # (pounce#91); the inverse_map_rhs helper itself depends only on jax.
 diffrax = ["diffrax>=0.5"]
 viz = ["plotly>=5"]
-dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30", "plotly>=5"]
+dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30", "torch>=2.2", "plotly>=5"]
 
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"
