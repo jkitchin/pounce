@@ -83,7 +83,7 @@ minimize(fun, x0, jac=None, hess=None, bounds=None,
 | Argument | Status | Notes |
 |---|---|---|
 | `fun`, `x0` | ✅ | objective callable and start point |
-| `jac` | ✅ | callable; **omitted → forward finite differences** (`√eps` step). Provide one for production. |
+| `jac` | ✅ | callable; **omitted → central finite differences** (`eps^(1/3)` step) and a one-time `UserWarning`. Provide one (or use `pounce.jax` / `pounce.torch`) for production. |
 | `hess` | ⚠️ | used **only when there are no constraints**; with constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
 | `bounds` | ✅ | a sequence of `(lo, hi)` pairs; a `None` element or a `None` endpoint means ±∞ |
 | `constraints` | ✅ | SciPy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}`; multiple are concatenated; `"jac"` optional (finite-diff fallback) |

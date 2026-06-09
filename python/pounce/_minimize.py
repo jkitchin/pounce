@@ -6,8 +6,13 @@ Thin wrapper that adapts SciPy conventions (functional ``fun``, ``jac``,
 
 Notes
 -----
-* When ``jac`` is omitted we fall back to forward finite differences
-  (step ``sqrt(eps)``). Production callers should provide a Jacobian.
+* When ``jac`` is omitted we fall back to **central** finite differences
+  (step ``eps**(1/3)``) and emit a one-time ``UserWarning`` naming the
+  remedies. Central differences have an ``O(h^2)`` truncation error whose
+  noise floor sits well below the tight default tolerance, so the solve
+  converges cleanly instead of stalling just short of it (gh #123).
+  Production callers should still provide an analytic Jacobian (or use the
+  autodiff frontends ``pounce.jax`` / ``pounce.torch``).
 * When ``hess`` is omitted, or when constraints are present, the solver
   is driven with ``hessian_approximation = limited-memory``.
 * Equality / inequality dicts are concatenated into a single ``g(x)``
@@ -17,6 +22,7 @@ Notes
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -25,7 +31,18 @@ import numpy as np
 from ._pounce import Problem
 from ._route import classify_and_extract, classify_and_extract_socp
 
-_EPS = float(np.finfo(np.float64).eps) ** 0.5
+# Central-difference step. The optimal step for a central difference is
+# ``~eps**(1/3)`` (≈6.06e-6), balancing the ``O(h^2)`` truncation error against
+# the ``O(eps/h)`` round-off error. Its noise floor (~1e-10) sits well below the
+# tight default ``tol=1e-8``, so the gradient is accurate enough for the IPM to
+# drive the dual infeasibility under tolerance instead of plateauing on FD noise
+# and tripping the tiny-step exit at the true optimum (gh #119 / #123).
+_CDIFF_STEP = float(np.finfo(np.float64).eps) ** (1.0 / 3.0)
+
+# Ipopt's default ``acceptable_tol``: the NLP error below which a stalled solve
+# is still considered converged "to an acceptable level". Used by the E-path
+# success heuristic when the exit status is not itself a success code.
+_DEFAULT_ACCEPTABLE_TOL = 1e-6
 
 # Convex-solver status string → scipy-style integer status (0 == success),
 # matching the NLP path's convention.
@@ -71,24 +88,34 @@ def _to_array(x, dtype=np.float64) -> np.ndarray:
 
 
 def _finite_diff_grad(fun: Callable, x: np.ndarray) -> np.ndarray:
-    f0 = float(fun(x))
+    """Central-difference gradient of a scalar ``fun`` at ``x``.
+
+    Central (two-sided) differences have an ``O(h^2)`` truncation error, two
+    orders better than a one-sided difference, at the cost of a second function
+    evaluation per coordinate. See ``_CDIFF_STEP`` for why this matters for the
+    tight-tolerance solve (gh #123).
+    """
     g = np.empty_like(x)
     for i in range(x.size):
-        h = _EPS * max(1.0, abs(x[i]))
+        h = _CDIFF_STEP * max(1.0, abs(x[i]))
         xp = x.copy()
         xp[i] += h
-        g[i] = (float(fun(xp)) - f0) / h
+        xm = x.copy()
+        xm[i] -= h
+        g[i] = (float(fun(xp)) - float(fun(xm))) / (2.0 * h)
     return g
 
 
 def _finite_diff_jac(g_fun: Callable, x: np.ndarray, m: int) -> np.ndarray:
-    g0 = _to_array(g_fun(x))
+    """Central-difference Jacobian of a vector ``g_fun`` at ``x``."""
     J = np.empty((m, x.size))
     for i in range(x.size):
-        h = _EPS * max(1.0, abs(x[i]))
+        h = _CDIFF_STEP * max(1.0, abs(x[i]))
         xp = x.copy()
         xp[i] += h
-        J[:, i] = (_to_array(g_fun(xp)) - g0) / h
+        xm = x.copy()
+        xm[i] -= h
+        J[:, i] = (_to_array(g_fun(xp)) - _to_array(g_fun(xm))) / (2.0 * h)
     return J
 
 
@@ -337,6 +364,18 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
     )
 
 
+def _any_constraint_without_jac(constraints) -> bool:
+    """True if any scipy-style constraint dict omits ``'jac'`` (so its Jacobian
+    is finite-differenced). Used to decide whether to warn (gh #123, D)."""
+    if not constraints:
+        return False
+    if isinstance(constraints, dict):
+        constraints = [constraints]
+    return any(
+        isinstance(c, dict) and c.get("jac") is None for c in constraints
+    )
+
+
 def minimize(
     fun: Callable[[np.ndarray], float],
     x0: np.ndarray,
@@ -427,6 +466,28 @@ def minimize(
             )
         return _solve_via_socp(socp, opts)
 
+    # (D, gh #123) The NLP path finite-differences any derivative the caller
+    # did not supply. FD derivatives are slower and less accurate, and on a
+    # tight solve can stall just short of the tolerance and report
+    # ``success=False`` at the true optimum. Warn once — naming the remedies —
+    # rather than degrading silently. (scipy.optimize.minimize is silent here;
+    # pounce deliberately is not, because this is the #1 source of confusing
+    # "failed at the right answer" reports.)
+    fd_targets = []
+    if jac is None:
+        fd_targets.append("the objective gradient (pass jac=...)")
+    if m > 0 and _any_constraint_without_jac(constraints):
+        fd_targets.append("constraint Jacobian(s) (pass 'jac' in each "
+                          "constraint dict)")
+    if fd_targets:
+        warnings.warn(
+            "pounce.minimize is approximating " + " and ".join(fd_targets)
+            + " by finite differences. This is slower and less accurate than "
+            "analytic derivatives. For a faster, more robust solve supply them "
+            "directly, or use the autodiff frontends pounce.jax / pounce.torch.",
+            stacklevel=2,
+        )
+
     problem_obj = _build_problem_obj(
         fun=fun,
         n=n,
@@ -452,11 +513,25 @@ def minimize(
         problem.add_option(k, v)
 
     x, info = problem.solve(x0=x0)
+    # (E, gh #119 / #123) Judge success on the final KKT error, not the exit
+    # status enum alone. Ipopt-family solvers report a non-success status (e.g.
+    # ``Search_Direction_Becomes_Too_Small``, code 3) when progress stalls — but
+    # a stall at a point whose overall NLP error is already at the acceptable
+    # tolerance is a converged solve, not a failure. cyipopt/scipy treat such a
+    # point as a success; so do we. ``final_kkt_error`` is the unscaled overall
+    # NLP error at the final iterate (exposed from the Rust SolveStatistics); it
+    # is NaN on paths that never computed it, which ``np.isfinite`` filters out.
+    status_code = int(info["status"])
+    acceptable_tol = float(opts.get("acceptable_tol", _DEFAULT_ACCEPTABLE_TOL))
+    kkt_error = float(info.get("final_kkt_error", float("nan")))
+    success = status_code in _NLP_SUCCESS_STATUS or (
+        np.isfinite(kkt_error) and kkt_error <= acceptable_tol
+    )
     return OptimizeResult(
         x=np.asarray(x),
         fun=float(info["obj_val"]),
-        success=int(info["status"]) in _NLP_SUCCESS_STATUS,
-        status=int(info["status"]),
+        success=success,
+        status=status_code,
         message=str(info["status_msg"]),
         nit=int(info["iter_count"]),
         info=dict(info),

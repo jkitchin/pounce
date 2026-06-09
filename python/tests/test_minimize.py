@@ -1,5 +1,7 @@
 """Smoke tests for the scipy.optimize-style facade."""
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -145,15 +147,96 @@ def test_minimize_acceptable_level_reports_success():
         {"type": "ineq", "fun": lambda x: x[0] * x[1] * x[2] * x[3] - 25.0},
         {"type": "eq", "fun": lambda x: float(x @ x) - 40.0},
     ]
-    res = pounce.minimize(
-        f, x0=np.array([2.0, 2.0, 2.0, 2.0]), bounds=[(1.0, 5.0)] * 4,
-        constraints=constraints, options={"solver_selection": "nlp", "print_level": 0},
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # this test deliberately uses the FD fallback
+        res = pounce.minimize(
+            f, x0=np.array([2.0, 2.0, 2.0, 2.0]), bounds=[(1.0, 5.0)] * 4,
+            constraints=constraints,
+            options={"solver_selection": "nlp", "print_level": 0},
+        )
     # Reaches the known HS071 optimum f* = 17.0140173 ...
     np.testing.assert_allclose(res.fun, 17.0140172891520078, atol=1e-5)
     # ... and terminates acceptable-or-better, which must read as success.
     assert res.status in (0, 1)
     assert res.success
+
+
+def test_finite_diff_grad_is_central_and_accurate():
+    """gh #123 (C). The FD fallback is now a *central* difference: its error on a
+    smooth function is ``O(h^2)``, orders of magnitude tighter than the old
+    one-sided ``O(h)``. Check it against an analytic gradient at a noise floor a
+    forward difference (step ~1.49e-8, error ~1e-8) could never reach."""
+    from pounce._minimize import _finite_diff_grad
+
+    # f(x) = sum(x^3)  =>  grad = 3 x^2, an analytic reference.
+    f = lambda x: float(np.sum(x ** 3))
+    x = np.array([0.7, -1.3, 2.1])
+    g_fd = _finite_diff_grad(f, x)
+    g_exact = 3.0 * x ** 2
+    # Central differences clear ~1e-9 here; a forward difference would sit ~1e-7.
+    np.testing.assert_allclose(g_fd, g_exact, rtol=1e-7, atol=1e-8)
+
+
+def test_minimize_fd_path_converges_from_documented_start():
+    """gh #119 facet 2 / gh #123 (C + E). HS071 from the *documented* start
+    (1, 5, 5, 1) with NO analytic jac used to crawl to a tiny-step exit
+    (status 3) and report ``success=False`` at the verified optimum, because the
+    forward-difference noise floor sat right at the tight ``tol=1e-8``. With
+    central differences the dual infeasibility clears the tolerance and the
+    finite-difference solve now reports success at the known optimum."""
+    def f(x):
+        return float(x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2])
+
+    constraints = [
+        {"type": "ineq", "fun": lambda x: x[0] * x[1] * x[2] * x[3] - 25.0},
+        {"type": "eq", "fun": lambda x: float(x @ x) - 40.0},
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # FD-fallback warning is asserted elsewhere
+        res = pounce.minimize(
+            f, x0=np.array([1.0, 5.0, 5.0, 1.0]), bounds=[(1.0, 5.0)] * 4,
+            constraints=constraints,
+            options={"solver_selection": "nlp", "print_level": 0},
+        )
+    np.testing.assert_allclose(res.fun, 17.0140172891520078, atol=1e-5)
+    assert res.success
+    # The fix also exposes the final NLP error to the info dict (gh #123, E).
+    assert np.isfinite(res.info["final_kkt_error"])
+    assert res.info["final_kkt_error"] <= 1e-6
+
+
+def test_minimize_warns_on_finite_difference_fallback():
+    """gh #123 (D). Omitting analytic derivatives makes the NLP path
+    finite-difference them, which is slower / less accurate. That must surface as
+    a ``UserWarning`` naming the remedies — not happen silently."""
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+    opts = {"solver_selection": "nlp", "tol": 1e-10, "print_level": 0}
+
+    # No jac -> warns, naming the objective gradient and the autodiff remedy.
+    with pytest.warns(UserWarning, match="objective gradient"):
+        pounce.minimize(f, x0=np.array([1.0, 1.0]), options=opts)
+
+    # Constraint without 'jac' -> warns about the constraint Jacobian even when
+    # the objective jac is supplied.
+    with pytest.warns(UserWarning, match="constraint Jacobian"):
+        pounce.minimize(
+            f, x0=np.array([1.0, 1.0]), jac=g,
+            constraints=[{"type": "eq", "fun": lambda x: x[0] + x[1] - 1.0}],
+            options=opts,
+        )
+
+    # Fully analytic -> no warning at all.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        pounce.minimize(
+            f, x0=np.array([1.0, 1.0]), jac=g,
+            constraints=[{
+                "type": "eq", "fun": lambda x: x[0] + x[1] - 1.0,
+                "jac": lambda x: np.array([[1.0, 1.0]]),
+            }],
+            options=opts,
+        )
 
 
 def test_minimize_rejects_malformed_constraint_dicts():
