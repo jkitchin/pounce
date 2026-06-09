@@ -482,17 +482,18 @@ pub fn main() -> ExitCode {
             println!();
         }
 
-        // Dispatch to the specialized convex LP/QP IPM when resolved.
-        // `LpIpm` and `QpIpm` both use the convex solver (LP is P = 0).
-        if matches!(choice, SolverChoice::LpIpm | SolverChoice::QpIpm) {
-            if let Some(prob) = reparsed {
-                let presolve_on = app
-                    .options()
-                    .get_string_value("qp_presolve", "")
-                    .map(|(v, _)| v != "no")
-                    .unwrap_or(true);
+        // Dispatch to the specialized convex solvers when resolved.
+        // `LpIpm`/`QpIpm` use the convex QP IPM (LP is P = 0); `SocpIpm`
+        // reformulates a convex QCQP to second-order cones and uses the
+        // conic IPM. Both live in `pounce-convex`.
+        if matches!(
+            choice,
+            SolverChoice::LpIpm | SolverChoice::QpIpm | SolverChoice::SocpIpm
+        ) {
+            if let Some(prob) = reparsed.as_ref() {
                 // JSON solve report, when requested — same schema as the NLP
-                // path, so the benchmark harness can compare QP and NLP solves.
+                // path, so the benchmark harness can compare convex and NLP
+                // solves.
                 let json_cfg = args.json_output.as_deref().map(|p| {
                     let input = match &args.problem {
                         ProblemSource::Builtin(name) => {
@@ -505,8 +506,22 @@ pub fn main() -> ExitCode {
                     };
                     (p, args.json_detail, input)
                 });
+                if matches!(choice, SolverChoice::SocpIpm) {
+                    return run_convex_socp(
+                        prob,
+                        class,
+                        sol_path.as_deref(),
+                        json_cfg,
+                        debug_hook.as_ref(),
+                    );
+                }
+                let presolve_on = app
+                    .options()
+                    .get_string_value("qp_presolve", "")
+                    .map(|(v, _)| v != "no")
+                    .unwrap_or(true);
                 return run_convex_qp(
-                    &prob,
+                    prob,
                     class,
                     sol_path.as_deref(),
                     presolve_on,
@@ -1270,6 +1285,144 @@ fn run_convex_qp(
         // Per-iteration convergence trace at Full detail (the convex IPM's
         // iterate records map onto the report's IterRecord schema, shared with
         // the NLP path so the harness reads one format).
+        if matches!(detail, ReportDetail::Full) {
+            builder.iterations = sol
+                .iterates
+                .iter()
+                .map(|it| IterRecord {
+                    iter: it.iter as _,
+                    objective: it.objective,
+                    inf_pr: it.primal_infeasibility,
+                    inf_du: it.dual_infeasibility,
+                    mu: it.mu,
+                    alpha_primal: it.alpha_primal,
+                    alpha_dual: it.alpha_dual,
+                    ..IterRecord::default()
+                })
+                .collect();
+        }
+        let report = builder.finish();
+        if let Err(e) = write_report_file(json_path, &report) {
+            eprintln!(
+                "pounce: failed to write JSON report to {}: {e}",
+                json_path.display()
+            );
+        } else {
+            eprintln!("pounce: wrote {}", json_path.display());
+        }
+    }
+
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Solve a classified **convex QCQP** by reformulating it to a second-order
+/// cone program and running the conic IPM (`pounce-convex`). Mirrors
+/// [`run_convex_qp`]: same objective-constant fold-back, `.sol`/JSON output,
+/// and per-constraint dual recovery, but the constraints carry quadratic rows
+/// that become SOC blocks (see `qp_extract::extract_socp_with_map`). Presolve
+/// is skipped — it is the QP-path's nonnegative-orthant reducer and is not
+/// cone-aware.
+fn run_convex_socp(
+    prob: &nl_reader::NlProblem,
+    class: pounce_cli::dispatch::ProblemClass,
+    sol_path: Option<&std::path::Path>,
+    json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
+    debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
+) -> ExitCode {
+    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions, QpStatus};
+
+    let (qp, con_map, obj_nl_const, cones) =
+        match pounce_cli::qp_extract::extract_socp_with_map(prob) {
+            Some(q) => q,
+            None => {
+                eprintln!(
+                    "pounce: internal error: {} not extractable as SOCP",
+                    class.name()
+                );
+                return ExitCode::from(2);
+            }
+        };
+
+    // Reported objective includes both constant sources (the `.nl` linear
+    // section and the degree-0 term folded into the nonlinear objective tree),
+    // in the user's sense — identical to the QP path.
+    let obj_const = prob.obj_constant + obj_nl_const;
+    let sign = if prob.minimize { 1.0 } else { -1.0 };
+
+    let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+    };
+    let want_trace = matches!(&json_cfg, Some((_, ReportDetail::Full, _)));
+    let qp_opts = QpOptions {
+        collect_iterates: want_trace,
+        ..QpOptions::default()
+    };
+    let t0 = std::time::Instant::now();
+    let sol = if let Some(hook) = debug_hook {
+        let mut h = hook.borrow_mut();
+        solve_socp_ipm_debug(&qp, &cones, &qp_opts, &mut *h, backend)
+    } else {
+        solve_socp_ipm(&qp, &cones, &qp_opts, backend)
+    };
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    let reported_obj = sign * sol.obj + obj_const;
+
+    let (msg, ok, srn) = match sol.status {
+        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
+        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
+        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
+        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
+        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
+    };
+    println!(
+        "POUNCE ({} conic IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
+        class.name(),
+        sol.iters,
+    );
+
+    // Per-constraint duals, mapped from the cone multipliers back to `.nl`
+    // constraint order (best-effort for the quadratic rows; see
+    // `recover_socp_duals`).
+    let lambda = pounce_cli::qp_extract::recover_socp_duals(prob, &con_map, &sol.y, &sol.z);
+
+    if let Some(path) = sol_path {
+        let payload = nl_writer::SolutionFile {
+            message: &format!("POUNCE {} conic IPM (pounce-convex): {msg}", class.name()),
+            x: &sol.x,
+            lambda: &lambda,
+            solve_result_num: srn,
+            suffixes: &[],
+        };
+        if let Err(e) = nl_writer::write_sol_file(path, &payload) {
+            eprintln!("pounce: failed to write {}: {e}", path.display());
+            return ExitCode::from(2);
+        }
+    }
+
+    if let Some((json_path, detail, input)) = json_cfg {
+        let mut builder = ReportBuilder::new(detail, input);
+        builder.problem.n_variables = qp.n as _;
+        builder.problem.n_constraints = lambda.len() as _;
+        builder.problem.n_objectives = 1;
+        builder.problem.minimize = prob.minimize;
+        builder.solution.status = qp_status_to_ars(sol.status);
+        builder.solution.solve_result_num = srn;
+        builder.solution.objective = reported_obj;
+        builder.solution.x = sol.x.clone();
+        builder.solution.lambda = lambda.clone();
+        builder.stats.iteration_count = sol.iters as _;
+        builder.stats.final_objective = reported_obj;
+        builder.stats.total_wallclock_time_secs = elapsed;
+        let res = sol.kkt_residuals(&qp);
+        builder.stats.final_constr_viol = res.primal_infeasibility;
+        builder.stats.final_dual_inf = res.dual_infeasibility;
+        builder.stats.final_compl = res.complementarity;
+        builder.stats.final_kkt_error = res.kkt_error();
         if matches!(detail, ReportDetail::Full) {
             builder.iterations = sol
                 .iterates

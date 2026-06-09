@@ -1,4 +1,4 @@
-//! Solver routing (Phase 1 of the LP/QP dispatch plan).
+//! Solver routing for the LP/QP/QCQP dispatch.
 //!
 //! See `dev-notes/lp-qp-routing.md`. This module sits between problem
 //! loading and the call to `optimize_tnlp`. It does three things:
@@ -7,13 +7,11 @@
 //!    the nonlinear expression trees the `.nl` reader already produced.
 //! 2. **Resolve** that class against the user's `solver_selection`
 //!    option into a [`SolverChoice`].
-//! 3. (Phase 2+) **Dispatch** to the chosen solver.
+//! 3. **Dispatch** to the chosen solver (in `main.rs`).
 //!
-//! Phase 1 ships with *no behavior change*: the only solvers wired are
-//! `Nlp` (the existing filter-IPM) and `auto`, which resolves to `Nlp`
-//! for every class until `pounce-convex` lands. The classifier and the
-//! option plumbing are fully present and tested so Phase 2 can drop in
-//! the specialized solvers behind the seam.
+//! All solvers are wired: `auto` routes an LP/convex-QP to `pounce-convex`'s
+//! interior-point solver, a convex QCQP to the same crate's conic (SOCP)
+//! driver, and everything else to the existing filter-IPM (`Nlp`).
 //!
 //! ## Classification
 //!
@@ -44,9 +42,20 @@ use std::collections::BTreeMap;
 /// check. A Hessian eigenvalue below `-PSD_TOL` is treated as a genuine
 /// negative direction (nonconvex); within `±PSD_TOL` it is treated as
 /// zero. Scaled tolerances would be better once we have problem scaling
-/// in this path; for Phase 1 a fixed absolute tolerance is adequate and
-/// errs toward the safe (more general) class.
+/// in this path; a fixed absolute tolerance is adequate here and errs
+/// toward the safe (more general) class.
 const PSD_TOL: f64 = 1e-9;
+
+/// The `.nl` "infinity" sentinel for a missing bound: AMPL writes ±1e20-ish
+/// and upstream Ipopt treats any magnitude ≥ 1e19 as infinite. Used to read
+/// a quadratic constraint's *sense* (one-sided `≤` vs. equality / range / `≥`)
+/// when deciding whether a QCQP is convex — see [`classify_problem`].
+const NL_INF: f64 = 1e19;
+
+#[inline]
+fn is_finite_bound(v: f64) -> bool {
+    v.abs() < NL_INF
+}
 
 /// The mathematical class of a loaded problem, from most to least
 /// specialized. See the module docs and `dev-notes/lp-qp-routing.md`.
@@ -57,7 +66,7 @@ pub enum ProblemClass {
     /// Convex quadratic objective, linear constraints (Hessian PSD).
     ConvexQp,
     /// Convex quadratic objective and/or convex quadratic constraints.
-    /// SOCP-representable; routes to the conic solver from Phase 4.
+    /// SOCP-representable; routes to the conic (SOCP) interior-point solver.
     ConvexQcqp,
     /// Quadratic but with an indefinite Hessian somewhere. Falls through
     /// to the NLP solver for a local minimum.
@@ -84,19 +93,20 @@ impl ProblemClass {
 /// The resolved solver to dispatch to, after combining a
 /// [`ProblemClass`] with the `solver_selection` option.
 ///
-/// Phase 1 only ever resolves to [`SolverChoice::Nlp`]; the other
-/// variants exist so the option parser and the forced-selection
-/// validation are complete, and so Phase 2 can wire them without
-/// touching this enum.
+/// `auto` resolves an LP/convex-QP to [`SolverChoice::LpIpm`]/[`SolverChoice::QpIpm`],
+/// a convex QCQP to [`SolverChoice::SocpIpm`], and everything else to
+/// [`SolverChoice::Nlp`]; a forced `solver_selection` can pin any of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverChoice {
-    /// The existing Wächter-Biegler filter-IPM. The only solver wired in
-    /// Phase 1.
+    /// The existing Wächter-Biegler filter-IPM.
     Nlp,
-    /// IPM-LP in `pounce-convex` (Phase 2).
+    /// LP interior-point in `pounce-convex`.
     LpIpm,
-    /// IPM-QP in `pounce-convex` (Phase 2).
+    /// Convex-QP interior-point in `pounce-convex`.
     QpIpm,
+    /// Conic (SOCP) IPM in `pounce-convex`: convex QCQP, reformulated to
+    /// second-order cones.
+    SocpIpm,
     /// Active-set QP in `pounce-qp` (parallel track).
     QpActiveSet,
 }
@@ -111,6 +121,7 @@ impl SolverChoice {
             SolverChoice::Nlp => "NLP filter line-search interior-point (pounce-nlp)",
             SolverChoice::LpIpm => "LP interior-point (pounce-convex)",
             SolverChoice::QpIpm => "convex QP interior-point (pounce-convex)",
+            SolverChoice::SocpIpm => "convex QCQP conic interior-point (pounce-convex)",
             SolverChoice::QpActiveSet => "active-set QP (pounce-qp)",
         }
     }
@@ -127,6 +138,9 @@ pub enum SolverSelection {
     LpIpm,
     /// Force IPM-QP; error if the problem is not LP/convex-QP.
     QpIpm,
+    /// Force the conic (SOCP) IPM; error if the problem is not a convex
+    /// LP / QP / QCQP (all of which the conic solver handles).
+    Socp,
     /// Force active-set QP; error if the problem is not LP/convex-QP.
     QpActiveSet,
 }
@@ -140,6 +154,7 @@ impl SolverSelection {
             "nlp" => Some(SolverSelection::Nlp),
             "lp-ipm" => Some(SolverSelection::LpIpm),
             "qp-ipm" => Some(SolverSelection::QpIpm),
+            "socp" => Some(SolverSelection::Socp),
             "qp-active-set" => Some(SolverSelection::QpActiveSet),
             _ => None,
         }
@@ -147,7 +162,7 @@ impl SolverSelection {
 
     /// The accepted values, for error messages and option registration.
     pub const VALUES: &'static [&'static str] =
-        &["auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set"];
+        &["auto", "nlp", "lp-ipm", "qp-ipm", "socp", "qp-active-set"];
 }
 
 /// Classify a parsed `.nl` problem.
@@ -203,20 +218,37 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
     }
 
     if any_quadratic_constraint {
-        // Convex QCQP requires every ≤-inequality's constraint Hessian
-        // to be PSD. Phase 1 does not yet distinguish constraint sense /
-        // curvature sign per row with full rigor, so be conservative:
-        // only call it ConvexQcqp when every quadratic constraint's
-        // Hessian is PSD; otherwise fall back to NLP (sound: NLP-IPM
-        // finds a local min either way).
-        for c in &prob.con_nonlinear {
+        // Convex QCQP requires every quadratic constraint to be convex *as a
+        // feasible set*, not merely to have a PSD Hessian. A quadratic
+        // `g(x) = ½xᵀQx + … ` carves a convex region only when it is a
+        // one-sided **upper** bound `g(x) ≤ g_u` *and* `Q ⪰ 0`. The other
+        // senses are nonconvex even with a PSD Hessian:
+        //   - `g(x) ≥ g_l` (finite lower bound): the super-level set of a
+        //     convex function is nonconvex;
+        //   - a quadratic equality `g(x) = c`;
+        //   - a two-sided range `g_l ≤ g(x) ≤ g_u` (includes the `≥` side).
+        // This sense test matters now that ConvexQcqp is dispatched to the
+        // conic solver (it is SOC-representable only in the convex case); a
+        // misclassified nonconvex row would return a spurious "optimum".
+        // Anything not provably convex falls back to NLP (sound: the
+        // filter-IPM finds a local minimum either way).
+        for (row, c) in prob.con_nonlinear.iter().enumerate() {
             if is_trivially_zero(c) {
                 continue;
             }
             match analyze_quadratic(c, prob.n) {
-                Some(q) if q.is_empty() => {}
+                Some(q) if q.is_empty() => {} // purely linear after all
                 Some(q) => {
-                    if !hessian_is_psd(&q, prob.n) {
+                    let lo = prob.g_l[row];
+                    let hi = prob.g_u[row];
+                    let vacuous = !is_finite_bound(lo) && !is_finite_bound(hi);
+                    let upper_only = is_finite_bound(hi) && !is_finite_bound(lo);
+                    if vacuous {
+                        // Free row: imposes nothing, so it cannot make the
+                        // problem nonconvex. Ignore it.
+                        continue;
+                    }
+                    if !upper_only || !hessian_is_psd(&q, prob.n) {
                         return ProblemClass::Nlp;
                     }
                 }
@@ -240,10 +272,11 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
 /// to dispatch to, or an error string when a forced selection does not
 /// match the detected class.
 ///
-/// In Phase 1 the resolved choice is informational for everything except
-/// `Nlp`: the dispatcher (Phase 2) is what acts on `LpIpm` / `QpIpm` /
-/// `QpActiveSet`. `auto` resolves to `Nlp` for every class until
-/// `pounce-convex` lands (documented no-op so there is no regression).
+/// `auto` routes LP / convex QP to the convex IPM (`QpIpm`) and convex
+/// QCQP to the conic IPM (`SocpIpm`); nonconvex QP and general NLP resolve
+/// to `Nlp`. A forced selection that does not match the detected class is
+/// rejected with a clear message. (`QpActiveSet` is accepted and validated
+/// here but not yet dispatched — it falls through to the NLP path.)
 pub fn resolve_solver(
     class: ProblemClass,
     selection: SolverSelection,
@@ -254,15 +287,19 @@ pub fn resolve_solver(
     // Is this class within the convex-QP family (LP or convex QP)?
     let is_lp = class == P::Lp;
     let is_convex_qp = matches!(class, P::Lp | P::ConvexQp);
+    // The conic solver handles the whole convex cone family: LP, convex QP,
+    // and (reformulated to second-order cones) convex QCQP.
+    let is_conic = matches!(class, P::Lp | P::ConvexQp | P::ConvexQcqp);
 
     match selection {
         // `auto`: route LP and convex QP to the specialized convex IPM
-        // (`pounce-convex`); everything else (QCQP until the conic
-        // solver lands, nonconvex QP, general NLP) falls through to the
-        // NLP filter-IPM. LP is solved by the same QP IPM (P = 0), so it
+        // (`pounce-convex`) and convex QCQP to the same crate's conic
+        // (SOCP) IPM; nonconvex QP and general NLP fall through to the NLP
+        // filter-IPM. LP is solved by the same QP IPM (P = 0), so it
         // resolves to `QpIpm` rather than a distinct LP entry point.
         S::Auto => match class {
             P::Lp | P::ConvexQp => Ok(SolverChoice::QpIpm),
+            P::ConvexQcqp => Ok(SolverChoice::SocpIpm),
             _ => Ok(SolverChoice::Nlp),
         },
         S::Nlp => Ok(SolverChoice::Nlp),
@@ -278,6 +315,13 @@ pub fn resolve_solver(
                 Ok(SolverChoice::QpIpm)
             } else {
                 Err(mismatch_msg(class, "qp-ipm", "an LP or convex QP"))
+            }
+        }
+        S::Socp => {
+            if is_conic {
+                Ok(SolverChoice::SocpIpm)
+            } else {
+                Err(mismatch_msg(class, "socp", "a convex LP, QP, or QCQP"))
             }
         }
         S::QpActiveSet => {
@@ -672,12 +716,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_routes_everything_else_to_nlp() {
-        for class in [
-            ProblemClass::ConvexQcqp, // until the conic solver lands
-            ProblemClass::NonconvexQp,
-            ProblemClass::Nlp,
-        ] {
+    fn auto_routes_convex_qcqp_to_socp() {
+        assert_eq!(
+            resolve_solver(ProblemClass::ConvexQcqp, SolverSelection::Auto),
+            Ok(SolverChoice::SocpIpm),
+            "auto should route convex QCQP to the conic IPM"
+        );
+    }
+
+    #[test]
+    fn auto_routes_nonconvex_to_nlp() {
+        for class in [ProblemClass::NonconvexQp, ProblemClass::Nlp] {
             assert_eq!(
                 resolve_solver(class, SolverSelection::Auto),
                 Ok(SolverChoice::Nlp),
@@ -685,6 +734,24 @@ mod tests {
                 class
             );
         }
+    }
+
+    #[test]
+    fn forced_socp_accepts_convex_cone_family_only() {
+        for class in [
+            ProblemClass::Lp,
+            ProblemClass::ConvexQp,
+            ProblemClass::ConvexQcqp,
+        ] {
+            assert_eq!(
+                resolve_solver(class, SolverSelection::Socp),
+                Ok(SolverChoice::SocpIpm),
+                "socp should accept {:?}",
+                class
+            );
+        }
+        assert!(resolve_solver(ProblemClass::NonconvexQp, SolverSelection::Socp).is_err());
+        assert!(resolve_solver(ProblemClass::Nlp, SolverSelection::Socp).is_err());
     }
 
     #[test]
@@ -1016,6 +1083,54 @@ mod tests {
         );
         let con = Expr::Binary(BinOp::Mul, Box::new(Expr::Var(0)), Box::new(Expr::Var(1)));
         let prob = qp_stub(obj, vec![con]);
+        assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
+    }
+
+    /// Sense guard: a PSD-Hessian quadratic constraint is convex only as an
+    /// **upper** bound. With a finite *lower* bound (`g(x) ≥ g_l`) the
+    /// feasible set is the nonconvex super-level set, so it must fall back to
+    /// NLP — never be routed to the conic solver as if convex.
+    #[test]
+    fn classify_psd_quadratic_with_lower_bound_is_nonconvex() {
+        let obj = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let con = Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(2.0)),
+            )),
+            Box::new(Expr::Binary(
+                BinOp::Pow,
+                Box::new(Expr::Var(1)),
+                Box::new(Expr::Const(2.0)),
+            )),
+        );
+        let mut prob = qp_stub(obj, vec![con]);
+        // g(x) ≥ 1  (finite lower, infinite upper) — convex function, but the
+        // ≥ side is a nonconvex region.
+        prob.g_l = vec![1.0];
+        prob.g_u = vec![f64::INFINITY];
+        assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
+    }
+
+    /// Sense guard: a quadratic *equality* (`g(x) = c`) is nonconvex even
+    /// with a PSD Hessian, so it must fall back to NLP, not ConvexQcqp.
+    #[test]
+    fn classify_quadratic_equality_is_nonconvex() {
+        let obj = Expr::Const(0.0);
+        let con = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let mut prob = qp_stub(obj, vec![con]);
+        prob.g_l = vec![1.0];
+        prob.g_u = vec![1.0]; // x0² = 1 — nonconvex.
         assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
     }
 
