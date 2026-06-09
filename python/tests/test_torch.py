@@ -358,6 +358,94 @@ def test_torch_problem_grad_pounce_75():
     np.testing.assert_allclose(J.numpy(), np.eye(n), atol=5e-6)
 
 
+def _warm_problem():
+    """min ½‖x−p‖² s.t. Σx = 1, −10 ≤ x ≤ 10 — x*(p) projects p onto the
+    simplex hyperplane, so ∂x*/∂p = I − 11ᵀ/n and the equality multiplier
+    is λ = (Σp − 1)/n."""
+    n, m = 3, 1
+
+    def f(x, p):
+        d = x - p
+        return 0.5 * torch.dot(d, d)
+
+    def g(x, p):  # noqa: ARG001
+        return torch.stack([torch.sum(x) - 1.0])
+
+    from pounce.torch import TorchProblem
+
+    tp = TorchProblem(
+        f=f, g=g, n=n, m=m, p_example=torch.zeros(n),
+        lb=torch.full((n,), -10.0), ub=torch.full((n,), 10.0),
+        cl=torch.tensor([0.0]), cu=torch.tensor([0.0]),
+        options={"tol": 1e-10, "print_level": 0},
+    )
+    return tp, n, m
+
+
+def test_torch_problem_warm_single_solve_and_grad():
+    """`TorchProblem.solve_with_warm` / `batched_solve_with_warm` must run
+    the IPM exactly once per call (no redundant dual-recovery solve) and
+    stay correctly differentiable w.r.t. p (duals threaded out, not
+    differentiated)."""
+    tp, n, m = _warm_problem()
+    from pounce.torch import TorchProblem
+
+    calls = {"single": 0, "batched": 0}
+    orig_s = TorchProblem._host_solve_warm
+    orig_b = TorchProblem._host_batched_solve_warm
+    TorchProblem._host_solve_warm = lambda self, *a, **k: (
+        calls.__setitem__("single", calls["single"] + 1) or orig_s(self, *a, **k)
+    )
+    TorchProblem._host_batched_solve_warm = lambda self, *a, **k: (
+        calls.__setitem__("batched", calls["batched"] + 1) or orig_b(self, *a, **k)
+    )
+    try:
+        x0 = torch.zeros(n)
+        p = torch.tensor([0.2, 0.5, 0.9], requires_grad=True)
+        x_star, (lam, zL, zU) = tp.solve_with_warm(p, x0)
+        # x* lies on the equality hyperplane and the duals come back.
+        np.testing.assert_allclose(float(x_star.sum()), 1.0, atol=1e-8)
+        assert lam.shape == (m,) and zL.shape == (n,) and zU.shape == (n,)
+        assert not lam.requires_grad  # duals are non-differentiable outputs
+        (x_star ** 2).sum().backward()
+        # ∂x*/∂p = I − 11ᵀ/n  ⇒  grad of Σx*² is 2 (I − 11ᵀ/n) x*.
+        xs = x_star.detach()
+        expected = 2.0 * (xs - xs.mean())
+        np.testing.assert_allclose(p.grad.numpy(), expected.numpy(), atol=1e-6)
+        assert calls["single"] == 1, f"expected one solve, got {calls['single']}"
+
+        pb = torch.tensor([[0.2, 0.5, 0.9], [0.1, 0.1, 0.1]], requires_grad=True)
+        xb, (lamb, zLb, zUb) = tp.batched_solve_with_warm(pb, x0)
+        np.testing.assert_allclose(xb.sum(dim=1).detach().numpy(), [1.0, 1.0], atol=1e-8)
+        assert not lamb.requires_grad
+        (xb ** 2).sum().backward()
+        assert torch.isfinite(pb.grad).all()
+        assert calls["batched"] == 1, f"expected one batched solve, got {calls['batched']}"
+    finally:
+        TorchProblem._host_solve_warm = orig_s
+        TorchProblem._host_batched_solve_warm = orig_b
+
+
+def test_torch_problem_rejects_float32_param():
+    """The differentiable TorchProblem entry points reject an explicit
+    float32 parameter (precision-losing) the same way the top-level
+    `pounce.torch.solve` does, while still accepting lists / NumPy /
+    float64 tensors."""
+    tp, n, _ = _warm_problem()
+    x0 = torch.zeros(n)
+    with pytest.raises(TypeError, match="float64"):
+        tp.solve(torch.tensor([0.2, 0.5, 0.9], dtype=torch.float32), x0)
+    with pytest.raises(TypeError, match="float64"):
+        tp.vmap_solve(torch.tensor([[0.2, 0.5, 0.9]], dtype=torch.float32), x0)
+    # Non-tensor and float64 inputs are accepted (coerced) without error.
+    np.testing.assert_allclose(
+        float(tp.solve([0.2, 0.5, 0.9], x0).sum()), 1.0, atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        float(tp.solve(np.array([0.2, 0.5, 0.9]), x0).sum()), 1.0, atol=1e-8,
+    )
+
+
 def test_factor_reuse_matches_dense_pounce_76():
     """The k_aug-style factor-reuse backward must agree with the dense
     KKT backward across equality, slack-inequality, and active-bound."""

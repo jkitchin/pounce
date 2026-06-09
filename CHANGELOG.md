@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+### Added — PyTorch frontend for the differentiable solver (`pounce.torch`)
+
+A PyTorch frontend mirroring `pounce.jax`: a solve is a
+`torch.autograd.Function` you can drop inside a learned model and backprop
+through, with the same constraint-satisfaction guarantee. This is a thin
+adapter, not a second solver — the Rust IPM core and the
+implicit-function-theorem backward are framework-agnostic; only the array
+namespace differs. Because PyTorch is eager, the adapter is smaller than the
+JAX one (no `pure_callback` / `ShapeDtypeStruct`, no host-callback registry or
+single-thread executor pin), and float64 is requested per tensor rather than
+via a global flag.
+
+Surface (parity with `pounce.jax`):
+
+- `from_torch` — build a `Problem` from `torch.func`-traced `f` / `g`
+  (`grad` / `jacrev` / `jacfwd` / `hessian`; CPR colored AD for `sparse=`,
+  via the shared detection/coloring helpers now in `pounce._ad_common`).
+- `solve` / `solve_with_warm` — `autograd.Function` + KKT implicit-diff
+  backward, with dual + barrier-μ warm-start threading.
+- `vmap_solve` / `vmap_solve_parallel` — sequential / threadpool batches.
+- `TorchProblem` — build-once handle with k_aug-style factor-reuse backward
+  (`Solver.kkt_solve_many`), stacked block-diagonal batched solve, and the
+  anchor / sensitivity / jvp_from_state / vjp_from_state / active_set_margin
+  post-solve API.
+- `solve_qp` / `solve_qp_batch` / `solve_socp` / `QpLayer` — OptNet-style
+  differentiable conic layers (feasible-by-construction).
+- `PathFollower` / `inverse_map_rhs` — predictor–corrector path following.
+
+PyTorch is an optional dependency (`pip install pounce-solver[torch]`,
+torch ≥ 2.2). See the [PyTorch integration guide](docs/src/python.md).
+
 ### Added — Convex QCQP auto-routes to the conic (SOCP) solver
 
 The `auto` router now recognizes a convex **quadratically-constrained QP** and

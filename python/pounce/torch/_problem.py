@@ -59,9 +59,20 @@ from .._ad_common import (
     _detect_pattern_lower_multi,
 )
 from ._build import _DT, _seed_matrix, _t, _to_np
-from ._diff import _kkt_backward
+from ._diff import _kkt_backward, _require_f64
 
 _ACTIVE_TOL = 1e-6
+
+
+def _coerce_param(p, name="p"):
+    """Coerce a user parameter to a float64 tensor, raising on an explicit
+    float32 tensor rather than silently upcasting — mirrors the dtype guard
+    in :func:`pounce.torch._diff.solve` so both surfaces reject a
+    precision-losing input the same way. Non-tensors (lists / NumPy arrays)
+    are coerced as before."""
+    if isinstance(p, torch.Tensor):
+        _require_f64(name, p)
+    return _t(p)
 
 
 # ----- cyipopt-shaped problem objects (closures owned by a TorchProblem) ---
@@ -807,7 +818,7 @@ class TorchProblem:
 
     def solve(self, p, x0):
         """Differentiable forward solve at parameter ``p``. Returns ``x*``."""
-        p = _t(p)
+        p = _coerce_param(p)
         x0 = _t(x0)
         tp = self
         factor_reuse = self._factor_reuse
@@ -845,7 +856,7 @@ class TorchProblem:
         """Differentiable forward solve with dual warm-start.
 
         Returns ``(x*, (lam_out, zL_out, zU_out))``."""
-        p = _t(p)
+        p = _coerce_param(p)
         x0 = _t(x0)
         n, m = self._n, self._m
         if warm_start is None:
@@ -868,11 +879,15 @@ class TorchProblem:
                 mxU = torch.as_tensor(np.asarray(info["mult_x_U"]), dtype=_DT)
                 ctx.save_for_backward(p, x_star, lam, mxL, mxU)
                 ctx.solver = solver
-                ctx.extra = (lam, mxL, mxU)
-                return x_star
+                # Dual outputs ride out of the same forward but are not
+                # differentiated (they're consequences of the active set /
+                # barrier homotopy, not inputs to dx*/dp) — same convention
+                # as pounce.torch._diff.solve_with_warm.
+                ctx.mark_non_differentiable(lam, mxL, mxU)
+                return x_star, lam, mxL, mxU
 
             @staticmethod
-            def backward(ctx, v):
+            def backward(ctx, v, *_drop):
                 p, x_star, lam, mxL, mxU = ctx.saved_tensors
                 if factor_reuse:
                     dL_dp = _bwd_factor_reuse_single(tp, ctx.solver, p, x_star, lam, v)
@@ -883,21 +898,16 @@ class TorchProblem:
                     )
                 return dL_dp, None
 
-        # Run forward once to also recover the dual outputs to thread out.
-        x_np, info, _solver = self._host_solve_warm(p, x0, lam_w, zL_w, zU_w)
-        x_star = _WarmFn.apply(p, x0)
-        lam_out = (
-            torch.as_tensor(np.asarray(info["mult_g"]), dtype=_DT)
-            if m > 0 else torch.zeros(0, dtype=_DT)
-        )
-        zL_out = torch.as_tensor(np.asarray(info["mult_x_L"]), dtype=_DT)
-        zU_out = torch.as_tensor(np.asarray(info["mult_x_U"]), dtype=_DT)
+        # Single solve: x* stays differentiable w.r.t. p while the dual
+        # outputs are threaded out of the same forward as non-differentiable
+        # tensors.
+        x_star, lam_out, zL_out, zU_out = _WarmFn.apply(p, x0)
         return x_star, (lam_out, zL_out, zU_out)
 
     def vmap_solve(self, p_batch, x0):
         """Sequential batched solve. Differentiable via per-element
         :meth:`solve`. ``x0`` may be ``(n,)`` (broadcast) or ``(B, n)``."""
-        p_batch = _t(p_batch)
+        p_batch = _coerce_param(p_batch, "p_batch")
         B = p_batch.shape[0]
         x0_arr = _t(x0)
         if x0_arr.ndim == 1:
@@ -909,7 +919,7 @@ class TorchProblem:
         per-element dense backward (no shared factor across threads)."""
         from ._diff import _solve_batch_threadpool
 
-        p_batch = _t(p_batch)
+        p_batch = _coerce_param(p_batch, "p_batch")
         B = p_batch.shape[0]
         n, m = self._n, self._m
         x0_arr = _t(x0)
@@ -959,7 +969,7 @@ class TorchProblem:
         ``x_batch`` of shape ``(B, n)``. Differentiable; the backward
         reuses the held stacked factor when ``factor_reuse=True``, else
         the per-block dense KKT solve."""
-        p_batch = _t(p_batch)
+        p_batch = _coerce_param(p_batch, "p_batch")
         B = p_batch.shape[0]
         x0_arr = _t(x0)
         if x0_arr.ndim == 1:
@@ -1004,7 +1014,7 @@ class TorchProblem:
     def batched_solve_with_warm(self, p_batch, x0, warm_start: tuple | None = None):
         """Warm-started stacked batched solve (pounce#78). Returns
         ``(x_batch, (lam_batch, zL_batch, zU_batch))``."""
-        p_batch = _t(p_batch)
+        p_batch = _coerce_param(p_batch, "p_batch")
         B = p_batch.shape[0]
         n, m = self._n, self._m
         x0_arr = _t(x0)
@@ -1019,10 +1029,6 @@ class TorchProblem:
         tp = self
         factor_reuse = self._factor_reuse
 
-        x_b, lam_b, mxL, mxU, _solver, info = self._host_batched_solve_warm(
-            p_batch, x0_arr, lam_w, zL_w, zU_w,
-        )
-
         class _BatchedWarmFn(torch.autograd.Function):
             @staticmethod
             def forward(ctx, p_batch, x0_batch):
@@ -1030,15 +1036,18 @@ class TorchProblem:
                     p_batch, x0_batch, lam_w, zL_w, zU_w,
                 )
                 x_star = torch.as_tensor(xb, dtype=_DT)
-                ctx.save_for_backward(
-                    p_batch, x_star, torch.as_tensor(lamb, dtype=_DT),
-                    torch.as_tensor(mxl, dtype=_DT), torch.as_tensor(mxu, dtype=_DT),
-                )
+                lam_t = torch.as_tensor(lamb, dtype=_DT)
+                mxL_t = torch.as_tensor(mxl, dtype=_DT)
+                mxU_t = torch.as_tensor(mxu, dtype=_DT)
+                ctx.save_for_backward(p_batch, x_star, lam_t, mxL_t, mxU_t)
                 ctx.solver = solver
-                return x_star
+                # Dual outputs threaded out but not differentiated (same
+                # convention as solve_with_warm).
+                ctx.mark_non_differentiable(lam_t, mxL_t, mxU_t)
+                return x_star, lam_t, mxL_t, mxU_t
 
             @staticmethod
-            def backward(ctx, v_batch):
+            def backward(ctx, v_batch, *_drop):
                 p_b, x_star, lam_b, mxl, mxu = ctx.saved_tensors
                 if factor_reuse:
                     dL = _bwd_factor_reuse_batched(
@@ -1054,10 +1063,9 @@ class TorchProblem:
                     ], dim=0)
                 return dL, None
 
-        x_star = _BatchedWarmFn.apply(p_batch, x0_arr)
-        lam_out = torch.as_tensor(lam_b, dtype=_DT)
-        zL_out = torch.as_tensor(mxL, dtype=_DT)
-        zU_out = torch.as_tensor(mxU, dtype=_DT)
+        # Single solve: x* differentiable w.r.t. p_batch; dual outputs ride
+        # out of the same forward as non-differentiable tensors.
+        x_star, lam_out, zL_out, zU_out = _BatchedWarmFn.apply(p_batch, x0_arr)
         return x_star, (lam_out, zL_out, zU_out)
 
     # ----- post-solve sensitivity API (pounce#82) -----

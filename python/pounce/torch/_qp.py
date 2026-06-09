@@ -40,13 +40,13 @@ from ._build import _DT
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
-# Active-set tolerance kept for parity with the JAX layer (the backward
-# here reads the converged multipliers directly via the arrow/diag
-# scalings, so no explicit thresholding is needed).
-_ACTIVE_TOL = 1e-6
+# Note: unlike the NLP backward, the QP/SOCP backward reads the converged
+# multipliers directly via the arrow/diag scalings, so no active-set
+# thresholding constant is needed here (the JAX layer keeps one only for
+# parity).
 
 
-def _t(a, shape=None) -> torch.Tensor:
+def _t(a) -> torch.Tensor:
     out = torch.as_tensor(np.asarray(a, dtype=np.float64), dtype=_DT) \
         if not isinstance(a, torch.Tensor) else a.to(_DT)
     return out
