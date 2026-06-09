@@ -1,12 +1,12 @@
 # LP / QP Solver Routing
 
-POUNCE can route **linear programs (LP)** and **convex quadratic
-programs (QP)** to a specialized interior-point solver
-(`pounce-convex`) instead of the general nonlinear (NLP) filter-IPM.
-The specialized path uses Mehrotra predictor-corrector and reaches the
-solution in materially fewer iterations on these problem classes —
-typically 30–50% fewer than the general NLP path on bound- or
-inequality-constrained convex QPs.
+POUNCE can route **linear programs (LP)**, **convex quadratic
+programs (QP)**, and **convex quadratically-constrained QPs (QCQP)** to a
+specialized interior-point solver (`pounce-convex`) instead of the general
+nonlinear (NLP) filter-IPM. The specialized path uses Mehrotra
+predictor-corrector and reaches the solution in materially fewer iterations
+on these problem classes — typically 30–50% fewer than the general NLP path
+on bound- or inequality-constrained convex QPs.
 
 Routing is **automatic and transparent**: you do not change how you
 call POUNCE. The same `pounce problem.nl`, the same
@@ -17,21 +17,24 @@ unchanged — POUNCE inspects the problem and picks the solver.
 
 When POUNCE loads a problem it classifies it into one of:
 
-| Class            | Routed to                              |
-|------------------|----------------------------------------|
-| **LP**           | convex IPM (`pounce-convex`)           |
-| **convex QP**    | convex IPM (`pounce-convex`)           |
-| **convex QCQP**  | NLP filter-IPM *(conic solver: future)*|
-| **nonconvex QP** | NLP filter-IPM (finds a local minimum) |
-| **NLP**          | NLP filter-IPM                         |
+| Class            | Routed to                                  |
+|------------------|--------------------------------------------|
+| **LP**           | convex IPM (`pounce-convex`)               |
+| **convex QP**    | convex IPM (`pounce-convex`)               |
+| **convex QCQP**  | conic IPM (`pounce-convex`, SOCP)          |
+| **nonconvex QP** | NLP filter-IPM (finds a local minimum)     |
+| **NLP**          | NLP filter-IPM                             |
 
 The classifier is **conservative**: a problem is sent to the convex
-solver only when POUNCE can *prove* it is an LP or a convex QP (the
-objective is a degree-≤2 polynomial with a positive-semidefinite
-Hessian and the constraints are linear). Anything it cannot prove
-convex — transcendental terms, an indefinite Hessian, quadratic
-constraints — falls back to the general NLP solver, which always
-produces a correct (locally optimal) answer. You never get a wrong
+solver only when POUNCE can *prove* it is convex — an LP or convex QP
+(degree-≤2 objective with a positive-semidefinite Hessian, linear
+constraints), or a convex QCQP (additionally allowing convex-quadratic
+inequality constraints, each with a positive-semidefinite Hessian and a
+one-sided `≤` bound, which are reformulated to second-order cones).
+Anything it cannot prove convex — transcendental terms, an indefinite
+objective Hessian, a quadratic *equality*, or a quadratic inequality whose
+feasible set is nonconvex — falls back to the general NLP solver, which
+always produces a correct (locally optimal) answer. You never get a wrong
 "optimum" from a misclassification.
 
 > **Note on QP detection.** The AMPL `.nl` format has no dedicated
@@ -51,6 +54,7 @@ file, or through Pyomo's `solver.options`.
 | `nlp`           | Always use the NLP filter-IPM, regardless of class.                 |
 | `lp-ipm`        | Force the convex IPM; **errors** if the problem is not an LP.        |
 | `qp-ipm`        | Force the convex IPM; **errors** if the problem is not LP/convex-QP. |
+| `socp`          | Force the conic IPM; **errors** if the problem is not a convex QCQP. |
 | `qp-active-set` | Reserved for the active-set QP track; currently falls back to NLP.  |
 
 ```sh
@@ -135,12 +139,14 @@ pounce model.nl qp_presolve=no
 
 ## Scope and limitations
 
-- **Convex QP only.** Nonconvex (indefinite-Hessian) QPs are solved by
-  the NLP path to a *local* minimum; POUNCE does not do global
+- **Convex problems only.** Nonconvex (indefinite-Hessian) QPs, quadratic
+  equalities, and quadratic inequalities whose feasible set is nonconvex are
+  solved by the NLP path to a *local* minimum; POUNCE does not do global
   optimization.
-- **Convex QCQP** (quadratic constraints) is detected as its own class
-  but currently routes to the NLP path; a second-order-cone solver is
-  planned.
+- **Convex QCQP** (convex-quadratic constraints) routes to the conic IPM:
+  each convex-quadratic inequality `½xᵀQx + aᵀx + b ≤ 0` (with `Q ⪰ 0`) is
+  reformulated to one second-order cone (`Q = FᵀF`, so `‖Fx‖² = xᵀQx`) and
+  solved alongside the QP objective and linear constraints.
 
 Both the primal solution and the constraint duals are written to the
 `.sol` file, in the same sign convention as POUNCE's NLP path (so Pyomo
