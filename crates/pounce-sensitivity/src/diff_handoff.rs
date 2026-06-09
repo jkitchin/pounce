@@ -163,11 +163,24 @@ impl DiffHandoff {
     ///
     /// Returns `None` when the solve did not populate the duals
     /// (`mult_g` / `mult_x_l` / `mult_x_u`) — i.e. it didn't converge, or
-    /// the NLP didn't expose user-space multipliers. `equality_mask` is
-    /// the caller's `g_l[i] == g_u[i]` test (length `n_g`); pass an empty
-    /// slice if unknown, in which case only nonzero-multiplier rows count
-    /// as active (a conservative, still-correct choice for equalities
-    /// whose multipliers are nonzero at the solution).
+    /// the NLP didn't expose user-space multipliers.
+    ///
+    /// `equality_mask` is the caller's `g_l[i] == g_u[i]` test, length
+    /// `n_g`. **Pass the real mask whenever the problem has equality
+    /// constraints.** Equality rows are *always* part of the differentiated
+    /// KKT block regardless of multiplier magnitude, and the mask is the
+    /// only way `from_sens_result` learns which rows those are — a
+    /// [`SensResult`] carries the constraint *values* (`g`) but not their
+    /// `[g_l, g_u]` bounds, so equalities can't be recovered from it.
+    ///
+    /// An empty slice means "no equality information": a row then counts as
+    /// active only when `|λ| > active_tol`. That is correct **only** when
+    /// the problem has no equalities. ⚠ With equalities present it silently
+    /// drops any *degenerate* equality — one whose multiplier is ≈ 0
+    /// (redundant rows, or an equality not binding the optimum's curvature)
+    /// — from the active set, yielding a wrong backward block and wrong
+    /// gradients. Dropping a row is the *unsafe* direction, so the empty
+    /// slice is a convenience for the no-equality case, not a safe default.
     pub fn from_sens_result(res: &SensResult, equality_mask: &[bool]) -> Option<Self> {
         let x = res.x.clone()?;
         let obj_val = res.obj_val?;
@@ -224,6 +237,58 @@ impl DiffHandoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pounce_nlp::return_codes::ApplicationReturnStatus;
+
+    #[test]
+    fn from_sens_result_degenerate_equality_needs_the_mask() {
+        // One equality constraint (g_l == g_u) whose multiplier is ≈ 0 at
+        // the solution — a degenerate / redundant equality. Equalities are
+        // always active, so it belongs in the backward block; but the
+        // empty-mask path can't know it's an equality and (wrongly) drops
+        // it. Pin BOTH behaviors so the hazard documented on
+        // `from_sens_result` is explicit and tested, not silent.
+        let res = SensResult {
+            status: ApplicationReturnStatus::SolveSucceeded,
+            x: Some(vec![1.0]),
+            obj_val: Some(0.0),
+            dx: None,
+            dx_full: None,
+            reduced_hessian: None,
+            reduced_hessian_eigenvalues: None,
+            reduced_hessian_eigenvectors: None,
+            mult_g: Some(vec![0.0]), // degenerate: |λ| ≈ 0
+            mult_x_l: Some(vec![0.0]),
+            mult_x_u: Some(vec![0.0]),
+            g: Some(vec![0.0]),
+        };
+
+        // Empty mask: no equality info → the degenerate equality is dropped.
+        let dropped = DiffHandoff::from_sens_result(&res, &[]).unwrap();
+        assert_eq!(dropped.active_constraints, vec![false]);
+
+        // Correct mask: the equality stays active regardless of |λ|.
+        let kept = DiffHandoff::from_sens_result(&res, &[true]).unwrap();
+        assert_eq!(kept.active_constraints, vec![true]);
+    }
+
+    #[test]
+    fn from_sens_result_returns_none_without_duals() {
+        let res = SensResult {
+            status: ApplicationReturnStatus::SolveSucceeded,
+            x: Some(vec![1.0]),
+            obj_val: Some(0.0),
+            dx: None,
+            dx_full: None,
+            reduced_hessian: None,
+            reduced_hessian_eigenvalues: None,
+            reduced_hessian_eigenvectors: None,
+            mult_g: None, // duals not populated → no handoff
+            mult_x_l: None,
+            mult_x_u: None,
+            g: None,
+        };
+        assert!(DiffHandoff::from_sens_result(&res, &[]).is_none());
+    }
 
     #[test]
     fn pins_active_bounds_and_marks_active_constraints() {

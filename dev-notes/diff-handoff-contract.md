@@ -7,11 +7,11 @@ bundle of post-convergence data, and every consumer (JAX, PyTorch, a
 future C/Rust autodiff user, discopt) differentiates from *that*, not
 from solver-specific internals.
 
-This is the one piece of MIP/global groundwork that is unambiguously
-POUNCE's to own (see
-[`mip-global-routing.md`](./mip-global-routing.md), RESOLVED banner):
-it is general-purpose differentiable-solver work, useful to every
-consumer, and it references no downstream orchestrator.
+This is general-purpose differentiable-solver work: useful to every
+consumer, owned by POUNCE for all of them, and referencing no downstream
+orchestrator (MIP / global / branch-and-bound all live in discopt, not
+here). That ownership test — "would a non-discopt user want it?" — is why
+the contract belongs in POUNCE while the combinatorial layers do not.
 
 ## Progress / current state (corrects the original framing)
 
