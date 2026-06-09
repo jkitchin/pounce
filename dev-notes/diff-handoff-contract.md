@@ -13,26 +13,63 @@ POUNCE's to own (see
 it is general-purpose differentiable-solver work, useful to every
 consumer, and it references no downstream orchestrator.
 
-## Why now: the backward pass is already forked four ways
+## Progress / current state (corrects the original framing)
 
-POUNCE today differentiates solves in at least four places, and **each
-re-derives the same implicit-function-theorem logic from a differently
-named set of multipliers**:
+The first implementation pass and a build-and-test sweep revised the
+picture below. Recorded here so the rest of the note is read in light of
+it:
 
-| Surface | File | Duals it reads | Active-set logic |
+- **`jax/_diff.py` is consolidated** — the three hand-copied NLP backward
+  bodies (plain `solve`, `solve_with_warm`, batched `vmap_solve_parallel`)
+  now route through one `_kkt_implicit_backward` helper. Verified:
+  `test_jax.py` 85 passed.
+- **The other three surfaces were *already* internally single-source** —
+  `torch/_diff.py`, `jax/_qp.py`, `torch/_qp.py` each have exactly one
+  backward helper, with batched paths `vmap`-ing over it. The "four
+  hand-written copies" framing below was only literally true *within*
+  `jax/_diff.py`; across files the duplication is **cross-framework**
+  (jax↔torch namespace ports), not within-framework.
+- **NLP and QP backward are different algorithms and must stay separate.**
+  `_diff` is active-set implicit diff (the pounce#73 slack-row fix);
+  `_qp` is OptNet (Amos & Kolter 2017) reading multipliers directly via
+  `diag(λ)` / `diag(Gx−h)` cone scalings, with **no active set**
+  (`torch/_qp.py` says so). A single shared backward across NLP+QP would
+  be a correctness regression, not a cleanup. The contract unifies the
+  *handoff data shape and naming*, not the backward algorithm.
+- **Cross-frontend parity already holds.** `test_parity_jax_torch.py`
+  directly compares `dL/dp` for the same Rust core under JAX and torch;
+  it passes (35 passed across parity + torch suites; 20 across jax
+  QP/SOCP). So the "one numerical backbone, any autodiff frontend" claim
+  is *already true and tested* — the consolidation is about removing
+  duplicate **derivation**, not about achieving parity.
+
+Net: the remaining Python-side work is **naming unification** (small) and
+**not** a four-way backward merge. The high-value remaining work is the
+**Rust `DiffHandoff` struct + the `nlp_pounce.py` seam** (steps 5–6
+below), which is where the discopt story and batched-`kkt_solve_many`
+backward actually live.
+
+## Why now: the backward derivation was forked (now partly consolidated)
+
+POUNCE differentiates solves across NLP/QP × JAX/torch. The active-set +
+KKT-assembly logic was hand-copied — three times inside `jax/_diff.py`
+(now fixed), and still mirrored across the jax↔torch framework boundary:
+
+| Surface | File | Duals it reads | Backward |
 |---|---|---|---|
-| NLP / JAX | `python/pounce/jax/_diff.py` | `info["mult_g"]`, `info["mult_x_L/U"]` | re-derived in `bwd` |
-| NLP / Torch | `python/pounce/torch/_diff.py` | same dict, repacked | re-derived again |
-| QP / JAX | `python/pounce/jax/_qp.py` | `d["z"]` (`lam`), `nu` | re-derived (`_kkt_backward`) |
-| QP / Torch | `python/pounce/torch/_qp.py` | same | re-derived again |
+| NLP / JAX | `python/pounce/jax/_diff.py` | `info["mult_g"]`, `info["mult_x_L/U"]` | active-set; **now one helper** |
+| NLP / Torch | `python/pounce/torch/_diff.py` | same dict, repacked | active-set; line-for-line jax port |
+| QP / JAX | `python/pounce/jax/_qp.py` | `lam`, `nu` | OptNet (no active set) |
+| QP / Torch | `python/pounce/torch/_qp.py` | same | OptNet; line-for-line jax port |
 
-Each works. But they encode the *same* facts — "a bound is active when
+The NLP surfaces encode the *same* facts — "a bound is active when
 `|mult| > tol`", "an equality row is always active", "pinned variables
-get `dx/dp = 0`" — in four hand-written copies, under two naming
-conventions (`mult_g`/`mult_x_L` vs `lam`/`nu`). Adding a conic surface,
-a torch path for it, or a discopt-facing MINLP-leaf handoff multiplies
-the copies again. That is exactly the "retrofit the backward onto each
-solver" failure mode the contract is meant to prevent.
+get `dx/dp = 0`". Within `jax/_diff.py` that was three copies (fixed).
+Across frameworks the jax and torch NLP backwards remain namespace-only
+ports — unifying *those* needs an array-API shim over both frameworks and
+is deferred (its only payoff is dropping a two-port maintenance burden;
+parity is already tested). The QP surfaces are a *different* algorithm
+and are intentionally not merged with the NLP ones.
 
 The Rust side is already *more* consolidated than the Python side:
 `pounce_sensitivity::ConvergedState` + `Solver` (`crates/pounce-sensitivity/
@@ -154,25 +191,31 @@ fixed, and discopt differentiates it exactly like any node solve. So:
 
 ## Incremental path (each step shippable, no regressions)
 
-1. **Name the struct, map existing surfaces onto it.** Introduce
-   `DiffHandoff` in Rust (a thin re-shape of `ConvergedState` +
-   multipliers); add a Python view. No behavior change — the existing
-   `info` dict keeps working; the handoff is an additional, typed view.
+Status tags reflect the build-and-test sweep recorded above.
+
+0. **[DONE] Consolidate the in-file NLP backward.** `jax/_diff.py`'s
+   three copies → one `_kkt_implicit_backward`. `test_jax.py` 85 passed.
+1. **[NEXT] Name the struct in Rust.** Introduce `DiffHandoff` (a thin
+   re-shape of `pounce_sensitivity::ConvergedState` + the multiplier
+   vectors and the precomputed active-set masks); expose a Python view.
+   No behavior change — the existing `info` dict keeps working; the
+   handoff is an additional, typed view.
 2. **Move active-set computation into the producer.** Compute
-   `active_constraints` / `pinned_vars` once and expose them; switch
-   `_diff.py` and `_qp.py` to *read* them instead of recomputing
-   `|mult| > tol`. Delete the duplicated masking. Lock with the existing
-   finite-difference gradient tests (they must not move).
+   `active_constraints` / `pinned_vars` once on the Rust side and expose
+   them; switch the NLP frontends to *read* them instead of recomputing
+   `|mult| > tol`. Lock with the finite-difference gradient tests.
 3. **Unify the multiplier naming at the boundary.** NLP and QP frontends
    consume `lambda`/`mult_x_*`; the `lam`/`nu`/`mult_g` names become
-   internal mapping detail. One convention from here out.
+   internal mapping detail. (QP keeps its *OptNet backward* — only the
+   handoff field names unify, not the algorithm.) Small, low-risk.
 4. **Surface the factor uniformly.** Route every backward through
    `factor.solve` / `kkt_solve_many` (batched), so `vmap`/batched
    backward is one code path. (NLP already does factor-reuse; bring QP
    onto the same handle.)
-5. **Conic + torch parity for free.** A new surface implements *produce
-   a `DiffHandoff`*; its backward is the shared steps 1–2. Validates the
-   contract by construction.
+5. **[deferred] Cross-framework jax↔torch NLP merge.** Only behind an
+   array-API shim; gated on the two-port maintenance burden actually
+   biting. Parity is already tested, so this is pure de-duplication with
+   no correctness upside — do it last, or not at all.
 6. **Expose across the seam.** `nlp_pounce.py` returns the handoff;
    document it as the stable contract discopt differentiates against.
 
