@@ -289,3 +289,61 @@ mark {
   border-left-color: var(--pounce-tiger);
   color: var(--pounce-tiger);
 }
+
+/* ---- Version selector (docs/assets/versions.js) ------------------------- */
+/* Sits inline with the menu-bar right-buttons (print / git / edit). */
+.pounce-version-wrap {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 0.4rem;
+}
+.pounce-version-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  color: var(--icons);
+  border: 1px solid var(--icons);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.2;
+  padding: 0.15em 1.4em 0.15em 0.5em;
+  cursor: pointer;
+  /* caret */
+  background-image: linear-gradient(45deg, transparent 50%, var(--icons) 50%),
+    linear-gradient(135deg, var(--icons) 50%, transparent 50%);
+  background-position: right 0.6em top 55%, right 0.45em top 55%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.pounce-version-select:hover {
+  color: var(--pounce-tiger);
+  border-color: var(--pounce-tiger);
+}
+.pounce-version-select option {
+  /* The popup list renders in the page palette, not the menu bar's. */
+  color: var(--fg);
+  background: var(--bg);
+}
+
+/* ---- Context banner on non-stable pages -------------------------------- */
+.pounce-version-banner {
+  margin: 0 0 1.5rem 0;
+  padding: 0.6rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--quote-border);
+  background: var(--quote-bg);
+  font-size: 0.9rem;
+}
+.pounce-version-banner a {
+  margin-left: 0.4em;
+  font-weight: 600;
+  color: var(--links);
+  white-space: nowrap;
+}
+.pounce-version-banner-dev {
+  border-left: 4px solid var(--pounce-amber);
+}
+.pounce-version-banner-archived {
+  border-left: 4px solid var(--pounce-rust);
+}
