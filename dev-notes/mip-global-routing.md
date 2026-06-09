@@ -1,9 +1,46 @@
 # Mixed-integer & global optimization — design note
 
-**Status: design only.** No code changes yet. This note captures the
-architecture for adding mixed-integer (MILP / MIQP / convex-MINLP) and
-deterministic global (nonconvex NLP / MINLP) optimization on top of the
-LP/QP routing already designed in
+> **RESOLVED — superseded. All MIP / MINLP / global work lives in
+> [`discopt`](https://github.com/jkitchin/discopt), not POUNCE.**
+>
+> This note explored adding mixed-integer and deterministic-global
+> optimization *inside* POUNCE (`pounce-mip`, `pounce-relax`, a B&B
+> shell). The exploration concluded the opposite — the layering below
+> makes the boundary clean, and the combinatorial layer belongs in
+> discopt:
+>
+> - **POUNCE** stays exactly as described elsewhere: *the best
+>   differentiable continuous solver* (LP / QP / NLP / conic) with a
+>   clean **`solve → DiffHandoff` contract** — `(x*, λ*, multipliers,
+>   active set, factor)` out of every solve. It exposes only
+>   general-purpose capabilities and **never references discopt**. The
+>   test for "does this belong in POUNCE?" is "would a non-discopt user
+>   (CLI / AMPL / Rust / other Python tool) want it?"
+> - **discopt** owns the entire MIP stack: branch-and-bound
+>   orchestration, branching/cuts, and relaxation construction
+>   (McCormick / αBB / AMP). It builds on POUNCE by calling the
+>   continuous solver once per node. discopt already ships a working
+>   Rust B&B engine (`discopt-core`) and a complete POUNCE backend
+>   (`python/discopt/solvers/nlp_pounce.py`), so the integration seam
+>   exists today.
+> - **No `pounce-mip` / `pounce-relax` crates.** No B&B in POUNCE. The
+>   "feral sparse LU + dual simplex" work is gated on discopt's global
+>   LP-relaxation needs, not on a POUNCE MINLP product.
+>
+> MINLP capability is what *emerges* when the two layers stack; it does
+> not live as a partial feature in either. The detailed design below is
+> retained as the record of how this conclusion was reached and as a
+> reference for the algorithms (it is *not* a POUNCE implementation
+> plan). Anything POUNCE actually builds for this — the differentiable
+> `solve → handoff` contract and its batching — is general-purpose solver
+> work, owned by POUNCE for all its consumers, of which discopt is one.
+
+---
+
+**Status: design only (superseded — see banner above).** This note
+captures the architecture for adding mixed-integer (MILP / MIQP /
+convex-MINLP) and deterministic global (nonconvex NLP / MINLP)
+optimization on top of the LP/QP routing already designed in
 [`lp-qp-routing.md`](./lp-qp-routing.md). It assumes that note's LP/QP
 plan has landed: a `pounce-convex` IPM family, the `pounce-qp`
 active-set solver, and the `solver_selection` dispatch seam.
