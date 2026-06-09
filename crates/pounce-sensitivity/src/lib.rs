@@ -67,6 +67,7 @@ pub mod algorithm_backsolver;
 pub mod backsolver;
 pub mod boundcheck;
 pub mod convenience;
+pub mod diff_handoff;
 pub mod p_calculator;
 pub mod reduced_hessian;
 pub mod schur_data;
@@ -78,6 +79,7 @@ pub mod step_calc;
 pub use algorithm_backsolver::PdSensBacksolver;
 pub use backsolver::{DenseLuBacksolver, SensBacksolver};
 pub use convenience::{SensResult, SensSolve};
+pub use diff_handoff::{DiffHandoff, DEFAULT_ACTIVE_TOL};
 // Hoisted to pounce-linalg so the convex QP sensitivity path can share it;
 // re-exported here to preserve `pounce_sensitivity::symmetric_eigen`.
 pub use p_calculator::{IndexPCalculator, PCalculator};
