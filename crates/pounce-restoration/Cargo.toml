@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Restoration phase for POUNCE (port of Ipopt's Algorithm/Resto*): RestoIpoptNLP, RestoMinC_1Nrm, RestoFilterConvCheck, etc. Phase 9 — currently scaffolded with trait surface and stubbed strategies; full implementation lands incrementally."
+description = "Restoration phase for POUNCE (port of Ipopt's Algorithm/Resto*): RestoIpoptNLP, RestoMinC_1Nrm, RestoFilterConvCheck, etc. Implemented and wired into the solve — the filter line search routes failed steps into the nested feasibility sub-IPM. Remaining Phase-10 work: upstream bit-equivalence of the restoration Hessian assembly and full recovery-trace validation."
 keywords = ["ipopt", "restoration", "nlp", "optimization", "feasibility"]
 categories = ["mathematics", "algorithms"]
 

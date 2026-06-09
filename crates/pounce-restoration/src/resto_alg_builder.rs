@@ -33,13 +33,17 @@
 //! — are reused from the outer builder via the
 //! [`RestoAlgorithmBuilder::outer_line_search`] selector below.
 //!
-//! Phase 9 follow-up ships the option-driven assembly surface and the
-//! resto-side bundle struct. Wiring the bundle into a runnable nested
-//! `IpoptAlgorithm` lands once the placeholder
-//! `MinC1NormRestoration::perform_restoration` body is filled in (still
-//! a [`crate::r#trait::RestorationPhase`] default-`false` stub). At
-//! that point the line search picks up the bundle from
-//! `RestoAlgorithmBuilder::build` and drives the nested loop.
+//! This is wired end to end: `RestoAlgorithmBuilder::build` assembles
+//! the bundle, the outer filter line search picks it up and drives the
+//! nested loop, and `MinC1NormRestoration::perform_restoration` runs the
+//! sub-IPM and returns `RestorationOutcome::Recovered` /
+//! `LocallyInfeasible` / `Failed`. (The default `RestorationPhase` impl
+//! still returns `Failed`, but that is just the no-restoration fallback
+//! for `AlgBuilder` uniformity, not the path used when a real provider
+//! is installed.) Remaining Phase-10 work is bit-equivalence of the
+//! restoration Hessian assembly with upstream's `CompoundSymMatrix`
+//! shape and full recovery-trace validation against the CUTEst /
+//! Mittelmann sweep.
 
 use crate::conv_check::{RestoFilterConvCheck, RestoPenaltyConvCheck};
 use crate::init::RestoIterateInitializer;

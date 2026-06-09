@@ -36,11 +36,15 @@ write-up.
 
 ## Status
 
-Phase 9 of the port. The trait surface and strategy skeletons are in
-place and exercised on CUTEst / Mittelmann problems; the cycle
-detector, μ-min widening, and almost-feasible gates have all landed
-recently (see `git log --oneline crates/pounce-restoration`). Edge-case
-bug-hunt continues in tandem with the CUTEst sweep.
+Implemented and wired into the solve. The filter line search routes a
+failed step into `MinC1NormRestoration::perform_restoration`, which runs
+the nested feasibility sub-IPM and returns `Recovered`,
+`LocallyInfeasible`, or `Failed`; the cycle detector, μ-min widening, and
+almost-feasible gates have all landed (see
+`git log --oneline crates/pounce-restoration`). Remaining Phase-10 work:
+bit-equivalence of the restoration Hessian assembly with upstream's
+`CompoundSymMatrix` shape, and full recovery-trace validation against the
+CUTEst / Mittelmann sweep (edge-case bug-hunt continues in tandem).
 
 ## License
 
