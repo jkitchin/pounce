@@ -44,6 +44,12 @@ jobs:
       - name: Release consistency check
         run: scripts/check-release-consistency.sh
 
+      # Docs guard (#108): every page under docs/src must be reachable from
+      # SUMMARY.md and every TOC link must resolve, so a newly written page
+      # can't ship in the repo while staying invisible in the book.
+      - name: Docs consistency check
+        run: scripts/check-docs-consistency.sh
+
       - name: Format check
         run: cargo fmt --all -- --check
 
