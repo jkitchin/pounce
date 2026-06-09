@@ -1,12 +1,14 @@
 # Introduction
 
-POUNCE is a pure-Rust interior-point optimization solver. Its
+POUNCE is a general interior-point method, implemented in pure Rust — one
+numerical backbone that now spans nonlinear, conic/quadratic, and polynomial
+global optimization rather than a single problem class. Its
 nonlinear-programming core began as a faithful port of the
 [Ipopt](https://github.com/coin-or/Ipopt) filter line-search method —
 the algorithm, console output, and option semantics follow upstream Ipopt
 closely enough that anyone used to reading `ipopt` logs can drop in
 `pounce` without relearning where the numbers live — and it has since grown
-into a *family* of solvers sharing one numerical backbone:
+into a *family* of solvers sharing that backbone:
 
 - **Nonlinear programming** — the filter line-search interior-point method
   (the Ipopt port) plus an active-set SQP path, for general smooth problems
