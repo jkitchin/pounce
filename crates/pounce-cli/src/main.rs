@@ -116,9 +116,10 @@ pub fn main() -> ExitCode {
         ],
         "Selects the solver by problem class. `auto` routes LP and convex \
          QP to the specialized convex interior-point solver (pounce-convex) \
-         and all other classes to the NLP filter-IPM. `qp-active-set` is \
-         reserved for the active-set QP track and currently falls through \
-         to NLP.",
+         and all other classes to the NLP filter-IPM. `qp-active-set` routes \
+         an LP / convex QP through the active-set SQP engine (pounce-qp QP \
+         subproblems) instead of the IPM; on these classes it converges in \
+         essentially one QP solve.",
     ) {
         eprintln!("pounce: failed to register solver_selection option: {e}");
         return ExitCode::from(2);
@@ -532,8 +533,27 @@ pub fn main() -> ExitCode {
             // Should not happen (only `.nl` classifies non-NLP), but be
             // safe: fall through to NLP rather than mis-dispatch.
         }
-        // `nlp`, `qp-active-set` (not yet wired), and unmatched cases
-        // fall through to the existing NLP solve below.
+        // `qp-active-set`: route the (convex-QP) problem through the
+        // active-set SQP engine instead of the IPM. `resolve_solver`
+        // already validated the class is LP / convex QP, so the SQP driver
+        // — which solves its step QPs with `pounce-qp` — converges in
+        // essentially one QP solve, and the NLP layer recovers the duals
+        // and writes the `.sol` exactly as the IPM path does. The
+        // application dispatches to that engine whenever the `algorithm`
+        // option resolves to "active-set-sqp" (`optimize_tnlp` →
+        // `optimize_sqp_tnlp`), so setting the option here is the whole
+        // wiring; the solve falls through to the NLP path below unchanged.
+        if matches!(choice, SolverChoice::QpActiveSet) {
+            if let Err(e) = app
+                .options_mut()
+                .read_from_str("algorithm active-set-sqp\n", true)
+            {
+                eprintln!("pounce: failed to select the active-set-sqp algorithm: {e}");
+                return ExitCode::from(2);
+            }
+        }
+        // `nlp` and any unmatched case fall through to the existing NLP
+        // solve below unchanged.
         let _ = choice;
     }
 
@@ -904,6 +924,18 @@ pub fn main() -> ExitCode {
         print::print_summary(status, &solve_stats, &counters);
     }
     drop(counters); // release before JSON block (which re-borrows the wrapped TNLP).
+
+    // Active-set SQP fallback: that solve path bypasses the IPM-only
+    // `on_converged` hook the `.sol` / JSON writers read, so
+    // `nominal_capture` is still empty even on a clean solve. Backfill it
+    // from the solution `CountingTnlp` captured at `finalize_solution`
+    // (original-problem space, the same `x` / `lambda` the IPM hook would
+    // have recorded). Only fills when empty, so the IPM path is untouched.
+    if nominal_capture.borrow().is_none() {
+        if let Some(xl) = counting.borrow().captured_solution() {
+            *nominal_capture.borrow_mut() = Some(xl);
+        }
+    }
 
     // Reduced Hessian: print to stderr (informational), mirroring
     // upstream sIPOPT's RedHessian / Eigenvalues prints in

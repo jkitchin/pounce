@@ -186,6 +186,71 @@ fn forced_qp_ipm_solves() {
     assert!(stdout.contains("pounce-convex"), "stdout=\n{stdout}");
 }
 
+/// The `qp-active-set` route is wired: it dispatches the convex QP to the
+/// active-set SQP engine (pounce-qp QP subproblems), not the IPM. The banner
+/// must name the active-set solver and the solve must succeed. (Previously the
+/// flag was validated then silently fell through to the NLP IPM.)
+#[test]
+fn forced_qp_active_set_solves_convex_qp() {
+    let out = Command::new(pounce_exe())
+        .arg(fixture())
+        .arg("--no-sol")
+        .arg("solver_selection=qp-active-set")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(0), "active-set route should solve");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("active-set QP (pounce-qp)"),
+        "banner must name the active-set solver, not fall through:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Optimal Solution Found"),
+        "active-set route should report optimal:\n{stdout}"
+    );
+}
+
+/// The active-set route's `.sol` must carry the *real* primal and dual — not
+/// the zero fallback. Its solve bypasses the IPM-only `on_converged` capture,
+/// so the CLI backfills the solution from `finalize_solution`; this test pins
+/// that the captured `x ≈ (1,1)` and the equality dual `≈ −2` match the IPM /
+/// NLP convention on the same `min x0²+x1² s.t. x0+x1=2` fixture.
+#[test]
+fn qp_active_set_sol_matches_known_optimum_and_dual() {
+    let dir = std::env::temp_dir();
+    let sol = dir.join("pounce_qp_active_set_test.sol");
+    let _ = std::fs::remove_file(&sol);
+    let out = Command::new(pounce_exe())
+        .arg(fixture())
+        .arg("--sol-output")
+        .arg(&sol)
+        .arg("solver_selection=qp-active-set")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(out.status.code(), Some(0));
+    let text = std::fs::read_to_string(&sol).expect("read .sol");
+    let floats: Vec<f64> = text
+        .lines()
+        .filter_map(|l| l.trim().parse::<f64>().ok())
+        .collect();
+    // Two primal values ≈ 1.0 (the real solution, not the zero fallback).
+    let near_one = floats.iter().filter(|v| (**v - 1.0).abs() < 1e-5).count();
+    assert!(
+        near_one >= 2,
+        "active-set .sol must carry the real primal x ≈ (1,1), not zeros:\n{text}"
+    );
+    // The equality multiplier is −2 in the same convention as the IPM/NLP path.
+    let dual_near = floats
+        .iter()
+        .copied()
+        .min_by(|a, b| (a + 2.0).abs().partial_cmp(&(b + 2.0).abs()).unwrap())
+        .expect("a float in .sol");
+    assert!(
+        (dual_near + 2.0).abs() < 1e-5,
+        "active-set equality dual {dual_near} != −2:\n{text}"
+    );
+}
+
 #[test]
 fn nlp_path_still_solves_same_file() {
     // No regression: the general NLP path must still handle the file.

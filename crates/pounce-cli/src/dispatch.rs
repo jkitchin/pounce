@@ -275,8 +275,8 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
 /// `auto` routes LP / convex QP to the convex IPM (`QpIpm`) and convex
 /// QCQP to the conic IPM (`SocpIpm`); nonconvex QP and general NLP resolve
 /// to `Nlp`. A forced selection that does not match the detected class is
-/// rejected with a clear message. (`QpActiveSet` is accepted and validated
-/// here but not yet dispatched — it falls through to the NLP path.)
+/// rejected with a clear message. (`QpActiveSet` is accepted for LP / convex
+/// QP and dispatched to the active-set SQP engine — see `main.rs`.)
 pub fn resolve_solver(
     class: ProblemClass,
     selection: SolverSelection,
