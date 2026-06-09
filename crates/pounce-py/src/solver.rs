@@ -85,6 +85,10 @@ impl PySolver {
             status,
             stats.iteration_count,
             stats.final_mu,
+            stats.final_kkt_error,
+            stats.final_dual_inf,
+            stats.final_constr_viol,
+            stats.final_compl,
         )?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         let _ = bridge; // alive via inner's Rc<RefCell<dyn TNLP>> clone

@@ -323,6 +323,10 @@ impl PyProblem {
             status,
             stats.iteration_count,
             stats.final_mu,
+            stats.final_kkt_error,
+            stats.final_dual_inf,
+            stats.final_constr_viol,
+            stats.final_compl,
         )?;
         let ws_obj: PyObject = match &self.last_working_set {
             Some(ws) => encode_working_set(py, ws).into_any().unbind(),
@@ -505,6 +509,10 @@ impl PyProblem {
             result.status,
             stats.iteration_count,
             stats.final_mu,
+            stats.final_kkt_error,
+            stats.final_dual_inf,
+            stats.final_constr_viol,
+            stats.final_compl,
         )?;
         let dx_obj: PyObject = match result.dx {
             Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
@@ -683,12 +691,17 @@ impl PyProblem {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_info_dict<'py>(
     py: Python<'py>,
     bridge: &PyTnlp,
     status: ApplicationReturnStatus,
     iter_count: i32,
     final_mu: Number,
+    final_kkt_error: Number,
+    final_dual_inf: Number,
+    final_constr_viol: Number,
+    final_compl: Number,
 ) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
     info.set_item("status", status as i32)?;
@@ -713,6 +726,18 @@ pub(crate) fn build_info_dict<'py>(
     // the corrector in predictor–corrector path following (pounce#86).
     // `0.0` on the barrier-free SQP path.
     info.set_item("mu", final_mu)?;
+
+    // Final convergence metrics (the values the IPM/SQP convergence check
+    // saw at the last iterate). `final_kkt_error` is the overall NLP error
+    // that `OptErrorConvCheck` tests against `tol` / `acceptable_tol`;
+    // surfacing it lets the scipy-style facade judge `success` on the actual
+    // optimality residual rather than solely on the exit-status enum, so a
+    // verified optimum reached via a tiny-step exit (gh #119/#123) is still
+    // reported as a success. NaN on a path that never computed them.
+    info.set_item("final_kkt_error", final_kkt_error)?;
+    info.set_item("final_dual_inf", final_dual_inf)?;
+    info.set_item("final_constr_viol", final_constr_viol)?;
+    info.set_item("final_compl", final_compl)?;
 
     // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
     // compute the active set ONCE here, in the producer, so the JAX /
