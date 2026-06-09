@@ -37,6 +37,16 @@ _QP_STATUS_CODE = {
     "numerical_failure": 4,
 }
 
+# NLP ``ApplicationReturnStatus`` codes that count as a successful solve for the
+# scipy-style ``success`` flag. ``SolveSucceeded`` (0) is the obvious one;
+# ``SolvedToAcceptableLevel`` (1) means the iterate met the *acceptable*
+# tolerance after the tight tolerance stalled — Ipopt/cyipopt and scipy both
+# treat that as a success, and pounce's own differentiable path already does
+# (``jax/_path.py`` / ``torch/_path.py`` ``_OK_STATUS``). Excluding it (gh #119)
+# made HS071 and similar problems report ``success=False`` at a verified
+# optimum. Codes 2..6 (infeasible, tiny step, diverging, …) stay failures.
+_NLP_SUCCESS_STATUS = frozenset({0, 1})
+
 
 @dataclass
 class OptimizeResult:
@@ -445,7 +455,7 @@ def minimize(
     return OptimizeResult(
         x=np.asarray(x),
         fun=float(info["obj_val"]),
-        success=int(info["status"]) == 0,
+        success=int(info["status"]) in _NLP_SUCCESS_STATUS,
         status=int(info["status"]),
         message=str(info["status_msg"]),
         nit=int(info["iter_count"]),

@@ -120,6 +120,42 @@ def test_minimize_rejects_reversed_bounds():
     np.testing.assert_allclose(res.x[0], 0.5, atol=1e-6)
 
 
+def test_nlp_success_status_includes_acceptable_level():
+    """gh #119 regression (mapping). ``success`` for the NLP path must count
+    ``Solved_To_Acceptable_Level`` (status 1) as a success, not only
+    ``Solve_Succeeded`` (status 0) — matching Ipopt/cyipopt, scipy, and pounce's
+    own differentiable ``_OK_STATUS``. Infeasible/tiny-step/etc. stay failures."""
+    from pounce._minimize import _NLP_SUCCESS_STATUS
+
+    assert 0 in _NLP_SUCCESS_STATUS          # Solve_Succeeded
+    assert 1 in _NLP_SUCCESS_STATUS          # Solved_To_Acceptable_Level
+    assert 2 not in _NLP_SUCCESS_STATUS      # Infeasible_Problem_Detected
+    assert 3 not in _NLP_SUCCESS_STATUS      # Search_Direction_Becomes_Too_Small
+
+
+def test_minimize_acceptable_level_reports_success():
+    """gh #119 regression (end-to-end). HS071 from the (2,2,2,2) start converges
+    to the acceptable level (status 1) rather than the tight tolerance; pounce
+    used to flag that ``success=False`` at the verified optimum. The acceptable
+    solve must now report ``success=True``."""
+    def f(x):
+        return float(x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2])
+
+    constraints = [
+        {"type": "ineq", "fun": lambda x: x[0] * x[1] * x[2] * x[3] - 25.0},
+        {"type": "eq", "fun": lambda x: float(x @ x) - 40.0},
+    ]
+    res = pounce.minimize(
+        f, x0=np.array([2.0, 2.0, 2.0, 2.0]), bounds=[(1.0, 5.0)] * 4,
+        constraints=constraints, options={"solver_selection": "nlp", "print_level": 0},
+    )
+    # Reaches the known HS071 optimum f* = 17.0140173 ...
+    np.testing.assert_allclose(res.fun, 17.0140172891520078, atol=1e-5)
+    # ... and terminates acceptable-or-better, which must read as success.
+    assert res.status in (0, 1)
+    assert res.success
+
+
 def test_minimize_rejects_malformed_constraint_dicts():
     """Malformed constraint dicts used to raise a bare ``KeyError``; they now
     raise a clear ValueError naming the problem."""
