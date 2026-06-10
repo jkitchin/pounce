@@ -19,6 +19,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H8 | convex: non-symmetric HSDE driver validates Farkas/recession certs with the orthant test — wrong in both directions for exp/power | **FIXED** | `hsde_nonsym.rs:840` now calls `detect_infeasibility_nscone` (new helper) instead of the componentwise `detect_infeasibility`. Added `NsCone::in_dual_cone`/`in_primal_cone` (per-block dispatch; exp/power use their `BarrierCone` tests). The dual exp cone requires `u < 0`, so componentwise `z ≥ 0` both **rejected** genuine exp Farkas certs (→ `IterationLimit`) and **accepted** all-nonnegative `z ∉ K_exp*` (false `PrimalInfeasible`); both fixed. `detect_infeasibility_with` made `pub(crate)`; the plain componentwise `detect_infeasibility` is now test/docs-only. Tests `exp_farkas_certificate_rejected_componentwise_accepted_cone_aware`, `nonneg_z_not_in_dual_exp_cone_is_false_positive_componentwise`, `nscone_exp_membership_disagrees_with_componentwise`. |
 | H9 | convex: `presolve_conic` protects only `SecondOrder` rows — unsound reductions / wrong `Infeasible` for PSD/exp/power rows | **FIXED** | Two layers fixed. (1) `presolve_conic` now protects **every** non-`Nonneg` cone block (`!matches!(spec, ConeSpec::Nonneg(_))`), not just `SecondOrder`. (2) The deeper bug: `build_rows` independently collapsed empty rows — a post-substitution empty cone row with `h<0` returned `Err`→`Infeasible`, and a feasible empty cone row (`h≥0`) was silently dropped, desyncing `reduced_cones`. `build_rows` now takes a `protected` mask and keeps coupled cone rows verbatim (the `0·x ≤ h` slack `s=h` is legal — e.g. `(−1,1,5) ∈ K_exp`); `pivot_divisor` guards empty rows. Tests `exp_cone_empty_row_negative_h_is_not_infeasible`, `exp_cone_activity_redundant_row_not_dropped` in `tests/presolve_conic.rs`. |
 | H10 | presolve: postsolve does not zero `z_l`/`z_u` at aux-fixed variables — reported duals violate stationarity | **FIXED** | `finalize_solution` (`lib.rs:1049`) forwarded `sol.z_l`/`sol.z_u` verbatim, but `recover_dropped_multipliers` folds the entire fixed-var stationarity residual into the recovered λ assuming `z_l = z_u = 0` there — double-counting against the IPM's large clamp multipliers. Now copies `z_l`/`z_u` into mutable buffers and zeros each `frame.fixed_vars` entry immediately after that frame's λ is recovered (only on `Ok` recovery; a failed recovery leaves λ=0 so the clamp multiplier is still legitimate). Test `phase0_finalize_zeroes_bound_multipliers_at_fixed_vars` (recording mock inner). |
+| H11 | presolve: objective coupling classified from the gradient at a single probe point — a nonlinear objective variable reading zero gradient at the probe is mis-classified `PureEquality` and wrongly eliminated | **FIXED** | `run_auxiliary_phase0` built `obj_support` solely from `objective_gradient_support(grad_f)` — one sample. A variable whose objective gradient happens to vanish at the probe (classic `f=(x−x₀)²` started at `x₀`) reads as objective-free, so its square block is classed `PureEquality` and eliminated even under `Safe`. `PresolveTnlp` now fetches `get_variables_linearity` (`lib.rs:354`) and passes it via a new `Phase0Probe::var_linearity` field; `run_auxiliary_phase0` (`auxiliary.rs:221`) unions every `NonLinear`-tagged variable into `obj_support`, so nonlinear vars are always treated objective-coupled. When the TNLP declines (default), `var_linearity=None` → falls back to the probe gradient (no behavior change; no production TNLP implements the hook). Test `phase0_nonlinear_var_with_zero_probe_grad_blocks_elimination_under_safe`. |
 
 ## C1 detail
 
@@ -410,3 +411,47 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   is the **full** row count, so the recovery+zeroing block runs even though
   the reduced problem has 0 rows. Full `pounce-presolve` suite green (204 lib
   + integration); `cargo fmt --check` clean.
+
+## H11 detail
+
+- **Bug**: `run_auxiliary_phase0` (`auxiliary.rs`) derived the objective
+  support that drives coupling classification from a single gradient sample:
+  `obj_support = objective_gradient_support(probe.grad_f, 1e-12)`. The probe
+  `grad_f` is `∇f` evaluated at **one** point (`x_l`/probe). For a variable
+  that appears nonlinearly in the objective, a zero entry there does NOT prove
+  the variable is objective-free — the canonical `f = (x − x₀)²` evaluated at
+  the stationary point `x₀` has `∂f/∂x = 0`. `classify_block`
+  (`coupling.rs`) then sees the block as touching no objective variable,
+  returns `PureEquality`, and `run_auxiliary_phase0` eliminates it even under
+  the `Safe` policy — silently changing the objective (the eliminated var is
+  pinned to its equality-implied value, dropping the `(x−x₀)²` curvature).
+- **Fix**: surface per-variable linearity from the inner TNLP and treat every
+  `NonLinear` variable as objective-coupled regardless of the probe gradient.
+  - `PresolveTnlp::run_phase0` (`lib.rs:354`) calls
+    `get_variables_linearity(&mut var_linearity)` (default-`NonLinear` buffer)
+    and records whether the TNLP supplied tags (`have_var_linearity`).
+  - New field `Phase0Probe::var_linearity: Option<&[Linearity]>`
+    (`auxiliary.rs:64`); set to `Some(&var_linearity)` only when
+    `have_var_linearity` (`lib.rs:484`), else `None`.
+  - `run_auxiliary_phase0` (`auxiliary.rs:221`) unions every `NonLinear`
+    variable into `obj_support` after the gradient-support seed. `None`
+    (TNLP declined) falls back to the probe gradient alone — the prior
+    behavior.
+- **Soundness**: a `Linear` variable with zero probe gradient is genuinely
+  objective-free (linear ⇒ constant gradient ⇒ zero everywhere) — safe to
+  eliminate. A `NonLinear` variable is the only ambiguous case, and it is now
+  always protected. The default `get_variables_linearity` returns `false`
+  (no tags), and no production TNLP overrides it, so the path is dormant —
+  zero regression risk on real solves; it engages only when a caller opts in.
+- **Test** (`auxiliary.rs` test module):
+  `phase0_nonlinear_var_with_zero_probe_grad_blocks_elimination_under_safe`
+  builds a 2×2 linear equality block (`x+y=3, x−y=1`) with `grad_f=[0,0]`
+  (probe reads no objective coupling) and `var_lin=[NonLinear, Linear]`. A
+  control probe with `var_linearity: None` eliminates 1 block (gradient-only
+  classification → `PureEquality`); the tagged probe
+  (`Phase0Probe { var_linearity: Some(&var_lin), ..base }`) eliminates **0**,
+  produces no frame, and reports `class_counts.objective_coupled == 1`.
+- **Verified by running code**: pre-fix (augmentation temporarily disabled)
+  FAILED (`left:1 right:0` — the nonlinear-tagged block was still
+  eliminated); post-fix PASSES. Full `pounce-presolve` suite green (205 lib +
+  integration + doctests); `cargo fmt --check` clean; no build warnings.

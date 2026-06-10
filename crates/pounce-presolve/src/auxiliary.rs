@@ -53,6 +53,15 @@ pub struct Phase0Probe<'a> {
     pub eq_tol: Number,
     pub x_probe: &'a [Number],
     pub grad_f: &'a [Number],
+    /// Per-variable linearity tags (`get_variables_linearity`), when the
+    /// inner TNLP supplies them. `grad_f` is sampled at a single probe
+    /// point, so a variable nonlinear in the objective can read as
+    /// objective-free there (e.g. `f=(x−x₀)²` started at `x₀`). A `Linear`
+    /// tag makes the zero probe-gradient conclusive; for a `NonLinear` tag
+    /// it is not, so the variable is treated as objective-coupled (H11).
+    /// `None` when the TNLP declines — the probe gradient is then used
+    /// alone, preserving the pre-H11 behavior.
+    pub var_linearity: Option<&'a [Linearity]>,
     /// PR 13: variable bounds — needed for the trivial-elimination
     /// pre-pass that runs before incidence is built.
     pub x_l: &'a [Number],
@@ -200,7 +209,22 @@ pub fn run_auxiliary_phase0(
     let comps = SquareComponents::of_square_part(&eq_inc, &matching, &dm);
     diag.stage_time_ms.components_ms = t_comp.elapsed().as_millis();
 
-    let obj_support = objective_gradient_support(probe.grad_f, 1e-12);
+    // Variables with a non-negligible objective gradient *at the probe*.
+    let mut obj_support = objective_gradient_support(probe.grad_f, 1e-12);
+    // H11: the probe gradient is a single sample. For any variable the inner
+    // TNLP tags `NonLinear`, a zero probe-gradient does NOT prove it is
+    // objective-free (the gradient may be non-zero elsewhere — the classic
+    // `f=(x−x₀)²` started at `x₀` reads as zero). Treat every nonlinear
+    // variable as objective-coupled so its block is not eliminated as
+    // `PureEquality` under the `Safe` policy. When the TNLP declines to
+    // provide variable linearity, fall back to the probe gradient alone.
+    if let Some(var_lin) = probe.var_linearity {
+        for (i, l) in var_lin.iter().enumerate() {
+            if matches!(l, Linearity::NonLinear) {
+                obj_support.insert(i);
+            }
+        }
+    }
 
     // -- 2. Decide which dropped rows are linear --------------------
     // We need a fast lookup from inner row index → linearity. The
@@ -863,6 +887,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe,
             grad_f,
+            var_linearity: None,
             x_l: Box::leak(x_l.into_boxed_slice()),
             x_u: Box::leak(x_u.into_boxed_slice()),
         }
@@ -948,6 +973,78 @@ mod tests {
         assert_eq!(frame.fixed_vars, vec![0, 1]);
         assert!((frame.fixed_values[0] - 2.0).abs() < 1e-12);
         assert!((frame.fixed_values[1] - 1.0).abs() < 1e-12);
+    }
+
+    /// H11: the objective gradient is a single-point sample, so a variable
+    /// nonlinear in the objective can read as objective-free at the probe
+    /// (`f=(x−x₀)²` started at `x₀` → zero gradient). A `NonLinear` variable
+    /// tag must make the classifier treat that variable as objective-coupled,
+    /// so its block is NOT eliminated as `PureEquality` under `Safe` (which
+    /// would silently fix it at a Newton root with no regard to the
+    /// objective). Same eliminable 2×2 block as the test above, but var 0 is
+    /// nonlinear in the objective and zero-gradient at the probe.
+    #[test]
+    fn phase0_nonlinear_var_with_zero_probe_grad_blocks_elimination_under_safe() {
+        let irow = [0, 0, 1, 1];
+        let jcol = [0, 1, 0, 1];
+        let vals = [1.0, 1.0, 1.0, -1.0];
+        let g_l = [3.0, 1.0];
+        let g_u = [3.0, 1.0];
+        let g_probe = [0.0, 0.0];
+        let linearity = [Linearity::Linear, Linearity::Linear];
+        let x_probe = [0.0, 0.0];
+        let grad_f = [0.0, 0.0]; // objective-free *at the probe* only
+        let x_l = [-1e19, -1e19];
+        let x_u = [1e19, 1e19];
+        let var_lin = [Linearity::NonLinear, Linearity::Linear];
+
+        let base = Phase0Probe {
+            n_vars: 2,
+            n_rows: 2,
+            jac_irow: &irow,
+            jac_jcol: &jcol,
+            jac_values: &vals,
+            g_l: &g_l,
+            g_u: &g_u,
+            g_at_probe: &g_probe,
+            linearity: &linearity,
+            one_based: false,
+            eq_tol: 1e-12,
+            x_probe: &x_probe,
+            grad_f: &grad_f,
+            var_linearity: None,
+            x_l: &x_l,
+            x_u: &x_u,
+        };
+
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        opts.auxiliary_coupling = AuxiliaryCouplingPolicy::Safe;
+
+        // Control (pre-H11 behavior): with no variable-linearity tag the zero
+        // probe gradient alone makes the block look objective-free → eliminated.
+        let plan_blind = run_auxiliary_phase0(&opts, &base, None, None);
+        assert_eq!(
+            plan_blind.diagnostics.blocks_eliminated, 1,
+            "control: zero probe-gradient alone eliminates the block"
+        );
+
+        // H11 fix: the `NonLinear` tag on var 0 makes it objective-coupled, so
+        // the block is rejected under Safe.
+        let tagged = Phase0Probe {
+            var_linearity: Some(&var_lin),
+            ..base
+        };
+        let plan_tagged = run_auxiliary_phase0(&opts, &tagged, None, None);
+        assert_eq!(
+            plan_tagged.diagnostics.blocks_eliminated, 0,
+            "H11: nonlinear-tagged objective variable must block elimination"
+        );
+        assert!(plan_tagged.frame.is_none());
+        assert_eq!(
+            plan_tagged.diagnostics.class_counts.objective_coupled, 1,
+            "block classified objective-coupled via the linearity tag"
+        );
     }
 
     #[test]
@@ -1257,6 +1354,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: Box::leak(x_probe.into_boxed_slice()),
             grad_f: Box::leak(grad_f.into_boxed_slice()),
+            var_linearity: None,
             x_l: Box::leak(x_l_def.into_boxed_slice()),
             x_u: Box::leak(x_u_def.into_boxed_slice()),
         }
@@ -1320,6 +1418,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: &x_probe,
             grad_f: &grad_f,
+            var_linearity: None,
             x_l: &x_l_def,
             x_u: &x_u_def,
         };
@@ -1387,6 +1486,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: &x_probe,
             grad_f: &grad_f,
+            var_linearity: None,
             x_l: &x_l,
             x_u: &x_u,
         };

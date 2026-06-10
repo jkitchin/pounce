@@ -346,6 +346,17 @@ impl PresolveTnlp {
             true
         };
 
+        // Per-variable linearity (H11): lets Phase-0 objective-coupling
+        // classification distinguish a genuinely objective-free variable from
+        // one that is merely zero-gradient at the single probe point. Most
+        // TNLPs decline (default `false`), in which case Phase 0 falls back to
+        // the probe gradient alone.
+        let mut var_linearity = vec![Linearity::NonLinear; n];
+        let have_var_linearity = self
+            .inner
+            .borrow_mut()
+            .get_variables_linearity(&mut var_linearity);
+
         // Probe point for Jacobian values (linear rows have constant
         // Jacobians; this `x` is only needed because some inner
         // TNLPs assert on receipt).
@@ -470,6 +481,11 @@ impl PresolveTnlp {
                 eq_tol: 1e-12,
                 x_probe: &x_probe,
                 grad_f: &grad_f_probe,
+                var_linearity: if have_var_linearity {
+                    Some(&var_linearity)
+                } else {
+                    None
+                },
                 x_l: &x_l,
                 x_u: &x_u,
             };
