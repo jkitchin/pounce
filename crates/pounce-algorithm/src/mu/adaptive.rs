@@ -101,8 +101,10 @@ pub struct AdaptiveMuUpdate {
     pub adaptive_mu_monotone_init_factor: Number,
     /// `adaptive_mu_restore_previous_iterate` (default false).
     pub restore_accepted_iterate: bool,
-    /// `sigma_max` / `sigma_min` forwarded to
-    /// `QualityFunctionMuOracle` on every free-mode call. Defaults
+    /// `sigma_max` / `sigma_min` forwarded to `QualityFunctionMuOracle`
+    /// on every free-mode call. `sigma_max` is additionally forwarded to
+    /// `ProbingMuOracle` (upstream `IpProbingMuOracle.cpp` reads the same
+    /// `sigma_max` option to cap its centering parameter — L3). Defaults
     /// from `IpQualityFunctionMuOracle.cpp:RegisterOptions`.
     pub sigma_max: Number,
     pub sigma_min: Number,
@@ -683,7 +685,13 @@ impl MuUpdate for AdaptiveMuUpdate {
                 match (nlp, pd_search_dir) {
                     (Some(nlp), Some(sd)) => {
                         let mut oracle = ProbingMuOracle {
-                            sigma_max: 100.0,
+                            // Forward the user-set `sigma_max` (default 1e2),
+                            // matching upstream `IpProbingMuOracle.cpp`, which
+                            // reads `options.GetNumericValue("sigma_max", ...)`
+                            // and caps `sigma = Min(sigma, sigma_max_)`. This
+                            // was hard-coded to 100.0, so a user-set `sigma_max`
+                            // reached only the quality-function oracle (L3).
+                            sigma_max: self.sigma_max,
                             mu_min: self.mu_min,
                             mu_max: self.mu_max,
                             mu_curr: curr_mu,

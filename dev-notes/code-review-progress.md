@@ -65,6 +65,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M39 | ci: `pounce-hsl` is on the crates.io publish list but compiled by zero CI jobs. `.github/workflows/ci.yml:63,66,69` (clippy/build/test) all pass `--exclude pounce-hsl` because the crate FFI-links the licensed `libcoinhsl` (absent from CI), so its first compile is the `cargo publish` verify build mid-release — and it is 5th of 19 in the publish order, so the four crates ahead of it (pounce-common/-linalg/-linsol/-feral) are already irreversibly published when it fails | **FIXED** | **Bug confirmed by running code**: with a deliberate type error appended to `crates/pounce-hsl/src/lib.rs`, the current CI build command `cargo build --workspace --exclude pounce-hsl` finished green (exit 0) — the error was completely invisible to CI. Root-caused the exclusion: `pounce-hsl/Cargo.toml` has `links = "coinhsl"` + a `build.rs`, but `build.rs` degrades gracefully when `COINHSL_DIR` is unset (emits a warning and returns, compiling a plain rlib with no link directives), so the crate *type-checks* fine without HSL — only *linking* (build/test of a final artifact) needs the library. **Fix**: add a `cargo check -p pounce-hsl --all-targets --verbose` step to the `test` job (after Test). `cargo check` type-checks without linking; `--all-targets` also covers the test modules (which the excluded test job never compiles either). Verified: against the injected error this step fails with `E0308` (exit 101) — catching exactly what the build step missed; with the error reverted it passes (exit 0), COINHSL_DIR unset, emitting only the benign warning. The publish list position (5/19) and the four-crates-ahead claim were confirmed from `scripts/publish-crates.sh`. **Test/verification**: the fail-first demonstration is the injected-error A/B above (current CI build green vs new check exit 101); the live repo `cargo check -p pounce-hsl --all-targets` is clean; `ci.yml` parses and the new step is present in the `test` job. CI-only change; no crate source touched (the temporary error was restored via `cp`+`touch`). See `## M39 detail`. |
 | L1 | algorithm: the final iterate is never convergence-tested at the `max_iter` boundary. `IpoptAlgorithm::optimize`'s main loop (`crates/pounce-algorithm/src/ipopt_alg.rs:1651-1656`) increments `iter_count` and breaks with `Maximum_Iterations_Exceeded` *before* calling `iterate()` again, so the convergence check never runs on the iterate produced by the final permitted step. A solve converging on exactly the `max_iter`-th iterate reports `Maximum_Iterations_Exceeded` where upstream Ipopt — whose `CheckConvergence` runs at the top of the loop, convergence-first — reports success; the `MaxIterExceeded` branch in `conv_check/opt_error.rs:233` is consequently dead (`data.iter_count` can never reach `max_iter`) | **FIXED** | **Bug confirmed by running code**: HS071 converges to `Solve_Succeeded` at `iter=8` with a generous budget; re-solving with `max_iter=8` reported `MaximumIterationsExceeded` at `iter=7` — the loop broke before the converged 8th iterate was ever tested. **Root cause**: the outer loop carried its own `if iter_count >= self.max_iter { break MaxiterExceeded }` that short-circuited *before* the next `iterate()` call, while the real convergence test (component tolerances **then** the `iter >= max_iter` gate) lives inside `iterate()` → `check_convergence_with_state`. Because the break fired first, `data.iter_count` topped out at `max_iter - 1`, so the in-`iterate()` `MaxIterExceeded` branch (`opt_error.rs:233`) never executed. **Fix**: drop the premature break — bump the counter and loop, letting the next `iterate()` run its convergence check. Termination is still guaranteed: once `iter_count` reaches `max_iter`, `check_convergence_with_state` returns `Converged`/`ConvergedToAcceptable` or `MaxIterExceeded`, never `Continue`. This matches upstream's top-of-loop, convergence-first ordering and takes the same number of steps (`max_iter`), adding only the missing final-iterate check. **Test** (`crates/pounce-algorithm/tests/optimize_hs71.rs::hs071_converges_exactly_at_max_iter_boundary`): finds HS071's natural convergence iteration `k`, re-solves with `max_iter=k`, asserts success + objective ≈ 17.014017. **Fail-first confirmed**: pre-fix the test fails with `MaximumIterationsExceeded (max_iter = 8)`; post-fix all 16 `optimize_hs71` tests pass and the full pounce-algorithm suite is green (lib 245 + all integration tests, 0 failures). See `## L1 detail`. |
 | L2 | algorithm: claim that the tiny-step *dual* test (`crates/pounce-algorithm/src/ipopt_alg.rs:1041-1042`) is absolute where upstream Ipopt is relative (`1/(1+‖y‖∞)` scaling), unlike the primal half (`detect_tiny_step`, 1152-1172), causing `STOP_AT_TINY_STEP` to under-fire on large-multiplier problems | **NOT A BUG** (premise refuted by upstream source) | **Premise checked against the actual upstream source and found false.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpBacktrackingLineSearch.cpp`: it sets `tiny_step_last_iteration_` via `Number delta_y_norm = Max(IpData().delta()->y_c()->Amax(), IpData().delta()->y_d()->Amax()); if (delta_y_norm < tiny_step_y_tol_) { ... }` — a **direct absolute comparison, no `1/(1+‖y‖∞)` scaling**. pounce's `let dy_amax = delta.y_c.amax().max(delta.y_d.amax()); self.tiny_step_last_iteration = dy_amax < self.tiny_step_y_tol;` is an exact, faithful port. The primal/dual asymmetry the review flags (primal relative per-component `|δxᵢ|/(1+|xᵢ|)`, dual absolute) is **present in upstream** and intentional — confirmed independently by the option help text for `tiny_step_y_tol`: *"the step in the y variables is smaller than this threshold"* (absolute), versus `tiny_step_tol`'s *"in relative terms for each component"* (primal). **No code change, no regression test**: the alleged bug does not exist; changing 1041-1042 to a relative form would *introduce* a divergence from upstream, not remove one. Recorded per the "document issues that cannot be verified" rule — here the issue is verifiable and refuted. See `## L2 detail`. |
+| L3 | algorithm: the probing μ-oracle hard-codes its centering cap `sigma_max = 100.0` (`crates/pounce-algorithm/src/mu/adaptive.rs:685-691`) instead of forwarding the user-set `sigma_max` option, so a user-set `sigma_max` reaches only the quality-function oracle — unlike upstream, where the probing oracle reads the same option | **FIXED** | **Bug confirmed by running code + upstream source.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpProbingMuOracle.cpp`: it reads `options.GetNumericValue("sigma_max", sigma_max_, prefix)` in `InitializeImpl` and caps `sigma = Min(sigma, sigma_max_)` — so the probing oracle **is** user-configurable upstream (the registered option help saying "Only used if mu_oracle is quality-function" is itself slightly inaccurate; behavior is what matters). pounce's adaptive free-mode update constructed `ProbingMuOracle { sigma_max: 100.0, … }` (hard-coded), while the quality-function branch correctly forwarded `self.sigma_max` (`adaptive.rs:705`). **Reproduced**: solving HS071 with `mu_strategy=adaptive`, `mu_oracle=probing` took **10** iterations at the default `sigma_max=100` *and* at `sigma_max=1e-6` — byte-identical, i.e. the user value was ignored. **Fix**: forward `self.sigma_max` (one line, `adaptive.rs:686`), matching upstream; updated the field doc-comment (104-108) to note it now also feeds the probing oracle. The registered option help string is left verbatim (it is upstream's). **Test** (`crates/pounce-algorithm/tests/optimize_hs71.rs::hs071_probing_oracle_honors_user_sigma_max`): solves HS071 via the probing oracle at default `sigma_max` vs `sigma_max=1e-6` and asserts the iteration counts differ. **Fail-first confirmed**: pre-fix both runs take 10 iters → `assert_ne!` fails ("both runs took 10 iters"); post-fix default=10 vs 1e-6=8 (both still `Solve_Succeeded`), so the option now reshapes the μ trajectory. Full pounce-algorithm suite green (lib 245 + all integration, `optimize_hs71` now 17, 0 failures). See `## L3 detail`. |
 
 ## C1 detail
 
@@ -3154,3 +3155,57 @@ source.**
   true, a fail-first test would have constructed a large-‖y‖ iterate at a tiny
   primal step and asserted the `'T'`/`tiny_step_flag` path fires; that test is
   intentionally omitted because the behavior it would assert is *wrong*.)
+
+## L3 detail
+
+- **Bug**: in the adaptive μ-update's free-mode oracle dispatch
+  (`mu/adaptive.rs`), the `MuOracleKind::Probing` arm built its oracle with a
+  hard-coded cap:
+  ```rust
+  let mut oracle = ProbingMuOracle {
+      sigma_max: 100.0,            // <-- ignores the user-set option
+      mu_min: self.mu_min,
+      ...
+  };
+  ```
+  while the sibling `MuOracleKind::QualityFunction` arm forwarded
+  `oracle.sigma_max = self.sigma_max;`. The probing oracle caps its centering
+  parameter as `sigma = min((mu_aff/mu_curr)^3, sigma_max)`
+  (`mu/oracle/probing.rs`), so the hard-coded 100 silently overrode any
+  user-set `sigma_max` whenever `mu_oracle=probing`.
+
+- **Upstream check** (the L2 lesson — verify, don't assume): fetched
+  `coin-or/Ipopt` `stable/3.14`, `src/Algorithm/IpProbingMuOracle.cpp`. Its
+  `InitializeImpl` does `options.GetNumericValue("sigma_max", sigma_max_,
+  prefix);` and the μ computation does `sigma = Min(sigma, sigma_max_);`. So
+  upstream's probing oracle **does** honor the user-set `sigma_max`. (The
+  option's registered help text — `upstream_options.rs:742`, copied verbatim
+  from upstream — claims it is "Only used if option mu_oracle is set to
+  quality-function"; that text is inaccurate even in upstream, since
+  `IpProbingMuOracle.cpp` reads it too. Behavior, not the help string, is the
+  source of truth, so the fix matches upstream behavior and leaves the help
+  string verbatim.)
+
+- **Reproduced by running code**: HS071 with `mu_strategy=adaptive`,
+  `mu_oracle=probing` solved in **10** iterations at the default
+  `sigma_max=100` and in **10** iterations at `sigma_max=1e-6` — identical,
+  proving the user value never reached the probing oracle.
+
+- **Fix**: forward the option —
+  ```rust
+  sigma_max: self.sigma_max,
+  ```
+  (`adaptive.rs`, with an explanatory comment citing the upstream source) and
+  refresh the `sigma_max` field doc-comment to note it now feeds both the
+  quality-function and probing oracles. One-line behavioral change; the QF
+  branch already did this, so the two arms are now symmetric.
+
+- **Test**:
+  `optimize_hs71.rs::hs071_probing_oracle_honors_user_sigma_max` runs HS071
+  through the probing oracle twice — at the default `sigma_max` and at
+  `sigma_max=1e-6` — and asserts the iteration counts differ (a tiny cap pins
+  the centering parameter and reshapes the μ trajectory). Fail-first: pre-fix
+  both runs take 10 iters and `assert_ne!` fires; post-fix default=10 vs
+  1e-6=8, both still `Solve_Succeeded`. The full `pounce-algorithm` suite stays
+  green (lib 245 + every integration test; `optimize_hs71` now 17 tests; 0
+  failures), confirming the probing-path change is regression-free.

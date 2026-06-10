@@ -764,6 +764,55 @@ fn hs071_converges_exactly_at_max_iter_boundary() {
     );
 }
 
+/// Regression test for L3: the probing μ-oracle must honor the user-set
+/// `sigma_max` option. Upstream Ipopt's `IpProbingMuOracle.cpp` reads it
+/// (`options.GetNumericValue("sigma_max", sigma_max_, prefix)`) and caps the
+/// centering parameter with it (`sigma = Min(sigma, sigma_max_)`). pounce's
+/// adaptive free-mode update hard-coded `sigma_max = 100.0` in the probing
+/// branch (`mu/adaptive.rs`), so a user-set `sigma_max` reached only the
+/// quality-function oracle. With probing selected, pinning `sigma` at a tiny
+/// cap forces a very different μ trajectory; before the fix the option was
+/// silently ignored, so the cap had no effect at all.
+#[test]
+fn hs071_probing_oracle_honors_user_sigma_max() {
+    let solve = |sigma_max: Option<Number>| {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("mu_strategy", "adaptive", true, false)
+            .unwrap();
+        app.options_mut()
+            .set_string_value("mu_oracle", "probing", true, false)
+            .unwrap();
+        if let Some(s) = sigma_max {
+            app.options_mut()
+                .set_numeric_value("sigma_max", s, true, false)
+                .unwrap();
+        }
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+        let status = app.optimize_tnlp(Rc::clone(&tnlp));
+        (status, app.statistics().iteration_count)
+    };
+
+    // Default sigma_max is 100; the probing cap rarely binds there.
+    let (status_default, iters_default) = solve(None);
+    // A tiny cap pins the centering parameter and reshapes the μ trajectory.
+    let (status_tiny, iters_tiny) = solve(Some(1e-6));
+
+    eprintln!(
+        "HS71 probing sigma_max: default(iters={iters_default}, {status_default:?}) \
+         vs 1e-6(iters={iters_tiny}, {status_tiny:?})",
+    );
+
+    // Before the fix the probing oracle ignored `sigma_max` (hard-coded 100),
+    // so both runs followed an identical μ trajectory and took the same number
+    // of iterations. Honoring the option must change the trajectory.
+    assert_ne!(
+        iters_default, iters_tiny,
+        "probing oracle ignored user-set sigma_max: both runs took {iters_default} iters",
+    );
+}
+
 #[test]
 fn warm_start_options_flow_through_builder() {
     let mut app = IpoptApplication::new();
