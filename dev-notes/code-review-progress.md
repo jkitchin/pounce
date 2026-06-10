@@ -17,6 +17,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H6 | qp: `select_blocker` EXPAND branch can panic (`best.expect`) on valid near-degenerate input | **FIXED** | The Harris two-pass admitted nothing in Pass 2 when every candidate's τ-relaxed ratio `r + τ/\|a·p\|` exceeded the artificial `α_min_relaxed = 1.0` init cap by more than `tol` (reachable when `\|a·p\| ≈ feas_tol` inflates `τ/\|a·p\|`). `best` stayed `None` → `expect` panicked. Now falls back to the strict minimum-ratio blocker (always exists since `α_min < 1.0`) and steps exactly `α_min`. Tests `expand_tau_inflation_falls_back_to_strict_min_no_panic` + 2 more in `solver::select_blocker_tests`. |
 | H7 | convex: dual-infeasibility certificate validates recession `Gd` componentwise — false `DualInfeasible` on SOC/PSD | **FIXED** | `detect_infeasibility_with` gained a `primal_recession_ok` closure: the dual-inf branch now checks `−Gd ∈ K` (orthant ⇒ componentwise `Gd ≤ 0`; SOC/PSD ⇒ `cone.in_dual_cone(−Gd)`, valid since the composite cone is self-dual) instead of `gd_max ≤ tol`. A direction with `Gd ≤ 0` but `−Gd ∉ K` (e.g. `−Gd=(0.1,0.5) ∉ SOC`) no longer yields a bogus unboundedness proof. Tests `soc_recession_not_in_cone_is_not_dual_infeasible` + 2 in `ipm::detect_infeasibility_tests`. |
 | H8 | convex: non-symmetric HSDE driver validates Farkas/recession certs with the orthant test — wrong in both directions for exp/power | **FIXED** | `hsde_nonsym.rs:840` now calls `detect_infeasibility_nscone` (new helper) instead of the componentwise `detect_infeasibility`. Added `NsCone::in_dual_cone`/`in_primal_cone` (per-block dispatch; exp/power use their `BarrierCone` tests). The dual exp cone requires `u < 0`, so componentwise `z ≥ 0` both **rejected** genuine exp Farkas certs (→ `IterationLimit`) and **accepted** all-nonnegative `z ∉ K_exp*` (false `PrimalInfeasible`); both fixed. `detect_infeasibility_with` made `pub(crate)`; the plain componentwise `detect_infeasibility` is now test/docs-only. Tests `exp_farkas_certificate_rejected_componentwise_accepted_cone_aware`, `nonneg_z_not_in_dual_exp_cone_is_false_positive_componentwise`, `nscone_exp_membership_disagrees_with_componentwise`. |
+| H9 | convex: `presolve_conic` protects only `SecondOrder` rows — unsound reductions / wrong `Infeasible` for PSD/exp/power rows | **FIXED** | Two layers fixed. (1) `presolve_conic` now protects **every** non-`Nonneg` cone block (`!matches!(spec, ConeSpec::Nonneg(_))`), not just `SecondOrder`. (2) The deeper bug: `build_rows` independently collapsed empty rows — a post-substitution empty cone row with `h<0` returned `Err`→`Infeasible`, and a feasible empty cone row (`h≥0`) was silently dropped, desyncing `reduced_cones`. `build_rows` now takes a `protected` mask and keeps coupled cone rows verbatim (the `0·x ≤ h` slack `s=h` is legal — e.g. `(−1,1,5) ∈ K_exp`); `pivot_divisor` guards empty rows. Tests `exp_cone_empty_row_negative_h_is_not_infeasible`, `exp_cone_activity_redundant_row_not_dropped` in `tests/presolve_conic.rs`. |
 
 ## C1 detail
 
@@ -338,3 +339,42 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   path (the literal pre-fix line-840 call) returning the wrong status while the
   new cone-aware path returns the correct one. Full `pounce-convex` suite green
   (103 lib + integration); no warnings.
+
+## H9 detail
+
+- **Bug**: `presolve_conic` (`presolve.rs:388`) built its `soc_row` protection
+  mask only for `ConeSpec::SecondOrder` blocks. Exp/power/PSD cone rows were
+  therefore treated as plain orthant `≤` rows by the reduction catalog, which
+  is unsound: a non-orthant cone row is coupled to its block, its `h<0` is
+  legal (e.g. `(−1,1,5) ∈ K_exp` since `1·e^{−1}≈0.37 ≤ 5`), and dropping any
+  one row of a fixed-layout block (3-row exp/power, `svec` PSD) corrupts the
+  layout AND desyncs `reduced_cones`, which assumes non-orthant blocks keep
+  full dimension.
+- **Two layers**:
+  1. `presolve_conic` now marks **every** non-`Nonneg` block:
+     `if !matches!(spec, ConeSpec::Nonneg(_))` (was `matches!(.., SecondOrder)`).
+     Variable renamed `soc_row` → `protected_row`. This guards the in-pass
+     reductions (`is_soc_row` at the empty-row, activity-drop, forcing, and
+     bound-tightening sites) for all cone rows.
+  2. The masking at step 1 alone was **insufficient** — the post-substitution
+     row builder `build_rows` collapsed empty rows independently of the mask:
+     an empty cone row with `h<0` returned `Err(())` → `Infeasible`
+     (`presolve.rs:1205`), and a feasible empty cone row (`h≥0`) was silently
+     `continue`-dropped (desyncing `reduced_cones`). `build_rows` now takes a
+     `protected: &[bool]` mask (the ineq call passes `soc_row`, the eq call
+     `&[]`) and pushes protected empty rows verbatim — the `0·x ≤ h` row is the
+     cone slack `s = h`, not an orthant feasibility check. `pivot_divisor`
+     guards `coeffs.first()` so an empty protected row can't panic the
+     parallel-row normalization (it's excluded from dedup grouping anyway).
+- **Tests** (`tests/presolve_conic.rs`):
+  `exp_cone_empty_row_negative_h_is_not_infeasible` — `n=1`, empty `G`,
+  `h=(−1,1,5)`, `cones=[Exponential]`: pre-fix returned bogus `Infeasible`;
+  post-fix `Reduced` with all 3 rows kept and `reduced_cones==[Exponential]`.
+  `exp_cone_activity_redundant_row_not_dropped` — row 0 `−x0 ≤ 10` with
+  `x0∈[0,1]` (max-activity `0 ≤ 10`, the orthant rule would drop it): pre-fix
+  dropped rows to leave 1; post-fix keeps all 3.
+- **Verified by running code**: both tests FAILED pre-fix exactly as predicted
+  (test1 panicked on the bogus `Infeasible`; test2 `left:1 right:3`) and PASS
+  post-fix. The step-1 mask fix alone left both still failing (`left:1`), which
+  is what surfaced the deeper `build_rows` layer. Full `pounce-convex` suite
+  green (103 lib + integration); `cargo fmt --check` clean.
