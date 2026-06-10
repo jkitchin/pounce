@@ -37,6 +37,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M11 | CLI QP extraction drops constraint terms folded into the nonlinear tree | **FIXED** | **Mechanism confirmed + reproduced by a failing test.** `extract_qp_with_map` (`crates/pounce-cli/src/qp_extract.rs`) built `A`/`G` from `prob.con_linear` **only**, ignoring `prob.con_nonlinear[row]`. But the classifier deliberately admits constraint rows whose nonlinear expression reduces to degree ≤ 1 (`dispatch.rs`), and AMPL/Pyomo fold a row's linear+constant terms into that nonlinear tree (cancelled quadratics, defined variables) — exactly as the *objective* path already handles via `analyze_quadratic_full` (`qp_extract.rs:80,98`) and as the **SOCP** extractor handles for constraints (`qp_extract.rs:355-396`, `nl_lin` + `const_shift`). So an LP/convex-QP with linear/constant terms inside a constraint's nonlinear tree got silently wrong constraints on the convex path: the folded coefficients vanished and the folded constant never shifted the bound. **Fix**: in the QP constraint loop, run `analyze_quadratic_full(&prob.con_nonlinear[row], n)` (empty Hessian for these linear rows), add the recovered `nl_lin` to the row coefficients, and shift the bound by the folded constant (`g_l−k ≤ row ≤ g_u−k`) — mirroring the SOCP path verbatim, including the `nonzeros()` filter so all-zero rows are not emitted. `con_nonlinear` is always parallel to `con_linear` (both length `m`, initialized to `Expr::Const(0.0)` per row at parse, `nl_reader.rs:295`), so the index is safe. **Test** (`qp_extract::tests::constraint_linear_terms_folded_in_tree_are_recovered`): `min x0 s.t. x0−3 ≥ 0` with the whole `x0−3` body in `con_nonlinear[0]` and `con_linear[0]` empty; asserts the solve is `Optimal` at `x0 = 3` and the recovered dual is finite. **Pre-fix the test FAILS** (`assert_eq!(sol.status, Optimal)` — the dropped constraint leaves a vacuous `0 ≤ 0` row and `min x0` is unbounded), confirmed by temporarily forcing the `nl_lin`/`const_shift` to `Default::default()` via an `if false` guard; post-fix it solves to `x0 = 3`. Full `pounce-cli` suite green (155 lib + all integration, 0 failed). See `## M11 detail`. |
 | M12 | `DivergingIterates` mapped to AMPL code 401 ("limit") instead of the 300 ("unbounded") range | **FIXED** | **Mechanism confirmed + reproduced by a failing test.** `status_to_solve_result_num` (`crates/pounce-solve-report/src/lib.rs:453`) mapped `ApplicationReturnStatus::DivergingIterates → 401`. `DivergingIterates` is Ipopt's **unboundedness** signal (the iterates run off to infinity), so per the AMPL `solve_result_num` convention (300–399 = unbounded; 400–499 = limit) it belongs in the 300 range. This was internally inconsistent: the CLI's convex path maps the *same* unbounded condition (`QpStatus::DualInfeasible`) to **300** in its own numeric mapping (`main.rs:1276,1425`, with the range documented at `main.rs:1271-1272`), yet routes the NLP-side `DualInfeasible → DivergingIterates` (`main.rs:1165`) which then went through the 401 mapping — so the same physical outcome reported 300 on the convex path and 401 on the NLP path. Also matches upstream Ipopt's ASL driver (Diverging_Iterates → 300). **Fix**: one-line mapping change `DivergingIterates => 300`; the doc comment is extended to document the 300 "unbounded" bucket and why `DivergingIterates` lives there (not a 400 limit). **Test** (`tests::diverging_iterates_maps_to_unbounded_range`): asserts `DivergingIterates → 300`, and pins the surrounding buckets (`SolveSucceeded → 0`, `InfeasibleProblemDetected → 200`, `MaximumIterationsExceeded`/`SearchDirectionBecomesTooSmall → 400`, `RestorationFailed → 500`) so the range convention can't silently drift. **Pre-fix the test FAILS** (`left: 401, right: 300`), confirmed by reverting the mapping to `401`. No test anywhere hard-coded the old `401` (grep confirmed). `pounce-solve-report` (7) and `pounce-cli` suites green. See `## M12 detail`. |
 | M13 | NLP-path presolve: `.sol` / JSON dual block carries the reduced kept-row count, not the original `.nl` `m` | **FIXED** | **Mechanism confirmed + reproduced end-to-end.** With `presolve=yes` on the general-NLP route, `PresolveTnlp` drops redundant rows and the solver works in a reduced (`m_out`) row space. The CLI captures the converged duals from **outside** that wrapper — the IPM `on_converged` hook (`main.rs:612`, via `pack_lambda_for_user`) and the active-set `CountingTnlp` fallback (`main.rs:950`) both see the reduced solution — so the `.sol` / JSON dual block had length `m_out`, shorter than the originating `.nl`'s `m`. AMPL/Pyomo read the dual block **positionally** against the `.nl`, so a short block mis-aligns or is rejected. **Reproduced** by running `lp_afiro.nl solver_selection=nlp presolve=yes` (drops 4 of 27 rows): pre-fix `.sol`/JSON `lambda` length was **23**, vs **27** for the `presolve=no` baseline; `dual_order.nl` (drops both rows) emitted a **zero-length** dual block. **Fix** (reuses existing machinery, no new dual math): `PresolveTnlp::finalize_solution` *already* lifts the duals back to the original row order with dropped-row multiplier recovery (the Phase-0 `recover_dropped_multipliers` path) before forwarding to the inner TNLP — it just wasn't surfaced. Added a `finalized_full_solution: Option<(Vec<Number>,Vec<Number>)>` capture on `PresolveTnlp` (stored at finalize, exposed via a getter); the CLI, when presolve dropped rows, swaps that full-length `lambda` into `nominal_capture` before the `.sol`/JSON writers run. Also: the `.sol` zero-fallback block and the JSON `problem.n_constraints` are now sized to the original `m` (`m_out + n_dropped_rows`), restoring the documented `lambda.len() == n_constraints` invariant. **Dropped-row duals**: redundant rows recover to a *valid alternative* certificate — exactly baseline for genuinely-slack rows (active-row duals match `lp_afiro` baseline tightly), and 0 where bound-tightening migrated the dual to a bound multiplier (e.g. `dual_order`); both satisfy KKT. The fix targets the **length/alignment** defect M13 names. **Test** (`tests/presolve_dual_length.rs::presolve_dual_block_keeps_original_nl_length`): runs `lp_afiro` through the NLP path with `presolve=no` then `=yes`, guards that presolve genuinely drops rows (parses the stdout summary), and asserts the presolved `lambda` length equals the baseline `m` **and** the reported `n_constraints`. **Pre-fix the test FAILS** (`presolve dual block length 23 != original .nl m 27`), confirmed by neutering the lambda swap with an `if false` guard. Mitigated in practice by presolve defaulting off. `pounce-presolve` (207 lib + 9 doc) and full `pounce-cli` (155 lib + all integration, 0 failed) suites green. See `## M13 detail`. |
+| M14 | Any `--minima` tuning knob (`--seed`, `--patience`, `--dedup`, `--sobol`, …) silently switches the whole run into multistart mode | **FIXED** | **Mechanism confirmed + reproduced.** The `minima_num!` macro and the `--sobol`/`--no-sobol` arms in the CLI parser call `minima.get_or_insert_with(MinimaArgs::default)` to stash the knob value, which materializes `Some(MinimaArgs { method: Deflation, .. })` — and `main.rs:420` reroutes the *entire* run through multistart on any `Some(minima)`. So a lone tuning knob with no `--minima <method>`/`--multistart` silently enables global search (different output, `.sol` with zero duals). Help text says only `--minima`/`--multistart` enable it. **Reproduced**: `lp_afiro.nl --seed 42` (no method flag) prints `Searching for up to 10 minima via \`deflation\`…`. **Fix**: track an explicit-method flag (`minima_method_explicit`, set *only* by `--minima`/`--multistart`) and the first knob seen (`minima_knob`); after parsing, if a knob was given without an explicit method, return a clear error instead of silently entering multistart. **Verified post-fix**: lone `--seed 42` now errors `--seed is a --minima tuning knob and has no effect on its own; enable global search with --minima <method> or --multistart`; `--multistart --seed 42` still parses (method=Multistart, seed=42). **Test** (`cli::tests::lone_minima_knob_without_method_is_rejected` + `minima_knob_with_explicit_method_is_accepted`): the first asserts lone `--seed 42` and lone `--no-sobol` error and that the message names both the knob and `--minima`; the second asserts `--seed 7 --multistart` parses (order-independent) to method=Multistart, seed=7. **Pre-fix the rejection test FAILS** (lone `--seed 42` parses to `Some(MinimaArgs{method:Deflation,seed:42})`), confirmed by neutering the guard to `if false && !minima_method_explicit`. **Non-breaking**: every existing multistart test pairs its knobs with an explicit method. Full `pounce-cli` green (157 lib + all integration, 0 failed). See `## M14 detail`. |
 
 ## C1 detail
 
@@ -1420,3 +1421,55 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 - **Result**: `pounce-presolve` green (207 lib + 9 doc, 0 failed); full
   `pounce-cli` green (155 lib + all integration incl. the new test, 0
   failed).
+
+## M14 detail
+
+- **Issue**: any `--minima` tuning knob (`--seed`, `--patience`, `--dedup`,
+  `--sobol`/`--no-sobol`, …) silently switches the whole run into multistart
+  mode, even with no `--minima <method>` or `--multistart`. The help text
+  advertises that only `--minima`/`--multistart` enable global search.
+- **Mechanism** (`crates/pounce-cli/src/cli.rs`): the `minima_num!` macro and
+  the `--sobol`/`--no-sobol` arms persist their value with
+  `minima.get_or_insert_with(MinimaArgs::default)`. That insert materializes
+  `Some(MinimaArgs { method: Deflation, .. })`. `main.rs:420` then reroutes the
+  entire run through `pounce_cli::minima::run(...)` on *any* `Some(minima)`, so
+  the lone knob silently enables global search — different console output and a
+  `.sol` written with zero duals.
+- **Reproduced**: `pounce lp_afiro.nl --seed 42` (no method flag) prints
+  `Searching for up to 10 minima via \`deflation\`…`, i.e. it entered
+  multistart purely from `--seed`.
+- **Fix**: introduce two parser-local flags —
+  - `minima_method_explicit` (bool), set *only* by the `--minima` and
+    `--multistart` arms, and
+  - `minima_knob: Option<&'static str>`, the first tuning knob seen (recorded
+    in the `minima_num!` macro and the `--sobol`/`--no-sobol` arms).
+  After parsing, in the `if !help && !version && !about && !cite` block, before
+  the problem is required:
+  ```rust
+  if let Some(knob) = minima_knob {
+      if !minima_method_explicit {
+          return Err(format!(
+              "{knob} is a --minima tuning knob and has no effect on its own; \
+               enable global search with --minima <method> or --multistart"
+          ));
+      }
+  }
+  ```
+- **Verified post-fix**: lone `--seed 42` now errors
+  `--seed is a --minima tuning knob and has no effect on its own; enable
+  global search with --minima <method> or --multistart`; `--multistart --seed 42`
+  still parses (method=Multistart, seed=42) and `Searching … via \`multistart\``.
+- **Tests** (`crates/pounce-cli/src/cli.rs`, `mod tests`):
+  - `lone_minima_knob_without_method_is_rejected` — lone `--seed 42` and lone
+    `--no-sobol` each error; the message names both the offending knob and
+    `--minima`.
+  - `minima_knob_with_explicit_method_is_accepted` — `--seed 7 --multistart`
+    parses (order-independent) to `method = Multistart`, `seed = 7`.
+- **Fail-first**: neutering the guard to `if false && !minima_method_explicit`
+  makes the rejection test fail (lone `--seed 42` parses to
+  `Some(MinimaArgs { method: Deflation, seed: 42 })`); restoring it passes.
+- **Non-breaking**: every existing multistart test
+  (`minima_method_and_shared_knobs`, `minima_strategy_knobs_are_optional_and_parsed`,
+  `issue_103_mlsl_terminates`) pairs its knobs with an explicit method, so the
+  new guard never trips on them.
+- **Result**: full `pounce-cli` green (157 lib + all integration, 0 failed).

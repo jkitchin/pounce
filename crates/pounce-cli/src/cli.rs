@@ -413,6 +413,14 @@ Multistart / find-minima (search for several local minima, not one):
         let mut debug_on_interrupt = false;
         let mut debug_script: Option<PathBuf> = None;
         let mut minima: Option<MinimaArgs> = None;
+        // Global search is enabled ONLY by an explicit method selector
+        // (`--minima <m>` / `--multistart`). The tuning knobs below
+        // (`--seed`, `--patience`, …) populate the config but must not, on
+        // their own, switch the run into multistart mode — track whether a
+        // method was explicitly chosen and which lone knob (if any) was seen
+        // so we can reject a knob-without-method invocation after parsing.
+        let mut minima_method_explicit = false;
+        let mut minima_knob: Option<&'static str> = None;
 
         let mut it = argv.into_iter().skip(1).peekable();
         // Shorthand: fetch the value for a flag that requires one.
@@ -429,11 +437,17 @@ Multistart / find-minima (search for several local minima, not one):
                 let v = flag_val!($flag);
                 let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
                 minima.get_or_insert_with(MinimaArgs::default).$field = parsed;
+                if minima_knob.is_none() {
+                    minima_knob = Some($flag);
+                }
             }};
             ($flag:expr, $ty:ty, $field:ident, opt) => {{
                 let v = flag_val!($flag);
                 let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
                 minima.get_or_insert_with(MinimaArgs::default).$field = Some(parsed);
+                if minima_knob.is_none() {
+                    minima_knob = Some($flag);
+                }
             }};
         }
         while let Some(arg) = it.next() {
@@ -546,10 +560,12 @@ Multistart / find-minima (search for several local minima, not one):
                     let v = flag_val!("--minima");
                     let method = MinimaMethod::parse(&v)?;
                     minima.get_or_insert_with(MinimaArgs::default).method = method;
+                    minima_method_explicit = true;
                 }
                 "--multistart" => {
                     minima.get_or_insert_with(MinimaArgs::default).method =
                         MinimaMethod::Multistart;
+                    minima_method_explicit = true;
                 }
                 "--n-minima" => minima_num!("--n-minima", usize, n_minima),
                 "--max-solves" => minima_num!("--max-solves", usize, max_solves, opt),
@@ -559,9 +575,15 @@ Multistart / find-minima (search for several local minima, not one):
                 "--seed" => minima_num!("--seed", u64, seed),
                 "--sobol" => {
                     minima.get_or_insert_with(MinimaArgs::default).sobol = true;
+                    if minima_knob.is_none() {
+                        minima_knob = Some("--sobol");
+                    }
                 }
                 "--no-sobol" => {
                     minima.get_or_insert_with(MinimaArgs::default).sobol = false;
+                    if minima_knob.is_none() {
+                        minima_knob = Some("--no-sobol");
+                    }
                 }
                 "--sigma" => minima_num!("--sigma", f64, sigma, opt),
                 "--sigma-frac" => minima_num!("--sigma-frac", f64, sigma_frac, opt),
@@ -612,6 +634,19 @@ Multistart / find-minima (search for several local minima, not one):
         }
 
         if !help && !version && !about && !cite {
+            // A `--minima` *tuning* knob on its own used to lazily create a
+            // config and silently reroute the whole run into multistart
+            // (deflation) mode — different console output and a dual-free
+            // `.sol`. Global search must be opted into explicitly; reject a
+            // lone knob with a message pointing at the method selectors.
+            if let Some(knob) = minima_knob {
+                if !minima_method_explicit {
+                    return Err(format!(
+                        "{knob} is a --minima tuning knob and has no effect on its own; \
+                         enable global search with --minima <method> or --multistart"
+                    ));
+                }
+            }
             let problem = problem.ok_or_else(|| {
                 "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string()
             })?;
@@ -1044,6 +1079,37 @@ mod tests {
     #[test]
     fn minima_unknown_method_errors() {
         assert!(Args::parse_argv(argv(&["/tmp/foo.nl", "--minima", "nope"])).is_err());
+    }
+
+    /// Code-review 2026-06 item M14: a `--minima` tuning knob (`--seed`,
+    /// `--patience`, `--no-sobol`, …) on its own used to lazily build a
+    /// `MinimaArgs` and silently reroute the whole run into multistart
+    /// (deflation) mode. It must now be rejected with a message pointing
+    /// at the method selectors.
+    #[test]
+    fn lone_minima_knob_without_method_is_rejected() {
+        let err = Args::parse_argv(argv(&["/tmp/foo.nl", "--seed", "42"]))
+            .expect_err("lone --seed should be rejected");
+        assert!(
+            err.contains("--seed") && err.contains("--minima"),
+            "error should name the knob and the method selectors; got: {err}"
+        );
+        // A no-value knob (`--no-sobol`) is rejected the same way.
+        let err2 = Args::parse_argv(argv(&["/tmp/foo.nl", "--no-sobol"]))
+            .expect_err("lone --no-sobol should be rejected");
+        assert!(err2.contains("--no-sobol"), "got: {err2}");
+        // And a lone knob does NOT leave the run in minima mode.
+        assert!(Args::parse_argv(argv(&["/tmp/foo.nl", "--seed", "42"])).is_err());
+    }
+
+    /// The same knob is accepted once global search is explicitly enabled,
+    /// regardless of flag order (knob before the method selector).
+    #[test]
+    fn minima_knob_with_explicit_method_is_accepted() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--seed", "7", "--multistart"])).unwrap();
+        let m = a.minima.expect("minima parsed");
+        assert_eq!(m.method, MinimaMethod::Multistart);
+        assert_eq!(m.seed, 7);
     }
 
     #[test]
