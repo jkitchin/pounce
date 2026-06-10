@@ -84,6 +84,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L19 | restoration: `min_c_1nrm` LSM branch mutates `data.curr` without restoring it only on the non-default `constr_mult_reset_threshold > 0` path (`min_c_1nrm.rs:397-407`) — a divergence trap between option settings | **FIXED** | **Bug confirmed by reading + running code (pounce port of `IpRestoMinC_1Nrm`).** In `recover`'s least-square-multiplier (LSM) block, the non-default `constr_mult_reset_threshold > 0` path sets `data.curr = recovered` (the just-staged trial container) so `EqMultCalculator::calculate_y_eq` evaluates ∇f/J_c/J_d at the recovered iterate — but it **never restored `curr`**, so this path returned with `curr` = the recovered iterate while the default (`threshold == 0`) path leaves `curr` untouched. Upstream `DefaultIterateInitializer::least_square_mults` ends with `CopyTrialToCurrent` + `AcceptTrialPoint`, so upstream's `curr` becomes the recovered iterate on *every* path; pounce instead defers that promotion to the caller (`IpoptAlgorithm`'s `Recovered` arm calls `accept_trial_point`, `curr ← trial`), so `recover` must leave `curr` exactly as found or the two option settings diverge mid-cycle — a latent trap for any read of `curr` between `recover`'s return and the caller's promotion (e.g. `adjust_variable_bounds_for_small_slacks`). **Not observable at solver-output level** because the caller unconditionally overwrites `curr` immediately after `Recovered`; the fix is verified directly at the `recover` boundary. **Fix**: snapshot `saved_curr = data.curr.clone()` before the temporary `curr = recovered`, then restore `data.curr = saved_curr` after the LSM step, so both option paths leave `curr` identical on return. **Test** (`min_c_1nrm::tests`): a direct `perform_restoration` fixture (2-var/1-eq/1-ineq `MockNlp` → non-square so the LSM branch is reachable; stub `EqMultCalculator` writing sub-threshold multipliers without touching `cq`/`aug_solver`; synthetic inner-solver hook returning a recovered `trial_x = [10,20]` ≠ `curr.x = [2,3]`) asserts `curr.x` is unchanged after the call on both the `threshold = 10` and `threshold = 0` paths. **Fail-first confirmed** by dropping the restore: `recover_restores_curr_on_constr_mult_reset_path` fails (`curr` leaks `[10,20]` vs expected `[2,3]`) while `recover_leaves_curr_unchanged_on_default_path` stays green. Restored, full pounce-restoration suite green (108 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L19 detail`. |
 | L20 | sensitivity: `IndexSchurData::set_from_flags` returns the wrong error variant (`AlreadyInitialized`) for an out-of-range flag value and leaves partially-populated `idx`/`val` state with `initialized == false` (`schur_data.rs:217`), so a caller retry double-appends rows | **FIXED** | **Bug confirmed by reading + running code (pounce port of `SensIndexSchurData`).** Two coupled defects: (1) an out-of-range flag (anything other than 0/1) returned `Err(SchurDataError::AlreadyInitialized)` — a misleading variant that names an unrelated failure mode; (2) the validation happened *mid-loop*, after earlier `f == 1` entries had already been pushed to `idx`/`val`, and the early return left `initialized == false`, so a caller that caught the error and retried with a corrected flag array would re-run the push loop and **append duplicate rows** on top of the partial state. **Fix**: added a dedicated `SchurDataError::InvalidFlag` variant (doc cites upstream `SensIndexSchurData.cpp:51-78`) and rewrote `set_from_flags` to validate the entire flag array up front (`flags.iter().any(|&f| f != 0 && f != 1)` → `Err(InvalidFlag)`) *before* any mutation — atomic, so a rejected call leaves the instance pristine for retry. **Tests** (`schur_data::tests`): `set_from_flags_rejects_invalid_flag_with_distinct_variant` (flags `[1,0,2,1]` → `Err(InvalidFlag)`, not `AlreadyInitialized`); `set_from_flags_invalid_flag_leaves_instance_pristine_for_retry` (flags `[1,0,5]` → `InvalidFlag`, asserts `!is_initialized()`, `nrows() == 0`, empty `col_indices`; then retry `[1,0,1]` yields `col_indices() == [0,2]` with no duplicate append). **Fail-first confirmed**: against the pre-fix code both new tests fail — the old loop returns `Err(AlreadyInitialized)` for the invalid-flag input and, with the early return removed, leaves `col_indices() == [0,3]` (partial) so the retry double-appends to `[0,3,0,2]`. Restored; full pounce-sensitivity suite green. `cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L20 detail`. |
 | L21 | l1penalty: `L1PenaltyBarrierTnlp::new` discards the `bool` return of `get_starting_point` and `eval_g` with `let _ =` (`wrapper.rs:179-191`), so a failing seed callback silently seeds the `(p, n)` slacks from a zeroed `x_0`/violation instead of returning `None` as documented | **FIXED** | **Bug confirmed by reading + running code (pounce port of ripopt `L1PenaltyBarrierNlp`).** `new`'s doc-contract: "Calls … `get_starting_point`, and `eval_g` … If any of these fail, returns `None`." The code violated it — both calls were `let _ = …`, so a TNLP whose `get_starting_point`/`eval_g` returns `false` would proceed with `x0` left at its `vec![0.0; n]` initialization (and `g0` at zero), seeding every equality slack `(p_k, n_k)` from a bogus zero violation rather than rejecting the wrap. Both methods return `bool` (`pounce-nlp/src/tnlp.rs:175,184`). **Fix**: capture the `get_starting_point` result and `return None` if false; fold the `eval_g` call into `if m > 0 && !…eval_g(…) { return None; }`. Now `new` honors its documented "returns `None` if any of these fail" contract. **Tests** (`wrapper::tests`): a `SeedFails` mock (mirrors `EqOnly` but with `fail_starting_point`/`fail_eval_g` flags) drives `new_returns_none_when_starting_point_fails`, `new_returns_none_when_eval_g_fails`, and a control `new_succeeds_when_seed_callbacks_succeed` (both flags off → `Some`). **Fail-first confirmed**: reverting to `let _ =` makes both `*_returns_none_*` tests fail (`new` returns `Some`) while the control stays green. Restored; full pounce-l1penalty suite green (14 lib). `cargo fmt -p pounce-l1penalty` / `cargo clippy -p pounce-l1penalty --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L21 detail`. |
+| L22 | CLI: the `--cite <model>.nl` "wrong file" hint suggests producing a report with `pounce … --solve-report report.json`, but no `--solve-report` flag exists — `cli.rs` parses only `--json-output` (`main.rs:1700-1711`), so a user following the hint hits "unknown argument" | **FIXED** | **Bug confirmed by reading + running code.** When `--cite` is handed a `.nl` model instead of a solve-report JSON, `run_cite` prints a help hint telling the user to generate a report first. The hint named `--solve-report`, which the CLI arg parser does not accept (grep of `cli.rs` shows the report-output flag is `--json-output` at `cli.rs:520`; `--solve-report` appears nowhere). Following the hint literally produces an unknown-argument error. **Fix**: corrected the hint string (and its preceding comment) to `pounce {} --json-output report.json`. **Test** (`tests/cite_hint_flag.rs`, new integration test using `CARGO_BIN_EXE_pounce`): writes a temp `.nl`-extension file with non-JSON contents, runs `pounce --cite <file>.nl`, and asserts stderr **contains** `--json-output` and **does not contain** `--solve-report`. **Fail-first confirmed**: reverting the hint to `--solve-report` makes the test fail (stderr lacks `--json-output`). `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L22 detail`. |
 
 ## C1 detail
 
@@ -4456,3 +4457,47 @@ flags so the chosen seed callback returns `false`:
 while the control stays green. Restored; full pounce-l1penalty suite green
 (14 lib). `cargo fmt -p pounce-l1penalty` / `cargo clippy -p pounce-l1penalty
 --all-targets -- -D clippy::correctness -D clippy::suspicious` clean.
+
+## L22 detail
+
+**Issue (L22).** Error hint names a nonexistent flag — `main.rs` suggests
+`--solve-report`; the actual flag is `--json-output`.
+
+**Verification.** `run_cite` (`crates/pounce-cli/src/main.rs`) handles
+`pounce --cite <path>`. When `<path>` has a `.nl` extension and fails to parse
+as a `SolveReport` JSON, it prints a help hint assuming the user passed the
+model file by mistake:
+
+```
+pounce: --cite expects a solve-report JSON, not a model file. Run
+`pounce <model>.nl --solve-report report.json` first, then
+`pounce --cite report.json` …
+```
+
+But `--solve-report` is not a CLI flag. The arg parser in
+`crates/pounce-cli/src/cli.rs` accepts `--json-output <path>` (line 520) as the
+flag that writes the `pounce.solve-report/v1` JSON; a grep for `--solve-report`
+across `pounce-cli/src` finds it only in this hint string. A user following the
+hint verbatim (`pounce model.nl --solve-report report.json`) gets an
+unknown-argument error, so the hint actively misleads.
+
+**Fix** (`crates/pounce-cli/src/main.rs`). Changed the hint (and the comment
+above it) to name the real flag:
+
+```
+Run `pounce {} --json-output report.json` first, then `pounce --cite report.json`
+```
+
+No behavior change beyond the user-facing string; the report path itself is
+unaffected.
+
+**Test** (`crates/pounce-cli/tests/cite_hint_flag.rs`, new). Hermetic
+integration test via `CARGO_BIN_EXE_pounce`: writes a temp file with a `.nl`
+extension and non-JSON contents, runs `pounce --cite <file>.nl`, and asserts the
+stderr hint **contains** `--json-output` and **does not contain**
+`--solve-report`.
+
+**Fail-first confirmed.** Reverting the hint to `--solve-report report.json`
+makes the test fail (stderr no longer contains `--json-output`). Restored.
+`cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --all-targets
+-- -D clippy::correctness -D clippy::suspicious` clean.

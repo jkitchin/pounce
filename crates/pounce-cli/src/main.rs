@@ -1699,12 +1699,12 @@ fn run_cite(args: &Args) -> ExitCode {
                     );
                     // Common mistake: passing the model (`.nl`) instead of a
                     // solve-report JSON. `--cite` takes the report produced by
-                    // a prior solve (`--solve-report out.json`), not the model;
+                    // a prior solve (`--json-output out.json`), not the model;
                     // bare `pounce --cite` prints the static core with no run.
                     if path.extension().and_then(|e| e.to_str()) == Some("nl") {
                         eprintln!(
                             "pounce: --cite expects a solve-report JSON, not a model file. \
-                             Run `pounce {} --solve-report report.json` first, then \
+                             Run `pounce {} --json-output report.json` first, then \
                              `pounce --cite report.json` — or use bare `pounce --cite` for the core citations.",
                             path.display()
                         );
