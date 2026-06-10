@@ -105,6 +105,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L35 | `k`-segment line count assumed, not read (`nl_reader.rs`); a nonstandard count desynchronizes the line stream into a confusing downstream error | **FIXED** | **Confirmed by reading code + reproducing the desync.** The `.nl` `k` segment (Jacobian column counts) header is `k<count>`, where `<count>` is the number of count lines that follow; the standard value is `n-1`. The parser **discarded** the header (`p.eat_segment_header()?`) and looped a hard-coded `n-1` times. A file declaring any other count then read the wrong number of data lines: it swallowed the following segment's header (or stopped short), so parsing failed far downstream with a baffling error pointing nowhere near the cause. **Fix**: read the declared count via `parse_segment_index(&hdr, 'k')`, validate it equals the expected `n-1` (0 when `n==0`), and `Err` with a clear `"k-segment declares {declared} … standard count for n={n} … is {expected}"` message at the segment itself; the consume loop then runs over the validated count. **Test** (`nl_reader::tests`): `k_segment_nonstandard_count_is_parse_error_at_source` rewrites EQ_LIN's `k1`+1 count line to `k0` (n=2 ⇒ expected 1) and asserts the `"k-segment declares"` error. **Fail-first confirmed**: with the old assume-`n-1` code the same input mis-reads `J0 2` as the k data line and dies downstream with `"unknown .nl segment tag '0'"` — the exact confusing far-removed error the issue describes — so the test's `k-segment declares` assert fails. Restored; 86 pounce-nl lib (+1) green, and the full pounce-cli suite (parses real `.nl` fixtures, all standard `k<n-1>`) green — the validation rejects no valid file. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L35 detail`. |
 | L36 | Stale module docs claim SOC reduced-system methods are `unimplemented!` (`cones/soc.rs:16-21`) and that only the orthant is implemented (`lib.rs:6-9`); both are fully implemented and production-wired | **FIXED (docs)** | **Confirmed false by reading code + grep + an existing test.** `soc.rs`'s module doc claimed `recover_ds`, `rhs_comp_term`, and the corrector were "deferred to Phase 2b and `unimplemented!`", and that "the driver builds an orthant-only cone … SOC is … not yet a solvable cone." In fact all three carry **real bodies** (`soc.rs:188-262`: `comp_residual_corrector`, `rhs_comp_term` = `Arw(z)⁻¹ r_comp`, `recover_ds` = `−Arw(z)⁻¹ r_comp − W⁻² dz`); the *only* `unimplemented!` is `scaling_diag` (deliberately N/A — "SOC uses kkt_block, not scaling_diag"). SOC is **production-wired**: `hsde_nonsym.rs` constructs `SecondOrderCone::new(m)` and calls `kkt_block`/`in_dual_cone` in the solve loop (lines 159/180/409/516/591/653), `composite.rs` builds `ConeSpec::SecondOrder`, and the CLI routes convex QCQP / `solver_selection=socp` → `SolverChoice::SocpIpm` (`dispatch.rs`). `lib.rs` similarly claimed "only the nonnegative orthant implemented" with SOCP/exp/power/SDP as future "phases"; all have landed (`cones::{soc,exp,power,psd}`, `hsde`, `hsde_nonsym`, `equilibrate`, `presolve`). **Fix**: rewrote both module docs to state the real, shipped status (docs-only; no code change). **Verification**: this is a verifiable (not unverifiable) issue — the claims are falsified by the code and by the existing test `cones::soc::tests::one_dimensional_cone_matches_orthant`, which calls `rhs_comp_term`/`recover_ds`/`kkt_block` and checks they reduce to the orthant in 1-D (impossible if `unimplemented!`). No new behavioral test is meaningful for a doc correction. 107 pounce-convex lib tests green; normal `cargo doc -p pounce-convex` builds clean; `cargo fmt` / gated `cargo clippy` clean. (Pre-existing strict-`-D warnings` rustdoc private-link errors in `hsde`/`presolve`/etc. are unrelated and untouched.) See `## L36 detail`. |
 | L37 | Failure paths seed the dual inconsistently (`z = 1.0` vs `0.0`) — `ipm.rs:1116-1120`, `hsde.rs:504` vs `ipm.rs:350-357, 411-418` | **FIXED** | **Confirmed by reading all failure sites.** Six `NumericalFailure` paths seeded the inequality dual `z = vec![1.0; m_ineq]` (`ipm.rs` build-factorization failures at 254/442/1113/1685; `hsde::failed`; `hsde_nonsym::failed`), while five validation-failure paths used `z = vec![0.0; m_ineq]` (cone-cover / nonsym+psd guards at `ipm.rs:350/366/412/425/866`). Beyond the inconsistency, **`z = 1.0` is wrong for non-orthant cones**: the all-ones vector is the orthant identity but is *not a member* of a general dual cone (e.g. an SOC of dim ≥ 3 requires `z₀ ≥ ‖z₁:‖ = √(m−1) > 1`). The successful cold start, by contrast, seeds `z` at the true `cone.identity(e)` (`ipm.rs:1196-1201`). **Fix**: unified all failure paths on `z = 0.0` — the cone apex, valid in *every* dual cone (orthant/SOC/PSD/exp/power) and matching the trivial `x = 0, y = 0` these paths already return; added explanatory comments at `failed_solution` and both `failed` helpers. **Test** (`tests/batch.rs`): `pattern_mismatch_failure_seeds_zero_dual` builds a `QpFactorization` on an inequality-constrained QP (n=2, m_ineq=1) then solves a structurally-different n=3 instance, tripping the pattern-mismatch failure; asserts `NumericalFailure` with `x`/`y`/`z` all-zeros and `z.len() == m_ineq`. **Fail-first confirmed**: reverting the `solve_inner` site to `z=1.0` makes the assert fail with `got [1.0]`. Restored; full pounce-convex suite green (107 lib + batch 7, +1). `cargo fmt -p pounce-convex` / gated `cargo clippy` clean. See `## L37 detail`. |
+| L38 | Equilibrated solves leave the per-iteration trace in scaled coordinates (`equilibrate.rs:254-278` unscales the solution only) | **FIXED** | **Confirmed by reading the unscaling path + reproducing the mismatch.** `Scaling::unscale_solution` maps `sol.x/y/z/z_lb/z_ub` back and recomputes `sol.obj` at the unscaled `x`, but never touches `sol.iterates` — so on an equilibrated solve the per-iteration trace (objective, residual ∞-norms, μ) stayed in the solver's scaled coordinates while the returned solution was unscaled, making the trace's final objective disagree with `sol.obj`. **Analysis**: of the trace fields, only `objective` admits an *exact* scalar unscaling — the scaled objective at the scaled iterate is `σ·(½xᵀPx + cᵀx)` (the column scaling `Dc` cancels), so dividing by σ recovers the original-coordinate value. The residual ∞-norms and μ cannot be unscaled exactly from a scalar: an ∞-norm of a per-row/per-column diagonally-scaled residual has no scalar inverse (they vanish at the optimum in either coordinate system regardless). **Fix**: `unscale_solution` now divides each `iterate.objective` by σ; documented the coordinate convention on `QpIterate` (`objective` original-coords/consistent with `sol.obj`; residuals/μ are the solver's internal equilibrated convergence measures). **Test** (`qp::residual_tests`): `equilibrated_trace_objective_is_in_original_coordinates` solves a pure LP (`min 1000·x0+500·x1 s.t. x0+x1≥2`, which triggers σ = 1/max\|ĉ\| ≠ 1 — a QP keeps σ=1 so the bug is invisible there) on the direct equilibrated path (`use_hsde=false`) with `collect_iterates`, and asserts the final trace objective matches `sol.obj` (= 1000). **Fail-first confirmed**: removing the unscale loop makes the final trace objective read `1.0` (= σ·1000, σ=1e-3) vs `sol.obj=1000`. Restored; full pounce-convex suite green (108 lib, +1). `cargo fmt -p pounce-convex` / gated `cargo clippy` clean. See `## L38 detail`. |
 
 ## C1 detail
 
@@ -5334,3 +5335,49 @@ structurally-different n=3 instance. That trips the pattern-mismatch guard in
 `failure inequality dual must be all-zeros (cone apex), got [1.0]`. Restored
 after confirming. Full pounce-convex suite green (107 lib tests; batch.rs 7,
 +1); `cargo fmt -p pounce-convex` / gated `cargo clippy` clean.
+
+## L38 detail
+
+**Issue.** Equilibrated solves leave the per-iteration trace in scaled
+coordinates (`equilibrate.rs:254-278` unscales the *solution* only).
+
+**Verification.** `Scaling::unscale_solution` maps `sol.x` (×Dc), `sol.y`
+(×R_A/σ), `sol.z` (×R_G/σ), `sol.z_lb`/`z_ub` (÷σDc) back and recomputes
+`sol.obj` at the unscaled `x` — but never iterates over `sol.iterates`. So when
+the direct path Ruiz-equilibrates (default for `use_hsde=false`), `run_ipm`
+records each `QpIterate` (objective, primal/dual ∞-norms, μ, step lengths) in
+the *scaled* problem's coordinates, and they are returned unchanged. The visible
+symptom: the trace's final-iterate objective ≠ the unscaled `sol.obj` (off by
+the cost scaling σ that pure-LP equilibration applies).
+
+**Analysis — what can be unscaled.** Only the **objective** has an exact scalar
+relationship. The scaled objective at the scaled iterate `x̂ = Dc⁻¹x` is
+`½ x̂ᵀP̂x̂ + ĉᵀx̂ = σ·(½ xᵀPx + cᵀx)` — the column scaling `Dc` cancels because
+`P̂ = σ·Dc P Dc` and `ĉ = σ·Dc c` — so dividing by σ recovers the
+original-coordinate objective. The **residual ∞-norms and μ cannot** be recovered
+exactly: the scaled residuals are `r_d = σ·Dc∘r_d^orig`, `r_p = R_A∘r_p^orig`,
+`r_g = R_G∘r_g^orig` (per-element diagonal scalings), and an ∞-norm of a
+diagonally-scaled vector is not a scalar multiple of the original ∞-norm. They
+remain valid monotone convergence indicators and vanish at the optimum in either
+coordinate system.
+
+**Fix.** `unscale_solution` now divides each `it.objective` by `self.sigma`,
+making the trace's objective consistent with `sol.obj`. Documented the
+coordinate convention on `QpIterate`: `objective` is in original coordinates
+(consistent with `QpSolution::obj`); `primal_infeasibility`/`dual_infeasibility`/
+`mu` are the solver's internal (equilibrated) convergence measures on an
+equilibrated solve. No behavioral change to the residual/μ fields (no exact
+unscaling exists) and none to the non-equilibrated path (σ=1, Dc=1 ⇒ identity).
+
+**Test.** `qp::residual_tests::equilibrated_trace_objective_is_in_original_coordinates`
+solves a pure LP `min 1000·x0 + 500·x1 s.t. x0+x1 ≥ 2, 0 ≤ x ≤ 10` on the direct
+equilibrated path (`use_hsde=false, equilibrate=true, collect_iterates=true`). A
+pure LP (empty `P`) triggers σ = 1/max|ĉ| ≠ 1; a QP keeps σ=1, so the
+discrepancy is LP-only. Asserts `status=Optimal`, `sol.obj≈1000`, and the final
+trace objective matches `sol.obj` within 1e-2.
+
+**Fail-first.** Removing the `for it in &mut sol.iterates { it.objective /= σ }`
+loop makes the final trace objective read `1.0000…` (= σ·1000 with σ=1e-3)
+against `sol.obj=1000.0000…`, failing the match assertion. Restored after
+confirming. Full pounce-convex suite green (108 lib, +1); `cargo fmt -p
+pounce-convex` / gated `cargo clippy` clean.

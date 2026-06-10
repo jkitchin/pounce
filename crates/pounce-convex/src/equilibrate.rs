@@ -275,6 +275,25 @@ impl Scaling {
             obj += 0.5 * xi * pxi + ci * xi;
         }
         sol.obj = obj;
+
+        // The per-iteration trace was recorded by the inner solve in scaled
+        // (equilibrated) coordinates. The objective is the one trace field with
+        // an exact scalar relationship to the original problem: the scaled
+        // objective at the scaled iterate `x̂` is
+        //   ½ x̂ᵀP̂x̂ + ĉᵀx̂ = σ·(½ xᵀP x + cᵀx)
+        // — the column scaling `Dc` cancels, since `P̂ = σ·Dc P Dc` and
+        // `ĉ = σ·Dc c` act on `x̂ = Dc⁻¹ x`. Dividing by σ recovers the
+        // original-coordinate objective, so the trace's final objective agrees
+        // with `sol.obj` recomputed above (instead of being off by the σ that a
+        // pure-LP equilibration applies). The residual ∞-norms and μ are left as
+        // recorded: an ∞-norm of a per-row/per-column diagonally-scaled residual
+        // has no exact scalar inverse, so they remain the solver's internal
+        // (equilibrated) convergence measures — documented as such on
+        // `QpIterate`. They vanish at the optimum in either coordinate system, so
+        // the converged trace stays consistent regardless.
+        for it in &mut sol.iterates {
+            it.objective /= self.sigma;
+        }
     }
 
     /// Map a warm-start point given in the **original** problem's coordinates
