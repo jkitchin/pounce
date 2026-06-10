@@ -586,38 +586,7 @@ impl PyProblem {
             .transpose()?;
         let z_l0 = zl.map(|v| extract_f64_vec(&v, n, "zl")).transpose()?;
         let z_u0 = zu.map(|v| extract_f64_vec(&v, n, "zu")).transpose()?;
-
-        let (jac_rows, jac_cols, nele_jac) = if m > 0 {
-            let s = call0(&self.problem_obj, "jacobianstructure")?;
-            let (rows, cols) = decode_structure_inferred(&s)?;
-            (rows.clone(), cols.clone(), rows.len() as Index)
-        } else {
-            (Vec::new(), Vec::new(), 0)
-        };
-
-        // Hessian sparsity. When the user provides one, use it
-        // verbatim. Without one we still need a non-empty pattern: the
-        // L-BFGS updater pins its work-space sparsity from
-        // `curr_exact_hessian()`, so an empty space means nowhere for
-        // the quasi-Newton approximation to land. Declare the dense
-        // lower triangle — `eval_h(Values)` returns zeros and the
-        // updater overwrites them with its rank-update approximation.
-        let (hess_rows, hess_cols, nele_hess) = if self.has_hessian {
-            let s = call0(&self.problem_obj, "hessianstructure")?;
-            let (rows, cols) = decode_structure_inferred(&s)?;
-            (rows.clone(), cols.clone(), rows.len() as Index)
-        } else {
-            let mut rows = Vec::with_capacity(n * (n + 1) / 2);
-            let mut cols = Vec::with_capacity(n * (n + 1) / 2);
-            for i in 0..n {
-                for j in 0..=i {
-                    rows.push(i as Index);
-                    cols.push(j as Index);
-                }
-            }
-            let nele = rows.len() as Index;
-            (rows, cols, nele)
-        };
+        let init = self.build_tnlp_init(py, x0_vec, lam0, z_l0, z_u0)?;
 
         let mut app = IpoptApplication::new();
         if !self.has_hessian {
@@ -658,7 +627,62 @@ impl PyProblem {
         );
         app.set_restoration_factory_provider(resto_provider);
 
-        let init = PyTnlpInit {
+        let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
+        Ok((app, bridge))
+    }
+
+    /// Assemble the [`PyTnlpInit`] payload for one solve: resolve the
+    /// Jacobian / Hessian sparsity through the Python object (once, so
+    /// the solver's `Structure` calls are GIL-free copies) and capture
+    /// bounds, starting point, optional warm duals, and the callback
+    /// handle. Factored out of [`Self::prepare`] so the batch path
+    /// (pounce#126 phase 2) can mint per-instance bridges without
+    /// building the application on this thread — the resulting
+    /// `PyTnlpInit` is plain data + `Py<PyAny>` handles, hence `Send`,
+    /// and moves to the rayon worker that owns the solve.
+    pub(crate) fn build_tnlp_init(
+        &self,
+        py: Python<'_>,
+        x0_vec: Vec<Number>,
+        lam0: Option<Vec<Number>>,
+        z_l0: Option<Vec<Number>>,
+        z_u0: Option<Vec<Number>>,
+    ) -> PyResult<PyTnlpInit> {
+        let n = self.n as usize;
+        let m = self.m as usize;
+        let (jac_rows, jac_cols, nele_jac) = if m > 0 {
+            let s = call0(&self.problem_obj, "jacobianstructure")?;
+            let (rows, cols) = decode_structure_inferred(&s)?;
+            (rows.clone(), cols.clone(), rows.len() as Index)
+        } else {
+            (Vec::new(), Vec::new(), 0)
+        };
+
+        // Hessian sparsity. When the user provides one, use it
+        // verbatim. Without one we still need a non-empty pattern: the
+        // L-BFGS updater pins its work-space sparsity from
+        // `curr_exact_hessian()`, so an empty space means nowhere for
+        // the quasi-Newton approximation to land. Declare the dense
+        // lower triangle — `eval_h(Values)` returns zeros and the
+        // updater overwrites them with its rank-update approximation.
+        let (hess_rows, hess_cols, nele_hess) = if self.has_hessian {
+            let s = call0(&self.problem_obj, "hessianstructure")?;
+            let (rows, cols) = decode_structure_inferred(&s)?;
+            (rows.clone(), cols.clone(), rows.len() as Index)
+        } else {
+            let mut rows = Vec::with_capacity(n * (n + 1) / 2);
+            let mut cols = Vec::with_capacity(n * (n + 1) / 2);
+            for i in 0..n {
+                for j in 0..=i {
+                    rows.push(i as Index);
+                    cols.push(j as Index);
+                }
+            }
+            let nele = rows.len() as Index;
+            (rows, cols, nele)
+        };
+
+        Ok(PyTnlpInit {
             n: self.n,
             m: self.m,
             nele_jac,
@@ -685,9 +709,28 @@ impl PyProblem {
             final_lambda: vec![0.0; m],
             final_obj: 0.0,
             final_status_code: 0,
-        };
-        let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
-        Ok((app, bridge))
+        })
+    }
+
+    /// The pending option sets, in `OptionsList`'s three value classes
+    /// — for the batch path, which applies them to a fresh per-worker
+    /// application instead of going through [`Self::prepare`].
+    pub(crate) fn option_sets(
+        &self,
+    ) -> (
+        &[(String, String)],
+        &[(String, Number)],
+        &[(String, Index)],
+    ) {
+        (&self.str_opts, &self.num_opts, &self.int_opts)
+    }
+
+    pub(crate) fn uses_exact_hessian(&self) -> bool {
+        self.has_hessian
+    }
+
+    pub(crate) fn dims(&self) -> (usize, usize) {
+        (self.n as usize, self.m as usize)
     }
 }
 
@@ -839,7 +882,7 @@ fn extract_index_vec_inferred(val: &Py<PyAny>, what: &str) -> PyResult<Vec<Index
     })
 }
 
-fn extract_f64_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<Number>> {
+pub(crate) fn extract_f64_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<Number>> {
     Python::with_gil(|py| {
         let bound = val.bind(py);
         if let Ok(arr) = bound.downcast::<PyArray1<Number>>() {

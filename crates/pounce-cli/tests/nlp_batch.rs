@@ -41,7 +41,7 @@ fn parametric_nl() -> PathBuf {
 /// backend, and the default restoration-phase provider — the same
 /// wiring `pounce-cli`'s solve path and `pounce-py`'s
 /// `Problem::prepare` install for a single solve.
-fn configure(app: &mut IpoptApplication) {
+fn configure(_i: usize, app: &mut IpoptApplication) {
     let _ = app
         .options_mut()
         .set_integer_value("print_level", 0, true, false);
@@ -68,7 +68,7 @@ fn nl_batch_matches_single_solve_and_honors_variants() {
 
     // Reference: single-problem solve of the unmodified model.
     let mut app = IpoptApplication::new();
-    configure(&mut app);
+    configure(0, &mut app);
     let single = Rc::new(RefCell::new(base.clone()));
     let status = app.optimize_tnlp(Rc::clone(&single) as Rc<RefCell<dyn TNLP>>);
     assert_eq!(status, ApplicationReturnStatus::SolveSucceeded);

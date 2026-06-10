@@ -85,25 +85,56 @@ instance with per-instance starting point / bounds; everything
 structural (expression DAG, AD tapes, sparsity, coloring) is shared
 work that is not redone.
 
-**Native vs. callback inputs — the GIL caveat.** Batch parallelism
-needs evaluators that don't touch Python during the solve:
+**Native vs. callback inputs — the GIL caveat.** Both kinds solve in
+parallel, with different ceilings:
 
 * `NlProblem` inputs (from `read_nl` / `variant`) are native-Rust
-  reverse-mode-AD evaluators. The batch runs **in parallel** on a
-  Rayon thread pool with the GIL released; each worker solves its
-  instance end-to-end with an inner-serial factorization
-  (outer-parallel / inner-serial, the same model as `solve_qp_batch`).
-* Callback-based `Problem` inputs evaluate through Python, and every
-  callback needs the GIL — parallelizing them buys nothing. They are
-  solved **sequentially** (pass `x0s=`, one starting point per
-  instance). True parallel callback batching is tracked as pounce#126
-  phase 2.
+  reverse-mode-AD evaluators. The batch runs on a Rayon thread pool
+  with the GIL fully released; each worker solves its instance
+  end-to-end with an inner-serial factorization (outer-parallel /
+  inner-serial, the same model as `solve_qp_batch`).
+* Callback-based `Problem` inputs (pass `x0s=`, one starting point per
+  instance) also run one instance per worker, but every `objective` /
+  `gradient` / `constraints` / `jacobian` / `hessian` call re-acquires
+  the GIL. The Python share of the work is therefore serialized: the
+  speedup scales with the Rust/Python work ratio — medium and large
+  problems whose factorizations dominate parallelize well (~4x on 4
+  cores for an n=800 banded NLP with vectorized NumPy callbacks);
+  tiny problems whose callbacks dominate won't. Each `Problem`'s own
+  `add_option` settings are honored per instance, with `options=` as
+  a batch-level overlay.
 
-With `parallel=False` the native path also solves one instance at a
-time, letting each factorization parallelize internally — better for a
-few large instances. For the batch, `print_level` defaults to 0
-(N workers interleaving iteration tables is noise); pass an explicit
+With `parallel=False` either path solves one instance at a time,
+letting each factorization parallelize internally — better for a few
+large instances. For the batch, `print_level` defaults to 0 (N workers
+interleaving iteration tables is noise); pass an explicit
 `print_level` to override.
+
+**Warm-start chaining (MPC / B&B).** Feed one batch's results into the
+next solve of a nearby batch:
+
+```python
+results = pounce.solve_nlp_batch(batch_t)              # cold
+results = pounce.solve_nlp_batch(batch_t1, warms=results)  # warm
+```
+
+Each instance is seeded with the previous `x` and duals, the converged
+barrier parameter (`info["mu"]`) is threaded into `mu_init`, and
+`warm_start_init_point=yes` is forced. A warm start changes iteration
+counts, never solutions (re-solving the 24-instance gaslib sweep warm
+drops 482 total iterations to 120). A dimension-mismatched warm entry
+falls back to that instance's cold start.
+
+**Identical-sparsity batches (`share_structure=True`).** When every
+instance shares its KKT sparsity (parametric sweeps, multi-start, B&B
+siblings), this opt-in keeps each worker's factorization backend alive
+across instances so the symbolic analysis (fill-reducing ordering,
+supernode structure) runs once per worker rather than once per
+instance. Always correct — a pattern change just triggers a fresh
+analysis — but pooled solver state means results are within solver
+tolerance of, not bit-identical to, the default fresh-backend solves.
+The win scales with how expensive ordering is for your model (small
+models: negligible; large sparse models: worth measuring).
 
 ## scipy.optimize-style
 

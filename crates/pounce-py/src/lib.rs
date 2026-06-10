@@ -46,8 +46,10 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySolver>()?;
     m.add_class::<PyNlProblem>()?;
     m.add_function(wrap_pyfunction!(read_nl, m)?)?;
-    // Batched NLP solving, native `.nl` path (pounce#126).
+    // Batched NLP solving (pounce#126): native `.nl` path (phase 1)
+    // and callback-Problem path (phase 2).
     m.add_function(wrap_pyfunction!(nlp_batch::solve_nlp_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(nlp_batch::solve_problem_batch, m)?)?;
     m.add_function(wrap_pyfunction!(warm_start::classify_working_set, m)?)?;
     // Convex LP/QP solver (pounce-convex) bindings.
     m.add_class::<PyQpProblem>()?;

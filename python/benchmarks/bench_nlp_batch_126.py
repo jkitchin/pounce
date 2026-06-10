@@ -67,6 +67,17 @@ def main() -> int:
     par = pounce.solve_nlp_batch(batch, parallel=True)
     t_par = time.perf_counter() - t0
 
+    # Optional extras (issue #126): identical-sparsity backend pooling
+    # and warm-start chaining (re-solve the same batch seeded from the
+    # previous results — the MPC / B&B shape).
+    t0 = time.perf_counter()
+    pooled = pounce.solve_nlp_batch(batch, share_structure=True)
+    t_pool = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    warm = pounce.solve_nlp_batch(batch, warms=par)
+    t_warm = time.perf_counter() - t0
+
     # Correctness gate before any timing claim.
     bad = [
         i for i, ((_, si), (_, pi)) in enumerate(zip(seq, par))
@@ -82,12 +93,24 @@ def main() -> int:
     )
     iters = [info["iter_count"] for _, info in par]
 
+    iters_warm = [info["iter_count"] for _, info in warm]
+    ok_extra = all(
+        i["status_msg"] == "Solve_Succeeded" for _, i in pooled
+    ) and all(i["status_msg"] == "Solve_Succeeded" for _, i in warm)
+    if not ok_extra:
+        print("FAIL: pooled / warm batch did not converge")
+        return 1
+
     print(f"instances: {K}   cores: {os.cpu_count()}")
     print(f"iters/instance: min={min(iters)} max={max(iters)} "
           f"(ragged is expected)")
     print(f"max |x_seq - x_par| over batch: {worst:.3e}")
-    print(f"sequential: {t_seq:.3f} s   parallel: {t_par:.3f} s   "
-          f"speedup: {t_seq / t_par:.2f}x")
+    print(f"sequential:        {t_seq:.3f} s")
+    print(f"parallel:          {t_par:.3f} s   speedup: {t_seq / t_par:.2f}x")
+    print(f"+ share_structure: {t_pool:.3f} s   (symbolic shared per worker; "
+          f"win grows with model size)")
+    print(f"+ warms re-solve:  {t_warm:.3f} s   "
+          f"({sum(iters)} -> {sum(iters_warm)} total iters)")
     return 0
 
 
