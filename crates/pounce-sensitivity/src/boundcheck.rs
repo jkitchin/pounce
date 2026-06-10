@@ -69,8 +69,16 @@ pub fn clamp_step_to_bounds(
             if i >= n_x {
                 continue;
             }
+            // No-op when the bound vector yielded no usable entries
+            // (non-dense downcast → empty; see `compressed_values`) or
+            // is shorter than the expansion. Honors the documented
+            // "silently no-op" contract instead of panicking on an
+            // out-of-range index (L16).
+            let lo = match bounds.get(compressed_i) {
+                Some(&v) => v,
+                None => continue,
+            };
             let trial = x_curr[i] + dx[i];
-            let lo = bounds[compressed_i];
             if trial < lo - eps {
                 dx[i] = lo - x_curr[i];
                 clamped += 1;
@@ -86,8 +94,13 @@ pub fn clamp_step_to_bounds(
             if i >= n_x {
                 continue;
             }
+            // See the lower-bound loop: no-op on missing/short bounds
+            // rather than panicking (L16).
+            let hi = match bounds.get(compressed_i) {
+                Some(&v) => v,
+                None => continue,
+            };
             let trial = x_curr[i] + dx[i];
-            let hi = bounds[compressed_i];
             if trial > hi + eps {
                 dx[i] = hi - x_curr[i];
                 clamped += 1;
@@ -106,7 +119,11 @@ pub fn clamp_step_to_bounds(
 fn compressed_values(v: &dyn Vector) -> Vec<Number> {
     use pounce_linalg::dense_vector::DenseVector;
     match v.as_any().downcast_ref::<DenseVector>() {
-        Some(dv) => dv.values().to_vec(),
+        // `expanded_values` (not `values`) so a homogeneous bound
+        // vector — e.g. every lower bound 0 — materializes its scalar
+        // instead of tripping `DenseVector::values`'s
+        // `!homogeneous` debug_assert (L16).
+        Some(dv) => dv.expanded_values(),
         None => Vec::new(),
     }
 }
@@ -136,13 +153,27 @@ pub fn _index_to_usize(i: Index) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pounce_linalg::compound_vector::{CompoundVector, CompoundVectorSpace};
     use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
     use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
+    use pounce_linalg::Vector;
 
     fn make_dv(values: &[Number]) -> DenseVector {
         let space = DenseVectorSpace::new(values.len() as Index);
         let mut dv = DenseVector::new(space);
         dv.values_mut().copy_from_slice(values);
+        dv
+    }
+
+    /// A homogeneous DenseVector of length `dim`, every entry `scalar`.
+    /// Built via `Vector::set`, which puts the vector in homogeneous
+    /// representation (no materialized storage) — the state under which
+    /// `DenseVector::values()` debug_asserts.
+    fn make_homogeneous_dv(dim: Index, scalar: Number) -> DenseVector {
+        let space = DenseVectorSpace::new(dim);
+        let mut dv = DenseVector::new(space);
+        dv.set(scalar);
+        assert!(dv.is_homogeneous());
         dv
     }
 
@@ -206,6 +237,64 @@ mod tests {
         assert_eq!(n, 0);
         assert!((dx[0] - 0.1).abs() < 1e-12);
         assert!((dx[1] - (-0.1)).abs() < 1e-12);
+    }
+
+    // L16: a homogeneous bound vector (e.g. every lower bound 0) must
+    // not panic. Pre-fix, `compressed_values` called `dv.values()`,
+    // whose `debug_assert!(!homogeneous)` fires in debug/test builds;
+    // post-fix it uses `expanded_values()`, which materializes the
+    // scalar. The clamp itself must still be computed correctly.
+    #[test]
+    fn clamp_handles_homogeneous_bounds_without_panicking() {
+        let n_x = 2;
+        let x_curr = [0.1, 0.2];
+        let mut dx = [-0.3, -0.05]; // trial = [-0.2, 0.15]
+        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 1], 0);
+        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
+        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
+        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
+        // Homogeneous lower bound: every variable bounded below by 0.
+        let x_l = make_homogeneous_dv(2, 0.0);
+        let x_u = make_dv(&[]);
+
+        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l, &x_u, 1e-9);
+        // Only slot 0 violates (trial -0.2 < 0); slot 1's trial 0.15 ≥ 0.
+        assert_eq!(n, 1);
+        assert!((dx[0] - (-0.1)).abs() < 1e-12, "dx[0] = {}", dx[0]);
+        assert!((dx[1] - (-0.05)).abs() < 1e-12, "dx[1] = {}", dx[1]);
+    }
+
+    // L16: a non-dense bound vector must silently no-op (per the module
+    // docs), not panic. Pre-fix, `compressed_values` returned an empty
+    // Vec for the failed downcast and the loop then indexed
+    // `bounds[compressed_i]` out of range; post-fix the `.get()` guard
+    // skips. Uses a CompoundVector (the only other `dyn Vector` impl) as
+    // a stand-in for "not a DenseVector".
+    #[test]
+    fn clamp_is_noop_on_non_dense_bounds() {
+        let n_x = 2;
+        let x_curr = [0.1, 0.2];
+        let mut dx = [-0.5, -0.5]; // would deeply violate a 0 lower bound
+                                   // px_l selects both variables as lower-bounded.
+        let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 1], 0);
+        let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
+        let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
+        let px_u: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_u_space));
+
+        // Non-dense bound vector: a 1-block CompoundVector of dim 2.
+        let cspace = CompoundVectorSpace::new(1, 2);
+        cspace.set_comp(0, 2, || {
+            Box::new(DenseVector::new(DenseVectorSpace::new(2)))
+        });
+        let mut x_l_compound = CompoundVector::new(cspace);
+        x_l_compound.set(0.0);
+        let x_u = make_dv(&[]);
+
+        let n = clamp_step_to_bounds(&x_curr, &mut dx, &px_l, &px_u, &x_l_compound, &x_u, 1e-9);
+        // Non-dense ⇒ treated as no bounds ⇒ no clamp, dx untouched.
+        assert_eq!(n, 0);
+        assert!((dx[0] - (-0.5)).abs() < 1e-12);
+        assert!((dx[1] - (-0.5)).abs() < 1e-12);
     }
 
     #[test]

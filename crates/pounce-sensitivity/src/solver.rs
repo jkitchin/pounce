@@ -405,7 +405,10 @@ fn dense_to_vec(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
         .as_any()
         .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
     {
-        Some(d) => d.values().to_vec(),
+        // `expanded_values` materializes a homogeneous vector instead
+        // of tripping `DenseVector::values`'s `!homogeneous`
+        // debug_assert (L16).
+        Some(d) => d.expanded_values(),
         None => vec![0.0; v.dim() as usize],
     }
 }

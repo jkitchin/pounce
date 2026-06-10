@@ -78,6 +78,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L13 | qp/restoration: doc/code sign mismatches in restoration formulas (code right, docs wrong): `resto_nlp.rs:6-7` (`c − n + p` vs implemented `c + n − p`), `resto_resto.rs:16-21` (wrong quadratic for the stated root) | **FIXED** (docs corrected; code already right + matches upstream) | **Both premises confirmed by reading code + verifying the code against upstream, then correcting the docs.** **(1) Constraint signs**: `restoration_constraint_{c,d}` (`resto_nlp.rs:895,907`) and the `eval_c`/`eval_d` doc-comments implement `c_resto = c_orig + n_c − p_c` (and `d_orig + n_d − p_d`), but the module-level doc said `c(x) − n_c + p_c = 0` / `d(x) − n_d + p_d − s = 0` — slack signs swapped. The implemented `c + n − p` is **correct**: it matches upstream `IpRestoIpoptNLP` (`p_c = c(x) + n_c` ⇒ `c + n − p = 0`, verified by WebFetch) and the existing tests `constraint_{c,d}_combines_orig_n_p_with_correct_signs` already lock it. **(2) Quadratic**: the closed-form slack reset (`resto_resto.rs::compute_n_p`) computes `v = a + sqrt(a²+b)` with `a = mu/(2ρ) − 0.5·c`, `b = c·mu/(2ρ)` — **identical to upstream** `IpRestoRestoPhase.cpp::solve_quadratic` (verified by WebFetch quoting the literal body `v=a; v=v*v; v+=b; v=sqrt(v); v+=a` ⇒ `a + sqrt(a²+b)`). But the module doc stated this root solves `v² + 2·a·v − b = 0`, whose root is actually `−a + sqrt(...)`. The root `a + sqrt(a²+b)` solves `v² − **2·a·v** − b = 0` (substitute: `(v−a)² = a²+b`). Confirmed by first-principles derivation (minimize `ρ(2n+c) − μln n − μln(c+n)` ⇒ `n² + (c−2·half)n − b = 0`, linear coeff `= −2a`) and a c=0 sanity check (true minimizer `n = μ/ρ = 2·half`; code gives `half+half = 2half`, the doc's `−a+sqrt` form gives 0 — wrong). **The same sign error was mirrored in the `resto_resto` test name/comments** (`quadratic_root_satisfies_v2_plus_2av_minus_b_zero`) even though its *assertion* already used the correct `v*v − 2av − b`. **Fix (docs/labels only — no code change)**: corrected the constraint signs in `resto_nlp.rs` and the sibling `resto_alg_builder.rs` module doc; corrected the quadratic to `v² − 2·a·v − b = 0` in `resto_resto.rs` with a short derivation note; renamed the test to `quadratic_root_satisfies_v2_minus_2av_minus_b_zero` and added an assertion that the wrong `v² + 2av − b` form is clearly non-zero (`> 1e-4`) so the corrected sign is regression-locked both ways. **Verification**: full pounce-restoration suite green (105 lib + integration), incl. the renamed test and the pre-existing sign tests; `init.rs`'s quadratic was already correct (`n*n − 2.0*a*n − b`). The "fail-first" here is the provable doc-vs-upstream contradiction (the doc's `+2av`/`−n+p` forms do not hold for the code's actual, upstream-matching values). `cargo fmt`/`clippy` clean. See `## L13 detail`. |
 | L14 | qp: the inertia-control retry loops recover from a linear-solver failure by substring-testing the error message for `"inertia"`/`"singular"` (`solver.rs:123,142`; `schur.rs:275,297`), a fragile case-sensitive match that silently misses the capitalized `Debug`-formatted `ESymSolverStatus` (`Singular`/`WrongInertia`) emitted by `LinearSolver::resolve`'s catch-all (`factor.rs:172`) — those failures propagate as unrecoverable instead of triggering a shift retry | **FIXED** | **Bug confirmed by reading + running code.** The §4.5 inertia-control loops in both the dense (`solver.rs`) and Schur (`schur.rs`) QP paths decide whether a `QpError::LinearSolverFailure(msg)` is recoverable (retry with a larger Hessian-diagonal shift) by `msg.contains("inertia") || msg.contains("singular")` — a **case-sensitive** substring test, duplicated at four sites. The factorize path produces lowercase messages (`"...inertia..."`), so those match. But `LinearSolver::resolve`'s catch-all (`factor.rs:172`) formats the backend status with `Debug`: `format!("resolve backend status: {other:?}")`, and `ESymSolverStatus`'s variants are **capitalized** (`Singular`, `WrongInertia`) — so a resolve-path singular/wrong-inertia failure yields `"resolve backend status: Singular"`, which `contains("singular")` **misses**. The recoverable failure then propagates as a hard error instead of triggering the shift retry that would rescue the solve. **Fix**: centralized the recoverability decision in one predicate `QpError::is_recoverable_factorization_failure()` (`error.rs`) that lowercases the message before testing (`m.contains("inertia") || m.contains("singular")`), and routed all four matchers through it (`solver.rs:123,142`; `schur.rs:275,297`), removing the duplicated inline substring tests. **Test** (`pounce-qp` `tests::refinement_unit::recoverable_factorization_failure_is_case_insensitive`): asserts the predicate accepts both the lowercase factorize-path messages **and** the capitalized resolve-path Debug strings (`"resolve backend status: Singular"`, `"...WrongInertia"`), and rejects non-recoverable failures (`"backend reported fatal error"`, `"resolve called before factorize"`) and non-`LinearSolverFailure` variants (`DimensionMismatch`). **Fail-first confirmed** by reverting the predicate to the case-sensitive `msg.contains(...)`: it fails on `"resolve backend status: Singular"` (`assertion failed: ...is_recoverable_factorization_failure()`); restored, full pounce-qp suite green (78 lib + 1 + 5 integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L14 detail`. |
 | L15 | qp: `ElasticReformulation::original_inertia()` hardcodes `Psd` (`elastic.rs:169-175`), making the `Indefinite` arm of `as_qp`'s inertia match dead — an indefinite original problem is solved through the augmented elastic problem as if PSD; `solve_elastic` hard-calls `solve_general` (`solver.rs:1087`), ignoring `opts.use_schur_updates` | **FIXED** | **Both bugs confirmed by reading + running code (pounce-internal §4.3/§4.5 design, not an upstream-divergence).** **(1) Dead inertia arm.** `ElasticReformulation::build` discarded `qp.hessian_inertia`, and `original_inertia()` unconditionally returned `HessianInertia::Psd`. `as_qp` (`elastic.rs:162-165`) maps the original inertia onto the augmented problem with `Psd|Unknown => Psd`, `Indefinite => Indefinite` — but since `original_inertia()` could never return `Indefinite`, the augmented problem was *always* marked `Psd`, so an indefinite original `H` was solved as if PSD (skipping the §4.5 inertia-control assumption). **Fix**: `build` now captures `qp.hessian_inertia` into a new `orig_inertia` field and `original_inertia()` returns it; the augmented Hessian is block-diag(`H_orig`, 0) so it shares `H_orig`'s definiteness category (zero slack diagonals never introduce negative curvature), and the existing `as_qp` match now correctly propagates `Indefinite` while collapsing `Psd`/`Unknown` to `Psd`. **(2) `use_schur_updates` ignored.** The top-level `solve` dispatches between `solve_general_schur` (when `opts.use_schur_updates`) and `solve_general` (`solver.rs:1587-1591`), but `solve_elastic`'s recursive solve hard-called `solve_general`, so an infeasible problem solved with `use_schur_updates = true` silently fell back to the refactor path. **Fix**: `solve_elastic` now mirrors the same dispatch; both inner solvers bypass the `solve` feasibility audit, so the no-re-audit / no-recovery-loop property is preserved (comment updated). **Tests**: `elastic_unit::as_qp_propagates_original_hessian_inertia` (Indefinite original ⇒ augmented `Indefinite`; Psd/Unknown ⇒ `Psd`) and `analytical::l15_elastic_honors_use_schur_updates` (the `problem_5` infeasible QP solved with `use_schur_updates = true` returns the same minimal-l1 certificate **and** records `n_schur_updates > 0`, proving the Schur path ran inside the elastic recovery — the refactor path leaves it 0). **Fail-first confirmed** by reverting both edits (`original_inertia` → hardcoded `Psd`; dispatch → `solve_general` only): both tests fail (inertia `Indefinite != Psd`; `n_schur_updates == 0`). Restored, full pounce-qp suite green (80 lib + 1 + 5 integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L15 detail`. |
+| L16 | sensitivity: `clamp_step_to_bounds` panics (index OOB) on non-dense bound vectors instead of the documented no-op (`boundcheck.rs:64-78,106-112`); and `dv.values()` (here + the `dense_to_vec` siblings in `solver.rs:408`, `convenience.rs:438`) trips `DenseVector::values`'s `!homogeneous` debug_assert where `expanded_values()` is the safe accessor | **FIXED** | **Both bugs confirmed by reading + running code (pounce sIPOPT port; the `values`/`expanded_values` homogeneous-value distinction is pounce-internal).** **(1) OOB panic on non-dense bounds.** `compressed_values` returns an empty `Vec` when the bound `dyn Vector` is not a `DenseVector` (documented contract: "silently no-ops"). But the clamp loops then indexed `bounds[compressed_i]` for every entry of the bound *expansion matrix* — so a non-dense `x_l`/`x_u` paired with a non-empty `px_l`/`px_u` panics `index out of bounds: the len is 0 but the index is 0` instead of no-opping. **Fix**: replaced both `bounds[compressed_i]` accesses with `bounds.get(compressed_i)` + `continue` on `None`, honoring the no-op contract (also covers a bounds slice shorter than the expansion). **(2) Homogeneous debug_assert.** `DenseVector::values()` carries `debug_assert!(self.initialized && !self.homogeneous)` (mirrors upstream's `DBG_ASSERT` in `DenseVector::Values() const`); a homogeneous bound vector — e.g. every lower bound 0, stored as a scalar with no materialized slice — makes `values()` panic in debug/test builds. Three sites used `dv.values().to_vec()`: `boundcheck.rs::compressed_values`, and the `dense_to_vec` helpers in `solver.rs` and `convenience.rs`. **Fix**: switched all three to `expanded_values()`, which materializes the scalar for a homogeneous vector and clones otherwise. **Tests** (`boundcheck::tests`): `clamp_handles_homogeneous_bounds_without_panicking` (homogeneous lower bound built via `Vector::set`; asserts no panic + correct single clamp) and `clamp_is_noop_on_non_dense_bounds` (a 1-block `CompoundVector` — the only other `dyn Vector` impl — as `x_l`; asserts 0 clamps, `dx` untouched). **Fail-first confirmed** by reverting both fixes: the homogeneous test panics at `dense_vector.rs:131` (`assertion failed: self.initialized && !self.homogeneous`) and the non-dense test panics at `boundcheck.rs` (`index out of bounds: the len is 0 but the index is 0`). Restored, full pounce-sensitivity suite green (45 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L16 detail`. |
 
 ## C1 detail
 
@@ -4037,3 +4038,72 @@ Reverting both edits — `original_inertia()` back to a hardcoded
 `n_schur_updates == 0`. Restored, the full pounce-qp suite is green (80 lib +
 1 doc + 5 integration, 0 failures); `cargo fmt -p pounce-qp -- --check` clean;
 clippy (correctness/suspicious) clean.
+
+## L16 detail
+
+Two defects in the parametric-sensitivity bound clamp (`pounce-sensitivity`,
+a port of upstream sIPOPT's `SensStdStepCalculator::BoundCheck`). Both are
+pounce-internal: the `DenseVector` homogeneous-value optimization and the
+`values()`/`expanded_values()` accessor split are pounce's own, so verification
+is by reading + running pounce code.
+
+### (1) Index-OOB panic on non-dense bound vectors
+
+- **Site**: `crates/pounce-sensitivity/src/boundcheck.rs`.
+  - `compressed_values(v)` downcasts the bound `dyn Vector` to `DenseVector`;
+    on failure it returns `Vec::new()`. The doc comment promises the
+    boundcheck then "silently no-ops, matching upstream's behavior when bounds
+    aren't represented as DenseVectors".
+  - But `clamp_step_to_bounds`'s two loops iterate over the bound *expansion
+    matrix*'s positions and index `bounds[compressed_i]` for each one.
+- **Bug**: a non-dense `x_l`/`x_u` with a non-empty `px_l`/`px_u` makes
+  `bounds` empty while `compressed_i` still ranges over the expansion entries,
+  so `bounds[0]` panics (`index out of bounds: the len is 0 but the index is
+  0`) — the opposite of the documented no-op.
+- **Fix**: replaced both `let lo = bounds[compressed_i];` /
+  `let hi = bounds[compressed_i];` with `bounds.get(compressed_i)` returning
+  early (`continue`) on `None`. This honors the no-op contract for non-dense
+  bounds and also defends against a bounds slice shorter than the expansion.
+
+### (2) Homogeneous-vector debug_assert in `values()`
+
+- **Site**: `boundcheck.rs::compressed_values`, plus the sibling `dense_to_vec`
+  helpers in `crates/pounce-sensitivity/src/solver.rs:408` and
+  `crates/pounce-sensitivity/src/convenience.rs:438`.
+- **Bug**: `DenseVector::values()` is documented to "Panic if currently
+  homogeneous" — it carries `debug_assert!(self.initialized &&
+  !self.homogeneous)` (mirroring upstream's `DBG_ASSERT` in
+  `DenseVector::Values() const`). A homogeneous bound vector (e.g. every lower
+  bound 0, stored as a scalar with the dense storage freed) makes
+  `dv.values().to_vec()` panic in debug/test builds. `expanded_values()` is
+  the accessor that "always returns a fully-materialized slice", allocating the
+  scalar fan-out when homogeneous — which is what the siblings should use.
+- **Fix**: switched all three `dv.values().to_vec()` call sites to
+  `dv.expanded_values()` (which already returns an owned `Vec`, so the
+  `.to_vec()` drops out).
+
+### Tests (`boundcheck::tests`)
+
+- `clamp_handles_homogeneous_bounds_without_panicking` — a homogeneous lower
+  bound built via `Vector::set(0.0)` (asserts `is_homogeneous()`), one
+  violating and one non-violating coordinate; asserts no panic and exactly one
+  correct clamp.
+- `clamp_is_noop_on_non_dense_bounds` — a 1-block `CompoundVector` (the only
+  other `dyn Vector` implementation) as `x_l`, with `px_l` selecting both
+  variables and a deeply-violating `dx`; asserts 0 clamps and `dx` untouched
+  (the documented no-op).
+
+### Fail-first
+
+Reverting both fixes (`expanded_values()` → `values().to_vec()`;
+`bounds.get(compressed_i)`+`continue` → `bounds[compressed_i]`) makes both
+tests fail:
+- `clamp_handles_homogeneous_bounds_without_panicking` panics at
+  `crates/pounce-linalg/src/dense_vector.rs:131` —
+  `assertion failed: self.initialized && !self.homogeneous`.
+- `clamp_is_noop_on_non_dense_bounds` panics at `boundcheck.rs` —
+  `index out of bounds: the len is 0 but the index is 0`.
+
+Restored, the full pounce-sensitivity suite is green (45 lib + integration, 0
+failures); `cargo fmt -p pounce-sensitivity -- --check` clean; clippy
+(correctness/suspicious) clean.
