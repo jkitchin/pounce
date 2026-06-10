@@ -60,6 +60,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M34 | python: default auto-routing in `pounce.minimize` costs O(n²) user-function evaluations before the solve. On the `auto` path the LP/QP router (`classify_and_extract`) and the SOCP/QCQP router (`classify_and_extract_socp`) both FD-fit the *same* objective at an *identical* probe set (same `seed=0`), so the objective is finite-differenced twice; for a problem that ends up on the NLP path this is pure overhead, and it was undocumented (`python/pounce/_route.py`, `_minimize.py:425,447-468`) | **FIXED** | **Bug confirmed by running code**: counting `fun` calls through `minimize` on a quartic (NLP route, n=5), the routing overhead (auto-path calls minus nlp-forced-path calls) was 520 = exactly 2× a single router's 260 probe calls — the SOCP router re-probed every point the QP router had already evaluated. **Fix**: wrap the router callables (`fun`/`jac`/`hess`/`g_combined`/`jac_combined`) in one shared point-keyed cache (`_route._point_cache`, keyed on the point's float64 bytes) inside the `route_kw` both routers receive, so the second router's probes are cache hits; the NLP fallback still calls the *original* callables, so the actual solve is unaffected. Also documented the routing cost and the `solver_selection="nlp"` opt-out in the `minimize` docstring. **Test** (`python/tests/test_minimize_autoroute.py::test_auto_route_probes_objective_once_not_twice`): asserts the auto-path routing overhead equals one router's probe count, not two. **Fail-first confirmed** by reverting the `_point_cache` wrapping: overhead = 520 ≠ 260 → test FAILS; post-fix 74 routing/minimize tests pass. See `## M34 detail`. |
 | M35 | rust(pounce-py): session-style solves hold the GIL for the whole IPM run. `PySolver::solve` (`crates/pounce-py/src/solver.rs:80`), `QpFactorization::solve` and `QpSensitivity::new` (`crates/pounce-py/src/qp.rs`) call the Rust solver without `py.allow_threads`, unlike `PyProblem::solve` and the one-shot QP/SOCP entry points. `Solver` is the workhorse under `curve_fit` and the jax/torch hosts, so concurrent solves on multiple Python threads serialize | **FIXED** | **Bug confirmed by running code**: the QP path is pure Rust (no Python callbacks), so a `QpSensitivity` solve held the GIL *continuously* — a background watcher thread stalled 23.6 ms ≈ the full 31 ms solve, and 8 `QpSensitivity` solves across 8 threads took as long as serial (ratio 0.97) on a 14-core box. **Fix**: wrap each solve in `py.allow_threads`. The QP sites are pure Rust but hold non-`Send` linear-solver trait objects, so a transparent `SendGuard` (the same trick `PyProblem::solve` uses for its `Rc`s) crosses the GIL-release boundary; the closure runs on the calling thread so it never actually moves between OS threads. The NLP `PySolver::solve` uses the identical `SendGuard` pattern as `PyProblem::solve` (every `tnlp_bridge.rs` callback re-acquires the GIL via `Python::with_gil`, so re-entrancy is safe). **Test** (`python/tests/test_qp_sensitivity.py::test_qp_solve_releases_the_gil`): asserts 8 threaded solves finish in < 0.75× serial (skips on < 4 cores). Post-fix the watcher stall dropped to 4.5 ms and the threaded ratio to 0.39 (~2.5× speedup). **Fail-first confirmed** by swapping the pre-M35 `.so`: ratio 1.01 → test FAILS; post-fix all 41 QP + 112 NLP-session/sensitivity/curve_fit tests pass (one pre-existing, unrelated `test_socp.py` exp-cone failure reproduces identically on the pre-M35 `.so`). See `## M35 detail`. |
 | M36 | rust(studio-core): the report-reader's `InputDescriptor` mirror (`crates/pounce-studio-core/src/report.rs:142-154`) is missing the `CbfFile` variant that the writer (`crates/pounce-solve-report/src/lib.rs:185-204`) emits as `"kind": "cbf-file"` for `.cbf` conic instances. serde's internally-tagged enum hard-fails on the unknown tag, so the *entire* solve report is rejected — CBF solve reports can't be loaded at all | **FIXED** | **Bug confirmed by running code**: rewriting a good fixture's `fair_metadata.input` to `{"kind":"cbf-file","path":…,"size_bytes":…}` and loading it via `SolveReport::from_json_str` failed with serde `unknown variant 'cbf-file', expected one of 'nl-file', 'builtin', 'tnlp-direct'`. **Fix**: add the `CbfFile { path, size_bytes }` variant to studio-core's `InputDescriptor`, mirroring the writer (kebab-case `"cbf-file"`; `path: String` matching the reader's other variants). No production code matches the enum exhaustively, so the addition is self-contained. **Test** (`crates/pounce-studio-core/tests/fixtures.rs::loads_cbf_file_input_descriptor`): loads a cbf-file report and asserts it decodes to `InputDescriptor::CbfFile` with the right path/size. **Fail-first confirmed**: pre-fix a load-only form of the test failed with the serde unknown-variant error; post-fix all 13 studio-core tests pass. See `## M36 detail`. |
+| M37 | rust(cinterface): library UB — the sensitivity C API feeds NULL straight into `slice::from_raw_parts`. `IpoptSolverParametricStep` (`crates/pounce-cinterface/src/solver.rs:339,347`) and `IpoptSolverReducedHessian` (`:383`) accept a legal `n_pins == 0` call (which is allowed to pass NULL `pin_indices`/`deltas` — there is nothing to point at), but build the slices with `from_raw_parts(pin_indices, 0)` unconditionally. `from_raw_parts` requires its pointer be non-null and aligned *even for empty slices*, so `from_raw_parts(NULL, 0)` is UB; recent rustc's `-C debug-assertions` precondition checks turn it into a process abort. The rest of the crate gates this correctly (`IpoptSolverSolve` uses `if n_us > 0 { from_raw_parts } else { &[] }`) | **FIXED** | **Bug confirmed by running code**: a converged-session solve followed by `IpoptSolverParametricStep(solver, 0, NULL, NULL, dx_out)` aborts with SIGABRT — `unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null` (the session check sits *before* the bad `from_raw_parts`, so a solve is required to reach it). **Fix**: a local `slice_or_empty(ptr, len)` helper that returns `&[]` when `len == 0` and only calls `from_raw_parts` otherwise — mirroring the `n_us > 0` gate already used in `IpoptSolverSolve` — applied to all three sites (the two `ParametricStep` slices + the `ReducedHessian` pins). An empty pin set is a well-defined no-op (zero perturbation → Δx ≈ 0, 0×0 reduced Hessian), so both calls now return `TRUE`. **Test** (`crates/pounce-cinterface/src/solver.rs::zero_pins_with_null_pointers_is_not_ub`): solves the 1-D quad to a session, then calls both entry points with `n_pins=0` + NULL pointers and asserts `TRUE`. **Fail-first confirmed** by reverting the `ParametricStep` slices to bare `from_raw_parts`: the test aborts (signal 6, SIGABRT, the non-null precondition message); post-fix all 43 pounce-cinterface lib tests pass, clippy clean of new warnings. See `## M37 detail`. |
 
 ## C1 detail
 
@@ -2824,3 +2825,73 @@ failed pre-fix with the serde unknown-variant error; post-fix the full test and
 all 13 studio-core tests pass. clippy reports no new lib warnings (the test's
 `unwrap`/`expect` follow the file's established convention). Pure-Rust crate; no
 Python extension involved.
+
+## M37 detail
+
+**Issue** (`crates/pounce-cinterface/src/solver.rs`): the session-style
+sensitivity C ABI exposes two entry points that take a pin set —
+`IpoptSolverParametricStep(solver, n_pins, pin_indices, deltas, dx_out)` and
+`IpoptSolverReducedHessian(solver, n_pins, pin_indices, obj_scal, hr_out)`. Both
+deliberately treat `n_pins == 0` as legal: the null-guards only reject NULL
+`pin_indices`/`deltas` *when `n_pins > 0`* (`if n_pins > 0 && (pin_indices.is_null()
+|| deltas.is_null()) { return FALSE; }`), because an empty pin set has nothing to
+point at, so a caller may pass NULL. But once past the solver/session guards, the
+code built the slices unconditionally:
+
+```rust
+let pins_raw = std::slice::from_raw_parts(pin_indices, n_pins as usize); // :339, :383
+let deltas_slice = std::slice::from_raw_parts(deltas, n_pins as usize);  // :347
+```
+
+`std::slice::from_raw_parts` documents that the pointer **must be non-null and
+aligned even for a zero-length slice** (enum-layout niche optimizations rely on
+references being non-null). So `from_raw_parts(NULL, 0)` is library UB. It is
+silent on older toolchains, but recent rustc emits an `assert_unsafe_precondition!`
+language-UB check under `-C debug-assertions` (the default for dev/test profiles),
+which turns the call into a hard process abort. The rest of the crate already
+gates this correctly — `IpoptSolverSolve` reads its primal buffer with
+`let initial_x = if n_us > 0 { std::slice::from_raw_parts(x, n_us).to_vec() } else
+{ Vec::new() };` — only these two sensitivity functions diverged.
+
+**Verification (running code)**: the bad `from_raw_parts` sits *after* the
+`info.session.as_ref()` guard, so a converged session is needed to reach it.
+Create the 1-D quad (`f(x)=(x-2)²`), `IpoptCreateSolver`, `IpoptSolverSolve`
+(→ `Solve_Succeeded`), then call
+`IpoptSolverParametricStep(solver, 0, NULL, NULL, dx_out)`. Pre-fix the test
+binary aborts:
+
+```
+unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be
+aligned and non-null, and the total size of the slice not to exceed `isize::MAX`
+... thread caused non-unwinding panic. aborting.
+... (signal: 6, SIGABRT)
+```
+
+**Fix** (`crates/pounce-cinterface/src/solver.rs`): a small private helper that
+mirrors the existing `n_us > 0` gate and dedupes the three sites —
+
+```rust
+/// Like `std::slice::from_raw_parts`, but yields an empty slice when
+/// `len == 0` instead of dereferencing `ptr`. … `from_raw_parts(NULL, 0)`
+/// is undefined behaviour and trips the non-null debug-assertion.
+unsafe fn slice_or_empty<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
+    if len == 0 { &[] } else { std::slice::from_raw_parts(ptr, len) }
+}
+```
+
+applied at all three call sites (`pins_raw`/`deltas_slice` in `ParametricStep`,
+`pins_raw` in `ReducedHessian`). An empty pin set is a well-defined no-op: a zero
+perturbation gives Δx ≈ 0 and a 0×0 reduced Hessian, so the underlying
+`pounce_sensitivity::Solver` returns `Ok` and both C calls report `TRUE`.
+
+**Test** (`crates/pounce-cinterface/src/solver.rs::zero_pins_with_null_pointers_is_not_ub`):
+solves the quad to a session, then calls both entry points with `n_pins = 0` and
+NULL `pin_indices`/`deltas` (valid `dx_out`/`hr_out` buffers), asserting each
+returns `TRUE` — reaching the assertions at all proves no `from_raw_parts(NULL, 0)`
+abort fired. **Fail-first confirmed** by reverting the two `ParametricStep` slices
+to bare `from_raw_parts` (leaving the helper referenced by `ReducedHessian` so it
+stays live): the test aborts with signal 6 / the non-null precondition message;
+restoring the helper makes it pass. Full `pounce-cinterface` lib suite green (43
+passed), `cargo clippy -p pounce-cinterface` clean of new warnings (the 3 reported
+`needless_range_loop` warnings pre-date this change and live in `lib.rs`).
+Pure-Rust crate; no Python extension rebuild needed.

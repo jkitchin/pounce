@@ -301,6 +301,26 @@ pub unsafe extern "C" fn IpoptSolverKktSolve(
     TRUE
 }
 
+/// Like [`std::slice::from_raw_parts`], but yields an empty slice when
+/// `len == 0` instead of dereferencing `ptr`. A legal zero-length call
+/// (`n_pins == 0`) is allowed to pass a NULL/dangling pointer, yet
+/// `from_raw_parts` requires its pointer be non-null and aligned *even
+/// for empty slices* — `from_raw_parts(NULL, 0)` is undefined behaviour
+/// and trips the `slice::from_raw_parts requires the pointer to be
+/// aligned and non-null` debug-assertion on recent Rust. This mirrors
+/// the `n_us > 0` gate already used in `IpoptSolverSolve`.
+///
+/// # Safety
+///
+/// When `len > 0`, `ptr` must point to `len` valid, initialized `T`.
+unsafe fn slice_or_empty<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
+    if len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ptr, len)
+    }
+}
+
 /// First-order parametric step `Δx ≈ ∂x*/∂p · Δp`. `pin_indices` is
 /// `n_pins` `Index` values (0-based indices into `g(x)`); `deltas` is
 /// the parameter perturbation `Δp` of the same length; `dx_out` is the
@@ -336,7 +356,7 @@ pub unsafe extern "C" fn IpoptSolverParametricStep(
         return FALSE;
     };
     let m = info.m;
-    let pins_raw = std::slice::from_raw_parts(pin_indices, n_pins as usize);
+    let pins_raw = slice_or_empty(pin_indices, n_pins as usize);
     let mut pins = Vec::with_capacity(n_pins as usize);
     for &i in pins_raw {
         if i < 0 || i >= m {
@@ -344,7 +364,7 @@ pub unsafe extern "C" fn IpoptSolverParametricStep(
         }
         pins.push(i as pounce_common::types::Index);
     }
-    let deltas_slice = std::slice::from_raw_parts(deltas, n_pins as usize);
+    let deltas_slice = slice_or_empty(deltas, n_pins as usize);
     let Ok(dx) = s.parametric_step(&pins, deltas_slice) else {
         return FALSE;
     };
@@ -380,7 +400,7 @@ pub unsafe extern "C" fn IpoptSolverReducedHessian(
         return FALSE;
     };
     let m = info.m;
-    let pins_raw = std::slice::from_raw_parts(pin_indices, n_pins as usize);
+    let pins_raw = slice_or_empty(pin_indices, n_pins as usize);
     let mut pins = Vec::with_capacity(n_pins as usize);
     for &i in pins_raw {
         if i < 0 || i >= m {
@@ -536,6 +556,70 @@ mod tests {
 
         unsafe { IpoptFreeSolver(solver) };
         // The (now-null) problem handle is safe to free.
+        unsafe { FreeIpoptProblem(prob) };
+    }
+
+    /// M37: a legal `n_pins == 0` call to the sensitivity entry points is
+    /// allowed to pass NULL `pin_indices`/`deltas` (there is nothing to
+    /// point at), but the implementation fed those straight into
+    /// `slice::from_raw_parts(NULL, 0)` — undefined behaviour that aborts
+    /// the process under the `-C debug-assertions` precondition checks
+    /// recent rustc emits. The session check sits *before* the bad
+    /// `from_raw_parts`, so a converged solver is required to reach it.
+    /// Pre-fix this test aborts the binary; post-fix the calls return a
+    /// well-defined `Bool` (an empty pin set is a no-op back-solve).
+    #[test]
+    fn zero_pins_with_null_pointers_is_not_ub() {
+        let mut prob = create_quad();
+        let solver = unsafe { IpoptCreateSolver(&mut prob) };
+        assert!(!solver.is_null());
+
+        // Solve so the handle holds a converged session (the null-pointer
+        // path past the session guard is what trips the UB).
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let status = unsafe {
+            IpoptSolverSolve(
+                solver,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj as *mut f64,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ApplicationReturnStatus::SolveSucceeded as Index);
+
+        // n_pins == 0 with NULL pin/delta pointers — the legal empty call.
+        // dx_out is a real n-long buffer (n == 1 here); n_pins² == 0 so the
+        // reduced-Hessian output buffer is never written, but pass a valid
+        // pointer anyway.
+        let mut dx_out = [0.0_f64];
+        let mut hr_out = [0.0_f64];
+
+        // Reaching the assertions at all means no `from_raw_parts(NULL, 0)`
+        // abort fired. An empty pin set is a well-defined no-op: a zero
+        // perturbation yields Δx ≈ 0 and an empty (0×0) reduced Hessian, so
+        // both calls succeed with TRUE — the defined, non-UB outcome.
+        let step = unsafe {
+            IpoptSolverParametricStep(
+                solver,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                dx_out.as_mut_ptr(),
+            )
+        };
+        assert_eq!(step, TRUE, "empty parametric step is a defined no-op");
+
+        let rh = unsafe {
+            IpoptSolverReducedHessian(solver, 0, std::ptr::null(), 1.0, hr_out.as_mut_ptr())
+        };
+        assert_eq!(rh, TRUE, "empty reduced Hessian is a defined no-op");
+
+        unsafe { IpoptFreeSolver(solver) };
         unsafe { FreeIpoptProblem(prob) };
     }
 }
