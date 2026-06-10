@@ -53,6 +53,12 @@ pub struct FilterLsAcceptor {
     pub gamma_theta: Number,
     pub s_phi: Number,
     pub s_theta: Number,
+    /// `obj_max_inc` option (default 5.0) — the rapid-barrier-increase
+    /// guard's log-scale cap. Both the live `check_acceptability` path and
+    /// the [`Self::is_acceptable_to_current_iterate`] helper read this, so
+    /// the regular-phase line search and the restoration progress test stay
+    /// in lockstep instead of one path hard-coding 5.0.
+    pub obj_max_inc: Number,
     pub max_soc: i32,
     /// `alpha_min_frac` from `IpFilterLSAcceptor.cpp:RegisterOptions` —
     /// safety factor applied to the dynamic alpha-min before declaring
@@ -109,6 +115,7 @@ impl Default for FilterLsAcceptor {
             gamma_theta: 1e-5,
             s_phi: 2.3,
             s_theta: 1.1,
+            obj_max_inc: 5.0,
             max_soc: 4,
             alpha_min_frac: 0.05,
             theta_min: None,
@@ -168,6 +175,18 @@ impl FilterLsAcceptor {
 
     /// Sufficient progress check (used when *not* in switching mode).
     /// Mirrors the OR-test in `IpFilterLSAcceptor.cpp:IsAcceptableToCurrentIterate`.
+    ///
+    /// The two comparisons use `compare_le` — a `<=` carrying a
+    /// `10·eps·|basval|` round-off slack — exactly like the live
+    /// [`Self::check_acceptability`] path and
+    /// [`Self::is_acceptable_to_current_iterate`]. An earlier version used
+    /// bare `<` here, so this (then-dead) helper silently disagreed with the
+    /// live path on the round-off boundary: near a solution `phi_trial - phi`
+    /// is dominated by summation noise (a tiny *positive* value on a genuine
+    /// descent step) while `-gamma_phi·theta` is a tiny *negative* one, and a
+    /// bare `<` rejects the step that `compare_le` accepts (the same
+    /// flat-objective failure mode documented on [`Self::armijo_holds`]).
+    /// This is now the single source of truth for the OR-test (L6).
     pub fn is_sufficient_progress(
         &self,
         theta: Number,
@@ -175,7 +194,8 @@ impl FilterLsAcceptor {
         theta_trial: Number,
         phi_trial: Number,
     ) -> bool {
-        phi_trial < phi - self.gamma_phi * theta || theta_trial < (1.0 - self.gamma_theta) * theta
+        pounce_common::utils::compare_le(theta_trial, (1.0 - self.gamma_theta) * theta, theta)
+            || pounce_common::utils::compare_le(phi_trial - phi, -self.gamma_phi * theta, phi)
     }
 
     /// Mirrors `FilterLSAcceptor::IsAcceptableToCurrentFilter`
@@ -216,16 +236,10 @@ impl FilterLsAcceptor {
                 return false;
             }
         }
-        // Filter-style sufficient-progress test (line 497-498).
-        pounce_common::utils::compare_le(
-            trial_theta,
-            (1.0 - self.gamma_theta) * reference_theta,
-            reference_theta,
-        ) || pounce_common::utils::compare_le(
-            trial_barr - reference_barr,
-            -self.gamma_phi * reference_theta,
-            reference_barr,
-        )
+        // Filter-style sufficient-progress test (line 497-498) — delegated to
+        // the canonical [`Self::is_sufficient_progress`] so this helper and
+        // the live path share one implementation (L6).
+        self.is_sufficient_progress(reference_theta, reference_barr, trial_theta, trial_barr)
     }
 
     /// Single-trial accept decision. Caller has already computed the
@@ -278,26 +292,22 @@ impl FilterLsAcceptor {
             self.armijo_holds(alpha_primal, d_phi, phi, phi_trial)
         } else {
             // `IsAcceptableToCurrentIterate` with `called_from_restoration=false`.
-            // Rapid-barrier-increase guard (`obj_max_inc` default 5.0).
+            // Rapid-barrier-increase guard, capped by the `obj_max_inc` field
+            // (default 5.0) — the same value the restoration progress test
+            // reads through `is_acceptable_to_current_iterate`, so the two
+            // paths no longer diverge on a hard-coded constant (L6).
             let rapid_increase_ok = if phi_trial > phi {
                 let basval = if phi.abs() > 10.0 {
                     phi.abs().log10()
                 } else {
                     1.0
                 };
-                (phi_trial - phi).log10() <= 5.0 + basval
+                (phi_trial - phi).log10() <= self.obj_max_inc + basval
             } else {
                 true
             };
-            let suff_progress_ok = pounce_common::utils::compare_le(
-                theta_trial,
-                (1.0 - self.gamma_theta) * theta,
-                theta,
-            ) || pounce_common::utils::compare_le(
-                phi_trial - phi,
-                -self.gamma_phi * theta,
-                phi,
-            );
+            // Single source of truth for the sufficient-progress OR-test.
+            let suff_progress_ok = self.is_sufficient_progress(theta, phi, theta_trial, phi_trial);
             // pounce#21 diagnostic — env-gated. Emits one line per
             // trial when POUNCE_DBG_LS=1 so the divergence-vs-Ipopt
             // investigation can correlate which branch (rapid-increase
@@ -546,6 +556,53 @@ mod tests {
         // Sufficient progress: phi_trial = -1 < phi=0 - gamma_phi*theta=0.
         let d = a.check_acceptability(1e-12, 1.0, 0.0, -1e-12, 1.0, -1.0);
         assert_eq!(d, AcceptDecision::Accept);
+    }
+
+    #[test]
+    fn is_sufficient_progress_accepts_round_off_boundary_like_live_path() {
+        // L6: `is_sufficient_progress` must carry the same `compare_le`
+        // round-off slack as the live `check_acceptability` path. Construct
+        // the φ-branch boundary exactly: `phi_trial - phi == -gamma_phi*theta`
+        // with the θ-branch firmly false. A bare `<` (the old, divergent
+        // implementation) rejects this equality; `compare_le`'s 10·eps·|phi|
+        // slack accepts it.
+        let a = FilterLsAcceptor::new();
+        let theta = 1.0;
+        let theta_trial = 1.0; // not < (1-gamma_theta)*theta → θ-branch false
+        let phi = 0.0;
+        let phi_trial = -a.gamma_phi * theta; // φ-branch equality boundary
+        assert!(
+            a.is_sufficient_progress(theta, phi, theta_trial, phi_trial),
+            "is_sufficient_progress must mirror the live compare_le path and \
+             accept the boundary phi_trial - phi == -gamma_phi*theta"
+        );
+    }
+
+    #[test]
+    fn check_acceptability_honors_obj_max_inc_field() {
+        // L6: the rapid-barrier-increase guard must read the `obj_max_inc`
+        // field, not a hard-coded 5.0. A ~1e7 jump in phi (log10 ≈ 7) is
+        // rejected at the default cap 5.0 (basval 1.0 → threshold 6) but
+        // accepted once the field is raised to 10.0 (threshold 11). d_phi=0
+        // keeps us out of the switching/Armijo branch; theta_trial stays
+        // under theta_max; the θ-branch satisfies sufficient progress so the
+        // decision turns purely on the rapid-increase guard.
+        let args = (1.0, 1.0, 1.0, 0.0, 0.5, 1.0 + 1e7);
+
+        let mut default_cap = FilterLsAcceptor::new();
+        assert_eq!(
+            default_cap.check_acceptability(args.0, args.1, args.2, args.3, args.4, args.5),
+            AcceptDecision::Reject,
+            "default obj_max_inc=5.0 should reject a 1e7 barrier jump"
+        );
+
+        let mut relaxed_cap = FilterLsAcceptor::new();
+        relaxed_cap.obj_max_inc = 10.0;
+        assert_eq!(
+            relaxed_cap.check_acceptability(args.0, args.1, args.2, args.3, args.4, args.5),
+            AcceptDecision::Accept,
+            "raising obj_max_inc to 10.0 should accept the same jump"
+        );
     }
 
     #[test]

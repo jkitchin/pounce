@@ -68,6 +68,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L3 | algorithm: the probing μ-oracle hard-codes its centering cap `sigma_max = 100.0` (`crates/pounce-algorithm/src/mu/adaptive.rs:685-691`) instead of forwarding the user-set `sigma_max` option, so a user-set `sigma_max` reaches only the quality-function oracle — unlike upstream, where the probing oracle reads the same option | **FIXED** | **Bug confirmed by running code + upstream source.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpProbingMuOracle.cpp`: it reads `options.GetNumericValue("sigma_max", sigma_max_, prefix)` in `InitializeImpl` and caps `sigma = Min(sigma, sigma_max_)` — so the probing oracle **is** user-configurable upstream (the registered option help saying "Only used if mu_oracle is quality-function" is itself slightly inaccurate; behavior is what matters). pounce's adaptive free-mode update constructed `ProbingMuOracle { sigma_max: 100.0, … }` (hard-coded), while the quality-function branch correctly forwarded `self.sigma_max` (`adaptive.rs:705`). **Reproduced**: solving HS071 with `mu_strategy=adaptive`, `mu_oracle=probing` took **10** iterations at the default `sigma_max=100` *and* at `sigma_max=1e-6` — byte-identical, i.e. the user value was ignored. **Fix**: forward `self.sigma_max` (one line, `adaptive.rs:686`), matching upstream; updated the field doc-comment (104-108) to note it now also feeds the probing oracle. The registered option help string is left verbatim (it is upstream's). **Test** (`crates/pounce-algorithm/tests/optimize_hs71.rs::hs071_probing_oracle_honors_user_sigma_max`): solves HS071 via the probing oracle at default `sigma_max` vs `sigma_max=1e-6` and asserts the iteration counts differ. **Fail-first confirmed**: pre-fix both runs take 10 iters → `assert_ne!` fails ("both runs took 10 iters"); post-fix default=10 vs 1e-6=8 (both still `Solve_Succeeded`), so the option now reshapes the μ trajectory. Full pounce-algorithm suite green (lib 245 + all integration, `optimize_hs71` now 17, 0 failures). See `## L3 detail`. |
 | L4 | algorithm: `golden_section` can return an unevaluated `-100.0` sentinel endpoint when `qmax <= 0` (`src/mu/oracle/quality_function.rs:540-554` with 730, 741); also `>=` in `qf_ok` makes the default `qf_tol = 0.0` flat-stop dead | **PARTIAL — one facet fixed, one not-a-bug** | **Two facets; verified against upstream.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpQualityFunctionMuOracle.cpp::PerformGoldenSection`. **Facet 2 (`>=` makes flat-stop dead): NOT A BUG.** Upstream's loop condition is `(1. - Min/Max) >= qf_tol` — the *same* `>=` as pounce line 499. With the default `qf_tol = 0.0` the term `(1 - qmin/qmax) >= 0` is always true for any non-degenerate bracket, so the qf-tolerance never stops the loop *in either codebase*; that is upstream's intended behavior (the qf_tol stop is opt-in via a positive `quality_function_eps`), not a pounce regression. **Facet 1 (unevaluated sentinel return): REAL, fixed.** `pick_sigma` always passes one endpoint with the `-100.0` sentinel (search-up → `q_up=-100` at line 730; search-down → `q_lo=-100` at 741). Upstream never lands on a sentinel because its loop lacks a `qmax > 0` guard, so a sentinel state (large positive ratio) keeps the loop alive until the slot is overwritten, and its post-loop else-branch re-evaluates `if( q_up < 0. )` anyway. pounce **adds** `qmax > 0.0 &&` to `qf_ok` (line 499, to dodge a divide-by-zero when every sample ≤ 0); that guard can force `qf_ok = false` on the first pass while an endpoint still holds the sentinel, routing it into the `width_ok && !qf_ok` branch (540-554) — which, unlike pounce's *own* else-branch (561-572) and upstream, did **not** re-evaluate, so it returned the unevaluated `-100.0` endpoint as the spurious minimum. **Reproduced** by a focused unit test on the pure `golden_section`: `q(σ) = -σ` on the interior/lo points (all ≤ 0 ⇒ `qmax ≤ 0`) but `+50` at the upper endpoint; search-up call returns σ=3 (the sentinel endpoint, true q=50, the bracket *maximum*) pre-fix. **Fix**: in the `width_ok && !qf_ok` branch re-evaluate any unmoved sentinel endpoint (`sigma_lo==sigma_lo_in && q_lo<0` / `sigma_up==sigma_up_in && q_up<0`) before selecting the minimum, mirroring the else-branch and upstream; refreshed the stale doc-comment (524-530) that wrongly claimed the sentinel could never reach this branch. **Test** (`quality_function.rs::tests::golden_section_never_returns_unevaluated_sentinel`): asserts the result is `< sigma_up`. **Fail-first confirmed** (pre-fix returns σ=3; post-fix returns an interior σ≈2.24). Full pounce-algorithm suite green (lib 246 + all integration, 0 failures). See `## L4 detail`. |
 | L5 | algorithm: `max_cpu_time` actually measures wall time — `src/conv_check/opt_error.rs:257` via `pounce_common::utils::cpu_time()`'s documented wallclock fallback | **FIXED** | **Bug confirmed by reading + running code; fix verified against upstream.** `pounce_common::utils::cpu_time()` was literally `wallclock_time()` (a documented "phase 4 will wire in a real CPU clock" stub), so the `max_cpu_time` gate at `opt_error.rs:257` (`timing.overall_alg.live_cpu_time() >= self.max_cpu_time`) bounded **wall** time, not CPU time — diverging from upstream, whose `max_cpu_time` bounds process CPU. **Upstream reference**: fetched `coin-or/Ipopt` (stable/3.14) `src/Common/IpUtils.cpp::CpuTime()` — on Unix it returns `getrusage(RUSAGE_SELF).ru_utime` (process **user** CPU time); on Windows it uses `clock()` (which on the MSVC runtime is itself elapsed real time). **Fix**: implement the Unix path with `libc::getrusage(RUSAGE_SELF)` returning `ru_utime` seconds, matching upstream exactly; keep the `wallclock_time()` fallback for non-Unix (faithful to upstream's Windows `clock()` ≈ wall behavior). Added `libc = "0.2"` to `[workspace.dependencies]` and a `[target.'cfg(unix)'.dependencies] libc` entry to pounce-common (Unix-only, so non-Unix targets pull nothing new); no change to the publish list / release-consistency guard. **Test** (`pounce-common::utils::tests::cpu_time_excludes_sleep_but_counts_compute`, `#[cfg(unix)]`): (1) sleeps 300 ms and asserts `wall_delta − cpu_delta > 0.1 s` (CPU must not accrue while blocked), and (2) runs a 50 M-iter busy loop and asserts `cpu_delta > 0` (clock is live, not constant-zero). **Fail-first confirmed** by temporarily reverting `cpu_time()` to the wallclock alias: it then reported "cpu_time advanced 0.310s across a 0.310s sleep … gap was only −0.000s" and the assertion fired; restored, it passes. Full pounce-common suite green (58) and pounce-algorithm green (lib 246 + all integration); `cargo check --workspace --exclude pounce-hsl` clean. See `## L5 detail`. |
+| L6 | algorithm: dead/divergent duplicates of filter acceptance predicates — `src/line_search/filter_acceptor.rs:171-179` (no round-off slack, unlike the live path at 292-300) and 199-229 (parameterized `obj_max_inc` while the live path hard-codes 5.0) | **FIXED** | **Both divergences confirmed by reading + running code; unified.** Two near-duplicate copies of the filter sufficient-progress / iterate-acceptance logic had drifted from the live `check_acceptability` path. **(a) `is_sufficient_progress` (171-179)** used bare `<` where the live path (then 292-300) uses `compare_le` (a `<=` carrying `10·eps·|basval|` round-off slack); the helper was also **dead** (`grep` shows no caller — only `is_acceptable_to_current_iterate` is live, from `pounce-restoration/src/conv_check.rs:163`). On the round-off boundary (`phi_trial − phi == −gamma_phi·theta`, common near a solution where φ is flat and the descent is summation-noise-sized) the bare `<` rejects a step `compare_le` accepts — the same flat-objective failure mode documented on `armijo_holds`. **(b)** the live `check_acceptability` rapid-barrier-increase guard hard-coded `5.0`, while the parameterized `is_acceptable_to_current_iterate` (the restoration-live copy) reads an `obj_max_inc` argument — so the two paths would diverge for any non-default `obj_max_inc`. **Fix**: (1) rewrote `is_sufficient_progress` to use `compare_le` (now identical to the live OR-test) and made it the **single source of truth** — both `check_acceptability` and `is_acceptable_to_current_iterate` now delegate their sufficient-progress test to it; (2) added an `obj_max_inc` field to `FilterLsAcceptor` (default 5.0) and switched the live guard from the literal `5.0` to `self.obj_max_inc`, so the regular-phase and restoration paths share one cap. The live regular-phase behavior is **byte-identical** (it already used `compare_le` and 5.0 = the field default), so no integration regression. **Tests** (`filter_acceptor::tests`): `is_sufficient_progress_accepts_round_off_boundary_like_live_path` builds the φ-branch equality boundary and asserts the helper accepts it; `check_acceptability_honors_obj_max_inc_field` drives a ~1e7 barrier jump (log10≈7) and asserts Reject at the default cap 5.0 (threshold 6) but Accept once `obj_max_inc=10.0` (threshold 11). **Fail-first confirmed** by temporarily reverting both edits (bare `<` and literal `5.0`): both new tests fail; restored, both pass. Full pounce-algorithm green (lib **248** + all integration) and pounce-restoration green (105), confirming the dedup is regression-free. See `## L6 detail`. |
 
 ## C1 detail
 
@@ -3355,3 +3356,84 @@ green (lib 246 + every integration test); `cargo check --workspace --exclude
 pounce-hsl` clean. The `max_wall_time` gate at `opt_error.rs:260` was already
 correct (`live_wallclock_time()`) and is unchanged, so the two budgets are now
 distinct as upstream intends.
+
+## L6 detail
+
+**Issue (review L6):** "Dead/divergent duplicates of filter acceptance
+predicates — `src/line_search/filter_acceptor.rs:171-179` (no round-off slack,
+unlike the live path at 292-300) and 199-229 (parameterized `obj_max_inc` while
+the live path hard-codes 5.0)."
+
+The filter acceptor had three textual copies of the same Fletcher-Leyffer
+sufficient-progress OR-test, and they had drifted apart:
+
+1. **`is_sufficient_progress` (171-179)** — `phi_trial < phi - gamma_phi*theta
+   || theta_trial < (1-gamma_theta)*theta`, a bare `<`.
+2. **The live `check_acceptability` path (292-300)** — the same OR-test but via
+   `compare_le` (the `10·eps·|basval|` round-off-tolerant `<=`).
+3. **`is_acceptable_to_current_iterate` (199-229)** — again the same OR-test via
+   `compare_le`, plus a rapid-barrier-increase guard parameterized on an
+   `obj_max_inc` argument.
+
+**Divergence (a): missing round-off slack + dead.** `grep` across the workspace
+shows `is_sufficient_progress` has **no caller** — it is dead — while
+`is_acceptable_to_current_iterate` is live (called from
+`pounce-restoration/src/conv_check.rs:163`,
+`RestoFilterConvCheck::test_orig_progress`). The dead helper's bare `<`
+disagrees with the live `compare_le` exactly on the round-off boundary: near a
+solution the barrier objective is flat, so `phi_trial - phi` is dominated by
+floating-point summation noise (a tiny *positive* value even on a genuine
+descent step) while `-gamma_phi·theta` is a tiny *negative* one. A bare `<`
+then rejects a step that `compare_le` accepts — the same flat-objective stall
+documented on `armijo_holds`. A future caller reaching for the public
+`is_sufficient_progress` would silently get the slack-less, divergent behavior.
+
+**Divergence (b): hard-coded 5.0 vs parameterized cap.** The live
+`check_acceptability` rapid-increase guard hard-coded
+`(phi_trial - phi).log10() <= 5.0 + basval`, while
+`is_acceptable_to_current_iterate` takes `obj_max_inc` as an argument
+(the restoration caller passes its own `obj_max_inc`, also defaulting to 5.0).
+`obj_max_inc` is a registered upstream option
+(`upstream_options.rs:492`, default 5.0). With the value hard-coded in the
+regular-phase path, the two code paths would diverge for any non-default
+`obj_max_inc`.
+
+**Fix** (`crates/pounce-algorithm/src/line_search/filter_acceptor.rs`):
+
+* Rewrote `is_sufficient_progress` to use `compare_le` for both branches —
+  now textually identical to the live OR-test — and made it the **single
+  source of truth**: `check_acceptability`'s `suff_progress_ok` and
+  `is_acceptable_to_current_iterate`'s tail both now call it. Three copies
+  collapse to one.
+* Added an `obj_max_inc: Number` field to `FilterLsAcceptor` (default 5.0) and
+  changed the live guard from the literal `5.0` to `self.obj_max_inc`, so the
+  regular-phase and restoration progress tests read one configurable cap. (The
+  env-gated `POUNCE_DBG_LS` diagnostic still computes `rapid_increase_ok` and
+  `suff_progress_ok` separately, so its per-branch logging is preserved.)
+
+Because the live regular-phase path already used `compare_le` and `5.0`
+(= the new field default), its behavior is **byte-identical** after the
+refactor — the change is a dedup, not a behavior change for the default
+configuration.
+
+**Tests** (`filter_acceptor::tests`):
+
+* `is_sufficient_progress_accepts_round_off_boundary_like_live_path`: with the
+  default acceptor, sets `theta = theta_trial = 1.0` (θ-branch firmly false)
+  and `phi = 0`, `phi_trial = -gamma_phi*theta` so that `phi_trial - phi ==
+  -gamma_phi*theta` *exactly* — the φ-branch equality boundary. The bare `<`
+  rejects this; `compare_le`'s slack accepts it. Asserts the helper returns
+  true.
+* `check_acceptability_honors_obj_max_inc_field`: drives `check_acceptability`
+  with `d_phi = 0` (out of the switching/Armijo branch), `theta_trial = 0.5`
+  (< `theta_max`), and a `phi` jump of `1e7` (log10 ≈ 7). The θ-branch
+  satisfies sufficient progress, so the decision turns purely on the
+  rapid-increase guard: Reject at the default cap 5.0 (threshold 5+1=6), Accept
+  once `obj_max_inc` is raised to 10.0 (threshold 11).
+
+**Fail-first confirmed.** Temporarily reverting both edits — `is_sufficient_progress`
+back to bare `<`, and the live guard back to the literal `5.0` — makes both new
+tests fail (`17 passed; 2 failed`); with the fixes in place all 19
+`filter_acceptor` tests pass. Full `pounce-algorithm` green (lib **248** + every
+integration test) and `pounce-restoration` green (105), confirming the live
+caller of `is_acceptable_to_current_iterate` is unaffected.
