@@ -23,6 +23,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H12 | presolve: FBBT lacks both the Phase-0 row mask and any infeasibility handling | **FIXED** | Two layers. (1) **Row mask**: `run_fbbt` (`fbbt/orchestrator.rs`) gained a `row_kept: Option<&[bool]>` param; the call site (`lib.rs`) passes `Some(&row_kept_inner)`, so propagation skips any row Phase 0 dropped — over the aux-clamped box a dropped row could fabricate a spurious infeasibility (the #53 hazard Phase 1 already filters). (2) **Infeasibility handling**: `fbbt_report.infeasibility_witness` was never inspected, so FBBT's "undefined and must not be trusted" partially-tightened bounds reached the IPM. The call site now snapshots `x_l`/`x_u` before FBBT and, on a witness, restores them (mirrors the Phase 1 rollback — presolve has no channel to certify infeasibility, so the IPM runs on the pre-FBBT box and certifies it). Tests `dropped_row_is_skipped_and_does_not_flag_infeasible` (orchestrator) + `fbbt_infeasibility_discards_corrupted_bounds` (lib integration). |
 | H13 | cinterface: `IpoptSolverSolve` silently discards all user options after the first solve | **FIXED** | The session solve does `mem::replace(&mut info.problem.app, IpoptApplication::new())` to move the configured app into the `RustSolver`, leaving a **blank** app behind that nothing restored (the doc's claimed `app_template` field never existed — grep-confirmed). The second `IpoptSolverSolve` on a handle then read default options — linear solver, tolerances, scaling all lost — and the `feral_config_from_options` snapshot read the blanked app too. Fix: clone the `OptionsList` (it derives `Clone`) before the `mem::replace` and write it back into the fresh blank app via `options_mut()`, so options survive every solve. Stale doc comment on `IpoptSolverInfo::problem` corrected. Test `options_survive_repeated_session_solves` (`solver.rs`): sets `max_iter=7`, creates the session, solves twice, asserts the option persists after each. |
 | H14 | release: crates.io automation guaranteed to fail mid-batch (irreversible partial publish), invisible to the consistency guard | **FIXED (guard + pre-flight; root pin out of scope)** | Verified by running `cargo publish -p pounce-feral --dry-run`: hard-fails with "all dependencies must have a version requirement specified … dependency `feral` does not specify a version". The root `feral` dep (`Cargo.toml:89`) is a versionless git pin (`req:"*"`, source `git+…`); it is crate #4 of 19 in publish order, so a `vX.Y.Z` tag uploads 3 crates then hard-fails — an irreversible partial release. The root pin cannot be lifted here (feral must first cut a crates.io release carrying the pinned commits — `feral` is on crates.io only at 0.10.0, which lacks them). Two-layer fix: (1) new `scripts/check_dep_publishability.py` flags any normal/build dep of a publishable crate that is git-sourced or wildcard/versionless; wired as check #4 in `check-release-consistency.sh` (the per-PR/pre-tag guard) so the blocker is no longer invisible. (2) `publish-crates.sh` pre-flight runs the same scan and **aborts before uploading crate 1**, converting the irreversible mid-batch failure into a safe no-op. Tests: `scripts/tests/test_check_dep_publishability.py` (7 synthetic-fixture cases, tree-state-independent). |
+| H15 | python: `curve_fit` reports `success=False` for `Solved_To_Acceptable_Level` | **FIXED** | `_solve_fit` (`_curve_fit.py:712`, shared by `curve_fit`, `curve_fit_streaming`, `curve_fit_minima`) gated `success` on `int(info["status"]) == 0`, so an acceptable-level stall (status 1) was reported failed despite a fully populated `popt`/`pcov` — and it lacked the `final_kkt_error` fallback `minimize` already had (gh #119/#123). **Verified by running code**: built the native ext (`maturin develop`) and ran an exp-decay FD fit at `tol=1e-12` → `status=1`, `success=False`, valid `popt≈[2.5,1.31,0.505]`. Fix reuses `_minimize._NLP_SUCCESS_STATUS` (`{0,1}`) plus the finite-KKT-≤-`acceptable_tol` second gate. Post-fix the same fit reports `success=True`. Tests `test_curve_fit_acceptable_level_reports_success` (e2e, asserts status 1 → success) + `test_curve_fit_success_mapping_matches_nlp_minimize`; pre-fix the e2e FAILS (`assert False is True`), post-fix PASSES. Full `test_curve_fit.py` (42) + `test_minima.py`/`test_minimize.py` (30) green. |
 
 ## C1 detail
 
@@ -615,3 +616,56 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   state. If the team prefers the guard not gate unrelated PRs, demote check #4
   to a warning (drop the `fail=1`) while keeping the `publish-crates.sh`
   pre-flight as the hard gate; the harm-prevention is unaffected.
+
+## H15 detail
+
+- **Bug** (`python/pounce/_curve_fit.py`): `_solve_fit` — the single solve path
+  behind `curve_fit`, `curve_fit_streaming`, and `curve_fit_minima` — computed
+  ```python
+  success = int(info["status"]) == 0
+  ```
+  Only `Solve_Succeeded` (0) counted; `Solved_To_Acceptable_Level` (1) — a
+  converged solve where the iterate met the *acceptable* tolerance after the
+  tight one stalled — was reported `success=False` despite returning a fully
+  populated `popt`/`pcov`. Callers gating on `result.success` discard valid
+  fits. The repo had already fixed exactly this class for `minimize`
+  (gh #119, `_minimize.py:65` accepts `{0, 1}`) and the jax/torch paths accept
+  both, so `curve_fit` was the lone straggler. It also lacked the
+  `final_kkt_error` ≤ `acceptable_tol` fallback `minimize` applies
+  (`_minimize.py:524-529`) for stall exits (e.g. tiny-step, status 3) that
+  nonetheless land at an acceptable NLP error.
+- **Verified by running code**: built the native extension into an isolated
+  venv (`maturin develop`, 17 s incremental) and ran an exp-decay fit over the
+  finite-difference path at a deliberately tight `tol=1e-12`,
+  `acceptable_tol=1e-5`:
+  ```
+  status 1  success False  msg Solved_To_Acceptable_Level   popt [2.5 1.311 0.505]
+  ```
+  i.e. a verified optimum reported as a failure. (`tol=1e-9` converges fully →
+  status 0, success True, confirming the tight tol is what forces the
+  acceptable-level stall.)
+- **Fix**: reuse the NLP `minimize` decision so the two entry points agree —
+  import `_NLP_SUCCESS_STATUS` (`{0, 1}`) and `_DEFAULT_ACCEPTABLE_TOL` from
+  `_minimize`, then
+  ```python
+  status_code = int(info["status"])
+  acceptable_tol = float(user_opts.get("acceptable_tol", _DEFAULT_ACCEPTABLE_TOL))
+  kkt_error = float(info.get("final_kkt_error", float("nan")))
+  success = status_code in _NLP_SUCCESS_STATUS or (
+      np.isfinite(kkt_error) and kkt_error <= acceptable_tol
+  )
+  ```
+  Post-fix the same fit reports `status 1, success True`. `user_opts` (already
+  built at `_curve_fit.py:702`) carries any caller-supplied `acceptable_tol`.
+- **Tests** (`python/tests/test_curve_fit.py`):
+  - `test_curve_fit_acceptable_level_reports_success` — e2e: the tight-`tol`
+    FD fit above; asserts `res.status == 1` (the acceptable path actually
+    fires) **and** `res.success is True` and `popt ≈ [2.5, 1.3, 0.5]`.
+  - `test_curve_fit_success_mapping_matches_nlp_minimize` — pins that the rule
+    reuses `_NLP_SUCCESS_STATUS` (0,1 success; 2 not), guarding against the
+    two paths diverging again.
+- **Verification summary**: with the fix reverted to the old one-liner the e2e
+  test FAILS (`assert False is True`, `popt` valid — the exact bug); restored,
+  both new tests PASS. Full `test_curve_fit.py` green (42), and
+  `test_minima.py` + `test_minimize.py` green (30) — the streaming/minima
+  routes and the `minimize` import are unaffected.

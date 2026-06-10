@@ -35,7 +35,12 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from ._pounce import Solver
-from ._minimize import _normalize_bounds, _wrap_constraints
+from ._minimize import (
+    _DEFAULT_ACCEPTABLE_TOL,
+    _NLP_SUCCESS_STATUS,
+    _normalize_bounds,
+    _wrap_constraints,
+)
 
 _EPS = float(np.finfo(np.float64).eps) ** 0.5
 
@@ -709,7 +714,19 @@ def _solve_fit(
     solver = Solver(problem)
     popt, info = solver.solve(x0=np.asarray(p0, dtype=float))
     popt = np.asarray(popt)
-    success = int(info["status"]) == 0
+    # Judge success exactly as the NLP `minimize` path does (gh #119 / #123).
+    # `Solved_To_Acceptable_Level` (status 1) is a converged solve — the iterate
+    # met the *acceptable* tolerance after the tight one stalled — so counting
+    # only status 0 reported `success=False` at a verified optimum with a fully
+    # populated `popt`/`pcov`, and callers gating on `.success` discarded valid
+    # fits. As a second gate, a stall (e.g. tiny-step exit) whose final unscaled
+    # NLP error is already within `acceptable_tol` is also a success.
+    status_code = int(info["status"])
+    acceptable_tol = float(user_opts.get("acceptable_tol", _DEFAULT_ACCEPTABLE_TOL))
+    kkt_error = float(info.get("final_kkt_error", float("nan")))
+    success = status_code in _NLP_SUCCESS_STATUS or (
+        np.isfinite(kkt_error) and kkt_error <= acceptable_tol
+    )
     # The converged factor is only trustworthy as an *unscaled* Hessian when
     # scaling was off and the solve actually held a factor.
     factor_ok = bool(scaling_off and solver.converged)

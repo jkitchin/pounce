@@ -709,3 +709,44 @@ def test_streaming_requires_factory_and_params():
 
     with pytest.raises(ValueError, match="number of parameters"):
         pounce.curve_fit_streaming(variadic, _batched_source(x, y))
+
+
+def test_curve_fit_acceptable_level_reports_success():
+    """gh #119 / #123 analog for curve_fit. A fit that stalls at the *acceptable*
+    tolerance after the tight tolerance exits returns status 1
+    (``Solved_To_Acceptable_Level``) with a fully populated ``popt``/``pcov`` —
+    a converged solve. ``_solve_fit`` used to gate ``success`` on ``status == 0``
+    alone, so it reported ``success=False`` at a verified optimum and callers
+    gating on ``result.success`` silently discarded valid fits. It must now count
+    the acceptable level (and an acceptable final KKT error) as success, matching
+    ``minimize`` and the jax/torch paths.
+
+    A very tight ``tol`` over the finite-difference path forces the acceptable
+    stall deterministically.
+    """
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 4.0, 60)
+    y = expdecay_np(x, 2.5, 1.3, 0.5) + 0.01 * rng.standard_normal(x.size)
+
+    with pytest.warns(UserWarning, match="finite-difference"):
+        res = pounce.curve_fit(
+            expdecay_np, x, y, p0=[1.0, 1.0, 0.0],
+            options={"tol": 1e-12, "acceptable_tol": 1e-5, "print_level": 0},
+        )
+
+    # The tight tol forces the acceptable-level stall rather than a status-0 exit.
+    assert res.status == 1, f"expected Solved_To_Acceptable_Level, got {res.message}"
+    # ...which must now read as success, with a valid recovered fit.
+    assert res.success is True
+    np.testing.assert_allclose(res.popt, [2.5, 1.3, 0.5], atol=0.1)
+
+
+def test_curve_fit_success_mapping_matches_nlp_minimize():
+    """The curve_fit success rule reuses the NLP ``minimize`` status set, so the
+    two entry points agree on what counts as a converged solve (no divergence to
+    re-introduce the gh #119 class of bug)."""
+    from pounce._minimize import _NLP_SUCCESS_STATUS
+
+    assert 0 in _NLP_SUCCESS_STATUS      # Solve_Succeeded
+    assert 1 in _NLP_SUCCESS_STATUS      # Solved_To_Acceptable_Level
+    assert 2 not in _NLP_SUCCESS_STATUS  # Infeasible_Problem_Detected
