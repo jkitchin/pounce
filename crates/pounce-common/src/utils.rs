@@ -19,10 +19,15 @@ pub fn is_finite_number(val: Number) -> bool {
 
 /// Equivalent to `Ipopt::Compare_le(lhs, rhs, BasVal)` — relaxed `<=`
 /// with a tolerance proportional to `|BasVal|`. Threshold matches
-/// upstream's `(10 * machine_epsilon * Max(1, |BasVal|))`.
+/// upstream's `IpUtils.cpp`:
+/// `lhs - rhs <= 10 * machine_epsilon * fabs(BasVal)` — note there is
+/// **no** `Max(1, …)` floor on the magnitude; the tolerance shrinks to 0
+/// as `BasVal → 0`. An earlier `.max(1.0)` here held the tolerance at
+/// `10·eps` for small filter values, accepting steps upstream rejects on
+/// the bit-equivalence path.
 #[inline]
 pub fn compare_le(lhs: Number, rhs: Number, bas_val: Number) -> bool {
-    let tol = 10.0 * Number::EPSILON * bas_val.abs().max(1.0);
+    let tol = 10.0 * Number::EPSILON * bas_val.abs();
     lhs - rhs <= tol
 }
 
@@ -153,6 +158,25 @@ mod tests {
         let v = 1.0;
         let near = v + 5.0 * Number::EPSILON;
         assert!(compare_le(near, v, v));
+    }
+
+    #[test]
+    fn compare_le_tolerance_shrinks_with_small_basval() {
+        // Code review L30: upstream Ipopt's Compare_le uses
+        // `10 * eps * fabs(BasVal)` with NO `Max(1, |BasVal|)` floor, so the
+        // tolerance must collapse toward 0 as BasVal does. With a tiny
+        // BasVal = 1e-6 the threshold is 10*eps*1e-6 ≈ 2.2e-21; a gap of
+        // 1e-18 exceeds it, so the relaxed `<=` must reject.
+        let bas_val = 1e-6;
+        let gap = 1e-18;
+        assert!(
+            !compare_le(gap, 0.0, bas_val),
+            "tolerance must scale with |BasVal|; gap {gap} should exceed \
+             10*eps*{bas_val}"
+        );
+        // Sanity: an in-tolerance gap at the same BasVal is still accepted.
+        let tiny = 5.0 * Number::EPSILON * bas_val;
+        assert!(compare_le(tiny, 0.0, bas_val));
     }
 
     #[test]

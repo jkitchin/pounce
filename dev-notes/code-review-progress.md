@@ -94,6 +94,8 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 
 | L29 | `Pow` first-order tangent disagrees with the reverse-mode gradient at base 0 (`nl_tape.rs` forward-tangent sites guard on `r != 0 && u != 0`; reverse guards only `rv != 0`) — Jacobian and Hessian-vector products use an inconsistent derivative model at `x = 0`, the `.nl` default start | **FIXED** | **Confirmed by reading code.** Three forward-tangent `Pow` sites — `forward_tangent` (was line 513), `hessian_directional` (736), free fn `fwd_tan_step` (2994) — guarded the base-derivative term `r * u^(r-1) * du` on `r != 0.0 && u != 0.0`, while the reverse adjoint sweep (`reverse_into` 343, free fn 2856) guards only `rv != 0.0`. At the `.nl` default start `x0 = 0` with `f = x0^x1`, `x1 = 1`: reverse gives `df/dx0 = 1*0^0 = 1`, forward-tangent gave `0` (term dropped) — a real Jacobian-vs-gradient disagreement. **Fix**: changed all three guards to `if r != 0.0` (dropping the spurious `&& u != 0.0`) so forward-tangent matches reverse exactly; `0.powf(r-1)` is `1` for `r=1`, `0` for `r>1`, `±inf` for `r<1` — identical to what reverse already produces. **Test** (`nl_tape::tests::pow_forward_tangent_matches_reverse_gradient_at_base_zero`): builds `pow(var(0), var(1))` (variable exponent stays a real `Pow`, not lowered to Mul/Sqrt), evaluates at `[0.0, 1.0]`, asserts forward-tangent `df/dx0 == reverse grad[0] == 1`. **Fail-first confirmed**: reverting the guard to `r != 0.0 && u != 0.0` makes forward-tangent return `0` while reverse stays `1`, failing the assert (`forward tangent df/dx0 = 0 must match reverse gradient 1`). Restored; 81 pounce-nl tests green. **Hessian (second-order) `Pow` base-0 sites left unchanged on purpose**: the forward-over-reverse cross-partial `∂²(u^r)/∂u∂r` at `u = 0` with a *variable* exponent is genuinely singular (`→ ±inf`); those sites already special-case integer `r ≥ 2` and base 0, and there is no finite value that both arms could consistently agree on — only the first-order tangent had a removable inconsistency. `cargo fmt -p pounce-nl` / `cargo clippy -p pounce-nl --all-targets -- -D clippy::correctness -D clippy::suspicious` clean (remaining warnings pre-existing `unwrap_used`/`expect_used` restriction-style). See `## L29 detail`. |
 
+| L30 | `compare_le` uses `10·eps·max(1, \|BasVal\|)` where upstream uses `10·eps·\|BasVal\|` (`pounce-common/src/utils.rs:24-27`); the doc comment wrongly asserts upstream has the `max` — looser comparison for small filter values on the bit-equivalence path | **FIXED** | **Confirmed by reading code.** Upstream Ipopt `IpUtils.cpp` defines `Compare_le(lhs, rhs, BasVal)` as `lhs - rhs <= 10. * mach_eps * fabs(BasVal)` — **no** `Max(1, …)` floor. The Rust port had `bas_val.abs().max(1.0)`, which pins the tolerance at `10·eps` even as `BasVal → 0`, accepting steps upstream rejects. The call-site comment in `filter_acceptor.rs:567` already (correctly) describes the slack as `10·eps·\|phi\|`, corroborating the intended semantics. **Fix**: dropped `.max(1.0)` (tol = `10·eps·\|BasVal\|`) and rewrote the doc comment to state there is no floor. **Test** (`utils::tests::compare_le_tolerance_shrinks_with_small_basval`): at `BasVal = 1e-6` the tolerance is `10·eps·1e-6 ≈ 2.2e-21`, so a gap of `1e-18` must be **rejected** (`!compare_le(1e-18, 0.0, 1e-6)`); a sub-tolerance gap at the same `BasVal` is still accepted. The pre-existing `compare_le_tolerates_eps` test used `BasVal = 1.0` where `max(1,·)` and `\|·\|` coincide, so it could not catch this. **Fail-first confirmed**: restoring `.max(1.0)` makes the new test fail (buggy tol `10·eps` accepts the `1e-18` gap). Restored; 59 pounce-common + 248 pounce-algorithm (filter/penalty acceptor consumers of `compare_le`) tests green — no regression from the tightened tolerance. `cargo fmt -p pounce-common` / `cargo clippy -p pounce-common --all-targets -- -D clippy::correctness -D clippy::suspicious` clean (1 pre-existing `expect_used` restriction warning). See `## L30 detail`. |
+
 ## C1 detail
 
 - **Bug**: `redundant_mask` from `find_redundant_rows` is aligned to the
@@ -4955,3 +4957,48 @@ the forward tangent return `0` while reverse stays `1`; the test fails with
 `forward tangent df/dx0 = 0 must match reverse gradient 1 at base 0`. Restored after
 confirming. Full crate suite: 80 lib + 1 integration tests green. `cargo fmt` / gated
 `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
+
+## L30 detail
+
+**Issue (L30).** `pounce_common::utils::compare_le` is the Rust port of Ipopt's
+`Compare_le(lhs, rhs, BasVal)` — a relaxed `<=` whose slack scales with the
+reference magnitude `BasVal`. It drives filter and penalty line-search
+acceptance (`filter_acceptor.rs`, `penalty_acceptor.rs`). Upstream
+(`Common/IpUtils.cpp`):
+
+    inline bool Compare_le(Number lhs, Number rhs, Number BasVal) {
+       Number mach_eps = std::numeric_limits<Number>::epsilon();
+       return (lhs - rhs <= 10. * mach_eps * fabs(BasVal));
+    }
+
+There is **no** `Max(1, |BasVal|)` floor: the tolerance shrinks to 0 as
+`BasVal → 0`. The Rust port instead computed
+`10 * eps * bas_val.abs().max(1.0)`, and its doc comment falsely claimed the
+`Max` matched upstream. Effect: for small reference values (small `phi`/`theta`
+near a solution) the comparison stayed as loose as `10·eps`, accepting trial
+steps that upstream's tighter, magnitude-proportional bound rejects — a
+divergence on the bit-equivalence path.
+
+Corroboration: the live call site at `filter_acceptor.rs:567` already documents
+the slack as "`compare_le`'s `10·eps·|phi|`" — i.e. the *intended* behavior was
+the no-floor form all along; the `.max(1.0)` was the stray deviation.
+
+**Fix.** `let tol = 10.0 * Number::EPSILON * bas_val.abs();` (drop `.max(1.0)`)
+and rewrite the doc comment to state explicitly that there is no `Max(1, …)`
+floor and why an earlier floor was wrong.
+
+**Test.** `utils::tests::compare_le_tolerance_shrinks_with_small_basval`. With
+`BasVal = 1e-6`, `tol = 10·eps·1e-6 ≈ 2.2e-21`. A gap of `1e-18` exceeds it, so
+`compare_le(1e-18, 0.0, 1e-6)` must be `false`; a `5·eps·BasVal` gap is still
+accepted. The pre-existing `compare_le_tolerates_eps` test used `BasVal = 1.0`,
+where `max(1, |BasVal|) == |BasVal|`, so it was blind to the floor — the new
+test deliberately uses a sub-unit `BasVal` to separate the two formulas.
+
+**Fail-first.** Restoring `.max(1.0)` makes `tol = 10·eps ≈ 2.2e-15`, which
+accepts the `1e-18` gap, so the new assert fails. Restored after confirming.
+
+**Regression scope.** `compare_le` feeds the filter/penalty acceptors, so the
+tightening could in principle change acceptance decisions. Full suites stayed
+green: 59 pounce-common, 248 pounce-algorithm (incl. the filter/penalty
+acceptor tests and the L6 `is_sufficient_progress`-mirrors-`compare_le` test).
+`cargo fmt` / gated `cargo clippy` clean.
