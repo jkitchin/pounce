@@ -149,10 +149,24 @@ impl Interval {
         if self.is_empty() || rhs.is_empty() {
             return Self::EMPTY;
         }
-        let p1 = self.lo * rhs.lo;
-        let p2 = self.lo * rhs.hi;
-        let p3 = self.hi * rhs.lo;
-        let p4 = self.hi * rhs.hi;
+        // `0 * ∞` is NaN under IEEE, but in interval arithmetic an *exact*
+        // zero endpoint annihilates, so a `0 * x` corner is 0. Without this,
+        // `[0,0] × ENTIRE` makes all four corners NaN → `[NaN, NaN]`, which
+        // `is_empty()` reads as EMPTY → spurious infeasibility in the reverse
+        // pass (L44). (A single NaN corner is already absorbed by `f64::min`/
+        // `max`, which return the non-NaN operand; only the all-NaN case
+        // leaked, but the guard makes every corner well-defined.)
+        fn corner(a: Number, b: Number) -> Number {
+            if a == 0.0 || b == 0.0 {
+                0.0
+            } else {
+                a * b
+            }
+        }
+        let p1 = corner(self.lo, rhs.lo);
+        let p2 = corner(self.lo, rhs.hi);
+        let p3 = corner(self.hi, rhs.lo);
+        let p4 = corner(self.hi, rhs.hi);
         let lo = round_down(p1.min(p2).min(p3.min(p4)));
         let hi = round_up(p1.max(p2).max(p3.max(p4)));
         Self { lo, hi }
@@ -333,7 +347,7 @@ impl Interval {
 
 /// Outward round on the low end: nudge `x` one ULP toward `-∞`.
 /// Identity on infinities and NaN.
-fn round_down(x: Number) -> Number {
+pub(crate) fn round_down(x: Number) -> Number {
     if x.is_finite() {
         x.next_down()
     } else {
@@ -342,7 +356,7 @@ fn round_down(x: Number) -> Number {
 }
 
 /// Outward round on the high end: nudge `x` one ULP toward `+∞`.
-fn round_up(x: Number) -> Number {
+pub(crate) fn round_up(x: Number) -> Number {
     if x.is_finite() {
         x.next_up()
     } else {
@@ -689,5 +703,22 @@ mod tests {
         let two = Interval::point(0.2);
         let sum = one.add(two);
         assert!(sum.contains(0.3));
+    }
+
+    /// L44: `[0,0] × ENTIRE` must be `[0,0]` (0 annihilates), not the
+    /// `[NaN, NaN]` that the raw four-corner `0 * ∞` produces — which
+    /// `is_empty()` would read as a spurious EMPTY (infeasibility).
+    #[test]
+    fn mul_zero_by_entire_is_zero_not_empty() {
+        let r = Interval::point(0.0).mul(Interval::ENTIRE);
+        assert!(!r.is_empty(), "0 × ENTIRE must not be empty, got {r:?}");
+        assert!(r.contains(0.0), "0 × ENTIRE must contain 0, got {r:?}");
+        // Symmetric: ENTIRE × 0.
+        let r2 = Interval::ENTIRE.mul(Interval::point(0.0));
+        assert!(!r2.is_empty() && r2.contains(0.0));
+        // A one-sided ∞ corner (`[0,2] × [3,∞]`) was already fine via
+        // `min`/`max` ignoring the lone NaN; confirm it still gives `[0, ∞]`.
+        let r3 = Interval::new(0.0, 2.0).mul(Interval::new(3.0, Number::INFINITY));
+        assert!(!r3.is_empty() && r3.contains(0.0) && r3.hi == Number::INFINITY);
     }
 }

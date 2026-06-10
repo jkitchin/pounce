@@ -110,6 +110,8 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L40 | `symmetric_eigen` return value ignored in `reduced_hessian` (`sensitivity.rs:300, 348`) — on non-convergence the rank/null-space would be silently wrong; everywhere else in the crate the return is checked | **FIXED** | **Confirmed by reading both call sites + the crate convention.** `symmetric_eigen` returns a `bool` (made meaningful by the M4 fix: `false` on non-convergence). `reduced_hessian` calls it twice — once on `BᵀB` to split rank vs. null space (`:322`), once on the assembled `H_R` to eigendecompose (`:370`) — and **discarded both returns**, so a non-converged sweep would publish a wrong `n_dof`/`Z` (hence a wrong reduced Hessian and eigenvalues) as if trustworthy. Every other consumer in the crate checks it: `psd.rs::sym_apply` does `if !symmetric_eigen(...) { return None; }`. **Fix**: `reduced_hessian` (and `reduced_hessian_default`) now return `Result<ReducedHessian, SensError>`; a new `SensError::EigenFailed` variant is returned at either guard (`if !symmetric_eigen(...) { return Err(SensError::EigenFailed); }`), and the success value is `Ok`-wrapped. The Python binding (`pounce-py/src/qp.rs::reduced_hessian`) maps the new error to a `PyValueError` (and the build-error `match` gains the now-required `EigenFailed` arm). The 4 in-crate test callers became `.expect("eigensolve converges")`. **Test** (`sensitivity::tests`): `reduced_hessian_returns_ok_on_convergent_eigensolve` — a well-formed QP (`min ½‖x‖²−2·𝟙ᵀx` on n=2 with `x₀+x₁≤1` active) whose two internal eigensolves both converge, asserting the call yields `Ok` with `n_dof=1` / eigenvalue 1, and that the explicit-tolerance entry point is `Ok` too. **Fail-first (N/A — the `Err` path is a defensive guard).** The `EigenFailed` branch only trips when `symmetric_eigen` exhausts its 50 sweeps, which a modest well-conditioned reduced Hessian never does — so the failure path is not reachable through the public solver at this layer (the same limitation M4 documented for the convergence flag itself) and is not exercised by a fixture; the test pins the `Ok` contract that previously was a bare return. Full pounce-convex suite green (110 lib, +1); `pounce-py` builds; `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean. See `## L40 detail`. |
 | L41 | Nonsym driver assembles SOC `(z,z)` blocks dense (`hsde_nonsym.rs:262-269`), unlike the symmetric driver's sparse diag+rank-1 form — O(m²) fill for large SOCs mixed with exp cones | **FIXED (perf; threshold-gated to preserve small-SOC numerics)** | **Confirmed by reading both drivers + a fail-first structural test.** `NsKkt::build` reserved the full dense `m×m` lower triangle for every SOC `(z,z)` block (`m(m+1)/2` entries), while the symmetric driver (`ipm.rs::KktStructure`, `ZBlockPos::DiagRank1`) uses the ECOS/Clarabel sparse trick: an auxiliary variable `ξ` with diagonal + coupling column `u` + `(ξ,ξ)=1`, whose Schur complement reproduces `diag(d)+uuᵀ` at `O(m)` fill. **Fix**: ported the aux-variable form to the nonsym KKT, but **threshold-gated** by `SOC_DENSE_MAX_DIM = 3` — for the dense triangle `m(m+1)/2` is actually *fewer* nonzeros than the aux form's `2m+1` (plus an extra row/col) when `m ≤ 3`, and is slightly better-conditioned near the cone boundary, so small SOCs keep the dense path and large ones (the review's concern) take the sparse path. The shared helpers already support the appended aux rows: `build_rhs` zeros the aux tail and `split_step` reads only the base rows; `recover_ds` uses `BlockScaling::SecondOrder{diag,u}` directly, independent of the KKT layout — so the change is contained to `NsKkt` (the `ZPos` variants, `build`, `update_blocks`). **Why the threshold (verified):** an unconditional sparse port tipped the existing `soc_mixed_with_exp` (SOC(3)+exp) test from `Optimal` to `OptimalInaccurate` — the solution was still correct to 1e-8 (`x=(5,e)`, `obj=5+e`), only the convergence band crossed, because the augmented system is marginally worse-conditioned near the boundary. Gating SOC(3) to dense restores exact `Optimal`. **Tests** (`hsde_nonsym::tests`): `large_soc_kkt_block_is_sparse_not_dense` (SOC(24): `+1` aux var, `ZPos::SecondOrderSparse`, nnz below the dense `m(m+1)/2` bound — **fail-first confirmed**: pre-fix `dim` was the base with no aux), `small_soc_kkt_block_stays_dense` (SOC(3): no aux, `ZPos::SecondOrderDense`), and `large_soc_sparse_path_solves` (SOC(6) norm-min through the driver reaches `t=5`, exercising the sparse path end-to-end, not just structurally). Full pounce-convex suite green (113 lib, +3); `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean (the one `type_complexity` note at `:908` is pre-existing and outside the gated set). See `## L41 detail`. |
 | L42 | Documented sensitivity regularization default `1e-8` vs actual `reg: 1e-10` (`sensitivity.rs:30-31` vs `ipm.rs:135`) | **FIXED (doc)** | **Confirmed by reading both sites.** The `sensitivity` module doc says the static regularization δ is "the QP solver's own `reg`, default `1e-8`" (`:29-30`), but `QpOptions::default()` sets `reg: 1e-10` (`ipm.rs:135`) — and the default-built sensitivity (`build_default` → `QpOptions::default()`) puts exactly that `opts.reg` on the KKT diagonal (`build`, `:116` `let reg = opts.reg`). The default was deliberately retuned `1e-8 → 1e-10` (the `ipm.rs:128-134` comment: `1e-8` floors the primal residual `δ·‖dy‖` above `tol` on badly-scaled NETLIB LPs like `adlittle`, stalling to the iteration cap; `1e-10` converges in ~57 iters), but the sensitivity doc kept the old number — a pure doc-staleness bug, no wrong behavior. **Fix**: corrected the doc to `1e-10`, and added a regression-guard test so doc and code can't silently drift again. **Test** (`sensitivity::tests`): `module_doc_regularization_matches_qp_options_default` asserts `QpOptions::default().reg == 1e-10` (the value the module doc now names). **Fail-first confirmed**: with the assertion temporarily set to the stale `1e-8`, the test failed (`left: 1e-10, right: 1e-8`), proving the doc's claim was wrong against the actual default; restoring `1e-10` (doc + test together) passes. Full pounce-convex suite green (114 lib, +1); `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean. See `## L42 detail`. |
+| L43 | Duplicate Jacobian entries handled inconsistently: assignment vs accumulation (`inequality_projection.rs:146-148, 213` vs 177, 215) — under the summing convention a wrong `J_block` can admit an unsafe block via `all_implied = true` | **FIXED** | **Confirmed by reading the function + a fail-first test.** `project_inequalities` buckets Jacobian triplets by row into `by_row` (which *keeps* duplicates), then reads them inconsistently: the linear constant `sum_jx` (`:145`) accumulates over all entries, but the block matrix `j_block` (`:147`) and the coupled-row coefficient `a_b` (`:213`) used plain assignment, so a duplicate `(row,col)` triplet kept only its last value; the surviving-column branch `a_y` (`:215`) already accumulated. Under the summing convention a dropped duplicate yields a wrong `J_block` → wrong block solution `b = M y + p` → wrong projected `rhs`, which can flip a real coupled inequality to "implied" and drop it (`all_implied = true`). **Fix**: accumulate (`+=`) at both sites; both targets are zero-initialized. **Test** (`inequality_projection::tests`): `projection_sums_duplicate_jacobian_entries_in_block` — equality row 0 carries duplicate block-col entries `2.0` and `-1.0` (true coef `1.0`); assignment keeps `-1.0` solving `b=-3` instead of `3`, making coupled row `b∈[-5,-1]` look implied when with `b=3` it is real. **Fail-first confirmed**: pre-fix `all_implied = true`; post-fix `false` (rhs_u = -4 ⇒ b solved to 3). Full pounce-presolve suite green (220 lib, +1); `cargo fmt` / gated `cargo clippy` clean. See `## L43 detail`. |
+| L44 | `Interval::mul` produces NaN endpoints on `0 × ∞` corners (`fbbt/interval.rs:148-159`) → `is_empty()` reads EMPTY → spurious infeasibility; `inverse_powint`'s `powf(1/n)` not outward-rounded (`reverse.rs:223-224`) | **FIXED (both parts)** | **Confirmed by reading both + three fail-first tests.** (1) `mul`'s four-corner formula computes `0.0 * ∞ = NaN`; for `[0,0] × ENTIRE` *all four* corners are NaN → `[NaN, NaN]`, which `is_empty()` (`:68`, NaN ⇒ empty) reads as spurious infeasibility. (A single NaN corner was already absorbed by `f64::min`/`max` returning the non-NaN operand, so only the all-NaN case leaked.) **Fix**: a `corner(a,b)` helper treating any `0 * x` as `0` (exact-zero annihilation, the IA convention) — the only NaN source in `a*b` is `0×∞`, so this makes every corner well-defined. (2) `inverse_powint` computed `abs_lo/abs_hi = powf(1/n)` round-to-nearest, violating the module's outward-rounding soundness invariant (could over-tighten and drop a feasible point); the odd branch (`signed_nth_root`) had the same flaw. **Fix**: `round_down`/`round_up` the root endpoints (helpers exposed `pub(crate)`), both branches. **Tests**: `mul_zero_by_entire_is_zero_not_empty` (fail-first: pre-fix `Interval{lo:NaN,hi:NaN}`); `inverse_powint_even_branch_is_outward_rounded` and `..._odd_branch_...` on perfect-square/cube intervals (fail-first: pre-fix lower root `== raw powf`, not strictly below). Full pounce-presolve suite green (223 lib, +3); `cargo fmt` / gated `cargo clippy` clean. See `## L44 detail`. |
 
 ## C1 detail
 
@@ -5612,3 +5614,91 @@ actual default. Restoring `1e-10` (doc comment and test together) passes.
 Full pounce-convex suite green (114 lib tests, +1; all integration green);
 `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D
 clippy::suspicious`) clean.
+
+## L43 detail
+
+**Issue.** `project_inequalities` (`inequality_projection.rs`) handles duplicate
+Jacobian entries inconsistently — assignment in some places, accumulation in
+others — so under the summing convention a wrong `J_block` can admit an unsafe
+block via `all_implied = true`.
+
+**Verification.** The function buckets Jacobian triplets by row into `by_row`,
+which *retains* duplicate `(row, col)` pairs (`:122` pushes without merging).
+Three readers, two conventions:
+- `sum_jx` (`:145`) — `sum_jx += v * x_probe[c]`, accumulates over all entries.
+- `j_block` (`:147`) — `j_block[..] = v`, plain assignment (last write wins).
+- `a_b` (`:213`) — `a_b[pos] = v`, plain assignment.
+- `a_y` (`:215`) — `*a_y.entry(c).or_insert(0.0) += v`, accumulates.
+
+So a duplicate block-column triplet is summed for the linear constant but
+*overwritten* for the matrix `J_block` and the coupled-row coefficient `a_b`.
+A wrong `J_block` → wrong block solve `b = M y + p` → wrong projected `rhs_l/
+rhs_u`, which can make a real coupled inequality look implied (`implied = rhs_l
+≤ activity_lo ≤ activity_hi ≤ rhs_u`) and be dropped — `all_implied = true`
+admits the block unsafely.
+
+**Fix.** Accumulate (`+=`) at `:147` and `:213`, matching `sum_jx`/`a_y`. Both
+targets are zero-initialized (`vec![0.0; …]`), so this is a pure correctness
+change.
+
+**Test** (`inequality_projection::tests::projection_sums_duplicate_jacobian_entries_in_block`):
+a 1×1 block whose equality row 0 has duplicate block-column entries `2.0` and
+`-1.0` (true coefficient `1.0`). Assignment keeps `-1.0`, so the block solves
+`-1·b = 3 → b = -3` instead of `1·b = 3 → b = 3`. The coupled inequality
+`b ∈ [-5, -1]` is then a real constraint with `b = 3` (3 ∉ [-5,-1]) but looks
+implied with the buggy `b = -3` (-3 ∈ [-5,-1]). **Fail-first confirmed**:
+pre-fix the test saw `all_implied = true` (panic "row b ∈ [-5,-1] … is a real
+constraint, not implied"); post-fix `all_implied = false` and `rhs_u = -4`
+(= -1 - 3, i.e. b correctly solved to 3). Full pounce-presolve suite green (220
+lib, +1); `cargo fmt` / gated `cargo clippy` clean.
+
+## L44 detail
+
+**Issue.** Two FBBT-interval soundness bugs: (1) `Interval::mul` produces NaN
+endpoints on `0 × ∞` corners, which `is_empty()` reads as EMPTY → spurious
+infeasibility in the reverse pass; (2) `inverse_powint`'s `powf(1/n)` is not
+outward-rounded.
+
+**Verification — part 1 (`interval.rs::mul`).** The classic four-corner formula
+computes `p1..p4 = {lo,hi}_self * {lo,hi}_rhs`. `0.0 * ∞` is NaN under IEEE.
+`is_empty()` (`:68`) returns `true` when either endpoint is NaN. Now: Rust's
+`f64::min`/`max` *ignore* a lone NaN (return the non-NaN operand), so a *single*
+NaN corner is absorbed — e.g. `[0,2] × [3,∞]` still yields `[0, ∞]` correctly.
+The leak is the *all-NaN* case: `[0,0] × ENTIRE` makes all four corners
+`0 * ±∞ = NaN`, so `min`/`max` propagate NaN → `[NaN, NaN]` → `is_empty()` true
+→ the reverse pass declares a spurious infeasibility. (The review notes this is
+currently masked by H12's ignored flag, i.e. not yet observable end-to-end, but
+it is a latent soundness hole.) The mathematically correct result is `[0,0]`
+(an exact-zero endpoint annihilates: `0 · x = 0` for all finite `x`).
+
+**Fix — part 1.** A local `corner(a, b)` that returns `0.0` whenever either
+operand is exactly `0.0`, else `a * b`. The only NaN source in `a * b` is
+`0 × ∞`, so guarding the zero case makes every corner well-defined; the result
+of `[0,0] × ENTIRE` is now `[0,0]` (±1 ULP from outward rounding).
+
+**Verification — part 2 (`reverse.rs::inverse_powint`).** The even branch
+computes `abs_lo = z_pos.lo.powf(1/n)` and `abs_hi = z_pos.hi.powf(1/n)` with
+round-to-nearest `powf`, then builds `[abs_lo, abs_hi]`. The module promises
+*outward*-rounded over-approximations (it "can never over-tighten and drop a
+feasible point"); a round-to-nearest root can land *inside* the true range, so
+the projected operand interval can exclude a feasible point. The odd branch
+(`signed_nth_root`, `:212-213`) has the identical flaw.
+
+**Fix — part 2.** `round_down` the lower root and `round_up` the upper root in
+both branches (the helpers were made `pub(crate)` so `reverse.rs` can reuse the
+crate's single ULP-nudge implementation).
+
+**Tests** (`interval::tests`, `reverse::tests`):
+- `mul_zero_by_entire_is_zero_not_empty`: `[0,0] × ENTIRE` (and the symmetric
+  `ENTIRE × [0,0]`) must be non-empty and contain 0; also re-checks the
+  one-sided `[0,2] × [3,∞] = [0,∞]` case. **Fail-first confirmed**: pre-fix
+  result was `Interval { lo: NaN, hi: NaN }`.
+- `inverse_powint_even_branch_is_outward_rounded`: on the perfect-square
+  interval `[4,9]` (roots exactly 2, 3) the returned box must be *strictly*
+  outside `[2,3]` (`r.lo < powf(4,½)`, `r.hi > powf(9,½)`). **Fail-first
+  confirmed**: pre-fix `r.lo == 2` (not below).
+- `inverse_powint_odd_branch_is_outward_rounded`: same on `[8,27]^(1/3)`.
+  **Fail-first confirmed**: pre-fix lower root `== raw`.
+
+Full pounce-presolve suite green (223 lib, +3); `cargo fmt` / gated `cargo
+clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
