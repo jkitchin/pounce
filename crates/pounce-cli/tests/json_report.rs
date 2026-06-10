@@ -262,3 +262,85 @@ fn schema_field_is_stable_across_runs() {
     let _ = std::fs::remove_file(&p1);
     let _ = std::fs::remove_file(&p2);
 }
+
+/// H3 regression: the JSON / `.sol` `lambda` block must be in original
+/// `.nl` g-row order, not the internal c/d-split order (all equalities
+/// then all inequalities). AMPL / Pyomo read the dual block positionally,
+/// so a permuted block silently assigns each constraint the wrong dual.
+///
+/// Fixture `dual_order.nl` (pyomo-generated) interleaves the two kinds:
+///
+/// ```text
+///   min (x-3)^2 + (y-30)^2
+///   s.t.  g0:  x <= 2     (INEQUALITY, active  -> internal y_d block)
+///         g1:  y == 1     (EQUALITY            -> internal y_c block)
+/// ```
+///
+/// At the optimum x=2 (active), y=1: the g0 inequality dual is ≈2
+/// (`2·(3-2)`) and the g1 equality dual is ≈58 (`2·(30-1)`). Correct
+/// g-order is therefore `lambda = [≈2, ≈58]`. The pre-fix hook emitted
+/// the raw `y_c`-then-`y_d` concatenation = `[≈58, ≈2]` — the duals
+/// swapped onto the wrong constraints. Magnitudes are an order apart so
+/// the swap is unambiguous regardless of sign convention.
+#[test]
+fn lambda_is_in_original_g_order_not_cd_split_order() {
+    fn fixture_named(name: &str) -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push(name);
+        p
+    }
+
+    let json_path = tmp_path("dual_order.json");
+    let _ = std::fs::remove_file(&json_path);
+    // Force the general NLP filter-IPM path (whose `on_converged` hook
+    // builds the captured dual block).
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("dual_order.nl"))
+        .arg("--no-sol")
+        .arg("--json-output")
+        .arg(&json_path)
+        .arg("solver_selection=nlp")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "solve should succeed; stderr=\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = std::fs::read_to_string(&json_path).expect("read report");
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize");
+
+    // Sanity: x at the active bound, y pinned.
+    assert!(
+        (report.solution.x[0] - 2.0).abs() < 1e-5,
+        "x0 = {}",
+        report.solution.x[0]
+    );
+    assert!(
+        (report.solution.x[1] - 1.0).abs() < 1e-5,
+        "x1 = {}",
+        report.solution.x[1]
+    );
+
+    assert_eq!(report.solution.lambda.len(), 2, "two constraint duals");
+    let g0 = report.solution.lambda[0].abs(); // x<=2 inequality
+    let g1 = report.solution.lambda[1].abs(); // y==1 equality
+    assert!(
+        (g0 - 2.0).abs() < 1e-3,
+        "lambda[0] (g0, the x<=2 inequality) = {} expected |·|≈2; \
+         pre-fix c/d-split order put the equality's ≈58 dual here",
+        report.solution.lambda[0]
+    );
+    assert!(
+        (g1 - 58.0).abs() < 1e-3,
+        "lambda[1] (g1, the y==1 equality) = {} expected |·|≈58; \
+         pre-fix c/d-split order put the inequality's ≈2 dual here",
+        report.solution.lambda[1]
+    );
+
+    let _ = std::fs::remove_file(&json_path);
+}

@@ -11,6 +11,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | C2 | presolve: Phase-0 block elimination assumes non-block columns are constants (4 sub-cases) | **FIXED** | Conservative soundness gate rejects any block whose rows reference a free non-block column; `x_running` clamped to fixed value for trivially-fixed vars. Test `c2_gate_rejects_block_with_probe_hidden_free_dependency`. |
 | H1 | qp: inertia-shift regularization silently discarded — unbounded QPs reported `Optimal` with δ-dependent garbage | **FIXED** (`solve_equality_only` path) | Re-verify unshifted stationarity `δ·‖x‖∞` after a shifted one-shot solve; report `Unbounded` when it exceeds `1e-3·‖g‖∞` (gradient scale, not `opt_tol`). Test `h1_zero_hessian_linear_objective_is_unbounded`; repointed `inertia_control_shift_succeeds_on_psd_singular_hessian` to a bounded singular case. |
 | H2 | sensitivity: pin-row mapping omits `full_g_to_c_block` — silently wrong sensitivities with inequality constraints | **FIXED** | Translate user full-g pin indices through the c/d split before indexing `y_c`; reject pinned inequalities. Fixed `Solver::parametric_step`, `Solver::compute_reduced_hessian`, and the `convenience` (`SensSolve`) path; added `PdSensBacksolver::full_g_to_c_block` accessor. Tests in `cd_split_pin_mapping.rs`. |
+| H3 | cli: `.sol`/JSON constraint duals written in internal c/d-split order, unscaled | **FIXED** | `on_converged` hook now reassembles `lambda` via `pack_lambda_for_user` (inverts the c/d split via `c_map`/`d_map` AND unwinds `c_scale`/`d_scale`) instead of concatenating raw `y_c`+`y_d`; manual concatenation kept only as a fallback for non-`OrigIpoptNlp`. Test `lambda_is_in_original_g_order_not_cd_split_order` in `json_report.rs`. |
 
 ## C1 detail
 
@@ -127,3 +128,32 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   returned `Ok([0.1, 0, 0])` silently; post-fix → `dx=[0.1,0.1,0]` and the
   inequality is rejected. Full `pounce-sensitivity` suite green (43 + 6 + 3 + …
   across test bins); `pounce-cli` builds clean.
+
+## H3 detail
+
+- **Bug**: the `on_converged` hook (`pounce-cli/src/main.rs:602-624`) built the
+  captured `lambda` as the raw internal multipliers — all `y_c` (equalities)
+  expanded, then all `y_d` (inequalities) expanded. But `OrigIpoptNlp` splits
+  the user's `g(x)` into c (equality) and d (inequality) blocks *interleaved by
+  original `.nl` g-index* (`c_map`/`d_map`), and the canonical
+  `pack_lambda_for_user` both inverts that permutation **and** unwinds the
+  `c_scale`/`d_scale` scaling. The hook did neither, so on any `.nl` with
+  interleaved eq/ineq rows the JSON/`.sol` dual block was permuted (AMPL/Pyomo
+  read it positionally → each constraint gets the wrong dual), and off by scale
+  factors whenever default `gradient-based` scaling fires. The correct backfill
+  at main.rs:934-938 only ran when the nominal capture was empty (active-set
+  route), so the NLP path always took the buggy branch.
+- **Fix**: reassemble via `nlp.borrow().pack_lambda_for_user(&*curr.y_c,
+  &*curr.y_d)`; keep the raw `y_c`-then-`y_d` concatenation only as a fallback
+  for a non-`OrigIpoptNlp` whose trait default returns an empty vector.
+- **Test** (`json_report.rs::lambda_is_in_original_g_order_not_cd_split_order`):
+  pyomo-generated `dual_order.nl` interleaves `g0: x ≤ 2` (active inequality,
+  dual ≈ 2) then `g1: y == 1` (equality, dual ≈ 58). Correct g-order is
+  `lambda = [≈2, ≈58]`; the pre-fix concatenation gives `[≈58, ≈2]`. Magnitudes
+  an order apart so the swap is unambiguous regardless of sign convention. Runs
+  the binary with `solver_selection=nlp` to force the general filter-IPM path.
+- **Verified the bug by running code**: pre-fix binary emitted
+  `lambda = [58.0, 2.0]` on `dual_order.nl`; post-fix → `[2.0, 58.0]`. Forcing
+  the fallback branch (`if true || lambda.is_empty()`) reproduced the failure in
+  the test harness (`lambda[0] = 58 expected ≈2`); restored → green. Full
+  `pounce-cli` suite green (154 unit + all integration bins).

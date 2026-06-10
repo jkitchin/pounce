@@ -600,26 +600,39 @@ pub fn main() -> ExitCode {
             // still occupies its slot — AMPL's `.sol` reader matches
             // the x block against the originating `.nl`'s var count.
             let x = nlp.borrow().lift_x_to_full(&*curr.x);
-            let n_c = curr.y_c.dim() as usize;
-            let n_d = curr.y_d.dim() as usize;
-            let mut lambda = Vec::with_capacity(n_c + n_d);
-            if let Some(dv) = curr
-                .y_c
-                .as_any()
-                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-            {
-                lambda.extend_from_slice(&dv.expanded_values());
-            } else {
-                lambda.extend(std::iter::repeat(0.0).take(n_c));
-            }
-            if let Some(dv) = curr
-                .y_d
-                .as_any()
-                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-            {
-                lambda.extend_from_slice(&dv.expanded_values());
-            } else {
-                lambda.extend(std::iter::repeat(0.0).take(n_d));
+            // Reassemble the user-facing `lambda` (length `n_full_g`, in
+            // original `.nl` g-row order) via `pack_lambda_for_user`, which
+            // inverts the c/d split through `c_map`/`d_map` AND unwinds the
+            // `c_scale`/`d_scale` scaling. Concatenating the raw `y_c` then
+            // `y_d` blocks here instead would permute the duals on any `.nl`
+            // with interleaved eq/ineq rows and leave them scaled — AMPL /
+            // Pyomo read the dual block positionally.
+            let mut lambda = nlp.borrow().pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+            if lambda.is_empty() {
+                // Fallback for a non-`OrigIpoptNlp` whose `pack_lambda_for_user`
+                // is the empty-vec default: emit the raw `y_c`-then-`y_d`
+                // concatenation (no map/scale information available).
+                let n_c = curr.y_c.dim() as usize;
+                let n_d = curr.y_d.dim() as usize;
+                lambda = Vec::with_capacity(n_c + n_d);
+                if let Some(dv) = curr
+                    .y_c
+                    .as_any()
+                    .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                {
+                    lambda.extend_from_slice(&dv.expanded_values());
+                } else {
+                    lambda.extend(std::iter::repeat(0.0).take(n_c));
+                }
+                if let Some(dv) = curr
+                    .y_d
+                    .as_any()
+                    .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                {
+                    lambda.extend_from_slice(&dv.expanded_values());
+                } else {
+                    lambda.extend(std::iter::repeat(0.0).take(n_d));
+                }
             }
             *cap.borrow_mut() = Some((x.clone(), lambda));
 
