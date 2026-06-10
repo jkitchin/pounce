@@ -119,6 +119,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L49 | Strict-contiguity fast path turns valid non-contiguous float64 arrays into errors instead of copying (`problem.rs::extract_f64_vec`, `tnlp_bridge.rs::copy_pyarray_into`) | **FIXED** | **Confirmed end-to-end (fail-first against installed main, pass against a freshly-built codereview wheel).** A non-contiguous float64 array (a strided view like `x[::2]`, or a column of a 2-D array) still downcasts to `PyArray1<f64>`, so it takes the fast path and hits `arr.as_slice()?`, which requires C-contiguity and returns `Err` → the call raised `TypeError: The given array is not contiguous` instead of copying. (The generic per-element fallback below was unreachable for such arrays — they downcast successfully.) **Fix**: in both decoders (and the i64/i32 index decoder `extract_index_vec_inferred` for consistency), match on `as_slice()`; on `Err` fall back to a strided ndarray view `arr.readonly().as_array().iter().copied()`. `warm_start.rs::extract_f64_vec` was inspected and is **not** affected — it uses `bound.extract()` (Python iteration protocol), which already handles non-contiguous arrays. **Test** (`test_problem.py::test_noncontiguous_float64_arrays_are_copied_not_rejected`): an HS071 solve where bounds, `x0`, and the gradient/constraints/Jacobian callback returns are all non-contiguous strided views; asserts `Solve_Succeeded` and the known optimum. **Fail-first**: the same script raises `TypeError: The given array is not contiguous` on the installed (main) build; passes (obj 17.014) on the codereview wheel. `cargo fmt` / gated `cargo clippy` clean. See `## L49 detail`. |
 | L50 | The KKT-fallback success heuristic can mark `User_Requested_Stop` as success (`_minimize.py`) — combined with M32, a crashing callback can yield `success=True` | **FIXED** | **Confirmed by reading + a monkeypatch test + a fail-first truth-table.** After the solve, `success = status_code in {0,1} or (isfinite(kkt) and kkt <= acceptable_tol)`. The KKT-error fallback (the second disjunct) is meant for *numerical stalls* (e.g. `Search_Direction_Becomes_Too_Small`, status 3) that happen to sit at an acceptable point — but it fired for **any** non-success status, including `User_Requested_Stop` (status 5). Status 5 is what the bridge reports when the user's `intermediate` callback aborts, and (per M32) also when such a callback *raises*. So a crashing/aborting callback whose last computed KKT error was coincidentally small was upgraded to `success=True`. **Fix**: add `_NO_KKT_FALLBACK_STATUS = {5}` and gate the fallback on `status_code not in _NO_KKT_FALLBACK_STATUS`. **Fail-first** (truth table): for `status=5, kkt=1e-12, acc=1e-6` the pre-fix expression is `True`; post-fix `False`; the `status=3` stall control stays `True`. **Test** (`test_minimize.py::test_user_requested_stop_is_not_success_despite_small_kkt`, monkeypatching the native `Problem`): a fake returning status 5 + `final_kkt_error=1e-12` yields `success is False`, while a sibling returning status 3 with the same KKT error stays `success is True`. Verified against the codereview source via the stubbed-native harness. See `## L50 detail`. |
 | L51 | `GetIpoptCurrentViolations` bound-violation branches skip the length check their sibling branches perform (`pounce-cinterface/src/lib.rs:788-808`); a packed-length mismatch indexes `v[i]` out of bounds → panic inside `extern "C"` → abort | **FIXED (hardened) + placeholder behavior documented** | **Confirmed by reading; panic not reachable through the public API (defense-in-depth fix).** The `x_l_violation`/`x_u_violation` branches built `v = vec![0.0; n_us]` and ran `for (i, s) in pack_z_*_for_user(...).enumerate() { v[i] = ... }` with **no** length guard, unlike the five sibling branches (`compl_x_l/u`, `grad_lag_x`, and every branch of `GetIpoptCurrentIterate`) which all `if v.len() != n_us { return false; }` first. An oversized pack would index `v[i]` out of bounds → panic; `with_current` has **no** `catch_unwind`, so the panic unwinds across `extern "C"` → process abort. In practice the top-of-function `n != info.n` guard pins `n` to `info.n`, and `pack_z_*_for_user` returns `cls.n_full_x == info.n`, so the mismatch is unreachable via the public API today — this is a latent gap hardened for consistency/defense-in-depth. **Fix**: add the same `if pack.len() != n_us { return false; }` guard to both bound branches. **Tests** (`pounce-cinterface` lib): `bound_violation_scatter_rejects_oversized_pack_instead_of_panicking` is **fail-first at the logic level** — `catch_unwind` over the pre-fix scatter (oversized pack) `.is_err()` (it panics), while the guarded version returns `Err`; and `get_current_violations_inside_callback_reports_finite_bounds` drives a real `IpoptSolve` with a finite-bound problem and asserts the (now-guarded) branches return `TRUE` with finite, non-negative violations from inside the callback. Note: `nlp_constraint_violation`/`compl_g` remain documented zero-fill placeholders returned with `TRUE` (per-row reconstruction is a follow-up) — already noted in the code comments, behavior unchanged. 45 lib tests pass; `cargo fmt` / gated clippy clean. See `## L51 detail`. |
+| L52 | `target_triple` in solve reports is always `"unknown"` (`pounce-solve-report/src/lib.rs:405-411`): `option_env!("TARGET")` is only set for build scripts, never for crate-source compilation | **FIXED** | **Confirmed empirically + fail-first test.** A standalone `rustc` of `option_env!("TARGET")` resolves to `"unknown"` at source-compile time (Cargo exposes `TARGET` to *build scripts* only), so `TARGET_TRIPLE` — and thus `fair_metadata.solver.target_triple` in every emitted `pounce.solve-report/v1` — was hard-stuck at `"unknown"`. The inline comment claiming "`TARGET` is set by Cargo when building this crate" was wrong. **Fix**: add `crates/pounce-solve-report/build.rs` that reads the build script's `TARGET` and re-exports it via `cargo:rustc-env=POUNCE_TARGET_TRIPLE=…` (with `rerun-if-env-changed=TARGET`); change the constant to `option_env!("POUNCE_TARGET_TRIPLE")` (keeps the `"unknown"` fallback for non-Cargo tooling). **Test** (`pounce-solve-report` lib): `target_triple_resolves_to_real_triple_not_unknown` asserts `TARGET_TRIPLE != "unknown"`, has `>= 2` dashes (`arch-vendor-os` shape), and propagates into a finished `ReportBuilder::finish()` report. **Fail-first**: pre-fix the constant is `"unknown"`, so the `assert_ne!` fails; post-fix it resolves to the host triple (`aarch64-apple-darwin` here). 8 lib tests pass; `cargo fmt` / gated clippy clean. See `## L52 detail`. |
 
 ## C1 detail
 
@@ -6038,3 +6039,53 @@ violation and constraint-complementarity reconstruction in full-`g`
 coordinates is an explicit follow-up. Left as-is (a correctness *gap in
 completeness*, not a bug): callers get the scalar `inf_pr` summary via
 `IterStats`; the per-row detail is simply not yet populated.
+
+## L52 detail
+
+**Issue.** `pounce-solve-report` stamps every report's
+`fair_metadata.solver.target_triple` from a module constant:
+
+```rust
+const TARGET_TRIPLE: &str = match option_env!("TARGET") {
+    Some(t) => t,
+    None => "unknown",
+};
+```
+
+The comment claimed "`TARGET` is set by Cargo when building this crate."
+That is **false**: Cargo sets the `TARGET` env var for *build scripts*
+only, never for normal crate compilation. So `option_env!("TARGET")` here
+is always `None`, and the triple is permanently `"unknown"` in every
+emitted `pounce.solve-report/v1`.
+
+**Verification (run).** A standalone `rustc` of the same `option_env!`
+expression prints `"unknown"`, confirming the source-compile-time value.
+
+**Fix.** Add a build script that reads the (build-script-visible) `TARGET`
+and re-exports it under our own name:
+
+```rust
+// crates/pounce-solve-report/build.rs
+fn main() {
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".into());
+    println!("cargo:rustc-env=POUNCE_TARGET_TRIPLE={target}");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=TARGET");
+}
+```
+
+and read it from the library via `option_env!("POUNCE_TARGET_TRIPLE")`,
+keeping the `"unknown"` fallback for non-Cargo tooling that skips build
+scripts. (Cargo auto-detects `build.rs` in the package root — no manifest
+change needed.)
+
+**Test.** `pounce-solve-report::tests::target_triple_resolves_to_real_triple_not_unknown`:
+asserts `TARGET_TRIPLE != "unknown"`, that it has the `arch-vendor-os[-abi]`
+shape (`>= 2` dashes), and that it propagates into a
+`ReportBuilder::finish()` report's `fair_metadata.solver.target_triple`.
+
+**Fail-first.** Pre-fix the constant is `"unknown"` (proved by the
+standalone `rustc` run above), so the `assert_ne!(TARGET_TRIPLE, "unknown")`
+fails; post-fix it resolves to the host triple (`aarch64-apple-darwin` on
+this machine). Full `pounce-solve-report` lib suite (8 tests) passes;
+`cargo fmt` / gated clippy clean.

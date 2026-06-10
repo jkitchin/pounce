@@ -402,10 +402,14 @@ impl ReportBuilder {
     }
 }
 
-/// `TARGET` is set by Cargo when building this crate. Doesn't fail to
-/// compile if absent (older Cargo or some tooling); falls back to
-/// "unknown".
-const TARGET_TRIPLE: &str = match option_env!("TARGET") {
+/// The build target triple (e.g. `aarch64-apple-darwin`).
+///
+/// Cargo only exposes `TARGET` to *build scripts*, not to crate source, so
+/// `option_env!("TARGET")` here is always `None`. Our `build.rs` re-exports
+/// the build script's `TARGET` as `POUNCE_TARGET_TRIPLE`, which we read
+/// instead. Falls back to "unknown" if the build script did not run (e.g.
+/// some non-Cargo tooling).
+const TARGET_TRIPLE: &str = match option_env!("POUNCE_TARGET_TRIPLE") {
     Some(t) => t,
     None => "unknown",
 };
@@ -551,6 +555,36 @@ mod tests {
         // Total = 1709210096.
         let s = unix_nanos_to_iso(1_709_210_096_789_000_000);
         assert_eq!(s, "2024-02-29T12:34:56.789Z", "got: {s}");
+    }
+
+    #[test]
+    fn target_triple_resolves_to_real_triple_not_unknown() {
+        // Fail-first: before the build.rs re-export this constant read
+        // `option_env!("TARGET")`, which is `None` at crate-source compile
+        // time (Cargo only exposes TARGET to build scripts), so it was always
+        // "unknown". The build.rs now re-exports TARGET as
+        // POUNCE_TARGET_TRIPLE, which resolves it to the real build triple.
+        assert_ne!(
+            TARGET_TRIPLE, "unknown",
+            "build.rs should re-export the build target triple"
+        );
+        // A real triple has the `arch-vendor-os[-abi]` shape (>= 2 dashes).
+        assert!(
+            TARGET_TRIPLE.matches('-').count() >= 2,
+            "unexpected target triple: {TARGET_TRIPLE:?}"
+        );
+
+        // And it must propagate into the finished report.
+        let b = ReportBuilder::new(
+            ReportDetail::Summary,
+            InputDescriptor::NlFile {
+                path: PathBuf::from("/tmp/foo.nl"),
+                size_bytes: None,
+            },
+        );
+        let report = b.finish();
+        assert_eq!(report.fair_metadata.solver.target_triple, TARGET_TRIPLE);
+        assert_ne!(report.fair_metadata.solver.target_triple, "unknown");
     }
 
     #[test]
