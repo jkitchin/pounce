@@ -24,6 +24,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H13 | cinterface: `IpoptSolverSolve` silently discards all user options after the first solve | **FIXED** | The session solve does `mem::replace(&mut info.problem.app, IpoptApplication::new())` to move the configured app into the `RustSolver`, leaving a **blank** app behind that nothing restored (the doc's claimed `app_template` field never existed — grep-confirmed). The second `IpoptSolverSolve` on a handle then read default options — linear solver, tolerances, scaling all lost — and the `feral_config_from_options` snapshot read the blanked app too. Fix: clone the `OptionsList` (it derives `Clone`) before the `mem::replace` and write it back into the fresh blank app via `options_mut()`, so options survive every solve. Stale doc comment on `IpoptSolverInfo::problem` corrected. Test `options_survive_repeated_session_solves` (`solver.rs`): sets `max_iter=7`, creates the session, solves twice, asserts the option persists after each. |
 | H14 | release: crates.io automation guaranteed to fail mid-batch (irreversible partial publish), invisible to the consistency guard | **FIXED (guard + pre-flight; root pin out of scope)** | Verified by running `cargo publish -p pounce-feral --dry-run`: hard-fails with "all dependencies must have a version requirement specified … dependency `feral` does not specify a version". The root `feral` dep (`Cargo.toml:89`) is a versionless git pin (`req:"*"`, source `git+…`); it is crate #4 of 19 in publish order, so a `vX.Y.Z` tag uploads 3 crates then hard-fails — an irreversible partial release. The root pin cannot be lifted here (feral must first cut a crates.io release carrying the pinned commits — `feral` is on crates.io only at 0.10.0, which lacks them). Two-layer fix: (1) new `scripts/check_dep_publishability.py` flags any normal/build dep of a publishable crate that is git-sourced or wildcard/versionless; wired as check #4 in `check-release-consistency.sh` (the per-PR/pre-tag guard) so the blocker is no longer invisible. (2) `publish-crates.sh` pre-flight runs the same scan and **aborts before uploading crate 1**, converting the irreversible mid-batch failure into a safe no-op. Tests: `scripts/tests/test_check_dep_publishability.py` (7 synthetic-fixture cases, tree-state-independent). |
 | H15 | python: `curve_fit` reports `success=False` for `Solved_To_Acceptable_Level` | **FIXED** | `_solve_fit` (`_curve_fit.py:712`, shared by `curve_fit`, `curve_fit_streaming`, `curve_fit_minima`) gated `success` on `int(info["status"]) == 0`, so an acceptable-level stall (status 1) was reported failed despite a fully populated `popt`/`pcov` — and it lacked the `final_kkt_error` fallback `minimize` already had (gh #119/#123). **Verified by running code**: built the native ext (`maturin develop`) and ran an exp-decay FD fit at `tol=1e-12` → `status=1`, `success=False`, valid `popt≈[2.5,1.31,0.505]`. Fix reuses `_minimize._NLP_SUCCESS_STATUS` (`{0,1}`) plus the finite-KKT-≤-`acceptable_tol` second gate. Post-fix the same fit reports `success=True`. Tests `test_curve_fit_acceptable_level_reports_success` (e2e, asserts status 1 → success) + `test_curve_fit_success_mapping_matches_nlp_minimize`; pre-fix the e2e FAILS (`assert False is True`), post-fix PASSES. Full `test_curve_fit.py` (42) + `test_minima.py`/`test_minimize.py` (30) green. |
+| M1 | algorithm: convergence gates use internally *scaled* residuals where upstream uses unscaled | **VERIFIED — DEFERRED** (cross-crate scaling-unwind + core convergence-criteria change; unsafe to ship in an autonomous edit) | **Mechanism confirmed by code inspection**: `check_convergence_with_state` / `current_is_acceptable_with_state` (`conv_check/opt_error.rs:215-222, 301-307`) gate `dual_inf_tol`/`constr_viol_tol`/`compl_inf_tol`/`acceptable_*` on the **scaled** CQ accessors `curr_dual_infeasibility_max` / `curr_primal_infeasibility_max` / `curr_complementarity_max` / `curr_f`; `ipopt_cq.rs` exposes **no** unscaled component accessor (only `unscaled_curr_f`), and `nlp_scaling_method` defaults to **gradient-based** (`upstream_options.rs:361`), so scaling is on by default. Direction (`orig_ipopt_nlp.rs:897-916`): `c_scaled = c_scale·c_orig` with `c_scale ≤ 1`, so the user-space violation = `c_scaled/c_scale ≥ c_scaled` can exceed `constr_viol_tol` by `1/c_scale` while pounce declares `Success` — the reported harm. **Why deferred, not fixed here**: (a) a correct unscaled constraint-violation accessor needs `c_scale`/`d_scale`, which are private to `OrigIpoptNlp` — exposing them means new `IpoptNlp` trait methods on every implementor; (b) unscaled dual-inf and complementarity need the scaling-object unwind pounce explicitly defers (`orig_ipopt_nlp.rs:52-54`) and, because x-scaling is identity but obj-scaling `df` is not, are **not** simple divisions (`∇ₓL_scaled = df·∇f + Jᵀλ` vs unscaled `∇f + Jᵀλ`), so a careless port silently corrupts termination; (c) this is core convergence criteria (high blast radius) deserving reference-validated review. See `## M1 detail` for the scoped two-PR plan and the tests it needs. No code changed. |
 
 ## C1 detail
 
@@ -669,3 +670,70 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   both new tests PASS. Full `test_curve_fit.py` green (42), and
   `test_minima.py` + `test_minimize.py` green (30) — the streaming/minima
   routes and the `minimize` import are unaffected.
+
+## M1 detail
+
+- **Issue** (review M1): the convergence test compares the *internally scaled*
+  residuals against the user-facing tolerances (`dual_inf_tol`,
+  `constr_viol_tol`, `compl_inf_tol`), whereas upstream Ipopt tests the
+  **unscaled** quantities. With `nlp_scaling_method` on (the default), a problem
+  whose scaled residuals are below tolerance can have unscaled residuals well
+  above it, so pounce can report `Solve_Succeeded` for a point the user's own
+  `constr_viol_tol` would reject.
+- **Verified by code inspection** (no fix shipped — see "why deferred"):
+  - `conv_check/opt_error.rs:215-222` (`check_convergence_with_state`) and
+    `:301-307` (`current_is_acceptable_with_state`) gate the per-component
+    tolerances on the CQ accessors `curr_dual_infeasibility_max`,
+    `curr_primal_infeasibility_max`, `curr_complementarity_max`, and `curr_f`.
+  - Those accessors are the **scaled** ones (`ipopt_cq.rs:950-962, 1041-1047`).
+    The CQ exposes **no** unscaled per-component accessor — only
+    `unscaled_curr_f` exists (`ipopt_cq.rs:743`). So the unscaled comparison
+    upstream performs is simply not expressible with today's CQ surface.
+  - Scaling is on by default: `nlp_scaling_method` defaults to
+    `gradient-based` (`upstream_options.rs:361`).
+  - Direction of harm (`orig_ipopt_nlp.rs:897-916`, `row_max_to_scale`):
+    `c_scaled = c_scale · c_orig` with `c_scale ≤ 1`. The user-space violation
+    is `c_orig = c_scaled / c_scale ≥ c_scaled`, so a scaled residual that
+    passes `constr_viol_tol` can correspond to an unscaled violation up to
+    `1/c_scale` larger — pounce declares success while the real constraint
+    violation exceeds the user's tolerance. (When `c_scale = 1`, i.e. scaling
+    off or unit row, the two agree; the gap only opens as scaling shrinks rows.)
+- **Why deferred, not fixed in this autonomous pass** — the correct fix is a
+  cross-crate change to core convergence criteria, with non-trivial math, and
+  carries high blast radius; it deserves a reference-validated review rather
+  than an unattended edit:
+  1. **Constraint violation** needs an unscaled accessor, which needs
+     `c_scale`/`d_scale`. These live in `RefCell<Option<Vec<Number>>>` private
+     to `OrigIpoptNlp`; the `IpoptNlp` trait exposes no constraint-scaling
+     accessor. Exposing them means **new trait methods on every `IpoptNlp`
+     implementor**, not a local patch.
+  2. **Dual infeasibility and complementarity** cannot be recovered by a simple
+     divide. x-scaling is identity in pounce, but objective scaling `df` is not,
+     so the scaled Lagrangian gradient is
+     `∇ₓL_scaled = df·∇f + Jᵀλ` versus the unscaled `∇f + Jᵀλ` — the `df`
+     factor couples in and a naive `/df` corrupts the stationarity measure.
+     Recovering the true unscaled quantities is exactly the NLPScalingObject
+     unwind pounce **explicitly defers** (`orig_ipopt_nlp.rs:52-54`).
+  3. This is the termination test itself: a wrong change silently flips
+     `Success`/`failure` verdicts across the whole solver. It must be validated
+     against upstream Ipopt on scaled problems, not shipped blind.
+- **Scoped forward plan** (two PRs, each independently reviewable + testable):
+  - **PR1 — constraint violation (mechanical, high value).** Add
+    `unscaled_curr_primal_infeasibility_max` to the CQ, backed by new
+    `IpoptNlp` trait methods exposing `c_scale`/`d_scale` (default impls return
+    `None` ⇒ "no scaling" ⇒ identical to today for implementors that don't
+    scale). Switch the `constr_viol_tol` gate in both convergence checks to the
+    unscaled value, and the objective-change criterion to `unscaled_curr_f`
+    (already available). **Test**: a small NLP with a deliberately ill-scaled
+    constraint (row scale ≪ 1) whose *scaled* residual sits just under
+    `constr_viol_tol` but whose *unscaled* residual is, say, 10× over — assert
+    pounce now returns a non-success status (today it returns
+    `Solve_Succeeded`). The test fails on `main` and passes after PR1.
+  - **PR2 — dual-inf + complementarity (derivation-heavy).** Implement the
+    `df`-coupled unscaled stationarity/complementarity recovery (the deferred
+    NLPScalingObject unwind for these two terms), switch the remaining two
+    gates, and validate termination verdicts against upstream Ipopt on a scaled
+    reference problem set before merge.
+- **No code changed for M1** — documented as VERIFIED — DEFERRED per the review
+  workflow ("document issues that cannot be verified [here]"). The mechanism is
+  confirmed; the fix is scoped above for a dedicated, reviewed change.
