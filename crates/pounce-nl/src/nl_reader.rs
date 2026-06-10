@@ -885,16 +885,36 @@ impl<'a> Parser<'a> {
         let raw = self
             .next_line()
             .ok_or_else(|| "expected funcall argument".to_string())?;
-        let tok = strip_comment(raw).trim().to_string();
-        let first = tok.chars().next().ok_or("empty funcall arg token")?;
-        if first == 'h' {
-            // `h<len>:<chars>` — strip the `<len>:` prefix.
-            let rest = &tok[1..];
-            let s = match rest.find(':') {
-                Some(i) => rest[i + 1..].to_string(),
-                None => String::new(),
-            };
-            Ok(FuncallArg::Str(s))
+        // A string arg is a Hollerith literal `h<len>:<chars>` where the
+        // chars are *exactly* `<len>` bytes and may legitimately contain
+        // '#'. We must NOT strip a trailing comment before extracting the
+        // content (that would truncate e.g. a path like `a#b`), and we
+        // honor the declared length rather than splitting loosely on ':'.
+        // Detect the form from the leading non-blank char of the raw line;
+        // no expression opcode (`o`/`v`/`n`/`f`) begins with 'h'.
+        let lead = raw.trim_start();
+        if let Some(after_h) = lead.strip_prefix('h') {
+            let colon = after_h
+                .find(':')
+                .ok_or_else(|| format!("malformed Hollerith string arg (no ':'): {lead:?}"))?;
+            let len: usize = after_h[..colon]
+                .trim()
+                .parse()
+                .map_err(|e| format!("Hollerith length in {lead:?}: {e}"))?;
+            let chars = &after_h[colon + 1..];
+            if chars.len() < len {
+                return Err(format!(
+                    "Hollerith string shorter than declared length {len}: {chars:?}"
+                ));
+            }
+            // Take exactly `len` bytes; anything past it (trailing
+            // whitespace, a real comment) is not part of the string.
+            if !chars.is_char_boundary(len) {
+                return Err(format!(
+                    "Hollerith length {len} splits a multibyte char in {chars:?}"
+                ));
+            }
+            Ok(FuncallArg::Str(chars[..len].to_string()))
         } else {
             // Rewind: parse_expr re-consumes the line we just peeked.
             self.pos = saved;
@@ -3181,5 +3201,31 @@ S1 2 sens_init_constr
         // Sorted, deduped per row: row 0 → cols 0,1,2; row 1 → col 2.
         assert_eq!(irow, vec![0, 0, 0, 1]);
         assert_eq!(jcol, vec![0, 1, 2, 2]);
+    }
+
+    #[test]
+    fn funcall_string_arg_with_hash_is_not_truncated() {
+        // Code review L31: an AMPL string argument is a Hollerith literal
+        // `h<len>:<chars>` whose content is exactly <len> bytes and may
+        // legitimately contain '#' (e.g. a parameters-directory path). The
+        // old parser ran strip_comment() over the line first, truncating
+        // the content at the '#'. Here `h3:a#b` must round-trip to "a#b".
+        let mut p = Parser::new("h3:a#b\n");
+        match p.parse_funcall_arg().expect("parse hollerith arg") {
+            FuncallArg::Str(s) => assert_eq!(s, "a#b"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn funcall_string_arg_honors_declared_length() {
+        // The declared `<len>` is authoritative: exactly that many bytes
+        // after the ':' form the string; trailing content (here a real
+        // ` # comment`) is not part of it.
+        let mut p = Parser::new("h3:abc # trailing comment\n");
+        match p.parse_funcall_arg().expect("parse hollerith arg") {
+            FuncallArg::Str(s) => assert_eq!(s, "abc"),
+            other => panic!("expected Str, got {other:?}"),
+        }
     }
 }

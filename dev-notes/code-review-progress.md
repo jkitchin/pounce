@@ -96,6 +96,8 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 
 | L30 | `compare_le` uses `10·eps·max(1, \|BasVal\|)` where upstream uses `10·eps·\|BasVal\|` (`pounce-common/src/utils.rs:24-27`); the doc comment wrongly asserts upstream has the `max` — looser comparison for small filter values on the bit-equivalence path | **FIXED** | **Confirmed by reading code.** Upstream Ipopt `IpUtils.cpp` defines `Compare_le(lhs, rhs, BasVal)` as `lhs - rhs <= 10. * mach_eps * fabs(BasVal)` — **no** `Max(1, …)` floor. The Rust port had `bas_val.abs().max(1.0)`, which pins the tolerance at `10·eps` even as `BasVal → 0`, accepting steps upstream rejects. The call-site comment in `filter_acceptor.rs:567` already (correctly) describes the slack as `10·eps·\|phi\|`, corroborating the intended semantics. **Fix**: dropped `.max(1.0)` (tol = `10·eps·\|BasVal\|`) and rewrote the doc comment to state there is no floor. **Test** (`utils::tests::compare_le_tolerance_shrinks_with_small_basval`): at `BasVal = 1e-6` the tolerance is `10·eps·1e-6 ≈ 2.2e-21`, so a gap of `1e-18` must be **rejected** (`!compare_le(1e-18, 0.0, 1e-6)`); a sub-tolerance gap at the same `BasVal` is still accepted. The pre-existing `compare_le_tolerates_eps` test used `BasVal = 1.0` where `max(1,·)` and `\|·\|` coincide, so it could not catch this. **Fail-first confirmed**: restoring `.max(1.0)` makes the new test fail (buggy tol `10·eps` accepts the `1e-18` gap). Restored; 59 pounce-common + 248 pounce-algorithm (filter/penalty acceptor consumers of `compare_le`) tests green — no regression from the tightened tolerance. `cargo fmt -p pounce-common` / `cargo clippy -p pounce-common --all-targets -- -D clippy::correctness -D clippy::suspicious` clean (1 pre-existing `expect_used` restriction warning). See `## L30 detail`. |
 
+| L31 | `strip_comment` can truncate AMPL string literals containing `#` (and ignores declared-length `h<len>:` tokens) — `nl_reader.rs` `parse_funcall_arg` | **FIXED** | **Confirmed by reading code + reproducing.** An AMPL imported-function string argument is a Hollerith literal `h<len>:<chars>` whose content is exactly `<len>` bytes and may legitimately contain `#` (e.g. an IDAES Helmholtz parameters-directory path). `parse_funcall_arg` did `let tok = strip_comment(raw).trim()` **before** detecting the `h` form, so a string like `h3:a#b` was truncated at `#` to `h3:a` and parsed as `"a"`. It also split loosely on the first `:` and took everything after, ignoring the authoritative `<len>`. **Fix**: detect the `h<len>:` form from the leading non-blank char of the *raw* (non-comment-stripped) line — no expression opcode (`o`/`v`/`n`/`f`) begins with `h` — parse `<len>`, and take exactly `<len>` bytes after the `:` (with a char-boundary guard and a too-short error). Content `#` is now preserved; trailing comments/whitespace beyond `<len>` are excluded. **Tests** (`nl_reader::tests`): `funcall_string_arg_with_hash_is_not_truncated` (`h3:a#b` → `"a#b"`) and `funcall_string_arg_honors_declared_length` (`h3:abc # trailing comment` → `"abc"`), both driving `Parser::parse_funcall_arg` directly. **Fail-first confirmed**: reintroducing `strip_comment(raw)` before extraction makes the `#` test parse `"a"` and fail. Restored; 82 pounce-nl lib + 1 integration tests green. `cargo fmt -p pounce-nl` / `cargo clippy -p pounce-nl --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L31 detail`. |
+
 ## C1 detail
 
 - **Bug**: `redundant_mask` from `find_redundant_rows` is aligned to the
@@ -5002,3 +5004,58 @@ tightening could in principle change acceptance decisions. Full suites stayed
 green: 59 pounce-common, 248 pounce-algorithm (incl. the filter/penalty
 acceptor tests and the L6 `is_sufficient_progress`-mirrors-`compare_le` test).
 `cargo fmt` / gated `cargo clippy` clean.
+
+## L31 detail
+
+**Issue (L31).** `Parser::parse_funcall_arg` in `crates/pounce-nl/src/nl_reader.rs`
+reads one positional argument to an AMPL imported (external) function. A string
+argument is encoded as an `.nl` Hollerith literal `h<len>:<chars>`, where the
+`<chars>` are exactly `<len>` bytes (AMPL emits these for `FUNCADD_STRING_ARGS`
+functions — e.g. a component name or a parameters-directory path for the IDAES
+Helmholtz functions). The old code:
+
+    let tok = strip_comment(raw).trim().to_string();
+    let first = tok.chars().next()...;
+    if first == 'h' {
+        let rest = &tok[1..];
+        let s = match rest.find(':') { Some(i) => rest[i+1..].into(), None => "".into() };
+        ...
+    }
+
+ran `strip_comment` (cut everything from the first `#`) over the line **before**
+recognizing the string form, so any string content containing `#` was silently
+truncated. A path like `a#b` (`h3:a#b`) parsed as `"a"`. It also took everything
+after the first `:` and trimmed, ignoring the declared `<len>` entirely.
+
+**Fix.** Recognize the `h<len>:` form from the *raw* line's leading non-blank
+character (no expression opcode — `o`/`v`/`n`/`f` — starts with `h`, so this is
+unambiguous), parse `<len>`, and slice exactly `<len>` bytes after the `:`:
+
+    let lead = raw.trim_start();
+    if let Some(after_h) = lead.strip_prefix('h') {
+        let colon = after_h.find(':')...;
+        let len: usize = after_h[..colon].trim().parse()...;
+        let chars = &after_h[colon + 1..];
+        if chars.len() < len { return Err(...too short...); }
+        if !chars.is_char_boundary(len) { return Err(...multibyte...); }
+        Ok(FuncallArg::Str(chars[..len].to_string()))
+    }
+
+Content `#` is preserved; whitespace / a real comment past `<len>` is excluded by
+construction. Added an explicit error for a string shorter than its declared
+length and a char-boundary guard so a malformed `<len>` can never panic on a
+byte slice.
+
+**Tests.**
+- `funcall_string_arg_with_hash_is_not_truncated`: `Parser::new("h3:a#b\n")`
+  → `FuncallArg::Str("a#b")`.
+- `funcall_string_arg_honors_declared_length`: `h3:abc # trailing comment`
+  → `"abc"` (exactly 3 bytes; trailing comment dropped).
+
+Both call the private `parse_funcall_arg` directly on a freshly constructed
+`Parser`, since a string arg only appears inside a full funcall opcode.
+
+**Fail-first.** Reintroducing `strip_comment(raw)` ahead of extraction makes the
+`#` test parse `"a"` and fail (`assertion left == right: "a" vs "a#b"`). Restored
+after confirming. 82 pounce-nl lib + 1 integration test green; `cargo fmt` /
+gated `cargo clippy` clean.
