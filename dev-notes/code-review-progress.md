@@ -116,6 +116,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L46 | Metadata projection infers per-row-ness from vector length alone (`project_con_metadata`/`expand_con_metadata`) — coincidental-length global vectors are silently subset/expanded | **VERIFIED REAL — documented limitation, not cleanly fixable** | **Confirmed by reading + a characterization test.** `project_con_metadata` treats any constraint-metadata vector with `len() == m_in` as per-row and subsets it to `rows_kept`; `expand_con_metadata` mirrors with `len() == m_out`. `MetaData` is an untyped `BTreeMap<String, Vec<_>>` (a faithful port of upstream Ipopt's untyped `*MetaDataMapType`) with **no per-key arity tag**, so length is the only available signal — a semantically-global vector that coincidentally has length `m_in` is wrongly subset. **Not cleanly fixable without an arity-aware metadata API.** Mitigations applied: (1) the heuristic is *exact* for every contract-conforming TNLP — by the TNLP contract all constraint-bucket vectors are per-constraint, and pounce's only real producer (`nl_reader`) emits genuinely per-row `con_names`, so today's shipped behavior is correct; (2) the fast path `m_in == m_out` (no rows dropped) is identity, so the hazard only exists once presolve drops a row; (3) explicit contract + caveat doc comments on both functions; (4) two regression tests — `con_metadata_per_row_vector_round_trips_under_row_drop` (canonical correct case) and `con_metadata_length_heuristic_misfires_on_coincidental_global` (pins the known misfire as a future-fix anchor). Full pounce-presolve suite green (226 lib, +2); `cargo fmt` / gated `cargo clippy` clean. See `## L46 detail`. |
 | L47 | `_wrap_constraints` probes user constraint funcs at `np.zeros(n)` instead of `x0` (`_minimize.py:198-199`) → constraints undefined at the origin fail before the solve even with feasible `x0`; `jac_combined` (211) re-evaluates `fn(x)` per FD call just for a row count it already has | **FIXED (both parts)** | **Confirmed by reading + a probe-point test.** (1) The sizing probe was hard-coded to `np.zeros(n)`; a constraint like `log(x)` is `-inf`/undefined at the origin yet finite at a feasible `x0=[1,1]`, so the size probe produced `-inf`/NaN (or raised) before the solve began. **Fix**: thread `x0` into `_wrap_constraints(constraints, n, x0)` and probe at `x0` (origin only as the `x0 is None` fallback). (2) `jac_combined`'s FD branch recomputed `m_i = fn(x).size` every call purely to size the FD block, although `sizes` was already captured at probe time. **Fix**: zip the precomputed `sizes` into the loop and pass `m_i` straight to `_finite_diff_jac` (the FD routine still calls `fn` for the columns — only the redundant sizing call is gone). **Tests** (`test_minimize.py`): `test_wrap_constraints_probes_at_x0_not_origin` (probe records `x0`, `g(x0)` finite; the `x0=None` origin path yields `-inf` — the pre-fix behavior) and `test_wrap_constraints_fd_jac_uses_probed_sizes` (3-output/2-input constraint → FD Jacobian shape `(3,2)`). Verified against the codereview source via a stubbed-native harness. See `## L47 detail`. |
 | L48 | `minimize` silently drops information on specific routes: user `hess` ignored whenever constraints are present (`_build_problem_obj` gates Hessian on `m == 0`, no warning); convex routes forward only `tol`/`max_iter`, so `disp`/`print_level`/`acceptable_tol` are silently discarded | **FIXED (both parts, via warnings)** | **Confirmed by reading + two monkeypatch tests.** (1) `_build_problem_obj` only attaches `hessian`/`hessianstructure` when `m == 0`, because the wrapper can supply only the *objective* Hessian and has no way to assemble the constraint-curvature term `Σλᵢ∇²gᵢ` of the Lagrangian Hessian the IPM needs; with constraints it falls back to L-BFGS. Correct behavior, but silent. **Fix**: warn when `hess is not None and m > 0`, explaining the L-BFGS fallback. (2) `_solve_via_convex`/`_solve_via_socp` read only `opts.get("tol")`/`opts.get("max_iter")`. **Fix**: capture the user's requested option keys *before* defaulting/popping (`requested_opt_keys`), and at each convex/SOCP routing return warn (`_warn_convex_dropped_opts`) listing any requested key outside the honored set `{tol, max_iter, disp}` plus a provided `hess`, pointing to `solver_selection='nlp'`. **Tests** (`test_minimize.py`, monkeypatching the native `Problem` / `classify_and_extract` / `_solve_via_convex`): `test_hess_ignored_with_constraints_warns` (warns with a constraint; no warning unconstrained) and `test_convex_route_warns_on_dropped_options` (warns on `acceptable_tol`/`print_level`; silent when only `tol`/`max_iter`). Verified against the codereview source via a stubbed-native harness. See `## L48 detail`. |
+| L49 | Strict-contiguity fast path turns valid non-contiguous float64 arrays into errors instead of copying (`problem.rs::extract_f64_vec`, `tnlp_bridge.rs::copy_pyarray_into`) | **FIXED** | **Confirmed end-to-end (fail-first against installed main, pass against a freshly-built codereview wheel).** A non-contiguous float64 array (a strided view like `x[::2]`, or a column of a 2-D array) still downcasts to `PyArray1<f64>`, so it takes the fast path and hits `arr.as_slice()?`, which requires C-contiguity and returns `Err` → the call raised `TypeError: The given array is not contiguous` instead of copying. (The generic per-element fallback below was unreachable for such arrays — they downcast successfully.) **Fix**: in both decoders (and the i64/i32 index decoder `extract_index_vec_inferred` for consistency), match on `as_slice()`; on `Err` fall back to a strided ndarray view `arr.readonly().as_array().iter().copied()`. `warm_start.rs::extract_f64_vec` was inspected and is **not** affected — it uses `bound.extract()` (Python iteration protocol), which already handles non-contiguous arrays. **Test** (`test_problem.py::test_noncontiguous_float64_arrays_are_copied_not_rejected`): an HS071 solve where bounds, `x0`, and the gradient/constraints/Jacobian callback returns are all non-contiguous strided views; asserts `Solve_Succeeded` and the known optimum. **Fail-first**: the same script raises `TypeError: The given array is not contiguous` on the installed (main) build; passes (obj 17.014) on the codereview wheel. `cargo fmt` / gated `cargo clippy` clean. See `## L49 detail`. |
 
 ## C1 detail
 
@@ -5877,3 +5878,47 @@ runs without the compiled extension):
 
 Both pass against the codereview source (stubbed-native harness; CI runs them
 on the built wheel).
+
+## L49 detail
+
+**Issue.** The float64 decoders take a fast path when the Python value
+downcasts to `PyArray1<f64>`, then call `arr.as_slice()` to borrow the buffer.
+`as_slice()` requires C-contiguity and returns `Err` otherwise. A *valid but
+non-contiguous* float64 array — a strided view such as `x[::2]`, or a
+non-owning column of a 2-D array — still downcasts to `PyArray1<f64>`, so it
+reaches this path and the `?` turns the contiguity error into a user-visible
+`TypeError: The given array is not contiguous`. The generic per-element
+fallback that follows is unreachable for such inputs (they downcast fine; only
+non-array sequences fall through).
+
+**Affected sites.** `crates/pounce-py/src/problem.rs::extract_f64_vec` (used for
+`x0`, bounds, scaling, warm-start duals) and
+`crates/pounce-py/src/tnlp_bridge.rs::copy_pyarray_into` (used to copy the
+gradient / constraints / Jacobian / Hessian arrays returned by user callbacks).
+`extract_index_vec_inferred` (the i64/i32 structure-index decoder) had the same
+shape and was fixed for consistency. `warm_start.rs::extract_f64_vec` was
+checked and is **not** affected — it decodes via `bound.extract::<Vec<f64>>()`,
+which uses the Python iteration protocol and already copies non-contiguous
+arrays element-by-element.
+
+**Fix.** Replace `arr.as_slice()?` with an explicit match: on `Ok` keep the
+zero-copy slice path; on `Err` (non-contiguous) copy through a strided ndarray
+view — `arr.readonly().as_array().iter().copied().collect()` for the value
+vectors, and a zip-copy into the output slice for `copy_pyarray_into`. ndarray's
+view iterator handles arbitrary strides, so the result is correct for any
+layout while the common contiguous case still avoids the copy.
+
+**Verification.** A standalone HS071 reproduction passes bounds, `x0`, and the
+gradient/constraints/Jacobian callback returns as non-contiguous strided views.
+- **Fail-first**: against the installed (main, pre-fix) build it raises
+  `TypeError: The given array is not contiguous`.
+- **Fixed**: a release wheel built from the codereview worktree
+  (`maturin build` into an isolated venv) solves it to `Solve_Succeeded`,
+  obj `17.01402` — the known HS071 optimum.
+
+**Test.** `test_problem.py::test_noncontiguous_float64_arrays_are_copied_not_rejected`
+encodes exactly this (a `NonContigHS071` subclass returning strided views, with
+non-contiguous bounds/`x0`); it passes against the codereview wheel, and the
+full `test_problem.py` (15 tests) stays green. `cargo fmt` / gated `cargo
+clippy` (`-D clippy::correctness -D clippy::suspicious`) clean (the
+`pounce-py` lib's remaining warnings are non-gated style lints).

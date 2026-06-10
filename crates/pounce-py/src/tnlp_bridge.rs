@@ -108,7 +108,7 @@ fn call1(obj: &Py<PyAny>, method: &str, x: &[Number]) -> PyResult<Py<PyAny>> {
 fn copy_pyarray_into(val: &Py<PyAny>, out: &mut [Number], what: &str) -> PyResult<()> {
     Python::with_gil(|py| {
         let bound = val.bind(py);
-        // Fast path: contiguous f64 NumPy array.
+        // Fast path: f64 NumPy array.
         if let Ok(arr) = bound.downcast::<PyArray1<Number>>() {
             let len = arr.len();
             if len != out.len() {
@@ -118,8 +118,18 @@ fn copy_pyarray_into(val: &Py<PyAny>, out: &mut [Number], what: &str) -> PyResul
                     len
                 )));
             }
-            let view = unsafe { arr.as_slice()? };
-            out.copy_from_slice(view);
+            // `as_slice()` requires C-contiguity; a valid non-contiguous
+            // float64 array (e.g. a strided view returned by a user callback)
+            // still downcasts here, so copy it via a strided ndarray view
+            // rather than erroring (L49).
+            match unsafe { arr.as_slice() } {
+                Ok(view) => out.copy_from_slice(view),
+                Err(_) => {
+                    for (dst, src) in out.iter_mut().zip(arr.readonly().as_array().iter()) {
+                        *dst = *src;
+                    }
+                }
+            }
             return Ok(());
         }
         // Generic fallback: iterate the sequence, expect floats.

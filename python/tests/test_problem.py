@@ -241,3 +241,48 @@ def test_intermediate_exception_aborts_with_user_stop():
     prob.add_option("print_level", 0)
     x, info = prob.solve(x0=np.array([-5.0]))
     assert info["status_msg"] == "User_Requested_Stop"
+
+
+def _noncontiguous(a):
+    """A non-contiguous float64 view holding the values of ``a`` (a strided
+    slice of a 2x-oversized buffer)."""
+    a = np.asarray(a, dtype=float)
+    buf = np.empty(a.size * 2, dtype=float)
+    buf[::2] = a
+    view = buf[::2]
+    assert not view.flags["C_CONTIGUOUS"]
+    return view
+
+
+def test_noncontiguous_float64_arrays_are_copied_not_rejected():
+    """L49: valid non-contiguous float64 arrays (strided views) must be
+    copied, not rejected with "array is not contiguous". This exercises both
+    decode paths — ``extract_f64_vec`` (bounds + ``x0``) and
+    ``copy_pyarray_into`` (the gradient / constraints / Jacobian callback
+    returns)."""
+
+    class NonContigHS071(HS071):
+        def gradient(self, x):
+            return _noncontiguous(super().gradient(x))
+
+        def constraints(self, x):
+            return _noncontiguous(super().constraints(x))
+
+        def jacobian(self, x):
+            return _noncontiguous(super().jacobian(x))
+
+    prob = pounce.Problem(
+        n=4,
+        m=2,
+        problem_obj=NonContigHS071(),
+        lb=_noncontiguous([1.0] * 4),
+        ub=_noncontiguous([5.0] * 4),
+        cl=_noncontiguous([25.0, 40.0]),
+        cu=_noncontiguous([2e19, 40.0]),
+    )
+    prob.add_option("tol", 1e-8)
+    prob.add_option("print_level", 0)
+    x, info = prob.solve(x0=_noncontiguous([1.0, 5.0, 5.0, 1.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(info["obj_val"], 17.0140172, rtol=1e-5)
+    np.testing.assert_allclose(x, [1.0, 4.7430, 3.8211, 1.3794], atol=1e-3)

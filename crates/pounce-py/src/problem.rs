@@ -823,17 +823,30 @@ fn decode_structure_inferred(val: &Py<PyAny>) -> PyResult<(Vec<Index>, Vec<Index
 fn extract_index_vec_inferred(val: &Py<PyAny>, what: &str) -> PyResult<Vec<Index>> {
     Python::with_gil(|py| {
         let bound = val.bind(py);
+        // Non-contiguous integer views (e.g. `idx[::2]`) still downcast to
+        // these array types, so fall back to a strided ndarray view instead
+        // of letting `as_slice()` error (L49).
         if let Ok(arr) = bound.downcast::<PyArray1<i64>>() {
-            return Ok(unsafe { arr.as_slice()? }
-                .iter()
-                .map(|&x| x as Index)
-                .collect());
+            return Ok(match unsafe { arr.as_slice() } {
+                Ok(s) => s.iter().map(|&x| x as Index).collect(),
+                Err(_) => arr
+                    .readonly()
+                    .as_array()
+                    .iter()
+                    .map(|&x| x as Index)
+                    .collect(),
+            });
         }
         if let Ok(arr) = bound.downcast::<PyArray1<i32>>() {
-            return Ok(unsafe { arr.as_slice()? }
-                .iter()
-                .map(|&x| x as Index)
-                .collect());
+            return Ok(match unsafe { arr.as_slice() } {
+                Ok(s) => s.iter().map(|&x| x as Index).collect(),
+                Err(_) => arr
+                    .readonly()
+                    .as_array()
+                    .iter()
+                    .map(|&x| x as Index)
+                    .collect(),
+            });
         }
         let mut out = Vec::new();
         for item in bound.iter()? {
@@ -856,7 +869,15 @@ fn extract_f64_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec
                     "{what}: expected length {expected}, got {got}",
                 )));
             }
-            return Ok(unsafe { arr.as_slice()? }.to_vec());
+            // `as_slice()` requires C-contiguity. A valid but non-contiguous
+            // float64 array (a strided view such as `x[::2]`, or a column of
+            // a 2-D array) is still a `PyArray1<f64>`, so it reaches this fast
+            // path; copy it via a strided ndarray view rather than erroring
+            // (L49). The generic fallback below is never hit for such arrays.
+            return Ok(match unsafe { arr.as_slice() } {
+                Ok(s) => s.to_vec(),
+                Err(_) => arr.readonly().as_array().iter().copied().collect(),
+            });
         }
         let mut out = Vec::with_capacity(expected);
         for item in bound.iter()? {
