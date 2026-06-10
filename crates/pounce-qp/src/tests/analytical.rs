@@ -47,6 +47,11 @@ fn identity_hessian(n: usize) -> SymTMatrix {
     h
 }
 
+/// Helper — `n × n` all-zero Hessian (no stored entries).
+fn zero_hessian(n: usize) -> SymTMatrix {
+    SymTMatrix::new(SymTMatrixSpace::new(n as i32, Vec::new(), Vec::new()))
+}
+
 fn empty_gen(m: usize, n: usize) -> GenTMatrix {
     GenTMatrix::new(GenTMatrixSpace::new(
         m as i32,
@@ -107,6 +112,53 @@ fn problem_1_unconstrained_identity_hessian() {
     assert_eq!(sol.stats.n_refactor, 1);
     assert_eq!(sol.stats.n_schur_updates, 0);
     assert_eq!(sol.stats.n_working_set_changes, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// H1 regression — zero Hessian + linear objective is unbounded.
+//
+//     min gᵀx,  H = 0,  no constraints, no bounds.
+//
+// The equality-only KKT is the singular 0-matrix; inertia control
+// shifts the H-diagonal by δ and solves `(δI) x = -g`, i.e.
+// x = -g/δ. Pre-fix every caller dropped δ and declared this point
+// `Optimal` — a δ-dependent garbage answer for a problem that is in
+// fact unbounded below. The true (unshifted) stationarity residual is
+// `δ·x = -g ≠ 0`, so the fix reports `QpStatus::Unbounded`.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn h1_zero_hessian_linear_objective_is_unbounded() {
+    let n = 2;
+    let h = zero_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [1.0, -2.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Unbounded,
+        "min gᵀx with H=0 must be Unbounded, got status {:?} with x = {:?}",
+        sol.status,
+        sol.x
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1507,14 +1559,20 @@ fn problem_6_indefinite_h_with_pd_reduced_hessian() {
 // reports `WrongInertia`; with shift `H ← H + δI` the reduced
 // Hessian becomes PD and the factor succeeds.
 //
-//     H = diag(0, 1),  g = (-1, -2),  no constraints
+//     H = diag(0, 1),  g = (0, -2),  no constraints
 //
 // H is PSD but not PD — the (1, 0) direction has zero curvature.
-// The unconstrained gradient `g + Hx = 0` requires `x₁ = -g₁/h₁
-// = -(-1)/0 = ∞`. With shift `δ` on the (1,1) diagonal, the
-// regularized solution is `x₁ = 1/δ`, `x₂ = 2`. As δ → 0, x₁
-// diverges — but for any finite δ, the factor succeeds and a
-// finite (regularized) answer is returned.
+// Crucially `g` has **no component along that null direction**
+// (g₁ = 0), so the objective is *bounded below* despite the
+// singular Hessian: any x₁ leaves the objective unchanged, and the
+// minimum `-2` is attained at x₂ = 2 for every x₁. The shift is
+// needed only to make the singular KKT factorable; the regularized
+// solution is x₁ = -g₁/δ = 0, x₂ = 2/(1 + δ) ≈ 2, which stays
+// finite as δ → 0. The H1 re-verification (`δ·‖x‖∞ ≤ 1e-3·‖g‖∞`)
+// therefore keeps `Optimal` here — distinguishing this bounded
+// singular problem from the genuinely-unbounded one in
+// `h1_zero_hessian_linear_objective_is_unbounded`, where g *does*
+// drive the null direction and x blows up to ≈ 1/δ.
 // ─────────────────────────────────────────────────────────────────
 #[test]
 fn inertia_control_shift_succeeds_on_psd_singular_hessian() {
@@ -1524,7 +1582,7 @@ fn inertia_control_shift_succeeds_on_psd_singular_hessian() {
     h.set_values(&[0.0, 1.0]); // singular: zero in (1,1)
 
     let a = empty_gen(0, n);
-    let g = [-1.0, -2.0];
+    let g = [0.0, -2.0]; // no descent along the null direction ⇒ bounded
     let bl: [f64; 0] = [];
     let bu: [f64; 0] = [];
     let xl = [NLP_LOWER_BOUND_INF; 2];
@@ -1552,11 +1610,12 @@ fn inertia_control_shift_succeeds_on_psd_singular_hessian() {
     // PD-direction perturbation (the standard cost of Tikhonov-
     // style regularization).
     assert!((sol.x[1] - 2.0).abs() < 1e-6, "x[1] = {}", sol.x[1]);
-    // x₁ should be a large positive value ≈ 1/δ_final, certifying
-    // that the singular direction was regularized.
+    // x₁ stays ≈ 0: g has no component along the null direction, so
+    // the regularizer does not blow it up (this is what keeps the
+    // problem bounded and the status `Optimal`).
     assert!(
-        sol.x[0] > 1.0,
-        "x[0] = {} should be large (≈ 1/δ_final after shift)",
+        sol.x[0].abs() < 1e-6,
+        "x[0] = {} should stay ≈ 0 (g has no null-direction component)",
         sol.x[0]
     );
 }

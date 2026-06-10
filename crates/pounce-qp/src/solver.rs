@@ -563,13 +563,65 @@ impl ParametricActiveSetSolver {
         // eigenvalues (Gould-Hribar-Nocedal 2001 §3.2). The
         // inertia-control retry handles indefinite reduced H via
         // §4.5.
-        self.factorize_with_inertia_control(kkt, &mut rhs, qp.m as i32, qp.n, opts)?;
+        let delta = self.factorize_with_inertia_control(kkt, &mut rhs, qp.m as i32, qp.n, opts)?;
 
         // RHS now holds [x*; λ*].
         let mut x = vec![0.0; qp.n];
         x.copy_from_slice(&rhs[..qp.n]);
         let mut lambda_g = vec![0.0; qp.m];
         lambda_g.copy_from_slice(&rhs[qp.n..]);
+
+        // H1: the inertia-control retry solved the *shifted* system
+        // `(H+δI)` when `δ > 0`, which it must do whenever the reduced
+        // Hessian is not PD on null(A). The shifted solution satisfies
+        // `(H+δI)x + Aᵀλ + g = 0`, so the *true* (unshifted)
+        // stationarity residual on the primal block is exactly `-δx`.
+        //
+        // Two regimes produce `δ > 0`, and they differ by orders of
+        // magnitude in `‖δx‖`:
+        //   * Bounded QP, flat (zero-curvature) direction not driven by
+        //     g — the regularizer just picks the min-norm point along
+        //     the flat direction, so `‖x‖` stays `O(‖x*‖)` and the
+        //     residual is `δ·‖x*‖` ≈ `δ_initial·O(1)` (Tikhonov noise).
+        //   * Unbounded QP — g has a descent component along the
+        //     null/negative-curvature direction, so the regularized
+        //     `x` blows up like `‖g_null‖/δ` and the residual is
+        //     `δ·‖x‖ ≈ ‖g_null‖ = O(‖g‖)`, independent of δ.
+        //
+        // We must NOT compare against `opt_tol` (1e-9): `δ_initial`
+        // (1e-8) already exceeds it, so every shifted *bounded* solve
+        // would false-positive. The discriminator is the gradient
+        // scale — a macroscopic fraction of `‖g‖` in the residual means
+        // -g genuinely drives the regularized direction, the
+        // certificate of unboundedness. Report `Unbounded` rather than
+        // a δ-dependent garbage `Optimal` (pre-fix, `min gᵀx`, H=0 gave
+        // `x = -g/δ` with `status: Optimal`).
+        if delta > 0.0 {
+            let x_inf = x.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            let g_inf = qp.g.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            let stationarity_resid = delta * x_inf;
+            // 1e-3·max(‖g‖∞,1): comfortably above the `δ_initial·O(1)`
+            // Tikhonov floor of a bounded solve, far below the `O(‖g‖)`
+            // residual of a genuine blow-up (an ~8-order gap in
+            // practice). The `max(.,1)` floors tiny-gradient problems.
+            if stationarity_resid > 1e-3 * g_inf.max(1.0) {
+                return Ok(QpSolution {
+                    x,
+                    lambda_g,
+                    lambda_x: vec![0.0; qp.n],
+                    working: WorkingSet::cold(qp.n, qp.m),
+                    obj: Number::NEG_INFINITY,
+                    status: QpStatus::Unbounded,
+                    stats: QpStats {
+                        n_working_set_changes: 0,
+                        n_refactor: 1,
+                        n_schur_updates: 0,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
+        }
 
         let obj = quad_objective(qp, &x);
 
