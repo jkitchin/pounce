@@ -27,34 +27,49 @@ Notes
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Callable, Sequence
 
 import numpy as np
 from scipy import sparse
-from scipy.optimize import LinearConstraint
+from scipy.optimize import Bounds, LinearConstraint, OptimizeResult
 
 from ._pounce import Problem
 
 _EPS = float(np.finfo(np.float64).eps) ** 0.5
 
 
-@dataclass
-class OptimizeResult:
-    """SciPy-OptimizeResult-shaped solve result."""
+# Mapping of scipy-canonical option names to their Ipopt equivalents. Multiple
+# scipy tolerance options (``gtol`` / ``ftol`` / ``xtol``) all collapse onto
+# Ipopt's single ``tol`` knob — last-write-wins if the caller sets more than
+# one. Used by :func:`_translate_option`.
+_SCIPY_TO_IPOPT_OPTION_NAMES = {
+    "maxiter": "max_iter",
+    "gtol": "tol",
+    "ftol": "tol",
+    "xtol": "tol",
+    "iprint": "print_level",
+    "maxcor": "limited_memory_max_history",
+}
 
-    x: np.ndarray
-    fun: float
-    success: bool
-    status: int
-    message: str
-    nit: int
-    info: Mapping[str, Any] = field(default_factory=dict)
 
-    def __getitem__(self, k: str) -> Any:
-        if hasattr(self, k):
-            return getattr(self, k)
-        return self.info[k]
+def _translate_option(k: str, v: Any) -> tuple[str, Any]:
+    """Translate a scipy-canonical ``(name, value)`` pair to its Ipopt form.
+
+    Handles both name aliases (``maxiter`` → ``max_iter``) and value coercions
+    where the types differ between scipy and Ipopt (``disp`` is bool in scipy
+    but Ipopt's ``print_level`` is an int 0–12).
+    """
+    if k == "disp":
+        # scipy bool/int → Ipopt print_level (0 quiet, 5 standard).
+        if isinstance(v, bool):
+            return "print_level", 5 if v else 0
+        return "print_level", int(v)
+    if k == "iprint":
+        return "print_level", int(v)
+    if k == "maxcor":
+        return "limited_memory_max_history", int(v)
+    return _SCIPY_TO_IPOPT_OPTION_NAMES.get(k, k), v
 
 
 def _to_array(x, dtype=np.float64) -> np.ndarray:
@@ -168,8 +183,19 @@ def _finite_diff_jac(g_fun: Callable, x: np.ndarray, m: int) -> np.ndarray:
 
 
 def _normalize_bounds(bounds, n: int):
+    """Accept ``None``, a list of ``(lo, hi)`` pairs, or a ``scipy.optimize.Bounds``.
+
+    ``scipy.optimize.Bounds.keep_feasible`` is silently ignored — Ipopt's
+    barrier method keeps the iterate strictly inside the box for the entire
+    solve, which is at least as strong as ``keep_feasible=True``.
+    """
     if bounds is None:
         return None, None
+    if isinstance(bounds, Bounds):
+        lb = np.broadcast_to(np.asarray(bounds.lb, dtype=np.float64), (n,)).copy()
+        ub = np.broadcast_to(np.asarray(bounds.ub, dtype=np.float64), (n,)).copy()
+        return lb, ub
+    # Legacy: iterable of (lo, hi) pairs, one per dimension.
     lb = np.full(n, -np.inf)
     ub = np.full(n, np.inf)
     for i, bd in enumerate(bounds):
@@ -217,9 +243,7 @@ def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBl
         # csr/csc/etc. — coalesce to COO so we can read row/col directly.
         A = A.tocoo()
     if A.shape[1] != n:
-        raise ValueError(
-            f"LinearConstraint.A has {A.shape[1]} columns; expected {n}"
-        )
+        raise ValueError(f"LinearConstraint.A has {A.shape[1]} columns; expected {n}")
     m_rows = int(A.shape[0])
     lb = np.broadcast_to(np.asarray(lc.lb, dtype=np.float64), (m_rows,)).copy()
     ub = np.broadcast_to(np.asarray(lc.ub, dtype=np.float64), (m_rows,)).copy()
@@ -371,6 +395,7 @@ def _build_problem_obj(
     jac_rows: np.ndarray | None,
     jac_cols: np.ndarray | None,
     callback: Callable | None,
+    eval_counters: dict,
 ):
     """Build a problem-object-with-methods on the fly. Only attaches
     ``hessian`` / ``hessianstructure`` when ``hess`` is provided so
@@ -380,23 +405,28 @@ def _build_problem_obj(
 
     members: dict[str, Any] = {}
     xcache = _LastXCache()
+    counters = eval_counters  # alias the caller's dict so we can mutate it
 
     if jac is True:
         cache = _FunAndGradCache(fun, args)
 
-        def objective(self, x, _c=cache, _xc=xcache):
+        def objective(self, x, _c=cache, _xc=xcache, _ctr=counters):
             _xc.remember(x)
+            _ctr["nfev"] += 1
             return _c.f(x)
 
-        def gradient(self, x, _c=cache):
+        def gradient(self, x, _c=cache, _ctr=counters):
+            _ctr["njev"] += 1
             return _c.g(x)
     else:
 
-        def objective(self, x, _xc=xcache):
+        def objective(self, x, _xc=xcache, _ctr=counters):
             _xc.remember(x)
+            _ctr["nfev"] += 1
             return float(fun(x, *args))
 
-        def gradient(self, x):
+        def gradient(self, x, _ctr=counters):
+            _ctr["njev"] += 1
             if jac is None or jac is False:
                 return _finite_diff_grad(lambda x: fun(x, *args), x)
             return _to_array(jac(x, *args)).ravel()
@@ -509,6 +539,7 @@ def minimize(
         constraints, n
     )
 
+    eval_counters: dict[str, int] = {"nfev": 0, "njev": 0}
     problem_obj = _build_problem_obj(
         fun=fun,
         n=n,
@@ -521,6 +552,7 @@ def minimize(
         jac_rows=jac_rows,
         jac_cols=jac_cols,
         callback=callback,
+        eval_counters=eval_counters,
     )
 
     problem = Problem(
@@ -539,7 +571,8 @@ def minimize(
         # ``RuntimeError`` from ``problem.solve()`` — by design.
         if v is None:
             continue
-        problem.add_option(k, v)
+        ipopt_k, ipopt_v = _translate_option(k, v)
+        problem.add_option(ipopt_k, ipopt_v)
 
     x, info = problem.solve(x0=x0)
     return OptimizeResult(
@@ -549,5 +582,7 @@ def minimize(
         status=int(info["status"]),
         message=str(info["status_msg"]),
         nit=int(info["iter_count"]),
+        nfev=int(eval_counters["nfev"]),
+        njev=int(eval_counters["njev"]),
         info=dict(info),
     )
