@@ -39,6 +39,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M13 | NLP-path presolve: `.sol` / JSON dual block carries the reduced kept-row count, not the original `.nl` `m` | **FIXED** | **Mechanism confirmed + reproduced end-to-end.** With `presolve=yes` on the general-NLP route, `PresolveTnlp` drops redundant rows and the solver works in a reduced (`m_out`) row space. The CLI captures the converged duals from **outside** that wrapper — the IPM `on_converged` hook (`main.rs:612`, via `pack_lambda_for_user`) and the active-set `CountingTnlp` fallback (`main.rs:950`) both see the reduced solution — so the `.sol` / JSON dual block had length `m_out`, shorter than the originating `.nl`'s `m`. AMPL/Pyomo read the dual block **positionally** against the `.nl`, so a short block mis-aligns or is rejected. **Reproduced** by running `lp_afiro.nl solver_selection=nlp presolve=yes` (drops 4 of 27 rows): pre-fix `.sol`/JSON `lambda` length was **23**, vs **27** for the `presolve=no` baseline; `dual_order.nl` (drops both rows) emitted a **zero-length** dual block. **Fix** (reuses existing machinery, no new dual math): `PresolveTnlp::finalize_solution` *already* lifts the duals back to the original row order with dropped-row multiplier recovery (the Phase-0 `recover_dropped_multipliers` path) before forwarding to the inner TNLP — it just wasn't surfaced. Added a `finalized_full_solution: Option<(Vec<Number>,Vec<Number>)>` capture on `PresolveTnlp` (stored at finalize, exposed via a getter); the CLI, when presolve dropped rows, swaps that full-length `lambda` into `nominal_capture` before the `.sol`/JSON writers run. Also: the `.sol` zero-fallback block and the JSON `problem.n_constraints` are now sized to the original `m` (`m_out + n_dropped_rows`), restoring the documented `lambda.len() == n_constraints` invariant. **Dropped-row duals**: redundant rows recover to a *valid alternative* certificate — exactly baseline for genuinely-slack rows (active-row duals match `lp_afiro` baseline tightly), and 0 where bound-tightening migrated the dual to a bound multiplier (e.g. `dual_order`); both satisfy KKT. The fix targets the **length/alignment** defect M13 names. **Test** (`tests/presolve_dual_length.rs::presolve_dual_block_keeps_original_nl_length`): runs `lp_afiro` through the NLP path with `presolve=no` then `=yes`, guards that presolve genuinely drops rows (parses the stdout summary), and asserts the presolved `lambda` length equals the baseline `m` **and** the reported `n_constraints`. **Pre-fix the test FAILS** (`presolve dual block length 23 != original .nl m 27`), confirmed by neutering the lambda swap with an `if false` guard. Mitigated in practice by presolve defaulting off. `pounce-presolve` (207 lib + 9 doc) and full `pounce-cli` (155 lib + all integration, 0 failed) suites green. See `## M13 detail`. |
 | M14 | Any `--minima` tuning knob (`--seed`, `--patience`, `--dedup`, `--sobol`, …) silently switches the whole run into multistart mode | **FIXED** | **Mechanism confirmed + reproduced.** The `minima_num!` macro and the `--sobol`/`--no-sobol` arms in the CLI parser call `minima.get_or_insert_with(MinimaArgs::default)` to stash the knob value, which materializes `Some(MinimaArgs { method: Deflation, .. })` — and `main.rs:420` reroutes the *entire* run through multistart on any `Some(minima)`. So a lone tuning knob with no `--minima <method>`/`--multistart` silently enables global search (different output, `.sol` with zero duals). Help text says only `--minima`/`--multistart` enable it. **Reproduced**: `lp_afiro.nl --seed 42` (no method flag) prints `Searching for up to 10 minima via \`deflation\`…`. **Fix**: track an explicit-method flag (`minima_method_explicit`, set *only* by `--minima`/`--multistart`) and the first knob seen (`minima_knob`); after parsing, if a knob was given without an explicit method, return a clear error instead of silently entering multistart. **Verified post-fix**: lone `--seed 42` now errors `--seed is a --minima tuning knob and has no effect on its own; enable global search with --minima <method> or --multistart`; `--multistart --seed 42` still parses (method=Multistart, seed=42). **Test** (`cli::tests::lone_minima_knob_without_method_is_rejected` + `minima_knob_with_explicit_method_is_accepted`): the first asserts lone `--seed 42` and lone `--no-sobol` error and that the message names both the knob and `--minima`; the second asserts `--seed 7 --multistart` parses (order-independent) to method=Multistart, seed=7. **Pre-fix the rejection test FAILS** (lone `--seed 42` parses to `Some(MinimaArgs{method:Deflation,seed:42})`), confirmed by neutering the guard to `if false && !minima_method_explicit`. **Non-breaking**: every existing multistart test pairs its knobs with an explicit method. Full `pounce-cli` green (157 lib + all integration, 0 failed). See `## M14 detail`. |
 | M15 | Real-AMPL driver conventions unsupported despite `-AMPL`: no `.nl`-appending for extensionless stubs, no `pounce_options` env var | **FIXED** | **Both facets confirmed + reproduced.** The `-AMPL` flag advertises "for Pyomo / AMPL drivers", and AMPL invokes a solver as `pounce mystub -AMPL` — passing the stub *without* `.nl` and conveying options through the `<solver>_options` env var (`pounce_options`). Pyomo worked (it passes a full `.nl` path and CLI `key=value` args); genuine AMPL did not. **Reproduced**: (1) `pounce mystub -AMPL` with `mystub.nl` present errored `could not read …/mystub: No such file or directory` (exit 2); (2) `pounce_options="max_iter=1" pounce model.nl` ignored the env var entirely. **Fix** — two small, additive changes: (a) `read_nl_file` (`crates/pounce-nl/src/nl_reader.rs`) now resolves an extensionless stub: if the path as given is missing but `<path>.nl` exists, read that (and name the `.col`/`.row` siblings off the resolved stem). An existing path is still read verbatim, so Pyomo / `--nl-file` / the second-positional form are untouched. A new `append_extension` helper *appends* `.nl` (AMPL semantics: `my.model` → `my.model.nl`), unlike `Path::with_extension` which would replace. (b) `main.rs` reads the `pounce_options` env var and merges its whitespace-separated `key=value` tokens (parsed by the new pure `cli::options_from_env`) *ahead of* the command-line `key=value` options, so an explicit CLI flag wins (`set_options` is applied last-wins). The `-AMPL` help text now documents both conventions. **Verified post-fix**: `pounce mystub -AMPL` solves to Optimal and writes `mystub.sol`; `pounce_options="max_iter=1"` caps iterations (Maximum Iterations Exceeded); a bogus env option exits 2 with `failed to set …`; CLI `max_iter=3000` overrides env `max_iter=1` (converges). **Tests**: `nl_reader::tests::{read_nl_file_resolves_extensionless_ampl_stub, read_nl_file_prefers_exact_path_over_nl_sibling, append_extension_appends_rather_than_replaces}`; `cli::tests::{options_from_env_parses_whitespace_separated_pairs, options_from_env_skips_non_kv_tokens_and_empty}`; integration `tests/ampl_driver_conventions.rs` (stub→`.nl`+`.sol`, env applied/rejected, CLI overrides env). **Fail-first**: neutering the stub fallback (`if true \|\| path.exists()`) fails the stub tests with `could not read …/mystub`; neutering the env merge fails the env tests (no `failed to set`, exit ≠ 2). Scope note: AMPL's rarer `keyword value` (space-separated) option spelling is intentionally not supported — it matches the existing CLI grammar, which has no `key value` form. `pounce-nl` (78) and full `pounce-cli` (159 lib + all integration, 0 failed) green. See `## M15 detail`. |
+| M16 | Constraints and the full Jacobian are evaluated twice per iterate (no shared full-space cache below the c/d split) | **FIXED** | **Mechanism confirmed + reproduced.** In `OrigIpoptNlp` (`crates/pounce-nlp/src/orig_ipopt_nlp.rs`), `eval_c_internal` and `eval_d_internal` each independently called the user `eval_g` to fill a full-space `full_g`, then sliced their own rows out; likewise `eval_jac_c_internal`/`eval_jac_d_internal` each evaluated all `nnz_jac_g_full` entries via `eval_jac_g`. Because the filter line search needs both `c` and `d` (and both Jacobians) at each iterate, the dominant AD cost was paid **twice** — a ~2× tax on `.nl` problems. **Reproduced** with a counting `Hs071` TNLP: pre-fix, `eval_c(x)` then `eval_d(x)` at one iterate invoked the user `eval_g` **2×** (and `eval_jac_c`+`eval_jac_d` invoked `eval_jac_g` 2×). **Fix** (mirrors upstream's tagged `full_g_`/`jac_g_` buffers): added two shared, tag-keyed caches — `full_g_cache`/`full_jac_g_cache` (`Cache<Rc<Vec<Number>>>`, size 1) — and two private helpers `full_g(x)`/`full_jac_g(x)` that compute the full-space vector/Jacobian once per iterate and memoize on the input vector's tag. `eval_c`/`eval_d` now slice rows out of one shared `full_g(x)`; `eval_jac_c`/`eval_jac_d` slice one shared `full_jac_g(x)`. NaN-on-eval-failure and scaling/bound-subtraction semantics are unchanged (only the *source* of `full_g`/`full_vals` moved). Per-subsystem counters (`c_evals`/`d_evals`/`jac_c_evals`/`jac_d_evals`) still report one evaluation each — they count produced c/d vectors, which is legitimate — while the redundant *user* AD call is gone. **Verified post-fix**: the counting TNLP shows exactly **1** `eval_g` shared by `eval_c`+`eval_d` (and 1 `eval_jac_g` shared by both Jacobians); a genuinely new iterate (tag bumped) costs exactly one more; values unchanged (c=12, d=25 at the HS071 start). End-to-end `lp_afiro solver_selection=nlp` still converges to the known optimum (−464.753, Optimal). **Tests** (`orig_ipopt_nlp::tests`): `eval_c_and_eval_d_share_one_eval_g_per_iterate`, `eval_jac_c_and_eval_jac_d_share_one_eval_jac_g_per_iterate` (new `build_orig_nlp_counting` keeps a typed `Rc<RefCell<Hs071>>` handle to read the user-side call counters). **Pre-fix both FAIL** (`left: 2, right: 1`), confirmed by neutering the shared lookups with `.filter(|_| false)`. `pounce-nlp` (36, 0 failed), `pounce-algorithm`, and `pounce-cli` suites all green. See `## M16 detail`. |
 
 ## C1 detail
 
@@ -1552,3 +1553,66 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   claim true.
 - **Result**: `pounce-nl` green (78, 0 failed); full `pounce-cli` green (159
   lib + all integration incl. the new test file, 0 failed).
+
+## M16 detail
+
+- **Issue**: `OrigIpoptNlp` (`crates/pounce-nlp/src/orig_ipopt_nlp.rs`) splits
+  the user's combined constraint vector `g` into equalities (`c`) and
+  inequalities (`d`). Each subsystem computed the *full* `g` (and the *full*
+  Jacobian) independently:
+  - `eval_c_internal` and `eval_d_internal` each called user `eval_g` into a
+    fresh `full_g`, then sliced their rows (`c_map` / `d_map`).
+  - `eval_jac_c_internal` and `eval_jac_d_internal` each called `eval_jac_g`
+    over all `nnz_jac_g_full` entries, then sliced (`jac_c_entry_in_g` /
+    `jac_d_entry_in_g`).
+  The filter line search needs `c`, `d`, `jac_c`, and `jac_d` at every
+  iterate, so the dominant AD cost was paid twice per iterate — roughly a 2×
+  tax on `.nl` problems, plus inflated underlying-eval accounting. Upstream
+  Ipopt avoids this with tagged `full_g_` / `jac_g_` buffers.
+- **Reproduced**: a counting `Hs071` TNLP (it already tallies `eval_g_calls`
+  and `eval_jac_g_value_calls`). Pre-fix, `eval_c(x)` followed by `eval_d(x)`
+  at one iterate drove `eval_g_calls == 2`; `eval_jac_c(x)` + `eval_jac_d(x)`
+  drove `eval_jac_g_value_calls == 2`.
+- **Fix**: introduce shared, tag-keyed full-space caches and route both
+  subsystems through them.
+  - New fields `full_g_cache: RefCell<Cache<Rc<Vec<Number>>>>` and
+    `full_jac_g_cache: RefCell<Cache<Rc<Vec<Number>>>>` (both `Cache::new(1)`,
+    keyed on the input vector's tag — the same `get_1dep`/`add_1dep`
+    mechanism the per-subsystem caches use).
+  - New private helpers `full_g(&self, x)` and `full_jac_g(&self, x)`: return
+    the cached buffer on a tag hit; otherwise lift `x`, call the user
+    `eval_g` / `eval_jac_g` once, fill NaN on failure (unchanged
+    line-search-backtrack contract), memoize, and return `Rc<Vec<Number>>`.
+  - `eval_c_internal` / `eval_d_internal` now do `let full_g = self.full_g(x)`
+    and slice as before; `eval_jac_c_internal` / `eval_jac_d_internal` now do
+    `let full_vals = self.full_jac_g(x)`. The scaling, equality-bound
+    subtraction (`full_g[g_idx] - full_g_l[g_idx]`), and row-mapping code are
+    untouched — only the *source* of the buffer moved, so numerics are
+    identical.
+  - Per-subsystem counters (`c_evals`, `d_evals`, `jac_c_evals`,
+    `jac_d_evals`) are deliberately left incrementing once per produced
+    vector — they measure c/d production, which still happens once each; the
+    saving is the redundant *user* AD call, now elided on the second
+    subsystem via the shared-cache hit.
+- **Why size-1 caches suffice**: within an iterate every `eval_*` is at the
+  same `x` (same tag) → one compute, subsequent hits. When the solver moves
+  to a new iterate, `x`'s tag bumps and the single slot is replaced — exactly
+  how the existing `c_cache`/`jac_c_cache` behave.
+- **Verified (post-fix)**:
+  - counting TNLP: `eval_c` + `eval_d` ⇒ `eval_g_calls == 1`; a new iterate
+    (x mutated) ⇒ one more (== 2). `eval_jac_c` + `eval_jac_d` ⇒
+    `eval_jac_g_value_calls == 1`.
+  - values unchanged: at the HS071 start c = g1−40 = 12, d = g0 = 25.
+  - end-to-end `pounce lp_afiro.nl solver_selection=nlp` still converges to
+    the known optimum (−464.753, "Optimal Solution Found").
+- **Tests** (`orig_ipopt_nlp::tests`):
+  - `eval_c_and_eval_d_share_one_eval_g_per_iterate`
+  - `eval_jac_c_and_eval_jac_d_share_one_eval_jac_g_per_iterate`
+  - helper `build_orig_nlp_counting` retains a typed `Rc<RefCell<Hs071>>`
+    aliasing the adapter's `dyn TNLP`, so the test can read the user-side
+    call counters (the adapter only exposes `dyn TNLP`).
+- **Fail-first**: neutering the two shared lookups with
+  `.filter(|_| false)` (forcing every call to recompute) makes both tests
+  fail with `left: 2, right: 1`; restored after confirmation.
+- **Result**: `pounce-nlp` green (36, 0 failed); downstream `pounce-algorithm`
+  and full `pounce-cli` suites green (0 failed).

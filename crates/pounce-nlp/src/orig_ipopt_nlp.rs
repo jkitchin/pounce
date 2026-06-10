@@ -192,6 +192,15 @@ pub struct OrigIpoptNlp {
     jac_c_cache: RefCell<Cache<Rc<dyn Matrix>>>,
     jac_d_cache: RefCell<Cache<Rc<dyn Matrix>>>,
     h_cache: RefCell<Cache<Rc<dyn SymMatrix>>>,
+    /// Shared full-space buffers below the c/d split, so the dominant AD
+    /// cost is paid once per iterate instead of twice. `eval_c`/`eval_d`
+    /// both slice their rows out of one `eval_g` result (`full_g_cache`),
+    /// and `eval_jac_c`/`eval_jac_d` both slice one `eval_jac_g` result
+    /// (`full_jac_g_cache`). Keyed by the input vector's tag, like the
+    /// per-subsystem caches; mirrors upstream's tagged `full_g_`/`jac_g_`
+    /// buffers. (Code review 2026-06 item M16.)
+    full_g_cache: RefCell<Cache<Rc<Vec<Number>>>>,
+    full_jac_g_cache: RefCell<Cache<Rc<Vec<Number>>>>,
 
     // ----- evaluation counters -----
     f_evals: RefCell<Index>,
@@ -507,6 +516,8 @@ impl OrigIpoptNlp {
             jac_c_cache: RefCell::new(Cache::new(1)),
             jac_d_cache: RefCell::new(Cache::new(1)),
             h_cache: RefCell::new(Cache::new(1)),
+            full_g_cache: RefCell::new(Cache::new(1)),
+            full_jac_g_cache: RefCell::new(Cache::new(1)),
             f_evals: RefCell::new(0),
             grad_f_evals: RefCell::new(0),
             c_evals: RefCell::new(0),
@@ -1377,6 +1388,64 @@ impl OrigIpoptNlp {
         result
     }
 
+    /// Full-space constraint vector `g(x)` (length `n_full_g`), shared by
+    /// `eval_c`/`eval_d` so the user `eval_g` runs once per iterate. On a
+    /// cache hit no user evaluation occurs; on a failed eval the buffer is
+    /// filled with NaN (so `theta_trial` goes non-finite and the line
+    /// search backtracks), matching the per-subsystem paths.
+    fn full_g(&self, x: &dyn Vector) -> Rc<Vec<Number>> {
+        if let Some(v) = self.full_g_cache.borrow().get_1dep(x.as_tagged()) {
+            return v;
+        }
+        let n_full_g = self.adapter.borrow().classification().n_full_g as usize;
+        let full_x = self.lift_x_to_full(x);
+        let mut full_g = vec![0.0; n_full_g];
+        let ok = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.eval_g(&full_x, true, &mut full_g)
+        };
+        if !ok {
+            full_g.fill(f64::NAN);
+        }
+        let result = Rc::new(full_g);
+        self.full_g_cache
+            .borrow_mut()
+            .add_1dep(Rc::clone(&result), x.as_tagged());
+        result
+    }
+
+    /// Full-space Jacobian values (length `nnz_jac_g_full`, in the user's
+    /// `eval_jac_g` order), shared by `eval_jac_c`/`eval_jac_d` so the user
+    /// `eval_jac_g` runs once per iterate. Same NaN-on-failure contract as
+    /// [`Self::full_g`].
+    fn full_jac_g(&self, x: &dyn Vector) -> Rc<Vec<Number>> {
+        if let Some(v) = self.full_jac_g_cache.borrow().get_1dep(x.as_tagged()) {
+            return v;
+        }
+        let mut full_vals = vec![0.0; self.nnz_jac_g_full as usize];
+        let full_x = self.lift_x_to_full(x);
+        let ok = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.eval_jac_g(
+                Some(&full_x),
+                true,
+                SparsityRequest::Values {
+                    values: &mut full_vals,
+                },
+            )
+        };
+        if !ok {
+            full_vals.fill(f64::NAN);
+        }
+        let result = Rc::new(full_vals);
+        self.full_jac_g_cache
+            .borrow_mut()
+            .add_1dep(Rc::clone(&result), x.as_tagged());
+        result
+    }
+
     fn eval_c_internal(&self, x: &dyn Vector) -> Rc<dyn Vector> {
         let cls = self.adapter.borrow().classification().clone();
         if cls.n_c == 0 {
@@ -1395,18 +1464,11 @@ impl OrigIpoptNlp {
             return v;
         }
         *self.c_evals.borrow_mut() += 1;
-        let full_x = self.lift_x_to_full(x);
-        let mut full_g = vec![0.0; cls.n_full_g as usize];
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_g(&full_x, true, &mut full_g)
-        };
-        // Eval failure → NaN constraint values, so `theta_trial` goes
-        // non-finite and the line search backtracks (see `eval_f_internal`).
-        if !ok {
-            full_g.fill(f64::NAN);
-        }
+        // Shared full-space `g(x)` — computed once per iterate and reused
+        // by `eval_d` (and vice versa). NaN-on-failure handled in `full_g`,
+        // so `theta_trial` goes non-finite and the line search backtracks
+        // (see `eval_f_internal`).
+        let full_g = self.full_g(x);
         let mut c = self.c_space.make_new_dense();
         // c_i = g(g_idx) - g_l(g_idx)  (since g_l == g_u for equalities,
         // upstream subtracts the bound to make it a residual). Matches
@@ -1463,16 +1525,8 @@ impl OrigIpoptNlp {
             return v;
         }
         *self.d_evals.borrow_mut() += 1;
-        let full_x = self.lift_x_to_full(x);
-        let mut full_g = vec![0.0; cls.n_full_g as usize];
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_g(&full_x, true, &mut full_g)
-        };
-        if !ok {
-            full_g.fill(f64::NAN);
-        }
+        // Shared full-space `g(x)` — reused with `eval_c` (see `full_g`).
+        let full_g = self.full_g(x);
         let mut d = self.d_space.make_new_dense();
         {
             let dv = d.values_mut();
@@ -1497,22 +1551,10 @@ impl OrigIpoptNlp {
             return m;
         }
         *self.jac_c_evals.borrow_mut() += 1;
-        let mut full_vals = vec![0.0; self.nnz_jac_g_full as usize];
-        let full_x = self.lift_x_to_full(x);
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_jac_g(
-                Some(&full_x),
-                true,
-                SparsityRequest::Values {
-                    values: &mut full_vals,
-                },
-            )
-        };
-        if !ok {
-            full_vals.fill(f64::NAN);
-        }
+        // Shared full-space Jacobian — computed once per iterate and reused
+        // by `eval_jac_d` (and vice versa). NaN-on-failure handled in
+        // `full_jac_g`.
+        let full_vals = self.full_jac_g(x);
         let mut jac_c = GenTMatrix::new(Rc::clone(&self.jac_c_space));
         {
             let cs = self.c_scale.borrow();
@@ -1539,22 +1581,9 @@ impl OrigIpoptNlp {
             return m;
         }
         *self.jac_d_evals.borrow_mut() += 1;
-        let mut full_vals = vec![0.0; self.nnz_jac_g_full as usize];
-        let full_x = self.lift_x_to_full(x);
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_jac_g(
-                Some(&full_x),
-                true,
-                SparsityRequest::Values {
-                    values: &mut full_vals,
-                },
-            )
-        };
-        if !ok {
-            full_vals.fill(f64::NAN);
-        }
+        // Shared full-space Jacobian — reused with `eval_jac_c` (see
+        // `full_jac_g`).
+        let full_vals = self.full_jac_g(x);
         let mut jac_d = GenTMatrix::new(Rc::clone(&self.jac_d_space));
         {
             let ds = self.d_scale.borrow();
@@ -2266,6 +2295,72 @@ mod tests {
         // Inequality is g0: d/dxj of x0*x1*x2*x3 at (1,5,5,1).
         // d/dx0 = 5*5*1 = 25, d/dx1 = 1*5*1 = 5, d/dx2 = 1*5*1 = 5, d/dx3 = 1*5*5 = 25.
         assert_eq!(g.values(), &[25.0, 5.0, 5.0, 25.0]);
+    }
+
+    /// Build an `OrigIpoptNlp` over `Hs071` while retaining a typed handle
+    /// to the underlying TNLP, so a test can read its `eval_g_calls` /
+    /// `eval_jac_g_value_calls` counters (the adapter only exposes a
+    /// `dyn TNLP`). Both `Rc`s alias the same allocation.
+    fn build_orig_nlp_counting() -> (Rc<RefCell<Hs071>>, OrigIpoptNlp) {
+        let concrete = Rc::new(RefCell::new(Hs071::default()));
+        let tnlp: Rc<RefCell<dyn TNLP>> = concrete.clone();
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+        (concrete, nlp)
+    }
+
+    #[test]
+    fn eval_c_and_eval_d_share_one_eval_g_per_iterate() {
+        // Code review 2026-06 item M16: `eval_c` and `eval_d` must slice
+        // their rows out of ONE shared `g(x)`, not call the user `eval_g`
+        // twice. Before the fix this asserted 2.
+        let (tnlp, mut nlp) = build_orig_nlp_counting();
+        let x = dense_x(&[1.0, 5.0, 5.0, 1.0], nlp.x_space());
+        let mut c = nlp.c_space().make_new_dense();
+        let mut d = nlp.d_space().make_new_dense();
+        nlp.eval_c(&x, &mut c);
+        nlp.eval_d(&x, &mut d);
+        assert_eq!(
+            tnlp.borrow().eval_g_calls,
+            1,
+            "eval_c + eval_d at one iterate must share a single user eval_g"
+        );
+        // Per-subsystem counters still report one c and one d evaluation.
+        assert_eq!(nlp.c_evals(), 1);
+        assert_eq!(nlp.d_evals(), 1);
+        // Values stay correct: c = g1 - 40 = 52 - 40 = 12, d = g0 = 25.
+        assert_eq!(c.values(), &[12.0]);
+        assert_eq!(d.values(), &[25.0]);
+
+        // A genuinely new iterate (x mutated → tag bumped) costs exactly
+        // one more eval_g shared across both subsystems.
+        let mut x2 = x;
+        x2.values_mut()[0] = 2.0;
+        nlp.eval_c(&x2, &mut c);
+        nlp.eval_d(&x2, &mut d);
+        assert_eq!(
+            tnlp.borrow().eval_g_calls,
+            2,
+            "a new iterate triggers exactly one more shared eval_g"
+        );
+    }
+
+    #[test]
+    fn eval_jac_c_and_eval_jac_d_share_one_eval_jac_g_per_iterate() {
+        // Code review 2026-06 item M16: the full Jacobian is evaluated once
+        // per iterate and sliced into jac_c / jac_d. Before the fix this
+        // asserted 2.
+        let (tnlp, mut nlp) = build_orig_nlp_counting();
+        let x = dense_x(&[1.0, 5.0, 5.0, 1.0], nlp.x_space());
+        let _ = nlp.eval_jac_c(&x);
+        let _ = nlp.eval_jac_d(&x);
+        assert_eq!(
+            tnlp.borrow().eval_jac_g_value_calls,
+            1,
+            "eval_jac_c + eval_jac_d at one iterate must share a single eval_jac_g"
+        );
+        assert_eq!(nlp.jac_c_evals(), 1);
+        assert_eq!(nlp.jac_d_evals(), 1);
     }
 
     #[test]
