@@ -1065,9 +1065,28 @@ impl TNLP for PresolveTnlp {
         let (g_full, mut lambda_full, n_inner, m_inner, nnz_inner, one_based) = {
             let s = self.state.as_mut().expect("inited");
             // Recompute g at sol.x — the solver gave us reduced g.
-            self.inner
+            let ok_g = self
+                .inner
                 .borrow_mut()
                 .eval_g(sol.x, true, &mut s.scratch_g);
+            if !ok_g {
+                // L45: the final constraint re-eval failed, so `scratch_g` is
+                // unreliable — it holds whatever the failing call left behind
+                // (partial garbage, or a stale value from an earlier iterate).
+                // Don't forward that. Rebuild g from the solver's own
+                // (trustworthy) reduced `sol.g`, mapped back to the kept inner
+                // rows exactly as the multiplier mapping below does; rows
+                // dropped by presolve are left at 0 (no reliable value exists
+                // for them once the re-eval has failed).
+                for v in s.scratch_g.iter_mut() {
+                    *v = 0.0;
+                }
+                for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
+                    if i_inner < s.scratch_g.len() && outer < sol.g.len() {
+                        s.scratch_g[i_inner] = sol.g[outer];
+                    }
+                }
+            }
             for v in s.scratch_lambda.iter_mut() {
                 *v = 0.0;
             }
@@ -1891,6 +1910,143 @@ mod tests {
             got_zu,
             vec![0.0, 0.0],
             "z_u must be zeroed at aux-fixed vars (H10)"
+        );
+    }
+
+    /// Same model as [`RecordingTwoVar`] but (a) records the `g` vector that
+    /// `finalize_solution` forwards to the inner TNLP and (b) can be told to
+    /// *fail* `eval_g` (returning `false` after scribbling a sentinel), so a
+    /// test can check what happens when the final constraint re-eval fails.
+    struct GFailRecordingVar {
+        rec_g: Rc<RefCell<Option<Vec<Number>>>>,
+        fail_g: Rc<RefCell<bool>>,
+    }
+    impl TNLP for GFailRecordingVar {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 4,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            for v in b.x_l.iter_mut() {
+                *v = -1e19;
+            }
+            for v in b.x_u.iter_mut() {
+                *v = 1e19;
+            }
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            b.g_l[1] = 1.0;
+            b.g_u[1] = 1.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            if *self.fail_g.borrow() {
+                // Simulate a failing evaluator that leaves garbage behind.
+                for v in g.iter_mut() {
+                    *v = 999.0;
+                }
+                return false;
+            }
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+            *self.rec_g.borrow_mut() = Some(sol.g.to_vec());
+        }
+    }
+
+    /// L45: when the final constraint re-eval in `finalize_solution` fails,
+    /// the forwarded `g` must NOT be the garbage/stale buffer the failing
+    /// `eval_g` left behind. Both rows here are Phase-0 dropped (reduced
+    /// `m = 0`, empty `sol.g`), so the trustworthy fallback yields all-zeros
+    /// — never the `999.0` sentinel.
+    #[test]
+    fn finalize_does_not_forward_stale_g_when_eval_g_fails() {
+        let rec_g = Rc::new(RefCell::new(None));
+        let fail_g = Rc::new(RefCell::new(false));
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(GFailRecordingVar {
+            rec_g: Rc::clone(&rec_g),
+            fail_g: Rc::clone(&fail_g),
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.m, 0, "both equality rows dropped by Phase 0");
+
+        // Now make the final re-eval fail.
+        *fail_g.borrow_mut() = true;
+        let x = [2.0, 1.0];
+        let z_l = [0.0, 0.0];
+        let z_u = [0.0, 0.0];
+        let g: [Number; 0] = [];
+        let lambda: [Number; 0] = [];
+        let sol = Solution {
+            status: pounce_nlp::alg_types::SolverReturn::Success,
+            x: &x,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g,
+            lambda: &lambda,
+            obj_value: 0.0,
+        };
+        wrapped.finalize_solution(sol, &IpoptData::default(), &IpoptCq::default());
+
+        let got_g = rec_g.borrow().clone().expect("inner finalize ran");
+        // Fail-first: pre-fix the ignored `eval_g` return forwards the
+        // sentinel-filled `scratch_g` (`[999, 999]`) verbatim.
+        assert_eq!(
+            got_g,
+            vec![0.0, 0.0],
+            "failed eval_g must not forward stale/garbage constraint values",
         );
     }
 

@@ -112,6 +112,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L42 | Documented sensitivity regularization default `1e-8` vs actual `reg: 1e-10` (`sensitivity.rs:30-31` vs `ipm.rs:135`) | **FIXED (doc)** | **Confirmed by reading both sites.** The `sensitivity` module doc says the static regularization δ is "the QP solver's own `reg`, default `1e-8`" (`:29-30`), but `QpOptions::default()` sets `reg: 1e-10` (`ipm.rs:135`) — and the default-built sensitivity (`build_default` → `QpOptions::default()`) puts exactly that `opts.reg` on the KKT diagonal (`build`, `:116` `let reg = opts.reg`). The default was deliberately retuned `1e-8 → 1e-10` (the `ipm.rs:128-134` comment: `1e-8` floors the primal residual `δ·‖dy‖` above `tol` on badly-scaled NETLIB LPs like `adlittle`, stalling to the iteration cap; `1e-10` converges in ~57 iters), but the sensitivity doc kept the old number — a pure doc-staleness bug, no wrong behavior. **Fix**: corrected the doc to `1e-10`, and added a regression-guard test so doc and code can't silently drift again. **Test** (`sensitivity::tests`): `module_doc_regularization_matches_qp_options_default` asserts `QpOptions::default().reg == 1e-10` (the value the module doc now names). **Fail-first confirmed**: with the assertion temporarily set to the stale `1e-8`, the test failed (`left: 1e-10, right: 1e-8`), proving the doc's claim was wrong against the actual default; restoring `1e-10` (doc + test together) passes. Full pounce-convex suite green (114 lib, +1); `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean. See `## L42 detail`. |
 | L43 | Duplicate Jacobian entries handled inconsistently: assignment vs accumulation (`inequality_projection.rs:146-148, 213` vs 177, 215) — under the summing convention a wrong `J_block` can admit an unsafe block via `all_implied = true` | **FIXED** | **Confirmed by reading the function + a fail-first test.** `project_inequalities` buckets Jacobian triplets by row into `by_row` (which *keeps* duplicates), then reads them inconsistently: the linear constant `sum_jx` (`:145`) accumulates over all entries, but the block matrix `j_block` (`:147`) and the coupled-row coefficient `a_b` (`:213`) used plain assignment, so a duplicate `(row,col)` triplet kept only its last value; the surviving-column branch `a_y` (`:215`) already accumulated. Under the summing convention a dropped duplicate yields a wrong `J_block` → wrong block solution `b = M y + p` → wrong projected `rhs`, which can flip a real coupled inequality to "implied" and drop it (`all_implied = true`). **Fix**: accumulate (`+=`) at both sites; both targets are zero-initialized. **Test** (`inequality_projection::tests`): `projection_sums_duplicate_jacobian_entries_in_block` — equality row 0 carries duplicate block-col entries `2.0` and `-1.0` (true coef `1.0`); assignment keeps `-1.0` solving `b=-3` instead of `3`, making coupled row `b∈[-5,-1]` look implied when with `b=3` it is real. **Fail-first confirmed**: pre-fix `all_implied = true`; post-fix `false` (rhs_u = -4 ⇒ b solved to 3). Full pounce-presolve suite green (220 lib, +1); `cargo fmt` / gated `cargo clippy` clean. See `## L43 detail`. |
 | L44 | `Interval::mul` produces NaN endpoints on `0 × ∞` corners (`fbbt/interval.rs:148-159`) → `is_empty()` reads EMPTY → spurious infeasibility; `inverse_powint`'s `powf(1/n)` not outward-rounded (`reverse.rs:223-224`) | **FIXED (both parts)** | **Confirmed by reading both + three fail-first tests.** (1) `mul`'s four-corner formula computes `0.0 * ∞ = NaN`; for `[0,0] × ENTIRE` *all four* corners are NaN → `[NaN, NaN]`, which `is_empty()` (`:68`, NaN ⇒ empty) reads as spurious infeasibility. (A single NaN corner was already absorbed by `f64::min`/`max` returning the non-NaN operand, so only the all-NaN case leaked.) **Fix**: a `corner(a,b)` helper treating any `0 * x` as `0` (exact-zero annihilation, the IA convention) — the only NaN source in `a*b` is `0×∞`, so this makes every corner well-defined. (2) `inverse_powint` computed `abs_lo/abs_hi = powf(1/n)` round-to-nearest, violating the module's outward-rounding soundness invariant (could over-tighten and drop a feasible point); the odd branch (`signed_nth_root`) had the same flaw. **Fix**: `round_down`/`round_up` the root endpoints (helpers exposed `pub(crate)`), both branches. **Tests**: `mul_zero_by_entire_is_zero_not_empty` (fail-first: pre-fix `Interval{lo:NaN,hi:NaN}`); `inverse_powint_even_branch_is_outward_rounded` and `..._odd_branch_...` on perfect-square/cube intervals (fail-first: pre-fix lower root `== raw powf`, not strictly below). Full pounce-presolve suite green (223 lib, +3); `cargo fmt` / gated `cargo clippy` clean. See `## L44 detail`. |
+| L45 | `finalize_solution` ignores the `eval_g` return value (`lib.rs:931-933` orig) → on re-eval failure the stale/garbage `scratch_g` is forwarded as the reported constraint vector | **FIXED** | **Confirmed by a fail-first test.** `finalize_solution` re-evaluates `g` at the final `sol.x` into the inner-sized `scratch_g`, but discarded the boolean result; a failed `eval_g` leaves `scratch_g` holding partial garbage or a stale earlier-iterate value, which was then cloned into `g_full` and reported. **Fix**: capture `ok_g`; on `!ok_g`, zero `scratch_g` and rebuild it from the solver's own (trustworthy) reduced `sol.g`, mapped to the kept inner rows via `rows_kept` exactly as the multiplier mapping does (presolve-dropped rows left at 0, no reliable value existing for them). **Test**: `finalize_does_not_forward_stale_g_when_eval_g_fails` — a `GFailRecordingVar` mock whose `eval_g` writes sentinel `999.0` and returns `false`; finalize records the reported `sol.g`. Fail-first: pre-fix the recorded vector is `[999, 999]`; post-fix `[0, 0]`. Full pounce-presolve suite green (224 lib, +1); `cargo fmt` / gated `cargo clippy` clean. See `## L45 detail`. |
 
 ## C1 detail
 
@@ -5701,4 +5702,41 @@ crate's single ULP-nudge implementation).
   **Fail-first confirmed**: pre-fix lower root `== raw`.
 
 Full pounce-presolve suite green (223 lib, +3); `cargo fmt` / gated `cargo
+clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
+
+## L45 detail
+
+**Issue.** `finalize_solution` re-evaluates the constraint vector `g` at the
+final `sol.x` (the solver hands back only the *reduced* problem's `g`), writing
+into the inner-sized `scratch_g` buffer — but it discarded the `bool` returned
+by `eval_g`. On a failed re-eval, `scratch_g` holds whatever the failing call
+left behind (partial writes, or a stale value from an earlier iterate); that
+buffer was then cloned into `g_full` and reported to the caller as the final
+constraint values.
+
+**Verification.** `eval_g`'s contract returns `false` on failure and makes no
+guarantee about buffer contents in that case. The original code
+(`lib.rs:931-933` in the review's numbering) was effectively
+`let _ = self.inner.borrow_mut().eval_g(...)` followed by `scratch_g.clone()`
+unconditionally. So a transient final-point eval failure silently forwards
+garbage as the reported `g`.
+
+**Fix.** Capture the result as `ok_g`. On `!ok_g`, zero `scratch_g`, then
+rebuild it from the solver's own (trustworthy) reduced `sol.g`, mapping each
+reduced row back to its inner row via `rows_kept` — exactly the same mapping
+the multiplier reconstruction (`scratch_lambda`) uses immediately below. Rows
+dropped by presolve are left at `0`: once the re-eval has failed there is no
+reliable value to place there, and the reduced `sol.g` carries no entry for
+them. On success (`ok_g`) behavior is byte-for-byte unchanged.
+
+**Test** (`tests::finalize_does_not_forward_stale_g_when_eval_g_fails`). A
+`GFailRecordingVar` mock TNLP (2 vars, 2 equality rows that presolve drops in
+Phase 0 so the reduced problem has `m == 0`) whose `eval_g` writes the sentinel
+`999.0` into the buffer and returns `false` when a flag is set. The wrapped
+`PresolveTnlp` records the `g` vector that `finalize_solution` produces.
+**Fail-first confirmed**: with the fix disabled the recorded vector is
+`[999, 999]` (the sentinel garbage forwarded verbatim); post-fix it is
+`[0, 0]` (re-eval failed, both rows were dropped so no reduced value maps in).
+
+Full pounce-presolve suite green (224 lib, +1); `cargo fmt` / gated `cargo
 clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
