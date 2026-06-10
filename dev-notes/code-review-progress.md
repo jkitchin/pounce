@@ -66,6 +66,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L1 | algorithm: the final iterate is never convergence-tested at the `max_iter` boundary. `IpoptAlgorithm::optimize`'s main loop (`crates/pounce-algorithm/src/ipopt_alg.rs:1651-1656`) increments `iter_count` and breaks with `Maximum_Iterations_Exceeded` *before* calling `iterate()` again, so the convergence check never runs on the iterate produced by the final permitted step. A solve converging on exactly the `max_iter`-th iterate reports `Maximum_Iterations_Exceeded` where upstream Ipopt — whose `CheckConvergence` runs at the top of the loop, convergence-first — reports success; the `MaxIterExceeded` branch in `conv_check/opt_error.rs:233` is consequently dead (`data.iter_count` can never reach `max_iter`) | **FIXED** | **Bug confirmed by running code**: HS071 converges to `Solve_Succeeded` at `iter=8` with a generous budget; re-solving with `max_iter=8` reported `MaximumIterationsExceeded` at `iter=7` — the loop broke before the converged 8th iterate was ever tested. **Root cause**: the outer loop carried its own `if iter_count >= self.max_iter { break MaxiterExceeded }` that short-circuited *before* the next `iterate()` call, while the real convergence test (component tolerances **then** the `iter >= max_iter` gate) lives inside `iterate()` → `check_convergence_with_state`. Because the break fired first, `data.iter_count` topped out at `max_iter - 1`, so the in-`iterate()` `MaxIterExceeded` branch (`opt_error.rs:233`) never executed. **Fix**: drop the premature break — bump the counter and loop, letting the next `iterate()` run its convergence check. Termination is still guaranteed: once `iter_count` reaches `max_iter`, `check_convergence_with_state` returns `Converged`/`ConvergedToAcceptable` or `MaxIterExceeded`, never `Continue`. This matches upstream's top-of-loop, convergence-first ordering and takes the same number of steps (`max_iter`), adding only the missing final-iterate check. **Test** (`crates/pounce-algorithm/tests/optimize_hs71.rs::hs071_converges_exactly_at_max_iter_boundary`): finds HS071's natural convergence iteration `k`, re-solves with `max_iter=k`, asserts success + objective ≈ 17.014017. **Fail-first confirmed**: pre-fix the test fails with `MaximumIterationsExceeded (max_iter = 8)`; post-fix all 16 `optimize_hs71` tests pass and the full pounce-algorithm suite is green (lib 245 + all integration tests, 0 failures). See `## L1 detail`. |
 | L2 | algorithm: claim that the tiny-step *dual* test (`crates/pounce-algorithm/src/ipopt_alg.rs:1041-1042`) is absolute where upstream Ipopt is relative (`1/(1+‖y‖∞)` scaling), unlike the primal half (`detect_tiny_step`, 1152-1172), causing `STOP_AT_TINY_STEP` to under-fire on large-multiplier problems | **NOT A BUG** (premise refuted by upstream source) | **Premise checked against the actual upstream source and found false.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpBacktrackingLineSearch.cpp`: it sets `tiny_step_last_iteration_` via `Number delta_y_norm = Max(IpData().delta()->y_c()->Amax(), IpData().delta()->y_d()->Amax()); if (delta_y_norm < tiny_step_y_tol_) { ... }` — a **direct absolute comparison, no `1/(1+‖y‖∞)` scaling**. pounce's `let dy_amax = delta.y_c.amax().max(delta.y_d.amax()); self.tiny_step_last_iteration = dy_amax < self.tiny_step_y_tol;` is an exact, faithful port. The primal/dual asymmetry the review flags (primal relative per-component `|δxᵢ|/(1+|xᵢ|)`, dual absolute) is **present in upstream** and intentional — confirmed independently by the option help text for `tiny_step_y_tol`: *"the step in the y variables is smaller than this threshold"* (absolute), versus `tiny_step_tol`'s *"in relative terms for each component"* (primal). **No code change, no regression test**: the alleged bug does not exist; changing 1041-1042 to a relative form would *introduce* a divergence from upstream, not remove one. Recorded per the "document issues that cannot be verified" rule — here the issue is verifiable and refuted. See `## L2 detail`. |
 | L3 | algorithm: the probing μ-oracle hard-codes its centering cap `sigma_max = 100.0` (`crates/pounce-algorithm/src/mu/adaptive.rs:685-691`) instead of forwarding the user-set `sigma_max` option, so a user-set `sigma_max` reaches only the quality-function oracle — unlike upstream, where the probing oracle reads the same option | **FIXED** | **Bug confirmed by running code + upstream source.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpProbingMuOracle.cpp`: it reads `options.GetNumericValue("sigma_max", sigma_max_, prefix)` in `InitializeImpl` and caps `sigma = Min(sigma, sigma_max_)` — so the probing oracle **is** user-configurable upstream (the registered option help saying "Only used if mu_oracle is quality-function" is itself slightly inaccurate; behavior is what matters). pounce's adaptive free-mode update constructed `ProbingMuOracle { sigma_max: 100.0, … }` (hard-coded), while the quality-function branch correctly forwarded `self.sigma_max` (`adaptive.rs:705`). **Reproduced**: solving HS071 with `mu_strategy=adaptive`, `mu_oracle=probing` took **10** iterations at the default `sigma_max=100` *and* at `sigma_max=1e-6` — byte-identical, i.e. the user value was ignored. **Fix**: forward `self.sigma_max` (one line, `adaptive.rs:686`), matching upstream; updated the field doc-comment (104-108) to note it now also feeds the probing oracle. The registered option help string is left verbatim (it is upstream's). **Test** (`crates/pounce-algorithm/tests/optimize_hs71.rs::hs071_probing_oracle_honors_user_sigma_max`): solves HS071 via the probing oracle at default `sigma_max` vs `sigma_max=1e-6` and asserts the iteration counts differ. **Fail-first confirmed**: pre-fix both runs take 10 iters → `assert_ne!` fails ("both runs took 10 iters"); post-fix default=10 vs 1e-6=8 (both still `Solve_Succeeded`), so the option now reshapes the μ trajectory. Full pounce-algorithm suite green (lib 245 + all integration, `optimize_hs71` now 17, 0 failures). See `## L3 detail`. |
+| L4 | algorithm: `golden_section` can return an unevaluated `-100.0` sentinel endpoint when `qmax <= 0` (`src/mu/oracle/quality_function.rs:540-554` with 730, 741); also `>=` in `qf_ok` makes the default `qf_tol = 0.0` flat-stop dead | **PARTIAL — one facet fixed, one not-a-bug** | **Two facets; verified against upstream.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpQualityFunctionMuOracle.cpp::PerformGoldenSection`. **Facet 2 (`>=` makes flat-stop dead): NOT A BUG.** Upstream's loop condition is `(1. - Min/Max) >= qf_tol` — the *same* `>=` as pounce line 499. With the default `qf_tol = 0.0` the term `(1 - qmin/qmax) >= 0` is always true for any non-degenerate bracket, so the qf-tolerance never stops the loop *in either codebase*; that is upstream's intended behavior (the qf_tol stop is opt-in via a positive `quality_function_eps`), not a pounce regression. **Facet 1 (unevaluated sentinel return): REAL, fixed.** `pick_sigma` always passes one endpoint with the `-100.0` sentinel (search-up → `q_up=-100` at line 730; search-down → `q_lo=-100` at 741). Upstream never lands on a sentinel because its loop lacks a `qmax > 0` guard, so a sentinel state (large positive ratio) keeps the loop alive until the slot is overwritten, and its post-loop else-branch re-evaluates `if( q_up < 0. )` anyway. pounce **adds** `qmax > 0.0 &&` to `qf_ok` (line 499, to dodge a divide-by-zero when every sample ≤ 0); that guard can force `qf_ok = false` on the first pass while an endpoint still holds the sentinel, routing it into the `width_ok && !qf_ok` branch (540-554) — which, unlike pounce's *own* else-branch (561-572) and upstream, did **not** re-evaluate, so it returned the unevaluated `-100.0` endpoint as the spurious minimum. **Reproduced** by a focused unit test on the pure `golden_section`: `q(σ) = -σ` on the interior/lo points (all ≤ 0 ⇒ `qmax ≤ 0`) but `+50` at the upper endpoint; search-up call returns σ=3 (the sentinel endpoint, true q=50, the bracket *maximum*) pre-fix. **Fix**: in the `width_ok && !qf_ok` branch re-evaluate any unmoved sentinel endpoint (`sigma_lo==sigma_lo_in && q_lo<0` / `sigma_up==sigma_up_in && q_up<0`) before selecting the minimum, mirroring the else-branch and upstream; refreshed the stale doc-comment (524-530) that wrongly claimed the sentinel could never reach this branch. **Test** (`quality_function.rs::tests::golden_section_never_returns_unevaluated_sentinel`): asserts the result is `< sigma_up`. **Fail-first confirmed** (pre-fix returns σ=3; post-fix returns an interior σ≈2.24). Full pounce-algorithm suite green (lib 246 + all integration, 0 failures). See `## L4 detail`. |
 
 ## C1 detail
 
@@ -3209,3 +3210,77 @@ source.**
   1e-6=8, both still `Solve_Succeeded`. The full `pounce-algorithm` suite stays
   green (lib 245 + every integration test; `optimize_hs71` now 17 tests; 0
   failures), confirming the probing-path change is regression-free.
+
+## L4 detail
+
+**Issue (review L4):** "`golden_section` can return an unevaluated `-100.0`
+sentinel endpoint when `qmax <= 0` (`src/mu/oracle/quality_function.rs:540-554`
+with 730, 741); also `>=` in `qf_ok` makes the default `qf_tol = 0.0`
+flat-stop dead."
+
+This is two separate claims. I checked both against the real upstream source.
+
+**Upstream reference.** Fetched `coin-or/Ipopt` (stable/3.14)
+`src/Algorithm/IpQualityFunctionMuOracle.cpp::PerformGoldenSection`. Its loop
+condition is
+`while( (sigma_up - sigma_lo) >= sigma_tol*sigma_up && (1. - Min(q_lo,q_up,qmid1,qmid2)/Max(q_lo,q_up,qmid1,qmid2)) >= qf_tol && nsections < quality_function_max_section_steps_ )`.
+Its post-loop selection has a qf_tol-stop branch
+(`if( ... && (1.-Min/Max) < qf_tol ) { ... DBG_ASSERT(qf_min > -100.); }`) and
+an else-branch that re-evaluates a sentinel endpoint:
+`if( q_up < 0. ) { qtmp = CalculateQualityFunction(UnscaleSigma(sigma_up),...); } else { qtmp = q_up; }`.
+
+**Facet 2 — `>=` in `qf_ok` makes flat-stop dead: NOT A BUG.** pounce
+line 499 is `qf_ok = qmax > 0.0 && (1.0 - qmin/qmax) >= qf_tol`. Upstream uses
+the *same* `>=` against `qf_tol`. With the default `qf_tol = 0.0`,
+`(1 - qmin/qmax) >= 0` holds for any non-degenerate bracket in **both**
+codebases, so the qf-tolerance stop simply never triggers by default — that is
+upstream's design (the qf_tol stop is opt-in via a positive
+`quality_function_eps`), not a pounce divergence. No change warranted.
+
+**Facet 1 — unevaluated `-100.0` sentinel can be returned: REAL, fixed.**
+`pick_sigma` always passes one endpoint as the `-100.0` sentinel: search-up
+calls `golden_section(sigma_lo, sigma_up, qf_1, -100.0, ...)` (line 730),
+search-down calls `golden_section(sigma_lo, sigma_up, -100.0, qf_1minus, ...)`
+(line 741). The endpoint q is meant to be evaluated lazily and compared only
+after the loop. Upstream never returns the sentinel because (a) it has no
+`qmax > 0` guard, so a sentinel state yields a large positive
+`(1 - qmin/qmax)` ratio that keeps the loop alive until the slot is
+overwritten, and (b) its post-loop else-branch re-evaluates `if( q_up < 0. )`.
+
+pounce **adds** `qmax > 0.0 &&` to `qf_ok` (line 499) — a guard against the
+divide-by-zero / nonsense ratio that occurs when *every* sampled q is ≤ 0
+(`qmax ≤ 0`). That guard is reasonable in isolation, but it forces
+`qf_ok = false` on the very first pass of such a state, breaking the loop with
+the sentinel still in place (`nsections = 0`, the sentinel endpoint never
+moved). The state then lands in the `width_ok && !qf_ok` branch (540-554),
+which — unlike pounce's *own* else-branch (561-572) and unlike upstream —
+selected the raw minimum of `{q_lo, q_up, qmid1, qmid2}` **without**
+re-evaluating the sentinel, so it returned the unevaluated `-100.0` endpoint
+as the spurious minimizer.
+
+**Reproduced (running code).** A focused unit test on the pure `golden_section`
+function (no solver state needed): `q(σ) = -σ` on the interior and lower-bound
+samples (all ≤ 0 ⇒ `qmax ≤ 0`, tripping the added guard) but `q(σ_up) = +50`
+— i.e. the upper endpoint is the *worst* point in the bracket. A search-up
+style call `golden_section(1.0, 3.0, q(1.0), -100.0, 1e-3, 0.0, 50, q)` returns
+**σ = 3.0** pre-fix (the unevaluated sentinel endpoint, whose true q = 50, the
+bracket maximum).
+
+**Fix** (`quality_function.rs`, `width_ok && !qf_ok` branch): before selecting
+the minimum, re-evaluate any endpoint that never moved during the loop and
+still carries the sentinel —
+`if sigma_lo == sigma_lo_in && q_lo < 0.0 { q_lo = q(sigma_lo); }` and the
+symmetric `sigma_up` case — mirroring the else-branch and upstream's
+`if( q_up < 0. )`. This makes `golden_section` provably never return an
+unevaluated `-100.0`. Also refreshed the stale doc-comment (524-530) that had
+asserted the sentinel could never reach this branch (it can, precisely because
+of pounce's added `qmax > 0` guard).
+
+**Test** (`quality_function.rs::tests::golden_section_never_returns_unevaluated_sentinel`):
+asserts the returned σ is `< sigma_up`. **Fail-first confirmed**: pre-fix
+returns σ = 3 (panics with "returned the unevaluated sentinel endpoint σ = 3,
+true q there = 50"); post-fix returns the real interior minimizer σ ≈ 2.24 and
+the test passes. Full `pounce-algorithm` suite green (lib **246** + every
+integration test, 0 failures), so the re-evaluation does not perturb any
+existing convergence path (the existing `golden_section_*` tests and the
+HS071/adaptive-oracle integration tests all still pass).
