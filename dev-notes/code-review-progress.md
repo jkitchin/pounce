@@ -87,6 +87,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L22 | CLI: the `--cite <model>.nl` "wrong file" hint suggests producing a report with `pounce … --solve-report report.json`, but no `--solve-report` flag exists — `cli.rs` parses only `--json-output` (`main.rs:1700-1711`), so a user following the hint hits "unknown argument" | **FIXED** | **Bug confirmed by reading + running code.** When `--cite` is handed a `.nl` model instead of a solve-report JSON, `run_cite` prints a help hint telling the user to generate a report first. The hint named `--solve-report`, which the CLI arg parser does not accept (grep of `cli.rs` shows the report-output flag is `--json-output` at `cli.rs:520`; `--solve-report` appears nowhere). Following the hint literally produces an unknown-argument error. **Fix**: corrected the hint string (and its preceding comment) to `pounce {} --json-output report.json`. **Test** (`tests/cite_hint_flag.rs`, new integration test using `CARGO_BIN_EXE_pounce`): writes a temp `.nl`-extension file with non-JSON contents, runs `pounce --cite <file>.nl`, and asserts stderr **contains** `--json-output` and **does not contain** `--solve-report`. **Fail-first confirmed**: reverting the hint to `--solve-report` makes the test fail (stderr lacks `--json-output`). `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L22 detail`. |
 | L23 | CLI: after a failed MC64 hypersensitivity scaling retry, `status` reverts to the original local-infeasibility verdict but the reported statistics still reflect the *retry* solve (`main.rs:883-899, 902`) — `app.statistics()` was read **after** the second `optimize_tnlp`, so a non-promoting retry pairs the original verdict with the failed retry's iteration count / objective | **FIXED** | **Bug confirmed by reading + running code.** The `feral_infeasibility_scaling_retry` guard re-solves once with MC64 on a local-infeasibility verdict; on failure it sets `status = InfeasibleProblemDetected` (original verdict) but the subsequent `let solve_stats = app.statistics()` returns the *retry* solve's stats (the retry's `optimize_tnlp` overwrote `app.statistics()`), so the summary/JSON report show the original verdict next to the failed retry's iterations/objective. On the promote path stats were correct only incidentally. **Fix**: snapshot `solve_stats = app.statistics()` immediately after the solve loop (the verdict-bearing solve), and after the retry set `(status, solve_stats)` together via a new pure helper `resolve_scaling_retry_outcome(retry_status, original_stats, retry_stats)` — promote ⇒ `(retry_status, retry_stats)`; otherwise ⇒ `(InfeasibleProblemDetected, original_stats)`. Status and stats now move in lockstep. Extracted `scaling_retry_promoted` for the promote predicate. **Tests** (`main.rs` `scaling_retry_tests`): `failed_retry_keeps_original_status_and_stats` (over `InfeasibleProblemDetected`/`MaximumIterationsExceeded`/`RestorationFailed` retry verdicts → status stays infeasible AND `iteration_count`/`final_objective` stay the original solve's `7`, not the retry's `42`); `promoted_retry_adopts_retry_status_and_stats` (`SolveSucceeded`/`SolvedToAcceptableLevel` → status + stats both the retry's `42`). **Fail-first confirmed**: modeling the pre-fix leak (else-branch returns `retry_stats`) fails the failed-retry test (`iteration_count` 42 ≠ 7). Restored; full pounce-cli bin tests green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L23 detail`. |
 | L24 | CLI: the `.nl` was fully re-parsed a second time purely to classify it for LP/QP dispatch (`main.rs:456-461` / the `nl_reader::read_nl_file` at the dispatch block), doubling parse time and peak memory on large models; the classification re-parse's error arm (`Err(_) => (ProblemClass::Nlp, None)`) silently fell back to NLP | **FIXED** | **Bug confirmed by reading + running code.** The `.nl` is parsed once to build `NlTnlp` (consuming `NlProblem`), then `read_nl_file(path)` ran a *second* full parse in the dispatch block just to call `classify_problem`. Every `.nl` solve paid two parses; large models paid double parse time + peak memory. The second parse's `Err(_)` arm discarded the error and defaulted to `ProblemClass::Nlp` (silent mis-route latent on a re-read failure). **Fix**: classify during the **first** parse — capture `nl_class = Some(classify_problem(&prob))` right before `prob` is moved into `NlTnlp::new`, and have the dispatch block read `class` from `nl_class` (no re-parse). The specialized convex solvers still need an owned `NlProblem` (the first one was consumed), so re-parse **once, lazily, only on the convex dispatch path** (LP/convex-QP/SOCP) — never for a general NLP solve — and on that re-parse a failure now surfaces (`eprintln!` + exit 2) instead of silently routing to NLP. Builtins (always NLP) never re-parse. **Tests/verification**: the existing end-to-end suites exercise the refactored path — `qp_dispatch_end_to_end::auto_routes_convex_qp_to_pounce_convex` (auto classifies `convex_qp.nl` → routes to pounce-convex, proving the captured `nl_class` drives routing), `nlp_path_still_solves_same_file`, plus `dispatch_routing` (21 tests total) all green. **Fail-first confirmed**: breaking the capture (`nl_class = None` → defaults to Nlp) makes `auto_routes_convex_qp_to_pounce_convex` fail (the convex QP misroutes to NLP, stdout lacks `pounce-convex`). The pure parse-count reduction and the re-parse error-surfacing path are verified by code reading (no deterministic fail-first seam for "parsed once not twice" or a first-succeeds/second-fails race). Restored; suites green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L24 detail`. |
+| L25 | CLI: a failed `.sol` write exited 0 on the NLP path (`main.rs:1076-1080`) but 2 on the convex LP/QP/SOCP path (`main.rs:1287`); under `-AMPL` a convex-path write failure made the process exit non-zero, so Pyomo/ASL raised `ApplicationError` and never read the (stale/missing) `.sol` | **ALREADY FIXED (by H4)** | **Verified by reading + git history; no separate fix needed.** The exact asymmetry L25 describes was eliminated by the earlier High-priority fix **H4** (`fix(cli): honor -AMPL exit-code contract on convex LP/QP/SOCP paths`, commit `ce49710`). Its message states it "drop[s] the convex paths' `.sol`-write-failure `exit 2` in favor of log-and-continue, matching the NLP path so the exit code uniformly follows the solve outcome." Confirmed by code reading: all three `.sol`-write sites — NLP (`main.rs:1169-1172`), convex-QP (`main.rs:1433-1435`), convex-SOCP (`main.rs:1574-1576`) — now `eprintln!` a warning and continue; none early-returns `ExitCode::from(2)` on a write failure. The convex paths' final exit routes through `convex_exit_code(ok, ampl)` (exits 0 when `ok \|\| ampl`), mirroring the NLP path's `_ if args.ampl => ExitCode::SUCCESS`. **Behavioral coverage**: H4's regression test `qp_dispatch_end_to_end::ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp` runs the infeasible-QP fixture both ways (`-AMPL` exits 0 with srn 200 in the `.sol`; plain CLI exits non-zero), locking the `-AMPL` exit contract that L25 was concerned with. A dedicated `.sol`-write-failure test was not added — forcing a write failure hermetically/portably (unwritable path) is brittle, and the failure mode L25 flagged (distinct exit 2) no longer exists in any path. See `## L25 detail`. |
 
 ## C1 detail
 
@@ -4654,3 +4655,46 @@ convex QP misroutes through the NLP path and stdout no longer contains
 first-parse capture. Restored; suites green. `cargo fmt -p pounce-cli` /
 `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness
 -D clippy::suspicious` clean.
+
+## L25 detail
+
+**Issue (verbatim).** "Failed `.sol` write exits 0 on the NLP path
+(`main.rs:1076-1080`) but 2 on the convex path (`main.rs:1287`); `-AMPL`
+callers see a clean exit with a stale/missing `.sol`."
+
+**Status: already fixed by H4 — no new fix in this iteration.**
+
+The `.sol`-write-failure exit-code asymmetry L25 describes was removed by the
+earlier High-priority issue **H4** (commit `ce49710`,
+`fix(cli): honor -AMPL exit-code contract on convex LP/QP/SOCP paths`). At the
+time L25 was authored, `run_convex_qp`/`run_convex_socp` early-returned a
+distinct `exit 2` on a `.sol`-write failure while the NLP path only logged.
+H4 unified all three paths.
+
+**Current state (verified by reading the code at HEAD):**
+
+- NLP path (`main.rs:1169-1172`):
+  `match write_sol_file(...) { Ok => "wrote", Err(e) => "failed to write" }`
+  — logs only, no early return.
+- Convex LP/QP path (`main.rs:1430-1435`): `if let Err(e) = write_sol_file(...)
+  { eprintln!("pounce: failed to write …") }` with an explicit comment:
+  "Log a `.sol` write failure but do not early-return a distinct exit code: the
+  NLP path … only logs, and under `-AMPL` the final exit must still follow the
+  solve-outcome contract."
+- Convex SOCP path (`main.rs:1571-1576`): identical log-and-continue.
+
+A `grep` for `.sol`-write sites finds exactly these three; none returns
+`ExitCode::from(2)` on a write error. The convex paths' terminal exit now flows
+through `convex_exit_code(ok, ampl)` (0 when `ok || ampl`), the direct mirror of
+the NLP path's `_ if args.ampl => ExitCode::SUCCESS`.
+
+**Why no separate test was added.** H4 already shipped
+`ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp`, which runs the
+infeasible-QP fixture under `-AMPL` (asserts exit 0 with the verdict, srn 200,
+in the `.sol`) and plain (asserts non-zero) — this guards the exact `-AMPL`
+contract L25 cared about. A test that forces a `.sol`-*write* failure
+specifically (e.g. an unwritable path/dir) would be brittle and
+platform-dependent (running as root, filesystem permission semantics), and the
+failure mode L25 flagged — a path that exits 2 on write failure — no longer
+exists anywhere in the binary, so there is nothing left to regress against on
+that axis.
