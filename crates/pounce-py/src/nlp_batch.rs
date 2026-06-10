@@ -1,18 +1,22 @@
-//! Batched NLP solving from Python (pounce#126) — native `.nl` path.
+//! Batched NLP solving from Python (pounce#126).
 //!
-//! `solve_nlp_batch(problems, ...)` takes a list of [`PyNlProblem`]s
-//! (the native-Rust evaluators `read_nl` returns — reverse-mode AD
-//! tapes, no Python callbacks, no GIL during evaluation), clones each
-//! problem's owned `NlTnlp` out of its pyclass, releases the GIL, and
-//! runs `pounce_algorithm::solve_nlp_batch_parallel` on rayon's global
-//! pool (outer-parallel across instances, inner-serial FERAL factor
-//! per worker). One `(x, info)` pair per input, in input order.
+//! Two entry points, one per input kind:
 //!
-//! Callback-based `pounce.Problem` objects cannot take this path —
-//! every `eval_*` would re-acquire the GIL, serializing the batch (see
-//! the phase-2 discussion on pounce#126). The pure-Python
-//! `pounce.solve_nlp_batch` wrapper routes those to a documented
-//! sequential fallback instead.
+//! - [`solve_nlp_batch`] (phase 1) takes a list of [`PyNlProblem`]s —
+//!   the native-Rust evaluators `read_nl` returns (reverse-mode AD
+//!   tapes, no Python callbacks, no GIL during evaluation). It clones
+//!   each problem's owned `NlTnlp` out of its pyclass, releases the
+//!   GIL, and runs the batch on rayon's global pool (outer-parallel
+//!   across instances, inner-serial FERAL factor per worker).
+//! - [`solve_problem_batch`] (phase 2) takes callback-based
+//!   `pounce.Problem`s: each instance's bridge moves to a rayon worker
+//!   that owns the whole solve and re-acquires the GIL transiently per
+//!   `eval_*` callback, so only the Python share of the work
+//!   serializes.
+//!
+//! Both return one `(x, info)` pair per input, in input order, and
+//! support warm-start chaining (`warms=`) and opt-in identical-
+//! sparsity backend pooling (`share_structure=`).
 
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -21,18 +25,18 @@ use pyo3::types::PyDict;
 
 use pounce_algorithm::application::{default_backend_factory, feral_config_from_options};
 use pounce_algorithm::batch::{
-    install_pooled_serial_feral_backend, install_serial_feral_backend, FeralBackendPool,
+    install_pooled_serial_feral_backend, install_serial_feral_backend,
     solve_nlp_batch as solve_batch_seq, solve_nlp_batch_parallel as solve_batch_par,
     solve_nlp_batch_parallel_warm as solve_batch_par_warm,
-    solve_nlp_batch_warm as solve_batch_seq_warm, NlpBatchResult, NlpWarmStart,
+    solve_nlp_batch_warm as solve_batch_seq_warm, FeralBackendPool, NlpBatchResult, NlpWarmStart,
 };
-use std::sync::Arc;
 use pounce_algorithm::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     make_default_restoration_factory_provider, InnerBackendFactoryFactory,
 };
+use std::sync::Arc;
 
 use crate::nl_problem::PyNlProblem;
 use crate::problem::{extract_f64_vec, status_message, PyProblem};
@@ -58,9 +62,9 @@ fn decode_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<BatchOptions>
         return Ok(out);
     };
     for (key, value) in dict.iter() {
-        let name: String = key.extract().map_err(|_| {
-            PyValueError::new_err("solve_nlp_batch: option names must be strings")
-        })?;
+        let name: String = key
+            .extract()
+            .map_err(|_| PyValueError::new_err("solve_nlp_batch: option names must be strings"))?;
         if value.is_instance_of::<pyo3::types::PyBool>() {
             if let Ok(b) = value.extract::<bool>() {
                 out.str_opts
@@ -301,7 +305,8 @@ pub fn solve_nlp_batch<'py>(
     let pool = {
         let mut probe = IpoptApplication::new();
         apply_options(&mut probe, &opts).map_err(PyRuntimeError::new_err)?;
-        share_structure.then(|| FeralBackendPool::serial(feral_config_from_options(probe.options())))
+        share_structure
+            .then(|| FeralBackendPool::serial(feral_config_from_options(probe.options())))
     };
 
     let dims: Vec<(usize, usize)> = problems.iter().map(|p| p.borrow().dims()).collect();

@@ -717,11 +717,7 @@ impl PyProblem {
     /// application instead of going through [`Self::prepare`].
     pub(crate) fn option_sets(
         &self,
-    ) -> (
-        &[(String, String)],
-        &[(String, Number)],
-        &[(String, Index)],
-    ) {
+    ) -> (&[(String, String)], &[(String, Number)], &[(String, Index)]) {
         (&self.str_opts, &self.num_opts, &self.int_opts)
     }
 
@@ -882,7 +878,11 @@ fn extract_index_vec_inferred(val: &Py<PyAny>, what: &str) -> PyResult<Vec<Index
     })
 }
 
-pub(crate) fn extract_f64_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<Number>> {
+pub(crate) fn extract_f64_vec(
+    val: &Py<PyAny>,
+    expected: usize,
+    what: &str,
+) -> PyResult<Vec<Number>> {
     Python::with_gil(|py| {
         let bound = val.bind(py);
         if let Ok(arr) = bound.downcast::<PyArray1<Number>>() {

@@ -414,7 +414,6 @@ pub fn read_nl(path: &str) -> PyResult<PyNlProblem> {
     // `try_new` (not `new`): a model that names an AMPL imported function with
     // no resolvable `$AMPLFUNC` library must raise a catchable Python error,
     // not panic across the pyo3 boundary as an uncatchable PanicException.
-    let tnlp =
-        NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
+    let tnlp = NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
     PyNlProblem::from_tnlp(tnlp, "read_nl")
 }

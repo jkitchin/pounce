@@ -360,7 +360,9 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
         self.get().determine_dependent_rows(ia, ja, c_deps)
     }
     fn factor_pattern(&self, want_values: bool) -> Option<pounce_linsol::FactorPattern> {
-        self.inner.as_ref().and_then(|s| s.factor_pattern(want_values))
+        self.inner
+            .as_ref()
+            .and_then(|s| s.factor_pattern(want_values))
     }
 }
 
@@ -368,7 +370,10 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
 /// identical-sparsity batch optimization (see [`FeralBackendPool`] for
 /// the reuse semantics and the determinism caveat). Call from
 /// `configure` *instead of* [`install_serial_feral_backend`].
-pub fn install_pooled_serial_feral_backend(app: &mut IpoptApplication, pool: &Arc<FeralBackendPool>) {
+pub fn install_pooled_serial_feral_backend(
+    app: &mut IpoptApplication,
+    pool: &Arc<FeralBackendPool>,
+) {
     let pool = Arc::clone(pool);
     app.set_linear_backend_factory(Box::new(move |_choice| Box::new(pool.acquire())));
 }
@@ -442,9 +447,9 @@ fn apply_warm_options(app: &mut IpoptApplication, mu: Option<Number>) {
             Ok((_, true))
         );
         if !user_set_mu {
-            let _ = app
-                .options_mut()
-                .set_numeric_value("mu_init", mu.max(WARM_MU_FLOOR), true, false);
+            let _ =
+                app.options_mut()
+                    .set_numeric_value("mu_init", mu.max(WARM_MU_FLOOR), true, false);
         }
     }
 }
