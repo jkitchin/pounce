@@ -13,6 +13,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H2 | sensitivity: pin-row mapping omits `full_g_to_c_block` — silently wrong sensitivities with inequality constraints | **FIXED** | Translate user full-g pin indices through the c/d split before indexing `y_c`; reject pinned inequalities. Fixed `Solver::parametric_step`, `Solver::compute_reduced_hessian`, and the `convenience` (`SensSolve`) path; added `PdSensBacksolver::full_g_to_c_block` accessor. Tests in `cd_split_pin_mapping.rs`. |
 | H3 | cli: `.sol`/JSON constraint duals written in internal c/d-split order, unscaled | **FIXED** | `on_converged` hook now reassembles `lambda` via `pack_lambda_for_user` (inverts the c/d split via `c_map`/`d_map` AND unwinds `c_scale`/`d_scale`) instead of concatenating raw `y_c`+`y_d`; manual concatenation kept only as a fallback for non-`OrigIpoptNlp`. Test `lambda_is_in_original_g_order_not_cd_split_order` in `json_report.rs`. |
 | H4 | cli: convex LP/QP/SOCP dispatch ignores the `-AMPL` exit-code contract | **FIXED** | Threaded `args.ampl` into `run_convex_qp`/`run_convex_socp`; new `convex_exit_code(ok, ampl)` returns 0 for any non-fatal outcome under `-AMPL` (mirrors NLP path), 1 otherwise. Also dropped the `.sol`-write-failure `exit 2` (log-and-continue like the NLP path). Test `ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp`. |
+| H5 | nl: external-function errors detected on the wrong channel — failed evals silently return garbage | **FIXED** | `ExternalLibrary::eval` now decodes both `funcadd` error channels via `decode_external_errmsg`: the **reassigned** `al->Errmsg` pointer (conforming path) and the caller buffer. Previously only `errmsg_buf[0]` was checked, so a library doing `al->Errmsg = "...";` was invisible and the IPM consumed NaN f/∇f/∇²f. Tests `reassigned_errmsg_pointer_is_detected_end_to_end` + `decode_external_errmsg_buffer_and_none_channels`. |
 
 ## C1 detail
 
@@ -188,3 +189,36 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   non-AMPL stays exit 1 / feasible `-AMPL` exits 0. Neutralizing the `|| ampl`
   guard reproduced the test failure (`right: Some(0)`); restored → green. Full
   `pounce-cli` suite green (154 unit + integration; qp_dispatch 16 tests).
+
+## H5 detail
+
+- **Bug**: the AMPL `funcadd` ABI lets an external library report an error two
+  ways. The conforming path is to **reassign** `arglist.errmsg` to the
+  library's own string (`al->Errmsg = "T out of range";`); the alternative is
+  to write into a caller-provided buffer. `ExternalLibrary::eval`
+  (`pounce-nl/src/nl_external.rs`) pre-pointed `al.errmsg` at a zeroed 1024-byte
+  buffer and only checked `errmsg_buf[0] != 0` afterward. A library that
+  reassigns the pointer (the standard behavior — e.g. IDAES Helmholtz on
+  out-of-domain `(h,p)`) leaves the buffer untouched, so the error was
+  invisible: `eval` returned `Ok` with the function's NaN/garbage value. This
+  defeated the NaN-poisoning design in `nl_tape.rs::ext_eval_or_nan` (written so
+  the line search backs off on out-of-domain evals); the IPM silently consumed
+  wrong f/∇f/∇²f.
+- **Fix**: remember the buffer's address, and after the call decode via a new
+  `decode_external_errmsg(errmsg_field, orig_buf_ptr, buf_first)`: if the field
+  no longer equals our buffer (and is non-null) the library reassigned it →
+  read from the new pointer; otherwise fall back to the buffer when its first
+  byte is non-zero; else no error.
+- **Test**: `reassigned_errmsg_pointer_is_detected_end_to_end` builds the real
+  `Arglist` and invokes a conforming Rust `extern "C"` `rfunc` that reassigns
+  `al->Errmsg` to a static string and returns NaN — exercising the real
+  function-pointer call and the real post-call decode. It asserts the caller
+  buffer stays zeroed (so the pre-fix `errmsg_buf[0]` check saw nothing) and
+  that the fixed decode surfaces `"T out of range"`.
+  `decode_external_errmsg_buffer_and_none_channels` covers the buffer-write
+  channel and the no-error / explicit-NULL cases.
+- **Verified the bug by running code**: the end-to-end test demonstrates
+  channel 1 in-process — after a reassigning call `errmsg_buf[0] == 0`, proving
+  the old check was blind to it, while `decode_external_errmsg` returns
+  `Some("T out of range")`. Full `pounce-nl` suite green (75 + …); no external
+  dylib required (the IDAES-dependent tests still skip when absent).

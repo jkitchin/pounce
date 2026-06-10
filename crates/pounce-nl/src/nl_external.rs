@@ -530,8 +530,14 @@ impl ExternalLibrary {
             Vec::new()
         };
 
-        // Space for a library-set error message.
+        // Space for a library-set error message. The ABI lets a library
+        // signal an error two ways (see `decode_external_errmsg`): by writing
+        // into this buffer, OR — the canonical conforming path — by
+        // *reassigning* `arglist.errmsg` to its own string. We seed the field
+        // with this buffer's address and remember it so the reassignment is
+        // detectable afterwards.
         let mut errmsg_buf: Vec<c_char> = vec![0; 1024];
+        let errmsg_orig_ptr = errmsg_buf.as_ptr();
 
         // Build the arglist. Pointers into Rust-owned buffers are valid for
         // the duration of the call since we hold those Vecs in this stack
@@ -587,14 +593,15 @@ impl ExternalLibrary {
         let value = unsafe { (rf.rfunc)(&mut al as *mut Arglist) };
         drop(_guard);
 
-        // If the library wrote into errmsg, surface that. AMPL convention:
-        // if errmsg[0] != 0 after the call, treat as error.
-        if errmsg_buf[0] != 0 {
-            // SAFETY: errmsg_buf is a NUL-terminated C buffer (we allocated
-            // and zeroed it); the library only writes a C string there.
-            let msg = unsafe { CStr::from_ptr(errmsg_buf.as_ptr()) }
-                .to_string_lossy()
-                .into_owned();
+        // Surface a library-reported error from *either* ABI channel: the
+        // reassigned `arglist.errmsg` pointer (the conforming path) or our
+        // pre-pointed buffer. Checking only the buffer would miss every
+        // library that does `al->Errmsg = "...";`, silently consuming garbage.
+        // SAFETY: `al.errmsg` is either our zeroed NUL-terminated buffer or a
+        // C string the library assigned; both are valid to read as a CStr.
+        if let Some(msg) =
+            unsafe { decode_external_errmsg(al.errmsg, errmsg_orig_ptr, errmsg_buf[0]) }
+        {
             return Err(format!("external '{name}' reported: {msg}"));
         }
 
@@ -631,6 +638,54 @@ pub struct EvalResult {
     /// Packed upper-triangular Hessian in AMPL's convention,
     /// `hes[i + j*(j+1)/2]` for `0 <= i <= j < nr`, if `want_hes`.
     pub hessian: Option<Vec<f64>>,
+}
+
+/// Decode an external function's error signal after its `rfunc` returns.
+///
+/// The AMPL `funcadd` ABI lets a library report an error two ways:
+///
+/// 1. **Reassign** `arglist.errmsg` to its own (usually static) C string —
+///    `al->Errmsg = "T out of range";`. This is the conforming path used by
+///    real libraries (e.g. IDAES Helmholtz on out-of-domain evals). The
+///    caller's pre-pointed buffer is left untouched.
+/// 2. Write a string into the buffer the caller pointed `errmsg` at before the
+///    call.
+///
+/// We seed `arglist.errmsg` with our buffer's address (`orig_buf_ptr`). After
+/// the call: if the field no longer equals that address (and is non-null) the
+/// library reassigned it → read from the new pointer; otherwise fall back to
+/// the buffer when its first byte is non-zero. Returns `None` when neither
+/// channel carries a message. Checking only the buffer (the prior behavior)
+/// silently dropped every channel-1 error and let the IPM consume NaN/garbage
+/// f/∇f/∇²f.
+///
+/// # Safety
+/// `errmsg_field` (when reassigned) and `orig_buf_ptr` must each point at a
+/// readable NUL-terminated C string for the duration of the read.
+unsafe fn decode_external_errmsg(
+    errmsg_field: *const c_char,
+    orig_buf_ptr: *const c_char,
+    buf_first: c_char,
+) -> Option<String> {
+    if !errmsg_field.is_null() && errmsg_field != orig_buf_ptr {
+        // Channel 1: the library reassigned the pointer to its own string.
+        // SAFETY: caller guarantees `errmsg_field` is a NUL-terminated string.
+        return Some(
+            unsafe { CStr::from_ptr(errmsg_field) }
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    if buf_first != 0 {
+        // Channel 2: the library wrote into the caller-provided buffer.
+        // SAFETY: caller guarantees `orig_buf_ptr` is a NUL-terminated string.
+        return Some(
+            unsafe { CStr::from_ptr(orig_buf_ptr) }
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -831,5 +886,99 @@ mod tests {
         for (i, h) in hes.iter().enumerate() {
             assert!(h.is_finite(), "hes[{i}] = {h} not finite");
         }
+    }
+
+    // --- H5: errmsg detection across both funcadd ABI channels ---
+
+    /// A conforming `rfunc` that signals an error the canonical AMPL way: by
+    /// **reassigning** `al->Errmsg` to its own static C string (leaving any
+    /// caller-provided buffer untouched), and returning NaN like an
+    /// out-of-domain evaluation.
+    unsafe extern "C" fn rfunc_reassigns_errmsg(al: *mut Arglist) -> f64 {
+        static MSG: &[u8] = b"T out of range\0";
+        // SAFETY: `al` is a valid, exclusively-borrowed Arglist for the call.
+        unsafe {
+            (*al).errmsg = MSG.as_ptr() as *mut c_char;
+        }
+        f64::NAN
+    }
+
+    /// Build an `Arglist` with every pointer null except `errmsg`. Sufficient
+    /// for a `rfunc` that only manipulates the error channel.
+    fn null_arglist(errmsg: *mut c_char) -> Arglist {
+        Arglist {
+            n: 1,
+            nr: 1,
+            at: ptr::null_mut(),
+            ra: ptr::null_mut(),
+            sa: ptr::null_mut(),
+            derivs: ptr::null_mut(),
+            hes: ptr::null_mut(),
+            dig: ptr::null_mut(),
+            funcinfo: ptr::null_mut(),
+            ae: ptr::null_mut(),
+            f: ptr::null_mut(),
+            tva: ptr::null_mut(),
+            errmsg,
+            tmi: ptr::null_mut(),
+            private: ptr::null_mut(),
+            nin: 0,
+            nout: 0,
+            nsin: 0,
+            nsout: 0,
+        }
+    }
+
+    /// End-to-end over the real `Arglist` + a real `extern "C"` call: a library
+    /// that reports an error by reassigning `al->Errmsg` (channel 1) must be
+    /// detected. Pre-fix, `eval` only inspected the caller buffer — which a
+    /// reassigning library never touches — so the error was invisible and the
+    /// IPM consumed the NaN return as a valid value.
+    #[test]
+    fn reassigned_errmsg_pointer_is_detected_end_to_end() {
+        let mut errmsg_buf: Vec<c_char> = vec![0; 1024];
+        let orig_ptr = errmsg_buf.as_ptr();
+        let mut al = null_arglist(errmsg_buf.as_mut_ptr());
+
+        // SAFETY: the rfunc matches the ABI and only writes `al.errmsg`.
+        let v = unsafe { rfunc_reassigns_errmsg(&mut al) };
+        assert!(v.is_nan(), "the failing eval returned NaN");
+
+        // A reassigning library leaves the caller buffer zeroed, so the old
+        // `errmsg_buf[0] != 0` check (the bug) saw nothing.
+        assert_eq!(
+            errmsg_buf[0], 0,
+            "a reassigning library must not touch the caller buffer"
+        );
+
+        // The fixed decode reads the reassigned pointer and surfaces the error.
+        let decoded = unsafe { decode_external_errmsg(al.errmsg, orig_ptr, errmsg_buf[0]) };
+        assert_eq!(
+            decoded.as_deref(),
+            Some("T out of range"),
+            "the reassigned errmsg pointer must be surfaced as an error"
+        );
+    }
+
+    /// The buffer channel (a library that writes into the caller buffer) and
+    /// the no-error cases still behave correctly.
+    #[test]
+    fn decode_external_errmsg_buffer_and_none_channels() {
+        // Channel 2: library wrote a string into the caller buffer.
+        let mut buf: Vec<c_char> = vec![0; 16];
+        for (i, b) in b"bad input".iter().enumerate() {
+            buf[i] = *b as c_char;
+        }
+        let orig = buf.as_ptr();
+        let decoded = unsafe { decode_external_errmsg(orig, orig, buf[0]) };
+        assert_eq!(decoded.as_deref(), Some("bad input"));
+
+        // No error: field still points at the (zeroed) buffer.
+        let zero: Vec<c_char> = vec![0; 16];
+        let z = zero.as_ptr();
+        assert_eq!(unsafe { decode_external_errmsg(z, z, zero[0]) }, None);
+
+        // No error via an explicitly NULL field (some libraries zero it).
+        assert_eq!(unsafe { decode_external_errmsg(ptr::null(), z, 0) }, None);
     }
 }
