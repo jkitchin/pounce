@@ -88,6 +88,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L23 | CLI: after a failed MC64 hypersensitivity scaling retry, `status` reverts to the original local-infeasibility verdict but the reported statistics still reflect the *retry* solve (`main.rs:883-899, 902`) — `app.statistics()` was read **after** the second `optimize_tnlp`, so a non-promoting retry pairs the original verdict with the failed retry's iteration count / objective | **FIXED** | **Bug confirmed by reading + running code.** The `feral_infeasibility_scaling_retry` guard re-solves once with MC64 on a local-infeasibility verdict; on failure it sets `status = InfeasibleProblemDetected` (original verdict) but the subsequent `let solve_stats = app.statistics()` returns the *retry* solve's stats (the retry's `optimize_tnlp` overwrote `app.statistics()`), so the summary/JSON report show the original verdict next to the failed retry's iterations/objective. On the promote path stats were correct only incidentally. **Fix**: snapshot `solve_stats = app.statistics()` immediately after the solve loop (the verdict-bearing solve), and after the retry set `(status, solve_stats)` together via a new pure helper `resolve_scaling_retry_outcome(retry_status, original_stats, retry_stats)` — promote ⇒ `(retry_status, retry_stats)`; otherwise ⇒ `(InfeasibleProblemDetected, original_stats)`. Status and stats now move in lockstep. Extracted `scaling_retry_promoted` for the promote predicate. **Tests** (`main.rs` `scaling_retry_tests`): `failed_retry_keeps_original_status_and_stats` (over `InfeasibleProblemDetected`/`MaximumIterationsExceeded`/`RestorationFailed` retry verdicts → status stays infeasible AND `iteration_count`/`final_objective` stay the original solve's `7`, not the retry's `42`); `promoted_retry_adopts_retry_status_and_stats` (`SolveSucceeded`/`SolvedToAcceptableLevel` → status + stats both the retry's `42`). **Fail-first confirmed**: modeling the pre-fix leak (else-branch returns `retry_stats`) fails the failed-retry test (`iteration_count` 42 ≠ 7). Restored; full pounce-cli bin tests green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L23 detail`. |
 | L24 | CLI: the `.nl` was fully re-parsed a second time purely to classify it for LP/QP dispatch (`main.rs:456-461` / the `nl_reader::read_nl_file` at the dispatch block), doubling parse time and peak memory on large models; the classification re-parse's error arm (`Err(_) => (ProblemClass::Nlp, None)`) silently fell back to NLP | **FIXED** | **Bug confirmed by reading + running code.** The `.nl` is parsed once to build `NlTnlp` (consuming `NlProblem`), then `read_nl_file(path)` ran a *second* full parse in the dispatch block just to call `classify_problem`. Every `.nl` solve paid two parses; large models paid double parse time + peak memory. The second parse's `Err(_)` arm discarded the error and defaulted to `ProblemClass::Nlp` (silent mis-route latent on a re-read failure). **Fix**: classify during the **first** parse — capture `nl_class = Some(classify_problem(&prob))` right before `prob` is moved into `NlTnlp::new`, and have the dispatch block read `class` from `nl_class` (no re-parse). The specialized convex solvers still need an owned `NlProblem` (the first one was consumed), so re-parse **once, lazily, only on the convex dispatch path** (LP/convex-QP/SOCP) — never for a general NLP solve — and on that re-parse a failure now surfaces (`eprintln!` + exit 2) instead of silently routing to NLP. Builtins (always NLP) never re-parse. **Tests/verification**: the existing end-to-end suites exercise the refactored path — `qp_dispatch_end_to_end::auto_routes_convex_qp_to_pounce_convex` (auto classifies `convex_qp.nl` → routes to pounce-convex, proving the captured `nl_class` drives routing), `nlp_path_still_solves_same_file`, plus `dispatch_routing` (21 tests total) all green. **Fail-first confirmed**: breaking the capture (`nl_class = None` → defaults to Nlp) makes `auto_routes_convex_qp_to_pounce_convex` fail (the convex QP misroutes to NLP, stdout lacks `pounce-convex`). The pure parse-count reduction and the re-parse error-surfacing path are verified by code reading (no deterministic fail-first seam for "parsed once not twice" or a first-succeeds/second-fails race). Restored; suites green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L24 detail`. |
 | L25 | CLI: a failed `.sol` write exited 0 on the NLP path (`main.rs:1076-1080`) but 2 on the convex LP/QP/SOCP path (`main.rs:1287`); under `-AMPL` a convex-path write failure made the process exit non-zero, so Pyomo/ASL raised `ApplicationError` and never read the (stale/missing) `.sol` | **ALREADY FIXED (by H4)** | **Verified by reading + git history; no separate fix needed.** The exact asymmetry L25 describes was eliminated by the earlier High-priority fix **H4** (`fix(cli): honor -AMPL exit-code contract on convex LP/QP/SOCP paths`, commit `ce49710`). Its message states it "drop[s] the convex paths' `.sol`-write-failure `exit 2` in favor of log-and-continue, matching the NLP path so the exit code uniformly follows the solve outcome." Confirmed by code reading: all three `.sol`-write sites — NLP (`main.rs:1169-1172`), convex-QP (`main.rs:1433-1435`), convex-SOCP (`main.rs:1574-1576`) — now `eprintln!` a warning and continue; none early-returns `ExitCode::from(2)` on a write failure. The convex paths' final exit routes through `convex_exit_code(ok, ampl)` (exits 0 when `ok \|\| ampl`), mirroring the NLP path's `_ if args.ampl => ExitCode::SUCCESS`. **Behavioral coverage**: H4's regression test `qp_dispatch_end_to_end::ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp` runs the infeasible-QP fixture both ways (`-AMPL` exits 0 with srn 200 in the `.sol`; plain CLI exits non-zero), locking the `-AMPL` exit contract that L25 was concerned with. A dedicated `.sol`-write-failure test was not added — forcing a write failure hermetically/portably (unwritable path) is brittle, and the failure mode L25 flagged (distinct exit 2) no longer exists in any path. See `## L25 detail`. |
+| L26 | CLI summary (`print.rs`): (a) the final-summary block prints the **same** number under both the `(scaled)` and `(unscaled)` columns for Dual infeasibility / Constraint violation / Complementarity / Overall NLP error (`print.rs:381-401`); (b) "Variable bound violation" is hardcoded `0.0` (`print.rs:391`); (c) the inequality bound-type breakdown didn't sum to `n_ineq` — a "free" inequality row (no finite bound) fell through to a no-op arm (`print.rs:87-89`) | **PARTIALLY FIXED** (c fixed + tested; a/b documented as solver-statistics limitations) | **All three verified by reading code.** **(c) FIXED:** a constraint row with `g_l=-inf, g_u=+inf` is classified inequality (`n_ineq += 1`) but its `(has_l,has_u)=(false,false)` match arm was `=> {}`, so `ineq_lower_only + ineq_both + ineq_upper_only < n_ineq` whenever a free row was present — exactly the "breakdown not sum to total" defect. The comment already said to "count it anyway under 'both' to keep the totals consistent," so the code was simply not doing what its comment claimed. **Fix**: `(false, false) => ineq_both += 1`, comment rewritten to match. **Test** (`print.rs` `inequality_tally_tests::free_inequality_row_keeps_breakdown_summing_to_total`): a mock TNLP with 3 inequality rows (lower-only, both, free) asserts `ineq_lower_only + ineq_both + ineq_upper_only == n_ineq == 3` (and the free row lands in "both": both=2). **Fail-first confirmed**: reverting to `=> {}` makes the sum 2 ≠ 3 (test fails). 160 pounce-cli lib tests green; `cargo fmt` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. **(a)/(b) DOCUMENTED, not fixed — root cause is missing solver statistics, not a print bug:** `SolveStatistics` (`pounce-nlp/src/solve_statistics.rs:51-66`) carries a single value each for `final_dual_inf`/`final_constr_viol`/`final_compl`/`final_kkt_error` (populated once off the scaled-space `cq` cache at `application.rs:1347-1361`) and **no** variable-bound-violation field; only the objective is tracked in both spaces (`final_objective` + `final_scaled_objective`). So the print layer has only the scaled residual to show — printing it under both columns is the *display* symptom of the solver not computing unscaled residuals, and the `0.0` bound violation is a value the solver never measures (an interior-point iterate is bound-feasible by construction, so it is ~0 on a converged solve, but it is genuinely uncomputed for early-terminated solves). A faithful fix requires plumbing unscaled residuals + a bound-violation metric through `pounce-algorithm`'s finalize path into `SolveStatistics` — a solver-statistics change well beyond a CLI print remediation, deferred to a dedicated issue. Nothing parses this block (grep over `crates/`/`pyomo-pounce/`/`python/` finds no scraper), so the misleading columns are cosmetic, not a data-integrity break. See `## L26 detail`. |
 
 ## C1 detail
 
@@ -4698,3 +4699,96 @@ platform-dependent (running as root, filesystem permission semantics), and the
 failure mode L25 flagged — a path that exits 2 on write failure — no longer
 exists anywhere in the binary, so there is nothing left to regress against on
 that axis.
+
+## L26 detail
+
+**Issue (verbatim).** "Summary block prints identical numbers in the
+'(scaled)/(unscaled)' columns and hardcodes variable bound violation 0.0
+(`print.rs:368-401`); inequality tally comment/code mismatch (`print.rs:87-89`)
+makes the breakdown not sum to the total."
+
+Three distinct sub-issues; one is a clean correctness bug (fixed + tested), the
+other two are display symptoms of a missing solver statistic (documented).
+
+### (c) Inequality bound-type breakdown didn't sum to the total — FIXED
+
+In `collect_stats` (`print.rs`), each non-equality row is bucketed by which
+finite bounds it has:
+
+```
+(true, true)   => ineq_both += 1,
+(true, false)  => ineq_lower_only += 1,
+(false, true)  => ineq_upper_only += 1,
+(false, false) => {}            // <-- BUG: free row counted in n_ineq, no bucket
+```
+
+A row with `g_l = -inf, g_u = +inf` (a fully open `.nl` range row) is not an
+equality, so `n_ineq += 1` fires, but the `(false, false)` arm did nothing —
+leaving `ineq_lower_only + ineq_both + ineq_upper_only < n_ineq`. The printed
+breakdown (three lines under "Total number of inequality constraints") then did
+not account for every inequality row. The arm's own comment already declared the
+intended behavior ("count it anyway under 'both' to keep the totals
+consistent"), so the code simply wasn't doing what it claimed.
+
+**Fix:** `(false, false) => ineq_both += 1;` (comment rewritten to match).
+
+**Test:** `print.rs::inequality_tally_tests::free_inequality_row_keeps_breakdown_summing_to_total`
+— a mock `TNLP` (2 free vars; rows: lower-only `[0,+inf)`, both `[0,1]`, free
+`(-inf,+inf)`; no equalities) asserts:
+- `n_eq == 0`, `n_ineq == 3`;
+- `ineq_lower_only + ineq_both + ineq_upper_only == n_ineq` (the headline
+  invariant);
+- the free row lands in "both": `lower_only == 1`, `upper_only == 0`,
+  `both == 2`.
+
+**Fail-first:** restoring `(false, false) => {}` makes the sum `2 != 3` and the
+test fails (observed: "breakdown (1 lower + 1 both + 0 upper) must sum to
+n_ineq=3 ... left: 2, right: 3"). Restored; 160 pounce-cli lib tests green;
+`cargo fmt -p pounce-cli` and
+`cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious`
+clean (the 3 remaining clippy warnings are pre-existing `clippy::style`, not in
+the changed code).
+
+### (a) (scaled)/(unscaled) columns print the same number — DOCUMENTED
+
+`print_summary` (`print.rs:368-401`) emits an Ipopt-style two-column block, but
+only the objective row passes two distinct values
+(`stats.final_scaled_objective`, `stats.final_objective`). The other four rows
+pass the same field twice:
+
+```
+row("Dual infeasibility......", stats.final_dual_inf,   stats.final_dual_inf);
+row("Constraint violation....", stats.final_constr_viol, stats.final_constr_viol);
+row("Complementarity.........", stats.final_compl,      stats.final_compl);
+row("Overall NLP error.......", stats.final_kkt_error,  stats.final_kkt_error);
+```
+
+**Root cause is in the solver, not the printer.** `SolveStatistics`
+(`pounce-nlp/src/solve_statistics.rs:51-66`) defines exactly one field for each
+of these residuals, and they are filled once off the scaled-space `cq` cache
+(`application.rs:1347-1361`: `curr_dual_infeasibility_max()`,
+`curr_primal_infeasibility_max()`, the compl max, `curr_nlp_error()`). pounce
+never computes the *unscaled* counterparts. The printer has only one value to
+show; duplicating it across both columns is the visible symptom. A faithful fix
+would compute and store unscaled residuals alongside the scaled ones in
+`SolveStatistics` (touching `pounce-algorithm`'s finalize path) — a
+solver-statistics change, out of scope for a CLI-print remediation and deferred.
+
+### (b) Variable bound violation hardcoded `0.0` — DOCUMENTED
+
+`row("Variable bound violation", 0.0, 0.0)` (`print.rs:391`). pounce's
+`SolveStatistics` has no bound-violation field, and the print site is not handed
+the final `x` or the variable bounds, so the value is not derivable here without
+both plumbing the metric through the solver statistics and passing `x`/bounds
+into `print_summary`. For a *converged* interior-point iterate the true value is
+~0 by construction (slacks stay strictly positive), so the constant is
+approximately right at optimum but genuinely uncomputed for early-terminated
+solves. Deferred to the same solver-statistics issue as (a).
+
+### Scope / safety note
+
+A grep for the summary block's text across `crates/`, `pyomo-pounce/`, and
+`python/` finds no parser — the two-column residual block is human-facing only,
+so the (a)/(b) display imprecision is cosmetic, not a data-integrity problem.
+The (c) fix is the only behavioral correctness defect in L26 and is now closed
+with a regression test.
