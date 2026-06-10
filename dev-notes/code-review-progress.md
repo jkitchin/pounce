@@ -106,6 +106,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L36 | Stale module docs claim SOC reduced-system methods are `unimplemented!` (`cones/soc.rs:16-21`) and that only the orthant is implemented (`lib.rs:6-9`); both are fully implemented and production-wired | **FIXED (docs)** | **Confirmed false by reading code + grep + an existing test.** `soc.rs`'s module doc claimed `recover_ds`, `rhs_comp_term`, and the corrector were "deferred to Phase 2b and `unimplemented!`", and that "the driver builds an orthant-only cone … SOC is … not yet a solvable cone." In fact all three carry **real bodies** (`soc.rs:188-262`: `comp_residual_corrector`, `rhs_comp_term` = `Arw(z)⁻¹ r_comp`, `recover_ds` = `−Arw(z)⁻¹ r_comp − W⁻² dz`); the *only* `unimplemented!` is `scaling_diag` (deliberately N/A — "SOC uses kkt_block, not scaling_diag"). SOC is **production-wired**: `hsde_nonsym.rs` constructs `SecondOrderCone::new(m)` and calls `kkt_block`/`in_dual_cone` in the solve loop (lines 159/180/409/516/591/653), `composite.rs` builds `ConeSpec::SecondOrder`, and the CLI routes convex QCQP / `solver_selection=socp` → `SolverChoice::SocpIpm` (`dispatch.rs`). `lib.rs` similarly claimed "only the nonnegative orthant implemented" with SOCP/exp/power/SDP as future "phases"; all have landed (`cones::{soc,exp,power,psd}`, `hsde`, `hsde_nonsym`, `equilibrate`, `presolve`). **Fix**: rewrote both module docs to state the real, shipped status (docs-only; no code change). **Verification**: this is a verifiable (not unverifiable) issue — the claims are falsified by the code and by the existing test `cones::soc::tests::one_dimensional_cone_matches_orthant`, which calls `rhs_comp_term`/`recover_ds`/`kkt_block` and checks they reduce to the orthant in 1-D (impossible if `unimplemented!`). No new behavioral test is meaningful for a doc correction. 107 pounce-convex lib tests green; normal `cargo doc -p pounce-convex` builds clean; `cargo fmt` / gated `cargo clippy` clean. (Pre-existing strict-`-D warnings` rustdoc private-link errors in `hsde`/`presolve`/etc. are unrelated and untouched.) See `## L36 detail`. |
 | L37 | Failure paths seed the dual inconsistently (`z = 1.0` vs `0.0`) — `ipm.rs:1116-1120`, `hsde.rs:504` vs `ipm.rs:350-357, 411-418` | **FIXED** | **Confirmed by reading all failure sites.** Six `NumericalFailure` paths seeded the inequality dual `z = vec![1.0; m_ineq]` (`ipm.rs` build-factorization failures at 254/442/1113/1685; `hsde::failed`; `hsde_nonsym::failed`), while five validation-failure paths used `z = vec![0.0; m_ineq]` (cone-cover / nonsym+psd guards at `ipm.rs:350/366/412/425/866`). Beyond the inconsistency, **`z = 1.0` is wrong for non-orthant cones**: the all-ones vector is the orthant identity but is *not a member* of a general dual cone (e.g. an SOC of dim ≥ 3 requires `z₀ ≥ ‖z₁:‖ = √(m−1) > 1`). The successful cold start, by contrast, seeds `z` at the true `cone.identity(e)` (`ipm.rs:1196-1201`). **Fix**: unified all failure paths on `z = 0.0` — the cone apex, valid in *every* dual cone (orthant/SOC/PSD/exp/power) and matching the trivial `x = 0, y = 0` these paths already return; added explanatory comments at `failed_solution` and both `failed` helpers. **Test** (`tests/batch.rs`): `pattern_mismatch_failure_seeds_zero_dual` builds a `QpFactorization` on an inequality-constrained QP (n=2, m_ineq=1) then solves a structurally-different n=3 instance, tripping the pattern-mismatch failure; asserts `NumericalFailure` with `x`/`y`/`z` all-zeros and `z.len() == m_ineq`. **Fail-first confirmed**: reverting the `solve_inner` site to `z=1.0` makes the assert fail with `got [1.0]`. Restored; full pounce-convex suite green (107 lib + batch 7, +1). `cargo fmt -p pounce-convex` / gated `cargo clippy` clean. See `## L37 detail`. |
 | L38 | Equilibrated solves leave the per-iteration trace in scaled coordinates (`equilibrate.rs:254-278` unscales the solution only) | **FIXED** | **Confirmed by reading the unscaling path + reproducing the mismatch.** `Scaling::unscale_solution` maps `sol.x/y/z/z_lb/z_ub` back and recomputes `sol.obj` at the unscaled `x`, but never touches `sol.iterates` — so on an equilibrated solve the per-iteration trace (objective, residual ∞-norms, μ) stayed in the solver's scaled coordinates while the returned solution was unscaled, making the trace's final objective disagree with `sol.obj`. **Analysis**: of the trace fields, only `objective` admits an *exact* scalar unscaling — the scaled objective at the scaled iterate is `σ·(½xᵀPx + cᵀx)` (the column scaling `Dc` cancels), so dividing by σ recovers the original-coordinate value. The residual ∞-norms and μ cannot be unscaled exactly from a scalar: an ∞-norm of a per-row/per-column diagonally-scaled residual has no scalar inverse (they vanish at the optimum in either coordinate system regardless). **Fix**: `unscale_solution` now divides each `iterate.objective` by σ; documented the coordinate convention on `QpIterate` (`objective` original-coords/consistent with `sol.obj`; residuals/μ are the solver's internal equilibrated convergence measures). **Test** (`qp::residual_tests`): `equilibrated_trace_objective_is_in_original_coordinates` solves a pure LP (`min 1000·x0+500·x1 s.t. x0+x1≥2`, which triggers σ = 1/max\|ĉ\| ≠ 1 — a QP keeps σ=1 so the bug is invisible there) on the direct equilibrated path (`use_hsde=false`) with `collect_iterates`, and asserts the final trace objective matches `sol.obj` (= 1000). **Fail-first confirmed**: removing the unscale loop makes the final trace objective read `1.0` (= σ·1000, σ=1e-3) vs `sol.obj=1000`. Restored; full pounce-convex suite green (108 lib, +1). `cargo fmt -p pounce-convex` / gated `cargo clippy` clean. See `## L38 detail`. |
+| L39 | `QpSensitivity::build` / `reduced_hessian` re-scan all of `G` per active row (`sensitivity.rs:134-138, 273-277`; review also cites a postsolve twin at `presolve.rs:1584-1590`) | **FIXED (perf; behavior-preserving)** | **Confirmed by reading both sites + checking the presolve cite.** Both `build` (KKT assembly, `:136`) and `reduced_hessian` (active-Jacobian `B`, `:274`) looped over the active rows and, *inside* each, did `prob.g.iter().filter(\|t\| t.row == i)` — re-walking the **entire** `G` triplet list once per active row, i.e. `O(n_active · nnz(G))`. The cited postsolve twin (`presolve.rs:1584-1590`) **no longer exists**: that region was rewritten by `d12a27f` (postsolve recovery-order fix) and a grep for `filter(\|t\| t.row ==` across `pounce-convex` now matches **only** the two `sensitivity.rs` sites — so the perf issue is real but confined to sensitivity. **Fix**: a single `group_rows_by_index(&prob.g, m_ineq)` pass builds a `Vec<Vec<(col,val)>>` (one `O(nnz(G))` bucket-sort), then each active row indexes its own bucket directly — `O(nnz(G))` total, each lookup proportional to that row's own nonzeros. Behavior is identical (same triplets added in the same order; `add` accumulates commutatively). **Test** (`sensitivity::tests`): `reduced_hessian_two_active_multi_triplet_rows` — `min ½‖x‖²−2·𝟙ᵀx` on n=3 with `x₀+x₁≤1` and `x₁+x₂≤1`, both active at `(1,0,1)` with λ=1>0. Two active rows, **each with two nonzeros and a shared column** (col 1 in both) — the case the existing single-triplet active-row fixtures never exercised. Asserts `x≈(1,0,1)`, both `z>0`, `reduced_hessian` `n_dof=1` / eigenvalue 1 (null space `(−1,1,−1)/√3`), and `kkt_dim = n+0+2` (both rows entered the factor). This is a perf refactor (no behavior change), so there is no fail-first *bug*; the test instead guards grouping correctness — a misgrouping such as `rows[t.col]` (or letting the shared column 1 leak between rows) would corrupt `B`/KKT and break the eigenvalue/`n_dof` assertions. Full pounce-convex suite green (109 lib, +1); `cargo fmt -p pounce-convex` / gated `cargo clippy` clean (no `sensitivity.rs` warnings). See `## L39 detail`. |
 
 ## C1 detail
 
@@ -5381,3 +5382,57 @@ loop makes the final trace objective read `1.0000…` (= σ·1000 with σ=1e-3)
 against `sol.obj=1000.0000…`, failing the match assertion. Restored after
 confirming. Full pounce-convex suite green (108 lib, +1); `cargo fmt -p
 pounce-convex` / gated `cargo clippy` clean.
+
+## L39 detail
+
+**Issue.** `QpSensitivity::build` and `QpSensitivity::reduced_hessian` re-scan
+all of `G` per active row (`sensitivity.rs:134-138, 273-277`); the review also
+cites a postsolve twin at `presolve.rs:1584-1590`.
+
+**Verification.** Both sensitivity sites loop over the active rows and, inside
+each iteration, evaluate `prob.g.iter().filter(|t| t.row == i)` — a full walk of
+the entire `G` triplet vector per active row. With `A` active inequality rows
+and `nnz(G)` stored entries that is `O(A · nnz(G))` work to assemble blocks
+that together contain only `nnz(G)` entries. Site 1 (`build`, `:136`) feeds the
+active-row block `B_a` of the KKT matrix; site 2 (`reduced_hessian`, `:274`)
+fills the dense active Jacobian `B` whose null space gives the reduced Hessian.
+
+The cited postsolve twin **no longer exists**. The current
+`presolve.rs:1584-1590` is the two-pass primal-restoration comment introduced
+by `d12a27f` (*correct postsolve primal-recovery order — capri LP wrong
+answer*), which rewrote that region after the review was written. A
+crate-wide grep `filter(|t| t.row ==` over `crates/pounce-convex/src/` matches
+**only** `sensitivity.rs:136` and `:274` — so the quadratic re-scan is confined
+to the sensitivity module and the presolve cite is stale. Documented rather
+than chased.
+
+**Fix.** Added a module-private `group_rows_by_index(triplets, n_rows) ->
+Vec<Vec<(usize, f64)>>` that bucket-sorts a constraint matrix's triplets by row
+in one `O(nnz)` pass (`n_rows = m_ineq`, so every `t.row` is in range). Both
+sites now build `g_rows` once and index `g_rows[i]` for each active row `i`,
+reading only that row's own `(col, val)` entries. Total assembly is `O(nnz(G))`
+plus the active-row iteration. Behavior is identical: the same `(col, val)`
+pairs are handed to `add` / written into `B` in the same row order, and `add`
+accumulates commutatively, so the assembled matrices are bit-identical to the
+filter version.
+
+**Test.** `sensitivity::tests::reduced_hessian_two_active_multi_triplet_rows`:
+`min ½‖x‖² − 2·𝟙ᵀx` on `n=3` with `x₀+x₁ ≤ 1` and `x₁+x₂ ≤ 1`. Unconstrained
+min `(2,2,2)` violates both, so both bind at the optimum `(1,0,1)` with equal
+positive multipliers `λ=1`. This is the first fixture with **two
+simultaneously-active inequality rows, each carrying two nonzeros and a shared
+column** (col 1 appears in both rows) — exactly the structure the grouping must
+keep separate and the single-triplet active-row fixtures never exercised.
+Asserts `x≈(1,0,1)`, both `z>0` (both active), `reduced_hessian` `n_dof=1` with
+eigenvalue `1` (the active Jacobian `B=[[1,1,0],[0,1,1]]` has rank 2 → null
+space `(−1,1,−1)/√3`, `ZᵀIZ=1`), and `kkt_dim = n + 0 + 2` (both rows entered
+the factor).
+
+**Fail-first (N/A — perf refactor).** This is a behavior-preserving
+optimization, so there is no pre-existing *bug* to reproduce; the new test is a
+correctness **guard** on the grouping. A misgrouping — e.g. `rows[t.col]`
+instead of `rows[t.row]`, or letting the shared column leak between the two
+rows — corrupts `B`/KKT and breaks the `n_dof`/eigenvalue assertions. The full
+pre-fix suite already passed and still passes post-fix (109 lib tests, +1),
+confirming no behavior changed. `cargo fmt -p pounce-convex` / gated `cargo
+clippy` clean (no `sensitivity.rs` warnings).

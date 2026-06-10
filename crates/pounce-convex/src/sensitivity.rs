@@ -31,11 +31,26 @@
 //! stable; the induced error in the step is `O(δ)`.
 
 use crate::ipm::QpOptions;
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet};
 use pounce_common::types::{Index, Number};
 use pounce_linalg::symmetric_eigen;
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
 use std::collections::BTreeMap;
+
+/// Group a constraint matrix's triplets by row, so an active-set assembly
+/// can read a row's `(col, val)` entries directly. Without this, both the
+/// KKT build and the reduced-Hessian assembly re-scanned *all* of `G` once
+/// per active row (`O(n_active · nnz(G))`); the grouping is a single
+/// `O(nnz(G))` pass and each lookup is then proportional to that row's
+/// own nonzeros. `n_rows` is the number of inequality rows (`m_ineq`), so
+/// every `t.row` is a valid index.
+fn group_rows_by_index(triplets: &[Triplet], n_rows: usize) -> Vec<Vec<(usize, f64)>> {
+    let mut rows = vec![Vec::new(); n_rows];
+    for t in triplets {
+        rows[t.row].push((t.col, t.val));
+    }
+    rows
+}
 
 /// A reason a [`QpSensitivity`] could not be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,10 +146,11 @@ impl QpSensitivity {
         // Active-row block `B_a` after the equality rows, in order:
         // active inequality rows, then active bound rows. (·,·): −δI diagonal.
         let abase = n + m_eq;
+        let g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
         for (k, &i) in active_ineq.iter().enumerate() {
             // The k-th active row holds G's row i.
-            for t in prob.g.iter().filter(|t| t.row == i) {
-                add(abase + k, t.col, t.val);
+            for &(col, val) in &g_rows[i] {
+                add(abase + k, col, val);
             }
         }
         for (k, &j) in active_bound_vars.iter().enumerate() {
@@ -269,10 +285,11 @@ impl QpSensitivity {
         for t in &self.prob.a {
             b[t.row * n + t.col] += t.val;
         }
+        let g_rows = group_rows_by_index(&self.prob.g, self.prob.m_ineq());
         let mut row = self.m_eq;
         for &i in &self.active_ineq {
-            for t in self.prob.g.iter().filter(|t| t.row == i) {
-                b[row * n + t.col] += t.val;
+            for &(col, val) in &g_rows[i] {
+                b[row * n + col] += val;
             }
             row += 1;
         }
@@ -574,5 +591,69 @@ mod tests {
             rh.eigenvalues
         );
         assert!((rh.matrix[0] - 1.5).abs() < 1e-9);
+    }
+
+    /// Two **simultaneously active** inequality rows, each with *multiple*
+    /// nonzeros and a **shared column**, so both the KKT build and the
+    /// reduced-Hessian assembly must read each active row's full set of
+    /// `(col, val)` entries — and must not let one row's entries leak into
+    /// the other (col 1 appears in both). The single-triplet active-row
+    /// fixtures elsewhere never exercise the per-row grouping; this is the
+    /// guard for the `group_rows_by_index` assembly.
+    ///
+    /// `min ½‖x‖² − 2·𝟙ᵀx` (unconstrained min at `(2,2,2)`) with
+    /// `x₀+x₁ ≤ 1` and `x₁+x₂ ≤ 1`. Both bind at the optimum `(1,0,1)`
+    /// with equal positive multipliers (λ = 1), so `B = [[1,1,0],[0,1,1]]`
+    /// has rank 2 → one degree of freedom. The null space is spanned by
+    /// `(−1,1,−1)/√3`, so `H_R = ZᵀIZ = 1`.
+    #[test]
+    fn reduced_hessian_two_active_multi_triplet_rows() {
+        let prob = QpProblem {
+            n: 3,
+            p_lower: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(1, 1, 1.0),
+                Triplet::new(2, 2, 1.0),
+            ],
+            c: vec![-2.0, -2.0, -2.0],
+            a: vec![],
+            b: vec![],
+            // Row 0: x₀ + x₁ (cols 0,1); row 1: x₁ + x₂ (cols 1,2).
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 1, 1.0),
+                Triplet::new(1, 2, 1.0),
+            ],
+            h: vec![1.0, 1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!(
+            (sol.x[0] - 1.0).abs() < 1e-5 && sol.x[1].abs() < 1e-5 && (sol.x[2] - 1.0).abs() < 1e-5,
+            "x = {:?} (expected (1, 0, 1))",
+            sol.x,
+        );
+        assert!(
+            sol.z[0] > 1e-6 && sol.z[1] > 1e-6,
+            "both inequalities should be active: z = {:?}",
+            sol.z,
+        );
+
+        let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+        let rh = sens.reduced_hessian_default();
+        assert_eq!(rh.n_dof, 1, "rank-2 active Jacobian on n=3 ⇒ 1 DOF");
+        assert!(
+            (rh.eigenvalues[0] - 1.0).abs() < 1e-7,
+            "H_R = {:?} (expected eigenvalue 1)",
+            rh.eigenvalues,
+        );
+
+        // The build's KKT must also see both active rows: a free RHS over
+        // the (empty) equality block leaves dx = 0, but the factorization
+        // having succeeded with dim = n + 0 + 2 confirms both rows entered.
+        assert_eq!(sens.kkt_dim(), 3 + 0 + 2);
     }
 }
