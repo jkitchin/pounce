@@ -18,5 +18,11 @@ categories = ["mathematics", "algorithms"]
 anstyle.workspace = true
 anstyle-query.workspace = true
 
+# Unix-only: `cpu_time()` reads user CPU time via `getrusage(RUSAGE_SELF)`,
+# matching Ipopt's `CpuTime()`. Non-Unix targets keep the wallclock fallback,
+# so no dependency is pulled there.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true

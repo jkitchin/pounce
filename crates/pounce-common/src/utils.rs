@@ -71,13 +71,33 @@ pub fn wallclock_time() -> Number {
 
 /// CPU time in seconds. Equivalent to `Ipopt::CpuTime`.
 ///
-/// std offers no portable CPU-time API, so we fall back to
-/// wallclock. The bit-equivalence trace strips the timing column
-/// before diffing per the plan, so this is acceptable; phase 4 will
-/// wire in a `libc::clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` path
-/// where it's needed by the iteration log.
+/// On Unix this returns the process's accumulated **user** CPU time via
+/// `getrusage(RUSAGE_SELF).ru_utime`, exactly matching upstream Ipopt's
+/// `CpuTime()` (`src/Common/IpUtils.cpp`). This is what `max_cpu_time`
+/// is meant to bound — a busy solve accrues CPU time at roughly the wall
+/// rate, but time spent blocked/sleeping does not count.
+///
+/// std exposes no portable CPU-time API, so non-Unix targets (Windows)
+/// fall back to wallclock. That mirrors upstream too: its Windows path
+/// uses `clock()`, which on the MSVC runtime measures elapsed real time
+/// rather than CPU time, so the two are already equivalent there.
 pub fn cpu_time() -> Number {
-    wallclock_time()
+    #[cfg(unix)]
+    {
+        // SAFETY: `getrusage` only writes into the provided `rusage` out-param
+        // and reads no global state; a zeroed `rusage` is a valid input.
+        let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0 {
+            return usage.ru_utime.tv_sec as Number + 1.0e-6 * usage.ru_utime.tv_usec as Number;
+        }
+        // getrusage failing is exceedingly rare (EFAULT/EINVAL only); degrade
+        // to wallclock rather than panicking in a timing helper.
+        wallclock_time()
+    }
+    #[cfg(not(unix))]
+    {
+        wallclock_time()
+    }
 }
 
 /// System time in seconds since UNIX epoch. Equivalent to
@@ -152,5 +172,46 @@ mod tests {
         let a = wallclock_time();
         let b = wallclock_time();
         assert!(b >= a);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpu_time_excludes_sleep_but_counts_compute() {
+        use std::hint::black_box;
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        // (1) Sleeping consumes no user CPU time, so `cpu_time()` must lag
+        // wallclock across a sleep — the defining property of `max_cpu_time`.
+        // Before the L5 fix `cpu_time()` was a `wallclock_time()` alias, so
+        // the two advanced in lockstep and the gap below was ~0.
+        let cpu0 = cpu_time();
+        let wall0 = wallclock_time();
+        sleep(Duration::from_millis(300));
+        let wall_slept = wallclock_time() - wall0;
+        let cpu_slept = cpu_time() - cpu0;
+        assert!(
+            wall_slept - cpu_slept > 0.1,
+            "cpu_time advanced {:.3}s across a {:.3}s sleep; it must measure \
+             CPU, not wallclock (wall−cpu gap was only {:.3}s)",
+            cpu_slept,
+            wall_slept,
+            wall_slept - cpu_slept
+        );
+
+        // (2) ...but a busy loop *does* accrue CPU time, confirming the clock
+        // is live (guards against a degenerate constant implementation).
+        let cpu1 = cpu_time();
+        let mut acc = 0u64;
+        for i in 0..50_000_000u64 {
+            acc = acc.wrapping_add(i ^ (i << 1));
+        }
+        black_box(acc);
+        let cpu_busy = cpu_time() - cpu1;
+        assert!(
+            cpu_busy > 0.0,
+            "cpu_time did not advance across a busy loop (got {:.6}s)",
+            cpu_busy
+        );
     }
 }

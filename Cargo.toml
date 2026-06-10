@@ -102,6 +102,11 @@ tracing-log = "0.2"
 anstyle = "1"
 anstyle-query = "1"
 anstream = "0.6"
+# Thin libc bindings — used only by pounce-common's `cpu_time()` for the
+# Unix `getrusage(RUSAGE_SELF)` user-CPU-time path (port of Ipopt's
+# `CpuTime()`); gated behind `cfg(unix)` so non-Unix targets keep the
+# wallclock fallback.
+libc = "0.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
