@@ -16,8 +16,9 @@
 //!   `n<num>` constants and `v<idx>` variables.
 //! * Linear-Jacobian (`J`) and linear-objective (`G`) segments.
 //! * Variable bounds (`b`) and constraint bounds (`r`).
-//! * Optional initial primal (`x`) segment. Initial dual (`d`) is
-//!   read and discarded.
+//! * Optional initial primal (`x`) segment and initial dual (`d`)
+//!   segment. Both are parsed (into `x0` / `lambda0`) and returned by
+//!   `get_starting_point`; the duals feed a `warm_start_init_point` solve.
 //! * Multiple objectives (we use only the first; per AMPL convention).
 //!
 //! Not supported (will return an error explaining what's missing):
@@ -2225,6 +2226,17 @@ impl TNLP for NlTnlp {
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
         sp.x.copy_from_slice(&self.prob.x0);
+        // The `.nl` `d` segment supplies initial constraint multipliers
+        // (`lambda0`). Honor a warm-start request — `init_lambda` is set by
+        // the engine when `warm_start_init_point yes` — by handing them
+        // back; `OrigIpoptNlp::get_starting_point` then compresses them into
+        // the algorithm-side y_c / y_d. Without this the warm start silently
+        // began from zero multipliers, discarding the parsed duals. (Code
+        // review 2026-06 item M19.) The `.nl` `d` segment carries no bound
+        // multipliers, so `z_l`/`z_u` are left to the engine's defaults.
+        if sp.init_lambda {
+            sp.lambda.copy_from_slice(&self.prob.lambda0);
+        }
         true
     }
 
@@ -2601,6 +2613,63 @@ J0 2
         assert!((p.g_u[0] - 1.0).abs() < 1e-12);
         // J-row 0: x0 (coef 1), x1 (coef 1).
         assert_eq!(p.con_linear[0], vec![(0, 1.0), (1, 1.0)]);
+    }
+
+    #[test]
+    fn get_starting_point_returns_nl_initial_duals() {
+        // Code review 2026-06 item M19: the `.nl` `d` segment supplies
+        // initial constraint multipliers. They are parsed into `lambda0`,
+        // but `get_starting_point` previously ignored them — so a
+        // `warm_start_init_point yes` solve silently began from zero duals.
+        // `get_starting_point` must hand the parsed duals back when the
+        // engine requests them (`init_lambda`), and leave the buffer
+        // untouched when it does not.
+        let nl = format!("{EQ_LIN}\nd1\n0 2.5\n");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert_eq!(p.lambda0, vec![2.5], "the `d` segment fills lambda0");
+
+        let mut t = NlTnlp::new(p);
+        let info = t.get_nlp_info().unwrap();
+        let (n, m) = (info.n as usize, info.m as usize);
+
+        // Warm-start request: init_lambda = true → the parsed `.nl` duals
+        // must be returned (pre-fix this stayed zero).
+        let mut x = vec![0.0; n];
+        let mut z_l = vec![0.0; n];
+        let mut z_u = vec![0.0; n];
+        let mut lambda = vec![0.0; m];
+        assert!(t.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: true,
+            lambda: &mut lambda,
+        }));
+        assert_eq!(
+            lambda,
+            vec![2.5],
+            "a warm start must use the `.nl` initial duals, not zero"
+        );
+
+        // No warm-start request: the multiplier buffer is left alone (the
+        // engine owns its default), so honoring the flag does not clobber it.
+        let mut lambda_untouched = vec![7.0; m];
+        assert!(t.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: false,
+            lambda: &mut lambda_untouched,
+        }));
+        assert_eq!(
+            lambda_untouched,
+            vec![7.0],
+            "without init_lambda the multiplier buffer must be untouched"
+        );
     }
 
     #[test]
