@@ -313,19 +313,21 @@ impl PsdCone {
         );
         let mut rm = vec![0.0; n * n];
         smat(r, n, &mut rm);
-        // R̃ = Qᵀ R Q. q column j: q[j*n + i] = Q[i][j].
-        let mut rtilde = vec![0.0; n * n];
-        for a in 0..n {
-            for b in 0..n {
-                let mut acc = 0.0;
-                for i in 0..n {
-                    for j in 0..n {
-                        acc += q[a * n + i] * rm[i * n + j] * q[b * n + j];
-                    }
-                }
-                rtilde[a * n + b] = acc;
+        // `q` is column-major (q[c*n + i] = Q[i][c]), so reading `q` as
+        // row-major IS Qᵀ; transpose it once to get Q row-major. Then the two
+        // congruences below are plain matmuls — O(n³) total, not the O(n⁴)
+        // quadruple loops this replaced (M23).
+        let mut q_rm = vec![0.0; n * n]; // Q row-major: q_rm[i*n+c] = Q[i][c].
+        for c in 0..n {
+            for i in 0..n {
+                q_rm[i * n + c] = q[c * n + i];
             }
         }
+        // R̃ = Qᵀ R Q  =  (q · R) · Q_rm.
+        let mut tmp = vec![0.0; n * n];
+        let mut rtilde = vec![0.0; n * n];
+        matmul(&q, &rm, n, &mut tmp);
+        matmul(&tmp, &q_rm, n, &mut rtilde);
         // D̃_{ab} = 2 R̃_{ab} / (λ_a + λ_b).
         let mut dtilde = vec![0.0; n * n];
         for a in 0..n {
@@ -333,19 +335,10 @@ impl PsdCone {
                 dtilde[a * n + b] = 2.0 * rtilde[a * n + b] / (vals[a] + vals[b]);
             }
         }
-        // D = Q D̃ Qᵀ.
+        // D = Q D̃ Qᵀ  =  (Q_rm · D̃) · q.
         let mut dm = vec![0.0; n * n];
-        for i in 0..n {
-            for k in 0..n {
-                let mut acc = 0.0;
-                for a in 0..n {
-                    for b in 0..n {
-                        acc += q[a * n + i] * dtilde[a * n + b] * q[b * n + k];
-                    }
-                }
-                dm[i * n + k] = acc;
-            }
-        }
+        matmul(&q_rm, &dtilde, n, &mut tmp);
+        matmul(&tmp, &q, n, &mut dm);
         svec(&dm, n, out);
     }
 }
@@ -427,26 +420,44 @@ impl Cone for PsdCone {
     #[allow(clippy::expect_used)]
     fn kkt_block(&self, s: &[f64], z: &[f64]) -> ConeBlock {
         // The (z,z) block is the symmetric Kronecker H = W ⊗ₛ W, an m×m SPD
-        // matrix with H·svec(z) = svec(WZW) = svec(s). Form it column by
-        // column and return its lower triangle (row-major).
+        // matrix with H·svec(z) = svec(WZW) = svec(s). Build its lower triangle
+        // (row-major) directly from a closed form — O(n⁴) total — rather than
+        // applying the scaling operator to every unit vector, which costs two
+        // O(n³) matmuls per column for O(n²) columns = O(n⁵) (M23).
+        //
+        // Column b ↔ svec basis vector e_b ↔ the lower-triangle pair (p,q),
+        // p ≥ q, for which `smat(e_b)` is E_pp (if p=q) or (E_pq+E_qp)/√2
+        // (if p>q). With D := W·smat(e_b)·W (= what `apply_scaling` returns,
+        // before the svec scaling), W symmetric gives
+        //   p = q:  D_ij = W_ip W_jp
+        //   p > q:  D_ij = (W_ip W_jq + W_iq W_jp) / √2
+        // and H[a][b] = (i=j ? 1 : √2)·D_ij for the output pair (i,j), i ≥ j.
+        let n = self.n;
         let m = self.dim();
         let w = self.nt_scaling(s, z).expect("kkt_block: NT scaling");
-        let mut cols = vec![0.0; m * m]; // cols[b*m + a] = M[a][b]
-        let mut e = vec![0.0; m];
-        let mut col = vec![0.0; m];
-        for b in 0..m {
-            e.iter_mut().for_each(|v| *v = 0.0);
-            e[b] = 1.0;
-            self.apply_scaling(&w, &e, &mut col);
-            for a in 0..m {
-                cols[b * m + a] = col[a];
+        let r2 = std::f64::consts::SQRT_2;
+        let inv_r2 = std::f64::consts::FRAC_1_SQRT_2;
+
+        // svec-order lower-triangle pairs (i,j), i ≥ j: column by column.
+        let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(m);
+        for j in 0..n {
+            for i in j..n {
+                pairs.push((i, j));
             }
         }
-        // Lower triangle, row-major: (0,0); (1,0),(1,1); …
+
         let mut lower = Vec::with_capacity(m * (m + 1) / 2);
         for a in 0..m {
+            let (i, j) = pairs[a];
+            let row_scale = if i == j { 1.0 } else { r2 };
             for b in 0..=a {
-                lower.push(cols[b * m + a]);
+                let (p, q) = pairs[b];
+                let d = if p == q {
+                    w[i * n + p] * w[j * n + p]
+                } else {
+                    inv_r2 * (w[i * n + p] * w[j * n + q] + w[i * n + q] * w[j * n + p])
+                };
+                lower.push(row_scale * d);
             }
         }
         ConeBlock::DenseLower { dim: m, lower }
@@ -656,6 +667,63 @@ mod tests {
                 (m, full)
             }
             _ => panic!("expected DenseLower"),
+        }
+    }
+
+    // Build a deterministic PD matrix (row-major n×n) in svec coords: strongly
+    // diagonally dominant so it is PD, with off-diagonal structure.
+    fn pd_v(c: &PsdCone, scale: f64) -> Vec<f64> {
+        let n = c.n;
+        let mut m = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                m[i * n + j] = if i == j {
+                    n as f64 + scale
+                } else {
+                    scale / (1.0 + (i as f64 - j as f64).abs())
+                };
+            }
+        }
+        to_v(c, &m)
+    }
+
+    /// The closed-form `kkt_block` (M23) must reproduce — entry for entry —
+    /// the reference built by applying the NT scaling operator `W ⊗ₛ W` to
+    /// every svec unit vector (the previous O(n⁵) construction). Checked over
+    /// a range of sizes, including off-diagonal-heavy blocks.
+    #[test]
+    fn kkt_block_matches_apply_scaling_reference() {
+        use crate::cones::Cone;
+        for &n in &[1usize, 2, 3, 5, 8] {
+            let c = PsdCone::new(n);
+            let s = pd_v(&c, 1.3);
+            let z = pd_v(&c, 0.7);
+            let m = c.dim();
+            let w = c.nt_scaling(&s, &z).expect("nt scaling");
+            // Reference: column b of H = W⊗ₛW applied to the unit vector e_b.
+            let mut e = vec![0.0; m];
+            let mut col = vec![0.0; m];
+            let mut href = vec![0.0; m * m];
+            for b in 0..m {
+                e[b] = 1.0;
+                c.apply_scaling(&w, &e, &mut col);
+                for (a, &v) in col.iter().enumerate() {
+                    href[a * m + b] = v;
+                }
+                e[b] = 0.0;
+            }
+            let (md, h) = dense_lower_to_full(&c.kkt_block(&s, &z));
+            assert_eq!(md, m);
+            for a in 0..m {
+                for b in 0..m {
+                    assert!(
+                        (h[a * m + b] - href[a * m + b]).abs() < 1e-9,
+                        "n={n} [{a}][{b}]: {} vs {}",
+                        h[a * m + b],
+                        href[a * m + b]
+                    );
+                }
+            }
         }
     }
 
