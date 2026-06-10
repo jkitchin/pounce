@@ -113,6 +113,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L43 | Duplicate Jacobian entries handled inconsistently: assignment vs accumulation (`inequality_projection.rs:146-148, 213` vs 177, 215) — under the summing convention a wrong `J_block` can admit an unsafe block via `all_implied = true` | **FIXED** | **Confirmed by reading the function + a fail-first test.** `project_inequalities` buckets Jacobian triplets by row into `by_row` (which *keeps* duplicates), then reads them inconsistently: the linear constant `sum_jx` (`:145`) accumulates over all entries, but the block matrix `j_block` (`:147`) and the coupled-row coefficient `a_b` (`:213`) used plain assignment, so a duplicate `(row,col)` triplet kept only its last value; the surviving-column branch `a_y` (`:215`) already accumulated. Under the summing convention a dropped duplicate yields a wrong `J_block` → wrong block solution `b = M y + p` → wrong projected `rhs`, which can flip a real coupled inequality to "implied" and drop it (`all_implied = true`). **Fix**: accumulate (`+=`) at both sites; both targets are zero-initialized. **Test** (`inequality_projection::tests`): `projection_sums_duplicate_jacobian_entries_in_block` — equality row 0 carries duplicate block-col entries `2.0` and `-1.0` (true coef `1.0`); assignment keeps `-1.0` solving `b=-3` instead of `3`, making coupled row `b∈[-5,-1]` look implied when with `b=3` it is real. **Fail-first confirmed**: pre-fix `all_implied = true`; post-fix `false` (rhs_u = -4 ⇒ b solved to 3). Full pounce-presolve suite green (220 lib, +1); `cargo fmt` / gated `cargo clippy` clean. See `## L43 detail`. |
 | L44 | `Interval::mul` produces NaN endpoints on `0 × ∞` corners (`fbbt/interval.rs:148-159`) → `is_empty()` reads EMPTY → spurious infeasibility; `inverse_powint`'s `powf(1/n)` not outward-rounded (`reverse.rs:223-224`) | **FIXED (both parts)** | **Confirmed by reading both + three fail-first tests.** (1) `mul`'s four-corner formula computes `0.0 * ∞ = NaN`; for `[0,0] × ENTIRE` *all four* corners are NaN → `[NaN, NaN]`, which `is_empty()` (`:68`, NaN ⇒ empty) reads as spurious infeasibility. (A single NaN corner was already absorbed by `f64::min`/`max` returning the non-NaN operand, so only the all-NaN case leaked.) **Fix**: a `corner(a,b)` helper treating any `0 * x` as `0` (exact-zero annihilation, the IA convention) — the only NaN source in `a*b` is `0×∞`, so this makes every corner well-defined. (2) `inverse_powint` computed `abs_lo/abs_hi = powf(1/n)` round-to-nearest, violating the module's outward-rounding soundness invariant (could over-tighten and drop a feasible point); the odd branch (`signed_nth_root`) had the same flaw. **Fix**: `round_down`/`round_up` the root endpoints (helpers exposed `pub(crate)`), both branches. **Tests**: `mul_zero_by_entire_is_zero_not_empty` (fail-first: pre-fix `Interval{lo:NaN,hi:NaN}`); `inverse_powint_even_branch_is_outward_rounded` and `..._odd_branch_...` on perfect-square/cube intervals (fail-first: pre-fix lower root `== raw powf`, not strictly below). Full pounce-presolve suite green (223 lib, +3); `cargo fmt` / gated `cargo clippy` clean. See `## L44 detail`. |
 | L45 | `finalize_solution` ignores the `eval_g` return value (`lib.rs:931-933` orig) → on re-eval failure the stale/garbage `scratch_g` is forwarded as the reported constraint vector | **FIXED** | **Confirmed by a fail-first test.** `finalize_solution` re-evaluates `g` at the final `sol.x` into the inner-sized `scratch_g`, but discarded the boolean result; a failed `eval_g` leaves `scratch_g` holding partial garbage or a stale earlier-iterate value, which was then cloned into `g_full` and reported. **Fix**: capture `ok_g`; on `!ok_g`, zero `scratch_g` and rebuild it from the solver's own (trustworthy) reduced `sol.g`, mapped to the kept inner rows via `rows_kept` exactly as the multiplier mapping does (presolve-dropped rows left at 0, no reliable value existing for them). **Test**: `finalize_does_not_forward_stale_g_when_eval_g_fails` — a `GFailRecordingVar` mock whose `eval_g` writes sentinel `999.0` and returns `false`; finalize records the reported `sol.g`. Fail-first: pre-fix the recorded vector is `[999, 999]`; post-fix `[0, 0]`. Full pounce-presolve suite green (224 lib, +1); `cargo fmt` / gated `cargo clippy` clean. See `## L45 detail`. |
+| L46 | Metadata projection infers per-row-ness from vector length alone (`project_con_metadata`/`expand_con_metadata`) — coincidental-length global vectors are silently subset/expanded | **VERIFIED REAL — documented limitation, not cleanly fixable** | **Confirmed by reading + a characterization test.** `project_con_metadata` treats any constraint-metadata vector with `len() == m_in` as per-row and subsets it to `rows_kept`; `expand_con_metadata` mirrors with `len() == m_out`. `MetaData` is an untyped `BTreeMap<String, Vec<_>>` (a faithful port of upstream Ipopt's untyped `*MetaDataMapType`) with **no per-key arity tag**, so length is the only available signal — a semantically-global vector that coincidentally has length `m_in` is wrongly subset. **Not cleanly fixable without an arity-aware metadata API.** Mitigations applied: (1) the heuristic is *exact* for every contract-conforming TNLP — by the TNLP contract all constraint-bucket vectors are per-constraint, and pounce's only real producer (`nl_reader`) emits genuinely per-row `con_names`, so today's shipped behavior is correct; (2) the fast path `m_in == m_out` (no rows dropped) is identity, so the hazard only exists once presolve drops a row; (3) explicit contract + caveat doc comments on both functions; (4) two regression tests — `con_metadata_per_row_vector_round_trips_under_row_drop` (canonical correct case) and `con_metadata_length_heuristic_misfires_on_coincidental_global` (pins the known misfire as a future-fix anchor). Full pounce-presolve suite green (226 lib, +2); `cargo fmt` / gated `cargo clippy` clean. See `## L46 detail`. |
 
 ## C1 detail
 
@@ -5739,4 +5740,51 @@ Phase 0 so the reduced problem has `m == 0`) whose `eval_g` writes the sentinel
 `[0, 0]` (re-eval failed, both rows were dropped so no reduced value maps in).
 
 Full pounce-presolve suite green (224 lib, +1); `cargo fmt` / gated `cargo
+clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
+
+## L46 detail
+
+**Issue.** `project_con_metadata` (used by `get_var_con_metadata`) and its
+inverse `expand_con_metadata` (used by `finalize_metadata`) subset/expand a
+constraint-metadata vector to the kept rows iff its length equals the inner
+constraint count `m_in` (resp. the reduced count `m_out`). A vector that is
+semantically *global* but coincidentally has that exact length is silently
+mangled.
+
+**Verification.** `MetaData` is `{strings, integers, numerics}`, each a
+`BTreeMap<String, Vec<_>>` — an untyped bag that mirrors upstream Ipopt's
+`StringMetaDataMapType` / `IntegerMetaDataMapType` / `NumericMetaDataMapType`.
+There is **no per-key arity field**, so "is this vector per-constraint?" is
+unanswerable from the data; the code uses `len()` as a proxy. A constructed
+test (`con_metadata_length_heuristic_misfires_on_coincidental_global`) confirms
+a length-3 global tuple is wrongly subset to 2 entries when one of 3 rows is
+dropped.
+
+**Why it is not cleanly fixable.** Distinguishing a per-row vector from a
+coincidentally-equal-length global one requires arity metadata that the API
+does not carry. A real fix means extending `MetaData` (or its key convention)
+to declare each key's arity — an API change touching every producer/consumer
+across crates, out of scope for a localized correctness fix. The untyped shape
+is itself a deliberate fidelity choice (it ports Ipopt's identical design).
+
+**Why shipped behavior is nonetheless correct today.** By the TNLP contract the
+*constraint* `MetaData` bucket holds per-constraint vectors (length `m_in`), so
+the length proxy is exact for any conforming inner TNLP. pounce's only concrete
+producer, `nl_reader`, inserts exactly one constraint key — `IDX_NAMES`
+(`con_names`, genuinely per-row). And the `m_in == m_out` fast path (presolve
+dropped nothing) makes projection/expansion pure identity, so the hazard cannot
+manifest unless a row is actually dropped *and* a non-conforming producer
+supplies a coincidentally-`m_in`-length global vector — which nothing in-tree
+does.
+
+**Changes.** (1) Contract + caveat doc comments on both functions making the
+"arity inferred from length" assumption and its failure mode explicit. (2) Two
+tests: `con_metadata_per_row_vector_round_trips_under_row_drop` proves the
+canonical per-row case projects and re-expands correctly across a row drop
+(strings/integers/numerics, dropped rows defaulted to `""`/`0`/`0.0`);
+`con_metadata_length_heuristic_misfires_on_coincidental_global` pins the known
+misfire so a future arity-aware fix has a regression anchor, and also checks
+that a global vector of *non*-`m_in` length is correctly passed through.
+
+Full pounce-presolve suite green (226 lib, +2); `cargo fmt` / gated `cargo
 clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.

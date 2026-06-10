@@ -1346,9 +1346,22 @@ impl TNLP for PresolveTnlp {
     }
 }
 
-/// Subset every per-row vector of `inner` to the rows in
-/// `rows_kept`. Per-row is identified by length == `m_in`; other
-/// vectors are passed through unchanged.
+/// Subset every per-row vector of `inner` to the rows in `rows_kept`.
+///
+/// Per-row-ness is inferred from `v.len() == m_in`, because `MetaData`
+/// (mirroring upstream Ipopt's untyped `*MetaDataMapType`) carries no
+/// per-key arity tag — so the length is the only signal available. By
+/// the TNLP contract every vector in the *constraint* `MetaData` bucket
+/// is per-constraint (length `m_in`), so this is exact for any
+/// conforming inner TNLP (e.g. `nl_reader`'s per-row `con_names`).
+///
+/// L46 caveat: a vector that is semantically *global* yet happens to
+/// have length `m_in` would be wrongly subset, and a genuinely per-row
+/// vector whose length differs from `m_in` (a contract violation) is
+/// passed through unchanged. Neither can be distinguished from the data
+/// alone; fully resolving it needs an arity-aware metadata API. The
+/// fast path `m_in == rows_kept.len()` (no rows dropped) is identity,
+/// so the hazard only exists when presolve actually drops a row.
 fn project_con_metadata(inner: &MetaData, rows_kept: &[usize], m_in: usize) -> MetaData {
     let mut out = MetaData::default();
     for (k, v) in &inner.strings {
@@ -1385,7 +1398,11 @@ fn project_con_metadata(inner: &MetaData, rows_kept: &[usize], m_in: usize) -> M
 }
 
 /// Expand every per-(outer-row) vector back to `m_in` rows by
-/// inserting empty / 0 / 0.0 defaults at dropped rows.
+/// inserting empty / 0 / 0.0 defaults at dropped rows. The inverse of
+/// [`project_con_metadata`]; per-row-ness is inferred from
+/// `v.len() == m_out` and carries the same L46 caveat (see that
+/// function): a coincidentally-`m_out`-length global vector is wrongly
+/// expanded, inherent to the untyped `MetaData` API.
 fn expand_con_metadata(outer: &MetaData, rows_kept: &[usize], m_in: usize) -> MetaData {
     let m_out = rows_kept.len();
     let mut full = MetaData::default();
@@ -2424,5 +2441,80 @@ mod tests {
             (0.0, 1.0),
             "FBBT's undefined-on-infeasibility bounds must not reach the IPM (H12)"
         );
+    }
+
+    /// L46: under a row drop, a genuinely per-constraint metadata vector
+    /// (length `m_in`) must be subset to the kept rows, and the inverse
+    /// `expand` must restore it (dropped rows defaulted). This is the
+    /// canonical, contract-conforming case — the only one any real inner
+    /// TNLP produces (e.g. `nl_reader`'s per-row `con_names`).
+    #[test]
+    fn con_metadata_per_row_vector_round_trips_under_row_drop() {
+        let m_in = 3;
+        let rows_kept = vec![0usize, 2]; // row 1 dropped by presolve
+        let mut inner = MetaData::default();
+        inner.strings.insert(
+            "names".to_string(),
+            vec!["c0".to_string(), "c1".to_string(), "c2".to_string()],
+        );
+        inner.integers.insert("flags".to_string(), vec![10, 11, 12]);
+        inner
+            .numerics
+            .insert("weights".to_string(), vec![1.0, 2.0, 3.0]);
+
+        let reduced = project_con_metadata(&inner, &rows_kept, m_in);
+        assert_eq!(
+            reduced.strings["names"],
+            vec!["c0".to_string(), "c2".to_string()]
+        );
+        assert_eq!(reduced.integers["flags"], vec![10, 12]);
+        assert_eq!(reduced.numerics["weights"], vec![1.0, 3.0]);
+
+        // finalize_metadata's inverse: reduced (m_out=2) back to m_in=3.
+        let restored = expand_con_metadata(&reduced, &rows_kept, m_in);
+        assert_eq!(
+            restored.strings["names"],
+            vec!["c0".to_string(), String::new(), "c2".to_string()]
+        );
+        assert_eq!(restored.integers["flags"], vec![10, 0, 12]);
+        assert_eq!(restored.numerics["weights"], vec![1.0, 0.0, 3.0]);
+    }
+
+    /// L46 hazard, characterized: a *global* metadata vector that happens
+    /// to have length `m_in` is indistinguishable from a per-row vector
+    /// (the untyped `MetaData` API carries no arity tag), so projection
+    /// silently subsets it. This pins the known-imperfect behavior so a
+    /// future arity-aware fix has a regression anchor; the value pounce
+    /// ships today is unaffected because no real inner TNLP emits a
+    /// coincidentally-`m_in`-length global constraint vector.
+    #[test]
+    fn con_metadata_length_heuristic_misfires_on_coincidental_global() {
+        let m_in = 3;
+        let rows_kept = vec![0usize, 2]; // a row is dropped, so projection is non-identity
+        let mut inner = MetaData::default();
+        // Semantically global (e.g. a 3-entry config tuple) that just
+        // happens to be length 3 == m_in.
+        inner
+            .integers
+            .insert("global_triple".to_string(), vec![100, 200, 300]);
+
+        let reduced = project_con_metadata(&inner, &rows_kept, m_in);
+        // Wrongly treated as per-row and subset to [100, 300]; the
+        // faithful value would be the untouched [100, 200, 300].
+        assert_eq!(
+            reduced.integers["global_triple"],
+            vec![100, 300],
+            "documents the L46 length-heuristic misfire on a coincidental global vector"
+        );
+
+        // A global vector whose length differs from m_in is correctly
+        // passed through untouched (the heuristic only misfires on the
+        // exact-length coincidence).
+        let mut inner2 = MetaData::default();
+        inner2
+            .numerics
+            .insert("two_globals".to_string(), vec![1.5, 2.5]);
+        let reduced2 = project_con_metadata(&inner2, &rows_kept, m_in);
+        assert_eq!(reduced2.numerics["two_globals"], vec![1.5, 2.5]);
     }
 }
