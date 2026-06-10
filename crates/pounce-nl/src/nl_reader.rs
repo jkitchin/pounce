@@ -2241,8 +2241,11 @@ impl TNLP for NlTnlp {
 
     fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
         grad.fill(0.0);
+        // Reuse the forward-value / adjoint scratch arenas (sized to
+        // `max_tape_n`) so each summand tape's reverse-AD sweep allocates
+        // nothing — see `Tape::gradient_seed_into` (M18).
         for t in &self.obj_tapes {
-            t.gradient_seed(x, 1.0, grad);
+            t.gradient_seed_into(x, 1.0, grad, &mut self.vals_scratch, &mut self.adj_scratch);
         }
         for (i, c) in &self.prob.obj_linear {
             grad[*i] += c;
@@ -2297,7 +2300,15 @@ impl TNLP for NlTnlp {
                         self.scratch_row_grad[j] = 0.0;
                     }
                     for t in &self.con_tapes[i] {
-                        t.gradient_seed(xs, 1.0, &mut self.scratch_row_grad);
+                        // Allocation-free reverse-AD per summand tape (M18):
+                        // reuse the shared forward/adjoint scratch arenas.
+                        t.gradient_seed_into(
+                            xs,
+                            1.0,
+                            &mut self.scratch_row_grad,
+                            &mut self.vals_scratch,
+                            &mut self.adj_scratch,
+                        );
                     }
                     for &(v, c) in &self.prob.con_linear[i] {
                         self.scratch_row_grad[v] += c;

@@ -267,9 +267,47 @@ impl Tape {
         self.reverse(&vals, seed, grad);
     }
 
+    /// Reverse-mode AD reusing two caller-supplied scratch buffers
+    /// (`vals` from [`forward_into`], and an `adj` arena ≥
+    /// `self.ops.len()`) instead of allocating a forward-value vector and
+    /// an adjoint vector per call like [`gradient_seed`]. The `.nl` design
+    /// emits one tiny tape per summand — ~10⁶ on large models — so a single
+    /// `eval_jac_g` / `eval_grad_f` drives this millions of times and the
+    /// per-call allocation dominated. `grad` is accumulated into (not
+    /// zeroed); `adj` may be passed dirty (it is zeroed at the touched
+    /// slots internally).
+    ///
+    /// [`forward_into`]: Tape::forward_into
+    pub fn gradient_seed_into(
+        &self,
+        x: &[f64],
+        seed: f64,
+        grad: &mut [f64],
+        vals: &mut [f64],
+        adj: &mut [f64],
+    ) {
+        if seed == 0.0 || self.ops.is_empty() {
+            return;
+        }
+        debug_assert!(vals.len() >= self.ops.len());
+        self.forward_into(x, vals);
+        self.reverse_into(vals, seed, grad, adj);
+    }
+
     fn reverse(&self, vals: &[f64], seed: f64, grad: &mut [f64]) {
         let n = self.ops.len();
         let mut adj = vec![0.0f64; n];
+        self.reverse_into(vals, seed, grad, &mut adj);
+    }
+
+    /// Reverse adjoint sweep into a caller-supplied `adj` scratch buffer
+    /// (length ≥ `self.ops.len()`), the allocation-free core of [`reverse`].
+    /// `adj` is zeroed over `[0, n)` internally, so a dirty arena is fine;
+    /// `grad` is accumulated into (not zeroed).
+    fn reverse_into(&self, vals: &[f64], seed: f64, grad: &mut [f64], adj: &mut [f64]) {
+        let n = self.ops.len();
+        debug_assert!(adj.len() >= n);
+        adj[..n].fill(0.0);
         adj[n - 1] = seed;
 
         for i in (0..n).rev() {

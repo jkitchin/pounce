@@ -41,6 +41,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M15 | Real-AMPL driver conventions unsupported despite `-AMPL`: no `.nl`-appending for extensionless stubs, no `pounce_options` env var | **FIXED** | **Both facets confirmed + reproduced.** The `-AMPL` flag advertises "for Pyomo / AMPL drivers", and AMPL invokes a solver as `pounce mystub -AMPL` — passing the stub *without* `.nl` and conveying options through the `<solver>_options` env var (`pounce_options`). Pyomo worked (it passes a full `.nl` path and CLI `key=value` args); genuine AMPL did not. **Reproduced**: (1) `pounce mystub -AMPL` with `mystub.nl` present errored `could not read …/mystub: No such file or directory` (exit 2); (2) `pounce_options="max_iter=1" pounce model.nl` ignored the env var entirely. **Fix** — two small, additive changes: (a) `read_nl_file` (`crates/pounce-nl/src/nl_reader.rs`) now resolves an extensionless stub: if the path as given is missing but `<path>.nl` exists, read that (and name the `.col`/`.row` siblings off the resolved stem). An existing path is still read verbatim, so Pyomo / `--nl-file` / the second-positional form are untouched. A new `append_extension` helper *appends* `.nl` (AMPL semantics: `my.model` → `my.model.nl`), unlike `Path::with_extension` which would replace. (b) `main.rs` reads the `pounce_options` env var and merges its whitespace-separated `key=value` tokens (parsed by the new pure `cli::options_from_env`) *ahead of* the command-line `key=value` options, so an explicit CLI flag wins (`set_options` is applied last-wins). The `-AMPL` help text now documents both conventions. **Verified post-fix**: `pounce mystub -AMPL` solves to Optimal and writes `mystub.sol`; `pounce_options="max_iter=1"` caps iterations (Maximum Iterations Exceeded); a bogus env option exits 2 with `failed to set …`; CLI `max_iter=3000` overrides env `max_iter=1` (converges). **Tests**: `nl_reader::tests::{read_nl_file_resolves_extensionless_ampl_stub, read_nl_file_prefers_exact_path_over_nl_sibling, append_extension_appends_rather_than_replaces}`; `cli::tests::{options_from_env_parses_whitespace_separated_pairs, options_from_env_skips_non_kv_tokens_and_empty}`; integration `tests/ampl_driver_conventions.rs` (stub→`.nl`+`.sol`, env applied/rejected, CLI overrides env). **Fail-first**: neutering the stub fallback (`if true \|\| path.exists()`) fails the stub tests with `could not read …/mystub`; neutering the env merge fails the env tests (no `failed to set`, exit ≠ 2). Scope note: AMPL's rarer `keyword value` (space-separated) option spelling is intentionally not supported — it matches the existing CLI grammar, which has no `key value` form. `pounce-nl` (78) and full `pounce-cli` (159 lib + all integration, 0 failed) green. See `## M15 detail`. |
 | M16 | Constraints and the full Jacobian are evaluated twice per iterate (no shared full-space cache below the c/d split) | **FIXED** | **Mechanism confirmed + reproduced.** In `OrigIpoptNlp` (`crates/pounce-nlp/src/orig_ipopt_nlp.rs`), `eval_c_internal` and `eval_d_internal` each independently called the user `eval_g` to fill a full-space `full_g`, then sliced their own rows out; likewise `eval_jac_c_internal`/`eval_jac_d_internal` each evaluated all `nnz_jac_g_full` entries via `eval_jac_g`. Because the filter line search needs both `c` and `d` (and both Jacobians) at each iterate, the dominant AD cost was paid **twice** — a ~2× tax on `.nl` problems. **Reproduced** with a counting `Hs071` TNLP: pre-fix, `eval_c(x)` then `eval_d(x)` at one iterate invoked the user `eval_g` **2×** (and `eval_jac_c`+`eval_jac_d` invoked `eval_jac_g` 2×). **Fix** (mirrors upstream's tagged `full_g_`/`jac_g_` buffers): added two shared, tag-keyed caches — `full_g_cache`/`full_jac_g_cache` (`Cache<Rc<Vec<Number>>>`, size 1) — and two private helpers `full_g(x)`/`full_jac_g(x)` that compute the full-space vector/Jacobian once per iterate and memoize on the input vector's tag. `eval_c`/`eval_d` now slice rows out of one shared `full_g(x)`; `eval_jac_c`/`eval_jac_d` slice one shared `full_jac_g(x)`. NaN-on-eval-failure and scaling/bound-subtraction semantics are unchanged (only the *source* of `full_g`/`full_vals` moved). Per-subsystem counters (`c_evals`/`d_evals`/`jac_c_evals`/`jac_d_evals`) still report one evaluation each — they count produced c/d vectors, which is legitimate — while the redundant *user* AD call is gone. **Verified post-fix**: the counting TNLP shows exactly **1** `eval_g` shared by `eval_c`+`eval_d` (and 1 `eval_jac_g` shared by both Jacobians); a genuinely new iterate (tag bumped) costs exactly one more; values unchanged (c=12, d=25 at the HS071 start). End-to-end `lp_afiro solver_selection=nlp` still converges to the known optimum (−464.753, Optimal). **Tests** (`orig_ipopt_nlp::tests`): `eval_c_and_eval_d_share_one_eval_g_per_iterate`, `eval_jac_c_and_eval_jac_d_share_one_eval_jac_g_per_iterate` (new `build_orig_nlp_counting` keeps a typed `Rc<RefCell<Hs071>>` handle to read the user-side call counters). **Pre-fix both FAIL** (`left: 2, right: 1`), confirmed by neutering the shared lookups with `.filter(|_| false)`. `pounce-nlp` (36, 0 failed), `pounce-algorithm`, and `pounce-cli` suites all green. See `## M16 detail`. |
 | M17 | `eval_c_internal` re-fetches all bounds and makes four full-size scratch allocations per cache miss, in the line-search hot path | **FIXED** | **Mechanism confirmed + reproduced.** In `OrigIpoptNlp` (`crates/pounce-nlp/src/orig_ipopt_nlp.rs`), `eval_c_internal` formed the equality residual `c_i = g[g_idx] - g_l[g_idx]` by calling the user `get_bounds_info` on **every** cache-missing iterate — allocating four fresh full-size scratch vectors (`tmp_x_l`, `tmp_x_u`, `full_g_l`, `full_g_u`) each time — purely to read the *constant* equality RHS `g_l[g_idx]` (`g_l == g_u` for equalities). Since the filter line search evaluates `c` at every trial point, this per-trial bounds fetch + four allocations sat squarely in the hot path. Upstream Ipopt captures the RHS once as `c_rhs`. **Reproduced** with a counting `Hs071` TNLP (now also tallying `get_bounds_info_calls`): pre-fix, each fresh iterate added another `get_bounds_info` call (6 extra calls for 6 iterates above the 2-call construction baseline). **Fix**: capture the constant RHS once at construction — new field `c_rhs: Vec<Number>` (length `n_c`), computed in `OrigIpoptNlp::new` from the already-fetched `full_g_l` as `c_map.iter().map(|&g_idx| full_g_l[g_idx]).collect()`. `eval_c_internal` now forms `raw = full_g[g_idx] - self.c_rhs[i]`, dropping the per-iterate `get_bounds_info` call and all four scratch allocations. Scaling and the `full_g` source (M16's shared cache) are unchanged, so numerics are identical. **Verified post-fix**: counting TNLP shows `get_bounds_info_calls` stays at the construction baseline across 6 fresh-iterate `eval_c` calls; residual value unchanged (c = g1−40 = 12 at the HS071 start); end-to-end `lp_afiro solver_selection=nlp` still converges to −464.75314761311961 ("Optimal Solution Found"). **Test** (`orig_ipopt_nlp::tests::eval_c_does_not_refetch_bounds_per_iterate`): snapshots `get_bounds_info_calls` after construction, runs `eval_c` at six distinct iterates, asserts the count is unchanged (and that c=12). **Pre-fix FAILS** (`left: 8, right: 2`), confirmed by neutering the fix — temporarily restoring the per-iterate `get_bounds_info` fetch — then restored. `pounce-nlp` (37, 0 failed), `pounce-algorithm` (245), and full `pounce-cli` (159 lib + all integration, 0 failed) green. See `## M17 detail`. |
+| M18 | Per-call allocations in the tape-AD gradient hot path (`forward` + `reverse` allocate per summand tape, ~10⁶ tapes per `eval_jac_g`) | **FIXED** | **Mechanism confirmed + reproduced.** In `crates/pounce-nl/src/nl_tape.rs`, `Tape::gradient_seed` calls `forward` (allocates a `Vec<f64>` of forward values, `:198`) and `reverse` (allocates `adj = vec![0.0; n]`, `:272`) on every invocation. The `.nl` front end (`nl_reader.rs`) deliberately emits one tiny `Tape` per additive summand, so `eval_jac_g` (`gradient_seed` per constraint summand) and `eval_grad_f` (per objective summand) drive these two small allocations millions of times on large models. The Hessian path already had the `forward_into` + reusable-scratch pattern; the gradient path did not. **Reproduced** with a counting global allocator: `gradient_seed` allocates on essentially every call (≥1000 allocations across 1000 calls on a sample tape). **Fix** (mirrors the Hessian scratch pattern): added `Tape::gradient_seed_into(x, seed, grad, vals, adj)` — a `pub` allocation-free variant that runs `forward_into` (existing) into a caller `vals` arena and a new private `reverse_into(vals, seed, grad, adj)` that zeroes the touched `[0,n)` slots of a caller `adj` arena instead of allocating one. `reverse` now delegates to `reverse_into` (behavior unchanged; `gradient_seed` and the FD-comparison tests still exercise it). The two hot-path callers in `nl_reader.rs` (`eval_grad_f`, `eval_jac_g`) now call `gradient_seed_into`, reusing the existing `vals_scratch`/`adj_scratch` arenas (already sized to `max_tape_n`, the max over all obj+con tapes, so always ≥ any single summand tape). **Verified post-fix**: the counting allocator shows `gradient_seed_into` performs **0** allocations across 1000 calls (vs ≥1000 for `gradient_seed`) and computes the identical gradient; end-to-end NLP solves unchanged — `convex_qp`→2.0, `tame`→0.0, `nonconvex_qp`→1.0, all "Optimal Solution Found". **Test** (`tests/tape_gradient_no_alloc.rs`): a counting `#[global_allocator]` (single test in its own integration binary so no sibling thread perturbs the counter) asserts `gradient_seed_into` == `gradient_seed` numerically, the baseline allocates ≥1000×, and the new path allocates 0×. **Pre-fix the 0-assertion FAILS** (`left: 1000, right: 0`), confirmed by neutering `gradient_seed_into` with a throwaway `vec!` per call, then restored. `pounce-nl` (78 lib + 1 new integration, 0 failed) and full `pounce-cli` (0 failed) green. See `## M18 detail`. |
 
 ## C1 detail
 
@@ -1663,3 +1664,65 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   restored after confirmation.
 - **Result**: `pounce-nlp` green (37, 0 failed); downstream `pounce-algorithm`
   (245) and full `pounce-cli` (159 lib + all integration) green (0 failed).
+
+## M18 detail
+
+- **Issue**: the tape-AD gradient sweep `Tape::gradient_seed`
+  (`crates/pounce-nl/src/nl_tape.rs`) allocates twice per call:
+  - `forward(x)` (`:198`) returns a fresh `Vec<f64>` of forward values.
+  - `reverse(vals, seed, grad)` (`:272`) allocates `adj = vec![0.0; n]` for
+    the adjoint accumulator.
+  The `.nl` front end (`nl_reader.rs`) deliberately builds **one tiny `Tape`
+  per additive summand** — on large models ~10⁶ of them — so a single
+  `eval_jac_g` (which calls `gradient_seed` for every constraint summand) or
+  `eval_grad_f` (every objective summand) turns those two small allocations
+  into millions of heap hits. The Hessian path already avoids this with the
+  `forward_into` + caller-scratch pattern (`vals_scratch`/`dot_scratch`/
+  `adj_scratch`/`adj_dot_scratch`, sized to `max_tape_n`); the gradient path
+  did not reuse them.
+- **Reproduced**: a counting `#[global_allocator]` wrapping `System`. On a
+  sample tape (`x0*x1 + exp(x0)*x1 + x0²`), `gradient_seed` allocates on
+  essentially every call — ≥1000 allocations across 1000 calls.
+- **Fix** (mirror the Hessian scratch pattern for first-order AD):
+  - New `pub fn gradient_seed_into(&self, x, seed, grad, vals, adj)` on
+    `Tape`: guards the `seed == 0 || ops empty` fast path like
+    `gradient_seed`, then runs the existing `forward_into(x, vals)` and a new
+    `reverse_into(vals, seed, grad, adj)`. `grad` is accumulated into (not
+    zeroed); `vals`/`adj` are caller arenas of length ≥ `ops.len()`.
+  - New private `fn reverse_into(&self, vals, seed, grad, adj)` holding the
+    full reverse-sweep body. It zeroes only `adj[0..n]` (so a dirty arena is
+    fine) and sets `adj[n-1] = seed` — no allocation.
+  - `reverse` now allocates an `adj` once and delegates to `reverse_into`, so
+    `gradient_seed` and every existing FD-comparison test still exercise the
+    same code with identical behavior.
+  - The two hot-path callers in `nl_reader.rs` switch to `gradient_seed_into`:
+    - `eval_grad_f`: `t.gradient_seed_into(x, 1.0, grad, &mut self.vals_scratch,
+      &mut self.adj_scratch)` per objective tape.
+    - `eval_jac_g` (Values): same, accumulating into `self.scratch_row_grad`.
+    Both reuse the pre-existing `vals_scratch`/`adj_scratch` arenas (sized to
+    `max_tape_n` = max ops length over all obj+con tapes, so always ≥ any
+    single summand tape). Disjoint `self` fields, so the borrow checker
+    accepts simultaneous `&self.con_tapes` / `&mut self.scratch_*` access.
+- **Why no numerics change**: `forward_into`/`reverse_into` are the
+  byte-for-byte same arithmetic as `forward`/`reverse` — only the *storage*
+  for the forward values and adjoints moved from a per-call `Vec` to a reused
+  arena. The arena is fully (re)written each call (`forward_into` writes all
+  `[0,n)`; `reverse_into` zeroes `adj[0,n)`), so no stale state leaks.
+- **Verified (post-fix)**:
+  - counting allocator: `gradient_seed_into` performs **0** allocations
+    across 1000 calls; `gradient_seed` performs ≥1000; both yield the
+    identical gradient.
+  - end-to-end NLP solves (gradient path exercised via tapes) unchanged:
+    `convex_qp` → 2.0, `tame` → 0.0, `nonconvex_qp` → 1.0, all "Optimal
+    Solution Found".
+- **Test** (`crates/pounce-nl/tests/tape_gradient_no_alloc.rs`): installs a
+  counting global allocator; a single test (alone in its integration binary,
+  so no sibling test thread perturbs the global counter inside the counting
+  window) asserts (a) `gradient_seed_into == gradient_seed` numerically,
+  (b) the baseline allocates ≥1000× (the harness genuinely observes
+  allocations), and (c) `gradient_seed_into` allocates 0× across 1000 calls.
+- **Fail-first**: neutering `gradient_seed_into` with a throwaway
+  `vec![0.0; ops.len()]` per call made assertion (c) fail with
+  `left: 1000, right: 0`; restored after confirmation.
+- **Result**: `pounce-nl` green (78 lib + 1 new integration test, 0 failed);
+  downstream full `pounce-cli` green (0 failed).
