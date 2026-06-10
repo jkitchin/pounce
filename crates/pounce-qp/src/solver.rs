@@ -1134,11 +1134,27 @@ impl ParametricActiveSetSolver {
     /// working-set change. Resets the cached factor when the
     /// Schur block reaches `max_schur_updates_before_refactor`.
     ///
-    /// Behavior is algorithmically identical to the refactor-per-
-    /// iteration path: same drop / ratio-test logic, same exit
-    /// conditions. The difference is the inner-loop cost: one
-    /// cached resolve + small dense Schur solve per iteration,
-    /// plus two cached resolves per working-set change.
+    /// Behavior matches the refactor-per-iteration path on every
+    /// problem with a positive-definite reduced Hessian: same drop /
+    /// ratio-test logic, same exit conditions. The difference is the
+    /// inner-loop cost: one cached resolve + small dense Schur solve
+    /// per iteration, plus two cached resolves per working-set change.
+    ///
+    /// Caveat (indefinite reduced Hessian only): the refactor path
+    /// runs `factorize_with_inertia_control` — re-checking inertia
+    /// and applying a δ-shift — on *every* iteration, whereas this
+    /// path only runs inertia control inside `SchurState::reset`
+    /// (at init and every `max_schur_updates_before_refactor`
+    /// working-set changes). The rank-2 SMW update in `apply_change`
+    /// does *not* re-check inertia. A DROP enlarges the active-set
+    /// null space and can expose negative curvature that the cached
+    /// factor does not regularize until the next reset; an ADD only
+    /// shrinks the null space and cannot introduce new negative
+    /// curvature. For the convex default (`HessianInertia::Psd`,
+    /// which is what the SQP driver feeds) the reduced Hessian is
+    /// always PD, so the two paths are identical; the gap is latent
+    /// for indefinite inputs on the opt-in `use_schur_updates = true`
+    /// path. See code-review item M10.
     fn solve_general_schur(
         &mut self,
         qp: &QpProblem,

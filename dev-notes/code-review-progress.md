@@ -33,6 +33,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M7 | QP: QPS parser doubles Hessian off-diagonals for `QMATRIX` files | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: `parse_qps` (`crates/pounce-qp/src/qps.rs`) mapped all three quadratic-section headers to the same state — `Some("QUADOBJ") \| Some("QSECTION") \| Some("QMATRIX") => section = Section::Quadobj` (old line 132). But the conventions differ: `QUADOBJ`/`QSECTION` list each off-diagonal pair **once** (single triangle), whereas `QMATRIX` lists the **full** matrix — both `(i,j)` and the mirror `(j,i)`. The content parser pushed every raw `(i_col, j_col, val)` triplet to `h_entries`; the lower-triangle normalization (`let (lo, hi) = if i>=j {(j,i)} else {(i,j)}`) then collapses both QMATRIX mirror entries onto the **same** lower triplet, and the evaluator sums all triplets → every off-diagonal is **doubled** (diagonal `i==j` is listed once, so unaffected). A QMATRIX file thus solves a different objective (`½xᵀHx` with off-diagonals 2×) and returns a wrong optimum. **Fix**: split the header match so `QMATRIX` sets a new `quad_is_full = true` flag (`QUADOBJ`/`QSECTION` set it `false`); in the content parser, when `quad_is_full && i_col < j_col`, skip the strict-upper mirror so each off-diagonal survives exactly once in the lower triangle. Single-triangle sections keep every entry (unchanged). **Latent-but-real**: no in-repo data uses QMATRIX (the `mm_published_optima` fixtures are all QUADOBJ, which is why they always passed), so this path had **zero** prior coverage; any user supplying a standard CPLEX/Maros-Mészáros QMATRIX file hit the bug. **Tests** (`src/tests/qps_unit.rs`): `parse_qps_qmatrix_full_matrix_does_not_double_off_diagonals` parses a QMATRIX `H = [[2,1],[1,2]]` (both `X1·X2` and `X2·X1` listed) and asserts the summed off-diagonal `H_21 == 1.0` (not 2.0) with diagonals intact; pre-fix it **FAILS** (`H_21 = 2`), post-fix passes. A paired `parse_qps_quadobj_single_triangle_keeps_off_diagonal` guards the QUADOBJ path against the fix regressing it. Full `pounce-qp` suite green (77 lib + 1 + 5 `mm_published_optima` integration, 0 failed). See `## M7 detail`. |
 | M8 | l1penalty: augmented `x` passed to inner `eval_jac_g` | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: in `L1PenaltyBarrierTnlp` (`crates/pounce-l1penalty/src/wrapper.rs`) every forwarding method truncates the augmented variable vector to the inner's original `n` before calling the inner TNLP — `eval_f` (`&x[..n]`), `eval_grad_f` (`&x[..n]`), `eval_g` (`&x[..n]`), `eval_h` (`x.map(|xa| &xa[..n])`) — **except** `eval_jac_g`, which forwarded the full augmented slice `x` (length `n + 2·m_eq`) unchanged to both the `Structure` and `Values` inner calls (old lines 416, 445). The augmented variables append `m_eq` `p` and `m_eq` `n` slacks, so the inner saw `m_eq*2` extra trailing entries. **Why it matters / latent**: most inner `eval_jac_g` impls index `x[j]` for fixed `j < n` and are unharmed, so no in-repo test caught it — but any inner that validates `x.len()` (a reasonable defensive check) or iterates the slice (`x.iter()`) reads garbage/out-of-contract data. The inconsistency with the other four methods is itself a latent correctness hazard. **Fix**: compute `let inner_x = x.map(|xa| &xa[..n]);` once and pass `inner_x` to both inner `eval_jac_g` calls, mirroring `eval_h` exactly. The wrapper's own slack Jacobian entries (the `-1`/`+1` columns) are unchanged. **Test** (`wrapper.rs` tests): `jacobian_passes_inner_only_original_x` wraps a `LenSpy` inner TNLP (`n=2, m=1`) that records, via `Rc<Cell<usize>>`, the length of the `x` slice it receives in `eval_jac_g`; the test calls the wrapper's `eval_jac_g` with an augmented `x` of length 4 (`2 + 2·1`) and asserts the inner saw length **2**. Pre-fix the inner sees **4** (the assertion **FAILS**, verified by temporarily reverting `inner_x`→`x`); post-fix it sees 2. Full `pounce-l1penalty` suite green (11 tests) and the `pounce-algorithm` consumer green (245 + integration binaries, 0 failed). See `## M8 detail`. |
 | M9 | restoration: silent zero-substitution on failed `DenseVector` downcasts | **FIXED** (scope corrected — sensitivity sites in the review do not exhibit the pattern) | **Mechanism confirmed by code inspection + reproduced by a failing test**: the restoration init/clone paths read outer-iterate blocks with `v.as_any().downcast_ref::<DenseVector>().map(|d| d.expanded_values()).unwrap_or_else(|| vec![0.0; dim])`. A failed downcast (a non-`DenseVector`, e.g. a compound block) silently substitutes **zeros** — seeding the restoration start point from a zero residual / zero multiplier with **no diagnostic**, masking the invariant violation. This is asymmetric with the *write* side, which already `.expect()`-panics on the same mismatch (`downcast_dense_mut`, `init.rs:475`). `expanded_values()` already handles the *homogeneous* DenseVector case correctly, so only a genuinely non-dense block triggers it. **Sites fixed (all in `pounce-restoration`)**: 7 inline reads in `init.rs` (c, d−s, s, z_l, z_u, v_l, v_u) plus the shared `expanded_dense_values` helpers in `resto_inner_solver.rs:775` and `resto_resto.rs:234`. **Scope correction**: the review also cited `pounce-sensitivity/src/solver.rs` and `convenience.rs` and `aug_resto_system_solver.rs:553`, but (a) a `grep` for the zero-fill pattern finds **none** in pounce-sensitivity (those line numbers now point to `IndexSchurData::from_parts` / the `SensResult` builder — unrelated; likely shifted by the M6 edit), and (b) `aug_resto_system_solver.rs:553` is `lr.get_diag()…unwrap_or_else(|| vec![0.0; n])` where the `Option` is a *legitimate* absence (a low-rank update with no diagonal → zero diagonal is correct), **not** a failed downcast — both excluded with rationale. **Fix**: introduce `expanded_dense_or_panic(v, what)` in `init.rs` (panics with a labelled message) and route all 7 inline sites through it; convert both `expanded_dense_values` helpers to panic (retaining `fallback_dim` only to size the diagnostic). Read and write sides are now symmetric — a non-dense block fails loudly. **Test** (`init.rs` tests): `expanded_dense_or_panic_panics_on_non_dense` builds a 1-block `CompoundVector` (not a `DenseVector`) and asserts the helper panics (`#[should_panic(expected = "must be a DenseVector")]`); `expanded_dense_or_panic_returns_values_for_dense` guards the happy path. **Pre-fix the panic test FAILS** ("test did not panic as expected" — the helper returns zeros), verified by temporarily restoring the silent `vec![0.0; v.dim()]` fallback. Full `pounce-restoration` suite green (105 lib + integration, 0 failed) and the `pounce-algorithm` consumer green (245 + integration, 0 failed). See `## M9 detail`. |
+| M10 | Schur-update QP path: no inertia re-check after working-set drops; `O(m·nnz(A))` assembly per reset | **VERIFIED (by inspection) — doc corrected; behavioral fix DEFERRED** | **Asymmetry confirmed by code inspection.** The refactor path (`solve_general`/`solve_box_constrained`) calls `factorize_with_inertia_control` **every iteration** (`solver.rs:734`, `:238`), re-checking KKT inertia and applying a δ-shift on `WrongInertia`/`Singular`. The Schur path (`solve_general_schur`) runs inertia control **only inside `SchurState::reset`** (at init + every `max_schur_updates_before_refactor = 50` changes); the rank-2 SMW `apply_change` after a DROP (`solver.rs:1234`) does **not** re-check inertia. A drop enlarges the active-set null space and can expose negative curvature the cached factor never regularizes until the next reset, contradicting the doc claim "algorithmically identical to the refactor-per-iteration path" (`solver.rs:1137`). **Latent**: indefinite-reduced-Hessian only; `use_schur_updates` defaults `false` and *no production caller flips it* (the SQP driver feeds `HessianInertia::Psd`, for which the reduced Hessian is always PD and both paths are provably identical). **Not deterministically regression-testable**: two indefinite-QP probes — (a) `H = diag(-1,2)`, box `[-1,1]²`, drop into negative curvature; (b) same with `x₁` unbounded so the dropped direction is unbounded below — were run through *both* paths. **Both produced byte-identical results** (case a: both `Optimal` at `x=(-1,0)`; case b: both `MaxIter` at identical `x`). The active-set ratio-test re-add and the global-KKT-inertia gating (a single 1-D negative-curvature exposure often still matches `expected_neg`, so even the refactor path takes no shift) make constructed cases self-correct or diverge identically; I could not force a deterministic divergence to anchor a fail-first test. **Disposition mirrors M1**: documented, not silently fixed. **Verifiable correction applied**: the false "algorithmically identical" doc comment in `solver.rs` is rewritten to state the PD-only equivalence and spell out the indefinite-H inertia caveat (DROP vs ADD curvature argument). **Behavioral fix DEFERRED** (forcing `schur.reset()` unconditionally after every drop would restore parity, but absent a failing test and given the numerical delicacy / blast radius on the opt-in path, it is not applied here). **Perf sub-claim** (`O(m·nnz(A))` assembly in `build_k_max_triplet` per reset, `schur.rs`) is real but a performance characteristic, not a correctness bug, and not naturally regression-testable. `cargo test -p pounce-qp` green (77 + 1 + 5, 0 failed). See `## M10 detail`. |
 
 ## C1 detail
 
@@ -1190,3 +1191,66 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   `pounce-restoration` suite green (105 lib + all integration binaries, 0 failed)
   and the downstream `pounce-algorithm` consumer green (245 unit + all
   integration, 0 failed).
+
+## M10 detail
+
+- **Claim** (review §M10): the Schur-update QP path does no inertia re-check
+  after working-set changes and assembles `K_max` in `O(m·nnz(A))` per reset, so
+  the doc claim of being "algorithmically identical to the refactor-per-iteration
+  path" (`solver.rs:1137`) does not hold for indefinite reduced Hessians after a
+  drop.
+- **Mechanism (confirmed by inspection)**: the refactor path runs
+  `factorize_with_inertia_control` on **every** inner iteration —
+  `solve_general` at `solver.rs:734`, `solve_box_constrained` at `:238` — so an
+  indefinite reduced Hessian triggers a δ-shift (`H += δI` on the H-block) before
+  the step is computed. The Schur path (`solve_general_schur`, `:1142`) factors
+  `K_max` once via `SchurState::reset` (which *does* run the same δ-shift inertia
+  control, `schur.rs:249`), then for each working-set change applies a rank-2 SMW
+  update through `apply_change` (`schur.rs:318`) that **never re-checks inertia**.
+  `reset` is only re-invoked when `needs_reset()` is true, i.e. after
+  `max_schur_updates_before_refactor = 50` accumulated changes. Between resets a
+  **drop** (`solver.rs:1234`, `going_active = false`) enlarges the active-set
+  null space and can expose a negative-curvature direction that the cached factor
+  leaves unregularized; an **add** (`:1334`, `going_active = true`) only shrinks
+  the null space and cannot introduce new negative curvature. So only drops break
+  parity, and only when the reduced Hessian is indefinite.
+- **Why it is latent**: `QpOptions::use_schur_updates` defaults `false`
+  (`options.rs:112`); a `grep` of the whole workspace finds it set `true` only in
+  `pounce-qp`'s own parity tests — **no production caller flips it** (the SQP
+  driver `sqp_alg.rs` keeps the default and feeds `HessianInertia::Psd`). For a
+  PD reduced Hessian no shift is ever needed, so the two paths are provably
+  identical; the gap exists only for indefinite `H` on the opt-in path.
+- **Verification attempts (could not force a divergence)**: a scratch
+  differential test put an indefinite QP through both paths
+  (`use_schur_updates` false vs true) and compared `x`, `obj`, `status`:
+    1. `H = diag(-1, 2)`, `g = (2, 0)`, box `[-1,1]²`, warm-started with both
+       bounds `AtUpper` so the solver must drop `x₁` (the negative-curvature
+       coordinate) into a now-indefinite reduced system. **Result: both paths
+       `Optimal` at `x = (-1, 0)`, `obj = -2.5` — identical.**
+    2. Same `H`/`g`, but `x₁` unbounded (`±∞`) and `x₂ ∈ [-1,1]`, so the dropped
+       direction is unbounded below. **Result: both paths `MaxIter` at the same
+       `x ≈ (-12.93, 1.0)`, same `obj` — identical.**
+  In both, the unshifted Schur step and the refactor step coincide because (a)
+  the ratio test immediately re-adds a blocking bound, self-correcting an ascent
+  step, and (b) a single 1-D negative-curvature exposure frequently still yields
+  a KKT inertia matching `expected_neg`, so even the refactor path takes **no**
+  shift. Constructing a robust, deterministic divergence proved impractical —
+  same conclusion as M1.
+- **Disposition**: **VERIFIED by inspection, DEFERRED for behavior** (mirrors
+  M1). The one *verifiable* defect — the overclaiming doc comment — **is fixed**:
+  `solve_general_schur`'s doc now states the equivalence holds for PD reduced
+  Hessians and spells out the indefinite-H inertia caveat (drop-vs-add curvature
+  argument, the `reset`-only inertia control, and the latency on the opt-in
+  path). The behavioral fix (force `schur.reset(...)` unconditionally after every
+  drop, restoring per-change inertia control) is **not applied**: without a
+  failing test to anchor it and given the numerical delicacy / blast radius of
+  changing inertia handling on a path no production code exercises, the safe
+  disposition is to document rather than perturb.
+- **Perf sub-claim**: `build_k_max_triplet` iterating all of `A` per general
+  slot is genuinely `O(m·nnz(A))` per reset, but that is a performance property,
+  not a correctness bug, and is not naturally regression-testable; noted for a
+  future optimization pass, not fixed here.
+- **Tests**: no new test (no deterministic divergence to assert). The scratch
+  differential probes were removed after confirming agreement. `cargo test -p
+  pounce-qp` green (77 lib + 1 + 5 integration, 0 failed) with the doc change in
+  place.
