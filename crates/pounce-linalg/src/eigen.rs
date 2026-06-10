@@ -41,6 +41,21 @@ pub fn symmetric_eigen(
     eigenvalues: &mut [Number],
     eigenvectors: &mut [Number],
 ) -> bool {
+    symmetric_eigen_impl(a, n, eigenvalues, eigenvectors, 50)
+}
+
+/// Implementation of [`symmetric_eigen`] with an injectable sweep
+/// budget. The public wrapper fixes `max_sweeps = 50`; the parameter
+/// exists so tests can exercise the non-convergence (`false`) return —
+/// which real inputs essentially never trigger, since cyclic Jacobi
+/// converges in a handful of sweeps — with a deliberately tiny budget.
+fn symmetric_eigen_impl(
+    a: &[Number],
+    n: usize,
+    eigenvalues: &mut [Number],
+    eigenvectors: &mut [Number],
+    max_sweeps: usize,
+) -> bool {
     if a.len() != n * n || eigenvalues.len() != n || eigenvectors.len() != n * n {
         return false;
     }
@@ -77,7 +92,7 @@ pub fn symmetric_eigen(
     }
     let tol = (1e-28 * frob_sq).max(1e-300);
 
-    let max_sweeps = 50;
+    let mut converged = false;
     for _sweep in 0..max_sweeps {
         // Off-diagonal sum of squares.
         let mut off = 0.0;
@@ -89,6 +104,7 @@ pub fn symmetric_eigen(
             }
         }
         if off < tol {
+            converged = true;
             break;
         }
 
@@ -133,8 +149,28 @@ pub fn symmetric_eigen(
         }
     }
 
+    // Convergence verdict. The per-sweep `break` above credits the
+    // common case (off-diagonal mass fell below `tol`). The top-of-sweep
+    // check never sees the state produced by the *final* sweep, so if the
+    // budget was exhausted, recompute the off-diagonal mass once more:
+    // this both credits a run that converged on the last sweep and lets a
+    // run that genuinely stalled report `false` per the doc contract,
+    // instead of the previous unconditional `true` (M4).
+    if !converged {
+        let mut off = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                if i != j {
+                    off += m[i * n + j] * m[i * n + j];
+                }
+            }
+        }
+        converged = off < tol;
+    }
+
     // Extract diagonal as eigenvalues, then sort ascending and
-    // permute columns of V to match.
+    // permute columns of V to match. Done regardless of `converged` so
+    // callers still receive best-effort eigenpairs alongside the verdict.
     let mut idx: Vec<usize> = (0..n).collect();
     let diag: Vec<Number> = (0..n).map(|k| m[k * n + k]).collect();
     idx.sort_by(|&i, &j| {
@@ -150,7 +186,7 @@ pub fn symmetric_eigen(
             eigenvectors[row + n * new_pos] = v_in[row + n * old_pos];
         }
     }
-    true
+    converged
 }
 
 /// Compute the (c, s) Jacobi rotation that zeros the (p, q) entry of
@@ -271,5 +307,47 @@ mod tests {
         let mut w: Vec<Number> = vec![];
         let mut v: Vec<Number> = vec![];
         assert!(symmetric_eigen(&[], 0, &mut w, &mut v));
+    }
+
+    // M4 regression: a run that exhausts its sweep budget without the
+    // off-diagonal mass dropping below `tol` must report `false`. The
+    // 4×4 matrix below carries substantial off-diagonal coupling, so a
+    // single cyclic Jacobi sweep cannot converge it; with the old
+    // unconditional `return true`, this asserted `false` would FAIL.
+    #[test]
+    fn eigen_reports_false_when_sweeps_exhausted() {
+        let a = vec![
+            4.0, 1.0, 2.0, 0.5, 1.0, 3.0, 0.7, 1.5, 2.0, 0.7, 5.0, 0.3, 0.5, 1.5, 0.3, 2.0,
+        ];
+        let n = 4;
+        let mut w = vec![0.0; n];
+        let mut v = vec![0.0; n * n];
+        // One sweep is not enough for this off-diagonal mass.
+        assert!(
+            !symmetric_eigen_impl(&a, n, &mut w, &mut v, 1),
+            "single-sweep run on a coupled matrix must report non-convergence"
+        );
+    }
+
+    // The same matrix with the full budget converges and reports `true`,
+    // and an already-diagonal matrix converges even within one sweep
+    // (the top-of-sweep check fires immediately). Guards the converged
+    // path against the fix over-reporting `false`.
+    #[test]
+    fn eigen_reports_true_when_converged() {
+        let a = vec![
+            4.0, 1.0, 2.0, 0.5, 1.0, 3.0, 0.7, 1.5, 2.0, 0.7, 5.0, 0.3, 0.5, 1.5, 0.3, 2.0,
+        ];
+        let n = 4;
+        let mut w = vec![0.0; n];
+        let mut v = vec![0.0; n * n];
+        assert!(symmetric_eigen_impl(&a, n, &mut w, &mut v, 50));
+
+        // Already diagonal → converged before any rotation, so even a
+        // one-sweep budget returns true.
+        let d = vec![3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0];
+        let mut dw = vec![0.0; 3];
+        let mut dv = vec![0.0; 9];
+        assert!(symmetric_eigen_impl(&d, 3, &mut dw, &mut dv, 1));
     }
 }

@@ -27,6 +27,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M1 | algorithm: convergence gates use internally *scaled* residuals where upstream uses unscaled | **VERIFIED — DEFERRED** (cross-crate scaling-unwind + core convergence-criteria change; unsafe to ship in an autonomous edit) | **Mechanism confirmed by code inspection**: `check_convergence_with_state` / `current_is_acceptable_with_state` (`conv_check/opt_error.rs:215-222, 301-307`) gate `dual_inf_tol`/`constr_viol_tol`/`compl_inf_tol`/`acceptable_*` on the **scaled** CQ accessors `curr_dual_infeasibility_max` / `curr_primal_infeasibility_max` / `curr_complementarity_max` / `curr_f`; `ipopt_cq.rs` exposes **no** unscaled component accessor (only `unscaled_curr_f`), and `nlp_scaling_method` defaults to **gradient-based** (`upstream_options.rs:361`), so scaling is on by default. Direction (`orig_ipopt_nlp.rs:897-916`): `c_scaled = c_scale·c_orig` with `c_scale ≤ 1`, so the user-space violation = `c_scaled/c_scale ≥ c_scaled` can exceed `constr_viol_tol` by `1/c_scale` while pounce declares `Success` — the reported harm. **Why deferred, not fixed here**: (a) a correct unscaled constraint-violation accessor needs `c_scale`/`d_scale`, which are private to `OrigIpoptNlp` — exposing them means new `IpoptNlp` trait methods on every implementor; (b) unscaled dual-inf and complementarity need the scaling-object unwind pounce explicitly defers (`orig_ipopt_nlp.rs:52-54`) and, because x-scaling is identity but obj-scaling `df` is not, are **not** simple divisions (`∇ₓL_scaled = df·∇f + Jᵀλ` vs unscaled `∇f + Jᵀλ`), so a careless port silently corrupts termination; (c) this is core convergence criteria (high blast radius) deserving reference-validated review. See `## M1 detail` for the scoped two-PR plan and the tests it needs. No code changed. |
 | M2 | algorithm: `accept_trial_point` silently nulls `curr` when no trial is staged | **FIXED** | **Mechanism confirmed by code inspection**: `accept_trial_point` (`ipopt_data.rs:203-205`) did `self.curr = self.trial.take()` unconditionally; `ipopt_alg.rs:1121` calls it every iteration. In the documented bookkeeping-only `iterate()` path (no NLP + no `search_dir`, module docs `ipopt_alg.rs:17-22`), step 5 (`ipopt_alg.rs:724-727`) is skipped, so `delta` stays `None`, `have_delta == false` (`ipopt_alg.rs:994`), and no trial is staged — yet accept still ran, nulling `curr`. The next iteration's `IpoptCq::curr_iv` (`ipopt_cq.rs:107-112`) then hits `unreachable!("curr iterate not set")`. **Fix**: guard the promotion — `if let Some(trial) = self.trial.take() { self.curr = Some(trial); }`, preserving `curr` when nothing is staged (normal path unchanged: trial is always `Some` after a line search, so it still promotes and clears `trial`). **Test** (`ipopt_data.rs` tests): `accept_trial_point_preserves_curr_when_no_trial_staged` sets `curr`, leaves `trial` unset, asserts `curr.is_some()` after accept. Pre-fix FAILS (`curr` nulled); post-fix PASSES alongside the existing `accept_trial_point_promotes_trial_to_curr`. Full `pounce-algorithm` suite green (323 passed, 0 failed). |
 | M3 | algorithm: `LeastSquareMults` lacks the δ_c/δ_d inertia workaround its sibling has | **FIXED** (trigger not synthetically reproducible — see note) | **Mechanism confirmed by code inspection**: `calculate_y_eq` (`eq_mult/least_square.rs:106-119`) solved the W=0 augmented system with `delta_c = delta_d = 0.0`, while the dual initializer (`init/default.rs:154-194`) solves the *identical* W=0 / structurally-zero (3,3)/(4,4)-block system but perturbs `delta_c = delta_d = 1e-8` specifically because pounce-feral's LDLᵀ mis-reports the inertia of that block (counted 0 negative eigenvalues on `nuffield2_trap` where the true count is `n_c+n_d`, raising `WrongInertia`). With `check_neg = aug_solver.provides_inertia()` (feral → true) and `num_eq = n_c+n_d` passed to `solve` (`least_square.rs:133-135`), the LS solve can spuriously fail; the caller then **silently leaves `y_c=y_d=0`** (`init/default.rs:388-390`) — the iter-0 `inf_du` blow-up this step exists to prevent. "Duplicate logic that diverged." **Fix**: mirror the sibling's `1e-8` perturbation (`least_square.rs:115,118`), with a cross-reference comment to keep the two in sync. **Verification**: the fail-first trigger is feral's *data-dependent* inertia mis-report on a CUTEst matrix (`nuffield2_trap`) **not in the repo**; the aug-solver unit harness uses `DenseMock` (an exact LU oracle) which cannot reproduce it, so a synthetic fail-first test is not constructible — the *sibling* fix itself shipped on the same basis (no synthetic fail-first test, integration-validated). Regression-safety is verified by running: `constr_mult_init_max` defaults to `1e3 > 0`, so every constrained solve traverses `calculate_y_eq`; the constrained-problem integration tests (`optimize_hs71`, `optimize_hs14`, `hock_schittkowski_subset`) and the full `pounce-algorithm` suite stay green (323 passed, 0 failed), confirming the `1e-8` perturbation is numerically inert (the constraint Jacobian dominates). See `## M3 detail`. |
+| M4 | linalg: `symmetric_eigen` reports `true` on non-convergence | **FIXED** | **Confirmed by code inspection**: the doc (`eigen.rs:32-35`) promises `false` when the Jacobi sweeps run out, but the cyclic-Jacobi loop only `break`s on early convergence; after `max_sweeps` (50) it fell through to `return true` unconditionally (old `eigen.rs:153`). Callers branch on the verdict (`pounce-convex/src/cones/psd.rs:108,145,163,231`, `sos.rs:615,672,717`), so a stalled matrix would feed unconverged eigenpairs into PSD projections / SOS decompositions instead of the error path. **Fix**: track a `converged` flag (set on the early-`break`), recompute the off-diagonal mass once after the loop (to credit convergence achieved on the final sweep, whose state the top-of-loop check never sees), and `return converged`. Eigenpair extraction stays unconditional so callers still get best-effort values. To make the otherwise-unreachable `false` path testable, the body moved to a private `symmetric_eigen_impl(.., max_sweeps)`; the public `symmetric_eigen` delegates with `50` (signature/callers unchanged). **Tests** (`eigen.rs`): `eigen_reports_false_when_sweeps_exhausted` — a coupled 4×4 with `max_sweeps=1` must return `false` (pre-fix FAILS, returning `true`); `eigen_reports_true_when_converged` — same matrix at `max_sweeps=50` returns `true`, and an already-diagonal matrix converges even at `max_sweeps=1`. Pre-fix the first test FAILS; post-fix all 8 `eigen` tests pass, and `pounce-linalg` + `pounce-convex` (the consumers) stay green (328 passed, 0 failed). See `## M4 detail`. |
 
 ## C1 detail
 
@@ -847,3 +848,48 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   strongest in-repo runtime evidence available; the data-dependent feral trigger
   is documented above for a future integration test if `nuffield2_trap` is added
   to the benchmark corpus.
+
+## M4 detail
+
+- **Bug** (`crates/pounce-linalg/src/eigen.rs`): `symmetric_eigen` runs cyclic
+  Jacobi for up to `max_sweeps = 50`, `break`ing out of the sweep loop when the
+  off-diagonal Frobenius mass `off` drops below `tol = 1e-28·‖A‖²_F`. The doc
+  contract (`eigen.rs:32-35`) says it "Returns `true` on convergence … `false`
+  if the iteration ran out of sweeps." But the old code fell through to a bare
+  `true` (old `eigen.rs:153`) after the loop, so a matrix that exhausted all 50
+  sweeps *without* converging was still reported as a success.
+- **Why it matters**: callers branch on the boolean —
+  `pounce-convex/src/cones/psd.rs:108,145,163,231` and
+  `pounce-convex/src/sos.rs:615,672,717` — to decide whether to use the
+  eigenpairs or take an error path. A false `true` feeds unconverged
+  eigenvalues/eigenvectors into PSD cone projections and SOS decompositions.
+  Latent in practice (cyclic Jacobi converges in a handful of sweeps for the
+  small reduced-Hessian dimensions here), but a real correctness hole.
+- **Fix**:
+  1. Track `converged` (set `true` on the early `break`).
+  2. After the loop, if `!converged`, recompute the off-diagonal mass once and
+     set `converged = off < tol`. The per-sweep test runs at the *top* of each
+     sweep, so it never observes the state produced by the final sweep; the
+     post-loop recompute credits a run that converged on the last sweep and lets
+     a genuinely stalled run report `false`.
+  3. Extract/sort the eigenpairs unconditionally (unchanged), then
+     `return converged` instead of `true`. Callers that ignore the bool keep
+     getting best-effort values; callers that branch now see the truth.
+- **Testability refactor**: the `false` path is essentially unreachable with
+  real inputs (Jacobi always converges), so to exercise it the body moved into a
+  private `fn symmetric_eigen_impl(a, n, evals, evecs, max_sweeps)`; the public
+  `symmetric_eigen` delegates with `max_sweeps = 50`. Public signature and all
+  callers are unchanged.
+- **Tests** (`eigen.rs` `mod tests`):
+  - `eigen_reports_false_when_sweeps_exhausted` — a coupled 4×4 symmetric matrix
+    with `max_sweeps = 1` cannot converge in one cyclic sweep, so it must return
+    `false`. **Pre-fix this FAILS** (the old code returned `true`).
+  - `eigen_reports_true_when_converged` — the same matrix at `max_sweeps = 50`
+    returns `true`, and an already-diagonal matrix returns `true` even at
+    `max_sweeps = 1` (the top-of-sweep check fires before any rotation). Guards
+    against the fix over-reporting `false`.
+- **Verification summary**: pre-fix `eigen_reports_false_when_sweeps_exhausted`
+  FAILS while the converged-path tests pass; post-fix all 8 `eigen` tests pass,
+  and the full `pounce-linalg` plus `pounce-convex` consumer suites stay green
+  (328 passed, 0 failed) — the existing convex PSD/SOS tests confirm the new
+  verdict does not perturb the converged (normal) path.
