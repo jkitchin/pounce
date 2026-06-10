@@ -56,6 +56,12 @@ def solve_nlp_batch(problems, x0s=None, options=None, parallel=True,
         using an inner-serial factorization). With ``False``,
         instances solve one at a time and each factorization may
         parallelize internally — better for a few large instances.
+        On the default path (``share_structure=False``) each instance
+        gets its own fresh backend, so a result depends only on that
+        instance, not on which worker ran it or on ``parallel`` — the
+        batch is bit-identical to solving the same instances one by one
+        (this is what ``test_problem_batch_parallel_equals_sequential``
+        pins). ``share_structure=True`` relaxes this to within-tolerance.
     warms : sequence of (x, info), optional
         Previous results (as returned by this function), one per
         instance, to warm-start from: the warm ``x`` and the

@@ -554,6 +554,16 @@ impl<T: TNLP> TNLP for WarmStartTnlp<T> {
 }
 
 /// Solve one instance with a fresh, caller-configured application.
+///
+/// Panic-isolated: a Rust panic raised *during* the solve — a user
+/// `eval_*`/`intermediate_callback` that panics, or a backend assertion
+/// tripping on malformed structure — is caught here and reported as an
+/// [`ApplicationReturnStatus::InternalError`] row. Without this guard the
+/// panic would unwind out of the rayon `map`/`collect` (or the sequential
+/// `map`) and discard *every other instance's* result, so a single bad
+/// instance would poison the whole batch. (Solver-detected failures —
+/// infeasibility, invalid numbers, eval callbacks that *return* failure —
+/// are already reported as ordinary statuses and never reach this path.)
 fn solve_nlp_one<T, C>(index: usize, tnlp: T, configure: &mut C) -> NlpBatchResult
 where
     T: TNLP + 'static,
@@ -565,14 +575,24 @@ where
         inner: tnlp,
         captured: None,
     }));
-    let status = app.optimize_tnlp(Rc::clone(&cap) as Rc<RefCell<dyn TNLP>>);
-    let stats = app.statistics();
-    let solution = cap.borrow_mut().captured.take();
-    NlpBatchResult {
-        status,
-        solution,
-        stats,
-    }
+    // `AssertUnwindSafe`: on a caught panic we discard `app`/`cap` without
+    // observing them, so any broken interior-mutability invariant cannot
+    // leak out — only the freshly-built `InternalError` row is returned.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let status = app.optimize_tnlp(Rc::clone(&cap) as Rc<RefCell<dyn TNLP>>);
+        let stats = app.statistics();
+        let solution = cap.borrow_mut().captured.take();
+        NlpBatchResult {
+            status,
+            solution,
+            stats,
+        }
+    }));
+    outcome.unwrap_or_else(|_| NlpBatchResult {
+        status: ApplicationReturnStatus::InternalError,
+        solution: None,
+        stats: SolveStatistics::default(),
+    })
 }
 
 /// Solve a batch of independent NLPs **sequentially**, returning one
@@ -824,6 +844,62 @@ mod tests {
             .collect()
     }
 
+    /// A `ShiftedQuad` that panics inside `eval_f` when `boom` — stands in
+    /// for any Rust panic raised mid-solve (a buggy user callback, a backend
+    /// assertion). Used to prove panic isolation: the panicking instance must
+    /// fail only itself, not unwind the whole batch.
+    struct BoomQuad {
+        inner: ShiftedQuad,
+        boom: bool,
+    }
+
+    impl TNLP for BoomQuad {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.inner.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            self.inner.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.inner.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+            if self.boom {
+                panic!("boom: simulated mid-solve panic in eval_f");
+            }
+            self.inner.eval_f(x, new_x)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
+            self.inner.eval_grad_f(x, new_x, grad_f)
+        }
+        fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_g(x, new_x, g)
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.inner.eval_jac_g(x, new_x, mode)
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            obj_factor: Number,
+            lambda: Option<&[Number]>,
+            new_lambda: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.inner
+                .eval_h(x, new_x, obj_factor, lambda, new_lambda, mode)
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+            self.inner.finalize_solution(sol, d, q)
+        }
+    }
+
     #[test]
     fn empty_batch_returns_empty() {
         let out = solve_nlp_batch_parallel(Vec::<ShiftedQuad>::new(), configure);
@@ -890,6 +966,56 @@ mod tests {
             ApplicationReturnStatus::SolveSucceeded,
             "infeasible instance must not report success"
         );
+    }
+
+    #[test]
+    fn panicking_instance_does_not_poison_batch() {
+        // Middle instance panics inside `eval_f`; the surrounding good
+        // instances must still solve, the batch must keep input order, and
+        // the panicking row must surface as `InternalError` — not unwind the
+        // whole `collect()`. The default panic hook still prints the message;
+        // that is fine (and useful) — only the unwind is contained.
+        let good = batch(3);
+        let expected: Vec<[f64; 2]> = good.iter().map(|p| p.expected()).collect();
+        let probs: Vec<BoomQuad> = good
+            .into_iter()
+            .enumerate()
+            .map(|(i, inner)| BoomQuad {
+                inner,
+                boom: i == 1,
+            })
+            .collect();
+        let out = solve_nlp_batch_parallel(probs, configure);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1].status, ApplicationReturnStatus::InternalError);
+        assert!(
+            out[1].solution.is_none(),
+            "a panicked instance carries no captured solution"
+        );
+        for i in [0, 2] {
+            assert_eq!(out[i].status, ApplicationReturnStatus::SolveSucceeded);
+            let sol = out[i].solution.as_ref().expect("solution");
+            assert!(
+                (sol.x[0] - expected[i][0]).abs() < 1e-6
+                    && (sol.x[1] - expected[i][1]).abs() < 1e-6,
+                "instance {i}: got {:?}, expected {:?}",
+                sol.x,
+                expected[i]
+            );
+        }
+        // The sequential path is panic-isolated too (same `solve_nlp_one`).
+        let probs_seq: Vec<BoomQuad> = batch(3)
+            .into_iter()
+            .enumerate()
+            .map(|(i, inner)| BoomQuad {
+                inner,
+                boom: i == 1,
+            })
+            .collect();
+        let seq = solve_nlp_batch(probs_seq, configure);
+        assert_eq!(seq[1].status, ApplicationReturnStatus::InternalError);
+        assert_eq!(seq[0].status, ApplicationReturnStatus::SolveSucceeded);
+        assert_eq!(seq[2].status, ApplicationReturnStatus::SolveSucceeded);
     }
 
     /// Warm-start chain (the MPC shape): solve a batch cold, perturb

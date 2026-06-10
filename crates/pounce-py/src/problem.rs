@@ -728,6 +728,17 @@ impl PyProblem {
     pub(crate) fn dims(&self) -> (usize, usize) {
         (self.n as usize, self.m as usize)
     }
+
+    /// Per-constraint equality mask (`g_l[i] == g_u[i]`), used by the batch
+    /// info-dict builder to reproduce the single-solve `active_constraints`
+    /// classification (equalities are always active).
+    pub(crate) fn equality_mask(&self) -> Vec<bool> {
+        self.g_l
+            .iter()
+            .zip(&self.g_u)
+            .map(|(l, u)| l == u)
+            .collect()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

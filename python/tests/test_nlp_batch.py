@@ -125,12 +125,43 @@ def test_info_dict_layout_matches_problem_solve():
         "mult_x_L", "mult_x_U", "iter_count", "mu",
         "final_kkt_error", "final_dual_inf", "final_constr_viol",
         "final_compl",
+        # DiffHandoff active-set masks — must match Problem.solve's keys
+        # so the JAX / torch backward passes read a batch result the same
+        # way they read a single solve (PR #129 info-dict parity).
+        "pinned_vars", "active_constraints", "active_tol",
     ):
         assert key in info, key
     assert info["g"].shape == (p.m,)
     assert info["mult_g"].shape == (p.m,)
     assert info["mult_x_L"].shape == (p.n,)
     assert info["mult_x_U"].shape == (p.n,)
+    assert info["pinned_vars"].shape == (p.n,)
+    assert info["pinned_vars"].dtype == bool
+    assert info["active_constraints"].shape == (p.m,)
+    assert info["active_constraints"].dtype == bool
+    assert info["active_tol"] > 0.0
+
+
+def test_native_active_constraints_follow_variant_bounds():
+    """The native batch's active-set mask is built from each instance's
+    own g_l/g_u, including a ``variant`` override (PR #129). parametric.nl
+    is all equalities (active); relaxing one row to a loose inequality
+    makes it slack (multiplier ~0) and drops it from the active set —
+    which only happens if the variant's bounds reach equality_mask."""
+    p = _load()
+    (_, base), = pounce.solve_nlp_batch([p])
+    assert base["status_msg"] == "Solve_Succeeded"
+    # every parametric.nl row is an equality, hence always active
+    assert np.all(base["active_constraints"])
+
+    gl = np.asarray(p.g_l).copy()
+    gu = np.asarray(p.g_u).copy()
+    gl[0], gu[0] = -1e3, 1e3  # row 0 → loose, non-binding inequality
+    (_, var), = pounce.solve_nlp_batch([p.variant(g_l=gl, g_u=gu)])
+    assert var["status_msg"] == "Solve_Succeeded"
+    assert abs(var["mult_g"][0]) < var["active_tol"]  # now slack
+    assert not var["active_constraints"][0]            # so: inactive
+    assert np.all(var["active_constraints"][1:])       # others still equalities
 
 
 def test_variant_validates_lengths():
@@ -251,6 +282,16 @@ def test_problem_batch_parallel_matches_individual_solves():
         np.testing.assert_allclose(info["obj_val"], 17.0140172, rtol=1e-5)
         np.testing.assert_array_equal(x, x_ref)
         assert info["iter_count"] == info_ref["iter_count"]
+        # Active-set masks must match the single solve byte-for-byte:
+        # HS071 has one equality row (cl==cu==40, always active) and one
+        # inequality, so this exercises the equality_mask the batch path
+        # now threads through from the input problem (PR #129 parity).
+        np.testing.assert_array_equal(
+            info["active_constraints"], info_ref["active_constraints"],
+        )
+        np.testing.assert_array_equal(info["pinned_vars"], info_ref["pinned_vars"])
+        assert info["active_tol"] == info_ref["active_tol"]
+        assert info_ref["active_constraints"][1]  # the equality is active
     # All instances identical → identical iterates regardless of which
     # worker ran them.
     np.testing.assert_array_equal(batch[0][0], batch[k - 1][0])
@@ -264,6 +305,59 @@ def test_problem_batch_parallel_equals_sequential():
     for (xp, ip), (xs, _) in zip(par, seq):
         assert ip["status_msg"] == "Solve_Succeeded"
         np.testing.assert_array_equal(xp, xs)
+
+
+class _DegenerateEq:
+    """min x0^2 s.t. x0 + x1 = 1. The optimum is x0=0, x1=1 with a
+    constraint multiplier of exactly 0 (the equality is satisfied but
+    does not bind the objective). So `|mult_g| > tol` alone classifies
+    the row as *inactive* — only the equality_mask marks it active.
+    This is the one configuration that exercises the mask the batch
+    path threads through from the input problem (PR #129)."""
+
+    def objective(self, x):
+        return x[0] ** 2
+
+    def gradient(self, x):
+        return np.array([2.0 * x[0], 0.0])
+
+    def constraints(self, x):
+        return np.array([x[0] + x[1]])
+
+    def jacobianstructure(self):
+        return (np.array([0, 0]), np.array([0, 1]))
+
+    def jacobian(self, x):
+        return np.array([1.0, 1.0])
+
+
+def _degenerate_eq_problem():
+    return pounce.Problem(
+        n=2, m=1, problem_obj=_DegenerateEq(),
+        lb=[-10.0, -10.0], ub=[10.0, 10.0],
+        cl=[1.0], cu=[1.0],  # equality row
+    )
+
+
+def test_problem_batch_active_constraints_use_equality_mask():
+    """A degenerate equality (zero multiplier) is marked active only via
+    the equality_mask the batch builder now threads from the input
+    problem. Without it the batch result would disagree with the single
+    solve — this is the fail-first guard for PR #129's info-dict parity."""
+    x0 = np.array([0.5, 0.5])
+    (x, info), = pounce.solve_nlp_batch([_degenerate_eq_problem()], x0s=[x0])
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x, [0.0, 1.0], atol=1e-6)
+    # The multiplier is ~0, so a |mult|>tol-only classifier would miss it.
+    assert abs(info["mult_g"][0]) < info["active_tol"]
+    assert info["active_constraints"][0]  # equality is always active
+
+    ref = _degenerate_eq_problem()
+    ref.add_option("print_level", 0)
+    _, info_ref = ref.solve(x0=x0)
+    np.testing.assert_array_equal(
+        info["active_constraints"], info_ref["active_constraints"],
+    )
 
 
 def test_problem_batch_honors_per_instance_options():

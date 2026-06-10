@@ -212,14 +212,21 @@ fn decode_warms(
 }
 
 /// Build the per-instance `(x, info)` pair. Mirrors the key layout of
-/// `Problem.solve`'s info dict (status / status_msg / obj_val / g /
-/// mult_g / mult_x_L / mult_x_U / iter_count / mu / final_* metrics)
-/// so downstream code can treat both uniformly.
+/// `Problem.solve`'s info dict — status / status_msg / obj_val / g /
+/// mult_g / mult_x_L / mult_x_U / iter_count / mu / final_* metrics, plus
+/// the DiffHandoff active-set masks (pinned_vars / active_constraints /
+/// active_tol) — so downstream code (e.g. the JAX / torch backward passes)
+/// can read a batch result exactly as it reads `Problem.solve`'s.
+///
+/// `equality_mask[i]` is `g_l[i] == g_u[i]` for the instance's constraint
+/// rows, supplied by the caller from the (static) input problem since the
+/// captured solution carries the constraint *values* but not their bounds.
 fn build_result<'py>(
     py: Python<'py>,
     r: &NlpBatchResult,
     n: usize,
     m: usize,
+    equality_mask: &[bool],
 ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
     let info = PyDict::new_bound(py);
     info.set_item("status", r.status as i32)?;
@@ -237,19 +244,37 @@ fn build_result<'py>(
             info.set_item("mult_g", sol.lambda.clone().into_pyarray_bound(py))?;
             info.set_item("mult_x_L", sol.z_l.clone().into_pyarray_bound(py))?;
             info.set_item("mult_x_U", sol.z_u.clone().into_pyarray_bound(py))?;
+            // Active-set masks, computed once here in the producer (same
+            // `masks` helper and `DEFAULT_ACTIVE_TOL` as single-solve).
+            let (pinned_vars, active_constraints) = pounce_sensitivity::DiffHandoff::masks(
+                &sol.z_l,
+                &sol.z_u,
+                &sol.lambda,
+                equality_mask,
+                pounce_sensitivity::DEFAULT_ACTIVE_TOL,
+            );
+            info.set_item("pinned_vars", pinned_vars.into_pyarray_bound(py))?;
+            info.set_item(
+                "active_constraints",
+                active_constraints.into_pyarray_bound(py),
+            )?;
             sol.x.clone()
         }
         // The solve aborted before `finalize_solution` ran (e.g. an
-        // invalid problem definition): no iterate to report.
+        // invalid problem definition): no iterate to report, and hence no
+        // active set — emit empty (all-false) masks of the right length.
         None => {
             info.set_item("obj_val", f64::NAN)?;
             info.set_item("g", vec![f64::NAN; m].into_pyarray_bound(py))?;
             info.set_item("mult_g", vec![f64::NAN; m].into_pyarray_bound(py))?;
             info.set_item("mult_x_L", vec![f64::NAN; n].into_pyarray_bound(py))?;
             info.set_item("mult_x_U", vec![f64::NAN; n].into_pyarray_bound(py))?;
+            info.set_item("pinned_vars", vec![false; n].into_pyarray_bound(py))?;
+            info.set_item("active_constraints", vec![false; m].into_pyarray_bound(py))?;
             vec![f64::NAN; n]
         }
     };
+    info.set_item("active_tol", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok((x.into_pyarray_bound(py), info))
 }
 
@@ -310,6 +335,10 @@ pub fn solve_nlp_batch<'py>(
     };
 
     let dims: Vec<(usize, usize)> = problems.iter().map(|p| p.borrow().dims()).collect();
+    let eq_masks: Vec<Vec<bool>> = problems
+        .iter()
+        .map(|p| p.borrow().equality_mask())
+        .collect();
     let tnlps: Vec<_> = problems.iter().map(|p| p.borrow().clone_tnlp()).collect();
     let warm_starts = warms.map(|w| decode_warms(py, w, &dims)).transpose()?;
 
@@ -331,7 +360,8 @@ pub fn solve_nlp_batch<'py>(
     results
         .iter()
         .zip(dims)
-        .map(|(r, (n, m))| build_result(py, r, n, m))
+        .zip(&eq_masks)
+        .map(|((r, (n, m)), eq)| build_result(py, r, n, m, eq))
         .collect()
 }
 
@@ -381,6 +411,10 @@ pub fn solve_problem_batch<'py>(
     }
     let overlay = decode_options(options)?;
     let dims: Vec<(usize, usize)> = problems.iter().map(|p| p.borrow().dims()).collect();
+    let eq_masks: Vec<Vec<bool>> = problems
+        .iter()
+        .map(|p| p.borrow().equality_mask())
+        .collect();
     let warm_starts = warms.map(|w| decode_warms(py, w, &dims)).transpose()?;
     let pool = share_structure.then(|| {
         let mut probe = IpoptApplication::new();
@@ -445,7 +479,8 @@ pub fn solve_problem_batch<'py>(
     results
         .iter()
         .zip(dims)
-        .map(|(r, (n, m))| build_result(py, r, n, m))
+        .zip(&eq_masks)
+        .map(|((r, (n, m)), eq)| build_result(py, r, n, m, eq))
         .collect()
 }
 
