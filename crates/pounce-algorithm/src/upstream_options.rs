@@ -1026,7 +1026,7 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         0.5,
         false,
         1e-8,
-        "Relative Bunch-Kaufman partial-pivoting threshold u: a candidate diagonal pivot is rejected when |d| < u * col_max. Direct analog of ma27_pivtol / ma57_pivtol. A smaller number pivots for sparsity (preserves the AMD ordering, keeps L sparse, factors faster but is less stable); a larger number pivots for stability (rejects more candidates, delays pivots, forces more 2x2 blocks, denser L but better backward error). LAPACK's textbook maximum-stability value is 0.5. Falls back to the FERAL_PIVTOL environment variable when not set on the OptionsList.",
+        "Relative Bunch-Kaufman partial-pivoting threshold u: a candidate diagonal pivot is rejected when |d| < u * col_max. Direct analog of ma27_pivtol / ma57_pivtol. A smaller number pivots for sparsity (preserves the AMD ordering, keeps L sparse, factors faster but is less stable); a larger number pivots for stability (rejects more candidates, delays pivots, forces more 2x2 blocks, denser L but better backward error). LAPACK's textbook maximum-stability value is 0.5. Falls back to the POUNCE_FERAL_PIVTOL environment variable (or its deprecated legacy alias FERAL_PIVTOL) when not set on the OptionsList.",
     )?;
     r.add_string_option(
         "feral_ordering",

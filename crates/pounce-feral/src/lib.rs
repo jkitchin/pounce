@@ -186,13 +186,29 @@ impl Default for FeralConfig {
     }
 }
 
+/// Resolve the feral pivot-threshold env override from its two accepted
+/// variable names. The documented `POUNCE_FERAL_PIVTOL` — the
+/// `POUNCE_FERAL_*` convention shared by every other knob in
+/// [`FeralConfig::from_env`] — takes precedence; the bare `FERAL_PIVTOL` is
+/// retained as a deprecated legacy alias for back-compatibility. An unset or
+/// unparseable value falls through to the next source, and with neither set
+/// to the `1e-8` default (matching [`FeralConfig::default`]).
+fn resolve_pivtol_env(pounce: Option<&str>, legacy: Option<&str>) -> f64 {
+    pounce
+        .and_then(|s| s.parse::<f64>().ok())
+        .or_else(|| legacy.and_then(|s| s.parse::<f64>().ok()))
+        .unwrap_or(1e-8)
+}
+
 impl FeralConfig {
     /// Read the knobs from `POUNCE_FERAL_CASCADE_BREAK`,
     /// `POUNCE_FERAL_FMA`, `POUNCE_FERAL_REFINE`,
-    /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR`, `POUNCE_FERAL_ORDERING`,
-    /// `POUNCE_FERAL_SCALING` environment variables. Used as a fallback
-    /// when the IPM has no `OptionsList` to consult (tests, legacy
-    /// callers).
+    /// `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR`, `POUNCE_FERAL_PIVTOL`,
+    /// `POUNCE_FERAL_ORDERING`, `POUNCE_FERAL_SCALING` environment
+    /// variables. Used as a fallback when the IPM has no `OptionsList` to
+    /// consult (tests, legacy callers). The pivot threshold also accepts the
+    /// deprecated bare `FERAL_PIVTOL` as a legacy alias (see
+    /// [`resolve_pivtol_env`]).
     pub fn from_env() -> Self {
         Self {
             cascade_break: match std::env::var("POUNCE_FERAL_CASCADE_BREAK").as_deref() {
@@ -212,10 +228,10 @@ impl FeralConfig {
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(1e-20),
-            pivtol: std::env::var("FERAL_PIVTOL")
-                .ok()
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(1e-8),
+            pivtol: resolve_pivtol_env(
+                std::env::var("POUNCE_FERAL_PIVTOL").ok().as_deref(),
+                std::env::var("FERAL_PIVTOL").ok().as_deref(),
+            ),
             ordering: std::env::var("POUNCE_FERAL_ORDERING")
                 .ok()
                 .as_deref()
@@ -320,7 +336,8 @@ impl FeralSolverInterface {
         // analog of Ipopt's `ma27_pivtol` / `ma57_pivtol`. Surfaced as
         // the `feral_pivtol` OptionsList option (registered in
         // pounce-algorithm's `upstream_options::register_all_options`),
-        // with `FERAL_PIVTOL` env var as a fallback read in
+        // with the `POUNCE_FERAL_PIVTOL` env var (or its deprecated legacy
+        // alias `FERAL_PIVTOL`) as a fallback read in
         // `FeralConfig::from_env`.
         np.bk.pivot_threshold = cfg.pivtol;
         // Cascade-break (FERAL issue #55 Phase B, commit 7554a78):
@@ -766,6 +783,29 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L12: the pivot-threshold env override honors the documented
+    /// `POUNCE_FERAL_*` convention (`POUNCE_FERAL_PIVTOL`) and keeps the bare
+    /// `FERAL_PIVTOL` only as a deprecated legacy alias. Tested on the pure
+    /// `resolve_pivtol_env` helper so it never mutates the process
+    /// environment (which would be a data race under the rayon-parallel
+    /// solves — the same hazard fixed in L9).
+    #[test]
+    fn resolve_pivtol_env_honors_pounce_convention() {
+        // The documented POUNCE_FERAL_* name is read (this is the bug: the
+        // old code only looked at the bare FERAL_PIVTOL, so this was ignored).
+        assert_eq!(resolve_pivtol_env(Some("0.3"), None), 0.3);
+        // Legacy FERAL_PIVTOL is still honored when the convention var is unset.
+        assert_eq!(resolve_pivtol_env(None, Some("0.4")), 0.4);
+        // Both set: the convention name takes precedence over the legacy alias.
+        assert_eq!(resolve_pivtol_env(Some("0.3"), Some("0.4")), 0.3);
+        // Neither set: the 1e-8 default (matches FeralConfig::default).
+        assert_eq!(resolve_pivtol_env(None, None), 1e-8);
+        // Unparseable convention value falls through to the legacy alias...
+        assert_eq!(resolve_pivtol_env(Some("garbage"), Some("0.4")), 0.4);
+        // ...and, with no legacy value, to the default.
+        assert_eq!(resolve_pivtol_env(Some("garbage"), None), 1e-8);
+    }
 
     /// 2x2 SPD matrix `[[2,1],[1,3]]`. Lower-triangle 1-based triplets.
     /// Solving against (3, 4) gives x = (1, 1).
