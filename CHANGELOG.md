@@ -73,6 +73,26 @@ silently; the CLI sIPOPT path already mapped correctly and now shares the
 same helper). `pounce.curve_fit` no longer requires scaling to be off to
 trust the converged factor for its covariance / data-sensitivity reads.
 
+### Changed — C ABI: sensitivity entry points now return natural units (breaking)
+
+Behavior change for C callers of the sensitivity ABI (`pounce-cinterface`).
+`IpoptSolverReducedHessian`, `IpoptSolverParametricStep`, and
+`IpoptSolverKktSolve` now return values in **natural (unscaled) units** as part
+of the #128 fix above — previously, on a badly-scaled NLP (where the default
+`gradient-based` method fires), they returned the IPM's internally scaled
+values. A C caller that was compensating for the old behavior — e.g. passing a
+non-`1.0` `obj_scal` to `IpoptSolverReducedHessian` to undo the `df / dc²`
+factor by hand — will now get a doubly-corrected (wrong) result and must drop
+that workaround; `obj_scal` is once again only the plain extra multiplier its
+docs describe. Callers that want the old scaled values back have an escape
+hatch **only** for the raw KKT solve: `IpoptSolverKktSolveScaled(..., scaled =
+true)`. There is intentionally no scaled variant of `IpoptSolverReducedHessian`
+or `IpoptSolverParametricStep` — the natural-units reduced Hessian and
+parametric step are the only correct answers for a covariance / predictor read,
+so the scaled forms are not re-exposed across the ABI (the Rust
+`Solver::compute_reduced_hessian_scaled` remains for in-process calibrated
+callers).
+
 ### Added — PyTorch frontend for the differentiable solver (`pounce.torch`)
 
 A PyTorch frontend mirroring `pounce.jax`: a solve is a

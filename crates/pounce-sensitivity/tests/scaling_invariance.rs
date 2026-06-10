@@ -440,6 +440,380 @@ impl TNLP for NegatedScaledPinTnlp {
     fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
 }
 
+/// `min c0(x−p)² + c1(x−1)²` with an **active** inequality
+/// `SCALE·x ≥ SCALE·0.95` (g[0]) and the pin `SCALE·p = SCALE·p̂`
+/// (g[1]). Variables `(x, p)`. With `p` pinned at `p̂ = 0.7` the
+/// unconstrained-in-`x` minimizer is `x* = (c0·p̂ + c1)/(c0+c1) =
+/// 0.88 < 0.95`, so the lower bound binds and `x` is clamped at
+/// `0.95`. The active inequality makes its slack bound multiplier
+/// (`v_l`) nonzero, so — unlike the *inactive* inequality in
+/// [`ScaledPinTnlp`] — the v-block of the natural-units (E, F) pair
+/// now actually moves the numbers: this is the coverage that proves
+/// the `dd`-dependent v-row scaling is applied correctly, not merely
+/// present.
+struct ActiveIneqTnlp;
+
+impl TNLP for ActiveIneqTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 2,
+            nnz_jac_g: 2,
+            nnz_h_lag: 3,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l[0] = -1.0e19;
+        b.x_u[0] = 1.0e19;
+        b.x_l[1] = -1.0e19;
+        b.x_u[1] = 1.0e19;
+        // g[0] = SCALE·x ≥ SCALE·0.95 (active lower bound)
+        b.g_l[0] = SCALE * 0.95;
+        b.g_u[0] = 1.0e19;
+        // g[1] = SCALE·p = SCALE·p̂ (pin)
+        b.g_l[1] = SCALE * P_HAT;
+        b.g_u[1] = SCALE * P_HAT;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x[0] = 0.0;
+        sp.x[1] = 0.0;
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        let (xx, p) = (x[0], x[1]);
+        Some(C0 * (xx - p) * (xx - p) + C1 * (xx - 1.0) * (xx - 1.0))
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        let (xx, p) = (x[0], x[1]);
+        g[0] = 2.0 * C0 * (xx - p) + 2.0 * C1 * (xx - 1.0);
+        g[1] = -2.0 * C0 * (xx - p);
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = SCALE * x[0];
+        g[1] = SCALE * x[1];
+        true
+    }
+
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = SCALE;
+                values[1] = SCALE;
+            }
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1, 1]);
+                jcol.copy_from_slice(&[0, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = obj_factor * 2.0 * (C0 + C1);
+                values[1] = obj_factor * (-2.0) * C0;
+                values[2] = obj_factor * 2.0 * C0;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+#[test]
+fn reduced_hessian_with_active_inequality_is_scaling_invariant() {
+    // With x clamped at 0.95 by the active inequality, f*(p) =
+    // c0·(0.95 − p)² + c1·(0.95 − 1)², so ∂²f*/∂p² = 2·c0 and, with
+    // the pin RHS r = SCALE·p, ∂²f*/∂r² = 2·c0 / SCALE². The reported
+    // reduced Hessian carries the pin-row sign flip (= −∂²f*/∂r²):
+    const H_ACTIVE: Number = -2.0 * C0 / (SCALE * SCALE);
+
+    let run = |method: &str| -> (Number, Number) {
+        let mut app = make_app(method);
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ActiveIneqTnlp));
+        let result = SensSolve::new(vec![1])
+            .with_reduced_hessian()
+            .run(&mut app, tnlp);
+        assert!(
+            matches!(
+                result.status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "solve failed under nlp_scaling_method={method}: {:?}",
+            result.status,
+        );
+        let hr = result.reduced_hessian.expect("reduced Hessian populated");
+        let hr_scaled = result
+            .reduced_hessian_scaled
+            .expect("scaled reduced Hessian populated");
+        (hr[0], hr_scaled[0])
+    };
+
+    let (h_none, h_none_scaled) = run("none");
+    let (h_grad, h_grad_scaled) = run("gradient-based");
+    let rel = |a: Number, b: Number| (a - b).abs() / b.abs();
+
+    // The headline guard: the natural-units reduced Hessian over an
+    // ACTIVE inequality is the same regardless of NLP scaling. The
+    // v-block scaling factors (`dd`-dependent F rows) are now nonzero
+    // contributors to the back-solve; if they were dropped or wrong,
+    // the gradient-based value would diverge from the unscaled one.
+    assert!(
+        rel(h_none, h_grad) < 1e-6,
+        "active-inequality reduced Hessian not scaling-invariant: \
+         none {h_none}, gradient-based {h_grad}",
+    );
+    // ...and it matches the clamped-x analytic value, which differs
+    // from the inactive-inequality H_ANALYTIC (= −4.8e-4): the active
+    // constraint removes x as a free variable, so the curvature comes
+    // from c0 alone.
+    assert!(
+        rel(h_none, H_ACTIVE) < 1e-6,
+        "active-inequality reduced Hessian: H = {h_none}, analytic = {H_ACTIVE}",
+    );
+    assert!(
+        rel(H_ACTIVE, H_ANALYTIC) > 0.1,
+        "fixture sanity: the active-inequality H must differ from the inactive one",
+    );
+    // With scaling off the two accessors agree; with gradient-based
+    // scaling on they must differ (the scaled value is the pre-#128
+    // leak preserved for calibrated callers).
+    assert!(rel(h_none_scaled, h_none) < 1e-12);
+    assert!(
+        rel(h_grad_scaled, h_grad) > 1.0,
+        "expected the scaled accessor to differ when scaling is active: \
+         natural {h_grad}, scaled {h_grad_scaled}",
+    );
+}
+
+/// Two pins at **different** scales so the off-diagonal of the
+/// reported reduced Hessian carries a `dc_i·dc_j` cross term:
+///
+/// ```text
+/// min c0(x − p0)² + c1(x − p1)²
+/// s.t. SCALE0·p0 = SCALE0·p̂0   (g[0], pin)
+///      SCALE1·p1 = SCALE1·p̂1   (g[1], pin)
+/// ```
+///
+/// Variables `(x, p0, p1)`. Eliminating x gives `f*(p0,p1) =
+/// K·(p1 − p0)²` with `K = c0·c1/(c0+c1)`, so the natural-units
+/// reduced Hessian over `(r0, r1) = (SCALE0·p0, SCALE1·p1)` is, in
+/// the pin-row sign convention (`= −∂²f*/∂r²`):
+///
+/// ```text
+/// H = [ −2K/SCALE0²        +2K/(SCALE0·SCALE1) ]
+///     [ +2K/(SCALE0·SCALE1)   −2K/SCALE1²      ]
+/// ```
+///
+/// The two distinct scales (`dc_0 ≠ dc_1`) make every entry carry a
+/// different scaling correction; the off-diagonal in particular
+/// exercises the `dc_i·dc_j` cross product that a per-pin (diagonal-
+/// only) correction would get wrong.
+struct MultiPinTnlp;
+
+const SCALE0: Number = 1.0e4;
+const SCALE1: Number = 2.0e4;
+const P0_HAT: Number = 0.3;
+const P1_HAT: Number = 0.8;
+
+impl TNLP for MultiPinTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 3,
+            m: 2,
+            nnz_jac_g: 2,
+            nnz_h_lag: 5,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        for k in 0..3 {
+            b.x_l[k] = -1.0e19;
+            b.x_u[k] = 1.0e19;
+        }
+        b.g_l[0] = SCALE0 * P0_HAT;
+        b.g_u[0] = SCALE0 * P0_HAT;
+        b.g_l[1] = SCALE1 * P1_HAT;
+        b.g_u[1] = SCALE1 * P1_HAT;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        // Nonzero so the objective gradient at the start exceeds
+        // nlp_scaling_max_gradient and gradient-based `df` fires.
+        sp.x[0] = 1.0;
+        sp.x[1] = 0.0;
+        sp.x[2] = 0.0;
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        let (xx, p0, p1) = (x[0], x[1], x[2]);
+        Some(C0 * (xx - p0) * (xx - p0) + C1 * (xx - p1) * (xx - p1))
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        let (xx, p0, p1) = (x[0], x[1], x[2]);
+        g[0] = 2.0 * C0 * (xx - p0) + 2.0 * C1 * (xx - p1);
+        g[1] = -2.0 * C0 * (xx - p0);
+        g[2] = -2.0 * C1 * (xx - p1);
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = SCALE0 * x[1];
+        g[1] = SCALE1 * x[2];
+        true
+    }
+
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[1, 2]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = SCALE0;
+                values[1] = SCALE1;
+            }
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        // Lower triangle: (0,0)=2c0+2c1, (1,0)=−2c0, (1,1)=2c0,
+        // (2,0)=−2c1, (2,2)=2c1. The p0/p1 cross term is zero.
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1, 1, 2, 2]);
+                jcol.copy_from_slice(&[0, 0, 1, 0, 2]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = obj_factor * 2.0 * (C0 + C1);
+                values[1] = obj_factor * (-2.0) * C0;
+                values[2] = obj_factor * 2.0 * C0;
+                values[3] = obj_factor * (-2.0) * C1;
+                values[4] = obj_factor * 2.0 * C1;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+#[test]
+fn multi_pin_reduced_hessian_off_diagonal_is_scaling_invariant() {
+    const K: Number = C0 * C1 / (C0 + C1);
+    // Column-major 2×2; symmetric so only three distinct values.
+    let h00 = -2.0 * K / (SCALE0 * SCALE0);
+    let h11 = -2.0 * K / (SCALE1 * SCALE1);
+    let h01 = 2.0 * K / (SCALE0 * SCALE1);
+
+    let run = |method: &str| -> Vec<Number> {
+        let mut app = make_app(method);
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(MultiPinTnlp));
+        let result = SensSolve::new(vec![0, 1])
+            .with_reduced_hessian()
+            .run(&mut app, tnlp);
+        assert!(
+            matches!(
+                result.status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "solve failed under nlp_scaling_method={method}: {:?}",
+            result.status,
+        );
+        let hr = result.reduced_hessian.expect("reduced Hessian populated");
+        assert_eq!(hr.len(), 4, "expected a 2×2 reduced Hessian");
+        hr
+    };
+
+    let h_none = run("none");
+    let h_grad = run("gradient-based");
+    let rel = |a: Number, b: Number| (a - b).abs() / b.abs().max(1e-30);
+
+    // Off-diagonal symmetry within each solve.
+    assert!(rel(h_none[1], h_none[2]) < 1e-9, "asymmetric: {h_none:?}");
+
+    // Headline guard: the full 2×2 natural-units reduced Hessian —
+    // diagonal AND off-diagonal — is invariant to NLP scaling. The
+    // off-diagonal mixes the two distinct pin scales (dc_0 ≠ dc_1);
+    // a diagonal-only scaling correction would leave it wrong under
+    // gradient-based scaling.
+    for k in 0..4 {
+        assert!(
+            rel(h_none[k], h_grad[k]) < 1e-6,
+            "entry {k} not scaling-invariant: none {}, gradient-based {}",
+            h_none[k],
+            h_grad[k],
+        );
+    }
+
+    // ...and matches the hand-derived analytic block.
+    assert!(
+        rel(h_none[0], h00) < 1e-6,
+        "H[0,0] = {}, analytic {h00}",
+        h_none[0]
+    );
+    assert!(
+        rel(h_none[3], h11) < 1e-6,
+        "H[1,1] = {}, analytic {h11}",
+        h_none[3]
+    );
+    assert!(
+        rel(h_none[1], h01) < 1e-6,
+        "H[1,0] = {}, analytic {h01} (the cross-scale off-diagonal)",
+        h_none[1],
+    );
+    // The off-diagonal must be genuinely nonzero — otherwise this
+    // would silently pass as a pair of decoupled single-pin tests.
+    assert!(h01.abs() > 1e-6, "fixture sanity: off-diagonal is nonzero");
+}
+
 #[test]
 fn parametric_step_is_invariant_to_nlp_scaling() {
     // dx*/dr for the pin RHS r: x*(p) = (c0·p + c1)/(c0+c1) and
