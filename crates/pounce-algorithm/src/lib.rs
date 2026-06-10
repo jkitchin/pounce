@@ -22,6 +22,7 @@
 
 pub mod alg_builder;
 pub mod application;
+pub mod batch;
 pub mod conv_check;
 pub mod debug;
 pub mod debug_rank;
@@ -47,6 +48,11 @@ pub mod timing_stats;
 pub mod upstream_options;
 
 pub use application::IpoptApplication;
+pub use batch::{
+    install_pooled_serial_feral_backend, install_serial_feral_backend, solve_nlp_batch,
+    solve_nlp_batch_parallel, solve_nlp_batch_parallel_warm, solve_nlp_batch_warm,
+    FeralBackendPool, NlpBatchResult, NlpBatchSolution, NlpWarmStart,
+};
 pub use ipopt_cq::{IpoptCalculatedQuantities, IpoptCqHandle};
 pub use ipopt_data::{IpoptData, IpoptDataHandle, PdPerturbations};
 pub use ipopt_nlp::{IpoptNlp, Nlp};

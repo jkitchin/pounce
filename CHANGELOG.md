@@ -93,6 +93,61 @@ so the scaled forms are not re-exposed across the ABI (the Rust
 `Solver::compute_reduced_hessian_scaled` remains for in-process calibrated
 callers).
 
+### Added — Batched NLP solving (`solve_nlp_batch`) (#126)
+
+Solve N independent NLPs in parallel on a Rayon pool — the general-NLP
+analog of `solve_qp_batch_parallel`, for parametric sweeps, multi-start,
+MPC chains, and branch-and-bound node relaxations (each sibling node
+differing only in tightened bounds).
+
+- **Rust** — `pounce_algorithm::solve_nlp_batch` /
+  `solve_nlp_batch_parallel`: one fully-equipped `IpoptApplication` per
+  instance, built *inside* the worker via a `Sync` configure hook that
+  receives the instance index (outer-parallel / inner-serial, like the
+  QP batch; `install_serial_feral_backend` sets up the per-worker
+  serial factor). Results return in input order with the captured
+  final iterate, multipliers, and per-instance `SolveStatistics`.
+- **`pounce-nl`** — CSE `Expr` sharing switched from `Rc` to `Arc`, so
+  `NlProblem` / `NlTnlp` are `Send` and an owned evaluator can move to a
+  worker. `NlTnlp` is now `Clone`, and `NlTnlp::variant` /
+  `NlVariation` build per-instance bound / starting-point overrides on
+  one parsed model (tapes are cheap to clone).
+- **Python** — `pounce.solve_nlp_batch(problems, x0s=, options=,
+  parallel=, warms=, share_structure=)`: native `NlProblem` inputs
+  (from `read_nl` or the new `NlProblem.variant(...)`) solve in
+  parallel with the GIL released. One `(x, info)` pair per input,
+  `info` matching `Problem.solve`'s layout; `print_level` defaults to
+  0 for the batch.
+- **Phase 2: parallel callback batching** — callback-based
+  `pounce.Problem` inputs also solve in parallel: each instance's
+  bridge (Python callables + pre-resolved sparsity) moves to a rayon
+  worker that owns the whole solve, re-acquiring the GIL transiently
+  per `eval_*` callback. The GIL serializes only the Python share, so
+  the speedup scales with the Rust/Python work ratio (~4x on 4 cores
+  for an n=800 banded NLP with NumPy-vectorized callbacks; tiny
+  callback-dominated problems won't speed up). Per-instance
+  `add_option` settings are honored, with `options=` as a batch-level
+  overlay; a raising callback degrades to that instance's failure
+  without poisoning the batch.
+- **Warm-started batches** — `solve_nlp_batch_parallel_warm` /
+  `solve_nlp_batch_warm` (Rust) and `warms=` (Python, both input
+  kinds): seed each instance from a previous result's iterate + duals
+  and thread the converged barrier μ into `mu_init`
+  (`warm_start_init_point=yes` forced; dimension mismatch falls back
+  to a cold start). Re-solving a perturbed 24-instance `.nl` sweep
+  warm cut total iterations 482 → 120.
+- **Identical-sparsity structure sharing** — `FeralBackendPool` /
+  `install_pooled_serial_feral_backend` (Rust) and
+  `share_structure=True` (Python): opt-in per-worker backend pooling
+  so FERAL's pattern-fingerprint symbolic cache (ordering + supernode
+  structure) carries across batch instances instead of being rebuilt
+  per instance. Always correct (pattern changes re-analyze); results
+  are within solver tolerance of — not guaranteed bit-identical to —
+  fresh-backend solves, which is why it is opt-in. Cross-*thread*
+  symbolic sharing stays future work (needs the `BackendPool`
+  ownership refactor documented in `dev-notes/backend-pool-resolve.md`
+  or a feral-side symbolic export API).
+
 ### Added — PyTorch frontend for the differentiable solver (`pounce.torch`)
 
 A PyTorch frontend mirroring `pounce.jax`: a solve is a

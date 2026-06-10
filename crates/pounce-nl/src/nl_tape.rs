@@ -16,14 +16,13 @@
 //! Lagrangian term lands in the right slot.
 //!
 //! Common subexpressions are tape-emitted **once**: when the recursive
-//! builder hits `Expr::Cse(rc)` it keys on the `Rc` pointer identity,
+//! builder hits `Expr::Cse(rc)` it keys on the `Arc` pointer identity,
 //! emitting the body the first time and returning the cached
 //! result-slot index on subsequent references. The forward pass then
 //! computes each CSE once and the reverse pass folds adjoints from
 //! every reference into a single slot — exact chain-rule behaviour.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use super::nl_external::{EvalResult, ExternalArg, ExternalLibrary, ExternalResolver};
@@ -176,7 +175,7 @@ pub struct Tape {
 
 impl Tape {
     /// Build a tape from an `Expr` tree (no AMPL external functions). CSE
-    /// bodies (`Expr::Cse(rc)`) are cached by `Rc` pointer identity so each
+    /// bodies (`Expr::Cse(rc)`) are cached by `Arc` pointer identity so each
     /// body is emitted once even when referenced many times.
     pub fn build(expr: &Expr) -> Self {
         Self::build_with_externals(expr, &ExternalResolver::default())
@@ -1639,13 +1638,13 @@ fn build_recursive(
             acc
         }
         Expr::Cse(body) => {
-            // Cache by Rc identity so each shared body is emitted into
+            // Cache by Arc identity so each shared body is emitted into
             // the tape exactly once and every reference resolves to the
             // same result-slot index. Forward computes the body once;
             // reverse-mode adjoint sums contributions from every ref
             // into that shared slot — exact chain rule for shared
             // sub-expressions.
-            let key = Rc::as_ptr(body) as *const Expr;
+            let key = Arc::as_ptr(body) as *const Expr;
             if let Some(&idx) = cache.get(&key) {
                 idx
             } else {
@@ -2199,7 +2198,7 @@ fn count_cse_appearances(
             count_cse_appearances(else_, seen_in_root, counts);
         }
         Expr::Cse(body) => {
-            let key = Rc::as_ptr(body) as *const Expr;
+            let key = Arc::as_ptr(body) as *const Expr;
             if seen_in_root.insert(key) {
                 *counts.entry(key).or_insert(0) += 1;
                 count_cse_appearances(body, seen_in_root, counts);
@@ -2219,7 +2218,7 @@ fn count_cse_appearances(
 /// (≥ 2 roots reference them per `cse_count`) get a single prelude
 /// emission via `build_recursive`; the summand records a Shared op
 /// pointing at the prelude slot. Non-promoted CSEs are inlined
-/// into the summand with intra-summand Rc-pointer dedup.
+/// into the summand with intra-summand Arc-pointer dedup.
 fn build_into_summand(
     expr: &Expr,
     local: &mut Vec<SummandOp>,
@@ -2317,7 +2316,7 @@ fn build_into_summand(
             acc
         }
         Expr::Cse(body) => {
-            let key = Rc::as_ptr(body) as *const Expr;
+            let key = Arc::as_ptr(body) as *const Expr;
             if let Some(&li) = local_cache.get(&key) {
                 return li;
             }
@@ -2326,7 +2325,7 @@ fn build_into_summand(
                 // Build (or reuse) the prelude slot for this CSE.
                 // `build_recursive(expr, ...)` hits the Cse arm,
                 // emits the body once into prelude, and caches it
-                // in `prelude_map` keyed by this Rc pointer.
+                // in `prelude_map` keyed by this Arc pointer.
                 let pslot =
                     build_recursive(expr, prelude, prelude_map, &ExternalResolver::default());
                 let li = local.len();
@@ -3490,8 +3489,8 @@ mod tests {
 
     #[test]
     fn cse_shared_body_evaluated_once() {
-        // body = x0 + x1, shared via Rc. f = body^2 + body.
-        let body = Rc::new(add(var(0), var(1)));
+        // body = x0 + x1, shared via Arc. f = body^2 + body.
+        let body = Arc::new(add(var(0), var(1)));
         let e = add(
             pow(Expr::Cse(body.clone()), cnst(2.0)),
             Expr::Cse(body.clone()),
@@ -4002,7 +4001,7 @@ mod tests {
     #[test]
     fn pow_const_through_cse_const() {
         // Exponent wrapped in Cse — peek_const should still see it.
-        let two = Rc::new(cnst(2.0));
+        let two = Arc::new(cnst(2.0));
         let e = Expr::Binary(BinOp::Pow, Box::new(var(0)), Box::new(Expr::Cse(two)));
         let t = Tape::build(&e);
         assert_eq!(count_op(&t, |o| matches!(o, TapeOp::Pow(..))), 0);
@@ -4037,7 +4036,7 @@ mod tests {
     fn hessian_sparsity_through_cse() {
         // body = x0+x1 (CSE). f = body^2 + body.
         // d²/dx² of body^2 couples (0,0), (1,0), (1,1).
-        let body = Rc::new(add(var(0), var(1)));
+        let body = Arc::new(add(var(0), var(1)));
         let e = add(
             pow(Expr::Cse(body.clone()), cnst(2.0)),
             Expr::Cse(body.clone()),

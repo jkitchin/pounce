@@ -1350,7 +1350,7 @@ mod tests {
     use super::*;
     use crate::nl_reader::{BinOp, Expr, UnaryOp};
     use std::collections::BTreeSet;
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     fn cnst(c: f64) -> Expr {
         Expr::Const(c)
@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn matches_through_cse() {
-        let body = Rc::new(add(var(0), var(1)));
+        let body = Arc::new(add(var(0), var(1)));
         let e = add(
             pow(Expr::Cse(body.clone()), cnst(2.0)),
             Expr::Cse(body.clone()),

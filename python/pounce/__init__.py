@@ -17,6 +17,7 @@ from ._pounce import (
     Problem, Solver, NlProblem, read_nl, classify_working_set, __version__,
 )
 from ._minimize import minimize, OptimizeResult
+from ._nlp_batch import solve_nlp_batch
 from ._curve_fit import (
     curve_fit,
     curve_fit_minima,
@@ -46,6 +47,7 @@ __all__ = [
     "Solver",
     "NlProblem",
     "read_nl",
+    "solve_nlp_batch",
     "minimize",
     "OptimizeResult",
     "curve_fit",

@@ -41,6 +41,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -57,12 +58,15 @@ pub enum Expr {
     Sum(Vec<Expr>),
     /// Reference to a common subexpression (`.nl` `V` segment). The
     /// payload is a shared body; many references to the same CSE share
-    /// one `Rc`, so the parsed problem is a DAG. Walking through `Cse`
+    /// one `Arc`, so the parsed problem is a DAG. Walking through `Cse`
     /// is mathematically equivalent to inlining the body at each
     /// occurrence (every reference is an independent occurrence in the
     /// chain rule), so eval/grad/collect_vars just recurse into the
-    /// inner `Expr`.
-    Cse(Rc<Expr>),
+    /// inner `Expr`. The pointer is atomically refcounted (`Arc`, not
+    /// `Rc`) so a parsed problem — and the `NlTnlp` built from it —
+    /// is `Send` and can move to a rayon worker for batched solving
+    /// (pounce#126); sharing is still read-only after parse.
+    Cse(Arc<Expr>),
     /// AMPL imported (external) function call. `id` matches an entry in
     /// `NlProblem.imported_funcs`; resolution to a live shared library
     /// happens when the tape is built (see `nl_external::ExternalResolver`).
@@ -692,7 +696,7 @@ struct Parser<'a> {
     n_funcs: usize,
     /// Common subexpressions (`V` segments). Index in this vec is the
     /// CSE-local index, i.e. the global `.nl` index minus `n`.
-    cses: Vec<Rc<Expr>>,
+    cses: Vec<Arc<Expr>>,
 }
 
 impl<'a> Parser<'a> {
@@ -1061,7 +1065,7 @@ impl<'a> Parser<'a> {
                 self.n + self.cses.len()
             ));
         }
-        self.cses.push(Rc::new(combined));
+        self.cses.push(Arc::new(combined));
         Ok(())
     }
 }
@@ -1390,7 +1394,11 @@ struct ColorWrite {
     hess_idx: u32,
 }
 
-#[derive(Debug)]
+// `Clone` supports the batched-solve path (pounce#126): one parsed
+// model is cloned per batch instance (tapes are flat `Vec`s of ops, so
+// the clone is cheap relative to a solve) and each clone gets its own
+// bound / starting-point overrides via [`NlTnlp::variant`].
+#[derive(Debug, Clone)]
 pub struct NlTnlp {
     prob: NlProblem,
     /// Per-summand objective tapes (one `Tape` per top-level
@@ -2142,6 +2150,82 @@ impl NlTnlp {
     pub fn final_obj(&self) -> Number {
         self.final_obj
     }
+
+    /// The parsed problem this TNLP evaluates (bounds, starting point,
+    /// names, suffixes). Read-only; per-instance overrides go through
+    /// [`Self::variant`].
+    pub fn problem(&self) -> &NlProblem {
+        &self.prob
+    }
+
+    /// Clone this TNLP with per-instance overrides applied — the
+    /// "one structure, many bound / starting-point variations" case of
+    /// batched NLP solving (pounce#126). The AD tapes, sparsity, and
+    /// coloring are reused via `Clone` (they depend only on the model
+    /// structure, which a variation cannot change); only the values in
+    /// `prob.x0` / `prob.x_l` / `prob.x_u` / `prob.g_l` / `prob.g_u`
+    /// are replaced. Any stale `final_x` from a previous solve of
+    /// `self` is cleared on the clone.
+    ///
+    /// Errors when an override's length does not match the model
+    /// (`n` for `x0`/`x_l`/`x_u`, `m` for `g_l`/`g_u`).
+    pub fn variant(&self, v: &NlVariation) -> Result<Self, String> {
+        let check = |name: &str, got: usize, want: usize| -> Result<(), String> {
+            if got == want {
+                Ok(())
+            } else {
+                Err(format!(
+                    "NlVariation.{name} has length {got}, expected {want}"
+                ))
+            }
+        };
+        let mut out = self.clone();
+        out.final_x = None;
+        out.final_obj = 0.0;
+        if let Some(x0) = &v.x0 {
+            check("x0", x0.len(), self.prob.n)?;
+            out.prob.x0.clone_from(x0);
+        }
+        if let Some(x_l) = &v.x_l {
+            check("x_l", x_l.len(), self.prob.n)?;
+            out.prob.x_l.clone_from(x_l);
+        }
+        if let Some(x_u) = &v.x_u {
+            check("x_u", x_u.len(), self.prob.n)?;
+            out.prob.x_u.clone_from(x_u);
+        }
+        if let Some(g_l) = &v.g_l {
+            check("g_l", g_l.len(), self.prob.m)?;
+            out.prob.g_l.clone_from(g_l);
+        }
+        if let Some(g_u) = &v.g_u {
+            check("g_u", g_u.len(), self.prob.m)?;
+            out.prob.g_u.clone_from(g_u);
+        }
+        Ok(out)
+    }
+
+    /// Build one [`NlTnlp`] per variation, sharing this instance's
+    /// structure (see [`Self::variant`]). Returns instances in input
+    /// order; errors on the first length-mismatched variation.
+    pub fn variants(&self, vs: &[NlVariation]) -> Result<Vec<Self>, String> {
+        vs.iter().map(|v| self.variant(v)).collect()
+    }
+}
+
+/// Per-instance overrides for building a family of related NLP
+/// instances from one parsed `.nl` model (pounce#126): same structure
+/// and tapes, different starting point and/or bounds — parametric
+/// sweeps, multi-start, or branch-and-bound node relaxations where
+/// each node only tightens variable bounds. `None` keeps the base
+/// model's value.
+#[derive(Debug, Clone, Default)]
+pub struct NlVariation {
+    pub x0: Option<Vec<Number>>,
+    pub x_l: Option<Vec<Number>>,
+    pub x_u: Option<Vec<Number>>,
+    pub g_l: Option<Vec<Number>>,
+    pub g_u: Option<Vec<Number>>,
 }
 
 impl pounce_nlp::expression_provider::ExpressionProvider for NlTnlp {
@@ -2430,6 +2514,66 @@ pub fn load_nl_as_tnlp(path: &Path) -> Result<Rc<RefCell<dyn TNLP>>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compile-time guarantee for the batched-solve path (pounce#126):
+    /// a parsed problem and the TNLP built from it must be movable to a
+    /// rayon worker. Regresses if anyone reintroduces an `Rc` (or other
+    /// `!Send` state) into the `Expr` DAG / tape pipeline.
+    #[test]
+    fn nl_problem_and_tnlp_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<NlProblem>();
+        assert_send::<NlTnlp>();
+        assert_send::<Expr>();
+    }
+
+    /// `variant()` patches starting point / bounds on a clone and
+    /// validates override lengths; the base instance is untouched.
+    #[test]
+    fn variant_overrides_bounds_and_x0() {
+        let p = parse_nl_text(SIMPLE).expect("parse");
+        let mut base = NlTnlp::new(p);
+        let var = base
+            .variant(&NlVariation {
+                x0: Some(vec![3.0, 4.0]),
+                x_l: Some(vec![-1.0, -2.0]),
+                x_u: Some(vec![5.0, 6.0]),
+                ..Default::default()
+            })
+            .expect("variant");
+        let mut var = var;
+        let (mut x_l, mut x_u) = ([0.0; 2], [0.0; 2]);
+        let (mut g_l, mut g_u) = ([0.0; 0], [0.0; 0]);
+        assert!(var.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        assert_eq!(x_l, [-1.0, -2.0]);
+        assert_eq!(x_u, [5.0, 6.0]);
+        let mut x = [0.0; 2];
+        let (mut zl, mut zu, mut lam) = ([0.0; 2], [0.0; 2], [0.0; 0]);
+        assert!(var.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut zl,
+            z_u: &mut zu,
+            init_lambda: false,
+            lambda: &mut lam,
+        }));
+        assert_eq!(x, [3.0, 4.0]);
+        // Base keeps its parsed (free) bounds.
+        assert!(base.problem().x_l[0] < -1.0e18);
+        // Length mismatch is an error, not a panic.
+        assert!(base
+            .variant(&NlVariation {
+                x0: Some(vec![1.0]),
+                ..Default::default()
+            })
+            .is_err());
+    }
 
     /// `min (x0 - 1)^2 + (x1 - 2)^2` written in `.nl` ASCII form.
     /// Header values:
