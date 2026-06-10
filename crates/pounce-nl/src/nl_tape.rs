@@ -510,7 +510,11 @@ impl Tape {
                     let du = dot[*a];
                     let dr = dot[*b];
                     let mut result = 0.0;
-                    if r != 0.0 && u != 0.0 {
+                    // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
+                    // u == 0 the slope is still well defined for r >= 1 (and a
+                    // genuine ±inf for r < 1), so it must not be silently dropped,
+                    // or the forward tangent disagrees with the reverse gradient.
+                    if r != 0.0 {
                         result += r * u.powf(r - 1.0) * du;
                     }
                     if u > 0.0 {
@@ -733,7 +737,11 @@ impl Tape {
                     let du = dot[*a];
                     let dr = dot[*b];
                     let mut result = 0.0;
-                    if r != 0.0 && u != 0.0 {
+                    // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
+                    // u == 0 the slope is still well defined for r >= 1 (and a
+                    // genuine ±inf for r < 1), so it must not be silently dropped,
+                    // or the forward tangent disagrees with the reverse gradient.
+                    if r != 0.0 {
                         result += r * u.powf(r - 1.0) * du;
                     }
                     if u > 0.0 {
@@ -2991,7 +2999,11 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
             let du = dot[*a];
             let dr = dot[*b];
             let mut result = 0.0;
-            if r != 0.0 && u != 0.0 {
+            // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
+            // u == 0 the slope is still well defined for r >= 1 (and a genuine
+            // ±inf for r < 1), so it must not be silently dropped, or the forward
+            // tangent disagrees with the reverse gradient.
+            if r != 0.0 {
                 result += r * u.powf(r - 1.0) * du;
             }
             if u > 0.0 {
@@ -4086,5 +4098,49 @@ mod tests {
         assert!(s.contains(&(1, 0)));
         assert!(s.contains(&(1, 1)));
         assert_eq!(s.len(), 3);
+    }
+
+    #[test]
+    fn pow_forward_tangent_matches_reverse_gradient_at_base_zero() {
+        // Code review L29: `Pow` first-order tangent disagreed with the
+        // reverse-mode gradient at base 0. f = x0 ^ x1 keeps a genuine `Pow`
+        // op (variable exponent is not lowered to a Mul/Sqrt chain). At the
+        // `.nl` default start x0 = 0, the base derivative d/dx0 (x0^1) = 1 is
+        // well defined; reverse mode has always computed it, but the forward
+        // tangent used to guard on `u != 0` and drop it, so Jacobian-vector
+        // products silently disagreed with the gradient at x = 0. After the
+        // fix both arms must agree.
+        let e = pow(var(0), var(1));
+        let t = Tape::build(&e);
+        // Guard: the op must survive as a real Pow (not lowered away), else
+        // this test would no longer exercise the fixed branch.
+        assert!(
+            t.ops.iter().any(|op| matches!(op, TapeOp::Pow(_, _))),
+            "expected a Pow op in the tape; got {:?}",
+            t.ops
+        );
+        let x = [0.0, 1.0];
+        let n = t.ops.len();
+
+        // Reverse-mode gradient w.r.t. x0.
+        let mut grad = vec![0.0; 2];
+        t.gradient_seed(&x, 1.0, &mut grad);
+
+        // Forward tangent seeded on x0: dot[output] = df/dx0.
+        let vals = t.forward(&x);
+        let mut dot = vec![0.0; n];
+        t.forward_tangent(&vals, 0, &mut dot);
+        let fwd_dfx0 = dot[n - 1];
+
+        assert!(
+            (grad[0] - 1.0).abs() < 1e-12,
+            "reverse gradient df/dx0 at base 0 should be 1, got {}",
+            grad[0]
+        );
+        assert!(
+            (fwd_dfx0 - grad[0]).abs() < 1e-12,
+            "forward tangent df/dx0 = {fwd_dfx0} must match reverse gradient {} at base 0",
+            grad[0]
+        );
     }
 }

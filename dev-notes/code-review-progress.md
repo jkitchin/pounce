@@ -92,6 +92,8 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L27 | CLI module doc (`main.rs:9-12`) claimed "Exit status: 0 on `Solve_Succeeded`, non-zero otherwise" but the code (`main.rs:1183-1185`) also returns 0 for `SolvedToAcceptableLevel` — the doc understated the success set | **FIXED** | **Confirmed by reading code.** The NLP exit-code `match status { SolveSucceeded \| SolvedToAcceptableLevel => SUCCESS, … }` exits 0 for reduced-accuracy convergence too (consistent with `minimize()` parity #119 and Ipopt), but the module-level doc only named `Solve_Succeeded`. **Fix**: (1) corrected the module doc to name both `Solve_Succeeded` and `Solved_To_Acceptable_Level` as the success set; (2) extracted the inline exit-code match into a pure helper `nlp_exit_code(status, ampl)` (mirroring the existing `convex_exit_code(ok, ampl)`), itself composed from a testable predicate `nlp_solve_succeeded(status)` (mirrors L23's `scaling_retry_promoted`). This both removes the duplicated AMPL-contract comment and gives the doc-claimed behavior a regression lock. **Tests** (`main.rs` `nlp_exit_code_tests`): `acceptable_level_counts_as_success` (both `SolveSucceeded` and `SolvedToAcceptableLevel` → true — the crux of L27) and `non_convergent_statuses_are_not_success` (Infeasible/MaxIters/RestorationFailed/Diverging/MaxCpuTime/InternalError → false). `ExitCode` has no `PartialEq`, so the bool predicate is the testable seam. **Fail-first confirmed**: dropping `SolvedToAcceptableLevel` from `nlp_solve_succeeded` makes `acceptable_level_counts_as_success` fail (`assertion failed: nlp_solve_succeeded(A::SolvedToAcceptableLevel)`). Restored; 5 pounce-cli bin tests green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L27 detail`. |
 | L28 | `nl_hessian_program.rs` (`HessianProgram::compile`) is dead in-tree (only `pub mod` in `lib.rs:19`; zero callers of `compile`/`execute`) but `panic!`s on `Funcall`/min/max/conditional-logical/extra-transcendental ops (lines 456, 477, 594, 615, 766, 787 in `compile`; 1275, 1285, 1329, 1339 in the `reachable_to_output`/`depends_on_var` helpers) — would fire on arbitrary user `.nl` input if ever wired into dispatch | **FIXED** | **Confirmed by reading code + git.** The module declares `pub mod nl_hessian_program;` (compiled) but nothing calls `HessianProgram::compile`/`execute` (grep over `crates/`/`pyomo-pounce/`/`python/` finds only the `pub mod` line). All three compile sweeps (forward / forward-tangent / reverse-over-tangent) and the two dependence/reachability analyses `panic!`ed on opcodes the program path can't lower; the panic messages themselves say "use the Tape (build_with_externals) path instead", revealing the *intended* design is a graceful fall-back, not a crash. **Fix**: (1) `compile` now returns `Option<Self>` with an up-front guard `if !tape.ops.iter().all(program_supports_op) { return None; }` — a new free fn `program_supports_op` is the single source of truth for the supported set (smooth arithmetic + `sin`/`cos`); (2) all 10 `panic!`s became `unreachable!` — the guard filters unsupported ops before any sweep or helper runs, so they are statically unreachable from the public entry, and `unreachable!` now flags only an internal guard/sweep inconsistency (a programmer error), never user input; (3) both early returns wrapped in `Some(...)`; (4) the two in-tree test call sites updated to `.expect(...)`. **Test** (`nl_hessian_program::tests::unsupported_opcode_returns_none_instead_of_panicking`): a `tan(x0)` tape (→ unsupported `TapeOp::Tan`) makes `compile` return `None`; a `mul(x0,x1)` tape still returns `Some`. **Fail-first confirmed**: disabling the guard (`if false`) makes the tan tape reach the forward-sweep `unreachable!` and panic (`internal error: entered unreachable code: HessianProgram path does not yet support tan/...`) — exactly the L28 crash-on-user-input failure mode. Restored; 161 pounce-cli lib tests green (was 160). `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --lib -- -D clippy::correctness -D clippy::suspicious` clean (remaining warnings are pre-existing `unwrap_used`/`expect_used` restriction-style, incl. the test `.expect()`s — not correctness/suspicious). See `## L28 detail`. |
 
+| L29 | `Pow` first-order tangent disagrees with the reverse-mode gradient at base 0 (`nl_tape.rs` forward-tangent sites guard on `r != 0 && u != 0`; reverse guards only `rv != 0`) — Jacobian and Hessian-vector products use an inconsistent derivative model at `x = 0`, the `.nl` default start | **FIXED** | **Confirmed by reading code.** Three forward-tangent `Pow` sites — `forward_tangent` (was line 513), `hessian_directional` (736), free fn `fwd_tan_step` (2994) — guarded the base-derivative term `r * u^(r-1) * du` on `r != 0.0 && u != 0.0`, while the reverse adjoint sweep (`reverse_into` 343, free fn 2856) guards only `rv != 0.0`. At the `.nl` default start `x0 = 0` with `f = x0^x1`, `x1 = 1`: reverse gives `df/dx0 = 1*0^0 = 1`, forward-tangent gave `0` (term dropped) — a real Jacobian-vs-gradient disagreement. **Fix**: changed all three guards to `if r != 0.0` (dropping the spurious `&& u != 0.0`) so forward-tangent matches reverse exactly; `0.powf(r-1)` is `1` for `r=1`, `0` for `r>1`, `±inf` for `r<1` — identical to what reverse already produces. **Test** (`nl_tape::tests::pow_forward_tangent_matches_reverse_gradient_at_base_zero`): builds `pow(var(0), var(1))` (variable exponent stays a real `Pow`, not lowered to Mul/Sqrt), evaluates at `[0.0, 1.0]`, asserts forward-tangent `df/dx0 == reverse grad[0] == 1`. **Fail-first confirmed**: reverting the guard to `r != 0.0 && u != 0.0` makes forward-tangent return `0` while reverse stays `1`, failing the assert (`forward tangent df/dx0 = 0 must match reverse gradient 1`). Restored; 81 pounce-nl tests green. **Hessian (second-order) `Pow` base-0 sites left unchanged on purpose**: the forward-over-reverse cross-partial `∂²(u^r)/∂u∂r` at `u = 0` with a *variable* exponent is genuinely singular (`→ ±inf`); those sites already special-case integer `r ≥ 2` and base 0, and there is no finite value that both arms could consistently agree on — only the first-order tangent had a removable inconsistency. `cargo fmt -p pounce-nl` / `cargo clippy -p pounce-nl --all-targets -- -D clippy::correctness -D clippy::suspicious` clean (remaining warnings pre-existing `unwrap_used`/`expect_used` restriction-style). See `## L29 detail`. |
+
 ## C1 detail
 
 - **Bug**: `redundant_mask` from `find_redundant_rows` is aligned to the
@@ -4905,3 +4907,51 @@ which are not in the gated `correctness`/`suspicious` groups.)
 makes the dead path safe to wire in later — `compile` returning `None` is now
 the documented "fall back to the Tape interpreter" signal a future caller
 composes with.
+
+## L29 detail
+
+**Issue (L29).** The `.nl` reverse/forward AD engine in `crates/pounce-nl/src/nl_tape.rs`
+modeled the first-order derivative of `Pow(u, r)` w.r.t. its base `u` differently in
+forward-tangent mode than in reverse mode:
+
+- **Reverse** (`reverse_into`, line 343; free fn `reverse` analog at 2856):
+  `if rv != 0.0 { adj[base] += a * rv * lv.powf(rv - 1.0); }` — the base-derivative
+  term is taken whenever the exponent is nonzero, *including at base `lv == 0`*.
+- **Forward-tangent** (`forward_tangent` 513, `hessian_directional` 736, `fwd_tan_step`
+  2994): `if r != 0.0 && u != 0.0 { result += r * u.powf(r - 1.0) * du; }` — the extra
+  `&& u != 0.0` silently dropped the term whenever the base was exactly 0.
+
+Because the `.nl` default starting point seeds unbounded variables at 0, this is exactly
+the point evaluated on iteration 0. For `f = x0^x1` at `x = (0, 1)`:
+- reverse `df/dx0 = 1 * 0^0 = 1`,
+- forward-tangent `df/dx0 = 0` (term dropped),
+
+so a Jacobian-vector product disagreed with the gradient of the same function at the
+default start. Constant exponents are lowered to Mul/Sqrt chains and so never hit this
+branch, which narrowed the exposure to genuine variable-exponent `Pow` nodes — but those
+do occur (e.g. `x^y` couplings), and when they do the inconsistency is silent.
+
+**Fix.** Drop the spurious `&& u != 0.0` from all three forward-tangent sites so the guard
+becomes `if r != 0.0` — byte-identical to the reverse guard's intent. `0.0.powf(r - 1.0)`
+is well defined and equals what reverse already computes: `1` at `r = 1`, `0` for `r > 1`,
+`±inf` for `0 < r < 1` (true infinite slope of e.g. `sqrt` at 0). The two arms now agree
+everywhere the first-order derivative is defined.
+
+**Why the Hessian base-0 sites are intentionally untouched.** The forward-over-reverse
+second-order `Pow` sites (methods at ~898 and ~1208, free fn at ~3148) compute the
+cross-partial `∂²(u^r)/∂u∂r`. At `u = 0` with a *variable* exponent this is genuinely
+singular (`r·u^(r-1)·ln(u)` → `±inf`), not a removable bookkeeping gap. Those sites
+already special-case integer `r ≥ 2` and base 0; there is no finite value on which the two
+second-order arms could be made to "agree," so the only real inconsistency — the
+first-order tangent — is the one fixed here.
+
+**Test.** `nl_tape::tests::pow_forward_tangent_matches_reverse_gradient_at_base_zero`
+builds `pow(var(0), var(1))`, asserts the tape still contains a real `TapeOp::Pow`
+(guarding against future lowering that would skip the branch), evaluates at `[0.0, 1.0]`,
+and asserts forward-tangent `dot[output] == reverse grad[0] == 1`.
+
+**Fail-first.** Reverting any forward-tangent guard back to `r != 0.0 && u != 0.0` makes
+the forward tangent return `0` while reverse stays `1`; the test fails with
+`forward tangent df/dx0 = 0 must match reverse gradient 1 at base 0`. Restored after
+confirming. Full crate suite: 80 lib + 1 integration tests green. `cargo fmt` / gated
+`cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
