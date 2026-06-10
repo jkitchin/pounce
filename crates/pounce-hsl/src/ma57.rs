@@ -172,6 +172,13 @@ pub struct Ma57SolverInterface {
     fact: Vec<Number>,
     lifact: Index,
     ifact: Vec<Index>,
+
+    /// Reusable MA57C real workspace (length `n*nrhs`). Kept across
+    /// backsolves so the factor-once/solve-many hot path does not
+    /// allocate per solve (L11). MA57C uses it as pure scratch — upstream
+    /// passes an *uninitialized* `new Number[lwork]` — so it needs no
+    /// zeroing on reuse.
+    work: Vec<Number>,
 }
 
 impl std::fmt::Debug for Ma57SolverInterface {
@@ -211,6 +218,7 @@ impl Ma57SolverInterface {
             fact: Vec::new(),
             lifact: 0,
             ifact: Vec::new(),
+            work: Vec::new(),
         };
         me.apply_icntl();
         me
@@ -454,7 +462,10 @@ impl Ma57SolverInterface {
             return ESymSolverStatus::FatalError;
         }
         let lwork = lwork_wide as Index;
-        let mut work: Vec<Number> = vec![0.0; lwork as usize];
+        // Reuse the cached workspace (L11): resize to `n*nrhs` (a no-op once
+        // it is large enough, so no per-solve allocation in the solve-many
+        // hot path). MA57C treats it as scratch, so stale contents are fine.
+        self.work.resize(lwork as usize, 0.0);
 
         // SAFETY: rhs_vals length `n*nrhs` is the caller's contract;
         // `work` sized to `n*nrhs` per MA57C requirement.
@@ -469,7 +480,7 @@ impl Ma57SolverInterface {
                 &nrhs,
                 rhs_vals.as_mut_ptr(),
                 &lrhs,
-                work.as_mut_ptr(),
+                self.work.as_mut_ptr(),
                 &lwork,
                 self.iwork.as_mut_ptr(),
                 self.icntl.as_ptr(),
@@ -629,6 +640,57 @@ mod tests {
         assert_eq!(ma57_scaled_size(1000, 0.5), Some(1000));
         // base near i32::MAX scaled up overflows the index range -> None.
         assert_eq!(ma57_scaled_size(Index::MAX - 1, 1.05), None);
+    }
+
+    /// L11: the MA57C workspace is cached on the struct and reused across
+    /// backsolves. Repeated solves against one factorization must stay correct
+    /// despite stale scratch, and must not reallocate `work`.
+    #[test]
+    fn backsolve_reuses_workspace_across_repeated_solves() {
+        let mut s = Ma57SolverInterface::new();
+        let n: Index = 2;
+        let ne: Index = 3;
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(n, ne, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        // A = [[2, 1], [1, 3]], det 5, A^-1 = [[3, -1], [-1, 2]] / 5.
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+
+        // First solve factors (new_matrix = true); A * (1, 1) = (3, 4).
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!((rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 1.0).abs() < 1e-12);
+        // The workspace is now populated and reused, not a per-solve local.
+        // Length is n*nrhs with nrhs = 1.
+        assert_eq!(s.work.len(), n as usize);
+        let cap_after_first = s.work.capacity();
+
+        // Further solves reuse the factor (new_matrix = false) and the cached
+        // workspace. Each must be correct; capacity must not grow.
+        for &(b0, b1, x0, x1) in &[
+            (5.0, 10.0, 1.0, 3.0), // A * (1, 3)
+            (2.0, 3.0, 3.0 / 5.0, 4.0 / 5.0),
+            (-1.0, 4.0, -7.0 / 5.0, 9.0 / 5.0),
+        ] {
+            let mut r = [b0, b1];
+            assert_eq!(
+                s.multi_solve(false, &irn, &jcn, 1, &mut r, false, 0),
+                ESymSolverStatus::Success
+            );
+            assert!((r[0] - x0).abs() < 1e-10, "x0 = {}, want {}", r[0], x0);
+            assert!((r[1] - x1).abs() < 1e-10, "x1 = {}, want {}", r[1], x1);
+            assert_eq!(
+                s.work.capacity(),
+                cap_after_first,
+                "cached workspace must not reallocate on same-size solves"
+            );
+        }
     }
 
     /// 2x2 SPD matrix
