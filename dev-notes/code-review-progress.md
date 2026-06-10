@@ -83,6 +83,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L18 | restoration: inner solver pins tolerances at `(1e-8, 1e-6, 15, 3000, 3000)` regardless of the user's outer `tol` (`resto_inner_solver.rs:251`), and `is_square_problem = n == m_eq` ignores inequalities (line 226), unlike IPOPT's `IsSquareProblem` | **FIXED (1 of 2; 2nd is not a bug)** | **Split verdict after running code + upstream cross-check.** **(1) Hardcoded resto tol — REAL, fixed.** `run_inner_resto` built the resto sub-solve's convergence check with `RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)` — the inner-IPM stationarity `tol`, `acceptable_tol`, and `acceptable_iter` were literals, so a user `tol=1e-3` (or `1e-10`) still drove the restoration sub-NLP to `1e-8`. Upstream clones the outer `OptionsList` into the resto sub-options (`IpRestoMinC_1Nrm.cpp`), so the resto IPM *inherits* the user's `tol`/`acceptable_tol`/`acceptable_iter`. Verified the inner builder carries these: `IpoptApplication::algorithm_builder_from_options` sets `builder.conv_check.{tol,acceptable_tol,acceptable_iter}` from the `tol`/`acceptable_tol`/`acceptable_iter` options (`application.rs:1627,1648,1663`), and CLI/py/cinterface all hand that builder to `make_default_restoration_factory_provider`. **Fix**: extracted `build_resto_conv_check_adapter(&ConvCheckOptions)` that reads `conv.{tol,acceptable_tol,acceptable_iter}` and keeps the resto-phase iteration budgets as named consts `RESTO_INNER_MAX_ITERS`/`RESTO_MAX_SUCCESSIVE_ITERS` (= 3000, which mirror `IpRestoConvCheck.cpp:137,144` `maximum_iters`/`maximum_resto_iters` — resto-specific, *not* the outer `max_iter`); the callsite now passes `&inner_alg_builder.conv_check`. Added `RestoConvCheckAdapter::{inner_tol,inner_acceptable_tol,inner_acceptable_iter}` accessors. **(2) `is_square_problem` — NOT a bug.** The claim "ignores inequalities, unlike IPOPT's `IsSquareProblem`" is false: upstream `IpoptCalculatedQuantities::IsSquareProblem()` is literally `return (ip_data_->curr()->x()->Dim() == ip_data_->curr()->y_c()->Dim());` (`IpIpoptCalculatedQuantities.cpp:3732-3735`, fetched via the GitHub raw API) — i.e. `n == m_eq`, with no inequality term. pounce's `is_square_problem = n_orig == m_eq` matches upstream exactly; left unchanged. **Test** (`resto_inner_solver::tests`): `resto_conv_check_adapter_inherits_user_tolerances` builds a `ConvCheckOptions` with `tol=1e-3, acceptable_tol=1e-2, acceptable_iter=7` and asserts the adapter reports them. **Fail-first confirmed** by reverting the helper to the old `(1e-8, 1e-6, 15)` literals — the test fails (`1e-8 != 1e-3`, "outer tol must propagate"). Restored, full pounce-restoration suite green (106 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L18 detail`. |
 | L19 | restoration: `min_c_1nrm` LSM branch mutates `data.curr` without restoring it only on the non-default `constr_mult_reset_threshold > 0` path (`min_c_1nrm.rs:397-407`) — a divergence trap between option settings | **FIXED** | **Bug confirmed by reading + running code (pounce port of `IpRestoMinC_1Nrm`).** In `recover`'s least-square-multiplier (LSM) block, the non-default `constr_mult_reset_threshold > 0` path sets `data.curr = recovered` (the just-staged trial container) so `EqMultCalculator::calculate_y_eq` evaluates ∇f/J_c/J_d at the recovered iterate — but it **never restored `curr`**, so this path returned with `curr` = the recovered iterate while the default (`threshold == 0`) path leaves `curr` untouched. Upstream `DefaultIterateInitializer::least_square_mults` ends with `CopyTrialToCurrent` + `AcceptTrialPoint`, so upstream's `curr` becomes the recovered iterate on *every* path; pounce instead defers that promotion to the caller (`IpoptAlgorithm`'s `Recovered` arm calls `accept_trial_point`, `curr ← trial`), so `recover` must leave `curr` exactly as found or the two option settings diverge mid-cycle — a latent trap for any read of `curr` between `recover`'s return and the caller's promotion (e.g. `adjust_variable_bounds_for_small_slacks`). **Not observable at solver-output level** because the caller unconditionally overwrites `curr` immediately after `Recovered`; the fix is verified directly at the `recover` boundary. **Fix**: snapshot `saved_curr = data.curr.clone()` before the temporary `curr = recovered`, then restore `data.curr = saved_curr` after the LSM step, so both option paths leave `curr` identical on return. **Test** (`min_c_1nrm::tests`): a direct `perform_restoration` fixture (2-var/1-eq/1-ineq `MockNlp` → non-square so the LSM branch is reachable; stub `EqMultCalculator` writing sub-threshold multipliers without touching `cq`/`aug_solver`; synthetic inner-solver hook returning a recovered `trial_x = [10,20]` ≠ `curr.x = [2,3]`) asserts `curr.x` is unchanged after the call on both the `threshold = 10` and `threshold = 0` paths. **Fail-first confirmed** by dropping the restore: `recover_restores_curr_on_constr_mult_reset_path` fails (`curr` leaks `[10,20]` vs expected `[2,3]`) while `recover_leaves_curr_unchanged_on_default_path` stays green. Restored, full pounce-restoration suite green (108 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L19 detail`. |
 | L20 | sensitivity: `IndexSchurData::set_from_flags` returns the wrong error variant (`AlreadyInitialized`) for an out-of-range flag value and leaves partially-populated `idx`/`val` state with `initialized == false` (`schur_data.rs:217`), so a caller retry double-appends rows | **FIXED** | **Bug confirmed by reading + running code (pounce port of `SensIndexSchurData`).** Two coupled defects: (1) an out-of-range flag (anything other than 0/1) returned `Err(SchurDataError::AlreadyInitialized)` — a misleading variant that names an unrelated failure mode; (2) the validation happened *mid-loop*, after earlier `f == 1` entries had already been pushed to `idx`/`val`, and the early return left `initialized == false`, so a caller that caught the error and retried with a corrected flag array would re-run the push loop and **append duplicate rows** on top of the partial state. **Fix**: added a dedicated `SchurDataError::InvalidFlag` variant (doc cites upstream `SensIndexSchurData.cpp:51-78`) and rewrote `set_from_flags` to validate the entire flag array up front (`flags.iter().any(|&f| f != 0 && f != 1)` → `Err(InvalidFlag)`) *before* any mutation — atomic, so a rejected call leaves the instance pristine for retry. **Tests** (`schur_data::tests`): `set_from_flags_rejects_invalid_flag_with_distinct_variant` (flags `[1,0,2,1]` → `Err(InvalidFlag)`, not `AlreadyInitialized`); `set_from_flags_invalid_flag_leaves_instance_pristine_for_retry` (flags `[1,0,5]` → `InvalidFlag`, asserts `!is_initialized()`, `nrows() == 0`, empty `col_indices`; then retry `[1,0,1]` yields `col_indices() == [0,2]` with no duplicate append). **Fail-first confirmed**: against the pre-fix code both new tests fail — the old loop returns `Err(AlreadyInitialized)` for the invalid-flag input and, with the early return removed, leaves `col_indices() == [0,3]` (partial) so the retry double-appends to `[0,3,0,2]`. Restored; full pounce-sensitivity suite green. `cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L20 detail`. |
+| L21 | l1penalty: `L1PenaltyBarrierTnlp::new` discards the `bool` return of `get_starting_point` and `eval_g` with `let _ =` (`wrapper.rs:179-191`), so a failing seed callback silently seeds the `(p, n)` slacks from a zeroed `x_0`/violation instead of returning `None` as documented | **FIXED** | **Bug confirmed by reading + running code (pounce port of ripopt `L1PenaltyBarrierNlp`).** `new`'s doc-contract: "Calls … `get_starting_point`, and `eval_g` … If any of these fail, returns `None`." The code violated it — both calls were `let _ = …`, so a TNLP whose `get_starting_point`/`eval_g` returns `false` would proceed with `x0` left at its `vec![0.0; n]` initialization (and `g0` at zero), seeding every equality slack `(p_k, n_k)` from a bogus zero violation rather than rejecting the wrap. Both methods return `bool` (`pounce-nlp/src/tnlp.rs:175,184`). **Fix**: capture the `get_starting_point` result and `return None` if false; fold the `eval_g` call into `if m > 0 && !…eval_g(…) { return None; }`. Now `new` honors its documented "returns `None` if any of these fail" contract. **Tests** (`wrapper::tests`): a `SeedFails` mock (mirrors `EqOnly` but with `fail_starting_point`/`fail_eval_g` flags) drives `new_returns_none_when_starting_point_fails`, `new_returns_none_when_eval_g_fails`, and a control `new_succeeds_when_seed_callbacks_succeed` (both flags off → `Some`). **Fail-first confirmed**: reverting to `let _ =` makes both `*_returns_none_*` tests fail (`new` returns `Some`) while the control stays green. Restored; full pounce-l1penalty suite green (14 lib). `cargo fmt -p pounce-l1penalty` / `cargo clippy -p pounce-l1penalty --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L21 detail`. |
 
 ## C1 detail
 
@@ -4395,4 +4396,63 @@ loop returns `Err(AlreadyInitialized)` for the invalid input, and (with the
 early return removed to model the partial-state path) the retry double-appends
 to `[0,3,0,2]`. Restored; full pounce-sensitivity suite green.
 `cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity
+--all-targets -- -D clippy::correctness -D clippy::suspicious` clean.
+
+## L21 detail
+
+**Issue (L21).** l1penalty `new()` ignores `get_starting_point`/`eval_g`
+failures (`wrapper.rs:179-191`); slack seeds silently computed from zero data.
+
+**Verification.** `L1PenaltyBarrierTnlp::new` (pounce port of ripopt's
+`L1PenaltyBarrierNlp`) wraps an inner TNLP and seeds the ℓ₁-penalty slack pairs
+`(p_k, n_k)` from the constraint violation `r_i = c_i(x_0) − g_i` at the user's
+start point. Its own doc-comment states the contract: "Calls `inner.get_nlp_info`,
+`get_bounds_info`, `get_starting_point`, and `eval_g` … If any of these fail,
+returns `None` — the caller should not enable the wrapper for that TNLP."
+
+`get_nlp_info` (`?`) and `get_bounds_info` (`if !ok { return None }`) were
+honored, but the two seed calls were not:
+
+```rust
+let _ = inner.borrow_mut().get_starting_point(StartingPoint { … });
+let mut g0 = vec![0.0; m];
+if m > 0 {
+    let _ = inner.borrow_mut().eval_g(&x0, true, &mut g0);
+}
+```
+
+Both methods return `bool` (`pounce-nlp/src/tnlp.rs:175,184`). With the returns
+discarded, a TNLP whose `get_starting_point` fails leaves `x0` at its
+`vec![0.0; n]` initialization, and one whose `eval_g` fails leaves `g0` at
+zero — so the violation `r_i` (and hence every `(p_k, n_k)` seed) is computed
+from fabricated zero data instead of the wrap being rejected. Silent: the
+wrapper would be returned as `Some(_)` and proceed to an inner solve with
+garbage slack seeds.
+
+**Fix** (`crates/pounce-l1penalty/src/wrapper.rs`). Honor the contract:
+
+```rust
+let sp_ok = inner.borrow_mut().get_starting_point(StartingPoint { … });
+if !sp_ok {
+    return None;
+}
+let mut g0 = vec![0.0; m];
+if m > 0 && !inner.borrow_mut().eval_g(&x0, true, &mut g0) {
+    return None;
+}
+```
+
+**Tests** (`wrapper::tests`): a `SeedFails` mock mirrors `EqOnly`
+(2 vars / 1 equality row) but carries `fail_starting_point` / `fail_eval_g`
+flags so the chosen seed callback returns `false`:
+- `new_returns_none_when_starting_point_fails` — `fail_starting_point` →
+  `new(..)` is `None`.
+- `new_returns_none_when_eval_g_fails` — `fail_eval_g` → `new(..)` is `None`.
+- `new_succeeds_when_seed_callbacks_succeed` — control, both flags off →
+  `new(..)` is `Some`, so the `None` results are attributable to the failures.
+
+**Fail-first confirmed.** Reverting the two callbacks to `let _ = …` makes both
+`*_returns_none_*` tests fail (`new` returns `Some` with zero-seeded slacks)
+while the control stays green. Restored; full pounce-l1penalty suite green
+(14 lib). `cargo fmt -p pounce-l1penalty` / `cargo clippy -p pounce-l1penalty
 --all-targets -- -D clippy::correctness -D clippy::suspicious` clean.

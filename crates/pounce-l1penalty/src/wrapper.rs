@@ -176,7 +176,7 @@ impl L1PenaltyBarrierTnlp {
         let mut z_l_ignore = vec![0.0; n];
         let mut z_u_ignore = vec![0.0; n];
         let mut lambda_ignore = vec![0.0; m];
-        let _ = inner.borrow_mut().get_starting_point(StartingPoint {
+        let sp_ok = inner.borrow_mut().get_starting_point(StartingPoint {
             init_x: true,
             x: &mut x0,
             init_z: false,
@@ -185,9 +185,12 @@ impl L1PenaltyBarrierTnlp {
             init_lambda: false,
             lambda: &mut lambda_ignore,
         });
+        if !sp_ok {
+            return None;
+        }
         let mut g0 = vec![0.0; m];
-        if m > 0 {
-            let _ = inner.borrow_mut().eval_g(&x0, true, &mut g0);
+        if m > 0 && !inner.borrow_mut().eval_g(&x0, true, &mut g0) {
+            return None;
         }
         let floor: Number = 1e-4;
         let mut p_init = vec![floor; m_eq];
@@ -1056,5 +1059,137 @@ mod tests {
         // Augmented n = 1 + 2*2 = 5.
         let info = w.get_nlp_info().unwrap();
         assert_eq!(info.n, 5);
+    }
+
+    /// Like [`EqOnly`] but lets a chosen seed-phase callback report
+    /// failure, so we can check `new()` honors its documented "returns
+    /// `None` if any of these fail" contract instead of silently
+    /// seeding `(p, n)` from zeroed `x_0`/`g_0`.
+    struct SeedFails {
+        fail_starting_point: bool,
+        fail_eval_g: bool,
+    }
+
+    impl TNLP for SeedFails {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 1,
+                nnz_jac_g: 2,
+                nnz_h_lag: 2,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            for v in b.x_l.iter_mut() {
+                *v = -1e19;
+            }
+            for v in b.x_u.iter_mut() {
+                *v = 1e19;
+            }
+            b.g_l[0] = 1.0;
+            b.g_u[0] = 1.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 0.0;
+            sp.x[1] = 0.0;
+            !self.fail_starting_point
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0] * x[0] + x[1] * x[1])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 2.0 * x[0];
+            g[1] = 2.0 * x[1];
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            !self.fail_eval_g
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                    irow[1] = 0;
+                    jcol[1] = 1;
+                    true
+                }
+                SparsityRequest::Values { values } => {
+                    values[0] = 1.0;
+                    values[1] = 1.0;
+                    true
+                }
+            }
+        }
+        fn eval_h(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            obj_factor: Number,
+            _lambda: Option<&[Number]>,
+            _new_lambda: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                    irow[1] = 1;
+                    jcol[1] = 1;
+                    true
+                }
+                SparsityRequest::Values { values } => {
+                    values[0] = 2.0 * obj_factor;
+                    values[1] = 2.0 * obj_factor;
+                    true
+                }
+            }
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    #[test]
+    fn new_returns_none_when_starting_point_fails() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeedFails {
+            fail_starting_point: true,
+            fail_eval_g: false,
+        }));
+        assert!(
+            L1PenaltyBarrierTnlp::new(inner, 1.0).is_none(),
+            "new() must reject a TNLP whose get_starting_point fails \
+             instead of seeding (p, n) from a zeroed x_0"
+        );
+    }
+
+    #[test]
+    fn new_returns_none_when_eval_g_fails() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeedFails {
+            fail_starting_point: false,
+            fail_eval_g: true,
+        }));
+        assert!(
+            L1PenaltyBarrierTnlp::new(inner, 1.0).is_none(),
+            "new() must reject a TNLP whose eval_g fails instead of \
+             seeding (p, n) from a zeroed violation"
+        );
+    }
+
+    #[test]
+    fn new_succeeds_when_seed_callbacks_succeed() {
+        // Control: the same mock with both callbacks succeeding wraps fine,
+        // so the None results above are attributable to the failures.
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeedFails {
+            fail_starting_point: false,
+            fail_eval_g: false,
+        }));
+        assert!(L1PenaltyBarrierTnlp::new(inner, 1.0).is_some());
     }
 }
