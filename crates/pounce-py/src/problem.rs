@@ -409,6 +409,9 @@ impl PyProblem {
     /// iterate. Returns `(x, info_dict)`; `info_dict` includes the
     /// extra keys `dx`, `dx_full`, `reduced_hessian`,
     /// `reduced_hessian_scaled`, `obj_scaling_factor`, `pin_g_scaling`,
+    /// `kkt_perturbations` (the inertia-correction `(δ_x, δ_s, δ_c,
+    /// δ_d)` baked into the converged factor — all zero means the
+    /// factor is unregularized and the covariance reading is exact),
     /// `reduced_hessian_eigenvalues`, and `reduced_hessian_eigenvectors`
     /// (each may be `None` when the corresponding output was not
     /// requested or the solve did not converge).
@@ -540,6 +543,10 @@ impl PyProblem {
         };
         info.set_item("obj_scaling_factor", obj_scaling_obj)?;
         info.set_item("pin_g_scaling", opt_vec_to_py(py, result.pin_g_scaling))?;
+        info.set_item(
+            "kkt_perturbations",
+            opt_vec_to_py(py, result.kkt_perturbations.map(|p| p.to_vec())),
+        )?;
         info.set_item(
             "reduced_hessian_eigenvalues",
             opt_vec_to_py(py, result.reduced_hessian_eigenvalues),

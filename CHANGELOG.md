@@ -9,6 +9,30 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `obj_scaling_factor` was silently ignored (maximization diverged)
+
+The `obj_scaling_factor` option was registered but never read: every solve
+constructed the NLP with no-op scaling, so the documented behavior — a
+constant multiplier on the objective, negative to **maximize** — was a silent
+no-op and maximization problems diverged (the IPM minimized the unscaled
+objective). The option value is now carried into `OrigIpoptNlp` on both the
+IPM and SQP paths (`ConstObjScaling`), combining with gradient-based /
+user scaling exactly as documented. Sensitivity analysis works under a
+negative factor too: the natural-units correction from #128 below uses a
+two-sided scaling with no square root, so `solve_with_sens` /
+`Solver.reduced_hessian` return the declared problem's reduced Hessian for
+maximization problems as well.
+
+### Added — KKT regularization reported alongside sensitivity outputs
+
+The IPM's inertia-correction perturbations are baked into the converged
+factor in scaled space, so a regularized final factorization makes the
+natural-units sensitivity outputs (covariance in particular) inexact and not
+perfectly scaling-invariant. The final `(δ_x, δ_s, δ_c, δ_d)` are now
+reported so workflows can check for the all-zero (exact) case:
+`info["kkt_perturbations"]` and `Solver.kkt_perturbations` (Python),
+`SensResult::kkt_perturbations` and `Solver::kkt_perturbations` (Rust).
+
 ### Fixed — sensitivity back-solves now return natural (unscaled) units (#128)
 
 The reduced Hessian from `solve_with_sens(compute_reduced_hessian=True)` /

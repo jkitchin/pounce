@@ -97,6 +97,18 @@ pub trait NlpScaling {
 pub struct NoScaling;
 impl NlpScaling for NoScaling {}
 
+/// Constant objective scaling: carries the user's `obj_scaling_factor`
+/// option value into [`OrigIpoptNlp`]. A negative factor flips the
+/// optimization direction (the IPM minimizes `factor·f`, i.e.
+/// maximizes `f`), matching upstream Ipopt's documented semantics.
+#[derive(Debug, Clone, Copy)]
+pub struct ConstObjScaling(pub Number);
+impl NlpScaling for ConstObjScaling {
+    fn obj_scaling(&self) -> Number {
+        self.0
+    }
+}
+
 /// Selector for [`OrigIpoptNlp::determine_scaling_from_starting_point`].
 /// Mirrors upstream's `nlp_scaling_method` option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,10 +479,16 @@ impl OrigIpoptNlp {
             Some(SymTMatrixSpace::new(n_x_var, Vec::new(), Vec::new()))
         };
 
+        // Honor the scaling object's constant factor from construction
+        // (a negative `obj_scaling_factor` means maximize). Callers
+        // that run `determine_scaling_from_starting_point` overwrite
+        // this with the combined automatic·user factor; callers that
+        // don't (e.g. the SQP path) still get the user's constant.
+        let initial_obj_scal = scaling.obj_scaling();
         Ok(Self {
             adapter,
             scaling,
-            obj_scale_factor: Cell::new(1.0),
+            obj_scale_factor: Cell::new(initial_obj_scal),
             c_scale: RefCell::new(None),
             d_scale: RefCell::new(None),
             x_space,

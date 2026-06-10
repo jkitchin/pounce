@@ -131,6 +131,14 @@ pub struct SensResult {
     /// constraint scaling is active), ordered like
     /// `pin_constraint_indices`. Present whenever the solve converged.
     pub pin_g_scaling: Option<Vec<Number>>,
+    /// Inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` baked
+    /// into the converged KKT factor. All zero ⇔ the factor is
+    /// unregularized and the natural-units sensitivity outputs invert
+    /// the exact KKT matrix; nonzero ⇔ they are perturbed (and not
+    /// exactly scaling-invariant) — check before trusting
+    /// `-inv(reduced_hessian)` as a covariance on ill-conditioned
+    /// problems. Present whenever the solve converged.
+    pub kkt_perturbations: Option<[Number; 4]>,
     /// Eigenvalues of `H_R` in ascending order, length `n_params`.
     /// Present only when [`SensSolve::with_reduced_hessian_eigen`] was
     /// called and the solve converged.
@@ -332,6 +340,7 @@ impl SensSolve {
             let df = backsolver.obj_scaling_factor();
             outbox_cb.borrow_mut().obj_scaling_factor = Some(df);
             outbox_cb.borrow_mut().pin_g_scaling = Some(pin_scales.clone());
+            outbox_cb.borrow_mut().kkt_perturbations = Some(backsolver.kkt_perturbations());
             let signs = vec![1; n_params];
 
             let a_data = match IndexSchurData::from_parts(param_rows, signs) {
@@ -412,6 +421,7 @@ impl SensSolve {
             reduced_hessian_scaled: out.reduced_hessian_scaled.clone(),
             obj_scaling_factor: out.obj_scaling_factor,
             pin_g_scaling: out.pin_g_scaling.clone(),
+            kkt_perturbations: out.kkt_perturbations,
             reduced_hessian_eigenvalues: out.reduced_hessian_eigenvalues.clone(),
             reduced_hessian_eigenvectors: out.reduced_hessian_eigenvectors.clone(),
             mult_g: out.mult_g.clone(),
@@ -432,6 +442,7 @@ struct CallbackOut {
     reduced_hessian_scaled: Option<Vec<Number>>,
     obj_scaling_factor: Option<Number>,
     pin_g_scaling: Option<Vec<Number>>,
+    kkt_perturbations: Option<[Number; 4]>,
     reduced_hessian_eigenvalues: Option<Vec<Number>>,
     reduced_hessian_eigenvectors: Option<Vec<Number>>,
     mult_g: Option<Vec<Number>>,

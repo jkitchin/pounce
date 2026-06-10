@@ -254,6 +254,22 @@ impl PySolver {
         Ok(out)
     }
 
+    /// Inertia-correction perturbations `(delta_x, delta_s, delta_c,
+    /// delta_d)` baked into the held KKT factor, as a length-4
+    /// ndarray. All zero means the final factorization was
+    /// unregularized and the natural-units back-solves (covariance in
+    /// particular) invert the exact KKT matrix; nonzero means the
+    /// factor carries a regularization and `-inv(reduced_hessian)` is
+    /// perturbed (pounce#128 follow-up).
+    #[getter]
+    fn kkt_perturbations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("kkt_perturbations: no converged factor (call solve() first)")
+        })?;
+        let p = s.inner.kkt_perturbations().map_err(solver_error_to_py)?;
+        Ok(p.to_vec().into_pyarray_bound(py))
+    }
+
     /// Dimension of the full compound KKT vector. `None` if no
     /// converged factor is held yet.
     #[getter]

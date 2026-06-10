@@ -106,12 +106,16 @@ The relation is `H_scaled[i,j] = df / (dc_i·dc_j) · H[i,j]`, where
 `df` is the objective scaling factor and `dc_i` the pin rows'
 constraint scaling factors.
 
-One caveat: the IPM's inertia-correction perturbations (`delta_w`,
-`delta_c`) are added to the factor in *scaled* space, so on a problem
-whose final factorization needed regularization (e.g. linearly
-dependent pin rows) the unscaling maps a slightly different perturbed
-system per scaling method. On well-posed estimation problems the
-final factor is unregularized and the invariance is exact.
+One caveat: the IPM's inertia-correction perturbations (`δ_x`, `δ_s`,
+`δ_c`, `δ_d`) are added to the factor in *scaled* space, so on a
+problem whose final factorization needed regularization (e.g.
+linearly dependent pin rows) the unscaling maps a slightly different
+perturbed system per scaling method. The perturbations are reported —
+`info["kkt_perturbations"]` / `Solver.kkt_perturbations` (Python),
+`SensResult::kkt_perturbations` / `Solver::kkt_perturbations` (Rust)
+— so a covariance workflow can assert they are all zero before
+trusting `-inv(reduced_hessian)`; on well-posed estimation problems
+the final factor is unregularized and the invariance is exact.
 
 ## Verification
 

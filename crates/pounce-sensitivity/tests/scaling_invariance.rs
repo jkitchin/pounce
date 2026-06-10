@@ -225,6 +225,13 @@ fn run_reduced_hessian(scaling_method: &str, with_leading_inequality: bool) -> (
         "solve failed under nlp_scaling_method={scaling_method}: {:?}",
         result.status,
     );
+    // Clean quadratic fixture: the final factorization needs no
+    // inertia correction, and the all-zero perturbations are the
+    // signal that the natural-units covariance reading is exact.
+    let pert = result
+        .kkt_perturbations
+        .expect("KKT perturbations reported at convergence");
+    assert_eq!(pert, [0.0; 4], "unexpected KKT regularization: {pert:?}");
     let hr = result.reduced_hessian.expect("reduced Hessian populated");
     let hr_scaled = result
         .reduced_hessian_scaled
@@ -298,13 +305,140 @@ fn pin_rows_map_through_the_c_d_split() {
     );
 }
 
-// Note on `obj_scaling_factor < 0` (maximization): the two-sided
-// (E, F) natural-units scaling handles a negative effective `df`
-// (no square root involved), so `PdSensBacksolver::new` accepts it.
-// An end-to-end regression test is not possible yet because pounce's
-// IPM currently diverges on maximization problems posed via a
-// negative `obj_scaling_factor` (pre-existing, independent of the
-// #128 fix), so no converged factor is ever produced.
+/// `obj_scaling_factor < 0` is the documented way to maximize. The
+/// two-sided (E, F) natural-units scaling needs no square root, so a
+/// negative effective `df` is handled and the sensitivity surfaces
+/// keep working. The fixture maximizes `−[c0(x−p)² + c1(x−1)²]`
+/// (same minimizer as [`ScaledPinTnlp`] under `obj_scaling_factor =
+/// −1`). The user-space multipliers satisfy the *declared* problem's
+/// Lagrangian `−f + yᵀg`, so the natural-units reduced Hessian is
+/// the sign-flip of [`H_ANALYTIC`].
+#[test]
+fn reduced_hessian_works_under_negative_obj_scaling() {
+    let mut app = make_app("gradient-based");
+    app.options_mut()
+        .set_numeric_value("obj_scaling_factor", -1.0, true, false)
+        .unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(NegatedScaledPinTnlp));
+    let result = SensSolve::new(vec![0])
+        .with_reduced_hessian()
+        .run(&mut app, tnlp);
+    assert!(
+        matches!(
+            result.status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "maximization solve failed: {:?}",
+        result.status,
+    );
+    let hr = result
+        .reduced_hessian
+        .expect("reduced Hessian populated under negative obj scaling");
+    let expected = -H_ANALYTIC;
+    let rel = (hr[0] - expected).abs() / expected.abs();
+    assert!(
+        rel < 1e-6,
+        "negative obj_scaling_factor: H = {}, expected = {expected}",
+        hr[0],
+    );
+    let df = result.obj_scaling_factor.expect("df reported");
+    assert!(df < 0.0, "effective df must carry the user's sign: {df}");
+}
+
+/// `max −[c0(x−p)² + c1(x−1)²]` posed as a TNLP whose `f` is the
+/// negated objective; with `obj_scaling_factor = −1` the IPM
+/// re-negates it internally and converges to the same minimizer as
+/// [`ScaledPinTnlp`].
+struct NegatedScaledPinTnlp;
+
+impl TNLP for NegatedScaledPinTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 1,
+            nnz_jac_g: 1,
+            nnz_h_lag: 3,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l[0] = -1.0e19;
+        b.x_u[0] = 1.0e19;
+        b.x_l[1] = -1.0e19;
+        b.x_u[1] = 1.0e19;
+        b.g_l[0] = SCALE * P_HAT;
+        b.g_u[0] = SCALE * P_HAT;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x[0] = 0.0;
+        sp.x[1] = 0.0;
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        let (xx, p) = (x[0], x[1]);
+        Some(-(C0 * (xx - p) * (xx - p) + C1 * (xx - 1.0) * (xx - 1.0)))
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        let (xx, p) = (x[0], x[1]);
+        g[0] = -(2.0 * C0 * (xx - p) + 2.0 * C1 * (xx - 1.0));
+        g[1] = 2.0 * C0 * (xx - p);
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = SCALE * x[1];
+        true
+    }
+
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0]);
+                jcol.copy_from_slice(&[1]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = SCALE;
+            }
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1, 1]);
+                jcol.copy_from_slice(&[0, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = -obj_factor * 2.0 * (C0 + C1);
+                values[1] = obj_factor * 2.0 * C0;
+                values[2] = -obj_factor * 2.0 * C0;
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
 
 #[test]
 fn parametric_step_is_invariant_to_nlp_scaling() {

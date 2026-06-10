@@ -328,6 +328,11 @@ def test_reduced_hessian_is_unscaled_regardless_of_nlp_scaling_pounce_128():
         info_off["reduced_hessian_scaled"], info_off["reduced_hessian"]
     )
 
+    # The clean quadratic fixture needs no inertia correction: the
+    # all-zero perturbations certify the covariance reading is exact.
+    for info in results.values():
+        np.testing.assert_allclose(info["kkt_perturbations"], np.zeros(4))
+
     # ...and with gradient-based scaling both df and the pin dc fire,
     # and the scaled accessor reconstructs from the reported factors.
     info_on = results[None]
@@ -366,6 +371,9 @@ def test_solver_session_reduced_hessian_scaled_accessor_and_nlp_scaling():
     h_scaled = solver.reduced_hessian([0], scaled=True)
     dc = scaling["c_scale"][0]
     np.testing.assert_allclose(h_scaled[0], h[0] * df / dc ** 2, rtol=1e-12)
+
+    # Factor-regularization diagnostic mirrors the info-dict key.
+    np.testing.assert_allclose(solver.kkt_perturbations, np.zeros(4))
 
 
 def test_solve_with_sens_finite_difference_cross_check():

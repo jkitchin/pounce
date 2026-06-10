@@ -82,7 +82,7 @@ use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_linsol::summary::LinearSolverSummary;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_nlp::alg_types::SolverReturn;
-use pounce_nlp::orig_ipopt_nlp::{NoScaling, OrigIpoptNlp, ScalingMethod};
+use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -630,13 +630,25 @@ impl IpoptApplication {
     fn optimize_sqp_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         use pounce_nlp::orig_ipopt_nlp::OrigIpoptNlp;
         use pounce_nlp::tnlp_adapter::TNLPAdapter;
-        use pounce_nlp::NoScaling;
+        use pounce_nlp::ConstObjScaling;
 
         let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
             Ok(a) => Rc::new(RefCell::new(a)),
             Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
         };
-        let orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
+        // The SQP path never runs gradient-based scaling, but the
+        // constant `obj_scaling_factor` (negative ⇒ maximize) still
+        // applies via the OrigIpoptNlp constructor.
+        let obj_scaling_factor = self
+            .options
+            .get_numeric_value("obj_scaling_factor", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1.0);
+        let orig_nlp = match OrigIpoptNlp::new(
+            Rc::clone(&adapter),
+            Rc::new(ConstObjScaling(obj_scaling_factor)),
+        ) {
             Ok(n) => n,
             Err(_) => return ApplicationReturnStatus::InternalError,
         };
@@ -1046,7 +1058,21 @@ impl IpoptApplication {
                 return ApplicationReturnStatus::InvalidProblemDefinition;
             }
         };
-        let mut orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
+        // Carry the user's constant `obj_scaling_factor` (default 1.0;
+        // negative ⇒ maximize) into the NLP. Until pounce#128's
+        // follow-up this option was registered but never read, so it
+        // was silently a no-op — maximization diverged because the
+        // algorithm minimized the unscaled objective.
+        let obj_scaling_factor = self
+            .options
+            .get_numeric_value("obj_scaling_factor", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1.0);
+        let mut orig_nlp = match OrigIpoptNlp::new(
+            Rc::clone(&adapter),
+            Rc::new(ConstObjScaling(obj_scaling_factor)),
+        ) {
             Ok(n) => n,
             Err(_) => {
                 timing.overall_alg.end();

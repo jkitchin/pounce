@@ -309,6 +309,21 @@ impl PdSensBacksolver {
         (n.obj_scaling_factor(), n.c_scale_vec(), n.d_scale_vec())
     }
 
+    /// Inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` baked
+    /// into the held KKT factor (the IPM's `current_perturbation`
+    /// state at convergence). All zero ⇔ the final factorization was
+    /// unregularized and the natural-units back-solves invert the
+    /// exact KKT matrix. Nonzero ⇔ the factor carries a (scaled-space)
+    /// regularization, so sensitivity outputs — covariance in
+    /// particular — are perturbed and no longer exactly
+    /// scaling-invariant; consumers should check this before trusting
+    /// `-inv(reduced_hessian)` on ill-conditioned problems
+    /// (pounce#128 follow-up).
+    pub fn kkt_perturbations(&self) -> [Number; 4] {
+        let p = self.data.borrow().perturbations;
+        [p.delta_x, p.delta_s, p.delta_c, p.delta_d]
+    }
+
     /// Map user-facing 0-based `g(x)` indices of parameter-pin
     /// equality constraints to flat KKT rows **and** the pin rows'
     /// `dc_i` scaling factors, in one pass. The KKT row of pin `i` is

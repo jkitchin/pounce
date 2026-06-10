@@ -480,6 +480,17 @@ impl Solver {
         Ok(state.backsolver.nlp_scaling())
     }
 
+    /// Inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` baked
+    /// into the held KKT factor. All zero ⇔ the final factorization
+    /// was unregularized and the natural-units back-solves invert the
+    /// exact KKT matrix — see
+    /// [`crate::PdSensBacksolver::kkt_perturbations`].
+    pub fn kkt_perturbations(&self) -> Result<[Number; 4], SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        Ok(state.backsolver.kkt_perturbations())
+    }
+
     /// Per-pin equality-row scaling factors `dc_i` (1.0 entries when
     /// no constraint scaling is active), ordered like
     /// `pin_constraint_indices`.
