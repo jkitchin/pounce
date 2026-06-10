@@ -31,6 +31,7 @@ use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::TNLP;
+use pounce_nlp::SolveStatistics;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     make_default_restoration_factory_provider, InnerBackendFactoryFactory,
@@ -858,6 +859,15 @@ pub fn main() -> ExitCode {
         );
     };
 
+    // Snapshot the statistics from the solve whose verdict `status` currently
+    // reflects. The MC64 scaling retry below runs a *second* solve into the
+    // same `app`, which overwrites `app.statistics()`. On a non-promoting
+    // retry we keep the original local-infeasibility verdict, so we must keep
+    // the original stats too — otherwise the summary/JSON report would pair the
+    // original verdict with the failed retry's iteration count / objective. We
+    // adopt the retry's stats only when the retry is actually promoted (below).
+    let mut solve_stats = app.statistics();
+
     // Hypersensitivity scaling fallback (`feral_infeasibility_scaling_retry`,
     // on by default). Some interior-point KKT trajectories are chaotic: under
     // two equally backward-stable linear-solver scalings the iterates stay
@@ -909,25 +919,27 @@ pub fn main() -> ExitCode {
         app.set_restoration_factory_provider(resto_provider);
 
         let retry_status = app.optimize_tnlp(Rc::clone(&tnlp));
-        if matches!(
-            retry_status,
-            ApplicationReturnStatus::SolveSucceeded
-                | ApplicationReturnStatus::SolvedToAcceptableLevel
-        ) {
+        let retry_stats = app.statistics();
+        if scaling_retry_promoted(retry_status) {
             eprintln!(
                 "pounce: MC64 re-solve recovered the problem — promoting ({retry_status:?})."
             );
-            status = retry_status;
         } else {
             eprintln!(
                 "pounce: MC64 re-solve did not recover ({retry_status:?}); keeping the original \
                  local-infeasibility verdict (now corroborated by a second scaling)."
             );
-            status = ApplicationReturnStatus::InfeasibleProblemDetected;
         }
+        // Keep `status` and `solve_stats` in lockstep: on promotion the retry
+        // is authoritative (its verdict + its statistics); otherwise both stay
+        // the original local-infeasibility verdict and the original solve's
+        // statistics. See `resolve_scaling_retry_outcome` (code review L23).
+        (status, solve_stats) =
+            resolve_scaling_retry_outcome(retry_status, solve_stats, retry_stats);
     }
 
-    let solve_stats = app.statistics();
+    // `solve_stats` was snapshotted right after the solve loop and updated
+    // above iff the MC64 retry was promoted, so it always matches `status`.
     let counters = counting.borrow();
     if json_dbg {
         // Pure protocol channel: emit a `terminated` lifecycle event in
@@ -1193,6 +1205,43 @@ fn build_debugger(
     match script {
         Some(p) => dbg.with_script(p.to_string_lossy().into_owned()),
         None => dbg,
+    }
+}
+
+/// Did an MC64 hypersensitivity re-solve converge well enough to overturn the
+/// original local-infeasibility verdict? Only a clean or acceptable-level solve
+/// promotes; everything else (including a second infeasibility verdict) leaves
+/// the original verdict standing.
+fn scaling_retry_promoted(retry_status: ApplicationReturnStatus) -> bool {
+    matches!(
+        retry_status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    )
+}
+
+/// Resolve the final `(status, statistics)` after an MC64 hypersensitivity
+/// re-solve (code review L23).
+///
+/// On promotion the retry is the authoritative solve, so its status **and** its
+/// statistics are reported together. Otherwise the original local-infeasibility
+/// verdict is kept — and so are the *original* solve's statistics, so the
+/// summary / JSON report never pair the original verdict with the failed
+/// retry's iteration count or objective. The pre-fix code reverted `status` to
+/// `InfeasibleProblemDetected` but read `app.statistics()` *after* the retry,
+/// leaking the retry solve's stats into a report labeled with the original
+/// verdict.
+fn resolve_scaling_retry_outcome(
+    retry_status: ApplicationReturnStatus,
+    original_stats: SolveStatistics,
+    retry_stats: SolveStatistics,
+) -> (ApplicationReturnStatus, SolveStatistics) {
+    if scaling_retry_promoted(retry_status) {
+        (retry_status, retry_stats)
+    } else {
+        (
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            original_stats,
+        )
     }
 }
 
@@ -1850,5 +1899,71 @@ mod convex_status_tests {
             qp_status_to_ars(QpStatus::Optimal),
             ApplicationReturnStatus::SolveSucceeded
         );
+    }
+}
+
+#[cfg(test)]
+mod scaling_retry_tests {
+    use super::{resolve_scaling_retry_outcome, scaling_retry_promoted};
+    use pounce_nlp::return_codes::ApplicationReturnStatus;
+    use pounce_nlp::SolveStatistics;
+
+    fn stats_with_iters(n: i32) -> SolveStatistics {
+        SolveStatistics {
+            iteration_count: n,
+            final_objective: n as f64,
+            ..SolveStatistics::default()
+        }
+    }
+
+    /// Code review L23: when the MC64 hypersensitivity re-solve does **not**
+    /// recover, the verdict reverts to the original local-infeasibility status
+    /// — and the reported statistics must revert with it, not leak the failed
+    /// retry's iteration count / objective.
+    #[test]
+    fn failed_retry_keeps_original_status_and_stats() {
+        let original = stats_with_iters(7);
+        let retry = stats_with_iters(42);
+        for retry_status in [
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            ApplicationReturnStatus::MaximumIterationsExceeded,
+            ApplicationReturnStatus::RestorationFailed,
+        ] {
+            assert!(!scaling_retry_promoted(retry_status));
+            let (status, stats) =
+                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
+            assert_eq!(
+                status,
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                "a non-promoting retry ({retry_status:?}) keeps the original verdict"
+            );
+            assert_eq!(
+                stats.iteration_count, 7,
+                "stats must stay the original solve's, not the failed retry's"
+            );
+            assert_eq!(stats.final_objective, 7.0);
+        }
+    }
+
+    /// On promotion the retry is authoritative: its status AND its statistics
+    /// are reported together.
+    #[test]
+    fn promoted_retry_adopts_retry_status_and_stats() {
+        let original = stats_with_iters(7);
+        let retry = stats_with_iters(42);
+        for retry_status in [
+            ApplicationReturnStatus::SolveSucceeded,
+            ApplicationReturnStatus::SolvedToAcceptableLevel,
+        ] {
+            assert!(scaling_retry_promoted(retry_status));
+            let (status, stats) =
+                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
+            assert_eq!(status, retry_status, "a promoting retry adopts its verdict");
+            assert_eq!(
+                stats.iteration_count, 42,
+                "promoted: stats must be the retry solve's"
+            );
+            assert_eq!(stats.final_objective, 42.0);
+        }
     }
 }

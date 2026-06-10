@@ -85,6 +85,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L20 | sensitivity: `IndexSchurData::set_from_flags` returns the wrong error variant (`AlreadyInitialized`) for an out-of-range flag value and leaves partially-populated `idx`/`val` state with `initialized == false` (`schur_data.rs:217`), so a caller retry double-appends rows | **FIXED** | **Bug confirmed by reading + running code (pounce port of `SensIndexSchurData`).** Two coupled defects: (1) an out-of-range flag (anything other than 0/1) returned `Err(SchurDataError::AlreadyInitialized)` — a misleading variant that names an unrelated failure mode; (2) the validation happened *mid-loop*, after earlier `f == 1` entries had already been pushed to `idx`/`val`, and the early return left `initialized == false`, so a caller that caught the error and retried with a corrected flag array would re-run the push loop and **append duplicate rows** on top of the partial state. **Fix**: added a dedicated `SchurDataError::InvalidFlag` variant (doc cites upstream `SensIndexSchurData.cpp:51-78`) and rewrote `set_from_flags` to validate the entire flag array up front (`flags.iter().any(|&f| f != 0 && f != 1)` → `Err(InvalidFlag)`) *before* any mutation — atomic, so a rejected call leaves the instance pristine for retry. **Tests** (`schur_data::tests`): `set_from_flags_rejects_invalid_flag_with_distinct_variant` (flags `[1,0,2,1]` → `Err(InvalidFlag)`, not `AlreadyInitialized`); `set_from_flags_invalid_flag_leaves_instance_pristine_for_retry` (flags `[1,0,5]` → `InvalidFlag`, asserts `!is_initialized()`, `nrows() == 0`, empty `col_indices`; then retry `[1,0,1]` yields `col_indices() == [0,2]` with no duplicate append). **Fail-first confirmed**: against the pre-fix code both new tests fail — the old loop returns `Err(AlreadyInitialized)` for the invalid-flag input and, with the early return removed, leaves `col_indices() == [0,3]` (partial) so the retry double-appends to `[0,3,0,2]`. Restored; full pounce-sensitivity suite green. `cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L20 detail`. |
 | L21 | l1penalty: `L1PenaltyBarrierTnlp::new` discards the `bool` return of `get_starting_point` and `eval_g` with `let _ =` (`wrapper.rs:179-191`), so a failing seed callback silently seeds the `(p, n)` slacks from a zeroed `x_0`/violation instead of returning `None` as documented | **FIXED** | **Bug confirmed by reading + running code (pounce port of ripopt `L1PenaltyBarrierNlp`).** `new`'s doc-contract: "Calls … `get_starting_point`, and `eval_g` … If any of these fail, returns `None`." The code violated it — both calls were `let _ = …`, so a TNLP whose `get_starting_point`/`eval_g` returns `false` would proceed with `x0` left at its `vec![0.0; n]` initialization (and `g0` at zero), seeding every equality slack `(p_k, n_k)` from a bogus zero violation rather than rejecting the wrap. Both methods return `bool` (`pounce-nlp/src/tnlp.rs:175,184`). **Fix**: capture the `get_starting_point` result and `return None` if false; fold the `eval_g` call into `if m > 0 && !…eval_g(…) { return None; }`. Now `new` honors its documented "returns `None` if any of these fail" contract. **Tests** (`wrapper::tests`): a `SeedFails` mock (mirrors `EqOnly` but with `fail_starting_point`/`fail_eval_g` flags) drives `new_returns_none_when_starting_point_fails`, `new_returns_none_when_eval_g_fails`, and a control `new_succeeds_when_seed_callbacks_succeed` (both flags off → `Some`). **Fail-first confirmed**: reverting to `let _ =` makes both `*_returns_none_*` tests fail (`new` returns `Some`) while the control stays green. Restored; full pounce-l1penalty suite green (14 lib). `cargo fmt -p pounce-l1penalty` / `cargo clippy -p pounce-l1penalty --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L21 detail`. |
 | L22 | CLI: the `--cite <model>.nl` "wrong file" hint suggests producing a report with `pounce … --solve-report report.json`, but no `--solve-report` flag exists — `cli.rs` parses only `--json-output` (`main.rs:1700-1711`), so a user following the hint hits "unknown argument" | **FIXED** | **Bug confirmed by reading + running code.** When `--cite` is handed a `.nl` model instead of a solve-report JSON, `run_cite` prints a help hint telling the user to generate a report first. The hint named `--solve-report`, which the CLI arg parser does not accept (grep of `cli.rs` shows the report-output flag is `--json-output` at `cli.rs:520`; `--solve-report` appears nowhere). Following the hint literally produces an unknown-argument error. **Fix**: corrected the hint string (and its preceding comment) to `pounce {} --json-output report.json`. **Test** (`tests/cite_hint_flag.rs`, new integration test using `CARGO_BIN_EXE_pounce`): writes a temp `.nl`-extension file with non-JSON contents, runs `pounce --cite <file>.nl`, and asserts stderr **contains** `--json-output` and **does not contain** `--solve-report`. **Fail-first confirmed**: reverting the hint to `--solve-report` makes the test fail (stderr lacks `--json-output`). `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L22 detail`. |
+| L23 | CLI: after a failed MC64 hypersensitivity scaling retry, `status` reverts to the original local-infeasibility verdict but the reported statistics still reflect the *retry* solve (`main.rs:883-899, 902`) — `app.statistics()` was read **after** the second `optimize_tnlp`, so a non-promoting retry pairs the original verdict with the failed retry's iteration count / objective | **FIXED** | **Bug confirmed by reading + running code.** The `feral_infeasibility_scaling_retry` guard re-solves once with MC64 on a local-infeasibility verdict; on failure it sets `status = InfeasibleProblemDetected` (original verdict) but the subsequent `let solve_stats = app.statistics()` returns the *retry* solve's stats (the retry's `optimize_tnlp` overwrote `app.statistics()`), so the summary/JSON report show the original verdict next to the failed retry's iterations/objective. On the promote path stats were correct only incidentally. **Fix**: snapshot `solve_stats = app.statistics()` immediately after the solve loop (the verdict-bearing solve), and after the retry set `(status, solve_stats)` together via a new pure helper `resolve_scaling_retry_outcome(retry_status, original_stats, retry_stats)` — promote ⇒ `(retry_status, retry_stats)`; otherwise ⇒ `(InfeasibleProblemDetected, original_stats)`. Status and stats now move in lockstep. Extracted `scaling_retry_promoted` for the promote predicate. **Tests** (`main.rs` `scaling_retry_tests`): `failed_retry_keeps_original_status_and_stats` (over `InfeasibleProblemDetected`/`MaximumIterationsExceeded`/`RestorationFailed` retry verdicts → status stays infeasible AND `iteration_count`/`final_objective` stay the original solve's `7`, not the retry's `42`); `promoted_retry_adopts_retry_status_and_stats` (`SolveSucceeded`/`SolvedToAcceptableLevel` → status + stats both the retry's `42`). **Fail-first confirmed**: modeling the pre-fix leak (else-branch returns `retry_stats`) fails the failed-retry test (`iteration_count` 42 ≠ 7). Restored; full pounce-cli bin tests green. `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce -- -D clippy::correctness -D clippy::suspicious` clean. See `## L23 detail`. |
 
 ## C1 detail
 
@@ -4500,4 +4501,89 @@ stderr hint **contains** `--json-output` and **does not contain**
 **Fail-first confirmed.** Reverting the hint to `--solve-report report.json`
 makes the test fail (stderr no longer contains `--json-output`). Restored.
 `cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --all-targets
+-- -D clippy::correctness -D clippy::suspicious` clean.
+
+## L23 detail
+
+**Issue (L23).** After a failed MC64 scaling retry, stats reflect the retry but
+status reverts to the original verdict (`main.rs:883-899, 902`).
+
+**Verification.** The `feral_infeasibility_scaling_retry` guard (on by default)
+handles discs-class hypersensitivity: on a local-infeasibility verdict under a
+non-MC64 effective scaling, it re-solves once with MC64 and promotes only if
+MC64 succeeds. The control flow was:
+
+```rust
+let mut status = loop { app.optimize_tnlp(...) /* … */ };   // original solve
+if scaling_retry_enabled && … && status == InfeasibleProblemDetected {
+    app.options_mut().read_from_str("feral_scaling mc64\n", true);
+    let retry_status = app.optimize_tnlp(...);              // SECOND solve
+    if matches!(retry_status, SolveSucceeded | SolvedToAcceptableLevel) {
+        status = retry_status;                              // promote
+    } else {
+        status = InfeasibleProblemDetected;                 // revert verdict
+    }
+}
+let solve_stats = app.statistics();                         // <-- BUG: read here
+```
+
+`app.statistics()` returns the stats of the *most recent* `optimize_tnlp`
+(`application.rs:428` clones `self.statistics`, which the retry overwrote). So
+on the non-promoting branch `status` is the original verdict but `solve_stats`
+is the failed retry's — the console summary and the JSON solve report then show
+`InfeasibleProblemDetected` paired with the MC64 retry's iteration count and
+objective, two different solves' data stitched together. (On the promote branch
+the stats happened to match the verdict, so the bug only bites the failure
+path — exactly the path the guard exists to handle.)
+
+**Fix** (`crates/pounce-cli/src/main.rs`). Snapshot the verdict-bearing solve's
+stats *before* the retry, and decide status + stats together:
+
+- After the solve loop: `let mut solve_stats = app.statistics();`.
+- After the retry: capture `let retry_stats = app.statistics();` and set
+  `(status, solve_stats) = resolve_scaling_retry_outcome(retry_status,
+  solve_stats, retry_stats);`.
+- Removed the later `let solve_stats = app.statistics();` re-read.
+
+Two new pure helpers make the decision testable:
+
+```rust
+fn scaling_retry_promoted(retry_status: ApplicationReturnStatus) -> bool {
+    matches!(retry_status, SolveSucceeded | SolvedToAcceptableLevel)
+}
+
+fn resolve_scaling_retry_outcome(
+    retry_status: ApplicationReturnStatus,
+    original_stats: SolveStatistics,
+    retry_stats: SolveStatistics,
+) -> (ApplicationReturnStatus, SolveStatistics) {
+    if scaling_retry_promoted(retry_status) {
+        (retry_status, retry_stats)
+    } else {
+        (InfeasibleProblemDetected, original_stats)
+    }
+}
+```
+
+Now status and statistics always describe the same solve.
+
+**Tests** (`main.rs` `scaling_retry_tests`, unit). An end-to-end reproduction
+would need a problem that is infeasible under the default scaling *and* under
+MC64, plus a way to distinguish the two solves' stats — fragile. Instead the
+decision logic is extracted and tested directly with synthetic
+`SolveStatistics` (original `iteration_count = 7`, retry `= 42`):
+- `failed_retry_keeps_original_status_and_stats` — for each non-promoting retry
+  verdict (`InfeasibleProblemDetected`, `MaximumIterationsExceeded`,
+  `RestorationFailed`): status stays `InfeasibleProblemDetected` and stats stay
+  the original (`iteration_count == 7`, `final_objective == 7.0`).
+- `promoted_retry_adopts_retry_status_and_stats` — for `SolveSucceeded` /
+  `SolvedToAcceptableLevel`: status becomes the retry's and stats become the
+  retry's (`42`).
+
+**Fail-first confirmed.** Modeling the original leak (the `else` branch returns
+`retry_stats` instead of `original_stats`) fails
+`failed_retry_keeps_original_status_and_stats` ("stats must stay the original
+solve's, not the failed retry's", `iteration_count` 42 ≠ 7) while the promote
+test stays green. Restored; full pounce-cli bin tests green.
+`cargo fmt -p pounce-cli` / `cargo clippy -p pounce-cli --bin pounce
 -- -D clippy::correctness -D clippy::suspicious` clean.
