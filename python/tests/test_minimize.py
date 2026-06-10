@@ -214,3 +214,132 @@ def test_minimize_unknown_option_raises_at_solve():
             tol_typo=1e-8,
             print_level=0,
         )
+
+
+# -- scipy.optimize.Bounds input ----------------------------------------------
+
+
+def test_minimize_accepts_scipy_bounds_object():
+    """``bounds`` may be a ``scipy.optimize.Bounds`` instance, not just a list."""
+    f, grad, target, _ = _mixture_quadratic()
+    # Box: x_i in [0.2, 0.6]. Target [0.7, 0.1, 0.4] gets clipped to [0.6, 0.2, 0.4].
+    bnds = opt.Bounds(lb=np.array([0.2, 0.2, 0.2]), ub=np.array([0.6, 0.6, 0.6]))
+    res = pounce.minimize(
+        f, x0=np.full(3, 0.4), jac=grad, bounds=bnds, tol=1e-10, print_level=0,
+    )
+    assert res.success
+    np.testing.assert_allclose(res.x, [0.6, 0.2, 0.4], atol=1e-6)
+
+
+def test_minimize_accepts_scipy_bounds_with_scalar_broadcast():
+    """``Bounds(lb=0.0, ub=1.0)`` (scalar) should broadcast to n."""
+    f, grad, target, _ = _mixture_quadratic()
+    bnds = opt.Bounds(lb=0.0, ub=1.0)
+    res = pounce.minimize(
+        f, x0=np.full(3, 0.5), jac=grad, bounds=bnds, tol=1e-10, print_level=0,
+    )
+    assert res.success
+    np.testing.assert_allclose(res.x, target, atol=1e-6)
+
+
+def test_minimize_accepts_scipy_bounds_keep_feasible_ignored():
+    """``keep_feasible=True`` must not raise — silently honored by the barrier."""
+    f, grad, target, _ = _mixture_quadratic()
+    bnds = opt.Bounds(lb=0.0, ub=1.0, keep_feasible=True)
+    res = pounce.minimize(
+        f, x0=np.full(3, 0.5), jac=grad, bounds=bnds, tol=1e-10, print_level=0,
+    )
+    assert res.success
+    np.testing.assert_allclose(res.x, target, atol=1e-6)
+
+
+# -- scipy → Ipopt option-name synonyms ---------------------------------------
+
+
+def test_minimize_maxiter_synonym():
+    """``maxiter`` (scipy) translates to Ipopt ``max_iter`` so user options work."""
+    f, grad, _, _ = _mixture_quadratic()
+    # maxiter=1 should leave the solver short of convergence on Rosenbrock-ish problems,
+    # but on this convex quadratic 1 step still converges. So instead just check the
+    # option is *accepted*.
+    res = pounce.minimize(
+        f, x0=np.full(3, 1.0 / 3), jac=grad, maxiter=200, print_level=0,
+    )
+    assert res.success
+
+
+def test_minimize_gtol_ftol_xtol_synonyms():
+    """``gtol`` / ``ftol`` / ``xtol`` all map to Ipopt's single ``tol``."""
+    f, grad, target, _ = _mixture_quadratic()
+    for key in ("gtol", "ftol", "xtol"):
+        res = pounce.minimize(
+            f, x0=np.full(3, 0.5), jac=grad, print_level=0, **{key: 1e-10},
+        )
+        assert res.success, f"{key} synonym failed"
+        np.testing.assert_allclose(res.x, target, atol=1e-6)
+
+
+def test_minimize_disp_synonym():
+    """``disp=False`` (scipy bool) translates to ``print_level=0`` (Ipopt int)."""
+    f, grad, target, _ = _mixture_quadratic()
+    res = pounce.minimize(
+        f, x0=np.full(3, 0.5), jac=grad, disp=False,
+    )
+    assert res.success
+    np.testing.assert_allclose(res.x, target, atol=1e-6)
+
+
+def test_minimize_iprint_synonym():
+    """``iprint`` translates to Ipopt's ``print_level``."""
+    f, grad, target, _ = _mixture_quadratic()
+    res = pounce.minimize(
+        f, x0=np.full(3, 0.5), jac=grad, iprint=0,
+    )
+    assert res.success
+    np.testing.assert_allclose(res.x, target, atol=1e-6)
+
+
+def test_minimize_maxcor_synonym():
+    """``maxcor`` translates to Ipopt's ``limited_memory_max_history``."""
+    f, grad, target, _ = _mixture_quadratic()
+    res = pounce.minimize(
+        f, x0=np.full(3, 0.5), jac=grad, maxcor=8, print_level=0,
+    )
+    assert res.success
+    np.testing.assert_allclose(res.x, target, atol=1e-6)
+
+
+# -- nfev / njev counters on the result ----------------------------------------
+
+
+def test_minimize_populates_nfev_and_njev():
+    """The result should expose scipy-standard ``nfev`` / ``njev`` counters."""
+    f, grad, target, _ = _mixture_quadratic()
+    res = pounce.minimize(
+        f, x0=np.full(3, 0.5), jac=grad, tol=1e-10, print_level=0,
+    )
+    assert res.success
+    # At least one objective and one gradient evaluation must have happened.
+    assert res.nfev > 0
+    assert res.njev > 0
+    # And they should be on the order of magnitude of iteration count, not 0.
+    assert res.nfev >= res.nit
+
+
+def test_minimize_jac_true_counts_both_eval_modes():
+    """With ``jac=True`` a single fun(x) call returns (f, g); both counters tick."""
+    call_count = {"n": 0}
+
+    def fg(x):
+        call_count["n"] += 1
+        return 0.5 * float((x ** 2).sum()), x
+
+    res = pounce.minimize(
+        fg, x0=np.array([1.0, 2.0, 3.0]), jac=True, tol=1e-10, print_level=0,
+    )
+    assert res.success
+    # Counters should both be non-zero; the single-pass cache reuse means
+    # ``call_count["n"]`` is roughly equal to ``nfev`` (Ipopt calls objective,
+    # which calls fg, which the cache then serves to gradient).
+    assert res.nfev > 0
+    assert res.njev > 0
