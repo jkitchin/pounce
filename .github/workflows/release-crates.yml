@@ -18,7 +18,7 @@
 # Add it under Settings -> Secrets -> Actions (repo-level), or scope it to the
 # `crates-io` environment below to gate publishes behind a manual approval.
 # (Alternative not used here: crates.io OIDC trusted publishing, which would
-# need a per-crate Trusted Publisher config for all 18 crates.)
+# need a per-crate Trusted Publisher config for all 19 crates.)
 name: release-crates
 
 on:

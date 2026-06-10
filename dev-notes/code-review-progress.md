@@ -121,6 +121,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L51 | `GetIpoptCurrentViolations` bound-violation branches skip the length check their sibling branches perform (`pounce-cinterface/src/lib.rs:788-808`); a packed-length mismatch indexes `v[i]` out of bounds → panic inside `extern "C"` → abort | **FIXED (hardened) + placeholder behavior documented** | **Confirmed by reading; panic not reachable through the public API (defense-in-depth fix).** The `x_l_violation`/`x_u_violation` branches built `v = vec![0.0; n_us]` and ran `for (i, s) in pack_z_*_for_user(...).enumerate() { v[i] = ... }` with **no** length guard, unlike the five sibling branches (`compl_x_l/u`, `grad_lag_x`, and every branch of `GetIpoptCurrentIterate`) which all `if v.len() != n_us { return false; }` first. An oversized pack would index `v[i]` out of bounds → panic; `with_current` has **no** `catch_unwind`, so the panic unwinds across `extern "C"` → process abort. In practice the top-of-function `n != info.n` guard pins `n` to `info.n`, and `pack_z_*_for_user` returns `cls.n_full_x == info.n`, so the mismatch is unreachable via the public API today — this is a latent gap hardened for consistency/defense-in-depth. **Fix**: add the same `if pack.len() != n_us { return false; }` guard to both bound branches. **Tests** (`pounce-cinterface` lib): `bound_violation_scatter_rejects_oversized_pack_instead_of_panicking` is **fail-first at the logic level** — `catch_unwind` over the pre-fix scatter (oversized pack) `.is_err()` (it panics), while the guarded version returns `Err`; and `get_current_violations_inside_callback_reports_finite_bounds` drives a real `IpoptSolve` with a finite-bound problem and asserts the (now-guarded) branches return `TRUE` with finite, non-negative violations from inside the callback. Note: `nlp_constraint_violation`/`compl_g` remain documented zero-fill placeholders returned with `TRUE` (per-row reconstruction is a follow-up) — already noted in the code comments, behavior unchanged. 45 lib tests pass; `cargo fmt` / gated clippy clean. See `## L51 detail`. |
 | L52 | `target_triple` in solve reports is always `"unknown"` (`pounce-solve-report/src/lib.rs:405-411`): `option_env!("TARGET")` is only set for build scripts, never for crate-source compilation | **FIXED** | **Confirmed empirically + fail-first test.** A standalone `rustc` of `option_env!("TARGET")` resolves to `"unknown"` at source-compile time (Cargo exposes `TARGET` to *build scripts* only), so `TARGET_TRIPLE` — and thus `fair_metadata.solver.target_triple` in every emitted `pounce.solve-report/v1` — was hard-stuck at `"unknown"`. The inline comment claiming "`TARGET` is set by Cargo when building this crate" was wrong. **Fix**: add `crates/pounce-solve-report/build.rs` that reads the build script's `TARGET` and re-exports it via `cargo:rustc-env=POUNCE_TARGET_TRIPLE=…` (with `rerun-if-env-changed=TARGET`); change the constant to `option_env!("POUNCE_TARGET_TRIPLE")` (keeps the `"unknown"` fallback for non-Cargo tooling). **Test** (`pounce-solve-report` lib): `target_triple_resolves_to_real_triple_not_unknown` asserts `TARGET_TRIPLE != "unknown"`, has `>= 2` dashes (`arch-vendor-os` shape), and propagates into a finished `ReportBuilder::finish()` report. **Fail-first**: pre-fix the constant is `"unknown"`, so the `assert_ne!` fails; post-fix it resolves to the host triple (`aarch64-apple-darwin` here). 8 lib tests pass; `cargo fmt` / gated clippy clean. See `## L52 detail`. |
 | L53 | Stale `[patch.crates-io]` story: five "Checkout feral sibling" CI steps + three manylinux `../feral` bind-mounts (`ci.yml`) and `studio/skill/README.md:39` reference a path-based feral patch the committed tree does not carry | **FIXED** | **Confirmed by reading + `cargo metadata`.** The committed `Cargo.toml` pins `feral = "0.10.0"` (a published crates.io release — verified live) with **no** `[patch.crates-io]`. The local-dev override (skip-worktree, `S` bit, not committed) redirects feral to a **git rev**, not a `path = "../feral"`. `cargo metadata` here resolves feral to `git+https://github.com/jkitchin/feral.git?rev=…` under `~/.cargo/git/checkouts/` — **never** `../feral`; in CI (committed tree, no patch) it resolves from crates.io. So every `git clone … ../feral` step and `-v …/feral:…/feral` bind-mount is dead, and the comments claiming `[patch.crates-io] feral = { path = "../feral" }` are false. **Fix**: remove all 5 "Checkout feral sibling" steps and all 3 `docker-options` feral bind-mounts from `ci.yml` (jobs `test`, `python-test`, `python-test-torch`, `wheel-smoke`, `pyomo-pounce-smoke`); correct the release-consistency comment ("feral resolves from crates.io"); rewrite `studio/skill/README.md` to state both installs build straight from crates.io (no sibling / no patch), noting the git-rev override is a local maintainer-only workflow. **Verification**: `python3 yaml.safe_load` confirms `ci.yml` stays valid with all 5 jobs; 0 "Checkout feral" steps remain; `cargo metadata` proof above. Left the dated QA log `dev-notes/qa-lp-qp-torch.md` (records a past build's `../feral` sibling) intact — a historical record, not a live reference. See `## L53 detail`. |
+| L54 | `release-crates.yml:21` says "all 18 crates"; the publish list has 19 | **FIXED** | **Confirmed by counting the authoritative list.** `scripts/publish-crates.sh`'s `CRATES=(…)` array — the topological publish list `check-release-consistency.sh` validates against the workspace's publishable crates — has exactly **19** entries (`grep -cE '^\s+pounce-'` → 19). The three `publish = false` crates (`pounce-py`, `pounce-studio-pyo3`, `iter-diff`) are correctly excluded; a `grep` false-positive flagged `pounce-studio-core`, but that match was inside a *comment* ("…stays publish = false") — studio-core IS published as of 0.4.0 (pounce-cli took a hard dep on it). So 19 is correct and the workflow comment's "18" was an off-by-one. **Fix**: `release-crates.yml:21` "all 18 crates" → "all 19 crates". Swept `.github/`, `scripts/`, `dev-notes/`, `README.md`, `CLAUDE.md` for other "18 crates" claims — none. `release-crates.yml` stays valid YAML. See `## L54 detail`. |
 
 ## C1 detail
 
@@ -6141,3 +6142,32 @@ sibling clone and bind-mount is dead, and the explanatory comments
 (`899405e`, the #111 PyTorch landing) was set up — a historical record, not
 a live instruction or a patch reference. Editing it would falsify that
 record; out of L53's scope.
+
+## L54 detail
+
+**Issue.** `.github/workflows/release-crates.yml:21` describes the
+hypothetical OIDC-trusted-publishing alternative as needing "a per-crate
+Trusted Publisher config for all 18 crates." The publish list has 19.
+
+**Verification.** The authoritative source is `scripts/publish-crates.sh`'s
+`CRATES=(…)` array — the topological list that
+`scripts/check-release-consistency.sh` cross-checks against the workspace's
+publishable crates on every PR. It has exactly 19 entries:
+
+```
+$ sed -n '/^CRATES=(/,/^)/p' scripts/publish-crates.sh | grep -cE '^\s+pounce-'
+19
+```
+
+The `publish = false` crates — `pounce-py`, `pounce-studio-pyo3`,
+`iter-diff` — are excluded. (A naive `grep -l 'publish = false'` also
+flagged `pounce-studio-core`, but that hit is in a *comment* in its
+`Cargo.toml` — "The PyO3 wrapper crate pounce-studio-pyo3 stays publish =
+false." — not a real key; studio-core is published as of 0.4.0 because the
+published `pounce-cli` depends on it.) So 19 is correct and "18" was an
+off-by-one in prose.
+
+**Fix.** `release-crates.yml:21`: "all 18 crates" → "all 19 crates". Swept
+`.github/`, `scripts/`, `dev-notes/`, `README.md`, and `CLAUDE.md` for any
+other "18 crates" claim — none found. `release-crates.yml` remains valid
+YAML. (Comment-only change; no behavior.)
