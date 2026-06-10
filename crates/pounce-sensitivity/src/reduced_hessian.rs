@@ -70,6 +70,29 @@ use pounce_common::types::Number;
 /// constructing a reduced Hessian outside a configured pounce IPM
 /// own the responsibility to pass an `obj_scal` consistent with
 /// whatever scaling their `K` factor encodes.
+/// Convert a natural-units reduced Hessian (column-major `n×n`,
+/// `n = dc.len()`) into the solver's internal scaled space in place:
+/// `H̃_ij = (df / (dc_i·dc_j)) · H_ij`, with `df` the effective
+/// objective scaling factor and `dc` the pin rows' constraint scaling
+/// factors. This is the inverse of the natural-units correction the
+/// live-factor backsolver applies (pounce#128) — i.e. the value
+/// pounce returned before #128. Single home for the formula so the
+/// `SensSolve` and `Solver` surfaces cannot drift.
+///
+/// Returns `false` when `hr` is mis-sized.
+pub fn scale_to_solver_space(hr: &mut [Number], df: Number, dc: &[Number]) -> bool {
+    let n = dc.len();
+    if hr.len() != n * n {
+        return false;
+    }
+    for j in 0..n {
+        for i in 0..n {
+            hr[j * n + i] *= df / (dc[i] * dc[j]);
+        }
+    }
+    true
+}
+
 pub fn compute_reduced_hessian<P: PCalculator>(
     pcalc: &mut P,
     hess_data: &dyn SchurData,

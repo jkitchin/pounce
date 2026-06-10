@@ -49,9 +49,12 @@ const P_HAT: Number = 0.7;
 
 /// `min c0(x−p)² + c1(x−1)²  s.t.  SCALE·p = SCALE·p̂`. Variables
 /// `(x, p)`; one equality (the pin). Optionally prepends an inactive
-/// inequality `x + p ≤ 10` as g[0] so the pin sits *after* an
-/// inequality in the user's g ordering (exercises the full-g → c-block
-/// row mapping).
+/// inequality `SCALE·(x + p) ≤ SCALE·10` as g[0] so the pin sits
+/// *after* an inequality in the user's g ordering (exercises the
+/// full-g → c-block row mapping) — and, being badly scaled itself,
+/// fires the per-row `dd` inequality scaling, which exercises the
+/// s/y_d/v-block entries of the natural-units (E, F) pair, including
+/// the `pd_u` expansion lookup for the v rows.
 struct ScaledPinTnlp {
     with_leading_inequality: bool,
 }
@@ -93,7 +96,7 @@ impl TNLP for ScaledPinTnlp {
         let pin = self.pin_row() as usize;
         if self.with_leading_inequality {
             b.g_l[0] = -1.0e19;
-            b.g_u[0] = 10.0;
+            b.g_u[0] = SCALE * 10.0;
         }
         b.g_l[pin] = SCALE * P_HAT;
         b.g_u[pin] = SCALE * P_HAT;
@@ -121,7 +124,7 @@ impl TNLP for ScaledPinTnlp {
     fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
         let pin = self.pin_row() as usize;
         if self.with_leading_inequality {
-            g[0] = x[0] + x[1];
+            g[0] = SCALE * (x[0] + x[1]);
         }
         g[pin] = SCALE * x[1];
         true
@@ -146,8 +149,8 @@ impl TNLP for ScaledPinTnlp {
             }
             SparsityRequest::Values { values } => {
                 if self.with_leading_inequality {
-                    values[0] = 1.0;
-                    values[1] = 1.0;
+                    values[0] = SCALE;
+                    values[1] = SCALE;
                     values[2] = SCALE;
                 } else {
                     values[0] = SCALE;
@@ -281,19 +284,27 @@ fn pin_rows_map_through_the_c_d_split() {
     // Hessian matches the same analytic value as the
     // no-inequality fixture.
     let (h, _) = run_reduced_hessian("none", true);
-    let rel = (h - H_ANALYTIC).abs() / H_ANALYTIC;
+    let rel = (h - H_ANALYTIC).abs() / H_ANALYTIC.abs();
     assert!(
         rel < 1e-6,
         "with a leading inequality: H = {h}, analytic = {H_ANALYTIC}",
     );
     // And stays right when scaling fires too.
     let (h2, _) = run_reduced_hessian("gradient-based", true);
-    let rel2 = (h2 - H_ANALYTIC).abs() / H_ANALYTIC;
+    let rel2 = (h2 - H_ANALYTIC).abs() / H_ANALYTIC.abs();
     assert!(
         rel2 < 1e-6,
         "leading inequality + gradient-based scaling: H = {h2}, analytic = {H_ANALYTIC}",
     );
 }
+
+// Note on `obj_scaling_factor < 0` (maximization): the two-sided
+// (E, F) natural-units scaling handles a negative effective `df`
+// (no square root involved), so `PdSensBacksolver::new` accepts it.
+// An end-to-end regression test is not possible yet because pounce's
+// IPM currently diverges on maximization problems posed via a
+// negative `obj_scaling_factor` (pre-existing, independent of the
+// #128 fix), so no converged factor is ever produced.
 
 #[test]
 fn parametric_step_is_invariant_to_nlp_scaling() {

@@ -527,46 +527,27 @@ impl PyProblem {
             stats.final_constr_viol,
             stats.final_compl,
         )?;
-        let dx_obj: PyObject = match result.dx {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("dx", dx_obj)?;
-        let dx_full_obj: PyObject = match result.dx_full {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("dx_full", dx_full_obj)?;
-        let rh_obj: PyObject = match result.reduced_hessian {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian", rh_obj)?;
-        let rh_scaled_obj: PyObject = match result.reduced_hessian_scaled {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian_scaled", rh_scaled_obj)?;
+        info.set_item("dx", opt_vec_to_py(py, result.dx))?;
+        info.set_item("dx_full", opt_vec_to_py(py, result.dx_full))?;
+        info.set_item("reduced_hessian", opt_vec_to_py(py, result.reduced_hessian))?;
+        info.set_item(
+            "reduced_hessian_scaled",
+            opt_vec_to_py(py, result.reduced_hessian_scaled),
+        )?;
         let obj_scaling_obj: PyObject = match result.obj_scaling_factor {
             Some(v) => v.into_py(py),
             None => py.None(),
         };
         info.set_item("obj_scaling_factor", obj_scaling_obj)?;
-        let pin_scaling_obj: PyObject = match result.pin_g_scaling {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("pin_g_scaling", pin_scaling_obj)?;
-        let eigvals_obj: PyObject = match result.reduced_hessian_eigenvalues {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian_eigenvalues", eigvals_obj)?;
-        let eigvecs_obj: PyObject = match result.reduced_hessian_eigenvectors {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian_eigenvectors", eigvecs_obj)?;
+        info.set_item("pin_g_scaling", opt_vec_to_py(py, result.pin_g_scaling))?;
+        info.set_item(
+            "reduced_hessian_eigenvalues",
+            opt_vec_to_py(py, result.reduced_hessian_eigenvalues),
+        )?;
+        info.set_item(
+            "reduced_hessian_eigenvectors",
+            opt_vec_to_py(py, result.reduced_hessian_eigenvectors),
+        )?;
 
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))
@@ -583,6 +564,16 @@ impl PyProblem {
     #[getter]
     fn has_hessian(&self) -> bool {
         self.has_hessian
+    }
+}
+
+/// `Some(vec)` → 1-D float ndarray, `None` → Python `None`. Shared by
+/// the optional-output info-dict keys here and in the sibling
+/// `Solver` pyclass.
+pub(crate) fn opt_vec_to_py(py: Python<'_>, v: Option<Vec<Number>>) -> PyObject {
+    match v {
+        Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        None => py.None(),
     }
 }
 

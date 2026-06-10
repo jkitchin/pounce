@@ -484,8 +484,26 @@ Index IpoptSolverGetKktDim(IpoptSolver solver);
  * Apply the converged KKT factor to `rhs` (length = KKT dim).
  * Writes the result into `lhs`. Returns 1 (TRUE) on success,
  * 0 (FALSE) on NULL inputs or absent factor.
+ *
+ * The solve is in natural (unscaled) units: any NLP scaling the IPM
+ * applied internally (`nlp_scaling_method`) is undone, so RHS and
+ * result are in the user's own units (pounce#128). The same applies
+ * to IpoptSolverParametricStep and IpoptSolverReducedHessian. Use
+ * IpoptSolverKktSolveScaled for the raw solver-space back-solve
+ * (the pre-#128 behavior).
  */
 Bool IpoptSolverKktSolve(
+    IpoptSolver    solver,
+    const Number  *rhs,
+    Number        *lhs
+);
+
+/**
+ * IpoptSolverKktSolve without the natural-units correction: the
+ * back-solve runs in the solver's internal scaled space. Identical
+ * to IpoptSolverKktSolve when no NLP scaling is active.
+ */
+Bool IpoptSolverKktSolveScaled(
     IpoptSolver    solver,
     const Number  *rhs,
     Number        *lhs

@@ -261,6 +261,13 @@ pub unsafe extern "C" fn IpoptSolverGetKktDim(solver: IpoptSolver) -> Index {
 /// `rhs` and `lhs` are flat buffers of length [`IpoptSolverGetKktDim`]
 /// in the `x || s || y_c || y_d || z_l || z_u || v_l || v_u` packing.
 ///
+/// `K` is the **natural-units** (unscaled) KKT matrix: any NLP
+/// scaling the IPM applied (`nlp_scaling_method`) is undone in the
+/// back-solve, so RHS and solution are in the user's own units
+/// (pounce#128). Use [`IpoptSolverKktSolveScaled`] for the raw
+/// back-solve against the factor exactly as the IPM holds it (the
+/// pre-#128 behavior).
+///
 /// Returns `TRUE` on success, `FALSE` if no factor is held or the
 /// back-solve fails.
 ///
@@ -274,6 +281,31 @@ pub unsafe extern "C" fn IpoptSolverKktSolve(
     rhs: *const Number,
     lhs: *mut Number,
 ) -> Bool {
+    kkt_solve_impl(solver, rhs, lhs, false)
+}
+
+/// [`IpoptSolverKktSolve`] without the natural-units correction: the
+/// back-solve runs in the solver's internal scaled space. Identical
+/// to `IpoptSolverKktSolve` when no NLP scaling is active.
+///
+/// # Safety
+///
+/// Same contract as [`IpoptSolverKktSolve`].
+#[no_mangle]
+pub unsafe extern "C" fn IpoptSolverKktSolveScaled(
+    solver: IpoptSolver,
+    rhs: *const Number,
+    lhs: *mut Number,
+) -> Bool {
+    kkt_solve_impl(solver, rhs, lhs, true)
+}
+
+unsafe fn kkt_solve_impl(
+    solver: IpoptSolver,
+    rhs: *const Number,
+    lhs: *mut Number,
+    scaled: bool,
+) -> Bool {
     if solver.is_null() || rhs.is_null() || lhs.is_null() {
         return FALSE;
     }
@@ -286,7 +318,12 @@ pub unsafe extern "C" fn IpoptSolverKktSolve(
     };
     let rhs_slice = std::slice::from_raw_parts(rhs, dim);
     let mut lhs_vec = vec![0.0; dim];
-    if s.kkt_solve(rhs_slice, &mut lhs_vec).is_err() {
+    let res = if scaled {
+        s.kkt_solve_scaled(rhs_slice, &mut lhs_vec)
+    } else {
+        s.kkt_solve(rhs_slice, &mut lhs_vec)
+    };
+    if res.is_err() {
         return FALSE;
     }
     std::ptr::copy_nonoverlapping(lhs_vec.as_ptr(), lhs, dim);

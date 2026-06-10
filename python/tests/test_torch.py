@@ -358,6 +358,42 @@ def test_torch_problem_grad_pounce_75():
     np.testing.assert_allclose(J.numpy(), np.eye(n), atol=5e-6)
 
 
+def test_torch_problem_grad_correct_under_nlp_scaling_pounce_128():
+    """pounce#128 (torch mirror of the test_jax.py regression): the
+    TorchProblem factor-reuse backward back-solves against the IPM's
+    converged KKT factor, which lives in the NLP's internally *scaled*
+    space whenever the default gradient-based scaling fires. The
+    cotangents are autodiffed from the user's natural-units f/g, so
+    the back-solve must be in natural units too (``Solver.kkt_solve``
+    now applies the scaling correction). The 1e4 coefficients make
+    both the objective factor df and the constraint row factor dc
+    fire; the analytic Jacobian of the projection onto x0+x1=1 is
+    I - 0.5*ones (the constraint's 1e4 doesn't move the feasible set).
+    """
+    from pounce.torch import TorchProblem
+
+    n, m = 2, 1
+    BIG = 1.0e4
+
+    def f(x, p):
+        d = x - p
+        return BIG * torch.dot(d, d)
+
+    def g(x, p):  # noqa: ARG001
+        return torch.stack([BIG * (x[0] + x[1] - 1.0)])
+
+    tp = TorchProblem(
+        f=f, g=g, n=n, m=m, p_example=torch.zeros(n),
+        lb=torch.full((n,), -10.0), ub=torch.full((n,), 10.0),
+        cl=torch.tensor([0.0]), cu=torch.tensor([0.0]),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    p0 = torch.tensor([0.3, -0.1])
+    J = torch.autograd.functional.jacobian(lambda p: tp.solve(p, torch.zeros(n)), p0)
+    # Pre-#128 this came back off by ~the objective scaling factor.
+    np.testing.assert_allclose(J.numpy(), np.eye(n) - 0.5 * np.ones((n, n)), atol=1e-6)
+
+
 def _warm_problem():
     """min ½‖x−p‖² s.t. Σx = 1, −10 ≤ x ≤ 10 — x*(p) projects p onto the
     simplex hyperplane, so ∂x*/∂p = I − 11ᵀ/n and the equality multiplier

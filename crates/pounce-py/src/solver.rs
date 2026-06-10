@@ -135,11 +135,17 @@ impl PySolver {
     /// real back-solve cost (pounce#77 follow-up). Same converged
     /// factor and same per-RHS work — only the per-call FFI / executor
     /// pin overhead is amortised.
+    ///
+    /// Like [`Self::kkt_solve`], results are in natural (unscaled)
+    /// units; pass `scaled=True` for the raw solver-space back-solve
+    /// (pounce#128).
+    #[pyo3(signature = (rhs_flat, n_rhs, scaled = false))]
     fn kkt_solve_many<'py>(
         &self,
         py: Python<'py>,
         rhs_flat: Vec<Number>,
         n_rhs: usize,
+        scaled: bool,
     ) -> PyResult<Bound<'py, PyArray1<Number>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("kkt_solve_many: no converged factor (call solve() first)")
@@ -160,9 +166,13 @@ impl PySolver {
             )));
         }
         let mut lhs_flat = vec![0.0; n_rhs * dim];
-        s.inner
-            .kkt_solve_many(&rhs_flat, &mut lhs_flat, n_rhs)
-            .map_err(solver_error_to_py)?;
+        let res = if scaled {
+            s.inner
+                .kkt_solve_many_scaled(&rhs_flat, &mut lhs_flat, n_rhs)
+        } else {
+            s.inner.kkt_solve_many(&rhs_flat, &mut lhs_flat, n_rhs)
+        };
+        res.map_err(solver_error_to_py)?;
         Ok(lhs_flat.into_pyarray_bound(py))
     }
 
@@ -239,16 +249,8 @@ impl PySolver {
         let (df, dc, dd) = s.inner.nlp_scaling().map_err(solver_error_to_py)?;
         let out = PyDict::new_bound(py);
         out.set_item("obj", df)?;
-        let dc_obj: PyObject = match dc {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        out.set_item("c_scale", dc_obj)?;
-        let dd_obj: PyObject = match dd {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        out.set_item("d_scale", dd_obj)?;
+        out.set_item("c_scale", crate::problem::opt_vec_to_py(py, dc))?;
+        out.set_item("d_scale", crate::problem::opt_vec_to_py(py, dd))?;
         Ok(out)
     }
 

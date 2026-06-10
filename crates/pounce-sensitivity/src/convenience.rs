@@ -104,7 +104,10 @@ pub struct SensResult {
     pub dx: Option<Vec<Number>>,
     /// Full KKT-space step (primals + slacks + duals stacked in the
     /// pounce compound-vector layout). Lower-level than `dx`; useful
-    /// for cross-checking against upstream sIPOPT outputs.
+    /// for cross-checking against upstream sIPOPT outputs. All blocks
+    /// — including the bound-multiplier z/v rows — are in natural
+    /// (unscaled) units (pounce#128); note upstream sIPOPT reports the
+    /// scaled-space step when NLP scaling is active.
     pub dx_full: Option<Vec<Number>>,
     /// Reduced Hessian `H_R`, length `n_params²`, column-major, in
     /// **natural (unscaled) units** — any NLP scaling baked into the
@@ -308,7 +311,7 @@ impl SensSolve {
                 Ok(b) => b,
                 Err(e) => {
                     outbox_cb.borrow_mut().error =
-                        Some(format!("PdSensBacksolver::new failed: {e:?}"));
+                        Some(format!("PdSensBacksolver::new failed: {e}"));
                     return;
                 }
             };
@@ -319,15 +322,8 @@ impl SensSolve {
             // NLP's c/d-split row map (pounce#128: a direct
             // `n_x + n_s + i` is wrong once inequalities precede the
             // pins in g).
-            let param_rows = match backsolver.map_pin_g_to_kkt_rows(&pin_indices) {
-                Ok(r) => r,
-                Err(e) => {
-                    outbox_cb.borrow_mut().error = Some(e);
-                    return;
-                }
-            };
-            let pin_scales = match backsolver.pin_c_scales(&pin_indices) {
-                Ok(s) => s,
+            let (param_rows, pin_scales) = match backsolver.pin_rows_and_c_scales(&pin_indices) {
+                Ok(rs) => rs,
                 Err(e) => {
                     outbox_cb.borrow_mut().error = Some(e);
                     return;
@@ -396,14 +392,9 @@ impl SensSolve {
                     return;
                 }
                 // Solver-space (pre-#128) value, reconstructed from
-                // the natural-units H rather than re-solved:
-                // H̃_ij = (df / (dc_i·dc_j)) · H_ij.
+                // the natural-units H rather than re-solved.
                 let mut hr_scaled = hr.clone();
-                for j in 0..n_params {
-                    for i in 0..n_params {
-                        hr_scaled[j * n_params + i] *= df / (pin_scales[i] * pin_scales[j]);
-                    }
-                }
+                crate::reduced_hessian::scale_to_solver_space(&mut hr_scaled, df, &pin_scales);
                 outbox_cb.borrow_mut().reduced_hessian = Some(hr);
                 outbox_cb.borrow_mut().reduced_hessian_scaled = Some(hr_scaled);
             }

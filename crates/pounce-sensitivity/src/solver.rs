@@ -174,7 +174,13 @@ impl Solver {
                 };
                 let backsolver = match PdSensBacksolver::new(data, cq, nlp, Rc::clone(&pd)) {
                     Ok(b) => b,
-                    Err(_) => return,
+                    Err(e) => {
+                        // No session state is stored, so post-solve
+                        // calls will report NotConverged; at least say
+                        // why on stderr rather than failing silently.
+                        eprintln!("pounce: Solver could not capture the KKT factor: {e}");
+                        return;
+                    }
                 };
                 let x = dense_to_vec(&*curr.x);
                 let obj_val = cq.borrow_mut().curr_f();
@@ -225,35 +231,14 @@ impl Solver {
     /// `x || s || y_c || y_d || z_l || z_u || v_l || v_u` packing.
     ///
     /// `K` here is the **natural-units** (unscaled) KKT matrix: when
-    /// the IPM solved with active NLP scaling, the backsolver
-    /// conjugates the RHS/solution so callers can pass RHS data in the
-    /// user's own units (pounce#128). The z/v bound-multiplier blocks
-    /// are passed through in solver space — see
+    /// the IPM solved with active NLP scaling, the backsolver scales
+    /// the RHS/solution (all eight blocks, including the z/v
+    /// bound-multiplier rows) so callers pass and receive data in the
+    /// user's own units (pounce#128) — see
     /// [`crate::PdSensBacksolver::solve`]. For the raw scaled-space
     /// back-solve use [`Self::kkt_solve_scaled`].
     pub fn kkt_solve(&self, rhs: &[Number], lhs: &mut [Number]) -> Result<(), SolverError> {
-        let state = self.state.borrow();
-        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
-        let total = state.backsolver.dim();
-        if rhs.len() != total {
-            return Err(SolverError::BadShape {
-                what: "rhs",
-                got: rhs.len(),
-                expected: total,
-            });
-        }
-        if lhs.len() != total {
-            return Err(SolverError::BadShape {
-                what: "lhs",
-                got: lhs.len(),
-                expected: total,
-            });
-        }
-        if state.backsolver.solve(rhs, lhs) {
-            Ok(())
-        } else {
-            Err(SolverError::BacksolveFailed)
-        }
+        self.kkt_solve_impl(rhs, lhs, false)
     }
 
     /// [`Self::kkt_solve`] without the natural-units conjugation: the
@@ -261,6 +246,15 @@ impl Solver {
     /// (the solver's internal scaled space). Identical to `kkt_solve`
     /// when no NLP scaling is active.
     pub fn kkt_solve_scaled(&self, rhs: &[Number], lhs: &mut [Number]) -> Result<(), SolverError> {
+        self.kkt_solve_impl(rhs, lhs, true)
+    }
+
+    fn kkt_solve_impl(
+        &self,
+        rhs: &[Number],
+        lhs: &mut [Number],
+        scaled: bool,
+    ) -> Result<(), SolverError> {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let total = state.backsolver.dim();
@@ -278,7 +272,12 @@ impl Solver {
                 expected: total,
             });
         }
-        if state.backsolver.solve_scaled_space(rhs, lhs) {
+        let ok = if scaled {
+            state.backsolver.solve_scaled_space(rhs, lhs)
+        } else {
+            state.backsolver.solve(rhs, lhs)
+        };
+        if ok {
             Ok(())
         } else {
             Err(SolverError::BacksolveFailed)
@@ -296,6 +295,27 @@ impl Solver {
         rhs_flat: &[Number],
         lhs_flat: &mut [Number],
         n_rhs: usize,
+    ) -> Result<(), SolverError> {
+        self.kkt_solve_many_impl(rhs_flat, lhs_flat, n_rhs, false)
+    }
+
+    /// [`Self::kkt_solve_many`] without the natural-units
+    /// conjugation (the batched sibling of [`Self::kkt_solve_scaled`]).
+    pub fn kkt_solve_many_scaled(
+        &self,
+        rhs_flat: &[Number],
+        lhs_flat: &mut [Number],
+        n_rhs: usize,
+    ) -> Result<(), SolverError> {
+        self.kkt_solve_many_impl(rhs_flat, lhs_flat, n_rhs, true)
+    }
+
+    fn kkt_solve_many_impl(
+        &self,
+        rhs_flat: &[Number],
+        lhs_flat: &mut [Number],
+        n_rhs: usize,
+        scaled: bool,
     ) -> Result<(), SolverError> {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
@@ -315,7 +335,14 @@ impl Solver {
                 expected,
             });
         }
-        if state.backsolver.solve_many(rhs_flat, lhs_flat, n_rhs) {
+        let ok = if scaled {
+            state
+                .backsolver
+                .solve_many_scaled_space(rhs_flat, lhs_flat, n_rhs)
+        } else {
+            state.backsolver.solve_many(rhs_flat, lhs_flat, n_rhs)
+        };
+        if ok {
             Ok(())
         } else {
             Err(SolverError::BacksolveFailed)
@@ -436,12 +463,7 @@ impl Solver {
             .backsolver
             .pin_c_scales(pin_constraint_indices)
             .map_err(SolverError::SensComputationFailed)?;
-        let n = pin_constraint_indices.len();
-        for j in 0..n {
-            for i in 0..n {
-                hr[j * n + i] *= df / (dc[i] * dc[j]);
-            }
-        }
+        crate::reduced_hessian::scale_to_solver_space(&mut hr, df, &dc);
         Ok(hr)
     }
 

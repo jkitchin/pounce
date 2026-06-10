@@ -106,6 +106,13 @@ The relation is `H_scaled[i,j] = df / (dc_i·dc_j) · H[i,j]`, where
 `df` is the objective scaling factor and `dc_i` the pin rows'
 constraint scaling factors.
 
+One caveat: the IPM's inertia-correction perturbations (`delta_w`,
+`delta_c`) are added to the factor in *scaled* space, so on a problem
+whose final factorization needed regularization (e.g. linearly
+dependent pin rows) the unscaling maps a slightly different perturbed
+system per scaling method. On well-posed estimation problems the
+final factor is unregularized and the invariance is exact.
+
 ## Verification
 
 All three entry points are verified against upstream sIPOPT 3.14.19's

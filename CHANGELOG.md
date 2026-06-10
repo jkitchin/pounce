@@ -19,27 +19,35 @@ whenever NLP scaling was active (the default
 constraint row exceeds 100 at the starting point). For a parameter-estimation
 NLP this made `-inv(reduced_hessian)` differ from the true covariance by
 `df / (dc_i·dc_j)` — the discretization-tracking "≈ nfe" fudge factor reported
-in #128. The same scaled factor silently corrupted the `pounce.jax`
-factor-reuse VJP (`JaxProblem(factor_reuse=True)`) on badly-scaled problems.
+in #128. The same scaled factor silently corrupted the factor-reuse VJP/JVP of
+**both** differentiable frontends (`pounce.jax` `JaxProblem(factor_reuse=True)`
+and `pounce.torch` `TorchProblem`) on badly-scaled problems.
 
-All held-factor back-solves now conjugate by the scaling diagonal
-(`K_natural⁻¹ = D K_scaled⁻¹ D`, `D = diag(√df·I_x, √df·dd⁻¹, dc/√df, dd/√df)`),
-so every sensitivity output is in the user's own units regardless of scaling
-method. The pre-fix solver-space values and the factors stay accessible:
+The scaled primal-dual system is the two-sided diagonal scaling
+`K_scaled = E·K_natural·F` (per-block: `E = (df, df/dd, dc, dd, df, df)` and
+`F = (1, 1/dd, dc/df, dd/df, 1/df, dd/df)` over `x, s, y_c, y_d, z, v`), so
+every held-factor back-solve now computes `K_natural⁻¹ = F·K_scaled⁻¹·E`: all
+eight KKT blocks — including the bound-multiplier z/v rows in `dx_full` —
+come back in the user's own units regardless of scaling method, and a
+negative `obj_scaling_factor` is handled (no square root involved). The CLI
+sIPOPT mode inherits the same correction: the `red_hessian` var-suffix output
+is now natural-units where upstream sIPOPT prints a scaled value it warns
+about. The pre-fix solver-space values and the factors stay accessible:
 `info["reduced_hessian_scaled"]` / `info["obj_scaling_factor"]` /
 `info["pin_g_scaling"]`, `Solver.reduced_hessian(..., scaled=True)`,
-`Solver.kkt_solve(..., scaled=True)`, the `Solver.nlp_scaling` dict, and the
-matching Rust surfaces (`SensResult` fields,
-`Solver::{compute_reduced_hessian_scaled, kkt_solve_scaled, nlp_scaling}`,
-`PdSensBacksolver::solve_scaled_space`).
+`Solver.kkt_solve(..., scaled=True)` / `kkt_solve_many(..., scaled=True)`,
+the `Solver.nlp_scaling` dict, the C ABI's `IpoptSolverKktSolveScaled`, and
+the matching Rust surfaces (`SensResult` fields,
+`Solver::{compute_reduced_hessian_scaled, kkt_solve_scaled,
+kkt_solve_many_scaled, nlp_scaling}`, `PdSensBacksolver::solve_scaled_space`).
 
 Also fixed in the same change: `SensSolve` / `Solver` pin-constraint indices
 are now mapped to KKT rows through the equality/inequality split
 (`full_g_to_c_block`), so pins are selected correctly when inequality
 constraints precede them in `g(x)` (previously the wrong row was used
-silently; the CLI sIPOPT path already mapped correctly). `pounce.curve_fit`
-no longer requires scaling to be off to trust the converged factor for its
-covariance / data-sensitivity reads.
+silently; the CLI sIPOPT path already mapped correctly and now shares the
+same helper). `pounce.curve_fit` no longer requires scaling to be off to
+trust the converged factor for its covariance / data-sensitivity reads.
 
 ### Added — PyTorch frontend for the differentiable solver (`pounce.torch`)
 
