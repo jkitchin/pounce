@@ -59,6 +59,18 @@ jobs:
         with:
           shared-key: release-crates
 
+      # Tag-vs-manifest guard (M38). A `v0.5.0` tag with the workspace still
+      # at 0.4.0 would make publish-crates.sh a silent green no-op (every
+      # crate "already published" at 0.4.0) — the new version never ships.
+      # Fail fast on a tag push before any publish. Skipped on manual
+      # workflow_dispatch (which carries no release tag); python3 is
+      # preinstalled on ubuntu-latest.
+      - name: Verify tag matches manifest version
+        if: github.event_name == 'push'
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: python3 scripts/check_tag_version.py "$GITHUB_REF"
+
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

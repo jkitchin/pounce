@@ -28,8 +28,27 @@ permissions:
   contents: read
 
 jobs:
+  # Tag-vs-manifest guard (M38). On a `python-v0.5.0` tag push, confirm
+  # python/pyproject.toml is actually at 0.5.0 before building/publishing —
+  # otherwise the wheels (and the PyPI release) would carry the stale
+  # manifest version under the new tag. The build jobs gate on this so a
+  # mismatch fails fast, before the 5-platform wheel matrix runs. On manual
+  # workflow_dispatch (no release tag) the check step is skipped, so this
+  # job is a no-op pass and the build proceeds.
+  verify-version:
+    name: verify tag matches manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify tag matches manifest version
+        if: github.event_name == 'push'
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: python3 scripts/check_tag_version.py "$GITHUB_REF"
+
   build-wheels:
     name: wheel ${{ matrix.target }} (${{ matrix.os }})
+    needs: verify-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -118,6 +137,7 @@ jobs:
 
   build-sdist:
     name: sdist
+    needs: verify-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

@@ -61,6 +61,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M35 | rust(pounce-py): session-style solves hold the GIL for the whole IPM run. `PySolver::solve` (`crates/pounce-py/src/solver.rs:80`), `QpFactorization::solve` and `QpSensitivity::new` (`crates/pounce-py/src/qp.rs`) call the Rust solver without `py.allow_threads`, unlike `PyProblem::solve` and the one-shot QP/SOCP entry points. `Solver` is the workhorse under `curve_fit` and the jax/torch hosts, so concurrent solves on multiple Python threads serialize | **FIXED** | **Bug confirmed by running code**: the QP path is pure Rust (no Python callbacks), so a `QpSensitivity` solve held the GIL *continuously* — a background watcher thread stalled 23.6 ms ≈ the full 31 ms solve, and 8 `QpSensitivity` solves across 8 threads took as long as serial (ratio 0.97) on a 14-core box. **Fix**: wrap each solve in `py.allow_threads`. The QP sites are pure Rust but hold non-`Send` linear-solver trait objects, so a transparent `SendGuard` (the same trick `PyProblem::solve` uses for its `Rc`s) crosses the GIL-release boundary; the closure runs on the calling thread so it never actually moves between OS threads. The NLP `PySolver::solve` uses the identical `SendGuard` pattern as `PyProblem::solve` (every `tnlp_bridge.rs` callback re-acquires the GIL via `Python::with_gil`, so re-entrancy is safe). **Test** (`python/tests/test_qp_sensitivity.py::test_qp_solve_releases_the_gil`): asserts 8 threaded solves finish in < 0.75× serial (skips on < 4 cores). Post-fix the watcher stall dropped to 4.5 ms and the threaded ratio to 0.39 (~2.5× speedup). **Fail-first confirmed** by swapping the pre-M35 `.so`: ratio 1.01 → test FAILS; post-fix all 41 QP + 112 NLP-session/sensitivity/curve_fit tests pass (one pre-existing, unrelated `test_socp.py` exp-cone failure reproduces identically on the pre-M35 `.so`). See `## M35 detail`. |
 | M36 | rust(studio-core): the report-reader's `InputDescriptor` mirror (`crates/pounce-studio-core/src/report.rs:142-154`) is missing the `CbfFile` variant that the writer (`crates/pounce-solve-report/src/lib.rs:185-204`) emits as `"kind": "cbf-file"` for `.cbf` conic instances. serde's internally-tagged enum hard-fails on the unknown tag, so the *entire* solve report is rejected — CBF solve reports can't be loaded at all | **FIXED** | **Bug confirmed by running code**: rewriting a good fixture's `fair_metadata.input` to `{"kind":"cbf-file","path":…,"size_bytes":…}` and loading it via `SolveReport::from_json_str` failed with serde `unknown variant 'cbf-file', expected one of 'nl-file', 'builtin', 'tnlp-direct'`. **Fix**: add the `CbfFile { path, size_bytes }` variant to studio-core's `InputDescriptor`, mirroring the writer (kebab-case `"cbf-file"`; `path: String` matching the reader's other variants). No production code matches the enum exhaustively, so the addition is self-contained. **Test** (`crates/pounce-studio-core/tests/fixtures.rs::loads_cbf_file_input_descriptor`): loads a cbf-file report and asserts it decodes to `InputDescriptor::CbfFile` with the right path/size. **Fail-first confirmed**: pre-fix a load-only form of the test failed with the serde unknown-variant error; post-fix all 13 studio-core tests pass. See `## M36 detail`. |
 | M37 | rust(cinterface): library UB — the sensitivity C API feeds NULL straight into `slice::from_raw_parts`. `IpoptSolverParametricStep` (`crates/pounce-cinterface/src/solver.rs:339,347`) and `IpoptSolverReducedHessian` (`:383`) accept a legal `n_pins == 0` call (which is allowed to pass NULL `pin_indices`/`deltas` — there is nothing to point at), but build the slices with `from_raw_parts(pin_indices, 0)` unconditionally. `from_raw_parts` requires its pointer be non-null and aligned *even for empty slices*, so `from_raw_parts(NULL, 0)` is UB; recent rustc's `-C debug-assertions` precondition checks turn it into a process abort. The rest of the crate gates this correctly (`IpoptSolverSolve` uses `if n_us > 0 { from_raw_parts } else { &[] }`) | **FIXED** | **Bug confirmed by running code**: a converged-session solve followed by `IpoptSolverParametricStep(solver, 0, NULL, NULL, dx_out)` aborts with SIGABRT — `unsafe precondition(s) violated: slice::from_raw_parts requires the pointer to be aligned and non-null` (the session check sits *before* the bad `from_raw_parts`, so a solve is required to reach it). **Fix**: a local `slice_or_empty(ptr, len)` helper that returns `&[]` when `len == 0` and only calls `from_raw_parts` otherwise — mirroring the `n_us > 0` gate already used in `IpoptSolverSolve` — applied to all three sites (the two `ParametricStep` slices + the `ReducedHessian` pins). An empty pin set is a well-defined no-op (zero perturbation → Δx ≈ 0, 0×0 reduced Hessian), so both calls now return `TRUE`. **Test** (`crates/pounce-cinterface/src/solver.rs::zero_pins_with_null_pointers_is_not_ub`): solves the 1-D quad to a session, then calls both entry points with `n_pins=0` + NULL pointers and asserts `TRUE`. **Fail-first confirmed** by reverting the `ParametricStep` slices to bare `from_raw_parts`: the test aborts (signal 6, SIGABRT, the non-null precondition message); post-fix all 43 pounce-cinterface lib tests pass, clippy clean of new warnings. See `## M37 detail`. |
+| M38 | release: no tag-vs-manifest version check in any release workflow. `.github/workflows/release-crates.yml`, `release-pounce.yml`, `release-pyomo-pounce.yml` key off the tag prefixes `v*` / `python-v*` / `pyomo-pounce-v*` but never confirm the tag's version matches the manifest it publishes. Tagging `v0.5.0` with manifests at 0.4.0 makes the crates publish a silent green no-op (`publish-crates.sh` skips every crate as "already published" at 0.4.0) and the PyPI publish ship the stale 0.4.0 wheel under the 0.5.0 release | **FIXED** | **Bug confirmed by running code**: there was no guard at all — `check-release-consistency.sh` checks the three *manifests* agree with each other but never against the *tag*. Added `scripts/check_tag_version.py <tag-or-ref>`, which strips the longest matching release prefix (`pyomo-pounce-v`/`python-v`/`v`, longest-first so the PyPI tags aren't misread as the bare crates `v`), reads the first top-of-line `version = "..."` from the routed manifest (Cargo `[workspace.package]` / the two `pyproject.toml`s — same extraction as the consistency script), and exits 2 on mismatch / 3 on an unrecognized tag / 4 on an unreadable manifest. **Verified live**: against the repo at 0.4.0, `check_tag_version.py refs/tags/v0.5.0` fails with exit 2 and a TAG/MANIFEST MISMATCH message (the exact M38 scenario nothing previously caught), while `v0.4.0`/`python-v0.4.0` pass and `pyomo-pounce-v1.0.0` correctly routes to the pyomo manifest. **Wiring**: `release-crates.yml` gains a guard step before `Publish crates`; `release-pounce.yml`/`release-pyomo-pounce.yml` gain a `verify-version` job that the build jobs `needs:`, so a mismatch fails before the multi-platform wheel matrix runs. All three gate on `github.event_name == 'push'`, so manual `workflow_dispatch` dry-runs (no tag) skip the check (no-op pass). **Test** (`scripts/tests/test_check_tag_version.py`, mirroring the sibling `test_check_dep_publishability.py` standalone-unittest convention): 18 cases over synthetic manifests (stable across version bumps) covering prefix routing, longest-prefix precedence, prerelease suffixes, and the M38 mismatch → exit 2; the three workflows parse and the `verify-version → build → publish` dependency graph is well-formed. 25 `scripts/tests` total green. See `## M38 detail`. |
 
 ## C1 detail
 
@@ -2895,3 +2896,85 @@ restoring the helper makes it pass. Full `pounce-cinterface` lib suite green (43
 passed), `cargo clippy -p pounce-cinterface` clean of new warnings (the 3 reported
 `needless_range_loop` warnings pre-date this change and live in `lib.rs`).
 Pure-Rust crate; no Python extension rebuild needed.
+
+## M38 detail
+
+**Issue** (`.github/workflows/release-crates.yml`, `release-pounce.yml`,
+`release-pyomo-pounce.yml`): POUNCE cuts a release by pushing a tag, and each
+workflow keys off a distinct prefix —
+
+| tag                     | workflow                  | manifest published                       |
+|-------------------------|---------------------------|------------------------------------------|
+| `v<X.Y.Z>`              | release-crates            | root `Cargo.toml` `[workspace.package]`  |
+| `python-v<X.Y.Z>`       | release-pounce            | `python/pyproject.toml`                  |
+| `pyomo-pounce-v<X.Y.Z>` | release-pyomo-pounce      | `pyomo-pounce/pyproject.toml`            |
+
+None of them compared the *tag's* version against the *manifest's*. The
+on-every-PR guard `scripts/check-release-consistency.sh` checks that the three
+manifests agree **with each other**, but nothing checks that the tag you push
+agrees with them. So a `v0.5.0` tag cut while the manifests still read 0.4.0:
+
+* **crates.io** — `scripts/publish-crates.sh` is idempotent: it skips any crate
+  already live at the workspace version. With the manifest at 0.4.0 (already
+  published), every crate is skipped and the workflow ends green having
+  published nothing — the 0.5.0 release silently never ships to crates.io.
+* **PyPI** — the wheels/sdist are built from the 0.4.0 manifest, so the
+  `pounce-solver`/`pyomo-pounce` 0.5.0 "release" publishes a 0.4.0 artifact (or
+  collides with the already-published 0.4.0), shipping the wrong version.
+
+**Verification (running code)**: there was no guard to demonstrate a "pre-fix"
+failure against — the gap *is* the absence. So the new guard is exercised
+directly. Against the live repo (all three manifests at 0.4.0):
+
+```
+$ python3 scripts/check_tag_version.py refs/tags/v0.5.0
+check_tag_version: TAG/MANIFEST MISMATCH for crates.io workspace.
+  tag 'v0.5.0' declares version 0.5.0
+  Cargo.toml is at 0.4.0
+  ...                                          # exit 2
+$ python3 scripts/check_tag_version.py v0.4.0          # exit 0 (matches)
+$ python3 scripts/check_tag_version.py pyomo-pounce-v1.0.0
+  ... MISMATCH for pyomo-pounce (PyPI) ...     # exit 2, routed to the right manifest
+```
+
+The `pyomo-pounce-v…`/`python-v…` cases confirm the longest-prefix-first
+dispatch — a `pyomo-pounce-v1.0.0` tag is not misread as a bare-`v` crates tag.
+
+**Fix**: a new `scripts/check_tag_version.py` (pure functions `strip_ref`,
+`parse_tag`, `manifest_version`, `check` for unit-testability, mirroring the
+existing `scripts/check_dep_publishability.py`). It strips `refs/tags/`, matches
+the tag against the longest release prefix, validates the remainder is an
+`X.Y.Z` (optionally `-prerelease`/`+build`) version, reads the first
+top-of-line `version = "..."` from the routed manifest (the same extraction
+`check-release-consistency.sh` uses — anchored at column 0, so indented
+dependency-table `version =` keys are ignored), and exits non-zero on
+mismatch/unknown-tag/unreadable-manifest with a message naming both versions.
+
+**Workflow wiring**:
+
+* `release-crates.yml` — a `Verify tag matches manifest version` step before
+  `Publish crates`, `if: github.event_name == 'push'`.
+* `release-pounce.yml` / `release-pyomo-pounce.yml` — a standalone
+  `verify-version` job that the `build-wheels`/`build-sdist` (resp. `build`)
+  jobs declare in `needs:`, so a mismatch fails **before** the multi-platform
+  wheel matrix runs rather than at publish time. The publish jobs already
+  `needs:` the build jobs, so they are transitively gated.
+
+All three gate on `github.event_name == 'push'`; a manual `workflow_dispatch`
+(TestPyPI dry run / crates dry run) carries no release tag, so the step is
+skipped and the job is a no-op pass — the dispatch path is unchanged.
+
+**Test** (`scripts/tests/test_check_tag_version.py`): 18 unittest cases over a
+synthetic repo tree built in a temp dir (so they don't depend on the live
+manifest versions, which change every release): `strip_ref`, prefix routing,
+longest-prefix precedence (`python-v` over `v`), prerelease-suffix acceptance,
+rejection of non-version/unknown-prefix tags, the indented-dependency-version
+trap, and `check()` end-to-end — matching tag passes (exit 0), the M38 mismatch
+fails (exit 2), a python/pyomo tag validates against its own manifest even when
+Cargo matches, unknown tag → 3, missing manifest → 4. The file follows the
+sibling test's standalone convention (`python3 scripts/tests/test_*.py` /
+`-m unittest`); neither is wired into `ci.yml`, so this one isn't either. Both
+script-test files run clean together: `python3 -m unittest discover -s
+scripts/tests` → 25 passed. All three workflow YAMLs parse and the
+`verify-version → build → publish` dependency graph validates. CI/release-only
+change; no Rust or Python package code touched.
