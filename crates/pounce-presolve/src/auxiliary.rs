@@ -100,6 +100,63 @@ impl Default for Phase0Plan {
     }
 }
 
+/// Decode a COO index respecting the probe's one-/zero-based convention.
+#[inline]
+fn decode_idx(raw: Index, one_based: bool) -> usize {
+    if one_based {
+        (raw as isize - 1) as usize
+    } else {
+        raw as usize
+    }
+}
+
+/// CSR row index into the probe's COO Jacobian, built once per Phase-0 pass.
+/// `entries[ptr[r]..ptr[r + 1]]` lists the nnz positions `kk` whose row is
+/// `r`. Block-assembly helpers iterate a row's nonzeros directly through this
+/// instead of scanning the full `nnz` array per block row (M27 — that scan was
+/// O(total_block_rows × nnz), quadratic on models built from many small
+/// blocks, e.g. gas networks).
+#[derive(Clone, Copy)]
+struct RowNnz<'a> {
+    ptr: &'a [usize],
+    entries: &'a [usize],
+}
+
+impl<'a> RowNnz<'a> {
+    /// The nnz positions `kk` belonging to row `r`.
+    #[inline]
+    fn of_row(&self, r: usize) -> &[usize] {
+        &self.entries[self.ptr[r]..self.ptr[r + 1]]
+    }
+}
+
+/// Build the CSR row index from the probe's COO row indices. O(nnz) time and
+/// space; rows with out-of-range indices are skipped (defensive — the COO is
+/// trusted, but a stray index must not panic the slice build).
+fn build_row_nnz(jac_irow: &[Index], n_rows: usize, one_based: bool) -> (Vec<usize>, Vec<usize>) {
+    let nnz = jac_irow.len();
+    let mut ptr = vec![0usize; n_rows + 1];
+    for &raw in jac_irow {
+        let i = decode_idx(raw, one_based);
+        if i < n_rows {
+            ptr[i + 1] += 1;
+        }
+    }
+    for r in 0..n_rows {
+        ptr[r + 1] += ptr[r];
+    }
+    let mut entries = vec![0usize; ptr[n_rows]];
+    let mut cursor = ptr.clone();
+    for (kk, &raw) in jac_irow.iter().enumerate().take(nnz) {
+        let i = decode_idx(raw, one_based);
+        if i < n_rows {
+            entries[cursor[i]] = kk;
+            cursor[i] += 1;
+        }
+    }
+    (ptr, entries)
+}
+
 /// Run the Phase-0 pipeline and return the resulting plan.
 ///
 /// When `opts.auxiliary` is `false` this is a true no-op. When
@@ -252,6 +309,16 @@ pub fn run_auxiliary_phase0(
             frame: None,
         };
     }
+    // CSR row index over the probe Jacobian, built once and shared by every
+    // block-assembly helper below so none of them re-scans the full nnz array
+    // per block row (M27).
+    let (row_nnz_ptr, row_nnz_entries) =
+        build_row_nnz(probe.jac_irow, probe.n_rows, probe.one_based);
+    let row_nnz = RowNnz {
+        ptr: &row_nnz_ptr,
+        entries: &row_nnz_entries,
+    };
+
     let mut x_running: Vec<Number> = probe.x_probe.to_vec();
     // C2(c): a trivially-fixed variable (`x_l == x_u`) is excluded from
     // incidence, so it can only appear in a block's rows as a *non-block*
@@ -405,22 +472,9 @@ pub fn run_auxiliary_phase0(
             // block), C2(b) (Square row adjacent to an Over column), and
             // C2(d) in one gate.
             let mut depends_on_free = false;
-            let nnz = probe.jac_irow.len();
             'gate: for &r_inner in &inner_rows {
-                for kk in 0..nnz {
-                    let i = if probe.one_based {
-                        (probe.jac_irow[kk] as isize - 1) as usize
-                    } else {
-                        probe.jac_irow[kk] as usize
-                    };
-                    if i != r_inner {
-                        continue;
-                    }
-                    let j = if probe.one_based {
-                        (probe.jac_jcol[kk] as isize - 1) as usize
-                    } else {
-                        probe.jac_jcol[kk] as usize
-                    };
+                for &kk in row_nnz.of_row(r_inner) {
+                    let j = decode_idx(probe.jac_jcol[kk], probe.one_based);
                     if block_cols.contains(&j) {
                         continue;
                     }
@@ -473,6 +527,7 @@ pub fn run_auxiliary_phase0(
             let solve_result = if all_linear {
                 solve_linear_block(
                     probe,
+                    &row_nnz,
                     &inner_rows,
                     block_cols,
                     &x_running,
@@ -486,6 +541,7 @@ pub fn run_auxiliary_phase0(
                 let cb: &mut dyn Phase0TnlpCallback = *tnlp.as_mut().expect("checked above");
                 solve_nonlinear_block(
                     probe,
+                    &row_nnz,
                     &inner_rows,
                     block_cols,
                     &x_running,
@@ -518,7 +574,7 @@ pub fn run_auxiliary_phase0(
             let row_resid = if all_linear {
                 // Re-evaluate using the linear model — same as the
                 // build code above.
-                residual_norm_linear(probe, &inner_rows, &candidate_x)
+                residual_norm_linear(probe, &row_nnz, &inner_rows, &candidate_x)
             } else {
                 // Ask the TNLP for `g(candidate_x)` and compare each
                 // dropped row to `g_l`. Reuses the callback we
@@ -599,6 +655,7 @@ pub fn run_auxiliary_phase0(
 /// converges in one iteration on linear systems).
 fn solve_linear_block<F>(
     probe: &Phase0Probe<'_>,
+    row_nnz: &RowNnz<'_>,
     inner_rows: &[usize],
     block_cols: &[usize],
     x_running: &[Number],
@@ -618,21 +675,8 @@ where
     let mut b_block = vec![0.0; k];
     for (ii, &r_inner) in inner_rows.iter().enumerate() {
         let mut sum_jx = 0.0;
-        let nnz = probe.jac_irow.len();
-        for kk in 0..nnz {
-            let i = if probe.one_based {
-                (probe.jac_irow[kk] as isize - 1) as usize
-            } else {
-                probe.jac_irow[kk] as usize
-            };
-            if i != r_inner {
-                continue;
-            }
-            let j = if probe.one_based {
-                (probe.jac_jcol[kk] as isize - 1) as usize
-            } else {
-                probe.jac_jcol[kk] as usize
-            };
+        for &kk in row_nnz.of_row(r_inner) {
+            let j = decode_idx(probe.jac_jcol[kk], probe.one_based);
             let v = probe.jac_values[kk];
             sum_jx += v * probe.x_probe[j];
             if let Some(jj) = block_cols.iter().position(|&c| c == j) {
@@ -679,13 +723,14 @@ where
 }
 
 /// Solve a nonlinear block by feeding TNLP callbacks into Newton.
-fn solve_nonlinear_block<F>(
+fn solve_nonlinear_block<'a, F>(
     probe: &Phase0Probe<'_>,
-    inner_rows: &[usize],
-    block_cols: &[usize],
-    x_running: &[Number],
+    row_nnz: &RowNnz<'a>,
+    inner_rows: &'a [usize],
+    block_cols: &'a [usize],
+    x_running: &'a [Number],
     bs_opts: &BlockSolveOptions,
-    tnlp: &mut dyn Phase0TnlpCallback,
+    tnlp: &'a mut dyn Phase0TnlpCallback,
     solver_call: F,
 ) -> Result<crate::block_solve::BlockSolveOutcome, crate::block_solve::BlockSolveError>
 where
@@ -700,11 +745,10 @@ where
 
     struct NonlinearBlock<'a> {
         n: usize,
-        nnz: usize,
+        row_nnz: RowNnz<'a>,
         inner_rows: &'a [usize],
         block_cols: &'a [usize],
         x_running: &'a [Number],
-        jac_irow: &'a [Index],
         jac_jcol: &'a [Index],
         g_l: &'a [Number],
         one_based: bool,
@@ -744,28 +788,21 @@ where
             {
                 return false;
             }
-            // Zero the dense submatrix, then scatter the nonzeros.
+            // Zero the dense submatrix, then scatter the nonzeros. Iterate
+            // only the block's inner rows (via the CSR index), not the whole
+            // nnz array — the column is still mapped through `block_cols`,
+            // which is the small block dimension (M27).
             for v in j.iter_mut() {
                 *v = 0.0;
             }
-            for kk in 0..self.nnz {
-                let i = if self.one_based {
-                    (self.jac_irow[kk] as isize - 1) as usize
-                } else {
-                    self.jac_irow[kk] as usize
-                };
-                let Some(ii) = self.inner_rows.iter().position(|&r| r == i) else {
-                    continue;
-                };
-                let col = if self.one_based {
-                    (self.jac_jcol[kk] as isize - 1) as usize
-                } else {
-                    self.jac_jcol[kk] as usize
-                };
-                let Some(jj) = self.block_cols.iter().position(|&c| c == col) else {
-                    continue;
-                };
-                j[ii * self.n + jj] = self.full_jac_vals[kk];
+            for (ii, &r) in self.inner_rows.iter().enumerate() {
+                for &kk in self.row_nnz.of_row(r) {
+                    let col = decode_idx(self.jac_jcol[kk], self.one_based);
+                    let Some(jj) = self.block_cols.iter().position(|&c| c == col) else {
+                        continue;
+                    };
+                    j[ii * self.n + jj] = self.full_jac_vals[kk];
+                }
             }
             true
         }
@@ -774,11 +811,10 @@ where
     let nnz = probe.jac_irow.len();
     let mut eqs = NonlinearBlock {
         n: k,
-        nnz,
+        row_nnz: *row_nnz,
         inner_rows,
         block_cols,
         x_running,
-        jac_irow: probe.jac_irow,
         jac_jcol: probe.jac_jcol,
         g_l: probe.g_l,
         one_based: probe.one_based,
@@ -799,28 +835,16 @@ where
 /// `g_l[r]` after splicing the candidate point in.
 fn residual_norm_linear(
     probe: &Phase0Probe<'_>,
+    row_nnz: &RowNnz<'_>,
     inner_rows: &[usize],
     candidate_x: &[Number],
 ) -> Number {
     let mut row_resid: Number = 0.0;
-    let nnz = probe.jac_irow.len();
     for &r_inner in inner_rows {
         let mut s = 0.0;
         let mut sum_jx = 0.0;
-        for kk in 0..nnz {
-            let i = if probe.one_based {
-                (probe.jac_irow[kk] as isize - 1) as usize
-            } else {
-                probe.jac_irow[kk] as usize
-            };
-            if i != r_inner {
-                continue;
-            }
-            let j = if probe.one_based {
-                (probe.jac_jcol[kk] as isize - 1) as usize
-            } else {
-                probe.jac_jcol[kk] as usize
-            };
+        for &kk in row_nnz.of_row(r_inner) {
+            let j = decode_idx(probe.jac_jcol[kk], probe.one_based);
             let v = probe.jac_values[kk];
             s += v * candidate_x[j];
             sum_jx += v * probe.x_probe[j];
@@ -1496,5 +1520,141 @@ mod tests {
         assert_eq!(plan.diagnostics.trivially_fixed_vars, 1);
         assert_eq!(plan.diagnostics.trivially_free_rows, 0);
         assert_eq!(plan.diagnostics.trivially_slack_rows, 1);
+    }
+
+    /// Build a diagonal singleton-block system: `n` vars, `n` rows, row `r`
+    /// is the equality `x_r = r+1`. Each row is its own 1×1 block, so the
+    /// orchestrator walks `n` blocks; the full-`nnz`-per-row scans make the
+    /// linear solve/residual cost O(n²).
+    fn diagonal_singletons(n: usize) -> (Vec<Index>, Vec<Index>, Vec<Number>, Vec<Number>) {
+        let jac_irow: Vec<Index> = (0..n as Index).collect();
+        let jac_jcol: Vec<Index> = (0..n as Index).collect();
+        let jac_vals: Vec<Number> = vec![1.0; n];
+        let g_l: Vec<Number> = (0..n).map(|r| (r + 1) as Number).collect();
+        (jac_irow, jac_jcol, jac_vals, g_l)
+    }
+
+    #[test]
+    fn phase0_diagonal_many_singletons_correct() {
+        // M27 regression: with the CSR row index replacing the per-row
+        // full-nnz scans, a large diagonal system must still be eliminated
+        // exactly — every var fixed to its row's target, every row dropped.
+        // (This is also the shape whose O(n²) scan cost motivated the fix;
+        // here we pin correctness at scale, not timing.)
+        let n = 400;
+        let (jac_irow, jac_jcol, jac_vals, g_l) = diagonal_singletons(n);
+        let g_u = g_l.clone();
+        let g_at_probe = vec![0.0; n];
+        let linearity = vec![Linearity::Linear; n];
+        let x_probe = vec![0.0; n];
+        let grad_f = vec![0.0; n];
+        let probe = linear_probe(
+            n,
+            n,
+            &jac_irow,
+            &jac_jcol,
+            &jac_vals,
+            &g_l,
+            &g_u,
+            &g_at_probe,
+            &linearity,
+            &x_probe,
+            &grad_f,
+        );
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let plan = run_auxiliary_phase0(&opts, &probe, None, None);
+        assert_eq!(plan.diagnostics.blocks_eliminated as usize, n);
+        let frame = plan.frame.expect("accepted frame");
+        assert_eq!(frame.fixed_vars, (0..n).collect::<Vec<_>>());
+        assert_eq!(frame.dropped_rows, (0..n).collect::<Vec<_>>());
+        for r in 0..n {
+            assert!(
+                (frame.fixed_values[r] - (r + 1) as Number).abs() < 1e-12,
+                "var {r} fixed to {}, want {}",
+                frame.fixed_values[r],
+                r + 1
+            );
+        }
+    }
+
+    #[test]
+    fn build_row_nnz_groups_by_row_zero_based() {
+        // COO rows (per kk): [0, 2, 0, 1, 2] — out of order, row 0 and row 2
+        // each have two entries, row 1 one. The CSR slice for each row must
+        // list exactly that row's kk positions.
+        let jac_irow: [Index; 5] = [0, 2, 0, 1, 2];
+        let (ptr, entries) = build_row_nnz(&jac_irow, 3, false);
+        let nnz = RowNnz {
+            ptr: &ptr,
+            entries: &entries,
+        };
+        let row_of = |r: usize| {
+            let mut v = nnz.of_row(r).to_vec();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(row_of(0), vec![0, 2]);
+        assert_eq!(row_of(1), vec![3]);
+        assert_eq!(row_of(2), vec![1, 4]);
+        // Every COO position placed exactly once.
+        assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn build_row_nnz_honours_one_based_decode() {
+        // Same pattern but one-based rows (`r + 1`); the decode must reproduce
+        // the zero-based grouping exactly.
+        let jac_irow_0: [Index; 5] = [0, 2, 0, 1, 2];
+        let jac_irow_1: [Index; 5] = [1, 3, 1, 2, 3];
+        let (ptr0, ent0) = build_row_nnz(&jac_irow_0, 3, false);
+        let (ptr1, ent1) = build_row_nnz(&jac_irow_1, 3, true);
+        assert_eq!(ptr0, ptr1, "one-based ptr must match zero-based");
+        assert_eq!(ent0, ent1, "one-based entries must match zero-based");
+    }
+
+    #[test]
+    fn phase0_one_based_two_blocks_eliminated() {
+        // End-to-end one-based guard: every changed helper (C2 gate, linear
+        // solve, residual check) reads the Jacobian through the CSR index,
+        // which decodes one-based COO indices. Two 1×1 blocks: row 1 → x0 = 5,
+        // row 2 → x1 = 7. Both must be eliminated, matching the pre-M27 code.
+        let jac_irow: [Index; 2] = [1, 2];
+        let jac_jcol: [Index; 2] = [1, 2];
+        let jac_vals = [1.0, 1.0];
+        let g_l = [5.0, 7.0];
+        let g_u = [5.0, 7.0];
+        let g_at_probe = [0.0, 0.0];
+        let linearity = [Linearity::Linear, Linearity::Linear];
+        let x_probe = [0.0, 0.0];
+        let grad_f = [0.0, 0.0];
+        let x_l = [-1e19, -1e19];
+        let x_u = [1e19, 1e19];
+        let probe = Phase0Probe {
+            n_vars: 2,
+            n_rows: 2,
+            jac_irow: &jac_irow,
+            jac_jcol: &jac_jcol,
+            jac_values: &jac_vals,
+            g_l: &g_l,
+            g_u: &g_u,
+            g_at_probe: &g_at_probe,
+            linearity: &linearity,
+            one_based: true,
+            eq_tol: 1e-12,
+            x_probe: &x_probe,
+            grad_f: &grad_f,
+            var_linearity: None,
+            x_l: &x_l,
+            x_u: &x_u,
+        };
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let plan = run_auxiliary_phase0(&opts, &probe, None, None);
+        let frame = plan.frame.expect("accepted frame");
+        assert_eq!(frame.fixed_vars, vec![0, 1]);
+        assert!((frame.fixed_values[0] - 5.0).abs() < 1e-12);
+        assert!((frame.fixed_values[1] - 7.0).abs() < 1e-12);
+        assert_eq!(frame.dropped_rows, vec![0, 1]);
     }
 }
