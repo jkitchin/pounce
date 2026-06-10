@@ -120,8 +120,7 @@ impl ParametricActiveSetSolver {
                 rhs.copy_from_slice(&rhs_local);
                 return Ok(0.0);
             }
-            Err(QpError::LinearSolverFailure(ref msg))
-                if msg.contains("inertia") || msg.contains("singular") => {}
+            Err(ref e) if e.is_recoverable_factorization_failure() => {}
             Err(e) => return Err(e),
         }
 
@@ -139,9 +138,7 @@ impl ParametricActiveSetSolver {
                     rhs.copy_from_slice(&rhs_local);
                     return Ok(current);
                 }
-                Err(QpError::LinearSolverFailure(ref msg))
-                    if msg.contains("inertia") || msg.contains("singular") =>
-                {
+                Err(ref e) if e.is_recoverable_factorization_failure() => {
                     next *= opts.inertia_shift_factor;
                 }
                 Err(e) => return Err(e),

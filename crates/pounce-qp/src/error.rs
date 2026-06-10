@@ -56,6 +56,32 @@ pub enum QpError {
     UnsupportedFeature(String),
 }
 
+impl QpError {
+    /// True when this is a linear-solver failure that the §4.5
+    /// inertia-control loop may recover from by shifting the Hessian
+    /// diagonal — i.e. a singular factor or a wrong-inertia report.
+    ///
+    /// Centralizes the recoverability decision so the retry loops in
+    /// `solver.rs` and `schur.rs` don't each re-implement a fragile
+    /// substring test. The match is **case-insensitive**: some failure
+    /// messages embed the backend's `Debug`-formatted `ESymSolverStatus`
+    /// (`Singular` / `WrongInertia`, capitalized — produced by
+    /// `LinearSolver::resolve`'s catch-all `"resolve backend status:
+    /// {status:?}"`), which a bare lowercase `contains("singular")` /
+    /// `contains("inertia")` would silently miss, so those failures would
+    /// propagate as unrecoverable instead of triggering a shift retry
+    /// (L14).
+    pub fn is_recoverable_factorization_failure(&self) -> bool {
+        match self {
+            QpError::LinearSolverFailure(msg) => {
+                let m = msg.to_ascii_lowercase();
+                m.contains("inertia") || m.contains("singular")
+            }
+            _ => false,
+        }
+    }
+}
+
 impl fmt::Display for QpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
