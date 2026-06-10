@@ -241,13 +241,36 @@ enum BlockScaling {
     },
 }
 
+/// SOC dimension at or below which the `(z,z)` block is assembled as a dense
+/// lower triangle rather than the sparse diagonal+rank-1 auxiliary-variable
+/// form. The dense triangle holds `m(m+1)/2` nonzeros vs the aux form's
+/// `2m+1` (plus one extra matrix row/col), so for `m <= 3` dense is the
+/// smaller — and slightly better-conditioned near the cone boundary —
+/// representation. Above this, the aux form avoids the dense `O(m²)` fill that
+/// the review (L41) flagged for large SOCs mixed with exp cones.
+const SOC_DENSE_MAX_DIM: usize = 3;
+
 /// KKT value-array positions for one cone block.
 enum ZPos {
     /// Orthant: one diagonal value position per row.
     Diag(Vec<usize>),
-    /// Second-order cone: the dense lower-triangle value positions, row-major
-    /// `[(0,0); (1,0),(1,1); …]` (length `m(m+1)/2`).
-    SecondOrder { dim: usize, pos: Vec<usize> },
+    /// Small second-order cone (`m <= SOC_DENSE_MAX_DIM`): the dense
+    /// lower-triangle value positions, row-major `[(0,0); (1,0),(1,1); …]`
+    /// (length `m(m+1)/2`). For such `m` the dense triangle has *fewer*
+    /// nonzeros than the auxiliary-variable form (and is marginally
+    /// better-conditioned), so it is preferred.
+    SecondOrderDense { dim: usize, pos: Vec<usize> },
+    /// Large second-order cone in **diagonal + rank-1** form via one auxiliary
+    /// variable `ξ` (the ECOS/Clarabel sparse-SOC trick, matching the
+    /// symmetric driver's `ZBlockPos::DiagRank1`): the `(z,z)` diagonal value
+    /// positions, the coupling column `(ξ, z_i) = u_i`, and the `(ξ, ξ) = +1`
+    /// entry. Eliminating `ξ` reproduces the dense `diag(d) + uuᵀ` block while
+    /// keeping the factor sparse — `O(m)` fill, not the dense `O(m²)`.
+    SecondOrderSparse {
+        diag_pos: Vec<usize>,
+        u_pos: Vec<usize>,
+        aux_pos: usize,
+    },
     /// Exp/power: the three diagonal positions and the three strict-lower
     /// positions `(1,0),(2,0),(2,1)`.
     Dense { diag: [usize; 3], lower: [usize; 3] },
@@ -292,8 +315,13 @@ impl NsKkt {
         for t in &prob.g {
             add(n + m_eq + t.row, t.col, t.val);
         }
-        // (z,z): per block, seeded with −reg on the diagonal. Exp blocks also
-        // reserve the strict-lower 3×3 off-diagonals (a genuine dense block).
+        // (z,z): per block, seeded with −reg on the diagonal. SOC blocks get
+        // an auxiliary variable (appended after the base rows) carrying the
+        // rank-1 term, so the (z,z) fill is O(m) not the dense O(m²). Exp
+        // blocks reserve the strict-lower 3×3 off-diagonals (a genuine dense
+        // block).
+        let base_dim = n + m_eq + m_ineq;
+        let mut aux = base_dim; // next auxiliary-variable index
         for (off, b) in &cone.blocks {
             let zb = n + m_eq + off;
             match b {
@@ -302,13 +330,26 @@ impl NsKkt {
                         add(zb + i, zb + i, -reg);
                     }
                 }
-                NsBlock::SecondOrder(m) => {
-                    // Genuine dense m×m lower triangle for the NT scaling W².
+                NsBlock::SecondOrder(m) if *m <= SOC_DENSE_MAX_DIM => {
+                    // Small SOC: dense m×m lower triangle for the NT scaling W²
+                    // (fewer nonzeros than the aux form at this size).
                     for i in 0..*m {
                         for j in 0..=i {
                             add(zb + i, zb + j, if i == j { -reg } else { 0.0 });
                         }
                     }
+                }
+                NsBlock::SecondOrder(m) => {
+                    // Large SOC: sparse diag-plus-rank-1 via the auxiliary
+                    // variable ξ — diagonal −reg (filled per iter), coupling
+                    // (ξ, z_i) = u_i, and (ξ, ξ) = +1. Eliminating ξ reproduces
+                    // diag(d) + uuᵀ with O(m) fill instead of dense O(m²).
+                    for i in 0..*m {
+                        add(zb + i, zb + i, -reg);
+                        add(aux, zb + i, 0.0);
+                    }
+                    add(aux, aux, 1.0);
+                    aux += 1;
                 }
                 NsBlock::Nonsym(_) => {
                     for i in 0..3 {
@@ -320,6 +361,7 @@ impl NsKkt {
                 }
             }
         }
+        let dim = aux;
 
         let nnz = entries.len();
         let mut airn = Vec::with_capacity(nnz);
@@ -334,6 +376,7 @@ impl NsKkt {
         }
 
         let mut z_pos = Vec::with_capacity(cone.blocks.len());
+        let mut aux = base_dim;
         for (off, b) in &cone.blocks {
             let zb = n + m_eq + off;
             match b {
@@ -342,14 +385,25 @@ impl NsKkt {
                         (0..*d).map(|i| coord_to_pos[&(zb + i, zb + i)]).collect(),
                     ));
                 }
-                NsBlock::SecondOrder(m) => {
+                NsBlock::SecondOrder(m) if *m <= SOC_DENSE_MAX_DIM => {
                     let mut pos = Vec::with_capacity(m * (m + 1) / 2);
                     for i in 0..*m {
                         for j in 0..=i {
                             pos.push(coord_to_pos[&(zb + i, zb + j)]);
                         }
                     }
-                    z_pos.push(ZPos::SecondOrder { dim: *m, pos });
+                    z_pos.push(ZPos::SecondOrderDense { dim: *m, pos });
+                }
+                NsBlock::SecondOrder(m) => {
+                    let diag_pos = (0..*m).map(|i| coord_to_pos[&(zb + i, zb + i)]).collect();
+                    let u_pos = (0..*m).map(|i| coord_to_pos[&(aux, zb + i)]).collect();
+                    let aux_pos = coord_to_pos[&(aux, aux)];
+                    z_pos.push(ZPos::SecondOrderSparse {
+                        diag_pos,
+                        u_pos,
+                        aux_pos,
+                    });
+                    aux += 1;
                 }
                 NsBlock::Nonsym(_) => {
                     let diag = [
@@ -366,12 +420,12 @@ impl NsKkt {
                 }
             }
         }
-        let _ = m_ineq;
+        debug_assert_eq!(aux, dim, "aux count must match between the two passes");
         NsKkt {
             airn,
             ajcn,
             values,
-            dim: n + m_eq + m_ineq,
+            dim,
             z_pos,
         }
     }
@@ -401,7 +455,7 @@ impl NsKkt {
                     }
                     scalings.push(BlockScaling::Orthant { sz_ratio, s_tilde });
                 }
-                (NsBlock::SecondOrder(m), ZPos::SecondOrder { dim, pos }) => {
+                (NsBlock::SecondOrder(m), ZPos::SecondOrderDense { dim, pos }) => {
                     debug_assert_eq!(m, dim);
                     let sb = &s[*off..off + m];
                     let zb = &z[*off..off + m];
@@ -422,6 +476,32 @@ impl NsKkt {
                             k += 1;
                         }
                     }
+                    scalings.push(BlockScaling::SecondOrder { diag, u });
+                }
+                (
+                    NsBlock::SecondOrder(m),
+                    ZPos::SecondOrderSparse {
+                        diag_pos,
+                        u_pos,
+                        aux_pos,
+                    },
+                ) => {
+                    let sb = &s[*off..off + m];
+                    let zb = &z[*off..off + m];
+                    // W² = diag(d) + u uᵀ from the SOC's NT scaling.
+                    let (diag, u) = match SecondOrderCone::new(*m).kkt_block(sb, zb) {
+                        ConeBlock::DiagPlusRank1 { diag, u } => (diag, u),
+                        _ => unreachable!("SOC kkt_block is DiagPlusRank1"),
+                    };
+                    // (z,z) = −(diag(d) + uuᵀ) − reg, with the rank-1 carried
+                    // by the aux variable ξ: diagonal −dᵢ − reg, coupling
+                    // (ξ, z_i) = uᵢ, and (ξ, ξ) = +1. Its Schur complement is
+                    // −diag(d) − reg − uuᵀ = −W² − reg.
+                    for i in 0..*m {
+                        out[diag_pos[i]] = -diag[i] - reg;
+                        out[u_pos[i]] = u[i];
+                    }
+                    out[*aux_pos] = 1.0;
                     scalings.push(BlockScaling::SecondOrder { diag, u });
                 }
                 (NsBlock::Nonsym(nscone), ZPos::Dense { diag, lower }) => {
@@ -1630,6 +1710,113 @@ mod tests {
         let sol = solve_conic_hsde_nonsym(&prob, &[NsBlock::SecondOrder(3)], &opts(), backend);
         assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.status);
         assert!((sol.x[0] - 5.0).abs() < 1e-5, "t = {} vs 5", sol.x[0]);
+    }
+
+    /// L41: a **large** SOC must be assembled in the sparse diag-plus-rank-1
+    /// (auxiliary-variable) form — `O(m)` fill — not the dense `m×m` lower
+    /// triangle (`O(m²)`). The KKT dimension grows by exactly one aux variable
+    /// for the cone, and the total nnz stays below the dense `(z,z)` count.
+    #[test]
+    fn large_soc_kkt_block_is_sparse_not_dense() {
+        // Pure SOC(m) problem (m > SOC_DENSE_MAX_DIM): n = m, G = -I_m.
+        let m = 24;
+        let g: Vec<Triplet> = (0..m).map(|i| Triplet::new(i, i, -1.0)).collect();
+        let prob = QpProblem {
+            n: m,
+            p_lower: vec![],
+            c: vec![0.0; m],
+            a: vec![],
+            b: vec![],
+            g,
+            h: vec![0.0; m],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = NsCone::new(&[NsBlock::SecondOrder(m)]);
+        let kkt = NsKkt::build(&prob, &cone, 1e-10);
+
+        // One auxiliary variable was appended for the single large SOC.
+        assert_eq!(
+            kkt.dim,
+            prob.n + prob.m_eq() + prob.m_ineq() + 1,
+            "large SOC must add exactly one auxiliary variable",
+        );
+        assert!(matches!(
+            kkt.z_pos.as_slice(),
+            [ZPos::SecondOrderSparse { .. }]
+        ));
+        // The dense lower triangle alone would be m(m+1)/2 entries in the
+        // (z,z) block; the sparse aux form uses ~2m. The full KKT nnz must sit
+        // below the dense-(z,z) lower bound.
+        let dense_zz = m * (m + 1) / 2;
+        assert!(
+            kkt.airn.len() < dense_zz,
+            "KKT nnz {} should be below the dense (z,z) count {} (sparse SOC fill)",
+            kkt.airn.len(),
+            dense_zz,
+        );
+    }
+
+    /// The sparse aux-variable SOC path must also **solve correctly**, not
+    /// just assemble sparsely: a large second-order cone routed through the
+    /// non-symmetric driver hits the new code path (`m > SOC_DENSE_MAX_DIM`)
+    /// and must reach the known norm-minimization optimum.
+    /// `min t s.t. (t, 3, 4, 0, 0, 0) ∈ SOC(6)` → `t = ‖(3,4,0,0,0)‖ = 5`.
+    #[test]
+    fn large_soc_sparse_path_solves() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0)], // SOC s0 = t
+            h: vec![0.0, 3.0, 4.0, 0.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        // dim 6 > SOC_DENSE_MAX_DIM ⇒ exercises the sparse aux path.
+        let sol = solve_conic_hsde_nonsym(&prob, &[NsBlock::SecondOrder(6)], &opts(), backend);
+        assert!(
+            matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
+            "status {:?}",
+            sol.status
+        );
+        assert!((sol.x[0] - 5.0).abs() < 1e-5, "t = {} vs 5", sol.x[0]);
+    }
+
+    /// A **small** SOC (`m <= SOC_DENSE_MAX_DIM`) stays in the dense
+    /// lower-triangle form: fewer nonzeros than the aux form at that size, no
+    /// auxiliary variable, and the existing small-SOC solves keep their
+    /// (better-conditioned) numerics.
+    #[test]
+    fn small_soc_kkt_block_stays_dense() {
+        let m = SOC_DENSE_MAX_DIM; // 3
+        let g: Vec<Triplet> = (0..m).map(|i| Triplet::new(i, i, -1.0)).collect();
+        let prob = QpProblem {
+            n: m,
+            p_lower: vec![],
+            c: vec![0.0; m],
+            a: vec![],
+            b: vec![],
+            g,
+            h: vec![0.0; m],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = NsCone::new(&[NsBlock::SecondOrder(m)]);
+        let kkt = NsKkt::build(&prob, &cone, 1e-10);
+
+        // No auxiliary variable for a small SOC.
+        assert_eq!(
+            kkt.dim,
+            prob.n + prob.m_eq() + prob.m_ineq(),
+            "small SOC must not add an auxiliary variable",
+        );
+        assert!(matches!(
+            kkt.z_pos.as_slice(),
+            [ZPos::SecondOrderDense { dim: 3, .. }]
+        ));
     }
 
     /// Power cone routed through the **public** entry `solve_socp_ipm` with

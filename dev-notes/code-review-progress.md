@@ -108,6 +108,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L38 | Equilibrated solves leave the per-iteration trace in scaled coordinates (`equilibrate.rs:254-278` unscales the solution only) | **FIXED** | **Confirmed by reading the unscaling path + reproducing the mismatch.** `Scaling::unscale_solution` maps `sol.x/y/z/z_lb/z_ub` back and recomputes `sol.obj` at the unscaled `x`, but never touches `sol.iterates` — so on an equilibrated solve the per-iteration trace (objective, residual ∞-norms, μ) stayed in the solver's scaled coordinates while the returned solution was unscaled, making the trace's final objective disagree with `sol.obj`. **Analysis**: of the trace fields, only `objective` admits an *exact* scalar unscaling — the scaled objective at the scaled iterate is `σ·(½xᵀPx + cᵀx)` (the column scaling `Dc` cancels), so dividing by σ recovers the original-coordinate value. The residual ∞-norms and μ cannot be unscaled exactly from a scalar: an ∞-norm of a per-row/per-column diagonally-scaled residual has no scalar inverse (they vanish at the optimum in either coordinate system regardless). **Fix**: `unscale_solution` now divides each `iterate.objective` by σ; documented the coordinate convention on `QpIterate` (`objective` original-coords/consistent with `sol.obj`; residuals/μ are the solver's internal equilibrated convergence measures). **Test** (`qp::residual_tests`): `equilibrated_trace_objective_is_in_original_coordinates` solves a pure LP (`min 1000·x0+500·x1 s.t. x0+x1≥2`, which triggers σ = 1/max\|ĉ\| ≠ 1 — a QP keeps σ=1 so the bug is invisible there) on the direct equilibrated path (`use_hsde=false`) with `collect_iterates`, and asserts the final trace objective matches `sol.obj` (= 1000). **Fail-first confirmed**: removing the unscale loop makes the final trace objective read `1.0` (= σ·1000, σ=1e-3) vs `sol.obj=1000`. Restored; full pounce-convex suite green (108 lib, +1). `cargo fmt -p pounce-convex` / gated `cargo clippy` clean. See `## L38 detail`. |
 | L39 | `QpSensitivity::build` / `reduced_hessian` re-scan all of `G` per active row (`sensitivity.rs:134-138, 273-277`; review also cites a postsolve twin at `presolve.rs:1584-1590`) | **FIXED (perf; behavior-preserving)** | **Confirmed by reading both sites + checking the presolve cite.** Both `build` (KKT assembly, `:136`) and `reduced_hessian` (active-Jacobian `B`, `:274`) looped over the active rows and, *inside* each, did `prob.g.iter().filter(\|t\| t.row == i)` — re-walking the **entire** `G` triplet list once per active row, i.e. `O(n_active · nnz(G))`. The cited postsolve twin (`presolve.rs:1584-1590`) **no longer exists**: that region was rewritten by `d12a27f` (postsolve recovery-order fix) and a grep for `filter(\|t\| t.row ==` across `pounce-convex` now matches **only** the two `sensitivity.rs` sites — so the perf issue is real but confined to sensitivity. **Fix**: a single `group_rows_by_index(&prob.g, m_ineq)` pass builds a `Vec<Vec<(col,val)>>` (one `O(nnz(G))` bucket-sort), then each active row indexes its own bucket directly — `O(nnz(G))` total, each lookup proportional to that row's own nonzeros. Behavior is identical (same triplets added in the same order; `add` accumulates commutatively). **Test** (`sensitivity::tests`): `reduced_hessian_two_active_multi_triplet_rows` — `min ½‖x‖²−2·𝟙ᵀx` on n=3 with `x₀+x₁≤1` and `x₁+x₂≤1`, both active at `(1,0,1)` with λ=1>0. Two active rows, **each with two nonzeros and a shared column** (col 1 in both) — the case the existing single-triplet active-row fixtures never exercised. Asserts `x≈(1,0,1)`, both `z>0`, `reduced_hessian` `n_dof=1` / eigenvalue 1 (null space `(−1,1,−1)/√3`), and `kkt_dim = n+0+2` (both rows entered the factor). This is a perf refactor (no behavior change), so there is no fail-first *bug*; the test instead guards grouping correctness — a misgrouping such as `rows[t.col]` (or letting the shared column 1 leak between rows) would corrupt `B`/KKT and break the eigenvalue/`n_dof` assertions. Full pounce-convex suite green (109 lib, +1); `cargo fmt -p pounce-convex` / gated `cargo clippy` clean (no `sensitivity.rs` warnings). See `## L39 detail`. |
 | L40 | `symmetric_eigen` return value ignored in `reduced_hessian` (`sensitivity.rs:300, 348`) — on non-convergence the rank/null-space would be silently wrong; everywhere else in the crate the return is checked | **FIXED** | **Confirmed by reading both call sites + the crate convention.** `symmetric_eigen` returns a `bool` (made meaningful by the M4 fix: `false` on non-convergence). `reduced_hessian` calls it twice — once on `BᵀB` to split rank vs. null space (`:322`), once on the assembled `H_R` to eigendecompose (`:370`) — and **discarded both returns**, so a non-converged sweep would publish a wrong `n_dof`/`Z` (hence a wrong reduced Hessian and eigenvalues) as if trustworthy. Every other consumer in the crate checks it: `psd.rs::sym_apply` does `if !symmetric_eigen(...) { return None; }`. **Fix**: `reduced_hessian` (and `reduced_hessian_default`) now return `Result<ReducedHessian, SensError>`; a new `SensError::EigenFailed` variant is returned at either guard (`if !symmetric_eigen(...) { return Err(SensError::EigenFailed); }`), and the success value is `Ok`-wrapped. The Python binding (`pounce-py/src/qp.rs::reduced_hessian`) maps the new error to a `PyValueError` (and the build-error `match` gains the now-required `EigenFailed` arm). The 4 in-crate test callers became `.expect("eigensolve converges")`. **Test** (`sensitivity::tests`): `reduced_hessian_returns_ok_on_convergent_eigensolve` — a well-formed QP (`min ½‖x‖²−2·𝟙ᵀx` on n=2 with `x₀+x₁≤1` active) whose two internal eigensolves both converge, asserting the call yields `Ok` with `n_dof=1` / eigenvalue 1, and that the explicit-tolerance entry point is `Ok` too. **Fail-first (N/A — the `Err` path is a defensive guard).** The `EigenFailed` branch only trips when `symmetric_eigen` exhausts its 50 sweeps, which a modest well-conditioned reduced Hessian never does — so the failure path is not reachable through the public solver at this layer (the same limitation M4 documented for the convergence flag itself) and is not exercised by a fixture; the test pins the `Ok` contract that previously was a bare return. Full pounce-convex suite green (110 lib, +1); `pounce-py` builds; `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean. See `## L40 detail`. |
+| L41 | Nonsym driver assembles SOC `(z,z)` blocks dense (`hsde_nonsym.rs:262-269`), unlike the symmetric driver's sparse diag+rank-1 form — O(m²) fill for large SOCs mixed with exp cones | **FIXED (perf; threshold-gated to preserve small-SOC numerics)** | **Confirmed by reading both drivers + a fail-first structural test.** `NsKkt::build` reserved the full dense `m×m` lower triangle for every SOC `(z,z)` block (`m(m+1)/2` entries), while the symmetric driver (`ipm.rs::KktStructure`, `ZBlockPos::DiagRank1`) uses the ECOS/Clarabel sparse trick: an auxiliary variable `ξ` with diagonal + coupling column `u` + `(ξ,ξ)=1`, whose Schur complement reproduces `diag(d)+uuᵀ` at `O(m)` fill. **Fix**: ported the aux-variable form to the nonsym KKT, but **threshold-gated** by `SOC_DENSE_MAX_DIM = 3` — for the dense triangle `m(m+1)/2` is actually *fewer* nonzeros than the aux form's `2m+1` (plus an extra row/col) when `m ≤ 3`, and is slightly better-conditioned near the cone boundary, so small SOCs keep the dense path and large ones (the review's concern) take the sparse path. The shared helpers already support the appended aux rows: `build_rhs` zeros the aux tail and `split_step` reads only the base rows; `recover_ds` uses `BlockScaling::SecondOrder{diag,u}` directly, independent of the KKT layout — so the change is contained to `NsKkt` (the `ZPos` variants, `build`, `update_blocks`). **Why the threshold (verified):** an unconditional sparse port tipped the existing `soc_mixed_with_exp` (SOC(3)+exp) test from `Optimal` to `OptimalInaccurate` — the solution was still correct to 1e-8 (`x=(5,e)`, `obj=5+e`), only the convergence band crossed, because the augmented system is marginally worse-conditioned near the boundary. Gating SOC(3) to dense restores exact `Optimal`. **Tests** (`hsde_nonsym::tests`): `large_soc_kkt_block_is_sparse_not_dense` (SOC(24): `+1` aux var, `ZPos::SecondOrderSparse`, nnz below the dense `m(m+1)/2` bound — **fail-first confirmed**: pre-fix `dim` was the base with no aux), `small_soc_kkt_block_stays_dense` (SOC(3): no aux, `ZPos::SecondOrderDense`), and `large_soc_sparse_path_solves` (SOC(6) norm-min through the driver reaches `t=5`, exercising the sparse path end-to-end, not just structurally). Full pounce-convex suite green (113 lib, +3); `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean (the one `type_complexity` note at `:908` is pre-existing and outside the gated set). See `## L41 detail`. |
 
 ## C1 detail
 
@@ -5497,3 +5498,67 @@ caller is forced to handle the failure. The new test pins the `Ok` contract so a
 regression that drops the guard or mis-wraps the result is caught. Full
 pounce-convex suite green (110 lib tests, +1); `pounce-py` builds; `cargo fmt` /
 gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.
+
+## L41 detail
+
+**Issue.** The non-symmetric HSDE driver assembles each second-order-cone
+`(z,z)` block as a dense `m×m` lower triangle (`hsde_nonsym.rs`, the
+`NsBlock::SecondOrder` arm of `NsKkt::build`), unlike the symmetric driver's
+sparse diagonal-plus-rank-1 form — `O(m²)` fill for large SOCs mixed with exp
+cones.
+
+**Verification.** `NsKkt::build`'s SOC branch did `for i in 0..m { for j in
+0..=i { add(zb+i, zb+j, …) } }`, i.e. `m(m+1)/2` value positions for the NT
+scaling `W² = diag(d) + uuᵀ`. The symmetric driver (`ipm.rs::KktStructure`,
+`BlockShape::DiagRank1` / `ZBlockPos::DiagRank1`) instead appends one auxiliary
+variable `ξ` per SOC: the `(z,z)` diagonal, a coupling column `(ξ, z_i) = u_i`,
+and `(ξ, ξ) = +1`. Eliminating `ξ` (Schur complement, pivot `+1`) reproduces
+`−diag(d) − reg − uuᵀ = −W² − reg` exactly, with only `2m+1` entries and one
+extra row/col. A fail-first structural test (`large_soc_kkt_block_is_sparse_not_dense`,
+SOC(24)) confirmed the pre-fix KKT carried no auxiliary variable (`dim` equal to
+the base `n+m_eq+m_ineq`, expected base+1).
+
+**Fix.** Ported the auxiliary-variable form to the nonsym KKT — two `ZPos`
+variants (`SecondOrderDense{dim,pos}`, `SecondOrderSparse{diag_pos,u_pos,aux_pos}`),
+a branch in `build` (entries + position recording, advancing an `aux` index
+appended after the base rows) and in `update_blocks`. The shared helpers already
+support aux rows transparently: `build_rhs` zeros the aux tail of the RHS and
+`split_step` reads only `[0, n+m_eq+m_ineq)`, so `(dx, dy, dz)` extraction is
+unchanged; `recover_ds` applies `W²·Δz` from `BlockScaling::SecondOrder{diag,u}`,
+independent of the KKT representation. So the change is wholly contained to
+`NsKkt`.
+
+**Threshold (the key decision).** The port is gated by `SOC_DENSE_MAX_DIM = 3`:
+SOCs with `m ≤ 3` stay dense, `m > 3` go sparse. Two reasons, both verified:
+(1) **nnz** — for `m ≤ 3` the dense triangle `m(m+1)/2` is *fewer* nonzeros than
+the aux form's `2m+1` (m=3: 6 vs 7), so dense is the smaller representation
+there; the crossover is `m ≈ 3.6`, and the `O(m²)` blow-up the review flags is a
+large-`m` phenomenon. (2) **Conditioning** — an *unconditional* sparse port
+tipped the existing `soc_mixed_with_exp` test (SOC(3) + exp) from `Optimal` to
+`OptimalInaccurate`. I probed it: the solution was still correct to 1e-8
+(`x = (4.99999999, 2.71828182) = (5, e)`, `obj = 5+e`), only the convergence
+*band* crossed — the augmented system is marginally worse-conditioned near the
+cone boundary, so the homogenized residual settled just above `tol` instead of
+just below. Gating SOC(3) to dense restores exact `Optimal` while still giving
+large SOCs the `O(m)` fill. (The symmetric driver sparsifies unconditionally,
+but it is a different algorithm with no equivalent borderline mixed test; for
+the nonsym driver the threshold is strictly better — fewer nnz *and* unchanged
+numerics for the common small cone.)
+
+**Tests** (`hsde_nonsym::tests`):
+- `large_soc_kkt_block_is_sparse_not_dense` (SOC(24)): asserts `dim = base + 1`
+  (one aux var), `z_pos == [SecondOrderSparse]`, and total nnz `< m(m+1)/2` (the
+  dense `(z,z)` lower bound). **Fail-first**: pre-fix `dim` was the bare base
+  (left 48, right 49).
+- `small_soc_kkt_block_stays_dense` (SOC(3)): asserts no aux var (`dim = base`)
+  and `z_pos == [SecondOrderDense{dim:3,…}]` — guards the threshold.
+- `large_soc_sparse_path_solves` (SOC(6) norm-minimization through the driver):
+  reaches `t = ‖(3,4,0,0,0)‖ = 5`, exercising the sparse aux path end-to-end
+  (solve, not just assembly) since the existing solve fixtures all use SOC(3),
+  now dense.
+
+Full pounce-convex suite green (113 lib tests, +3; all integration green);
+`soc_mixed_with_exp` back to `Optimal`. `cargo fmt` / gated `cargo clippy`
+(`-D clippy::correctness -D clippy::suspicious`) clean — the lone
+`type_complexity` note at `hsde_nonsym.rs:908` (the `best` iterate tuple) is
+pre-existing and outside the gated set.
