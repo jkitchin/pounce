@@ -1016,7 +1016,7 @@ fn extract_i8_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<
     })
 }
 
-fn status_message(status: ApplicationReturnStatus) -> &'static str {
+pub(crate) fn status_message(status: ApplicationReturnStatus) -> &'static str {
     use ApplicationReturnStatus::*;
     match status {
         SolveSucceeded => "Solve_Succeeded",

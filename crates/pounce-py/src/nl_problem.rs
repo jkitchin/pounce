@@ -33,13 +33,16 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use pounce_common::types::{Index, Number};
-use pounce_nl::nl_reader::{read_nl_file, NlTnlp};
+use pounce_nl::nl_reader::{read_nl_file, NlTnlp, NlVariation};
 use pounce_nlp::tnlp::{SparsityRequest, TNLP};
 
 /// A `.nl` model loaded through pounce's reader, exposing its evaluators.
-// `NlTnlp` shares `Expr` nodes via `Rc` (CSE), so it is not `Send`; the
-// pyclass is `unsendable` and stays on the thread that created it (fine
-// under the GIL).
+// `NlTnlp` itself is `Send` (its CSE nodes went `Arc` for pounce#126's
+// batched solving), but the pyclass stays `unsendable`: per-object
+// thread affinity is the conservative default under the GIL, and the
+// batch path never moves the pyclass — `solve_nlp_batch` clones the
+// owned `NlTnlp` out (see `clone_tnlp`) and moves the clone to the
+// rayon worker.
 #[pyclass(unsendable, module = "pounce", name = "NlProblem")]
 pub struct PyNlProblem {
     tnlp: RefCell<NlTnlp>,
@@ -308,11 +311,93 @@ impl PyNlProblem {
         Ok(values.into_pyarray_bound(py))
     }
 
+    /// Clone this model with per-instance overrides applied — the
+    /// "one structure, many bound / starting-point variations" case of
+    /// batched solving (pounce#126): parametric sweeps, multi-start,
+    /// or branch-and-bound nodes that only tighten variable bounds.
+    /// The parsed expression DAG / AD tapes are shared structure and
+    /// cheap to clone; only the named vectors are replaced. Arguments
+    /// left as `None` keep this model's values.
+    #[pyo3(signature = (x0=None, x_l=None, x_u=None, g_l=None, g_u=None))]
+    fn variant(
+        &self,
+        x0: Option<&Bound<'_, PyAny>>,
+        x_l: Option<&Bound<'_, PyAny>>,
+        x_u: Option<&Bound<'_, PyAny>>,
+        g_l: Option<&Bound<'_, PyAny>>,
+        g_u: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyNlProblem> {
+        let dec = |v: Option<&Bound<'_, PyAny>>, len: usize, what: &str| {
+            v.map(|b| decode_vec(b, len, what)).transpose()
+        };
+        let variation = NlVariation {
+            x0: dec(x0, self.n, "variant: x0")?,
+            x_l: dec(x_l, self.n, "variant: x_l")?,
+            x_u: dec(x_u, self.n, "variant: x_u")?,
+            g_l: dec(g_l, self.m, "variant: g_l")?,
+            g_u: dec(g_u, self.m, "variant: g_u")?,
+        };
+        let tnlp = self
+            .tnlp
+            .borrow()
+            .variant(&variation)
+            .map_err(PyValueError::new_err)?;
+        PyNlProblem::from_tnlp(tnlp, "variant")
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "NlProblem(n={}, m={}, nnz_jac={}, nnz_hess={}, minimize={})",
             self.n, self.m, self.nnz_jac, self.nnz_h, self.minimize
         )
+    }
+}
+
+impl PyNlProblem {
+    /// Build the pyclass around an owned `NlTnlp`, capturing the
+    /// metadata the getters serve. `what` labels error messages.
+    pub(crate) fn from_tnlp(mut tnlp: NlTnlp, what: &str) -> PyResult<PyNlProblem> {
+        let info = tnlp
+            .get_nlp_info()
+            .ok_or_else(|| PyValueError::new_err(format!("{what}: get_nlp_info returned None")))?;
+        let prob = tnlp.problem();
+        let (n, m) = (prob.n, prob.m);
+        let minimize = prob.minimize;
+        let obj_constant = prob.obj_constant;
+        let x0 = prob.x0.clone();
+        let x_l = prob.x_l.clone();
+        let x_u = prob.x_u.clone();
+        let g_l = prob.g_l.clone();
+        let g_u = prob.g_u.clone();
+        let var_names = prob.var_names.clone();
+        let con_names = prob.con_names.clone();
+        Ok(PyNlProblem {
+            tnlp: RefCell::new(tnlp),
+            n,
+            m,
+            nnz_jac: info.nnz_jac_g as usize,
+            nnz_h: info.nnz_h_lag as usize,
+            minimize,
+            obj_constant,
+            x0,
+            x_l,
+            x_u,
+            g_l,
+            g_u,
+            var_names,
+            con_names,
+        })
+    }
+
+    /// Owned copy of the evaluator for the batch path: the clone (not
+    /// the pyclass) moves to a rayon worker. Cheap relative to a
+    /// solve — tapes are flat `Vec`s of ops.
+    pub(crate) fn clone_tnlp(&self) -> NlTnlp {
+        self.tnlp.borrow().clone()
+    }
+
+    pub(crate) fn dims(&self) -> (usize, usize) {
+        (self.n, self.m)
     }
 }
 
@@ -326,42 +411,10 @@ pub fn read_nl(path: &str) -> PyResult<PyNlProblem> {
     let prob = read_nl_file(std::path::Path::new(path))
         .map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
 
-    // Capture metadata before `prob` is consumed by `NlTnlp::try_new`.
-    let minimize = prob.minimize;
-    let obj_constant = prob.obj_constant;
-    let x0 = prob.x0.clone();
-    let x_l = prob.x_l.clone();
-    let x_u = prob.x_u.clone();
-    let g_l = prob.g_l.clone();
-    let g_u = prob.g_u.clone();
-    let var_names = prob.var_names.clone();
-    let con_names = prob.con_names.clone();
-    let n = prob.n;
-    let m = prob.m;
-
     // `try_new` (not `new`): a model that names an AMPL imported function with
     // no resolvable `$AMPLFUNC` library must raise a catchable Python error,
     // not panic across the pyo3 boundary as an uncatchable PanicException.
-    let mut tnlp =
+    let tnlp =
         NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
-    let info = tnlp
-        .get_nlp_info()
-        .ok_or_else(|| PyValueError::new_err("read_nl: get_nlp_info returned None"))?;
-
-    Ok(PyNlProblem {
-        tnlp: RefCell::new(tnlp),
-        n,
-        m,
-        nnz_jac: info.nnz_jac_g as usize,
-        nnz_h: info.nnz_h_lag as usize,
-        minimize,
-        obj_constant,
-        x0,
-        x_l,
-        x_u,
-        g_l,
-        g_u,
-        var_names,
-        con_names,
-    })
+    PyNlProblem::from_tnlp(tnlp, "read_nl")
 }

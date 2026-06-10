@@ -9,6 +9,34 @@ changes.
 
 ## [Unreleased]
 
+### Added — Batched NLP solving (`solve_nlp_batch`, native-Rust path) (#126)
+
+Solve N independent NLPs in parallel on a Rayon pool — the general-NLP
+analog of `solve_qp_batch_parallel`, for parametric sweeps, multi-start,
+MPC chains, and branch-and-bound node relaxations (each sibling node
+differing only in tightened bounds).
+
+- **Rust** — `pounce_algorithm::solve_nlp_batch` /
+  `solve_nlp_batch_parallel`: one fully-equipped `IpoptApplication` per
+  instance, built *inside* the worker via a `Sync` configure hook
+  (outer-parallel / inner-serial, like the QP batch;
+  `install_serial_feral_backend` sets up the per-worker serial factor).
+  Results return in input order with the captured final iterate,
+  multipliers, and per-instance `SolveStatistics`.
+- **`pounce-nl`** — CSE `Expr` sharing switched from `Rc` to `Arc`, so
+  `NlProblem` / `NlTnlp` are `Send` and an owned evaluator can move to a
+  worker. `NlTnlp` is now `Clone`, and `NlTnlp::variant` /
+  `NlVariation` build per-instance bound / starting-point overrides on
+  one parsed model (tapes are cheap to clone).
+- **Python** — `pounce.solve_nlp_batch(problems, x0s=, options=,
+  parallel=)`: native `NlProblem` inputs (from `read_nl` or the new
+  `NlProblem.variant(...)`) solve in parallel with the GIL released;
+  callback-based `Problem` inputs fall back to a documented sequential
+  loop (the GIL serializes every callback — true callback batching is
+  tracked as #126 phase 2). One `(x, info)` pair per input, `info`
+  matching `Problem.solve`'s layout; `print_level` defaults to 0 for
+  the batch.
+
 ### Added — PyTorch frontend for the differentiable solver (`pounce.torch`)
 
 A PyTorch frontend mirroring `pounce.jax`: a solve is a

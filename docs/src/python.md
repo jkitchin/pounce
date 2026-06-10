@@ -57,6 +57,54 @@ x, info = prob.solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
 print(info['status_msg'], info['obj_val'], x)
 ```
 
+## Batched NLP solving (`solve_nlp_batch`)
+
+`pounce.solve_nlp_batch` solves N **independent** NLPs and returns one
+`(x, info)` pair per input, in input order — for parametric sweeps,
+multi-start, MPC chains, or branch-and-bound node relaxations where
+each sibling differs only in tightened bounds.
+
+```python
+import numpy as np
+import pounce
+
+base = pounce.read_nl("model.nl")          # native-Rust evaluators
+
+# One parsed structure, many variations (cheap clones of the AD tapes):
+rng = np.random.default_rng(0)
+batch = [base.variant(x0=np.asarray(base.x0) + rng.normal(0, 0.01, base.n))
+         for _ in range(24)]
+
+results = pounce.solve_nlp_batch(batch, options={"tol": 1e-8})
+for x, info in results:
+    print(info["status_msg"], info["obj_val"])
+```
+
+`NlProblem.variant(x0=, x_l=, x_u=, g_l=, g_u=)` builds a sibling
+instance with per-instance starting point / bounds; everything
+structural (expression DAG, AD tapes, sparsity, coloring) is shared
+work that is not redone.
+
+**Native vs. callback inputs — the GIL caveat.** Batch parallelism
+needs evaluators that don't touch Python during the solve:
+
+* `NlProblem` inputs (from `read_nl` / `variant`) are native-Rust
+  reverse-mode-AD evaluators. The batch runs **in parallel** on a
+  Rayon thread pool with the GIL released; each worker solves its
+  instance end-to-end with an inner-serial factorization
+  (outer-parallel / inner-serial, the same model as `solve_qp_batch`).
+* Callback-based `Problem` inputs evaluate through Python, and every
+  callback needs the GIL — parallelizing them buys nothing. They are
+  solved **sequentially** (pass `x0s=`, one starting point per
+  instance). True parallel callback batching is tracked as pounce#126
+  phase 2.
+
+With `parallel=False` the native path also solves one instance at a
+time, letting each factorization parallelize internally — better for a
+few large instances. For the batch, `print_level` defaults to 0
+(N workers interleaving iteration tables is noise); pass an explicit
+`print_level` to override.
+
 ## scipy.optimize-style
 
 ```python
