@@ -595,6 +595,9 @@ impl PyQpSensitivity {
                 "QpSensitivity: the active-set KKT is singular (the active constraint \
                  gradients are rank-deficient), so the parametric step is not unique",
             ),
+            SensError::EigenFailed => {
+                PyValueError::new_err("QpSensitivity: a symmetric eigensolve did not converge")
+            }
         })?;
         Ok(Self {
             inner,
@@ -642,7 +645,18 @@ impl PyQpSensitivity {
     /// threshold for the rank of the active Jacobian.
     #[pyo3(signature = (rank_tol = 1e-9))]
     fn reduced_hessian<'py>(&self, py: Python<'py>, rank_tol: f64) -> PyResult<Bound<'py, PyDict>> {
-        let rh = self.inner.reduced_hessian(rank_tol);
+        let rh = self.inner.reduced_hessian(rank_tol).map_err(|e| match e {
+            SensError::EigenFailed => PyValueError::new_err(
+                "QpSensitivity.reduced_hessian: a symmetric eigensolve did not converge, \
+                 so the reduced Hessian's rank / null-space cannot be trusted",
+            ),
+            SensError::NotOptimal => {
+                PyValueError::new_err("QpSensitivity: solution is not optimal")
+            }
+            SensError::FactorizationFailed => {
+                PyValueError::new_err("QpSensitivity: the active-set KKT is singular")
+            }
+        })?;
         let d = PyDict::new_bound(py);
         d.set_item("n_dof", rh.n_dof)?;
         d.set_item("matrix", rh.matrix.into_pyarray_bound(py))?;

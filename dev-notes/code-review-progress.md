@@ -107,6 +107,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L37 | Failure paths seed the dual inconsistently (`z = 1.0` vs `0.0`) — `ipm.rs:1116-1120`, `hsde.rs:504` vs `ipm.rs:350-357, 411-418` | **FIXED** | **Confirmed by reading all failure sites.** Six `NumericalFailure` paths seeded the inequality dual `z = vec![1.0; m_ineq]` (`ipm.rs` build-factorization failures at 254/442/1113/1685; `hsde::failed`; `hsde_nonsym::failed`), while five validation-failure paths used `z = vec![0.0; m_ineq]` (cone-cover / nonsym+psd guards at `ipm.rs:350/366/412/425/866`). Beyond the inconsistency, **`z = 1.0` is wrong for non-orthant cones**: the all-ones vector is the orthant identity but is *not a member* of a general dual cone (e.g. an SOC of dim ≥ 3 requires `z₀ ≥ ‖z₁:‖ = √(m−1) > 1`). The successful cold start, by contrast, seeds `z` at the true `cone.identity(e)` (`ipm.rs:1196-1201`). **Fix**: unified all failure paths on `z = 0.0` — the cone apex, valid in *every* dual cone (orthant/SOC/PSD/exp/power) and matching the trivial `x = 0, y = 0` these paths already return; added explanatory comments at `failed_solution` and both `failed` helpers. **Test** (`tests/batch.rs`): `pattern_mismatch_failure_seeds_zero_dual` builds a `QpFactorization` on an inequality-constrained QP (n=2, m_ineq=1) then solves a structurally-different n=3 instance, tripping the pattern-mismatch failure; asserts `NumericalFailure` with `x`/`y`/`z` all-zeros and `z.len() == m_ineq`. **Fail-first confirmed**: reverting the `solve_inner` site to `z=1.0` makes the assert fail with `got [1.0]`. Restored; full pounce-convex suite green (107 lib + batch 7, +1). `cargo fmt -p pounce-convex` / gated `cargo clippy` clean. See `## L37 detail`. |
 | L38 | Equilibrated solves leave the per-iteration trace in scaled coordinates (`equilibrate.rs:254-278` unscales the solution only) | **FIXED** | **Confirmed by reading the unscaling path + reproducing the mismatch.** `Scaling::unscale_solution` maps `sol.x/y/z/z_lb/z_ub` back and recomputes `sol.obj` at the unscaled `x`, but never touches `sol.iterates` — so on an equilibrated solve the per-iteration trace (objective, residual ∞-norms, μ) stayed in the solver's scaled coordinates while the returned solution was unscaled, making the trace's final objective disagree with `sol.obj`. **Analysis**: of the trace fields, only `objective` admits an *exact* scalar unscaling — the scaled objective at the scaled iterate is `σ·(½xᵀPx + cᵀx)` (the column scaling `Dc` cancels), so dividing by σ recovers the original-coordinate value. The residual ∞-norms and μ cannot be unscaled exactly from a scalar: an ∞-norm of a per-row/per-column diagonally-scaled residual has no scalar inverse (they vanish at the optimum in either coordinate system regardless). **Fix**: `unscale_solution` now divides each `iterate.objective` by σ; documented the coordinate convention on `QpIterate` (`objective` original-coords/consistent with `sol.obj`; residuals/μ are the solver's internal equilibrated convergence measures). **Test** (`qp::residual_tests`): `equilibrated_trace_objective_is_in_original_coordinates` solves a pure LP (`min 1000·x0+500·x1 s.t. x0+x1≥2`, which triggers σ = 1/max\|ĉ\| ≠ 1 — a QP keeps σ=1 so the bug is invisible there) on the direct equilibrated path (`use_hsde=false`) with `collect_iterates`, and asserts the final trace objective matches `sol.obj` (= 1000). **Fail-first confirmed**: removing the unscale loop makes the final trace objective read `1.0` (= σ·1000, σ=1e-3) vs `sol.obj=1000`. Restored; full pounce-convex suite green (108 lib, +1). `cargo fmt -p pounce-convex` / gated `cargo clippy` clean. See `## L38 detail`. |
 | L39 | `QpSensitivity::build` / `reduced_hessian` re-scan all of `G` per active row (`sensitivity.rs:134-138, 273-277`; review also cites a postsolve twin at `presolve.rs:1584-1590`) | **FIXED (perf; behavior-preserving)** | **Confirmed by reading both sites + checking the presolve cite.** Both `build` (KKT assembly, `:136`) and `reduced_hessian` (active-Jacobian `B`, `:274`) looped over the active rows and, *inside* each, did `prob.g.iter().filter(\|t\| t.row == i)` — re-walking the **entire** `G` triplet list once per active row, i.e. `O(n_active · nnz(G))`. The cited postsolve twin (`presolve.rs:1584-1590`) **no longer exists**: that region was rewritten by `d12a27f` (postsolve recovery-order fix) and a grep for `filter(\|t\| t.row ==` across `pounce-convex` now matches **only** the two `sensitivity.rs` sites — so the perf issue is real but confined to sensitivity. **Fix**: a single `group_rows_by_index(&prob.g, m_ineq)` pass builds a `Vec<Vec<(col,val)>>` (one `O(nnz(G))` bucket-sort), then each active row indexes its own bucket directly — `O(nnz(G))` total, each lookup proportional to that row's own nonzeros. Behavior is identical (same triplets added in the same order; `add` accumulates commutatively). **Test** (`sensitivity::tests`): `reduced_hessian_two_active_multi_triplet_rows` — `min ½‖x‖²−2·𝟙ᵀx` on n=3 with `x₀+x₁≤1` and `x₁+x₂≤1`, both active at `(1,0,1)` with λ=1>0. Two active rows, **each with two nonzeros and a shared column** (col 1 in both) — the case the existing single-triplet active-row fixtures never exercised. Asserts `x≈(1,0,1)`, both `z>0`, `reduced_hessian` `n_dof=1` / eigenvalue 1 (null space `(−1,1,−1)/√3`), and `kkt_dim = n+0+2` (both rows entered the factor). This is a perf refactor (no behavior change), so there is no fail-first *bug*; the test instead guards grouping correctness — a misgrouping such as `rows[t.col]` (or letting the shared column 1 leak between rows) would corrupt `B`/KKT and break the eigenvalue/`n_dof` assertions. Full pounce-convex suite green (109 lib, +1); `cargo fmt -p pounce-convex` / gated `cargo clippy` clean (no `sensitivity.rs` warnings). See `## L39 detail`. |
+| L40 | `symmetric_eigen` return value ignored in `reduced_hessian` (`sensitivity.rs:300, 348`) — on non-convergence the rank/null-space would be silently wrong; everywhere else in the crate the return is checked | **FIXED** | **Confirmed by reading both call sites + the crate convention.** `symmetric_eigen` returns a `bool` (made meaningful by the M4 fix: `false` on non-convergence). `reduced_hessian` calls it twice — once on `BᵀB` to split rank vs. null space (`:322`), once on the assembled `H_R` to eigendecompose (`:370`) — and **discarded both returns**, so a non-converged sweep would publish a wrong `n_dof`/`Z` (hence a wrong reduced Hessian and eigenvalues) as if trustworthy. Every other consumer in the crate checks it: `psd.rs::sym_apply` does `if !symmetric_eigen(...) { return None; }`. **Fix**: `reduced_hessian` (and `reduced_hessian_default`) now return `Result<ReducedHessian, SensError>`; a new `SensError::EigenFailed` variant is returned at either guard (`if !symmetric_eigen(...) { return Err(SensError::EigenFailed); }`), and the success value is `Ok`-wrapped. The Python binding (`pounce-py/src/qp.rs::reduced_hessian`) maps the new error to a `PyValueError` (and the build-error `match` gains the now-required `EigenFailed` arm). The 4 in-crate test callers became `.expect("eigensolve converges")`. **Test** (`sensitivity::tests`): `reduced_hessian_returns_ok_on_convergent_eigensolve` — a well-formed QP (`min ½‖x‖²−2·𝟙ᵀx` on n=2 with `x₀+x₁≤1` active) whose two internal eigensolves both converge, asserting the call yields `Ok` with `n_dof=1` / eigenvalue 1, and that the explicit-tolerance entry point is `Ok` too. **Fail-first (N/A — the `Err` path is a defensive guard).** The `EigenFailed` branch only trips when `symmetric_eigen` exhausts its 50 sweeps, which a modest well-conditioned reduced Hessian never does — so the failure path is not reachable through the public solver at this layer (the same limitation M4 documented for the convergence flag itself) and is not exercised by a fixture; the test pins the `Ok` contract that previously was a bare return. Full pounce-convex suite green (110 lib, +1); `pounce-py` builds; `cargo fmt` / gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean. See `## L40 detail`. |
 
 ## C1 detail
 
@@ -5436,3 +5437,63 @@ rows — corrupts `B`/KKT and breaks the `n_dof`/eigenvalue assertions. The full
 pre-fix suite already passed and still passes post-fix (109 lib tests, +1),
 confirming no behavior changed. `cargo fmt -p pounce-convex` / gated `cargo
 clippy` clean (no `sensitivity.rs` warnings).
+
+## L40 detail
+
+**Issue.** `symmetric_eigen`'s return value is ignored in `reduced_hessian`
+(`sensitivity.rs:300, 348` in the review's line numbering) — on non-convergence
+the rank / null-space would be silently wrong, whereas everywhere else in the
+crate the return is checked.
+
+**Verification.** `symmetric_eigen(a, n, vals, vecs) -> bool` returns `false`
+when its cyclic-Jacobi sweep loop does not converge (this bool was made
+meaningful by the earlier M4 fix — before it, it always returned `true`).
+`reduced_hessian` calls it twice and bound neither return:
+
+- `symmetric_eigen(&btb, n, &mut sv, &mut vecs)` — the eigenvalues `sv` are the
+  squared singular values of the active Jacobian `B`; the count above
+  `rank_tol · λ_max` is `rank(B)`, and the first `n_dof = n − rank` eigenvectors
+  are taken as the null-space basis `Z`. A non-converged sweep here gives a
+  wrong rank split and a wrong `Z`.
+- `symmetric_eigen(&hr, n_dof, &mut eigenvalues, &mut eigenvectors)` — the final
+  eigendecomposition of the assembled reduced Hessian `H_R = ZᵀPZ`.
+
+Either failure would have been published as a fully-formed `ReducedHessian` with
+no indication the numbers are untrustworthy. The crate convention is the
+opposite: `psd.rs::sym_apply` does `if !symmetric_eigen(...) { return None; }`,
+propagating the failure. The only consumers of `reduced_hessian` are 4 in-crate
+tests and the Python binding `pounce-py/src/qp.rs::reduced_hessian`, so widening
+the return type is contained.
+
+**Fix.** `reduced_hessian(&self, rank_tol) ` and `reduced_hessian_default(&self)`
+now return `Result<ReducedHessian, SensError>`. A new `SensError::EigenFailed`
+variant is added (documented: only `reduced_hessian` can raise it; the
+parametric step does not eigendecompose). Both call sites became
+`if !symmetric_eigen(...) { return Err(SensError::EigenFailed); }` and the
+final struct is `Ok`-wrapped. In the Python binding, `reduced_hessian` maps the
+`Result` to a `PyValueError` (mirroring the existing `NotOptimal` /
+`FactorizationFailed` mapping), and the `build` error `match` gains the
+now-required `EigenFailed` arm. The 4 in-crate test callers became
+`.expect("eigensolve converges")`.
+
+**Test.** `sensitivity::tests::reduced_hessian_returns_ok_on_convergent_eigensolve`:
+`min ½‖x‖² − 2·𝟙ᵀx` on `n=2` with `x₀+x₁ ≤ 1` (active at `(0.5,0.5)`, rank-1
+active Jacobian ⇒ 1 DOF, null space `(1,−1)/√2`, `H_R = 1`). Both internal
+eigensolves converge, so the new contract requires the call to return `Ok`;
+the test `match`es on the `Result` (the behavior L40 introduced — the verdict is
+surfaced, not discarded), asserts `n_dof=1` / eigenvalue `1`, and that the
+explicit-tolerance entry point `reduced_hessian(1e-9)` is `Ok` too.
+
+**Fail-first (N/A — the `Err` path is a defensive guard).** The `EigenFailed`
+branch only trips if `symmetric_eigen` exhausts its 50 sweeps. A modest,
+well-conditioned reduced Hessian like every fixture here converges in a handful
+of sweeps, so the failure path is **not reachable through the public solver at
+this layer** — the same limitation M4 documented for the convergence flag
+itself (it could not synthesize a non-convergent matrix through the public
+path either). The change is therefore a correctness/consistency hardening, not a
+reproduced miscomputation: before it, a (hypothetical) non-converged solve
+returned a bare `ReducedHessian` indistinguishable from a good one; after it, the
+caller is forced to handle the failure. The new test pins the `Ok` contract so a
+regression that drops the guard or mis-wraps the result is caught. Full
+pounce-convex suite green (110 lib tests, +1); `pounce-py` builds; `cargo fmt` /
+gated `cargo clippy` (`-D clippy::correctness -D clippy::suspicious`) clean.

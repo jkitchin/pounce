@@ -60,6 +60,11 @@ pub enum SensError {
     /// The active-set KKT factorization failed (e.g. the active constraint
     /// gradients are rank-deficient, so the parametric step is not unique).
     FactorizationFailed,
+    /// A symmetric eigensolve did not converge while forming the reduced
+    /// Hessian, so its rank / null-space (and hence the result) cannot be
+    /// trusted. Only [`reduced_hessian`](QpSensitivity::reduced_hessian) can
+    /// raise this; the parametric step does not eigendecompose.
+    EigenFailed,
 }
 
 /// Post-optimal sensitivity for a solved convex QP.
@@ -275,7 +280,14 @@ impl QpSensitivity {
     /// sIPOPT's reduced Hessian, for QPs with a modest number of variables
     /// (the parametric step stays sparse and is the workhorse for large
     /// problems).
-    pub fn reduced_hessian(&self, rank_tol: f64) -> ReducedHessian {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SensError::EigenFailed`] if either symmetric eigensolve (the
+    /// one that extracts `Z` from `BᵀB`, or the final one on `H_R`) does not
+    /// converge — its rank / null-space, and hence the result, cannot be
+    /// trusted, so a wrong answer is never returned silently.
+    pub fn reduced_hessian(&self, rank_tol: f64) -> Result<ReducedHessian, SensError> {
         let n = self.n;
 
         // Active Jacobian B (m_act × n), dense row-major: equality rows,
@@ -314,7 +326,11 @@ impl QpSensitivity {
         }
         let mut sv = vec![0.0; n];
         let mut vecs = vec![0.0; n * n];
-        symmetric_eigen(&btb, n, &mut sv, &mut vecs); // ascending eigenvalues
+        // Ascending eigenvalues. A failed eigensolve makes the rank/null-space
+        // count below meaningless, so refuse rather than return garbage.
+        if !symmetric_eigen(&btb, n, &mut sv, &mut vecs) {
+            return Err(SensError::EigenFailed);
+        }
 
         // rank(B) = # squared-singular-values above the relative threshold;
         // the null space is spanned by the eigenvectors of the rest (the
@@ -362,19 +378,21 @@ impl QpSensitivity {
         // Eigendecompose the (small) reduced Hessian.
         let mut eigenvalues = vec![0.0; n_dof];
         let mut eigenvectors = vec![0.0; n_dof * n_dof];
-        symmetric_eigen(&hr, n_dof, &mut eigenvalues, &mut eigenvectors);
+        if !symmetric_eigen(&hr, n_dof, &mut eigenvalues, &mut eigenvectors) {
+            return Err(SensError::EigenFailed);
+        }
 
-        ReducedHessian {
+        Ok(ReducedHessian {
             n_dof,
             matrix: hr,
             eigenvalues,
             eigenvectors,
-        }
+        })
     }
 
     /// [`reduced_hessian`](Self::reduced_hessian) with a relative rank
     /// tolerance of `1e-9`.
-    pub fn reduced_hessian_default(&self) -> ReducedHessian {
+    pub fn reduced_hessian_default(&self) -> Result<ReducedHessian, SensError> {
         self.reduced_hessian(1e-9)
     }
 }
@@ -510,7 +528,9 @@ mod tests {
         let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
         let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
-        let rh = sens.reduced_hessian_default();
+        let rh = sens
+            .reduced_hessian_default()
+            .expect("eigensolve converges");
         assert_eq!(rh.n_dof, 2);
         assert!(
             (rh.eigenvalues[0] - 2.0).abs() < 1e-9,
@@ -551,7 +571,9 @@ mod tests {
         let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
         let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
-        let rh = sens.reduced_hessian_default();
+        let rh = sens
+            .reduced_hessian_default()
+            .expect("eigensolve converges");
         assert_eq!(rh.n_dof, 2, "one equality ⇒ 2 DOF");
         for &ev in &rh.eigenvalues {
             assert!((ev - 1.0).abs() < 1e-9, "eig {ev}");
@@ -583,7 +605,9 @@ mod tests {
         let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
         assert_eq!(sol.status, QpStatus::Optimal);
         let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
-        let rh = sens.reduced_hessian_default();
+        let rh = sens
+            .reduced_hessian_default()
+            .expect("eigensolve converges");
         assert_eq!(rh.n_dof, 1);
         assert!(
             (rh.eigenvalues[0] - 1.5).abs() < 1e-9,
@@ -643,7 +667,9 @@ mod tests {
         );
 
         let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
-        let rh = sens.reduced_hessian_default();
+        let rh = sens
+            .reduced_hessian_default()
+            .expect("eigensolve converges");
         assert_eq!(rh.n_dof, 1, "rank-2 active Jacobian on n=3 ⇒ 1 DOF");
         assert!(
             (rh.eigenvalues[0] - 1.0).abs() < 1e-7,
@@ -655,5 +681,55 @@ mod tests {
         // the (empty) equality block leaves dx = 0, but the factorization
         // having succeeded with dim = n + 0 + 2 confirms both rows entered.
         assert_eq!(sens.kkt_dim(), 3 + 0 + 2);
+    }
+
+    /// `reduced_hessian` now *returns* an eigensolve-convergence verdict
+    /// instead of silently ignoring it: on a well-formed QP both internal
+    /// symmetric eigensolves (the `BᵀB` rank/null-space split and the final
+    /// `H_R` decomposition) converge, so the call must yield `Ok` with the
+    /// hand-checked reduced Hessian.
+    ///
+    /// The `Err(EigenFailed)` branch is a defensive consistency guard: it can
+    /// only trip if `symmetric_eigen` exhausts its sweeps, which a modest,
+    /// well-conditioned reduced Hessian like this one never does — so the
+    /// failure path is not reachable through the public solver here and is not
+    /// exercised by a fixture (the same limitation noted for the underlying
+    /// `symmetric_eigen` convergence flag). This test pins the `Ok` contract;
+    /// before the fix the function returned a bare `ReducedHessian` and a
+    /// non-converged solve would have been published as if trustworthy.
+    #[test]
+    fn reduced_hessian_returns_ok_on_convergent_eigensolve() {
+        // min ½‖x‖² − 2·𝟙ᵀx with x₀ + x₁ ≤ 1 (active at (0.5, 0.5)); the
+        // single active row has rank 1 on n=2 ⇒ 1 DOF, null space (1,−1)/√2,
+        // so H_R = ZᵀIZ = 1.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![-2.0, -2.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![1.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+
+        // The verdict is surfaced, not discarded: matching on the Result is
+        // the behavior L40 introduced.
+        let rh = match sens.reduced_hessian_default() {
+            Ok(rh) => rh,
+            Err(e) => panic!("convergent eigensolve must yield Ok, got {e:?}"),
+        };
+        assert_eq!(rh.n_dof, 1, "rank-1 active Jacobian on n=2 ⇒ 1 DOF");
+        assert!(
+            (rh.eigenvalues[0] - 1.0).abs() < 1e-7,
+            "H_R = {:?} (expected eigenvalue 1)",
+            rh.eigenvalues,
+        );
+        // The explicit-tolerance entry point carries the same contract.
+        assert!(sens.reduced_hessian(1e-9).is_ok());
     }
 }
