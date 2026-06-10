@@ -539,6 +539,13 @@ impl PyProblem {
             None => py.None(),
         };
         info.set_item("reduced_hessian_eigenvectors", eigvecs_obj)?;
+        // Surface a post-solve sensitivity-stage failure (M6). The
+        // underlying solve can converge (so `status` is success) while
+        // the sensitivity step still fails, leaving every `dx`/Hessian
+        // output `None`. Without this key, that is indistinguishable
+        // from "sensitivity not requested". `Option<String>` maps
+        // `None` ⇒ Python `None`, `Some(msg)` ⇒ the error string.
+        info.set_item("sens_error", result.error.clone())?;
 
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))

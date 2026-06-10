@@ -29,6 +29,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M3 | algorithm: `LeastSquareMults` lacks the δ_c/δ_d inertia workaround its sibling has | **FIXED** (trigger not synthetically reproducible — see note) | **Mechanism confirmed by code inspection**: `calculate_y_eq` (`eq_mult/least_square.rs:106-119`) solved the W=0 augmented system with `delta_c = delta_d = 0.0`, while the dual initializer (`init/default.rs:154-194`) solves the *identical* W=0 / structurally-zero (3,3)/(4,4)-block system but perturbs `delta_c = delta_d = 1e-8` specifically because pounce-feral's LDLᵀ mis-reports the inertia of that block (counted 0 negative eigenvalues on `nuffield2_trap` where the true count is `n_c+n_d`, raising `WrongInertia`). With `check_neg = aug_solver.provides_inertia()` (feral → true) and `num_eq = n_c+n_d` passed to `solve` (`least_square.rs:133-135`), the LS solve can spuriously fail; the caller then **silently leaves `y_c=y_d=0`** (`init/default.rs:388-390`) — the iter-0 `inf_du` blow-up this step exists to prevent. "Duplicate logic that diverged." **Fix**: mirror the sibling's `1e-8` perturbation (`least_square.rs:115,118`), with a cross-reference comment to keep the two in sync. **Verification**: the fail-first trigger is feral's *data-dependent* inertia mis-report on a CUTEst matrix (`nuffield2_trap`) **not in the repo**; the aug-solver unit harness uses `DenseMock` (an exact LU oracle) which cannot reproduce it, so a synthetic fail-first test is not constructible — the *sibling* fix itself shipped on the same basis (no synthetic fail-first test, integration-validated). Regression-safety is verified by running: `constr_mult_init_max` defaults to `1e3 > 0`, so every constrained solve traverses `calculate_y_eq`; the constrained-problem integration tests (`optimize_hs71`, `optimize_hs14`, `hock_schittkowski_subset`) and the full `pounce-algorithm` suite stay green (323 passed, 0 failed), confirming the `1e-8` perturbation is numerically inert (the constraint Jacobian dominates). See `## M3 detail`. |
 | M4 | linalg: `symmetric_eigen` reports `true` on non-convergence | **FIXED** | **Confirmed by code inspection**: the doc (`eigen.rs:32-35`) promises `false` when the Jacobi sweeps run out, but the cyclic-Jacobi loop only `break`s on early convergence; after `max_sweeps` (50) it fell through to `return true` unconditionally (old `eigen.rs:153`). Callers branch on the verdict (`pounce-convex/src/cones/psd.rs:108,145,163,231`, `sos.rs:615,672,717`), so a stalled matrix would feed unconverged eigenpairs into PSD projections / SOS decompositions instead of the error path. **Fix**: track a `converged` flag (set on the early-`break`), recompute the off-diagonal mass once after the loop (to credit convergence achieved on the final sweep, whose state the top-of-loop check never sees), and `return converged`. Eigenpair extraction stays unconditional so callers still get best-effort values. To make the otherwise-unreachable `false` path testable, the body moved to a private `symmetric_eigen_impl(.., max_sweeps)`; the public `symmetric_eigen` delegates with `50` (signature/callers unchanged). **Tests** (`eigen.rs`): `eigen_reports_false_when_sweeps_exhausted` — a coupled 4×4 with `max_sweeps=1` must return `false` (pre-fix FAILS, returning `true`); `eigen_reports_true_when_converged` — same matrix at `max_sweeps=50` returns `true`, and an already-diagonal matrix converges even at `max_sweeps=1`. Pre-fix the first test FAILS; post-fix all 8 `eigen` tests pass, and `pounce-linalg` + `pounce-convex` (the consumers) stay green (328 passed, 0 failed). See `## M4 detail`. |
 | M5 | QP: warm start can return `Optimal` at an infeasible point; unmarked equality rows never enforced | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: `ParametricActiveSetSolver::solve_general` (`crates/pounce-qp/src/solver.rs`) trusts the caller's warm-start `(x, working)` and steps with a zero-RHS active-set system (`rhs[n..] = 0`, lines 729-732), so the residuals of caller-marked-active rows are frozen and never re-audited; the `Optimal` return (lines 827-841) had **no** feasibility check, contradicting `QpStatus::Optimal`'s own contract ("KKT residual **and feasibility** within tolerance", `error.rs:8-9`). Separately, an equality row (`bl==bu`) the caller left `Inactive` is skipped by the ratio test (`if qp.bl[i]==qp.bu[i] { continue; }`, lines 883-884) and can **never** enter the working set, so it is never enforced. Net effect: a warm start at an infeasible point converges to a KKT-stationary point of the wrong working set and is returned as a silent `Optimal` (the doc claimed it "may diverge or hit max_iter" — the real failure is worse). **Fix**: add a post-solve feasibility audit in the public `solve` (the one entry point for both `solve_general` and `solve_general_schur`): a free fn `point_is_feasible` checks every general row **including equalities** and every variable bound against `feas_tol`; when a result claims `Optimal` but fails the audit, recover through `solve_elastic` — the exact recovery the cold path already uses when `cold_general_initial` returns an infeasible point. **Recursion-safe by construction**: `solve_elastic` recurses through `solve_general` *directly* (not the public `solve`), seeding a slack-feasible augmented problem, so the recovery is never re-audited and cannot loop. Feasible warm/cold results pass the audit untouched (happy path unchanged). The audit is the "`OptimalityCheck` audit pass" the doc comment (lines 668-671) explicitly deferred. **Test** (`tests/analytical.rs`): `m5_warm_start_inactive_equality_is_not_a_false_optimal` — `min ½‖x‖² s.t. x₁+x₂=2`, warm-started at `(0,0)` with the equality row `Inactive`; pre-fix returns `Optimal` at `(0,0)` (residual 2.0 — **FAILS** the feasibility assertion), post-fix recovers to the true optimum `(1,1)` reported `Optimal`. Full `pounce-qp` suite green (75 + 6 integration) and the `pounce-algorithm` QP consumer green (245 + SQP integration, 0 failed). See `## M5 detail`. |
+| M6 | sensitivity: `SensSolve` swallows sensitivity-stage failures | **FIXED** | **Mechanism confirmed by code inspection + reproduced by a failing test**: the `on_converged` callback in `SensSolve::run` (`crates/pounce-sensitivity/src/convenience.rs`) writes a diagnostic into `CallbackOut.error` on *every* sensitivity-stage failure (no current iterate, inequality/invalid pin, `PdSensBacksolver::new` / `IndexSchurData::from_parts` error, `parametric_step` / `compute_reduced_hessian[_eigen]` returning false) and bails. But `CallbackOut.error` carried `#[allow(dead_code)]` and was **never copied into `SensResult`** (the result builder at the old lines 382-396 read every other `out.*` field but not `error`). Because the *underlying solve* still converged, `status` is `SolveSucceeded` and the requested `dx`/`reduced_hessian` are simply `None` — **indistinguishable from "sensitivity not requested."** A failed `parametric_step` therefore looked like success with no step computed. **Fix**: add a public `error: Option<String>` field to `SensResult` (documented as the sole signal separating a sensitivity failure from a not-requested computation), copy `out.error.clone()` into it in the builder, and drop the `#[allow(dead_code)]`. Updated the two unit-test `SensResult` literals in `diff_handoff.rs` (`error: None`). Also surfaced it end-to-end: the Python `info` dict now carries `info["sens_error"]` (`pounce-py/src/problem.rs`), since the Python binding is the primary user-facing consumer and previously had no way to see the failure either. **Test** (`tests/convenience_api.rs`): `sens_solve_surfaces_sensitivity_stage_failure` — solves the known-good `ParametricTNLP` (converges) but pins an out-of-range index, so the callback hits the "not in the equality c-block" branch and writes `error`. Post-fix asserts `status == SolveSucceeded`, `error.is_some()`, `dx.is_none()`; a paired happy-path solve asserts `error.is_none()` + `dx.is_some()`. **Pre-fix the assertion FAILS** ("failure must be surfaced … not swallowed; dx = None, status = SolveSucceeded") — verified by temporarily forcing `error: None` in the builder. Full `pounce-sensitivity` suite green (64 across 7 binaries, 0 failed); `pounce-py` builds clean. See `## M6 detail`. |
 
 ## C1 detail
 
@@ -965,3 +966,64 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   integration, 0 failed); the `pounce-algorithm` QP consumer (active-set SQP +
   l1-elastic) green (245 unit + SQP/elastic integration, 0 failed) — the audit
   does not perturb any feasible-result path.
+
+## M6 detail
+
+- **Bug** (`crates/pounce-sensitivity/src/convenience.rs`): `SensSolve::run`
+  installs an `on_converged` callback that performs the post-solve sensitivity
+  work (parametric step, reduced Hessian, eigendecomposition) and writes its
+  results into a side-channel `CallbackOut` (via `Rc<RefCell<_>>`). Every failure
+  branch in that callback sets `outbox.error = Some(message)` and returns early:
+  - no current iterate at convergence (line ~234);
+  - a pinned index that is an inequality / not in the equality c-block
+    (`full_g_to_c_block` → `None`, line ~296);
+  - `PdSensBacksolver::new` failure (line ~311);
+  - `IndexSchurData::from_parts` failure (line ~321);
+  - `SensApplication::parametric_step` returning `false` (line ~339);
+  - `compute_reduced_hessian` / `compute_reduced_hessian_eigen` returning
+    `false` (lines ~364, ~372).
+  The result builder (`SensResult { status, x: out.x.clone(), … }`) copied every
+  `out.*` field **except** `error`, and `CallbackOut.error` was annotated
+  `#[allow(dead_code)]` — so the diagnostic was written and immediately
+  discarded.
+- **Why it matters**: the callback only runs *after* the IPM solve converged, so
+  `status` is `SolveSucceeded` (or `SolvedToAcceptableLevel`) regardless of the
+  sensitivity outcome. On failure the requested outputs (`dx`, `dx_full`,
+  `reduced_hessian`, …) are left `None` — which is *exactly* the same state as
+  "the caller didn't request that computation." A caller doing
+  `SensSolve::new(pins).with_deltas(dp).run(...)` and reading `result.dx` cannot
+  tell a genuine sensitivity failure from a no-op. The review's framing: "a
+  failed `parametric_step` yields `dx: None` with `status: SolveSucceeded`,
+  indistinguishable from 'not requested'."
+- **Fix**:
+  1. Add `pub error: Option<String>` to `SensResult`, documented (type-level +
+     field-level) as the dedicated channel for *sensitivity-stage* failures that
+     `status` cannot express, and noting that callers must check it to
+     distinguish failure from not-requested.
+  2. Copy `error: out.error.clone()` in the result builder.
+  3. Remove `#[allow(dead_code)]` from `CallbackOut.error` (now genuinely read).
+  4. Update the two `SensResult` literals in `diff_handoff.rs` unit tests with
+     `error: None`.
+  5. **End-to-end surfacing**: the Python binding (`pounce-py/src/problem.rs`),
+     the primary user-facing consumer, builds an `info` dict from the
+     `SensResult`; it now sets `info["sens_error"]` (`Option<String>` →
+     `None` / message). Previously the Python layer had no visibility into a
+     sensitivity failure either.
+- **Test** (`tests/convenience_api.rs`):
+  `sens_solve_surfaces_sensitivity_stage_failure`. Reuses the known-good
+  `ParametricTNLP` (`m = 4`, all equalities) and `make_app()` so the IPM solve
+  reliably converges and fires `on_converged`; then pins an out-of-range index
+  (`99`) so `full_g_to_c_block` returns `None` and the callback takes the
+  "only equality constraints can be pinned" failure branch, writing `error`.
+  Asserts the solve converged (`status` success) **and** `error.is_some()` **and**
+  `dx.is_none()`. A paired happy-path solve (`pins = [2, 3]`, real deltas)
+  asserts `error.is_none()` + `dx.is_some()`, guarding against the fix
+  over-reporting. The out-of-range pin exercises the identical
+  `outbox.error = Some(_)` → (previously discarded) plumbing as the
+  `parametric_step` branch the review cited; both are closed by the same
+  one-field propagation.
+- **Verification summary**: pre-fix the new test FAILS (the swallowed error
+  leaves `error == None` while `status == SolveSucceeded` and `dx == None`),
+  confirmed by temporarily forcing `error: None` in the builder; post-fix it
+  PASSES. Full `pounce-sensitivity` suite green (64 tests across 7 binaries, 0
+  failed) and `pounce-py` compiles clean with the new `info["sens_error"]` key.

@@ -89,10 +89,26 @@ pub struct SensSolve {
 /// that [`IpoptApplication::optimize_tnlp`] would have returned on its
 /// own; sensitivity outputs are populated only when the solve
 /// converged (`SolveSucceeded` or `SolvedToAcceptableLevel`).
+///
+/// **Sensitivity-stage failures are reported through [`Self::error`],
+/// not `status`.** The underlying solve can converge (so `status` is
+/// `SolveSucceeded`) yet the post-solve sensitivity step still fail —
+/// e.g. a pinned index that isn't an equality, a backsolver/Schur
+/// setup error, or `parametric_step` / reduced-Hessian failing. In
+/// that case the requested outputs (`dx`, `reduced_hessian`, …) are
+/// `None` *and* `error` is `Some(_)`. Callers must check `error` to
+/// distinguish "sensitivity failed" from "sensitivity not requested"
+/// (both leave the outputs `None`).
 #[derive(Debug, Clone)]
 pub struct SensResult {
     /// Pounce return status of the underlying solve.
     pub status: ApplicationReturnStatus,
+    /// `Some(message)` when the post-solve sensitivity stage failed
+    /// (despite a possibly-converged `status`). `None` when the
+    /// sensitivity stage ran cleanly or was not requested. See the
+    /// type-level note: this is the only signal that separates a
+    /// sensitivity failure from a not-requested computation.
+    pub error: Option<String>,
     /// Final primal iterate `x*`. Length `n_x`. None when the solve
     /// failed before convergence.
     pub x: Option<Vec<Number>>,
@@ -382,6 +398,7 @@ impl SensSolve {
         let out = outbox.borrow();
         SensResult {
             status,
+            error: out.error.clone(),
             x: out.x.clone(),
             obj_val: out.obj_val,
             dx: out.dx.clone(),
@@ -410,7 +427,6 @@ struct CallbackOut {
     mult_x_l: Option<Vec<Number>>,
     mult_x_u: Option<Vec<Number>>,
     g: Option<Vec<Number>>,
-    #[allow(dead_code)]
     error: Option<String>,
 }
 
