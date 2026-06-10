@@ -4,12 +4,12 @@
 //! The `Expr` tree pounce reads from a `.nl` file uses a richer
 //! operator set than FBBT supports (extern function calls,
 //! variable-exponent powers, AMPL `log10`, n-ary sums) and embeds
-//! common subexpressions via `Rc` sharing. This module flattens
+//! common subexpressions via `Arc` sharing. This module flattens
 //! the tree into a tape where:
 //!
 //! * Every `Expr::Cse(rc)` is emitted **once** and re-referenced by
 //!   slot index on every subsequent occurrence — matching the
-//!   per-Rc-pointer caching strategy `nl_tape::Tape::build` already
+//!   per-Arc-pointer caching strategy `nl_tape::Tape::build` already
 //!   uses for AD tapes.
 //! * Operators FBBT can reason about become the corresponding
 //!   [`FbbtOp`] variants.
@@ -26,7 +26,7 @@
 //! [#62]: https://github.com/jkitchin/pounce/issues/62
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use pounce_common::types::Number;
 use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
@@ -36,7 +36,7 @@ use crate::nl_reader::{BinOp, Expr, UnaryOp};
 /// Result of translating one `Expr` into a tape.
 struct Builder {
     ops: Vec<FbbtOp>,
-    /// CSE cache: `Rc::as_ptr` → tape slot of the body.
+    /// CSE cache: `Arc::as_ptr` → tape slot of the body.
     cse_cache: HashMap<*const Expr, usize>,
 }
 
@@ -61,7 +61,7 @@ impl Builder {
             Expr::Const(v) => self.emit(FbbtOp::Const(*v)),
             Expr::Var(i) => self.emit(FbbtOp::Var(*i)),
             Expr::Cse(rc) => {
-                let key = Rc::as_ptr(rc);
+                let key = Arc::as_ptr(rc);
                 if let Some(&slot) = self.cse_cache.get(&key) {
                     return slot;
                 }
@@ -354,14 +354,14 @@ mod tests {
     #[test]
     fn cse_shared_body_emitted_once() {
         // body = x + 1; (body * 2) + body
-        let body = Rc::new(Expr::Binary(
+        let body = Arc::new(Expr::Binary(
             BinOp::Add,
             Box::new(Expr::Var(0)),
             Box::new(Expr::Const(1.0)),
         ));
         let two_body = Expr::Binary(
             BinOp::Mul,
-            Box::new(Expr::Cse(Rc::clone(&body))),
+            Box::new(Expr::Cse(Arc::clone(&body))),
             Box::new(Expr::Const(2.0)),
         );
         let total = Expr::Binary(BinOp::Add, Box::new(two_body), Box::new(Expr::Cse(body)));
@@ -421,10 +421,10 @@ mod tests {
     #[test]
     fn translated_tape_is_well_formed() {
         // A messy expression mixing CSEs, unary, binary, sums.
-        let body = Rc::new(Expr::Unary(UnaryOp::Exp, Box::new(Expr::Var(0))));
+        let body = Arc::new(Expr::Unary(UnaryOp::Exp, Box::new(Expr::Var(0))));
         let e = Expr::Binary(
             BinOp::Add,
-            Box::new(Expr::Cse(Rc::clone(&body))),
+            Box::new(Expr::Cse(Arc::clone(&body))),
             Box::new(Expr::Binary(
                 BinOp::Mul,
                 Box::new(Expr::Cse(body)),

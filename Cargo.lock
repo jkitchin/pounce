@@ -876,6 +876,7 @@ dependencies = [
  "pounce-observability",
  "pounce-presolve",
  "pounce-qp",
+ "rayon",
  "tracing",
 ]
 
