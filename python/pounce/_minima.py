@@ -237,7 +237,7 @@ class _Context:
         return minimize(
             fun, x0, jac=jac, hess=hess,
             bounds=self.bounds, constraints=self.constraints,
-            options=self.options,
+            **(self.options or {}),
         )
 
     def in_bounds(self, x):

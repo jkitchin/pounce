@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
+from scipy import sparse
+from scipy.optimize import LinearConstraint
 
 from ._pounce import Problem
 
@@ -181,56 +183,179 @@ def _normalize_bounds(bounds, n: int):
     return lb, ub
 
 
-def _wrap_constraints(constraints, n: int):
-    """Coalesce scipy-style constraint dict(s) into one g(x) + (cl, cu)."""
-    if not constraints:
-        return 0, None, None, None, None
-    if isinstance(constraints, dict):
-        constraints = [constraints]
+@dataclass
+class _ConstraintBlock:
+    """One contiguous block of constraint rows in the unified representation.
 
-    funs, jacs, cargs = [], [], []
-    for c in constraints:
-        kind = c["type"]
-        if kind not in ("eq", "ineq"):
-            raise ValueError(f"unknown constraint type {kind!r}")
-        funs.append(c["fun"])
-        jacs.append(c.get("jac"))
-        cargs.append(tuple(c.get("args", ())))
+    Linear blocks (from :class:`scipy.optimize.LinearConstraint`) carry their
+    sparse COO triplet directly in ``constant_vals``; the Jacobian value
+    callback simply slices these into its output. Legacy dict blocks fall back
+    to a fully-dense per-row pattern with ``constant_vals=None``; their
+    ``fun`` / ``jac`` get evaluated at solve time.
+    """
 
+    rows: np.ndarray  # 0-indexed within block, length nnz
+    cols: np.ndarray  # absolute column indices into x, length nnz
+    constant_vals: np.ndarray | None  # None → dynamic (dict); else COO values
+    fun: Callable | None  # dict: returns the constraint value vector
+    jac: Callable | None  # dict: optional explicit jacobian
+    args: tuple
+    lb: np.ndarray  # length n_rows
+    ub: np.ndarray  # length n_rows
+    n_rows: int
+
+
+def _empty_constraints():
+    return 0, None, None, None, None, None, None
+
+
+def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBlock:
+    A = lc.A
+    if not sparse.issparse(A):
+        A = sparse.coo_array(np.atleast_2d(np.asarray(A, dtype=np.float64)))
+    elif not isinstance(A, sparse.coo_array):
+        # csr/csc/etc. — coalesce to COO so we can read row/col directly.
+        A = A.tocoo()
+    if A.shape[1] != n:
+        raise ValueError(
+            f"LinearConstraint.A has {A.shape[1]} columns; expected {n}"
+        )
+    m_rows = int(A.shape[0])
+    lb = np.broadcast_to(np.asarray(lc.lb, dtype=np.float64), (m_rows,)).copy()
+    ub = np.broadcast_to(np.asarray(lc.ub, dtype=np.float64), (m_rows,)).copy()
+    return _ConstraintBlock(
+        rows=np.asarray(A.row, dtype=np.int64),
+        cols=np.asarray(A.col, dtype=np.int64),
+        constant_vals=np.asarray(A.data, dtype=np.float64),
+        fun=None,
+        jac=None,
+        args=(),
+        lb=lb,
+        ub=ub,
+        n_rows=m_rows,
+    )
+
+
+def _block_from_dict(c: dict, n: int) -> _ConstraintBlock:
+    kind = c["type"]
+    if kind not in ("eq", "ineq"):
+        raise ValueError(f"unknown constraint type {kind!r}")
+    fun = c["fun"]
+    ca = tuple(c.get("args", ()))
     probe = np.zeros(n)
-    sizes = [int(_to_array(fn(probe, *ca)).size) for fn, ca in zip(funs, cargs)]
-    m_total = int(sum(sizes))
+    m_rows = int(_to_array(fun(probe, *ca)).size)
+    # Dense sparsity pattern: every row may touch every column.
+    rows = np.repeat(np.arange(m_rows, dtype=np.int64), n)
+    cols = np.tile(np.arange(n, dtype=np.int64), m_rows)
+    if kind == "eq":
+        lb = np.zeros(m_rows)
+        ub = np.zeros(m_rows)
+    else:
+        lb = np.zeros(m_rows)
+        ub = np.full(m_rows, np.inf)
+    return _ConstraintBlock(
+        rows=rows,
+        cols=cols,
+        constant_vals=None,
+        fun=fun,
+        jac=c.get("jac"),
+        args=ca,
+        lb=lb,
+        ub=ub,
+        n_rows=m_rows,
+    )
+
+
+def _wrap_constraints(constraints, n: int):
+    """Build a unified Ipopt-shaped constraint representation.
+
+    Accepts heterogeneous input:
+      - ``None`` or empty sequence: no constraints
+      - a single :class:`scipy.optimize.LinearConstraint` (dense or sparse ``A``)
+      - a single legacy dict ``{"type": "eq"|"ineq", "fun": ..., "jac": ..., "args": ...}``
+      - a list mixing both forms
+
+    Returns ``(m_total, g_combined, jac_values, cl, cu, jac_rows, jac_cols)``.
+    ``(jac_rows, jac_cols)`` declare Ipopt's ``jacobianstructure``; ``jac_values(x)``
+    produces values in matching order. LinearConstraint blocks contribute their
+    constant COO triplet; dict blocks fall back to a fully-dense per-row pattern
+    and evaluate jac on demand.
+    """
+    if constraints is None:
+        return _empty_constraints()
+    if isinstance(constraints, (dict, LinearConstraint)):
+        constraints = [constraints]
+    elif not constraints:
+        return _empty_constraints()
+
+    blocks: list[_ConstraintBlock] = []
+    for c in constraints:
+        if isinstance(c, LinearConstraint):
+            blocks.append(_block_from_linear_constraint(c, n))
+        elif isinstance(c, dict):
+            blocks.append(_block_from_dict(c, n))
+        else:
+            raise TypeError(
+                f"unsupported constraint type {type(c).__name__!r}; expected "
+                "scipy.optimize.LinearConstraint or a dict with 'type'/'fun'"
+            )
+
+    if not blocks:
+        return _empty_constraints()
+
+    row_offset = 0
+    nnz_start = 0
+    row_parts, col_parts, lb_parts, ub_parts = [], [], [], []
+    block_nnz_spans: list[tuple[int, int]] = []
+    for blk in blocks:
+        row_parts.append(blk.rows + row_offset)
+        col_parts.append(blk.cols)
+        lb_parts.append(blk.lb)
+        ub_parts.append(blk.ub)
+        nnz_end = nnz_start + int(blk.rows.size)
+        block_nnz_spans.append((nnz_start, nnz_end))
+        nnz_start = nnz_end
+        row_offset += blk.n_rows
+
+    m_total = row_offset
+    nnz_total = nnz_start
+    jac_rows = np.concatenate(row_parts)
+    jac_cols = np.concatenate(col_parts)
+    cl = np.concatenate(lb_parts)
+    cu = np.concatenate(ub_parts)
 
     def g_combined(x):
-        return np.concatenate(
-            [_to_array(fn(x, *ca)).ravel() for fn, ca in zip(funs, cargs)]
-        )
-
-    def jac_combined(x):
-        rows = []
-        for fn, jc, ca in zip(funs, jacs, cargs):
-            if jc is not None:
-                rows.append(np.atleast_2d(_to_array(jc(x, *ca))))
-            else:
-                m_i = _to_array(fn(x, *ca)).size
-                rows.append(
-                    _finite_diff_jac(lambda xx, fn=fn, ca=ca: fn(xx, *ca), x, m_i)
+        x = np.asarray(x, dtype=np.float64)
+        parts = []
+        for blk in blocks:
+            if blk.constant_vals is not None:
+                A_blk = sparse.coo_array(
+                    (blk.constant_vals, (blk.rows, blk.cols)),
+                    shape=(blk.n_rows, x.size),
                 )
-        return np.vstack(rows)
+                parts.append(np.asarray(A_blk @ x).ravel())
+            else:
+                parts.append(_to_array(blk.fun(x, *blk.args)).ravel())
+        return np.concatenate(parts)
 
-    cl = np.empty(m_total)
-    cu = np.empty(m_total)
-    off = 0
-    for sz, c in zip(sizes, constraints):
-        if c["type"] == "eq":
-            cl[off : off + sz] = 0.0
-            cu[off : off + sz] = 0.0
-        else:  # ineq: g(x) >= 0
-            cl[off : off + sz] = 0.0
-            cu[off : off + sz] = float(np.inf)
-        off += sz
+    def jac_values(x):
+        out = np.empty(nnz_total)
+        for (start, end), blk in zip(block_nnz_spans, blocks):
+            if blk.constant_vals is not None:
+                out[start:end] = blk.constant_vals
+            elif blk.jac is not None:
+                J = np.atleast_2d(_to_array(blk.jac(x, *blk.args)))
+                out[start:end] = J.ravel()
+            else:
+                J = _finite_diff_jac(
+                    lambda xx, fn=blk.fun, ca=blk.args: fn(xx, *ca),
+                    x,
+                    blk.n_rows,
+                )
+                out[start:end] = J.ravel()
+        return out
 
-    return m_total, g_combined, jac_combined, cl, cu
+    return m_total, g_combined, jac_values, cl, cu, jac_rows, jac_cols
 
 
 def _build_problem_obj(
@@ -243,6 +368,8 @@ def _build_problem_obj(
     hess: Callable | None,
     g: Callable | None,
     jac_g: Callable | None,
+    jac_rows: np.ndarray | None,
+    jac_cols: np.ndarray | None,
     callback: Callable | None,
 ):
     """Build a problem-object-with-methods on the fly. Only attaches
@@ -324,14 +451,13 @@ def _build_problem_obj(
         members["intermediate"] = intermediate
 
     if m > 0:
+        assert jac_rows is not None and jac_cols is not None
 
         def constraints(self, x):
             return _to_array(g(x)).ravel()
 
-        def jacobianstructure(self):
-            rows = np.repeat(np.arange(m), n)
-            cols = np.tile(np.arange(n), m)
-            return (rows, cols)
+        def jacobianstructure(self, _r=jac_rows, _c=jac_cols):
+            return (_r, _c)
 
         def jacobian(self, x):
             return _to_array(jac_g(x)).ravel()
@@ -365,15 +491,23 @@ def minimize(
     jac: Callable | bool | None = None,
     hess: Callable | None = None,
     bounds: Sequence | None = None,
-    constraints: Sequence | dict | None = None,
+    constraints: Sequence | LinearConstraint | dict | None = None,
     callback: Callable | None = None,
-    options: Mapping[str, Any] | None = None,
+    **options: Any,
 ) -> OptimizeResult:
-    """scipy.optimize.minimize-style facade over pounce."""
+    """scipy.optimize.minimize-style facade over pounce.
+
+    The signature mirrors scipy's ``_custom`` callable-method contract: ``hessp``
+    and unknown options arrive via ``**options`` and are filtered out before
+    being forwarded to Ipopt. This makes ``pounce.minimize`` a drop-in target
+    for ``scipy.optimize.minimize(method=pounce.minimize, ...)``.
+    """
     x0 = _to_array(x0)
     n = x0.size
     lb, ub = _normalize_bounds(bounds, n)
-    m, g_combined, jac_combined, cl, cu = _wrap_constraints(constraints, n)
+    m, g_combined, jac_combined, cl, cu, jac_rows, jac_cols = _wrap_constraints(
+        constraints, n
+    )
 
     problem_obj = _build_problem_obj(
         fun=fun,
@@ -384,6 +518,8 @@ def minimize(
         hess=hess,
         g=g_combined,
         jac_g=jac_combined,
+        jac_rows=jac_rows,
+        jac_cols=jac_cols,
         callback=callback,
     )
 
@@ -396,9 +532,14 @@ def minimize(
         cl=cl,
         cu=cu,
     )
-    if options:
-        for k, v in options.items():
-            problem.add_option(k, v)
+    for k, v in options.items():
+        # Drop None-valued kwargs (scipy's ``_custom`` dispatch always sends
+        # ``hessp=None``, ``bounds=None``, etc.; absorbed here when undeclared
+        # on the signature). Real Ipopt option misses still surface as
+        # ``RuntimeError`` from ``problem.solve()`` — by design.
+        if v is None:
+            continue
+        problem.add_option(k, v)
 
     x, info = problem.solve(x0=x0)
     return OptimizeResult(
