@@ -378,3 +378,56 @@ def test_convex_route_warns_on_dropped_options(monkeypatch):
         warnings.simplefilter("error")
         M.minimize(f, np.ones(2),
                    options={"solver_selection": "qp-ipm", "tol": 1e-8, "max_iter": 50})
+
+
+class _UserStopProblem:
+    """Fake native Problem that returns ``User_Requested_Stop`` (status 5) —
+    what the bridge reports when the user's ``intermediate`` callback aborts or
+    crashes (M32) — together with a *small* final KKT error."""
+
+    def __init__(self, **kwargs):
+        pass
+
+    def add_option(self, key, value):
+        pass
+
+    def solve(self, x0):
+        info = {
+            "status": 5,  # User_Requested_Stop
+            "status_msg": "User_Requested_Stop",
+            "obj_val": 1.0,
+            "iter_count": 3,
+            "final_kkt_error": 1e-12,  # coincidentally below acceptable_tol
+        }
+        return np.asarray(x0, dtype=float), info
+
+
+def test_user_requested_stop_is_not_success_despite_small_kkt(monkeypatch):
+    """L50: the KKT-error fallback must not upgrade a ``User_Requested_Stop``
+    to ``success=True``. A callback that aborted (or crashed, via M32) is an
+    external stop, not a numerical stall at an acceptable point — even when the
+    last computed KKT error happens to be below ``acceptable_tol``."""
+    import pounce._minimize as M
+
+    monkeypatch.setattr(M, "Problem", _UserStopProblem)
+
+    f = lambda x: float(x @ x)
+    res = M.minimize(f, np.ones(2),
+                     options={"solver_selection": "nlp", "print_level": 0})
+    assert res.status == 5
+    assert res.success is False, "User_Requested_Stop must not be reported as success"
+
+    # Control: a genuine numerical stall (Search_Direction_Becomes_Too_Small,
+    # status 3) with the same small KKT error IS still upgraded to success.
+    class _StallProblem(_UserStopProblem):
+        def solve(self, x0):
+            x, info = super().solve(x0)
+            info["status"] = 3
+            info["status_msg"] = "Search_Direction_Becomes_Too_Small"
+            return x, info
+
+    monkeypatch.setattr(M, "Problem", _StallProblem)
+    res2 = M.minimize(f, np.ones(2),
+                      options={"solver_selection": "nlp", "print_level": 0})
+    assert res2.status == 3
+    assert res2.success is True, "an acceptable-KKT numerical stall stays a success"
