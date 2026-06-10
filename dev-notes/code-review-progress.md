@@ -123,6 +123,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L53 | Stale `[patch.crates-io]` story: five "Checkout feral sibling" CI steps + three manylinux `../feral` bind-mounts (`ci.yml`) and `studio/skill/README.md:39` reference a path-based feral patch the committed tree does not carry | **FIXED** | **Confirmed by reading + `cargo metadata`.** The committed `Cargo.toml` pins `feral = "0.10.0"` (a published crates.io release — verified live) with **no** `[patch.crates-io]`. The local-dev override (skip-worktree, `S` bit, not committed) redirects feral to a **git rev**, not a `path = "../feral"`. `cargo metadata` here resolves feral to `git+https://github.com/jkitchin/feral.git?rev=…` under `~/.cargo/git/checkouts/` — **never** `../feral`; in CI (committed tree, no patch) it resolves from crates.io. So every `git clone … ../feral` step and `-v …/feral:…/feral` bind-mount is dead, and the comments claiming `[patch.crates-io] feral = { path = "../feral" }` are false. **Fix**: remove all 5 "Checkout feral sibling" steps and all 3 `docker-options` feral bind-mounts from `ci.yml` (jobs `test`, `python-test`, `python-test-torch`, `wheel-smoke`, `pyomo-pounce-smoke`); correct the release-consistency comment ("feral resolves from crates.io"); rewrite `studio/skill/README.md` to state both installs build straight from crates.io (no sibling / no patch), noting the git-rev override is a local maintainer-only workflow. **Verification**: `python3 yaml.safe_load` confirms `ci.yml` stays valid with all 5 jobs; 0 "Checkout feral" steps remain; `cargo metadata` proof above. Left the dated QA log `dev-notes/qa-lp-qp-torch.md` (records a past build's `../feral` sibling) intact — a historical record, not a live reference. See `## L53 detail`. |
 | L54 | `release-crates.yml:21` says "all 18 crates"; the publish list has 19 | **FIXED** | **Confirmed by counting the authoritative list.** `scripts/publish-crates.sh`'s `CRATES=(…)` array — the topological publish list `check-release-consistency.sh` validates against the workspace's publishable crates — has exactly **19** entries (`grep -cE '^\s+pounce-'` → 19). The three `publish = false` crates (`pounce-py`, `pounce-studio-pyo3`, `iter-diff`) are correctly excluded; a `grep` false-positive flagged `pounce-studio-core`, but that match was inside a *comment* ("…stays publish = false") — studio-core IS published as of 0.4.0 (pounce-cli took a hard dep on it). So 19 is correct and the workflow comment's "18" was an off-by-one. **Fix**: `release-crates.yml:21` "all 18 crates" → "all 19 crates". Swept `.github/`, `scripts/`, `dev-notes/`, `README.md`, `CLAUDE.md` for other "18 crates" claims — none. `release-crates.yml` stays valid YAML. See `## L54 detail`. |
 | L55 | `check-docs-consistency.sh`: the friendlier failure message is dead code under `set -e` (the `rc=$?` after the python heredoc is unreachable when the check fails) | **FIXED** | **Confirmed by running the script (fail-first).** Under `set -euo pipefail`, when the embedded `python3` heredoc `sys.exit(rc)`s non-zero (orphan/dead-link found), `set -e` aborts the script at the `python3 …` command itself — so the following `rc=$?` capture and the `if [[ $rc -ne 0 ]]; then echo "…FAILED — wire new pages…"; exit 1; fi` block never ran. **Fail-first**: injecting a throwaway `docs/src/__orphan.md` and running the script → exit 1 but the friendly "wire new pages into docs/src/SUMMARY.md" line is **absent** (only python's raw "ORPHAN pages" output shows). **Fix**: run the checker as an `if python3 … <<PY … PY; then echo OK; else echo "…FAILED…" >&2; exit 1; fi` — an `if` condition is exempt from `set -e`, so the message branch is reachable. (First pass inverted the branches — caught immediately by re-running both paths.) **Verification**: failure path now exits 1 *and* prints the friendly message; clean tree exits 0 with "OK — 33 pages…". `shellcheck` clean. See `## L55 detail`. |
+| L56 | No `catch_unwind` at the C FFI boundary (`pounce-cinterface/src/lib.rs`): an internal panic aborts the embedding process (upstream Ipopt returns `Internal_Error`) | **FIXED (solve entry points) + scope/aliasing-nit documented** | **Confirmed by reading; mechanism tested + end-to-end transparency verified.** `IpoptSolve` calls `info.app.optimize_tnlp(...)`, which runs the entire pounce core + callback bridge; a panic in *our* Rust code (an `unwrap`, an index, a numerical kernel) unwinds across `extern "C"` → process abort. **Fix**: add an `ffi_guard(fallback, body)` helper (`catch_unwind` + `AssertUnwindSafe`, returns `fallback` on panic) and wrap the bodies of `IpoptSolve` and `IpoptSolveWarmStart` (the only entry points that run the solver / user callbacks / working-set marshalling), returning `ApplicationReturnStatus::InternalError` on panic — matching upstream's `try/catch → Internal_Error`. Used `|| unsafe { … }` so the raw-pointer body keeps its unsafe context inside the closure. **Scope note (important)**: user-supplied callbacks are themselves `extern "C"`, so a panic *inside a user callback* aborts at that callback's own ABI boundary before unwinding can reach `ffi_guard` — that is the caller's responsibility (same as the C/C++ original), and is why the test exercises the guard mechanism directly rather than via a panicking callback. **Tests** (`pounce-cinterface` lib): `ffi_guard_converts_panic_to_fallback` (a panicking body yields the `Internal_Error` fallback, no unwind) and `ffi_guard_is_transparent_on_success` (happy path returns the body's value unchanged); the pre-existing end-to-end solve tests (`intermediate_callback_fires…`, `post_solve_stats_populated_after_solve`, the warm-start tests) all still pass, proving the wrap is transparent. 47 lib tests pass; `cargo fmt` / gated clippy clean. **Aliasing nit (left as-is)**: the issue flags a Stacked-Borrows `&mut`/`&` overlap on `GetIpoptCurrentIterate` during `IpoptSolve` under documented in-callback usage, "almost certainly benign" — acknowledged, not changed (would need a Miri investigation; no observable miscompile). See `## L56 detail`. |
 
 ## C1 detail
 
@@ -6226,3 +6227,72 @@ paths caught it; dropping the `!` so success→`then`/OK, failure→`else`/exit
 - Success path (clean tree): exits `0`, prints "OK — 33 pages, all reachable
   …".
 - `shellcheck scripts/check-docs-consistency.sh` is clean.
+
+## L56 detail
+
+**Issue.** None of `pounce-cinterface`'s `extern "C"` entry points wrapped
+their bodies in `catch_unwind`. `IpoptSolve` in particular calls
+`info.app.optimize_tnlp(...)`, which runs the entire pounce solver core and
+the callback bridge. A panic anywhere in *our* Rust code on that path — an
+`unwrap`/`expect`, an out-of-bounds index (cf. L51), a numerical-kernel
+assertion — unwinds across the `extern "C"` boundary, which is undefined
+behavior and in practice aborts the whole embedding process. Upstream
+Ipopt's C interface instead wraps the solve in `try { … } catch(…)` and
+returns `Internal_Error`.
+
+**Fix.** Add a boundary helper:
+
+```rust
+fn ffi_guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(r) => r,
+        Err(_) => fallback,
+    }
+}
+```
+
+and wrap the bodies of the two solve entry points —`IpoptSolve` and
+`IpoptSolveWarmStart`— in `ffi_guard(ApplicationReturnStatus::InternalError
+as Index, || unsafe { … })`. These are the only entry points that drive the
+solver, invoke user callbacks, or marshal the warm-start working set, i.e.
+the realistic panic surface. The `|| unsafe { … }` form keeps the raw-pointer
+body in an unsafe context inside the closure (a nested closure does not
+inherit the `unsafe fn`'s implicit unsafe scope). On panic the caller now
+gets `Internal_Error` instead of a process abort.
+
+**Scope — user callbacks (deliberate).** The user-supplied `Eval_*_CB`
+callbacks are themselves `extern "C"`. A panic *inside a user callback*
+aborts at that callback's own ABI boundary, before unwinding can ever reach
+`ffi_guard`. That is the caller's responsibility and matches the C/C++
+original exactly. Consequently the test exercises the guard mechanism
+directly rather than through a panicking callback (which would abort the
+test harness itself).
+
+**Tests** (`pounce-cinterface` lib).
+- `ffi_guard_converts_panic_to_fallback`: a body that `panic!`s yields the
+  `Internal_Error` fallback — the panic is caught, not propagated. (The
+  panic message prints to stderr via the default hook; that is expected and
+  does not fail the test.)
+- `ffi_guard_is_transparent_on_success`: the happy path returns the body's
+  value unchanged.
+- Regression/transparency: the pre-existing end-to-end solve tests
+  (`intermediate_callback_fires_per_iteration_and_inspector_reads_x`,
+  `post_solve_stats_populated_after_solve`,
+  `intermediate_callback_false_surfaces_user_requested_stop`, and the
+  warm-start tests) all still pass through the now-wrapped `IpoptSolve`,
+  proving the guard is transparent on normal solves.
+
+Full `pounce-cinterface` lib suite: 47 tests pass; `cargo fmt` and gated
+clippy (`-D clippy::correctness -D clippy::suspicious`) clean.
+
+**Fail-first note.** Pre-fix, an internal panic during a solve aborts the
+process — it cannot be captured by a test without killing the harness, which
+is precisely the failure mode being fixed. The `ffi_guard` mechanism tests
+plus the transparent end-to-end solves are the verifiable evidence the
+boundary now behaves like upstream's `try/catch`.
+
+**Aliasing nit (acknowledged, not changed).** The issue also flags a
+Stacked-Borrows `&mut`/`&` overlap on `GetIpoptCurrentIterate` invoked during
+`IpoptSolve` under documented in-callback usage, "almost certainly benign."
+Left as-is: confirming/altering it warrants a dedicated Miri run, and there
+is no observed miscompilation; out of scope for this defensive pass.

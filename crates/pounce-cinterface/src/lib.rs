@@ -62,6 +62,25 @@ pub type Bool = c_int;
 const TRUE: Bool = 1;
 const FALSE: Bool = 0;
 
+/// Run an FFI entry-point body, converting any Rust panic into `fallback`
+/// rather than letting it unwind across the `extern "C"` boundary — which is
+/// undefined behavior and, in practice, a process abort that takes the
+/// embedding application down with it. Upstream Ipopt's C interface likewise
+/// wraps the solve in `try { … } catch(…)` and reports `Internal_Error`
+/// instead of propagating a C++ exception across the ABI.
+///
+/// Note: this guards panics that originate in *pounce's own* Rust code (the
+/// solver core, the callback bridge, numerical kernels). A panic inside a
+/// user-supplied `extern "C"` callback aborts at that callback's own ABI
+/// boundary, before unwinding can reach here — that is the caller's
+/// responsibility, exactly as in the C/C++ original.
+fn ffi_guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(r) => r,
+        Err(_) => fallback,
+    }
+}
+
 /// C-ABI encoding of [`pounce_qp::BoundStatus`] (§7.2 of the
 /// active-set-SQP design note). Stable values:
 /// `0 = Inactive`, `1 = AtLower`, `2 = AtUpper`, `3 = Fixed`.
@@ -524,101 +543,108 @@ pub unsafe extern "C" fn IpoptSolve(
     if ipopt_problem.is_null() {
         return ApplicationReturnStatus::InternalError as Index;
     }
-    let info = &mut *ipopt_problem;
-    if info.n < 0 || info.m < 0 {
-        return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-    }
-    if info.n > 0 && x.is_null() {
-        return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-    }
+    // Guard the whole solve: `optimize_tnlp` runs the entire pounce core and
+    // callback bridge, any of which could panic on an unexpected internal
+    // state. Without this, such a panic would unwind across `extern "C"` and
+    // abort the embedding process; instead we report `Internal_Error`,
+    // matching upstream Ipopt's exception handling. (See `ffi_guard`.)
+    ffi_guard(ApplicationReturnStatus::InternalError as Index, || unsafe {
+        let info = &mut *ipopt_problem;
+        if info.n < 0 || info.m < 0 {
+            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+        }
+        if info.n > 0 && x.is_null() {
+            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+        }
 
-    let n_us = info.n as usize;
-    let m_us = info.m as usize;
-    let initial_x = if n_us > 0 {
-        std::slice::from_raw_parts(x, n_us).to_vec()
-    } else {
-        Vec::new()
-    };
+        let n_us = info.n as usize;
+        let m_us = info.m as usize;
+        let initial_x = if n_us > 0 {
+            std::slice::from_raw_parts(x, n_us).to_vec()
+        } else {
+            Vec::new()
+        };
 
-    let bridge = Rc::new(RefCell::new(CCallbackTnlp {
-        n: info.n,
-        m: info.m,
-        nele_jac: info.nele_jac,
-        nele_hess: info.nele_hess,
-        index_style: info.index_style,
-        x_l: info.x_l.clone(),
-        x_u: info.x_u.clone(),
-        g_l: info.g_l.clone(),
-        g_u: info.g_u.clone(),
-        initial_x,
-        eval_f: info.eval_f,
-        eval_grad_f: info.eval_grad_f,
-        eval_g: info.eval_g,
-        eval_jac_g: info.eval_jac_g,
-        eval_h: info.eval_h,
-        user_data,
-        intermediate_cb: info.intermediate_cb,
-        user_scaling: info.user_scaling.clone(),
-        final_status: None,
-        final_x: vec![0.0; n_us],
-        final_z_l: vec![0.0; n_us],
-        final_z_u: vec![0.0; n_us],
-        final_g: vec![0.0; m_us],
-        final_lambda: vec![0.0; m_us],
-        final_obj: 0.0,
-    }));
+        let bridge = Rc::new(RefCell::new(CCallbackTnlp {
+            n: info.n,
+            m: info.m,
+            nele_jac: info.nele_jac,
+            nele_hess: info.nele_hess,
+            index_style: info.index_style,
+            x_l: info.x_l.clone(),
+            x_u: info.x_u.clone(),
+            g_l: info.g_l.clone(),
+            g_u: info.g_u.clone(),
+            initial_x,
+            eval_f: info.eval_f,
+            eval_grad_f: info.eval_grad_f,
+            eval_g: info.eval_g,
+            eval_jac_g: info.eval_jac_g,
+            eval_h: info.eval_h,
+            user_data,
+            intermediate_cb: info.intermediate_cb,
+            user_scaling: info.user_scaling.clone(),
+            final_status: None,
+            final_x: vec![0.0; n_us],
+            final_z_l: vec![0.0; n_us],
+            final_z_u: vec![0.0; n_us],
+            final_g: vec![0.0; m_us],
+            final_lambda: vec![0.0; m_us],
+            final_obj: 0.0,
+        }));
 
-    // Wire the restoration phase fresh for this solve. Without it, any
-    // line-search failure surfaces as `RestorationFailure` instead of
-    // falling back into the ℓ1-feasibility sub-IPM — exactly what the
-    // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
-    // repeated solves on the same `IpoptProblem`. The feral config is
-    // snapshot from the now-fully-populated options so `feral_*`
-    // overrides flow into the restoration sub-IPM too. Use the multi-pass
-    // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
-    // second inner solve (pounce#10 Phase 3 / pounce#24).
-    let feral_cfg = feral_config_from_options(info.app.options());
-    let bff_mint = move || -> InnerBackendFactoryFactory {
-        let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
-    };
-    let resto_provider = make_default_restoration_factory_provider(
-        RestoAlgorithmBuilder::new(),
-        info.app.algorithm_builder_from_options(),
-        bff_mint,
-    );
-    info.app.set_restoration_factory_provider(resto_provider);
+        // Wire the restoration phase fresh for this solve. Without it, any
+        // line-search failure surfaces as `RestorationFailure` instead of
+        // falling back into the ℓ1-feasibility sub-IPM — exactly what the
+        // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
+        // repeated solves on the same `IpoptProblem`. The feral config is
+        // snapshot from the now-fully-populated options so `feral_*`
+        // overrides flow into the restoration sub-IPM too. Use the multi-pass
+        // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
+        // second inner solve (pounce#10 Phase 3 / pounce#24).
+        let feral_cfg = feral_config_from_options(info.app.options());
+        let bff_mint = move || -> InnerBackendFactoryFactory {
+            let feral_cfg = feral_cfg.clone();
+            Box::new(move || default_backend_factory(feral_cfg.clone()))
+        };
+        let resto_provider = make_default_restoration_factory_provider(
+            RestoAlgorithmBuilder::new(),
+            info.app.algorithm_builder_from_options(),
+            bff_mint,
+        );
+        info.app.set_restoration_factory_provider(resto_provider);
 
-    let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
-    let status = info.app.optimize_tnlp(bridge_for_solve);
-    let bridge_ref = bridge.borrow();
-    info.last_solve = Some(LastSolve {
-        stats: info.app.statistics(),
-        status,
-        linear_solver: info.app.linear_solver_summary(),
-        final_x: bridge_ref.final_x.clone(),
-        final_lambda: bridge_ref.final_lambda.clone(),
-        final_obj: bridge_ref.final_obj,
-    });
-    if !x.is_null() && n_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
-    }
-    if !g.is_null() && m_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
-    }
-    if !obj_val.is_null() {
-        *obj_val = bridge_ref.final_obj;
-    }
-    if !mult_g.is_null() && m_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
-    }
-    if !mult_x_L.is_null() && n_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
-    }
-    if !mult_x_U.is_null() && n_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
-    }
-    status as Index
+        let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+        let status = info.app.optimize_tnlp(bridge_for_solve);
+        let bridge_ref = bridge.borrow();
+        info.last_solve = Some(LastSolve {
+            stats: info.app.statistics(),
+            status,
+            linear_solver: info.app.linear_solver_summary(),
+            final_x: bridge_ref.final_x.clone(),
+            final_lambda: bridge_ref.final_lambda.clone(),
+            final_obj: bridge_ref.final_obj,
+        });
+        if !x.is_null() && n_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
+        }
+        if !g.is_null() && m_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
+        }
+        if !obj_val.is_null() {
+            *obj_val = bridge_ref.final_obj;
+        }
+        if !mult_g.is_null() && m_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
+        }
+        if !mult_x_L.is_null() && n_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
+        }
+        if !mult_x_U.is_null() && n_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
+        }
+        status as Index
+    })
 }
 
 /// Port of `SetIntermediateCallback`.
@@ -1190,25 +1216,30 @@ pub unsafe extern "C" fn IpoptSolveWarmStart(
     if ipopt_problem.is_null() {
         return ApplicationReturnStatus::InternalError as Index;
     }
-    // Best-effort set. Errors here (e.g. bad status code) are
-    // silently treated as cold-start; the caller can probe via
-    // `IpoptSetWarmStartWorkingSet` directly if they need to
-    // validate the input.
-    if !bound_status_in.is_null() || !cons_status_in.is_null() {
-        let _ = IpoptSetWarmStartWorkingSet(ipopt_problem, bound_status_in, cons_status_in);
-    }
-    let status = IpoptSolve(
-        ipopt_problem,
-        x,
-        g,
-        obj_val,
-        mult_g,
-        mult_x_L,
-        mult_x_U,
-        user_data,
-    );
-    let _ = IpoptGetWorkingSet(ipopt_problem, bound_status_out, cons_status_out);
-    status
+    // Guard the working-set set/get helpers too. The inner `IpoptSolve` is
+    // independently guarded, but a panic in the warm-start working-set
+    // marshalling would otherwise still abort across `extern "C"`.
+    ffi_guard(ApplicationReturnStatus::InternalError as Index, || unsafe {
+        // Best-effort set. Errors here (e.g. bad status code) are
+        // silently treated as cold-start; the caller can probe via
+        // `IpoptSetWarmStartWorkingSet` directly if they need to
+        // validate the input.
+        if !bound_status_in.is_null() || !cons_status_in.is_null() {
+            let _ = IpoptSetWarmStartWorkingSet(ipopt_problem, bound_status_in, cons_status_in);
+        }
+        let status = IpoptSolve(
+            ipopt_problem,
+            x,
+            g,
+            obj_val,
+            mult_g,
+            mult_x_L,
+            mult_x_U,
+            user_data,
+        );
+        let _ = IpoptGetWorkingSet(ipopt_problem, bound_status_out, cons_status_out);
+        status
+    })
 }
 
 /// Adapter that bridges the user-supplied C callback table to the
@@ -2586,6 +2617,31 @@ mod tests {
         };
         assert_eq!(rc, ApplicationReturnStatus::UserRequestedStop as Index);
         unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn ffi_guard_converts_panic_to_fallback() {
+        // L56: a panic in pounce's own Rust code during a solve must be
+        // caught at the FFI boundary and reported as `Internal_Error`, never
+        // unwound across `extern "C"` (which aborts the embedding process).
+        // This exercises the exact mechanism wrapping IpoptSolve /
+        // IpoptSolveWarmStart. (The "boom" panic message printing to stderr
+        // is expected — the default panic hook still runs before the catch.)
+        let fallback = ApplicationReturnStatus::InternalError as Index;
+        let got = ffi_guard(fallback, || -> Index {
+            panic!("boom inside solver core");
+        });
+        assert_eq!(got, fallback);
+        assert_eq!(got, ApplicationReturnStatus::InternalError as Index);
+    }
+
+    #[test]
+    fn ffi_guard_is_transparent_on_success() {
+        // On the happy path the guard returns the body's value unchanged, so
+        // wrapping IpoptSolve does not alter normal solves (the end-to-end
+        // solve tests above confirm this at the public-API level).
+        let got = ffi_guard(-99, || 7);
+        assert_eq!(got, 7);
     }
 
     #[test]
