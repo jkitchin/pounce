@@ -255,7 +255,7 @@ where
                 p,
                 vec![0.0; p.n],
                 vec![0.0; p.m_eq()],
-                vec![1.0; p.m_ineq()],
+                vec![0.0; p.m_ineq()],
                 0,
             ),
         }
@@ -443,7 +443,7 @@ where
                 p,
                 vec![0.0; p.n],
                 vec![0.0; p.m_eq()],
-                vec![1.0; p.m_ineq()],
+                vec![0.0; p.m_ineq()],
                 0,
             ),
         }
@@ -1114,7 +1114,7 @@ where
                 prob,
                 vec![0.0; n],
                 vec![0.0; prob.m_eq()],
-                vec![1.0; prob.m_ineq()],
+                vec![0.0; prob.m_ineq()],
                 0,
             );
         }
@@ -1686,7 +1686,7 @@ impl QpFactorization {
                 prob,
                 vec![0.0; prob.n],
                 vec![0.0; prob.m_eq()],
-                vec![1.0; prob.m_ineq()],
+                vec![0.0; prob.m_ineq()],
                 0,
             );
         }
@@ -1717,6 +1717,15 @@ fn cone_dims_cover(cones: &[ConeSpec], m_ineq: usize) -> bool {
 
 /// Build a `NumericalFailure` solution from the current iterate (used
 /// when the *initial* factorization fails before the loop starts).
+///
+/// All failure call sites pass the trivial point `x = 0, y = 0, z = 0`.
+/// The inequality dual `z` is **0**, not the cold-start identity `e`: a
+/// failure carries no usable iterate, and `z = 0` (the cone apex) is the
+/// one value valid in *every* dual cone — the orthant, but also SOC / PSD /
+/// exponential / power, where the all-ones vector used previously is not
+/// even a member (e.g. `(1,…,1)` violates an SOC of dimension ≥ 3). This
+/// keeps the reported dual cone-feasible and consistent across all drivers
+/// (cf. `hsde::failed`, `hsde_nonsym::failed`).
 fn failed_solution(
     prob: &QpProblem,
     x: Vec<f64>,

@@ -1275,7 +1275,10 @@ fn failed(prob: &QpProblem) -> QpSolution {
         status: QpStatus::NumericalFailure,
         x: vec![0.0; prob.n],
         y: vec![0.0; prob.m_eq()],
-        z: vec![1.0; prob.m_ineq()],
+        // Trivial dual: `z = 0` (the cone apex) is valid in every dual cone,
+        // unlike the all-ones vector, which is not a member of an SOC of
+        // dimension ≥ 3. Matches `ipm::failed_solution`.
+        z: vec![0.0; prob.m_ineq()],
         z_lb: vec![0.0; prob.n],
         z_ub: vec![0.0; prob.n],
         obj: 0.0,

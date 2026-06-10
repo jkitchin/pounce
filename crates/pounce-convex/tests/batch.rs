@@ -214,3 +214,51 @@ fn factorization_handle_rejects_pattern_mismatch() {
     let ok = handle.solve(&boxed_qp(vec![-1.0, -1.0]));
     assert_eq!(ok.status, QpStatus::Optimal);
 }
+
+/// An inequality-constrained QP `min ½·2‖x‖² + cᵀx  s.t.  Σx ≤ 10`, no
+/// variable bounds — so `m_ineq = 1` (the explicit `G` row) and the dual
+/// vector `z` is non-empty on every code path.
+fn ineq_qp(c: Vec<f64>) -> QpProblem {
+    let n = c.len();
+    QpProblem {
+        n,
+        p_lower: (0..n).map(|i| Triplet::new(i, i, 2.0)).collect(),
+        c,
+        a: vec![],
+        b: vec![],
+        g: (0..n).map(|j| Triplet::new(0, j, 1.0)).collect(),
+        h: vec![10.0],
+        lb: vec![],
+        ub: vec![],
+    }
+}
+
+#[test]
+fn pattern_mismatch_failure_seeds_zero_dual() {
+    // Code review L37: failure paths must seed the inequality dual
+    // consistently. The QpFactorization pattern-mismatch failure used to
+    // return z = 1 (an orthant-era artifact — and not even a member of a
+    // general dual cone: the all-ones vector violates an SOC of dimension
+    // ≥ 3), while the cone-cover / validation failures return z = 0. They
+    // now agree on z = 0: the cone apex, valid in every dual cone and
+    // matching the trivial x = 0, y = 0 the same failure returns.
+    let base = ineq_qp(vec![-1.0, -1.0]); // n = 2, m_ineq = 1
+    let mut handle = QpFactorization::build(&base, &QpOptions::default(), backend).expect("build");
+
+    let mismatched = ineq_qp(vec![-1.0, -1.0, -1.0]); // n = 3 ⇒ pattern mismatch
+    let sol = handle.solve(&mismatched);
+
+    assert_eq!(sol.status, QpStatus::NumericalFailure);
+    assert_eq!(sol.x, vec![0.0; 3], "failure primal is the trivial point");
+    assert_eq!(sol.y, vec![0.0; mismatched.m_eq()]);
+    assert_eq!(
+        sol.z.len(),
+        mismatched.m_ineq(),
+        "z spans the inequality rows"
+    );
+    assert!(
+        sol.z.iter().all(|&zi| zi == 0.0),
+        "failure inequality dual must be all-zeros (cone apex), got {:?}",
+        sol.z
+    );
+}
