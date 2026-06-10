@@ -72,6 +72,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L7 | algorithm: watchdog revert applies the current-direction fraction-to-boundary cap to the snapshot direction — `src/line_search/backtracking.rs:725-737`; the correct stored cap is `#[allow(dead_code)]`. Rescued by backtracking, but wastes evaluations post-watchdog | **NOT A BUG** (premise refuted by upstream source) + dead field removed | **Premise checked against the actual upstream source and found false.** Fetched `coin-or/Ipopt` (stable/3.14) `src/Algorithm/IpBacktrackingLineSearch.cpp`. In `FindAcceptableTrialPoint`, when the watchdog trial cap is exceeded the code does `StopWatchDog(actual_delta); skip_first_trial_point = true;`, and the next `DoBacktrackingLineSearch` executes `if( skip_first_trial_point ) { alpha_primal *= alpha_red_factor_; }` — it multiplies the **existing** `alpha_primal` (the *current* direction's `alpha_primal_max`, set fresh at the top of this outer iteration's call) by the reduction factor and does **NOT** recompute a fraction-to-the-boundary cap from the reverted snapshot delta. `StopWatchDog` only restores `actual_delta` to the snapshot (`actual_delta = watchdog_delta_->MakeNewContainer()`); it does not touch `alpha_primal`. pounce's `handle_watchdog_failure` re-runs `run_alpha_loop(&snap_delta, alpha_init, …, skip_first=true)`, which starts at `alpha_init * alpha_red_factor` (`backtracking.rs:842-843`) where `alpha_init` is the current direction's FTB cap — an **exact** match to upstream. The "correct stored cap" the review points to (`watchdog_alpha_primal_test`) is a misread: upstream's `watchdog_alpha_primal_test_` is the **acceptor's** frozen Armijo *test* step length (used inside `IpFilterLSAcceptor` when in watchdog), not a line-search restart cap, so there is no upstream behavior that would consume a snapshot FTB cap here. The "wastes evaluations when the snapshot direction has a tighter boundary" cost, to the extent it exists, is present in upstream too (both backtrack from the over-large start). **No behavioral change** is warranted; switching the restart to a snapshot-recomputed cap would *introduce* a divergence from upstream. **Cleanup done**: pounce's `watchdog_alpha_primal_test` field was genuinely dead (written in `start_watchdog`, never read; carried `#[allow(dead_code)]`). Removed the field, its initializer, and the `aff_step_alpha_primal_max` computation in `start_watchdog`, and added a comment at the revert site documenting the upstream-faithful `alpha_init` choice so the site is not re-flagged. **Verified by running code**: `cargo build -p pounce-algorithm` clean (no dead-code warning), full suite green (lib **248** + all integration, 0 failures) — the watchdog revert path is exercised by the HS/integration solves (e.g. PFIT3/PFIT4/scon1dls noted in the code comments), confirming the removal is regression-free. Recorded per the "document issues that cannot be verified" rule — here the issue is verifiable and refuted. See `## L7 detail`. |
 | L8 | linsol: Ruiz scaler's 0/1-based auto-detection misclassifies a 0-based triplet whose index 0 carries no entries (`crates/pounce-linsol/src/ruiz.rs:117-129`); factors land on the wrong rows. Applied consistently, so result quality degrades rather than correctness; the only in-tree caller is safe (1-based) | **FIXED** | **Bug confirmed by reading + running code (latent: no live caller hits it).** `compute_sym_t_scaling_factors` auto-detected the index base with a **min-only** rule: `let offset = if min_idx >= 1 { 1 } else { 0 }`. A 0-based triplet whose row 0 is structurally empty has every index `>= 1`, so `min_idx >= 1` → it was treated as **1-based** and `airn[k] - 1`/`ajcn[k] - 1` shifted every entry down one row; the equilibration factors then landed on the wrong rows (row 0 received the factor meant for row 1, the true last row was never scaled). **Reproduced** with a focused unit test: `K = diag([0, 4, 9])` stored 0-based (entries on rows/cols 1,2; row 0 empty, `min_idx==1`, `max_idx==2==n-1`). Pre-fix the detector picked offset 1 and `s = [0.5, 0.333, 1.0]` — the factor for `K_11=4` leaked onto the empty row 0 and `K_22=9` was left unscaled. **Fix**: detect the base from **both** index extremes, which are individually decisive for an n×n matrix — a 1-based triplet never references index 0, and a 0-based triplet never references index n (valid range `[0, n-1]`). New rule: `min_idx == 0 ⇒ 0-based`; else `max_idx >= n ⇒ 1-based`; else `max_idx == n-1 ⇒ 0-based` (full 0-based coverage, the case the old rule botched); else fall back to the historical 1-based assumption. The in-tree 1-based caller (indices `1..=n`, `max_idx == n`) and the existing `fortran_index_style` / 0-based tests are unchanged. **Test** (`ruiz::tests::zero_based_with_empty_first_row_is_not_misread_as_fortran`): asserts row 0 keeps `d=1` and `K_11`,`K_22` equilibrate to ≈1. **Fail-first confirmed** by temporarily reverting to the min-only rule: the test fails with `empty row 0 must keep d=1, got 0.5`. Restored, full `pounce-linsol` suite green (18 + 1, 0 failures). See `## L8 detail`. |
 | L9 | linsol: the KKT-dump diagnostic disables its one-shot via `unsafe std::env::remove_var("POUNCE_DBG_KKT_DUMP")` (`crates/pounce-linsol/src/t_sym_solver.rs:197-243`), which is unsound — `setenv`/`unsetenv` is not thread-safe and feral runs solves under rayon, so a concurrent env read can race the unset | **FIXED** | **Bug confirmed by reading the code + the threading model.** The dump block read `POUNCE_DBG_KKT_DUMP`, and after dumping called `unsafe { std::env::remove_var(...) }` to ensure a single dump. `std::env::{set_var,remove_var}` mutate the process environment via `setenv`/`unsetenv`, which glibc/musl do **not** make thread-safe against concurrent `getenv`; Rust 2024 marks them `unsafe` for exactly this reason. pounce-feral drives multiple solves in parallel through rayon, so one solver's `remove_var` can race another thread's env read (in this crate or any dependency that reads env, e.g. logging) — UB, not merely a lost dump. **Fix**: stop mutating the environment entirely. The env var is now **read-only** (gates whether dumping is requested); the one-shot guarantee moves to a lock-free atomic claim. Extracted a free fn `claim_kkt_dump(n_call, skip, &DUMPED) -> bool` that returns `false` while `n_call < skip` (the existing skip-N-calls knob) and otherwise `!dumped.swap(true, SeqCst)` — exactly one caller across all threads ever sees `true`. Statics are now `CALL_COUNT: AtomicUsize` + `DUMPED: AtomicBool` (the old `WARNED` flag folded in); no `unsafe`, no env writes. **Tests** (`t_sym_solver::tests`): `claim_kkt_dump_is_one_shot_after_skip` (sequential/deterministic — calls below `skip` return false, the first at/after `skip` returns true, all later return false) and `claim_kkt_dump_claims_exactly_once_under_concurrency` (32 threads + `Barrier`, asserts **exactly one** winner). **Fail-first confirmed** by making the helper non-one-shot (always-claim): both tests fail; restored, full `pounce-linsol` suite green (20 + 1, 0 failures). See `## L9 detail`. |
+| L10 | hsl: 32-bit index arithmetic in MA57 sizing has no overflow guard (`crates/pounce-hsl/src/ma57.rs:263, 294-297, 434`) — `5*N + NE + max(N,NE) + 42` overflows i32 near ne ≈ 3×10⁸ and converts to an absurd allocation/abort instead of a clean `FatalError` | **FIXED** | **Bug confirmed by reading code + a provable arithmetic fact, and fixed with linked MA57 verification.** `Index = i32` (`pounce-common::types`). Three sizing sites computed lengths in i32: (a) symbolic `self.lkeep = 5*n + ne + n.max(ne) + 42` and `iwork = vec![0; (5*n) as usize]` (cpp:536) — for n=ne the leading term is `7·n`, so it exceeds `i32::MAX` (2.147×10⁹) once n ≳ 3.07×10⁸; in **release** the i32 sum wraps to a negative length that `as usize` turns into an enormous allocation, in **debug** it panics on overflow; (b) the `pre_alloc`-scaled suggested sizes `(info[8] as f64 * scale).ceil() as Index` — the float→int cast *saturates* to `i32::MAX` (Rust ≥1.45, so no wrap) but still yields an i32::MAX-element allocation; (c) backsolve `lwork = n * nrhs` — same i32 multiply overflow. **Fix**: extracted two pure helpers — `ma57_symbolic_sizes(n, ne) -> Option<(lkeep, liwork)>` (computes in i64, returns `None` when either exceeds `i32::MAX`) and `ma57_scaled_size(base, scale) -> Option<Index>` (validates the scaled length fits, never shrinks below MA57's own `base`); the backsolve widens `n*nrhs` to i64 with an `i32::MAX` check. Each out-of-range case now returns `ESymSolverStatus::FatalError` instead of allocating/aborting. **Tests** (`ma57::tests`): `ma57_symbolic_sizes_guards_i32_overflow` (exact small sizing; n=ne=3×10⁸ fits → `Some`; n=ne=3.5×10⁸, i.e. 2.45×10⁹, → `None`) and `ma57_scaled_size_guards_overflow_and_floors_at_base` (1.05× growth, `scale<1` floors at base, `Index::MAX-1` scaled up → `None`). **Verified by running code**: built+linked against a local CoinHSL (`COINHSL_DIR`, kept out of the repo for licensing) — full `pounce-hsl` suite green (12 lib + 3 integration). **Fail-first confirmed** by stripping both guards (return the i64→i32 `as` cast unconditionally): the overflow test fails (`is_none()` false) and the scaled test fails (`Some(2147483647)` vs `None`); restored, all green. **CI note**: `pounce-hsl` is `--exclude`d from the CI build/test/clippy jobs (needs proprietary HSL), so these tests run only where CoinHSL is installed — verified locally here. See `## L10 detail`. |
 
 ## C1 detail
 
@@ -3673,3 +3674,78 @@ one-shot): both tests fail (the sequential one on call 3 returning `true`, the
 concurrency one on a winner count > 1). Restored; full `pounce-linsol` suite
 green (20 lib + 1 integration, 0 failures). `cargo fmt -p pounce-linsol
 --check` clean.
+
+## L10 detail
+
+**Issue (review L10).** MA57's symbolic-phase workspace sizing in
+`crates/pounce-hsl/src/ma57.rs` did all index arithmetic in `Index` (`= i32`,
+matching MA57's Fortran `INTEGER`), with no overflow guard:
+
+- `self.lkeep = 5 * n + ne + n.max(ne) + 42;` (cpp:536) and
+  `self.iwork = vec![0; (5 * n) as usize];` — for a matrix with `n ≈ ne`, the
+  leading behavior is `7·n`, which exceeds `i32::MAX` (2 147 483 647) once
+  `n ≳ 3.07×10⁸`. In a release build the i32 sum wraps to a negative value,
+  and `negative_i32 as usize` becomes an astronomically large `usize`, so the
+  `vec![…; len]` either aborts (OOM) or attempts an absurd allocation; in a
+  debug build the multiply/add panics on overflow.
+- `let suggested_lfact = (self.info[8] as Number * scale).ceil() as Index;` —
+  `info[8]` is MA57's own suggested size (already an i32), grown by
+  `ma57_pre_alloc` (default 1.05). The `f64 -> i32` cast *saturates* to
+  `i32::MAX` (Rust ≥ 1.45), so it no longer wraps, but an i32::MAX-element
+  `fact`/`ifact` allocation is still nonsense.
+- backsolve `let lwork = n * nrhs;` — the same i32 multiply overflow for large
+  `n*nrhs`.
+
+The review notes this is inherited from the Fortran interface but "cheap to
+guard," and asks for a clean `FatalError` rather than an allocation/abort.
+
+**Verification.** The overflow is a provable arithmetic fact (i32 cannot hold
+`7·3.5×10⁸ = 2.45×10⁹`). Because the crate links proprietary MA57, the tests
+were run against a locally-installed CoinHSL via `COINHSL_DIR` (the library
+lives outside the repo and is never committed, per its license); CI keeps
+`pounce-hsl` in its `--exclude` list for the same reason.
+
+**Fix.** Two pure, unit-testable helpers replace the inline arithmetic:
+
+```rust
+fn ma57_symbolic_sizes(n: Index, ne: Index) -> Option<(Index, Index)> {
+    let (n64, ne64) = (n as i64, ne as i64);
+    let lkeep = 5 * n64 + ne64 + n64.max(ne64) + 42;
+    let liwork = 5 * n64;
+    if lkeep > Index::MAX as i64 || liwork > Index::MAX as i64 {
+        return None;
+    }
+    Some((lkeep as Index, liwork as Index))
+}
+
+fn ma57_scaled_size(base: Index, scale: Number) -> Option<Index> {
+    let scaled = (base as Number * scale).ceil();
+    if scaled > Index::MAX as Number {
+        return None;
+    }
+    Some((scaled as Index).max(base))
+}
+```
+
+`symbolic_factorization` calls `ma57_symbolic_sizes` (let-else → `FatalError`)
+for `lkeep`/`iwork`, and `ma57_scaled_size` for the two suggested sizes;
+`backsolve` widens `n*nrhs` to i64 and returns `FatalError` if it exceeds
+`i32::MAX`. The on-the-happy-path behavior is byte-identical (same lengths for
+in-range problems); only the out-of-range cases change from
+overflow/abort to a clean `ESymSolverStatus::FatalError`.
+
+**Tests** (`ma57::tests`):
+- `ma57_symbolic_sizes_guards_i32_overflow` — exact small sizing
+  `(5*N+NE+max+42, 5*N)`; `n=ne=3×10⁸` (`7·n = 2.1×10⁹ < i32::MAX`) → `Some`;
+  `n=ne=3.5×10⁸` (`2.45×10⁹ > i32::MAX`) → `None`.
+- `ma57_scaled_size_guards_overflow_and_floors_at_base` — `1.05×` growth;
+  `scale<1` floors at `base` (never shrinks MA57's minimum); `Index::MAX-1`
+  scaled up → `None`.
+
+**Fail-first.** Temporarily stripped both `> Index::MAX` guards (returning the
+`i64 -> i32 as` cast unconditionally): `ma57_symbolic_sizes_guards_i32_overflow`
+fails (the `is_none()` assertion is false — the wrapped i32 is `Some`) and
+`ma57_scaled_size_guards_overflow_and_floors_at_base` fails with
+`left: Some(2147483647), right: None`. Restored; full `pounce-hsl` suite green
+(12 lib + 3 integration, 0 failures), `cargo fmt -p pounce-hsl --check` clean,
+`cargo clippy -p pounce-hsl` clean for correctness/suspicious.
