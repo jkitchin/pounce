@@ -62,6 +62,43 @@ use std::rc::Rc;
 /// trigger).
 pub type InnerBackendFactoryFactory = Box<dyn FnMut() -> LinearBackendFactory>;
 
+/// Per-call iteration cap on the restoration sub-IPM
+/// (`IpRestoConvCheck.cpp:137` `maximum_iters`). Resto-phase-specific,
+/// distinct from the user's outer `max_iter` — the restoration phase is
+/// a feasibility-recovery side-solve and gets its own generous budget.
+const RESTO_INNER_MAX_ITERS: i32 = 3000;
+
+/// Cap on successive restoration iterations
+/// (`IpRestoConvCheck.cpp:144` `maximum_resto_iters`).
+const RESTO_MAX_SUCCESSIVE_ITERS: i32 = 3000;
+
+/// Build the restoration convergence-check adapter, threading the inner
+/// IPM's *user-derived* stationarity tolerances (`tol`,
+/// `acceptable_tol`, `acceptable_iter`) through to the sub-solve.
+///
+/// Upstream clones the outer `OptionsList` into the restoration
+/// sub-options (`IpRestoMinC_1Nrm.cpp`), so the resto IPM inherits the
+/// user's `tol`/`acceptable_tol`/`acceptable_iter` unless a `resto.`
+/// override is set. Pounce previously hardcoded `(1e-8, 1e-6, 15)`
+/// here, so a user asking for e.g. `tol=1e-3` still drove the resto
+/// sub-solve to `1e-8` stationarity (and vice-versa). Reading the
+/// inner builder's `conv_check` options — which
+/// [`pounce_algorithm::application::IpoptApplication::algorithm_builder_from_options`]
+/// populates from the same `tol`/`acceptable_tol`/`acceptable_iter`
+/// options the outer solve reads — restores upstream's inheritance. The
+/// two iteration budgets stay at the resto-phase constants.
+fn build_resto_conv_check_adapter(
+    conv: &pounce_algorithm::alg_builder::ConvCheckOptions,
+) -> crate::conv_check::RestoConvCheckAdapter {
+    crate::conv_check::RestoConvCheckAdapter::new(
+        conv.tol,
+        conv.acceptable_tol,
+        conv.acceptable_iter,
+        RESTO_INNER_MAX_ITERS,
+        RESTO_MAX_SUCCESSIVE_ITERS,
+    )
+}
+
 /// Build a [`crate::min_c_1nrm::RestoInnerSolver`] closure that
 /// constructs and runs the nested IPM on every restoration entry.
 ///
@@ -248,7 +285,11 @@ pub fn run_inner_resto(
     }
     alg_bundle.init =
         Box::new(resto_bundle.init) as Box<dyn pounce_algorithm::init::r#trait::IterateInitializer>;
-    let mut adapter = crate::conv_check::RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)
+    // Thread the user's outer `tol`/`acceptable_tol`/`acceptable_iter`
+    // (carried on the inner builder's conv_check options) into the resto
+    // sub-solve instead of hardcoded `(1e-8, 1e-6, 15)`. See
+    // `build_resto_conv_check_adapter`.
+    let mut adapter = build_resto_conv_check_adapter(&inner_alg_builder.conv_check)
         .with_orig_progress_guard(Rc::clone(outer_nlp), orig_curr_inf_pr, kappa_resto);
     if let Some(cb) = orig_progress_cb {
         adapter = adapter.with_orig_progress_callback(cb);
@@ -839,6 +880,26 @@ mod tests {
         assert_eq!(iv.z_u.dim(), 2);
         assert_eq!(iv.v_l.dim(), 1);
         assert_eq!(iv.v_u.dim(), 1);
+    }
+
+    /// **L18 regression.** The restoration sub-solve must inherit the
+    /// user's outer `tol`/`acceptable_tol`/`acceptable_iter` (carried on
+    /// the inner builder's `conv_check` options) rather than the
+    /// previously-hardcoded `(1e-8, 1e-6, 15)`. Upstream clones the outer
+    /// options into the resto sub-options, so a user `tol=1e-3` drives the
+    /// resto IPM to `1e-3` stationarity too.
+    #[test]
+    fn resto_conv_check_adapter_inherits_user_tolerances() {
+        let mut conv = pounce_algorithm::alg_builder::ConvCheckOptions::default();
+        // Deliberately not the old hardcoded defaults.
+        conv.tol = 1e-3;
+        conv.acceptable_tol = 1e-2;
+        conv.acceptable_iter = 7;
+
+        let adapter = build_resto_conv_check_adapter(&conv);
+        assert_eq!(adapter.inner_tol(), 1e-3, "outer tol must propagate");
+        assert_eq!(adapter.inner_acceptable_tol(), 1e-2);
+        assert_eq!(adapter.inner_acceptable_iter(), 7);
     }
 
     #[test]

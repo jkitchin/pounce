@@ -80,6 +80,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | L15 | qp: `ElasticReformulation::original_inertia()` hardcodes `Psd` (`elastic.rs:169-175`), making the `Indefinite` arm of `as_qp`'s inertia match dead — an indefinite original problem is solved through the augmented elastic problem as if PSD; `solve_elastic` hard-calls `solve_general` (`solver.rs:1087`), ignoring `opts.use_schur_updates` | **FIXED** | **Both bugs confirmed by reading + running code (pounce-internal §4.3/§4.5 design, not an upstream-divergence).** **(1) Dead inertia arm.** `ElasticReformulation::build` discarded `qp.hessian_inertia`, and `original_inertia()` unconditionally returned `HessianInertia::Psd`. `as_qp` (`elastic.rs:162-165`) maps the original inertia onto the augmented problem with `Psd|Unknown => Psd`, `Indefinite => Indefinite` — but since `original_inertia()` could never return `Indefinite`, the augmented problem was *always* marked `Psd`, so an indefinite original `H` was solved as if PSD (skipping the §4.5 inertia-control assumption). **Fix**: `build` now captures `qp.hessian_inertia` into a new `orig_inertia` field and `original_inertia()` returns it; the augmented Hessian is block-diag(`H_orig`, 0) so it shares `H_orig`'s definiteness category (zero slack diagonals never introduce negative curvature), and the existing `as_qp` match now correctly propagates `Indefinite` while collapsing `Psd`/`Unknown` to `Psd`. **(2) `use_schur_updates` ignored.** The top-level `solve` dispatches between `solve_general_schur` (when `opts.use_schur_updates`) and `solve_general` (`solver.rs:1587-1591`), but `solve_elastic`'s recursive solve hard-called `solve_general`, so an infeasible problem solved with `use_schur_updates = true` silently fell back to the refactor path. **Fix**: `solve_elastic` now mirrors the same dispatch; both inner solvers bypass the `solve` feasibility audit, so the no-re-audit / no-recovery-loop property is preserved (comment updated). **Tests**: `elastic_unit::as_qp_propagates_original_hessian_inertia` (Indefinite original ⇒ augmented `Indefinite`; Psd/Unknown ⇒ `Psd`) and `analytical::l15_elastic_honors_use_schur_updates` (the `problem_5` infeasible QP solved with `use_schur_updates = true` returns the same minimal-l1 certificate **and** records `n_schur_updates > 0`, proving the Schur path ran inside the elastic recovery — the refactor path leaves it 0). **Fail-first confirmed** by reverting both edits (`original_inertia` → hardcoded `Psd`; dispatch → `solve_general` only): both tests fail (inertia `Indefinite != Psd`; `n_schur_updates == 0`). Restored, full pounce-qp suite green (80 lib + 1 + 5 integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L15 detail`. |
 | L16 | sensitivity: `clamp_step_to_bounds` panics (index OOB) on non-dense bound vectors instead of the documented no-op (`boundcheck.rs:64-78,106-112`); and `dv.values()` (here + the `dense_to_vec` siblings in `solver.rs:408`, `convenience.rs:438`) trips `DenseVector::values`'s `!homogeneous` debug_assert where `expanded_values()` is the safe accessor | **FIXED** | **Both bugs confirmed by reading + running code (pounce sIPOPT port; the `values`/`expanded_values` homogeneous-value distinction is pounce-internal).** **(1) OOB panic on non-dense bounds.** `compressed_values` returns an empty `Vec` when the bound `dyn Vector` is not a `DenseVector` (documented contract: "silently no-ops"). But the clamp loops then indexed `bounds[compressed_i]` for every entry of the bound *expansion matrix* — so a non-dense `x_l`/`x_u` paired with a non-empty `px_l`/`px_u` panics `index out of bounds: the len is 0 but the index is 0` instead of no-opping. **Fix**: replaced both `bounds[compressed_i]` accesses with `bounds.get(compressed_i)` + `continue` on `None`, honoring the no-op contract (also covers a bounds slice shorter than the expansion). **(2) Homogeneous debug_assert.** `DenseVector::values()` carries `debug_assert!(self.initialized && !self.homogeneous)` (mirrors upstream's `DBG_ASSERT` in `DenseVector::Values() const`); a homogeneous bound vector — e.g. every lower bound 0, stored as a scalar with no materialized slice — makes `values()` panic in debug/test builds. Three sites used `dv.values().to_vec()`: `boundcheck.rs::compressed_values`, and the `dense_to_vec` helpers in `solver.rs` and `convenience.rs`. **Fix**: switched all three to `expanded_values()`, which materializes the scalar for a homogeneous vector and clones otherwise. **Tests** (`boundcheck::tests`): `clamp_handles_homogeneous_bounds_without_panicking` (homogeneous lower bound built via `Vector::set`; asserts no panic + correct single clamp) and `clamp_is_noop_on_non_dense_bounds` (a 1-block `CompoundVector` — the only other `dyn Vector` impl — as `x_l`; asserts 0 clamps, `dx` untouched). **Fail-first confirmed** by reverting both fixes: the homogeneous test panics at `dense_vector.rs:131` (`assertion failed: self.initialized && !self.homogeneous`) and the non-dense test panics at `boundcheck.rs` (`index out of bounds: the len is 0 but the index is 0`). Restored, full pounce-sensitivity suite green (45 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L16 detail`. |
 | L17 | sensitivity: `IndexPCalculator::schur_matrix` drops the B-row sign and caches P columns by column index only, so a `−1` B row mis-signs its Schur entry and two A rows selecting the same column with opposite signs share one wrong-signed cached column (`p_calculator.rs:150-166,191-199`) | **FIXED** | **Both bugs confirmed by reading + running code, and verified against upstream sIPOPT (`SensIndexPCalculator.cpp`) — both behaviors *mirror* upstream but are only *reachable* in pounce because `from_parts`/`set_from_*` accept `−1` signs and duplicate columns, where production `IndexSchurData` is `+1`-only with unique columns.** **(1) B-row sign dropped.** Upstream `GetSchurMatrix` writes `S[i,j] = −P[B_colᵢ, A_colⱼ]` indexing `P` by `B`'s column index alone, never reading `B`'s ±1 factor. `schur_matrix` faithfully copied this (`let (b_idx_vec, _facs) = b.multiplying_row(i)?; … = -p_col[b_col]`), discarding `_facs`. So a `B` row carrying `−1` produced a Schur entry with the wrong sign. **Fix**: bind the factor (`b_facs`) and write `S[i,j] = −b_facs[0]·P[…]`. **(2) Duplicate-column cache conflation.** `compute_p` keyed the `p_cols` cache by column index only (`contains_key(&col)` / `insert(col, …)`) while the stored column *bakes in* A's sign (`K⁻¹(sign·e_col)`). Two A rows selecting the same column with opposite signs → the second hit `contains_key` on the first and silently reused the `+`-signed column for the `−` row. **Fix**: key the cache by `(col, sign)`; `schur_matrix` looks columns up by the same `(a_col, a_sign)` key. Public `p_columns()` return type changes `HashMap<Index,…>` → `HashMap<(Index,Index),…>` (only the test suite consumes it). **Tests** (`p_calculator::tests`): `schur_matrix_honors_negative_b_sign` (A col 0 +1, B col 1 −1 ⇒ `S[0,0] = −(−1)·P[1,0] = +½`, the buggy path yields −½) and `compute_p_distinguishes_same_column_opposite_signs` (A = col 1 twice with +1/−1 ⇒ both `(1,+1)` and `(1,−1)` cached as exact negatives; the buggy path caches only one). The contract test `adapter_compute_p_respects_negative_signs` (signed-column storage: `p_pos[i] == −p_neg[i]`) still passes — the fix preserves signed storage, it just stops two opposite-sign rows from aliasing. **Fail-first confirmed** by reverting each bug independently (drop `b_facs[0]`; collapse the cache key to column-only): the matching new test fails (`schur_matrix_honors_negative_b_sign` gets −½ not +½; `compute_p_distinguishes_same_column_opposite_signs`'s `(1,−1)` lookup is `None`) while the rest stay green. Restored, full pounce-sensitivity suite green (47 lib + 6 adapter + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L17 detail`. |
+| L18 | restoration: inner solver pins tolerances at `(1e-8, 1e-6, 15, 3000, 3000)` regardless of the user's outer `tol` (`resto_inner_solver.rs:251`), and `is_square_problem = n == m_eq` ignores inequalities (line 226), unlike IPOPT's `IsSquareProblem` | **FIXED (1 of 2; 2nd is not a bug)** | **Split verdict after running code + upstream cross-check.** **(1) Hardcoded resto tol — REAL, fixed.** `run_inner_resto` built the resto sub-solve's convergence check with `RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)` — the inner-IPM stationarity `tol`, `acceptable_tol`, and `acceptable_iter` were literals, so a user `tol=1e-3` (or `1e-10`) still drove the restoration sub-NLP to `1e-8`. Upstream clones the outer `OptionsList` into the resto sub-options (`IpRestoMinC_1Nrm.cpp`), so the resto IPM *inherits* the user's `tol`/`acceptable_tol`/`acceptable_iter`. Verified the inner builder carries these: `IpoptApplication::algorithm_builder_from_options` sets `builder.conv_check.{tol,acceptable_tol,acceptable_iter}` from the `tol`/`acceptable_tol`/`acceptable_iter` options (`application.rs:1627,1648,1663`), and CLI/py/cinterface all hand that builder to `make_default_restoration_factory_provider`. **Fix**: extracted `build_resto_conv_check_adapter(&ConvCheckOptions)` that reads `conv.{tol,acceptable_tol,acceptable_iter}` and keeps the resto-phase iteration budgets as named consts `RESTO_INNER_MAX_ITERS`/`RESTO_MAX_SUCCESSIVE_ITERS` (= 3000, which mirror `IpRestoConvCheck.cpp:137,144` `maximum_iters`/`maximum_resto_iters` — resto-specific, *not* the outer `max_iter`); the callsite now passes `&inner_alg_builder.conv_check`. Added `RestoConvCheckAdapter::{inner_tol,inner_acceptable_tol,inner_acceptable_iter}` accessors. **(2) `is_square_problem` — NOT a bug.** The claim "ignores inequalities, unlike IPOPT's `IsSquareProblem`" is false: upstream `IpoptCalculatedQuantities::IsSquareProblem()` is literally `return (ip_data_->curr()->x()->Dim() == ip_data_->curr()->y_c()->Dim());` (`IpIpoptCalculatedQuantities.cpp:3732-3735`, fetched via the GitHub raw API) — i.e. `n == m_eq`, with no inequality term. pounce's `is_square_problem = n_orig == m_eq` matches upstream exactly; left unchanged. **Test** (`resto_inner_solver::tests`): `resto_conv_check_adapter_inherits_user_tolerances` builds a `ConvCheckOptions` with `tol=1e-3, acceptable_tol=1e-2, acceptable_iter=7` and asserts the adapter reports them. **Fail-first confirmed** by reverting the helper to the old `(1e-8, 1e-6, 15)` literals — the test fails (`1e-8 != 1e-3`, "outer tol must propagate"). Restored, full pounce-restoration suite green (106 lib + integration). `cargo fmt`/`clippy` (correctness/suspicious) clean. See `## L18 detail`. |
 
 ## C1 detail
 
@@ -4178,3 +4179,91 @@ key to column-only fails only `compute_p_distinguishes_same_column_opposite_sign
 (47 lib + 6 adapter_trait_pipeline + the rest of the integration suites).
 `cargo fmt -p pounce-sensitivity` / `cargo clippy -p pounce-sensitivity
 --all-targets -- -D clippy::correctness -D clippy::suspicious` clean.
+
+## L18 detail
+
+**Issue (code-review-2026-06.md L18).** Restoration inner solver pins
+tolerances at `(1e-8, 1e-6, 15, 3000, 3000)` regardless of the user's outer
+`tol` (`resto_inner_solver.rs:251`), and `is_square_problem = n == m_eq`
+ignores inequalities (line 226), unlike IPOPT's `IsSquareProblem`.
+
+Two separate claims; verified independently.
+
+### Claim 1 — hardcoded resto tolerances (REAL bug, fixed)
+
+`run_inner_resto` built the restoration sub-solve's convergence check as
+
+```rust
+RestoConvCheckAdapter::new(1e-8, 1e-6, 15, 3000, 3000)
+```
+
+The first three args are `tol` / `acceptable_tol` / `acceptable_iter` for the
+inner IPM's `OptErrorConvCheck`. As literals, they ignored whatever `tol` the
+user requested: a `tol=1e-3` run still drove the restoration sub-NLP to `1e-8`
+stationarity (wasting inner iterations), and a `tol=1e-10` run exited the
+sub-solve too early at `1e-8`.
+
+**Upstream behavior.** `IpRestoMinC_1Nrm.cpp` clones the outer `OptionsList`
+into `actual_resto_options` and only *overrides* `required_infeasibility_reduction`
+(and a few `resto.`-prefixed knobs); it never overrides `tol`, so the
+restoration IPM inherits the outer `tol` / `acceptable_tol` / `acceptable_iter`.
+
+**Plumbing check.** The inner builder already carries the user's values:
+`IpoptApplication::algorithm_builder_from_options` does
+`builder.conv_check.tol = read_num("tol")`,
+`builder.conv_check.acceptable_tol = read_num("acceptable_tol")`,
+`builder.conv_check.acceptable_iter = read_int("acceptable_iter")`
+(`application.rs` ~1627/1648/1663), and every embedder
+(`pounce-cli/src/main.rs:265`, `pounce-py/src/problem.rs:661`,
+`pounce-cinterface/src/{solver.rs:194,lib.rs:585}`) passes
+`app.algorithm_builder_from_options()` as the `inner_alg_builder` to
+`make_default_restoration_factory_provider`. So the user's tol was sitting on
+`inner_alg_builder.conv_check` the whole time — just unread.
+
+**Fix.** Extracted
+
+```rust
+fn build_resto_conv_check_adapter(conv: &ConvCheckOptions) -> RestoConvCheckAdapter {
+    RestoConvCheckAdapter::new(
+        conv.tol, conv.acceptable_tol, conv.acceptable_iter,
+        RESTO_INNER_MAX_ITERS, RESTO_MAX_SUCCESSIVE_ITERS,
+    )
+}
+```
+
+with the two iteration budgets kept as named consts (`= 3000`), since those
+mirror `IpRestoConvCheck.cpp:137,144` `maximum_iters` / `maximum_resto_iters`
+— resto-phase-specific caps, *not* the user's outer `max_iter`. The callsite
+now reads `&inner_alg_builder.conv_check`. Added read-only accessors
+`RestoConvCheckAdapter::{inner_tol, inner_acceptable_tol, inner_acceptable_iter}`
+so the mapping is unit-testable.
+
+### Claim 2 — `is_square_problem` ignoring inequalities (NOT a bug)
+
+The code is `let is_square_problem = n_orig == m_eq;`. The review says this
+diverges from IPOPT's `IsSquareProblem`. It does not. Fetched the upstream
+definition via the GitHub raw API
+(`src/Algorithm/IpIpoptCalculatedQuantities.cpp:3732-3735`):
+
+```cpp
+bool IpoptCalculatedQuantities::IsSquareProblem() const
+{
+   return (ip_data_->curr()->x()->Dim() == ip_data_->curr()->y_c()->Dim());
+}
+```
+
+`x()->Dim()` is the number of (original) variables and `y_c()->Dim()` is the
+number of *equality* multipliers, so upstream is exactly `n == m_eq` and also
+carries no inequality term. pounce matches upstream; left unchanged.
+
+### Test + fail-first
+
+`resto_inner_solver::tests::resto_conv_check_adapter_inherits_user_tolerances`
+builds a `ConvCheckOptions { tol: 1e-3, acceptable_tol: 1e-2, acceptable_iter: 7 }`
+and asserts `build_resto_conv_check_adapter` produces an adapter reporting
+those values. Fail-first confirmed by reverting the helper body to the old
+`RestoConvCheckAdapter::new(1e-8, 1e-6, 15, …)` literals: the test fails with
+`1e-8 != 1e-3` ("outer tol must propagate"). Restored; full pounce-restoration
+suite green (106 lib + integration). `cargo fmt -p pounce-restoration` /
+`cargo clippy -p pounce-restoration --all-targets -- -D clippy::correctness
+-D clippy::suspicious` clean.
