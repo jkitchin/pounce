@@ -43,13 +43,11 @@ pub struct IpoptSolverInfo {
     /// The session. `None` before the first solve or after a solve
     /// that didn't converge.
     session: Option<RustSolver>,
-    /// All the problem state: callbacks, dims, bounds, options. The
-    /// IpoptApplication inside is moved out into the `session` on each
-    /// successful solve, then restored on the next solve via the
-    /// `app_template` field below.
-    ///
-    /// (Stored as `Option` so `IpoptSolverSolve` can `.take()` the app
-    /// to move into the session, then put it back on next call.)
+    /// All the problem state: callbacks, dims, bounds, options. On each
+    /// solve the inner `IpoptApplication` is moved into a fresh
+    /// `RustSolver` (held in `session`) and a blank app is left in its
+    /// place; `IpoptSolverSolve` clones the OptionsList across that move
+    /// so the user's options survive into the next solve.
     problem: IpoptProblemInfo,
     /// Number of constraints — cached for cheap shape checks.
     m: Index,
@@ -202,8 +200,18 @@ pub unsafe extern "C" fn IpoptSolverSolve(
         .app
         .set_restoration_factory_provider(resto_provider);
 
-    // Move the app out of the problem and into a fresh RustSolver.
+    // Move the app out of the problem and into a fresh RustSolver. The
+    // app carries the user's options (set via AddIpopt{Str,Num,Int}Option),
+    // so we snapshot the OptionsList first and restore it into the fresh
+    // blank app left behind. Without this, a second IpoptSolverSolve on the
+    // same handle reads a default-initialised app — silently discarding the
+    // linear solver, tolerances, scaling, etc. the caller configured (and
+    // the `feral_config_from_options` snapshot above would, on that second
+    // call, read the already-blanked options). The session API's design
+    // center is repeated solves, so this must survive across them.
+    let saved_options = info.problem.app.options().clone();
     let app = std::mem::replace(&mut info.problem.app, IpoptApplication::new());
+    *info.problem.app.options_mut() = saved_options;
     let bridge_for_solver: Rc<RefCell<dyn TNLP>> = bridge.clone();
     let mut rust_solver = RustSolver::new(app, bridge_for_solver);
     let status = rust_solver.solve();
@@ -385,4 +393,149 @@ pub unsafe extern "C" fn IpoptSolverReducedHessian(
     };
     std::ptr::copy_nonoverlapping(hr.as_ptr(), hr_out, hr.len());
     TRUE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AddIpoptIntOption, CreateIpoptProblem, FreeIpoptProblem};
+    use std::ffi::CString;
+
+    // f(x) = (x - 2)^2 — the same 1-D quadratic the bridge tests use;
+    // converges in one Newton step.
+    unsafe extern "C" fn quad_eval_f(
+        _n: Index,
+        x: *const Number,
+        _new_x: Bool,
+        obj_value: *mut Number,
+        _user_data: *mut c_void,
+    ) -> Bool {
+        let v = *x.offset(0);
+        *obj_value = (v - 2.0) * (v - 2.0);
+        TRUE
+    }
+    unsafe extern "C" fn quad_eval_grad_f(
+        _n: Index,
+        x: *const Number,
+        _new_x: Bool,
+        grad: *mut Number,
+        _user_data: *mut c_void,
+    ) -> Bool {
+        let v = *x.offset(0);
+        *grad.offset(0) = 2.0 * (v - 2.0);
+        TRUE
+    }
+    unsafe extern "C" fn quad_eval_h(
+        _n: Index,
+        _x: *const Number,
+        _new_x: Bool,
+        obj_factor: Number,
+        _m: Index,
+        _lambda: *const Number,
+        _new_lambda: Bool,
+        _nele_hess: Index,
+        irow: *mut Index,
+        jcol: *mut Index,
+        values: *mut Number,
+        _user_data: *mut c_void,
+    ) -> Bool {
+        if !irow.is_null() && !jcol.is_null() && values.is_null() {
+            *irow.offset(0) = 0;
+            *jcol.offset(0) = 0;
+        } else if irow.is_null() && jcol.is_null() && !values.is_null() {
+            *values.offset(0) = 2.0 * obj_factor;
+        } else {
+            return FALSE;
+        }
+        TRUE
+    }
+
+    fn create_quad() -> IpoptProblem {
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
+            )
+        }
+    }
+
+    /// H13: a user option set before `IpoptCreateSolver` must survive every
+    /// `IpoptSolverSolve` on the handle. Before the fix the app (and its
+    /// OptionsList) was `mem::replace`d with a blank default on the first
+    /// solve and never restored, so the second solve silently ran with
+    /// default options. Here we set a clearly non-default `max_iter = 7`
+    /// and assert it is still present after the first AND second solve.
+    #[test]
+    fn options_survive_repeated_session_solves() {
+        let mut prob = create_quad();
+        let key = CString::new("max_iter").unwrap();
+        assert_eq!(unsafe { AddIpoptIntOption(prob, key.as_ptr(), 7) }, TRUE);
+
+        // IpoptCreateSolver consumes the problem and nulls the handle.
+        let solver = unsafe { IpoptCreateSolver(&mut prob) };
+        assert!(!solver.is_null());
+        assert!(prob.is_null(), "create must null the caller's handle");
+
+        let read_max_iter = |solver: IpoptSolver| -> Option<i32> {
+            let info = unsafe { &*solver };
+            match info.problem.app.options().get_integer_value("max_iter", "") {
+                Ok((v, true)) => Some(v),
+                _ => None,
+            }
+        };
+
+        // The option is present before any solve.
+        assert_eq!(read_max_iter(solver), Some(7), "option set pre-solve");
+
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let solve = |solver: IpoptSolver, x: &mut [f64], obj: &mut f64| unsafe {
+            IpoptSolverSolve(
+                solver,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                obj as *mut f64,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        // First solve — the app is moved into the session; the OptionsList
+        // must be restored into the blank app left behind.
+        let _ = solve(solver, &mut x, &mut obj);
+        assert_eq!(
+            read_max_iter(solver),
+            Some(7),
+            "max_iter must survive the first session solve (H13)"
+        );
+
+        // Second solve — the design center of the session API. Pre-fix this
+        // ran on a blanked app; the option must still be there.
+        let _ = solve(solver, &mut x, &mut obj);
+        assert_eq!(
+            read_max_iter(solver),
+            Some(7),
+            "max_iter must survive a second session solve (H13)"
+        );
+
+        unsafe { IpoptFreeSolver(solver) };
+        // The (now-null) problem handle is safe to free.
+        unsafe { FreeIpoptProblem(prob) };
+    }
 }

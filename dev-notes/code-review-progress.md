@@ -21,6 +21,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | H10 | presolve: postsolve does not zero `z_l`/`z_u` at aux-fixed variables — reported duals violate stationarity | **FIXED** | `finalize_solution` (`lib.rs:1049`) forwarded `sol.z_l`/`sol.z_u` verbatim, but `recover_dropped_multipliers` folds the entire fixed-var stationarity residual into the recovered λ assuming `z_l = z_u = 0` there — double-counting against the IPM's large clamp multipliers. Now copies `z_l`/`z_u` into mutable buffers and zeros each `frame.fixed_vars` entry immediately after that frame's λ is recovered (only on `Ok` recovery; a failed recovery leaves λ=0 so the clamp multiplier is still legitimate). Test `phase0_finalize_zeroes_bound_multipliers_at_fixed_vars` (recording mock inner). |
 | H11 | presolve: objective coupling classified from the gradient at a single probe point — a nonlinear objective variable reading zero gradient at the probe is mis-classified `PureEquality` and wrongly eliminated | **FIXED** | `run_auxiliary_phase0` built `obj_support` solely from `objective_gradient_support(grad_f)` — one sample. A variable whose objective gradient happens to vanish at the probe (classic `f=(x−x₀)²` started at `x₀`) reads as objective-free, so its square block is classed `PureEquality` and eliminated even under `Safe`. `PresolveTnlp` now fetches `get_variables_linearity` (`lib.rs:354`) and passes it via a new `Phase0Probe::var_linearity` field; `run_auxiliary_phase0` (`auxiliary.rs:221`) unions every `NonLinear`-tagged variable into `obj_support`, so nonlinear vars are always treated objective-coupled. When the TNLP declines (default), `var_linearity=None` → falls back to the probe gradient (no behavior change; no production TNLP implements the hook). Test `phase0_nonlinear_var_with_zero_probe_grad_blocks_elimination_under_safe`. |
 | H12 | presolve: FBBT lacks both the Phase-0 row mask and any infeasibility handling | **FIXED** | Two layers. (1) **Row mask**: `run_fbbt` (`fbbt/orchestrator.rs`) gained a `row_kept: Option<&[bool]>` param; the call site (`lib.rs`) passes `Some(&row_kept_inner)`, so propagation skips any row Phase 0 dropped — over the aux-clamped box a dropped row could fabricate a spurious infeasibility (the #53 hazard Phase 1 already filters). (2) **Infeasibility handling**: `fbbt_report.infeasibility_witness` was never inspected, so FBBT's "undefined and must not be trusted" partially-tightened bounds reached the IPM. The call site now snapshots `x_l`/`x_u` before FBBT and, on a witness, restores them (mirrors the Phase 1 rollback — presolve has no channel to certify infeasibility, so the IPM runs on the pre-FBBT box and certifies it). Tests `dropped_row_is_skipped_and_does_not_flag_infeasible` (orchestrator) + `fbbt_infeasibility_discards_corrupted_bounds` (lib integration). |
+| H13 | cinterface: `IpoptSolverSolve` silently discards all user options after the first solve | **FIXED** | The session solve does `mem::replace(&mut info.problem.app, IpoptApplication::new())` to move the configured app into the `RustSolver`, leaving a **blank** app behind that nothing restored (the doc's claimed `app_template` field never existed — grep-confirmed). The second `IpoptSolverSolve` on a handle then read default options — linear solver, tolerances, scaling all lost — and the `feral_config_from_options` snapshot read the blanked app too. Fix: clone the `OptionsList` (it derives `Clone`) before the `mem::replace` and write it back into the fresh blank app via `options_mut()`, so options survive every solve. Stale doc comment on `IpoptSolverInfo::problem` corrected. Test `options_survive_repeated_session_solves` (`solver.rs`): sets `max_iter=7`, creates the session, solves twice, asserts the option persists after each. |
 
 ## C1 detail
 
@@ -505,3 +506,48 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   partial tightening leaking to the IPM); with the fix it reads `(0.0, 1.0)`
   and PASSES. Full `pounce-presolve` suite green (207 lib + integration +
   9 doctests); `cargo fmt --check` clean; no build warnings.
+
+## H13 detail
+
+- **Bug** (`pounce-cinterface/src/solver.rs`): the session-style
+  `IpoptSolverSolve` moves the configured `IpoptApplication` into a fresh
+  `RustSolver` with
+  `std::mem::replace(&mut info.problem.app, IpoptApplication::new())`,
+  leaving a **default-initialised** app in `info.problem.app`. Nothing
+  restored it. The struct doc claimed restoration happened "via the
+  `app_template` field below", but no such field exists (grep-confirmed). On
+  the **second** `IpoptSolverSolve` of the same handle:
+  - every option set via `AddIpopt{Str,Num,Int}Option` (linear solver,
+    tolerances, scaling, `max_iter`, …) had been silently replaced by
+    defaults, and
+  - the `feral_config_from_options(info.problem.app.options())` snapshot
+    (`solver.rs:191`) read the already-blanked options.
+  Repeated solves on one handle are the session API's whole purpose, so this
+  is a silent wrong-result bug for any multi-solve caller.
+- **Fix**: `OptionsList` derives `Clone` and holds the full option map plus
+  the registry `Rc`. Clone it immediately before the `mem::replace`, then
+  write it into the fresh blank app via `options_mut()`:
+  ```rust
+  let saved_options = info.problem.app.options().clone();
+  let app = std::mem::replace(&mut info.problem.app, IpoptApplication::new());
+  *info.problem.app.options_mut() = saved_options;
+  ```
+  The app moved into the solver keeps its own options for that solve; the
+  handle keeps a faithful copy for the next one. The stale `app_template`
+  doc comment on `IpoptSolverInfo::problem` was rewritten to describe the
+  real clone-across-move behavior.
+- **Scope note**: the review names options as the lost state; the fix
+  restores the full `OptionsList`, which covers every `AddIpopt*Option` key
+  and the derived `feral_config` snapshot. Per-solve app wiring (restoration
+  provider, linsol sink) is already re-established each call and needs no
+  preservation.
+- **Test** (`solver.rs`, new `mod tests`):
+  `options_survive_repeated_session_solves` builds the 1-D quadratic
+  `f=(x−2)²` (the bridge tests' solvable problem), sets `max_iter = 7`,
+  `IpoptCreateSolver` (consuming the problem), then solves **twice**,
+  asserting `get_integer_value("max_iter")` still reads `7` after each solve.
+- **Verified by running code**: with the restore line disabled the test
+  FAILED after the first solve (`left: None`, the option blanked); with the
+  fix it reads `Some(7)` after both solves and PASSES. Full
+  `pounce-cinterface` suite green (42 tests); `cargo fmt --check` clean; no
+  build warnings.
