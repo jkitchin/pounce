@@ -223,6 +223,14 @@ impl Solver {
     /// Solve `K · lhs = rhs` against the converged KKT factor. Both
     /// slices must have length `kkt_dim()`; the layout is the flat
     /// `x || s || y_c || y_d || z_l || z_u || v_l || v_u` packing.
+    ///
+    /// `K` here is the **natural-units** (unscaled) KKT matrix: when
+    /// the IPM solved with active NLP scaling, the backsolver
+    /// conjugates the RHS/solution so callers can pass RHS data in the
+    /// user's own units (pounce#128). The z/v bound-multiplier blocks
+    /// are passed through in solver space — see
+    /// [`crate::PdSensBacksolver::solve`]. For the raw scaled-space
+    /// back-solve use [`Self::kkt_solve_scaled`].
     pub fn kkt_solve(&self, rhs: &[Number], lhs: &mut [Number]) -> Result<(), SolverError> {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
@@ -242,6 +250,35 @@ impl Solver {
             });
         }
         if state.backsolver.solve(rhs, lhs) {
+            Ok(())
+        } else {
+            Err(SolverError::BacksolveFailed)
+        }
+    }
+
+    /// [`Self::kkt_solve`] without the natural-units conjugation: the
+    /// back-solve runs against the factor exactly as the IPM holds it
+    /// (the solver's internal scaled space). Identical to `kkt_solve`
+    /// when no NLP scaling is active.
+    pub fn kkt_solve_scaled(&self, rhs: &[Number], lhs: &mut [Number]) -> Result<(), SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let total = state.backsolver.dim();
+        if rhs.len() != total {
+            return Err(SolverError::BadShape {
+                what: "rhs",
+                got: rhs.len(),
+                expected: total,
+            });
+        }
+        if lhs.len() != total {
+            return Err(SolverError::BadShape {
+                what: "lhs",
+                got: lhs.len(),
+                expected: total,
+            });
+        }
+        if state.backsolver.solve_scaled_space(rhs, lhs) {
             Ok(())
         } else {
             Err(SolverError::BacksolveFailed)
@@ -307,16 +344,14 @@ impl Solver {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
 
-        // y_c rows live right after the (x, s) primal block in the
-        // compound-vector layout (matches `convenience.rs`).
+        // Map user g-indices to y_c rows through the NLP's c/d-split
+        // permutation (pounce#128; matches `convenience.rs`).
         let dims = state.backsolver.block_dims();
         let n_x = dims[0];
-        let n_s = dims[1];
-        let y_c_offset = (n_x + n_s) as Index;
-        let param_rows: Vec<Index> = pin_constraint_indices
-            .iter()
-            .map(|&i| y_c_offset + i)
-            .collect();
+        let param_rows = state
+            .backsolver
+            .map_pin_g_to_kkt_rows(pin_constraint_indices)
+            .map_err(SolverError::SensComputationFailed)?;
         let signs = vec![1; pin_constraint_indices.len()];
         let a_data = IndexSchurData::from_parts(param_rows, signs)
             .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
@@ -339,11 +374,20 @@ impl Solver {
 
     /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
     /// equality-constraint rows, where `B` selects the
-    /// `pin_constraint_indices` rows of the y_c block. Returns the
-    /// `n²`-long column-major dense matrix (`n = pin_constraint_indices.len()`).
+    /// `pin_constraint_indices` rows of the y_c block and `K` is the
+    /// **natural-units** (unscaled) KKT matrix — active NLP scaling
+    /// is undone by the backsolver, so `−inv(H_R)` is directly the
+    /// parameter covariance regardless of `nlp_scaling_method`
+    /// (pounce#128). `obj_scal` survives as a plain extra multiplier
+    /// (default 1.0); it is no longer needed to recover natural units.
+    /// Returns the `n²`-long column-major dense matrix
+    /// (`n = pin_constraint_indices.len()`).
     ///
     /// Equivalent to [`crate::SensSolve::with_reduced_hessian`] but
-    /// usable post-hoc on a held `Solver`.
+    /// usable post-hoc on a held `Solver`. For the solver-space
+    /// (pre-#128) value use [`Self::compute_reduced_hessian_scaled`];
+    /// the factors themselves are exposed via [`Self::nlp_scaling`] /
+    /// [`Self::pin_g_scaling`].
     pub fn compute_reduced_hessian(
         &self,
         pin_constraint_indices: &[Index],
@@ -352,12 +396,10 @@ impl Solver {
         let state = self.state.borrow();
         let state = state.as_ref().ok_or(SolverError::NotConverged)?;
         let n = pin_constraint_indices.len();
-        let dims = state.backsolver.block_dims();
-        let y_c_offset = (dims[0] + dims[1]) as Index;
-        let param_rows: Vec<Index> = pin_constraint_indices
-            .iter()
-            .map(|&i| y_c_offset + i)
-            .collect();
+        let param_rows = state
+            .backsolver
+            .map_pin_g_to_kkt_rows(pin_constraint_indices)
+            .map_err(SolverError::SensComputationFailed)?;
         let signs = vec![1; n];
         let a_data = IndexSchurData::from_parts(param_rows, signs)
             .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
@@ -374,6 +416,61 @@ impl Solver {
             ));
         }
         Ok(hr)
+    }
+
+    /// The reduced Hessian as the solver's internal **scaled** space
+    /// sees it — the value [`Self::compute_reduced_hessian`] returned
+    /// before pounce#128: `H̃_ij = (df / (dc_i·dc_j)) · H_ij`.
+    /// Identical to `compute_reduced_hessian` when no NLP scaling is
+    /// active.
+    pub fn compute_reduced_hessian_scaled(
+        &self,
+        pin_constraint_indices: &[Index],
+        obj_scal: Number,
+    ) -> Result<Vec<Number>, SolverError> {
+        let mut hr = self.compute_reduced_hessian(pin_constraint_indices, obj_scal)?;
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let df = state.backsolver.obj_scaling_factor();
+        let dc = state
+            .backsolver
+            .pin_c_scales(pin_constraint_indices)
+            .map_err(SolverError::SensComputationFailed)?;
+        let n = pin_constraint_indices.len();
+        for j in 0..n {
+            for i in 0..n {
+                hr[j * n + i] *= df / (dc[i] * dc[j]);
+            }
+        }
+        Ok(hr)
+    }
+
+    /// Effective NLP scaling the IPM applied on the most recent
+    /// converged solve: `(obj_scaling_factor, c_scale, d_scale)`.
+    /// `(1.0, None, None)` ⇔ no scaling was active. The vectors are
+    /// per-row factors over the algorithm's equality (`c`) and
+    /// inequality (`d`) blocks.
+    pub fn nlp_scaling(
+        &self,
+    ) -> Result<(Number, Option<Vec<Number>>, Option<Vec<Number>>), SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        Ok(state.backsolver.nlp_scaling())
+    }
+
+    /// Per-pin equality-row scaling factors `dc_i` (1.0 entries when
+    /// no constraint scaling is active), ordered like
+    /// `pin_constraint_indices`.
+    pub fn pin_g_scaling(
+        &self,
+        pin_constraint_indices: &[Index],
+    ) -> Result<Vec<Number>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        state
+            .backsolver
+            .pin_c_scales(pin_constraint_indices)
+            .map_err(SolverError::SensComputationFailed)
     }
 }
 

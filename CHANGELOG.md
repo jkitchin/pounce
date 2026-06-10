@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — sensitivity back-solves now return natural (unscaled) units (#128)
+
+The reduced Hessian from `solve_with_sens(compute_reduced_hessian=True)` /
+`Solver.reduced_hessian`, the parametric step `dx`, and the raw
+`Solver.kkt_solve` were returned in the IPM's internally **scaled** space
+whenever NLP scaling was active (the default
+`nlp_scaling_method = "gradient-based"` fires when an objective gradient or a
+constraint row exceeds 100 at the starting point). For a parameter-estimation
+NLP this made `-inv(reduced_hessian)` differ from the true covariance by
+`df / (dc_i·dc_j)` — the discretization-tracking "≈ nfe" fudge factor reported
+in #128. The same scaled factor silently corrupted the `pounce.jax`
+factor-reuse VJP (`JaxProblem(factor_reuse=True)`) on badly-scaled problems.
+
+All held-factor back-solves now conjugate by the scaling diagonal
+(`K_natural⁻¹ = D K_scaled⁻¹ D`, `D = diag(√df·I_x, √df·dd⁻¹, dc/√df, dd/√df)`),
+so every sensitivity output is in the user's own units regardless of scaling
+method. The pre-fix solver-space values and the factors stay accessible:
+`info["reduced_hessian_scaled"]` / `info["obj_scaling_factor"]` /
+`info["pin_g_scaling"]`, `Solver.reduced_hessian(..., scaled=True)`,
+`Solver.kkt_solve(..., scaled=True)`, the `Solver.nlp_scaling` dict, and the
+matching Rust surfaces (`SensResult` fields,
+`Solver::{compute_reduced_hessian_scaled, kkt_solve_scaled, nlp_scaling}`,
+`PdSensBacksolver::solve_scaled_space`).
+
+Also fixed in the same change: `SensSolve` / `Solver` pin-constraint indices
+are now mapped to KKT rows through the equality/inequality split
+(`full_g_to_c_block`), so pins are selected correctly when inequality
+constraints precede them in `g(x)` (previously the wrong row was used
+silently; the CLI sIPOPT path already mapped correctly). `pounce.curve_fit`
+no longer requires scaling to be off to trust the converged factor for its
+covariance / data-sensitivity reads.
+
 ### Added — PyTorch frontend for the differentiable solver (`pounce.torch`)
 
 A PyTorch frontend mirroring `pounce.jax`: a solve is a

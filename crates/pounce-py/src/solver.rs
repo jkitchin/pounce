@@ -98,18 +98,30 @@ impl PySolver {
 
     /// Solve `K · lhs = rhs` against the converged KKT factor. Returns
     /// the solution vector. `rhs` must have length [`Self::kkt_dim`].
+    ///
+    /// `K` is the **natural-units** (unscaled) KKT matrix: when the
+    /// IPM solved with active NLP scaling (`nlp_scaling_method`,
+    /// `obj_scaling_factor`, user scaling) the back-solve is
+    /// conjugated so RHS and solution are in the user's own units
+    /// (pounce#128). Pass `scaled=True` for the raw back-solve against
+    /// the factor exactly as the IPM holds it.
+    #[pyo3(signature = (rhs, scaled = false))]
     fn kkt_solve<'py>(
         &self,
         py: Python<'py>,
         rhs: Vec<Number>,
+        scaled: bool,
     ) -> PyResult<Bound<'py, PyArray1<Number>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("kkt_solve: no converged factor (call solve() first)")
         })?;
         let mut lhs = vec![0.0; rhs.len()];
-        s.inner
-            .kkt_solve(&rhs, &mut lhs)
-            .map_err(solver_error_to_py)?;
+        let res = if scaled {
+            s.inner.kkt_solve_scaled(&rhs, &mut lhs)
+        } else {
+            s.inner.kkt_solve(&rhs, &mut lhs)
+        };
+        res.map_err(solver_error_to_py)?;
         Ok(lhs.into_pyarray_bound(py))
     }
 
@@ -182,24 +194,62 @@ impl PySolver {
     }
 
     /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
-    /// rows. Returned as a `n²`-long column-major flat array
+    /// rows, in **natural (unscaled) units**: any NLP scaling baked
+    /// into the converged factor is undone, so `-inv(H_R)` is directly
+    /// the parameter covariance of an estimation problem regardless of
+    /// `nlp_scaling_method` (pounce#128). Pass `scaled=True` for the
+    /// solver-space value pounce returned before #128. `obj_scal`
+    /// survives as a plain extra multiplier (default 1.0); it is no
+    /// longer needed to undo pounce's own scaling. Returned as a
+    /// `n²`-long column-major flat array
     /// (`n = pin_constraint_indices.len()`).
-    #[pyo3(signature = (pin_constraint_indices, obj_scal = 1.0))]
+    #[pyo3(signature = (pin_constraint_indices, obj_scal = 1.0, scaled = false))]
     fn reduced_hessian<'py>(
         &self,
         py: Python<'py>,
         pin_constraint_indices: Vec<i64>,
         obj_scal: Number,
+        scaled: bool,
     ) -> PyResult<Bound<'py, PyArray1<Number>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("reduced_hessian: no converged factor (call solve() first)")
         })?;
         let pins = validate_pins(&pin_constraint_indices, s.m)?;
-        let hr = s
-            .inner
-            .compute_reduced_hessian(&pins, obj_scal)
-            .map_err(solver_error_to_py)?;
+        let hr = if scaled {
+            s.inner.compute_reduced_hessian_scaled(&pins, obj_scal)
+        } else {
+            s.inner.compute_reduced_hessian(&pins, obj_scal)
+        }
+        .map_err(solver_error_to_py)?;
         Ok(hr.into_pyarray_bound(py))
+    }
+
+    /// Effective NLP scaling the IPM applied on the held solve, as a
+    /// dict with keys `obj` (float, the objective factor `df`),
+    /// `c_scale` and `d_scale` (each an ndarray of per-row factors
+    /// over the algorithm's equality / inequality blocks, or `None`
+    /// when that block carries no row scaling).
+    /// `{"obj": 1.0, "c_scale": None, "d_scale": None}` ⇔ no scaling
+    /// was active.
+    #[getter]
+    fn nlp_scaling<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("nlp_scaling: no converged factor (call solve() first)")
+        })?;
+        let (df, dc, dd) = s.inner.nlp_scaling().map_err(solver_error_to_py)?;
+        let out = PyDict::new_bound(py);
+        out.set_item("obj", df)?;
+        let dc_obj: PyObject = match dc {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        out.set_item("c_scale", dc_obj)?;
+        let dd_obj: PyObject = match dd {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        out.set_item("d_scale", dd_obj)?;
+        Ok(out)
     }
 
     /// Dimension of the full compound KKT vector. `None` if no

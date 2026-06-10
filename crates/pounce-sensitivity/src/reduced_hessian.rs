@@ -17,10 +17,13 @@
 //! from the augmented-system reduction), which is then multiplied
 //! by `-obj_scal` to produce the unscaled reduced Hessian.
 //!
-//! In pounce we default `obj_scal = 1.0` (no NLP-side scaling
-//! folded in here) so the operation reduces to `H_R = -S = B K⁻¹ Bᵀ`.
-//! Phase D's `SensApplication` will plumb the real obj scaling once
-//! the algorithm-side wiring lands.
+//! In pounce we default `obj_scal = 1.0` so the operation reduces to
+//! `H_R = -S = B K⁻¹ Bᵀ`. Unlike upstream, no NLP-side scaling needs
+//! folding in here: since pounce#128 the live-factor backsolver
+//! ([`crate::PdSensBacksolver`]) conjugates every back-solve by the
+//! NLP scaling diagonal, so `K⁻¹` is already the natural-units KKT
+//! inverse and `obj_scal` survives purely as a user-side extra
+//! multiplier.
 //!
 //! Reference: Pirnay, López-Negrete & Biegler 2012, §5
 //! (reduced-Hessian use case), DOI:

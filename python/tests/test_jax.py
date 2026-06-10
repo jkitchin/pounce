@@ -792,6 +792,62 @@ def test_factor_reuse_matches_dense_pounce_76():
     np.testing.assert_allclose(np.asarray(g_new), np.asarray(g_old), atol=1e-7)
 
 
+def test_factor_reuse_correct_under_nlp_scaling_pounce_128():
+    """pounce#128: the factor-reuse VJP back-solves against the IPM's
+    converged compound KKT factor. That factor is held in the NLP's
+    internally *scaled* space whenever the default gradient-based
+    scaling fires (objective gradient or a constraint row exceeding
+    ``nlp_scaling_max_gradient = 100`` at the start). The cotangents
+    contracted with the back-solve (``dgradL_dp`` / ``dg_dp``) are
+    autodiffed from the user's natural-units ``f`` / ``g``, so the
+    back-solve must be in natural units too — ``Solver.kkt_solve``
+    now conjugates by the scaling factors.
+
+    This fixture makes both factors fire (objective and constraint
+    coefficients of 1e4) and checks the factor-reuse gradient against
+    the dense path (which assembles its own natural-units KKT block in
+    JAX, so it was never affected) and the analytic gradient.
+    """
+    from pounce.jax import JaxProblem
+
+    BIG = 1.0e4
+
+    def f(x, p):
+        return BIG * jnp.sum((x - p) ** 2)
+
+    def g(x, p):  # noqa: ARG001
+        return jnp.stack([BIG * (x[0] + x[1] - 1.0)])
+
+    kwargs = dict(
+        f=f, g=g, n=2, m=1, p_example=jnp.zeros(2),
+        lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
+        cl=jnp.zeros(1), cu=jnp.zeros(1),
+        options={"tol": 1e-10, "print_level": 0, "sb": "yes"},
+    )
+    jp_reuse = JaxProblem(**kwargs, factor_reuse=True)
+    jp_dense = JaxProblem(**kwargs, factor_reuse=False)
+
+    p = jnp.array([0.3, -0.1])
+
+    def loss(jp, p):
+        return jnp.sum(jp.solve(p, jnp.zeros(2)) ** 2)
+
+    g_reuse = jax.grad(lambda p: loss(jp_reuse, p))(p)
+    g_dense = jax.grad(lambda p: loss(jp_dense, p))(p)
+
+    # Analytic: x*(p) projects p onto {x0 + x1 = 1} (the 1e4 on the
+    # constraint doesn't move the feasible set):
+    # x* = p + (1 - p0 - p1)/2 * [1, 1], so with loss = |x*|^2,
+    # dloss/dp = 2 x*^T (I - 0.5 * ones(2,2)).
+    p_np = np.asarray(p)
+    x_star = p_np + 0.5 * (1.0 - p_np.sum()) * np.ones(2)
+    g_analytic = 2.0 * x_star @ (np.eye(2) - 0.5 * np.ones((2, 2)))
+
+    np.testing.assert_allclose(np.asarray(g_dense), g_analytic, atol=1e-6)
+    # Pre-#128 this was off by ~the objective scaling factor (~100x here).
+    np.testing.assert_allclose(np.asarray(g_reuse), g_analytic, atol=1e-6)
+
+
 def test_factor_reuse_jacobian_pounce_76():
     """The bwd is called once per output direction under
     ``jax.jacobian``; verify the LRU lookup holds the factor across

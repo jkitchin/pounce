@@ -368,6 +368,15 @@ def _bwd_single_factor_reuse(
     Lagrangian needs the multipliers as a constant inside the trace,
     so we close ``lam`` (already returned from the fwd in user g-order)
     into ``lagrangian(x, p_)``.
+
+    Units. ``dgradL_dp`` / ``dg_dp`` are autodiffed from the user's own
+    ``f`` / ``g`` — natural units — so the back-solve must be against
+    the *natural-units* KKT matrix. ``Solver.kkt_solve`` guarantees
+    exactly that since pounce#128: when the IPM solved with active NLP
+    scaling (``nlp_scaling_method``, default ``gradient-based``), the
+    Rust side conjugates the RHS/solution by the scaling factors, so
+    this VJP is correct whether or not scaling fired on the forward
+    solve.
     """
     def lagrangian(x, p_):
         base = f(x, p_)

@@ -57,7 +57,17 @@ lhs = solver.kkt_solve(rhs)
 The KKT compound vector is laid out as
 `x || s || y_c || y_d || z_l || z_u || v_l || v_u`. `pin` indices in
 `parametric_step` / `reduced_hessian` are 0-based row indices into
-`g(x)`; they are shifted internally to the y_c block.
+`g(x)`; they are mapped internally to the matching y_c rows (through
+the equality/inequality split, so inequalities may precede the pins).
+
+All back-solves are in **natural (unscaled) units** — any NLP scaling
+the IPM applied internally is undone, so results are independent of
+`nlp_scaling_method`
+([#128](https://github.com/jkitchin/pounce/issues/128)). The
+solver-space values remain available via
+`reduced_hessian(pins, scaled=True)` / `kkt_solve(rhs, scaled=True)`,
+and the factors via the `Solver.nlp_scaling` dict — see
+[Sensitivity Analysis](sensitivity.md#units-and-nlp-scaling).
 
 `pounce.Problem.solve()` and `Problem.solve_with_sens()` still work
 unchanged — each internally builds a fresh session — but new code that

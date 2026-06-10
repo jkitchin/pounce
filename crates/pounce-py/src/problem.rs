@@ -408,9 +408,22 @@ impl PyProblem {
     /// Solve, then run a parametric sensitivity step at the converged
     /// iterate. Returns `(x, info_dict)`; `info_dict` includes the
     /// extra keys `dx`, `dx_full`, `reduced_hessian`,
+    /// `reduced_hessian_scaled`, `obj_scaling_factor`, `pin_g_scaling`,
     /// `reduced_hessian_eigenvalues`, and `reduced_hessian_eigenvectors`
     /// (each may be `None` when the corresponding output was not
     /// requested or the solve did not converge).
+    ///
+    /// `reduced_hessian` is in **natural (unscaled) units**: any NLP
+    /// scaling the IPM applied (`nlp_scaling_method`, default
+    /// `"gradient-based"`) is undone, so `-inv(reduced_hessian)` is
+    /// directly the parameter covariance of an estimation problem,
+    /// independent of problem scaling and discretization (pounce#128).
+    /// `reduced_hessian_scaled` is the value as the solver's internal
+    /// scaled space sees it (what pounce returned before #128), and
+    /// `obj_scaling_factor` / `pin_g_scaling` are the factors relating
+    /// the two: `H_scaled[i,j] = obj_scaling_factor /
+    /// (pin_g_scaling[i]*pin_g_scaling[j]) * H[i,j]`. `obj_scal`
+    /// survives as a plain extra multiplier on both (default 1.0).
     ///
     /// `pin_constraint_indices` are 0-based indices into `g(x)`
     /// identifying the parameter-pin equalities `g_i(x) = p_i`. The
@@ -529,6 +542,21 @@ impl PyProblem {
             None => py.None(),
         };
         info.set_item("reduced_hessian", rh_obj)?;
+        let rh_scaled_obj: PyObject = match result.reduced_hessian_scaled {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("reduced_hessian_scaled", rh_scaled_obj)?;
+        let obj_scaling_obj: PyObject = match result.obj_scaling_factor {
+            Some(v) => v.into_py(py),
+            None => py.None(),
+        };
+        info.set_item("obj_scaling_factor", obj_scaling_obj)?;
+        let pin_scaling_obj: PyObject = match result.pin_g_scaling {
+            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+            None => py.None(),
+        };
+        info.set_item("pin_g_scaling", pin_scaling_obj)?;
         let eigvals_obj: PyObject = match result.reduced_hessian_eigenvalues {
             Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
             None => py.None(),

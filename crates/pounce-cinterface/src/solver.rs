@@ -347,6 +347,13 @@ pub unsafe extern "C" fn IpoptSolverParametricStep(
 /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned rows.
 /// `hr_out` receives an `n_pins²`-long column-major dense matrix.
 ///
+/// `H_R` is in **natural (unscaled) units**: any NLP scaling the IPM
+/// applied (`nlp_scaling_method`) is undone before the value is
+/// reported, so `-inv(H_R)` is directly the parameter covariance of
+/// an estimation problem (pounce#128). `obj_scal` is a plain extra
+/// multiplier (pass 1.0); it is no longer needed to undo pounce's own
+/// scaling.
+///
 /// Returns `TRUE` on success, `FALSE` otherwise.
 ///
 /// # Safety

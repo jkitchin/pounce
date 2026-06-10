@@ -1773,6 +1773,14 @@ impl IpoptNlp for OrigIpoptNlp {
         self.obj_scale_factor.get()
     }
 
+    fn c_scale_vec(&self) -> Option<Vec<Number>> {
+        self.c_scale.borrow().clone()
+    }
+
+    fn d_scale_vec(&self) -> Option<Vec<Number>> {
+        self.d_scale.borrow().clone()
+    }
+
     /// Project the underlying TNLP's `idx_names` metadata into the
     /// algorithm's split space. Variable names are gathered through the
     /// fixed-variable map (`x_not_fixed_map`), equality names through the

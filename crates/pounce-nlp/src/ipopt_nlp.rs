@@ -264,6 +264,26 @@ pub trait IpoptNlp: Nlp {
         1.0
     }
 
+    /// Per-row scaling vector for the equality block (`dc_` upstream):
+    /// the factor each `c` row is multiplied by inside [`Self::eval_c`]
+    /// / [`Self::eval_jac_c`]. `None` ⇔ no row scaling (all 1.0);
+    /// length `m_eq()` when present. Together with
+    /// [`Self::obj_scaling_factor`] and [`Self::d_scale_vec`] this is
+    /// what lets `pounce-sensitivity` undo the NLP scaling baked into
+    /// the converged KKT factor (pounce#128). Default `None`;
+    /// `OrigIpoptNlp` overrides.
+    fn c_scale_vec(&self) -> Option<Vec<Number>> {
+        None
+    }
+
+    /// Per-row scaling vector for the inequality block (`dd_`
+    /// upstream), same convention as [`Self::c_scale_vec`]. Length
+    /// `m_ineq()` when present. Default `None`; `OrigIpoptNlp`
+    /// overrides.
+    fn d_scale_vec(&self) -> Option<Vec<Number>> {
+        None
+    }
+
     /// Human-readable variable / constraint names projected into the
     /// algorithm's split space (free variables, equalities, inequalities),
     /// or `None` when the model carries no names. The debugger uses this to

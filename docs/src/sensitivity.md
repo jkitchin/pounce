@@ -70,6 +70,42 @@ eigendecomposition; `sens_bound_eps=…` tunes the bound projection. See
 [`python/notebooks/04_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/04_sensitivity.ipynb)
 for a walkthrough.
 
+## Units and NLP scaling
+
+All sensitivity outputs are in **natural (unscaled) units**. The IPM
+holds its converged KKT factor in an internally scaled space whenever
+NLP scaling is active (the default `nlp_scaling_method =
+"gradient-based"` fires when an objective gradient or constraint row
+exceeds `nlp_scaling_max_gradient = 100` at the starting point);
+pounce undoes that scaling in every held-factor back-solve, so `dx`,
+`kkt_solve`, and the reduced Hessian are independent of how the
+problem was scaled internally
+([#128](https://github.com/jkitchin/pounce/issues/128)).
+
+In particular, for a parameter-estimation NLP with the parameters
+pinned by equality constraints, `-inv(info["reduced_hessian"])` is
+directly the parameter covariance — no per-problem scale factor, no
+need to set `nlp_scaling_method = "none"`. (Sign convention: over pin
+*constraint* rows, `B K⁻¹ Bᵀ` equals the multiplier sensitivity
+`∂λ/∂p = −∂²f*/∂p²`, hence the minus in the covariance recipe.)
+
+For callers that calibrated against the pre-#128 behavior, the
+solver-space value and the factors that relate the two are exposed:
+
+- Python: `info["reduced_hessian_scaled"]`,
+  `info["obj_scaling_factor"]`, `info["pin_g_scaling"]`;
+  `Solver.reduced_hessian(pins, scaled=True)`,
+  `Solver.kkt_solve(rhs, scaled=True)`, and the `Solver.nlp_scaling`
+  dict (`{"obj": df, "c_scale": …, "d_scale": …}`).
+- Rust: `SensResult::{reduced_hessian_scaled, obj_scaling_factor,
+  pin_g_scaling}`, `Solver::{compute_reduced_hessian_scaled,
+  kkt_solve_scaled, nlp_scaling, pin_g_scaling}`, and
+  `PdSensBacksolver::solve_scaled_space`.
+
+The relation is `H_scaled[i,j] = df / (dc_i·dc_j) · H[i,j]`, where
+`df` is the objective scaling factor and `dc_i` the pin rows'
+constraint scaling factors.
+
 ## Verification
 
 All three entry points are verified against upstream sIPOPT 3.14.19's
