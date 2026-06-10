@@ -38,6 +38,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M12 | `DivergingIterates` mapped to AMPL code 401 ("limit") instead of the 300 ("unbounded") range | **FIXED** | **Mechanism confirmed + reproduced by a failing test.** `status_to_solve_result_num` (`crates/pounce-solve-report/src/lib.rs:453`) mapped `ApplicationReturnStatus::DivergingIterates → 401`. `DivergingIterates` is Ipopt's **unboundedness** signal (the iterates run off to infinity), so per the AMPL `solve_result_num` convention (300–399 = unbounded; 400–499 = limit) it belongs in the 300 range. This was internally inconsistent: the CLI's convex path maps the *same* unbounded condition (`QpStatus::DualInfeasible`) to **300** in its own numeric mapping (`main.rs:1276,1425`, with the range documented at `main.rs:1271-1272`), yet routes the NLP-side `DualInfeasible → DivergingIterates` (`main.rs:1165`) which then went through the 401 mapping — so the same physical outcome reported 300 on the convex path and 401 on the NLP path. Also matches upstream Ipopt's ASL driver (Diverging_Iterates → 300). **Fix**: one-line mapping change `DivergingIterates => 300`; the doc comment is extended to document the 300 "unbounded" bucket and why `DivergingIterates` lives there (not a 400 limit). **Test** (`tests::diverging_iterates_maps_to_unbounded_range`): asserts `DivergingIterates → 300`, and pins the surrounding buckets (`SolveSucceeded → 0`, `InfeasibleProblemDetected → 200`, `MaximumIterationsExceeded`/`SearchDirectionBecomesTooSmall → 400`, `RestorationFailed → 500`) so the range convention can't silently drift. **Pre-fix the test FAILS** (`left: 401, right: 300`), confirmed by reverting the mapping to `401`. No test anywhere hard-coded the old `401` (grep confirmed). `pounce-solve-report` (7) and `pounce-cli` suites green. See `## M12 detail`. |
 | M13 | NLP-path presolve: `.sol` / JSON dual block carries the reduced kept-row count, not the original `.nl` `m` | **FIXED** | **Mechanism confirmed + reproduced end-to-end.** With `presolve=yes` on the general-NLP route, `PresolveTnlp` drops redundant rows and the solver works in a reduced (`m_out`) row space. The CLI captures the converged duals from **outside** that wrapper — the IPM `on_converged` hook (`main.rs:612`, via `pack_lambda_for_user`) and the active-set `CountingTnlp` fallback (`main.rs:950`) both see the reduced solution — so the `.sol` / JSON dual block had length `m_out`, shorter than the originating `.nl`'s `m`. AMPL/Pyomo read the dual block **positionally** against the `.nl`, so a short block mis-aligns or is rejected. **Reproduced** by running `lp_afiro.nl solver_selection=nlp presolve=yes` (drops 4 of 27 rows): pre-fix `.sol`/JSON `lambda` length was **23**, vs **27** for the `presolve=no` baseline; `dual_order.nl` (drops both rows) emitted a **zero-length** dual block. **Fix** (reuses existing machinery, no new dual math): `PresolveTnlp::finalize_solution` *already* lifts the duals back to the original row order with dropped-row multiplier recovery (the Phase-0 `recover_dropped_multipliers` path) before forwarding to the inner TNLP — it just wasn't surfaced. Added a `finalized_full_solution: Option<(Vec<Number>,Vec<Number>)>` capture on `PresolveTnlp` (stored at finalize, exposed via a getter); the CLI, when presolve dropped rows, swaps that full-length `lambda` into `nominal_capture` before the `.sol`/JSON writers run. Also: the `.sol` zero-fallback block and the JSON `problem.n_constraints` are now sized to the original `m` (`m_out + n_dropped_rows`), restoring the documented `lambda.len() == n_constraints` invariant. **Dropped-row duals**: redundant rows recover to a *valid alternative* certificate — exactly baseline for genuinely-slack rows (active-row duals match `lp_afiro` baseline tightly), and 0 where bound-tightening migrated the dual to a bound multiplier (e.g. `dual_order`); both satisfy KKT. The fix targets the **length/alignment** defect M13 names. **Test** (`tests/presolve_dual_length.rs::presolve_dual_block_keeps_original_nl_length`): runs `lp_afiro` through the NLP path with `presolve=no` then `=yes`, guards that presolve genuinely drops rows (parses the stdout summary), and asserts the presolved `lambda` length equals the baseline `m` **and** the reported `n_constraints`. **Pre-fix the test FAILS** (`presolve dual block length 23 != original .nl m 27`), confirmed by neutering the lambda swap with an `if false` guard. Mitigated in practice by presolve defaulting off. `pounce-presolve` (207 lib + 9 doc) and full `pounce-cli` (155 lib + all integration, 0 failed) suites green. See `## M13 detail`. |
 | M14 | Any `--minima` tuning knob (`--seed`, `--patience`, `--dedup`, `--sobol`, …) silently switches the whole run into multistart mode | **FIXED** | **Mechanism confirmed + reproduced.** The `minima_num!` macro and the `--sobol`/`--no-sobol` arms in the CLI parser call `minima.get_or_insert_with(MinimaArgs::default)` to stash the knob value, which materializes `Some(MinimaArgs { method: Deflation, .. })` — and `main.rs:420` reroutes the *entire* run through multistart on any `Some(minima)`. So a lone tuning knob with no `--minima <method>`/`--multistart` silently enables global search (different output, `.sol` with zero duals). Help text says only `--minima`/`--multistart` enable it. **Reproduced**: `lp_afiro.nl --seed 42` (no method flag) prints `Searching for up to 10 minima via \`deflation\`…`. **Fix**: track an explicit-method flag (`minima_method_explicit`, set *only* by `--minima`/`--multistart`) and the first knob seen (`minima_knob`); after parsing, if a knob was given without an explicit method, return a clear error instead of silently entering multistart. **Verified post-fix**: lone `--seed 42` now errors `--seed is a --minima tuning knob and has no effect on its own; enable global search with --minima <method> or --multistart`; `--multistart --seed 42` still parses (method=Multistart, seed=42). **Test** (`cli::tests::lone_minima_knob_without_method_is_rejected` + `minima_knob_with_explicit_method_is_accepted`): the first asserts lone `--seed 42` and lone `--no-sobol` error and that the message names both the knob and `--minima`; the second asserts `--seed 7 --multistart` parses (order-independent) to method=Multistart, seed=7. **Pre-fix the rejection test FAILS** (lone `--seed 42` parses to `Some(MinimaArgs{method:Deflation,seed:42})`), confirmed by neutering the guard to `if false && !minima_method_explicit`. **Non-breaking**: every existing multistart test pairs its knobs with an explicit method. Full `pounce-cli` green (157 lib + all integration, 0 failed). See `## M14 detail`. |
+| M15 | Real-AMPL driver conventions unsupported despite `-AMPL`: no `.nl`-appending for extensionless stubs, no `pounce_options` env var | **FIXED** | **Both facets confirmed + reproduced.** The `-AMPL` flag advertises "for Pyomo / AMPL drivers", and AMPL invokes a solver as `pounce mystub -AMPL` — passing the stub *without* `.nl` and conveying options through the `<solver>_options` env var (`pounce_options`). Pyomo worked (it passes a full `.nl` path and CLI `key=value` args); genuine AMPL did not. **Reproduced**: (1) `pounce mystub -AMPL` with `mystub.nl` present errored `could not read …/mystub: No such file or directory` (exit 2); (2) `pounce_options="max_iter=1" pounce model.nl` ignored the env var entirely. **Fix** — two small, additive changes: (a) `read_nl_file` (`crates/pounce-nl/src/nl_reader.rs`) now resolves an extensionless stub: if the path as given is missing but `<path>.nl` exists, read that (and name the `.col`/`.row` siblings off the resolved stem). An existing path is still read verbatim, so Pyomo / `--nl-file` / the second-positional form are untouched. A new `append_extension` helper *appends* `.nl` (AMPL semantics: `my.model` → `my.model.nl`), unlike `Path::with_extension` which would replace. (b) `main.rs` reads the `pounce_options` env var and merges its whitespace-separated `key=value` tokens (parsed by the new pure `cli::options_from_env`) *ahead of* the command-line `key=value` options, so an explicit CLI flag wins (`set_options` is applied last-wins). The `-AMPL` help text now documents both conventions. **Verified post-fix**: `pounce mystub -AMPL` solves to Optimal and writes `mystub.sol`; `pounce_options="max_iter=1"` caps iterations (Maximum Iterations Exceeded); a bogus env option exits 2 with `failed to set …`; CLI `max_iter=3000` overrides env `max_iter=1` (converges). **Tests**: `nl_reader::tests::{read_nl_file_resolves_extensionless_ampl_stub, read_nl_file_prefers_exact_path_over_nl_sibling, append_extension_appends_rather_than_replaces}`; `cli::tests::{options_from_env_parses_whitespace_separated_pairs, options_from_env_skips_non_kv_tokens_and_empty}`; integration `tests/ampl_driver_conventions.rs` (stub→`.nl`+`.sol`, env applied/rejected, CLI overrides env). **Fail-first**: neutering the stub fallback (`if true \|\| path.exists()`) fails the stub tests with `could not read …/mystub`; neutering the env merge fails the env tests (no `failed to set`, exit ≠ 2). Scope note: AMPL's rarer `keyword value` (space-separated) option spelling is intentionally not supported — it matches the existing CLI grammar, which has no `key value` form. `pounce-nl` (78) and full `pounce-cli` (159 lib + all integration, 0 failed) green. See `## M15 detail`. |
 
 ## C1 detail
 
@@ -1473,3 +1474,81 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
   `issue_103_mlsl_terminates`) pairs its knobs with an explicit method, so the
   new guard never trips on them.
 - **Result**: full `pounce-cli` green (157 lib + all integration, 0 failed).
+
+## M15 detail
+
+- **Issue**: the `-AMPL` flag advertises "AMPL solver-protocol mode (for
+  Pyomo / AMPL drivers)", but two real-AMPL invocation conventions were
+  unsupported, so genuine AMPL (as opposed to Pyomo) could not drive pounce:
+  1. **Extensionless stub** — AMPL runs a solver as `pounce mystub -AMPL`,
+     passing the stub *without* the `.nl` extension and expecting `mystub.nl`
+     to be read and `mystub.sol` written.
+  2. **`pounce_options` env var** — AMPL conveys solver directives through a
+     `<solver>_options` environment variable, not the command line.
+  (Pyomo sidesteps both: it writes a full `<tmp>.nl` path and passes options
+  as CLI `key=value` args, so it always worked.)
+- **Repro (pre-fix)**:
+  - `cp convex_qp.nl /tmp/mymodel.nl && pounce /tmp/mymodel -AMPL` →
+    `pounce: failed to read /tmp/mymodel: could not read /tmp/mymodel: No such
+    file or directory (os error 2)` (exit 2).
+  - `pounce_options="max_iter=1" pounce /tmp/mymodel.nl` ran to normal
+    convergence — the env var had no effect.
+- **Fix (a) — stub resolution** (`crates/pounce-nl/src/nl_reader.rs`):
+  `read_nl_file` resolves the path before reading: if `path.exists()` it is
+  read verbatim; otherwise, if `append_extension(path, "nl")` exists, that is
+  read instead. The `.col`/`.row` sibling-name lookups use the *resolved*
+  path so they still hit `mystub.col` / `mystub.row`. New helper
+  `append_extension` appends `.nl` to the full file name (AMPL convention:
+  `my.model` → `my.model.nl`), as opposed to `Path::with_extension`, which
+  would replace an existing extension. The fix is purely additive — an
+  existing path is always read as-is, so `--nl-file`, the bare positional
+  `.nl`, and the second-positional `.sol` form are unchanged. The `.sol`
+  output path (`main.rs`) already derives correctly from the stub
+  (`set_extension("sol")` on `mystub` → `mystub.sol`), so no change there.
+- **Fix (b) — `pounce_options` env var** (`crates/pounce-cli/src/cli.rs`,
+  `main.rs`): new pure `cli::options_from_env(&str) -> Vec<(String,String)>`
+  splits the value on whitespace and parses each `key=value` token with the
+  existing `parse_kv` (tokens without `=` are skipped). `main` reads
+  `std::env::var("pounce_options")` after argv parsing and **prepends** the
+  parsed pairs to `args.set_options`, so the command-line `key=value` options
+  (pushed later, applied last-wins via `read_from_str`) override the env var —
+  matching AMPL, where command-line options after the stub win. The `-AMPL`
+  help text / `PATH` doc now describe both conventions.
+- **Verified (post-fix)**:
+  - `pounce /tmp/mymodel -AMPL solver_selection=nlp` → `Optimal Solution
+    Found`, exit 0, and `/tmp/mymodel.sol` written next to the stub.
+  - `pounce_options="max_iter=1" pounce …mymodel.nl solver_selection=nlp` →
+    `Maximum Number of Iterations Exceeded` (env applied).
+  - `pounce_options="bogus_opt=1" pounce …mymodel.nl` → exit 2,
+    `pounce: failed to set bogus_opt=1: … OPTION_INVALID` (env read+applied).
+  - `pounce_options="max_iter=1" pounce …mymodel.nl max_iter=3000` →
+    `Optimal Solution Found` (CLI overrides env).
+- **Tests**:
+  - `nl_reader::tests::read_nl_file_resolves_extensionless_ampl_stub` — a
+    stub with no extension resolves to `<stub>.nl`, and a sibling `.col`
+    rides along.
+  - `nl_reader::tests::read_nl_file_prefers_exact_path_over_nl_sibling` — an
+    existing exact path is read verbatim even when a `<file>.nl` sibling
+    exists (guards against silent redirection).
+  - `nl_reader::tests::append_extension_appends_rather_than_replaces` — pins
+    the append-vs-replace semantics (`my.model` → `my.model.nl`).
+  - `cli::tests::options_from_env_parses_whitespace_separated_pairs` and
+    `…_skips_non_kv_tokens_and_empty` — the env-string parser.
+  - integration `tests/ampl_driver_conventions.rs`:
+    `extensionless_stub_resolves_to_nl_and_writes_sol`,
+    `pounce_options_env_var_is_applied` (bogus option → exit 2 + "failed to
+    set"), `cli_key_value_overrides_pounce_options_env`.
+- **Fail-first**: neutering the stub fallback to `if true || path.exists()`
+  fails `read_nl_file_resolves_extensionless_ampl_stub` and the stub
+  integration test (`could not read …/mystub`); gating the env merge off
+  fails both env integration tests (no "failed to set", exit ≠ 2). Both
+  restored after confirmation.
+- **Scope note**: AMPL's rarer `keyword value` (space-separated, no `=`)
+  option spelling is intentionally *not* supported — it matches the existing
+  CLI grammar, which has no `key value` form either; such tokens are skipped
+  rather than guessed at. The review item itself flagged uncertainty over
+  whether genuine AMPL is in scope; since `-AMPL`'s own help text claims AMPL
+  driver support, honoring these two well-defined conventions makes that
+  claim true.
+- **Result**: `pounce-nl` green (78, 0 failed); full `pounce-cli` green (159
+  lib + all integration incl. the new test file, 0 failed).

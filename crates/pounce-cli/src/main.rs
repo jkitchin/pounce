@@ -55,7 +55,7 @@ pub fn main() -> ExitCode {
         return pounce_cli::verify::run_from_argv(&raw_argv[2..]);
     }
 
-    let args = match Args::parse_argv(std::env::args().collect()) {
+    let mut args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("pounce: {msg}");
@@ -63,6 +63,19 @@ pub fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // AMPL drivers pass solver directives via the `<solver>_options` env
+    // var (`pounce_options`): a whitespace-separated list of `key=value`
+    // tokens. Merge them ahead of the command-line `key=value` options so
+    // an explicit CLI flag overrides the env var (set_options is applied
+    // last-wins). Pyomo, which writes options as CLI args, is unaffected.
+    if let Ok(env_opts) = std::env::var("pounce_options") {
+        let mut merged = pounce_cli::cli::options_from_env(&env_opts);
+        if !merged.is_empty() {
+            merged.append(&mut args.set_options);
+            args.set_options = merged;
+        }
+    }
 
     if args.help {
         println!("{}", Args::usage());

@@ -255,12 +255,41 @@ pub struct NlSuffixes {
 /// back to indices. Names are a diagnostic nicety, never load-blocking
 /// (cf. Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
 pub fn read_nl_file(path: &Path) -> Result<NlProblem, String> {
-    let txt = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read {}: {}", path.display(), e))?;
+    // AMPL invokes a solver with an extensionless *stub* — e.g.
+    // `pounce mymodel -AMPL` — and expects `mymodel.nl` to be read (and
+    // the `.col`/`.row`/`.sol` siblings named off the same stem). If the
+    // path as given is missing but appending `.nl` names an existing file,
+    // resolve to that. This only ever *adds* a fallback: an existing path
+    // is read verbatim, so nothing changes for callers that already pass a
+    // full `.nl` path (Pyomo, `--nl-file`, the second-positional form).
+    let resolved = if path.exists() {
+        path.to_path_buf()
+    } else {
+        let with_nl = append_extension(path, "nl");
+        if with_nl.exists() {
+            with_nl
+        } else {
+            path.to_path_buf()
+        }
+    };
+    let txt = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("could not read {}: {}", resolved.display(), e))?;
     let mut prob = parse_nl_text(&txt)?;
-    prob.var_names = read_name_file(&path.with_extension("col"), prob.n);
-    prob.con_names = read_name_file(&path.with_extension("row"), prob.m);
+    prob.var_names = read_name_file(&resolved.with_extension("col"), prob.n);
+    prob.con_names = read_name_file(&resolved.with_extension("row"), prob.m);
     Ok(prob)
+}
+
+/// Append `.ext` to `path`'s full file name (AMPL stub convention:
+/// `mymodel` → `mymodel.nl`), as opposed to [`Path::with_extension`],
+/// which would *replace* an existing extension. A stub that itself
+/// contains a dot (`my.model` → `my.model.nl`) is therefore handled the
+/// way AMPL names it.
+fn append_extension(path: &Path, ext: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(ext);
+    std::path::PathBuf::from(name)
 }
 
 /// Read an AMPL name file (`.col` / `.row`): one name per line, in index
@@ -2883,6 +2912,54 @@ S1 2 sens_init_constr
         assert!(prob.con_names.is_empty());
         let tnlp = NlTnlp::new(prob);
         assert_eq!(tnlp.variable_name(0), None);
+    }
+
+    #[test]
+    fn read_nl_file_resolves_extensionless_ampl_stub() {
+        // AMPL invokes `pounce mystub -AMPL`, passing the stub *without*
+        // the `.nl` extension; the solver must read `mystub.nl`. Code
+        // review 2026-06 item M15.
+        let dir = scratch_dir("stub");
+        std::fs::write(dir.join("mystub.nl"), SIMPLE).unwrap();
+        // Pass the extensionless stub — the file `mystub` does not exist.
+        let stub = dir.join("mystub");
+        assert!(!stub.exists(), "stub must be extensionless / absent");
+        let prob = read_nl_file(&stub).expect("stub should resolve to mystub.nl");
+        assert_eq!(prob.n, 2);
+        assert_eq!(prob.m, 0);
+
+        // Sibling name files are still found off the resolved stem.
+        std::fs::write(dir.join("mystub.col"), "alpha\nbeta\n").unwrap();
+        let prob = read_nl_file(&stub).expect("stub resolves, names ride along");
+        assert_eq!(prob.var_names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn read_nl_file_prefers_exact_path_over_nl_sibling() {
+        // An existing path is read verbatim — the `.nl` fallback only
+        // kicks in when the literal path is missing, so a caller passing a
+        // real file is never silently redirected to a `<file>.nl` sibling.
+        let dir = scratch_dir("exact");
+        // `data` exists and IS a valid .nl; `data.nl` is deliberate garbage.
+        std::fs::write(dir.join("data"), SIMPLE).unwrap();
+        std::fs::write(dir.join("data.nl"), "not an nl file").unwrap();
+        let prob = read_nl_file(&dir.join("data")).expect("exact path wins");
+        assert_eq!(prob.n, 2);
+    }
+
+    #[test]
+    fn append_extension_appends_rather_than_replaces() {
+        use std::path::Path;
+        assert_eq!(
+            append_extension(Path::new("mystub"), "nl"),
+            Path::new("mystub.nl")
+        );
+        // A stub that itself contains a dot keeps its stem (AMPL names it
+        // `my.model.nl`, not `my.nl`).
+        assert_eq!(
+            append_extension(Path::new("my.model"), "nl"),
+            Path::new("my.model.nl")
+        );
     }
 
     // ---- equation rendering (`print equation`) ----

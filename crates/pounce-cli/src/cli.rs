@@ -247,9 +247,15 @@ impl Args {
 Usage: pounce [OPTIONS] [PATH] [SOL] [KEY=VALUE ...]
 
 PATH is an AMPL .nl file (positional). Equivalent: --nl-file <path>.
+An extensionless AMPL stub is accepted: if PATH is missing but PATH.nl
+exists, PATH.nl is read (the `pounce mystub -AMPL` invocation convention).
 SOL is an optional second positional naming the .sol output file
 (equivalent to --sol-output <path>); the AMPL `solver in.nl out.sol`
 convention.
+
+Options may also be supplied via the `pounce_options` environment
+variable (AMPL's `<solver>_options` convention): a whitespace-separated
+list of KEY=VALUE tokens. Command-line KEY=VALUE options override it.
 
 Subcommand:
   pounce verify <problem.nl> <claim.sol> [--feas-tol T] [--json-output P]
@@ -724,6 +730,20 @@ fn parse_kv(s: &str) -> Option<(String, String)> {
     Some((k.to_string(), v.to_string()))
 }
 
+/// Parse the AMPL `pounce_options` environment variable into
+/// `(key, value)` option pairs.
+///
+/// AMPL passes solver directives through a `<solver>_options` env var
+/// (here `pounce_options`): a whitespace-separated list of `key=value`
+/// tokens — the same `key=value` grammar pounce accepts as positional CLI
+/// options. Tokens without an `=` (AMPL's rarer `keyword value` spelling)
+/// are skipped rather than guessed at, matching the CLI parser, which has
+/// no `key value` form either. The caller applies these *before* the
+/// command-line `key=value` options so an explicit CLI flag wins.
+pub fn options_from_env(value: &str) -> Vec<(String, String)> {
+    value.split_whitespace().filter_map(parse_kv).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1125,5 +1145,43 @@ mod tests {
         assert_eq!(parse_kv("plain_path.nl"), None);
         assert_eq!(parse_kv("=value"), None);
         assert_eq!(parse_kv("key="), None);
+    }
+
+    #[test]
+    fn options_from_env_parses_whitespace_separated_pairs() {
+        // AMPL `<solver>_options` convention: a whitespace-separated list
+        // of key=value tokens. Code review 2026-06 item M15.
+        assert_eq!(
+            options_from_env("max_iter=100 tol=1e-8"),
+            vec![
+                ("max_iter".into(), "100".into()),
+                ("tol".into(), "1e-8".into()),
+            ]
+        );
+        // Multiple spaces / tabs / newlines all split.
+        assert_eq!(
+            options_from_env("a=1\tb=2\n c=3"),
+            vec![
+                ("a".into(), "1".into()),
+                ("b".into(), "2".into()),
+                ("c".into(), "3".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn options_from_env_skips_non_kv_tokens_and_empty() {
+        // Tokens without `=` (AMPL's `keyword value` spelling) are skipped,
+        // matching the CLI grammar, which has no `key value` form either.
+        assert_eq!(
+            options_from_env("max_iter=100 bareword tol=1e-8"),
+            vec![
+                ("max_iter".into(), "100".into()),
+                ("tol".into(), "1e-8".into()),
+            ]
+        );
+        assert!(options_from_env("").is_empty());
+        assert!(options_from_env("   \t\n ").is_empty());
+        assert!(options_from_env("just some words").is_empty());
     }
 }
