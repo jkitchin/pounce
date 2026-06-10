@@ -158,6 +158,13 @@ pub struct OrigIpoptNlp {
     x_u: Rc<DenseVector>,
     d_l: Rc<DenseVector>,
     d_u: Rc<DenseVector>,
+    /// Constant equality right-hand side (upstream's `c_rhs`): for each
+    /// equality row `i`, the bound `g_l[c_map[i]] == g_u[c_map[i]]`.
+    /// Captured once at construction so [`Self::eval_c_internal`] forms the
+    /// residual `g - c_rhs` without re-fetching all bounds (and the four
+    /// full-size scratch allocations that requires) on every line-search
+    /// trial. (Code review 2026-06 item M17.)
+    c_rhs: Vec<Number>,
 
     // ----- expansion matrices (instances; spaces above) -----
     px_l: Rc<dyn Matrix>,
@@ -331,6 +338,17 @@ impl OrigIpoptNlp {
             full_g_u[full_g_idx]
         });
 
+        // ---- Constant equality RHS (`c_rhs`). For an equality row the
+        // bound satisfies `g_l == g_u`; capture it once here so the
+        // line-search-hot `eval_c` subtracts a cached constant instead of
+        // re-fetching every bound (and allocating four full-size scratch
+        // vectors) per cache miss. (Code review 2026-06 item M17.) -----
+        let c_rhs: Vec<Number> = classification
+            .c_map
+            .iter()
+            .map(|&g_idx| full_g_l[g_idx as usize])
+            .collect();
+
         // ---- Jacobian sparsity. Ask the TNLP for the full jacobian
         // structure (g rows × full-x cols), then split entries into
         // c-rows (equality) and d-rows (inequality). Within each split
@@ -500,6 +518,7 @@ impl OrigIpoptNlp {
             x_u: Rc::new(x_u),
             d_l: Rc::new(d_l),
             d_u: Rc::new(d_u),
+            c_rhs,
             px_l,
             px_u,
             pd_l,
@@ -1470,31 +1489,18 @@ impl OrigIpoptNlp {
         // (see `eval_f_internal`).
         let full_g = self.full_g(x);
         let mut c = self.c_space.make_new_dense();
-        // c_i = g(g_idx) - g_l(g_idx)  (since g_l == g_u for equalities,
+        // c_i = g(g_idx) - c_rhs[i]  (since g_l == g_u for equalities,
         // upstream subtracts the bound to make it a residual). Matches
         // `OrigIpoptNLP::c` which calls `nlp_->Eval_c` after the adapter
         // subtracted the bound — TNLPAdapter doesn't subtract yet, so we
-        // do it here.
-        let n_full_g = cls.n_full_g as usize;
-        let mut full_g_l = vec![0.0; n_full_g];
-        let mut full_g_u = vec![0.0; n_full_g];
-        {
-            let mut tmp_x_l = vec![0.0; cls.n_full_x as usize];
-            let mut tmp_x_u = vec![0.0; cls.n_full_x as usize];
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.get_bounds_info(crate::tnlp::BoundsInfo {
-                x_l: &mut tmp_x_l,
-                x_u: &mut tmp_x_u,
-                g_l: &mut full_g_l,
-                g_u: &mut full_g_u,
-            });
-        }
+        // do it here. The RHS is the constant `g_l[g_idx]`, captured once
+        // at construction (`self.c_rhs`, M17) — no per-iterate bounds
+        // fetch or full-size scratch allocations in the line-search path.
         {
             let cv = c.values_mut();
             let cs = self.c_scale.borrow();
             for (i, &g_idx) in cls.c_map.iter().enumerate() {
-                let raw = full_g[g_idx as usize] - full_g_l[g_idx as usize];
+                let raw = full_g[g_idx as usize] - self.c_rhs[i];
                 cv[i] = match cs.as_ref() {
                     Some(v) => raw * v[i],
                     None => raw,
@@ -2049,6 +2055,7 @@ mod tests {
         eval_g_calls: usize,
         eval_jac_g_value_calls: usize,
         eval_h_value_calls: usize,
+        get_bounds_info_calls: usize,
     }
 
     impl TNLP for Hs071 {
@@ -2062,6 +2069,7 @@ mod tests {
             })
         }
         fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            self.get_bounds_info_calls += 1;
             b.x_l.copy_from_slice(&[1.0; 4]);
             b.x_u.copy_from_slice(&[5.0; 4]);
             // Constraint 0: 25 <= g0 (inequality, finite lower only)
@@ -2342,6 +2350,40 @@ mod tests {
             tnlp.borrow().eval_g_calls,
             2,
             "a new iterate triggers exactly one more shared eval_g"
+        );
+    }
+
+    #[test]
+    fn eval_c_does_not_refetch_bounds_per_iterate() {
+        // Code review 2026-06 item M17: the constant equality RHS is the
+        // bound `g_l == g_u`, captured once at construction. `eval_c` must
+        // NOT call the user's `get_bounds_info` on every (cache-missing)
+        // iterate just to subtract that RHS. Before the fix each fresh
+        // iterate re-fetched all bounds (and allocated four full-size
+        // scratch vectors); this asserted the call count climbed with the
+        // iterate count.
+        let (tnlp, mut nlp) = build_orig_nlp_counting();
+        // Construction fetches the bounds (once for classification, once in
+        // `OrigIpoptNlp::new`). Snapshot whatever that baseline is.
+        let baseline = tnlp.borrow().get_bounds_info_calls;
+
+        let x = dense_x(&[1.0, 5.0, 5.0, 1.0], nlp.x_space());
+        let mut c = nlp.c_space().make_new_dense();
+        nlp.eval_c(&x, &mut c);
+        // RHS is correct: c = g1 - 40 = (1+25+25+1) - 40 = 12.
+        assert_eq!(c.values(), &[12.0]);
+
+        // Several genuinely new iterates, each a cache miss.
+        let mut x2 = x;
+        for k in 0..5 {
+            x2.values_mut()[0] = 2.0 + k as Number;
+            nlp.eval_c(&x2, &mut c);
+        }
+
+        assert_eq!(
+            tnlp.borrow().get_bounds_info_calls,
+            baseline,
+            "eval_c must reuse the captured c_rhs, not re-fetch bounds per iterate"
         );
     }
 
