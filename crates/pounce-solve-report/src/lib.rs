@@ -439,9 +439,15 @@ fn empty_stats() -> StatisticsInfo {
 
 /// AMPL-style `solve_result_num` per Gay 2005 (Hooking Your Solver to
 /// AMPL §5, p. 23 table): 0 = solved, 100s = warning, 200s =
-/// infeasible, 400s = limit reached, 500s = failure. Shared by the CLI
-/// and cinterface report writers so both encode the same int codes
-/// into `SolutionInfo::solve_result_num`.
+/// infeasible, 300s = unbounded, 400s = limit reached, 500s = failure.
+/// Shared by the CLI and cinterface report writers so both encode the
+/// same int codes into `SolutionInfo::solve_result_num`.
+///
+/// `DivergingIterates` is Ipopt's unboundedness signal (the iterates run
+/// off to infinity), so it maps to the 300 "unbounded" range — matching
+/// upstream Ipopt's ASL driver and the CLI's own convex path, which
+/// reports `QpStatus::DualInfeasible` (unbounded) as 300 (`main.rs`). It
+/// is *not* a limit (400) condition.
 pub fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
     use ApplicationReturnStatus::*;
     match status {
@@ -449,8 +455,8 @@ pub fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
         SolvedToAcceptableLevel => 100,
         FeasiblePointFound => 100,
         InfeasibleProblemDetected => 200,
+        DivergingIterates => 300,
         SearchDirectionBecomesTooSmall => 400,
-        DivergingIterates => 401,
         MaximumIterationsExceeded => 400,
         MaximumCpuTimeExceeded => 400,
         MaximumWallTimeExceeded => 400,
@@ -634,6 +640,31 @@ mod tests {
         );
         assert_eq!(ReportDetail::parse("Full").unwrap(), ReportDetail::Full);
         assert!(ReportDetail::parse("verbose").is_err());
+    }
+
+    #[test]
+    fn diverging_iterates_maps_to_unbounded_range() {
+        use ApplicationReturnStatus::*;
+        // M12 regression: DivergingIterates is Ipopt's unboundedness
+        // signal and must land in the AMPL 300 "unbounded" range, not
+        // the 400 "limit" range — matching upstream Ipopt's ASL driver
+        // and the CLI convex path (QpStatus::DualInfeasible → 300).
+        assert_eq!(status_to_solve_result_num(DivergingIterates), 300);
+
+        // Lock the surrounding range convention so the fix can't silently
+        // drift back: solved / infeasible / limit / failure buckets.
+        assert_eq!(status_to_solve_result_num(SolveSucceeded), 0);
+        assert_eq!(status_to_solve_result_num(InfeasibleProblemDetected), 200);
+        assert_eq!(
+            status_to_solve_result_num(MaximumIterationsExceeded),
+            400,
+            "iteration limit stays in the 400 range",
+        );
+        assert_eq!(
+            status_to_solve_result_num(SearchDirectionBecomesTooSmall),
+            400,
+        );
+        assert_eq!(status_to_solve_result_num(RestorationFailed), 500);
     }
 
     #[test]
