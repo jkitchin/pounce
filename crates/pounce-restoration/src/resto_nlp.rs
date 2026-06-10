@@ -4,7 +4,9 @@
 //! Wraps the regular-phase NLP into the augmented restoration NLP
 //! whose variables are `(x, n_c, p_c, n_d, p_d)`, objective is
 //! `ρ * sum(n + p) + 0.5 * η(μ) * ||D_R (x - x_R)||_2^2`, and constraints
-//! are `c(x) - n_c + p_c = 0`, `d(x) - n_d + p_d - s = 0`.
+//! are `c(x) + n_c - p_c = 0`, `d(x) + n_d - p_d - s = 0` (the slacks enter
+//! as `+n - p`, matching upstream `IpRestoIpoptNLP` and the
+//! `restoration_constraint_{c,d}` implementations below).
 //!
 //! [`RestoIpoptNlp`] owns the 5-block `CompoundVectorSpace` for the
 //! resto `x`, the dense `x_ref / D_R / D_R²` weight vectors, and the

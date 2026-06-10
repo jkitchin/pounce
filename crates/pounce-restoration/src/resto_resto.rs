@@ -13,11 +13,15 @@
 //! is the positive root of the quadratic
 //!
 //! ```text
-//!   v² + 2·a·v − b = 0     with   a = mu/(2ρ) − 0.5·c_i,  b = c_i · mu/(2ρ)
+//!   v² − 2·a·v − b = 0     with   a = mu/(2ρ) − 0.5·c_i,  b = c_i · mu/(2ρ)
 //! ```
 //!
 //! solved as `v = a + sqrt(a² + b)`, then `n_i = v` and `p_i = c_i + n_i`
-//! (which satisfies `c + n − p = 0` exactly). Mirrors
+//! (which satisfies `c + n − p = 0` exactly). The linear term is `−2·a·v`,
+//! not `+2·a·v`: substituting the root gives `(v − a)² = a² + b`, i.e.
+//! `v² − 2·a·v − b = 0`. (Upstream's `solve_quadratic` computes the same
+//! `a + sqrt(a² + b)` — verified against `IpRestoRestoPhase.cpp`, whose body
+//! is `v = a; v = v*v; v += b; v = sqrt(v); v += a`.) Mirrors
 //! `IpRestoRestoPhase.cpp:30-109`.
 
 use crate::r#trait::{RestorationOutcome, RestorationPhase};
@@ -283,10 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn quadratic_root_satisfies_v2_plus_2av_minus_b_zero() {
-        // The roots of v² + 2a·v − b = 0 with v = a + sqrt(a²+b)
-        // (the formula upstream's solve_quadratic computes) — verify
-        // the identity holds.
+    fn quadratic_root_satisfies_v2_minus_2av_minus_b_zero() {
+        // The computed root v = a + sqrt(a²+b) (the value upstream's
+        // solve_quadratic produces) is the positive root of
+        // v² − 2·a·v − b = 0, NOT v² + 2·a·v − b = 0: from
+        // v = a + sqrt(a²+b) we get (v − a)² = a² + b, i.e.
+        // v² − 2·a·v − b = 0. Verify the correct identity holds with a
+        // small residual, and that the wrong-sign form does NOT (locking
+        // the L13 doc-sign correction so a regression in either the code or
+        // the documented quadratic is caught).
         let s = DenseVectorSpace::new(3);
         let mut c = s.make_new_dense();
         c.set_values(&[3.0, -1.0, 0.7]);
@@ -299,14 +308,16 @@ mod tests {
             let a = half - 0.5 * cvals[i];
             let b = cvals[i] * half;
             let v = n[i];
-            // v = a + sqrt(a²+b), so (v − a)² = a² + b, i.e.
-            // v² − 2av = b, i.e. v² + 2(−a)v − b = 0.
-            // Upstream's formula writes the equation as
-            // v² + 2a·v − b = 0 with a' = −a; check the residual.
-            let residual = v * v - 2.0 * a * v - b;
+            let correct = v * v - 2.0 * a * v - b;
             assert!(
-                residual.abs() < 1e-10 * (1.0 + a.abs() + b.abs()),
-                "residual={residual}, v={v}, a={a}, b={b}"
+                correct.abs() < 1e-10 * (1.0 + a.abs() + b.abs()),
+                "v² − 2av − b should be ≈0, got {correct} (v={v}, a={a}, b={b})"
+            );
+            let wrong = v * v + 2.0 * a * v - b;
+            assert!(
+                wrong.abs() > 1e-4,
+                "v² + 2av − b is the wrong (doc-bug) form and must be \
+                 clearly non-zero, got {wrong} (v={v}, a={a}, b={b})"
             );
         }
     }
