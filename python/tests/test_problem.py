@@ -11,12 +11,14 @@ class HS071:
         return x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2]
 
     def gradient(self, x):
-        return np.array([
-            x[0] * x[3] + x[3] * (x[0] + x[1] + x[2]),
-            x[0] * x[3],
-            x[0] * x[3] + 1.0,
-            x[0] * (x[0] + x[1] + x[2]),
-        ])
+        return np.array(
+            [
+                x[0] * x[3] + x[3] * (x[0] + x[1] + x[2]),
+                x[0] * x[3],
+                x[0] * x[3] + 1.0,
+                x[0] * (x[0] + x[1] + x[2]),
+            ]
+        )
 
     def constraints(self, x):
         return np.array([np.prod(x), np.dot(x, x)])
@@ -25,24 +27,30 @@ class HS071:
         return (np.repeat([0, 1], 4), np.tile([0, 1, 2, 3], 2))
 
     def jacobian(self, x):
-        return np.array([
-            x[1] * x[2] * x[3],
-            x[0] * x[2] * x[3],
-            x[0] * x[1] * x[3],
-            x[0] * x[1] * x[2],
-            2 * x[0],
-            2 * x[1],
-            2 * x[2],
-            2 * x[3],
-        ])
+        return np.array(
+            [
+                x[1] * x[2] * x[3],
+                x[0] * x[2] * x[3],
+                x[0] * x[1] * x[3],
+                x[0] * x[1] * x[2],
+                2 * x[0],
+                2 * x[1],
+                2 * x[2],
+                2 * x[3],
+            ]
+        )
 
 
 def test_hs071_lbfgs():
     """L-BFGS path (no hessian methods on the user object)."""
     prob = pounce.Problem(
-        n=4, m=2, problem_obj=HS071(),
-        lb=[1.0] * 4, ub=[5.0] * 4,
-        cl=[25.0, 40.0], cu=[2e19, 40.0],
+        n=4,
+        m=2,
+        problem_obj=HS071(),
+        lb=[1.0] * 4,
+        ub=[5.0] * 4,
+        cl=[25.0, 40.0],
+        cu=[2e19, 40.0],
     )
     prob.add_option("tol", 1e-8)
     prob.add_option("print_level", 0)
@@ -63,9 +71,13 @@ def test_diff_handoff_masks_in_info():
         an equality → both active.
     """
     prob = pounce.Problem(
-        n=4, m=2, problem_obj=HS071(),
-        lb=[1.0] * 4, ub=[5.0] * 4,
-        cl=[25.0, 40.0], cu=[2e19, 40.0],
+        n=4,
+        m=2,
+        problem_obj=HS071(),
+        lb=[1.0] * 4,
+        ub=[5.0] * 4,
+        cl=[25.0, 40.0],
+        cu=[2e19, 40.0],
     )
     prob.add_option("tol", 1e-8)
     prob.add_option("print_level", 0)
@@ -92,10 +104,18 @@ def test_diff_handoff_masks_in_info():
 
 
 def test_problem_attributes():
-    prob = pounce.Problem(n=2, m=0, problem_obj=type("P", (), {
-        "objective": staticmethod(lambda x: float(np.sum(x * x))),
-        "gradient":  staticmethod(lambda x: 2 * np.asarray(x, dtype=float)),
-    })())
+    prob = pounce.Problem(
+        n=2,
+        m=0,
+        problem_obj=type(
+            "P",
+            (),
+            {
+                "objective": staticmethod(lambda x: float(np.sum(x * x))),
+                "gradient": staticmethod(lambda x: 2 * np.asarray(x, dtype=float)),
+            },
+        )(),
+    )
     assert prob.n == 2
     assert prob.m == 0
     assert prob.has_hessian is False
@@ -119,3 +139,105 @@ def test_unconstrained_quadratic():
     x, info = prob.solve(x0=np.zeros(4))
     assert info["status_msg"] == "Solve_Succeeded"
     np.testing.assert_allclose(x, target, atol=1e-6)
+
+
+# --------------------------------------------------------------------------
+# issue M32 — the `intermediate` callback return value must follow cyipopt
+# truthiness. A falsy return (False, 0, 0.0, []) requests a stop; truthy
+# continues. Pre-fix, the bridge used a strict `extract::<bool>().unwrap_or
+# (true)`, so a valid falsy int `0` was coerced to "continue" and the user's
+# stop was silently ignored. (Code review M32.)
+# --------------------------------------------------------------------------
+
+
+def _stopper(return_value):
+    """A tiny well-conditioned problem (min (x-3)^2) whose `intermediate`
+    returns ``return_value`` once at least one iteration has elapsed."""
+
+    class P:
+        def __init__(self):
+            self.iters = []
+
+        def objective(self, x):
+            return float((x[0] - 3.0) ** 2)
+
+        def gradient(self, x):
+            return np.array([2.0 * (x[0] - 3.0)])
+
+        def intermediate(self, **kw):
+            self.iters.append(kw["iter_count"])
+            return 1 if kw["iter_count"] < 1 else return_value
+
+    obj = P()
+    prob = pounce.Problem(
+        n=1, m=0, problem_obj=obj, lb=[-10.0], ub=[10.0], cl=[], cu=[]
+    )
+    prob.add_option("print_level", 0)
+    return obj, prob
+
+
+@pytest.mark.parametrize("falsy", [0, False, 0.0, []])
+def test_intermediate_falsy_return_stops(falsy):
+    # Each cyipopt-falsy value must abort with User_Requested_Stop. Pre-fix,
+    # the int/float/list values slipped through `extract::<bool>` and the
+    # solve ran to Solve_Succeeded (only `False` stopped).
+    obj, prob = _stopper(falsy)
+    x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "User_Requested_Stop"
+    # It really stopped early — never reached the optimum x* = 3.
+    assert not np.isclose(x[0], 3.0, atol=1e-3)
+
+
+@pytest.mark.parametrize("truthy", [1, True, 0.5, [0]])
+def test_intermediate_truthy_return_continues(truthy):
+    # The mirror image: a truthy return keeps iterating to convergence.
+    obj, prob = _stopper(truthy)
+    prob.add_option("tol", 1e-8)
+    x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
+
+
+def test_intermediate_no_return_continues():
+    # A callback that returns None (the common "just observe" case) must NOT
+    # be read as a stop.
+    class P:
+        def objective(self, x):
+            return float((x[0] - 3.0) ** 2)
+
+        def gradient(self, x):
+            return np.array([2.0 * (x[0] - 3.0)])
+
+        def intermediate(self, **kw):
+            return None
+
+    prob = pounce.Problem(
+        n=1, m=0, problem_obj=P(), lb=[-10.0], ub=[10.0], cl=[], cu=[]
+    )
+    prob.add_option("tol", 1e-8)
+    prob.add_option("print_level", 0)
+    x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x[0], 3.0, atol=1e-4)
+
+
+def test_intermediate_exception_aborts_with_user_stop():
+    # A raising `intermediate` aborts the solve (User_Requested_Stop) rather
+    # than crashing across the FFI boundary; post-fix it also logs a trace
+    # line (verified manually — the log goes through the Rust subscriber).
+    class P:
+        def objective(self, x):
+            return float((x[0] - 3.0) ** 2)
+
+        def gradient(self, x):
+            return np.array([2.0 * (x[0] - 3.0)])
+
+        def intermediate(self, **kw):
+            raise RuntimeError("boom from intermediate")
+
+    prob = pounce.Problem(
+        n=1, m=0, problem_obj=P(), lb=[-10.0], ub=[10.0], cl=[], cu=[]
+    )
+    prob.add_option("print_level", 0)
+    x, info = prob.solve(x0=np.array([-5.0]))
+    assert info["status_msg"] == "User_Requested_Stop"

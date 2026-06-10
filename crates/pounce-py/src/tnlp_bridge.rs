@@ -365,12 +365,25 @@ impl TNLP for PyTnlp {
             if res.is_none() {
                 return Ok(Some(true));
             }
-            Ok(Some(res.extract::<bool>().unwrap_or(true)))
+            // cyipopt truthiness: any falsy return (`False`, `0`, `0.0`, an
+            // empty container) requests a stop; truthy continues. A strict
+            // `extract::<bool>()` rejects a valid falsy int `0` and, via
+            // `unwrap_or(true)`, silently *continued* — ignoring the user's
+            // stop. Use Python truthiness so `0` stops like cyipopt.
+            Ok(Some(res.is_truthy()?))
         });
         match r {
             Ok(Some(v)) => v,
             Ok(None) => true,
-            Err(_) => false,
+            // A raising `intermediate` aborts the solve with a user-stop
+            // status (consistent with cyipopt). Log it like the eval
+            // callbacks (`objective`/`gradient`/…) so a crashing callback
+            // leaves a trace instead of masquerading as a silent
+            // `User_Requested_Stop`.
+            Err(e) => {
+                tracing::error!(target: "pounce::py", "pounce-py: intermediate(): {e}");
+                false
+            }
         }
     }
 

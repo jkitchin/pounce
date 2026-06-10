@@ -55,6 +55,7 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 | M29 | LICQ structural check duplicates and degrades an existing primitive: per-row `vec![false; n]` allocation (O(m·n)) and recursive augmenting paths (stack-overflow risk on long chains, e.g. discretized dynamics), while the crate already has an iterative Hopcroft–Karp in `matching.rs` | **FIXED** | **Both degradations confirmed by running code.** `bipartite_matching_rank` (`crates/pounce-presolve/src/licq.rs:72-110`) ran its own Hungarian-style matcher: a `vec![false; n]` `seen` array allocated **per row** (O(m·n) total just to zero scratch) and a **recursive** `try_augment` whose depth equals the augmenting-path length. The crate already ships an iterative, BFS-layered Hopcroft–Karp (`matching.rs::hopcroft_karp`, O(E·√V), König-cross-checked) operating on `EqualityIncidence` — the LICQ matcher was a second, weaker copy. **Reproduced by running code**: (a) a temporary recursion-depth counter on `try_augment` over a staircase chain (`row 0:{0}`, `row i:{i−1,i}`, final row → last column only) measured max depth `= m−1` exactly (999 / 3999 / 15999 at m = 1000/4000/16000) — linear in chain length, so a chain of tens of thousands of rows overflows a normal 2–8 MB stack; (b) a timing probe on the m = n diagonal showed the per-row allocation scaling super-linearly (`0.023 / 0.069 / 0.245 ms` at n = 1000/2000/4000, the O(m·n) signature). **Fix**: delete `try_augment` and rewrite `bipartite_matching_rank` to pack the `EqRow` list into a CSR `EqualityIncidence` (out-of-range columns dropped, columns sorted+deduped exactly as `from_probe`) and call `hopcroft_karp(&inc).size`. Hopcroft–Karp prunes failed searches in BFS (no DFS at all when no augmenting path exists) and bounds its DFS recursion depth to the BFS layer distance (O(√V)), removing both the per-row allocation and the deep recursion. `licq_check`'s public verdict semantics are unchanged. **Verified post-fix**: all 7 existing LICQ tests (over-determined, empty-row, duplicate-singleton, distinct-singleton, augmenting-path) pass unchanged. **New tests**: `long_chain_does_not_overflow_stack` (m = 50 000 rows over m−1 touched columns + a phantom column so `m ≤ n`; the exact chain that drove the old matcher to depth ≈ 50 000) completes on the default 2 MB test stack and returns `StructuralRank(m−1)`; `long_chain_full_rank` (m = 20 000, m columns, perfect matching) returns `Full`, guarding against the fix capping long augmenting paths short. `pounce-presolve` (219 lib + integration + 9 doctests, 0 failed), no new clippy warnings, and `pounce-py` build green. See `## M29 detail`. |
 | M30 | python: `curve_fit` covariance never projects onto the active *general-constraint* nullspace — `active_mask` covers variable bounds only, so an active equality between parameters is returned as the unconstrained covariance while labeled `reduced_hessian(projected)`, overstating variances and dropping induced anti-correlations | **FIXED** | **Bug confirmed by running code.** `_covariance` (`python/pounce/_curve_fit.py:1542-1547`) and its streaming twin `_stream_covariance` (1108-1112) handled the active set with `free = ~active_mask` — projecting out only **bound**-active columns. With `m_con > 0` but no active bound the branch fired (`if m_con > 0 or active_mask.any()`), computed `free = all-True`, and returned the **unconstrained** `s2·pinv(M)` while labeling it `reduced_hessian(projected)`. **Reproduced by running code**: a weighted line fit (`f = a·x + b`, `M = JwᵀJw`) under an active equality `a + b = c` — calling `_covariance` directly and checking the variance along the constraint gradient. Pre-fix `A·pcov·Aᵀ = 0.318` (should be 0: the binding relation is known exactly) and `pcov` was bit-identical to the unconstrained inverse, with the induced anti-correlation absent; the correct projected covariance carries `A·pcov·Aᵀ = 0` and a `-0.065` off-diagonal. **Fix**: thread the constraint plumbing already on `_FitProblem` (`jac_combined`, `g_combined`, `cl`, `cu`) into both covariance functions and project onto the **joint** active-set nullspace. `_active_constraint_jac` selects the binding general-constraint rows (equalities `cl==cu` always bind; inequalities within `tol` of a finite bound); `_projected_covariance` stacks those with unit rows `eⱼ` for active bounds, takes an orthonormal nullspace basis `Z` (SVD), and returns `s2·Z·pinv(ZᵀMZ)·Zᵀ`. For a bounds-only active set `Z` is the free coordinate subspace and this reduces **exactly** to the old `cov[ix_(free,free)] = s2·pinv(M[free,free])` (the prior behavior preserved, verified by the existing bound tests). When `m_con > 0` but every inequality is slack and no bound binds, nothing is projected and the source is honestly reported as `jacobian`. **Also**: the `_covariance` docstring now states it is the first-order (delta-method) asymptotic covariance — `M` is the Gauss-Newton Hessian and the constraints are linearized at `popt`, omitting the curvature term `ΣλᵢHᵢ` (zero for linear constraints, higher-order otherwise) — resolving the "Gauss-Newton comment assumes linear constraints" note; the module docstring's "projection onto the active-constraint nullspace" claim is now actually true. **Tests** (`python/tests/test_curve_fit.py`): `test_active_equality_constraint_projects_covariance` (in-memory) and `test_streaming_active_equality_projects_covariance` (streaming twin) fit a line under an active `a+b=1` equality and assert `cov_source == "reduced_hessian(projected)"`, zero variance along the constraint gradient (`g·pcov·g < 1e-9`), a negative `pcov[0,1]`, and a match to the closed-form `Z·pinv(ZᵀMZ)·Zᵀ`. **Pre-fix both FAIL** (`g·pcov·g ≈ 1.6e-3`, the unconstrained variance) — confirmed before the fix; post-fix both PASS. Full `test_curve_fit.py` (44) green, and `test_sensitivity.py`/`test_minimize.py`/`test_minima.py` (37) unaffected. See `## M30 detail`. |
 | M31 | python: the issue-#112 indefinite-`P` guard fires only on `solve_qp` — every other host QP entry point (`solve_qp_batch`, `solve_qp_multi_rhs`, `QpFactorization`, `QpSensitivity`, `solve_socp`) and the jax/torch differentiable layers skip the PSD check, so a nonconvex `P` is solved by the convex IPM and returns a silently-wrong `status="optimal"` (or a constructed handle / a corrupt backward pass) | **FIXED** | **Bug confirmed by running code** (`/tmp/m31_verify.py`): an indefinite `P = diag(1,-1)` with box bounds fed to all six host entry points — only `solve_qp` raised; the other five returned `status="optimal"` or constructed a usable handle. **Fix**: a shared `_maybe_check_psd(P, c, check_psd)` helper (honoring `check_psd ∈ {None=auto, True, False}` with the `_PSD_CHECK_AUTO_MAX_N=1500` auto threshold) is threaded into all six host entry points, each of which gained a `check_psd` parameter; the jax/torch host forwards (`_forward_solve`, `_forward_solve_batch`, `_forward_solve_socp`) gained a `_guard_psd` that runs the same eigenvalue screen before building the `_pounce.QpProblem`. **Tests**: `test_qp_host.py` gained 7 tests — five `*_rejects_indefinite_p` (one per previously-unguarded entry point, `pytest.raises(ValueError, match="positive semidefinite")`), `test_check_psd_false_bypasses_guard_everywhere`, and `test_psd_p_still_solves_on_all_entry_points`; `test_qp_jax.py`/`test_qp_torch.py` each gained `test_indefinite_p_rejected_in_{forward,batch_forward}` (jax wraps the host `ValueError` but the "semidefinite" message survives). **Pre-fix the five rejection tests FAIL** (the unguarded points return `optimal`) — confirmed by neutering the guard; post-fix all PASS. Full QP suite green: `test_qp.py`/`test_qp_host.py`/`test_qp_jax.py`/`test_qp_torch.py`/`test_qp_sensitivity.py`/`test_socp.py` (82 passed). See `## M31 detail`. |
+| M32 | rust(pounce-py): the `intermediate` TNLP callback (`crates/pounce-py/src/tnlp_bridge.rs:364-374`) (a) coerces a non-`bool` return via `res.extract::<bool>().unwrap_or(true)`, so a cyipopt-valid falsy int `0` (meaning *stop*) fails strict bool extraction and is read as *continue* — silently ignoring the user's stop; and (b) maps any callback exception to `Err(_) => false` with **no logging** (unlike the eval callbacks), so a crashing callback masquerades as a silent `User_Requested_Stop` | **FIXED** | **Both bugs confirmed by running code** (`/tmp/m32_verify.py`, after a `maturin build` of the worktree): an `intermediate` returning `0` at `iter_count>=1` was **ignored** pre-fix — the solve ran all 8 IPM iterations to `Solve_Succeeded` (`x→3`) instead of stopping. **Fix**: replace `res.extract::<bool>().unwrap_or(true)` with `res.is_truthy()?` (Python truthiness, matching cyipopt: `False`/`0`/`0.0`/`[]` stop, truthy continues; `None`/no-return still continues via the existing `is_none()` branch), and replace `Err(_) => false` with `Err(e) => { tracing::error!(target: "pounce::py", "pounce-py: intermediate(): {e}"); false }` so a raising callback leaves a trace like `objective`/`gradient`/… (verified: post-fix log line `ERROR pounce::py: pounce-py: intermediate(): RuntimeError: boom...`). **Tests** (`python/tests/test_problem.py`): `test_intermediate_falsy_return_stops[0,False,0.0,[]]` (all must yield `User_Requested_Stop` and not reach `x*=3`), `test_intermediate_truthy_return_continues[1,True,0.5,[0]]` (→`Solve_Succeeded`), `test_intermediate_no_return_continues`, and `test_intermediate_exception_aborts_with_user_stop`. **Fail-first confirmed** by swapping the pre-fix `.so`: `[0]`, `[0.0]`, `[[]]` FAIL (`Solve_Succeeded`) while `[False]` already passed — exactly the `extract::<bool>` gap; post-fix all 14 pass. Broader solve-exercising suite green (53 passed); `cargo clippy -p pounce-py` clean of new warnings. See `## M32 detail`. |
 
 ## C1 detail
 
@@ -2549,3 +2550,63 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
     (Python-only change; extension unchanged): `test_qp.py`, `test_qp_host.py`,
     `test_qp_jax.py`, `test_qp_torch.py`, `test_qp_sensitivity.py`,
     `test_socp.py` — **82 passed**.
+
+## M32 detail
+
+- **Issue** (`dev-notes/code-review-2026-06.md:474-480`,
+  `crates/pounce-py/src/tnlp_bridge.rs:364-374`): the optional `intermediate`
+  TNLP callback maps the Python return value to the solver's continue/stop
+  bool. Two defects:
+  1. `Ok(Some(res.extract::<bool>().unwrap_or(true)))` — `extract::<bool>()`
+     is strict (a Python `int` is *not* a `bool` even though `bool ⊂ int`),
+     so a cyipopt-valid falsy `0` (the documented "stop" signal) fails
+     extraction and `unwrap_or(true)` coerces it to **continue**. The user's
+     stop request is silently dropped. Only an actual `False` stopped.
+  2. `Err(_) => false` — a callback that *raises* is swallowed into a
+     `false` (stop ⇒ `User_Requested_Stop`) with **no log**, unlike the eval
+     callbacks (`objective`/`gradient`/`constraints`/`jacobian`/`hessian`),
+     each of which `tracing::error!(target: "pounce::py", …)` on error. A
+     crashing callback masquerades as a clean user stop.
+- **Verification (running code)**: a `maturin build --release` of the worktree
+  crate, the resulting `_pounce.abi3.so` extracted into `python/pounce/` and
+  imported via `PYTHONPATH=$PWD/python` (the venv's editable install still
+  points at the *main* repo, so it is untouched). `/tmp/m32_verify.py` solves
+  `min (x-3)²` with an `intermediate` returning `0` at `iter_count>=1`:
+  **pre-fix** → `Solve_Succeeded`, 8 iters, `x=3` (stop ignored); **post-fix**
+  → `User_Requested_Stop`, 2 iters, `x≈7.6` (stopped early). The raising-
+  callback case logs `ERROR pounce::py: pounce-py: intermediate(): RuntimeError:
+  boom from intermediate` post-fix.
+- **Fix** (`crates/pounce-py/src/tnlp_bridge.rs`):
+  ```rust
+  // was: Ok(Some(res.extract::<bool>().unwrap_or(true)))
+  Ok(Some(res.is_truthy()?))           // cyipopt truthiness
+  ...
+  // was: Err(_) => false,
+  Err(e) => {
+      tracing::error!(target: "pounce::py", "pounce-py: intermediate(): {e}");
+      false
+  }
+  ```
+  `is_truthy()` makes `False`/`0`/`0.0`/`[]` stop and truthy continue; the
+  pre-existing `res.is_none()` branch still maps a `None`/no-return to
+  continue. The `Err` arm now logs (consistent with the eval callbacks) while
+  preserving the stop-on-exception behavior.
+- **Tests** (`python/tests/test_problem.py`):
+  - `test_intermediate_falsy_return_stops[0, False, 0.0, []]` — each must abort
+    with `User_Requested_Stop` and not reach `x*=3`.
+  - `test_intermediate_truthy_return_continues[1, True, 0.5, [0]]` — truthy
+    keeps iterating to `Solve_Succeeded` (`x≈3`).
+  - `test_intermediate_no_return_continues` — a `None` return is not a stop.
+  - `test_intermediate_exception_aborts_with_user_stop` — a raising callback
+    aborts with `User_Requested_Stop` (the log line is verified manually; it
+    routes through the Rust `tracing` subscriber, not visible to pytest).
+  - **Fail-first confirmed** by swapping the pre-fix `.so` back in and running
+    `-k intermediate`: `[0]`, `[0.0]`, `[[]]` FAIL (`Solve_Succeeded`) while
+    `[False]` passes — precisely the `extract::<bool>` gap. Post-fix the
+    restored extension passes all 14 `test_problem.py` tests.
+- **Result**: `test_problem.py` (14) green; broader solve-exercising suite —
+  `test_critical.py`/`test_warm_start.py`/`test_solver_session.py`/
+  `test_sensitivity.py`/`test_minimize.py` — green (53 passed total). `cargo
+  clippy -p pounce-py` shows only pre-existing warnings (none from the two
+  changed lines). The rebuilt `.so` is a worktree-local build artifact
+  (gitignored); only the Rust source, the test, and this doc are committed.
