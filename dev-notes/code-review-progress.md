@@ -98,6 +98,8 @@ regression test that fails pre-fix and passes post-fix → fix → `cargo test`.
 
 | L31 | `strip_comment` can truncate AMPL string literals containing `#` (and ignores declared-length `h<len>:` tokens) — `nl_reader.rs` `parse_funcall_arg` | **FIXED** | **Confirmed by reading code + reproducing.** An AMPL imported-function string argument is a Hollerith literal `h<len>:<chars>` whose content is exactly `<len>` bytes and may legitimately contain `#` (e.g. an IDAES Helmholtz parameters-directory path). `parse_funcall_arg` did `let tok = strip_comment(raw).trim()` **before** detecting the `h` form, so a string like `h3:a#b` was truncated at `#` to `h3:a` and parsed as `"a"`. It also split loosely on the first `:` and took everything after, ignoring the authoritative `<len>`. **Fix**: detect the `h<len>:` form from the leading non-blank char of the *raw* (non-comment-stripped) line — no expression opcode (`o`/`v`/`n`/`f`) begins with `h` — parse `<len>`, and take exactly `<len>` bytes after the `:` (with a char-boundary guard and a too-short error). Content `#` is now preserved; trailing comments/whitespace beyond `<len>` are excluded. **Tests** (`nl_reader::tests`): `funcall_string_arg_with_hash_is_not_truncated` (`h3:a#b` → `"a#b"`) and `funcall_string_arg_honors_declared_length` (`h3:abc # trailing comment` → `"abc"`), both driving `Parser::parse_funcall_arg` directly. **Fail-first confirmed**: reintroducing `strip_comment(raw)` before extraction makes the `#` test parse `"a"` and fail. Restored; 82 pounce-nl lib + 1 integration tests green. `cargo fmt -p pounce-nl` / `cargo clippy -p pounce-nl --all-targets -- -D clippy::correctness -D clippy::suspicious` clean. See `## L31 detail`. |
 
+| L32 | Malformed `J`/`G` indices panic later as slice OOB instead of a parse error, while `x`/`d` out-of-range entries are silently dropped — inconsistent strictness (`nl_reader.rs` segment parse loop) | **FIXED** | **Confirmed by reading code + tracing the panic.** The J/G segment parsers pushed each entry's *variable (column) index* into `con_linear`/`obj_linear` without bounds-checking it against `n`. An out-of-range column index then panicked as a slice OOB at `x[*j]` during constraint/objective evaluation (`nl_reader.rs:2299`, `2345`) — a crash on malformed user `.nl`. The `x`/`d` segments, by contrast, guarded `if idx < n`/`if idx < m` and *silently dropped* out-of-range entries (hiding corruption). The J *row* index was already a clean `Err`. **Fix**: unified all four index-bearing segments on **parse error** — J and G now reject `var >= n` with a descriptive error before storing; `x`/`d` now reject `idx >= n`/`idx >= m` instead of dropping. **Tests** (`nl_reader::tests`): `malformed_j_variable_index_is_parse_error_not_panic` (J entry var 5 with n=2 → `Err(... out of range)` rather than a later panic) and `out_of_range_x_segment_index_is_parse_error` (x index 5 with n=2 → `Err`). **Fail-first confirmed**: removing the J check makes `parse_nl_text` return `Ok` (storing the bad index) so `expect_err` panics; removing the x check makes it silently drop and return `Ok`, also failing `expect_err`. Restored; 84 pounce-nl lib (+2) + 1 integration green, and full pounce-cli suite (parses real `.nl` fixtures) green — the tighter x/d parsing rejects no valid file. `cargo fmt -p pounce-nl` / gated `cargo clippy` clean. See `## L32 detail`. |
+
 ## C1 detail
 
 - **Bug**: `redundant_mask` from `find_redundant_rows` is aligned to the
@@ -5059,3 +5061,49 @@ Both call the private `parse_funcall_arg` directly on a freshly constructed
 `#` test parse `"a"` and fail (`assertion left == right: "a" vs "a#b"`). Restored
 after confirming. 82 pounce-nl lib + 1 integration test green; `cargo fmt` /
 gated `cargo clippy` clean.
+
+## L32 detail
+
+**Issue (L32).** The `.nl` segment parse loop in `crates/pounce-nl/src/nl_reader.rs`
+treated index validation inconsistently across the four index-bearing segments:
+
+- **`J` / `G`** (linear Jacobian rows / objective gradient): each entry's
+  variable (column) index from `parse_var_coef` was pushed into
+  `con_linear[row]` / `obj_linear` **unchecked**. An out-of-range column index
+  was stored and only blew up later as a slice out-of-bounds panic at `x[*j]`
+  during constraint/objective evaluation (`nl_reader.rs:2299` and `:2345`) — a
+  hard crash on malformed user input, far from the parse site.
+- **`x` / `d`** (initial primal / dual values): guarded `if idx < n` /
+  `if idx < m` and **silently dropped** any out-of-range entry, hiding a corrupt
+  segment.
+
+The `J` *row* index was already validated with a clean `Err` (`J<row> out of
+range`), so the codebase had three different reactions to a bad index: clean
+error (J row), latent panic (J/G column), silent drop (x/d).
+
+**Fix.** Unify on **parse error** — the right call for a well-specified binary
+format where any out-of-range index means corruption:
+
+- `J`: `if var >= n { return Err("J{row} entry variable index {var} out of range (n={n})") }`
+- `G`: `if var >= n { return Err("G{idx} entry variable index {var} out of range (n={n})") }`
+- `x`: `if idx >= n { return Err("x-segment variable index {idx} out of range (n={n})") }`
+- `d`: `if idx >= m { return Err("d-segment constraint index {idx} out of range (m={m})") }`
+
+This removes the latent panic and the silent data loss in one consistent rule.
+
+**Tests** (`nl_reader::tests`, built on the existing `EQ_LIN` n=2/m=1 fixture):
+- `malformed_j_variable_index_is_parse_error_not_panic`: substitutes a J entry
+  with variable index 5 → `parse_nl_text` returns `Err(... out of range ...)`,
+  where it previously stored the bad index and panicked downstream.
+- `out_of_range_x_segment_index_is_parse_error`: appends `x1\n5 0.5` → `Err`
+  (previously silently dropped).
+
+**Fail-first.** Removing the J `var >= n` check makes `parse_nl_text` return `Ok`
+(bad index stored), so the test's `expect_err` panics; removing the x check makes
+it silently drop and return `Ok`, likewise failing `expect_err`. Both restored
+after confirming.
+
+**Regression scope.** The x/d change from drop→error could in principle reject a
+file that previously parsed. Verified it does not: 84 pounce-nl lib tests and the
+full pounce-cli suite (which parses real `.nl` problem fixtures end to end) stay
+green. `cargo fmt` / gated `cargo clippy` clean.

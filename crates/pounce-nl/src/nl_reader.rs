@@ -409,6 +409,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nz {
                     let line = p.next_data_line()?;
                     let (var, coef) = parse_var_coef(&line)?;
+                    // Validate the column index here: an out-of-range `var`
+                    // would otherwise be stored and panic as a slice OOB
+                    // (`x[var]`) during constraint evaluation. Mirror the
+                    // clean parse error used for the row index above.
+                    if var >= n {
+                        return Err(format!(
+                            "J{row} entry variable index {var} out of range (n={n})"
+                        ));
+                    }
                     con_linear[row].push((var, coef));
                 }
             }
@@ -424,6 +433,13 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nz {
                     let line = p.next_data_line()?;
                     let (var, coef) = parse_var_coef(&line)?;
+                    // Same as J: reject an out-of-range gradient column index
+                    // up front rather than letting it panic on `x[var]` later.
+                    if var >= n {
+                        return Err(format!(
+                            "G{idx} entry variable index {var} out of range (n={n})"
+                        ));
+                    }
                     acc.push((var, coef));
                 }
                 if idx == 0 {
@@ -440,9 +456,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nx {
                     let line = p.next_data_line()?;
                     let (idx, val) = parse_var_coef(&line)?;
-                    if idx < n {
-                        x0[idx] = val;
+                    // Reject out-of-range indices as a parse error, matching
+                    // J/G strictness, rather than silently dropping the entry
+                    // (which hides a corrupt initial-primal segment).
+                    if idx >= n {
+                        return Err(format!(
+                            "x-segment variable index {idx} out of range (n={n})"
+                        ));
                     }
+                    x0[idx] = val;
                 }
             }
             'd' => {
@@ -455,9 +477,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nd {
                     let line = p.next_data_line()?;
                     let (idx, val) = parse_var_coef(&line)?;
-                    if idx < m {
-                        lambda0[idx] = val;
+                    // Reject out-of-range indices as a parse error, matching
+                    // J/G strictness, rather than silently dropping the entry
+                    // (which hides a corrupt initial-dual segment).
+                    if idx >= m {
+                        return Err(format!(
+                            "d-segment constraint index {idx} out of range (m={m})"
+                        ));
                     }
+                    lambda0[idx] = val;
                 }
             }
             'V' => p.parse_v_segment()?,
@@ -2633,6 +2661,29 @@ J0 2
         assert!((p.g_u[0] - 1.0).abs() < 1e-12);
         // J-row 0: x0 (coef 1), x1 (coef 1).
         assert_eq!(p.con_linear[0], vec![(0, 1.0), (1, 1.0)]);
+    }
+
+    #[test]
+    fn malformed_j_variable_index_is_parse_error_not_panic() {
+        // Code review L32: a J-segment entry's variable (column) index was
+        // pushed into con_linear unchecked, so an out-of-range index (here 5
+        // with n=2) flowed through to a slice OOB panic (`x[*j]`) during
+        // constraint evaluation. It must instead surface as a clean parse
+        // error, consistent with the existing `J<row> out of range` check.
+        let bad = EQ_LIN.replace("J0 2\n0 1\n1 1\n", "J0 2\n0 1\n5 1\n");
+        assert_ne!(bad, EQ_LIN, "fixture substitution must apply");
+        let err = parse_nl_text(&bad).expect_err("out-of-range J var must error");
+        assert!(err.contains("out of range"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn out_of_range_x_segment_index_is_parse_error() {
+        // Same strictness for the initial-primal `x` segment: an index past
+        // `n` used to be silently dropped; now it is a parse error, so the
+        // four index-bearing segments (J/G/x/d) behave consistently.
+        let bad = format!("{EQ_LIN}x1\n5 0.5\n");
+        let err = parse_nl_text(&bad).expect_err("out-of-range x index must error");
+        assert!(err.contains("out of range"), "unexpected error: {err}");
     }
 
     #[test]
