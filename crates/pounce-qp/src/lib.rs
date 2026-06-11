@@ -19,10 +19,21 @@
 //!
 //! # Status
 //!
-//! Phase 5a scaffold. Types and trait surface are stable; the
-//! solver internals (Schur-complement factor maintenance, EXPAND
-//! anti-cycling, l1-elastic phase-1, parametric homotopy, inertia
-//! control) are stubbed and land in subsequent commits.
+//! Implemented and tested. The solver internals — Schur-complement
+//! factor maintenance ([`schur`]), GMSW EXPAND anti-cycling
+//! ([`working_set`]), l1-elastic phase-1 ([`elastic`]), parametric
+//! homotopy ([`ParametricActiveSetSolver::solve_parametric`]), and
+//! inertia control ([`HessianInertia`]) — are live, exercised by the
+//! crate's unit tests and the published-optimum fixtures under
+//! `tests/` (Maros-Mészáros-style closed-form KKT optima). The active
+//! set engine is reached from Python through the SQP path
+//! (`Problem(algorithm = "active-set-sqp")`, with `working_set`
+//! warm-starting) and through `QpSensitivity` (parametric `dx/dp`), and
+//! from the CLI via `solver_selection = "qp-active-set"` on an LP /
+//! convex-QP `.nl` (routed through the SQP driver, which solves its step
+//! QPs here). Still outstanding: cross-checking the full 138-problem
+//! Maros-Mészáros `.qps` set against external oracles (qpOASES / OSQP),
+//! which is gated on the `.qps` distribution and FFI.
 //!
 //! [`docs/research/active-set-sqp-warm-start.md`]: ../../../../docs/research/active-set-sqp-warm-start.md
 

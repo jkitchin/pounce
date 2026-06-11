@@ -268,7 +268,36 @@ pub const TOPICS: &[(&str, &[&str])] = &[
     ("knitro", &["byrd2006"]),
 ];
 
+/// Solve *feature* → ordered citation keys, for the `pounce --cite`
+/// lister. Distinct from [`TOPICS`] (which is keyed by documentation
+/// topic): these keys name things a *run* can actually do, so the CLI
+/// can map "this solve used feature X" → "cite these papers".
+///
+/// `"core"` is the static set every pounce run should cite. The rest
+/// are solve-aware extras; `"restoration"` is the only one wired in
+/// v1 (the report schema records restoration activity). New entries
+/// (adaptive-μ → `hinder2018`, etc.) slot in here as the report grows
+/// a `features_used` block.
+pub const SOLVE_FEATURES: &[(&str, &[&str])] = &[
+    ("core", &["pounce2026", "wachter2006"]),
+    // Restoration *entered* is often benign, so cite only the on-point
+    // restoration/infeasibility-detection paper. `leyffer2003`
+    // (penalty-IPM non-convergence) belongs to a restoration *loop* /
+    // infeasibility signal, not a single restoration entry — kept out
+    // of v1 until the report distinguishes the two.
+    ("restoration", &["byrd2010"]),
+];
+
 const CITATIONS: &[Citation] = &[
+    Citation {
+        key: "pounce2026",
+        entry_type: "software",
+        title: "POUNCE: a pure-Rust port of the Ipopt interior-point NLP solver",
+        author: "Kitchin, J. R.",
+        year: "2026",
+        venue: "Zenodo",
+        doi: "10.5281/zenodo.20387011",
+    },
     Citation {
         key: "wachter2006",
         entry_type: "article",
@@ -399,6 +428,16 @@ pub fn all_topics() -> Vec<&'static str> {
     TOPICS.iter().map(|(t, _)| *t).collect()
 }
 
+/// Citation keys for a solve *feature* (see [`SOLVE_FEATURES`]). Used
+/// by the `pounce --cite` lister to turn "this run did X" into the
+/// papers to cite.
+pub fn solve_feature_keys(feature: &str) -> Option<&'static [&'static str]> {
+    SOLVE_FEATURES
+        .iter()
+        .find(|(f, _)| *f == feature)
+        .map(|(_, keys)| *keys)
+}
+
 /// All citations.
 pub fn all_citations() -> &'static [Citation] {
     CITATIONS
@@ -499,5 +538,32 @@ mod tests {
     fn citation_lookup() {
         let c = citation_by_key("wachter2006").expect("wachter2006 cited");
         assert!(c.title.contains("interior-point filter line-search"));
+    }
+
+    #[test]
+    fn pounce_self_citation_present() {
+        let c = citation_by_key("pounce2026").expect("pounce2026 cited");
+        assert_eq!(c.doi, "10.5281/zenodo.20387011");
+    }
+
+    #[test]
+    fn solve_feature_core_and_restoration() {
+        let core = solve_feature_keys("core").expect("core feature exists");
+        assert_eq!(core, &["pounce2026", "wachter2006"]);
+        let resto = solve_feature_keys("restoration").expect("restoration feature exists");
+        assert!(resto.contains(&"byrd2010"));
+        assert!(solve_feature_keys("nonsense").is_none());
+    }
+
+    #[test]
+    fn every_solve_feature_key_resolves() {
+        for (_feature, keys) in SOLVE_FEATURES {
+            for k in *keys {
+                assert!(
+                    citation_by_key(k).is_some(),
+                    "SOLVE_FEATURES references unknown key {k:?}",
+                );
+            }
+        }
     }
 }

@@ -82,7 +82,7 @@ use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_linsol::summary::LinearSolverSummary;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_nlp::alg_types::SolverReturn;
-use pounce_nlp::orig_ipopt_nlp::{NoScaling, OrigIpoptNlp, ScalingMethod};
+use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -171,6 +171,16 @@ pub struct IpoptApplication {
     /// Stays valid until the next solve (which overwrites it).
     /// Accessed via [`Self::last_sqp_working_set`].
     sqp_last_working_set: Option<pounce_qp::WorkingSet>,
+    /// Full primal-dual warm-start iterate for the IPM path, captured by
+    /// the interactive debugger's `resolve` command. When `Some`, the
+    /// next `optimize_tnlp` installs this 8-vector (algorithm space)
+    /// directly onto `data.curr` before the iterate initializer runs, so
+    /// a warm `resolve` continues from the paused interior point rather
+    /// than cold-restarting the duals. Consumed once per solve, then
+    /// auto-cleared. Requires `warm_start_init_point=yes` so the
+    /// re-optimize branch of `WarmStartIterateInitializer` keeps the
+    /// installed iterate. Wire-set via [`Self::set_warm_start_iterate`].
+    warm_start_iterate: Option<crate::debug::IterateSnapshot>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -216,6 +226,7 @@ impl IpoptApplication {
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             sqp_warm_start: None,
             sqp_last_working_set: None,
+            warm_start_iterate: None,
         }
     }
 
@@ -584,6 +595,17 @@ impl IpoptApplication {
         self.sqp_warm_start = None;
     }
 
+    /// Install a full primal-dual warm-start iterate for the next IPM
+    /// `optimize_tnlp`. Captured by the debugger's `resolve` so the
+    /// re-solve continues from the paused interior point. The caller is
+    /// responsible for also enabling `warm_start_init_point=yes` (and
+    /// usually `warm_start_target_mu=<μ>`) so the re-optimize branch of
+    /// `WarmStartIterateInitializer` preserves the installed iterate.
+    /// Consumed once per solve, then auto-cleared.
+    pub fn set_warm_start_iterate(&mut self, snap: crate::debug::IterateSnapshot) {
+        self.warm_start_iterate = Some(snap);
+    }
+
     /// Return the final QP working set from the most recent SQP
     /// solve, or `None` if the last solve wasn't SQP, didn't
     /// produce a working set (cold-start declared the iterate
@@ -608,13 +630,25 @@ impl IpoptApplication {
     fn optimize_sqp_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
         use pounce_nlp::orig_ipopt_nlp::OrigIpoptNlp;
         use pounce_nlp::tnlp_adapter::TNLPAdapter;
-        use pounce_nlp::NoScaling;
+        use pounce_nlp::ConstObjScaling;
 
         let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
             Ok(a) => Rc::new(RefCell::new(a)),
             Err(_) => return ApplicationReturnStatus::InvalidProblemDefinition,
         };
-        let orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
+        // The SQP path never runs gradient-based scaling, but the
+        // constant `obj_scaling_factor` (negative ⇒ maximize) still
+        // applies via the OrigIpoptNlp constructor.
+        let obj_scaling_factor = self
+            .options
+            .get_numeric_value("obj_scaling_factor", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1.0);
+        let orig_nlp = match OrigIpoptNlp::new(
+            Rc::clone(&adapter),
+            Rc::new(ConstObjScaling(obj_scaling_factor)),
+        ) {
             Ok(n) => n,
             Err(_) => return ApplicationReturnStatus::InternalError,
         };
@@ -906,13 +940,6 @@ impl IpoptApplication {
         Some(last_status)
     }
 
-    /// **Stub.** Re-solve with a warm start. Phase 7+.
-    pub fn reoptimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
-        // Same dispatch as `optimize_tnlp` for now; warm-start handling
-        // lands once the IPM path's warm-start hooks are exposed.
-        self.optimize_tnlp(tnlp)
-    }
-
     /// Constrained-NLP path: build adapter → OrigIpoptNlp → algorithm
     /// bundle, run `optimize`, populate statistics, and call
     /// `finalize_solution` on the user's TNLP.
@@ -1031,7 +1058,21 @@ impl IpoptApplication {
                 return ApplicationReturnStatus::InvalidProblemDefinition;
             }
         };
-        let mut orig_nlp = match OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)) {
+        // Carry the user's constant `obj_scaling_factor` (default 1.0;
+        // negative ⇒ maximize) into the NLP. Until pounce#128's
+        // follow-up this option was registered but never read, so it
+        // was silently a no-op — maximization diverged because the
+        // algorithm minimized the unscaled objective.
+        let obj_scaling_factor = self
+            .options
+            .get_numeric_value("obj_scaling_factor", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(1.0);
+        let mut orig_nlp = match OrigIpoptNlp::new(
+            Rc::clone(&adapter),
+            Rc::new(ConstObjScaling(obj_scaling_factor)),
+        ) {
             Ok(n) => n,
             Err(_) => {
                 timing.overall_alg.end();
@@ -1152,6 +1193,11 @@ impl IpoptApplication {
         let cq: crate::ipopt_cq::IpoptCqHandle = Rc::new(RefCell::new(
             IpoptCalculatedQuantities::new(Rc::clone(&data), Rc::clone(&nlp_handle)),
         ));
+        // Correction size for very small slacks (default mach_eps^{3/4});
+        // drives the safe-slack bound-adjustment mechanism.
+        if let Ok((v, true)) = self.options.get_numeric_value("slack_move", "") {
+            cq.borrow_mut().slack_move = v;
+        }
 
         // Seed `data.curr` with a zero-valued iterate of the correct
         // dimensions. The `IterateInitializer` consumes these as its
@@ -1179,6 +1225,34 @@ impl IpoptApplication {
                 Rc::new(DenseVectorSpace::new(n_vu).make_new_dense()),
             );
             data.borrow_mut().set_curr(iv);
+        }
+
+        // Full primal-dual warm restart (debugger `resolve`): if a
+        // captured iterate is queued, install it onto `data.curr` over
+        // the placeholder so the `WarmStartIterateInitializer`'s
+        // re-optimize branch (x already initialized) keeps it and only
+        // clamps multipliers / sets target_mu — no cold re-seed from the
+        // NLP. Skipped (with a warning) if the dimensions don't line up,
+        // e.g. an option changed the problem structure between solves.
+        if let Some(snap) = self.warm_start_iterate.take() {
+            let dims_match = {
+                let borrow = data.borrow();
+                borrow
+                    .curr
+                    .as_ref()
+                    .map(|c| iterates_dims(c) == iterates_dims(snap.iterates()))
+                    .unwrap_or(false)
+            };
+            if dims_match {
+                data.borrow_mut().set_curr(snap.iterates().clone());
+                data.borrow_mut().curr_mu = snap.mu();
+            } else {
+                tracing::warn!(
+                    target: "pounce::warm_start",
+                    "debugger warm-restart iterate dimensions differ from the fresh \
+                     solve; ignoring the captured iterate and seeding normally"
+                );
+            }
         }
 
         let max_iter = self
@@ -1891,6 +1965,22 @@ impl IpoptApplication {
 /// Map the integer `print_level` / `file_print_level` option to the
 /// matching [`JournalLevel`] variant. Mirrors upstream's
 /// `static_cast<EJournalLevel>(int_value)` with clamping.
+/// The eight block dimensions of an iterate, in canonical order
+/// (x, s, y_c, y_d, z_l, z_u, v_l, v_u). Used to guard the debugger's
+/// warm-restart install against a structural mismatch between solves.
+fn iterates_dims(c: &IteratesVector) -> [i32; 8] {
+    [
+        c.x.dim(),
+        c.s.dim(),
+        c.y_c.dim(),
+        c.y_d.dim(),
+        c.z_l.dim(),
+        c.z_u.dim(),
+        c.v_l.dim(),
+        c.v_u.dim(),
+    ]
+}
+
 fn journal_level_from_int(v: i32) -> JournalLevel {
     match v.clamp(0, 12) {
         0 => JournalLevel::J_NONE,
@@ -1921,9 +2011,9 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
     Box::new(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
-                LinearSolverChoice::Feral => {
-                    Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
-                }
+                LinearSolverChoice::Feral => Box::new(
+                    pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone()),
+                ),
                 LinearSolverChoice::Ma57 => {
                     #[cfg(feature = "ma57")]
                     {
@@ -1932,7 +2022,9 @@ pub fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBa
                     #[cfg(not(feature = "ma57"))]
                     {
                         // ma57 feature not compiled in — fall back to FERAL.
-                        Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+                        Box::new(pounce_feral::FeralSolverInterface::with_config(
+                            feral_cfg.clone(),
+                        ))
                     }
                 }
             }
@@ -1954,7 +2046,7 @@ pub fn default_backend_factory_with_sink(
         move |choice: LinearSolverChoice| -> Box<dyn SparseSymLinearSolverInterface> {
             match choice {
                 LinearSolverChoice::Feral => Box::new(
-                    pounce_feral::FeralSolverInterface::with_config(feral_cfg)
+                    pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
                         .with_summary_sink(Arc::clone(&sink)),
                 ),
                 LinearSolverChoice::Ma57 => {
@@ -1965,7 +2057,7 @@ pub fn default_backend_factory_with_sink(
                     #[cfg(not(feature = "ma57"))]
                     {
                         Box::new(
-                            pounce_feral::FeralSolverInterface::with_config(feral_cfg)
+                            pounce_feral::FeralSolverInterface::with_config(feral_cfg.clone())
                                 .with_summary_sink(Arc::clone(&sink)),
                         )
                     }
@@ -2012,6 +2104,14 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_string_value("feral_ordering", "") {
         if let Some(m) = pounce_feral::parse_ordering_method(&v) {
             cfg.ordering = m;
+        }
+    }
+    // Same explicit-set discipline as `feral_ordering`: `from_env`
+    // defaults to ScalingStrategy::Auto (FERAL's current default), so
+    // leaving the option unset preserves existing behaviour exactly.
+    if let Ok((v, true)) = options.get_string_value("feral_scaling", "") {
+        if let Some(s) = pounce_feral::parse_scaling_strategy(&v) {
+            cfg.scaling = s;
         }
     }
     cfg

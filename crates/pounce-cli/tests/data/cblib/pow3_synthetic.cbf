@@ -1,0 +1,42 @@
+# Synthetic 3-D power-cone instance (hand-authored, valid CBF v2) used to
+# exercise the POWCONES section of the reader. Not from CBLIB — the real
+# power-cone instances (2013_fir*) are ~120 MB, impractical to vendor.
+#
+#   max  x2   s.t.  (x0, x1, x2) in POW(alpha = 1/2),  x0 = 2,  x1 = 1/2
+#
+# The 3-D power cone is  x0^a x1^(1-a) >= |x2|  with a = alpha0/(alpha0+alpha1).
+# With alpha = (1, 1) -> a = 1/2 and x0 = 2, x1 = 1/2 the bound is
+#   2^(1/2) * (1/2)^(1/2) = 1,  so the optimum is  x2 = 1.
+VER
+2
+
+OBJSENSE
+MAX
+
+POWCONES
+1 2
+2
+1.0
+1.0
+
+VAR
+3 1
+@0:POW 3
+
+CON
+2 1
+L= 2
+
+OBJACOORD
+1
+2 1.0
+
+ACOORD
+2
+0 0 1.0
+1 1 1.0
+
+BCOORD
+2
+0 -2.0
+1 -5e-1

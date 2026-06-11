@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pounce-studio-mcp"
-version = "0.0.1"
+version = "0.1.0"
 description = "MCP server exposing pounce solve reports as Claude-callable tools. Analysis backed by pounce-studio-core via PyO3."
 readme = "README.md"
 requires-python = ">=3.10"

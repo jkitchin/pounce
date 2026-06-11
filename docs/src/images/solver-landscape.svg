@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 910" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <!-- backdrop so it reads on light and dark book themes -->
+  <rect x="0" y="0" width="1000" height="910" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+
+  <text x="500" y="38" text-anchor="middle" font-size="22" font-weight="bold" fill="#0f172a">POUNCE — solver landscape</text>
+
+  <!-- ===================== Interfaces ===================== -->
+  <g>
+    <rect x="130" y="60" width="180" height="40" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+    <text x="220" y="85" text-anchor="middle" font-size="12.5" fill="#111827">CLI — <tspan font-style="italic">pounce</tspan> (.nl, .cbf)</text>
+
+    <rect x="410" y="60" width="180" height="40" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+    <text x="500" y="85" text-anchor="middle" font-size="12.5" fill="#111827">Python — <tspan font-style="italic">pounce</tspan></text>
+
+    <rect x="690" y="60" width="180" height="40" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+    <text x="780" y="85" text-anchor="middle" font-size="12.5" fill="#111827">C API — <tspan font-style="italic">cinterface</tspan></text>
+  </g>
+
+  <!-- interfaces -> routing -->
+  <line x1="220" y1="100" x2="220" y2="126" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="500" y1="100" x2="500" y2="126" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="780" y1="100" x2="780" y2="126" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ===================== Routing ===================== -->
+  <rect x="130" y="128" width="740" height="46" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="500" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#111827">Dispatch &amp; routing</text>
+  <text x="500" y="165" text-anchor="middle" font-size="11.5" fill="#374151">auto-classify (LP · QP · conic · NLP) — or force with <tspan font-style="italic">--solver</tspan></text>
+
+  <!-- routing -> solvers -->
+  <line x1="160" y1="174" x2="160" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="380" y1="174" x2="380" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="600" y1="174" x2="600" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="820" y1="174" x2="820" y2="210" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- problem-class tags above each solver -->
+  <text x="160" y="205" text-anchor="middle" font-size="10" font-style="italic" fill="#6b7280">LP · convex QP · conic</text>
+  <text x="380" y="205" text-anchor="middle" font-size="10" font-style="italic" fill="#6b7280">general NLP (default)</text>
+  <text x="600" y="205" text-anchor="middle" font-size="10" font-style="italic" fill="#6b7280">NLP, stable active set</text>
+  <text x="820" y="205" text-anchor="middle" font-size="10" font-style="italic" fill="#6b7280">QP / MPC subproblems</text>
+
+  <!-- ===================== Solvers ===================== -->
+  <!-- Convex IPM -->
+  <rect x="60" y="212" width="200" height="140" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="160" y="234" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#111827">Convex IPM</text>
+  <text x="160" y="250" text-anchor="middle" font-size="10.5" font-style="italic" fill="#4b5563">pounce-convex</text>
+  <text x="160" y="272" text-anchor="middle" font-size="11" fill="#111827">LP · convex QP</text>
+  <text x="160" y="288" text-anchor="middle" font-size="11" fill="#111827">SOCP · exp · power cones</text>
+  <text x="160" y="312" text-anchor="middle" font-size="11" font-weight="bold" fill="#1d4ed8">GLOBAL (convex)</text>
+  <text x="160" y="332" text-anchor="middle" font-size="10" fill="#374151">warm-start · batch · sensitivity</text>
+
+  <!-- NLP filter-IPM -->
+  <rect x="280" y="212" width="200" height="140" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="380" y="234" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#111827">NLP filter-IPM</text>
+  <text x="380" y="250" text-anchor="middle" font-size="10.5" font-style="italic" fill="#4b5563">pounce-algorithm + nlp</text>
+  <text x="380" y="272" text-anchor="middle" font-size="11" fill="#111827">general smooth NLP</text>
+  <text x="380" y="288" text-anchor="middle" font-size="11" fill="#111827">(nonconvex OK)</text>
+  <text x="380" y="312" text-anchor="middle" font-size="11" font-weight="bold" fill="#15803d">LOCAL (KKT point)</text>
+  <text x="380" y="332" text-anchor="middle" font-size="10" fill="#374151">filter line-search · restoration</text>
+
+  <!-- NLP active-set SQP -->
+  <rect x="500" y="212" width="200" height="140" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="600" y="234" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#111827">NLP active-set SQP</text>
+  <text x="600" y="250" text-anchor="middle" font-size="10.5" font-style="italic" fill="#4b5563">pounce-algorithm</text>
+  <text x="600" y="272" text-anchor="middle" font-size="11" fill="#111827">general NLP</text>
+  <text x="600" y="288" text-anchor="middle" font-size="11" fill="#111827">via QP subproblems</text>
+  <text x="600" y="312" text-anchor="middle" font-size="11" font-weight="bold" fill="#15803d">LOCAL</text>
+  <text x="600" y="332" text-anchor="middle" font-size="10" fill="#374151">warm active-set re-solves</text>
+
+  <!-- Active-set QP -->
+  <rect x="720" y="212" width="200" height="140" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+  <text x="820" y="234" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#111827">Active-set QP</text>
+  <text x="820" y="250" text-anchor="middle" font-size="10.5" font-style="italic" fill="#4b5563">pounce-qp</text>
+  <text x="820" y="272" text-anchor="middle" font-size="11" fill="#111827">QP (convex or indefinite)</text>
+  <text x="820" y="288" text-anchor="middle" font-size="11" fill="#111827">parametric / MPC</text>
+  <text x="820" y="312" text-anchor="middle" font-size="11" font-weight="bold" fill="#b45309">LOCAL</text>
+  <text x="820" y="332" text-anchor="middle" font-size="10" fill="#374151">factorization-reuse paths</text>
+
+  <!-- SQP -> active-set QP (subproblems) -->
+  <line x1="700" y1="300" x2="720" y2="300" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="710" y="293" text-anchor="middle" font-size="9" fill="#92400e">solves</text>
+
+  <!-- solvers -> shared core (threading past the global-optimization band) -->
+  <line x1="160" y1="352" x2="160" y2="496" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="380" y1="352" x2="380" y2="496" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="600" y1="352" x2="600" y2="496" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="820" y1="352" x2="820" y2="496" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ===================== Global optimization band ===================== -->
+  <text x="500" y="378" text-anchor="middle" font-size="11" font-weight="bold" fill="#7c2d12">Global optimization — certified global optima for nonconvex problems (orchestrate the solvers above)</text>
+  <rect x="200" y="388" width="170" height="60" rx="7" fill="#ffedd5" stroke="#ea580c" stroke-width="1.4"/>
+  <text x="285" y="409" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#111827">SOS / Lasserre</text>
+  <text x="285" y="425" text-anchor="middle" font-size="9.5" font-style="italic" fill="#4b5563">pounce-convex</text>
+  <text x="285" y="440" text-anchor="middle" font-size="9.5" fill="#374151">polynomial → one SDP</text>
+  <rect x="610" y="388" width="180" height="60" rx="7" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 3"/>
+  <text x="700" y="409" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#6b7280">Spatial branch &amp; bound</text>
+  <text x="700" y="425" text-anchor="middle" font-size="9.5" font-style="italic" fill="#9ca3af">pounce-global · in development</text>
+  <text x="700" y="440" text-anchor="middle" font-size="9.5" fill="#9ca3af">not in this release (feature branch)</text>
+  <text x="500" y="468" text-anchor="middle" font-size="9.5" font-style="italic" fill="#6b7280">SOS solves an SDP via the Convex IPM; branch-and-bound calls the Convex IPM (LP relaxations) and the NLP filter-IPM (upper bounds)</text>
+
+  <!-- core, backends, and support layers shifted down to make room for the
+       global-optimization band above -->
+  <g transform="translate(0,90)">
+  <!-- ===================== Shared numerical core ===================== -->
+  <rect x="60" y="408" width="860" height="96" rx="8" fill="#eef2f7" stroke="#475569" stroke-width="1.5"/>
+  <text x="74" y="426" font-size="11" font-weight="bold" fill="#334155">Shared numerical core</text>
+
+  <rect x="80" y="436" width="300" height="56" rx="6" fill="#e2e8f0" stroke="#64748b" stroke-width="1.2"/>
+  <text x="230" y="459" text-anchor="middle" font-size="12" font-weight="bold" fill="#111827">Presolve (optional front-end)</text>
+  <text x="230" y="477" text-anchor="middle" font-size="10.5" fill="#374151">FBBT · redundancy · LICQ repair — pounce-presolve</text>
+
+  <rect x="410" y="436" width="490" height="56" rx="6" fill="#e2e8f0" stroke="#64748b" stroke-width="1.2"/>
+  <text x="655" y="459" text-anchor="middle" font-size="12" font-weight="bold" fill="#111827">KKT assembly + sparse symmetric LDLᵀ factorization</text>
+  <text x="655" y="477" text-anchor="middle" font-size="10.5" font-style="italic" fill="#374151">pounce-linsol (shared by every interior-point / active-set solver)</text>
+
+  <!-- presolve -> linsol -->
+  <line x1="380" y1="464" x2="408" y2="464" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- linsol -> backends -->
+  <line x1="540" y1="492" x2="540" y2="536" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="770" y1="492" x2="770" y2="536" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ===================== Backends ===================== -->
+  <rect x="410" y="538" width="260" height="44" rx="6" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="540" y="557" text-anchor="middle" font-size="12" font-weight="bold" fill="#111827">FERAL</text>
+  <text x="540" y="573" text-anchor="middle" font-size="10.5" fill="#374151">pure-Rust LDLᵀ — default</text>
+
+  <rect x="690" y="538" width="210" height="44" rx="6" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="795" y="557" text-anchor="middle" font-size="12" font-weight="bold" fill="#111827">HSL MA57</text>
+  <text x="795" y="573" text-anchor="middle" font-size="10.5" fill="#374151">optional (feature <tspan font-style="italic">ma57</tspan>)</text>
+
+  <!-- ===================== Support / post-solve ===================== -->
+  <rect x="60" y="620" width="860" height="92" rx="8" fill="#fafaf9" stroke="#9ca3af" stroke-width="1.3" stroke-dasharray="6 4"/>
+  <text x="74" y="640" font-size="11" font-weight="bold" fill="#334155">Cross-cutting layers</text>
+  <text x="80" y="662" font-size="11" fill="#111827">• <tspan font-weight="bold">Sensitivity</tspan> — sIPOPT parametric step + reduced Hessian (NLP, pounce-sensitivity); QpSensitivity (convex QP)</text>
+  <text x="80" y="682" font-size="11" fill="#111827">• <tspan font-weight="bold">Restoration phase</tspan> — feasibility recovery inside the filter-IPM (pounce-restoration); ℓ₁-penalty reformulation (pounce-l1penalty)</text>
+  <text x="80" y="702" font-size="11" fill="#111827">• <tspan font-weight="bold">Cone library</tspan> — nonnegative · second-order · exponential · power · PSD (small dense); shared JSON solve report</text>
+
+  <text x="500" y="742" text-anchor="middle" font-size="10" fill="#6b7280">Convex/conic, SOS, and branch-and-bound paths return certified global optima; NLP &amp; active-set solvers return a local (KKT) point. All share the pounce-linsol factorization backbone.</text>
+  </g>
+</svg>

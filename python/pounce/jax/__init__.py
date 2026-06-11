@@ -46,6 +46,7 @@ from ._build import from_jax
 from ._diff import solve, solve_with_warm, vmap_solve, vmap_solve_parallel
 from ._problem import AnchorState, JaxProblem
 from ._path import PathFollower, PathTrace, inverse_map_rhs
+from ._qp import QpLayer, solve_qp, solve_qp_batch, solve_socp
 
 __all__ = [
     "from_jax",
@@ -58,4 +59,8 @@ __all__ = [
     "PathFollower",
     "PathTrace",
     "inverse_map_rhs",
+    "solve_qp",
+    "solve_qp_batch",
+    "solve_socp",
+    "QpLayer",
 ]

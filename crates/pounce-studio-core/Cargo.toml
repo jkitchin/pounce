@@ -9,9 +9,9 @@ description = "Pure-Rust parsers and analysis helpers for pounce solve reports a
 keywords = ["optimization", "nlp", "ipopt", "pounce"]
 categories = ["mathematics", "parser-implementations", "development-tools"]
 readme = "README.md"
-# Not published to crates.io: only the (publish = false) studio-pyo3 crate
-# depends on it, so it has no consumer on the registry.
-publish = false
+# Published to crates.io: the (published) pounce-cli depends on it as of
+# 0.4.0, so it must be on the registry for `cargo install pounce-cli` to
+# resolve. (The PyO3 wrapper crate pounce-studio-pyo3 stays publish = false.)
 
 [lib]
 path = "src/lib.rs"

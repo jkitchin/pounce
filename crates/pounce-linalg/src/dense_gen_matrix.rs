@@ -3,12 +3,15 @@
 //! Storage is column-major Fortran order: `values[i + j * n_rows]`
 //! references row `i`, column `j`. Phase 2 ships the BLAS-2 paths
 //! (`mult_vector`, `trans_mult_vector`, `Copy`, `FillIdentity`,
-//! `ScaleColumns`, row/col amax, has_valid_numbers). LAPACK-fronted
-//! routines (`ComputeCholeskyFactor`, `ComputeEigenVectors`,
-//! `ComputeLUFactorInPlace`, the back-solves) and the gemm-fronted
-//! `AddMatrixProduct` are stubbed with `unimplemented!()` and will be
-//! filled when the LAPACK shim lands. `HighRankUpdateTranspose` uses
-//! `MultiVectorMatrix`, deferred to Phase 8 (L-BFGS).
+//! `ScaleColumns`, row/col amax, has_valid_numbers). The Cholesky
+//! factor + back-solves (`compute_cholesky_factor`,
+//! `cholesky_back_solve_matrix`, `cholesky_solve_vector/matrix`) and
+//! `high_rank_update_transpose` (used by the L-BFGS aug-system solver)
+//! are implemented as pure-Rust column-major routines. The remaining
+//! LAPACK/BLAS-fronted upstream routines — eigenvectors (`dsyev`), LU
+//! factor + solve (`dgetrf`/`dgetrs`), and the dense `gemm`
+//! (`add_matrix_product`) — have no caller in pounce and were never
+//! ported; they are intentionally omitted.
 //!
 //! `mult_vector_impl` / `trans_mult_vector_impl` use the reference
 //! DGEMV scalar-loop order (column-major outer over `j`) so the
@@ -134,22 +137,6 @@ impl DenseGenMatrix {
         self.cache.bump();
     }
 
-    /// `M ← α · op(A) · op(B) + β · M`. **Stub** — requires GEMM. The
-    /// LAPACK shim phase will route this to BLAS `dgemm`.
-    pub fn add_matrix_product(
-        &mut self,
-        _alpha: Number,
-        _a: &DenseGenMatrix,
-        _trans_a: bool,
-        _b: &DenseGenMatrix,
-        _trans_b: bool,
-        _beta: Number,
-    ) {
-        unimplemented!(
-            "DenseGenMatrix::add_matrix_product needs BLAS gemm — wired in LAPACK shim phase"
-        );
-    }
-
     /// `J Jᵀ = M` where `M` is symmetric positive definite. Lower
     /// triangle of `J` is written column-major; strict-upper is zeroed
     /// to match upstream's post-`dpotrf` cleanup
@@ -203,16 +190,6 @@ impl DenseGenMatrix {
         self.initialized.set(true);
         self.cache.bump();
         true
-    }
-
-    /// **Stub** — requires LAPACK `dsyev`.
-    pub fn compute_eigen_vectors(&mut self, _m: &dyn Matrix, _evals: &mut DenseVector) -> bool {
-        unimplemented!("DenseGenMatrix::compute_eigen_vectors needs LAPACK dsyev");
-    }
-
-    /// **Stub** — requires LAPACK `dgetrf`.
-    pub fn compute_lu_factor_in_place(&mut self) -> bool {
-        unimplemented!("DenseGenMatrix::compute_lu_factor_in_place needs LAPACK dgetrf");
     }
 
     /// `B ← α · op(L)⁻¹ · B` where `L` is the lower-triangular factor
@@ -345,16 +322,6 @@ impl DenseGenMatrix {
         }
         self.initialized.set(true);
         self.cache.bump();
-    }
-
-    /// **Stub** — requires LAPACK `dgetrs`.
-    pub fn lu_solve_matrix(&self, _b: &mut DenseGenMatrix) {
-        unimplemented!("DenseGenMatrix::lu_solve_matrix needs LAPACK dgetrs");
-    }
-
-    /// **Stub** — requires LAPACK `dgetrs`.
-    pub fn lu_solve_vector(&self, _b: &mut DenseVector) {
-        unimplemented!("DenseGenMatrix::lu_solve_vector needs LAPACK dgetrs");
     }
 }
 

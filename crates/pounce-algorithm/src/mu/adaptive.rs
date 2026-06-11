@@ -239,6 +239,33 @@ impl AdaptiveMuUpdate {
         factor > 0.0 && curr_mu > 0.0 && avrg_compl > factor * curr_mu
     }
 
+    /// Scalar core of the lazy `mu_max` initialization
+    /// (`IpAdaptiveMuUpdate.cpp:267-274`): on the first call, when the
+    /// user did not set `mu_max` explicitly, upstream sets it to
+    /// `mu_max_fact * curr_avrg_compl()`.
+    ///
+    /// A warm start (`warm_start_init_point=yes`) can hand us an iterate
+    /// whose bound multipliers are all zero — pounce does not yet wire
+    /// `warm_start_mult_bound_push`, so `seed_from_nlp` leaves
+    /// `z_l`/`z_u`/`v_l`/`v_u` at 0. Then `curr_avrg_compl()` is 0 even
+    /// though bounds exist, the `no_bounds` short-circuit does NOT fire,
+    /// `mu_max` collapses to 0, and the later `new_mu.clamp(mu_min,
+    /// mu_max)` panics with `min > max` (min = mu_min = 1e-11, max = 0).
+    /// When `avrg` carries no positive complementarity signal (zero, or a
+    /// NaN handed in by a pathological iterate) fall back to `mu_init` as
+    /// the proxy — what a cold start's `avrg_compl` is ~scaled to — so the
+    /// `[mu_min, mu_max]` band stays valid. The final `.max(mu_min)` is a
+    /// belt-and-suspenders floor against pathological options.
+    pub fn lazy_mu_max(
+        mu_max_fact: Number,
+        avrg: Number,
+        mu_init: Number,
+        mu_min: Number,
+    ) -> Number {
+        let avrg = if avrg > 0.0 { avrg } else { mu_init };
+        (mu_max_fact * avrg).max(mu_min)
+    }
+
     /// Scalar core of `AdaptiveMuUpdate::lower_mu_safeguard`
     /// (`IpAdaptiveMuUpdate.cpp:753-786`):
     /// ```text
@@ -446,7 +473,7 @@ impl MuUpdate for AdaptiveMuUpdate {
         // at iter 198, destabilising the rest of the run.
         if self.mu_max < 0.0 {
             let avrg = cq.borrow().curr_avrg_compl();
-            self.mu_max = self.mu_max_fact * avrg;
+            self.mu_max = Self::lazy_mu_max(self.mu_max_fact, avrg, self.mu_init, self.mu_min);
         }
 
         // No-bounds short-circuit — port of `IpAdaptiveMuUpdate.cpp:282-296`.
@@ -818,6 +845,45 @@ mod tests {
         assert!(!AdaptiveMuUpdate::probing_iterate_guard_fires(
             1e4, 0.0, 1e-6
         ));
+    }
+
+    // Regression: `mu_strategy=adaptive` + `warm_start_init_point=yes`
+    // used to panic in `new_mu.clamp(mu_min, mu_max)` with
+    // "min > max ... min = 1e-11, max = 0.0" — the warm start zeroes the
+    // bound multipliers, so `curr_avrg_compl()` reads 0 even though
+    // bounds exist, collapsing `mu_max` to 0. `lazy_mu_max` must keep the
+    // band valid (mu_max >= mu_min) regardless of the `avrg` it is fed.
+    #[test]
+    fn lazy_mu_max_keeps_band_valid_on_zero_avrg_compl() {
+        let a = AdaptiveMuUpdate::new();
+        // Warm-start pathology: avrg_compl == 0.
+        let mu_max = AdaptiveMuUpdate::lazy_mu_max(a.mu_max_fact, 0.0, a.mu_init, a.mu_min);
+        assert!(
+            mu_max >= a.mu_min,
+            "mu_max {mu_max} must not fall below mu_min {}",
+            a.mu_min
+        );
+        // Falls back to the mu_init-scaled band: 1e3 * 0.1 = 100.
+        assert!((mu_max - a.mu_max_fact * a.mu_init).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lazy_mu_max_unchanged_for_cold_start() {
+        let a = AdaptiveMuUpdate::new();
+        // A healthy cold start hands a positive avrg_compl; the band is
+        // mu_max_fact * avrg, exactly as before the warm-start guard.
+        let avrg = 2.5e-3;
+        let mu_max = AdaptiveMuUpdate::lazy_mu_max(a.mu_max_fact, avrg, a.mu_init, a.mu_min);
+        assert!((mu_max - a.mu_max_fact * avrg).abs() < 1e-15);
+    }
+
+    #[test]
+    fn lazy_mu_max_survives_nan_avrg_compl() {
+        let a = AdaptiveMuUpdate::new();
+        // A NaN avrg (the other half of the original panic message) must
+        // not propagate: `avrg > 0.0` is false for NaN, so we fall back.
+        let mu_max = AdaptiveMuUpdate::lazy_mu_max(a.mu_max_fact, f64::NAN, a.mu_init, a.mu_min);
+        assert!(mu_max.is_finite() && mu_max >= a.mu_min);
     }
 
     #[test]

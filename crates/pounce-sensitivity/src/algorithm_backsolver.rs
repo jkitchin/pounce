@@ -47,7 +47,7 @@ use pounce_algorithm::ipopt_cq::IpoptCqHandle;
 use pounce_algorithm::ipopt_data::IpoptDataHandle;
 use pounce_algorithm::iterates_vector::{IteratesVector, IteratesVectorMut};
 use pounce_algorithm::kkt::pd_full_space_solver::PdFullSpaceSolver;
-use pounce_common::types::Number;
+use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_nlp::ipopt_nlp::IpoptNlp;
 
@@ -87,20 +87,60 @@ pub struct PdSensBacksolver {
     /// `VectorSpace`s as the converged iterate; cloned from
     /// `data.borrow().curr`.
     template: IteratesVector,
+    /// Natural-units row/column scaling pair (pounce#128). The IPM's
+    /// KKT factor is held in the NLP's internally **scaled** space
+    /// (objective factor `df`, per-row constraint factors `dc` / `dd`
+    /// from `nlp_scaling_method`; scaled multipliers `ỹ = (df/dc)·y`,
+    /// `z̃ = df·z`, `ṽ = (df/dd)·v`, scaled slack `s̃ = dd·s`). The
+    /// scaled 8-block primal-dual system is the two-sided diagonal
+    /// scaling `K̃ = E K F` of the natural-units system, with
+    /// per-block entries
+    ///
+    /// ```text
+    ///        x      s        y_c      y_d     z_l/z_u   v_l/v_u
+    /// E  =   df     df/dd_i  dc_i     dd_i    df        df
+    /// F  =   1      1/dd_i   dc_i/df  dd_i/df 1/df      dd_r(j)/df
+    /// ```
+    ///
+    /// (`dd_r(j)` = the d-row scaling of the j-th finite d-bound,
+    /// through the `pd_l` / `pd_u` expansion). Hence
+    /// `K⁻¹ = F K̃⁻¹ E`: scale the RHS by `E`, back-solve against the
+    /// held factor, scale the result by `F`. Unlike a symmetric
+    /// congruence this needs no square root, so it covers a negative
+    /// `obj_scaling_factor` (maximization) and covers the z/v
+    /// bound-multiplier rows exactly (those rows admit no symmetric
+    /// diagonal: `K̃_{z,x} = df·Z·Pᵀ` but `K̃_{z,z} = X − x_L` is
+    /// unscaled). `None` ⇔ scaling inactive, identity.
+    conj: Option<Rc<ConjPair>>,
+}
+
+/// Left/right diagonal pair for the natural-units back-solve; see the
+/// `conj` field doc on [`PdSensBacksolver`]. Both vectors are
+/// flat-KKT-length, in the `x‖s‖y_c‖y_d‖z_l‖z_u‖v_l‖v_u` packing.
+struct ConjPair {
+    /// `E`: multiplied into the RHS before the scaled-space solve.
+    e: Vec<Number>,
+    /// `F`: multiplied into the solution after the scaled-space solve.
+    f: Vec<Number>,
 }
 
 impl PdSensBacksolver {
     /// Construct from the four handles handed in by the `on_converged`
-    /// callback. Returns `Err(())` if `data` has no `curr` (i.e. the
-    /// algorithm never reached an iterate — should not happen on
-    /// `SolveSucceeded`).
+    /// callback. Errors if `data` has no `curr` (i.e. the algorithm
+    /// never reached an iterate — should not happen on
+    /// `SolveSucceeded`) or the NLP reports scaling data inconsistent
+    /// with the converged iterate (see [`Self::natural_units_conj`]).
     pub fn new(
         data: &IpoptDataHandle,
         cq: &IpoptCqHandle,
         nlp: &Rc<RefCell<dyn IpoptNlp>>,
         pd: Rc<RefCell<PdFullSpaceSolver>>,
-    ) -> Result<Self, ()> {
-        let curr = data.borrow().curr.clone().ok_or(())?;
+    ) -> Result<Self, String> {
+        let curr = data
+            .borrow()
+            .curr
+            .clone()
+            .ok_or_else(|| "no current iterate at convergence".to_string())?;
         let dims = [
             curr.x.dim() as usize,
             curr.s.dim() as usize,
@@ -111,6 +151,7 @@ impl PdSensBacksolver {
             curr.v_l.dim() as usize,
             curr.v_u.dim() as usize,
         ];
+        let conj = Self::natural_units_conj(nlp, &dims)?;
         Ok(Self {
             pd,
             data: Rc::clone(data),
@@ -118,7 +159,221 @@ impl PdSensBacksolver {
             nlp: Rc::clone(nlp),
             dims,
             template: curr,
+            conj,
         })
+    }
+
+    /// Build the natural-units scaling pair `(E, F)` from the NLP's
+    /// effective scaling (see the field doc on [`Self::conj`]).
+    /// Returns `Ok(None)` when no scaling is active. Errors when the
+    /// NLP reports scaling data inconsistent with the converged
+    /// iterate's block dimensions (would silently corrupt every
+    /// back-solve) or a zero/non-finite `df`.
+    fn natural_units_conj(
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        dims: &[usize; 8],
+    ) -> Result<Option<Rc<ConjPair>>, String> {
+        let nlp_ref = nlp.borrow();
+        let df = nlp_ref.obj_scaling_factor();
+        let dc = nlp_ref.c_scale_vec();
+        let dd = nlp_ref.d_scale_vec();
+        if df == 1.0 && dc.is_none() && dd.is_none() {
+            return Ok(None);
+        }
+        // df may be negative (obj_scaling_factor < 0 means maximize);
+        // the two-sided scaling needs no square root, only df ≠ 0.
+        if !df.is_finite() || df == 0.0 {
+            return Err(format!("invalid obj_scaling_factor {df}"));
+        }
+        if let Some(v) = &dc {
+            if v.len() != dims[2] {
+                return Err(format!("c_scale length {} != y_c dim {}", v.len(), dims[2]));
+            }
+        }
+        if let Some(v) = &dd {
+            if v.len() != dims[3] || dims[1] != dims[3] {
+                return Err(format!(
+                    "d_scale length {} != y_d dim {} (s dim {})",
+                    v.len(),
+                    dims[3],
+                    dims[1]
+                ));
+            }
+        }
+        // Per-entry d-row scale for the compressed v_l / v_u blocks:
+        // entry j of v_l covers the d row pd_l.expanded_pos[j].
+        let v_row_scale = |pm: Rc<dyn pounce_linalg::matrix::Matrix>,
+                           n_v: usize,
+                           which: &str|
+         -> Result<Vec<Number>, String> {
+            let Some(dd) = &dd else {
+                return Ok(vec![1.0; n_v]);
+            };
+            if n_v == 0 {
+                return Ok(Vec::new());
+            }
+            let Some(em) = pm
+                .as_any()
+                .downcast_ref::<pounce_linalg::expansion_matrix::ExpansionMatrix>()
+            else {
+                return Err(format!("{which} is not an ExpansionMatrix"));
+            };
+            let pos = em.expanded_pos_indices();
+            if pos.len() != n_v {
+                return Err(format!(
+                    "{which} expansion length {} != {} block dim {}",
+                    pos.len(),
+                    which,
+                    n_v
+                ));
+            }
+            pos.iter()
+                .map(|&r| {
+                    dd.get(r as usize).copied().ok_or_else(|| {
+                        format!(
+                            "{which} expansion row {r} out of d_scale range {}",
+                            dd.len()
+                        )
+                    })
+                })
+                .collect()
+        };
+        let vl_dd = v_row_scale(nlp_ref.pd_l(), dims[6], "pd_l")?;
+        let vu_dd = v_row_scale(nlp_ref.pd_u(), dims[7], "pd_u")?;
+        drop(nlp_ref);
+
+        let total: usize = dims.iter().sum();
+        let mut e = Vec::with_capacity(total);
+        let mut f = Vec::with_capacity(total);
+        // x block: E = df, F = 1.
+        e.extend(std::iter::repeat_n(df, dims[0]));
+        f.extend(std::iter::repeat_n(1.0, dims[0]));
+        // s block: E = df/dd_i, F = 1/dd_i (slacks live in scaled d-space).
+        match &dd {
+            Some(v) => {
+                e.extend(v.iter().map(|&ddi| df / ddi));
+                f.extend(v.iter().map(|&ddi| 1.0 / ddi));
+            }
+            None => {
+                e.extend(std::iter::repeat_n(df, dims[1]));
+                f.extend(std::iter::repeat_n(1.0, dims[1]));
+            }
+        }
+        // y_c block: E = dc_i, F = dc_i/df.
+        match &dc {
+            Some(v) => {
+                e.extend(v.iter().copied());
+                f.extend(v.iter().map(|&dci| dci / df));
+            }
+            None => {
+                e.extend(std::iter::repeat_n(1.0, dims[2]));
+                f.extend(std::iter::repeat_n(1.0 / df, dims[2]));
+            }
+        }
+        // y_d block: E = dd_i, F = dd_i/df.
+        match &dd {
+            Some(v) => {
+                e.extend(v.iter().copied());
+                f.extend(v.iter().map(|&ddi| ddi / df));
+            }
+            None => {
+                e.extend(std::iter::repeat_n(1.0, dims[3]));
+                f.extend(std::iter::repeat_n(1.0 / df, dims[3]));
+            }
+        }
+        // z_l / z_u blocks: E = df, F = 1/df (z̃ = df·z; bounds on x
+        // are unscaled so the slack diagonal X − x_L is shared by both
+        // systems).
+        e.extend(std::iter::repeat_n(df, dims[4] + dims[5]));
+        f.extend(std::iter::repeat_n(1.0 / df, dims[4] + dims[5]));
+        // v_l / v_u blocks: E = df, F = dd_r/df (ṽ = (df/dd)·v and the
+        // slack diagonal s̃ − d̃_l = dd·(s − d_l) carries the d-row
+        // scale).
+        e.extend(std::iter::repeat_n(df, dims[6] + dims[7]));
+        f.extend(vl_dd.iter().map(|&ddr| ddr / df));
+        f.extend(vu_dd.iter().map(|&ddr| ddr / df));
+        Ok(Some(Rc::new(ConjPair { e, f })))
+    }
+
+    /// Effective objective scaling factor `df` of the converged NLP
+    /// (1.0 when no scaling is active).
+    pub fn obj_scaling_factor(&self) -> Number {
+        self.nlp.borrow().obj_scaling_factor()
+    }
+
+    /// Effective NLP scaling at convergence:
+    /// `(obj_scaling_factor, c_scale, d_scale)`. The vectors are
+    /// `None` when the corresponding block carries no row scaling.
+    pub fn nlp_scaling(&self) -> (Number, Option<Vec<Number>>, Option<Vec<Number>>) {
+        let n = self.nlp.borrow();
+        (n.obj_scaling_factor(), n.c_scale_vec(), n.d_scale_vec())
+    }
+
+    /// Inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` baked
+    /// into the held KKT factor (the IPM's `current_perturbation`
+    /// state at convergence). All zero ⇔ the final factorization was
+    /// unregularized and the natural-units back-solves invert the
+    /// exact KKT matrix. Nonzero ⇔ the factor carries a (scaled-space)
+    /// regularization, so sensitivity outputs — covariance in
+    /// particular — are perturbed and no longer exactly
+    /// scaling-invariant; consumers should check this before trusting
+    /// `-inv(reduced_hessian)` on ill-conditioned problems
+    /// (pounce#128 follow-up).
+    pub fn kkt_perturbations(&self) -> [Number; 4] {
+        let p = self.data.borrow().perturbations;
+        [p.delta_x, p.delta_s, p.delta_c, p.delta_d]
+    }
+
+    /// Map user-facing 0-based `g(x)` indices of parameter-pin
+    /// equality constraints to flat KKT rows **and** the pin rows'
+    /// `dc_i` scaling factors, in one pass. The KKT row of pin `i` is
+    /// `n_x + n_s + c_block_idx`, i.e. the matching `y_c` slot, found
+    /// through `IpoptNlp::full_g_to_c_block` so the c/d split's row
+    /// permutation is honored (pounce#128 follow-up: the previous
+    /// direct `n_x + n_s + g_idx` mapping silently picked wrong rows
+    /// when inequalities preceded the pins). The scales are 1.0 when
+    /// no constraint scaling is active; they relate the natural and
+    /// solver-space reduced Hessians via
+    /// `H̃_ij = (df / (dc_i·dc_j)) · H_ij`. Errors when a pin index
+    /// is out of range or refers to an inequality row.
+    pub fn pin_rows_and_c_scales(
+        &self,
+        pin_g_indices: &[Index],
+    ) -> Result<(Vec<Index>, Vec<Number>), String> {
+        let y_c_offset = (self.dims[0] + self.dims[1]) as Index;
+        let nlp = self.nlp.borrow();
+        let dc = nlp.c_scale_vec();
+        let n_full_g = nlp.n_full_g();
+        let mut rows = Vec::with_capacity(pin_g_indices.len());
+        let mut scales = Vec::with_capacity(pin_g_indices.len());
+        for &gi in pin_g_indices {
+            // n_full_g() defaults to 0 for IpoptNlp impls that don't
+            // report it; only range-check when it's meaningful.
+            if gi < 0 || (n_full_g > 0 && gi >= n_full_g) {
+                return Err(format!(
+                    "pin constraint index {gi} out of range [0, m={n_full_g})"
+                ));
+            }
+            let Some(ci) = nlp.full_g_to_c_block(gi) else {
+                return Err(format!(
+                    "pin constraint index {gi} is an inequality (not an equality row); \
+                     parameter pins must be exact equalities"
+                ));
+            };
+            rows.push(y_c_offset + ci);
+            scales.push(dc.as_ref().map(|v| v[ci as usize]).unwrap_or(1.0));
+        }
+        Ok((rows, scales))
+    }
+
+    /// KKT-row half of [`Self::pin_rows_and_c_scales`].
+    pub fn map_pin_g_to_kkt_rows(&self, pin_g_indices: &[Index]) -> Result<Vec<Index>, String> {
+        Ok(self.pin_rows_and_c_scales(pin_g_indices)?.0)
+    }
+
+    /// Scaling half of [`Self::pin_rows_and_c_scales`].
+    pub fn pin_c_scales(&self, pin_g_indices: &[Index]) -> Result<Vec<Number>, String> {
+        Ok(self.pin_rows_and_c_scales(pin_g_indices)?.1)
     }
 
     /// Block dimensions of the compound KKT vector at convergence, in
@@ -204,7 +459,46 @@ impl PdSensBacksolver {
     /// The matrix and perturbation state inside `PdFullSpaceSolver`
     /// are unchanged across calls, so each iteration hits the cached
     /// fast path in `solve_once` (`uptodate && !pretend_singular`).
+    ///
+    /// Like [`SensBacksolver::solve`], results are in **natural
+    /// (unscaled) units** — see [`Self::solve_many_scaled_space`] for
+    /// the raw solver-space back-solve.
     pub fn solve_many(&self, rhs_flat: &[Number], lhs_flat: &mut [Number], n_rhs: usize) -> bool {
+        match &self.conj {
+            None => self.solve_many_scaled_space(rhs_flat, lhs_flat, n_rhs),
+            Some(c) => {
+                let total = self.dim();
+                if rhs_flat.len() != n_rhs * total || lhs_flat.len() != n_rhs * total {
+                    return false;
+                }
+                let mut rhs_scaled = rhs_flat.to_vec();
+                for row in rhs_scaled.chunks_mut(total) {
+                    for (r, &ei) in row.iter_mut().zip(c.e.iter()) {
+                        *r *= ei;
+                    }
+                }
+                if !self.solve_many_scaled_space(&rhs_scaled, lhs_flat, n_rhs) {
+                    return false;
+                }
+                for row in lhs_flat.chunks_mut(total) {
+                    for (l, &fi) in row.iter_mut().zip(c.f.iter()) {
+                        *l *= fi;
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// Batched-RHS back-solve against the held factor in the solver's
+    /// internal **scaled** space (no natural-units conjugation). Same
+    /// buffer contract as [`Self::solve_many`].
+    pub fn solve_many_scaled_space(
+        &self,
+        rhs_flat: &[Number],
+        lhs_flat: &mut [Number],
+        n_rhs: usize,
+    ) -> bool {
         let total = self.dim();
         if rhs_flat.len() != n_rhs * total || lhs_flat.len() != n_rhs * total {
             return false;
@@ -387,12 +681,12 @@ fn read_res_block(blk: &dyn pounce_linalg::vector::Vector, dst: &mut [Number]) -
     true
 }
 
-impl SensBacksolver for PdSensBacksolver {
-    fn dim(&self) -> usize {
-        self.dims.iter().sum()
-    }
-
-    fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+impl PdSensBacksolver {
+    /// Single-RHS back-solve against the held factor in the solver's
+    /// internal **scaled** space (no natural-units conjugation). This
+    /// is the value [`SensBacksolver::solve`] returned before
+    /// pounce#128; kept for callers that want the raw factor.
+    pub fn solve_scaled_space(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
         let total = self.dim();
         if rhs.len() != total || lhs.len() != total {
             return false;
@@ -437,5 +731,40 @@ impl SensBacksolver for PdSensBacksolver {
             return false;
         }
         self.unpack(&res_iv, lhs).is_ok()
+    }
+}
+
+impl SensBacksolver for PdSensBacksolver {
+    fn dim(&self) -> usize {
+        self.dims.iter().sum()
+    }
+
+    /// Solve `K · lhs = rhs` against the converged factor, in
+    /// **natural (unscaled) units** (pounce#128): when the NLP carries
+    /// active scaling (`nlp_scaling_method`, `obj_scaling_factor`,
+    /// user scaling) the RHS is pre-multiplied by `E` and the result
+    /// post-multiplied by `F` (see the `conj` field doc), so
+    /// `lhs = K_natural⁻¹ rhs` for **all eight blocks** — including
+    /// the z/v bound-multiplier rows. Use
+    /// [`Self::solve_scaled_space`] for the raw factor.
+    fn solve(&self, rhs: &[Number], lhs: &mut [Number]) -> bool {
+        match &self.conj {
+            None => self.solve_scaled_space(rhs, lhs),
+            Some(c) => {
+                let total = self.dim();
+                if rhs.len() != total || lhs.len() != total {
+                    return false;
+                }
+                let rhs_scaled: Vec<Number> =
+                    rhs.iter().zip(c.e.iter()).map(|(&r, &ei)| r * ei).collect();
+                if !self.solve_scaled_space(&rhs_scaled, lhs) {
+                    return false;
+                }
+                for (l, &fi) in lhs.iter_mut().zip(c.f.iter()) {
+                    *l *= fi;
+                }
+                true
+            }
+        }
     }
 }

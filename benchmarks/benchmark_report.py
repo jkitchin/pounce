@@ -464,7 +464,91 @@ def vanderbei_crosscheck_lines(comps):
     return lines
 
 
-def generate_report(suites, output_path, baseline=None):
+def generate_profiles(profile_dirs):
+    """Render Dolan–Moré performance + data profiles and return the
+    markdown lines that embed them.
+
+    `profile_dirs` is a list of suite directory names that have BOTH a
+    fresh pounce.json and an ipopt_ma57.json (a performance profile needs
+    two solvers to be meaningful). Figures are written to
+    benchmarks/figures/ and referenced with repo-relative paths so they
+    render on GitHub and in local Markdown viewers alike.
+
+    Degrades gracefully: if matplotlib is unavailable or nothing is
+    plottable, returns a short note instead of figures so the report still
+    generates.
+    """
+    lines = ["## Performance Profiles", ""]
+    if not profile_dirs:
+        lines += ["_No suite had both a POUNCE run and an Ipopt reference, "
+                  "so no performance profile could be drawn._", ""]
+        return lines
+
+    fig_dir = os.path.join(SCRIPT_DIR, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+    sys.path.insert(0, os.path.join(SCRIPT_DIR, "scripts"))
+    try:
+        from perf_profile import render_profile
+    except Exception as exc:  # matplotlib/numpy missing, etc.
+        lines += [f"_Profiles skipped: could not import the plotter "
+                  f"({exc}). Install matplotlib + numpy and rerun "
+                  "`make -C benchmarks benchmark-report`._", ""]
+        return lines
+
+    lines += [
+        "[Dolan & Moré (2002)](https://doi.org/10.1007/s101070100263) "
+        "performance profiles pooled over every suite with an Ipopt "
+        "reference. ρ_s(τ) is the fraction of problems a solver solves "
+        "within a factor τ of the fastest solver on each problem: the "
+        "**height at τ=1** is how often it was the quickest, and the "
+        "**right-hand plateau** is its overall robustness (fraction solved "
+        "at all). A problem counts as solved only at strict/acceptable "
+        "success; failures and timeouts are charged infinite cost. "
+        "Regenerate or slice these with "
+        "`python3 scripts/perf_profile.py <suite…> [--metric iters] "
+        "[--mode data]`.",
+        "",
+    ]
+
+    # (filename, kwargs, caption). Time profiles are only fair on one host;
+    # the iterations profile is machine-independent, so we always include it.
+    figs = [
+        ("profile_performance_time.png",
+         dict(metric="time", mode="performance"),
+         "**Performance profile by wall-clock time.** Valid because POUNCE "
+         "and Ipopt-MA57 were run interleaved on this host (see Provenance)."),
+        ("profile_performance_iters.png",
+         dict(metric="iters", mode="performance"),
+         "**Performance profile by iteration count** — machine-independent, "
+         "so it stays comparable across hosts and reruns."),
+        ("profile_data_time.png",
+         dict(metric="time", mode="data"),
+         "**Data profile (absolute-time ECDF).** Fraction of problems solved "
+         "within a given wall-clock budget, without best-solver "
+         "normalization — reads directly as “how many by 1 s? by 10 s?”."),
+    ]
+    any_ok = False
+    for fname, kw, caption in figs:
+        out = os.path.join(fig_dir, fname)
+        try:
+            res = render_profile(profile_dirs, out, **kw)
+        except Exception as exc:
+            lines += [f"_Could not render {fname}: {exc}._", ""]
+            continue
+        if res is None:
+            continue
+        nprob, solvers = res
+        any_ok = True
+        lines += [f"![{caption}](figures/{fname})", "", caption,
+                  f"  \n_{nprob} problems; solvers: "
+                  f"{', '.join(solvers)}._", ""]
+    if not any_ok:
+        lines += ["_No problem was solved by enough solvers to draw a "
+                  "profile._", ""]
+    return lines
+
+
+def generate_report(suites, output_path, baseline=None, profile_dirs=None):
     """Generate the unified benchmark report."""
     prov = collect_provenance()
     lines = []
@@ -541,6 +625,9 @@ def generate_report(suites, output_path, baseline=None):
     lines.append("> never folded into the pass rate. See the \"Acceptable (not Optimal)\" and")
     lines.append("> \"Different Local Minima\" sections below.")
     lines.append("")
+
+    # Performance / data profiles (Dolan–Moré) over suites with a reference.
+    lines.extend(generate_profiles(profile_dirs or []))
 
     # Per-suite summary table
     lines.append("## Per-Suite Summary")
@@ -838,6 +925,7 @@ def main():
     # retired compiled CUTEst suite; large_scale is now generated as .nl by
     # benchmarks/large_scale/generate_nl.py rather than a Rust harness.
     missing_reference = []
+    profile_dirs = []  # dirnames with both pounce + ipopt, for the profiles
     for suite_name, dirname, make_target in (
         ('Vanderbei',   'vanderbei',   'vanderbei-run'),
         ('Electrolyte', 'electrolyte', 'electrolyte-run'),
@@ -856,6 +944,8 @@ def main():
             suites.append((suite_name, suite))
             ref = 'pounce + ipopt-ma57 reference' if has_ipopt else 'POUNCE-only (no ipopt reference)'
             print(f"{suite_name} suite: {len(suite)} records loaded — {ref}")
+            if has_pounce and has_ipopt:
+                profile_dirs.append(dirname)
             if has_pounce and not has_ipopt:
                 missing_reference.append((suite_name, dirname))
         else:
@@ -882,7 +972,8 @@ def main():
         print("No benchmark results found. Run `make benchmark` first.")
         sys.exit(1)
 
-    combined, _summary = generate_report(suites, output_path, baseline)
+    combined, _summary = generate_report(suites, output_path, baseline,
+                                          profile_dirs=profile_dirs)
 
     print(f"\nReport written to {output_path}")
     print(f"Baseline saved to {output_path.replace('.md', '.json')}")

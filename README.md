@@ -11,20 +11,30 @@
 
 ![POUNCE](logos/pounce_A_pounce.png)
 
-POUNCE is a pure-Rust port of the [Ipopt](https://github.com/coin-or/Ipopt)
-interior-point nonlinear programming solver. It solves problems of the
-form
+POUNCE is a pure-Rust interior-point optimization solver. Its
+nonlinear-programming core began as a faithful port of
+[Ipopt](https://github.com/coin-or/Ipopt) — the same filter line-search
+algorithm, console output, and option semantics, so anyone used to reading
+`ipopt` logs can drop in `pounce` without relearning where the numbers
+live — and it has since grown into a *family* of solvers sharing one
+numerical backbone:
 
-```
-min  f(x)
-s.t. g_L <= g(x) <= g_U
-     x_L <=   x  <= x_U
-```
+- **Nonlinear programming** — the filter line-search interior-point method
+  (the Ipopt port), plus an active-set SQP path, for general smooth problems
+  `min f(x)  s.t.  g_L ≤ g(x) ≤ g_U,  x_L ≤ x ≤ x_U`.
+- **Conic & quadratic** — dedicated interior-point solvers for LP, convex QP,
+  second-order (SOCP), positive-semidefinite (SDP), and the non-symmetric
+  exponential and power cones — each solved to the global optimum, with
+  infeasibility certificates, warm starts, and post-optimal sensitivity.
+- **Global optimization** — certified global optima for nonconvex
+  **polynomial** problems via SOS / Lasserre relaxations. (A general-purpose
+  spatial branch-and-bound solver, `pounce-global`, is in development on the
+  `feature/global` branch and not part of this release.)
 
-where `f` and `g` are twice-continuously-differentiable. The algorithm,
-console output, and option semantics follow upstream Ipopt closely enough
-that anyone used to reading `ipopt` logs can drop in `pounce` without
-relearning where the numbers live.
+Convex and conic problems are solved to global optimality; nonconvex problems
+are solved locally by default, or — for polynomials — to a certified global
+optimum via the SOS path. See **[Choosing a Solver](https://jkitchin.github.io/pounce/choosing-a-solver.html)**
+for the full map of which solver fits which problem.
 
 The default build is pure Rust — no Fortran, no HSL, no system BLAS required.
 The [FERAL](crates/pounce-feral) backend provides a sparse symmetric LDLᵀ
@@ -46,6 +56,24 @@ port) and reduced-Hessian computation are wired end-to-end; the
 `pounce-presolve` pass (auxiliary-equality elimination + FBBT +
 bound-tightening) and the active-set SQP path (`pounce-qp`-backed)
 are available behind option keys.
+
+Beyond the NLP core, the solver family is wired end-to-end and validated
+against external suites:
+
+- **Convex & conic** (`pounce-convex`) — LP / convex-QP, SOCP, the
+  exponential and power cones (geometric programming, entropy, logistic,
+  `p`-norms), and small dense SDPs, with a Conic Benchmark Format (`.cbf`)
+  reader cross-checked against the CBLIB tier. The CLI's `auto` routing
+  classifies an `.nl` and sends LP / convex-QP problems here automatically.
+- **Global (polynomials)** — SOS / Lasserre polynomial optimization
+  (`sos_minimize` / `pounce.sos_minimize`): a single SDP certifies the global
+  minimum and recovers the global minimizers. A general-purpose spatial
+  branch-and-bound solver (`pounce-global`, with McCormick relaxations,
+  OBBT/FBBT bound tightening, and a certified optimality gap) is in development
+  on the `feature/global` branch and not part of this release.
+
+The shipped solvers — NLP, conic, and SOS — are reachable from the CLI, the
+Python package, and the JSON solve report.
 
 See `benchmarks/` for the comparison harness against upstream Ipopt.
 
@@ -77,6 +105,7 @@ make book       # builds docs/book/ (requires `cargo install mdbook`)
 | [`pounce-l1penalty`](crates/pounce-l1penalty)     | Thierry-Biegler ℓ₁-exact penalty-barrier wrapper for degenerate / MPCC problems.                                              |
 | [`pounce-sensitivity`](crates/pounce-sensitivity) | Post-optimal sensitivity + reduced-Hessian (port of upstream sIPOPT).                                                         |
 | [`pounce-qp`](crates/pounce-qp)                   | Sparse parametric active-set QP subproblem solver — drives the SQP path and the sensitivity corrector.                        |
+| [`pounce-convex`](crates/pounce-convex)           | Convex/conic interior-point solver — LP, QP, SOCP, exponential/power cones, small SDP, and SOS polynomial optimization.       |
 | [`pounce-solve-report`](crates/pounce-solve-report) | `pounce.solve-report/v1` JSON writer (shared by `pounce-cli --json-output` and `IpoptWriteSolveReport`).                     |
 | [`pounce-observability`](crates/pounce-observability) | `tracing` subscriber install + per-iteration collector layer that feeds the iteration stream into the solve report.       |
 | [`pounce-cinterface`](crates/pounce-cinterface)   | C ABI shim — `CreateIpoptProblem` / `IpoptSolve` / `FreeIpoptProblem` / `IpoptWriteSolveReport`.                              |
@@ -235,6 +264,29 @@ redirected. The per-iteration table is colored when stdout is a terminal.
 See [`docs/src/options.md`](docs/src/options.md) and
 [`docs/src/troubleshooting.md`](docs/src/troubleshooting.md) for details.
 
+### Interactive solver debugger (`--debug`)
+
+POUNCE ships an interactive debugger for the interior-point loop — a *pdb
+for the IPM*. Pause the solve at well-defined checkpoints, inspect and
+**mutate** the live state (iterate, multipliers, the barrier parameter μ),
+set breakpoints by iteration / numeric condition / solver event, step
+through an iteration's internal phases, rewind, and re-solve with new
+options. It has **zero effect on the solve when not attached**.
+
+```sh
+pounce problem.nl --debug             # human REPL (history, Tab-complete)
+pounce problem.nl --debug-on-error    # run freely; drop in only on failure
+pounce problem.nl --debug-json        # newline-delimited JSON for agents/tools
+```
+
+`--debug-json` speaks a self-describing protocol: the first line is a
+`hello` handshake advertising every command, event, checkpoint, metric,
+and capability, so an **LLM agent, script, or visual debugger** can drive
+the solver with no out-of-band docs. Full guide:
+[`docs/src/debugger.md`](docs/src/debugger.md). Post-mortem analysis of a
+finished solve is also available through the **pounce-studio MCP server**
+([`studio/mcp`](studio/mcp)) and the JSON solve report.
+
 ### Sensitivity analysis (sIPOPT-compatible)
 
 The `pounce-sensitivity` crate is a Rust port of upstream Ipopt's
@@ -326,11 +378,11 @@ the full list and per-suite details.
 
 ## Acknowledgments
 
-POUNCE is a Rust port of [Ipopt](https://github.com/coin-or/Ipopt),
-the interior-point nonlinear programming solver by Andreas Wächter,
-Lorenz T. Biegler, and the COIN-OR community. Its algorithm, console
-output, and option semantics are modeled directly on that codebase,
-which is released under the EPL-2.0.
+POUNCE's nonlinear-programming core is a Rust port of
+[Ipopt](https://github.com/coin-or/Ipopt), the interior-point nonlinear
+programming solver by Andreas Wächter, Lorenz T. Biegler, and the COIN-OR
+community. Its algorithm, console output, and option semantics are modeled
+directly on that codebase, which is released under the EPL-2.0.
 
 It is a sibling of [ripopt](https://github.com/jkitchin/ripopt), an
 earlier memory-safe interior-point NLP optimizer in Rust by the same

@@ -199,6 +199,27 @@ pub trait ExpressionProvider {
     fn objective_expression(&self) -> Option<FbbtTape> {
         None
     }
+
+    /// Human-readable name for variable `i` (0-based, original problem
+    /// order), if the model carries one. `None` ⇒ the caller should fall
+    /// back to an index label like `x[i]`.
+    ///
+    /// Names turn index-level diagnostics into model-level ones — e.g.
+    /// reporting that a near-singular Jacobian row is the `mass_balance`
+    /// equation rather than "row 3". Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) call out that gap as a key
+    /// roadblock for debugging equation-oriented models; this method is
+    /// the seam the debugger reads names through.
+    fn variable_name(&self, _i: usize) -> Option<&str> {
+        None
+    }
+
+    /// Human-readable name for constraint `i` (0-based, original problem
+    /// order), if the model carries one. `None` ⇒ fall back to an index
+    /// label like `c[i]`. See [`Self::variable_name`].
+    fn constraint_name(&self, _i: usize) -> Option<&str> {
+        None
+    }
 }
 
 #[cfg(test)]

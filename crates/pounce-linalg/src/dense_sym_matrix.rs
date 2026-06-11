@@ -7,10 +7,10 @@
 //! BLAS-2 only: `mult_vector`, `FillIdentity`, `AddMatrix`, the
 //! SR1-helper `SpecialAddForLMSR1` (kept here since it's pure
 //! arithmetic; `L` is a `DenseGenMatrix` and we already have one),
-//! `compute_row_amax`, `has_valid_numbers`. The two `HighRankUpdate`
-//! variants — one fronted by BLAS `dsyrk`, one by `MultiVectorMatrix`
-//! — are stubbed (the syrk path lands with the LAPACK shim; the
-//! multi-vector path lands in Phase 8 alongside L-BFGS).
+//! `compute_row_amax`, `has_valid_numbers`. The `MultiVectorMatrix`-fronted
+//! `HighRankUpdateTranspose` is implemented (used by the L-BFGS aug-system
+//! solver). The `dsyrk`-fronted dense `HighRankUpdate` variant has no caller
+//! in pounce and was never ported — it is intentionally omitted.
 //!
 //! `mult_vector_impl` uses the reference DSYMV scalar-loop order so
 //! results are deterministic across BLAS implementations.
@@ -173,17 +173,6 @@ impl DenseSymMatrix {
             }
         }
         self.cache.bump();
-    }
-
-    /// **Stub** — BLAS `dsyrk`. Filled by LAPACK shim.
-    pub fn high_rank_update(
-        &mut self,
-        _trans: bool,
-        _alpha: Number,
-        _v: &DenseGenMatrix,
-        _beta: Number,
-    ) {
-        unimplemented!("DenseSymMatrix::high_rank_update needs BLAS dsyrk");
     }
 
     /// `M[i, j] ← α · V1[:, i]ᵀ · V2[:, j] + β · M[i, j]` for `j ≤ i`

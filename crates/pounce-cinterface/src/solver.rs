@@ -190,7 +190,8 @@ pub unsafe extern "C" fn IpoptSolverSolve(
     // don't panic on the second inner solve (pounce#10 / pounce#24).
     let feral_cfg = feral_config_from_options(info.problem.app.options());
     let bff_mint = move || -> InnerBackendFactoryFactory {
-        Box::new(move || default_backend_factory(feral_cfg))
+        let feral_cfg = feral_cfg.clone();
+        Box::new(move || default_backend_factory(feral_cfg.clone()))
     };
     let resto_provider = make_default_restoration_factory_provider(
         RestoAlgorithmBuilder::new(),
@@ -260,6 +261,13 @@ pub unsafe extern "C" fn IpoptSolverGetKktDim(solver: IpoptSolver) -> Index {
 /// `rhs` and `lhs` are flat buffers of length [`IpoptSolverGetKktDim`]
 /// in the `x || s || y_c || y_d || z_l || z_u || v_l || v_u` packing.
 ///
+/// `K` is the **natural-units** (unscaled) KKT matrix: any NLP
+/// scaling the IPM applied (`nlp_scaling_method`) is undone in the
+/// back-solve, so RHS and solution are in the user's own units
+/// (pounce#128). Use [`IpoptSolverKktSolveScaled`] for the raw
+/// back-solve against the factor exactly as the IPM holds it (the
+/// pre-#128 behavior).
+///
 /// Returns `TRUE` on success, `FALSE` if no factor is held or the
 /// back-solve fails.
 ///
@@ -273,6 +281,31 @@ pub unsafe extern "C" fn IpoptSolverKktSolve(
     rhs: *const Number,
     lhs: *mut Number,
 ) -> Bool {
+    kkt_solve_impl(solver, rhs, lhs, false)
+}
+
+/// [`IpoptSolverKktSolve`] without the natural-units correction: the
+/// back-solve runs in the solver's internal scaled space. Identical
+/// to `IpoptSolverKktSolve` when no NLP scaling is active.
+///
+/// # Safety
+///
+/// Same contract as [`IpoptSolverKktSolve`].
+#[no_mangle]
+pub unsafe extern "C" fn IpoptSolverKktSolveScaled(
+    solver: IpoptSolver,
+    rhs: *const Number,
+    lhs: *mut Number,
+) -> Bool {
+    kkt_solve_impl(solver, rhs, lhs, true)
+}
+
+unsafe fn kkt_solve_impl(
+    solver: IpoptSolver,
+    rhs: *const Number,
+    lhs: *mut Number,
+    scaled: bool,
+) -> Bool {
     if solver.is_null() || rhs.is_null() || lhs.is_null() {
         return FALSE;
     }
@@ -285,7 +318,12 @@ pub unsafe extern "C" fn IpoptSolverKktSolve(
     };
     let rhs_slice = std::slice::from_raw_parts(rhs, dim);
     let mut lhs_vec = vec![0.0; dim];
-    if s.kkt_solve(rhs_slice, &mut lhs_vec).is_err() {
+    let res = if scaled {
+        s.kkt_solve_scaled(rhs_slice, &mut lhs_vec)
+    } else {
+        s.kkt_solve(rhs_slice, &mut lhs_vec)
+    };
+    if res.is_err() {
         return FALSE;
     }
     std::ptr::copy_nonoverlapping(lhs_vec.as_ptr(), lhs, dim);
@@ -345,6 +383,13 @@ pub unsafe extern "C" fn IpoptSolverParametricStep(
 
 /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned rows.
 /// `hr_out` receives an `n_pins²`-long column-major dense matrix.
+///
+/// `H_R` is in **natural (unscaled) units**: any NLP scaling the IPM
+/// applied (`nlp_scaling_method`) is undone before the value is
+/// reported, so `-inv(H_R)` is directly the parameter covariance of
+/// an estimation problem (pounce#128). `obj_scal` is a plain extra
+/// multiplier (pass 1.0); it is no longer needed to undo pounce's own
+/// scaling.
 ///
 /// Returns `TRUE` on success, `FALSE` otherwise.
 ///

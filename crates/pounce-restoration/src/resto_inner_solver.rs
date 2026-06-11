@@ -138,8 +138,10 @@ pub fn make_default_restoration_factory(
 /// provider call to produce a fresh
 /// [`InnerBackendFactoryFactory`] (FERAL/MA57 backend), so each inner
 /// solve gets independent backend state. Callsites that capture a
-/// `FeralConfig` (which is `Copy`) can pass
-/// `move || Box::new(move || default_backend_factory(feral_cfg))`.
+/// `FeralConfig` (which is `Clone` but not `Copy`, since
+/// `ScalingStrategy::External` carries a `Vec`) clone it into each
+/// layer, e.g.
+/// `move || { let c = feral_cfg.clone(); Box::new(move || default_backend_factory(c.clone())) }`.
 pub fn make_default_restoration_factory_provider<F>(
     resto_builder: RestoAlgorithmBuilder,
     inner_alg_builder: AlgorithmBuilder,

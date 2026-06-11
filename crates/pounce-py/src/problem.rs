@@ -323,6 +323,10 @@ impl PyProblem {
             status,
             stats.iteration_count,
             stats.final_mu,
+            stats.final_kkt_error,
+            stats.final_dual_inf,
+            stats.final_constr_viol,
+            stats.final_compl,
         )?;
         let ws_obj: PyObject = match &self.last_working_set {
             Some(ws) => encode_working_set(py, ws).into_any().unbind(),
@@ -404,9 +408,25 @@ impl PyProblem {
     /// Solve, then run a parametric sensitivity step at the converged
     /// iterate. Returns `(x, info_dict)`; `info_dict` includes the
     /// extra keys `dx`, `dx_full`, `reduced_hessian`,
+    /// `reduced_hessian_scaled`, `obj_scaling_factor`, `pin_g_scaling`,
+    /// `kkt_perturbations` (the inertia-correction `(δ_x, δ_s, δ_c,
+    /// δ_d)` baked into the converged factor — all zero means the
+    /// factor is unregularized and the covariance reading is exact),
     /// `reduced_hessian_eigenvalues`, and `reduced_hessian_eigenvectors`
     /// (each may be `None` when the corresponding output was not
     /// requested or the solve did not converge).
+    ///
+    /// `reduced_hessian` is in **natural (unscaled) units**: any NLP
+    /// scaling the IPM applied (`nlp_scaling_method`, default
+    /// `"gradient-based"`) is undone, so `-inv(reduced_hessian)` is
+    /// directly the parameter covariance of an estimation problem,
+    /// independent of problem scaling and discretization (pounce#128).
+    /// `reduced_hessian_scaled` is the value as the solver's internal
+    /// scaled space sees it (what pounce returned before #128), and
+    /// `obj_scaling_factor` / `pin_g_scaling` are the factors relating
+    /// the two: `H_scaled[i,j] = obj_scaling_factor /
+    /// (pin_g_scaling[i]*pin_g_scaling[j]) * H[i,j]`. `obj_scal`
+    /// survives as a plain extra multiplier on both (default 1.0).
     ///
     /// `pin_constraint_indices` are 0-based indices into `g(x)`
     /// identifying the parameter-pin equalities `g_i(x) = p_i`. The
@@ -505,32 +525,36 @@ impl PyProblem {
             result.status,
             stats.iteration_count,
             stats.final_mu,
+            stats.final_kkt_error,
+            stats.final_dual_inf,
+            stats.final_constr_viol,
+            stats.final_compl,
         )?;
-        let dx_obj: PyObject = match result.dx {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        info.set_item("dx", opt_vec_to_py(py, result.dx))?;
+        info.set_item("dx_full", opt_vec_to_py(py, result.dx_full))?;
+        info.set_item("reduced_hessian", opt_vec_to_py(py, result.reduced_hessian))?;
+        info.set_item(
+            "reduced_hessian_scaled",
+            opt_vec_to_py(py, result.reduced_hessian_scaled),
+        )?;
+        let obj_scaling_obj: PyObject = match result.obj_scaling_factor {
+            Some(v) => v.into_py(py),
             None => py.None(),
         };
-        info.set_item("dx", dx_obj)?;
-        let dx_full_obj: PyObject = match result.dx_full {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("dx_full", dx_full_obj)?;
-        let rh_obj: PyObject = match result.reduced_hessian {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian", rh_obj)?;
-        let eigvals_obj: PyObject = match result.reduced_hessian_eigenvalues {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian_eigenvalues", eigvals_obj)?;
-        let eigvecs_obj: PyObject = match result.reduced_hessian_eigenvectors {
-            Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
-            None => py.None(),
-        };
-        info.set_item("reduced_hessian_eigenvectors", eigvecs_obj)?;
+        info.set_item("obj_scaling_factor", obj_scaling_obj)?;
+        info.set_item("pin_g_scaling", opt_vec_to_py(py, result.pin_g_scaling))?;
+        info.set_item(
+            "kkt_perturbations",
+            opt_vec_to_py(py, result.kkt_perturbations.map(|p| p.to_vec())),
+        )?;
+        info.set_item(
+            "reduced_hessian_eigenvalues",
+            opt_vec_to_py(py, result.reduced_hessian_eigenvalues),
+        )?;
+        info.set_item(
+            "reduced_hessian_eigenvectors",
+            opt_vec_to_py(py, result.reduced_hessian_eigenvectors),
+        )?;
 
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))
@@ -547,6 +571,16 @@ impl PyProblem {
     #[getter]
     fn has_hessian(&self) -> bool {
         self.has_hessian
+    }
+}
+
+/// `Some(vec)` → 1-D float ndarray, `None` → Python `None`. Shared by
+/// the optional-output info-dict keys here and in the sibling
+/// `Solver` pyclass.
+pub(crate) fn opt_vec_to_py(py: Python<'_>, v: Option<Vec<Number>>) -> PyObject {
+    match v {
+        Some(v) => v.into_pyarray_bound(py).into_any().unbind(),
+        None => py.None(),
     }
 }
 
@@ -578,7 +612,70 @@ impl PyProblem {
             .transpose()?;
         let z_l0 = zl.map(|v| extract_f64_vec(&v, n, "zl")).transpose()?;
         let z_u0 = zu.map(|v| extract_f64_vec(&v, n, "zu")).transpose()?;
+        let init = self.build_tnlp_init(py, x0_vec, lam0, z_l0, z_u0)?;
 
+        let mut app = IpoptApplication::new();
+        if !self.has_hessian {
+            let _ = app.options_mut().set_string_value(
+                "hessian_approximation",
+                "limited-memory",
+                true,
+                false,
+            );
+        }
+        for (k, v) in &self.str_opts {
+            app.options_mut()
+                .set_string_value(k, v, true, false)
+                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
+        }
+        for (k, v) in &self.num_opts {
+            app.options_mut()
+                .set_numeric_value(k, *v, true, false)
+                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
+        }
+        for (k, v) in &self.int_opts {
+            app.options_mut()
+                .set_integer_value(k, *v, true, false)
+                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
+        }
+        app.initialize()
+            .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
+
+        let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
+        let bff_mint = move || -> InnerBackendFactoryFactory {
+            let feral_cfg = feral_cfg.clone();
+            Box::new(move || default_backend_factory(feral_cfg.clone()))
+        };
+        let resto_provider = make_default_restoration_factory_provider(
+            RestoAlgorithmBuilder::new(),
+            app.algorithm_builder_from_options(),
+            bff_mint,
+        );
+        app.set_restoration_factory_provider(resto_provider);
+
+        let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
+        Ok((app, bridge))
+    }
+
+    /// Assemble the [`PyTnlpInit`] payload for one solve: resolve the
+    /// Jacobian / Hessian sparsity through the Python object (once, so
+    /// the solver's `Structure` calls are GIL-free copies) and capture
+    /// bounds, starting point, optional warm duals, and the callback
+    /// handle. Factored out of [`Self::prepare`] so the batch path
+    /// (pounce#126 phase 2) can mint per-instance bridges without
+    /// building the application on this thread — the resulting
+    /// `PyTnlpInit` is plain data + `Py<PyAny>` handles, hence `Send`,
+    /// and moves to the rayon worker that owns the solve.
+    pub(crate) fn build_tnlp_init(
+        &self,
+        py: Python<'_>,
+        x0_vec: Vec<Number>,
+        lam0: Option<Vec<Number>>,
+        z_l0: Option<Vec<Number>>,
+        z_u0: Option<Vec<Number>>,
+    ) -> PyResult<PyTnlpInit> {
+        let n = self.n as usize;
+        let m = self.m as usize;
         let (jac_rows, jac_cols, nele_jac) = if m > 0 {
             let s = call0(&self.problem_obj, "jacobianstructure")?;
             let (rows, cols) = decode_structure_inferred(&s)?;
@@ -611,45 +708,7 @@ impl PyProblem {
             (rows, cols, nele)
         };
 
-        let mut app = IpoptApplication::new();
-        if !self.has_hessian {
-            let _ = app.options_mut().set_string_value(
-                "hessian_approximation",
-                "limited-memory",
-                true,
-                false,
-            );
-        }
-        for (k, v) in &self.str_opts {
-            app.options_mut()
-                .set_string_value(k, v, true, false)
-                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
-        }
-        for (k, v) in &self.num_opts {
-            app.options_mut()
-                .set_numeric_value(k, *v, true, false)
-                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
-        }
-        for (k, v) in &self.int_opts {
-            app.options_mut()
-                .set_integer_value(k, *v, true, false)
-                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
-        }
-        app.initialize()
-            .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
-
-        let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
-        let bff_mint = move || -> InnerBackendFactoryFactory {
-            Box::new(move || default_backend_factory(feral_cfg))
-        };
-        let resto_provider = make_default_restoration_factory_provider(
-            RestoAlgorithmBuilder::new(),
-            app.algorithm_builder_from_options(),
-            bff_mint,
-        );
-        app.set_restoration_factory_provider(resto_provider);
-
-        let init = PyTnlpInit {
+        Ok(PyTnlpInit {
             n: self.n,
             m: self.m,
             nele_jac,
@@ -676,18 +735,49 @@ impl PyProblem {
             final_lambda: vec![0.0; m],
             final_obj: 0.0,
             final_status_code: 0,
-        };
-        let bridge = Rc::new(RefCell::new(PyTnlp::new(init)));
-        Ok((app, bridge))
+        })
+    }
+
+    /// The pending option sets, in `OptionsList`'s three value classes
+    /// — for the batch path, which applies them to a fresh per-worker
+    /// application instead of going through [`Self::prepare`].
+    pub(crate) fn option_sets(
+        &self,
+    ) -> (&[(String, String)], &[(String, Number)], &[(String, Index)]) {
+        (&self.str_opts, &self.num_opts, &self.int_opts)
+    }
+
+    pub(crate) fn uses_exact_hessian(&self) -> bool {
+        self.has_hessian
+    }
+
+    pub(crate) fn dims(&self) -> (usize, usize) {
+        (self.n as usize, self.m as usize)
+    }
+
+    /// Per-constraint equality mask (`g_l[i] == g_u[i]`), used by the batch
+    /// info-dict builder to reproduce the single-solve `active_constraints`
+    /// classification (equalities are always active).
+    pub(crate) fn equality_mask(&self) -> Vec<bool> {
+        self.g_l
+            .iter()
+            .zip(&self.g_u)
+            .map(|(l, u)| l == u)
+            .collect()
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_info_dict<'py>(
     py: Python<'py>,
     bridge: &PyTnlp,
     status: ApplicationReturnStatus,
     iter_count: i32,
     final_mu: Number,
+    final_kkt_error: Number,
+    final_dual_inf: Number,
+    final_constr_viol: Number,
+    final_compl: Number,
 ) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
     info.set_item("status", status as i32)?;
@@ -712,6 +802,48 @@ pub(crate) fn build_info_dict<'py>(
     // the corrector in predictor–corrector path following (pounce#86).
     // `0.0` on the barrier-free SQP path.
     info.set_item("mu", final_mu)?;
+
+    // Final convergence metrics (the values the IPM/SQP convergence check
+    // saw at the last iterate). `final_kkt_error` is the overall NLP error
+    // that `OptErrorConvCheck` tests against `tol` / `acceptable_tol`;
+    // surfacing it lets the scipy-style facade judge `success` on the actual
+    // optimality residual rather than solely on the exit-status enum, so a
+    // verified optimum reached via a tiny-step exit (gh #119/#123) is still
+    // reported as a success. NaN on a path that never computed them.
+    info.set_item("final_kkt_error", final_kkt_error)?;
+    info.set_item("final_dual_inf", final_dual_inf)?;
+    info.set_item("final_constr_viol", final_constr_viol)?;
+    info.set_item("final_compl", final_compl)?;
+
+    // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
+    // compute the active set ONCE here, in the producer, so the JAX /
+    // torch backward passes read it instead of each re-deriving
+    // `|mult| > tol` under its own tolerance. `pinned_vars[i]` = an
+    // active variable bound (dx/dp = 0); `active_constraints[i]` = an
+    // equality row or a binding inequality. We want only the two masks,
+    // not a full `DiffHandoff`, so go through the shared `masks` helper on
+    // the borrowed duals rather than cloning x / λ / z_L / z_U just to
+    // discard them.
+    let equality_mask: Vec<bool> = bridge
+        .state
+        .g_l
+        .iter()
+        .zip(bridge.state.g_u.iter())
+        .map(|(l, u)| l == u)
+        .collect();
+    let (pinned_vars, active_constraints) = pounce_sensitivity::DiffHandoff::masks(
+        &bridge.state.final_z_l,
+        &bridge.state.final_z_u,
+        &bridge.state.final_lambda,
+        &equality_mask,
+        pounce_sensitivity::DEFAULT_ACTIVE_TOL,
+    );
+    info.set_item("pinned_vars", pinned_vars.into_pyarray_bound(py))?;
+    info.set_item(
+        "active_constraints",
+        active_constraints.into_pyarray_bound(py),
+    )?;
+    info.set_item("active_tol", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok(info)
 }
 
@@ -783,7 +915,11 @@ fn extract_index_vec_inferred(val: &Py<PyAny>, what: &str) -> PyResult<Vec<Index
     })
 }
 
-fn extract_f64_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<Number>> {
+pub(crate) fn extract_f64_vec(
+    val: &Py<PyAny>,
+    expected: usize,
+    what: &str,
+) -> PyResult<Vec<Number>> {
     Python::with_gil(|py| {
         let bound = val.bind(py);
         if let Ok(arr) = bound.downcast::<PyArray1<Number>>() {
@@ -834,7 +970,9 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
             // Only FERAL is wired into the wheel build; the `_choice`
             // argument is honored by the CLI build (which can route to
             // MA57) but ignored here.
-            Box::new(pounce_feral::FeralSolverInterface::with_config(feral_cfg))
+            Box::new(pounce_feral::FeralSolverInterface::with_config(
+                feral_cfg.clone(),
+            ))
         },
     )
 }
@@ -958,7 +1096,7 @@ fn extract_i8_vec(val: &Py<PyAny>, expected: usize, what: &str) -> PyResult<Vec<
     })
 }
 
-fn status_message(status: ApplicationReturnStatus) -> &'static str {
+pub(crate) fn status_message(status: ApplicationReturnStatus) -> &'static str {
     use ApplicationReturnStatus::*;
     match status {
         SolveSucceeded => "Solve_Succeeded",

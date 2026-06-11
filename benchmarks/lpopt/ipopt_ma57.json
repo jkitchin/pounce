@@ -1,6 +1,6 @@
 [
-  {"solver":"ipopt","name":"ex10","n":17680,"m":69608,"status":"Maximum_CpuTime_Exceeded","objective":null,"iterations":21,"solve_time":300.078749},
-  {"solver":"ipopt","name":"irish-electricity","n":61728,"m":104259,"status":"Maximum_CpuTime_Exceeded","objective":null,"iterations":1213,"solve_time":300.057744},
-  {"solver":"ipopt","name":"qap15","n":22275,"m":6330,"status":"Solve_Succeeded","objective":8.6749413338822933e+02,"iterations":49,"solve_time":169.069699},
-  {"solver":"ipopt","name":"supportcase10","n":14630,"m":165684,"status":"Maximum_CpuTime_Exceeded","objective":null,"iterations":5,"solve_time":300.080918}
+  {"solver":"ipopt","name":"ex10","n":17680,"m":69608,"status":"Maximum_CpuTime_Exceeded","objective":1.3381571214388191e+02,"iterations":5,"solve_time":80.115455},
+  {"solver":"ipopt","name":"irish-electricity","n":61728,"m":104259,"status":"Maximum_CpuTime_Exceeded","objective":2.4564424947298542e+06,"iterations":1429,"solve_time":232.928152},
+  {"solver":"ipopt","name":"qap15","n":22275,"m":6330,"status":"Maximum_CpuTime_Exceeded","objective":8.6752197907712230e+02,"iterations":30,"solve_time":66.198477},
+  {"solver":"ipopt","name":"supportcase10","n":14630,"m":165684,"status":"Maximum_CpuTime_Exceeded","objective":7.8121217018302858e-01,"iterations":1,"solve_time":134.365215}
 ]

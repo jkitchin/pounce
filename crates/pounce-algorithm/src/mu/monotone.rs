@@ -203,13 +203,18 @@ impl MuUpdate for MonotoneMuUpdate {
             }
             mu = new_mu;
             tau = self.compute_tau(mu);
-            // Only one reduction per outer iteration unless we'd need
-            // to re-test sub_err for the new μ. Upstream re-tests, so
-            // we do the same — but `curr_barrier_error` is keyed on the
-            // current iterate (μ enters via the constant subtraction),
-            // so the re-tested value will generally be larger and the
-            // loop exits.
-            //
+            // Mirror upstream `IpData().Set_mu(mu)` *inside* the loop
+            // (`IpMonotoneMuUpdate.cpp:CalcNewMuAndTau`): the next
+            // `curr_barrier_error()` must see the reduced μ. The relaxed
+            // complementarity `s⊙z − μ` is keyed on `data.curr_mu`
+            // (see `ipopt_cq.rs::curr_relaxed_compl_*`), so without this
+            // write the re-tested `sub_err` stays pinned to the *old* μ
+            // while `kappa_eps_mu = barrier_tol_factor·mu` shrinks, and
+            // the loop over-drops μ in a single outer iteration. Writing
+            // it here makes the residual grow as μ falls (toward the
+            // current `s⊙z`), so the loop exits after one effective
+            // reduction — matching IPOPT.
+            data.borrow_mut().curr_mu = mu;
             // Stop after one reduction in the tiny_step branch (matches
             // upstream which clears tiny_step_flag once consumed).
             if tiny_step {

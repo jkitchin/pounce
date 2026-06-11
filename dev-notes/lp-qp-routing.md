@@ -22,7 +22,7 @@ correct (LP ⊂ convex QP ⊂ NLP) but leaves performance on the table:
    in `ipopt.opt`. Mirrors Gurobi/CPLEX UX; preserves a single Pyomo
    `SolverFactory('pounce')` entry.
 2. **One `pounce-convex` crate** for the IPM-based convex algorithms
-   (IPM-LP, IPM-QP, and a future simplex). Resists workspace sprawl;
+   (IPM-LP, IPM-QP, and the conic extensions). Resists workspace sprawl;
    related algorithms share warm-start logic, presolve adapters, and the
    predictor-corrector machinery.
 3. **Active-set QP stays in its own `pounce-qp` crate.** A sparse
@@ -50,17 +50,17 @@ It does three things:
    capture `n_nl_cons`, `n_nl_objs`, and the `n_nl_vars_*` triplet
    currently skipped at `nl_reader.rs:591`. Walks the parsed `Expr`
    AST (`nl_reader.rs:45-65`) to confirm linearity and detect
-   quadratic objectives. Produces:
+   quadratic objectives and constraints. Produces:
    ```rust
-   enum ProblemClass { Lp, ConvexQp, NonconvexQp, Nlp }
+   enum ProblemClass { Lp, ConvexQp, ConvexQcqp, NonconvexQp, Nlp }
    ```
 2. **Resolves the solver choice** by combining `ProblemClass` with the
    `solver_selection` option:
    - `auto` (default): most specialized solver matching the class
    - `nlp`: always IPM-NLP (current behavior)
-   - `lp-ipm`, `lp-simplex`, `qp-ipm`, `qp-active-set`: force; error
-     if the problem doesn't fit (e.g., `simplex` on a problem with a
-     quadratic objective).
+   - `lp-ipm`, `qp-ipm`, `qp-active-set`: force; error if the problem
+     doesn't fit (e.g., `qp-ipm` on a problem with a non-quadratic
+     objective).
 3. **Dispatches.** Each solver implements (or is wrapped behind) the
    existing `TNLP` trait (`crates/pounce-nlp/src/tnlp.rs:157`); the
    trait is already algorithm-agnostic and object-safe, so dispatch is
@@ -72,7 +72,7 @@ It does three things:
 ```
 crates/
   pounce-algorithm/    # existing — IPM-NLP, unchanged
-  pounce-convex/       # NEW — IPM-LP, IPM-QP, simplex
+  pounce-convex/       # NEW — IPM-LP, IPM-QP, conic (SOCP/exp/pow/SDP)
   pounce-qp/           # existing (on active-set-sqp-warm-start branch)
                        #   — sparse Schur-complement parametric active-set QP
   pounce-nlp/          # existing — TNLP trait, unchanged
@@ -82,12 +82,12 @@ crates/
   pounce-presolve/     # existing — extended with LP-specific reductions
 ```
 
-`pounce-convex` exposes per-algorithm entry points for the IPM family
-and (eventually) simplex:
+`pounce-convex` exposes per-algorithm entry points for the IPM family:
 ```rust
 pub fn solve_lp_ipm(tnlp: Rc<RefCell<dyn TNLP>>, opts: &OptionsList) -> Status;
 pub fn solve_qp_ipm(tnlp: Rc<RefCell<dyn TNLP>>, opts: &OptionsList) -> Status;
-pub fn solve_simplex(tnlp: Rc<RefCell<dyn TNLP>>, opts: &OptionsList) -> Status;
+// SOCP / exp / pow / SDP reuse solve_qp_ipm's cone-generic scaffolding
+// (see src/cones/), selected by the cone types present — not a new fn.
 ```
 
 `pounce-qp` already exposes its own active-set entry point; dispatch
@@ -101,11 +101,20 @@ All IPM solvers reuse `pounce-linsol` for the augmented-system
 factorization (`SparseSymLinearSolverInterface` — same trait feral and
 MA57 implement today). Mehrotra predictor-corrector and Gondzio
 higher-order correctors live inside `pounce-convex` because the same
-iteration scaffolding serves both IPM-LP and IPM-QP. Simplex grows its
-own LU-with-updates module (eventually a separate `pounce-lu` crate
-when justified). `pounce-qp` keeps its own Schur-complement KKT
+iteration scaffolding serves both IPM-LP and IPM-QP (and the conic
+extensions). `pounce-qp` keeps its own Schur-complement KKT
 machinery — different from the IPM augmented system — so it does not
 share the IPM scaffolding.
+
+Unlike the NLP path, the convex entry points exploit the constant-matrix
+structure: for an LP/QP the Hessian `P` and constraint matrix `A` (and
+`c`, `b`) do *not* depend on `x`, so they are extracted **once** at
+setup via a single `eval_h` / `eval_jac_g` call and cached for the rest
+of the solve. The `TNLP` contract is built for nonlinear problems and
+suggests per-iteration re-evaluation; the convex solver must *not* be a
+thin per-iteration `TNLP` driver like the NLP path, or it forfeits the
+specialization that justifies it (and the Phase 2 "specialized path
+wins" benchmark claim).
 
 ### Active-set vs IPM-QP: why both
 
@@ -120,9 +129,53 @@ share the IPM scaffolding.
 | Best for                        | one-shot convex QPs, LPs        | QP sequences, SQP inner solver,       |
 |                                 |                                 | MPC, MIP node QPs                     |
 
-Dispatch picks between them via `solver_selection`; `auto` defaults to
-IPM-QP for one-shot convex QPs and routes parametric / warm-startable
-calls (when that signal is exposed by the caller) to `pounce-qp`.
+Dispatch picks between them via `solver_selection`. Under `auto`,
+convex LP/QP always goes to IPM-LP/IPM-QP — **the active-set path is
+opt-in**, never auto-selected from the NL path. The reason: an `.nl`
+file describes a single instance, and neither the format nor
+`solver_selection` carries a "this is one of a parametric sequence,
+warm-start it" signal for the classifier to act on. So `pounce-qp` is
+reached only (a) explicitly via `solver_selection = qp-active-set`, or
+(b) programmatically via the Python/C warm-start API, where the caller
+holds state across solves and *is* the warm-start signal. A future
+extension could let a caller mark a problem as warm-startable through a
+`solver.options` hint, at which point `auto` could route it to
+`pounce-qp`; until that hint exists, auto-routing to active-set is not
+possible and is not claimed.
+
+### Relationship to active-set SQP
+
+Two *orthogonal* solver-selection axes are in play; conflating them
+causes confusion:
+
+1. **`solver_selection`** (this note) — picks a solver by **problem
+   class**: LP / convex QP / convex QCQP / NLP. This is the dispatch
+   layer described above.
+2. **`algorithm`** — picks the **NLP algorithm strategy**: the
+   Wächter-Biegler filter-IPM (default) vs. an active-set SQP. Both
+   solve *general NLP*; they differ in warm-start behavior. Active-set
+   SQP is a new `AlgorithmStrategy` end-to-end (see the design note
+   [`research/active-set-sqp-warm-start.md`](research/active-set-sqp-warm-start.md)),
+   opt-in and parallel to the IPM, leaving the default loop untouched.
+
+Active-set **SQP** is therefore an *NLP* solver — it sits beside IPM-NLP
+at the top of the stack, **not** in the convex LP/QP layer.
+
+The two notes connect through one crate: **`pounce-qp` does double
+duty.** Its sparse parametric active-set QP solver is both
+
+- the **`qp-active-set` dispatch target** for a standalone convex QP
+  (this note), and
+- the **inner QP subproblem solver** inside the active-set SQP NLP
+  algorithm (the SQP note).
+
+Build it once, use it both ways — which is why both notes point at the
+same `crates/pounce-qp/` on `claude/active-set-sqp-warm-start-BnjLA`.
+Both target the same warm-start sweet spot (MPC, SQP inner solve, B&B
+node QPs, parametric homotopy), where IPM warm-starts badly because the
+barrier pushes iterates off the active boundary. This is the parallel
+track called out in the phasing: it is *not* phase-ordered against
+`pounce-convex` and ships on its own schedule.
 
 ### What modeling languages see
 
@@ -149,31 +202,67 @@ The NL format header (Gay 2005 §3) lines currently skipped at
 needed:
 
 - Line 2: `n_vars n_cons n_objs ranges eqns` (already parsed)
-- Line 4: `n_nl_cons n_nl_objs` — if both zero, problem is at-most
-  quadratic (could be LP or QP; need AST walk to decide)
+- Line 4: `n_nl_cons n_nl_objs` — count of constraints/objectives with
+  a *nonlinear part*. Zero means purely linear; see the LP/QP caveat
+  below.
 - Line 5: `n_nl_net n_lin_net` — network structure (future routing
   target)
 - Line 6: `n_nl_vars_in_both n_nl_vars_in_cons n_nl_vars_in_obj`
 
-If `n_nl_cons == 0` and `n_nl_objs == 0` → class is LP or QP.
-If furthermore the objective AST contains only linear terms → LP.
-If the objective AST has degree-2 `Mul` or `Pow` nodes only → QP
-(check positive-semidefiniteness for convex/nonconvex split via the
-Hessian-pattern computation already in `pounce-nlp`).
+The NL format has no dedicated quadratic section: each row's linear
+part lives in the `G`/`J` (gradient/Jacobian) coefficient segments,
+while *any* higher-order term — including the quadratic terms of a QP —
+is written into the nonlinear expression tree (`O`/`C` segments) as
+`Mul`/`Pow` nodes. Consequently a QP objective registers as nonlinear,
+so the header alone does **not** distinguish LP from QP:
+
+- `n_nl_cons == 0` and `n_nl_objs == 0` → class is **LP** (all
+  structure is in the linear `G`/`J` segments; no AST walk needed).
+- Otherwise walk the nonlinear AST of every row (objective *and*
+  constraints) that carries a nonlinear part. If any nonlinear term is
+  not a degree-2 polynomial (transcendental, higher-degree `Pow`, etc.)
+  → **NLP**. If all nonlinear terms are degree-2 polynomials, extract
+  the Hessians and split on convexity (PSD test via numerical
+  factorization / attempted Cholesky — *not* the Hessian *pattern* from
+  `pounce-nlp`):
+  - quadratic objective, **linear** constraints, objective Hessian PSD
+    → **ConvexQp** (→ IPM-QP);
+  - quadratic objective and/or **quadratic** constraints, all convex
+    (objective Hessian PSD and each ≤-inequality's constraint Hessian
+    PSD) → **ConvexQcqp** (→ SOCP / conic solver, Phase 4+). A convex
+    QCQP is SOCP-representable via the epigraph / rotated-second-order-
+    cone reformulation, so it routes to the same conic IPM as native
+    SOCP rather than to the dense NLP path;
+  - any indefinite Hessian (objective or a constraint) → **NonconvexQp**
+    (falls through to NLP-IPM for a local min).
+- **Conservative fallback (correctness guard).** Whenever the walk
+  cannot *prove* the stronger class — parse failure, an inconclusive /
+  near-singular PSD test, or a quadratic constraint whose sense is
+  incompatible with its curvature — fall back to the more general class,
+  ultimately **NLP**. Misclassifying an indefinite or non-quadratic
+  problem *into* a convex solver would return a spurious KKT point as if
+  globally optimal; falling back to NLP is always sound. The PSD test
+  therefore uses a tolerance, and "inconclusive within tolerance" routes
+  to NLP, never to the convex path.
+- Until Phase 4 (SOCP) lands, **ConvexQcqp** falls through to NLP-IPM;
+  the distinct class is the dispatch seam the conic solver later
+  intercepts (same pattern as `NonconvexQp`).
+
+This mirrors how QP-capable AMPL solvers detect QPs (ASL's `nqpcheck`
+walks the nonlinear tree to recover `Q`); the header is a fast reject
+for the LP case only.
 
 ### Option plumbing
 
 Single new option on `OptionsList`:
 
 - Key: `solver_selection`
-- Values: `auto` (default), `nlp`, `lp-ipm`, `lp-simplex`, `qp-ipm`,
-  `qp-active-set`
+- Values: `auto` (default), `nlp`, `lp-ipm`, `qp-ipm`, `qp-active-set`
 - Validation: `auto` always works; explicit values error if the
   loaded problem doesn't match the class (with a message naming the
   detected class).
-- Routing: `lp-ipm` / `qp-ipm` / `lp-simplex` resolve into
-  `pounce-convex` entry points; `qp-active-set` resolves into the
-  existing `pounce-qp` crate.
+- Routing: `lp-ipm` / `qp-ipm` resolve into `pounce-convex` entry
+  points; `qp-active-set` resolves into the existing `pounce-qp` crate.
 
 Follows the precedent of `linear_solver`, which selects `Ma57`/`Feral`
 via the `LinearBackendFactory` at
@@ -185,19 +274,127 @@ via the `LinearBackendFactory` at
   object-safe (`crates/pounce-nlp/src/tnlp.rs:157-249`).
 - `.sol` writer (`crates/pounce-cli/src/nl_writer.rs`) is already
   problem-type-agnostic; takes `(x, lambda, status)`. No change.
-- `pounce-restoration`, `pounce-l1penalty`, `pounce-sensitivity`,
-  `pounce-mu` stay coupled to IPM-NLP only — convex solvers don't
-  need most of them.
+- `pounce-restoration`, `pounce-l1penalty`, `pounce-sensitivity` stay
+  coupled to IPM-NLP only — the convex solvers don't use them (no
+  filter restoration, no penalty reformulation; sensitivity stays
+  NLP-coupled for now, though it's the natural seam for differentiable
+  convex layers later).
+- A barrier parameter μ is *not* optional, though: every IPM has one.
+  The convex IPM supplies its own **Mehrotra adaptive σ·μ centering**
+  (in `pounce-convex`, Phase 3), which is distinct from the NLP
+  `mu_strategy` (Monotone / Adaptive) in `pounce-mu`. Open question for
+  Phase 2/3: reuse `pounce-mu`'s strategy abstraction if it fits, or
+  keep the convex μ logic local to `pounce-convex`. Either way it is a
+  required component, not a skipped one.
 - `pyomo-pounce` doesn't change at all; users get LP/QP routing
   transparently via the CLI dispatch.
+
+### Presolve integration
+
+Presolve is a 2–10× factor on the Mittelmann/Maros-Mészáros sets, so
+*wall-clock* competitiveness with HiGHS/Clarabel depends on it — Phase 3
+delivers an *algorithmically* competitive iteration (low iteration
+counts), and Phase 3.5 (presolve) is what turns that into competitive
+end-to-end wall-clock. Presolve is *not* optional for that bar, even
+though it is not blocking for *correctness*. Two parts: the integration
+seam (favorable, mostly inherited) and the reduction work (largely
+net-new for LP/QP).
+
+**Integration seam — inherited for free.** `pounce-presolve` is already
+a *composable TNLP wrapper* (TNLP-in → reduced-TNLP-out, with a
+postsolve path that reinstates dropped rows and forwards multipliers;
+see `crates/pounce-presolve/src/lib.rs` Phases 0–5). Because the convex
+solvers also consume `TNLP`, `pounce-convex` sits *behind*
+`PresolveTnlp` exactly as the IPM does today — no new plumbing. This is
+the part that is genuinely "not blocking."
+
+**IPM-aware reduction policy — the seam differs from a simplex
+presolve.** Gondzio (1997) shows an IPM cares about Cholesky/LDLᵀ
+*fill-in*, not a basis: reductions that help simplex (aggressive
+variable substitution) can *hurt* an IPM by densifying the factor.
+Since `pounce-convex` factors through `pounce-linsol` LDLᵀ, substitution
+must be gated on fill growth (Mészáros & Suhl 2003 bound model-size
+increase before each elimination). This is a *policy*, not just a
+reduction set.
+
+**Reduction catalog to implement.** Grounded in the literature review
+(citations below):
+
+- *Core LP reductions (Andersen & Andersen 1995):* empty / singleton /
+  forcing / dominated rows; singleton / duplicate columns; bound
+  tightening. Most already exist in `pounce-presolve` for the NLP path
+  and carry over.
+- *Modern strengthening (Achterberg et al. 2020):* coefficient
+  strengthening, dual reductions, parallel/dominated row–column
+  detection. The modern bar; add incrementally.
+- *QP/Hessian-consistent reductions (Gould & Toint 2004) — net-new:*
+  variable substitution and duplicate-column detection must account for
+  the Hessian `Q` (elimination fills `Q` with cross-terms), and the
+  **postsolve must recover the dual consistently with the quadratic
+  term**. The existing NLP-shaped presolve has no notion of a `P`
+  block, so this is the genuinely new work for the convex-QP path.
+
+**Postsolve / restoration stack — the missing architectural piece.**
+Every reduction must carry its undo and recover *primal and dual* for
+the original problem (Andersen & Andersen 1995; PaPILO's
+transaction/reduction-stack design). The current crate does this for
+its NLP reductions; LP/QP variable substitution and bound shifts need
+their own dual-recovery transforms.
+
+**Equilibration front-end.** Ruiz (2001) row–column norm balancing
+(optionally + Pock–Chambolle), as used by OSQP/Clarabel, conditions the
+KKT system before the IPM solve. Adjacent to presolve proper; bundle it
+with the dispatch into `pounce-convex`.
+
+**Build in pure Rust; learn from PaPILO, don't wrap it.** POUNCE's
+default build is pure Rust by design (no Fortran/C/C++, no system BLAS —
+see README and `docs/src/introduction.md`), so wrapping PaPILO
+(header-only C++) is out: it would break the pure-Rust guarantee that
+`pounce-feral` exists to uphold. PaPILO (Gleixner, Gottwald & Hoen
+2023; INFORMS JOC; arXiv:2206.10709) is still the best *reference
+architecture* — its **transaction-based reduction stack** (each
+reduction is a transaction with an undo, conflict-checked so reductions
+can be applied in parallel) is exactly the postsolve design
+`pounce-presolve` needs, and it is Apache-2.0 so studying the source is
+unencumbered. The plan is therefore to extend `pounce-presolve`
+in-house, porting PaPILO's *ideas* (transaction model, the LP/QP
+reduction set) rather than its code. Parallelism uses **rayon** (the
+idiomatic Rust data-parallel crate; not yet a workspace dependency) for
+the same recursive/data-parallel routines PaPILO parallelizes with
+Intel TBB — probing, dominated-column detection, constraint
+sparsification — keeping the transaction model as the conflict-avoidance
+mechanism.
+
+**Key references**
+
+- E. D. Andersen & K. D. Andersen, *Presolving in linear programming*,
+  Math. Prog. 71:221–245 (1995). — reduction catalog + restoration.
+- J. Gondzio, *Presolve analysis of linear programs prior to applying
+  an interior point method*, INFORMS JOC 9(1):73–91 (1997); Addendum
+  13(2):169 (2001). — IPM-specific (fill-in) presolve.
+- C. Mészáros & U. Suhl, *Advanced preprocessing techniques for linear
+  and quadratic programming*, OR Spectrum 25:575–595 (2003). —
+  fill-/row-growth control during elimination.
+- N. Gould & P. Toint, *Preprocessing for quadratic programming*,
+  Math. Prog. Ser. B 100:95–132 (2004). — QP/Hessian-aware reductions
+  and dual recovery.
+- T. Achterberg, R. Bixby, Z. Gu, E. Rothberg & D. Weninger, *Presolve
+  Reductions in Mixed Integer Programming*, INFORMS JOC 32(2):473–506
+  (2020). — modern taxonomy (Gurobi).
+- A. Gleixner, L. Gottwald & A. Hoen, *PaPILO: A Parallel Presolving
+  Library for Integer and Linear Optimization with Multiprecision
+  Support*, INFORMS JOC (2023); arXiv:2206.10709. — Apache-2.0
+  reference implementation (LP/MIP/QP).
+- D. Ruiz, *A scaling algorithm to equilibrate both rows and columns
+  norms in matrices*, RAL-TR-2001-034 (2001). — equilibration.
 
 ## Implementation phasing
 
 Each phase is independently shippable. The headline shift from the
 original plan is that `pounce-convex` is *the* in-house home for the
 entire IPM/conic family — LP, QP, SOCP, SDP, exponential cone, power
-cone — built incrementally on a single Mehrotra + HSDE scaffolding
-sharing `pounce-linsol`. Active-set QP stays in `pounce-qp` on its own
+cone — built incrementally on a single Mehrotra scaffolding (with the
+HSDE embedding added at the SOCP phase) sharing `pounce-linsol`. Active-set QP stays in `pounce-qp` on its own
 track. Other algorithm families (ADMM, AL+semismooth Newton,
 banded/Riccati IPM, simplex) are explicitly *out of scope* — see the
 "Out of scope and why" section below.
@@ -207,25 +404,100 @@ banded/Riccati IPM, simplex) are explicitly *out of scope* — see the
 `nlp` (auto → nlp for now). Ship to verify no regression. *No new
 algorithm.*
 
-**Phase 2 — IPM-QP in `pounce-convex`.** Bare IPM-QP (no Mehrotra
-yet); route LP and QP problems to it under `auto`. Compare iteration
-counts and wall-clock against the existing IPM-NLP path on the
+**Phase 2 — IPM-QP in `pounce-convex` (+ Ruiz equilibration).** Bare
+IPM-QP (no Mehrotra yet); route LP and QP problems to it under `auto`.
+**Build the iteration over the `Cone` abstraction (`src/cones/`) from
+the start, with only `nonneg` implemented** — this is what makes
+Phases 4–6 cone *extensions* rather than a rewrite; a QP-specific solve
+retrofitted for cones later would make the Phase 4 "cheap incremental
+win" claim false. Bring in **Ruiz equilibration** here — it is a
+conditioning prerequisite for the IPM KKT solve, effectively part of the
+solver rather than deferrable presolve (see "Presolve integration").
+Compare
+iteration counts and wall-clock against the existing IPM-NLP path on the
 `quadratic`, `bounded-quadratic`, `eq-quadratic` builtins. This is the
 minimum that justifies the `pounce-convex` crate.
 
-**Phase 3 — Mehrotra predictor-corrector + HSDE.** Add the
-predictor-corrector iteration and homogeneous self-dual embedding for
-infeasibility detection and a self-starting iterate. Should reduce
-iteration counts ~30-50% on convex QPs. Validate on Mittelmann LP
+**Phase 3 — Mehrotra predictor-corrector.** ✅ **Landed.** Add the
+predictor-corrector iteration (affine predictor, adaptive centering
+σ = (μ_aff/μ)³, second-order corrector, single factorization shared by
+both solves). Reduces iteration counts ~30–50% on convex QPs vs the NLP
+filter-IPM — verified in `crates/pounce-cli/tests/qp_vs_nlp_iterations.rs`
+(≈41% fewer at n=50).
+
+*The HSDE split.* The original plan bundled the homogeneous self-dual
+embedding into this phase for two benefits: (a) infeasibility/
+unboundedness detection and (b) a self-starting iterate. These are now
+separated:
+
+- **(a) Infeasibility/unboundedness detection — landed without HSDE.**
+  Implemented via *verified Farkas-certificate detection* layered on the
+  Mehrotra iterate (`detect_infeasibility` in `pounce-convex/src/ipm.rs`):
+  a primal-infeasibility certificate (`Aᵀy + Gᵀz ≈ 0`, `bᵀy + hᵀz < 0`,
+  `z ≥ 0`) or an unbounded recession direction (`Pd ≈ 0`, `Ad ≈ 0`,
+  `Gd ≤ 0`, `cᵀd < 0`), each *checked* against a tolerance so a positive
+  result is a proof — no false positives, only an `IterationLimit`
+  fallback when nothing is certifiable. This delivers HSDE's headline
+  user-facing benefit (clean `Infeasible`/`Unbounded` status, surfaced
+  to the CLI as AMPL `solve_result_num` 200/300) without rewriting the
+  iteration. Tests: `pounce-convex/tests/infeasibility.rs`.
+- **(b) Self-starting iterate via the embedding — deferred to Phase 4.**
+  The full homogeneous self-dual embedding is a from-scratch rewrite of
+  the iteration (adds the τ, κ homogenizing variables and reworks the
+  KKT system). It is most justified as the **conic-IPM scaffolding**
+  Clarabel/ECOS are built on, so it lands with SOCP (Phase 4), where it
+  generalizes to cones — rather than rewriting the working QP iteration
+  now for a benefit the certificate approach already largely provides.
+  When built, it must be the **quadratic-objective HSDE variant** (as in
+  Clarabel; Goulart & Chen) that carries the `P` term inside the
+  embedding — *not* the textbook LP/conic HSDE, which assumes a linear
+  objective. Validate on Mittelmann LP
 subset and Maros-Mészáros QP set. After this phase `pounce-convex` is
 algorithmically competitive with Clarabel and HiGHS for the LP/QP
-problem class.
+problem class. This is *algorithmic* competitiveness (iteration count
+and convergence); *wall-clock* competitiveness on the full benchmark
+sets additionally needs presolve (Phase 3.5).
 
-**Phase 4 — SOCP via second-order cone.** Add the second-order cone as
-a constraint type. Nesterov-Todd scaling on the SOC block; rotated-SOC
-as a derived form. Validate on Mittelmann SOCP set. This is a cheap
-incremental win once Mehrotra is in place — the symmetric-cone IPM
-machinery extends from LP/QP unchanged.
+**Phase 3.5 — Presolve (reduction catalog + postsolve stack).** Now
+that the iteration is algorithmically competitive, presolve is the
+multiplier that closes the benchmark gap to HiGHS/Clarabel (a 2–10×
+factor on the standard sets). Land the LP/QP reduction catalog, the
+IPM-aware reduction policy, and the pure-Rust transaction-based
+postsolve stack (PaPILO ideas, rayon for parallelism — not a wrap), per
+the "Presolve integration" section. Sequenced *after* Phase 3 on
+purpose: debugging the postsolve dual-recovery against a solver you
+already trust avoids chasing two unknowns at once. Benchmark-driven —
+add the reductions that actually move the Mittelmann / Maros-Mészáros
+numbers. Equilibration (Phase 2) is the prerequisite already in place;
+this phase adds the size-reducing transformations on top.
+
+*Status (implemented in `pounce-convex/src/presolve.rs`).* The
+transaction-stack architecture with reversible primal+dual postsolve is
+in place, plus an explicit variable-bound form (`lb`/`ub` on
+`QpProblem`, bound duals `z_lb`/`z_ub`) and these reductions: empty
+rows/columns, fixed-variable (singleton equality), free / linear-only
+columns, free column singleton substitution, duplicate-row removal
+(rayon-parallel hashing), and activity-bound redundancy + infeasibility
+detection. Presolve is wired into the CLI dispatch, so `.nl` LP/QP
+inputs run through it end-to-end. Each reduction has round-trip / KKT
+tests and an example. Deferred (harder dual postsolve — an active
+reduced bound's multiplier must be re-attributed to its source row):
+bound *tightening*, forcing constraints, dominated columns; and the
+MIP-leaning coefficient strengthening / probing. Benchmark-scale tuning
+against the Mittelmann / Maros-Mészáros sets remains.
+
+**Phase 4 — SOCP via second-order cone (+ HSDE embedding).** Add the
+second-order cone as a constraint type. Nesterov-Todd scaling on the SOC
+block; rotated-SOC as a derived form. Validate on Mittelmann SOCP set.
+This is a cheap incremental win once Mehrotra is in place — the
+symmetric-cone IPM machinery extends from LP/QP unchanged. **This is
+also where the homogeneous self-dual embedding lands** (deferred from
+Phase 3): the embedding is the standard conic-IPM scaffolding
+(Clarabel/ECOS) and generalizes cleanly to cones, so building it here —
+rather than retrofitting the QP iteration — gives the self-starting
+iterate and intrinsic infeasibility handling for the whole conic family
+at once. (Phase 3 already provides verified-certificate infeasibility
+detection for LP/QP, so this is an upgrade, not a prerequisite.)
 
 **Phase 5 — Exponential and power cones (non-symmetric).** Add the
 three-dimensional exponential cone, three-dimensional power cone, and
@@ -258,16 +530,19 @@ and ships when its own phases 5a–d are complete.
 | Phase | Effort | Cumulative |
 |------|--------|-----------|
 | 1 — Dispatch | 2–4 weeks | 1 month |
-| 2 — Bare IPM-QP | 3–6 months | 4–7 months |
-| 3 — Mehrotra + HSDE | 2–3 months | 6–10 months |
-| 4 — SOCP | 1–2 months | 7–12 months |
-| 5 — Exp/power cones | 2–4 months | 9–16 months |
-| 6 — SDP + chordal | 6+ months | 15+ months (optional) |
+| 2 — Bare IPM-QP (+ equilibration) | 3–6 months | 4–7 months |
+| 3 — Mehrotra (+ cert. infeasibility) | 2–3 months | 6–10 months |
+| 3.5 — Presolve | 2–4 months | 8–14 months |
+| 4 — SOCP (+ HSDE embedding) | 1–2 months | 9–16 months |
+| 5 — Exp/power cones | 2–4 months | 11–20 months |
+| 6 — SDP + chordal | 6+ months | 17+ months (optional) |
 
 Phases 1–3 are the minimum to justify the dispatch architecture and
-deliver a credible LP/QP solver. Phases 4–5 are the natural extension
-that closes most of the convex-conic-IPM gap to Clarabel. Phase 6 is
-gated on demand.
+deliver a *correct* LP/QP solver; Phase 3.5 (presolve) is what makes it
+*benchmark-competitive* with HiGHS/Clarabel — required for that bar,
+though not for correctness. Phases 4–5 are the natural extension that
+closes most of the convex-conic-IPM gap to Clarabel. Phase 6 is gated
+on demand.
 
 ## Out of scope and why
 
@@ -332,20 +607,47 @@ sensitivity analysis on degenerate LPs). It needs LU-with-updates,
 which is a substantial engineering effort separate from the
 LDLᵀ-based IPM/conic scaffolding.
 
-*Escape hatch:* IPM-LP from Phase 2/3 covers the medium-to-large LP
-case and benchmarks competitively with HiGHS-IPM on the Mittelmann
-sets. For small LPs and warm-start LP sequences, defer simplex until
-a specific application forces it; alternative is to wrap HiGHS as a
-backend.
+*Escape hatch:* IPM-LP from Phases 2/3 plus presolve (Phase 3.5) covers
+the medium-to-large LP case and benchmarks competitively with HiGHS-IPM
+on the Mittelmann sets. For small LPs and warm-start LP sequences, defer
+simplex until a specific application forces it; alternative is to wrap
+HiGHS as a backend.
 
 ### Nonconvex QP / global optimization
 
-Inherently combinatorial (branch-and-bound + SDP relaxation). Out of
-scope for the entire POUNCE direction — neither the NLP-IPM nor the
-convex-IPM addresses global optimization.
+Inherently combinatorial (spatial branch-and-bound + convex
+relaxation). Out of scope *for now* — neither the NLP-IPM nor the
+convex-IPM finds global optima today, and the B&B shell is substantial
+new engineering. But it is deliberately left *reachable*: the
+lower-bounding subproblem at each B&B node is itself a convex
+relaxation (Shor/SDP, RLT/LP, or convex-QP), which is precisely the
+conic family this note already plans to build. So the per-node solver
+is free; only the B&B shell is new.
 
-*Escape hatch:* none. Use BARON / Gurobi-nonconvex for problems with
-indefinite Hessians where local minima are insufficient.
+Architectural choices that keep global QP in scope for later, without
+redesign:
+
+1. **`NonconvexQp` stays a first-class `ProblemClass`**, never folded
+   into `Nlp`. It falls through to NLP-IPM (local min) today, but the
+   distinct class is the dispatch seam a future `qp-global` target
+   intercepts.
+2. **Reserve option space** — a future `solver_selection = qp-global`
+   value, or (cleaner) an orthogonal `require_global` flag, so the
+   dispatch `match` grows by one arm rather than being reworked.
+3. **Branching-rule-agnostic B&B shell.** The future `pounce-mip` B&B
+   shell (see "Mixed-integer" in the outlook) should parameterize the
+   branching rule and relaxation builder so that *spatial* branching
+   (continuous vars, for global QP) and *integer* branching (MIP) share
+   one tree / incumbent / pruning / node-queue core.
+4. **Preserve the classifier's Hessian factorization.** The PSD test in
+   the classifier already computes the eigenstructure of `P`; a global
+   solver reuses it for the DC split (`P = P⁺ − P⁻`) and relaxation
+   construction. Expose it rather than recomputing.
+5. **Factor-reuse / warm-start across nodes** (outlook items 1–2) is
+   what makes any B&B tractable — the same argument as MIP.
+
+*Escape hatch (until then):* use BARON / Gurobi-nonconvex for problems
+with indefinite Hessians where local minima are insufficient.
 
 ### Decision principle
 
@@ -378,15 +680,19 @@ both are weak (ADMM, AL), wrap or defer. When only one is strong
 - `crates/pounce-algorithm/src/options.rs` (or equivalent) — register
   `solver_selection`
 - `Cargo.toml` (workspace) — add `pounce-convex` as a member
-- `crates/pounce-presolve/` — LP-specific reductions over time
-  (singleton rows/cols, dual-bound tightening); not blocking
+- `crates/pounce-presolve/` — LP/QP reductions, IPM-aware reduction
+  policy, and a pure-Rust transaction-based postsolve stack (PaPILO
+  ideas, rayon for parallelism — not a wrap); see the "Presolve
+  integration" section for the scoped catalog and references. Not
+  blocking for correctness, but required for the Phase 3 benchmark bar.
 
 ### Add
 - `crates/pounce-cli/src/dispatch.rs` — `classify_problem(&NlProblem)
   -> ProblemClass` plus the `match`-based router
 - `crates/pounce-convex/` — new crate scaffolded with `solve_lp_ipm`
-  and `solve_qp_ipm` entry points; `src/ipm.rs` (the shared Mehrotra +
-  HSDE scaffolding) plus `src/cones/` (per-cone barrier, gradient,
+  and `solve_qp_ipm` entry points; `src/ipm.rs` (the shared Mehrotra
+  scaffolding; HSDE embedding added at the SOCP phase) plus `src/cones/`
+  (per-cone barrier, gradient,
   Hessian, scaling-update — one module per cone: `nonneg.rs`, `soc.rs`,
   `psd.rs`, `exp.rs`, `pow.rs`, `gpow.rs`). The first implementation
   target is `cones/nonneg.rs` (covers LP) plus the IPM scaffolding; QP
@@ -400,12 +706,26 @@ both are weak (ADMM, AL), wrap or defer. When only one is strong
 
 ## Verification
 
+The functional-correctness checks below cover *what* each phase must
+prove. The performance-engineering methodology that backs the
+"specialized path wins" claims — vectorization (SIMD), parallelism, the
+reproducibility-vs-performance decision, and the CI performance/numerical
+gates — lives in the companion note
+[`performance-engineering.md`](performance-engineering.md).
+
 Phase 1 (routing scaffolding, no behavior change):
 
 - `cargo test -p pounce-cli` covers new dispatcher with unit tests on
   `classify_problem`: feed it parsed `NlProblem` structs for known
-  LP / convex QP / nonconvex QP / NLP cases (builtins + Mittelmann
-  fixtures already on disk) and assert the right `ProblemClass`.
+  LP / convex QP / convex QCQP / nonconvex QP / NLP cases, plus boundary
+  cases that must fall back to NLP (inconclusive PSD test, parse
+  failure), and assert the right `ProblemClass`. These use **small
+  committed `.nl` fixtures** (one per class) so the unit tests are
+  hermetic — they must run in CI and a fresh clone, not depend on the
+  gitignored Mittelmann/CUTEst caches that only exist after a local
+  `make fetch`/`make translate`. The full benchmark sets stay for the
+  wall-clock validation in Phases 2–3.5, where relying on the local
+  cache is fine.
 - `make benchmark-mittelmann` produces identical results to current
   behavior — `auto` routes everything to NLP-IPM until `pounce-convex`
   lands.
@@ -421,6 +741,48 @@ Phase 2 (LP/QP actually dispatched):
 - `studio/mcp` MCP tools can render `compare_runs` between the two
   paths for any individual benchmark — `compare_runs` was built for
   exactly this kind of side-by-side analysis.
+
+Phase 3 (Mehrotra + certificate infeasibility): ✅ landed
+
+- Iteration-count regression: assert the predictor-corrector cuts
+  iterations vs the bare Phase-2 IPM — done in
+  `pounce-cli/tests/qp_vs_nlp_iterations.rs` (QP path uses fewer
+  interior-point iterations than the NLP path; ≈41% at n=50). Extending
+  this to the full Mittelmann LP / Maros-Mészáros sets is the remaining
+  benchmark-scale check.
+- Infeasibility / unboundedness: known-infeasible and known-unbounded
+  LP/QP fixtures assert the correct status instead of stalling — done in
+  `pounce-convex/tests/infeasibility.rs` (verified Farkas / recession
+  certificates) and end-to-end in
+  `pounce-cli/tests/qp_dispatch_end_to_end.rs`.
+
+Phase 3.5 (presolve) — the highest correctness risk is postsolve dual
+recovery, so it gets the most coverage:
+
+- Round-trip primal *and* dual: for each Mittelmann / Maros-Mészáros
+  instance, solve with presolve on and off and assert the recovered
+  `x` *and* the duals (`λ`, bound multipliers) match to 1e-6 after
+  postsolve. Primal-only matching hides the most common postsolve bug.
+- Per-reduction unit tests: each reduction (singleton / doubleton /
+  forcing / dominated row; singleton / duplicate column; bound
+  tightening) gets a fixture where postsolve must reconstruct the
+  eliminated primal *and* dual entries exactly.
+- Detection: presolve-only infeasibility / unboundedness fixtures
+  (e.g. contradictory singleton bounds) assert the correct status
+  without invoking the IPM at all.
+- QP-specific: a fixture where a variable substitution fills the
+  Hessian, asserting `P` is transformed consistently and the dual is
+  recovered with the quadratic term (the net-new Gould–Toint path).
+
+Phases 4–6 (conic):
+
+- Objective-value cross-check against Clarabel / MOSEK on the matching
+  cone benchmark set (SOCP / GP-entropy / SDP) to 1e-6.
+- Regression guard: adding a cone must not change LP/QP results — re-run
+  the Phase-2/3 suite and assert stable iteration counts on the pure
+  LP/QP instances. Convex-QCQP fixtures route to the SOCP path and are
+  cross-checked against the NLP-IPM local solution (same optimum, since
+  the QCQP is convex).
 
 Python / C APIs:
 
@@ -484,7 +846,7 @@ land. Listed roughly in the order POUNCE should adopt them.
   Heinkenschloss optimal-control benchmarks; relevant for the NLP
   path, not for LP/QP routing.
 
-### What "competitive" means in 2025
+### What "competitive" means
 
 Reading Mittelmann's site sets expectations:
 
@@ -600,7 +962,7 @@ crates/
   pounce-hsl/       # MA57 backend
   ┌─ consumers ─────────────────────────────────────┐
   pounce-algorithm/ # IPM-NLP (today)
-  pounce-convex/    # IPM-LP/QP, simplex (planned)
+  pounce-convex/    # IPM-LP/QP + conic (planned)
   pounce-qp/        # active-set QP (in flight)
   pounce-socp/      # SOCP / conic IPM (future)
   pounce-mcp/       # complementarity (future)

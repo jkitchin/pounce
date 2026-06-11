@@ -1,10 +1,10 @@
 {
-  "generated": "2026-06-02 00:07:18 EDT",
+  "generated": "2026-06-04 19:15:02 EDT",
   "host": "Johns-Mac-mini.local",
   "platform": "Darwin 25.5.0 arm64",
   "ipopt_bin": "/Users/jkitchin/projects/pounce/ref/Ipopt/install-ma57/bin/ipopt",
   "ipopt_version": "Ipopt 3.14.20 (Darwin arm64), ASL(20241202)",
   "linear_solver": "ma57 (via ref/Ipopt/install-ma57)",
   "timelimit": 300,
-  "git_sha": "4aa3f13"
+  "git_sha": "37133a7"
 }

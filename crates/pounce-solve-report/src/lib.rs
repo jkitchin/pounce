@@ -190,6 +190,13 @@ pub enum InputDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         size_bytes: Option<u64>,
     },
+    /// A Conic Benchmark Format (`.cbf`) instance — e.g. a CBLIB problem
+    /// solved through the convex conic driver.
+    CbfFile {
+        path: PathBuf,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size_bytes: Option<u64>,
+    },
     Builtin {
         name: String,
     },

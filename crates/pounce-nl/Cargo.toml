@@ -1,0 +1,21 @@
+[package]
+name = "pounce-nl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "AMPL .nl reader, reverse-mode AD tape, and TNLP evaluator for pounce"
+
+# The .nl pipeline (parser → Expr DAG → reverse-mode AD tape → NlTnlp)
+# lives here as a leaf crate so both the CLI and the Python bindings can
+# read a `.nl` file and evaluate objective/gradient/Hessian +
+# constraints/Jacobian without either depending on the other.
+[dependencies]
+pounce-common.workspace = true
+pounce-nlp = { workspace = true, features = ["serde"] }
+libloading = "0.8"
+tracing.workspace = true
+
+[lints]
+workspace = true

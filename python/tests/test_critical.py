@@ -194,3 +194,17 @@ def test_morse_index_degenerate_flag():
     assert deg
     idx, _, deg = _morse_index(np.diag([1.0, 1e-12]), 1e-8)
     assert deg
+
+
+def test_find_saddles_validates_index_and_budget():
+    """A Morse ``index`` outside ``[1, n]`` used to silently slice the step
+    vector wrong (finding the wrong critical points); it and a sub-1
+    ``n_saddles``/``patience``/``max_solves`` now raise clear errors."""
+    with pytest.raises(ValueError, match="index must be between 1 and the dimension 2"):
+        pounce.find_saddles(fun, np.zeros(2), grad=grad, hess=hess, index=5)
+    with pytest.raises(ValueError, match="index must be between 1 and the dimension 2"):
+        pounce.find_saddles(fun, np.zeros(2), grad=grad, hess=hess, index=0)
+    with pytest.raises(ValueError, match="n_saddles must be >= 1"):
+        pounce.find_saddles(fun, np.zeros(2), grad=grad, hess=hess, n_saddles=0)
+    with pytest.raises(ValueError, match="max_solves must be >= 1"):
+        pounce.find_saddles(fun, np.zeros(2), grad=grad, hess=hess, max_solves=0)

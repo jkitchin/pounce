@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cached;
+pub mod debug;
 pub mod diagnostics;
 pub mod exception;
 pub mod journalist;

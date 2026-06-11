@@ -85,6 +85,10 @@ impl PySolver {
             status,
             stats.iteration_count,
             stats.final_mu,
+            stats.final_kkt_error,
+            stats.final_dual_inf,
+            stats.final_constr_viol,
+            stats.final_compl,
         )?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         let _ = bridge; // alive via inner's Rc<RefCell<dyn TNLP>> clone
@@ -94,18 +98,30 @@ impl PySolver {
 
     /// Solve `K · lhs = rhs` against the converged KKT factor. Returns
     /// the solution vector. `rhs` must have length [`Self::kkt_dim`].
+    ///
+    /// `K` is the **natural-units** (unscaled) KKT matrix: when the
+    /// IPM solved with active NLP scaling (`nlp_scaling_method`,
+    /// `obj_scaling_factor`, user scaling) the back-solve is
+    /// conjugated so RHS and solution are in the user's own units
+    /// (pounce#128). Pass `scaled=True` for the raw back-solve against
+    /// the factor exactly as the IPM holds it.
+    #[pyo3(signature = (rhs, scaled = false))]
     fn kkt_solve<'py>(
         &self,
         py: Python<'py>,
         rhs: Vec<Number>,
+        scaled: bool,
     ) -> PyResult<Bound<'py, PyArray1<Number>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("kkt_solve: no converged factor (call solve() first)")
         })?;
         let mut lhs = vec![0.0; rhs.len()];
-        s.inner
-            .kkt_solve(&rhs, &mut lhs)
-            .map_err(solver_error_to_py)?;
+        let res = if scaled {
+            s.inner.kkt_solve_scaled(&rhs, &mut lhs)
+        } else {
+            s.inner.kkt_solve(&rhs, &mut lhs)
+        };
+        res.map_err(solver_error_to_py)?;
         Ok(lhs.into_pyarray_bound(py))
     }
 
@@ -119,11 +135,17 @@ impl PySolver {
     /// real back-solve cost (pounce#77 follow-up). Same converged
     /// factor and same per-RHS work — only the per-call FFI / executor
     /// pin overhead is amortised.
+    ///
+    /// Like [`Self::kkt_solve`], results are in natural (unscaled)
+    /// units; pass `scaled=True` for the raw solver-space back-solve
+    /// (pounce#128).
+    #[pyo3(signature = (rhs_flat, n_rhs, scaled = false))]
     fn kkt_solve_many<'py>(
         &self,
         py: Python<'py>,
         rhs_flat: Vec<Number>,
         n_rhs: usize,
+        scaled: bool,
     ) -> PyResult<Bound<'py, PyArray1<Number>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("kkt_solve_many: no converged factor (call solve() first)")
@@ -144,9 +166,13 @@ impl PySolver {
             )));
         }
         let mut lhs_flat = vec![0.0; n_rhs * dim];
-        s.inner
-            .kkt_solve_many(&rhs_flat, &mut lhs_flat, n_rhs)
-            .map_err(solver_error_to_py)?;
+        let res = if scaled {
+            s.inner
+                .kkt_solve_many_scaled(&rhs_flat, &mut lhs_flat, n_rhs)
+        } else {
+            s.inner.kkt_solve_many(&rhs_flat, &mut lhs_flat, n_rhs)
+        };
+        res.map_err(solver_error_to_py)?;
         Ok(lhs_flat.into_pyarray_bound(py))
     }
 
@@ -178,24 +204,70 @@ impl PySolver {
     }
 
     /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
-    /// rows. Returned as a `n²`-long column-major flat array
+    /// rows, in **natural (unscaled) units**: any NLP scaling baked
+    /// into the converged factor is undone, so `-inv(H_R)` is directly
+    /// the parameter covariance of an estimation problem regardless of
+    /// `nlp_scaling_method` (pounce#128). Pass `scaled=True` for the
+    /// solver-space value pounce returned before #128. `obj_scal`
+    /// survives as a plain extra multiplier (default 1.0); it is no
+    /// longer needed to undo pounce's own scaling. Returned as a
+    /// `n²`-long column-major flat array
     /// (`n = pin_constraint_indices.len()`).
-    #[pyo3(signature = (pin_constraint_indices, obj_scal = 1.0))]
+    #[pyo3(signature = (pin_constraint_indices, obj_scal = 1.0, scaled = false))]
     fn reduced_hessian<'py>(
         &self,
         py: Python<'py>,
         pin_constraint_indices: Vec<i64>,
         obj_scal: Number,
+        scaled: bool,
     ) -> PyResult<Bound<'py, PyArray1<Number>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("reduced_hessian: no converged factor (call solve() first)")
         })?;
         let pins = validate_pins(&pin_constraint_indices, s.m)?;
-        let hr = s
-            .inner
-            .compute_reduced_hessian(&pins, obj_scal)
-            .map_err(solver_error_to_py)?;
+        let hr = if scaled {
+            s.inner.compute_reduced_hessian_scaled(&pins, obj_scal)
+        } else {
+            s.inner.compute_reduced_hessian(&pins, obj_scal)
+        }
+        .map_err(solver_error_to_py)?;
         Ok(hr.into_pyarray_bound(py))
+    }
+
+    /// Effective NLP scaling the IPM applied on the held solve, as a
+    /// dict with keys `obj` (float, the objective factor `df`),
+    /// `c_scale` and `d_scale` (each an ndarray of per-row factors
+    /// over the algorithm's equality / inequality blocks, or `None`
+    /// when that block carries no row scaling).
+    /// `{"obj": 1.0, "c_scale": None, "d_scale": None}` ⇔ no scaling
+    /// was active.
+    #[getter]
+    fn nlp_scaling<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("nlp_scaling: no converged factor (call solve() first)")
+        })?;
+        let (df, dc, dd) = s.inner.nlp_scaling().map_err(solver_error_to_py)?;
+        let out = PyDict::new_bound(py);
+        out.set_item("obj", df)?;
+        out.set_item("c_scale", crate::problem::opt_vec_to_py(py, dc))?;
+        out.set_item("d_scale", crate::problem::opt_vec_to_py(py, dd))?;
+        Ok(out)
+    }
+
+    /// Inertia-correction perturbations `(delta_x, delta_s, delta_c,
+    /// delta_d)` baked into the held KKT factor, as a length-4
+    /// ndarray. All zero means the final factorization was
+    /// unregularized and the natural-units back-solves (covariance in
+    /// particular) invert the exact KKT matrix; nonzero means the
+    /// factor carries a regularization and `-inv(reduced_hessian)` is
+    /// perturbed (pounce#128 follow-up).
+    #[getter]
+    fn kkt_perturbations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("kkt_perturbations: no converged factor (call solve() first)")
+        })?;
+        let p = s.inner.kkt_perturbations().map_err(solver_error_to_py)?;
+        Ok(p.to_vec().into_pyarray_bound(py))
     }
 
     /// Dimension of the full compound KKT vector. `None` if no

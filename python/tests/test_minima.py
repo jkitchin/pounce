@@ -112,6 +112,40 @@ def test_patience_terminates_when_few_minima():
     assert r.x == pytest.approx([1.0, -2.0], abs=1e-5)
 
 
+def test_mlsl_terminates_and_respects_budget():
+    """pounce#103: MLSL must not spin on solve-less rounds.
+
+    In moderate dimension the clustering radius ``γ·√n·(ln N/N)^(1/n)``
+    barely shrinks, so once the single minimum of this bowl is found almost
+    every later sample is filtered out and no local solve fires. Before the
+    fix, termination was solve-gated — neither ``max_solves`` nor
+    ``patience`` advanced on those rounds — and the loop spun forever while
+    the pool grew under an O(N²) scan. A sample budget
+    (``max_solves`` × ``samples_per_round``) now bounds the loop directly,
+    independent of whether any solve fires.
+    """
+    n = 8
+    target = np.arange(1, n + 1) / (n + 1)  # interior optimum, well inside box
+    fun = lambda z: float(np.sum((np.asarray(z, float) - target) ** 2))
+    jac = lambda z: 2 * (np.asarray(z, float) - target)
+    hess = lambda z: 2 * np.eye(n)
+    bounds = [(-1.0, 1.0)] * n
+    r = pounce.find_minima(
+        fun, np.zeros(n), method="mlsl", jac=jac, hess=hess, bounds=bounds,
+        n_minima=6, max_solves=20, patience=8,
+        strategy_kw={"samples_per_round": 20},
+        seed=0, options=OPTS,
+    )
+    # It returns at all (no hang) with a valid terminal status...
+    assert r.status in ("converged", "budget_exhausted")
+    # ...having located the single minimum...
+    assert len(r) >= 1
+    assert r.fun == pytest.approx(0.0, abs=1e-6)
+    # ...and stayed within both budgets (solves, and the derived sample
+    # ceiling max_solves * samples_per_round).
+    assert r.n_solves <= 20
+
+
 def test_budget_is_respected():
     fun, jac, hess, bounds = rastrigin()
     r = pounce.find_minima(
@@ -145,3 +179,47 @@ def test_rastrigin_global_via_hopping():
         n_minima=8, max_solves=200, patience=60, dedup=1e-2, seed=1, options=OPTS,
     )
     assert r.fun == pytest.approx(0.0, abs=1e-4)
+
+
+def test_find_minima_and_saddles_reject_wrong_length_bounds():
+    """The sampling-based searches broadcast ``lo + (hi-lo)*u`` over the box, so
+    a wrong-length ``bounds`` could silently sample every dimension from one
+    variable's interval. Length is now validated up front (matching minimize)."""
+    def fun(z):
+        return float(z @ z)
+
+    def jac(z):
+        return 2.0 * np.asarray(z, float)
+
+    # two variables, one bound pair
+    with pytest.raises(ValueError, match="bounds has 1 entry but the problem has 2"):
+        pounce.find_minima(fun, x0=np.zeros(2), jac=jac, bounds=[(-2, 2)],
+                           options={"print_level": 0})
+
+    def hess(z):
+        return 2.0 * np.eye(2)
+
+    with pytest.raises(ValueError, match="bounds has 1 entry but the problem has 2"):
+        pounce.find_saddles(fun, x0=np.zeros(2), grad=jac, hess=hess,
+                            bounds=[(-2, 2)])
+
+    # correct length is accepted (smoke: returns a result, no exception)
+    r = pounce.find_minima(fun, x0=np.zeros(2), jac=jac,
+                           bounds=[(-2, 2), (-2, 2)], max_solves=5,
+                           options={"print_level": 0})
+    assert r is not None
+
+
+def test_find_minima_rejects_nonsensical_budget():
+    """``n_minima``/``patience``/``max_solves`` below 1 are nonsensical and used
+    to silently no-op or return a wrong count; they now raise clear errors."""
+    f = lambda v: float(v @ v)
+    g = lambda v: 2.0 * np.asarray(v, float)
+    box = [(-2, 2), (-2, 2)]
+    opts = {"print_level": 0}
+    with pytest.raises(ValueError, match="n_minima must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, n_minima=0, options=opts)
+    with pytest.raises(ValueError, match="patience must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, patience=-1, options=opts)
+    with pytest.raises(ValueError, match="max_solves must be >= 1"):
+        pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, max_solves=0, options=opts)

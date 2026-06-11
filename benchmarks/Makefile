@@ -53,6 +53,8 @@ export IPOPT_LINEAR_SOLVER
 	qp-run qp-rerun qp-generate \
 	lp-run lp-rerun lp-generate \
 	lpopt-run lpopt-rerun lpopt-generate \
+	globallib-run globallib-rerun globallib-translate \
+	globallib-micro globallib-fast .PHONY-build-simplex-obbt \
 	ipopt-reference ipopt-reference-provenance \
 	$(addprefix ipopt-ref-,$(REF_SUITES)) \
 	gams-bench gams-rerun \
@@ -89,6 +91,10 @@ help:
 	@echo "  lpopt-run       / -rerun   HARD Mittelmann lpopt LP subset (stress tier; use BENCH_TIMELIMIT=1800)"
 	@echo "  lpopt-generate             (Re)generate the lpopt .nl files only (downloads MPS from plato lptestset)"
 	@echo "  gams-bench      / gams-rerun  GAMS solver-link smoke check (10 problems; not in the report)"
+	@echo "  globallib-run   / -rerun   GLOBALLib proven-optimum global suite (solver_selection=global; vs known optima)"
+	@echo "  globallib-micro            fast dev loop (~3s): IPM-vs-simplex OBBT cross-check on tiers/micro.txt"
+	@echo "  globallib-fast             broader fast cross-check (~30s) on tiers/fast.txt"
+	@echo "  globallib-translate        (Re)generate the globallib .nl from AMPL .mod (needs ampl; see benchmarks/globallib)"
 	@echo ""
 	@echo "  clean-bench       Wipe pounce results/logs across every suite (keeps the committed ipopt reference)"
 	@echo "  clean-bench-large-scale Wipe large_scale pounce.json"
@@ -143,6 +149,7 @@ nldir_mittelmann  := $(POUNCE_BENCH_DATA)/mittelmann/nl
 nldir_qp          := $(POUNCE_BENCH_DATA)/qp/nl
 nldir_lp          := $(POUNCE_BENCH_DATA)/lp/nl
 nldir_lpopt       := $(POUNCE_BENCH_DATA)/lpopt/nl
+nldir_globallib   := $(POUNCE_BENCH_DATA)/globallib/nl
 
 # --- pounce release runs (incremental, pounce-only) ---
 # Each <suite>/pounce.json rebuilds when the pounce binary or the suite's
@@ -305,6 +312,54 @@ mittelmann-run: mittelmann-translate $(MITT_DIR)/pounce.json
 mittelmann-rerun:
 	rm -f $(MITT_DIR)/pounce.json
 	$(MAKE) mittelmann-run
+
+# --- GLOBALLib global-optimization benchmark (pounce-global) ---
+# The only tier that drives `solver_selection=global`: the GLOBALLib subset
+# with a *proven* global optimum (MINLPLib `=opt=`). Translation clones the
+# AMPL .mod sources and runs AMPL `write` into the bench-data tree; the run
+# checks each certified objective against the known optimum in optima.txt.
+# Needs `ampl` on PATH (set $AMPL to override). GLOBALLIB_TIMEOUT caps each
+# problem (default 30s). This is a hard external (subprocess) kill; the global
+# solver also accepts `global_max_cpu_time` (and `global_max_nodes` / gap / cut
+# tunables — see `register_global_options` in pounce-cli) for a graceful
+# node-boundary stop that still reports the best incumbent, but the external
+# timeout stays as the hard backstop (it catches a single pathological slow node).
+GLOBALLIB_DIR     := $(REPO_ROOT)/benchmarks/globallib
+GLOBALLIB_TIMEOUT ?= 30
+
+globallib-translate:
+	$(GLOBALLIB_DIR)/translate.sh $(nldir_globallib)
+
+$(GLOBALLIB_DIR)/pounce.json: $(POUNCE_BIN) $(wildcard $(nldir_globallib)/*.nl)
+	python3 $(GLOBALLIB_DIR)/run_globallib.py --bin $(POUNCE_BIN) \
+		--nl-dir $(nldir_globallib) --timeout $(GLOBALLIB_TIMEOUT) --out $@
+
+globallib-run: $(GLOBALLIB_DIR)/pounce.json
+
+globallib-rerun:
+	rm -f $(GLOBALLIB_DIR)/pounce.json
+	$(MAKE) globallib-run
+
+# --- fast dev tiers: small/fast subsets for wiring the per-node pieces (OBBT,
+# simplex/IPM warm-starts, branching) with a seconds-long edit->run loop.
+# Both run the IPM and simplex OBBT engines and assert they certify identical
+# optima (the soundness gate), so the simplex binary needs the feature on.
+GLOBALLIB_DEV_BIN := $(REPO_ROOT)/target/release/pounce
+.PHONY-build-simplex-obbt:
+	$(CARGO) build --release --manifest-path $(CARGO_MANIFEST) \
+		-p pounce-cli --features simplex-obbt
+
+# Inner loop (~2-3s): `make globallib-micro`
+globallib-micro: .PHONY-build-simplex-obbt
+	python3 $(GLOBALLIB_DIR)/compare_obbt_engines.py \
+		--bin $(GLOBALLIB_DEV_BIN) --nl-dir $(nldir_globallib) \
+		--stems-file $(GLOBALLIB_DIR)/tiers/micro.txt --timeout 10
+
+# Broader fast regression (~25-30s both engines): `make globallib-fast`
+globallib-fast: .PHONY-build-simplex-obbt
+	python3 $(GLOBALLIB_DIR)/compare_obbt_engines.py \
+		--bin $(GLOBALLIB_DEV_BIN) --nl-dir $(nldir_globallib) \
+		--stems-file $(GLOBALLIB_DIR)/tiers/fast.txt --timeout 10
 
 # --- ipopt-ma57 reference (run rarely; committed) ---
 # `make ipopt-reference` runs ipopt-ma57 across every suite and writes the

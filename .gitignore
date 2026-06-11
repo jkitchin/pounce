@@ -6,6 +6,11 @@
 # mdbook render output — `make book` regenerates it from docs/src/.
 /docs/book
 
+# Versioned-docs render output — `scripts/build-versioned-docs.sh` default
+# output dir (stable + dev + archived tag builds for GitHub Pages).
+/site
+/_serve
+
 # Local Python venv used to build/test the native extension
 # (`maturin develop`). Machine-specific build artifact.
 /.venv
@@ -26,6 +31,8 @@
 !/benchmarks/benchmark_report.py
 !/benchmarks/BENCHMARK_REPORT.md
 !/benchmarks/BENCHMARK_REPORT.json
+!/benchmarks/figures
+!/benchmarks/figures/*
 !/benchmarks/preprocessing
 !/benchmarks/scripts
 !/benchmarks/*/
@@ -53,6 +60,11 @@
 !/benchmarks/lp/mps_to_nl.py
 !/benchmarks/lpopt/build_subset.py
 !/benchmarks/lpopt/mps_to_nl.py
+# The cblib suite is the conic (exp/power cone) tier: CBLIB .cbf instances
+# solved through the pounce_cblib binary. Track its runner (README via the
+# per-suite rule above); the per-run pounce.json stays ignored like every
+# other suite.
+!/benchmarks/cblib/run_cblib.py
 # Vanderbei reference status (derived once from cute_table.pdf): which
 # problems have a documented feasible optimum vs. are hard/infeasible/
 # unbounded/untabulated. Tracked so we never have to re-derive it.
@@ -84,6 +96,9 @@ python/dist/
 # Figures rendered by example scripts (e.g. examples/critical_points.py)
 python/examples/*.png
 python/*.egg-info/
+
+# Local virtualenvs (e.g. for building the extension + running notebooks)
+.venv/
 
 # Claude Code local state
 .claude/

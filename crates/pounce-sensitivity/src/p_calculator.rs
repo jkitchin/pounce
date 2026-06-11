@@ -258,7 +258,7 @@ mod tests {
     use crate::backsolver::DenseLuBacksolver;
 
     #[test]
-    fn compute_p_solves_each_a_column_against_K() {
+    fn compute_p_solves_each_a_column_against_k_matrix() {
         // K is the 3×3 SPD example from the backsolver test.
         //   2 -1  0
         //  -1  2 -1

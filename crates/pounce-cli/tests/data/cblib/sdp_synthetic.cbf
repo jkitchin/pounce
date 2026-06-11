@@ -1,0 +1,35 @@
+# Synthetic SDP via an affine PSD constraint (PSDCON), hand-authored valid
+# CBF v2 — exercises the DCOORD/HCOORD reader. Not from CBLIB.
+#
+#   max  λ   s.t.   M − λ·I ⪰ 0,   M = diag(2, 5)
+#
+# As a PSDCON: D = M (DCOORD), H_{con=0, var=0} = −I (HCOORD, the coefficient
+# of λ). The constraint D + λ·H = diag(2−λ, 5−λ) ⪰ 0 forces λ ≤ 2, so the
+# optimum is λ = λ_min(M) = 2.
+VER
+2
+
+OBJSENSE
+MAX
+
+VAR
+1 1
+F 1
+
+PSDCON
+1
+2
+
+OBJACOORD
+1
+0 1.0
+
+HCOORD
+2
+0 0 0 0 -1.0
+0 0 1 1 -1.0
+
+DCOORD
+2
+0 0 0 2.0
+0 1 1 5.0

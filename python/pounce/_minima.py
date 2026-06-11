@@ -42,7 +42,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from ._minimize import minimize, OptimizeResult
+from ._minimize import minimize, OptimizeResult, _validate_bounds_length
 
 __all__ = ["find_minima", "MinimaResult"]
 
@@ -229,6 +229,22 @@ class _Context:
         self.psd_tol = psd_tol
         self.n_solves = 0
         self.max_solves = None
+        # Sampling budget: strategies whose expensive work is *sampling*
+        # rather than solving (MLSL) count each drawn sample here, so the
+        # search is bounded even on rounds that trigger no local solve.
+        self.n_samples = 0
+        self.max_samples = None
+
+    def note_sample(self):
+        """Count one sampled point against the sampling budget.
+
+        MLSL grows a sample pool and runs an O(N²) single-linkage scan per
+        round; on a problem where almost every sample is filtered out, no
+        solve fires, so ``max_solves`` never bounds the loop (pounce#103).
+        Counting samples gives that loop a hard ceiling."""
+        if self.max_samples is not None and self.n_samples >= self.max_samples:
+            raise _Stop("budget_exhausted")
+        self.n_samples += 1
 
     def solve(self, fun, x0, jac=None, hess=None):
         if self.max_solves is not None and self.n_solves >= self.max_solves:
@@ -240,6 +256,17 @@ class _Context:
             **(self.options or {}),
         )
 
+    # Acceptance must tolerate the solver's bound relaxation: the IPM lets a
+    # converged primal sit up to ``bound_relax_factor * max(1, |bound|)``
+    # outside a bound (the Ipopt default factor is 1e-8). On problems that
+    # bind a large-magnitude limit (e.g. ACOPF generator/flow limits in the
+    # hundreds), that legal slack dwarfs any fixed absolute tolerance, so a
+    # purely absolute test wrongly rejects every minimum (pounce#101). Use a
+    # bound-magnitude-relative tolerance, well above the relaxation but far
+    # below any real basin spacing.
+    _ATOL = 1e-9
+    _RTOL = 1e-6
+
     def in_bounds(self, x):
         if self.bounds is None:
             return True
@@ -247,10 +274,14 @@ class _Context:
             if bd is None:
                 continue
             lo, hi = bd
-            if lo is not None and xi < lo - 1e-9:
-                return False
-            if hi is not None and xi > hi + 1e-9:
-                return False
+            if lo is not None:
+                tol = self._ATOL + self._RTOL * max(1.0, abs(lo))
+                if xi < lo - tol:
+                    return False
+            if hi is not None:
+                tol = self._ATOL + self._RTOL * max(1.0, abs(hi))
+                if xi > hi + tol:
+                    return False
         return True
 
     def is_minimum(self, x):
@@ -520,8 +551,10 @@ def _run_mlsl(ctx, state, x0, rng, kw):
     res = ctx.solve(ctx.fun, x0, ctx.jac, ctx.hess)
     state.consider(res.x, res.success, polish=False)
     while True:
-        # Grow the sample pool.
+        # Grow the sample pool (each draw counts against the sample budget,
+        # so a round that solves nothing still makes the loop terminate).
         for _ in range(batch):
+            ctx.note_sample()
             s = _sample(ctx.bounds, x0, rng, jitter, sobol)
             pool_x.append(s)
             pool_f.append(float(ctx.fun(s)))
@@ -651,7 +684,14 @@ def find_minima(
         raise ValueError(
             f"unknown method {method!r}; choose from {sorted(_STRATEGIES)}"
         )
-    x0 = np.asarray(x0, dtype=float)
+    x0 = np.atleast_1d(np.asarray(x0, dtype=float))
+    _validate_bounds_length(bounds, x0.size)
+    if n_minima < 1:
+        raise ValueError(f"n_minima must be >= 1, got {n_minima}")
+    if patience < 1:
+        raise ValueError(f"patience must be >= 1, got {patience}")
+    if max_solves is not None and max_solves < 1:
+        raise ValueError(f"max_solves must be >= 1, got {max_solves}")
     rng = np.random.default_rng(seed)
     if max_solves is None:
         # Generous default: repulsion methods spend a polish solve per
@@ -671,6 +711,14 @@ def find_minima(
 
     ctx = _Context(fun, jac, hess, bounds, constraints, options, psd_tol)
     ctx.max_solves = max_solves
+    # Hard ceiling on sampled points for solve-gated strategies (MLSL): the
+    # natural envelope is one round of samples per unit of solve budget.
+    # Termination is otherwise solve-gated, so a round whose clustering filter
+    # rejects every sample never advances `max_solves` or `patience`; this cap
+    # guarantees `max_solves` bounds wall-clock even when no solve ever fires
+    # (pounce#103). Overridable via strategy_kw["max_samples"].
+    batch = max(int(kw.get("samples_per_round", 20)), 1)
+    ctx.max_samples = int(kw.get("max_samples", max_solves * batch))
     archive = MinimaArchive(dedup, distance)
     state = _State(ctx, archive, n_minima, patience, callback)
 

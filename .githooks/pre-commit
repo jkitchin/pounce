@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Reject commits that don't satisfy rustfmt, mirroring CI's
+# `cargo fmt --all -- --check` gate so formatting drift never reaches CI
+# (it had broken `main` twice). Enable with:
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass for a single commit with `git commit --no-verify` (discouraged).
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found on PATH; skipping rustfmt check" >&2
+    exit 0
+fi
+
+if ! cargo fmt --all -- --check; then
+    echo >&2
+    echo "pre-commit: rustfmt check failed — run 'cargo fmt --all', re-stage, and commit again." >&2
+    exit 1
+fi

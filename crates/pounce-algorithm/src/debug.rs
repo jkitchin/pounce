@@ -27,120 +27,16 @@
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::Number;
+use pounce_linalg::{Matrix, Vector};
+use pounce_nlp::ipopt_nlp::SplitNames;
 
-/// Where in the main loop a checkpoint fired.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Checkpoint {
-    /// Top of an outer iteration — after the intermediate callback,
-    /// before this iteration's Newton step is computed. The iterate,
-    /// multipliers, and μ all reflect the *accepted* point from the
-    /// previous iteration.
-    IterStart,
-    /// After the barrier parameter μ was updated for this iteration
-    /// (before the search direction is computed).
-    AfterBarrierUpdate,
-    /// After the primal-dual Newton step was computed — the search
-    /// direction `δ` (`data.delta`), the applied regularization, and the
-    /// KKT factorization are available.
-    AfterSearchDirection,
-    /// After the line search chose a step length and the trial point was
-    /// accepted — α (`info_alpha_*`) and the new iterate are in place.
-    AfterStep,
-    /// The line search *rejected* this iteration's step — it hit the tiny-step
-    /// floor or exhausted its backtracks without an acceptable point, and the
-    /// solver is about to fall into restoration. The search direction `δ` and
-    /// the un-accepted current iterate are intact for inspection. The "why did
-    /// the line search give up here?" stop, distinct from the restoration entry
-    /// that follows.
-    StepRejected,
-    /// Just before the algorithm switches into the restoration phase —
-    /// the iterate that tripped restoration is intact. The most-requested
-    /// "why did this go to restoration?" stop.
-    PreRestoration,
-    /// Just after the restoration phase returns, so its effect on the
-    /// iterate can be inspected.
-    PostRestoration,
-    /// The solve has finished (or is about to): fired once before
-    /// `optimize` returns, at the final iterate, carrying the outcome
-    /// via [`DebugCtx::status`]. Lets a debugger drop in for a
-    /// post-mortem at the failing (or final) point. The [`DebugAction`]
-    /// returned at this checkpoint is **ignored** — the solve is already
-    /// over, so there is nothing left to resume or stop.
-    Terminated,
-}
-
-impl Checkpoint {
-    /// The stable wire/CLI protocol name for this checkpoint. These strings
-    /// are intentionally **not** the variant identifiers (`AfterBarrierUpdate`
-    /// → `"after_mu"`, `PreRestoration` → `"pre_restoration_entry"`) — they're
-    /// the names the JSON protocol and `stop-at` use, so match on the variant,
-    /// not the string. Locked by the `checkpoint_as_str_is_stable` test.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Checkpoint::IterStart => "iter_start",
-            Checkpoint::AfterBarrierUpdate => "after_mu",
-            Checkpoint::AfterSearchDirection => "after_search_dir",
-            Checkpoint::AfterStep => "after_step",
-            Checkpoint::StepRejected => "step_rejected",
-            Checkpoint::PreRestoration => "pre_restoration_entry",
-            Checkpoint::PostRestoration => "post_restoration_exit",
-            Checkpoint::Terminated => "terminated",
-        }
-    }
-
-    /// Sub-iteration checkpoints (everything between `IterStart` and the
-    /// next `IterStart`).
-    pub fn is_sub_iteration(self) -> bool {
-        matches!(
-            self,
-            Checkpoint::AfterBarrierUpdate
-                | Checkpoint::AfterSearchDirection
-                | Checkpoint::AfterStep
-                | Checkpoint::StepRejected
-                | Checkpoint::PreRestoration
-                | Checkpoint::PostRestoration
-        )
-    }
-}
-
-/// What the algorithm should do after a [`DebugHook`] returns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DebugAction {
-    /// Keep solving.
-    Resume,
-    /// Stop the solve now. Surfaces to the caller as
-    /// `SolverReturn::UserRequestedStop`.
-    Stop,
-}
+pub use pounce_common::debug::{
+    Checkpoint, DebugAction, DebugHook, DebugState, IterSnapshot, KktReport, KktTriplets, LFactor,
+    ResidKind, Residual,
+};
 
 /// The eight primal/dual blocks of an iterate, addressable by name.
 pub const BLOCK_NAMES: [&str; 8] = ["x", "s", "y_c", "y_d", "z_l", "z_u", "v_l", "v_u"];
-
-/// KKT-factorization report (see [`DebugCtx::kkt`]). The inertia of a
-/// well-posed primal-dual system is `(n_pos = n, n_neg = m, n_zero = 0)`;
-/// a mismatch (or nonzero regularization) is the classic signal that the
-/// step is being stabilized.
-#[derive(Clone, Debug)]
-pub struct KktReport {
-    /// Augmented-system dimension (n + m).
-    pub dim: i32,
-    /// Negative eigenvalues reported (-1 if the backend has no inertia).
-    pub n_neg: i32,
-    /// Positive eigenvalues = `dim − n_neg` (-1 if unknown).
-    pub n_pos: i32,
-    /// Expected negatives = number of equality + inequality multipliers.
-    pub expected_neg: i32,
-    /// Whether the backend reports inertia.
-    pub provides_inertia: bool,
-    /// `true` when reported inertia matches the expected `(n, m, 0)`.
-    pub inertia_correct: bool,
-    /// Primal regularization δ_w applied to the (1,1) block.
-    pub delta_w: Number,
-    /// Dual regularization δ_c applied to the (3,3)/(4,4) blocks.
-    pub delta_c: Number,
-    /// Factorization status (debug string).
-    pub status: String,
-}
 
 /// Live, mutable view of solver state handed to a [`DebugHook`].
 ///
@@ -155,6 +51,33 @@ pub struct DebugCtx {
     cp: Checkpoint,
     /// Solve outcome, set only for the [`Checkpoint::Terminated`] fire.
     status: Option<String>,
+    /// Convergence-tolerance changes the debugger asked to apply *in
+    /// place* (so the next `step` honors them). The main loop drains
+    /// these after the hook returns and writes them into the live
+    /// convergence-check policy — see [`Self::take_live_tolerances`].
+    pending_tol: Vec<(String, Number)>,
+}
+
+/// Solver options the debugger can apply in place at the next checkpoint:
+/// the convergence-check tolerances [`crate::conv_check`]'s policy
+/// re-reads each iteration. Anything not listed here is baked into a
+/// strategy at build time and needs a `resolve` to take effect.
+pub const LIVE_TOLERANCE_OPTS: &[&str] = &[
+    "tol",
+    "dual_inf_tol",
+    "constr_viol_tol",
+    "compl_inf_tol",
+    "acceptable_tol",
+    "acceptable_dual_inf_tol",
+    "acceptable_constr_viol_tol",
+    "acceptable_compl_inf_tol",
+    "acceptable_obj_change_tol",
+];
+
+/// Whether `name` is a tolerance the debugger can hot-swap live (next
+/// `step`), as opposed to a structural option that needs `resolve`.
+pub fn is_live_tolerance(name: &str) -> bool {
+    LIVE_TOLERANCE_OPTS.contains(&name)
 }
 
 /// A cheap, correct snapshot of the primal-dual state at one step.
@@ -181,10 +104,35 @@ impl IterateSnapshot {
         self.mu
     }
 
+    pub fn tau(&self) -> Number {
+        self.tau
+    }
+
+    /// The captured full primal-dual iterate (algorithm space), for the
+    /// debugger's `resolve` warm restart. Cloning is `Rc`-shallow.
+    pub(crate) fn iterates(&self) -> &crate::iterates_vector::IteratesVector {
+        &self.curr
+    }
+
     /// Read a named block of the snapshotted iterate as a flat `f64` vec.
     pub fn block(&self, name: &str) -> Option<Vec<Number>> {
         let v = block_ref(&self.curr, name)?;
         Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
+    }
+}
+
+impl IterSnapshot for IterateSnapshot {
+    fn iter(&self) -> i32 {
+        IterateSnapshot::iter(self)
+    }
+    fn mu(&self) -> Number {
+        IterateSnapshot::mu(self)
+    }
+    fn block(&self, name: &str) -> Option<Vec<Number>> {
+        IterateSnapshot::block(self, name)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -195,7 +143,22 @@ impl DebugCtx {
             cq: Some(cq),
             cp,
             status: None,
+            pending_tol: Vec::new(),
         }
+    }
+
+    /// Stage a live convergence-tolerance change (e.g. `tol`,
+    /// `acceptable_tol`). Accumulated across all commands at one pause and
+    /// applied by the main loop after the hook returns, so the next
+    /// iteration's convergence test uses the new value. No effect for
+    /// names outside [`LIVE_TOLERANCE_OPTS`].
+    pub fn set_live_tolerance(&mut self, name: &str, value: Number) {
+        self.pending_tol.push((name.to_string(), value));
+    }
+
+    /// Drain the staged live-tolerance changes (main loop only).
+    pub fn take_live_tolerances(&mut self) -> Vec<(String, Number)> {
+        std::mem::take(&mut self.pending_tol)
     }
 
     /// Attach a solve-outcome string (used for the terminal checkpoint).
@@ -217,6 +180,7 @@ impl DebugCtx {
             cq: None,
             cp,
             status: None,
+            pending_tol: Vec::new(),
         }
     }
 
@@ -312,6 +276,89 @@ impl DebugCtx {
         Some(crate::ipopt_alg::flat_read_owned(v.as_ref()))
     }
 
+    /// Full-length variable bounds in algorithm space — `(x_L, x_U)`, each
+    /// of length `n`, with `-∞` / `+∞` in slots that have no lower / upper
+    /// bound. Reconstructed from the NLP's *reduced* bound vectors
+    /// (`x_l`/`x_u`, indexed over only the bounded variables) and their
+    /// expansion matrices, so the result lines up with the `x` block and
+    /// with a `set x` / `resolve` seed. `None` in the CQ-less test context
+    /// or before the iterate exists.
+    ///
+    /// These are the bounds the *algorithm* sees — post-scaling and after
+    /// any `bound_relax_factor` — which is exactly the space a box-sampled
+    /// start must live in to be a valid seed.
+    pub fn var_bounds(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        let cq = self.cq.as_ref()?.borrow();
+        let nlp = cq.nlp().borrow();
+        let d = self.data.borrow();
+        let x = &d.curr.as_ref()?.x; // full x-space template
+        let lower = expand_bound(&*nlp.px_l(), nlp.x_l(), &**x, Number::NEG_INFINITY);
+        let upper = expand_bound(&*nlp.px_u(), nlp.x_u(), &**x, Number::INFINITY);
+        Some((lower, upper))
+    }
+
+    /// Per-constraint signed primal residuals at the current iterate,
+    /// equality constraints ([`ResidKind::Eq`], `c_i(x)`) then inequality
+    /// constraints ([`ResidKind::Ineq`], `d_i(x) − s_i`). These are the
+    /// same quantities the studio iterate-dump emits as `slack`, and the
+    /// largest `|value|` over the returned vector equals [`Self::inf_pr`].
+    /// `None` only in the CQ-less test context.
+    pub fn constraint_residuals(&self) -> Option<Vec<Residual>> {
+        let cq = self.cq.as_ref()?.borrow();
+        let c = crate::ipopt_alg::flat_read_owned(cq.curr_c().as_ref());
+        let dms = crate::ipopt_alg::flat_read_owned(cq.curr_d_minus_s().as_ref());
+        let mut out = Vec::with_capacity(c.len() + dms.len());
+        out.extend(c.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::Eq,
+            index,
+            value,
+        }));
+        out.extend(dms.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::Ineq,
+            index,
+            value,
+        }));
+        Some(out)
+    }
+
+    /// Per-variable signed dual residuals (Lagrangian-gradient
+    /// components) at the current iterate, `x`-space
+    /// ([`ResidKind::DualX`], `(∇_x L)_i`) then `s`-space
+    /// ([`ResidKind::DualS`], `(∇_s L)_i`). The largest `|value|` over
+    /// the returned vector equals [`Self::inf_du`]. `None` only in the
+    /// CQ-less test context.
+    pub fn dual_residuals(&self) -> Option<Vec<Residual>> {
+        let cq = self.cq.as_ref()?.borrow();
+        let gx = crate::ipopt_alg::flat_read_owned(cq.curr_grad_lag_x().as_ref());
+        let gs = crate::ipopt_alg::flat_read_owned(cq.curr_grad_lag_s().as_ref());
+        let mut out = Vec::with_capacity(gx.len() + gs.len());
+        out.extend(gx.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::DualX,
+            index,
+            value,
+        }));
+        out.extend(gs.iter().enumerate().map(|(index, &value)| Residual {
+            kind: ResidKind::DualS,
+            index,
+            value,
+        }));
+        Some(out)
+    }
+
+    /// Model names for the residual index spaces, projected into the
+    /// solver's split space (free variables, equalities, inequalities), or
+    /// `None` when the problem carries no names (or in the CQ-less test
+    /// context). The REPL pairs these with [`Residual::kind`] /
+    /// [`Residual::index`] to print `mass_balance` instead of `c[3]` —
+    /// closing the model-vs-index reporting gap Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) identify for equation-oriented
+    /// model debugging.
+    pub fn split_names(&self) -> Option<SplitNames> {
+        let cq = self.cq.as_ref()?.borrow();
+        let names = cq.nlp().borrow().split_space_names();
+        names
+    }
+
     /// Primal regularization δ_w **as recorded for this iteration's info**
     /// (`info_regu_x`) — the value reported in the iteration table's `lg(rg)`
     /// column, reset to 0 at the start of each iteration. This is distinct
@@ -351,6 +398,7 @@ impl DebugCtx {
         let n_pos = if k.n_neg >= 0 { k.dim - k.n_neg } else { -1 };
         let inertia_correct = k.provides_inertia && k.n_neg == expected_neg;
         Some(KktReport {
+            iter: k.iter,
             dim: k.dim,
             n_neg: k.n_neg,
             n_pos,
@@ -369,9 +417,56 @@ impl DebugCtx {
         self.data.borrow().kkt_debug.as_ref()?.matrix.clone()
     }
 
+    /// Numerical rank diagnosis of the equality-constraint Jacobian `J_c`
+    /// at the current iterate. `J_c` is the block whose (near) rank
+    /// deficiency drives the `δ_c` dual regularization and wrong-inertia
+    /// signals; this assembles it densely (with the constraint scaling the
+    /// solver factorizes), runs a rank-revealing SVD, and localizes any
+    /// dependency to specific equation rows by their model name (see
+    /// [`crate::debug_rank`]). `None` in the CQ-less test context, when the
+    /// problem has no equality constraints, or if the SVD fails.
+    ///
+    /// Unlike the structural Dulmage–Mendelsohn pass (which works on the
+    /// sparsity pattern alone), this catches dependencies that are
+    /// *numerical* — values that cancel over a structurally full-rank
+    /// pattern at this point.
+    pub fn rank_report(&self) -> Option<crate::debug_rank::RankReport> {
+        use crate::debug_rank::RankRow;
+        use pounce_linalg::triplet::GenTMatrix;
+        let cq = self.cq.as_ref()?.borrow();
+        let jac = cq.curr_jac_c();
+        let g = jac.as_any().downcast_ref::<GenTMatrix>()?;
+        let m = g.n_rows() as usize;
+        let n = g.n_cols() as usize;
+        if m == 0 || n == 0 {
+            return None;
+        }
+        // Dense row-major from the 1-based triplets. Values already carry
+        // the constraint scaling, so this is the matrix the linear solver
+        // actually factorizes.
+        let mut dense = vec![0.0; m * n];
+        for ((&ir, &jc), &v) in g.irows().iter().zip(g.jcols()).zip(g.values()) {
+            dense[(ir - 1) as usize * n + (jc - 1) as usize] += v;
+        }
+        let rows: Vec<RankRow> = (0..m)
+            .map(|index| RankRow {
+                kind: ResidKind::Eq,
+                index,
+            })
+            .collect();
+        crate::debug_rank::svd_rank(m, n, &dense, rows)
+    }
+
+    /// The outer iteration the captured KKT system / factor came from —
+    /// the previous iteration at an `iter_start` pause (look-back). For
+    /// labeling `viz kkt` / `viz L` with the right iteration.
+    pub fn kkt_captured_iter(&self) -> Option<i32> {
+        Some(self.data.borrow().kkt_debug.as_ref()?.iter)
+    }
+
     /// The `LDLᵀ` factor (`n`, `perm`, strict-lower `l_irn`/`l_jcn` and
-    /// optional `l_vals`) for `viz L`, if captured. Capture is opt-in —
-    /// call [`Self::request_l_factor`] first (it's the expensive piece).
+    /// optional `l_vals`) for `viz L`, if captured this iteration (i.e.
+    /// the debugger was stepping — see `DebugHook::wants_kkt_capture`).
     #[allow(clippy::type_complexity)]
     pub fn kkt_l_factor(
         &self,
@@ -385,32 +480,6 @@ impl DebugCtx {
             f.l_jcn.clone(),
             f.l_vals.clone(),
         ))
-    }
-
-    /// Ask the solver to capture the `LDLᵀ` factor on subsequent solves
-    /// (so `viz L` has data). Returns whether it's already available now.
-    pub fn request_l_factor(&mut self) -> bool {
-        self.data.borrow_mut().want_l_factor = true;
-        self.data
-            .borrow()
-            .kkt_debug
-            .as_ref()
-            .map(|k| k.l_factor.is_some())
-            .unwrap_or(false)
-    }
-
-    /// Ask the solver to assemble the KKT matrix triplets on subsequent
-    /// solves (so `viz kkt`/`save` has the matrix). Off by default so an
-    /// attached debugger doesn't pay the O(nnz) assembly every iteration.
-    /// Returns whether the triplets are already available now.
-    pub fn request_kkt_matrix(&mut self) -> bool {
-        self.data.borrow_mut().want_matrix = true;
-        self.data
-            .borrow()
-            .kkt_debug
-            .as_ref()
-            .map(|k| k.matrix.is_some())
-            .unwrap_or(false)
     }
 
     // ---- vector reads --------------------------------------------------
@@ -513,6 +582,34 @@ impl DebugCtx {
     }
 }
 
+/// Expand a *reduced* bound vector (one entry per bounded variable) into a
+/// full-length `Vec<Number>`, placing `absent` in slots that variable has
+/// no such bound. `p` is the bound's expansion matrix (full × reduced),
+/// `template` any full x-space vector (for the right dimension/space).
+///
+/// `P · 1` marks which full slots are bounded; `P · bound` scatters the
+/// bound values into them. Anything the mask leaves untouched gets `absent`
+/// (`±∞`).
+fn expand_bound(
+    p: &dyn Matrix,
+    reduced: &dyn Vector,
+    template: &dyn Vector,
+    absent: Number,
+) -> Vec<Number> {
+    let mut ones = reduced.make_new();
+    ones.set(1.0);
+    let mut mask = template.make_new();
+    p.mult_vector(1.0, &*ones, 0.0, &mut *mask);
+    let mut vals = template.make_new();
+    p.mult_vector(1.0, reduced, 0.0, &mut *vals);
+    let mask = crate::ipopt_alg::flat_read_owned(&*mask);
+    let vals = crate::ipopt_alg::flat_read_owned(&*vals);
+    mask.iter()
+        .zip(vals)
+        .map(|(&m, v)| if m > 0.5 { v } else { absent })
+        .collect()
+}
+
 /// Borrow a named block of an [`IteratesVector`].
 fn block_ref<'a>(
     iv: &'a crate::iterates_vector::IteratesVector,
@@ -549,12 +646,112 @@ fn block_ref_mut<'a>(
     })
 }
 
-/// A consumer that the main loop pauses at each checkpoint. The CLI's
-/// REPL / agent driver is the production implementation.
-pub trait DebugHook {
-    /// Called at every [`Checkpoint`]. Inspect and/or mutate via `ctx`,
-    /// then return whether to keep solving.
-    fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction;
+/// Expose the NLP solver's [`DebugCtx`] through the shared
+/// [`DebugState`] surface, forwarding to its inherent accessors. The NLP
+/// solver supports the full surface, so every method is overridden.
+impl DebugState for DebugCtx {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+    fn checkpoint(&self) -> Checkpoint {
+        DebugCtx::checkpoint(self)
+    }
+    fn iter(&self) -> i32 {
+        DebugCtx::iter(self)
+    }
+    fn mu(&self) -> Number {
+        DebugCtx::mu(self)
+    }
+    fn objective(&self) -> Number {
+        DebugCtx::objective(self)
+    }
+    fn inf_pr(&self) -> Number {
+        DebugCtx::inf_pr(self)
+    }
+    fn inf_du(&self) -> Number {
+        DebugCtx::inf_du(self)
+    }
+    fn complementarity(&self) -> Number {
+        DebugCtx::complementarity(self)
+    }
+    fn alpha(&self) -> (Number, Number) {
+        DebugCtx::alpha(self)
+    }
+    fn block_dims(&self) -> Vec<(&'static str, usize)> {
+        DebugCtx::block_dims(self)
+    }
+    fn block(&self, name: &str) -> Option<Vec<Number>> {
+        DebugCtx::block(self, name)
+    }
+    fn delta_block(&self, name: &str) -> Option<Vec<Number>> {
+        DebugCtx::delta_block(self, name)
+    }
+    fn status(&self) -> Option<&str> {
+        DebugCtx::status(self)
+    }
+    fn nlp_error(&self) -> Number {
+        DebugCtx::nlp_error(self)
+    }
+    fn bound_slack(&self, which: &str) -> Option<Vec<Number>> {
+        DebugCtx::bound_slack(self, which)
+    }
+    fn regularization(&self) -> Number {
+        DebugCtx::regularization(self)
+    }
+    fn ls_count(&self) -> i32 {
+        DebugCtx::ls_count(self)
+    }
+    fn kkt(&self) -> Option<KktReport> {
+        DebugCtx::kkt(self)
+    }
+    fn kkt_matrix(&self) -> Option<KktTriplets> {
+        DebugCtx::kkt_matrix(self)
+    }
+    fn kkt_l_factor(&self) -> Option<LFactor> {
+        DebugCtx::kkt_l_factor(self)
+    }
+    fn kkt_captured_iter(&self) -> Option<i32> {
+        DebugCtx::kkt_captured_iter(self)
+    }
+    fn request_l_factor(&mut self) -> bool {
+        // Arming for future solves is handled by `DebugHook::wants_kkt_capture`
+        // (the NLP solver captures the factor while the debugger steps); here we
+        // just report whether it is already available now.
+        DebugCtx::kkt_l_factor(self).is_some()
+    }
+    fn request_kkt_matrix(&mut self) -> bool {
+        DebugCtx::kkt_matrix(self).is_some()
+    }
+    fn set_mu(&mut self, mu: Number) -> Result<(), String> {
+        DebugCtx::set_mu(self, mu)
+    }
+    fn set_block(&mut self, name: &str, vals: &[Number]) -> Result<(), String> {
+        DebugCtx::set_block(self, name, vals)
+    }
+    fn set_component(&mut self, name: &str, idx: usize, val: Number) -> Result<(), String> {
+        DebugCtx::set_component(self, name, idx, val)
+    }
+    fn snapshot(&self) -> Option<Box<dyn IterSnapshot>> {
+        DebugCtx::snapshot(self).map(|s| Box::new(s) as Box<dyn IterSnapshot>)
+    }
+    fn restore(&mut self, snap: &dyn IterSnapshot) -> bool {
+        match snap.as_any().downcast_ref::<IterateSnapshot>() {
+            Some(s) => {
+                DebugCtx::restore(self, s);
+                true
+            }
+            None => false,
+        }
+    }
+    fn constraint_residuals(&self) -> Option<Vec<Residual>> {
+        DebugCtx::constraint_residuals(self)
+    }
+    fn dual_residuals(&self) -> Option<Vec<Residual>> {
+        DebugCtx::dual_residuals(self)
+    }
 }
 
 #[cfg(test)]
@@ -643,6 +840,27 @@ mod tests {
             ctx.set_block(name, &cur)
                 .unwrap_or_else(|e| panic!("block_ref_mut does not resolve `{name}`: {e}"));
         }
+    }
+
+    #[test]
+    fn residuals_are_none_without_cq() {
+        // The data-only test ctx has no CQ, so both residual accessors
+        // report `None` (mirrors the documented NaN-scalar contract).
+        let ctx = ctx_with(&[1.0, 2.0]);
+        assert!(ctx.constraint_residuals().is_none());
+        assert!(ctx.dual_residuals().is_none());
+    }
+
+    #[test]
+    fn resid_kind_tags_and_primal_classification_are_stable() {
+        assert_eq!(ResidKind::Eq.tag(), "c");
+        assert_eq!(ResidKind::Ineq.tag(), "d-s");
+        assert_eq!(ResidKind::DualX.tag(), "grad_x_L");
+        assert_eq!(ResidKind::DualS.tag(), "grad_s_L");
+        assert!(ResidKind::Eq.is_primal());
+        assert!(ResidKind::Ineq.is_primal());
+        assert!(!ResidKind::DualX.is_primal());
+        assert!(!ResidKind::DualS.is_primal());
     }
 
     #[test]

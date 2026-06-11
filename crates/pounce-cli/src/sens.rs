@@ -347,31 +347,23 @@ fn try_compute_sens_step(
     // Pounce's compound layout matches upstream's
     // `MetadataMeasurement::GetInitialEqConstraints`
     // (`ref/Ipopt/contrib/sIPOPT/src/SensMetadataMeasurement.cpp:69-83`).
-    //
-    // Two coordinate transforms are needed when `n_x != n_full` (fixed
-    // variables present) or when the c/d split reorders constraints:
-    //   * full-x index → var-x index via `IpoptNlp::full_x_to_var_x`
-    //   * full-g index → c-block index via `IpoptNlp::full_g_to_c_block`
-    let curr = data.borrow().curr.clone()?;
-    let n_x = curr.x.dim() as usize;
-    let n_s = curr.s.dim() as usize;
-    let nlp_ref = nlp.borrow();
-    let y_c_offset = n_x + n_s;
-    let mut rows: Vec<Index> = Vec::with_capacity(n_params);
-    for k in 0..n_params {
-        let full_ci = param_con_idx[k].unwrap();
-        match nlp_ref.full_g_to_c_block(full_ci as Index) {
-            Some(c_idx) => rows.push(y_c_offset as Index + c_idx),
-            None => {
-                eprintln!(
-                    "pounce: parameter {} pinning constraint #{} is an inequality (not in the c block)",
-                    k + 1,
-                    full_ci
-                );
-                return None;
-            }
+    // The full-g → c-block transform (needed when the c/d split
+    // reorders constraints) is the backsolver's canonical
+    // `map_pin_g_to_kkt_rows` (pounce#128 single source of truth).
+    let backsolver = PdSensBacksolver::new(data, cq, nlp, pd)
+        .map_err(|e| eprintln!("pounce: could not capture the KKT factor: {e}"))
+        .ok()?;
+    let pin_g: Vec<Index> = param_con_idx
+        .iter()
+        .map(|ci| ci.unwrap() as Index)
+        .collect();
+    let rows = match backsolver.map_pin_g_to_kkt_rows(&pin_g) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("pounce: {e}");
+            return None;
         }
-    }
+    };
     let signs: Vec<Index> = vec![1; n_params];
     let a_data = IndexSchurData::from_parts(rows, signs).ok()?;
 
@@ -385,9 +377,6 @@ fn try_compute_sens_step(
         let vi = param_var_idx[k].unwrap();
         delta_p.push(sens_state_value[vi] - x_nominal[vi]);
     }
-    drop(nlp_ref);
-
-    let backsolver = PdSensBacksolver::new(data, cq, nlp, pd).ok()?;
     let n_full_pd = backsolver.dim();
     let mut rhs_full = vec![0.0; n_full_pd];
     a_data

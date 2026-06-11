@@ -64,10 +64,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._build import _detect_pattern_2d, _detect_pattern_lower, _to_np
+from ._build import (
+    _color_columns,
+    _detect_pattern_2d_multi,
+    _detect_pattern_lower_multi,
+    _seed_matrix,
+    _to_np,
+)
 from .._pounce import Problem, Solver
 
-_ACTIVE_TOL = 1e-6
+from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
 
 
 class _StackedJaxNlp:
@@ -182,6 +188,14 @@ class _StackedJaxNlp:
             return np.zeros(0, dtype=np.float64)
         n = self._jp._n
         X_2d = jnp.asarray(X).reshape(self._B, n)
+        if self._jp._sparse:
+            # Per-block colored JVP → (B, k, m); scatter via the per-block
+            # column colors. comp[:, color[c], r] == J^(blk)[r, c].
+            comp = jax.vmap(self._jp._jac_compressed_jit, in_axes=(0, 0))(
+                X_2d, self._P,
+            )
+            vals = comp[:, self._jp._jac_seed_cols, self._jac_rows_per]
+            return _to_np(vals).reshape(-1)
         J_3d = jax.vmap(self._jp._jac_g_jit, in_axes=(0, 0))(X_2d, self._P)
         # J_3d: (B, m, n). Gather across the (m, n) axes via the cached
         # per-block index arrays, then flatten so the result is in
@@ -200,6 +214,20 @@ class _StackedJaxNlp:
         # Hessian via vmap and gather the lower-triangular pattern.
         n, m = self._jp._n, self._jp._m
         X_2d = jnp.asarray(X).reshape(self._B, n)
+        if self._jp._sparse:
+            # Per-block colored HVP → (B, k, n); H^(blk)[r, c] lives at
+            # comp[:, color[c], r].
+            if m > 0:
+                Lam_2d = jnp.asarray(lam).reshape(self._B, m)
+                comp = jax.vmap(
+                    self._jp._hess_compressed_jit, in_axes=(0, 0, None, 0),
+                )(X_2d, Lam_2d, obj_factor, self._P)
+            else:
+                comp = jax.vmap(
+                    self._jp._hess_compressed_jit, in_axes=(0, None, 0),
+                )(X_2d, obj_factor, self._P)
+            vals = comp[:, self._jp._hess_seed_cols, self._hess_rows_per]
+            return _to_np(vals).reshape(-1)
         if m > 0:
             Lam_2d = jnp.asarray(lam).reshape(self._B, m)
             H_3d = jax.vmap(
@@ -246,6 +274,12 @@ class _ReusableJaxNlp:
     def jacobian(self, x):
         if self._jp._m == 0:
             return np.zeros(0, dtype=np.float64)
+        if self._jp._sparse:
+            # Colored JVP → (k, m); J[rows, cols] == comp[color(cols), rows].
+            comp = _to_np(
+                self._jp._jac_compressed_jit(jnp.asarray(x), self._p)
+            )
+            return comp[self._jp._jac_seed_cols, self._jp._jac_rows]
         J = _to_np(self._jp._jac_g_jit(jnp.asarray(x), self._p))
         return J[self._jp._jac_rows, self._jp._jac_cols]
 
@@ -253,6 +287,21 @@ class _ReusableJaxNlp:
         return (self._jp._hess_rows, self._jp._hess_cols)
 
     def hessian(self, x, lam, obj_factor):
+        if self._jp._sparse:
+            # Colored HVP → (k, n); H[r, c] == comp[color(c), r].
+            if self._jp._m > 0:
+                comp = _to_np(
+                    self._jp._hess_compressed_jit(
+                        jnp.asarray(x), jnp.asarray(lam), obj_factor, self._p,
+                    )
+                )
+            else:
+                comp = _to_np(
+                    self._jp._hess_compressed_jit(
+                        jnp.asarray(x), obj_factor, self._p,
+                    )
+                )
+            return comp[self._jp._hess_seed_cols, self._jp._hess_rows]
         if self._jp._m > 0:
             H = _to_np(
                 self._jp._hess_lag_jit(
@@ -319,6 +368,15 @@ def _bwd_single_factor_reuse(
     Lagrangian needs the multipliers as a constant inside the trace,
     so we close ``lam`` (already returned from the fwd in user g-order)
     into ``lagrangian(x, p_)``.
+
+    Units. ``dgradL_dp`` / ``dg_dp`` are autodiffed from the user's own
+    ``f`` / ``g`` — natural units — so the back-solve must be against
+    the *natural-units* KKT matrix. ``Solver.kkt_solve`` guarantees
+    exactly that since pounce#128: when the IPM solved with active NLP
+    scaling (``nlp_scaling_method``, default ``gradient-based``), the
+    Rust side conjugates the RHS/solution by the scaling factors, so
+    this VJP is correct whether or not scaling fired on the forward
+    solve.
     """
     def lagrangian(x, p_):
         base = f(x, p_)
@@ -1068,7 +1126,32 @@ class JaxProblem:
         :meth:`solve_with_warm`; otherwise the same dict is in force
         for every method call.
     seed : int
-        Seed for the random sparsity probe.
+        Seed for the random sparsity probe(s).
+    sparse : bool
+        When ``True``, compute the *forward* constraint Jacobian and
+        Lagrangian Hessian with CPR-style colored AD (one JVP/HVP per
+        color) instead of forming the dense matrix and slicing it to the
+        nonzeros (issue #83). Drops the per-IPM-iteration derivative cost
+        from ``O(n)`` to ``O(k)`` AD passes (``k`` = number of colors) on
+        genuinely sparse problems, applied uniformly to the single-solve
+        and batched (block-diagonal) paths. **Provided the sparsity
+        pattern is value-independent** (any composition of smooth
+        pointwise ops), the reported structure, values, and solve are
+        identical to the dense path. For value-dependent structure
+        (``where`` / ``abs`` / branches) a probe can miss a nonzero, and
+        under compression a missed entry *aliases into a same-colored
+        reported entry* — silently wrong derivatives, unlike the dense
+        path which merely drops the missed entry. Use a hand-specified
+        pattern (the :class:`pounce.Problem` API) for such models, or
+        leave ``sparse=False``. This affects only the forward derivatives
+        fed to the IPM — the differentiable backward (``factor_reuse`` /
+        implicit diff) is unchanged. Defaults to ``False`` (dense, with
+        forward/reverse mode chosen by shape).
+    n_probes : int or None
+        Number of random probes whose nonzero patterns are unioned to
+        detect sparsity. ``None`` (default) uses 1 probe for the dense
+        path and 3 for ``sparse=True`` (a mis-probe under compression
+        corrupts the seed structure, not just a reported nonzero).
     factor_reuse : bool
         When ``True`` (default), the differentiable backward reuses the
         IPM's converged compound KKT factor for the implicit-function
@@ -1157,6 +1240,8 @@ class JaxProblem:
         options: dict | None = None,
         seed: int = 0,
         factor_reuse: bool = True,
+        sparse: bool = False,
+        n_probes: int | None = None,
     ):
         if m > 0 and g is None:
             raise ValueError("g must be provided when m > 0")
@@ -1164,6 +1249,13 @@ class JaxProblem:
         self._g = g
         self._n = n
         self._m = m
+        # Colored/compressed forward Jacobian & Hessian (issue #83). The
+        # backward (implicit-diff / factor-reuse) is unaffected — this
+        # only changes how the per-iteration derivative *values* fed to
+        # the IPM are produced. See :meth:`_build_compressed_closures`.
+        self._sparse = bool(sparse)
+        self._n_probes = max(1, int(n_probes if n_probes is not None
+                                    else (3 if sparse else 1)))
         self._lb = lb
         self._ub = ub
         self._cl = cl
@@ -1244,20 +1336,45 @@ class JaxProblem:
         self._p_shape = p_arr.shape
         self._p_dtype = jnp.float64
         rng = np.random.default_rng(seed)
-        x_probe = jnp.asarray(rng.standard_normal(n))
-        p_probe = jnp.asarray(rng.standard_normal(p_arr.shape))
+        # Union the nonzero pattern across n_probes random (x, p) (and λ)
+        # draws. One probe suffices for value-independent structure; the
+        # union hardens against branchy / value-dependent sparsity, which
+        # matters more under sparse=True (a mis-probe there corrupts the
+        # compression seed, not just a reported nonzero).
+        x_probes = [
+            jnp.asarray(rng.standard_normal(n)) for _ in range(self._n_probes)
+        ]
+        p_probes = [
+            jnp.asarray(rng.standard_normal(p_arr.shape))
+            for _ in range(self._n_probes)
+        ]
         if m > 0:
-            lam_probe = jnp.asarray(rng.standard_normal(m))
-            jac_dense = _to_np(self._jac_g_jit(x_probe, p_probe))
-            self._jac_rows, self._jac_cols = _detect_pattern_2d(jac_dense)
-            hess_dense = _to_np(
-                self._hess_lag_jit(x_probe, lam_probe, 1.0, p_probe)
-            )
+            lam_probes = [
+                jnp.asarray(rng.standard_normal(m))
+                for _ in range(self._n_probes)
+            ]
+            jac_denses = [
+                _to_np(self._jac_g_jit(xp, pp))
+                for xp, pp in zip(x_probes, p_probes)
+            ]
+            self._jac_rows, self._jac_cols = _detect_pattern_2d_multi(jac_denses)
+            hess_denses = [
+                _to_np(self._hess_lag_jit(xp, lp, 1.0, pp))
+                for xp, lp, pp in zip(x_probes, lam_probes, p_probes)
+            ]
         else:
             self._jac_rows = np.zeros(0, dtype=np.int64)
             self._jac_cols = np.zeros(0, dtype=np.int64)
-            hess_dense = _to_np(self._hess_lag_jit(x_probe, 1.0, p_probe))
-        self._hess_rows, self._hess_cols = _detect_pattern_lower(hess_dense)
+            hess_denses = [
+                _to_np(self._hess_lag_jit(xp, 1.0, pp))
+                for xp, pp in zip(x_probes, p_probes)
+            ]
+        self._hess_rows, self._hess_cols = _detect_pattern_lower_multi(hess_denses)
+
+        # Colored/compressed forward closures (issue #83, option B).
+        # Built after the probe because coloring needs the pattern.
+        if self._sparse:
+            self._build_compressed_closures()
 
     # ----- internal: rebuildable per-process state -----
 
@@ -1274,7 +1391,13 @@ class JaxProblem:
         self._grad_f_jit = jax.jit(jax.grad(f, argnums=0))
         if g is not None and m > 0:
             self._g_jit = jax.jit(g)
-            self._jac_g_jit = jax.jit(jax.jacrev(g, argnums=0))
+            # Option A (issue #83): jacrev costs ~m passes, jacfwd ~n;
+            # pick the cheaper direction for the dense path / probe.
+            jac_g = (
+                jax.jacfwd(g, argnums=0) if self._n < m
+                else jax.jacrev(g, argnums=0)
+            )
+            self._jac_g_jit = jax.jit(jac_g)
 
             def lagrangian(x, lam, sigma, p):
                 return sigma * f(x, p) + jnp.dot(lam, g(x, p))
@@ -1288,6 +1411,73 @@ class JaxProblem:
                 return sigma * f(x, p)
 
             self._hess_lag_jit = jax.jit(jax.hessian(lagrangian_unc, argnums=0))
+
+    def _build_compressed_closures(self) -> None:
+        """Build the colored JVP (Jacobian) and HVP (Hessian) closures
+        and the scatter indices that map compressed columns back to the
+        stored ``(rows, cols)`` nonzeros (issue #83, option B).
+
+        Parametric analogue of :meth:`_build.JaxProblem._build_compressed`:
+        the seed structure depends only on the (fixed) sparsity pattern,
+        so the JVP/HVP just close over the per-solve ``p``. Rebuilt from
+        the pickled pattern arrays on ``__setstate__`` since coloring is
+        deterministic."""
+        n, m = self._n, self._m
+        f, g = self._f, self._g
+
+        # Jacobian: color the (m, n) pattern, one forward-mode JVP per
+        # color → (k, m). For nonzero (i, j) the value lives at
+        # compressed[color[j], i].
+        if m > 0:
+            jac_colors, k_jac = _color_columns(self._jac_rows, self._jac_cols, n)
+            S_jac = _seed_matrix(jac_colors, k_jac, n)
+            self._jac_seed_cols = jac_colors[self._jac_cols]
+
+            def jac_compressed(x, p):
+                return jax.vmap(
+                    lambda s: jax.jvp(lambda xx: g(xx, p), (x,), (s,))[1]
+                )(S_jac)
+
+            self._jac_compressed_jit = jax.jit(jac_compressed)
+        else:
+            self._jac_seed_cols = np.zeros(0, dtype=np.int64)
+            self._jac_compressed_jit = None
+
+        # Hessian: symmetric — color the *full* pattern (both triangles)
+        # because a column's compressed value sums over every row,
+        # including the upper triangle we don't store.
+        full_rows = np.concatenate([self._hess_rows, self._hess_cols])
+        full_cols = np.concatenate([self._hess_cols, self._hess_rows])
+        hess_colors, k_hess = _color_columns(full_rows, full_cols, n)
+        S_hess = _seed_matrix(hess_colors, k_hess, n)
+        self._hess_seed_cols = hess_colors[self._hess_cols]
+
+        if m > 0:
+            def lagrangian(x, lam, sigma, p):
+                return sigma * f(x, p) + jnp.dot(lam, g(x, p))
+
+            grad_L = jax.grad(lagrangian, argnums=0)
+
+            def hess_compressed(x, lam, sigma, p):
+                return jax.vmap(
+                    lambda s: jax.jvp(
+                        lambda xx: grad_L(xx, lam, sigma, p), (x,), (s,)
+                    )[1]
+                )(S_hess)
+        else:
+            def lagrangian_unc(x, sigma, p):
+                return sigma * f(x, p)
+
+            grad_L = jax.grad(lagrangian_unc, argnums=0)
+
+            def hess_compressed(x, sigma, p):
+                return jax.vmap(
+                    lambda s: jax.jvp(
+                        lambda xx: grad_L(xx, sigma, p), (x,), (s,)
+                    )[1]
+                )(S_hess)
+
+        self._hess_compressed_jit = jax.jit(hess_compressed)
 
     def _init_runtime_state(self) -> None:
         """(Re)create per-process mutable state: bwd-registry id
@@ -1359,6 +1549,7 @@ class JaxProblem:
     # truth so the two hooks can't drift.
     _PICKLE_DROP = (
         "_f_jit", "_grad_f_jit", "_g_jit", "_jac_g_jit", "_hess_lag_jit",
+        "_jac_compressed_jit", "_hess_compressed_jit",
         "_registry_lock", "_tls", "_factor_executor",
         "_solver_registry", "_pinned_solvers", "_solver_id_counter",
     )
@@ -1388,6 +1579,10 @@ class JaxProblem:
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._build_jit_closures()
+        if self._sparse:
+            # Coloring is deterministic from the pickled pattern arrays,
+            # so rebuild the compressed closures rather than pickle them.
+            self._build_compressed_closures()
         self._init_runtime_state()
 
     # ----- internal: per-thread cached Problem -----

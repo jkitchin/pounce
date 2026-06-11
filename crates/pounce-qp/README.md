@@ -11,7 +11,7 @@ Pure Rust, no FFI. Layered on `pounce-common` + `pounce-linalg` +
 ## Status
 
 **Phase 5a — feature-complete on correctness.** Every problem
-class identified in the design note (`dev-notes/research/active-set-sqp-warm-start.md`)
+class identified in the design note (`docs/src/active-set-sqp-warm-start.md`)
 solves end-to-end; infeasibility is certified honestly; warm-start
 is wired. Five of the six analytical-ladder problems (§8.0) pass;
 problem #4 (LICQ-violating redundant equality) is a documented
@@ -130,4 +130,4 @@ Run with: `cargo test -p pounce-qp`. For per-test timings,
 
 The full design note, including literature pinning for every
 algorithmic choice, integration plan, and per-workload notes, is at
-[`dev-notes/research/active-set-sqp-warm-start.md`](../../dev-notes/research/active-set-sqp-warm-start.md).
+[`docs/src/active-set-sqp-warm-start.md`](../../docs/src/active-set-sqp-warm-start.md).

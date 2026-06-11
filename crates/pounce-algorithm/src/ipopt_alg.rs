@@ -276,6 +276,30 @@ impl IpoptAlgorithm {
         true
     }
 
+    /// Terminal fallback for a near-feasible numerical breakdown (a
+    /// restoration cycle or a failed step computation). If a finite
+    /// acceptable iterate was recorded earlier in the solve, roll back
+    /// to it and stop at [`SolverReturn::StopAtAcceptablePoint`] (mapped
+    /// by the application layer to `Solved_To_Acceptable_Level`) rather
+    /// than surfacing the hard `fallback` error. This mirrors upstream
+    /// `IpBacktrackingLineSearch`'s `ACCEPTABLE_POINT_REACHED`
+    /// precedence: when the line search exhausts but an acceptable point
+    /// was stored, that point is returned instead of the failure. With
+    /// no snapshot — or if the restored objective is non-finite — the
+    /// original `fallback` status is surfaced unchanged, so genuinely
+    /// failed/infeasible solves keep their honest status. Catches
+    /// degenerate LPs (kleemin8, nsir2) whose μ-endgame reaches the
+    /// optimum, then destabilizes on the ill-conditioned vertex and
+    /// cycles in restoration instead of stopping at the acceptable
+    /// iterate it already passed through.
+    fn terminate_acceptable_or(&mut self, fallback: SolverReturn) -> IterateOutcome {
+        if self.restore_acceptable_point() && self.cq.borrow().curr_f().is_finite() {
+            IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
+        } else {
+            IterateOutcome::Terminate(fallback)
+        }
+    }
+
     pub fn with_nlp(mut self, nlp: Rc<RefCell<dyn IpoptNlp>>) -> Self {
         self.nlp = Some(nlp);
         self
@@ -377,11 +401,20 @@ impl IpoptAlgorithm {
     /// requested action, defaulting to `Resume` when no hook is set.
     fn fire_debug(&mut self, cp: crate::debug::Checkpoint) -> crate::debug::DebugAction {
         use crate::debug::{DebugAction, DebugCtx};
-        let Some(hook) = self.debug.as_ref() else {
+        // Clone the Rc so the hook borrow is released before we touch
+        // `self.bundle` to apply any live option changes below.
+        let Some(hook) = self.debug.as_ref().map(Rc::clone) else {
             return DebugAction::Resume;
         };
         let mut ctx = DebugCtx::new(Rc::clone(&self.data), Rc::clone(&self.cq), cp);
-        hook.borrow_mut().at_checkpoint(&mut ctx)
+        let action = hook.borrow_mut().at_checkpoint(&mut ctx);
+        // Drain any tolerances the hook asked to hot-swap and write them
+        // into the live convergence-check policy, so the next iteration's
+        // termination test uses the new value (no `resolve` needed).
+        for (name, value) in ctx.take_live_tolerances() {
+            self.bundle.conv_check.set_tolerance(&name, value);
+        }
+        action
     }
 
     /// Run the restoration phase, bracketed by the `PreRestoration` /
@@ -905,17 +938,24 @@ impl IpoptAlgorithm {
             }
         }
 
-        // Capture KKT-factorization diagnostics (dim, inertia, status)
-        // for the debugger before the line search runs. Only when a
-        // debugger is installed — pulls nothing otherwise.
-        if self.debug.is_some() {
-            let want_l = self.data.borrow().want_l_factor;
-            let want_matrix = self.data.borrow().want_matrix;
+        // Capture KKT-factorization diagnostics for the debugger before
+        // the line search runs. Only when a debugger is installed. The
+        // inertia/status fields are cheap and always captured; the matrix
+        // triplets and `LDLᵀ` factor are O(nnz) assemblies, so they're
+        // captured only while the debugger is stepping (`wants_kkt_capture`)
+        // — a detached/free-running debugger drops them to keep the run
+        // cheap. `kkt_debug` is overwritten every iteration and never
+        // cleared at `iter_start`, so a stepping session always has the
+        // previous iteration's system to look back at via `viz kkt`/`viz L`.
+        if let Some(hook) = self.debug.as_ref() {
+            let capture_heavy = hook.borrow().wants_kkt_capture();
+            let captured_iter = self.data.borrow().iter_count;
             let info = self.search_dir.as_ref().map(|sd| {
                 let pd = sd.pd_solver_mut();
                 let aug = pd.aug_solver();
                 let provides = aug.provides_inertia();
                 crate::ipopt_data::KktDebug {
+                    iter: captured_iter,
                     dim: aug.system_dim(),
                     n_neg: if provides {
                         aug.number_of_neg_evals()
@@ -924,17 +964,16 @@ impl IpoptAlgorithm {
                     },
                     provides_inertia: provides,
                     status: format!("{:?}", aug.last_solve_status()),
-                    // Triplet assembly is O(nnz) — only when `viz kkt`/`save`
-                    // armed it, so attaching the debugger to a big problem
-                    // doesn't tax every iteration. (Inertia/status above are
-                    // cheap and always captured.)
-                    matrix: if want_matrix {
+                    matrix: if capture_heavy {
                         aug.kkt_triplets()
                     } else {
                         None
                     },
-                    // The factor is the expensive piece — only when asked.
-                    l_factor: if want_l { aug.l_factor(true) } else { None },
+                    l_factor: if capture_heavy {
+                        aug.l_factor(true)
+                    } else {
+                        None
+                    },
                 }
             });
             self.data.borrow_mut().kkt_debug = info;
@@ -1071,6 +1110,14 @@ impl IpoptAlgorithm {
         //    `update_for_next_iteration`, mirroring upstream's call
         //    chain in `IpBacktrackingLineSearch.cpp:839`.
         let _accept_guard = timing.accept_trial_point.guard();
+
+        // 7a. Safe-slack bound adjustment. Before promoting `trial`, move
+        //     any `x_L/x_U/d_L/d_U` whose trial slack fell below
+        //     `eps*min(1,mu)` so the slack becomes representable (port of
+        //     the bound-adjustment block in
+        //     `IpoptAlgorithm::AcceptTrialPoint`, `IpIpoptAlg.cpp:664-706`).
+        self.adjust_variable_bounds_for_small_slacks();
+
         self.data.borrow_mut().accept_trial_point();
 
         // 8. Bound multiplier kappa_sigma reset.
@@ -1201,7 +1248,7 @@ impl IpoptAlgorithm {
         } else {
             SolverReturn::ErrorInStepComputation
         };
-        if let (Some(prev_x), Some(prev_s)) = (
+        let static_cycle = if let (Some(prev_x), Some(prev_s)) = (
             self.last_resto_entry_x.as_ref(),
             self.last_resto_entry_s.as_ref(),
         ) {
@@ -1213,11 +1260,17 @@ impl IpoptAlgorithm {
                     dx_rel, ds_rel
                 );
             }
-            if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
-                return IterateOutcome::Terminate(cycle_exit);
-            }
+            dx_rel <= 1e-10 && ds_rel <= 1e-10
+        } else {
+            false
+        };
+        if static_cycle {
+            // Prefer the last acceptable point over the cycle error —
+            // the borrows above are released, so the `&mut self` helper
+            // is free to roll back.
+            return self.terminate_acceptable_or(cycle_exit);
         }
-        if let (Some(prev_x), Some(prev_s)) = (
+        let recovery_cycle = if let (Some(prev_x), Some(prev_s)) = (
             self.last_resto_recovery_x.as_ref(),
             self.last_resto_recovery_s.as_ref(),
         ) {
@@ -1229,21 +1282,26 @@ impl IpoptAlgorithm {
                     dx_rel, ds_rel, self.resto_no_outer_progress_count
                 );
             }
-            if dx_rel <= 1e-10 && ds_rel <= 1e-10 {
-                self.resto_no_outer_progress_count =
-                    self.resto_no_outer_progress_count.saturating_add(1);
-                // 10-strike limit: tuned to give OET7-style traces room
-                // to break through (inner inf_pr still decreasing across
-                // strikes) while still bounding DECONVBNE-style cycles
-                // (which need a guard but tolerate a wider window —
-                // ~3 outer steps per cycle, so 10 strikes ≈ 30 outer
-                // iters, well below the 2987-iter pathological run).
-                if self.resto_no_outer_progress_count >= 10 {
-                    return IterateOutcome::Terminate(cycle_exit);
-                }
-            } else {
-                self.resto_no_outer_progress_count = 0;
+            dx_rel <= 1e-10 && ds_rel <= 1e-10
+        } else {
+            false
+        };
+        if recovery_cycle {
+            self.resto_no_outer_progress_count =
+                self.resto_no_outer_progress_count.saturating_add(1);
+            // 10-strike limit: tuned to give OET7-style traces room
+            // to break through (inner inf_pr still decreasing across
+            // strikes) while still bounding DECONVBNE-style cycles
+            // (which need a guard but tolerate a wider window —
+            // ~3 outer steps per cycle, so 10 strikes ≈ 30 outer
+            // iters, well below the 2987-iter pathological run).
+            if self.resto_no_outer_progress_count >= 10 {
+                // Prefer the last acceptable point over the cycle error;
+                // borrows are released, so the `&mut self` helper is free.
+                return self.terminate_acceptable_or(cycle_exit);
             }
+        } else {
+            self.resto_no_outer_progress_count = 0;
         }
         // Near-feasible resto re-entry detector — matches the *intent*
         // of upstream `IpBacktrackingLineSearch.cpp:580-600`'s almost-
@@ -1329,7 +1387,10 @@ impl IpoptAlgorithm {
         match outcome {
             RestorationOutcome::Recovered => {
                 // The driver has staged the recovered point on
-                // `data.trial`; promote it and continue iterating.
+                // `data.trial`; apply the safe-slack bound adjustment
+                // (as the main accept path does), then promote it and
+                // continue iterating.
+                self.adjust_variable_bounds_for_small_slacks();
                 self.data.borrow_mut().accept_trial_point();
                 // Snapshot the recovery iterate for the slow-cycle
                 // detector at the top of the next `invoke_restoration`.
@@ -1396,6 +1457,40 @@ impl IpoptAlgorithm {
                 IterateOutcome::Terminate(SolverReturn::LocalInfeasibility)
             }
         }
+    }
+
+    /// Safe-slack bound adjustment, applied to the staged `trial`
+    /// iterate before it is promoted to `curr`. When one or more trial
+    /// slacks fell below `eps*min(1,mu)`, [`IpoptCalculatedQuantities::
+    /// adjusted_trial_bounds`] returns the moved `x_L/x_U/d_L/d_U`; we
+    /// install them on the NLP so the slack becomes representable. Port
+    /// of the bound-adjustment block in `IpoptAlgorithm::AcceptTrialPoint`
+    /// (`IpIpoptAlg.cpp:664-706`).
+    fn adjust_variable_bounds_for_small_slacks(&mut self) {
+        // Compute the moved bounds (releases the CQ/NLP borrows on return).
+        let adjusted = {
+            let trial_set = self.data.borrow().trial.is_some();
+            if !trial_set {
+                return;
+            }
+            self.cq.borrow().adjusted_trial_bounds()
+        };
+        let Some(bounds) = adjusted else {
+            return;
+        };
+        tracing::debug!(
+            target: "pounce::algorithm",
+            "slack_move: {} slack(s) too small, adjusting variable bound(s) at iter {}",
+            bounds.adjusted,
+            self.data.borrow().iter_count,
+        );
+        let nlp = Rc::clone(self.cq.borrow().nlp());
+        nlp.borrow_mut().adjust_variable_bounds(
+            &*bounds.x_l,
+            &*bounds.x_u,
+            &*bounds.d_l,
+            &*bounds.d_u,
+        );
     }
 
     /// Port of `IpIpoptAlg::correct_bound_multiplier`

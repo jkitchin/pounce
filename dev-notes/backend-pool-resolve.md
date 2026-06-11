@@ -78,7 +78,7 @@ default-implemented method. Both backends override or accept the default.
 
 ### 3. What's allowed to change between resolves?
 
-This is the **real** unknown. Upstream Ipopt's `reoptimize_tnlp` has
+This is the **real** unknown. Upstream Ipopt's re-solve path has
 non-trivial behavior here. Decisions we'd need to make:
 
 | Change between resolves | Plausible behavior                                              |

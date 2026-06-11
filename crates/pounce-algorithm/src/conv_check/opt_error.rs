@@ -267,6 +267,22 @@ impl ConvCheck for OptErrorConvCheck {
         self.tol
     }
 
+    fn set_tolerance(&mut self, name: &str, value: Number) -> bool {
+        match name {
+            "tol" => self.tol = value,
+            "dual_inf_tol" => self.dual_inf_tol = value,
+            "constr_viol_tol" => self.constr_viol_tol = value,
+            "compl_inf_tol" => self.compl_inf_tol = value,
+            "acceptable_tol" => self.acceptable_tol = value,
+            "acceptable_dual_inf_tol" => self.acceptable_dual_inf_tol = value,
+            "acceptable_constr_viol_tol" => self.acceptable_constr_viol_tol = value,
+            "acceptable_compl_inf_tol" => self.acceptable_compl_inf_tol = value,
+            "acceptable_obj_change_tol" => self.acceptable_obj_change_tol = value,
+            _ => return false,
+        }
+        true
+    }
+
     fn current_is_acceptable(&self, nlp_err: Number) -> bool {
         // Scalar fallback used when the caller has no `IpoptCq` handle
         // (e.g. unit tests). The state-aware variant

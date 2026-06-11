@@ -104,7 +104,7 @@ configuration is required — the GAMS-native marginal carry IS the
 warm-start channel.
 
 This mechanism (the §7.4(a) **marginal-based reconstruction** in
-`dev-notes/research/active-set-sqp-warm-start.md`) is the same idiom
+`docs/src/active-set-sqp-warm-start.md`) is the same idiom
 CONOPT, IPOPT, and KNITRO use under GAMS, and shares the same
 caveat: at degenerate active sets the marginal signs are
 ambiguous, so the reconstructed working set may differ from the

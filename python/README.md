@@ -149,6 +149,16 @@ prob = from_jax(f, g, n=4, m=1, lb=jnp.zeros(4), ub=jnp.full(4, 10.0),
 x, info = prob.solve(x0=jnp.ones(4))
 ```
 
+On problems with a genuinely sparse Jacobian/Hessian (banded, block,
+PDE-constrained, separable), pass `sparse=True` to `from_jax` or
+`JaxProblem` for CPR-style colored AD — one JVP/HVP per color instead of
+a dense matrix sliced to the nonzeros, dropping the per-iteration cost
+from `O(n)` to `O(k)` AD passes (pounce#83; up to ~560× faster
+per-Jacobian and 7.6× faster solve on a banded sweep). It's opt-in
+because dense problems gain nothing. See the
+[Python API docs](../docs/src/python.md) and
+`benchmarks/bench_sparse_ad_83.py`.
+
 Differentiate through the solver (the backward respects the active
 set, so slack inequalities don't pollute the gradient — pounce#73):
 

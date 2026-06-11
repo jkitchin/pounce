@@ -27,6 +27,12 @@ pub struct CountingTnlp {
     pub n_g: Cell<i32>,
     pub n_jac_g: Cell<i32>,
     pub n_h: Cell<i32>,
+    /// Primal `x` and constraint duals `lambda` captured at
+    /// `finalize_solution`, in the original-problem space the inner TNLP
+    /// presents. The CLI uses this as a fallback solution source for the
+    /// active-set SQP route, whose solve bypasses the IPM-only
+    /// `on_converged` hook the `.sol` / JSON writers normally read.
+    captured_solution: RefCell<Option<(Vec<Number>, Vec<Number>)>>,
 }
 
 impl CountingTnlp {
@@ -38,7 +44,13 @@ impl CountingTnlp {
             n_g: Cell::new(0),
             n_jac_g: Cell::new(0),
             n_h: Cell::new(0),
+            captured_solution: RefCell::new(None),
         }
+    }
+
+    /// The `(x, lambda)` captured at the last `finalize_solution`, if any.
+    pub fn captured_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        self.captured_solution.borrow().clone()
     }
 }
 
@@ -97,6 +109,7 @@ impl TNLP for CountingTnlp {
     }
 
     fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
+        *self.captured_solution.borrow_mut() = Some((sol.x.to_vec(), sol.lambda.to_vec()));
         self.inner
             .borrow_mut()
             .finalize_solution(sol, ip_data, ip_cq);

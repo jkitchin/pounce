@@ -43,6 +43,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .._ad_common import ACTIVE_TOL
+
 _OK_STATUS = ("Solve_Succeeded", "Solved_To_Acceptable_Level")
 
 
@@ -355,7 +357,7 @@ class PathFollower:
         )
         return float(r["margin"][0])
 
-    def _active_signature(self, lam, zL, zU, active_tol=1e-6):
+    def _active_signature(self, lam, zL, zU, active_tol=ACTIVE_TOL):
         """Boolean active-set fingerprint: which bounds / inequalities are
         active. Used to detect active-set changes across corrections."""
         jp = self._jp

@@ -28,8 +28,10 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp.workspace = true
+pounce-nl.workspace = true
 pounce-algorithm.workspace = true
 pounce-qp.workspace = true
+pounce-convex.workspace = true
 pounce-restoration.workspace = true
 pounce-feral.workspace = true
 pounce-linsol.workspace = true

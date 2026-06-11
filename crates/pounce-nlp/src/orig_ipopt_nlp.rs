@@ -57,8 +57,8 @@
 //!   `fixed_variable_treatment` knob lands when the option machinery
 //!   does.
 
-use crate::ipopt_nlp::{IpoptNlp, Nlp};
-use crate::tnlp::{NlpInfo, ScalingRequest, SparsityRequest, StartingPoint};
+use crate::ipopt_nlp::{IpoptNlp, Nlp, SplitNames};
+use crate::tnlp::{MetaData, NlpInfo, ScalingRequest, SparsityRequest, StartingPoint, IDX_NAMES};
 use crate::tnlp_adapter::{BoundClassification, TNLPAdapter};
 use pounce_common::cached::Cache;
 use pounce_common::timing::TimingStatistics;
@@ -96,6 +96,18 @@ pub trait NlpScaling {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoScaling;
 impl NlpScaling for NoScaling {}
+
+/// Constant objective scaling: carries the user's `obj_scaling_factor`
+/// option value into [`OrigIpoptNlp`]. A negative factor flips the
+/// optimization direction (the IPM minimizes `factor·f`, i.e.
+/// maximizes `f`), matching upstream Ipopt's documented semantics.
+#[derive(Debug, Clone, Copy)]
+pub struct ConstObjScaling(pub Number);
+impl NlpScaling for ConstObjScaling {
+    fn obj_scaling(&self) -> Number {
+        self.0
+    }
+}
 
 /// Selector for [`OrigIpoptNlp::determine_scaling_from_starting_point`].
 /// Mirrors upstream's `nlp_scaling_method` option.
@@ -467,10 +479,16 @@ impl OrigIpoptNlp {
             Some(SymTMatrixSpace::new(n_x_var, Vec::new(), Vec::new()))
         };
 
+        // Honor the scaling object's constant factor from construction
+        // (a negative `obj_scaling_factor` means maximize). Callers
+        // that run `determine_scaling_from_starting_point` overwrite
+        // this with the combined automatic·user factor; callers that
+        // don't (e.g. the SQP path) still get the user's constant.
+        let initial_obj_scal = scaling.obj_scaling();
         Ok(Self {
             adapter,
             scaling,
-            obj_scale_factor: Cell::new(1.0),
+            obj_scale_factor: Cell::new(initial_obj_scal),
             c_scale: RefCell::new(None),
             d_scale: RefCell::new(None),
             x_space,
@@ -717,6 +735,22 @@ impl OrigIpoptNlp {
             *self.d_scale.borrow_mut() = None;
             self.invalidate_eval_caches();
             return;
+        }
+
+        // Lift fixed variables (x_l == x_u) to their fixed value before
+        // sampling the gradient / Jacobian. Fixed vars never enter the
+        // algorithm's compressed x; every algorithm-side eval re-inserts
+        // their fixed value via `lift_x_to_full`, so scaling must be
+        // computed at that same point. Upstream achieves this implicitly:
+        // `TNLPAdapter::GetStartingPoint` projects the start onto the
+        // (relaxed) bounds, pinning fixed vars to their value. A raw `x0`
+        // that leaves them elsewhere can shift the objective gradient by
+        // orders of magnitude (pounce: flosp2hm — 41 fixed vars sitting at
+        // x0=0 instead of their fixed value 1 made ‖∇f‖∞ read 40 instead of
+        // 2.4e5, so obj_scale_factor stayed 1.0 and the solve stalled at
+        // max-iter while IPOPT, scaling correctly, converged in 5 iters).
+        for (i, &full_idx) in cls.x_fixed_map.iter().enumerate() {
+            full_x[full_idx as usize] = cls.x_fixed_vals[i];
         }
 
         match method {
@@ -1725,8 +1759,107 @@ impl IpoptNlp for OrigIpoptNlp {
         Rc::clone(&self.pd_u)
     }
 
+    /// Install moved bounds from the safe-slack mechanism. Mirrors
+    /// `OrigIpoptNLP::AdjustVariableBounds` (`IpOrigIpoptNLP.cpp:990`):
+    /// upstream simply swaps in the new bound vectors. We copy the values
+    /// into the existing `Rc<DenseVector>` storage (falling back to a
+    /// fresh allocation if the bound is somehow shared), which leaves the
+    /// `Px_* / Pd_*` expansion matrices — keyed on the bound *spaces*,
+    /// not values — untouched.
+    fn adjust_variable_bounds(
+        &mut self,
+        new_x_l: &dyn Vector,
+        new_x_u: &dyn Vector,
+        new_d_l: &dyn Vector,
+        new_d_u: &dyn Vector,
+    ) {
+        // The bound `Rc`s are uniquely owned (nothing clones them — same
+        // invariant `relax_bounds` relies on), so `get_mut` always
+        // succeeds and we copy the moved values into the existing storage.
+        fn install(slot: &mut Rc<DenseVector>, new: &dyn Vector) {
+            Rc::get_mut(slot)
+                .expect("adjust_variable_bounds: bound vector is uniquely owned")
+                .copy(new);
+        }
+        install(&mut self.x_l, new_x_l);
+        install(&mut self.x_u, new_x_u);
+        install(&mut self.d_l, new_d_l);
+        install(&mut self.d_u, new_d_u);
+    }
+
     fn obj_scaling_factor(&self) -> Number {
         self.obj_scale_factor.get()
+    }
+
+    fn c_scale_vec(&self) -> Option<Vec<Number>> {
+        self.c_scale.borrow().clone()
+    }
+
+    fn d_scale_vec(&self) -> Option<Vec<Number>> {
+        self.d_scale.borrow().clone()
+    }
+
+    /// Project the underlying TNLP's `idx_names` metadata into the
+    /// algorithm's split space. Variable names are gathered through the
+    /// fixed-variable map (`x_not_fixed_map`), equality names through the
+    /// c-block map (`c_map`), and inequality names through the d-block map
+    /// (`d_map`) — exactly the permutations the adapter applied when it
+    /// split the problem, so a residual at split index `k` is labeled with
+    /// the equation the user actually wrote.
+    ///
+    /// Returns `None` when the TNLP exposes no names (e.g. presolve, which
+    /// renumbers rows, declines `get_var_con_metadata`) so callers fall
+    /// back to index labels rather than mislabeling permuted rows. This is
+    /// the seam that turns "row 3" into `mass_balance` per Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    fn split_space_names(&self) -> Option<SplitNames> {
+        let a = self.adapter.borrow();
+        let cls = a.classification();
+
+        let mut var_meta = MetaData::default();
+        let mut con_meta = MetaData::default();
+        if !a
+            .tnlp()
+            .borrow_mut()
+            .get_var_con_metadata(&mut var_meta, &mut con_meta)
+        {
+            return None;
+        }
+
+        // Full-space (original TNLP order) name pools. Either may be
+        // absent — a model can name variables but not constraints, etc.
+        let var_full = var_meta.strings.get(IDX_NAMES);
+        let con_full = con_meta.strings.get(IDX_NAMES);
+        if var_full.is_none() && con_full.is_none() {
+            return None;
+        }
+
+        // Look a full-space name up safely; `None` for out-of-range or
+        // empty entries so we degrade to an index label per slot.
+        let pick = |pool: Option<&Vec<String>>, full_idx: Index| -> Option<String> {
+            pool.and_then(|v| v.get(full_idx as usize))
+                .filter(|s| !s.is_empty())
+                .cloned()
+        };
+
+        let x_var = cls
+            .x_not_fixed_map
+            .iter()
+            .map(|&full_idx| pick(var_full, full_idx))
+            .collect();
+        let eq = cls
+            .c_map
+            .iter()
+            .map(|&full_idx| pick(con_full, full_idx))
+            .collect();
+        let ineq = cls
+            .d_map
+            .iter()
+            .map(|&full_idx| pick(con_full, full_idx))
+            .collect();
+
+        let names = SplitNames { x_var, eq, ineq };
+        names.any_present().then_some(names)
     }
 
     /// Populate `x` (length `n_x_var`) from the TNLP's starting point,
@@ -2269,6 +2402,69 @@ mod tests {
         assert_eq!(lifted, vec![7.0, 0.5]);
     }
 
+    /// `OneFixedOneFree` plus `idx_names` metadata — used to check the
+    /// split-space name projection threads names through the fixed-var
+    /// and c/d-split permutations.
+    struct NamedFixedOneFree;
+    impl TNLP for NamedFixedOneFree {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            OneFixedOneFree.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            OneFixedOneFree.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            OneFixedOneFree.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], n: bool) -> Option<Number> {
+            OneFixedOneFree.eval_f(x, n)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            OneFixedOneFree.eval_grad_f(x, n, g)
+        }
+        fn eval_g(&mut self, x: &[Number], n: bool, g: &mut [Number]) -> bool {
+            OneFixedOneFree.eval_g(x, n, g)
+        }
+        fn eval_jac_g(&mut self, x: Option<&[Number]>, n: bool, m: SparsityRequest<'_>) -> bool {
+            OneFixedOneFree.eval_jac_g(x, n, m)
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+        fn get_var_con_metadata(&mut self, var: &mut MetaData, con: &mut MetaData) -> bool {
+            var.strings.insert(
+                IDX_NAMES.to_string(),
+                vec!["fixed_x".to_string(), "free_x".to_string()],
+            );
+            con.strings
+                .insert(IDX_NAMES.to_string(), vec!["balance".to_string()]);
+            true
+        }
+    }
+
+    #[test]
+    fn split_space_names_threads_through_fixed_var_and_cd_split() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(NamedFixedOneFree));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+
+        let names = nlp.split_space_names().expect("names present");
+        // x[0] (fixed) dropped; var-x 0 is full-x 1 = "free_x".
+        assert_eq!(names.x_var, vec![Some("free_x".to_string())]);
+        // The single g is an equality → c-block 0 = "balance".
+        assert_eq!(names.eq, vec![Some("balance".to_string())]);
+        // No inequalities.
+        assert!(names.ineq.is_empty());
+        assert!(names.any_present());
+    }
+
+    #[test]
+    fn split_space_names_none_when_tnlp_declines() {
+        // OneFixedOneFree does not implement get_var_con_metadata.
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneFixedOneFree));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+        assert!(nlp.split_space_names().is_none());
+    }
+
     /// Regression: a TNLP with `x[0]` fixed and `nnz_h_lag = 1` whose
     /// only Hessian entry is (0,0). After fixed-var filtering kept = 0
     /// but `nnz_h_lag_full = 1`, which used to hit the broken
@@ -2558,6 +2754,94 @@ mod tests {
             (nlp2.obj_scale_factor() - 0.1).abs() < 1e-12,
             "target_gradient=1, max_grad_f=10 → df=0.1; got {}",
             nlp2.obj_scale_factor()
+        );
+    }
+
+    /// Regression (flosp2hm): gradient-based scaling must sample the
+    /// objective gradient at the point the algorithm actually operates
+    /// on — i.e. with fixed variables (`x_l == x_u`) lifted to their
+    /// fixed value — not at the raw `x0` returned by `get_starting_point`.
+    /// Here `x[1]` is fixed at 1000 but the starting point places it at 0,
+    /// and the only free-variable gradient is `df/dx0 = x[1]`. Sampling at
+    /// the raw `x0` gives `max_grad_f = 0` (df stays 1.0, no scaling);
+    /// lifting `x[1]→1000` gives `max_grad_f = 1000`, so df = 100/1000 = 0.1.
+    /// Pre-fix this left df=1 and stalled flosp2hm at max-iter.
+    struct FixedVarShiftsObjGrad;
+    impl TNLP for FixedVarShiftsObjGrad {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 0,
+                nnz_jac_g: 0,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -1.0e19;
+            b.x_u[0] = 1.0e19;
+            b.x_l[1] = 1000.0;
+            b.x_u[1] = 1000.0; // fixed at 1000
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x[0] = 1.0;
+            sp.x[1] = 0.0; // deliberately NOT the fixed value
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _: bool) -> Option<Number> {
+            Some(x[0] * x[1])
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _: bool, g: &mut [Number]) -> bool {
+            g[0] = x[1];
+            g[1] = x[0];
+            true
+        }
+        fn eval_g(&mut self, _: &[Number], _: bool, _: &mut [Number]) -> bool {
+            true
+        }
+        fn eval_jac_g(&mut self, _: Option<&[Number]>, _: bool, _: SparsityRequest<'_>) -> bool {
+            true
+        }
+        fn eval_h(
+            &mut self,
+            _: Option<&[Number]>,
+            _: bool,
+            _: Number,
+            _: Option<&[Number]>,
+            _: bool,
+            _: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+        fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    }
+
+    #[test]
+    fn gradient_scaling_lifts_fixed_vars_to_their_value() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(FixedVarShiftsObjGrad));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let mut nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+
+        // Sanity: x[1] is fixed out of the var-x space, fixed value 1000.
+        assert_eq!(nlp.n_full_x(), 2);
+        assert_eq!(nlp.n(), 1);
+
+        nlp.determine_scaling_from_starting_point(
+            ScalingMethod::GradientBased,
+            100.0,
+            1e-8,
+            0.0,
+            0.0,
+        );
+
+        // Lifted gradient ∞-norm over free vars is |df/dx0| = x[1] = 1000,
+        // so df = 100/1000 = 0.1. Sampling at the raw x0 (x[1]=0) would
+        // give 0 and leave df=1.0 (the pre-fix bug).
+        assert!(
+            (nlp.obj_scale_factor() - 0.1).abs() < 1e-12,
+            "fixed var must be lifted before scaling; expected df=0.1, got {}",
+            nlp.obj_scale_factor()
         );
     }
 

@@ -101,4 +101,13 @@ pub trait ConvCheck {
     fn tol_or_default(&self) -> Number {
         1e-8
     }
+
+    /// Live-update a named convergence tolerance mid-solve, for the
+    /// debugger's in-place option hot-swap. Returns `true` if `name`
+    /// matched a tolerance this policy owns (so the caller can report
+    /// whether it took). Default: this policy exposes no live
+    /// tolerances → `false`.
+    fn set_tolerance(&mut self, _name: &str, _value: Number) -> bool {
+        false
+    }
 }

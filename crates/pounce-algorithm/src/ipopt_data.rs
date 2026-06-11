@@ -33,6 +33,12 @@ pub struct PdPerturbations {
 /// installed (see `IpoptAlgorithm`); inspected via `DebugCtx::kkt`.
 #[derive(Clone, Debug, Default)]
 pub struct KktDebug {
+    /// The outer iteration this factorization was assembled at. Lets the
+    /// debugger label `viz kkt` / `viz L` with the iteration the system
+    /// actually came from — at an `iter_start` pause that's the *previous*
+    /// iteration (the step that produced the current point), not the
+    /// iterate you're standing on.
+    pub iter: i32,
     /// Dimension of the augmented system (n + m).
     pub dim: i32,
     /// Negative eigenvalues reported by the factorization (-1 if the
@@ -76,16 +82,13 @@ pub struct IpoptData {
     pub perturbations: PdPerturbations,
 
     /// KKT-factorization diagnostics for the debugger (set after a
-    /// search-direction solve when a debugger is installed).
+    /// search-direction solve when a debugger is installed). The full
+    /// matrix triplets and `LDLᵀ` factor are captured here whenever the
+    /// debugger is stepping (see `DebugHook::wants_kkt_capture`) and
+    /// dropped when it detaches, so `viz kkt` / `viz L` always have the
+    /// previous iteration's system to look back at without paying the
+    /// O(nnz) assembly during a free run.
     pub kkt_debug: Option<KktDebug>,
-    /// Set by the debugger to request the (expensive) `LDLᵀ` factor be
-    /// captured into `kkt_debug.l_factor` on the next solve.
-    pub want_l_factor: bool,
-    /// Set by the debugger to request the assembled KKT matrix triplets be
-    /// captured into `kkt_debug.matrix` on the next solve. Off by default so
-    /// merely attaching the debugger doesn't pay an O(nnz) triplet assembly
-    /// every iteration — only armed when `viz kkt` / `save` needs them.
-    pub want_matrix: bool,
 
     /// Set after a successful trial-acceptance step in the line
     /// search. Cleared on accept.
@@ -165,8 +168,6 @@ impl IpoptData {
             tol: 1e-8,
             perturbations: PdPerturbations::default(),
             kkt_debug: None,
-            want_l_factor: false,
-            want_matrix: false,
             info_alpha_primal: 0.0,
             info_alpha_dual: 0.0,
             info_regu_x: 0.0,

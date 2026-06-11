@@ -218,6 +218,164 @@ def test_solve_with_sens_boundcheck_clamps_violating_step():
     np.testing.assert_allclose(dx[4], UPSTREAM_DX[4], atol=5e-8)
 
 
+class ScaledPinNLP:
+    """pounce#128 regression fixture: a badly-scaled 2-variable
+    least-squares NLP with a badly-scaled parameter pin.
+
+        min  c0*(x - p)**2 + c1*(x - 1)**2
+        s.t. SCALE*p = SCALE*p_hat
+
+    The objective gradient at the start (~2*c1 = 1.2e5) and the pin
+    row's Jacobian entry (SCALE = 1e4) both exceed
+    nlp_scaling_max_gradient (100), so the default gradient-based NLP
+    scaling fires on both the objective and the pin row. Analytically,
+    f*(p) = c0*c1*(p-1)**2/(c0+c1), and w.r.t. the pin RHS r = SCALE*p,
+    the reduced Hessian in pounce's pin-row sign convention is
+
+        H = -d2f*/dr2 = -2*c0*c1 / ((c0+c1)*SCALE**2)
+
+    Before #128 the returned value was off by exactly df/dc**2 (the
+    objective / pin-row scaling factors).
+    """
+
+    C0 = 4.0e4
+    C1 = 6.0e4
+    SCALE = 1.0e4
+    P_HAT = 0.7
+
+    def objective(self, x):
+        xx, p = x
+        return self.C0 * (xx - p) ** 2 + self.C1 * (xx - 1.0) ** 2
+
+    def gradient(self, x):
+        xx, p = x
+        return np.array([
+            2 * self.C0 * (xx - p) + 2 * self.C1 * (xx - 1.0),
+            -2 * self.C0 * (xx - p),
+        ])
+
+    def constraints(self, x):
+        return np.array([self.SCALE * x[1]])
+
+    def jacobianstructure(self):
+        return np.array([0], dtype=np.int64), np.array([1], dtype=np.int64)
+
+    def jacobian(self, x):
+        return np.array([self.SCALE])
+
+    def hessianstructure(self):
+        rows = np.array([0, 1, 1], dtype=np.int64)
+        cols = np.array([0, 0, 1], dtype=np.int64)
+        return rows, cols
+
+    def hessian(self, x, lagrange, obj_factor):
+        return obj_factor * np.array([
+            2 * (self.C0 + self.C1),
+            -2 * self.C0,
+            2 * self.C0,
+        ])
+
+
+H_ANALYTIC_128 = (
+    -2.0 * ScaledPinNLP.C0 * ScaledPinNLP.C1
+    / ((ScaledPinNLP.C0 + ScaledPinNLP.C1) * ScaledPinNLP.SCALE ** 2)
+)
+
+
+def _make_scaled_pin(nlp_scaling_method=None):
+    nlp = ScaledPinNLP()
+    rhs = nlp.SCALE * nlp.P_HAT
+    p = pounce.Problem(
+        n=2, m=1, problem_obj=nlp,
+        lb=[-1e19, -1e19], ub=[1e19, 1e19],
+        cl=[rhs], cu=[rhs],
+    )
+    p.add_option("tol", 1e-9)
+    p.add_option("print_level", 0)
+    p.add_option("sb", "yes")
+    if nlp_scaling_method is not None:
+        p.add_option("nlp_scaling_method", nlp_scaling_method)
+    return p
+
+
+def test_reduced_hessian_is_unscaled_regardless_of_nlp_scaling_pounce_128():
+    """The headline #128 fix: -inv(reduced_hessian) (the covariance
+    recipe) must be the same with scaling off and with the default
+    gradient-based scaling actively firing."""
+    x0 = np.array([0.0, 0.0])
+    results = {}
+    for method in ("none", None):  # None = pounce default (gradient-based)
+        _, info = _make_scaled_pin(method).solve_with_sens(
+            x0=x0,
+            pin_constraint_indices=[0],
+            compute_reduced_hessian=True,
+        )
+        assert info["status_msg"] == "Solve_Succeeded"
+        results[method] = info
+
+    for method, info in results.items():
+        h = info["reduced_hessian"][0]
+        np.testing.assert_allclose(
+            h, H_ANALYTIC_128, rtol=1e-6,
+            err_msg=f"nlp_scaling_method={method}: natural-units H wrong",
+        )
+
+    # Scaling factors are reported. With scaling off they are trivial...
+    info_off = results["none"]
+    assert info_off["obj_scaling_factor"] == pytest.approx(1.0)
+    np.testing.assert_allclose(info_off["pin_g_scaling"], [1.0])
+    np.testing.assert_allclose(
+        info_off["reduced_hessian_scaled"], info_off["reduced_hessian"]
+    )
+
+    # The clean quadratic fixture needs no inertia correction: the
+    # all-zero perturbations certify the covariance reading is exact.
+    for info in results.values():
+        np.testing.assert_allclose(info["kkt_perturbations"], np.zeros(4))
+
+    # ...and with gradient-based scaling both df and the pin dc fire,
+    # and the scaled accessor reconstructs from the reported factors.
+    info_on = results[None]
+    df = info_on["obj_scaling_factor"]
+    dc = info_on["pin_g_scaling"][0]
+    assert df < 1.0  # max grad ~1.2e5 >> 100
+    assert dc < 1.0  # pin row max = SCALE = 1e4 >> 100
+    np.testing.assert_allclose(
+        info_on["reduced_hessian_scaled"],
+        info_on["reduced_hessian"] * df / dc ** 2,
+        rtol=1e-12,
+    )
+    # The pre-#128 value really was wildly off for this fixture.
+    ratio = info_on["reduced_hessian_scaled"][0] / info_on["reduced_hessian"][0]
+    assert not ratio == pytest.approx(1.0, rel=0.5)
+
+
+def test_solver_session_reduced_hessian_scaled_accessor_and_nlp_scaling():
+    """Session API mirror: Solver.reduced_hessian is natural-units by
+    default, scaled=True returns the solver-space value, and
+    Solver.nlp_scaling exposes the factors."""
+    problem = _make_scaled_pin()  # default gradient-based scaling
+    solver = pounce.Solver(problem)
+    _, info = solver.solve(x0=np.array([0.0, 0.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+
+    h = solver.reduced_hessian([0])
+    np.testing.assert_allclose(h[0], H_ANALYTIC_128, rtol=1e-6)
+
+    scaling = solver.nlp_scaling
+    df = scaling["obj"]
+    assert df < 1.0
+    assert scaling["c_scale"] is not None and scaling["c_scale"][0] < 1.0
+    assert scaling["d_scale"] is None  # no inequalities in this fixture
+
+    h_scaled = solver.reduced_hessian([0], scaled=True)
+    dc = scaling["c_scale"][0]
+    np.testing.assert_allclose(h_scaled[0], h[0] * df / dc ** 2, rtol=1e-12)
+
+    # Factor-regularization diagnostic mirrors the info-dict key.
+    np.testing.assert_allclose(solver.kkt_perturbations, np.zeros(4))
+
+
 def test_solve_with_sens_finite_difference_cross_check():
     """First-order sensitivity Δx_sens vs Δx from a fresh resolve."""
     x0 = np.array([0.15, 0.15, 0.0, 0.0, 0.0])

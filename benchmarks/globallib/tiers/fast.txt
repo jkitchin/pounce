@@ -1,0 +1,42 @@
+# fast tier — every GLOBALLib proven-optimum model the IPM-OBBT engine
+# solves in <1s (wall from the 2026-06-07 30s sweep). ~12s total per engine:
+# the broader regression set once a change passes tiers/micro.txt.
+#
+#   python3 run_globallib.py --stems-file tiers/fast.txt --timeout 10
+#   python3 compare_obbt_engines.py --stems-file tiers/fast.txt --timeout 10
+#
+# stem            n   nodes   wall(IPM)
+ex9_2_8         # n=3      1n  0.01s
+rbrock          # n=2      1n  0.02s
+ex2_1_2         # n=6      1n  0.03s
+ex4_1_8         # n=2      3n  0.03s
+ex8_1_1         # n=2      5n  0.04s
+ex4_1_7         # n=1      7n  0.05s
+ex2_1_4         # n=6      1n  0.06s
+ex14_2_2        # n=4      1n  0.07s
+ex2_1_3         # n=13     1n  0.07s
+chance          # n=4      3n  0.11s
+ex14_1_3        # n=3      5n  0.11s
+ex4_1_1         # n=1     19n  0.13s
+ex4_1_3         # n=1     29n  0.18s
+ex14_1_8        # n=3      7n  0.23s
+ex3_1_2         # n=5      3n  0.24s
+ex14_2_1        # n=5      1n  0.30s
+himmel11        # n=9      3n  0.32s
+ex4_1_6         # n=1     51n  0.38s
+ex4_1_4         # n=1     65n  0.40s
+ex9_2_4         # n=8     11n  0.40s
+ex2_1_1         # n=5      7n  0.40s
+ex9_1_4         # n=10     3n  0.42s
+ex14_2_8        # n=4      1n  0.44s
+ex14_1_4        # n=3      7n  0.50s
+ex4_1_9         # n=2     41n  0.54s
+ex14_2_9        # n=4      1n  0.57s
+ex3_1_4         # n=3     21n  0.62s
+ex5_2_2_case3   # n=9      7n  0.65s
+ex14_2_3        # n=6      1n  0.69s
+ex3_1_3         # n=6      3n  0.77s
+ex9_1_2         # n=10     3n  0.82s
+ex5_2_2_case1   # n=9      9n  0.91s
+ex14_1_6        # n=9      3n  0.95s
+ex2_1_6         # n=10     5n  0.96s

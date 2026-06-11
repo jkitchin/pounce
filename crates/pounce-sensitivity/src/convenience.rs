@@ -104,12 +104,41 @@ pub struct SensResult {
     pub dx: Option<Vec<Number>>,
     /// Full KKT-space step (primals + slacks + duals stacked in the
     /// pounce compound-vector layout). Lower-level than `dx`; useful
-    /// for cross-checking against upstream sIPOPT outputs.
+    /// for cross-checking against upstream sIPOPT outputs. All blocks
+    /// — including the bound-multiplier z/v rows — are in natural
+    /// (unscaled) units (pounce#128); note upstream sIPOPT reports the
+    /// scaled-space step when NLP scaling is active.
     pub dx_full: Option<Vec<Number>>,
-    /// Reduced Hessian `H_R`, length `n_params²`, column-major. Only
-    /// present when [`SensSolve::with_reduced_hessian`] was called and
-    /// the solve converged.
+    /// Reduced Hessian `H_R`, length `n_params²`, column-major, in
+    /// **natural (unscaled) units** — any NLP scaling baked into the
+    /// converged KKT factor is undone, so `−inv(H_R)` is directly the
+    /// parameter covariance of an estimation problem regardless of
+    /// `nlp_scaling_method` (pounce#128). Only present when
+    /// [`SensSolve::with_reduced_hessian`] was called and the solve
+    /// converged.
     pub reduced_hessian: Option<Vec<Number>>,
+    /// The reduced Hessian as the solver's internal scaled space sees
+    /// it — `H̃_ij = (df / (dc_i·dc_j)) · H_ij` with `df =`
+    /// [`Self::obj_scaling_factor`] and `dc =` [`Self::pin_g_scaling`].
+    /// This is the value pounce returned before #128; kept for callers
+    /// that calibrated against it. Present iff `reduced_hessian` is.
+    pub reduced_hessian_scaled: Option<Vec<Number>>,
+    /// Effective objective scaling factor `df` the IPM applied
+    /// (`nlp_scaling_method` / `obj_scaling_factor`; 1.0 ⇔ none).
+    /// Present whenever the solve converged.
+    pub obj_scaling_factor: Option<Number>,
+    /// Per-pin equality-row scaling factors `dc_i` (all 1.0 when no
+    /// constraint scaling is active), ordered like
+    /// `pin_constraint_indices`. Present whenever the solve converged.
+    pub pin_g_scaling: Option<Vec<Number>>,
+    /// Inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` baked
+    /// into the converged KKT factor. All zero ⇔ the factor is
+    /// unregularized and the natural-units sensitivity outputs invert
+    /// the exact KKT matrix; nonzero ⇔ they are perturbed (and not
+    /// exactly scaling-invariant) — check before trusting
+    /// `-inv(reduced_hessian)` as a covariance on ill-conditioned
+    /// problems. Present whenever the solve converged.
+    pub kkt_perturbations: Option<[Number; 4]>,
     /// Eigenvalues of `H_R` in ascending order, length `n_params`.
     /// Present only when [`SensSolve::with_reduced_hessian_eigen`] was
     /// called and the solve converged.
@@ -160,8 +189,14 @@ impl SensSolve {
         self
     }
 
-    /// Request the reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` at the
-    /// converged solution, where `B` selects the parameter-pin rows.
+    /// Request the reduced Hessian `H_R = B K⁻¹ Bᵀ` at the converged
+    /// solution, where `B` selects the parameter-pin rows and `K` is
+    /// the **natural-units** (unscaled) KKT matrix — any active NLP
+    /// scaling is undone by the backsolver (pounce#128). The
+    /// solver-space value and the scaling factors are reported
+    /// alongside in [`SensResult::reduced_hessian_scaled`] /
+    /// [`SensResult::obj_scaling_factor`] /
+    /// [`SensResult::pin_g_scaling`].
     pub fn with_reduced_hessian(mut self) -> Self {
         self.compute_reduced_hessian = true;
         self
@@ -177,9 +212,12 @@ impl SensSolve {
         self
     }
 
-    /// Objective scaling factor applied to the reduced Hessian.
-    /// Default 1.0; set to the IPM's `obj_scaling_factor` if the
-    /// caller scaled their objective.
+    /// Extra constant multiplier applied to the reduced Hessian.
+    /// Default 1.0. **Deprecated in spirit since pounce#128**: the
+    /// backsolver now undoes the IPM's NLP scaling itself, so this is
+    /// no longer needed to recover natural units — it survives as a
+    /// plain user-side multiplier for callers that scaled their
+    /// objective *outside* pounce.
     pub fn with_obj_scal(mut self, obj_scal: Number) -> Self {
         self.obj_scal = obj_scal;
         self
@@ -276,24 +314,34 @@ impl SensSolve {
             }
 
             let n_x = curr.x.dim() as usize;
-            let n_s = curr.s.dim() as usize;
-            // y_c rows live right after the (x, s) primal block in
-            // the compound-vector layout. Pin constraint indices are
-            // user-facing 0-based indices into g(x); the same
-            // constraint lives at flat KKT row `n_x + n_s + i`.
-            let y_c_offset = (n_x + n_s) as Index;
-            let param_rows: Vec<Index> = pin_indices.iter().map(|&i| y_c_offset + i).collect();
-            let signs = vec![1; n_params];
 
             let backsolver = match PdSensBacksolver::new(data, cq, nlp, Rc::clone(&pd)) {
                 Ok(b) => b,
                 Err(e) => {
                     outbox_cb.borrow_mut().error =
-                        Some(format!("PdSensBacksolver::new failed: {e:?}"));
+                        Some(format!("PdSensBacksolver::new failed: {e}"));
                     return;
                 }
             };
             let n_full = backsolver.dim();
+
+            // Pin constraint indices are user-facing 0-based indices
+            // into g(x); the matching y_c slot is found through the
+            // NLP's c/d-split row map (pounce#128: a direct
+            // `n_x + n_s + i` is wrong once inequalities precede the
+            // pins in g).
+            let (param_rows, pin_scales) = match backsolver.pin_rows_and_c_scales(&pin_indices) {
+                Ok(rs) => rs,
+                Err(e) => {
+                    outbox_cb.borrow_mut().error = Some(e);
+                    return;
+                }
+            };
+            let df = backsolver.obj_scaling_factor();
+            outbox_cb.borrow_mut().obj_scaling_factor = Some(df);
+            outbox_cb.borrow_mut().pin_g_scaling = Some(pin_scales.clone());
+            outbox_cb.borrow_mut().kkt_perturbations = Some(backsolver.kkt_perturbations());
+            let signs = vec![1; n_params];
 
             let a_data = match IndexSchurData::from_parts(param_rows, signs) {
                 Ok(a) => a,
@@ -345,16 +393,19 @@ impl SensSolve {
                             Some("SensApplication::compute_reduced_hessian_eigen failed".into());
                         return;
                     }
-                    outbox_cb.borrow_mut().reduced_hessian = Some(hr);
                     outbox_cb.borrow_mut().reduced_hessian_eigenvalues = Some(w);
                     outbox_cb.borrow_mut().reduced_hessian_eigenvectors = Some(v);
                 } else if !sens_app.compute_reduced_hessian(&mut hr) {
                     outbox_cb.borrow_mut().error =
                         Some("SensApplication::compute_reduced_hessian failed".into());
                     return;
-                } else {
-                    outbox_cb.borrow_mut().reduced_hessian = Some(hr);
                 }
+                // Solver-space (pre-#128) value, reconstructed from
+                // the natural-units H rather than re-solved.
+                let mut hr_scaled = hr.clone();
+                crate::reduced_hessian::scale_to_solver_space(&mut hr_scaled, df, &pin_scales);
+                outbox_cb.borrow_mut().reduced_hessian = Some(hr);
+                outbox_cb.borrow_mut().reduced_hessian_scaled = Some(hr_scaled);
             }
         }));
 
@@ -367,6 +418,10 @@ impl SensSolve {
             dx: out.dx.clone(),
             dx_full: out.dx_full.clone(),
             reduced_hessian: out.reduced_hessian.clone(),
+            reduced_hessian_scaled: out.reduced_hessian_scaled.clone(),
+            obj_scaling_factor: out.obj_scaling_factor,
+            pin_g_scaling: out.pin_g_scaling.clone(),
+            kkt_perturbations: out.kkt_perturbations,
             reduced_hessian_eigenvalues: out.reduced_hessian_eigenvalues.clone(),
             reduced_hessian_eigenvectors: out.reduced_hessian_eigenvectors.clone(),
             mult_g: out.mult_g.clone(),
@@ -384,6 +439,10 @@ struct CallbackOut {
     dx: Option<Vec<Number>>,
     dx_full: Option<Vec<Number>>,
     reduced_hessian: Option<Vec<Number>>,
+    reduced_hessian_scaled: Option<Vec<Number>>,
+    obj_scaling_factor: Option<Number>,
+    pin_g_scaling: Option<Vec<Number>>,
+    kkt_perturbations: Option<[Number; 4]>,
     reduced_hessian_eigenvalues: Option<Vec<Number>>,
     reduced_hessian_eigenvectors: Option<Vec<Number>>,
     mult_g: Option<Vec<Number>>,

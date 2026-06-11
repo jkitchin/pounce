@@ -147,6 +147,96 @@ fn pounce_sens_emits_report_with_sens_sol_state_suffix() {
     let _ = std::fs::remove_file(&json_path);
 }
 
+/// The `--json-output` report must have a *uniform* schema regardless of
+/// which solver path produced it. The NLP path is covered above and the
+/// convex QP-IPM path in `qp_dispatch_end_to_end.rs`, but nothing asserts
+/// the schema is genuinely identical in shape across paths — including the
+/// LP-IPM path, which had no JSON coverage at all. This runs one set of
+/// schema invariants over three distinct solver paths (NLP, convex QP-IPM,
+/// convex LP-IPM) so the benchmark harness can ingest any pounce solve
+/// uniformly. A path that emitted a divergent or placeholder report (e.g.
+/// an objective that disagrees with `final_objective`, or an `x` whose
+/// length contradicts `n_variables`) would fail here.
+#[test]
+fn json_schema_is_uniform_across_solver_paths() {
+    fn fixture_named(name: &str) -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push(name);
+        p
+    }
+
+    // (label, fixture, forced solver_selection) — three genuinely different
+    // code paths inside the CLI dispatch.
+    let cases: &[(&str, PathBuf, &str)] = &[
+        ("nlp", fixture_nl(), "nlp"),
+        ("convex-qp-ipm", fixture_named("convex_qp.nl"), "qp-ipm"),
+        ("convex-lp-ipm", fixture_named("lp_afiro.nl"), "lp-ipm"),
+    ];
+
+    for (label, fixture, sel) in cases {
+        let json_path = tmp_path(&format!("uniform_{label}.json"));
+        let _ = std::fs::remove_file(&json_path);
+        let out = Command::new(pounce_exe())
+            .arg(fixture)
+            .arg("--no-sol")
+            .arg("--json-output")
+            .arg(&json_path)
+            .arg(format!("solver_selection={sel}"))
+            .output()
+            .unwrap_or_else(|e| panic!("spawn pounce ({label}): {e}"));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{label} solve should succeed; stderr=\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let text = std::fs::read_to_string(&json_path)
+            .unwrap_or_else(|e| panic!("read report ({label}): {e}"));
+        let report: SolveReport = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("deserialize report ({label}): {e}\n{text}"));
+
+        // --- invariants every path must satisfy identically ---
+        assert_eq!(
+            report.schema, "pounce.solve-report/v1",
+            "{label}: schema tag"
+        );
+        assert_eq!(
+            report.fair_metadata.solver.name, "pounce",
+            "{label}: solver name"
+        );
+        assert!(
+            !report.fair_metadata.result_id.is_empty(),
+            "{label}: result_id present"
+        );
+        assert!(!report.solution.x.is_empty(), "{label}: primal x populated");
+        assert!(
+            report.solution.x.iter().all(|v| v.is_finite()),
+            "{label}: primal x all finite"
+        );
+        assert!(
+            report.solution.objective.is_finite(),
+            "{label}: objective finite"
+        );
+        assert!(
+            (report.solution.objective - report.statistics.final_objective).abs()
+                <= 1e-9 * report.solution.objective.abs().max(1.0),
+            "{label}: solution.objective {} != statistics.final_objective {}",
+            report.solution.objective,
+            report.statistics.final_objective
+        );
+        assert_eq!(
+            report.problem.n_variables as usize,
+            report.solution.x.len(),
+            "{label}: n_variables matches x length"
+        );
+
+        let _ = std::fs::remove_file(&json_path);
+    }
+}
+
 #[test]
 fn schema_field_is_stable_across_runs() {
     let p1 = tmp_path("schema_a.json");

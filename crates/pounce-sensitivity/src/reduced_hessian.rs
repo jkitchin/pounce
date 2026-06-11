@@ -17,10 +17,13 @@
 //! from the augmented-system reduction), which is then multiplied
 //! by `-obj_scal` to produce the unscaled reduced Hessian.
 //!
-//! In pounce we default `obj_scal = 1.0` (no NLP-side scaling
-//! folded in here) so the operation reduces to `H_R = -S = B K⁻¹ Bᵀ`.
-//! Phase D's `SensApplication` will plumb the real obj scaling once
-//! the algorithm-side wiring lands.
+//! In pounce we default `obj_scal = 1.0` so the operation reduces to
+//! `H_R = -S = B K⁻¹ Bᵀ`. Unlike upstream, no NLP-side scaling needs
+//! folding in here: since pounce#128 the live-factor backsolver
+//! ([`crate::PdSensBacksolver`]) conjugates every back-solve by the
+//! NLP scaling diagonal, so `K⁻¹` is already the natural-units KKT
+//! inverse and `obj_scal` survives purely as a user-side extra
+//! multiplier.
 //!
 //! Reference: Pirnay, López-Negrete & Biegler 2012, §5
 //! (reduced-Hessian use case), DOI:
@@ -67,6 +70,29 @@ use pounce_common::types::Number;
 /// constructing a reduced Hessian outside a configured pounce IPM
 /// own the responsibility to pass an `obj_scal` consistent with
 /// whatever scaling their `K` factor encodes.
+/// Convert a natural-units reduced Hessian (column-major `n×n`,
+/// `n = dc.len()`) into the solver's internal scaled space in place:
+/// `H̃_ij = (df / (dc_i·dc_j)) · H_ij`, with `df` the effective
+/// objective scaling factor and `dc` the pin rows' constraint scaling
+/// factors. This is the inverse of the natural-units correction the
+/// live-factor backsolver applies (pounce#128) — i.e. the value
+/// pounce returned before #128. Single home for the formula so the
+/// `SensSolve` and `Solver` surfaces cannot drift.
+///
+/// Returns `false` when `hr` is mis-sized.
+pub fn scale_to_solver_space(hr: &mut [Number], df: Number, dc: &[Number]) -> bool {
+    let n = dc.len();
+    if hr.len() != n * n {
+        return false;
+    }
+    for j in 0..n {
+        for i in 0..n {
+            hr[j * n + i] *= df / (dc[i] * dc[j]);
+        }
+    }
+    true
+}
+
 pub fn compute_reduced_hessian<P: PCalculator>(
     pcalc: &mut P,
     hess_data: &dyn SchurData,

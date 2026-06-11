@@ -1,0 +1,92 @@
+# Publish the POUNCE Rust crates to crates.io.
+#
+# Triggers:
+#   - push of a `v*` tag (e.g. v0.4.0) -> publish every crate in
+#     scripts/publish-crates.sh, in dependency order, to crates.io. This is
+#     the same `v*` marker tag the other release steps key off, so cutting a
+#     release publishes PyPI (release-pounce / release-pyomo-pounce, on their
+#     own `python-v*` / `pyomo-pounce-v*` tags) and crates.io together.
+#   - workflow_dispatch -> manual run. Defaults to a DRY RUN (packages every
+#     crate, uploads nothing). Set dry_run=false to actually publish, and
+#     optionally start_from=<crate> to resume after a mid-batch failure.
+#
+# The publish is idempotent: scripts/publish-crates.sh skips any crate already
+# live at the workspace version, so re-running on the same tag is a no-op.
+#
+# AUTH: uses a crates.io API token in the `CARGO_REGISTRY_TOKEN` secret (the
+# same model dev-notes/cargo-release.md documents for local `cargo login`).
+# Add it under Settings -> Secrets -> Actions (repo-level), or scope it to the
+# `crates-io` environment below to gate publishes behind a manual approval.
+# (Alternative not used here: crates.io OIDC trusted publishing, which would
+# need a per-crate Trusted Publisher config for all 18 crates.)
+name: release-crates
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (package only, no upload)"
+        type: boolean
+        default: true
+      start_from:
+        description: "Resume from this crate (optional)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Never run two publishes at once, and never cancel one mid-batch.
+concurrency:
+  group: release-crates
+  cancel-in-progress: false
+
+jobs:
+  publish-crates:
+    name: publish to crates.io
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/pounce-cli
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-crates
+
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          START_FROM_INPUT: ${{ inputs.start_from }}
+          # cargo 1.66+ waits for the index after each publish; a small sleep
+          # adds margin for a dependent to see its just-published dependency.
+          SLEEP: "10"
+        run: |
+          set -euo pipefail
+          # Manual dispatch defaults to a dry run; a tag push always publishes.
+          DRY=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_INPUT" = "true" ]; then
+            DRY=true
+          fi
+          # A real upload needs the token; a dry run does not.
+          if [ "$DRY" != "true" ] && [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN secret is not set — add it (repo or 'crates-io' environment) before publishing." >&2
+            exit 1
+          fi
+          args=()
+          [ "$DRY" = "true" ] && args+=(--dry-run)
+          if [ -n "${START_FROM_INPUT:-}" ]; then
+            args+=(--start-from "$START_FROM_INPUT")
+          fi
+          if [ "${#args[@]}" -gt 0 ]; then
+            scripts/publish-crates.sh "${args[@]}"
+          else
+            scripts/publish-crates.sh
+          fi

@@ -39,6 +39,11 @@ pub struct IpoptCalculatedQuantities {
     /// Damping coefficient for the bound-multiplier complementarity
     /// term (`kappa_d` in upstream's RegisterOptions).
     pub kappa_d: Number,
+    /// Correction size for very small slacks (`slack_move` option,
+    /// default `mach_eps^{3/4}`). Drives `calculate_safe_slack`'s
+    /// upper cap on the moved bound — port of upstream's `slack_move_`
+    /// (`IpIpoptCalculatedQuantities.cpp:525`).
+    pub slack_move: Number,
 
     // Per-iterate caches for the hot accessors used by the KKT solver
     // dependency-tag check. Without these the PdFullSpaceSolver sees a
@@ -62,6 +67,18 @@ fn rc_from(v: Box<dyn Vector>) -> Rc<dyn Vector> {
     Rc::from(v)
 }
 
+/// Result of [`IpoptCalculatedQuantities::adjusted_trial_bounds`]: the
+/// new `x_L / x_U / d_L / d_U` to install on the NLP when one or more
+/// trial slacks were corrected by the safe-slack mechanism.
+pub struct AdjustedBounds {
+    /// Total number of slack components corrected across all four blocks.
+    pub adjusted: usize,
+    pub x_l: Box<dyn Vector>,
+    pub x_u: Box<dyn Vector>,
+    pub d_l: Box<dyn Vector>,
+    pub d_u: Box<dyn Vector>,
+}
+
 impl IpoptCalculatedQuantities {
     pub fn new(data: IpoptDataHandle, nlp: Rc<RefCell<dyn IpoptNlp>>) -> Self {
         Self {
@@ -69,6 +86,7 @@ impl IpoptCalculatedQuantities {
             nlp,
             s_max: 100.0,
             kappa_d: 1e-5,
+            slack_move: f64::EPSILON.powf(0.75),
             curr_slack_x_l_cache: RefCell::new(Cache::new(1)),
             curr_slack_x_u_cache: RefCell::new(Cache::new(1)),
             curr_slack_s_l_cache: RefCell::new(Cache::new(1)),
@@ -106,20 +124,132 @@ impl IpoptCalculatedQuantities {
     // (`IpIpoptCalculatedQuantities.cpp:238-266`).
     // --------------------------------------------------------------
 
-    fn calc_slack_l(p: &dyn Matrix, x: &dyn Vector, x_bound: &dyn Vector) -> Rc<dyn Vector> {
+    fn calc_slack_l_box(p: &dyn Matrix, x: &dyn Vector, x_bound: &dyn Vector) -> Box<dyn Vector> {
         let mut result = x_bound.make_new();
         result.copy(x_bound);
         // result = -1*result + 1*P^T x  ⇒  P^T x - x_bound.
         p.trans_mult_vector(1.0, x, -1.0, &mut *result);
-        rc_from(result)
+        result
     }
 
-    fn calc_slack_u(p: &dyn Matrix, x: &dyn Vector, x_bound: &dyn Vector) -> Rc<dyn Vector> {
+    fn calc_slack_u_box(p: &dyn Matrix, x: &dyn Vector, x_bound: &dyn Vector) -> Box<dyn Vector> {
         let mut result = x_bound.make_new();
         result.copy(x_bound);
         // result = 1*result + (-1)*P^T x  ⇒  x_bound - P^T x.
         p.trans_mult_vector(-1.0, x, 1.0, &mut *result);
-        rc_from(result)
+        result
+    }
+
+    /// Floor a freshly computed slack against machine precision and,
+    /// where it falls below `eps*min(1,mu)`, raise it to a representable
+    /// positive value, returning the number of corrected components.
+    /// Faithful port of `IpoptCalculatedQuantities::CalculateSafeSlack`
+    /// (`IpIpoptCalculatedQuantities.cpp:455-537`): the corrected slack
+    /// is `min(max(mu/multiplier, s_min), slack_move*max(1,|bound|)+slack)`.
+    /// `multiplier` and `mu` are taken from the *current* iterate, exactly
+    /// as upstream does even for trial slacks.
+    fn calculate_safe_slack(
+        &self,
+        slack: &mut dyn Vector,
+        bound: &dyn Vector,
+        multiplier: &dyn Vector,
+        mu: Number,
+    ) -> usize {
+        if slack.dim() == 0 {
+            return 0;
+        }
+        let min_slack = slack.min();
+        // s_min = eps * min(1, mu); if mu drove it to 0, keep it strictly
+        // positive (upstream #212) so the strict `slack < s_min` test and
+        // the barrier term stay well-defined.
+        let mut s_min = f64::EPSILON * mu.min(1.0);
+        if s_min == 0.0 {
+            s_min = f64::MIN_POSITIVE;
+        }
+        if min_slack >= s_min {
+            return 0;
+        }
+
+        // t = sign(slack - s_min); then collapse to 1 where slack < s_min,
+        // 0 elsewhere.
+        let mut t = slack.make_new();
+        t.copy(&*slack);
+        t.add_scalar(-s_min);
+        t.element_wise_sgn();
+        let mut zero_vec = t.make_new();
+        zero_vec.set(0.0);
+        t.element_wise_min(&*zero_vec); // -1 if slack < s_min, else 0
+        t.scal(-1.0); //  1 if slack < s_min, else 0
+        let retval = t.asum().round() as usize;
+
+        // Clamp the raw slack to be non-negative before forming the target
+        // (upstream's AW fix for negative slacks producing 0).
+        slack.element_wise_max(&*zero_vec);
+
+        // t2 = max(mu/multiplier, s_min) - slack.
+        let mut t2 = t.make_new();
+        let mut s_min_vec = t2.make_new();
+        s_min_vec.set(s_min);
+        if mu != 0.0 {
+            // mu/0 → +inf here, intentionally capped by t_max below.
+            t2.set(mu);
+            t2.element_wise_divide(multiplier);
+            t2.element_wise_max(&*s_min_vec);
+        } else {
+            // mu == 0: max(0/multiplier, s_min) is s_min everywhere, but a 0/0
+            // (zero multiplier at μ=0) would seed the slack target with NaN and
+            // poison the bound move — pin straight to s_min instead.
+            t2.copy(&*s_min_vec);
+        }
+        t2.axpy(-1.0, &*slack);
+
+        // t = max(mu/multiplier, s_min) where flagged, else slack.
+        t.element_wise_select(&*t2);
+        t.axpy(1.0, &*slack);
+
+        // t_max = slack_move*max(1,|bound|) + slack.
+        let mut t_max = t2; // reuse buffer
+        t_max.set(1.0);
+        let mut abs_bound = bound.make_new();
+        abs_bound.copy(bound);
+        abs_bound.element_wise_abs();
+        t_max.element_wise_max(&*abs_bound);
+        // t_max = 1.0*slack + slack_move*t_max.
+        t_max.add_one_vector(1.0, &*slack, self.slack_move);
+
+        // new slack = min(target, t_max) where flagged, else slack.
+        t.element_wise_min(&*t_max);
+        slack.copy(&*t);
+        retval
+    }
+
+    /// `calc_slack_l` followed by `calculate_safe_slack`, returning the
+    /// (floored) slack plus the number of corrected components. The
+    /// multiplier and `mu` come from the current iterate.
+    fn safe_slack_l(
+        &self,
+        p: &dyn Matrix,
+        x: &dyn Vector,
+        bound: &dyn Vector,
+        multiplier: &dyn Vector,
+    ) -> (Rc<dyn Vector>, usize) {
+        let mu = self.data.borrow().curr_mu;
+        let mut result = Self::calc_slack_l_box(p, x, bound);
+        let n = self.calculate_safe_slack(&mut *result, bound, multiplier, mu);
+        (rc_from(result), n)
+    }
+
+    fn safe_slack_u(
+        &self,
+        p: &dyn Matrix,
+        x: &dyn Vector,
+        bound: &dyn Vector,
+        multiplier: &dyn Vector,
+    ) -> (Rc<dyn Vector>, usize) {
+        let mu = self.data.borrow().curr_mu;
+        let mut result = Self::calc_slack_u_box(p, x, bound);
+        let n = self.calculate_safe_slack(&mut *result, bound, multiplier, mu);
+        (rc_from(result), n)
     }
 
     pub fn curr_slack_x_l(&self) -> Rc<dyn Vector> {
@@ -131,7 +261,7 @@ impl IpoptCalculatedQuantities {
             }
         }
         let nlp = self.nlp.borrow();
-        let v = Self::calc_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l());
+        let (v, _) = self.safe_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l(), &*iv.z_l);
         self.curr_slack_x_l_cache
             .borrow_mut()
             .add(v.clone(), &[iv.x.as_tagged()], &[]);
@@ -147,7 +277,7 @@ impl IpoptCalculatedQuantities {
             }
         }
         let nlp = self.nlp.borrow();
-        let v = Self::calc_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u());
+        let (v, _) = self.safe_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u(), &*iv.z_u);
         self.curr_slack_x_u_cache
             .borrow_mut()
             .add(v.clone(), &[iv.x.as_tagged()], &[]);
@@ -163,7 +293,7 @@ impl IpoptCalculatedQuantities {
             }
         }
         let nlp = self.nlp.borrow();
-        let v = Self::calc_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l());
+        let (v, _) = self.safe_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l(), &*iv.v_l);
         self.curr_slack_s_l_cache
             .borrow_mut()
             .add(v.clone(), &[iv.s.as_tagged()], &[]);
@@ -179,7 +309,7 @@ impl IpoptCalculatedQuantities {
             }
         }
         let nlp = self.nlp.borrow();
-        let v = Self::calc_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u());
+        let (v, _) = self.safe_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u(), &*iv.v_u);
         self.curr_slack_s_u_cache
             .borrow_mut()
             .add(v.clone(), &[iv.s.as_tagged()], &[]);
@@ -188,26 +318,86 @@ impl IpoptCalculatedQuantities {
 
     pub fn trial_slack_x_l(&self) -> Rc<dyn Vector> {
         let iv = self.trial_iv();
+        let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        Self::calc_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l())
+        self.safe_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l(), &*mult.z_l)
+            .0
     }
 
     pub fn trial_slack_x_u(&self) -> Rc<dyn Vector> {
         let iv = self.trial_iv();
+        let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        Self::calc_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u())
+        self.safe_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u(), &*mult.z_u)
+            .0
     }
 
     pub fn trial_slack_s_l(&self) -> Rc<dyn Vector> {
         let iv = self.trial_iv();
+        let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        Self::calc_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l())
+        self.safe_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l(), &*mult.v_l)
+            .0
     }
 
     pub fn trial_slack_s_u(&self) -> Rc<dyn Vector> {
         let iv = self.trial_iv();
+        let mult = self.curr_iv();
         let nlp = self.nlp.borrow();
-        Self::calc_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u())
+        self.safe_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u(), &*mult.v_u)
+            .0
+    }
+
+    /// Compute the four trial slacks with safe-slack flooring and, if any
+    /// component was corrected, the adjusted variable bounds that make the
+    /// trial slacks exactly representable. Port of the bound-adjustment
+    /// block in `IpoptAlgorithm::AcceptTrialPoint`
+    /// (`IpIpoptAlg.cpp:664-706`): `new_x_L = Px_L^T x - safe_slack_x_L`,
+    /// `new_x_U = Px_U^T x + safe_slack_x_U`, likewise for `s`/`d`.
+    /// Returns `None` when no slack needed correcting.
+    pub fn adjusted_trial_bounds(&self) -> Option<AdjustedBounds> {
+        let iv = self.trial_iv();
+        let mult = self.curr_iv();
+        let nlp = self.nlp.borrow();
+
+        let (s_x_l, n_x_l) = self.safe_slack_l(&*nlp.px_l(), &*iv.x, nlp.x_l(), &*mult.z_l);
+        let (s_x_u, n_x_u) = self.safe_slack_u(&*nlp.px_u(), &*iv.x, nlp.x_u(), &*mult.z_u);
+        let (s_s_l, n_s_l) = self.safe_slack_l(&*nlp.pd_l(), &*iv.s, nlp.d_l(), &*mult.v_l);
+        let (s_s_u, n_s_u) = self.safe_slack_u(&*nlp.pd_u(), &*iv.s, nlp.d_u(), &*mult.v_u);
+
+        let adjusted = n_x_l + n_x_u + n_s_l + n_s_u;
+        if adjusted == 0 {
+            return None;
+        }
+
+        // new_x_L = Px_L^T x - safe_slack_x_L
+        let mut new_x_l = nlp.x_l().make_new();
+        nlp.px_l()
+            .trans_mult_vector(1.0, &*iv.x, 0.0, &mut *new_x_l);
+        new_x_l.axpy(-1.0, &*s_x_l);
+        // new_x_U = Px_U^T x + safe_slack_x_U
+        let mut new_x_u = nlp.x_u().make_new();
+        nlp.px_u()
+            .trans_mult_vector(1.0, &*iv.x, 0.0, &mut *new_x_u);
+        new_x_u.axpy(1.0, &*s_x_u);
+        // new_d_L = Pd_L^T s - safe_slack_s_L
+        let mut new_d_l = nlp.d_l().make_new();
+        nlp.pd_l()
+            .trans_mult_vector(1.0, &*iv.s, 0.0, &mut *new_d_l);
+        new_d_l.axpy(-1.0, &*s_s_l);
+        // new_d_U = Pd_U^T s + safe_slack_s_U
+        let mut new_d_u = nlp.d_u().make_new();
+        nlp.pd_u()
+            .trans_mult_vector(1.0, &*iv.s, 0.0, &mut *new_d_u);
+        new_d_u.axpy(1.0, &*s_s_u);
+
+        Some(AdjustedBounds {
+            adjusted,
+            x_l: new_x_l,
+            x_u: new_x_u,
+            d_l: new_d_l,
+            d_u: new_d_u,
+        })
     }
 
     // --------------------------------------------------------------

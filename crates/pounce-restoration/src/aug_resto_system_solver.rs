@@ -58,7 +58,7 @@ use pounce_common::types::{Index, Number};
 use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
-use pounce_linalg::{Matrix, Vector};
+use pounce_linalg::{LowRankUpdateSymMatrix, Matrix, MultiVectorMatrix, Vector};
 use pounce_linsol::ESymSolverStatus;
 use std::rc::Rc;
 
@@ -202,12 +202,9 @@ impl AugSystemSolver for AugRestoSystemSolver {
         num_neg_evals: Index,
     ) -> ESymSolverStatus {
         // ---- Downcast the flat resto matrices. ----
-        let w = coeffs
+        let w_dyn = coeffs
             .w
-            .expect("AugRestoSystemSolver: W must be present (resto Hessian)")
-            .as_any()
-            .downcast_ref::<SymTMatrix>()
-            .expect("AugRestoSystemSolver: W must be a SymTMatrix");
+            .expect("AugRestoSystemSolver: W must be present (resto Hessian)");
         let j_c = coeffs
             .j_c
             .as_any()
@@ -218,6 +215,40 @@ impl AugSystemSolver for AugRestoSystemSolver {
             .as_any()
             .downcast_ref::<GenTMatrix>()
             .expect("AugRestoSystemSolver: J_d must be a GenTMatrix");
+
+        // The flat Schur reduction reads `W`'s triplets directly. The
+        // exact-Hessian path publishes `W` as a [`SymTMatrix`] (orig
+        // Hessian + proximity diagonal, all triplets in `1..=n_orig`),
+        // which we use as-is. The limited-memory path publishes `W` as a
+        // [`LowRankUpdateSymMatrix`] (`B0 + VVᵀ − UUᵀ`, no triplets), so
+        // we materialize its `n_orig` orig block into a dense-lower-
+        // triangle `SymTMatrix` via matrix–vector products. Restoration
+        // is a heavyweight fallback and `n_orig` is the orig variable
+        // count, so the `O(n_orig²)` densification is negligible. Without
+        // this, constrained limited-memory solves (every constrained
+        // solve through the Python `Problem` API) panic the moment
+        // restoration triggers (pounce#102).
+        let m_eq = j_c.n_rows();
+        let m_ineq = j_d.n_rows();
+        let n_orig = j_c.n_cols() - 2 * m_eq - 2 * m_ineq;
+
+        // ---- D_x compound (also the matvec-probe template for a low-rank W). ----
+        let dx_compound = coeffs
+            .d_x
+            .expect("AugRestoSystemSolver: D_x must be present (5-block compound)")
+            .as_any()
+            .downcast_ref::<CompoundVector>()
+            .expect("AugRestoSystemSolver: D_x must be a CompoundVector");
+        debug_assert_eq!(dx_compound.n_comps(), 5);
+
+        let w_owned;
+        let w = match w_dyn.as_any().downcast_ref::<SymTMatrix>() {
+            Some(w) => w,
+            None => {
+                w_owned = materialize_orig_block(w_dyn, n_orig);
+                &w_owned
+            }
+        };
 
         if !self.initialized {
             self.build_structure(w, j_c, j_d);
@@ -238,13 +269,6 @@ impl AugSystemSolver for AugRestoSystemSolver {
         }
 
         // ---- σ vectors from D_x compound. ----
-        let dx_compound = coeffs
-            .d_x
-            .expect("AugRestoSystemSolver: D_x must be present (5-block compound)")
-            .as_any()
-            .downcast_ref::<CompoundVector>()
-            .expect("AugRestoSystemSolver: D_x must be a CompoundVector");
-        debug_assert_eq!(dx_compound.n_comps(), 5);
         let sigma_orig_dyn = dx_compound.comp(0); // &dyn Vector, n_orig dim
         let sigma_n_c = dense_values(dx_compound.comp(1));
         let sigma_p_c = dense_values(dx_compound.comp(2));
@@ -473,6 +497,111 @@ fn downcast_dense_mut(v: &mut dyn Vector) -> &mut DenseVector {
     v.as_any_mut()
         .downcast_mut::<DenseVector>()
         .expect("AugRestoSystemSolver: expected DenseVector argument")
+}
+
+/// Densify the `n_orig` orig (top-left) block of a flat resto Hessian
+/// `W` into a dense lower-triangle [`SymTMatrix`].
+///
+/// The exact-Hessian path publishes `W` as a [`SymTMatrix`] with triplet
+/// storage; the limited-memory path publishes it as a
+/// [`LowRankUpdateSymMatrix`] (`D + V Vᵀ − U Uᵀ`) with no triplets, so the
+/// Schur reduction — which reads `W`'s entries directly — needs an
+/// explicit form. Restoration only ever wraps the *plain* limited-memory
+/// Hessian (full-space diagonal, identity `P`, no `reduced_diag`), so the
+/// `(i, j)` entry of the orig block is, in closed form,
+/// `Wᵢⱼ = D[i]·δᵢⱼ + Σ_k V[i,k]·V[j,k] − Σ_k U[i,k]·U[j,k]` for
+/// `i, j < n_orig`. We read `D`, `V`, `U` directly through the matrix's
+/// accessors rather than probing with `W·eⱼ`: the resto low-rank `W`
+/// stores `D` as a flat [`DenseVector`] but its `V`/`U` columns as 5-block
+/// resto [`CompoundVector`]s, so no single probe-vector type threads
+/// through `mult_vector`. Cost is `O(rank·n_orig²)`; restoration is a rare
+/// heavyweight fallback and `n_orig` is small, so this is negligible.
+///
+/// Panics with a clear message if `W` is neither a `SymTMatrix` (handled
+/// by the caller) nor a plain-configuration `LowRankUpdateSymMatrix` —
+/// i.e. if a future code path hands restoration a low-rank `W` with a
+/// `p_lowrank` expansion or `reduced_diag`, which this closed form does
+/// not cover (pounce#102).
+fn materialize_orig_block(w: &dyn Matrix, n_orig: Index) -> SymTMatrix {
+    let n = n_orig as usize;
+    let lr = w
+        .as_any()
+        .downcast_ref::<LowRankUpdateSymMatrix>()
+        .expect("AugRestoSystemSolver: resto W must be a SymTMatrix or LowRankUpdateSymMatrix");
+    assert!(
+        lr.p_lowrank().is_none() && !lr.reduced_diag(),
+        "AugRestoSystemSolver: resto W has a p_lowrank/reduced_diag low-rank form \
+         that the orig-block densification does not cover (pounce#102)"
+    );
+
+    // Dense lower-triangle sparsity (1-based, row-major).
+    let mut irows = Vec::with_capacity(n * (n + 1) / 2);
+    let mut jcols = Vec::with_capacity(n * (n + 1) / 2);
+    for i in 1..=n_orig {
+        for j in 1..=i {
+            irows.push(i);
+            jcols.push(j);
+        }
+    }
+    let space = SymTMatrixSpace::new(n_orig, irows, jcols);
+    let mut sym = SymTMatrix::new(space);
+
+    // Pull the orig (first `n_orig`) rows of D and of every V/U column.
+    let diag = lr
+        .get_diag()
+        .map(|d| orig_rows(d.as_ref(), n))
+        .unwrap_or_else(|| vec![0.0; n]);
+    let v_cols = multi_vector_orig_cols(lr.get_v(), n);
+    let u_cols = multi_vector_orig_cols(lr.get_u(), n);
+
+    let vals = sym.values_mut();
+    for ii in 0..n {
+        for jj in 0..=ii {
+            // Row-major triplet index of the 1-based entry (ii+1, jj+1).
+            let idx = (ii + 1) * ii / 2 + jj;
+            let mut acc = if ii == jj { diag[ii] } else { 0.0 };
+            for col in &v_cols {
+                acc += col[ii] * col[jj];
+            }
+            for col in &u_cols {
+                acc -= col[ii] * col[jj];
+            }
+            vals[idx] = acc;
+        }
+    }
+    sym
+}
+
+/// The first `n` rows of a resto primal vector, which is either a flat
+/// [`DenseVector`] or a 5-block resto [`CompoundVector`] whose component 0
+/// (the `n_orig` orig block) is a `DenseVector`.
+fn orig_rows(v: &dyn Vector, n: usize) -> Vec<Number> {
+    // `expanded_values` (not `values`) so a homogeneously-stored block —
+    // e.g. the σ·I diagonal published by the limited-memory updater — is
+    // materialized rather than tripping the dense-vector value assert.
+    if let Some(c) = v.as_any().downcast_ref::<CompoundVector>() {
+        let orig = c
+            .comp(0)
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .expect("AugRestoSystemSolver: resto W orig block must be a DenseVector");
+        orig.expanded_values()[..n].to_vec()
+    } else if let Some(d) = v.as_any().downcast_ref::<DenseVector>() {
+        d.expanded_values()[..n].to_vec()
+    } else {
+        panic!("AugRestoSystemSolver: resto W component must be Dense or Compound");
+    }
+}
+
+/// The orig (first `n`) rows of every column of an optional curvature
+/// [`MultiVectorMatrix`] (`V` or `U`); empty when the factor is absent.
+fn multi_vector_orig_cols(m: Option<&Rc<MultiVectorMatrix>>, n: usize) -> Vec<Vec<Number>> {
+    match m {
+        None => Vec::new(),
+        Some(mv) => (0..mv.space().n_cols())
+            .map(|k| orig_rows(mv.get_vector(k).as_ref(), n))
+            .collect(),
+    }
 }
 
 // ---------- Scalar reduction kernels ----------

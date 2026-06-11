@@ -33,7 +33,7 @@ pub mod tnlp_adapter;
 pub use alg_types::SolverReturn;
 pub use expression_provider::{ExpressionProvider, FbbtOp, FbbtTape};
 pub use ipopt_nlp::{IpoptNlp, Nlp};
-pub use orig_ipopt_nlp::{NlpScaling, NoScaling, OrigIpoptNlp};
+pub use orig_ipopt_nlp::{ConstObjScaling, NlpScaling, NoScaling, OrigIpoptNlp};
 pub use return_codes::{AlgorithmMode, ApplicationReturnStatus};
 pub use solve_statistics::SolveStatistics;
 pub use tnlp::{

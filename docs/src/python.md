@@ -16,7 +16,8 @@ Optional extras:
 
 ```sh
 pip install -e .[jax]        # JAX integration
-pip install -e .[dev]        # tests + jax + scipy
+pip install -e .[torch]      # PyTorch integration
+pip install -e .[dev]        # tests + jax + torch + scipy
 ```
 
 ## cyipopt-style interface
@@ -56,6 +57,85 @@ x, info = prob.solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
 print(info['status_msg'], info['obj_val'], x)
 ```
 
+## Batched NLP solving (`solve_nlp_batch`)
+
+`pounce.solve_nlp_batch` solves N **independent** NLPs and returns one
+`(x, info)` pair per input, in input order — for parametric sweeps,
+multi-start, MPC chains, or branch-and-bound node relaxations where
+each sibling differs only in tightened bounds.
+
+```python
+import numpy as np
+import pounce
+
+base = pounce.read_nl("model.nl")          # native-Rust evaluators
+
+# One parsed structure, many variations (cheap clones of the AD tapes):
+rng = np.random.default_rng(0)
+batch = [base.variant(x0=np.asarray(base.x0) + rng.normal(0, 0.01, base.n))
+         for _ in range(24)]
+
+results = pounce.solve_nlp_batch(batch, options={"tol": 1e-8})
+for x, info in results:
+    print(info["status_msg"], info["obj_val"])
+```
+
+`NlProblem.variant(x0=, x_l=, x_u=, g_l=, g_u=)` builds a sibling
+instance with per-instance starting point / bounds; everything
+structural (expression DAG, AD tapes, sparsity, coloring) is shared
+work that is not redone.
+
+**Native vs. callback inputs — the GIL caveat.** Both kinds solve in
+parallel, with different ceilings:
+
+* `NlProblem` inputs (from `read_nl` / `variant`) are native-Rust
+  reverse-mode-AD evaluators. The batch runs on a Rayon thread pool
+  with the GIL fully released; each worker solves its instance
+  end-to-end with an inner-serial factorization (outer-parallel /
+  inner-serial, the same model as `solve_qp_batch`).
+* Callback-based `Problem` inputs (pass `x0s=`, one starting point per
+  instance) also run one instance per worker, but every `objective` /
+  `gradient` / `constraints` / `jacobian` / `hessian` call re-acquires
+  the GIL. The Python share of the work is therefore serialized: the
+  speedup scales with the Rust/Python work ratio — medium and large
+  problems whose factorizations dominate parallelize well (~4x on 4
+  cores for an n=800 banded NLP with vectorized NumPy callbacks);
+  tiny problems whose callbacks dominate won't. Each `Problem`'s own
+  `add_option` settings are honored per instance, with `options=` as
+  a batch-level overlay.
+
+With `parallel=False` either path solves one instance at a time,
+letting each factorization parallelize internally — better for a few
+large instances. For the batch, `print_level` defaults to 0 (N workers
+interleaving iteration tables is noise); pass an explicit
+`print_level` to override.
+
+**Warm-start chaining (MPC / B&B).** Feed one batch's results into the
+next solve of a nearby batch:
+
+```python
+results = pounce.solve_nlp_batch(batch_t)              # cold
+results = pounce.solve_nlp_batch(batch_t1, warms=results)  # warm
+```
+
+Each instance is seeded with the previous `x` and duals, the converged
+barrier parameter (`info["mu"]`) is threaded into `mu_init`, and
+`warm_start_init_point=yes` is forced. A warm start changes iteration
+counts, never solutions (re-solving the 24-instance gaslib sweep warm
+drops 482 total iterations to 120). A dimension-mismatched warm entry
+falls back to that instance's cold start.
+
+**Identical-sparsity batches (`share_structure=True`).** When every
+instance shares its KKT sparsity (parametric sweeps, multi-start, B&B
+siblings), this opt-in keeps each worker's factorization backend alive
+across instances so the symbolic analysis (fill-reducing ordering,
+supernode structure) runs once per worker rather than once per
+instance. Always correct — a pattern change just triggers a fresh
+analysis — but pooled solver state means results are within solver
+tolerance of, not bit-identical to, the default fresh-backend solves.
+The win scales with how expensive ordering is for your model (small
+models: negligible; large sparse models: worth measuring).
+
 ## scipy.optimize-style
 
 ```python
@@ -66,6 +146,166 @@ res = minimize(lambda x: (x - 1) @ (x - 1) + 1, x0=np.zeros(5))
 print(res.fun, res.x)
 ```
 
+`minimize` is a thin facade over `pounce.Problem` shaped after
+`scipy.optimize.minimize`, so SciPy code ports with few changes. It returns a
+SciPy-`OptimizeResult`-shaped object (`res.x`, `res.fun`, `res.success`,
+`res.status`, `res.message`, `res.nit`, plus `res.info` and dict-style
+`res["x"]`).
+
+### Compatibility with `scipy.optimize.minimize`
+
+```python
+minimize(fun, x0, jac=None, hess=None, bounds=None,
+         constraints=None, options=None)
+```
+
+| Argument | Status | Notes |
+|---|---|---|
+| `fun`, `x0` | ✅ | objective callable and start point |
+| `jac` | ✅ | callable; **omitted → central finite differences** (`eps^(1/3)` step) and a one-time `UserWarning`. Provide one (or use `pounce.jax` / `pounce.torch`) for production. |
+| `hess` | ⚠️ | used **only when there are no constraints**; with constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
+| `bounds` | ✅ | a sequence of `(lo, hi)` pairs; a `None` element or a `None` endpoint means ±∞ |
+| `constraints` | ✅ | SciPy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}`; multiple are concatenated; `"jac"` optional (finite-diff fallback) |
+| `options` | ⚠️ | forwarded to `Problem.add_option` — keys are **pounce/Ipopt option names** (`tol`, `max_iter`, `hessian_approximation`), **not** SciPy's (`maxiter`, `ftol`) |
+| `args` | ❌ | not supported — close over extra arguments in `fun`/`jac` |
+| `method` | ❌ | always the filter-IPM (see below for why there is no `method=`) |
+| `hessp` | ❌ | no Hessian-vector-product mode |
+| `tol` | ❌ | pass it via `options={"tol": …}` |
+| `callback` | ❌ | not supported |
+
+**Conventions that match SciPy** (so constraint dicts port directly):
+
+- Inequalities use the SciPy sign convention **`g(x) ≥ 0`**; equalities are
+  **`g(x) = 0`**.
+- The result object is SciPy-`OptimizeResult`-shaped (subset of fields + an
+  `info` map).
+
+**Gaps worth knowing:**
+
+- **Only the dict form of `constraints`** is accepted — a SciPy `Bounds`,
+  `LinearConstraint`, or `NonlinearConstraint` *object* will not work, and
+  `bounds` must be `(lo, hi)` pairs (not a `Bounds` object).
+- The constraint **Jacobian is dense**; for large sparse Jacobians use the
+  `Problem` class directly (it takes a sparse Jacobian and structure).
+- The most common porting snag is `options`: `options={"maxiter": 100}` is a
+  no-op — it is `options={"max_iter": 100}`.
+
+### Solver routing in `minimize`
+
+By default `minimize` **auto-routes** the same way the CLI's
+`solver_selection=auto` does: a problem that is provably a **linear program**
+or a **convex quadratic program** is dispatched to the specialized convex
+interior-point solver (`pounce.solve_qp`, the HSDE driver), and a provably
+**convex QCQP** (convex-quadratic objective and/or constraints) is reformulated
+to a second-order cone program and dispatched to the conic solver
+(`pounce.solve_socp`). Both reach a **global** optimum in materially fewer
+iterations; everything else is solved by the general NLP filter line-search
+interior-point method, exactly as before.
+
+The catch is that `minimize` only sees **opaque callables** — it cannot read a
+`.nl` expression tree the way the CLI can. So instead of *reading* the
+structure it **probes** it: it evaluates `fun`/`jac`/`hess` at several points,
+fits a linear/quadratic model, and then **validates that model against the
+true callables at held-out points** before trusting it. The two
+misclassification directions are not symmetric, and the validation gates the
+dangerous one:
+
+- A convex LP/QP/QCQP mistakenly sent to the NLP solver is merely *slower* —
+  the filter-IPM still solves it correctly.
+- A genuinely nonlinear or nonconvex problem sent to the convex solver would
+  return a **silently wrong** answer.
+
+So any probe that raises, any model mismatch beyond `route_tol`, a
+non-constant Hessian/Jacobian, an indefinite objective Hessian (a nonconvex
+QP), a quadratic *equality*, or a quadratic inequality whose feasible set is
+nonconvex (a non-PSD constraint Hessian) all fall back to the NLP solver.
+**You never get a wrong "optimum" from a misclassification.**
+
+#### Forcing the solver
+
+The `solver_selection` option (passed in `options=`) overrides the automatic
+choice — mirroring the CLI option of the same name:
+
+| `options={"solver_selection": …}` | Behavior |
+|---|---|
+| `"auto"` | **Default.** Probe-and-validate; route provable LP/convex-QP to `solve_qp`, a convex QCQP to `solve_socp`, else NLP. |
+| `"nlp"` | Skip routing entirely; always use the NLP solver (the pre-routing behavior). |
+| `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
+| `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
+| `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |
+
+```python
+# Default: route a convex QP to the fast convex IPM automatically.
+res = minimize(fun, x0, bounds=bounds)
+print(res.info["solver"])          # 'qp-ipm' / 'socp' when routed; absent on the NLP path
+
+# Keep the pre-routing behavior — always the NLP solver:
+res = minimize(fun, x0, options={"solver_selection": "nlp"})
+
+# Insist the problem is a convex QP; fail loudly if the probe disagrees:
+res = minimize(fun, x0, options={"solver_selection": "qp-ipm"})
+
+# A convex QCQP (e.g. a quadratic ball constraint) routes to the conic solver.
+# Give the objective and constraint analytic `jac`s: derivative-free detection
+# recovers the constraint Hessian from a finite-difference-of-finite-difference
+# Jacobian, which is too noisy to confirm the quadratic, so without `jac` the
+# probe conservatively defers to NLP (still the correct answer, just slower).
+ball = {"type": "ineq",
+        "fun": lambda x: 1.0 - x @ x,        # x·x ≤ 1
+        "jac": lambda x: -2.0 * np.asarray(x)}
+res = minimize(lambda x: -x[0] - x[1], [0.1, 0.1],
+               jac=lambda x: np.array([-1.0, -1.0]),
+               constraints=[ball])
+print(res.info.get("solver"))      # 'socp' (None on the NLP fall-back path)
+```
+
+`route_tol` (default `1e-5`) sets the relative tolerance for the held-out
+validation; raise it if a genuinely-linear problem with noisy finite-difference
+Jacobians is being conservatively rejected, lower it to be stricter. The
+routing keys are consumed by `minimize` and never forwarded to the backend, so
+the rest of `options` still reaches the NLP solver unchanged.
+
+#### When you still need a typed entry point
+
+Auto-routing handles LP, convex QP, and convex QCQP from the
+`minimize(fun, x0, …)` shape. The remaining specialized solvers need structure
+that a callable cannot carry — an explicit cone list (exp/power/PSD cones), a
+symbolic objective to relax and bound — so each keeps its own pounce-native
+entry point:
+
+| Want | Entry point | You provide | Optimum |
+|---|---|---|---|
+| General nonlinear, fast local solve | `minimize(fun, x0, …)` | callables (`fun`/`jac`/`hess`) | local |
+| LP / convex QP | `minimize` (auto) or `solve_qp(P, c, A, b, G, h, lb, ub, …)` | callables / matrices | **global** |
+| Convex QCQP | `minimize` (auto / `socp`) or `solve_socp(…, cones=…)` | callables / matrices + cone list | **global** |
+| SOCP / exp / power / PSD cones | `solve_socp(P, c, A, b, G, h, *, cones, …)` | matrices + cone list | **global** |
+| Polynomial, certified global | `sos_minimize(objective, *, inequalities, equalities, …)` | a polynomial | **global** |
+
+The `solve_qp` / `solve_socp` / `sos_minimize` functions are pounce-native (not
+SciPy-shaped) by necessity — e.g. `sos_minimize` takes a polynomial as a
+coefficient dict and returns a certificate, *not* callables and SciPy dicts. See
+[Choosing a Solver](choosing-a-solver.md) for the full map.
+
+> A `minimize_global` entry point for factorable nonconvex problems (spatial
+> branch-and-bound) is in development on the `feature/global` branch and is not
+> exposed in this release; today the certified-global Python path is
+> `sos_minimize`, for polynomials.
+
+## Curve fitting
+
+`pounce.curve_fit` is the data-fitting companion to `minimize` — a
+`scipy.optimize.curve_fit`-style front end that adds parameter constraints,
+robust losses, confidence intervals, and `∂params/∂data` sensitivity, with the
+covariance read from the solver's reduced Hessian. See
+[Curve Fitting](curve-fitting.md).
+
+```python
+from pounce import curve_fit
+
+res = curve_fit(model, xdata, ydata, p0=[1, 1, 0])   # model written with jax.numpy
+print(res.summary())
+```
+
 ## Finding multiple minima
 
 `pounce.find_minima` is the global-search companion to `minimize`: it drives
@@ -74,9 +314,9 @@ deflation, tunneling, multistart, MLSL, basin-hopping). See
 [Finding Multiple Minima](find-minima.md) for the methods and references,
 [Choosing a Method](find-minima-choosing.md) for selection guidance
 (including high-dimensional behavior), and notebooks
-[15](https://github.com/jkitchin/pounce/blob/main/python/notebooks/15_find_minima_repulsion.ipynb),
-[16](https://github.com/jkitchin/pounce/blob/main/python/notebooks/16_find_minima_restart.ipynb),
-[17](https://github.com/jkitchin/pounce/blob/main/python/notebooks/17_find_minima_hopping.ipynb)
+[19](https://github.com/jkitchin/pounce/blob/main/python/notebooks/19_find_minima_repulsion.ipynb),
+[20](https://github.com/jkitchin/pounce/blob/main/python/notebooks/20_find_minima_restart.ipynb),
+[21](https://github.com/jkitchin/pounce/blob/main/python/notebooks/21_find_minima_hopping.ipynb)
 for the three families.
 
 ```python
@@ -112,6 +352,61 @@ prob = from_jax(f, g, n=4, m=1, lb=jnp.zeros(4), ub=jnp.full(4, 10.0),
                 cl=jnp.zeros(1), cu=jnp.zeros(1))
 x, info = prob.solve(x0=jnp.ones(4))
 ```
+
+### Sparse Jacobian/Hessian compression (`sparse=`)
+
+By default the constraint Jacobian and the Lagrangian Hessian are
+computed *densely* — `jax.jacrev`/`jacfwd`/`hessian` build the full
+matrix, which is then sliced to the detected sparsity pattern. The
+reported structure is sparse, but the AD work and memory are `O(m·n)`
+(Jacobian) and `O(n²)` (Hessian) **regardless of how sparse the true
+matrices are**. On a 10,000-variable banded system that means computing
+~10⁸ entries per iteration to keep ~50,000.
+
+Passing `sparse=True` switches both derivatives to CPR-style **colored
+AD** (pounce#83): structurally-orthogonal columns are colored, one
+JVP (Jacobian) / HVP (Hessian) is taken per color — `k ≪ n` colors —
+and the compressed result is scattered back to the known nonzeros. The
+per-iteration cost drops from `O(n)` to `O(k)` AD passes. This is the
+same compression strategy the Rust `.nl` tape path already uses for its
+Hessian.
+
+```python
+prob = from_jax(f, g, n=4, m=1, lb=jnp.zeros(4), ub=jnp.full(4, 10.0),
+                cl=jnp.zeros(1), cu=jnp.zeros(1),
+                sparse=True)              # colored JVP/HVP instead of dense slice
+```
+
+The flag is also accepted by [`JaxProblem`](#build-once-solve-many-jaxproblem),
+where it applies to both the single-solve and the batched
+block-diagonal paths. The reported structure, the values, and the
+solution are identical to the dense path either way — only the cost of
+producing the derivative values changes. The differentiable backward
+(`factor_reuse` / implicit diff) is unaffected.
+
+**When to use it.** `sparse=True` wins on problems whose Jacobian/Hessian
+are *genuinely* sparse with bounded per-row fill (banded, block, finite
+differences/elements, PDE-constrained, separable). On a dense problem
+the coloring finds no orthogonality (`k = n`) and the flag is a small,
+bounded overhead, so it is **opt-in rather than the default**. Measured
+on a banded family (`python/benchmarks/bench_sparse_ad_83.py`):
+
+| n | colors (Jac / Hess) | per-eval Jacobian | per-eval Hessian | full solve |
+|---|---|---|---|---|
+| 800  | 2 / 3 | 6.2× faster | 2.0× faster | 1.3× faster |
+| 2000 | 2 / 3 | 18.4× faster | 5.4× faster | 7.6× faster |
+| 5000 | 2 / 3 | **560× faster** | **200× faster** | — |
+
+The color count stays constant in `n` while the dense path grows
+linearly, so the gap widens without bound as the problem scales.
+
+**Pattern detection.** Sparsity is found by probing the dense derivative
+at random points and recording where entries are nonzero. Under
+`sparse=True` a mis-probe is costlier — it corrupts the compression
+seed, not just a reported nonzero — so detection unions **3 probes** by
+default (vs 1 for the dense path). Override with `n_probes=`. Truly
+value-dependent structure (branchy `where`/`abs`) should still be
+hand-rolled via the `Problem` API.
 
 ### Differentiable solve
 
@@ -223,6 +518,7 @@ jp = JaxProblem(
     lb=jnp.full(2, -10.0), ub=jnp.full(2, 10.0),
     cl=jnp.zeros(1),       cu=jnp.zeros(1),
     options={"tol": 1e-9, "print_level": 0},
+    # sparse=True,                                  # colored AD on sparse problems (see above)
 )
 
 # Sequential, differentiable:
@@ -473,6 +769,83 @@ handle is garbage-collected without `close()`. A worked example —
 projection layer, full Jacobian, JVP/VJP-from-state, and the lifetime
 patterns — is in
 [`notebooks/13_post_solve_jacobian.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/13_post_solve_jacobian.ipynb).
+
+## PyTorch integration
+
+The `pounce.torch` subpackage is a PyTorch frontend mirroring
+`pounce.jax`, one-for-one. It is a thin **adapter**, not a second solver:
+the numerical core (the Rust IPM) and the implicit-function-theorem
+backward are framework-agnostic — only the array namespace differs. A
+solve is a `torch.autograd.Function` you can drop inside a `torch.nn`
+model and backprop through, with the same constraint-satisfaction
+guarantee the JAX path gives. Install with `pip install pounce[torch]`
+(`torch.func` requires torch ≥ 2.2).
+
+Because PyTorch is eager, the adapter is *smaller* than the JAX one:
+there is no `pure_callback` / `ShapeDtypeStruct` machinery (the forward
+calls `problem.solve(...)` directly), no host-callback registry or
+single-thread executor (the converged `Solver` is stashed on the
+autograd `ctx` / `AnchorState` and read back in the backward on the same
+thread), and no global `jax_enable_x64` flag — float64 tensors are
+requested explicitly (`torch.set_default_dtype(torch.float64)` or
+`.double()` your inputs; the implicit-diff and KKT solves need double
+precision and the layers validate it).
+
+| JAX surface | PyTorch equivalent |
+|---|---|
+| `from_jax(f, g, …)` | `from_torch(f, g, …)` |
+| `solve(p, …)` | `solve(p, …)` (`torch.autograd.Function` + KKT backward) |
+| `solve_with_warm(p, …, warm_start=)` | `solve_with_warm(…)` (dual triple + barrier-μ, pounce#86) |
+| `vmap_solve` / `vmap_solve_parallel` | `vmap_solve` / `vmap_solve_parallel` |
+| `JaxProblem(…)` | `TorchProblem(…)` (build-once, factor-reuse backward) |
+| `solve_qp` / `solve_qp_batch` / `solve_socp` / `QpLayer` | same names |
+| `PathFollower` / `inverse_map_rhs` | same names |
+
+```python
+import torch
+torch.set_default_dtype(torch.float64)
+from pounce.torch import solve as psolve
+
+def f(x, p): return torch.sum((x - p) ** 2)
+def g(x, p): return torch.stack([x[0] + x[1] - 1.0])   # equality
+
+p = torch.tensor([0.3, 0.7], requires_grad=True)
+x_star = psolve(
+    p, f=f, g=g, x0=torch.zeros(2), n=2, m=1,
+    lb=torch.full((2,), -10.0), ub=torch.full((2,), 10.0),
+    cl=torch.zeros(1), cu=torch.zeros(1),
+    options={"tol": 1e-10, "print_level": 0},
+)
+(x_star ** 2).sum().backward()   # dL/dp via the implicit function theorem
+print(p.grad)
+```
+
+The differentiable conic layers are feasible-by-construction (the same
+"one roof" as cvxpylayers/theseus, off one core):
+
+```python
+from pounce.torch import solve_qp
+P = torch.eye(2); c = torch.tensor([-4.0, -4.0], requires_grad=True)
+G = torch.tensor([[1.0, 1.0]]); h = torch.tensor([0.5])
+x = solve_qp(P=P, c=c, G=G, h=h)   # min ½xᵀPx+cᵀx s.t. Gx ≤ h
+x.sum().backward()                  # OptNet implicit-diff gradients
+```
+
+Validation. Every layer is checked with `torch.autograd.gradcheck`
+against finite differences, and a JAX↔Torch **parity** suite asserts both
+frontends agree on `x*` and `dL/dp` to tolerance on shared fixtures
+(`python/tests/test_torch.py`, `test_qp_torch.py`, `test_socp_torch.py`,
+`test_parity_jax_torch.py`).
+
+> Thread-safety note. `torch.func` transforms share a process-global
+> layer stack and are not thread-safe; `vmap_solve_parallel` therefore
+> serializes the (already GIL-bound) Python derivative callbacks with a
+> lock while the Rust IPM linear algebra still runs concurrently
+> (GIL released). Double-backward is supported on the conic layers but
+> not guaranteed on the NLP implicit-diff path (the parameter
+> sensitivities are taken with `torch.func`, outside the autograd graph)
+> — set `factor_reuse=False` on `TorchProblem` for the in-framework dense
+> backward if you need higher-order behaviour.
 
 ## Notebooks
 

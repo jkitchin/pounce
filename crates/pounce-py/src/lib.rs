@@ -19,12 +19,18 @@
 
 use pyo3::prelude::*;
 
+mod nl_problem;
+mod nlp_batch;
 mod problem;
+mod qp;
 mod solver;
+mod sos;
 mod tnlp_bridge;
 mod warm_start;
 
+pub use nl_problem::{read_nl, PyNlProblem};
 pub use problem::PyProblem;
+pub use qp::{PyQpFactorization, PyQpProblem, PyQpSensitivity};
 pub use solver::PySolver;
 
 /// Python module entry point. The crate name (`_pounce`) and the
@@ -38,7 +44,28 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     pounce_observability::init_subscriber();
     m.add_class::<PyProblem>()?;
     m.add_class::<PySolver>()?;
+    m.add_class::<PyNlProblem>()?;
+    m.add_function(wrap_pyfunction!(read_nl, m)?)?;
+    // Batched NLP solving (pounce#126): native `.nl` path (phase 1)
+    // and callback-Problem path (phase 2).
+    m.add_function(wrap_pyfunction!(nlp_batch::solve_nlp_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(nlp_batch::solve_problem_batch, m)?)?;
     m.add_function(wrap_pyfunction!(warm_start::classify_working_set, m)?)?;
+    // Convex LP/QP solver (pounce-convex) bindings.
+    m.add_class::<PyQpProblem>()?;
+    m.add_class::<PyQpFactorization>()?;
+    m.add_class::<PyQpSensitivity>()?;
+    m.add_function(wrap_pyfunction!(qp::solve_qp, m)?)?;
+    m.add_function(wrap_pyfunction!(qp::solve_socp, m)?)?;
+    m.add_function(wrap_pyfunction!(qp::solve_qp_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(qp::solve_qp_multi_rhs, m)?)?;
+    // SOS polynomial global optimizer (pounce-convex::sos).
+    m.add_function(wrap_pyfunction!(sos::sos_minimize, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // Single source of truth for the differentiable-solve active-set
+    // tolerance (the `DiffHandoff` contract). The JAX / torch frontends
+    // import this instead of each hardcoding `1e-6`, so the producer's
+    // `info["active_tol"]` and every consumer's threshold can never drift.
+    m.add("DEFAULT_ACTIVE_TOL", pounce_sensitivity::DEFAULT_ACTIVE_TOL)?;
     Ok(())
 }

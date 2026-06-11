@@ -1,113 +1,139 @@
 # crates.io release
 
-POUNCE ships 13 Rust crates to crates.io. This file is the procedure.
-For the PyPI side (`pounce-solver` + `pyomo-pounce`), see
-`pypi-release.md`.
+POUNCE ships **19** Rust crates to crates.io. This file is the procedure.
+For the PyPI side (`pounce-solver` + `pyomo-pounce`), see `pypi-release.md`.
+
+The publish list and its dependency order live in
+`scripts/publish-crates.sh` (the `CRATES=(...)` array). That list is the one
+the release uses, and `scripts/check-release-consistency.sh` (run in CI on
+every PR) fails the build if it ever drifts from the workspace's actual
+publishable crates or stops being topologically ordered — so the tables below
+are documentation, not a second source of truth to keep hand-synced.
 
 ## What publishes, what does not
 
-| Crate                  | Publishes? | Why                                          |
+The publishable set is exactly "every workspace member without
+`publish = false`". As of this writing that is these 19:
+
+| Crate                  | Publishes? | Role                                         |
 | ---------------------- | ---------- | -------------------------------------------- |
-| `pounce-common`        | yes        | foundation                                   |
-| `pounce-linalg`        | yes        |                                              |
-| `pounce-linsol`        | yes        |                                              |
-| `pounce-nlp`           | yes        |                                              |
-| `pounce-feral`         | yes        | pure-Rust linear-solver backend              |
+| `pounce-common`        | yes        | foundation: types, exceptions, journal       |
+| `pounce-linalg`        | yes        | dense/sparse linear-algebra primitives       |
+| `pounce-linsol`        | yes        | symmetric linear-solver trait layer          |
+| `pounce-feral`         | yes        | pure-Rust sparse LDLᵀ backend                |
 | `pounce-hsl`           | yes        | optional HSL/MA57 backend (user supplies HSL)|
-| `pounce-l1penalty`     | yes        |                                              |
-| `pounce-presolve`      | yes        |                                              |
-| `pounce-algorithm`     | yes        | IPM core                                     |
-| `pounce-restoration`   | yes        |                                              |
-| `pounce-sensitivity`   | yes        | sIPOPT port                                  |
+| `pounce-nlp`           | yes        | NLP-side glue: TNLP trait, IpoptApplication  |
+| `pounce-l1penalty`     | yes        | ℓ₁-exact penalty-barrier TNLP wrapper        |
+| `pounce-observability` | yes        | tracing/metrics install (pounce#71)          |
+| `pounce-presolve`      | yes        | NLP preprocessing TNLP wrapper               |
+| `pounce-qp`            | yes        | active-set QP subproblem solver              |
+| `pounce-algorithm`     | yes        | IPM core (Ipopt `src/Algorithm` port)        |
+| `pounce-restoration`   | yes        | restoration phase                            |
+| `pounce-sensitivity`   | yes        | sIPOPT port / parametric warm-start          |
+| `pounce-solve-report`  | yes        | `pounce.solve-report/v1` JSON writer         |
 | `pounce-cinterface`    | yes        | C ABI (CreateIpoptProblem / IpoptSolve)      |
+| `pounce-convex`        | yes        | LP/QP/SOCP/SDP conic IPM (**not yet on crates.io**) |
+| `pounce-nl`            | yes        | `.nl` reader + AD tape; pounce-cli depends   |
+| `pounce-studio-core`   | yes        | solve-report parsers; pounce-cli dep (0.4.0+)|
 | `pounce-cli`           | yes        | `pounce` and `pounce_sens` binaries          |
 | `pounce-py`            | **no**     | ships on PyPI as `pounce-solver` via maturin |
-| `pounce-cutest`        | **no**     | benchmark harness (gitignored crate too)     |
-| `pounce-large-scale`   | **no**     | synthetic benchmark suite                    |
+| `pounce-studio-pyo3`   | **no**     | PyO3 wrapper; ships on PyPI                   |
 | `iter-diff`            | **no**     | internal Track-A validation tool             |
 
-Each `publish = false` crate has that flag in its `Cargo.toml`. The
-publish script enforces the same list and will skip them by construction.
+Each `publish = false` crate has that flag in its `Cargo.toml`. The publish
+script's list is derived from this same rule, and the consistency check
+enforces that they agree.
 
 ## Dependency order
 
-Layer 0: `pounce-common`
+cargo refuses to publish a crate before the crates it depends on are live, so
+the list is topologically sorted. The script publishes one crate at a time in
+this order, not in parallel — each crate must be live (and visible in the
+index, which is not instantaneous) before any dependent can publish. The
+layered view (each layer depends only on earlier layers):
+
+Layer 0: `pounce-common`, `pounce-studio-core` (leaves)
 Layer 1: `pounce-linalg`
 Layer 2: `pounce-linsol`, `pounce-nlp`
-Layer 3: `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`, `pounce-presolve`
+Layer 3: `pounce-convex`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`,
+         `pounce-nl`, `pounce-observability`, `pounce-presolve`, `pounce-qp`,
+         `pounce-solve-report`
 Layer 4: `pounce-algorithm`
 Layer 5: `pounce-restoration`, `pounce-sensitivity`
 Layer 6: `pounce-cinterface`, `pounce-cli`
 
-The script publishes one crate at a time in this layered order, not in
-parallel — each crate must be live on crates.io before any dependent
-crate can publish, and the index update is not instantaneous.
+`pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends only on `pounce-common` +
+`pounce-linsol` + `pounce-linalg`, so it sits in layer 3. `pounce-nl` depends
+on `pounce-common` + `pounce-nlp`, also layer 3. `pounce-cli` is the sink:
+it depends (transitively) on nearly everything, so it always publishes last.
 
-## Rate limits — read this before the first release
+The exact order the script uses can be re-derived at any time with:
 
-The first release is the painful one. crates.io rate-limits **new
-crate names** to:
+```sh
+cargo metadata --format-version 1 | python3 -c '...'   # see check-release-consistency.sh
+```
 
-- **5 publishes burst**, then **1 per ~10 minutes**.
-- New *versions* of *existing* crates: 1 per minute, burst 30. So
-  follow-up releases (0.1.1, 0.2.0, …) are not affected — only the
-  initial run for these 13 names is.
+## Rate limits — new crate names
 
-Untreated: 5 immediate publishes, then 8 × 10 min = ~80 min wall time
-for the initial release. The publish script handles this if you set
-`SLEEP=600`, but the better option is to request an exemption.
+crates.io rate-limits **new crate names** to 5 publishes burst, then 1 per
+~10 minutes. New *versions* of *existing* crates are 1/min (burst 30), so a
+routine release is unaffected.
 
-### Requesting a rate-limit exemption
+As of 0.4.0, **18 of the 19** crates are already published — only one new
+crate name is subject to the new-crate limit on its first publish:
 
-Before the first release, email **help@crates.io** with:
+- `pounce-convex` — not yet on crates.io (the QCQP→SOCP wiring took
+  `pounce-cli` to a hard dependency on it, so the next release must publish
+  it).
 
-> Subject: Rate-limit exemption request for batched workspace release
->
-> Hi crates.io team,
->
-> I am about to publish 13 new crates in a single coordinated release
-> for the POUNCE project (https://github.com/jkitchin/pounce — a pure-
-> Rust port of Ipopt). All crates share the `pounce-` prefix and will
-> be released under my account `jkitchin`. Could I get a temporary
-> exemption from the new-crate rate limit so the batch can land in one
-> sitting?
->
-> Crate list: pounce-common, pounce-linalg, pounce-linsol, pounce-nlp,
-> pounce-feral, pounce-hsl, pounce-l1penalty, pounce-presolve,
-> pounce-algorithm, pounce-restoration, pounce-sensitivity,
-> pounce-cinterface, pounce-cli.
->
-> Thanks!
-
-They typically respond within a business day.
+One new name is well under the 5-burst limit, so no exemption is needed for
+this release. If a future release introduces **several** new crate names at
+once and you would exceed the burst, either set `SLEEP=600` on the publish
+script or email **help@crates.io** ahead of time for a temporary exemption
+(they typically respond within a business day); list the new crate names and
+note they all share the `pounce-` prefix under account `jkitchin`.
 
 ## Cutting a release
 
 ### Pre-flight
 
-1. Make sure `cargo login` is set up (one-time: `cargo login <token>`
-   from https://crates.io/me).
-2. Bump the workspace version in `Cargo.toml` (root `[workspace.package]`
-   and every entry in `[workspace.dependencies]` that points at one of
-   our crates — they must all match the new version). If the version
-   bump itself is non-trivial, do it as its own commit before tagging.
-3. Run `scripts/publish-crates.sh --dry-run` to catch any missing
-   metadata, broken links, or dirty working tree errors. **This
-   completes the dry-run for every crate end-to-end**, so any breakage
-   appears here, not three crates into the real release.
+1. Make sure `cargo login` is set up (one-time: `cargo login <token>` from
+   https://crates.io/me) — only needed for a local publish; CI uses the
+   `CARGO_REGISTRY_TOKEN` secret (see Automation below).
+2. Bump the workspace version in `Cargo.toml` (root `[workspace.package]` and
+   every entry in `[workspace.dependencies]` that points at one of our crates
+   — they must all match the new version) **and** the two PyPI projects
+   (`python/pyproject.toml`, `pyomo-pounce/pyproject.toml`) to the same
+   X.Y.Z. `scripts/check-release-consistency.sh` verifies all three agree; run
+   it before tagging. If the version bump is non-trivial, do it as its own
+   commit.
+3. Bump `CITATION.cff` to match: set `version:` to the new release version and
+   `date-released:` to the release date. GitHub's "Cite this repository"
+   widget reads these. (The `doi:` is the Zenodo *concept* DOI and stays put.)
+4. Run `scripts/publish-crates.sh --dry-run` to catch missing metadata, broken
+   links, or dirty-tree errors. This dry-runs every crate end-to-end, so any
+   breakage appears here, not three crates into the real release.
 
 ### Real release
 
+The crates.io publish is automated by `.github/workflows/release-crates.yml`
+(triggered on a `v*` tag push, or manually via `workflow_dispatch` — which
+defaults to a dry run). It runs `scripts/publish-crates.sh`, which is
+idempotent (skips any crate already live at the target version), so a re-run
+or a resumed run is safe.
+
+To publish locally instead:
+
 ```sh
-# Option A: rate-limit exemption granted, no inter-crate sleep needed:
+# Option A: no new-crate rate-limit concern (the common case):
 scripts/publish-crates.sh
 
-# Option B: no exemption — space publishes out to dodge the rate limit:
+# Option B: several new crate names this release — space publishes out:
 SLEEP=600 scripts/publish-crates.sh
 ```
 
-If a publish fails part-way through (network blip, transient 5xx,
-intermittent toolchain error), fix the underlying issue and resume:
+If a publish fails part-way through (network blip, transient 5xx), fix the
+issue and resume:
 
 ```sh
 scripts/publish-crates.sh --start-from pounce-algorithm
@@ -118,26 +144,37 @@ scripts/publish-crates.sh --start-from pounce-algorithm
 Tag the release in git so the release point is reproducible:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 (The Python distributions use their own tag prefixes — `python-v*` and
-`pyomo-pounce-v*` — so the bare `v*` tag namespace is reserved for the
-Rust crates.)
+`pyomo-pounce-v*` — so the bare `v*` tag namespace is reserved for the Rust
+crates and drives `release-crates.yml`.)
+
+## Automation
+
+| Surface                 | Workflow                              | Trigger                  |
+| ----------------------- | ------------------------------------- | ------------------------ |
+| crates.io (19 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
+| PyPI `pounce-solver`    | `release-pounce.yml`                  | `python-v*` tag          |
+| PyPI `pyomo-pounce`     | `release-pyomo-pounce.yml`            | `pyomo-pounce-v*` tag    |
+
+`release-crates.yml` needs the `CARGO_REGISTRY_TOKEN` secret and runs in the
+`crates-io` environment. The GitHub Release itself is still created by hand
+(`gh release create vX.Y.Z --notes-file <file>`); no workflow makes it.
 
 ## Yanking
 
 If a release is broken, yank individual crates with
-`cargo yank --version 0.1.0 -p pounce-common`. Yanking is reversible
+`cargo yank --version X.Y.Z -p pounce-common`. Yanking is reversible
 (`cargo yank --undo …`) and does **not** delete the artifact — it just
-prevents new builds from picking that version. There is no "yank the
-whole workspace" command; iterate over the crate list manually if
-needed.
+prevents new builds from picking that version. There is no "yank the whole
+workspace" command; iterate over the crate list manually if needed.
 
 ## HSL note
 
-`pounce-hsl` is publishable but does **not** ship HSL source — users
-must license MA57 separately from STFC and set `COINHSL_DIR`. The
-published crate is a thin FFI wrapper. The README spells this out;
-flagging here so we do not accidentally pull HSL source into a future
-release and create a licensing problem.
+`pounce-hsl` is publishable but does **not** ship HSL source — users must
+license MA57 separately from STFC and set `COINHSL_DIR`. The published crate
+is a thin FFI wrapper. The README spells this out; flagging here so we do not
+accidentally pull HSL source into a future release and create a licensing
+problem.

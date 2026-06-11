@@ -4,9 +4,11 @@
 //!
 //! There are two callers we serve:
 //!
-//! * **`IpoptApplication::ReOptimizeTNLP`** (the upstream re-solve
-//!   path) populates `data.curr` with the previous solve's iterate.
-//!   We clamp multipliers and optionally override `mu`.
+//! * **A full primal-dual warm restart** installed via
+//!   `Application::set_warm_start_iterate` and consumed by the next
+//!   `optimize_tnlp` (e.g. the debugger `resolve` re-solve): `data.curr`
+//!   already carries the previous solve's iterate, so we keep it, clamp
+//!   multipliers, and optionally override `mu`.
 //! * **First solves from `OptimizeTNLP`** that opt into
 //!   `warm_start_init_point=yes` to forward user-supplied
 //!   primal/dual seeds via `TNLP::get_starting_point`. Here

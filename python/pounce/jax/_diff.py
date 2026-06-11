@@ -63,7 +63,86 @@ import numpy as np
 from ._build import _JaxProblem
 from .._pounce import Problem
 
-_ACTIVE_TOL = 1e-6
+from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
+
+
+def _kkt_implicit_backward(f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v):
+    """Shared implicit-function-theorem backward for the NLP custom_vjp.
+
+    This is the single, solver-agnostic core that every NLP backward in
+    this module routes through (the plain ``solve``, ``solve_with_warm``,
+    and the per-element ``vmap`` of ``vmap_solve_parallel``). It is the
+    Python embodiment of the ``solve → DiffHandoff`` contract's backward
+    (see ``dev-notes/diff-handoff-contract.md``): the active set is
+    derived in exactly one place, and the KKT block is assembled and
+    solved once.
+
+    Given the converged primal ``x_star``, constraint multipliers
+    ``lam``, bound multipliers ``mult_xL`` / ``mult_xU`` (the handoff
+    duals), and the output cotangent ``v`` (w.r.t. ``x*``), returns the
+    cotangent ``dL_dp`` w.r.t. the parameter ``p``.
+
+    Active set (the rule lives *here*, not in each caller):
+      * a variable bound is active when ``mult_xL`` or ``mult_xU`` exceeds
+        ``_ACTIVE_TOL`` → that variable is pinned (``dx/dp = 0``);
+      * a constraint row is active when it is an equality
+        (``cl[i] == cu[i]``) or its multiplier exceeds ``_ACTIVE_TOL``;
+        inactive (slack) rows drop out of the KKT block via the
+        identity-augment trick (pounce#73).
+    """
+    active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
+
+    def lagrangian(x, p_):
+        base = f(x, p_)
+        if g is not None and m > 0:
+            base = base + jnp.dot(lam, g(x, p_))
+        return base
+
+    H = jax.hessian(lagrangian, argnums=0)(x_star, p)
+    # ∂_p ∇_x L — partial Jacobian of grad-L w.r.t. p.
+    grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star, p_)
+    dgradL_dp = jax.jacrev(grad_L_of_p)(p)
+
+    if g is not None and m > 0:
+        J = jax.jacrev(g, argnums=0)(x_star, p)
+        dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)
+        cl_arr = jnp.asarray(cl, dtype=H.dtype)
+        cu_arr = jnp.asarray(cu, dtype=H.dtype)
+        is_equality = cl_arr == cu_arr
+        cons_active = is_equality | (jnp.abs(lam) > _ACTIVE_TOL)
+        cons_inactive = ~cons_active
+    else:
+        J = jnp.zeros((0, n))
+        dg_dp = jnp.zeros((0,) + jnp.shape(p))
+        cons_inactive = jnp.zeros((0,), dtype=bool)
+
+    # Augment with identity on the active set: zero rows/cols belonging to
+    # active vars, put 1 on their diagonal, zero the matching RHS rows.
+    active_mat = jnp.diag(active.astype(H.dtype))
+    H_eff = jnp.where(active[:, None] | active[None, :], 0.0, H) + active_mat
+    J_eff = jnp.where(cons_inactive[:, None] | active[None, :], 0.0, J)
+    v_eff = jnp.where(active, 0.0, v)
+
+    # Assemble [[H, Jᵀ], [J, D]] u = [v; 0] with D = diag(cons_inactive),
+    # so each slack row reads `1 · u_lam[i] = 0` and drops out.
+    if m > 0:
+        cons_inactive_diag = jnp.diag(cons_inactive.astype(H.dtype))
+        top = jnp.concatenate([H_eff, J_eff.T], axis=1)
+        bot = jnp.concatenate([J_eff, cons_inactive_diag], axis=1)
+        K = jnp.concatenate([top, bot], axis=0)
+        rhs = jnp.concatenate([v_eff, jnp.zeros(m, dtype=H.dtype)])
+        u = jnp.linalg.solve(K, rhs)
+        u_x, u_lam = u[:n], u[n:]
+    else:
+        u_x = jnp.linalg.solve(H_eff, v_eff)
+        u_lam = jnp.zeros(0)
+
+    # Contract with the parameter sensitivities. The minus sign comes from
+    # rearranging dKKT/dp = 0 into the form above.
+    dL_dp = -jnp.tensordot(u_x, dgradL_dp, axes=1)
+    if m > 0:
+        dL_dp = dL_dp - jnp.tensordot(u_lam, dg_dp, axes=1)
+    return dL_dp
 
 
 def _solve_once(
@@ -127,85 +206,12 @@ def _make_solve_custom_vjp(
 
     def bwd(residuals, cotangent_x):
         p, x_star, lam, mult_xL, mult_xU = residuals
-        v = cotangent_x
-
-        # Detect active variable bounds (|mult| > tol → bound binds → dx/dp = 0).
-        active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
-        inactive = ~active
-
-        # AD-build the Lagrangian Hessian and Jacobian at (x*, λ*, p).
-        def lagrangian(x, p_):
-            base = f(x, p_)
-            if g is not None and m > 0:
-                base = base + jnp.dot(lam, g(x, p_))
-            return base
-
-        H = jax.hessian(lagrangian, argnums=0)(x_star, p)
-        # ∂_p ∇_x L  — partial Jacobian of grad-L w.r.t. p.
-        grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star, p_)
-        dgradL_dp = jax.jacrev(grad_L_of_p)(p)  # shape (n, *p_shape)
-
-        if g is not None and m > 0:
-            J = jax.jacrev(g, argnums=0)(x_star, p)
-            dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)  # (m, *p_shape)
-            # Constraint-row active set: equalities are always active;
-            # inequalities are active iff their multiplier is non-zero.
-            # Slack inequality rows drop out of the KKT block via the
-            # same identity-augment trick used for active bounds —
-            # pounce#73 (without this, slack ineqs are kept as
-            # equalities and the gradient is silently wrong).
-            cl_arr = jnp.asarray(cl, dtype=H.dtype)
-            cu_arr = jnp.asarray(cu, dtype=H.dtype)
-            is_equality = cl_arr == cu_arr
-            cons_active = is_equality | (jnp.abs(lam) > _ACTIVE_TOL)
-            cons_inactive = ~cons_active
-        else:
-            J = jnp.zeros((0, n))
-            dg_dp = jnp.zeros((0,) + jnp.shape(p))
-            cons_inactive = jnp.zeros((0,), dtype=bool)
-
-        # Project to inactive variables.
-        idx = jnp.where(inactive, jnp.arange(n), n)  # n sentinel for masked-out
-        keep = jnp.nonzero(inactive, size=n, fill_value=-1)[0]
-        # We can't dynamically size arrays inside jit, so do a static
-        # version: zero out rows/cols belonging to active vars, replace
-        # diagonal with 1 so the system stays invertible, and zero the
-        # RHS on those rows. This is the standard "augment with
-        # identity on the active set" trick.
-        active_mat = jnp.diag(active.astype(H.dtype))
-        H_eff = jnp.where(
-            active[:, None] | active[None, :], 0.0, H
-        ) + active_mat
-        # Zero variable-active columns AND constraint-inactive rows.
-        J_eff = jnp.where(
-            cons_inactive[:, None] | active[None, :], 0.0, J
+        dL_dp = _kkt_implicit_backward(
+            f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, cotangent_x
         )
-        v_eff = jnp.where(active, 0.0, v)
-
-        # Assemble [[H, Jᵀ], [J, D]] u = [v; 0]   where D = diag(cons_inactive)
-        # so each slack row reads `1 · u_lam[i] = 0` and drops out.
-        if m > 0:
-            cons_inactive_diag = jnp.diag(cons_inactive.astype(H.dtype))
-            top = jnp.concatenate([H_eff, J_eff.T], axis=1)
-            bot = jnp.concatenate([J_eff, cons_inactive_diag], axis=1)
-            K = jnp.concatenate([top, bot], axis=0)
-            rhs = jnp.concatenate([v_eff, jnp.zeros(m, dtype=H.dtype)])
-            u = jnp.linalg.solve(K, rhs)
-            u_x, u_lam = u[:n], u[n:]
-        else:
-            u_x = jnp.linalg.solve(H_eff, v_eff)
-            u_lam = jnp.zeros(0)
-
-        # Contract with the parameter sensitivities. The minus sign
-        # comes from rearranging dKKT/dp = 0 into the form above.
-        # u_x has shape (n,); dgradL_dp has shape (n, *p_shape).
-        # u_lam has shape (m,); dg_dp has shape (m, *p_shape).
-        dL_dp = -jnp.tensordot(u_x, dgradL_dp, axes=1)
-        if m > 0:
-            dL_dp = dL_dp - jnp.tensordot(u_lam, dg_dp, axes=1)
         # The x0 input has no sensitivity through x* (the solver is
         # deterministic at optimum); return zeros.
-        return dL_dp, jnp.zeros_like(idx, dtype=jnp.float64)
+        return dL_dp, jnp.zeros((n,), dtype=jnp.float64)
 
     solve_fn.defvjp(fwd, bwd)
     return solve_fn
@@ -416,56 +422,9 @@ def _make_solve_with_warm_custom_vjp(
         # barrier homotopy, not inputs).
         v = cotangents[0]
 
-        active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
-        inactive = ~active
-
-        def lagrangian(x, p_):
-            base = f(x, p_)
-            if g is not None and m > 0:
-                base = base + jnp.dot(lam, g(x, p_))
-            return base
-
-        H = jax.hessian(lagrangian, argnums=0)(x_star, p)
-        grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star, p_)
-        dgradL_dp = jax.jacrev(grad_L_of_p)(p)
-
-        if g is not None and m > 0:
-            J = jax.jacrev(g, argnums=0)(x_star, p)
-            dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)
-            cl_arr = jnp.asarray(cl, dtype=H.dtype)
-            cu_arr = jnp.asarray(cu, dtype=H.dtype)
-            is_equality = cl_arr == cu_arr
-            cons_active = is_equality | (jnp.abs(lam) > _ACTIVE_TOL)
-            cons_inactive = ~cons_active
-        else:
-            J = jnp.zeros((0, n))
-            dg_dp = jnp.zeros((0,) + jnp.shape(p))
-            cons_inactive = jnp.zeros((0,), dtype=bool)
-
-        active_mat = jnp.diag(active.astype(H.dtype))
-        H_eff = jnp.where(
-            active[:, None] | active[None, :], 0.0, H
-        ) + active_mat
-        J_eff = jnp.where(
-            cons_inactive[:, None] | active[None, :], 0.0, J
+        dL_dp = _kkt_implicit_backward(
+            f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v
         )
-        v_eff = jnp.where(active, 0.0, v)
-
-        if m > 0:
-            cons_inactive_diag = jnp.diag(cons_inactive.astype(H.dtype))
-            top = jnp.concatenate([H_eff, J_eff.T], axis=1)
-            bot = jnp.concatenate([J_eff, cons_inactive_diag], axis=1)
-            K = jnp.concatenate([top, bot], axis=0)
-            rhs = jnp.concatenate([v_eff, jnp.zeros(m, dtype=H.dtype)])
-            u = jnp.linalg.solve(K, rhs)
-            u_x, u_lam = u[:n], u[n:]
-        else:
-            u_x = jnp.linalg.solve(H_eff, v_eff)
-            u_lam = jnp.zeros(0)
-
-        dL_dp = -jnp.tensordot(u_x, dgradL_dp, axes=1)
-        if m > 0:
-            dL_dp = dL_dp - jnp.tensordot(u_lam, dg_dp, axes=1)
 
         return (
             dL_dp,
@@ -668,56 +627,9 @@ def _make_vmap_solve_parallel_custom_vjp(
         return x_star, (p_batch, x_star, lam, mult_xL, mult_xU)
 
     def bwd_single(p, x_star, lam, mult_xL, mult_xU, v):
-        active = (mult_xL > _ACTIVE_TOL) | (mult_xU > _ACTIVE_TOL)
-
-        def lagrangian(x, p_):
-            base = f(x, p_)
-            if g is not None and m > 0:
-                base = base + jnp.dot(lam, g(x, p_))
-            return base
-
-        H = jax.hessian(lagrangian, argnums=0)(x_star, p)
-        grad_L_of_p = lambda p_: jax.grad(lagrangian, argnums=0)(x_star, p_)
-        dgradL_dp = jax.jacrev(grad_L_of_p)(p)
-
-        if g is not None and m > 0:
-            J = jax.jacrev(g, argnums=0)(x_star, p)
-            dg_dp = jax.jacrev(lambda p_: g(x_star, p_))(p)
-            cl_arr = jnp.asarray(cl, dtype=H.dtype)
-            cu_arr = jnp.asarray(cu, dtype=H.dtype)
-            is_equality = cl_arr == cu_arr
-            cons_active = is_equality | (jnp.abs(lam) > _ACTIVE_TOL)
-            cons_inactive = ~cons_active
-        else:
-            J = jnp.zeros((0, n))
-            dg_dp = jnp.zeros((0,) + jnp.shape(p))
-            cons_inactive = jnp.zeros((0,), dtype=bool)
-
-        active_mat = jnp.diag(active.astype(H.dtype))
-        H_eff = jnp.where(
-            active[:, None] | active[None, :], 0.0, H
-        ) + active_mat
-        J_eff = jnp.where(
-            cons_inactive[:, None] | active[None, :], 0.0, J
+        return _kkt_implicit_backward(
+            f, g, n, m, cl, cu, p, x_star, lam, mult_xL, mult_xU, v
         )
-        v_eff = jnp.where(active, 0.0, v)
-
-        if m > 0:
-            cons_inactive_diag = jnp.diag(cons_inactive.astype(H.dtype))
-            top = jnp.concatenate([H_eff, J_eff.T], axis=1)
-            bot = jnp.concatenate([J_eff, cons_inactive_diag], axis=1)
-            K = jnp.concatenate([top, bot], axis=0)
-            rhs = jnp.concatenate([v_eff, jnp.zeros(m, dtype=H.dtype)])
-            u = jnp.linalg.solve(K, rhs)
-            u_x, u_lam = u[:n], u[n:]
-        else:
-            u_x = jnp.linalg.solve(H_eff, v_eff)
-            u_lam = jnp.zeros(0)
-
-        dL_dp = -jnp.tensordot(u_x, dgradL_dp, axes=1)
-        if m > 0:
-            dL_dp = dL_dp - jnp.tensordot(u_lam, dg_dp, axes=1)
-        return dL_dp
 
     def bwd(residuals, cotangent_x_batch):
         p_batch, x_star_batch, lam_batch, mult_xL_batch, mult_xU_batch = residuals

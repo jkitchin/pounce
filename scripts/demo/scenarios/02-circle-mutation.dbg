@@ -1,0 +1,13 @@
+# problem: circle
+# title:   Break at an iteration, inspect KKT, then perturb the iterate live
+#
+# It's a real debugger, not a trace viewer: set a breakpoint, read the
+# reduced-Hessian inertia, then OVERWRITE a primal variable mid-solve and
+# watch the solver recover from the bad point.
+b 3
+c
+p x
+p kkt
+@1.6 set x[0] 1.2
+diff
+c

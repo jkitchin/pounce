@@ -6,12 +6,15 @@ Thin wrapper that adapts SciPy conventions (functional ``fun``, ``jac``,
 
 Notes
 -----
-* When ``jac`` is omitted (or ``False``) we fall back to forward finite
-  differences (step ``sqrt(eps)``). Production callers should provide
-  a Jacobian.
-* When ``jac=True``, ``fun(x, *args)`` must return
-  ``(f, grad)``; the pair is cached so each Ipopt iterate triggers only
-  one forward pass.
+* When ``jac`` is omitted (or ``False``) we fall back to **central** finite
+  differences (step ``eps**(1/3)``) and emit a one-time ``UserWarning`` naming
+  the remedies. Central differences have an ``O(h^2)`` truncation error whose
+  noise floor sits well below the tight default tolerance, so the solve
+  converges cleanly instead of stalling just short of it (gh #123).
+  Production callers should still provide an analytic Jacobian (or use the
+  autodiff frontends ``pounce.jax`` / ``pounce.torch``).
+* When ``jac=True``, ``fun(x, *args)`` must return ``(f, grad)``; the pair is
+  cached so each Ipopt iterate triggers only one forward pass.
 * When ``hess`` is omitted, or when constraints are present, the solver
   is driven with ``hessian_approximation = limited-memory``.
 * Equality / inequality dicts are concatenated into a single ``g(x)``
@@ -27,16 +30,49 @@ Notes
 from __future__ import annotations
 
 import inspect
+import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy import sparse
 from scipy.optimize import Bounds, LinearConstraint, OptimizeResult
 
 from ._pounce import Problem
+from ._route import classify_and_extract, classify_and_extract_socp
 
-_EPS = float(np.finfo(np.float64).eps) ** 0.5
+# Central-difference step. The optimal step for a central difference is
+# ``~eps**(1/3)`` (≈6.06e-6), balancing the ``O(h^2)`` truncation error against
+# the ``O(eps/h)`` round-off error. Its noise floor (~1e-10) sits well below the
+# tight default ``tol=1e-8``, so the gradient is accurate enough for the IPM to
+# drive the dual infeasibility under tolerance instead of plateauing on FD noise
+# and tripping the tiny-step exit at the true optimum (gh #119 / #123).
+_CDIFF_STEP = float(np.finfo(np.float64).eps) ** (1.0 / 3.0)
+
+# Ipopt's default ``acceptable_tol``: the NLP error below which a stalled solve
+# is still considered converged "to an acceptable level". Used by the E-path
+# success heuristic when the exit status is not itself a success code.
+_DEFAULT_ACCEPTABLE_TOL = 1e-6
+
+# Convex-solver status string → scipy-style integer status (0 == success),
+# matching the NLP path's convention.
+_QP_STATUS_CODE = {
+    "optimal": 0,
+    "primal_infeasible": 2,
+    "dual_infeasible": 3,
+    "iteration_limit": 1,
+    "numerical_failure": 4,
+}
+
+# NLP ``ApplicationReturnStatus`` codes that count as a successful solve for the
+# scipy-style ``success`` flag. ``SolveSucceeded`` (0) is the obvious one;
+# ``SolvedToAcceptableLevel`` (1) means the iterate met the *acceptable*
+# tolerance after the tight tolerance stalled — Ipopt/cyipopt and scipy both
+# treat that as a success, and pounce's own differentiable path already does
+# (``jax/_path.py`` / ``torch/_path.py`` ``_OK_STATUS``). Excluding it (gh #119)
+# made HS071 and similar problems report ``success=False`` at a verified
+# optimum. Codes 2..6 (infeasible, tiny step, diverging, …) stay failures.
+_NLP_SUCCESS_STATUS = frozenset({0, 1})
 
 
 # Mapping of scipy-canonical option names to their Ipopt equivalents. Multiple
@@ -77,13 +113,21 @@ def _to_array(x, dtype=np.float64) -> np.ndarray:
 
 
 def _finite_diff_grad(fun: Callable, x: np.ndarray) -> np.ndarray:
-    f0 = float(fun(x))
+    """Central-difference gradient of a scalar ``fun`` at ``x``.
+
+    Central (two-sided) differences have an ``O(h^2)`` truncation error, two
+    orders better than a one-sided difference, at the cost of a second function
+    evaluation per coordinate. See ``_CDIFF_STEP`` for why this matters for the
+    tight-tolerance solve (gh #123).
+    """
     g = np.empty_like(x)
     for i in range(x.size):
-        h = _EPS * max(1.0, abs(x[i]))
+        h = _CDIFF_STEP * max(1.0, abs(x[i]))
         xp = x.copy()
         xp[i] += h
-        g[i] = (float(fun(xp)) - f0) / h
+        xm = x.copy()
+        xm[i] -= h
+        g[i] = (float(fun(xp)) - float(fun(xm))) / (2.0 * h)
     return g
 
 
@@ -172,14 +216,40 @@ def _wrap_callback(callback: Callable | None) -> Callable | None:
 
 
 def _finite_diff_jac(g_fun: Callable, x: np.ndarray, m: int) -> np.ndarray:
-    g0 = _to_array(g_fun(x))
+    """Central-difference Jacobian of a vector ``g_fun`` at ``x``."""
     J = np.empty((m, x.size))
     for i in range(x.size):
-        h = _EPS * max(1.0, abs(x[i]))
+        h = _CDIFF_STEP * max(1.0, abs(x[i]))
         xp = x.copy()
         xp[i] += h
-        J[:, i] = (_to_array(g_fun(xp)) - g0) / h
+        xm = x.copy()
+        xm[i] -= h
+        J[:, i] = (_to_array(g_fun(xp)) - _to_array(g_fun(xm))) / (2.0 * h)
     return J
+
+
+def _validate_bounds_length(bounds, n: int) -> None:
+    """Reject a per-variable ``bounds`` sequence that doesn't have exactly ``n``
+    entries (one ``(lo, hi)`` pair per variable).
+
+    Without this, a too-short list silently leaves trailing variables unbounded
+    — and in the sampling-based searches it can *broadcast* one variable's box
+    across several — while a too-long list trips a cryptic ``IndexError`` deep in
+    the solve setup. scipy validates bounds length; so do we, up front.
+    """
+    if bounds is None:
+        return
+    try:
+        length = len(bounds)
+    except TypeError:
+        raise ValueError(
+            "bounds must be a sequence of (lo, hi) pairs, one per variable"
+        ) from None
+    if length != n:
+        raise ValueError(
+            f"bounds has {length} entr{'y' if length == 1 else 'ies'} but the "
+            f"problem has {n} variable(s); pass one (lo, hi) pair per variable"
+        )
 
 
 def _normalize_bounds(bounds, n: int):
@@ -196,6 +266,7 @@ def _normalize_bounds(bounds, n: int):
         ub = np.broadcast_to(np.asarray(bounds.ub, dtype=np.float64), (n,)).copy()
         return lb, ub
     # Legacy: iterable of (lo, hi) pairs, one per dimension.
+    _validate_bounds_length(bounds, n)
     lb = np.full(n, -np.inf)
     ub = np.full(n, np.inf)
     for i, bd in enumerate(bounds):
@@ -206,6 +277,13 @@ def _normalize_bounds(bounds, n: int):
             lb[i] = lo
         if hi is not None:
             ub[i] = hi
+    bad = np.where(lb > ub)[0]
+    if bad.size:
+        i = int(bad[0])
+        raise ValueError(
+            f"bounds[{i}] is reversed: lower {lb[i]} > upper {ub[i]}; "
+            f"each bound must be (low, high) with low <= high"
+        )
     return lb, ub
 
 
@@ -261,10 +339,20 @@ def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBl
 
 
 def _block_from_dict(c: dict, n: int) -> _ConstraintBlock:
+    # Mirror the validation main added to the dict path: clear ValueErrors
+    # instead of bare KeyError / cryptic TypeError surfacing later.
+    if "type" not in c or "fun" not in c:
+        missing = sorted({"type", "fun"} - set(c))
+        raise ValueError(
+            f"constraint dict is missing required key(s) {missing}; a "
+            f"constraint needs {{'type': 'eq'|'ineq', 'fun': callable}}"
+        )
     kind = c["type"]
     if kind not in ("eq", "ineq"):
-        raise ValueError(f"unknown constraint type {kind!r}")
+        raise ValueError(f"unknown constraint type {kind!r}; use 'eq' or 'ineq'")
     fun = c["fun"]
+    if not callable(fun):
+        raise ValueError("constraint 'fun' must be callable")
     ca = tuple(c.get("args", ()))
     probe = np.zeros(n)
     m_rows = int(_to_array(fun(probe, *ca)).size)
@@ -319,9 +407,10 @@ def _wrap_constraints(constraints, n: int):
         elif isinstance(c, dict):
             blocks.append(_block_from_dict(c, n))
         else:
-            raise TypeError(
-                f"unsupported constraint type {type(c).__name__!r}; expected "
-                "scipy.optimize.LinearConstraint or a dict with 'type'/'fun'"
+            raise ValueError(
+                f"each constraint must be a dict with 'type' and 'fun', a "
+                f"scipy.optimize.LinearConstraint, or a list mixing those — "
+                f"got {type(c).__name__}"
             )
 
     if not blocks:
@@ -514,6 +603,93 @@ def _build_problem_obj(
     return cls()
 
 
+def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
+    """Adapt a routed convex LP/QP solve back into an :class:`OptimizeResult`.
+
+    The convex solver minimizes ``½xᵀPx + cᵀx`` and never sees the objective's
+    degree-0 term, so we add ``ex.obj_const`` back to the reported value (the
+    same constant the CLI threads through ``run_convex_qp``). The result shape
+    is identical to the NLP path so the router is transparent to callers.
+    """
+    from .qp import solve_qp
+
+    res = solve_qp(
+        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, lb=ex.lb, ub=ex.ub,
+        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+    )
+    fun_val = float(res.obj) + ex.obj_const
+    success = res.status == "optimal"
+    selector = "lp-ipm" if ex.kind == "lp" else "qp-ipm"
+    return OptimizeResult(
+        x=np.asarray(res.x),
+        fun=fun_val,
+        success=success,
+        status=_QP_STATUS_CODE.get(res.status, 1),
+        message=res.status,
+        nit=int(res.iters),
+        info={
+            "solver": selector,
+            "problem_class": ex.kind,
+            "obj_val": fun_val,
+            "obj_constant": ex.obj_const,
+            "status": res.status,
+            "status_msg": res.status,
+            "iter_count": int(res.iters),
+            "residuals": res.residuals,
+        },
+    )
+
+
+def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
+    """Adapt a routed convex-QCQP solve (reformulated to a SOCP) back into an
+    :class:`OptimizeResult`.
+
+    Mirrors :func:`_solve_via_convex`: the conic solver minimizes
+    ``½xᵀPx + cᵀx`` over the cone constraints and never sees the objective's
+    degree-0 term, so ``ex.obj_const`` is added back to the reported value (the
+    same constant the CLI threads through ``run_convex_socp``). The result shape
+    matches the NLP path so the router stays transparent to callers.
+    """
+    from .qp import solve_socp
+
+    res = solve_socp(
+        P=ex.P, c=ex.c, A=ex.A, b=ex.b, G=ex.G, h=ex.h, cones=ex.cones,
+        tol=opts.get("tol"), max_iter=opts.get("max_iter"),
+    )
+    fun_val = float(res.obj) + ex.obj_const
+    success = res.status == "optimal"
+    return OptimizeResult(
+        x=np.asarray(res.x),
+        fun=fun_val,
+        success=success,
+        status=_QP_STATUS_CODE.get(res.status, 1),
+        message=res.status,
+        nit=int(res.iters),
+        info={
+            "solver": "socp",
+            "problem_class": ex.kind,
+            "obj_val": fun_val,
+            "obj_constant": ex.obj_const,
+            "status": res.status,
+            "status_msg": res.status,
+            "iter_count": int(res.iters),
+            "residuals": res.residuals,
+        },
+    )
+
+
+def _any_constraint_without_jac(constraints) -> bool:
+    """True if any scipy-style constraint dict omits ``'jac'`` (so its Jacobian
+    is finite-differenced). Used to decide whether to warn (gh #123, D)."""
+    if not constraints:
+        return False
+    if isinstance(constraints, (dict, LinearConstraint)):
+        constraints = [constraints]
+    return any(
+        isinstance(c, dict) and c.get("jac") is None for c in constraints
+    )
+
+
 def minimize(
     fun: Callable[[np.ndarray], float],
     x0: np.ndarray,
@@ -531,15 +707,131 @@ def minimize(
     and unknown options arrive via ``**options`` and are filtered out before
     being forwarded to Ipopt. This makes ``pounce.minimize`` a drop-in target
     for ``scipy.optimize.minimize(method=pounce.minimize, ...)``.
+
+    Solver routing mirrors the CLI's ``solver_selection`` but is **opt-in**:
+    the default is the NLP backend, with no structure probing overhead. Pass
+    ``solver_selection="auto"`` (or one of the explicit selectors) to enable
+    routing. A linear or convex-quadratic objective with only linear constraints
+    can be dispatched to the specialized convex LP/QP interior-point solver
+    (``pounce.solve_qp``), a convex-quadratic objective/constraints problem (a
+    convex QCQP) to the conic solver (``pounce.solve_socp``), and everything
+    else falls through to the general NLP filter-IPM. Detection is conservative
+    and validated against the true callables at held-out points, so a nonlinear
+    problem is never silently sent to the convex solver.
+
+    * ``"nlp"`` (default) — always use the NLP solver, skipping the probe;
+    * ``"auto"`` — route LP/convex-QP to the convex QP solver, a convex QCQP to
+      the conic solver, else NLP;
+    * ``"lp-ipm"`` / ``"qp-ipm"`` — force the convex QP solver, raising
+      ``ValueError`` if the problem is not detected as an LP / convex QP;
+    * ``"socp"`` — force the conic solver, raising ``ValueError`` if the
+      problem is not detected as a convex QCQP.
+
+    Like :func:`scipy.optimize.minimize`, this facade is **silent by default**.
+    Pass ``disp=True`` for a concise log or an explicit ``print_level=N``
+    (0–12) to control the NLP backend's IPM iteration table directly.
     """
-    x0 = _to_array(x0)
+    # Accept both calling conventions: scipy-style ``options={...}`` (one dict
+    # argument) and the splatted ``**options`` form (kwargs absorbed by the
+    # signature, as scipy's ``_custom`` dispatch sends them). Explicit kwargs
+    # win over the legacy dict if both are supplied.
+    legacy_options = options.pop("options", None)
+    if isinstance(legacy_options, Mapping):
+        options = {**dict(legacy_options), **options}
+
+    # Promote a scalar / 0-d x0 to 1-D, matching scipy.optimize.minimize, so a
+    # single-variable problem can be written ``minimize(f, 1.5)``.
+    x0 = np.atleast_1d(_to_array(x0))
     n = x0.size
     lb, ub = _normalize_bounds(bounds, n)
     m, g_combined, jac_combined, cl, cu, jac_rows, jac_cols = _wrap_constraints(
         constraints, n
     )
 
+    # Solver routing (mirrors the CLI's `solver_selection`). Pop routing keys
+    # so the remainder of `options` flows to the NLP backend. The default is
+    # `"nlp"` (no probe) — opt in to `"auto"` to enable structure detection.
+    selection = str(options.pop("solver_selection", "nlp")).lower()
+    route_tol = float(options.pop("route_tol", 1e-5))
+    # scipy.optimize.minimize is silent unless `disp=True`; match that. pounce's
+    # NLP backend otherwise prints a full IPM iteration table by default (and
+    # the log is written from Rust to fd 1, so Python stdout redirection can't
+    # catch it). Default print_level to 0 (silent) unless the caller passes an
+    # explicit print_level or scipy-style disp=True. (#115)
+    disp = bool(options.pop("disp", False))
+    options.setdefault("print_level", 5 if disp else 0)
+
+    if selection != "nlp" and m > 0:
+        # The router's `_linear_constraints` expects a dense `m × n` Jacobian
+        # from `jac_combined(x)`. Our `_wrap_constraints` returns a flat
+        # nnz-length value vector instead. Materialize a dense view here only
+        # when routing is on, so the no-route path pays nothing.
+        def _jac_combined_dense(x, _vals=jac_combined, _r=jac_rows, _c=jac_cols, _m=m, _n=n):
+            out = np.zeros((_m, _n), dtype=np.float64)
+            out[_r, _c] = _vals(x)
+            return out
+        router_jac_combined = _jac_combined_dense
+    else:
+        router_jac_combined = jac_combined  # value-vec; never read when nlp
+    route_kw = dict(
+        fun=fun, jac=jac, hess=hess, lb=lb, ub=ub, m=m,
+        g_combined=g_combined, jac_combined=router_jac_combined,
+        cl=cl, cu=cu, x0=x0, rtol=route_tol,
+    )
+    if selection in ("auto", "lp-ipm", "qp-ipm"):
+        extract = classify_and_extract(**route_kw)
+        if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
+            raise ValueError(
+                "solver_selection='lp-ipm' but the problem was not detected as "
+                "a linear program (linear objective + linear constraints)"
+            )
+        if selection == "qp-ipm" and extract is None:
+            raise ValueError(
+                "solver_selection='qp-ipm' but the problem was not detected as "
+                "a convex LP/QP (convex-quadratic objective + linear constraints)"
+            )
+        if extract is not None:
+            return _solve_via_convex(extract, options)
+        # Auto: an LP/QP wasn't found — try a convex QCQP before giving up to
+        # the NLP solver (a quadratic *constraint* lands here, not above).
+        if selection == "auto":
+            socp = classify_and_extract_socp(**route_kw)
+            if socp is not None:
+                return _solve_via_socp(socp, options)
+    elif selection == "socp":
+        socp = classify_and_extract_socp(**route_kw)
+        if socp is None:
+            raise ValueError(
+                "solver_selection='socp' but the problem was not detected as a "
+                "convex QCQP (convex-quadratic objective and/or constraints, all "
+                "convex, with only linear equalities)"
+            )
+        return _solve_via_socp(socp, options)
+
     eval_counters: dict[str, int] = {"nfev": 0, "njev": 0}
+
+    # (D, gh #123) The NLP path finite-differences any derivative the caller
+    # did not supply. FD derivatives are slower and less accurate, and on a
+    # tight solve can stall just short of the tolerance and report
+    # ``success=False`` at the true optimum. Warn once — naming the remedies —
+    # rather than degrading silently. (scipy.optimize.minimize is silent here;
+    # pounce deliberately is not, because this is the #1 source of confusing
+    # "failed at the right answer" reports.)
+    fd_targets = []
+    if jac is None:
+        fd_targets.append("the objective gradient (pass jac=...)")
+    if m > 0 and _any_constraint_without_jac(constraints):
+        fd_targets.append("constraint Jacobian(s) (pass 'jac' in each "
+                          "constraint dict)")
+    if fd_targets:
+        warnings.warn(
+            "pounce.minimize is approximating " + " and ".join(fd_targets)
+            + " by finite differences. This is slower and less accurate than "
+            "analytic derivatives. For a faster, more robust solve supply them "
+            "directly, or use the autodiff frontends pounce.jax / pounce.torch.",
+            stacklevel=2,
+        )
+
     problem_obj = _build_problem_obj(
         fun=fun,
         n=n,
@@ -564,22 +856,38 @@ def minimize(
         cl=cl,
         cu=cu,
     )
+    # ``options`` was already drained of routing keys (`solver_selection`,
+    # `route_tol`) and ``disp`` above, so only genuine solver options reach
+    # the NLP backend. Drop None-valued kwargs (scipy's ``_custom`` dispatch
+    # always sends ``hessp=None``, ``bounds=None``, etc.; absorbed here when
+    # undeclared on the signature). Real Ipopt option misses still surface as
+    # ``RuntimeError`` from ``problem.solve()`` — by design.
     for k, v in options.items():
-        # Drop None-valued kwargs (scipy's ``_custom`` dispatch always sends
-        # ``hessp=None``, ``bounds=None``, etc.; absorbed here when undeclared
-        # on the signature). Real Ipopt option misses still surface as
-        # ``RuntimeError`` from ``problem.solve()`` — by design.
         if v is None:
             continue
         ipopt_k, ipopt_v = _translate_option(k, v)
         problem.add_option(ipopt_k, ipopt_v)
 
     x, info = problem.solve(x0=x0)
+    # (E, gh #119 / #123) Judge success on the final KKT error, not the exit
+    # status enum alone. Ipopt-family solvers report a non-success status (e.g.
+    # ``Search_Direction_Becomes_Too_Small``, code 3) when progress stalls — but
+    # a stall at a point whose overall NLP error is already at the acceptable
+    # tolerance is a converged solve, not a failure. cyipopt/scipy treat such a
+    # point as a success; so do we. ``final_kkt_error`` is the unscaled overall
+    # NLP error at the final iterate (exposed from the Rust SolveStatistics); it
+    # is NaN on paths that never computed it, which ``np.isfinite`` filters out.
+    status_code = int(info["status"])
+    acceptable_tol = float(options.get("acceptable_tol", _DEFAULT_ACCEPTABLE_TOL))
+    kkt_error = float(info.get("final_kkt_error", float("nan")))
+    success = status_code in _NLP_SUCCESS_STATUS or (
+        np.isfinite(kkt_error) and kkt_error <= acceptable_tol
+    )
     return OptimizeResult(
         x=np.asarray(x),
         fun=float(info["obj_val"]),
-        success=int(info["status"]) == 0,
-        status=int(info["status"]),
+        success=success,
+        status=status_code,
         message=str(info["status_msg"]),
         nit=int(info["iter_count"]),
         nfev=int(eval_counters["nfev"]),

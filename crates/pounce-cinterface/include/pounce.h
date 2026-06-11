@@ -484,8 +484,26 @@ Index IpoptSolverGetKktDim(IpoptSolver solver);
  * Apply the converged KKT factor to `rhs` (length = KKT dim).
  * Writes the result into `lhs`. Returns 1 (TRUE) on success,
  * 0 (FALSE) on NULL inputs or absent factor.
+ *
+ * The solve is in natural (unscaled) units: any NLP scaling the IPM
+ * applied internally (`nlp_scaling_method`) is undone, so RHS and
+ * result are in the user's own units (pounce#128). The same applies
+ * to IpoptSolverParametricStep and IpoptSolverReducedHessian. Use
+ * IpoptSolverKktSolveScaled for the raw solver-space back-solve
+ * (the pre-#128 behavior).
  */
 Bool IpoptSolverKktSolve(
+    IpoptSolver    solver,
+    const Number  *rhs,
+    Number        *lhs
+);
+
+/**
+ * IpoptSolverKktSolve without the natural-units correction: the
+ * back-solve runs in the solver's internal scaled space. Identical
+ * to IpoptSolverKktSolve when no NLP scaling is active.
+ */
+Bool IpoptSolverKktSolveScaled(
     IpoptSolver    solver,
     const Number  *rhs,
     Number        *lhs
@@ -505,10 +523,16 @@ Bool IpoptSolverParametricStep(
 );
 
 /**
- * Reduced Hessian over the free directions left when the
- * constraints in `pin_indices` are pinned. Writes a dense
- * `(n - n_pins) x (n - n_pins)` matrix in row-major order to
- * `hr_out`. `obj_scal` scales the objective contribution.
+ * Reduced Hessian `H_R = obj_scal * B K^-1 B^T` over the pinned
+ * equality-constraint rows in `pin_indices` (0-based indices into
+ * g(x)). Writes a dense `n_pins x n_pins` matrix in column-major
+ * order to `hr_out`.
+ *
+ * `H_R` is in natural (unscaled) units: any NLP scaling the IPM
+ * applied (`nlp_scaling_method`) is undone before the value is
+ * reported, so `-inv(H_R)` is directly the parameter covariance of
+ * an estimation problem (pounce#128). `obj_scal` is a plain extra
+ * multiplier (pass 1.0).
  */
 Bool IpoptSolverReducedHessian(
     IpoptSolver    solver,

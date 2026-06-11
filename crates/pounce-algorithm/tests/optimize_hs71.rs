@@ -452,7 +452,6 @@ fn hs071_max_cpu_time_terminates() {
 }
 
 #[test]
-#[test]
 fn hs071_solves_with_adaptive_mu_probing_oracle() {
     let mut app = IpoptApplication::new();
     app.options_mut()

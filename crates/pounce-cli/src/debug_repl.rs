@@ -3,7 +3,7 @@
 //! Implements [`pounce_algorithm::debug::DebugHook`]. The core fires us
 //! at every checkpoint (today: the top of each outer iteration); we
 //! pause, hand the user (or an agent) a command prompt, and apply
-//! inspect / mutate / flow commands against the live [`DebugCtx`] before
+//! inspect / mutate / flow commands against the live [`DebugState`] before
 //! returning [`DebugAction::Resume`] or [`DebugAction::Stop`].
 //!
 //! Two front ends share one command engine ([`SolverDebugger::dispatch`]):
@@ -42,9 +42,15 @@
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{
-    Checkpoint, DebugAction, DebugCtx, DebugHook, IterateSnapshot, BLOCK_NAMES,
+    is_live_tolerance, DebugCtx, IterateSnapshot, ResidKind, Residual, BLOCK_NAMES,
 };
+use pounce_algorithm::debug_rank::{RankReport, RankRow};
+use pounce_common::debug::{Checkpoint, DebugAction, DebugHook, DebugState};
 use pounce_common::reg_options::{DefaultValue, OptionType, RegisteredOptions};
+use pounce_nlp::ipopt_nlp::SplitNames;
+use pounce_presolve::dulmage_mendelsohn::DulmageMendelsohnPartition;
+use pounce_presolve::incidence::EqualityIncidence;
+use pounce_presolve::matching::hopcroft_karp;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
@@ -69,16 +75,21 @@ const COMMANDS: &[&str] = &[
     "commands",
     "stop-at",
     "set",
+    "get",
     "opt",
     "complete",
     "viz",
     "save",
+    "load",
+    "sweep",
+    "multistart",
     "goto",
     "restart",
     "resolve",
     "ask",
     "watch",
     "diff",
+    "diagnose",
     "source",
     "progress",
     "detach",
@@ -131,14 +142,56 @@ const CHECKPOINTS: &[&str] = &[
 /// read by the CLI after the solve unwinds.
 pub struct RestartRequest {
     /// Primal seed (the algorithm-space `x` at the time of `resolve`).
+    /// Also drives `sweep` / `multistart`, where only `x` varies.
     pub seed_x: Vec<f64>,
     /// `set opt` edits staged during the session, to apply before re-solve.
     pub options: Vec<(String, String)>,
+    /// Full primal-dual iterate (all 8 blocks + μ) captured at the pause,
+    /// for a true warm `resolve` that continues from the current interior
+    /// point. `None` for primal-only restarts (sweep / multistart). When
+    /// present, the CLI installs it via `set_warm_start_iterate` and turns
+    /// on `warm_start_init_point` / `warm_start_target_mu`.
+    pub warm: Option<IterateSnapshot>,
 }
 
 /// Shared slot the debugger uses to hand a [`RestartRequest`] back to the
 /// CLI's re-solve loop.
 pub type RestartCell = Rc<std::cell::RefCell<Option<RestartRequest>>>;
+
+/// One completed solve in a `sweep` / `multistart` run.
+#[derive(Clone)]
+struct SweepRecord {
+    /// 0-based index in the sweep.
+    idx: usize,
+    /// The primal seed this solve started from.
+    seed: Vec<f64>,
+    /// Terminal `SolverReturn` (debug string).
+    status: String,
+    /// Final objective.
+    objective: f64,
+    /// Final primal infeasibility.
+    inf_pr: f64,
+    /// Iteration count at termination.
+    iters: i32,
+}
+
+/// In-flight `sweep` state, carried across the CLI's re-solve loop (the
+/// same debugger instance is re-armed each solve, so this persists). Each
+/// queued seed is run as a full solve; the terminal checkpoint records the
+/// outcome and launches the next.
+struct SweepState {
+    /// Starts not yet run.
+    queue: VecDeque<Vec<f64>>,
+    /// The seed of the solve currently running (recorded at its terminal).
+    current: Option<Vec<f64>>,
+    /// Completed solves, in order.
+    records: Vec<SweepRecord>,
+    /// Total starts requested (for progress display).
+    total: usize,
+    /// `pause_iters` to restore when the sweep finishes (a sweep runs each
+    /// solve free, so it disables per-iteration pausing for the duration).
+    saved_pause_iters: bool,
+}
 
 /// Cap on retained per-iteration snapshots (bounds rewind memory; oldest
 /// are evicted first).
@@ -150,21 +203,86 @@ fn is_success_status(s: &str) -> bool {
     matches!(s, "Success" | "StopAtAcceptablePoint")
 }
 
+/// Parse a free-form numeric blob — values separated by commas, whitespace,
+/// or newlines — into `f64`s (used by `load` and `sweep` for plain start
+/// files). Errors on the first unparsable token.
+fn parse_floats(s: &str) -> Result<Vec<f64>, String> {
+    s.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse::<f64>().map_err(|_| format!("bad number `{t}`")))
+        .collect()
+}
+
+/// A `splitmix64` step — a tiny deterministic PRNG (no `rand` dependency).
+/// Returns a uniform draw in `[-1, 1]` and advances the state.
+fn splitmix_unit(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Top 53 bits → [0,1), then map to [-1,1).
+    ((z >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+}
+
+/// Per-start PRNG seed: deterministic in `k` so a `multistart` reproduces.
+fn seed_for(k: usize) -> u64 {
+    0x9E37_79B9_7F4A_7C15u64
+        ^ (k as u64)
+            .wrapping_mul(0xD1B5_4A32_D192_ED03)
+            .wrapping_add(1)
+}
+
+/// Sample `multistart` start `k`. Start 0 is the unperturbed `base` (so the
+/// run always covers the current point). For `k ≥ 1`, each component is
+/// drawn **uniformly in its box** `[loᵢ, hiᵢ]` when both bounds are finite;
+/// where a bound is missing (`±∞`), it falls back to a relative jitter
+/// `±rel·(|baseᵢ|+1)` around the base. Deterministic in `k`.
+fn sample_start(base: &[f64], bounds: Option<(&[f64], &[f64])>, rel: f64, k: usize) -> Vec<f64> {
+    if k == 0 {
+        return base.to_vec();
+    }
+    let mut state = seed_for(k);
+    base.iter()
+        .enumerate()
+        .map(|(i, &xi)| {
+            let unit = splitmix_unit(&mut state); // [-1, 1)
+            if let Some((lo, hi)) = bounds {
+                let (l, u) = (lo[i], hi[i]);
+                if l.is_finite() && u.is_finite() && u > l {
+                    // [-1,1) → [l, u).
+                    return l + (u - l) * (unit * 0.5 + 0.5);
+                }
+            }
+            xi + rel * (xi.abs() + 1.0) * unit
+        })
+        .collect()
+}
+
+/// `multistart` with no bounds — pure relative jitter around `base`.
+#[cfg(test)]
+fn jitter(base: &[f64], rel: f64, k: usize) -> Vec<f64> {
+    sample_start(base, None, rel, k)
+}
+
 /// SIGINT → "break into the debugger at the next iteration". A first
 /// Ctrl-C sets a pending flag the hook consumes at the next checkpoint;
 /// a second Ctrl-C before that (or any Ctrl-C once detached) hard-exits,
 /// preserving the usual "abort" escape hatch.
 ///
 /// At a rustyline prompt the terminal is in raw mode, so Ctrl-C arrives
-/// as input (handled as `Interrupted`, reprompt) rather than as SIGINT —
-/// this handler only fires while the solve is running.
+/// as input (handled as `Interrupted`) rather than as SIGINT — this handler
+/// only fires while the solve is running. The prompt has its own analogous
+/// double-tap: the first Ctrl-C cancels the line, a second quits the solve
+/// (see [`SolverDebugger::on_prompt_interrupt`]).
 pub mod interrupt {
-    use nix::sys::signal::{self, SigHandler, Signal};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static PENDING: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
     static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+    #[cfg(unix)]
     extern "C" fn handler(_sig: nix::libc::c_int) {
         // `swap` returns the previous value: if a break was already
         // pending and unconsumed, the user pressed Ctrl-C twice — abort.
@@ -176,7 +294,9 @@ pub mod interrupt {
 
     /// Install the handler once (idempotent). Call only when a debugger
     /// is active, so a normal run keeps default Ctrl-C behavior.
+    #[cfg(unix)]
     pub fn install() {
+        use nix::sys::signal::{self, SigHandler, Signal};
         if INSTALLED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -185,6 +305,13 @@ pub mod interrupt {
             let _ = signal::signal(Signal::SIGINT, SigHandler::Handler(handler));
         }
     }
+
+    /// Non-Unix targets have no POSIX `SIGINT` handler to install, so the
+    /// solve-time Ctrl-C-to-break path is unavailable there. `take()` simply
+    /// never sees a pending break; the rustyline prompt's own double-tap
+    /// (see [`SolverDebugger::on_prompt_interrupt`]) remains the escape hatch.
+    #[cfg(not(unix))]
+    pub fn install() {}
 
     /// Consume a pending break request (clears it).
     pub fn take() -> bool {
@@ -245,7 +372,20 @@ impl CmdOut {
 }
 
 /// Metric names accepted in `break if …` (and shown by `help`).
-const METRICS: &[&str] = &["mu", "inf_pr", "inf_du", "obj", "err", "compl", "iter"];
+// The streamed scalar field names, in the exact form they appear on `pause` /
+// `progress` / `terminated` events — so a client can read `hello.metrics` and
+// index those keys directly off the event objects. Command input additionally
+// accepts the short aliases `obj`/`err`/`compl` (see `Metric::parse`); these are
+// the canonical advertised names.
+const METRICS: &[&str] = &[
+    "iter",
+    "mu",
+    "objective",
+    "inf_pr",
+    "inf_du",
+    "nlp_error",
+    "complementarity",
+];
 
 /// A scalar the solver exposes for conditional breakpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,7 +412,7 @@ impl Metric {
             _ => return None,
         })
     }
-    fn eval(self, ctx: &DebugCtx) -> f64 {
+    fn eval(self, ctx: &dyn DebugState) -> f64 {
         match self {
             Metric::Mu => ctx.mu(),
             Metric::InfPr => ctx.inf_pr(),
@@ -281,6 +421,46 @@ impl Metric {
             Metric::NlpError => ctx.nlp_error(),
             Metric::Compl => ctx.complementarity(),
             Metric::Iter => ctx.iter() as f64,
+        }
+    }
+}
+
+/// The single source of truth for the streamed scalar-metric block.
+///
+/// Builds the `(name, value)` pairs that go on every `pause` / `progress`
+/// event and the `info` command's `data`, in [`METRICS`] order and driven
+/// *by* [`METRICS`] — so the advertised `hello.metrics` vocabulary and the
+/// fields that actually appear on events can never drift apart. Add a name
+/// to `METRICS` (with a matching [`Metric`] arm) and it shows up everywhere
+/// at once.
+///
+/// Every interior-point backend necessarily answers each entry: the metric
+/// accessors (`mu`/`objective`/`inf_pr`/…) are *required* [`DebugState`]
+/// methods, and the one optional metric (`nlp_error`) defaults to `NaN`,
+/// which `serde_json` renders as `null` — so a backend without that scalar
+/// reports it explicitly rather than dropping the field. `iter` is emitted
+/// as an integer; the rest as JSON numbers.
+fn metric_fields(ctx: &dyn DebugState) -> Vec<(&'static str, serde_json::Value)> {
+    METRICS
+        .iter()
+        .map(|&name| {
+            let value = if name == "iter" {
+                serde_json::json!(ctx.iter())
+            } else {
+                let metric = Metric::parse(name)
+                    .expect("every METRICS entry must have a matching Metric arm");
+                serde_json::json!(metric.eval(ctx))
+            };
+            (name, value)
+        })
+        .collect()
+}
+
+/// Merge the canonical [`metric_fields`] into a JSON object event in place.
+fn insert_metric_fields(ev: &mut serde_json::Value, ctx: &dyn DebugState) {
+    if let serde_json::Value::Object(map) = ev {
+        for (name, value) in metric_fields(ctx) {
+            map.insert(name.to_string(), value);
         }
     }
 }
@@ -365,7 +545,7 @@ impl Atom {
         })
     }
 
-    fn holds(&self, ctx: &DebugCtx) -> bool {
+    fn holds(&self, ctx: &dyn DebugState) -> bool {
         self.op.eval(self.metric.eval(ctx), self.rhs)
     }
 }
@@ -435,7 +615,7 @@ impl Condition {
         })
     }
 
-    fn holds(&self, ctx: &DebugCtx) -> bool {
+    fn holds(&self, ctx: &dyn DebugState) -> bool {
         let mut acc = self.first.holds(ctx);
         for (join, atom) in &self.rest {
             let v = atom.holds(ctx);
@@ -452,6 +632,41 @@ impl Condition {
 /// the `complete` command). `before` is the line text up to the start of
 /// the word being completed; `word` is that partial word. Pure so it can
 /// be unit-tested without a terminal.
+/// Filesystem completions for a path argument (`save`/`load`/`sweep`/
+/// `source`). `word` is the whole path token typed so far; the returned
+/// candidates carry its directory prefix (so they replace the token whole),
+/// directories get a trailing `/`, and dotfiles are hidden unless the
+/// prefix opens with a dot.
+fn path_candidates(word: &str) -> Vec<String> {
+    // Split into the directory to list and the basename prefix to match.
+    let (dir, prefix) = match word.rfind('/') {
+        Some(i) => (&word[..=i], &word[i + 1..]), // dir keeps its trailing '/'
+        None => ("", word),
+    };
+    let read_from = if dir.is_empty() { "." } else { dir };
+    let Ok(entries) = std::fs::read_dir(read_from) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        if name.starts_with('.') && !prefix.starts_with('.') {
+            continue;
+        }
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let mut cand = format!("{dir}{name}");
+        if is_dir {
+            cand.push('/');
+        }
+        out.push(cand);
+    }
+    out.sort();
+    out
+}
+
 fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &str) -> Vec<String> {
     let toks: Vec<&str> = before.split_whitespace().collect();
     let starts = |opts: &[&str]| -> Vec<String> {
@@ -477,7 +692,7 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             v.extend(starts(&BLOCK_NAMES));
             v
         }
-        ["set", "opt"] | ["opt"] | ["options"] => opt_names(),
+        ["set", "opt"] | ["get", "opt"] | ["get"] | ["opt"] | ["options"] => opt_names(),
         // After `set opt <name>`, complete the option's valid values.
         ["set", "opt", name] => reg
             .and_then(|r| r.get_option(name))
@@ -497,7 +712,19 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
         ["print"] | ["p"] | ["watch"] | ["display"] => {
             let mut v = starts(&BLOCK_NAMES);
             v.extend(starts(&[
-                "mu", "obj", "inf_pr", "inf_du", "err", "compl", "iter", "kkt", "active",
+                "mu",
+                "obj",
+                "inf_pr",
+                "inf_du",
+                "err",
+                "compl",
+                "iter",
+                "kkt",
+                "active",
+                "inactive",
+                "residuals",
+                "equation",
+                "rank",
             ]));
             v
         }
@@ -507,6 +734,10 @@ fn completion_candidates(reg: Option<&RegisteredOptions>, before: &str, word: &s
             v
         }
         ["complete"] => starts(COMMANDS),
+        // Path arguments: complete against the filesystem.
+        ["save"] | ["load"] | ["sweep"] | ["source"] => path_candidates(word),
+        // `load <file> [block]` — the optional second arg names a block.
+        ["load", _] => starts(&BLOCK_NAMES),
         _ => Vec::new(),
     }
 }
@@ -542,6 +773,201 @@ impl Completer for DbgHelper {
             })
             .collect();
         Ok((start, pairs))
+    }
+}
+
+/// Rendered constraint equations from the source model, indexed in
+/// original `.nl` row order. Lets the debugger answer
+/// `print equation <name|row>` with the actual algebra — the source
+/// expression for a constraint, resolved by its model name. This closes
+/// the loop on the residual-name labeling (`print residuals`): once a
+/// culprit equation is named, the user can read it. Naming and printing
+/// culprit equations rather than bare indices is the diagnostic
+/// recommendation of Lee et al. (2024,
+/// <https://doi.org/10.69997/sct.147875>).
+pub struct EquationBook {
+    /// Constraint names in original `.nl` row order (empty `String` when a
+    /// row has no name, e.g. no `.row` auxfile was emitted).
+    names: Vec<String>,
+    /// Rendered equation text, parallel to `names`.
+    equations: Vec<String>,
+}
+
+impl EquationBook {
+    /// Build from parallel name / rendered-equation vectors (original
+    /// `.nl` row order). Lengths are zipped to the shorter of the two.
+    pub fn new(names: Vec<String>, equations: Vec<String>) -> Self {
+        Self { names, equations }
+    }
+
+    /// Number of constraints with a rendered equation.
+    pub fn len(&self) -> usize {
+        self.equations.len()
+    }
+
+    /// True when there are no equations.
+    pub fn is_empty(&self) -> bool {
+        self.equations.is_empty()
+    }
+
+    /// Human label for row `i`: its model name if present, else `c[i]`
+    /// (original `.nl` row index).
+    fn label(&self, i: usize) -> String {
+        match self.names.get(i) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("c[{i}]"),
+        }
+    }
+
+    /// Resolve a user key to an original row index: an exact name match
+    /// first, else the key parsed as a `usize` row index.
+    fn resolve(&self, key: &str) -> Option<usize> {
+        if let Some(i) = self.names.iter().position(|n| n == key) {
+            return Some(i);
+        }
+        key.parse::<usize>()
+            .ok()
+            .filter(|&i| i < self.equations.len())
+    }
+}
+
+/// Maximum number of named culprits listed inline in a structural
+/// finding before it switches to a "+N more" tail. Keeps a pathological
+/// model (hundreds of redundant rows) from flooding the report while
+/// still reporting the full count — no silent truncation.
+const MAX_STRUCT_NAMES: usize = 10;
+
+/// Maximum singular values echoed inline by `print rank` before the tail
+/// is elided (the full spectrum is always in the JSON payload).
+const MAX_SINGULAR_VALUES_SHOWN: usize = 16;
+
+/// Maximum implicated rows listed inline by `print rank` before a
+/// "+N more" tail. Same no-silent-truncation rule as [`MAX_STRUCT_NAMES`].
+const MAX_RANK_CULPRITS: usize = 12;
+
+/// Structural rank analysis of the *equality* constraint Jacobian,
+/// after the Dulmage–Mendelsohn decomposition used by IDAES's
+/// `DiagnosticsToolbox`. The Hessian-free, iterate-independent sparsity
+/// pattern alone tells us whether a subset of equations is
+/// over-determined — more equations than the variables they jointly
+/// touch — which forces at least one of them to be redundant or
+/// mutually inconsistent (a structurally singular Jacobian, LICQ
+/// failure).
+///
+/// The payoff is *naming* those rows. The solver's δ_c dual
+/// regularization and wrong-inertia flags detect rank deficiency but
+/// report it as a scalar; this book maps the dependent rows back to the
+/// model's equation names so `diagnose` can say `mass_balance` instead
+/// of "equation 13". Tracing a singular system to *named* equations is
+/// exactly the roadblock Lee et al. (2024) identify for
+/// equation-oriented model debugging. See
+/// <https://doi.org/10.69997/sct.147875>.
+pub struct StructureBook {
+    /// Equality-row × variable incidence graph (built from the source
+    /// model's Jacobian sparsity).
+    inc: EqualityIncidence,
+    /// Constraint names in original `.nl` row order (empty `String`
+    /// when a row has no name).
+    con_names: Vec<String>,
+    /// Variable names in original column order (empty `String` when a
+    /// column has no name).
+    var_names: Vec<String>,
+}
+
+impl StructureBook {
+    /// Build from the equality incidence graph plus the model's
+    /// constraint and variable name vectors (original order). The
+    /// incidence rows index into `con_names` via
+    /// `inc.eq_row_inner_idx`; the incidence columns index `var_names`
+    /// directly.
+    pub fn new(inc: EqualityIncidence, con_names: Vec<String>, var_names: Vec<String>) -> Self {
+        Self {
+            inc,
+            con_names,
+            var_names,
+        }
+    }
+
+    /// Label for equality-incidence row `eq_row`: the source model's
+    /// constraint name if present, else `c[<orig row>]`.
+    fn con_label(&self, eq_row: usize) -> String {
+        let orig = self.inc.eq_row_inner_idx[eq_row];
+        match self.con_names.get(orig) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("c[{orig}]"),
+        }
+    }
+
+    /// Label for variable column `v`: the source model's variable name
+    /// if present, else `x[v]`.
+    fn var_label(&self, v: usize) -> String {
+        match self.var_names.get(v) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("x[{v}]"),
+        }
+    }
+
+    /// Join up to [`MAX_STRUCT_NAMES`] labels, appending an explicit
+    /// "+N more" tail when truncated so nothing is dropped silently.
+    fn join_capped(labels: &[String]) -> String {
+        if labels.len() <= MAX_STRUCT_NAMES {
+            labels.join(", ")
+        } else {
+            let head = labels[..MAX_STRUCT_NAMES].join(", ");
+            let more = labels.len() - MAX_STRUCT_NAMES;
+            format!("{head}, … (+{more} more)")
+        }
+    }
+
+    /// Run the structural pass and return `diagnose` findings.
+    ///
+    /// Only the *over-determined* block is reported: it names the
+    /// candidate dependent (redundant / inconsistent) equations behind
+    /// a singular Jacobian. The under-determined block is deliberately
+    /// suppressed — an NLP with more variables than equality
+    /// constraints is the normal, well-posed case (the remaining
+    /// degrees of freedom are pinned by the objective, bounds, and
+    /// inequalities), so flagging it would fire on nearly every model.
+    fn findings(&self) -> Vec<(&'static str, &'static str, String)> {
+        let mut out = Vec::new();
+        if self.inc.n_eq_rows() == 0 {
+            return out;
+        }
+        let matching = hopcroft_karp(&self.inc);
+        let dm = DulmageMendelsohnPartition::from_matching(&self.inc, &matching);
+        if dm.over_rows.is_empty() {
+            return out;
+        }
+
+        // over_rows.len() == over_cols.len() + (unmatched rows); the
+        // unmatched count is the minimum number of structurally
+        // redundant equations.
+        let excess = dm.over_rows.len().saturating_sub(dm.over_cols.len());
+        let eq_labels: Vec<String> = dm.over_rows.iter().map(|&r| self.con_label(r)).collect();
+        let var_labels: Vec<String> = dm.over_cols.iter().map(|&v| self.var_label(v)).collect();
+        let eqs = Self::join_capped(&eq_labels);
+        let shared = if var_labels.is_empty() {
+            "no variables".to_string()
+        } else {
+            Self::join_capped(&var_labels)
+        };
+        out.push((
+            "warning",
+            "structural_singularity",
+            format!(
+                "Constraint Jacobian is structurally singular (Dulmage–Mendelsohn): {} equation(s) \
+                 over-determine the {} variable(s) they jointly touch ({}), so ≥{} of them must be \
+                 redundant or mutually inconsistent (LICQ fails on this block). Candidate \
+                 dependent equations: {}. Inspect them with `print equation <name>`; this names \
+                 the rows behind any δ_c dual-regularization / wrong-inertia signal.",
+                dm.over_rows.len(),
+                dm.over_cols.len(),
+                shared,
+                excess.max(1),
+                eqs
+            ),
+        ));
+        out
     }
 }
 
@@ -595,7 +1021,7 @@ pub struct SolverDebugger {
     break_events: HashSet<&'static str>,
     /// Per-iteration primal-dual snapshots for `goto`/`restart`, keyed by
     /// iteration index. Capped at [`SNAPSHOT_CAP`] (oldest evicted).
-    snapshots: BTreeMap<i32, IterateSnapshot>,
+    snapshots: BTreeMap<i32, Box<dyn pounce_common::debug::IterSnapshot>>,
     /// Shared slot for `resolve` to request a fresh solve from the
     /// current point with staged options. `None` disables `resolve`.
     restart: Option<RestartCell>,
@@ -618,7 +1044,36 @@ pub struct SolverDebugger {
     /// registry; surfaced to the caller after the solve. Not applied to
     /// already-built strategies mid-solve (see `staged_options`).
     staged: Vec<(String, String)>,
+    /// Active `sweep` / `multistart` run, if any. Driven at the terminal
+    /// checkpoint across re-solves (see [`SolverDebugger::drive_sweep`]).
+    sweep: Option<SweepState>,
+    /// Consecutive Ctrl-C presses at the REPL prompt with no command in
+    /// between. The first cancels the line (readline convention); a second
+    /// quits the solve — a discoverable Ctrl-C escape hatch that mirrors the
+    /// running-mode double-tap. Reset whenever a real line is entered.
+    prompt_interrupts: u8,
+    /// Rendered constraint equations from the source model (`.nl`), for the
+    /// `print equation <name|row>` command. `None` when no model was wired in
+    /// (e.g. a non-`.nl` entry point). See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>) on naming culprit equations.
+    equation_book: Option<EquationBook>,
+    /// Structural rank analysis of the source model's equality Jacobian,
+    /// for the `diagnose` command's `structural_singularity` finding.
+    /// `None` when no `.nl` model was wired in. See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    structure_book: Option<StructureBook>,
+    /// A command queue shared with another REPL (the branch-and-bound tree
+    /// debugger), used when this debugger drives a *sub-solve* under
+    /// `--debug-script`. When set, [`next_command_line`](Self::next_command_line)
+    /// pops from it instead of stdin, so a single script interleaves tree and
+    /// interior-point commands.
+    script_queue: Option<SharedScript>,
 }
+
+/// A command queue shared between the tree debugger and an interior-point
+/// sub-solve debugger so one `--debug-script` drives both (they run
+/// sequentially, never concurrently).
+pub type SharedScript = Rc<std::cell::RefCell<VecDeque<String>>>;
 
 impl SolverDebugger {
     /// Fully interactive: pause at the first iteration and at the
@@ -657,12 +1112,55 @@ impl SolverDebugger {
             watches: Vec::new(),
             pending_script: None,
             staged: Vec::new(),
+            sweep: None,
+            prompt_interrupts: 0,
+            equation_book: None,
+            structure_book: None,
+            script_queue: None,
         }
+    }
+
+    /// A debugger that stays **quiet** (never pauses) until [`arm`]ed. Used as
+    /// the on-demand sub-solve hook for the branch-and-bound tree debugger:
+    /// it sees a node's relaxation solve only when the user steps into it.
+    ///
+    /// [`arm`]: DebugHook::arm
+    pub fn quiet(mode: DebugMode, reg: Option<Rc<RegisteredOptions>>) -> Self {
+        let mut d = Self::new(mode, reg);
+        d.step = false;
+        d.pause_iters = false;
+        d.pause_terminal = false;
+        d.detached = true;
+        d
     }
 
     /// Queue a debugger script to run once at the first pause.
     pub fn with_script(mut self, path: String) -> Self {
         self.pending_script = Some(path);
+        self
+    }
+
+    /// Attach the source model's rendered constraint equations, enabling
+    /// `print equation <name|row>`. Wired in on the `.nl` entry path
+    /// (see Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
+    pub fn set_equation_book(&mut self, book: EquationBook) {
+        self.equation_book = Some(book);
+    }
+
+    /// Attach the source model's structural rank analysis, enabling the
+    /// `diagnose` command's `structural_singularity` finding (named
+    /// dependent equations). Wired in on the `.nl` entry path alongside
+    /// the equation book. See Lee et al. (2024,
+    /// <https://doi.org/10.69997/sct.147875>).
+    pub fn set_structure_book(&mut self, book: StructureBook) {
+        self.structure_book = Some(book);
+    }
+
+    /// Read commands from a queue shared with the tree debugger, so one
+    /// `--debug-script` drives both this sub-solve and the tree (see
+    /// [`SharedScript`]). Takes precedence over stdin / the editor.
+    pub fn with_shared_script(mut self, queue: SharedScript) -> Self {
+        self.script_queue = Some(queue);
         self
     }
 
@@ -728,7 +1226,7 @@ impl SolverDebugger {
 
     /// First conditional breakpoint that holds at the current state, if
     /// any. Returns its source text (for the pause banner / event).
-    fn matched_condition(&self, ctx: &DebugCtx) -> Option<String> {
+    fn matched_condition(&self, ctx: &dyn DebugState) -> Option<String> {
         if self.detached {
             return None;
         }
@@ -741,7 +1239,7 @@ impl SolverDebugger {
     /// First armed event that fires at the current checkpoint/state, if
     /// any. Events are derived from observable state, so they're evaluated
     /// at the checkpoint where the relevant quantity is meaningful.
-    fn matched_event(&self, ctx: &DebugCtx) -> Option<&'static str> {
+    fn matched_event(&self, ctx: &dyn DebugState) -> Option<&'static str> {
         if self.detached || self.break_events.is_empty() {
             return None;
         }
@@ -785,7 +1283,7 @@ impl SolverDebugger {
 
     /// First watchpoint whose value changed (beyond its threshold) since
     /// the previous iteration. Updates the stored baselines.
-    fn matched_watchpoint(&mut self, ctx: &DebugCtx) -> Option<String> {
+    fn matched_watchpoint(&mut self, ctx: &dyn DebugState) -> Option<String> {
         if self.detached {
             return None;
         }
@@ -819,8 +1317,12 @@ impl SolverDebugger {
 
     // ---- command engine -----------------------------------------------
 
-    fn dispatch(&mut self, line: &str, ctx: &mut DebugCtx) -> CmdOut {
-        let toks: Vec<&str> = line.split_whitespace().collect();
+    fn dispatch(&mut self, line: &str, ctx: &mut dyn DebugState) -> CmdOut {
+        // Quote-aware so a file path with spaces (e.g. `load "my run.json"`)
+        // survives as a single token; identical to `split_whitespace` for any
+        // line without quotes. `owned` backs the `&str` slices `toks` holds.
+        let owned = tokenize_quoted(line);
+        let toks: Vec<&str> = owned.iter().map(String::as_str).collect();
         let Some(&verb) = toks.first() else {
             return CmdOut::ok(vec![]); // empty line: reprompt
         };
@@ -866,7 +1368,7 @@ impl SolverDebugger {
                 }
                 None => CmdOut::err("usage: tbreak <iteration>"),
             },
-            "watchpoint" | "wp" => self.cmd_watchpoint(rest),
+            "watchpoint" | "wp" => self.cmd_watchpoint(rest, ctx),
             "commands" => self.cmd_commands(rest),
             "stop-at" | "stopat" => self.cmd_stop_at(rest),
             "progress" => match rest.first().copied() {
@@ -881,19 +1383,39 @@ impl SolverDebugger {
                 _ => CmdOut::err("usage: progress [on|off]"),
             },
             "set" => self.cmd_set(rest, ctx),
+            "get" => self.cmd_get(rest),
             "opt" | "options" => self.cmd_opt(rest),
             "complete" => self.cmd_complete(rest),
             "viz" | "plot" => self.cmd_viz(rest, ctx),
             "save" => self.cmd_save(rest, ctx),
+            "load" => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_load(rest, c),
+                None => nlp_only("load"),
+            },
+            "sweep" => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_sweep(rest, c),
+                None => nlp_only("sweep"),
+            },
+            "multistart" => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_multistart(rest, c),
+                None => nlp_only("multistart"),
+            },
             "goto" | "jump" => self.cmd_goto(rest, ctx),
             "restart" => match self.snapshots.keys().next().copied() {
                 Some(k) => self.restore_to(k, ctx),
                 None => CmdOut::err("no snapshots captured yet"),
             },
-            "resolve" | "re-solve" => self.cmd_resolve(ctx),
+            "resolve" | "re-solve" => match as_nlp(ctx) {
+                Some(c) => self.cmd_resolve(c),
+                None => nlp_only("resolve"),
+            },
             "ask" | "explain" | "claude" => self.cmd_ask(rest, ctx),
             "watch" | "display" => self.cmd_watch(rest),
             "diff" => self.cmd_diff(ctx),
+            "diagnose" | "diag" => match as_nlp(ctx) {
+                Some(c) => self.cmd_diagnose(c),
+                None => nlp_only("diagnose"),
+            },
             "source" => self.cmd_source(rest, ctx),
             "detach" => {
                 self.detached = true;
@@ -904,9 +1426,46 @@ impl SolverDebugger {
             // A `pause` received while already paused is a no-op; the
             // meaningful use is async, consumed mid-run by `try_take_pause`.
             "pause" => CmdOut::ok(vec!["already paused".into()]),
+            // Easter egg — not in COMMANDS / help / Tab, so it stays hidden.
+            "coffee" | "brew" | "espresso" => self.cmd_coffee(),
             "quit" | "q" | "exit" => CmdOut::ok(vec!["stopping solve".into()]).flow(Flow::Stop),
             other => CmdOut::err(format!("unknown command `{other}` (try `help`)")),
         }
+    }
+
+    /// `coffee` — a hidden treat. Prints a steaming mug in colour (TTY +
+    /// `NO_COLOR`-respecting, like the banner). Pure output, no solver
+    /// effect; every IPM deserves a coffee break.
+    fn cmd_coffee(&self) -> CmdOut {
+        let color = matches!(self.mode, DebugMode::Repl)
+            && std::io::stderr().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none();
+        let paint = |r: u8, g: u8, b: u8, s: &str| -> String {
+            if color {
+                format!("\x1b[38;2;{r};{g};{b}m{s}\x1b[0m")
+            } else {
+                s.to_string()
+            }
+        };
+        // Palette: ceramic white, dark-roast & medium brown, gray steam.
+        let cup = |s: &str| paint(0xEC, 0xEC, 0xEF, s);
+        let dark = |s: &str| paint(0x5A, 0x32, 0x1E, s);
+        let brew = |s: &str| paint(0x96, 0x5F, 0x37, s);
+        let steam = |s: &str| paint(0xB4, 0xB9, 0xC3, s);
+        let lines = vec![
+            String::new(),
+            format!("     {}", steam(") )  )")),
+            format!("    {}", steam("( (  (")),
+            format!("   {}", cup("._________.")),
+            format!("   {}{}{}", cup("|"), dark("~~~~~~~~"), cup("|_")),
+            format!("   {}{}{}", cup("|  "), brew("COFFEE"), cup("| |")),
+            format!("   {}{}{}", cup("|  "), dark("~~~~~~"), cup("| |")),
+            format!("   {}", cup("|________|_|")),
+            format!("    {}", cup("\\________/")),
+            format!("      {}", brew("a fresh cup for a stuck solve")),
+            String::new(),
+        ];
+        CmdOut::ok(lines).with_data(serde_json::json!({"easter_egg": "coffee"}))
     }
 
     fn cmd_help(&self) -> CmdOut {
@@ -914,7 +1473,10 @@ impl SolverDebugger {
             "commands:".into(),
             "  info | i                 summary of the current iterate".into(),
             "  print | p <what>         x|s|y_c|y_d|z_l|z_u|v_l|v_u | dx (step) |".into(),
-            "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active".into(),
+            "                           mu|obj|inf_pr|inf_du|err|compl|iter | kkt | active | inactive".into(),
+            "  print residuals [pr|du] [k]  top-k largest-magnitude residuals (default k=10)".into(),
+            "  print equation [name|row]    source algebra of a constraint, by model name or row".into(),
+            "  print rank                   SVD rank of the equality Jacobian; names dependent equations".into(),
             "  step | s | n             run one iteration, pause again".into(),
             "  stepi | si | step sub    run to the next checkpoint (into sub-iteration phases)".into(),
             "  progress [on|off]        toggle per-iteration progress events (JSON mode)".into(),
@@ -933,15 +1495,21 @@ impl SolverDebugger {
             "  set <blk>[<i>] <v>       overwrite one component (e.g. set x[2] 1.5)".into(),
             "  set <blk> <v0,v1,...>    overwrite a whole block".into(),
             "  set opt <name> <value>   stage a solver option (validated)".into(),
+            "  get opt <name>           show an option's effective value (staged or default)".into(),
             "  opt [filter]             list solver options (name/type/default)".into(),
             "  complete <prefix>        completion candidates (commands + options)".into(),
             "  viz <x|s|dx|...|kkt|L>   open the artifact in an external viewer".into(),
             "  save [path]              write the current iterate + residuals to JSON".into(),
+            "  load <file> [block]      read a block (default x) from a save artifact / numeric file".into(),
+            "  sweep <file>             one solve per start in <file>; tabulate outcomes".into(),
+            "  multistart <N> [rel]     N restarts (uniform in each finite box; jitter else)".into(),
             "  goto <k> | restart       rewind to a captured iteration (primal-dual only)".into(),
             "  resolve                  re-solve from the current x with staged `set opt`s".into(),
-            "  ask [question]           ask Claude Code (claude -p / $POUNCE_DBG_LLM) about the state".into(),
+            "  ask [question]           ask an LLM about the state (default Claude Code; set".into(),
+            "                           POUNCE_DBG_LLM=claude|codex|gemini|llm or a command template)".into(),
             "  watch [target|clear|del] auto-print a `print` target at every pause".into(),
             "  diff                     what changed in the iterate since the last iteration".into(),
+            "  diagnose | diag          live health report: named culprit residuals, KKT inertia, stalls".into(),
             "  source <file>            run debugger commands from a file".into(),
             "  detach                   stop pausing; solve to completion".into(),
             "  quit | q                 stop the solve now".into(),
@@ -949,7 +1517,7 @@ impl SolverDebugger {
         CmdOut::ok(lines)
     }
 
-    fn cmd_info(&self, ctx: &DebugCtx) -> CmdOut {
+    fn cmd_info(&self, ctx: &dyn DebugState) -> CmdOut {
         let dims: Vec<_> = ctx.block_dims();
         let dims_json: serde_json::Map<String, serde_json::Value> = dims
             .iter()
@@ -970,18 +1538,15 @@ impl SolverDebugger {
                     .join(" ")
             ),
         ];
-        CmdOut::ok(lines).with_data(serde_json::json!({
-            "iter": ctx.iter(),
-            "mu": ctx.mu(),
-            "objective": ctx.objective(),
-            "inf_pr": ctx.inf_pr(),
-            "inf_du": ctx.inf_du(),
-            "nlp_error": ctx.nlp_error(),
-            "dims": dims_json,
-        }))
+        let mut data = serde_json::json!({ "dims": dims_json });
+        // The same canonical metric block as the streamed events, so `info`'s
+        // `data` matches `hello.metrics` (this adds `complementarity`, which
+        // the human-readable lines above omit for brevity).
+        insert_metric_fields(&mut data, ctx);
+        CmdOut::ok(lines).with_data(data)
     }
 
-    fn cmd_print(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_print(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let Some(&what) = rest.first() else {
             return self.cmd_info(ctx);
         };
@@ -989,11 +1554,26 @@ impl SolverDebugger {
             return self.cmd_print_kkt(ctx);
         }
         if what == "active" {
-            return self.cmd_print_active(ctx);
+            return self.cmd_print_bounds(ctx, true);
+        }
+        if what == "inactive" {
+            return self.cmd_print_bounds(ctx, false);
+        }
+        if what == "residuals" || what == "resid" {
+            return self.cmd_print_residuals(&rest[1..], ctx);
+        }
+        if what == "equation" || what == "eqn" || what == "eq" {
+            return self.cmd_print_equation(&rest[1..]);
+        }
+        if what == "rank" {
+            return match as_nlp(ctx) {
+                Some(c) => self.cmd_print_rank(c),
+                None => nlp_only("print rank"),
+            };
         }
         // step / delta blocks: `dx`, `ds`, ... or `delta_x`.
-        let delta = what.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b));
-        if BLOCK_NAMES.contains(&what) {
+        let delta = what.strip_prefix("d").filter(|b| is_block(ctx, b));
+        if is_block(ctx, what) {
             match ctx.block(what) {
                 Some(v) => CmdOut::ok(vec![fmt_vec(what, &v)])
                     .with_data(serde_json::json!({"name": what, "values": v})),
@@ -1025,10 +1605,12 @@ impl SolverDebugger {
         }
     }
 
-    /// `print active` — bound-slack classification: how many of each
-    /// bound category are near-active (slack below `tol`), and the min
-    /// slack. Small slacks mark the bounds the iterate is pressing on.
-    fn cmd_print_active(&self, ctx: &DebugCtx) -> CmdOut {
+    /// `print active` / `print inactive` — bound-slack classification per
+    /// category. `active` counts bounds the iterate is pressing on (slack
+    /// below `tol`) and reports the min slack; `inactive` is the mirror —
+    /// it counts the bounds with room to spare (slack ≥ `tol`) and reports
+    /// the max slack, the variables furthest from their bound.
+    fn cmd_print_bounds(&self, ctx: &dyn DebugState, active: bool) -> CmdOut {
         let tol = 1e-6;
         let mut lines = Vec::new();
         let mut cats = serde_json::Map::new();
@@ -1040,15 +1622,27 @@ impl SolverDebugger {
                 continue;
             }
             let n = sl.len();
-            let min = sl.iter().copied().fold(f64::INFINITY, f64::min);
-            let near = sl.iter().filter(|&&s| s.abs() < tol).count();
-            lines.push(format!(
-                "{cat}: {n} bound(s), {near} near-active (slack<{tol:.0e}), min slack {min:.3e}"
-            ));
-            cats.insert(
-                cat.to_string(),
-                serde_json::json!({"n": n, "near_active": near, "min_slack": min}),
-            );
+            if active {
+                let min = sl.iter().copied().fold(f64::INFINITY, f64::min);
+                let near = sl.iter().filter(|&&s| s.abs() < tol).count();
+                lines.push(format!(
+                    "{cat}: {n} bound(s), {near} near-active (slack<{tol:.0e}), min slack {min:.3e}"
+                ));
+                cats.insert(
+                    cat.to_string(),
+                    serde_json::json!({"n": n, "near_active": near, "min_slack": min}),
+                );
+            } else {
+                let max = sl.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let far = sl.iter().filter(|&&s| s.abs() >= tol).count();
+                lines.push(format!(
+                    "{cat}: {n} bound(s), {far} inactive (slack≥{tol:.0e}), max slack {max:.3e}"
+                ));
+                cats.insert(
+                    cat.to_string(),
+                    serde_json::json!({"n": n, "inactive": far, "max_slack": max}),
+                );
+            }
         }
         if lines.is_empty() {
             lines.push("no bounded variables or inequality slacks".into());
@@ -1056,9 +1650,398 @@ impl SolverDebugger {
         CmdOut::ok(lines).with_data(serde_json::json!({"tol": tol, "categories": cats}))
     }
 
+    /// `print residuals [primal|dual] [k]` — the `k` largest-magnitude
+    /// residuals at this step, ranked. With no filter, primal
+    /// (constraint) and dual (∇L) residuals are pooled and ranked
+    /// together; `primal`/`dual` restrict to one space. Default `k=10`.
+    /// The top primal entry equals `inf_pr`; the top dual equals
+    /// `inf_du`. Args may appear in either order.
+    fn cmd_print_residuals(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
+        let mut k: Option<usize> = None;
+        let mut filter: Option<bool> = None; // Some(true)=primal, Some(false)=dual
+        for &arg in rest {
+            if let Ok(n) = arg.parse::<usize>() {
+                k = Some(n);
+            } else {
+                match arg {
+                    "primal" | "pr" => filter = Some(true),
+                    "dual" | "du" => filter = Some(false),
+                    other => {
+                        return CmdOut::err(format!(
+                            "usage: print residuals [primal|dual] [k] (got `{other}`)"
+                        ))
+                    }
+                }
+            }
+        }
+        let k = k.unwrap_or(10);
+
+        let mut all = Vec::new();
+        if filter != Some(false) {
+            let Some(primal) = ctx.constraint_residuals() else {
+                return CmdOut::err("no iterate yet — residuals unavailable");
+            };
+            all.extend(primal);
+        }
+        if filter != Some(true) {
+            let Some(dual) = ctx.dual_residuals() else {
+                return CmdOut::err("no iterate yet — residuals unavailable");
+            };
+            all.extend(dual);
+        }
+
+        let total = all.len();
+        let top = rank_residuals(all, k);
+        if top.is_empty() {
+            return CmdOut::ok(vec!["no residuals at this iterate".into()])
+                .with_data(serde_json::json!({"k": k, "total": total, "top": []}));
+        }
+
+        // Model names projected into the solver's split space, when the
+        // problem carries them (`.col`/`.row`, no presolve). Lets a residual
+        // print as `mass_balance` rather than `c[3]` — the model-vs-index
+        // gap Lee et al. (2024, <https://doi.org/10.69997/sct.147875>) flag
+        // for equation-oriented debugging. `None` ⇒ index labels throughout.
+        // Model names are NLP-specific (.col/.row); only the NLP debugger
+        // exposes them — other solvers fall back to index labels.
+        let names = ctx
+            .as_any()
+            .and_then(|a| a.downcast_ref::<DebugCtx>())
+            .and_then(|c| c.split_names());
+        let name_of = |r: &Residual| resid_name(r, &names);
+
+        let lines = top
+            .iter()
+            .map(|r| {
+                let label = match name_of(r) {
+                    Some(name) => format!("{}[{}]", r.kind.tag(), name),
+                    None => format!("{}[{}]", r.kind.tag(), r.index),
+                };
+                format!("{:>8} = {:+.6e}   |{:.3e}|", label, r.value, r.value.abs())
+            })
+            .collect();
+        let data: Vec<_> = top
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "space": r.kind.tag(),
+                    "primal": r.kind.is_primal(),
+                    "index": r.index,
+                    "name": name_of(r),
+                    "value": r.value,
+                })
+            })
+            .collect();
+        CmdOut::ok(lines).with_data(serde_json::json!({"k": k, "total": total, "top": data}))
+    }
+
+    /// `print equation [name|row]` — the source algebra of a constraint,
+    /// resolved by its model name (preferred) or original `.nl` row index.
+    /// With no argument, reports how many equations are available and how
+    /// to address one. This is the read-side companion to the named
+    /// residual labels (`print residuals`): once a culprit constraint is
+    /// named, this prints what it actually says. Naming and surfacing
+    /// culprit equations rather than bare indices is the diagnostic path
+    /// urged by Lee et al. (2024, <https://doi.org/10.69997/sct.147875>).
+    fn cmd_print_equation(&self, rest: &[&str]) -> CmdOut {
+        let Some(book) = self.equation_book.as_ref() else {
+            return CmdOut::err(
+                "no equation source — `print equation` needs an .nl model (none was loaded)",
+            );
+        };
+        if book.is_empty() {
+            return CmdOut::err("the model has no constraint equations to print");
+        }
+        let Some(&key) = rest.first() else {
+            return CmdOut::ok(vec![format!(
+                "{} constraint equation(s) — `print equation <name|row>` to show one",
+                book.len()
+            )])
+            .with_data(serde_json::json!({"count": book.len()}));
+        };
+        let Some(i) = book.resolve(key) else {
+            return CmdOut::err(format!(
+                "no constraint named or indexed `{key}` (have {} equation(s); try a name or 0..{})",
+                book.len(),
+                book.len().saturating_sub(1)
+            ));
+        };
+        let label = book.label(i);
+        // `i` may come from a name lookup that indexes `names`; guard against a
+        // names/equations length skew rather than risk an out-of-bounds panic.
+        let Some(eq) = book.equations.get(i) else {
+            return CmdOut::err(format!(
+                "constraint `{key}` has no source algebra (index {i} out of range)"
+            ));
+        };
+        CmdOut::ok(vec![format!("{label}:  {eq}")]).with_data(serde_json::json!({
+            "index": i,
+            "name": book.names.get(i).filter(|n| !n.is_empty()),
+            "equation": eq,
+        }))
+    }
+
+    /// `diagnose` (`diag`) — a point-in-time health report for the
+    /// *current* iterate.
+    ///
+    /// Where the studio `diagnose` tool runs temporal heuristics over a
+    /// finished solve report, this runs **live**: it reads the current KKT
+    /// inertia / regularization, the named primal & dual residuals, the
+    /// iterate geometry, and the debugger's own restoration / μ-stall
+    /// tracking — and names the culprit equation or variable wherever it
+    /// can. Tracing a numerical symptom back to the *named* equation behind
+    /// it, rather than a bare row index, is the actionable-diagnostics path
+    /// of Lee et al. (2024, <https://doi.org/10.69997/sct.147875>).
+    ///
+    /// Each finding is `{severity, code, message}` — the same shape the
+    /// report-based `diagnose` emits — so a client can treat both uniformly.
+    fn cmd_diagnose(&self, ctx: &DebugCtx) -> CmdOut {
+        const TOL: f64 = 1e-6;
+        let names = ctx.split_names();
+        // (severity, code, message). Severity ranks error > warning > info.
+        let mut f: Vec<(&'static str, &'static str, String)> = Vec::new();
+
+        // --- Primal feasibility: the worst *named* constraint residual. ---
+        let inf_pr = ctx.inf_pr();
+        if inf_pr > TOL {
+            if let Some(resids) = ctx.constraint_residuals() {
+                if let Some((label, val)) = worst_named(resids, &names) {
+                    let sev = if inf_pr > 1e-2 { "error" } else { "warning" };
+                    f.push((
+                        sev,
+                        "primal_infeasible",
+                        format!(
+                            "Primal infeasibility {inf_pr:.2e}; worst constraint residual is \
+                         {label} = {val:+.3e}. Inspect this equation's feasibility and scaling \
+                         at the current point (`print equation {label}`)."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // --- Dual stationarity: the worst *named* ∇L component. ---
+        let inf_du = ctx.inf_du();
+        if inf_du > TOL {
+            if let Some(resids) = ctx.dual_residuals() {
+                if let Some((label, val)) = worst_named(resids, &names) {
+                    f.push((
+                        "warning",
+                        "dual_infeasible",
+                        format!(
+                            "Dual infeasibility {inf_du:.2e}; largest stationarity residual is \
+                         {label} = {val:+.3e}."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // --- KKT structural health (only once a search dir is computed). ---
+        if let Some(k) = ctx.kkt() {
+            if k.provides_inertia && !k.inertia_correct {
+                f.push((
+                    "warning",
+                    "inertia_wrong",
+                    format!(
+                        "KKT inertia is wrong (n-={} vs expected {}): the system was \
+                     indefinite/singular and the step had to be stabilized. A persistent \
+                     mismatch points at a rank-deficient Jacobian or an indefinite Hessian.",
+                        k.n_neg, k.expected_neg
+                    ),
+                ));
+            }
+            if k.delta_w > 1e-4 {
+                f.push((
+                    "info",
+                    "heavy_regularization",
+                    format!(
+                        "Primal regularization δ_w={:.2e} applied — the Hessian was indefinite at \
+                     this step. Normal near saddle points; persistent large δ_w suggests a \
+                     problematic Hessian.",
+                        k.delta_w
+                    ),
+                ));
+            }
+            if k.delta_c > 0.0 {
+                f.push((
+                    "warning",
+                    "dual_regularization",
+                    format!(
+                    "Dual regularization δ_c={:.2e} applied — the constraint Jacobian is (near) \
+                     rank-deficient (linearly dependent or redundant equalities). Inspect the \
+                     equality residuals by name (`print residuals primal`).",
+                    k.delta_c
+                ),
+                ));
+            }
+        }
+
+        // --- Structural rank: name the dependent equations (DM). ---
+        // Iterate-independent; localizes the δ_c / wrong-inertia signal
+        // above to the specific over-determined rows by model name.
+        if let Some(book) = self.structure_book.as_ref() {
+            f.extend(book.findings());
+        }
+
+        // --- Numerical rank: SVD of the equality Jacobian at this point. ---
+        // The numerical complement to the structural pass above: catches
+        // *value* dependencies a full sparsity pattern hides, and localizes
+        // the δ_c signal to specific equations even when the structure is
+        // nominally full rank. Iterate-dependent (it factors J_c at x).
+        if let Some(rep) = ctx.rank_report() {
+            if rep.is_rank_deficient() {
+                let culprits: Vec<String> = rep
+                    .culprits
+                    .iter()
+                    .take(MAX_RANK_CULPRITS)
+                    .map(|c| rank_row_label(&rep.rows[c.row], &names))
+                    .collect();
+                let named = if culprits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Implicated equations: {}.", culprits.join(", "))
+                };
+                f.push((
+                    "warning",
+                    "rank_deficient_jacobian",
+                    format!(
+                        "Equality Jacobian J_c is numerically rank-deficient at this iterate: \
+                         rank {}/{} (deficiency {}), σ_min={:.2e}, cond={}. Linearly dependent \
+                         or redundant equality constraints — the root cause behind δ_c \
+                         regularization / wrong inertia.{named}",
+                        rep.rank,
+                        rep.n_rows(),
+                        rep.deficiency(),
+                        rep.sigma_min(),
+                        fmt_cond(rep.cond),
+                    ),
+                ));
+            }
+        }
+
+        // --- Multiplier magnitude: constraint-qualification / scaling. ---
+        let mut max_mult = 0.0_f64;
+        for blk in ["y_c", "y_d", "z_l", "z_u", "v_l", "v_u"] {
+            if let Some(v) = ctx.block(blk) {
+                max_mult = v.iter().fold(max_mult, |m, &x| m.max(x.abs()));
+            }
+        }
+        if max_mult > 1e8 {
+            f.push((
+                "warning",
+                "large_multipliers",
+                format!(
+                "Largest multiplier magnitude is {max_mult:.2e}. Very large multipliers signal a \
+                 constraint-qualification failure or poor scaling — consider rescaling the \
+                 offending rows."
+            ),
+            ));
+        }
+
+        // --- Iterate geometry: variable bounds pressed at this point. ---
+        let mut pinned = 0usize;
+        for cat in ["x_l", "x_u"] {
+            if let Some(sl) = ctx.bound_slack(cat) {
+                pinned += sl.iter().filter(|&&s| s.abs() < TOL).count();
+            }
+        }
+        if pinned > 0 {
+            f.push((
+                "info",
+                "bounds_pinned",
+                format!(
+                    "{pinned} variable bound(s) are active (slack < {TOL:.0e}). Active bounds are \
+                 expected at a solution, but a large count early can throttle the line search."
+                ),
+            ));
+        }
+
+        // --- Line search / step length at this iteration. ---
+        let (alpha_pr, _) = ctx.alpha();
+        if ctx.iter() > 0 && alpha_pr > 0.0 && alpha_pr < 1e-6 {
+            f.push((
+                "warning",
+                "tiny_step",
+                format!(
+                    "Accepted primal step α_pr={alpha_pr:.2e} is tiny — the line search is barely \
+                 moving. Often a poor search direction or an ill-conditioned KKT system."
+                ),
+            ));
+        }
+        let ls = ctx.ls_count();
+        if ls >= 10 {
+            f.push((
+                "warning",
+                "heavy_line_search",
+                format!(
+                "Line search needed {ls} trial points for the accepted step — search-direction \
+                 quality may be poor (check Hessian accuracy)."
+            ),
+            ));
+        }
+
+        // --- Temporal flags the debugger already tracks across iters. ---
+        if self.in_restoration {
+            f.push((
+                "warning",
+                "in_restoration",
+                "Currently inside feasibility restoration: the line search could not make \
+                 progress on the original problem at the working point."
+                    .to_string(),
+            ));
+        }
+        if self.mu_stall >= MU_STALL_ITERS {
+            f.push((
+                "warning",
+                "mu_stalled",
+                format!(
+                    "μ has not decreased for {} consecutive iterations — the barrier is stuck. \
+                 Try mu_strategy=adaptive or a smaller mu_init.",
+                    self.mu_stall
+                ),
+            ));
+        }
+
+        // --- Healthy fallback. ---
+        if f.is_empty() {
+            f.push((
+                "info",
+                "healthy",
+                format!(
+                    "No issues detected at iter {}: inf_pr={:.2e}, inf_du={:.2e}, μ={:.2e}.",
+                    ctx.iter(),
+                    inf_pr,
+                    inf_du,
+                    ctx.mu()
+                ),
+            ));
+        }
+
+        // Surface errors first, then warnings, then info.
+        let rank = |s: &str| match s {
+            "error" => 0,
+            "warning" => 1,
+            _ => 2,
+        };
+        f.sort_by_key(|(sev, _, _)| rank(sev));
+
+        let lines: Vec<String> = f
+            .iter()
+            .map(|(sev, code, msg)| format!("[{sev:>7}] {code}: {msg}"))
+            .collect();
+        let data: Vec<_> = f
+            .iter()
+            .map(|(sev, code, msg)| serde_json::json!({"severity": sev, "code": code, "message": msg}))
+            .collect();
+        let n = data.len();
+        CmdOut::ok(lines)
+            .with_data(serde_json::json!({"iter": ctx.iter(), "findings": data, "n_findings": n}))
+    }
+
     /// `print kkt` — inertia + regularization of the factored augmented
     /// system. Only meaningful at/after `after_search_dir`.
-    fn cmd_print_kkt(&self, ctx: &DebugCtx) -> CmdOut {
+    fn cmd_print_kkt(&self, ctx: &dyn DebugState) -> CmdOut {
         let Some(k) = ctx.kkt() else {
             return CmdOut::err(
                 "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
@@ -1097,6 +2080,27 @@ impl SolverDebugger {
             "delta_c": k.delta_c,
             "status": k.status,
         }))
+    }
+
+    /// `print rank` — numerical rank diagnosis of the equality-constraint
+    /// Jacobian `J_c` at the current iterate. Runs a rank-revealing SVD,
+    /// reports the numerical rank / condition number, and — when the block
+    /// is rank-deficient — names the equations participating in the
+    /// near-null space (the dependency the `δ_c` regularization is papering
+    /// over). The numerical complement to the structural `diagnose` /
+    /// Dulmage–Mendelsohn pass: it also catches *value* dependencies a
+    /// full sparsity pattern hides.
+    fn cmd_print_rank(&self, ctx: &DebugCtx) -> CmdOut {
+        let Some(rep) = ctx.rank_report() else {
+            return CmdOut::err(
+                "no equality-constraint Jacobian to analyze (the problem has no equality \
+                 constraints, or there is no iterate yet)",
+            );
+        };
+        let names = ctx.split_names();
+        let (lines, data) =
+            render_rank_report(&rep, &names, self.equation_book.as_ref(), ctx.iter());
+        CmdOut::ok(lines).with_data(data)
     }
 
     fn cmd_run(&mut self, rest: &[&str]) -> CmdOut {
@@ -1241,7 +2245,7 @@ impl SolverDebugger {
         }
     }
 
-    fn cmd_set(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_set(&mut self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         match rest {
             ["mu", v] => match v.parse::<f64>() {
                 Ok(mu) => match ctx.set_mu(mu) {
@@ -1250,7 +2254,10 @@ impl SolverDebugger {
                 },
                 Err(_) => CmdOut::err("usage: set mu <value>"),
             },
-            ["opt", name, value] => self.cmd_set_opt(name, value),
+            ["opt", name, value] => match as_nlp_mut(ctx) {
+                Some(c) => self.cmd_set_opt(name, value, c),
+                None => nlp_only("set opt"),
+            },
             [target, value] => self.cmd_set_block(target, value, ctx),
             _ => CmdOut::err(
                 "usage: set mu <v> | set <blk>[<i>] <v> | set <blk> <v0,v1,..> | set opt <name> <v>",
@@ -1259,7 +2266,7 @@ impl SolverDebugger {
     }
 
     /// `set x[2] 1.5` (component) or `set x 1,2,3` (whole block).
-    fn cmd_set_block(&mut self, target: &str, value: &str, ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_set_block(&mut self, target: &str, value: &str, ctx: &mut dyn DebugState) -> CmdOut {
         // Component form: name[idx]
         if let Some(open) = target.find('[') {
             if !target.ends_with(']') {
@@ -1290,7 +2297,7 @@ impl SolverDebugger {
         }
     }
 
-    fn cmd_set_opt(&mut self, name: &str, value: &str) -> CmdOut {
+    fn cmd_set_opt(&mut self, name: &str, value: &str, ctx: &mut DebugCtx) -> CmdOut {
         let Some(reg) = self.reg.as_ref() else {
             return CmdOut::err("no options registry available");
         };
@@ -1313,12 +2320,66 @@ impl SolverDebugger {
         if !valid {
             return CmdOut::err(format!("`{value}` is not a valid value for `{name}`"));
         }
+        // Record it on the staged list either way, so `get opt` reflects
+        // it and a later `resolve` re-applies it from scratch.
         self.staged.retain(|(k, _)| k != name);
         self.staged.push((name.to_string(), value.to_string()));
+        // Convergence tolerances are re-read by the conv-check policy each
+        // iteration, so we can hot-swap them in place: hand the value to
+        // the live `DebugCtx`, which the main loop drains after this hook
+        // returns. The next `step` honors it — no `resolve` required.
+        if is_live_tolerance(name) {
+            if let Ok(v) = value.parse::<f64>() {
+                ctx.set_live_tolerance(name, v);
+                return CmdOut::ok(vec![format!(
+                    "{name} = {value}  (applied live — the next `step` uses it)"
+                )])
+                .with_data(serde_json::json!({
+                    "option": name, "value": value, "live": true
+                }));
+            }
+        }
         CmdOut::ok(vec![format!(
-            "staged {name} = {value}  (validated; applied on next solve — built strategies don't re-read mid-solve)"
+            "staged {name} = {value}  (validated; takes effect on `resolve` — built strategies don't re-read mid-solve)"
         )])
         .with_data(serde_json::json!({"option": name, "value": value, "staged": true}))
+    }
+
+    /// `get opt <name>` (or the shorthand `get <name>`) — show the value
+    /// an option would take on the next solve: the value you staged this
+    /// session with `set opt`, if any, else the registered default. The
+    /// debugger holds the staged overrides and the option registry, not
+    /// the running solver's live `OptionsList`, so this is the *configured*
+    /// value, not a mid-solve internal.
+    fn cmd_get(&self, rest: &[&str]) -> CmdOut {
+        // Accept both `get opt <name>` and the shorthand `get <name>`.
+        let name = match rest {
+            ["opt", n] => *n,
+            [n] => *n,
+            _ => return CmdOut::err("usage: get opt <name>"),
+        };
+        let Some(reg) = self.reg.as_ref() else {
+            return CmdOut::err("no options registry available");
+        };
+        let Some(o) = reg.get_option(name) else {
+            return CmdOut::err(format!("unknown option `{name}` (try `opt {name}`)"));
+        };
+        let def = default_str(&o.default);
+        let staged = self
+            .staged
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone());
+        let (value, source) = match &staged {
+            Some(v) => (v.clone(), "staged"),
+            None => (def.clone(), "default"),
+        };
+        CmdOut::ok(vec![format!("{name} = {value}  ({source}; default={def})")]).with_data(
+            serde_json::json!({
+                "option": name, "value": value, "source": source,
+                "default": def, "staged": staged,
+            }),
+        )
     }
 
     fn cmd_opt(&self, rest: &[&str]) -> CmdOut {
@@ -1386,7 +2447,7 @@ impl SolverDebugger {
     /// `save [path]` — dump the full current iterate (all blocks +
     /// search-direction blocks) and residual scalars to a JSON file for
     /// external analysis. Defaults to a temp path keyed by iteration.
-    fn cmd_save(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_save(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let iter = ctx.iter();
         let path = rest
             .first()
@@ -1394,7 +2455,7 @@ impl SolverDebugger {
             .unwrap_or_else(|| std::env::temp_dir().join(format!("pounce-dbg-iter{iter}.json")));
         let collect = |delta: bool| -> serde_json::Map<String, serde_json::Value> {
             let mut m = serde_json::Map::new();
-            for &b in BLOCK_NAMES.iter() {
+            for b in block_names(ctx) {
                 let v = if delta {
                     ctx.delta_block(b)
                 } else {
@@ -1433,8 +2494,336 @@ impl SolverDebugger {
         }
     }
 
+    /// `load <file> [block]` — the inverse of `save`. Read a block (by
+    /// default `x`) into the live iterate from either a `save` artifact
+    /// (JSON: top-level or under `iterate`, every block found is loaded) or
+    /// a plain numeric file (comma/whitespace/newline-separated values →
+    /// the named block, default `x`). The point that a many-variable start
+    /// is awkward to type by hand — generate it once, `load` it here.
+    fn cmd_load(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        let Some(&path) = rest.first() else {
+            return CmdOut::err("usage: load <file> [block]   (inverse of `save`)");
+        };
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return CmdOut::err(format!("cannot read `{path}`: {e}")),
+        };
+        // JSON path: a `save` artifact (blocks at top level or under
+        // `iterate`). Load every block present; report dims and any
+        // dimension mismatches per block.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(content.trim()) {
+            let obj = v
+                .get("iterate")
+                .and_then(|o| o.as_object())
+                .or_else(|| v.as_object());
+            if let Some(obj) = obj {
+                let mut loaded: Vec<(String, usize)> = Vec::new();
+                let mut errs: Vec<String> = Vec::new();
+                for &b in BLOCK_NAMES.iter() {
+                    let Some(arr) = obj.get(b).and_then(|a| a.as_array()) else {
+                        continue;
+                    };
+                    let vals: Option<Vec<f64>> = arr.iter().map(|x| x.as_f64()).collect();
+                    let Some(vals) = vals else {
+                        errs.push(format!("{b}: non-numeric entries"));
+                        continue;
+                    };
+                    match ctx.set_block(b, &vals) {
+                        Ok(()) => loaded.push((b.to_string(), vals.len())),
+                        Err(e) => errs.push(format!("{b}: {e}")),
+                    }
+                }
+                if loaded.is_empty() && errs.is_empty() {
+                    return CmdOut::err(
+                        "no recognizable blocks in JSON (expected `x`, `s`, … at top level or under `iterate`)",
+                    );
+                }
+                let mut lines: Vec<String> = loaded
+                    .iter()
+                    .map(|(b, n)| format!("loaded {b} ({n} values)"))
+                    .collect();
+                lines.extend(errs.iter().map(|e| format!("skipped {e}")));
+                return CmdOut::ok(lines).with_data(serde_json::json!({
+                    "loaded": loaded.iter().map(|(b, n)| serde_json::json!({"block": b, "n": n})).collect::<Vec<_>>(),
+                    "skipped": errs,
+                }));
+            }
+        }
+        // Raw numeric path: parse floats and set the named block (default x).
+        let block = rest.get(1).copied().unwrap_or("x");
+        let vals = match parse_floats(&content) {
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) => return CmdOut::err("file held no numbers"),
+            Err(e) => return CmdOut::err(e),
+        };
+        match ctx.set_block(block, &vals) {
+            Ok(()) => CmdOut::ok(vec![format!("loaded {block} ({} values)", vals.len())])
+                .with_data(serde_json::json!({"block": block, "n": vals.len()})),
+            Err(e) => CmdOut::err(e),
+        }
+    }
+
+    /// `sweep <file>` — run one full solve per start point in `file` (one
+    /// start per line, comma/whitespace-separated; `#` comments skipped),
+    /// then tabulate the terminal status / objective of each. An
+    /// initialization-sensitivity probe: which starts converge, and to
+    /// which minima. Needs the re-solve machinery (a restart cell).
+    fn cmd_sweep(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        if self.restart.is_none() {
+            return CmdOut::err("sweep needs re-solve, which is not available in this context");
+        }
+        let Some(&path) = rest.first() else {
+            return CmdOut::err("usage: sweep <file>   (one start per line, comma-separated)");
+        };
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return CmdOut::err(format!("cannot read `{path}`: {e}")),
+        };
+        let dim = ctx.block("x").map(|x| x.len()).unwrap_or(0);
+        let mut seeds: Vec<Vec<f64>> = Vec::new();
+        for (lineno, raw) in content.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+                continue;
+            }
+            match parse_floats(line) {
+                Ok(v) if v.len() == dim => seeds.push(v),
+                Ok(v) => {
+                    return CmdOut::err(format!(
+                        "line {}: got {} values, expected {dim} (= dim x)",
+                        lineno + 1,
+                        v.len()
+                    ));
+                }
+                Err(e) => return CmdOut::err(format!("line {}: {e}", lineno + 1)),
+            }
+        }
+        self.start_sweep(seeds, &format!("sweep `{path}`"))
+    }
+
+    /// `multistart <N> [rel]` — run `N` full solves from sampled starts,
+    /// then tabulate the outcomes. Each variable with a finite box
+    /// `[x_Lᵢ, x_Uᵢ]` is sampled **uniformly in that box**; variables that
+    /// are unbounded on either side fall back to a relative jitter
+    /// `±rel·(|xᵢ|+1)` around the current point (`rel` default 0.1). Start 0
+    /// is always the current `x`. Deterministic (a fixed-seed PRNG), so runs
+    /// reproduce.
+    fn cmd_multistart(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+        if self.restart.is_none() {
+            return CmdOut::err(
+                "multistart needs re-solve, which is not available in this context",
+            );
+        }
+        let Some(n) = rest.first().and_then(|s| s.parse::<usize>().ok()) else {
+            return CmdOut::err("usage: multistart <N> [rel]   (N sampled restarts)");
+        };
+        if n == 0 {
+            return CmdOut::err("N must be ≥ 1");
+        }
+        let rel = rest
+            .get(1)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.1);
+        let Some(base) = ctx.block("x") else {
+            return CmdOut::err("no current iterate to sample from");
+        };
+        // Full-length algorithm-space bounds, if available and aligned.
+        let bounds = ctx
+            .var_bounds()
+            .filter(|(lo, hi)| lo.len() == base.len() && hi.len() == base.len());
+        let n_box = bounds
+            .as_ref()
+            .map(|(lo, hi)| {
+                lo.iter()
+                    .zip(hi)
+                    .filter(|(l, u)| l.is_finite() && u.is_finite() && u > l)
+                    .count()
+            })
+            .unwrap_or(0);
+        let seeds: Vec<Vec<f64>> = (0..n)
+            .map(|k| {
+                let b = bounds
+                    .as_ref()
+                    .map(|(lo, hi)| (lo.as_slice(), hi.as_slice()));
+                sample_start(&base, b, rel, k)
+            })
+            .collect();
+        let n_var = base.len();
+        let label = if n_box == n_var {
+            format!("multistart {n} (box-sampled, {n_box}/{n_var} vars bounded)")
+        } else if n_box > 0 {
+            format!(
+                "multistart {n} (box {n_box}/{n_var} vars; {} unbounded → jitter rel={rel})",
+                n_var - n_box
+            )
+        } else {
+            format!("multistart {n} (no finite boxes → jitter rel={rel})")
+        };
+        self.start_sweep(seeds, &label)
+    }
+
+    /// Launch a sweep: stop the current solve and re-solve from the first
+    /// seed; the rest are driven from the terminal checkpoint
+    /// ([`Self::drive_sweep`]). Each solve runs free (`pause_iters` off,
+    /// restored when the sweep ends).
+    fn start_sweep(&mut self, seeds: Vec<Vec<f64>>, label: &str) -> CmdOut {
+        if seeds.is_empty() {
+            return CmdOut::err("no start points");
+        }
+        let Some(cell) = self.restart.as_ref() else {
+            return CmdOut::err("sweep needs re-solve, which is not available in this context");
+        };
+        let total = seeds.len();
+        let mut queue: VecDeque<Vec<f64>> = seeds.into();
+        let first = queue.pop_front().expect("non-empty");
+        *cell.borrow_mut() = Some(RestartRequest {
+            seed_x: first.clone(),
+            options: self.staged.clone(),
+            warm: None,
+        });
+        // Run each sweep solve free; we intercept only at the terminal
+        // checkpoint. Clear any one-shot arming so the re-solve doesn't pause.
+        let saved_pause_iters = self.pause_iters;
+        self.pause_iters = false;
+        self.step = false;
+        self.sub_step = false;
+        self.run_to = None;
+        self.sweep = Some(SweepState {
+            queue,
+            current: Some(first),
+            records: Vec::new(),
+            total,
+            saved_pause_iters,
+        });
+        CmdOut::ok(vec![format!("{label}: running {total} start(s)…")])
+            .with_data(serde_json::json!({"sweep": label, "starts": total}))
+            .flow(Flow::Stop)
+    }
+
+    /// Drive an in-flight sweep at the terminal checkpoint: record the
+    /// solve that just finished, then either launch the next seed (returns
+    /// `Some(Resume)` — the CLI re-solve loop picks up the queued
+    /// [`RestartRequest`]) or, when the queue drains, print the summary,
+    /// restore state, and return `None` so the caller falls through to the
+    /// normal terminal handling.
+    fn drive_sweep(&mut self, ctx: &DebugCtx) -> Option<DebugAction> {
+        let mut sweep = self.sweep.take()?;
+        let rec = SweepRecord {
+            idx: sweep.records.len(),
+            seed: sweep.current.clone().unwrap_or_default(),
+            status: ctx.status().unwrap_or("?").to_string(),
+            objective: ctx.objective(),
+            inf_pr: ctx.inf_pr(),
+            iters: ctx.iter(),
+        };
+        self.emit_sweep_progress(&rec, sweep.total);
+        sweep.records.push(rec);
+        if let Some(next) = sweep.queue.pop_front() {
+            sweep.current = Some(next.clone());
+            if let Some(cell) = self.restart.as_ref() {
+                *cell.borrow_mut() = Some(RestartRequest {
+                    seed_x: next,
+                    options: self.staged.clone(),
+                    warm: None,
+                });
+            }
+            self.sweep = Some(sweep);
+            return Some(DebugAction::Resume);
+        }
+        // Sweep complete: restore per-iteration pausing and report.
+        self.pause_iters = sweep.saved_pause_iters;
+        self.emit_sweep_summary(&sweep);
+        None
+    }
+
+    /// One-line-per-solve progress as a sweep runs (REPL → stderr; JSON →
+    /// a `sweep_result` event).
+    fn emit_sweep_progress(&self, rec: &SweepRecord, total: usize) {
+        match self.mode {
+            DebugMode::Repl => eprintln!(
+                "   sweep {}/{}: {:<22} iters={:<4} obj={:.6e} inf_pr={:.2e}",
+                rec.idx + 1,
+                total,
+                rec.status,
+                rec.iters,
+                rec.objective,
+                rec.inf_pr,
+            ),
+            DebugMode::Json => emit_json(&serde_json::json!({
+                "event": "sweep_result",
+                "index": rec.idx,
+                "total": total,
+                "status": rec.status,
+                "iters": rec.iters,
+                "objective": rec.objective,
+                "inf_pr": rec.inf_pr,
+                "seed": rec.seed,
+            })),
+        }
+    }
+
+    /// Final sweep summary: a table of every solve plus a distinct-minima
+    /// count and the best (lowest-objective) successful solve.
+    fn emit_sweep_summary(&self, sweep: &SweepState) {
+        let succeeded: Vec<&SweepRecord> = sweep
+            .records
+            .iter()
+            .filter(|r| is_success_status(&r.status))
+            .collect();
+        // Distinct minima: successful objectives clustered to a relative 1e-6.
+        let mut distinct: Vec<f64> = Vec::new();
+        for r in &succeeded {
+            if !distinct
+                .iter()
+                .any(|&o| (o - r.objective).abs() <= 1e-6 * o.abs().max(1.0))
+            {
+                distinct.push(r.objective);
+            }
+        }
+        let best = succeeded.iter().min_by(|a, b| {
+            a.objective
+                .partial_cmp(&b.objective)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        match self.mode {
+            DebugMode::Repl => {
+                eprintln!(
+                    "\n── sweep complete ── {} solves, {} succeeded, {} distinct minima",
+                    sweep.records.len(),
+                    succeeded.len(),
+                    distinct.len()
+                );
+                eprintln!(
+                    "   {:>3}  {:<22} {:>5}  {:>14}  {:>9}",
+                    "#", "status", "iters", "objective", "inf_pr"
+                );
+                for r in &sweep.records {
+                    eprintln!(
+                        "   {:>3}  {:<22} {:>5}  {:>14.6e}  {:>9.2e}",
+                        r.idx, r.status, r.iters, r.objective, r.inf_pr
+                    );
+                }
+                if let Some(b) = best {
+                    eprintln!("   best: solve #{}  obj={:.8e}", b.idx, b.objective);
+                }
+            }
+            DebugMode::Json => emit_json(&serde_json::json!({
+                "event": "sweep_summary",
+                "solves": sweep.records.len(),
+                "succeeded": succeeded.len(),
+                "distinct_minima": distinct.len(),
+                "best_index": best.map(|b| b.idx),
+                "best_objective": best.map(|b| b.objective),
+                "records": sweep.records.iter().map(|r| serde_json::json!({
+                    "index": r.idx, "status": r.status, "iters": r.iters,
+                    "objective": r.objective, "inf_pr": r.inf_pr,
+                })).collect::<Vec<_>>(),
+            })),
+        }
+    }
+
     /// `goto <k>` — rewind to a captured iteration.
-    fn cmd_goto(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_goto(&mut self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         match rest.first().and_then(|s| s.parse::<i32>().ok()) {
             Some(k) => self.restore_to(k, ctx),
             None => CmdOut::err("usage: goto <iteration>"),
@@ -1444,10 +2833,14 @@ impl SolverDebugger {
     /// Restore the snapshot for iteration `k` (primal-dual state only;
     /// strategy history is not rewound). Stays paused so the user can
     /// inspect / re-tune before `continue`/`step`.
-    fn restore_to(&mut self, k: i32, ctx: &mut DebugCtx) -> CmdOut {
+    fn restore_to(&mut self, k: i32, ctx: &mut dyn DebugState) -> CmdOut {
         match self.snapshots.get(&k) {
             Some(snap) => {
-                ctx.restore(snap);
+                if !ctx.restore(snap.as_ref()) {
+                    return CmdOut::err(format!(
+                        "this solver does not support rewinding to iter {k}"
+                    ));
+                }
                 CmdOut::ok(vec![format!(
                     "rewound to iter {k} (primal-dual only; strategy history not restored). \
                      `continue`/`step` to resume."
@@ -1461,10 +2854,13 @@ impl SolverDebugger {
         }
     }
 
-    /// `resolve` — capture the current primal `x` and the staged option
-    /// edits, then stop this solve so the CLI re-runs from that point with
-    /// the new options applied (a primal warm start). Needs a restart cell
-    /// (wired by the CLI); a no-op error otherwise.
+    /// `resolve` — capture the full primal-dual iterate (all 8 blocks +
+    /// μ) and the staged option edits, then stop this solve so the CLI
+    /// re-runs continuing from that interior point with the new options
+    /// applied (a true warm start: duals carry over, the barrier resumes
+    /// at the current μ rather than restarting at `mu_init`). Falls back
+    /// to a primal-only seed if the iterate can't be snapshotted. Needs a
+    /// restart cell (wired by the CLI); a no-op error otherwise.
     fn cmd_resolve(&mut self, ctx: &DebugCtx) -> CmdOut {
         let Some(cell) = self.restart.as_ref() else {
             return CmdOut::err("re-solve is not available in this context");
@@ -1472,20 +2868,40 @@ impl SolverDebugger {
         let Some(seed_x) = ctx.block("x") else {
             return CmdOut::err("no current iterate to seed from");
         };
+        let warm = ctx.snapshot();
+        let mu = warm.as_ref().map(|s| s.mu());
         let options = self.staged.clone();
         let n_opt = options.len();
-        *cell.borrow_mut() = Some(RestartRequest { seed_x, options });
-        CmdOut::ok(vec![format!(
-            "re-solving from current x with {n_opt} staged option override(s)…"
-        )])
-        .with_data(serde_json::json!({"resolve": true, "options": n_opt}))
-        .flow(Flow::Stop)
+        let warm_msg = match mu {
+            Some(mu) => format!(
+                "re-solving warm from the current primal-dual iterate (μ={mu:.3e}) \
+                 with {n_opt} staged option override(s)…"
+            ),
+            None => format!(
+                "re-solving from current x (primal-only) with {n_opt} staged option override(s)…"
+            ),
+        };
+        *cell.borrow_mut() = Some(RestartRequest {
+            seed_x,
+            options,
+            warm,
+        });
+        CmdOut::ok(vec![warm_msg])
+            .with_data(serde_json::json!({
+                "resolve": true,
+                "options": n_opt,
+                "warm": mu.is_some(),
+                "mu": mu,
+            }))
+            .flow(Flow::Stop)
     }
 
-    /// `ask [question]` — hand the current solver state to Claude Code
-    /// (headless `claude -p`, or `$POUNCE_DBG_LLM`) and print its reply.
+    /// `ask [question]` — hand the current solver state to an LLM CLI and
+    /// print its reply. Defaults to headless Claude Code; `$POUNCE_DBG_LLM`
+    /// selects another provider (`codex`, `gemini`, `llm`) or a full command
+    /// template. Degrades gracefully when the CLI isn't installed.
     /// "Ask why this step looks wrong without leaving the debugger."
-    fn cmd_ask(&self, rest: &[&str], ctx: &DebugCtx) -> CmdOut {
+    fn cmd_ask(&self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         let question = if rest.is_empty() {
             "Explain the current state of this interior-point solve and suggest what to try next."
                 .to_string()
@@ -1533,7 +2949,7 @@ impl SolverDebugger {
     /// `watchpoint <blk>[<i>] [threshold] | clear | del <spec>` — pause
     /// when a watched value changes by more than `threshold` (default 0,
     /// any change) between iterations.
-    fn cmd_watchpoint(&mut self, rest: &[&str]) -> CmdOut {
+    fn cmd_watchpoint(&mut self, rest: &[&str], ctx: &dyn DebugState) -> CmdOut {
         match rest {
             [] => {
                 let v: Vec<&str> = self.watchpoints.iter().map(|w| w.raw.as_str()).collect();
@@ -1564,7 +2980,7 @@ impl SolverDebugger {
                     }
                     _ => (spec.to_string(), None),
                 };
-                if !BLOCK_NAMES.contains(&block.as_str()) {
+                if !is_block(ctx, block.as_str()) {
                     return CmdOut::err(format!("unknown block `{block}`"));
                 }
                 let raw = spec.to_string();
@@ -1630,7 +3046,7 @@ impl SolverDebugger {
 
     /// `diff` — what changed in the iterate since the previous captured
     /// iteration: per-block max |Δ| (and where), plus Δμ.
-    fn cmd_diff(&self, ctx: &DebugCtx) -> CmdOut {
+    fn cmd_diff(&self, ctx: &dyn DebugState) -> CmdOut {
         let iter = ctx.iter();
         let Some((&piter, prev)) = self.snapshots.range(..iter).next_back() else {
             return CmdOut::err("no previous iterate to diff against");
@@ -1639,7 +3055,7 @@ impl SolverDebugger {
         let dmu = ctx.mu() - prev.mu();
         lines.push(format!("  mu  = {:.6e}  (Δ {:+.3e})", ctx.mu(), dmu));
         let mut blocks = serde_json::Map::new();
-        for b in BLOCK_NAMES {
+        for b in block_names(ctx) {
             let (Some(cur), Some(old)) = (ctx.block(b), prev.block(b)) else {
                 continue;
             };
@@ -1677,7 +3093,7 @@ impl SolverDebugger {
     /// `source <file>` — run debugger commands from a file (one per line;
     /// `#` comments and blank lines skipped). Stops early if a command
     /// resumes or stops the solve, propagating that control flow.
-    fn cmd_source(&mut self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_source(&mut self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         let Some(&path) = rest.first() else {
             return CmdOut::err("usage: source <file>");
         };
@@ -1708,7 +3124,7 @@ impl SolverDebugger {
         }
     }
 
-    fn cmd_viz(&self, rest: &[&str], ctx: &mut DebugCtx) -> CmdOut {
+    fn cmd_viz(&self, rest: &[&str], ctx: &mut dyn DebugState) -> CmdOut {
         let Some(&target) = rest.first() else {
             return CmdOut::err("usage: viz <x|s|y_c|...|dx|kkt|L>");
         };
@@ -1717,69 +3133,77 @@ impl SolverDebugger {
         if target == "kkt" {
             let Some(k) = ctx.kkt() else {
                 return CmdOut::err(
-                    "no KKT factorization yet — stop at `after_search_dir` (e.g. `stop-at kkt`)",
+                    "no KKT factorization captured yet — nothing has been factored (iter 0), \
+                     or the debugger is detached. `step` once to capture.",
                 );
             };
-            // Triplet capture is opt-in (O(nnz) assembly), so the first call
-            // arms it — same dance as `viz L`.
+            // The matrix triplets are captured into `kkt_debug` whenever the
+            // debugger is stepping, so once anything has been factored they're
+            // here — this is the previous iteration's system at `iter_start`,
+            // the current one at `after_search_dir`.
             let Some((dim, irn, jcn, vals)) = ctx.kkt_matrix() else {
-                ctx.request_kkt_matrix();
                 return CmdOut::err(
-                    "KKT matrix capture enabled — re-run `viz kkt` after the next \
-                     `after_search_dir` stop (`stepi` or `continue`).",
+                    "KKT matrix not captured here — the debugger is detached \
+                     (running free). `step` once to capture and re-run `viz kkt`.",
                 );
             };
+            // Label with the iteration the factorization came from — at an
+            // `iter_start` pause that's the previous iteration, not `ctx.iter()`.
+            let kiter = k.iter;
             let matrix = serde_json::json!({"dim": dim, "irn": irn, "jcn": jcn, "vals": vals,
                                             "format": "triplet_1based_lower"});
             let payload = serde_json::json!({
-                "label": "kkt", "iter": ctx.iter(),
+                "label": "kkt", "iter": kiter,
                 "dim": k.dim, "n_pos": k.n_pos, "n_neg": k.n_neg,
                 "expected_neg": k.expected_neg, "inertia_correct": k.inertia_correct,
                 "delta_w": k.delta_w, "delta_c": k.delta_c, "status": k.status,
                 "matrix": matrix,
             });
-            return match write_json_and_open("kkt", ctx.iter(), &payload) {
-                Ok((path, viewer)) => {
-                    CmdOut::ok(vec![format!("wrote {path}; opened with `{viewer}`")])
-                        .with_data(serde_json::json!({"path": path, "viewer": viewer}))
-                }
+            return match write_json_and_open("kkt", kiter, &payload) {
+                Ok((path, viewer)) => CmdOut::ok(vec![format!(
+                    "wrote {path} (KKT system, iter {kiter}); opened with `{viewer}`"
+                )])
+                .with_data(serde_json::json!({"path": path, "viewer": viewer})),
                 Err(e) => CmdOut::err(e),
             };
         }
-        // `viz L` writes the LDLᵀ factor triplets. Capture is opt-in (the
-        // factor is the expensive piece), so the first call arms it.
+        // `viz L` writes the LDLᵀ factor triplets, read out of the factor
+        // the solver actually computed. Captured into `kkt_debug` whenever
+        // the debugger is stepping (same as the matrix), so it shows the
+        // previous iteration's factorization at `iter_start`.
         if target == "L" {
             match ctx.kkt_l_factor() {
                 Some((n, perm, l_irn, l_jcn, l_vals)) => {
+                    // Iteration the factor came from (previous iter at `iter_start`).
+                    let kiter = ctx.kkt_captured_iter().unwrap_or_else(|| ctx.iter());
                     let payload = serde_json::json!({
-                        "label": "L", "iter": ctx.iter(), "n": n, "perm": perm,
+                        "label": "L", "iter": kiter, "n": n, "perm": perm,
                         "l_irn": l_irn, "l_jcn": l_jcn, "l_vals": l_vals,
                         "format": "strict_lower_1based_permuted",
                     });
-                    return match write_json_and_open("L", ctx.iter(), &payload) {
-                        Ok((path, viewer)) => {
-                            CmdOut::ok(vec![format!("wrote {path}; opened with `{viewer}`")])
-                                .with_data(serde_json::json!({"path": path, "viewer": viewer}))
-                        }
+                    return match write_json_and_open("L", kiter, &payload) {
+                        Ok((path, viewer)) => CmdOut::ok(vec![format!(
+                            "wrote {path} (L factor, iter {kiter}); opened with `{viewer}`"
+                        )])
+                        .with_data(serde_json::json!({"path": path, "viewer": viewer})),
                         Err(e) => CmdOut::err(e),
                     };
                 }
                 None => {
-                    ctx.request_l_factor();
                     return CmdOut::err(
-                        "L-factor capture enabled — re-run `viz L` after the next \
-                         `after_search_dir` stop (`stepi` or `continue`).",
+                        "L factor not captured here — nothing factored yet (iter 0), \
+                         or the debugger is detached. `step` once to capture.",
                     );
                 }
             }
         }
         // Resolve the vector to visualize.
-        let (label, vals) = if BLOCK_NAMES.contains(&target) {
+        let (label, vals) = if is_block(ctx, target) {
             match ctx.block(target) {
                 Some(v) => (target.to_string(), v),
                 None => return CmdOut::err(format!("no data for block `{target}`")),
             }
-        } else if let Some(blk) = target.strip_prefix("d").filter(|b| BLOCK_NAMES.contains(b)) {
+        } else if let Some(blk) = target.strip_prefix("d").filter(|b| is_block(ctx, b)) {
             match ctx.delta_block(blk) {
                 Some(v) => (format!("d{blk}"), v),
                 None => return CmdOut::err(format!("no search direction for `d{blk}`")),
@@ -1802,7 +3226,7 @@ impl SolverDebugger {
     // ---- front ends ----------------------------------------------------
 
     /// Emit the pause banner / state for the current front end.
-    fn emit_pause(&self, ctx: &DebugCtx, reason: Option<&str>) {
+    fn emit_pause(&self, ctx: &dyn DebugState, reason: Option<&str>) {
         let terminal = matches!(ctx.checkpoint(), Checkpoint::Terminated);
         match self.mode {
             DebugMode::Repl => {
@@ -1864,39 +3288,33 @@ impl SolverDebugger {
                     .map(|(n, d)| (n.to_string(), serde_json::json!(d)))
                     .collect();
                 let conds: Vec<String> = self.conds.iter().map(|c| c.raw.clone()).collect();
-                let ev = serde_json::json!({
+                let mut ev = serde_json::json!({
                     "event": "pause",
                     "checkpoint": ctx.checkpoint().as_str(),
                     "status": ctx.status(),
                     "in_restoration": self.in_restoration,
-                    "iter": ctx.iter(),
-                    "mu": ctx.mu(),
-                    "objective": ctx.objective(),
-                    "inf_pr": ctx.inf_pr(),
-                    "inf_du": ctx.inf_du(),
-                    "nlp_error": ctx.nlp_error(),
                     "dims": dims,
                     "breakpoints": self.breaks,
                     "conditions": conds,
                     "reason": reason,
                     "watches": watches,
                 });
+                // iter / mu / objective / inf_pr / inf_du / nlp_error /
+                // complementarity — from the single METRICS source of truth.
+                insert_metric_fields(&mut ev, ctx);
                 emit_json(&ev);
             }
         }
     }
 
-    /// Emit a per-iteration `progress` event (JSON mode only). Same
-    /// scalars as `pause`; fired while running between pauses.
-    fn emit_progress_event(&self, ctx: &DebugCtx) {
-        let ev = serde_json::json!({
-            "event": "progress",
-            "iter": ctx.iter(),
-            "mu": ctx.mu(),
-            "inf_pr": ctx.inf_pr(),
-            "inf_du": ctx.inf_du(),
-            "obj": ctx.objective(),
-        });
+    /// Emit a per-iteration `progress` event (JSON mode only). Carries the
+    /// same scalar fields, under the same names, as `pause` (minus the
+    /// per-pause `dims` / `breakpoints` / `watches`); fired while running
+    /// between pauses.
+    fn emit_progress_event(&self, ctx: &dyn DebugState) {
+        let mut ev = serde_json::json!({ "event": "progress" });
+        // Same scalar metric block as `pause`, from the single METRICS source.
+        insert_metric_fields(&mut ev, ctx);
         emit_json(&ev);
     }
 
@@ -1943,9 +3361,19 @@ impl SolverDebugger {
                 "mutate_mu": true,
                 "conditional_breakpoints": "compound",
                 "request_ids": true,
-                "viz": ["block", "delta"],
+                "viz": ["block", "delta", "kkt", "L"],
                 "save": true,
+                "load": true,
+                "sweep": self.restart.is_some(),
                 "kkt_inspect": true,
+                // `print equation <name|row>` is available when a source
+                // model (`.nl`) supplied constraint algebra to render.
+                "equations": self.equation_book.is_some(),
+                // Live `diagnose` — point-in-time named health findings.
+                "diagnose": true,
+                // `diagnose`'s structural rank pass (Dulmage–Mendelsohn)
+                // names dependent equations; available with a `.nl` model.
+                "structural_diagnose": self.structure_book.is_some(),
                 "llm_assist": true,
                 "rewind": "primal_dual",
                 "resolve": self.restart.is_some(),
@@ -1994,22 +3422,52 @@ impl SolverDebugger {
         self.editor = Some(ed);
     }
 
+    /// Handle a Ctrl-C received at the prompt. Returns the command line to
+    /// feed the loop: the first interrupt in a row cancels the line (empty
+    /// string → reprompt) with a hint; a second quits the solve. The
+    /// counter resets when any real line is entered (see `next_command_line`).
+    fn on_prompt_interrupt(&mut self) -> String {
+        self.prompt_interrupts += 1;
+        if self.prompt_interrupts >= 2 {
+            self.prompt_interrupts = 0;
+            eprintln!("(quitting — Ctrl-C)");
+            "quit".to_string()
+        } else {
+            eprintln!("(Ctrl-C — press again, or `quit`/Ctrl-D, to stop the solve)");
+            String::new()
+        }
+    }
+
     /// Read one command line. Returns `None` on EOF. Uses rustyline when
     /// an editor is active (history / Tab / Ctrl-R); otherwise a plain
     /// reader with a stderr prompt (REPL) or no prompt (JSON).
     fn next_command_line(&mut self) -> Option<String> {
+        // A shared script (sub-solve under the tree debugger's --debug-script)
+        // takes precedence: pop the next command, echoing it. An empty queue
+        // returns None, which resumes this sub-solve back to the tree.
+        if let Some(q) = &self.script_queue {
+            let cmd = q.borrow_mut().pop_front();
+            if let Some(c) = &cmd {
+                let _ = writeln!(std::io::stderr(), "pounce-dbg> {c}");
+            }
+            return cmd;
+        }
         if let DebugMode::Repl = self.mode {
             if let Some(ed) = self.editor.as_mut() {
                 return match ed.readline("pounce-dbg> ") {
                     Ok(l) => {
+                        self.prompt_interrupts = 0;
                         let _ = ed.add_history_entry(l.as_str());
                         if let Some(p) = &self.hist_path {
                             let _ = ed.save_history(p);
                         }
                         Some(l)
                     }
-                    // Ctrl-C: abandon the current line, reprompt.
-                    Err(ReadlineError::Interrupted) => Some(String::new()),
+                    // Ctrl-C at the prompt: the first cancels the current
+                    // line (readline convention); a second in a row quits the
+                    // solve, so Ctrl-C is a working escape hatch here too —
+                    // matching the running-mode double-tap.
+                    Err(ReadlineError::Interrupted) => Some(self.on_prompt_interrupt()),
                     // Ctrl-D / closed input: EOF.
                     Err(ReadlineError::Eof) => None,
                     Err(_) => None,
@@ -2033,6 +3491,224 @@ fn read_stdin_line() -> Option<String> {
         Ok(_) => Some(line),
         Err(_) => None,
     }
+}
+
+/// Rank residuals by descending magnitude and keep the top `k`.
+///
+/// Pure (no solver state) so it can be unit-tested directly. Ties on
+/// `|value|` keep input order (stable sort), so within equal magnitudes
+/// equality constraints precede inequalities precede dual components —
+/// the order [`DebugCtx::constraint_residuals`]/`dual_residuals` emit.
+/// `k == 0` returns empty.
+fn rank_residuals(mut entries: Vec<Residual>, k: usize) -> Vec<Residual> {
+    entries.sort_by(|a, b| {
+        b.value
+            .abs()
+            .partial_cmp(&a.value.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries.truncate(k);
+    entries
+}
+
+/// Look up the model name for a residual by kind + split index, given
+/// optional split-space names. Equality residuals index the `eq` pool;
+/// inequality and `s`-space dual residuals share the `ineq` pool (one
+/// slack per inequality); `x`-space dual residuals index `x_var`. Returns
+/// `None` when the problem carries no names or the index is out of range.
+/// Render a [`RankReport`] into the human-readable REPL lines and the JSON
+/// payload for the agent interface. Pure (no solver access) so it can be
+/// unit-tested with a synthetic report and a name pool. Shared by the
+/// `print rank` command; the `diagnose` finding builds its own one-line
+/// summary directly from the report.
+fn render_rank_report(
+    rep: &RankReport,
+    names: &Option<SplitNames>,
+    equations: Option<&EquationBook>,
+    iter: i32,
+) -> (Vec<String>, serde_json::Value) {
+    let m = rep.n_rows();
+    let n = rep.n_cols;
+    let mut lines = vec![
+        format!("equality Jacobian J_c: {m} row(s) × {n} column(s)"),
+        format!(
+            "numerical rank = {} / {}  (deficiency {})",
+            rep.rank,
+            m,
+            rep.deficiency()
+        ),
+        format!(
+            "σ_max = {:.3e}   σ_min = {:.3e}   cond = {}   (rank tol τ = {:.3e})",
+            rep.sigma_max(),
+            rep.sigma_min(),
+            fmt_cond(rep.cond),
+            rep.tol
+        ),
+    ];
+
+    // Singular-value spectrum, capped so a large block stays readable.
+    let shown: Vec<String> = rep
+        .singular_values
+        .iter()
+        .take(MAX_SINGULAR_VALUES_SHOWN)
+        .map(|s| format!("{s:.3e}"))
+        .collect();
+    let tail = if rep.singular_values.len() > MAX_SINGULAR_VALUES_SHOWN {
+        " …"
+    } else {
+        ""
+    };
+    lines.push(format!("singular values: [{}{tail}]", shown.join(", ")));
+
+    if rep.is_rank_deficient() {
+        lines.push(format!(
+            "rank-deficient: {} equation(s) lie in the near-null space \
+             (linearly dependent / redundant) — the source of δ_c regularization:",
+            rep.deficiency()
+        ));
+        let mut shown_any_eq = false;
+        for c in rep.culprits.iter().take(MAX_RANK_CULPRITS) {
+            let row = &rep.rows[c.row];
+            let label = rank_row_label(row, names);
+            lines.push(format!("  {label}   (participation {:.2})", c.weight));
+            // Print the offending equation's source algebra directly beneath
+            // it, so the dependency is readable without a second command.
+            // Resolves by model name, so it lands only when the row is named.
+            if let Some(eq) = culprit_equation(row, names, equations) {
+                lines.push(format!("      {eq}"));
+                shown_any_eq = true;
+            }
+        }
+        if rep.culprits.len() > MAX_RANK_CULPRITS {
+            lines.push(format!(
+                "  … and {} more",
+                rep.culprits.len() - MAX_RANK_CULPRITS
+            ));
+        }
+        // Only nag about `print equation` when we couldn't show the algebra
+        // inline (no .nl model loaded, or the rows are unnamed).
+        if !shown_any_eq {
+            lines.push("inspect a row with `print equation <name>` to see its terms".to_string());
+        }
+    } else {
+        lines.push("J_c has full row rank at this iterate.".to_string());
+    }
+
+    let culprits_json: Vec<serde_json::Value> = rep
+        .culprits
+        .iter()
+        .map(|c| {
+            let row = &rep.rows[c.row];
+            serde_json::json!({
+                "row": c.row,
+                "kind": row.kind.tag(),
+                "index": row.index,
+                "name": rank_row_name(row, names),
+                "label": rank_row_label(row, names),
+                "weight": c.weight,
+                "equation": culprit_equation(row, names, equations),
+            })
+        })
+        .collect();
+
+    let data = serde_json::json!({
+        "iter": iter,
+        "n_rows": m,
+        "n_cols": n,
+        "rank": rep.rank,
+        "deficiency": rep.deficiency(),
+        "rank_deficient": rep.is_rank_deficient(),
+        "sigma_max": rep.sigma_max(),
+        "sigma_min": rep.sigma_min(),
+        "cond": cond_json(rep.cond),
+        "tol": rep.tol,
+        "singular_values": rep.singular_values,
+        "culprits": culprits_json,
+    });
+
+    (lines, data)
+}
+
+/// Rendered source algebra of a rank-report culprit row, resolved through
+/// the [`EquationBook`] by model name (the same DAG-faithful text `print
+/// equation` shows). `None` when no equation book is loaded, the row is
+/// unnamed, or the name doesn't resolve — the split equality index the
+/// rank report carries is *not* the original `.nl` row index the book keys
+/// on, so only named rows can be mapped.
+fn culprit_equation(
+    row: &RankRow,
+    names: &Option<SplitNames>,
+    equations: Option<&EquationBook>,
+) -> Option<String> {
+    let book = equations?;
+    let name = rank_row_name(row, names)?;
+    let i = book.resolve(&name)?;
+    Some(book.equations.get(i)?.clone())
+}
+
+/// Model name of a rank-report row, if the problem carries names — the
+/// bare name (e.g. `mass_balance`), no `kind[..]` wrapper. `None` when
+/// unnamed. Routes through [`resid_name`] so equality/inequality rows hit
+/// the same name pools as the rest of the debugger.
+fn rank_row_name(row: &RankRow, names: &Option<SplitNames>) -> Option<String> {
+    let r = Residual {
+        kind: row.kind,
+        index: row.index,
+        value: 0.0,
+    };
+    resid_name(&r, names).map(|s| s.to_string())
+}
+
+/// Display label for a rank-report row: `c[mass_balance]` when named, else
+/// `c[3]` by split index — matching [`worst_named`]'s convention.
+fn rank_row_label(row: &RankRow, names: &Option<SplitNames>) -> String {
+    match rank_row_name(row, names) {
+        Some(name) => format!("{}[{}]", row.kind.tag(), name),
+        None => format!("{}[{}]", row.kind.tag(), row.index),
+    }
+}
+
+/// Human rendering of a condition number, spelling out a non-finite ratio
+/// (`σ_min == 0`) as `inf` rather than `NaN`/`inf` float formatting.
+fn fmt_cond(cond: f64) -> String {
+    if cond.is_finite() {
+        format!("{cond:.3e}")
+    } else {
+        "inf (σ_min = 0)".to_string()
+    }
+}
+
+/// JSON rendering of a condition number — `null` for a non-finite ratio,
+/// since JSON has no infinity.
+fn cond_json(cond: f64) -> serde_json::Value {
+    if cond.is_finite() {
+        serde_json::json!(cond)
+    } else {
+        serde_json::Value::Null
+    }
+}
+
+fn resid_name<'a>(r: &Residual, names: &'a Option<SplitNames>) -> Option<&'a str> {
+    let n = names.as_ref()?;
+    let pool = match r.kind {
+        ResidKind::Eq => &n.eq,
+        ResidKind::Ineq | ResidKind::DualS => &n.ineq,
+        ResidKind::DualX => &n.x_var,
+    };
+    pool.get(r.index).and_then(|o| o.as_deref())
+}
+
+/// The single largest-magnitude residual, labeled with its model name
+/// (`c[mass_balance]`) when available, else its split index (`c[3]`),
+/// paired with its signed value. `None` for an empty input.
+fn worst_named(resids: Vec<Residual>, names: &Option<SplitNames>) -> Option<(String, f64)> {
+    let top = rank_residuals(resids, 1);
+    let r = top.first()?;
+    let label = match resid_name(r, names) {
+        Some(name) => format!("{}[{}]", r.kind.tag(), name),
+        None => format!("{}[{}]", r.kind.tag(), r.index),
+    };
+    Some((label, r.value))
 }
 
 /// Print the branded open banner (human REPL only): the project POUNCE
@@ -2187,7 +3863,24 @@ impl StdinPump {
 }
 
 impl DebugHook for SolverDebugger {
-    fn at_checkpoint(&mut self, ctx: &mut DebugCtx) -> DebugAction {
+    /// Capture the heavy KKT matrix / `LDLᵀ` factor only while attached:
+    /// once detached the debugger runs free and won't `viz`, so there's
+    /// no reason to pay the O(nnz) assembly every iteration.
+    fn wants_kkt_capture(&self) -> bool {
+        !self.detached
+    }
+
+    /// Re-arm a [`quiet`](SolverDebugger::quiet) debugger to drop in at the
+    /// next checkpoint of the next sub-solve (the tree debugger's
+    /// step-into-relaxation).
+    fn arm(&mut self) {
+        self.step = true;
+        self.detached = false;
+        self.pause_iters = true;
+        self.pause_terminal = true;
+    }
+
+    fn at_checkpoint(&mut self, ctx: &mut dyn DebugState) -> DebugAction {
         // One-time handshake so a JSON client learns the protocol /
         // capabilities before the first pause.
         if matches!(self.mode, DebugMode::Json) && !self.hello_sent {
@@ -2198,6 +3891,18 @@ impl DebugHook for SolverDebugger {
         // `--debug-on-error`, only when the solve failed). Snapshots /
         // rewinding don't apply — the solve is over.
         if let Checkpoint::Terminated = ctx.checkpoint() {
+            // An in-flight `sweep`/`multistart` records this solve and
+            // launches the next; `Some` means "re-solving from the next
+            // seed", `None` means the sweep finished (fall through).
+            if self.sweep.is_some() {
+                // A sweep can only be started on the NLP solver, so the
+                // downcast succeeds whenever one is in flight.
+                if let Some(c) = as_nlp(ctx) {
+                    if let Some(action) = self.drive_sweep(c) {
+                        return action;
+                    }
+                }
+            }
             let failed = ctx.status().map(|s| !is_success_status(s)).unwrap_or(false);
             let should =
                 self.pause_terminal && !self.detached && (!self.terminal_only_on_error || failed);
@@ -2223,7 +3928,7 @@ impl DebugHook for SolverDebugger {
         // by evicting the oldest beyond the cap.
         if is_iter_start {
             if let Some(snap) = ctx.snapshot() {
-                self.snapshots.insert(snap.iter(), snap);
+                self.snapshots.insert(ctx.iter(), snap);
                 while self.snapshots.len() > SNAPSHOT_CAP {
                     let Some(&oldest) = self.snapshots.keys().next() else {
                         break;
@@ -2317,7 +4022,7 @@ impl DebugHook for SolverDebugger {
 
 impl SolverDebugger {
     /// Read and dispatch commands until one resumes or stops the solve.
-    fn prompt_loop(&mut self, ctx: &mut DebugCtx) -> DebugAction {
+    fn prompt_loop(&mut self, ctx: &mut dyn DebugState) -> DebugAction {
         // Run a `--debug-script` once, at the first pause, before reading
         // any interactive command. It may itself resume / stop the solve.
         if let Some(path) = self.pending_script.take() {
@@ -2370,6 +4075,40 @@ struct ParsedCmd {
     id: Option<serde_json::Value>,
 }
 
+/// Split a command line on whitespace, honoring double-quoted spans so a
+/// file-path argument containing spaces survives as one token. Quotes are
+/// delimiters and stripped; for any line without quotes this is byte-for-byte
+/// equivalent to `str::split_whitespace` (collapsing runs of whitespace,
+/// trimming the ends).
+fn tokenize_quoted(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    let mut has_tok = false;
+    for c in line.chars() {
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                has_tok = true; // an empty "" is still a token
+            }
+            c if c.is_whitespace() && !in_quote => {
+                if has_tok {
+                    out.push(std::mem::take(&mut cur));
+                    has_tok = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has_tok = true;
+            }
+        }
+    }
+    if has_tok {
+        out.push(cur);
+    }
+    out
+}
+
 /// In JSON mode a command line may be a bare string or a JSON object
 /// `{"cmd": "...", "args": [...], "id": <any>}`. Returns the resolved
 /// command string and the request id (if the object carried one).
@@ -2382,12 +4121,19 @@ fn parse_command(line: &str, mode: DebugMode) -> ParsedCmd {
                 let mut s = cmd.to_string();
                 if let Some(args) = v.get("args").and_then(|a| a.as_array()) {
                     for a in args {
-                        if let Some(a) = a.as_str() {
-                            s.push(' ');
-                            s.push_str(a);
+                        s.push(' ');
+                        let tok = a
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| a.to_string());
+                        // Quote whitespace-bearing args (e.g. paths) so the
+                        // quote-aware tokenizer keeps them as one token.
+                        if tok.contains(char::is_whitespace) {
+                            s.push('"');
+                            s.push_str(&tok);
+                            s.push('"');
                         } else {
-                            s.push(' ');
-                            s.push_str(&a.to_string());
+                            s.push_str(&tok);
                         }
                     }
                 }
@@ -2409,6 +4155,39 @@ fn emit_json(v: &serde_json::Value) {
     let mut h = stdout.lock();
     let _ = writeln!(h, "{v}");
     let _ = h.flush();
+}
+
+/// Downcast a generic [`DebugState`] to the NLP solver's concrete
+/// [`DebugCtx`], for the NLP-only REPL commands (rank diagnosis, model-name
+/// resolution, warm `resolve`, sweep/multistart). `None` for the
+/// convex/conic solver, whose REPL reports "not supported".
+fn as_nlp<'a>(ctx: &'a dyn DebugState) -> Option<&'a DebugCtx> {
+    ctx.as_any().and_then(|a| a.downcast_ref::<DebugCtx>())
+}
+
+/// Mutable form of [`as_nlp`], for commands that mutate NLP-specific state.
+fn as_nlp_mut<'a>(ctx: &'a mut dyn DebugState) -> Option<&'a mut DebugCtx> {
+    ctx.as_any_mut().and_then(|a| a.downcast_mut::<DebugCtx>())
+}
+
+/// Standard "command needs the NLP solver" error for the convex/conic REPL.
+fn nlp_only(cmd: &str) -> CmdOut {
+    CmdOut::err(format!(
+        "`{cmd}` is only available for the NLP solver (not the convex/conic solver)"
+    ))
+}
+
+/// The iterate-block names the *current* solver exposes (NLP: the eight
+/// primal-dual blocks; convex IPM: `x`/`s`/`y`/`z`). Block commands use
+/// this rather than the static NLP [`BLOCK_NAMES`] so they work for any
+/// solver behind the [`DebugState`] trait.
+fn block_names(ctx: &dyn DebugState) -> Vec<&'static str> {
+    ctx.block_dims().into_iter().map(|(n, _)| n).collect()
+}
+
+/// Whether `name` is one of the current solver's iterate blocks.
+fn is_block(ctx: &dyn DebugState, name: &str) -> bool {
+    block_names(ctx).iter().any(|n| *n == name)
 }
 
 fn fmt_vec(name: &str, v: &[f64]) -> String {
@@ -2460,12 +4239,13 @@ fn write_and_open(label: &str, iter: i32, vals: &[f64]) -> Result<(String, Strin
 
 /// Build the prompt handed to the LLM by `ask`: a compact, self-contained
 /// description of the paused interior-point state plus the user question.
-fn build_ask_prompt(ctx: &DebugCtx, question: &str) -> String {
+fn build_ask_prompt(ctx: &dyn DebugState, question: &str) -> String {
     use std::fmt::Write as _;
     let mut p = String::new();
     p.push_str(
-        "You are helping debug a paused run of POUNCE, a pure-Rust port of the Ipopt \
-         interior-point NLP solver. The solve is stopped at a debugger checkpoint. \
+        "You are helping debug a paused run of POUNCE, a pure-Rust interior-point \
+         optimization solver whose NLP core is ported from Ipopt. The solve is \
+         stopped at a debugger checkpoint. \
          Use the state below to answer concisely and suggest concrete next steps \
          (options to try, what to inspect). State:\n\n",
     );
@@ -2506,16 +4286,55 @@ fn build_ask_prompt(ctx: &DebugCtx, question: &str) -> String {
     p
 }
 
-/// Resolve the LLM command from `$POUNCE_DBG_LLM` (whitespace-split; `{}`
-/// substitutes the prompt as an argument), defaulting to `claude -p`. The
-/// bool is whether the prompt goes on stdin (true) or was substituted
-/// into an argument (false).
-fn llm_command(prompt: &str) -> (String, Vec<String>, bool) {
-    let tmpl = std::env::var("POUNCE_DBG_LLM").unwrap_or_default();
-    let tmpl = tmpl.trim();
-    if tmpl.is_empty() {
-        return ("claude".to_string(), vec!["-p".to_string()], true);
+/// Provider keywords with a built-in non-interactive invocation, so a user
+/// can select one with just `POUNCE_DBG_LLM=codex` instead of memorizing
+/// each CLI's flags. Returns the program, its argv (with the prompt already
+/// placed for arg-style tools), and whether the prompt is *also* written to
+/// stdin. Keep `LLM_PROVIDERS` in sync for help/error text.
+const LLM_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "llm"];
+
+fn llm_preset(name: &str, prompt: &str) -> Option<(String, Vec<String>, bool)> {
+    match name {
+        // Claude Code — headless print mode, prompt on stdin.
+        "claude" => Some(("claude".to_string(), vec!["-p".to_string()], true)),
+        // OpenAI Codex CLI — non-interactive `codex exec <prompt>`.
+        "codex" => Some((
+            "codex".to_string(),
+            vec!["exec".to_string(), prompt.to_string()],
+            false,
+        )),
+        // Google Gemini CLI — non-interactive `gemini -p <prompt>`.
+        "gemini" => Some((
+            "gemini".to_string(),
+            vec!["-p".to_string(), prompt.to_string()],
+            false,
+        )),
+        // simonw's `llm` — prompt as a positional argument.
+        "llm" => Some(("llm".to_string(), vec![prompt.to_string()], false)),
+        _ => None,
     }
+}
+
+/// Resolve the LLM command from `$POUNCE_DBG_LLM`, defaulting to `claude`.
+/// The value may be either a **bare provider keyword** (`claude`, `codex`,
+/// `gemini`, `llm` — see `llm_preset`) or a **full command template**
+/// (whitespace-split; `{}` substitutes the prompt as an argument, else the
+/// prompt is fed on stdin). The bool is whether the prompt goes on stdin.
+fn llm_command(prompt: &str) -> (String, Vec<String>, bool) {
+    let raw = std::env::var("POUNCE_DBG_LLM").unwrap_or_default();
+    let tmpl = raw.trim();
+    if tmpl.is_empty() {
+        // Default provider.
+        return llm_preset("claude", prompt).expect("claude is a known provider");
+    }
+    // A bare keyword (no whitespace) matching a known provider wins; this is
+    // the ergonomic `POUNCE_DBG_LLM=codex` path.
+    if !tmpl.contains(char::is_whitespace) {
+        if let Some(preset) = llm_preset(tmpl, prompt) {
+            return preset;
+        }
+    }
+    // Otherwise: a full command template.
     let mut parts = tmpl
         .split_whitespace()
         .map(str::to_string)
@@ -2547,10 +4366,19 @@ fn run_llm(prompt: &str) -> Result<String, String> {
         Stdio::null()
     });
     let mut child = cmd.spawn().map_err(|e| {
-        format!(
-            "could not launch `{prog}`: {e} \
-             (set POUNCE_DBG_LLM to an LLM command, e.g. `claude -p` or `llm`)"
-        )
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // The configured LLM CLI isn't installed / not on PATH. Fail with
+            // an actionable message instead of a raw OS error — the rest of
+            // the debugger keeps working regardless.
+            format!(
+                "LLM CLI `{prog}` is not installed or not on PATH. Install it, \
+                 or set POUNCE_DBG_LLM to another provider \
+                 ({}) or a full command template (e.g. `my-llm --ask {{}}`).",
+                LLM_PROVIDERS.join(" | ")
+            )
+        } else {
+            format!("could not launch `{prog}`: {e}")
+        }
     })?;
     if on_stdin {
         // Write the prompt and close stdin so the child sees EOF.
@@ -2589,12 +4417,16 @@ fn write_json_and_open(
     std::fs::write(&path, payload.to_string()).map_err(|e| format!("write failed: {e}"))?;
     let path_s = path.to_string_lossy().to_string();
 
-    // Candidate viewers, tried in order until one launches:
-    //   1. $POUNCE_DBG_VIEWER (a command template; `{}` ← the path),
+    // Candidate viewers, tried in order until one launches. Each carries
+    // the artifact path we report on success (JSON for the data consumers,
+    // the rendered HTML for the OS opener):
+    //   1. $POUNCE_DBG_VIEWER (a command template; `{}` ← the JSON path),
     //   2. `pounce-dbg-viz` — the bundled interactive Plotly viewer
     //      (`pip install 'pounce-solver[viz]'`), when on PATH,
-    //   3. the OS opener (xdg-open / open) on the raw JSON.
-    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    //   3. the OS opener (xdg-open / open) on a self-contained HTML
+    //      visualization — NOT the raw JSON, which a text editor (VS Code)
+    //      would just display instead of plotting.
+    let mut candidates: Vec<(String, Vec<String>, String)> = Vec::new();
     match std::env::var("POUNCE_DBG_VIEWER") {
         Ok(tmpl) if !tmpl.trim().is_empty() => {
             let mut parts = tmpl
@@ -2612,23 +4444,30 @@ fn write_json_and_open(
             if !replaced {
                 parts.push(path_s.clone());
             }
-            candidates.push((prog, parts));
+            candidates.push((prog, parts, path_s.clone()));
         }
         _ => {
-            candidates.push(("pounce-dbg-viz".to_string(), vec![path_s.clone()]));
+            candidates.push((
+                "pounce-dbg-viz".to_string(),
+                vec![path_s.clone()],
+                path_s.clone(),
+            ));
             let opener = if cfg!(target_os = "macos") {
                 "open"
             } else {
                 "xdg-open"
             };
-            candidates.push((opener.to_string(), vec![path_s.clone()]));
+            // Render the HTML spy/bar plot; if that write fails for any
+            // reason, fall back to opening the raw JSON.
+            let artifact = write_html_viz(label, iter, payload).unwrap_or_else(|_| path_s.clone());
+            candidates.push((opener.to_string(), vec![artifact.clone()], artifact));
         }
     }
 
     let mut last_err = String::new();
-    for (program, args) in &candidates {
+    for (program, args, artifact) in &candidates {
         match std::process::Command::new(program).args(args).spawn() {
-            Ok(_) => return Ok((path_s, format!("{program} {}", args.join(" ")))),
+            Ok(_) => return Ok((artifact.clone(), format!("{program} {}", args.join(" ")))),
             Err(e) => last_err = format!("`{program}`: {e}"),
         }
     }
@@ -2638,6 +4477,136 @@ fn write_json_and_open(
          or set POUNCE_DBG_VIEWER, e.g. `python my_plot.py {{}}`."
     ))
 }
+
+/// Render a self-contained HTML visualization (no external assets, no pip
+/// install) for a `viz` payload and write it next to the JSON. A KKT/L
+/// matrix becomes a sign-colored sparsity (spy) plot; a plain vector
+/// becomes a zero-centered bar chart. Opening this in the OS default
+/// handler pops a browser window that actually draws the artifact —
+/// unlike the raw JSON, which a text editor (VS Code) would just display.
+fn write_html_viz(label: &str, iter: i32, payload: &serde_json::Value) -> Result<String, String> {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("pounce-dbg-{label}-iter{iter}.html"));
+    let html = VIZ_HTML_TEMPLATE.replace("__PAYLOAD__", &payload.to_string());
+    std::fs::write(&path, html).map_err(|e| format!("write failed: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Self-contained HTML viewer for `viz` artifacts. `__PAYLOAD__` is
+/// replaced with the JSON payload; an inline canvas renderer picks the
+/// plot type from the payload shape (`matrix` → KKT spy, `l_irn` → L-factor
+/// spy, `values` → vector bar chart).
+const VIZ_HTML_TEMPLATE: &str = r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>pounce-dbg viz</title>
+<style>
+ html,body{margin:0;background:#0e1116;color:#d6dae0;
+   font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,monospace}
+ .wrap{padding:18px 20px;max-width:880px;margin:0 auto}
+ h1{font-size:15px;margin:0 0 4px;font-weight:600}
+ .sub{color:#7d8694;margin:0 0 12px}
+ .stats{color:#9aa4b2;white-space:pre-wrap;margin:0 0 14px;
+   background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px 12px}
+ canvas{background:#161b22;border:1px solid #30363d;border-radius:6px;
+   max-width:100%;height:auto;image-rendering:pixelated}
+ .legend{margin-top:10px;color:#9aa4b2}
+ .pos{color:#4ea1ff}.neg{color:#ff6b6b}.bad{color:#ff6b6b;font-weight:600}
+ .ok{color:#56d364;font-weight:600}
+</style></head><body><div class="wrap">
+<h1 id="title">pounce-dbg</h1>
+<div class="sub" id="sub"></div>
+<div class="stats" id="stats"></div>
+<canvas id="c" width="820" height="820"></canvas>
+<div class="legend" id="legend"></div>
+</div>
+<script>
+const D = __PAYLOAD__;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const fmt = x => (x===null||x===undefined) ? '—'
+  : (Math.abs(x) >= 1e4 || (x!==0 && Math.abs(x) < 1e-3) ? x.toExponential(3) : (+x).toPrecision(6));
+
+function clearCanvas(){ ctx.fillStyle='#161b22'; ctx.fillRect(0,0,cv.width,cv.height); }
+
+function spy(irn, jcn, vals, dim, symmetric, title){
+  $('sub').textContent = title;
+  clearCanvas();
+  const W=cv.width, H=cv.height, pad=42;
+  const span=Math.max(1, dim);
+  const cell=(Math.min(W,H)-2*pad)/span;
+  const px=Math.max(0.7, cell);
+  // frame + light grid ticks
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=1;
+  ctx.strokeRect(pad-0.5, pad-0.5, span*cell+1, span*cell+1);
+  ctx.fillStyle='#6e7681'; ctx.font='11px monospace';
+  ctx.fillText('0', pad-12, pad+9);
+  ctx.fillText(String(dim), pad+span*cell-8, pad-8);
+  ctx.fillText('row', pad-34, pad+span*cell/2);
+  ctx.fillText('col', pad+span*cell/2-8, pad-22);
+  let nnz=0;
+  for(let k=0;k<irn.length;k++){
+    const i=irn[k]-1, j=jcn[k]-1, v=vals?vals[k]:1;
+    ctx.fillStyle = v>=0 ? 'rgba(78,161,255,0.92)' : 'rgba(255,107,107,0.92)';
+    ctx.fillRect(pad+j*cell, pad+i*cell, px, px); nnz++;
+    if(symmetric && i!==j){ ctx.fillRect(pad+i*cell, pad+j*cell, px, px); nnz++; }
+  }
+  $('legend').innerHTML =
+    `<span class="pos">■</span> positive&nbsp;&nbsp;<span class="neg">■</span> negative`
+    + `&nbsp;&nbsp;·&nbsp;&nbsp;${dim}×${dim}, ${nnz} plotted nonzeros`
+    + (symmetric ? ' (lower triangle mirrored)' : '');
+}
+
+function bars(values, title){
+  $('sub').textContent = title;
+  clearCanvas();
+  const W=cv.width, H=cv.height, pad=42;
+  const n=values.length;
+  const maxAbs=Math.max(1e-300, ...values.map(v=>Math.abs(v)));
+  const x0=pad, y0=H-pad, plotW=W-2*pad, plotH=H-2*pad, mid=pad+plotH/2;
+  const bw=Math.max(0.7, plotW/Math.max(1,n));
+  // zero axis
+  ctx.strokeStyle='#30363d'; ctx.beginPath();
+  ctx.moveTo(pad, mid); ctx.lineTo(W-pad, mid); ctx.stroke();
+  ctx.fillStyle='#6e7681'; ctx.font='11px monospace';
+  ctx.fillText('+'+fmt(maxAbs), 4, pad+10);
+  ctx.fillText('-'+fmt(maxAbs), 4, H-pad-2);
+  ctx.fillText('0', 4, mid+4);
+  for(let k=0;k<n;k++){
+    const v=values[k], h=(Math.abs(v)/maxAbs)*(plotH/2);
+    ctx.fillStyle = v>=0 ? 'rgba(78,161,255,0.92)' : 'rgba(255,107,107,0.92)';
+    if(v>=0) ctx.fillRect(pad+k*bw, mid-h, bw, h);
+    else     ctx.fillRect(pad+k*bw, mid, bw, h);
+  }
+  $('legend').innerHTML = `${n} components · max |val| = ${fmt(maxAbs)}`;
+}
+
+const lbl = D.label || 'viz';
+const iter = (D.iter!==undefined) ? D.iter : '?';
+$('title').textContent = `pounce-dbg · viz ${lbl} · iter ${iter}`;
+
+if(D.matrix && D.matrix.irn){
+  const m=D.matrix;
+  const inertia = (D.inertia_correct===false)
+    ? `<span class="bad">WRONG</span>` : `<span class="ok">correct</span>`;
+  $('stats').innerHTML =
+    `KKT augmented system   dim=${D.dim}\n`+
+    `inertia  n+=${D.n_pos}  n-=${D.n_neg}  (expected n-=${D.expected_neg}, ${inertia})\n`+
+    `regularization  delta_w=${fmt(D.delta_w)}  delta_c=${fmt(D.delta_c)}\n`+
+    `factorization status: ${D.status}`;
+  spy(m.irn, m.jcn, m.vals, m.dim, true, 'sparsity pattern (sign-colored)');
+} else if(D.l_irn){
+  $('stats').textContent =
+    `LDLᵀ factor   n=${D.n}   nnz(L)=${D.l_irn.length}   format=${D.format||''}`;
+  spy(D.l_irn, D.l_jcn, D.l_vals, D.n, false, 'L factor sparsity (permuted, strict lower)');
+} else if(D.values){
+  $('stats').textContent = `vector ${lbl}   length=${D.values.length}`;
+  bars(D.values, 'component magnitudes (zero-centered)');
+} else {
+  $('stats').textContent = 'unrecognized payload — raw JSON:\n'+JSON.stringify(D,null,2);
+}
+</script></body></html>
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -2713,6 +4682,79 @@ mod tests {
         assert_eq!(a.metric, Metric::Iter);
         assert_eq!(a.op, CmpOp::Eq);
         assert_eq!(a.rhs, 10.0);
+    }
+
+    /// A bare-minimum [`DebugState`] that implements only the required
+    /// methods and leaves every optional one (including `nlp_error`) at its
+    /// trait default. Stands in for "a new backend with no solver-specific
+    /// extras", so the metric-vocabulary test below exercises the
+    /// default-`NaN` (unsupported-metric) path.
+    struct MinimalState;
+    impl DebugState for MinimalState {
+        fn checkpoint(&self) -> Checkpoint {
+            Checkpoint::IterStart
+        }
+        fn iter(&self) -> i32 {
+            7
+        }
+        fn mu(&self) -> f64 {
+            1e-3
+        }
+        fn objective(&self) -> f64 {
+            42.0
+        }
+        fn inf_pr(&self) -> f64 {
+            1e-4
+        }
+        fn inf_du(&self) -> f64 {
+            2e-4
+        }
+        fn complementarity(&self) -> f64 {
+            5e-4
+        }
+        fn alpha(&self) -> (f64, f64) {
+            (1.0, 1.0)
+        }
+        fn block_dims(&self) -> Vec<(&'static str, usize)> {
+            vec![]
+        }
+        fn block(&self, _name: &str) -> Option<Vec<f64>> {
+            None
+        }
+        fn delta_block(&self, _name: &str) -> Option<Vec<f64>> {
+            None
+        }
+    }
+
+    /// The streamed scalar block is driven by the single `METRICS` source of
+    /// truth: `metric_fields` emits *exactly* the advertised `hello.metrics`
+    /// names, every backend answers each (required accessors), and an
+    /// unsupported metric surfaces explicitly as JSON `null` (default `NaN`)
+    /// rather than a dropped field — so the protocol can't silently drift.
+    #[test]
+    fn metric_fields_match_advertised_vocabulary() {
+        let fields = metric_fields(&MinimalState);
+
+        // Same names, same order as the advertised `hello.metrics`.
+        let names: Vec<&str> = fields.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, METRICS);
+
+        // Every METRICS name parses to a Metric arm (except `iter`, the
+        // integer counter) — the invariant `metric_fields` relies on.
+        for &name in METRICS {
+            assert!(
+                name == "iter" || Metric::parse(name).is_some(),
+                "METRICS entry `{name}` has no matching Metric arm"
+            );
+        }
+
+        let map: std::collections::HashMap<_, _> = fields.into_iter().collect();
+        // `iter` is an integer, not a float.
+        assert_eq!(map["iter"], serde_json::json!(7));
+        assert_eq!(map["objective"], serde_json::json!(42.0));
+        // The one optional metric, left at its `NaN` default, is reported
+        // explicitly as `null` — present, not silently omitted.
+        assert_eq!(map["nlp_error"], serde_json::Value::Null);
     }
 
     #[test]
@@ -2794,6 +4836,43 @@ mod tests {
     }
 
     #[test]
+    fn coffee_easter_egg_prints_art_but_stays_hidden() {
+        let d = SolverDebugger::new(DebugMode::Repl, None);
+        let out = d.cmd_coffee();
+        assert!(out.ok);
+        assert!(out.lines.len() > 5, "multi-line art");
+        assert!(
+            out.lines.iter().any(|l| l.contains("COFFEE")),
+            "the mug says COFFEE"
+        );
+        // Easter egg: not advertised anywhere discoverable.
+        assert!(
+            !COMMANDS.contains(&"coffee"),
+            "hidden from help/complete/Tab"
+        );
+        // Output is plain in the (non-TTY) test context — no escape codes.
+        assert!(
+            out.lines.iter().all(|l| !l.contains('\x1b')),
+            "no color when stderr isn't a TTY"
+        );
+    }
+
+    #[test]
+    fn double_ctrl_c_at_prompt_quits_single_cancels_line() {
+        let mut d = SolverDebugger::new(DebugMode::Repl, None);
+        // First Ctrl-C in a row cancels the line (empty → reprompt).
+        assert_eq!(d.on_prompt_interrupt(), "");
+        // Second in a row quits the solve.
+        assert_eq!(d.on_prompt_interrupt(), "quit");
+        // Counter reset after quitting, so the next single press cancels again.
+        assert_eq!(d.on_prompt_interrupt(), "");
+        // A real command in between resets the streak (simulating the
+        // `Ok(l)` branch of `next_command_line`).
+        d.prompt_interrupts = 0;
+        assert_eq!(d.on_prompt_interrupt(), "", "fresh streak after a command");
+    }
+
+    #[test]
     fn stop_at_accepts_names_and_aliases() {
         let mut d = SolverDebugger::new(DebugMode::Repl, None);
         assert!(d.cmd_stop_at(&["after_search_dir"]).ok);
@@ -2830,6 +4909,52 @@ mod tests {
         std::env::set_var("POUNCE_DBG_LLM", "llm -m gpt");
         let (_, _, on_stdin) = llm_command("q");
         assert!(on_stdin);
+
+        // Bare provider keywords resolve to the right non-interactive call.
+        // (All env-var assertions live in this one test so they can't race
+        // a sibling that mutates the same process-global var.)
+        std::env::set_var("POUNCE_DBG_LLM", "codex");
+        let (prog, args, on_stdin) = llm_command("why is mu stuck");
+        assert_eq!(prog, "codex");
+        assert_eq!(
+            args,
+            vec!["exec".to_string(), "why is mu stuck".to_string()]
+        );
+        assert!(!on_stdin); // prompt is in the argv, not stdin
+
+        std::env::set_var("POUNCE_DBG_LLM", "gemini");
+        let (prog, args, _) = llm_command("q");
+        assert_eq!(prog, "gemini");
+        assert_eq!(args, vec!["-p".to_string(), "q".to_string()]);
+
+        std::env::set_var("POUNCE_DBG_LLM", "llm");
+        let (prog, args, _) = llm_command("q");
+        assert_eq!(prog, "llm");
+        assert_eq!(args, vec!["q".to_string()]);
+
+        // Bare `claude` keyword goes through the preset (gains `-p`), not the
+        // bare-program fallback that would hang in interactive mode.
+        std::env::set_var("POUNCE_DBG_LLM", "claude");
+        let (prog, args, on_stdin) = llm_command("q");
+        assert_eq!(prog, "claude");
+        assert_eq!(args, vec!["-p".to_string()]);
+        assert!(on_stdin);
+
+        // An unknown bare word is NOT a preset: bare program, prompt on stdin
+        // (backward-compatible).
+        std::env::set_var("POUNCE_DBG_LLM", "mytool");
+        let (prog, args, on_stdin) = llm_command("q");
+        assert_eq!(prog, "mytool");
+        assert!(args.is_empty());
+        assert!(on_stdin);
+
+        // A missing CLI fails gracefully: an error (never a panic) with an
+        // actionable, provider-listing message.
+        std::env::set_var("POUNCE_DBG_LLM", "pounce-no-such-llm-xyz");
+        let err = run_llm("hello").unwrap_err();
+        assert!(err.contains("not installed or not on PATH"), "{err}");
+        assert!(err.contains("codex"), "{err}");
+
         std::env::remove_var("POUNCE_DBG_LLM");
     }
 
@@ -2841,5 +4966,447 @@ mod tests {
         d.breaks = vec![1];
         assert!(!d.should_pause(0));
         assert!(!d.should_pause(1));
+    }
+
+    #[test]
+    fn kkt_capture_tracks_attached_state() {
+        // Heavy KKT/L capture is on while stepping (attached), off once
+        // detached so a free run doesn't pay the per-iteration assembly.
+        let mut d = dbg(DebugMode::Repl);
+        assert!(d.wants_kkt_capture());
+        d.detached = true;
+        assert!(!d.wants_kkt_capture());
+    }
+
+    fn resid(kind: ResidKind, index: usize, value: f64) -> Residual {
+        Residual { kind, index, value }
+    }
+
+    #[test]
+    fn rank_residuals_sorts_by_magnitude_and_truncates() {
+        use ResidKind::*;
+        let entries = vec![
+            resid(Eq, 0, -0.5),
+            resid(Ineq, 1, 3.0),
+            resid(DualX, 2, -7.0),
+            resid(DualS, 3, 1.0),
+        ];
+        let top = rank_residuals(entries, 2);
+        assert_eq!(top.len(), 2);
+        // Largest |value| first: |-7|, then |3|.
+        assert_eq!(top[0].value, -7.0);
+        assert_eq!(top[0].kind, DualX);
+        assert_eq!(top[1].value, 3.0);
+        assert_eq!(top[1].kind, Ineq);
+    }
+
+    #[test]
+    fn rank_residuals_k_zero_and_k_over_len() {
+        use ResidKind::*;
+        let entries = vec![resid(Eq, 0, 1.0), resid(Ineq, 1, 2.0)];
+        assert!(rank_residuals(entries.clone(), 0).is_empty());
+        // k larger than the input just returns everything, ranked.
+        let all = rank_residuals(entries, 99);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].value, 2.0);
+    }
+
+    #[test]
+    fn rank_residuals_is_stable_on_magnitude_ties() {
+        use ResidKind::*;
+        // Equal |value|: input order preserved (Eq before Ineq before dual).
+        let entries = vec![
+            resid(Ineq, 5, -2.0),
+            resid(Eq, 1, 2.0),
+            resid(DualX, 9, -2.0),
+        ];
+        let top = rank_residuals(entries, 3);
+        assert_eq!(
+            top.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            vec![Ineq, Eq, DualX]
+        );
+    }
+
+    fn split_names_fixture() -> SplitNames {
+        SplitNames {
+            x_var: vec![Some("T_reactor".into()), None],
+            eq: vec![Some("mass_balance".into()), Some("energy_balance".into())],
+            ineq: vec![Some("pressure_cap".into())],
+        }
+    }
+
+    #[test]
+    fn resid_name_maps_each_kind_to_its_pool() {
+        use ResidKind::*;
+        let names = Some(split_names_fixture());
+        // Equality → eq pool; inequality and s-space dual → ineq pool;
+        // x-space dual → x_var pool.
+        assert_eq!(
+            resid_name(&resid(Eq, 1, 0.0), &names),
+            Some("energy_balance")
+        );
+        assert_eq!(
+            resid_name(&resid(Ineq, 0, 0.0), &names),
+            Some("pressure_cap")
+        );
+        assert_eq!(
+            resid_name(&resid(DualS, 0, 0.0), &names),
+            Some("pressure_cap")
+        );
+        assert_eq!(resid_name(&resid(DualX, 0, 0.0), &names), Some("T_reactor"));
+        // Unnamed slot (None) and out-of-range fall back to no name.
+        assert_eq!(resid_name(&resid(DualX, 1, 0.0), &names), None);
+        assert_eq!(resid_name(&resid(Eq, 9, 0.0), &names), None);
+        // No names at all ⇒ None.
+        assert_eq!(resid_name(&resid(Eq, 0, 0.0), &None), None);
+    }
+
+    #[test]
+    fn worst_named_picks_largest_and_labels_it() {
+        use ResidKind::*;
+        let names = Some(split_names_fixture());
+        // |−3.2| is the largest; it sits in the eq pool at index 1.
+        let resids = vec![resid(Eq, 0, 0.5), resid(Eq, 1, -3.2), resid(Ineq, 0, 1.1)];
+        assert_eq!(
+            worst_named(resids, &names),
+            Some(("c[energy_balance]".to_string(), -3.2))
+        );
+        // Without names, the label falls back to the split index.
+        let resids = vec![resid(DualX, 7, 9.0)];
+        assert_eq!(
+            worst_named(resids, &None),
+            Some(("grad_x_L[7]".to_string(), 9.0))
+        );
+        // Empty input ⇒ None.
+        assert_eq!(worst_named(vec![], &names), None);
+    }
+
+    use pounce_algorithm::debug_rank::RankCulprit;
+
+    fn rank_report_fixture() -> RankReport {
+        // 2×3 equality block, row 1 redundant: rank 1, deficiency 1, with
+        // both equality rows sharing the single null direction.
+        RankReport {
+            rows: vec![
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 0,
+                },
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 1,
+                },
+            ],
+            n_cols: 3,
+            singular_values: vec![2.0, 0.0],
+            tol: 1e-15,
+            rank: 1,
+            cond: f64::INFINITY,
+            culprits: vec![
+                RankCulprit {
+                    row: 0,
+                    weight: 0.5,
+                },
+                RankCulprit {
+                    row: 1,
+                    weight: 0.5,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn render_rank_report_names_culprits_and_builds_json() {
+        let names = Some(split_names_fixture());
+        let rep = rank_report_fixture();
+        // No equation book ⇒ names only, plus the `print equation` hint.
+        let (lines, data) = render_rank_report(&rep, &names, None, 7);
+
+        let text = lines.join("\n");
+        assert!(text.contains("2 row(s) × 3 column(s)"), "{text}");
+        assert!(text.contains("numerical rank = 1 / 2"), "{text}");
+        // cond is non-finite (σ_min = 0) ⇒ spelled out, not "inf"/"NaN".
+        assert!(text.contains("inf (σ_min = 0)"), "{text}");
+        // Culprits resolved to model names from the eq pool.
+        assert!(text.contains("c[mass_balance]"), "{text}");
+        assert!(text.contains("c[energy_balance]"), "{text}");
+        assert!(text.contains("participation 0.50"), "{text}");
+        // No book ⇒ fall back to the inspect hint, no inline algebra.
+        assert!(text.contains("print equation"), "{text}");
+
+        // JSON payload: cond is null (non-finite), culprits carry names but
+        // no resolved equation (no book).
+        assert_eq!(data["iter"], 7);
+        assert_eq!(data["rank"], 1);
+        assert_eq!(data["deficiency"], 1);
+        assert_eq!(data["rank_deficient"], true);
+        assert!(data["cond"].is_null(), "non-finite cond ⇒ null: {data}");
+        assert_eq!(data["culprits"][0]["name"], "mass_balance");
+        assert_eq!(data["culprits"][0]["label"], "c[mass_balance]");
+        assert!(data["culprits"][0]["equation"].is_null());
+        assert_eq!(data["culprits"][1]["name"], "energy_balance");
+    }
+
+    #[test]
+    fn render_rank_report_prints_culprit_equations_inline() {
+        let names = Some(split_names_fixture());
+        let rep = rank_report_fixture();
+        // The equation book keys on original .nl row order; both eq names
+        // present so the rank culprits resolve by name.
+        let book = EquationBook::new(
+            vec!["mass_balance".into(), "energy_balance".into()],
+            vec![
+                "x[0] + x[1] - 10 = 0".into(),
+                "T_reactor*flow - Q = 0".into(),
+            ],
+        );
+        let (lines, data) = render_rank_report(&rep, &names, Some(&book), 7);
+
+        let text = lines.join("\n");
+        // The offending equations' algebra is printed inline, beneath each
+        // named culprit — no second command needed.
+        assert!(text.contains("x[0] + x[1] - 10 = 0"), "{text}");
+        assert!(text.contains("T_reactor*flow - Q = 0"), "{text}");
+        // With the algebra shown inline, the `print equation` nag is dropped.
+        assert!(!text.contains("inspect a row with"), "{text}");
+
+        // JSON carries the resolved equation per culprit.
+        assert_eq!(data["culprits"][0]["equation"], "x[0] + x[1] - 10 = 0");
+        assert_eq!(data["culprits"][1]["equation"], "T_reactor*flow - Q = 0");
+    }
+
+    #[test]
+    fn render_rank_report_full_rank_reports_positive_signal() {
+        let rep = RankReport {
+            rows: vec![
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 0,
+                },
+                RankRow {
+                    kind: ResidKind::Eq,
+                    index: 1,
+                },
+            ],
+            n_cols: 3,
+            singular_values: vec![2.0, 1.0],
+            tol: 1e-15,
+            rank: 2,
+            cond: 2.0,
+            culprits: vec![],
+        };
+        let (lines, data) = render_rank_report(&rep, &None, None, 3);
+        let text = lines.join("\n");
+        assert!(text.contains("full row rank"), "{text}");
+        assert!(!text.contains("rank-deficient"), "{text}");
+        assert_eq!(data["rank_deficient"], false);
+        assert_eq!(data["cond"], 2.0);
+        assert_eq!(data["culprits"].as_array().map(|a| a.len()), Some(0));
+    }
+
+    #[test]
+    fn print_equation_resolves_by_name_index_and_errors() {
+        let mut d = dbg(DebugMode::Repl);
+        // No book wired in yet ⇒ a helpful error, not a panic.
+        let out = d.cmd_print_equation(&[]);
+        assert!(!out.ok);
+        assert!(out.lines[0].contains("needs an .nl model"));
+
+        d.set_equation_book(EquationBook::new(
+            vec!["mass_balance".into(), String::new()],
+            vec!["x[0] + x[1] = 10".into(), "x[0] - x[1] <= 2".into()],
+        ));
+
+        // No arg ⇒ count + usage hint.
+        let out = d.cmd_print_equation(&[]);
+        assert!(out.ok);
+        assert!(out.lines[0].contains("2 constraint equation"));
+
+        // By model name.
+        let out = d.cmd_print_equation(&["mass_balance"]);
+        assert!(out.ok);
+        assert_eq!(out.lines[0], "mass_balance:  x[0] + x[1] = 10");
+
+        // By original row index; the unnamed row falls back to `c[1]`.
+        let out = d.cmd_print_equation(&["1"]);
+        assert!(out.ok);
+        assert_eq!(out.lines[0], "c[1]:  x[0] - x[1] <= 2");
+
+        // Unknown key ⇒ error.
+        let out = d.cmd_print_equation(&["nope"]);
+        assert!(!out.ok);
+        assert!(out.lines[0].contains("no constraint named or indexed"));
+    }
+
+    /// Build an `EqualityIncidence` from an explicit row→vars adjacency,
+    /// carrying the original-row indices so `con_label`'s `c[orig]`
+    /// fallback can be exercised.
+    fn eq_inc(n_vars: usize, eq_row_inner_idx: Vec<usize>, rows: &[&[usize]]) -> EqualityIncidence {
+        let mut adj_ptr = vec![0usize];
+        let mut vars = Vec::new();
+        for r in rows {
+            let mut v = r.to_vec();
+            v.sort_unstable();
+            v.dedup();
+            vars.extend_from_slice(&v);
+            adj_ptr.push(vars.len());
+        }
+        EqualityIncidence {
+            n_vars,
+            eq_row_inner_idx,
+            adj_ptr,
+            vars,
+        }
+    }
+
+    #[test]
+    fn structural_singularity_names_overdetermined_equations() {
+        // 3 equality rows over 2 vars, each touching both → a maximum
+        // matching saturates the 2 columns, leaving 1 row unmatched;
+        // the alternating walk pulls all 3 rows into the over-determined
+        // block. The finding must name every candidate equation, the
+        // shared variables, and the ≥1 redundancy excess.
+        let inc = eq_inc(2, vec![0, 1, 2], &[&[0, 1], &[0, 1], &[0, 1]]);
+        let book = StructureBook::new(
+            inc,
+            vec!["balance_a".into(), "balance_b".into(), "balance_c".into()],
+            vec!["flow".into(), "temp".into()],
+        );
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let (sev, code, msg) = &f[0];
+        assert_eq!(*sev, "warning");
+        assert_eq!(*code, "structural_singularity");
+        assert!(msg.contains("balance_a"), "msg: {msg}");
+        assert!(msg.contains("balance_b"), "msg: {msg}");
+        assert!(msg.contains("balance_c"), "msg: {msg}");
+        assert!(msg.contains("flow") && msg.contains("temp"), "msg: {msg}");
+        assert!(msg.contains("≥1"), "msg: {msg}");
+    }
+
+    #[test]
+    fn structural_findings_silent_when_well_posed_and_fall_back_to_indices() {
+        // Square 2×2 with a perfect matching → structurally sound, no
+        // finding (and the normal "more vars than eqs" case is never
+        // flagged either, since we only report the over-determined side).
+        let inc = eq_inc(2, vec![0, 1], &[&[0], &[1]]);
+        let book = StructureBook::new(inc, vec![], vec![]);
+        assert!(book.findings().is_empty());
+
+        // Over-determined but unnamed: 3 rows over 1 var, with the
+        // original row indices skipping 2 (e.g. an interleaved
+        // inequality) → labels fall back to `c[<orig>]`.
+        let inc = eq_inc(1, vec![0, 1, 3], &[&[0], &[0], &[0]]);
+        let book = StructureBook::new(inc, vec![], vec![]);
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let msg = &f[0].2;
+        assert!(
+            msg.contains("c[0]") && msg.contains("c[1]") && msg.contains("c[3]"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn structural_singularity_handles_empty_row_with_no_variables() {
+        // An empty equality row (no variable support) is unmatched and
+        // touches no columns → over-determined with no shared variables.
+        let inc = eq_inc(1, vec![0, 1], &[&[0], &[]]);
+        let book = StructureBook::new(inc, vec!["real".into(), "ghost".into()], vec!["x".into()]);
+        let f = book.findings();
+        assert_eq!(f.len(), 1);
+        let msg = &f[0].2;
+        assert!(msg.contains("ghost"), "msg: {msg}");
+        assert!(msg.contains("no variables"), "msg: {msg}");
+    }
+
+    #[test]
+    fn parse_floats_accepts_commas_whitespace_and_newlines() {
+        assert_eq!(parse_floats("1, 2 ,3").unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(parse_floats("1\n2\n-3.5").unwrap(), vec![1.0, 2.0, -3.5]);
+        assert_eq!(parse_floats("  1.0   2e-1 ").unwrap(), vec![1.0, 0.2]);
+        assert!(parse_floats("1, nope, 3").is_err());
+        assert_eq!(parse_floats("").unwrap(), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn jitter_start_zero_is_the_unperturbed_base_and_is_deterministic() {
+        let base = vec![1.0, -2.0, 0.0];
+        // k=0 reproduces the base exactly, so a multistart always covers x0.
+        assert_eq!(jitter(&base, 0.1, 0), base);
+        // k>0 perturbs, bounded by rel·(|xᵢ|+1), and reproduces run-to-run.
+        let a = jitter(&base, 0.1, 1);
+        let b = jitter(&base, 0.1, 1);
+        assert_eq!(a, b);
+        assert_ne!(a, base);
+        for (j, (&p, &x)) in a.iter().zip(&base).enumerate() {
+            let bound = 0.1 * (x.abs() + 1.0);
+            assert!(
+                (p - x).abs() <= bound + 1e-12,
+                "component {j} moved {} > bound {bound}",
+                (p - x).abs()
+            );
+        }
+        // Different start index → different point.
+        assert_ne!(jitter(&base, 0.1, 1), jitter(&base, 0.1, 2));
+    }
+
+    #[test]
+    fn sample_start_draws_inside_finite_boxes_and_jitters_unbounded() {
+        let base = vec![1.0, 1.0, 0.5];
+        // var 0: box [0,2]; var 1: lower-only (upper = +inf); var 2: box [-1,1].
+        let lo = vec![0.0, 0.0, -1.0];
+        let hi = vec![2.0, f64::INFINITY, 1.0];
+        let b = Some((lo.as_slice(), hi.as_slice()));
+        // Start 0 is always the base, regardless of bounds.
+        assert_eq!(sample_start(&base, b, 0.1, 0), base);
+        for k in 1..50 {
+            let s = sample_start(&base, b, 0.1, k);
+            // Boxed components land strictly inside their box.
+            assert!((0.0..=2.0).contains(&s[0]), "var0 {} out of [0,2]", s[0]);
+            assert!((-1.0..=1.0).contains(&s[2]), "var2 {} out of [-1,1]", s[2]);
+            // The half-bounded component falls back to jitter around base.
+            let bound = 0.1 * (base[1].abs() + 1.0);
+            assert!(
+                (s[1] - base[1]).abs() <= bound + 1e-12,
+                "var1 jitter exceeded"
+            );
+        }
+        // Deterministic in k.
+        assert_eq!(
+            sample_start(&base, b, 0.1, 7),
+            sample_start(&base, b, 0.1, 7)
+        );
+    }
+
+    #[test]
+    fn path_completion_lists_matching_files_with_dir_prefix() {
+        let dir = std::env::temp_dir().join("pounce_dbg_complete_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("starts.txt"), "0,0\n").unwrap();
+        std::fs::write(dir.join("start2.txt"), "1,1\n").unwrap();
+        std::fs::write(dir.join("other.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+
+        let p = dir.to_string_lossy().to_string();
+        // Prefix filters; the dir prefix is preserved so the token replaces whole.
+        let mut got = path_candidates(&format!("{p}/start"));
+        got.sort();
+        assert_eq!(
+            got,
+            vec![format!("{p}/start2.txt"), format!("{p}/starts.txt")]
+        );
+        // Directories get a trailing slash.
+        let got = path_candidates(&format!("{p}/sub"));
+        assert_eq!(got, vec![format!("{p}/subdir/")]);
+        // Listing a directory with an empty basename returns all entries.
+        assert_eq!(path_candidates(&format!("{p}/")).len(), 4);
+        // Verb-context routing: `load <file>` arg yields path candidates.
+        assert!(completion_candidates(None, "load", &format!("{p}/star"))
+            .iter()
+            .all(|c| c.contains("start")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

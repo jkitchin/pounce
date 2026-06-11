@@ -220,6 +220,7 @@ pub fn logo_rows(color: bool) -> Vec<String> {
             r as f64 / (rows - 1) as f64
         }
     };
+    // Molten color for a claw cell at row `r` (0 = top, hottest).
     let molten = |r: usize| {
         let t = vfrac(r);
         if t < 0.5 {
@@ -288,7 +289,8 @@ pub fn print_banner(linear_solver: &str) {
 
     let rule = "*".repeat(BANNER_WIDTH);
     println!("{rule}");
-    println!("This program contains POUNCE, a Rust port of Ipopt for nonlinear optimization.");
+    println!("This program contains POUNCE, a pure-Rust interior-point optimization solver");
+    println!("for nonlinear, conic, and global problems (its NLP core is ported from Ipopt).");
     println!("Released under the Eclipse Public License (EPL) — drop-in compatible with Ipopt.");
     println!("         For more information visit {link}");
     println!("{rule}");

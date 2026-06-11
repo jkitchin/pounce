@@ -1,0 +1,27 @@
+# micro tier — the inner dev loop for wiring the global solver's per-node
+# pieces (OBBT sweep, simplex/IPM warm-starts, relaxation, branching/incumbent).
+# Curated to run in ~1-2s total per engine so the edit→run loop is seconds.
+# Wall times below are from the IPM-OBBT engine (30s sweep, 2026-06-07).
+#
+# Run:  python3 run_globallib.py --stems-file tiers/micro.txt --timeout 10
+# Both engines + soundness gate:
+#       python3 compare_obbt_engines.py --stems-file tiers/micro.txt --timeout 10
+#
+# Keep every entry SUB-SECOND. If a change makes one slow, that's the signal —
+# don't pad the timeout, fix the regression or move it to fast.txt.
+
+# --- root-only: exercises OBBT 2n-LP sweep + relaxation + local solve, no tree
+rbrock          # n=2   1 node   0.02s
+ex2_1_2         # n=6   1 node   0.03s
+ex14_2_2        # n=4   1 node   0.07s
+ex2_1_3         # n=13  1 node   0.07s  (widest root OBBT sweep in the tier)
+
+# --- branching: also exercises tree / branch-var select / incumbent update
+ex4_1_8         # n=2   3 nodes  0.03s
+ex8_1_1         # n=2   5 nodes  0.04s
+ex4_1_7         # n=1   7 nodes  0.05s
+chance          # n=4   3 nodes  0.11s
+ex4_1_1         # n=1  19 nodes  0.13s
+ex4_1_3         # n=1  29 nodes  0.18s  (deepest tree in the tier)
+ex2_1_1         # n=5   7 nodes  0.40s  (warm-start across more vars)
+ex9_2_4         # n=8  11 nodes  0.40s  (widest sweep × branching)

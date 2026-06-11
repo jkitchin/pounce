@@ -11,4 +11,6 @@ preferred-dark-theme = "navy"
 additional-css = ["assets/pounce.css"]
 additional-js = ["assets/pounce.js"]
 git-repository-url = "https://github.com/jkitchin/pounce"
-edit-url-template = "https://github.com/jkitchin/pounce/edit/main/docs/src/{path}"
+# {path} already includes the book's `src/` prefix (e.g. src/introduction.md),
+# so the template points at docs/, not docs/src/, to avoid a doubled src/src/.
+edit-url-template = "https://github.com/jkitchin/pounce/edit/main/docs/{path}"

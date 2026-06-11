@@ -2,7 +2,10 @@ name: Deploy docs
 
 on:
   push:
+    # main rebuilds the dev/ docs; a new vX.Y.Z release tag rebuilds the
+    # whole versioned site (stable at root + the new archive entry).
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -14,24 +17,39 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  # Pin mdBook so archived-tag rebuilds are reproducible and the inline
+  # `path_to_root` the selector injection relies on stays stable. Matches the
+  # version used locally to author scripts/build-versioned-docs.sh.
+  MDBOOK_VERSION: "0.5.2"
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 — the versioned build checks out each v* tag via
+      # `git worktree`, so the full tag history must be present (the default
+      # shallow clone has none).
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install mdbook
         uses: peaceiris/actions-mdbook@v2
         with:
-          mdbook-version: latest
+          mdbook-version: ${{ env.MDBOOK_VERSION }}
 
-      - name: Build book
-        run: mdbook build docs
+      # Builds stable (latest tag) -> site root, main -> site/dev/, and each
+      # v* tag -> site/<tag>/, then injects the version selector into every
+      # page. Strict: any version failing to build fails the job, so the last
+      # good site stays live.
+      - name: Build versioned site
+        run: scripts/build-versioned-docs.sh "$GITHUB_WORKSPACE/site"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/book
+          path: site
 
   deploy:
     needs: build

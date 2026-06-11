@@ -26,9 +26,17 @@ path = "src/main.rs"
 name = "pounce_sens"
 path = "src/bin/pounce_sens.rs"
 
+# `pounce_cblib` solves a CBLIB Conic Benchmark Format (.cbf) instance
+# through the convex conic driver and emits a pounce.solve-report/v1 JSON
+# report. Used by the benchmarks/cblib harness (conic tier).
+[[bin]]
+name = "pounce_cblib"
+path = "src/bin/pounce_cblib.rs"
+
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp = { workspace = true, features = ["serde"] }
+pounce-nl.workspace = true
 pounce-algorithm.workspace = true
 pounce-restoration.workspace = true
 pounce-feral.workspace = true
@@ -38,13 +46,23 @@ pounce-presolve.workspace = true
 pounce-linalg.workspace = true
 pounce-sensitivity.workspace = true
 pounce-solve-report.workspace = true
+pounce-studio-core.workspace = true
 pounce-observability.workspace = true
+# Specialized convex LP/QP interior-point solver, dispatched to for
+# classified LP / convex-QP `.nl` inputs.
+pounce-convex.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libloading = "0.8"
 tracing.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
+# Multistart / find-minima sampling (`--minima`). `rand_chacha` gives a
+# seedable, portable PRNG (reproducible runs under `--seed`); `sobol_burley`
+# is an Owen-scrambled Sobol' source matching scipy's `qmc.Sobol(scramble=True)`
+# used by `pounce.find_minima`.
+rand = "0.8"
+rand_chacha = "0.3"
+sobol_burley = "0.5"
 # Line editing for the interactive debugger REPL (`--debug`): history,
 # Ctrl-R search, and Tab completion. Only used on an interactive TTY;
 # piped input and `--debug-json` fall back to a plain line reader.

@@ -45,8 +45,19 @@ fn aux_fixture(name: &str) -> PathBuf {
 }
 
 fn tmp_json(suffix: &str) -> PathBuf {
+    // Unique per call: the pid is constant across this test binary, so
+    // parallel `run_for_report` spawns sharing only a pid + timestamp
+    // could resolve the SAME path and race the JSON write (manifesting
+    // as "trailing characters" / "No such file" on the reader side).
+    // A process-wide atomic counter makes every path distinct.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
-    p.push(format!("pounce_aux_{}_{suffix}.json", std::process::id()));
+    p.push(format!(
+        "pounce_aux_{}_{seq}_{suffix}.json",
+        std::process::id()
+    ));
     p
 }
 
