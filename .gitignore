@@ -143,6 +143,13 @@ gams/nlpbench.zip
 crates/pounce-cli/tests/fixtures/*.sol
 crates/pounce-cli/tests/fixtures_issue_49/*.sol
 
+# Demo screencast scenarios 04/05 are local scratch recordings (the live
+# feasibility-restore and Wächter–Biegler rescue demos); the README documents
+# them but the .dbg scripts themselves stay out of version control. Scenarios
+# 01–03 remain tracked as the canonical reference set.
+/scripts/demo/scenarios/04-restore-feasibility.dbg
+/scripts/demo/scenarios/05-wachter-biegler-rescue.dbg
+
 # pyomo-pounce plugin build artifacts.
 pyomo-pounce/build/
 pyomo-pounce/pyomo_pounce.egg-info/
