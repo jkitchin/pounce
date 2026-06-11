@@ -6296,3 +6296,31 @@ Stacked-Borrows `&mut`/`&` overlap on `GetIpoptCurrentIterate` invoked during
 `IpoptSolve` under documented in-callback usage, "almost certainly benign."
 Left as-is: confirming/altering it warrants a dedicated Miri run, and there
 is no observed miscompilation; out of scope for this defensive pass.
+
+## Addendum (2026-06-11): L30 reverted — the Max(1, |BasVal|) floor is load-bearing
+
+The L30 "fix" (c9e3e06, removing the `max(1, ·)` floor from `compare_le` for
+upstream bit-equivalence) regressed the Mittelmann ampl-nlp benchmark
+41/47 → 33/47 — exactly upstream Ipopt's score — with nine
+Optimal → Maximum_CpuTime_Exceeded near-convergence tail stalls (NARX_CFy,
+bearing_400, nql180, qssp180, qcqp500-3nc, qcqp750-2c/2nc, qcqp1000-2c,
+qcqp1500-1c; one improvement, qcqp1000-1nc). The mechanism was confirmed by
+a differential experiment on synthesized QCQP/NARX proxies driven into the
+round-off endgame: with the strict relative tolerance, filter/Armijo
+comparisons reject converged-boundary trial steps (θ and φ_trial − φ sit at
+summation-noise scale, which tracks the barrier-sum term magnitudes, not
+|φ|), the line search grinds with fractional steps and falls into
+restoration excursions, and the dual infeasibility never closes — e.g.
+226 iterations with a ~100-iteration restoration excursion and final
+inf_du ≈ 7e+1 vs 141 clean iterations and inf_du ≈ 1e-14 with the floor
+restored. The watchdog FTB-cap suspect (e196dea) was exonerated by the same
+experiment (its path never executes at defaults on this set; force-engaged,
+reverting it is neutral-to-worse).
+
+The floor is restored as a **documented deviation** from upstream (see
+`pounce-common/src/utils.rs::compare_le` and the pinning test
+`compare_le_floors_tolerance_for_small_basval`). The original L30 analysis
+was correct that upstream lacks the floor — but matching upstream here
+inherits upstream's endgame stalls, and the floor is what bought pounce the
++8 problems over Ipopt in the committed 41/47 baseline (generated at
+16a3c65, with the floor in place since the initial commit).

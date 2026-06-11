@@ -18,16 +18,36 @@ pub fn is_finite_number(val: Number) -> bool {
 }
 
 /// Equivalent to `Ipopt::Compare_le(lhs, rhs, BasVal)` — relaxed `<=`
-/// with a tolerance proportional to `|BasVal|`. Threshold matches
-/// upstream's `IpUtils.cpp`:
-/// `lhs - rhs <= 10 * machine_epsilon * fabs(BasVal)` — note there is
-/// **no** `Max(1, …)` floor on the magnitude; the tolerance shrinks to 0
-/// as `BasVal → 0`. An earlier `.max(1.0)` here held the tolerance at
-/// `10·eps` for small filter values, accepting steps upstream rejects on
-/// the bit-equivalence path.
+/// with a tolerance proportional to `BasVal`:
+/// `lhs - rhs <= 10 * machine_epsilon * max(1, |BasVal|)`.
+///
+/// **Deliberate deviation from upstream.** Ipopt's `IpUtils.cpp` has no
+/// `Max(1, …)` floor — its tolerance shrinks to 0 as `BasVal → 0`. The
+/// floor was in this port from the initial commit and is load-bearing:
+/// `compare_le` backs the filter line-search acceptance tests
+/// (`filter_acceptor.rs` — Armijo with `BasVal = φ`, sufficient
+/// progress and filter dominance with `BasVal = θ` or `φ`), and near a
+/// solution θ and `φ_trial − φ` sit at summation-noise scale, which is
+/// set by the magnitude of the *barrier-sum terms*, not by `|φ|` or
+/// `|θ|` themselves. A strictly relative tolerance therefore undershoots
+/// the real round-off noise once `|BasVal| < 1`, rejecting trial points
+/// that genuinely reached the optimum; the line search then backtracks
+/// into fractional-step grinds and restoration excursions while the dual
+/// infeasibility refuses to close (the PALMER/VESUVIALS class documented
+/// on `FilterLsAcceptor::armijo_holds`).
+///
+/// Removing the floor for upstream bit-equivalence (review item L30)
+/// regressed the Mittelmann ampl-nlp set 41/47 → 33/47 — exactly
+/// upstream's score — with nine Optimal→timeout tail stalls
+/// (NARX_CFy, bearing_400, nql180, qssp180, five qcqp instances). The
+/// mechanism was confirmed differentially on synthesized QCQP/NARX
+/// proxies: with the floor restored the same boundary steps are
+/// accepted and the solves close crisply (e.g. 226 grinding iterations
+/// with a ~100-iteration restoration excursion → 141 clean ones). Keep
+/// the floor; it is the documented price of beating upstream here.
 #[inline]
 pub fn compare_le(lhs: Number, rhs: Number, bas_val: Number) -> bool {
-    let tol = 10.0 * Number::EPSILON * bas_val.abs();
+    let tol = 10.0 * Number::EPSILON * bas_val.abs().max(1.0);
     lhs - rhs <= tol
 }
 
@@ -161,22 +181,31 @@ mod tests {
     }
 
     #[test]
-    fn compare_le_tolerance_shrinks_with_small_basval() {
-        // Code review L30: upstream Ipopt's Compare_le uses
-        // `10 * eps * fabs(BasVal)` with NO `Max(1, |BasVal|)` floor, so the
-        // tolerance must collapse toward 0 as BasVal does. With a tiny
-        // BasVal = 1e-6 the threshold is 10*eps*1e-6 ≈ 2.2e-21; a gap of
-        // 1e-18 exceeds it, so the relaxed `<=` must reject.
+    fn compare_le_floors_tolerance_for_small_basval() {
+        // Deliberate deviation from upstream (see `compare_le`'s doc):
+        // the tolerance is `10*eps*max(1, |BasVal|)`, NOT upstream's
+        // `10*eps*|BasVal|`. The floor keeps a ~2.2e-15 absolute slack
+        // when the filter quantities (θ, φ) are < 1, which is the
+        // round-off regime near a solution — removing it (review item
+        // L30) regressed the Mittelmann ampl-nlp set 41/47 -> 33/47 with
+        // nine near-convergence tail-stall timeouts. This test pins the
+        // floor so a future "upstream faithfulness" pass cannot silently
+        // reintroduce that regression.
         let bas_val = 1e-6;
         let gap = 1e-18;
         assert!(
-            !compare_le(gap, 0.0, bas_val),
-            "tolerance must scale with |BasVal|; gap {gap} should exceed \
-             10*eps*{bas_val}"
+            compare_le(gap, 0.0, bas_val),
+            "gap {gap} is below the floored tolerance 10*eps*max(1, {bas_val}) \
+             and must be accepted; rejecting it reintroduces the Mittelmann \
+             tail stall"
         );
-        // Sanity: an in-tolerance gap at the same BasVal is still accepted.
-        let tiny = 5.0 * Number::EPSILON * bas_val;
-        assert!(compare_le(tiny, 0.0, bas_val));
+        // Above the floored tolerance the relaxed `<=` still rejects.
+        let big = 1e-13;
+        assert!(!compare_le(big, 0.0, bas_val));
+        // For |BasVal| >= 1 the floor is inert and the tolerance is
+        // upstream's relative one.
+        assert!(compare_le(5.0 * Number::EPSILON * 1e6, 0.0, 1e6));
+        assert!(!compare_le(3e-9, 0.0, 1e6)); // tol(1e6) = 10*eps*1e6 ~ 2.22e-9
     }
 
     #[test]

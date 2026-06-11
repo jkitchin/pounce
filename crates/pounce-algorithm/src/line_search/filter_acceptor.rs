@@ -177,7 +177,9 @@ impl FilterLsAcceptor {
     /// Mirrors the OR-test in `IpFilterLSAcceptor.cpp:IsAcceptableToCurrentIterate`.
     ///
     /// The two comparisons use `compare_le` — a `<=` carrying a
-    /// `10·eps·|basval|` round-off slack — exactly like the live
+    /// `10·eps·max(1, |basval|)` round-off slack (the floor is a
+    /// deliberate deviation from upstream; see `compare_le`'s doc for
+    /// the Mittelmann evidence) — exactly like the live
     /// [`Self::check_acceptability`] path and
     /// [`Self::is_acceptable_to_current_iterate`]. An earlier version used
     /// bare `<` here, so this (then-dead) helper silently disagreed with the
