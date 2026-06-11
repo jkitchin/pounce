@@ -12,7 +12,7 @@ code, a fail-first test where constructible, the fix, and the result.
 | F4 | L7 watchdog `alpha_primal_max` — reopen | Medium | ✅ fixed |
 | F5 | L56 incomplete — session FFI unguarded | Medium | ✅ fixed |
 | F6 | H12 no Phase-0 rollback on FBBT infeasibility | Medium | ✅ fixed |
-| F7 | L10 MA57 grow paths unguarded | Low | ⬜ todo |
+| F7 | L10 MA57 grow paths unguarded | Low | ✅ fixed |
 | F8 | M9 zero-fill in pounce-sensitivity `dense_to_vec` | Low | ⬜ todo |
 
 ---
@@ -386,3 +386,52 @@ valid). Fail-first demonstrated by neutralizing the new guard
 
 **Result.** `pounce-presolve` full lib suite green — 227 tests (226 prior + 1
 new). fmt + clippy (correctness/suspicious gate) clean.
+
+## F7 detail — MA57 `info[0] = -3/-4` grow paths were unguarded against i32 overflow (Low)
+
+**Finding.** The L10 fix guarded the *symbolic* workspace sizing
+(`ma57_symbolic_sizes`, `ma57_scaled_size`) against i32 overflow, but the
+numerical-factor grow loop's two retry paths in
+`crates/pounce-hsl/src/ma57.rs` were missed. `grow_fact` (info[0] = −3) and
+`grow_ifact` (info[0] = −4) each computed the new workspace size as
+
+```rust
+let suggested = (self.info[16] as Number * self.options.pre_alloc).ceil() as Index;
+let new_lfact = suggested.max(self.info[16]).max(self.lfact + 1);
+let mut newfac: Vec<Number> = vec![0.0; new_lfact as usize];
+```
+
+Two unguarded hazards: (1) the `… as Index` float→int cast *saturates* to
+`i32::MAX` on a large suggestion (no longer wraps, but an i32::MAX-element
+allocation is absurd), and (2) the strictly-growing `self.lfact + 1` bump is a
+plain i32 add that **overflows** — when `lfact == i32::MAX` it wraps to
+`i32::MIN`, and `new_lfact as usize` then becomes a colossal value
+(`-2147483648 as usize` ≈ 9.2e18), so `vec![0.0; new_lfact as usize]` aborts on
+a ~74 EB allocation instead of failing cleanly.
+
+**Fix.** Added `ma57_grown_size(base, scale, current)`, a sibling to the
+existing `ma57_scaled_size`: it routes the scale through `ma57_scaled_size`
+(reusing the saturation/floor guard) and bumps via `current.checked_add(1)`,
+returning `None` if either step leaves the 32-bit index range. Both grow paths
+now return `Result<(), ESymSolverStatus>` — `Err(FatalError)` when
+`ma57_grown_size` is `None` — and the `info[0]` match arms (`-3 =>`/`-4 =>`)
+propagate that as a clean `return status`, matching how the symbolic phase
+already maps an out-of-range suggestion to `FatalError`.
+
+**Verification by running code.** New unit test
+`ma57_grown_size_guards_overflow_and_grows_strictly` (mirrors the existing L10
+`ma57_scaled_size_guards_*` test): normal grow `max(ceil(1000·1.05), 2000+1) =
+2001`; scaled-base wins over the bump; `scale < 1` never shrinks below the
+MA57-suggested base; scaled-size overflow → `None`; and `current == i32::MAX` →
+`None` (the `+1`-bump overflow guard).
+
+`pounce-hsl`'s test *binary* cannot link in this environment — the crate has
+`links = "coinhsl"` and `COINHSL_DIR` is unset here, so MA57's Fortran symbols
+are absent at link time (the pre-existing L10 tests share this constraint and
+run in CI where CoinHSL is installed). Verification was therefore done two ways:
+`cargo check --tests -p pounce-hsl` confirms the fix and the new test compile
+(the `Result` signatures, the match arms, the helper); and the pure helper logic
+(`ma57_scaled_size` + `ma57_grown_size`, no FFI) was extracted to a standalone
+program and run — all five assertions pass, and it prints the pre-fix wrap
+(`current + 1 = i32::MIN = -2147483648`) that the guard now rejects. fmt +
+clippy (correctness/suspicious gate) clean.
