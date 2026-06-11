@@ -69,7 +69,7 @@ else
 endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
-        install-mcp uninstall-mcp install-skill uninstall-skill \
+        install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
         python-ext python-test \
         benchmark benchmark-rerun benchmark-report benchmark-gams
 
@@ -121,6 +121,19 @@ uninstall:
 
 clean:
 	$(CARGO) clean
+
+# Build pounce-cli with the HSL MA57 backend enabled and emit the
+# binary as `pounce-ma57` so it sits alongside the default `pounce`.
+# Requires libcoinhsl discoverable to the linker.
+pounce-ma57:
+	$(CARGO) build -p pounce-cli $(CARGO_PROFILE_FLAG) --features ma57 $(CARGO_FLAGS)
+	cp "$(CLI_BIN)" "$(TARGET_DIR)/pounce-ma57"
+	@echo
+	@echo "Built $(TARGET_DIR)/pounce-ma57"
+	@echo "Run it like the default pounce, e.g.:"
+	@echo "    $(TARGET_DIR)/pounce-ma57 problem.nl linear_solver=ma57"
+	@echo "Add $(abspath $(TARGET_DIR)) to PATH or copy the binary into ~/.local/bin"
+	@echo "to invoke it as just 'pounce-ma57'."
 
 help:
 	@sed -n 's/^# \{0,1\}//p' Makefile | sed -n '1,45p'
