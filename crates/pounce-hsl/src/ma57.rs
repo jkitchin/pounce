@@ -623,8 +623,13 @@ fn ma57_symbolic_sizes(n: Index, ne: Index) -> Option<(Index, Index)> {
 /// Grow a MA57 suggested workspace size `base` by `scale` (>= 1), rounding up,
 /// and validate the result fits in `Index`. Returns `max(scaled, base)` (never
 /// shrinking below MA57's own minimum), or `None` if the scaled length exceeds
-/// the 32-bit index range.
+/// the 32-bit index range — or if `base` is negative (a corrupt MA57 INFO
+/// entry; a negative length would otherwise convert via `as usize` into an
+/// absurd allocation downstream).
 fn ma57_scaled_size(base: Index, scale: Number) -> Option<Index> {
+    if base < 0 {
+        return None;
+    }
     let scaled = (base as Number * scale).ceil();
     if scaled > Index::MAX as Number {
         return None;
@@ -676,6 +681,12 @@ mod tests {
         assert_eq!(ma57_scaled_size(1000, 0.5), Some(1000));
         // base near i32::MAX scaled up overflows the index range -> None.
         assert_eq!(ma57_scaled_size(Index::MAX - 1, 1.05), None);
+        // Positive boundary: i32::MAX itself at scale 1.0 is representable
+        // (f64 holds 2^31 - 1 exactly, so the compare is not lossy).
+        assert_eq!(ma57_scaled_size(Index::MAX, 1.0), Some(Index::MAX));
+        // A corrupt (negative) MA57 INFO size is rejected, not scaled into
+        // a negative length.
+        assert_eq!(ma57_scaled_size(-1, 1.05), None);
     }
 
     /// F7 (L10 follow-up): the `info[0] = -3/-4` grow paths size the new
@@ -698,6 +709,11 @@ mod tests {
         // `current + 1` overflow: current == i32::MAX would wrap to i32::MIN.
         // The guard reports None instead of allocating a negative length.
         assert_eq!(ma57_grown_size(10, 1.05, Index::MAX), None);
+        // Positive boundary: current == i32::MAX - 1 still has one
+        // representable bump left.
+        assert_eq!(ma57_grown_size(10, 1.05, Index::MAX - 1), Some(Index::MAX));
+        // Corrupt (negative) MA57 INFO base propagates the rejection.
+        assert_eq!(ma57_grown_size(-3, 1.05, 100), None);
     }
 
     /// L11: the MA57C workspace is cached on the struct and reused across
