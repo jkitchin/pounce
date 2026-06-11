@@ -1250,7 +1250,7 @@ mod tests {
             Box::new(Expr::Var(0)),
             Box::new(Expr::Const(2.0)),
         );
-        let mut g_l = vec![f64::NEG_INFINITY; m];
+        let g_l = vec![f64::NEG_INFINITY; m];
         let mut g_u = vec![f64::INFINITY; m];
         g_u[0] = 1.0; // upper-only bound ⇒ convex feasible set
         NlProblem {
