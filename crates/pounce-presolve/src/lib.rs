@@ -761,6 +761,13 @@ impl PresolveTnlp {
                     if tighten_report.infeasible {
                         x_l.copy_from_slice(&inner_x_l);
                         x_u.copy_from_slice(&inner_x_u);
+                        tracing::warn!(
+                            target: "pounce::presolve",
+                            "Phase 1 bound tightening on the rolled-back (un-clamped) \
+                             box proved the feasible region empty; its crossed bounds \
+                             are being discarded — the solve proceeds on the original \
+                             box so the IPM can certify infeasibility itself."
+                        );
                     }
                     // Re-run FBBT on the un-clamped, all-kept box.
                     let rerun_x_l_pre = x_l.clone();
@@ -2834,6 +2841,222 @@ mod tests {
             x_l[0] > 2.0 + 1e-6,
             "x0 must no longer be clamped to the aux value 2 (got x_l[0]={})",
             x_l[0]
+        );
+    }
+
+    /// 2-variable, 2-row TNLP whose ORIGINAL problem is FEASIBLE (at
+    /// `(x, y) = (2, 1)`) but where Phase-0's nonlinear block solve picks the
+    /// WRONG root of a multi-root block. Row 0 is the 1×1 nonlinear block
+    /// `x² = 4` (roots ±2); the starting point `x = -1` drives the damped
+    /// Newton to the root `x = -2`. Row 1 is the kept row `x + y = 3` with
+    /// `y ∈ [0, 2]` — tagged `NonLinear` so it is FBBT-handled (a `Linear`
+    /// tag would let Phase 1 catch the clamp first and exercise the Phase-1
+    /// rollback instead of the F6 FBBT rollback under test). Under the clamp
+    /// `x = -2` the kept row needs `y = 5 > 2`: infeasible. At the OTHER root
+    /// `x = +2` it needs `y = 1 ∈ [0, 2]`: feasible. So FBBT's witness is
+    /// purely a Phase-0 artifact of the wrong root, on a feasible original.
+    ///
+    /// Phase-0 mechanics that make the scenario fire: DM matches row 0 to
+    /// `x` (its only column) and row 1 to `y`; BTF solves the block
+    /// `{row 0, x}` first (Newton from the probe `x = -1` → `-2`, inside
+    /// `x ∈ [-10, 10]`, residual 0, accepted and clamped) and then rejects
+    /// the block `{row 1, y}` as `OutOfBounds` (`y = 3 − (−2) = 5 ∉ [0, 2]`),
+    /// which keeps row 1 visible to FBBT.
+    struct WrongRootClampBreaksFeasibleOriginal;
+    impl TNLP for WrongRootClampBreaksFeasibleOriginal {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 3,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -10.0;
+            b.x_u[0] = 10.0;
+            b.x_l[1] = 0.0;
+            b.x_u[1] = 2.0;
+            b.g_l[0] = 4.0;
+            b.g_u[0] = 4.0;
+            b.g_l[1] = 3.0;
+            b.g_u[1] = 3.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                // The probe seeds the block Newton: from -1 it converges to
+                // the wrong root -2 (a start of +1 would find +2 and the
+                // scenario would not fire).
+                sp.x[0] = -1.0;
+                sp.x[1] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] * x[0];
+            g[1] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    // ∂(x²)/∂x = 2x — genuinely point-dependent so the block
+                    // Newton sees the true (sign-carrying) derivative at each
+                    // iterate. Values requests always carry `Some(x)` here
+                    // (probe fetch and Phase-0 callback both pass it).
+                    let x0 = x.map(|x| x[0]).unwrap_or(-1.0);
+                    values.copy_from_slice(&[2.0 * x0, 1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::NonLinear;
+            // Tagged NonLinear so it is FBBT-handled, not a Phase-1 linear row.
+            types[1] = Linearity::NonLinear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Supplies the FBBT tape `x + y` for the kept row 1 only (row 0 is the
+    /// eliminated block; it needs no tape for this scenario).
+    struct WrongRootKeptRowProvider;
+    impl ExpressionProvider for WrongRootKeptRowProvider {
+        fn constraint_expression(
+            &self,
+            i: usize,
+        ) -> Option<pounce_nlp::expression_provider::FbbtTape> {
+            use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+            if i == 1 {
+                Some(FbbtTape {
+                    ops: vec![FbbtOp::Var(0), FbbtOp::Var(1), FbbtOp::Add(0, 1)],
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    /// F6's headline failure mode, end to end: a FEASIBLE original problem
+    /// must not be declared infeasible because Phase 0 clamped a multi-root
+    /// nonlinear block at the wrong root. The companion test above
+    /// (`fbbt_infeasibility_with_aux_clamp_rolls_back_phase0`) exercises the
+    /// rollback *mechanism* but its original model is itself infeasible; here
+    /// the original is feasible at `(2, 1)`, Newton lands on `x = -2`
+    /// (breaking the kept row `x + y = 3`, `y ∈ [0, 2]`), FBBT witnesses the
+    /// artifact infeasibility, and the rollback must rescue the solve: full
+    /// row set restored, clamp gone, FBBT witness-free on the re-run — so the
+    /// IPM receives the feasible full problem instead of a wrong "infeasible"
+    /// verdict.
+    #[test]
+    fn fbbt_rollback_rescues_feasible_original_from_wrong_root_clamp() {
+        let inner: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(WrongRootClampBreaksFeasibleOriginal));
+        let provider: Rc<RefCell<dyn ExpressionProvider>> =
+            Rc::new(RefCell::new(WrongRootKeptRowProvider));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            bound_tightening: true,
+            fbbt: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped =
+            PresolveTnlp::with_expression_provider(Rc::clone(&inner), Rc::clone(&provider), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+
+        // Pre-rollback, the scenario must actually have fired: Phase 0
+        // eliminated the 1×1 block, clamping x at a Newton root. Without
+        // this the test passes vacuously (diagnostics survive the rollback).
+        assert_eq!(
+            wrapped.auxiliary_diagnostics().vars_eliminated,
+            1,
+            "Phase 0 must have solved and clamped the x² = 4 block — \
+             otherwise the wrong-root path is never exercised"
+        );
+
+        // The rollback restored the full model. `m == 2` proves both halves:
+        // (a) FBBT witnessed the artifact infeasibility (no witness → no
+        // rollback → row 0 stays dropped → m == 1), and (b) that witness can
+        // only arise from the wrong root (-2): at +2 the kept row is
+        // satisfiable with y = 1 ∈ [0, 2] and FBBT finds nothing.
+        assert_eq!(
+            info.m, 2,
+            "wrong-root clamp on a feasible original must trigger the F6 \
+             rollback and restore the dropped block row (got m={})",
+            info.m
+        );
+
+        // The re-run on the un-clamped box is witness-free: the original is
+        // feasible, so nothing survives the rollback.
+        let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        assert!(
+            rpt.infeasibility_witness.is_none(),
+            "feasible original: FBBT must not witness infeasibility after \
+             the rollback, got {:?}",
+            rpt.infeasibility_witness
+        );
+
+        // The box handed to the IPM is valid, the wrong-root clamp is gone,
+        // and the feasible point (x, y) = (2, 1) is still inside it.
+        let mut x_l = vec![0.0; info.n as usize];
+        let mut x_u = vec![0.0; info.n as usize];
+        let mut g_l = vec![0.0; info.m as usize];
+        let mut g_u = vec![0.0; info.m as usize];
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        for i in 0..(info.n as usize) {
+            assert!(
+                x_l[i] <= x_u[i] + 1e-12,
+                "bounds handed to IPM must be valid: x_l[{i}]={} > x_u[{i}]={}",
+                x_l[i],
+                x_u[i]
+            );
+        }
+        assert!(
+            x_u[0] - x_l[0] > 1e-6,
+            "x must no longer be clamped (got [{}, {}])",
+            x_l[0],
+            x_u[0]
+        );
+        assert!(
+            x_l[0] <= 2.0 + 1e-9 && 2.0 <= x_u[0] + 1e-9,
+            "the feasible root x = 2 must survive in the IPM's box, got \
+             [{}, {}]",
+            x_l[0],
+            x_u[0]
+        );
+        assert!(
+            x_l[1] <= 1.0 + 1e-9 && 1.0 <= x_u[1] + 1e-9,
+            "the feasible y = 1 must survive in the IPM's box, got [{}, {}]",
+            x_l[1],
+            x_u[1]
         );
     }
 
