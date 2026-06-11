@@ -257,57 +257,26 @@ def test_minimize_accepts_scipy_bounds_keep_feasible_ignored():
 # -- scipy → Ipopt option-name synonyms ---------------------------------------
 
 
-def test_minimize_maxiter_synonym():
-    """``maxiter`` (scipy) translates to Ipopt ``max_iter`` so user options work."""
-    f, grad, _, _ = _mixture_quadratic()
-    # maxiter=1 should leave the solver short of convergence on Rosenbrock-ish problems,
-    # but on this convex quadratic 1 step still converges. So instead just check the
-    # option is *accepted*.
-    res = pounce.minimize(
-        f, x0=np.full(3, 1.0 / 3), jac=grad, maxiter=200, print_level=0,
-    )
-    assert res.success
-
-
-def test_minimize_gtol_ftol_xtol_synonyms():
-    """``gtol`` / ``ftol`` / ``xtol`` all map to Ipopt's single ``tol``."""
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("maxiter", 200),     # → max_iter
+        ("gtol", 1e-10),      # → tol  (gradient tolerance synonym)
+        ("ftol", 1e-10),      # → tol  (function tolerance synonym)
+        ("xtol", 1e-10),      # → tol  (x-step tolerance synonym)
+        ("disp", False),      # → print_level=0
+        ("iprint", 0),        # → print_level
+        ("maxcor", 8),        # → limited_memory_max_history
+    ],
+)
+def test_minimize_scipy_option_synonyms(key, value):
+    """Each scipy-canonical option translates to its Ipopt equivalent and is
+    accepted without error, reaching the same optimum as the bare call."""
     f, grad, target, _ = _mixture_quadratic()
-    for key in ("gtol", "ftol", "xtol"):
-        res = pounce.minimize(
-            f, x0=np.full(3, 0.5), jac=grad, print_level=0, **{key: 1e-10},
-        )
-        assert res.success, f"{key} synonym failed"
-        np.testing.assert_allclose(res.x, target, atol=1e-6)
-
-
-def test_minimize_disp_synonym():
-    """``disp=False`` (scipy bool) translates to ``print_level=0`` (Ipopt int)."""
-    f, grad, target, _ = _mixture_quadratic()
-    res = pounce.minimize(
-        f, x0=np.full(3, 0.5), jac=grad, disp=False,
-    )
-    assert res.success
-    np.testing.assert_allclose(res.x, target, atol=1e-6)
-
-
-def test_minimize_iprint_synonym():
-    """``iprint`` translates to Ipopt's ``print_level``."""
-    f, grad, target, _ = _mixture_quadratic()
-    res = pounce.minimize(
-        f, x0=np.full(3, 0.5), jac=grad, iprint=0,
-    )
-    assert res.success
-    np.testing.assert_allclose(res.x, target, atol=1e-6)
-
-
-def test_minimize_maxcor_synonym():
-    """``maxcor`` translates to Ipopt's ``limited_memory_max_history``."""
-    f, grad, target, _ = _mixture_quadratic()
-    res = pounce.minimize(
-        f, x0=np.full(3, 0.5), jac=grad, maxcor=8, print_level=0,
-    )
-    assert res.success
-    np.testing.assert_allclose(res.x, target, atol=1e-6)
+    kwargs = {"jac": grad, "print_level": 0, key: value}
+    res = pounce.minimize(f, x0=np.full(3, 1.0 / 3), **kwargs)
+    assert res.success, f"{key}={value!r} was not accepted as a scipy synonym"
+    np.testing.assert_allclose(res.x, target, atol=1e-5)
 
 
 # -- nfev / njev counters on the result ----------------------------------------

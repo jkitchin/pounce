@@ -75,17 +75,17 @@ _QP_STATUS_CODE = {
 _NLP_SUCCESS_STATUS = frozenset({0, 1})
 
 
-# Mapping of scipy-canonical option names to their Ipopt equivalents. Multiple
-# scipy tolerance options (``gtol`` / ``ftol`` / ``xtol``) all collapse onto
-# Ipopt's single ``tol`` knob — last-write-wins if the caller sets more than
-# one. Used by :func:`_translate_option`.
+# Pure-rename map: scipy option name → Ipopt option name with no value
+# coercion. Multiple scipy tolerance options (``gtol`` / ``ftol`` / ``xtol``)
+# all collapse onto Ipopt's single ``tol`` knob — last-write-wins if the
+# caller sets more than one. Options that also need a *value* transform
+# (``disp``, ``iprint``, ``maxcor``) are handled by branches in
+# :func:`_translate_option` and intentionally do NOT appear here.
 _SCIPY_TO_IPOPT_OPTION_NAMES = {
     "maxiter": "max_iter",
     "gtol": "tol",
     "ftol": "tol",
     "xtol": "tol",
-    "iprint": "print_level",
-    "maxcor": "limited_memory_max_history",
 }
 
 
@@ -94,7 +94,8 @@ def _translate_option(k: str, v: Any) -> tuple[str, Any]:
 
     Handles both name aliases (``maxiter`` → ``max_iter``) and value coercions
     where the types differ between scipy and Ipopt (``disp`` is bool in scipy
-    but Ipopt's ``print_level`` is an int 0–12).
+    but Ipopt's ``print_level`` is an int 0–12). Value-coercing entries live
+    in the branches below; pure renames live in ``_SCIPY_TO_IPOPT_OPTION_NAMES``.
     """
     if k == "disp":
         # scipy bool/int → Ipopt print_level (0 quiet, 5 standard).
@@ -102,8 +103,11 @@ def _translate_option(k: str, v: Any) -> tuple[str, Any]:
             return "print_level", 5 if v else 0
         return "print_level", int(v)
     if k == "iprint":
+        # scipy may pass float; Ipopt's print_level is strictly int.
         return "print_level", int(v)
     if k == "maxcor":
+        # scipy passes integer L-BFGS history; Ipopt option is int-typed,
+        # so coerce defensively for callers that send floats.
         return "limited_memory_max_history", int(v)
     return _SCIPY_TO_IPOPT_OPTION_NAMES.get(k, k), v
 
@@ -264,19 +268,23 @@ def _normalize_bounds(bounds, n: int):
     if isinstance(bounds, Bounds):
         lb = np.broadcast_to(np.asarray(bounds.lb, dtype=np.float64), (n,)).copy()
         ub = np.broadcast_to(np.asarray(bounds.ub, dtype=np.float64), (n,)).copy()
-        return lb, ub
-    # Legacy: iterable of (lo, hi) pairs, one per dimension.
-    _validate_bounds_length(bounds, n)
-    lb = np.full(n, -np.inf)
-    ub = np.full(n, np.inf)
-    for i, bd in enumerate(bounds):
-        if bd is None:
-            continue
-        lo, hi = bd
-        if lo is not None:
-            lb[i] = lo
-        if hi is not None:
-            ub[i] = hi
+    else:
+        # Legacy: iterable of (lo, hi) pairs, one per dimension. Entries may
+        # be ``None`` (no bound on that dim) or carry partial-None for a
+        # one-sided bound; missing sides stay at ±inf.
+        _validate_bounds_length(bounds, n)
+        lb = np.full(n, -np.inf)
+        ub = np.full(n, np.inf)
+        for i, bd in enumerate(bounds):
+            if bd is None:
+                continue
+            lo, hi = bd
+            if lo is not None:
+                lb[i] = lo
+            if hi is not None:
+                ub[i] = hi
+    # Both paths share the reversed-bound check (the ``Bounds`` path silently
+    # produced an infeasible box before).
     bad = np.where(lb > ub)[0]
     if bad.size:
         i = int(bad[0])
@@ -307,6 +315,11 @@ class _ConstraintBlock:
     lb: np.ndarray  # length n_rows
     ub: np.ndarray  # length n_rows
     n_rows: int
+    # Pre-assembled ``sparse.coo_array`` for linear blocks. ``g_combined``
+    # would otherwise rebuild this from ``(rows, cols, constant_vals)`` on
+    # every Ipopt iteration (per-iter waste in the inner loop). ``None`` for
+    # dict blocks, which don't have a constant Jacobian.
+    sparse_A: Any = None
 
 
 def _empty_constraints():
@@ -325,16 +338,23 @@ def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBl
     m_rows = int(A.shape[0])
     lb = np.broadcast_to(np.asarray(lc.lb, dtype=np.float64), (m_rows,)).copy()
     ub = np.broadcast_to(np.asarray(lc.ub, dtype=np.float64), (m_rows,)).copy()
+    rows_i = np.asarray(A.row, dtype=np.int64)
+    cols_i = np.asarray(A.col, dtype=np.int64)
+    vals_i = np.asarray(A.data, dtype=np.float64)
+    # Cache the assembled sparse matrix once; ``g_combined`` reuses it
+    # every iteration instead of rebuilding from the triplets.
+    sparse_A = sparse.coo_array((vals_i, (rows_i, cols_i)), shape=(m_rows, n))
     return _ConstraintBlock(
-        rows=np.asarray(A.row, dtype=np.int64),
-        cols=np.asarray(A.col, dtype=np.int64),
-        constant_vals=np.asarray(A.data, dtype=np.float64),
+        rows=rows_i,
+        cols=cols_i,
+        constant_vals=vals_i,
         fun=None,
         jac=None,
         args=(),
         lb=lb,
         ub=ub,
         n_rows=m_rows,
+        sparse_A=sparse_A,
     )
 
 
@@ -441,12 +461,9 @@ def _wrap_constraints(constraints, n: int):
         x = np.asarray(x, dtype=np.float64)
         parts = []
         for blk in blocks:
-            if blk.constant_vals is not None:
-                A_blk = sparse.coo_array(
-                    (blk.constant_vals, (blk.rows, blk.cols)),
-                    shape=(blk.n_rows, x.size),
-                )
-                parts.append(np.asarray(A_blk @ x).ravel())
+            if blk.sparse_A is not None:
+                # Linear block: reuse the COO matrix assembled once at setup.
+                parts.append(np.asarray(blk.sparse_A @ x).ravel())
             else:
                 parts.append(_to_array(blk.fun(x, *blk.args)).ravel())
         return np.concatenate(parts)
