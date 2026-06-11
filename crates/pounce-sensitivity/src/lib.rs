@@ -75,6 +75,7 @@ pub mod schur_driver;
 pub mod sens_app;
 pub mod solver;
 pub mod step_calc;
+mod vec_util;
 
 pub use algorithm_backsolver::PdSensBacksolver;
 pub use backsolver::{DenseLuBacksolver, SensBacksolver};

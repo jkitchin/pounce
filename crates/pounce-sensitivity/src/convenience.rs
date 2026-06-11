@@ -65,6 +65,7 @@ use crate::backsolver::SensBacksolver;
 use crate::boundcheck::clamp_with_nlp;
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
+use crate::vec_util::dense_to_vec;
 use crate::PdSensBacksolver;
 use pounce_algorithm::IpoptApplication;
 use pounce_common::types::{Index, Number};
@@ -165,16 +166,30 @@ pub struct SensResult {
     /// called and the solve converged.
     pub reduced_hessian_eigenvectors: Option<Vec<Number>>,
     /// Phase 5c §6 — converged user-space constraint multipliers
-    /// `λ_g` (length `n_full_g`), suitable for direct hand-off to
-    /// the SQP-corrector via [`pounce_algorithm::sqp::classify_working_set`].
-    /// `None` when the solve didn't converge or the underlying NLP
-    /// didn't expose `pack_lambda_for_user`.
+    /// `λ_g` (length `n_full_g`), in **natural (unscaled-Lagrangian)
+    /// units**: lifted via `finalize_solution_lambda`, which inverts
+    /// the c/d split, unwinds the per-row `c_scale`/`d_scale`
+    /// constraint scaling, AND divides out `obj_scale_factor` — so
+    /// the values match what the user TNLP's `finalize_solution`
+    /// receives (and the C ABI / Python info dict's `mult_g`),
+    /// independent of `nlp_scaling_method`. Suitable for direct
+    /// hand-off to the SQP corrector via
+    /// [`pounce_algorithm::sqp::classify_working_set`], and
+    /// round-trip-consistent with warm starts:
+    /// `initialize_starting_point` multiplies the user's λ back by
+    /// `obj_scale_factor` on the way in. `None` when the solve
+    /// didn't converge or the underlying NLP didn't expose
+    /// `finalize_solution_lambda`.
     pub mult_g: Option<Vec<Number>>,
     /// Converged user-space lower-bound multipliers `z_L`, length
-    /// `n_full_x`. Same convention as the C ABI / Python info dict.
+    /// `n_full_x`, divided by `obj_scale_factor` like
+    /// [`Self::mult_g`] (via `finalize_solution_z_l`) — the same
+    /// natural-units convention as the C ABI / Python info dict's
+    /// `mult_x_L`.
     pub mult_x_l: Option<Vec<Number>>,
     /// Converged user-space upper-bound multipliers `z_U`, length
-    /// `n_full_x`. Same convention.
+    /// `n_full_x`. Same convention (`finalize_solution_z_u` /
+    /// `mult_x_U`).
     pub mult_x_u: Option<Vec<Number>>,
     /// Converged constraint values `g(x*)` lifted to user-space
     /// (length `n_full_g`). Used by `classify_working_set` to
@@ -298,10 +313,21 @@ impl SensSolve {
             // Phase 5c §6 — also capture user-space multipliers +
             // constraint values so callers can wire the parametric
             // corrector via `classify_working_set` without a
-            // separate IPM solve. `pack_*_for_user` returns empty
-            // when the underlying NLP doesn't implement lifting
-            // (defaults on `IpoptNlp` trait); we treat that as
+            // separate IPM solve. The `finalize_solution_*` family
+            // returns empty when the underlying NLP doesn't implement
+            // lifting (defaults on `IpoptNlp` trait); we treat that as
             // "no user-space hand-off available".
+            //
+            // `finalize_solution_*` (NOT `pack_*_for_user`) is
+            // deliberate: both invert the c/d split and unwind the
+            // per-row `c_scale`/`d_scale`, but only the finalize
+            // family also divides out `obj_scale_factor`, so the
+            // multipliers land in the user's natural
+            // (unscaled-Lagrangian) units even when gradient-based
+            // NLP scaling fired — the same convention as the user
+            // TNLP's `finalize_solution` / the Python info dict.
+            // (`pack_*_for_user` feeds the scaled `eval_h` path;
+            // using it here left the duals obj-scaled: pounce#11 F1.)
             //
             // `curr_c`/`curr_d` cache results into the NLP via
             // `eval_*` if not already computed; pull them BEFORE
@@ -311,15 +337,15 @@ impl SensSolve {
             let d_curr = cq.borrow_mut().curr_d();
             {
                 let nlp_borrow = nlp.borrow();
-                let lambda = nlp_borrow.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                let lambda = nlp_borrow.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
                 if !lambda.is_empty() {
                     outbox_cb.borrow_mut().mult_g = Some(lambda);
                 }
-                let z_l = nlp_borrow.pack_z_l_for_user(&*curr.z_l);
+                let z_l = nlp_borrow.finalize_solution_z_l(&*curr.z_l);
                 if !z_l.is_empty() {
                     outbox_cb.borrow_mut().mult_x_l = Some(z_l);
                 }
-                let z_u = nlp_borrow.pack_z_u_for_user(&*curr.z_u);
+                let z_u = nlp_borrow.finalize_solution_z_u(&*curr.z_u);
                 if !z_u.is_empty() {
                     outbox_cb.borrow_mut().mult_x_u = Some(z_u);
                 }
@@ -467,35 +493,4 @@ struct CallbackOut {
     mult_x_u: Option<Vec<Number>>,
     g: Option<Vec<Number>>,
     error: Option<String>,
-}
-
-fn dense_to_vec(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
-    let any = v.as_any();
-    // `expanded_values` materializes a homogeneous vector instead of tripping
-    // `DenseVector::values`'s `!homogeneous` debug_assert (L16).
-    if let Some(d) = any.downcast_ref::<pounce_linalg::dense_vector::DenseVector>() {
-        return d.expanded_values();
-    }
-    // M9/F8: a `CompoundVector` (e.g. a partitioned primal `x`) is the other
-    // concrete `Vector` impl the iterate can carry. Flatten its components in
-    // order — recursively, so nested compounds work — instead of silently
-    // fabricating a zero vector, which previously poisoned `SensResult.x` /
-    // the KKT residual extraction with zeros.
-    if let Some(c) = any.downcast_ref::<pounce_linalg::compound_vector::CompoundVector>() {
-        let mut out = Vec::with_capacity(v.dim() as usize);
-        for i in 0..c.n_comps() {
-            out.extend(dense_to_vec(c.comp(i)));
-        }
-        return out;
-    }
-    // No generic element accessor exists on the `Vector` trait, so an
-    // unrecognized concrete impl still falls back to zeros — but assert in
-    // debug builds so a newly-added `Vector` type is caught by tests rather
-    // than silently emitting a zero vector in release.
-    debug_assert!(
-        false,
-        "dense_to_vec: unhandled Vector impl, returning zeros (dim {})",
-        v.dim()
-    );
-    vec![0.0; v.dim() as usize]
 }
