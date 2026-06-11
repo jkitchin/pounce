@@ -193,16 +193,6 @@ def _suggest_options(dims: dict[str, Any]) -> list[dict[str, str]]:
     nlo = dims.get("n_nonlinear_objectives", 0)
     size = n_var + n_con
 
-    if size > 5_000:
-        suggestions.append({
-            "option": "linear_solver",
-            "value": "ma57",
-            "why": (
-                f"problem is medium/large ({n_var} vars, {n_con} cons); MA57 "
-                "is much faster than FERAL at this scale. Requires the build "
-                "to have been compiled with `--features ma57`."
-            ),
-        })
     if size > 1_000 and nlc == 0 and nlo == 0:
         suggestions.append({
             "option": "mu_strategy",
@@ -1587,15 +1577,6 @@ def _suggest_gams_options(dims: dict[str, Any], model_type: str | None) -> list[
             "compile-time default is `monotone`, which stalls some hard NLPs."
         ),
     })
-    if size > 5_000:
-        suggestions.append({
-            "option": "linear_solver",
-            "value": "ma57",
-            "why": (
-                f"problem is medium/large ({n_var} vars, {n_eq} eqs); MA57 is much "
-                "faster than FERAL at this scale. Requires --features ma57 build."
-            ),
-        })
     if nnl > 0 and nnl > 0.5 * dims.get("nnz_total", 1):
         suggestions.append({
             "option": "tol",
