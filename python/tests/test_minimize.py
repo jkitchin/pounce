@@ -539,6 +539,43 @@ def test_minimize_solver_selection_auto_routes_convex_qp():
     assert res.info.get("solver") == "qp-ipm"
 
 
+def test_routed_result_exposes_eval_counters():
+    """A routed (convex) result must still carry the scipy-standard
+    ``nfev``/``njev``/``nhev`` attributes — accessing them must not
+    ``AttributeError`` just because a different backend ran. The convex solver
+    consumes the extracted quadratic form, so the counts are 0."""
+    fun = lambda x: x[0] ** 2 + x[1] ** 2
+    jac = lambda x: 2 * x
+    hess = lambda x: 2 * np.eye(2)
+    res = pounce.minimize(
+        fun, [1.0, 1.0], jac=jac, hess=hess, bounds=[(-1, 1), (-1, 1)],
+        solver_selection="auto",
+    )
+    assert res.info.get("solver") == "qp-ipm"
+    assert res.nfev == 0 and res.njev == 0 and res.nhev == 0
+
+
+def test_result_subscript_falls_back_to_info():
+    """Back-compat: ``res["<info-key>"]`` resolves the nested ``info`` mapping,
+    preserving the pre-#97 subscript access (the old bespoke dataclass did this
+    via ``__getitem__``). Top-level keys still win; a genuine miss raises."""
+    fun = lambda x: x[0] ** 2 + x[1] ** 2
+    jac = lambda x: 2 * x
+    hess = lambda x: 2 * np.eye(2)
+    res = pounce.minimize(
+        fun, [1.0, 1.0], jac=jac, hess=hess, bounds=[(-1, 1), (-1, 1)],
+        solver_selection="auto",
+    )
+    # nested info key reachable via subscript and attribute
+    assert res["solver"] == "qp-ipm"
+    assert res.solver == "qp-ipm"
+    # top-level key still resolves directly
+    assert res["nfev"] == 0
+    # a key in neither place still raises KeyError
+    with pytest.raises(KeyError):
+        res["definitely_not_a_key"]
+
+
 def test_minimize_solver_selection_qp_ipm_with_linear_constraint():
     """``solver_selection="qp-ipm"`` accepts a ``LinearConstraint`` end-to-end
     and dispatches to the convex IPM (rather than probing or falling back)."""

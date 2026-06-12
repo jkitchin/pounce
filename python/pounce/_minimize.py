@@ -36,10 +36,35 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy import sparse
-from scipy.optimize import Bounds, LinearConstraint, OptimizeResult
+from scipy.optimize import Bounds, LinearConstraint
+from scipy.optimize import OptimizeResult as _ScipyOptimizeResult
 
 from ._pounce import Problem
 from ._route import _point_cache, classify_and_extract, classify_and_extract_socp
+
+
+class OptimizeResult(_ScipyOptimizeResult):
+    """SciPy ``OptimizeResult`` with a pounce back-compat shim.
+
+    pounce nests its solver-specific extras (``solver``, ``problem_class``,
+    ``status_msg``, ``residuals``, …) under a single ``info`` mapping rather
+    than as top-level keys. Before #97 the result was a bespoke dataclass whose
+    ``__getitem__`` fell back to ``info`` so ``res["solver"]`` worked; switching
+    to scipy's plain-dict ``OptimizeResult`` would silently break that subscript
+    (it would ``KeyError``). This subclass restores the fallback: a key absent at
+    the top level is looked up in ``info`` before raising. New code should prefer
+    ``res.info[...]`` explicitly; this only preserves the old access pattern.
+    """
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            info = super().get("info")
+            if isinstance(info, Mapping) and key in info:
+                return info[key]
+            raise
+
 
 # Central-difference step. The optimal step for a central difference is
 # ``~eps**(1/3)`` (≈6.06e-6), balancing the ``O(h^2)`` truncation error against
@@ -693,6 +718,14 @@ def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
         status=_QP_STATUS_CODE.get(res.status, 1),
         message=res.status,
         nit=int(res.iters),
+        # The convex solver consumes the extracted quadratic form, not the
+        # python callables, so no objective/gradient/Hessian callbacks fire
+        # during the solve. Report 0 (rather than omitting the keys) so the
+        # scipy-standard counters are present on every result regardless of
+        # which backend ran.
+        nfev=0,
+        njev=0,
+        nhev=0,
         info={
             "solver": selector,
             "problem_class": ex.kind,
@@ -738,6 +771,12 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
         status=_QP_STATUS_CODE.get(res.status, 1),
         message=res.status,
         nit=int(res.iters),
+        # See ``_solve_via_convex``: the conic solver works on the extracted
+        # cone program, so the python objective callbacks never fire — report
+        # 0 for the scipy-standard eval counters.
+        nfev=0,
+        njev=0,
+        nhev=0,
         info={
             "solver": "socp",
             "problem_class": ex.kind,
@@ -800,10 +839,11 @@ def minimize(
 
     Auto-routing has a cost: detection probes the opaque callables and
     finite-differences a quadratic model of the objective (and any
-    constraints), which is ``O(n²)`` extra ``fun`` evaluations. For a problem
-    that ultimately lands on the NLP path this probing is pure overhead, so if
-    you already know your problem is a general NLP — or ``fun`` is expensive —
-    pass ``options={"solver_selection": "nlp"}`` to skip routing entirely.
+    constraints), which is ``O(n²)`` extra ``fun`` evaluations. That is why
+    routing is opt-in — the default ``"nlp"`` skips the probe entirely, so a
+    general NLP (or an expensive ``fun``) pays nothing. Pass
+    ``solver_selection="auto"`` only when you want the convex/conic fast paths
+    and accept the detection overhead on problems that fall through to NLP.
 
     Like :func:`scipy.optimize.minimize`, this facade is **silent by default**.
     Pass ``disp=True`` for a concise log or an explicit ``print_level=N``
