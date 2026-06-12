@@ -147,60 +147,65 @@ print(res.fun, res.x)
 ```
 
 `minimize` is a thin facade over `pounce.Problem` shaped after
-`scipy.optimize.minimize`, so SciPy code ports with few changes. It returns a
-SciPy-`OptimizeResult`-shaped object (`res.x`, `res.fun`, `res.success`,
-`res.status`, `res.message`, `res.nit`, plus `res.info` and dict-style
-`res["x"]`).
+`scipy.optimize.minimize`, so SciPy code ports with few changes — including as a
+`method=` callable handed to `scipy.optimize.minimize` itself. It returns a
+genuine `scipy.optimize.OptimizeResult` (`res.x`, `res.fun`, `res.success`,
+`res.status`, `res.message`, `res.nit`, and the `res.nfev` / `res.njev` /
+`res.nhev` evaluation counters), with pounce-specific extras under `res.info`
+and a back-compat shim so a key absent at the top level falls back to `res.info`.
 
 ### Compatibility with `scipy.optimize.minimize`
 
 ```python
-minimize(fun, x0, jac=None, hess=None, bounds=None,
-         constraints=None, options=None)
+minimize(fun, x0, args=(), jac=None, hess=None, bounds=None,
+         constraints=None, callback=None, **options)
 ```
 
 | Argument | Status | Notes |
 |---|---|---|
 | `fun`, `x0` | ✅ | objective callable and start point |
-| `jac` | ✅ | callable; **omitted → central finite differences** (`eps^(1/3)` step) and a one-time `UserWarning`. Provide one (or use `pounce.jax` / `pounce.torch`) for production. |
-| `hess` | ⚠️ | used **only when there are no constraints**; with constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
-| `bounds` | ✅ | a sequence of `(lo, hi)` pairs; a `None` element or a `None` endpoint means ±∞ |
-| `constraints` | ✅ | SciPy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}`; multiple are concatenated; `"jac"` optional (finite-diff fallback) |
-| `options` | ⚠️ | forwarded to `Problem.add_option` — keys are **pounce/Ipopt option names** (`tol`, `max_iter`, `hessian_approximation`), **not** SciPy's (`maxiter`, `ftol`) |
-| `args` | ❌ | not supported — close over extra arguments in `fun`/`jac` |
-| `method` | ❌ | always the filter-IPM (see below for why there is no `method=`) |
+| `args` | ✅ | tuple of extra positional arguments forwarded to `fun` / `jac` |
+| `jac` | ✅ | callable, **or `jac=True`** (then `fun` returns `(value, gradient)`, cached so the gradient is not recomputed); **omitted → central finite differences** (`eps^(1/3)` step) and a one-time `UserWarning`. Provide one (or use `pounce.jax` / `pounce.torch`) for production. |
+| `hess` | ⚠️ | used when there are no constraints **or all constraints are linear** (the constraint curvature is then zero, so the objective Hessian is the Lagrangian Hessian); with nonlinear constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
+| `bounds` | ✅ | a sequence of `(lo, hi)` pairs **or a scipy `Bounds` object**; a `None` element or endpoint means ±∞ |
+| `constraints` | ✅ | scipy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}` **or scipy `LinearConstraint` object(s)** (dense or sparse `A`); multiple are concatenated; dict `"jac"` optional (finite-diff fallback) |
+| `callback` | ✅ | called each iteration; both scipy signatures supported — `callback(xk)` and `callback(intermediate_result)` |
+| `tol` | ✅ | accepted directly (scipy `gtol` / `ftol` / `xtol` are synonyms) |
+| `options` / `**options` | ✅ | pass options as keyword args (legacy `options={…}` dict still works); keys are pounce/Ipopt names, with scipy synonyms mapped: `maxiter`→`max_iter`, `gtol`/`ftol`/`xtol`→`tol`, `disp`→`print_level`, `maxcor`→`limited_memory_max_history` |
+| `method` | ✅ | `scipy.optimize.minimize(fun, x0, method=pounce.minimize, …)` works — pounce satisfies scipy's custom-method contract |
 | `hessp` | ❌ | no Hessian-vector-product mode |
-| `tol` | ❌ | pass it via `options={"tol": …}` |
-| `callback` | ❌ | not supported |
 
-**Conventions that match SciPy** (so constraint dicts port directly):
+**Conventions that match SciPy** (so constraints port directly):
 
 - Inequalities use the SciPy sign convention **`g(x) ≥ 0`**; equalities are
-  **`g(x) = 0`**.
-- The result object is SciPy-`OptimizeResult`-shaped (subset of fields + an
-  `info` map).
+  **`g(x) = 0`**. A `LinearConstraint(A, lb, ub)` becomes `lb ≤ A x ≤ ub`.
+- The result object is a genuine `scipy.optimize.OptimizeResult` (subset of
+  fields + an `info` map).
 
 **Gaps worth knowing:**
 
-- **Only the dict form of `constraints`** is accepted — a SciPy `Bounds`,
-  `LinearConstraint`, or `NonlinearConstraint` *object* will not work, and
-  `bounds` must be `(lo, hi)` pairs (not a `Bounds` object).
-- The constraint **Jacobian is dense**; for large sparse Jacobians use the
-  `Problem` class directly (it takes a sparse Jacobian and structure).
-- The most common porting snag is `options`: `options={"maxiter": 100}` is a
-  no-op — it is `options={"max_iter": 100}`.
+- `NonlinearConstraint` *objects* are not accepted — pass nonlinear constraints
+  as the dict form `{"type": …, "fun": …, "jac": …}`. (`Bounds` and
+  `LinearConstraint` objects **are** accepted.)
+- A constraint **dict's Jacobian is dense**; for large sparse Jacobians use the
+  `Problem` class directly (a `LinearConstraint` may carry a sparse `A`, which
+  is honored).
+- `options={"maxiter": 100}` now works (scipy synonyms are mapped), but the
+  underlying pounce option is still `max_iter`; an unrecognized key is forwarded
+  verbatim to the backend.
 
 ### Solver routing in `minimize`
 
-By default `minimize` **auto-routes** the same way the CLI's
-`solver_selection=auto` does: a problem that is provably a **linear program**
-or a **convex quadratic program** is dispatched to the specialized convex
+By default `minimize` uses the general NLP filter line-search interior-point
+method and does **no** structure probing — an expensive `fun` pays nothing. Opt
+in with `solver_selection="auto"` (the same key the CLI uses) and `minimize`
+probes the callables: a problem that is provably a **linear program** or a
+**convex quadratic program** is dispatched to the specialized convex
 interior-point solver (`pounce.solve_qp`, the HSDE driver), and a provably
 **convex QCQP** (convex-quadratic objective and/or constraints) is reformulated
 to a second-order cone program and dispatched to the conic solver
 (`pounce.solve_socp`). Both reach a **global** optimum in materially fewer
-iterations; everything else is solved by the general NLP filter line-search
-interior-point method, exactly as before.
+iterations; everything else falls through to the NLP solver.
 
 The catch is that `minimize` only sees **opaque callables** — it cannot read a
 `.nl` expression tree the way the CLI can. So instead of *reading* the
@@ -226,36 +231,37 @@ nonconvex (a non-PSD constraint Hessian) all fall back to the NLP solver.
 The `solver_selection` option (passed in `options=`) overrides the automatic
 choice — mirroring the CLI option of the same name:
 
-| `options={"solver_selection": …}` | Behavior |
+| `solver_selection=…` | Behavior |
 |---|---|
-| `"auto"` | **Default.** Probe-and-validate; route provable LP/convex-QP to `solve_qp`, a convex QCQP to `solve_socp`, else NLP. |
-| `"nlp"` | Skip routing entirely; always use the NLP solver (the pre-routing behavior). |
+| `"nlp"` | **Default.** Skip routing entirely; always use the NLP solver — no probe overhead. |
+| `"auto"` | Probe-and-validate; route provable LP/convex-QP to `solve_qp`, a convex QCQP to `solve_socp`, else NLP. |
 | `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
 | `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
 | `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |
 
 ```python
-# Default: route a convex QP to the fast convex IPM automatically.
+# Default: the general NLP solver, no probing.
 res = minimize(fun, x0, bounds=bounds)
-print(res.info["solver"])          # 'qp-ipm' / 'socp' when routed; absent on the NLP path
 
-# Keep the pre-routing behavior — always the NLP solver:
-res = minimize(fun, x0, options={"solver_selection": "nlp"})
+# Opt into routing: a convex QP goes to the fast convex IPM automatically.
+res = minimize(fun, x0, bounds=bounds, solver_selection="auto")
+print(res.info.get("solver"))      # 'qp-ipm' / 'socp' when routed; None on the NLP path
 
 # Insist the problem is a convex QP; fail loudly if the probe disagrees:
-res = minimize(fun, x0, options={"solver_selection": "qp-ipm"})
+res = minimize(fun, x0, solver_selection="qp-ipm")
 
-# A convex QCQP (e.g. a quadratic ball constraint) routes to the conic solver.
-# Give the objective and constraint analytic `jac`s: derivative-free detection
-# recovers the constraint Hessian from a finite-difference-of-finite-difference
-# Jacobian, which is too noisy to confirm the quadratic, so without `jac` the
-# probe conservatively defers to NLP (still the correct answer, just slower).
+# A convex QCQP (e.g. a quadratic ball constraint) routes to the conic solver
+# under `solver_selection="auto"`. Give the objective and constraint analytic
+# `jac`s: derivative-free detection recovers the constraint Hessian from a
+# finite-difference-of-finite-difference Jacobian, which is too noisy to confirm
+# the quadratic, so without `jac` the probe conservatively defers to NLP (still
+# the correct answer, just slower).
 ball = {"type": "ineq",
         "fun": lambda x: 1.0 - x @ x,        # x·x ≤ 1
         "jac": lambda x: -2.0 * np.asarray(x)}
 res = minimize(lambda x: -x[0] - x[1], [0.1, 0.1],
                jac=lambda x: np.array([-1.0, -1.0]),
-               constraints=[ball])
+               constraints=[ball], solver_selection="auto")
 print(res.info.get("solver"))      # 'socp' (None on the NLP fall-back path)
 ```
 

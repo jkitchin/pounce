@@ -253,7 +253,7 @@ class _Context:
         return minimize(
             fun, x0, jac=jac, hess=hess,
             bounds=self.bounds, constraints=self.constraints,
-            options=self.options,
+            **(self.options or {}),
         )
 
     # Acceptance must tolerate the solver's bound relaxation: the IPM lets a

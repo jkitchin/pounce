@@ -26,7 +26,8 @@ def test_convex_qp_routes_and_recovers_objective_constant():
     fun = lambda x: x[0] ** 2 + x[1] ** 2 - 3 * x[0] - 4 * x[1] + 5.0
     jac = lambda x: np.array([2 * x[0] - 3, 2 * x[1] - 4])
     hess = lambda x: np.array([[2.0, 0.0], [0.0, 2.0]])
-    res = minimize(fun, [0.5, 0.5], jac=jac, hess=hess, bounds=[(0, 1), (0, 1)])
+    res = minimize(fun, [0.5, 0.5], jac=jac, hess=hess, bounds=[(0, 1), (0, 1)],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "qp-ipm"
     assert res.info["problem_class"] == "convex_qp"
@@ -40,7 +41,8 @@ def test_lp_routes_to_lp_selector():
     # min −x0 − 2x1  s.t.  x0 + x1 ≤ 1,  x ≥ 0  → x*=(0,1), f*=−2.
     fun = lambda x: -x[0] - 2 * x[1]
     con = {"type": "ineq", "fun": lambda x: 1.0 - x[0] - x[1]}  # ≥ 0
-    res = minimize(fun, [0.1, 0.1], bounds=[(0, None), (0, None)], constraints=con)
+    res = minimize(fun, [0.1, 0.1], bounds=[(0, None), (0, None)], constraints=con,
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "lp-ipm"
     assert res.info["problem_class"] == "lp"
@@ -55,7 +57,7 @@ def test_routed_qp_matches_nlp_solve():
     hess = lambda x: np.array([[2.0, 0.0], [0.0, 2.0]])
     kw = dict(jac=jac, hess=hess, bounds=[(0, 1), (0, 1)])
 
-    auto = minimize(fun, [0.5, 0.5], **kw)
+    auto = minimize(fun, [0.5, 0.5], options={"solver_selection": "auto"}, **kw)
     nlp = minimize(fun, [0.5, 0.5], options={"solver_selection": "nlp"}, **kw)
 
     assert _routed_to(auto) == "qp-ipm"
@@ -112,7 +114,7 @@ def test_nonlinear_objective_stays_on_nlp():
             200 * (x[1] - x[0] ** 2),
         ]
     )
-    res = minimize(fun, [-1.2, 1.0], jac=jac)
+    res = minimize(fun, [-1.2, 1.0], jac=jac, options={"solver_selection": "auto"})
 
     assert _routed_to(res) is None
     np.testing.assert_allclose(res.x, [1.0, 1.0], atol=1e-4)
@@ -124,7 +126,8 @@ def test_nonconvex_qp_stays_on_nlp():
     fun = lambda x: -(x[0] ** 2) + x[1] ** 2
     jac = lambda x: np.array([-2 * x[0], 2 * x[1]])
     hess = lambda x: np.array([[-2.0, 0.0], [0.0, 2.0]])
-    res = minimize(fun, [0.5, 0.5], jac=jac, hess=hess, bounds=[(0, 1), (0, 1)])
+    res = minimize(fun, [0.5, 0.5], jac=jac, hess=hess, bounds=[(0, 1), (0, 1)],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) is None
 
@@ -146,7 +149,8 @@ def test_finite_difference_qp_routes_without_user_derivatives():
     # and the held-out validation confirms it. min ½‖x−a‖² style box QP.
     a = np.array([0.3, 0.7])
     fun = lambda x: float((x[0] - a[0]) ** 2 + (x[1] - a[1]) ** 2)
-    res = minimize(fun, [0.0, 0.0], bounds=[(0, 1), (0, 1)])
+    res = minimize(fun, [0.0, 0.0], bounds=[(0, 1), (0, 1)],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "qp-ipm"
     np.testing.assert_allclose(res.x, a, atol=1e-5)
@@ -173,8 +177,9 @@ def test_auto_route_probes_objective_once_not_twice():
         return fun, calls
 
     # Auto path: both routers probe, then the problem falls through to NLP.
+    # (pounce defaults to solver_selection="nlp"; opt in explicitly to route.)
     f_auto, c_auto = _counting_quartic()
-    minimize(f_auto, x0)
+    minimize(f_auto, x0, options={"solver_selection": "auto"})
     # NLP-forced path: no routing, so the difference isolates the routing cost.
     f_nlp, c_nlp = _counting_quartic()
     minimize(f_nlp, x0, options={"solver_selection": "nlp"})

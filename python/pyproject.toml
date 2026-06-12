@@ -25,7 +25,7 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
 ]
-dependencies = ["numpy>=1.23"]
+dependencies = ["numpy>=1.23", "scipy>=1.11"]
 
 # Console script: `pip install pounce-solver` drops a `pounce`
 # executable on PATH. The shim in pounce/_cli.py transfers control
@@ -44,6 +44,9 @@ jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
 # >= 2.2 for a stable torch.func surface (pounce#109). CPU wheels are
 # sufficient — pounce solves on the host.
 torch = ["torch>=2.2"]
+# scipy is now a hard dependency (used by the minimize facade for Bounds,
+# LinearConstraint, OptimizeResult, and sparse helpers). Kept as an extra
+# alias for callers who still write `pounce-solver[scipy]` in their pins.
 scipy = ["scipy>=1.11"]
 # diffrax is only needed to run the inverse-map ODE example/recipe
 # (pounce#91); the inverse_map_rhs helper itself depends only on jax.

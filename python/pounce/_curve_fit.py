@@ -669,8 +669,10 @@ def _build_fit_problem(
 
     # Probe constraints at the starting seed, not the origin, so a constraint
     # undefined at 0 but defined at p0 does not fail at build time (L47 —
-    # mirrors _minimize.py passing x0).
-    m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(
+    # mirrors _minimize.py passing x0). ``_wrap_constraints`` returns the COO
+    # sparsity (rows, cols) as the last two entries; the fit path is dense and
+    # ignores them.
+    m_con, g_combined, jac_combined, cl, cu, _, _ = _wrap_constraints(
         constraints, n, np.asarray(p0, dtype=float)
     )
 
@@ -1211,8 +1213,9 @@ def _build_streaming_fit_problem(
 
     closures = _StreamingClosures(data_source, model, model_jac, loss_fn, fs2, n)
     # Probe constraints at the starting seed, not the origin (L47 — mirrors
-    # _minimize.py passing x0).
-    m_con, g_combined, jac_combined, cl, cu = _wrap_constraints(
+    # _minimize.py passing x0). Last two return values are COO sparsity, unused
+    # on the dense fit path.
+    m_con, g_combined, jac_combined, cl, cu, _, _ = _wrap_constraints(
         constraints, n, np.asarray(p0, dtype=float)
     )
 

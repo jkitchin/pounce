@@ -36,7 +36,8 @@ def test_convex_qcqp_routes_to_socp():
     # min −x0 − x1  s.t.  x0² + x1² ≤ 1  → x*=(1/√2, 1/√2), f*=−√2.
     fun = lambda x: -x[0] - x[1]
     jac = lambda x: np.array([-1.0, -1.0])
-    res = minimize(fun, [0.1, 0.1], jac=jac, constraints=[_ball_constraint()])
+    res = minimize(fun, [0.1, 0.1], jac=jac, constraints=[_ball_constraint()],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "socp"
     assert res.info["problem_class"] == "convex_qcqp"
@@ -51,7 +52,8 @@ def test_qcqp_with_quadratic_objective_and_constraint():
     # nearest (2,2): the radial point (1/√2, 1/√2).
     fun = lambda x: (x[0] - 2) ** 2 + (x[1] - 2) ** 2
     jac = lambda x: np.array([2 * (x[0] - 2), 2 * (x[1] - 2)])
-    res = minimize(fun, [0.0, 0.0], jac=jac, constraints=[_ball_constraint()])
+    res = minimize(fun, [0.0, 0.0], jac=jac, constraints=[_ball_constraint()],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "socp"
     np.testing.assert_allclose(res.x, [1 / np.sqrt(2)] * 2, atol=1e-5)
@@ -63,7 +65,7 @@ def test_routed_qcqp_matches_nlp_solve():
     jac = lambda x: np.array([2 * (x[0] - 2), 2 * (x[1] - 2)])
     kw = dict(jac=jac, constraints=[_ball_constraint()])
 
-    auto = minimize(fun, [0.0, 0.0], **kw)
+    auto = minimize(fun, [0.0, 0.0], options={"solver_selection": "auto"}, **kw)
     nlp = minimize(fun, [0.0, 0.0], options={"solver_selection": "nlp"}, **kw)
 
     assert _routed_to(auto) == "socp"
@@ -83,7 +85,8 @@ def test_qcqp_folds_constraint_constant():
         "fun": lambda x: 1.0 - (x[0] - 3.0) ** 2,
         "jac": lambda x: np.array([-2.0 * (x[0] - 3.0)]),
     }
-    res = minimize(fun, [3.0], jac=jac, constraints=[con])
+    res = minimize(fun, [3.0], jac=jac, constraints=[con],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "socp"
     assert res.x[0] == pytest.approx(2.0, abs=1e-5)
@@ -99,6 +102,7 @@ def test_qcqp_with_linear_and_quadratic_constraints():
     res = minimize(
         fun, [0.1, 0.1], jac=jac,
         bounds=[(0, 1), (0, 1)], constraints=[_ball_constraint(), lin],
+        options={"solver_selection": "auto"},
     )
 
     assert _routed_to(res) == "socp"
@@ -115,7 +119,8 @@ def test_nonconvex_quadratic_constraint_stays_on_nlp():
         "fun": lambda x: x[0] ** 2 + x[1] ** 2 - 1.0,
         "jac": lambda x: np.array([2 * x[0], 2 * x[1]]),
     }
-    res = minimize(fun, [2.0, 2.0], jac=jac, constraints=[con])
+    res = minimize(fun, [2.0, 2.0], jac=jac, constraints=[con],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) is None
 
@@ -130,7 +135,8 @@ def test_quadratic_equality_stays_on_nlp():
         "fun": lambda x: x[0] ** 2 + x[1] ** 2 - 1.0,
         "jac": lambda x: np.array([2 * x[0], 2 * x[1]]),
     }
-    res = minimize(fun, [0.5, 0.5], jac=jac, constraints=[con])
+    res = minimize(fun, [0.5, 0.5], jac=jac, constraints=[con],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) is None
 
@@ -167,6 +173,7 @@ def test_plain_qp_still_routes_to_qp_not_socp():
     # though the QCQP router exists; auto must not divert it to the conic solver.
     fun = lambda x: x[0] ** 2 + x[1] ** 2 - 3 * x[0] - 4 * x[1]
     jac = lambda x: np.array([2 * x[0] - 3, 2 * x[1] - 4])
-    res = minimize(fun, [0.5, 0.5], jac=jac, bounds=[(0, 1), (0, 1)])
+    res = minimize(fun, [0.5, 0.5], jac=jac, bounds=[(0, 1), (0, 1)],
+                   options={"solver_selection": "auto"})
 
     assert _routed_to(res) == "qp-ipm"
