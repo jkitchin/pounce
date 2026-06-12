@@ -1438,6 +1438,20 @@ fn run_convex_qp(
         sol.iters,
     );
 
+    // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
+    // summary block and the JSON report below.
+    let res = sol.kkt_residuals(&qp);
+    // Ipopt-style summary so the objective/iteration count are scrapable by
+    // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
+    print::print_convex_summary(
+        sol.iters,
+        reported_obj,
+        res.primal_infeasibility,
+        res.dual_infeasibility,
+        res.complementarity,
+        res.kkt_error(),
+    );
+
     // Recover per-constraint duals once (mapped from the QP multipliers back
     // to per-`.nl`-constraint order); used by both the `.sol` and the JSON
     // report.
@@ -1480,9 +1494,8 @@ fn run_convex_qp(
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
         builder.stats.total_wallclock_time_secs = elapsed;
-        // Real final KKT residuals (from pounce-convex), so the harness sees
-        // genuine convergence numbers rather than zeros.
-        let res = sol.kkt_residuals(&qp);
+        // Real final KKT residuals (from pounce-convex, computed above), so the
+        // harness sees genuine convergence numbers rather than zeros.
         builder.stats.final_constr_viol = res.primal_infeasibility;
         builder.stats.final_dual_inf = res.dual_infeasibility;
         builder.stats.final_compl = res.complementarity;
@@ -1581,6 +1594,20 @@ fn run_convex_socp(
         sol.iters,
     );
 
+    // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
+    // summary block and the JSON report below.
+    let res = sol.kkt_residuals(&qp);
+    // Ipopt-style summary so the objective/iteration count are scrapable by
+    // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
+    print::print_convex_summary(
+        sol.iters,
+        reported_obj,
+        res.primal_infeasibility,
+        res.dual_infeasibility,
+        res.complementarity,
+        res.kkt_error(),
+    );
+
     // Per-constraint duals, mapped from the cone multipliers back to `.nl`
     // constraint order (best-effort for the quadratic rows; see
     // `recover_socp_duals`).
@@ -1616,7 +1643,6 @@ fn run_convex_socp(
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
         builder.stats.total_wallclock_time_secs = elapsed;
-        let res = sol.kkt_residuals(&qp);
         builder.stats.final_constr_viol = res.primal_infeasibility;
         builder.stats.final_dual_inf = res.dual_infeasibility;
         builder.stats.final_compl = res.complementarity;

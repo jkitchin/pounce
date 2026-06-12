@@ -448,6 +448,42 @@ pub fn print_summary(
     );
 }
 
+/// Emit an Ipopt-style end-of-run summary for the dedicated convex
+/// (LP / QP / conic) IPM path. That path otherwise prints only a compact
+/// one-line result, so the `Number of Iterations....:` and
+/// `Objective...............:` lines the general NLP path emits are missing.
+/// Downstream consumers that parse Ipopt's summary block — notably the
+/// benchmark harness's `extract_obj`/`extract_iters` in
+/// `benchmarks/scripts/run_nl_bench.sh` — then see a null objective and zero
+/// iterations even though the solve succeeded. This prints the same labelled
+/// lines (objective + KKT residual rows) so those consumers capture the real
+/// values. The convex solver reports a single (unscaled, user-sense) objective
+/// and residuals, so the "(scaled)"/"(unscaled)" columns carry the same value.
+pub fn print_convex_summary(
+    iterations: usize,
+    objective: f64,
+    primal_inf: f64,
+    dual_inf: f64,
+    complementarity: f64,
+    kkt_error: f64,
+) {
+    println!();
+    println!();
+    println!("Number of Iterations....: {iterations}");
+    println!();
+    println!("                                   (scaled)                 (unscaled)");
+    let row = |label: &str, v: f64| {
+        println!("{label}:   {}    {}", fmt_ipopt(v), fmt_ipopt(v));
+    };
+    row("Objective...............", objective);
+    row("Dual infeasibility......", dual_inf);
+    row("Constraint violation....", primal_inf);
+    row("Variable bound violation", 0.0);
+    row("Complementarity.........", complementarity);
+    row("Overall NLP error.......", kkt_error);
+    println!();
+}
+
 /// Format a number in Ipopt's scientific notation: 16-digit mantissa,
 /// signed 2-digit exponent (e.g. `3.7952009505566139e+03`). Rust's
 /// `{:.16e}` is close but emits a 1-digit exponent without leading

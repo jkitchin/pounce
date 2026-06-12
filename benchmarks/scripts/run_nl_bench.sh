@@ -115,14 +115,24 @@ extract_iters() {
 extract_obj() {
   # Prefer the "Objective..." summary line; fall back to "Final objective
   # value: V". Returns a JSON-valid number, or "null" when the solver reported
-  # a non-numeric objective (nan/inf) or none. We take the first field after
-  # the label's colon rather than a trailing char-class match, because a value
-  # like "nan" otherwise causes the old regex to scrape the label text itself
-  # (e.g. the "e" of "Objective" + dot-fill) and emit invalid JSON.
+  # a non-numeric objective (nan/inf) or none.
+  #
+  # Ipopt's summary prints TWO columns — "(scaled)  (unscaled)" — and pounce's
+  # NLP path mirrors that format. We scrape the LAST field (`$NF`), i.e. the
+  # UNSCALED (true, user-sense) objective. Taking the first column instead
+  # would record Ipopt's gradient-SCALED objective, which differs from the
+  # true optimum whenever nlp_scaling_method activates (large objective
+  # gradient norm — common on LPs with big cost vectors). The dedicated convex
+  # solver (pounce-convex) reports only the true unscaled objective, so
+  # scraping the scaled column made convex vs. NLP/Ipopt objectives spuriously
+  # disagree even though both reached the identical optimum. `$NF` also handles
+  # the single-value "Final objective value: V" fallback correctly. We strip
+  # everything up to the label's colon first so a non-numeric value like "nan"
+  # can't cause the field split to scrape the label text and emit invalid JSON.
   local line v
   line=$(grep -E 'Objective[. :]+' "$1" | tail -1)
   [ -z "$line" ] && line=$(grep -E 'Final objective[. :]+' "$1" | tail -1)
-  v=$(printf '%s\n' "$line" | sed -E 's/^.*://' | awk '{print $1}')
+  v=$(printf '%s\n' "$line" | sed -E 's/^.*://' | awk '{print $NF}')
   if printf '%s' "$v" | grep -qE '^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$'; then
     printf '%s' "$v"
   else

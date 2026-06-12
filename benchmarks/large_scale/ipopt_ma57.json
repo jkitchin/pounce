@@ -1,7 +1,7 @@
 [
-  {"solver":"ipopt","name":"bratu","n":9998,"m":9998,"status":"Solve_Succeeded","objective":0.0000000000000000e+00,"iterations":2,"solve_time":0.085736},
-  {"solver":"ipopt","name":"optcontrol","n":100001,"m":50001,"status":"Solve_Succeeded","objective":1.1734281339218713e-01,"iterations":1,"solve_time":0.430522},
-  {"solver":"ipopt","name":"poisson","n":80000,"m":40000,"status":"Solve_Succeeded","objective":9.9470023228081850e-02,"iterations":1,"solve_time":0.921440},
-  {"solver":"ipopt","name":"rosenbrock","n":2000,"m":0,"status":"Solve_Succeeded","objective":1.0000000000000000e+00,"iterations":1518,"solve_time":1.176061},
-  {"solver":"ipopt","name":"sparseqp","n":50000,"m":50000,"status":"Solve_Succeeded","objective":-1.2499816987360637e+04,"iterations":6,"solve_time":0.518181}
+  {"solver":"ipopt","name":"bratu","n":9998,"m":9998,"status":"Solve_Succeeded","objective":0.0000000000000000e+00,"iterations":2,"solve_time":0.137750},
+  {"solver":"ipopt","name":"optcontrol","n":100001,"m":50001,"status":"Solve_Succeeded","objective":1.1734281339218713e-01,"iterations":1,"solve_time":0.425301},
+  {"solver":"ipopt","name":"poisson","n":80000,"m":40000,"status":"Solve_Succeeded","objective":9.9470023228081850e-02,"iterations":1,"solve_time":7.023972},
+  {"solver":"ipopt","name":"rosenbrock","n":2000,"m":0,"status":"Solve_Succeeded","objective":1.0000000000000000e+00,"iterations":1518,"solve_time":1.272494},
+  {"solver":"ipopt","name":"sparseqp","n":50000,"m":50000,"status":"Solve_Succeeded","objective":-1.2499816987360637e+04,"iterations":6,"solve_time":0.573160}
 ]

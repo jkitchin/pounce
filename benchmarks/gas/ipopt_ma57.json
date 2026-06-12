@@ -1,6 +1,6 @@
 [
-  {"solver":"ipopt","name":"gaslib11_dynamic","n":2542,"m":2492,"status":"Solve_Succeeded","objective":1.6986405294102997e+00,"iterations":20,"solve_time":0.067149},
-  {"solver":"ipopt","name":"gaslib11_steady","n":204,"m":200,"status":"Solve_Succeeded","objective":3.2855597132974652e-02,"iterations":18,"solve_time":0.039635},
-  {"solver":"ipopt","name":"gaslib40_dynamic","n":21058,"m":20908,"status":"Infeasible_Problem_Detected","objective":5.7027489964107211e+01,"iterations":249,"solve_time":4.479564},
-  {"solver":"ipopt","name":"gaslib40_steady","n":1694,"m":1682,"status":"Solve_Succeeded","objective":1.2899875309882551e+00,"iterations":81,"solve_time":0.114505}
+  {"solver":"ipopt","name":"gaslib11_dynamic","n":2542,"m":2492,"status":"Solve_Succeeded","objective":1.6986405294102997e+00,"iterations":20,"solve_time":0.113273},
+  {"solver":"ipopt","name":"gaslib11_steady","n":204,"m":200,"status":"Solve_Succeeded","objective":3.2855597132974652e-02,"iterations":18,"solve_time":0.048679},
+  {"solver":"ipopt","name":"gaslib40_dynamic","n":21058,"m":20908,"status":"Infeasible_Problem_Detected","objective":5.7027489964107211e+01,"iterations":249,"solve_time":6.526841},
+  {"solver":"ipopt","name":"gaslib40_steady","n":1694,"m":1682,"status":"Solve_Succeeded","objective":1.2899875309882551e+00,"iterations":81,"solve_time":0.212016}
 ]

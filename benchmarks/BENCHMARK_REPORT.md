@@ -1,12 +1,12 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-06-04 19:15:02
+Generated: 2026-06-11 21:49:49
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.3.1-dev (main @ 37133a7-dirty) |
+| POUNCE | v0.4.0 (main @ 659d98a-dirty) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -15,7 +15,7 @@ Generated: 2026-06-04 19:15:02
 POUNCE results were produced this run by `make -C benchmarks
 <suite>-run` (pounce only). The Ipopt column is a saved reference
 (`make -C benchmarks ipopt-reference`), rerun only when explicitly
-regenerated — generated 2026-06-04 19:15:02 EDT on Johns-Mac-mini.local (Darwin 25.5.0 arm64), git 37133a7, timelimit 300s. Ipopt solve *times* are
+regenerated — generated 2026-06-11 21:49:49 EDT on Johns-Mac-mini.local (Darwin 25.5.0 arm64), git 659d98a, timelimit 300s. Ipopt solve *times* are
 from that reference machine and only comparable to POUNCE when this
 report is generated on the same host.
 
@@ -38,11 +38,11 @@ smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Optimal (strict) | **1271/1326** (95.9%) | **1233/1326** (93.0%) |
-| Acceptable (informational, *not* counted as solved) | 15 | 25 |
-| Solved exclusively (strict Optimal) | 44 | 6 |
-| Both Optimal | 1227 | |
-| Matching objectives (< 0.01%) | 1216/1227 | |
+| Optimal (strict) | **1213/1326** (91.5%) | **1237/1326** (93.3%) |
+| Acceptable (informational, *not* counted as solved) | 6 | 24 |
+| Solved exclusively (strict Optimal) | 41 | 65 |
+| Both Optimal | 1172 | |
+| Matching objectives (< 0.01%) | 1133/1172 | |
 
 > **Note:** All headline counts use strict Optimal status only. `Acceptable`
 > means the iterate met relaxed tolerances but not the requested tolerance —
@@ -58,13 +58,13 @@ smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.
 
 **Performance profile by wall-clock time.** Valid because POUNCE and Ipopt-MA57 were run interleaved on this host (see Provenance).
   
-_1287 problems; solvers: pounce, ipopt._
+_1284 problems; solvers: pounce, ipopt._
 
 ![**Performance profile by iteration count** — machine-independent, so it stays comparable across hosts and reruns.](figures/profile_performance_iters.png)
 
 **Performance profile by iteration count** — machine-independent, so it stays comparable across hosts and reruns.
   
-_1287 problems; solvers: pounce, ipopt._
+_1284 problems; solvers: pounce, ipopt._
 
 ![**Data profile (absolute-time ECDF).** Fraction of problems solved within a given wall-clock budget, without best-solver normalization — reads directly as “how many by 1 s? by 10 s?”.](figures/profile_data_time.png)
 
@@ -76,16 +76,16 @@ _1326 problems; solvers: pounce, ipopt._
 
 | Suite | Problems | POUNCE Optimal | Ipopt Optimal | POUNCE only | Ipopt only | Both Optimal | Match |
 |-------|----------|---------------|--------------|-------------|------------|--------------|-------|
-| Vanderbei | 733 | 703 (95.9%) | 684 (93.3%) | 21 | 2 | 682 | 673/682 |
+| Vanderbei | 733 | 678 (92.5%) | 683 (93.2%) | 18 | 23 | 660 | 650/660 |
 | Electrolyte | 13 | 13 (100.0%) | 13 (100.0%) | 0 | 0 | 13 | 13/13 |
 | Grid | 4 | 4 (100.0%) | 4 (100.0%) | 0 | 0 | 4 | 4/4 |
 | CHO | 1 | 1 (100.0%) | 1 (100.0%) | 0 | 0 | 1 | 1/1 |
-| Water | 6 | 6 (100.0%) | 6 (100.0%) | 0 | 0 | 6 | 4/6 |
+| Water | 6 | 6 (100.0%) | 6 (100.0%) | 0 | 0 | 6 | 2/6 |
 | Gas | 4 | 3 (75.0%) | 3 (75.0%) | 0 | 0 | 3 | 3/3 |
 | LargeScale | 5 | 5 (100.0%) | 5 (100.0%) | 0 | 0 | 5 | 5/5 |
-| Mittelmann | 47 | 41 (87.2%) | 33 (70.2%) | 9 | 1 | 32 | 32/32 |
-| QP | 138 | 136 (98.6%) | 132 (95.7%) | 4 | 0 | 132 | 132/132 |
-| LP | 371 | 358 (96.5%) | 352 (94.9%) | 9 | 3 | 349 | 349/349 |
+| Mittelmann | 47 | 43 (91.5%) | 37 (78.7%) | 6 | 0 | 37 | 36/37 |
+| QP | 138 | 126 (91.3%) | 133 (96.4%) | 2 | 9 | 124 | 123/124 |
+| LP | 371 | 333 (89.8%) | 352 (94.9%) | 14 | 33 | 319 | 296/319 |
 | LPopt | 4 | 1 (25.0%) | 0 (0.0%) | 1 | 0 | 0 | 0/1 |
 
 ## Vanderbei Reference Cross-Check
@@ -94,172 +94,59 @@ Per-problem status from R. Vanderbei's `cute_table.pdf` (`vanderbei/cute_table_s
 
 | cute_table status | problems | POUNCE solved | meaning |
 |---|---|---|---|
-| optimum | 684 | 668 | finite reference optimum exists (expected-solvable) |
+| optimum | 684 | 643 | finite reference optimum exists (expected-solvable) |
 | hard | 14 | 8 | in table, but SNOPT+NITRO+LOQO all hit time/iter limits |
 | infeasible | 3 | 0 | a reference solver declared infeasibility |
 | unbounded | 1 | 0 | unbounded below |
 | untabulated | 31 | 27 | not in cute_table — no reference datum |
 
-**POUNCE solved 668 / 684 expected-solvable (97.7%).** The hard / infeasible / unbounded / untabulated rows above are excluded from this denominator — a POUNCE failure there is shared with the commercial reference solvers and is not counted as a miss.
+**POUNCE solved 643 / 684 expected-solvable (94.0%).** The hard / infeasible / unbounded / untabulated rows above are excluded from this denominator — a POUNCE failure there is shared with the commercial reference solvers and is not counted as a miss.
 
-**Genuine misses — expected-solvable but POUNCE did not reach Optimal (16):**
+**Genuine misses — expected-solvable but POUNCE did not reach Optimal (41):**
 
-> brainpc0 britgas coshfun cresc100 cresc132 cresc50 deconvb flosp2hh grouping himmelbj nonmsqrt orthrds2 palmer5e sineali ssebnln steenbrc
+> airport brainpc0 brainpc2 britgas coshfun cresc100 cresc132 cresc50 dallass deconvb eigena2 flosp2hh grouping himmelbj hs012 hs043 hs065 kissing liswet1 liswet10 liswet11 liswet12 liswet7 liswet8 liswet9 makela2 minmaxbd nonmsqrt orthrds2 orthrege palmer1c palmer5e palmer7c polak3 polak4 powell20 rosenmmx sawpath sineali steenbrc steenbrf
 
-**Objective disagreements vs. cute_table reference (133)** — POUNCE converged but to a different value than the agreed reference optimum (possible wrong basin or misread problem):
+**Objective disagreements vs. cute_table reference (20)** — POUNCE converged but to a different value than the agreed reference optimum (possible wrong basin or misread problem):
 
 | Problem | POUNCE obj | reference obj | rel. diff |
 |---|---|---|---|
+| quartc | 2.488823e+02 | 2.406057e-18 | 2.5e+02 |
 | broydn7d | 3.450050e+02 | 3.823419e+00 | 8.9e+01 |
-| liswet9 | 1.899426e+03 | 2.499976e+01 | 7.5e+01 |
-| liswet8 | 6.509716e+02 | 2.499977e+01 | 2.5e+01 |
-| liswet7 | 3.911520e+02 | 2.499979e+01 | 1.5e+01 |
-| eigenbco | 5.617567e-26 | 9.000000e+00 | 1.0e+00 |
-| scurly10 | -1.003163e-02 | -1.003163e+06 | 1.0e+00 |
-| scurly20 | -1.003163e-02 | -1.003163e+06 | 1.0e+00 |
-| scurly30 | -1.003163e-02 | -1.003163e+06 | 1.0e+00 |
-| meyer3 | 8.794586e-07 | 8.794586e+01 | 1.0e+00 |
-| djtl | -8.951545e-05 | -8.951545e+03 | 1.0e+00 |
-| hs099 | -3.456347e+02 | -8.310799e+08 | 1.0e+00 |
-| spanhyd | 5.193068e-04 | 2.397380e+02 | 1.0e+00 |
-| himmelbd | 6.699286e-05 | 5.922563e+00 | 1.0e+00 |
-| arglinb | 1.469851e-04 | 4.634146e+00 | 1.0e+00 |
-| hs084 | -2.872406e+02 | -5.280335e+06 | 1.0e+00 |
-| brownden | 4.823391e+00 | 8.582220e+04 | 1.0e+00 |
-| arglinc | 3.679793e-04 | 6.135135e+00 | 1.0e+00 |
-| lakes | 6.298140e+01 | 3.505248e+05 | 1.0e+00 |
-| optctrl3 | 5.120041e-01 | 2.048017e+03 | 1.0e+00 |
-| optctrl6 | 5.120041e-01 | 2.048017e+03 | 1.0e+00 |
-| bdqrtic | 1.333272e+00 | 3.983818e+03 | 1.0e+00 |
-| penalty2 | 3.848429e+01 | 9.709608e+04 | 1.0e+00 |
-| flosp2hm | 1.598325e-02 | 3.887126e+01 | 1.0e+00 |
-| flosp2th | 4.111842e-03 | 1.000000e+01 | 1.0e+00 |
-| flosp2tm | 4.111842e-03 | 1.000000e+01 | 1.0e+00 |
-| flosp2tl | 4.111842e-03 | 1.000000e+01 | 1.0e+00 |
-| flosp2hl | 1.598295e-02 | 3.887054e+01 | 1.0e+00 |
-| bratu1d | -4.242482e-03 | -8.518927e+00 | 1.0e+00 |
-| dallasl | -1.048696e+02 | -2.026041e+05 | 1.0e+00 |
-| hs064 | 4.375194e+00 | 6.299842e+03 | 1.0e+00 |
-| scosine | -8.553258e+00 | -9.999000e+03 | 1.0e+00 |
-| dallasm | -5.386822e+01 | -4.819819e+04 | 1.0e+00 |
-| jensmp | 1.422873e-01 | 1.243622e+02 | 1.0e+00 |
-| errinros | 4.833189e-02 | 3.990415e+01 | 1.0e+00 |
-| dallass | -4.053642e+01 | -3.239323e+04 | 1.0e+00 |
-| cvxbqp1 | 4.286142e+03 | 2.250225e+06 | 1.0e+00 |
-| ncvxbqp1 | -3.781988e+07 | -1.985544e+10 | 1.0e+00 |
-| cvxqp2 | 1.558904e+05 | 8.184246e+07 | 1.0e+00 |
-| cvxqp3 | 2.204021e+05 | 1.157111e+08 | 1.0e+00 |
-| palmer7e | 2.398370e-02 | 1.015390e+01 | 1.0e+00 |
-| lch | -1.649122e-02 | -4.318289e+00 | 1.0e+00 |
-| avion2 | 4.115108e+05 | 9.468017e+07 | 1.0e+00 |
-| chainwoo | 2.788601e-01 | 6.362471e+01 | 1.0e+00 |
-| hs119 | 1.313276e+00 | 2.448997e+02 | 9.9e-01 |
-| palmer1b | 2.409219e-02 | 3.447355e+00 | 9.9e-01 |
-| 3pk | 1.677022e-02 | 1.720119e+00 | 9.9e-01 |
-| hs062 | -2.624873e+02 | -2.627251e+04 | 9.9e-01 |
-| himmelbf | 3.640806e+00 | 3.185717e+02 | 9.9e-01 |
-| model | 7.764926e+01 | 5.742163e+03 | 9.9e-01 |
-| cragglvy | 2.988096e+01 | 1.688215e+03 | 9.8e-01 |
-| steenbre | 5.197370e+02 | 2.745916e+04 | 9.8e-01 |
-| ncvxqp4 | -1.789977e+06 | -9.397879e+07 | 9.8e-01 |
-| cvxqp1 | 2.071451e+04 | 1.087512e+06 | 9.8e-01 |
-| hs107 | 1.027441e+02 | 5.055012e+03 | 9.8e-01 |
-| ncvxqp2 | -1.541020e+06 | -5.781269e+07 | 9.7e-01 |
-| steenbrd | 2.614067e+02 | 9.030082e+03 | 9.7e-01 |
-| steenbrb | 2.627318e+02 | 9.075855e+03 | 9.7e-01 |
-| palmer4b | 2.097297e-01 | 6.835139e+00 | 9.7e-01 |
-| palmer3b | 1.373521e-01 | 4.227647e+00 | 9.7e-01 |
+| dqrtic | 3.935818e+01 | 1.654558e-17 | 3.9e+01 |
+| penalty1 | 6.439498e+00 | 9.686175e-03 | 6.4e+00 |
+| eigenbco | 1.024905e-16 | 9.000000e+00 | 1.0e+00 |
 | orthregd | 1.523900e+03 | 4.245801e+04 | 9.6e-01 |
-| palmer1 | 4.262081e+02 | 1.175460e+04 | 9.6e-01 |
-| lsnnodoc | 4.808004e+00 | 1.231124e+02 | 9.6e-01 |
-| hs020 | 1.670770e+00 | 4.019873e+01 | 9.6e-01 |
-| hs017 | 4.156277e-02 | 1.000000e+00 | 9.6e-01 |
-| eigenc2 | 4.011484e+01 | 7.718095e+02 | 9.5e-01 |
 | orthrgds | 1.523900e+03 | 2.603509e+04 | 9.4e-01 |
-| palmer5d | 5.193696e+00 | 8.733940e+01 | 9.4e-01 |
-| sseblin | 1.078040e+06 | 1.617060e+07 | 9.3e-01 |
-| palmer2 | 2.646634e+02 | 3.651090e+03 | 9.3e-01 |
-| freuroth | 4.458645e+04 | 6.081592e+05 | 9.3e-01 |
 | bt4 | -3.704768e+00 | -4.551055e+01 | 9.2e-01 |
-| explin | -6.031302e+04 | -7.237563e+05 | 9.2e-01 |
-| expquad | -3.020500e+05 | -3.624600e+06 | 9.2e-01 |
-| explin2 | -6.037160e+04 | -7.244591e+05 | 9.2e-01 |
-| qrtquad | -3.065620e+05 | -3.648088e+06 | 9.2e-01 |
-| powell20 | 5.211962e+06 | 5.214578e+07 | 9.0e-01 |
-| palmer5c | 2.632140e-01 | 2.128087e+00 | 8.8e-01 |
-| hs103 | 7.378044e+01 | 5.436680e+02 | 8.6e-01 |
-| hs102 | 1.239180e+02 | 9.118806e+02 | 8.6e-01 |
-| hs101 | 2.461046e+02 | 1.809765e+03 | 8.6e-01 |
-| hs019 | -1.157377e+03 | -6.961814e+03 | 8.3e-01 |
 | camel6 | -2.154638e-01 | -1.031628e+00 | 7.9e-01 |
-| catena | -5.175437e+03 | -2.307775e+04 | 7.8e-01 |
-| hong | 3.964576e-01 | 1.347307e+00 | 7.1e-01 |
-| fccu | 3.716370e+00 | 1.114911e+01 | 6.7e-01 |
-| hs083 | -1.059902e+04 | -3.066554e+04 | 6.5e-01 |
-| palmer1d | 1.550473e-06 | 6.526826e-01 | 6.5e-01 |
-| palmer2b | 1.952286e-02 | 6.233947e-01 | 6.0e-01 |
-| palmer7c | 1.385267e-05 | 6.019857e-01 | 6.0e-01 |
-| batch | 1.036721e+05 | 2.591804e+05 | 6.0e-01 |
-| gpp | 5.783505e+03 | 1.440093e+04 | 6.0e-01 |
-| liswet10 | 3.930236e+01 | 2.499967e+01 | 5.7e-01 |
-| harkerp2 | -3.697727e-05 | -5.000000e-01 | 5.0e-01 |
-| hs114 | -9.211388e+02 | -1.768807e+03 | 4.8e-01 |
-| hs105 | 5.918833e+02 | 1.136361e+03 | 4.8e-01 |
-| eigena2 | 4.583333e+01 | 8.250000e+01 | 4.4e-01 |
 | fletcher | 1.165685e+01 | 1.952537e+01 | 4.0e-01 |
-| eigenb2 | 1.000000e+00 | 1.600000e+00 | 3.7e-01 |
-| dixmaand | 6.503642e-01 | 1.000000e+00 | 3.5e-01 |
-| dixmaanh | 6.560532e-01 | 1.000000e+00 | 3.4e-01 |
-| dixmaanl | 6.599015e-01 | 1.000000e+00 | 3.4e-01 |
-| liswet12 | -3.379107e+03 | -5.026353e+03 | 3.3e-01 |
-| smmpsf | 7.321578e+05 | 1.046985e+06 | 3.0e-01 |
 | discs | 1.444952e+01 | 1.200008e+01 | 2.0e-01 |
-| cliff | 2.135747e-09 | 1.997866e-01 | 2.0e-01 |
-| engval1 | 4.474733e+03 | 5.548668e+03 | 1.9e-01 |
-| hs093 | 1.102206e+02 | 1.350760e+02 | 1.8e-01 |
-| hairy | 1.639999e+01 | 2.000000e+01 | 1.8e-01 |
-| qudlin | -6.000000e+03 | -7.200000e+03 | 1.7e-01 |
-| palmer8c | 1.415888e-05 | 1.597681e-01 | 1.6e-01 |
 | hs044 | -1.300000e+01 | -1.500000e+01 | 1.3e-01 |
-| hs113 | 2.170197e+01 | 2.430621e+01 | 1.1e-01 |
-| palmer1c | 1.984316e-08 | 9.759799e-02 | 9.8e-02 |
-| palmer1a | 4.213860e-04 | 8.988363e-02 | 8.9e-02 |
 | avgasb | -4.483219e+00 | -4.132819e+00 | 8.5e-02 |
-| liswet1 | 2.712029e+01 | 2.500304e+01 | 8.5e-02 |
-| mwright | 2.312853e+01 | 2.497881e+01 | 7.4e-02 |
-| palmer8a | 1.927299e-03 | 7.400970e-02 | 7.2e-02 |
-| palmer6a | 2.800103e-03 | 5.594884e-02 | 5.3e-02 |
-| palmer4c | 4.753927e-07 | 5.031070e-02 | 5.0e-02 |
-| palmer4a | 7.908980e-04 | 4.060614e-02 | 4.0e-02 |
-| expfitc | 1.159858e-04 | 2.330257e-02 | 2.3e-02 |
-| palmer3a | 4.343676e-04 | 2.043142e-02 | 2.0e-02 |
-| palmer3c | 1.843055e-07 | 1.953764e-02 | 2.0e-02 |
-| palmer2a | 3.838581e-04 | 1.716074e-02 | 1.7e-02 |
-| palmer6c | 1.644281e-06 | 1.638742e-02 | 1.6e-02 |
-| palmer2c | 3.935677e-08 | 1.442139e-02 | 1.4e-02 |
-| palmer5b | 6.582649e-06 | 9.752493e-03 | 9.7e-03 |
-| penalty1 | 6.439498e-08 | 9.686175e-03 | 9.7e-03 |
-| palmer8e | 5.501854e-05 | 6.339307e-03 | 6.3e-03 |
-| twirism1 | -1.001289e+00 | -1.006758e+00 | 5.4e-03 |
-| expfitb | 1.249092e-04 | 5.019366e-03 | 4.9e-03 |
+| steenbre | 2.851495e+04 | 2.745916e+04 | 3.8e-02 |
+| haldmads | 3.195581e-02 | 1.223712e-04 | 3.2e-02 |
+| errinros | 4.040449e+01 | 3.990415e+01 | 1.3e-02 |
+| cliff | 2.072380e-01 | 1.997866e-01 | 7.5e-03 |
+| lch | -4.287718e+00 | -4.318289e+00 | 7.1e-03 |
 | trainh | 1.231200e+01 | 1.236996e+01 | 4.7e-03 |
+| twirism1 | -1.008371e+00 | -1.006758e+00 | 1.6e-03 |
 
 ## Vanderbei Suite — Performance
 
-On 682 commonly-solved problems:
+On 660 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 37.6ms | 37.8ms |
-| Total time | 350.83s | 252.00s |
-| Mean iterations | 50.9 | 47.2 |
-| Median iterations | 16 | 16 |
+| Median time | 38.7ms | 44.3ms |
+| Total time | 286.33s | 230.84s |
+| Mean iterations | 47.8 | 46.8 |
+| Median iterations | 15 | 16 |
 
-- **Geometric mean speedup**: 0.8x
-- **Median speedup**: 1.0x
-- POUNCE faster: 332/682 (49%)
-- POUNCE 10x+ faster: 0/682
-- Ipopt faster: 350/682
+- **Geometric mean speedup**: 0.9x
+- **Median speedup**: 1.1x
+- POUNCE faster: 388/660 (59%)
+- POUNCE 10x+ faster: 1/660
+- Ipopt faster: 272/660
 
 ## Electrolyte Suite — Performance
 
@@ -267,13 +154,13 @@ On 13 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 30.3ms | 35.9ms |
-| Total time | 412.2ms | 476.5ms |
-| Mean iterations | 12.5 | 12.2 |
+| Median time | 30.1ms | 37.6ms |
+| Total time | 405.4ms | 503.3ms |
+| Mean iterations | 14.8 | 12.2 |
 | Median iterations | 10 | 10 |
 
 - **Geometric mean speedup**: 1.2x
-- **Median speedup**: 1.2x
+- **Median speedup**: 1.3x
 - POUNCE faster: 12/13 (92%)
 - POUNCE 10x+ faster: 0/13
 - Ipopt faster: 1/13
@@ -284,13 +171,13 @@ On 4 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 38.5ms | 39.4ms |
-| Total time | 321.7ms | 179.1ms |
+| Median time | 33.5ms | 41.9ms |
+| Total time | 141.2ms | 157.2ms |
 | Mean iterations | 15.5 | 15.5 |
 | Median iterations | 17 | 17 |
 
-- **Geometric mean speedup**: 0.8x
-- **Median speedup**: 1.2x
+- **Geometric mean speedup**: 1.1x
+- **Median speedup**: 1.1x
 - POUNCE faster: 3/4 (75%)
 - POUNCE 10x+ faster: 0/4
 - Ipopt faster: 1/4
@@ -301,13 +188,13 @@ On 1 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 6.54s | 1.77s |
-| Total time | 6.54s | 1.77s |
-| Mean iterations | 43.0 | 33.0 |
-| Median iterations | 43 | 33 |
+| Median time | 4.20s | 1.76s |
+| Total time | 4.20s | 1.76s |
+| Mean iterations | 36.0 | 33.0 |
+| Median iterations | 36 | 33 |
 
-- **Geometric mean speedup**: 0.3x
-- **Median speedup**: 0.3x
+- **Geometric mean speedup**: 0.4x
+- **Median speedup**: 0.4x
 - POUNCE faster: 0/1 (0%)
 - POUNCE 10x+ faster: 0/1
 - Ipopt faster: 1/1
@@ -318,16 +205,16 @@ On 6 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 111.8ms | 78.1ms |
-| Total time | 724.6ms | 499.2ms |
-| Mean iterations | 209.3 | 205.2 |
-| Median iterations | 183 | 209 |
+| Median time | 141.2ms | 122.5ms |
+| Total time | 782.6ms | 696.0ms |
+| Mean iterations | 192.7 | 205.2 |
+| Median iterations | 191 | 209 |
 
-- **Geometric mean speedup**: 0.7x
-- **Median speedup**: 0.6x
-- POUNCE faster: 1/6 (17%)
+- **Geometric mean speedup**: 0.9x
+- **Median speedup**: 0.9x
+- POUNCE faster: 2/6 (33%)
 - POUNCE 10x+ faster: 0/6
-- Ipopt faster: 5/6
+- Ipopt faster: 4/6
 
 ## Gas Suite — Performance
 
@@ -335,16 +222,16 @@ On 3 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 92.4ms | 67.1ms |
-| Total time | 301.7ms | 221.3ms |
-| Mean iterations | 39.7 | 39.7 |
+| Median time | 89.9ms | 113.3ms |
+| Total time | 302.6ms | 374.0ms |
+| Mean iterations | 40.0 | 39.7 |
 | Median iterations | 20 | 20 |
 
-- **Geometric mean speedup**: 0.8x
-- **Median speedup**: 0.7x
-- POUNCE faster: 1/3 (33%)
+- **Geometric mean speedup**: 1.3x
+- **Median speedup**: 1.3x
+- POUNCE faster: 3/3 (100%)
 - POUNCE 10x+ faster: 0/3
-- Ipopt faster: 2/3
+- Ipopt faster: 0/3
 
 ## LargeScale Suite — Performance
 
@@ -352,67 +239,67 @@ On 5 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 631.4ms | 518.2ms |
-| Total time | 5.00s | 3.13s |
-| Mean iterations | 306.6 | 305.6 |
-| Median iterations | 1 | 2 |
+| Median time | 2.79s | 573.2ms |
+| Total time | 9.74s | 9.43s |
+| Mean iterations | 308.0 | 305.6 |
+| Median iterations | 5 | 2 |
 
-- **Geometric mean speedup**: 0.8x
-- **Median speedup**: 0.9x
+- **Geometric mean speedup**: 0.7x
+- **Median speedup**: 0.6x
 - POUNCE faster: 2/5 (40%)
 - POUNCE 10x+ faster: 0/5
 - Ipopt faster: 3/5
 
 ## Mittelmann Suite — Performance
 
-On 32 commonly-solved problems:
+On 37 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 6.53s | 3.05s |
-| Total time | 931.38s | 754.83s |
-| Mean iterations | 142.9 | 86.9 |
-| Median iterations | 34 | 34 |
+| Median time | 9.16s | 5.65s |
+| Total time | 1243.98s | 1301.60s |
+| Mean iterations | 107.9 | 105.4 |
+| Median iterations | 35 | 41 |
 
-- **Geometric mean speedup**: 0.6x
+- **Geometric mean speedup**: 0.7x
 - **Median speedup**: 0.6x
-- POUNCE faster: 11/32 (34%)
-- POUNCE 10x+ faster: 0/32
-- Ipopt faster: 21/32
+- POUNCE faster: 12/37 (32%)
+- POUNCE 10x+ faster: 0/37
+- Ipopt faster: 25/37
 
 ## QP Suite — Performance
 
-On 132 commonly-solved problems:
+On 124 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 118.1ms | 103.7ms |
-| Total time | 112.81s | 120.58s |
-| Mean iterations | 76.0 | 76.1 |
-| Median iterations | 24 | 24 |
+| Median time | 74.1ms | 85.7ms |
+| Total time | 137.17s | 162.89s |
+| Mean iterations | 32.0 | 59.3 |
+| Median iterations | 19 | 22 |
 
-- **Geometric mean speedup**: 0.9x
-- **Median speedup**: 0.9x
-- POUNCE faster: 61/132 (46%)
-- POUNCE 10x+ faster: 0/132
-- Ipopt faster: 71/132
+- **Geometric mean speedup**: 1.1x
+- **Median speedup**: 1.1x
+- POUNCE faster: 74/124 (60%)
+- POUNCE 10x+ faster: 1/124
+- Ipopt faster: 50/124
 
 ## LP Suite — Performance
 
-On 349 commonly-solved problems:
+On 319 commonly-solved problems:
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Median time | 211.1ms | 153.1ms |
-| Total time | 1116.35s | 390.90s |
-| Mean iterations | 109.7 | 106.9 |
-| Median iterations | 56 | 56 |
+| Median time | 123.3ms | 147.5ms |
+| Total time | 226.14s | 396.02s |
+| Mean iterations | 29.3 | 107.1 |
+| Median iterations | 29 | 56 |
 
-- **Geometric mean speedup**: 0.7x
-- **Median speedup**: 0.7x
-- POUNCE faster: 56/349 (16%)
-- POUNCE 10x+ faster: 1/349
-- Ipopt faster: 293/349
+- **Geometric mean speedup**: 1.2x
+- **Median speedup**: 1.1x
+- POUNCE faster: 181/319 (57%)
+- POUNCE 10x+ faster: 9/319
+- Ipopt faster: 138/319
 
 ## Failure Analysis
 
@@ -420,15 +307,15 @@ On 349 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Acceptable | 4 | 6 |
-| Infeasible_Problem_Detected | 4 | 4 |
+| Acceptable | 6 | 6 |
+| Infeasible_Problem_Detected | 5 | 4 |
 | Invalid_Number_Detected | 1 | 3 |
-| Maximum_CpuTime_Exceeded | 2 | 7 |
-| Maximum_Iterations_Exceeded | 13 | 16 |
-| Restoration_Failed | 0 | 3 |
+| Maximum_CpuTime_Exceeded | 3 | 8 |
+| Maximum_Iterations_Exceeded | 15 | 16 |
+| Restoration_Failed | 1 | 3 |
 | Search_Direction_Becomes_Too_Small | 1 | 1 |
-| Solver_Error | 5 | 2 |
-| Unknown_Error | 0 | 7 |
+| Solver_Error | 19 | 2 |
+| Unknown_Error | 4 | 7 |
 
 ### Gas Suite
 
@@ -440,8 +327,7 @@ On 349 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Acceptable | 1 | 0 |
-| Maximum_CpuTime_Exceeded | 5 | 10 |
+| Maximum_CpuTime_Exceeded | 4 | 6 |
 | Maximum_Iterations_Exceeded | 0 | 3 |
 | Solver_Error | 0 | 1 |
 
@@ -449,19 +335,21 @@ On 349 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Acceptable | 1 | 4 |
-| Maximum_CpuTime_Exceeded | 1 | 2 |
+| Acceptable | 0 | 4 |
+| Maximum_CpuTime_Exceeded | 0 | 1 |
+| Solver_Error | 12 | 0 |
 
 ### LP Suite
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Acceptable | 9 | 15 |
-| Infeasible_Problem_Detected | 1 | 1 |
-| Maximum_Iterations_Exceeded | 1 | 1 |
+| Acceptable | 0 | 14 |
+| Infeasible_Problem_Detected | 0 | 1 |
+| Maximum_CpuTime_Exceeded | 0 | 1 |
+| Maximum_Iterations_Exceeded | 0 | 1 |
 | Restoration_Failed | 0 | 1 |
-| Solver_Error | 2 | 0 |
-| Unknown_Error | 0 | 1 |
+| Solver_Error | 14 | 0 |
+| Unknown_Error | 24 | 1 |
 
 ### LPopt Suite
 
@@ -473,83 +361,130 @@ On 349 commonly-solved problems:
 
 | Problem | Suite | n | m | POUNCE status | Ipopt obj |
 |---------|-------|---|---|--------------|-----------|
-| model3 | LP | 3840 | 1609 | Acceptable | 1.750657e+03 |
-| model7 | LP | 8007 | 3358 | Acceptable | 4.942951e+03 |
+| LISWET1 | QP | 10002 | 10000 | Solver_Error | 2.712208e+01 |
+| LISWET10 | QP | 10002 | 10000 | Solver_Error | 3.930500e+01 |
+| LISWET11 | QP | 10002 | 10000 | Solver_Error | 4.655055e+01 |
+| LISWET12 | QP | 10002 | 10000 | Solver_Error | 1.672207e+03 |
+| LISWET7 | QP | 10002 | 10000 | Solver_Error | 3.911951e+02 |
+| LISWET8 | QP | 10002 | 10000 | Solver_Error | 6.509597e+02 |
+| LISWET9 | QP | 10002 | 10000 | Solver_Error | 1.899378e+03 |
+| POWELL20 | QP | 10000 | 10000 | Solver_Error | 5.208854e+10 |
+| QFORPLAN | QP | 421 | 135 | Solver_Error | 7.456631e+09 |
+| agg3 | LP | 302 | 516 | Unknown_Error | 1.031212e+07 |
+| airport | Vanderbei | 84 | 42 | Unknown_Error | 4.795270e+04 |
+| ch | LP | 5062 | 3682 | Unknown_Error | 9.257564e+05 |
+| delf001 | LP | 5462 | 3098 | Unknown_Error | 2.358603e+03 |
+| delf014 | LP | 5472 | 3170 | Unknown_Error | 1.534961e+02 |
+| delf022 | LP | 5472 | 3214 | Unknown_Error | 3.649904e+02 |
+| delf030 | LP | 5469 | 3199 | Unknown_Error | 2.538378e+02 |
+| delf036 | LP | 5459 | 3170 | Unknown_Error | 1.644569e+02 |
+| eigena2 | Vanderbei | 110 | 55 | Acceptable | 8.250000e+01 |
+| gen | LP | 2560 | 769 | Solver_Error | -1.097485e-05 |
+| gen1 | LP | 2560 | 769 | Solver_Error | -1.097485e-05 |
+| gen4 | LP | 4297 | 1537 | Solver_Error | -2.221401e-05 |
+| hs012 | Vanderbei | 2 | 1 | Solver_Error | -3.000000e+01 |
+| hs043 | Vanderbei | 4 | 3 | Unknown_Error | -4.400000e+01 |
+| hs065 | Vanderbei | 3 | 4 | Solver_Error | 9.535288e-01 |
+| kissing | Vanderbei | 127 | 903 | Acceptable | 8.454426e-01 |
+| kleemin7 | LP | 7 | 7 | Solver_Error | -1.000000e+12 |
+| kleemin8 | LP | 8 | 8 | Solver_Error | -1.000000e+14 |
+| large000 | LP | 6833 | 4239 | Unknown_Error | 7.260546e+01 |
+| large013 | LP | 6838 | 4248 | Unknown_Error | 5.710028e+02 |
+| large018 | LP | 6837 | 4297 | Unknown_Error | 2.146131e+02 |
+| large019 | LP | 6836 | 4300 | Unknown_Error | 5.255244e+02 |
+| large022 | LP | 6834 | 4312 | Unknown_Error | 3.774823e+02 |
+| large027 | LP | 6821 | 4275 | Unknown_Error | 3.337026e+02 |
+| liswet1 | Vanderbei | 10002 | 10000 | Solver_Error | 2.712029e+01 |
+| liswet10 | Vanderbei | 10002 | 10000 | Solver_Error | 3.930236e+01 |
+| liswet11 | Vanderbei | 10002 | 10000 | Solver_Error | 4.652759e+01 |
+| liswet12 | Vanderbei | 10002 | 10000 | Solver_Error | -3.379107e+03 |
+| liswet7 | Vanderbei | 10002 | 10000 | Solver_Error | 3.911520e+02 |
+| liswet8 | Vanderbei | 10002 | 10000 | Solver_Error | 6.509716e+02 |
+| liswet9 | Vanderbei | 10002 | 10000 | Solver_Error | 1.899426e+03 |
+| makela2 | Vanderbei | 3 | 3 | Unknown_Error | 7.200000e+00 |
+| minmaxbd | Vanderbei | 5 | 20 | Solver_Error | 1.157064e+02 |
+| model4 | LP | 4549 | 1337 | Unknown_Error | 1.112702e+06 |
+| nemspmm1 | LP | 8622 | 2342 | Unknown_Error | -3.274158e+05 |
+| orna1 | LP | 882 | 882 | Solver_Error | -5.044297e+08 |
+| orna2 | LP | 882 | 882 | Solver_Error | -5.864624e+08 |
+| orna3 | LP | 882 | 882 | Solver_Error | -5.840362e+08 |
+| orna4 | LP | 882 | 882 | Solver_Error | 6.721838e+08 |
+| orna7 | LP | 882 | 882 | Solver_Error | -5.837442e+08 |
 | orthrds2 | Vanderbei | 203 | 100 | Acceptable | 1.544297e+03 |
-| p0201 | LP | 201 | 133 | Solver_Error | 7.161458e+01 |
-| qcqp1000-1nc | Mittelmann | 1000 | 154 | Acceptable | -1.841514e+06 |
-| ssebnln | Vanderbei | 194 | 96 | Acceptable | 1.078040e+06 |
+| orthrege | Vanderbei | 36 | 20 | Acceptable | 3.868188e+00 |
+| palmer1c | Vanderbei | 8 | 0 | Solver_Error | 9.759799e-02 |
+| palmer7c | Vanderbei | 8 | 0 | Solver_Error | 6.019857e-01 |
+| pcb1000 | LP | 2428 | 1565 | Unknown_Error | 5.680946e+04 |
+| pcb3000 | LP | 6810 | 3960 | Unknown_Error | 1.374164e+05 |
+| pilot87 | LP | 4883 | 2030 | Unknown_Error | 3.017104e+02 |
+| pldd003b | LP | 3267 | 3069 | Unknown_Error | 4.032281e+00 |
+| pldd007b | LP | 3267 | 3069 | Unknown_Error | 4.041209e+00 |
+| polak4 | Vanderbei | 3 | 3 | Solver_Error | -3.513953e-09 |
+| powell20 | Vanderbei | 1000 | 1000 | Solver_Error | 5.214568e+07 |
+| rosenmmx | Vanderbei | 5 | 4 | Unknown_Error | -4.400000e+01 |
+| sawpath | Vanderbei | 593 | 786 | Infeasible_Problem_Detected | 1.815730e+02 |
+| seymourl | LP | 1372 | 4944 | Unknown_Error | 4.038465e+02 |
+| ship08l | LP | 4283 | 712 | Unknown_Error | 1.909055e+06 |
+| ship08s | LP | 2387 | 712 | Unknown_Error | 1.920098e+06 |
 
-## Wins (POUNCE Optimal, Ipopt not Optimal) — 44 problems
+## Wins (POUNCE Optimal, Ipopt not Optimal) — 41 problems
 
 | Problem | Suite | n | m | Ipopt status | POUNCE obj |
 |---------|-------|---|---|-------------|------------|
-| BOYD1 | QP | 93261 | 18 | Acceptable | -6.415515e+05 |
-| CVXQP3_L | QP | 10000 | 7500 | Maximum_CpuTime_Exceeded | 1.102011e+06 |
-| NARX_CFy | Mittelmann | 43973 | 48256 | Maximum_CpuTime_Exceeded | 8.581943e-03 |
-| QPILOTNO | QP | 2172 | 975 | Acceptable | 6.433450e+05 |
-| QSCORPIO | QP | 358 | 388 | Acceptable | 9.357630e+02 |
-| brainpc1 | Vanderbei | 6905 | 6900 | Restoration_Failed | 4.371251e-04 |
-| brainpc2 | Vanderbei | 13805 | 13800 | Maximum_CpuTime_Exceeded | 4.330683e-04 |
-| brainpc5 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.750403e-04 |
-| brainpc7 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.927065e-04 |
+| QRECIPE | QP | 180 | 91 | Acceptable | -2.666160e+02 |
+| QSCORPIO | QP | 358 | 388 | Acceptable | 1.880510e+03 |
+| aa4 | LP | 7195 | 426 | Acceptable | 2.587761e+04 |
+| air05 | LP | 7195 | 426 | Acceptable | 2.587761e+04 |
+| bore3d | LP | 315 | 233 | Acceptable | 1.373080e+03 |
+| brainpc1 | Vanderbei | 6905 | 6900 | Restoration_Failed | 4.362953e-04 |
+| brainpc5 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.752286e-04 |
+| brainpc7 | Vanderbei | 6905 | 6900 | Maximum_CpuTime_Exceeded | 3.926834e-04 |
 | bt8 | Vanderbei | 5 | 2 | Acceptable | 1.000000e+00 |
+| co5 | LP | 7993 | 5715 | Acceptable | 7.144696e+05 |
 | complex | LP | 1408 | 1023 | Acceptable | -9.966667e+01 |
 | coolhans | Vanderbei | 9 | 0 | Unknown_Error | 0.000000e+00 |
+| cq5 | LP | 7530 | 5025 | Acceptable | 4.001338e+05 |
 | csfi2 | Vanderbei | 5 | 4 | Acceptable | 5.501760e+01 |
-| dallasl | Vanderbei | 906 | 667 | Invalid_Number_Detected | -1.048696e+02 |
-| dallasm | Vanderbei | 196 | 151 | Invalid_Number_Detected | -5.386822e+01 |
-| dallass | Vanderbei | 46 | 31 | Invalid_Number_Detected | -4.053642e+01 |
-| de063155 | LP | 1488 | 852 | Restoration_Failed | 9.883094e+08 |
-| dirichlet120 | Mittelmann | 53881 | 241 | Maximum_CpuTime_Exceeded | 3.503609e-02 |
+| cvxqp3 | Vanderbei | 10000 | 7500 | Maximum_CpuTime_Exceeded | 1.157111e+08 |
+| dallasl | Vanderbei | 906 | 667 | Invalid_Number_Detected | -2.026041e+05 |
+| dallasm | Vanderbei | 196 | 151 | Invalid_Number_Detected | -4.819819e+04 |
 | drcav2lq | Vanderbei | 10816 | 816 | Maximum_CpuTime_Exceeded | 1.555870e-03 |
 | drcavty2 | Vanderbei | 10816 | 816 | Maximum_CpuTime_Exceeded | 1.555870e-03 |
-| eigenc2 | Vanderbei | 462 | 231 | Unknown_Error | 4.011484e+01 |
-| elec_400 | Mittelmann | 1200 | 400 | Maximum_CpuTime_Exceeded | 1.001292e+02 |
-| finnis | LP | 614 | 497 | Acceptable | 4.288360e+03 |
-| flosp2th | Vanderbei | 691 | 0 | Maximum_Iterations_Exceeded | 4.111842e-03 |
-| greenbeb | LP | 5405 | 2389 | Acceptable | -4.302260e+06 |
+| eigenc2 | Vanderbei | 462 | 231 | Unknown_Error | 7.718095e+02 |
+| finnis | LP | 614 | 497 | Acceptable | 1.727911e+05 |
+| flosp2th | Vanderbei | 691 | 0 | Maximum_Iterations_Exceeded | 1.000000e+01 |
 | henon120 | Mittelmann | 32401 | 241 | Maximum_CpuTime_Exceeded | 1.332947e+02 |
 | lane_emden120 | Mittelmann | 57721 | 241 | Maximum_CpuTime_Exceeded | 9.340251e+00 |
-| manne | Vanderbei | 1094 | 730 | Acceptable | -9.741479e-01 |
-| maros | LP | 1443 | 845 | Acceptable | -4.720630e+04 |
-| nql180 | Mittelmann | 129601 | 130080 | Solver_Error | -9.277211e-01 |
-| palmer7e | Vanderbei | 8 | 0 | Maximum_Iterations_Exceeded | 2.398370e-02 |
+| manne | Vanderbei | 1094 | 730 | Acceptable | -9.741684e-01 |
+| maros | LP | 1443 | 845 | Acceptable | -5.806374e+04 |
+| nql180 | Mittelmann | 129601 | 130080 | Solver_Error | -9.277258e-01 |
+| palmer7e | Vanderbei | 8 | 0 | Maximum_Iterations_Exceeded | 1.015390e+01 |
+| pilot.ja | LP | 1988 | 940 | Acceptable | -6.113136e+03 |
 | pilotnov | LP | 2172 | 975 | Acceptable | -4.497276e+03 |
-| polak3 | Vanderbei | 12 | 10 | Maximum_Iterations_Exceeded | 5.933003e+00 |
 | polak6 | Vanderbei | 5 | 4 | Unknown_Error | -4.400000e+01 |
 | qap15 | LPopt | 22275 | 6330 | Maximum_CpuTime_Exceeded | 8.674941e+02 |
-| qcqp1000-2c | Mittelmann | 1000 | 5107 | Maximum_CpuTime_Exceeded | 1.112949e+04 |
-| qcqp1500-1c | Mittelmann | 1500 | 10508 | Maximum_CpuTime_Exceeded | 1.751829e+04 |
-| qcqp1500-1nc | Mittelmann | 1500 | 10508 | Maximum_CpuTime_Exceeded | 1.537714e+04 |
+| qcqp1000-2c | Mittelmann | 1000 | 5107 | Maximum_CpuTime_Exceeded | 7.381274e+05 |
+| qcqp1500-1c | Mittelmann | 1500 | 10508 | Maximum_CpuTime_Exceeded | 3.882979e+06 |
+| qcqp1500-1nc | Mittelmann | 1500 | 10508 | Maximum_CpuTime_Exceeded | 4.778480e+06 |
+| recipe | LP | 180 | 91 | Acceptable | -2.666160e+02 |
 | scfxm1-2r-27 | LP | 6189 | 4088 | Acceptable | 2.886965e+03 |
-| scorpion | LP | 358 | 388 | Acceptable | 9.345764e+02 |
-| scrs8-2r-256 | LP | 9765 | 7196 | Acceptable | 2.156604e+01 |
-| steenbre | Vanderbei | 540 | 126 | Acceptable | 5.197370e+02 |
-| steenbrf | Vanderbei | 468 | 108 | Acceptable | 2.315828e+02 |
-| steenbrg | Vanderbei | 540 | 126 | Acceptable | 5.006421e+02 |
+| scorpion | LP | 358 | 388 | Acceptable | 1.878125e+03 |
+| scrs8-2r-256 | LP | 9765 | 7196 | Maximum_CpuTime_Exceeded | 1.144161e+03 |
+| steenbre | Vanderbei | 540 | 126 | Acceptable | 2.851495e+04 |
+| steenbrg | Vanderbei | 540 | 126 | Acceptable | 2.747128e+04 |
 
-## Acceptable (not Optimal) — 15 problems
+## Acceptable (not Optimal) — 6 problems
 
 These problems converged within relaxed tolerances but not strict tolerances.
 
 | Problem | Suite | n | m | Ipopt status | POUNCE obj | Ipopt obj |
 |---------|-------|---|---|-------------|------------|-----------|
-| QRECIPE | QP | 180 | 91 | Acceptable | -2.666160e+02 | -2.666160e+02 |
-| aa4 | LP | 7195 | 426 | Acceptable | 9.659420e+02 | 9.659420e+02 |
-| air05 | LP | 7195 | 426 | Acceptable | 9.659420e+02 | 9.659420e+02 |
-| bore3d | LP | 315 | 233 | Acceptable | 4.094410e+02 | 4.094410e+02 |
-| co5 | LP | 7993 | 5715 | Acceptable | 5.075138e+03 | 5.075138e+03 |
-| coshfun | Vanderbei | 61 | 20 | Maximum_Iterations_Exceeded | 4.186680e-01 | -1.169474e+11 |
-| cq5 | LP | 7530 | 5025 | Acceptable | 2.842296e+03 | 2.842296e+03 |
-| model3 | LP | 3840 | 1609 | Optimal | 1.750657e+03 | 1.750657e+03 |
-| model7 | LP | 8007 | 3358 | Optimal | 4.942951e+03 | 4.942951e+03 |
+| dallass | Vanderbei | 46 | 31 | Invalid_Number_Detected | -3.202464e+04 | N/A |
+| eigena2 | Vanderbei | 110 | 55 | Optimal | 8.250000e+01 | 8.250000e+01 |
+| kissing | Vanderbei | 127 | 903 | Optimal | 1.000001e+00 | 8.454426e-01 |
 | orthrds2 | Vanderbei | 203 | 100 | Optimal | 1.544296e+03 | 1.544297e+03 |
-| pilot.ja | LP | 1988 | 940 | Acceptable | -6.113137e+03 | -6.113137e+03 |
-| qcqp1000-1nc | Mittelmann | 1000 | 154 | Optimal | -1.841514e+06 | -1.841514e+06 |
-| recipe | LP | 180 | 91 | Acceptable | -2.666160e+02 | -2.666160e+02 |
-| ssebnln | Vanderbei | 194 | 96 | Optimal | 1.079313e+06 | 1.078040e+06 |
-| steenbrc | Vanderbei | 540 | 126 | Unknown_Error | 1.040910e+04 | 1.258424e+04 |
+| orthrege | Vanderbei | 36 | 20 | Optimal | 3.934338e+00 | 3.868188e+00 |
+| steenbrc | Vanderbei | 540 | 126 | Unknown_Error | 1.946894e+04 | 2.597624e+04 |
 
 ## POUNCE-Only Suite Details
 

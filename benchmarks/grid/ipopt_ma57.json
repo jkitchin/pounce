@@ -1,6 +1,6 @@
 [
-  {"solver":"ipopt","name":"case14_ieee","n":38,"m":68,"status":"Solve_Succeeded","objective":9.3602396804144931e+01,"iterations":15,"solve_time":0.064555},
-  {"solver":"ipopt","name":"case3_lmbd","n":12,"m":12,"status":"Solve_Succeeded","objective":2.5833968610796191e+01,"iterations":10,"solve_time":0.036346},
-  {"solver":"ipopt","name":"case30_ieee","n":72,"m":142,"status":"Solve_Succeeded","objective":1.5730473099768352e+02,"iterations":17,"solve_time":0.039399},
-  {"solver":"ipopt","name":"case5_pjm","n":20,"m":22,"status":"Solve_Succeeded","objective":4.3879727096482048e+02,"iterations":20,"solve_time":0.038839}
+  {"solver":"ipopt","name":"case14_ieee","n":38,"m":68,"status":"Solve_Succeeded","objective":2.1780804108196699e+03,"iterations":15,"solve_time":0.036422},
+  {"solver":"ipopt","name":"case3_lmbd","n":12,"m":12,"status":"Solve_Succeeded","objective":5.8126429374291429e+03,"iterations":10,"solve_time":0.035557},
+  {"solver":"ipopt","name":"case30_ieee","n":72,"m":142,"status":"Solve_Succeeded","objective":8.2085154283227948e+03,"iterations":17,"solve_time":0.041917},
+  {"solver":"ipopt","name":"case5_pjm","n":20,"m":22,"status":"Solve_Succeeded","objective":1.7551890838592819e+04,"iterations":20,"solve_time":0.043301}
 ]

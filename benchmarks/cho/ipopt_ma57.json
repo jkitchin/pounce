@@ -1,3 +1,3 @@
 [
-  {"solver":"ipopt","name":"cho_parmest","n":21672,"m":21660,"status":"Solve_Succeeded","objective":4.7460677969223791e+04,"iterations":33,"solve_time":1.772449}
+  {"solver":"ipopt","name":"cho_parmest","n":21672,"m":21660,"status":"Solve_Succeeded","objective":6.7672867557536025e+04,"iterations":33,"solve_time":1.758514}
 ]
