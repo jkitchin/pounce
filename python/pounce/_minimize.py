@@ -335,6 +335,27 @@ def _empty_constraints():
     return 0, None, None, None, None, None, None
 
 
+def _all_linear_constraints(constraints) -> bool:
+    """True iff every constraint is an explicit ``scipy.optimize.LinearConstraint``.
+
+    Used to decide whether a user-supplied ``hess`` can be honored even with
+    constraints present: for *linear* constraints the constraint-curvature term
+    ``Σᵢ λᵢ ∇²gᵢ`` of the Lagrangian Hessian is zero, so the objective Hessian
+    *is* the Lagrangian Hessian. We rely solely on the declared type — a dict
+    constraint (even if secretly affine) counts as nonlinear; there is no
+    probing.
+    """
+    if isinstance(constraints, LinearConstraint):
+        return True
+    if constraints is None or isinstance(constraints, dict):
+        return False
+    try:
+        items = list(constraints)
+    except TypeError:
+        return False
+    return len(items) > 0 and all(isinstance(c, LinearConstraint) for c in items)
+
+
 def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBlock:
     A = lc.A
     if not sparse.issparse(A):
@@ -515,12 +536,15 @@ def _build_problem_obj(
     jac_cols: np.ndarray | None,
     callback: Callable | None,
     eval_counters: dict,
+    constraints_all_linear: bool = False,
 ):
     """Build a problem-object-with-methods on the fly. Only attaches
-    ``hessian`` / ``hessianstructure`` when ``hess`` is provided so
-    Problem's ``hasattr`` probe correctly falls back to L-BFGS. Likewise,
-    ``intermediate`` is only attached when ``callback`` is provided so the
-    no-callback case has zero per-iter Python overhead."""
+    ``hessian`` / ``hessianstructure`` when ``hess`` is provided AND it can be
+    used as the Lagrangian Hessian — i.e. unconstrained (``m == 0``) or all
+    constraints linear (zero constraint curvature) — so Problem's ``hasattr``
+    probe correctly falls back to L-BFGS otherwise. Likewise, ``intermediate``
+    is only attached when ``callback`` is provided so the no-callback case has
+    zero per-iter Python overhead."""
 
     members: dict[str, Any] = {}
     xcache = _LastXCache()
@@ -615,13 +639,17 @@ def _build_problem_obj(
         members["jacobianstructure"] = jacobianstructure
         members["jacobian"] = jacobian
 
-    if hess is not None and m == 0:
+    # Attach an exact Hessian when ``hess`` is supplied AND it equals the
+    # Lagrangian Hessian: unconstrained, or all constraints linear (then the
+    # constraint-curvature term ``Σᵢ λᵢ ∇²gᵢ`` is zero, so ``lam`` is unused).
+    if hess is not None and (m == 0 or constraints_all_linear):
 
         def hessianstructure(self):
             r, c = np.tril_indices(n)
             return (r, c)
 
-        def hessian(self, x, lam, obj_factor):
+        def hessian(self, x, lam, obj_factor, _ctr=counters):
+            _ctr["nhev"] += 1
             H = obj_factor * _to_array(hess(x, *args))
             r, c = np.tril_indices(n)
             return H[r, c]
@@ -907,7 +935,13 @@ def minimize(
         _warn_convex_dropped_opts("convex SOCP")
         return _solve_via_socp(socp, options)
 
-    eval_counters: dict[str, int] = {"nfev": 0, "njev": 0}
+    eval_counters: dict[str, int] = {"nfev": 0, "njev": 0, "nhev": 0}
+
+    # A user-supplied ``hess`` equals the Lagrangian Hessian (so the IPM can use
+    # it directly) when unconstrained or when *every* constraint is linear — then
+    # the constraint-curvature term ``Σ λᵢ ∇²gᵢ`` vanishes. We rely only on the
+    # declared ``LinearConstraint`` type (no probing).
+    constraints_all_linear = _all_linear_constraints(constraints)
 
     # (D, gh #123) The NLP path finite-differences any derivative the caller
     # did not supply. FD derivatives are slower and less accurate, and on a
@@ -931,17 +965,19 @@ def minimize(
             stacklevel=2,
         )
 
-    # (L48) The NLP wrapper can only supply the *objective* Hessian; it has no
-    # way to assemble the constraint-curvature term ``Σ λᵢ ∇²gᵢ`` the IPM needs
-    # for the full Lagrangian Hessian. So a user-supplied ``hess`` is honored
-    # only for unconstrained problems (`m == 0`); with constraints the solver
-    # falls back to L-BFGS. Warn rather than drop it silently.
-    if hess is not None and m > 0:
+    # (L48) The NLP wrapper can only supply the *objective* Hessian; for
+    # *nonlinear* constraints it has no way to assemble the constraint-curvature
+    # term ``Σ λᵢ ∇²gᵢ`` the IPM needs for the full Lagrangian Hessian, so a
+    # supplied ``hess`` is dropped (L-BFGS fallback). With all-linear constraints
+    # that term is zero, so ``hess`` IS the Lagrangian Hessian and is used —
+    # no warning. Warn only for the genuinely-nonlinear case.
+    if hess is not None and m > 0 and not constraints_all_linear:
         warnings.warn(
-            "pounce.minimize ignores the supplied 'hess' when constraints are "
-            "present: the wrapper cannot form the constraint-curvature term of "
-            "the Lagrangian Hessian, so the solver uses an L-BFGS approximation. "
-            "The objective Hessian is used only for unconstrained problems.",
+            "pounce.minimize ignores the supplied 'hess' when nonlinear "
+            "constraints are present: the wrapper cannot form the "
+            "constraint-curvature term of the Lagrangian Hessian, so the solver "
+            "uses an L-BFGS approximation. The objective Hessian is used for "
+            "unconstrained problems and problems with only linear constraints.",
             stacklevel=2,
         )
 
@@ -958,6 +994,7 @@ def minimize(
         jac_cols=jac_cols,
         callback=callback,
         eval_counters=eval_counters,
+        constraints_all_linear=constraints_all_linear,
     )
 
     problem = Problem(
@@ -1007,5 +1044,6 @@ def minimize(
         nit=int(info["iter_count"]),
         nfev=int(eval_counters["nfev"]),
         njev=int(eval_counters["njev"]),
+        nhev=int(eval_counters["nhev"]),
         info=dict(info),
     )

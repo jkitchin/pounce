@@ -674,6 +674,98 @@ def test_hess_ignored_with_constraints_warns(monkeypatch):
                    options={"solver_selection": "nlp", "print_level": 0})
 
 
+def _no_hess_warning(rec):
+    """True if no 'ignores the supplied hess' warning is in the record."""
+    return not any("ignores the supplied 'hess'" in str(w.message) for w in rec)
+
+
+def test_hess_used_with_linear_constraint():
+    """A user ``hess`` IS honored when all constraints are linear (the
+    constraint-curvature term of the Lagrangian Hessian is zero, so the
+    objective Hessian is the Lagrangian Hessian). No warning; the exact
+    Hessian is actually used (``nhev > 0``)."""
+    target = np.array([0.7, 0.1, 0.4])
+    f = lambda x: 0.5 * float(((x - target) ** 2).sum())
+    g = lambda x: x - target
+    H = lambda x: np.eye(3)
+    lc = opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), lb=1.0, ub=1.0)
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = pounce.minimize(
+            f, np.full(3, 1.0 / 3), jac=g, hess=H, constraints=lc,
+            tol=1e-10, print_level=0,
+        )
+    assert _no_hess_warning(rec), "hess must not be dropped for linear constraints"
+    assert res.success
+    np.testing.assert_allclose(res.x.sum(), 1.0, atol=1e-8)
+    assert res.nhev > 0, "the exact Hessian was not used (fell back to L-BFGS)"
+
+
+def test_hess_used_with_mixed_eq_ineq_linear_constraint():
+    """A single LinearConstraint carrying both an equality and an inequality
+    row still counts as linear → the Hessian is used."""
+    target = np.array([0.6, 0.1, 0.5])
+    f = lambda x: 0.5 * float(((x - target) ** 2).sum())
+    g = lambda x: x - target
+    H = lambda x: np.eye(3)
+    # row 0: sum == 1 (lb==ub); row 1: x0 - x1 >= 0 (lb=0, ub=+inf)
+    A = np.array([[1.0, 1.0, 1.0], [1.0, -1.0, 0.0]])
+    lc = opt.LinearConstraint(A, lb=[1.0, 0.0], ub=[1.0, np.inf])
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = pounce.minimize(
+            f, np.full(3, 1.0 / 3), jac=g, hess=H, constraints=lc,
+            tol=1e-10, print_level=0,
+        )
+    assert _no_hess_warning(rec)
+    assert res.success
+    np.testing.assert_allclose(res.x.sum(), 1.0, atol=1e-8)
+    assert res.x[0] - res.x[1] >= -1e-8
+    assert res.nhev > 0
+
+
+def test_hess_still_dropped_with_dict_constraint():
+    """A dict constraint is treated as nonlinear-by-policy (no probing), so a
+    supplied ``hess`` is still dropped + warned, and the exact Hessian is NOT
+    used (``nhev == 0`` → L-BFGS)."""
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+    H = lambda x: 2.0 * np.eye(2)
+    con = {"type": "eq", "fun": lambda x: x[0] + x[1] - 1.0,
+           "jac": lambda x: np.array([[1.0, 1.0]])}
+
+    with pytest.warns(UserWarning, match="ignores the supplied 'hess'"):
+        res = pounce.minimize(f, np.full(2, 0.5), jac=g, hess=H, constraints=con,
+                              tol=1e-10, print_level=0)
+    assert res.success
+    assert res.nhev == 0, "dict constraint must not trigger exact-Hessian use"
+
+
+def test_hess_with_jac_true_and_linear_constraint():
+    """``jac=True`` (fun returns (f, g)) composes with a separate ``hess`` and a
+    LinearConstraint: the (f, g) cache and the exact Hessian are both used."""
+    target = np.array([0.7, 0.1, 0.4])
+
+    def fg(x):
+        return 0.5 * float(((x - target) ** 2).sum()), x - target
+
+    H = lambda x: np.eye(3)
+    lc = opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), lb=1.0, ub=1.0)
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = pounce.minimize(
+            fg, np.full(3, 1.0 / 3), jac=True, hess=H, constraints=lc,
+            tol=1e-10, print_level=0,
+        )
+    assert _no_hess_warning(rec)
+    assert res.success
+    np.testing.assert_allclose(res.x.sum(), 1.0, atol=1e-8)
+    assert res.nhev > 0 and res.nfev > 0
+
+
 def test_convex_route_warns_on_dropped_options(monkeypatch):
     """L48: the dedicated convex (LP/QP) router honors only tol/max_iter, so
     NLP-only options like ``acceptable_tol``/``print_level`` are dropped. That
