@@ -84,14 +84,15 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.4.0"
 # feral: pinned to the published crates.io release so the pounce crates stay
 # publishable — a git rev would block the crates.io publish and is rejected by
 # scripts/check-release-consistency.sh ("git dependency … needs a crates.io
-# version"). feral HEAD carries unreleased issue-#80 MC64/scaling perf work
-# (Hungarian-heap reuse across columns, localized dense-column cost,
-# ldlt_compress profiling). To develop against that HEAD locally, add an
-# UNCOMMITTED `[patch.crates-io]` redirecting feral to the git rev — e.g.
+# version"). 0.11.0 ships the formerly-unreleased MC64/scaling perf work (#80),
+# LU basis engine (#81), and correctness campaign (#82/#83) that we previously
+# carried locally via a git patch. If you ever need to develop against an
+# unreleased feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting
+# feral to the git rev — e.g.
 #   [patch.crates-io]
-#   feral = { git = "https://github.com/jkitchin/feral.git", rev = "11fb4b98d7caac0383c53b6a969e27632efcef77" }
-# Do NOT commit that patch (it would re-introduce the publish blocker).
-feral = { version = "0.10.0" }
+#   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
+# Do NOT commit that patch (it re-introduces the publish blocker).
+feral = { version = "0.11.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
