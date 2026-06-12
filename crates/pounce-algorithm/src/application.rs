@@ -21,6 +21,7 @@ use crate::alg_builder::{
     AlgorithmBuilder, HessianApproxChoice, LineSearchChoice, LinearBackendFactory,
     LinearSolverChoice, MuStrategyChoice,
 };
+use crate::hess::lim_mem_quasi_newton::UpdateType;
 use crate::ipopt_alg::IpoptAlgorithm;
 use crate::ipopt_cq::IpoptCalculatedQuantities;
 use crate::ipopt_data::IpoptData as AlgIpoptData;
@@ -1561,6 +1562,31 @@ impl IpoptApplication {
                 };
             }
         }
+        // Limited-memory quasi-Newton update formula. Registered upstream
+        // (`limited_memory_update_type`, IpLimMemQuasiNewtonUpdater.cpp) but
+        // until now read nowhere on the IPM path — the updater was hard-wired
+        // to Powell-damped BFGS. SR1 is honored too (the updater and the
+        // low-rank/inertia path already handle its indefinite models).
+        if let Ok((v, found)) = self
+            .options
+            .get_string_value("limited_memory_update_type", "")
+        {
+            if found {
+                builder.limited_memory_update_type = match v.as_str() {
+                    "sr1" => UpdateType::Sr1,
+                    _ => UpdateType::Bfgs,
+                };
+            }
+        }
+        // Limited-memory history length (`limited_memory_max_history`).
+        if let Ok((v, found)) = self
+            .options
+            .get_integer_value("limited_memory_max_history", "")
+        {
+            if found && v >= 0 {
+                builder.limited_memory_max_history = v as Index;
+            }
+        }
         if let Ok((v, found)) = self.options.get_string_value("line_search_method", "") {
             if found {
                 builder.line_search_method = match v.as_str() {
@@ -2651,6 +2677,36 @@ mod tests {
         assert!((snap.sqp.bt_min_alpha - 1e-10).abs() < 1e-18);
         assert_eq!(snap.sqp.print_level, 2);
         assert_eq!(snap.sqp.lbfgs_max_history, 12);
+    }
+
+    #[test]
+    fn application_limited_memory_options_propagate_to_builder() {
+        use crate::hess::lim_mem_quasi_newton::UpdateType;
+
+        // Default: no options set -> bit-exact with Ipopt's default
+        // (bfgs, history 6). This is what the IPM path runs unless the
+        // user opts in, so it must not drift.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        let def = app.algorithm_builder_from_options();
+        assert_eq!(def.limited_memory_update_type, UpdateType::Bfgs);
+        assert_eq!(def.limited_memory_max_history, 6);
+
+        // `limited_memory_update_type=sr1` and a custom history length
+        // must reach the builder (these were registered upstream but
+        // read nowhere on the IPM path before — see #131). Honoring
+        // them is what lets SR1 break the monotone L-BFGS stall.
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "hessian_approximation limited-memory\n\
+             limited_memory_update_type sr1\n\
+             limited_memory_max_history 9\n",
+        )
+        .unwrap();
+        let snap = app.algorithm_builder_from_options();
+        assert_eq!(snap.limited_memory_update_type, UpdateType::Sr1);
+        assert_eq!(snap.limited_memory_max_history, 9);
     }
 
     #[test]

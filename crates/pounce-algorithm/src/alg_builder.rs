@@ -199,6 +199,9 @@ pub struct AlgorithmBuilder {
     pub mu_oracle: MuOracleKind,
     pub hessian_approximation: HessianApproxChoice,
     pub limited_memory_update_type: UpdateType,
+    /// History length for the limited-memory quasi-Newton approximation
+    /// (`limited_memory_max_history`). Defaults to upstream's 6.
+    pub limited_memory_max_history: i32,
     pub line_search_method: LineSearchChoice,
     pub warm_start_init_point: bool,
     /// `mehrotra_algorithm` — when true, [`PdSearchDirCalc`] folds
@@ -499,6 +502,7 @@ impl Default for AlgorithmBuilder {
             mu_oracle: MuOracleKind::QualityFunction,
             hessian_approximation: HessianApproxChoice::Exact,
             limited_memory_update_type: UpdateType::Bfgs,
+            limited_memory_max_history: 6,
             line_search_method: LineSearchChoice::Filter,
             warm_start_init_point: false,
             mehrotra_algorithm: false,
@@ -705,6 +709,7 @@ impl AlgorithmBuilder {
             HessianApproxChoice::Exact => Box::new(ExactHessianUpdater::new()),
             HessianApproxChoice::LimitedMemory => Box::new(LimMemQuasiNewtonUpdater {
                 update_type: self.limited_memory_update_type,
+                max_history: self.limited_memory_max_history,
                 ..LimMemQuasiNewtonUpdater::default()
             }),
         };
@@ -801,6 +806,7 @@ mod tests {
                             mu_oracle: MuOracleKind::QualityFunction,
                             hessian_approximation,
                             limited_memory_update_type: UpdateType::Bfgs,
+                            limited_memory_max_history: 6,
                             line_search_method,
                             warm_start_init_point: false,
                             mehrotra_algorithm: false,
