@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+### Added — broader `scipy.optimize.minimize` compatibility
+
+`pounce.minimize` now covers much more of the SciPy surface, so it works as a
+drop-in `method=` callable for `scipy.optimize.minimize` and ports existing
+SciPy code with fewer changes:
+
+- **`args=(...)`** — extra positional arguments forwarded to `fun` / `jac`.
+- **`jac=True`** — `fun` returns `(value, gradient)` in one call; the pair is
+  cached so the gradient is not recomputed.
+- **`callback`** — invoked each iteration; both SciPy signatures are accepted
+  (`callback(xk)` and `callback(intermediate_result)`).
+- **scipy `Bounds` and `LinearConstraint` objects** — accepted alongside
+  `(lo, hi)` pairs and constraint dicts; a `LinearConstraint` may carry a
+  sparse `A`, which is honored. When all constraints are linear the objective
+  Hessian is the Lagrangian Hessian, so an exact `hess` is used (no L-BFGS
+  fallback).
+- **scipy option spellings** as synonyms — `maxiter`→`max_iter`,
+  `gtol`/`ftol`/`xtol`→`tol`, `disp`→`print_level`, `maxcor`→
+  `limited_memory_max_history`; options may be passed as `**kwargs` (the legacy
+  `options={…}` dict still works).
+- The result is now a genuine `scipy.optimize.OptimizeResult` carrying the
+  `nfev` / `njev` / `nhev` evaluation counters, with pounce extras under
+  `res.info` and a back-compat shim so a key absent at the top level falls back
+  to `res.info`.
+
+**Changed:** the `solver_selection` default is now `"nlp"` (no structure
+probing) — automatic LP/QP/QCQP routing is opt-in via `solver_selection="auto"`,
+so a general NLP or an expensive `fun` pays no probe overhead. The `args`
+argument is now the third positional parameter (matching SciPy), ahead of `jac`.
+
 ### Fixed — `obj_scaling_factor` was silently ignored (maximization diverged)
 
 The `obj_scaling_factor` option was registered but never read: every solve
