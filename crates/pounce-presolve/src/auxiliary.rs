@@ -53,6 +53,17 @@ pub struct Phase0Probe<'a> {
     pub eq_tol: Number,
     pub x_probe: &'a [Number],
     pub grad_f: &'a [Number],
+    /// Per-variable linearity tags **with respect to the objective**
+    /// (`get_objective_variables_linearity`, falling back to the global
+    /// `get_variables_linearity` — a conservative superset), when the
+    /// inner TNLP supplies them. `grad_f` is sampled at a single probe
+    /// point, so a variable nonlinear in the objective can read as
+    /// objective-free there (e.g. `f=(x−x₀)²` started at `x₀`). A `Linear`
+    /// tag makes the zero probe-gradient conclusive; for a `NonLinear` tag
+    /// it is not, so the variable is treated as objective-coupled (H11).
+    /// `None` when the TNLP declines — the probe gradient is then used
+    /// alone, preserving the pre-H11 behavior.
+    pub var_linearity: Option<&'a [Linearity]>,
     /// PR 13: variable bounds — needed for the trivial-elimination
     /// pre-pass that runs before incidence is built.
     pub x_l: &'a [Number],
@@ -89,6 +100,63 @@ impl Default for Phase0Plan {
             frame: None,
         }
     }
+}
+
+/// Decode a COO index respecting the probe's one-/zero-based convention.
+#[inline]
+fn decode_idx(raw: Index, one_based: bool) -> usize {
+    if one_based {
+        (raw as isize - 1) as usize
+    } else {
+        raw as usize
+    }
+}
+
+/// CSR row index into the probe's COO Jacobian, built once per Phase-0 pass.
+/// `entries[ptr[r]..ptr[r + 1]]` lists the nnz positions `kk` whose row is
+/// `r`. Block-assembly helpers iterate a row's nonzeros directly through this
+/// instead of scanning the full `nnz` array per block row (M27 — that scan was
+/// O(total_block_rows × nnz), quadratic on models built from many small
+/// blocks, e.g. gas networks).
+#[derive(Clone, Copy)]
+struct RowNnz<'a> {
+    ptr: &'a [usize],
+    entries: &'a [usize],
+}
+
+impl<'a> RowNnz<'a> {
+    /// The nnz positions `kk` belonging to row `r`.
+    #[inline]
+    fn of_row(&self, r: usize) -> &[usize] {
+        &self.entries[self.ptr[r]..self.ptr[r + 1]]
+    }
+}
+
+/// Build the CSR row index from the probe's COO row indices. O(nnz) time and
+/// space; rows with out-of-range indices are skipped (defensive — the COO is
+/// trusted, but a stray index must not panic the slice build).
+fn build_row_nnz(jac_irow: &[Index], n_rows: usize, one_based: bool) -> (Vec<usize>, Vec<usize>) {
+    let nnz = jac_irow.len();
+    let mut ptr = vec![0usize; n_rows + 1];
+    for &raw in jac_irow {
+        let i = decode_idx(raw, one_based);
+        if i < n_rows {
+            ptr[i + 1] += 1;
+        }
+    }
+    for r in 0..n_rows {
+        ptr[r + 1] += ptr[r];
+    }
+    let mut entries = vec![0usize; ptr[n_rows]];
+    let mut cursor = ptr.clone();
+    for (kk, &raw) in jac_irow.iter().enumerate().take(nnz) {
+        let i = decode_idx(raw, one_based);
+        if i < n_rows {
+            entries[cursor[i]] = kk;
+            cursor[i] += 1;
+        }
+    }
+    (ptr, entries)
 }
 
 /// Run the Phase-0 pipeline and return the resulting plan.
@@ -200,7 +268,25 @@ pub fn run_auxiliary_phase0(
     let comps = SquareComponents::of_square_part(&eq_inc, &matching, &dm);
     diag.stage_time_ms.components_ms = t_comp.elapsed().as_millis();
 
-    let obj_support = objective_gradient_support(probe.grad_f, 1e-12);
+    // Variables with a non-negligible objective gradient *at the probe*.
+    let mut obj_support = objective_gradient_support(probe.grad_f, 1e-12);
+    // H11: the probe gradient is a single sample. For any variable tagged
+    // `NonLinear` *in the objective*, a zero probe-gradient does NOT prove it
+    // is objective-free (the gradient may be non-zero elsewhere — the classic
+    // `f=(x−x₀)²` started at `x₀` reads as zero). Treat every such variable
+    // as objective-coupled so its block is not eliminated as `PureEquality`
+    // under the `Safe` policy. The tags are objective-scoped when the TNLP
+    // provides them (constraint-only nonlinearity must NOT block elimination
+    // of an objective-free block — the gas-network case); the global tags are
+    // only a conservative fallback. When the TNLP declines both, fall back to
+    // the probe gradient alone.
+    if let Some(var_lin) = probe.var_linearity {
+        for (i, l) in var_lin.iter().enumerate() {
+            if matches!(l, Linearity::NonLinear) {
+                obj_support.insert(i);
+            }
+        }
+    }
 
     // -- 2. Decide which dropped rows are linear --------------------
     // We need a fast lookup from inner row index → linearity. The
@@ -228,7 +314,31 @@ pub fn run_auxiliary_phase0(
             frame: None,
         };
     }
+    // CSR row index over the probe Jacobian, built once and shared by every
+    // block-assembly helper below so none of them re-scans the full nnz array
+    // per block row (M27).
+    let (row_nnz_ptr, row_nnz_entries) =
+        build_row_nnz(probe.jac_irow, probe.n_rows, probe.one_based);
+    let row_nnz = RowNnz {
+        ptr: &row_nnz_ptr,
+        entries: &row_nnz_entries,
+    };
+
     let mut x_running: Vec<Number> = probe.x_probe.to_vec();
+    // C2(c): a trivially-fixed variable (`x_l == x_u`) is excluded from
+    // incidence, so it can only appear in a block's rows as a *non-block*
+    // column folded into the RHS. Fold it at its fixed value, not its
+    // (possibly different) probe value — otherwise the dropped equality
+    // is satisfied at a point the IPM will never occupy.
+    //
+    // `fixed_mask[j]` tracks which columns are pinned: trivially fixed
+    // up front, plus any fixed by an earlier accepted block. The C2
+    // soundness gate below consults it.
+    let mut fixed_mask = vec![false; probe.n_vars];
+    for &i in &trivial.fixed_vars {
+        x_running[i] = probe.x_l[i];
+        fixed_mask[i] = true;
+    }
 
     for comp in &comps.components {
         let t_btf = std::time::Instant::now();
@@ -351,6 +461,42 @@ pub fn run_auxiliary_phase0(
                 .map(|&kk| eq_inc.eq_row_inner_idx[kk])
                 .collect();
             let block_cols = &block.cols;
+
+            // -- 3c'. C2 soundness gate --
+            // A block's rows are dropped from the IPM's problem, so
+            // every variable they depend on must be pinned: either a
+            // block column (solved + clamped here) or an already-fixed
+            // non-block column. Any *free* non-block column means the
+            // IPM can move it after the row is gone, silently breaking
+            // the dropped equality (`solve_linear_block` folds it into
+            // the RHS at a fixed probe value). Scan the **raw Jacobian
+            // sparsity** — not incidence, which drops entries that are
+            // numerically zero at the probe (a nonlinear row's
+            // derivative can be zero there yet structurally nonzero,
+            // C2(d)). Catches C2(a) (free column from a rejected earlier
+            // block), C2(b) (Square row adjacent to an Over column), and
+            // C2(d) in one gate.
+            let mut depends_on_free = false;
+            'gate: for &r_inner in &inner_rows {
+                for &kk in row_nnz.of_row(r_inner) {
+                    let j = decode_idx(probe.jac_jcol[kk], probe.one_based);
+                    if block_cols.contains(&j) {
+                        continue;
+                    }
+                    let pinned =
+                        (probe.x_u[j] - probe.x_l[j]).abs() <= probe.eq_tol || fixed_mask[j];
+                    if !pinned {
+                        depends_on_free = true;
+                        break 'gate;
+                    }
+                }
+            }
+            if depends_on_free {
+                diag.rejection_reasons
+                    .push(AuxiliaryRejectionReason::NonBlockColumnFree);
+                continue;
+            }
+
             // PR #60 review nit: pass the block's variable bounds
             // into Newton so a converged-but-out-of-box solution
             // gets caught early as `OutOfBounds` rather than
@@ -386,6 +532,7 @@ pub fn run_auxiliary_phase0(
             let solve_result = if all_linear {
                 solve_linear_block(
                     probe,
+                    &row_nnz,
                     &inner_rows,
                     block_cols,
                     &x_running,
@@ -399,6 +546,7 @@ pub fn run_auxiliary_phase0(
                 let cb: &mut dyn Phase0TnlpCallback = *tnlp.as_mut().expect("checked above");
                 solve_nonlinear_block(
                     probe,
+                    &row_nnz,
                     &inner_rows,
                     block_cols,
                     &x_running,
@@ -431,7 +579,7 @@ pub fn run_auxiliary_phase0(
             let row_resid = if all_linear {
                 // Re-evaluate using the linear model — same as the
                 // build code above.
-                residual_norm_linear(probe, &inner_rows, &candidate_x)
+                residual_norm_linear(probe, &row_nnz, &inner_rows, &candidate_x)
             } else {
                 // Ask the TNLP for `g(candidate_x)` and compare each
                 // dropped row to `g_l`. Reuses the callback we
@@ -459,6 +607,9 @@ pub fn run_auxiliary_phase0(
                 accepted_fixed_vars.push(c);
                 accepted_fixed_values.push(out.x[ii]);
                 x_running[c] = out.x[ii];
+                // This column is now pinned for the C2 gate on later
+                // blocks in BTF order.
+                fixed_mask[c] = true;
             }
             for &r_inner in &inner_rows {
                 accepted_dropped_rows.push(r_inner);
@@ -509,6 +660,7 @@ pub fn run_auxiliary_phase0(
 /// converges in one iteration on linear systems).
 fn solve_linear_block<F>(
     probe: &Phase0Probe<'_>,
+    row_nnz: &RowNnz<'_>,
     inner_rows: &[usize],
     block_cols: &[usize],
     x_running: &[Number],
@@ -528,21 +680,8 @@ where
     let mut b_block = vec![0.0; k];
     for (ii, &r_inner) in inner_rows.iter().enumerate() {
         let mut sum_jx = 0.0;
-        let nnz = probe.jac_irow.len();
-        for kk in 0..nnz {
-            let i = if probe.one_based {
-                (probe.jac_irow[kk] as isize - 1) as usize
-            } else {
-                probe.jac_irow[kk] as usize
-            };
-            if i != r_inner {
-                continue;
-            }
-            let j = if probe.one_based {
-                (probe.jac_jcol[kk] as isize - 1) as usize
-            } else {
-                probe.jac_jcol[kk] as usize
-            };
+        for &kk in row_nnz.of_row(r_inner) {
+            let j = decode_idx(probe.jac_jcol[kk], probe.one_based);
             let v = probe.jac_values[kk];
             sum_jx += v * probe.x_probe[j];
             if let Some(jj) = block_cols.iter().position(|&c| c == j) {
@@ -589,13 +728,14 @@ where
 }
 
 /// Solve a nonlinear block by feeding TNLP callbacks into Newton.
-fn solve_nonlinear_block<F>(
+fn solve_nonlinear_block<'a, F>(
     probe: &Phase0Probe<'_>,
-    inner_rows: &[usize],
-    block_cols: &[usize],
-    x_running: &[Number],
+    row_nnz: &RowNnz<'a>,
+    inner_rows: &'a [usize],
+    block_cols: &'a [usize],
+    x_running: &'a [Number],
     bs_opts: &BlockSolveOptions,
-    tnlp: &mut dyn Phase0TnlpCallback,
+    tnlp: &'a mut dyn Phase0TnlpCallback,
     solver_call: F,
 ) -> Result<crate::block_solve::BlockSolveOutcome, crate::block_solve::BlockSolveError>
 where
@@ -610,11 +750,10 @@ where
 
     struct NonlinearBlock<'a> {
         n: usize,
-        nnz: usize,
+        row_nnz: RowNnz<'a>,
         inner_rows: &'a [usize],
         block_cols: &'a [usize],
         x_running: &'a [Number],
-        jac_irow: &'a [Index],
         jac_jcol: &'a [Index],
         g_l: &'a [Number],
         one_based: bool,
@@ -654,28 +793,21 @@ where
             {
                 return false;
             }
-            // Zero the dense submatrix, then scatter the nonzeros.
+            // Zero the dense submatrix, then scatter the nonzeros. Iterate
+            // only the block's inner rows (via the CSR index), not the whole
+            // nnz array — the column is still mapped through `block_cols`,
+            // which is the small block dimension (M27).
             for v in j.iter_mut() {
                 *v = 0.0;
             }
-            for kk in 0..self.nnz {
-                let i = if self.one_based {
-                    (self.jac_irow[kk] as isize - 1) as usize
-                } else {
-                    self.jac_irow[kk] as usize
-                };
-                let Some(ii) = self.inner_rows.iter().position(|&r| r == i) else {
-                    continue;
-                };
-                let col = if self.one_based {
-                    (self.jac_jcol[kk] as isize - 1) as usize
-                } else {
-                    self.jac_jcol[kk] as usize
-                };
-                let Some(jj) = self.block_cols.iter().position(|&c| c == col) else {
-                    continue;
-                };
-                j[ii * self.n + jj] = self.full_jac_vals[kk];
+            for (ii, &r) in self.inner_rows.iter().enumerate() {
+                for &kk in self.row_nnz.of_row(r) {
+                    let col = decode_idx(self.jac_jcol[kk], self.one_based);
+                    let Some(jj) = self.block_cols.iter().position(|&c| c == col) else {
+                        continue;
+                    };
+                    j[ii * self.n + jj] = self.full_jac_vals[kk];
+                }
             }
             true
         }
@@ -684,11 +816,10 @@ where
     let nnz = probe.jac_irow.len();
     let mut eqs = NonlinearBlock {
         n: k,
-        nnz,
+        row_nnz: *row_nnz,
         inner_rows,
         block_cols,
         x_running,
-        jac_irow: probe.jac_irow,
         jac_jcol: probe.jac_jcol,
         g_l: probe.g_l,
         one_based: probe.one_based,
@@ -709,28 +840,16 @@ where
 /// `g_l[r]` after splicing the candidate point in.
 fn residual_norm_linear(
     probe: &Phase0Probe<'_>,
+    row_nnz: &RowNnz<'_>,
     inner_rows: &[usize],
     candidate_x: &[Number],
 ) -> Number {
     let mut row_resid: Number = 0.0;
-    let nnz = probe.jac_irow.len();
     for &r_inner in inner_rows {
         let mut s = 0.0;
         let mut sum_jx = 0.0;
-        for kk in 0..nnz {
-            let i = if probe.one_based {
-                (probe.jac_irow[kk] as isize - 1) as usize
-            } else {
-                probe.jac_irow[kk] as usize
-            };
-            if i != r_inner {
-                continue;
-            }
-            let j = if probe.one_based {
-                (probe.jac_jcol[kk] as isize - 1) as usize
-            } else {
-                probe.jac_jcol[kk] as usize
-            };
+        for &kk in row_nnz.of_row(r_inner) {
+            let j = decode_idx(probe.jac_jcol[kk], probe.one_based);
             let v = probe.jac_values[kk];
             s += v * candidate_x[j];
             sum_jx += v * probe.x_probe[j];
@@ -797,6 +916,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe,
             grad_f,
+            var_linearity: None,
             x_l: Box::leak(x_l.into_boxed_slice()),
             x_u: Box::leak(x_u.into_boxed_slice()),
         }
@@ -882,6 +1002,78 @@ mod tests {
         assert_eq!(frame.fixed_vars, vec![0, 1]);
         assert!((frame.fixed_values[0] - 2.0).abs() < 1e-12);
         assert!((frame.fixed_values[1] - 1.0).abs() < 1e-12);
+    }
+
+    /// H11: the objective gradient is a single-point sample, so a variable
+    /// nonlinear in the objective can read as objective-free at the probe
+    /// (`f=(x−x₀)²` started at `x₀` → zero gradient). A `NonLinear` variable
+    /// tag must make the classifier treat that variable as objective-coupled,
+    /// so its block is NOT eliminated as `PureEquality` under `Safe` (which
+    /// would silently fix it at a Newton root with no regard to the
+    /// objective). Same eliminable 2×2 block as the test above, but var 0 is
+    /// nonlinear in the objective and zero-gradient at the probe.
+    #[test]
+    fn phase0_nonlinear_var_with_zero_probe_grad_blocks_elimination_under_safe() {
+        let irow = [0, 0, 1, 1];
+        let jcol = [0, 1, 0, 1];
+        let vals = [1.0, 1.0, 1.0, -1.0];
+        let g_l = [3.0, 1.0];
+        let g_u = [3.0, 1.0];
+        let g_probe = [0.0, 0.0];
+        let linearity = [Linearity::Linear, Linearity::Linear];
+        let x_probe = [0.0, 0.0];
+        let grad_f = [0.0, 0.0]; // objective-free *at the probe* only
+        let x_l = [-1e19, -1e19];
+        let x_u = [1e19, 1e19];
+        let var_lin = [Linearity::NonLinear, Linearity::Linear];
+
+        let base = Phase0Probe {
+            n_vars: 2,
+            n_rows: 2,
+            jac_irow: &irow,
+            jac_jcol: &jcol,
+            jac_values: &vals,
+            g_l: &g_l,
+            g_u: &g_u,
+            g_at_probe: &g_probe,
+            linearity: &linearity,
+            one_based: false,
+            eq_tol: 1e-12,
+            x_probe: &x_probe,
+            grad_f: &grad_f,
+            var_linearity: None,
+            x_l: &x_l,
+            x_u: &x_u,
+        };
+
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        opts.auxiliary_coupling = AuxiliaryCouplingPolicy::Safe;
+
+        // Control (pre-H11 behavior): with no variable-linearity tag the zero
+        // probe gradient alone makes the block look objective-free → eliminated.
+        let plan_blind = run_auxiliary_phase0(&opts, &base, None, None);
+        assert_eq!(
+            plan_blind.diagnostics.blocks_eliminated, 1,
+            "control: zero probe-gradient alone eliminates the block"
+        );
+
+        // H11 fix: the `NonLinear` tag on var 0 makes it objective-coupled, so
+        // the block is rejected under Safe.
+        let tagged = Phase0Probe {
+            var_linearity: Some(&var_lin),
+            ..base
+        };
+        let plan_tagged = run_auxiliary_phase0(&opts, &tagged, None, None);
+        assert_eq!(
+            plan_tagged.diagnostics.blocks_eliminated, 0,
+            "H11: nonlinear-tagged objective variable must block elimination"
+        );
+        assert!(plan_tagged.frame.is_none());
+        assert_eq!(
+            plan_tagged.diagnostics.class_counts.objective_coupled, 1,
+            "block classified objective-coupled via the linearity tag"
+        );
     }
 
     #[test]
@@ -1068,6 +1260,69 @@ mod tests {
         );
     }
 
+    /// Callback for the C2(d) gate test: row 0 is `g = x0 + x1^2`,
+    /// whose derivative w.r.t. x1 is `2*x1` — zero at the probe
+    /// x1 = 0. The probe's Jacobian *values* therefore carry a 0 for
+    /// the (0, x1) entry, so `EqualityIncidence::from_probe` drops it
+    /// and DM forms a clean square block {row0, x0}; but x1 is a real
+    /// dependency the IPM is free to move.
+    struct HiddenDepCallback;
+    impl Phase0TnlpCallback for HiddenDepCallback {
+        fn eval_g_full(&mut self, x: &[Number], g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1] * x[1];
+            true
+        }
+        fn eval_jac_g_values(&mut self, x: &[Number], values: &mut [Number]) -> bool {
+            // Sparsity (0,0)=∂/∂x0=1, (0,1)=∂/∂x1=2*x1.
+            values[0] = 1.0;
+            values[1] = 2.0 * x[1];
+            true
+        }
+    }
+
+    #[test]
+    fn c2_gate_rejects_block_with_probe_hidden_free_dependency() {
+        // Regression for C2(d) (and the C2 gate generally). Row 0 is
+        // `x0 + x1^2 = 5`, nonlinear in x1. At the probe x1 = 0 the
+        // derivative ∂/∂x1 is 0, so incidence omits the entry and DM
+        // forms the square block {row0, x0}. Pre-fix, Phase 0 solved
+        // x0 = 5 (folding x1 at its probe 0), passed the residual check
+        // at (5, 0), and dropped row 0 — leaving the IPM free to move
+        // x1 and silently break x0 + x1^2 = 5. The C2 soundness gate
+        // scans the raw Jacobian sparsity, sees x1 is a free non-block
+        // column, and rejects.
+        let probe = linear_probe(
+            2,
+            1,
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 0.0], // ∂/∂x0=1, ∂/∂x1=2*x1=0 at probe x1=0
+            &[5.0],
+            &[5.0],
+            &[0.0], // g(0,0) = 0
+            &[Linearity::NonLinear],
+            &[0.0, 0.0],
+            &[0.0, 0.0],
+        );
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let mut tnlp = HiddenDepCallback;
+        let plan = run_auxiliary_phase0(&opts, &probe, Some(&mut tnlp), None);
+        assert_eq!(
+            plan.diagnostics.blocks_eliminated, 0,
+            "block depending on free non-block var x1 must not be eliminated"
+        );
+        assert!(plan.frame.is_none());
+        assert!(
+            plan.diagnostics
+                .rejection_reasons
+                .iter()
+                .any(|r| matches!(r, AuxiliaryRejectionReason::NonBlockColumnFree)),
+            "expected NonBlockColumnFree, got {:?}",
+            plan.diagnostics.rejection_reasons
+        );
+    }
+
     #[test]
     fn phase0_nonlinear_rejected_without_callback() {
         // Same probe as above but with `tnlp = None`.
@@ -1128,6 +1383,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: Box::leak(x_probe.into_boxed_slice()),
             grad_f: Box::leak(grad_f.into_boxed_slice()),
+            var_linearity: None,
             x_l: Box::leak(x_l_def.into_boxed_slice()),
             x_u: Box::leak(x_u_def.into_boxed_slice()),
         }
@@ -1191,6 +1447,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: &x_probe,
             grad_f: &grad_f,
+            var_linearity: None,
             x_l: &x_l_def,
             x_u: &x_u_def,
         };
@@ -1258,6 +1515,7 @@ mod tests {
             eq_tol: 1e-12,
             x_probe: &x_probe,
             grad_f: &grad_f,
+            var_linearity: None,
             x_l: &x_l,
             x_u: &x_u,
         };
@@ -1267,5 +1525,141 @@ mod tests {
         assert_eq!(plan.diagnostics.trivially_fixed_vars, 1);
         assert_eq!(plan.diagnostics.trivially_free_rows, 0);
         assert_eq!(plan.diagnostics.trivially_slack_rows, 1);
+    }
+
+    /// Build a diagonal singleton-block system: `n` vars, `n` rows, row `r`
+    /// is the equality `x_r = r+1`. Each row is its own 1×1 block, so the
+    /// orchestrator walks `n` blocks; the full-`nnz`-per-row scans make the
+    /// linear solve/residual cost O(n²).
+    fn diagonal_singletons(n: usize) -> (Vec<Index>, Vec<Index>, Vec<Number>, Vec<Number>) {
+        let jac_irow: Vec<Index> = (0..n as Index).collect();
+        let jac_jcol: Vec<Index> = (0..n as Index).collect();
+        let jac_vals: Vec<Number> = vec![1.0; n];
+        let g_l: Vec<Number> = (0..n).map(|r| (r + 1) as Number).collect();
+        (jac_irow, jac_jcol, jac_vals, g_l)
+    }
+
+    #[test]
+    fn phase0_diagonal_many_singletons_correct() {
+        // M27 regression: with the CSR row index replacing the per-row
+        // full-nnz scans, a large diagonal system must still be eliminated
+        // exactly — every var fixed to its row's target, every row dropped.
+        // (This is also the shape whose O(n²) scan cost motivated the fix;
+        // here we pin correctness at scale, not timing.)
+        let n = 400;
+        let (jac_irow, jac_jcol, jac_vals, g_l) = diagonal_singletons(n);
+        let g_u = g_l.clone();
+        let g_at_probe = vec![0.0; n];
+        let linearity = vec![Linearity::Linear; n];
+        let x_probe = vec![0.0; n];
+        let grad_f = vec![0.0; n];
+        let probe = linear_probe(
+            n,
+            n,
+            &jac_irow,
+            &jac_jcol,
+            &jac_vals,
+            &g_l,
+            &g_u,
+            &g_at_probe,
+            &linearity,
+            &x_probe,
+            &grad_f,
+        );
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let plan = run_auxiliary_phase0(&opts, &probe, None, None);
+        assert_eq!(plan.diagnostics.blocks_eliminated as usize, n);
+        let frame = plan.frame.expect("accepted frame");
+        assert_eq!(frame.fixed_vars, (0..n).collect::<Vec<_>>());
+        assert_eq!(frame.dropped_rows, (0..n).collect::<Vec<_>>());
+        for r in 0..n {
+            assert!(
+                (frame.fixed_values[r] - (r + 1) as Number).abs() < 1e-12,
+                "var {r} fixed to {}, want {}",
+                frame.fixed_values[r],
+                r + 1
+            );
+        }
+    }
+
+    #[test]
+    fn build_row_nnz_groups_by_row_zero_based() {
+        // COO rows (per kk): [0, 2, 0, 1, 2] — out of order, row 0 and row 2
+        // each have two entries, row 1 one. The CSR slice for each row must
+        // list exactly that row's kk positions.
+        let jac_irow: [Index; 5] = [0, 2, 0, 1, 2];
+        let (ptr, entries) = build_row_nnz(&jac_irow, 3, false);
+        let nnz = RowNnz {
+            ptr: &ptr,
+            entries: &entries,
+        };
+        let row_of = |r: usize| {
+            let mut v = nnz.of_row(r).to_vec();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(row_of(0), vec![0, 2]);
+        assert_eq!(row_of(1), vec![3]);
+        assert_eq!(row_of(2), vec![1, 4]);
+        // Every COO position placed exactly once.
+        assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn build_row_nnz_honours_one_based_decode() {
+        // Same pattern but one-based rows (`r + 1`); the decode must reproduce
+        // the zero-based grouping exactly.
+        let jac_irow_0: [Index; 5] = [0, 2, 0, 1, 2];
+        let jac_irow_1: [Index; 5] = [1, 3, 1, 2, 3];
+        let (ptr0, ent0) = build_row_nnz(&jac_irow_0, 3, false);
+        let (ptr1, ent1) = build_row_nnz(&jac_irow_1, 3, true);
+        assert_eq!(ptr0, ptr1, "one-based ptr must match zero-based");
+        assert_eq!(ent0, ent1, "one-based entries must match zero-based");
+    }
+
+    #[test]
+    fn phase0_one_based_two_blocks_eliminated() {
+        // End-to-end one-based guard: every changed helper (C2 gate, linear
+        // solve, residual check) reads the Jacobian through the CSR index,
+        // which decodes one-based COO indices. Two 1×1 blocks: row 1 → x0 = 5,
+        // row 2 → x1 = 7. Both must be eliminated, matching the pre-M27 code.
+        let jac_irow: [Index; 2] = [1, 2];
+        let jac_jcol: [Index; 2] = [1, 2];
+        let jac_vals = [1.0, 1.0];
+        let g_l = [5.0, 7.0];
+        let g_u = [5.0, 7.0];
+        let g_at_probe = [0.0, 0.0];
+        let linearity = [Linearity::Linear, Linearity::Linear];
+        let x_probe = [0.0, 0.0];
+        let grad_f = [0.0, 0.0];
+        let x_l = [-1e19, -1e19];
+        let x_u = [1e19, 1e19];
+        let probe = Phase0Probe {
+            n_vars: 2,
+            n_rows: 2,
+            jac_irow: &jac_irow,
+            jac_jcol: &jac_jcol,
+            jac_values: &jac_vals,
+            g_l: &g_l,
+            g_u: &g_u,
+            g_at_probe: &g_at_probe,
+            linearity: &linearity,
+            one_based: true,
+            eq_tol: 1e-12,
+            x_probe: &x_probe,
+            grad_f: &grad_f,
+            var_linearity: None,
+            x_l: &x_l,
+            x_u: &x_u,
+        };
+        let mut opts = PresolveOptions::defaults();
+        opts.auxiliary = true;
+        let plan = run_auxiliary_phase0(&opts, &probe, None, None);
+        let frame = plan.frame.expect("accepted frame");
+        assert_eq!(frame.fixed_vars, vec![0, 1]);
+        assert!((frame.fixed_values[0] - 5.0).abs() < 1e-12);
+        assert!((frame.fixed_values[1] - 7.0).abs() < 1e-12);
+        assert_eq!(frame.dropped_rows, vec![0, 1]);
     }
 }

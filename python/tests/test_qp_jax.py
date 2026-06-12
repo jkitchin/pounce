@@ -297,3 +297,93 @@ def test_infeasible_grad_raises():
 
     with pytest.raises(RuntimeError, match="status"):
         jax.grad(loss)(jnp.array([0.0]))
+
+
+def test_indefinite_p_rejected_in_forward():
+    # issue #112 (code review M31): the differentiable layer must not solve an
+    # indefinite QP and feed a silently-wrong "optimal" into the backward pass.
+    # The host-callback guard raises; jax wraps it, but the PSD message
+    # survives in the error string.
+    P = jnp.array([[1.0, 0.0], [0.0, -1.0]])  # eigenvalues +1, -1
+    c = jnp.zeros(2)
+    G = -jnp.eye(2)
+    h = jnp.ones(2)
+    with pytest.raises(Exception, match="semidefinite"):
+        solve_qp(P=P, c=c, G=G, h=h)
+
+
+def test_indefinite_p_rejected_in_batch_forward():
+    # batched layer: ``c`` is (B, n) and ``h`` is (B, m); the shared P is
+    # screened once before any instance solves.
+    P = jnp.array([[1.0, 0.0], [0.0, -1.0]])
+    c = jnp.zeros((2, 2))  # B=2, n=2
+    G = -jnp.eye(2)
+    h = jnp.ones((2, 2))  # B=2, m=2
+    with pytest.raises(Exception, match="semidefinite"):
+        solve_qp_batch(P=P, c=c, G=G, h=h)
+
+
+# --------------------------------------------------------------------------
+# M31 nit: the per-forward PSD guard must be skippable (check_psd=False, for
+# a layer whose P is PSD by construction) and forceable above the auto cap
+# (check_psd=True), with the same semantics as pounce.qp.solve_qp.
+# --------------------------------------------------------------------------
+
+_P_INDEF = jnp.array([[1.0, 0.0], [0.0, -1.0]])  # eigenvalues +1, -1
+_BOX_LB = np.array([-1.0, -1.0])
+_BOX_UB = np.array([1.0, 1.0])
+
+
+def _assert_guard_skipped(fn):
+    """Run ``fn`` and assert the PSD guard did not fire. The unguarded
+    nonconvex solve may legitimately report a non-optimal status (raised by
+    the layer's _check_status, possibly wrapped by jax); only a
+    'semidefinite' error means the guard ran despite check_psd=False."""
+    try:
+        fn()
+    except Exception as e:
+        assert "semidefinite" not in str(e)
+
+
+def test_check_psd_false_bypasses_indefinite_guard():
+    # Box bounds keep the IPM from diverging (same fixture as the host
+    # test_check_psd_false_bypasses_guard_everywhere).
+    _assert_guard_skipped(
+        lambda: solve_qp(
+            P=_P_INDEF, c=jnp.zeros(2), lb=_BOX_LB, ub=_BOX_UB, check_psd=False
+        )
+    )
+
+
+def test_check_psd_false_bypasses_batch_and_layer():
+    _assert_guard_skipped(
+        lambda: solve_qp_batch(
+            P=_P_INDEF, c=jnp.zeros((2, 2)), lb=_BOX_LB, ub=_BOX_UB, check_psd=False
+        )
+    )
+    layer = QpLayer(P=_P_INDEF, lb=_BOX_LB, ub=_BOX_UB, check_psd=False)
+    _assert_guard_skipped(lambda: layer(jnp.zeros(2)))
+
+
+def test_check_psd_true_forces_guard_above_auto_cap():
+    # Above the auto cap (n > 1500) the default skips the eigvalsh check;
+    # check_psd=True must force it. The guard runs before any solve, so the
+    # indefinite problem never reaches the IPM and the test stays cheap.
+    from pounce.qp import _PSD_CHECK_AUTO_MAX_N
+
+    n = _PSD_CHECK_AUTO_MAX_N + 1
+    diag = np.ones(n)
+    diag[-1] = -1.0
+    P_big = jnp.diag(jnp.asarray(diag))
+    with pytest.raises(Exception, match="semidefinite"):
+        solve_qp(P=P_big, c=jnp.zeros(n), check_psd=True)
+
+
+def test_check_psd_true_on_psd_p_solves_normally():
+    P = jnp.array([[2.0, 0.0], [0.0, 2.0]])
+    c = jnp.array([-4.0, -4.0])
+    G = jnp.array([[1.0, 1.0]])
+    h = jnp.array([0.5])
+    x_default = solve_qp(P=P, c=c, G=G, h=h)
+    x_forced = solve_qp(P=P, c=c, G=G, h=h, check_psd=True)
+    np.testing.assert_allclose(np.asarray(x_forced), np.asarray(x_default), atol=1e-12)

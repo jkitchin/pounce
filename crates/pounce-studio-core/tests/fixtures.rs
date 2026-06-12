@@ -11,7 +11,7 @@ use pounce_studio_core::analysis::{
 };
 use pounce_studio_core::iter_dump::IterDumpTrace;
 use pounce_studio_core::markdown::render_inspect;
-use pounce_studio_core::report::{Error, SolveReport, SOLVE_REPORT_SCHEMA};
+use pounce_studio_core::report::{Error, InputDescriptor, SolveReport, SOLVE_REPORT_SCHEMA};
 
 const ROSENBROCK: &str = include_str!("../../../studio/mcp/fixtures/rosenbrock.json");
 const STALLED: &str = include_str!("../../../studio/mcp/fixtures/rosenbrock-stalled.json");
@@ -29,6 +29,31 @@ fn fixtures_round_trip_schema() {
     ] {
         let r = SolveReport::from_json_str(src).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(r.schema, SOLVE_REPORT_SCHEMA, "{name}");
+    }
+}
+
+#[test]
+fn loads_cbf_file_input_descriptor() {
+    // M36: the writer (`pounce-solve-report`) emits a `CbfFile` input variant
+    // (`"kind": "cbf-file"`) for `.cbf` conic instances, but this reader's
+    // mirror enum was missing it, so serde's internally-tagged enum hard-failed
+    // and the *whole* report was rejected. Rewrite a good fixture's input to a
+    // cbf-file descriptor and confirm it now loads and decodes to `CbfFile`.
+    let mut v: serde_json::Value = serde_json::from_str(ROSENBROCK).unwrap();
+    v["fair_metadata"]["input"] = serde_json::json!({
+        "kind": "cbf-file",
+        "path": "/tmp/cblib/instance.cbf",
+        "size_bytes": 4096,
+    });
+    let src = serde_json::to_string(&v).unwrap();
+
+    let r = SolveReport::from_json_str(&src).expect("cbf-file report must load");
+    match r.fair_metadata.input {
+        InputDescriptor::CbfFile { path, size_bytes } => {
+            assert_eq!(path, "/tmp/cblib/instance.cbf");
+            assert_eq!(size_bytes, Some(4096));
+        }
+        other => panic!("expected CbfFile, got {other:?}"),
     }
 }
 

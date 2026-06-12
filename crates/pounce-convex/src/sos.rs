@@ -30,7 +30,7 @@ use crate::qp::{QpProblem, QpStatus, Triplet};
 use crate::ConeSpec;
 use pounce_linalg::symmetric_eigen;
 use pounce_linsol::SparseSymLinearSolverInterface;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A sparse multivariate polynomial over `n_vars` variables: a list of
 /// `(exponent vector, coefficient)` terms. The exponent vector has length
@@ -68,6 +68,31 @@ impl Polynomial {
     /// summing duplicate terms). `0.0` for the zero polynomial.
     fn coeff_inf_norm(&self) -> f64 {
         self.coeff_map().values().fold(0.0, |m, c| m.max(c.abs()))
+    }
+
+    /// Evaluate the polynomial at a point `x` (length `n_vars`).
+    fn eval(&self, x: &[f64]) -> f64 {
+        self.terms
+            .iter()
+            .map(|(e, c)| c * Self::monomial(e, x))
+            .sum()
+    }
+
+    /// Triangle-inequality magnitude bound `Σ|cᵢ|·∏ₖ|xₖ|^{eₖ}` at `x` — an upper
+    /// bound on `|eval(x)|` used to set a scale-invariant feasibility tolerance.
+    fn eval_magnitude(&self, x: &[f64]) -> f64 {
+        self.terms
+            .iter()
+            .map(|(e, c)| c.abs() * Self::monomial(e, x).abs())
+            .sum()
+    }
+
+    /// `∏ₖ xₖ^{eₖ}` for a single exponent vector at `x`.
+    fn monomial(e: &[usize], x: &[f64]) -> f64 {
+        e.iter()
+            .enumerate()
+            .map(|(k, &pw)| x[k].powi(pw as i32))
+            .product()
     }
 
     /// This polynomial with every coefficient divided by `s`.
@@ -111,6 +136,26 @@ impl PolyProblem {
     pub fn eq(mut self, h: Polynomial) -> Self {
         self.equalities.push(h);
         self
+    }
+
+    /// Whether a candidate point `x` lies in the feasible set
+    /// `K = {gᵢ(x) ≥ 0, hⱼ(x) = 0}`, to a scale-invariant tolerance.
+    ///
+    /// Each constraint is judged on a *relative* margin: a point is infeasible
+    /// only when `gᵢ(x) < −tol·(1 + ‖gᵢ‖(x))` (or `|hⱼ(x)| > tol·(1 + ‖hⱼ‖(x))`),
+    /// where `‖·‖(x)` is the triangle-inequality magnitude bound at `x`. This
+    /// tolerates the ~1e-4 inaccuracy of moment-extracted atoms (a binding
+    /// constraint reads `gᵢ ≈ 0`) while still catching a clear violation.
+    fn is_feasible(&self, x: &[f64], tol: f64) -> bool {
+        let ineq_ok = self
+            .inequalities
+            .iter()
+            .all(|g| g.eval(x) >= -tol * (1.0 + g.eval_magnitude(x)));
+        let eq_ok = self
+            .equalities
+            .iter()
+            .all(|h| h.eval(x).abs() <= tol * (1.0 + h.eval_magnitude(x)));
+        ineq_ok && eq_ok
     }
 
     /// Coefficient-equilibrated copy for conditioning the moment SDP (gh #124),
@@ -290,7 +335,11 @@ fn build_sos_sdp(
     let mut cones: Vec<ConeSpec> = Vec::new();
     let mut g_rows: Vec<Triplet> = Vec::new();
     let mut g_h: Vec<f64> = Vec::new();
-    let mut by_mono: HashMap<Vec<usize>, Vec<(usize, f64)>> = HashMap::new();
+    // BTreeMap (not HashMap) so the coefficient-matching rows below are emitted
+    // in a deterministic, sorted-by-monomial order. With a HashMap the SDP's row
+    // ordering — and hence the solver's floating-point path and results — varied
+    // run-to-run (M22).
+    let mut by_mono: BTreeMap<Vec<usize>, Vec<(usize, f64)>> = BTreeMap::new();
     let unit = [(vec![0usize; n], 1.0)]; // weight ≡ 1 for σ₀
 
     // PSD (SOS) blocks: σ₀ (weight 1, basis degree d), then one localizing
@@ -424,7 +473,11 @@ where
 ///
 /// `is_exact` is a *sufficient* exactness certificate: when it holds,
 /// `lower_bound` is provably the global minimum and `minimizers` are the
-/// global optimizers.
+/// global optimizers. For a constrained program it is only set once the
+/// extracted atoms have been checked to lie in the feasible set — flat
+/// truncation of the moment matrix `M_d` alone does not guarantee that (see
+/// [`sos_minimize`]), so an atom that violates a constraint withdraws the
+/// certificate (`is_exact = false`) while `lower_bound` stays a valid bound.
 ///
 /// An interior-point solver returns the **maximum-rank** (analytic-center)
 /// optimal moment matrix, which is flat only when the optimal moment matrix is
@@ -481,7 +534,7 @@ where
         };
     }
 
-    let mut rec = recover_from_moments(&mi, &sol.y);
+    let mut rec = recover_from_moments(prob, &mi, &sol.y);
 
     // Facial reduction. The interior-point solver lands on the analytic-center
     // (maximum-rank) optimal moment matrix, which is flat only when the optimum
@@ -496,7 +549,7 @@ where
         let (qp2, cones2, mi2) = build_sos_sdp(prob, order, Some(TRACE_EPS));
         let sol2 = solve_socp_ipm(&qp2, &cones2, &opts, &mut make_backend);
         if sol2.status == QpStatus::Optimal {
-            let rec2 = recover_from_moments(&mi2, &sol2.y);
+            let rec2 = recover_from_moments(prob, &mi2, &sol2.y);
             if rec2.is_exact {
                 rec = rec2;
             }
@@ -522,7 +575,17 @@ struct Recovery {
 /// Read the moment matrix out of the equality duals `y` (`y_α = y[row_of(α)]`,
 /// with `y_0 = 1` by γ-stationarity up to a global sign), test flat truncation
 /// (`rank M_d = rank M_{d−1}`), and extract the global minimizers when flat.
-fn recover_from_moments(mi: &MomentInfo, y: &[f64]) -> Recovery {
+///
+/// For a *constrained* program the flat-truncation rank test on the moment
+/// matrix `M_d` alone is only sufficient for a representing measure on `ℝⁿ`; its
+/// atoms need not lie in the feasible set `K`. When some constraint has
+/// `dg = ⌈deg/2⌉ > 1` (degree > 2), the `rank M_d = rank M_{d−1}` window is a
+/// strictly weaker condition than the `rank M_d = rank M_{d−dg}` window that
+/// Curto–Fialkow/Henrion–Lasserre require to pin the atoms to `K`, so a flat
+/// `M_d` can yield atoms outside `K` (M21). We therefore validate the extracted
+/// atoms against `prob`'s constraints and withdraw the exactness certificate if
+/// any atom is infeasible — `lower_bound` remains a valid lower bound.
+fn recover_from_moments(prob: &PolyProblem, mi: &MomentInfo, y: &[f64]) -> Recovery {
     let moment = |alpha: &[usize]| -> f64 { y[mi.row_of[alpha]] };
     let zero = vec![0usize; mi.n_vars];
     let sign = if moment(&zero) < 0.0 { -1.0 } else { 1.0 };
@@ -559,12 +622,28 @@ fn recover_from_moments(mi: &MomentInfo, y: &[f64]) -> Recovery {
         psd_rank(&sub, sub_n) == rank_full
     };
 
-    let num_minimizers = if is_exact { rank_full } else { 0 };
-    let minimizers = if is_exact && rank_full >= 1 && mi.d >= 1 {
+    let mut minimizers = if is_exact && rank_full >= 1 && mi.d >= 1 {
         extract_atoms(mi, rank_full, |alpha| sign * y[mi.row_of[alpha]])
     } else {
         Vec::new()
     };
+
+    // Atom-feasibility guard (M21). The flat-truncation test above certifies a
+    // representing measure on ℝⁿ but not that its atoms lie in K; for a
+    // constrained program an extracted atom may violate a constraint (this is
+    // exactly the gap when some gᵢ has degree > 2). If any recovered atom is
+    // infeasible the exactness certificate is unsound, so withdraw it: report
+    // is_exact = false with no minimizers. The lower bound is unaffected (it is
+    // a valid lower bound regardless of flatness).
+    const FEAS_TOL: f64 = 1e-4;
+    let atoms_feasible = (mi.d >= 1)
+        && !minimizers.is_empty()
+        && minimizers.iter().all(|x| prob.is_feasible(x, FEAS_TOL));
+    let is_exact = is_exact && (minimizers.is_empty() || atoms_feasible);
+    if !is_exact {
+        minimizers.clear();
+    }
+    let num_minimizers = if is_exact { rank_full } else { 0 };
 
     Recovery {
         is_exact,
@@ -1108,6 +1187,74 @@ mod tests {
             quad.iter().all(|&q| q),
             "missing a quadrant: {:?}",
             s.minimizers
+        );
+    }
+
+    #[test]
+    fn sdp_row_order_is_deterministic() {
+        // M22: the coefficient-matching rows were emitted in `HashMap`
+        // iteration order, so the SDP's row ordering — and hence the solver's
+        // floating-point path and results — varied run-to-run. Rust seeds each
+        // `HashMap` differently, so building the *same* problem twice in one
+        // process exposes it: with a `HashMap` the two builds disagree on row
+        // order; with the `BTreeMap` they are identical. Assert determinism via
+        // both the RHS vector order and the monomial→row map.
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 0], 1.0),
+                (vec![0, 4], 1.0),
+                (vec![2, 2], -1.0),
+                (vec![1, 0], -2.0),
+                (vec![0, 1], 3.0),
+                (vec![0, 0], 5.0),
+            ],
+        );
+        let prob = PolyProblem::new(p);
+        let (qp1, _, mi1) = build_sos_sdp(&prob, None, None);
+        let (qp2, _, mi2) = build_sos_sdp(&prob, None, None);
+        assert!(qp1.b.len() > 1, "need several rows to detect a permutation");
+        assert_eq!(qp1.b, qp2.b, "RHS row order differs between builds");
+        assert_eq!(
+            mi1.row_of, mi2.row_of,
+            "monomial→row assignment differs between builds"
+        );
+    }
+
+    #[test]
+    fn constrained_overclaim_rejected_when_atom_infeasible() {
+        // min (x+1)²  s.t.  x³ ≥ 0  (feasible set x ≥ 0).  The constrained
+        // minimum is 1 at x = 0; the *unconstrained* minimum is 0 at x = −1.
+        // At order 2 the localizing constraint is the single scalar L(x³) ≥ 0,
+        // far too weak to pin the relaxation's atom to the feasible set: the
+        // degree-3 constraint has dg = ⌈3/2⌉ = 2, so the d−1 flat-truncation
+        // window is *weaker* than the d−dg window Curto–Fialkow/Henrion–Lasserre
+        // require to certify atoms in K. Flat truncation on M_d alone fires and
+        // would extract a single atom at x ≈ −0.72 — INFEASIBLE (x³ ≈ −0.37 < 0)
+        // — while reporting the unconstrained bound 0 as the exact constrained
+        // optimum (M21). The atom-feasibility guard must reject this: is_exact
+        // is false, no minimizers, and lower_bound stays a valid lower bound
+        // (0 ≤ 1).
+        let prob = PolyProblem::new(Polynomial::new(
+            1,
+            vec![(vec![2], 1.0), (vec![1], 2.0), (vec![0], 1.0)],
+        ))
+        .ge(Polynomial::new(1, vec![(vec![3], 1.0)]));
+        let s = sos_minimize(&prob, Some(2), backend);
+        assert_eq!(s.status, QpStatus::Optimal, "{:?}", s.status);
+        assert!(
+            !s.is_exact,
+            "flat M_d truncation extracted an infeasible atom; the certificate \
+             must be rejected, got is_exact=true with minimizers {:?}",
+            s.minimizers
+        );
+        assert_eq!(s.num_minimizers, 0);
+        assert!(s.minimizers.is_empty());
+        // The reported bound is still a valid lower bound on the constrained min.
+        assert!(
+            s.lower_bound <= 1.0 + 1e-6,
+            "bound {} must not exceed the true constrained min 1",
+            s.lower_bound
         );
     }
 }

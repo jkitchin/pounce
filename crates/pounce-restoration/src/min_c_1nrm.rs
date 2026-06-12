@@ -396,8 +396,19 @@ impl RestorationPhase for MinC1NormRestoration {
         let square = new_y_c.dim() == result.trial_x.dim();
         if !square && self.constr_mult_reset_threshold > 0.0 && total_eq_dim > 0 {
             // Upstream `CopyTrialToCurrent` so LSM evaluates ∇f, J_c, J_d
-            // at the recovered iterate. We replicate by setting `curr` to
-            // the just-staged trial container.
+            // at the recovered iterate. We replicate by temporarily setting
+            // `curr` to the just-staged trial container — then RESTORE the
+            // saved `curr` once the multipliers are computed. Upstream's
+            // `least_square_mults` ends with `AcceptTrialPoint`, so its curr
+            // becomes the recovered iterate on every path; pounce defers that
+            // promotion to the caller's `accept_trial_point` (curr ← trial)
+            // on `RestorationOutcome::Recovered`. So `recover` must leave
+            // `curr` exactly as it found it — otherwise this non-default
+            // (`constr_mult_reset_threshold > 0`) path would exit with
+            // `curr` = recovered while the default path leaves it untouched,
+            // a divergence trap for any read of `curr` between here and the
+            // caller's promotion (e.g. `adjust_variable_bounds_for_small_slacks`).
+            let saved_curr = data.borrow().curr.clone();
             let recovered = data
                 .borrow()
                 .trial
@@ -424,6 +435,10 @@ impl RestorationPhase for MinC1NormRestoration {
                 new_y_c.set(0.0);
                 new_y_d.set(0.0);
             }
+
+            // Restore the pre-LSM `curr` so both option-setting paths leave
+            // `data.curr` identical on return (see comment above).
+            data.borrow_mut().curr = saved_curr;
         }
         // else: already zeroed via make_zeroed_like.
 
@@ -679,5 +694,276 @@ mod tests {
         let driver = MinC1NormRestoration::new();
         assert_eq!(driver.bound_mult_reset_threshold, 1e3);
         assert_eq!(driver.constr_mult_reset_threshold, 0.0);
+    }
+
+    // --- L19 regression fixture -------------------------------------------
+    //
+    // Drives `perform_restoration` directly (with a synthetic "successful
+    // resto" inner hook) to pin the `recover` contract that `data.curr` is
+    // left untouched on return — on BOTH the default
+    // (`constr_mult_reset_threshold == 0`) path and the non-default
+    // (`> 0`) LSM path, which temporarily repoints `curr` at the recovered
+    // iterate so the multiplier step can evaluate there. Before the L19 fix
+    // the LSM path leaked that recovered container into `curr`, diverging
+    // from the default path (the caller only promotes `trial → curr` AFTER
+    // `recover` returns).
+    use pounce_algorithm::ipopt_cq::IpoptCalculatedQuantities;
+    use pounce_algorithm::ipopt_data::IpoptData;
+    use pounce_algorithm::ipopt_nlp::Nlp;
+    use pounce_algorithm::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol};
+    use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
+    use pounce_linalg::{Matrix, SymMatrix};
+    use pounce_linsol::ESymSolverStatus;
+
+    fn rcv(values: &[f64]) -> Rc<dyn Vector> {
+        Rc::new(dv(values)) as Rc<dyn Vector>
+    }
+
+    /// Minimal `Nlp`: 2 vars, 1 equality, 1 inequality. Non-square
+    /// (`y_c.dim() == 1 != x.dim() == 2`) so the LSM branch in `recover`
+    /// is reachable. Mirrors the `MockNlp` in `pounce_algorithm::ipopt_cq`
+    /// tests; only the bound/expansion accessors the slack computations
+    /// need are real — gradients/Jacobians/Hessian are never reached here.
+    struct MockNlp {
+        x_l: DenseVector,
+        x_u: DenseVector,
+        d_l: DenseVector,
+        d_u: DenseVector,
+        px_l: Rc<dyn Matrix>,
+        px_u: Rc<dyn Matrix>,
+        pd_l: Rc<dyn Matrix>,
+        pd_u: Rc<dyn Matrix>,
+    }
+
+    impl MockNlp {
+        fn new() -> Self {
+            Self {
+                x_l: dv(&[0.0]),
+                x_u: dv(&[5.0]),
+                d_l: dv(&[1.0]),
+                d_u: dv(&[]),
+                px_l: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    2,
+                    1,
+                    &[0],
+                    0,
+                ))),
+                px_u: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    2,
+                    1,
+                    &[1],
+                    0,
+                ))),
+                pd_l: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    1,
+                    1,
+                    &[0],
+                    0,
+                ))),
+                pd_u: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    1,
+                    0,
+                    &[],
+                    0,
+                ))),
+            }
+        }
+    }
+
+    impl Nlp for MockNlp {
+        fn n(&self) -> Index {
+            2
+        }
+        fn m_eq(&self) -> Index {
+            1
+        }
+        fn m_ineq(&self) -> Index {
+            1
+        }
+        fn eval_f(&mut self, _x: &dyn Vector) -> Number {
+            0.0
+        }
+        fn eval_grad_f(&mut self, _x: &dyn Vector, g: &mut dyn Vector) {
+            g.set(0.0);
+        }
+        fn eval_c(&mut self, _x: &dyn Vector, c: &mut dyn Vector) {
+            c.set(0.0);
+        }
+        fn eval_d(&mut self, _x: &dyn Vector, d: &mut dyn Vector) {
+            d.set(0.0);
+        }
+        fn eval_jac_c(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+            unimplemented!("L19 fixture: Jacobians never evaluated")
+        }
+        fn eval_jac_d(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+            unimplemented!("L19 fixture: Jacobians never evaluated")
+        }
+        fn eval_h(
+            &mut self,
+            _x: &dyn Vector,
+            _obj_factor: Number,
+            _y_c: &dyn Vector,
+            _y_d: &dyn Vector,
+        ) -> Rc<dyn SymMatrix> {
+            unimplemented!("L19 fixture: Hessian never evaluated")
+        }
+    }
+
+    impl IpoptNlp for MockNlp {
+        fn x_l(&self) -> &dyn Vector {
+            &self.x_l
+        }
+        fn x_u(&self) -> &dyn Vector {
+            &self.x_u
+        }
+        fn d_l(&self) -> &dyn Vector {
+            &self.d_l
+        }
+        fn d_u(&self) -> &dyn Vector {
+            &self.d_u
+        }
+        fn px_l(&self) -> Rc<dyn Matrix> {
+            self.px_l.clone()
+        }
+        fn px_u(&self) -> Rc<dyn Matrix> {
+            self.px_u.clone()
+        }
+        fn pd_l(&self) -> Rc<dyn Matrix> {
+            self.pd_l.clone()
+        }
+        fn pd_u(&self) -> Rc<dyn Matrix> {
+            self.pd_u.clone()
+        }
+    }
+
+    /// Stub multiplier calculator: writes fixed sub-threshold multipliers
+    /// and reports success WITHOUT touching `cq`/`aug_solver`, so the LSM
+    /// branch in `recover` runs without a working augmented-system solve.
+    struct StubEqMult;
+    impl EqMultCalculator for StubEqMult {
+        fn calculate_y_eq(
+            &mut self,
+            _data: &IpoptDataHandle,
+            _cq: &IpoptCqHandle,
+            _nlp: &Rc<RefCell<dyn IpoptNlp>>,
+            _aug: &mut dyn AugSystemSolver,
+            y_c: &mut dyn Vector,
+            y_d: &mut dyn Vector,
+        ) -> bool {
+            y_c.set(0.01);
+            y_d.set(0.01);
+            true
+        }
+    }
+
+    /// Aug solver that panics if ever used — `StubEqMult` never invokes it.
+    struct UnusedAug;
+    impl AugSystemSolver for UnusedAug {
+        fn provides_inertia(&self) -> bool {
+            false
+        }
+        fn number_of_neg_evals(&self) -> Index {
+            0
+        }
+        fn increase_quality(&mut self) -> bool {
+            false
+        }
+        fn last_solve_status(&self) -> ESymSolverStatus {
+            ESymSolverStatus::Success
+        }
+        fn solve(
+            &mut self,
+            _coeffs: &AugSysCoeffs<'_>,
+            _rhs: &AugSysRhs<'_>,
+            _sol: &mut AugSysSol<'_>,
+            _check_neg_evals: bool,
+            _num_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            unimplemented!("L19 fixture: aug solver must not be invoked")
+        }
+    }
+
+    fn curr_x_vals(data: &IpoptDataHandle) -> Vec<f64> {
+        let curr = data.borrow().curr.clone().expect("curr set");
+        curr.x
+            .as_any()
+            .downcast_ref::<DenseVector>()
+            .expect("dense x")
+            .values()
+            .to_vec()
+    }
+
+    /// Run `perform_restoration` once with the given
+    /// `constr_mult_reset_threshold`; return `(curr.x before, curr.x after)`.
+    /// The recovered `trial_x` ([10, 20]) deliberately differs from `curr.x`
+    /// ([2, 3]) so a leaked `curr` is visible.
+    fn run_recover_with_threshold(threshold: f64) -> (Vec<f64>, Vec<f64>) {
+        let mut data = IpoptData::new();
+        data.curr_mu = 0.1;
+        data.curr_tau = 0.99;
+        let curr_iv = IteratesVector::new(
+            rcv(&[2.0, 3.0]), // x
+            rcv(&[4.0]),      // s
+            rcv(&[1.0]),      // y_c
+            rcv(&[1.0]),      // y_d
+            rcv(&[0.5]),      // z_l
+            rcv(&[0.7]),      // z_u
+            rcv(&[0.3]),      // v_l
+            rcv(&[]),         // v_u
+        );
+        data.set_curr(curr_iv);
+        let data: IpoptDataHandle = Rc::new(RefCell::new(data));
+
+        let nlp: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(MockNlp::new()));
+        let cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(
+            Rc::clone(&data),
+            Rc::clone(&nlp),
+        )));
+
+        let hook: RestoInnerSolver = Box::new(|_, _, _, _, _, _| {
+            Some(RestoSolveResult {
+                trial_x: rcv(&[10.0, 20.0]),
+                trial_s: rcv(&[4.0]),
+                iter_count: 1,
+                iters_since_header: 0,
+                last_output: 0.0,
+                locally_infeasible: false,
+            })
+        });
+
+        let mut driver = MinC1NormRestoration::new().with_inner_solver(hook);
+        driver.constr_mult_reset_threshold = threshold;
+        driver.eq_mult = Box::new(StubEqMult);
+
+        let before = curr_x_vals(&data);
+        let mut aug = UnusedAug;
+        let outcome = driver.perform_restoration(&data, &cq, &nlp, &mut aug);
+        assert!(
+            matches!(outcome, RestorationOutcome::Recovered),
+            "fixture should recover, got {outcome:?}",
+        );
+        let after = curr_x_vals(&data);
+        (before, after)
+    }
+
+    #[test]
+    fn recover_restores_curr_on_constr_mult_reset_path() {
+        // threshold > 0 → LSM branch runs and (pre-fix) leaks the recovered
+        // trial ([10, 20]) into `curr`. With the fix, `curr` is restored.
+        let (before, after) = run_recover_with_threshold(10.0);
+        assert_eq!(before, vec![2.0, 3.0]);
+        assert_eq!(
+            after, before,
+            "recover must leave data.curr unchanged on the \
+             constr_mult_reset_threshold > 0 path (leaked {after:?})",
+        );
+    }
+
+    #[test]
+    fn recover_leaves_curr_unchanged_on_default_path() {
+        // threshold == 0 (default) → LSM branch skipped; `curr` already
+        // untouched. Pins the invariant the threshold>0 path must match.
+        let (before, after) = run_recover_with_threshold(0.0);
+        assert_eq!(after, before);
     }
 }

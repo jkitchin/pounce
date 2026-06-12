@@ -84,9 +84,14 @@ pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
                 (true, true) => ineq_both += 1,
                 (true, false) => ineq_lower_only += 1,
                 (false, true) => ineq_upper_only += 1,
-                // A "free" inequality has no bounds at all — count it
-                // anyway under "both" to keep the totals consistent.
-                (false, false) => {}
+                // A "free" inequality has no finite bound on either side
+                // (e.g. an `.nl` range row left fully open). It is already
+                // counted in `n_ineq`, so it must land in one of the
+                // per-bound-type buckets or the printed breakdown won't sum
+                // to the total. Bucket it under "both", matching the comment's
+                // long-standing intent (it previously fell through to `{}`,
+                // leaving `lower_only + both + upper_only < n_ineq`).
+                (false, false) => ineq_both += 1,
             }
         }
     }
@@ -507,5 +512,104 @@ pub fn status_message(s: ApplicationReturnStatus) -> &'static str {
         ApplicationReturnStatus::NonIpoptExceptionThrown => "Exception of type generic.",
         ApplicationReturnStatus::InsufficientMemory => "Insufficient memory.",
         ApplicationReturnStatus::InternalError => "INTERNAL ERROR: Unknown SolverReturn value.",
+    }
+}
+
+#[cfg(test)]
+mod inequality_tally_tests {
+    //! Regression test for code review L26: the inequality bound-type
+    //! breakdown (`lower_only` / `both` / `upper_only`) must always sum to
+    //! `n_ineq`. A "free" inequality row (no finite bound on either side)
+    //! previously fell through to a no-op arm, so the breakdown summed to
+    //! *less* than the total whenever such a row was present.
+    use super::*;
+    use pounce_common::types::{Index, Number};
+    use pounce_nlp::tnlp::{IndexStyle, IpoptCq, IpoptData, Solution, StartingPoint};
+
+    /// Two free variables, three inequality rows of distinct bound types:
+    /// row 0 lower-only, row 1 both, row 2 *free* (the bug trigger). No
+    /// equality rows. The breakdown must sum to `n_ineq == 3`.
+    struct FreeIneqRow;
+    impl TNLP for FreeIneqRow {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 3,
+                nnz_jac_g: 3,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.iter_mut().for_each(|v| *v = -BOUND_INF);
+            b.x_u.iter_mut().for_each(|v| *v = BOUND_INF);
+            // row 0: lower-only  [0, +inf)
+            b.g_l[0] = 0.0;
+            b.g_u[0] = BOUND_INF;
+            // row 1: both        [0, 1]
+            b.g_l[1] = 0.0;
+            b.g_u[1] = 1.0;
+            // row 2: free        (-inf, +inf) — the regression trigger
+            b.g_l[2] = -BOUND_INF;
+            b.g_u[2] = BOUND_INF;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.iter_mut().for_each(|v| *v = 0.0);
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, grad_f: &mut [Number]) -> bool {
+            grad_f.iter_mut().for_each(|v| *v = 0.0);
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.iter_mut().for_each(|v| *v = 0.0);
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    // one entry per row so the eq/ineq Jacobian split also
+                    // visits each row.
+                    irow.copy_from_slice(&[0, 1, 2]);
+                    jcol.copy_from_slice(&[0, 0, 0]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn free_inequality_row_keeps_breakdown_summing_to_total() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(FreeIneqRow));
+        let s = collect_stats(&tnlp).expect("collect_stats succeeds");
+
+        assert_eq!(s.n_eq, 0, "no equality rows");
+        assert_eq!(s.n_ineq, 3, "all three rows are inequalities");
+        // The headline invariant L26 flagged: the three printed buckets must
+        // account for every inequality row.
+        let bucket_sum: Index = s.ineq_lower_only + s.ineq_both + s.ineq_upper_only;
+        assert_eq!(
+            bucket_sum, s.n_ineq,
+            "ineq bound-type breakdown ({} lower + {} both + {} upper) must sum to n_ineq={}",
+            s.ineq_lower_only, s.ineq_both, s.ineq_upper_only, s.n_ineq
+        );
+        // The free row is bucketed under "both" alongside the genuine
+        // both-bounded row 1.
+        assert_eq!(s.ineq_lower_only, 1);
+        assert_eq!(s.ineq_upper_only, 0);
+        assert_eq!(s.ineq_both, 2);
     }
 }

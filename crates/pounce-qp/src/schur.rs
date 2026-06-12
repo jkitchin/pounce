@@ -272,10 +272,8 @@ impl SchurState {
                 self.s_dim = 0;
                 return Ok(());
             }
-            Err(QpError::LinearSolverFailure(ref msg))
-                if msg.contains("inertia") || msg.contains("singular") =>
-            {
-                last_err = Some(QpError::LinearSolverFailure(msg.clone()));
+            Err(ref e) if e.is_recoverable_factorization_failure() => {
+                last_err = Some(e.clone());
             }
             Err(e) => return Err(e),
         }
@@ -294,10 +292,8 @@ impl SchurState {
                     self.s_dim = 0;
                     return Ok(());
                 }
-                Err(QpError::LinearSolverFailure(ref msg))
-                    if msg.contains("inertia") || msg.contains("singular") =>
-                {
-                    last_err = Some(QpError::LinearSolverFailure(msg.clone()));
+                Err(ref e) if e.is_recoverable_factorization_failure() => {
+                    last_err = Some(e.clone());
                     next *= opts.inertia_shift_factor;
                 }
                 Err(e) => return Err(e),

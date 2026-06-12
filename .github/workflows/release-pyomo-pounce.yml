@@ -27,8 +27,25 @@ permissions:
   contents: read
 
 jobs:
+  # Tag-vs-manifest guard (M38). On a `pyomo-pounce-v0.5.0` tag push, confirm
+  # pyomo-pounce/pyproject.toml is at 0.5.0 before building/publishing, so the
+  # wheel and PyPI release can't ship the stale manifest version under the new
+  # tag. The build job gates on this. Skipped (no-op pass) on manual
+  # workflow_dispatch, which carries no release tag.
+  verify-version:
+    name: verify tag matches manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify tag matches manifest version
+        if: github.event_name == 'push'
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: python3 scripts/check_tag_version.py "$GITHUB_REF"
+
   build:
     name: build wheel + sdist
+    needs: verify-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

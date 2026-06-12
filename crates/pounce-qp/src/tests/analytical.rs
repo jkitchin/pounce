@@ -47,6 +47,31 @@ fn identity_hessian(n: usize) -> SymTMatrix {
     h
 }
 
+/// Helper — `n × n` all-zero Hessian (no stored entries).
+fn zero_hessian(n: usize) -> SymTMatrix {
+    SymTMatrix::new(SymTMatrixSpace::new(n as i32, Vec::new(), Vec::new()))
+}
+
+/// Helper — diagonal Hessian from `diag`, storing only the nonzero
+/// entries (1-based pounce convention). A zero entry is omitted, so
+/// the resulting `H` is genuinely rank-deficient on that coordinate.
+fn diag_hessian(diag: &[f64]) -> SymTMatrix {
+    let mut irows = Vec::new();
+    let mut jcols = Vec::new();
+    let mut vals = Vec::new();
+    for (k, &d) in diag.iter().enumerate() {
+        if d != 0.0 {
+            irows.push(k as i32 + 1);
+            jcols.push(k as i32 + 1);
+            vals.push(d);
+        }
+    }
+    let space = SymTMatrixSpace::new(diag.len() as i32, irows, jcols);
+    let mut h = SymTMatrix::new(space);
+    h.set_values(&vals);
+    h
+}
+
 fn empty_gen(m: usize, n: usize) -> GenTMatrix {
     GenTMatrix::new(GenTMatrixSpace::new(
         m as i32,
@@ -107,6 +132,345 @@ fn problem_1_unconstrained_identity_hessian() {
     assert_eq!(sol.stats.n_refactor, 1);
     assert_eq!(sol.stats.n_schur_updates, 0);
     assert_eq!(sol.stats.n_working_set_changes, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// H1 regression — zero Hessian + linear objective is unbounded.
+//
+//     min gᵀx,  H = 0,  no constraints, no bounds.
+//
+// The equality-only KKT is the singular 0-matrix; inertia control
+// shifts the H-diagonal by δ and solves `(δI) x = -g`, i.e.
+// x = -g/δ. Pre-fix every caller dropped δ and declared this point
+// `Optimal` — a δ-dependent garbage answer for a problem that is in
+// fact unbounded below. The true (unshifted) stationarity residual is
+// `δ·x = -g ≠ 0`, so the fix reports `QpStatus::Unbounded`.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn h1_zero_hessian_linear_objective_is_unbounded() {
+    let n = 2;
+    let h = zero_hessian(n);
+    let a = empty_gen(0, n);
+    let g = [1.0, -2.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Unbounded,
+        "min gᵀx with H=0 must be Unbounded, got status {:?} with x = {:?}",
+        sol.status,
+        sol.x
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// N1 regression — bounded singular QP must NOT be falsely Unbounded.
+//
+//     min ½·1e-6·x₁² − x₁,   x₂ free with zero curvature & zero grad
+//     H = diag(1e-6, 0),  g = (−1, 0),  no constraints, no bounds.
+//
+// The x₁ direction is curved (h₁₁ = 1e-6 > 0) so the problem has a
+// finite minimizer x₁* = −g₁/h₁₁ = 1e6, obj* = −5e5. The x₂ direction
+// is flat but g₂ = 0, so there is NO descent ray — the QP is bounded.
+//
+// H is rank-deficient (the x₂ diagonal is structurally absent), so
+// inertia control shifts by δ and solves the regularized system,
+// giving a large-but-finite x₁ ≈ 1/(1e-6+δ). The OLD magnitude
+// heuristic (`δ·‖x‖∞ > 1e-3·‖g‖∞`) fired on this `‖x‖∞ ≈ 1e6` and
+// wrongly returned `Unbounded`: it cannot tell a large finite
+// minimizer in a *curved* direction from a blow-up along a *flat*
+// descent ray. The certified recession test rejects it because the
+// dominant ray d = x/‖x‖ ≈ (1,0) has curvature dᵀHd ≈ 1e-6 ≈ ‖H‖
+// (NOT a zero-curvature direction).
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn n1_bounded_singular_qp_is_not_falsely_unbounded() {
+    let n = 2;
+    let h = diag_hessian(&[1e-6, 0.0]);
+    let a = empty_gen(0, n);
+    let g = [-1.0, 0.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Optimal,
+        "bounded singular QP (curved x₁, flat-but-gradient-free x₂) must be \
+         Optimal, got {:?} with x = {:?}",
+        sol.status,
+        sol.x
+    );
+    // Finite, negative objective (≈ −5e5 at the regularized minimizer).
+    assert!(
+        sol.obj.is_finite() && sol.obj < 0.0,
+        "expected a finite negative objective, got {}",
+        sol.obj
+    );
+    // Curved coordinate drives toward the large finite minimizer; flat
+    // coordinate has no gradient so stays put.
+    assert!(
+        sol.x[0] > 1e5,
+        "x₁ should approach the ≈1e6 minimizer, got {}",
+        sol.x[0]
+    );
+    assert!(
+        sol.x[1].abs() < 1e-3,
+        "x₂ (flat, zero-gradient) should stay ≈0, got {}",
+        sol.x[1]
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Genuine unbounded WITH curvature in one coordinate (guard that the
+// recession test still fires when only PART of the space is flat).
+//
+//     min ½ x₁² − x₂,   H = diag(1, 0),  g = (0, −1).
+//
+// The x₂ direction is flat (h₂₂ = 0) and g₂ = −1 drives descent along
+// it without bound → Unbounded. The recession ray d = (0,1) has
+// dᵀHd = 0 (zero curvature), is feasible, and g·d = −1 < 0.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn n1_partial_curvature_descent_ray_is_unbounded() {
+    let n = 2;
+    let h = diag_hessian(&[1.0, 0.0]);
+    let a = empty_gen(0, n);
+    let g = [0.0, -1.0];
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Unbounded,
+        "min ½x₁²−x₂ has a flat descent ray along x₂ and must be Unbounded, \
+         got {:?} with x = {:?}",
+        sol.status,
+        sol.x
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// F2(a) regression — δ discarded on the general active-set path.
+//
+//     min ½ x₁² − x₂,   s.t.  x₁ ≤ 5   (general inequality row)
+//     H = diag(1, 0),  g = (0, −1),  A = [1 0],  bl = −∞, bu = 5.
+//
+// The inequality row routes this to `solve_general` (not the
+// equality-only fast path). The QP is unbounded: x₂ runs to +∞ along
+// the flat, gradient-driven direction, and the lone inequality only
+// caps x₁ (a·p = 0 along the recession ray, so it never blocks). The
+// inertia-control shift inside the active-set loop made every step
+// finite, and with no blocking constraint the loop simply stepped
+// forever and returned `MaxIter` — δ was discarded, so the recession
+// ray was never certified. The fix runs the same certified recession
+// test (zero curvature + feasible ray + descent) on the unblocked
+// Newton step and reports `Unbounded`.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn f2_general_active_set_detects_unbounded_ray() {
+    let n = 2;
+    let m = 1;
+    let h = diag_hessian(&[1.0, 0.0]);
+
+    // A = [1 0] — the single row reads x₁.
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1], vec![1]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0]);
+
+    let g = [0.0, -1.0];
+    let bl = [NLP_LOWER_BOUND_INF]; // one-sided: x₁ ≤ 5
+    let bu = [5.0];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Unbounded,
+        "min ½x₁²−x₂ s.t. x₁≤5 is unbounded along x₂ and must be Unbounded, \
+         got {:?} with x = {:?}",
+        sol.status,
+        sol.x
+    );
+
+    // Same problem on the opt-in Schur-update path.
+    let schur_opts = QpOptions {
+        use_schur_updates: true,
+        ..QpOptions::default()
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &schur_opts).unwrap();
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Unbounded,
+        "Schur path: min ½x₁²−x₂ s.t. x₁≤5 must be Unbounded, got {:?} with x = {:?}",
+        sol.status,
+        sol.x
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Bounded ill-conditioned QP: the certificate must NOT fire on a soft
+// (small-but-real curvature) mode.
+//
+//     min ½ x₁² + ½·10⁻⁴ x₂² − x₂,   H = diag(1, 1e-4, 0),
+//     g = (0, −1, 0) — true minimum −5000 at x₂ = 10⁴.
+//
+// x₃ is structurally flat (h₃₃ = 0), so the inertia shift fires
+// (δ > 0) and the certificate runs; the candidate ray is dominated by
+// the *soft* x₂ mode, whose curvature (1e-4) is 4 orders below the
+// stiffest entry but real — the minimizer is finite. An earlier
+// `dᵀHd ≤ 1e-3·‖H‖` curvature clause certified this `Unbounded` with
+// obj = −∞ on all three paths (the pre-certificate code answered
+// Optimal). The structural-zero floor (`‖Hd‖∞ ≤ 1e-10·‖H‖`) must
+// reject the ray and report the finite optimum.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn soft_mode_bounded_qp_is_not_falsely_unbounded() {
+    let n = 3;
+    let h = diag_hessian(&[1.0, 1e-4, 0.0]);
+    let g = [0.0, -1.0, 0.0];
+    let xl = [NLP_LOWER_BOUND_INF; 3];
+    let xu = [NLP_UPPER_BOUND_INF; 3];
+
+    let check = |sol: &crate::QpSolution, path: &str| {
+        assert_eq!(
+            sol.status,
+            crate::QpStatus::Optimal,
+            "{path}: bounded soft-mode QP must be Optimal, got {:?} with x = {:?}",
+            sol.status,
+            sol.x
+        );
+        // True minimum −5000 at x₂ = 1e4; the δ-regularized solve sits
+        // within O(δ/λ) of it.
+        assert!(
+            (sol.obj + 5000.0).abs() < 5.0,
+            "{path}: expected obj ≈ −5000, got {}",
+            sol.obj
+        );
+        assert!(
+            (sol.x[1] - 1e4).abs() < 10.0,
+            "{path}: expected x₂ ≈ 1e4, got {}",
+            sol.x[1]
+        );
+    };
+
+    // Unconstrained (one-shot equality path, m = 0).
+    let a = empty_gen(0, n);
+    let bl: [f64; 0] = [];
+    let bu: [f64; 0] = [];
+    let qp = QpProblem {
+        n,
+        m: 0,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    check(&sol, "one-shot");
+
+    // With a non-binding inequality row (x₁ ≤ 5) → general active-set
+    // path, and the same on the opt-in Schur-update path.
+    let a_space = GenTMatrixSpace::new(1, n as i32, vec![1], vec![1]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0]);
+    let bl = [NLP_LOWER_BOUND_INF];
+    let bu = [5.0];
+    let qp = QpProblem {
+        n,
+        m: 1,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &QpOptions::default()).unwrap();
+    check(&sol, "general");
+
+    let schur_opts = QpOptions {
+        use_schur_updates: true,
+        ..QpOptions::default()
+    };
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &schur_opts).unwrap();
+    check(&sol, "schur");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1507,14 +1871,20 @@ fn problem_6_indefinite_h_with_pd_reduced_hessian() {
 // reports `WrongInertia`; with shift `H ← H + δI` the reduced
 // Hessian becomes PD and the factor succeeds.
 //
-//     H = diag(0, 1),  g = (-1, -2),  no constraints
+//     H = diag(0, 1),  g = (0, -2),  no constraints
 //
 // H is PSD but not PD — the (1, 0) direction has zero curvature.
-// The unconstrained gradient `g + Hx = 0` requires `x₁ = -g₁/h₁
-// = -(-1)/0 = ∞`. With shift `δ` on the (1,1) diagonal, the
-// regularized solution is `x₁ = 1/δ`, `x₂ = 2`. As δ → 0, x₁
-// diverges — but for any finite δ, the factor succeeds and a
-// finite (regularized) answer is returned.
+// Crucially `g` has **no component along that null direction**
+// (g₁ = 0), so the objective is *bounded below* despite the
+// singular Hessian: any x₁ leaves the objective unchanged, and the
+// minimum `-2` is attained at x₂ = 2 for every x₁. The shift is
+// needed only to make the singular KKT factorable; the regularized
+// solution is x₁ = -g₁/δ = 0, x₂ = 2/(1 + δ) ≈ 2, which stays
+// finite as δ → 0. The H1 re-verification (`δ·‖x‖∞ ≤ 1e-3·‖g‖∞`)
+// therefore keeps `Optimal` here — distinguishing this bounded
+// singular problem from the genuinely-unbounded one in
+// `h1_zero_hessian_linear_objective_is_unbounded`, where g *does*
+// drive the null direction and x blows up to ≈ 1/δ.
 // ─────────────────────────────────────────────────────────────────
 #[test]
 fn inertia_control_shift_succeeds_on_psd_singular_hessian() {
@@ -1524,7 +1894,7 @@ fn inertia_control_shift_succeeds_on_psd_singular_hessian() {
     h.set_values(&[0.0, 1.0]); // singular: zero in (1,1)
 
     let a = empty_gen(0, n);
-    let g = [-1.0, -2.0];
+    let g = [0.0, -2.0]; // no descent along the null direction ⇒ bounded
     let bl: [f64; 0] = [];
     let bu: [f64; 0] = [];
     let xl = [NLP_LOWER_BOUND_INF; 2];
@@ -1552,11 +1922,12 @@ fn inertia_control_shift_succeeds_on_psd_singular_hessian() {
     // PD-direction perturbation (the standard cost of Tikhonov-
     // style regularization).
     assert!((sol.x[1] - 2.0).abs() < 1e-6, "x[1] = {}", sol.x[1]);
-    // x₁ should be a large positive value ≈ 1/δ_final, certifying
-    // that the singular direction was regularized.
+    // x₁ stays ≈ 0: g has no component along the null direction, so
+    // the regularizer does not blow it up (this is what keeps the
+    // problem bounded and the status `Optimal`).
     assert!(
-        sol.x[0] > 1.0,
-        "x[0] = {} should be large (≈ 1/δ_final after shift)",
+        sol.x[0].abs() < 1e-6,
+        "x[0] = {} should stay ≈ 0 (g has no null-direction component)",
         sol.x[0]
     );
 }
@@ -1625,4 +1996,147 @@ fn problem_5_infeasibility_certified_by_elastic_mode() {
         "x = {} but expected 3.0 (the minimum-violation point)",
         sol.x[0]
     );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// L15 regression (dev-notes/code-review-2026-06.md): `solve_elastic`
+// hard-called `solve_general`, ignoring `opts.use_schur_updates` — so
+// an infeasible problem solved with the Schur path silently fell back
+// to the refactor path. Same infeasible problem as
+// `problem_5_infeasibility_certified_by_elastic_mode`, but with
+// `use_schur_updates = true`: the elastic recovery must now route the
+// augmented solve through `solve_general_schur`, which records ≥1
+// rank-2 Schur update in the stats (the refactor path reports 0).
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn l15_elastic_honors_use_schur_updates() {
+    let n = 1;
+    let m = 2;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1], vec![1]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[1.0]);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 2], vec![1, 1]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0];
+    let bl = [5.0, NLP_LOWER_BOUND_INF];
+    let bu = [NLP_UPPER_BOUND_INF, 3.0];
+    let xl = [NLP_LOWER_BOUND_INF];
+    let xu = [NLP_UPPER_BOUND_INF];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut opts = QpOptions::default();
+    opts.use_schur_updates = true;
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, None, &opts).unwrap();
+
+    // Same minimal-l1 infeasibility certificate as the refactor path.
+    assert_eq!(sol.status, crate::QpStatus::Infeasible);
+    assert!(sol.stats.used_phase1, "elastic mode should have run");
+    assert!((sol.x[0] - 3.0).abs() < 1e-6, "x = {}", sol.x[0]);
+    // The Schur path was actually taken inside the elastic recovery:
+    // the refactor path leaves n_schur_updates == 0.
+    assert!(
+        sol.stats.n_schur_updates > 0,
+        "elastic solve should have used the Schur path (≥1 update), got {}",
+        sol.stats.n_schur_updates
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// M5 regression (dev-notes/code-review-2026-06.md): a warm start can
+// drive `solve` to report `Optimal` at a point that violates an
+// equality row the caller left `Inactive`.
+//
+//     min ½‖x‖²   s.t.   x₁ + x₂ = 2   (no bounds)
+//
+// True optimum: x* = (1, 1), obj = 1. We warm-start at x = (0, 0)
+// with the single equality row marked `Inactive` (not `Equality`).
+//
+// Pre-fix: the inner loop sees no active rows, computes p = −Hx − g
+// = 0, declares KKT-stationarity, finds no active row to drop, and
+// returns `Optimal` at (0, 0) — which violates x₁ + x₂ = 2 by 2.0
+// (the ratio test would have `continue`d past the equality row even
+// if it had been reached). Post-fix: the feasibility audit catches
+// the violation and recovers through elastic mode, returning the
+// true feasible optimum (1, 1).
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn m5_warm_start_inactive_equality_is_not_a_false_optimal() {
+    let n = 2;
+    let m = 1;
+    let h = identity_hessian(n);
+
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1], vec![1, 2]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0]);
+
+    let g = [0.0, 0.0];
+    let bl = [2.0];
+    let bu = [2.0];
+    let xl = [NLP_LOWER_BOUND_INF; 2];
+    let xu = [NLP_UPPER_BOUND_INF; 2];
+
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    // Infeasible warm start with the equality row left Inactive.
+    let ws = crate::QpWarmStart {
+        x: vec![0.0, 0.0],
+        lambda_g: vec![0.0],
+        lambda_x: vec![0.0, 0.0],
+        working: crate::WorkingSet {
+            bounds: vec![crate::BoundStatus::Inactive; 2],
+            constraints: vec![crate::ConsStatus::Inactive],
+        },
+    };
+
+    let mut solver = new_solver();
+    let sol = solver.solve(&qp, Some(&ws), &QpOptions::default()).unwrap();
+
+    // The returned point MUST satisfy the equality (this is the
+    // assertion that fails pre-fix: x = (0, 0) ⇒ residual 2.0).
+    let residual = (sol.x[0] + sol.x[1] - 2.0).abs();
+    assert!(
+        residual < 1e-6,
+        "returned x = ({}, {}) violates x₁+x₂=2 by {residual}; status = {:?}",
+        sol.x[0],
+        sol.x[1],
+        sol.status
+    );
+
+    // And it must be the true optimum, reported feasible.
+    assert_eq!(
+        sol.status,
+        crate::QpStatus::Optimal,
+        "status = {:?}",
+        sol.status
+    );
+    assert!((sol.x[0] - 1.0).abs() < 1e-6, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 1.0).abs() < 1e-6, "x[1] = {}", sol.x[1]);
 }

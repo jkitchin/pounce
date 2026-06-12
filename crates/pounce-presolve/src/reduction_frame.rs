@@ -210,13 +210,71 @@ impl ReductionFrame {
     ) -> Result<Vec<Number>, BlockSolveError> {
         let n_vars = self.n_full_vars();
         let n_rows = self.n_full_rows();
-        let k = self.fixed_vars.len();
-        assert_eq!(grad_f.len(), n_vars, "grad_f length mismatch");
         assert_eq!(
             jac_full_row_major.len(),
             n_rows * n_vars,
             "jac_full_row_major length mismatch"
         );
+        // The recovery reads the Jacobian only at columns `i ∈ fixed_vars`,
+        // so the full dense layout is just one indexing convention; see
+        // `recover_dropped_multipliers_cols` for the column-compacted one.
+        self.recover_core(grad_f, lambda_full, |row, col| {
+            jac_full_row_major[row * n_vars + col]
+        })
+    }
+
+    /// Same recovery as [`recover_dropped_multipliers`], but reads the
+    /// Jacobian from a **column-compacted** dense buffer that holds only a
+    /// subset of the full columns. The recovery touches the Jacobian only at
+    /// the frame's `fixed_vars` columns (it never reads any other column), so
+    /// a caller that knows which columns matter can materialize an
+    /// `(n_full_rows × n_cols)` block instead of the full
+    /// `(n_full_rows × n_full_vars)` one — the difference between O(m·k) and
+    /// O(m·n) memory when `k = |fixed_vars|` is tiny next to `n` (issue M26).
+    ///
+    /// - `jac_cols_row_major` — dense `(n_full_rows × n_cols)`, row-major.
+    /// - `n_cols` — number of compacted columns (the row stride).
+    /// - `orig_to_compact` — length `n_full_vars`; maps an original column
+    ///   index to its position in the compacted buffer. Only the entries at
+    ///   `fixed_vars` are ever read, and the caller must place those columns
+    ///   in the buffer; entries for absent columns may be any value.
+    pub fn recover_dropped_multipliers_cols(
+        &self,
+        grad_f: &[Number],
+        jac_cols_row_major: &[Number],
+        n_cols: usize,
+        orig_to_compact: &[usize],
+        lambda_full: &[Number],
+    ) -> Result<Vec<Number>, BlockSolveError> {
+        let n_rows = self.n_full_rows();
+        assert_eq!(
+            jac_cols_row_major.len(),
+            n_rows * n_cols,
+            "jac_cols_row_major length mismatch"
+        );
+        assert_eq!(
+            orig_to_compact.len(),
+            self.n_full_vars(),
+            "orig_to_compact length mismatch"
+        );
+        self.recover_core(grad_f, lambda_full, |row, col| {
+            jac_cols_row_major[row * n_cols + orig_to_compact[col]]
+        })
+    }
+
+    /// Shared core of the multiplier recovery. `get(row, col)` returns the
+    /// full-space Jacobian entry `J[row][col]`; the two public wrappers differ
+    /// only in how they lay out the matrix behind that accessor. `get` is
+    /// invoked exclusively at `col ∈ fixed_vars`.
+    fn recover_core(
+        &self,
+        grad_f: &[Number],
+        lambda_full: &[Number],
+        get: impl Fn(usize, usize) -> Number,
+    ) -> Result<Vec<Number>, BlockSolveError> {
+        let n_rows = self.n_full_rows();
+        let k = self.fixed_vars.len();
+        assert_eq!(grad_f.len(), self.n_full_vars(), "grad_f length mismatch");
         assert_eq!(lambda_full.len(), n_rows, "lambda_full length mismatch");
 
         if k == 0 {
@@ -232,7 +290,7 @@ impl ReductionFrame {
         let mut matrix = vec![0.0; k * k];
         for (i_idx, &i) in self.fixed_vars.iter().enumerate() {
             for (j_idx, &dr) in self.dropped_rows.iter().enumerate() {
-                matrix[i_idx * k + j_idx] = jac_full_row_major[dr * n_vars + i];
+                matrix[i_idx * k + j_idx] = get(dr, i);
             }
         }
 
@@ -244,7 +302,7 @@ impl ReductionFrame {
                     // Row was dropped.
                     continue;
                 }
-                sum += jac_full_row_major[r * n_vars + i] * lambda_full[r];
+                sum += get(r, i) * lambda_full[r];
             }
             rhs[i_idx] = grad_f[i] - sum;
         }
@@ -422,6 +480,99 @@ mod tests {
             .recover_dropped_multipliers(&grad_f, &jac, &[0.0, 0.0])
             .unwrap_err();
         assert_eq!(err, BlockSolveError::Singular);
+    }
+
+    #[test]
+    fn recover_only_reads_fixed_var_columns() {
+        // M26 verification: the recovery indexes the Jacobian solely at the
+        // frame's `fixed_vars` columns, so a caller need only materialize
+        // those columns. Poison every *non-fixed* column with NaN and confirm
+        // the recovered multipliers are byte-for-byte identical to the clean
+        // run — proving the densified non-fixed columns are never read.
+        //
+        // 3 vars, 3 rows. fixed_vars = [0, 2], dropped_rows = [0, 1];
+        // var 1 is free, so column 1 is the one allowed to be garbage.
+        let frame = ReductionFrame::new(3, 3, vec![0, 2], vec![1.0, 2.0], vec![0, 1]);
+        let grad_f = [10.0, 4.0, 7.0];
+        let lambda_full = [0.0, 0.0, 0.5]; // row 2 kept
+        let clean = [
+            2.0, 1.0, 0.5, // row 0
+            1.0, -1.0, 3.0, // row 1
+            0.4, 1.0, 0.9, // row 2 (kept)
+        ];
+        let expected = frame
+            .recover_dropped_multipliers(&grad_f, &clean, &lambda_full)
+            .unwrap();
+
+        let mut poisoned = clean;
+        for r in 0..3 {
+            poisoned[r * 3 + 1] = Number::NAN; // column 1 = the free var
+        }
+        let got = frame
+            .recover_dropped_multipliers(&grad_f, &poisoned, &lambda_full)
+            .unwrap();
+
+        assert_eq!(got.len(), expected.len());
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!(g.is_finite(), "recovered multiplier went NaN: {g}");
+            assert_eq!(g.to_bits(), e.to_bits(), "got {g}, expected {e}");
+        }
+    }
+
+    #[test]
+    fn recover_cols_matches_dense() {
+        // M26: the column-compacted recovery must reproduce the dense one
+        // exactly. Build a dense Jacobian, then a compacted buffer holding
+        // only the fixed-var columns, and assert identical multipliers.
+        let frame = ReductionFrame::new(3, 3, vec![0, 2], vec![1.0, 2.0], vec![0, 1]);
+        let grad_f = [10.0, 4.0, 7.0];
+        let lambda_full = [0.0, 0.0, 0.5];
+        let dense = [
+            2.0, 1.0, 0.5, // row 0
+            1.0, -1.0, 3.0, // row 1
+            0.4, 1.0, 0.9, // row 2
+        ];
+        let dense_lam = frame
+            .recover_dropped_multipliers(&grad_f, &dense, &lambda_full)
+            .unwrap();
+
+        // Compact only columns {0, 2} (the union of fixed_vars).
+        let needed = [0usize, 2];
+        let n_cols = needed.len();
+        let mut orig_to_compact = [usize::MAX; 3];
+        for (cc, &c) in needed.iter().enumerate() {
+            orig_to_compact[c] = cc;
+        }
+        let mut jac_cols = vec![0.0; 3 * n_cols];
+        for r in 0..3 {
+            for (cc, &c) in needed.iter().enumerate() {
+                jac_cols[r * n_cols + cc] = dense[r * 3 + c];
+            }
+        }
+        let cols_lam = frame
+            .recover_dropped_multipliers_cols(
+                &grad_f,
+                &jac_cols,
+                n_cols,
+                &orig_to_compact,
+                &lambda_full,
+            )
+            .unwrap();
+
+        assert_eq!(cols_lam.len(), dense_lam.len());
+        for (c, d) in cols_lam.iter().zip(dense_lam.iter()) {
+            assert_eq!(c.to_bits(), d.to_bits(), "cols {c} != dense {d}");
+        }
+    }
+
+    #[test]
+    fn recover_cols_empty_frame() {
+        // No fixed vars → no columns needed → empty compact buffer is valid.
+        let frame = ReductionFrame::new(2, 2, vec![], vec![], vec![]);
+        let lam = frame
+            .recover_dropped_multipliers_cols(&[0.0; 2], &[], 0, &[usize::MAX; 2], &[0.0; 2])
+            .unwrap();
+        assert!(lam.is_empty());
     }
 
     #[test]

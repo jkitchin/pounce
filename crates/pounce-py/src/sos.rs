@@ -22,6 +22,7 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
 fn status_str(s: QpStatus) -> &'static str {
     match s {
         QpStatus::Optimal => "optimal",
+        QpStatus::OptimalInaccurate => "optimal_inaccurate",
         QpStatus::PrimalInfeasible => "primal_infeasible",
         QpStatus::DualInfeasible => "dual_infeasible",
         QpStatus::IterationLimit => "iteration_limit",

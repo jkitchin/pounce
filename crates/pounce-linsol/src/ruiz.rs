@@ -116,17 +116,34 @@ impl TSymScalingMethod for RuizTSymScalingMethod {
 
         // Detect Fortran-style 1-based triplets. Upstream's
         // `TSymLinearSolver` hands triplets through unchanged; both
-        // index styles appear in the test bed.
+        // index styles appear in the test bed. The base cannot always be
+        // read from the indices alone, but for an n×n matrix two signals
+        // are decisive: a 1-based triplet never references index 0, and a
+        // 0-based triplet never references index n (its valid range is
+        // [0, n-1]). The previous min-only rule (`min_idx >= 1 ⇒
+        // 1-based`) misclassified a 0-based triplet whose row 0 is
+        // structurally empty (so `min_idx >= 1`) as 1-based, shifting
+        // every scaling factor onto the wrong row. Use *both* extremes,
+        // and resolve the residual ambiguity (neither 0 nor n present)
+        // toward 0-based when the indices already cover the last row
+        // (`max_idx == n - 1`, the hallmark of a full 0-based n×n
+        // system); otherwise keep the historical 1-based assumption of
+        // the in-tree caller.
         let mut min_idx = airn[0];
+        let mut max_idx = airn[0];
         for k in 0..nnz_us {
-            if airn[k] < min_idx {
-                min_idx = airn[k];
-            }
-            if ajcn[k] < min_idx {
-                min_idx = ajcn[k];
-            }
+            min_idx = min_idx.min(airn[k]).min(ajcn[k]);
+            max_idx = max_idx.max(airn[k]).max(ajcn[k]);
         }
-        let offset: Index = if min_idx >= 1 { 1 } else { 0 };
+        let offset: Index = if min_idx == 0 {
+            0
+        } else if max_idx >= n {
+            1
+        } else if max_idx == n - 1 {
+            0
+        } else {
+            1
+        };
 
         // Initialize d = 1.
         for s in scaling_factors.iter_mut() {
@@ -293,6 +310,47 @@ mod tests {
         let scaled_11 = vals[1] * s[1] * s[1];
         assert!((scaled_00 - 1.0).abs() < 1e-3);
         assert!((scaled_11 - 1.0).abs() < 1e-3);
+    }
+
+    /// A 0-based triplet whose row 0 is structurally empty has
+    /// `min_idx >= 1`, so the old min-only base detection misread it as
+    /// Fortran 1-based and shifted every factor down one row (issue L8).
+    /// Here `K = diag([0, 4, 9])` (0-based; row 0 empty): the factors
+    /// must land on rows 1 and 2, and the empty row 0 must keep `d=1`.
+    #[test]
+    fn zero_based_with_empty_first_row_is_not_misread_as_fortran() {
+        let mut method = RuizTSymScalingMethod::new();
+        // 0-based indices: entries only on rows/cols 1 and 2. min_idx==1,
+        // max_idx==2==n-1 ⇒ must be detected as 0-based (offset 0).
+        let irn = [1, 2];
+        let jcn = [1, 2];
+        let vals = [4.0, 9.0];
+        let mut s = vec![0.0; 3];
+        assert!(method.compute_sym_t_scaling_factors(3, 2, &irn, &jcn, &vals, &mut s));
+
+        // Empty row 0 → untouched unit scale. Pre-fix this slot received
+        // the factor meant for row 1 (≈0.5) because offset was 1.
+        assert!(
+            (s[0] - 1.0).abs() < 1e-12,
+            "empty row 0 must keep d=1, got {} (factor leaked from a \
+             misdetected 1-based offset)",
+            s[0]
+        );
+        // The actual entries (rows 1,2) must be equilibrated to ≈1.
+        let scaled_11 = vals[0] * s[1] * s[1];
+        let scaled_22 = vals[1] * s[2] * s[2];
+        assert!(
+            (scaled_11 - 1.0).abs() < 1e-3,
+            "K_11=4 → scaled {}, want ≈1; s={:?}",
+            scaled_11,
+            s
+        );
+        assert!(
+            (scaled_22 - 1.0).abs() < 1e-3,
+            "K_22=9 → scaled {}, want ≈1; s={:?}",
+            scaled_22,
+            s
+        );
     }
 
     /// Symmetric balance: after equilibration the max row/col ∞-norm

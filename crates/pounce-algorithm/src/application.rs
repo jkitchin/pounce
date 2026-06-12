@@ -2202,17 +2202,24 @@ fn finalize_via_orig_nlp(
     let m = info.m as usize;
     debug_assert_eq!(x_vec.len(), n);
     // Lift algorithm-side multipliers back into user-space (pounce#11).
-    // Backends without overrides return empty; fall back to zero stubs
-    // so the user sees a length-consistent vector.
-    let mut z_l = nlp_borrow.pack_z_l_for_user(&*curr.z_l);
+    // Use the `finalize_solution_*` family (not the `pack_*` family): the
+    // final solution duals must be reported in the user's *unscaled-
+    // Lagrangian* convention `∇f + λ·∇g + z = 0`, which divides out the
+    // `obj_scale_factor` the algorithm threads through `eval_h`. The `pack_*`
+    // family deliberately omits that division because it feeds the scaled
+    // `eval_h`; calling it here left every dual scaled by `obj_scale_factor`
+    // whenever gradient-based scaling triggered (pounce#11 F1).
+    // Backends without overrides return empty; fall back to zero stubs so the
+    // user sees a length-consistent vector.
+    let mut z_l = nlp_borrow.finalize_solution_z_l(&*curr.z_l);
     if z_l.is_empty() {
         z_l = vec![0.0; n];
     }
-    let mut z_u = nlp_borrow.pack_z_u_for_user(&*curr.z_u);
+    let mut z_u = nlp_borrow.finalize_solution_z_u(&*curr.z_u);
     if z_u.is_empty() {
         z_u = vec![0.0; n];
     }
-    let mut lambda = nlp_borrow.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+    let mut lambda = nlp_borrow.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
     if lambda.is_empty() {
         lambda = vec![0.0; m];
     }
@@ -2350,11 +2357,13 @@ fn finalize_via_sqp(
     let zu_vals: Vec<Number> = res.lambda_x.iter().map(|v| (-v).max(0.0)).collect();
     z_l_compressed.set_values(&zl_vals);
     z_u_compressed.set_values(&zu_vals);
-    let mut z_l = nlp_borrow.pack_z_l_for_user(&z_l_compressed);
+    // `finalize_solution_*` (not `pack_*`): report unscaled-Lagrangian duals,
+    // dividing out `obj_scale_factor` — see `finalize_via_orig_nlp` (F1).
+    let mut z_l = nlp_borrow.finalize_solution_z_l(&z_l_compressed);
     if z_l.is_empty() {
         z_l = vec![0.0; n];
     }
-    let mut z_u = nlp_borrow.pack_z_u_for_user(&z_u_compressed);
+    let mut z_u = nlp_borrow.finalize_solution_z_u(&z_u_compressed);
     if z_u.is_empty() {
         z_u = vec![0.0; n];
     }
@@ -2368,7 +2377,7 @@ fn finalize_via_sqp(
     if m_ineq > 0 {
         y_d_dv.set_values(&res.lambda_g[m_eq..]);
     }
-    let mut lambda = nlp_borrow.pack_lambda_for_user(&y_c_dv, &y_d_dv);
+    let mut lambda = nlp_borrow.finalize_solution_lambda(&y_c_dv, &y_d_dv);
     if lambda.is_empty() {
         lambda = vec![0.0; m];
     }

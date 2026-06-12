@@ -119,3 +119,53 @@ fn refinement_holds_under_indefinite_saddle_kkt() {
     assert!((rhs[1] - 0.0).abs() < 1e-13, "x[1] = {}", rhs[1]);
     assert!((rhs[2] - (-1.0)).abs() < 1e-13, "λ = {}", rhs[2]);
 }
+
+/// L14: the inertia-control retry loops decide recoverability via
+/// `QpError::is_recoverable_factorization_failure`. It must accept the
+/// failures produced by BOTH the `factorize_and_solve` path (lower-case
+/// human messages "…singular…" / "…inertia…") AND the cached-factor
+/// `resolve` path, whose catch-all embeds the backend's `Debug`-formatted
+/// `ESymSolverStatus` ("Singular" / "WrongInertia", capitalized). A
+/// case-sensitive `contains("singular")` — the pre-fix code — would miss
+/// the resolve-path messages, so a singular/wrong-inertia failure during a
+/// Schur-update resolve would propagate as unrecoverable instead of
+/// triggering a Hessian-shift retry.
+#[test]
+fn recoverable_factorization_failure_is_case_insensitive() {
+    use crate::QpError;
+
+    // factorize_and_solve path — lower-case keywords.
+    assert!(QpError::LinearSolverFailure(
+        "KKT matrix is singular (LICQ violation or rank-deficient Jacobian)".into()
+    )
+    .is_recoverable_factorization_failure());
+    assert!(QpError::LinearSolverFailure(
+        "KKT inertia mismatch: expected 2 negative eigenvalues, got 1".into()
+    )
+    .is_recoverable_factorization_failure());
+
+    // resolve path — capitalized Debug-formatted ESymSolverStatus. These
+    // are exactly the strings `format!("resolve backend status: {st:?}")`
+    // produces, and are the L14 regression.
+    assert!(
+        QpError::LinearSolverFailure("resolve backend status: Singular".into())
+            .is_recoverable_factorization_failure()
+    );
+    assert!(
+        QpError::LinearSolverFailure("resolve backend status: WrongInertia".into())
+            .is_recoverable_factorization_failure()
+    );
+
+    // Genuinely unrecoverable / unrelated failures must NOT be retried.
+    assert!(
+        !QpError::LinearSolverFailure("backend reported fatal error".into())
+            .is_recoverable_factorization_failure()
+    );
+    assert!(!QpError::LinearSolverFailure(
+        "resolve called before a successful factorize_and_solve".into()
+    )
+    .is_recoverable_factorization_failure());
+    assert!(
+        !QpError::DimensionMismatch("g.len() != n".into()).is_recoverable_factorization_failure()
+    );
+}

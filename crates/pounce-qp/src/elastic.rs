@@ -56,6 +56,15 @@ pub struct ElasticReformulation {
     pub xu_aug: Vec<Number>,
 
     pub gamma: Number,
+
+    /// Inertia hint of the *original* `H`, captured at `build` time.
+    /// The augmented Hessian is block-diag(`H_orig`, 0), so it shares
+    /// `H_orig`'s definiteness category (adding zero slack diagonals
+    /// never introduces negative curvature). `as_qp` propagates this
+    /// to the augmented problem so an indefinite original is solved
+    /// through the inertia-control path instead of being silently
+    /// treated as PSD (L15).
+    orig_inertia: HessianInertia,
 }
 
 impl ElasticReformulation {
@@ -140,6 +149,7 @@ impl ElasticReformulation {
             xl_aug,
             xu_aug,
             gamma,
+            orig_inertia: qp.hessian_inertia,
         }
     }
 
@@ -167,11 +177,13 @@ impl ElasticReformulation {
     }
 
     fn original_inertia(&self) -> HessianInertia {
-        // Stored as part of the reformulation so the caller can
-        // pass the augmented problem through `solve` without
-        // re-thinking the inertia hint each call. For now the
-        // builder takes no inertia argument; default to PSD.
-        HessianInertia::Psd
+        // The inertia hint of the original `H`, captured at `build`
+        // time from `qp.hessian_inertia`. `as_qp` maps it onto the
+        // augmented problem: `Psd`/`Unknown` collapse to `Psd` (the
+        // augmented Hessian is PSD with explicit zero slack diagonals),
+        // while `Indefinite` propagates so the augmented solve takes
+        // the inertia-control path rather than assuming PSD.
+        self.orig_inertia
     }
 
     /// Compute an initial primal-dual seed for the augmented

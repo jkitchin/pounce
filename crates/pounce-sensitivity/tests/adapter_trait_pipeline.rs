@@ -248,7 +248,7 @@ fn adapter_compute_p_matches_direct_backsolves() {
             let mut col_ref = vec![0.0; n_full];
             assert!(backsolver.solve(&e, &mut col_ref));
 
-            let col_pcalc = pcalc.p_columns().get(&idx).expect("col cached");
+            let col_pcalc = pcalc.p_columns().get(&(idx, 1)).expect("col cached");
             assert_eq!(col_pcalc.len(), n_full);
             for i in 0..n_full {
                 let err = (col_pcalc[i] - col_ref[i]).abs();
@@ -281,8 +281,8 @@ fn adapter_compute_p_respects_negative_signs() {
         assert!(pc_pos.compute_p());
         assert!(pc_neg.compute_p());
 
-        let p_pos = pc_pos.p_columns().get(&Y_C_PARAM_ROW_ETA1).unwrap();
-        let p_neg = pc_neg.p_columns().get(&Y_C_PARAM_ROW_ETA1).unwrap();
+        let p_pos = pc_pos.p_columns().get(&(Y_C_PARAM_ROW_ETA1, 1)).unwrap();
+        let p_neg = pc_neg.p_columns().get(&(Y_C_PARAM_ROW_ETA1, -1)).unwrap();
         for i in 0..n_full {
             let err = (p_pos[i] - (-p_neg[i])).abs();
             assert!(

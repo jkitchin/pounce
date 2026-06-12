@@ -85,6 +85,16 @@ enum RowSense {
 pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
     let mut name = String::new();
     let mut section = Section::None;
+    // Whether the active quadratic section uses the *full-matrix*
+    // convention (`QMATRIX`, both triangles listed) versus the
+    // *single-triangle* convention (`QUADOBJ` / `QSECTION`). For a
+    // full-matrix section every off-diagonal H_ij is given twice —
+    // once as (i,j) and once as the mirror (j,i). After lower-triangle
+    // normalization both collapse onto the same triplet and the
+    // evaluator sums them, doubling the off-diagonal. We drop the
+    // strict-upper mirror of a full-matrix section so each off-diagonal
+    // survives exactly once.
+    let mut quad_is_full = false;
 
     // Row metadata.
     let mut obj_row: Option<String> = None;
@@ -129,7 +139,14 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
                 Some("RHS") => section = Section::Rhs,
                 Some("RANGES") => section = Section::Ranges,
                 Some("BOUNDS") => section = Section::Bounds,
-                Some("QUADOBJ") | Some("QSECTION") | Some("QMATRIX") => section = Section::Quadobj,
+                Some("QUADOBJ") | Some("QSECTION") => {
+                    section = Section::Quadobj;
+                    quad_is_full = false;
+                }
+                Some("QMATRIX") => {
+                    section = Section::Quadobj;
+                    quad_is_full = true;
+                }
                 Some("ENDATA") => {
                     let _ = Section::Endata;
                     break;
@@ -368,6 +385,15 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
                 let val: f64 = tokens[2]
                     .parse()
                     .map_err(|e| format!("line {}: bad QUADOBJ value: {e}", line_no + 1))?;
+                // In a full-matrix (`QMATRIX`) section the mirror entry
+                // (j,i) carries the same value, so keep only the lower
+                // triangle and the diagonal; otherwise the off-diagonal
+                // is double-counted after normalization below. A
+                // single-triangle section lists each pair once, so keep
+                // everything.
+                if quad_is_full && i_col < j_col {
+                    continue;
+                }
                 h_entries.push((i_col, j_col, val));
             }
             Section::None | Section::Endata => continue,

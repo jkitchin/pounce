@@ -814,6 +814,85 @@ fn multi_pin_reduced_hessian_off_diagonal_is_scaling_invariant() {
     assert!(h01.abs() > 1e-6, "fixture sanity: off-diagonal is nonzero");
 }
 
+/// F1 follow-up (pounce#11): the user-space multipliers `SensSolve`
+/// captures must be in natural (unscaled-Lagrangian) units — the
+/// `finalize_solution` / Python-info-dict convention — independent of
+/// `nlp_scaling_method`. The capture used to go through
+/// `pack_lambda_for_user`/`pack_z_*_for_user`, which unwind the
+/// per-row constraint scaling but NOT `obj_scale_factor`, so whenever
+/// gradient-based objective scaling fired the reported `mult_g` was
+/// obj-scaled (off by `df`). [`ScaledPinTnlp`]'s starting objective
+/// gradient (≈ 2·c1 = 1.2e5) exceeds `nlp_scaling_max_gradient`
+/// (100), so `df` fires under `gradient-based` and this fixture
+/// catches the leak.
+#[test]
+fn captured_multipliers_are_invariant_to_nlp_scaling() {
+    // Analytic pin multiplier in the user's convention (L = f + λᵀg):
+    // stationarity in p gives −2·c0·(x* − p̂) + λ·SCALE = 0 with
+    // x* = (c0·p̂ + c1)/(c0 + c1).
+    let x_star = (C0 * P_HAT + C1) / (C0 + C1);
+    let lambda_analytic = 2.0 * C0 * (x_star - P_HAT) / SCALE;
+
+    let run = |method: &str| -> (Vec<Number>, Number) {
+        let mut app = make_app(method);
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ScaledPinTnlp {
+            with_leading_inequality: false,
+        }));
+        let result = SensSolve::new(vec![0]).run(&mut app, tnlp);
+        assert!(
+            matches!(
+                result.status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "solve failed under nlp_scaling_method={method}: {:?}",
+            result.status,
+        );
+        assert!(result.error.is_none(), "sens error: {:?}", result.error);
+        let mult_g = result.mult_g.expect("mult_g captured");
+        let df = result.obj_scaling_factor.expect("df reported");
+        // Bound multipliers must also be captured (all-zero here:
+        // the fixture has no finite variable bounds) at full-x length.
+        assert_eq!(result.mult_x_l.expect("mult_x_l captured").len(), 2);
+        assert_eq!(result.mult_x_u.expect("mult_x_u captured").len(), 2);
+        (mult_g, df)
+    };
+
+    let (m_none, df_none) = run("none");
+    let (m_grad, df_grad) = run("gradient-based");
+
+    // Fixture sanity: the gradient-based objective scaling really
+    // fired — otherwise this test degenerates into a no-op guard.
+    assert!(
+        (df_none - 1.0).abs() < 1e-12,
+        "df must be 1.0 under nlp_scaling_method=none: {df_none}"
+    );
+    assert!(
+        (df_grad - 1.0).abs() > 0.5,
+        "gradient-based df should have fired on this fixture: {df_grad}"
+    );
+
+    assert_eq!(m_none.len(), 1);
+    assert_eq!(m_grad.len(), 1);
+    let rel = |a: Number, b: Number| (a - b).abs() / b.abs();
+    assert!(
+        rel(m_none[0], lambda_analytic) < 1e-6,
+        "unscaled solve: mult_g = {}, analytic = {lambda_analytic}",
+        m_none[0],
+    );
+    // The headline guard: same natural-units value under scaling. A
+    // capture that skips the obj_scale division would report
+    // λ·df ≈ λ/1200 here instead.
+    assert!(
+        rel(m_grad[0], m_none[0]) < 1e-6,
+        "mult_g not scaling-invariant: none {}, gradient-based {} \
+         (ratio {} — a ratio ≪ 1 means the obj-scaled dual leaked out)",
+        m_none[0],
+        m_grad[0],
+        m_grad[0] / m_none[0],
+    );
+}
+
 #[test]
 fn parametric_step_is_invariant_to_nlp_scaling() {
     // dx*/dr for the pin RHS r: x*(p) = (c0·p + c1)/(c0+c1) and

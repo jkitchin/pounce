@@ -287,3 +287,66 @@ fn sens_solve_captures_user_space_multipliers_for_sqp_corrector() {
     assert_eq!(result.mult_x_u.as_ref().unwrap().len(), n_full_x);
     assert_eq!(result.g.as_ref().unwrap().len(), n_full_g);
 }
+
+// ─────────────────────────────────────────────────────────────────
+// M6 regression (dev-notes/code-review-2026-06.md): a post-solve
+// sensitivity-stage failure must be surfaced through
+// `SensResult::error`, not silently swallowed.
+//
+// The underlying solve converges (so `status == SolveSucceeded`), but
+// the sensitivity step is asked to pin a constraint index that is NOT
+// an equality in the c-block — here an out-of-range index. The
+// callback writes `outbox.error` and bails, leaving `dx == None`.
+//
+// Pre-fix: `SensResult` had no `error` field, so this was
+// indistinguishable from "deltas not requested" — `dx == None`,
+// `status == SolveSucceeded`, and no way to tell the sensitivity
+// step blew up. Post-fix: `result.error` carries the message and the
+// requested `dx` is `None`.
+// ─────────────────────────────────────────────────────────────────
+#[test]
+fn sens_solve_surfaces_sensitivity_stage_failure() {
+    let mut app = make_app();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+
+    // ParametricTNLP has m = 4 constraints (indices 0..=3). Pin an
+    // out-of-range index so `full_g_to_c_block` returns None and the
+    // sensitivity callback fails after a successful solve.
+    let bad_pin: Index = 99;
+    let result = SensSolve::new(vec![bad_pin])
+        .with_deltas(vec![0.1])
+        .run(&mut app, tnlp);
+
+    // The underlying solve still converged...
+    assert!(
+        matches!(
+            result.status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "underlying solve should converge; status = {:?}",
+        result.status,
+    );
+    // ...but the sensitivity stage failed, and that MUST be visible.
+    assert!(
+        result.error.is_some(),
+        "sensitivity-stage failure must be surfaced in SensResult::error, \
+         not swallowed (dx = {:?}, status = {:?})",
+        result.dx,
+        result.status,
+    );
+    assert!(
+        result.dx.is_none(),
+        "dx must be None when the sensitivity step failed",
+    );
+
+    // A successful sensitivity solve leaves `error` None — guards
+    // against the fix spuriously reporting an error on the happy path.
+    let mut app_ok = make_app();
+    let tnlp_ok: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ParametricTNLP::new(5.0, 1.0)));
+    let ok = SensSolve::new(vec![2, 3])
+        .with_deltas(vec![-0.5, 0.0])
+        .run(&mut app_ok, tnlp_ok);
+    assert!(ok.error.is_none(), "happy path must not report an error");
+    assert!(ok.dx.is_some(), "happy path must produce dx");
+}

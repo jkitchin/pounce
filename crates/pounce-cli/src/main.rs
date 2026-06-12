@@ -6,10 +6,12 @@
 //! used to reading `ipopt` output can drop in `pounce` without
 //! relearning where the numbers live.
 //!
-//! Exit status: 0 on `Solve_Succeeded`, non-zero otherwise. In AMPL
-//! solver mode (`-AMPL`) the exit code instead follows the AMPL
-//! contract — 0 for any solve that ran and produced a `.sol`, since
-//! the termination is carried by the file's `solve_result_num`.
+//! Exit status: 0 on a successful solve — `Solve_Succeeded` or
+//! `Solved_To_Acceptable_Level` (the reduced-accuracy convergence Ipopt
+//! likewise treats as success) — and non-zero otherwise. In AMPL solver
+//! mode (`-AMPL`) the exit code instead follows the AMPL contract — 0 for
+//! any solve that ran and produced a `.sol`, since the termination is
+//! carried by the file's `solve_result_num`.
 
 use pounce_algorithm::alg_builder::{LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
@@ -31,6 +33,7 @@ use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::TNLP;
+use pounce_nlp::SolveStatistics;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     make_default_restoration_factory_provider, InnerBackendFactoryFactory,
@@ -55,7 +58,7 @@ pub fn main() -> ExitCode {
         return pounce_cli::verify::run_from_argv(&raw_argv[2..]);
     }
 
-    let args = match Args::parse_argv(std::env::args().collect()) {
+    let mut args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("pounce: {msg}");
@@ -63,6 +66,19 @@ pub fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // AMPL drivers pass solver directives via the `<solver>_options` env
+    // var (`pounce_options`): a whitespace-separated list of `key=value`
+    // tokens. Merge them ahead of the command-line `key=value` options so
+    // an explicit CLI flag overrides the env var (set_options is applied
+    // last-wins). Pyomo, which writes options as CLI args, is unaffected.
+    if let Ok(env_opts) = std::env::var("pounce_options") {
+        let mut merged = pounce_cli::cli::options_from_env(&env_opts);
+        if !merged.is_empty() {
+            merged.append(&mut args.set_options);
+            args.set_options = merged;
+        }
+    }
 
     if args.help {
         println!("{}", Args::usage());
@@ -324,6 +340,11 @@ pub fn main() -> ExitCode {
     // read off `NlProblem` before `NlTnlp` consumes it.
     let mut nl_suffixes: Option<nl_reader::NlSuffixes> = None;
     let mut nl_dims: Option<(usize, usize)> = None;
+    // Problem class captured from the *first* `.nl` parse below, so the
+    // LP/QP dispatch never has to re-read the file just to classify it
+    // (re-parsing doubled parse time / peak memory on large models — code
+    // review L24). `None` for builtins (treated as general NLP).
+    let mut nl_class: Option<pounce_cli::dispatch::ProblemClass> = None;
     // `nl_expr_provider` shadows `inner_tnlp` for the `.nl`-file path:
     // both point at the same `NlTnlp`, but the second handle is typed
     // as `dyn ExpressionProvider` so the presolve wrapper can use it
@@ -391,6 +412,10 @@ pub fn main() -> ExitCode {
                         h.set_equation_book(book);
                         h.set_structure_book(structure);
                     }
+                    // Classify now, while we still own `prob` (it's about to
+                    // be moved into `NlTnlp`). Saves a second full parse in the
+                    // LP/QP dispatch block below.
+                    nl_class = Some(pounce_cli::dispatch::classify_problem(&prob));
                     let nl_rc = Rc::new(RefCell::new(nl_reader::NlTnlp::new(prob)));
                     nl_expr_provider = Some(Rc::clone(&nl_rc)
                         as Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>);
@@ -430,9 +455,7 @@ pub fn main() -> ExitCode {
     // that does not match the detected class is rejected with a clear
     // message, instead of being silently ignored.
     {
-        use pounce_cli::dispatch::{
-            classify_problem, resolve_solver, ProblemClass, SolverChoice, SolverSelection,
-        };
+        use pounce_cli::dispatch::{resolve_solver, ProblemClass, SolverChoice, SolverSelection};
         let sel_str = app
             .options()
             .get_string_value("solver_selection", "")
@@ -449,16 +472,14 @@ pub fn main() -> ExitCode {
             }
         };
 
-        // Classify the problem. Only the `.nl` path carries enough
-        // structure; builtins are treated as general NLP. (Re-reading the
-        // `.nl` here is cheap relative to a solve and keeps the dispatch
-        // self-contained.)
-        let (class, reparsed) = match &args.problem {
-            ProblemSource::NlFile(path) => match nl_reader::read_nl_file(path) {
-                Ok(prob) => (classify_problem(&prob), Some(prob)),
-                Err(_) => (ProblemClass::Nlp, None),
-            },
-            ProblemSource::Builtin(_) => (ProblemClass::Nlp, None),
+        // Problem class. The `.nl` path was already classified during the
+        // initial parse above (`nl_class`) — we do NOT re-read the file here
+        // (re-parsing doubled parse time / peak memory on large models, and
+        // its error arm silently fell back to NLP; code review L24). Builtins
+        // are treated as general NLP.
+        let class = match &args.problem {
+            ProblemSource::NlFile(_) => nl_class.unwrap_or(ProblemClass::Nlp),
+            ProblemSource::Builtin(_) => ProblemClass::Nlp,
         };
 
         let choice = match resolve_solver(class, selection) {
@@ -491,29 +512,41 @@ pub fn main() -> ExitCode {
             choice,
             SolverChoice::LpIpm | SolverChoice::QpIpm | SolverChoice::SocpIpm
         ) {
-            if let Some(prob) = reparsed.as_ref() {
+            // The convex solvers need the parsed `NlProblem`, but the initial
+            // parse moved it into `NlTnlp`. Re-parse the file here — only on
+            // the convex dispatch path (LP / convex-QP / SOCP), never for a
+            // general NLP solve. Only `.nl` inputs ever classify as convex, so
+            // the builtin arm falls through to NLP. A parse failure surfaces
+            // and exits rather than silently mis-routing to NLP (L24).
+            if let ProblemSource::NlFile(path) = &args.problem {
+                let prob = match nl_reader::read_nl_file(path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "pounce: failed to re-read {} for the convex solver: {e}",
+                            path.display()
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
                 // JSON solve report, when requested — same schema as the NLP
                 // path, so the benchmark harness can compare convex and NLP
                 // solves.
                 let json_cfg = args.json_output.as_deref().map(|p| {
-                    let input = match &args.problem {
-                        ProblemSource::Builtin(name) => {
-                            InputDescriptor::Builtin { name: name.clone() }
-                        }
-                        ProblemSource::NlFile(f) => InputDescriptor::NlFile {
-                            path: f.clone(),
-                            size_bytes: std::fs::metadata(f).ok().map(|m| m.len()),
-                        },
+                    let input = InputDescriptor::NlFile {
+                        path: path.clone(),
+                        size_bytes: std::fs::metadata(path).ok().map(|m| m.len()),
                     };
                     (p, args.json_detail, input)
                 });
                 if matches!(choice, SolverChoice::SocpIpm) {
                     return run_convex_socp(
-                        prob,
+                        &prob,
                         class,
                         sol_path.as_deref(),
                         json_cfg,
                         debug_hook.as_ref(),
+                        args.ampl,
                     );
                 }
                 let presolve_on = app
@@ -522,16 +555,16 @@ pub fn main() -> ExitCode {
                     .map(|(v, _)| v != "no")
                     .unwrap_or(true);
                 return run_convex_qp(
-                    prob,
+                    &prob,
                     class,
                     sol_path.as_deref(),
                     presolve_on,
                     json_cfg,
                     debug_hook.as_ref(),
+                    args.ampl,
                 );
             }
-            // Should not happen (only `.nl` classifies non-NLP), but be
-            // safe: fall through to NLP rather than mis-dispatch.
+            // Builtins never classify as convex; fall through to NLP.
         }
         // `qp-active-set`: route the (convex-QP) problem through the
         // active-set SQP engine instead of the IPM. `resolve_solver`
@@ -600,26 +633,45 @@ pub fn main() -> ExitCode {
             // still occupies its slot — AMPL's `.sol` reader matches
             // the x block against the originating `.nl`'s var count.
             let x = nlp.borrow().lift_x_to_full(&*curr.x);
-            let n_c = curr.y_c.dim() as usize;
-            let n_d = curr.y_d.dim() as usize;
-            let mut lambda = Vec::with_capacity(n_c + n_d);
-            if let Some(dv) = curr
-                .y_c
-                .as_any()
-                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-            {
-                lambda.extend_from_slice(&dv.expanded_values());
-            } else {
-                lambda.extend(std::iter::repeat(0.0).take(n_c));
-            }
-            if let Some(dv) = curr
-                .y_d
-                .as_any()
-                .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-            {
-                lambda.extend_from_slice(&dv.expanded_values());
-            } else {
-                lambda.extend(std::iter::repeat(0.0).take(n_d));
+            // Reassemble the user-facing `lambda` (length `n_full_g`, in
+            // original `.nl` g-row order) via `finalize_solution_lambda`, which
+            // inverts the c/d split through `c_map`/`d_map`, unwinds the
+            // `c_scale`/`d_scale` scaling, AND divides out `obj_scale_factor`
+            // so the dual is in the user's unscaled-Lagrangian convention.
+            // (`pack_lambda_for_user` omits the obj_scale division — it feeds
+            // the scaled `eval_h` — so using it here left the duals scaled
+            // whenever gradient-based scaling triggered: pounce#11 F1.)
+            // Concatenating the raw `y_c` then `y_d` blocks here instead would
+            // permute the duals on any `.nl` with interleaved eq/ineq rows and
+            // leave them scaled — AMPL / Pyomo read the dual block positionally.
+            let mut lambda = nlp
+                .borrow()
+                .finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
+            if lambda.is_empty() {
+                // Fallback for a non-`OrigIpoptNlp` whose `pack_lambda_for_user`
+                // is the empty-vec default: emit the raw `y_c`-then-`y_d`
+                // concatenation (no map/scale information available).
+                let n_c = curr.y_c.dim() as usize;
+                let n_d = curr.y_d.dim() as usize;
+                lambda = Vec::with_capacity(n_c + n_d);
+                if let Some(dv) = curr
+                    .y_c
+                    .as_any()
+                    .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                {
+                    lambda.extend_from_slice(&dv.expanded_values());
+                } else {
+                    lambda.extend(std::iter::repeat(0.0).take(n_c));
+                }
+                if let Some(dv) = curr
+                    .y_d
+                    .as_any()
+                    .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+                {
+                    lambda.extend_from_slice(&dv.expanded_values());
+                } else {
+                    lambda.extend(std::iter::repeat(0.0).take(n_d));
+                }
             }
             *cap.borrow_mut() = Some((x.clone(), lambda));
 
@@ -830,6 +882,15 @@ pub fn main() -> ExitCode {
         );
     };
 
+    // Snapshot the statistics from the solve whose verdict `status` currently
+    // reflects. The MC64 scaling retry below runs a *second* solve into the
+    // same `app`, which overwrites `app.statistics()`. On a non-promoting
+    // retry we keep the original local-infeasibility verdict, so we must keep
+    // the original stats too — otherwise the summary/JSON report would pair the
+    // original verdict with the failed retry's iteration count / objective. We
+    // adopt the retry's stats only when the retry is actually promoted (below).
+    let mut solve_stats = app.statistics();
+
     // Hypersensitivity scaling fallback (`feral_infeasibility_scaling_retry`,
     // on by default). Some interior-point KKT trajectories are chaotic: under
     // two equally backward-stable linear-solver scalings the iterates stay
@@ -881,25 +942,27 @@ pub fn main() -> ExitCode {
         app.set_restoration_factory_provider(resto_provider);
 
         let retry_status = app.optimize_tnlp(Rc::clone(&tnlp));
-        if matches!(
-            retry_status,
-            ApplicationReturnStatus::SolveSucceeded
-                | ApplicationReturnStatus::SolvedToAcceptableLevel
-        ) {
+        let retry_stats = app.statistics();
+        if scaling_retry_promoted(retry_status) {
             eprintln!(
                 "pounce: MC64 re-solve recovered the problem — promoting ({retry_status:?})."
             );
-            status = retry_status;
         } else {
             eprintln!(
                 "pounce: MC64 re-solve did not recover ({retry_status:?}); keeping the original \
                  local-infeasibility verdict (now corroborated by a second scaling)."
             );
-            status = ApplicationReturnStatus::InfeasibleProblemDetected;
         }
+        // Keep `status` and `solve_stats` in lockstep: on promotion the retry
+        // is authoritative (its verdict + its statistics); otherwise both stay
+        // the original local-infeasibility verdict and the original solve's
+        // statistics. See `resolve_scaling_retry_outcome` (code review L23).
+        (status, solve_stats) =
+            resolve_scaling_retry_outcome(retry_status, solve_stats, retry_stats);
     }
 
-    let solve_stats = app.statistics();
+    // `solve_stats` was snapshotted right after the solve loop and updated
+    // above iff the MC64 retry was promoted, so it always matches `status`.
     let counters = counting.borrow();
     if json_dbg {
         // Pure protocol channel: emit a `terminated` lifecycle event in
@@ -934,6 +997,27 @@ pub fn main() -> ExitCode {
     if nominal_capture.borrow().is_none() {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
+        }
+    }
+
+    // Presolve row-dropping: both lambda sources above (`on_converged`
+    // and the `CountingTnlp` fallback) sit *outside* presolve, so their
+    // `lambda` is in the reduced kept-row space — length `m_out`, not the
+    // original `.nl`'s `m`. AMPL / Pyomo read the `.sol` dual block
+    // positionally against the originating `.nl`, so a short block
+    // mis-aligns or is rejected. `PresolveTnlp::finalize_solution` already
+    // lifted the duals back to the original row order *and* recovered
+    // multipliers for the dropped rows; swap that full-length vector in.
+    if let Some(p) = &presolve_handle {
+        let lifted = if p.borrow().n_dropped_rows() > 0 {
+            p.borrow().finalized_full_solution().map(|(_x, lam)| lam)
+        } else {
+            None
+        };
+        if let Some(lam_full) = lifted {
+            if let Some((_x, lambda)) = nominal_capture.borrow_mut().as_mut() {
+                *lambda = lam_full;
+            }
         }
     }
 
@@ -976,7 +1060,16 @@ pub fn main() -> ExitCode {
         let mut builder = ReportBuilder::new(args.json_detail, input);
         if let Some(info) = nlp_info_snapshot {
             builder.problem.n_variables = info.n;
-            builder.problem.n_constraints = info.m;
+            // `info.m` is the reduced kept-row count under presolve, but
+            // the lifted `lambda` (and the `.sol`) carry the original
+            // `.nl` constraint count — and `SolutionInfo::lambda` is
+            // documented to have length `problem.n_constraints`. Report
+            // the original `m` so that invariant holds.
+            let n_dropped = presolve_handle
+                .as_ref()
+                .map(|p| p.borrow().n_dropped_rows())
+                .unwrap_or(0);
+            builder.problem.n_constraints = info.m + n_dropped;
             builder.problem.n_objectives = 1; // pounce IPM uses obj 0; multi-obj is read but ignored
             builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
             builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
@@ -1057,10 +1150,18 @@ pub fn main() -> ExitCode {
     // the capture is empty; fall back to zero blocks sized from the
     // pre-solve NLP dimensions so the file still round-trips.
     if let Some(sol_path) = &sol_path {
-        let (n, m) = nlp_info_snapshot
+        let (n, m_out) = nlp_info_snapshot
             .as_ref()
             .map(|i| (i.n as usize, i.m as usize))
             .unwrap_or((0, 0));
+        // `nlp_info_snapshot.m` is the reduced kept-row count when
+        // presolve dropped rows; the zero-fallback block must be sized to
+        // the original `.nl`'s `m` so a failed-solve `.sol` still aligns.
+        let m = m_out
+            + presolve_handle
+                .as_ref()
+                .map(|p| p.borrow().n_dropped_rows() as usize)
+                .unwrap_or(0);
         let (x, lambda) = nominal_capture
             .borrow()
             .clone()
@@ -1087,22 +1188,40 @@ pub fn main() -> ExitCode {
         write_diagnostics_timing(diag, &app);
     }
 
-    match status {
-        ApplicationReturnStatus::SolveSucceeded
-        | ApplicationReturnStatus::SolvedToAcceptableLevel => ExitCode::SUCCESS,
-        // AMPL solver-protocol mode: the process exit code is not the
-        // status channel. AMPL and Pyomo's ASL interface read the
-        // termination from the `.sol` file's `solve_result_num`, and
-        // conventionally an AMPL solver exits 0 whenever it ran and
-        // produced a `.sol` — limit reached, infeasible, even a failed
-        // solve. A non-zero exit makes Pyomo raise `ApplicationError`
-        // and never parse the `.sol`. Genuine startup failures (bad
-        // `.nl`, bad option) already returned non-zero above, before
-        // the solve, so reaching here in `-AMPL` mode means a `.sol`
-        // was written and carries the verdict.
-        _ if args.ampl => ExitCode::SUCCESS,
-        _ => ExitCode::from(1),
+    nlp_exit_code(status, args.ampl)
+}
+
+/// Process exit code for the general NLP solve path.
+///
+/// A *successful* solve — `SolveSucceeded` **or** `SolvedToAcceptableLevel`
+/// (the reduced-accuracy convergence Ipopt also treats as a success; see
+/// `minimize()` parity, #119) — exits 0. Everything else exits 1, **except**
+/// in AMPL solver mode.
+///
+/// In `-AMPL` mode the process exit code is not the status channel: AMPL and
+/// Pyomo's ASL interface read the termination from the `.sol` file's
+/// `solve_result_num`, and conventionally an AMPL solver exits 0 whenever it
+/// ran and produced a `.sol` — limit reached, infeasible, even a failed solve.
+/// A non-zero exit makes Pyomo raise `ApplicationError` and never parse the
+/// `.sol`. Genuine startup failures (bad `.nl`, bad option) already returned
+/// non-zero earlier, before the solve, so reaching here in `-AMPL` mode means a
+/// `.sol` was written and carries the verdict. Mirrors [`convex_exit_code`].
+fn nlp_exit_code(status: ApplicationReturnStatus, ampl: bool) -> ExitCode {
+    if nlp_solve_succeeded(status) || ampl {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
+}
+
+/// Whether an NLP solve outcome counts as a "success" for the (non-AMPL) exit
+/// code: `SolveSucceeded` or the reduced-accuracy `SolvedToAcceptableLevel`,
+/// matching Ipopt and the `minimize()` success set (#119).
+fn nlp_solve_succeeded(status: ApplicationReturnStatus) -> bool {
+    matches!(
+        status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    )
 }
 
 /// Build a `SolverDebugger` for the requested mode/flags, wired to the
@@ -1130,6 +1249,43 @@ fn build_debugger(
     }
 }
 
+/// Did an MC64 hypersensitivity re-solve converge well enough to overturn the
+/// original local-infeasibility verdict? Only a clean or acceptable-level solve
+/// promotes; everything else (including a second infeasibility verdict) leaves
+/// the original verdict standing.
+fn scaling_retry_promoted(retry_status: ApplicationReturnStatus) -> bool {
+    matches!(
+        retry_status,
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    )
+}
+
+/// Resolve the final `(status, statistics)` after an MC64 hypersensitivity
+/// re-solve (code review L23).
+///
+/// On promotion the retry is the authoritative solve, so its status **and** its
+/// statistics are reported together. Otherwise the original local-infeasibility
+/// verdict is kept — and so are the *original* solve's statistics, so the
+/// summary / JSON report never pair the original verdict with the failed
+/// retry's iteration count or objective. The pre-fix code reverted `status` to
+/// `InfeasibleProblemDetected` but read `app.statistics()` *after* the retry,
+/// leaking the retry solve's stats into a report labeled with the original
+/// verdict.
+fn resolve_scaling_retry_outcome(
+    retry_status: ApplicationReturnStatus,
+    original_stats: SolveStatistics,
+    retry_stats: SolveStatistics,
+) -> (ApplicationReturnStatus, SolveStatistics) {
+    if scaling_retry_promoted(retry_status) {
+        (retry_status, retry_stats)
+    } else {
+        (
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            original_stats,
+        )
+    }
+}
+
 /// Solve a classified LP / convex-QP `.nl` problem through the
 /// specialized `pounce-convex` interior-point method, write a `.sol`,
 /// and return the process exit code. This is the LP/QP dispatch target
@@ -1146,10 +1302,32 @@ fn qp_status_to_ars(s: pounce_convex::QpStatus) -> ApplicationReturnStatus {
     use pounce_convex::QpStatus;
     match s {
         QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
+        // Reduced-accuracy solve (residual above `tol` but usable) — Ipopt's
+        // "Solved To Acceptable Level" is the matching NLP-side status.
+        QpStatus::OptimalInaccurate => ApplicationReturnStatus::SolvedToAcceptableLevel,
         QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
         QpStatus::NumericalFailure => ApplicationReturnStatus::InternalError,
+    }
+}
+
+/// Map a convex-solver status onto the AMPL `.sol` terminal line: the message,
+/// whether the solve is treated as a success (drives the exit code), and the
+/// `solve_result_num`. AMPL convention: 0 solved, 100–199 solved to reduced
+/// accuracy, 200–299 infeasible, 300–399 unbounded, 400–499 limit, 500–599
+/// failure. Shared by the QP/LP and SOCP report paths so the two cannot drift.
+fn convex_status_report(s: pounce_convex::QpStatus) -> (&'static str, bool, i32) {
+    use pounce_convex::QpStatus;
+    match s {
+        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
+        QpStatus::OptimalInaccurate => {
+            ("Solved to acceptable level (reduced accuracy).", true, 100)
+        }
+        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
+        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
+        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
+        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
     }
 }
 
@@ -1160,6 +1338,7 @@ fn run_convex_qp(
     presolve_on: bool,
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
+    ampl: bool,
 ) -> ExitCode {
     use pounce_convex::presolve::{presolve, PresolveOutcome};
     use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
@@ -1252,15 +1431,7 @@ fn run_convex_qp(
     // dropped constant term: f_user = sign * (½xᵀPx + cᵀx) + const.
     let reported_obj = sign * sol.obj + obj_const;
 
-    // AMPL `.sol` convention: 0 solved, 200–299 infeasible, 300–399
-    // unbounded, 400–499 limit, 500–599 failure.
-    let (msg, ok, srn) = match sol.status {
-        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
-        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
-        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
-        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
-        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
-    };
+    let (msg, ok, srn) = convex_status_report(sol.status);
     println!(
         "POUNCE ({} IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
         class.name(),
@@ -1282,9 +1453,11 @@ fn run_convex_qp(
             solve_result_num: srn,
             suffixes: &[],
         };
+        // Log a `.sol` write failure but do not early-return a distinct exit
+        // code: the NLP path (main.rs:1091-1093) only logs, and under `-AMPL`
+        // the final exit must still follow the solve-outcome contract.
         if let Err(e) = nl_writer::write_sol_file(path, &payload) {
             eprintln!("pounce: failed to write {}: {e}", path.display());
-            return ExitCode::from(2);
         }
     }
 
@@ -1344,11 +1517,7 @@ fn run_convex_qp(
         }
     }
 
-    if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
+    convex_exit_code(ok, ampl)
 }
 
 /// Solve a classified **convex QCQP** by reformulating it to a second-order
@@ -1364,8 +1533,9 @@ fn run_convex_socp(
     sol_path: Option<&std::path::Path>,
     json_cfg: Option<(&std::path::Path, ReportDetail, InputDescriptor)>,
     debug_hook: Option<&Rc<RefCell<pounce_cli::debug_repl::SolverDebugger>>>,
+    ampl: bool,
 ) -> ExitCode {
-    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions, QpStatus};
+    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions};
 
     let (qp, con_map, obj_nl_const, cones) =
         match pounce_cli::qp_extract::extract_socp_with_map(prob) {
@@ -1404,13 +1574,7 @@ fn run_convex_socp(
 
     let reported_obj = sign * sol.obj + obj_const;
 
-    let (msg, ok, srn) = match sol.status {
-        QpStatus::Optimal => ("Optimal Solution Found.", true, 0),
-        QpStatus::PrimalInfeasible => ("Problem is primal infeasible.", false, 200),
-        QpStatus::DualInfeasible => ("Problem is unbounded (dual infeasible).", false, 300),
-        QpStatus::IterationLimit => ("Maximum iterations exceeded.", false, 400),
-        QpStatus::NumericalFailure => ("Numerical failure in KKT factorization.", false, 500),
-    };
+    let (msg, ok, srn) = convex_status_report(sol.status);
     println!(
         "POUNCE ({} conic IPM, pounce-convex): {msg}  obj={reported_obj:.8}  iters={}  ({elapsed:.3}s)",
         class.name(),
@@ -1430,9 +1594,11 @@ fn run_convex_socp(
             solve_result_num: srn,
             suffixes: &[],
         };
+        // Log a `.sol` write failure but do not early-return a distinct exit
+        // code: the NLP path (main.rs:1091-1093) only logs, and under `-AMPL`
+        // the final exit must still follow the solve-outcome contract.
         if let Err(e) = nl_writer::write_sol_file(path, &payload) {
             eprintln!("pounce: failed to write {}: {e}", path.display());
-            return ExitCode::from(2);
         }
     }
 
@@ -1482,7 +1648,20 @@ fn run_convex_socp(
         }
     }
 
-    if ok {
+    convex_exit_code(ok, ampl)
+}
+
+/// Process exit code for the convex (LP/QP/SOCP) solver paths, honoring the
+/// AMPL solver-protocol contract. In `-AMPL` mode the termination is conveyed
+/// through the `.sol` file's `solve_result_num`, so the process exits 0 for
+/// any non-fatal solve outcome (infeasible, unbounded, iteration limit) just
+/// as the NLP path does (main.rs:1103-1118) — a non-zero exit makes Pyomo /
+/// the ASL interface raise `ApplicationError` and never read the `.sol`.
+/// Genuine startup failures (bad `.nl`/option, unextractable problem) returned
+/// non-zero earlier, before any solve, so reaching here in `-AMPL` mode means a
+/// verdict was produced. Outside AMPL mode, an unsuccessful solve exits 1.
+fn convex_exit_code(ok: bool, ampl: bool) -> ExitCode {
+    if ok || ampl {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -1610,12 +1789,12 @@ fn run_cite(args: &Args) -> ExitCode {
                     );
                     // Common mistake: passing the model (`.nl`) instead of a
                     // solve-report JSON. `--cite` takes the report produced by
-                    // a prior solve (`--solve-report out.json`), not the model;
+                    // a prior solve (`--json-output out.json`), not the model;
                     // bare `pounce --cite` prints the static core with no run.
                     if path.extension().and_then(|e| e.to_str()) == Some("nl") {
                         eprintln!(
                             "pounce: --cite expects a solve-report JSON, not a model file. \
-                             Run `pounce {} --solve-report report.json` first, then \
+                             Run `pounce {} --json-output report.json` first, then \
                              `pounce --cite report.json` — or use bare `pounce --cite` for the core citations.",
                             path.display()
                         );
@@ -1718,4 +1897,148 @@ fn default_backend_factory(feral_cfg: pounce_feral::FeralConfig) -> LinearBacken
             }
         },
     )
+}
+
+#[cfg(test)]
+mod convex_status_tests {
+    use super::{convex_status_report, qp_status_to_ars};
+    use pounce_convex::QpStatus;
+    use pounce_nlp::return_codes::ApplicationReturnStatus;
+
+    /// Code review 2026-06 item M20: the reduced-accuracy convex status
+    /// (`OptimalInaccurate`) must surface to the user as a *distinct* outcome —
+    /// not silently folded into a clean `Optimal`. It maps to AMPL
+    /// `solve_result_num` 100 (the "solved to acceptable/reduced accuracy"
+    /// band) with a distinct message, and onto the NLP-side
+    /// `SolvedToAcceptableLevel` status, so callers reading either the `.sol`
+    /// terminal line or the JSON report can tell it apart from a full-accuracy
+    /// solve.
+    #[test]
+    fn optimal_inaccurate_is_distinct_from_optimal() {
+        let (msg, ok, srn) = convex_status_report(QpStatus::OptimalInaccurate);
+        assert_eq!(srn, 100, "reduced-accuracy solve must use the 100 band");
+        assert!(ok, "a reduced-accuracy solve is still a usable success");
+        assert!(
+            msg.contains("acceptable"),
+            "message should signal reduced accuracy, got {msg:?}"
+        );
+
+        let (opt_msg, _, opt_srn) = convex_status_report(QpStatus::Optimal);
+        assert_eq!(opt_srn, 0);
+        assert_ne!(
+            srn, opt_srn,
+            "OptimalInaccurate must not share Optimal's solve_result_num"
+        );
+        assert_ne!(msg, opt_msg, "the two must read differently to the user");
+
+        // And on the NLP-side status vocabulary used by the JSON report.
+        assert_eq!(
+            qp_status_to_ars(QpStatus::OptimalInaccurate),
+            ApplicationReturnStatus::SolvedToAcceptableLevel
+        );
+        assert_eq!(
+            qp_status_to_ars(QpStatus::Optimal),
+            ApplicationReturnStatus::SolveSucceeded
+        );
+    }
+}
+
+#[cfg(test)]
+mod scaling_retry_tests {
+    use super::{resolve_scaling_retry_outcome, scaling_retry_promoted};
+    use pounce_nlp::return_codes::ApplicationReturnStatus;
+    use pounce_nlp::SolveStatistics;
+
+    fn stats_with_iters(n: i32) -> SolveStatistics {
+        SolveStatistics {
+            iteration_count: n,
+            final_objective: n as f64,
+            ..SolveStatistics::default()
+        }
+    }
+
+    /// Code review L23: when the MC64 hypersensitivity re-solve does **not**
+    /// recover, the verdict reverts to the original local-infeasibility status
+    /// — and the reported statistics must revert with it, not leak the failed
+    /// retry's iteration count / objective.
+    #[test]
+    fn failed_retry_keeps_original_status_and_stats() {
+        let original = stats_with_iters(7);
+        let retry = stats_with_iters(42);
+        for retry_status in [
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            ApplicationReturnStatus::MaximumIterationsExceeded,
+            ApplicationReturnStatus::RestorationFailed,
+        ] {
+            assert!(!scaling_retry_promoted(retry_status));
+            let (status, stats) =
+                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
+            assert_eq!(
+                status,
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                "a non-promoting retry ({retry_status:?}) keeps the original verdict"
+            );
+            assert_eq!(
+                stats.iteration_count, 7,
+                "stats must stay the original solve's, not the failed retry's"
+            );
+            assert_eq!(stats.final_objective, 7.0);
+        }
+    }
+
+    /// On promotion the retry is authoritative: its status AND its statistics
+    /// are reported together.
+    #[test]
+    fn promoted_retry_adopts_retry_status_and_stats() {
+        let original = stats_with_iters(7);
+        let retry = stats_with_iters(42);
+        for retry_status in [
+            ApplicationReturnStatus::SolveSucceeded,
+            ApplicationReturnStatus::SolvedToAcceptableLevel,
+        ] {
+            assert!(scaling_retry_promoted(retry_status));
+            let (status, stats) =
+                resolve_scaling_retry_outcome(retry_status, original.clone(), retry.clone());
+            assert_eq!(status, retry_status, "a promoting retry adopts its verdict");
+            assert_eq!(
+                stats.iteration_count, 42,
+                "promoted: stats must be the retry solve's"
+            );
+            assert_eq!(stats.final_objective, 42.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod nlp_exit_code_tests {
+    //! Code review L27: the module doc claimed exit 0 only on `Solve_Succeeded`,
+    //! but the NLP path also (correctly) exits 0 on `SolvedToAcceptableLevel`.
+    //! The doc was corrected; these tests lock the actual behavior so the doc
+    //! and code can't drift again.
+    use super::nlp_solve_succeeded;
+    use pounce_nlp::return_codes::ApplicationReturnStatus as A;
+
+    #[test]
+    fn acceptable_level_counts_as_success() {
+        // The crux of L27: reduced-accuracy convergence is a success.
+        assert!(nlp_solve_succeeded(A::SolvedToAcceptableLevel));
+        assert!(nlp_solve_succeeded(A::SolveSucceeded));
+    }
+
+    #[test]
+    fn non_convergent_statuses_are_not_success() {
+        for s in [
+            A::InfeasibleProblemDetected,
+            A::MaximumIterationsExceeded,
+            A::RestorationFailed,
+            A::DivergingIterates,
+            A::MaximumCpuTimeExceeded,
+            A::InternalError,
+        ] {
+            assert!(
+                !nlp_solve_succeeded(s),
+                "{s:?} must not count as a successful solve"
+            );
+        }
+    }
 }

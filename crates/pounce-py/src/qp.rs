@@ -32,6 +32,24 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
 }
 
+/// Transparent `Send` shim used to move a non-`Send` value (a factorization /
+/// sensitivity holding `dyn SparseSymLinearSolverInterface` trait objects)
+/// across a `py.allow_threads` boundary. SAFETY: the closure runs on the
+/// calling thread after `PyEval_SaveThread` (it never actually crosses OS
+/// threads), so the wrapped value is only ever touched by this one thread.
+/// Method-call accessors (vs. field `.0`) defeat the 2021-edition
+/// disjoint-capture rule so the closure captures the whole guard.
+struct SendGuard<T>(T);
+unsafe impl<T> Send for SendGuard<T> {}
+impl<T> SendGuard<T> {
+    fn new(v: T) -> Self {
+        Self(v)
+    }
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 /// Inner-serial backend for the rayon-parallel batch / multi-RHS paths:
 /// each worker builds its own serial factor so the only parallelism is
 /// across instances (outer-parallel / inner-serial). No global state.
@@ -165,6 +183,7 @@ impl PyQpProblem {
 fn status_str(s: QpStatus) -> &'static str {
     match s {
         QpStatus::Optimal => "optimal",
+        QpStatus::OptimalInaccurate => "optimal_inaccurate",
         QpStatus::PrimalInfeasible => "primal_infeasible",
         QpStatus::DualInfeasible => "dual_infeasible",
         QpStatus::IterationLimit => "iteration_limit",
@@ -483,10 +502,25 @@ impl PyQpFactorization {
         prob: &PyQpProblem,
         warm_start: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let sol = match warm_start {
-            Some(w) => self.inner.solve_warm(&prob.inner, &warm_from_dict(w)?),
-            None => self.inner.solve(&prob.inner),
+        // Parse the (Python) warm-start dict *before* dropping the GIL, then
+        // run the pure-Rust solve with the GIL released so other threads make
+        // progress — the QP path never calls back into Python (mirrors the
+        // one-shot `solve_qp` above).
+        let warm = match warm_start {
+            Some(w) => Some(warm_from_dict(w)?),
+            None => None,
         };
+        let qp = &prob.inner;
+        // `self.inner` holds non-`Send` linear-solver trait objects, so wrap the
+        // exclusive borrow in `SendGuard` to cross the GIL-release boundary.
+        let guard = SendGuard::new(&mut self.inner);
+        let sol = py.allow_threads(move || {
+            let inner = guard.into_inner();
+            match &warm {
+                Some(w) => inner.solve_warm(qp, w),
+                None => inner.solve(qp),
+            }
+        });
         solution_dict(py, sol, Some(&prob.inner))
     }
 }
@@ -513,32 +547,58 @@ impl PyQpSensitivity {
     #[new]
     #[pyo3(signature = (prob, tol=None, max_iter=None, active_tol=1e-7))]
     fn new(
+        py: Python<'_>,
         prob: &PyQpProblem,
         tol: Option<f64>,
         max_iter: Option<usize>,
         active_tol: f64,
     ) -> PyResult<Self> {
         let o = opts(tol, max_iter, false);
-        let sol = solve_qp_ipm(&prob.inner, &o, backend);
-        if sol.status != QpStatus::Optimal {
-            return Err(PyValueError::new_err(format!(
-                "QpSensitivity: the QP did not solve to optimality (status {}); \
-                 sensitivity is only defined at an optimum",
-                status_str(sol.status)
-            )));
-        }
-        let (x, obj) = (sol.x.clone(), sol.obj);
-        let inner = QpSensitivity::build(&prob.inner, &sol, &o, active_tol, backend).map_err(
-            |e| match e {
-                SensError::NotOptimal => {
-                    PyValueError::new_err("QpSensitivity: solution is not optimal")
-                }
-                SensError::FactorizationFailed => PyValueError::new_err(
-                    "QpSensitivity: the active-set KKT is singular (the active constraint \
-                     gradients are rank-deficient), so the parametric step is not unique",
-                ),
-            },
-        )?;
+        // Both the IPM solve and the sensitivity factorization are pure Rust
+        // (no Python callbacks), so run them with the GIL released — other
+        // threads make progress during the solve (mirrors `solve_qp`).
+        let qp = &prob.inner;
+        // The built `QpSensitivity` holds non-`Send` linear-solver trait
+        // objects, so wrap the closure's result in `SendGuard` to return it
+        // across the GIL-release boundary. The factorization runs only when the
+        // solve is optimal; otherwise the closure returns just the status and
+        // the caller raises below (no panic-on-`None` unwrap).
+        type Payload = (Vec<f64>, f64, Result<QpSensitivity, SensError>);
+        let (status, payload): (QpStatus, Option<Payload>) = py
+            .allow_threads(|| {
+                let sol = solve_qp_ipm(qp, &o, backend);
+                let payload = (sol.status == QpStatus::Optimal).then(|| {
+                    (
+                        sol.x.clone(),
+                        sol.obj,
+                        QpSensitivity::build(qp, &sol, &o, active_tol, backend),
+                    )
+                });
+                SendGuard::new((sol.status, payload))
+            })
+            .into_inner();
+        let (x, obj, build_res) = match payload {
+            Some(p) => p,
+            None => {
+                return Err(PyValueError::new_err(format!(
+                    "QpSensitivity: the QP did not solve to optimality (status {}); \
+                     sensitivity is only defined at an optimum",
+                    status_str(status)
+                )));
+            }
+        };
+        let inner = build_res.map_err(|e| match e {
+            SensError::NotOptimal => {
+                PyValueError::new_err("QpSensitivity: solution is not optimal")
+            }
+            SensError::FactorizationFailed => PyValueError::new_err(
+                "QpSensitivity: the active-set KKT is singular (the active constraint \
+                 gradients are rank-deficient), so the parametric step is not unique",
+            ),
+            SensError::EigenFailed => {
+                PyValueError::new_err("QpSensitivity: a symmetric eigensolve did not converge")
+            }
+        })?;
         Ok(Self {
             inner,
             x,
@@ -585,7 +645,18 @@ impl PyQpSensitivity {
     /// threshold for the rank of the active Jacobian.
     #[pyo3(signature = (rank_tol = 1e-9))]
     fn reduced_hessian<'py>(&self, py: Python<'py>, rank_tol: f64) -> PyResult<Bound<'py, PyDict>> {
-        let rh = self.inner.reduced_hessian(rank_tol);
+        let rh = self.inner.reduced_hessian(rank_tol).map_err(|e| match e {
+            SensError::EigenFailed => PyValueError::new_err(
+                "QpSensitivity.reduced_hessian: a symmetric eigensolve did not converge, \
+                 so the reduced Hessian's rank / null-space cannot be trusted",
+            ),
+            SensError::NotOptimal => {
+                PyValueError::new_err("QpSensitivity: solution is not optimal")
+            }
+            SensError::FactorizationFailed => {
+                PyValueError::new_err("QpSensitivity: the active-set KKT is singular")
+            }
+        })?;
         let d = PyDict::new_bound(py);
         d.set_item("n_dof", rh.n_dof)?;
         d.set_item("matrix", rh.matrix.into_pyarray_bound(py))?;

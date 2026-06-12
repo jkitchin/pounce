@@ -699,6 +699,120 @@ fn hs071_output_file_captures_timing_report() {
 /// re-optimize workflow that drives this initializer doesn't yet
 /// surface. The unit tests in `init::warm_start` cover the clamp /
 /// target-mu semantics in isolation.
+/// Regression test for the `max_iter`-boundary convergence gap (L1).
+///
+/// The main loop in `IpoptAlgorithm::optimize` incremented the iteration
+/// counter and broke out with `Maximum_Iterations_Exceeded` *before*
+/// calling `iterate()` again, so the convergence check never ran on the
+/// iterate produced by the final permitted step. A solve that converges on
+/// exactly the `max_iter`-th iterate therefore reported
+/// `Maximum_Iterations_Exceeded`, where upstream Ipopt — which runs its
+/// `CheckConvergence` (including the `iter >= max_iter` test) at the *top*
+/// of the loop, convergence first — reports success. That premature break
+/// also kept `data.iter_count` from ever reaching `max_iter`, leaving the
+/// `MaxIterExceeded` branch in `conv_check/opt_error.rs` effectively dead.
+///
+/// Strategy: find the iteration `k` at which HS071 naturally converges with
+/// a generous budget, then re-solve with `max_iter = k`. The converging
+/// iterate is the one produced by the final permitted step; the solver must
+/// still test it and report success, not `Maximum_Iterations_Exceeded`.
+#[test]
+fn hs071_converges_exactly_at_max_iter_boundary() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+    let status = app.optimize_tnlp(Rc::clone(&tnlp));
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "baseline HS071 did not converge to full success: {status:?}",
+    );
+    let k = app.statistics().iteration_count;
+    assert!(
+        k > 1,
+        "need a multi-iteration solve to exercise the boundary; k = {k}",
+    );
+
+    // Cap max_iter at exactly the iteration HS071 converges on. The final
+    // permitted step produces the converged iterate; before the L1 fix the
+    // loop broke with Maximum_Iterations_Exceeded before that iterate was
+    // ever convergence-tested.
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("max_iter", k, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+    let status = app.optimize_tnlp(Rc::clone(&tnlp));
+    let stats = app.statistics();
+    eprintln!(
+        "HS71 boundary: max_iter={k} status={status:?} iter={}",
+        stats.iteration_count,
+    );
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "converging on the max_iter-th iterate must report success, \
+         got {status:?} (max_iter = {k})",
+    );
+    assert!(
+        (stats.final_objective - 17.014017).abs() < 1e-4,
+        "final_objective = {} (expected ~17.014017)",
+        stats.final_objective,
+    );
+}
+
+/// Regression test for L3: the probing μ-oracle must honor the user-set
+/// `sigma_max` option. Upstream Ipopt's `IpProbingMuOracle.cpp` reads it
+/// (`options.GetNumericValue("sigma_max", sigma_max_, prefix)`) and caps the
+/// centering parameter with it (`sigma = Min(sigma, sigma_max_)`). pounce's
+/// adaptive free-mode update hard-coded `sigma_max = 100.0` in the probing
+/// branch (`mu/adaptive.rs`), so a user-set `sigma_max` reached only the
+/// quality-function oracle. With probing selected, pinning `sigma` at a tiny
+/// cap forces a very different μ trajectory; before the fix the option was
+/// silently ignored, so the cap had no effect at all.
+#[test]
+fn hs071_probing_oracle_honors_user_sigma_max() {
+    let solve = |sigma_max: Option<Number>| {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_string_value("mu_strategy", "adaptive", true, false)
+            .unwrap();
+        app.options_mut()
+            .set_string_value("mu_oracle", "probing", true, false)
+            .unwrap();
+        if let Some(s) = sigma_max {
+            app.options_mut()
+                .set_numeric_value("sigma_max", s, true, false)
+                .unwrap();
+        }
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+        let status = app.optimize_tnlp(Rc::clone(&tnlp));
+        (status, app.statistics().iteration_count)
+    };
+
+    // Default sigma_max is 100; the probing cap rarely binds there.
+    let (status_default, iters_default) = solve(None);
+    // A tiny cap pins the centering parameter and reshapes the μ trajectory.
+    let (status_tiny, iters_tiny) = solve(Some(1e-6));
+
+    eprintln!(
+        "HS71 probing sigma_max: default(iters={iters_default}, {status_default:?}) \
+         vs 1e-6(iters={iters_tiny}, {status_tiny:?})",
+    );
+
+    // Before the fix the probing oracle ignored `sigma_max` (hard-coded 100),
+    // so both runs followed an identical μ trajectory and took the same number
+    // of iterations. Honoring the option must change the trajectory.
+    assert_ne!(
+        iters_default, iters_tiny,
+        "probing oracle ignored user-set sigma_max: both runs took {iters_default} iters",
+    );
+}
+
 #[test]
 fn warm_start_options_flow_through_builder() {
     let mut app = IpoptApplication::new();

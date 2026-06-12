@@ -256,6 +256,21 @@ def _check_psd(pr, pc, pv, n: int) -> None:
         )
 
 
+def _maybe_check_psd(P, c, check_psd) -> None:
+    """Run the issue-#112 PSD guard on ``P`` unless explicitly disabled.
+
+    Shared by *every* QP entry point so an indefinite (nonconvex) Hessian is
+    rejected uniformly — not only by :func:`solve_qp`. ``check_psd=False``
+    skips it; ``True`` forces it; ``None`` (the default) runs it only when
+    ``n <= _PSD_CHECK_AUTO_MAX_N`` so a large QP is not slowed by the O(n^3)
+    eigenvalue solve. ``c`` fixes ``n``."""
+    if check_psd is False:
+        return
+    n = np.asarray(c, dtype=np.float64).ravel().shape[0]
+    if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
+        _check_psd(*_lower_triangle_coo(P, n), n)
+
+
 def _mat_shape(mat):
     """``(n_rows, n_cols)`` of a sparse-or-dense matrix, or ``None`` for a
     ``None`` matrix or a dense array that is not 2-D (``_coo`` raises a clear
@@ -277,7 +292,8 @@ def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
         if arr is None:
             return
         data = np.asarray(
-            arr.tocoo().data if hasattr(arr, "tocoo") else arr, dtype=np.float64)
+            arr.tocoo().data if hasattr(arr, "tocoo") else arr, dtype=np.float64
+        )
         if not data.size:
             return
         # ±inf bounds are the idiomatic "no bound"; only NaN is malformed there.
@@ -286,8 +302,7 @@ def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
             what = "NaN" if allow_inf else "NaN or Inf"
             raise ValueError(f"solve_qp: `{name}` contains {what}")
 
-    for name, arr in (("P", P), ("c", c), ("A", A), ("b", b),
-                      ("G", G), ("h", h)):
+    for name, arr in (("P", P), ("c", c), ("A", A), ("b", b), ("G", G), ("h", h)):
         _finite(name, arr)
     _finite("lb", lb, allow_inf=True)
     _finite("ub", ub, allow_inf=True)
@@ -303,19 +318,21 @@ def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
         rows, cols = sh
         if cols != n:
             raise ValueError(
-                f"solve_qp: `{mname}` has {cols} columns but n={n} (from `c`)")
+                f"solve_qp: `{mname}` has {cols} columns but n={n} (from `c`)"
+            )
         vlen = 0 if vec is None else np.asarray(vec).ravel().shape[0]
         if vlen != rows:
             raise ValueError(
-                f"solve_qp: `{mname}` has {rows} rows but `{vname}` has "
-                f"length {vlen}")
+                f"solve_qp: `{mname}` has {rows} rows but `{vname}` has length {vlen}"
+            )
 
     for name, vec in (("lb", lb), ("ub", ub)):
         if vec is not None:
             vlen = np.asarray(vec).ravel().shape[0]
             if vlen != n:
                 raise ValueError(
-                    f"solve_qp: `{name}` has length {vlen} but n={n} (from `c`)")
+                    f"solve_qp: `{name}` has length {vlen} but n={n} (from `c`)"
+                )
 
 
 def _build(
@@ -431,10 +448,7 @@ def solve_qp(
     """
     if c is None:
         raise ValueError("solve_qp: `c` is required")
-    if check_psd is not False:
-        n = np.asarray(c, dtype=np.float64).ravel().shape[0]
-        if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
-            _check_psd(*_lower_triangle_coo(P, n), n)
+    _maybe_check_psd(P, c, check_psd)
     prob = _build(P, c, A, b, G, h, lb, ub)
     return _to_result(
         _pounce.solve_qp(
@@ -483,6 +497,7 @@ def solve_socp(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     collect_iterates: bool = False,
+    check_psd: Optional[bool] = None,
 ) -> QpResult:
     """Solve a standard-form conic program (LP/QP + second-order and/or
     exponential cones).
@@ -535,6 +550,7 @@ def solve_socp(
     """
     if c is None:
         raise ValueError("solve_socp: `c` is required")
+    _maybe_check_psd(P, c, check_psd)
     prob = _build(P, c, A, b, G, h, None, None)
     specs = _normalize_cones(cones)
     return _to_result(
@@ -550,6 +566,7 @@ def solve_qp_batch(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_starts: Optional[Sequence] = None,
+    check_psd: Optional[bool] = None,
 ) -> list[QpResult]:
     """Solve a batch of convex QPs in parallel (across instances).
 
@@ -560,7 +577,14 @@ def solve_qp_batch(
     ``warm_starts`` (optional) is a sequence — one per problem — of prior
     :class:`QpResult`\\ s or mappings (for a sequence of nearby batches).
     Each seeds its instance's iteration; mismatched entries are ignored.
+
+    ``check_psd`` guards each problem's Hessian against indefiniteness
+    (issue #112), with the same ``None``/``True``/``False`` semantics as
+    :func:`solve_qp`; an offending problem raises ``ValueError`` before any
+    solve runs.
     """
+    for pr in problems:
+        _maybe_check_psd(pr.get("P"), pr["c"], check_psd)
     built = [
         _build(
             pr.get("P"),
@@ -598,6 +622,7 @@ def solve_qp_multi_rhs(
     cs: Sequence[Sequence[float]],
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
+    check_psd: Optional[bool] = None,
 ) -> list[QpResult]:
     """Solve one QP *structure* against many linear objectives, in parallel.
 
@@ -617,6 +642,8 @@ def solve_qp_multi_rhs(
     n = len(np.asarray(cs[0], dtype=np.float64).ravel())
     # `c` only fixes `n` for the base structure; the real objectives are `cs`.
     base_c = c if c is not None else np.zeros(n)
+    # `P` is shared across every right-hand side, so one check covers the batch.
+    _maybe_check_psd(P, base_c, check_psd)
     base = _build(P, base_c, A, b, G, h, lb, ub)
     cs_list = [np.asarray(ci, dtype=np.float64).ravel().tolist() for ci in cs]
     dicts = _pounce.solve_qp_multi_rhs(base, cs_list, tol=tol, max_iter=max_iter)
@@ -645,9 +672,15 @@ class QpFactorization:
         *,
         tol: Optional[float] = None,
         max_iter: Optional[int] = None,
+        check_psd: Optional[bool] = None,
     ):
         if c is None:
-            raise ValueError("QpFactorization: `c` is required (representative problem)")
+            raise ValueError(
+                "QpFactorization: `c` is required (representative problem)"
+            )
+        # `P` is fixed for the lifetime of the handle, so one check at build
+        # time covers every same-structure `solve` (issue #112).
+        _maybe_check_psd(P, c, check_psd)
         base = _build(P, c, A, b, G, h, lb, ub)
         self._inner = _pounce.QpFactorization(base, tol=tol, max_iter=max_iter)
 
@@ -719,9 +752,11 @@ class QpSensitivity:
         tol: Optional[float] = None,
         max_iter: Optional[int] = None,
         active_tol: float = 1e-7,
+        check_psd: Optional[bool] = None,
     ):
         if c is None:
             raise ValueError("QpSensitivity: `c` is required")
+        _maybe_check_psd(P, c, check_psd)
         prob = _build(P, c, A, b, G, h, lb, ub)
         self._inner = _pounce.QpSensitivity(
             prob, tol=tol, max_iter=max_iter, active_tol=active_tol

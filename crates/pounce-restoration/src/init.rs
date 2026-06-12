@@ -179,18 +179,8 @@ impl IterateInitializer for RestoIterateInitializer {
         downcast_dense_mut(x.comp_mut(BLOCK_X)).set_values(&x_ref_vals);
 
         // Slack blocks via init_slack_pair on each entry of c / d-s.
-        let c_vals = snap
-            .c_vec
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-            .unwrap_or_else(|| vec![0.0; m_eq as usize]);
-        let dms_vals = snap
-            .d_minus_s_vec
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-            .unwrap_or_else(|| vec![0.0; m_ineq as usize]);
+        let c_vals = expanded_dense_or_panic(&*snap.c_vec, "c residual");
+        let dms_vals = expanded_dense_or_panic(&*snap.d_minus_s_vec, "d − s residual");
 
         let mut nc_vals = vec![0.0; m_eq as usize];
         let mut pc_vals = vec![0.0; m_eq as usize];
@@ -213,12 +203,7 @@ impl IterateInitializer for RestoIterateInitializer {
 
         // ---- primal s: clone outer.s ----
         let mut s = DenseVectorSpace::new(m_ineq).make_new_dense();
-        let s_outer = snap
-            .s
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-            .unwrap_or_else(|| vec![0.0; m_ineq as usize]);
+        let s_outer = expanded_dense_or_panic(&*snap.s, "s (inequality slacks)");
         s.set_values(&s_outer);
 
         // ---- y_c, y_d: zero ----
@@ -232,12 +217,7 @@ impl IterateInitializer for RestoIterateInitializer {
         let z_l_space = build_z_l_space(n_xl_orig, m_eq, m_ineq, z_l_total);
         let mut z_l = CompoundVector::new(z_l_space);
         // block 0: min(rho, outer.z_l)
-        let outer_zl_vals = snap
-            .z_l
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-            .unwrap_or_else(|| vec![0.0; n_xl_orig as usize]);
+        let outer_zl_vals = expanded_dense_or_panic(&*snap.z_l, "z_l (lower-bound multipliers)");
         let mut zl0 = vec![0.0; n_xl_orig as usize];
         for (i, &v) in outer_zl_vals.iter().enumerate() {
             zl0[i] = self.rho.min(v);
@@ -251,12 +231,7 @@ impl IterateInitializer for RestoIterateInitializer {
 
         // ---- z_u: orig-shape (slacks have no upper bound) ----
         let mut z_u = DenseVectorSpace::new(n_xu_orig).make_new_dense();
-        let outer_zu_vals = snap
-            .z_u
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-            .unwrap_or_else(|| vec![0.0; n_xu_orig as usize]);
+        let outer_zu_vals = expanded_dense_or_panic(&*snap.z_u, "z_u (upper-bound multipliers)");
         let mut zu = vec![0.0; n_xu_orig as usize];
         for (i, &v) in outer_zu_vals.iter().enumerate() {
             zu[i] = self.rho.min(v);
@@ -265,12 +240,7 @@ impl IterateInitializer for RestoIterateInitializer {
 
         // ---- v_l, v_u: orig-shape (d-bounds unchanged by resto) ----
         let mut v_l = DenseVectorSpace::new(n_dl).make_new_dense();
-        let outer_vl_vals = snap
-            .v_l
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-            .unwrap_or_else(|| vec![0.0; n_dl as usize]);
+        let outer_vl_vals = expanded_dense_or_panic(&*snap.v_l, "v_l (d lower-bound multipliers)");
         let mut vl = vec![0.0; n_dl as usize];
         for (i, &v) in outer_vl_vals.iter().enumerate() {
             vl[i] = self.rho.min(v);
@@ -278,12 +248,7 @@ impl IterateInitializer for RestoIterateInitializer {
         v_l.set_values(&vl);
 
         let mut v_u = DenseVectorSpace::new(n_du).make_new_dense();
-        let outer_vu_vals = snap
-            .v_u
-            .as_any()
-            .downcast_ref::<DenseVector>()
-            .map(|d| d.expanded_values())
-            .unwrap_or_else(|| vec![0.0; n_du as usize]);
+        let outer_vu_vals = expanded_dense_or_panic(&*snap.v_u, "v_u (d upper-bound multipliers)");
         let mut vu = vec![0.0; n_du as usize];
         for (i, &v) in outer_vu_vals.iter().enumerate() {
             vu[i] = self.rho.min(v);
@@ -478,9 +443,59 @@ fn downcast_dense_mut(v: &mut dyn Vector) -> &mut DenseVector {
         .expect("RestoIterateInitializer expected a DenseVector component")
 }
 
+/// Expand an outer-snapshot vector block to a dense value slice,
+/// panicking with a clear diagnostic if it is not a `DenseVector`.
+///
+/// The restoration NLP is built entirely from `DenseVector` blocks — the
+/// *write* side already asserts this via `downcast_dense_mut`'s `expect`.
+/// The read side previously did `…downcast_ref::<DenseVector>().map(…)
+/// .unwrap_or_else(|| vec![0.0; dim])`, which silently replaced a
+/// non-dense (e.g. compound) block with **zeros**: the restoration start
+/// point would be seeded from a zero residual / zero multiplier with no
+/// signal, masking the invariant violation. Failing loudly here is
+/// strictly better and symmetric with the write side.
+fn expanded_dense_or_panic(v: &dyn Vector, what: &str) -> Vec<Number> {
+    v.as_any()
+        .downcast_ref::<DenseVector>()
+        .map(|d| d.expanded_values())
+        .unwrap_or_else(|| {
+            panic!("RestoIterateInitializer: outer {what} must be a DenseVector (got a non-dense block)")
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal non-`DenseVector` `dyn Vector`: a 1-block compound
+    /// whose sole component is dense. The compound itself does not
+    /// downcast to `DenseVector`, exercising the failed-downcast path.
+    fn make_compound(dim: Index) -> CompoundVector {
+        let dspace = DenseVectorSpace::new(dim);
+        let cspace = CompoundVectorSpace::new(1, dim);
+        cspace.set_comp(0, dim, move || Box::new(dspace.make_new_dense()));
+        CompoundVector::new(cspace)
+    }
+
+    #[test]
+    fn expanded_dense_or_panic_returns_values_for_dense() {
+        // Happy path: a real DenseVector (incl. the homogeneous case)
+        // round-trips its values — guards against the diagnostic fix
+        // breaking the normal, all-DenseVector restoration data.
+        let mut v = DenseVectorSpace::new(3).make_new_dense();
+        v.set_values(&[1.0, -2.0, 3.5]);
+        assert_eq!(expanded_dense_or_panic(&v, "test"), vec![1.0, -2.0, 3.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a DenseVector")]
+    fn expanded_dense_or_panic_panics_on_non_dense() {
+        // Regression for M9: a non-DenseVector block must surface a
+        // diagnostic, NOT be silently replaced with zeros. Pre-fix this
+        // returned `vec![0.0; dim]` and did not panic.
+        let cv = make_compound(3);
+        let _ = expanded_dense_or_panic(&cv, "z_l (lower-bound multipliers)");
+    }
 
     #[test]
     fn restoration_mu_takes_max() {

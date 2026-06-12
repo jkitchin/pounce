@@ -227,7 +227,17 @@ fn geometric_program_conic_matches_nlp() {
         ub: vec![],
     };
     let conic = timed_conic("GP", &prob, &[ConeSpec::Exponential, ConeSpec::Exponential]);
-    assert_eq!(conic.status, QpStatus::Optimal, "conic: {:?}", conic.status);
+    // Usable solve: clean `Optimal` or the reduced-accuracy `OptimalInaccurate`
+    // fallback (code review 2026-06 item M20); the objective is cross-checked
+    // against an independent NLP below.
+    assert!(
+        matches!(
+            conic.status,
+            QpStatus::Optimal | QpStatus::OptimalInaccurate
+        ),
+        "conic: {:?}",
+        conic.status
+    );
 
     // NLP: min_u e^u + e^{−u}, optimum u=0, obj=2.
     let nlp = ClosureNlp {
@@ -298,7 +308,17 @@ fn entropy_maximization_conic_matches_nlp() {
     };
     let specs = vec![ConeSpec::Exponential; n];
     let conic = timed_conic("entropy", &prob, &specs);
-    assert_eq!(conic.status, QpStatus::Optimal, "conic: {:?}", conic.status);
+    // Usable solve: clean `Optimal` or the reduced-accuracy `OptimalInaccurate`
+    // fallback (code review 2026-06 item M20); the objective is cross-checked
+    // against an independent NLP below.
+    assert!(
+        matches!(
+            conic.status,
+            QpStatus::Optimal | QpStatus::OptimalInaccurate
+        ),
+        "conic: {:?}",
+        conic.status
+    );
 
     // NLP: min Σ xᵢ log xᵢ s.t. Σ xᵢ = 1, xᵢ ≥ 1e-9.
     let nlp = ClosureNlp {
@@ -388,7 +408,17 @@ fn log_sum_exp_conic_matches_nlp() {
         ConeSpec::Nonneg(1),
     ];
     let conic = timed_conic("lse", &prob, &specs);
-    assert_eq!(conic.status, QpStatus::Optimal, "conic: {:?}", conic.status);
+    // Usable solve: clean `Optimal` or the reduced-accuracy `OptimalInaccurate`
+    // fallback (code review 2026-06 item M20); the objective is cross-checked
+    // against an independent NLP below.
+    assert!(
+        matches!(
+            conic.status,
+            QpStatus::Optimal | QpStatus::OptimalInaccurate
+        ),
+        "conic: {:?}",
+        conic.status
+    );
 
     // NLP: min log(e^{x1}+e^{x2}) s.t. x1+x2=0.
     let nlp = ClosureNlp {
@@ -464,7 +494,17 @@ fn power_cone_geometric_mean_matches_nlp() {
         ub: vec![],
     };
     let conic = timed_conic("power-gm", &prob, &[ConeSpec::Power(0.5)]);
-    assert_eq!(conic.status, QpStatus::Optimal, "conic: {:?}", conic.status);
+    // Usable solve: clean `Optimal` or the reduced-accuracy `OptimalInaccurate`
+    // fallback (code review 2026-06 item M20); the objective is cross-checked
+    // against an independent NLP below.
+    assert!(
+        matches!(
+            conic.status,
+            QpStatus::Optimal | QpStatus::OptimalInaccurate
+        ),
+        "conic: {:?}",
+        conic.status
+    );
 
     // NLP: max x s.t. x ≤ √(y·z), y=2, z=8  ⇔  min −x with x² ≤ y·z.
     // Pose directly as max of √(2·8): the closed form is 4. Cross-check with a
@@ -548,7 +588,17 @@ fn entropy_maximization_larger_instance() {
     };
     let specs = vec![ConeSpec::Exponential; n];
     let conic = timed_conic("entropy16", &prob, &specs);
-    assert_eq!(conic.status, QpStatus::Optimal, "conic: {:?}", conic.status);
+    // Usable solve: clean `Optimal` or the reduced-accuracy `OptimalInaccurate`
+    // fallback (code review 2026-06 item M20); the objective is cross-checked
+    // against an independent NLP below.
+    assert!(
+        matches!(
+            conic.status,
+            QpStatus::Optimal | QpStatus::OptimalInaccurate
+        ),
+        "conic: {:?}",
+        conic.status
+    );
     assert!(
         (conic.obj - want_obj).abs() < 1e-4,
         "entropy(n=16) obj {} vs −log 16 = {want_obj}",
@@ -606,11 +656,15 @@ fn near_boundary_gp_matches_nlp() {
         );
 
         // Safety property: must NEVER report a wrong/premature Optimal. Either it
-        // converges (Optimal, checked below) or it fails honestly.
+        // converges (Optimal / reduced-accuracy OptimalInaccurate, checked below)
+        // or it fails honestly.
         assert!(
             matches!(
                 conic.status,
-                QpStatus::Optimal | QpStatus::NumericalFailure | QpStatus::IterationLimit
+                QpStatus::Optimal
+                    | QpStatus::OptimalInaccurate
+                    | QpStatus::NumericalFailure
+                    | QpStatus::IterationLimit
             ),
             "u={u}: unexpected status {:?}",
             conic.status

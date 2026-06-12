@@ -179,6 +179,56 @@ fn initial_seed_pushes_violation_into_slack_and_keeps_qp_feasible() {
     assert!((aug_lhs[0] - 5.0).abs() < 1e-12);
 }
 
+// L15 regression: `original_inertia()` hard-returned `Psd`, so the
+// `Indefinite` arm of `as_qp`'s inertia match was dead — an indefinite
+// original problem was silently solved through the augmented problem as
+// if PSD, skipping the inertia-control path. `build` now captures
+// `qp.hessian_inertia`; `as_qp` propagates `Indefinite` and collapses
+// `Psd`/`Unknown` to `Psd` (the augmented Hessian is PSD with explicit
+// zero slack diagonals).
+#[test]
+fn as_qp_propagates_original_hessian_inertia() {
+    let (h, a, g, bl, bu, xl, xu) = tiny_qp_with_one_inequality();
+    let mk = |inertia| QpProblem {
+        n: 2,
+        m: 1,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: inertia,
+    };
+
+    // Indefinite original ⇒ augmented marked Indefinite (the formerly
+    // dead arm). Pre-fix this collapsed to Psd.
+    let qp_ind = mk(HessianInertia::Indefinite);
+    let reform_ind = ElasticReformulation::build(&qp_ind, 1e6);
+    assert_eq!(
+        reform_ind.as_qp().hessian_inertia,
+        HessianInertia::Indefinite
+    );
+
+    // Psd and Unknown both collapse to Psd (zero slack diagonals make
+    // the augmented Hessian PSD, never indefinite).
+    let qp_psd = mk(HessianInertia::Psd);
+    assert_eq!(
+        ElasticReformulation::build(&qp_psd, 1e6)
+            .as_qp()
+            .hessian_inertia,
+        HessianInertia::Psd
+    );
+    let qp_unk = mk(HessianInertia::Unknown);
+    assert_eq!(
+        ElasticReformulation::build(&qp_unk, 1e6)
+            .as_qp()
+            .hessian_inertia,
+        HessianInertia::Psd
+    );
+}
+
 #[test]
 fn is_feasible_zero_slacks_returns_true() {
     let (h, a, g, bl, bu, xl, xu) = tiny_qp_with_one_inequality();

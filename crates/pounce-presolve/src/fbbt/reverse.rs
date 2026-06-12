@@ -27,7 +27,7 @@
 use pounce_common::types::Number;
 use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
 
-use crate::fbbt::interval::Interval;
+use crate::fbbt::interval::{round_down, round_up, Interval};
 
 /// Result of [`reverse_pass`].
 #[derive(Debug, Clone, PartialEq)]
@@ -208,9 +208,12 @@ fn inverse_powint(z: Interval, n: u32, prior_a: Interval) -> Interval {
         return z;
     }
     if n % 2 == 1 {
-        // Odd: real-valued cube/quintic/... root is monotone.
-        let lo = signed_nth_root(z.lo, n);
-        let hi = signed_nth_root(z.hi, n);
+        // Odd: real-valued cube/quintic/... root is monotone. Outward-round
+        // the endpoints — `powf` is round-to-nearest, so without nudging the
+        // lower endpoint up / upper endpoint down by a ULP we could exclude a
+        // feasible point (L44, soundness invariant).
+        let lo = round_down(signed_nth_root(z.lo, n));
+        let hi = round_up(signed_nth_root(z.hi, n));
         Interval::new(lo, hi)
     } else {
         // Even: z must be non-negative.
@@ -219,9 +222,12 @@ fn inverse_powint(z: Interval, n: u32, prior_a: Interval) -> Interval {
             return Interval::EMPTY;
         }
         // |a| ∈ [sqrt(z.lo), sqrt(z.hi)] (with `^(1/n)` for general
-        // even n).
-        let abs_lo = z_pos.lo.powf(1.0 / n as f64);
-        let abs_hi = z_pos.hi.powf(1.0 / n as f64);
+        // even n). Outward-round: `powf` is round-to-nearest, so the lower
+        // root must be nudged down and the upper root up, else the
+        // over-approximation could over-tighten and drop a feasible point
+        // (L44, the soundness invariant the interval module promises).
+        let abs_lo = round_down(z_pos.lo.powf(1.0 / n as f64));
+        let abs_hi = round_up(z_pos.hi.powf(1.0 / n as f64));
         // Two branches: a ∈ [-abs_hi, -abs_lo] ∪ [abs_lo, abs_hi].
         // We can't return a union, so pick the branch that
         // intersects `prior_a` (the orchestrator-typical case). If
@@ -475,5 +481,52 @@ mod tests {
                 var1
             );
         }
+    }
+
+    /// L44: the even-`n` inverse-power root must be *outward*-rounded —
+    /// `powf` is round-to-nearest, so without nudging the lower root down /
+    /// the upper root up the over-approximation could exclude a feasible
+    /// point. Using a perfect-square interval `[4, 9]` (roots exactly 2, 3)
+    /// the bug returns `[2, 3]` exactly; the fix returns a strictly wider box.
+    #[test]
+    fn inverse_powint_even_branch_is_outward_rounded() {
+        let raw_lo = 4.0_f64.powf(0.5);
+        let raw_hi = 9.0_f64.powf(0.5);
+        // prior_a = [0, ∞) selects the positive branch only.
+        let r = inverse_powint(
+            Interval::new(4.0, 9.0),
+            2,
+            Interval::new(0.0, Number::INFINITY),
+        );
+        assert!(
+            r.lo < raw_lo,
+            "lower root must be rounded below {raw_lo}, got {} (fail-first: assignment leaves it == {raw_lo})",
+            r.lo,
+        );
+        assert!(
+            r.hi > raw_hi,
+            "upper root must be rounded above {raw_hi}, got {}",
+            r.hi
+        );
+        // Still sound: contains the exact roots.
+        assert!(r.contains(2.0) && r.contains(3.0));
+    }
+
+    /// The odd-`n` branch carries the same outward-rounding requirement.
+    #[test]
+    fn inverse_powint_odd_branch_is_outward_rounded() {
+        let raw_lo = signed_nth_root(8.0, 3);
+        let raw_hi = signed_nth_root(27.0, 3);
+        let r = inverse_powint(Interval::new(8.0, 27.0), 3, Interval::ENTIRE);
+        assert!(
+            r.lo < raw_lo,
+            "odd lower root not outward-rounded: {} vs {raw_lo}",
+            r.lo
+        );
+        assert!(
+            r.hi > raw_hi,
+            "odd upper root not outward-rounded: {} vs {raw_hi}",
+            r.hi
+        );
     }
 }

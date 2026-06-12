@@ -249,6 +249,7 @@ mod tests {
         // `from_sens_result` is explicit and tested, not silent.
         let res = SensResult {
             status: ApplicationReturnStatus::SolveSucceeded,
+            error: None,
             x: Some(vec![1.0]),
             obj_val: Some(0.0),
             dx: None,
@@ -279,6 +280,7 @@ mod tests {
     fn from_sens_result_returns_none_without_duals() {
         let res = SensResult {
             status: ApplicationReturnStatus::SolveSucceeded,
+            error: None,
             x: Some(vec![1.0]),
             obj_val: Some(0.0),
             dx: None,

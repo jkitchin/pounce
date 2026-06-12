@@ -96,6 +96,43 @@ class _NotConvex(Exception):
     """Internal sentinel: the problem is not a confidently-convex LP/QP."""
 
 
+_MISS = object()
+
+
+def _point_cache(f: Optional[Callable]) -> Optional[Callable]:
+    """Wrap a callable so repeated evaluations at the *same point* return a
+    cached result, keyed on the point's exact float64 bytes.
+
+    The LP/QP router (:func:`classify_and_extract`) and the SOCP router
+    (:func:`classify_and_extract_socp`) build an identical probe set (same RNG
+    seed) and finite-difference the *same* objective, so the ``auto`` path in
+    :func:`pounce.minimize` would otherwise probe the objective twice (~8n²
+    redundant ``fun`` evaluations at FD). Sharing one cache across both router
+    calls turns the second router's probes into cache hits.
+
+    ``None`` passes through (an absent ``jac``/``hess``). Cached values are
+    stored as defensive float64 *copies*, never as the user's return object: a
+    ``jac``/``hess`` that reuses one output buffer across calls would otherwise
+    mutate earlier cache entries in place and poison the routers' probe data
+    (M34). Scalars (a ``fun`` value) become 0-d arrays, which every router
+    consumer already accepts (``float(...)`` / ``np.asarray(...)``).
+    """
+    if f is None:
+        return None
+    cache: dict = {}
+
+    def wrapped(x):
+        key = np.asarray(x, dtype=np.float64).tobytes()
+        hit = cache.get(key, _MISS)
+        if hit is not _MISS:
+            return hit
+        val = np.array(f(x), dtype=np.float64, copy=True)
+        cache[key] = val
+        return val
+
+    return wrapped
+
+
 def _grad_fn(fun: Callable, jac: Optional[Callable]) -> Callable:
     """Return a gradient callable: the user's ``jac`` if given, else a
     central finite-difference of ``fun`` (central, not forward, because the
@@ -147,8 +184,9 @@ def _probe_points(x0, lb, ub, rng, k=5):
     if lb is not None and ub is not None:
         width = ub - lb
         finite = np.isfinite(width)
-        span = np.where(finite, np.maximum(width, 1e-6) * 0.25,
-                        np.maximum(np.abs(x0), 1.0))
+        span = np.where(
+            finite, np.maximum(width, 1e-6) * 0.25, np.maximum(np.abs(x0), 1.0)
+        )
     else:
         span = np.maximum(np.abs(x0), 1.0)
     pts = [x0.copy()]
@@ -478,12 +516,16 @@ def classify_and_extract_socp(
                     gp = float(np.asarray(g_combined(p), dtype=np.float64).ravel()[i])
                     model = 0.5 * float(p @ Qi @ p) + float(a_g @ p) + b_g
                     if abs(gp - model) > rtol * (1.0 + abs(gp)):
-                        raise _NotConvex("a constraint does not match its quadratic model")
+                        raise _NotConvex(
+                            "a constraint does not match its quadratic model"
+                        )
                 H = -Qi
                 eigh = np.linalg.eigvalsh(H)
                 if float(eigh.min()) < -1e-8 * max(1.0, abs(float(eigh.max()))):
-                    raise _NotConvex("a constraint is convex-quadratic but its "
-                                     "feasible set is nonconvex")
+                    raise _NotConvex(
+                        "a constraint is convex-quadratic but its "
+                        "feasible set is nonconvex"
+                    )
                 f_rows = _psd_outer_factor(H, n)
                 a_vec = -a_g
                 b_eff = lo - b_g  # −(g − lo) ≤ 0  ⇒  ½xᵀHx + a_vec·x + b_eff ≤ 0
@@ -496,7 +538,9 @@ def classify_and_extract_socp(
                 gp = float(np.asarray(g_combined(p), dtype=np.float64).ravel()[i])
                 model = float(Ji @ p) + float(off)
                 if abs(gp - model) > 1e-6 * (1.0 + abs(gp)):
-                    raise _NotConvex("a constraint is neither linear nor convex-quadratic")
+                    raise _NotConvex(
+                        "a constraint is neither linear nor convex-quadratic"
+                    )
             if eq:
                 A_rows.append(Ji)
                 b_vals.append(lo - off)

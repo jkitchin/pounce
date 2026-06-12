@@ -172,6 +172,13 @@ pub struct Ma57SolverInterface {
     fact: Vec<Number>,
     lifact: Index,
     ifact: Vec<Index>,
+
+    /// Reusable MA57C real workspace (length `n*nrhs`). Kept across
+    /// backsolves so the factor-once/solve-many hot path does not
+    /// allocate per solve (L11). MA57C uses it as pure scratch — upstream
+    /// passes an *uninitialized* `new Number[lwork]` — so it needs no
+    /// zeroing on reuse.
+    work: Vec<Number>,
 }
 
 impl std::fmt::Debug for Ma57SolverInterface {
@@ -211,6 +218,7 @@ impl Ma57SolverInterface {
             fact: Vec::new(),
             lifact: 0,
             ifact: Vec::new(),
+            work: Vec::new(),
         };
         me.apply_icntl();
         me
@@ -259,11 +267,19 @@ impl Ma57SolverInterface {
         let n = self.dim;
         let ne = self.nonzeros;
 
-        // lkeep >= 5*N + NE + max(N, NE) + 42  (upstream cpp:536)
-        self.lkeep = 5 * n + ne + n.max(ne) + 42;
+        // lkeep >= 5*N + NE + max(N, NE) + 42  (upstream cpp:536).
+        // MA57's Fortran interface is 32-bit, so every workspace length must
+        // fit in `Index` (i32). Evaluated in i32 this sum overflows near
+        // ne ~ 3e8 — wrapping to a negative length that `as usize` turns into
+        // an absurd allocation (release) or a panic (debug). Size in i64 and
+        // fail cleanly if the problem exceeds MA57's index range.
+        let Some((lkeep, liwork)) = ma57_symbolic_sizes(n, ne) else {
+            return ESymSolverStatus::FatalError;
+        };
+        self.lkeep = lkeep;
 
         self.cntl[0] = self.options.pivtol;
-        self.iwork = vec![0; (5 * n) as usize];
+        self.iwork = vec![0; liwork as usize];
         self.keep = vec![0; self.lkeep as usize];
 
         // SAFETY: pointer/length contract documented in the FFI
@@ -291,10 +307,18 @@ impl Ma57SolverInterface {
         // `pre_alloc` to avoid the `info[0] = -3 / -4` retries on
         // typical problems.
         let scale = self.options.pre_alloc;
-        let suggested_lfact = (self.info[8] as Number * scale).ceil() as Index;
-        let suggested_lifact = (self.info[9] as Number * scale).ceil() as Index;
-        self.lfact = suggested_lfact.max(self.info[8]);
-        self.lifact = suggested_lifact.max(self.info[9]);
+        // `info[8]`/`info[9]` are MA57's suggested workspace sizes; growing by
+        // `scale` and rounding up can exceed i32. The float->int cast saturates
+        // (so it no longer wraps), but an i32::MAX-element allocation is still
+        // absurd — treat an out-of-range suggestion as too large for MA57.
+        let (Some(lfact), Some(lifact)) = (
+            ma57_scaled_size(self.info[8], scale),
+            ma57_scaled_size(self.info[9], scale),
+        ) else {
+            return ESymSolverStatus::FatalError;
+        };
+        self.lfact = lfact;
+        self.lifact = lifact;
 
         self.fact = vec![0.0; self.lfact as usize];
         self.ifact = vec![0; self.lifact as usize];
@@ -339,8 +363,16 @@ impl Ma57SolverInterface {
 
             match self.info[0] {
                 0 => break,
-                -3 => self.grow_fact(),
-                -4 => self.grow_ifact(),
+                -3 => {
+                    if let Err(status) = self.grow_fact() {
+                        return status;
+                    }
+                }
+                -4 => {
+                    if let Err(status) = self.grow_ifact() {
+                        return status;
+                    }
+                }
                 4 => return ESymSolverStatus::Singular,
                 v if v < 0 => return ESymSolverStatus::FatalError,
                 // info[0] > 0 is a warning; upstream treats it as
@@ -356,11 +388,20 @@ impl Ma57SolverInterface {
         ESymSolverStatus::Success
     }
 
-    /// Grow `fact` via MA57E with `ic = 0` (cpp:644-673).
-    fn grow_fact(&mut self) {
-        // info[16] is MA57's suggested new lfact.
-        let suggested = (self.info[16] as Number * self.options.pre_alloc).ceil() as Index;
-        let new_lfact = suggested.max(self.info[16]).max(self.lfact + 1);
+    /// Grow `fact` via MA57E with `ic = 0` (cpp:644-673). Returns
+    /// `Err(FatalError)` when the suggested size cannot be represented as a
+    /// positive `Index` (L10 follow-up F7): the float→int cast and the
+    /// strictly-growing `+1` bump are both range-checked through
+    /// `ma57_scaled_size` / `checked_add` rather than saturating or wrapping
+    /// into a bogus (possibly negative) allocation length.
+    fn grow_fact(&mut self) -> Result<(), ESymSolverStatus> {
+        // info[16] is MA57's suggested new lfact. Scale it (guarded against
+        // i32 overflow), never shrinking below MA57's own minimum, then ensure
+        // it strictly grows past the current `lfact`.
+        let Some(new_lfact) = ma57_grown_size(self.info[16], self.options.pre_alloc, self.lfact)
+        else {
+            return Err(ESymSolverStatus::FatalError);
+        };
         let mut newfac: Vec<Number> = vec![0.0; new_lfact as usize];
         let n = self.dim;
         let ic: Index = 0;
@@ -389,12 +430,17 @@ impl Ma57SolverInterface {
         }
         self.fact = newfac;
         self.lfact = new_lfact;
+        Ok(())
     }
 
-    /// Grow `ifact` via MA57E with `ic = 1` (cpp:675-697).
-    fn grow_ifact(&mut self) {
-        let suggested = (self.info[17] as Number * self.options.pre_alloc).ceil() as Index;
-        let new_lifact = suggested.max(self.info[17]).max(self.lifact + 1);
+    /// Grow `ifact` via MA57E with `ic = 1` (cpp:675-697). Returns
+    /// `Err(FatalError)` on an unrepresentable suggested size (see
+    /// [`Self::grow_fact`]).
+    fn grow_ifact(&mut self) -> Result<(), ESymSolverStatus> {
+        let Some(new_lifact) = ma57_grown_size(self.info[17], self.options.pre_alloc, self.lifact)
+        else {
+            return Err(ESymSolverStatus::FatalError);
+        };
         let mut newifc: Vec<Index> = vec![0; new_lifact as usize];
         let n = self.dim;
         let ic: Index = 1;
@@ -421,6 +467,7 @@ impl Ma57SolverInterface {
         }
         self.ifact = newifc;
         self.lifact = new_lifact;
+        Ok(())
     }
 
     /// Apply the factorization to `nrhs` right-hand sides packed in
@@ -430,8 +477,18 @@ impl Ma57SolverInterface {
         let n = self.dim;
         let job: Index = 1;
         let lrhs = n;
-        let lwork = n * nrhs;
-        let mut work: Vec<Number> = vec![0.0; lwork as usize];
+        // MA57C needs `n*nrhs` reals of workspace; in i32 this overflows for
+        // large n*nrhs. Widen to i64 and fail cleanly rather than wrap into a
+        // garbage length.
+        let lwork_wide = n as i64 * nrhs as i64;
+        if lwork_wide > Index::MAX as i64 {
+            return ESymSolverStatus::FatalError;
+        }
+        let lwork = lwork_wide as Index;
+        // Reuse the cached workspace (L11): resize to `n*nrhs` (a no-op once
+        // it is large enough, so no per-solve allocation in the solve-many
+        // hot path). MA57C treats it as scratch, so stale contents are fine.
+        self.work.resize(lwork as usize, 0.0);
 
         // SAFETY: rhs_vals length `n*nrhs` is the caller's contract;
         // `work` sized to `n*nrhs` per MA57C requirement.
@@ -446,7 +503,7 @@ impl Ma57SolverInterface {
                 &nrhs,
                 rhs_vals.as_mut_ptr(),
                 &lrhs,
-                work.as_mut_ptr(),
+                self.work.as_mut_ptr(),
                 &lwork,
                 self.iwork.as_mut_ptr(),
                 self.icntl.as_ptr(),
@@ -549,9 +606,166 @@ impl SparseSymLinearSolverInterface for Ma57SolverInterface {
     }
 }
 
+/// Symbolic-phase workspace sizes for MA57, computed in i64 and validated
+/// against MA57's 32-bit `Index`. Returns `(lkeep, liwork)` when both fit, or
+/// `None` when the problem is too large for MA57's index range. Sizing follows
+/// upstream cpp:536: `lkeep = 5*N + NE + max(N, NE) + 42`, `liwork = 5*N`.
+fn ma57_symbolic_sizes(n: Index, ne: Index) -> Option<(Index, Index)> {
+    let (n64, ne64) = (n as i64, ne as i64);
+    let lkeep = 5 * n64 + ne64 + n64.max(ne64) + 42;
+    let liwork = 5 * n64;
+    if lkeep > Index::MAX as i64 || liwork > Index::MAX as i64 {
+        return None;
+    }
+    Some((lkeep as Index, liwork as Index))
+}
+
+/// Grow a MA57 suggested workspace size `base` by `scale` (>= 1), rounding up,
+/// and validate the result fits in `Index`. Returns `max(scaled, base)` (never
+/// shrinking below MA57's own minimum), or `None` if the scaled length exceeds
+/// the 32-bit index range — or if `base` is negative (a corrupt MA57 INFO
+/// entry; a negative length would otherwise convert via `as usize` into an
+/// absurd allocation downstream).
+fn ma57_scaled_size(base: Index, scale: Number) -> Option<Index> {
+    if base < 0 {
+        return None;
+    }
+    let scaled = (base as Number * scale).ceil();
+    if scaled > Index::MAX as Number {
+        return None;
+    }
+    Some((scaled as Index).max(base))
+}
+
+/// Grow a MA57 workspace from MA57's suggested `base` (scaled by `pre_alloc`
+/// via [`ma57_scaled_size`]) while guaranteeing the result strictly exceeds the
+/// `current` length. Returns `None` when either the scaled size or the
+/// `current + 1` bump cannot be represented as a positive `Index`. The
+/// `info[0] = -3/-4` grow paths map that to a clean `FatalError` (L10 follow-up
+/// F7) instead of saturating the float→int cast / wrapping `current + 1` into a
+/// bogus, possibly-negative allocation length.
+fn ma57_grown_size(base: Index, scale: Number, current: Index) -> Option<Index> {
+    let grown = ma57_scaled_size(base, scale)?;
+    let bump = current.checked_add(1)?;
+    Some(grown.max(bump))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L10: the symbolic sizing `5*N + NE + max(N,NE) + 42` overflows i32 near
+    /// ne ~ 3e8. The guard computes it in i64 and reports `None` (mapped to a
+    /// clean `FatalError`) instead of wrapping into a negative/garbage length.
+    #[test]
+    fn ma57_symbolic_sizes_guards_i32_overflow() {
+        // Small problem: exact sizing, lkeep = 5*N + NE + max(N,NE) + 42,
+        // liwork = 5*N.
+        assert_eq!(
+            ma57_symbolic_sizes(10, 20),
+            Some((5 * 10 + 20 + 20 + 42, 5 * 10))
+        );
+        // n = ne = 3e8: 7*3e8 = 2.1e9 < i32::MAX (2.147e9) — still representable.
+        assert!(ma57_symbolic_sizes(300_000_000, 300_000_000).is_some());
+        // n = ne = 3.5e8: 7*3.5e8 = 2.45e9 > i32::MAX. The i32 expression would
+        // wrap to a negative length; the guard returns None.
+        assert!(ma57_symbolic_sizes(350_000_000, 350_000_000).is_none());
+    }
+
+    /// L10: a suggested size scaled by `pre_alloc` must still fit in i32, and
+    /// must never shrink below MA57's own minimum.
+    #[test]
+    fn ma57_scaled_size_guards_overflow_and_floors_at_base() {
+        assert_eq!(ma57_scaled_size(1000, 1.05), Some(1050));
+        // scale < 1 must not drop below the MA57-suggested base.
+        assert_eq!(ma57_scaled_size(1000, 0.5), Some(1000));
+        // base near i32::MAX scaled up overflows the index range -> None.
+        assert_eq!(ma57_scaled_size(Index::MAX - 1, 1.05), None);
+        // Positive boundary: i32::MAX itself at scale 1.0 is representable
+        // (f64 holds 2^31 - 1 exactly, so the compare is not lossy).
+        assert_eq!(ma57_scaled_size(Index::MAX, 1.0), Some(Index::MAX));
+        // A corrupt (negative) MA57 INFO size is rejected, not scaled into
+        // a negative length.
+        assert_eq!(ma57_scaled_size(-1, 1.05), None);
+    }
+
+    /// F7 (L10 follow-up): the `info[0] = -3/-4` grow paths size the new
+    /// workspace as `max(scaled(base), current + 1)`. Both the float→int scale
+    /// and the strictly-growing `+ 1` bump must be range-checked: a saturating
+    /// cast or a wrapping `current + 1` would otherwise feed `Vec::with` a
+    /// bogus (possibly negative) length. `ma57_grown_size` returns `None` in
+    /// those cases, which the grow paths map to a clean `FatalError`.
+    #[test]
+    fn ma57_grown_size_guards_overflow_and_grows_strictly() {
+        // Normal grow: max(ceil(1000*1.05), 2000 + 1) = max(1050, 2001) = 2001.
+        assert_eq!(ma57_grown_size(1000, 1.05, 2000), Some(2001));
+        // When the scaled base already exceeds current+1, it wins and the
+        // result never shrinks below MA57's suggested minimum.
+        assert_eq!(ma57_grown_size(1000, 1.05, 100), Some(1050));
+        // scale < 1 must still not drop below the MA57-suggested base.
+        assert_eq!(ma57_grown_size(1000, 0.5, 100), Some(1000));
+        // Scaled-size overflow (base near i32::MAX) -> None (FatalError).
+        assert_eq!(ma57_grown_size(Index::MAX - 1, 1.05, 10), None);
+        // `current + 1` overflow: current == i32::MAX would wrap to i32::MIN.
+        // The guard reports None instead of allocating a negative length.
+        assert_eq!(ma57_grown_size(10, 1.05, Index::MAX), None);
+        // Positive boundary: current == i32::MAX - 1 still has one
+        // representable bump left.
+        assert_eq!(ma57_grown_size(10, 1.05, Index::MAX - 1), Some(Index::MAX));
+        // Corrupt (negative) MA57 INFO base propagates the rejection.
+        assert_eq!(ma57_grown_size(-3, 1.05, 100), None);
+    }
+
+    /// L11: the MA57C workspace is cached on the struct and reused across
+    /// backsolves. Repeated solves against one factorization must stay correct
+    /// despite stale scratch, and must not reallocate `work`.
+    #[test]
+    fn backsolve_reuses_workspace_across_repeated_solves() {
+        let mut s = Ma57SolverInterface::new();
+        let n: Index = 2;
+        let ne: Index = 3;
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(n, ne, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        // A = [[2, 1], [1, 3]], det 5, A^-1 = [[3, -1], [-1, 2]] / 5.
+        s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+
+        // First solve factors (new_matrix = true); A * (1, 1) = (3, 4).
+        let mut rhs = [3.0, 4.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+            ESymSolverStatus::Success
+        );
+        assert!((rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 1.0).abs() < 1e-12);
+        // The workspace is now populated and reused, not a per-solve local.
+        // Length is n*nrhs with nrhs = 1.
+        assert_eq!(s.work.len(), n as usize);
+        let cap_after_first = s.work.capacity();
+
+        // Further solves reuse the factor (new_matrix = false) and the cached
+        // workspace. Each must be correct; capacity must not grow.
+        for &(b0, b1, x0, x1) in &[
+            (5.0, 10.0, 1.0, 3.0), // A * (1, 3)
+            (2.0, 3.0, 3.0 / 5.0, 4.0 / 5.0),
+            (-1.0, 4.0, -7.0 / 5.0, 9.0 / 5.0),
+        ] {
+            let mut r = [b0, b1];
+            assert_eq!(
+                s.multi_solve(false, &irn, &jcn, 1, &mut r, false, 0),
+                ESymSolverStatus::Success
+            );
+            assert!((r[0] - x0).abs() < 1e-10, "x0 = {}, want {}", r[0], x0);
+            assert!((r[1] - x1).abs() < 1e-10, "x1 = {}, want {}", r[1], x1);
+            assert_eq!(
+                s.work.capacity(),
+                cap_after_first,
+                "cached workspace must not reallocate on same-size solves"
+            );
+        }
+    }
 
     /// 2x2 SPD matrix
     /// ```text

@@ -18,8 +18,33 @@ pub fn is_finite_number(val: Number) -> bool {
 }
 
 /// Equivalent to `Ipopt::Compare_le(lhs, rhs, BasVal)` — relaxed `<=`
-/// with a tolerance proportional to `|BasVal|`. Threshold matches
-/// upstream's `(10 * machine_epsilon * Max(1, |BasVal|))`.
+/// with a tolerance proportional to `BasVal`:
+/// `lhs - rhs <= 10 * machine_epsilon * max(1, |BasVal|)`.
+///
+/// **Deliberate deviation from upstream.** Ipopt's `IpUtils.cpp` has no
+/// `Max(1, …)` floor — its tolerance shrinks to 0 as `BasVal → 0`. The
+/// floor was in this port from the initial commit and is load-bearing:
+/// `compare_le` backs the filter line-search acceptance tests
+/// (`filter_acceptor.rs` — Armijo with `BasVal = φ`, sufficient
+/// progress and filter dominance with `BasVal = θ` or `φ`), and near a
+/// solution θ and `φ_trial − φ` sit at summation-noise scale, which is
+/// set by the magnitude of the *barrier-sum terms*, not by `|φ|` or
+/// `|θ|` themselves. A strictly relative tolerance therefore undershoots
+/// the real round-off noise once `|BasVal| < 1`, rejecting trial points
+/// that genuinely reached the optimum; the line search then backtracks
+/// into fractional-step grinds and restoration excursions while the dual
+/// infeasibility refuses to close (the PALMER/VESUVIALS class documented
+/// on `FilterLsAcceptor::armijo_holds`).
+///
+/// Removing the floor for upstream bit-equivalence (review item L30)
+/// regressed the Mittelmann ampl-nlp set 41/47 → 33/47 — exactly
+/// upstream's score — with nine Optimal→timeout tail stalls
+/// (NARX_CFy, bearing_400, nql180, qssp180, five qcqp instances). The
+/// mechanism was confirmed differentially on synthesized QCQP/NARX
+/// proxies: with the floor restored the same boundary steps are
+/// accepted and the solves close crisply (e.g. 226 grinding iterations
+/// with a ~100-iteration restoration excursion → 141 clean ones). Keep
+/// the floor; it is the documented price of beating upstream here.
 #[inline]
 pub fn compare_le(lhs: Number, rhs: Number, bas_val: Number) -> bool {
     let tol = 10.0 * Number::EPSILON * bas_val.abs().max(1.0);
@@ -71,13 +96,33 @@ pub fn wallclock_time() -> Number {
 
 /// CPU time in seconds. Equivalent to `Ipopt::CpuTime`.
 ///
-/// std offers no portable CPU-time API, so we fall back to
-/// wallclock. The bit-equivalence trace strips the timing column
-/// before diffing per the plan, so this is acceptable; phase 4 will
-/// wire in a `libc::clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` path
-/// where it's needed by the iteration log.
+/// On Unix this returns the process's accumulated **user** CPU time via
+/// `getrusage(RUSAGE_SELF).ru_utime`, exactly matching upstream Ipopt's
+/// `CpuTime()` (`src/Common/IpUtils.cpp`). This is what `max_cpu_time`
+/// is meant to bound — a busy solve accrues CPU time at roughly the wall
+/// rate, but time spent blocked/sleeping does not count.
+///
+/// std exposes no portable CPU-time API, so non-Unix targets (Windows)
+/// fall back to wallclock. That mirrors upstream too: its Windows path
+/// uses `clock()`, which on the MSVC runtime measures elapsed real time
+/// rather than CPU time, so the two are already equivalent there.
 pub fn cpu_time() -> Number {
-    wallclock_time()
+    #[cfg(unix)]
+    {
+        // SAFETY: `getrusage` only writes into the provided `rusage` out-param
+        // and reads no global state; a zeroed `rusage` is a valid input.
+        let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0 {
+            return usage.ru_utime.tv_sec as Number + 1.0e-6 * usage.ru_utime.tv_usec as Number;
+        }
+        // getrusage failing is exceedingly rare (EFAULT/EINVAL only); degrade
+        // to wallclock rather than panicking in a timing helper.
+        wallclock_time()
+    }
+    #[cfg(not(unix))]
+    {
+        wallclock_time()
+    }
 }
 
 /// System time in seconds since UNIX epoch. Equivalent to
@@ -136,6 +181,34 @@ mod tests {
     }
 
     #[test]
+    fn compare_le_floors_tolerance_for_small_basval() {
+        // Deliberate deviation from upstream (see `compare_le`'s doc):
+        // the tolerance is `10*eps*max(1, |BasVal|)`, NOT upstream's
+        // `10*eps*|BasVal|`. The floor keeps a ~2.2e-15 absolute slack
+        // when the filter quantities (θ, φ) are < 1, which is the
+        // round-off regime near a solution — removing it (review item
+        // L30) regressed the Mittelmann ampl-nlp set 41/47 -> 33/47 with
+        // nine near-convergence tail-stall timeouts. This test pins the
+        // floor so a future "upstream faithfulness" pass cannot silently
+        // reintroduce that regression.
+        let bas_val = 1e-6;
+        let gap = 1e-18;
+        assert!(
+            compare_le(gap, 0.0, bas_val),
+            "gap {gap} is below the floored tolerance 10*eps*max(1, {bas_val}) \
+             and must be accepted; rejecting it reintroduces the Mittelmann \
+             tail stall"
+        );
+        // Above the floored tolerance the relaxed `<=` still rejects.
+        let big = 1e-13;
+        assert!(!compare_le(big, 0.0, bas_val));
+        // For |BasVal| >= 1 the floor is inert and the tolerance is
+        // upstream's relative one.
+        assert!(compare_le(5.0 * Number::EPSILON * 1e6, 0.0, 1e6));
+        assert!(!compare_le(3e-9, 0.0, 1e6)); // tol(1e6) = 10*eps*1e6 ~ 2.22e-9
+    }
+
+    #[test]
     fn random_01_in_range_and_deterministic() {
         ip_reset_random_01();
         let a: Vec<f64> = (0..16).map(|_| ip_random_01()).collect();
@@ -152,5 +225,46 @@ mod tests {
         let a = wallclock_time();
         let b = wallclock_time();
         assert!(b >= a);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpu_time_excludes_sleep_but_counts_compute() {
+        use std::hint::black_box;
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        // (1) Sleeping consumes no user CPU time, so `cpu_time()` must lag
+        // wallclock across a sleep — the defining property of `max_cpu_time`.
+        // Before the L5 fix `cpu_time()` was a `wallclock_time()` alias, so
+        // the two advanced in lockstep and the gap below was ~0.
+        let cpu0 = cpu_time();
+        let wall0 = wallclock_time();
+        sleep(Duration::from_millis(300));
+        let wall_slept = wallclock_time() - wall0;
+        let cpu_slept = cpu_time() - cpu0;
+        assert!(
+            wall_slept - cpu_slept > 0.1,
+            "cpu_time advanced {:.3}s across a {:.3}s sleep; it must measure \
+             CPU, not wallclock (wall−cpu gap was only {:.3}s)",
+            cpu_slept,
+            wall_slept,
+            wall_slept - cpu_slept
+        );
+
+        // (2) ...but a busy loop *does* accrue CPU time, confirming the clock
+        // is live (guards against a degenerate constant implementation).
+        let cpu1 = cpu_time();
+        let mut acc = 0u64;
+        for i in 0..50_000_000u64 {
+            acc = acc.wrapping_add(i ^ (i << 1));
+        }
+        black_box(acc);
+        let cpu_busy = cpu_time() - cpu1;
+        assert!(
+            cpu_busy > 0.0,
+            "cpu_time did not advance across a busy loop (got {:.6}s)",
+            cpu_busy
+        );
     }
 }

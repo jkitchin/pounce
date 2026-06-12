@@ -62,6 +62,25 @@ pub type Bool = c_int;
 const TRUE: Bool = 1;
 const FALSE: Bool = 0;
 
+/// Run an FFI entry-point body, converting any Rust panic into `fallback`
+/// rather than letting it unwind across the `extern "C"` boundary — which is
+/// undefined behavior and, in practice, a process abort that takes the
+/// embedding application down with it. Upstream Ipopt's C interface likewise
+/// wraps the solve in `try { … } catch(…)` and reports `Internal_Error`
+/// instead of propagating a C++ exception across the ABI.
+///
+/// Note: this guards panics that originate in *pounce's own* Rust code (the
+/// solver core, the callback bridge, numerical kernels). A panic inside a
+/// user-supplied `extern "C"` callback aborts at that callback's own ABI
+/// boundary, before unwinding can reach here — that is the caller's
+/// responsibility, exactly as in the C/C++ original.
+pub(crate) fn ffi_guard<R>(fallback: R, body: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(r) => r,
+        Err(_) => fallback,
+    }
+}
+
 /// C-ABI encoding of [`pounce_qp::BoundStatus`] (§7.2 of the
 /// active-set-SQP design note). Stable values:
 /// `0 = Inactive`, `1 = AtLower`, `2 = AtUpper`, `3 = Fixed`.
@@ -524,101 +543,116 @@ pub unsafe extern "C" fn IpoptSolve(
     if ipopt_problem.is_null() {
         return ApplicationReturnStatus::InternalError as Index;
     }
-    let info = &mut *ipopt_problem;
-    if info.n < 0 || info.m < 0 {
-        return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-    }
-    if info.n > 0 && x.is_null() {
-        return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-    }
+    // Invalidate the retained stats up front, before the solve is attempted.
+    // The `last_solve` snapshot is only repopulated at the *end* of a
+    // completed solve, so if the guarded body below bails early or a panic is
+    // caught (returning `Internal_Error`), the post-solve accessors
+    // (`GetIpoptIterCount`, `IpoptWriteSolveReport`, …) must not silently
+    // report the *previous* solve's stats. Clearing here makes the
+    // failure-consistent state "no data" rather than stale data (F5).
+    (*ipopt_problem).last_solve = None;
+    // Guard the whole solve: `optimize_tnlp` runs the entire pounce core and
+    // callback bridge, any of which could panic on an unexpected internal
+    // state. Without this, such a panic would unwind across `extern "C"` and
+    // abort the embedding process; instead we report `Internal_Error`,
+    // matching upstream Ipopt's exception handling. (See `ffi_guard`.)
+    ffi_guard(ApplicationReturnStatus::InternalError as Index, || unsafe {
+        let info = &mut *ipopt_problem;
+        if info.n < 0 || info.m < 0 {
+            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+        }
+        if info.n > 0 && x.is_null() {
+            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+        }
 
-    let n_us = info.n as usize;
-    let m_us = info.m as usize;
-    let initial_x = if n_us > 0 {
-        std::slice::from_raw_parts(x, n_us).to_vec()
-    } else {
-        Vec::new()
-    };
+        let n_us = info.n as usize;
+        let m_us = info.m as usize;
+        let initial_x = if n_us > 0 {
+            std::slice::from_raw_parts(x, n_us).to_vec()
+        } else {
+            Vec::new()
+        };
 
-    let bridge = Rc::new(RefCell::new(CCallbackTnlp {
-        n: info.n,
-        m: info.m,
-        nele_jac: info.nele_jac,
-        nele_hess: info.nele_hess,
-        index_style: info.index_style,
-        x_l: info.x_l.clone(),
-        x_u: info.x_u.clone(),
-        g_l: info.g_l.clone(),
-        g_u: info.g_u.clone(),
-        initial_x,
-        eval_f: info.eval_f,
-        eval_grad_f: info.eval_grad_f,
-        eval_g: info.eval_g,
-        eval_jac_g: info.eval_jac_g,
-        eval_h: info.eval_h,
-        user_data,
-        intermediate_cb: info.intermediate_cb,
-        user_scaling: info.user_scaling.clone(),
-        final_status: None,
-        final_x: vec![0.0; n_us],
-        final_z_l: vec![0.0; n_us],
-        final_z_u: vec![0.0; n_us],
-        final_g: vec![0.0; m_us],
-        final_lambda: vec![0.0; m_us],
-        final_obj: 0.0,
-    }));
+        let bridge = Rc::new(RefCell::new(CCallbackTnlp {
+            n: info.n,
+            m: info.m,
+            nele_jac: info.nele_jac,
+            nele_hess: info.nele_hess,
+            index_style: info.index_style,
+            x_l: info.x_l.clone(),
+            x_u: info.x_u.clone(),
+            g_l: info.g_l.clone(),
+            g_u: info.g_u.clone(),
+            initial_x,
+            eval_f: info.eval_f,
+            eval_grad_f: info.eval_grad_f,
+            eval_g: info.eval_g,
+            eval_jac_g: info.eval_jac_g,
+            eval_h: info.eval_h,
+            user_data,
+            intermediate_cb: info.intermediate_cb,
+            user_scaling: info.user_scaling.clone(),
+            final_status: None,
+            final_x: vec![0.0; n_us],
+            final_z_l: vec![0.0; n_us],
+            final_z_u: vec![0.0; n_us],
+            final_g: vec![0.0; m_us],
+            final_lambda: vec![0.0; m_us],
+            final_obj: 0.0,
+        }));
 
-    // Wire the restoration phase fresh for this solve. Without it, any
-    // line-search failure surfaces as `RestorationFailure` instead of
-    // falling back into the ℓ1-feasibility sub-IPM — exactly what the
-    // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
-    // repeated solves on the same `IpoptProblem`. The feral config is
-    // snapshot from the now-fully-populated options so `feral_*`
-    // overrides flow into the restoration sub-IPM too. Use the multi-pass
-    // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
-    // second inner solve (pounce#10 Phase 3 / pounce#24).
-    let feral_cfg = feral_config_from_options(info.app.options());
-    let bff_mint = move || -> InnerBackendFactoryFactory {
-        let feral_cfg = feral_cfg.clone();
-        Box::new(move || default_backend_factory(feral_cfg.clone()))
-    };
-    let resto_provider = make_default_restoration_factory_provider(
-        RestoAlgorithmBuilder::new(),
-        info.app.algorithm_builder_from_options(),
-        bff_mint,
-    );
-    info.app.set_restoration_factory_provider(resto_provider);
+        // Wire the restoration phase fresh for this solve. Without it, any
+        // line-search failure surfaces as `RestorationFailure` instead of
+        // falling back into the ℓ1-feasibility sub-IPM — exactly what the
+        // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
+        // repeated solves on the same `IpoptProblem`. The feral config is
+        // snapshot from the now-fully-populated options so `feral_*`
+        // overrides flow into the restoration sub-IPM too. Use the multi-pass
+        // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
+        // second inner solve (pounce#10 Phase 3 / pounce#24).
+        let feral_cfg = feral_config_from_options(info.app.options());
+        let bff_mint = move || -> InnerBackendFactoryFactory {
+            let feral_cfg = feral_cfg.clone();
+            Box::new(move || default_backend_factory(feral_cfg.clone()))
+        };
+        let resto_provider = make_default_restoration_factory_provider(
+            RestoAlgorithmBuilder::new(),
+            info.app.algorithm_builder_from_options(),
+            bff_mint,
+        );
+        info.app.set_restoration_factory_provider(resto_provider);
 
-    let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
-    let status = info.app.optimize_tnlp(bridge_for_solve);
-    let bridge_ref = bridge.borrow();
-    info.last_solve = Some(LastSolve {
-        stats: info.app.statistics(),
-        status,
-        linear_solver: info.app.linear_solver_summary(),
-        final_x: bridge_ref.final_x.clone(),
-        final_lambda: bridge_ref.final_lambda.clone(),
-        final_obj: bridge_ref.final_obj,
-    });
-    if !x.is_null() && n_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
-    }
-    if !g.is_null() && m_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
-    }
-    if !obj_val.is_null() {
-        *obj_val = bridge_ref.final_obj;
-    }
-    if !mult_g.is_null() && m_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
-    }
-    if !mult_x_L.is_null() && n_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
-    }
-    if !mult_x_U.is_null() && n_us > 0 {
-        std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
-    }
-    status as Index
+        let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+        let status = info.app.optimize_tnlp(bridge_for_solve);
+        let bridge_ref = bridge.borrow();
+        info.last_solve = Some(LastSolve {
+            stats: info.app.statistics(),
+            status,
+            linear_solver: info.app.linear_solver_summary(),
+            final_x: bridge_ref.final_x.clone(),
+            final_lambda: bridge_ref.final_lambda.clone(),
+            final_obj: bridge_ref.final_obj,
+        });
+        if !x.is_null() && n_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
+        }
+        if !g.is_null() && m_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
+        }
+        if !obj_val.is_null() {
+            *obj_val = bridge_ref.final_obj;
+        }
+        if !mult_g.is_null() && m_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
+        }
+        if !mult_x_L.is_null() && n_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
+        }
+        if !mult_x_U.is_null() && n_us > 0 {
+            std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
+        }
+        status as Index
+    })
 }
 
 /// Port of `SetIntermediateCallback`.
@@ -786,22 +820,32 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
         // (always non-negative at feasible iterates), so reverse the
         // sign and clamp.
         if !x_l_violation.is_null() && n_us > 0 {
-            let mut v = vec![0.0; n_us];
             let slack = cq.curr_slack_x_l();
             let z_l_full = nlp.pack_z_l_for_user(&*slack);
+            // Guard the scatter length exactly like the sibling branches
+            // below: an unexpected packed length would otherwise index
+            // `v[i]` out of bounds and panic across this `extern "C"`
+            // boundary (an abort, not a recoverable error).
+            if z_l_full.len() != n_us {
+                return false;
+            }
             // pack_z_l_for_user scatters by the same x_L mapping; the
             // returned vector at full-x positions holds `slack_x_l[i]`
             // which is `x_i - x_L_i`. Clamp the *negative* part to get
             // the violation `max(0, x_L_i - x_i)`.
+            let mut v = vec![0.0; n_us];
             for (i, s) in z_l_full.iter().enumerate() {
                 v[i] = (-s).max(0.0);
             }
             std::ptr::copy_nonoverlapping(v.as_ptr(), x_l_violation, n_us);
         }
         if !x_u_violation.is_null() && n_us > 0 {
-            let mut v = vec![0.0; n_us];
             let slack = cq.curr_slack_x_u();
             let s_full = nlp.pack_z_u_for_user(&*slack);
+            if s_full.len() != n_us {
+                return false;
+            }
+            let mut v = vec![0.0; n_us];
             for (i, s) in s_full.iter().enumerate() {
                 v[i] = (-s).max(0.0);
             }
@@ -1180,25 +1224,30 @@ pub unsafe extern "C" fn IpoptSolveWarmStart(
     if ipopt_problem.is_null() {
         return ApplicationReturnStatus::InternalError as Index;
     }
-    // Best-effort set. Errors here (e.g. bad status code) are
-    // silently treated as cold-start; the caller can probe via
-    // `IpoptSetWarmStartWorkingSet` directly if they need to
-    // validate the input.
-    if !bound_status_in.is_null() || !cons_status_in.is_null() {
-        let _ = IpoptSetWarmStartWorkingSet(ipopt_problem, bound_status_in, cons_status_in);
-    }
-    let status = IpoptSolve(
-        ipopt_problem,
-        x,
-        g,
-        obj_val,
-        mult_g,
-        mult_x_L,
-        mult_x_U,
-        user_data,
-    );
-    let _ = IpoptGetWorkingSet(ipopt_problem, bound_status_out, cons_status_out);
-    status
+    // Guard the working-set set/get helpers too. The inner `IpoptSolve` is
+    // independently guarded, but a panic in the warm-start working-set
+    // marshalling would otherwise still abort across `extern "C"`.
+    ffi_guard(ApplicationReturnStatus::InternalError as Index, || unsafe {
+        // Best-effort set. Errors here (e.g. bad status code) are
+        // silently treated as cold-start; the caller can probe via
+        // `IpoptSetWarmStartWorkingSet` directly if they need to
+        // validate the input.
+        if !bound_status_in.is_null() || !cons_status_in.is_null() {
+            let _ = IpoptSetWarmStartWorkingSet(ipopt_problem, bound_status_in, cons_status_in);
+        }
+        let status = IpoptSolve(
+            ipopt_problem,
+            x,
+            g,
+            obj_val,
+            mult_g,
+            mult_x_L,
+            mult_x_U,
+            user_data,
+        );
+        let _ = IpoptGetWorkingSet(ipopt_problem, bound_status_out, cons_status_out);
+        status
+    })
 }
 
 /// Adapter that bridges the user-supplied C callback table to the
@@ -1559,53 +1608,59 @@ pub unsafe extern "C" fn IpoptWriteSolveReport(
         status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
     };
 
-    if ipopt_problem.is_null() || path.is_null() {
-        return FALSE;
-    }
-    let info = unsafe { &*ipopt_problem };
-    let Some(last) = info.last_solve.as_ref() else {
-        return FALSE;
-    };
-
-    let Ok(path_str) = (unsafe { CStr::from_ptr(path) }).to_str() else {
-        return FALSE;
-    };
-
-    let detail_choice = if detail.is_null() {
-        ReportDetail::Summary
-    } else {
-        let Ok(detail_str) = (unsafe { CStr::from_ptr(detail) }).to_str() else {
+    // Guard the report build/write: it clones the retained iterate and runs
+    // the `pounce-solve-report` serializer + file I/O, any of which could
+    // panic on an unexpected state. A panic unwinding across `extern "C"`
+    // aborts the embedding process; report `FALSE` instead. (See `ffi_guard`.)
+    ffi_guard(FALSE, || unsafe {
+        if ipopt_problem.is_null() || path.is_null() {
+            return FALSE;
+        }
+        let info = &*ipopt_problem;
+        let Some(last) = info.last_solve.as_ref() else {
             return FALSE;
         };
-        match ReportDetail::parse(detail_str) {
-            Ok(d) => d,
-            Err(_) => return FALSE,
+
+        let Ok(path_str) = CStr::from_ptr(path).to_str() else {
+            return FALSE;
+        };
+
+        let detail_choice = if detail.is_null() {
+            ReportDetail::Summary
+        } else {
+            let Ok(detail_str) = CStr::from_ptr(detail).to_str() else {
+                return FALSE;
+            };
+            match ReportDetail::parse(detail_str) {
+                Ok(d) => d,
+                Err(_) => return FALSE,
+            }
+        };
+
+        let mut builder = ReportBuilder::new(detail_choice, InputDescriptor::TnlpDirect);
+        builder.problem.n_variables = info.n;
+        builder.problem.n_constraints = info.m;
+        builder.problem.n_objectives = 1;
+        builder.problem.nnz_jac_g = Some(info.nele_jac);
+        builder.problem.nnz_h_lag = Some(info.nele_hess);
+
+        builder.solution.status = last.status;
+        builder.solution.solve_result_num = status_to_solve_result_num(last.status);
+        builder.solution.objective = last.final_obj;
+        builder.solution.x = last.final_x.clone();
+        builder.solution.lambda = last.final_lambda.clone();
+
+        builder.ingest_stats(&last.stats);
+        if let Some(linsol) = last.linear_solver.clone() {
+            builder.set_linear_solver_summary(linsol);
         }
-    };
 
-    let mut builder = ReportBuilder::new(detail_choice, InputDescriptor::TnlpDirect);
-    builder.problem.n_variables = info.n;
-    builder.problem.n_constraints = info.m;
-    builder.problem.n_objectives = 1;
-    builder.problem.nnz_jac_g = Some(info.nele_jac);
-    builder.problem.nnz_h_lag = Some(info.nele_hess);
-
-    builder.solution.status = last.status;
-    builder.solution.solve_result_num = status_to_solve_result_num(last.status);
-    builder.solution.objective = last.final_obj;
-    builder.solution.x = last.final_x.clone();
-    builder.solution.lambda = last.final_lambda.clone();
-
-    builder.ingest_stats(&last.stats);
-    if let Some(linsol) = last.linear_solver.clone() {
-        builder.set_linear_solver_summary(linsol);
-    }
-
-    let report = builder.finish();
-    match write_report_file(std::path::Path::new(path_str), &report) {
-        Ok(_) => TRUE,
-        Err(_) => FALSE,
-    }
+        let report = builder.finish();
+        match write_report_file(std::path::Path::new(path_str), &report) {
+            Ok(_) => TRUE,
+            Err(_) => FALSE,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1925,6 +1980,104 @@ mod tests {
         assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
         assert!((x[0] - 2.0).abs() < 1e-6, "x[0] = {}", x[0]);
         assert!(obj.abs() < 1e-10, "obj = {}", obj);
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    /// F5: `IpoptSolve` invalidates the retained `last_solve` stats **up
+    /// front**, so a solve that bails — or whose pounce-internal panic
+    /// `ffi_guard` catches (returning `Internal_Error`) — does not leave the
+    /// post-solve accessors (`GetIpoptIterCount`, `IpoptWriteSolveReport`, …)
+    /// silently reporting the *previous* solve's stats.
+    ///
+    /// A caught panic can't be injected deterministically through the public
+    /// C ABI (a panic in a user `extern "C"` callback aborts at its own
+    /// boundary; see `ffi_guard`). We drive the equivalent control-flow shape:
+    /// after a successful solve we corrupt `n` to a negative value so the next
+    /// `IpoptSolve` returns `InvalidProblemDefinition` from inside the guarded
+    /// body **without** reaching the trailing `last_solve = Some(..)` write —
+    /// exactly where a caught panic also bails. The up-front clear makes the
+    /// accessor report "no data" (0) in both cases rather than stale data.
+    #[test]
+    fn stale_stats_cleared_when_resolve_bails() {
+        let xl = [-1.0e20];
+        let xu = [1.0e20];
+        let p = unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                1,
+                0,
+                Some(quad_eval_f),
+                None,
+                Some(quad_eval_grad_f),
+                None,
+                Some(quad_eval_h),
+            )
+        };
+        assert!(!p.is_null());
+
+        let mut x = [0.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        // The successful solve recorded real stats.
+        let iters_after_success = unsafe { GetIpoptIterCount(p) };
+        assert!(
+            iters_after_success >= 1,
+            "a converged solve should record >=1 iteration, got {iters_after_success}"
+        );
+        assert!(unsafe { (*p).last_solve.is_some() });
+
+        // Corrupt the problem so the next solve bails early in the guarded body
+        // (the same place a caught panic would land) without recording stats.
+        unsafe { (*p).n = -1 };
+        let mut x2 = [0.0_f64];
+        let rc2 = unsafe {
+            IpoptSolve(
+                p,
+                x2.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            rc2,
+            ApplicationReturnStatus::InvalidProblemDefinition as Index
+        );
+
+        // Post-fix: the up-front invalidation cleared the retained stats, so
+        // the accessor reports "no data" (0), not the previous iteration count.
+        // Pre-fix this returned `iters_after_success` (stale).
+        assert!(
+            unsafe { (*p).last_solve.is_none() },
+            "a bailed re-solve must clear stale last_solve (F5)"
+        );
+        assert_eq!(
+            unsafe { GetIpoptIterCount(p) },
+            0,
+            "stale iteration count must not survive a bailed re-solve (F5)"
+        );
+
         unsafe { FreeIpoptProblem(p) };
     }
 
@@ -2387,6 +2540,157 @@ mod tests {
         unsafe { FreeIpoptProblem(p) };
     }
 
+    static CB_VIOL_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    // Bounded variant of `create_callback_test_problem`: x in [0, 10] with a
+    // finite lower bound, so the `x_l_violation` / `x_u_violation` branches of
+    // GetIpoptCurrentViolations actually scatter a real `x_L`/`x_U` mapping
+    // (not the degenerate "no bound" pack).
+    fn create_bounded_callback_test_problem() -> IpoptProblem {
+        // min (x - 2)^2  s.t.  -10 <= x <= 10,  x in [0, 10].
+        let xl = [0.0];
+        let xu = [10.0];
+        let gl = [-10.0];
+        let gu = [10.0];
+        unsafe {
+            CreateIpoptProblem(
+                1,
+                xl.as_ptr(),
+                xu.as_ptr(),
+                1,
+                gl.as_ptr(),
+                gu.as_ptr(),
+                1,
+                1,
+                0,
+                Some(quad_eval_f),
+                Some(cb_quad_eval_g),
+                Some(quad_eval_grad_f),
+                Some(cb_quad_eval_jac_g),
+                Some(cb_quad_eval_h),
+            )
+        }
+    }
+
+    unsafe extern "C" fn violations_inspecting_cb(
+        _alg_mod: Index,
+        _iter_count: Index,
+        _obj_value: Number,
+        _inf_pr: Number,
+        _inf_du: Number,
+        _mu: Number,
+        _d_norm: Number,
+        _regularization_size: Number,
+        _alpha_du: Number,
+        _alpha_pr: Number,
+        _ls_trials: Index,
+        user_data: *mut c_void,
+    ) -> Bool {
+        let problem = user_data as IpoptProblem;
+        // Exercise the bound-violation branches (n=1, m=1) from inside an
+        // installed intermediate context. Pre-L51 these branches indexed
+        // `v[i]` without a length guard; the fix makes them return FALSE on
+        // a packed-length mismatch instead of panicking across `extern "C"`.
+        let mut x_l_viol = [f64::NAN];
+        let mut x_u_viol = [f64::NAN];
+        let rc = GetIpoptCurrentViolations(
+            problem,
+            FALSE,
+            1,
+            x_l_viol.as_mut_ptr(),
+            x_u_viol.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        if rc == TRUE
+            && x_l_viol[0].is_finite()
+            && x_l_viol[0] >= 0.0
+            && x_u_viol[0].is_finite()
+            && x_u_viol[0] >= 0.0
+        {
+            CB_VIOL_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        TRUE
+    }
+
+    #[test]
+    fn get_current_violations_inside_callback_reports_finite_bounds() {
+        CB_VIOL_OK.store(false, std::sync::atomic::Ordering::SeqCst);
+        let p = create_bounded_callback_test_problem();
+        assert!(!p.is_null());
+        let ok = unsafe { SetIntermediateCallback(p, Some(violations_inspecting_cb)) };
+        assert_eq!(ok, TRUE);
+        let mut x = [5.0_f64];
+        let mut obj = 0.0_f64;
+        let rc = unsafe {
+            IpoptSolve(
+                p,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                &mut obj,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                p as *mut c_void,
+            )
+        };
+        assert_eq!(rc, ApplicationReturnStatus::SolveSucceeded as Index);
+        assert!(
+            CB_VIOL_OK.load(std::sync::atomic::Ordering::SeqCst),
+            "GetIpoptCurrentViolations did not return finite, non-negative \
+             bound violations from inside the callback"
+        );
+        unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn bound_violation_scatter_rejects_oversized_pack_instead_of_panicking() {
+        // L51 fail-first (logic level): reproduce the scatter of the
+        // `x_l_violation` / `x_u_violation` branches. The packed vector comes
+        // from `pack_z_*_for_user`, whose length must equal the output `n`.
+        // Pre-fix the branches scattered it with `for (i, s) in
+        // packed.enumerate() { v[i] = ... }` over a `vec![0.0; n]` *without*
+        // checking the length; an oversized pack indexes `v[i]` out of bounds
+        // and panics — and across the real `extern "C"` boundary that panic
+        // aborts the embedding process. The fix adds the same length guard
+        // the sibling (`compl_*`, `grad_lag_x`) branches already had.
+        let n_us = 1usize;
+        let packed = vec![0.5_f64, -0.3]; // len 2 != n_us == 1
+
+        // Pre-fix: the unguarded scatter panics on the oversized pack.
+        let unguarded = std::panic::catch_unwind(|| {
+            let mut v = vec![0.0; n_us];
+            for (i, s) in packed.iter().enumerate() {
+                v[i] = (-s).max(0.0);
+            }
+            v
+        });
+        assert!(
+            unguarded.is_err(),
+            "unguarded scatter should panic (→ abort across extern \"C\") on an oversized pack"
+        );
+
+        // Post-fix: the length guard returns an error instead of panicking.
+        let guarded: Result<Vec<f64>, ()> = (|| {
+            if packed.len() != n_us {
+                return Err(());
+            }
+            let mut v = vec![0.0; n_us];
+            for (i, s) in packed.iter().enumerate() {
+                v[i] = (-s).max(0.0);
+            }
+            Ok(v)
+        })();
+        assert!(
+            guarded.is_err(),
+            "guarded scatter should reject the length mismatch (return FALSE), not panic"
+        );
+    }
+
     unsafe extern "C" fn user_stop_cb(
         _alg_mod: Index,
         _iter_count: Index,
@@ -2425,6 +2729,31 @@ mod tests {
         };
         assert_eq!(rc, ApplicationReturnStatus::UserRequestedStop as Index);
         unsafe { FreeIpoptProblem(p) };
+    }
+
+    #[test]
+    fn ffi_guard_converts_panic_to_fallback() {
+        // L56: a panic in pounce's own Rust code during a solve must be
+        // caught at the FFI boundary and reported as `Internal_Error`, never
+        // unwound across `extern "C"` (which aborts the embedding process).
+        // This exercises the exact mechanism wrapping IpoptSolve /
+        // IpoptSolveWarmStart. (The "boom" panic message printing to stderr
+        // is expected — the default panic hook still runs before the catch.)
+        let fallback = ApplicationReturnStatus::InternalError as Index;
+        let got = ffi_guard(fallback, || -> Index {
+            panic!("boom inside solver core");
+        });
+        assert_eq!(got, fallback);
+        assert_eq!(got, ApplicationReturnStatus::InternalError as Index);
+    }
+
+    #[test]
+    fn ffi_guard_is_transparent_on_success() {
+        // On the happy path the guard returns the body's value unchanged, so
+        // wrapping IpoptSolve does not alter normal solves (the end-to-end
+        // solve tests above confirm this at the public-API level).
+        let got = ffi_guard(-99, || 7);
+        assert_eq!(got, 7);
     }
 
     #[test]

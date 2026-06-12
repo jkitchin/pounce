@@ -224,6 +224,18 @@ pub trait TNLP {
         false
     }
 
+    /// Per-variable linearity with respect to the **objective only** (a
+    /// pounce extension; upstream has no objective-scoped query).
+    /// `NonLinear` iff the objective's nonlinear part depends on the
+    /// variable; a variable that enters the objective only linearly (or
+    /// not at all) is `Linear` even when it is nonlinear in a
+    /// constraint. Consumed by presolve's Phase-0 objective-coupling
+    /// guard, which must not mistake constraint-only nonlinearity for
+    /// objective coupling. Default: declines (slice untouched).
+    fn get_objective_variables_linearity(&mut self, _types: &mut [Linearity]) -> bool {
+        false
+    }
+
     /// Constraint linearity tags. Used by adaptive-mu's
     /// `nlp_scaling_method=equilibration-based`.
     fn get_constraints_linearity(&mut self, _types: &mut [Linearity]) -> bool {

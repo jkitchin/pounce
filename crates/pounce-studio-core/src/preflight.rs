@@ -277,17 +277,6 @@ fn nl_suggestions(h: &NlHeader) -> Vec<Suggestion> {
     let n_eq = h.n_equalities.unwrap_or(0);
     let size = n_var + n_con;
 
-    if size > 5_000 {
-        out.push(Suggestion {
-            option: "linear_solver".into(),
-            value: "ma57".into(),
-            why: format!(
-                "problem is medium/large ({n_var} vars, {n_con} cons); MA57 is much \
-                 faster than FERAL at this scale. Requires the build to have been \
-                 compiled with `--features ma57`.",
-            ),
-        });
-    }
     if size > 1_000 && nlc == 0 && nlo == 0 {
         out.push(Suggestion {
             option: "mu_strategy".into(),
@@ -544,11 +533,8 @@ fn classify_gms(model_type: Option<&str>, dims: &GmsHeader) -> String {
 
 fn suggest_gms(dims: &GmsHeader, model_type: Option<&str>) -> Vec<Suggestion> {
     let mut out = Vec::new();
-    let n_var = dims.n_variables_total.unwrap_or(0);
-    let n_eq = dims.n_equations_total.unwrap_or(0);
     let nnl = dims.nnz_nonlinear.unwrap_or(0);
     let nnz_total = dims.nnz_total.unwrap_or(1);
-    let size = n_var + n_eq;
 
     if let Some(mt @ ("MINLP" | "MIP")) = model_type {
         out.push(Suggestion {
@@ -569,16 +555,6 @@ fn suggest_gms(dims: &GmsHeader, model_type: Option<&str>) -> Vec<Suggestion> {
               default is `monotone`, which stalls some hard NLPs."
             .into(),
     });
-    if size > 5_000 {
-        out.push(Suggestion {
-            option: "linear_solver".into(),
-            value: "ma57".into(),
-            why: format!(
-                "problem is medium/large ({n_var} vars, {n_eq} eqs); MA57 is much faster \
-                 than FERAL at this scale. Requires --features ma57 build.",
-            ),
-        });
-    }
     if nnl > 0 && (nnl as f64) > 0.5 * (nnz_total as f64) {
         out.push(Suggestion {
             option: "tol".into(),

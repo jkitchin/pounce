@@ -348,7 +348,22 @@ impl HessianProgram {
     /// Build the program. The `hess_map` is the same `(row, col)
     /// -> values-index` map that [`Tape::hessian_accumulate`] uses;
     /// the compiler inlines each lookup into a `HessEmit` op.
-    pub fn compile(tape: &Tape, hess_map: &HashMap<(usize, usize), usize>) -> Self {
+    ///
+    /// Returns `None` when `tape` contains an opcode the program path
+    /// cannot lower (see [`program_supports_op`]). A caller must fall
+    /// back to the `Tape` (`build_with_externals`) interpreter path for
+    /// those tapes — this is a *graceful* signal, not a panic, so a
+    /// problem built from arbitrary user `.nl` input can never crash the
+    /// process here (code review L28).
+    pub fn compile(tape: &Tape, hess_map: &HashMap<(usize, usize), usize>) -> Option<Self> {
+        // Gate up front: every downstream sweep (forward / tangent /
+        // reverse) and the dependence/reachability analyses only handle the
+        // supported opcode set. Reject unsupported tapes here so none of
+        // those match arms is ever reached with an opcode it can't lower.
+        if !tape.ops.iter().all(program_supports_op) {
+            return None;
+        }
+
         let n = tape.ops.len() as u32;
         let v_base = 0u32;
         let dot_base = n;
@@ -453,7 +468,7 @@ impl HessianProgram {
                     dst,
                     a: v_slot(a as u32),
                 },
-                TapeOp::Funcall(_) => panic!(
+                TapeOp::Funcall(_) => unreachable!(
                     "HessianProgram path does not support AMPL external functions; \
                      use the Tape (build_with_externals) path instead."
                 ),
@@ -474,7 +489,7 @@ impl HessianProgram {
                 | TapeOp::Not(_)
                 | TapeOp::Select(_, _, _)
                 | TapeOp::Min(_, _)
-                | TapeOp::Max(_, _) => panic!(
+                | TapeOp::Max(_, _) => unreachable!(
                     "HessianProgram path does not yet support tan/atan/acos, the \
                      other transcendental opcodes, atan2, min/max, or \
                      conditional / logical opcodes; use the Tape \
@@ -485,11 +500,11 @@ impl HessianProgram {
         }
 
         if n == 0 || var_indices.is_empty() {
-            return HessianProgram {
+            return Some(HessianProgram {
                 ops,
                 consts,
                 n_slots,
-            };
+            });
         }
 
         // ---- Per-j forward-tangent + reverse-over-tangent ----
@@ -591,7 +606,7 @@ impl HessianProgram {
                         dot_a: dot_slot(a as u32),
                         va: v_slot(a as u32),
                     },
-                    TapeOp::Funcall(_) => panic!(
+                    TapeOp::Funcall(_) => unreachable!(
                         "HessianProgram path does not support AMPL external functions; \
                          use the Tape (build_with_externals) path instead."
                     ),
@@ -612,7 +627,7 @@ impl HessianProgram {
                     | TapeOp::Not(_)
                     | TapeOp::Select(_, _, _)
                     | TapeOp::Min(_, _)
-                    | TapeOp::Max(_, _) => panic!(
+                    | TapeOp::Max(_, _) => unreachable!(
                         "HessianProgram path does not yet support tan/atan/acos, the \
                          other transcendental opcodes, atan2, min/max, or \
                          conditional / logical opcodes; use the Tape \
@@ -763,7 +778,7 @@ impl HessianProgram {
                         va: v_slot(a as u32),
                         dot_a: dot_slot(a as u32),
                     },
-                    TapeOp::Funcall(_) => panic!(
+                    TapeOp::Funcall(_) => unreachable!(
                         "HessianProgram path does not support AMPL external functions; \
                          use the Tape (build_with_externals) path instead."
                     ),
@@ -784,7 +799,7 @@ impl HessianProgram {
                     | TapeOp::Not(_)
                     | TapeOp::Select(_, _, _)
                     | TapeOp::Min(_, _)
-                    | TapeOp::Max(_, _) => panic!(
+                    | TapeOp::Max(_, _) => unreachable!(
                         "HessianProgram path does not yet support tan/atan/acos, the \
                          other transcendental opcodes, atan2, min/max, or \
                          conditional / logical opcodes; use the Tape \
@@ -795,11 +810,11 @@ impl HessianProgram {
             }
         }
 
-        HessianProgram {
+        Some(HessianProgram {
             ops,
             consts,
             n_slots,
-        }
+        })
     }
 
     pub fn n_slots(&self) -> usize {
@@ -1227,6 +1242,38 @@ impl HessianProgram {
     }
 }
 
+/// Whether [`HessianProgram::compile`] can lower a single opcode. The
+/// program path covers smooth arithmetic plus `sin`/`cos`; every other
+/// opcode — AMPL external `Funcall`, the remaining transcendentals
+/// (`tan`/`atan`/`acos`/the hyperbolics/`asin`…) and `atan2`, and the
+/// `min`/`max`/conditional/logical family — is unsupported, so `compile`
+/// returns `None` and the caller falls back to the `Tape`
+/// (`build_with_externals`) interpreter path rather than panicking on user
+/// input (code review L28). This is the single source of truth for the
+/// supported set: the per-sweep match arms and the dependence/reachability
+/// analyses are only ever reached with opcodes this predicate accepts, so
+/// their unsupported branches are `unreachable!`.
+fn program_supports_op(op: &TapeOp) -> bool {
+    matches!(
+        op,
+        TapeOp::Const(_)
+            | TapeOp::Var(_)
+            | TapeOp::Add(_, _)
+            | TapeOp::Sub(_, _)
+            | TapeOp::Mul(_, _)
+            | TapeOp::Div(_, _)
+            | TapeOp::Pow(_, _)
+            | TapeOp::Neg(_)
+            | TapeOp::Abs(_)
+            | TapeOp::Sqrt(_)
+            | TapeOp::Exp(_)
+            | TapeOp::Log(_)
+            | TapeOp::Log10(_)
+            | TapeOp::Sin(_)
+            | TapeOp::Cos(_)
+    )
+}
+
 /// `out[i]` = does tape slot `i` contribute (transitively) to the
 /// output slot `n-1`. Used to skip emitting reverse-pass ops for
 /// dead slots.
@@ -1272,7 +1319,7 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Atanh(a) => {
                 r[a] = true;
             }
-            TapeOp::Funcall(_) => panic!(
+            TapeOp::Funcall(_) => unreachable!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."
             ),
@@ -1282,7 +1329,7 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Not(_)
             | TapeOp::Select(_, _, _)
             | TapeOp::Min(_, _)
-            | TapeOp::Max(_, _) => panic!(
+            | TapeOp::Max(_, _) => unreachable!(
                 "HessianProgram path does not support conditional / logical / min-max \
                  opcodes; use the Tape (build_with_externals) path instead."
             ),
@@ -1326,7 +1373,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
             | TapeOp::Atanh(a) => d[a],
-            TapeOp::Funcall(_) => panic!(
+            TapeOp::Funcall(_) => unreachable!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."
             ),
@@ -1336,7 +1383,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Not(_)
             | TapeOp::Select(_, _, _)
             | TapeOp::Min(_, _)
-            | TapeOp::Max(_, _) => panic!(
+            | TapeOp::Max(_, _) => unreachable!(
                 "HessianProgram path does not support conditional / logical / min-max \
                  opcodes; use the Tape (build_with_externals) path instead."
             ),
@@ -1405,7 +1452,8 @@ mod tests {
         let mut tape_vals = vec![0.0; nnz];
         tape.hessian_accumulate(x, weight, &hess_map, &mut tape_vals);
 
-        let program = HessianProgram::compile(tape, &hess_map);
+        let program =
+            HessianProgram::compile(tape, &hess_map).expect("tape uses only supported opcodes");
         let mut scratch = vec![0.0; program.n_slots()];
         let mut prog_vals = vec![0.0; nnz];
         program.execute(x, weight, &mut scratch, &mut prog_vals);
@@ -1507,7 +1555,7 @@ mod tests {
         let e = mul(var(0), var(1));
         let tape = Tape::build(&e);
         let (hess_map, _) = build_hess_map(&tape);
-        let prog = HessianProgram::compile(&tape, &hess_map);
+        let prog = HessianProgram::compile(&tape, &hess_map).expect("mul tape is supported");
         assert_eq!(prog.n_slots(), 4 * tape.ops.len());
     }
 
@@ -1523,5 +1571,34 @@ mod tests {
         assert!(s.contains(&(0, 0)));
         assert!(s.contains(&(2, 1)));
         assert_program_matches_tape(&tape, &[0.7, 1.1, 2.2], 1.0);
+    }
+
+    /// Code review L28: a tape using an opcode the program path cannot
+    /// lower (here `tan`) must make `compile` return `None` — a graceful
+    /// fall-back-to-the-`Tape`-path signal — rather than panic. Previously
+    /// the per-sweep match arms `panic!`'d on such ops, which would crash
+    /// the process on arbitrary user `.nl` input if this path were ever
+    /// wired into dispatch.
+    #[test]
+    fn unsupported_opcode_returns_none_instead_of_panicking() {
+        // `tan(x0)` lowers to `TapeOp::Tan`, which the HessianProgram
+        // compiler does not support.
+        let e = unary(UnaryOp::Tan, var(0));
+        let tape = Tape::build(&e);
+        let (hess_map, _) = build_hess_map(&tape);
+        assert!(
+            HessianProgram::compile(&tape, &hess_map).is_none(),
+            "tan() tape must fall back (None), not compile"
+        );
+
+        // A fully-supported tape still compiles to `Some`, so the guard
+        // rejects only genuinely-unsupported ops.
+        let ok = mul(var(0), var(1));
+        let ok_tape = Tape::build(&ok);
+        let (ok_map, _) = build_hess_map(&ok_tape);
+        assert!(
+            HessianProgram::compile(&ok_tape, &ok_map).is_some(),
+            "a supported (mul) tape must still compile"
+        );
     }
 }

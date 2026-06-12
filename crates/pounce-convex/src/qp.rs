@@ -170,6 +170,19 @@ impl QpProblem {
 pub enum QpStatus {
     /// Converged: KKT residuals and duality gap below tolerance.
     Optimal,
+    /// Solved to *reduced* accuracy: the KKT factorization or a back-solve
+    /// broke down (or the iteration cap / a stalled step was hit) while the
+    /// best KKT residual reached was already small — within `~1e3·tol` for the
+    /// symmetric HSDE driver, `√tol` for the non-symmetric one — but never as
+    /// tight as the clean `tol` convergence test. The returned iterate is
+    /// usable but its residual sits above `tol`. This is the analogue of
+    /// ECOS/Clarabel's `*_INACC` ("solved to inaccurate") and Ipopt's
+    /// "Solved To Acceptable Level": callers that need full accuracy (e.g.
+    /// sensitivity, SOS exactness certification) should treat it as *not*
+    /// [`Optimal`](Self::Optimal). Previously these cases were reported as a
+    /// bare `Optimal`, indistinguishable from a genuinely-converged solve.
+    /// (Code review 2026-06 item M20.)
+    OptimalInaccurate,
     /// Primal infeasible: no `x` satisfies `Ax = b, Gx ≤ h`. A Farkas
     /// certificate `(y, z ≥ 0)` with `Aᵀy + Gᵀz ≈ 0` and `bᵀy + hᵀz < 0`
     /// was detected and verified.
@@ -181,6 +194,22 @@ pub enum QpStatus {
     IterationLimit,
     /// The KKT factorization failed (e.g. structurally singular system).
     NumericalFailure,
+}
+
+/// Terminal status for a mid-iteration breakdown (factorization / back-solve
+/// failure, or a non-positive step). When the best KKT residual reached so far
+/// is already within the reduced-accuracy band (`near_opt`), the iterate is
+/// usable and we report [`QpStatus::OptimalInaccurate`] rather than discarding
+/// it as a [`QpStatus::NumericalFailure`]. Centralized so the symmetric and
+/// non-symmetric HSDE drivers cannot drift apart, and so the "a near-`tol`
+/// breakdown is *not* a bare `Optimal`" rule is unit-testable. (Code review
+/// 2026-06 item M20.)
+pub(crate) fn breakdown_status(near_opt: bool) -> QpStatus {
+    if near_opt {
+        QpStatus::OptimalInaccurate
+    } else {
+        QpStatus::NumericalFailure
+    }
 }
 
 /// Result of an IPM solve: the primal/dual solution and status.
@@ -216,13 +245,27 @@ pub struct QpSolution {
 pub struct QpIterate {
     /// Iteration index (0-based).
     pub iter: usize,
-    /// Objective `½ xᵀP x + cᵀx` at the start of this iteration.
+    /// Objective `½ xᵀP x + cᵀx` at the start of this iteration, in the
+    /// **original problem's coordinates** — consistent with
+    /// [`QpSolution::obj`]. When the solve was Ruiz-equilibrated (the default
+    /// direct path), the inner iteration records the scaled objective and the
+    /// unscaling pass divides it by the cost-scaling factor σ to recover this
+    /// value (see [`crate::equilibrate::Scaling::unscale_solution`]).
     pub objective: f64,
     /// Primal infeasibility `max(‖Ax − b‖∞, ‖(Gx + s − h)‖∞)`.
+    ///
+    /// On an equilibrated solve this (and the two fields below) is reported in
+    /// the solver's **internal scaled coordinates**, not the original problem's:
+    /// an ∞-norm of a per-row/per-column diagonally-scaled residual has no exact
+    /// scalar inverse, so unlike [`Self::objective`] it cannot be mapped back
+    /// exactly. It is a monotone convergence indicator that vanishes at the
+    /// optimum in either coordinate system.
     pub primal_infeasibility: f64,
-    /// Dual infeasibility `‖Px + c + Aᵀy + Gᵀz‖∞`.
+    /// Dual infeasibility `‖Px + c + Aᵀy + Gᵀz‖∞` (scaled coordinates on an
+    /// equilibrated solve; see [`Self::primal_infeasibility`]).
     pub dual_infeasibility: f64,
-    /// Duality measure `μ = ⟨s, z⟩ / degree`.
+    /// Duality measure `μ = ⟨s, z⟩ / degree` (scaled coordinates on an
+    /// equilibrated solve; see [`Self::primal_infeasibility`]).
     pub mu: f64,
     /// Primal step length taken this iteration.
     pub alpha_primal: f64,
@@ -416,6 +459,57 @@ mod residual_tests {
         assert_eq!(term.alpha_dual, 0.0, "converged record takes no step");
     }
 
+    /// Code review L38: on a Ruiz-equilibrated solve the per-iteration trace was
+    /// recorded in scaled coordinates while the returned solution was unscaled,
+    /// so the trace's objective disagreed with `sol.obj`. The unscaling pass now
+    /// maps the per-iterate objective back (÷σ), so the converged trace point
+    /// reports the same objective as the solution.
+    ///
+    /// A pure LP triggers the cost scaling σ = 1/max|ĉ| ≠ 1 (a QP keeps σ = 1,
+    /// so the discrepancy is invisible there). With a large linear term the
+    /// scaled objective is off by ~σ, which this test would catch.
+    #[test]
+    fn equilibrated_trace_objective_is_in_original_coordinates() {
+        // min 1000·x0 + 500·x1  s.t.  x0 + x1 ≥ 2,  0 ≤ x ≤ 10.
+        // Pure LP (empty P) ⇒ σ ≠ 1. Optimum loads the cheaper variable:
+        // x = (0, 2), obj = 1000.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1000.0, 500.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0), Triplet::new(0, 1, -1.0)],
+            h: vec![-2.0],
+            lb: vec![0.0, 0.0],
+            ub: vec![10.0, 10.0],
+        };
+        // Direct equilibrated path (use_hsde = false ⇒ Ruiz is applied), with
+        // the trace turned on.
+        let opts = QpOptions {
+            use_hsde: false,
+            equilibrate: true,
+            collect_iterates: true,
+            ..QpOptions::default()
+        };
+        let sol = solve_qp_ipm(&prob, &opts, backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((sol.obj - 1000.0).abs() < 1e-3, "obj {} ≠ 1000", sol.obj);
+        assert!(!sol.iterates.is_empty(), "trace should be populated");
+
+        // The converged (final) trace point's objective must agree with the
+        // unscaled solution objective — not the σ-scaled value the inner solve
+        // recorded. (Before the fix this was ≈ σ·1000, off by orders of
+        // magnitude.)
+        let last = sol.iterates.last().unwrap();
+        assert!(
+            (last.objective - sol.obj).abs() < 1e-2,
+            "final traced objective {} should match unscaled sol.obj {}",
+            last.objective,
+            sol.obj
+        );
+    }
+
     /// Inequality complementarity: a binding general inequality must show
     /// `z·slack ≈ 0`, and stationarity must vanish with the `Gᵀz` term.
     /// `min x0²+x1² −3x0 −4x1 s.t. x0+x1 ≤ 1` → optimum on the face (0.25, 0.75).
@@ -439,5 +533,25 @@ mod residual_tests {
             res.kkt_error() < 1e-6,
             "binding-inequality residuals not small: {res:?}"
         );
+    }
+
+    /// Code review 2026-06 item M20: a mid-iteration breakdown whose best KKT
+    /// residual is already within the reduced-accuracy band must be reported as
+    /// the distinct `OptimalInaccurate`, *not* a bare `Optimal`. Before the fix
+    /// both the symmetric and non-symmetric HSDE drivers re-labeled these
+    /// breakdowns plain `Optimal`, so callers could not tell a residual sitting
+    /// at ~1e3·tol apart from a genuinely converged solve. `breakdown_status`
+    /// centralizes that decision; this pins it.
+    #[test]
+    fn breakdown_status_marks_near_opt_as_inaccurate_not_optimal() {
+        // Near-optimal breakdown: usable iterate, reduced accuracy.
+        assert_eq!(breakdown_status(true), QpStatus::OptimalInaccurate);
+        assert_ne!(
+            breakdown_status(true),
+            QpStatus::Optimal,
+            "a near-tol breakdown must be distinguishable from a clean Optimal"
+        );
+        // Genuine breakdown with a large residual: still a hard failure.
+        assert_eq!(breakdown_status(false), QpStatus::NumericalFailure);
     }
 }

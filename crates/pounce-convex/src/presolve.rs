@@ -381,26 +381,34 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
 /// by `cones`. Applies only the cone-safe reductions (equality singletons,
 /// free columns / free-column singletons, fixed-variable substitution; and
 /// the orthant `≤`-row reductions on the *nonnegative* blocks), leaving
-/// second-order-cone rows and the columns coupled to them untouched. A
-/// **single pass** (the fixpoint loop is orthant-only), so the reduced cone
-/// partition is recoverable from the kept rows — see
-/// [`Presolve::reduced_cones`].
+/// every **non-orthant** cone row (second-order, exponential, power, PSD)
+/// and the columns coupled to them untouched. A **single pass** (the
+/// fixpoint loop is orthant-only), so the reduced cone partition is
+/// recoverable from the kept rows — see [`Presolve::reduced_cones`].
 pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
-    // SOC rows are the inequality rows belonging to a non-`Nonneg` block.
-    let mut soc_row = vec![false; prob.m_ineq()];
+    // Protect the rows of every non-orthant cone. The orthant `≤`-row
+    // reductions (empty-row infeasibility, activity-redundancy drop, forcing,
+    // bound tightening, parallel/duplicate) are sound only for the nonnegative
+    // orthant: a non-orthant cone row is coupled to its block, its `h<0` is
+    // legal (e.g. `K_exp` contains points with a negative first coordinate),
+    // and dropping any one row corrupts the block's fixed layout (3-row
+    // exp/power, `svec` PSD) AND desyncs [`Presolve::reduced_cones`], which
+    // assumes non-orthant blocks keep their full dimension. Marking only
+    // `SecondOrder` (the old behavior) left exp/power/PSD rows exposed.
+    let mut protected_row = vec![false; prob.m_ineq()];
     let mut row = 0;
     for spec in cones {
         let d = spec.dim();
-        if matches!(spec, ConeSpec::SecondOrder(_)) {
+        if !matches!(spec, ConeSpec::Nonneg(_)) {
             for r in row..row + d {
-                if r < soc_row.len() {
-                    soc_row[r] = true;
+                if r < protected_row.len() {
+                    protected_row[r] = true;
                 }
             }
         }
         row += d;
     }
-    presolve_once(prob, &soc_row)
+    presolve_once(prob, &protected_row)
 }
 
 /// A single presolve pass (the reduction catalog applied once). [`presolve`]
@@ -1054,7 +1062,16 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     }
 
     // --- build reduced rows (after substitution), then dedup ---
-    let eq_rows = match build_rows(&prob.a, m_eq, &eq_dropped, &prob.b, &fixed, &col_new, true) {
+    let eq_rows = match build_rows(
+        &prob.a,
+        m_eq,
+        &eq_dropped,
+        &prob.b,
+        &fixed,
+        &col_new,
+        true,
+        &[],
+    ) {
         Ok(rows) => rows,
         Err(()) => return PresolveOutcome::Infeasible,
     };
@@ -1066,6 +1083,7 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
         &fixed,
         &col_new,
         false,
+        soc_row,
     ) {
         Ok(rows) => rows,
         Err(()) => return PresolveOutcome::Infeasible,
@@ -1157,7 +1175,14 @@ fn build_rows(
     fixed: &[Option<f64>],
     col_new: &[usize],
     is_equality: bool,
+    protected: &[bool],
 ) -> Result<Vec<Row>, ()> {
+    // A coupled cone row (second-order / exp / power / PSD) is kept verbatim
+    // even when substitution empties its coefficients: an empty `G` row with
+    // `s = h` is a legal cone slack (e.g. `h<0` is in `K_exp`), so it must
+    // neither trip the orthant `0 ≤ rhs` feasibility check nor be dropped —
+    // dropping one row of a fixed-layout block desyncs `reduced_cones`.
+    let is_protected = |i: usize| protected.get(i).copied().unwrap_or(false);
     let mut acc: Vec<Option<Row>> = (0..m)
         .map(|r| {
             if dropped[r] {
@@ -1189,6 +1214,12 @@ fn build_rows(
         let mut row = row;
         merge_sort_coeffs(&mut row.coeffs);
         if row.coeffs.is_empty() {
+            // A protected cone row stays verbatim — `0·x ≤ h` is the cone
+            // slack `s = h`, not an orthant feasibility check.
+            if is_protected(row.orig) {
+                out.push(row);
+                continue;
+            }
             // Row reduced to `0 (cmp) rhs`: a feasibility check.
             if is_equality {
                 if row.rhs.abs() > 0.0 {
@@ -1233,7 +1264,9 @@ const PARALLEL_TOL: f64 = 1e-9;
 /// — normalize alike; for equalities we divide by the **signed** pivot so
 /// `±` multiples (the same constraint either way) match.
 fn pivot_divisor(row: &Row, is_equality: bool) -> f64 {
-    let p = row.coeffs[0].1;
+    // Empty (coupled cone) rows are never grouped/merged, so any nonzero
+    // divisor is fine; guard the index to keep normalization panic-free.
+    let p = row.coeffs.first().map_or(1.0, |&(_, v)| v);
     if is_equality {
         p
     } else {

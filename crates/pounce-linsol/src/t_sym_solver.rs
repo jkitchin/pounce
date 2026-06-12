@@ -197,47 +197,51 @@ impl TSymLinearSolver {
         {
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
-            static WARNED: AtomicBool = AtomicBool::new(false);
+            static DUMPED: AtomicBool = AtomicBool::new(false);
             let n_call = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
             let skip: usize = std::env::var("POUNCE_DBG_KKT_DUMP_SKIP")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            if n_call < skip {
-                // not yet
-            } else if let Ok(path) = std::env::var("POUNCE_DBG_KKT_DUMP") {
-                if !WARNED.swap(true, Ordering::SeqCst) {
+            // The trigger path is only *read* (never mutated), and the
+            // one-shot "disable after firing" is an atomic claim via
+            // `claim_kkt_dump`. This replaces the previous
+            // `unsafe std::env::remove_var` step, whose SAFETY note
+            // ("single-threaded … main IPM thread") was false: pounce-feral
+            // runs rayon-parallel outer solves (feral lib.rs:159-168), so
+            // multiple `multi_solve` calls can be in flight at once and
+            // `remove_var` would race any concurrent environment read
+            // (undefined behavior). The atomic guarantees exactly one
+            // thread writes the dump while the process environment is left
+            // untouched.
+            if let Ok(path) = std::env::var("POUNCE_DBG_KKT_DUMP") {
+                if claim_kkt_dump(n_call, skip, &DUMPED) {
                     tracing::warn!(
                         target: "pounce::linsol",
                         "POUNCE_DBG_KKT_DUMP is deprecated; prefer `--dump kkt:<iter-spec>` (see pounce --help)"
                     );
-                }
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::File::create(&path) {
-                    let dim = self.dim as u64;
-                    let nnz = self.nonzeros_triplet as u64;
-                    let nrhs64 = nrhs as u64;
-                    let _ = f.write_all(&dim.to_le_bytes());
-                    let _ = f.write_all(&nnz.to_le_bytes());
-                    let _ = f.write_all(&nrhs64.to_le_bytes());
-                    for &i in &self.airn {
-                        let _ = f.write_all(&(i as i64).to_le_bytes());
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        let dim = self.dim as u64;
+                        let nnz = self.nonzeros_triplet as u64;
+                        let nrhs64 = nrhs as u64;
+                        let _ = f.write_all(&dim.to_le_bytes());
+                        let _ = f.write_all(&nnz.to_le_bytes());
+                        let _ = f.write_all(&nrhs64.to_le_bytes());
+                        for &i in &self.airn {
+                            let _ = f.write_all(&(i as i64).to_le_bytes());
+                        }
+                        for &j in &self.ajcn {
+                            let _ = f.write_all(&(j as i64).to_le_bytes());
+                        }
+                        for &v in vals {
+                            let _ = f.write_all(&v.to_le_bytes());
+                        }
+                        for &v in &*rhs_vals {
+                            let _ = f.write_all(&v.to_le_bytes());
+                        }
+                        let _ = f.flush();
                     }
-                    for &j in &self.ajcn {
-                        let _ = f.write_all(&(j as i64).to_le_bytes());
-                    }
-                    for &v in vals {
-                        let _ = f.write_all(&v.to_le_bytes());
-                    }
-                    for &v in &*rhs_vals {
-                        let _ = f.write_all(&v.to_le_bytes());
-                    }
-                    let _ = f.flush();
-                }
-                // SAFETY: removing an env var is safe in single-threaded
-                // setup; this dump fires from the main IPM thread.
-                unsafe {
-                    std::env::remove_var("POUNCE_DBG_KKT_DUMP");
                 }
             }
         }
@@ -401,6 +405,27 @@ impl SymLinearSolver for TSymLinearSolver {
     fn provides_inertia(&self) -> bool {
         self.backend.provides_inertia()
     }
+}
+
+/// Gate the deprecated one-shot `POUNCE_DBG_KKT_DUMP` dump
+/// ([`TSymLinearSolver::multi_solve`]). Returns `true` for exactly one
+/// caller — the first whose `n_call` has reached `skip` — claiming the
+/// dump with an atomic compare on `dumped`.
+///
+/// Extracted from `multi_solve` so the one-shot logic is unit-testable
+/// with a local `AtomicBool` (the live call site uses a `static`), and to
+/// make explicit that disabling the dump is an atomic claim rather than a
+/// mutation of the process environment. The previous implementation called
+/// `unsafe std::env::remove_var`, which is unsound when any other thread
+/// may read the environment concurrently — and pounce-feral runs
+/// rayon-parallel outer solves, so several `multi_solve` calls can race.
+/// This claims via `swap` and never touches the environment.
+fn claim_kkt_dump(n_call: usize, skip: usize, dumped: &std::sync::atomic::AtomicBool) -> bool {
+    use std::sync::atomic::Ordering;
+    if n_call < skip {
+        return false;
+    }
+    !dumped.swap(true, Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -603,5 +628,56 @@ mod tests {
         assert!(solver.increase_quality());
         // Backend caps at 1; second call returns false.
         assert!(!solver.increase_quality());
+    }
+
+    /// The deprecated KKT-dump gate must fire exactly once, on the first
+    /// call at/after the skip count, and never re-fire — without mutating
+    /// the environment (L9: replaces the old `unsafe env::remove_var`).
+    #[test]
+    fn claim_kkt_dump_is_one_shot_after_skip() {
+        use std::sync::atomic::AtomicBool;
+        let dumped = AtomicBool::new(false);
+        // Below the skip count: never claims.
+        assert!(!super::claim_kkt_dump(0, 2, &dumped));
+        assert!(!super::claim_kkt_dump(1, 2, &dumped));
+        // First call at/after skip claims exactly once; later calls no-op.
+        assert!(super::claim_kkt_dump(2, 2, &dumped));
+        assert!(!super::claim_kkt_dump(3, 2, &dumped));
+        assert!(!super::claim_kkt_dump(4, 2, &dumped));
+    }
+
+    /// The one-shot claim must be race-free across threads — the property
+    /// the old `unsafe env::remove_var` disable step could not provide
+    /// under pounce-feral's rayon-parallel outer solves. Exactly one of
+    /// many concurrent callers may win the claim.
+    #[test]
+    fn claim_kkt_dump_claims_exactly_once_under_concurrency() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+        let dumped = Arc::new(AtomicBool::new(false));
+        let wins = Arc::new(AtomicUsize::new(0));
+        let n_threads = 32;
+        let barrier = Arc::new(Barrier::new(n_threads));
+        let mut handles = Vec::new();
+        for _ in 0..n_threads {
+            let d = Arc::clone(&dumped);
+            let w = Arc::clone(&wins);
+            let b = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                // Maximize contention: all threads reach the claim together.
+                b.wait();
+                if super::claim_kkt_dump(0, 0, &d) {
+                    w.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            wins.load(Ordering::SeqCst),
+            1,
+            "exactly one thread must claim the one-shot KKT dump"
+        );
     }
 }

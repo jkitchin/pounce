@@ -266,9 +266,47 @@ impl Tape {
         self.reverse(&vals, seed, grad);
     }
 
+    /// Reverse-mode AD reusing two caller-supplied scratch buffers
+    /// (`vals` from [`forward_into`], and an `adj` arena ≥
+    /// `self.ops.len()`) instead of allocating a forward-value vector and
+    /// an adjoint vector per call like [`gradient_seed`]. The `.nl` design
+    /// emits one tiny tape per summand — ~10⁶ on large models — so a single
+    /// `eval_jac_g` / `eval_grad_f` drives this millions of times and the
+    /// per-call allocation dominated. `grad` is accumulated into (not
+    /// zeroed); `adj` may be passed dirty (it is zeroed at the touched
+    /// slots internally).
+    ///
+    /// [`forward_into`]: Tape::forward_into
+    pub fn gradient_seed_into(
+        &self,
+        x: &[f64],
+        seed: f64,
+        grad: &mut [f64],
+        vals: &mut [f64],
+        adj: &mut [f64],
+    ) {
+        if seed == 0.0 || self.ops.is_empty() {
+            return;
+        }
+        debug_assert!(vals.len() >= self.ops.len());
+        self.forward_into(x, vals);
+        self.reverse_into(vals, seed, grad, adj);
+    }
+
     fn reverse(&self, vals: &[f64], seed: f64, grad: &mut [f64]) {
         let n = self.ops.len();
         let mut adj = vec![0.0f64; n];
+        self.reverse_into(vals, seed, grad, &mut adj);
+    }
+
+    /// Reverse adjoint sweep into a caller-supplied `adj` scratch buffer
+    /// (length ≥ `self.ops.len()`), the allocation-free core of [`reverse`].
+    /// `adj` is zeroed over `[0, n)` internally, so a dirty arena is fine;
+    /// `grad` is accumulated into (not zeroed).
+    fn reverse_into(&self, vals: &[f64], seed: f64, grad: &mut [f64], adj: &mut [f64]) {
+        let n = self.ops.len();
+        debug_assert!(adj.len() >= n);
+        adj[..n].fill(0.0);
         adj[n - 1] = seed;
 
         for i in (0..n).rev() {
@@ -471,7 +509,11 @@ impl Tape {
                     let du = dot[*a];
                     let dr = dot[*b];
                     let mut result = 0.0;
-                    if r != 0.0 && u != 0.0 {
+                    // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
+                    // u == 0 the slope is still well defined for r >= 1 (and a
+                    // genuine ±inf for r < 1), so it must not be silently dropped,
+                    // or the forward tangent disagrees with the reverse gradient.
+                    if r != 0.0 {
                         result += r * u.powf(r - 1.0) * du;
                     }
                     if u > 0.0 {
@@ -694,7 +736,11 @@ impl Tape {
                     let du = dot[*a];
                     let dr = dot[*b];
                     let mut result = 0.0;
-                    if r != 0.0 && u != 0.0 {
+                    // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
+                    // u == 0 the slope is still well defined for r >= 1 (and a
+                    // genuine ±inf for r < 1), so it must not be silently dropped,
+                    // or the forward tangent disagrees with the reverse gradient.
+                    if r != 0.0 {
                         result += r * u.powf(r - 1.0) * du;
                     }
                     if u > 0.0 {
@@ -2170,6 +2216,37 @@ impl HybridTape {
 /// first time a Cse pointer is encountered in this root. Recursing
 /// into the body is gated on the first visit to avoid quadratic
 /// blowup on heavily shared CSE DAGs.
+/// True when `expr` (or any subexpression) is an AMPL external function
+/// call. The hybrid summand path rejects funcalls outright, but the
+/// *promoted*-CSE branch emits a shared CSE body via `build_recursive`
+/// with an **empty** `ExternalResolver::default()` — it has no resolver
+/// of its own. Without this pre-scan a funcall buried in a promoted CSE
+/// would reach `build_recursive`'s `Expr::Funcall` arm and panic with the
+/// misleading `unresolved AMPL funcall id <n>` message, instead of the
+/// clear "not supported on the hybrid path" message the non-promoted
+/// summand path raises. Pre-scanning makes both paths report the same
+/// reason. (Funcalls are unsupported on the hybrid path regardless of
+/// whether the id would resolve, so this never rejects a buildable tape.)
+fn cse_contains_funcall(expr: &Expr) -> bool {
+    match expr {
+        Expr::Funcall { .. } => true,
+        Expr::Const(_) | Expr::Var(_) => false,
+        Expr::Binary(_, a, b) => cse_contains_funcall(a) || cse_contains_funcall(b),
+        Expr::Unary(_, a) => cse_contains_funcall(a),
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
+            args.iter().any(cse_contains_funcall)
+        }
+        Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            cse_contains_funcall(a) || cse_contains_funcall(b)
+        }
+        Expr::Not(a) => cse_contains_funcall(a),
+        Expr::Cond { cond, then_, else_ } => {
+            cse_contains_funcall(cond) || cse_contains_funcall(then_) || cse_contains_funcall(else_)
+        }
+        Expr::Cse(body) => cse_contains_funcall(body),
+    }
+}
+
 fn count_cse_appearances(
     e: &Expr,
     seen_in_root: &mut HashSet<*const Expr>,
@@ -2322,6 +2399,19 @@ fn build_into_summand(
             }
             let promoted = cse_count.get(&key).copied().unwrap_or(0) >= 2;
             if promoted {
+                // `build_recursive` below runs with an empty resolver, so a
+                // funcall hidden inside the promoted body would panic with the
+                // misleading "unresolved AMPL funcall id" message rather than
+                // the clear hybrid-unsupported message the non-promoted summand
+                // path (and the `Expr::Funcall` arm at the bottom) raises.
+                // Reject it up front so both CSE paths report the same reason.
+                if cse_contains_funcall(body) {
+                    panic!(
+                        "HybridTape: AMPL external function calls are not supported on the \
+                         hybrid (partial-separability) tape path. Build with \
+                         Tape::build_with_externals instead."
+                    );
+                }
                 // Build (or reuse) the prelude slot for this CSE.
                 // `build_recursive(expr, ...)` hits the Cse arm,
                 // emits the body once into prelude, and caches it
@@ -2952,7 +3042,11 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
             let du = dot[*a];
             let dr = dot[*b];
             let mut result = 0.0;
-            if r != 0.0 && u != 0.0 {
+            // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
+            // u == 0 the slope is still well defined for r >= 1 (and a genuine
+            // ±inf for r < 1), so it must not be silently dropped, or the forward
+            // tangent disagrees with the reverse gradient.
+            if r != 0.0 {
                 result += r * u.powf(r - 1.0) * du;
             }
             if u > 0.0 {
@@ -4047,5 +4141,70 @@ mod tests {
         assert!(s.contains(&(1, 0)));
         assert!(s.contains(&(1, 1)));
         assert_eq!(s.len(), 3);
+    }
+
+    #[test]
+    fn pow_forward_tangent_matches_reverse_gradient_at_base_zero() {
+        // Code review L29: `Pow` first-order tangent disagreed with the
+        // reverse-mode gradient at base 0. f = x0 ^ x1 keeps a genuine `Pow`
+        // op (variable exponent is not lowered to a Mul/Sqrt chain). At the
+        // `.nl` default start x0 = 0, the base derivative d/dx0 (x0^1) = 1 is
+        // well defined; reverse mode has always computed it, but the forward
+        // tangent used to guard on `u != 0` and drop it, so Jacobian-vector
+        // products silently disagreed with the gradient at x = 0. After the
+        // fix both arms must agree.
+        let e = pow(var(0), var(1));
+        let t = Tape::build(&e);
+        // Guard: the op must survive as a real Pow (not lowered away), else
+        // this test would no longer exercise the fixed branch.
+        assert!(
+            t.ops.iter().any(|op| matches!(op, TapeOp::Pow(_, _))),
+            "expected a Pow op in the tape; got {:?}",
+            t.ops
+        );
+        let x = [0.0, 1.0];
+        let n = t.ops.len();
+
+        // Reverse-mode gradient w.r.t. x0.
+        let mut grad = vec![0.0; 2];
+        t.gradient_seed(&x, 1.0, &mut grad);
+
+        // Forward tangent seeded on x0: dot[output] = df/dx0.
+        let vals = t.forward(&x);
+        let mut dot = vec![0.0; n];
+        t.forward_tangent(&vals, 0, &mut dot);
+        let fwd_dfx0 = dot[n - 1];
+
+        assert!(
+            (grad[0] - 1.0).abs() < 1e-12,
+            "reverse gradient df/dx0 at base 0 should be 1, got {}",
+            grad[0]
+        );
+        assert!(
+            (fwd_dfx0 - grad[0]).abs() < 1e-12,
+            "forward tangent df/dx0 = {fwd_dfx0} must match reverse gradient {} at base 0",
+            grad[0]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "external function calls are not supported on the")]
+    fn hybrid_promoted_cse_with_funcall_reports_clear_message() {
+        // Code review L34: `HybridTape::build_multi` builds a promoted CSE
+        // (one shared across ≥2 summands) via `build_recursive` with an empty
+        // resolver. A funcall inside that promoted body used to panic with the
+        // misleading "unresolved AMPL funcall id 0" — implying a resolution
+        // failure — instead of the real reason: funcalls are unsupported on
+        // the hybrid path. Here the funcall body is shared across two roots so
+        // it is promoted; assert the clear hybrid-unsupported message fires.
+        let body = Arc::new(Expr::Funcall {
+            id: 0,
+            args: vec![FuncallArg::Real(var(0))],
+        });
+        let exprs = vec![
+            add(Expr::Cse(body.clone()), cnst(1.0)),
+            add(Expr::Cse(body.clone()), cnst(2.0)),
+        ];
+        HybridTape::build_multi(&exprs);
     }
 }

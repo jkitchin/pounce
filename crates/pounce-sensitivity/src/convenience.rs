@@ -65,6 +65,7 @@ use crate::backsolver::SensBacksolver;
 use crate::boundcheck::clamp_with_nlp;
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
+use crate::vec_util::dense_to_vec;
 use crate::PdSensBacksolver;
 use pounce_algorithm::IpoptApplication;
 use pounce_common::types::{Index, Number};
@@ -89,10 +90,26 @@ pub struct SensSolve {
 /// that [`IpoptApplication::optimize_tnlp`] would have returned on its
 /// own; sensitivity outputs are populated only when the solve
 /// converged (`SolveSucceeded` or `SolvedToAcceptableLevel`).
+///
+/// **Sensitivity-stage failures are reported through [`Self::error`],
+/// not `status`.** The underlying solve can converge (so `status` is
+/// `SolveSucceeded`) yet the post-solve sensitivity step still fail —
+/// e.g. a pinned index that isn't an equality, a backsolver/Schur
+/// setup error, or `parametric_step` / reduced-Hessian failing. In
+/// that case the requested outputs (`dx`, `reduced_hessian`, …) are
+/// `None` *and* `error` is `Some(_)`. Callers must check `error` to
+/// distinguish "sensitivity failed" from "sensitivity not requested"
+/// (both leave the outputs `None`).
 #[derive(Debug, Clone)]
 pub struct SensResult {
     /// Pounce return status of the underlying solve.
     pub status: ApplicationReturnStatus,
+    /// `Some(message)` when the post-solve sensitivity stage failed
+    /// (despite a possibly-converged `status`). `None` when the
+    /// sensitivity stage ran cleanly or was not requested. See the
+    /// type-level note: this is the only signal that separates a
+    /// sensitivity failure from a not-requested computation.
+    pub error: Option<String>,
     /// Final primal iterate `x*`. Length `n_x`. None when the solve
     /// failed before convergence.
     pub x: Option<Vec<Number>>,
@@ -149,16 +166,30 @@ pub struct SensResult {
     /// called and the solve converged.
     pub reduced_hessian_eigenvectors: Option<Vec<Number>>,
     /// Phase 5c §6 — converged user-space constraint multipliers
-    /// `λ_g` (length `n_full_g`), suitable for direct hand-off to
-    /// the SQP-corrector via [`pounce_algorithm::sqp::classify_working_set`].
-    /// `None` when the solve didn't converge or the underlying NLP
-    /// didn't expose `pack_lambda_for_user`.
+    /// `λ_g` (length `n_full_g`), in **natural (unscaled-Lagrangian)
+    /// units**: lifted via `finalize_solution_lambda`, which inverts
+    /// the c/d split, unwinds the per-row `c_scale`/`d_scale`
+    /// constraint scaling, AND divides out `obj_scale_factor` — so
+    /// the values match what the user TNLP's `finalize_solution`
+    /// receives (and the C ABI / Python info dict's `mult_g`),
+    /// independent of `nlp_scaling_method`. Suitable for direct
+    /// hand-off to the SQP corrector via
+    /// [`pounce_algorithm::sqp::classify_working_set`], and
+    /// round-trip-consistent with warm starts:
+    /// `initialize_starting_point` multiplies the user's λ back by
+    /// `obj_scale_factor` on the way in. `None` when the solve
+    /// didn't converge or the underlying NLP didn't expose
+    /// `finalize_solution_lambda`.
     pub mult_g: Option<Vec<Number>>,
     /// Converged user-space lower-bound multipliers `z_L`, length
-    /// `n_full_x`. Same convention as the C ABI / Python info dict.
+    /// `n_full_x`, divided by `obj_scale_factor` like
+    /// [`Self::mult_g`] (via `finalize_solution_z_l`) — the same
+    /// natural-units convention as the C ABI / Python info dict's
+    /// `mult_x_L`.
     pub mult_x_l: Option<Vec<Number>>,
     /// Converged user-space upper-bound multipliers `z_U`, length
-    /// `n_full_x`. Same convention.
+    /// `n_full_x`. Same convention (`finalize_solution_z_u` /
+    /// `mult_x_U`).
     pub mult_x_u: Option<Vec<Number>>,
     /// Converged constraint values `g(x*)` lifted to user-space
     /// (length `n_full_g`). Used by `classify_working_set` to
@@ -282,10 +313,21 @@ impl SensSolve {
             // Phase 5c §6 — also capture user-space multipliers +
             // constraint values so callers can wire the parametric
             // corrector via `classify_working_set` without a
-            // separate IPM solve. `pack_*_for_user` returns empty
-            // when the underlying NLP doesn't implement lifting
-            // (defaults on `IpoptNlp` trait); we treat that as
+            // separate IPM solve. The `finalize_solution_*` family
+            // returns empty when the underlying NLP doesn't implement
+            // lifting (defaults on `IpoptNlp` trait); we treat that as
             // "no user-space hand-off available".
+            //
+            // `finalize_solution_*` (NOT `pack_*_for_user`) is
+            // deliberate: both invert the c/d split and unwind the
+            // per-row `c_scale`/`d_scale`, but only the finalize
+            // family also divides out `obj_scale_factor`, so the
+            // multipliers land in the user's natural
+            // (unscaled-Lagrangian) units even when gradient-based
+            // NLP scaling fired — the same convention as the user
+            // TNLP's `finalize_solution` / the Python info dict.
+            // (`pack_*_for_user` feeds the scaled `eval_h` path;
+            // using it here left the duals obj-scaled: pounce#11 F1.)
             //
             // `curr_c`/`curr_d` cache results into the NLP via
             // `eval_*` if not already computed; pull them BEFORE
@@ -295,15 +337,15 @@ impl SensSolve {
             let d_curr = cq.borrow_mut().curr_d();
             {
                 let nlp_borrow = nlp.borrow();
-                let lambda = nlp_borrow.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                let lambda = nlp_borrow.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
                 if !lambda.is_empty() {
                     outbox_cb.borrow_mut().mult_g = Some(lambda);
                 }
-                let z_l = nlp_borrow.pack_z_l_for_user(&*curr.z_l);
+                let z_l = nlp_borrow.finalize_solution_z_l(&*curr.z_l);
                 if !z_l.is_empty() {
                     outbox_cb.borrow_mut().mult_x_l = Some(z_l);
                 }
-                let z_u = nlp_borrow.pack_z_u_for_user(&*curr.z_u);
+                let z_u = nlp_borrow.finalize_solution_z_u(&*curr.z_u);
                 if !z_u.is_empty() {
                     outbox_cb.borrow_mut().mult_x_u = Some(z_u);
                 }
@@ -413,6 +455,7 @@ impl SensSolve {
         let out = outbox.borrow();
         SensResult {
             status,
+            error: out.error.clone(),
             x: out.x.clone(),
             obj_val: out.obj_val,
             dx: out.dx.clone(),
@@ -449,16 +492,5 @@ struct CallbackOut {
     mult_x_l: Option<Vec<Number>>,
     mult_x_u: Option<Vec<Number>>,
     g: Option<Vec<Number>>,
-    #[allow(dead_code)]
     error: Option<String>,
-}
-
-fn dense_to_vec(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
-    match v
-        .as_any()
-        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-    {
-        Some(d) => d.values().to_vec(),
-        None => vec![0.0; v.dim() as usize],
-    }
 }

@@ -268,6 +268,24 @@ impl RestoConvCheckAdapter {
         }
     }
 
+    /// Inner-IPM stationarity tolerance (`OptErrorConvCheck::tol`) this
+    /// adapter was built with. Read-only accessor used by the resto
+    /// factory tests to confirm the user's outer `tol` is threaded
+    /// through instead of a hardcoded default.
+    pub fn inner_tol(&self) -> f64 {
+        self.inner.tol
+    }
+
+    /// Inner-IPM acceptable tolerance (`OptErrorConvCheck::acceptable_tol`).
+    pub fn inner_acceptable_tol(&self) -> f64 {
+        self.inner.acceptable_tol
+    }
+
+    /// Inner-IPM acceptable-iteration count (`OptErrorConvCheck::acceptable_iter`).
+    pub fn inner_acceptable_iter(&self) -> i32 {
+        self.inner.acceptable_iter
+    }
+
     /// Wire the orig-progress callback the outer line search built at
     /// restoration entry. Adds a second gate to the `Converged`
     /// decision: after the kappa-reduction passes, the recovered

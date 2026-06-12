@@ -22,6 +22,13 @@
 #      dependency order. This check fails if any crate appears before one of
 #      its own (publishable) workspace dependencies.
 #
+#   4. EVERY DEPENDENCY IS PUBLISHABLE. cargo publish rewrites path/git deps to
+#      a crates.io version requirement and refuses to upload a crate whose
+#      dependency lacks one (or pins a git rev / wildcard). Without this check a
+#      tag would publish the leading crates and hard-fail mid-batch at the first
+#      crate carrying such a dep — an irreversible partial release. See
+#      scripts/check_dep_publishability.py (e.g. the `feral` git pin).
+#
 # `cargo metadata` is the single source of truth: it is the real workspace and
 # cannot drift. The explicit list in publish-crates.sh stays because it makes
 # the publish set reviewable in a PR diff — this guard is what keeps it honest.
@@ -125,6 +132,19 @@ if rc == 0:
 
 sys.exit(rc)
 ' || fail=1
+echo
+
+# --- 4. Every dependency of a publishable crate is itself publishable -------
+# cargo publish drops git/path specs and needs a crates.io version for each
+# dependency; a git pin or version-less dep makes the publish hard-fail
+# mid-batch. Check the publish list specifically (the crates a tag will upload).
+echo "== dependency publishability =="
+if cargo metadata --format-version 1 2>/dev/null \
+  | python3 scripts/check_dep_publishability.py $script_list; then
+  :
+else
+  fail=1
+fi
 echo
 
 if [[ $fail -ne 0 ]]; then

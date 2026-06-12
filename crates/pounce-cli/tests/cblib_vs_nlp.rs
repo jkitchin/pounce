@@ -455,7 +455,14 @@ fn solve_nlp(m: &CbfModel) -> f64 {
 fn cross_check(label: &str, text: &str) {
     let m = cbf::parse(text).expect("parse");
     let (status, conic_obj) = solve_conic(&m);
-    assert_eq!(status, QpStatus::Optimal, "{label}: conic status");
+    // These exp/power-cone GPs reach the optimum through the non-symmetric
+    // driver's reduced-accuracy fallback, so the status is `OptimalInaccurate`
+    // (code review 2026-06 item M20); both count as a usable solve. The
+    // objective is cross-checked against an independent NLP below.
+    assert!(
+        matches!(status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
+        "{label}: conic status {status:?}"
+    );
     let nlp_obj = solve_nlp(&m);
     let rel = (conic_obj - nlp_obj).abs() / (1.0 + nlp_obj.abs());
     eprintln!("[{label}] conic={conic_obj:.8}  nlp={nlp_obj:.8}  rel={rel:.2e}");

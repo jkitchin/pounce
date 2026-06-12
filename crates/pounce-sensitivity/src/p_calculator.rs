@@ -93,13 +93,25 @@ pub trait PCalculator {
 /// trailing block). Pounce keeps the same sign so downstream
 /// `SchurDriver` consumers don't have to track which convention
 /// they're under.
+///
+/// Upstream's `GetSchurMatrix` indexes `P` by `B`'s column indices
+/// alone and never reads `B`'s ±1 factor — safe there only because
+/// production `IndexSchurData` is built `+1`-only. Pounce's
+/// `from_parts` / `set_from_*` accept `−1` signs, so pounce multiplies
+/// each entry by `B`'s row factor (`S[i, j] = −b_signᵢ · P[B_colᵢ,
+/// A_colⱼ]`); likewise the `P` cache is keyed by `(column, sign)` so a
+/// `−1` `A` row never aliases a `+1` row's column.
 pub struct IndexPCalculator<B: SensBacksolver> {
     backsolver: B,
     data_a: IndexSchurData,
     n_full: usize,
-    /// Column of `P = K⁻¹ A` keyed by the corresponding column index
-    /// in `A_data`. Built lazily by `compute_p`.
-    p_cols: HashMap<Index, Vec<Number>>,
+    /// Column of `P = K⁻¹ A` keyed by `(column index, ±1 sign)` in
+    /// `A_data`. Built lazily by `compute_p`. The sign is part of the
+    /// key because the stored column bakes it in (`K⁻¹ (sign · e_col)`),
+    /// so two `A` rows selecting the same column with *opposite* signs
+    /// must not share one cached column — keying by column alone would
+    /// hand the second row the first row's wrong-signed column.
+    p_cols: HashMap<(Index, Index), Vec<Number>>,
 }
 
 impl<B: SensBacksolver> IndexPCalculator<B> {
@@ -123,9 +135,10 @@ impl<B: SensBacksolver> IndexPCalculator<B> {
         self.n_full
     }
 
-    /// Read-only access to the cached `P = K⁻¹ A` columns. Used by
-    /// the test suite + Phase-B.2 SchurDriver to verify rows.
-    pub fn p_columns(&self) -> &HashMap<Index, Vec<Number>> {
+    /// Read-only access to the cached `P = K⁻¹ A` columns, keyed by
+    /// `(column index, ±1 sign)`. Used by the test suite + Phase-B.2
+    /// SchurDriver to verify rows.
+    pub fn p_columns(&self) -> &HashMap<(Index, Index), Vec<Number>> {
         &self.p_cols
     }
 
@@ -148,9 +161,12 @@ impl<B: SensBacksolver> PCalculator for IndexPCalculator<B> {
         let cols = self.data_a.col_indices().to_vec();
         let signs = self.data_a.signs().to_vec();
         for (i, &col) in cols.iter().enumerate() {
-            if self.p_cols.contains_key(&col) {
-                // Already cached — A_data may have duplicate column
-                // indices across runs, no work needed.
+            let key = (col, signs[i]);
+            if self.p_cols.contains_key(&key) {
+                // Already cached — A_data may have duplicate
+                // (column, sign) pairs, no work needed. A duplicate
+                // column with the *opposite* sign is a distinct key
+                // and is solved separately below.
                 continue;
             }
             let mut rhs = vec![0.0; self.n_full];
@@ -163,7 +179,7 @@ impl<B: SensBacksolver> PCalculator for IndexPCalculator<B> {
             if !self.backsolver.solve(&rhs, &mut p_col) {
                 return false;
             }
-            self.p_cols.insert(col, p_col);
+            self.p_cols.insert(key, p_col);
         }
         true
     }
@@ -179,16 +195,22 @@ impl<B: SensBacksolver> PCalculator for IndexPCalculator<B> {
             return false;
         }
         let a_cols = self.data_a.col_indices().to_vec();
+        let a_signs = self.data_a.signs().to_vec();
         // Column-major layout: S[i, j] = dense_schur[j * n_b + i].
         for (j, &a_col) in a_cols.iter().enumerate() {
-            let p_col = match self.p_cols.get(&a_col) {
+            // The cached column bakes in A's sign, so look it up by the
+            // same `(col, sign)` key `compute_p` stored it under.
+            let p_col = match self.p_cols.get(&(a_col, a_signs[j])) {
                 Some(v) => v,
                 None => return false,
             };
             // For each row `i` of B, pick the single non-zero column
-            // index that row points to (Index_SchurData contract).
+            // index that row points to (Index_SchurData contract) and
+            // honor its ±1 factor — `multiplying_row` returns it as
+            // `facs[0]`. Dropping it silently mis-signs every Schur
+            // entry whose B row carries a −1.
             for i in 0..n_b {
-                let (b_idx_vec, _facs) = match b.multiplying_row(i as Index) {
+                let (b_idx_vec, b_facs) = match b.multiplying_row(i as Index) {
                     Ok(t) => t,
                     Err(_) => return false,
                 };
@@ -196,7 +218,7 @@ impl<B: SensBacksolver> PCalculator for IndexPCalculator<B> {
                 if b_col >= p_col.len() {
                     return false;
                 }
-                dense_schur[j * n_b + i] = -p_col[b_col];
+                dense_schur[j * n_b + i] = -b_facs[0] * p_col[b_col];
             }
         }
         true
@@ -279,13 +301,13 @@ mod tests {
         assert!(pc.compute_p());
 
         // K⁻¹ e_0 = (3/4, 1/2, 1/4)   (from the prior solver test).
-        let p0 = pc.p_columns().get(&0).expect("col 0 cached");
+        let p0 = pc.p_columns().get(&(0, 1)).expect("col 0 cached");
         assert!((p0[0] - 0.75).abs() < 1e-12);
         assert!((p0[1] - 0.50).abs() < 1e-12);
         assert!((p0[2] - 0.25).abs() < 1e-12);
 
         // K⁻¹ e_2 by symmetry = (1/4, 1/2, 3/4).
-        let p2 = pc.p_columns().get(&2).expect("col 2 cached");
+        let p2 = pc.p_columns().get(&(2, 1)).expect("col 2 cached");
         assert!((p2[0] - 0.25).abs() < 1e-12);
         assert!((p2[1] - 0.50).abs() < 1e-12);
         assert!((p2[2] - 0.75).abs() < 1e-12);
@@ -305,7 +327,7 @@ mod tests {
         let a = IndexSchurData::from_parts(vec![1], vec![-1]).unwrap();
         let mut pc = IndexPCalculator::new(backsolver, a);
         assert!(pc.compute_p());
-        let p1 = pc.p_columns().get(&1).expect("col 1 cached");
+        let p1 = pc.p_columns().get(&(1, -1)).expect("col 1 cached");
         assert!((p1[0] - (-0.5)).abs() < 1e-12);
         assert!((p1[1] - (-1.0)).abs() < 1e-12);
         assert!((p1[2] - (-0.5)).abs() < 1e-12);
@@ -402,5 +424,77 @@ mod tests {
                 s_expected[k],
             );
         }
+    }
+
+    /// **L17 regression — duplicate column, opposite signs.**
+    ///
+    /// `from_parts` accepts a repeated column index with different
+    /// signs, so `A` can legitimately ask for both `K⁻¹ e_col` and
+    /// `K⁻¹ (−e_col)`. These are distinct columns (negatives of each
+    /// other). The old cache keyed by column index alone, so the second
+    /// row hit `contains_key` on the first and silently reused the
+    /// wrong-signed column — only one entry ever landed in `p_cols`.
+    /// With the `(col, sign)` key both columns are present and correct.
+    #[test]
+    fn compute_p_distinguishes_same_column_opposite_signs() {
+        #[rustfmt::skip]
+        let k = vec![
+             2.0, -1.0,  0.0,
+            -1.0,  2.0, -1.0,
+             0.0, -1.0,  2.0,
+        ];
+        let backsolver = DenseLuBacksolver::from_dense(3, &k).unwrap();
+        // Column 1 selected twice: once +1, once −1.
+        let a = IndexSchurData::from_parts(vec![1, 1], vec![1, -1]).unwrap();
+        let mut pc = IndexPCalculator::new(backsolver, a);
+        assert!(pc.compute_p());
+
+        // Both keys must be cached as separate columns.
+        let p_plus = pc.p_columns().get(&(1, 1)).expect("(col 1, +1) cached");
+        let p_minus = pc.p_columns().get(&(1, -1)).expect("(col 1, -1) cached");
+
+        // K⁻¹ e_1 = (1/2, 1, 1/2); the −1 column is its negation.
+        assert!((p_plus[0] - 0.5).abs() < 1e-12);
+        assert!((p_plus[1] - 1.0).abs() < 1e-12);
+        assert!((p_plus[2] - 0.5).abs() < 1e-12);
+        for r in 0..3 {
+            assert!(
+                (p_minus[r] - (-p_plus[r])).abs() < 1e-12,
+                "row {r}: +={}, −={}",
+                p_plus[r],
+                p_minus[r],
+            );
+        }
+    }
+
+    /// **L17 regression — B row carries a −1 sign.**
+    ///
+    /// `S[i, j] = −b_signᵢ · P[B_colᵢ, A_colⱼ]`. The old `schur_matrix`
+    /// dropped `b_signᵢ` (wrote `−P[…]`), so a B row with a −1 factor
+    /// produced a Schur entry with the wrong sign. Here A picks column 0
+    /// (+1) and B selects column 1 with sign −1, so the correct entry is
+    /// `−(−1)·P[1,0] = +P[1,0] = +1/2`; the buggy code yields −1/2.
+    #[test]
+    fn schur_matrix_honors_negative_b_sign() {
+        #[rustfmt::skip]
+        let k = vec![
+             2.0, -1.0,  0.0,
+            -1.0,  2.0, -1.0,
+             0.0, -1.0,  2.0,
+        ];
+        let backsolver = DenseLuBacksolver::from_dense(3, &k).unwrap();
+        let a = IndexSchurData::from_parts(vec![0], vec![1]).unwrap();
+        // B selects column 1 with a −1 sign.
+        let b = IndexSchurData::from_parts(vec![1], vec![-1]).unwrap();
+        let mut pc = IndexPCalculator::new(backsolver, a);
+        let mut s = vec![0.0; 1];
+        assert!(pc.schur_matrix(&b, &mut s));
+        // P[:,0] = K⁻¹ e_0 = (3/4, 1/2, 1/4), so P[1,0] = 1/2 and
+        // S[0,0] = −(−1)·1/2 = +1/2.
+        assert!(
+            (s[0] - 0.5).abs() < 1e-12,
+            "expected +0.5 (B sign honored), got {}",
+            s[0],
+        );
     }
 }

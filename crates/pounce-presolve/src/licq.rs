@@ -65,49 +65,49 @@ pub fn licq_check(rows: &[EqRow], n: Index) -> LicqVerdict {
     }
 }
 
-/// Maximum bipartite matching size between rows and columns. Plain
-/// Hungarian-style augmenting paths over an adjacency list. For the
-/// problem sizes we care about (equality blocks of LP/NLP models)
-/// the simple algorithm is fast enough.
+/// Maximum bipartite matching size between equality rows and columns.
+///
+/// Delegates to the crate's iterative Hopcroft-Karp primitive
+/// ([`crate::matching::hopcroft_karp`]) rather than carrying a second,
+/// weaker matcher. The previous local implementation allocated a
+/// `vec![false; n]` *per row* (`O(m·n)` total) and augmented with
+/// recursion whose depth grows with the augmenting-path length — so a
+/// long alternating chain (e.g. discretized dynamics) could both burn
+/// `O(m·n)` and overflow the stack. Hopcroft-Karp uses BFS layering to
+/// prune searches and bounds its DFS depth to the layer distance
+/// (`O(√V)`), and shares its battle-tested König-theorem cross-check.
 fn bipartite_matching_rank(rows: &[EqRow], n: usize) -> usize {
-    let mut match_col: Vec<isize> = vec![-1; n];
-    let mut count = 0;
-    for (u, row) in rows.iter().enumerate() {
-        let mut seen = vec![false; n];
-        if try_augment(u, row, rows, &mut match_col, &mut seen) {
-            count += 1;
-        }
-    }
-    count
-}
+    use crate::incidence::EqualityIncidence;
+    use crate::matching::hopcroft_karp;
 
-fn try_augment(
-    u: usize,
-    row: &EqRow,
-    rows: &[EqRow],
-    match_col: &mut [isize],
-    seen: &mut [bool],
-) -> bool {
-    for &col in &row.cols {
-        let c = col as usize;
-        if c >= seen.len() || seen[c] {
-            continue;
-        }
-        seen[c] = true;
-        if match_col[c] < 0
-            || try_augment(
-                match_col[c] as usize,
-                &rows[match_col[c] as usize],
-                rows,
-                match_col,
-                seen,
-            )
-        {
-            match_col[c] = u as isize;
-            return true;
-        }
+    // Pack the rows into the CSR bipartite incidence Hopcroft-Karp
+    // consumes. Columns out of range (`≥ n`) are dropped — preserving
+    // the previous guard — and each row's columns are sorted + deduped
+    // exactly as `EqualityIncidence::from_probe` does, so a column never
+    // contributes two parallel edges from one row.
+    let mut adj_ptr: Vec<usize> = Vec::with_capacity(rows.len() + 1);
+    let mut vars: Vec<usize> = Vec::new();
+    let mut scratch: Vec<usize> = Vec::new();
+    adj_ptr.push(0);
+    for row in rows {
+        scratch.clear();
+        scratch.extend(row.cols.iter().filter_map(|&c| {
+            let c = c as usize;
+            (c < n).then_some(c)
+        }));
+        scratch.sort_unstable();
+        scratch.dedup();
+        vars.extend_from_slice(&scratch);
+        adj_ptr.push(vars.len());
     }
-    false
+
+    let inc = EqualityIncidence {
+        n_vars: n,
+        eq_row_inner_idx: (0..rows.len()).collect(),
+        adj_ptr,
+        vars,
+    };
+    hopcroft_karp(&inc).size
 }
 
 /// Construct an `EqRow` list from CSR-ish triples: for each equality
@@ -191,5 +191,49 @@ mod tests {
         // With augmenting, row 0 gets bumped to 1, row 1 takes 0.
         let rows = vec![row(&[0, 1]), row(&[0])];
         assert_eq!(licq_check(&rows, 2), LicqVerdict::Full);
+    }
+
+    /// Long alternating chain — `m` equality rows over `m − 1` columns
+    /// as a staircase (`row 0: {0}`, `row i: {i−1, i}`, final row: just
+    /// the last column). Structural rank is `m − 1`, so LICQ must report
+    /// `StructuralRank(m − 1)`. The previous recursive matcher augmented
+    /// the final row by recursing the full length of the chain (verified
+    /// depth ≈ m), which overflows the stack for `m` in the tens of
+    /// thousands — exactly the discretized-dynamics shape the review
+    /// flags. Hopcroft-Karp's BFS layering bounds the search, so this
+    /// completes on a normal stack. (Issue M29.)
+    #[test]
+    fn long_chain_does_not_overflow_stack() {
+        let m = 50_000usize;
+        let mut rows: Vec<EqRow> = Vec::with_capacity(m);
+        rows.push(row(&[0]));
+        for i in 1..(m - 1) {
+            rows.push(row(&[(i - 1) as Index, i as Index]));
+        }
+        rows.push(row(&[(m - 2) as Index]));
+        // The chain touches m-1 distinct columns (0..m-2); declaring an
+        // extra phantom column (n = m) keeps `m <= n` so the over-
+        // determined short-circuit does NOT fire and the matcher actually
+        // runs. Max matching = m-1 ⇒ StructuralRank(m-1).
+        assert_eq!(
+            licq_check(&rows, m as Index),
+            LicqVerdict::StructuralRank((m - 1) as Index)
+        );
+    }
+
+    /// A long chain that IS full structural rank — `m` rows over `m`
+    /// columns, same staircase plus a final row reaching a fresh column.
+    /// The maximum matching is perfect, so the verdict is `Full`. Guards
+    /// against the fix mistakenly capping the matching short on long
+    /// augmenting paths.
+    #[test]
+    fn long_chain_full_rank() {
+        let m = 20_000usize;
+        let mut rows: Vec<EqRow> = Vec::with_capacity(m);
+        rows.push(row(&[0]));
+        for i in 1..m {
+            rows.push(row(&[(i - 1) as Index, i as Index]));
+        }
+        assert_eq!(licq_check(&rows, m as Index), LicqVerdict::Full);
     }
 }

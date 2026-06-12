@@ -8,8 +8,8 @@
 //!
 //! ```text
 //!   min  ρ · 1ᵀ(n_c + p_c + n_d + p_d) + ½ η(μ) · ||D_R (x − x_R)||²
-//!   s.t. c(x) − n_c + p_c   = 0
-//!        d(x) − n_d + p_d − s = 0
+//!   s.t. c(x) + n_c − p_c   = 0
+//!        d(x) + n_d − p_d − s = 0
 //! ```
 //!
 //! The nested solver reuses the regular-phase `AlgorithmBuilder` for

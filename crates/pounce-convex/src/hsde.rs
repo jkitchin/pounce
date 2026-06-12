@@ -39,7 +39,7 @@ use crate::debug::{fire, ConvexDebugState};
 use crate::ipm::{
     build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step, QpOptions,
 };
-use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
+use crate::qp::{breakdown_status, QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -171,8 +171,11 @@ where
         // "Acceptable level": near the cone boundary the scaling/factorization
         // can break down a hair short of `tol`. If the unregularized KKT
         // residuals are already tiny (within `~1e3·tol`) when that happens, the
-        // current iterate *is* essentially optimal — accept it rather than
-        // reporting a spurious `NumericalFailure`. This mirrors the
+        // iterate is usable — report it as `OptimalInaccurate` (reduced
+        // accuracy) rather than discarding it as a spurious `NumericalFailure`.
+        // It is deliberately *not* reported as a bare `Optimal`: the residual
+        // sits above `tol`, so callers can tell it apart from a genuinely
+        // converged solve (code review 2026-06 item M20). This mirrors the
         // non-symmetric HSDE driver (`hsde_nonsym.rs`), which already does this;
         // the two drivers were inconsistent (the symmetric one discarded usable
         // SOC/orthant iterates that the non-symmetric one would have accepted).
@@ -241,22 +244,14 @@ where
         // --- refactor M with the current cone scaling ---
         kkt.update_blocks(cone, &s, &z, opts.reg, &mut kkt_vals);
         if fact.refactor(&kkt_vals).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
 
         // --- constant direction p: M p = (−c, b, h) ---
         build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut p_x, &mut p_y, &mut p_z);
@@ -275,11 +270,7 @@ where
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
@@ -319,11 +310,7 @@ where
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
@@ -501,7 +488,10 @@ fn failed(prob: &QpProblem) -> QpSolution {
         status: QpStatus::NumericalFailure,
         x: vec![0.0; prob.n],
         y: vec![0.0; prob.m_eq()],
-        z: vec![1.0; prob.m_ineq()],
+        // Trivial dual: `z = 0` (the cone apex) is valid in every dual cone,
+        // unlike the all-ones vector, which is not a member of an SOC of
+        // dimension ≥ 3. Matches `ipm::failed_solution`.
+        z: vec![0.0; prob.m_ineq()],
         z_lb: vec![0.0; prob.n],
         z_ub: vec![0.0; prob.n],
         obj: 0.0,

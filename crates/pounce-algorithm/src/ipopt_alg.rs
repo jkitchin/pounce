@@ -1650,9 +1650,22 @@ impl IpoptAlgorithm {
                     // ignoring the inner-IPM iterations.
                     let mut iter_count: Index = self.data.borrow().iter_count;
                     iter_count += 1;
-                    if iter_count >= self.max_iter {
-                        break SolverReturn::MaxiterExceeded;
-                    }
+                    // Do NOT short-circuit to `MaxiterExceeded` here: bump the
+                    // counter and loop, letting the next `iterate()` run its
+                    // convergence check (`OptimalityErrorConvergenceCheck`,
+                    // which tests the component tolerances *before* its own
+                    // `iter_count >= max_iter` gate at
+                    // `conv_check/opt_error.rs`). Breaking before that call
+                    // skipped the convergence test on the iterate produced by
+                    // the final permitted step, so a solve converging on
+                    // exactly the `max_iter`-th iterate reported
+                    // `Maximum_Iterations_Exceeded` where upstream Ipopt —
+                    // which runs `CheckConvergence` at the top of its loop,
+                    // convergence-first — reports success. The check is
+                    // guaranteed to terminate the loop: once `iter_count`
+                    // reaches `max_iter`, `check_convergence_with_state`
+                    // returns either `Converged`/`ConvergedToAcceptable` or
+                    // `MaxIterExceeded`, never `Continue` (L1).
                     self.data.borrow_mut().iter_count = iter_count;
                     // Keep the diagnostics counter in lock-step with
                     // `data.iter_count` so KKT-dump gating reflects the

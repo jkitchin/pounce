@@ -35,7 +35,13 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from ._pounce import Solver
-from ._minimize import _normalize_bounds, _wrap_constraints
+from ._minimize import (
+    _DEFAULT_ACCEPTABLE_TOL,
+    _NLP_SUCCESS_STATUS,
+    _NO_KKT_FALLBACK_STATUS,
+    _normalize_bounds,
+    _wrap_constraints,
+)
 
 _EPS = float(np.finfo(np.float64).eps) ** 0.5
 
@@ -661,7 +667,14 @@ def _build_fit_problem(
         Jw = J * (w[:, None])
         return (Jw.T * weight) @ Jw
 
-    m_con, g_combined, jac_combined, cl, cu, _, _ = _wrap_constraints(constraints, n)
+    # Probe constraints at the starting seed, not the origin, so a constraint
+    # undefined at 0 but defined at p0 does not fail at build time (L47 —
+    # mirrors _minimize.py passing x0). ``_wrap_constraints`` returns the COO
+    # sparsity (rows, cols) as the last two entries; the fit path is dense and
+    # ignores them.
+    m_con, g_combined, jac_combined, cl, cu, _, _ = _wrap_constraints(
+        constraints, n, np.asarray(p0, dtype=float)
+    )
 
     return _FitProblem(
         f=f, model=model, model_jac=model_jac, residual=residual,
@@ -709,7 +722,26 @@ def _solve_fit(
     solver = Solver(problem)
     popt, info = solver.solve(x0=np.asarray(p0, dtype=float))
     popt = np.asarray(popt)
-    success = int(info["status"]) == 0
+    # Judge success exactly as the NLP `minimize` path does (gh #119 / #123).
+    # `Solved_To_Acceptable_Level` (status 1) is a converged solve — the iterate
+    # met the *acceptable* tolerance after the tight one stalled — so counting
+    # only status 0 reported `success=False` at a verified optimum with a fully
+    # populated `popt`/`pcov`, and callers gating on `.success` discarded valid
+    # fits. As a second gate, a stall (e.g. tiny-step exit) whose final unscaled
+    # NLP error is already within `acceptable_tol` is also a success — except
+    # for `_NO_KKT_FALLBACK_STATUS` (User_Requested_Stop), which is an external
+    # abort that must never be laundered into success (L50). curve_fit exposes
+    # no intermediate callback today, so that status cannot currently arise
+    # here; the gate exists to keep this success judgment in lockstep with
+    # `_minimize.py`'s, which is the contract this block documents.
+    status_code = int(info["status"])
+    acceptable_tol = float(user_opts.get("acceptable_tol", _DEFAULT_ACCEPTABLE_TOL))
+    kkt_error = float(info.get("final_kkt_error", float("nan")))
+    success = status_code in _NLP_SUCCESS_STATUS or (
+        status_code not in _NO_KKT_FALLBACK_STATUS
+        and np.isfinite(kkt_error)
+        and kkt_error <= acceptable_tol
+    )
     # The converged factor is trustworthy when the derivatives that built it
     # were exact and the solve actually held a factor. (Scaling state no
     # longer enters: factor back-solves are scaling-corrected, pounce#128.)
@@ -776,11 +808,15 @@ def _solve_fit(
         pcov, cov_source = _stream_covariance(
             solver, popt, pr.data_source, pr.model, pr.model_jac, pr.loss_fn,
             pr.fs2, s2, pr.is_robust, active_mask, pr.n, pr.m_con, factor_ok,
+            jac_combined=pr.jac_combined, g_combined=pr.g_combined,
+            cl=pr.cl, cu=pr.cu,
         )
     else:
         pcov, cov_source = _covariance(
             solver, popt, pr.model_jac, pr.xdata, pr.w, s2, pr.is_robust,
             pr.residual, pr.loss_fn, pr.fs2, active_mask, pr.n, pr.m_con, factor_ok,
+            jac_combined=pr.jac_combined, g_combined=pr.g_combined,
+            cl=pr.cl, cu=pr.cu,
         )
     perr = np.sqrt(np.clip(np.diag(pcov), 0.0, None))
     # Use max(dof, 1) for the quantile so the t-value stays finite; when dof <= 0
@@ -1050,6 +1086,7 @@ class _StreamingClosures:
 def _stream_covariance(
     solver, popt, data_source, model, model_jac, loss_fn, fs2,
     s2, is_robust, active_mask, n, m_con, factor_ok,
+    jac_combined=None, g_combined=None, cl=None, cu=None,
 ):
     """Streaming counterpart of :func:`_covariance`.
 
@@ -1090,9 +1127,10 @@ def _stream_covariance(
         Ainv = np.linalg.pinv(A)
         return s2 * (Ainv @ B @ Ainv), "sandwich"
     if has_active:
-        free = ~active_mask if active_mask is not None else np.ones(n, bool)
-        cov = np.zeros((n, n))
-        cov[np.ix_(free, free)] = s2 * np.linalg.pinv(M[np.ix_(free, free)])
+        A_gen = _active_constraint_jac(popt, jac_combined, g_combined, cl, cu)
+        cov = _projected_covariance(M, s2, active_mask, A_gen, n)
+        if _n_active(active_mask, A_gen) == 0:
+            return cov, "jacobian"
         return cov, "reduced_hessian(projected)"
     return s2 * np.linalg.pinv(M), "jacobian"
 
@@ -1174,7 +1212,12 @@ def _build_streaming_fit_problem(
     model_jac, jac_exact, _ = _resolve_model_jac(f, model, jac, probe_x, p0)
 
     closures = _StreamingClosures(data_source, model, model_jac, loss_fn, fs2, n)
-    m_con, g_combined, jac_combined, cl, cu, _, _ = _wrap_constraints(constraints, n)
+    # Probe constraints at the starting seed, not the origin (L47 — mirrors
+    # _minimize.py passing x0). Last two return values are COO sparsity, unused
+    # on the dense fit path.
+    m_con, g_combined, jac_combined, cl, cu, _, _ = _wrap_constraints(
+        constraints, n, np.asarray(p0, dtype=float)
+    )
 
     return _FitProblem(
         f=f, model=model, model_jac=model_jac, residual=None,
@@ -1493,9 +1536,73 @@ def _inv_hessian_from_factor(solver, n, m_con):
     return 0.5 * (cols + cols.T)
 
 
+def _active_constraint_jac(popt, jac_combined, g_combined, cl, cu, tol=1e-6):
+    """Rows of the general-constraint Jacobian active at ``popt``.
+
+    A constraint row is active when it binds: an equality (``cl == cu``) is
+    always active; an inequality is active when its value sits on either bound
+    within ``tol``. Returns the ``(n_active, n)`` active Jacobian (possibly
+    zero rows), or ``None`` when there are no general constraints. This is the
+    linearization of the (possibly nonlinear) constraints at ``popt`` — the
+    first-order set whose nullspace the asymptotic covariance lives in.
+    """
+    if jac_combined is None or cl is None or cu is None:
+        return None
+    Jc = np.atleast_2d(_to_array(jac_combined(popt)))
+    g = _to_array(g_combined(popt)).ravel()
+    keep = np.zeros(Jc.shape[0], dtype=bool)
+    for i in range(Jc.shape[0]):
+        lo, hi = float(cl[i]), float(cu[i])
+        if lo == hi:                                   # equality: always binds
+            keep[i] = True
+        elif np.isfinite(lo) and abs(g[i] - lo) <= tol * max(1.0, abs(lo)):
+            keep[i] = True
+        elif np.isfinite(hi) and abs(hi - g[i]) <= tol * max(1.0, abs(hi)):
+            keep[i] = True
+    return Jc[keep]
+
+
+def _projected_covariance(M, s2, active_mask, A_gen, n):
+    """``s2`` times the inverse reduced Hessian projected onto the joint
+    active-constraint nullspace.
+
+    The active set is the union of active variable bounds (unit rows ``e_j``
+    for ``active_mask[j]``) and the active general-constraint rows ``A_gen``.
+    With ``Z`` an orthonormal basis of ``null(A)``, the constrained covariance
+    is ``s2 Z (Z^T M Z)^-1 Z^T`` — zero variance along constrained directions
+    plus the induced cross-parameter correlations. For a bounds-only active
+    set ``Z`` is the free coordinate subspace and this reduces *exactly* to
+    zeroing the bound rows/cols of ``s2 pinv(M)`` (the prior behavior).
+    """
+    rows = []
+    if active_mask is not None and active_mask.any():
+        rows.append(np.eye(n)[active_mask])
+    if A_gen is not None and A_gen.shape[0] > 0:
+        rows.append(np.atleast_2d(A_gen))
+    if not rows:                                        # nothing binds
+        return s2 * np.linalg.pinv(M)
+    A = np.vstack(rows)
+    # orthonormal nullspace basis of A via SVD (rank-robust).
+    _, sv, Vt = np.linalg.svd(A)
+    tol = max(A.shape) * np.finfo(float).eps * (sv[0] if sv.size else 0.0)
+    rank = int((sv > tol).sum())
+    Z = Vt[rank:].T                                     # (n, n - rank)
+    if Z.shape[1] == 0:                                 # active set pins x fully
+        return np.zeros((n, n))
+    return s2 * Z @ np.linalg.pinv(Z.T @ M @ Z) @ Z.T
+
+
+def _n_active(active_mask, A_gen):
+    """Total active constraints (bounds + general rows)."""
+    nb = int(active_mask.sum()) if active_mask is not None else 0
+    ng = 0 if A_gen is None else int(A_gen.shape[0])
+    return nb + ng
+
+
 def _covariance(
     solver, popt, model_jac, xdata, w, s2, is_robust,
     residual, loss_fn, fs2, active_mask, n, m_con, factor_ok,
+    jac_combined=None, g_combined=None, cl=None, cu=None,
 ):
     """Parameter covariance.
 
@@ -1506,8 +1613,15 @@ def _covariance(
     matrix inverse; the back-solve is scaling-corrected, pounce#128);
     otherwise it is formed from the model Jacobian, which is
     scaling-independent and gives the identical value. Robust losses
-    use the sandwich estimator; active bounds/constraints project onto the
-    free parameter set.
+    use the sandwich estimator.
+
+    Active variable bounds *and* active general constraints project the
+    covariance onto the joint active-constraint nullspace (see
+    :func:`_projected_covariance`). ``M`` is the Gauss-Newton Hessian and the
+    active constraints are linearized at ``popt``, so for nonlinear models or
+    constraints this is the standard first-order (delta-method) asymptotic
+    covariance — it omits the constraint-curvature term ``sum lambda_i H_i``,
+    which vanishes for linear constraints and is higher-order otherwise.
     """
     J = model_jac(xdata, popt)              # (m, n) dmodel/dp
     Jw = J * w[:, None]                      # weighted Jacobian
@@ -1524,11 +1638,15 @@ def _covariance(
         Ainv = np.linalg.pinv(A)
         return s2 * (Ainv @ B @ Ainv), "sandwich"
 
-    # active bounds / general constraints: project onto the free set.
+    # active bounds and/or active general constraints: project the inverse
+    # reduced Hessian onto the joint active-constraint nullspace.
     if m_con > 0 or (active_mask is not None and active_mask.any()):
-        free = ~active_mask if active_mask is not None else np.ones(n, bool)
-        cov = np.zeros((n, n))
-        cov[np.ix_(free, free)] = s2 * np.linalg.pinv(M[np.ix_(free, free)])
+        A_gen = _active_constraint_jac(popt, jac_combined, g_combined, cl, cu)
+        cov = _projected_covariance(M, s2, active_mask, A_gen, n)
+        if _n_active(active_mask, A_gen) == 0:
+            # m_con > 0 but every inequality is slack and no bound binds: the
+            # covariance is the plain unconstrained one (nothing to project).
+            return cov, "jacobian"
         return cov, "reduced_hessian(projected)"
 
     # interior least-squares optimum.

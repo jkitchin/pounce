@@ -262,3 +262,181 @@ fn schema_field_is_stable_across_runs() {
     let _ = std::fs::remove_file(&p1);
     let _ = std::fs::remove_file(&p2);
 }
+
+/// H3 regression: the JSON / `.sol` `lambda` block must be in original
+/// `.nl` g-row order, not the internal c/d-split order (all equalities
+/// then all inequalities). AMPL / Pyomo read the dual block positionally,
+/// so a permuted block silently assigns each constraint the wrong dual.
+///
+/// Fixture `dual_order.nl` (pyomo-generated) interleaves the two kinds:
+///
+/// ```text
+///   min (x-3)^2 + (y-30)^2
+///   s.t.  g0:  x <= 2     (INEQUALITY, active  -> internal y_d block)
+///         g1:  y == 1     (EQUALITY            -> internal y_c block)
+/// ```
+///
+/// At the optimum x=2 (active), y=1: the g0 inequality dual is ≈2
+/// (`2·(3-2)`) and the g1 equality dual is ≈58 (`2·(30-1)`). Correct
+/// g-order is therefore `lambda = [≈2, ≈58]`. The pre-fix hook emitted
+/// the raw `y_c`-then-`y_d` concatenation = `[≈58, ≈2]` — the duals
+/// swapped onto the wrong constraints. Magnitudes are an order apart so
+/// the swap is unambiguous regardless of sign convention.
+#[test]
+fn lambda_is_in_original_g_order_not_cd_split_order() {
+    fn fixture_named(name: &str) -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push(name);
+        p
+    }
+
+    let json_path = tmp_path("dual_order.json");
+    let _ = std::fs::remove_file(&json_path);
+    // Force the general NLP filter-IPM path (whose `on_converged` hook
+    // builds the captured dual block).
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("dual_order.nl"))
+        .arg("--no-sol")
+        .arg("--json-output")
+        .arg(&json_path)
+        .arg("solver_selection=nlp")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "solve should succeed; stderr=\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = std::fs::read_to_string(&json_path).expect("read report");
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize");
+
+    // Sanity: x at the active bound, y pinned.
+    assert!(
+        (report.solution.x[0] - 2.0).abs() < 1e-5,
+        "x0 = {}",
+        report.solution.x[0]
+    );
+    assert!(
+        (report.solution.x[1] - 1.0).abs() < 1e-5,
+        "x1 = {}",
+        report.solution.x[1]
+    );
+
+    assert_eq!(report.solution.lambda.len(), 2, "two constraint duals");
+    let g0 = report.solution.lambda[0].abs(); // x<=2 inequality
+    let g1 = report.solution.lambda[1].abs(); // y==1 equality
+    assert!(
+        (g0 - 2.0).abs() < 1e-3,
+        "lambda[0] (g0, the x<=2 inequality) = {} expected |·|≈2; \
+         pre-fix c/d-split order put the equality's ≈58 dual here",
+        report.solution.lambda[0]
+    );
+    assert!(
+        (g1 - 58.0).abs() < 1e-3,
+        "lambda[1] (g1, the y==1 equality) = {} expected |·|≈58; \
+         pre-fix c/d-split order put the inequality's ≈2 dual here",
+        report.solution.lambda[1]
+    );
+
+    let _ = std::fs::remove_file(&json_path);
+}
+
+/// F1 regression (pounce#11): the reported `lambda` must be in the user's
+/// **unscaled-Lagrangian** convention — i.e. divided by `obj_scale_factor`
+/// when gradient-based objective scaling triggers. The `on_converged` hook
+/// (and `finalize_via_orig_nlp`) historically packed duals via
+/// `pack_lambda_for_user`, which applies `c_scale`/`d_scale` but NOT the
+/// `obj_scale_factor` division (that family feeds the scaled `eval_h`), so
+/// every dual came back scaled by `obj_scale_factor` whenever scaling kicked
+/// in. The sibling `finalize_solution_lambda` does the division; the hook now
+/// uses it.
+///
+/// Fixture `dual_scaled.nl` is `dual_order.nl` with the y-target moved from 30
+/// to 3000:
+///
+/// ```text
+///   min (x-3)^2 + (y-3000)^2
+///   s.t.  g0:  x <= 2     (inequality, active)
+///         g1:  y == 1     (equality)
+/// ```
+///
+/// The default `gradient-based` scaling reads the objective gradient at the
+/// start point x0=(0,0): `‖∇f‖∞ = 2·3000 = 6000 > nlp_scaling_max_gradient`
+/// (100), so `obj_scale_factor = 100/6000 = 1/60`. The true unscaled duals at
+/// the optimum (x=2 active, y=1) are `lambda = [2, 5998]` (`2·(3-2)`,
+/// `2·(3000-1)`). The pre-fix hook reported these scaled by 1/60 —
+/// `≈[0.033, 99.97]`. The 60× gap makes the regression unambiguous.
+#[test]
+fn lambda_is_unscaled_by_obj_scale_factor_under_gradient_scaling() {
+    fn fixture_named(name: &str) -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push(name);
+        p
+    }
+
+    let json_path = tmp_path("dual_scaled.json");
+    let _ = std::fs::remove_file(&json_path);
+    // Default scaling (gradient-based) is intentionally left ON — that is what
+    // creates the `obj_scale_factor != 1` the fix must divide out.
+    let out = Command::new(pounce_exe())
+        .arg(fixture_named("dual_scaled.nl"))
+        .arg("--no-sol")
+        .arg("--json-output")
+        .arg(&json_path)
+        .arg("solver_selection=nlp")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "solve should succeed; stderr=\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = std::fs::read_to_string(&json_path).expect("read report");
+    let report: SolveReport = serde_json::from_str(&text).expect("deserialize");
+
+    // Sanity: same optimum as dual_order (x at the active bound, y pinned).
+    assert!(
+        (report.solution.x[0] - 2.0).abs() < 1e-5,
+        "x0 = {}",
+        report.solution.x[0]
+    );
+    assert!(
+        (report.solution.x[1] - 1.0).abs() < 1e-5,
+        "x1 = {}",
+        report.solution.x[1]
+    );
+
+    assert_eq!(report.solution.lambda.len(), 2, "two constraint duals");
+    let g0 = report.solution.lambda[0].abs(); // x<=2 inequality
+    let g1 = report.solution.lambda[1].abs(); // y==1 equality
+                                              // The decisive check: pre-fix this was ≈99.97 (= 5998/60); the unscaled
+                                              // value is 5998. Anything near 100 means the obj_scale division is missing.
+    assert!(
+        g1 > 1000.0,
+        "lambda[1] (g1, y==1 equality) = {} is scaled by obj_scale_factor; \
+         expected the unscaled |·|≈5998, not the ≈99.97 the pre-F1 hook emitted",
+        report.solution.lambda[1]
+    );
+    assert!(
+        (g0 - 2.0).abs() < 1e-2,
+        "lambda[0] (g0, x<=2 inequality) = {} expected unscaled |·|≈2 \
+         (pre-fix ≈0.033 = 2/60)",
+        report.solution.lambda[0]
+    );
+    assert!(
+        (g1 - 5998.0).abs() < 1e-1,
+        "lambda[1] (g1, y==1 equality) = {} expected unscaled |·|≈5998 \
+         (pre-fix ≈99.97 = 5998/60)",
+        report.solution.lambda[1]
+    );
+
+    let _ = std::fs::remove_file(&json_path);
+}

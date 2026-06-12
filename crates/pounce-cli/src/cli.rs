@@ -247,9 +247,15 @@ impl Args {
 Usage: pounce [OPTIONS] [PATH] [SOL] [KEY=VALUE ...]
 
 PATH is an AMPL .nl file (positional). Equivalent: --nl-file <path>.
+An extensionless AMPL stub is accepted: if PATH is missing but PATH.nl
+exists, PATH.nl is read (the `pounce mystub -AMPL` invocation convention).
 SOL is an optional second positional naming the .sol output file
 (equivalent to --sol-output <path>); the AMPL `solver in.nl out.sol`
 convention.
+
+Options may also be supplied via the `pounce_options` environment
+variable (AMPL's `<solver>_options` convention): a whitespace-separated
+list of KEY=VALUE tokens. Command-line KEY=VALUE options override it.
 
 Subcommand:
   pounce verify <problem.nl> <claim.sol> [--feas-tol T] [--json-output P]
@@ -413,6 +419,14 @@ Multistart / find-minima (search for several local minima, not one):
         let mut debug_on_interrupt = false;
         let mut debug_script: Option<PathBuf> = None;
         let mut minima: Option<MinimaArgs> = None;
+        // Global search is enabled ONLY by an explicit method selector
+        // (`--minima <m>` / `--multistart`). The tuning knobs below
+        // (`--seed`, `--patience`, …) populate the config but must not, on
+        // their own, switch the run into multistart mode — track whether a
+        // method was explicitly chosen and which lone knob (if any) was seen
+        // so we can reject a knob-without-method invocation after parsing.
+        let mut minima_method_explicit = false;
+        let mut minima_knob: Option<&'static str> = None;
 
         let mut it = argv.into_iter().skip(1).peekable();
         // Shorthand: fetch the value for a flag that requires one.
@@ -429,11 +443,17 @@ Multistart / find-minima (search for several local minima, not one):
                 let v = flag_val!($flag);
                 let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
                 minima.get_or_insert_with(MinimaArgs::default).$field = parsed;
+                if minima_knob.is_none() {
+                    minima_knob = Some($flag);
+                }
             }};
             ($flag:expr, $ty:ty, $field:ident, opt) => {{
                 let v = flag_val!($flag);
                 let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
                 minima.get_or_insert_with(MinimaArgs::default).$field = Some(parsed);
+                if minima_knob.is_none() {
+                    minima_knob = Some($flag);
+                }
             }};
         }
         while let Some(arg) = it.next() {
@@ -546,10 +566,12 @@ Multistart / find-minima (search for several local minima, not one):
                     let v = flag_val!("--minima");
                     let method = MinimaMethod::parse(&v)?;
                     minima.get_or_insert_with(MinimaArgs::default).method = method;
+                    minima_method_explicit = true;
                 }
                 "--multistart" => {
                     minima.get_or_insert_with(MinimaArgs::default).method =
                         MinimaMethod::Multistart;
+                    minima_method_explicit = true;
                 }
                 "--n-minima" => minima_num!("--n-minima", usize, n_minima),
                 "--max-solves" => minima_num!("--max-solves", usize, max_solves, opt),
@@ -559,9 +581,15 @@ Multistart / find-minima (search for several local minima, not one):
                 "--seed" => minima_num!("--seed", u64, seed),
                 "--sobol" => {
                     minima.get_or_insert_with(MinimaArgs::default).sobol = true;
+                    if minima_knob.is_none() {
+                        minima_knob = Some("--sobol");
+                    }
                 }
                 "--no-sobol" => {
                     minima.get_or_insert_with(MinimaArgs::default).sobol = false;
+                    if minima_knob.is_none() {
+                        minima_knob = Some("--no-sobol");
+                    }
                 }
                 "--sigma" => minima_num!("--sigma", f64, sigma, opt),
                 "--sigma-frac" => minima_num!("--sigma-frac", f64, sigma_frac, opt),
@@ -612,6 +640,19 @@ Multistart / find-minima (search for several local minima, not one):
         }
 
         if !help && !version && !about && !cite {
+            // A `--minima` *tuning* knob on its own used to lazily create a
+            // config and silently reroute the whole run into multistart
+            // (deflation) mode — different console output and a dual-free
+            // `.sol`. Global search must be opted into explicitly; reject a
+            // lone knob with a message pointing at the method selectors.
+            if let Some(knob) = minima_knob {
+                if !minima_method_explicit {
+                    return Err(format!(
+                        "{knob} is a --minima tuning knob and has no effect on its own; \
+                         enable global search with --minima <method> or --multistart"
+                    ));
+                }
+            }
             let problem = problem.ok_or_else(|| {
                 "missing problem: pass a positional .nl path, --nl-file, or --problem".to_string()
             })?;
@@ -687,6 +728,20 @@ fn parse_kv(s: &str) -> Option<(String, String)> {
         return None;
     }
     Some((k.to_string(), v.to_string()))
+}
+
+/// Parse the AMPL `pounce_options` environment variable into
+/// `(key, value)` option pairs.
+///
+/// AMPL passes solver directives through a `<solver>_options` env var
+/// (here `pounce_options`): a whitespace-separated list of `key=value`
+/// tokens — the same `key=value` grammar pounce accepts as positional CLI
+/// options. Tokens without an `=` (AMPL's rarer `keyword value` spelling)
+/// are skipped rather than guessed at, matching the CLI parser, which has
+/// no `key value` form either. The caller applies these *before* the
+/// command-line `key=value` options so an explicit CLI flag wins.
+pub fn options_from_env(value: &str) -> Vec<(String, String)> {
+    value.split_whitespace().filter_map(parse_kv).collect()
 }
 
 #[cfg(test)]
@@ -1046,6 +1101,37 @@ mod tests {
         assert!(Args::parse_argv(argv(&["/tmp/foo.nl", "--minima", "nope"])).is_err());
     }
 
+    /// Code-review 2026-06 item M14: a `--minima` tuning knob (`--seed`,
+    /// `--patience`, `--no-sobol`, …) on its own used to lazily build a
+    /// `MinimaArgs` and silently reroute the whole run into multistart
+    /// (deflation) mode. It must now be rejected with a message pointing
+    /// at the method selectors.
+    #[test]
+    fn lone_minima_knob_without_method_is_rejected() {
+        let err = Args::parse_argv(argv(&["/tmp/foo.nl", "--seed", "42"]))
+            .expect_err("lone --seed should be rejected");
+        assert!(
+            err.contains("--seed") && err.contains("--minima"),
+            "error should name the knob and the method selectors; got: {err}"
+        );
+        // A no-value knob (`--no-sobol`) is rejected the same way.
+        let err2 = Args::parse_argv(argv(&["/tmp/foo.nl", "--no-sobol"]))
+            .expect_err("lone --no-sobol should be rejected");
+        assert!(err2.contains("--no-sobol"), "got: {err2}");
+        // And a lone knob does NOT leave the run in minima mode.
+        assert!(Args::parse_argv(argv(&["/tmp/foo.nl", "--seed", "42"])).is_err());
+    }
+
+    /// The same knob is accepted once global search is explicitly enabled,
+    /// regardless of flag order (knob before the method selector).
+    #[test]
+    fn minima_knob_with_explicit_method_is_accepted() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--seed", "7", "--multistart"])).unwrap();
+        let m = a.minima.expect("minima parsed");
+        assert_eq!(m.method, MinimaMethod::Multistart);
+        assert_eq!(m.seed, 7);
+    }
+
     #[test]
     fn parse_kv_basic() {
         assert_eq!(
@@ -1059,5 +1145,43 @@ mod tests {
         assert_eq!(parse_kv("plain_path.nl"), None);
         assert_eq!(parse_kv("=value"), None);
         assert_eq!(parse_kv("key="), None);
+    }
+
+    #[test]
+    fn options_from_env_parses_whitespace_separated_pairs() {
+        // AMPL `<solver>_options` convention: a whitespace-separated list
+        // of key=value tokens. Code review 2026-06 item M15.
+        assert_eq!(
+            options_from_env("max_iter=100 tol=1e-8"),
+            vec![
+                ("max_iter".into(), "100".into()),
+                ("tol".into(), "1e-8".into()),
+            ]
+        );
+        // Multiple spaces / tabs / newlines all split.
+        assert_eq!(
+            options_from_env("a=1\tb=2\n c=3"),
+            vec![
+                ("a".into(), "1".into()),
+                ("b".into(), "2".into()),
+                ("c".into(), "3".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn options_from_env_skips_non_kv_tokens_and_empty() {
+        // Tokens without `=` (AMPL's `keyword value` spelling) are skipped,
+        // matching the CLI grammar, which has no `key value` form either.
+        assert_eq!(
+            options_from_env("max_iter=100 bareword tol=1e-8"),
+            vec![
+                ("max_iter".into(), "100".into()),
+                ("tol".into(), "1e-8".into()),
+            ]
+        );
+        assert!(options_from_env("").is_empty());
+        assert!(options_from_env("   \t\n ").is_empty());
+        assert!(options_from_env("just some words").is_empty());
     }
 }

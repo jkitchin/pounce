@@ -76,8 +76,40 @@ impl PySolver {
         drop(problem);
 
         let bridge_for_solver: Rc<RefCell<dyn TNLP>> = bridge.clone();
-        let mut inner = RustSolver::new(app, bridge_for_solver);
-        let status: ApplicationReturnStatus = inner.solve();
+        let inner = RustSolver::new(app, bridge_for_solver);
+
+        // Release the GIL during the IPM run so `Solver` instances on other OS
+        // threads (e.g. concurrent `curve_fit` / jax-host solves) overlap their
+        // iterations. Every TNLP callback in `tnlp_bridge.rs` re-acquires the
+        // GIL via `Python::with_gil` before touching Python, so re-entrancy is
+        // safe and serialized the usual way. Mirrors `PyProblem::solve`.
+        //
+        // SAFETY: `inner` carries `Rc<RefCell<…>>` (pounce_nlp is single-thread
+        // refcounted). `allow_threads` requires `Send`, so we wrap the move in a
+        // transparent `SendGuard`; the closure does not actually cross OS
+        // threads — `allow_threads` runs its body on the calling thread after
+        // `PyEval_SaveThread`, so the `Rc`/`RefCell` are only ever touched by
+        // this one thread. Method-call captures (vs. field-access `.0`) defeat
+        // the 2021-edition disjoint-capture rule, so the closure captures the
+        // whole `SendGuard` rather than peeking at the inner `Rc`.
+        struct SendGuard<T>(T);
+        unsafe impl<T> Send for SendGuard<T> {}
+        impl<T> SendGuard<T> {
+            fn into_inner(self) -> T {
+                self.0
+            }
+            fn new(v: T) -> Self {
+                Self(v)
+            }
+        }
+        let inner_guard = SendGuard::new(inner);
+        let (status, inner_back): (ApplicationReturnStatus, SendGuard<RustSolver>) = py
+            .allow_threads(move || {
+                let mut inner = inner_guard.into_inner();
+                let status = inner.solve();
+                (status, SendGuard::new(inner))
+            });
+        let inner = inner_back.into_inner();
         let stats = inner.app().statistics();
         let info = build_info_dict(
             py,

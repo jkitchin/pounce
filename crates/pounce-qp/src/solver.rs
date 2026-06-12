@@ -120,8 +120,7 @@ impl ParametricActiveSetSolver {
                 rhs.copy_from_slice(&rhs_local);
                 return Ok(0.0);
             }
-            Err(QpError::LinearSolverFailure(ref msg))
-                if msg.contains("inertia") || msg.contains("singular") => {}
+            Err(ref e) if e.is_recoverable_factorization_failure() => {}
             Err(e) => return Err(e),
         }
 
@@ -139,9 +138,7 @@ impl ParametricActiveSetSolver {
                     rhs.copy_from_slice(&rhs_local);
                     return Ok(current);
                 }
-                Err(QpError::LinearSolverFailure(ref msg))
-                    if msg.contains("inertia") || msg.contains("singular") =>
-                {
+                Err(ref e) if e.is_recoverable_factorization_failure() => {
                     next *= opts.inertia_shift_factor;
                 }
                 Err(e) => return Err(e),
@@ -563,13 +560,85 @@ impl ParametricActiveSetSolver {
         // eigenvalues (Gould-Hribar-Nocedal 2001 §3.2). The
         // inertia-control retry handles indefinite reduced H via
         // §4.5.
-        self.factorize_with_inertia_control(kkt, &mut rhs, qp.m as i32, qp.n, opts)?;
+        let delta = self.factorize_with_inertia_control(kkt, &mut rhs, qp.m as i32, qp.n, opts)?;
 
         // RHS now holds [x*; λ*].
         let mut x = vec![0.0; qp.n];
         x.copy_from_slice(&rhs[..qp.n]);
         let mut lambda_g = vec![0.0; qp.m];
         lambda_g.copy_from_slice(&rhs[qp.n..]);
+
+        // H1 / N1: the inertia-control retry solved the *shifted* system
+        // `(H+δI)` when `δ > 0`, which it must do whenever the reduced
+        // Hessian is not PD on null(A). A `δ > 0` solve is consistent with
+        // BOTH a bounded QP (the regularizer merely picks the min-norm
+        // point along a flat, gradient-free direction) and an unbounded
+        // one — so the shift alone proves nothing.
+        //
+        // The discriminator is a *certified recession ray*. A QP
+        // `min ½xᵀHx + gᵀx  s.t. Ax = b` is unbounded below iff there is a
+        // direction `d` with `Hd = 0` (zero curvature — for PSD H
+        // equivalent to `dᵀHd = 0`), `Ad = 0` (stays feasible), and
+        // `gᵀd < 0` (descent). The shifted solve manufactures exactly
+        // this witness when one exists: any descent component of `-g`
+        // lying in a zero-curvature, feasible direction is amplified by
+        // `1/δ`, so the normalized iterate `d = x/‖x‖` converges to that
+        // recession ray as `δ → 0`. We therefore certify the three
+        // conditions directly on `d`.
+        //
+        // This replaces the earlier magnitude heuristic `δ·‖x‖∞ >
+        // 1e-3·‖g‖∞`, which fired on any large `‖x‖` and could not
+        // distinguish a large-but-finite minimizer in a *curved*
+        // direction (e.g. `H = diag(1e-6, 0)`, `g = (-1, 0)`: the curved
+        // x₁ runs out to its finite optimum ≈ 1e6) from a genuine blow-up
+        // along a *flat* descent ray (N1 false positive). The curvature
+        // clause `‖Hd‖∞ ≈ 0` (structural-zero floor, see
+        // `ray_is_unbounded_descent`) rejects the former (there `‖Hd‖∞ ≈
+        // ‖H‖`) and admits the latter.
+        if delta > 0.0 {
+            // Feasibility of the candidate ray `d = x/‖x‖`: the saddle
+            // solve enforced `Ax = b` exactly, so `Ad = b/‖x‖`, which the
+            // blow-up drives to ~0. Verify it explicitly (cheap guard;
+            // trivially satisfied in the unconstrained `m = 0` case), then
+            // delegate the curvature + descent clauses to the shared test.
+            let x_norm = x.iter().map(|v| v * v).sum::<Number>().sqrt();
+            let feasible_ray = if x_norm > 0.0 {
+                let inv = 1.0 / x_norm;
+                let mut ad = vec![0.0; qp.m];
+                let mut a_scale: Number = 0.0;
+                let irows = qp.a.irows();
+                let jcols = qp.a.jcols();
+                let vals = qp.a.values();
+                for k in 0..irows.len() {
+                    let i = (irows[k] - 1) as usize;
+                    let j = (jcols[k] - 1) as usize;
+                    a_scale = a_scale.max(vals[k].abs());
+                    ad[i] += vals[k] * x[j] * inv;
+                }
+                let ad_inf = ad.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                ad_inf <= 1e-6 * (1.0 + a_scale)
+            } else {
+                false
+            };
+
+            if feasible_ray && ray_is_unbounded_descent(qp.h, qp.g, &x, &x) {
+                return Ok(QpSolution {
+                    x,
+                    lambda_g,
+                    lambda_x: vec![0.0; qp.n],
+                    working: WorkingSet::cold(qp.n, qp.m),
+                    obj: Number::NEG_INFINITY,
+                    status: QpStatus::Unbounded,
+                    stats: QpStats {
+                        n_working_set_changes: 0,
+                        n_refactor: 1,
+                        n_schur_updates: 0,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
+        }
 
         let obj = quad_objective(qp, &x);
 
@@ -679,7 +748,8 @@ impl ParametricActiveSetSolver {
                 *rhs_i = -(hx_i + g_i);
             }
 
-            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
+            let delta =
+                self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, qp.n, opts)?;
             n_refactor += 1;
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -842,6 +912,35 @@ impl ParametricActiveSetSolver {
             }
 
             let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
+
+            // F2(a): certified unboundedness on the active-set path. An
+            // empty candidate list means NO inactive row or bound blocks
+            // along `+p` (and `p` already lies in the active constraints'
+            // null space), so `+p` is feasible for every step length — a
+            // recession ray if it is also zero-curvature and descent.
+            // We only reach for this when the inertia shift fired
+            // (`delta > 0`, i.e. the reduced Hessian was singular on the
+            // active null space); a PD reduced Hessian gives a finite
+            // Newton step and never trips here. Without this the loop
+            // takes unbounded full steps until `MaxIter` (δ discarded).
+            if candidates.is_empty() && delta > 0.0 && ray_is_unbounded_descent(qp.h, qp.g, &x, &p)
+            {
+                return Ok(QpSolution {
+                    obj: Number::NEG_INFINITY,
+                    x,
+                    lambda_g: vec![0.0; m],
+                    lambda_x: vec![0.0; n],
+                    working,
+                    status: QpStatus::Unbounded,
+                    stats: QpStats {
+                        n_working_set_changes: n_changes,
+                        n_refactor,
+                        n_schur_updates: 0,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
 
             if alpha < 0.0 {
                 alpha = 0.0;
@@ -1034,8 +1133,18 @@ impl ParametricActiveSetSolver {
             working: working_aug,
         };
 
-        // Recursive solve through the standard path.
-        let sol_aug = self.solve_general(&qp_aug, Some(&ws), opts)?;
+        // Recursive solve through the standard path, honoring the
+        // same Schur-vs-refactor choice the top-level `solve` makes
+        // (L15: this previously hard-called `solve_general`, so an
+        // infeasible problem solved with `use_schur_updates = true`
+        // silently fell back to the refactor path). Both inner solvers
+        // bypass the `solve` feasibility audit, so the recursive solve
+        // is still never re-audited and the recovery cannot loop.
+        let sol_aug = if opts.use_schur_updates {
+            self.solve_general_schur(&qp_aug, Some(&ws), opts)?
+        } else {
+            self.solve_general(&qp_aug, Some(&ws), opts)?
+        };
 
         // Pack the original-space solution.
         let x = sol_aug.x[..n].to_vec();
@@ -1082,11 +1191,27 @@ impl ParametricActiveSetSolver {
     /// working-set change. Resets the cached factor when the
     /// Schur block reaches `max_schur_updates_before_refactor`.
     ///
-    /// Behavior is algorithmically identical to the refactor-per-
-    /// iteration path: same drop / ratio-test logic, same exit
-    /// conditions. The difference is the inner-loop cost: one
-    /// cached resolve + small dense Schur solve per iteration,
-    /// plus two cached resolves per working-set change.
+    /// Behavior matches the refactor-per-iteration path on every
+    /// problem with a positive-definite reduced Hessian: same drop /
+    /// ratio-test logic, same exit conditions. The difference is the
+    /// inner-loop cost: one cached resolve + small dense Schur solve
+    /// per iteration, plus two cached resolves per working-set change.
+    ///
+    /// Caveat (indefinite reduced Hessian only): the refactor path
+    /// runs `factorize_with_inertia_control` — re-checking inertia
+    /// and applying a δ-shift — on *every* iteration, whereas this
+    /// path only runs inertia control inside `SchurState::reset`
+    /// (at init and every `max_schur_updates_before_refactor`
+    /// working-set changes). The rank-2 SMW update in `apply_change`
+    /// does *not* re-check inertia. A DROP enlarges the active-set
+    /// null space and can expose negative curvature that the cached
+    /// factor does not regularize until the next reset; an ADD only
+    /// shrinks the null space and cannot introduce new negative
+    /// curvature. For the convex default (`HessianInertia::Psd`,
+    /// which is what the SQP driver feeds) the reduced Hessian is
+    /// always PD, so the two paths are identical; the gap is latent
+    /// for indefinite inputs on the opt-in `use_schur_updates = true`
+    /// path. See code-review item M10.
     fn solve_general_schur(
         &mut self,
         qp: &QpProblem,
@@ -1257,6 +1382,35 @@ impl ParametricActiveSetSolver {
                 }
             }
             let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
+
+            // F2(a), Schur path. Same certificate as `solve_general`: an
+            // empty candidate list means `+p` is feasible for every step
+            // length, so a zero-curvature descent `p` is a recession ray.
+            // The Schur driver hides the per-iterate inertia shift inside
+            // `SchurState`, so unlike `solve_general` we cannot gate on
+            // `delta > 0` here — but `ray_is_unbounded_descent` rejects
+            // any direction with measurable curvature (`‖Hp‖∞` above the
+            // 1e-10·‖H‖ structural-zero floor), so a PD-reduced-Hessian
+            // Newton step never certifies and the unconditional check is
+            // still safe.
+            if candidates.is_empty() && ray_is_unbounded_descent(qp.h, qp.g, &x, &p) {
+                return Ok(QpSolution {
+                    obj: Number::NEG_INFINITY,
+                    x,
+                    lambda_g: vec![0.0; m],
+                    lambda_x: vec![0.0; n],
+                    working,
+                    status: QpStatus::Unbounded,
+                    stats: QpStats {
+                        n_working_set_changes: n_changes,
+                        n_refactor,
+                        n_schur_updates,
+                        used_phase1: false,
+                        time: started.elapsed(),
+                    },
+                });
+            }
+
             if alpha < 0.0 {
                 alpha = 0.0;
             }
@@ -1463,11 +1617,34 @@ fn select_blocker(
                     best = Some((target, r, ap_mag));
                 }
             }
-            let (target, r, _) = best.expect("non-empty candidates above");
-            // Floor the step length at the τ-relaxed minimum so
-            // we never freeze at α = 0; cap at 1.0.
-            let alpha = r.max(alpha_min_relaxed).min(1.0).max(0.0);
-            (alpha, Some(target))
+            match best {
+                Some((target, r, _)) => {
+                    // Floor the step length at the τ-relaxed minimum so
+                    // we never freeze at α = 0; cap at 1.0.
+                    let alpha = r.max(alpha_min_relaxed).min(1.0).max(0.0);
+                    (alpha, Some(target))
+                }
+                None => {
+                    // Pass 2 admitted nothing. This happens when every
+                    // candidate's τ-relaxed ratio exceeds the artificial
+                    // `α_min_relaxed = 1.0` initialization cap by more than
+                    // `tol` — reachable when |a·p| ≈ feas_tol makes
+                    // `τ/|a·p|` inflate `r_relaxed` above `1 + tol` for ALL
+                    // candidates (so the recorded minimum is the cap, which
+                    // no real candidate attains). Fall back to the strict
+                    // minimum-ratio blocker (guaranteed to exist since
+                    // `α_min < 1.0`) and step exactly `α_min`: never freeze,
+                    // panic, or overstep the first blocking constraint.
+                    let mut fb: Option<BlockerTarget> = None;
+                    for &(target, r, _) in candidates {
+                        if r <= alpha_min {
+                            fb = Some(target);
+                            break;
+                        }
+                    }
+                    (alpha_min, fb)
+                }
+            }
         }
     }
 }
@@ -1496,10 +1673,32 @@ impl QpSolver for ParametricActiveSetSolver {
         // Any of: caller provided a warm start, or the problem has at
         // least one one-sided / two-sided general inequality row.
         if ws.is_some() || has_general_inequality {
-            if opts.use_schur_updates {
-                return self.solve_general_schur(qp, ws, opts);
+            let sol = if opts.use_schur_updates {
+                self.solve_general_schur(qp, ws, opts)?
+            } else {
+                self.solve_general(qp, ws, opts)?
+            };
+
+            // Feasibility audit (M5): the warm-start inner loop steps
+            // with a zero-RHS active-set system, so the residuals of
+            // caller-marked-active rows are frozen and an equality row
+            // left `Inactive` can never enter the working set — either
+            // way the loop can converge to a constraint-violating point
+            // and label it `Optimal`. Audit every row + bound; on
+            // violation, recover through elastic mode (the same
+            // recovery the cold path uses when `cold_general_initial`
+            // returns an infeasible point). `solve_elastic` recurses
+            // through `solve_general` / `solve_general_schur` *directly*
+            // (per `use_schur_updates`), bypassing this entry, and seeds
+            // a slack-feasible augmented problem — so the recursive solve
+            // is never re-audited and the recovery cannot loop. Feasible
+            // warm/cold results pass untouched.
+            if matches!(sol.status, QpStatus::Optimal)
+                && !point_is_feasible(qp, &sol.x, opts.feas_tol)
+            {
+                return self.solve_elastic(qp, opts);
             }
-            return self.solve_general(qp, ws, opts);
+            return Ok(sol);
         }
 
         // Cold-start fast paths for problems with no general
@@ -1595,6 +1794,131 @@ impl QpSolver for ParametricActiveSetSolver {
 
 /// Evaluate `½ xᵀ H x + gᵀ x`, walking the symmetric Hessian once
 /// and fanning each off-diagonal entry into both halves.
+/// Feasibility audit for a candidate solution `x` (M5). Checks every
+/// general-constraint row — **including equality rows** (`bl == bu`) —
+/// and every variable bound against `feas_tol`. Returns `true` iff `x`
+/// violates none of them.
+///
+/// The warm-start path of [`ParametricActiveSetSolver::solve_general`]
+/// trusts the caller's `(x, working)` and steps with a zero-RHS active-
+/// set system, so the residuals of rows the caller marked active are
+/// frozen and never re-checked; an equality row the caller left
+/// `Inactive` is skipped by the ratio test (`bl == bu` ⇒ `continue`)
+/// and can never enter the working set. Either way the inner loop can
+/// reach a KKT-stationary point that violates a constraint and report
+/// it as `Optimal`. `solve` runs this audit before trusting an
+/// `Optimal` and recovers through elastic mode on failure.
+fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
+    let ax = a_times_x(qp.a, x, qp.m);
+    for i in 0..qp.m {
+        if qp.bl[i] > NLP_LOWER_BOUND_INF && ax[i] < qp.bl[i] - feas_tol {
+            return false;
+        }
+        if qp.bu[i] < NLP_UPPER_BOUND_INF && ax[i] > qp.bu[i] + feas_tol {
+            return false;
+        }
+    }
+    for (i, &xi) in x.iter().enumerate() {
+        if qp.xl[i] > NLP_LOWER_BOUND_INF && xi < qp.xl[i] - feas_tol {
+            return false;
+        }
+        if qp.xu[i] < NLP_UPPER_BOUND_INF && xi > qp.xu[i] + feas_tol {
+            return false;
+        }
+    }
+    true
+}
+
+/// Two intrinsic clauses of a certified-recession-ray test for QP
+/// unboundedness. A QP `min ½xᵀHx + gᵀx s.t. Ax = b` is unbounded
+/// below iff there is a direction `d` with `Hd = 0` (zero curvature —
+/// for PSD `H` equivalent to `dᵀHd = 0`), `Ad = 0` (stays feasible),
+/// and `gᵀd < 0` (descent). This helper checks the two clauses that
+/// depend only on `(H, g)` and the current iterate `x_cand`:
+///   (i)  zero curvature  `‖Hd‖∞ ≈ 0` relative to `‖H‖`  (H ≡ 0 ⇒ flat),
+///   (ii) strict descent of the *local* gradient `(H·x_cand + g)ᵀd < 0`.
+///
+/// **Feasibility of the ray is the caller's responsibility** — the
+/// call sites certify it by different (both locally valid) arguments:
+/// the equality-only solve maintains `Ax = b` so `A(x/‖x‖) = b/‖x‖ → 0`
+/// as the iterate blows up; the active-set loop reaches its check only
+/// when the ratio test finds NO inactive row blocking along `dir` (and
+/// `dir` already lies in the active constraints' null space).
+///
+/// `dir` need not be normalized — the test is scale-invariant.
+///
+/// The curvature clause is deliberately near-exact (`1e-10·‖H‖`): a
+/// false `Unbounded` is the dangerous direction. For PSD `H`, any
+/// measurable curvature along `d` means a *finite* minimizer in that
+/// direction at `‖∇q‖/λ`, however large — an earlier `dᵀHd ≤ 1e-3·‖H‖`
+/// version certified `Unbounded` on bounded QPs whose softest mode sat
+/// 3+ orders below the stiffest entry (e.g. `H = diag(1, 1e-4, 0)`,
+/// `g = (0, -1, 0)`, true minimum −5000 at `x₂ = 10⁴`). Curvature below
+/// `1e-10·‖H‖` is beneath any meaningful precision of the problem data
+/// and is treated as structurally zero. Soft-but-real modes therefore
+/// fall on the conservative side (reported bounded), never falsely
+/// unbounded.
+///
+/// The descent clause uses the local gradient `H·x_cand + g`, not the
+/// origin gradient `g`: with `Hd ≈ 0` enforced only to tolerance, the
+/// two can disagree at a large iterate (the earlier `gᵀd` version read
+/// "descent" while sitting essentially at the minimizer). For a genuine
+/// recession ray they coincide (`xᵀ(Hd) ≈ 0`).
+fn ray_is_unbounded_descent(
+    h: &pounce_linalg::triplet::SymTMatrix,
+    g: &[Number],
+    x_cand: &[Number],
+    dir: &[Number],
+) -> bool {
+    let norm = dir.iter().map(|v| v * v).sum::<Number>().sqrt();
+    if norm == 0.0 {
+        return false;
+    }
+    let inv = 1.0 / norm;
+
+    // ‖Hd‖∞, H·x_cand, and ‖H‖ (max |stored entry|), using the symmetric
+    // triplet convention (off-diagonal pairs stored once ⇒ scatter both
+    // (i,j) and (j,i)).
+    let n = dir.len();
+    let mut hd = vec![0.0; n];
+    let mut hx = vec![0.0; n];
+    let mut h_scale: Number = 0.0;
+    let irows = h.irows();
+    let jcols = h.jcols();
+    let vals = h.values();
+    for k in 0..irows.len() {
+        let i = (irows[k] - 1) as usize;
+        let j = (jcols[k] - 1) as usize;
+        let v = vals[k];
+        h_scale = h_scale.max(v.abs());
+        hd[i] += v * dir[j] * inv;
+        hx[i] += v * x_cand[j];
+        if i != j {
+            hd[j] += v * dir[i] * inv;
+            hx[j] += v * x_cand[i];
+        }
+    }
+    let hd_inf = hd.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    let zero_curvature = if h_scale > 0.0 {
+        hd_inf <= 1e-10 * h_scale
+    } else {
+        true // H ≡ 0: every direction is a zero-curvature ray.
+    };
+
+    // Local directional derivative (H·x_cand + g)ᵀd vs ‖g‖₂ — strict
+    // (numerically meaningful) descent.
+    let slope: Number = g
+        .iter()
+        .zip(hx.iter())
+        .zip(dir.iter())
+        .map(|((&gi, &hxi), &di)| (gi + hxi) * di * inv)
+        .sum();
+    let g_norm = g.iter().map(|v| v * v).sum::<Number>().sqrt();
+    let descent = slope < -1e-6 * g_norm.max(1.0);
+
+    zero_curvature && descent
+}
+
 fn quad_objective(qp: &QpProblem, x: &[Number]) -> Number {
     let mut quad = 0.0;
     let irows = qp.h.irows();
@@ -1612,4 +1936,88 @@ fn quad_objective(qp: &QpProblem, x: &[Number]) -> Number {
     }
     let lin: Number = qp.g.iter().zip(x.iter()).map(|(&gi, &xi)| gi * xi).sum();
     quad + lin
+}
+
+#[cfg(test)]
+mod select_blocker_tests {
+    //! Unit tests for the GMSW EXPAND ratio test in `select_blocker`.
+    //! These live inside `solver` (not `crate::tests`) so they can reach
+    //! the private `select_blocker`/`BlockerTarget` items.
+    use super::{select_blocker, BlockerTarget};
+    use crate::options::{AntiCyclingChoice, QpOptions};
+    use crate::working_set::BoundStatus;
+
+    fn expand_opts(feas_tol: f64) -> QpOptions {
+        QpOptions {
+            feas_tol,
+            anti_cycling: AntiCyclingChoice::Expand,
+            ..QpOptions::default()
+        }
+    }
+
+    /// Regression for H6: the EXPAND branch panicked (`best.expect`)
+    /// when every candidate's τ-relaxed ratio `r + τ/|a·p|` exceeded
+    /// the artificial `α_min_relaxed = 1.0` initialization cap by more
+    /// than `tol`. Reachable with a *single* candidate that has a true
+    /// blocking ratio `r < 1` but a tiny `|a·p| ≈ feas_tol`, so
+    /// `τ/|a·p|` inflates `r_relaxed` far above `1`. Pre-fix this hits
+    /// `best = None → panic`; post-fix it falls back to the strict
+    /// minimum-ratio blocker and steps exactly `α_min = r`.
+    #[test]
+    fn expand_tau_inflation_falls_back_to_strict_min_no_panic() {
+        let opts = expand_opts(1e-6);
+        // expand_tol (τ) = 1e-3, ap_mag = 1e-9 ⇒ r_relaxed ≈ 0.5 + 1e6.
+        let candidates = [(BlockerTarget::Bound(0, BoundStatus::AtLower), 0.5, 1e-9)];
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3);
+        assert!(
+            matches!(blocker, Some(BlockerTarget::Bound(0, BoundStatus::AtLower))),
+            "expected the sole candidate as blocker, got {:?}",
+            blocker.map(|b| match b {
+                BlockerTarget::Bound(i, _) => ("bound", i),
+                BlockerTarget::Cons(i, _) => ("cons", i),
+            })
+        );
+        // Step the strict ratio, never the bogus 1.0 floor (which would
+        // overstep the constraint).
+        assert!(
+            (alpha - 0.5).abs() < 1e-12,
+            "expected α = 0.5 (strict min), got {alpha}"
+        );
+    }
+
+    /// Multiple inflated candidates: the fallback must still pick the
+    /// strict minimum-ratio one (here index 1, r = 0.25) and step its
+    /// ratio, not the larger-index r.
+    #[test]
+    fn expand_fallback_selects_strict_minimum_among_inflated() {
+        let opts = expand_opts(1e-6);
+        let candidates = [
+            (BlockerTarget::Bound(0, BoundStatus::AtLower), 0.75, 1e-9),
+            (BlockerTarget::Bound(1, BoundStatus::AtUpper), 0.25, 1e-9),
+        ];
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3);
+        assert!(
+            matches!(blocker, Some(BlockerTarget::Bound(1, BoundStatus::AtUpper))),
+            "expected the strict-min candidate (index 1)"
+        );
+        assert!(
+            (alpha - 0.25).abs() < 1e-12,
+            "expected α = 0.25, got {alpha}"
+        );
+    }
+
+    /// Non-degenerate EXPAND still works: a candidate with a healthy
+    /// `|a·p|` keeps its τ-relaxed ratio below the cap, so Pass 2
+    /// admits it normally (no fallback).
+    #[test]
+    fn expand_normal_case_admits_in_pass_two() {
+        let opts = expand_opts(1e-6);
+        let candidates = [(BlockerTarget::Bound(0, BoundStatus::AtLower), 0.5, 1.0)];
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-9);
+        assert!(matches!(
+            blocker,
+            Some(BlockerTarget::Bound(0, BoundStatus::AtLower))
+        ));
+        assert!(alpha >= 0.5 && alpha <= 1.0, "α in range, got {alpha}");
+    }
 }

@@ -109,22 +109,44 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
     for (row, lin) in prob.con_linear.iter().enumerate() {
         let lo = prob.g_l[row];
         let hi = prob.g_u[row];
+
+        // Combine the `.nl` linear section with any degree-≤1 terms AMPL
+        // folded into the (here empty-Hessian) nonlinear tree — the
+        // classifier admits constraint rows whose nonlinear expression
+        // reduces to degree ≤ 1 (`dispatch.rs`), e.g. cancelled
+        // quadratics or defined variables, and those linear/constant
+        // terms live in `con_nonlinear`, not `con_linear`. Dropping them
+        // silently solves the wrong constraint. The folded constant
+        // shifts the bounds: `g_l ≤ row + k ≤ g_u  ⇔  g_l−k ≤ row ≤ g_u−k`.
+        // This mirrors the SOCP extractor's linear-constraint handling.
+        let (nl_lin, const_shift) = analyze_quadratic_full(&prob.con_nonlinear[row], n)
+            .map(|(_, l, k)| (l, k))
+            .unwrap_or_default();
+        let mut coef = vec![0.0; n];
+        for (var, v) in lin {
+            coef[*var] += *v;
+        }
+        for (var, v) in &nl_lin {
+            coef[*var] += *v;
+        }
+        let nonzeros = || coef.iter().enumerate().filter(|(_, v)| **v != 0.0);
+
         if lo == hi && is_finite_bound(lo) {
             // Equality row.
             let eq_row = next_row(&b);
-            for (var, coef) in lin {
-                a.push(Triplet::new(eq_row, *var, *coef));
+            for (var, v) in nonzeros() {
+                a.push(Triplet::new(eq_row, var, *v));
             }
-            b.push(lo);
+            b.push(lo - const_shift);
             con_map.push(ConRowMap::Eq { a_row: eq_row });
         } else {
             // Upper bound: row ≤ hi.
             let upper = if is_finite_bound(hi) {
                 let gr = next_row(&h);
-                for (var, coef) in lin {
-                    g.push(Triplet::new(gr, *var, *coef));
+                for (var, v) in nonzeros() {
+                    g.push(Triplet::new(gr, var, *v));
                 }
-                h.push(hi);
+                h.push(hi - const_shift);
                 Some(gr)
             } else {
                 None
@@ -132,10 +154,10 @@ pub fn extract_qp_with_map(prob: &NlProblem) -> Option<(QpProblem, Vec<ConRowMap
             // Lower bound: row ≥ lo  ⇔  −row ≤ −lo.
             let lower = if is_finite_bound(lo) {
                 let gr = next_row(&h);
-                for (var, coef) in lin {
-                    g.push(Triplet::new(gr, *var, -*coef));
+                for (var, v) in nonzeros() {
+                    g.push(Triplet::new(gr, var, -*v));
                 }
-                h.push(-lo);
+                h.push(-(lo - const_shift));
                 Some(gr)
             } else {
                 None
@@ -857,6 +879,60 @@ mod tests {
         assert!((sol.x[0] - 1.0).abs() < 1e-6, "x0={}", sol.x[0]);
         let lambda = recover_duals(&prob, &con_map, &sol.y, &sol.z);
         assert!((lambda[0] - (-2.0)).abs() < 1e-5, "ineq dual={}", lambda[0]);
+    }
+
+    /// Regression (M11): a *constraint* whose linear and constant
+    /// terms are folded into the nonlinear tree (not the `con_linear`
+    /// section) must still reach `A`/`G`. AMPL/Pyomo emit this shape for
+    /// rows the classifier admits as degree-≤1 (cancelled quadratics,
+    /// defined variables): the whole `x0 − 3` lives in `con_nonlinear`
+    /// and `con_linear[0]` is empty.
+    ///
+    ///     min x0   s.t.   x0 − 3 ≥ 0     (body in the nonlinear tree)
+    ///
+    /// True optimum: x0 = 3. The QP extractor used to build `A`/`G` from
+    /// `con_linear` only — dropping the folded `+x0` *and* the `−3`
+    /// shift, leaving a vacuous `0 ≤ 0` row, so `min x0` came out
+    /// unbounded (or otherwise wrong) on the convex path.
+    #[test]
+    fn constraint_linear_terms_folded_in_tree_are_recovered() {
+        // con body = x0 − 3, entirely in the nonlinear tree.
+        let con = Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(3.0)),
+        );
+        let prob = NlProblem {
+            n: 1,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(0, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![con],
+            con_linear: vec![vec![]], // the `+x0` lives in the TREE
+            x_l: vec![-2e19],
+            x_u: vec![2e19],
+            g_l: vec![0.0], // x0 − 3 ≥ 0
+            g_u: vec![2e19],
+            x0: vec![0.0],
+            lambda0: vec![0.0],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        };
+        let (qp, con_map, _obj_const) = extract_qp_with_map(&prob).expect("extract");
+        // One inequality row: −x0 ≤ −3 (the lower bound, constant-shifted).
+        assert_eq!(qp.m_ineq(), 1);
+        let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((sol.x[0] - 3.0).abs() < 1e-5, "x0={}", sol.x[0]);
+        // Dual is recoverable and finite (the row carries a real coef now).
+        let lambda = recover_duals(&prob, &con_map, &sol.y, &sol.z);
+        assert_eq!(lambda.len(), 1);
+        assert!(lambda[0].is_finite(), "dual={}", lambda[0]);
     }
 
     /// Regression: a constant folded into the *nonlinear objective tree*

@@ -157,6 +157,9 @@ impl<T: TNLP> TNLP for CaptureTnlp<T> {
     fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
         self.inner.get_variables_linearity(types)
     }
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner.get_objective_variables_linearity(types)
+    }
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
         self.inner.get_constraints_linearity(types)
     }
@@ -527,6 +530,9 @@ impl<T: TNLP> TNLP for WarmStartTnlp<T> {
     }
     fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
         self.inner.get_variables_linearity(types)
+    }
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner.get_objective_variables_linearity(types)
     }
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
         self.inner.get_constraints_linearity(types)

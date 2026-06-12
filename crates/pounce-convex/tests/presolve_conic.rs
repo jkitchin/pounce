@@ -98,6 +98,77 @@ fn conic_presolve_roundtrip_mixed() {
     }
 }
 
+/// H9: an **exponential**-cone row with an empty `G` row and `h < 0` is
+/// legal — `K_exp` contains points with a negative first coordinate (e.g.
+/// `(−1, 1, 5)`: `1·e^{−1} ≈ 0.37 ≤ 5`). The orthant empty-row check
+/// (`ineq_nnz==0 && h<0 ⇒ Infeasible`) must NOT fire on a non-orthant cone
+/// row. Before the fix, `presolve_conic` only protected `SecondOrder`
+/// rows, so this returned a bogus `Infeasible`.
+#[test]
+fn exp_cone_empty_row_negative_h_is_not_infeasible() {
+    // No variables couple the cone: slack s = h = (−1, 1, 5) ∈ K_exp.
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![], // all three exp rows empty in G
+        h: vec![-1.0, 1.0, 5.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let cones = [ConeSpec::Exponential];
+    match presolve_conic(&prob, &cones) {
+        PresolveOutcome::Reduced(ps) => {
+            // The full 3-row exp block must survive; partition unchanged.
+            assert_eq!(ps.reduced.m_ineq(), 3, "exp block rows must all survive");
+            assert_eq!(ps.reduced_cones(&cones), vec![ConeSpec::Exponential]);
+        }
+        PresolveOutcome::Infeasible => {
+            panic!("empty exp row with h<0 wrongly reported Infeasible (H9)")
+        }
+        PresolveOutcome::Unbounded => panic!("unexpected Unbounded"),
+    }
+}
+
+/// H9: an exp/power/PSD cone row that the orthant activity test would deem
+/// "redundant" (max-activity ≤ h) must NOT be dropped — dropping one row of
+/// a 3-row exp block corrupts the `(svec/triple)` layout and desyncs
+/// `reduced_cones`. Here `−x0 ≤ 10` with `x0 ∈ [0,1]` has max-activity
+/// `0 ≤ 10` ⇒ the orthant rule would drop it; the cone protection must keep
+/// all three rows.
+#[test]
+fn exp_cone_activity_redundant_row_not_dropped() {
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        // Row 0 of the exp block: −x0 ≤ 10 (always slack for x0 ∈ [0,1]).
+        g: vec![Triplet::new(0, 0, -1.0)],
+        h: vec![10.0, 1.0, 5.0],
+        lb: vec![0.0],
+        ub: vec![1.0],
+    };
+    let cones = [ConeSpec::Exponential];
+    match presolve_conic(&prob, &cones) {
+        PresolveOutcome::Reduced(ps) => {
+            assert_eq!(
+                ps.reduced.m_ineq(),
+                3,
+                "no exp row may be dropped by the activity rule (H9)"
+            );
+            assert_eq!(ps.reduced_cones(&cones), vec![ConeSpec::Exponential]);
+        }
+        other => panic!(
+            "expected Reduced with 3 rows, got {}",
+            matches!(other, PresolveOutcome::Infeasible)
+        ),
+    }
+}
+
 /// A pure SOCP: presolve must be a near-no-op on the cone rows (only the
 /// objective/equality machinery can act), leaving the partition unchanged.
 #[test]

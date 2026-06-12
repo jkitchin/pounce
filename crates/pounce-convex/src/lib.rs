@@ -1,12 +1,17 @@
 //! `pounce-convex` — interior-point solvers for POUNCE's convex problem
 //! classes.
 //!
-//! Phase 2 of the LP/QP routing plan (see `dev-notes/lp-qp-routing.md`):
-//! a bare primal-dual interior-point solver for convex QP (and LP, which
-//! is the `P = 0` case), built over a [`cones::Cone`] abstraction with
-//! only the nonnegative orthant implemented so that later phases
-//! (Mehrotra + HSDE, SOCP, exponential/power cones, SDP) extend rather
-//! than rewrite the driver.
+//! Originally Phase 2 of the LP/QP routing plan (see
+//! `dev-notes/lp-qp-routing.md`): a primal-dual interior-point solver for
+//! convex QP (and LP, the `P = 0` case), built over a [`cones::Cone`]
+//! abstraction so that later cone families extend rather than rewrite the
+//! driver. Those phases have since landed: beyond the nonnegative orthant
+//! (`cones::nonneg`), the crate implements and production-wires the
+//! **second-order (SOC/SOCP)** cone (`cones::soc`), **exponential** and
+//! **power** cones (`cones::exp`, `cones::power`), and **PSD** blocks
+//! (`cones::psd`), together with **Mehrotra** predictor–corrector, the
+//! **homogeneous self-dual embedding** (`hsde`, `hsde_nonsym`), and **Ruiz
+//! equilibration** / presolve (`equilibrate`, `presolve`).
 //!
 //! The augmented-system factorization is shared with the NLP path via
 //! [`pounce_linsol::Factorization`]; this crate adds no new linear-solver

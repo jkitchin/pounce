@@ -10,7 +10,15 @@ import numpy as np
 import pytest
 
 import pounce
-from pounce.qp import QpResult, solve_qp, solve_qp_multi_rhs, solve_socp
+from pounce.qp import (
+    QpFactorization,
+    QpResult,
+    QpSensitivity,
+    solve_qp,
+    solve_qp_batch,
+    solve_qp_multi_rhs,
+    solve_socp,
+)
 
 
 def test_qp_is_reexported_at_top_level():
@@ -76,8 +84,9 @@ def test_iterate_trace_is_opt_in():
 
 def test_conic_solve_has_no_orthant_residuals():
     # SOCP slack lives in a non-orthant cone: orthant residuals don't apply.
-    r = solve_socp(c=[1.0, 0.0, 0.0], G=-np.eye(3), h=[0.0, -2.0, 1.0],
-                   cones=[("soc", 3)])
+    r = solve_socp(
+        c=[1.0, 0.0, 0.0], G=-np.eye(3), h=[0.0, -2.0, 1.0], cones=[("soc", 3)]
+    )
     assert r.status == "optimal"
     assert r.residuals is None
     assert r.kkt_error is None
@@ -105,3 +114,77 @@ def test_malformed_cone_partition_raises_valueerror():
     # error and must raise a catchable ValueError (not panic across FFI).
     with pytest.raises(ValueError):
         solve_socp(c=[1.0, 0.0], G=-np.eye(2), h=[0.0, 0.0], cones=[("exp", 2)])
+
+
+# --------------------------------------------------------------------------
+# issue #112 — the indefinite-P guard must cover EVERY QP entry point, not
+# only solve_qp. Pre-fix, an indefinite P fed to solve_qp_batch /
+# solve_qp_multi_rhs / QpFactorization / QpSensitivity / solve_socp produced a
+# silently-wrong status="optimal" (or a constructed handle) instead of an
+# error. (Code review M31.)
+# --------------------------------------------------------------------------
+
+# Indefinite Hessian: eigenvalues +1, -1. Box bounds keep the convex IPM from
+# diverging so, absent the guard, it would return a concrete status.
+_P_INDEF = np.array([[1.0, 0.0], [0.0, -1.0]])
+_C2 = np.zeros(2)
+_LB = -np.ones(2)
+_UB = np.ones(2)
+
+
+def test_solve_qp_batch_rejects_indefinite_p():
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        solve_qp_batch([{"P": _P_INDEF, "c": _C2, "lb": _LB, "ub": _UB}])
+
+
+def test_solve_qp_multi_rhs_rejects_indefinite_p():
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        solve_qp_multi_rhs(P=_P_INDEF, c=_C2, lb=_LB, ub=_UB, cs=[_C2])
+
+
+def test_qp_factorization_rejects_indefinite_p():
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        QpFactorization(P=_P_INDEF, c=_C2, lb=_LB, ub=_UB)
+
+
+def test_qp_sensitivity_rejects_indefinite_p():
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        QpSensitivity(P=_P_INDEF, c=_C2, A=[[1.0, 1.0]], b=[0.0])
+
+
+def test_solve_socp_rejects_indefinite_p():
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        solve_socp(P=_P_INDEF, c=_C2, G=-np.eye(2), h=np.ones(2), cones=[("nonneg", 2)])
+
+
+def test_check_psd_false_bypasses_guard_everywhere():
+    # check_psd=False must skip the guard on every entry point — the escape
+    # hatch for a caller who knows P is PSD (or wants the nonconvex behavior)
+    # and is avoiding the O(n^3) eigenvalue cost. None of these should raise.
+    solve_qp_batch([{"P": _P_INDEF, "c": _C2, "lb": _LB, "ub": _UB}], check_psd=False)
+    solve_qp_multi_rhs(P=_P_INDEF, c=_C2, lb=_LB, ub=_UB, cs=[_C2], check_psd=False)
+    QpFactorization(P=_P_INDEF, c=_C2, lb=_LB, ub=_UB, check_psd=False)
+    QpSensitivity(P=_P_INDEF, c=_C2, A=[[1.0, 1.0]], b=[0.0], check_psd=False)
+    solve_socp(
+        P=_P_INDEF,
+        c=_C2,
+        G=-np.eye(2),
+        h=np.ones(2),
+        cones=[("nonneg", 2)],
+        check_psd=False,
+    )
+
+
+def test_psd_p_still_solves_on_all_entry_points():
+    # A genuinely PSD P must pass the guard unscathed on every entry point.
+    P = 2.0 * np.eye(2)  # PSD
+    assert (
+        solve_qp_batch([{"P": P, "c": _C2, "lb": _LB, "ub": _UB}])[0].status
+        == "optimal"
+    )
+    assert (
+        solve_qp_multi_rhs(P=P, c=_C2, lb=_LB, ub=_UB, cs=[_C2])[0].status == "optimal"
+    )
+    QpFactorization(P=P, c=_C2, lb=_LB, ub=_UB)  # constructs, no raise
+    s = QpSensitivity(P=P, c=_C2, A=[[1.0, 1.0]], b=[2.0])
+    np.testing.assert_allclose(s.x, [1.0, 1.0], atol=1e-6)

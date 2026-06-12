@@ -32,16 +32,23 @@ def test_step_with_active_inequality():
     # min ½‖x‖²  s.t.  x0 + x1 = 1,  x0 ≥ 1.  The bound binds: x* = (1, 0).
     # Perturbing b slides along the active face: x = (1, b−1), dx/db = (0, 1).
     s = QpSensitivity(
-        P=np.eye(2), c=[0.0, 0.0],
-        A=[[1.0, 1.0]], b=[1.0],
-        G=[[-1.0, 0.0]], h=[-1.0],  # −x0 ≤ −1  ⇔  x0 ≥ 1
+        P=np.eye(2),
+        c=[0.0, 0.0],
+        A=[[1.0, 1.0]],
+        b=[1.0],
+        G=[[-1.0, 0.0]],
+        h=[-1.0],  # −x0 ≤ −1  ⇔  x0 ≥ 1
     )
     np.testing.assert_allclose(s.x, [1.0, 0.0], atol=1e-6)
     dx = s.parametric_step([0], [0.5])
     np.testing.assert_allclose(dx, [0.0, 0.5], atol=1e-6)
     exact = solve_qp(
-        P=np.eye(2), c=[0.0, 0.0], A=[[1.0, 1.0]], b=[1.5],
-        G=[[-1.0, 0.0]], h=[-1.0],
+        P=np.eye(2),
+        c=[0.0, 0.0],
+        A=[[1.0, 1.0]],
+        b=[1.5],
+        G=[[-1.0, 0.0]],
+        h=[-1.0],
     )
     np.testing.assert_allclose(s.x + dx, exact.x, atol=1e-6)
 
@@ -62,8 +69,10 @@ def test_multiple_pins_and_factor_reuse():
     # factorization (build-once / solve-many).
     # min ½‖x‖²  s.t.  x0 = b0,  x1 = b1   → x* = (b0, b1), dx = Δb.
     s = QpSensitivity(
-        P=np.eye(3), c=[0.0, 0.0, 0.0],
-        A=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], b=[1.0, 2.0],
+        P=np.eye(3),
+        c=[0.0, 0.0, 0.0],
+        A=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        b=[1.0, 2.0],
     )
     np.testing.assert_allclose(s.x[:2], [1.0, 2.0], atol=1e-6)
     d1 = s.parametric_step([0, 1], [0.3, -0.5])
@@ -150,8 +159,11 @@ def test_reduced_hessian_with_active_bound():
     # min ½‖x‖² s.t. x0+x1+x2 = 1, x0 ≥ 0.9. The bound binds (x0 = 0.9),
     # leaving 1 DOF in the (x1, x2) plane along (0, 1, −1)/√2: H_R = 1.
     s = QpSensitivity(
-        P=np.eye(3), c=[0.0, 0.0, 0.0],
-        A=[[1.0, 1.0, 1.0]], b=[1.0], lb=[0.9, -10.0, -10.0],
+        P=np.eye(3),
+        c=[0.0, 0.0, 0.0],
+        A=[[1.0, 1.0, 1.0]],
+        b=[1.0],
+        lb=[0.9, -10.0, -10.0],
     )
     np.testing.assert_allclose(s.x, [0.9, 0.05, 0.05], atol=1e-6)
     rh = s.reduced_hessian()
@@ -174,3 +186,64 @@ def test_finite_difference_agreement():
     xm = solve_qp(**{**base, "b": [1.0 - eps]}).x
     fd = (xp - xm) / (2 * eps)
     np.testing.assert_allclose(dx, fd, atol=1e-5)
+
+
+# --------------------------------------------------------------------------
+# issue M35 — QpSensitivity (like QpFactorization.solve and the NLP Solver)
+# must release the GIL for the duration of the pure-Rust IPM solve, so
+# concurrent solves on multiple Python threads run in parallel instead of
+# being serialized. Pre-fix the solve held the GIL continuously, so N
+# threaded solves took as long as N serial ones. (Code review M35.)
+# --------------------------------------------------------------------------
+
+
+def _big_convex_qp(n, seed):
+    rng = np.random.default_rng(seed)
+    M = rng.standard_normal((n, n))
+    P = M @ M.T + n * np.eye(n)  # SPD → strictly convex, nontrivial to factor
+    c = rng.standard_normal(n)
+    return dict(P=P, c=c, lb=-np.ones(n), ub=np.ones(n))
+
+
+def test_qp_solve_releases_the_gil():
+    import os
+    import threading
+    import time
+
+    if (os.cpu_count() or 1) < 4:
+        pytest.skip("need ≥4 cores to observe parallel speedup")
+
+    n, k = 180, 8
+    args = [_big_convex_qp(n, s) for s in range(k)]
+
+    def run_all():
+        for a in args:
+            QpSensitivity(**a)
+
+    def run_all_threaded():
+        ths = [threading.Thread(target=lambda a=a: QpSensitivity(**a)) for a in args]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+
+    # Best-of-2 for each to damp scheduling noise.
+    serial = min(_timed(run_all) for _ in range(2))
+    threaded = min(_timed(run_all_threaded) for _ in range(2))
+
+    # With the GIL released the k solves overlap across cores; pre-fix they
+    # serialize (ratio ≈ 1). A generous 0.75 threshold separates the regimes
+    # (measured ≈ 0.4 released vs ≈ 0.97 held) while tolerating a busy CI box.
+    assert threaded < 0.75 * serial, (
+        f"threaded solves did not overlap (threaded={threaded:.3f}s, "
+        f"serial={serial:.3f}s, ratio={threaded / serial:.2f}); the GIL was "
+        f"not released during the QP solve"
+    )
+
+
+def _timed(fn):
+    import time
+
+    t0 = time.perf_counter()
+    fn()
+    return time.perf_counter() - t0

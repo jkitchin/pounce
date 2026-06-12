@@ -73,7 +73,10 @@ pub trait SchurData {
     /// ([`SensSchurData.hpp:45-49`](../../../ref/Ipopt/contrib/sIPOPT/src/SensSchurData.hpp),
     /// [`SensIndexSchurData.cpp:51-78`](../../../ref/Ipopt/contrib/sIPOPT/src/SensIndexSchurData.cpp)).
     ///
-    /// Returns `Err(_)` if the instance was already initialized.
+    /// Returns `Err(SchurDataError::AlreadyInitialized)` if the instance
+    /// was already initialized, or `Err(SchurDataError::InvalidFlag)` if any
+    /// `flags[i]` is not 0/1. On either error the instance is left
+    /// unchanged, so a corrected retry is safe.
     fn set_from_flags(&mut self, flags: &[Index], v: Number) -> Result<(), SchurDataError>;
 
     /// Set rows from a list of column indices. Each `cols[k]` becomes
@@ -123,10 +126,16 @@ pub enum SchurDataError {
     /// the instance. Upstream asserts `Is_Initialized()` in DBG builds
     /// (e.g. [`SensIndexSchurData.cpp:176`](../../../ref/Ipopt/contrib/sIPOPT/src/SensIndexSchurData.cpp)).
     NotInitialized,
-    /// `set_*` called twice on the same instance, or `flags` contained
-    /// values other than 0/1. Upstream:
+    /// `set_*` called twice on the same instance. Upstream:
     /// [`SensIndexSchurData.cpp:59-69`](../../../ref/Ipopt/contrib/sIPOPT/src/SensIndexSchurData.cpp).
     AlreadyInitialized,
+    /// `set_from_flags` was passed a flag value other than 0/1. Upstream
+    /// asserts `flags[i] == 0 || flags[i] == 1`
+    /// ([`SensIndexSchurData.cpp:51-78`](../../../ref/Ipopt/contrib/sIPOPT/src/SensIndexSchurData.cpp));
+    /// pounce surfaces it as this distinct `Err` (not `AlreadyInitialized`,
+    /// which would mislead — the instance is *not* initialized) and leaves
+    /// the instance untouched so a corrected retry is safe.
+    InvalidFlag,
     /// A row index was out of range (e.g. `multiplying_row(i)` with
     /// `i >= nrows()`).
     RowOutOfRange,
@@ -206,15 +215,23 @@ impl SchurData for IndexSchurData {
         if v == 0.0 {
             return Err(SchurDataError::ZeroSign);
         }
+        // Validate the whole flag array BEFORE mutating any state, so an
+        // invalid entry leaves the instance exactly as found. The previous
+        // code pushed rows as it scanned and bailed mid-loop on a bad flag,
+        // leaving `idx`/`val` partially populated with `initialized == false`
+        // — a caller that fixed the flags and retried would then append a
+        // second copy of the leading rows (duplicate rows). Upstream asserts
+        // `flags[i] ∈ {0,1}` (`SensIndexSchurData.cpp:51-78`); we surface the
+        // bad input as `InvalidFlag` rather than the misleading
+        // `AlreadyInitialized`.
+        if flags.iter().any(|&f| f != 0 && f != 1) {
+            return Err(SchurDataError::InvalidFlag);
+        }
         let w: Index = if v > 0.0 { 1 } else { -1 };
         for (i, &f) in flags.iter().enumerate() {
-            match f {
-                0 => {}
-                1 => {
-                    self.idx.push(i as Index);
-                    self.val.push(w);
-                }
-                _ => return Err(SchurDataError::AlreadyInitialized), // upstream asserts flag ∈ {0,1}
+            if f == 1 {
+                self.idx.push(i as Index);
+                self.val.push(w);
             }
         }
         self.initialized = true;
@@ -325,6 +342,46 @@ mod tests {
             s.set_from_flags(&[1, 0, 1], 0.0),
             Err(SchurDataError::ZeroSign),
         );
+    }
+
+    #[test]
+    fn set_from_flags_rejects_invalid_flag_with_distinct_variant() {
+        // A flag value other than 0/1 is bad *input*, not a double-init —
+        // it must surface as `InvalidFlag`, not `AlreadyInitialized`.
+        let mut s = IndexSchurData::new();
+        assert_eq!(
+            s.set_from_flags(&[1, 0, 2, 1], 1.0),
+            Err(SchurDataError::InvalidFlag),
+        );
+    }
+
+    #[test]
+    fn set_from_flags_invalid_flag_leaves_instance_pristine_for_retry() {
+        // The bad flag sits AFTER a valid `1`, so a non-atomic
+        // implementation would have already pushed row 0 before bailing.
+        // The instance must be left untouched (uninitialized, empty) so a
+        // corrected retry produces exactly the right rows — no duplicates.
+        let mut s = IndexSchurData::new();
+        assert_eq!(
+            s.set_from_flags(&[1, 0, 5], 1.0),
+            Err(SchurDataError::InvalidFlag),
+        );
+        assert!(
+            !s.is_initialized(),
+            "must stay uninitialized after a failed set"
+        );
+        assert_eq!(s.nrows(), 0, "no partial rows may linger");
+        assert_eq!(s.col_indices(), &[] as &[Index]);
+
+        // Corrected retry: selects vars 0 and 2 only.
+        s.set_from_flags(&[1, 0, 1], 1.0).expect("retry init");
+        assert_eq!(
+            s.col_indices(),
+            &[0, 2],
+            "retry must not append to leftover state"
+        );
+        assert_eq!(s.signs(), &[1, 1]);
+        assert!(s.is_initialized());
     }
 
     #[test]

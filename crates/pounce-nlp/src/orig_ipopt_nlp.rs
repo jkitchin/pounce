@@ -170,6 +170,13 @@ pub struct OrigIpoptNlp {
     x_u: Rc<DenseVector>,
     d_l: Rc<DenseVector>,
     d_u: Rc<DenseVector>,
+    /// Constant equality right-hand side (upstream's `c_rhs`): for each
+    /// equality row `i`, the bound `g_l[c_map[i]] == g_u[c_map[i]]`.
+    /// Captured once at construction so [`Self::eval_c_internal`] forms the
+    /// residual `g - c_rhs` without re-fetching all bounds (and the four
+    /// full-size scratch allocations that requires) on every line-search
+    /// trial. (Code review 2026-06 item M17.)
+    c_rhs: Vec<Number>,
 
     // ----- expansion matrices (instances; spaces above) -----
     px_l: Rc<dyn Matrix>,
@@ -204,6 +211,15 @@ pub struct OrigIpoptNlp {
     jac_c_cache: RefCell<Cache<Rc<dyn Matrix>>>,
     jac_d_cache: RefCell<Cache<Rc<dyn Matrix>>>,
     h_cache: RefCell<Cache<Rc<dyn SymMatrix>>>,
+    /// Shared full-space buffers below the c/d split, so the dominant AD
+    /// cost is paid once per iterate instead of twice. `eval_c`/`eval_d`
+    /// both slice their rows out of one `eval_g` result (`full_g_cache`),
+    /// and `eval_jac_c`/`eval_jac_d` both slice one `eval_jac_g` result
+    /// (`full_jac_g_cache`). Keyed by the input vector's tag, like the
+    /// per-subsystem caches; mirrors upstream's tagged `full_g_`/`jac_g_`
+    /// buffers. (Code review 2026-06 item M16.)
+    full_g_cache: RefCell<Cache<Rc<Vec<Number>>>>,
+    full_jac_g_cache: RefCell<Cache<Rc<Vec<Number>>>>,
 
     // ----- evaluation counters -----
     f_evals: RefCell<Index>,
@@ -333,6 +349,17 @@ impl OrigIpoptNlp {
             let full_g_idx = classification.d_map[d_idx] as usize;
             full_g_u[full_g_idx]
         });
+
+        // ---- Constant equality RHS (`c_rhs`). For an equality row the
+        // bound satisfies `g_l == g_u`; capture it once here so the
+        // line-search-hot `eval_c` subtracts a cached constant instead of
+        // re-fetching every bound (and allocating four full-size scratch
+        // vectors) per cache miss. (Code review 2026-06 item M17.) -----
+        let c_rhs: Vec<Number> = classification
+            .c_map
+            .iter()
+            .map(|&g_idx| full_g_l[g_idx as usize])
+            .collect();
 
         // ---- Jacobian sparsity. Ask the TNLP for the full jacobian
         // structure (g rows × full-x cols), then split entries into
@@ -509,6 +536,7 @@ impl OrigIpoptNlp {
             x_u: Rc::new(x_u),
             d_l: Rc::new(d_l),
             d_u: Rc::new(d_u),
+            c_rhs,
             px_l,
             px_u,
             pd_l,
@@ -525,6 +553,8 @@ impl OrigIpoptNlp {
             jac_c_cache: RefCell::new(Cache::new(1)),
             jac_d_cache: RefCell::new(Cache::new(1)),
             h_cache: RefCell::new(Cache::new(1)),
+            full_g_cache: RefCell::new(Cache::new(1)),
+            full_jac_g_cache: RefCell::new(Cache::new(1)),
             f_evals: RefCell::new(0),
             grad_f_evals: RefCell::new(0),
             c_evals: RefCell::new(0),
@@ -653,18 +683,28 @@ impl OrigIpoptNlp {
                 *x += sign * delta;
             }
         };
-        if let Some(x_l) = Rc::get_mut(&mut self.x_l) {
-            apply(x_l, -1.0);
-        }
-        if let Some(x_u) = Rc::get_mut(&mut self.x_u) {
-            apply(x_u, 1.0);
-        }
-        if let Some(d_l) = Rc::get_mut(&mut self.d_l) {
-            apply(d_l, -1.0);
-        }
-        if let Some(d_u) = Rc::get_mut(&mut self.d_u) {
-            apply(d_u, 1.0);
-        }
+        // The bound `Rc`s are uniquely owned (nothing clones them — the same
+        // invariant `adjust_variable_bounds` relies on), so `get_mut` must
+        // succeed. A shared `Rc` here would silently skip the relaxation,
+        // leaving bounds tighter than `bound_relax_factor` requires; that is
+        // a programming error, so fail loudly to match `adjust_variable_bounds`
+        // rather than no-op.
+        apply(
+            Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned"),
+            -1.0,
+        );
+        apply(
+            Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),
+            1.0,
+        );
+        apply(
+            Rc::get_mut(&mut self.d_l).expect("relax_bounds: d_l is uniquely owned"),
+            -1.0,
+        );
+        apply(
+            Rc::get_mut(&mut self.d_u).expect("relax_bounds: d_u is uniquely owned"),
+            1.0,
+        );
     }
 
     /// Determine objective + per-constraint scaling from the starting
@@ -1395,6 +1435,64 @@ impl OrigIpoptNlp {
         result
     }
 
+    /// Full-space constraint vector `g(x)` (length `n_full_g`), shared by
+    /// `eval_c`/`eval_d` so the user `eval_g` runs once per iterate. On a
+    /// cache hit no user evaluation occurs; on a failed eval the buffer is
+    /// filled with NaN (so `theta_trial` goes non-finite and the line
+    /// search backtracks), matching the per-subsystem paths.
+    fn full_g(&self, x: &dyn Vector) -> Rc<Vec<Number>> {
+        if let Some(v) = self.full_g_cache.borrow().get_1dep(x.as_tagged()) {
+            return v;
+        }
+        let n_full_g = self.adapter.borrow().classification().n_full_g as usize;
+        let full_x = self.lift_x_to_full(x);
+        let mut full_g = vec![0.0; n_full_g];
+        let ok = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.eval_g(&full_x, true, &mut full_g)
+        };
+        if !ok {
+            full_g.fill(f64::NAN);
+        }
+        let result = Rc::new(full_g);
+        self.full_g_cache
+            .borrow_mut()
+            .add_1dep(Rc::clone(&result), x.as_tagged());
+        result
+    }
+
+    /// Full-space Jacobian values (length `nnz_jac_g_full`, in the user's
+    /// `eval_jac_g` order), shared by `eval_jac_c`/`eval_jac_d` so the user
+    /// `eval_jac_g` runs once per iterate. Same NaN-on-failure contract as
+    /// [`Self::full_g`].
+    fn full_jac_g(&self, x: &dyn Vector) -> Rc<Vec<Number>> {
+        if let Some(v) = self.full_jac_g_cache.borrow().get_1dep(x.as_tagged()) {
+            return v;
+        }
+        let mut full_vals = vec![0.0; self.nnz_jac_g_full as usize];
+        let full_x = self.lift_x_to_full(x);
+        let ok = {
+            let a = self.adapter.borrow();
+            let mut t = a.tnlp().borrow_mut();
+            t.eval_jac_g(
+                Some(&full_x),
+                true,
+                SparsityRequest::Values {
+                    values: &mut full_vals,
+                },
+            )
+        };
+        if !ok {
+            full_vals.fill(f64::NAN);
+        }
+        let result = Rc::new(full_vals);
+        self.full_jac_g_cache
+            .borrow_mut()
+            .add_1dep(Rc::clone(&result), x.as_tagged());
+        result
+    }
+
     fn eval_c_internal(&self, x: &dyn Vector) -> Rc<dyn Vector> {
         let cls = self.adapter.borrow().classification().clone();
         if cls.n_c == 0 {
@@ -1413,44 +1511,24 @@ impl OrigIpoptNlp {
             return v;
         }
         *self.c_evals.borrow_mut() += 1;
-        let full_x = self.lift_x_to_full(x);
-        let mut full_g = vec![0.0; cls.n_full_g as usize];
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_g(&full_x, true, &mut full_g)
-        };
-        // Eval failure → NaN constraint values, so `theta_trial` goes
-        // non-finite and the line search backtracks (see `eval_f_internal`).
-        if !ok {
-            full_g.fill(f64::NAN);
-        }
+        // Shared full-space `g(x)` — computed once per iterate and reused
+        // by `eval_d` (and vice versa). NaN-on-failure handled in `full_g`,
+        // so `theta_trial` goes non-finite and the line search backtracks
+        // (see `eval_f_internal`).
+        let full_g = self.full_g(x);
         let mut c = self.c_space.make_new_dense();
-        // c_i = g(g_idx) - g_l(g_idx)  (since g_l == g_u for equalities,
+        // c_i = g(g_idx) - c_rhs[i]  (since g_l == g_u for equalities,
         // upstream subtracts the bound to make it a residual). Matches
         // `OrigIpoptNLP::c` which calls `nlp_->Eval_c` after the adapter
         // subtracted the bound — TNLPAdapter doesn't subtract yet, so we
-        // do it here.
-        let n_full_g = cls.n_full_g as usize;
-        let mut full_g_l = vec![0.0; n_full_g];
-        let mut full_g_u = vec![0.0; n_full_g];
-        {
-            let mut tmp_x_l = vec![0.0; cls.n_full_x as usize];
-            let mut tmp_x_u = vec![0.0; cls.n_full_x as usize];
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.get_bounds_info(crate::tnlp::BoundsInfo {
-                x_l: &mut tmp_x_l,
-                x_u: &mut tmp_x_u,
-                g_l: &mut full_g_l,
-                g_u: &mut full_g_u,
-            });
-        }
+        // do it here. The RHS is the constant `g_l[g_idx]`, captured once
+        // at construction (`self.c_rhs`, M17) — no per-iterate bounds
+        // fetch or full-size scratch allocations in the line-search path.
         {
             let cv = c.values_mut();
             let cs = self.c_scale.borrow();
             for (i, &g_idx) in cls.c_map.iter().enumerate() {
-                let raw = full_g[g_idx as usize] - full_g_l[g_idx as usize];
+                let raw = full_g[g_idx as usize] - self.c_rhs[i];
                 cv[i] = match cs.as_ref() {
                     Some(v) => raw * v[i],
                     None => raw,
@@ -1481,16 +1559,8 @@ impl OrigIpoptNlp {
             return v;
         }
         *self.d_evals.borrow_mut() += 1;
-        let full_x = self.lift_x_to_full(x);
-        let mut full_g = vec![0.0; cls.n_full_g as usize];
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_g(&full_x, true, &mut full_g)
-        };
-        if !ok {
-            full_g.fill(f64::NAN);
-        }
+        // Shared full-space `g(x)` — reused with `eval_c` (see `full_g`).
+        let full_g = self.full_g(x);
         let mut d = self.d_space.make_new_dense();
         {
             let dv = d.values_mut();
@@ -1515,22 +1585,10 @@ impl OrigIpoptNlp {
             return m;
         }
         *self.jac_c_evals.borrow_mut() += 1;
-        let mut full_vals = vec![0.0; self.nnz_jac_g_full as usize];
-        let full_x = self.lift_x_to_full(x);
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_jac_g(
-                Some(&full_x),
-                true,
-                SparsityRequest::Values {
-                    values: &mut full_vals,
-                },
-            )
-        };
-        if !ok {
-            full_vals.fill(f64::NAN);
-        }
+        // Shared full-space Jacobian — computed once per iterate and reused
+        // by `eval_jac_d` (and vice versa). NaN-on-failure handled in
+        // `full_jac_g`.
+        let full_vals = self.full_jac_g(x);
         let mut jac_c = GenTMatrix::new(Rc::clone(&self.jac_c_space));
         {
             let cs = self.c_scale.borrow();
@@ -1557,22 +1615,9 @@ impl OrigIpoptNlp {
             return m;
         }
         *self.jac_d_evals.borrow_mut() += 1;
-        let mut full_vals = vec![0.0; self.nnz_jac_g_full as usize];
-        let full_x = self.lift_x_to_full(x);
-        let ok = {
-            let a = self.adapter.borrow();
-            let mut t = a.tnlp().borrow_mut();
-            t.eval_jac_g(
-                Some(&full_x),
-                true,
-                SparsityRequest::Values {
-                    values: &mut full_vals,
-                },
-            )
-        };
-        if !ok {
-            full_vals.fill(f64::NAN);
-        }
+        // Shared full-space Jacobian — reused with `eval_jac_c` (see
+        // `full_jac_g`).
+        let full_vals = self.full_jac_g(x);
         let mut jac_d = GenTMatrix::new(Rc::clone(&self.jac_d_space));
         {
             let ds = self.d_scale.borrow();
@@ -2046,6 +2091,7 @@ mod tests {
         eval_g_calls: usize,
         eval_jac_g_value_calls: usize,
         eval_h_value_calls: usize,
+        get_bounds_info_calls: usize,
     }
 
     impl TNLP for Hs071 {
@@ -2059,6 +2105,7 @@ mod tests {
             })
         }
         fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            self.get_bounds_info_calls += 1;
             b.x_l.copy_from_slice(&[1.0; 4]);
             b.x_u.copy_from_slice(&[5.0; 4]);
             // Constraint 0: 25 <= g0 (inequality, finite lower only)
@@ -2292,6 +2339,106 @@ mod tests {
         // Inequality is g0: d/dxj of x0*x1*x2*x3 at (1,5,5,1).
         // d/dx0 = 5*5*1 = 25, d/dx1 = 1*5*1 = 5, d/dx2 = 1*5*1 = 5, d/dx3 = 1*5*5 = 25.
         assert_eq!(g.values(), &[25.0, 5.0, 5.0, 25.0]);
+    }
+
+    /// Build an `OrigIpoptNlp` over `Hs071` while retaining a typed handle
+    /// to the underlying TNLP, so a test can read its `eval_g_calls` /
+    /// `eval_jac_g_value_calls` counters (the adapter only exposes a
+    /// `dyn TNLP`). Both `Rc`s alias the same allocation.
+    fn build_orig_nlp_counting() -> (Rc<RefCell<Hs071>>, OrigIpoptNlp) {
+        let concrete = Rc::new(RefCell::new(Hs071::default()));
+        let tnlp: Rc<RefCell<dyn TNLP>> = concrete.clone();
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+        let nlp = OrigIpoptNlp::new(Rc::clone(&adapter), Rc::new(NoScaling)).unwrap();
+        (concrete, nlp)
+    }
+
+    #[test]
+    fn eval_c_and_eval_d_share_one_eval_g_per_iterate() {
+        // Code review 2026-06 item M16: `eval_c` and `eval_d` must slice
+        // their rows out of ONE shared `g(x)`, not call the user `eval_g`
+        // twice. Before the fix this asserted 2.
+        let (tnlp, mut nlp) = build_orig_nlp_counting();
+        let x = dense_x(&[1.0, 5.0, 5.0, 1.0], nlp.x_space());
+        let mut c = nlp.c_space().make_new_dense();
+        let mut d = nlp.d_space().make_new_dense();
+        nlp.eval_c(&x, &mut c);
+        nlp.eval_d(&x, &mut d);
+        assert_eq!(
+            tnlp.borrow().eval_g_calls,
+            1,
+            "eval_c + eval_d at one iterate must share a single user eval_g"
+        );
+        // Per-subsystem counters still report one c and one d evaluation.
+        assert_eq!(nlp.c_evals(), 1);
+        assert_eq!(nlp.d_evals(), 1);
+        // Values stay correct: c = g1 - 40 = 52 - 40 = 12, d = g0 = 25.
+        assert_eq!(c.values(), &[12.0]);
+        assert_eq!(d.values(), &[25.0]);
+
+        // A genuinely new iterate (x mutated → tag bumped) costs exactly
+        // one more eval_g shared across both subsystems.
+        let mut x2 = x;
+        x2.values_mut()[0] = 2.0;
+        nlp.eval_c(&x2, &mut c);
+        nlp.eval_d(&x2, &mut d);
+        assert_eq!(
+            tnlp.borrow().eval_g_calls,
+            2,
+            "a new iterate triggers exactly one more shared eval_g"
+        );
+    }
+
+    #[test]
+    fn eval_c_does_not_refetch_bounds_per_iterate() {
+        // Code review 2026-06 item M17: the constant equality RHS is the
+        // bound `g_l == g_u`, captured once at construction. `eval_c` must
+        // NOT call the user's `get_bounds_info` on every (cache-missing)
+        // iterate just to subtract that RHS. Before the fix each fresh
+        // iterate re-fetched all bounds (and allocated four full-size
+        // scratch vectors); this asserted the call count climbed with the
+        // iterate count.
+        let (tnlp, mut nlp) = build_orig_nlp_counting();
+        // Construction fetches the bounds (once for classification, once in
+        // `OrigIpoptNlp::new`). Snapshot whatever that baseline is.
+        let baseline = tnlp.borrow().get_bounds_info_calls;
+
+        let x = dense_x(&[1.0, 5.0, 5.0, 1.0], nlp.x_space());
+        let mut c = nlp.c_space().make_new_dense();
+        nlp.eval_c(&x, &mut c);
+        // RHS is correct: c = g1 - 40 = (1+25+25+1) - 40 = 12.
+        assert_eq!(c.values(), &[12.0]);
+
+        // Several genuinely new iterates, each a cache miss.
+        let mut x2 = x;
+        for k in 0..5 {
+            x2.values_mut()[0] = 2.0 + k as Number;
+            nlp.eval_c(&x2, &mut c);
+        }
+
+        assert_eq!(
+            tnlp.borrow().get_bounds_info_calls,
+            baseline,
+            "eval_c must reuse the captured c_rhs, not re-fetch bounds per iterate"
+        );
+    }
+
+    #[test]
+    fn eval_jac_c_and_eval_jac_d_share_one_eval_jac_g_per_iterate() {
+        // Code review 2026-06 item M16: the full Jacobian is evaluated once
+        // per iterate and sliced into jac_c / jac_d. Before the fix this
+        // asserted 2.
+        let (tnlp, mut nlp) = build_orig_nlp_counting();
+        let x = dense_x(&[1.0, 5.0, 5.0, 1.0], nlp.x_space());
+        let _ = nlp.eval_jac_c(&x);
+        let _ = nlp.eval_jac_d(&x);
+        assert_eq!(
+            tnlp.borrow().eval_jac_g_value_calls,
+            1,
+            "eval_jac_c + eval_jac_d at one iterate must share a single eval_jac_g"
+        );
+        assert_eq!(nlp.jac_c_evals(), 1);
+        assert_eq!(nlp.jac_d_evals(), 1);
     }
 
     #[test]
@@ -3068,5 +3215,33 @@ mod tests {
         let yd = nlp.d_space().make_new_dense();
         let h = nlp.eval_h(&x, 1.0, &yc, &yd);
         assert_eq!(h.n_rows(), 1);
+    }
+
+    #[test]
+    fn relax_bounds_widens_uniquely_owned_bounds() {
+        // Baseline: with uniquely-owned bound Rcs (the normal post-construction
+        // state) relax_bounds loosens x_l downward and x_u upward.
+        let (_adapter, mut nlp) = build_orig_nlp();
+        let x_l_before = nlp.x_l.values().to_vec();
+        let x_u_before = nlp.x_u.values().to_vec();
+        nlp.relax_bounds(1e-2, 1.0);
+        for (b, a) in x_l_before.iter().zip(nlp.x_l.values()) {
+            assert!(a < b, "x_l should relax downward: {a} !< {b}");
+        }
+        for (b, a) in x_u_before.iter().zip(nlp.x_u.values()) {
+            assert!(a > b, "x_u should relax upward: {a} !> {b}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "x_l is uniquely owned")]
+    fn relax_bounds_panics_on_shared_bound_rc() {
+        // Code review L33: a shared bound Rc used to make relax_bounds silently
+        // skip the relaxation, leaving bounds tighter than bound_relax_factor
+        // requires. The unique-ownership invariant is now enforced loudly,
+        // matching adjust_variable_bounds' `expect`.
+        let (_adapter, mut nlp) = build_orig_nlp();
+        let _shared = Rc::clone(&nlp.x_l); // bump strong_count so get_mut fails
+        nlp.relax_bounds(1e-2, 1.0);
     }
 }

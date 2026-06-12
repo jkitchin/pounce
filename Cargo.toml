@@ -81,12 +81,17 @@ pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.4.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.4.0" }
 pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.4.0" }
 pounce-observability = { path = "crates/pounce-observability", version = "0.4.0" }
-# feral HEAD past the 0.10.0 release checkpoint: issue #80 — MC64/scaling
-# perf work (Hungarian-heap reuse across columns, localized dense-column
-# cost, ldlt_compress profiling). Not yet on crates.io; pinned by rev for
-# reproducibility. NOTE: this git pin blocks the crates.io publish of the
-# pounce crates until feral cuts a release carrying these commits.
-feral = { git = "https://github.com/jkitchin/feral.git", rev = "11fb4b98d7caac0383c53b6a969e27632efcef77" }
+# feral: pinned to the published crates.io release so the pounce crates stay
+# publishable — a git rev would block the crates.io publish and is rejected by
+# scripts/check-release-consistency.sh ("git dependency … needs a crates.io
+# version"). feral HEAD carries unreleased issue-#80 MC64/scaling perf work
+# (Hungarian-heap reuse across columns, localized dense-column cost,
+# ldlt_compress profiling). To develop against that HEAD locally, add an
+# UNCOMMITTED `[patch.crates-io]` redirecting feral to the git rev — e.g.
+#   [patch.crates-io]
+#   feral = { git = "https://github.com/jkitchin/feral.git", rev = "11fb4b98d7caac0383c53b6a969e27632efcef77" }
+# Do NOT commit that patch (it would re-introduce the publish blocker).
+feral = { version = "0.10.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
@@ -102,6 +107,11 @@ tracing-log = "0.2"
 anstyle = "1"
 anstyle-query = "1"
 anstream = "0.6"
+# Thin libc bindings — used only by pounce-common's `cpu_time()` for the
+# Unix `getrusage(RUSAGE_SELF)` user-CPU-time path (port of Ipopt's
+# `CpuTime()`); gated behind `cfg(unix)` so non-Unix targets keep the
+# wallclock fallback.
+libc = "0.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

@@ -2,6 +2,10 @@
 
 Run with `pytest`. The `pounce` binary must be on PATH (or bundled).
 """
+
+import os
+import stat
+
 import pytest
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce' with SolverFactory)
@@ -26,6 +30,61 @@ def solver():
 
 def test_registered():
     assert SolverFactory("pounce") is not None
+
+
+def _make_executable(path):
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return str(path)
+
+
+# --------------------------------------------------------------------------
+# issue M33 — the plugin must discover the binary bundled in the installed
+# `pounce-solver` wheel (a deterministic path, independent of PATH), not only
+# `shutil.which("pounce")`. Pre-fix, a non-activated-venv run (cron, IDE
+# runner, Jupyter kernel) with the venv's bin off PATH reported the solver
+# unavailable even though the bundled binary was present. (Code review M33.)
+# --------------------------------------------------------------------------
+
+
+def test_default_executable_prefers_bundled(monkeypatch, tmp_path):
+    # A bundled binary exists at the deterministic wheel path, but PATH does
+    # NOT contain `pounce`. The plugin must still resolve the bundled binary.
+    import pounce._cli as cli
+
+    bundled = tmp_path / "bin" / "pounce"
+    bundled.parent.mkdir()
+    _make_executable(bundled)
+    monkeypatch.setattr(cli, "_bundled_binary", lambda: bundled)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")  # no `pounce` here
+
+    exe = SolverFactory("pounce")._default_executable()
+    assert exe == str(bundled)
+
+
+def test_default_executable_falls_back_to_path(monkeypatch, tmp_path):
+    # No bundled binary (system install / local cargo dev build): fall back to
+    # whatever `pounce` is on PATH.
+    import pounce._cli as cli
+
+    monkeypatch.setattr(cli, "_bundled_binary", lambda: tmp_path / "absent" / "pounce")
+    shim_dir = tmp_path / "pathbin"
+    shim_dir.mkdir()
+    shim = _make_executable(shim_dir / "pounce")
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}/usr/bin:/bin")
+
+    exe = SolverFactory("pounce")._default_executable()
+    assert exe == shim
+
+
+def test_default_executable_none_when_nowhere(monkeypatch, tmp_path):
+    # Neither bundled nor on PATH → None (the honest "unavailable" signal).
+    import pounce._cli as cli
+
+    monkeypatch.setattr(cli, "_bundled_binary", lambda: tmp_path / "absent" / "pounce")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    assert SolverFactory("pounce")._default_executable() is None
 
 
 def test_unconstrained(solver):

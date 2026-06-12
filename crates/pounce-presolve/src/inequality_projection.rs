@@ -144,7 +144,10 @@ pub fn project_inequalities(
         for &(c, v) in entries {
             sum_jx += v * x_probe[c];
             if let Some(j_pos) = col_to_block_pos[c] {
-                j_block[i_block * k + j_pos] = v;
+                // Accumulate: duplicate (row, col) triplets sum, matching the
+                // `sum_jx` convention used for the linear constant just above
+                // (L43). Assignment would drop all but the last duplicate.
+                j_block[i_block * k + j_pos] += v;
             }
         }
         let c_r = g_at_probe[r] - sum_jx;
@@ -210,7 +213,9 @@ pub fn project_inequalities(
         let mut a_y: std::collections::HashMap<usize, Number> = std::collections::HashMap::new();
         for &(c, v) in &entries {
             if let Some(pos) = col_to_block_pos[c] {
-                a_b[pos] = v;
+                // Accumulate duplicates, consistent with the `a_y` surviving-
+                // column branch below and with `sum_jx` (L43).
+                a_b[pos] += v;
             } else {
                 *a_y.entry(c).or_insert(0.0) += v;
             }
@@ -428,5 +433,53 @@ mod tests {
             false,
         );
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn projection_sums_duplicate_jacobian_entries_in_block() {
+        // L43: duplicate Jacobian triplets for the same (row, col) must be
+        // *summed* (the convention the linear constant `sum_jx` already uses),
+        // not overwritten. Here the equality row 0 carries TWO entries for the
+        // block column 0 — `2.0` and `-1.0` — whose sum is the true coefficient
+        // `1.0`. With assignment-instead-of-accumulation the last write (`-1.0`)
+        // wins, so the block solves `-1·b = 3 → b = -3` instead of `1·b = 3 →
+        // b = 3`.
+        //
+        // The coupled inequality (row 1, coefficient 1 on b) is `b ∈ [-5, -1]`.
+        // With the correct `b = 3` it is NOT implied (3 ∉ [-5,-1]) — a real
+        // constraint that must be kept. With the buggy `b = -3` it looks
+        // implied (-3 ∈ [-5,-1]) and would be silently dropped → unsafe. So
+        // the correct verdict is `all_implied == false`.
+        let result = project_inequalities(
+            &[0],              // block_rows
+            &[0],              // block_cols
+            &[1],              // coupled_ineq_rows
+            1,                 // n_vars (only b)
+            &[-1e19],          // x_l
+            &[1e19],           // x_u
+            &[3.0, -5.0],      // g_l: row0 equality = 3, row1 ineq lower
+            &[3.0, -1.0],      // g_u: row0 equality = 3, row1 ineq upper
+            &[0, 0, 1],        // jac_irow: row 0 twice (duplicate), row 1 once
+            &[0, 0, 0],        // jac_jcol: all column 0
+            &[2.0, -1.0, 1.0], // jac_values: 2 + (-1) = 1 for row 0
+            &[0.0, 0.0],       // g_at_probe
+            &[0.0],            // x_probe
+            false,
+        )
+        .expect("non-singular: summed coefficient 1.0 is invertible");
+        // Fail-first: with assignment, b = -3 makes the row look implied and
+        // this is `true`.
+        assert!(
+            !result.all_implied,
+            "row b ∈ [-5,-1] with b=3 is a real constraint, not implied",
+        );
+        assert!(!result.per_row[0].implied);
+        // The block solution drives rhs: rhs_l = -5 - b, rhs_u = -1 - b with
+        // b = 3 ⇒ [-8, -4], which does NOT contain the activity 0 ⇒ not implied.
+        assert!(
+            (result.per_row[0].rhs_u - (-4.0)).abs() < 1e-9,
+            "rhs_u = {} (expected -1 - 3 = -4, i.e. b solved to 3 not -3)",
+            result.per_row[0].rhs_u,
+        );
     }
 }

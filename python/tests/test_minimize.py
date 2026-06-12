@@ -569,3 +569,212 @@ def test_minimize_callback_fires_with_linear_constraint():
     )
     assert res.success
     assert len(xs) >= 1
+
+
+def test_wrap_constraints_probes_at_x0_not_origin():
+    """L47: constraint sizing must probe at the user's x0, not at the
+    origin. A constraint undefined at 0 (e.g. ``log``) but defined at a
+    feasible start used to fail before the solve began."""
+    from pounce._minimize import _wrap_constraints
+
+    calls = []
+
+    def con(x):
+        calls.append(np.array(x, dtype=float))
+        # Undefined at the origin; finite at x0 = [1, 1].
+        return np.log(x)
+
+    x0 = np.array([1.0, 1.0])
+    m, g, jac, cl, cu, _, _ = _wrap_constraints([{"type": "ineq", "fun": con}], 2, x0)
+
+    # Probe happened at x0, so it saw a finite value (log(1) == 0).
+    assert m == 2
+    assert calls, "constraint should have been probed once for sizing"
+    np.testing.assert_allclose(calls[0], x0)
+    assert np.all(np.isfinite(g(x0)))
+
+    # Probing at the origin (the old behavior) would have yielded -inf.
+    with np.errstate(divide="ignore"):
+        m0, g0, _, _, _, _, _ = _wrap_constraints(
+            [{"type": "ineq", "fun": con}], 2, None
+        )
+        assert np.any(np.isneginf(g0(np.zeros(2))))
+
+
+def test_wrap_constraints_fd_jac_uses_probed_sizes():
+    """L47 (part 2): the FD Jacobian must not re-evaluate the constraint
+    function purely to recount rows — the per-constraint size learned at
+    probe time is reused, and the assembled Jacobian has the right shape.
+
+    Our representation returns ``jac_values`` (a flat nnz vector) plus the COO
+    ``(jac_rows, jac_cols)`` structure, so we reconstruct the dense ``(3, 2)``
+    matrix to check the property.
+    """
+    from pounce._minimize import _wrap_constraints
+
+    def con(x):
+        # 3 outputs from 2 inputs -> Jacobian must be (3, 2).
+        return np.array([x[0], x[1], x[0] + x[1]])
+
+    x0 = np.array([0.5, 0.5])
+    m, g, jac_values, cl, cu, jac_rows, jac_cols = _wrap_constraints(
+        [{"type": "eq", "fun": con}], 2, x0
+    )
+    assert m == 3
+    J = sparse.coo_array(
+        (jac_values(x0), (jac_rows, jac_cols)), shape=(m, 2)
+    ).toarray()
+    assert J.shape == (3, 2)
+
+
+class _FakeProblem:
+    """Stand-in for the native ``Problem`` so the NLP path can run to its
+    warnings without the compiled extension."""
+
+    def __init__(self, **kwargs):
+        self._x0 = None
+
+    def add_option(self, key, value):
+        pass
+
+    def solve(self, x0):
+        info = {
+            "status": 0,
+            "status_msg": "Solve_Succeeded",
+            "obj_val": 0.0,
+            "iter_count": 1,
+            "final_kkt_error": 0.0,
+        }
+        return np.asarray(x0, dtype=float), info
+
+
+def test_hess_ignored_with_constraints_warns(monkeypatch):
+    """L48: a user-supplied ``hess`` cannot be honored once constraints are
+    present (the wrapper can't form the constraint-curvature term of the
+    Lagrangian Hessian), so the solver silently fell back to L-BFGS. It must
+    now warn."""
+    import pounce._minimize as M
+
+    monkeypatch.setattr(M, "Problem", _FakeProblem)
+
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+    H = lambda x: 2.0 * np.eye(2)
+    con = {"type": "eq", "fun": lambda x: x[0] - x[1], "jac": lambda x: np.array([[1.0, -1.0]])}
+
+    # solver_selection='nlp' forces the general NLP path (no convex routing).
+    with pytest.warns(UserWarning, match="ignores the supplied 'hess'"):
+        M.minimize(f, np.ones(2), jac=g, hess=H, constraints=con,
+                   options={"solver_selection": "nlp", "print_level": 0})
+
+    # Unconstrained: hess is honored, so no such warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        M.minimize(f, np.ones(2), jac=g, hess=H,
+                   options={"solver_selection": "nlp", "print_level": 0})
+
+
+def test_convex_route_warns_on_dropped_options(monkeypatch):
+    """L48: the dedicated convex (LP/QP) router honors only tol/max_iter, so
+    NLP-only options like ``acceptable_tol``/``print_level`` are dropped. That
+    must warn rather than happen silently."""
+    import pounce._minimize as M
+
+    class _Extract:
+        kind = "qp"
+
+    sentinel = M.OptimizeResult(x=np.zeros(2), fun=0.0, success=True, status=0,
+                                message="optimal", nit=1, info={"solver": "qp-ipm"})
+
+    monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
+    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
+
+    f = lambda x: float(x @ x)
+    with pytest.warns(UserWarning, match="had no effect|were ignored|acceptable_tol"):
+        res = M.minimize(f, np.ones(2),
+                         options={"solver_selection": "qp-ipm",
+                                  "acceptable_tol": 1e-9, "print_level": 3})
+    assert res is sentinel
+
+    # Only honored options (tol/max_iter) -> no warning.
+    monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        M.minimize(f, np.ones(2),
+                   options={"solver_selection": "qp-ipm", "tol": 1e-8, "max_iter": 50})
+
+
+def test_convex_route_warns_on_disp(monkeypatch):
+    """L48 residual: ``_solve_via_convex``/``_solve_via_socp`` read only
+    ``tol``/``max_iter``, so ``disp=True`` is dropped on the convex routes just
+    like ``print_level`` — it must trigger the same dropped-options warning
+    rather than be listed as honored."""
+    import pounce._minimize as M
+
+    class _Extract:
+        kind = "qp"
+
+    sentinel = M.OptimizeResult(x=np.zeros(2), fun=0.0, success=True, status=0,
+                                message="optimal", nit=1, info={"solver": "qp-ipm"})
+
+    monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
+    monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
+
+    f = lambda x: float(x @ x)
+    with pytest.warns(UserWarning, match="disp"):
+        res = M.minimize(f, np.ones(2),
+                         options={"solver_selection": "qp-ipm", "disp": True})
+    assert res is sentinel
+
+
+class _UserStopProblem:
+    """Fake native Problem that returns ``User_Requested_Stop`` (status 5) —
+    what the bridge reports when the user's ``intermediate`` callback aborts or
+    crashes (M32) — together with a *small* final KKT error."""
+
+    def __init__(self, **kwargs):
+        pass
+
+    def add_option(self, key, value):
+        pass
+
+    def solve(self, x0):
+        info = {
+            "status": 5,  # User_Requested_Stop
+            "status_msg": "User_Requested_Stop",
+            "obj_val": 1.0,
+            "iter_count": 3,
+            "final_kkt_error": 1e-12,  # coincidentally below acceptable_tol
+        }
+        return np.asarray(x0, dtype=float), info
+
+
+def test_user_requested_stop_is_not_success_despite_small_kkt(monkeypatch):
+    """L50: the KKT-error fallback must not upgrade a ``User_Requested_Stop``
+    to ``success=True``. A callback that aborted (or crashed, via M32) is an
+    external stop, not a numerical stall at an acceptable point — even when the
+    last computed KKT error happens to be below ``acceptable_tol``."""
+    import pounce._minimize as M
+
+    monkeypatch.setattr(M, "Problem", _UserStopProblem)
+
+    f = lambda x: float(x @ x)
+    res = M.minimize(f, np.ones(2),
+                     options={"solver_selection": "nlp", "print_level": 0})
+    assert res.status == 5
+    assert res.success is False, "User_Requested_Stop must not be reported as success"
+
+    # Control: a genuine numerical stall (Search_Direction_Becomes_Too_Small,
+    # status 3) with the same small KKT error IS still upgraded to success.
+    class _StallProblem(_UserStopProblem):
+        def solve(self, x0):
+            x, info = super().solve(x0)
+            info["status"] = 3
+            info["status_msg"] = "Search_Direction_Becomes_Too_Small"
+            return x, info
+
+    monkeypatch.setattr(M, "Problem", _StallProblem)
+    res2 = M.minimize(f, np.ones(2),
+                      options={"solver_selection": "nlp", "print_level": 0})
+    assert res2.status == 3
+    assert res2.success is True, "an acceptable-KKT numerical stall stays a success"

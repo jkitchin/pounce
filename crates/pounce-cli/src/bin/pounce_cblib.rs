@@ -27,6 +27,8 @@ use std::process::ExitCode;
 fn qp_status_to_ars(s: QpStatus) -> ApplicationReturnStatus {
     match s {
         QpStatus::Optimal => ApplicationReturnStatus::SolveSucceeded,
+        // Reduced-accuracy solve — Ipopt's "Solved To Acceptable Level".
+        QpStatus::OptimalInaccurate => ApplicationReturnStatus::SolvedToAcceptableLevel,
         QpStatus::PrimalInfeasible => ApplicationReturnStatus::InfeasibleProblemDetected,
         QpStatus::DualInfeasible => ApplicationReturnStatus::DivergingIterates, // unbounded
         QpStatus::IterationLimit => ApplicationReturnStatus::MaximumIterationsExceeded,
@@ -207,7 +209,9 @@ fn main() -> ExitCode {
         }
     }
 
-    if matches!(sol.status, QpStatus::Optimal) {
+    // A reduced-accuracy solve (`OptimalInaccurate`) still yields a usable
+    // solution, so it counts as success for the process exit code.
+    if matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate) {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

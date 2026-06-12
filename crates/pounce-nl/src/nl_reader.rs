@@ -16,8 +16,9 @@
 //!   `n<num>` constants and `v<idx>` variables.
 //! * Linear-Jacobian (`J`) and linear-objective (`G`) segments.
 //! * Variable bounds (`b`) and constraint bounds (`r`).
-//! * Optional initial primal (`x`) segment. Initial dual (`d`) is
-//!   read and discarded.
+//! * Optional initial primal (`x`) segment and initial dual (`d`)
+//!   segment. Both are parsed (into `x0` / `lambda0`) and returned by
+//!   `get_starting_point`; the duals feed a `warm_start_init_point` solve.
 //! * Multiple objectives (we use only the first; per AMPL convention).
 //!
 //! Not supported (will return an error explaining what's missing):
@@ -259,12 +260,41 @@ pub struct NlSuffixes {
 /// back to indices. Names are a diagnostic nicety, never load-blocking
 /// (cf. Lee et al. 2024, <https://doi.org/10.69997/sct.147875>).
 pub fn read_nl_file(path: &Path) -> Result<NlProblem, String> {
-    let txt = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read {}: {}", path.display(), e))?;
+    // AMPL invokes a solver with an extensionless *stub* — e.g.
+    // `pounce mymodel -AMPL` — and expects `mymodel.nl` to be read (and
+    // the `.col`/`.row`/`.sol` siblings named off the same stem). If the
+    // path as given is missing but appending `.nl` names an existing file,
+    // resolve to that. This only ever *adds* a fallback: an existing path
+    // is read verbatim, so nothing changes for callers that already pass a
+    // full `.nl` path (Pyomo, `--nl-file`, the second-positional form).
+    let resolved = if path.exists() {
+        path.to_path_buf()
+    } else {
+        let with_nl = append_extension(path, "nl");
+        if with_nl.exists() {
+            with_nl
+        } else {
+            path.to_path_buf()
+        }
+    };
+    let txt = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("could not read {}: {}", resolved.display(), e))?;
     let mut prob = parse_nl_text(&txt)?;
-    prob.var_names = read_name_file(&path.with_extension("col"), prob.n);
-    prob.con_names = read_name_file(&path.with_extension("row"), prob.m);
+    prob.var_names = read_name_file(&resolved.with_extension("col"), prob.n);
+    prob.con_names = read_name_file(&resolved.with_extension("row"), prob.m);
     Ok(prob)
+}
+
+/// Append `.ext` to `path`'s full file name (AMPL stub convention:
+/// `mymodel` → `mymodel.nl`), as opposed to [`Path::with_extension`],
+/// which would *replace* an existing extension. A stub that itself
+/// contains a dot (`my.model` → `my.model.nl`) is therefore handled the
+/// way AMPL names it.
+fn append_extension(path: &Path, ext: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(ext);
+    std::path::PathBuf::from(name)
 }
 
 /// Read an AMPL name file (`.col` / `.row`): one name per line, in index
@@ -361,11 +391,28 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 }
             }
             'k' => {
-                // Column counts in the Jacobian; we don't need them
-                // for evaluation since J segments give explicit lists.
-                p.eat_segment_header()?;
-                let count = if n == 0 { 0 } else { n - 1 };
-                for _ in 0..count {
+                // Column counts in the Jacobian; we don't need their
+                // values for evaluation (the J segments give explicit
+                // lists), but we must consume exactly as many data lines
+                // as follow or the segment stream desyncs. The `.nl`
+                // format writes that line count in the header itself
+                // (`k<count>`), and the standard value is `n-1`. Read the
+                // declared count rather than assuming it: a file with a
+                // nonstandard count would otherwise leave us reading the
+                // wrong number of lines, swallowing a later segment header
+                // (or stopping short) and failing with a confusing,
+                // far-removed error. Validate against the expected `n-1`
+                // so a mismatch surfaces here, clearly, at its source.
+                let (hdr, _) = p.eat_segment_header()?;
+                let declared = parse_segment_index(&hdr, 'k')?;
+                let expected = if n == 0 { 0 } else { n - 1 };
+                if declared != expected {
+                    return Err(format!(
+                        "k-segment declares {declared} column-count lines but \
+                         the standard count for n={n} variables is {expected}"
+                    ));
+                }
+                for _ in 0..declared {
                     p.next_data_line()?;
                 }
             }
@@ -383,6 +430,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nz {
                     let line = p.next_data_line()?;
                     let (var, coef) = parse_var_coef(&line)?;
+                    // Validate the column index here: an out-of-range `var`
+                    // would otherwise be stored and panic as a slice OOB
+                    // (`x[var]`) during constraint evaluation. Mirror the
+                    // clean parse error used for the row index above.
+                    if var >= n {
+                        return Err(format!(
+                            "J{row} entry variable index {var} out of range (n={n})"
+                        ));
+                    }
                     con_linear[row].push((var, coef));
                 }
             }
@@ -398,6 +454,13 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nz {
                     let line = p.next_data_line()?;
                     let (var, coef) = parse_var_coef(&line)?;
+                    // Same as J: reject an out-of-range gradient column index
+                    // up front rather than letting it panic on `x[var]` later.
+                    if var >= n {
+                        return Err(format!(
+                            "G{idx} entry variable index {var} out of range (n={n})"
+                        ));
+                    }
                     acc.push((var, coef));
                 }
                 if idx == 0 {
@@ -414,9 +477,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nx {
                     let line = p.next_data_line()?;
                     let (idx, val) = parse_var_coef(&line)?;
-                    if idx < n {
-                        x0[idx] = val;
+                    // Reject out-of-range indices as a parse error, matching
+                    // J/G strictness, rather than silently dropping the entry
+                    // (which hides a corrupt initial-primal segment).
+                    if idx >= n {
+                        return Err(format!(
+                            "x-segment variable index {idx} out of range (n={n})"
+                        ));
                     }
+                    x0[idx] = val;
                 }
             }
             'd' => {
@@ -429,9 +498,15 @@ pub fn parse_nl_text(txt: &str) -> Result<NlProblem, String> {
                 for _ in 0..nd {
                     let line = p.next_data_line()?;
                     let (idx, val) = parse_var_coef(&line)?;
-                    if idx < m {
-                        lambda0[idx] = val;
+                    // Reject out-of-range indices as a parse error, matching
+                    // J/G strictness, rather than silently dropping the entry
+                    // (which hides a corrupt initial-dual segment).
+                    if idx >= m {
+                        return Err(format!(
+                            "d-segment constraint index {idx} out of range (m={m})"
+                        ));
                     }
+                    lambda0[idx] = val;
                 }
             }
             'V' => p.parse_v_segment()?,
@@ -859,16 +934,36 @@ impl<'a> Parser<'a> {
         let raw = self
             .next_line()
             .ok_or_else(|| "expected funcall argument".to_string())?;
-        let tok = strip_comment(raw).trim().to_string();
-        let first = tok.chars().next().ok_or("empty funcall arg token")?;
-        if first == 'h' {
-            // `h<len>:<chars>` — strip the `<len>:` prefix.
-            let rest = &tok[1..];
-            let s = match rest.find(':') {
-                Some(i) => rest[i + 1..].to_string(),
-                None => String::new(),
-            };
-            Ok(FuncallArg::Str(s))
+        // A string arg is a Hollerith literal `h<len>:<chars>` where the
+        // chars are *exactly* `<len>` bytes and may legitimately contain
+        // '#'. We must NOT strip a trailing comment before extracting the
+        // content (that would truncate e.g. a path like `a#b`), and we
+        // honor the declared length rather than splitting loosely on ':'.
+        // Detect the form from the leading non-blank char of the raw line;
+        // no expression opcode (`o`/`v`/`n`/`f`) begins with 'h'.
+        let lead = raw.trim_start();
+        if let Some(after_h) = lead.strip_prefix('h') {
+            let colon = after_h
+                .find(':')
+                .ok_or_else(|| format!("malformed Hollerith string arg (no ':'): {lead:?}"))?;
+            let len: usize = after_h[..colon]
+                .trim()
+                .parse()
+                .map_err(|e| format!("Hollerith length in {lead:?}: {e}"))?;
+            let chars = &after_h[colon + 1..];
+            if chars.len() < len {
+                return Err(format!(
+                    "Hollerith string shorter than declared length {len}: {chars:?}"
+                ));
+            }
+            // Take exactly `len` bytes; anything past it (trailing
+            // whitespace, a real comment) is not part of the string.
+            if !chars.is_char_boundary(len) {
+                return Err(format!(
+                    "Hollerith length {len} splits a multibyte char in {chars:?}"
+                ));
+            }
+            Ok(FuncallArg::Str(chars[..len].to_string()))
         } else {
             // Rewind: parse_expr re-consumes the line we just peeked.
             self.pos = saved;
@@ -2280,6 +2375,17 @@ impl TNLP for NlTnlp {
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
         sp.x.copy_from_slice(&self.prob.x0);
+        // The `.nl` `d` segment supplies initial constraint multipliers
+        // (`lambda0`). Honor a warm-start request — `init_lambda` is set by
+        // the engine when `warm_start_init_point yes` — by handing them
+        // back; `OrigIpoptNlp::get_starting_point` then compresses them into
+        // the algorithm-side y_c / y_d. Without this the warm start silently
+        // began from zero multipliers, discarding the parsed duals. (Code
+        // review 2026-06 item M19.) The `.nl` `d` segment carries no bound
+        // multipliers, so `z_l`/`z_u` are left to the engine's defaults.
+        if sp.init_lambda {
+            sp.lambda.copy_from_slice(&self.prob.lambda0);
+        }
         true
     }
 
@@ -2296,8 +2402,11 @@ impl TNLP for NlTnlp {
 
     fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, grad: &mut [Number]) -> bool {
         grad.fill(0.0);
+        // Reuse the forward-value / adjoint scratch arenas (sized to
+        // `max_tape_n`) so each summand tape's reverse-AD sweep allocates
+        // nothing — see `Tape::gradient_seed_into` (M18).
         for t in &self.obj_tapes {
-            t.gradient_seed(x, 1.0, grad);
+            t.gradient_seed_into(x, 1.0, grad, &mut self.vals_scratch, &mut self.adj_scratch);
         }
         for (i, c) in &self.prob.obj_linear {
             grad[*i] += c;
@@ -2352,7 +2461,15 @@ impl TNLP for NlTnlp {
                         self.scratch_row_grad[j] = 0.0;
                     }
                     for t in &self.con_tapes[i] {
-                        t.gradient_seed(xs, 1.0, &mut self.scratch_row_grad);
+                        // Allocation-free reverse-AD per summand tape (M18):
+                        // reuse the shared forward/adjoint scratch arenas.
+                        t.gradient_seed_into(
+                            xs,
+                            1.0,
+                            &mut self.scratch_row_grad,
+                            &mut self.vals_scratch,
+                            &mut self.adj_scratch,
+                        );
                     }
                     for &(v, c) in &self.prob.con_linear[i] {
                         self.scratch_row_grad[v] += c;
@@ -2503,6 +2620,54 @@ impl TNLP for NlTnlp {
         }
         true
     }
+
+    fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        // Global linearity, per the upstream TNLP contract: a variable is
+        // NonLinear iff it appears in the nonlinear part of the objective
+        // or of any constraint; otherwise Linear. The parsed `.nl` splits
+        // every row into a linear part (J/G coefficient list) and a
+        // nonlinear expression, so the set of nonlinear variables is
+        // exactly the structural union of `collect_vars` over
+        // `obj_nonlinear` and every `con_nonlinear` row. A variable touched
+        // only by a linear part — or not referenced at all — is Linear.
+        //
+        let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
+        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
+        for row in &self.prob.con_nonlinear {
+            collect_vars(row, &mut nonlinear);
+        }
+        for (i, t) in types.iter_mut().enumerate() {
+            *t = if nonlinear.contains(&i) {
+                Linearity::NonLinear
+            } else {
+                Linearity::Linear
+            };
+        }
+        true
+    }
+
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        // Objective-scoped variant of `get_variables_linearity`: only
+        // `obj_nonlinear` contributes. This is what engages the presolve
+        // auxiliary-elimination safeguard (pounce-presolve H11): a variable
+        // that is nonlinear in the objective but happens to have a zero
+        // gradient at the single probe point (e.g. `f = (x - x0)^2`
+        // warm-started at `x0`) is kept in the objective support instead of
+        // being mis-classified objective-free and eliminated. A variable
+        // that is nonlinear only in *constraints* stays `Linear` here, so
+        // the guard does not block legitimate eliminations of
+        // objective-free equality blocks (the gas-network case).
+        let mut nonlinear: BTreeSet<usize> = BTreeSet::new();
+        collect_vars(&self.prob.obj_nonlinear, &mut nonlinear);
+        for (i, t) in types.iter_mut().enumerate() {
+            *t = if nonlinear.contains(&i) {
+                Linearity::NonLinear
+            } else {
+                Linearity::Linear
+            };
+        }
+        true
+    }
 }
 
 /// Convenience: read an `.nl` file and build a TNLP-compatible Rc.
@@ -2645,6 +2810,124 @@ b
         assert!((g[1] - (-2.0)).abs() < 1e-12);
     }
 
+    /// F3 (H11 dormant): `NlTnlp` must answer `get_variables_linearity`
+    /// with global semantics so the presolve auxiliary-elimination
+    /// safeguard actually engages. Pre-fix the default trait stub returned
+    /// `false` and left the slice untouched, so a variable that is
+    /// nonlinear in the objective but zero-gradient at the probe point
+    /// could be wrongly eliminated.
+    ///
+    /// Problem: `min (x0 - 1)^2 + 3*x1`. x0 appears in the nonlinear part
+    /// of the objective (NonLinear); x1 appears only in the linear part
+    /// (Linear).
+    #[test]
+    fn variables_linearity_tags_obj_nonlinear_vs_linear_vars() {
+        // (x0 - 1)^2
+        let obj_nl = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Binary(
+                BinOp::Sub,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::Const(1.0)),
+            )),
+            Box::new(Expr::Const(2.0)),
+        );
+        let prob = NlProblem {
+            n: 2,
+            m: 0,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: obj_nl,
+            obj_linear: vec![(1, 3.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![],
+            con_linear: vec![],
+            x_l: vec![f64::NEG_INFINITY; 2],
+            x_u: vec![f64::INFINITY; 2],
+            g_l: vec![],
+            g_u: vec![],
+            x0: vec![0.0; 2],
+            lambda0: vec![],
+            suffixes: NlSuffixes::default(),
+            imported_funcs: vec![],
+            var_names: vec![],
+            con_names: vec![],
+        };
+        let mut tnlp = NlTnlp::new(prob);
+        let mut types = vec![Linearity::Linear; 2];
+        let ok = tnlp.get_variables_linearity(&mut types);
+        // Pre-fix: default stub returns false (slice untouched).
+        assert!(
+            ok,
+            "get_variables_linearity must report it filled the slice"
+        );
+        assert!(
+            matches!(types[0], Linearity::NonLinear),
+            "x0 is nonlinear in the objective"
+        );
+        assert!(
+            matches!(types[1], Linearity::Linear),
+            "x1 appears only in the linear part"
+        );
+    }
+
+    /// Objective-scoped linearity must NOT inherit constraint
+    /// nonlinearity. `min 3*x1 s.t. x0^2 = 4`: x0 is nonlinear globally
+    /// (constraint tape) but linear w.r.t. the objective, so the presolve
+    /// H11 guard must not treat it as objective-coupled — that was the CI
+    /// regression where every gas-network variable (nonlinear in the flow
+    /// equations, absent from the linear objective) blocked Phase-0
+    /// elimination.
+    #[test]
+    fn objective_variables_linearity_ignores_constraint_nonlinearity() {
+        // x0^2
+        let con_nl = Expr::Binary(
+            BinOp::Pow,
+            Box::new(Expr::Var(0)),
+            Box::new(Expr::Const(2.0)),
+        );
+        let prob = NlProblem {
+            n: 2,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(1, 3.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![con_nl],
+            con_linear: vec![vec![]],
+            x_l: vec![f64::NEG_INFINITY; 2],
+            x_u: vec![f64::INFINITY; 2],
+            g_l: vec![4.0],
+            g_u: vec![4.0],
+            x0: vec![0.0; 2],
+            lambda0: vec![0.0],
+            suffixes: NlSuffixes::default(),
+            imported_funcs: vec![],
+            var_names: vec![],
+            con_names: vec![],
+        };
+        let mut tnlp = NlTnlp::new(prob);
+
+        let mut global = vec![Linearity::Linear; 2];
+        assert!(tnlp.get_variables_linearity(&mut global));
+        assert!(
+            matches!(global[0], Linearity::NonLinear),
+            "global tags see x0's constraint nonlinearity"
+        );
+
+        let mut obj = vec![Linearity::NonLinear; 2];
+        assert!(tnlp.get_objective_variables_linearity(&mut obj));
+        assert!(
+            matches!(obj[0], Linearity::Linear),
+            "x0 is linear w.r.t. the objective despite the nonlinear constraint"
+        );
+        assert!(
+            matches!(obj[1], Linearity::Linear),
+            "x1 is linear everywhere"
+        );
+    }
+
     /// `min x0^2 + x1^2  s.t.  x0 + x1 = 1`.
     /// One equality constraint with a purely linear Jacobian — exercises
     /// the constrained path (`eval_g`, `eval_jac_g`, `r`-segment bound
@@ -2705,6 +2988,106 @@ J0 2
         assert!((p.g_u[0] - 1.0).abs() < 1e-12);
         // J-row 0: x0 (coef 1), x1 (coef 1).
         assert_eq!(p.con_linear[0], vec![(0, 1.0), (1, 1.0)]);
+    }
+
+    #[test]
+    fn malformed_j_variable_index_is_parse_error_not_panic() {
+        // Code review L32: a J-segment entry's variable (column) index was
+        // pushed into con_linear unchecked, so an out-of-range index (here 5
+        // with n=2) flowed through to a slice OOB panic (`x[*j]`) during
+        // constraint evaluation. It must instead surface as a clean parse
+        // error, consistent with the existing `J<row> out of range` check.
+        let bad = EQ_LIN.replace("J0 2\n0 1\n1 1\n", "J0 2\n0 1\n5 1\n");
+        assert_ne!(bad, EQ_LIN, "fixture substitution must apply");
+        let err = parse_nl_text(&bad).expect_err("out-of-range J var must error");
+        assert!(err.contains("out of range"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn out_of_range_x_segment_index_is_parse_error() {
+        // Same strictness for the initial-primal `x` segment: an index past
+        // `n` used to be silently dropped; now it is a parse error, so the
+        // four index-bearing segments (J/G/x/d) behave consistently.
+        let bad = format!("{EQ_LIN}x1\n5 0.5\n");
+        let err = parse_nl_text(&bad).expect_err("out-of-range x index must error");
+        assert!(err.contains("out of range"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn k_segment_nonstandard_count_is_parse_error_at_source() {
+        // Code review L35: the `k` (Jacobian column-count) segment header
+        // declares how many count lines follow — `k<count>` — and the
+        // standard value is n-1. The parser used to *assume* n-1 and ignore
+        // the header, so a file declaring a different count read the wrong
+        // number of data lines, desynced the segment stream, and failed far
+        // downstream with a confusing error (or silently mis-parsed). With
+        // the declared count now read and validated, a nonstandard count is
+        // a clear parse error at its source. Here EQ_LIN has n=2 (expected
+        // count 1); rewrite its `k1` + one count line to `k0`.
+        let bad = EQ_LIN.replace("k1\n2\n", "k0\n");
+        assert_ne!(bad, EQ_LIN, "fixture substitution must apply");
+        let err = parse_nl_text(&bad).expect_err("nonstandard k count must error");
+        assert!(
+            err.contains("k-segment declares"),
+            "expected a clear k-segment count error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn get_starting_point_returns_nl_initial_duals() {
+        // Code review 2026-06 item M19: the `.nl` `d` segment supplies
+        // initial constraint multipliers. They are parsed into `lambda0`,
+        // but `get_starting_point` previously ignored them — so a
+        // `warm_start_init_point yes` solve silently began from zero duals.
+        // `get_starting_point` must hand the parsed duals back when the
+        // engine requests them (`init_lambda`), and leave the buffer
+        // untouched when it does not.
+        let nl = format!("{EQ_LIN}\nd1\n0 2.5\n");
+        let p = parse_nl_text(&nl).expect("parse");
+        assert_eq!(p.lambda0, vec![2.5], "the `d` segment fills lambda0");
+
+        let mut t = NlTnlp::new(p);
+        let info = t.get_nlp_info().unwrap();
+        let (n, m) = (info.n as usize, info.m as usize);
+
+        // Warm-start request: init_lambda = true → the parsed `.nl` duals
+        // must be returned (pre-fix this stayed zero).
+        let mut x = vec![0.0; n];
+        let mut z_l = vec![0.0; n];
+        let mut z_u = vec![0.0; n];
+        let mut lambda = vec![0.0; m];
+        assert!(t.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: true,
+            lambda: &mut lambda,
+        }));
+        assert_eq!(
+            lambda,
+            vec![2.5],
+            "a warm start must use the `.nl` initial duals, not zero"
+        );
+
+        // No warm-start request: the multiplier buffer is left alone (the
+        // engine owns its default), so honoring the flag does not clobber it.
+        let mut lambda_untouched = vec![7.0; m];
+        assert!(t.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: false,
+            lambda: &mut lambda_untouched,
+        }));
+        assert_eq!(
+            lambda_untouched,
+            vec![7.0],
+            "without init_lambda the multiplier buffer must be untouched"
+        );
     }
 
     #[test]
@@ -3029,6 +3412,54 @@ S1 2 sens_init_constr
         assert_eq!(tnlp.variable_name(0), None);
     }
 
+    #[test]
+    fn read_nl_file_resolves_extensionless_ampl_stub() {
+        // AMPL invokes `pounce mystub -AMPL`, passing the stub *without*
+        // the `.nl` extension; the solver must read `mystub.nl`. Code
+        // review 2026-06 item M15.
+        let dir = scratch_dir("stub");
+        std::fs::write(dir.join("mystub.nl"), SIMPLE).unwrap();
+        // Pass the extensionless stub — the file `mystub` does not exist.
+        let stub = dir.join("mystub");
+        assert!(!stub.exists(), "stub must be extensionless / absent");
+        let prob = read_nl_file(&stub).expect("stub should resolve to mystub.nl");
+        assert_eq!(prob.n, 2);
+        assert_eq!(prob.m, 0);
+
+        // Sibling name files are still found off the resolved stem.
+        std::fs::write(dir.join("mystub.col"), "alpha\nbeta\n").unwrap();
+        let prob = read_nl_file(&stub).expect("stub resolves, names ride along");
+        assert_eq!(prob.var_names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn read_nl_file_prefers_exact_path_over_nl_sibling() {
+        // An existing path is read verbatim — the `.nl` fallback only
+        // kicks in when the literal path is missing, so a caller passing a
+        // real file is never silently redirected to a `<file>.nl` sibling.
+        let dir = scratch_dir("exact");
+        // `data` exists and IS a valid .nl; `data.nl` is deliberate garbage.
+        std::fs::write(dir.join("data"), SIMPLE).unwrap();
+        std::fs::write(dir.join("data.nl"), "not an nl file").unwrap();
+        let prob = read_nl_file(&dir.join("data")).expect("exact path wins");
+        assert_eq!(prob.n, 2);
+    }
+
+    #[test]
+    fn append_extension_appends_rather_than_replaces() {
+        use std::path::Path;
+        assert_eq!(
+            append_extension(Path::new("mystub"), "nl"),
+            Path::new("mystub.nl")
+        );
+        // A stub that itself contains a dot keeps its stem (AMPL names it
+        // `my.model.nl`, not `my.nl`).
+        assert_eq!(
+            append_extension(Path::new("my.model"), "nl"),
+            Path::new("my.model.nl")
+        );
+    }
+
     // ---- equation rendering (`print equation`) ----
 
     fn names(v: &[&str]) -> Vec<String> {
@@ -3168,5 +3599,31 @@ S1 2 sens_init_constr
         // Sorted, deduped per row: row 0 → cols 0,1,2; row 1 → col 2.
         assert_eq!(irow, vec![0, 0, 0, 1]);
         assert_eq!(jcol, vec![0, 1, 2, 2]);
+    }
+
+    #[test]
+    fn funcall_string_arg_with_hash_is_not_truncated() {
+        // Code review L31: an AMPL string argument is a Hollerith literal
+        // `h<len>:<chars>` whose content is exactly <len> bytes and may
+        // legitimately contain '#' (e.g. a parameters-directory path). The
+        // old parser ran strip_comment() over the line first, truncating
+        // the content at the '#'. Here `h3:a#b` must round-trip to "a#b".
+        let mut p = Parser::new("h3:a#b\n");
+        match p.parse_funcall_arg().expect("parse hollerith arg") {
+            FuncallArg::Str(s) => assert_eq!(s, "a#b"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn funcall_string_arg_honors_declared_length() {
+        // The declared `<len>` is authoritative: exactly that many bytes
+        // after the ':' form the string; trailing content (here a real
+        // ` # comment`) is not part of it.
+        let mut p = Parser::new("h3:abc # trailing comment\n");
+        match p.parse_funcall_arg().expect("parse hollerith arg") {
+            FuncallArg::Str(s) => assert_eq!(s, "abc"),
+            other => panic!("expected Str, got {other:?}"),
+        }
     }
 }

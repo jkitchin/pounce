@@ -30,8 +30,8 @@
 
 use crate::cones::{BarrierCone, Cone, ConeBlock, ExponentialCone, PowerCone, SecondOrderCone};
 use crate::debug::{fire, ConvexDebugState};
-use crate::ipm::{build_rhs, detect_infeasibility, dot, inf_norm, split_step, QpOptions};
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::ipm::{build_rhs, detect_infeasibility_with, dot, inf_norm, split_step, QpOptions};
+use crate::qp::{breakdown_status, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -145,6 +145,49 @@ impl NsCone {
         }
     }
 
+    /// Whether `z` lies in the **dual** cone `K*` (to tolerance `tol`),
+    /// block by block. The orthant and SOC are self-dual; exp/power use
+    /// their barrier-cone dual test (`K_exp*` requires `u < 0`, so a
+    /// componentwise `z ≥ 0` test is wrong in *both* directions). Used to
+    /// validate Farkas (primal-infeasibility) multipliers.
+    pub(crate) fn in_dual_cone(&self, z: &[f64], tol: f64) -> bool {
+        for &(off, b) in &self.blocks {
+            let ok = match b {
+                NsBlock::Orthant(d) => z[off..off + d].iter().all(|&v| v >= -tol),
+                // SOC is self-dual ⇒ its `in_dual_cone` is the membership test.
+                NsBlock::SecondOrder(m) => {
+                    SecondOrderCone::new(m).in_dual_cone(&z[off..off + m], tol)
+                }
+                NsBlock::Nonsym(c) => c.in_dual_cone(&z[off..off + 3], tol),
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `s` lies in the **primal** cone `K` (to tolerance `tol`),
+    /// block by block. For exp/power this is distinct from `in_dual_cone`
+    /// (the cones are not self-dual). Used to validate the recession
+    /// direction `−Gd ∈ K` for the dual-infeasibility certificate.
+    pub(crate) fn in_primal_cone(&self, s: &[f64], tol: f64) -> bool {
+        for &(off, b) in &self.blocks {
+            let ok = match b {
+                NsBlock::Orthant(d) => s[off..off + d].iter().all(|&v| v >= -tol),
+                // SOC is self-dual ⇒ `in_dual_cone` doubles as the primal test.
+                NsBlock::SecondOrder(m) => {
+                    SecondOrderCone::new(m).in_dual_cone(&s[off..off + m], tol)
+                }
+                NsBlock::Nonsym(c) => c.in_primal_cone(&s[off..off + 3], tol),
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Self-dual starting iterate `e` (orthant: ones; non-symmetric cone: the
     /// cone's `interior_reference`, which lies in both `K` and `K*`). The
     /// corrector recenters from here, so an exact central point is not needed.
@@ -198,13 +241,36 @@ enum BlockScaling {
     },
 }
 
+/// SOC dimension at or below which the `(z,z)` block is assembled as a dense
+/// lower triangle rather than the sparse diagonal+rank-1 auxiliary-variable
+/// form. The dense triangle holds `m(m+1)/2` nonzeros vs the aux form's
+/// `2m+1` (plus one extra matrix row/col), so for `m <= 3` dense is the
+/// smaller — and slightly better-conditioned near the cone boundary —
+/// representation. Above this, the aux form avoids the dense `O(m²)` fill that
+/// the review (L41) flagged for large SOCs mixed with exp cones.
+const SOC_DENSE_MAX_DIM: usize = 3;
+
 /// KKT value-array positions for one cone block.
 enum ZPos {
     /// Orthant: one diagonal value position per row.
     Diag(Vec<usize>),
-    /// Second-order cone: the dense lower-triangle value positions, row-major
-    /// `[(0,0); (1,0),(1,1); …]` (length `m(m+1)/2`).
-    SecondOrder { dim: usize, pos: Vec<usize> },
+    /// Small second-order cone (`m <= SOC_DENSE_MAX_DIM`): the dense
+    /// lower-triangle value positions, row-major `[(0,0); (1,0),(1,1); …]`
+    /// (length `m(m+1)/2`). For such `m` the dense triangle has *fewer*
+    /// nonzeros than the auxiliary-variable form (and is marginally
+    /// better-conditioned), so it is preferred.
+    SecondOrderDense { dim: usize, pos: Vec<usize> },
+    /// Large second-order cone in **diagonal + rank-1** form via one auxiliary
+    /// variable `ξ` (the ECOS/Clarabel sparse-SOC trick, matching the
+    /// symmetric driver's `ZBlockPos::DiagRank1`): the `(z,z)` diagonal value
+    /// positions, the coupling column `(ξ, z_i) = u_i`, and the `(ξ, ξ) = +1`
+    /// entry. Eliminating `ξ` reproduces the dense `diag(d) + uuᵀ` block while
+    /// keeping the factor sparse — `O(m)` fill, not the dense `O(m²)`.
+    SecondOrderSparse {
+        diag_pos: Vec<usize>,
+        u_pos: Vec<usize>,
+        aux_pos: usize,
+    },
     /// Exp/power: the three diagonal positions and the three strict-lower
     /// positions `(1,0),(2,0),(2,1)`.
     Dense { diag: [usize; 3], lower: [usize; 3] },
@@ -249,8 +315,13 @@ impl NsKkt {
         for t in &prob.g {
             add(n + m_eq + t.row, t.col, t.val);
         }
-        // (z,z): per block, seeded with −reg on the diagonal. Exp blocks also
-        // reserve the strict-lower 3×3 off-diagonals (a genuine dense block).
+        // (z,z): per block, seeded with −reg on the diagonal. SOC blocks get
+        // an auxiliary variable (appended after the base rows) carrying the
+        // rank-1 term, so the (z,z) fill is O(m) not the dense O(m²). Exp
+        // blocks reserve the strict-lower 3×3 off-diagonals (a genuine dense
+        // block).
+        let base_dim = n + m_eq + m_ineq;
+        let mut aux = base_dim; // next auxiliary-variable index
         for (off, b) in &cone.blocks {
             let zb = n + m_eq + off;
             match b {
@@ -259,13 +330,26 @@ impl NsKkt {
                         add(zb + i, zb + i, -reg);
                     }
                 }
-                NsBlock::SecondOrder(m) => {
-                    // Genuine dense m×m lower triangle for the NT scaling W².
+                NsBlock::SecondOrder(m) if *m <= SOC_DENSE_MAX_DIM => {
+                    // Small SOC: dense m×m lower triangle for the NT scaling W²
+                    // (fewer nonzeros than the aux form at this size).
                     for i in 0..*m {
                         for j in 0..=i {
                             add(zb + i, zb + j, if i == j { -reg } else { 0.0 });
                         }
                     }
+                }
+                NsBlock::SecondOrder(m) => {
+                    // Large SOC: sparse diag-plus-rank-1 via the auxiliary
+                    // variable ξ — diagonal −reg (filled per iter), coupling
+                    // (ξ, z_i) = u_i, and (ξ, ξ) = +1. Eliminating ξ reproduces
+                    // diag(d) + uuᵀ with O(m) fill instead of dense O(m²).
+                    for i in 0..*m {
+                        add(zb + i, zb + i, -reg);
+                        add(aux, zb + i, 0.0);
+                    }
+                    add(aux, aux, 1.0);
+                    aux += 1;
                 }
                 NsBlock::Nonsym(_) => {
                     for i in 0..3 {
@@ -277,6 +361,7 @@ impl NsKkt {
                 }
             }
         }
+        let dim = aux;
 
         let nnz = entries.len();
         let mut airn = Vec::with_capacity(nnz);
@@ -291,6 +376,7 @@ impl NsKkt {
         }
 
         let mut z_pos = Vec::with_capacity(cone.blocks.len());
+        let mut aux = base_dim;
         for (off, b) in &cone.blocks {
             let zb = n + m_eq + off;
             match b {
@@ -299,14 +385,25 @@ impl NsKkt {
                         (0..*d).map(|i| coord_to_pos[&(zb + i, zb + i)]).collect(),
                     ));
                 }
-                NsBlock::SecondOrder(m) => {
+                NsBlock::SecondOrder(m) if *m <= SOC_DENSE_MAX_DIM => {
                     let mut pos = Vec::with_capacity(m * (m + 1) / 2);
                     for i in 0..*m {
                         for j in 0..=i {
                             pos.push(coord_to_pos[&(zb + i, zb + j)]);
                         }
                     }
-                    z_pos.push(ZPos::SecondOrder { dim: *m, pos });
+                    z_pos.push(ZPos::SecondOrderDense { dim: *m, pos });
+                }
+                NsBlock::SecondOrder(m) => {
+                    let diag_pos = (0..*m).map(|i| coord_to_pos[&(zb + i, zb + i)]).collect();
+                    let u_pos = (0..*m).map(|i| coord_to_pos[&(aux, zb + i)]).collect();
+                    let aux_pos = coord_to_pos[&(aux, aux)];
+                    z_pos.push(ZPos::SecondOrderSparse {
+                        diag_pos,
+                        u_pos,
+                        aux_pos,
+                    });
+                    aux += 1;
                 }
                 NsBlock::Nonsym(_) => {
                     let diag = [
@@ -323,12 +420,12 @@ impl NsKkt {
                 }
             }
         }
-        let _ = m_ineq;
+        debug_assert_eq!(aux, dim, "aux count must match between the two passes");
         NsKkt {
             airn,
             ajcn,
             values,
-            dim: n + m_eq + m_ineq,
+            dim,
             z_pos,
         }
     }
@@ -358,7 +455,7 @@ impl NsKkt {
                     }
                     scalings.push(BlockScaling::Orthant { sz_ratio, s_tilde });
                 }
-                (NsBlock::SecondOrder(m), ZPos::SecondOrder { dim, pos }) => {
+                (NsBlock::SecondOrder(m), ZPos::SecondOrderDense { dim, pos }) => {
                     debug_assert_eq!(m, dim);
                     let sb = &s[*off..off + m];
                     let zb = &z[*off..off + m];
@@ -379,6 +476,32 @@ impl NsKkt {
                             k += 1;
                         }
                     }
+                    scalings.push(BlockScaling::SecondOrder { diag, u });
+                }
+                (
+                    NsBlock::SecondOrder(m),
+                    ZPos::SecondOrderSparse {
+                        diag_pos,
+                        u_pos,
+                        aux_pos,
+                    },
+                ) => {
+                    let sb = &s[*off..off + m];
+                    let zb = &z[*off..off + m];
+                    // W² = diag(d) + u uᵀ from the SOC's NT scaling.
+                    let (diag, u) = match SecondOrderCone::new(*m).kkt_block(sb, zb) {
+                        ConeBlock::DiagPlusRank1 { diag, u } => (diag, u),
+                        _ => unreachable!("SOC kkt_block is DiagPlusRank1"),
+                    };
+                    // (z,z) = −(diag(d) + uuᵀ) − reg, with the rank-1 carried
+                    // by the aux variable ξ: diagonal −dᵢ − reg, coupling
+                    // (ξ, z_i) = uᵢ, and (ξ, ξ) = +1. Its Schur complement is
+                    // −diag(d) − reg − uuᵀ = −W² − reg.
+                    for i in 0..*m {
+                        out[diag_pos[i]] = -diag[i] - reg;
+                        out[u_pos[i]] = u[i];
+                    }
+                    out[*aux_pos] = 1.0;
                     scalings.push(BlockScaling::SecondOrder { diag, u });
                 }
                 (NsBlock::Nonsym(nscone), ZPos::Dense { diag, lower }) => {
@@ -654,6 +777,39 @@ fn max_step(
     }
 }
 
+/// Cone-aware infeasibility detection for the non-symmetric driver.
+///
+/// Validates the Farkas multiplier `z ∈ K*` and the recession direction
+/// `−Gd ∈ K` against the genuine non-symmetric cone instead of the
+/// orthant componentwise default. For an exp block the dual cone requires
+/// `u < 0`, so the componentwise test both *rejects* genuine exp Farkas
+/// certificates (infeasible problems degraded to `IterationLimit`) and
+/// *accepts* all-nonnegative `z ∉ K_exp*` (false `PrimalInfeasible`); the
+/// recession branch had the analogous flaw via `Gd ≤ 0`.
+fn detect_infeasibility_nscone(
+    prob: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    opts: &QpOptions,
+    cone: &NsCone,
+) -> Option<QpStatus> {
+    detect_infeasibility_with(
+        prob,
+        x,
+        y,
+        z,
+        opts,
+        |z, tol| cone.in_dual_cone(z, tol),
+        |gd, tol| {
+            // `−Gd ∈ K`; the non-symmetric cone is NOT self-dual, so this
+            // is the *primal* membership test (distinct from `in_dual_cone`).
+            let neg: Vec<f64> = gd.iter().map(|&v| -v).collect();
+            cone.in_primal_cone(&neg, tol)
+        },
+    )
+}
+
 /// Solve `min cᵀx s.t. Ax = b, Gx + s = h, s ∈ K` with `K` a product of
 /// orthant and exponential cones, via the non-symmetric HSDE.
 fn run_nonsym<F>(
@@ -832,12 +988,18 @@ where
         // "Acceptable level": near the cone boundary the barrier Hessian blows
         // up (ψ → 0) and the scaling/factorization can break down a hair short
         // of `tol`. If that happens while the KKT residuals are already tiny
-        // (within `~1e3·tol`), the current iterate *is* essentially optimal —
-        // accept it rather than reporting a spurious NumericalFailure.
+        // (within `~1e3·tol`), the iterate is usable — report it as
+        // `OptimalInaccurate` (reduced accuracy) rather than discarding it as a
+        // spurious NumericalFailure. It is deliberately *not* a bare `Optimal`:
+        // the residual sits above `tol`, so callers can distinguish it from a
+        // genuinely converged solve (code review 2026-06 item M20).
         let near_opt = res < 1e3 * opts.tol;
-        // Infeasibility certificate as τ → 0.
+        // Infeasibility certificate as τ → 0. Validate the Farkas multiplier
+        // and the recession direction against the *actual* (non-symmetric)
+        // cone — the orthant-only componentwise test is wrong in both
+        // directions for exp/power blocks (`K_exp*` requires `u < 0`).
         if tau < 1e-2 * kappa.max(1.0) {
-            if let Some(st) = detect_infeasibility(prob, &x, &y, &z, opts) {
+            if let Some(st) = detect_infeasibility_nscone(prob, &x, &y, &z, opts, &cone) {
                 status = st;
                 break;
             }
@@ -848,31 +1010,19 @@ where
         let scalings = match kkt.update_blocks(&cone, &s, &z, opts.reg, &mut kkt_vals) {
             Some(sc) => sc,
             None => {
-                status = if near_opt {
-                    QpStatus::Optimal
-                } else {
-                    QpStatus::NumericalFailure
-                };
+                status = breakdown_status(near_opt);
                 break;
             }
         };
         if fact.refactor(&kkt_vals).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
 
         // Constant direction p: M p = (−c, b, h).
         build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut p_x, &mut p_y, &mut p_z);
@@ -887,11 +1037,7 @@ where
         comp_term(&cone, &scalings, &s, &z, 0.0, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
         if fact.solve_one(&mut rhs).is_err() {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
@@ -990,19 +1136,11 @@ where
             break;
         }
         if solve_failed {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
         if alpha <= 0.0 {
-            status = if near_opt {
-                QpStatus::Optimal
-            } else {
-                QpStatus::NumericalFailure
-            };
+            status = breakdown_status(near_opt);
             break;
         }
 
@@ -1085,8 +1223,11 @@ where
     // (NumericalFailure / IterationLimit) but the best iterate we reached has a
     // KKT residual within √tol (e.g. tol=1e-8 → 1e-4), the problem was
     // essentially solved — a near-boundary stall on a non-symmetric cone, not a
-    // genuine failure. Restore that iterate and report Optimal, mirroring the
-    // "solved to reduced accuracy" outcome of ECOS/Clarabel/SCS. This never
+    // genuine failure. Restore that iterate and report `OptimalInaccurate`,
+    // mirroring the "solved to reduced accuracy" outcome of ECOS/Clarabel/SCS.
+    // It is reported as `OptimalInaccurate`, *not* a bare `Optimal`: the
+    // residual is only within `√tol`, so callers can tell it apart from a
+    // genuinely converged solve (code review 2026-06 item M20). This never
     // fires for infeasible/unbounded problems (their residuals never get this
     // small — the embedding drives τ → 0 and the certificate path triggers
     // first) and never relaxes the clean convergence test above (still `tol`).
@@ -1105,7 +1246,7 @@ where
                 z = bz;
                 s = bs;
                 tau = btau;
-                status = QpStatus::Optimal;
+                status = QpStatus::OptimalInaccurate;
             }
         }
     }
@@ -1214,7 +1355,10 @@ fn failed(prob: &QpProblem) -> QpSolution {
         status: QpStatus::NumericalFailure,
         x: vec![0.0; prob.n],
         y: vec![0.0; prob.m_eq()],
-        z: vec![1.0; prob.m_ineq()],
+        // Trivial dual: `z = 0` (the cone apex) is valid in every dual cone,
+        // unlike the all-ones vector, which is not a member of an SOC of
+        // dimension ≥ 3. Matches `ipm::failed_solution`.
+        z: vec![0.0; prob.m_ineq()],
         z_lb: vec![0.0; prob.n],
         z_ub: vec![0.0; prob.n],
         obj: 0.0,
@@ -1332,9 +1476,12 @@ mod tests {
         };
         let specs = [NsBlock::exp(), NsBlock::exp(), NsBlock::Orthant(1)];
         let sol = solve_conic_hsde_nonsym(&prob, &specs, &opts(), backend);
-        assert_eq!(
-            sol.status,
-            QpStatus::Optimal,
+        // This exp-cone GP reaches its optimum through the driver's
+        // reduced-accuracy fallback (best iterate within √tol), so the status
+        // is `OptimalInaccurate` — a usable solve at reduced accuracy, not a
+        // failure. The objective check below pins the actual solution quality.
+        assert!(
+            matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
             "not optimal: {:?}",
             sol.status
         );
@@ -1527,7 +1674,14 @@ mod tests {
         // length-mismatched (ignored) vector all reach the same optimum.
         for warm in [cold.x.as_slice(), &[50.0, -30.0, 9.0], &[1.0]] {
             let sol = solve_conic_hsde_nonsym_warm(&prob, &specs, warm, &opts(), backend);
-            assert_eq!(sol.status, QpStatus::Optimal, "warm {warm:?}");
+            // A bad warm start can land on the reduced-accuracy fallback
+            // (`OptimalInaccurate`); both count as a usable solve. The
+            // start-independent invariant is the objective, checked next.
+            assert!(
+                matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
+                "warm {warm:?}: {:?}",
+                sol.status
+            );
             assert!(
                 (sol.obj - cold.obj).abs() < 1e-5,
                 "warm {warm:?} obj {} vs {}",
@@ -1558,6 +1712,113 @@ mod tests {
         assert!((sol.x[0] - 5.0).abs() < 1e-5, "t = {} vs 5", sol.x[0]);
     }
 
+    /// L41: a **large** SOC must be assembled in the sparse diag-plus-rank-1
+    /// (auxiliary-variable) form — `O(m)` fill — not the dense `m×m` lower
+    /// triangle (`O(m²)`). The KKT dimension grows by exactly one aux variable
+    /// for the cone, and the total nnz stays below the dense `(z,z)` count.
+    #[test]
+    fn large_soc_kkt_block_is_sparse_not_dense() {
+        // Pure SOC(m) problem (m > SOC_DENSE_MAX_DIM): n = m, G = -I_m.
+        let m = 24;
+        let g: Vec<Triplet> = (0..m).map(|i| Triplet::new(i, i, -1.0)).collect();
+        let prob = QpProblem {
+            n: m,
+            p_lower: vec![],
+            c: vec![0.0; m],
+            a: vec![],
+            b: vec![],
+            g,
+            h: vec![0.0; m],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = NsCone::new(&[NsBlock::SecondOrder(m)]);
+        let kkt = NsKkt::build(&prob, &cone, 1e-10);
+
+        // One auxiliary variable was appended for the single large SOC.
+        assert_eq!(
+            kkt.dim,
+            prob.n + prob.m_eq() + prob.m_ineq() + 1,
+            "large SOC must add exactly one auxiliary variable",
+        );
+        assert!(matches!(
+            kkt.z_pos.as_slice(),
+            [ZPos::SecondOrderSparse { .. }]
+        ));
+        // The dense lower triangle alone would be m(m+1)/2 entries in the
+        // (z,z) block; the sparse aux form uses ~2m. The full KKT nnz must sit
+        // below the dense-(z,z) lower bound.
+        let dense_zz = m * (m + 1) / 2;
+        assert!(
+            kkt.airn.len() < dense_zz,
+            "KKT nnz {} should be below the dense (z,z) count {} (sparse SOC fill)",
+            kkt.airn.len(),
+            dense_zz,
+        );
+    }
+
+    /// The sparse aux-variable SOC path must also **solve correctly**, not
+    /// just assemble sparsely: a large second-order cone routed through the
+    /// non-symmetric driver hits the new code path (`m > SOC_DENSE_MAX_DIM`)
+    /// and must reach the known norm-minimization optimum.
+    /// `min t s.t. (t, 3, 4, 0, 0, 0) ∈ SOC(6)` → `t = ‖(3,4,0,0,0)‖ = 5`.
+    #[test]
+    fn large_soc_sparse_path_solves() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0)], // SOC s0 = t
+            h: vec![0.0, 3.0, 4.0, 0.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        // dim 6 > SOC_DENSE_MAX_DIM ⇒ exercises the sparse aux path.
+        let sol = solve_conic_hsde_nonsym(&prob, &[NsBlock::SecondOrder(6)], &opts(), backend);
+        assert!(
+            matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
+            "status {:?}",
+            sol.status
+        );
+        assert!((sol.x[0] - 5.0).abs() < 1e-5, "t = {} vs 5", sol.x[0]);
+    }
+
+    /// A **small** SOC (`m <= SOC_DENSE_MAX_DIM`) stays in the dense
+    /// lower-triangle form: fewer nonzeros than the aux form at that size, no
+    /// auxiliary variable, and the existing small-SOC solves keep their
+    /// (better-conditioned) numerics.
+    #[test]
+    fn small_soc_kkt_block_stays_dense() {
+        let m = SOC_DENSE_MAX_DIM; // 3
+        let g: Vec<Triplet> = (0..m).map(|i| Triplet::new(i, i, -1.0)).collect();
+        let prob = QpProblem {
+            n: m,
+            p_lower: vec![],
+            c: vec![0.0; m],
+            a: vec![],
+            b: vec![],
+            g,
+            h: vec![0.0; m],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = NsCone::new(&[NsBlock::SecondOrder(m)]);
+        let kkt = NsKkt::build(&prob, &cone, 1e-10);
+
+        // No auxiliary variable for a small SOC.
+        assert_eq!(
+            kkt.dim,
+            prob.n + prob.m_eq() + prob.m_ineq(),
+            "small SOC must not add an auxiliary variable",
+        );
+        assert!(matches!(
+            kkt.z_pos.as_slice(),
+            [ZPos::SecondOrderDense { dim: 3, .. }]
+        ));
+    }
+
     /// Power cone routed through the **public** entry `solve_socp_ipm` with
     /// `ConeSpec::Power(α)`.
     #[test]
@@ -1582,5 +1843,111 @@ mod tests {
         let sol = solve_socp_ipm(&prob, &[ConeSpec::Power(0.5)], &opts(), backend);
         assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.status);
         assert!((sol.x[0] - 1.0).abs() < 1e-5, "x = {} vs 1", sol.x[0]);
+    }
+
+    // ---- H8: non-symmetric Farkas/recession certificates must use the
+    // actual cone, not the orthant componentwise test. ----
+
+    /// `NsCone`'s membership tests must agree with the exp cone's own
+    /// `K_exp*` test (`u < 0`), where the componentwise `z ≥ 0` disagrees
+    /// in both directions.
+    #[test]
+    fn nscone_exp_membership_disagrees_with_componentwise() {
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        // Self-dual interior reference: in both K and K* (and has u < 0).
+        let mut e = [0.0; 3];
+        cone.identity(&mut e);
+        assert!(cone.in_dual_cone(&e, 1e-9), "interior ref must be in K*");
+        assert!(cone.in_primal_cone(&e, 1e-9), "interior ref must be in K");
+        assert!(e[0] < 0.0, "dual exp interior has u < 0, got {}", e[0]);
+
+        // All-nonnegative point: passes componentwise z ≥ 0 but u = 1 > 0
+        // ⇒ NOT in K_exp*.
+        let allpos = [1.0, 1.0, 1.0];
+        assert!(
+            allpos.iter().all(|&v| v >= 0.0),
+            "componentwise nonneg holds"
+        );
+        assert!(
+            !cone.in_dual_cone(&allpos, 1e-9),
+            "(1,1,1) has u>0 ⇒ not in K_exp*"
+        );
+    }
+
+    /// **False negative** (the headline H8 bug): a genuine exp Farkas
+    /// multiplier has `u < 0`, so the orthant componentwise test rejects
+    /// it and an infeasible problem degrades to `IterationLimit`. The
+    /// cone-aware detector accepts it as `PrimalInfeasible`.
+    ///
+    /// Setup isolates the primal branch: `A` empty, `y` empty, `G = 0`
+    /// (so `Gᵀz = 0` trivially), and `h` chosen so `hᵀz < 0`.
+    #[test]
+    fn exp_farkas_certificate_rejected_componentwise_accepted_cone_aware() {
+        use crate::ipm::detect_infeasibility;
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        let mut zc = [0.0; 3];
+        cone.identity(&mut zc); // in K*, u < 0
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],              // G = 0 ⇒ Gᵀz = 0
+            h: vec![1.0, 0.0, 0.0], // hᵀz = z₀ < 0
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions::default();
+        let x = [0.0]; // skip the dual-inf branch
+        let y: [f64; 0] = [];
+        assert!(zc[0] < 0.0 && prob.h[0] > 0.0, "hᵀz = z₀ < 0");
+
+        // Componentwise (orthant) test: z₀ < 0 ⇒ rejects the genuine cert.
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &zc, &opts),
+            None,
+            "orthant test wrongly rejects a real exp Farkas certificate"
+        );
+        // Cone-aware: z ∈ K_exp* ⇒ verified PrimalInfeasible.
+        assert_eq!(
+            detect_infeasibility_nscone(&prob, &x, &y, &zc, &opts, &cone),
+            Some(QpStatus::PrimalInfeasible),
+            "cone-aware test must accept the genuine exp Farkas certificate"
+        );
+    }
+
+    /// **False positive**: an all-nonnegative `z ∉ K_exp*` is accepted by
+    /// the componentwise test (bogus `PrimalInfeasible`) but rejected by
+    /// the cone-aware one.
+    #[test]
+    fn nonneg_z_not_in_dual_exp_cone_is_false_positive_componentwise() {
+        use crate::ipm::detect_infeasibility;
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        let z = [1.0, 1.0, 1.0]; // u = 1 > 0 ⇒ ∉ K_exp*, but ≥ 0 componentwise
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![-1.0, 0.0, 0.0], // hᵀz = −z₀ = −1 < 0
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions::default();
+        let x = [0.0];
+        let y: [f64; 0] = [];
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &z, &opts),
+            Some(QpStatus::PrimalInfeasible),
+            "componentwise test FALSE-positives on z=(1,1,1) ∉ K_exp*"
+        );
+        assert_eq!(
+            detect_infeasibility_nscone(&prob, &x, &y, &z, &opts, &cone),
+            None,
+            "cone-aware test must reject z=(1,1,1): not in K_exp*"
+        );
     }
 }

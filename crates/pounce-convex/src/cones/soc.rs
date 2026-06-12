@@ -1,24 +1,28 @@
 //! Second-order (Lorentz) cone `K = { (t, x) : t ≥ ‖x‖₂ }` for the convex
 //! IPM.
 //!
-//! Phase 2 of the SOCP extension (see `dev-notes/socp-extension.md`). This
-//! module ships the parts whose correctness is unambiguous and
-//! independently testable:
+//! SOCP extension (see `dev-notes/socp-extension.md`). This module
+//! implements the full Nesterov–Todd machinery for a single SOC block:
 //!
 //! - the Jordan-algebra geometry (`∘`, identity `e`, the `det` quadratic),
 //! - the central-path measure `μ = ⟨s, z⟩ / 2` (rank 2, regardless of
 //!   dimension),
-//! - the fraction-to-boundary `max_step` (the cone-boundary root), and
+//! - the fraction-to-boundary `max_step` (the cone-boundary root),
 //! - the **Nesterov–Todd scaling Hessian** `W² = η²(2 w̄ w̄ᵀ − J)` that
 //!   enters the KKT `(z, z)` block, with its defining identities
-//!   (`W² s = z`, symmetric PD, `W² = I` at `s = z`) verified in tests.
+//!   (`W² s = z`, symmetric PD, `W² = I` at `s = z`) verified in tests, and
+//! - the *reduced-system* methods — `rhs_comp_term` (the `(z)`-row term
+//!   `Arw(z)⁻¹ r_comp`), `recover_ds` (`−Arw(z)⁻¹ r_comp − W⁻² dz`), and
+//!   the Mehrotra second-order `comp_residual_corrector` — all carrying the
+//!   NT scaling/sign conventions, checked against the orthant in the 1-D
+//!   limit (`one_dimensional_cone_matches_orthant`).
 //!
-//! The *reduced-system* methods (`recover_ds`, `rhs_comp_term`, the
-//! corrector) carry the NT scaling/sign conventions whose end-to-end
-//! correctness must be validated against a reference solver; they are
-//! deferred to Phase 2b and `unimplemented!` here so they cannot be used
-//! before that validation. The driver builds an orthant-only cone until
-//! then, so SOC is a tested building block, not yet a solvable cone.
+//! These are fully implemented and **production-wired**: the HSDE solver
+//! (`hsde_nonsym.rs`) builds and steps SOC blocks, and the CLI routes a
+//! convex QCQP / `solver_selection=socp` to this path
+//! (`pounce-cli` dispatch → `SolverChoice::SocpIpm`). The only method left
+//! `unimplemented!` is `scaling_diag`, which is deliberately not applicable
+//! to SOC (the driver consumes the dense `kkt_block`, not a diagonal).
 
 use super::{Cone, ConeBlock};
 

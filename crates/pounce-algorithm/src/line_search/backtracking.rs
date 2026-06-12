@@ -130,12 +130,6 @@ pub struct BacktrackingLineSearch {
     watchdog_iterate: Option<IteratesVector>,
     /// Snapshot of the search direction at watchdog activation.
     watchdog_delta: Option<IteratesVector>,
-    /// Snapshot of `primal_frac_to_the_bound(τ, δ)` at watchdog
-    /// activation. Currently unused inside the alpha loop (pounce's
-    /// driver passes `alpha_init` directly), but stored for parity
-    /// with upstream's iter-by-iter trace.
-    #[allow(dead_code)]
-    watchdog_alpha_primal_test: Number,
     /// Number of outer iterations elapsed since watchdog activation.
     watchdog_trial_iter: i32,
     /// Number of consecutive shortened (n_steps > 0) accepts.
@@ -235,7 +229,6 @@ impl BacktrackingLineSearch {
             in_watchdog: false,
             watchdog_iterate: None,
             watchdog_delta: None,
-            watchdog_alpha_primal_test: 0.0,
             watchdog_trial_iter: 0,
             watchdog_shortened_iter: 0,
             last_mu: -1.0,
@@ -615,7 +608,6 @@ impl BacktrackingLineSearch {
                     self.handle_watchdog_failure(
                         data,
                         cq,
-                        alpha_init,
                         alpha_dual,
                         nlp,
                         n_steps,
@@ -659,8 +651,6 @@ impl BacktrackingLineSearch {
         self.watchdog_iterate = Some(curr);
         self.watchdog_delta = Some(delta.clone());
         self.watchdog_trial_iter = 0;
-        let tau = data.borrow().curr_tau;
-        self.watchdog_alpha_primal_test = cq.borrow().aff_step_alpha_primal_max(delta, tau);
         self.watchdog_theta = cq.borrow().curr_constraint_violation();
         self.watchdog_phi = cq.borrow().curr_barrier_obj();
         self.watchdog_d_phi = self.compute_d_phi(cq, delta);
@@ -677,7 +667,6 @@ impl BacktrackingLineSearch {
         &mut self,
         data: &IpoptDataHandle,
         cq: &IpoptCqHandle,
-        alpha_init: Number,
         alpha_dual: Number,
         nlp: Option<&Rc<RefCell<dyn IpoptNlp>>>,
         n_steps: i32,
@@ -717,17 +706,48 @@ impl BacktrackingLineSearch {
             let theta = cq.borrow().curr_constraint_violation();
             let phi = cq.borrow().curr_barrier_obj();
             let d_phi = self.compute_d_phi(cq, &snap_delta);
+            // Recompute the fraction-to-the-boundary caps from the
+            // *reverted* snapshot direction at the *reverted* iterate
+            // (`curr` was just set to `snap`). This mirrors upstream
+            // `IpBacktrackingLineSearch::FindAcceptableTrialPoint`, which
+            // recomputes `alpha_primal_max` / `alpha_dual_max` from
+            // `actual_delta_` after `StopWatchDog` has reverted it to the
+            // snapshot — the whole FindAcceptableTrialPoint body re-runs
+            // on the recovered direction, caps included.
+            //
+            // The failed direction's caps (the `alpha_init` / `alpha_dual`
+            // this method was handed, sized for the pre-revert iterate and
+            // the now-abandoned search direction) are NOT reused: applying
+            // them to `snap_delta` is wrong in both directions. If the
+            // failed cap is looser than the snapshot's FTB limit, the first
+            // retry trial overshoots the boundary — a negative slack /
+            // bound-multiplier, i.e. a non-finite barrier objective — and
+            // the loop wastes trials backtracking out of infeasibility; if
+            // tighter, it needlessly shortens a feasible step. Clamp by the
+            // full step `1.0` (the default `alpha_max`), matching the main
+            // path's `alpha_init.min(alpha_primal_max)` at
+            // `ipopt_alg.rs:1045`.
+            let tau = data.borrow().curr_tau;
+            let (alpha_primal_retry, alpha_dual_retry) = {
+                let cq_ref = cq.borrow();
+                (
+                    1.0_f64.min(cq_ref.aff_step_alpha_primal_max(&snap_delta, tau)),
+                    1.0_f64.min(cq_ref.aff_step_alpha_dual_max(&snap_delta, tau)),
+                )
+            };
             // SOC is disabled on the StopWatchDog retry. The original
             // `search_dir` was consumed by the first alpha-loop call
             // and we want a plain backtracking pass over the saved
             // delta; mirrors upstream's behavior of not running the
-            // soc_method on the recovered search.
+            // soc_method on the recovered search (hence `search_dir =
+            // None` and `skip_first = true`, which starts the retry from
+            // `alpha_*_retry * alpha_red_factor`).
             let result2 = self.run_alpha_loop(
                 data,
                 cq,
                 &snap_delta,
-                alpha_init,
-                alpha_dual,
+                alpha_primal_retry,
+                alpha_dual_retry,
                 nlp,
                 None,
                 theta,
@@ -1101,10 +1121,15 @@ fn scaled_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipopt_cq::IpoptCalculatedQuantities;
+    use crate::ipopt_data::IpoptData;
+    use crate::ipopt_nlp::Nlp;
     use crate::iterates_vector::IteratesVector;
     use crate::line_search::filter_acceptor::FilterLsAcceptor;
-    use pounce_linalg::dense_vector::DenseVectorSpace;
-    use pounce_linalg::Vector;
+    use pounce_common::types::Index;
+    use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
+    use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
+    use pounce_linalg::{Matrix, SymMatrix, Vector};
     use std::rc::Rc;
 
     fn dense(n: i32, vals: &[Number]) -> Rc<dyn Vector> {
@@ -1114,6 +1139,236 @@ mod tests {
             v.values_mut().copy_from_slice(vals);
         }
         Rc::new(v)
+    }
+
+    fn dvec(vals: &[Number]) -> DenseVector {
+        let mut v = DenseVectorSpace::new(vals.len() as Index).make_new_dense();
+        v.set(0.0);
+        if !vals.is_empty() {
+            v.values_mut().copy_from_slice(vals);
+        }
+        v
+    }
+
+    /// Minimal NLP for the F4 watchdog test: one variable `x[0] >= 0`,
+    /// no constraints. `f(x) = x[0]^2`. The only finite bound is the
+    /// lower bound on `x[0]`, so the primal fraction-to-the-boundary cap
+    /// is governed entirely by the `x[0]` slack.
+    struct F4MockNlp {
+        x_l: DenseVector,
+        x_u: DenseVector,
+        d_l: DenseVector,
+        d_u: DenseVector,
+        px_l: Rc<dyn Matrix>,
+        px_u: Rc<dyn Matrix>,
+        pd_l: Rc<dyn Matrix>,
+        pd_u: Rc<dyn Matrix>,
+    }
+
+    impl F4MockNlp {
+        fn new() -> Self {
+            Self {
+                x_l: dvec(&[0.0]),
+                x_u: dvec(&[]),
+                d_l: dvec(&[]),
+                d_u: dvec(&[]),
+                // P_L lifts the single lower-bounded var (col 0) into x[0].
+                px_l: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    1,
+                    1,
+                    &[0],
+                    0,
+                ))),
+                px_u: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    1,
+                    0,
+                    &[],
+                    0,
+                ))),
+                pd_l: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    0,
+                    0,
+                    &[],
+                    0,
+                ))),
+                pd_u: Rc::new(ExpansionMatrix::new(ExpansionMatrixSpace::new(
+                    0,
+                    0,
+                    &[],
+                    0,
+                ))),
+            }
+        }
+    }
+
+    impl Nlp for F4MockNlp {
+        fn n(&self) -> Index {
+            1
+        }
+        fn m_eq(&self) -> Index {
+            0
+        }
+        fn m_ineq(&self) -> Index {
+            0
+        }
+        fn eval_f(&mut self, x: &dyn Vector) -> Number {
+            let xx = x.as_any().downcast_ref::<DenseVector>().unwrap();
+            xx.values()[0] * xx.values()[0]
+        }
+        fn eval_grad_f(&mut self, x: &dyn Vector, g: &mut dyn Vector) {
+            let xx = x.as_any().downcast_ref::<DenseVector>().unwrap();
+            let gg = g.as_any_mut().downcast_mut::<DenseVector>().unwrap();
+            gg.values_mut()[0] = 2.0 * xx.values()[0];
+        }
+        fn eval_c(&mut self, _x: &dyn Vector, _c: &mut dyn Vector) {}
+        fn eval_d(&mut self, _x: &dyn Vector, _d: &mut dyn Vector) {}
+        fn eval_jac_c(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+            unimplemented!("no equality constraints in the F4 watchdog fixture")
+        }
+        fn eval_jac_d(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
+            unimplemented!("no inequality constraints in the F4 watchdog fixture")
+        }
+        fn eval_h(
+            &mut self,
+            _x: &dyn Vector,
+            _obj_factor: Number,
+            _y_c: &dyn Vector,
+            _y_d: &dyn Vector,
+        ) -> Rc<dyn SymMatrix> {
+            unimplemented!("Hessian not exercised by the line search")
+        }
+    }
+
+    impl IpoptNlp for F4MockNlp {
+        fn x_l(&self) -> &dyn Vector {
+            &self.x_l
+        }
+        fn x_u(&self) -> &dyn Vector {
+            &self.x_u
+        }
+        fn d_l(&self) -> &dyn Vector {
+            &self.d_l
+        }
+        fn d_u(&self) -> &dyn Vector {
+            &self.d_u
+        }
+        fn px_l(&self) -> Rc<dyn Matrix> {
+            self.px_l.clone()
+        }
+        fn px_u(&self) -> Rc<dyn Matrix> {
+            self.px_u.clone()
+        }
+        fn pd_l(&self) -> Rc<dyn Matrix> {
+            self.pd_l.clone()
+        }
+        fn pd_u(&self) -> Rc<dyn Matrix> {
+            self.pd_u.clone()
+        }
+    }
+
+    /// Acceptor that accepts the first trial unconditionally and records
+    /// the primal step it was offered — lets the test read back the
+    /// alpha the StopWatchDog retry started from.
+    struct RecordingAcceptor {
+        first_alpha: Rc<RefCell<Option<Number>>>,
+    }
+
+    impl BacktrackingLsAcceptor for RecordingAcceptor {
+        fn reset(&mut self) {}
+        fn check_trial_point(
+            &mut self,
+            alpha_primal: Number,
+            _theta: Number,
+            _phi: Number,
+            _d_phi: Number,
+            _theta_trial: Number,
+            _phi_trial: Number,
+        ) -> AcceptDecision {
+            let mut slot = self.first_alpha.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(alpha_primal);
+            }
+            AcceptDecision::Accept
+        }
+    }
+
+    fn empty() -> Rc<dyn Vector> {
+        dense(0, &[])
+    }
+
+    /// F4 (L7 reopen): on the StopWatchDog revert, the alpha-loop retry
+    /// must restart from the fraction-to-the-boundary cap of the
+    /// *snapshot* direction at the *reverted* iterate — NOT the failed
+    /// direction's cap. Pre-fix `handle_watchdog_failure` reused
+    /// `alpha_init` (the failed direction's cap); this test pins the
+    /// retry's first trial alpha to the recomputed snapshot cap.
+    #[test]
+    fn stop_watchdog_retry_recomputes_ftb_cap_from_snapshot_direction() {
+        let nlp: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(F4MockNlp::new()));
+        let data: IpoptDataHandle = Rc::new(RefCell::new(IpoptData::new()));
+
+        // Snapshot iterate: x = 2 (so the x[0] slack is 2), z_L = 0.5.
+        let snap = IteratesVector::new(
+            dense(1, &[2.0]),
+            empty(),
+            empty(),
+            empty(),
+            dense(1, &[0.5]),
+            empty(),
+            empty(),
+            empty(),
+        );
+        {
+            let mut d = data.borrow_mut();
+            d.curr_mu = 0.1;
+            d.curr_tau = 1.0;
+            d.set_curr(snap.clone());
+        }
+        let cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(
+            data.clone(),
+            nlp,
+        )));
+
+        // Snapshot search direction: Δx = -4. At x = 2 with τ = 1 the
+        // fraction-to-the-boundary cap is τ·s/|Δx| = 1·2/4 = 0.5.
+        let snap_delta = IteratesVector::new(
+            dense(1, &[-4.0]),
+            empty(),
+            empty(),
+            empty(),
+            dense(1, &[0.0]),
+            empty(),
+            empty(),
+            empty(),
+        );
+
+        let recorded = Rc::new(RefCell::new(None));
+        let mut bls = BacktrackingLineSearch::new(Box::new(RecordingAcceptor {
+            first_alpha: recorded.clone(),
+        }));
+
+        // Arm the watchdog at the snapshot and put it one trial over the
+        // cap, so the next failure triggers StopWatchDog (revert + retry).
+        bls.in_watchdog = true;
+        bls.watchdog_iterate = Some(snap.clone());
+        bls.watchdog_delta = Some(snap_delta);
+        bls.watchdog_trial_iter = bls.watchdog_trial_iter_max;
+
+        let outcome = bls.handle_watchdog_failure(
+            &data, &cq, /*alpha_dual*/ 1.0, None, /*n_steps*/ 0, /*last_alpha*/ 1.0,
+            /*evaluation_error*/ false,
+        );
+        assert_eq!(outcome, Outcome::Accepted);
+
+        // skip_first halves the recomputed cap: 0.5 × alpha_red_factor
+        // (0.5) = 0.25. The failed direction's cap would differ.
+        let a = recorded
+            .borrow()
+            .expect("acceptor must have seen at least one trial");
+        assert!(
+            (a - 0.25).abs() < 1e-12,
+            "retry first alpha = {a}, expected 0.25 (snapshot FTB cap 0.5 × red 0.5)"
+        );
     }
 
     fn iv_from(x: &[Number], s: &[Number]) -> IteratesVector {

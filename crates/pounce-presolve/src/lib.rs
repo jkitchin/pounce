@@ -9,6 +9,22 @@
 //!   variable box are dropped from the problem the solver sees, then
 //!   reinstated with `λ=0` when forwarding `eval_h` / `finalize_solution`
 //!   to the inner TNLP.
+//!
+//!   **Dual-attribution caveat (issue M24).** A row that was *itself* the
+//!   reason a bound got tightened in Phase 1 — e.g. `x ≥ 2` tightening
+//!   `x_l = 2` — then has an activity interval flush against its own
+//!   bound, so Phase 2 sees it as redundant and drops it. If that bound is
+//!   active at the solution the interior-point method reports the dual on
+//!   the *variable bound* multiplier (`z_l`/`z_u`) against a bound that did
+//!   not exist in the original problem, while the reinstated row keeps
+//!   `λ = 0`. The primal point, objective, and KKT stationarity
+//!   (`∇f − Jᵀλ − z_l + z_u = 0`) are all unaffected — only the *attribution*
+//!   of the dual differs from a no-presolve solve (row multiplier vs. bound
+//!   multiplier). A faithful fix would transfer the bound multiplier back to
+//!   the row's `λ`, but that needs Phase-1 provenance (which row implied
+//!   which bound) that is not currently tracked, and is ambiguous for
+//!   multi-variable rows; it is left as future work. The behavior is pinned
+//!   by `tests::dropped_row_dual_lands_on_bound_not_row` (M24).
 //! * **Phase 3** — structural LICQ check on the surviving equality
 //!   rows. Verdict is published via [`PresolveTnlp::licq_verdict`].
 //! * **Phase 4** — bound-multiplier warm-start hints for variables
@@ -158,6 +174,15 @@ pub struct PresolveTnlp {
 
     /// `None` until init has run; afterwards `Some(state)`.
     state: Option<PresolveState>,
+
+    /// Full-space `(x, lambda)` forwarded to the inner TNLP at the last
+    /// `finalize_solution` — i.e. after row-drop multiplier recovery, in
+    /// the original `.nl` row order (length `info_inner.m`). `None` until
+    /// a solve finalizes. The CLI prefers this over its reduced-space
+    /// `on_converged` / counting capture so the `.sol` / JSON dual block
+    /// regains the original constraint count: the kept-row-space lambda
+    /// the solver produces otherwise mis-aligns against the `.nl`'s `m`.
+    finalized_full_solution: Option<(Vec<Number>, Vec<Number>)>,
 }
 
 struct PresolveState {
@@ -216,6 +241,7 @@ impl PresolveTnlp {
             expr_provider: None,
             opts,
             state: None,
+            finalized_full_solution: None,
         }
     }
 
@@ -235,6 +261,7 @@ impl PresolveTnlp {
             expr_provider: Some(expr_provider),
             opts,
             state: None,
+            finalized_full_solution: None,
         }
     }
 
@@ -256,6 +283,16 @@ impl PresolveTnlp {
     /// has not yet run or no rows are redundant).
     pub fn n_dropped_rows(&self) -> Index {
         self.state.as_ref().map(|s| s.n_dropped_rows).unwrap_or(0)
+    }
+
+    /// The full-space `(x, lambda)` captured at the last
+    /// `finalize_solution`, lifted back to the original `.nl` row space
+    /// (length `info_inner.m`) with dropped-row multipliers recovered.
+    /// `None` until a solve finalizes. The CLI consumes this so its
+    /// `.sol` / JSON dual block carries the original constraint count
+    /// rather than the reduced kept-row count. See the field docs.
+    pub fn finalized_full_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
+        self.finalized_full_solution.clone()
     }
 
     /// Cached reduced bounds, if presolve has run.
@@ -344,6 +381,23 @@ impl PresolveTnlp {
                 .get_constraints_linearity(&mut linearity)
         } else {
             true
+        };
+
+        // Per-variable linearity (H11): lets Phase-0 objective-coupling
+        // classification distinguish a genuinely objective-free variable from
+        // one that is merely zero-gradient at the single probe point. The
+        // objective-scoped query is preferred — it is exactly the set the
+        // guard needs. The global tags are only a fallback: they are a
+        // conservative superset (a variable nonlinear only in a *constraint*
+        // is tagged NonLinear too), which keeps the guard sound but blocks
+        // legitimate eliminations of objective-free blocks (the gas-network
+        // case). Most TNLPs decline both (default `false`), in which case
+        // Phase 0 falls back to the probe gradient alone.
+        let mut var_linearity = vec![Linearity::NonLinear; n];
+        let have_var_linearity = {
+            let mut inner = self.inner.borrow_mut();
+            inner.get_objective_variables_linearity(&mut var_linearity)
+                || inner.get_variables_linearity(&mut var_linearity)
         };
 
         // Probe point for Jacobian values (linear rows have constant
@@ -470,6 +524,11 @@ impl PresolveTnlp {
                 eq_tol: 1e-12,
                 x_probe: &x_probe,
                 grad_f: &grad_f_probe,
+                var_linearity: if have_var_linearity {
+                    Some(&var_linearity)
+                } else {
+                    None
+                },
                 x_l: &x_l,
                 x_u: &x_u,
             };
@@ -527,7 +586,7 @@ impl PresolveTnlp {
         // bounds through an aux-dropped row lets tighten_bounds
         // derive `x_l[j] > x_u[j]` for an aux-clamped variable and
         // then hand corrupted bounds to the IPM.
-        let linear_rows: Vec<LinearRow> = linear_row_map
+        let mut linear_rows: Vec<LinearRow> = linear_row_map
             .iter()
             .enumerate()
             .filter_map(|(i, r)| if row_kept_inner[i] { r.clone() } else { None })
@@ -566,7 +625,9 @@ impl PresolveTnlp {
             }
             reduction_stack = ReductionStack::default();
             // Re-run tighten on the unfiltered linear rows now that
-            // the aux clamps are gone.
+            // the aux clamps are gone. Rebuild `linear_rows` to the
+            // full set too, so Phase 2's redundancy mask stays aligned
+            // with the now all-kept `row_kept_inner` (C1).
             let full_linear_rows: Vec<LinearRow> =
                 linear_row_map.iter().filter_map(|r| r.clone()).collect();
             tighten_report = TightenReport::default();
@@ -579,6 +640,32 @@ impl PresolveTnlp {
                     1e-12,
                 );
             }
+            linear_rows = full_linear_rows;
+        }
+
+        // M25: a *genuine* Phase-1 infeasibility (empty feasible box) must not
+        // reach the IPM as crossed bounds `x_l > x_u`. `tighten_pass` returns
+        // the moment it detects `x_l[j] > x_u[j]`, leaving those crossed
+        // bounds in place; the rollback above only fires when Phase 0 made
+        // changes (`!reduction_stack.is_empty()`), so an infeasibility found
+        // with an empty reduction stack — or one that survives the rollback
+        // re-tighten — would otherwise hand a degenerate box to the solver,
+        // which reports an invalid-problem error instead of a clean
+        // infeasibility verdict. Presolve has no channel to certify
+        // infeasibility, so — mirroring the aux rollback above and the FBBT
+        // handling below — restore the original inner box (always a valid box)
+        // and let the IPM run on it and certify infeasibility itself. The
+        // `tighten_report.infeasible` flag is preserved and surfaced via
+        // `tighten_report()` for diagnostics.
+        if tighten_report.infeasible {
+            x_l.copy_from_slice(&inner_x_l);
+            x_u.copy_from_slice(&inner_x_u);
+            tracing::warn!(
+                target: "pounce::presolve",
+                "Phase 1 bound tightening proved the feasible region empty; its \
+                 crossed bounds are being discarded — the solve proceeds on the \
+                 original box so the IPM can certify infeasibility itself."
+            );
         }
 
         // Phase 1b — FBBT (issue #62). Runs interval arithmetic over
@@ -596,8 +683,19 @@ impl PresolveTnlp {
                     max_iter: self.opts.fbbt_max_iter.max(1) as usize,
                     max_constraints: self.opts.fbbt_max_constraints.max(0) as usize,
                 };
+                // H12: snapshot the bounds before FBBT. The `FbbtReport`
+                // contract states that on detected infeasibility the
+                // variable bounds are "undefined and must not be trusted"
+                // — FBBT may have partially tightened several variables
+                // before a later constraint proved the box empty. Pass the
+                // Phase-0 `row_kept_inner` mask so propagation skips any row
+                // an auxiliary elimination dropped (over the aux-clamped box
+                // a dropped row can fabricate a spurious infeasibility — the
+                // same #53 hazard Phase 1 guards against with filtered rows).
+                let fbbt_x_l_pre = x_l.clone();
+                let fbbt_x_u_pre = x_u.clone();
                 let provider_borrow = provider.borrow();
-                let report = crate::fbbt::run_fbbt(
+                let mut report = crate::fbbt::run_fbbt(
                     &*provider_borrow,
                     n,
                     m_in,
@@ -605,8 +703,122 @@ impl PresolveTnlp {
                     &mut x_u,
                     &g_l_inner,
                     &g_u_inner,
+                    Some(&row_kept_inner),
                     &cfg,
                 );
+                drop(provider_borrow);
+                if report.infeasibility_witness.is_some() && !reduction_stack.is_empty() {
+                    // F6: an FBBT infeasibility found while a Phase-0
+                    // auxiliary elimination is in force may be an *artifact*
+                    // of that elimination — an aux clamp can make a kept
+                    // *nonlinear* row infeasible over the clamped box even
+                    // though the original problem is feasible. Restoring only
+                    // the pre-FBBT box (the `else` branch below) leaves the
+                    // aux clamps in place, so the IPM would then cleanly
+                    // certify infeasibility of a problem presolve itself broke
+                    // — a wrong "infeasible" verdict on a feasible original.
+                    // Mirror the Phase-1 aux rollback (the `tighten_report`
+                    // branch above): undo Phase 0 entirely — restore the inner
+                    // box, re-keep every dropped row, clear the reduction
+                    // stack, rebuild the full linear-row set — then re-run
+                    // Phase 1 and FBBT on the un-clamped box. Only an
+                    // infeasibility that *survives* on the un-clamped box is
+                    // genuine; presolve still cannot certify it, so it then
+                    // falls through to the same "discard FBBT bounds, let the
+                    // IPM certify" handling.
+                    tracing::warn!(
+                        target: "pounce::presolve",
+                        witness = report.infeasibility_witness,
+                        "FBBT reported a constraint infeasibility while auxiliary \
+                         elimination was active; rolling back the elimination and \
+                         re-running FBBT on the un-clamped box to avoid certifying \
+                         a presolve-induced infeasibility on a feasible original."
+                    );
+                    x_l.copy_from_slice(&inner_x_l);
+                    x_u.copy_from_slice(&inner_x_u);
+                    for kept in row_kept_inner.iter_mut() {
+                        *kept = true;
+                    }
+                    reduction_stack = ReductionStack::default();
+                    // Rebuild `linear_rows` to the full set so Phase 2's
+                    // redundancy mask stays aligned with the now all-kept
+                    // `row_kept_inner` (C1), mirroring the Phase-1 rollback.
+                    let full_linear_rows: Vec<LinearRow> =
+                        linear_row_map.iter().filter_map(|r| r.clone()).collect();
+                    tighten_report = TightenReport::default();
+                    if self.opts.bound_tightening && !full_linear_rows.is_empty() {
+                        tighten_report = tighten_bounds(
+                            &full_linear_rows,
+                            &mut x_l,
+                            &mut x_u,
+                            self.opts.max_passes,
+                            1e-12,
+                        );
+                    }
+                    linear_rows = full_linear_rows;
+                    // M25: a genuine Phase-1 infeasibility on the un-clamped
+                    // box must not reach the IPM as crossed bounds.
+                    if tighten_report.infeasible {
+                        x_l.copy_from_slice(&inner_x_l);
+                        x_u.copy_from_slice(&inner_x_u);
+                        tracing::warn!(
+                            target: "pounce::presolve",
+                            "Phase 1 bound tightening on the rolled-back (un-clamped) \
+                             box proved the feasible region empty; its crossed bounds \
+                             are being discarded — the solve proceeds on the original \
+                             box so the IPM can certify infeasibility itself."
+                        );
+                    }
+                    // Re-run FBBT on the un-clamped, all-kept box.
+                    let rerun_x_l_pre = x_l.clone();
+                    let rerun_x_u_pre = x_u.clone();
+                    let provider_borrow = provider.borrow();
+                    report = crate::fbbt::run_fbbt(
+                        &*provider_borrow,
+                        n,
+                        m_in,
+                        &mut x_l,
+                        &mut x_u,
+                        &g_l_inner,
+                        &g_u_inner,
+                        Some(&row_kept_inner),
+                        &cfg,
+                    );
+                    drop(provider_borrow);
+                    if report.infeasibility_witness.is_some() {
+                        // Survives without the aux clamp: a genuine
+                        // infeasibility of the original problem. Discard
+                        // FBBT's undefined bounds and let the IPM certify it.
+                        tracing::warn!(
+                            target: "pounce::presolve",
+                            witness = report.infeasibility_witness,
+                            "FBBT still reports infeasibility on the un-clamped box; \
+                             treating it as genuine and proceeding on the pre-FBBT \
+                             box so the IPM can certify infeasibility itself."
+                        );
+                        x_l.copy_from_slice(&rerun_x_l_pre);
+                        x_u.copy_from_slice(&rerun_x_u_pre);
+                    }
+                } else if report.infeasibility_witness.is_some() {
+                    // No aux elimination active (empty reduction stack): the
+                    // witnessed infeasibility cannot be a Phase-0 artifact.
+                    // Presolve has no channel to certify infeasibility to the
+                    // solver, so — mirroring the Phase 1 rollback — discard
+                    // FBBT's corrupted bounds and let the IPM run on the
+                    // pre-FBBT box and certify infeasibility itself. The
+                    // report is still surfaced via `fbbt_report()` for
+                    // diagnostics.
+                    tracing::warn!(
+                        target: "pounce::presolve",
+                        witness = report.infeasibility_witness,
+                        "FBBT reported a constraint infeasibility; its tightened \
+                         bounds are undefined and are being discarded — the solve \
+                         proceeds on the pre-FBBT box so the IPM can certify \
+                         infeasibility itself."
+                    );
+                    x_l.copy_from_slice(&fbbt_x_l_pre);
+                    x_u.copy_from_slice(&fbbt_x_u_pre);
+                }
                 fbbt_report = Some(report);
             }
         }
@@ -639,18 +851,11 @@ impl PresolveTnlp {
         let mut n_dropped_rows: Index = 0;
         if self.opts.redundant_constraint_removal {
             let redundant_mask = find_redundant_rows(&linear_rows, &x_l, &x_u, 1e-9);
-            // redundant_mask aligns with `linear_rows`; map back to
-            // inner row indices.
-            let mut linear_iter = redundant_mask.iter();
-            for (i, lr) in linear_row_map.iter().enumerate() {
-                if lr.is_some() {
-                    let is_red = *linear_iter.next().unwrap_or(&false);
-                    if is_red {
-                        row_kept_inner[i] = false;
-                        n_dropped_rows += 1;
-                    }
-                }
-            }
+            // `redundant_mask` aligns with the *kept* linear rows
+            // (`linear_rows`); map it back onto inner rows, skipping
+            // rows Phase 0 already dropped (C1).
+            n_dropped_rows =
+                apply_redundant_verdicts(&linear_row_map, &redundant_mask, &mut row_kept_inner);
         }
 
         // Phase 3: structural LICQ check on the kept equality rows.
@@ -757,6 +962,38 @@ impl PresolveTnlp {
         });
         self.state.as_ref()
     }
+}
+
+/// Map `find_redundant_rows`' verdict mask back onto `row_kept_inner`,
+/// returning the number of rows newly dropped.
+///
+/// The mask is aligned to the **kept** linear rows in inner-row order
+/// — i.e. it has exactly one entry per `(i)` where `linear_row_map[i]`
+/// is `Some` **and** `row_kept_inner[i]` is still `true` (that is the
+/// filter `linear_rows` was built with). The mapping iterator must
+/// therefore advance only on rows that are both linear and still kept.
+///
+/// Regression guard for C1: the original loop advanced the mask on
+/// every `Some` row regardless of `row_kept_inner`, so once Phase 0 had
+/// dropped any linear row every later verdict landed on its
+/// predecessor's row — silently deleting a binding constraint (and
+/// keeping a redundant one).
+fn apply_redundant_verdicts(
+    linear_row_map: &[Option<LinearRow>],
+    redundant_mask: &[bool],
+    row_kept_inner: &mut [bool],
+) -> Index {
+    let mut mask = redundant_mask.iter();
+    let mut n_dropped: Index = 0;
+    for (i, lr) in linear_row_map.iter().enumerate() {
+        if lr.is_some() && row_kept_inner[i] {
+            if *mask.next().unwrap_or(&false) {
+                row_kept_inner[i] = false;
+                n_dropped += 1;
+            }
+        }
+    }
+    n_dropped
 }
 
 // Inside this impl every `.expect("inited")` is invariant-protected
@@ -928,9 +1165,28 @@ impl TNLP for PresolveTnlp {
         let (g_full, mut lambda_full, n_inner, m_inner, nnz_inner, one_based) = {
             let s = self.state.as_mut().expect("inited");
             // Recompute g at sol.x — the solver gave us reduced g.
-            self.inner
+            let ok_g = self
+                .inner
                 .borrow_mut()
                 .eval_g(sol.x, true, &mut s.scratch_g);
+            if !ok_g {
+                // L45: the final constraint re-eval failed, so `scratch_g` is
+                // unreliable — it holds whatever the failing call left behind
+                // (partial garbage, or a stale value from an earlier iterate).
+                // Don't forward that. Rebuild g from the solver's own
+                // (trustworthy) reduced `sol.g`, mapped back to the kept inner
+                // rows exactly as the multiplier mapping below does; rows
+                // dropped by presolve are left at 0 (no reliable value exists
+                // for them once the re-eval has failed).
+                for v in s.scratch_g.iter_mut() {
+                    *v = 0.0;
+                }
+                for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
+                    if i_inner < s.scratch_g.len() && outer < sol.g.len() {
+                        s.scratch_g[i_inner] = sol.g[outer];
+                    }
+                }
+            }
             for v in s.scratch_lambda.iter_mut() {
                 *v = 0.0;
             }
@@ -956,6 +1212,15 @@ impl TNLP for PresolveTnlp {
             let s = self.state.as_ref().expect("inited");
             s.reduction_stack.iter_top_down().cloned().collect()
         };
+        // Bound multipliers forwarded to the inner finalize. At each frame's
+        // Phase-0 aux-fixed variables these are zeroed once the variable's
+        // dropped-row multipliers are recovered below:
+        // `recover_dropped_multipliers` folds the entire stationarity residual
+        // into λ under the documented assumption `z_l = z_u = 0` there, so
+        // forwarding the IPM's clamp multipliers unchanged would double-count
+        // that contribution and break `∇f − Jᵀλ − z_l + z_u = 0`.
+        let mut z_l_full = sol.z_l.to_vec();
+        let mut z_u_full = sol.z_u.to_vec();
         if !frames.is_empty() && m_inner > 0 {
             let mut grad_f = vec![0.0; n_inner];
             let ok_grad = self
@@ -990,8 +1255,23 @@ impl TNLP for PresolveTnlp {
                 true
             };
             if ok_grad && ok_struct && ok_vals {
-                // Densify the Jacobian (only needed for the recovery LU).
-                let mut jac_dense = vec![0.0; m_inner * n_inner];
+                // `recover_dropped_multipliers` reads the Jacobian only at the
+                // frames' fixed-var columns, so materialize just those columns
+                // (the union across all frames) instead of the full
+                // `m_inner × n_inner` dense block — O(m·k) rather than O(m·n),
+                // where k = total distinct fixed vars is tiny next to n. The
+                // old full densification cost ~80 GB at 100k×100k (issue M26).
+                let mut orig_to_compact = vec![usize::MAX; n_inner];
+                let mut n_cols = 0usize;
+                for frame in &frames {
+                    for &c in &frame.fixed_vars {
+                        if c < n_inner && orig_to_compact[c] == usize::MAX {
+                            orig_to_compact[c] = n_cols;
+                            n_cols += 1;
+                        }
+                    }
+                }
+                let mut jac_cols = vec![0.0; m_inner * n_cols];
                 for k in 0..nnz_inner {
                     let i = if one_based {
                         (jac_irow_inner[k] as isize - 1) as usize
@@ -1004,26 +1284,47 @@ impl TNLP for PresolveTnlp {
                         jac_jcol_inner[k] as usize
                     };
                     if i < m_inner && j < n_inner {
-                        jac_dense[i * n_inner + j] = jac_values[k];
+                        let cc = orig_to_compact[j];
+                        if cc != usize::MAX {
+                            jac_cols[i * n_cols + cc] = jac_values[k];
+                        }
                     }
                 }
                 for frame in &frames {
-                    if let Ok(lam_dropped) =
-                        frame.recover_dropped_multipliers(&grad_f, &jac_dense, &lambda_full)
-                    {
+                    if let Ok(lam_dropped) = frame.recover_dropped_multipliers_cols(
+                        &grad_f,
+                        &jac_cols,
+                        n_cols,
+                        &orig_to_compact,
+                        &lambda_full,
+                    ) {
                         for (idx, &r) in frame.dropped_rows.iter().enumerate() {
                             lambda_full[r] = lam_dropped[idx];
+                        }
+                        // The recovered λ now carries this frame's fixed-var
+                        // stationarity; drop the IPM's clamp multipliers there.
+                        for &i in &frame.fixed_vars {
+                            if i < z_l_full.len() {
+                                z_l_full[i] = 0.0;
+                            }
+                            if i < z_u_full.len() {
+                                z_u_full[i] = 0.0;
+                            }
                         }
                     }
                 }
             }
         }
+        // Stash the full-space (x, lambda) the inner TNLP is about to
+        // receive so the CLI can prefer it over its reduced-space
+        // capture when sizing the `.sol` / JSON dual block.
+        self.finalized_full_solution = Some((sol.x.to_vec(), lambda_full.clone()));
         self.inner.borrow_mut().finalize_solution(
             Solution {
                 status: sol.status,
                 x: sol.x,
-                z_l: sol.z_l,
-                z_u: sol.z_u,
+                z_l: &z_l_full,
+                z_u: &z_u_full,
                 g: &g_full,
                 lambda: &lambda_full,
                 obj_value: sol.obj_value,
@@ -1096,6 +1397,12 @@ impl TNLP for PresolveTnlp {
         self.inner.borrow_mut().get_variables_linearity(types)
     }
 
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner
+            .borrow_mut()
+            .get_objective_variables_linearity(types)
+    }
+
     fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
         let Some(_) = self.ensure_init() else {
             return false;
@@ -1145,9 +1452,22 @@ impl TNLP for PresolveTnlp {
     }
 }
 
-/// Subset every per-row vector of `inner` to the rows in
-/// `rows_kept`. Per-row is identified by length == `m_in`; other
-/// vectors are passed through unchanged.
+/// Subset every per-row vector of `inner` to the rows in `rows_kept`.
+///
+/// Per-row-ness is inferred from `v.len() == m_in`, because `MetaData`
+/// (mirroring upstream Ipopt's untyped `*MetaDataMapType`) carries no
+/// per-key arity tag — so the length is the only signal available. By
+/// the TNLP contract every vector in the *constraint* `MetaData` bucket
+/// is per-constraint (length `m_in`), so this is exact for any
+/// conforming inner TNLP (e.g. `nl_reader`'s per-row `con_names`).
+///
+/// L46 caveat: a vector that is semantically *global* yet happens to
+/// have length `m_in` would be wrongly subset, and a genuinely per-row
+/// vector whose length differs from `m_in` (a contract violation) is
+/// passed through unchanged. Neither can be distinguished from the data
+/// alone; fully resolving it needs an arity-aware metadata API. The
+/// fast path `m_in == rows_kept.len()` (no rows dropped) is identity,
+/// so the hazard only exists when presolve actually drops a row.
 fn project_con_metadata(inner: &MetaData, rows_kept: &[usize], m_in: usize) -> MetaData {
     let mut out = MetaData::default();
     for (k, v) in &inner.strings {
@@ -1184,7 +1504,11 @@ fn project_con_metadata(inner: &MetaData, rows_kept: &[usize], m_in: usize) -> M
 }
 
 /// Expand every per-(outer-row) vector back to `m_in` rows by
-/// inserting empty / 0 / 0.0 defaults at dropped rows.
+/// inserting empty / 0 / 0.0 defaults at dropped rows. The inverse of
+/// [`project_con_metadata`]; per-row-ness is inferred from
+/// `v.len() == m_out` and carries the same L46 caveat (see that
+/// function): a coincidentally-`m_out`-length global vector is wrongly
+/// expanded, inherent to the untyped `MetaData` API.
 fn expand_con_metadata(outer: &MetaData, rows_kept: &[usize], m_in: usize) -> MetaData {
     let m_out = rows_kept.len();
     let mut full = MetaData::default();
@@ -1269,6 +1593,54 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn c1_redundancy_mask_realigned_after_phase0_drop() {
+        // Regression for C1. `find_redundant_rows` returns a verdict
+        // mask aligned to the *kept* linear rows (inner-row order).
+        // When Phase 0 has dropped an earlier linear row, the mapping
+        // back to inner rows must skip already-dropped rows; advancing
+        // the mask iterator on them shifts every later verdict onto its
+        // predecessor's row.
+        let lr = |lo: Number| {
+            Some(LinearRow {
+                entries: vec![(0, 1.0)],
+                lo,
+                hi: lo,
+            })
+        };
+        // Three linear rows; Phase 0 dropped inner row 0.
+        let linear_row_map = vec![lr(0.0), lr(1.0), lr(2.0)];
+        let row_kept = vec![false, true, true];
+        // `find_redundant_rows` ran over the *kept* rows [row1, row2]
+        // and flagged the SECOND kept row (inner row 2) redundant; the
+        // first kept row (inner row 1) is binding.
+        let mask = vec![false, true];
+
+        // Correct mapping: only inner row 2 is dropped.
+        let mut kept_new = row_kept.clone();
+        let n = apply_redundant_verdicts(&linear_row_map, &mask, &mut kept_new);
+        assert_eq!(
+            kept_new,
+            vec![false, true, false],
+            "verdict must land on inner row 2, not its predecessor"
+        );
+        assert_eq!(n, 1);
+
+        // Document the pre-fix misalignment this test guards against:
+        // the old loop advanced the mask on every `Some` row regardless
+        // of `row_kept_inner`, dropping inner row 1 (binding!) and
+        // keeping inner row 2 (redundant) — a silent wrong answer.
+        let mut buggy = row_kept.clone();
+        let mut it = mask.iter();
+        for (i, l) in linear_row_map.iter().enumerate() {
+            if l.is_some() && *it.next().unwrap_or(&false) {
+                buggy[i] = false;
+            }
+        }
+        assert_eq!(buggy, vec![false, false, true]);
+        assert_ne!(buggy, kept_new);
     }
 
     #[test]
@@ -1445,6 +1817,115 @@ mod tests {
         assert!((bounds.x_u[1] - 1.0).abs() < 1e-12);
     }
 
+    /// [`TwoVarSquareEq`] with linearity tags layered on: the *global*
+    /// tags report both variables `NonLinear` (as a TNLP whose equality
+    /// rows are nonlinear would — the gas-network shape), while the
+    /// objective-scoped tags, when offered, report both `Linear`
+    /// (matching the zero objective gradient).
+    struct SquareEqWithTags {
+        inner: TwoVarSquareEq,
+        offer_obj_tags: bool,
+    }
+    impl TNLP for SquareEqWithTags {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.inner.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            self.inner.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.inner.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+            self.inner.eval_f(x, new_x)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_grad_f(x, new_x, g)
+        }
+        fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            self.inner.eval_g(x, new_x, g)
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.inner.eval_jac_g(x, new_x, mode)
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            self.inner.get_constraints_linearity(types)
+        }
+        fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::NonLinear;
+            types[1] = Linearity::NonLinear;
+            true
+        }
+        fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            if !self.offer_obj_tags {
+                return false;
+            }
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+            self.inner.finalize_solution(sol, d, q)
+        }
+    }
+
+    /// Regression for the gas-network CI failure: objective-scoped tags
+    /// must take precedence over the global ones, so a variable that is
+    /// nonlinear only in *constraints* does not poison `obj_support` and
+    /// block a legitimate Phase-0 elimination. Pre-fix (global tags only)
+    /// both variables were unioned into the objective support and the
+    /// Safe policy kept both rows.
+    #[test]
+    fn phase0_objective_scoped_tags_dont_block_constraint_nonlinear_elimination() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SquareEqWithTags {
+            inner: TwoVarSquareEq,
+            offer_obj_tags: true,
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(
+            info.m, 0,
+            "objective-free block must still be eliminated when only the \
+             global tags say NonLinear"
+        );
+        assert_eq!(wrapped.auxiliary_diagnostics().vars_eliminated, 2);
+    }
+
+    /// When the TNLP offers only the global tags, the fallback stays
+    /// conservative: constraint nonlinearity is treated as possible
+    /// objective coupling and the block is kept (sound, just suboptimal).
+    #[test]
+    fn phase0_global_tags_fallback_remains_conservative() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SquareEqWithTags {
+            inner: TwoVarSquareEq,
+            offer_obj_tags: false,
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(
+            info.m, 2,
+            "global-only tags fall back to the conservative union"
+        );
+        assert_eq!(wrapped.auxiliary_diagnostics().vars_eliminated, 0);
+    }
+
     #[test]
     fn phase0_via_tnlp_disabled_is_pass_through() {
         // Same inner TNLP, but presolve_auxiliary=no. Orchestrator
@@ -1525,5 +2006,1132 @@ mod tests {
         // tighten_report must NOT have flagged infeasibility.
         let rpt = wrapped.tighten_report();
         assert!(!rpt.infeasible, "Phase 1 falsely flagged infeasibility");
+    }
+
+    /// Same model as [`TwoVarSquareEq`] but records the bound multipliers
+    /// `z_l`/`z_u` that `finalize_solution` forwards to the inner TNLP, so a
+    /// test can assert what the reported KKT point carries.
+    struct RecordingTwoVar {
+        rec: Rc<RefCell<Option<(Vec<Number>, Vec<Number>)>>>,
+    }
+    impl TNLP for RecordingTwoVar {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 4,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            for v in b.x_l.iter_mut() {
+                *v = -1e19;
+            }
+            for v in b.x_u.iter_mut() {
+                *v = 1e19;
+            }
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            b.g_l[1] = 1.0;
+            b.g_u[1] = 1.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+            *self.rec.borrow_mut() = Some((sol.z_l.to_vec(), sol.z_u.to_vec()));
+        }
+    }
+
+    /// Regression for H10. Phase 0 clamps `x_l = x_u = v` at the two
+    /// eliminated variables, so the IPM reports large bound multipliers
+    /// there. `recover_dropped_multipliers` attributes the *whole*
+    /// stationarity residual to the recovered row multipliers λ under the
+    /// documented assumption `z_l = z_u = 0` at those variables; if
+    /// `finalize_solution` forwards the clamp multipliers unchanged the
+    /// contribution is double-counted and the reported point violates
+    /// `∇f − Jᵀλ − z_l + z_u = 0`. The fix zeros `z_l`/`z_u` at every
+    /// frame's `fixed_vars` once their λ has been recovered.
+    #[test]
+    fn phase0_finalize_zeroes_bound_multipliers_at_fixed_vars() {
+        let rec = Rc::new(RefCell::new(None));
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(RecordingTwoVar {
+            rec: Rc::clone(&rec),
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 2, "variable count unchanged (clamp, not reduce)");
+        assert_eq!(info.m, 0, "both equality rows dropped by Phase 0");
+
+        // The reduced solve returns the clamped point (2, 1); the IPM places
+        // large bound multipliers on the now-fixed variables, and the reduced
+        // problem has no rows (so empty g / lambda).
+        let x = [2.0, 1.0];
+        let z_l = [7.0, 0.0];
+        let z_u = [0.0, 3.0];
+        let g: [Number; 0] = [];
+        let lambda: [Number; 0] = [];
+        let sol = Solution {
+            status: pounce_nlp::alg_types::SolverReturn::Success,
+            x: &x,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g,
+            lambda: &lambda,
+            obj_value: 0.0,
+        };
+        wrapped.finalize_solution(sol, &IpoptData::default(), &IpoptCq::default());
+
+        let (got_zl, got_zu) = rec.borrow().clone().expect("inner finalize ran");
+        // fixed_vars = {0, 1}: both must be zeroed. Pre-fix the inner sees the
+        // forwarded clamp multipliers [7,0] / [0,3] verbatim.
+        assert_eq!(
+            got_zl,
+            vec![0.0, 0.0],
+            "z_l must be zeroed at aux-fixed vars (H10)"
+        );
+        assert_eq!(
+            got_zu,
+            vec![0.0, 0.0],
+            "z_u must be zeroed at aux-fixed vars (H10)"
+        );
+    }
+
+    /// Same model as [`RecordingTwoVar`] but (a) records the `g` vector that
+    /// `finalize_solution` forwards to the inner TNLP and (b) can be told to
+    /// *fail* `eval_g` (returning `false` after scribbling a sentinel), so a
+    /// test can check what happens when the final constraint re-eval fails.
+    struct GFailRecordingVar {
+        rec_g: Rc<RefCell<Option<Vec<Number>>>>,
+        fail_g: Rc<RefCell<bool>>,
+    }
+    impl TNLP for GFailRecordingVar {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 4,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            for v in b.x_l.iter_mut() {
+                *v = -1e19;
+            }
+            for v in b.x_u.iter_mut() {
+                *v = 1e19;
+            }
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            b.g_l[1] = 1.0;
+            b.g_u[1] = 1.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            if *self.fail_g.borrow() {
+                // Simulate a failing evaluator that leaves garbage behind.
+                for v in g.iter_mut() {
+                    *v = 999.0;
+                }
+                return false;
+            }
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+            *self.rec_g.borrow_mut() = Some(sol.g.to_vec());
+        }
+    }
+
+    /// L45: when the final constraint re-eval in `finalize_solution` fails,
+    /// the forwarded `g` must NOT be the garbage/stale buffer the failing
+    /// `eval_g` left behind. Both rows here are Phase-0 dropped (reduced
+    /// `m = 0`, empty `sol.g`), so the trustworthy fallback yields all-zeros
+    /// — never the `999.0` sentinel.
+    #[test]
+    fn finalize_does_not_forward_stale_g_when_eval_g_fails() {
+        let rec_g = Rc::new(RefCell::new(None));
+        let fail_g = Rc::new(RefCell::new(false));
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(GFailRecordingVar {
+            rec_g: Rc::clone(&rec_g),
+            fail_g: Rc::clone(&fail_g),
+        }));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.m, 0, "both equality rows dropped by Phase 0");
+
+        // Now make the final re-eval fail.
+        *fail_g.borrow_mut() = true;
+        let x = [2.0, 1.0];
+        let z_l = [0.0, 0.0];
+        let z_u = [0.0, 0.0];
+        let g: [Number; 0] = [];
+        let lambda: [Number; 0] = [];
+        let sol = Solution {
+            status: pounce_nlp::alg_types::SolverReturn::Success,
+            x: &x,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g,
+            lambda: &lambda,
+            obj_value: 0.0,
+        };
+        wrapped.finalize_solution(sol, &IpoptData::default(), &IpoptCq::default());
+
+        let got_g = rec_g.borrow().clone().expect("inner finalize ran");
+        // Fail-first: pre-fix the ignored `eval_g` return forwards the
+        // sentinel-filled `scratch_g` (`[999, 999]`) verbatim.
+        assert_eq!(
+            got_g,
+            vec![0.0, 0.0],
+            "failed eval_g must not forward stale/garbage constraint values",
+        );
+    }
+
+    /// Single-variable `min x` with one linear row `x ≥ 2` (M24). Phase 1
+    /// tightens `x_l = 2` from the row; Phase 2 then sees the row's activity
+    /// `[2, 10] ⊆ [2, +∞)` and drops it as redundant.
+    struct MinXWithLowerRow;
+    impl TNLP for MinXWithLowerRow {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 1,
+                nnz_jac_g: 1,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 10.0;
+            b.g_l[0] = 2.0; // x ≥ 2
+            b.g_u[0] = 1e19;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 5.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(x[0])
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 1.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                SparsityRequest::Values { values } => {
+                    values[0] = 1.0;
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Characterizes the M24 dual-attribution behavior (see the module-level
+    /// "Dual-attribution caveat"). A redundant row that *implied* a now-active
+    /// bound is dropped; the dual lands on the variable-bound multiplier
+    /// (`z_l`) rather than the row's `λ`, which stays 0. The primal point and
+    /// KKT stationarity are intact — only the attribution differs from a
+    /// no-presolve solve. Pins the current behavior so a future provenance-
+    /// based dual-transfer fix has an explicit target (the `λ == 0` assertion
+    /// is what such a fix would flip to `λ == z_l`).
+    #[test]
+    fn dropped_row_dual_lands_on_bound_not_row() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(MinXWithLowerRow));
+        let opts = PresolveOptions {
+            enabled: true,
+            bound_tightening: true,
+            redundant_constraint_removal: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+
+        // Phase 1 tightened the bound from the row; Phase 2 dropped the row.
+        assert_eq!(
+            wrapped.n_dropped_rows(),
+            1,
+            "the `x ≥ 2` row must be dropped"
+        );
+        assert_eq!(info.m, 0, "reduced problem has no rows");
+        let b = wrapped.cached_bounds().expect("inited");
+        assert!(
+            (b.x_l[0] - 2.0).abs() < 1e-12,
+            "x_l tightened to 2 by the row, got {}",
+            b.x_l[0]
+        );
+
+        // Reduced solve at the optimum x=2: the bound `x ≥ 2` (which presolve
+        // created — the original lower bound was 0) is active, so the IPM puts
+        // the dual on z_l. ∇f = 1, so stationarity ∇f − z_l = 0 ⇒ z_l = 1.
+        let x = [2.0];
+        let z_l = [1.0];
+        let z_u = [0.0];
+        let g: [Number; 0] = [];
+        let lambda: [Number; 0] = [];
+        let sol = Solution {
+            status: pounce_nlp::alg_types::SolverReturn::Success,
+            x: &x,
+            z_l: &z_l,
+            z_u: &z_u,
+            g: &g,
+            lambda: &lambda,
+            obj_value: 2.0,
+        };
+        wrapped.finalize_solution(sol, &IpoptData::default(), &IpoptCq::default());
+        let (xf, lamf) = wrapped.finalized_full_solution().expect("finalized");
+
+        // Primal is correct.
+        assert!((xf[0] - 2.0).abs() < 1e-12, "primal x = 2");
+        // M24: the reinstated row keeps λ = 0 — the dual is *not* transferred
+        // back from the bound multiplier. (A dual-transfer fix would make this
+        // `≈ z_l = 1`.)
+        assert_eq!(lamf.len(), 1, "full-space lambda regains the original row");
+        assert!(
+            lamf[0].abs() < 1e-12,
+            "M24: dropped-row λ stays 0 (dual sits on z_l instead), got {}",
+            lamf[0]
+        );
+        // KKT stationarity ∇f − Jᵀλ − z_l + z_u = 0 still holds with the dual
+        // on z_l (1 − 1·0 − 1 + 0 = 0): the certificate is valid, only the
+        // attribution differs.
+        let grad_f = 1.0;
+        let jac = 1.0; // ∂g0/∂x
+        let stat = grad_f - jac * lamf[0] - z_l[0] + z_u[0];
+        assert!(stat.abs() < 1e-12, "KKT stationarity residual {stat}");
+    }
+
+    /// M25 scratch: one variable, box `x ∈ [0, 10]`, two contradictory linear
+    /// rows `x ≥ 5` and `x ≤ 3`. Phase 1 tightens `x_l = 5`, `x_u = 3` and
+    /// flags infeasible. Auxiliary is off, so the reduction stack is empty and
+    /// the rollback guard does NOT fire.
+    struct TwoContradictoryRows;
+    impl TNLP for TwoContradictoryRows {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 2,
+                nnz_jac_g: 2,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 10.0;
+            b.g_l[0] = 5.0; // x ≥ 5
+            b.g_u[0] = 1e19;
+            b.g_l[1] = -1e19; // x ≤ 3
+            b.g_u[1] = 3.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 4.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            g[1] = x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1]);
+                    jcol.copy_from_slice(&[0, 0]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Regression for M25. A genuine Phase-1 infeasibility found with an empty
+    /// reduction stack (auxiliary off, so the aux rollback guard never fires)
+    /// must NOT hand crossed bounds `x_l > x_u` to the IPM — that triggers an
+    /// invalid-problem failure instead of a clean infeasibility verdict.
+    /// Presolve restores the original box and lets the IPM certify
+    /// infeasibility itself; the `infeasible` flag is still surfaced for
+    /// diagnostics.
+    #[test]
+    fn phase1_infeasible_restores_valid_box_for_ipm() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(TwoContradictoryRows));
+        let opts = PresolveOptions {
+            enabled: true,
+            bound_tightening: true,
+            auxiliary: false,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let _info = wrapped.get_nlp_info().expect("init ok");
+
+        // The infeasibility is still detected and surfaced for diagnostics.
+        assert!(
+            wrapped.tighten_report().infeasible,
+            "Phase 1 must still flag the empty feasible region"
+        );
+
+        // But the box handed to the IPM is the original, valid box — not the
+        // crossed `[5, 3]` Phase 1 derived.
+        let b = wrapped.cached_bounds().expect("inited");
+        assert!(
+            b.x_l[0] <= b.x_u[0] + 1e-12,
+            "M25: bounds handed to IPM must be valid, got x_l={} > x_u={}",
+            b.x_l[0],
+            b.x_u[0]
+        );
+        assert!(
+            (b.x_l[0] - 0.0).abs() < 1e-12 && (b.x_u[0] - 10.0).abs() < 1e-12,
+            "box restored to the original [0, 10], got [{}, {}]",
+            b.x_l[0],
+            b.x_u[0]
+        );
+    }
+
+    /// 1-variable, 2-constraint TNLP that drives FBBT into a partial
+    /// tightening followed by a genuine infeasibility. Both constraints are
+    /// `g = x` (default `NonLinear` linearity, so they are FBBT-handled, not
+    /// turned into linear rows Phase 1 would catch first). Row 0 demands
+    /// `x ∈ [0.3, 0.7]` (tightens the box `x ∈ [0, 1]`); row 1 demands
+    /// `x = 5` (infeasible). FBBT applies row 0, then row 1 flags the box
+    /// empty — leaving the bounds in the partially-tightened `[0.3, 0.7]`
+    /// state the `FbbtReport` contract says must not be trusted.
+    struct FbbtPartialThenInfeasible;
+    impl TNLP for FbbtPartialThenInfeasible {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 1,
+                m: 2,
+                nnz_jac_g: 2,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = 0.0;
+            b.x_u[0] = 1.0;
+            b.g_l[0] = 0.3;
+            b.g_u[0] = 0.7;
+            b.g_l[1] = 5.0;
+            b.g_u[1] = 5.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.5;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 0.0;
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            g[1] = x[0];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1]);
+                    jcol.copy_from_slice(&[0, 0]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Returns the tape `x` (i.e. `Var(0)`) for both constraints.
+    struct VarTapeProvider;
+    impl ExpressionProvider for VarTapeProvider {
+        fn constraint_expression(
+            &self,
+            i: usize,
+        ) -> Option<pounce_nlp::expression_provider::FbbtTape> {
+            use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+            if i < 2 {
+                Some(FbbtTape {
+                    ops: vec![FbbtOp::Var(0)],
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    /// H12: when FBBT detects a genuine infeasibility, the partially
+    /// tightened (and per its own contract "undefined") bounds must NOT
+    /// reach the reduced problem. Presolve has no infeasibility channel, so
+    /// it discards FBBT's bounds and lets the IPM run on the pre-FBBT box —
+    /// here the original `[0, 1]`, never the corrupted `[0.3, 0.7]`.
+    #[test]
+    fn fbbt_infeasibility_discards_corrupted_bounds() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(FbbtPartialThenInfeasible));
+        let provider: Rc<RefCell<dyn ExpressionProvider>> = Rc::new(RefCell::new(VarTapeProvider));
+        let opts = PresolveOptions {
+            enabled: true,
+            fbbt: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped =
+            PresolveTnlp::with_expression_provider(Rc::clone(&inner), Rc::clone(&provider), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.n, 1);
+        assert_eq!(info.m, 2, "nonlinear rows are not dropped by presolve");
+
+        // FBBT must have reached the infeasible row.
+        let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        assert_eq!(
+            rpt.infeasibility_witness,
+            Some(1),
+            "row 1 (`x = 5`) is the infeasibility witness"
+        );
+
+        // ...but its corrupted tightening is discarded: the reduced box is
+        // the original [0, 1], not the partial [0.3, 0.7] FBBT left behind.
+        let mut x_l = vec![0.0; info.n as usize];
+        let mut x_u = vec![0.0; info.n as usize];
+        let mut g_l = vec![0.0; info.m as usize];
+        let mut g_u = vec![0.0; info.m as usize];
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        assert_eq!(
+            (x_l[0], x_u[0]),
+            (0.0, 1.0),
+            "FBBT's undefined-on-infeasibility bounds must not reach the IPM (H12)"
+        );
+    }
+
+    /// 3-variable, 3-row TNLP that pits a Phase-0 auxiliary clamp against a
+    /// kept nonlinear row. Rows 0/1 are a square LINEAR equality block
+    /// (`x0 + x1 = 3`, `x0 - x1 = 1` → `(x0, x1) = (2, 1)`) that Phase 0
+    /// eliminates, clamping `x0 = 2`. Row 2 is tagged `NonLinear` (so it is
+    /// FBBT-handled, never turned into a linear row Phase 1 would catch) and
+    /// reads `x0 + x2 = 20` with `x2 ∈ [0, 1]`. Over the *aux-clamped* box
+    /// `x0 ∈ [2, 2]` FBBT sees `x0 + x2 ∈ [2, 3]`, disjoint from the required
+    /// `20`, and witnesses infeasibility on row 2 — an infeasibility that
+    /// exists ONLY because the aux clamp pinned `x0`. On the un-clamped box
+    /// `x0` is free and FBBT tightens it to `[19, 20]` with no witness.
+    struct AuxClampBreaksKeptNonlinearRow;
+    impl TNLP for AuxClampBreaksKeptNonlinearRow {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 3,
+                nnz_jac_g: 6,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -1e19;
+            b.x_u[0] = 1e19;
+            b.x_l[1] = -1e19;
+            b.x_u[1] = 1e19;
+            b.x_l[2] = 0.0;
+            b.x_u[2] = 1.0;
+            b.g_l[0] = 3.0;
+            b.g_u[0] = 3.0;
+            b.g_l[1] = 1.0;
+            b.g_u[1] = 1.0;
+            b.g_l[2] = 20.0;
+            b.g_u[2] = 20.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x[0] = 0.0;
+                sp.x[1] = 0.0;
+                sp.x[2] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] + x[1];
+            g[1] = x[0] - x[1];
+            g[2] = x[0] + x[2];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 1, 1, 2, 2]);
+                    jcol.copy_from_slice(&[0, 1, 0, 1, 0, 2]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0, -1.0, 1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::Linear;
+            types[1] = Linearity::Linear;
+            // Tagged NonLinear so it is FBBT-handled, not a Phase-1 linear row.
+            types[2] = Linearity::NonLinear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Supplies the FBBT tape `x0 + x2` for row 2 only (rows 0/1 are linear
+    /// and need no tape).
+    struct AuxBreakProvider;
+    impl ExpressionProvider for AuxBreakProvider {
+        fn constraint_expression(
+            &self,
+            i: usize,
+        ) -> Option<pounce_nlp::expression_provider::FbbtTape> {
+            use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+            if i == 2 {
+                Some(FbbtTape {
+                    ops: vec![FbbtOp::Var(0), FbbtOp::Var(2), FbbtOp::Add(0, 1)],
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Regression for F6 (follow-up to H12). An FBBT infeasibility witnessed
+    /// while a Phase-0 auxiliary elimination is in force must roll back that
+    /// elimination and re-run FBBT on the un-clamped box — mirroring the
+    /// Phase-1 aux rollback (#53). Restoring only the pre-FBBT box leaves the
+    /// aux clamps in place, handing the IPM a reduced problem whose
+    /// infeasibility is a presolve artifact (here `x0` pinned to 2 makes the
+    /// kept row `x0 + x2 = 20` infeasible). After the rollback the dropped
+    /// rows are restored, FBBT finds no infeasibility on the free box, and the
+    /// solver sees the full original problem.
+    #[test]
+    fn fbbt_infeasibility_with_aux_clamp_rolls_back_phase0() {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(AuxClampBreaksKeptNonlinearRow));
+        let provider: Rc<RefCell<dyn ExpressionProvider>> = Rc::new(RefCell::new(AuxBreakProvider));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            bound_tightening: true,
+            fbbt: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped =
+            PresolveTnlp::with_expression_provider(Rc::clone(&inner), Rc::clone(&provider), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+
+        // Confirm the scenario actually fired: Phase 0 eliminated the 2×2
+        // linear block (clamping x0, x1). Without this the test would pass
+        // vacuously.
+        assert_eq!(
+            wrapped.auxiliary_diagnostics().vars_eliminated,
+            2,
+            "Phase 0 must have clamped the linear block — otherwise the \
+             rollback path is never exercised"
+        );
+
+        // The headline fix: the elimination is rolled back, so every dropped
+        // row is restored. Without the rollback Phase 0's two dropped rows
+        // would leave `m == 1`.
+        assert_eq!(
+            info.m, 3,
+            "FBBT infeasibility under an aux clamp must roll Phase 0 back, \
+             restoring the dropped rows (got m={})",
+            info.m
+        );
+
+        // FBBT, re-run on the un-clamped box, finds no infeasibility: the
+        // witness was an artifact of the aux clamp.
+        let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        assert!(
+            rpt.infeasibility_witness.is_none(),
+            "FBBT must not witness infeasibility on the un-clamped box, got {:?}",
+            rpt.infeasibility_witness
+        );
+
+        // x0 is no longer pinned to the aux value 2; FBBT over `x0 + x2 = 20`
+        // with `x2 ∈ [0, 1]` tightens it to `[19, 20]`. Bounds stay valid.
+        let mut x_l = vec![0.0; info.n as usize];
+        let mut x_u = vec![0.0; info.n as usize];
+        let mut g_l = vec![0.0; info.m as usize];
+        let mut g_u = vec![0.0; info.m as usize];
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        for i in 0..(info.n as usize) {
+            assert!(
+                x_l[i] <= x_u[i] + 1e-12,
+                "bounds handed to IPM must be valid: x_l[{i}]={} > x_u[{i}]={}",
+                x_l[i],
+                x_u[i]
+            );
+        }
+        assert!(
+            x_l[0] > 2.0 + 1e-6,
+            "x0 must no longer be clamped to the aux value 2 (got x_l[0]={})",
+            x_l[0]
+        );
+    }
+
+    /// 2-variable, 2-row TNLP whose ORIGINAL problem is FEASIBLE (at
+    /// `(x, y) = (2, 1)`) but where Phase-0's nonlinear block solve picks the
+    /// WRONG root of a multi-root block. Row 0 is the 1×1 nonlinear block
+    /// `x² = 4` (roots ±2); the starting point `x = -1` drives the damped
+    /// Newton to the root `x = -2`. Row 1 is the kept row `x + y = 3` with
+    /// `y ∈ [0, 2]` — tagged `NonLinear` so it is FBBT-handled (a `Linear`
+    /// tag would let Phase 1 catch the clamp first and exercise the Phase-1
+    /// rollback instead of the F6 FBBT rollback under test). Under the clamp
+    /// `x = -2` the kept row needs `y = 5 > 2`: infeasible. At the OTHER root
+    /// `x = +2` it needs `y = 1 ∈ [0, 2]`: feasible. So FBBT's witness is
+    /// purely a Phase-0 artifact of the wrong root, on a feasible original.
+    ///
+    /// Phase-0 mechanics that make the scenario fire: DM matches row 0 to
+    /// `x` (its only column) and row 1 to `y`; BTF solves the block
+    /// `{row 0, x}` first (Newton from the probe `x = -1` → `-2`, inside
+    /// `x ∈ [-10, 10]`, residual 0, accepted and clamped) and then rejects
+    /// the block `{row 1, y}` as `OutOfBounds` (`y = 3 − (−2) = 5 ∉ [0, 2]`),
+    /// which keeps row 1 visible to FBBT.
+    struct WrongRootClampBreaksFeasibleOriginal;
+    impl TNLP for WrongRootClampBreaksFeasibleOriginal {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 3,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l[0] = -10.0;
+            b.x_u[0] = 10.0;
+            b.x_l[1] = 0.0;
+            b.x_u[1] = 2.0;
+            b.g_l[0] = 4.0;
+            b.g_u[0] = 4.0;
+            b.g_l[1] = 3.0;
+            b.g_u[1] = 3.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                // The probe seeds the block Newton: from -1 it converges to
+                // the wrong root -2 (a start of +1 would find +2 and the
+                // scenario would not fire).
+                sp.x[0] = -1.0;
+                sp.x[1] = 0.0;
+            }
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] * x[0];
+            g[1] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 0, 1]);
+                }
+                SparsityRequest::Values { values } => {
+                    // ∂(x²)/∂x = 2x — genuinely point-dependent so the block
+                    // Newton sees the true (sign-carrying) derivative at each
+                    // iterate. Values requests always carry `Some(x)` here
+                    // (probe fetch and Phase-0 callback both pass it).
+                    let x0 = x.map(|x| x[0]).unwrap_or(-1.0);
+                    values.copy_from_slice(&[2.0 * x0, 1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types[0] = Linearity::NonLinear;
+            // Tagged NonLinear so it is FBBT-handled, not a Phase-1 linear row.
+            types[1] = Linearity::NonLinear;
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// Supplies the FBBT tape `x + y` for the kept row 1 only (row 0 is the
+    /// eliminated block; it needs no tape for this scenario).
+    struct WrongRootKeptRowProvider;
+    impl ExpressionProvider for WrongRootKeptRowProvider {
+        fn constraint_expression(
+            &self,
+            i: usize,
+        ) -> Option<pounce_nlp::expression_provider::FbbtTape> {
+            use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
+            if i == 1 {
+                Some(FbbtTape {
+                    ops: vec![FbbtOp::Var(0), FbbtOp::Var(1), FbbtOp::Add(0, 1)],
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    /// F6's headline failure mode, end to end: a FEASIBLE original problem
+    /// must not be declared infeasible because Phase 0 clamped a multi-root
+    /// nonlinear block at the wrong root. The companion test above
+    /// (`fbbt_infeasibility_with_aux_clamp_rolls_back_phase0`) exercises the
+    /// rollback *mechanism* but its original model is itself infeasible; here
+    /// the original is feasible at `(2, 1)`, Newton lands on `x = -2`
+    /// (breaking the kept row `x + y = 3`, `y ∈ [0, 2]`), FBBT witnesses the
+    /// artifact infeasibility, and the rollback must rescue the solve: full
+    /// row set restored, clamp gone, FBBT witness-free on the re-run — so the
+    /// IPM receives the feasible full problem instead of a wrong "infeasible"
+    /// verdict.
+    #[test]
+    fn fbbt_rollback_rescues_feasible_original_from_wrong_root_clamp() {
+        let inner: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(WrongRootClampBreaksFeasibleOriginal));
+        let provider: Rc<RefCell<dyn ExpressionProvider>> =
+            Rc::new(RefCell::new(WrongRootKeptRowProvider));
+        let opts = PresolveOptions {
+            enabled: true,
+            auxiliary: true,
+            auxiliary_coupling: AuxiliaryCouplingPolicy::Safe,
+            bound_tightening: true,
+            fbbt: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped =
+            PresolveTnlp::with_expression_provider(Rc::clone(&inner), Rc::clone(&provider), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+
+        // Pre-rollback, the scenario must actually have fired: Phase 0
+        // eliminated the 1×1 block, clamping x at a Newton root. Without
+        // this the test passes vacuously (diagnostics survive the rollback).
+        assert_eq!(
+            wrapped.auxiliary_diagnostics().vars_eliminated,
+            1,
+            "Phase 0 must have solved and clamped the x² = 4 block — \
+             otherwise the wrong-root path is never exercised"
+        );
+
+        // The rollback restored the full model. `m == 2` proves both halves:
+        // (a) FBBT witnessed the artifact infeasibility (no witness → no
+        // rollback → row 0 stays dropped → m == 1), and (b) that witness can
+        // only arise from the wrong root (-2): at +2 the kept row is
+        // satisfiable with y = 1 ∈ [0, 2] and FBBT finds nothing.
+        assert_eq!(
+            info.m, 2,
+            "wrong-root clamp on a feasible original must trigger the F6 \
+             rollback and restore the dropped block row (got m={})",
+            info.m
+        );
+
+        // The re-run on the un-clamped box is witness-free: the original is
+        // feasible, so nothing survives the rollback.
+        let rpt = wrapped.fbbt_report().expect("fbbt ran");
+        assert!(
+            rpt.infeasibility_witness.is_none(),
+            "feasible original: FBBT must not witness infeasibility after \
+             the rollback, got {:?}",
+            rpt.infeasibility_witness
+        );
+
+        // The box handed to the IPM is valid, the wrong-root clamp is gone,
+        // and the feasible point (x, y) = (2, 1) is still inside it.
+        let mut x_l = vec![0.0; info.n as usize];
+        let mut x_u = vec![0.0; info.n as usize];
+        let mut g_l = vec![0.0; info.m as usize];
+        let mut g_u = vec![0.0; info.m as usize];
+        assert!(wrapped.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        }));
+        for i in 0..(info.n as usize) {
+            assert!(
+                x_l[i] <= x_u[i] + 1e-12,
+                "bounds handed to IPM must be valid: x_l[{i}]={} > x_u[{i}]={}",
+                x_l[i],
+                x_u[i]
+            );
+        }
+        assert!(
+            x_u[0] - x_l[0] > 1e-6,
+            "x must no longer be clamped (got [{}, {}])",
+            x_l[0],
+            x_u[0]
+        );
+        assert!(
+            x_l[0] <= 2.0 + 1e-9 && 2.0 <= x_u[0] + 1e-9,
+            "the feasible root x = 2 must survive in the IPM's box, got \
+             [{}, {}]",
+            x_l[0],
+            x_u[0]
+        );
+        assert!(
+            x_l[1] <= 1.0 + 1e-9 && 1.0 <= x_u[1] + 1e-9,
+            "the feasible y = 1 must survive in the IPM's box, got [{}, {}]",
+            x_l[1],
+            x_u[1]
+        );
+    }
+
+    /// L46: under a row drop, a genuinely per-constraint metadata vector
+    /// (length `m_in`) must be subset to the kept rows, and the inverse
+    /// `expand` must restore it (dropped rows defaulted). This is the
+    /// canonical, contract-conforming case — the only one any real inner
+    /// TNLP produces (e.g. `nl_reader`'s per-row `con_names`).
+    #[test]
+    fn con_metadata_per_row_vector_round_trips_under_row_drop() {
+        let m_in = 3;
+        let rows_kept = vec![0usize, 2]; // row 1 dropped by presolve
+        let mut inner = MetaData::default();
+        inner.strings.insert(
+            "names".to_string(),
+            vec!["c0".to_string(), "c1".to_string(), "c2".to_string()],
+        );
+        inner.integers.insert("flags".to_string(), vec![10, 11, 12]);
+        inner
+            .numerics
+            .insert("weights".to_string(), vec![1.0, 2.0, 3.0]);
+
+        let reduced = project_con_metadata(&inner, &rows_kept, m_in);
+        assert_eq!(
+            reduced.strings["names"],
+            vec!["c0".to_string(), "c2".to_string()]
+        );
+        assert_eq!(reduced.integers["flags"], vec![10, 12]);
+        assert_eq!(reduced.numerics["weights"], vec![1.0, 3.0]);
+
+        // finalize_metadata's inverse: reduced (m_out=2) back to m_in=3.
+        let restored = expand_con_metadata(&reduced, &rows_kept, m_in);
+        assert_eq!(
+            restored.strings["names"],
+            vec!["c0".to_string(), String::new(), "c2".to_string()]
+        );
+        assert_eq!(restored.integers["flags"], vec![10, 0, 12]);
+        assert_eq!(restored.numerics["weights"], vec![1.0, 0.0, 3.0]);
+    }
+
+    /// L46 hazard, characterized: a *global* metadata vector that happens
+    /// to have length `m_in` is indistinguishable from a per-row vector
+    /// (the untyped `MetaData` API carries no arity tag), so projection
+    /// silently subsets it. This pins the known-imperfect behavior so a
+    /// future arity-aware fix has a regression anchor; the value pounce
+    /// ships today is unaffected because no real inner TNLP emits a
+    /// coincidentally-`m_in`-length global constraint vector.
+    #[test]
+    fn con_metadata_length_heuristic_misfires_on_coincidental_global() {
+        let m_in = 3;
+        let rows_kept = vec![0usize, 2]; // a row is dropped, so projection is non-identity
+        let mut inner = MetaData::default();
+        // Semantically global (e.g. a 3-entry config tuple) that just
+        // happens to be length 3 == m_in.
+        inner
+            .integers
+            .insert("global_triple".to_string(), vec![100, 200, 300]);
+
+        let reduced = project_con_metadata(&inner, &rows_kept, m_in);
+        // Wrongly treated as per-row and subset to [100, 300]; the
+        // faithful value would be the untouched [100, 200, 300].
+        assert_eq!(
+            reduced.integers["global_triple"],
+            vec![100, 300],
+            "documents the L46 length-heuristic misfire on a coincidental global vector"
+        );
+
+        // A global vector whose length differs from m_in is correctly
+        // passed through untouched (the heuristic only misfires on the
+        // exact-length coincidence).
+        let mut inner2 = MetaData::default();
+        inner2
+            .numerics
+            .insert("two_globals".to_string(), vec![1.5, 2.5]);
+        let reduced2 = project_con_metadata(&inner2, &rows_kept, m_in);
+        assert_eq!(reduced2.numerics["two_globals"], vec![1.5, 2.5]);
     }
 }

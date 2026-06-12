@@ -23,7 +23,12 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-python3 - <<'PY'
+# Run the checker as the condition of an `if` so `set -e` does NOT abort the
+# script when python exits non-zero — that lets the friendlier failure message
+# below actually run. (Previously the `rc=$?`/message block sat after a bare
+# `python3 … <<PY` under `set -e`, so a failing check killed the script before
+# the message was ever reached.)
+if python3 - <<'PY'
 import re, os, glob, sys
 
 root = "docs/src"
@@ -59,10 +64,9 @@ if rc == 0:
     print("  OK — %d pages, all reachable from SUMMARY.md, no dead links" % len(present))
 sys.exit(rc)
 PY
-rc=$?
-
-if [[ $rc -ne 0 ]]; then
+then
+  echo "check-docs-consistency: OK"
+else
   echo "check-docs-consistency: FAILED — wire new pages into docs/src/SUMMARY.md." >&2
   exit 1
 fi
-echo "check-docs-consistency: OK"

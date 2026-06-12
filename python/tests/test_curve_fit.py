@@ -186,6 +186,38 @@ def test_general_parameter_constraint():
     assert r.popt[0] + r.popt[1] <= 1e-6
 
 
+def test_active_equality_constraint_projects_covariance():
+    """An ACTIVE general equality between parameters must be projected out of
+    ``pcov``: the constrained combination carries ~zero variance and the
+    parameters pick up an induced anti-correlation -- neither holds for the
+    unconstrained covariance. Pre-fix the projection ignored general
+    constraints entirely and returned the unconstrained covariance while
+    mislabeling it ``reduced_hessian(projected)``. (Code review M30.)"""
+    rng = np.random.default_rng(31)
+    x = np.linspace(0.0, 10.0, 40)
+    y = line(x, 2.0, -1.0) + rng.normal(0.0, 0.5, x.size)  # unconstrained a+b != 1
+    # require a + b = 1  (active equality g(p) = a + b - 1 = 0)
+    cons = [{"type": "eq", "fun": lambda p: p[0] + p[1] - 1.0,
+             "jac": lambda p: np.array([[1.0, 1.0]])}]
+    r = pounce.curve_fit(line_j, x, y, p0=[1.0, 0.0], constraints=cons)
+
+    assert abs(r.popt[0] + r.popt[1] - 1.0) <= 1e-6
+    assert r.cov_source == "reduced_hessian(projected)"
+    g = np.array([1.0, 1.0])                      # the active-constraint gradient
+    # variance along the constrained direction is ~zero (the binding relation
+    # is known exactly), and the parameters are perfectly anti-correlated.
+    assert float(g @ r.pcov @ g) < 1e-9
+    assert r.pcov[0, 1] < 0.0
+    # cross-check against the closed-form projected covariance.
+    Jw = np.column_stack([x, np.ones_like(x)])    # d line / d[a, b]
+    M = Jw.T @ Jw
+    A = np.array([[1.0, 1.0]])
+    _, _, Vt = np.linalg.svd(A)
+    Z = Vt[1:].T
+    pcov_ref = r._s2 * Z @ np.linalg.pinv(Z.T @ M @ Z) @ Z.T
+    np.testing.assert_allclose(r.pcov, pcov_ref, rtol=1e-5, atol=1e-10)
+
+
 # --------------------------------------------------------------------------
 # 7. Result object UX.
 # --------------------------------------------------------------------------
@@ -652,6 +684,26 @@ def test_streaming_active_bound_projects_covariance():
     np.testing.assert_allclose(streamed.pcov, full.pcov, rtol=1e-5, atol=1e-12)
 
 
+def test_streaming_active_equality_projects_covariance():
+    """The streaming covariance must project out an active general equality
+    exactly like the in-memory fit (the streaming twin of the M30 bug)."""
+    rng = np.random.default_rng(31)
+    x = np.linspace(0.0, 10.0, 400)
+    y = line(x, 2.0, -1.0) + rng.normal(0.0, 0.5, x.size)
+    cons = [{"type": "eq", "fun": lambda p: p[0] + p[1] - 1.0,
+             "jac": lambda p: np.array([[1.0, 1.0]])}]
+
+    full = pounce.curve_fit(line_j, x, y, p0=[1.0, 0.0], constraints=cons)
+    streamed = pounce.curve_fit_streaming(
+        line_j, _batched_source(x, y), p0=[1.0, 0.0], constraints=cons
+    )
+    assert streamed.cov_source == full.cov_source == "reduced_hessian(projected)"
+    g = np.array([1.0, 1.0])
+    assert float(g @ streamed.pcov @ g) < 1e-9
+    np.testing.assert_allclose(streamed.popt, full.popt, rtol=1e-6)
+    np.testing.assert_allclose(streamed.pcov, full.pcov, rtol=1e-5, atol=1e-10)
+
+
 def test_streaming_disables_residuals_and_sensitivity():
     """The O(n_data) outputs are not materialised; summary still renders."""
     rng = np.random.default_rng(0)
@@ -709,3 +761,98 @@ def test_streaming_requires_factory_and_params():
 
     with pytest.raises(ValueError, match="number of parameters"):
         pounce.curve_fit_streaming(variadic, _batched_source(x, y))
+
+
+def test_curve_fit_acceptable_level_reports_success():
+    """gh #119 / #123 analog for curve_fit. A fit that stalls at the *acceptable*
+    tolerance after the tight tolerance exits returns status 1
+    (``Solved_To_Acceptable_Level``) with a fully populated ``popt``/``pcov`` —
+    a converged solve. ``_solve_fit`` used to gate ``success`` on ``status == 0``
+    alone, so it reported ``success=False`` at a verified optimum and callers
+    gating on ``result.success`` silently discarded valid fits. It must now count
+    the acceptable level (and an acceptable final KKT error) as success, matching
+    ``minimize`` and the jax/torch paths.
+
+    A very tight ``tol`` over the finite-difference path forces the acceptable
+    stall deterministically.
+    """
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 4.0, 60)
+    y = expdecay_np(x, 2.5, 1.3, 0.5) + 0.01 * rng.standard_normal(x.size)
+
+    with pytest.warns(UserWarning, match="finite-difference"):
+        res = pounce.curve_fit(
+            expdecay_np, x, y, p0=[1.0, 1.0, 0.0],
+            options={"tol": 1e-12, "acceptable_tol": 1e-5, "print_level": 0},
+        )
+
+    # The tight tol forces the acceptable-level stall rather than a status-0 exit.
+    assert res.status == 1, f"expected Solved_To_Acceptable_Level, got {res.message}"
+    # ...which must now read as success, with a valid recovered fit.
+    assert res.success is True
+    np.testing.assert_allclose(res.popt, [2.5, 1.3, 0.5], atol=0.1)
+
+
+def test_curve_fit_success_mapping_matches_nlp_minimize():
+    """The curve_fit success rule reuses the NLP ``minimize`` status set, so the
+    two entry points agree on what counts as a converged solve (no divergence to
+    re-introduce the gh #119 class of bug)."""
+    from pounce._minimize import _NLP_SUCCESS_STATUS
+
+    assert 0 in _NLP_SUCCESS_STATUS      # Solve_Succeeded
+    assert 1 in _NLP_SUCCESS_STATUS      # Solved_To_Acceptable_Level
+    assert 2 not in _NLP_SUCCESS_STATUS  # Infeasible_Problem_Detected
+
+
+def test_curve_fit_no_kkt_fallback_gate_matches_minimize():
+    """L50 lockstep: curve_fit's KKT-error success fallback must exclude the
+    same statuses as minimize's, so an external abort (``User_Requested_Stop``,
+    code 5) can never be laundered into ``success=True`` by a coincidentally
+    small final KKT error. curve_fit exposes no intermediate callback today, so
+    the gate is latent — this pins both sites to the *same* constant so the two
+    "judge success exactly as minimize" sites cannot drift."""
+    from pounce._curve_fit import _NO_KKT_FALLBACK_STATUS as cf_gate
+    from pounce._minimize import _NO_KKT_FALLBACK_STATUS as m_gate
+
+    assert cf_gate is m_gate              # one shared source of truth
+    assert 5 in cf_gate                   # User_Requested_Stop stays failed
+    assert not cf_gate & {0, 1}           # success codes never gated
+
+
+def test_curve_fit_constraint_probed_at_p0_not_origin():
+    """L47 (curve_fit side): constraint sizing must probe at the starting seed
+    ``p0``, not the origin, mirroring ``minimize``'s x0 probe — a constraint
+    undefined at 0 (e.g. ``log``) but defined at p0 must not blow up before
+    the solve begins. Covers both the in-memory and the streaming builder."""
+    from pounce._curve_fit import _build_fit_problem, _build_streaming_fit_problem
+
+    x = np.linspace(0.0, 10.0, 40)
+    y = line(x, 2.0, 1.5)
+    p0 = [1.5, 1.2]
+
+    probes = []
+
+    def con(p):
+        probes.append(np.array(p, dtype=float))
+        # Undefined (-inf) at the origin; finite at p0.
+        return np.log(p)
+
+    prob = _build_fit_problem(
+        line, x, y, p0, None, (-np.inf, np.inf),
+        [{"type": "ineq", "fun": con}], "sse", 1.0, "fd",
+    )
+    assert prob.m_con == 2
+    np.testing.assert_allclose(probes[0], p0)  # probed at p0, not 0
+    assert np.all(np.isfinite(prob.g_combined(np.asarray(p0, dtype=float))))
+
+    s_probes = []
+
+    def s_con(p):
+        s_probes.append(np.array(p, dtype=float))
+        return np.log(p)
+
+    _build_streaming_fit_problem(
+        line, lambda: iter([(x, y)]), p0, None, (-np.inf, np.inf),
+        [{"type": "ineq", "fun": s_con}], "sse", 1.0, "fd", None,
+    )
+    np.testing.assert_allclose(s_probes[0], p0)  # streaming builder too

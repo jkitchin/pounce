@@ -59,12 +59,35 @@ import numpy as np
 from jax.scipy.linalg import block_diag
 
 from .. import _pounce
+from ..qp import _PSD_CHECK_AUTO_MAX_N, _check_psd
 
 __all__ = ["solve_qp", "solve_qp_batch", "solve_socp", "QpLayer"]
 
+
+def _guard_psd(P, n, check_psd=None):
+    """Reject an indefinite Hessian on the host forward (issue #112).
+
+    The differentiable layer reads the primal/dual iterate and solves a KKT
+    system for the gradient; an indefinite ``P`` gives a silently-wrong
+    ``"optimal"`` forward and feeds that garbage into the backward pass too.
+    This runs on the concrete numpy ``P`` inside the host callback.
+
+    ``check_psd`` has the same semantics as :func:`pounce.qp.solve_qp`'s
+    (M31): ``None`` (default) checks only when ``n <= 1500`` so a large QP is
+    not slowed by the O(n^3) eigenvalue solve, ``True`` always checks, and
+    ``False`` skips the check (e.g. a layer whose ``P`` is PSD by
+    construction, where the per-forward ``eigvalsh`` is pure overhead)."""
+    if check_psd is False:
+        return
+    if check_psd or n <= _PSD_CHECK_AUTO_MAX_N:
+        _check_psd(*_to_coo_lower(np.asarray(P)), n)
+
+
 # Active-set tolerance for the backward pass: an inequality counts as
 # active when its multiplier is above this (complementarity slackness).
-from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
+from .._ad_common import (
+    ACTIVE_TOL as _ACTIVE_TOL,
+)  # single source of truth (DiffHandoff contract)
 
 
 def _expand_bounds(G, h, lb, ub, n):
@@ -167,7 +190,7 @@ def _split_duals(d, m_g, m_a):
     return lam, nu
 
 
-def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
+def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None, check_psd=None):
     """Host-side forward solve via pounce-convex. Returns (x, lam, nu).
 
     ``lam`` are the inequality (``G``) multipliers, ``nu`` the equality
@@ -175,6 +198,7 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     iteration with that primal; it only affects the iteration count."""
     m_g = G.shape[0]
     m_a = A.shape[0]
+    _guard_psd(P, c.shape[0], check_psd)
     prob = _build_problem(P, c, G, h, A, b)
     warm = None
     if warm_x is not None and np.asarray(warm_x).size == c.shape[0]:
@@ -186,7 +210,8 @@ def _forward_solve(P, c, G, h, A, b, tol, max_iter, warm_x=None):
     return x, lam, nu
 
 
-def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None):
+def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None,
+                         check_psd=None):
     """Parallel host-side batch solve. Shared ``P``/``G``/``A``; per-row
     ``cs``/``hs``/``bs``. Returns stacked (xs, lams, nus). ``warm_xs`` (if
     shaped ``(B, n)``) seeds each instance's primal."""
@@ -194,6 +219,8 @@ def _forward_solve_batch(P, cs, G, hs, A, bs, tol, max_iter, warm_xs=None):
     m_a = A.shape[0]
     b_sz = cs.shape[0]
     n = cs.shape[1]
+    # P is shared across the batch — one check covers all rows.
+    _guard_psd(P, n, check_psd)
     probs = [_build_problem(P, cs[i], G, hs[i], A, bs[i]) for i in range(b_sz)]
     warms = None
     if warm_xs is not None and np.asarray(warm_xs).shape == (b_sz, n):
@@ -270,18 +297,20 @@ def _kkt_backward(P, G, A, h, x, lam, nu, gx):
     return grad_P, grad_c, grad_G, grad_h, grad_A, grad_b
 
 
-def _make_qp_vjp(n, m_g, m_a, tol, max_iter):
+def _make_qp_vjp(n, m_g, m_a, tol, max_iter, check_psd=None):
     # `warm_x` is a primal input so it threads cleanly through jit/grad,
     # but it never affects the solution (only the iteration count), so its
     # cotangent is zero.
     @jax.custom_vjp
     def qp(P, c, G, h, A, b, warm_x):
-        x, _, _ = _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter)
+        x, _, _ = _pure_forward(
+            P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter, check_psd
+        )
         return x
 
     def fwd(P, c, G, h, A, b, warm_x):
         x, lam, nu = _pure_forward(
-            P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter
+            P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter, check_psd
         )
         return x, (P, G, A, h, x, lam, nu, warm_x)
 
@@ -294,7 +323,7 @@ def _make_qp_vjp(n, m_g, m_a, tol, max_iter):
     return qp
 
 
-def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter):
+def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter, check_psd=None):
     """custom_vjp for a parallel batch. Differentiable args are the shared
     ``P``/``G``/``A`` and the per-row ``cs``/``hs``/``bs`` (all leading
     axis ``B``). Matrix gradients sum over the batch; RHS gradients stay
@@ -303,13 +332,13 @@ def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter):
     @jax.custom_vjp
     def qp(P, cs, G, hs, A, bs, warm_xs):
         xs, _, _ = _pure_forward_batch(
-            P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter
+            P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter, check_psd
         )
         return xs
 
     def fwd(P, cs, G, hs, A, bs, warm_xs):
         xs, lams, nus = _pure_forward_batch(
-            P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter
+            P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter, check_psd
         )
         return xs, (P, G, A, hs, xs, lams, nus, warm_xs)
 
@@ -335,7 +364,8 @@ def _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter):
     return qp
 
 
-def _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter):
+def _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter,
+                  check_psd=None):
     """custom_vjp-friendly forward via pure_callback. Returns (x, lam, nu).
 
     ``warm_x`` is an extra (non-differentiated) operand carrying an optional
@@ -357,6 +387,7 @@ def _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter):
             tol,
             max_iter,
             warm_x=np.asarray(w_h),
+            check_psd=check_psd,
         )
 
     # `vmap_method="sequential"` lets the layer be used under jax.vmap
@@ -370,7 +401,8 @@ def _pure_forward(P, c, G, h, A, b, warm_x, n, m_g, m_a, tol, max_iter):
         return jax.pure_callback(host, shapes, P, c, G, h, A, b, warm_x)
 
 
-def _pure_forward_batch(P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter):
+def _pure_forward_batch(P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter,
+                        check_psd=None):
     """Parallel-batch forward via a single host callback. Returns stacked
     (xs, lams, nus). ``warm_xs`` is a non-differentiated warm-start operand
     (empty trailing dim ⇒ cold)."""
@@ -392,6 +424,7 @@ def _pure_forward_batch(P, cs, G, hs, A, bs, warm_xs, n, m_g, m_a, tol, max_iter
             tol,
             max_iter,
             warm_xs=np.asarray(w_h),
+            check_psd=check_psd,
         )
 
     return jax.pure_callback(host, shapes, P, cs, G, hs, A, bs, warm_xs)
@@ -424,6 +457,7 @@ def solve_qp(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_start=None,
+    check_psd: Optional[bool] = None,
 ):
     """Differentiable convex-QP solve ``x*(P, c, G, h, A, b)``.
 
@@ -441,6 +475,12 @@ def solve_qp(
     differentiated and does not change the solution or its gradients; it
     only reduces the iteration count. This is the natural fit here, since
     the layer returns the primal — feed the previous output back in.
+
+    ``check_psd`` controls the host-side PSD guard on ``P`` (issue #112),
+    with the same semantics as :func:`pounce.qp.solve_qp`: ``None`` (the
+    default) checks only when ``n <= 1500``, ``True`` always checks, and
+    ``False`` skips the per-forward O(n^3) eigenvalue check — useful when
+    ``P`` is PSD by construction (e.g. ``LLᵀ + εI`` in an OptNet layer).
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     c = jnp.asarray(c, dtype=jnp.float64)
@@ -454,7 +494,7 @@ def solve_qp(
     G_full, h_full = _expand_bounds(G0, h0, lb, ub, n)
     warm_x = _warm_primal(warm_start, n)
 
-    fn = _make_qp_vjp(n, G_full.shape[0], A0.shape[0], tol, max_iter)
+    fn = _make_qp_vjp(n, G_full.shape[0], A0.shape[0], tol, max_iter, check_psd)
     return fn(P, c, G_full, h_full, A0, b0, warm_x)
 
 
@@ -490,6 +530,7 @@ def solve_qp_batch(
     tol: Optional[float] = None,
     max_iter: Optional[int] = None,
     warm_start=None,
+    check_psd: Optional[bool] = None,
 ):
     """Differentiable **parallel** batch of convex QPs sharing structure.
 
@@ -509,6 +550,10 @@ def solve_qp_batch(
     array of primals (e.g. a previous batch's returned ``xs``) or a
     sequence of per-row results/vectors. It is not differentiated and does
     not change the solution or its gradients — only the iteration count.
+
+    ``check_psd``: PSD-guard control for the shared ``P`` (one check covers
+    the whole batch) — ``None`` auto (``n <= 1500``), ``True`` force,
+    ``False`` skip; same semantics as :func:`pounce.qp.solve_qp`.
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     cs = jnp.asarray(c, dtype=jnp.float64)
@@ -532,9 +577,7 @@ def solve_qp_batch(
     else:
         h_arr = jnp.asarray(h, dtype=jnp.float64)
         hs_user = (
-            jnp.broadcast_to(h_arr, (b_sz, n_user_rows))
-            if h_arr.ndim == 1
-            else h_arr
+            jnp.broadcast_to(h_arr, (b_sz, n_user_rows)) if h_arr.ndim == 1 else h_arr
         )
     hs_bounds = jnp.broadcast_to(h_bounds[n_user_rows:], (b_sz, bound_rows))
     hs = jnp.concatenate([hs_user, hs_bounds], axis=1)
@@ -547,7 +590,7 @@ def solve_qp_batch(
         bs = jnp.broadcast_to(b_arr, (b_sz, m_a)) if b_arr.ndim == 1 else b_arr
 
     warm_xs = _warm_primal_batch(warm_start, b_sz, n)
-    fn = _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter)
+    fn = _make_qp_batch_vjp(n, m_g, m_a, tol, max_iter, check_psd)
     return fn(P, cs, G_full, hs, A0, bs, warm_xs)
 
 
@@ -563,9 +606,15 @@ class QpLayer:
     the iteration on a nearby problem; for fixed-structure repeated solves,
     :class:`pounce.qp.QpFactorization` (host API) additionally reuses the
     symbolic factorization.
+
+    ``check_psd`` controls the per-forward PSD guard on ``P`` (same
+    ``None``/``True``/``False`` semantics as :func:`pounce.qp.solve_qp`);
+    pass ``check_psd=False`` when ``P`` is PSD by construction to skip the
+    O(n^3) eigenvalue check on every forward.
     """
 
-    def __init__(self, P, G=None, A=None, lb=None, ub=None, *, tol=None, max_iter=None):
+    def __init__(self, P, G=None, A=None, lb=None, ub=None, *, tol=None,
+                 max_iter=None, check_psd=None):
         self._P = P
         self._G = G
         self._A = A
@@ -573,6 +622,7 @@ class QpLayer:
         self._ub = ub
         self._tol = tol
         self._max_iter = max_iter
+        self._check_psd = check_psd
 
     def __call__(self, c, *, b=None, h=None, warm_start=None):
         return solve_qp(
@@ -587,6 +637,7 @@ class QpLayer:
             tol=self._tol,
             max_iter=self._max_iter,
             warm_start=warm_start,
+            check_psd=self._check_psd,
         )
 
     def batch(self, cs, *, b=None, h=None, warm_start=None):
@@ -608,6 +659,7 @@ class QpLayer:
             tol=self._tol,
             max_iter=self._max_iter,
             warm_start=warm_start,
+            check_psd=self._check_psd,
         )
 
 
@@ -692,10 +744,11 @@ def _socp_backward(P, G, A, h, x, lam, nu, gx, cones):
     return grad_P, grad_c, grad_G, grad_h, grad_A, grad_b
 
 
-def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
+def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter, check_psd=None):
     """Host-side SOCP forward via pounce-convex. Returns (x, z, y)."""
     m_g = G.shape[0]
     m_a = A.shape[0]
+    _guard_psd(P, c.shape[0], check_psd)
     prob = _build_problem(P, c, G, h, A, b)
     d = _pounce.solve_socp(prob, specs, tol=tol, max_iter=max_iter)
     _check_status(d["status"], "SOCP differentiable forward solve")
@@ -704,7 +757,7 @@ def _forward_solve_socp(P, c, G, h, A, b, specs, tol, max_iter):
     return x, lam, nu
 
 
-def _make_socp_vjp(n, m_g, m_a, cones, specs, tol, max_iter):
+def _make_socp_vjp(n, m_g, m_a, cones, specs, tol, max_iter, check_psd=None):
     shapes = (
         jax.ShapeDtypeStruct((n,), jnp.float64),
         jax.ShapeDtypeStruct((m_g,), jnp.float64),
@@ -714,9 +767,16 @@ def _make_socp_vjp(n, m_g, m_a, cones, specs, tol, max_iter):
     def forward(P, c, G, h, A, b):
         def host(P_h, c_h, G_h, h_h, A_h, b_h):
             return _forward_solve_socp(
-                np.asarray(P_h), np.asarray(c_h), np.asarray(G_h),
-                np.asarray(h_h), np.asarray(A_h), np.asarray(b_h),
-                specs, tol, max_iter,
+                np.asarray(P_h),
+                np.asarray(c_h),
+                np.asarray(G_h),
+                np.asarray(h_h),
+                np.asarray(A_h),
+                np.asarray(b_h),
+                specs,
+                tol,
+                max_iter,
+                check_psd=check_psd,
             )
 
         return jax.pure_callback(host, shapes, P, c, G, h, A, b)
@@ -738,7 +798,8 @@ def _make_socp_vjp(n, m_g, m_a, cones, specs, tol, max_iter):
     return socp
 
 
-def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None):
+def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None,
+               check_psd=None):
     """Differentiable convex-SOCP solve ``x*(P, c, G, h, A, b)`` over a
     product of cones.
 
@@ -748,6 +809,10 @@ def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None):
     ``s = h − Gx`` block must lie in its cone. Differentiable w.r.t.
     ``P, c, G, h, A, b`` via cone-aware OptNet implicit differentiation
     (``diag`` → the cones' arrow operators).
+
+    ``check_psd`` controls the host-side PSD guard on ``P`` — ``None`` auto
+    (``n <= 1500``), ``True`` force, ``False`` skip; same semantics as
+    :func:`pounce.qp.solve_qp`.
     """
     P = jnp.asarray(P, dtype=jnp.float64)
     c = jnp.asarray(c, dtype=jnp.float64)
@@ -757,5 +822,7 @@ def solve_socp(*, P, c, G, h, A=None, b=None, cones, tol=None, max_iter=None):
     A0 = jnp.zeros((0, n)) if A is None else jnp.asarray(A, dtype=jnp.float64)
     b0 = jnp.zeros((0,)) if b is None else jnp.asarray(b, dtype=jnp.float64)
     static, specs = _normalize_socp_cones(cones)
-    fn = _make_socp_vjp(n, G.shape[0], A0.shape[0], static, specs, tol, max_iter)
+    fn = _make_socp_vjp(
+        n, G.shape[0], A0.shape[0], static, specs, tol, max_iter, check_psd
+    )
     return fn(P, c, G, h, A0, b0)

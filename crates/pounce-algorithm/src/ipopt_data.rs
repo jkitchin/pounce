@@ -199,9 +199,18 @@ impl IpoptData {
     }
 
     /// Replace `curr` with the previously-set `trial`. Mirrors
-    /// `IpIpoptData::AcceptTrialPoint`.
+    /// `IpIpoptData::AcceptTrialPoint`, which `DBG_ASSERT`s a trial is
+    /// staged before promoting it (upstream always runs a line search that
+    /// stages one). pounce additionally supports a bookkeeping-only
+    /// `iterate()` path (no NLP + no search_dir, per the module docs) that
+    /// runs the per-iteration bookkeeping without computing a step, so
+    /// `trial` may be unset here. Promoting `None` would null out `curr`
+    /// and make the next iteration's CQ accessor (`IpoptCq::curr_iv`) hit
+    /// `unreachable!`; preserve `curr` when nothing is staged.
     pub fn accept_trial_point(&mut self) {
-        self.curr = self.trial.take();
+        if let Some(trial) = self.trial.take() {
+            self.curr = Some(trial);
+        }
     }
 
     /// Set the trial iterate from a primal step `delta_x`/`delta_s`
@@ -254,6 +263,27 @@ mod tests {
         assert!(d.curr.is_none());
         d.accept_trial_point();
         assert!(d.curr.is_some());
+        assert!(d.trial.is_none());
+    }
+
+    // Regression for M2 (dev-notes/code-review-2026-06.md): in the
+    // bookkeeping-only `iterate()` path (no NLP + no search_dir), step 5
+    // is skipped so no trial is staged, yet `accept_trial_point()` is still
+    // called. The old `curr = trial.take()` then nulled out `curr`, and the
+    // next iteration's CQ accessor (`ipopt_cq.rs` `curr_iv`) hit
+    // `unreachable!`. With no trial staged, `curr` must be preserved.
+    #[test]
+    fn accept_trial_point_preserves_curr_when_no_trial_staged() {
+        let mut d = IpoptData::new();
+        d.set_curr(zero_iv());
+        assert!(d.curr.is_some());
+        assert!(d.trial.is_none());
+        d.accept_trial_point();
+        // Must NOT destroy the current iterate when nothing is staged.
+        assert!(
+            d.curr.is_some(),
+            "accept_trial_point() nulled curr with no trial staged"
+        );
         assert!(d.trial.is_none());
     }
 }

@@ -49,6 +49,59 @@ fn infeasible_qp_reports_infeasible() {
     assert_ne!(out.status.code(), Some(0), "infeasible must exit non-zero");
 }
 
+/// H4 regression: the AMPL solver-protocol exit-code contract on the convex
+/// path. Under `-AMPL` the termination is conveyed through the `.sol`'s
+/// `solve_result_num`, so the process must exit 0 even for a non-fatal
+/// *unsuccessful* outcome (infeasible/unbounded/limit) — a non-zero exit makes
+/// Pyomo / the ASL interface raise `ApplicationError` and never parse the
+/// `.sol`. The NLP path already honors this; the convex QP/SOCP paths
+/// previously ignored `args.ampl` and returned exit 1 on infeasible, breaking
+/// the Pyomo integration on every default-routed LP/convex-QP `.nl`. This test
+/// runs both arms on the same infeasible QP: `-AMPL` exits 0 (with the verdict
+/// `.sol` written), plain CLI exits non-zero.
+#[test]
+fn ampl_mode_honors_exit_code_contract_on_infeasible_convex_qp() {
+    let dir = std::env::temp_dir();
+    let sol = dir.join("pounce_h4_ampl_infeasible.sol");
+    let _ = std::fs::remove_file(&sol);
+
+    // `-AMPL` arm: exit 0, verdict in the `.sol`.
+    let ampl = Command::new(pounce_exe())
+        .arg(fixture_named("infeasible_qp.nl"))
+        .arg("-AMPL")
+        .arg("--sol-output")
+        .arg(&sol)
+        .arg("solver_selection=qp-ipm")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(
+        ampl.status.code(),
+        Some(0),
+        "-AMPL infeasible must exit 0 (verdict travels in the .sol); stdout=\n{}",
+        String::from_utf8_lossy(&ampl.stdout)
+    );
+    let text = std::fs::read_to_string(&sol).expect("verdict .sol written under -AMPL");
+    assert!(
+        text.contains("200"),
+        "the infeasible solve_result_num (200) must be in the .sol:\n{text}"
+    );
+    let _ = std::fs::remove_file(&sol);
+
+    // Plain-CLI arm on the same problem: still exits non-zero (the contract
+    // change is scoped to `-AMPL`).
+    let plain = Command::new(pounce_exe())
+        .arg(fixture_named("infeasible_qp.nl"))
+        .arg("--no-sol")
+        .arg("solver_selection=qp-ipm")
+        .output()
+        .expect("spawn pounce");
+    assert_ne!(
+        plain.status.code(),
+        Some(0),
+        "plain-CLI infeasible must still exit non-zero"
+    );
+}
+
 // --- A2: a forced solver_selection that does not match the detected
 // class must error end-to-end (nonzero exit, clear message) and NEVER
 // silently mis-solve to a wrong "optimal". `auto` on the same file must

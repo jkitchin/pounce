@@ -245,6 +245,90 @@ ENDATA
     );
 }
 
+/// Sum the parsed Hessian triplets that land on the lower-triangle
+/// position (`irow`, `jcol`) (both 1-based). The evaluator sums all
+/// triplets, so this is the *effective* H entry the solver sees.
+fn h_at(model: &crate::qps::QpsModel, irow: i32, jcol: i32) -> f64 {
+    model
+        .h_irow
+        .iter()
+        .zip(&model.h_jcol)
+        .zip(&model.h_val)
+        .filter(|((&r, &c), _)| r == irow && c == jcol)
+        .map(|(_, &v)| v)
+        .sum()
+}
+
+#[test]
+fn parse_qps_qmatrix_full_matrix_does_not_double_off_diagonals() {
+    // QMATRIX uses the *full-matrix* convention: both (i,j) and the
+    // mirror (j,i) are listed. For H = [[2, 1], [1, 2]] the file
+    // carries X1·X2 = 1 and X2·X1 = 1. After lower-triangle
+    // normalization both land on (2,1); the evaluator sums all
+    // triplets, so a naive parser reports H_21 = 2 — double the true
+    // value. The diagonal is listed once and must be unaffected.
+    let text = "\
+NAME          QFULL
+ROWS
+ N  COST
+COLUMNS
+    X1        COST       0.0
+    X2        COST       0.0
+QMATRIX
+    X1        X1         2.0
+    X1        X2         1.0
+    X2        X1         1.0
+    X2        X2         2.0
+ENDATA
+";
+    let m = parse_qps(text).unwrap();
+    assert!(
+        (h_at(&m, 2, 1) - 1.0).abs() < 1e-12,
+        "off-diagonal H_21 = {} but expected 1.0 (doubled?)",
+        h_at(&m, 2, 1)
+    );
+    assert!(
+        (h_at(&m, 1, 1) - 2.0).abs() < 1e-12,
+        "H_11 = {}",
+        h_at(&m, 1, 1)
+    );
+    assert!(
+        (h_at(&m, 2, 2) - 2.0).abs() < 1e-12,
+        "H_22 = {}",
+        h_at(&m, 2, 2)
+    );
+}
+
+#[test]
+fn parse_qps_quadobj_single_triangle_keeps_off_diagonal() {
+    // QUADOBJ uses the *single-triangle* convention: each off-diagonal
+    // pair is listed exactly once. The same H = [[2, 1], [1, 2]] is
+    // expressed with a single X1·X2 = 1 entry, and must round-trip to
+    // H_21 = 1 (this path was already correct — guards against the
+    // QMATRIX fix regressing the triangle convention).
+    let text = "\
+NAME          QTRI
+ROWS
+ N  COST
+COLUMNS
+    X1        COST       0.0
+    X2        COST       0.0
+QUADOBJ
+    X1        X1         2.0
+    X1        X2         1.0
+    X2        X2         2.0
+ENDATA
+";
+    let m = parse_qps(text).unwrap();
+    assert!(
+        (h_at(&m, 2, 1) - 1.0).abs() < 1e-12,
+        "off-diagonal H_21 = {}",
+        h_at(&m, 2, 1)
+    );
+    assert!((h_at(&m, 1, 1) - 2.0).abs() < 1e-12);
+    assert!((h_at(&m, 2, 2) - 2.0).abs() < 1e-12);
+}
+
 #[test]
 fn parse_qps_rejects_binary_variable_bound() {
     let text = "\

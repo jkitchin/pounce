@@ -33,20 +33,17 @@ mkdir -p ~/.claude/skills
 cp -r studio/skill ~/.claude/skills/pounce
 ```
 
-The `pounce-studio` install needs nothing extra. The `pounce` install
-inherits the workspace's current requirement that the [`feral`][feral]
-crate be available as a sibling checkout (`../feral`), because
-`Cargo.toml` carries a `[patch.crates-io] feral = { path = "../feral" }`
-override. Either clone the sibling first
+Both installs build straight from crates.io — the committed `Cargo.toml`
+pins [`feral`][feral] to a published release (`feral = "0.10.0"`), so no
+sibling checkout or `[patch.crates-io]` override is required. (Solver-core
+development against feral's unreleased HEAD uses a *local, uncommitted*
+`[patch.crates-io]` git-rev override; that is a maintainer workflow and
+does not affect installing the skill.)
 
-```sh
-git clone --depth 1 https://github.com/jkitchin/feral.git ../feral
-```
-
-or skip the `pounce` install and reuse a `pounce` binary you have
-elsewhere on `PATH` (the skill only invokes `pounce-studio` directly;
-`pounce` is needed only when you want to drive a fresh solve from
-within the skill).
+If you'd rather not build `pounce` at all, skip its install and reuse a
+`pounce` binary you have elsewhere on `PATH` — the skill only invokes
+`pounce-studio` directly; `pounce` is needed only when you want to drive a
+fresh solve from within the skill.
 
 The skill works in every Claude Code session — desktop, web, IDE
 extension, the CLI — because skills travel with the configuration

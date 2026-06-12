@@ -58,6 +58,7 @@ use pounce_nlp::TNLP;
 use crate::backsolver::SensBacksolver;
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
+use crate::vec_util::dense_to_vec;
 use crate::PdSensBacksolver;
 
 /// Errors returned by post-convergence operations on [`Solver`].
@@ -504,15 +505,5 @@ impl Solver {
             .backsolver
             .pin_c_scales(pin_constraint_indices)
             .map_err(SolverError::SensComputationFailed)
-    }
-}
-
-fn dense_to_vec(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
-    match v
-        .as_any()
-        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
-    {
-        Some(d) => d.values().to_vec(),
-        None => vec![0.0; v.dim() as usize],
     }
 }

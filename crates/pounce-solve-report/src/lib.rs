@@ -402,10 +402,14 @@ impl ReportBuilder {
     }
 }
 
-/// `TARGET` is set by Cargo when building this crate. Doesn't fail to
-/// compile if absent (older Cargo or some tooling); falls back to
-/// "unknown".
-const TARGET_TRIPLE: &str = match option_env!("TARGET") {
+/// The build target triple (e.g. `aarch64-apple-darwin`).
+///
+/// Cargo only exposes `TARGET` to *build scripts*, not to crate source, so
+/// `option_env!("TARGET")` here is always `None`. Our `build.rs` re-exports
+/// the build script's `TARGET` as `POUNCE_TARGET_TRIPLE`, which we read
+/// instead. Falls back to "unknown" if the build script did not run (e.g.
+/// some non-Cargo tooling).
+const TARGET_TRIPLE: &str = match option_env!("POUNCE_TARGET_TRIPLE") {
     Some(t) => t,
     None => "unknown",
 };
@@ -439,9 +443,15 @@ fn empty_stats() -> StatisticsInfo {
 
 /// AMPL-style `solve_result_num` per Gay 2005 (Hooking Your Solver to
 /// AMPL §5, p. 23 table): 0 = solved, 100s = warning, 200s =
-/// infeasible, 400s = limit reached, 500s = failure. Shared by the CLI
-/// and cinterface report writers so both encode the same int codes
-/// into `SolutionInfo::solve_result_num`.
+/// infeasible, 300s = unbounded, 400s = limit reached, 500s = failure.
+/// Shared by the CLI and cinterface report writers so both encode the
+/// same int codes into `SolutionInfo::solve_result_num`.
+///
+/// `DivergingIterates` is Ipopt's unboundedness signal (the iterates run
+/// off to infinity), so it maps to the 300 "unbounded" range — matching
+/// upstream Ipopt's ASL driver and the CLI's own convex path, which
+/// reports `QpStatus::DualInfeasible` (unbounded) as 300 (`main.rs`). It
+/// is *not* a limit (400) condition.
 pub fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
     use ApplicationReturnStatus::*;
     match status {
@@ -449,8 +459,8 @@ pub fn status_to_solve_result_num(status: ApplicationReturnStatus) -> i32 {
         SolvedToAcceptableLevel => 100,
         FeasiblePointFound => 100,
         InfeasibleProblemDetected => 200,
+        DivergingIterates => 300,
         SearchDirectionBecomesTooSmall => 400,
-        DivergingIterates => 401,
         MaximumIterationsExceeded => 400,
         MaximumCpuTimeExceeded => 400,
         MaximumWallTimeExceeded => 400,
@@ -548,6 +558,36 @@ mod tests {
     }
 
     #[test]
+    fn target_triple_resolves_to_real_triple_not_unknown() {
+        // Fail-first: before the build.rs re-export this constant read
+        // `option_env!("TARGET")`, which is `None` at crate-source compile
+        // time (Cargo only exposes TARGET to build scripts), so it was always
+        // "unknown". The build.rs now re-exports TARGET as
+        // POUNCE_TARGET_TRIPLE, which resolves it to the real build triple.
+        assert_ne!(
+            TARGET_TRIPLE, "unknown",
+            "build.rs should re-export the build target triple"
+        );
+        // A real triple has the `arch-vendor-os[-abi]` shape (>= 2 dashes).
+        assert!(
+            TARGET_TRIPLE.matches('-').count() >= 2,
+            "unexpected target triple: {TARGET_TRIPLE:?}"
+        );
+
+        // And it must propagate into the finished report.
+        let b = ReportBuilder::new(
+            ReportDetail::Summary,
+            InputDescriptor::NlFile {
+                path: PathBuf::from("/tmp/foo.nl"),
+                size_bytes: None,
+            },
+        );
+        let report = b.finish();
+        assert_eq!(report.fair_metadata.solver.target_triple, TARGET_TRIPLE);
+        assert_ne!(report.fair_metadata.solver.target_triple, "unknown");
+    }
+
+    #[test]
     fn report_serializes_round_trip() {
         let mut b = ReportBuilder::new(
             ReportDetail::Summary,
@@ -634,6 +674,31 @@ mod tests {
         );
         assert_eq!(ReportDetail::parse("Full").unwrap(), ReportDetail::Full);
         assert!(ReportDetail::parse("verbose").is_err());
+    }
+
+    #[test]
+    fn diverging_iterates_maps_to_unbounded_range() {
+        use ApplicationReturnStatus::*;
+        // M12 regression: DivergingIterates is Ipopt's unboundedness
+        // signal and must land in the AMPL 300 "unbounded" range, not
+        // the 400 "limit" range — matching upstream Ipopt's ASL driver
+        // and the CLI convex path (QpStatus::DualInfeasible → 300).
+        assert_eq!(status_to_solve_result_num(DivergingIterates), 300);
+
+        // Lock the surrounding range convention so the fix can't silently
+        // drift back: solved / infeasible / limit / failure buckets.
+        assert_eq!(status_to_solve_result_num(SolveSucceeded), 0);
+        assert_eq!(status_to_solve_result_num(InfeasibleProblemDetected), 200);
+        assert_eq!(
+            status_to_solve_result_num(MaximumIterationsExceeded),
+            400,
+            "iteration limit stays in the 400 range",
+        );
+        assert_eq!(
+            status_to_solve_result_num(SearchDirectionBecomesTooSmall),
+            400,
+        );
+        assert_eq!(status_to_solve_result_num(RestorationFailed), 500);
     }
 
     #[test]

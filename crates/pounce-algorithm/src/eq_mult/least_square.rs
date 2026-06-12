@@ -112,10 +112,23 @@ impl EqMultCalculator for LeastSquareMults {
             delta_s: 1.0,
             j_c: &*j_c,
             d_c: None,
-            delta_c: 0.0,
+            // Tiny δ_c, δ_d (upstream `IpLeastSquareMults.cpp` uses 0).
+            // This is the SAME W=0 / structurally-zero (3,3)/(4,4)-block
+            // augmented system the dual initializer solves in
+            // `init/default.rs`, where pounce-feral's LDLᵀ mis-reports the
+            // inertia (it counted 0 negative eigenvalues on nuffield2_trap
+            // where the true count is n_c+n_d, raising WrongInertia). Here
+            // a spurious failure makes `calculate_y_eq` return false and the
+            // caller (`init/default.rs:388-390`) silently leaves y_c=y_d=0
+            // — the iter-0 `inf_du` blow-up this step exists to prevent.
+            // Perturbing by 1e-8 keeps the LS solution numerically identical
+            // (the constraint Jacobian dominates) while giving the diagonal
+            // something nonzero to pivot on. Mirrors the sibling workaround
+            // at `init/default.rs:171,174`; keep the two in sync.
+            delta_c: 1e-8,
             j_d: &*j_d,
             d_d: None,
-            delta_d: 0.0,
+            delta_d: 1e-8,
         };
         let aug_rhs = AugSysRhs {
             rhs_x: &*rhs_x,

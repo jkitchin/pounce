@@ -114,6 +114,24 @@ echo "  inter-crate sleep: ${SLEEP}s"
 printf "  order: %s\n" "${CRATES[*]}"
 echo
 
+# Pre-flight: refuse to start an irreversible batch when any crate carries a
+# dependency cargo publish cannot upload (a git pin or version-less dep). Once
+# the first crate is live its version can never be re-published, so a mid-batch
+# hard-fail leaves a split, un-rollback-able release. Catch it before crate 1.
+# (dev-only check; the publish itself is what enforces this per-crate, but by
+# then it is too late for the crates already uploaded.)
+echo "pre-flight: checking that every crate's dependencies are publishable..."
+if ! cargo metadata --format-version 1 2>/dev/null \
+  | python3 "$(dirname "$0")/check_dep_publishability.py" "${CRATES[@]}"; then
+  echo
+  echo "ABORTING before any upload: the crates above have dependencies that" >&2
+  echo "cargo publish cannot satisfy. Publishing now would hard-fail mid-batch" >&2
+  echo "and leave an irreversible partial release on crates.io. Resolve the" >&2
+  echo "dependency (e.g. release & pin a crates.io version) before publishing." >&2
+  exit 1
+fi
+echo
+
 for i in "${!CRATES[@]}"; do
   c="${CRATES[$i]}"
   n=$((i+1))

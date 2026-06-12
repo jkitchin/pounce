@@ -523,11 +523,15 @@ pub fn golden_section(
     // Two distinct cases:
     //  * **qf_tol stop** (`width_ok && !qf_ok`): the four sampled values
     //    have converged to within `qf_tol`. Pick whichever of the four
-    //    has the smallest q. Upstream `DBG_ASSERT(qf_min > -100.)`
-    //    holds because the qf_ok predicate `(1 - qmin/qmax) < qf_tol`
-    //    forces qmin to be a real positive value (sentinel `-100.0`
-    //    would yield `1 + 100/qmax > 1 > qf_tol`, keeping the loop
-    //    alive until the sentinel slot is overwritten).
+    //    has the smallest q. Upstream reaches this branch only with real
+    //    values — its loop condition `(1 - qmin/qmax) >= qf_tol` keeps a
+    //    sentinel state alive (sentinel `-100.0` yields a large positive
+    //    ratio) until the slot is overwritten, so `DBG_ASSERT(qf_min > -100.)`
+    //    holds. pounce, however, adds a `qmax > 0.0` guard to `qf_ok`
+    //    (line 499) to avoid a divide-by-zero when every sample is ≤ 0; that
+    //    guard can force `qf_ok = false` while an endpoint still holds the
+    //    sentinel, routing it here. So this branch must re-evaluate an unmoved
+    //    sentinel endpoint first (below), exactly like the else-branch (L4).
     //  * **Else** (`!width_ok || nsections == max_steps`): pick min of
     //    the two midpoints, then check whether either endpoint *never
     //    moved during the loop*. If an unmoved endpoint was passed in
@@ -538,6 +542,19 @@ pub fn golden_section(
     //    return that *unevaluated* endpoint as the minimum, which is
     //    how DECONVBNE used to land on `sigma = sigma_min`.
     if width_ok && !qf_ok {
+        // Re-evaluate any endpoint that *never moved during the loop* and is
+        // still carrying the `-100.0` sentinel, before selecting the minimum.
+        // Upstream only reaches this branch with real values (its loop keeps a
+        // sentinel state alive because it lacks the `qmax > 0.0` guard); the
+        // guard pounce adds at line 499 can route a sentinel-containing state
+        // here, so we must mirror the else-branch / upstream re-evaluation or
+        // we would return an unevaluated endpoint as the spurious minimum (L4).
+        if sigma_lo == sigma_lo_in && q_lo < 0.0 {
+            q_lo = q(sigma_lo);
+        }
+        if sigma_up == sigma_up_in && q_up < 0.0 {
+            q_up = q(sigma_up);
+        }
         let mut best_s = sigma_lo;
         let mut best_q = q_lo;
         if q_up < best_q {
@@ -770,6 +787,35 @@ mod tests {
         let f = |s: f64| s;
         let s = golden_section(0.1, 2.0, 0.1, 2.0, 1e-6, 0.0, 50, f);
         assert!(s < 0.2, "got s = {}", s);
+    }
+
+    #[test]
+    fn golden_section_never_returns_unevaluated_sentinel() {
+        // Regression for L4. `pick_sigma` always passes one endpoint with the
+        // `-100.0` sentinel as its q-value (search-up → q_up = -100,
+        // search-down → q_lo = -100). When every *evaluated* sample is ≤ 0,
+        // pounce's added `qmax > 0.0` guard forces `qf_ok = false` on the
+        // first pass and drops into the `width_ok && !qf_ok` branch. Before
+        // the fix that branch compared the raw q values — including the
+        // unevaluated `-100.0` — and returned the sentinel endpoint as the
+        // spurious minimum, even though its true quality value is the *worst*
+        // of the bracket. The fix re-evaluates any unmoved sentinel endpoint
+        // first, mirroring the else-branch and upstream's `if( q_up < 0. )`.
+        let sigma_lo = 1.0_f64;
+        let sigma_up = 3.0_f64;
+        // Negative on the interior/lo points (so qmax ≤ 0) but large and
+        // positive exactly at the upper endpoint — the worst place to land.
+        let q = move |s: f64| if s == sigma_up { 50.0 } else { -s };
+        // search-up style: the upper endpoint carries the -100 sentinel.
+        let s = golden_section(sigma_lo, sigma_up, q(sigma_lo), -100.0, 1e-3, 0.0, 50, q);
+        assert!(
+            s < sigma_up,
+            "golden_section returned the unevaluated sentinel endpoint σ = {} \
+             (true q there = {}, the bracket maximum); it must re-evaluate the \
+             sentinel before selecting a minimum",
+            s,
+            q(s)
+        );
     }
 
     #[test]

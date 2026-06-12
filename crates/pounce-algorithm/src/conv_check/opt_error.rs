@@ -209,9 +209,12 @@ impl ConvCheck for OptErrorConvCheck {
     ) -> ConvergenceStatus {
         // Mirror upstream `IpOptErrorConvCheck.cpp::CheckConvergence`:
         // the scaled scalar `nlp_err` must drop below `tol` AND each
-        // unscaled component must sit under its own tolerance. The
-        // `acceptable_*` machinery still runs off the scalar; that
-        // expansion lands with the `acceptable_*` option wiring.
+        // per-component value must sit under its own tolerance. Known
+        // deviation (M1, documented in the code-review notes): upstream
+        // gates the components on the *unscaled* residuals; the CQ layer
+        // exposes no unscaled per-component accessors yet, so these are
+        // the internally *scaled* values. The unscaled expansion is
+        // deferred until the scaling objects are threaded through.
         let cq_ref = cq.borrow();
         let dual_inf = cq_ref.curr_dual_infeasibility_max();
         let constr_viol = cq_ref.curr_primal_infeasibility_max();

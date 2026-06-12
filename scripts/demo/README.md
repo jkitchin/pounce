@@ -35,6 +35,18 @@ original asciicast — crisp, copy-pasteable, embeddable on asciinema.org) and
 3. **`03-infeasible-eq`** — the failure case: an event breakpoint on restoration
    entry (`break on resto_entered`) fires, inspect the state, then run to the
    "converged to a point of local infeasibility" exit.
+4. **`04-restore-feasibility`** — the mirror of 03: a *feasible* problem (the
+   unit circle). Knock the iterate far off the circle by hand (`set x[0] 5.0`),
+   watch `inf_pr` spike, arm a conditional breakpoint (`break if inf_pr<1e-6`)
+   that fires the instant feasibility is restored, then `continue` and watch the
+   solver steer the violated constraint back to zero on the way to the optimum.
+5. **`05-wachter-biegler-rescue`** — rescuing a *default-strategy failure*. The
+   Wächter–Biegler counterexample, where the default monotone barrier takes a
+   catastrophic first step (x0 plunges to −4.4) and converges to a spurious
+   "point of local infeasibility". Step once to watch the bad step land, then do
+   live surgery on the running iterate — pull `x[0]` back to the feasible side
+   **and** lower the barrier `mu` by hand — and watch the default solver recover
+   to the true optimum `(1, 0, 1/6)`.
 
 ## Regenerate
 
@@ -59,7 +71,7 @@ s                              # one debugger command per line
 ```
 
 Built-in problems: `quadratic`, `rosenbrock`, `bounded-quadratic`,
-`eq-quadratic`, `circle`, `infeasible-eq`. Type `help` at the `pounce-dbg>`
+`eq-quadratic`, `circle`, `infeasible-eq`, `wachter-biegler`. Type `help` at the `pounce-dbg>`
 prompt for the full command set. Avoid `viz` in scenarios — it opens an
 external viewer that won't render in a terminal recording; use the textual
 `print` / `diff` / `i` commands instead.

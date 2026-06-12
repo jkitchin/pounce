@@ -32,6 +32,13 @@ pub enum AuxiliaryRejectionReason {
     /// outside the variable box. The orchestrator declines to clamp
     /// `x_l = x_u = solution` at an out-of-bounds value.
     OutOfBounds,
+    /// C2 soundness gate: one of the block's rows references a
+    /// non-block variable that is neither trivially fixed
+    /// (`x_l == x_u`) nor pinned by an earlier accepted block, so the
+    /// IPM is still free to move it. Eliminating the block would fold
+    /// that variable into the RHS at its probe value and silently make
+    /// the dropped equality conditional on a value that can change.
+    NonBlockColumnFree,
 }
 
 /// Per-stage wall-time breakdown for one Phase-0 pass.
@@ -157,6 +164,7 @@ impl fmt::Display for AuxiliaryPreprocessingDiagnostics {
                     AuxiliaryRejectionReason::BlockSolveDiverged => "block-solve-diverged",
                     AuxiliaryRejectionReason::ResidualCheckFailed => "residual-check-failed",
                     AuxiliaryRejectionReason::OutOfBounds => "out-of-bounds",
+                    AuxiliaryRejectionReason::NonBlockColumnFree => "non-block-column-free",
                 };
                 *by_reason.entry(key).or_insert(0) += 1;
             }

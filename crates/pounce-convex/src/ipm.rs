@@ -255,7 +255,7 @@ where
                 p,
                 vec![0.0; p.n],
                 vec![0.0; p.m_eq()],
-                vec![1.0; p.m_ineq()],
+                vec![0.0; p.m_ineq()],
                 0,
             ),
         }
@@ -443,7 +443,7 @@ where
                 p,
                 vec![0.0; p.n],
                 vec![0.0; p.m_eq()],
-                vec![1.0; p.m_ineq()],
+                vec![0.0; p.m_ineq()],
                 0,
             ),
         }
@@ -1114,7 +1114,7 @@ where
                 prob,
                 vec![0.0; n],
                 vec![0.0; prob.m_eq()],
-                vec![1.0; prob.m_ineq()],
+                vec![0.0; prob.m_ineq()],
                 0,
             );
         }
@@ -1686,7 +1686,7 @@ impl QpFactorization {
                 prob,
                 vec![0.0; prob.n],
                 vec![0.0; prob.m_eq()],
-                vec![1.0; prob.m_ineq()],
+                vec![0.0; prob.m_ineq()],
                 0,
             );
         }
@@ -1717,6 +1717,15 @@ fn cone_dims_cover(cones: &[ConeSpec], m_ineq: usize) -> bool {
 
 /// Build a `NumericalFailure` solution from the current iterate (used
 /// when the *initial* factorization fails before the loop starts).
+///
+/// All failure call sites pass the trivial point `x = 0, y = 0, z = 0`.
+/// The inequality dual `z` is **0**, not the cold-start identity `e`: a
+/// failure carries no usable iterate, and `z = 0` (the cone apex) is the
+/// one value valid in *every* dual cone — the orthant, but also SOC / PSD /
+/// exponential / power, where the all-ones vector used previously is not
+/// even a member (e.g. `(1,…,1)` violates an SOC of dimension ≥ 3). This
+/// keeps the reported dual cone-feasible and consistent across all drivers
+/// (cf. `hsde::failed`, `hsde_nonsym::failed`).
 fn failed_solution(
     prob: &QpProblem,
     x: Vec<f64>,
@@ -2117,7 +2126,15 @@ pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// - **Primal infeasible:** `(y, z ≥ 0)` with `Aᵀy + Gᵀz ≈ 0` and
 ///   `bᵀy + hᵀz < 0` (Farkas). `z ≥ 0` is maintained by the IPM.
 /// - **Dual infeasible / unbounded:** direction `d` (= `x`) with
-///   `Pd ≈ 0, Ad ≈ 0, Gd ≤ 0, cᵀd < 0`.
+///   `Pd ≈ 0, Ad ≈ 0, −Gd ∈ K, cᵀd < 0` (orthant: `−Gd ∈ K ⟺ Gd ≤ 0`).
+///
+/// This orthant-exact entry point is the documented baseline that the
+/// cone-aware variants ([`detect_infeasibility_cone`] for the symmetric
+/// composite cone, `detect_infeasibility_nscone` for the non-symmetric
+/// driver) generalize. Both production drivers now route through a
+/// cone-aware path, so this plain version is retained for documentation
+/// and as a contrast oracle in tests.
+#[allow(dead_code)]
 pub(crate) fn detect_infeasibility(
     prob: &QpProblem,
     x: &[f64],
@@ -2128,15 +2145,35 @@ pub(crate) fn detect_infeasibility(
     // Default dual-cone test: componentwise `zᵢ ≥ −tol`, exact for the
     // nonnegative orthant (LP/QP) and the non-symmetric Farkas paths. The
     // cone-aware entry point is [`detect_infeasibility_cone`].
-    detect_infeasibility_with(prob, x, y, z, opts, |z, tol| z.iter().all(|&zi| zi >= -tol))
+    //
+    // Default primal-recession test: `−Gd ∈ R₊ᵐ`, i.e. `(Gd)ᵢ ≤ tol`
+    // componentwise — exact for the orthant.
+    detect_infeasibility_with(
+        prob,
+        x,
+        y,
+        z,
+        opts,
+        |z, tol| z.iter().all(|&zi| zi >= -tol),
+        |gd, tol| gd.iter().all(|&v| v <= tol),
+    )
 }
 
-/// Cone-aware variant of [`detect_infeasibility`]: validates the Farkas
-/// dual multiplier `z` against the **actual** dual cone `K*` (orthant: `z ≥
-/// 0`; SOC: `z₀ ≥ ‖z₁‖`; PSD: `smat(z) ⪰ 0`). The componentwise default is
-/// correct only for the orthant — for SOC/PSD blocks a primal-infeasibility
-/// certificate must have its multiplier *in the cone*, not merely
-/// componentwise nonnegative, or the "proof" is not a proof.
+/// Cone-aware variant of [`detect_infeasibility`]: validates **both**
+/// certificates against the **actual** cone instead of componentwise.
+///
+/// - *Primal infeasibility* — the Farkas dual multiplier `z` must lie in the
+///   dual cone `K*` (orthant: `z ≥ 0`; SOC: `z₀ ≥ ‖z₁‖`; PSD: `smat(z) ⪰ 0`).
+/// - *Dual infeasibility / unboundedness* — for a cone constraint
+///   `Gx ⪯_K h`, the recession direction `d` must satisfy `−Gd ∈ K`, not the
+///   componentwise `Gd ≤ 0`. E.g. `−Gd = (0.1, 0.5)` passes componentwise but
+///   is **not** in the SOC, so the componentwise test would emit a false
+///   `DualInfeasible`.
+///
+/// The componentwise default ([`detect_infeasibility`]) is correct only for
+/// the orthant. Every cone reaching `CompositeCone` is symmetric (self-dual:
+/// orthant/SOC/PSD; exp/power route to `hsde_nonsym`), so `−Gd ∈ K` is tested
+/// as `cone.in_dual_cone(−Gd)`.
 pub(crate) fn detect_infeasibility_cone(
     prob: &QpProblem,
     x: &[f64],
@@ -2145,16 +2182,29 @@ pub(crate) fn detect_infeasibility_cone(
     opts: &QpOptions,
     cone: &CompositeCone,
 ) -> Option<QpStatus> {
-    detect_infeasibility_with(prob, x, y, z, opts, |z, tol| cone.in_dual_cone(z, tol))
+    detect_infeasibility_with(
+        prob,
+        x,
+        y,
+        z,
+        opts,
+        |z, tol| cone.in_dual_cone(z, tol),
+        |gd, tol| {
+            // `−Gd ∈ K`; K self-dual here ⇒ test via `in_dual_cone`.
+            let neg: Vec<f64> = gd.iter().map(|&v| -v).collect();
+            cone.in_dual_cone(&neg, tol)
+        },
+    )
 }
 
-fn detect_infeasibility_with(
+pub(crate) fn detect_infeasibility_with(
     prob: &QpProblem,
     x: &[f64],
     y: &[f64],
     z: &[f64],
     opts: &QpOptions,
     dual_cone_ok: impl Fn(&[f64], f64) -> bool,
+    primal_recession_ok: impl Fn(&[f64], f64) -> bool,
 ) -> Option<QpStatus> {
     let n = prob.n;
     let ctol = opts.infeas_tol;
@@ -2182,15 +2232,140 @@ fn detect_infeasibility_with(
         let mut gd = vec![0.0; prob.m_ineq()];
         prob.g_mul(x, &mut gd);
         let cd = dot(&prob.c, x);
-        let gd_max = gd.iter().fold(0.0_f64, |m, &v| m.max(v));
+        // Recession condition `−Gd ∈ K` (orthant ⇒ componentwise `Gd ≤ 0`;
+        // SOC/PSD ⇒ true cone membership). Checked, not componentwise, so a
+        // direction that merely has `Gd ≤ 0` but `−Gd ∉ K` is rejected.
+        let gd_ok = primal_recession_ok(&gd, ctol * x_norm);
         if cd < -ctol * x_norm
             && inf_norm(&pd) <= ctol * x_norm
             && inf_norm(&ad) <= ctol * x_norm
-            && gd_max <= ctol * x_norm
+            && gd_ok
         {
             return Some(QpStatus::DualInfeasible);
         }
     }
 
     None
+}
+
+#[cfg(test)]
+mod detect_infeasibility_tests {
+    //! H7 regression: the dual-infeasibility recession test must validate
+    //! `−Gd ∈ K`, not componentwise `Gd ≤ 0`. These call the `pub(crate)`
+    //! detectors directly with crafted recession directions.
+    use super::{detect_infeasibility, detect_infeasibility_cone};
+    use crate::cones::{CompositeCone, ConeSpec};
+    use crate::qp::{QpProblem, QpStatus, Triplet};
+    use crate::QpOptions;
+
+    /// `min −x₀` with the single SOC row block `Gx ⪯_{SOC} h`,
+    /// `G = [[−0.1], [−0.5]]`. Recession direction `d = (1)` gives
+    /// `Gd = (−0.1, −0.5)`: componentwise `≤ 0` (the OLD test passes) but
+    /// `−Gd = (0.1, 0.5)` has `0.1 < ‖0.5‖`, so `−Gd ∉ SOC` — the direction
+    /// is NOT a genuine recession ray. The cone-aware detector must return
+    /// `None`; the orthant default (wrongly) returns `DualInfeasible`,
+    /// demonstrating the bug.
+    fn soc_false_recession_problem() -> QpProblem {
+        QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0], // cᵀd = −1 < 0
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, -0.1), // (Gd)₀ = −0.1
+                Triplet::new(1, 0, -0.5), // (Gd)₁ = −0.5
+            ],
+            h: vec![0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        }
+    }
+
+    #[test]
+    fn soc_recession_not_in_cone_is_not_dual_infeasible() {
+        let prob = soc_false_recession_problem();
+        let opts = QpOptions::default();
+        let x = [1.0]; // recession direction d
+        let y: [f64; 0] = [];
+        let z = [0.0, 0.0];
+
+        // The bug: orthant/componentwise test accepts the bogus direction.
+        let componentwise = detect_infeasibility(&prob, &x, &y, &z, &opts);
+        assert_eq!(
+            componentwise,
+            Some(QpStatus::DualInfeasible),
+            "componentwise test should (wrongly) accept −Gd=(0.1,0.5) as recession"
+        );
+
+        // The fix: cone-aware test rejects it (−Gd ∉ SOC).
+        let cone = CompositeCone::from_specs(&[ConeSpec::SecondOrder(2)]);
+        let cone_aware = detect_infeasibility_cone(&prob, &x, &y, &z, &opts, &cone);
+        assert_eq!(
+            cone_aware, None,
+            "cone-aware test must reject −Gd=(0.1,0.5): not in SOC, so no \
+             verified unboundedness certificate"
+        );
+    }
+
+    /// A genuine SOC recession: `G = [[−1.0], [0.0]]`, `d = (1)` gives
+    /// `Gd = (−1, 0)`, `−Gd = (1, 0)` with `1 ≥ ‖0‖` ⇒ `−Gd ∈ SOC`. The
+    /// cone-aware detector must still report `DualInfeasible` (no false
+    /// negative from the fix).
+    #[test]
+    fn soc_genuine_recession_still_dual_infeasible() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0), Triplet::new(1, 0, 0.0)],
+            h: vec![0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions::default();
+        let x = [1.0];
+        let y: [f64; 0] = [];
+        let z = [0.0, 0.0];
+        let cone = CompositeCone::from_specs(&[ConeSpec::SecondOrder(2)]);
+        assert_eq!(
+            detect_infeasibility_cone(&prob, &x, &y, &z, &opts, &cone),
+            Some(QpStatus::DualInfeasible),
+            "−Gd=(1,0) IS in the SOC ⇒ genuine recession ray"
+        );
+    }
+
+    /// Orthant LP unboundedness still detected by the cone-aware path
+    /// (Nonneg cone), confirming the closure is consistent with the old
+    /// componentwise behavior for the orthant.
+    #[test]
+    fn orthant_unbounded_lp_detected_both_paths() {
+        // min −x₀ s.t. −x₀ ≤ 0 (x₀ ≥ 0). d=(1): Gd=(−1) ≤ 0, −Gd=(1) ≥ 0.
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0)],
+            h: vec![0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let opts = QpOptions::default();
+        let x = [1.0];
+        let y: [f64; 0] = [];
+        let z = [0.0];
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &z, &opts),
+            Some(QpStatus::DualInfeasible)
+        );
+        let cone = CompositeCone::from_specs(&[ConeSpec::Nonneg(1)]);
+        assert_eq!(
+            detect_infeasibility_cone(&prob, &x, &y, &z, &opts, &cone),
+            Some(QpStatus::DualInfeasible)
+        );
+    }
 }

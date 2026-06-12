@@ -385,6 +385,19 @@ impl PdSensBacksolver {
         self.dims
     }
 
+    /// Map a 0-based **full-g** index (user-TNLP `g(x)` order) to its
+    /// 0-based position in the equality-multiplier `y_c` block, or
+    /// `None` when the constraint is an inequality (it lives in the `d`
+    /// block, not `y_c`). Delegates to the held NLP's c/d-split map.
+    ///
+    /// Pin-row construction must route through this: the flat KKT row of
+    /// a pinned equality is `n_x + n_s + full_g_to_c_block(g)`, NOT
+    /// `n_x + n_s + g` — those differ whenever any inequality precedes
+    /// the pinned equality in `g(x)`.
+    pub fn full_g_to_c_block(&self, full_idx: Index) -> Option<Index> {
+        self.nlp.borrow().full_g_to_c_block(full_idx)
+    }
+
     /// Cumulative block offsets: `offset(i)` is the start index of
     /// block `i` in the flat slice.
     fn offsets(&self) -> [usize; 9] {
