@@ -1021,7 +1021,12 @@ def main():
         ('LPopt',       'lpopt',       'lpopt-run'),
     ):
         suite, has_pounce, has_ipopt = load_suite(suite_name, dirname)
-        if suite:
+        # Render a suite only when the POUNCE arm actually ran. A real run
+        # always writes records (even for problems it fails), so an empty
+        # pounce arm means the suite was skipped (e.g. lpopt). Without this
+        # guard a suite with only the committed ipopt-ma57 reference would
+        # render as "pounce 0/N solved" — a spurious total regression.
+        if suite and has_pounce:
             suites.append((suite_name, suite))
             ref = 'pounce + ipopt-ma57 reference' if has_ipopt else 'POUNCE-only (no ipopt reference)'
             print(f"{suite_name} suite: {len(suite)} records loaded — {ref}")
@@ -1030,8 +1035,8 @@ def main():
             if has_pounce and not has_ipopt:
                 missing_reference.append((suite_name, dirname))
         else:
-            print(f"{suite_name} suite: no results "
-                  f"(run `make -C benchmarks {make_target}` first)")
+            print(f"{suite_name} suite: skipped or no pounce results "
+                  f"(run `make -C benchmarks {make_target}` to include it)")
 
     if missing_reference:
         print()

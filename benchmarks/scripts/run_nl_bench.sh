@@ -109,7 +109,15 @@ pounce_status_from_log() {
   # The convex IPM path (pounce-convex, solver_selection=lp-ipm/qp-ipm) prints
   # a single summary line "POUNCE (LP IPM, pounce-convex): <msg>  obj=... iters=...".
   # "Optimal Solution Found." is picked up by ipopt_status_from_log below; the
-  # non-optimal convex messages have their own wording, mapped here.
+  # other convex messages have their own wording, mapped here.
+  #
+  # NOTE: the convex path's reduced-accuracy success line is lowercase
+  # ("Solved to acceptable level (reduced accuracy).") whereas Ipopt prints
+  # "Solved To Acceptable Level". The case-sensitive ipopt scrape below misses
+  # it, so match it explicitly here — otherwise a genuine acceptable-level solve
+  # is mis-recorded as Unknown_Error (silently undercounts the convex/auto LP
+  # arm, including the headline lp suite).
+  if grep -q "Solved to acceptable level" "$log"; then echo "Solved_To_Acceptable_Level"; return; fi
   if grep -q "Problem is primal infeasible" "$log"; then echo "Infeasible_Problem_Detected"; return; fi
   if grep -q "dual infeasible" "$log"; then echo "Diverging_Iterates"; return; fi
   if grep -q "Maximum iterations exceeded" "$log"; then echo "Maximum_Iterations_Exceeded"; return; fi

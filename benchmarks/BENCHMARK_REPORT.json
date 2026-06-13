@@ -3262,7 +3262,7 @@
   {
     "name": "hs012",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Optimal",
     "pounce_obj": -30.000000000000007,
     "ipopt_obj": -30.000000122494,
@@ -3782,7 +3782,7 @@
   {
     "name": "hs065",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.953528856804752,
     "ipopt_obj": 0.9535288198704925,
@@ -4582,7 +4582,7 @@
   {
     "name": "liswet1",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 35.35431428992479,
     "ipopt_obj": 27.12028622582106,
@@ -4592,7 +4592,7 @@
   {
     "name": "liswet10",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 48.098093798303125,
     "ipopt_obj": 39.30235780155429,
@@ -4602,7 +4602,7 @@
   {
     "name": "liswet11",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 49.51522446560375,
     "ipopt_obj": 46.52759012757113,
@@ -4612,7 +4612,7 @@
   {
     "name": "liswet12",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": -3340.8328479628362,
     "ipopt_obj": -3379.1067272630567,
@@ -4672,7 +4672,7 @@
   {
     "name": "liswet7",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 490.1004088044856,
     "ipopt_obj": 391.1519538079545,
@@ -4682,7 +4682,7 @@
   {
     "name": "liswet8",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 677.0359808601772,
     "ipopt_obj": 650.9715595037973,
@@ -4692,7 +4692,7 @@
   {
     "name": "liswet9",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 1580.0318803776368,
     "ipopt_obj": 1899.4263295012204,
@@ -5002,7 +5002,7 @@
   {
     "name": "minmaxbd",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Optimal",
     "pounce_obj": 115.70643951406913,
     "ipopt_obj": 115.70643951851932,
@@ -5642,7 +5642,7 @@
   {
     "name": "palmer1c",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.09759819148166571,
     "ipopt_obj": 0.09759799126306348,
@@ -5912,7 +5912,7 @@
   {
     "name": "palmer7c",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 0.6019868837029207,
     "ipopt_obj": 0.6019856723142903,
@@ -6112,7 +6112,7 @@
   {
     "name": "polak4",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Optimal",
     "pounce_obj": -1.3820388140882092e-13,
     "ipopt_obj": -3.513953381583422e-09,
@@ -6212,7 +6212,7 @@
   {
     "name": "powell20",
     "suite": "Vanderbei",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 52145781.24887788,
     "ipopt_obj": 52145676.35321904,
@@ -7662,11 +7662,11 @@
   {
     "name": "NARX_CFy",
     "suite": "Mittelmann",
-    "pounce_status": "Optimal",
+    "pounce_status": "Maximum_CpuTime_Exceeded",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.008581465278318755,
+    "pounce_obj": null,
     "ipopt_obj": 0.008726796449115172,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -8212,7 +8212,7 @@
   {
     "name": "BOYD1",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Acceptable",
     "pounce_obj": -61735219.64092102,
     "ipopt_obj": -61735221.428562656,
@@ -8222,7 +8222,7 @@
   {
     "name": "BOYD2",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
     "pounce_obj": 21.256767003850545,
     "ipopt_obj": 21.25678233207441,
@@ -8652,7 +8652,7 @@
   {
     "name": "LISWET1",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 35.35610013079304,
     "ipopt_obj": 27.122076276355322,
@@ -8662,7 +8662,7 @@
   {
     "name": "LISWET10",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 47.80017475368004,
     "ipopt_obj": 39.30500436452159,
@@ -8672,7 +8672,7 @@
   {
     "name": "LISWET11",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 49.52389512983109,
     "ipopt_obj": 46.55055154144619,
@@ -8682,7 +8682,7 @@
   {
     "name": "LISWET12",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 1711.2528891756488,
     "ipopt_obj": 1672.2074170478497,
@@ -8742,7 +8742,7 @@
   {
     "name": "LISWET7",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 490.1486601194606,
     "ipopt_obj": 391.1951295262188,
@@ -8752,7 +8752,7 @@
   {
     "name": "LISWET8",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 678.2772486812346,
     "ipopt_obj": 650.9596946335929,
@@ -8762,7 +8762,7 @@
   {
     "name": "LISWET9",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 1573.515614313732,
     "ipopt_obj": 1899.3778414905746,
@@ -8802,7 +8802,7 @@
   {
     "name": "POWELL20",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Optimal",
     "pounce_obj": 9.541710629597222e-07,
     "ipopt_obj": 52088540527.57657,
@@ -9002,7 +9002,7 @@
   {
     "name": "QFORPLAN",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 7456631460.807273,
     "ipopt_obj": 7456631458.010747,
@@ -9102,7 +9102,7 @@
   {
     "name": "QPILOTNO",
     "suite": "QP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Acceptable",
     "pounce_obj": 4728417.185125556,
     "ipopt_obj": 4728585.632263857,
@@ -9912,7 +9912,7 @@
   {
     "name": "de063155",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Restoration_Failed",
     "pounce_obj": 66352007080.69347,
     "ipopt_obj": 9891854759.786541,
@@ -10502,7 +10502,7 @@
   {
     "name": "gen",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 1.428386625064118e-06,
     "ipopt_obj": -1.0974845560297915e-05,
@@ -10512,7 +10512,7 @@
   {
     "name": "gen1",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 1.428386625064118e-06,
     "ipopt_obj": -1.0974845560297915e-05,
@@ -10532,7 +10532,7 @@
   {
     "name": "gen4",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 4.123474677473251e-06,
     "ipopt_obj": -2.221400501318905e-05,
@@ -10552,7 +10552,7 @@
   {
     "name": "greenbea",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Maximum_Iterations_Exceeded",
     "pounce_obj": -72555243.61868498,
     "ipopt_obj": -55651822.50980404,
@@ -10612,7 +10612,7 @@
   {
     "name": "iprob",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
     "pounce_obj": 35.37471795082092,
     "ipopt_obj": 2714.404056580304,
@@ -10692,7 +10692,7 @@
   {
     "name": "kleemin7",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": -999999500000.5486,
     "ipopt_obj": -1000000000000.0109,
@@ -10702,7 +10702,7 @@
   {
     "name": "kleemin8",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": -11666917626552.703,
     "ipopt_obj": -100000000000000.11,
@@ -11182,7 +11182,7 @@
   {
     "name": "model8",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Unknown_Error",
     "pounce_obj": 125128.57208406045,
     "ipopt_obj": null,
@@ -11362,7 +11362,7 @@
   {
     "name": "orna1",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": -504429730.84480625,
     "ipopt_obj": -504429743.7875043,
@@ -11372,7 +11372,7 @@
   {
     "name": "orna2",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": -586462386.7821438,
     "ipopt_obj": -586462382.8152354,
@@ -11382,7 +11382,7 @@
   {
     "name": "orna3",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": -584036213.192567,
     "ipopt_obj": -584036234.9143798,
@@ -11392,7 +11392,7 @@
   {
     "name": "orna4",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": 672183857.151376,
     "ipopt_obj": 672183849.8590347,
@@ -11402,7 +11402,7 @@
   {
     "name": "orna7",
     "suite": "LP",
-    "pounce_status": "Solver_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
     "pounce_obj": -583744167.8923336,
     "ipopt_obj": -583744190.1272225,
@@ -13218,45 +13218,5 @@
     "ipopt_obj": -15060.645312698494,
     "pounce_solved": true,
     "ipopt_solved": true
-  },
-  {
-    "name": "ex10",
-    "suite": "LPopt",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": null,
-    "ipopt_obj": 133.8157121438819,
-    "pounce_solved": false,
-    "ipopt_solved": false
-  },
-  {
-    "name": "irish-electricity",
-    "suite": "LPopt",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": null,
-    "ipopt_obj": 2456442.494729854,
-    "pounce_solved": false,
-    "ipopt_solved": false
-  },
-  {
-    "name": "qap15",
-    "suite": "LPopt",
-    "pounce_status": "Optimal",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 867.4941333883583,
-    "ipopt_obj": 867.5219790771223,
-    "pounce_solved": true,
-    "ipopt_solved": false
-  },
-  {
-    "name": "supportcase10",
-    "suite": "LPopt",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
-    "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": null,
-    "ipopt_obj": 0.7812121701830286,
-    "pounce_solved": false,
-    "ipopt_solved": false
   }
 ]
