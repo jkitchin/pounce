@@ -948,6 +948,7 @@ dependencies = [
 name = "pounce-convex"
 version = "0.4.0"
 dependencies = [
+ "feral",
  "pounce-common",
  "pounce-feral",
  "pounce-linalg",

@@ -1465,6 +1465,12 @@ fn run_ipm(
         // the symbolic factor / ordering is reused). The one factorization
         // then backs both the predictor and corrector solves. ---
         kkt.update_blocks(cone, &s, &z, opts.reg, &mut kkt_vals);
+        // Adaptive μ-scaled regularization on the equality block: bounds the
+        // duals of a rank-deficient equality Jacobian so the primal residual
+        // converges below `tol` (see `adaptive_eq_reg`). Reduces to the static
+        // `opts.reg` at the tolerance, leaving already-converging LPs/QPs
+        // unchanged at the optimum.
+        kkt.update_eq_reg(adaptive_eq_reg(mu, opts.reg), &mut kkt_vals);
         if fact.refactor(&kkt_vals).is_err() {
             status = QpStatus::NumericalFailure;
             break;
@@ -1954,6 +1960,14 @@ pub(crate) struct KktStructure {
     pub(crate) dim: usize,
     /// Per-cone `(z, z)` block positions, in `cone.blocks()` order.
     z_blocks: Vec<ZBlockPos>,
+    /// Value-array positions of the `(y, y)` equality-multiplier diagonal,
+    /// one per equality row. Seeded with `-reg` in [`Self::build`] and
+    /// overwritten each iteration with the adaptive, μ-scaled `-δ_c` by
+    /// [`Self::update_eq_reg`] — the Jacobian regularization that lets a
+    /// rank-deficient equality system (redundant rows, non-unique duals)
+    /// converge below `tol` instead of flooring the primal residual at
+    /// `δ·‖dy‖`. Empty when there are no equality rows.
+    y_diag_pos: Vec<usize>,
 }
 
 impl KktStructure {
@@ -2076,12 +2090,18 @@ impl KktStructure {
             }
         }
 
+        // Positions of the (y,y) equality-multiplier diagonal, for the
+        // per-iteration adaptive regularization. Built unconditionally; the
+        // `-reg` seed is already in `values` from the loop above.
+        let y_diag_pos: Vec<usize> = (0..m_eq).map(|i| coord_to_pos[&(n + i, n + i)]).collect();
+
         KktStructure {
             airn,
             ajcn,
             values,
             dim,
             z_blocks,
+            y_diag_pos,
         }
     }
 
@@ -2138,6 +2158,38 @@ impl KktStructure {
             }
         }
     }
+
+    /// Overwrite the `(y, y)` equality-multiplier diagonal with the adaptive
+    /// regularization `-δ_c` for the current barrier parameter. Call once per
+    /// iteration, after [`Self::update_blocks`], on the same `out` buffer.
+    ///
+    /// A no-op when there are no equality rows.
+    pub(crate) fn update_eq_reg(&self, delta_c: f64, out: &mut [Number]) {
+        for &p in &self.y_diag_pos {
+            out[p] = -delta_c;
+        }
+    }
+}
+
+/// Adaptive equality-Jacobian regularization `δ_c(μ)`, mirroring the NLP
+/// path's primal-dual perturbation handler (`δ_cd_val · μ^δ_cd_exp`, Ipopt
+/// defaults `1e-8 · μ^0.25`).
+///
+/// Floored at `reg` so it never drops below the static value the LP/QP
+/// suites already converge with — at `μ = tol = 1e-8` the μ-term equals
+/// exactly `1e-8 · (1e-8)^0.25 = 1e-10 = reg`, so a problem that already
+/// reaches the optimum sees the *same* regularization there; the only change
+/// is *extra* regularization in the earlier, larger-μ iterations. That extra
+/// damping keeps the duals of a rank-deficient equality system (gen/gen1's
+/// redundant rows) bounded, so the primal residual `δ·‖dy‖` clears `tol`
+/// instead of flooring at ~9e-5. Capped at `1e-2` to stay well-conditioned.
+pub(crate) fn adaptive_eq_reg(mu: f64, reg: f64) -> f64 {
+    const DELTA_CD_VAL: f64 = 1e-8;
+    const DELTA_CD_EXP: f64 = 0.25;
+    const DELTA_CD_MAX: f64 = 1e-2;
+    (DELTA_CD_VAL * mu.max(0.0).powf(DELTA_CD_EXP))
+        .max(reg)
+        .min(DELTA_CD_MAX)
 }
 
 /// How each cone block enters the `(z,z)` position — diagonal (orthant),

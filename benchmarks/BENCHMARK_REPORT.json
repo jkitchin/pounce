@@ -4,7 +4,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.7201185696467292,
+    "pounce_obj": 1.720118569661281,
     "ipopt_obj": 1.720118569648039,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -32,9 +32,9 @@
   {
     "name": "airport",
     "suite": "Vanderbei",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Restoration_Failed",
     "ipopt_status": "Optimal",
-    "pounce_obj": 47952.70167951998,
+    "pounce_obj": 47952.70167967269,
     "ipopt_obj": 47952.70140972709,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -174,7 +174,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1818392.658941918,
+    "pounce_obj": 1818392.6589419297,
     "ipopt_obj": 1818392.658941505,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -184,7 +184,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6498179.3519653035,
+    "pounce_obj": 6498179.351965457,
     "ipopt_obj": 6498179.34813813,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -194,7 +194,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6237011.775567464,
+    "pounce_obj": 6237011.775567561,
     "ipopt_obj": 6237011.771856198,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -374,7 +374,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.015001157364156604,
+    "pounce_obj": 0.01500000037557836,
     "ipopt_obj": 0.015001157364156604,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1054,7 +1054,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2.0000022639022252,
+    "pounce_obj": -1.999999996274996,
     "ipopt_obj": -2.0000022639020996,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1324,7 +1324,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2250224.563111137,
+    "pounce_obj": 2250224.9999999995,
     "ipopt_obj": 2250224.563111137,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1334,7 +1334,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1087511.5628245051,
+    "pounce_obj": 1087511.567321506,
     "ipopt_obj": 1087511.5628245054,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1344,7 +1344,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 81842457.78584099,
+    "pounce_obj": 81842458.28909439,
     "ipopt_obj": 81842457.785841,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1354,7 +1354,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 115711104.16129676,
+    "pounce_obj": 115711104.75582045,
     "ipopt_obj": 115711110.78519969,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -1424,7 +1424,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.0603487011689783,
+    "pounce_obj": 3.0603490882427193,
     "ipopt_obj": 3.054879783679254,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1434,7 +1434,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -30.731247022630086,
+    "pounce_obj": -30.73124600588575,
     "ipopt_obj": -30.76399484891752,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1944,7 +1944,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6155.251685862971,
+    "pounce_obj": 6155.251685862977,
     "ipopt_obj": 6155.210610720013,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1954,7 +1954,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3551.306375769467,
+    "pounce_obj": 3551.3063757694954,
     "ipopt_obj": 3551.3031997824182,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1964,7 +1964,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 427.23256777606076,
+    "pounce_obj": 427.23256777606207,
     "ipopt_obj": 427.23254014874567,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1974,7 +1974,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 18309.361235345415,
+    "pounce_obj": 18309.361235345412,
     "ipopt_obj": 18309.36006023366,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2534,7 +2534,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0001882434125090696,
+    "pounce_obj": 0.00018799929168429182,
     "ipopt_obj": 0.0001882434125091326,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2544,7 +2544,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.0651549614316767,
+    "pounce_obj": 2.065155444688571,
     "ipopt_obj": 2.0651549614316784,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2724,7 +2724,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.4320822508345406,
+    "pounce_obj": 0.43208225083467605,
     "ipopt_obj": 0.4320822508346741,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2734,7 +2734,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.14096125191461698,
+    "pounce_obj": 0.14096125191467393,
     "ipopt_obj": 0.14096125191467196,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -2744,7 +2744,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.7940334142631458,
+    "pounce_obj": 2.7940308768422946,
     "ipopt_obj": 2.7940334142631165,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -3572,7 +3572,7 @@
   {
     "name": "hs043",
     "suite": "Vanderbei",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
     "pounce_obj": -44.000000000000064,
     "ipopt_obj": -44.0000001749944,
@@ -4344,7 +4344,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6.493792170658708e-10,
+    "pounce_obj": 6.475602276623249e-10,
     "ipopt_obj": 6.359660442711856e-07,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4404,7 +4404,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 34824488.462217145,
+    "pounce_obj": 34824488.46221711,
     "ipopt_obj": 34824488.46221486,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4414,7 +4414,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 348244884622.175,
+    "pounce_obj": 348244885262.4524,
     "ipopt_obj": 348244884622.12634,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4574,7 +4574,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -76.99999999999632,
+    "pounce_obj": -76.99999999999629,
     "ipopt_obj": -77.00004547336937,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4582,41 +4582,41 @@
   {
     "name": "liswet1",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 35.35431428992479,
+    "pounce_obj": 36.12061717792449,
     "ipopt_obj": 27.12028622582106,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "liswet10",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 48.098093798303125,
+    "pounce_obj": 49.4839123769234,
     "ipopt_obj": 39.30235780155429,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "liswet11",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 49.51522446560375,
+    "pounce_obj": 49.515249301493895,
     "ipopt_obj": 46.52759012757113,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "liswet12",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -3340.8328479628362,
+    "pounce_obj": -3314.380858862812,
     "ipopt_obj": -3379.1067272630567,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -4624,7 +4624,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.999967508322243,
+    "pounce_obj": 24.99996944573104,
     "ipopt_obj": 24.999855183471357,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4634,7 +4634,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.999809445740198,
+    "pounce_obj": 24.999809443641652,
     "ipopt_obj": 24.99979555886562,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4644,7 +4644,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.99980533635153,
+    "pounce_obj": 24.999805338279543,
     "ipopt_obj": 24.99978207315762,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4654,7 +4654,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.99981924158601,
+    "pounce_obj": 24.999819224618477,
     "ipopt_obj": 24.999793720316386,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4664,7 +4664,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.9998689386166,
+    "pounce_obj": 24.999868936210078,
     "ipopt_obj": 24.999829417084104,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -4672,31 +4672,31 @@
   {
     "name": "liswet7",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 490.1004088044856,
+    "pounce_obj": 498.7922000081992,
     "ipopt_obj": 391.1519538079545,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "liswet8",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 677.0359808601772,
+    "pounce_obj": 714.4874002449692,
     "ipopt_obj": 650.9715595037973,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "liswet9",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1580.0318803776368,
+    "pounce_obj": 1963.3053363626557,
     "ipopt_obj": 1899.4263295012204,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -4812,7 +4812,7 @@
   {
     "name": "makela2",
     "suite": "Vanderbei",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
     "pounce_obj": 7.199999999999809,
     "ipopt_obj": 7.199999853410457,
@@ -5004,7 +5004,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Restoration_Failed",
     "ipopt_status": "Optimal",
-    "pounce_obj": 115.70643951406913,
+    "pounce_obj": 115.70643952034273,
     "ipopt_obj": 115.70643951851932,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -5054,7 +5054,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5742.163348936606,
+    "pounce_obj": 5742.16334893659,
     "ipopt_obj": 5742.163124647991,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5074,7 +5074,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -952.8754569598728,
+    "pounce_obj": -952.8754383213004,
     "ipopt_obj": -952.8754569598717,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5084,7 +5084,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1597.4822617387454,
+    "pounce_obj": -1597.482245882268,
     "ipopt_obj": -1597.482261738747,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5344,7 +5344,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.3978975604034893,
+    "pounce_obj": 1.3978975595651921,
     "ipopt_obj": 1.3978975874108135,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -5994,7 +5994,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.7500035340669168,
+    "pounce_obj": -0.7499999970129314,
     "ipopt_obj": -0.750003534066862,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6114,7 +6114,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Restoration_Failed",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.3820388140882092e-13,
+    "pounce_obj": 1.5692599503779952e-12,
     "ipopt_obj": -3.513953381583422e-09,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -6212,11 +6212,11 @@
   {
     "name": "powell20",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 52145781.24887788,
+    "pounce_obj": 52145781.11713868,
     "ipopt_obj": 52145676.35321904,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -6304,7 +6304,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 14433867.279153828,
+    "pounce_obj": 14433867.279153818,
     "ipopt_obj": 14433866.955094006,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6314,7 +6314,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8293665.5077052675,
+    "pounce_obj": 8293665.511299059,
     "ipopt_obj": 8293663.860437476,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6324,7 +6324,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6204391.696320516,
+    "pounce_obj": 6204391.696320507,
     "ipopt_obj": 6204391.6792465,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6464,7 +6464,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.074511146725854e-09,
+    "pounce_obj": 1.0744081180291687e-09,
     "ipopt_obj": 1.8139660373811286e-08,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6502,7 +6502,7 @@
   {
     "name": "rosenmmx",
     "suite": "Vanderbei",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
     "pounce_obj": -43.9999999999994,
     "ipopt_obj": -44.00000017949011,
@@ -6874,7 +6874,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 16170599.999999998,
+    "pounce_obj": 16170600.000000002,
     "ipopt_obj": 16170599.811918266,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -6924,7 +6924,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 16957.674661465455,
+    "pounce_obj": 16957.674664383452,
     "ipopt_obj": 16957.674661465437,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7084,7 +7084,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.455123213633504e-24,
+    "pounce_obj": -2.220446049250313e-16,
     "ipopt_obj": 1.782393300719619e-24,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7134,7 +7134,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.1160008156945793,
+    "pounce_obj": 1.1160008156945802,
     "ipopt_obj": 1.1160008156948171,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7234,7 +7234,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 197.70461557815753,
+    "pounce_obj": 197.70461557248683,
     "ipopt_obj": 196.17747576627835,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7654,7 +7654,7 @@
     "suite": "LargeScale",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -12499.816987391872,
+    "pounce_obj": -12499.816987298107,
     "ipopt_obj": -12499.816987360637,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7662,11 +7662,11 @@
   {
     "name": "NARX_CFy",
     "suite": "Mittelmann",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": null,
+    "pounce_obj": 0.008581465278318755,
     "ipopt_obj": 0.008726796449115172,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -7704,7 +7704,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.1546803172408703,
+    "pounce_obj": -0.1548183809895909,
     "ipopt_obj": -0.15468031724087145,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7744,7 +7744,7 @@
     "suite": "Mittelmann",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0006535600514664536,
+    "pounce_obj": 0.0006535600514831347,
     "ipopt_obj": 0.000662747155522909,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8154,7 +8154,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6498134.739473289,
+    "pounce_obj": 6498134.739473241,
     "ipopt_obj": 6498134.735645631,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8164,7 +8164,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6237012.0255673425,
+    "pounce_obj": 6237012.025567386,
     "ipopt_obj": 6237012.021856232,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8212,21 +8212,21 @@
   {
     "name": "BOYD1",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -61735219.64092102,
+    "pounce_obj": -61735219.64674729,
     "ipopt_obj": -61735221.428562656,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
     "name": "BOYD2",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 21.256767003850545,
+    "pounce_obj": 21.25676704452112,
     "ipopt_obj": 21.25678233207441,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
@@ -8244,7 +8244,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4.644397868755262,
+    "pounce_obj": -4.644397868755281,
     "ipopt_obj": -4.6443978748356525,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8264,7 +8264,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -4.684875920349659,
+    "pounce_obj": -4.684875920349612,
     "ipopt_obj": -4.684875926222778,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8294,7 +8294,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 108704799.44513677,
+    "pounce_obj": 108704799.91555104,
     "ipopt_obj": 108704799.44513573,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8304,7 +8304,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1087511.562783754,
+    "pounce_obj": 1087511.567321506,
     "ipopt_obj": 1087511.5627837568,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8314,7 +8314,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 11590.718119427098,
+    "pounce_obj": 11590.718119427085,
     "ipopt_obj": 11590.7180757414,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8324,7 +8324,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 81842457.7793449,
+    "pounce_obj": 81842458.28909439,
     "ipopt_obj": 81842457.77934478,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8334,7 +8334,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 820155.4261748999,
+    "pounce_obj": 820155.4310156989,
     "ipopt_obj": 820155.4261749024,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8344,7 +8344,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8120.94047725128,
+    "pounce_obj": 8120.94047725129,
     "ipopt_obj": 8120.940420116289,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8354,7 +8354,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 115711104.15632272,
+    "pounce_obj": 115711104.75582045,
     "ipopt_obj": 115711104.1563345,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8364,7 +8364,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1362828.7375735957,
+    "pounce_obj": 1362828.7416028252,
     "ipopt_obj": 1362828.7375735964,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8374,7 +8374,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 11943.43220231428,
+    "pounce_obj": 11943.4322023143,
     "ipopt_obj": 11943.432175202737,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8394,7 +8394,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 235.26248103392308,
+    "pounce_obj": 235.26248103392427,
     "ipopt_obj": 235.26248103522548,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8444,7 +8444,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6155.250829462628,
+    "pounce_obj": 6155.250829462639,
     "ipopt_obj": 6155.209754303575,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8454,7 +8454,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3551.3076926610192,
+    "pounce_obj": 3551.3076926610483,
     "ipopt_obj": 3551.304516672071,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8464,7 +8464,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 427.23232677636497,
+    "pounce_obj": 427.23232677636656,
     "ipopt_obj": 427.2322991490901,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8474,7 +8474,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 18309.358832733917,
+    "pounce_obj": 18309.35883273393,
     "ipopt_obj": 18309.357657622153,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8484,7 +8484,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -141.84343084912206,
+    "pounce_obj": -141.8434321888952,
     "ipopt_obj": -141.84343084904606,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8504,7 +8504,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.0001845025158063382,
+    "pounce_obj": 0.00018427640476218634,
     "ipopt_obj": 0.00018450251580634514,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8514,7 +8514,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.0627835023842636,
+    "pounce_obj": 2.0627839715853042,
     "ipopt_obj": 2.062783502177796,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8544,7 +8544,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6.493792170658708e-10,
+    "pounce_obj": 6.475602276623249e-10,
     "ipopt_obj": 7.076746451062377e-07,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8614,7 +8614,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 34824463.87334663,
+    "pounce_obj": 34824463.87334633,
     "ipopt_obj": 34824463.87334354,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8624,7 +8624,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 348244638733.45764,
+    "pounce_obj": 348244639373.74133,
     "ipopt_obj": 348244638733.4167,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8644,7 +8644,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2409601.201980872,
+    "pounce_obj": 2409601.3567875666,
     "ipopt_obj": 2409601.201980863,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8652,41 +8652,41 @@
   {
     "name": "LISWET1",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 35.35610013079304,
+    "pounce_obj": 36.12240209086394,
     "ipopt_obj": 27.122076276355322,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "LISWET10",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 47.80017475368004,
+    "pounce_obj": 49.485784689550655,
     "ipopt_obj": 39.30500436452159,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "LISWET11",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 49.52389512983109,
+    "pounce_obj": 49.523957140695074,
     "ipopt_obj": 46.55055154144619,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "LISWET12",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1711.2528891756488,
+    "pounce_obj": 1736.9274261187247,
     "ipopt_obj": 1672.2074170478497,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -8694,7 +8694,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.998074023286335,
+    "pounce_obj": 24.998075959422522,
     "ipopt_obj": 24.997961699368638,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8704,7 +8704,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 25.00122000396334,
+    "pounce_obj": 25.001220001587512,
     "ipopt_obj": 25.00119717974228,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8714,7 +8714,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 25.00011208713113,
+    "pounce_obj": 25.000112089123263,
     "ipopt_obj": 25.00008882229354,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8724,7 +8724,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 25.034253424839335,
+    "pounce_obj": 25.034253410081874,
     "ipopt_obj": 25.034236184338695,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8734,7 +8734,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.995747562646557,
+    "pounce_obj": 24.995747560341442,
     "ipopt_obj": 24.99571366270328,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8742,31 +8742,31 @@
   {
     "name": "LISWET7",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 490.1486601194606,
+    "pounce_obj": 498.84089078680404,
     "ipopt_obj": 391.1951295262188,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "LISWET8",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 678.2772486812346,
+    "pounce_obj": 714.470059027836,
     "ipopt_obj": 650.9596946335929,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "LISWET9",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1573.515614313732,
+    "pounce_obj": 1963.2512608959914,
     "ipopt_obj": 1899.3778414905746,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -8774,7 +8774,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2398.415891450755,
+    "pounce_obj": 2398.415891450754,
     "ipopt_obj": 2398.4158904067713,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8784,7 +8784,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -952.8754616684272,
+    "pounce_obj": -952.8754430299,
     "ipopt_obj": -952.8754616684276,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8794,7 +8794,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1597.4821333773798,
+    "pounce_obj": -1597.4821175197662,
     "ipopt_obj": -1597.4821333773791,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8802,11 +8802,11 @@
   {
     "name": "POWELL20",
     "suite": "QP",
-    "pounce_status": "Infeasible_Problem_Detected",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 9.541710629597222e-07,
+    "pounce_obj": 52089582498.78505,
     "ipopt_obj": 52088540527.57657,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -8854,7 +8854,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -6155.250829462646,
+    "pounce_obj": -6155.250829462676,
     "ipopt_obj": -6155.252983678175,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8864,7 +8864,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -3551.3076926657645,
+    "pounce_obj": -3551.307692665685,
     "ipopt_obj": -3551.3099327815253,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8874,7 +8874,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -427.2323267757975,
+    "pounce_obj": -427.2323267757956,
     "ipopt_obj": -427.2331594336422,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8882,11 +8882,11 @@
   {
     "name": "PRIMALC8",
     "suite": "QP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": -18309.429788412774,
+    "pounce_obj": -18309.429788239137,
     "ipopt_obj": -18309.434246346937,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -8894,7 +8894,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 13744447.807829177,
+    "pounce_obj": 13744447.892313506,
     "ipopt_obj": 13744447.807831159,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8904,7 +8904,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 480318.85854476783,
+    "pounce_obj": 480318.8585447676,
     "ipopt_obj": 480318.8552021643,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8914,7 +8914,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.5907817936518045,
+    "pounce_obj": -1.590781793651804,
     "ipopt_obj": -1.5907820448014514,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8924,7 +8924,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 16352.342036650834,
+    "pounce_obj": 16352.342036650858,
     "ipopt_obj": 16352.342032635901,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8944,7 +8944,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3100.2008017621124,
+    "pounce_obj": 3100.2008017621242,
     "ipopt_obj": 3100.2007904156912,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8954,7 +8954,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 28375.114856671033,
+    "pounce_obj": 28375.114856671,
     "ipopt_obj": 28375.1147974101,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8964,7 +8964,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 66793293.26638886,
+    "pounce_obj": 66793282.96734102,
     "ipopt_obj": 66793292.49442713,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8974,7 +8974,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 212.65343286901572,
+    "pounce_obj": 212.65343286900392,
     "ipopt_obj": 212.65342769749336,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8984,7 +8984,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 86760.35859711237,
+    "pounce_obj": 86760.36962583242,
     "ipopt_obj": 86760.35859711232,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -8994,7 +8994,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 873147.4427798768,
+    "pounce_obj": 873147.4605185952,
     "ipopt_obj": 873147.4427798719,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9002,11 +9002,11 @@
   {
     "name": "QFORPLAN",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7456631460.807273,
+    "pounce_obj": 7456631424.044792,
     "ipopt_obj": 7456631458.010747,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -9014,7 +9014,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 100790584870.42369,
+    "pounce_obj": 100790585064.724,
     "ipopt_obj": 100790584576.92372,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9024,7 +9024,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -101693640.46826628,
+    "pounce_obj": -101693640.42522174,
     "ipopt_obj": -101693640.57203527,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9034,7 +9034,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -149628953.47137603,
+    "pounce_obj": -149628952.89916638,
     "ipopt_obj": -149628953.62558657,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9054,7 +9054,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 25347837.78912151,
+    "pounce_obj": 25347837.789121553,
     "ipopt_obj": 25347837.278282173,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9074,7 +9074,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 11503914.009768222,
+    "pounce_obj": 11503914.009768227,
     "ipopt_obj": 11503913.75234041,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9084,7 +9084,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8171962.244330338,
+    "pounce_obj": 8171962.249399674,
     "ipopt_obj": 8171960.274110591,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9094,7 +9094,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6204387.476082539,
+    "pounce_obj": 6204387.47608254,
     "ipopt_obj": 6204387.45900854,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9102,11 +9102,11 @@
   {
     "name": "QPILOTNO",
     "suite": "QP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 4728417.185125556,
+    "pounce_obj": 4728586.837898105,
     "ipopt_obj": 4728585.632263857,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
@@ -9124,7 +9124,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -266.615999999471,
+    "pounce_obj": -266.61599999942297,
     "ipopt_obj": -266.61600266855214,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9134,7 +9134,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -0.005813951447227722,
+    "pounce_obj": -0.005813951447267236,
     "ipopt_obj": -0.005813940272599702,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9144,7 +9144,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 201737938.3707121,
+    "pounce_obj": 201737938.4339982,
     "ipopt_obj": 201737938.14598575,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9154,7 +9154,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 26865948.589022703,
+    "pounce_obj": 26865948.589022726,
     "ipopt_obj": 26865948.585450254,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9164,7 +9164,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 16882691.63931452,
+    "pounce_obj": 16882691.639314543,
     "ipopt_obj": 16882691.484926257,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9174,7 +9174,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 27776161.578610726,
+    "pounce_obj": 27776161.57861072,
     "ipopt_obj": 27776161.380498268,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9184,7 +9184,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 30816354.47086655,
+    "pounce_obj": 30816354.470866635,
     "ipopt_obj": 30816354.2674722,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9194,7 +9194,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 1880.5095528403042,
+    "pounce_obj": 1880.509552840166,
     "ipopt_obj": 1880.5094498415467,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9204,7 +9204,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 904.5600138577229,
+    "pounce_obj": 904.5600138578427,
     "ipopt_obj": 904.5600005693974,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9244,7 +9244,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1415.861111089013,
+    "pounce_obj": 1415.8611110890156,
     "ipopt_obj": 1415.8610624853216,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9274,7 +9274,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 81481800.35682775,
+    "pounce_obj": 81481800.06227058,
     "ipopt_obj": 81481798.63483332,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9284,7 +9284,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 720078.3181538588,
+    "pounce_obj": 720078.3181538584,
     "ipopt_obj": 720078.3181320281,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9294,7 +9294,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 11703.691721513092,
+    "pounce_obj": 11703.691721513067,
     "ipopt_obj": 11703.691268312863,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9304,7 +9304,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1572636839939.3213,
+    "pounce_obj": 1572636847810.7158,
     "ipopt_obj": 1572636839939.3137,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9314,7 +9314,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2420015.5341103235,
+    "pounce_obj": 2420015.534110436,
     "ipopt_obj": 2420015.5285034594,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9324,7 +9324,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2424993.673004609,
+    "pounce_obj": 2424993.6730046067,
     "ipopt_obj": 2424993.6689381874,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9334,7 +9334,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2376040.605414123,
+    "pounce_obj": 2376040.6165791685,
     "ipopt_obj": 2376040.605414064,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9344,7 +9344,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2385728.845651226,
+    "pounce_obj": 2385728.851390575,
     "ipopt_obj": 2385728.8456512373,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9354,7 +9354,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3018876.564154393,
+    "pounce_obj": 3018876.57718037,
     "ipopt_obj": 3018876.5641543125,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9364,7 +9364,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3056962.239383235,
+    "pounce_obj": 3056962.2492783098,
     "ipopt_obj": 3056962.2393831746,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9374,7 +9374,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 23750458.178745523,
+    "pounce_obj": 23750458.1787455,
     "ipopt_obj": 23750458.149273343,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9384,7 +9384,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7985452.756288447,
+    "pounce_obj": 7985452.756288456,
     "ipopt_obj": 7985452.750552084,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9394,7 +9394,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6411.838388890391,
+    "pounce_obj": 6411.838388892155,
     "ipopt_obj": 6411.838081933376,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9404,7 +9404,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6.493792170658708e-10,
+    "pounce_obj": 6.475602276623249e-10,
     "ipopt_obj": 7.076746451062377e-07,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9414,7 +9414,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -28526864.044984426,
+    "pounce_obj": -28526864.04498563,
     "ipopt_obj": -28526864.06806983,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9444,7 +9444,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 155143.55462704753,
+    "pounce_obj": 155143.55470395897,
     "ipopt_obj": 155143.55462704544,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9454,7 +9454,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 22327.31325490539,
+    "pounce_obj": 22327.313272419244,
     "ipopt_obj": 22327.313254905275,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9474,7 +9474,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.1160008156942756,
+    "pounce_obj": 1.1160008156942678,
     "ipopt_obj": 1.1160008156948165,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9494,7 +9494,7 @@
     "suite": "QP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 197.70425594199526,
+    "pounce_obj": 197.704255941056,
     "ipopt_obj": 196.17711948293766,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9514,7 +9514,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 5501.845888289177,
+    "pounce_obj": 5501.845888288165,
     "ipopt_obj": 5501.8457633975995,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9522,11 +9522,11 @@
   {
     "name": "80bau3b",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 987224.192409091,
+    "pounce_obj": 987224.1924963556,
     "ipopt_obj": 987224.1763348022,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -9534,7 +9534,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 55535.43638621963,
+    "pounce_obj": 55535.43638791152,
     "ipopt_obj": 55535.394670384376,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9544,7 +9544,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 49616.363636217546,
+    "pounce_obj": 49616.36363619713,
     "ipopt_obj": 49616.33339479919,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9554,7 +9554,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 49616.36363632442,
+    "pounce_obj": 49616.36363634625,
     "ipopt_obj": 49616.33294602397,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9564,7 +9564,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 25877.60926756415,
+    "pounce_obj": 25877.609267780757,
     "ipopt_obj": 25877.585236662337,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9574,7 +9574,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 53735.92857075209,
+    "pounce_obj": 53735.92857134671,
     "ipopt_obj": 53735.89656442337,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9584,7 +9584,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 26977.187499867854,
+    "pounce_obj": 26977.187499865115,
     "ipopt_obj": 26977.175828018288,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9594,7 +9594,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 225494.96316233635,
+    "pounce_obj": 225494.9631623361,
     "ipopt_obj": 225494.9616029806,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9604,7 +9604,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -464.75314285080447,
+    "pounce_obj": -464.75314285080435,
     "ipopt_obj": -464.7531476131196,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9614,7 +9614,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -35991767.28657649,
+    "pounce_obj": -35991767.2865765,
     "ipopt_obj": -35991768.4962268,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9624,7 +9624,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -20239252.355977118,
+    "pounce_obj": -20239252.355977114,
     "ipopt_obj": -20239252.41281752,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9632,11 +9632,11 @@
   {
     "name": "agg3",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 10312115.935089229,
+    "pounce_obj": 10312115.93508921,
     "ipopt_obj": 10312115.829987584,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -9644,7 +9644,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7639.999993093879,
+    "pounce_obj": 7639.999998513601,
     "ipopt_obj": 7639.835316149904,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9654,7 +9654,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 55535.43638621963,
+    "pounce_obj": 55535.43638791152,
     "ipopt_obj": 55535.394670384376,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9662,11 +9662,11 @@
   {
     "name": "air05",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 25877.609264346953,
+    "pounce_obj": 25877.609252761562,
     "ipopt_obj": 25877.58524633186,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -9674,7 +9674,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 49616.363636217546,
+    "pounce_obj": 49616.36363619713,
     "ipopt_obj": 49616.33339479919,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9684,7 +9684,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1567.0423499032663,
+    "pounce_obj": 1567.0423499032738,
     "ipopt_obj": 1567.0423567836035,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9694,7 +9694,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -158.62801842437088,
+    "pounce_obj": -158.62801842433686,
     "ipopt_obj": -158.62801946180784,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9724,7 +9724,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1977.629561521739,
+    "pounce_obj": 1977.6295615247698,
     "ipopt_obj": 1977.6291795614775,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9734,7 +9734,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1811.2365403824053,
+    "pounce_obj": 1811.2365403823885,
     "ipopt_obj": 1811.2365205644903,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9744,7 +9744,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -335.2135674978888,
+    "pounce_obj": -335.21356749788936,
     "ipopt_obj": -335.21357464412364,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9754,7 +9754,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -315.0187280149175,
+    "pounce_obj": -315.0187280149125,
     "ipopt_obj": -315.0187324122294,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9764,7 +9764,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 1373.08039429304,
+    "pounce_obj": 1373.080394293212,
     "ipopt_obj": 1373.0803839123494,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9784,7 +9784,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2690.0129137700387,
+    "pounce_obj": 2690.0129137700865,
     "ipopt_obj": 2690.0128611642604,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9804,7 +9804,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 355160.0860333342,
+    "pounce_obj": 355160.08603333414,
     "ipopt_obj": 355160.0649545624,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9812,9 +9812,9 @@
   {
     "name": "ch",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Optimal",
-    "pounce_obj": 925759.622946994,
+    "pounce_obj": 925757.7592208383,
     "ipopt_obj": 925756.3628654466,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -9822,11 +9822,11 @@
   {
     "name": "co5",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 714469.55375032,
+    "pounce_obj": 714469.5537503613,
     "ipopt_obj": 714469.5377092436,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -9844,7 +9844,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 400133.80747257743,
+    "pounce_obj": 400133.8074726157,
     "ipopt_obj": 400133.8009840115,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -9874,7 +9874,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -5.226392995110057,
+    "pounce_obj": -5.226392995131066,
     "ipopt_obj": -5.2263920121070635,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9884,7 +9884,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2185196.698855973,
+    "pounce_obj": 2185196.6988559733,
     "ipopt_obj": 2185196.6865596343,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9894,7 +9894,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 122784.21081426306,
+    "pounce_obj": 122784.21081419302,
     "ipopt_obj": 122784.21052466711,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9914,7 +9914,7 @@
     "suite": "LP",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Restoration_Failed",
-    "pounce_obj": 66352007080.69347,
+    "pounce_obj": 65811138105.46054,
     "ipopt_obj": 9891854759.786541,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -9924,7 +9924,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 13.924732778031908,
+    "pounce_obj": 13.924732799928215,
     "ipopt_obj": 13.923903936426504,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9954,7 +9954,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.076298351956366,
+    "pounce_obj": 3.076298388412978,
     "ipopt_obj": 3.073872394802225,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9962,9 +9962,9 @@
   {
     "name": "delf001",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2358.608875630437,
+    "pounce_obj": 2358.608868214962,
     "ipopt_obj": 2358.602942316121,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -9974,7 +9974,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.832759264024975,
+    "pounce_obj": 2.8327590368152378,
     "ipopt_obj": 2.8303338085904985,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9984,7 +9984,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 9115.545171236807,
+    "pounce_obj": 9115.545171257234,
     "ipopt_obj": 9115.537949802527,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -9994,7 +9994,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 158.69365841394594,
+    "pounce_obj": 158.693660883307,
     "ipopt_obj": 158.69122435544037,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10004,7 +10004,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2287.3040196866464,
+    "pounce_obj": 2287.3040192204057,
     "ipopt_obj": 2287.300741432111,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10014,7 +10014,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 228.431142913365,
+    "pounce_obj": 228.43114291326341,
     "ipopt_obj": 228.42866270289292,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10024,7 +10024,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 379.95582659458285,
+    "pounce_obj": 379.9558265947546,
     "ipopt_obj": 379.9532167322532,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10034,7 +10034,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 241.2354827152438,
+    "pounce_obj": 241.23548271568455,
     "ipopt_obj": 241.23301075701264,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10044,7 +10044,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 484.1247876642492,
+    "pounce_obj": 484.1247876687429,
     "ipopt_obj": 484.1221298234007,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10054,7 +10054,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 229.10666735727784,
+    "pounce_obj": 229.10666739397314,
     "ipopt_obj": 229.1041966222672,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10064,7 +10064,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 473.49420292490885,
+    "pounce_obj": 473.4942029249589,
     "ipopt_obj": 473.49152466179027,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10074,7 +10074,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 178.68005863293783,
+    "pounce_obj": 178.68007365745794,
     "ipopt_obj": 178.67759441282658,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10084,7 +10084,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2616.6769144235554,
+    "pounce_obj": 2616.6769212442173,
     "ipopt_obj": 2616.6735541111825,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10092,11 +10092,11 @@
   {
     "name": "delf014",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 153.49852668918157,
+    "pounce_obj": 153.4985454030085,
     "ipopt_obj": 153.49609413869186,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -10104,7 +10104,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 737.0367679116621,
+    "pounce_obj": 737.0367682002442,
     "ipopt_obj": 737.0339892437285,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10114,7 +10114,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 461.51833952275507,
+    "pounce_obj": 461.5183398015358,
     "ipopt_obj": 461.51563955333376,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10124,7 +10124,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 142.13386322485786,
+    "pounce_obj": 142.1338632663333,
     "ipopt_obj": 142.1313638986606,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10134,7 +10134,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2342.1288538056415,
+    "pounce_obj": 2342.128855411011,
     "ipopt_obj": 2342.124271280423,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10144,7 +10144,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 351.68125641656115,
+    "pounce_obj": 351.68125641835854,
     "ipopt_obj": 351.67878555797944,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10154,7 +10154,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 394.704353320955,
+    "pounce_obj": 394.70435337163997,
     "ipopt_obj": 394.7017771183279,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10162,9 +10162,9 @@
   {
     "name": "delf022",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 364.99292748381083,
+    "pounce_obj": 364.99292765156144,
     "ipopt_obj": 364.9904451915008,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -10174,7 +10174,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 354.1170678160596,
+    "pounce_obj": 354.11706781611383,
     "ipopt_obj": 354.1145983210402,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10184,7 +10184,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 351.4167942247769,
+    "pounce_obj": 351.41679422536885,
     "ipopt_obj": 351.4143440617572,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10194,7 +10194,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 350.29680949492405,
+    "pounce_obj": 350.2968094967323,
     "ipopt_obj": 350.2943580784302,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10204,7 +10204,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 351.6133481305738,
+    "pounce_obj": 351.61334813372684,
     "ipopt_obj": 351.61089616772284,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10214,7 +10214,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 319.45557710962555,
+    "pounce_obj": 319.45557711883083,
     "ipopt_obj": 319.45313299021586,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10224,7 +10224,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 297.2456438398623,
+    "pounce_obj": 297.24564384240824,
     "ipopt_obj": 297.24319947475124,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10234,7 +10234,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 275.22564901729777,
+    "pounce_obj": 275.2256490247053,
     "ipopt_obj": 275.2232082594732,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10242,9 +10242,9 @@
   {
     "name": "delf030",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 253.84022244858357,
+    "pounce_obj": 253.84022256533973,
     "ipopt_obj": 253.83778424221208,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -10254,7 +10254,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 234.29851356458218,
+    "pounce_obj": 234.29851360081514,
     "ipopt_obj": 234.2960783141792,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10264,7 +10264,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 216.03920915611923,
+    "pounce_obj": 216.03920925686788,
     "ipopt_obj": 216.03677659829492,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10274,7 +10274,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 200.27165062796556,
+    "pounce_obj": 200.27165063328573,
     "ipopt_obj": 200.2692187332542,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10284,7 +10284,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 189.437475022634,
+    "pounce_obj": 189.43749817508498,
     "ipopt_obj": 189.43504454452076,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10294,7 +10294,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 176.9488207193115,
+    "pounce_obj": 176.9488207327833,
     "ipopt_obj": 176.94639082308422,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10302,11 +10302,11 @@
   {
     "name": "delf036",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 164.4593032752573,
+    "pounce_obj": 164.4593481125639,
     "ipopt_obj": 164.45687988369102,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -10314,7 +10314,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2.0459196109906777,
+    "pounce_obj": -2.045919610990681,
     "ipopt_obj": -2.045907544472701,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10324,7 +10324,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.4280350453567092,
+    "pounce_obj": -1.4280350453567126,
     "ipopt_obj": -1.4280150918228256,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10344,7 +10344,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 202079.45653584902,
+    "pounce_obj": 202079.4565358379,
     "ipopt_obj": 202079.45174468608,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10354,7 +10354,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -305.1981749462721,
+    "pounce_obj": -305.1981750094811,
     "ipopt_obj": -305.1982026818099,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10364,7 +10364,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -11.638929066134942,
+    "pounce_obj": -11.638929066134946,
     "ipopt_obj": -11.638931415304254,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10374,7 +10374,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -755.7152334109136,
+    "pounce_obj": -755.715233387313,
     "ipopt_obj": -755.7152694678373,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10394,7 +10394,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 555679.5648183629,
+    "pounce_obj": 555679.564818366,
     "ipopt_obj": 555679.5609233516,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10402,11 +10402,11 @@
   {
     "name": "finnis",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 172791.07486339836,
+    "pounce_obj": 172791.06562455682,
     "ipopt_obj": 172791.62548855066,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": false
   },
   {
@@ -10414,7 +10414,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -9146.378092442126,
+    "pounce_obj": -9146.378092441955,
     "ipopt_obj": -9146.379059031522,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10424,7 +10424,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 9146.378092421966,
+    "pounce_obj": 9146.378092422061,
     "ipopt_obj": 9146.37799833472,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10434,7 +10434,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -664.2189612721978,
+    "pounce_obj": -664.2189612687586,
     "ipopt_obj": -664.2189664420353,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10444,7 +10444,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 18416.75902836805,
+    "pounce_obj": 18416.75902836823,
     "ipopt_obj": 18416.75899115862,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10454,7 +10454,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 18417.065572499723,
+    "pounce_obj": 18417.065572499727,
     "ipopt_obj": 18417.065529688058,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10464,7 +10464,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 18616.042089896364,
+    "pounce_obj": 18616.042089896408,
     "ipopt_obj": 18616.042060618187,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10494,7 +10494,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -109585.73612915081,
+    "pounce_obj": -109585.73612910342,
     "ipopt_obj": -109585.73664181864,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10544,7 +10544,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6902235.999548797,
+    "pounce_obj": 6902235.999548805,
     "ipopt_obj": 6902235.980630916,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10552,21 +10552,21 @@
   {
     "name": "greenbea",
     "suite": "LP",
-    "pounce_status": "Restoration_Failed",
+    "pounce_status": "Optimal",
     "ipopt_status": "Maximum_Iterations_Exceeded",
-    "pounce_obj": -72555243.61868498,
+    "pounce_obj": -72551773.62486117,
     "ipopt_obj": -55651822.50980404,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
     "name": "greenbeb",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -4302260.261206493,
+    "pounce_obj": -4302260.261206266,
     "ipopt_obj": -4302260.302458597,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
@@ -10574,7 +10574,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -106870941.29357535,
+    "pounce_obj": -106870940.9014434,
     "ipopt_obj": -106870941.38262118,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10584,7 +10584,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -160834336.48256296,
+    "pounce_obj": -160834336.3219879,
     "ipopt_obj": -160834336.6267415,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10594,7 +10594,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -47787811.81471151,
+    "pounce_obj": -47787811.67465113,
     "ipopt_obj": -47787811.85585012,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10604,7 +10604,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 263486121.14176327,
+    "pounce_obj": 263486120.88272968,
     "ipopt_obj": 263486113.11434382,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10614,7 +10614,7 @@
     "suite": "LP",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 35.37471795082092,
+    "pounce_obj": 418370.25,
     "ipopt_obj": 2714.404056580304,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -10624,7 +10624,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -896644.8218630431,
+    "pounce_obj": -896644.8218630434,
     "ipopt_obj": -896644.8327797493,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10634,7 +10634,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 7028.460511950044,
+    "pounce_obj": 7028.460511955554,
     "ipopt_obj": 7028.4605054330505,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10644,7 +10644,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1749.9001297695447,
+    "pounce_obj": -1749.900129769545,
     "ipopt_obj": -1749.9001473518597,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10664,7 +10664,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -999999.9999999903,
+    "pounce_obj": -999999.9999999905,
     "ipopt_obj": -1000000.0001109997,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10674,7 +10674,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -99999999.99999999,
+    "pounce_obj": -99999999.69862045,
     "ipopt_obj": -100000000.00020984,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10684,7 +10684,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -10000000000.0,
+    "pounce_obj": -9999999920.73652,
     "ipopt_obj": -10000000000.001194,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10692,21 +10692,21 @@
   {
     "name": "kleemin7",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -999999500000.5486,
+    "pounce_obj": -999999977602.7904,
     "ipopt_obj": -1000000000000.0109,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "kleemin8",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -11666917626552.703,
+    "pounce_obj": -99999997315730.95,
     "ipopt_obj": -100000000000000.11,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -10722,9 +10722,9 @@
   {
     "name": "large000",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 72.60852158749992,
+    "pounce_obj": 72.60852589922979,
     "ipopt_obj": 72.60545668272333,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -10734,7 +10734,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 33181.415506059326,
+    "pounce_obj": 33181.415505675395,
     "ipopt_obj": 33181.38955729655,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10744,7 +10744,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.8815196077880576,
+    "pounce_obj": 2.881519626757906,
     "ipopt_obj": 2.8784575684122014,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10754,7 +10754,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24595.48759371325,
+    "pounce_obj": 24595.48759298246,
     "ipopt_obj": 24595.471379111186,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10764,7 +10764,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 174.7063147314579,
+    "pounce_obj": 174.7063147334242,
     "ipopt_obj": 174.70324035468118,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10774,7 +10774,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 411.85286911251967,
+    "pounce_obj": 411.85286910777955,
     "ipopt_obj": 411.84956958234466,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10784,7 +10784,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 247.4492016810889,
+    "pounce_obj": 247.4492016815555,
     "ipopt_obj": 247.44609411026477,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10794,7 +10794,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 502.61153301821116,
+    "pounce_obj": 502.6115330196397,
     "ipopt_obj": 502.6082178277652,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10804,7 +10804,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 268.1140465023611,
+    "pounce_obj": 268.1139935937678,
     "ipopt_obj": 268.1108815052772,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10814,7 +10814,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 502.8242268935208,
+    "pounce_obj": 502.8242268924829,
     "ipopt_obj": 502.8209116704279,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10824,7 +10824,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 256.2503393901168,
+    "pounce_obj": 256.25033939105435,
     "ipopt_obj": 256.2472279905287,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10832,11 +10832,11 @@
   {
     "name": "large011",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 493.5847507431802,
+    "pounce_obj": 493.58475063128276,
     "ipopt_obj": 493.5814060381475,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -10844,7 +10844,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 199.70116298333224,
+    "pounce_obj": 199.70116298377621,
     "ipopt_obj": 199.6980543532817,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10852,11 +10852,11 @@
   {
     "name": "large013",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 571.00619992127,
+    "pounce_obj": 571.0062167933849,
     "ipopt_obj": 571.0027971564581,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -10864,7 +10864,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 171.57602486472308,
+    "pounce_obj": 171.57602483362885,
     "ipopt_obj": 171.572928873208,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10874,7 +10874,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 672.5305673564319,
+    "pounce_obj": 672.530567399833,
     "ipopt_obj": 672.5271263957015,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10884,7 +10884,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 163.48694005661682,
+    "pounce_obj": 163.48694009201267,
     "ipopt_obj": 163.4838471343139,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10892,31 +10892,31 @@
   {
     "name": "large017",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 625.6827373406813,
+    "pounce_obj": 625.6827110434992,
     "ipopt_obj": 625.6793016792952,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
     "name": "large018",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 214.61649835731038,
+    "pounce_obj": 214.61650935916202,
     "ipopt_obj": 214.6131313909894,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "large019",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 525.5274067172069,
+    "pounce_obj": 525.5276872416074,
     "ipopt_obj": 525.5244119272409,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -10924,7 +10924,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 377.5187297014532,
+    "pounce_obj": 377.5187297093582,
     "ipopt_obj": 377.51561514312306,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10934,7 +10934,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 422.13099347619055,
+    "pounce_obj": 422.13099351301065,
     "ipopt_obj": 422.12769019274236,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10942,9 +10942,9 @@
   {
     "name": "large022",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 377.4854200379061,
+    "pounce_obj": 377.4854257469737,
     "ipopt_obj": 377.4823078822544,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -10954,7 +10954,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 362.4466674739008,
+    "pounce_obj": 362.4466675408954,
     "ipopt_obj": 362.44356051554763,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10962,21 +10962,21 @@
   {
     "name": "large024",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 356.0314330634563,
+    "pounce_obj": 356.0314317555719,
     "ipopt_obj": 356.028345414432,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
     "name": "large025",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 355.445962096148,
+    "pounce_obj": 355.44595452646803,
     "ipopt_obj": 355.4428749921387,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -10984,7 +10984,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 356.37549585744773,
+    "pounce_obj": 356.37549588782827,
     "ipopt_obj": 356.3724091655972,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -10992,9 +10992,9 @@
   {
     "name": "large027",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 333.7056497933173,
+    "pounce_obj": 333.7056561161187,
     "ipopt_obj": 333.7025751897438,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -11004,7 +11004,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 311.36505721046234,
+    "pounce_obj": 311.3650572124103,
     "ipopt_obj": 311.3619785563909,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11014,7 +11014,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 287.4776083473185,
+    "pounce_obj": 287.47760835114343,
     "ipopt_obj": 287.47453141480725,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11024,7 +11024,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 265.1259918484944,
+    "pounce_obj": 265.1259918550673,
     "ipopt_obj": 265.1229166228277,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11034,7 +11034,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 245.02763107683782,
+    "pounce_obj": 245.0276310779267,
     "ipopt_obj": 245.02455595806282,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11044,7 +11044,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 226.1455897489144,
+    "pounce_obj": 226.14558975766414,
     "ipopt_obj": 226.14251836972502,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11054,7 +11054,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 209.83804998231597,
+    "pounce_obj": 209.83805000539215,
     "ipopt_obj": 209.83497936249236,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11064,7 +11064,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 198.76759200503562,
+    "pounce_obj": 198.7675941186249,
     "ipopt_obj": 198.764523078351,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11074,7 +11074,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 185.6066479254408,
+    "pounce_obj": 185.60664802720544,
     "ipopt_obj": 185.60358047784666,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11084,7 +11084,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 171.06537399634192,
+    "pounce_obj": 171.06537399787413,
     "ipopt_obj": 171.06230536089416,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11094,7 +11094,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -25.26470605745335,
+    "pounce_obj": -25.264706057453417,
     "ipopt_obj": -25.264705854846458,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11104,7 +11104,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -58063.74370106362,
+    "pounce_obj": -58063.743701057116,
     "ipopt_obj": -58063.744058754826,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -11134,7 +11134,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -7400.489104884474,
+    "pounce_obj": -7400.489104885068,
     "ipopt_obj": -7400.489269298808,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11144,7 +11144,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 17489.061026225296,
+    "pounce_obj": 17489.060983189283,
     "ipopt_obj": 17489.059450530684,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11152,11 +11152,11 @@
   {
     "name": "model4",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1112702.4463627937,
+    "pounce_obj": 1112702.4465466645,
     "ipopt_obj": 1112702.4434834474,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -11164,7 +11164,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 117507.69182197674,
+    "pounce_obj": 117507.69182197629,
     "ipopt_obj": 117507.69106628485,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11174,7 +11174,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 49380.0854927732,
+    "pounce_obj": 49380.08549276868,
     "ipopt_obj": 49380.081808936135,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11184,7 +11184,7 @@
     "suite": "LP",
     "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Unknown_Error",
-    "pounce_obj": 125128.57208406045,
+    "pounce_obj": 125403.24260929333,
     "ipopt_obj": null,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -11194,7 +11194,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 320.61972906419265,
+    "pounce_obj": 320.61972953339443,
     "ipopt_obj": 320.61846137824364,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11204,7 +11204,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 44404.67652583394,
+    "pounce_obj": 44404.67652583035,
     "ipopt_obj": 44404.67375349555,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11214,7 +11214,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -6792.374279885539,
+    "pounce_obj": -6792.374279885572,
     "ipopt_obj": -6792.374490512165,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11224,7 +11224,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 89772.33351154468,
+    "pounce_obj": 89772.33351154477,
     "ipopt_obj": 89772.33209538597,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11232,9 +11232,9 @@
   {
     "name": "nemspmm1",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": -327415.8356706384,
+    "pounce_obj": -327415.8356706434,
     "ipopt_obj": -327415.8368564889,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -11244,7 +11244,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -291794.83608745557,
+    "pounce_obj": -291794.8360881494,
     "ipopt_obj": -291794.83678711316,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11252,11 +11252,11 @@
   {
     "name": "nesm",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 14076036.487560626,
+    "pounce_obj": 14076036.487562748,
     "ipopt_obj": 14076036.210751375,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -11264,7 +11264,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1229264.007817425,
+    "pounce_obj": 1229264.0078174258,
     "ipopt_obj": 1229263.9917826534,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11274,7 +11274,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -9168553.999999994,
+    "pounce_obj": -9168554.0,
     "ipopt_obj": -9168554.013361499,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11294,7 +11294,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -28909032.999999993,
+    "pounce_obj": -28909033.000000004,
     "ipopt_obj": -28909033.24985821,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11302,11 +11302,11 @@
   {
     "name": "nsir2",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": -27175593.5,
+    "pounce_obj": -27175593.499999955,
     "ipopt_obj": -27175593.90605695,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -11354,7 +11354,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 522.8943496568745,
+    "pounce_obj": 522.894349656797,
     "ipopt_obj": 522.8939869556042,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11362,51 +11362,51 @@
   {
     "name": "orna1",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -504429730.84480625,
+    "pounce_obj": -504429724.34444493,
     "ipopt_obj": -504429743.7875043,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "orna2",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -586462386.7821438,
+    "pounce_obj": -586462358.8588315,
     "ipopt_obj": -586462382.8152354,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "orna3",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -584036213.192567,
+    "pounce_obj": -584036210.4996251,
     "ipopt_obj": -584036234.9143798,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "orna4",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 672183857.151376,
+    "pounce_obj": 672183861.9768537,
     "ipopt_obj": 672183849.8590347,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
     "name": "orna7",
     "suite": "LP",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -583744167.8923336,
+    "pounce_obj": -583744167.4631233,
     "ipopt_obj": -583744190.1272225,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -11424,7 +11424,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2520.571739129079,
+    "pounce_obj": 2520.5717391290777,
     "ipopt_obj": 2520.5716984090773,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11434,7 +11434,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 61796.54505240638,
+    "pounce_obj": 61796.54505240627,
     "ipopt_obj": 61796.54432193654,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11442,11 +11442,11 @@
   {
     "name": "p0201",
     "suite": "LP",
-    "pounce_status": "Optimal",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6874.999999999231,
+    "pounce_obj": 6874.999999692501,
     "ipopt_obj": 6874.999867124263,
-    "pounce_solved": true,
+    "pounce_solved": false,
     "ipopt_solved": true
   },
   {
@@ -11454,7 +11454,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 176867.5033491078,
+    "pounce_obj": 176867.5033491073,
     "ipopt_obj": 176867.49297979698,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11464,7 +11464,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1705.128761233278,
+    "pounce_obj": 1705.1287612334206,
     "ipopt_obj": 1705.1257950689826,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11474,7 +11474,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 556000.2766260266,
+    "pounce_obj": 556000.2766258777,
     "ipopt_obj": 556000.2744292311,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11484,7 +11484,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 315.2549019627335,
+    "pounce_obj": 315.25490196282294,
     "ipopt_obj": 315.25407764198985,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11494,7 +11494,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 253964.3545999761,
+    "pounce_obj": 253964.35459997423,
     "ipopt_obj": 253964.34012588856,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11504,7 +11504,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2688.750000001172,
+    "pounce_obj": 2688.750000001057,
     "ipopt_obj": 2688.747361487284,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11514,7 +11514,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2351871.325024044,
+    "pounce_obj": -2351871.325024049,
     "ipopt_obj": -2351871.8190688235,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11522,9 +11522,9 @@
   {
     "name": "pcb1000",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 56809.45688817753,
+    "pounce_obj": 56809.45688547916,
     "ipopt_obj": 56809.45653413305,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -11532,9 +11532,9 @@
   {
     "name": "pcb3000",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 137416.41960856915,
+    "pounce_obj": 137416.41960648794,
     "ipopt_obj": 137416.41872468663,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -11544,7 +11544,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -9380.755278213193,
+    "pounce_obj": -9380.75527821275,
     "ipopt_obj": -9380.755546567043,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11574,7 +11574,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -557.4897199016066,
+    "pounce_obj": -557.4897205662734,
     "ipopt_obj": -557.4897468585752,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11584,7 +11584,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -6113.13646537786,
+    "pounce_obj": -6113.136465063099,
     "ipopt_obj": -6113.137237724252,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -11594,7 +11594,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2720107.5328449756,
+    "pounce_obj": -2720107.5328449085,
     "ipopt_obj": -2720107.5538034895,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11604,7 +11604,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2581.1392581516857,
+    "pounce_obj": -2581.139258106259,
     "ipopt_obj": -2581.139538918964,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11612,9 +11612,9 @@
   {
     "name": "pilot87",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 301.71060277929706,
+    "pounce_obj": 301.71052098820644,
     "ipopt_obj": 301.71035063475375,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -11624,7 +11624,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -4497.276188218589,
+    "pounce_obj": -4497.276188218635,
     "ipopt_obj": -4497.27623367919,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -11634,7 +11634,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.743281265821629,
+    "pounce_obj": 2.743281266179145,
     "ipopt_obj": 2.7406768937292947,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11644,7 +11644,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3.811373982773736,
+    "pounce_obj": 3.8113720758219474,
     "ipopt_obj": 3.8087642721459414,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11654,7 +11654,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.065130924197719,
+    "pounce_obj": 4.06513092494647,
     "ipopt_obj": 4.062522996534635,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11662,11 +11662,11 @@
   {
     "name": "pldd003b",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.034887426122598,
+    "pounce_obj": 4.034888347404851,
     "ipopt_obj": 4.032280860560072,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -11674,7 +11674,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.182203222960572,
+    "pounce_obj": 4.1822032233168125,
     "ipopt_obj": 4.179594961093672,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11684,7 +11684,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.15399261852044,
+    "pounce_obj": 4.153992619043456,
     "ipopt_obj": 4.151384363208925,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11694,7 +11694,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.18242877167432,
+    "pounce_obj": 4.182428772626953,
     "ipopt_obj": 4.179808938252714,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11702,11 +11702,11 @@
   {
     "name": "pldd007b",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.043837532598435,
+    "pounce_obj": 4.04383770686163,
     "ipopt_obj": 4.041208911049876,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -11714,7 +11714,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.172145568025379,
+    "pounce_obj": 4.172145568731901,
     "ipopt_obj": 4.169518133923403,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11724,7 +11724,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.543195706693757,
+    "pounce_obj": 4.543195706980468,
     "ipopt_obj": 4.540568319300852,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11734,7 +11734,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.8275915460759355,
+    "pounce_obj": 4.82759154689625,
     "ipopt_obj": 4.824974041744968,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11744,7 +11744,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.968125578488763,
+    "pounce_obj": 4.968125579311805,
     "ipopt_obj": 4.965518026476352,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11754,7 +11754,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.613329331989401,
+    "pounce_obj": 4.613329332647968,
     "ipopt_obj": 4.6107218989046705,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11764,7 +11764,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -9.663308205651093,
+    "pounce_obj": -9.663308205649775,
     "ipopt_obj": -9.663315694286181,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11774,7 +11774,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -9.479353647853044,
+    "pounce_obj": -9.479353647724064,
     "ipopt_obj": -9.479372009988753,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11784,7 +11784,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -1.7170436377029688e-07,
+    "pounce_obj": -1.979223328383694e-09,
     "ipopt_obj": -1.5996991454255909,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11794,7 +11794,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 760773.2149962833,
+    "pounce_obj": 760773.2149962806,
     "ipopt_obj": 760773.1588104952,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11814,7 +11814,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 557831.8590409963,
+    "pounce_obj": 557831.8590406548,
     "ipopt_obj": 557831.8568622585,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11824,7 +11824,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1999531.6628792756,
+    "pounce_obj": 1999531.6628792752,
     "ipopt_obj": 1999531.6628207779,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11834,7 +11834,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 3083707.010438418,
+    "pounce_obj": 3083707.0104384185,
     "ipopt_obj": 3083707.0103803272,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11844,7 +11844,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": -266.6159999989105,
+    "pounce_obj": -266.61599999891035,
     "ipopt_obj": -266.6160026376282,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -11854,7 +11854,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -392691.7999999979,
+    "pounce_obj": -392691.7999999977,
     "ipopt_obj": -392691.801355425,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11864,7 +11864,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -27612.736670539485,
+    "pounce_obj": -27612.736670539478,
     "ipopt_obj": -27612.737006905736,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11874,7 +11874,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -174215.45613870036,
+    "pounce_obj": -174215.45613870045,
     "ipopt_obj": -174215.45811650626,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11884,7 +11884,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -54417.50976232885,
+    "pounce_obj": -54417.50976232884,
     "ipopt_obj": -54417.51042616023,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11894,7 +11894,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -20329.701768573217,
+    "pounce_obj": -20329.701768573224,
     "ipopt_obj": -20329.701999982946,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11904,7 +11904,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -42122.67946585951,
+    "pounce_obj": -42122.67946585952,
     "ipopt_obj": -42122.67994658092,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11914,7 +11914,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -52.20206120574366,
+    "pounce_obj": -52.202061205743654,
     "ipopt_obj": -52.202061569646446,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11924,7 +11924,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -52.202061189405775,
+    "pounce_obj": -52.20206118940577,
     "ipopt_obj": -52.2020614361104,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11934,7 +11934,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -10.070493453991475,
+    "pounce_obj": -10.070493453991473,
     "ipopt_obj": -10.070494013331594,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11944,7 +11944,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -55.38771399768159,
+    "pounce_obj": -55.38771399768157,
     "ipopt_obj": -55.387714324965586,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11954,7 +11954,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -10.070493453686659,
+    "pounce_obj": -10.070493453553809,
     "ipopt_obj": -10.070494028482905,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11964,7 +11964,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -15.105740180227611,
+    "pounce_obj": -15.105740180227613,
     "ipopt_obj": -15.105740761924503,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11974,7 +11974,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -55.3877139969117,
+    "pounce_obj": -55.387713996911714,
     "ipopt_obj": -55.38771420311721,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11984,7 +11984,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -60.422960724245854,
+    "pounce_obj": -60.42296072424585,
     "ipopt_obj": -60.42296117683813,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -11994,7 +11994,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -10.070493453486273,
+    "pounce_obj": -10.070493453486248,
     "ipopt_obj": -10.07049390045534,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12004,7 +12004,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -30.764114076577492,
+    "pounce_obj": -30.7641140765775,
     "ipopt_obj": -30.764114718589067,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12024,7 +12024,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -60.42296072111099,
+    "pounce_obj": -60.422960721111,
     "ipopt_obj": -60.422961016656124,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12034,7 +12034,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -64.57507705717096,
+    "pounce_obj": -64.57507705717097,
     "ipopt_obj": -64.57507764193295,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12044,7 +12044,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -69.99999999596949,
+    "pounce_obj": -69.9999999959695,
     "ipopt_obj": -70.00000064800619,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12054,7 +12054,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -14753433.06076809,
+    "pounce_obj": -14753433.060768506,
     "ipopt_obj": -14753433.07068758,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12064,7 +12064,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -2331389.8243309474,
+    "pounce_obj": -2331389.824330948,
     "ipopt_obj": -2331389.826304098,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12094,7 +12094,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -832260.0342453083,
+    "pounce_obj": -832260.0342453079,
     "ipopt_obj": -832260.0356711714,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12104,7 +12104,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -832260.0342452459,
+    "pounce_obj": -832260.034245246,
     "ipopt_obj": -832260.0356747286,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12124,7 +12124,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -834038.8492426613,
+    "pounce_obj": -834038.8492426614,
     "ipopt_obj": -834038.8506652858,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12144,7 +12144,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -834038.8492426364,
+    "pounce_obj": -834038.849242674,
     "ipopt_obj": -834038.8506365061,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12164,7 +12164,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -832902.0936352179,
+    "pounce_obj": -832902.0936352182,
     "ipopt_obj": -832902.0950643219,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12184,7 +12184,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -833834.1039077151,
+    "pounce_obj": -833834.103907715,
     "ipopt_obj": -833834.1053376208,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12194,7 +12194,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -832902.0434187935,
+    "pounce_obj": -832902.0434187915,
     "ipopt_obj": -832902.0448393169,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12204,7 +12204,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -832902.1508426586,
+    "pounce_obj": -832902.1508426587,
     "ipopt_obj": -832902.1522780784,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12214,7 +12214,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 18416.75902834959,
+    "pounce_obj": 18416.759028349592,
     "ipopt_obj": 18416.75898277045,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12224,7 +12224,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2877.5638637112615,
+    "pounce_obj": 2877.56386371126,
     "ipopt_obj": 2877.56384705845,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12234,7 +12234,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2875.9833637076185,
+    "pounce_obj": 2875.983363707647,
     "ipopt_obj": 2875.9833437809943,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12244,7 +12244,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2875.9833637081138,
+    "pounce_obj": 2875.983363708122,
     "ipopt_obj": 2875.9833437819893,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12254,7 +12254,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2877.5638637089583,
+    "pounce_obj": 2877.5638637089464,
     "ipopt_obj": 2877.5638470588024,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12264,7 +12264,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 2886.9646137204063,
+    "pounce_obj": 2886.964613720406,
     "ipopt_obj": 2886.964595318261,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -12274,7 +12274,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2877.5638637091374,
+    "pounce_obj": 2877.563863709138,
     "ipopt_obj": 2877.563851432123,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12284,7 +12284,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2877.5638637076763,
+    "pounce_obj": 2877.563863707692,
     "ipopt_obj": 2877.5638437807247,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12304,7 +12304,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 36660.26156500044,
+    "pounce_obj": 36660.26156500045,
     "ipopt_obj": 36660.261473263534,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12314,7 +12314,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 54901.25454975528,
+    "pounce_obj": 54901.25454975527,
     "ipopt_obj": 54901.25441190871,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12324,7 +12324,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Acceptable",
-    "pounce_obj": 1878.1248225797265,
+    "pounce_obj": 1878.1248225795762,
     "ipopt_obj": 1878.1247196888417,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -12334,7 +12334,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 904.2969537987027,
+    "pounce_obj": 904.2969537987077,
     "ipopt_obj": 904.2969408681445,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12344,7 +12344,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 112.10427549810102,
+    "pounce_obj": 112.10427549808708,
     "ipopt_obj": 112.10424398817455,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12354,7 +12354,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 112.10427539870687,
+    "pounce_obj": 112.10427539870378,
     "ipopt_obj": 112.10417553286857,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12364,7 +12364,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1121.451228679298,
+    "pounce_obj": 1121.4512286792974,
     "ipopt_obj": 1121.4512653031577,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12374,7 +12374,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 112.43172550713827,
+    "pounce_obj": 112.43172550713655,
     "ipopt_obj": 112.43169383621206,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12384,7 +12384,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 112.1562355232981,
+    "pounce_obj": 112.15623552329666,
     "ipopt_obj": 112.15623703470087,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12394,7 +12394,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 112.10427539314603,
+    "pounce_obj": 112.10427539313142,
     "ipopt_obj": 112.10417564625388,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12404,7 +12404,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 111.88118950511517,
+    "pounce_obj": 111.88118950510535,
     "ipopt_obj": 111.88125757239457,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12414,7 +12414,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 112.41590874505282,
+    "pounce_obj": 112.41590874504077,
     "ipopt_obj": 112.41586048022221,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12424,7 +12424,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1177.3450449123602,
+    "pounce_obj": 1177.345044912376,
     "ipopt_obj": 1177.3452281938478,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12434,7 +12434,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 123.17656472739877,
+    "pounce_obj": 123.17656472738744,
     "ipopt_obj": 123.17653227836553,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12444,7 +12444,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": 1144.1606229985769,
+    "pounce_obj": 1144.1606229985794,
     "ipopt_obj": 1144.1607333082482,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -12454,7 +12454,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 587.1663606191551,
+    "pounce_obj": 587.1663606191554,
     "ipopt_obj": 587.1663335067078,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12464,7 +12464,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 123.17656473179589,
+    "pounce_obj": 123.1765647317941,
     "ipopt_obj": 123.1765641847538,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12474,7 +12474,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 123.17656467668503,
+    "pounce_obj": 123.17656467667929,
     "ipopt_obj": 123.17646485682938,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12484,7 +12484,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 123.17660263574238,
+    "pounce_obj": 123.17660263573973,
     "ipopt_obj": 123.1766656579746,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12494,7 +12494,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1346.0963340976355,
+    "pounce_obj": 1346.09633409763,
     "ipopt_obj": 1346.0963837484344,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12504,7 +12504,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1122.9708421677897,
+    "pounce_obj": 1122.97084216778,
     "ipopt_obj": 1122.9707668095077,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12664,7 +12664,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1412.2499999760562,
+    "pounce_obj": 1412.249999976057,
     "ipopt_obj": 1412.2499511250353,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12724,7 +12724,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 359.00000000092365,
+    "pounce_obj": 359.00000000106775,
     "ipopt_obj": 358.9999962966484,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12744,7 +12744,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 354.0000000002118,
+    "pounce_obj": 354.0000000002128,
     "ipopt_obj": 353.9999971387736,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12774,7 +12774,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 344.0000000013275,
+    "pounce_obj": 344.0000000013274,
     "ipopt_obj": 343.9999989795677,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12824,7 +12824,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 15711.600000003282,
+    "pounce_obj": 15711.600000003276,
     "ipopt_obj": 15711.599934946978,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12832,7 +12832,7 @@
   {
     "name": "seymourl",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
     "pounce_obj": 403.84647411499515,
     "ipopt_obj": 403.84647137887623,
@@ -12844,7 +12844,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -76589.31857908997,
+    "pounce_obj": -76589.31857908999,
     "ipopt_obj": -76589.31858771516,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12854,7 +12854,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -415.7322407405061,
+    "pounce_obj": -415.7322407403845,
     "ipopt_obj": -415.73224775327964,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12864,7 +12864,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1208825345.9999995,
+    "pounce_obj": 1208825342.4615133,
     "ipopt_obj": 1208825345.685057,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12874,7 +12874,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1793324.5379678272,
+    "pounce_obj": 1793324.5379702298,
     "ipopt_obj": 1793324.5330891202,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12884,7 +12884,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1798714.7004444315,
+    "pounce_obj": 1798714.7004453326,
     "ipopt_obj": 1798714.696747762,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12892,9 +12892,9 @@
   {
     "name": "ship08l",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Acceptable",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1909055.2113566948,
+    "pounce_obj": 1909055.211312659,
     "ipopt_obj": 1909055.1982403852,
     "pounce_solved": false,
     "ipopt_solved": true
@@ -12902,11 +12902,11 @@
   {
     "name": "ship08s",
     "suite": "LP",
-    "pounce_status": "Unknown_Error",
+    "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1920098.2105267486,
+    "pounce_obj": 1920098.2105886305,
     "ipopt_obj": 1920098.2027418737,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": true
   },
   {
@@ -12914,7 +12914,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1470187.91932674,
+    "pounce_obj": 1470187.9193291317,
     "ipopt_obj": 1470187.9106509495,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12924,7 +12924,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1489236.1344052812,
+    "pounce_obj": 1489236.1344053133,
     "ipopt_obj": 1489236.1292388877,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12934,7 +12934,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 15394362.183631929,
+    "pounce_obj": 15394362.183631934,
     "ipopt_obj": 15394362.151516596,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12944,7 +12944,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 29.8953684806125,
+    "pounce_obj": 29.89536848061251,
     "ipopt_obj": 29.895365609972774,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12954,7 +12954,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 21.282722899568604,
+    "pounce_obj": 21.282722903216793,
     "ipopt_obj": 21.28220644434902,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12964,7 +12964,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2007.6324962357785,
+    "pounce_obj": 2007.632496235886,
     "ipopt_obj": 2007.6311845234397,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12974,7 +12974,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 37.65764000362932,
+    "pounce_obj": 37.6576400049095,
     "ipopt_obj": 37.65713110394811,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12984,7 +12984,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 185.43683751265831,
+    "pounce_obj": 185.43683751385763,
     "ipopt_obj": 185.43614874001835,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -12994,7 +12994,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 54.68444146001753,
+    "pounce_obj": 54.68444146180996,
     "ipopt_obj": 54.68392899429311,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13004,7 +13004,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 34.171689777837976,
+    "pounce_obj": 34.17168892922037,
     "ipopt_obj": 34.171170911929615,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13014,7 +13014,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 24.431347299452185,
+    "pounce_obj": 24.431347313915676,
     "ipopt_obj": 24.430842989034158,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13024,7 +13024,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 13.882469651428837,
+    "pounce_obj": 13.882469653373162,
     "ipopt_obj": 13.881966356288675,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13034,7 +13034,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 8.053825978530016,
+    "pounce_obj": 8.05382598970627,
     "ipopt_obj": 8.053324679241614,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13044,7 +13044,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 4.908138866505195,
+    "pounce_obj": 4.908138873036632,
     "ipopt_obj": 4.907637525837109,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13054,7 +13054,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.262910899307666,
+    "pounce_obj": 2.262910900122625,
     "ipopt_obj": 2.26240962812077,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13064,7 +13064,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.8866428505771237,
+    "pounce_obj": 0.8866428634343484,
     "ipopt_obj": 0.886140950138893,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13074,7 +13074,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.6230622972497506,
+    "pounce_obj": 0.6230622995960364,
     "ipopt_obj": 0.6225608298524781,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13084,7 +13084,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.9630475811861057,
+    "pounce_obj": 0.9630475819715316,
     "ipopt_obj": 0.9625452027986529,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13094,7 +13094,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.2298481059033073,
+    "pounce_obj": 1.2298481081730461,
     "ipopt_obj": 1.229334921738692,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13104,7 +13104,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1.6804930953525492,
+    "pounce_obj": 1.680493107995994,
     "ipopt_obj": 1.679980147829401,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13114,7 +13114,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 2.2030894232451055,
+    "pounce_obj": 2.203089452596126,
     "ipopt_obj": 2.2025759109009253,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13124,7 +13124,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -251.2669511610814,
+    "pounce_obj": -251.2669511610598,
     "ipopt_obj": -251.26695182663642,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13134,7 +13134,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1257.6995000005422,
+    "pounce_obj": 1257.6995000005506,
     "ipopt_obj": 1257.699427419868,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13144,7 +13144,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 1406.0175000011063,
+    "pounce_obj": 1406.0175000011313,
     "ipopt_obj": 1406.017425879394,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13154,7 +13154,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -41131.9762190712,
+    "pounce_obj": -41131.97621907115,
     "ipopt_obj": -41131.97624366409,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13164,7 +13164,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -39024.40853526454,
+    "pounce_obj": -39024.40853526453,
     "ipopt_obj": -39024.408563482706,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13174,7 +13174,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.2921478100043431,
+    "pounce_obj": 0.292147809992369,
     "ipopt_obj": 0.29214872091226196,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13184,7 +13184,7 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 129831.4624613447,
+    "pounce_obj": 129831.46246134475,
     "ipopt_obj": 129831.46158943299,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -13214,9 +13214,49 @@
     "suite": "LP",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": -15060.645240627311,
+    "pounce_obj": -15060.645240627306,
     "ipopt_obj": -15060.645312698494,
     "pounce_solved": true,
     "ipopt_solved": true
+  },
+  {
+    "name": "ex10",
+    "suite": "LPopt",
+    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "irish-electricity",
+    "suite": "LPopt",
+    "pounce_status": "Maximum_Iterations_Exceeded",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "pounce_obj": 2454389.0030205003,
+    "ipopt_obj": 48035.512857471454,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "qap15",
+    "suite": "LPopt",
+    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
+  },
+  {
+    "name": "supportcase10",
+    "suite": "LPopt",
+    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "ipopt_status": "Maximum_CpuTime_Exceeded",
+    "pounce_obj": null,
+    "ipopt_obj": null,
+    "pounce_solved": false,
+    "ipopt_solved": false
   }
 ]

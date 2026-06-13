@@ -71,14 +71,36 @@ const IR_RELTOL: f64 = 1e-12;
 /// is singular, or the constant-direction solve cannot be refined below
 /// [`DYN_REG_RES_TOL`] (the KKT is numerically singular on the degenerate
 /// face), raise the `(z,z)` regularization δ by [`DYN_REG_FACTOR`] — up to
-/// [`DYN_REG_MAX`], at most [`DYN_REG_MAX_TRIES`] times — and refactor. δ is
-/// reset to its small per-iteration base every iteration, so a single hard
-/// iterate never inflates δ for the rest of the solve; well-conditioned
-/// iterations keep the tight static δ and never enter the bump loop.
+/// [`DYN_REG_MAX`] — and refactor. δ is reset to its small per-iteration base
+/// every iteration, so a single hard iterate never inflates δ for the rest of
+/// the solve; well-conditioned iterations keep the tight static δ and never
+/// enter the bump loop. The bump count is shared with the δ_c inertia
+/// escalation below and bounded by [`INERTIA_MAX_TRIES`].
 const DYN_REG_FACTOR: f64 = 10.0;
 const DYN_REG_MAX: f64 = 1e-7;
-const DYN_REG_MAX_TRIES: usize = 4;
 const DYN_REG_RES_TOL: f64 = 1e-8;
+
+/// Inertia-based perturbation escalation (Ipopt's `perturb_for_singular` /
+/// `perturb_for_wrong_inertia`, adapted to the HSDE KKT). A rank-deficient
+/// equality Jacobian — gen/gen1's redundant rows, non-unique duals — factors
+/// "successfully" but with **too few negative eigenvalues**: an indefinite
+/// (saddle) direction whose step never reduces the primal residual, so the
+/// solve plateaus at `δ·‖ŷ‖ ~ 9e-5` and runs to `max_iter`. The `(z,z)`
+/// dynamic bump above keys only on a *singular* factor or an un-refinable
+/// constant-direction solve; it misses wrong inertia because nothing checks
+/// it. Here we read the factor's negative-eigenvalue count and, when it falls
+/// short of the `m_eq + m_ineq` a correct KKT requires, escalate the
+/// equality-block regularization `δ_c` — from [`DELTA_C_INIT`], by
+/// [`DELTA_C_FACTOR`], up to [`DELTA_C_MAX`] — and refactor until the inertia
+/// is right, so the Newton step is a genuine descent direction. `δ_c` resets
+/// to its small μ-scaled base every iteration; the regularized step leaves the
+/// new primal residual at `δ_c·‖dy‖`, and as `μ → 0` both `δ_c` and `dy`
+/// shrink, so that residual drives to zero (Ipopt's convergence argument on
+/// degenerate equality systems).
+const DELTA_C_INIT: f64 = 1e-8;
+const DELTA_C_FACTOR: f64 = 10.0;
+const DELTA_C_MAX: f64 = 1e-1;
+const INERTIA_MAX_TRIES: usize = 20;
 
 /// Gondzio multiple centrality correctors (Gondzio 1996, "Multiple centrality
 /// corrections in a primal–dual method for linear programming"). After the
@@ -530,18 +552,55 @@ where
         // the conditioning probe: it is solved here inside the loop so its
         // refinement residual gates the bump.
         let mut reg_eff = base_reg;
-        let mut dyn_tries = 0usize;
+        // δ_c on the (y,y) equality-multiplier block. `build` freezes (y,y) at
+        // the static `opts.reg`; we override it each iteration, starting from a
+        // moderate μ-scaled base (Ipopt's `1e-8·μ^0.25`) and escalating on
+        // wrong inertia / singularity (see `DELTA_C_INIT` & co.). The (z,z)
+        // slack block keeps `reg_eff`, whose iterate-norm scaling is correct
+        // for full-rank large-dual problems (LISWET).
+        let mut delta_c = crate::ipm::adaptive_eq_reg(mu, opts.reg);
+        // Correct KKT inertia has one negative eigenvalue per equality and per
+        // inequality row; the SOC auxiliary variables contribute positives
+        // only. Too few negatives ⇒ the factor is an indefinite saddle.
+        let expected_neg = (m_eq + m_ineq) as Index;
+        let mut tries = 0usize;
         let mut factored = false;
         loop {
             kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
-            if fact.refactor(&kkt_vals).is_err() {
-                if dyn_tries < DYN_REG_MAX_TRIES && reg_eff < DYN_REG_MAX {
-                    reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
-                    dyn_tries += 1;
-                    continue;
+            kkt.update_eq_reg(delta_c, &mut kkt_vals);
+
+            // Escalation budget (tries + per-block ceilings) and the bump that
+            // raises δ_c (equality/Jacobian reg) and the (z,z) reg together.
+            // `macro` would be cleaner, but inlined to keep the borrow trivial.
+            let budget =
+                tries < INERTIA_MAX_TRIES && (delta_c < DELTA_C_MAX || reg_eff < DYN_REG_MAX);
+
+            match fact.refactor(&kkt_vals) {
+                Err(_) => {
+                    // Singular factorization: rank-deficient KKT. Escalate.
+                    if budget {
+                        delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
+                        reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                        tries += 1;
+                        continue;
+                    }
+                    break; // factored stays false → breakdown below
                 }
-                break; // factored stays false → breakdown below
+                Ok(()) => {
+                    // Inertia check: a rank-deficient equality Jacobian factors
+                    // without error but with too few negative eigenvalues — a
+                    // saddle direction. Escalate δ_c until the inertia is right.
+                    let wrong_inertia =
+                        matches!(fact.number_of_neg_evals(), Some(n) if n < expected_neg);
+                    if wrong_inertia && budget {
+                        delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
+                        reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
+                        tries += 1;
+                        continue;
+                    }
+                }
             }
+
             build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
             let res_p = match solve_refined(
                 &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
@@ -550,9 +609,10 @@ where
                 Ok(res) => res,
                 Err(_) => break, // factored stays false → breakdown below
             };
-            if res_p > DYN_REG_RES_TOL && dyn_tries < DYN_REG_MAX_TRIES && reg_eff < DYN_REG_MAX {
+            if res_p > DYN_REG_RES_TOL && budget {
+                delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
                 reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
-                dyn_tries += 1;
+                tries += 1;
                 continue;
             }
             factored = true;

@@ -34,6 +34,7 @@ pub mod ipm;
 pub mod presolve;
 pub mod qp;
 pub mod sensitivity;
+pub(crate) mod simplex;
 pub mod sos;
 
 pub use batch::{

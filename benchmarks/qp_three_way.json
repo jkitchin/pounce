@@ -1,0 +1,4556 @@
+[
+  {
+    "name": "TAME",
+    "n": 2,
+    "m": 3,
+    "opt": 3.47098798e-30,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.0,
+      "iterations": 7,
+      "solve_time": 0.000427667,
+      "rel_err": 3.4709879799999994e-20,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.0,
+      "iterations": 5,
+      "solve_time": 6.6916e-05,
+      "rel_err": 3.4709879799999994e-20,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.0,
+      "iterations": 5,
+      "solve_time": 0.001103667,
+      "rel_err": 3.4709879799999994e-20,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "ZECEVIC2",
+    "n": 2,
+    "m": 4,
+    "opt": -4.125,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -4.1249999996108695,
+      "iterations": 9,
+      "solve_time": 0.000729625,
+      "rel_err": 9.433466802323837e-11,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -4.124999999846825,
+      "iterations": 8,
+      "solve_time": 4.8999e-05,
+      "rel_err": 3.71333940027839e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -4.125000037494695,
+      "iterations": 8,
+      "solve_time": 0.001608542,
+      "rel_err": 9.089623032173367e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS21",
+    "n": 2,
+    "m": 3,
+    "opt": -99.9599999,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -99.95999999936977,
+      "iterations": 11,
+      "solve_time": 0.000654041,
+      "rel_err": 9.940953489285625e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -99.95999999911375,
+      "iterations": 9,
+      "solve_time": 5.3164e-05,
+      "rel_err": 9.915340968447608e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -99.95999999859,
+      "iterations": 7,
+      "solve_time": 0.001574708,
+      "rel_err": 9.86294590542071e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS35",
+    "n": 3,
+    "m": 4,
+    "opt": 0.111111111,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.11111111174322197,
+      "iterations": 9,
+      "solve_time": 0.000444333,
+      "rel_err": 6.6889976926546085e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.11111111828596343,
+      "iterations": 7,
+      "solve_time": 4.3335e-05,
+      "rel_err": 6.557366663390292e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.11111110700101534,
+      "iterations": 8,
+      "solve_time": 0.001467042,
+      "rel_err": 3.59908619517376e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS35MOD",
+    "n": 3,
+    "m": 4,
+    "opt": 0.250000001,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.2500000033538896,
+      "iterations": 13,
+      "solve_time": 0.00060925,
+      "rel_err": 9.415558206688589e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.2500000116542882,
+      "iterations": 12,
+      "solve_time": 5.7583e-05,
+      "rel_err": 4.261715070902175e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.25000000196007477,
+      "iterations": 16,
+      "solve_time": 0.002485292,
+      "rel_err": 3.8402989376075566e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QPTEST",
+    "n": 2,
+    "m": 4,
+    "opt": 4.371875,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 4.371874999998543,
+      "iterations": 9,
+      "solve_time": 0.00046475,
+      "rel_err": 3.3338116637092906e-13,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 4.371875000309744,
+      "iterations": 8,
+      "solve_time": 4.1708e-05,
+      "rel_err": 7.084928783249663e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 4.371874917005603,
+      "iterations": 7,
+      "solve_time": 0.001400291,
+      "rel_err": 1.898370770723133e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS53",
+    "n": 5,
+    "m": 8,
+    "opt": 4.09302326,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 4.093023255813428,
+      "iterations": 9,
+      "solve_time": 0.0008585,
+      "rel_err": 1.0228556526654365e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 4.0930232558139545,
+      "iterations": 6,
+      "solve_time": 6.0124e-05,
+      "rel_err": 1.0227269727705457e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 4.093023255813954,
+      "iterations": 6,
+      "solve_time": 0.001364041,
+      "rel_err": 1.022727189768682e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS52",
+    "n": 5,
+    "m": 8,
+    "opt": 5.32664756,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 5.326647562459641,
+      "iterations": 3,
+      "solve_time": 0.000355375,
+      "rel_err": 4.61761614715126e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 5.326647564469913,
+      "iterations": 0,
+      "solve_time": 3.4708e-05,
+      "rel_err": 8.391607055401563e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 5.326647564469914,
+      "iterations": 1,
+      "solve_time": 0.000534083,
+      "rel_err": 8.391608722826353e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS51",
+    "n": 5,
+    "m": 8,
+    "opt": 8.8817842e-16,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.0,
+      "iterations": 1,
+      "solve_time": 0.0003275,
+      "rel_err": 8.8817842e-06,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -1.7763568394002505e-15,
+      "iterations": 0,
+      "solve_time": 3.1874e-05,
+      "rel_err": 2.6645352594002504e-05,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.0,
+      "iterations": 1,
+      "solve_time": 0.000498583,
+      "rel_err": 8.8817842e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS76",
+    "n": 4,
+    "m": 7,
+    "opt": -4.68181818,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -4.681818181642933,
+      "iterations": 9,
+      "solve_time": 0.000680917,
+      "rel_err": 3.5091789669583947e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -4.681818173865547,
+      "iterations": 6,
+      "solve_time": 5.0624e-05,
+      "rel_err": 1.3102715034560422e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -4.681818216798863,
+      "iterations": 9,
+      "solve_time": 0.001753959,
+      "rel_err": 7.859951371006873e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "GENHS28",
+    "n": 10,
+    "m": 18,
+    "opt": 0.927173694,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.9271736892835826,
+      "iterations": 1,
+      "solve_time": 0.000349792,
+      "rel_err": 5.08687585649888e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.9271736937663909,
+      "iterations": 0,
+      "solve_time": 4.2e-05,
+      "rel_err": 2.519583262019692e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.9271736937663908,
+      "iterations": 1,
+      "solve_time": 0.000464584,
+      "rel_err": 2.5195844594469183e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "S268",
+    "n": 5,
+    "m": 10,
+    "opt": 5.73107049e-07,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2.48473952524364e-09,
+      "iterations": 18,
+      "solve_time": 0.0007925,
+      "rel_err": 0.9956644408237881,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 9.347888408228755e-06,
+      "iterations": 12,
+      "solve_time": 6.8999e-05,
+      "rel_err": 0.9386912825686382,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 7.076741894707084e-07,
+      "iterations": 16,
+      "solve_time": 0.002592541,
+      "rel_err": 0.19015408852392274,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS268",
+    "n": 5,
+    "m": 10,
+    "opt": 5.73107049e-07,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2.48473952524364e-09,
+      "iterations": 18,
+      "solve_time": 0.00051675,
+      "rel_err": 0.9956644408237881,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 9.347888408228755e-06,
+      "iterations": 12,
+      "solve_time": 7.2167e-05,
+      "rel_err": 0.9386912825686382,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 7.076741894707084e-07,
+      "iterations": 16,
+      "solve_time": 0.002647292,
+      "rel_err": 0.19015408852392274,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HS118",
+    "n": 15,
+    "m": 32,
+    "opt": 664.820452,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 664.8204500050824,
+      "iterations": 12,
+      "solve_time": 0.00141425,
+      "rel_err": 3.000686303901704e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 664.820453611101,
+      "iterations": 11,
+      "solve_time": 0.000135585,
+      "rel_err": 2.4233625202354655e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 664.8204424581925,
+      "iterations": 18,
+      "solve_time": 0.003506542,
+      "rel_err": 1.435245793494705e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "LOTSCHD",
+    "n": 12,
+    "m": 19,
+    "opt": 2398.41589,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2398.41589144882,
+      "iterations": 13,
+      "solve_time": 0.001084708,
+      "rel_err": 6.04073550430351e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 2398.4158920728037,
+      "iterations": 9,
+      "solve_time": 9.3667e-05,
+      "rel_err": 8.64238542223919e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 2398.4158904067713,
+      "iterations": 14,
+      "solve_time": 0.00250375,
+      "rel_err": 1.6959988142490287e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QAFIRO",
+    "n": 32,
+    "m": 59,
+    "opt": -1.59078179,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -1.5907817896787226,
+      "iterations": 14,
+      "solve_time": 0.001541667,
+      "rel_err": 2.0196198567815665e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -1.5907817935438848,
+      "iterations": 14,
+      "solve_time": 0.000205291,
+      "rel_err": 2.227762950017511e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -1.5907820447524093,
+      "iterations": 24,
+      "solve_time": 0.004394083,
+      "rel_err": 1.6014287438571472e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCAGR7",
+    "n": 140,
+    "m": 269,
+    "opt": 26865948.6,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 26865948.58902274,
+      "iterations": 24,
+      "solve_time": 0.007995125,
+      "rel_err": 4.085938275194029e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 26865948.664076865,
+      "iterations": 16,
+      "solve_time": 0.000971543,
+      "rel_err": 2.3850586491648268e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 26865948.58545025,
+      "iterations": 132,
+      "solve_time": 0.033113917,
+      "rel_err": 5.415684758178777e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSC205",
+    "n": 203,
+    "m": 408,
+    "opt": -0.00581395184,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -0.005813953296998971,
+      "iterations": 17,
+      "solve_time": 0.007003,
+      "rel_err": 2.506038312824107e-07,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -0.005813953275592093,
+      "iterations": 19,
+      "solve_time": 0.001585251,
+      "rel_err": 2.469218490532862e-07,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -0.0058139402725997,
+      "iterations": 25,
+      "solve_time": 0.009976042,
+      "rel_err": 1.9895934156498876e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QRECIPE",
+    "n": 180,
+    "m": 271,
+    "opt": -266.616,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -266.615999997774,
+      "iterations": 20,
+      "solve_time": 0.007407625,
+      "rel_err": 8.349042377761432e-12,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -266.61599906310994,
+      "iterations": 17,
+      "solve_time": 0.001152004,
+      "rel_err": 3.5140053351351067e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolvedToAcceptableLevel",
+      "objective": -266.61600266855214,
+      "iterations": 47,
+      "solve_time": 0.016214834,
+      "rel_err": 1.0008972190071599e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHARE2B",
+    "n": 79,
+    "m": 175,
+    "opt": 11703.6917,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 11703.691721421686,
+      "iterations": 18,
+      "solve_time": 0.007207334,
+      "rel_err": 1.8303358941488005e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 11703.691726619705,
+      "iterations": 16,
+      "solve_time": 0.000899959,
+      "rel_err": 2.2744708568632852e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 11703.691268312838,
+      "iterations": 39,
+      "solve_time": 0.011379625,
+      "rel_err": 3.68847003920759e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QADLITTL",
+    "n": 97,
+    "m": 153,
+    "opt": 480318.859,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 480318.85854465305,
+      "iterations": 15,
+      "solve_time": 0.003862167,
+      "rel_err": 9.480097220199586e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 480318.8586212868,
+      "iterations": 14,
+      "solve_time": 0.000635044,
+      "rel_err": 7.884620378077241e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 480318.85520216444,
+      "iterations": 60,
+      "solve_time": 0.014670834,
+      "rel_err": 7.90690492957776e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP2_S",
+    "n": 100,
+    "m": 125,
+    "opt": 8120.94048,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 8120.940477251841,
+      "iterations": 13,
+      "solve_time": 0.004141416,
+      "rel_err": 3.384040568909869e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 8120.94047779833,
+      "iterations": 10,
+      "solve_time": 0.000597208,
+      "rel_err": 2.7111025116800724e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 8120.9404201163115,
+      "iterations": 12,
+      "solve_time": 0.004015208,
+      "rel_err": 7.3739844309055914e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP1_S",
+    "n": 100,
+    "m": 150,
+    "opt": 11590.7181,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 11590.718119187646,
+      "iterations": 12,
+      "solve_time": 0.005788209,
+      "rel_err": 1.6554320367197693e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 11590.718120544974,
+      "iterations": 9,
+      "solve_time": 0.000655291,
+      "rel_err": 1.7725367801509494e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 11590.718075741388,
+      "iterations": 12,
+      "solve_time": 0.00459125,
+      "rel_err": 2.0929343479909887e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP3_S",
+    "n": 100,
+    "m": 175,
+    "opt": 11943.4322,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 11943.432202306276,
+      "iterations": 14,
+      "solve_time": 0.007420834,
+      "rel_err": 1.9309999142683712e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 11943.432203777107,
+      "iterations": 11,
+      "solve_time": 0.000947833,
+      "rel_err": 3.162497835761328e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 11943.432175202723,
+      "iterations": 13,
+      "solve_time": 0.00513525,
+      "rel_err": 2.0762270193488016e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QPCBLEND",
+    "n": 83,
+    "m": 157,
+    "opt": -0.00784254092,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -0.007842541541307781,
+      "iterations": 15,
+      "solve_time": 0.004404167,
+      "rel_err": 7.922275935581547e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -0.007842542015327473,
+      "iterations": 17,
+      "solve_time": 0.00080179,
+      "rel_err": 1.3966485237548665e-07,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -0.007842848469046268,
+      "iterations": 23,
+      "solve_time": 0.006454542,
+      "rel_err": 3.9213947264450574e-05,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUALC2",
+    "n": 7,
+    "m": 236,
+    "opt": 3551.30769,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 3551.307692604823,
+      "iterations": 22,
+      "solve_time": 0.009598334,
+      "rel_err": 7.334827237378107e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 3551.3076926737135,
+      "iterations": 11,
+      "solve_time": 0.000596417,
+      "rel_err": 7.528813767388114e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 3551.3045166720726,
+      "iterations": 21,
+      "solve_time": 0.009394417,
+      "rel_err": 8.93566033832e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMALC2",
+    "n": 231,
+    "m": 238,
+    "opt": -3551.30769,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -3551.30769266975,
+      "iterations": 21,
+      "solve_time": 0.008942917,
+      "rel_err": 7.517652870472525e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "DualInfeasible",
+      "objective": null,
+      "iterations": 1,
+      "solve_time": 0.000289625,
+      "rel_err": null,
+      "solved": false,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -3551.3099327815253,
+      "iterations": 15,
+      "solve_time": 0.006008,
+      "rel_err": 6.315364098414401e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCTAP1",
+    "n": 480,
+    "m": 780,
+    "opt": 1415.86111,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1415.8611111071032,
+      "iterations": 21,
+      "solve_time": 0.024374041,
+      "rel_err": 7.819291793895561e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1415.8611110660636,
+      "iterations": 19,
+      "solve_time": 0.00331467,
+      "rel_err": 7.529435791618189e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1415.8610624853206,
+      "iterations": 41,
+      "solve_time": 0.0272585,
+      "rel_err": 3.355885621350087e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUALC5",
+    "n": 8,
+    "m": 286,
+    "opt": 427.232327,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 427.2323267764118,
+      "iterations": 14,
+      "solve_time": 0.005484042,
+      "rel_err": 5.23340987640658e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 427.2323269916109,
+      "iterations": 10,
+      "solve_time": 0.000727038,
+      "rel_err": 1.9635972644304674e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 427.2322991490902,
+      "iterations": 14,
+      "solve_time": 0.007772625,
+      "rel_err": 6.518914430510047e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMALC5",
+    "n": 287,
+    "m": 295,
+    "opt": -427.232326,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -427.23232677598185,
+      "iterations": 14,
+      "solve_time": 0.008625458,
+      "rel_err": 1.816299463447828e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -427.2323267067417,
+      "iterations": 14,
+      "solve_time": 0.001556293,
+      "rel_err": 1.6542326715586162e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -427.2331594336422,
+      "iterations": 13,
+      "solve_time": 0.006860458,
+      "rel_err": 1.9507700275189053e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUALC1",
+    "n": 9,
+    "m": 224,
+    "opt": 6155.25083,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 6155.250828493426,
+      "iterations": 25,
+      "solve_time": 0.012068917,
+      "rel_err": 2.4476246007151725e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 6155.250830436567,
+      "iterations": 11,
+      "solve_time": 0.000682628,
+      "rel_err": 7.092602288991708e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 6155.209754303575,
+      "iterations": 25,
+      "solve_time": 0.011196459,
+      "rel_err": 6.67327742754899e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHARE1B",
+    "n": 225,
+    "m": 342,
+    "opt": 720078.318,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 720078.3181548011,
+      "iterations": 27,
+      "solve_time": 0.014069,
+      "rel_err": 2.1497825281040445e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 720082.0136703902,
+      "iterations": 32,
+      "solve_time": 0.002990458,
+      "rel_err": 5.1322909336830635e-06,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 720078.3181320282,
+      "iterations": 251,
+      "solve_time": 0.090323542,
+      "rel_err": 1.8335262008850631e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "VALUES",
+    "n": 202,
+    "m": 203,
+    "opt": -1.39662114,
+    "qp_ipm": {
+      "status": "ParseError:JSONDecodeError",
+      "objective": null,
+      "iterations": null,
+      "solve_time": 0.024982708040624857,
+      "rel_err": null,
+      "solved": false,
+      "correct": false
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -1.3966211433271118,
+      "iterations": 13,
+      "solve_time": 0.002206999,
+      "rel_err": 2.38225801979378e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -1.3966211114987845,
+      "iterations": 15,
+      "solve_time": 0.014780625,
+      "rel_err": 2.040726333827174e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCAGR25",
+    "n": 500,
+    "m": 971,
+    "opt": 201737938.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 201737938.41543445,
+      "iterations": 20,
+      "solve_time": 0.019284041,
+      "rel_err": 2.0592777599205095e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 201737938.46580958,
+      "iterations": 20,
+      "solve_time": 0.003991208,
+      "rel_err": 2.3089835615767706e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 201737938.14598566,
+      "iterations": 296,
+      "solve_time": 0.168760875,
+      "rel_err": 7.236401059652113e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCORPIO",
+    "n": 358,
+    "m": 746,
+    "opt": 1880.50955,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1880.5095519662068,
+      "iterations": 15,
+      "solve_time": 0.015334541,
+      "rel_err": 1.0455712962242606e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1880.5095494929835,
+      "iterations": 11,
+      "solve_time": 0.001750708,
+      "rel_err": 2.6961653353193827e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1880.5094204951067,
+      "iterations": 62,
+      "solve_time": 0.039931791,
+      "rel_err": 6.886691602610061e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QPCBOEI2",
+    "n": 143,
+    "m": 309,
+    "opt": 8171962.25,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 8171962.190868715,
+      "iterations": 24,
+      "solve_time": 0.018353917,
+      "rel_err": 7.235873510756993e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 8171962.271004355,
+      "iterations": 20,
+      "solve_time": 0.002927835,
+      "rel_err": 2.5702950998396314e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 8171960.27411057,
+      "iterations": 127,
+      "solve_time": 0.049606,
+      "rel_err": 2.417888592646592e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMALC1",
+    "n": 230,
+    "m": 239,
+    "opt": -6155.25082,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -6155.250829462023,
+      "iterations": 23,
+      "solve_time": 0.010573708,
+      "rel_err": 1.5372278042762779e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "DualInfeasible",
+      "objective": null,
+      "iterations": 1,
+      "solve_time": 0.000354751,
+      "rel_err": null,
+      "solved": false,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -6155.252983678174,
+      "iterations": 15,
+      "solve_time": 0.006479292,
+      "rel_err": 3.5151734293721703e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QISRAEL",
+    "n": 142,
+    "m": 316,
+    "opt": 25347837.8,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 25347837.78912153,
+      "iterations": 34,
+      "solve_time": 0.024159958,
+      "rel_err": 4.2916756375128105e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "InsufficientProgress",
+      "objective": null,
+      "iterations": 60,
+      "solve_time": 0.00628271,
+      "rel_err": null,
+      "solved": false,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 25347837.27828214,
+      "iterations": 58,
+      "solve_time": 0.036461875,
+      "rel_err": 2.0582341792274935e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCSD1",
+    "n": 760,
+    "m": 837,
+    "opt": 8.66666668,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 8.666666669912528,
+      "iterations": 11,
+      "solve_time": 0.014756291,
+      "rel_err": 1.1639390971581078e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 8.666666632606573,
+      "iterations": 10,
+      "solve_time": 0.002595712,
+      "rel_err": 5.4684724356878255e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 8.666650998861373,
+      "iterations": 15,
+      "solve_time": 0.013965458,
+      "rel_err": 1.8093621465547133e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DPKLO1",
+    "n": 133,
+    "m": 210,
+    "opt": 0.370096217,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.37009621674367754,
+      "iterations": 2,
+      "solve_time": 0.001900958,
+      "rel_err": 6.925833107193767e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.37009621711427076,
+      "iterations": 0,
+      "solve_time": 0.00025775,
+      "rel_err": 3.087595988211234e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.3700962171142715,
+      "iterations": 1,
+      "solve_time": 0.001584834,
+      "rel_err": 3.087615487058626e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QBORE3D",
+    "n": 315,
+    "m": 548,
+    "opt": 3100.2008,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 3100.2008018284205,
+      "iterations": 19,
+      "solve_time": 0.01634675,
+      "rel_err": 5.897748325777913e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 3100.2043167966826,
+      "iterations": 27,
+      "solve_time": 0.004496665,
+      "rel_err": 1.1343757775922567e-06,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 3100.2007904156926,
+      "iterations": 178,
+      "solve_time": 0.089592042,
+      "rel_err": 3.0915118347264698e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QBRANDY",
+    "n": 249,
+    "m": 469,
+    "opt": 28375.1149,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 28375.114856724518,
+      "iterations": 18,
+      "solve_time": 0.017258917,
+      "rel_err": 1.5251209542171929e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 28375.11487937443,
+      "iterations": 19,
+      "solve_time": 0.003760379,
+      "rel_err": 7.268894540585548e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 28375.114776296796,
+      "iterations": 153,
+      "solve_time": 0.078930667,
+      "rel_err": 4.3595666545000625e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSTANDAT",
+    "n": 1075,
+    "m": 1434,
+    "opt": 6411.83839,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 6411.838388906408,
+      "iterations": 19,
+      "solve_time": 0.035463709,
+      "rel_err": 1.7055824309721864e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 6411.838389661271,
+      "iterations": 18,
+      "solve_time": 0.006824379,
+      "rel_err": 5.282861921126841e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 6411.83808193337,
+      "iterations": 56,
+      "solve_time": 0.061836958,
+      "rel_err": 4.8046536957159444e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMAL1",
+    "n": 325,
+    "m": 410,
+    "opt": -0.0350129646,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -0.03501296476763619,
+      "iterations": 9,
+      "solve_time": 0.013006083,
+      "rel_err": 4.787831900680082e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -0.03501296515430889,
+      "iterations": 10,
+      "solve_time": 0.003821748,
+      "rel_err": 1.583153234842485e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -0.035012917984657735,
+      "iterations": 19,
+      "solve_time": 0.018051,
+      "rel_err": 1.3313737582449128e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QGFRDXPN",
+    "n": 1092,
+    "m": 1708,
+    "opt": 100790585000.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 100790585049.16042,
+      "iterations": 26,
+      "solve_time": 0.089887459,
+      "rel_err": 4.8774809299337e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 100790586285.85118,
+      "iterations": 22,
+      "solve_time": 0.008002875,
+      "rel_err": 1.2757651566620356e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 100790584576.94818,
+      "iterations": 193,
+      "solve_time": 0.201762208,
+      "rel_err": 4.197334690017488e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QBEACONF",
+    "n": 262,
+    "m": 435,
+    "opt": 164712.062,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 164712.06014970053,
+      "iterations": 17,
+      "solve_time": 0.013581416,
+      "rel_err": 1.1233539647959682e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 164712.06483577273,
+      "iterations": 28,
+      "solve_time": 0.005966662,
+      "rel_err": 1.7216545313036956e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 164712.06012605233,
+      "iterations": 45,
+      "solve_time": 0.025695417,
+      "rel_err": 1.1377112624553814e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUALC8",
+    "n": 8,
+    "m": 511,
+    "opt": 18309.3588,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 18309.35883273396,
+      "iterations": 18,
+      "solve_time": 0.019255166,
+      "rel_err": 1.7878265866436058e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 18309.358833232338,
+      "iterations": 10,
+      "solve_time": 0.001318666,
+      "rel_err": 1.815046416369392e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 18309.35765762208,
+      "iterations": 20,
+      "solve_time": 0.016556209,
+      "rel_err": 6.239311458009758e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUAL4",
+    "n": 75,
+    "m": 76,
+    "opt": 0.746090842,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.7460908418720258,
+      "iterations": 10,
+      "solve_time": 0.004037209,
+      "rel_err": 1.7152628017811096e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.7460908419308909,
+      "iterations": 12,
+      "solve_time": 0.001657584,
+      "rel_err": 9.262820011207735e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.7460908440101485,
+      "iterations": 13,
+      "solve_time": 0.009509375,
+      "rel_err": 2.6942409335838107e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QCAPRI",
+    "n": 353,
+    "m": 624,
+    "opt": 66793293.4,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 66793251.39788421,
+      "iterations": 23,
+      "solve_time": 0.037735208,
+      "rel_err": 6.288373225518416e-07,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 66793291.6549917,
+      "iterations": 32,
+      "solve_time": 0.009124919,
+      "rel_err": 2.612550165499963e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 66793292.4944216,
+      "iterations": 306,
+      "solve_time": 0.265677542,
+      "rel_err": 1.3557924023767523e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMALC8",
+    "n": 520,
+    "m": 528,
+    "opt": -18309.4298,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -18309.429788414272,
+      "iterations": 17,
+      "solve_time": 0.01929775,
+      "rel_err": 6.327738958736716e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -18309.4296469802,
+      "iterations": 12,
+      "solve_time": 0.003363041,
+      "rel_err": 8.357431337534844e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -18309.434246346944,
+      "iterations": 20,
+      "solve_time": 0.014653209,
+      "rel_err": 2.428445839618865e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCSD6",
+    "n": 1350,
+    "m": 1497,
+    "opt": 50.8082139,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 50.808213899031166,
+      "iterations": 14,
+      "solve_time": 0.035402666,
+      "rel_err": 1.9068415346052035e-11,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 50.8082136853755,
+      "iterations": 13,
+      "solve_time": 0.005885501,
+      "rel_err": 4.224208706262832e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 50.80818690904309,
+      "iterations": 19,
+      "solve_time": 0.027289791,
+      "rel_err": 5.312321540056529e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUAL1",
+    "n": 85,
+    "m": 86,
+    "opt": 0.0350129662,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.03501296695119359,
+      "iterations": 10,
+      "solve_time": 0.004960959,
+      "rel_err": 2.145472526073977e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.03501296883322048,
+      "iterations": 12,
+      "solve_time": 0.002210706,
+      "rel_err": 7.520700365468122e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.03501298387582216,
+      "iterations": 16,
+      "solve_time": 0.013957833,
+      "rel_err": 5.048362122691973e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QE226",
+    "n": 282,
+    "m": 505,
+    "opt": 212.653433,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 212.6534328709164,
+      "iterations": 17,
+      "solve_time": 0.01985775,
+      "rel_err": 6.070140268297999e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 212.6534344695481,
+      "iterations": 24,
+      "solve_time": 0.006333664,
+      "rel_err": 6.9105307390018926e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 212.65342769749384,
+      "iterations": 53,
+      "solve_time": 0.043941125,
+      "rel_err": 2.4934966215577737e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCFXM1",
+    "n": 457,
+    "m": 787,
+    "opt": 16882691.7,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 16882691.63931353,
+      "iterations": 25,
+      "solve_time": 0.037640834,
+      "rel_err": 3.594596771441604e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 16882691.675983284,
+      "iterations": 26,
+      "solve_time": 0.007702622,
+      "rel_err": 1.4225643643178924e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 16882691.484926276,
+      "iterations": 198,
+      "solve_time": 0.165093708,
+      "rel_err": 1.2739302900733237e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QETAMACR",
+    "n": 688,
+    "m": 1088,
+    "opt": 86760.3699,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 86760.36962579352,
+      "iterations": 32,
+      "solve_time": 0.128266084,
+      "rel_err": 3.1605038439616084e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 86760.36986893491,
+      "iterations": 20,
+      "solve_time": 0.088490169,
+      "rel_err": 3.5805626429754655e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 86760.35859711237,
+      "iterations": 97,
+      "solve_time": 0.180102709,
+      "rel_err": 1.3027707984336875e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QFORPLAN",
+    "n": 421,
+    "m": 582,
+    "opt": 7456631480.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 7456631406.02752,
+      "iterations": 24,
+      "solve_time": 0.036153291,
+      "rel_err": 9.920361495490114e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 7456631464.8852,
+      "iterations": 21,
+      "solve_time": 0.007174498,
+      "rel_err": 2.027027954073712e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 7456631458.010684,
+      "iterations": 98,
+      "solve_time": 0.088254208,
+      "rel_err": 2.948961075200313e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QGROW7",
+    "n": 301,
+    "m": 441,
+    "opt": -42798713.8,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -42798713.872541346,
+      "iterations": 29,
+      "solve_time": 0.044227625,
+      "rel_err": 1.6949422557926722e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -42798713.85293761,
+      "iterations": 22,
+      "solve_time": 0.005549044,
+      "rel_err": 1.2368972609649897e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -42798713.91311966,
+      "iterations": 90,
+      "solve_time": 0.062533375,
+      "rel_err": 2.643062173261656e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QBANDM",
+    "n": 472,
+    "m": 777,
+    "opt": 16352.342,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 16352.342036881004,
+      "iterations": 19,
+      "solve_time": 0.02248275,
+      "rel_err": 2.2553957862381616e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 16352.342427537973,
+      "iterations": 21,
+      "solve_time": 0.005063251,
+      "rel_err": 2.6145365676031918e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 16352.342032635917,
+      "iterations": 74,
+      "solve_time": 0.044842791,
+      "rel_err": 1.995794653179551e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSEBA",
+    "n": 1028,
+    "m": 1543,
+    "opt": 81481800.5,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 81481777.63077912,
+      "iterations": 19,
+      "solve_time": 0.072031,
+      "rel_err": 2.8066661195900046e-07,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 81481800.36970986,
+      "iterations": 30,
+      "solve_time": 0.015160122,
+      "rel_err": 1.599009041794969e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 81481798.63483198,
+      "iterations": 234,
+      "solve_time": 0.256289625,
+      "rel_err": 2.289060880692252e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMAL2",
+    "n": 649,
+    "m": 745,
+    "opt": -0.0337336761,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -0.03373367597586787,
+      "iterations": 9,
+      "solve_time": 0.018324167,
+      "rel_err": 3.6797687811888128e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -0.03373367401364834,
+      "iterations": 8,
+      "solve_time": 0.005384002,
+      "rel_err": 6.184774095460463e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -0.03373360228265362,
+      "iterations": 17,
+      "solve_time": 0.023474542,
+      "rel_err": 2.1882390215185757e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "GOULDQP2",
+    "n": 699,
+    "m": 1048,
+    "opt": 0.000184275341,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.00018427564621486796,
+      "iterations": 11,
+      "solve_time": 0.013658875,
+      "rel_err": 1.656295198067614e-06,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.0001842749399378116,
+      "iterations": 14,
+      "solve_time": 0.004418874,
+      "rel_err": 2.176428958142762e-06,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.0001845025158063382,
+      "iterations": 16,
+      "solve_time": 0.012204125,
+      "rel_err": 0.00123128297381395,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUAL2",
+    "n": 96,
+    "m": 97,
+    "opt": 0.0337336761,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.03373367683317598,
+      "iterations": 9,
+      "solve_time": 0.005571292,
+      "rel_err": 2.173424444326942e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.0337336762397864,
+      "iterations": 11,
+      "solve_time": 0.002502251,
+      "rel_err": 4.143823628355282e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.03373368524549387,
+      "iterations": 13,
+      "solve_time": 0.014136666,
+      "rel_err": 2.711086500807861e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "LASER",
+    "n": 1002,
+    "m": 2002,
+    "opt": 2409601.35,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2409601.3567875773,
+      "iterations": 16,
+      "solve_time": 0.039682583,
+      "rel_err": 2.816888013118595e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 2409601.357419756,
+      "iterations": 11,
+      "solve_time": 0.004827958,
+      "rel_err": 3.0792461414839226e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 2409601.201980872,
+      "iterations": 49,
+      "solve_time": 0.088727375,
+      "rel_err": 6.142888657221337e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHIP04S",
+    "n": 1458,
+    "m": 1860,
+    "opt": 2424993.67,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2424993.6730044773,
+      "iterations": 18,
+      "solve_time": 0.051450042,
+      "rel_err": 1.2389629683577936e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 2424993.676150411,
+      "iterations": 15,
+      "solve_time": 0.006629582,
+      "rel_err": 2.5362585629602357e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 2424993.6689381804,
+      "iterations": 48,
+      "solve_time": 0.056129083,
+      "rel_err": 4.3786485173406635e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCTAP2",
+    "n": 1880,
+    "m": 2970,
+    "opt": 1735.0265,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1735.0264976497776,
+      "iterations": 15,
+      "solve_time": 0.063080708,
+      "rel_err": 1.3545742978528818e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1735.026497805103,
+      "iterations": 12,
+      "solve_time": 0.010798167,
+      "rel_err": 1.2650509826999524e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1735.026448562425,
+      "iterations": 32,
+      "solve_time": 0.088605667,
+      "rel_err": 2.964656444093092e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QPCBOEI1",
+    "n": 384,
+    "m": 735,
+    "opt": 11503914.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 11503914.009768227,
+      "iterations": 29,
+      "solve_time": 0.06291725,
+      "rel_err": 8.491220559349677e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 11503914.028979536,
+      "iterations": 17,
+      "solve_time": 0.006098709,
+      "rel_err": 2.5191022875278018e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 11503913.752340391,
+      "iterations": 123,
+      "solve_time": 0.107155917,
+      "rel_err": 2.1528291042660185e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QFFFFF80",
+    "n": 854,
+    "m": 1378,
+    "opt": 873147.466,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 873147.4605204633,
+      "iterations": 28,
+      "solve_time": 0.154086042,
+      "rel_err": 6.275614293264848e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 873147.4662026004,
+      "iterations": 27,
+      "solve_time": 0.032528878,
+      "rel_err": 2.3203454901411603e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 873147.4427798768,
+      "iterations": 300,
+      "solve_time": 0.62345475,
+      "rel_err": 2.6593587179336797e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCRS8",
+    "n": 1169,
+    "m": 1659,
+    "opt": 904.560014,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 904.5600138528723,
+      "iterations": 25,
+      "solve_time": 0.062849834,
+      "rel_err": 1.626511288067965e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 904.560016237992,
+      "iterations": 33,
+      "solve_time": 0.014964454,
+      "rel_err": 2.4741222040131553e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 904.5600015727061,
+      "iterations": 84,
+      "solve_time": 0.091721375,
+      "rel_err": 1.3738495721253325e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSIERRA",
+    "n": 2036,
+    "m": 3263,
+    "opt": 23750458.2,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 23750458.1787455,
+      "iterations": 26,
+      "solve_time": 0.166848416,
+      "rel_err": 8.949089879686115e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 23750458.178927127,
+      "iterations": 51,
+      "solve_time": 0.044550043,
+      "rel_err": 8.872617027258573e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 23750458.149275534,
+      "iterations": 67,
+      "solve_time": 0.15813475,
+      "rel_err": 2.1357257604394572e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHIP04L",
+    "n": 2118,
+    "m": 2520,
+    "opt": 2420015.53,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2420015.5341089624,
+      "iterations": 17,
+      "solve_time": 0.069968583,
+      "rel_err": 1.6979075319970123e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 2420015.572676957,
+      "iterations": 15,
+      "solve_time": 0.009569249,
+      "rel_err": 1.763499285128116e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 2420015.5285034645,
+      "iterations": 53,
+      "solve_time": 0.09210625,
+      "rel_err": 6.18399031608819e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "MOSARQP2",
+    "n": 900,
+    "m": 1500,
+    "opt": -1597.48211,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -1597.4821175216316,
+      "iterations": 13,
+      "solve_time": 0.020613375,
+      "rel_err": 4.708429349392408e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -1597.4821171691863,
+      "iterations": 10,
+      "solve_time": 0.00638625,
+      "rel_err": 4.487803819365786e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -1597.4821333773798,
+      "iterations": 16,
+      "solve_time": 0.021652334,
+      "rel_err": 1.4633891288681463e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "GOULDQP3",
+    "n": 699,
+    "m": 1048,
+    "opt": 2.06278397,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2.062783971821773,
+      "iterations": 15,
+      "solve_time": 0.021738959,
+      "rel_err": 8.831622601295839e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 2.062805958859826,
+      "iterations": 7,
+      "solve_time": 0.002071874,
+      "rel_err": 1.0659684073458831e-05,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 2.0627835023842636,
+      "iterations": 16,
+      "solve_time": 0.012377958,
+      "rel_err": 2.266915698180393e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCTAP3",
+    "n": 2480,
+    "m": 3960,
+    "opt": 1438.75468,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1438.7546808988093,
+      "iterations": 17,
+      "solve_time": 0.102372083,
+      "rel_err": 6.247133634581646e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1438.7546809873813,
+      "iterations": 12,
+      "solve_time": 0.014151959,
+      "rel_err": 6.862749709663616e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1438.754630379068,
+      "iterations": 30,
+      "solve_time": 0.107457125,
+      "rel_err": 3.4488806689238746e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCSD8",
+    "n": 2750,
+    "m": 3147,
+    "opt": 940.763574,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 940.763574218724,
+      "iterations": 13,
+      "solve_time": 0.06113525,
+      "rel_err": 2.324962889326387e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 940.7635764065974,
+      "iterations": 11,
+      "solve_time": 0.010308875,
+      "rel_err": 2.558132038829856e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 940.7635202416197,
+      "iterations": 21,
+      "solve_time": 0.066573125,
+      "rel_err": 5.714334790376548e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DUAL3",
+    "n": 111,
+    "m": 112,
+    "opt": 0.135755839,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.13575583769680952,
+      "iterations": 10,
+      "solve_time": 0.007351958,
+      "rel_err": 9.599516910662097e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.13575583786424678,
+      "iterations": 12,
+      "solve_time": 0.003931127,
+      "rel_err": 8.366146326119171e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.13575584680154648,
+      "iterations": 14,
+      "solve_time": 0.018782125,
+      "rel_err": 5.746748059819059e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QGROW15",
+    "n": 645,
+    "m": 945,
+    "opt": -101693640.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -101693640.15122537,
+      "iterations": 18,
+      "solve_time": 0.047050958,
+      "rel_err": 1.4870681482542636e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -101693640.4547979,
+      "iterations": 22,
+      "solve_time": 0.01128425,
+      "rel_err": 4.472235350496111e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -101693640.57203528,
+      "iterations": 154,
+      "solve_time": 0.201049166,
+      "rel_err": 5.625084121607988e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCFXM2",
+    "n": 914,
+    "m": 1574,
+    "opt": 27776161.7,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 27776161.578606736,
+      "iterations": 30,
+      "solve_time": 0.078081417,
+      "rel_err": 4.3704117455507305e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 27776161.7392698,
+      "iterations": 32,
+      "solve_time": 0.018491502,
+      "rel_err": 1.4137950951559682e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 27776161.38049831,
+      "iterations": 279,
+      "solve_time": 0.386136167,
+      "rel_err": 1.1502730075427944e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSTAIR",
+    "n": 467,
+    "m": 823,
+    "opt": 7985452.76,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 7985452.756288445,
+      "iterations": 26,
+      "solve_time": 0.072511,
+      "rel_err": 4.647895698191426e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 7985452.753515017,
+      "iterations": 31,
+      "solve_time": 0.017404958,
+      "rel_err": 8.120995455735156e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 7985452.750552103,
+      "iterations": 224,
+      "solve_time": 0.219969625,
+      "rel_err": 1.1831385316578258e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "AUG3DQP",
+    "n": 3873,
+    "m": 4873,
+    "opt": 675.237673,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 675.2376712767777,
+      "iterations": 17,
+      "solve_time": 0.086824458,
+      "rel_err": 2.5520232284883706e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 675.2376720166599,
+      "iterations": 13,
+      "solve_time": 0.026464874,
+      "rel_err": 1.456287378832078e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 675.2376688561621,
+      "iterations": 21,
+      "solve_time": 0.071085708,
+      "rel_err": 6.136858166001017e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "AUG3D",
+    "n": 3873,
+    "m": 4873,
+    "opt": 554.067726,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 554.0677257966724,
+      "iterations": 4,
+      "solve_time": 0.013400375,
+      "rel_err": 3.6697236724280455e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 554.067725792529,
+      "iterations": 0,
+      "solve_time": 0.002682416,
+      "rel_err": 3.7445056944294865e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 554.0677257925186,
+      "iterations": 2,
+      "solve_time": 0.029664459,
+      "rel_err": 3.7446944653789493e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QPCSTAIR",
+    "n": 467,
+    "m": 823,
+    "opt": 6204387.48,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 6204387.476082522,
+      "iterations": 27,
+      "solve_time": 0.06320575,
+      "rel_err": 6.314044758789894e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 6204387.49447738,
+      "iterations": 22,
+      "solve_time": 0.009349167,
+      "rel_err": 2.3334099672146142e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 6204387.459008542,
+      "iterations": 220,
+      "solve_time": 0.180984917,
+      "rel_err": 3.3833248850450805e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP2_M",
+    "n": 1000,
+    "m": 1250,
+    "opt": 820155.431,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 820155.4310157005,
+      "iterations": 16,
+      "solve_time": 0.125004875,
+      "rel_err": 1.914328455286524e-11,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 820155.4311292585,
+      "iterations": 10,
+      "solve_time": 0.051976375,
+      "rel_err": 1.5760243492328282e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 820155.4261748999,
+      "iterations": 15,
+      "solve_time": 0.047449583,
+      "rel_err": 5.883153226190835e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "YAO",
+    "n": 2002,
+    "m": 4002,
+    "opt": 197.704256,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 197.7042559484383,
+      "iterations": 22,
+      "solve_time": 0.093335792,
+      "rel_err": 2.6080216963320363e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 91.02240770952696,
+      "iterations": 49,
+      "solve_time": 0.02902133,
+      "rel_err": 0.5396031954439718,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 196.17711948292526,
+      "iterations": 27,
+      "solve_time": 0.0604435,
+      "rel_err": 0.007724348215724416,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "AUG3DCQP",
+    "n": 3873,
+    "m": 4873,
+    "opt": 993.362148,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 993.362146527908,
+      "iterations": 14,
+      "solve_time": 0.074711041,
+      "rel_err": 1.4819289192862852e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 993.362148207596,
+      "iterations": 11,
+      "solve_time": 0.022342375,
+      "rel_err": 2.0898311629841934e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 993.3621385711285,
+      "iterations": 21,
+      "solve_time": 0.070060459,
+      "rel_err": 9.491877197818475e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP1_M",
+    "n": 1000,
+    "m": 1500,
+    "opt": 1087511.57,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1087511.5673214828,
+      "iterations": 16,
+      "solve_time": 0.244616083,
+      "rel_err": 2.4629781660224566e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1087511.5713252237,
+      "iterations": 10,
+      "solve_time": 0.070214915,
+      "rel_err": 1.2185834430148181e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1087511.562783754,
+      "iterations": 18,
+      "solve_time": 0.138611667,
+      "rel_err": 6.635558001596799e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "AUG3DC",
+    "n": 3873,
+    "m": 4873,
+    "opt": 771.262439,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 771.2624386925118,
+      "iterations": 4,
+      "solve_time": 0.019714292,
+      "rel_err": 3.986817015880457e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 771.262438688982,
+      "iterations": 0,
+      "solve_time": 0.002521542,
+      "rel_err": 4.0325828766185643e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 771.2624386889811,
+      "iterations": 1,
+      "solve_time": 0.0098115,
+      "rel_err": 4.0325946689042483e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMAL4",
+    "n": 1489,
+    "m": 1564,
+    "opt": -0.746090829,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -0.7460908412736914,
+      "iterations": 9,
+      "solve_time": 0.03713675,
+      "rel_err": 1.6450666215933082e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -0.7460908391843186,
+      "iterations": 10,
+      "solve_time": 0.012452832,
+      "rel_err": 1.3650239455823225e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -0.746090692988298,
+      "iterations": 13,
+      "solve_time": 0.0380675,
+      "rel_err": 1.8229912059696698e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QGROW22",
+    "n": 946,
+    "m": 1386,
+    "opt": -149628953.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -149628953.20109028,
+      "iterations": 21,
+      "solve_time": 0.081982209,
+      "rel_err": 1.3439262384670432e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -149628953.43527082,
+      "iterations": 27,
+      "solve_time": 0.019202541,
+      "rel_err": 2.9090012734468536e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -149628953.62558672,
+      "iterations": 166,
+      "solve_time": 0.341205292,
+      "rel_err": 4.180920224078012e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "PRIMAL3",
+    "n": 745,
+    "m": 856,
+    "opt": -0.135755836,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -0.1357558357199277,
+      "iterations": 9,
+      "solve_time": 0.044985459,
+      "rel_err": 2.0630589957562266e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -0.13575583422619372,
+      "iterations": 9,
+      "solve_time": 0.016567251,
+      "rel_err": 1.306615111953366e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -0.13575575691593725,
+      "iterations": 15,
+      "solve_time": 0.048496584,
+      "rel_err": 5.825463204611625e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP3_M",
+    "n": 1000,
+    "m": 1750,
+    "opt": 1362828.74,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1362828.7415953067,
+      "iterations": 16,
+      "solve_time": 0.370432792,
+      "rel_err": 1.1705848484041403e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1362828.741728385,
+      "iterations": 12,
+      "solve_time": 0.10141129,
+      "rel_err": 1.2682334437637873e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1362828.7375735957,
+      "iterations": 19,
+      "solve_time": 0.200030791,
+      "rel_err": 1.7804175990135416e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "STADAT1",
+    "n": 2001,
+    "m": 6000,
+    "opt": -28526863.8,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -28526864.04498583,
+      "iterations": 22,
+      "solve_time": 0.287112041,
+      "rel_err": 8.587899099335004e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -28526864.044553872,
+      "iterations": 15,
+      "solve_time": 0.014510958,
+      "rel_err": 8.572756930830492e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -28526864.06803206,
+      "iterations": 53,
+      "solve_time": 0.516087959,
+      "rel_err": 9.395777202647796e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHIP08S",
+    "n": 2387,
+    "m": 3165,
+    "opt": 2385728.85,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2385728.851390573,
+      "iterations": 19,
+      "solve_time": 0.11583875,
+      "rel_err": 5.828713946978203e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 2385728.8742957995,
+      "iterations": 15,
+      "solve_time": 0.029489665,
+      "rel_err": 1.0183805752594778e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 2385728.845651226,
+      "iterations": 44,
+      "solve_time": 0.206163084,
+      "rel_err": 1.822828262702729e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSCFXM3",
+    "n": 1371,
+    "m": 2361,
+    "opt": 30816354.5,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 30816354.470865868,
+      "iterations": 34,
+      "solve_time": 0.13024225,
+      "rel_err": 9.454113713554728e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 30816354.573380988,
+      "iterations": 34,
+      "solve_time": 0.029644338,
+      "rel_err": 2.381235194983657e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 30816354.267472222,
+      "iterations": 282,
+      "solve_time": 0.59713325,
+      "rel_err": 7.545596529031514e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHELL",
+    "n": 1775,
+    "m": 2311,
+    "opt": 1572636840000.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1572636843570.9807,
+      "iterations": 33,
+      "solve_time": 0.447876792,
+      "rel_err": 2.27069633239802e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1572636843516.9392,
+      "iterations": 35,
+      "solve_time": 0.11231175,
+      "rel_err": 2.236332706741964e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1572636839939.3213,
+      "iterations": 508,
+      "solve_time": 1.7532815419999999,
+      "rel_err": 3.858405793005587e-11,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CONT-050",
+    "n": 2597,
+    "m": 4998,
+    "opt": -4.5638509,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -4.563850904217506,
+      "iterations": 14,
+      "solve_time": 0.1054065,
+      "rel_err": 9.241111387065655e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -4.563850904249411,
+      "iterations": 9,
+      "solve_time": 0.047208081,
+      "rel_err": 9.311019773278003e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -4.563850909898039,
+      "iterations": 18,
+      "solve_time": 0.079568417,
+      "rel_err": 2.1687910118916848e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "STADAT2",
+    "n": 2001,
+    "m": 6000,
+    "opt": -32.6266649,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -32.626664872275896,
+      "iterations": 17,
+      "solve_time": 0.122104042,
+      "rel_err": 8.497376536288911e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -32.626664902294685,
+      "iterations": 45,
+      "solve_time": 0.055881915,
+      "rel_err": 7.033153897752937e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -32.626659308652584,
+      "iterations": 21,
+      "solve_time": 0.092077209,
+      "rel_err": 1.7137355087330952e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHIP12S",
+    "n": 2763,
+    "m": 3914,
+    "opt": 3056962.26,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 3056962.249278299,
+      "iterations": 24,
+      "solve_time": 0.121340209,
+      "rel_err": 3.507305560149407e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 3056962.2782944604,
+      "iterations": 15,
+      "solve_time": 0.030285875,
+      "rel_err": 5.984522849930878e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 3056962.239383235,
+      "iterations": 50,
+      "solve_time": 0.299070459,
+      "rel_err": 6.7441999327709254e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "MOSARQP1",
+    "n": 2500,
+    "m": 3200,
+    "opt": -952.875441,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -952.8754430267406,
+      "iterations": 13,
+      "solve_time": 0.035967958,
+      "rel_err": 2.1269732911509434e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -952.8754406278966,
+      "iterations": 10,
+      "solve_time": 0.009060502,
+      "rel_err": 3.90505799934623e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -952.8754616684272,
+      "iterations": 16,
+      "solve_time": 0.035831167,
+      "rel_err": 2.1690586021249978e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QPILOTNO",
+    "n": 2172,
+    "m": 3147,
+    "opt": 4728586.9,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 4728586.824885189,
+      "iterations": 36,
+      "solve_time": 0.649719208,
+      "rel_err": 1.5885255650185463e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 4728586.906008377,
+      "iterations": 33,
+      "solve_time": 0.932909626,
+      "rel_err": 1.2706494533822811e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolvedToAcceptableLevel",
+      "objective": 4728585.63226385,
+      "iterations": 343,
+      "solve_time": 2.457916375,
+      "rel_err": 2.6810042339537325e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "STADAT3",
+    "n": 4001,
+    "m": 12000,
+    "opt": -35.779453,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -35.77945295081774,
+      "iterations": 18,
+      "solve_time": 0.296574125,
+      "rel_err": 1.3745949305956961e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -35.779453242627156,
+      "iterations": 54,
+      "solve_time": 0.133950003,
+      "rel_err": 6.781186889785774e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -35.77944150455796,
+      "iterations": 22,
+      "solve_time": 0.18760925,
+      "rel_err": 3.212861314080838e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHIP08L",
+    "n": 4283,
+    "m": 5061,
+    "opt": 2376040.62,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 2376040.6165791694,
+      "iterations": 19,
+      "solve_time": 0.326048834,
+      "rel_err": 1.4397189490269713e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 2376040.6173984352,
+      "iterations": 16,
+      "solve_time": 0.340042002,
+      "rel_err": 1.094915987519628e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 2376040.605414123,
+      "iterations": 47,
+      "solve_time": 0.639659417,
+      "rel_err": 6.138732301232319e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "Q25FV47",
+    "n": 1571,
+    "m": 2391,
+    "opt": 13744447.9,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 13744447.892313523,
+      "iterations": 36,
+      "solve_time": 0.842289292,
+      "rel_err": 5.592423362813527e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 13744447.985873329,
+      "iterations": 26,
+      "solve_time": 0.349582706,
+      "rel_err": 6.24785573328082e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 13744447.807829177,
+      "iterations": 418,
+      "solve_time": 7.641878042,
+      "rel_err": 6.706040434366949e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "POWELL20",
+    "n": 10000,
+    "m": 20000,
+    "opt": 52089582800.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 52089582498.78505,
+      "iterations": 15,
+      "solve_time": 0.174663792,
+      "rel_err": 5.782633194012132e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "PrimalInfeasible",
+      "objective": null,
+      "iterations": 14,
+      "solve_time": 0.059440875,
+      "rel_err": null,
+      "solved": false,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 52088540527.57659,
+      "iterations": 2087,
+      "solve_time": 17.54840325,
+      "rel_err": 2.0009229626782657e-05,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "STCQP2",
+    "n": 4097,
+    "m": 6149,
+    "opt": 22327.3133,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 22327.313272417177,
+      "iterations": 13,
+      "solve_time": 0.062801958,
+      "rel_err": 1.2353848350978226e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 22327.313276567507,
+      "iterations": 9,
+      "solve_time": 0.238077293,
+      "rel_err": 1.0494990610844455e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 22327.31325490539,
+      "iterations": 16,
+      "solve_time": 0.248398333,
+      "rel_err": 2.0197060592619986e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "STCQP1",
+    "n": 4097,
+    "m": 6149,
+    "opt": 155143.555,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 155143.55470395723,
+      "iterations": 13,
+      "solve_time": 0.055235875,
+      "rel_err": 1.908186043706639e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 155143.5552624174,
+      "iterations": 7,
+      "solve_time": 0.111682956,
+      "rel_err": 1.6914488876157718e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 155143.55462704753,
+      "iterations": 17,
+      "solve_time": 0.506896375,
+      "rel_err": 2.4039184964886647e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CONT-101",
+    "n": 10197,
+    "m": 20295,
+    "opt": 0.19552733,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.1955273247915685,
+      "iterations": 15,
+      "solve_time": 0.629524292,
+      "rel_err": 2.66378694561753e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.19552732462207006,
+      "iterations": 10,
+      "solve_time": 0.49876846,
+      "rel_err": 2.7504747979289756e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.195527328352314,
+      "iterations": 24,
+      "solve_time": 0.42334175,
+      "rel_err": 8.426883278409639e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "QSHIP12L",
+    "n": 5427,
+    "m": 6578,
+    "opt": 3018876.58,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 3018876.577180359,
+      "iterations": 26,
+      "solve_time": 0.508172,
+      "rel_err": 9.340034124878245e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 3018876.57916143,
+      "iterations": 16,
+      "solve_time": 0.483696914,
+      "rel_err": 2.7777561438579043e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 3018876.564154393,
+      "iterations": 54,
+      "solve_time": 1.067195417,
+      "rel_err": 5.248842281211126e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "UBH1",
+    "n": 18009,
+    "m": 30009,
+    "opt": 1.11600082,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1.1160008156948102,
+      "iterations": 10,
+      "solve_time": 0.213764792,
+      "rel_err": 3.85769408327612e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1.1166280828462263,
+      "iterations": 16,
+      "solve_time": 0.074454748,
+      "rel_err": 0.0005617473318666793,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1.1160008156948156,
+      "iterations": 5,
+      "solve_time": 0.085878209,
+      "rel_err": 3.857689308126834e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "DTOC3",
+    "n": 14999,
+    "m": 24997,
+    "opt": 235.262481,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 235.26248103453347,
+      "iterations": 12,
+      "solve_time": 0.149108541,
+      "rel_err": 1.4678692850234017e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 235.26248103523216,
+      "iterations": 0,
+      "solve_time": 0.007031834,
+      "rel_err": 1.4975676406537e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 235.262481035225,
+      "iterations": 1,
+      "solve_time": 0.028640125,
+      "rel_err": 1.497263203212427e-10,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "LISWET5",
+    "n": 10002,
+    "m": 20002,
+    "opt": 25.0342534,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 25.03425342490118,
+      "iterations": 24,
+      "solve_time": 0.357343167,
+      "rel_err": 9.946843375824799e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 25.034280460069567,
+      "iterations": 11,
+      "solve_time": 0.03926146,
+      "rel_err": 1.0809206044325097e-06,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 25.03423618445231,
+      "iterations": 32,
+      "solve_time": 0.320718791,
+      "rel_err": 6.876796928815436e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "LISWET6",
+    "n": 10002,
+    "m": 20002,
+    "opt": 24.9957476,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 24.995747563763416,
+      "iterations": 23,
+      "solve_time": 0.374524625,
+      "rel_err": 1.449710001390478e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 24.995728165835317,
+      "iterations": 20,
+      "solve_time": 0.064228789,
+      "rel_err": 7.774988368277352e-07,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 24.99571366271539,
+      "iterations": 32,
+      "solve_time": 0.333574708,
+      "rel_err": 1.3577223276475109e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "LISWET7",
+    "n": 10002,
+    "m": 20002,
+    "opt": 498.840891,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 498.8408907994831,
+      "iterations": 22,
+      "solve_time": 0.45879425,
+      "rel_err": 4.019656884493155e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 42.06503136857509,
+      "iterations": 168,
+      "solve_time": 0.484685376,
+      "rel_err": 0.9156744522602196,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 391.1951305717339,
+      "iterations": 20,
+      "solve_time": 0.204297625,
+      "rel_err": 0.2157917732294847,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "LISWET10",
+    "n": 10002,
+    "m": 20002,
+    "opt": 49.4857847,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 49.485784688471085,
+      "iterations": 25,
+      "solve_time": 0.578856041,
+      "rel_err": 2.3297434474152864e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 25.179551232987706,
+      "iterations": 38,
+      "solve_time": 0.116414663,
+      "rel_err": 0.4911760743891426,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 39.30500436766579,
+      "iterations": 129,
+      "solve_time": 1.258613709,
+      "rel_err": 0.20573141143570095,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "LISWET1",
+    "n": 10002,
+    "m": 20002,
+    "opt": 36.1224021,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 36.1224020919949,
+      "iterations": 21,
+      "solve_time": 0.418807375,
+      "rel_err": 2.2161046589882585e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 26.30101285522551,
+      "iterations": 152,
+      "solve_time": 0.437097615,
+      "rel_err": 0.27189191952366015,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 27.122076276818007,
+      "iterations": 39,
+      "solve_time": 0.386141291,
+      "rel_err": 0.24916188569812733,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "LISWET8",
+    "n": 10002,
+    "m": 20002,
+    "opt": 714.470057,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 714.470059026055,
+      "iterations": 26,
+      "solve_time": 0.611226458,
+      "rel_err": 2.8357451039376803e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 55.25397885991924,
+      "iterations": 170,
+      "solve_time": 0.473678494,
+      "rel_err": 0.9226643883552992,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 650.9596946075535,
+      "iterations": 112,
+      "solve_time": 1.080093375,
+      "rel_err": 0.0888915662317903,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "LISWET2",
+    "n": 10002,
+    "m": 20002,
+    "opt": 24.9980761,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 24.99807571068527,
+      "iterations": 26,
+      "solve_time": 0.346940834,
+      "rel_err": 1.5573787616838194e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 24.99806814387648,
+      "iterations": 18,
+      "solve_time": 0.060418669,
+      "rel_err": 3.1826943347159556e-07,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 24.997961699341886,
+      "iterations": 33,
+      "solve_time": 0.32281875,
+      "rel_err": 4.576378504298437e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "LISWET11",
+    "n": 10002,
+    "m": 20002,
+    "opt": 49.523957,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 49.52395714050999,
+      "iterations": 22,
+      "solve_time": 0.480338375,
+      "rel_err": 2.837212483298383e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 36.527316535223235,
+      "iterations": 179,
+      "solve_time": 0.502836461,
+      "rel_err": 0.262431381740695,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 46.550547346588246,
+      "iterations": 52,
+      "solve_time": 0.474644042,
+      "rel_err": 0.06003982382530049,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "LISWET12",
+    "n": 10002,
+    "m": 20002,
+    "opt": 1736.92742,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1736.927426120601,
+      "iterations": 24,
+      "solve_time": 0.526585834,
+      "rel_err": 3.5238093063795348e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 236.0199613126074,
+      "iterations": 145,
+      "solve_time": 0.405984881,
+      "rel_err": 0.8641163939293403,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1672.2074170465924,
+      "iterations": 100,
+      "solve_time": 0.964369875,
+      "rel_err": 0.03726120171066655,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "LISWET9",
+    "n": 10002,
+    "m": 20002,
+    "opt": 1963.25126,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1963.2512609008804,
+      "iterations": 25,
+      "solve_time": 0.573049167,
+      "rel_err": 4.588716893484624e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": 547.900736175141,
+      "iterations": 168,
+      "solve_time": 0.472618427,
+      "rel_err": 0.7209217447922885,
+      "solved": true,
+      "correct": false
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1899.3778414905262,
+      "iterations": 65,
+      "solve_time": 0.6274835,
+      "rel_err": 0.032534510386344445,
+      "solved": true,
+      "correct": false
+    }
+  },
+  {
+    "name": "LISWET3",
+    "n": 10002,
+    "m": 20002,
+    "opt": 25.00122,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 25.00122001063562,
+      "iterations": 20,
+      "solve_time": 0.289791667,
+      "rel_err": 4.2540405547677876e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 25.001221393492074,
+      "iterations": 23,
+      "solve_time": 0.072499289,
+      "rel_err": 5.573695987884924e-08,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 25.001197179283736,
+      "iterations": 35,
+      "solve_time": 0.345935125,
+      "rel_err": 9.127841067055562e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "LISWET4",
+    "n": 10002,
+    "m": 20002,
+    "opt": 25.0001121,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 25.000112089979552,
+      "iterations": 21,
+      "solve_time": 0.332307125,
+      "rel_err": 4.0081607052574807e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 25.000102478681015,
+      "iterations": 27,
+      "solve_time": 0.084078997,
+      "rel_err": 3.848510336954693e-07,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 25.00008882229622,
+      "iterations": 39,
+      "solve_time": 0.382529958,
+      "rel_err": 9.311039760796e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "KSIP",
+    "n": 20,
+    "m": 1021,
+    "opt": 0.5757979412,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.5757979412506796,
+      "iterations": 11,
+      "solve_time": 0.041661042,
+      "rel_err": 8.801624323336671e-11,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.5757979412401398,
+      "iterations": 14,
+      "solve_time": 0.007874335,
+      "rel_err": 6.971157330288999e-11,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.5757979357592653,
+      "iterations": 25,
+      "solve_time": 0.056520458,
+      "rel_err": 9.449034743467931e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CONT-100",
+    "n": 10197,
+    "m": 19998,
+    "opt": -4.64439787,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -4.644397868737908,
+      "iterations": 14,
+      "solve_time": 0.61336875,
+      "rel_err": 2.717449709861445e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -4.644397868633559,
+      "iterations": 9,
+      "solve_time": 0.417913083,
+      "rel_err": 2.942125830938232e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -4.644397874835733,
+      "iterations": 19,
+      "solve_time": 0.356586333,
+      "rel_err": 1.0411970984519044e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "AUG2DQP",
+    "n": 20200,
+    "m": 30200,
+    "opt": 6237012.05,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 6237012.025567457,
+      "iterations": 65,
+      "solve_time": 2.877736,
+      "rel_err": 3.917347367293942e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 6237012.032949221,
+      "iterations": 14,
+      "solve_time": 0.161641456,
+      "rel_err": 2.7338056038043376e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 6237012.021856123,
+      "iterations": 30,
+      "solve_time": 0.519536583,
+      "rel_err": 4.512397432922933e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "AUG2DCQP",
+    "n": 20200,
+    "m": 30200,
+    "opt": 6498134.75,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 6498134.739473111,
+      "iterations": 25,
+      "solve_time": 1.182692333,
+      "rel_err": 1.6199862589511962e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 6498134.743930635,
+      "iterations": 12,
+      "solve_time": 0.148785624,
+      "rel_err": 9.340164818083259e-10,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 6498134.735645654,
+      "iterations": 28,
+      "solve_time": 0.512324042,
+      "rel_err": 2.2089948688788078e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "AUG2D",
+    "n": 20200,
+    "m": 30200,
+    "opt": 1687411.75,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1687411.7528967117,
+      "iterations": 32,
+      "solve_time": 0.656762,
+      "rel_err": 1.7166596658857177e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1687411.7528967485,
+      "iterations": 0,
+      "solve_time": 0.013267167,
+      "rel_err": 1.7166814668726855e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1687411.7528967317,
+      "iterations": 2,
+      "solve_time": 0.109344208,
+      "rel_err": 1.7166715322457129e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "AUG2DC",
+    "n": 20200,
+    "m": 30200,
+    "opt": 1818368.07,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 1818368.0655702057,
+      "iterations": 28,
+      "solve_time": 0.592132209,
+      "rel_err": 2.4361373560106304e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 1818368.0655701964,
+      "iterations": 0,
+      "solve_time": 0.013524458,
+      "rel_err": 2.4361424777601265e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 1818368.0655701964,
+      "iterations": 1,
+      "solve_time": 0.046169375,
+      "rel_err": 2.4361424777601265e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HUESTIS",
+    "n": 10000,
+    "m": 10002,
+    "opt": 348246902000.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 348244637980.84296,
+      "iterations": 14,
+      "solve_time": 0.16123,
+      "rel_err": 6.501189656077564e-06,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 348244638831.1369,
+      "iterations": 9,
+      "solve_time": 0.02587996,
+      "rel_err": 6.498748014987782e-06,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 348244638733.41675,
+      "iterations": 38,
+      "solve_time": 0.2155275,
+      "rel_err": 6.499028620940763e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "HUES-MOD",
+    "n": 10000,
+    "m": 10002,
+    "opt": 34824690.2,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 34824463.87334657,
+      "iterations": 55,
+      "solve_time": 0.444712625,
+      "rel_err": 6.499028480541265e-06,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 34824463.89881404,
+      "iterations": 13,
+      "solve_time": 0.037773209,
+      "rel_err": 6.498297175534903e-06,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 34824463.87334357,
+      "iterations": 30,
+      "solve_time": 0.173204833,
+      "rel_err": 6.499028566547296e-06,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP2_L",
+    "n": 10000,
+    "m": 12500,
+    "opt": 81842458.3,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 81842458.44409573,
+      "iterations": 13,
+      "solve_time": 10.106942625,
+      "rel_err": 1.7606476699403542e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 81842458.3938411,
+      "iterations": 10,
+      "solve_time": 1.103008209,
+      "rel_err": 1.1466066335392611e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 81842457.7793449,
+      "iterations": 22,
+      "solve_time": 7.518316583,
+      "rel_err": 6.36167469052234e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP1_L",
+    "n": 10000,
+    "m": 15000,
+    "opt": 108704800.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 108704799.91551572,
+      "iterations": 28,
+      "solve_time": 58.773451542,
+      "rel_err": 7.771899599256998e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 108704800.14080866,
+      "iterations": 11,
+      "solve_time": 2.05325454,
+      "rel_err": 1.2953306259642667e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 108704799.44513677,
+      "iterations": 18,
+      "solve_time": 26.42295375,
+      "rel_err": 5.104312131515435e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CVXQP3_L",
+    "n": 10000,
+    "m": 17500,
+    "opt": 115711104.0,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 115711099.43277621,
+      "iterations": 12,
+      "solve_time": 29.587902625,
+      "rel_err": 3.947092050308101e-08,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 115711104.59308727,
+      "iterations": 11,
+      "solve_time": 1.681818876,
+      "rel_err": 5.125586458979628e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 115711104.15632272,
+      "iterations": 16,
+      "solve_time": 38.8225965,
+      "rel_err": 1.3509742112169116e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CONT-201",
+    "n": 40397,
+    "m": 80595,
+    "opt": 0.192483373,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.19248337303338112,
+      "iterations": 16,
+      "solve_time": 4.202080542,
+      "rel_err": 1.7342330878205846e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.19248337264288987,
+      "iterations": 10,
+      "solve_time": 3.088928208,
+      "rel_err": 1.8552778946211104e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.1924833771908936,
+      "iterations": 27,
+      "solve_time": 2.626303,
+      "rel_err": 2.177275584925101e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CONT-200",
+    "n": 40397,
+    "m": 79998,
+    "opt": -4.6848759,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -4.684875920354904,
+      "iterations": 16,
+      "solve_time": 3.6794925000000003,
+      "rel_err": 4.344811853010891e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -4.684875920362383,
+      "iterations": 11,
+      "solve_time": 2.770954754,
+      "rel_err": 4.346408151907277e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -4.684875926222781,
+      "iterations": 19,
+      "solve_time": 1.7255216249999998,
+      "rel_err": 5.5973267366485194e-09,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "CONT-300",
+    "n": 90597,
+    "m": 180895,
+    "opt": 0.191512321,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 0.19151228607601795,
+      "iterations": 15,
+      "solve_time": 9.927424667,
+      "rel_err": 1.823589306684445e-07,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": 0.1915122860802132,
+      "iterations": 11,
+      "solve_time": 5.6980705,
+      "rel_err": 1.823370247397168e-07,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": 0.19151229230382472,
+      "iterations": 25,
+      "solve_time": 6.518116833,
+      "rel_err": 1.498398387490948e-07,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "BOYD2",
+    "n": 93263,
+    "m": 279794,
+    "opt": 21.256767,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": 21.256767019240634,
+      "iterations": 34,
+      "solve_time": 19.985123625,
+      "rel_err": 9.051533545785133e-10,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "MaxIterations",
+      "objective": null,
+      "iterations": 200,
+      "solve_time": 6.834993333,
+      "rel_err": null,
+      "solved": false,
+      "correct": false
+    },
+    "nlp": {
+      "status": "TimeOut",
+      "objective": null,
+      "iterations": null,
+      "solve_time": 120.0,
+      "rel_err": null,
+      "solved": false,
+      "correct": false
+    }
+  },
+  {
+    "name": "BOYD1",
+    "n": 93261,
+    "m": 93279,
+    "opt": -61735219.6,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -61735219.66984442,
+      "iterations": 27,
+      "solve_time": 10.564526,
+      "rel_err": 1.1313544788132489e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "AlmostSolved",
+      "objective": -61735210.240298375,
+      "iterations": 90,
+      "solve_time": 3.545175626,
+      "rel_err": 1.5161040467089856e-07,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -61735221.42856431,
+      "iterations": 56,
+      "solve_time": 4.558666959,
+      "rel_err": 2.9619466266912534e-08,
+      "solved": true,
+      "correct": true
+    }
+  },
+  {
+    "name": "EXDATA",
+    "n": 3000,
+    "m": 6001,
+    "opt": -141.843432,
+    "qp_ipm": {
+      "status": "SolveSucceeded",
+      "objective": -141.84343218885604,
+      "iterations": 15,
+      "solve_time": 3.174128625,
+      "rel_err": 1.3314401089732436e-09,
+      "solved": true,
+      "correct": true
+    },
+    "clarabel": {
+      "status": "Solved",
+      "objective": -141.84343214646628,
+      "iterations": 22,
+      "solve_time": 1.104667041,
+      "rel_err": 1.0325911824911815e-09,
+      "solved": true,
+      "correct": true
+    },
+    "nlp": {
+      "status": "SolveSucceeded",
+      "objective": -141.84343084912206,
+      "iterations": 23,
+      "solve_time": 9.315430542,
+      "rel_err": 8.113720411003424e-09,
+      "solved": true,
+      "correct": true
+    }
+  }
+]

@@ -16,10 +16,13 @@ pounce-linsol.workspace = true
 # Dense symmetric eigensolver (cyclic Jacobi) for the QP reduced Hessian,
 # shared with the NLP sensitivity path.
 pounce-linalg.workspace = true
-# Active-set QP engine used by the LP-crossover phase to purify a
-# near-optimal interior iterate to an exact optimal vertex. Acyclic:
-# pounce-qp depends only on pounce-linalg/linsol/common/feral.
+# Active-set QP engine, retained for the legacy crossover bridge and its
+# tests. Acyclic: pounce-qp depends only on pounce-linalg/linsol/common/feral.
 pounce-qp.workspace = true
+# feral's unsymmetric sparse LU (factor / ftran / btran / column update) is the
+# basis engine for the revised-simplex LP crossover (`simplex.rs`). Already a
+# transitive workspace dependency via pounce-qp, so no new external crate.
+feral.workspace = true
 # Data-parallel presolve (duplicate-row hashing); already a transitive
 # workspace dependency via feral, so no new external crate is pulled in.
 rayon = "1"

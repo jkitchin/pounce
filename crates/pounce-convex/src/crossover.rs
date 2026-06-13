@@ -137,6 +137,31 @@ where
         return sol;
     }
 
+    // ---- Primary path: revised-simplex LU-basis crossover ----
+    // The architecturally-correct engine ([`crate::simplex`]) pivots one
+    // variable at a time on an unsymmetric LU basis, walking straight through
+    // degeneracy with Bland's rule — so it resolves the highly-degenerate NETLIB
+    // GEN vertices (issue #133) that the active-set bridge below stalls on. On
+    // any breakdown it returns `None` and we fall through to the bridge.
+    if let Some(v) = crate::simplex::crossover_simplex(prob, &sol, opts) {
+        let candidate = QpSolution {
+            status: QpStatus::Optimal,
+            x: v.x,
+            y: v.y,
+            z: v.z,
+            z_lb: v.z_lb,
+            z_ub: v.z_ub,
+            obj: v.obj,
+            iters: sol.iters,
+            iterates: sol.iterates.clone(),
+        };
+        let cand_err = candidate.kkt_residuals(prob).kkt_error();
+        let orig_err = sol.kkt_residuals(prob).kkt_error();
+        if cand_err.is_finite() && cand_err <= orig_err.max(0.0) + REGRESS_SLACK {
+            return candidate;
+        }
+    }
+
     // ---- Translate to pounce-qp form (owned locals outlive the borrow) ----
     // Hessian: pure LP ⇒ empty symmetric triplet of dimension n.
     let h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, Vec::new(), Vec::new()));

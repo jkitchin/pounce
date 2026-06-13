@@ -31,6 +31,8 @@
 !/benchmarks/benchmark_report.py
 !/benchmarks/BENCHMARK_REPORT.md
 !/benchmarks/BENCHMARK_REPORT.json
+!/benchmarks/qp_three_way.md
+!/benchmarks/qp_three_way.json
 !/benchmarks/figures
 !/benchmarks/figures/*
 !/benchmarks/preprocessing
