@@ -46,27 +46,6 @@ use std::collections::BTreeMap;
 /// toward the safe (more general) class.
 const PSD_TOL: f64 = 1e-9;
 
-/// Upper bound on the dense PSD-test dimension for a *coupled* Hessian.
-///
-/// The convexity check builds a dense `k×k` matrix over the variables that
-/// appear in the quadratic form and runs cyclic Jacobi at
-/// `O(MAX_SWEEPS · k³)`. For a Hessian with off-diagonal coupling the
-/// rotations cause fill-in, so the full cubic cost is paid; beyond a few
-/// hundred active variables that classifier cost dominates — or dwarfs —
-/// the actual solve. This was the root cause of the mittelmann regression
-/// (large convex `qcqp*` problems burned the entire CPU budget inside the
-/// classifier, emitting zero solver iterations).
-///
-/// When a *coupled* quadratic form exceeds this many active variables we
-/// cannot cheaply *prove* convexity, so we route to the general NLP
-/// filter-IPM — which solves convex QPs/QCQPs correctly anyway, and is
-/// exactly what the pre-classifier baseline did for these problems. A
-/// purely *diagonal* Hessian is exempt: it is PSD-tested in `O(nnz)` by
-/// sign (see [`hessian_is_psd`]), so its size never makes the test
-/// expensive (large separable / least-squares QPs stay on the convex
-/// fast path).
-const PSD_DENSE_MAX_VARS: usize = 256;
-
 /// Size budget (`n · m`) above which a convex QCQP is routed to the general
 /// NLP solver instead of the conic (SOCP) interior-point path.
 ///
@@ -84,6 +63,30 @@ const PSD_DENSE_MAX_VARS: usize = 256;
 /// `1e8` keeps the conic path for small-to-moderate QCQPs (e.g. 1e4 × 1e4)
 /// while bounding the reformulation cost to roughly a second.
 const SOCP_SIZE_BUDGET: u64 = 100_000_000;
+
+/// Per-constraint coupling budget for the QCQP→SOCP conic path.
+///
+/// The `n · m` [`SOCP_SIZE_BUDGET`] catches QCQPs that are large in the
+/// *problem* dimensions, but a problem can have a small `n · m` and still be
+/// ruinously expensive to put in conic form: each convex quadratic *row*
+/// `½xᵀQx ≤ b` is reformulated to a second-order cone via a factorization of
+/// its Hessian `Q` ([`crate::qp_extract::extract_socp_with_map`]), which costs
+/// `O(k³)` in the number of variables `k` that couple inside that one
+/// constraint. The mittelmann `qcqp1000-*` rows have only a handful of
+/// constraints (tiny `n · m`) but each couples ~1000 variables, so the
+/// per-row factorization alone exhausts the CPU budget before the conic solve
+/// starts.
+///
+/// When any single quadratic constraint couples more than this many active
+/// variables we route the whole QCQP to the general NLP filter-IPM, which
+/// solves it soundly without the conic reformulation — exactly what the
+/// classifier did for these rows before the convexity certificate was made
+/// cheap. A *diagonal* (separable) constraint Hessian is exempt: it is
+/// SOC-representable in `O(nnz)` with no factorization, so its size is
+/// harmless. This guard governs only the conic *reformulation* cost; the
+/// convexity test itself is the cheap sparse factorization in
+/// [`coupled_hessian_is_psd`].
+const QCQP_SOCP_COUPLED_VARS: usize = 256;
 
 /// The `.nl` "infinity" sentinel for a missing bound: AMPL writes ±1e20-ish
 /// and upstream Ipopt treats any magnitude ≥ 1e19 as infinite. Used to read
@@ -251,14 +254,6 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
         } else {
             obj_quad.iter().map(|(k, v)| (*k, -v)).collect()
         };
-        // A large coupled Hessian is too costly to PSD-test (dense Jacobi);
-        // we cannot prove convexity in bounded time, so route to the general
-        // NLP solver rather than burn the CPU budget in classification.
-        // Reported as NLP (not nonconvex QP): it may well be convex — we just
-        // declined to verify.
-        if psd_test_too_expensive(&effective) {
-            return ProblemClass::Nlp;
-        }
         if !hessian_is_psd(&effective, prob.n) {
             return ProblemClass::NonconvexQp;
         }
@@ -295,10 +290,16 @@ pub fn classify_problem(prob: &NlProblem) -> ProblemClass {
                         // problem nonconvex. Ignore it.
                         continue;
                     }
-                    // Same size guard as the objective: a large coupled
-                    // constraint Hessian is too costly to PSD-test, so the
-                    // QCQP cannot be cheaply proven convex ⇒ fall back to NLP.
-                    if !upper_only || psd_test_too_expensive(&q) || !hessian_is_psd(&q, prob.n) {
+                    // Convexity (cheap sparse certificate) gates the QCQP
+                    // class; the per-row coupling guard then gates the *conic*
+                    // path: a convex but heavily-coupled constraint Hessian is
+                    // ruinous to put in SOC form, so route the whole QCQP to
+                    // NLP (which solves it soundly) rather than burn the budget
+                    // in the reformulation — the mittelmann `qcqp1000-*` rows.
+                    if !upper_only
+                        || !hessian_is_psd(&q, prob.n)
+                        || qcqp_constraint_too_costly_for_socp(&q)
+                    {
                         return ProblemClass::Nlp;
                     }
                 }
@@ -641,8 +642,8 @@ fn is_trivially_zero(e: &Expr) -> bool {
 // PSD test
 // ---------------------------------------------------------------------
 
-/// Number of distinct variables appearing in a sparse Hessian — i.e. the
-/// dimension `k` of the dense matrix the PSD test would build.
+/// Number of distinct variables that couple inside a quadratic form — the
+/// dimension `k` of the matrix that would be factored.
 fn hessian_active_vars(h: &QuadHessian) -> usize {
     let mut active: Vec<usize> = Vec::with_capacity(2 * h.len());
     for (i, j) in h.keys() {
@@ -654,46 +655,74 @@ fn hessian_active_vars(h: &QuadHessian) -> usize {
     active.len()
 }
 
-/// True when the dense Jacobi PSD test on this Hessian would be too costly
-/// to run in the classifier — a *coupled* (off-diagonal) form over more
-/// than [`PSD_DENSE_MAX_VARS`] active variables. A purely diagonal Hessian
-/// is exempt: [`hessian_is_psd`] settles it in `O(nnz)` by sign, regardless
-/// of size. Callers use this to route oversized convex forms to the general
-/// NLP solver instead of hanging in classification (see [`classify_problem`]).
-fn psd_test_too_expensive(h: &QuadHessian) -> bool {
+/// True when reformulating this *convex* quadratic constraint to a
+/// second-order cone would be too costly — a *coupled* (off-diagonal) Hessian
+/// over more than [`QCQP_SOCP_COUPLED_VARS`] active variables, whose per-row
+/// `O(k³)` factorization dominates the budget. A purely diagonal constraint
+/// Hessian is exempt (SOC-representable in `O(nnz)`). Callers route such a
+/// QCQP to the general NLP solver instead of the conic path. This is about
+/// the *reformulation* cost, not convexity: the constraint is already known
+/// convex (PSD) when this is consulted.
+fn qcqp_constraint_too_costly_for_socp(h: &QuadHessian) -> bool {
     let has_offdiag = h.keys().any(|(i, j)| i != j);
-    has_offdiag && hessian_active_vars(h) > PSD_DENSE_MAX_VARS
+    has_offdiag && hessian_active_vars(h) > QCQP_SOCP_COUPLED_VARS
 }
 
 /// Is the (symmetric, sparse) Hessian positive semidefinite?
 ///
 /// A purely diagonal Hessian is settled in `O(nnz)` by sign — its
-/// eigenvalues *are* its diagonal entries — with no dense allocation or
-/// eigensolve; this keeps large separable / least-squares QPs cheap. A
-/// coupled Hessian builds the dense symmetric matrix over the variables
-/// that actually appear in the quadratic form and runs a symmetric
-/// eigenvalue check via Jacobi rotations — adequate for the small-to-
-/// moderate dense blocks a classifier sees, and dependency-free. Returns
-/// `true` only when the smallest eigenvalue is `≥ -PSD_TOL`; an
-/// inconclusive or clearly-negative result returns `false`, routing to the
-/// safe (more general) class.
-///
-/// Callers must pre-filter oversized coupled forms with
-/// [`psd_test_too_expensive`]; this routine still runs the dense path on
-/// any coupled Hessian it is handed.
+/// eigenvalues *are* its diagonal entries — with no factorization at all;
+/// this keeps large separable / least-squares QPs cheap. A *coupled*
+/// Hessian is certified by a sparse symmetric factorization (see
+/// [`coupled_hessian_is_psd`]): feral's LDLᵀ reports the matrix inertia in
+/// roughly `O(nnz · fill)`, so even the large but sparse coupled Hessians of
+/// the CVXQP family (n ≈ 1000) are classified in well under the solve cost —
+/// no dense `k×k` allocation and no `O(k³)` eigensolve. Returns `true` only
+/// when the smallest eigenvalue is `≥ -PSD_TOL`; an indefinite or
+/// inconclusive result returns `false`, routing to the safe (more general)
+/// class.
 fn hessian_is_psd(h: &QuadHessian, _n: usize) -> bool {
     if h.is_empty() {
         return true; // zero matrix is PSD (the linear case)
     }
     // Fast path: a diagonal Hessian is PSD iff every diagonal entry is
-    // `≥ -PSD_TOL`. No dense k×k allocation, no Jacobi sweeps — essential
-    // for large but separable objectives, where the dense matrix would be
-    // enormous (and the eigensolve hopeless) yet the answer is trivial.
+    // `≥ -PSD_TOL`. No factorization — essential for large but separable
+    // objectives, where the answer is trivial.
     if h.keys().all(|(i, j)| i == j) {
         return h.values().all(|v| *v >= -PSD_TOL);
     }
-    // Compress to the active variable set so the dense matrix is small.
-    let mut active: Vec<usize> = Vec::new();
+    coupled_hessian_is_psd(h)
+}
+
+/// PSD certificate for a *coupled* Hessian via a sparse symmetric
+/// factorization.
+///
+/// The test is positive-definiteness of the `ε`-shifted matrix `H + ε·I`
+/// with `ε = PSD_TOL`. A genuinely-PSD `H` (smallest eigenvalue `λ_min ≥ 0`,
+/// even a singular one) becomes strictly positive definite after the shift,
+/// so feral factors it with no negative pivots (`inertia.negative == 0`); a
+/// truly indefinite `H` with `λ_min < -PSD_TOL` keeps a strictly-negative
+/// shifted eigenvalue and yields `negative > 0`. The `negative == 0` test on
+/// the shifted matrix is therefore exactly `λ_min ≥ -PSD_TOL` — the same
+/// tolerance the dense path used — and it scales to large sparse Hessians
+/// because the factorization cost tracks the nonzero/fill count, not a dense
+/// `k³`.
+///
+/// The Hessian is compressed to its active variable set so the factored
+/// dimension is `k` (the number of distinct variables in the form). The
+/// [`QuadHessian`] is upper-triangular (`i ≤ j`); feral wants the lower
+/// triangle (`row ≥ col`), so each entry `(i, j)` is emitted at
+/// `(row = j, col = i)`. Every active diagonal is seeded with `ε` (the shift;
+/// `from_triplets` sums it with any diagonal entry already in `H`), which
+/// also guarantees no structurally empty column. A non-`Success`
+/// factorization (singular/fatal — should not occur given the strictly-PD
+/// shift, but possible on a pathological form) is treated conservatively as
+/// not-provably-PSD.
+fn coupled_hessian_is_psd(h: &QuadHessian) -> bool {
+    use feral::{CscMatrix, FactorStatus, Solver};
+
+    // Compress to the active variable set so the factored dimension is `k`.
+    let mut active: Vec<usize> = Vec::with_capacity(2 * h.len());
     for (i, j) in h.keys() {
         active.push(*i);
         active.push(*j);
@@ -703,78 +732,37 @@ fn hessian_is_psd(h: &QuadHessian, _n: usize) -> bool {
     let k = active.len();
     let idx = |v: usize| active.binary_search(&v).unwrap();
 
-    let mut a = vec![0.0f64; k * k];
+    // Lower-triangle triplets: H's entry (i ≤ j) maps to (row = j, col = i).
+    // Capacity covers H's nonzeros plus one ε-shift per active diagonal.
+    let mut rows: Vec<usize> = Vec::with_capacity(h.len() + k);
+    let mut cols: Vec<usize> = Vec::with_capacity(h.len() + k);
+    let mut vals: Vec<f64> = Vec::with_capacity(h.len() + k);
     for ((i, j), v) in h {
         let (ri, rj) = (idx(*i), idx(*j));
-        a[ri * k + rj] = *v;
-        a[rj * k + ri] = *v;
+        // i ≤ j by the upper-tri convention, so rj ≥ ri ⇒ lower triangle.
+        rows.push(rj);
+        cols.push(ri);
+        vals.push(*v);
+    }
+    // εI shift: seed every active diagonal (summed with H's own diagonal).
+    for d in 0..k {
+        rows.push(d);
+        cols.push(d);
+        vals.push(PSD_TOL);
     }
 
-    match smallest_eigenvalue_symmetric(&mut a, k) {
-        Some(min_eig) => min_eig >= -PSD_TOL,
-        None => false, // did not converge ⇒ be conservative
-    }
-}
-
-/// Smallest eigenvalue of a dense `k×k` symmetric matrix (row-major) via
-/// the classical cyclic Jacobi eigenvalue algorithm. Destroys `a`.
-/// Returns `None` if it fails to converge within the sweep budget.
-fn smallest_eigenvalue_symmetric(a: &mut [f64], k: usize) -> Option<f64> {
-    if k == 0 {
-        return Some(0.0);
-    }
-    if k == 1 {
-        return Some(a[0]);
-    }
-    const MAX_SWEEPS: usize = 100;
-    for _ in 0..MAX_SWEEPS {
-        // Off-diagonal Frobenius norm.
-        let mut off = 0.0;
-        for p in 0..k {
-            for q in (p + 1)..k {
-                off += a[p * k + q] * a[p * k + q];
-            }
+    let mat = match CscMatrix::from_triplets(k, &rows, &cols, &vals) {
+        Ok(m) => m,
+        Err(_) => return false, // malformed ⇒ be conservative
+    };
+    let mut solver = Solver::new();
+    match solver.factor(&mat, None) {
+        FactorStatus::Success => {
+            // PD ⟺ no negative pivots in the LDLᵀ of the ε-shifted matrix.
+            solver.inertia().map(|i| i.negative == 0).unwrap_or(false)
         }
-        if off <= 1e-30 {
-            break;
-        }
-        for p in 0..k {
-            for q in (p + 1)..k {
-                let apq = a[p * k + q];
-                if apq.abs() <= 1e-300 {
-                    continue;
-                }
-                let app = a[p * k + p];
-                let aqq = a[q * k + q];
-                let theta = (aqq - app) / (2.0 * apq);
-                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
-                let t = if theta == 0.0 { 1.0 } else { t };
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
-                // Apply the rotation J^T A J.
-                for i in 0..k {
-                    let aip = a[i * k + p];
-                    let aiq = a[i * k + q];
-                    a[i * k + p] = c * aip - s * aiq;
-                    a[i * k + q] = s * aip + c * aiq;
-                }
-                for i in 0..k {
-                    let api = a[p * k + i];
-                    let aqi = a[q * k + i];
-                    a[p * k + i] = c * api - s * aqi;
-                    a[q * k + i] = s * api + c * aqi;
-                }
-            }
-        }
-    }
-    let mut min_eig = f64::INFINITY;
-    for i in 0..k {
-        min_eig = min_eig.min(a[i * k + i]);
-    }
-    if min_eig.is_finite() {
-        Some(min_eig)
-    } else {
-        None
+        // Singular / wrong-inertia / fatal: cannot certify ⇒ safe fallback.
+        _ => false,
     }
 }
 
@@ -1042,60 +1030,78 @@ mod tests {
         );
     }
 
-    // --- Dense-PSD cost guard (mittelmann regression) ---
+    // --- Sparse-factorization PSD certificate (CVXQP family) ---
 
-    /// A large *diagonal* Hessian must take the O(nnz) sign fast path: no
-    /// dense allocation, not flagged expensive, and correctly read PSD. This
-    /// is the large separable / least-squares QP shape (AUG2D, LISWET, …)
-    /// that must stay on the convex fast path.
+    /// A large *diagonal* Hessian must take the O(nnz) sign fast path — no
+    /// factorization at all — and read PSD. This is the large separable /
+    /// least-squares QP shape (AUG2D, LISWET, …) that stays on the convex
+    /// fast path.
     #[test]
     fn large_diagonal_hessian_is_cheap_and_psd() {
-        let n = 50_000; // far above PSD_DENSE_MAX_VARS
+        let n = 50_000;
         let mut h = QuadHessian::new();
         for i in 0..n {
             h.insert((i, i), 2.0);
         }
         assert!(
-            !psd_test_too_expensive(&h),
-            "a diagonal Hessian is O(nnz) to test; size must not flag it expensive"
-        );
-        assert!(
             hessian_is_psd(&h, n),
-            "diag(2,…,2) is PSD and must be settled without a dense eigensolve"
+            "diag(2,…,2) is PSD and must be settled by the O(nnz) sign path"
         );
     }
 
-    /// A large *coupled* Hessian (off-diagonal terms over many variables) is
-    /// the dense-Jacobi blow-up that hung the classifier. It must be flagged
-    /// too-expensive so the caller routes to NLP instead of eigensolving.
+    /// A large *coupled* convex Hessian (off-diagonal terms over many
+    /// variables) is the CVXQP-family shape that the old dense-Jacobi cap
+    /// refused to certify (routing it to NLP). The sparse-factorization
+    /// certificate now proves it PSD cheaply, so it reaches the convex
+    /// solver. This is the regression fix.
     #[test]
-    fn large_coupled_hessian_is_flagged_too_expensive() {
-        let k = PSD_DENSE_MAX_VARS + 50;
+    fn large_coupled_convex_hessian_is_certified_psd() {
+        let k = 1_000;
         let mut h = QuadHessian::new();
+        // Diagonally dominant tridiagonal: SPD. 2 on the diagonal, 0.1 on
+        // the off-diagonal coupling chain ⇒ strictly diagonally dominant.
         for i in 0..k {
             h.insert((i, i), 2.0);
         }
-        // One off-diagonal coupling chain makes it non-diagonal.
         for i in 0..(k - 1) {
             h.insert((i, i + 1), 0.1);
         }
         assert!(
-            psd_test_too_expensive(&h),
-            "a coupled Hessian over {k} > {PSD_DENSE_MAX_VARS} vars must be flagged expensive"
+            hessian_is_psd(&h, k),
+            "a diagonally-dominant coupled Hessian over {k} vars must be \
+             certified PSD by the sparse factorization (CVXQP regression)"
         );
-        assert_eq!(hessian_active_vars(&h), k);
     }
 
-    /// A *small* coupled Hessian stays on the convex path: not flagged
-    /// expensive, and PSD-tested exactly by the dense Jacobi.
+    /// The sparse certificate must still *reject* a large coupled Hessian
+    /// that is genuinely indefinite — size does not buy a free pass.
     #[test]
-    fn small_coupled_hessian_still_uses_dense_test() {
+    fn large_coupled_indefinite_hessian_is_rejected() {
+        let k = 1_000;
+        let mut h = QuadHessian::new();
+        for i in 0..k {
+            h.insert((i, i), 2.0);
+        }
+        for i in 0..(k - 1) {
+            h.insert((i, i + 1), 0.1);
+        }
+        // Flip one diagonal strongly negative ⇒ an indefinite direction.
+        h.insert((0, 0), -5.0);
+        assert!(
+            !hessian_is_psd(&h, k),
+            "a coupled Hessian with a strong negative-curvature direction \
+             must be rejected regardless of size"
+        );
+    }
+
+    /// A *small* coupled Hessian is certified by the same sparse path.
+    #[test]
+    fn small_coupled_hessian_is_certified_psd() {
         // [[2, 1], [1, 2]] — eigenvalues 1 and 3, PSD.
         let mut h = QuadHessian::new();
         h.insert((0, 0), 2.0);
         h.insert((0, 1), 1.0);
         h.insert((1, 1), 2.0);
-        assert!(!psd_test_too_expensive(&h));
         assert!(hessian_is_psd(&h, 2));
     }
 
@@ -1293,6 +1299,66 @@ mod tests {
         let prob = convex_qcqp_at_size(10_001, 10_001);
         assert!((prob.n as u64) * (prob.m as u64) > SOCP_SIZE_BUDGET);
         assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
+    }
+
+    /// Build a convex QCQP whose single quadratic constraint `(Σ xᵢ)² ≤ 1`
+    /// couples all `k` variables (a dense rank-1 PSD Hessian over `k` vars),
+    /// with `n = k`, `m = 1`. Exercises the per-row conic-reformulation guard
+    /// independently of the `n·m` budget.
+    fn coupled_convex_qcqp_with_k_vars(k: usize) -> NlProblem {
+        // sum = x0 + x1 + … + x_{k-1}
+        let mut sum = Expr::Var(0);
+        for i in 1..k {
+            sum = Expr::Binary(BinOp::Add, Box::new(sum), Box::new(Expr::Var(i)));
+        }
+        // constraint (Σ xᵢ)² ≤ 1 — convex feasible set, Hessian = 2·(all-ones),
+        // PSD (rank 1) and fully coupled across all k variables.
+        let con = Expr::Binary(BinOp::Pow, Box::new(sum), Box::new(Expr::Const(2.0)));
+        NlProblem {
+            n: k,
+            m: 1,
+            num_obj: 1,
+            minimize: true,
+            obj_nonlinear: Expr::Const(0.0),
+            obj_linear: vec![(0, 1.0)],
+            obj_constant: 0.0,
+            con_nonlinear: vec![con],
+            con_linear: vec![vec![]],
+            x_l: vec![f64::NEG_INFINITY; k],
+            x_u: vec![f64::INFINITY; k],
+            g_l: vec![f64::NEG_INFINITY],
+            g_u: vec![1.0],
+            x0: vec![0.0; k],
+            lambda0: vec![0.0],
+            suffixes: Default::default(),
+            imported_funcs: Vec::new(),
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        }
+    }
+
+    /// A heavily-coupled *convex* QCQP constraint (here over 300 > 256 vars,
+    /// `n·m = 300` well under [`SOCP_SIZE_BUDGET`]) must still fall back to NLP:
+    /// the per-row SOC reformulation is `O(k³)` in the coupling width, which
+    /// is the mittelmann `qcqp1000-*` hang (small `n·m`, ~1000-var coupled
+    /// rows). The convexity certificate accepts it; the coupling guard routes
+    /// it away from the conic path.
+    #[test]
+    fn heavily_coupled_convex_qcqp_falls_back_to_nlp() {
+        let k = QCQP_SOCP_COUPLED_VARS + 44; // 300
+        let prob = coupled_convex_qcqp_with_k_vars(k);
+        assert!((prob.n as u64) * (prob.m as u64) <= SOCP_SIZE_BUDGET);
+        assert_eq!(classify_problem(&prob), ProblemClass::Nlp);
+    }
+
+    /// The companion to the guard: a convex QCQP whose constraint couples few
+    /// enough variables keeps the conic path. Same `(Σ xᵢ)² ≤ 1` shape over
+    /// `k ≤ QCQP_SOCP_COUPLED_VARS` vars ⇒ `ConvexQcqp`.
+    #[test]
+    fn lightly_coupled_convex_qcqp_keeps_conic() {
+        let k = QCQP_SOCP_COUPLED_VARS - 6; // 250 ≤ 256
+        let prob = coupled_convex_qcqp_with_k_vars(k);
+        assert_eq!(classify_problem(&prob), ProblemClass::ConvexQcqp);
     }
 
     /// Classification mirror of the boundary guard: a QP whose only

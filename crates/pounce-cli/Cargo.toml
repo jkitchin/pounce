@@ -51,6 +51,7 @@ pounce-observability.workspace = true
 # Specialized convex LP/QP interior-point solver, dispatched to for
 # classified LP / convex-QP `.nl` inputs.
 pounce-convex.workspace = true
+feral.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing.workspace = true
