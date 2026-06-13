@@ -812,14 +812,18 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
 
         // A pivot position is singular when its U diagonal sits at/below the
         // detection floor; independent pivots are O(s) ≫ this floor. The
-        // s-scaling guarantees singular pivots map to J-rows (perm[k] ≥
-        // n_cols); defensively skip any that do not.
+        // s-scaling normally maps singular pivots to J-rows (perm[k] ≥
+        // n_cols), but under heavy degeneracy (e.g. the elastic phase-1
+        // vertices of NETLIB afiro/gen) AMD fill-in plus the Jᵀ coupling can
+        // push a near-zero pivot onto an x-row. That is not an invariant
+        // violation — we only collect J-row dependencies, so an x-row
+        // singular pivot is simply skipped. Under-reporting here is safe:
+        // the caller re-prunes / inertia-shifts on the next iteration.
         let dep_tol = 1e-9 * s;
         let perm = lu.perm();
         for k in 0..d {
             if lu.u_dense(k, k).abs() <= dep_tol {
                 let r = perm[k];
-                debug_assert!(r >= n_cols, "singular pivot landed on an x-row");
                 if r >= n_cols {
                     c_deps.push((r - n_cols) as Index);
                 }

@@ -779,6 +779,28 @@ impl ParametricActiveSetSolver {
         let mut tabu_cons = vec![false; m];
         let mut tabu_bounds = vec![false; n];
 
+        // Anti-stall fallback to Bland's rule (§4.4). The default
+        // steepest-violation drop + Harris/largest-pivot add is fast
+        // but NOT cycle-free: on a degenerate vertex (notably the
+        // elastic phase-1 high-penalty vertices the GEN family and even
+        // trivial LPs like `afiro` park at) it can churn the working set
+        // without improving the objective until `max_iter`. Bland's rule
+        // (lowest-index drop/add) is provably finite. We monitor the
+        // objective and, once it fails to improve for `stall_limit`
+        // consecutive iterations, latch into Bland selection for the
+        // remainder of the solve — the textbook "Bland as anti-cycling
+        // fallback after stalling" safeguard. The latch is sticky (never
+        // reverts) so it cannot flip-flop, and it is a no-op on problems
+        // that make steady progress.
+        let mut force_bland = false;
+        let mut best_obj = Number::INFINITY;
+        let mut stall_iters: u32 = 0;
+        // A problem making genuine progress rarely goes this many
+        // consecutive iterations without any objective improvement; a
+        // degenerate cycle does. Constant (not size-scaled) so it fires
+        // well inside the default `max_iter` on large problems too.
+        const STALL_LIMIT: u32 = 50;
+
         for _iter in 0..opts.max_iter {
             let active_cons: Vec<usize> = (0..m)
                 .filter(|&i| working.constraints[i].is_active())
@@ -874,7 +896,8 @@ impl ParametricActiveSetSolver {
                 // violation behavior, which is correct on every
                 // non-cycling problem in the analytical ladder and
                 // matches the qpOASES default.
-                let use_bland = matches!(opts.anti_cycling, AntiCyclingChoice::Bland);
+                let use_bland =
+                    force_bland || matches!(opts.anti_cycling, AntiCyclingChoice::Bland);
 
                 let mut worst: Option<(DropTarget, Number)> = None;
                 let consider =
@@ -1033,7 +1056,7 @@ impl ParametricActiveSetSolver {
             // above: a pruned dependent row enters `candidates` only once
             // its rate along `p` leaves the linear-dependence drift band.)
 
-            let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
+            let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol, force_bland);
 
             // F2(a): certified unboundedness on the active-set path. An
             // empty candidate list means NO inactive row or bound blocks
@@ -1125,6 +1148,26 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 expand_tol = opts.expand_tol_initial;
+            }
+
+            // Anti-stall monitor: latch into Bland's rule once the
+            // objective stops improving for `stall_limit` consecutive
+            // iterations. Uses a relative-plus-absolute improvement test
+            // so it is scale-invariant (the elastic phase-1 objective is
+            // ~γ·infeasibility, often 1e7+). Once latched it stays
+            // latched; Bland then guarantees finite termination.
+            if !force_bland {
+                let obj_now = quad_objective(qp, &x);
+                let improved = obj_now < best_obj - 1e-9 * best_obj.abs() - 1e-12;
+                if improved {
+                    best_obj = obj_now;
+                    stall_iters = 0;
+                } else {
+                    stall_iters += 1;
+                    if stall_iters >= STALL_LIMIT {
+                        force_bland = true;
+                    }
+                }
             }
         }
 
@@ -1298,6 +1341,14 @@ impl ParametricActiveSetSolver {
         // silently fell back to the refactor path). Both inner solvers
         // bypass the `solve` feasibility audit, so the recursive solve
         // is still never re-audited and the recovery cannot loop.
+        // Phase-1 infeasibility minimization is inherently highly
+        // degenerate (many slacks sit exactly at zero), so the
+        // steepest-violation default cycles at the elastic vertices the
+        // GEN family and even trivial LPs like `afiro` park at. Bland's
+        // rule is provably finite; use it for the recovery solve.
+        let mut opts_p1 = opts.clone();
+        opts_p1.anti_cycling = AntiCyclingChoice::Bland;
+        let opts = &opts_p1;
         let sol_aug = if opts.use_schur_updates {
             self.solve_general_schur(&qp_aug, Some(&ws), opts)?
         } else {
@@ -1539,7 +1590,7 @@ impl ParametricActiveSetSolver {
                     candidates.push((BlockerTarget::Cons(i, ConsStatus::AtUpper), r, ap[i].abs()));
                 }
             }
-            let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol);
+            let (mut alpha, blocker) = select_blocker(&candidates, opts, expand_tol, false);
 
             // F2(a), Schur path. Same certificate as `solve_general`: an
             // empty candidate list means `+p` is feasible for every step
@@ -1934,6 +1985,7 @@ fn select_blocker(
     candidates: &[(BlockerTarget, f64, f64)],
     opts: &QpOptions,
     expand_tol: f64,
+    force_bland: bool,
 ) -> (f64, Option<BlockerTarget>) {
     if candidates.is_empty() {
         return (1.0, None);
@@ -1958,7 +2010,14 @@ fn select_blocker(
         return (1.0, None);
     }
 
-    match opts.anti_cycling {
+    // The anti-stall latch forces Bland (strict-min, lowest-index)
+    // regardless of the configured rule.
+    let effective = if force_bland {
+        AntiCyclingChoice::Bland
+    } else {
+        opts.anti_cycling
+    };
+    match effective {
         AntiCyclingChoice::None | AntiCyclingChoice::Bland => {
             // Strict-min: pick the first candidate achieving
             // `alpha_min` (encounter order ⇒ lowest index for ties).
@@ -2418,7 +2477,7 @@ mod select_blocker_tests {
         let opts = expand_opts(1e-6);
         // expand_tol (τ) = 1e-3, ap_mag = 1e-9 ⇒ r_relaxed ≈ 0.5 + 1e6.
         let candidates = [(BlockerTarget::Bound(0, BoundStatus::AtLower), 0.5, 1e-9)];
-        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3);
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3, false);
         assert!(
             matches!(blocker, Some(BlockerTarget::Bound(0, BoundStatus::AtLower))),
             "expected the sole candidate as blocker, got {:?}",
@@ -2445,7 +2504,7 @@ mod select_blocker_tests {
             (BlockerTarget::Bound(0, BoundStatus::AtLower), 0.75, 1e-9),
             (BlockerTarget::Bound(1, BoundStatus::AtUpper), 0.25, 1e-9),
         ];
-        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3);
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-3, false);
         assert!(
             matches!(blocker, Some(BlockerTarget::Bound(1, BoundStatus::AtUpper))),
             "expected the strict-min candidate (index 1)"
@@ -2463,7 +2522,7 @@ mod select_blocker_tests {
     fn expand_normal_case_admits_in_pass_two() {
         let opts = expand_opts(1e-6);
         let candidates = [(BlockerTarget::Bound(0, BoundStatus::AtLower), 0.5, 1.0)];
-        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-9);
+        let (alpha, blocker) = select_blocker(&candidates, &opts, 1e-9, false);
         assert!(matches!(
             blocker,
             Some(BlockerTarget::Bound(0, BoundStatus::AtLower))

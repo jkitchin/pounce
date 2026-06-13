@@ -509,3 +509,60 @@ fn qp_presolve_option_on_and_off_agree() {
     assert_eq!(run("yes"), 0);
     assert_eq!(run("no"), 0);
 }
+
+/// Regression (issue #133): the active-set QP path must solve the NETLIB
+/// `afiro` LP under the **default** anti-cycling rule. Previously the
+/// steepest-violation default cycled in elastic phase-1 and bailed at
+/// iteration 0 with "Search Direction is becoming Too Small" (objective 0,
+/// constraint violation 44), while `sqp_qp_anti_cycling=bland` solved it.
+/// Phase-1 now uses Bland's provably-finite rule internally, so the default
+/// path reaches the true optimum (-464.7531...). Both anti-cycling settings
+/// must agree.
+#[test]
+fn afiro_active_set_solves_under_default_anti_cycling() {
+    const AFIRO_OPT: f64 = -4.6475314286e+02;
+    let run = |extra: Option<&str>| -> SolveReport {
+        let dir = std::env::temp_dir();
+        let json = dir.join(format!(
+            "pounce_afiro_{}.json",
+            extra.unwrap_or("default").replace(['=', ' '], "_")
+        ));
+        let _ = std::fs::remove_file(&json);
+        let mut cmd = Command::new(pounce_exe());
+        cmd.arg(fixture_named("lp_afiro.nl"))
+            .arg("--no-sol")
+            .arg("--json-output")
+            .arg(&json)
+            .arg("solver_selection=qp-active-set");
+        if let Some(e) = extra {
+            cmd.arg(e);
+        }
+        let out = cmd.output().expect("spawn pounce");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "afiro qp-active-set ({}) should exit 0; stdout=\n{}",
+            extra.unwrap_or("default"),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let text = std::fs::read_to_string(&json).expect("JSON report written");
+        serde_json::from_str(&text).expect("deserialize report")
+    };
+
+    // Default rule (the issue's failing case) now reaches the optimum.
+    let def = run(None);
+    assert_eq!(def.solution.solve_result_num, 0, "afiro default = solved");
+    assert!(
+        (def.solution.objective - AFIRO_OPT).abs() < 1e-4,
+        "afiro default objective {} != {AFIRO_OPT}",
+        def.solution.objective
+    );
+
+    // Explicit Bland agrees (it always solved afiro).
+    let bland = run(Some("sqp_qp_anti_cycling=bland"));
+    assert!(
+        (bland.solution.objective - AFIRO_OPT).abs() < 1e-4,
+        "afiro bland objective {} != {AFIRO_OPT}",
+        bland.solution.objective
+    );
+}
