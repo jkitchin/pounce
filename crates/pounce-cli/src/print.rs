@@ -4,15 +4,18 @@
 //! can spot at a glance whether POUNCE is converging similarly.
 
 use crate::counting_tnlp::CountingTnlp;
+use pounce_common::types::Number;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
-use pounce_nlp::tnlp::{BoundsInfo, NlpInfo, SparsityRequest, TNLP};
+use pounce_nlp::tnlp::{IndexStyle, NlpInfo, SparsityRequest, TNLP};
+use pounce_nlp::tnlp_adapter::{FixedVarTreatment, TNLPAdapter};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Same sentinel Ipopt uses for "no bound": ±1e19. Matched exactly so
-/// the per-bound-type tallies agree with `ipopt`'s own output on
-/// problems whose bounds were authored against that convention.
+/// Same sentinel Ipopt uses for "no bound": ±1e19. Only referenced by the
+/// unit tests now that `collect_stats` derives bounds from the adapter
+/// classification rather than re-thresholding raw bounds itself.
+#[cfg(test)]
 const BOUND_INF: f64 = 1.0e19;
 
 #[derive(Debug, Clone, Copy)]
@@ -33,33 +36,51 @@ pub struct ProblemStats {
     pub ineq_both: i32,
 }
 
-/// Walk the TNLP once to gather everything the banner block needs:
-/// `NlpInfo`, the four bound vectors, and the Jacobian row indices.
-/// Returns `None` if any of the required TNLP calls fails.
-pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
-    let mut t = tnlp.borrow_mut();
-    let info: NlpInfo = t.get_nlp_info()?;
-    let n = info.n as usize;
+/// Gather everything the banner block needs, reported over the **reduced**
+/// problem that the algorithm actually solves — i.e. after
+/// `fixed_variable_treatment` removes fixed (`x_l == x_u`) variables under
+/// `make_parameter`. This mirrors Ipopt, whose banner is computed from the
+/// post-`IpTNLPAdapter` problem; computing it from the raw TNLP instead made
+/// pounce over-report variables and bucket fixed vars as "lower and upper
+/// bounds" (#140).
+///
+/// To stay byte-for-byte consistent with the solve, the counts are taken from
+/// a throwaway [`TNLPAdapter`] built with the same options — reusing the exact
+/// production classification (including the `make_parameter → relax_bounds`
+/// auto-switch). The Jacobian / Hessian nnz are read from the raw structure and
+/// filtered to drop entries in fixed-variable columns (the columns Ipopt
+/// removes). Returns `None` if any required TNLP call fails.
+pub fn collect_stats(
+    tnlp: &Rc<RefCell<dyn TNLP>>,
+    lo_inf: Number,
+    up_inf: Number,
+    fixed_treatment: FixedVarTreatment,
+) -> Option<ProblemStats> {
+    let adapter =
+        TNLPAdapter::new_with_options(Rc::clone(tnlp), lo_inf, up_inf, fixed_treatment).ok()?;
+    let cls = adapter.classification();
+    let info: NlpInfo = *adapter.nlp_info();
+    let n_full_x = cls.n_full_x as usize;
     let m = info.m as usize;
-    let mut x_l = vec![0.0; n];
-    let mut x_u = vec![0.0; n];
-    let mut g_l = vec![0.0; m];
-    let mut g_u = vec![0.0; m];
-    if !t.get_bounds_info(BoundsInfo {
-        x_l: &mut x_l,
-        x_u: &mut x_u,
-        g_l: &mut g_l,
-        g_u: &mut g_u,
-    }) {
-        return None;
-    }
+    let one_based = matches!(info.index_style, IndexStyle::Fortran);
 
-    // Variable bound classification.
+    // --- Variable bound buckets over the reduced (non-fixed) variable set.
+    // `x_l_map` / `x_u_map` hold positions in `x_var` that carry a finite
+    // lower / upper bound. A fixed var under `make_parameter` is absent from
+    // both (it was dropped from `x_var`); under `relax_bounds` it lands in
+    // both — matching Ipopt's banner in either mode.
+    let nv = cls.n_x_var() as usize;
+    let mut has_l = vec![false; nv];
+    let mut has_u = vec![false; nv];
+    for &p in &cls.x_l_map {
+        has_l[p as usize] = true;
+    }
+    for &p in &cls.x_u_map {
+        has_u[p as usize] = true;
+    }
     let (mut var_lower_only, mut var_upper_only, mut var_both, mut var_free) = (0, 0, 0, 0);
-    for i in 0..n {
-        let has_l = x_l[i] > -BOUND_INF;
-        let has_u = x_u[i] < BOUND_INF;
-        match (has_l, has_u) {
+    for k in 0..nv {
+        match (has_l[k], has_u[k]) {
             (true, true) => var_both += 1,
             (true, false) => var_lower_only += 1,
             (false, true) => var_upper_only += 1,
@@ -67,41 +88,47 @@ pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
         }
     }
 
-    // Constraint classification (equality vs inequality, and the
-    // inequality bound type).
-    let (mut n_eq, mut n_ineq) = (0, 0);
+    // --- Constraint counts / inequality bound buckets, straight from the
+    // classification (equality = `c_map`, inequality = `d_map`).
+    let n_eq = cls.n_c;
+    let n_ineq = cls.n_d;
+    let nd = cls.n_d as usize;
+    let mut has_dl = vec![false; nd];
+    let mut has_du = vec![false; nd];
+    for &p in &cls.d_l_map {
+        has_dl[p as usize] = true;
+    }
+    for &p in &cls.d_u_map {
+        has_du[p as usize] = true;
+    }
     let (mut ineq_lower_only, mut ineq_upper_only, mut ineq_both) = (0, 0, 0);
-    let mut row_is_eq = vec![false; m];
-    for i in 0..m {
-        if (g_l[i] - g_u[i]).abs() < 1e-12 && g_l[i].abs() < BOUND_INF {
-            n_eq += 1;
-            row_is_eq[i] = true;
-        } else {
-            n_ineq += 1;
-            let has_l = g_l[i] > -BOUND_INF;
-            let has_u = g_u[i] < BOUND_INF;
-            match (has_l, has_u) {
-                (true, true) => ineq_both += 1,
-                (true, false) => ineq_lower_only += 1,
-                (false, true) => ineq_upper_only += 1,
-                // A "free" inequality has no finite bound on either side
-                // (e.g. an `.nl` range row left fully open). It is already
-                // counted in `n_ineq`, so it must land in one of the
-                // per-bound-type buckets or the printed breakdown won't sum
-                // to the total. Bucket it under "both", matching the comment's
-                // long-standing intent (it previously fell through to `{}`,
-                // leaving `lower_only + both + upper_only < n_ineq`).
-                (false, false) => ineq_both += 1,
-            }
+    for k in 0..nd {
+        match (has_dl[k], has_du[k]) {
+            (true, true) => ineq_both += 1,
+            (true, false) => ineq_lower_only += 1,
+            (false, true) => ineq_upper_only += 1,
+            // A "free" inequality has no finite bound on either side (e.g. an
+            // `.nl` range row left fully open). It is still counted in
+            // `n_ineq`, so bucket it under "both" or the printed breakdown
+            // won't sum to the total.
+            (false, false) => ineq_both += 1,
         }
     }
 
-    // Jacobian split: read the structure once and tally per-row.
+    // Which raw rows are equality rows (for the Jacobian split).
+    let mut row_is_eq = vec![false; m];
+    for &r in &cls.c_map {
+        row_is_eq[r as usize] = true;
+    }
+
+    // --- Jacobian split: read the raw structure once, drop fixed-variable
+    // columns (the ones `make_parameter` removes), tally per-row.
     let nnz_total = info.nnz_jac_g as usize;
     let (mut nnz_jac_eq, mut nnz_jac_ineq) = (0, 0);
     if nnz_total > 0 && m > 0 {
         let mut irow = vec![0_i32; nnz_total];
         let mut jcol = vec![0_i32; nnz_total];
+        let mut t = tnlp.borrow_mut();
         if t.eval_jac_g(
             None,
             true,
@@ -110,12 +137,21 @@ pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
                 jcol: &mut jcol,
             },
         ) {
-            let one_based = matches!(info.index_style, pounce_nlp::tnlp::IndexStyle::Fortran);
-            for &r in &irow {
-                let row = if one_based {
-                    (r - 1) as usize
+            for k in 0..nnz_total {
+                let col = if one_based {
+                    (jcol[k] - 1) as usize
                 } else {
-                    r as usize
+                    jcol[k] as usize
+                };
+                // Skip nonzeros in fixed-variable columns: `full_to_var[col]`
+                // is `-1` for a dropped fixed var.
+                if col >= n_full_x || cls.full_to_var[col] < 0 {
+                    continue;
+                }
+                let row = if one_based {
+                    (irow[k] - 1) as usize
+                } else {
+                    irow[k] as usize
                 };
                 if row < m && row_is_eq[row] {
                     nnz_jac_eq += 1;
@@ -126,12 +162,56 @@ pub fn collect_stats(tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<ProblemStats> {
         }
     }
 
+    // --- Hessian nnz over the reduced problem: drop any entry touching a
+    // fixed-variable row or column. If the TNLP supplies no Hessian
+    // (`eval_h` → false), fall back to the raw count.
+    let mut nnz_h_lag = info.nnz_h_lag;
+    let nnz_h = info.nnz_h_lag as usize;
+    if nnz_h > 0 {
+        let mut irow = vec![0_i32; nnz_h];
+        let mut jcol = vec![0_i32; nnz_h];
+        let mut t = tnlp.borrow_mut();
+        if t.eval_h(
+            None,
+            true,
+            1.0,
+            None,
+            true,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol,
+            },
+        ) {
+            let mut kept = 0_i32;
+            for k in 0..nnz_h {
+                let r = if one_based {
+                    (irow[k] - 1) as usize
+                } else {
+                    irow[k] as usize
+                };
+                let c = if one_based {
+                    (jcol[k] - 1) as usize
+                } else {
+                    jcol[k] as usize
+                };
+                if r < n_full_x
+                    && c < n_full_x
+                    && cls.full_to_var[r] >= 0
+                    && cls.full_to_var[c] >= 0
+                {
+                    kept += 1;
+                }
+            }
+            nnz_h_lag = kept;
+        }
+    }
+
     Some(ProblemStats {
-        n: info.n,
+        n: cls.n_x_var(),
         m: info.m,
         nnz_jac_eq,
         nnz_jac_ineq,
-        nnz_h_lag: info.nnz_h_lag,
+        nnz_h_lag,
         var_lower_only,
         var_upper_only,
         var_both,
@@ -560,7 +640,7 @@ mod inequality_tally_tests {
     //! *less* than the total whenever such a row was present.
     use super::*;
     use pounce_common::types::{Index, Number};
-    use pounce_nlp::tnlp::{IndexStyle, IpoptCq, IpoptData, Solution, StartingPoint};
+    use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, IpoptCq, IpoptData, Solution, StartingPoint};
 
     /// Two free variables, three inequality rows of distinct bound types:
     /// row 0 lower-only, row 1 both, row 2 *free* (the bug trigger). No
@@ -630,7 +710,13 @@ mod inequality_tally_tests {
     #[test]
     fn free_inequality_row_keeps_breakdown_summing_to_total() {
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(FreeIneqRow));
-        let s = collect_stats(&tnlp).expect("collect_stats succeeds");
+        let s = collect_stats(
+            &tnlp,
+            -BOUND_INF,
+            BOUND_INF,
+            FixedVarTreatment::MakeParameter,
+        )
+        .expect("collect_stats succeeds");
 
         assert_eq!(s.n_eq, 0, "no equality rows");
         assert_eq!(s.n_ineq, 3, "all three rows are inequalities");
@@ -647,5 +733,117 @@ mod inequality_tally_tests {
         assert_eq!(s.ineq_lower_only, 1);
         assert_eq!(s.ineq_upper_only, 0);
         assert_eq!(s.ineq_both, 2);
+    }
+
+    /// #140 regression. Three variables, the middle one fixed
+    /// (`x_l == x_u`). Under the default `make_parameter` the banner must
+    /// report the *reduced* problem: the fixed var is dropped from the total,
+    /// is NOT bucketed as "lower and upper bounds", and its Jacobian column is
+    /// excluded from the nnz tally — matching Ipopt (and the problem the
+    /// algorithm actually solves). Previously the banner walked the raw TNLP
+    /// and over-reported all three.
+    struct OneFixedVar;
+    impl TNLP for OneFixedVar {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 3,
+                m: 1,
+                nnz_jac_g: 3,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            // var 0: lower-only [0, +inf)   var 1: FIXED at 2   var 2: free
+            b.x_l[0] = 0.0;
+            b.x_u[0] = BOUND_INF;
+            b.x_l[1] = 2.0;
+            b.x_u[1] = 2.0;
+            b.x_l[2] = -BOUND_INF;
+            b.x_u[2] = BOUND_INF;
+            // one equality row (keeps n_x_var=2 >= n_c=1, so no relax switch)
+            b.g_l[0] = 0.0;
+            b.g_u[0] = 0.0;
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.iter_mut().for_each(|v| *v = 0.0);
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(0.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, grad_f: &mut [Number]) -> bool {
+            grad_f.iter_mut().for_each(|v| *v = 0.0);
+            true
+        }
+        fn eval_g(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.iter_mut().for_each(|v| *v = 0.0);
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                // The equality row touches all three columns, including the
+                // fixed var (col 1) that must be filtered out.
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 0]);
+                    jcol.copy_from_slice(&[0, 1, 2]);
+                }
+                SparsityRequest::Values { values } => {
+                    values.copy_from_slice(&[1.0, 1.0, 1.0]);
+                }
+            }
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    #[test]
+    fn make_parameter_banner_reports_reduced_problem() {
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneFixedVar));
+        let s = collect_stats(
+            &tnlp,
+            -BOUND_INF,
+            BOUND_INF,
+            FixedVarTreatment::MakeParameter,
+        )
+        .expect("collect_stats succeeds");
+
+        // Fixed var removed: 3 raw vars → 2 optimized.
+        assert_eq!(s.n, 2, "fixed variable must be dropped from the total");
+        assert_eq!(s.var_both, 0, "fixed var must NOT count as lower-and-upper");
+        assert_eq!(s.var_lower_only, 1, "var 0 is lower-only");
+        assert_eq!(s.var_free, 1, "var 2 is free");
+        assert_eq!(s.var_upper_only, 0);
+        // The fixed column is excluded from the Jacobian nnz.
+        assert_eq!(s.n_eq, 1);
+        assert_eq!(
+            s.nnz_jac_eq, 2,
+            "fixed-var column dropped from the Jacobian"
+        );
+        assert_eq!(s.nnz_jac_ineq, 0);
+    }
+
+    #[test]
+    fn relax_bounds_banner_keeps_fixed_variable() {
+        // Under relax_bounds the fixed var stays in the optimization and is
+        // reported as a lower-and-upper-bounded variable — matching Ipopt.
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(OneFixedVar));
+        let s = collect_stats(&tnlp, -BOUND_INF, BOUND_INF, FixedVarTreatment::RelaxBounds)
+            .expect("collect_stats succeeds");
+
+        assert_eq!(s.n, 3, "relax_bounds keeps the fixed variable");
+        assert_eq!(
+            s.var_both, 1,
+            "fixed var reported as lower-and-upper bounded"
+        );
+        assert_eq!(s.var_lower_only, 1);
+        assert_eq!(s.var_free, 1);
+        assert_eq!(s.nnz_jac_eq, 3, "all columns retained under relax_bounds");
     }
 }
