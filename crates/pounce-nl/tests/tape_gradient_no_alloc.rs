@@ -12,33 +12,63 @@
 //! The test installs a counting global allocator and proves, on identical
 //! tapes/inputs, that `gradient_seed_into` performs zero heap allocations
 //! across many calls while `gradient_seed` allocates on essentially every
-//! call — and that both compute the same gradient. A single test lives in
-//! this file so no sibling test thread perturbs the global allocation
-//! counter while the counting window is open.
+//! call — and that both compute the same gradient.
+//!
+//! The counters are **thread-local**, not global: the `#[global_allocator]`
+//! intercepts every allocation process-wide, but it only tallies those made
+//! on the thread that opened the counting window. libtest runs background
+//! threads of its own (output capture, timing, the test-runner thread) whose
+//! allocations would otherwise race into the window and produce a sporadic
+//! nonzero count on the no-alloc path — the original global-atomic version was
+//! flaky for exactly this reason. The thread-locals use `const` initializers,
+//! so reading them inside the allocator never allocates (no reentrancy) and
+//! they carry no destructor to panic on at thread teardown.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use pounce_nl::nl_tape::{Tape, TapeOp};
 
 struct CountingAlloc;
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Count one allocation against the current thread, but only while its
+/// counting window is open. `try_with` guards the rare case where the TLS is
+/// touched during thread teardown.
+fn tally() {
+    let _ = COUNTING.try_with(|counting| {
+        if counting.get() {
+            let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
+        }
+    });
+}
+
+fn set_counting(on: bool) {
+    COUNTING.with(|c| c.set(on));
+}
+
+fn reset_allocs() {
+    ALLOCS.with(|n| n.set(0));
+}
+
+fn allocs() -> usize {
+    ALLOCS.with(|n| n.get())
+}
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
+        tally();
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
+        tally();
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -81,24 +111,24 @@ fn gradient_seed_into_does_not_allocate_per_call() {
     let reference = grad_into.clone();
 
     // ---- gradient_seed_into: must allocate nothing across many calls ----
-    ALLOCS.store(0, Ordering::Relaxed);
-    COUNTING.store(true, Ordering::Relaxed);
+    reset_allocs();
+    set_counting(true);
     for _ in 0..1000 {
         grad_into.fill(0.0); // reuses the Vec's buffer — no allocation
         tape.gradient_seed_into(&x, 1.0, &mut grad_into, &mut vals, &mut adj);
     }
-    COUNTING.store(false, Ordering::Relaxed);
-    let into_allocs = ALLOCS.load(Ordering::Relaxed);
+    set_counting(false);
+    let into_allocs = allocs();
 
     // ---- gradient_seed: the allocating baseline (forward + adj per call) ----
-    ALLOCS.store(0, Ordering::Relaxed);
-    COUNTING.store(true, Ordering::Relaxed);
+    reset_allocs();
+    set_counting(true);
     for _ in 0..1000 {
         grad_seed.fill(0.0);
         tape.gradient_seed(&x, 1.0, &mut grad_seed);
     }
-    COUNTING.store(false, Ordering::Relaxed);
-    let seed_allocs = ALLOCS.load(Ordering::Relaxed);
+    set_counting(false);
+    let seed_allocs = allocs();
 
     // Same numbers: the no-alloc path is a faithful refactor.
     assert_eq!(
