@@ -725,11 +725,13 @@ pub fn main() -> ExitCode {
                         convex_opts,
                     );
                 }
-                let presolve_on = app
-                    .options()
-                    .get_string_value("qp_presolve", "")
-                    .map(|(v, _)| v != "no")
-                    .unwrap_or(true);
+                // Resolve the convex-path presolve switch (#139). See
+                // `resolve_convex_presolve` for the aliasing rationale.
+                let opts = app.options();
+                let presolve_on = resolve_convex_presolve(
+                    opts.get_string_value("qp_presolve", "").ok(),
+                    opts.get_string_value("presolve", "").ok(),
+                );
                 return run_convex_qp(
                     &prob,
                     class,
@@ -1590,6 +1592,30 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
     o
 }
 
+/// Resolve the convex LP/QP presolve switch (#139).
+///
+/// The convex driver is gated by the `qp_presolve` option, but `presolve` is
+/// the spelling users carry over from the NLP path; on the convex path it used
+/// to be silently ignored. Honor whichever the user *explicitly* set, with the
+/// more specific `qp_presolve` winning when both are given; when neither is set
+/// keep the driver's default (on).
+///
+/// Each argument is `Some((value, explicitly_set))` as returned by
+/// `OptionsList::get_string_value(..).ok()`, or `None` if the lookup failed.
+fn resolve_convex_presolve(
+    qp_presolve: Option<(String, bool)>,
+    presolve: Option<(String, bool)>,
+) -> bool {
+    match (qp_presolve, presolve) {
+        // `qp_presolve` explicitly set → authoritative.
+        (Some((v, true)), _) => v != "no",
+        // else alias an explicitly-set `presolve` onto this path.
+        (_, Some((v, true))) => v != "no",
+        // neither set → keep the driver's default (on).
+        _ => true,
+    }
+}
+
 fn run_convex_qp(
     prob: &nl_reader::NlProblem,
     class: pounce_cli::dispatch::ProblemClass,
@@ -2327,5 +2353,55 @@ mod nlp_exit_code_tests {
                 "{s:?} must not count as a successful solve"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod convex_presolve_tests {
+    //! #139: the convex LP/QP driver is gated by `qp_presolve`, but `presolve`
+    //! (the NLP-path spelling) used to be silently ignored on this path. These
+    //! lock the aliasing: `presolve` is honored, `qp_presolve` wins ties, and
+    //! only explicit settings count.
+    use super::resolve_convex_presolve;
+
+    // Helpers mirroring `OptionsList::get_string_value(..).ok()`:
+    //   set(v)   → user explicitly set the option to `v`
+    //   unset(v) → option carries its default `v`, not user-set
+    fn set(v: &str) -> Option<(String, bool)> {
+        Some((v.to_string(), true))
+    }
+    fn unset(v: &str) -> Option<(String, bool)> {
+        Some((v.to_string(), false))
+    }
+
+    #[test]
+    fn defaults_on_when_nothing_set() {
+        assert!(resolve_convex_presolve(None, None));
+        assert!(resolve_convex_presolve(unset("yes"), unset("yes")));
+    }
+
+    #[test]
+    fn explicit_presolve_is_honored() {
+        // The crux of #139: a bare `presolve no` must turn it off here.
+        assert!(!resolve_convex_presolve(unset("yes"), set("no")));
+        assert!(resolve_convex_presolve(unset("yes"), set("yes")));
+    }
+
+    #[test]
+    fn explicit_qp_presolve_is_honored() {
+        assert!(!resolve_convex_presolve(set("no"), None));
+        assert!(resolve_convex_presolve(set("yes"), None));
+    }
+
+    #[test]
+    fn qp_presolve_wins_when_both_explicit() {
+        // More specific spelling is authoritative when the two conflict.
+        assert!(!resolve_convex_presolve(set("no"), set("yes")));
+        assert!(resolve_convex_presolve(set("yes"), set("no")));
+    }
+
+    #[test]
+    fn explicit_presolve_overrides_unset_qp_presolve() {
+        assert!(!resolve_convex_presolve(unset("yes"), set("no")));
     }
 }
