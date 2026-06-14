@@ -232,6 +232,97 @@ the conic solver shipped in 0.4.0 but was not reachable from either router for
 quadratic *constraints*. See [LP / QP Solver Routing](docs/src/lp-qp-routing.md)
 and [Choosing a Solver](docs/src/choosing-a-solver.md).
 
+### Added — CLI knobs for the convex IPM and active-set QP solvers (#134)
+
+Previously hard-coded solver defaults are now registered CLI options:
+
+- **Convex IPM** (`solver_selection=lp-ipm` / `qp-ipm` / `socp`): `qp_tau`,
+  `qp_reg`, `qp_infeas_tol`, `qp_hsde`, `qp_equilibrate`, `qp_crossover`.
+  Each is forwarded only when explicitly set, so engine defaults are otherwise
+  preserved.
+- **Active-set QP** (`solver_selection=qp-active-set`): `sqp_qp_feas_tol`,
+  `sqp_qp_opt_tol`, `sqp_qp_max_iter`, `sqp_qp_elastic_gamma`,
+  `sqp_qp_anti_cycling` (`expand` / `bland` / `none`).
+
+Both families are documented in `dev-notes/lp-qp-routing.md`. The LP crossover
+default is now **off** (opt in with `qp_crossover=yes`): crossover-on regressed
+the LP suite 3×–800× without reaching an exact vertex on the GEN family — the
+machinery is unchanged, only the default flips.
+
+### Fixed — `solver_selection=socp` was rejected; debugger silently no-op'd on `qp-active-set`
+
+Two reachability gaps around the new convex solvers, found while confirming the
+interactive debugger works on every backend:
+
+- `solver_selection=socp` was a documented value (the conic IPM that a convex
+  QCQP reaches under `auto`) but was missing from the option's registered
+  allow-list, so forcing it failed with `Invalid value "socp"`. It is now
+  accepted and routes a convex LP/QP/QCQP to the SOCP conic IPM.
+- The interactive debugger (`--debug` / `--debug-script` / `--debug-json`) is a
+  pdb-for-the-IPM. It engages correctly on `lp-ipm`, `qp-ipm`, and `socp`, but
+  the active-set SQP engine (`qp-active-set`) has no such hook, so a debug
+  request there used to run to completion without ever pausing — a silent
+  no-op. It now prints an explicit note that the debugger is IPM-only and points
+  at `qp-ipm` for interactive convex-QP debugging.
+
+### Added — exact-vertex LP crossover (revised simplex)
+
+`pounce-convex` gains a revised-simplex crossover that purifies a near-optimal
+interior LP iterate to an exact optimal vertex, pivoting one variable at a time
+on feral's unsymmetric sparse LU with Bland's anti-cycling rule (so it walks
+through the highly degenerate NETLIB GEN vertices where the active-set bridge
+stalls). It is tried first and accepted only when the KKT error does not
+regress; on any breakdown it falls back to the legacy active-set bridge. Opt-in
+via `qp_crossover=yes`.
+
+### Fixed — convex LP/QP robustness on rank-deficient and large-scale data
+
+Interior-point hardening in the dedicated convex (`lp-ipm` / `qp-ipm`) path:
+
+- **Adaptive equality-block regularization (δ_c)** (#133). The
+  equality-multiplier `(y,y)` block was frozen at a static value; on
+  rank-deficient equality Jacobians that leaves a near-singular saddle and the
+  solve plateaus to max_iter. δ_c now seeds from a μ-scaled base
+  (`1e-8·μ^0.25`) and escalates on singular factorization / wrong KKT inertia /
+  un-refinable direction probes, resetting each iteration so one hard iterate
+  never inflates regularization for the rest of the solve. Regression-clean on
+  NETLIB; drops the rank-deficient GEN constraint violation 9.3e-5 → 3.1e-8.
+  (GEN still floors just above the 1e-8 tolerance, so #133 stays open.)
+- **Scale-gated relative stopping + ratio-based infeasibility ray**. The
+  absolute KKT stop is unreachable once the data scale pushes the
+  finite-precision residual floor above tol — POWELL20 / BOYD1 / BOYD2 /
+  QFORPLAN / QSHELL (scale 7e9–4e12) ran to max_iter despite being optimal to
+  ~1e-9 relative. A Clarabel-style scale-relative residual now relaxes the
+  absolute test, but only once roundoff sits below tol, so well-scaled problems
+  are unaffected. Infeasibility now triggers on the ratio κ/τ→∞ rather than a
+  bare τ floor, fixing a false `PrimalInfeasible` on feasible large-norm-x QPs.
+
+### Fixed — active-set QP cycling on degenerate phase-1 (#133)
+
+The active-set QP elastic phase-1 recovery (ℓ₁-infeasibility minimization,
+γ=1e6) is inherently highly degenerate and could cycle under the default
+anti-cycling rule (NETLIB `afiro` bailed at iteration 0). The phase-1 solve now
+runs under Bland's rule (provably finite), and `solve_general` latches into
+Bland after 50 consecutive non-improving iterations as a sticky,
+scale-invariant anti-stall safety net.
+
+### Changed — large sparse convex QPs are now recognized as convex (faster routing)
+
+Problem classification certifies a coupled quadratic Hessian as PSD via feral's
+sparse LDLᵀ inertia (~O(nnz·fill)) instead of a dense Jacobi eigensolve, so
+large-but-sparse convex QPs (the CVXQP family, n≈1000) that previously fell back
+to the general NLP solver are now sent to the dedicated convex path.
+
+### Added — limited-memory update type & history honored on the IPM path (#131, #132)
+
+`limited_memory_update_type` and `limited_memory_max_history` were registered
+but read nowhere on the interior-point path (the updater was hard-wired to
+Powell-damped BFGS). Both are now threaded through to the limited-memory
+updater. The default is unchanged (`bfgs`, history 6 — bit-exact with Ipopt), so
+there is no behavior change unless set; `sr1` (which can represent negative
+curvature) is now selectable and rescues ill-conditioned nonconvex objectives
+where damped BFGS hides indefiniteness from the inertia check.
+
 
 ## [0.4.0] — 2026-06-05
 

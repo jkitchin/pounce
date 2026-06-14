@@ -129,13 +129,18 @@ pub fn main() -> ExitCode {
                 "qp-active-set",
                 "Force active-set QP; errors if not LP/convex-QP.",
             ),
+            (
+                "socp",
+                "Force the SOCP conic IPM; errors if not a convex LP/QP/QCQP.",
+            ),
         ],
         "Selects the solver by problem class. `auto` routes LP and convex \
-         QP to the specialized convex interior-point solver (pounce-convex) \
-         and all other classes to the NLP filter-IPM. `qp-active-set` routes \
-         an LP / convex QP through the active-set SQP engine (pounce-qp QP \
-         subproblems) instead of the IPM; on these classes it converges in \
-         essentially one QP solve.",
+         QP to the specialized convex interior-point solver (pounce-convex), \
+         a convex QCQP to the SOCP conic IPM, and all other classes to the \
+         NLP filter-IPM. `qp-active-set` routes an LP / convex QP through the \
+         active-set SQP engine (pounce-qp QP subproblems) instead of the IPM; \
+         on these classes it converges in essentially one QP solve. `socp` \
+         forces the conic IPM (a convex QCQP routes there under `auto`).",
     ) {
         eprintln!("pounce: failed to register solver_selection option: {e}");
         return ExitCode::from(2);
@@ -755,6 +760,19 @@ pub fn main() -> ExitCode {
             {
                 eprintln!("pounce: failed to select the active-set-sqp algorithm: {e}");
                 return ExitCode::from(2);
+            }
+            // The interactive debugger is a pdb-for-the-IPM: it pauses on
+            // barrier-IPM iterations (mu, search direction, fraction-to-the-
+            // boundary). The active-set SQP engine is a different algorithm
+            // with no such hook, so a `--debug*` request here would otherwise
+            // silently no-op. Say so explicitly rather than pretend it engaged.
+            if debug_hook.is_some() {
+                eprintln!(
+                    "pounce: note: the interactive debugger is IPM-only and does \
+                     not engage on the active-set QP engine (solver_selection=\
+                     qp-active-set); the solve runs without pausing. Use \
+                     solver_selection=qp-ipm to debug a convex QP interactively."
+                );
             }
         }
         // `nlp` and any unmatched case fall through to the existing NLP

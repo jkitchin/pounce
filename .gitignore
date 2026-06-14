@@ -42,6 +42,9 @@
 !/benchmarks/*/README.md
 !/benchmarks/preprocessing/*
 !/benchmarks/scripts/*
+# Local adversarial generator for the convex solvers — kept out of the tree
+# (its .json/.md outputs are already ignored by the /benchmarks/* rule).
+/benchmarks/scripts/adversarial_convex.py
 # The large_scale suite is now .nl-driven: its problems are emitted by a
 # Pyomo generator rather than a compiled Rust crate. Track the generator
 # (and README, via the rule above); the generated .nl and per-run results
