@@ -505,6 +505,15 @@ impl IpoptApplication {
         if info.m > 0 && self.is_l1_fallback_enabled() && !self.is_l1_penalty_enabled() {
             return self.run_with_l1_fallback(tnlp);
         }
+        // μ-strategy auto-fallback (pounce#138): if the standard solve
+        // only reaches Solved_To_Acceptable_Level, retry once with the
+        // opposite mu_strategy and promote only on Solve_Succeeded.
+        // Applies to constrained and unconstrained alike (both run the
+        // same IPM). Independent of, and lower priority than, the ℓ₁
+        // fallback above.
+        if self.is_mu_strategy_fallback_enabled() {
+            return self.run_with_mu_strategy_fallback(tnlp);
+        }
         // Every problem — constrained or not — goes through the same
         // primal-dual IPM, exactly as upstream Ipopt does. There is no
         // separate "unconstrained Newton" path: the linear-solver
@@ -569,6 +578,16 @@ impl IpoptApplication {
     fn is_l1_fallback_enabled(&self) -> bool {
         self.options
             .get_bool_value("l1_fallback_on_restoration_failure", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+            .unwrap_or(false)
+    }
+
+    /// Read the μ-strategy auto-fallback switch (pounce#138).
+    /// Default `false` when the option is not set.
+    fn is_mu_strategy_fallback_enabled(&self) -> bool {
+        self.options
+            .get_bool_value("mu_strategy_fallback", "")
             .ok()
             .and_then(|(v, found)| found.then_some(v))
             .unwrap_or(false)
@@ -786,6 +805,72 @@ impl IpoptApplication {
         let _ = self.options.set_string_value(
             "l1_exact_penalty_barrier",
             prev.as_ref().map(|(v, _)| v.as_str()).unwrap_or("no"),
+            true,
+            false,
+        );
+        if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
+            retry_status
+        } else {
+            first_status
+        }
+    }
+
+    /// μ-strategy auto-fallback driver (pounce#138).
+    ///
+    /// Runs the standard solve first. If it stalls short of optimal in a
+    /// way a μ-strategy flip can plausibly fix — `Solved_To_Acceptable_Level`
+    /// or `Maximum_Iterations_Exceeded`, the two signatures seen on the
+    /// princetonlib instances where the dual infeasibility parks above
+    /// `tol` while constraint violation and complementarity are already
+    /// deeply converged — it flips `mu_strategy` (adaptive↔monotone) and
+    /// solves once more. The retry's status is promoted only if it returns
+    /// `Solve_Succeeded`; otherwise the original status is returned.
+    ///
+    /// (maxcut/price stall at acceptable-level under adaptive; fermat2_vareps
+    /// stalls at `max_iter` — hence both triggers. flosp2tm is μ-independent
+    /// and correctly does not promote.)
+    ///
+    /// The flip direction is taken from the option's current value:
+    /// `adaptive` → `monotone`, anything else (including absent, which
+    /// the builder treats as monotone) → `adaptive`. The option table is
+    /// restored to the user's original view afterward.
+    ///
+    /// Caveat (shared with the ℓ₁ fallback): the user TNLP's
+    /// `finalize_solution` runs once per attempt, so when the retry
+    /// doesn't promote the captured fields hold the retry's iterate.
+    fn run_with_mu_strategy_fallback(
+        &mut self,
+        tnlp: Rc<RefCell<dyn TNLP>>,
+    ) -> ApplicationReturnStatus {
+        let first_status = self.optimize_constrained(Rc::clone(&tnlp));
+        if !matches!(
+            first_status,
+            ApplicationReturnStatus::SolvedToAcceptableLevel
+                | ApplicationReturnStatus::MaximumIterationsExceeded
+        ) {
+            return first_status;
+        }
+        // Flip the strategy for one retry. The parser maps "adaptive" →
+        // Adaptive and every other value (incl. unset) → Monotone, so the
+        // opposite of an explicit "adaptive" is "monotone" and the
+        // opposite of anything else is "adaptive".
+        let prev = self.options.get_string_value("mu_strategy", "").ok();
+        let was_adaptive = prev
+            .as_ref()
+            .map(|(v, found)| *found && v == "adaptive")
+            .unwrap_or(false);
+        let flipped = if was_adaptive { "monotone" } else { "adaptive" };
+        let _ = self
+            .options
+            .set_string_value("mu_strategy", flipped, true, false);
+        let retry_status = self.optimize_constrained(Rc::clone(&tnlp));
+        // Restore the user's original option-table view.
+        let _ = self.options.set_string_value(
+            "mu_strategy",
+            prev.as_ref()
+                .filter(|(_, found)| *found)
+                .map(|(v, _)| v.as_str())
+                .unwrap_or("monotone"),
             true,
             false,
         );

@@ -887,6 +887,17 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     /* Default print level */
     AddIpoptIntOption(nlp, "print_level", 5);
 
+    /* Disable acceptable-level termination by default, matching the GAMS
+     * Ipopt link (optipopt.def sets `acceptable_iter` default 0, overriding
+     * Ipopt's source default of 15). Without this, pounce stops early at the
+     * "acceptable" point on slow-tail problems where GAMS-Ipopt grinds on to
+     * true local optimality — e.g. princetonlib/flosp2tm, which pounce parked
+     * at MS=7 (dual inf 2e-8, iter 17) while GAMS-Ipopt reaches MS=2 (8.7e-9,
+     * iter 248). Set before the opt-file parse so a user pounce.opt can still
+     * re-enable it. See pounce#138. (pounce honors 0 == disabled per the
+     * IpOptErrorConvCheck.cpp:241 `acceptable_iter_ > 0` guard.) */
+    AddIpoptIntOption(nlp, "acceptable_iter", 0);
+
     /* Use L-BFGS if no analytical Hessian */
     if (!data->have_hessian)
         AddIpoptStrOption(nlp, "hessian_approximation", "limited-memory");

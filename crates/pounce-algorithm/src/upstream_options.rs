@@ -1816,6 +1816,12 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         false,
         "When set, optimize_tnlp first runs the standard solve. If it terminates in Restoration_Failed / Infeasible_Problem_Detected / Solved_To_Acceptable_Level / Maximum_Iterations_Exceeded / Not_Enough_Degrees_Of_Freedom, the wrapper is enabled and the solve is repeated. The retry's status replaces the original ONLY if the retry returns Solve_Succeeded (promotion); otherwise the original status is returned. NOTE: the user TNLP's finalize_solution is called once per attempt, so when the retry doesn't promote the user's captured fields hold the retry's iterate (the ℓ₁-best least-infeasible point) even though the returned status is the original's — pounce#10 Phase-4 note.",
     )?;
+    r.add_bool_option(
+        "mu_strategy_fallback",
+        "Auto-retry with the opposite mu_strategy when the standard solve stalls short of optimal.",
+        false,
+        "When set, optimize_tnlp first runs the standard solve. If it terminates in Solved_To_Acceptable_Level or Maximum_Iterations_Exceeded — the stall signatures where the dual infeasibility parks above tol while constraint violation and complementarity are already converged — the mu_strategy is flipped (adaptive↔monotone) and the solve is repeated once. The retry's status replaces the original ONLY if the retry returns Solve_Succeeded (promotion); otherwise the original status is returned. Motivated by pounce#138: on several princetonlib instances adaptive under-converges the dual term while monotone drives it under tol (maxcut, price recover from acceptable-level; fermat2_vareps recovers from a 3000-iter stall) — and the converse holds on other models (globallib/ex8_3_1), so neither strategy is globally correct and a one-shot fallback recovers the stalled cases without a blanket flag flip. NOTE: like the ℓ₁ fallback, the user TNLP's finalize_solution runs once per attempt, so when the retry doesn't promote the captured fields hold the retry's iterate.",
+    )?;
 
     register_sipopt_options(r)?;
 

@@ -186,7 +186,12 @@ impl ConvCheck for OptErrorConvCheck {
         if nlp_err <= self.tol {
             return ConvergenceStatus::Converged;
         }
-        if nlp_err <= self.acceptable_tol {
+        // `acceptable_iter == 0` disables acceptable-level termination,
+        // mirroring upstream `IpOptErrorConvCheck.cpp:241`
+        // (`if( acceptable_iter_ > 0 && CurrentIsAcceptable() )`). Without
+        // the `> 0` guard, a zero would make `acceptable_count >= 0` fire on
+        // the first acceptable iterate — the opposite of "disabled".
+        if self.acceptable_iter > 0 && nlp_err <= self.acceptable_tol {
             self.acceptable_count += 1;
             if self.acceptable_count >= self.acceptable_iter {
                 return ConvergenceStatus::ConvergedToAcceptable;
@@ -225,7 +230,11 @@ impl ConvCheck for OptErrorConvCheck {
         if self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf) {
             return ConvergenceStatus::Converged;
         }
-        if self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f) {
+        // `acceptable_iter == 0` disables acceptable-level termination
+        // (upstream `IpOptErrorConvCheck.cpp:241`). See `check_convergence`.
+        if self.acceptable_iter > 0
+            && self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f)
+        {
             self.acceptable_count += 1;
             if self.acceptable_count >= self.acceptable_iter {
                 return ConvergenceStatus::ConvergedToAcceptable;
@@ -338,6 +347,30 @@ mod tests {
             c.check_convergence(1e-7, 2),
             ConvergenceStatus::ConvergedToAcceptable
         );
+    }
+
+    #[test]
+    fn acceptable_iter_zero_disables_acceptable_termination() {
+        // Upstream `IpOptErrorConvCheck.cpp:241` gates the acceptable
+        // counter on `acceptable_iter_ > 0`, so a zero disables the
+        // acceptable-level exit entirely. Before the guard, `>= 0` made
+        // pounce fire on the FIRST acceptable iterate (the opposite).
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 0,
+            ..Default::default()
+        };
+        // Many iterates parked between tol (1e-8) and acceptable (1e-6)
+        // must never trigger ConvergedToAcceptable; the run continues
+        // until tol or max_iter.
+        for k in 0..50 {
+            assert_eq!(
+                c.check_convergence(1e-7, k),
+                ConvergenceStatus::Continue,
+                "acceptable_iter=0 must not stop at the acceptable level (iter {k})"
+            );
+        }
+        // tol is still honored regardless.
+        assert_eq!(c.check_convergence(1e-9, 51), ConvergenceStatus::Converged);
     }
 
     #[test]
