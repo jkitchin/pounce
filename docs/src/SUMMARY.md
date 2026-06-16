@@ -27,6 +27,7 @@
 # Integrations
 
 - [Pyomo](pyomo.md)
+- [GAMS](gams.md)
 - [Python API](python.md)
 - [Curve Fitting](curve-fitting.md)
 

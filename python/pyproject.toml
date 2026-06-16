@@ -37,6 +37,11 @@ pounce = "pounce._cli:main"
 # Interactive viewer for the debugger's `viz`/`save` artifacts. Point the
 # debugger at it with: export POUNCE_DBG_VIEWER='pounce-dbg-viz {}'
 pounce-dbg-viz = "pounce._debug_viz:main"
+# GAMS solver-link registration (the `[gams]` extra). `pounce-gams register`
+# writes/merges a gamsconfig.yaml entry so GAMS can `option nlp = pounce;`.
+# `pounce-gams-link` is the launcher GAMS invokes with a control file.
+pounce-gams = "pounce._gams_cli:main"
+pounce-gams-link = "pounce.gams.link:main"
 
 [project.optional-dependencies]
 jax = ["jax>=0.4.30", "jaxlib>=0.4.30"]
@@ -52,7 +57,13 @@ scipy = ["scipy>=1.11"]
 # (pounce#91); the inverse_map_rhs helper itself depends only on jax.
 diffrax = ["diffrax>=0.5"]
 viz = ["plotly>=5"]
-dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30", "torch>=2.2", "plotly>=5"]
+# GAMS solver link. `gamsapi[core]` is GAMS's own expert-level GMO/GEV Python
+# API (on PyPI); its bindings dlopen the user's GAMS C libraries, so pin it to
+# match the installed GAMS (`pounce-gams status` diagnoses a mismatch). PyYAML
+# is used to merge POUNCE into an existing gamsconfig.yaml without clobbering
+# other solvers.
+gams = ["gamsapi[core]>=45", "pyyaml>=6"]
+dev = ["pytest>=7", "scipy>=1.11", "jax>=0.4.30", "jaxlib>=0.4.30", "torch>=2.2", "plotly>=5", "pyyaml>=6"]
 
 [project.urls]
 Homepage = "https://github.com/jkitchin/pounce"

@@ -1,4 +1,4 @@
-# GAMS solver link for POUNCE
+# GAMS solver link for POUNCE (native C link)
 
 This directory builds `libGamsPounce`, a shared library that registers POUNCE
 as a GAMS NLP solver. Once installed, a GAMS model can invoke POUNCE with
@@ -7,6 +7,14 @@ as a GAMS NLP solver. Once installed, a GAMS model can invoke POUNCE with
 option nlp = pounce;
 solve mymodel using nlp minimizing obj;
 ```
+
+> **Most users want the pip route instead.** `pip install pounce-solver[gams]`
+> followed by `pounce-gams register` makes POUNCE a GAMS solver with **no
+> compiler and no `sudo`** — a pure-Python link built on GAMS's own `gamsapi`
+> package. See the [GAMS integration docs](../docs/src/gams.md). This C link is
+> the *native* route: it requires building from source and `sudo make install`,
+> but adds the active-set-SQP working-set / on-disk state-file warm starts that
+> the pip link does not yet reproduce.
 
 ## Files
 
