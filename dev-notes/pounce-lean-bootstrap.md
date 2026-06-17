@@ -5,7 +5,7 @@ locally and reach its first validated milestone: a Lean 4 + Mathlib project that
 **kernel-checks a POUNCE solution certificate**. This document is deliberately
 standalone — you can take it to a fresh directory and not need the POUNCE repo
 open. (Companion design material, if you have the POUNCE repo: `dev-notes/lean-certificate.md`,
-`docs/src/schema/lean-cert-v1.md`, `dev-notes/lean-cert-example/`.)
+`dev-notes/lean-cert-schema-v1.md`, `dev-notes/lean-cert-example/`.)
 
 ---
 
@@ -342,7 +342,7 @@ emitter — against a schema now *proven* Lean-checkable.
 
 ## 9. Schema reference (`pounce.lean-cert/v1`) — essentials
 
-Full field-level spec: `docs/src/schema/lean-cert-v1.md` in the POUNCE repo. The
+Full field-level spec: `dev-notes/lean-cert-schema-v1.md` in the POUNCE repo. The
 load-bearing rules:
 
 - **No float anywhere.** Every number is `{ "num": "<int str>", "den": "<int str>" }`,

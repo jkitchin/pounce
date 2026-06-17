@@ -208,7 +208,7 @@ non-breaking; removing/renaming bumps the major; changing a field's semantics
 without a rename is forbidden.
 
 The concrete field-level schema is written up in
-[`docs/src/schema/lean-cert-v1.md`](../docs/src/schema/lean-cert-v1.md), and a
+[`dev-notes/lean-cert-schema-v1.md`](lean-cert-schema-v1.md), and a
 complete worked `qp-convex` / `global-min` certificate plus the `.lean` it
 should generate lives in [`dev-notes/lean-cert-example/`](lean-cert-example/).
 One refinement settled while writing those: `statement_sha256` (and any
@@ -263,7 +263,7 @@ Rationale:
 * **Decouples release cadence** — a Mathlib/Lean syntax change is a `pounce-lean`
   concern only; the cert schema (and POUNCE) are unaffected.
 
-Schema: [`docs/src/schema/lean-cert-v1.md`](../docs/src/schema/lean-cert-v1.md).
+Schema: [`dev-notes/lean-cert-schema-v1.md`](lean-cert-schema-v1.md).
 Worked example: [`dev-notes/lean-cert-example/`](lean-cert-example/).
 
 ## Open questions
