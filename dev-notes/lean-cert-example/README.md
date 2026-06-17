@@ -2,7 +2,7 @@
 
 End-to-end reference for the `pounce-lean` codegen. Design-stage; see
 `dev-notes/lean-certificate.md` for the architecture and
-`docs/src/schema/lean-cert-v1.md` for the schema.
+`../lean-cert-schema-v1.md` for the schema.
 
 ## The problem
 
