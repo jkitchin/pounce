@@ -207,6 +207,16 @@ Versioning policy mirrors the solve-report schema: adding fields is
 non-breaking; removing/renaming bumps the major; changing a field's semantics
 without a rename is forbidden.
 
+The concrete field-level schema is written up in
+[`docs/src/schema/lean-cert-v1.md`](../docs/src/schema/lean-cert-v1.md), and a
+complete worked `qp-convex` / `global-min` certificate plus the `.lean` it
+should generate lives in [`dev-notes/lean-cert-example/`](lean-cert-example/).
+One refinement settled while writing those: `statement_sha256` (and any
+signature) is **not** in the certificate POUNCE emits — it belongs to the
+*verification receipt* produced after codegen, because the statement is derived
+by `pounce-lean`, not by POUNCE. The certificate carries `nl_sha256` and
+`sol_sha256` only.
+
 **Drift guard** (mirrors `scripts/check-release-consistency.sh`): POUNCE CI
 emits a golden `cert` fixture; pounce-lean CI checks committed golden fixtures
 still verify. A schema break then fails *someone's* CI loudly instead of
@@ -234,16 +244,35 @@ silently rotting.
 math, with no SOS and no equality-residual argument, and produces a genuinely
 *global* certificate immediately.
 
+## Resolved: emitter output form (was open question #2)
+
+**Decision: POUNCE emits a neutral `cert.json`; `pounce-lean` owns the
+`cert → .lean` codegen.** POUNCE never emits Lean source.
+
+Rationale:
+
+* **Keeps `.nl`→math translation in Rust**, where `pounce-nl`'s reader already
+  lives — no second `.nl` parser, no duplicated TCB.
+* **Keeps the Lean repo free of POUNCE-format knowledge** — it codes against a
+  small, versioned, language-neutral schema, not against AMPL internals.
+* **Makes the witness/statement split explicit**, which is what the whole trust
+  argument rests on: the cert carries *data* (problem + untrusted witnesses);
+  the Lean side derives the *statement* and the *proof*. Emitting `.lean`
+  directly would blur that line and drag Lean syntax into POUNCE's release
+  surface.
+* **Decouples release cadence** — a Mathlib/Lean syntax change is a `pounce-lean`
+  concern only; the cert schema (and POUNCE) are unaffected.
+
+Schema: [`docs/src/schema/lean-cert-v1.md`](../docs/src/schema/lean-cert-v1.md).
+Worked example: [`dev-notes/lean-cert-example/`](lean-cert-example/).
+
 ## Open questions
 
 1. **Equality constraints in tier 1:** ship declared-tolerance ε now, or invest
    in interval-Newton existence? Changes what "verified feasible" *means* to a
    consumer.
-2. **Emitter output form:** neutral `cert.json` consumed by a Lean-side codegen
-   (cleaner TCB split, recommended) vs. POUNCE emitting `.lean` source directly
-   (fewer moving parts, but puts `.nl`→Lean knowledge in Rust).
-3. **Consumer ergonomics:** is requiring `lake build` acceptable, or do we also
+2. **Consumer ergonomics:** is requiring `lake build` acceptable, or do we also
    ship a prebuilt/attested verdict for consumers who will not run Lean? (The
    latter reintroduces a trust-the-attester problem the proof was meant to
    remove.)
-4. **Naming:** `pounce-lean` vs `pounce-cert` for the verification repo.
+3. **Naming:** `pounce-lean` vs `pounce-cert` for the verification repo.
