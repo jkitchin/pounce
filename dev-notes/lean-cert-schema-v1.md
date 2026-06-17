@@ -4,10 +4,11 @@
 
 > **Status: DRAFT / design-stage.** This schema is the contract between the
 > POUNCE-side emitter (`pounce certify`, not yet implemented) and the external
-> `pounce-lean` verification repo (not yet created). It is documented here, in
-> the producer's repo, so the external project can be built against a fixed
-> interface. It is **not** wired into the user-facing docs nav and **not**
-> implemented yet. Design rationale: `dev-notes/lean-certificate.md`.
+> `pounce-lean` verification repo (not yet created). It lives in `dev-notes/`
+> (not the published `docs/src/` book) precisely because the feature is not
+> implemented yet — it will graduate to `docs/src/schema/lean-cert-v1.md` and be
+> wired into the user-facing nav when `pounce certify` ships. Design rationale:
+> `dev-notes/lean-certificate.md`.
 
 This document defines the JSON certificate POUNCE emits for a solve so that
 Lean 4 can independently produce a kernel-checked proof that the returned `x*`
