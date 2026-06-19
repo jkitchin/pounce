@@ -1,0 +1,160 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "global-min",
+  "problem_class": "qp-convex",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "fa599febe64fd450951bd000381b0bc9e6318e9f1a17f0656a40e5ae1adadea9",
+    "sol_sha256": "029840db026267396fef3e7ca43ea846d6d9cb296e60497fd26827d61cfe9ae0",
+    "solver": "pounce 0.5.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": [
+          {
+            "i": 0,
+            "j": 0,
+            "val": {
+              "num": "2",
+              "den": "1"
+            }
+          },
+          {
+            "i": 1,
+            "j": 1,
+            "val": {
+              "num": "2",
+              "den": "1"
+            }
+          }
+        ]
+      },
+      "c": [
+        {
+          "num": "-6",
+          "den": "1"
+        },
+        {
+          "num": "-6",
+          "den": "1"
+        }
+      ],
+      "constant": {
+        "num": "18",
+        "den": "1"
+      }
+    },
+    "var_bounds": {
+      "lower": [
+        "-inf",
+        "-inf"
+      ],
+      "upper": [
+        "+inf",
+        "+inf"
+      ]
+    },
+    "constraints": [
+      {
+        "name": "c0_lo",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "1",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "c0_hi",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": "-inf",
+        "upper": {
+          "num": "4",
+          "den": "1"
+        }
+      }
+    ]
+  },
+  "candidate": {
+    "x": [
+      {
+        "num": "2",
+        "den": "1"
+      },
+      {
+        "num": "2",
+        "den": "1"
+      }
+    ],
+    "objective": {
+      "num": "2",
+      "den": "1"
+    }
+  },
+  "witnesses": {
+    "duals": [
+      {
+        "num": "0",
+        "den": "1"
+      },
+      {
+        "num": "2",
+        "den": "1"
+      }
+    ],
+    "hessian_psd": {
+      "of": "Q",
+      "L": {
+        "rows": 2,
+        "cols": 2,
+        "unit_lower": true,
+        "entries": []
+      },
+      "D": [
+        {
+          "num": "2",
+          "den": "1"
+        },
+        {
+          "num": "2",
+          "den": "1"
+        }
+      ]
+    },
+    "active_set": [
+      1
+    ]
+  }
+}

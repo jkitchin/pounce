@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Lean-certificate drift guard — the cross-repo analog of
+# scripts/check-release-consistency.sh, for the `pounce certify` emitter.
+#
+# The emitter (`pounce certify`) and the external pounce-lean codegen
+# (`codegen/gen_lean.py` → `lake build`) talk only through the
+# `pounce.lean-cert/v1` schema. If either side drifts from that contract a
+# certificate silently stops verifying. This guard pins both directions against
+# committed golden fixtures.
+#
+# Two layers, by cost:
+#
+#   1. POUNCE-side (ALWAYS, fast, no Lean toolchain): regenerate the golden
+#      `cert.json` from the committed `.nl`/`.sol` and diff byte-for-byte. The
+#      emitter is deterministic (exact rational arithmetic + content-addressed
+#      hashes of fixed bytes), so any change in emitted bytes is real drift.
+#      This is the part wired into POUNCE CI — it keeps the multi-GB Mathlib
+#      build off POUNCE's critical path, exactly as the architecture intends.
+#
+#   2. Cross-repo (OPT-IN, set POUNCE_LEAN_DIR=/path/to/pounce-lean): run that
+#      repo's codegen on the golden cert and diff the golden `expected.lean`;
+#      and if LAKE_BUILD=1, `lake build` the generated module so the whole
+#      emit → codegen → kernel-check loop is exercised. The lake build proper
+#      lives in pounce-lean's own CI (its check_fixtures.py); this is for local
+#      end-to-end validation.
+#
+# Usage:
+#   scripts/check-lean-cert.sh                          # layer 1 only
+#   POUNCE_LEAN_DIR=../pounce-lean scripts/check-lean-cert.sh
+#   POUNCE_LEAN_DIR=../pounce-lean LAKE_BUILD=1 scripts/check-lean-cert.sh
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+FIX="crates/pounce-cli/tests/fixtures"
+
+# Each fixture: "<basename> <Lean module>". The basename names the committed
+# <basename>.{nl,sol,cert.json,expected.lean} quadruple.
+FIXTURES=(
+  "certify_qp    PounceLean.CertifyQP"     # free variables, one general constraint
+  "certify_box   PounceLean.CertifyBox"    # box variable bounds (folded to rows)
+  "certify_range PounceLean.CertifyRange"  # two-sided range constraint (split to rows)
+  "certify_eq    PounceLean.CertifyEq"     # equality constraint (free-sign μ = -1)
+)
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# --- layer 1: emitter reproduces the golden certificate ---------------------
+echo "== certificate regeneration (pounce certify) =="
+if [[ -n "${POUNCE_BIN:-}" ]]; then
+  PNC=("$POUNCE_BIN")
+else
+  echo "  building pounce (cargo) ..."
+  cargo build -q -p pounce-cli --bin pounce
+  PNC=("target/debug/pounce")
+fi
+
+for entry in "${FIXTURES[@]}"; do
+  read -r base module <<<"$entry"
+  golden_cert="$FIX/$base.cert.json"
+  "${PNC[@]}" certify "$FIX/$base.nl" "$FIX/$base.sol" -o "$tmp/$base.cert.json"
+  if ! diff -u "$golden_cert" "$tmp/$base.cert.json"; then
+    echo "FAIL — emitted certificate drifted from $golden_cert" >&2
+    echo "       (intentional? regenerate: pounce certify $FIX/$base.nl $FIX/$base.sol -o $golden_cert)" >&2
+    exit 1
+  fi
+  echo "  OK — $base: emitted cert matches golden"
+  # Consumer-side binding check: the golden cert must verify against its own .nl
+  # (re-derived problem == cert.problem, hash matches).
+  if ! "${PNC[@]}" cert-verify "$FIX/$base.nl" "$golden_cert" >/dev/null; then
+    echo "FAIL — $base: cert-verify rejected the golden cert against its own .nl" >&2
+    exit 1
+  fi
+  echo "  OK — $base: cert-verify binds cert ↔ .nl"
+done
+
+# --- layer 2 (opt-in): codegen + optional lake build ------------------------
+if [[ -z "${POUNCE_LEAN_DIR:-}" ]]; then
+  echo "== codegen / lake build: SKIPPED (set POUNCE_LEAN_DIR to enable) =="
+  echo "check-lean-cert: OK (layer 1, ${#FIXTURES[@]} fixtures)"
+  exit 0
+fi
+
+GEN="$POUNCE_LEAN_DIR/codegen/gen_lean.py"
+if [[ ! -f "$GEN" ]]; then
+  echo "FAIL — POUNCE_LEAN_DIR=$POUNCE_LEAN_DIR has no codegen/gen_lean.py" >&2
+  exit 1
+fi
+
+# Files we may write into the pounce-lean checkout for LAKE_BUILD; cleaned up.
+declare -a placed=()
+cleanup() { rm -rf "$tmp"; for f in "${placed[@]}"; do rm -f "$f"; done; }
+trap cleanup EXIT
+
+for entry in "${FIXTURES[@]}"; do
+  read -r base module <<<"$entry"
+  golden_lean="$FIX/$base.expected.lean"
+
+  echo "== $base: codegen reproduces the golden .lean =="
+  python3 "$GEN" "$FIX/$base.cert.json" -m "$module" -o "$tmp/$base.lean"
+  if ! diff -u "$golden_lean" "$tmp/$base.lean"; then
+    echo "FAIL — codegen drifted from $golden_lean" >&2
+    echo "       (regenerate: python3 $GEN $FIX/$base.cert.json -m $module -o $golden_lean)" >&2
+    exit 1
+  fi
+  echo "  OK — $base: codegen output matches golden"
+
+  if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
+    echo "== $base: lake build + axiom audit ($module) =="
+    dest="$POUNCE_LEAN_DIR/${module//.//}.lean"   # PounceLean.CertifyQP -> PounceLean/CertifyQP.lean
+    if [[ -e "$dest" ]]; then
+      echo "FAIL — $dest already exists; refusing to overwrite" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$dest")"
+    cp "$golden_lean" "$dest"
+    # Audit the trust base of the verdict: print the axioms `global_min` rests
+    # on. `lake build` exits 0 even on a `sorry` (it only warns), so the exit
+    # code alone is NOT sufficient — the axiom set is the real gate.
+    printf '\n#print axioms %s.global_min\n' "$module" >> "$dest"
+    placed+=("$dest")
+
+    out="$( cd "$POUNCE_LEAN_DIR" && lake build "$module" 2>&1 )" || {
+      printf '%s\n' "$out" | grep -iE "error" | head -5 >&2
+      echo "FAIL — $base: lake build failed" >&2
+      exit 1
+    }
+    # The `#print axioms` info line for global_min.
+    axline="$(printf '%s\n' "$out" | grep "global_min' depends on axioms" || true)"
+    if [[ -z "$axline" ]]; then
+      echo "FAIL — $base: no axiom report for $module.global_min (did the theorem build?)" >&2
+      exit 1
+    fi
+    if printf '%s' "$axline" | grep -q "sorryAx"; then
+      echo "FAIL — $base: proof depends on 'sorryAx' (a sorry slipped through a green build)" >&2
+      exit 1
+    fi
+    # Anything beyond Lean's three standard axioms is a forbidden trust escalation.
+    extras="$(printf '%s' "$axline" \
+      | sed 's/.*\[//; s/\].*//; s/,/ /g' | tr ' ' '\n' \
+      | grep -vE '^(propext|Classical\.choice|Quot\.sound)?$' || true)"
+    if [[ -n "$extras" ]]; then
+      echo "FAIL — $base: proof rests on non-standard axioms: $(echo "$extras" | tr '\n' ' ')" >&2
+      exit 1
+    fi
+    echo "  OK — $base: kernel-checks; axioms = {propext, Classical.choice, Quot.sound}, no sorry"
+  fi
+done
+
+echo "check-lean-cert: OK"

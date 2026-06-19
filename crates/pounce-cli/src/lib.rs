@@ -19,6 +19,7 @@ pub use pounce_nl::{nl_external, nl_fbbt_translate, nl_reader, nl_tape};
 // inverts, so the wasm frontend can emit the same file. Re-exported under its
 // historical name to keep `nl_writer::…` call sites resolving.
 pub use pounce_nl::sol_writer as nl_writer;
+pub mod certify;
 pub mod dispatch;
 pub mod minima;
 pub mod nl_hessian_program;
