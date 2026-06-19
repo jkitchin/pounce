@@ -46,6 +46,7 @@ pounce-presolve.workspace = true
 pounce-linalg.workspace = true
 pounce-sensitivity.workspace = true
 pounce-solve-report.workspace = true
+pounce-lean-cert.workspace = true
 pounce-studio-core.workspace = true
 pounce-observability.workspace = true
 # Specialized convex LP/QP interior-point solver, dispatched to for

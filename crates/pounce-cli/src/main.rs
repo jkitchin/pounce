@@ -66,6 +66,22 @@ pub fn main() -> ExitCode {
         return pounce_cli::check_x0::run_from_argv(&raw_argv[2..]);
     }
 
+    // `pounce certify <problem.nl> <claim.sol>` — emit an exact-rational
+    // pounce.lean-cert/v1 certificate for a convex-QP global-min solve, for
+    // the pounce-lean kernel checker. Also a distinct subcommand, dispatched
+    // before the solve path. See `pounce_cli::certify`.
+    if raw_argv.get(1).map(|s| s == "certify").unwrap_or(false) {
+        return pounce_cli::certify::run_from_argv(&raw_argv[2..]);
+    }
+
+    // `pounce cert-verify <problem.nl> <cert.json>` — the consumer-side binding
+    // check: re-derive the problem from the .nl and confirm the certificate is
+    // about THIS problem (closes the "prove an easier problem under the real
+    // hash" gap). See `pounce_cli::certify::run_verify_from_argv`.
+    if raw_argv.get(1).map(|s| s == "cert-verify").unwrap_or(false) {
+        return pounce_cli::certify::run_verify_from_argv(&raw_argv[2..]);
+    }
+
     let mut args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {
