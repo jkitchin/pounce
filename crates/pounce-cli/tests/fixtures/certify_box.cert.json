@@ -1,0 +1,182 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "global-min",
+  "problem_class": "qp-convex",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "954c42ae9ac363b2fbd0a1b8beb7f4d6c0da9d26fe7f20259c710db39aca7e1f",
+    "sol_sha256": "e5cf3eb55ef280a0d42c3da8a7a46c9ca89016a9c95307d84aa88c1574582408",
+    "solver": "pounce 0.5.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": [
+          {
+            "i": 0,
+            "j": 0,
+            "val": {
+              "num": "2",
+              "den": "1"
+            }
+          },
+          {
+            "i": 1,
+            "j": 1,
+            "val": {
+              "num": "2",
+              "den": "1"
+            }
+          }
+        ]
+      },
+      "c": [
+        {
+          "num": "-6",
+          "den": "1"
+        },
+        {
+          "num": "-8",
+          "den": "1"
+        }
+      ],
+      "constant": {
+        "num": "25",
+        "den": "1"
+      }
+    },
+    "var_bounds": {
+      "lower": [
+        "-inf",
+        "-inf"
+      ],
+      "upper": [
+        "+inf",
+        "+inf"
+      ]
+    },
+    "constraints": [
+      {
+        "name": "var0_lb",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "0",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "var0_ub",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ],
+        "lower": "-inf",
+        "upper": {
+          "num": "1",
+          "den": "1"
+        }
+      },
+      {
+        "name": "var1_lb",
+        "coeffs": [
+          {
+            "num": "0",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "0",
+          "den": "1"
+        },
+        "upper": "+inf"
+      }
+    ]
+  },
+  "candidate": {
+    "x": [
+      {
+        "num": "1",
+        "den": "1"
+      },
+      {
+        "num": "4",
+        "den": "1"
+      }
+    ],
+    "objective": {
+      "num": "4",
+      "den": "1"
+    }
+  },
+  "witnesses": {
+    "duals": [
+      {
+        "num": "0",
+        "den": "1"
+      },
+      {
+        "num": "4",
+        "den": "1"
+      },
+      {
+        "num": "0",
+        "den": "1"
+      }
+    ],
+    "hessian_psd": {
+      "of": "Q",
+      "L": {
+        "rows": 2,
+        "cols": 2,
+        "unit_lower": true,
+        "entries": []
+      },
+      "D": [
+        {
+          "num": "2",
+          "den": "1"
+        },
+        {
+          "num": "2",
+          "den": "1"
+        }
+      ]
+    },
+    "active_set": [
+      1
+    ]
+  }
+}

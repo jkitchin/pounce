@@ -15,6 +15,7 @@ pub mod debug_repl;
 // it. Re-export the modules so existing `crate::nl_reader::…` /
 // `pounce_cli::nl_reader::…` paths keep resolving unchanged.
 pub use pounce_nl::{nl_external, nl_fbbt_translate, nl_reader, nl_tape};
+pub mod certify;
 pub mod dispatch;
 pub mod minima;
 pub mod nl_hessian_program;
