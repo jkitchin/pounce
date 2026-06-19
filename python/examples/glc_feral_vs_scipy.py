@@ -16,6 +16,20 @@ same BVP two ways and compare speed and accuracy:
   node count.
 
 Standalone — only needs numpy, scipy, pounce (no pathsim).
+
+Attribution
+-----------
+The model code reproduced below — the property correlations
+(``_calculate_properties``), the dimensionless groups
+(``_calculate_dimensionless_groups``), and the ODE / boundary-condition
+equations (``make_bvp``) — is adapted from pathsim-chem,
+``src/pathsim_chem/tritium/glc.py``, which is MIT-licensed:
+
+    Copyright (c) 2025 PathSim
+    https://github.com/pathsim/pathsim-chem   (MIT License)
+
+Reproduced here under the terms of the MIT License for a solver comparison;
+the pounce-specific parts (the solve/compare harness) are pounce's own.
 """
 
 import time
