@@ -121,15 +121,39 @@ lam.grad
 | Solved-for unknown `p*` | differentiate `sol.p` | (c) |
 | Full solution `dy/dθ` | `jax.jacobian` over `sol.y` | (d) |
 | Vector `θ` | one reverse pass | (e) |
+| Second derivative / Hessian | `second_order=True` | (f) |
 
 All of these are validated against finite differences to ~1e-11 in
 `python/examples/bvp_scipy_compare.py`, which also benchmarks accuracy and
 speed against SciPy.
 
-> **Second-order differentiation through the solver is not supported.** The
-> JAX forward crosses a `pure_callback` (no JVP rule), so `jax.grad(jax.grad(...))`
-> through `solve_bvp` raises. First-order gradients and Jacobians w.r.t.
-> any `theta` are fully supported.
+### Second-order derivatives
+
+By default `solve_bvp` routes through `pounce.jax.solve`'s first-order
+`custom_vjp`, whose forward crosses a `pure_callback` (no JVP rule) — so
+`jax.grad(jax.grad(...))` / `jax.hessian` raise. Pass **`second_order=True`**
+to wrap the solve in a `custom_jvp` whose tangent rule re-applies the
+implicit-function theorem to the square collocation root-find,
+
+```text
+dz/dθ = -(∂R/∂z)⁻¹ (∂R/∂θ),
+```
+
+and recovers `z*` through the *same* custom-ruled primitive, so JAX
+recurses to arbitrary order:
+
+```python
+def y_mid(lam):
+    sol = pj.solve_bvp(fun, bc, x, y0, theta=lam, second_order=True)
+    return sol.y[0, sol.y.shape[1] // 2]
+
+jax.grad(jax.grad(y_mid))(1.0)     # d²y(0.5)/dλ²  — works
+```
+
+The cost is one extra forward solve per differentiation level (the rule
+re-solves to recover `z*`); the opaque forward is still only evaluated for
+primal values. Leave it off for plain gradient-based training; turn it on
+for Hessians / Newton-type outer loops.
 
 ## How it works
 

@@ -24,8 +24,11 @@ differentiable JAX/PyTorch frontends:
   differentiable w.r.t. a `theta` parameter threaded into `fun` / `bc`, via
   the implicit-function theorem on the collocation KKT system. Supports
   gradients/Jacobians w.r.t. ODE/BC coefficients, boundary values, and the
-  sensitivity of solved-for unknown parameters `p*`. First-order only
-  (the forward crosses a `pure_callback`).
+  sensitivity of solved-for unknown parameters `p*`. First-order by
+  default; `pounce.jax.solve_bvp(..., second_order=True)` wraps the solve
+  in a `custom_jvp` that re-applies the implicit-function theorem to the
+  square collocation root-find, enabling `jax.grad(jax.grad(...))` /
+  `jax.hessian` to arbitrary order.
 - Docs: `docs/src/bvp.md`; worked accuracy/speed/differentiability comparison
   in `python/examples/bvp_scipy_compare.py`.
 

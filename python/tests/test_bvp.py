@@ -137,6 +137,38 @@ def test_jax_solve_bvp_gradient_boundary_value():
     assert abs(g - fd) / abs(fd) < 1e-6
 
 
+def test_jax_solve_bvp_second_order():
+    """second_order=True unlocks jax.grad(jax.grad(...)) via custom_jvp."""
+    pytest.importorskip("jax")
+    import jax
+    import jax.numpy as jnp
+    import pounce.jax as pj
+
+    # Bratu: y'' + lambda e^y = 0, y(0)=y(1)=0.
+    def fun(x, y, lam):
+        return jnp.vstack((y[1], -lam * jnp.exp(y[0])))
+
+    def bc(ya, yb, lam):
+        return jnp.array([ya[0], yb[0]])
+
+    x = jnp.linspace(0, 1, 51)
+    y0 = jnp.zeros((2, x.size))
+
+    def y_mid(lam):
+        sol = pj.solve_bvp(fun, bc, x, y0, theta=lam, second_order=True)
+        return sol.y[0, sol.y.shape[1] // 2]
+
+    lam = 1.0
+    g1 = float(jax.grad(y_mid)(lam))
+    g2 = float(jax.grad(jax.grad(y_mid))(lam))
+
+    h = 1e-5
+    fd1 = float((y_mid(lam + h) - y_mid(lam - h)) / (2 * h))
+    fd2 = float((jax.grad(y_mid)(lam + h) - jax.grad(y_mid)(lam - h)) / (2 * h))
+    assert abs(g1 - fd1) / abs(fd1) < 1e-6
+    assert abs(g2 - fd2) / abs(fd2) < 1e-5
+
+
 def test_jax_solve_bvp_unknown_parameter():
     pytest.importorskip("jax")
     import jax.numpy as jnp

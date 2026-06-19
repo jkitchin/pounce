@@ -230,10 +230,24 @@ def differentiability_jax():
     print(f"    finite diff   : [{fd_v[0]:.8f}, {fd_v[1]:.8f}]")
     print(f"    max rel error : {np.max(np.abs(g_v - fd_v) / np.abs(fd_v)):.2e}")
 
-    print("\nNote: first-order gradients/Jacobians w.r.t. any theta are "
-          "supported.\nSecond-order differentiation *through* the solver is "
-          "not (the JAX\nforward crosses a pure_callback, which has no JVP "
-          "rule).")
+    # ---- (f) second derivative through the solver (second_order=True) ----
+    def y_mid_so(lam):
+        sol = pj.solve_bvp(fun, bc, x, y0, theta=lam, second_order=True)
+        return sol.y[0, sol.y.shape[1] // 2]
+
+    print("\n(f) second derivative d^2 y(0.5)/dlambda^2 (second_order=True)")
+    h2 = float(jax.grad(jax.grad(y_mid_so))(1.0))
+    dd = 1e-4
+    fd2 = float((jax.grad(y_mid_so)(1.0 + dd) - jax.grad(y_mid_so)(1.0 - dd))
+                / (2 * dd))
+    print(f"    implicit Hessian : {h2:.8f}")
+    print(f"    finite diff      : {fd2:.8f}")
+    print(f"    rel error        : {abs(h2 - fd2) / abs(fd2):.2e}")
+
+    print("\nNote: first-order gradients/Jacobians w.r.t. any theta work by "
+          "default.\nPass second_order=True to also take jax.grad(jax.grad) / "
+          "jax.hessian\nthrough the solve (a custom_jvp re-applies the "
+          "implicit function theorem).")
 
 
 # --------------------------------------------------------------------------

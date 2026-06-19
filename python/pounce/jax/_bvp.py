@@ -55,7 +55,10 @@ class JaxBVPSolution:
     sol: Callable
 
 
-def solve_bvp(fun, bc, x, y, p=None, theta=None, *, tol=1e-8, options=None):
+def solve_bvp(
+    fun, bc, x, y, p=None, theta=None, *,
+    tol=1e-8, options=None, second_order=False,
+):
     """Solve a BVP differentiably w.r.t. ``theta`` with JAX + pounce.
 
     Parameters
@@ -76,6 +79,22 @@ def solve_bvp(fun, bc, x, y, p=None, theta=None, *, tol=1e-8, options=None):
         pounce convergence tolerance.
     options : dict or None
         Extra pounce options.
+    second_order : bool
+        When ``False`` (default) the solve routes through
+        :func:`pounce.jax.solve`'s first-order ``custom_vjp`` — efficient
+        (the backward reuses the forward's converged duals, no re-solve),
+        but ``jax.grad`` only (``jax.grad(jax.grad(...))`` / ``jax.hessian``
+        raise, because that path's forward crosses a ``pure_callback`` with
+        no JVP rule). When ``True`` the solve is wrapped in a ``custom_jvp``
+        whose tangent rule re-applies the implicit-function theorem to the
+        collocation root-find ``dz/dtheta = -(dR/dz)^{-1} (dR/dtheta)`` and
+        recomputes the solution through the *same* custom-ruled primitive,
+        so JAX recurses for arbitrary differentiation order (``jax.hessian``
+        works). The cost is one extra forward solve per differentiation
+        level (the rule re-solves to recover ``z*``); the opaque forward is
+        only ever evaluated for primal values, never differentiated. Use
+        this for second derivatives / Newton-type outer loops; leave it off
+        for plain gradient-based training.
 
     Returns
     -------
@@ -114,9 +133,13 @@ def solve_bvp(fun, bc, x, y, p=None, theta=None, *, tol=1e-8, options=None):
     if options:
         opts.update(options)
 
-    z_star = _pounce_solve(
-        theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
-    )
+    if second_order:
+        solve_root = _make_root_solver_jvp(f, g, z0, N, cl, cu, opts)
+        z_star = solve_root(theta)
+    else:
+        z_star = _pounce_solve(
+            theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
+        )
 
     Y_star, p_star = _core.unpack_z(z_star, n, m)
     nfun, _ = _core._make_normalized(fun, bc, theta=theta, uses_p=uses_p)
@@ -131,6 +154,42 @@ def solve_bvp(fun, bc, x, y, p=None, theta=None, *, tol=1e-8, options=None):
         yp=yp,
         sol=sol,
     )
+
+
+def _make_root_solver_jvp(f, g, z0, N, cl, cu, opts):
+    """Build a ``custom_jvp`` collocation root-solver, differentiable to
+    arbitrary order w.r.t. ``theta``.
+
+    The collocation system is the **square** root-find ``R(z, theta) = 0``
+    (``g`` is the residual), so the implicit-function theorem gives the
+    tangent ``z_dot = -(dR/dz)^{-1} (dR/dtheta . theta_dot)`` directly — no
+    active-set / bound bookkeeping (there are none here). Crucially the
+    rule recovers ``z*`` by calling ``solve_root`` again, i.e. through the
+    *same* ``custom_jvp`` primitive, so differentiating the rule re-enters
+    the rule and JAX composes derivatives to any order. The forward
+    ``pure_callback`` (inside :func:`pounce.jax.solve`) is only evaluated
+    for primal values; it is never asked for a tangent, which is why this
+    sidesteps the "pure callbacks do not support JVP" limitation that
+    blocks second-order through the plain :func:`pounce.jax.solve` path.
+    """
+
+    @jax.custom_jvp
+    def solve_root(theta):
+        return _pounce_solve(
+            theta, f=f, g=g, x0=z0, n=N, m=N, cl=cl, cu=cu, options=opts,
+        )
+
+    @solve_root.defjvp
+    def solve_root_jvp(primals, tangents):
+        (theta,), (theta_dot,) = primals, tangents
+        z = solve_root(theta)
+        # R_z (N x N) and the directional derivative R_theta . theta_dot.
+        Rz = jax.jacfwd(lambda zz: g(zz, theta))(z)
+        _, R_theta_dot = jax.jvp(lambda th: g(z, th), (theta,), (theta_dot,))
+        z_dot = -jnp.linalg.solve(Rz, R_theta_dot)
+        return z, z_dot
+
+    return solve_root
 
 
 def _make_spline(x, y, yp):
