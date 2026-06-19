@@ -8,11 +8,16 @@ solver is Newton: factor the ``N x N`` Jacobian ``J = dR/dz`` and step
 so this path never builds the interior-point method's ``2N`` symmetric
 saddle system.
 
-The iteration is an affine-invariant damped Newton: backtrack the step
-length until the residual norm decreases, which makes it robust on mildly
-nonlinear problems without the IPM's filter / barrier machinery. The
-Jacobian structure is fixed across iterations, so the LU symbolic analysis
-is computed once and only the numeric factorization repeats.
+The iteration is a **modified (frozen-Jacobian) damped Newton**: the LU is
+reused across steps and only refactored when progress stalls (the line
+search fails, or a step's residual reduction is poor). Because the
+factorization dominates the per-iteration cost — and the collocation
+Jacobian changes slowly between steps — reusing it typically cuts the
+number of factorizations from one-per-iteration to one or two for the whole
+solve, which is what makes this competitive with (and often faster than)
+SciPy, whose ``solve_newton`` freezes the Jacobian the same way. The LU
+symbolic analysis is computed once (fixed sparsity); refactoring only
+re-runs the numeric factorization.
 """
 
 from __future__ import annotations
@@ -21,9 +26,14 @@ import numpy as np
 
 from .._pounce import SparseLU
 
+# Refactor the frozen Jacobian when an accepted step reduces the residual
+# norm by less than this factor — convergence has slowed enough that a fresh
+# factor (restoring quadratic convergence) is worth its cost.
+_REFACTOR_RATIO = 0.5
+
 
 def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
-    """Solve ``R(z) = 0`` from ``z0`` by damped Newton.
+    """Solve ``R(z) = 0`` from ``z0`` by modified (frozen-Jacobian) Newton.
 
     Parameters
     ----------
@@ -49,15 +59,20 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
     R = np.asarray(residual_fn(z), dtype=np.float64)
     rnorm = np.linalg.norm(R, np.inf)
 
+    need_factor = True   # (re)factor the held LU at the top of the next step
+    fresh = False        # True iff the held factor was built at the current z
     converged = False
     it = 0
     for it in range(1, max_iter + 1):
         if rnorm < tol:
             converged = True
             break
-        Y = z[: n * m].reshape(n, m)
-        p = z[n * m :]
-        lu.factor(jac.values(Y, p))
+        if need_factor:
+            Y = z[: n * m].reshape(n, m)
+            p = z[n * m :]
+            lu.factor(jac.values(Y, p))
+            need_factor = False
+            fresh = True
         dz = lu.solve(-R)
 
         # Backtracking line search on the residual infinity-norm.
@@ -71,13 +86,26 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
                 accepted = True
                 break
             alpha *= 0.5
+
         if not accepted:
-            # Backtracking could not reduce the residual — the iterate has
-            # converged to round-off (quadratic convergence then stalls).
-            # Stop here rather than spinning to max_iter.
-            converged = rnorm < 1e-6
-            break
+            if fresh:
+                # A fresh factor still can't reduce the residual — the iterate
+                # has converged to round-off (quadratic convergence stalls).
+                converged = rnorm < 1e-6
+                break
+            # The frozen factor gave a poor direction; refresh it at the
+            # current z and retry this step (no move taken).
+            need_factor = True
+            continue
+
+        ratio = rnorm_trial / rnorm
         z, R, rnorm = z_trial, R_trial, rnorm_trial
+        fresh = False
+        # Refactor next step if the frozen factor is going stale — slow
+        # reduction or a heavily damped step both signal the linearisation
+        # no longer matches; a fresh factor restores fast convergence.
+        if ratio > _REFACTOR_RATIO or alpha < 1.0:
+            need_factor = True
 
     if rnorm < tol:
         converged = True

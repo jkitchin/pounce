@@ -68,11 +68,15 @@ res.p           # ≈ [π]
   predictable, and what the differentiable frontends rely on (a fixed mesh
   keeps `θ ↦ y` smooth). `adaptive=True` turns on SciPy-style residual-driven
   refinement (below).
-- **Solver (`method`).** `method="newton"` (default) runs a damped Newton
-  on the square collocation system and factorises the `N×N` Jacobian with
-  FERAL's unsymmetric sparse LU (`pounce._pounce.SparseLU`) — the same
-  algorithm SciPy uses, and **typically faster than SciPy** (≈2–3× on fine
-  meshes; both scale linearly). The Jacobian is the exact **sparse**
+- **Solver (`method`).** `method="newton"` (default) runs a **modified
+  (frozen-Jacobian) Newton** on the square collocation system, factorising
+  the `N×N` Jacobian with FERAL's unsymmetric sparse LU
+  (`pounce._pounce.SparseLU`) and reusing that factor across steps
+  (refactoring only when progress stalls — the same trick SciPy's
+  `solve_newton` uses). Both scale linearly in the mesh; at equal mesh
+  pounce is **typically faster than SciPy** (≈0.6–1.0×), including large
+  nonlinear problems, because the factorisation dominates and it does far
+  fewer of them. The Jacobian is the exact **sparse**
   collocation Jacobian (analytic per-node `∂f/∂y` blocks from
   `fun_jac`/`bc_jac` if supplied, else a vectorised finite difference that
   perturbs each state across the whole mesh — `O(n)` `fun` calls, not

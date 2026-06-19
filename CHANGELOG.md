@@ -22,9 +22,12 @@ differentiable JAX/PyTorch frontends:
   `message`, `success`). Accuracy matches SciPy (same collocation scheme).
   The default `method="newton"` factors the exact **sparse** `N×N`
   collocation Jacobian (analytic per-node blocks from `fun_jac`/`bc_jac`,
-  else a vectorised finite difference) with FERAL's unsymmetric sparse LU
-  and is **typically faster than `scipy.integrate.solve_bvp`** (≈2–3× on
-  fine meshes). `method="ipm"` solves it as a pounce feasibility NLP.
+  else a vectorised finite difference) with FERAL's unsymmetric sparse LU,
+  using a **modified (frozen-Jacobian) Newton** that reuses the factor
+  across steps and refactors only on stall — so it is **typically faster
+  than `scipy.integrate.solve_bvp`** at equal mesh (≈0.6–1.0×), including
+  large nonlinear problems. `method="ipm"` solves it as a pounce
+  feasibility NLP.
   `adaptive=True` enables SciPy-style residual-driven mesh refinement
   (faithful port of SciPy's Lobatto residual estimator + refinement rule;
   reproduces SciPy's mesh sequence node-for-node); the default is
