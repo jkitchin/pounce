@@ -30,6 +30,7 @@
 - [GAMS](gams.md)
 - [Python API](python.md)
 - [Curve Fitting](curve-fitting.md)
+- [Boundary Value Problems](bvp.md)
 
 # Global Search
 

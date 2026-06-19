@@ -64,6 +64,7 @@ from ._diff import solve, solve_with_warm, vmap_solve, vmap_solve_parallel
 from ._problem import AnchorState, TorchProblem
 from ._path import PathFollower, PathTrace, inverse_map_rhs
 from ._qp import QpLayer, solve_qp, solve_qp_batch, solve_socp
+from ._bvp import solve_bvp, TorchBVPSolution
 
 __all__ = [
     "from_torch",
@@ -71,6 +72,8 @@ __all__ = [
     "solve_with_warm",
     "vmap_solve",
     "vmap_solve_parallel",
+    "solve_bvp",
+    "TorchBVPSolution",
     "TorchProblem",
     "AnchorState",
     "PathFollower",

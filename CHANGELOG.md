@@ -9,6 +9,26 @@ changes.
 
 ## [Unreleased]
 
+### Added — boundary value problems (`pounce.bvp`)
+
+A `scipy.integrate.solve_bvp`-compatible boundary value problem solver, plus
+differentiable JAX/PyTorch frontends:
+
+- **`pounce.solve_bvp(fun, bc, x, y, p=None, ...)`** — drop-in for
+  `scipy.integrate.solve_bvp`. Discretises the BVP with 4th-order
+  Hermite–Simpson collocation on a fixed mesh and solves the square
+  collocation root-find as a pounce feasibility NLP. Returns a SciPy-shaped
+  bunch (`sol`, `x`, `y`, `yp`, `p`, `rms_residuals`, `niter`, `status`,
+  `message`, `success`). Accuracy matches SciPy (same collocation scheme).
+- **`pounce.jax.solve_bvp` / `pounce.torch.solve_bvp`** — the same solve made
+  differentiable w.r.t. a `theta` parameter threaded into `fun` / `bc`, via
+  the implicit-function theorem on the collocation KKT system. Supports
+  gradients/Jacobians w.r.t. ODE/BC coefficients, boundary values, and the
+  sensitivity of solved-for unknown parameters `p*`. First-order only
+  (the forward crosses a `pure_callback`).
+- Docs: `docs/src/bvp.md`; worked accuracy/speed/differentiability comparison
+  in `python/examples/bvp_scipy_compare.py`.
+
 
 ## [0.5.0] - 2026-06-14
 
