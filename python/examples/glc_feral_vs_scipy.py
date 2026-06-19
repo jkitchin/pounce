@@ -145,8 +145,8 @@ def main():
     # --- pounce FERAL Newton, fixed mesh matched to SciPy's refined node count ---
     xi_f = np.linspace(0, 1, m_scipy)
     yf = np.zeros((4, m_scipy))
-    rp = pounce.solve_bvp(ode, bc, xi_f, yf, tol=1e-5, method="newton")
-    t_pounce = _time(lambda: pounce.solve_bvp(ode, bc, xi_f, yf, tol=1e-5, method="newton"))
+    rp = pounce.solve_bvp(ode, bc, xi_f, yf, tol=1e-5, method="newton", adaptive=False)
+    t_pounce = _time(lambda: pounce.solve_bvp(ode, bc, xi_f, yf, tol=1e-5, method="newton", adaptive=False))
     print(f"pounce: success={rp.success}  fixed mesh {m_scipy} nodes  niter={rp.niter}  "
           f"{t_pounce*1e3:.2f} ms   ({t_scipy/t_pounce:.2f}x scipy)")
 
@@ -173,8 +173,8 @@ def main():
         xm = np.linspace(0, 1, m)
         ym = np.zeros((4, m))
         ts = _time(lambda: scipy_solve_bvp(ode, bc, xm, ym, tol=1e-5, max_nodes=m))
-        rpm = pounce.solve_bvp(ode, bc, xm, ym, tol=1e-5, method="newton")
-        tp = _time(lambda: pounce.solve_bvp(ode, bc, xm, ym, tol=1e-5, method="newton"))
+        rpm = pounce.solve_bvp(ode, bc, xm, ym, tol=1e-5, method="newton", adaptive=False)
+        tp = _time(lambda: pounce.solve_bvp(ode, bc, xm, ym, tol=1e-5, method="newton", adaptive=False))
         d = np.max(np.abs(rpm.sol(xq) - (scipy_solve_bvp(ode, bc, xm, ym, tol=1e-5,
                                                          max_nodes=m).sol(xq))))
         print(f"{m:>7} | {ts*1e3:>9.2f} {tp*1e3:>10.2f} {ts/tp:>6.2f}x {d:>9.1e}")

@@ -27,8 +27,8 @@ for name,(fun,bc,dom,yg) in problems.items():
     for m in (51,201,801,3201):
         x=np.linspace(0,dom,m); y0=yg(x,m)
         ts=t(lambda:sp(fun,bc,x,y0,tol=1e-6,max_nodes=m))
-        r=pounce.solve_bvp(fun,bc,x,y0,tol=1e-6,method='newton')
-        tp=t(lambda:pounce.solve_bvp(fun,bc,x,y0,tol=1e-6,method='newton'))
+        r=pounce.solve_bvp(fun,bc,x,y0,tol=1e-6,method='newton',adaptive=False)
+        tp=t(lambda:pounce.solve_bvp(fun,bc,x,y0,tol=1e-6,method='newton',adaptive=False))
         xt=np.linspace(0,dom,400)
         rs=sp(fun,bc,x,y0,tol=1e-6,max_nodes=m)
         d=np.max(np.abs(r.sol(xt)[0]-rs.sol(xt)[0])) if rs.success and r.success else float('nan')

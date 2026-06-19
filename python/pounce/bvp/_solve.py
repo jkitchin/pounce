@@ -8,11 +8,11 @@ NLP** — ``min 0`` subject to the square collocation residual
 
 Differences from SciPy worth knowing:
 
-* **Mesh.** ``adaptive=False`` (default) solves on the mesh ``x`` as given —
-  fast and predictable, and what the differentiable ``pounce.jax`` /
-  ``pounce.torch`` layers rely on (a fixed mesh keeps ``theta -> y`` smooth).
-  ``adaptive=True`` enables SciPy-style residual-driven refinement and
-  reproduces SciPy's mesh sequence essentially node-for-node.
+* **Mesh.** ``adaptive=True`` (default, like SciPy) refines the mesh to meet
+  ``tol`` and reproduces SciPy's mesh sequence essentially node-for-node.
+  ``adaptive=False`` solves the given mesh as-is — fast and predictable, and
+  the mode the differentiable ``pounce.jax`` / ``pounce.torch`` layers use
+  internally (a fixed mesh keeps ``theta -> y`` smooth).
 * **Solver (``method``).** ``"newton"`` (default) factors the exact sparse
   ``N x N`` collocation Jacobian with FERAL's unsymmetric LU — SciPy's
   algorithm, typically faster. ``"ipm"`` solves the collocation feasibility
@@ -57,6 +57,26 @@ def _ipm_status(ipm_code):
     if ipm_code == 1:
         return 5
     return 4
+
+
+# --- verbose reporting (mirrors SciPy's solve_bvp output) ------------------
+
+def _print_progress_header():
+    print("{:^15}{:^15}{:^15}{:^15}{:^15}".format(
+        "Iteration", "Max residual", "Max BC residual", "Total nodes",
+        "Nodes added"))
+
+
+def _print_progress(iteration, residual, bc_residual, total_nodes, nodes_added):
+    print("{:^15}{:^15.2e}{:^15.2e}{:^15}{:^15}".format(
+        iteration, residual, bc_residual, total_nodes, str(nodes_added)))
+
+
+def _print_termination(status, niter, n_nodes, max_rms, max_bc):
+    print(f"{_TERMINATION_MESSAGES.get(status, 'Unknown status.')}")
+    print(f"Number of iterations {niter}, number of nodes {n_nodes}.")
+    print(f"Maximum relative residual: {max_rms:.2e}")
+    print(f"Maximum boundary residual: {max_bc:.2e}")
 
 
 @dataclass
@@ -255,22 +275,25 @@ def solve_bvp(
     verbose=0,
     bc_tol=None,
     method="newton",
-    adaptive=False,
+    adaptive=True,
 ):
-    """Solve a boundary value problem on a fixed mesh with pounce.
+    """Solve a boundary value problem with pounce (SciPy-compatible).
 
     Drop-in for :func:`scipy.integrate.solve_bvp`. ``fun(x, y[, p])``
     returns the ``(n, m)`` RHS over the mesh; ``bc(ya, yb[, p])`` returns
     the ``n + k`` boundary residuals. See the module docstring for the
     (small) behavioural differences from SciPy.
 
-    ``adaptive=False`` (default) solves on the mesh ``x`` as given — fast and
-    predictable. ``adaptive=True`` turns on SciPy-style mesh refinement: it
-    re-solves, estimates the relative RMS residual of the continuous solution
-    between collocation points, inserts nodes where it exceeds ``tol``, and
-    repeats up to ``max_nodes``. (The differentiable ``pounce.jax`` /
-    ``pounce.torch`` paths are always fixed-mesh — a parameter-dependent mesh
-    would make the solution nonsmooth.)
+    ``adaptive=True`` (default, like SciPy) refines the mesh: solve, estimate
+    the relative RMS residual of the continuous solution between collocation
+    points, insert nodes where it exceeds ``tol``, and repeat up to
+    ``max_nodes``. ``adaptive=False`` solves once on the mesh ``x`` as given —
+    fast and predictable, and the mode the differentiable ``pounce.jax`` /
+    ``pounce.torch`` paths use internally (a parameter-dependent mesh would
+    make the solution nonsmooth).
+
+    ``verbose`` mirrors SciPy: ``1`` prints a one-line termination report,
+    ``2`` additionally prints per-iteration mesh-refinement progress.
 
     ``method`` selects the forward solver:
 
@@ -365,7 +388,8 @@ def solve_bvp(
         # Collocation residuals are naturally well-scaled; skip the scaling
         # pass (its setup cost buys nothing here).
         problem.add_option("nlp_scaling_method", "none")
-        problem.add_option("print_level", 5 if verbose >= 2 else 0)
+        # `verbose` drives our SciPy-style report, not the IPM's internal log.
+        problem.add_option("print_level", 0)
         z_star, info = problem.solve(x0=z0)
         niter = int(info.get("iter_count", 0))
         status = _ipm_status(info.get("status", -1))
@@ -384,15 +408,21 @@ def solve_bvp(
     col = r_star[: n * (m - 1)].reshape(n, m - 1)
     rms_residuals = np.sqrt(np.mean(col**2, axis=0))
 
+    max_bc = float(np.max(np.abs(np.asarray(nbc(Y[:, 0], Y[:, -1], p_star)))))
     # Boundary-condition tolerance (SciPy status 3): only downgrade an
     # otherwise-converged solve.
-    if status == 0:
-        max_bc = float(np.max(np.abs(np.asarray(nbc(Y[:, 0], Y[:, -1], p_star)))))
-        if max_bc > (float(tol) if bc_tol is None else float(bc_tol)):
-            status = 3
+    if status == 0 and max_bc > (float(tol) if bc_tol is None else float(bc_tol)):
+        status = 3
 
     message = _TERMINATION_MESSAGES.get(status, "unknown status")
     success = status == 0
+
+    if verbose >= 2:  # single fixed-mesh solve = one mesh iteration
+        _print_progress_header()
+        _print_progress(niter, float(rms_residuals.max()), max_bc, m, 0)
+    if verbose >= 1:
+        _print_termination(status, niter, m, float(rms_residuals.max()), max_bc)
+
     sol = _make_spline(x, Y, yp)
 
     return BVPResult(
@@ -496,33 +526,55 @@ def _solve_bvp_adaptive(
     n = y.shape[0]
     uses_p = p is not None
     p_cur = (np.asarray(p, dtype=np.float64).ravel() if uses_p else None)
+    nfun, nbc = _core._make_normalized(fun, bc, theta=None, uses_p=uses_p)
+
+    if verbose >= 2:
+        _print_progress_header()
 
     res = None
-    for _ in range(max_rounds):
+    for iteration in range(1, max_rounds + 1):
+        # Inner solve is silent (verbose=0); this loop owns the reporting.
         res = solve_bvp(
             fun, bc, x, y, p=(p_cur if uses_p else None),
             fun_jac=fun_jac, bc_jac=bc_jac, tol=tol, max_nodes=max_nodes,
-            verbose=verbose, method=method, adaptive=False,
-        )
-        nfun, _ = _core._make_normalized(
-            fun, bc, theta=None, uses_p=uses_p,
+            verbose=0, method=method, adaptive=False,
         )
         p_eval = res.p if uses_p else np.zeros(0)
         rms = _estimate_rms_residuals(nfun, res.x, res.y, res.yp, p_eval)
         res.rms_residuals = rms
-        if not res.success or rms.max() < tol or res.x.size >= max_nodes:
+        done = (not res.success) or rms.max() < tol or res.x.size >= max_nodes
+        if not done:
+            x_new = _refine_mesh(res.x, rms, tol, max_nodes)
+            nodes_added = x_new.size - res.x.size
+        else:
+            nodes_added = 0
+        if verbose >= 2:
+            max_bc = float(np.max(np.abs(np.asarray(
+                nbc(res.y[:, 0], res.y[:, -1], p_eval)))))
+            _print_progress(iteration, float(rms.max()), max_bc,
+                            res.x.size, nodes_added)
+        if done:
             break
-        x_new = _refine_mesh(res.x, rms, tol, max_nodes)
         if x_new.size == res.x.size:
             break  # node budget exhausted; return best effort
         y = res.sol(x_new)
         x = x_new
         if uses_p:
             p_cur = res.p
+    if res is not None:
+        # SciPy reports the mesh-refinement iteration count, not the inner
+        # Newton count.
+        res.niter = iteration
     if res is not None and res.success and res.rms_residuals.max() >= tol:
         # The inner solve converged but the mesh couldn't be refined enough
         # to bring the estimated residual under tol (SciPy status 1).
         res.status = 1
         res.success = False
         res.message = _TERMINATION_MESSAGES[1]
+    if verbose >= 1 and res is not None:
+        p_eval = res.p if uses_p else np.zeros(0)
+        max_bc = float(np.max(np.abs(np.asarray(
+            nbc(res.y[:, 0], res.y[:, -1], p_eval)))))
+        _print_termination(res.status, res.niter, res.x.size,
+                           float(res.rms_residuals.max()), max_bc)
     return res

@@ -70,14 +70,14 @@ def accuracy_and_speed():
         y0[0] = x / (np.pi / 2)
 
         r_sp = scipy_solve_bvp(fun, bc, x, y0)
-        r_pc = pounce.solve_bvp(fun, bc, x, y0)
+        r_pc = pounce.solve_bvp(fun, bc, x, y0, adaptive=False)
 
         xt = np.linspace(a, b, 201)
         err_sp = np.max(np.abs(r_sp.sol(xt)[0] - exact(xt)))
         err_pc = np.max(np.abs(r_pc.sol(xt)[0] - exact(xt)))
 
         t_sp = _time_it(lambda: scipy_solve_bvp(fun, bc, x, y0))
-        t_pc = _time_it(lambda: pounce.solve_bvp(fun, bc, x, y0))
+        t_pc = _time_it(lambda: pounce.solve_bvp(fun, bc, x, y0, adaptive=False))
 
         print(f"{m:>6} | {err_sp:>11.2e} {err_pc:>11.2e} | "
               f"{t_sp * 1e3:>9.2f} {t_pc * 1e3:>10.2f}")

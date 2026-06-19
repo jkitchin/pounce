@@ -64,10 +64,12 @@ res.p           # ≈ [π]
 
 ### Differences from SciPy
 
-- **Mesh.** `adaptive=False` (default) solves on the mesh you pass — fast and
-  predictable, and what the differentiable frontends rely on (a fixed mesh
-  keeps `θ ↦ y` smooth). `adaptive=True` turns on SciPy-style residual-driven
-  refinement (below).
+- **Mesh.** `adaptive=True` (default, like SciPy) refines the mesh to meet
+  `tol`. `adaptive=False` solves the mesh you pass as-is — fast and
+  predictable, and the mode the differentiable frontends use internally (a
+  fixed mesh keeps `θ ↦ y` smooth).
+- **`verbose`** mirrors SciPy: `1` prints a one-line termination report, `2`
+  also prints per-iteration mesh-refinement progress.
 - **Solver (`method`).** `method="newton"` (default) runs a **modified
   (frozen-Jacobian) Newton** on the square collocation system, factorising
   the `N×N` Jacobian with FERAL's unsymmetric sparse LU
@@ -186,11 +188,12 @@ for Hessians / Newton-type outer loops.
 
 ## Adaptive mesh refinement
 
-By default the solve is **fixed-mesh**. Pass `adaptive=True` for SciPy-style
-refinement driven by `tol` / `max_nodes`:
+Adaptive refinement is **on by default** (like SciPy), driven by `tol` /
+`max_nodes`. Pass `adaptive=False` to solve the given mesh as-is:
 
 ```python
-res = pounce.solve_bvp(fun, bc, x, y0, tol=1e-6, adaptive=True, max_nodes=2000)
+res = pounce.solve_bvp(fun, bc, x, y0, tol=1e-6, max_nodes=2000)  # adaptive
+res = pounce.solve_bvp(fun, bc, x, y0, adaptive=False)            # fixed mesh
 ```
 
 Each round: solve on the current mesh (to round-off), estimate the relative

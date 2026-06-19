@@ -28,11 +28,14 @@ differentiable JAX/PyTorch frontends:
   than `scipy.integrate.solve_bvp`** at equal mesh (≈0.6–1.0×), including
   large nonlinear problems. `method="ipm"` solves it as a pounce
   feasibility NLP.
-  `adaptive=True` enables SciPy-style residual-driven mesh refinement
-  (faithful port of SciPy's Lobatto residual estimator + refinement rule;
-  reproduces SciPy's mesh sequence node-for-node); the default is
-  fixed-mesh. The collocation system is solved to round-off independent of
-  the mesh `tol` (the latter only gates refinement).
+  Adaptive mesh refinement is **on by default** (`adaptive=True`, like
+  SciPy — a faithful port of SciPy's Lobatto residual estimator + refinement
+  rule that reproduces its mesh sequence node-for-node); `adaptive=False`
+  solves the given mesh as-is. The collocation system is solved to round-off
+  independent of the mesh `tol` (the latter only gates refinement).
+  `verbose` mirrors SciPy (1 = termination report, 2 = per-iteration
+  progress). Result `status` codes: 0 converged, 1 max nodes, 2 singular
+  Jacobian, 3 bc_tol unmet, 4 Newton non-convergence, 5 IPM acceptable-only.
 - **`pounce._pounce.SparseLU`** — new PyO3 binding exposing FERAL's
   unsymmetric sparse LU (`factor` / `solve` / `solve_transpose`) for direct
   `A x = b` on general sparse matrices.

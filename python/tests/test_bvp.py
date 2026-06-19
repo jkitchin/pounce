@@ -29,14 +29,20 @@ def test_solve_bvp_matches_scipy():
     y0 = np.zeros((2, x.size))
     y0[0] = 1.0
 
-    res = pounce.solve_bvp(fun, bc, x, y0)
-    ref = scipy_integrate.solve_bvp(fun, bc, x, y0)
+    # Default is adaptive (like SciPy): both refine to meet tol.
+    res = pounce.solve_bvp(fun, bc, x, y0, tol=1e-4)
+    ref = scipy_integrate.solve_bvp(fun, bc, x, y0, tol=1e-4)
 
     assert res.success
-    # Collocation residual is satisfied essentially to machine precision.
-    assert res.rms_residuals.max() < 1e-9
+    assert res.rms_residuals.max() < 1e-4  # refined until under tol
     xt = np.linspace(0, 4, 25)
     assert np.max(np.abs(res.sol(xt)[0] - ref.sol(xt)[0])) < 5e-3
+
+    # adaptive=False solves the given mesh as-is — collocation residual to
+    # ~machine precision on that fixed mesh.
+    fixed = pounce.solve_bvp(fun, bc, x, y0, adaptive=False)
+    assert fixed.success and fixed.x.size == x.size
+    assert fixed.rms_residuals.max() < 1e-9
 
 
 def test_solve_bvp_adaptive_matches_scipy():
@@ -91,8 +97,11 @@ def test_solve_bvp_newton_and_ipm_agree():
 
     x = np.linspace(0, 1, 51)
     y0 = np.zeros((2, x.size))
-    r_newton = pounce.solve_bvp(fun, bc, x, y0, method="newton", tol=1e-8)
-    r_ipm = pounce.solve_bvp(fun, bc, x, y0, method="ipm", tol=1e-8)
+    # Compare the two forward solvers on the same fixed mesh.
+    r_newton = pounce.solve_bvp(fun, bc, x, y0, method="newton", tol=1e-8,
+                                adaptive=False)
+    r_ipm = pounce.solve_bvp(fun, bc, x, y0, method="ipm", tol=1e-8,
+                             adaptive=False)
     assert r_newton.success and r_ipm.success
     assert np.max(np.abs(r_newton.y - r_ipm.y)) < 1e-7
 
