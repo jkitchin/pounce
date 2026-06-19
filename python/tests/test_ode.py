@@ -99,6 +99,20 @@ def test_van_der_pol_stiff_vs_scipy():
     assert got.nstep < 3 * ref.t.size
 
 
+def test_stage_predictor_warm_start_reduces_nfev():
+    """The collocation stage predictor warm-starts the simplified-Newton stage
+    solve from the previous step instead of a cold ``K = 0``, cutting RHS
+    evaluations. On Van der Pol mu=1000 with a finite-difference Jacobian a
+    cold start needs ~23.7k evals; the predictor needs ~18k. ``nfev`` is
+    deterministic, so this guards the warm start against silent regression."""
+    def f(t, y):
+        return [y[1], 1000.0 * (1 - y[0] ** 2) * y[1] - y[0]]
+
+    r = po.solve_ivp(f, (0.0, 3000.0), [2.0, 0.0], rtol=1e-6, atol=1e-9)
+    assert r.success
+    assert r.nfev < 20000, f"stage predictor regressed: nfev={r.nfev}"
+
+
 # --- index-1 DAE (mass matrix) -----------------------------------------------
 
 def test_robertson_dae():

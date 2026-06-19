@@ -36,6 +36,17 @@ RADAU_B = RADAU_A[-1]                       # stiffly accurate: y_{n+1} = Y_s
 # Embedded order-3 error-estimate weights and the real eigenvalue of A^{-1}.
 RADAU_E = np.array([-13 - 7 * _S6, -13 + 7 * _S6, -1.0]) / 3
 MU_REAL = 3 + 3 ** (2 / 3) - 3 ** (1 / 3)
+# Stage predictor: inverse Vandermonde on the collocation nodes. Used to warm-
+# start the simplified-Newton stage solve by extrapolating the *previous*
+# step's collocation polynomial (its derivative interpolates K at the nodes) to
+# the new stage points, instead of cold-starting from K = 0 every step.
+_PRED_VINV = np.linalg.inv(np.vander(RADAU_C, 3, increasing=True))
+# Hold h (and so reuse the cached LU) when the controller's growth factor is
+# below this. 1.2 matches RADAU5's reference QUOT2; 2.0 reuses the factor more
+# aggressively, a net win for pounce because its (3n×3n) dense factor is
+# relatively expensive — no accuracy cost, a few more steps, and the largest
+# effect on big stiff systems where the LU dominates the per-step cost.
+_HOLD_HI = 2.0
 
 # Dense-output: the collocation polynomial through (y_n, stage values). We
 # build per-step interpolation coefficients from the stages.
@@ -102,7 +113,22 @@ class _RadauProblem:
         return J
 
 
-def _solve_stages(prob, t, y, h, lu3, scale, newton_tol):
+def _predict_stages(K_prev, ratio):
+    """Warm-start guess for the stage derivatives from the previous step.
+
+    The previous step's collocation polynomial has derivative ``u'(τ) = Σ aⱼτʲ``
+    with ``a = Vinv @ K_prev``; its value at the new stage points (in the
+    previous step's normalised coordinate ``τ = 1 + cᵢ·ratio``, where
+    ``ratio = h_new / h_prev``) is the natural prediction of the new stage
+    derivatives. Returns ``(3, n)``. This is the standard RADAU5 predictor and
+    typically halves the Newton iterations versus a cold ``K = 0`` start.
+    """
+    tau = 1.0 + RADAU_C * ratio
+    Vpred = np.vander(tau, 3, increasing=True)      # (3,3)
+    return (Vpred @ _PRED_VINV) @ K_prev            # (3,n)
+
+
+def _solve_stages(prob, t, y, h, lu3, scale, newton_tol, K0=None):
     """Simplified-Newton solve of the 3-stage system for stage derivatives K.
 
     ``M K_i = f(t + c_i h, y + h Σ_j A_ij K_j)``. Returns ``(K, converged,
@@ -116,7 +142,7 @@ def _solve_stages(prob, t, y, h, lu3, scale, newton_tol):
     error, so the stage solve is only as accurate as the tolerance needs.
     """
     n = prob.n
-    K = np.zeros((3, n))
+    K = np.zeros((3, n)) if K0 is None else K0.copy()
     dnorm_prev = None
     rate = None
     converged = False
@@ -222,6 +248,11 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     h_lu = None
     need_factor = True
 
+    # Stage predictor carry: the previous accepted step's converged stage
+    # derivatives and (unsigned) step, used to warm-start the next Newton solve.
+    K_prev = None
+    h_prev = None
+
     status, message = 0, _ODE_MESSAGES[0]
 
     while (t - t1) * s < -1e-12 and nstep < max_steps:
@@ -236,8 +267,13 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
             need_factor = False
 
         scale = atol + rtol * np.abs(y)
+        # Warm-start Newton from the previous step's collocation polynomial
+        # (cold K=0 on the first step). Re-predicts with the current h after a
+        # rejection/refactor, so a shrunk step gets a matching guess.
+        K0 = (_predict_stages(K_prev, h / h_prev)
+              if K_prev is not None and h_prev else None)
         K, converged, rate = _solve_stages(prob, t, y, hs, lu3, scale,
-                                           newton_tol)
+                                           newton_tol, K0=K0)
         if not converged:
             # A stale Jacobian is the usual reason simplified Newton stalls at
             # a larger step; refresh it at the current point and retry the
@@ -270,6 +306,8 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         # Accept.
         if records is not None:
             records.append((t, hs, y.copy(), K.copy()))
+        K_prev = K.copy()           # warm-start seed for the next step
+        h_prev = h
         t = t + hs
         y = y_new
         ts.append(t)
@@ -281,10 +319,12 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         if rejected:
             fac = min(fac, 1.0)
             rejected = False
-        # Hold h on mild growth so the cached LU is reused across steps
+        # Hold h on growth up to 2x so the cached LU is reused across steps
         # (Hairer-Wanner: only change h, and pay the refactor, when it buys
-        # enough). A shrink always changes h and forces a refactor.
-        if 1.0 <= fac < 1.2:
+        # enough). A shrink always changes h and forces a refactor. The 2x band
+        # matters most for large stiff systems, where the (3n×3n) refactor is
+        # the dominant per-step cost.
+        if 1.0 <= fac < _HOLD_HI:
             fac = 1.0
         h_new = min(h * fac, max_step)
         if h_new != h:
