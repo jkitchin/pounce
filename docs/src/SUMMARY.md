@@ -31,6 +31,7 @@
 - [Python API](python.md)
 - [Curve Fitting](curve-fitting.md)
 - [Boundary Value Problems](bvp.md)
+- [ODE / DAE Initial Value Problems](ode.md)
 
 # Global Search
 

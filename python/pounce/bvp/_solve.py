@@ -28,6 +28,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .._pounce import Problem, SparseLU
+from .._result import ResultMixin
 from . import _core
 from ._jac import CollocationJacobian
 
@@ -80,7 +81,7 @@ def _print_termination(status, niter, n_nodes, max_rms, max_bc):
 
 
 @dataclass
-class BVPResult:
+class BVPResult(ResultMixin):
     """Result of :func:`solve_bvp`, mirroring SciPy's ``Bunch``.
 
     Attributes match :func:`scipy.integrate.solve_bvp` so existing code can
@@ -159,7 +160,11 @@ def _make_spline(x, y, yp):
 
             # CubicHermiteSpline interpolates along axis 0; feed (m, n) and
             # transpose the query result back to SciPy's (n, ...) layout.
+            # It requires strictly increasing x, so a decreasing mesh (e.g.
+            # backward ODE integration) is reversed before the build.
             xn, yn, ypn = _to_numpy(x), _to_numpy(y), _to_numpy(yp)
+            if xn.size > 1 and xn[0] > xn[-1]:
+                xn, yn, ypn = xn[::-1], yn[:, ::-1], ypn[:, ::-1]
             cache["spline"] = CubicHermiteSpline(xn, yn.T, ypn.T)
         return cache["spline"](xq).T
 
@@ -276,6 +281,7 @@ def solve_bvp(
     bc_tol=None,
     method="newton",
     adaptive=True,
+    args=None,
 ):
     """Solve a boundary value problem with pounce (SciPy-compatible).
 
@@ -310,6 +316,12 @@ def solve_bvp(
     residuals: an otherwise-converged solve whose ``max|bc|`` exceeds it is
     reported as ``status=3`` (matching SciPy), ``success=False``.
 
+    ``args`` (tuple) supplies extra fixed parameters for parameterized runs,
+    appended to the solver's positional arguments — ``fun(x, y[, p], *args)``,
+    ``bc(ya, yb[, p], *args)``, and likewise ``fun_jac`` / ``bc_jac`` — so a
+    sweep over a fixed parameter needs no closure. (A pounce convenience;
+    ``scipy.integrate.solve_bvp`` has no ``args``.)
+
     Returns
     -------
     BVPResult
@@ -324,6 +336,18 @@ def solve_bvp(
         raise NotImplementedError(
             "pounce.bvp.solve_bvp does not yet support the singular term S."
         )
+
+    # Extra fixed parameters for parameterized runs: appended after the
+    # solver's positional arguments, so `fun(x, y[, p], *args)` etc.
+    if args is not None:
+        if not isinstance(args, tuple):
+            args = (args,)
+        fun = (lambda _f: (lambda *a: _f(*a, *args)))(fun)
+        bc = (lambda _b: (lambda *a: _b(*a, *args)))(bc)
+        if fun_jac is not None:
+            fun_jac = (lambda _fj: (lambda *a: _fj(*a, *args)))(fun_jac)
+        if bc_jac is not None:
+            bc_jac = (lambda _bj: (lambda *a: _bj(*a, *args)))(bc_jac)
 
     if adaptive:
         return _solve_bvp_adaptive(

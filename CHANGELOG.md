@@ -83,6 +83,41 @@ Honest framing of where this sits relative to other BVP solvers:
   `bvp5c` / SciPy on a standard suite (e.g. the Cash–Mazzia test set) for
   accuracy-vs-nodes and robustness, not just speed-vs-SciPy.
 
+### Added — stiff ODE / DAE initial value problems (`pounce.ode`)
+
+A `scipy.integrate.solve_ivp`-compatible stiff solver, plus differentiable
+JAX/PyTorch frontends:
+
+- **`pounce.ode.solve_ivp(fun, t_span, y0, method="Radau", ...)`** — drop-in
+  for `scipy.integrate.solve_ivp` with the implicit `Radau` method (3-stage
+  Radau IIA, order 5, L-stable — the same RADAU5 of Hairer–Wanner that SciPy
+  implements). Adaptive step control with the embedded order-3 error estimate
+  and a simplified-Newton stage solve whose Jacobian is factored with FERAL's
+  sparse LU. Tracks SciPy's `Radau` step-for-step on stiff problems (Van der
+  Pol μ=1000: 1082 vs SciPy's 1188 steps, agreeing to ~7e-7) and returns a
+  SciPy-shaped bunch (`t`, `y`, `sol`, `nfev`, `njev`, `nlu`, `status`,
+  `message`, `success`). Supports `t_eval`, `dense_output`, `args`, `jac`,
+  `first_step`, `max_step`, `rtol`/`atol`. Only `method="Radau"` is
+  implemented (the stiff/DAE niche); other methods raise rather than silently
+  substitute, and `events=` is not yet supported.
+- **Index-1 DAEs** via a mass matrix: pass `mass=M` to integrate `M y' = f`.
+  A **singular** `M` makes it an index-1 differential-algebraic equation —
+  something `scipy.integrate.solve_ivp` cannot do. Validated on Robertson
+  kinetics (conservation constraint held to round-off).
+- **`pounce.jax.odeint` / `pounce.torch.odeint`** — differentiable
+  fixed-mesh integration. An IVP on a fixed mesh is a BVP with
+  `bc(ya, yb) = ya - y0`, so this reuses the Hermite–Simpson collocation and
+  the same FERAL sparse-LU implicit-diff back-solve as `solve_bvp`. Returns
+  the trajectory differentiably w.r.t. the ODE parameters `theta` **and** the
+  initial condition `y0` (gradients exact for the discretisation; checked
+  against analytic and finite differences).
+- **Dict-subscriptable results.** `OdeResult` and `BVPResult` now support
+  SciPy-`Bunch`-style item access (`res["y"]`, `"success" in res`,
+  `res.keys()`, `res.get(...)`) alongside attribute access, for a tighter
+  drop-in.
+- Docs: `docs/src/ode.md`; worked stiff/DAE/differentiability comparison in
+  `python/examples/ode_scipy_compare.py`.
+
 
 ## [0.5.0] - 2026-06-14
 

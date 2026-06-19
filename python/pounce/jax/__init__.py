@@ -48,6 +48,7 @@ from ._problem import AnchorState, JaxProblem
 from ._path import PathFollower, PathTrace, inverse_map_rhs
 from ._qp import QpLayer, solve_qp, solve_qp_batch, solve_socp
 from ._bvp import solve_bvp, JaxBVPSolution
+from ._ode import odeint, JaxODESolution
 
 __all__ = [
     "from_jax",
@@ -57,6 +58,8 @@ __all__ = [
     "vmap_solve_parallel",
     "solve_bvp",
     "JaxBVPSolution",
+    "odeint",
+    "JaxODESolution",
     "JaxProblem",
     "AnchorState",
     "PathFollower",

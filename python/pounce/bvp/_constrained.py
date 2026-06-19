@@ -200,6 +200,7 @@ def solve_bvp_constrained(
     tol=1e-8,
     max_iter=3000,
     verbose=0,
+    args=None,
 ):
     """Solve a bounded / path-constrained BVP with pounce's IPM.
 
@@ -226,10 +227,22 @@ def solve_bvp_constrained(
         problem (any solution satisfying the ODE, BCs, bounds, and path
         constraints).
 
+    args : tuple or None
+        Extra fixed parameters appended to ``fun`` / ``bc`` / ``path``
+        (``fun(x, y[, p], *args)`` …) for parameterized runs.
+
     Returns
     -------
     BVPResult
     """
+    if args is not None:
+        if not isinstance(args, tuple):
+            args = (args,)
+        fun = (lambda _f: (lambda *a: _f(*a, *args)))(fun)
+        bc = (lambda _b: (lambda *a: _b(*a, *args)))(bc)
+        if path is not None:
+            path = (lambda _p: (lambda *a: _p(*a, *args)))(path)
+
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     if y.ndim != 2:
