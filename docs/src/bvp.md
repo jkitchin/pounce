@@ -25,7 +25,9 @@ autodiff frontends, `pounce.jax.solve_bvp` and `pounce.torch.solve_bvp`.
 > [`python/notebooks/24_boundary_value_problems.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/24_boundary_value_problems.ipynb),
 > and a SciPy speed/accuracy comparison in
 > `python/examples/bvp_scipy_compare.py` (plus the GLC tritium-column case in
-> `python/examples/glc_feral_vs_scipy.py`).
+> `python/examples/glc_feral_vs_scipy.py`). The GLC problem was suggested by
+> [Milan Rother](https://github.com/milanofthe) and is adapted from
+> [pathsim-chem](https://github.com/pathsim/pathsim-chem) (MIT License).
 
 ## Drop-in NumPy solve
 
