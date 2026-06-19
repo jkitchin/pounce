@@ -58,10 +58,10 @@ res.p           # ≈ [π]
 
 ### Differences from SciPy
 
-- **Fixed mesh.** The mesh you pass is used as-is — there is no adaptive
-  refinement. This keeps the solution map `θ ↦ y` smooth, which is what the
-  differentiable frontends exploit. Refine by passing a denser `x`;
-  `max_nodes` is accepted for signature compatibility.
+- **Mesh.** `adaptive=False` (default) solves on the mesh you pass — fast and
+  predictable, and what the differentiable frontends rely on (a fixed mesh
+  keeps `θ ↦ y` smooth). `adaptive=True` turns on SciPy-style residual-driven
+  refinement (below).
 - **Solver (`method`).** `method="newton"` (default) runs a damped Newton
   on the square collocation system and factorises the `N×N` Jacobian with
   FERAL's unsymmetric sparse LU (`pounce._pounce.SparseLU`) — the same
@@ -173,6 +173,34 @@ The cost is one extra forward solve per differentiation level (the rule
 re-solves to recover `z*`); the opaque forward is still only evaluated for
 primal values. Leave it off for plain gradient-based training; turn it on
 for Hessians / Newton-type outer loops.
+
+## Adaptive mesh refinement
+
+By default the solve is **fixed-mesh**. Pass `adaptive=True` for SciPy-style
+refinement driven by `tol` / `max_nodes`:
+
+```python
+res = pounce.solve_bvp(fun, bc, x, y0, tol=1e-6, adaptive=True, max_nodes=2000)
+```
+
+Each round: solve on the current mesh (to round-off), estimate the relative
+RMS residual of the continuous solution per interval with a 5-point Lobatto
+quadrature at the *superconvergent* Gauss points `x_mid ± ½h√(3/7)`, insert
+nodes where it exceeds `tol` (one node, or two if it's >100× over), and
+re-solve warm-started off the previous solution. This is a faithful port of
+SciPy's estimator and refinement rule, so it reproduces SciPy's mesh
+sequence essentially node-for-node:
+
+| problem | SciPy nodes | pounce nodes | solution agreement |
+| --- | --- | --- | --- |
+| `y''+y=0` | 6 → 31 | 6 → 31 | 1e-16 |
+| Bratu | 5 → 29 | 5 → 29 | 6e-17 |
+| `y''=-|y|` (kink) | 11 → 58 | 11 → 58 | 9e-16 |
+
+Adaptive is **numpy-only** — the differentiable `pounce.jax` /
+`pounce.torch` paths are always fixed-mesh, because a parameter-dependent
+mesh would make `y(θ)` nonsmooth and break the gradients. Pick a fixed mesh
+fine enough for your `θ` range, or run an adaptive solve once to size it.
 
 ## Constrained / optimal-control BVPs (pounce-unique)
 

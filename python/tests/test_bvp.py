@@ -39,6 +39,28 @@ def test_solve_bvp_matches_scipy():
     assert np.max(np.abs(res.sol(xt)[0] - ref.sol(xt)[0])) < 5e-3
 
 
+def test_solve_bvp_adaptive_matches_scipy():
+    """adaptive=True reproduces SciPy's mesh refinement (same nodes & soln)."""
+    scipy_integrate = pytest.importorskip("scipy.integrate")
+
+    def fun(x, y):
+        return np.vstack((y[1], -np.exp(y[0])))  # Bratu
+
+    def bc(ya, yb):
+        return np.array([ya[0], yb[0]])
+
+    x = np.linspace(0, 1, 5)
+    y0 = np.zeros((2, x.size))
+    ra = pounce.solve_bvp(fun, bc, x, y0, tol=1e-6, adaptive=True, max_nodes=2000)
+    rs = scipy_integrate.solve_bvp(fun, bc, x, y0, tol=1e-6)
+    assert ra.success
+    # Same refinement decisions -> same final mesh size, and identical soln.
+    assert ra.x.size == rs.x.size
+    xt = np.linspace(0, 1, 200)
+    assert np.max(np.abs(ra.sol(xt)[0] - rs.sol(xt)[0])) < 1e-10
+    assert ra.rms_residuals.max() < 1e-6
+
+
 def test_solve_bvp_unknown_parameter_eigenvalue():
     """y'' + k^2 y = 0, y(0)=y(1)=0, y'(0)=k recovers the first eigenvalue."""
 

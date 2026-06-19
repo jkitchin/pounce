@@ -72,11 +72,11 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
                 break
             alpha *= 0.5
         if not accepted:
-            # No decrease found; take the full step and let the next
-            # iteration re-assess (or the loop terminate on max_iter).
-            z_trial = z + dz
-            R_trial = np.asarray(residual_fn(z_trial), dtype=np.float64)
-            rnorm_trial = np.linalg.norm(R_trial, np.inf)
+            # Backtracking could not reduce the residual — the iterate has
+            # converged to round-off (quadratic convergence then stalls).
+            # Stop here rather than spinning to max_iter.
+            converged = rnorm < 1e-6
+            break
         z, R, rnorm = z_trial, R_trial, rnorm_trial
 
     if rnorm < tol:

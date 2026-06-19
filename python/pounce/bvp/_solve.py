@@ -8,17 +8,15 @@ NLP** — ``min 0`` subject to the square collocation residual
 
 Differences from SciPy worth knowing:
 
-* **Fixed mesh.** The mesh ``x`` you pass is used as-is; there is no
-  adaptive refinement. This is deliberate: a fixed mesh makes the
-  solution map ``theta -> y`` smooth, which is what the differentiable
-  ``pounce.jax`` / ``pounce.torch`` layers exploit. Refine by passing a
-  denser ``x``. ``max_nodes`` is accepted for signature compatibility.
-* **Derivatives.** The collocation Jacobian handed to the interior-point
-  solver is formed by forward finite differences of the residual; the
-  Hessian uses pounce's limited-memory quasi-Newton approximation. The
-  ``fun_jac`` / ``bc_jac`` arguments are accepted for signature
-  compatibility (a future revision can assemble the exact sparse
-  collocation Jacobian from them).
+* **Mesh.** ``adaptive=False`` (default) solves on the mesh ``x`` as given —
+  fast and predictable, and what the differentiable ``pounce.jax`` /
+  ``pounce.torch`` layers rely on (a fixed mesh keeps ``theta -> y`` smooth).
+  ``adaptive=True`` enables SciPy-style residual-driven refinement and
+  reproduces SciPy's mesh sequence essentially node-for-node.
+* **Solver (``method``).** ``"newton"`` (default) factors the exact sparse
+  ``N x N`` collocation Jacobian with FERAL's unsymmetric LU — SciPy's
+  algorithm, typically faster. ``"ipm"`` solves the collocation feasibility
+  NLP with the interior-point method.
 * **Singular term ``S``** is not yet supported.
 """
 
@@ -189,6 +187,7 @@ def solve_bvp(
     verbose=0,
     bc_tol=None,
     method="newton",
+    adaptive=False,
 ):
     """Solve a boundary value problem on a fixed mesh with pounce.
 
@@ -196,6 +195,14 @@ def solve_bvp(
     returns the ``(n, m)`` RHS over the mesh; ``bc(ya, yb[, p])`` returns
     the ``n + k`` boundary residuals. See the module docstring for the
     (small) behavioural differences from SciPy.
+
+    ``adaptive=False`` (default) solves on the mesh ``x`` as given — fast and
+    predictable. ``adaptive=True`` turns on SciPy-style mesh refinement: it
+    re-solves, estimates the relative RMS residual of the continuous solution
+    between collocation points, inserts nodes where it exceeds ``tol``, and
+    repeats up to ``max_nodes``. (The differentiable ``pounce.jax`` /
+    ``pounce.torch`` paths are always fixed-mesh — a parameter-dependent mesh
+    would make the solution nonsmooth.)
 
     ``method`` selects the forward solver:
 
@@ -216,6 +223,12 @@ def solve_bvp(
     if S is not None:
         raise NotImplementedError(
             "pounce.bvp.solve_bvp does not yet support the singular term S."
+        )
+
+    if adaptive:
+        return _solve_bvp_adaptive(
+            fun, bc, x, y, p=p, fun_jac=fun_jac, bc_jac=bc_jac,
+            tol=tol, max_nodes=max_nodes, verbose=verbose, method=method,
         )
 
     x = np.asarray(x, dtype=np.float64)
@@ -256,8 +269,14 @@ def solve_bvp(
     if method == "newton":
         from ._newton import newton_solve
 
+        # The collocation system is solved to (near) round-off, NOT to the
+        # mesh ``tol``: the residual estimate that drives adaptive refinement
+        # divides the collocation residual by the interval width, so a
+        # loosely-solved system reads as a huge residual on fine meshes.
+        # ``tol`` controls refinement, not the Newton stop.
+        newton_tol = min(float(tol), 1e-10)
         z_star, niter, converged, _rn = newton_solve(
-            residual_fn, jac, z0, n, m, k, tol=float(tol),
+            residual_fn, jac, z0, n, m, k, tol=newton_tol,
         )
         info = {}
         status = 0 if converged else 1
@@ -305,3 +324,120 @@ def solve_bvp(
         success=success,
         info=info,
     )
+
+
+# --------------------------------------------------------------------------
+# Adaptive mesh refinement (opt-in, SciPy-style)
+# --------------------------------------------------------------------------
+
+def _estimate_rms_residuals(nfun, x, Y, yp, p):
+    """Relative RMS collocation residual per interval (SciPy's estimator).
+
+    Faithful port of ``scipy.integrate._bvp.estimate_rms_residuals``: build
+    the C1 cubic-Hermite spline from node states ``Y`` and node derivatives
+    ``yp = f(x, Y)``, then estimate, on each interval, the relative residual
+    ``r = sol'(s) - f(s, sol(s))`` (normalised by ``1 + |f|``) with a
+    **5-point Lobatto quadrature**. Crucially the residual is sampled at the
+    *superconvergent* Gauss points ``x_mid ± 0.5 h √(3/7)`` and the interval
+    midpoint (where ``r_mid = 1.5 · col_res / h``); at those points the
+    cubic's residual reflects the true 4th-order solution error rather than
+    its own interpolation error, which is what makes the refinement converge
+    at scipy's rate instead of over-refining.
+    """
+    from scipy.interpolate import CubicHermiteSpline
+
+    h = x[1:] - x[:-1]                                  # (m-1,)
+    f = np.asarray(yp, dtype=np.float64)                # f(x, Y) at nodes, (n, m)
+    x_mid = x[:-1] + 0.5 * h
+    y_mid = 0.5 * (Y[:, 1:] + Y[:, :-1]) - 0.125 * h * (f[:, 1:] - f[:, :-1])
+    f_mid = np.asarray(nfun(x_mid, y_mid, p), dtype=np.float64)   # (n, m-1)
+    col_res = (Y[:, 1:] - Y[:, :-1]) - (h / 6.0) * (f[:, :-1] + 4 * f_mid + f[:, 1:])
+    r_mid = 1.5 * col_res / h                           # midpoint residual (≠0)
+
+    spline = CubicHermiteSpline(x, Y.T, f.T)
+    dspline = spline.derivative()
+    s = 0.5 * h * (3 / 7) ** 0.5                        # Gauss offset
+    x1 = x_mid + s
+    x2 = x_mid - s
+    f1 = np.asarray(nfun(x1, spline(x1).T, p), dtype=np.float64)
+    f2 = np.asarray(nfun(x2, spline(x2).T, p), dtype=np.float64)
+    r1 = dspline(x1).T - f1
+    r2 = dspline(x2).T - f2
+
+    r_mid = r_mid / (1.0 + np.abs(f_mid))
+    r1 = r1 / (1.0 + np.abs(f1))
+    r2 = r2 / (1.0 + np.abs(f2))
+    r_mid = np.sum(r_mid**2, axis=0)
+    r1 = np.sum(r1**2, axis=0)
+    r2 = np.sum(r2**2, axis=0)
+    return (0.5 * (32 / 45 * r_mid + 49 / 90 * (r1 + r2))) ** 0.5
+
+
+def _refine_mesh(x, rms, tol, max_nodes):
+    """Insert nodes in intervals whose residual exceeds ``tol``.
+
+    One node (the midpoint) where ``tol < rms <= 100*tol``; two (the
+    thirds) where ``rms > 100*tol`` — SciPy's rule. Capped at ``max_nodes``.
+    Returns the new mesh (strictly increasing), or the old one if nothing
+    can be inserted within the node budget.
+    """
+    pieces = [x[:1]]
+    budget = max_nodes - x.size
+    for i in range(x.size - 1):
+        a, b = x[i], x[i + 1]
+        if rms[i] > tol and budget > 0:
+            if rms[i] > 100 * tol and budget >= 2:
+                pieces.append(np.array([a + (b - a) / 3, a + 2 * (b - a) / 3]))
+                budget -= 2
+            else:
+                pieces.append(np.array([0.5 * (a + b)]))
+                budget -= 1
+        pieces.append(np.array([b]))
+    return np.concatenate(pieces)
+
+
+def _solve_bvp_adaptive(
+    fun, bc, x, y, p=None, fun_jac=None, bc_jac=None,
+    tol=1e-3, max_nodes=1000, verbose=0, method="newton", max_rounds=30,
+):
+    """SciPy-style refine loop around the fixed-mesh :func:`solve_bvp`.
+
+    Solve → estimate per-interval residual → insert nodes where it exceeds
+    ``tol`` → re-solve (warm-started by interpolating the previous solution
+    onto the new mesh), until every interval is under ``tol`` or the mesh
+    reaches ``max_nodes``.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n = y.shape[0]
+    uses_p = p is not None
+    p_cur = (np.asarray(p, dtype=np.float64).ravel() if uses_p else None)
+
+    res = None
+    for _ in range(max_rounds):
+        res = solve_bvp(
+            fun, bc, x, y, p=(p_cur if uses_p else None),
+            fun_jac=fun_jac, bc_jac=bc_jac, tol=tol, max_nodes=max_nodes,
+            verbose=verbose, method=method, adaptive=False,
+        )
+        nfun, _ = _core._make_normalized(
+            fun, bc, theta=None, uses_p=uses_p,
+        )
+        p_eval = res.p if uses_p else np.zeros(0)
+        rms = _estimate_rms_residuals(nfun, res.x, res.y, res.yp, p_eval)
+        res.rms_residuals = rms
+        if not res.success or rms.max() < tol or res.x.size >= max_nodes:
+            break
+        x_new = _refine_mesh(res.x, rms, tol, max_nodes)
+        if x_new.size == res.x.size:
+            break  # node budget exhausted; return best effort
+        y = res.sol(x_new)
+        x = x_new
+        if uses_p:
+            p_cur = res.p
+    if res is not None and res.rms_residuals.max() >= tol:
+        res.status = max(res.status, 1)
+        res.success = res.status == 0
+        if res.message in ("converged", ""):
+            res.message = "adaptive refinement hit max_nodes before reaching tol"
+    return res

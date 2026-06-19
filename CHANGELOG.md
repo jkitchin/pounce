@@ -25,6 +25,11 @@ differentiable JAX/PyTorch frontends:
   else a vectorised finite difference) with FERAL's unsymmetric sparse LU
   and is **typically faster than `scipy.integrate.solve_bvp`** (≈2–3× on
   fine meshes). `method="ipm"` solves it as a pounce feasibility NLP.
+  `adaptive=True` enables SciPy-style residual-driven mesh refinement
+  (faithful port of SciPy's Lobatto residual estimator + refinement rule;
+  reproduces SciPy's mesh sequence node-for-node); the default is
+  fixed-mesh. The collocation system is solved to round-off independent of
+  the mesh `tol` (the latter only gates refinement).
 - **`pounce._pounce.SparseLU`** — new PyO3 binding exposing FERAL's
   unsymmetric sparse LU (`factor` / `solve` / `solve_transpose`) for direct
   `A x = b` on general sparse matrices.
