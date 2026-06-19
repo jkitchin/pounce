@@ -9,6 +9,21 @@ changes.
 
 ## [Unreleased]
 
+### Performance — stiff ODE stepper (`pounce.ode`)
+
+- **Stage predictor.** The adaptive Radau stepper now warm-starts each step's
+  simplified-Newton stage solve by extrapolating the previous step's
+  collocation polynomial (the standard RADAU5 predictor), instead of cold-
+  starting from `K = 0`. This cuts the per-step Newton iterations: on Van der
+  Pol (mu=1000) it drops `nfev` ~24% (≈23.7k → ≈18k) and wall-clock ~15%,
+  bringing the stiff solve to near parity with `scipy.integrate.solve_ivp`.
+  No change to accuracy or the public API.
+- **Wider LU-reuse band.** The step-size controller now holds `h` (and so
+  reuses the cached `(3n×3n)` factor) on growth up to 2× (was 1.2×). On large
+  stiff systems where the dense factor dominates, this drops factorisations
+  per step well below SciPy's and cuts wall-clock ~25–30% (e.g. a 100-state
+  Brusselator), with no accuracy cost.
+
 ### Added — boundary value problems (`pounce.bvp`)
 
 A `scipy.integrate.solve_bvp`-compatible boundary value problem solver, plus
