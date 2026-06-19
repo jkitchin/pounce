@@ -160,7 +160,11 @@ def _make_spline(x, y, yp):
 
             # CubicHermiteSpline interpolates along axis 0; feed (m, n) and
             # transpose the query result back to SciPy's (n, ...) layout.
+            # It requires strictly increasing x, so a decreasing mesh (e.g.
+            # backward ODE integration) is reversed before the build.
             xn, yn, ypn = _to_numpy(x), _to_numpy(y), _to_numpy(yp)
+            if xn.size > 1 and xn[0] > xn[-1]:
+                xn, yn, ypn = xn[::-1], yn[:, ::-1], ypn[:, ::-1]
             cache["spline"] = CubicHermiteSpline(xn, yn.T, ypn.T)
         return cache["spline"](xq).T
 

@@ -46,6 +46,28 @@ class OdeResult(ResultMixin):
     info: dict = field(default_factory=dict, repr=False)
 
 
+def mesh_initial_guess(fun_np, t_np, y0_np, n, m):
+    """Cheap explicit trajectory on a fixed mesh, to seed collocation Newton.
+
+    Shared by the differentiable ``pounce.jax.odeint`` / ``pounce.torch.odeint``
+    frontends. Runs the adaptive Radau solver on the concrete RHS sampled at
+    the mesh nodes; init-guess quality only affects Newton convergence, never
+    the converged solution or its gradient, so any reasonable trajectory works
+    (it falls back to holding the initial state if the explicit solve fails).
+    """
+    try:
+        res = solve_ivp(
+            fun_np, (float(t_np[0]), float(t_np[-1])), y0_np,
+            method="Radau", t_eval=t_np, rtol=1e-3, atol=1e-6,
+        )
+        Y = np.asarray(res.y, dtype=np.float64)
+        if Y.shape == (n, m) and np.all(np.isfinite(Y)):
+            return Y
+    except Exception:
+        pass
+    return np.broadcast_to(y0_np[:, None], (n, m)).copy()
+
+
 def solve_ivp(
     fun,
     t_span,
@@ -121,15 +143,14 @@ def solve_ivp(
             _jac = jac
             jac = lambda t, y: _jac(t, y, *args)
 
-    try:
-        res = _radau.integrate(
-            fun, t0, t1, y0, rtol=rtol, atol=atol, first_step=first_step,
-            max_step=max_step, mass=mass, jac=jac, t_eval=t_eval,
-            dense_output=dense_output or t_eval is not None,
-        )
-        status, message, success = 0, "The solver successfully reached the end of the integration interval.", True
-    except RuntimeError as e:
-        raise
+    res = _radau.integrate(
+        fun, t0, t1, y0, rtol=rtol, atol=atol, first_step=first_step,
+        max_step=max_step, mass=mass, jac=jac, t_eval=t_eval,
+        dense_output=dense_output or t_eval is not None,
+    )
+    # Like SciPy's solve_ivp, a numerical failure (step underflow, step cap)
+    # is reported as status < 0 / success = False with the partial trajectory
+    # accumulated so far — never raised.
     return OdeResult(
         t=res["t"],
         y=res["y"],
@@ -137,9 +158,9 @@ def solve_ivp(
         nfev=res["nfev"],
         njev=res["njev"],
         nlu=res["nlu"],
-        status=status,
-        message=message,
-        success=success,
+        status=res["status"],
+        message=res["message"],
+        success=res["success"],
         nstep=res["nstep"],
         nrej=res["nrej"],
     )

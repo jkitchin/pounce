@@ -42,6 +42,26 @@ def test_backward_integration():
     assert abs(r.y[0, -1] - 1.0) < 1e-6
 
 
+def test_backward_dense_output():
+    """Dense output must be correct for a decreasing (backward) mesh."""
+    r = po.solve_ivp(lambda t, y: [y[0]], (2.0, 0.0), [np.e ** 2],
+                     rtol=1e-9, atol=1e-12, dense_output=True)
+    tt = np.linspace(0, 2, 40)
+    assert np.max(np.abs(r.sol(tt)[0] - np.exp(tt))) < 1e-7
+
+
+def test_full_rank_nonidentity_mass():
+    """A non-singular, non-identity M must be handled by the error estimate.
+
+    M = diag(2, 1), f = (-2 y0, -y1)  =>  y0' = -y0, y1' = -y1  =>  both e^-t.
+    """
+    M = np.diag([2.0, 1.0])
+    r = po.solve_ivp(lambda t, y: [-2 * y[0], -y[1]], (0.0, 3.0), [1.0, 1.0],
+                     mass=M, rtol=1e-9, atol=1e-12, dense_output=True)
+    tt = np.linspace(0, 3, 30)
+    assert np.max(np.abs(r.sol(tt) - np.exp(-tt))) < 1e-6
+
+
 # --- stiffness: agreement with SciPy -----------------------------------------
 
 def test_stiff_vs_scipy():
@@ -142,6 +162,28 @@ def test_result_is_dict_subscriptable():
 def test_non_radau_method_raises():
     with pytest.raises(NotImplementedError):
         po.solve_ivp(lambda t, y: [-y[0]], (0, 1), [1.0], method="RK45")
+
+
+def test_step_cap_reports_failure_not_success():
+    """Hitting the internal step cap returns status<0 / success=False (SciPy
+    behaviour), with the partial trajectory — never raises."""
+    from pounce.ode import _radau
+    res = _radau.integrate(lambda t, y: [-y[0]], 0.0, 100.0, np.array([1.0]),
+                           rtol=1e-9, atol=1e-12, max_steps=3)
+    assert res["success"] is False and res["status"] < 0
+    assert "maximum number" in res["message"].lower()
+    assert res["t"][-1] < 100.0          # partial trajectory returned
+
+
+def test_info_excluded_from_dict_surface():
+    """The internal `info` field must not leak through the Bunch interface."""
+    r = po.solve_ivp(lambda t, y: [-y[0]], (0, 1), [1.0])
+    assert "info" not in r.keys()
+    assert "info" not in r
+    with pytest.raises(KeyError):
+        r["info"]
+    # consistency: a method name is neither a key nor membership-true
+    assert "get" not in r and "keys" not in r
 
 
 # --- differentiable JAX layer ------------------------------------------------

@@ -18,13 +18,21 @@ class ResultMixin:
     ``res.keys()`` / ``res.get(...)`` and iteration over field names on top
     of normal attribute access, so a pounce result is interchangeable with a
     SciPy result in downstream code.
+
+    The dict view is restricted to the **public** fields (those that appear
+    in ``repr`` — i.e. fields declared ``repr=False``, such as internal
+    solver state, are excluded), and ``__getitem__`` honours that same set,
+    so ``"k" in res`` and ``res["k"]`` agree and private state is never
+    exposed through the SciPy-Bunch surface.
     """
 
+    def keys(self):
+        return [f.name for f in dataclasses.fields(self) if f.repr]
+
     def __getitem__(self, key):
-        try:
-            return getattr(self, key)
-        except AttributeError:
+        if key not in self.keys():
             raise KeyError(key)
+        return getattr(self, key)
 
     def __setitem__(self, key, value):
         setattr(self, key, value)
@@ -32,11 +40,8 @@ class ResultMixin:
     def __contains__(self, key):
         return key in self.keys()
 
-    def keys(self):
-        return [f.name for f in dataclasses.fields(self)]
-
     def __iter__(self):
         return iter(self.keys())
 
     def get(self, key, default=None):
-        return getattr(self, key, default)
+        return getattr(self, key, default) if key in self.keys() else default

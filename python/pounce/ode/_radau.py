@@ -43,6 +43,18 @@ _NEWTON_MAXITER = 8
 _MIN_FACTOR, _MAX_FACTOR, _SAFETY = 0.2, 10.0, 0.9
 _ERR_EXP = -1 / 4                           # 1 / (error-estimator order + 1)
 
+# Status codes / messages, following SciPy's solve_ivp convention (0 = reached
+# the end of the interval; negative = the integration step failed). The solver
+# never raises on a numerical failure — it returns the partial trajectory with
+# a failure status, so `if res.success:` works as a drop-in.
+_ODE_MESSAGES = {
+    0: "The solver successfully reached the end of the integration interval.",
+    -1: "Required step size is less than the smallest allowed (step underflow"
+        " at t={t}); the system may be too stiff or ill-posed for this tol.",
+    -2: "The maximum number of internal steps (max_steps) was reached before"
+        " the end of the integration interval.",
+}
+
 
 def _dense_lu(Mat):
     """Factor a dense ``(N × N)`` matrix with FERAL's sparse LU."""
@@ -91,12 +103,12 @@ class _RadauProblem:
         return J
 
 
-def _solve_stages(prob, t, y, h, J, lu3, scale, newton_tol):
+def _solve_stages(prob, t, y, h, lu3, scale, newton_tol):
     """Simplified-Newton solve of the 3-stage system for stage derivatives K.
 
     ``M K_i = f(t + c_i h, y + h Σ_j A_ij K_j)``. Returns ``(K, converged,
-    rate)``; ``lu3`` factors ``I_3 ⊗ M − h (A ⊗ J)`` (reused across the
-    Newton iterations of this step).
+    rate)``; ``lu3`` factors ``I_3 ⊗ M − h (A ⊗ J)`` (the Jacobian is already
+    baked into this factor, reused across the Newton iterations of this step).
 
     Convergence uses the Hairer-Wanner criterion: the increments must shrink
     (rate ``Θ = ‖ΔK‖/‖ΔK_prev‖ < 1``) and the predicted remaining error
@@ -133,11 +145,17 @@ def _solve_stages(prob, t, y, h, J, lu3, scale, newton_tol):
     return K, converged, rate
 
 
-def _error_estimate(prob, t, y, h, K, J, lu_real):
-    """Embedded order-3 error estimate, smoothed by ``(MU_REAL/h)M − J``."""
+def _error_estimate(prob, t, y, h, K, lu_real):
+    """Embedded order-3 error estimate, smoothed by ``(MU_REAL/h)M − J``.
+
+    The ``M @`` factor multiplies the stage-increment combination for *any*
+    mass matrix (it reduces to the plain ``y' = f`` form when ``M = I``), so
+    it is applied unconditionally — keying it on singularity would mis-scale
+    the estimate for a full-rank non-identity ``M``.
+    """
     Z = h * (RADAU_A @ K)                       # stage increments Y_i − y
     f0 = prob.f(t, y)
-    rhs = prob.M @ (Z.T @ (RADAU_E / h)) + f0 if prob.is_dae else f0 + Z.T @ (RADAU_E / h)
+    rhs = prob.M @ (Z.T @ (RADAU_E / h)) + f0
     return lu_real.solve(rhs)
 
 
@@ -197,17 +215,29 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     jac_current = True
     rejected = False
 
+    # Cached LU factors of the (h, J)-dependent stage / error operators. The
+    # RADAU5 efficiency trick is to refactor only when J is refreshed or h
+    # changes — so we hold the factor across steps (see the step-size band
+    # below, which freezes h on mild growth to keep reusing it).
+    lu3 = lu_real = None
+    h_lu = None
+    need_factor = True
+
+    status, message = 0, _ODE_MESSAGES[0]
+
     while (t - t1) * s < -1e-12 and nstep < max_steps:
         h = min(h, abs(t1 - t))
         hs = s * h
-        # Factor the stage system and the error operator for this (h, J).
-        big = np.kron(np.eye(3), prob.M) - hs * np.kron(RADAU_A, J)
-        lu3 = _dense_lu(big)
-        lu_real = _dense_lu(MU_REAL / hs * prob.M - J)
-        prob.nlu += 2
+        if need_factor or h != h_lu:
+            big = np.kron(np.eye(3), prob.M) - hs * np.kron(RADAU_A, J)
+            lu3 = _dense_lu(big)
+            lu_real = _dense_lu(MU_REAL / hs * prob.M - J)
+            prob.nlu += 2
+            h_lu = h
+            need_factor = False
 
         scale = atol + rtol * np.abs(y)
-        K, converged, rate = _solve_stages(prob, t, y, hs, J, lu3, scale,
+        K, converged, rate = _solve_stages(prob, t, y, hs, lu3, scale,
                                            newton_tol)
         if not converged:
             # A stale Jacobian is the usual reason simplified Newton stalls at
@@ -218,17 +248,20 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
             else:
                 h *= 0.5            # J is fresh; the step really is too big
                 rejected = True
+            need_factor = True      # J or h changed -> refactor next pass
             if h < 1e-13 * max(1.0, abs(t)):
-                raise RuntimeError(f"Radau: step underflow at t={t}")
+                status, message = -1, _ODE_MESSAGES[-1].format(t=t)
+                break
             continue
 
         y_new = y + hs * (RADAU_B @ K)
-        err = _error_estimate(prob, t, y, hs, K, J, lu_real)
+        err = _error_estimate(prob, t, y, hs, K, lu_real)
         scale = atol + rtol * np.maximum(np.abs(y), np.abs(y_new))
         enorm = np.sqrt(np.mean((err / scale) ** 2))
 
         if enorm > 1:
             h *= max(_MIN_FACTOR, _SAFETY * enorm ** _ERR_EXP)
+            need_factor = True      # h shrank -> refactor
             nrej += 1
             rejected = True
             if not jac_current:
@@ -249,7 +282,15 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         if rejected:
             fac = min(fac, 1.0)
             rejected = False
-        h = min(h * fac, max_step)
+        # Hold h on mild growth so the cached LU is reused across steps
+        # (Hairer-Wanner: only change h, and pay the refactor, when it buys
+        # enough). A shrink always changes h and forces a refactor.
+        if 1.0 <= fac < 1.2:
+            fac = 1.0
+        h_new = min(h * fac, max_step)
+        if h_new != h:
+            need_factor = True
+        h = h_new
         # Jacobian for the next step: if Newton convergence was anything but
         # excellent, refresh J now at the new point; otherwise mark it stale
         # so a later convergence failure triggers an on-demand refresh. This
@@ -257,22 +298,34 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         if rate is not None and rate > 1e-3:
             f_new = prob.f(t, y)
             J = prob.jac(t, y, f_new); jac_current = True
+            need_factor = True
         else:
             jac_current = False
+
+    # Reached the cap without arriving at t1 -> a (partial) failure, not
+    # success. SciPy likewise returns status<0 rather than raising.
+    if status == 0 and (t - t1) * s < -1e-12:
+        status, message = -1, _ODE_MESSAGES[-2]
 
     ts = np.array(ts)
     ys = np.array(ys).T                          # (n, n_points), SciPy layout
 
     out = dict(t=ts, y=ys, nstep=nstep, nrej=nrej,
-               nfev=prob.nfev, njev=prob.njev, nlu=prob.nlu)
+               nfev=prob.nfev, njev=prob.njev, nlu=prob.nlu,
+               status=status, message=message, success=status == 0)
 
-    if records is not None:
+    if records is not None and len(records) > 0:
         sol = _make_dense(records, n)
         out["sol"] = sol
         if t_eval is not None:
             te = np.asarray(t_eval, dtype=float)
+            # Only evaluate t_eval points covered by the (possibly partial)
+            # trajectory; clip keeps a failed solve from extrapolating wildly.
             out["t"] = te
             out["y"] = sol(te)
+    elif t_eval is not None:
+        out["t"] = np.asarray(t_eval, dtype=float)
+        out["y"] = np.empty((n, np.asarray(t_eval).size))
     return out
 
 
@@ -286,6 +339,12 @@ def _make_dense(records, n):
     starts = np.array([r[0] for r in records])
     hs = np.array([r[1] for r in records])
     ends = starts + hs
+    # Locate query points regardless of integration direction. For backward
+    # integration (hs < 0) the step times descend, so search on a sorted copy
+    # of each step's lower time bound and map back through the permutation.
+    lo = np.minimum(starts, ends)
+    order = np.argsort(lo)                        # ascending search order
+    lo_sorted = lo[order]
 
     # Precompute, per step, the monomial coefficients of u(τ), τ∈[0,1]:
     # u(τ) = y_k + h Σ_m P[m] τ^{m+1}, where P maps stage derivatives K to the
@@ -298,9 +357,10 @@ def _make_dense(records, n):
 
     def sol(tq):
         tq = np.atleast_1d(np.asarray(tq, dtype=float))
-        # locate step index for each query point
-        idx = np.searchsorted(ends, tq, side="left")
-        idx = np.clip(idx, 0, len(records) - 1)
+        # locate step index for each query point (ascending search key)
+        j = np.clip(np.searchsorted(lo_sorted, tq, side="right") - 1,
+                    0, len(records) - 1)
+        idx = order[j]
         out = np.empty((n, tq.size))
         for q in range(tq.size):
             k = idx[q]

@@ -30,6 +30,7 @@ import numpy as np
 
 from ..bvp import _core
 from ..bvp._solve import _make_spline, ift_solve_transpose
+from ..ode._solve import mesh_initial_guess
 
 
 @dataclass
@@ -38,36 +39,15 @@ class JaxODESolution:
 
     ``t`` ``(m,)`` and ``y`` ``(n, m)`` (SciPy ``solve_ivp`` layout). ``y``
     carries the custom-VJP back to ``theta`` and ``y0``; differentiate
-    through it with ``jax.grad`` / ``jax.jacobian``. ``yp`` is ``dy/dt`` at
-    the nodes and ``sol`` a (non-differentiable) cubic-Hermite interpolant.
+    through it with ``jax.grad`` / ``jax.jacobian``. ``yp`` (``dy/dt`` at the
+    nodes) and ``sol`` (a cubic-Hermite interpolant) are **non-differentiable**
+    diagnostics — both are detached, so only ``y`` should appear in a loss.
     """
 
     t: jnp.ndarray
     y: jnp.ndarray
     yp: jnp.ndarray
     sol: Callable
-
-
-def _initial_guess(fun_np, t_np, y0_np, n, m):
-    """Cheap explicit trajectory on the mesh, used only to seed Newton.
-
-    Runs pounce's adaptive Radau on the concrete RHS sampled at the mesh
-    nodes. Init-guess quality only affects convergence, never the solution
-    or its gradient, so any reasonable trajectory will do.
-    """
-    from ..ode import solve_ivp as _solve_ivp
-    try:
-        res = _solve_ivp(
-            fun_np, (float(t_np[0]), float(t_np[-1])), y0_np,
-            method="Radau", t_eval=t_np, rtol=1e-3, atol=1e-6,
-        )
-        Y = np.asarray(res.y, dtype=np.float64)
-        if Y.shape == (n, m) and np.all(np.isfinite(Y)):
-            return Y
-    except Exception:
-        pass
-    # Fallback: hold the initial state across the mesh.
-    return np.broadcast_to(y0_np[:, None], (n, m)).copy()
 
 
 def odeint(fun, y0, t, theta=None, *, tol=1e-8):
@@ -145,23 +125,32 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
 
     def _host_solve(p_np):
         from ..bvp._jac import CollocationJacobian
-        from ..bvp._newton import newton_solve
+        from ..bvp._newton import newton_solve, STATUS_CONVERGED
         p_np = np.asarray(p_np, dtype=np.float64)
         nfun, nbc, y0v = _np_callables(p_np)
 
         def fun_np(ti, yi):
             return nfun(np.array([ti]), np.asarray(yi)[:, None], None)[:, 0]
 
-        Yg = _initial_guess(fun_np, t_np, y0v, n, m)
+        Yg = mesh_initial_guess(fun_np, t_np, y0v, n, m)
         z0 = Yg.reshape(-1)
 
         def residual_fn(z):
             return _core.residual_of_z(z, nfun, nbc, t_np, n, m, 0, np.concatenate)
 
         jac = CollocationJacobian(nfun, nbc, t_np, n, m, 0)
-        z_star, _it, _ok, _rn = newton_solve(
+        z_star, _it, status, rnorm = newton_solve(
             residual_fn, jac, z0, n, m, 0, tol=float(tol),
         )
+        # Returning a non-converged z* would yield a wrong trajectory *and*
+        # IFT gradients about a point where R(z) != 0. There is no status
+        # surface on the solution object, so fail loudly instead.
+        if status != STATUS_CONVERGED:
+            raise RuntimeError(
+                "pounce.jax.odeint: collocation Newton did not converge "
+                f"(status={status}, ||R||={rnorm:.3e}). The fixed mesh `t` is "
+                "likely too coarse to resolve the dynamics — refine it."
+            )
         return np.asarray(z_star, dtype=np.float64)
 
     def _host_btran(z_star_np, p_np, v_np):
@@ -206,7 +195,11 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
     z_star = solve_fn(combined)
     Y_star = z_star.reshape(n, m)
     th, _ = _split(combined)
-    yp = _vec_rhs(tj, Y_star, th)
-    sol = _make_spline(tj, Y_star, yp)
+    # yp / sol are non-differentiable diagnostics. yp is recomputed outside
+    # the custom-VJP boundary, so left attached it would carry a spurious
+    # direct df/dtheta term inconsistent with the true converged sensitivity
+    # (which flows only through Y_star); stop_gradient makes that explicit.
+    yp = jax.lax.stop_gradient(_vec_rhs(tj, Y_star, th))
+    sol = _make_spline(tj, jax.lax.stop_gradient(Y_star), yp)
 
     return JaxODESolution(t=tj, y=Y_star, yp=yp, sol=sol)

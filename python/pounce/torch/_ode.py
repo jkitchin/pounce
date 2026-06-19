@@ -23,6 +23,7 @@ import torch
 
 from ..bvp import _core
 from ..bvp._solve import _make_spline, ift_solve_transpose
+from ..ode._solve import mesh_initial_guess
 
 
 def _cat(parts):
@@ -35,8 +36,9 @@ class TorchODESolution:
 
     ``t`` ``(m,)`` and ``y`` ``(n, m)`` (SciPy ``solve_ivp`` layout). ``y``
     is in the autograd graph; ``.backward()`` on a downstream scalar fills
-    ``theta.grad`` / ``y0.grad``. ``sol`` is a (detached) cubic-Hermite
-    interpolant.
+    ``theta.grad`` / ``y0.grad``. ``yp`` (``dy/dt`` at the nodes) and ``sol``
+    (a cubic-Hermite interpolant) are **non-differentiable** diagnostics —
+    both detached, so only ``y`` should appear in a loss.
     """
 
     t: torch.Tensor
@@ -109,13 +111,13 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
         @staticmethod
         def forward(ctx, p):
             from ..bvp._jac import CollocationJacobian
-            from ..bvp._newton import newton_solve
+            from ..bvp._newton import newton_solve, STATUS_CONVERGED
             nfun, nbc, y0v_np = _np_callables(p.detach())
 
             def fun_np(ti, yi):
                 return nfun(np.array([ti]), np.asarray(yi)[:, None], None)[:, 0]
 
-            Yg = _initial_guess(fun_np, t_np, y0v_np, n, m)
+            Yg = mesh_initial_guess(fun_np, t_np, y0v_np, n, m)
             z0 = Yg.reshape(-1)
 
             def residual_fn(z):
@@ -123,9 +125,18 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
                                            np.concatenate)
 
             jac = CollocationJacobian(nfun, nbc, t_np, n, m, 0)
-            z_star, _it, _ok, _rn = newton_solve(
+            z_star, _it, status, rnorm = newton_solve(
                 residual_fn, jac, z0, n, m, 0, tol=float(tol),
             )
+            # A non-converged z* gives a wrong trajectory and IFT gradients
+            # about a point where R(z) != 0; there is no status field on the
+            # solution, so fail loudly rather than return silently-wrong data.
+            if status != STATUS_CONVERGED:
+                raise RuntimeError(
+                    "pounce.torch.odeint: collocation Newton did not converge "
+                    f"(status={status}, ||R||={rnorm:.3e}). The fixed mesh `t` "
+                    "is likely too coarse to resolve the dynamics — refine it."
+                )
             z_star = np.asarray(z_star, dtype=np.float64)
             ctx.save_for_backward(p)
             ctx._z_star = z_star
@@ -156,23 +167,12 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
     z_star = _Solve.apply(combined)
     Y_star = z_star.reshape(n, m)
     th, _ = _split(combined)
-    yp = _vec_rhs(fun, tt, Y_star, th, has_theta)
-    sol = _make_spline(tt, Y_star, yp)
+    # yp / sol are non-differentiable diagnostics (detached): yp is recomputed
+    # outside the autograd.Function boundary, so attached it would carry a
+    # spurious direct df/dtheta term inconsistent with the true converged
+    # sensitivity (which flows only through Y_star).
+    yp = _vec_rhs(fun, tt, Y_star.detach(), th.detach() if has_theta else th,
+                  has_theta)
+    sol = _make_spline(tt, Y_star.detach(), yp)
 
     return TorchODESolution(t=tt, y=Y_star, yp=yp, sol=sol)
-
-
-def _initial_guess(fun_np, t_np, y0_np, n, m):
-    """Cheap explicit trajectory on the mesh, used only to seed Newton."""
-    from ..ode import solve_ivp as _solve_ivp
-    try:
-        res = _solve_ivp(
-            fun_np, (float(t_np[0]), float(t_np[-1])), y0_np,
-            method="Radau", t_eval=t_np, rtol=1e-3, atol=1e-6,
-        )
-        Y = np.asarray(res.y, dtype=np.float64)
-        if Y.shape == (n, m) and np.all(np.isfinite(Y)):
-            return Y
-    except Exception:
-        pass
-    return np.broadcast_to(y0_np[:, None], (n, m)).copy()
