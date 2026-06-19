@@ -174,6 +174,48 @@ re-solves to recover `z*`); the opaque forward is still only evaluated for
 primal values. Leave it off for plain gradient-based training; turn it on
 for Hessians / Newton-type outer loops.
 
+## Constrained / optimal-control BVPs (pounce-unique)
+
+`pounce.solve_bvp_constrained` solves a collocation BVP **subject to bounds
+on the states/parameters and inequality path constraints**, optionally
+minimising an objective:
+
+```text
+dy/dx = f(x, y, p),  bc(y(a), y(b), p) = 0
+ylo <= y(x) <= yhi              (state bounds, every node)
+clo <= c(x, y, p) <= chi        (path constraints, every node)
+minimise  J(Y, p)               (optional)
+```
+
+This is a genuine NLP, so it goes through pounce's interior-point method
+(not the Newton path), and **SciPy's `solve_bvp` cannot express any of it**.
+A fully determined BVP (`n + k` boundary residuals) has a unique solution,
+so constraints only bite when there is freedom — return *fewer* boundary
+residuals and let the objective resolve the remainder (an optimal-control
+collocation):
+
+```python
+import numpy as np, pounce
+
+# minimise ∫(y-1)² s.t. y''=0, y(0)=0  (slope free) — optimal control.
+def fun(x, y): return np.vstack((y[1], np.zeros_like(y[0])))
+def bc(ya, yb): return np.array([ya[0]])          # one boundary residual → 1 DOF
+x = np.linspace(0, 1, 41); y0 = np.zeros((2, x.size)); y0[0] = x
+
+obj = lambda Y, p: np.trapezoid((Y[0] - 1.0) ** 2, x)
+
+r  = pounce.solve_bvp_constrained(fun, bc, x, y0, objective=obj)        # y(1) ≈ 1.5
+rc = pounce.solve_bvp_constrained(fun, bc, x, y0, objective=obj,
+                                  y_bounds=([-np.inf, -np.inf], [1.2, np.inf]))
+rc.y[0].max()    # ≤ 1.2 — the bound is active and respected
+```
+
+`path=path(x, Y, p) -> (q, m)` with `path_bounds=(clo, chi)` adds inequality
+path constraints at every node (assembled with a sparse block-diagonal
+Jacobian). The objective's gradient is finite-differenced; the Lagrangian
+Hessian uses pounce's limited-memory quasi-Newton (the path constraints
+make it nonzero in general).
+
 ## How it works
 
 For a mesh `x₀ < … < x_{m-1}`, each interval contributes the Hermite–Simpson

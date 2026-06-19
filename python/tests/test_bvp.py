@@ -132,6 +132,69 @@ def test_solve_bvp_validates_inputs():
 
 
 # --------------------------------------------------------------------------
+# Constrained / optimal-control BVP (pounce-unique)
+# --------------------------------------------------------------------------
+
+def test_constrained_bvp_optimal_control_bound():
+    """Bounded optimal control: minimise ∫(y-1)² s.t. y''=0, y(0)=0.
+
+    Unconstrained optimum is y = 1.5x (y(1)=1.5). With the active bound
+    y <= 1.2 the optimum caps at y(1)=1.2 and the bound is respected
+    everywhere.
+    """
+    def fun(x, y):
+        return np.vstack((y[1], np.zeros_like(y[0])))
+
+    def bc(ya, yb):
+        return np.array([ya[0]])  # only y(0)=0 -> one degree of freedom
+
+    x = np.linspace(0, 1, 41)
+    y0 = np.zeros((2, x.size))
+    y0[0] = x
+
+    def obj(Y, p):
+        return np.trapezoid((Y[0] - 1.0) ** 2, x)
+
+    r = pounce.solve_bvp_constrained(fun, bc, x, y0, objective=obj)
+    assert r.success
+    assert abs(r.y[0, -1] - 1.5) < 1e-2
+
+    rc = pounce.solve_bvp_constrained(
+        fun, bc, x, y0, objective=obj,
+        y_bounds=([-1e19, -1e19], [1.2, 1e19]),
+    )
+    assert rc.success
+    assert rc.y[0].max() <= 1.2 + 1e-6
+    assert abs(rc.y[0, -1] - 1.2) < 1e-4
+
+
+def test_constrained_bvp_path_constraint():
+    """A path constraint active on an under-determined system is satisfied."""
+    def fun(x, y):
+        return np.vstack((y[1], np.zeros_like(y[0])))
+
+    def bc(ya, yb):
+        return np.array([ya[0]])
+
+    x = np.linspace(0, 1, 41)
+    y0 = np.zeros((2, x.size))
+    y0[0] = x
+
+    def obj(Y, p):
+        return np.trapezoid((Y[0] - 1.0) ** 2, x)
+
+    # Enforce y <= 0.8 everywhere via a path constraint.
+    def path(x, y):
+        return np.vstack([y[0]])
+
+    r = pounce.solve_bvp_constrained(
+        fun, bc, x, y0, objective=obj, path=path, path_bounds=([-1e19], [0.8]),
+    )
+    assert r.success
+    assert r.y[0].max() <= 0.8 + 1e-6
+
+
+# --------------------------------------------------------------------------
 # JAX differentiable path
 # --------------------------------------------------------------------------
 
@@ -240,6 +303,31 @@ def test_jax_solve_bvp_newton_ipm_grad_agree():
     g_newton = float(jax.grad(lambda t: loss(t, "newton"))(1.0))
     g_ipm = float(jax.grad(lambda t: loss(t, "ipm"))(1.0))
     assert abs(g_newton - g_ipm) / abs(g_ipm) < 1e-5
+
+
+def test_jax_solve_bvp_full_jacobian_newton():
+    """jax.jacobian (which vmaps the VJP) works on the Newton path."""
+    pytest.importorskip("jax")
+    import jax
+    import jax.numpy as jnp
+    import pounce.jax as pj
+
+    def fun(x, y, theta):
+        return jnp.vstack((y[1], -theta * jnp.exp(y[0])))
+
+    def bc(ya, yb, theta):
+        return jnp.array([ya[0], yb[0]])
+
+    x = jnp.linspace(0, 1, 21)
+    y0 = jnp.zeros((2, x.size))
+
+    def y_of_lambda(lam):
+        return pj.solve_bvp(fun, bc, x, y0, theta=lam).y[0]
+
+    J = np.asarray(jax.jacobian(y_of_lambda)(1.0))
+    base = np.asarray(y_of_lambda(1.0))
+    fd = (np.asarray(y_of_lambda(1.0 + 1e-5)) - base) / 1e-5
+    assert np.max(np.abs(J - fd)) < 1e-5
 
 
 def test_jax_solve_bvp_unknown_parameter():

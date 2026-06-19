@@ -79,7 +79,7 @@ def _fd_dbc(nbc, ya, yb, p, b0):
     """
     n = ya.shape[0]
     k = p.shape[0]
-    nb = n + k
+    nb = b0.shape[0]
     dya = np.empty((nb, n), dtype=np.float64)
     dyb = np.empty((nb, n), dtype=np.float64)
     dp = np.empty((nb, k), dtype=np.float64)
@@ -104,13 +104,19 @@ class CollocationJacobian:
     :meth:`values` recomputes only the nonzero values at a given ``z``.
     """
 
-    def __init__(self, nfun, nbc, x, n, m, k, df_blocks=None, dbc_block=None):
+    def __init__(self, nfun, nbc, x, n, m, k, df_blocks=None, dbc_block=None,
+                 bc_len=None):
         self._nfun = nfun
         self._nbc = nbc
         self._x = np.asarray(x, dtype=np.float64)
         self._n = n
         self._m = m
         self._k = k
+        # Number of boundary residuals. Defaults to n + k (a fully
+        # determined BVP); the constrained solver may pass fewer (an
+        # under-determined system whose remaining freedom an objective
+        # resolves — an optimal-control collocation).
+        self._bc_len = (n + k) if bc_len is None else bc_len
         self._df_blocks = df_blocks   # callable(xq, Yq, p, fq) -> (J (mq,n,n), K (mq,n,k)) or None
         self._dbc_block = dbc_block   # callable(ya, yb, p, b0) -> (dya, dyb, dp) or None
         self._I = np.eye(n, dtype=np.float64)
@@ -141,7 +147,7 @@ class CollocationJacobian:
             cols.append((n * m + L).ravel())
 
         # Boundary block: rows n*(m-1)+t, cols y_0 / y_{m-1} / p.
-        nb = n + k
+        nb = self._bc_len
         T, Bb = np.meshgrid(np.arange(nb), np.arange(n), indexing="ij")
         bc_row = (n * (m - 1) + T).ravel()
         rows.append(bc_row)                           # d bc / d ya

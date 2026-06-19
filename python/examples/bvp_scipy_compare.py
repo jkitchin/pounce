@@ -233,7 +233,8 @@ def differentiability_jax():
 
     # ---- (f) second derivative through the solver (second_order=True) ----
     def y_mid_so(lam):
-        sol = pj.solve_bvp(fun, bc, x, y0, theta=lam, second_order=True)
+        sol = pj.solve_bvp(fun, bc, x, y0, theta=lam,
+                           method="ipm", second_order=True)
         return sol.y[0, sol.y.shape[1] // 2]
 
     print("\n(f) second derivative d^2 y(0.5)/dlambda^2 (second_order=True)")
@@ -293,8 +294,39 @@ def differentiability_torch():
     print(f"    rel error     : {abs(g - fd) / abs(fd):.2e}")
 
 
+def constrained_optimal_control():
+    """A bounded optimal-control BVP — something scipy.solve_bvp cannot do."""
+    _hr("4. Constrained / optimal-control BVP (pounce-unique)")
+
+    # minimise ∫(y-1)² dx  s.t.  y'' = 0,  y(0) = 0  (slope free → 1 DOF)
+    def fun(x, y):
+        return np.vstack((y[1], np.zeros_like(y[0])))
+
+    def bc(ya, yb):
+        return np.array([ya[0]])
+
+    x = np.linspace(0, 1, 41)
+    y0 = np.zeros((2, x.size))
+    y0[0] = x
+    obj = lambda Y, p: np.trapezoid((Y[0] - 1.0) ** 2, x)
+
+    r = pounce.solve_bvp_constrained(fun, bc, x, y0, objective=obj)
+    print("\nminimise ∫(y-1)² s.t. y''=0, y(0)=0   (optimal control, slope free)")
+    print(f"  unconstrained: y(1) = {r.y[0, -1]:.4f}   (analytic optimum 1.5)")
+
+    rc = pounce.solve_bvp_constrained(
+        fun, bc, x, y0, objective=obj,
+        y_bounds=([-np.inf, -np.inf], [1.2, np.inf]),
+    )
+    print(f"  with y <= 1.2: y(1) = {rc.y[0, -1]:.4f}   max y = {rc.y[0].max():.4f} "
+          "(bound active & respected)")
+    print("\nscipy.integrate.solve_bvp cannot express bounds / path constraints "
+          "/ an objective.")
+
+
 if __name__ == "__main__":
     accuracy_and_speed()
     differentiability_jax()
     differentiability_torch()
+    constrained_optimal_control()
     print()

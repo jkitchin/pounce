@@ -28,6 +28,12 @@ differentiable JAX/PyTorch frontends:
 - **`pounce._pounce.SparseLU`** — new PyO3 binding exposing FERAL's
   unsymmetric sparse LU (`factor` / `solve` / `solve_transpose`) for direct
   `A x = b` on general sparse matrices.
+- **`pounce.solve_bvp_constrained`** — constrained / optimal-control BVPs
+  (state & parameter bounds, inequality path constraints, optional
+  objective over an under-determined system), solved with the interior-point
+  method on the collocation NLP. This is unique to pounce —
+  `scipy.integrate.solve_bvp` cannot express bounds, path constraints, or an
+  objective.
 - **`pounce.jax.solve_bvp` / `pounce.torch.solve_bvp`** — the same solve made
   differentiable w.r.t. a `theta` parameter threaded into `fun` / `bc`, via
   the implicit-function theorem on the collocation system. Supports

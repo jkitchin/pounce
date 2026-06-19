@@ -15,5 +15,6 @@ collocation KKT system. Those imports are deferred to their backends so
 """
 
 from ._solve import solve_bvp, BVPResult
+from ._constrained import solve_bvp_constrained
 
-__all__ = ["solve_bvp", "BVPResult"]
+__all__ = ["solve_bvp", "BVPResult", "solve_bvp_constrained"]

@@ -118,19 +118,24 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol):
     def solve_fn(theta):
         return jax.pure_callback(
             _host_newton, jax.ShapeDtypeStruct((N,), jnp.float64), theta,
+            vmap_method="sequential",
         )
 
     def fwd(theta):
         z_star = jax.pure_callback(
             _host_newton, jax.ShapeDtypeStruct((N,), jnp.float64), theta,
+            vmap_method="sequential",
         )
         return z_star, (z_star, theta)
 
     def bwd(res, v):
         z_star, theta = res
+        # jax.jacobian vmaps the VJP over output basis vectors, which vmaps
+        # this callback — declare a vmap_method so JAX loops it (each cotangent
+        # is a fresh R_z^T solve).
         u = jax.pure_callback(
             _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
-            z_star, theta, v,
+            z_star, theta, v, vmap_method="sequential",
         )
         # dL/dtheta = -(dR/dtheta)^T u, via VJP of the residual at z*.
         _, vjp_theta = jax.vjp(lambda th: residual_jax(z_star, th), theta)

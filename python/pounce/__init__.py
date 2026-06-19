@@ -40,7 +40,7 @@ from .qp import (
     solve_qp_multi_rhs,
 )
 from .sos import sos_minimize, SosResult
-from .bvp import solve_bvp, BVPResult
+from .bvp import solve_bvp, BVPResult, solve_bvp_constrained
 
 __all__ = [
     # Nonlinear programming (cyipopt-compatible)
@@ -80,5 +80,6 @@ __all__ = [
     # Boundary value problems (SciPy-compatible)
     "solve_bvp",
     "BVPResult",
+    "solve_bvp_constrained",
     "__version__",
 ]
