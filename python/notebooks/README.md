@@ -74,3 +74,9 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 |---|---|---|
 | 22 | [`22_curve_fit.ipynb`](22_curve_fit.ipynb) | `pounce.curve_fit` — SciPy-style nonlinear least squares with exact Jacobians, covariance, and confidence intervals. |
 | 23 | [`23_curve_fit_minima.ipynb`](23_curve_fit_minima.ipynb) | `pounce.curve_fit_minima` — find *every* parameter set that explains the data, each a full `CurveFitResult`. |
+
+## Boundary value problems
+
+| # | Notebook | What it shows |
+|---|---|---|
+| 24 | [`24_boundary_value_problems.ipynb`](24_boundary_value_problems.ipynb) | `pounce.solve_bvp` — SciPy-compatible BVPs (fast FERAL Newton + adaptive refinement), differentiable JAX/Torch solves, and constrained / optimal-control BVPs unique to pounce. |

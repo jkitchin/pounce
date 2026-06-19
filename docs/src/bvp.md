@@ -21,6 +21,12 @@ autodiff frontends, `pounce.jax.solve_bvp` and `pounce.torch.solve_bvp`.
 
 [scipy-bvp]: https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.solve_bvp.html
 
+> A runnable tour of every feature is in
+> [`python/notebooks/24_boundary_value_problems.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/24_boundary_value_problems.ipynb),
+> and a SciPy speed/accuracy comparison in
+> `python/examples/bvp_scipy_compare.py` (plus the GLC tritium-column case in
+> `python/examples/glc_feral_vs_scipy.py`).
+
 ## Drop-in NumPy solve
 
 ```python
