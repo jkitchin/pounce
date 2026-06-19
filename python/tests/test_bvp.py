@@ -127,6 +127,46 @@ def test_solve_bvp_analytic_jac_matches_fd():
     assert np.max(np.abs(res_fd.y - res_an.y)) < 1e-8
 
 
+def test_solve_bvp_bc_tol_status():
+    """An unmet bc_tol downgrades an otherwise-converged solve to status 3."""
+    def fun(x, y):
+        return np.vstack((y[1], -y[0]))
+
+    def bc(ya, yb):
+        return np.array([ya[0], yb[0] - 1.0])
+
+    x = np.linspace(0, np.pi / 2, 21)
+    y0 = np.zeros((2, x.size)); y0[0] = x / (np.pi / 2)
+    base = pounce.solve_bvp(fun, bc, x, y0)
+    achieved = float(np.max(np.abs(bc(base.y[:, 0], base.y[:, -1]))))
+    assert base.status == 0
+    if achieved > 0:  # ask for tighter than achieved -> status 3
+        res = pounce.solve_bvp(fun, bc, x, y0, bc_tol=achieved / 2)
+        assert res.status == 3
+        assert not res.success
+
+
+def test_solve_bvp_singular_does_not_raise():
+    """A degenerate (resonant) BVP returns a result, never raises.
+
+    y'' + π² y = 0, y(0)=y(1)=0 has a one-parameter family of solutions, so
+    the collocation Jacobian is singular. SciPy returns a result bunch with
+    success=False (status 2); pounce must not propagate the FERAL singular
+    error as an exception.
+    """
+    def fun(x, y):
+        return np.vstack((y[1], -(np.pi**2) * y[0]))
+
+    def bc(ya, yb):
+        return np.array([ya[0], yb[0]])
+
+    x = np.linspace(0, 1, 21)
+    y0 = np.zeros((2, x.size)); y0[0] = np.sin(np.pi * x)  # nonzero -> must iterate
+    res = pounce.solve_bvp(fun, bc, x, y0)  # must not raise
+    assert isinstance(res, pounce.BVPResult)
+    assert res.status in (0, 2, 4)
+
+
 def test_solve_bvp_validates_inputs():
     def fun(x, y):
         return np.vstack((y[1], -y[0]))

@@ -31,10 +31,10 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from . import solve as _pounce_solve
 from ..bvp import _core
+from ..bvp._solve import _make_spline
 
 
 @dataclass
@@ -72,8 +72,7 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
     import numpy as np
     from ..bvp._jac import CollocationJacobian
     from ..bvp._newton import newton_solve
-    from ..bvp._solve import _BvpNlp  # noqa: F401  (kept for parity / reuse)
-    from .._pounce import SparseLU
+    from ..bvp._solve import ift_solve_transpose
 
     x_np = np.asarray(x, dtype=np.float64)
     z0_np = np.asarray(z0, dtype=np.float64)
@@ -105,31 +104,16 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
         # Under vmap_method="broadcast_all" (jax.jacobian / batched VJP), all
         # inputs arrive with a leading batch axis. ``z_star`` / ``theta`` are
         # identical across the batch (the primal is fixed), so collapse them;
-        # ``v`` carries the distinct cotangents. Factor R_z ONCE, then do all
-        # the R_z^T back-solves with a single multi-RHS call.
+        # ``v`` carries the distinct cotangents (one factorization, multi-RHS).
         v_np = np.asarray(v_np, np.float64)
         z_star_np = np.asarray(z_star_np, np.float64)
         theta_np = np.asarray(theta_np)
-        batched = v_np.ndim == 2
         if z_star_np.ndim == 2:
             z_star_np = z_star_np[0]
         if theta_np.ndim == theta_ndim + 1:
             theta_np = theta_np[0]
-
         nfun, nbc = _np_normalized(theta_np)
-        jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
-        rows, cols = jac.structure()
-        lu = SparseLU(n * m + k, np.asarray(rows, np.int64), np.asarray(cols, np.int64))
-        Y = z_star_np[: n * m].reshape(n, m)
-        pp = z_star_np[n * m :]
-        lu.factor(jac.values(Y, pp))  # one factorization
-        if batched:
-            B = v_np.shape[0]
-            u = np.asarray(
-                lu.solve_transpose_many(v_np.reshape(-1), B), np.float64
-            ).reshape(B, n * m + k)
-            return u
-        return np.asarray(lu.solve_transpose(v_np), np.float64)
+        return ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star_np, v_np)
 
     N = n * m + k
 
@@ -184,8 +168,11 @@ def solve_bvp(
         Initial guess for the node states (not differentiated through).
     p : array (k,) or None
         Initial guess for unknown parameters, or ``None``.
-    theta : pytree
-        The differentiation parameter threaded into ``fun`` / ``bc``.
+    theta : array-like
+        The differentiation parameter threaded into ``fun`` / ``bc``. On the
+        default ``method="newton"`` path this must be an array or scalar (it
+        is passed as a single callback argument); structured pytree ``theta``
+        is only supported on ``method="ipm"``.
     tol : float
         pounce convergence tolerance.
     options : dict or None
@@ -309,32 +296,15 @@ def _make_root_solver_jvp(f, g, z0, N, cl, cu, opts):
         (theta,), (theta_dot,) = primals, tangents
         z = solve_root(theta)
         # R_z (N x N) and the directional derivative R_theta . theta_dot.
+        # This forms R_z densely (jnp.linalg.solve) rather than reusing the
+        # sparse FERAL LU on purpose: keeping the rule in pure JAX is what
+        # lets JAX recurse for arbitrary order (jax.hessian). A FERAL
+        # pure_callback has no JVP rule and would break second-order, so the
+        # dense O(N^3) solve is the deliberate price of higher-order autodiff
+        # on this (opt-in, second_order) path.
         Rz = jax.jacfwd(lambda zz: g(zz, theta))(z)
         _, R_theta_dot = jax.jvp(lambda th: g(z, th), (theta,), (theta_dot,))
         z_dot = -jnp.linalg.solve(Rz, R_theta_dot)
         return z, z_dot
 
     return solve_root
-
-
-def _make_spline(x, y, yp):
-    """Lazily-built cubic Hermite interpolant.
-
-    Construction is deferred to first call so a ``solve_bvp`` invoked
-    *inside* a JAX trace (``jax.grad`` / ``jit``), where ``y`` / ``yp`` are
-    tracers, does not eagerly force them to concrete NumPy arrays. The
-    spline materialises (once, cached) when the user evaluates ``sol`` on
-    a concrete solution.
-    """
-    cache = {}
-
-    def sol(xq):
-        if "spline" not in cache:
-            from scipy.interpolate import CubicHermiteSpline
-
-            cache["spline"] = CubicHermiteSpline(
-                np.asarray(x), np.asarray(y).T, np.asarray(yp).T
-            )
-        return cache["spline"](xq).T
-
-    return sol

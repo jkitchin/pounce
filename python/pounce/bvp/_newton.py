@@ -31,6 +31,13 @@ from .._pounce import SparseLU
 # factor (restoring quadratic convergence) is worth its cost.
 _REFACTOR_RATIO = 0.5
 
+# Outcome codes returned by :func:`newton_solve` (mapped to BVPResult.status
+# by the caller). Distinct from SciPy's mesh codes (1 = max nodes,
+# 2 = singular Jacobian) so the two can't be confused.
+STATUS_CONVERGED = 0
+STATUS_SINGULAR = 2
+STATUS_NOT_CONVERGED = 4
+
 
 def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
     """Solve ``R(z) = 0`` from ``z0`` by modified (frozen-Jacobian) Newton.
@@ -49,7 +56,9 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
 
     Returns
     -------
-    (z, niter, converged, res_norm)
+    (z, niter, status, res_norm)
+        ``status`` is one of :data:`STATUS_CONVERGED` (0),
+        :data:`STATUS_SINGULAR` (2), :data:`STATUS_NOT_CONVERGED` (4).
     """
     N = n * m + k
     rows, cols = jac.structure()
@@ -61,16 +70,23 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
 
     need_factor = True   # (re)factor the held LU at the top of the next step
     fresh = False        # True iff the held factor was built at the current z
-    converged = False
+    status = STATUS_NOT_CONVERGED
     it = 0
     for it in range(1, max_iter + 1):
         if rnorm < tol:
-            converged = True
+            status = STATUS_CONVERGED
             break
         if need_factor:
             Y = z[: n * m].reshape(n, m)
             p = z[n * m :]
-            lu.factor(jac.values(Y, p))
+            try:
+                lu.factor(jac.values(Y, p))
+            except RuntimeError:
+                # FERAL raises on a singular factorisation (e.g. a poor
+                # initial guess). Mirror SciPy, which returns a result with
+                # status 2 rather than propagating an exception.
+                status = STATUS_SINGULAR
+                break
             need_factor = False
             fresh = True
         dz = lu.solve(-R)
@@ -89,9 +105,12 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
 
         if not accepted:
             if fresh:
-                # A fresh factor still can't reduce the residual — the iterate
-                # has converged to round-off (quadratic convergence stalls).
-                converged = rnorm < 1e-6
+                # A fresh factor still can't reduce the residual: the iterate
+                # has stalled (typically at round-off, but possibly short of
+                # `tol`). Judge success against the requested `tol` rather
+                # than a hardcoded threshold so a loose stall is reported as
+                # non-convergence.
+                status = STATUS_CONVERGED if rnorm < tol else STATUS_NOT_CONVERGED
                 break
             # The frozen factor gave a poor direction; refresh it at the
             # current z and retry this step (no move taken).
@@ -106,7 +125,8 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
         # no longer matches; a fresh factor restores fast convergence.
         if ratio > _REFACTOR_RATIO or alpha < 1.0:
             need_factor = True
+    else:
+        # Loop ran to max_iter without the top-of-loop tol test firing.
+        status = STATUS_CONVERGED if rnorm < tol else STATUS_NOT_CONVERGED
 
-    if rnorm < tol:
-        converged = True
-    return z, it, converged, rnorm
+    return z, it, status, rnorm

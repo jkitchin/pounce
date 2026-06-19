@@ -24,6 +24,7 @@ import torch
 
 from . import solve as _pounce_solve
 from ..bvp import _core
+from ..bvp._solve import _make_spline
 
 
 def _cat(parts):
@@ -58,11 +59,10 @@ def _newton_autograd_fn(fun, bc, x, n, m, k, uses_p, z0, tol):
     import numpy as _np
     from ..bvp._jac import CollocationJacobian
     from ..bvp._newton import newton_solve
-    from .._pounce import SparseLU
+    from ..bvp._solve import ift_solve_transpose
 
     x_np = _np.asarray(x.detach().cpu().numpy(), dtype=_np.float64)
     z0_np = _np.asarray(z0.detach().cpu().numpy(), dtype=_np.float64)
-    N = n * m + k
 
     def _np_normalized(theta_t):
         nfun_t, nbc_t = _core._make_normalized(fun, bc, theta=theta_t, uses_p=uses_p)
@@ -102,15 +102,10 @@ def _newton_autograd_fn(fun, bc, x, n, m, k, uses_p, z0, tol):
             (theta,) = ctx.saved_tensors
             z_star = ctx._z_star
             nfun, nbc = _np_normalized(theta.detach())
-            jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
-            rows, cols = jac.structure()
-            lu = SparseLU(N, _np.asarray(rows, _np.int64), _np.asarray(cols, _np.int64))
-            Y = z_star[: n * m].reshape(n, m)
-            pp = z_star[n * m :]
-            lu.factor(jac.values(Y, pp))
-            u = _np.asarray(
-                lu.solve_transpose(_np.asarray(grad_out.detach().cpu().numpy(), _np.float64)),
-                _np.float64,
+            # Shared host-side IFT back-solve: R_z^T u = grad_out at z*.
+            u = ift_solve_transpose(
+                nfun, nbc, x_np, n, m, k, z_star,
+                _np.asarray(grad_out.detach().cpu().numpy(), _np.float64),
             )
             u_t = torch.as_tensor(u, dtype=torch.float64)
             # dL/dtheta = -(dR/dtheta)^T u via torch autograd of the residual.
@@ -195,20 +190,3 @@ def solve_bvp(
         yp=yp,
         sol=sol,
     )
-
-
-def _make_spline(x, y, yp):
-    """Lazily-built cubic Hermite interpolant over detached values."""
-    cache = {}
-
-    def sol(xq):
-        if "spline" not in cache:
-            from scipy.interpolate import CubicHermiteSpline
-
-            xn = x.detach().cpu().numpy()
-            yn = y.detach().cpu().numpy()
-            ypn = yp.detach().cpu().numpy()
-            cache["spline"] = CubicHermiteSpline(xn, yn.T, ypn.T)
-        return cache["spline"](xq).T
-
-    return sol

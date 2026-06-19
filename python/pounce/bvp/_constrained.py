@@ -29,7 +29,7 @@ import numpy as np
 from .._pounce import Problem
 from . import _core
 from ._jac import CollocationJacobian, _FD_EPS
-from ._solve import BVPResult, _make_spline
+from ._solve import BVPResult, _make_spline, _ipm_status, _TERMINATION_MESSAGES
 
 
 def _broadcast_bounds(b, length):
@@ -104,7 +104,7 @@ class _PathJacobian:
             cb = np.asarray(self._npath(x, Yb, p), dtype=np.float64)
             dcdy[:, :, b] = (cb - c0) / step
         # Structure order is (j, i, b): for each component j, node i, state b.
-        vals = [dcdy.transpose(0, 1, 2).reshape(-1)]
+        vals = [dcdy.reshape(-1)]
         if k > 0:
             dcdp = np.empty((q, m, k), dtype=np.float64)
             for l in range(k):
@@ -329,7 +329,12 @@ def solve_bvp_constrained(
     col = r_star[: n * (m - 1)].reshape(n, m - 1)
     rms_residuals = np.sqrt(np.mean(col**2, axis=0))
 
-    status = 0 if info.get("status", 1) in (0, 1) else 1
+    # IPM code 1 ("acceptable level") is the looser tolerance, not a full
+    # solve — surface it as status 5 (success=False) rather than reporting
+    # it as a clean convergence (constraint violations show up here too,
+    # since the IPM status reflects the full KKT, bounds and path rows
+    # included).
+    status = _ipm_status(info.get("status", -1))
     return BVPResult(
         sol=_make_spline(x, Y, yp),
         p=(p_star.copy() if uses_p else None),
@@ -339,7 +344,7 @@ def solve_bvp_constrained(
         rms_residuals=rms_residuals,
         niter=int(info.get("iter_count", 0)),
         status=status,
-        message=info.get("status_msg", ""),
+        message=_TERMINATION_MESSAGES.get(status, info.get("status_msg", "")),
         success=status == 0,
         info=info,
     )

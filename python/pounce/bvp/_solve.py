@@ -27,9 +27,36 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .._pounce import Problem
+from .._pounce import Problem, SparseLU
 from . import _core
 from ._jac import CollocationJacobian
+
+# Result status codes. 0/1/2/3 follow SciPy's solve_bvp (converged / max
+# nodes / singular Jacobian / bc_tol unmet); 4 and 5 are pounce-specific so
+# they can't be mistaken for SciPy's meanings.
+_TERMINATION_MESSAGES = {
+    0: "The algorithm converged to the desired tolerance.",
+    1: "The maximum number of mesh nodes is exceeded.",
+    2: "A singular Jacobian was encountered.",
+    3: "The boundary condition residuals do not satisfy bc_tol.",
+    4: "The Newton iteration did not converge.",
+    5: "The interior-point solver reached only its acceptable tolerance.",
+}
+
+
+def _ipm_status(ipm_code):
+    """Map a pounce IPM return code to a BVP result status.
+
+    The IPM's code 1 is ``SolvedToAcceptableLevel`` — the *looser*
+    ``acceptable_tol``, which is not a full-accuracy solve, so it is surfaced
+    as status 5 (``success=False``) rather than silently reported as a clean
+    convergence.
+    """
+    if ipm_code == 0:
+        return 0
+    if ipm_code == 1:
+        return 5
+    return 4
 
 
 @dataclass
@@ -57,12 +84,52 @@ class BVPResult:
     info: dict = field(default_factory=dict, repr=False)
 
 
+def ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star, v):
+    """Implicit-function-theorem back-solve, shared by the JAX/Torch VJPs.
+
+    Solves ``R_zᵀ u = v`` at the converged ``z*`` by factoring the sparse
+    collocation Jacobian with FERAL's LU. Both differentiable frontends route
+    their (framework-native) ``custom_vjp`` / ``autograd.Function`` backward
+    through this one host-side numpy routine, so the linear-algebra half of
+    the IFT can't drift between them.
+
+    ``v`` may be a single cotangent ``(N,)`` or a batch ``(B, N)`` (e.g.
+    ``jax.jacobian``); the batch case uses one factorization and a multi-RHS
+    ``solve_transpose_many``. The factor is taken at ``z*`` (not reused from
+    the forward Newton, whose frozen-Jacobian factor is generally at an
+    earlier iterate) so the sensitivity is exact.
+    """
+    v = np.asarray(v, dtype=np.float64)
+    z_star = np.asarray(z_star, dtype=np.float64)
+    N = n * m + k
+    jac = CollocationJacobian(nfun, nbc, x_np, n, m, k)
+    rows, cols = jac.structure()
+    lu = SparseLU(N, np.asarray(rows, np.int64), np.asarray(cols, np.int64))
+    Y = z_star[: n * m].reshape(n, m)
+    pp = z_star[n * m :]
+    lu.factor(jac.values(Y, pp))
+    if v.ndim == 2:
+        B = v.shape[0]
+        return np.asarray(lu.solve_transpose_many(v.reshape(-1), B), np.float64).reshape(B, N)
+    return np.asarray(lu.solve_transpose(v), np.float64)
+
+
+def _to_numpy(a):
+    """Concrete NumPy view of a NumPy / JAX / detached-Torch array."""
+    try:
+        return np.asarray(a, dtype=np.float64)
+    except (TypeError, RuntimeError):  # torch tensor requiring grad
+        return np.asarray(a.detach().cpu().numpy(), dtype=np.float64)
+
+
 def _make_spline(x, y, yp):
     """Lazily-built cubic-Hermite interpolant ``sol(xq) -> (n, ...)`` from
     node states ``y`` ``(n, m)`` and node derivatives ``yp`` ``(n, m)``.
 
-    Construction is deferred to the first call so callers that only read
-    ``res.y`` / ``res.p`` don't pay for the spline build.
+    Shared by the NumPy, JAX, and Torch frontends. Construction is deferred
+    to the first call so callers that only read ``res.y`` / ``res.p`` don't
+    pay for the spline build, and so a solve inside a JAX trace (where ``y``
+    is a tracer) doesn't eagerly force concrete values.
     """
     cache = {}
 
@@ -72,7 +139,8 @@ def _make_spline(x, y, yp):
 
             # CubicHermiteSpline interpolates along axis 0; feed (m, n) and
             # transpose the query result back to SciPy's (n, ...) layout.
-            cache["spline"] = CubicHermiteSpline(x, y.T, yp.T)
+            xn, yn, ypn = _to_numpy(x), _to_numpy(y), _to_numpy(yp)
+            cache["spline"] = CubicHermiteSpline(xn, yn.T, ypn.T)
         return cache["spline"](xq).T
 
     return sol
@@ -215,10 +283,19 @@ def solve_bvp(
       method. Slower (it factors the ``2N`` saddle KKT each iteration),
       kept as a reference and for the constrained extension.
 
+    ``bc_tol`` (default ``tol``) is the absolute tolerance on the boundary
+    residuals: an otherwise-converged solve whose ``max|bc|`` exceeds it is
+    reported as ``status=3`` (matching SciPy), ``success=False``.
+
     Returns
     -------
     BVPResult
-        SciPy-compatible result bunch.
+        SciPy-compatible result bunch. ``status`` codes: ``0`` converged;
+        ``1`` max mesh nodes exceeded (adaptive); ``2`` singular Jacobian;
+        ``3`` boundary residuals exceed ``bc_tol``; ``4`` Newton did not
+        converge; ``5`` (``method="ipm"``) the IPM reached only its
+        *acceptable* tolerance, not full accuracy. ``success`` is
+        ``status == 0``.
     """
     if S is not None:
         raise NotImplementedError(
@@ -275,12 +352,10 @@ def solve_bvp(
         # loosely-solved system reads as a huge residual on fine meshes.
         # ``tol`` controls refinement, not the Newton stop.
         newton_tol = min(float(tol), 1e-10)
-        z_star, niter, converged, _rn = newton_solve(
+        z_star, niter, status, _rn = newton_solve(
             residual_fn, jac, z0, n, m, k, tol=newton_tol,
-        )
+        )  # status: 0 converged / 2 singular / 4 not converged
         info = {}
-        status = 0 if converged else 1
-        message = "converged" if converged else "Newton did not converge"
     elif method == "ipm":
         obj = _BvpNlp(residual_fn, jac, n, m, k)
         cl = np.zeros(N, dtype=np.float64)
@@ -293,8 +368,7 @@ def solve_bvp(
         problem.add_option("print_level", 5 if verbose >= 2 else 0)
         z_star, info = problem.solve(x0=z0)
         niter = int(info.get("iter_count", 0))
-        status = 0 if info.get("status", 1) in (0, 1) else 1
-        message = info.get("status_msg", "")
+        status = _ipm_status(info.get("status", -1))
     else:
         raise ValueError(f"unknown method {method!r}; use 'newton' or 'ipm'.")
 
@@ -303,11 +377,21 @@ def solve_bvp(
     Y = np.array(Y)
     yp = np.asarray(nfun(x, Y, p_star), dtype=np.float64)
 
-    # Per-interval RMS of the collocation residual (state-major block).
+    # Per-interval RMS of the collocation residual (matches SciPy's
+    # `rms_residuals`, which is the collocation estimate, not the boundary
+    # residual — the boundary conditions are checked separately below).
     r_star = residual_fn(z_star)
     col = r_star[: n * (m - 1)].reshape(n, m - 1)
     rms_residuals = np.sqrt(np.mean(col**2, axis=0))
 
+    # Boundary-condition tolerance (SciPy status 3): only downgrade an
+    # otherwise-converged solve.
+    if status == 0:
+        max_bc = float(np.max(np.abs(np.asarray(nbc(Y[:, 0], Y[:, -1], p_star)))))
+        if max_bc > (float(tol) if bc_tol is None else float(bc_tol)):
+            status = 3
+
+    message = _TERMINATION_MESSAGES.get(status, "unknown status")
     success = status == 0
     sol = _make_spline(x, Y, yp)
 
@@ -435,9 +519,10 @@ def _solve_bvp_adaptive(
         x = x_new
         if uses_p:
             p_cur = res.p
-    if res is not None and res.rms_residuals.max() >= tol:
-        res.status = max(res.status, 1)
-        res.success = res.status == 0
-        if res.message in ("converged", ""):
-            res.message = "adaptive refinement hit max_nodes before reaching tol"
+    if res is not None and res.success and res.rms_residuals.max() >= tol:
+        # The inner solve converged but the mesh couldn't be refined enough
+        # to bring the estimated residual under tol (SciPy status 1).
+        res.status = 1
+        res.success = False
+        res.message = _TERMINATION_MESSAGES[1]
     return res
