@@ -45,6 +45,14 @@ wrapper — from two reference projects, gratefully acknowledged:
   solver, reduction frame with multiplier recovery — and ships
   with the `tutorial_flow_density{,_perturbed}.nl` and
   `gaslib11_steady.nl` test fixtures David vendored.
+- **Milan Rother** ([@milanofthe](https://github.com/milanofthe))
+  suggested the boundary value problem solver and the tritium
+  gas-liquid-contactor (GLC) test problem behind
+  [`docs/src/bvp.md`](bvp.md) and
+  `python/examples/glc_feral_vs_scipy.py`. The GLC model is adapted from
+  [pathsim-chem](https://github.com/pathsim/pathsim-chem)
+  (`src/pathsim_chem/tritium/glc.py`, MIT License, Copyright (c) 2025
+  PathSim).
 
 ## Key references
 

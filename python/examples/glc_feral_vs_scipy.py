@@ -30,6 +30,9 @@ equations (``make_bvp``) — is adapted from pathsim-chem,
 
 Reproduced here under the terms of the MIT License for a solver comparison;
 the pounce-specific parts (the solve/compare harness) are pounce's own.
+
+Thanks to Milan Rother (https://github.com/milanofthe) for suggesting this
+BVP and problem.
 """
 
 import time
