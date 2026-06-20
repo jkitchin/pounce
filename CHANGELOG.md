@@ -23,6 +23,16 @@ changes.
   stiff systems where the dense factor dominates, this drops factorisations
   per step well below SciPy's and cuts wall-clock ~25–30% (e.g. a 100-state
   Brusselator), with no accuracy cost.
+- **Reuse the LU pattern across refactors.** The stepper was rebuilding the
+  `SparseLU` object — re-bucketing the `(3n)²` COO pattern and re-running
+  FERAL's symbolic analysis — on *every* refactor, even though the sparsity
+  pattern is fixed for the whole solve. The pattern object is now built once
+  per solve and refactored in place (the binding already caches the symbolic),
+  so each step pays only the numeric factorisation. This is a large-`n` win
+  that grows with system size: **~4× faster on a 100-state Brusselator
+  (318 → 79 ms) and ~7× on 300 states (2.83 s → 0.41 s)**, cutting the gap to
+  `scipy.integrate.solve_ivp` from ~14–30× down to ~3–4×. Identical accuracy
+  and step counts; no API change.
 
 ### Added — boundary value problems (`pounce.bvp`)
 

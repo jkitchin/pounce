@@ -113,6 +113,32 @@ def test_stage_predictor_warm_start_reduces_nfev():
     assert r.nfev < 20000, f"stage predictor regressed: nfev={r.nfev}"
 
 
+def test_lu_pattern_built_once_per_solve(monkeypatch):
+    """The (3n×3n) stage and (n×n) error LU patterns — and FERAL's cached
+    symbolic analysis — must be built once per solve and refactored in place,
+    not re-created on every step. Re-analysing the pattern per refactor was the
+    large-n bottleneck. Guard the invariant: exactly two patterns are built,
+    regardless of how many times the step refactors."""
+    from pounce.ode import _radau
+
+    n_built = [0]
+    orig = _radau._dense_lu_pattern
+
+    def counting(N):
+        n_built[0] += 1
+        return orig(N)
+
+    monkeypatch.setattr(_radau, "_dense_lu_pattern", counting)
+
+    def f(t, y):
+        return [y[1], 100.0 * (1 - y[0] ** 2) * y[1] - y[0]]
+
+    r = po.solve_ivp(f, (0.0, 200.0), [2.0, 0.0], rtol=1e-6, atol=1e-9)
+    assert r.success
+    assert r.nlu >= 4, "test needs several refactors to be meaningful"
+    assert n_built[0] == 2, f"LU pattern rebuilt per refactor ({n_built[0]} builds)"
+
+
 # --- index-1 DAE (mass matrix) -----------------------------------------------
 
 def test_robertson_dae():

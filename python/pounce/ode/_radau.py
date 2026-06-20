@@ -67,13 +67,24 @@ _ODE_MESSAGES = {
 }
 
 
-def _dense_lu(Mat):
-    """Factor a dense ``(N × N)`` matrix with FERAL's sparse LU."""
-    N = Mat.shape[0]
+def _dense_lu_pattern(N):
+    """Build a reusable FERAL ``SparseLU`` over the full dense ``N × N`` pattern.
+
+    The sparsity pattern is fixed across a whole solve — only the matrix values
+    change as ``h`` and ``J`` vary — so the pattern object (and FERAL's symbolic
+    analysis, which it caches internally) is built **once** and the matrix is
+    refactored in place with :func:`_refactor` each step. Re-creating it per
+    refactor (re-bucketing the ``N²`` COO entries and re-analysing) dominated
+    the per-step cost on large systems.
+    """
     idx = np.arange(N, dtype=np.int64)
-    lu = SparseLU(N, np.repeat(idx, N), np.tile(idx, N))
+    return SparseLU(N, np.repeat(idx, N), np.tile(idx, N))
+
+
+def _refactor(lu, Mat):
+    """Numerically refactor ``lu`` (a fixed-pattern dense ``SparseLU``) from the
+    row-major values of ``Mat`` — reusing the cached symbolic analysis."""
     lu.factor(np.ascontiguousarray(Mat, dtype=np.float64).reshape(-1))
-    return lu
 
 
 def _fd_jac(f, t, y, f0):
@@ -244,7 +255,12 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     # RADAU5 efficiency trick is to refactor only when J is refreshed or h
     # changes — so we hold the factor across steps (see the step-size band
     # below, which freezes h on mild growth to keep reusing it).
-    lu3 = lu_real = None
+    # Reusable LU factors over the FIXED dense patterns: the (3n×3n) stage
+    # operator and the (n×n) real error operator. Only the values change across
+    # steps, so the pattern objects (and FERAL's symbolic analysis) are built
+    # once here and refactored in place inside the loop.
+    lu3 = _dense_lu_pattern(3 * prob.n)
+    lu_real = _dense_lu_pattern(prob.n)
     h_lu = None
     need_factor = True
 
@@ -260,8 +276,8 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         hs = s * h
         if need_factor or h != h_lu:
             big = np.kron(np.eye(3), prob.M) - hs * np.kron(RADAU_A, J)
-            lu3 = _dense_lu(big)
-            lu_real = _dense_lu(MU_REAL / hs * prob.M - J)
+            _refactor(lu3, big)
+            _refactor(lu_real, MU_REAL / hs * prob.M - J)
             prob.nlu += 2
             h_lu = h
             need_factor = False
