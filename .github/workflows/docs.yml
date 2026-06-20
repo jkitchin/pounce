@@ -1,11 +1,19 @@
 name: Deploy docs
 
 on:
+  # main rebuilds the dev/ docs. A release additionally needs the versioned
+  # site rebuilt (new archive entry + stable pointer) — but GitHub Pages only
+  # *serves* deployments from the source branch (main), so a tag-triggered run
+  # reports success yet never publishes (docs-deploy postmortem, 0.6.0). So
+  # instead of `tags: ['v*']` we ride `workflow_run` after the crates release:
+  # that event runs in the default-branch (main) context, so it deploys from
+  # main (and therefore actually publishes), and by the time it fires the new
+  # vX.Y.Z tag already exists, so build-versioned-docs.sh picks it up as stable.
   push:
-    # main rebuilds the dev/ docs; a new vX.Y.Z release tag rebuilds the
-    # whole versioned site (stable at root + the new archive entry).
     branches: [main]
-    tags: ['v*']
+  workflow_run:
+    workflows: ["release-crates"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -26,6 +34,12 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # On the release (workflow_run) trigger, only rebuild if the release
+    # actually succeeded; push/dispatch runs are unconditional. `deploy` needs
+    # `build`, so skipping here skips the deploy too.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     steps:
       # fetch-depth: 0 — the versioned build checks out each v* tag via
       # `git worktree`, so the full tag history must be present (the default
