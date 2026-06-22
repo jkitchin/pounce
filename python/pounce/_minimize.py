@@ -89,6 +89,26 @@ _QP_STATUS_CODE = {
     "numerical_failure": 4,
 }
 
+# Human-readable message for each convex-solver status. `pounce.minimize`
+# always *minimizes*, so for the routed LP/QP the HSDE certificates map to the
+# usual primal verdicts: a dual-infeasibility certificate means the objective
+# is unbounded below over the feasible region (primal unbounded), and a
+# primal-infeasibility certificate means the feasible set is empty. The raw
+# certificate string stays available in ``info["status"]`` for callers that
+# key on it; this clearer text is surfaced as the result ``message`` so an
+# unbounded / infeasible solve is not mistaken for a generic iteration limit
+# (gh #160).
+_QP_STATUS_MESSAGE = {
+    "optimal": "Optimization terminated successfully.",
+    "primal_infeasible": "The problem appears infeasible (the convex solver "
+    "returned a primal-infeasibility certificate).",
+    "dual_infeasible": "The problem appears unbounded — the objective is "
+    "unbounded below over the feasible region (the convex solver returned a "
+    "dual-infeasibility certificate).",
+    "iteration_limit": "Maximum number of iterations reached.",
+    "numerical_failure": "Numerical difficulties encountered.",
+}
+
 # NLP ``ApplicationReturnStatus`` codes that count as a successful solve for the
 # scipy-style ``success`` flag. ``SolveSucceeded`` (0) is the obvious one;
 # ``SolvedToAcceptableLevel`` (1) means the iterate met the *acceptable*
@@ -711,12 +731,13 @@ def _solve_via_convex(ex, opts: dict) -> OptimizeResult:
     fun_val = float(res.obj) + ex.obj_const
     success = res.status == "optimal"
     selector = "lp-ipm" if ex.kind == "lp" else "qp-ipm"
+    message = _QP_STATUS_MESSAGE.get(res.status, res.status)
     return OptimizeResult(
         x=np.asarray(res.x),
         fun=fun_val,
         success=success,
         status=_QP_STATUS_CODE.get(res.status, 1),
-        message=res.status,
+        message=message,
         nit=int(res.iters),
         # The convex solver consumes the extracted quadratic form, not the
         # python callables, so no objective/gradient/Hessian callbacks fire
@@ -764,12 +785,13 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
     )
     fun_val = float(res.obj) + ex.obj_const
     success = res.status == "optimal"
+    message = _QP_STATUS_MESSAGE.get(res.status, res.status)
     return OptimizeResult(
         x=np.asarray(res.x),
         fun=fun_val,
         success=success,
         status=_QP_STATUS_CODE.get(res.status, 1),
-        message=res.status,
+        message=message,
         nit=int(res.iters),
         # See ``_solve_via_convex``: the conic solver works on the extracted
         # cone program, so the python objective callbacks never fire — report
@@ -783,7 +805,7 @@ def _solve_via_socp(ex, opts: dict) -> OptimizeResult:
             "obj_val": fun_val,
             "obj_constant": ex.obj_const,
             "status": res.status,
-            "status_msg": res.status,
+            "status_msg": message,
             "iter_count": int(res.iters),
             "residuals": res.residuals,
         },

@@ -38,6 +38,17 @@ changes.
   emits a `UserWarning` instead of vanishing. The fully-implicit `solve_dae`
   above also supersedes the "constant mass only" limitation for callers needing
   a general implicit form.
+- **`pounce.minimize` routed LP/QP/SOCP results now report unbounded and
+  infeasible outcomes in plain language** (gh #160). When the convex solver
+  returns a dual- or primal-infeasibility certificate, the result `message` now
+  reads "The problem appears unbounded …" / "… infeasible …" (status `3` /
+  `2`, matching SciPy `linprog`) instead of the raw `dual_infeasible` /
+  `primal_infeasible` string — so a downstream adapter can distinguish
+  unboundedness from a generic iteration limit. The raw certificate is still
+  available in `res.info["status"]`. (Note: the general NLP path —
+  `solver_selection="nlp"`, the default — cannot certify LP unboundedness, the
+  same as stock Ipopt; route linear/convex problems with
+  `solver_selection="lp-ipm"` / `"auto"` to get the certificate.)
 
 
 ## [0.6.0] - 2026-06-20

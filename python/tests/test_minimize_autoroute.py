@@ -204,3 +204,30 @@ def test_auto_route_probes_objective_once_not_twice():
     # Post-fix the overhead equals a single router's probe count; pre-fix (no
     # shared cache) it was 2× because each router re-probed from scratch.
     assert routing_overhead == c_one["n"]
+
+
+def test_unbounded_lp_reports_unbounded_not_iteration_limit():
+    """gh #160: an unbounded LP routed to the convex solver must report a
+    distinct unbounded status, not a generic iteration limit.
+
+        min -x0 - x1  s.t. x0 - x1 <= 1,  x0, x1 >= 0
+    is unbounded along x0 = x1 + 1, x1 -> inf. The NLP path can only hit
+    max_iter here (its iterates grow ~linearly, never reaching
+    diverging_iterates_tol), so LP callers route to the LP solver, whose HSDE
+    returns a dual-infeasibility certificate => primal unbounded.
+    """
+    fun = lambda x: -x[0] - x[1]
+    jac = lambda x: np.array([-1.0, -1.0])
+    con = {"type": "ineq",
+           "fun": lambda x: 1.0 - (x[0] - x[1]),   # con(x) >= 0
+           "jac": lambda x: np.array([-1.0, 1.0])}
+    res = minimize(fun, [0.5, 0.5], jac=jac, bounds=[(0.0, None), (0.0, None)],
+                   constraints=con,
+                   options={"solver_selection": "lp-ipm", "max_iter": 3000})
+
+    assert _routed_to(res) == "lp-ipm"          # took the LP path, not NLP
+    assert not res.success
+    assert res.status == 3                       # scipy-linprog: 3 == unbounded
+    assert "unbounded" in res.message.lower()    # distinct, not "max iterations"
+    # Raw HSDE certificate still available for programmatic callers.
+    assert res.info["status"] == "dual_infeasible"
