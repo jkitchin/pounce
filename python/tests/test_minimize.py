@@ -177,6 +177,126 @@ def test_minimize_mixed_linear_and_dict_constraints():
     assert res.x[0] >= 0.2 - 1e-8
 
 
+# -- Sparse Jacobians from dict constraints (linear & nonlinear) -------------
+
+
+def test_wrap_constraints_dict_sparse_jac_declares_sparse_structure():
+    """A dict constraint whose ``jac`` returns a scipy-sparse matrix declares the
+    matrix's COO structure (nnz), not the dense m*n grid."""
+    from pounce._minimize import _wrap_constraints
+
+    n = 6
+    # Two rows, block-diagonal: row0 touches cols 0,1; row1 touches cols 2,3.
+    A = sparse.coo_array(
+        np.array([[1.0, 1.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 0.0, 0.0]])
+    )
+    con = {"type": "ineq", "fun": lambda x: A @ x, "jac": lambda x: A}
+    m, g, jac_values, cl, cu, jr, jc = _wrap_constraints([con], n, x0=np.zeros(n))
+
+    assert m == 2
+    # Sparse: 4 nonzeros, NOT the dense 2*6 = 12.
+    assert jr.size == 4 and jc.size == 4
+    # Structure matches A's (canonicalized, row-major) COO triplet.
+    np.testing.assert_array_equal(jr, [0, 0, 1, 1])
+    np.testing.assert_array_equal(jc, [0, 1, 2, 3])
+    np.testing.assert_allclose(jac_values(np.arange(n, dtype=float)), [1, 1, 1, 1])
+
+
+def test_minimize_dict_sparse_jac_linear_matches_linear_constraint():
+    """A linear equality given as a dict with a constant coo jac reaches the same
+    optimum as the equivalent LinearConstraint."""
+    f, grad, _, expected = _mixture_quadratic()
+    A = sparse.coo_array(np.array([[1.0, 1.0, 1.0]]))
+    kw = dict(x0=np.full(3, 1.0 / 3), jac=grad, tol=1e-10, print_level=0)
+
+    res_lc = pounce.minimize(f, constraints=opt.LinearConstraint(A, 1.0, 1.0), **kw)
+    res_sd = pounce.minimize(
+        f,
+        constraints={
+            "type": "eq",
+            "fun": lambda x: np.array([x.sum() - 1.0]),
+            "jac": lambda x: A,
+        },
+        **kw,
+    )
+
+    assert res_lc.success and res_sd.success
+    np.testing.assert_allclose(res_sd.x, expected, atol=1e-6)
+    np.testing.assert_allclose(res_sd.x, res_lc.x, atol=1e-6)
+
+
+def test_minimize_dict_sparse_jac_nonlinear_matches_dense():
+    """A nonlinear inequality whose jac returns a (varying) coo matrix solves to
+    the same point as the dense-jac form."""
+    f, grad, _, _ = _mixture_quadratic()
+
+    # Active nonlinear ineq (pounce dict 'ineq' means fun(x) >= 0):
+    #   x[0]^2 + x[2]^2 - 0.7 >= 0  → jac = [2 x0, 0, 2 x2] (nonzeros at cols 0, 2).
+    def c_fun(x):
+        return np.array([x[0] ** 2 + x[2] ** 2 - 0.7])
+
+    def c_jac_dense(x):
+        return np.array([[2 * x[0], 0.0, 2 * x[2]]])
+
+    def c_jac_sparse(x):
+        return sparse.coo_array(
+            (np.array([2 * x[0], 2 * x[2]]), (np.array([0, 0]), np.array([0, 2]))),
+            shape=(1, 3),
+        )
+
+    lc = opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), 1.0, 1.0)
+    kw = dict(x0=np.array([0.3, 0.3, 0.4]), jac=grad, tol=1e-9, print_level=0)
+
+    res_dense = pounce.minimize(
+        f, constraints=[lc, {"type": "ineq", "fun": c_fun, "jac": c_jac_dense}], **kw
+    )
+    res_sparse = pounce.minimize(
+        f, constraints=[lc, {"type": "ineq", "fun": c_fun, "jac": c_jac_sparse}], **kw
+    )
+
+    assert res_dense.success and res_sparse.success
+    np.testing.assert_allclose(res_sparse.x.sum(), 1.0, atol=1e-7)
+    assert res_sparse.x[0] ** 2 + res_sparse.x[2] ** 2 >= 0.7 - 1e-6
+    # Identical jac *values* → identical iterates; only the representation differs.
+    np.testing.assert_allclose(res_sparse.x, res_dense.x, atol=1e-5)
+
+
+def test_minimize_dict_sparse_jac_pattern_change_raises():
+    """Pounce requires a fixed sparsity pattern; a jac whose nnz changes between
+    the x0 probe and the solve raises a clear error."""
+    from pounce._minimize import _wrap_constraints
+
+    n = 3
+    calls = {"k": 0}
+
+    def jac(x):
+        calls["k"] += 1
+        # 1 nonzero at probe (build), 2 thereafter → pattern change.
+        if calls["k"] == 1:
+            return sparse.coo_array(([1.0], ([0], [0])), shape=(1, n))
+        return sparse.coo_array(([1.0, 1.0], ([0, 0], [0, 1])), shape=(1, n))
+
+    con = {"type": "ineq", "fun": lambda x: np.array([x[0]]), "jac": jac}
+    _, _, jac_values, _, _, jr, _ = _wrap_constraints([con], n, x0=np.zeros(n))
+    assert jr.size == 1  # declared from the probe
+    with pytest.raises(ValueError, match="sparsity pattern changed"):
+        jac_values(np.ones(n))
+
+
+def test_minimize_dict_dense_jac_still_dense():
+    """Regression: a dict jac returning a dense ndarray keeps the dense pattern."""
+    from pounce._minimize import _wrap_constraints
+
+    n = 4
+    con = {
+        "type": "ineq",
+        "fun": lambda x: np.array([x[0] - 0.2]),
+        "jac": lambda x: np.array([[1.0, 0.0, 0.0, 0.0]]),
+    }
+    m, _, _, _, _, jr, jc = _wrap_constraints([con], n, x0=np.zeros(n))
+    assert m == 1 and jr.size == n  # dense 1*n pattern, unchanged
+
+
 def test_minimize_absorbs_scipy_default_kwargs():
     """Calling with the kwargs scipy's ``_custom`` dispatch always sends
     (including ``hessp=None``) must not TypeError. ``None`` values are filtered
@@ -226,7 +346,12 @@ def test_minimize_accepts_scipy_bounds_object():
     # Box: x_i in [0.2, 0.6]. Target [0.7, 0.1, 0.4] gets clipped to [0.6, 0.2, 0.4].
     bnds = opt.Bounds(lb=np.array([0.2, 0.2, 0.2]), ub=np.array([0.6, 0.6, 0.6]))
     res = pounce.minimize(
-        f, x0=np.full(3, 0.4), jac=grad, bounds=bnds, tol=1e-10, print_level=0,
+        f,
+        x0=np.full(3, 0.4),
+        jac=grad,
+        bounds=bnds,
+        tol=1e-10,
+        print_level=0,
     )
     assert res.success
     np.testing.assert_allclose(res.x, [0.6, 0.2, 0.4], atol=1e-6)
@@ -237,7 +362,12 @@ def test_minimize_accepts_scipy_bounds_with_scalar_broadcast():
     f, grad, target, _ = _mixture_quadratic()
     bnds = opt.Bounds(lb=0.0, ub=1.0)
     res = pounce.minimize(
-        f, x0=np.full(3, 0.5), jac=grad, bounds=bnds, tol=1e-10, print_level=0,
+        f,
+        x0=np.full(3, 0.5),
+        jac=grad,
+        bounds=bnds,
+        tol=1e-10,
+        print_level=0,
     )
     assert res.success
     np.testing.assert_allclose(res.x, target, atol=1e-6)
@@ -248,7 +378,12 @@ def test_minimize_accepts_scipy_bounds_keep_feasible_ignored():
     f, grad, target, _ = _mixture_quadratic()
     bnds = opt.Bounds(lb=0.0, ub=1.0, keep_feasible=True)
     res = pounce.minimize(
-        f, x0=np.full(3, 0.5), jac=grad, bounds=bnds, tol=1e-10, print_level=0,
+        f,
+        x0=np.full(3, 0.5),
+        jac=grad,
+        bounds=bnds,
+        tol=1e-10,
+        print_level=0,
     )
     assert res.success
     np.testing.assert_allclose(res.x, target, atol=1e-6)
@@ -260,13 +395,13 @@ def test_minimize_accepts_scipy_bounds_keep_feasible_ignored():
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("maxiter", 200),     # → max_iter
-        ("gtol", 1e-10),      # → tol  (gradient tolerance synonym)
-        ("ftol", 1e-10),      # → tol  (function tolerance synonym)
-        ("xtol", 1e-10),      # → tol  (x-step tolerance synonym)
-        ("disp", False),      # → print_level=0
-        ("iprint", 0),        # → print_level
-        ("maxcor", 8),        # → limited_memory_max_history
+        ("maxiter", 200),  # → max_iter
+        ("gtol", 1e-10),  # → tol  (gradient tolerance synonym)
+        ("ftol", 1e-10),  # → tol  (function tolerance synonym)
+        ("xtol", 1e-10),  # → tol  (x-step tolerance synonym)
+        ("disp", False),  # → print_level=0
+        ("iprint", 0),  # → print_level
+        ("maxcor", 8),  # → limited_memory_max_history
     ],
 )
 def test_minimize_scipy_option_synonyms(key, value):
@@ -286,7 +421,11 @@ def test_minimize_populates_nfev_and_njev():
     """The result should expose scipy-standard ``nfev`` / ``njev`` counters."""
     f, grad, target, _ = _mixture_quadratic()
     res = pounce.minimize(
-        f, x0=np.full(3, 0.5), jac=grad, tol=1e-10, print_level=0,
+        f,
+        x0=np.full(3, 0.5),
+        jac=grad,
+        tol=1e-10,
+        print_level=0,
     )
     assert res.success
     # At least one objective and one gradient evaluation must have happened.
@@ -302,10 +441,14 @@ def test_minimize_jac_true_counts_both_eval_modes():
 
     def fg(x):
         call_count["n"] += 1
-        return 0.5 * float((x ** 2).sum()), x
+        return 0.5 * float((x**2).sum()), x
 
     res = pounce.minimize(
-        fg, x0=np.array([1.0, 2.0, 3.0]), jac=True, tol=1e-10, print_level=0,
+        fg,
+        x0=np.array([1.0, 2.0, 3.0]),
+        jac=True,
+        tol=1e-10,
+        print_level=0,
     )
     assert res.success
     # Counters should both be non-zero; the single-pass cache reuse means
@@ -319,6 +462,7 @@ def test_minimize_rejects_wrong_length_bounds():
     """A too-short ``bounds`` list used to silently leave trailing variables
     unbounded (and, in the sampling searches, broadcast one box across several);
     it now raises a clear ValueError up front, like scipy."""
+
     def f(x):
         return float(x @ x)
 
@@ -327,19 +471,28 @@ def test_minimize_rejects_wrong_length_bounds():
 
     # two variables, one bound pair -> rejected
     with pytest.raises(ValueError, match="bounds has 1 entry but the problem has 2"):
-        pounce.minimize(f, x0=np.zeros(2), jac=grad, bounds=[(-1, 1)],
-                        options={"print_level": 0})
+        pounce.minimize(
+            f, x0=np.zeros(2), jac=grad, bounds=[(-1, 1)], options={"print_level": 0}
+        )
 
     # too-long list is rejected too (plural wording)
     with pytest.raises(ValueError, match="bounds has 3 entries but the problem has 2"):
-        pounce.minimize(f, x0=np.zeros(2), jac=grad,
-                        bounds=[(-1, 1), (-1, 1), (-1, 1)],
-                        options={"print_level": 0})
+        pounce.minimize(
+            f,
+            x0=np.zeros(2),
+            jac=grad,
+            bounds=[(-1, 1), (-1, 1), (-1, 1)],
+            options={"print_level": 0},
+        )
 
     # correct length still works
-    res = pounce.minimize(f, x0=np.array([0.5, 0.5]), jac=grad,
-                          bounds=[(-1, 1), (-1, 1)],
-                          options={"tol": 1e-10, "print_level": 0})
+    res = pounce.minimize(
+        f,
+        x0=np.array([0.5, 0.5]),
+        jac=grad,
+        bounds=[(-1, 1), (-1, 1)],
+        options={"tol": 1e-10, "print_level": 0},
+    )
     assert res.success
     np.testing.assert_allclose(res.x, [0.0, 0.0], atol=1e-6)
 
@@ -364,12 +517,21 @@ def test_minimize_rejects_reversed_bounds():
     f = lambda x: float(x @ x)
     g = lambda x: 2.0 * x
     with pytest.raises(ValueError, match=r"bounds\[0\] is reversed"):
-        pounce.minimize(f, x0=np.zeros(2), jac=g, bounds=[(1.0, -1.0), (-2, 2)],
-                        options={"print_level": 0})
+        pounce.minimize(
+            f,
+            x0=np.zeros(2),
+            jac=g,
+            bounds=[(1.0, -1.0), (-2, 2)],
+            options={"print_level": 0},
+        )
     # low == high (a fixed variable) is permitted
-    res = pounce.minimize(f, x0=np.array([0.3, 0.3]), jac=g,
-                          bounds=[(0.5, 0.5), (-2, 2)],
-                          options={"tol": 1e-10, "print_level": 0})
+    res = pounce.minimize(
+        f,
+        x0=np.array([0.3, 0.3]),
+        jac=g,
+        bounds=[(0.5, 0.5), (-2, 2)],
+        options={"tol": 1e-10, "print_level": 0},
+    )
     np.testing.assert_allclose(res.x[0], 0.5, atol=1e-6)
 
 
@@ -380,10 +542,10 @@ def test_nlp_success_status_includes_acceptable_level():
     own differentiable ``_OK_STATUS``. Infeasible/tiny-step/etc. stay failures."""
     from pounce._minimize import _NLP_SUCCESS_STATUS
 
-    assert 0 in _NLP_SUCCESS_STATUS          # Solve_Succeeded
-    assert 1 in _NLP_SUCCESS_STATUS          # Solved_To_Acceptable_Level
-    assert 2 not in _NLP_SUCCESS_STATUS      # Infeasible_Problem_Detected
-    assert 3 not in _NLP_SUCCESS_STATUS      # Search_Direction_Becomes_Too_Small
+    assert 0 in _NLP_SUCCESS_STATUS  # Solve_Succeeded
+    assert 1 in _NLP_SUCCESS_STATUS  # Solved_To_Acceptable_Level
+    assert 2 not in _NLP_SUCCESS_STATUS  # Infeasible_Problem_Detected
+    assert 3 not in _NLP_SUCCESS_STATUS  # Search_Direction_Becomes_Too_Small
 
 
 def test_minimize_acceptable_level_reports_success():
@@ -391,6 +553,7 @@ def test_minimize_acceptable_level_reports_success():
     to the acceptable level (status 1) rather than the tight tolerance; pounce
     used to flag that ``success=False`` at the verified optimum. The acceptable
     solve must now report ``success=True``."""
+
     def f(x):
         return float(x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2])
 
@@ -401,7 +564,9 @@ def test_minimize_acceptable_level_reports_success():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # this test deliberately uses the FD fallback
         res = pounce.minimize(
-            f, x0=np.array([2.0, 2.0, 2.0, 2.0]), bounds=[(1.0, 5.0)] * 4,
+            f,
+            x0=np.array([2.0, 2.0, 2.0, 2.0]),
+            bounds=[(1.0, 5.0)] * 4,
             constraints=constraints,
             options={"solver_selection": "nlp", "print_level": 0},
         )
@@ -420,10 +585,10 @@ def test_finite_diff_grad_is_central_and_accurate():
     from pounce._minimize import _finite_diff_grad
 
     # f(x) = sum(x^3)  =>  grad = 3 x^2, an analytic reference.
-    f = lambda x: float(np.sum(x ** 3))
+    f = lambda x: float(np.sum(x**3))
     x = np.array([0.7, -1.3, 2.1])
     g_fd = _finite_diff_grad(f, x)
-    g_exact = 3.0 * x ** 2
+    g_exact = 3.0 * x**2
     # Central differences clear ~1e-9 here; a forward difference would sit ~1e-7.
     np.testing.assert_allclose(g_fd, g_exact, rtol=1e-7, atol=1e-8)
 
@@ -435,6 +600,7 @@ def test_minimize_fd_path_converges_from_documented_start():
     forward-difference noise floor sat right at the tight ``tol=1e-8``. With
     central differences the dual infeasibility clears the tolerance and the
     finite-difference solve now reports success at the known optimum."""
+
     def f(x):
         return float(x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2])
 
@@ -445,7 +611,9 @@ def test_minimize_fd_path_converges_from_documented_start():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # FD-fallback warning is asserted elsewhere
         res = pounce.minimize(
-            f, x0=np.array([1.0, 5.0, 5.0, 1.0]), bounds=[(1.0, 5.0)] * 4,
+            f,
+            x0=np.array([1.0, 5.0, 5.0, 1.0]),
+            bounds=[(1.0, 5.0)] * 4,
             constraints=constraints,
             options={"solver_selection": "nlp", "print_level": 0},
         )
@@ -472,7 +640,9 @@ def test_minimize_warns_on_finite_difference_fallback():
     # the objective jac is supplied.
     with pytest.warns(UserWarning, match="constraint Jacobian"):
         pounce.minimize(
-            f, x0=np.array([1.0, 1.0]), jac=g,
+            f,
+            x0=np.array([1.0, 1.0]),
+            jac=g,
             constraints=[{"type": "eq", "fun": lambda x: x[0] + x[1] - 1.0}],
             options=opts,
         )
@@ -481,11 +651,16 @@ def test_minimize_warns_on_finite_difference_fallback():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         pounce.minimize(
-            f, x0=np.array([1.0, 1.0]), jac=g,
-            constraints=[{
-                "type": "eq", "fun": lambda x: x[0] + x[1] - 1.0,
-                "jac": lambda x: np.array([[1.0, 1.0]]),
-            }],
+            f,
+            x0=np.array([1.0, 1.0]),
+            jac=g,
+            constraints=[
+                {
+                    "type": "eq",
+                    "fun": lambda x: x[0] + x[1] - 1.0,
+                    "jac": lambda x: np.array([[1.0, 1.0]]),
+                }
+            ],
             options=opts,
         )
 
@@ -497,16 +672,21 @@ def test_minimize_rejects_malformed_constraint_dicts():
     g = lambda x: 2.0 * x
     opts = {"print_level": 0}
     with pytest.raises(ValueError, match="missing required key"):
-        pounce.minimize(f, np.ones(2), jac=g,
-                        constraints={"fun": lambda x: x[0] - x[1]}, options=opts)
+        pounce.minimize(
+            f,
+            np.ones(2),
+            jac=g,
+            constraints={"fun": lambda x: x[0] - x[1]},
+            options=opts,
+        )
     with pytest.raises(ValueError, match="missing required key"):
-        pounce.minimize(f, np.ones(2), jac=g,
-                        constraints={"type": "eq"}, options=opts)
+        pounce.minimize(f, np.ones(2), jac=g, constraints={"type": "eq"}, options=opts)
     with pytest.raises(ValueError, match="must be a dict"):
         pounce.minimize(f, np.ones(2), jac=g, constraints=["bad"], options=opts)
     with pytest.raises(ValueError, match="must be callable"):
-        pounce.minimize(f, np.ones(2), jac=g,
-                        constraints={"type": "eq", "fun": 3.0}, options=opts)
+        pounce.minimize(
+            f, np.ones(2), jac=g, constraints={"type": "eq", "fun": 3.0}, options=opts
+        )
 
 
 # -- Opt-in routing (default is NLP after the auto-route default flip) --------
@@ -519,7 +699,11 @@ def test_minimize_default_does_not_route():
     jac = lambda x: np.array([2 * x[0] - 3, 2 * x[1] - 4])
     hess = lambda x: np.array([[2.0, 0.0], [0.0, 2.0]])
     res = pounce.minimize(
-        fun, [0.5, 0.5], jac=jac, hess=hess, bounds=[(0, 1), (0, 1)],
+        fun,
+        [0.5, 0.5],
+        jac=jac,
+        hess=hess,
+        bounds=[(0, 1), (0, 1)],
     )
     # No routing — `info["solver"]` is only set when the router fires.
     assert res.info.get("solver") is None
@@ -533,7 +717,11 @@ def test_minimize_solver_selection_auto_routes_convex_qp():
     jac = lambda x: 2 * x
     hess = lambda x: 2 * np.eye(2)
     res = pounce.minimize(
-        fun, [1.0, 1.0], jac=jac, hess=hess, bounds=[(-1, 1), (-1, 1)],
+        fun,
+        [1.0, 1.0],
+        jac=jac,
+        hess=hess,
+        bounds=[(-1, 1), (-1, 1)],
         solver_selection="auto",
     )
     assert res.info.get("solver") == "qp-ipm"
@@ -548,7 +736,11 @@ def test_routed_result_exposes_eval_counters():
     jac = lambda x: 2 * x
     hess = lambda x: 2 * np.eye(2)
     res = pounce.minimize(
-        fun, [1.0, 1.0], jac=jac, hess=hess, bounds=[(-1, 1), (-1, 1)],
+        fun,
+        [1.0, 1.0],
+        jac=jac,
+        hess=hess,
+        bounds=[(-1, 1), (-1, 1)],
         solver_selection="auto",
     )
     assert res.info.get("solver") == "qp-ipm"
@@ -563,7 +755,11 @@ def test_result_subscript_falls_back_to_info():
     jac = lambda x: 2 * x
     hess = lambda x: 2 * np.eye(2)
     res = pounce.minimize(
-        fun, [1.0, 1.0], jac=jac, hess=hess, bounds=[(-1, 1), (-1, 1)],
+        fun,
+        [1.0, 1.0],
+        jac=jac,
+        hess=hess,
+        bounds=[(-1, 1), (-1, 1)],
         solver_selection="auto",
     )
     # nested info key reachable via subscript and attribute
@@ -585,8 +781,12 @@ def test_minimize_solver_selection_qp_ipm_with_linear_constraint():
     hess = lambda x: np.eye(3)
     lc = opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), lb=1.0, ub=1.0)
     res = pounce.minimize(
-        fun, np.full(3, 1.0 / 3), jac=jac, hess=hess,
-        constraints=lc, solver_selection="qp-ipm",
+        fun,
+        np.full(3, 1.0 / 3),
+        jac=jac,
+        hess=hess,
+        constraints=lc,
+        solver_selection="qp-ipm",
     )
     assert res.info.get("solver") == "qp-ipm"
     np.testing.assert_allclose(res.x.sum(), 1.0, atol=1e-8)
@@ -600,9 +800,13 @@ def test_minimize_callback_fires_with_linear_constraint():
     lc = opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), lb=1.0, ub=1.0)
     xs = []
     res = pounce.minimize(
-        f, x0=np.full(3, 1.0 / 3), jac=grad, constraints=lc,
+        f,
+        x0=np.full(3, 1.0 / 3),
+        jac=grad,
+        constraints=lc,
         callback=lambda xk: xs.append(xk.copy()),
-        tol=1e-10, print_level=0,
+        tol=1e-10,
+        print_level=0,
     )
     assert res.success
     assert len(xs) >= 1
@@ -658,9 +862,7 @@ def test_wrap_constraints_fd_jac_uses_probed_sizes():
         [{"type": "eq", "fun": con}], 2, x0
     )
     assert m == 3
-    J = sparse.coo_array(
-        (jac_values(x0), (jac_rows, jac_cols)), shape=(m, 2)
-    ).toarray()
+    J = sparse.coo_array((jac_values(x0), (jac_rows, jac_cols)), shape=(m, 2)).toarray()
     assert J.shape == (3, 2)
 
 
@@ -697,18 +899,33 @@ def test_hess_ignored_with_constraints_warns(monkeypatch):
     f = lambda x: float(x @ x)
     g = lambda x: 2.0 * x
     H = lambda x: 2.0 * np.eye(2)
-    con = {"type": "eq", "fun": lambda x: x[0] - x[1], "jac": lambda x: np.array([[1.0, -1.0]])}
+    con = {
+        "type": "eq",
+        "fun": lambda x: x[0] - x[1],
+        "jac": lambda x: np.array([[1.0, -1.0]]),
+    }
 
     # solver_selection='nlp' forces the general NLP path (no convex routing).
     with pytest.warns(UserWarning, match="ignores the supplied 'hess'"):
-        M.minimize(f, np.ones(2), jac=g, hess=H, constraints=con,
-                   options={"solver_selection": "nlp", "print_level": 0})
+        M.minimize(
+            f,
+            np.ones(2),
+            jac=g,
+            hess=H,
+            constraints=con,
+            options={"solver_selection": "nlp", "print_level": 0},
+        )
 
     # Unconstrained: hess is honored, so no such warning.
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        M.minimize(f, np.ones(2), jac=g, hess=H,
-                   options={"solver_selection": "nlp", "print_level": 0})
+        M.minimize(
+            f,
+            np.ones(2),
+            jac=g,
+            hess=H,
+            options={"solver_selection": "nlp", "print_level": 0},
+        )
 
 
 def _no_hess_warning(rec):
@@ -730,8 +947,13 @@ def test_hess_used_with_linear_constraint():
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         res = pounce.minimize(
-            f, np.full(3, 1.0 / 3), jac=g, hess=H, constraints=lc,
-            tol=1e-10, print_level=0,
+            f,
+            np.full(3, 1.0 / 3),
+            jac=g,
+            hess=H,
+            constraints=lc,
+            tol=1e-10,
+            print_level=0,
         )
     assert _no_hess_warning(rec), "hess must not be dropped for linear constraints"
     assert res.success
@@ -753,8 +975,13 @@ def test_hess_used_with_mixed_eq_ineq_linear_constraint():
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         res = pounce.minimize(
-            f, np.full(3, 1.0 / 3), jac=g, hess=H, constraints=lc,
-            tol=1e-10, print_level=0,
+            f,
+            np.full(3, 1.0 / 3),
+            jac=g,
+            hess=H,
+            constraints=lc,
+            tol=1e-10,
+            print_level=0,
         )
     assert _no_hess_warning(rec)
     assert res.success
@@ -770,12 +997,16 @@ def test_hess_still_dropped_with_dict_constraint():
     f = lambda x: float(x @ x)
     g = lambda x: 2.0 * x
     H = lambda x: 2.0 * np.eye(2)
-    con = {"type": "eq", "fun": lambda x: x[0] + x[1] - 1.0,
-           "jac": lambda x: np.array([[1.0, 1.0]])}
+    con = {
+        "type": "eq",
+        "fun": lambda x: x[0] + x[1] - 1.0,
+        "jac": lambda x: np.array([[1.0, 1.0]]),
+    }
 
     with pytest.warns(UserWarning, match="ignores the supplied 'hess'"):
-        res = pounce.minimize(f, np.full(2, 0.5), jac=g, hess=H, constraints=con,
-                              tol=1e-10, print_level=0)
+        res = pounce.minimize(
+            f, np.full(2, 0.5), jac=g, hess=H, constraints=con, tol=1e-10, print_level=0
+        )
     assert res.success
     assert res.nhev == 0, "dict constraint must not trigger exact-Hessian use"
 
@@ -794,8 +1025,13 @@ def test_hess_with_jac_true_and_linear_constraint():
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         res = pounce.minimize(
-            fg, np.full(3, 1.0 / 3), jac=True, hess=H, constraints=lc,
-            tol=1e-10, print_level=0,
+            fg,
+            np.full(3, 1.0 / 3),
+            jac=True,
+            hess=H,
+            constraints=lc,
+            tol=1e-10,
+            print_level=0,
         )
     assert _no_hess_warning(rec)
     assert res.success
@@ -812,25 +1048,41 @@ def test_convex_route_warns_on_dropped_options(monkeypatch):
     class _Extract:
         kind = "qp"
 
-    sentinel = M.OptimizeResult(x=np.zeros(2), fun=0.0, success=True, status=0,
-                                message="optimal", nit=1, info={"solver": "qp-ipm"})
+    sentinel = M.OptimizeResult(
+        x=np.zeros(2),
+        fun=0.0,
+        success=True,
+        status=0,
+        message="optimal",
+        nit=1,
+        info={"solver": "qp-ipm"},
+    )
 
     monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
     monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
 
     f = lambda x: float(x @ x)
     with pytest.warns(UserWarning, match="had no effect|were ignored|acceptable_tol"):
-        res = M.minimize(f, np.ones(2),
-                         options={"solver_selection": "qp-ipm",
-                                  "acceptable_tol": 1e-9, "print_level": 3})
+        res = M.minimize(
+            f,
+            np.ones(2),
+            options={
+                "solver_selection": "qp-ipm",
+                "acceptable_tol": 1e-9,
+                "print_level": 3,
+            },
+        )
     assert res is sentinel
 
     # Only honored options (tol/max_iter) -> no warning.
     monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        M.minimize(f, np.ones(2),
-                   options={"solver_selection": "qp-ipm", "tol": 1e-8, "max_iter": 50})
+        M.minimize(
+            f,
+            np.ones(2),
+            options={"solver_selection": "qp-ipm", "tol": 1e-8, "max_iter": 50},
+        )
 
 
 def test_convex_route_warns_on_disp(monkeypatch):
@@ -843,16 +1095,24 @@ def test_convex_route_warns_on_disp(monkeypatch):
     class _Extract:
         kind = "qp"
 
-    sentinel = M.OptimizeResult(x=np.zeros(2), fun=0.0, success=True, status=0,
-                                message="optimal", nit=1, info={"solver": "qp-ipm"})
+    sentinel = M.OptimizeResult(
+        x=np.zeros(2),
+        fun=0.0,
+        success=True,
+        status=0,
+        message="optimal",
+        nit=1,
+        info={"solver": "qp-ipm"},
+    )
 
     monkeypatch.setattr(M, "classify_and_extract", lambda **kw: _Extract())
     monkeypatch.setattr(M, "_solve_via_convex", lambda ex, opts: sentinel)
 
     f = lambda x: float(x @ x)
     with pytest.warns(UserWarning, match="disp"):
-        res = M.minimize(f, np.ones(2),
-                         options={"solver_selection": "qp-ipm", "disp": True})
+        res = M.minimize(
+            f, np.ones(2), options={"solver_selection": "qp-ipm", "disp": True}
+        )
     assert res is sentinel
 
 
@@ -888,8 +1148,9 @@ def test_user_requested_stop_is_not_success_despite_small_kkt(monkeypatch):
     monkeypatch.setattr(M, "Problem", _UserStopProblem)
 
     f = lambda x: float(x @ x)
-    res = M.minimize(f, np.ones(2),
-                     options={"solver_selection": "nlp", "print_level": 0})
+    res = M.minimize(
+        f, np.ones(2), options={"solver_selection": "nlp", "print_level": 0}
+    )
     assert res.status == 5
     assert res.success is False, "User_Requested_Stop must not be reported as success"
 
@@ -903,7 +1164,8 @@ def test_user_requested_stop_is_not_success_despite_small_kkt(monkeypatch):
             return x, info
 
     monkeypatch.setattr(M, "Problem", _StallProblem)
-    res2 = M.minimize(f, np.ones(2),
-                      options={"solver_selection": "nlp", "print_level": 0})
+    res2 = M.minimize(
+        f, np.ones(2), options={"solver_selection": "nlp", "print_level": 0}
+    )
     assert res2.status == 3
     assert res2.success is True, "an acceptable-KKT numerical stall stays a success"

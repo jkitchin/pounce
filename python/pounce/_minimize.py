@@ -349,6 +349,12 @@ class _ConstraintBlock:
     lb: np.ndarray  # length n_rows
     ub: np.ndarray  # length n_rows
     n_rows: int
+    # Dict block whose ``jac`` returns a *scipy-sparse* matrix: ``(rows, cols)``
+    # above are that matrix's COO structure (canonicalized) and ``jac_values``
+    # streams the per-iteration COO data instead of a dense ``ravel()``. Lets a
+    # nonlinear (or linear) dict constraint declare a sparse Jacobian, mirroring
+    # cyipopt's detect-by-return-type behavior.
+    sparse_jac: bool = False
     # Pre-assembled ``sparse.coo_array`` for linear blocks. ``g_combined``
     # would otherwise rebuild this from ``(rows, cols, constant_vals)`` on
     # every Ipopt iteration (per-iter waste in the inner loop). ``None`` for
@@ -434,9 +440,33 @@ def _block_from_dict(c: dict, n: int, x0=None) -> _ConstraintBlock:
     # time (L47, mirrors the dict path on main).
     probe = np.zeros(n) if x0 is None else np.asarray(x0, dtype=float).ravel()
     m_rows = int(_to_array(fun(probe, *ca)).size)
-    # Dense sparsity pattern: every row may touch every column.
-    rows = np.repeat(np.arange(m_rows, dtype=np.int64), n)
-    cols = np.tile(np.arange(n, dtype=np.int64), m_rows)
+    jac = c.get("jac")
+
+    # If an explicit jac is supplied and returns a *scipy-sparse* matrix, declare
+    # a sparse Jacobian structure from its COO triplet (canonicalized) instead of
+    # the dense grid — so nonlinear (and linear) dict constraints can be sparse,
+    # mirroring how cyipopt detects sparsity from the jac's return type. Any
+    # sparse format is accepted; ``.tocsr().tocoo()`` gives a deterministic
+    # row-major order so build- and solve-time orderings align (Ipopt requires
+    # a fixed pattern). A dense return (or no jac → finite differences) keeps the
+    # original fully-dense pattern.
+    sparse_jac = False
+    if callable(jac):
+        probe_jac = jac(probe, *ca)
+        if sparse.issparse(probe_jac):
+            Jc = probe_jac.tocsr().tocoo()
+            if Jc.shape != (m_rows, n):
+                raise ValueError(
+                    f"constraint Jacobian has shape {Jc.shape}; expected "
+                    f"{(m_rows, n)} (m_rows from 'fun', n from x)"
+                )
+            rows = np.asarray(Jc.row, dtype=np.int64)
+            cols = np.asarray(Jc.col, dtype=np.int64)
+            sparse_jac = True
+    if not sparse_jac:
+        # Dense sparsity pattern: every row may touch every column.
+        rows = np.repeat(np.arange(m_rows, dtype=np.int64), n)
+        cols = np.tile(np.arange(n, dtype=np.int64), m_rows)
     if kind == "eq":
         lb = np.zeros(m_rows)
         ub = np.zeros(m_rows)
@@ -448,11 +478,12 @@ def _block_from_dict(c: dict, n: int, x0=None) -> _ConstraintBlock:
         cols=cols,
         constant_vals=None,
         fun=fun,
-        jac=c.get("jac"),
+        jac=jac,
         args=ca,
         lb=lb,
         ub=ub,
         n_rows=m_rows,
+        sparse_jac=sparse_jac,
     )
 
 
@@ -468,9 +499,12 @@ def _wrap_constraints(constraints, n: int, x0=None):
     Returns ``(m_total, g_combined, jac_values, cl, cu, jac_rows, jac_cols)``.
     ``(jac_rows, jac_cols)`` declare Ipopt's ``jacobianstructure``; ``jac_values(x)``
     produces values in matching order. LinearConstraint blocks contribute their
-    constant COO triplet; dict blocks fall back to a fully-dense per-row pattern
-    and evaluate jac on demand. Dict constraints are probed for their output
-    size at ``x0`` when supplied, not the origin (L47).
+    constant COO triplet; a dict block whose ``jac`` returns a scipy-sparse matrix
+    declares that matrix's COO structure (sparse — for linear or nonlinear
+    constraints alike); dict blocks with a dense (or absent) jac fall back to a
+    fully-dense per-row pattern and evaluate jac on demand. Dict constraints are
+    probed for their output size — and their jac sparsity — at ``x0`` when
+    supplied, not the origin (L47).
     """
     if constraints is None:
         return _empty_constraints()
@@ -532,6 +566,18 @@ def _wrap_constraints(constraints, n: int, x0=None):
         for (start, end), blk in zip(block_nnz_spans, blocks):
             if blk.constant_vals is not None:
                 out[start:end] = blk.constant_vals
+            elif blk.sparse_jac:
+                # Sparse dict Jacobian: stream COO data in the same canonical
+                # order declared at build time (``.tocsr().tocoo()``).
+                J = blk.jac(x, *blk.args).tocsr().tocoo()
+                if J.data.size != (end - start):
+                    raise ValueError(
+                        "constraint Jacobian sparsity pattern changed between "
+                        "probe and solve; the pattern must be fixed across "
+                        f"iterations (declared {end - start} nonzeros, got "
+                        f"{J.data.size})"
+                    )
+                out[start:end] = J.data
             elif blk.jac is not None:
                 J = np.atleast_2d(_to_array(blk.jac(x, *blk.args)))
                 out[start:end] = J.ravel()
