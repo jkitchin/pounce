@@ -66,6 +66,7 @@ from ._path import PathFollower, PathTrace, inverse_map_rhs
 from ._qp import QpLayer, solve_qp, solve_qp_batch, solve_socp
 from ._bvp import solve_bvp, TorchBVPSolution
 from ._ode import odeint, TorchODESolution
+from ._dae import daeint
 
 __all__ = [
     "from_torch",
@@ -77,6 +78,7 @@ __all__ = [
     "TorchBVPSolution",
     "odeint",
     "TorchODESolution",
+    "daeint",
     "TorchProblem",
     "AnchorState",
     "PathFollower",

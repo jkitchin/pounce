@@ -14,6 +14,7 @@ diffrax; this raises for them rather than silently substituting.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -132,6 +133,20 @@ def solve_ivp(
         )
     if events is not None:
         raise NotImplementedError("event detection is not yet supported.")
+    # gh #165: don't silently no-op SciPy parameters.
+    if vectorized:
+        warnings.warn(
+            "pounce.ode.solve_ivp ignores vectorized=True; the RHS and its "
+            "finite-difference Jacobian are evaluated point-wise. Pass an "
+            "analytic jac= to avoid the per-column RHS evaluations.",
+            UserWarning, stacklevel=2,
+        )
+    if options:
+        warnings.warn(
+            f"pounce.ode.solve_ivp received unrecognized options "
+            f"{sorted(options)} and ignored them.",
+            UserWarning, stacklevel=2,
+        )
 
     t0, t1 = float(t_span[0]), float(t_span[1])
     y0 = np.asarray(y0, dtype=float).ravel()
@@ -163,4 +178,83 @@ def solve_ivp(
         success=res["success"],
         nstep=res["nstep"],
         nrej=res["nrej"],
+    )
+
+
+def solve_dae(
+    F,
+    t_span,
+    y0,
+    yp0=None,
+    *,
+    consistent="project",
+    rtol=1e-3,
+    atol=1e-6,
+    jac=None,
+    first_step=None,
+    max_step=np.inf,
+    t_eval=None,
+    dense_output=False,
+    args=None,
+):
+    """Solve a fully-implicit index-1 DAE ``F(t, y, y') = 0`` with pounce.
+
+    A pounce extension beyond SciPy (which has no fully-implicit DAE solver),
+    using the same Radau IIA(5) collocation as :func:`solve_ivp` in residual
+    form. Index-1 only.
+
+    Parameters
+    ----------
+    F : callable
+        ``F(t, y, yp)`` (or ``F(t, y, yp, *args)``) returning the ``(n,)``
+        residual; a solution has ``F(t, y, y') == 0``.
+    t_span, y0 : as in :func:`solve_ivp`.
+    yp0 : array (n,) or None
+        Guess for the initial derivative. With ``consistent="project"``
+        (default) it is projected onto ``F(t0, y0, y'0) = 0`` (differential
+        ``y`` and algebraic ``y'`` held fixed, IDA ``IDA_YA_YDP_INIT`` style),
+        so an approximate guess (or ``None`` → zeros) is fine. With
+        ``consistent="assume"`` it is used as given and must already satisfy
+        ``F(t0, y0, yp0) == 0``.
+    jac : callable or None
+        ``jac(t, y, yp)`` returning ``(dF/dy, dF/dy')``; finite-differenced
+        (``2n`` evals) if omitted.
+
+    Returns
+    -------
+    OdeResult
+    """
+    from . import _dae
+
+    t0, t1 = float(t_span[0]), float(t_span[1])
+    y0 = np.asarray(y0, dtype=float).ravel()
+    if yp0 is not None:
+        yp0 = np.asarray(yp0, dtype=float).ravel()
+
+    if args is not None:
+        _F = F
+        F = lambda t, y, yp: _F(t, y, yp, *args)
+        if jac is not None:
+            _jac = jac
+            jac = lambda t, y, yp: _jac(t, y, yp, *args)
+
+    if consistent == "project":
+        prob = _dae._DaeProblem(F, y0.size, jac=jac)
+        y0, yp0 = _dae.consistent_initial_conditions(prob, t0, y0, yp0)
+    elif consistent == "assume":
+        if yp0 is None:
+            raise ValueError("consistent='assume' requires an explicit yp0.")
+    else:
+        raise ValueError("consistent must be 'project' or 'assume'.")
+
+    res = _dae.integrate_dae(
+        F, t0, t1, y0, yp0, rtol=rtol, atol=atol, jac=jac,
+        first_step=first_step, max_step=max_step, t_eval=t_eval,
+        dense_output=dense_output or t_eval is not None,
+    )
+    return OdeResult(
+        t=res["t"], y=res["y"], sol=res.get("sol"),
+        nfev=res["nfev"], njev=res["njev"], nlu=res["nlu"],
+        status=res["status"], message=res["message"], success=res["success"],
+        nstep=res["nstep"], nrej=res["nrej"],
     )

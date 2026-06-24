@@ -32,6 +32,7 @@
 - [Curve Fitting](curve-fitting.md)
 - [Boundary Value Problems](bvp.md)
 - [ODE / DAE Initial Value Problems](ode.md)
+- [Implicit DAEs](dae.md)
 
 # Global Search
 

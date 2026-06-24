@@ -12,6 +12,6 @@ implicit-function theorem on each step's stage solve) lives in
 ``pounce.jax.odeint`` and is imported on demand.
 """
 
-from ._solve import solve_ivp, OdeResult
+from ._solve import solve_ivp, solve_dae, OdeResult
 
-__all__ = ["solve_ivp", "OdeResult"]
+__all__ = ["solve_ivp", "solve_dae", "OdeResult"]

@@ -49,6 +49,7 @@ from ._path import PathFollower, PathTrace, inverse_map_rhs
 from ._qp import QpLayer, solve_qp, solve_qp_batch, solve_socp
 from ._bvp import solve_bvp, JaxBVPSolution
 from ._ode import odeint, JaxODESolution
+from ._dae import daeint
 
 __all__ = [
     "from_jax",
@@ -60,6 +61,7 @@ __all__ = [
     "JaxBVPSolution",
     "odeint",
     "JaxODESolution",
+    "daeint",
     "JaxProblem",
     "AnchorState",
     "PathFollower",

@@ -41,7 +41,7 @@ from .qp import (
 )
 from .sos import sos_minimize, SosResult
 from .bvp import solve_bvp, BVPResult, solve_bvp_constrained
-from .ode import solve_ivp, OdeResult
+from .ode import solve_ivp, solve_dae, OdeResult
 
 __all__ = [
     # Nonlinear programming (cyipopt-compatible)
@@ -84,6 +84,7 @@ __all__ = [
     "solve_bvp_constrained",
     # Stiff ODE / DAE initial value problems (SciPy-compatible)
     "solve_ivp",
+    "solve_dae",
     "OdeResult",
     "__version__",
 ]

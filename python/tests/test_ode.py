@@ -310,3 +310,15 @@ def test_torch_odeint_gradients():
     assert abs(yT.item() - np.exp(-k0 * T)) < 1e-6
     assert abs(k.grad.item() + T * np.exp(-k0 * T)) < 1e-5
     assert abs(y0.grad.item() - np.exp(-k0 * T)) < 1e-5
+
+
+def test_vectorized_arg_warns_not_silent():
+    """gh #165: vectorized=True is ignored, but no longer silently."""
+    with pytest.warns(UserWarning, match="vectorized"):
+        po.solve_ivp(lambda t, y: [-y[0]], (0, 1), [1.0], vectorized=True)
+
+
+def test_unknown_option_warns():
+    """gh #165: unrecognized options warn instead of vanishing silently."""
+    with pytest.warns(UserWarning, match="unrecognized options"):
+        po.solve_ivp(lambda t, y: [-y[0]], (0, 1), [1.0], not_a_real_option=3)
