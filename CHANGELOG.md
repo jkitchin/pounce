@@ -20,7 +20,7 @@ changes.
 - **Ergonomic builder API** in `pounce-rs` (argmin-style, per the #168
   discussion): implement the small `Problem` trait (only `objective` is
   required) and configure + solve with the `Nlp` builder
-  (`Nlp::new(problem, n).var_bounds(..).constraint_bounds(..).solve()`).
+  (`Nlp::new(problem).var_bounds(..).constraint_bounds(..).solve()`).
   Unimplemented `gradient` / `jacobian` are finite-differenced and the Hessian
   defaults to limited-memory L-BFGS, so a simple problem stays small; the full
   `TNLP` trait remains for advanced use. Runnable HS071 + constrained-QP

@@ -24,7 +24,7 @@
 //!     fn constraints(&self, x: &[f64], g: &mut [f64]) { g[0] = x[0] + x[1]; }
 //! }
 //!
-//! let sol = Nlp::new(P, 2)
+//! let sol = Nlp::new(P)                       // variable count inferred below
 //!     .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
 //!     .constraint_bounds(&[3.0], &[3.0])      // equality: lower == upper
 //!     .x0(&[0.0, 0.0])
@@ -91,44 +91,62 @@ pub struct Solution {
     pub multipliers: Vec<f64>,
 }
 
-/// Builder: `Nlp::new(problem, n)` then `.var_bounds(..).solve()`.
+/// Builder: `Nlp::new(problem)` then `.var_bounds(..)` / `.x0(..)` (which fix
+/// the number of variables) and `.solve()`.
 pub struct Nlp<P: Problem> {
     problem: P,
-    n: usize,
-    x_l: Vec<f64>,
-    x_u: Vec<f64>,
+    n: Option<usize>, // inferred from var_bounds / x0 (must agree)
+    x_l: Option<Vec<f64>>,
+    x_u: Option<Vec<f64>>,
     g_l: Vec<f64>,
     g_u: Vec<f64>,
-    x0: Vec<f64>,
+    x0: Option<Vec<f64>>,
     num: Vec<(String, f64)>,
     int: Vec<(String, i32)>,
     string: Vec<(String, String)>,
 }
 
 impl<P: Problem + 'static> Nlp<P> {
-    /// A problem in `n` variables. Variable bounds default to `±∞`, constraint
-    /// bounds to `0` (set them with [`constraint_bounds`](Self::constraint_bounds)),
-    /// and `x0` to the origin.
-    pub fn new(problem: P, n: usize) -> Self {
+    /// A new builder for `problem`. The number of variables is inferred from
+    /// the first of [`var_bounds`](Self::var_bounds) / [`x0`](Self::x0) you set
+    /// (they must agree); the number of constraints comes from
+    /// `Problem::n_constraints`. Variable bounds default to `±∞`, constraint
+    /// bounds to `0`, and `x0` to the origin.
+    pub fn new(problem: P) -> Self {
         let m = problem.n_constraints();
         Nlp {
             problem,
-            n,
-            x_l: vec![-INF; n],
-            x_u: vec![INF; n],
+            n: None,
+            x_l: None,
+            x_u: None,
             g_l: vec![0.0; m],
             g_u: vec![0.0; m],
-            x0: vec![0.0; n],
+            x0: None,
             num: Vec::new(),
             int: Vec::new(),
             string: Vec::new(),
         }
     }
 
-    /// Variable bounds `x_l ≤ x ≤ x_u` (use `±2e19` for ∞).
+    // Record (and cross-check) the variable count implied by a length-`len`
+    // argument.
+    fn set_n(&mut self, len: usize, what: &str) {
+        match self.n {
+            Some(n) if n != len => panic!(
+                "pounce_rs::Nlp: {what} has length {len}, but the problem was \
+                 already sized to {n} variables",
+            ),
+            _ => self.n = Some(len),
+        }
+    }
+
+    /// Variable bounds `x_l ≤ x ≤ x_u` (use `±2e19` for ∞). Fixes the number of
+    /// variables.
     pub fn var_bounds(mut self, lo: &[f64], hi: &[f64]) -> Self {
-        self.x_l = lo.to_vec();
-        self.x_u = hi.to_vec();
+        assert_eq!(lo.len(), hi.len(), "var_bounds: lo and hi differ in length");
+        self.set_n(lo.len(), "var_bounds");
+        self.x_l = Some(lo.to_vec());
+        self.x_u = Some(hi.to_vec());
         self
     }
 
@@ -139,9 +157,10 @@ impl<P: Problem + 'static> Nlp<P> {
         self
     }
 
-    /// Initial guess.
+    /// Initial guess. Fixes the number of variables.
     pub fn x0(mut self, x0: &[f64]) -> Self {
-        self.x0 = x0.to_vec();
+        self.set_n(x0.len(), "x0");
+        self.x0 = Some(x0.to_vec());
         self
     }
 
@@ -164,17 +183,24 @@ impl<P: Problem + 'static> Nlp<P> {
     }
 
     /// Build the `TNLP` adapter and run the interior-point solver.
+    ///
+    /// # Panics
+    /// If the number of variables was never fixed (no `var_bounds` or `x0`).
     pub fn solve(self) -> Solution {
+        let n = self.n.expect(
+            "pounce_rs::Nlp: number of variables unknown — call .var_bounds(..) \
+             or .x0(..) to set it",
+        );
         let m = self.problem.n_constraints();
         let adapter = Rc::new(RefCell::new(Adapter {
             problem: self.problem,
-            n: self.n,
+            n,
             m,
-            x_l: self.x_l,
-            x_u: self.x_u,
+            x_l: self.x_l.unwrap_or_else(|| vec![-INF; n]),
+            x_u: self.x_u.unwrap_or_else(|| vec![INF; n]),
             g_l: self.g_l,
             g_u: self.g_u,
-            x0: self.x0,
+            x0: self.x0.unwrap_or_else(|| vec![0.0; n]),
             sol_x: Vec::new(),
             sol_obj: 0.0,
             sol_lambda: Vec::new(),
@@ -333,5 +359,58 @@ impl<P: Problem> TNLP for Adapter<P> {
         self.sol_x = sol.x.to_vec();
         self.sol_obj = sol.obj_value;
         self.sol_lambda = sol.lambda.to_vec();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Quad; // min (x0-1)^2 + (x1-2)^2  s.t. x0 + x1 == 3
+    impl Problem for Quad {
+        fn objective(&self, x: &[f64]) -> f64 {
+            (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2)
+        }
+        fn n_constraints(&self) -> usize {
+            1
+        }
+        fn constraints(&self, x: &[f64], g: &mut [f64]) {
+            g[0] = x[0] + x[1];
+        }
+    }
+
+    #[test]
+    fn infers_n_from_bounds_and_solves() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0]) // n inferred = 2
+            .constraint_bounds(&[3.0], &[3.0])
+            .option_num("tol", 1e-10)
+            .solve();
+        assert!(sol.success);
+        assert!((sol.x[0] - 1.0).abs() < 1e-5 && (sol.x[1] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn infers_n_from_x0() {
+        let sol = Nlp::new(Quad)
+            .constraint_bounds(&[3.0], &[3.0])
+            .x0(&[0.0, 0.0]) // n inferred = 2
+            .solve();
+        assert!(sol.success);
+    }
+
+    #[test]
+    #[should_panic(expected = "already sized to 2")]
+    fn mismatched_sizes_panic() {
+        let _ = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .x0(&[0.0, 0.0, 0.0]) // length 3 != 2
+            .solve();
+    }
+
+    #[test]
+    #[should_panic(expected = "number of variables unknown")]
+    fn missing_size_panics() {
+        let _ = Nlp::new(Quad).constraint_bounds(&[3.0], &[3.0]).solve();
     }
 }
