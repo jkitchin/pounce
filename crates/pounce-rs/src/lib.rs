@@ -145,13 +145,19 @@ pub use pounce_algorithm;
 pub use pounce_common;
 pub use pounce_nlp;
 
-/// The common case in one glob import: the [`TNLP`] trait, the
-/// [`IpoptApplication`] driver, and the types a problem definition touches.
+// --- ergonomic builder API (argmin-style small trait + builder; #168) -------
+pub mod builder;
+pub use builder::{Nlp, Problem, Solution as NlpSolution};
+
+/// The common case in one glob import. Brings in the ergonomic [`Problem`]
+/// trait + [`Nlp`] builder, plus the low-level [`TNLP`] surface and the
+/// [`IpoptApplication`] driver for full control.
 ///
 /// ```
 /// use pounce_rs::prelude::*;
 /// ```
 pub mod prelude {
+    pub use crate::builder::{Nlp, Problem};
     pub use pounce_algorithm::application::IpoptApplication;
     pub use pounce_common::types::{Index, Number};
     pub use pounce_nlp::return_codes::ApplicationReturnStatus;

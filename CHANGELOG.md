@@ -15,9 +15,16 @@ changes.
   Rust. It re-exports the `TNLP` problem trait (`pounce-nlp`), the
   `IpoptApplication` driver (`pounce-algorithm`), and the supporting scalar
   types (`pounce-common`) in one place, plus a `prelude` — the Rust counterpart
-  to the one-import `import pounce` Python API. Re-exports only (no logic), so
-  it also pins a single curated public surface. The 20th published crate. Docs
-  carry a complete, runnable HS071 example.
+  to the one-import `import pounce` Python API. Pins a single curated public
+  surface. The 20th published crate.
+- **Ergonomic builder API** in `pounce-rs` (argmin-style, per the #168
+  discussion): implement the small `Problem` trait (only `objective` is
+  required) and configure + solve with the `Nlp` builder
+  (`Nlp::new(problem, n).var_bounds(..).constraint_bounds(..).solve()`).
+  Unimplemented `gradient` / `jacobian` are finite-differenced and the Hessian
+  defaults to limited-memory L-BFGS, so a simple problem stays small; the full
+  `TNLP` trait remains for advanced use. Runnable HS071 + constrained-QP
+  examples in the crate docs.
 
 ### Added — event detection (`pounce.ode.solve_ivp` / `solve_dae`)
 
