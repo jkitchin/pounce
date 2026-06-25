@@ -20,6 +20,7 @@ members = [
     "crates/pounce-cinterface",
     "crates/pounce-py",
     "crates/pounce-cli",
+    "crates/pounce-rs",
     "crates/pounce-studio-core",
     "crates/pounce-studio-pyo3",
     "tools/iter-diff",
@@ -48,6 +49,7 @@ default-members = [
     "crates/pounce-observability",
     "crates/pounce-cinterface",
     "crates/pounce-cli",
+    "crates/pounce-rs",
     "crates/pounce-studio-core",
     "tools/iter-diff",
 ]

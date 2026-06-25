@@ -1087,6 +1087,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pounce-rs"
+version = "0.6.0"
+dependencies = [
+ "pounce-algorithm",
+ "pounce-common",
+ "pounce-nlp",
+]
+
+[[package]]
 name = "pounce-sensitivity"
 version = "0.6.0"
 dependencies = [

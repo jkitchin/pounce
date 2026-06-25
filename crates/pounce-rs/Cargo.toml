@@ -1,0 +1,19 @@
+[package]
+name = "pounce-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Single-crate facade for solving nonlinear programs with POUNCE from Rust: re-exports the TNLP trait, the IpoptApplication driver, and the supporting types in one place (plus a prelude)."
+keywords = ["ipopt", "nlp", "optimization", "solver", "nonlinear"]
+categories = ["mathematics", "science"]
+
+[dependencies]
+pounce-common.workspace = true
+pounce-nlp.workspace = true
+pounce-algorithm.workspace = true
+
+[lints]
+workspace = true

@@ -54,6 +54,7 @@ CRATES=(
   pounce-nl
   pounce-studio-core
   pounce-cli
+  pounce-rs
 )
 
 DRY_RUN=""

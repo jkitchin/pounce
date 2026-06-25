@@ -9,6 +9,23 @@ changes.
 
 ## [Unreleased]
 
+### Added — `pounce-rs` Rust facade crate (#168)
+
+- **`pounce-rs`** is a single-crate facade for solving nonlinear programs from
+  Rust. It re-exports the `TNLP` problem trait (`pounce-nlp`), the
+  `IpoptApplication` driver (`pounce-algorithm`), and the supporting scalar
+  types (`pounce-common`) in one place, plus a `prelude` — the Rust counterpart
+  to the one-import `import pounce` Python API. Pins a single curated public
+  surface. The 20th published crate.
+- **Ergonomic builder API** in `pounce-rs` (argmin-style, per the #168
+  discussion): implement the small `Problem` trait (only `objective` is
+  required) and configure + solve with the `Nlp` builder
+  (`Nlp::new(problem).var_bounds(..).constraint_bounds(..).solve()`).
+  Unimplemented `gradient` / `jacobian` are finite-differenced and the Hessian
+  defaults to limited-memory L-BFGS, so a simple problem stays small; the full
+  `TNLP` trait remains for advanced use. Runnable HS071 + constrained-QP
+  examples in the crate docs.
+
 ### Added — event detection (`pounce.ode.solve_ivp` / `solve_dae`)
 
 - **SciPy-compatible `events=`** on both `solve_ivp` and `solve_dae`. Zero

@@ -1,6 +1,6 @@
 # crates.io release
 
-POUNCE ships **19** Rust crates to crates.io. This file is the procedure.
+POUNCE ships **20** Rust crates to crates.io. This file is the procedure.
 For the PyPI side (`pounce-solver` + `pyomo-pounce`), see `pypi-release.md`.
 
 The publish list and its dependency order live in
@@ -13,7 +13,7 @@ are documentation, not a second source of truth to keep hand-synced.
 ## What publishes, what does not
 
 The publishable set is exactly "every workspace member without
-`publish = false`". As of this writing that is these 19:
+`publish = false`". As of this writing that is these 20:
 
 | Crate                  | Publishes? | Role                                         |
 | ---------------------- | ---------- | -------------------------------------------- |
@@ -36,6 +36,7 @@ The publishable set is exactly "every workspace member without
 | `pounce-nl`            | yes        | `.nl` reader + AD tape; pounce-cli depends   |
 | `pounce-studio-core`   | yes        | solve-report parsers; pounce-cli dep (0.4.0+)|
 | `pounce-cli`           | yes        | `pounce` and `pounce_sens` binaries          |
+| `pounce-rs`            | yes        | single-crate Rust facade (re-exports TNLP + driver) |
 | `pounce-py`            | **no**     | ships on PyPI as `pounce-solver` via maturin |
 | `pounce-studio-pyo3`   | **no**     | PyO3 wrapper; ships on PyPI                   |
 | `iter-diff`            | **no**     | internal Track-A validation tool             |
@@ -153,7 +154,7 @@ crates and drives `release-crates.yml`.)
 
 | Surface                 | Workflow                              | Trigger                  |
 | ----------------------- | ------------------------------------- | ------------------------ |
-| crates.io (19 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
+| crates.io (20 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
 | PyPI `pounce-solver`    | `release-pounce.yml`                  | `python-v*` tag          |
 | PyPI `pyomo-pounce`     | `release-pyomo-pounce.yml`            | `pyomo-pounce-v*` tag    |
 
