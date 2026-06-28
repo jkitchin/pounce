@@ -86,7 +86,7 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.6.0"
 # feral: pinned to the published crates.io release so the pounce crates stay
 # publishable — a git rev would block the crates.io publish and is rejected by
 # scripts/check-release-consistency.sh ("git dependency … needs a crates.io
-# version"). 0.11.0 ships the formerly-unreleased MC64/scaling perf work (#80),
+# version"). 0.11.x ships the formerly-unreleased MC64/scaling perf work (#80),
 # LU basis engine (#81), and correctness campaign (#82/#83) that we previously
 # carried locally via a git patch. 0.11.1 adds a Forrest–Tomlin bump
 # re-triangularization fast path (a bump-local sub-diagonal pivot index that
@@ -95,13 +95,13 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.6.0"
 # (~15.8× on the casctanks root LP solve). 0.11.2 pools the Forrest–Tomlin
 # `SparseLu::update` scratch buffers (≈1804→82 heap allocs/update, ~31% faster
 # on a 144-update replay chain) — again bit-identical numerics, no API change.
-# If you ever need to develop against an
+# 0.11.3 is the current pin. If you ever need to develop against an
 # unreleased feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting
 # feral to the git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.11.2" }
+feral = { version = "0.11.3" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.

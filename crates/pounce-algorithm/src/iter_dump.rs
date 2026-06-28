@@ -83,6 +83,23 @@ impl IterDumper {
         })
     }
 
+    /// Test-only constructor that opens `path` directly, bypassing the
+    /// process environment. Unit tests must NOT round-trip through
+    /// `from_env()`/`set_var`: the solver hot paths read `POUNCE_DBG_*`
+    /// via `std::env::var` on concurrently-running test threads, and on
+    /// glibc a `setenv` racing those `getenv` calls can hand back a
+    /// corrupted value — which made `from_env` open the wrong path and the
+    /// test read an empty file (the CI flake this replaces).
+    #[cfg(test)]
+    fn for_test(path: &std::path::Path, name: &str) -> std::io::Result<Self> {
+        let file = File::create(path)?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+            header_written: false,
+            name: name.to_string(),
+        })
+    }
+
     fn write_u32(&mut self, v: u32) -> std::io::Result<()> {
         self.writer.write_all(&v.to_le_bytes())
     }
@@ -131,6 +148,14 @@ impl IterDumper {
             self.writer.write_all(&0.0_f64.to_le_bytes())?;
         }
         Ok(())
+    }
+
+    /// Flush buffered bytes to the underlying file. `Drop` also flushes,
+    /// but that path can only warn on failure; call this when you need to
+    /// observe (and surface) a flush error — e.g. before reading the file
+    /// back in a test.
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
     }
 
     /// Emit the fixed POUNCEIT header. Called once before the first
@@ -260,7 +285,7 @@ impl Drop for IterDumper {
     fn drop(&mut self) {
         // BufWriter flushes on drop, but surface any error rather than
         // swallowing it silently.
-        if let Err(e) = self.writer.flush() {
+        if let Err(e) = self.flush() {
             tracing::warn!(target: "pounce::diagnostics", "iter_dump: failed to flush trace file on drop: {}", e);
         }
     }
@@ -285,6 +310,20 @@ mod tests {
         ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// A process- and call-unique temp path. `std::process::id()` alone is
+    /// constant for the whole test binary, so a re-run or any future test
+    /// reusing the same prefix would share one file; the atomic counter
+    /// makes every path unique within the process, removing that footgun.
+    fn unique_temp_path(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "pounce_iter_dump_{tag}_{}_{n}.bin",
+            std::process::id()
+        ))
+    }
+
     fn dense(n: i32, vals: Option<&[Number]>) -> Rc<dyn Vector> {
         let space = DenseVectorSpace::new(n);
         let mut dv = space.make_new_dense();
@@ -296,17 +335,15 @@ mod tests {
 
     #[test]
     fn write_vec_emits_len_then_values_little_endian() {
-        let _env = env_guard();
-        // Round-trip a small vector through write_vec → in-memory buffer.
-        // We don't have IpoptDataHandle here, so we test write_vec
-        // directly via a tempfile + manual byte-level check.
-        let path =
-            std::env::temp_dir().join(format!("pounce_iter_dump_test_{}.bin", std::process::id()));
-        std::env::set_var(ENV_DUMP_PATH, &path);
-        let mut dumper = IterDumper::from_env().expect("dumper");
-        std::env::remove_var(ENV_DUMP_PATH);
+        // Round-trip a small vector through write_vec → tempfile. Open the
+        // file directly (no env) — see `for_test`.
+        let path = unique_temp_path("vec");
+        let mut dumper = IterDumper::for_test(&path, "").expect("dumper");
         let v = dense(3, Some(&[1.0_f64, 2.0, 3.0]));
         dumper.write_vec(&*v).unwrap();
+        // Flush explicitly so a write/flush failure surfaces here as a
+        // clear error instead of a mystifying empty-file assert below.
+        dumper.flush().expect("flush");
         drop(dumper);
         let bytes = std::fs::read(&path).unwrap();
         // 4 bytes len (=3) + 3 * 8 bytes values
@@ -320,6 +357,9 @@ mod tests {
 
     #[test]
     fn from_env_returns_none_when_unset() {
+        // The only test that still touches the process environment, and it
+        // only reads/clears `ENV_DUMP_PATH` (no test sets it anymore), so
+        // there is no setenv/getenv data race with concurrent tests.
         let _env = env_guard();
         std::env::remove_var(ENV_DUMP_PATH);
         assert!(IterDumper::from_env().is_none());
@@ -327,15 +367,11 @@ mod tests {
 
     #[test]
     fn header_writes_magic_and_version() {
-        let _env = env_guard();
-        let path =
-            std::env::temp_dir().join(format!("pounce_iter_dump_hdr_{}.bin", std::process::id()));
-        std::env::set_var(ENV_DUMP_PATH, &path);
-        std::env::set_var(ENV_DUMP_NAME, "hs071");
-        let mut dumper = IterDumper::from_env().expect("dumper");
-        std::env::remove_var(ENV_DUMP_PATH);
-        std::env::remove_var(ENV_DUMP_NAME);
+        // Open the file directly (no env) — see `for_test`.
+        let path = unique_temp_path("hdr");
+        let mut dumper = IterDumper::for_test(&path, "hs071").expect("dumper");
         dumper.write_header(4, 2).unwrap();
+        dumper.flush().expect("flush");
         drop(dumper);
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..8], MAGIC);
