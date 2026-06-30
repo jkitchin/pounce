@@ -9,10 +9,11 @@ differential-algebraic equations** when ``M`` is singular.
 
 Each step solves the coupled 3-stage system by a simplified Newton
 iteration; the ``(3n × 3n)`` stage Jacobian (and the ``n × n`` error-
-estimate operator) are factored with FERAL's sparse LU
-(:class:`pounce._pounce.SparseLU`). The Jacobian and its factorisation are
-reused across steps and only refreshed when Newton convergence degrades —
-the standard Hairer-Wanner efficiency trick.
+estimate operator) are dense and tiny, so they are factored with a dense
+partial-pivoting LU (:class:`pounce._pounce.DenseLU`, faer-backed) — the
+same dense factorisation SciPy's ``Radau`` uses. The Jacobian and its
+factorisation are reused across steps and only refreshed when Newton
+convergence degrades — the standard Hairer-Wanner efficiency trick.
 
 Adaptivity uses the embedded order-3 error estimate (the ``E`` weights with
 the ``(γ/h)M − J`` smoothing) and an elementary step-size controller.
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .._pounce import SparseLU
+from .._pounce import DenseLU
 
 # --- Radau IIA (5) tableau (Hairer-Wanner) --------------------------------
 _S6 = 6 ** 0.5
@@ -41,6 +42,27 @@ MU_REAL = 3 + 3 ** (2 / 3) - 3 ** (1 / 3)
 # step's collocation polynomial (its derivative interpolates K at the nodes) to
 # the new stage points, instead of cold-starting from K = 0 every step.
 _PRED_VINV = np.linalg.inv(np.vander(RADAU_C, 3, increasing=True))
+# RADAU5 eigendecomposition of the Butcher matrix (A = T Λ T⁻¹). The simplified
+# Newton stage solve runs in the eigenbasis W = T⁻¹ Z, where it decouples into
+# one real and one complex n×n system against the *shifted* operators
+# (μ/h·M − J) — which stay nonsingular even when J is singular (e.g. Robertson
+# at equilibrium), unlike the full I₃⊗M − h(A⊗J) operator (pounce#175).
+# MU_REAL / MU_COMPLEX are the eigenvalues of A⁻¹; T / TI = T⁻¹ are the standard
+# Radau IIA(5) transform matrices (Hairer-Wanner, matching SciPy's Radau).
+MU_COMPLEX = (3 + 0.5 * (3 ** (1 / 3) - 3 ** (2 / 3))
+              - 0.5j * (3 ** (5 / 6) + 3 ** (7 / 6)))
+_T = np.array([
+    [0.09443876248897524, -0.14125529502095421, 0.03002919410514742],
+    [0.25021312296533332, 0.20412935229379994, -0.38294211275726192],
+    [1.0, 1.0, 0.0]])
+_TI = np.array([
+    [4.17871859155190428, 0.32768282076106237, 0.52337644549944951],
+    [-4.17871859155190428, -0.32768282076106237, 0.47662355450055044],
+    [0.50287263494578682, -2.57192694985560522, 0.59603920482822492]])
+_TI_REAL = _TI[0]
+_TI_COMPLEX = _TI[1] + 1j * _TI[2]
+# Stage values ↔ derivatives: Z_i = h Σ_j A_ij K_j, so K = (1/h) A⁻¹ Z.
+RADAU_AINV = np.linalg.inv(RADAU_A)
 # Hold h (and so reuse the cached LU) when the controller's growth factor is
 # below this. 1.2 matches RADAU5's reference QUOT2; 2.0 reuses the factor more
 # aggressively, a net win for pounce because its (3n×3n) dense factor is
@@ -121,22 +143,22 @@ def _detect_events(events, dirs, t0, g0, t1, g1, step_data, n):
 
 
 def _dense_lu_pattern(N):
-    """Build a reusable FERAL ``SparseLU`` over the full dense ``N × N`` pattern.
+    """Build a reusable dense ``N × N`` LU (faer partial-pivoting, via
+    :class:`pounce._pounce.DenseLU`).
 
-    The sparsity pattern is fixed across a whole solve — only the matrix values
-    change as ``h`` and ``J`` vary — so the pattern object (and FERAL's symbolic
-    analysis, which it caches internally) is built **once** and the matrix is
-    refactored in place with :func:`_refactor` each step. Re-creating it per
-    refactor (re-bucketing the ``N²`` COO entries and re-analysing) dominated
-    the per-step cost on large systems.
+    The stage / error operators are dense and tiny; a dense LU is both faster
+    than a sparse factorisation on these blocks and, like LAPACK, stays
+    permissive on the ill-conditioned (large-``h``) operators a stiff/DAE
+    problem reaches on its slow manifold — where the old sparse-LU path
+    hard-failed as ``SingularBasis`` (pounce#175). Only the values change
+    across steps, so the object is built once and re-:func:`_refactor`-ed in
+    place each step.
     """
-    idx = np.arange(N, dtype=np.int64)
-    return SparseLU(N, np.repeat(idx, N), np.tile(idx, N))
+    return DenseLU(N)
 
 
 def _refactor(lu, Mat):
-    """Numerically refactor ``lu`` (a fixed-pattern dense ``SparseLU``) from the
-    row-major values of ``Mat`` — reusing the cached symbolic analysis."""
+    """Numerically refactor ``lu`` from the row-major values of ``Mat``."""
     lu.factor(np.ascontiguousarray(Mat, dtype=np.float64).reshape(-1))
 
 
@@ -192,59 +214,80 @@ def _predict_stages(K_prev, ratio):
     return (Vpred @ _PRED_VINV) @ K_prev            # (3,n)
 
 
-def _solve_stages(prob, t, y, h, lu3, scale, newton_tol, K0=None):
-    """Simplified-Newton solve of the 3-stage system for stage derivatives K.
+def _solve_stages(prob, t, y, h, lu_real, lu_cplx, scale, newton_tol, K0=None):
+    """Simplified-Newton solve of the 3-stage system via the RADAU5
+    eigendecomposition.
 
-    ``M K_i = f(t + c_i h, y + h Σ_j A_ij K_j)``. Returns ``(K, converged,
-    rate)``; ``lu3`` factors ``I_3 ⊗ M − h (A ⊗ J)`` (the Jacobian is already
-    baked into this factor, reused across the Newton iterations of this step).
+    Solves ``M K_i = f(t + c_i h, y + h Σ_j A_ij K_j)``. Rather than factoring
+    the full ``I₃⊗M − h(A⊗J)`` operator (which inherits any singularity of
+    ``J`` — Robertson at equilibrium, pounce#175), the iteration runs in the
+    eigenbasis ``W = T⁻¹ Z`` of the Butcher matrix, where it decouples into one
+    real and one complex ``n×n`` solve against the shifted operators
+    ``μ_real/h·M − J`` (``lu_real``) and ``μ_cplx/h·M − J`` (``lu_cplx``, held as
+    its real ``2n×2n`` embedding ``[[Re,−Im],[Im,Re]]``). Those stay
+    well-conditioned even at a singular-``J`` equilibrium, so the warm start is
+    corrected properly instead of leaving an uncorrectable near-null component.
 
-    Convergence uses the Hairer-Wanner criterion: the increments must shrink
-    (rate ``Θ = ‖ΔK‖/‖ΔK_prev‖ < 1``) and the predicted remaining error
-    ``Θ/(1−Θ)·‖ΔK‖`` must drop below ``newton_tol`` in the scaled RMS norm.
-    Norms are taken in the same ``scale = atol + rtol·|y|`` used for the step
-    error, so the stage solve is only as accurate as the tolerance needs.
+    Iterates on stage *values* ``Z`` (``Z_i = Y_i − y``) internally and returns
+    the stage *derivatives* ``K = (1/h) A⁻¹ Z`` for the caller, so the rest of
+    the integrator (step update, error estimate, dense output) is unchanged.
+    Convergence is the Hairer-Wanner criterion (SciPy's Radau): increments must
+    contract (rate ``Θ < 1``) with predicted remaining error
+    ``Θ/(1−Θ)·‖ΔW‖`` below ``newton_tol`` in the scaled RMS norm.
     """
     n = prob.n
-    K = np.zeros((3, n)) if K0 is None else K0.copy()
+    m_real = MU_REAL / h
+    m_cplx = MU_COMPLEX / h
+    Z = np.zeros((3, n)) if K0 is None else h * (RADAU_A @ K0)
+    W = _TI @ Z
+    sc = scale * np.sqrt(3 * n)              # RMS denominator for (3n,) stack
     dnorm_prev = None
     rate = None
     converged = False
-    sc = scale * np.sqrt(3 * n)              # RMS denominator for (3n,) stack
     for it in range(_NEWTON_MAXITER):
-        G = np.empty((3, n))
+        F = np.empty((3, n))
         for i in range(3):
-            stage_y = y + h * (RADAU_A[i] @ K)
-            G[i] = prob.M @ K[i] - prob.f(t + RADAU_C[i] * h, stage_y)
-        dK = lu3.solve(-G.reshape(-1)).reshape(3, n)
-        K = K + dK
-        dnorm = np.linalg.norm(dK / sc)
+            F[i] = prob.f(t + RADAU_C[i] * h, y + Z[i])
+        if not np.all(np.isfinite(F)):
+            break              # blew up — bail, caller shrinks h / refreshes J
+        f_real = F.T @ _TI_REAL - m_real * (prob.M @ W[0])
+        f_cplx = F.T @ _TI_COMPLEX - m_cplx * (prob.M @ (W[1] + 1j * W[2]))
+        dW_real = lu_real.solve(f_real)
+        sol = lu_cplx.solve(np.concatenate([f_cplx.real, f_cplx.imag]))
+        dW = np.array([dW_real, sol[:n], sol[n:]])
+        dnorm = np.linalg.norm(dW / sc)
         if dnorm_prev is not None and dnorm_prev > 0:
             rate = dnorm / dnorm_prev
-            if rate >= 1:
-                break          # diverging — bail, caller shrinks h / refreshes J
-            # Predicted error of the converged iterate; stop once it's tiny.
-            if rate / (1 - rate) * dnorm < newton_tol:
-                converged = True
+            # Bail if not contracting (Θ ≥ 1) or the predicted remaining error
+            # won't reach tol in the iterations left — caller shrinks h.
+            if rate >= 1 or rate ** (_NEWTON_MAXITER - it) / (1 - rate) * dnorm > newton_tol:
                 break
-        elif dnorm < newton_tol:
-            converged = True   # already at tolerance on the first increment
+        W = W + dW
+        Z = _T @ W
+        if dnorm == 0.0 or (rate is not None and rate / (1 - rate) * dnorm < newton_tol):
+            converged = True
             break
         dnorm_prev = dnorm
+    K = (RADAU_AINV @ Z) / h
     return K, converged, rate
 
 
-def _error_estimate(prob, t, y, h, K, lu_real):
+def _error_estimate(prob, t, y, h, K, lu_real, refine_from=None):
     """Embedded order-3 error estimate, smoothed by ``(MU_REAL/h)M − J``.
 
     The ``M @`` factor multiplies the stage-increment combination for *any*
     mass matrix (it reduces to the plain ``y' = f`` form when ``M = I``), so
     it is applied unconditionally — keying it on singularity would mis-scale
     the estimate for a full-rank non-identity ``M``.
+
+    ``refine_from`` performs the Hairer-Wanner / SciPy nonlinear refinement:
+    re-evaluate ``f`` at ``y + refine_from`` (a previous error estimate) instead
+    of at ``y``, so a linear estimate that is over-pessimistic at large ``h`` on
+    a stiff problem doesn't force a needless step rejection.
     """
     Z = h * (RADAU_A @ K)                       # stage increments Y_i − y
-    f0 = prob.f(t, y)
-    rhs = prob.M @ (Z.T @ (RADAU_E / h)) + f0
+    fpt = prob.f(t, y if refine_from is None else y + refine_from)
+    rhs = prob.M @ (Z.T @ (RADAU_E / h)) + fpt
     return lu_real.solve(rhs)
 
 
@@ -304,16 +347,16 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     jac_current = True
     rejected = False
 
-    # Cached LU factors of the (h, J)-dependent stage / error operators. The
-    # RADAU5 efficiency trick is to refactor only when J is refreshed or h
-    # changes — so we hold the factor across steps (see the step-size band
-    # below, which freezes h on mild growth to keep reusing it).
-    # Reusable LU factors over the FIXED dense patterns: the (3n×3n) stage
-    # operator and the (n×n) real error operator. Only the values change across
-    # steps, so the pattern objects (and FERAL's symbolic analysis) are built
-    # once here and refactored in place inside the loop.
-    lu3 = _dense_lu_pattern(3 * prob.n)
+    # Cached LU factors of the (h, J)-dependent operators. The RADAU5 efficiency
+    # trick is to refactor only when J is refreshed or h changes — so we hold
+    # the factors across steps (see the step-size band below, which freezes h on
+    # mild growth to keep reusing them). The eigendecomposed stage solve uses two
+    # shifted operators: the real (n×n) ``μ_real/h·M − J`` (which doubles as the
+    # error-estimate operator) and the complex ``μ_cplx/h·M − J``, held as its
+    # real (2n×2n) embedding — both far better conditioned than the full
+    # (3n×3n) ``I₃⊗M − h(A⊗J)`` and cheaper to factor.
     lu_real = _dense_lu_pattern(prob.n)
+    lu_cplx = _dense_lu_pattern(2 * prob.n)
     h_lu = None
     need_factor = True
 
@@ -337,9 +380,33 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         h = min(h, abs(t1 - t))
         hs = s * h
         if need_factor or h != h_lu:
-            big = np.kron(np.eye(3), prob.M) - hs * np.kron(RADAU_A, J)
-            _refactor(lu3, big)
-            _refactor(lu_real, MU_REAL / hs * prob.M - J)
+            # Shifted RADAU5 operators (eigenbasis of the Butcher matrix): the
+            # real ``μ_real/h·M − J`` and the complex ``μ_cplx/h·M − J``, the
+            # latter held as its real 2n×2n embedding ``[[Re,−Im],[Im,Re]]``.
+            mc = MU_COMPLEX / hs
+            c_re = mc.real * prob.M - J
+            c_im = mc.imag * prob.M
+            try:
+                _refactor(lu_real, MU_REAL / hs * prob.M - J)
+                _refactor(lu_cplx, np.block([[c_re, -c_im], [c_im, c_re]]))
+            except RuntimeError:
+                # A stage-operator factorization failure is treated like a
+                # rejected step (shrink h, refresh a stale J, retry) rather than
+                # killing the integration — the Hairer-Wanner RADAU5 response to
+                # a singular decomposition, mirroring the Newton-non-convergence
+                # branch below. The dense-LU backend factors near-singular
+                # operators like LAPACK, so this is a safety net for a genuinely
+                # unrecoverable (inf/nan) operator rather than the common path.
+                if not jac_current:
+                    J = prob.jac(t, y, prob.f(t, y)); jac_current = True
+                else:
+                    h *= 0.5
+                    rejected = True
+                need_factor = True
+                if h < 1e-13 * max(1.0, abs(t)):
+                    status, message = -1, _ODE_MESSAGES[-1].format(t=t)
+                    break
+                continue
             prob.nlu += 2
             h_lu = h
             need_factor = False
@@ -350,8 +417,8 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         # rejection/refactor, so a shrunk step gets a matching guess.
         K0 = (_predict_stages(K_prev, h / h_prev)
               if K_prev is not None and h_prev else None)
-        K, converged, rate = _solve_stages(prob, t, y, hs, lu3, scale,
-                                           newton_tol, K0=K0)
+        K, converged, rate = _solve_stages(prob, t, y, hs, lu_real, lu_cplx,
+                                           scale, newton_tol, K0=K0)
         if not converged:
             # A stale Jacobian is the usual reason simplified Newton stalls at
             # a larger step; refresh it at the current point and retry the
@@ -371,6 +438,12 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         err = _error_estimate(prob, t, y, hs, K, lu_real)
         scale = atol + rtol * np.maximum(np.abs(y), np.abs(y_new))
         enorm = np.sqrt(np.mean((err / scale) ** 2))
+        if rejected and enorm > 1:
+            # Nonlinear refinement of the stiff error estimate (so an
+            # over-pessimistic linear estimate at large h doesn't needlessly
+            # reject step growth on the slow manifold — Hairer-Wanner / SciPy).
+            err = _error_estimate(prob, t, y, hs, K, lu_real, refine_from=err)
+            enorm = np.sqrt(np.mean((err / scale) ** 2))
 
         if enorm > 1:
             h *= max(_MIN_FACTOR, _SAFETY * enorm ** _ERR_EXP)

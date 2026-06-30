@@ -1046,6 +1046,7 @@ dependencies = [
 name = "pounce-py"
 version = "0.6.0"
 dependencies = [
+ "faer",
  "feral",
  "numpy",
  "pounce-algorithm",
