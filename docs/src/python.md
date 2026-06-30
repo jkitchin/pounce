@@ -57,6 +57,42 @@ x, info = prob.solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
 print(info['status_msg'], info['obj_val'], x)
 ```
 
+### Verifying convergence / trustworthy duals
+
+`info` carries the final KKT residuals so a consumer can independently
+check how converged a returned point is — useful when the duals
+(`info["mult_g"]`, `info["mult_x_L"]`, `info["mult_x_U"]`) feed a
+downstream certificate (e.g. dual bound tightening). Two flavors:
+
+- `final_kkt_error` / `final_dual_inf` / `final_constr_viol` /
+  `final_compl` — the residuals the convergence test saw, in the
+  **internally-scaled** NLP space (the `nlp_scaling_method` factors).
+- `final_unscaled_kkt_error` / `final_unscaled_dual_inf` /
+  `final_unscaled_constr_viol` / `final_unscaled_compl` — the same
+  residuals with the scaling divided back out, i.e. in your **original
+  problem units**. Equal to the scaled values when no scaling activates.
+
+On ill-conditioned problems `nlp_scaling` can deflate the scaled residual
+enough that the default test reports `Solve_Succeeded` while the
+*unscaled* duals have drifted. Two ways to guard against trusting such a
+point:
+
+- **Tighten the (unscaled) component tolerances** — `dual_inf_tol`,
+  `constr_viol_tol`, `compl_inf_tol` gate on the unscaled residuals, so
+  the solver keeps iterating until it actually meets them (or exits with
+  a non-success status).
+- **Opt into the post-solve fidelity gate** — set `kkt_fidelity_tol` to a
+  positive threshold. A `Solve_Succeeded` whose `final_unscaled_kkt_error`
+  exceeds it is relabeled `Solved_To_Acceptable_Level` (a pure relabel, no
+  extra iterations), so a status check alone won't trust a drifted point.
+
+```python
+prob.add_option('kkt_fidelity_tol', 1e-6)   # default 0 = disabled
+x, info = prob.solve(x0=...)
+trustworthy = info['status'] == 0           # Solve_Succeeded only
+assert info['final_unscaled_dual_inf'] <= 1e-6 or not trustworthy
+```
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

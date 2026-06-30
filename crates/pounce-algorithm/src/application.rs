@@ -715,6 +715,16 @@ impl IpoptApplication {
             stats.final_dual_inf = res.final_stationarity;
             stats.final_constr_viol = res.final_constr_viol;
             stats.final_compl = 0.0; // SQP has no barrier — no compl term.
+                                     // Unscaled residuals (pounce#173). The SQP path does not thread
+                                     // the nlp_scaling factors through to its residuals yet, so these
+                                     // mirror the SQP-side values: correct when no scaling is active
+                                     // (the common case) and a conservative proxy otherwise. Populated
+                                     // here so the info dict's `final_unscaled_*` keys are honest
+                                     // rather than left at the 0.0 default.
+            stats.final_unscaled_dual_inf = res.final_stationarity;
+            stats.final_unscaled_constr_viol = res.final_constr_viol;
+            stats.final_unscaled_compl = 0.0;
+            stats.final_unscaled_kkt_error = res.final_stationarity.max(res.final_constr_viol);
         }
         let (app_status, solver_status) = match res.status {
             crate::sqp::SqpStatus::Optimal => (
@@ -742,6 +752,41 @@ impl IpoptApplication {
         // sees the right ApplicationReturnStatus regardless.
         let _ = finalize_via_sqp(&nlp_rc, &res, solver_status, &tnlp);
 
+        // Honor the opt-in status-fidelity gate on the SQP path too
+        // (pounce#173).
+        self.apply_kkt_fidelity_gate(app_status)
+    }
+
+    /// Opt-in status-fidelity gate (pounce#173), shared by the IPM and
+    /// SQP solve paths. When the user sets a positive `kkt_fidelity_tol`,
+    /// a reported `Solve_Succeeded` whose max-norm UNSCALED KKT error
+    /// (`SolveStatistics::final_unscaled_kkt_error`) exceeds it is
+    /// downgraded to `Solved_To_Acceptable_Level` — the honest "this is a
+    /// point, but not converged to the requested fidelity" status. This
+    /// catches the ill-conditioned / nlp_scaling-deflated case where the
+    /// scaled convergence test passes but the user-space duals have
+    /// drifted. It is a pure relabel at termination (no extra iterations);
+    /// unset or non-positive (the default) is a strict no-op, so every
+    /// existing caller keeps the Ipopt-faithful status.
+    fn apply_kkt_fidelity_gate(
+        &self,
+        app_status: ApplicationReturnStatus,
+    ) -> ApplicationReturnStatus {
+        if !matches!(app_status, ApplicationReturnStatus::SolveSucceeded) {
+            return app_status;
+        }
+        if let Ok((ftol, true)) = self.options.get_numeric_value("kkt_fidelity_tol", "") {
+            if ftol > 0.0 {
+                let unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
+                if unscaled_kkt > ftol {
+                    tracing::info!(target: "pounce::diagnostics",
+                        "kkt_fidelity_tol={ftol:.3e}: unscaled KKT error {unscaled_kkt:.3e} \
+                         exceeds it — downgrading Solve_Succeeded → \
+                         Solved_To_Acceptable_Level (pounce#173)");
+                    return ApplicationReturnStatus::SolvedToAcceptableLevel;
+                }
+            }
+        }
         app_status
     }
 
@@ -1483,33 +1528,9 @@ impl IpoptApplication {
         }
 
         // Map SolverReturn → ApplicationReturnStatus per
-        // MAIN_LOOP.md's exception table.
-        let mut app_status = solver_return_to_app_status(solver_status);
-
-        // pounce#173 — opt-in status-fidelity gate. When the user sets a
-        // positive `kkt_fidelity_tol`, a reported `Solve_Succeeded` whose
-        // max-norm UNSCALED KKT error exceeds it is downgraded to
-        // `Solved_To_Acceptable_Level` — the honest "this is a point, but
-        // not converged to the requested fidelity" status. This catches the
-        // ill-conditioned / nlp_scaling-deflated case where the scaled
-        // convergence test passes but the user-space duals have drifted.
-        // It is a pure relabel (no extra iterations). Unset or non-positive
-        // (the default) is a strict no-op, so every existing caller keeps
-        // the Ipopt-faithful status.
-        if matches!(app_status, ApplicationReturnStatus::SolveSucceeded) {
-            if let Ok((ftol, true)) = self.options.get_numeric_value("kkt_fidelity_tol", "") {
-                if ftol > 0.0 {
-                    let unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
-                    if unscaled_kkt > ftol {
-                        tracing::info!(target: "pounce::diagnostics",
-                            "kkt_fidelity_tol={ftol:.3e}: unscaled KKT error {unscaled_kkt:.3e} \
-                             exceeds it — downgrading Solve_Succeeded → \
-                             Solved_To_Acceptable_Level (pounce#173)");
-                        app_status = ApplicationReturnStatus::SolvedToAcceptableLevel;
-                    }
-                }
-            }
-        }
+        // MAIN_LOOP.md's exception table, then apply the opt-in
+        // status-fidelity gate (pounce#173).
+        let app_status = self.apply_kkt_fidelity_gate(solver_return_to_app_status(solver_status));
 
         // On convergence, fire the user-supplied callback (post-optimal
         // sensitivity hook, pounce#16) before flowing back through

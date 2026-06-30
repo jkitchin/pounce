@@ -86,6 +86,7 @@ _DEFAULT_ACCEPTABLE_TOL = 1e-6
 # matching the NLP path's convention.
 _QP_STATUS_CODE = {
     "optimal": 0,
+    "optimal_inaccurate": 1,
     "primal_infeasible": 2,
     "dual_infeasible": 3,
     "iteration_limit": 1,
@@ -103,6 +104,13 @@ _QP_STATUS_CODE = {
 # (gh #160).
 _QP_STATUS_MESSAGE = {
     "optimal": "Optimization terminated successfully.",
+    # Reduced-accuracy convergence (ECOS/Clarabel ``*_INACC`` analogue): the
+    # KKT residual reached the inaccurate band but never the tight ``tol``. We
+    # report ``success=False`` (the residual is in ``info["residuals"]`` for a
+    # caller that wants to judge for itself), with a message that says so
+    # rather than leaking the raw ``optimal_inaccurate`` token (pounce#173).
+    "optimal_inaccurate": "Solved to acceptable level (reduced accuracy); the "
+    "KKT residual did not reach the requested tolerance.",
     "primal_infeasible": "The problem appears infeasible (the convex solver "
     "returned a primal-infeasibility certificate).",
     "dual_infeasible": "The problem appears unbounded — the objective is "
