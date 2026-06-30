@@ -1472,11 +1472,44 @@ impl IpoptApplication {
                 .max(cq.curr_compl_s_u().amax());
             stats.final_compl = compl;
             stats.final_kkt_error = cq.curr_nlp_error();
+            // Unscaled (user-space) counterparts — divide the nlp_scaling
+            // back out so a consumer can verify the certificate in its own
+            // units (pounce#173). Identical to the scaled fields when no
+            // scaling is active.
+            stats.final_unscaled_dual_inf = cq.curr_unscaled_dual_infeasibility_max();
+            stats.final_unscaled_constr_viol = cq.curr_unscaled_primal_infeasibility_max();
+            stats.final_unscaled_compl = cq.curr_unscaled_complementarity_max();
+            stats.final_unscaled_kkt_error = cq.curr_unscaled_nlp_error();
         }
 
         // Map SolverReturn → ApplicationReturnStatus per
         // MAIN_LOOP.md's exception table.
-        let app_status = solver_return_to_app_status(solver_status);
+        let mut app_status = solver_return_to_app_status(solver_status);
+
+        // pounce#173 — opt-in status-fidelity gate. When the user sets a
+        // positive `kkt_fidelity_tol`, a reported `Solve_Succeeded` whose
+        // max-norm UNSCALED KKT error exceeds it is downgraded to
+        // `Solved_To_Acceptable_Level` — the honest "this is a point, but
+        // not converged to the requested fidelity" status. This catches the
+        // ill-conditioned / nlp_scaling-deflated case where the scaled
+        // convergence test passes but the user-space duals have drifted.
+        // It is a pure relabel (no extra iterations). Unset or non-positive
+        // (the default) is a strict no-op, so every existing caller keeps
+        // the Ipopt-faithful status.
+        if matches!(app_status, ApplicationReturnStatus::SolveSucceeded) {
+            if let Ok((ftol, true)) = self.options.get_numeric_value("kkt_fidelity_tol", "") {
+                if ftol > 0.0 {
+                    let unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
+                    if unscaled_kkt > ftol {
+                        tracing::info!(target: "pounce::diagnostics",
+                            "kkt_fidelity_tol={ftol:.3e}: unscaled KKT error {unscaled_kkt:.3e} \
+                             exceeds it — downgrading Solve_Succeeded → \
+                             Solved_To_Acceptable_Level (pounce#173)");
+                        app_status = ApplicationReturnStatus::SolvedToAcceptableLevel;
+                    }
+                }
+            }
+        }
 
         // On convergence, fire the user-supplied callback (post-optimal
         // sensitivity hook, pounce#16) before flowing back through

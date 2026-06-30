@@ -24,6 +24,7 @@ use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
 use pounce_common::cached::Cache;
 use pounce_common::types::Number;
+use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::{Matrix, SymMatrix, Vector};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -65,6 +66,27 @@ pub struct IpoptCalculatedQuantities {
 /// box is unwrapped without copying.
 fn rc_from(v: Box<dyn Vector>) -> Rc<dyn Vector> {
     Rc::from(v)
+}
+
+/// Max-norm of `v` after dividing each entry by its per-row scale factor
+/// (`max_i |v_i / scale_i|`). `scale == None` means "no row scaling" and
+/// returns the plain `v.amax()`; a zero factor for an entry is treated as
+/// the identity (no divide) so a degenerate scale never yields infinities.
+/// Falls back to `v.amax()` for a non-dense backing — POUNCE is dense-only,
+/// so that branch is defensive.
+fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
+    let Some(s) = scale else {
+        return v.amax();
+    };
+    match v.as_any().downcast_ref::<DenseVector>() {
+        Some(d) => d
+            .values()
+            .iter()
+            .zip(s.iter())
+            .map(|(&x, &f)| if f == 0.0 { x.abs() } else { (x / f).abs() })
+            .fold(0.0, Number::max),
+        None => v.amax(),
+    }
 }
 
 /// Result of [`IpoptCalculatedQuantities::adjusted_trial_bounds`]: the
@@ -748,6 +770,71 @@ impl IpoptCalculatedQuantities {
         } else {
             scaled / factor
         }
+    }
+
+    /// Max-norm dual infeasibility in the **unscaled** (user-original)
+    /// space. [`Self::curr_dual_infeasibility_max`] is evaluated in the
+    /// internally-scaled NLP space (objective × `df`, constraints × `dc`);
+    /// because POUNCE applies no variable scaling, every term of the
+    /// Lagrangian gradient `∇f + Jᵀy − z` carries the same objective
+    /// factor `df`, so the unscaling is a single divide by
+    /// `df = obj_scaling_factor`. A zero or unit factor returns the scaled
+    /// value unchanged — the common no-scaling path stays division-free.
+    pub fn curr_unscaled_dual_infeasibility_max(&self) -> Number {
+        let df = self.nlp.borrow().obj_scaling_factor();
+        let scaled = self.curr_dual_infeasibility_max();
+        if df == 0.0 || df == 1.0 {
+            scaled
+        } else {
+            scaled / df
+        }
+    }
+
+    /// Max-norm complementarity in the **unscaled** space. Each bound block
+    /// `s · z` scales uniformly by `df`: the slack's `dc`/`dd` factor and
+    /// the multiplier's `df/dc` (`df/dd`) factor cancel in the product,
+    /// leaving `df`. So this is the scaled max-norm divided by `df`. See
+    /// [`Self::curr_unscaled_dual_infeasibility_max`].
+    pub fn curr_unscaled_complementarity_max(&self) -> Number {
+        let df = self.nlp.borrow().obj_scaling_factor();
+        let scaled = self.curr_complementarity_max();
+        if df == 0.0 || df == 1.0 {
+            scaled
+        } else {
+            scaled / df
+        }
+    }
+
+    /// Max-norm primal infeasibility in the **unscaled** space. Unlike the
+    /// dual/complementarity terms the constraint scaling is per-row
+    /// (`c_scaled = dc ⊙ c_user`, `(d−s)_scaled = dd ⊙ (d−s)_user`), so each
+    /// block is unscaled element-by-element before the max-norm. When no row
+    /// scaling is active (`c_scale_vec`/`d_scale_vec` both `None` — the
+    /// common case) this is exactly [`Self::curr_primal_infeasibility_max`].
+    pub fn curr_unscaled_primal_infeasibility_max(&self) -> Number {
+        let (dc, dd) = {
+            let nlp = self.nlp.borrow();
+            (nlp.c_scale_vec(), nlp.d_scale_vec())
+        };
+        if dc.is_none() && dd.is_none() {
+            return self.curr_primal_infeasibility_max();
+        }
+        let c_max = unscaled_block_amax(&*self.curr_c(), dc.as_deref());
+        let dms_max = unscaled_block_amax(&*self.curr_d_minus_s(), dd.as_deref());
+        c_max.max(dms_max)
+    }
+
+    /// Overall **unscaled** max-norm KKT error — `max` of the unscaled dual
+    /// infeasibility, primal infeasibility, and complementarity. This is the
+    /// honest "distance from a KKT point in the user's own units", as
+    /// opposed to [`Self::curr_nlp_error`], which additionally applies the
+    /// `s_d`/`s_c` optimality scaling. Used by the status-fidelity gate and
+    /// surfaced to callers that must independently verify a returned
+    /// certificate (pounce#173).
+    pub fn curr_unscaled_nlp_error(&self) -> Number {
+        self.curr_unscaled_dual_infeasibility_max()
+            .max(self.curr_unscaled_primal_infeasibility_max())
+            .max(self.curr_unscaled_complementarity_max())
     }
 
     pub fn trial_f(&self) -> Number {
@@ -1578,6 +1665,7 @@ mod tests {
     use pounce_common::types::Index;
     use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
     use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace};
     use std::rc::Rc as StdRc;
 
     fn dvec(values: &[Number]) -> DenseVector {
@@ -1605,9 +1693,28 @@ mod tests {
         px_u: Rc<dyn Matrix>,
         pd_l: Rc<dyn Matrix>,
         pd_u: Rc<dyn Matrix>,
+        // NLP scaling factors. Identity by default; `with_scaling`
+        // installs non-trivial ones to exercise the unscaled accessors.
+        // (The mock does not actually apply these in `eval_*`; the tests
+        // verify the unscaling *arithmetic*, not end-to-end scaling.)
+        obj_scale: Number,
+        c_scale: Option<Vec<Number>>,
+        d_scale: Option<Vec<Number>>,
     }
 
     impl MockNlp {
+        fn with_scaling(
+            mut self,
+            obj_scale: Number,
+            c_scale: Option<Vec<Number>>,
+            d_scale: Option<Vec<Number>>,
+        ) -> Self {
+            self.obj_scale = obj_scale;
+            self.c_scale = c_scale;
+            self.d_scale = d_scale;
+            self
+        }
+
         fn new() -> Self {
             // x_L holds finite lower bounds; here only x[0] has one (=0).
             let x_l = dvec(&[0.0]);
@@ -1631,6 +1738,9 @@ mod tests {
                 px_u: StdRc::new(ExpansionMatrix::new(px_u_space)),
                 pd_l: StdRc::new(ExpansionMatrix::new(pd_l_space)),
                 pd_u: StdRc::new(ExpansionMatrix::new(pd_u_space)),
+                obj_scale: 1.0,
+                c_scale: None,
+                d_scale: None,
             }
         }
     }
@@ -1668,10 +1778,18 @@ mod tests {
             dd.values_mut()[0] = xx.values()[0];
         }
         fn eval_jac_c(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
-            unimplemented!("not exercised in Phase 5 unit tests")
+            // c(x) = x0 + x1 - 1 → Jc = [1, 1] (1×2), nonzeros (1,1),(1,2).
+            let space = GenTMatrixSpace::new(1, 2, vec![1, 1], vec![1, 2]);
+            let mut jac = GenTMatrix::new(space);
+            jac.set_values(&[1.0, 1.0]);
+            StdRc::new(jac)
         }
         fn eval_jac_d(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
-            unimplemented!("not exercised in Phase 5 unit tests")
+            // d(x) = x0 → Jd = [1, 0] (1×2), single nonzero (1,1).
+            let space = GenTMatrixSpace::new(1, 2, vec![1], vec![1]);
+            let mut jac = GenTMatrix::new(space);
+            jac.set_values(&[1.0]);
+            StdRc::new(jac)
         }
         fn eval_h(
             &mut self,
@@ -1709,9 +1827,22 @@ mod tests {
         fn pd_u(&self) -> Rc<dyn Matrix> {
             self.pd_u.clone()
         }
+        fn obj_scaling_factor(&self) -> Number {
+            self.obj_scale
+        }
+        fn c_scale_vec(&self) -> Option<Vec<Number>> {
+            self.c_scale.clone()
+        }
+        fn d_scale_vec(&self) -> Option<Vec<Number>> {
+            self.d_scale.clone()
+        }
     }
 
     fn fixture() -> IpoptCalculatedQuantities {
+        fixture_with(MockNlp::new())
+    }
+
+    fn fixture_with(nlp: MockNlp) -> IpoptCalculatedQuantities {
         let mut data = IpoptData::new();
         data.curr_mu = 0.1;
         // Iterate: x = (2, 3); s = (4); y_c = (1); y_d = (1);
@@ -1729,7 +1860,7 @@ mod tests {
         );
         data.set_curr(iv);
         let data_handle = StdRc::new(RefCell::new(data));
-        let nlp: StdRc<RefCell<dyn IpoptNlp>> = StdRc::new(RefCell::new(MockNlp::new()));
+        let nlp: StdRc<RefCell<dyn IpoptNlp>> = StdRc::new(RefCell::new(nlp));
         let mut cq = IpoptCalculatedQuantities::new(data_handle, nlp);
         // Disable damping for clean unit-test expectations.
         cq.kappa_d = 0.0;
@@ -1983,5 +2114,75 @@ mod tests {
         let ds = dvec(&[3.0]);
         let r = cq.curr_dwd(&dx, &ds);
         assert!((r - 7.00).abs() < 1e-13, "r = {r}");
+    }
+
+    // ---- Unscaled (user-space) KKT residuals — pounce#173 -------------
+
+    #[test]
+    fn unscaled_dual_inf_is_scaled_over_df() {
+        // df = 2: every Lagrangian-gradient term carries the objective
+        // factor, so the unscaled dual infeasibility is the scaled one
+        // divided by df.
+        let cq = fixture_with(MockNlp::new().with_scaling(2.0, None, None));
+        let scaled = cq.curr_dual_infeasibility_max();
+        let unscaled = cq.curr_unscaled_dual_infeasibility_max();
+        assert!(scaled > 0.0, "fixture should have nonzero dual inf");
+        assert!(
+            (unscaled - scaled / 2.0).abs() < 1e-12,
+            "unscaled {unscaled} != scaled/df {}",
+            scaled / 2.0
+        );
+    }
+
+    #[test]
+    fn unscaled_residuals_are_identity_without_scaling() {
+        // df = 1, no row scaling → unscaled accessors return exactly the
+        // scaled values (the common no-scaling path).
+        let cq = fixture();
+        assert_eq!(
+            cq.curr_unscaled_dual_infeasibility_max(),
+            cq.curr_dual_infeasibility_max()
+        );
+        assert_eq!(
+            cq.curr_unscaled_complementarity_max(),
+            cq.curr_complementarity_max()
+        );
+        assert_eq!(
+            cq.curr_unscaled_primal_infeasibility_max(),
+            cq.curr_primal_infeasibility_max()
+        );
+    }
+
+    #[test]
+    fn unscaled_compl_is_scaled_over_df() {
+        let cq = fixture_with(MockNlp::new().with_scaling(2.0, None, None));
+        let scaled = cq.curr_complementarity_max();
+        let unscaled = cq.curr_unscaled_complementarity_max();
+        assert!(scaled > 0.0);
+        assert!((unscaled - scaled / 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unscaled_primal_divides_each_row_by_its_factor() {
+        // Fixture residuals: c = x0+x1-1 = 4; d-s = x0 - s = 2 - 4 = -2.
+        // Scaled max-norm primal = max(|4|, |-2|) = 4.
+        // With dc = [4], dd = [2]: unscaled = max(|4/4|, |-2/2|) = 1.
+        let cq = fixture_with(MockNlp::new().with_scaling(1.0, Some(vec![4.0]), Some(vec![2.0])));
+        assert!((cq.curr_primal_infeasibility_max() - 4.0).abs() < 1e-12);
+        assert!(
+            (cq.curr_unscaled_primal_infeasibility_max() - 1.0).abs() < 1e-12,
+            "got {}",
+            cq.curr_unscaled_primal_infeasibility_max()
+        );
+    }
+
+    #[test]
+    fn unscaled_nlp_error_is_max_of_unscaled_components() {
+        let cq = fixture_with(MockNlp::new().with_scaling(2.0, Some(vec![4.0]), Some(vec![2.0])));
+        let expected = cq
+            .curr_unscaled_dual_infeasibility_max()
+            .max(cq.curr_unscaled_primal_infeasibility_max())
+            .max(cq.curr_unscaled_complementarity_max());
+        assert_eq!(cq.curr_unscaled_nlp_error(), expected);
     }
 }

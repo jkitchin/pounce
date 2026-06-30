@@ -214,16 +214,21 @@ impl ConvCheck for OptErrorConvCheck {
     ) -> ConvergenceStatus {
         // Mirror upstream `IpOptErrorConvCheck.cpp::CheckConvergence`:
         // the scaled scalar `nlp_err` must drop below `tol` AND each
-        // per-component value must sit under its own tolerance. Known
-        // deviation (M1, documented in the code-review notes): upstream
-        // gates the components on the *unscaled* residuals; the CQ layer
-        // exposes no unscaled per-component accessors yet, so these are
-        // the internally *scaled* values. The unscaled expansion is
-        // deferred until the scaling objects are threaded through.
+        // per-component value must sit under its own tolerance. The
+        // component tolerances (`dual_inf_tol`/`constr_viol_tol`/
+        // `compl_inf_tol`) are defined on the *unscaled* (user-original)
+        // residuals — both upstream and per pounce's own option help text
+        // — so we gate on the unscaled accessors. This resolves the former
+        // M1 deviation (gating on internally-scaled residuals), which let
+        // an ill-conditioned, nlp_scaling-deflated solve report
+        // `Solve_Succeeded` while the user-space duals had drifted
+        // (pounce#173). When no scaling is active the unscaled accessors
+        // return the scaled values unchanged, so behaviour is identical on
+        // the common path.
         let cq_ref = cq.borrow();
-        let dual_inf = cq_ref.curr_dual_infeasibility_max();
-        let constr_viol = cq_ref.curr_primal_infeasibility_max();
-        let compl_inf = cq_ref.curr_complementarity_max();
+        let dual_inf = cq_ref.curr_unscaled_dual_infeasibility_max();
+        let constr_viol = cq_ref.curr_unscaled_primal_infeasibility_max();
+        let compl_inf = cq_ref.curr_unscaled_complementarity_max();
         let curr_f = cq_ref.curr_f();
         drop(cq_ref);
 
@@ -311,9 +316,12 @@ impl ConvCheck for OptErrorConvCheck {
         cq: &IpoptCqHandle,
     ) -> bool {
         let cq_ref = cq.borrow();
-        let dual_inf = cq_ref.curr_dual_infeasibility_max();
-        let constr_viol = cq_ref.curr_primal_infeasibility_max();
-        let compl_inf = cq_ref.curr_complementarity_max();
+        // Unscaled per-component residuals — see `check_convergence_with_state`
+        // (the `acceptable_*_tol` triplet is likewise defined on the
+        // user-original residuals).
+        let dual_inf = cq_ref.curr_unscaled_dual_infeasibility_max();
+        let constr_viol = cq_ref.curr_unscaled_primal_infeasibility_max();
+        let compl_inf = cq_ref.curr_unscaled_complementarity_max();
         let curr_f = cq_ref.curr_f();
         drop(cq_ref);
         self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f)

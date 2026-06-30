@@ -64,6 +64,17 @@ pub struct SolveStatistics {
     pub final_constr_viol: Number,
     pub final_compl: Number,
     pub final_kkt_error: Number,
+    // Unscaled (user-original-space) counterparts of the four residuals
+    // above. The `final_*` fields are max-norms in the internally-scaled
+    // NLP space (objective × df, constraints × dc); these divide the
+    // nlp_scaling back out so a consumer can verify a returned KKT
+    // certificate in its own units. Equal to the scaled fields when no
+    // nlp_scaling is active. `final_unscaled_kkt_error` is the plain
+    // max-norm of the three (no s_d/s_c optimality scaling). (pounce#173)
+    pub final_unscaled_dual_inf: Number,
+    pub final_unscaled_constr_viol: Number,
+    pub final_unscaled_compl: Number,
+    pub final_unscaled_kkt_error: Number,
     /// Final barrier parameter μ at termination (the IPM's `curr_mu`
     /// after the last iterate). Lets a caller thread the converged
     /// barrier into a warm-started re-solve's `mu_init` /

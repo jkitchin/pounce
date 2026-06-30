@@ -327,6 +327,10 @@ impl PyProblem {
             stats.final_dual_inf,
             stats.final_constr_viol,
             stats.final_compl,
+            stats.final_unscaled_kkt_error,
+            stats.final_unscaled_dual_inf,
+            stats.final_unscaled_constr_viol,
+            stats.final_unscaled_compl,
         )?;
         let ws_obj: PyObject = match &self.last_working_set {
             Some(ws) => encode_working_set(py, ws).into_any().unbind(),
@@ -529,6 +533,10 @@ impl PyProblem {
             stats.final_dual_inf,
             stats.final_constr_viol,
             stats.final_compl,
+            stats.final_unscaled_kkt_error,
+            stats.final_unscaled_dual_inf,
+            stats.final_unscaled_constr_viol,
+            stats.final_unscaled_compl,
         )?;
         info.set_item("dx", opt_vec_to_py(py, result.dx))?;
         info.set_item("dx_full", opt_vec_to_py(py, result.dx_full))?;
@@ -785,6 +793,10 @@ pub(crate) fn build_info_dict<'py>(
     final_dual_inf: Number,
     final_constr_viol: Number,
     final_compl: Number,
+    final_unscaled_kkt_error: Number,
+    final_unscaled_dual_inf: Number,
+    final_unscaled_constr_viol: Number,
+    final_unscaled_compl: Number,
 ) -> PyResult<Bound<'py, PyDict>> {
     let info = PyDict::new_bound(py);
     info.set_item("status", status as i32)?;
@@ -821,6 +833,16 @@ pub(crate) fn build_info_dict<'py>(
     info.set_item("final_dual_inf", final_dual_inf)?;
     info.set_item("final_constr_viol", final_constr_viol)?;
     info.set_item("final_compl", final_compl)?;
+    // Unscaled (user-original-space) counterparts of the four residuals
+    // above — the nlp_scaling divided back out so a consumer can verify a
+    // returned KKT certificate in its own units, independent of any
+    // internal objective/constraint scaling (pounce#173). Equal to the
+    // scaled values when no scaling is active. `final_unscaled_kkt_error`
+    // is the plain max-norm of the three (no s_d/s_c optimality scaling).
+    info.set_item("final_unscaled_kkt_error", final_unscaled_kkt_error)?;
+    info.set_item("final_unscaled_dual_inf", final_unscaled_dual_inf)?;
+    info.set_item("final_unscaled_constr_viol", final_unscaled_constr_viol)?;
+    info.set_item("final_unscaled_compl", final_unscaled_compl)?;
 
     // DiffHandoff active-set masks (dev-notes/diff-handoff-contract.md):
     // compute the active set ONCE here, in the producer, so the JAX /

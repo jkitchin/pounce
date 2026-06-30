@@ -344,6 +344,86 @@ fn hs071_dual_inf_tol_blocks_convergence() {
     );
 }
 
+/// pounce#173 — the unscaled final residuals are exposed on
+/// `SolveStatistics`, and equal the scaled ones when no nlp_scaling is
+/// active. HS071's objective gradient and Jacobian rows stay well below
+/// `nlp_scaling_max_gradient` (=100), so `df=1` and there is no row
+/// scaling — the unscaled accessors must return the scaled values
+/// unchanged.
+#[test]
+fn hs071_exposes_unscaled_residuals_matching_scaled() {
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+    let status = app.optimize_tnlp(tnlp);
+    assert!(
+        matches!(status, ApplicationReturnStatus::SolveSucceeded),
+        "baseline HS071 should succeed: {status:?}",
+    );
+    let stats = app.statistics();
+    assert_eq!(stats.final_unscaled_dual_inf, stats.final_dual_inf);
+    assert_eq!(stats.final_unscaled_constr_viol, stats.final_constr_viol);
+    assert_eq!(stats.final_unscaled_compl, stats.final_compl);
+    // The unscaled overall KKT error is the plain max of the three
+    // unscaled components (no s_d/s_c optimality scaling).
+    let expected = stats
+        .final_unscaled_dual_inf
+        .max(stats.final_unscaled_constr_viol)
+        .max(stats.final_unscaled_compl);
+    assert_eq!(stats.final_unscaled_kkt_error, expected);
+    assert!(
+        stats.final_unscaled_kkt_error > 0.0 && stats.final_unscaled_kkt_error < 1e-4,
+        "unscaled KKT error out of expected range: {}",
+        stats.final_unscaled_kkt_error,
+    );
+}
+
+/// pounce#173 — the opt-in `kkt_fidelity_tol` gate downgrades a
+/// `Solve_Succeeded` whose unscaled KKT error exceeds the threshold to
+/// `Solved_To_Acceptable_Level`, and is a no-op above the error. Uses the
+/// baseline solve's own residual as the pivot so the test is independent
+/// of the exact tolerance HS071 converges to.
+#[test]
+fn hs071_kkt_fidelity_tol_downgrades_succeeded() {
+    let solve = |fidelity: Option<Number>| -> (ApplicationReturnStatus, Number) {
+        let mut app = IpoptApplication::new();
+        if let Some(f) = fidelity {
+            app.options_mut()
+                .set_numeric_value("kkt_fidelity_tol", f, true, false)
+                .unwrap();
+        }
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+        let status = app.optimize_tnlp(tnlp);
+        (status, app.statistics().final_unscaled_kkt_error)
+    };
+
+    // Control: no gate → succeeds; capture the unscaled KKT residual.
+    let (status0, e0) = solve(None);
+    assert!(
+        matches!(status0, ApplicationReturnStatus::SolveSucceeded),
+        "baseline should succeed: {status0:?}",
+    );
+    assert!(e0 > 0.0, "expected a small positive residual, got {e0}");
+
+    // Threshold well above the residual → no downgrade.
+    let (status_loose, _) = solve(Some(e0 * 10.0));
+    assert!(
+        matches!(status_loose, ApplicationReturnStatus::SolveSucceeded),
+        "loose kkt_fidelity_tol must not downgrade: {status_loose:?}",
+    );
+
+    // Threshold below the residual → downgrade to acceptable.
+    let (status_tight, _) = solve(Some(e0 * 0.1));
+    assert!(
+        matches!(
+            status_tight,
+            ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "tight kkt_fidelity_tol must downgrade Succeeded → Acceptable: {status_tight:?}",
+    );
+}
+
 /// Tightening `tol` past machine precision and pairing it with a
 /// generous `acceptable_tol = 1e-4` plus `acceptable_iter = 1` must
 /// route HS71 through `SolvedToAcceptableLevel`. Demonstrates that
