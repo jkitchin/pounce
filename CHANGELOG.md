@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-01
+
 ### Added — `pounce-rs` Rust facade crate (#168)
 
 - **`pounce-rs`** is a single-crate facade for solving nonlinear programs from
@@ -90,6 +92,45 @@ changes.
   same as stock Ipopt; route linear/convex problems with
   `solver_selection="lp-ipm"` / `"auto"` to get the certificate.)
 
+
+### Fixed — ODE/DAE Radau engine: dense LU, complex-split stage solve, exact Jacobian (#175)
+
+- **`pounce.ode.solve_ivp` / `solve_dae` no longer crash with a `SingularBasis`
+  error** on stiff/DAE problems whose stage matrices become ill-conditioned on
+  the slow manifold (e.g. the Robertson index-1 DAE). The Radau IIA(5) stage and
+  error operators now factor with a faer dense partial-pivoting LU (`DenseLU`)
+  that — like LAPACK / SciPy's `Radau` — always completes (a singular matrix
+  surfaces as `inf`/`nan` in the solve, which the step control already handles)
+  instead of hard-failing. The stage solve is rewritten as the standard RADAU5
+  **complex split** (one real + one complex shifted operator via the Butcher
+  eigendecomposition), so it stays well-conditioned at a singular-Jacobian
+  equilibrium.
+- **The stage Jacobian now defaults to exact JAX forward-mode autodiff**
+  (`jax.jacfwd`) when the RHS is JAX-traceable, falling back to an accurate
+  central difference for opaque callables — replacing a noisy forward difference
+  that inflated the step count ~45× near singular-Jacobian steady states.
+  Robertson integrated to `t = 1e11` now matches SciPy's Radau step count.
+
+### Changed — IPM status fidelity on ill-conditioned / scaled solves (#173)
+
+- The interior-point solver no longer reports `Solve_Succeeded` when the
+  **unscaled** KKT error remains large (untrustworthy duals) even though the
+  scaled error looks converged. Convergence is now gated on the unscaled
+  dual/primal/complementarity infeasibility, so a downstream consumer can trust
+  an `Optimal` status. Adds unscaled-error accessors to the convergence check
+  and extends the fidelity fix to the SQP and convex facades.
+
+### Changed — feral linear-solver backend bumped to 0.12.0 (#177)
+
+- Resolves the qap15 / mittelmann conic-KKT family end to end: (#91)
+  `OrderingPreprocess::Auto` verifies fill instead of predicting, removing a
+  misfiring MC64 `LdltCompress` trigger that inflated fill ~6× (qap15 factor
+  15.4s → 0.77s); (#99) packed BLAS-3 dense trailing update (~8–10× on large
+  dense fronts); (#102) fixes a latent re-entrant nested-rayon workspace-mutex
+  deadlock the ordering change exposed; (#105) escalates the ordering to
+  `LdltCompress` on pivot growth so factorization accuracy holds on late μ→0 IPM
+  KKTs. qap15 now solves (was a 300s timeout) with no regressions across the
+  mittelmann / LP / QP suites.
 
 ## [0.6.0] - 2026-06-20
 
