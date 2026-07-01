@@ -95,13 +95,23 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.6.0"
 # (~15.8× on the casctanks root LP solve). 0.11.2 pools the Forrest–Tomlin
 # `SparseLu::update` scratch buffers (≈1804→82 heap allocs/update, ~31% faster
 # on a 144-update replay chain) — again bit-identical numerics, no API change.
-# 0.11.3 is the current pin. If you ever need to develop against an
-# unreleased feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting
+# 0.12.0 fixes the qap15/mittelmann conic-KKT family end to end: (#91) the
+# `OrderingPreprocess::Auto` verify no longer inflates fill via a misfiring
+# MC64 `LdltCompress` trigger (qap15 factor 15.4s→0.77s, ~20×); (#99) a packed
+# BLAS-3 dense trailing update (~8–10× on large dense fronts); (#102) fixes a
+# latent re-entrant nested-rayon workspace-mutex self-deadlock the #91 ordering
+# exposed (cont5_2_4_l/dirichlet120 no longer stall at 0% CPU); and (#105)
+# escalates the ordering to `LdltCompress` on pivot growth >1e24 so the
+# fill-preferred `None` path can't degrade factorization accuracy on late μ→0
+# IPM KKTs (restores cont5_2_4_l to 14 iters). Net for pounce: qap15 converges
+# (was a 300s timeout) with no regressions — full mittelmann/LP/QP suites stay
+# bit-identical. 0.12.0 is the current pin. If you ever need to develop against
+# an unreleased feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting
 # feral to the git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.11.3" }
+feral = { version = "0.12.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
