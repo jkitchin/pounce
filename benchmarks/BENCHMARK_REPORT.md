@@ -1,12 +1,12 @@
 # POUNCE Benchmark Report
 
-Generated: 2026-06-14 07:31:55
+Generated: 2026-07-01 13:36:24
 
 ## Provenance
 
 | Component | Version / Detail |
 |-----------|------------------|
-| POUNCE | v0.4.0 (fix/convex-debugger-reachability @ 1ea75a2-dirty) |
+| POUNCE | v0.6.0 (chore/bump-feral-0.12.0 @ aed7c51-dirty) |
 | POUNCE linear solver | feral (default) |
 | Ipopt | Ipopt 3.14.20 (Darwin arm64), ASL(20241202) |
 | Ipopt linear solver | ma57 (via ref/Ipopt/install-ma57) |
@@ -38,9 +38,9 @@ smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.
 
 | Metric | POUNCE | Ipopt |
 |--------|--------|-------|
-| Optimal (strict) | **1262/1326** (95.2%) | **1237/1326** (93.3%) |
+| Optimal (strict) | **1263/1326** (95.2%) | **1237/1326** (93.3%) |
 | Acceptable (informational, *not* counted as solved) | 10 | 24 |
-| Solved exclusively (strict Optimal) | 45 | 20 |
+| Solved exclusively (strict Optimal) | 46 | 20 |
 | Both Optimal | 1217 | |
 | Matching objectives (< 0.01%) | 1162/1217 | |
 
@@ -58,13 +58,13 @@ smoke check (`make -C benchmarks gams-bench`) and is not aggregated here.
 
 **Performance profile by wall-clock time.** Valid because POUNCE and Ipopt-MA57 were run interleaved on this host (see Provenance).
   
-_1285 problems; solvers: pounce, ipopt._
+_1286 problems; solvers: pounce, ipopt._
 
 ![**Performance profile by iteration count** — machine-independent, so it stays comparable across hosts and reruns.](figures/profile_performance_iters.png)
 
 **Performance profile by iteration count** — machine-independent, so it stays comparable across hosts and reruns.
   
-_1285 problems; solvers: pounce, ipopt._
+_1286 problems; solvers: pounce, ipopt._
 
 ![**Data profile (absolute-time ECDF).** Fraction of problems solved within a given wall-clock budget, without best-solver normalization — reads directly as “how many by 1 s? by 10 s?”.](figures/profile_data_time.png)
 
@@ -86,7 +86,7 @@ _1326 problems; solvers: pounce, ipopt._
 | Mittelmann | 47 | 42 (89.4%) | 37 (78.7%) | 6 | 1 | 36 | 35/36 |
 | QP | 138 | 138 (100.0%) | 133 (96.4%) | 5 | 0 | 133 | 125/133 |
 | LP | 371 | 363 (97.8%) | 352 (94.9%) | 16 | 5 | 347 | 322/347 |
-| LPopt | 4 | 0 (0.0%) | 0 (0.0%) | 0 | 0 | 0 | 0/1 |
+| LPopt | 4 | 1 (25.0%) | 0 (0.0%) | 1 | 0 | 0 | 0/1 |
 
 ## Vanderbei Reference Cross-Check
 
@@ -359,7 +359,7 @@ On 347 commonly-solved problems:
 
 | Failure Mode | POUNCE | Ipopt |
 |-------------|--------|-------|
-| Maximum_CpuTime_Exceeded | 3 | 4 |
+| Maximum_CpuTime_Exceeded | 2 | 4 |
 | Maximum_Iterations_Exceeded | 1 | 0 |
 
 ## Regressions (Ipopt Optimal, POUNCE not Optimal)
@@ -387,7 +387,7 @@ On 347 commonly-solved problems:
 | rosenmmx | Vanderbei | 5 | 4 | Acceptable | -4.400000e+01 |
 | sawpath | Vanderbei | 593 | 786 | Infeasible_Problem_Detected | 1.815730e+02 |
 
-## Wins (POUNCE Optimal, Ipopt not Optimal) — 45 problems
+## Wins (POUNCE Optimal, Ipopt not Optimal) — 46 problems
 
 | Problem | Suite | n | m | Ipopt status | POUNCE obj |
 |---------|-------|---|---|-------------|------------|
@@ -427,6 +427,7 @@ On 347 commonly-solved problems:
 | pilot.ja | LP | 1988 | 940 | Acceptable | -6.113136e+03 |
 | pilotnov | LP | 2172 | 975 | Acceptable | -4.497276e+03 |
 | polak6 | Vanderbei | 5 | 4 | Unknown_Error | -4.400000e+01 |
+| qap15 | LPopt | 22275 | 6330 | Maximum_CpuTime_Exceeded | 1.040994e+03 |
 | qcqp1000-2c | Mittelmann | 1000 | 5107 | Maximum_CpuTime_Exceeded | 7.381274e+05 |
 | qcqp1500-1c | Mittelmann | 1500 | 10508 | Maximum_CpuTime_Exceeded | 3.882979e+06 |
 | qcqp1500-1nc | Mittelmann | 1500 | 10508 | Maximum_CpuTime_Exceeded | 4.778480e+06 |
@@ -464,10 +465,10 @@ These suites currently run POUNCE only — no Ipopt-side comparison is captured 
 |---------|---|---|--------|-----------|-------|------|
 | ex10 | 17,680 | 69,608 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.06s |
 | irish-electricity | 61,728 | 104,259 | Maximum_Iterations_Exceeded | 2.4544e+06 | 199 | 110.17s |
-| qap15 | 22,275 | 6,330 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.05s |
+| qap15 | 22,275 | 6,330 | Optimal | 1.0410e+03 | 22 | 30.33s |
 | supportcase10 | 14,630 | 165,684 | Maximum_CpuTime_Exceeded | N/A | 0 | 300.09s |
 
-POUNCE: **0/4 Optimal** in 1010.38s total
+POUNCE: **1/4 Optimal** in 740.66s total
 
 ## Dedicated Convex Solver vs. General NLP (head-to-head)
 

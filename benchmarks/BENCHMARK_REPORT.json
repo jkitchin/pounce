@@ -13242,11 +13242,11 @@
   {
     "name": "qap15",
     "suite": "LPopt",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Maximum_CpuTime_Exceeded",
-    "pounce_obj": null,
+    "pounce_obj": 1040.9940351954722,
     "ipopt_obj": null,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
