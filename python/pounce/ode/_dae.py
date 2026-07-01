@@ -33,24 +33,8 @@ from __future__ import annotations
 import numpy as np
 
 from . import _radau as R
-
-_FD = np.sqrt(np.finfo(float).eps)
+from ._jacobian import make_dae_jac
 _ALG_TOL = 1e-9            # column of F_y' below this (relative) => algebraic
-
-
-def _fd_dae_jacs(Ffun, t, y, yp, F0):
-    """Forward-difference ``(F_y, F_y')`` at ``(t, y, yp)``; ``2n`` evals."""
-    n = y.size
-    Fy = np.empty((n, n))
-    Fyp = np.empty((n, n))
-    for j in range(n):
-        dy = _FD * max(1.0, abs(y[j]))
-        yj = y.copy(); yj[j] += dy
-        Fy[:, j] = (Ffun(t, yj, yp) - F0) / dy
-        dp = _FD * max(1.0, abs(yp[j]))
-        pj = yp.copy(); pj[j] += dp
-        Fyp[:, j] = (Ffun(t, y, pj) - F0) / dp
-    return Fy, Fyp
 
 
 class _DaeProblem:
@@ -60,6 +44,7 @@ class _DaeProblem:
         self.Ffun = Ffun
         self.n = n
         self._user_jac = jac          # optional (t,y,yp) -> (F_y, F_y')
+        self._auto_jac = None         # lazily built JAX-or-central-diff strategy
         self.nfev = 0
         self.njev = 0
         self.nlu = 0
@@ -73,7 +58,11 @@ class _DaeProblem:
         if self._user_jac is not None:
             Fy, Fyp = self._user_jac(t, y, yp)
             return np.asarray(Fy, float), np.asarray(Fyp, float)
-        return _fd_dae_jacs(self.F, t, y, yp, F0)
+        # No analytic Jacobians: exact JAX autodiff when the residual is
+        # traceable, else accurate central differences (see _jacobian.py).
+        if self._auto_jac is None:
+            self._auto_jac = make_dae_jac(self.Ffun, self.F)
+        return self._auto_jac(t, y, yp, F0)
 
 
 def _algebraic_mask(Fyp):

@@ -23,8 +23,7 @@ from __future__ import annotations
 import numpy as np
 
 from .._pounce import SparseLU
-
-_FD = np.sqrt(np.finfo(float).eps)
+from ._jacobian import make_dae_jac
 
 
 def _stencil(t, k, order):
@@ -44,21 +43,21 @@ def _stencil(t, k, order):
     return c_w, [(-1, c_k), (-2, c_km1)]
 
 
-def _node_jacs(Ffun, t1, w, wp, jac):
-    """``(dF/dy, dF/dy', F0)`` at a node, analytic if ``jac`` else forward-diff."""
+def _node_jacs(Ffun, t1, w, wp, jac, auto=None):
+    """``(dF/dy, dF/dy', F0)`` at a node.
+
+    Uses the analytic ``jac`` if given; otherwise the ``auto`` strategy
+    (exact JAX autodiff when traceable, else a central difference — see
+    :mod:`._jacobian`). ``auto`` is built once per solve by the caller so the
+    JAX-vs-FD probe is not repeated at every node.
+    """
     F0 = np.asarray(Ffun(t1, w, wp), float)
     if jac is not None:
         Fy, Fyp = jac(t1, w, wp)
         return np.asarray(Fy, float), np.asarray(Fyp, float), F0
-    n = w.size
-    Fy = np.empty((n, n)); Fyp = np.empty((n, n))
-    for j in range(n):
-        dy = _FD * max(1.0, abs(w[j]))
-        wj = w.copy(); wj[j] += dy
-        Fy[:, j] = (np.asarray(Ffun(t1, wj, wp), float) - F0) / dy
-        dp = _FD * max(1.0, abs(wp[j]))
-        pj = wp.copy(); pj[j] += dp
-        Fyp[:, j] = (np.asarray(Ffun(t1, w, pj), float) - F0) / dp
+    if auto is None:
+        auto = make_dae_jac(Ffun)
+    Fy, Fyp = auto(t1, w, wp, F0)
     return Fy, Fyp, F0
 
 
@@ -80,12 +79,13 @@ def collocation_forward(Ffun, t, y0, *, order=2, jac=None, tol=1e-10,
     n, m = y0.size, t.size
     Y = np.empty((n, m))
     Y[:, 0] = y0
+    auto = make_dae_jac(Ffun) if jac is None else None
     for k in range(m - 1):
         c_w, yp_k = _yp_known(t, Y, k, order)
         w = Y[:, k].copy()                        # warm start from prev node
         for _ in range(maxiter):
             wp = c_w * w + yp_k
-            Fy, Fyp, F0 = _node_jacs(Ffun, t[k + 1], w, wp, jac)
+            Fy, Fyp, F0 = _node_jacs(Ffun, t[k + 1], w, wp, jac, auto)
             if np.linalg.norm(F0) <= tol * (1.0 + np.linalg.norm(w)):
                 break
             w = w + np.linalg.solve(Fy + c_w * Fyp, -F0)
@@ -109,7 +109,7 @@ def _coo_pattern(n, M, order):
     return np.asarray(rows, np.int64), np.asarray(cols, np.int64)
 
 
-def _jac_values(Ffun, t, Y, n, M, order, jac):
+def _jac_values(Ffun, t, Y, n, M, order, jac, auto=None):
     """Values aligned to :func:`_coo_pattern`, evaluated at ``Y`` (full)."""
     t = np.asarray(t, float)
     vals = []
@@ -117,7 +117,7 @@ def _jac_values(Ffun, t, Y, n, M, order, jac):
         c_w, yp_k = _yp_known(t, Y, k, order)
         w = Y[:, k + 1]
         wp = c_w * w + yp_k
-        Fy, Fyp, _ = _node_jacs(Ffun, t[k + 1], w, wp, jac)
+        Fy, Fyp, _ = _node_jacs(Ffun, t[k + 1], w, wp, jac, auto)
         _, terms = _stencil(t, k, order)
         sub_coeff = {-off: c for off, c in terms}   # subdiagonal -> coeff
         for sub in range(0, order + 1):
@@ -140,5 +140,6 @@ def collocation_transpose_solve(Ffun, t, Y, v, *, order=2, jac=None):
     M = Y.shape[1] - 1
     rows, cols = _coo_pattern(n, M, order)
     lu = SparseLU(n * M, rows, cols)
-    lu.factor(_jac_values(Ffun, t, Y, n, M, order, jac))
+    auto = make_dae_jac(Ffun) if jac is None else None
+    lu.factor(_jac_values(Ffun, t, Y, n, M, order, jac, auto))
     return np.asarray(lu.solve_transpose(np.asarray(v, float).reshape(-1)))

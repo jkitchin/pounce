@@ -19,6 +19,7 @@
 
 use pyo3::prelude::*;
 
+mod dense_lu;
 mod nl_problem;
 mod nlp_batch;
 mod problem;
@@ -48,6 +49,7 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySolver>()?;
     m.add_class::<PyNlProblem>()?;
     m.add_class::<sparse_lu::PySparseLu>()?;
+    m.add_class::<dense_lu::PyDenseLu>()?;
     m.add_function(wrap_pyfunction!(read_nl, m)?)?;
     // Batched NLP solving (pounce#126): native `.nl` path (phase 1)
     // and callback-Problem path (phase 2).

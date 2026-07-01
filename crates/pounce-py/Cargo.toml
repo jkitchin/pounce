@@ -35,6 +35,7 @@ pounce-convex.workspace = true
 pounce-restoration.workspace = true
 pounce-feral.workspace = true
 feral.workspace = true
+faer.workspace = true
 pounce-linsol.workspace = true
 pounce-sensitivity.workspace = true
 pounce-observability.workspace = true
