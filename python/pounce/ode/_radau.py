@@ -24,6 +24,7 @@ from __future__ import annotations
 import numpy as np
 
 from .._pounce import DenseLU
+from ._jacobian import make_ode_jac
 
 # --- Radau IIA (5) tableau (Hairer-Wanner) --------------------------------
 _S6 = 6 ** 0.5
@@ -162,18 +163,6 @@ def _refactor(lu, Mat):
     lu.factor(np.ascontiguousarray(Mat, dtype=np.float64).reshape(-1))
 
 
-def _fd_jac(f, t, y, f0):
-    """Forward-difference Jacobian ``df/dy``."""
-    n = y.size
-    J = np.empty((n, n))
-    for j in range(n):
-        d = (np.sqrt(np.finfo(float).eps)) * max(1.0, abs(y[j]))
-        yj = y.copy()
-        yj[j] += d
-        J[:, j] = (f(t, yj) - f0) / d
-    return J
-
-
 class _RadauProblem:
     """Holds the RHS, mass matrix, Jacobian, and counters for one solve."""
 
@@ -182,6 +171,7 @@ class _RadauProblem:
         self.n = n
         self.M = np.eye(n) if mass is None else np.asarray(mass, dtype=float)
         self._user_jac = jac
+        self._auto_jac = None      # lazily built JAX-or-central-diff strategy
         self.nfev = 0
         self.njev = 0
         self.nlu = 0
@@ -194,9 +184,11 @@ class _RadauProblem:
         self.njev += 1
         if self._user_jac is not None:
             return np.asarray(self._user_jac(t, y), dtype=float)
-        # FD costs n extra fun evals (counted).
-        J = _fd_jac(self.f, t, y, f0)
-        return J
+        # No analytic Jacobian: use exact JAX autodiff when the RHS is
+        # traceable, else an accurate central difference (see _jacobian.py).
+        if self._auto_jac is None:
+            self._auto_jac = make_ode_jac(self.fun, self.f)
+        return self._auto_jac(t, y, f0)
 
 
 def _predict_stages(K_prev, ratio):
@@ -269,7 +261,7 @@ def _solve_stages(prob, t, y, h, lu_real, lu_cplx, scale, newton_tol, K0=None):
             break
         dnorm_prev = dnorm
     K = (RADAU_AINV @ Z) / h
-    return K, converged, rate
+    return K, converged, rate, it + 1
 
 
 def _error_estimate(prob, t, y, h, K, lu_real, refine_from=None):
@@ -417,8 +409,9 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         # rejection/refactor, so a shrunk step gets a matching guess.
         K0 = (_predict_stages(K_prev, h / h_prev)
               if K_prev is not None and h_prev else None)
-        K, converged, rate = _solve_stages(prob, t, y, hs, lu_real, lu_cplx,
-                                           scale, newton_tol, K0=K0)
+        K, converged, rate, n_iter = _solve_stages(prob, t, y, hs, lu_real,
+                                                   lu_cplx, scale, newton_tol,
+                                                   K0=K0)
         if not converged:
             # A stale Jacobian is the usual reason simplified Newton stalls at
             # a larger step; refresh it at the current point and retry the
@@ -502,13 +495,17 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
         if h_new != h:
             need_factor = True
         h = h_new
-        # Jacobian for the next step: if Newton convergence was anything but
-        # excellent, refresh J now at the new point; otherwise mark it stale
-        # so a later convergence failure triggers an on-demand refresh. This
-        # keeps a frozen Jacobian only while it is genuinely working.
-        if rate is not None and rate > 1e-3:
-            f_new = prob.f(t, y)
-            J = prob.jac(t, y, f_new); jac_current = True
+        # Jacobian for the next step (SciPy Radau policy): recompute J only when
+        # the just-completed Newton was *both* slow (took more than 2 iterations)
+        # and contracting poorly (rate > 1e-3). Otherwise keep J frozen and skip
+        # the refactor. Near a singular-Jacobian steady state (e.g. the Robertson
+        # DAE on its slow manifold) the dynamics change slowly, so a frozen J
+        # stays valid for many steps and the simplified Newton converges in ≤ 2
+        # iterations — refreshing it every step instead just burns evaluations
+        # and factorisations. A stale J that later stalls Newton is refreshed
+        # on-demand by the non-convergence branch above.
+        if rate is not None and n_iter > 2 and rate > 1e-3:
+            J = prob.jac(t, y, prob.f(t, y)); jac_current = True
             need_factor = True
         else:
             jac_current = False

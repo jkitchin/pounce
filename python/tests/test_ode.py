@@ -139,6 +139,78 @@ def test_lu_pattern_built_once_per_solve(monkeypatch):
     assert n_built[0] == 2, f"LU pattern rebuilt per refactor ({n_built[0]} builds)"
 
 
+# --- Jacobian strategy: JAX autodiff / central-difference fallback -----------
+
+def test_jacobian_jax_autodiff_is_exact():
+    """A JAX-traceable RHS gets an *exact* Jacobian from jax.jacfwd — matching
+    the analytic Jacobian to ~machine precision, far tighter than any FD."""
+    jnp = pytest.importorskip("jax.numpy")
+    from pounce.ode._jacobian import make_ode_jac
+
+    k1, k2, k3 = 0.04, 3e7, 1e4
+
+    def f(t, y):
+        y3 = 1.0 - y[0] - y[1]
+        return jnp.array([-k1 * y[0] + k3 * y[1] * y3,
+                          k1 * y[0] - k3 * y[1] * y3 - k2 * y[1] ** 2])
+
+    def jac_analytic(y):
+        y0, y1 = y
+        y3 = 1 - y0 - y1
+        return np.array([[-k1 - k3 * y1, k3 * (y3 - y1)],
+                         [k1 + k3 * y1, -k3 * (y3 - y1) - 2 * k2 * y1]])
+
+    jac = make_ode_jac(f)
+    y = np.array([1.9e-6, 7.6e-12])
+    J = jac(0.0, y, np.asarray(f(0.0, y), float))
+    assert np.allclose(J, jac_analytic(y), rtol=1e-10, atol=1e-12)
+
+
+def test_jacobian_central_diff_fallback_is_accurate():
+    """A plain-NumPy RHS (untraceable by JAX) falls back to a *central*
+    difference — accurate to O(d^2), not the noisy forward difference that
+    previously ballooned the Robertson step count ~45x (pounce#175)."""
+    from pounce.ode._jacobian import make_ode_jac
+
+    k1, k2, k3 = 0.04, 3e7, 1e4
+
+    def f(t, y):                       # np.array -> not JAX-traceable
+        y3 = 1.0 - y[0] - y[1]
+        return np.array([-k1 * y[0] + k3 * y[1] * y3,
+                         k1 * y[0] - k3 * y[1] * y3 - k2 * y[1] ** 2])
+
+    def jac_analytic(y):
+        y0, y1 = y
+        y3 = 1 - y0 - y1
+        return np.array([[-k1 - k3 * y1, k3 * (y3 - y1)],
+                         [k1 + k3 * y1, -k3 * (y3 - y1) - 2 * k2 * y1]])
+
+    jac = make_ode_jac(f)
+    y = np.array([1.9e-6, 7.6e-12])
+    J = jac(0.0, y, f(0.0, y))
+    # central difference reaches ~1e-4 relative here; a forward difference
+    # over the same perturbation is ~40x worse and wrecks Newton contraction.
+    assert np.allclose(J, jac_analytic(y), rtol=2e-4, atol=1e-10)
+
+
+def test_robertson_longtime_step_count_bounded():
+    """Robertson (reduced ODE, plain-NumPy RHS) integrated far onto its slow
+    manifold. The central-difference Jacobian keeps the step count near SciPy's;
+    the old forward difference took ~45x more steps (pounce#175). Guard the fix
+    with an absolute bound well below the regressed count."""
+    k1, k2, k3 = 0.04, 3e7, 1e4
+
+    def f(t, y):
+        y3 = 1.0 - y[0] - y[1]
+        return np.array([-k1 * y[0] + k3 * y[1] * y3,
+                         k1 * y[0] - k3 * y[1] * y3 - k2 * y[1] ** 2])
+
+    r = po.solve_ivp(f, (0.0, 1e11), [1.0, 0.0], rtol=1e-8, atol=1e-10)
+    assert r.success
+    assert r.nstep < 2000, f"Jacobian-quality regression: nstep={r.nstep}"
+    assert abs(r.y[0, -1] - 2.08e-8) < 5e-9
+
+
 # --- index-1 DAE (mass matrix) -----------------------------------------------
 
 def test_robertson_dae():
