@@ -211,8 +211,7 @@ Implications:
   HS14 uses the dual-block Schur split end-to-end (verified *not* falling back,
   7 iters → optimum) + oversized-block fallback; Python convex-QP parity vs the
   full-space solve, round-trip, oversized fallback, negative-index reject.
-- **Phase 3 — validation + perf (2–4 days):** corpus correctness/inertia parity,
-  perf study, docs.
+- **Phase 3 — validation + perf: DONE.** See § Phase-3 below.
 - **Total ≈ 2–3 weeks** *if* Phase 0 hits outcome (1). Outcome (2) adds a FERAL
   request + release round-trip (as with item 1). A FERAL F3.3 (multi-supernode
   Schur tail) follow-up may be needed for larger aggregation problems.
@@ -275,6 +274,55 @@ self-formed design as the baseline, revisit native as an optimization.**
 FERAL round-trip** (the previously-largest risk), so the estimate tightens to the
 ~2–3 week Phases 1–3 with the biggest unknown removed. Sylvester inertia — the
 remaining correctness risk — is empirically confirmed (incl. indefinite `A_FF`).
+
+## Phase-3 results (corpus / perf validation)
+
+Harnesses: `crates/pounce-algorithm/tests/schur_corpus.rs` (Rust, in CI) and
+`python/benchmarks/schur_kkt_180.py` (larger sweep, not CI). Corpus: a scalable,
+strictly-convex, box- **and** equality-constrained NLP (diagonal PD Hessian ⇒
+positive-definite primal block; the constraint-dual block is the Schur set — the
+range/null-space split), swept over size `n`, constraint count `m`, and two
+Jacobian shapes (`banded` local coupling, `spread` strided coupling). Active
+bounds force a full ~13–15-iteration barrier trajectory, so the Schur factor +
+resolve + per-iteration inertia check are exercised repeatedly, not once.
+
+**Correctness / inertia parity — PASS, at scale.** The Schur solve reaches the
+*same* optimum as the standard full-space solve in every case:
+
+- Rust CI: `n = 120, 600` — identical objective, identical iteration count
+  (13/13), `max|Δx| = 0`.
+- Python: `banded` + `spread`, `n = 1 000 … 32 000`, `m = 16` — every solve
+  `Solve_Succeeded` both ways, identical iteration counts (15/15), `max|Δx| = 0`,
+  `Δobj = 0`. (Exact agreement, not just within tol — the block backsolve is a
+  reordering of the same system, and both converge to the unique convex optimum.)
+
+**The Schur path is genuinely exercised (not silently falling back).** The
+per-solve factorization time (item-3 `info["timing"]`) has a distinct signature:
+an intentionally-oversized block (gate → fallback) times **equal to** the
+monolithic `Std` path, while the real Schur block times **differently** — e.g.
+`n=800, m=10 spread`: `Std 0.0174 s`, forced-fallback `0.0173 s`, Schur `0.0162 s`.
+A silent fallback would match `Std` exactly; it does not.
+
+**Perf — competitive and linear-scaling, no dramatic win on these synthetics.**
+Schur-vs-`Std` factorization-time ratio ranged **0.74×–1.55×** across shapes and
+sizes; both scale ~linearly in `n` (4× size → ~4–5× factor time — no `n²`
+through the full solve). No large speedup here, and that is *expected*: feral's
+multifrontal factor with AMD already forms the equivalent dense Schur complement
+*internally* when it eliminates a well-orderable bordered/banded KKT, so an
+*explicit* Schur split has little to beat. The paper's up-to-15×-over-MA57/MA86
+requires the specific **block-triangular / NN-surrogate** structures where a
+generic symmetric degree/ND ordering underperforms — reproducing that needs the
+actual aggregation models the `discopt` plugin generates, which are not
+available here.
+
+**Conclusion / value.** Phase 3 establishes the mechanism is **correct, safe, and
+linear-scaling at scale**, and that the gate + transparent fallback behave as
+designed. The feature's value is: (1) letting a structure-aware caller exploit a
+block structure feral's AMD cannot discover (the paper's regime), (2) exact
+a-priori inertia via Sylvester, and (3) the item-1/item-2 hooks that let the
+downstream tool drive it — with pounce providing the validated mechanism. A
+quantified end-to-end speedup on real block-triangular models is the natural
+follow-up once such a model is available through the hooks.
 
 ## Recommendation
 
