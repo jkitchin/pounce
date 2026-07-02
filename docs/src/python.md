@@ -99,6 +99,33 @@ Two convenience knobs back this up:
   distinguishes those two statuses; if yours doesn't, gate on the residual
   directly as above.
 
+### Where the time went (`info["timing"]`)
+
+Every `Problem.solve` attaches a per-subsystem wall-clock breakdown so you
+can attribute a solve's runtime without patching or rebuilding the solver.
+`info["wall_time"]` is the overall-algorithm total (seconds); `info["timing"]`
+is a dict of the same total plus its components:
+
+```python
+x, info = prob.solve(x0=...)
+t = info["timing"]
+print(t["overall_alg"])                    # total solve wall time
+print(t["linear_system_factorization"],    # KKT factorization vs …
+      t["linear_system_back_solve"],        # … back-solve, and their
+      t["linear_system_total"])             # sum (total linear algebra)
+print(t["eval_objective"], t["eval_gradient"],
+      t["eval_constraints"], t["eval_constraint_jacobian"],
+      t["eval_lagrangian_hessian"])         # per-callback eval time
+```
+
+The `scipy`-style `pounce.minimize` facade mirrors these onto the result as
+`res.wall_time` and `res.timing` (also in `res.info`). The callback split is
+what lets you see, for example, that a reduced-space / variable-aggregation
+solve converges in few iterations but spends most of its time in a densified
+Lagrangian-Hessian evaluation — the func/Jacobian/Hessian story becomes a
+direct measurement rather than an inference. All values are wall-clock
+seconds; unused subsystems read `0.0`.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

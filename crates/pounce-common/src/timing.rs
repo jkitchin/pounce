@@ -316,6 +316,56 @@ impl TimingStatistics {
         s
     }
 
+    /// Structured wall-clock breakdown (seconds) of the major solve
+    /// subsystems, as ordered `(label, seconds)` pairs. Same numbers
+    /// [`Self::report`] prints, but as data rather than formatted text,
+    /// so a programmatic consumer (e.g. the Python `Problem.solve` `info`
+    /// dict) can attribute a solve's runtime without scraping the report
+    /// or patching the solver.
+    ///
+    /// Ordered coarse→fine: the overall algorithm total; the
+    /// linear-algebra split (`linear_system_total` = factorization +
+    /// back-solve, with factorization broken out); and the per-callback
+    /// function-evaluation split (objective / gradient / constraints /
+    /// Jacobian / Lagrangian Hessian). This is exactly the func /
+    /// Jacobian / Hessian time split issue #180 needs to reproduce a
+    /// Table-6-style "where did the time go" analysis for a
+    /// reduced-space / variable-aggregation solve.
+    pub fn wall_time_breakdown(&self) -> Vec<(&'static str, Number)> {
+        let factorization = self.linear_system_factorization.total_wallclock_time();
+        let back_solve = self.linear_system_back_solve.total_wallclock_time();
+        vec![
+            ("overall_alg", self.overall_alg.total_wallclock_time()),
+            ("update_hessian", self.update_hessian.total_wallclock_time()),
+            (
+                "compute_search_direction",
+                self.compute_search_direction.total_wallclock_time(),
+            ),
+            ("linear_system_total", factorization + back_solve),
+            ("linear_system_factorization", factorization),
+            ("linear_system_back_solve", back_solve),
+            (
+                "function_evaluations_total",
+                self.total_function_evaluation_time.total_wallclock_time(),
+            ),
+            ("eval_objective", self.eval_obj.total_wallclock_time()),
+            ("eval_gradient", self.eval_grad_obj.total_wallclock_time()),
+            ("eval_constraints", self.eval_constr.total_wallclock_time()),
+            (
+                "eval_constraint_jacobian",
+                self.eval_constr_jac.total_wallclock_time(),
+            ),
+            (
+                "eval_lagrangian_hessian",
+                self.eval_lag_hess.total_wallclock_time(),
+            ),
+            (
+                "total_callback",
+                self.total_callback_time.total_wallclock_time(),
+            ),
+        ]
+    }
+
     /// Reset all counters. Mirrors upstream `ResetTimes()`.
     pub fn reset(&self) {
         self.overall_alg.reset();
@@ -372,5 +422,43 @@ mod tests {
         let t = TimedTask::new();
         t.end_if_started();
         assert_eq!(t.total_wallclock_time(), 0.0);
+    }
+
+    #[test]
+    fn wall_time_breakdown_reports_subsystems() {
+        let stats = TimingStatistics::new();
+        // Accumulate into two distinct subsystems so the breakdown is
+        // not trivially all-zero and the linear-algebra total is the
+        // sum of its two parts.
+        stats.linear_system_factorization.start();
+        stats.linear_system_factorization.end();
+        stats.eval_lag_hess.start();
+        stats.eval_lag_hess.end();
+
+        let bd = stats.wall_time_breakdown();
+        let get = |k: &str| bd.iter().find(|(label, _)| *label == k).map(|(_, v)| *v);
+
+        // Every advertised key is present and non-negative.
+        for key in [
+            "overall_alg",
+            "linear_system_total",
+            "linear_system_factorization",
+            "linear_system_back_solve",
+            "function_evaluations_total",
+            "eval_objective",
+            "eval_gradient",
+            "eval_constraints",
+            "eval_constraint_jacobian",
+            "eval_lagrangian_hessian",
+        ] {
+            assert!(get(key).is_some(), "missing breakdown key {key}");
+            assert!(get(key).unwrap() >= 0.0, "negative time for {key}");
+        }
+
+        // linear_system_total == factorization + back_solve, exactly.
+        let total = get("linear_system_total").unwrap();
+        let fact = get("linear_system_factorization").unwrap();
+        let back = get("linear_system_back_solve").unwrap();
+        assert_eq!(total, fact + back);
     }
 }

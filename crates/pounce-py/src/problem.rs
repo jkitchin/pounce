@@ -337,6 +337,21 @@ impl PyProblem {
             None => py.None(),
         };
         info.set_item("working_set", ws_obj)?;
+        // Per-subsystem wall-clock breakdown (seconds) of this solve
+        // (pounce#180 item 3). `info["timing"]` is a dict keyed by
+        // subsystem (`overall_alg`, the linear-algebra split, and the
+        // per-callback objective/gradient/constraint/Jacobian/Hessian
+        // eval split); `info["wall_time"]` mirrors the overall total for
+        // convenience. Lets a reduced-space / variable-aggregation caller
+        // attribute runtime (e.g. densified-Hessian eval cost) directly
+        // instead of inferring it.
+        let timing = app.timing_stats();
+        let timing_dict = PyDict::new_bound(py);
+        for (label, secs) in timing.wall_time_breakdown() {
+            timing_dict.set_item(label, secs)?;
+        }
+        info.set_item("wall_time", timing.overall_alg.total_wallclock_time())?;
+        info.set_item("timing", timing_dict)?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))
     }
