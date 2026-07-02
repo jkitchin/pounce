@@ -336,7 +336,51 @@ impl StdAugSystemSolver {
         );
     }
 
-    fn pack_rhs(&self, rhs: &AugSysRhs<'_>, packed: &mut [Number]) {
+    /// Rebuild the triplet structure when the structural fingerprint changes,
+    /// then refill the value array — i.e. everything `solve` does *before*
+    /// handing the matrix to the linear solver. Factored out so
+    /// [`crate::kkt::schur_aug_system_solver::SchurAugSystemSolver`] can reuse
+    /// the exact KKT assembly (the same lower-triangle triplet layout) without
+    /// duplicating it, then route the assembled `(dim, irn, jcn, vals)` through
+    /// the Schur backend instead of `self.linsol`. Returns the build status;
+    /// on `Success` the `dim`/`irn`/`jcn`/`vals` accessors are current.
+    pub(crate) fn assemble(&mut self, coeffs: &AugSysCoeffs<'_>) -> ESymSolverStatus {
+        let sig = {
+            let w_nnz = coeffs.w.map(w_nonzeros).unwrap_or(0);
+            let jc_nnz = gen_t_downcast(coeffs.j_c).nonzeros() as usize;
+            let jd_nnz = gen_t_downcast(coeffs.j_d).nonzeros() as usize;
+            (
+                w_nnz,
+                jc_nnz,
+                jd_nnz,
+                coeffs.j_c.n_cols(),
+                coeffs.j_c.n_rows(),
+                coeffs.j_d.n_rows(),
+            )
+        };
+        if !self.initialized || self.struct_sig != Some(sig) {
+            let s = self.build_structure(coeffs);
+            if s != ESymSolverStatus::Success {
+                self.last_status = Some(s);
+                return s;
+            }
+            self.struct_sig = Some(sig);
+        }
+        self.refill_values(coeffs);
+        ESymSolverStatus::Success
+    }
+
+    /// Assembled KKT dimension (valid after [`Self::assemble`]).
+    pub(crate) fn assembled_dim(&self) -> Index {
+        self.dim
+    }
+    /// Assembled 1-based lower-triangle triplet + value array (after
+    /// [`Self::assemble`]). Same layout the linear solver receives.
+    pub(crate) fn assembled_triplet(&self) -> (&[Index], &[Index], &[Number]) {
+        (&self.irn, &self.jcn, &self.vals)
+    }
+
+    pub(crate) fn pack_rhs(&self, rhs: &AugSysRhs<'_>, packed: &mut [Number]) {
         let n_x = self.n_x as usize;
         let n_s = self.n_s as usize;
         let n_c = self.n_c as usize;
@@ -350,7 +394,7 @@ impl StdAugSystemSolver {
         );
     }
 
-    fn unpack_sol(&self, packed: &[Number], sol: &mut AugSysSol<'_>) {
+    pub(crate) fn unpack_sol(&self, packed: &[Number], sol: &mut AugSysSol<'_>) {
         let n_x = self.n_x as usize;
         let n_s = self.n_s as usize;
         let n_c = self.n_c as usize;
@@ -418,28 +462,10 @@ impl AugSystemSolver for StdAugSystemSolver {
         // (`zero_w` for Hessian-free init/multiplier solves vs an
         // `n`-diagonal `B0` for the main solves); reusing a stale pinned
         // structure would drop the W block entirely.
-        let sig = {
-            let w_nnz = coeffs.w.map(w_nonzeros).unwrap_or(0);
-            let jc_nnz = gen_t_downcast(coeffs.j_c).nonzeros() as usize;
-            let jd_nnz = gen_t_downcast(coeffs.j_d).nonzeros() as usize;
-            (
-                w_nnz,
-                jc_nnz,
-                jd_nnz,
-                coeffs.j_c.n_cols(),
-                coeffs.j_c.n_rows(),
-                coeffs.j_d.n_rows(),
-            )
-        };
-        if !self.initialized || self.struct_sig != Some(sig) {
-            let s = self.build_structure(coeffs);
-            if s != ESymSolverStatus::Success {
-                self.last_status = Some(s);
-                return s;
-            }
-            self.struct_sig = Some(sig);
+        let s = self.assemble(coeffs);
+        if s != ESymSolverStatus::Success {
+            return s;
         }
-        self.refill_values(coeffs);
 
         let mut packed = vec![0.0; self.dim as usize];
         self.pack_rhs(rhs, &mut packed);

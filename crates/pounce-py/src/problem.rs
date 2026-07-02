@@ -70,6 +70,11 @@ pub struct PyProblem {
     /// installs `OrderingMethod::External` on the FERAL backend. `None`
     /// leaves the `feral_ordering` option / env default in charge.
     external_ordering: Option<Vec<usize>>,
+    /// Caller-supplied Schur KKT partition installed via
+    /// `set_kkt_schur_block` (pounce#180 item 2). Forwarded to
+    /// `IpoptApplication::set_kkt_schur_block` in `prepare`. `None` uses the
+    /// standard full-space solver.
+    kkt_schur_block: Option<Vec<usize>>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -144,6 +149,7 @@ impl PyProblem {
             last_working_set: None,
             user_scaling: None,
             external_ordering: None,
+            kkt_schur_block: None,
         })
     }
 
@@ -481,6 +487,57 @@ impl PyProblem {
         })
     }
 
+    /// Install a block-triangular / Schur KKT partition (pounce#180 item 2).
+    /// Lets a structure-aware presolve hand pounce the reducible block of the
+    /// KKT system (e.g. from a reduced-space / variable-aggregation analysis,
+    /// Parker, Garcia & Bent, arXiv:2602.17968): that block is
+    /// Schur-complemented out and only the two diagonal blocks are factorized,
+    /// with inertia recovered a priori via Sylvester's law.
+    ///
+    /// `indices` are **KKT-space indices** (`0..dim`, where
+    /// `dim = n + n_slack + n_eq + n_ineq` in the solver's internal
+    /// `x, slack, eq-dual, ineq-dual` block order) given as a sequence or numpy
+    /// integer array. The Schur block should be a **small** fraction of the
+    /// system (the method wins only when it is much smaller than the eliminated
+    /// block); when the partition is unsuitable (too large, malformed, or the
+    /// backend errors) the solver falls back to the standard full-space path
+    /// transparently, so a stray hook never breaks a solve. Honored only on the
+    /// default feral + exact-Hessian path. Negative indices are rejected.
+    ///
+    /// Persistent config: call once before `solve()`; drop with
+    /// `clear_kkt_schur_block()`.
+    fn set_kkt_schur_block(&mut self, indices: Py<PyAny>) -> PyResult<()> {
+        let idx = extract_index_vec_inferred(&indices, "kkt_schur_block")?;
+        let mut out = Vec::with_capacity(idx.len());
+        for v in idx {
+            if v < 0 {
+                return Err(PyValueError::new_err(
+                    "kkt_schur_block: indices must be non-negative (0-based KKT indices)",
+                ));
+            }
+            out.push(v as usize);
+        }
+        self.kkt_schur_block = Some(out);
+        Ok(())
+    }
+
+    /// Drop any installed Schur KKT partition, restoring the standard
+    /// full-space solver.
+    fn clear_kkt_schur_block(&mut self) {
+        self.kkt_schur_block = None;
+    }
+
+    /// The currently-installed Schur KKT partition as a numpy int64 array, or
+    /// `None` if none is set.
+    fn get_kkt_schur_block<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<i64>>> {
+        self.kkt_schur_block.as_ref().map(|p| {
+            p.iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py)
+        })
+    }
+
     /// Solve, then run a parametric sensitivity step at the converged
     /// iterate. Returns `(x, info_dict)`; `info_dict` includes the
     /// extra keys `dx`, `dx_full`, `reduced_hessian`,
@@ -735,6 +792,13 @@ impl PyProblem {
         // dimension than the permutation is sized for.
         if let Some(perm) = &self.external_ordering {
             app.set_external_ordering(perm.clone());
+        }
+        // Block-triangular / Schur KKT partition (pounce#180 item 2). The
+        // application routes the KKT solve through a SchurAugSystemSolver over
+        // these KKT-space indices, falling back to the standard solver when the
+        // partition is unsuitable.
+        if let Some(indices) = &self.kkt_schur_block {
+            app.set_kkt_schur_block(indices.clone());
         }
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());

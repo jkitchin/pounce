@@ -228,6 +228,14 @@ pub struct AlgorithmBuilder {
     /// `application::apply_qp_subproblem_options`.
     pub sqp_qp: pounce_qp::QpOptions,
     pub init: InitOptions,
+    /// Optional block-triangular / Schur KKT partition (pounce#180 item 2):
+    /// `(schur_indices, feral_cfg)`. When `Some` and the IPM path is selected
+    /// with the feral linear solver and an exact Hessian, `build_with_backend`
+    /// wraps the standard aug-system solver in a
+    /// [`crate::kkt::SchurAugSystemSolver`] over the given KKT-space indices.
+    /// The Schur solver falls back to the standard solver transparently when
+    /// the partition is unsuitable. Set via [`Self::set_kkt_schur`].
+    pub kkt_schur: Option<(Vec<usize>, pounce_feral::FeralConfig)>,
 }
 
 /// Knobs read off `OptionsList` and baked into
@@ -520,6 +528,7 @@ impl Default for AlgorithmBuilder {
             sqp: crate::sqp::SqpOptions::default(),
             sqp_qp: pounce_qp::QpOptions::default(),
             init: InitOptions::default(),
+            kkt_schur: None,
         }
     }
 }
@@ -527,6 +536,15 @@ impl Default for AlgorithmBuilder {
 impl AlgorithmBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Install a Schur KKT partition (pounce#180 item 2). `schur_indices` are
+    /// KKT-space indices (`0..dim`, the `x,s,c,d` block order the aug-system
+    /// solver assembles); `cfg` configures the per-block feral solvers. Only
+    /// honored on the IPM + feral + exact-Hessian path by
+    /// [`Self::build_with_backend`]; ignored otherwise.
+    pub fn set_kkt_schur(&mut self, schur_indices: Vec<usize>, cfg: pounce_feral::FeralConfig) {
+        self.kkt_schur = Some((schur_indices, cfg));
     }
 
     /// Assemble the strategy bundle without a search-direction
@@ -561,11 +579,27 @@ impl AlgorithmBuilder {
         // Sherman-Morrison-Woodbury low-rank solver so the augmented
         // system factorizes only the diagonal `B0` and the quasi-Newton
         // update is applied as a rank-`m` correction (`O(n·m)` memory).
-        let aug_solver: Box<dyn AugSystemSolver> = if matches!(
+        let is_lbfgs = matches!(
             self.hessian_approximation,
             HessianApproxChoice::LimitedMemory
-        ) {
+        );
+        let aug_solver: Box<dyn AugSystemSolver> = if is_lbfgs {
             Box::new(LowRankAugSystemSolver::new(Box::new(inner_aug)))
+        } else if let Some((indices, cfg)) = self.kkt_schur.clone() {
+            // Block-triangular / Schur KKT path (pounce#180 item 2). Only on the
+            // exact-Hessian feral path — the Schur backend is feral-specific,
+            // and the L-BFGS low-rank Woodbury wrapper owns the (2,2) block.
+            // The Schur solver falls back to `StdAugSystemSolver` transparently
+            // when the partition is unsuitable, so a stray hook never breaks a
+            // solve; we gate on `linear_solver == Feral` here to avoid silently
+            // ignoring a user's explicit MA57 selection.
+            if matches!(self.linear_solver, LinearSolverChoice::Feral) {
+                Box::new(crate::kkt::SchurAugSystemSolver::new(
+                    inner_aug, indices, cfg,
+                ))
+            } else {
+                Box::new(inner_aug)
+            }
         } else {
             Box::new(inner_aug)
         };
@@ -828,6 +862,7 @@ mod tests {
                             sqp: crate::sqp::SqpOptions::default(),
                             sqp_qp: pounce_qp::QpOptions::default(),
                             init: InitOptions::default(),
+                            kkt_schur: None,
                         }
                         .build();
                     }

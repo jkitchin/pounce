@@ -196,6 +196,19 @@ pub struct IpoptApplication {
     /// backends and by any custom factory plugged via
     /// [`Self::set_linear_backend_factory`].
     external_ordering: Option<Vec<usize>>,
+    /// Caller-supplied block-triangular / Schur KKT partition (pounce#180
+    /// item 2). When `Some`, the next IPM solve on the feral + exact-Hessian
+    /// path routes the KKT linear solve through a
+    /// [`crate::kkt::SchurAugSystemSolver`] over these **KKT-space indices**
+    /// (`0..dim` in the `x, s, c, d` block order the aug-system solver
+    /// assembles): the `S` block is Schur-complemented out and only the two
+    /// diagonal blocks are factorized, with inertia recovered via Sylvester's
+    /// law. Beneficial only when `|S| ≪` the eliminated block; the Schur solver
+    /// falls back to the standard full-space solver transparently when the
+    /// partition is unsuitable (too large, malformed, or the backend errors),
+    /// so a stray hook never breaks a solve. Persistent config (not
+    /// auto-cleared). Wire-set via [`Self::set_kkt_schur_block`].
+    kkt_schur_block: Option<Vec<usize>>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -243,6 +256,7 @@ impl IpoptApplication {
             sqp_last_working_set: None,
             warm_start_iterate: None,
             external_ordering: None,
+            kkt_schur_block: None,
         }
     }
 
@@ -675,6 +689,31 @@ impl IpoptApplication {
     /// The currently-installed external KKT ordering, if any.
     pub fn external_ordering(&self) -> Option<&[usize]> {
         self.external_ordering.as_deref()
+    }
+
+    /// Install a block-triangular / Schur KKT partition (pounce#180 item 2).
+    /// `indices` are KKT-space indices (`0..dim` in the `x, s, c, d` block
+    /// order the aug-system solver assembles) naming the Schur block `S`; that
+    /// block is Schur-complemented out and only the two diagonal blocks are
+    /// factorized (inertia via Sylvester's law). Honored on the IPM + feral +
+    /// exact-Hessian path; the Schur solver falls back to the standard
+    /// full-space solver transparently when the partition is unsuitable (too
+    /// large a fraction of the system, malformed, or a backend error), so a
+    /// stray hook never breaks a solve. Persistent config (not auto-cleared);
+    /// drop it via [`Self::clear_kkt_schur_block`].
+    pub fn set_kkt_schur_block(&mut self, indices: Vec<usize>) {
+        self.kkt_schur_block = Some(indices);
+    }
+
+    /// Drop any installed Schur KKT partition, restoring the standard
+    /// full-space solver for subsequent solves.
+    pub fn clear_kkt_schur_block(&mut self) {
+        self.kkt_schur_block = None;
+    }
+
+    /// The currently-installed Schur KKT partition, if any.
+    pub fn kkt_schur_block(&self) -> Option<&[usize]> {
+        self.kkt_schur_block.as_deref()
     }
 
     /// Return the final QP working set from the most recent SQP
@@ -1353,7 +1392,7 @@ impl IpoptApplication {
         // `AlgBuilder::RegisterOptions` in upstream — that registry
         // hookup lands as a follow-up; default builder is correct for
         // HS71-class problems.
-        let builder = self.algorithm_builder_from_options();
+        let mut builder = self.algorithm_builder_from_options();
 
         // Linear-solver backend. The default factory is option-aware
         // — it reads the `feral_*` extension options off the same
@@ -1361,6 +1400,15 @@ impl IpoptApplication {
         // per-problem `.opt` files can flip backend knobs without
         // rebuilding pounce.
         let mut feral_cfg = feral_config_from_options(&self.options);
+        // Block-triangular / Schur KKT partition (pounce#180 item 2). Configure
+        // the Schur block solvers from the *base* feral cfg: a full-KKT external
+        // ordering (item 1) is sized for the whole system and cannot apply to
+        // the A_FF sub-block, so the Schur path keeps the default sub-block
+        // ordering. `build_with_backend` honors this only on the IPM + feral +
+        // exact-Hessian path and falls back to the standard solver otherwise.
+        if let Some(indices) = &self.kkt_schur_block {
+            builder.set_kkt_schur(indices.clone(), feral_cfg.clone());
+        }
         // A caller-supplied KKT permutation (pounce#180 item 1) overrides
         // the string-option / env ordering: `OrderingMethod::External`
         // can't be expressed through the OptionsList (it carries a

@@ -29,6 +29,20 @@ changes.
   Lagrangian-Hessian eval time); `pounce.minimize` mirrors these as
   `res.wall_time` / `res.timing`. Lets a caller attribute a reduced-space
   solve's runtime (e.g. densified-Hessian eval cost) directly.
+- **Block-triangular / Schur KKT solve** (item 2). A structure-aware presolve
+  can hand pounce the reducible block of the KKT system; that block is
+  Schur-complemented out and only the two diagonal blocks are factorized, with
+  full-system inertia recovered a priori via Sylvester's law (Parker, Garcia &
+  Bent, arXiv:2602.17968). Python: `Problem.set_kkt_schur_block(indices)` /
+  `get_kkt_schur_block()` / `clear_kkt_schur_block()`; Rust:
+  `IpoptApplication::set_kkt_schur_block(indices)`. `indices` are KKT-space
+  (`x, slack, eq-dual, ineq-dual` block order). The Schur solver
+  (`FeralSchurSolver` + `SchurAugSystemSolver`) uses only feral's stable
+  factor/solve, and falls back to the standard full-space solver transparently
+  when the partition is unsuitable (too large a fraction, malformed, or a
+  singular diagonal block), so a stray hook never breaks a solve. Beneficial
+  only when the Schur block is much smaller than the eliminated block; honored
+  on the default feral + exact-Hessian path.
 
 ### Changed
 

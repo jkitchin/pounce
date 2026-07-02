@@ -197,9 +197,20 @@ Implications:
   `FeralSolverInterface` oracle: SPD + indefinite `A_FF`, scattered (non-tail)
   Schur sets, multi-RHS, refactor-same-pattern, `WrongInertia` flagging,
   malformed-partition rejection — all machine-precision solution + exact inertia.
-- **Phase 2 — `SchurAugSystemSolver` + app/Problem API (3–5 days):** trait impl,
-  block-partition hook, `InvalidInput`→`Std` fallback, wire through
-  `PdFullSpaceSolver`, inertia-loop integration.
+- **Phase 2 — `SchurAugSystemSolver` + app/Problem API: DONE.**
+  `crates/pounce-algorithm/src/kkt/schur_aug_system_solver.rs` implements
+  `AugSystemSolver` by wrapping `StdAugSystemSolver` (assembly + fallback) and a
+  `FeralSchurSolver`. Extracted `StdAugSystemSolver::assemble` +
+  triplet/packing accessors for reuse (no duplication). Transparent fallback to
+  the monolithic path on an over-`max_schur_frac` (default 0.5), malformed, or
+  singular-block partition — only `WrongInertia` reaches the δ-perturbation
+  loop (both blocks' diagonals are perturbed, so it converges). Wired through
+  `AlgorithmBuilder::set_kkt_schur` / `build_with_backend` (IPM + feral +
+  exact-Hessian only). API: `IpoptApplication::set_kkt_schur_block` (+ clear /
+  getter) and pyo3 `Problem.set_kkt_schur_block` (+ clear / getter). Tests:
+  HS14 uses the dual-block Schur split end-to-end (verified *not* falling back,
+  7 iters → optimum) + oversized-block fallback; Python convex-QP parity vs the
+  full-space solve, round-trip, oversized fallback, negative-index reject.
 - **Phase 3 — validation + perf (2–4 days):** corpus correctness/inertia parity,
   perf study, docs.
 - **Total ≈ 2–3 weeks** *if* Phase 0 hits outcome (1). Outcome (2) adds a FERAL

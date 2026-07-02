@@ -154,6 +154,36 @@ persistent config (it applies to every subsequent `solve()` until
 `clear_ordering()`) and is honored only by the default FERAL backend. This
 maps to FERAL's `OrderingMethod::External` (feral#107).
 
+### Block-triangular / Schur KKT solve (`set_kkt_schur_block`)
+
+If a presolve can identify a **reducible block** of the KKT system — e.g. the
+nonsingular block-triangular submatrix a reduced-space / variable-aggregation
+analysis exposes (Parker, Garcia & Bent, arXiv:2602.17968) — it can hand that
+block to pounce, which Schur-complements it out and factorizes only the two
+diagonal blocks, recovering the full-system inertia a priori via Sylvester's
+law:
+
+```python
+prob = pounce.Problem(n, m, problem_obj=...)   # needs an exact Hessian
+prob.set_kkt_schur_block(indices)              # KKT-space indices of the Schur block
+x, info = prob.solve(x0=...)
+# prob.get_kkt_schur_block()  -> installed indices, or None
+# prob.clear_kkt_schur_block()
+```
+
+`indices` are **KKT-space** indices into `0..dim` where
+`dim = n + n_slack + n_eq + n_ineq`, in the solver's internal
+`x, slack, eq-dual, ineq-dual` block order (e.g. for an all-equality problem
+the constraint-dual block is `range(n, n + n_eq)`, and the primal block is the
+positive-definite eliminated block — the classic range/null-space split). The
+method wins **only when the Schur block is much smaller than the eliminated
+block** (the dense Schur complement is `O(n_schur²)` to store and `O(n_schur³)`
+to factor). When the partition is unsuitable — too large a fraction of the
+system, malformed, or a diagonal block turns out singular — the solver **falls
+back to the standard full-space path transparently**, so the hook can never
+break a solve; it only changes *how* the identical system is factored, never
+the solution. Honored on the default feral + exact-Hessian path.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

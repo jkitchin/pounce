@@ -182,3 +182,63 @@ fn hs014_solves_with_adaptive_mu_quality_function() {
         stats.final_objective,
     );
 }
+
+/// pounce#180 item 2: solving with a Schur KKT partition installed reaches the
+/// same optimum as the standard full-space solve. HS14's augmented KKT has
+/// dimension `n_x + n_s + n_c + n_d = 2 + 1 + 1 + 1 = 5` in `x, s, c, d` block
+/// order; the constraint-dual block is indices `[3, 4]`. Choosing that as the
+/// Schur block leaves the primal `(x, s)` block — positive definite in the
+/// interior — as the eliminated `A_FF`, the classic range/null-space split.
+#[test]
+fn hs014_solves_with_schur_kkt_block() {
+    let mut app = IpoptApplication::new();
+    app.set_kkt_schur_block(vec![3, 4]);
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs014));
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    eprintln!(
+        "HS14 schur[3,4]: status={:?} iter={} obj={}",
+        status, stats.iteration_count, stats.final_objective,
+    );
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+    assert!(
+        (stats.final_objective - F_STAR).abs() < 1e-4,
+        "schur final_objective = {} (expected ~{F_STAR})",
+        stats.final_objective,
+    );
+}
+
+/// An oversized / unsuitable Schur block must not break the solve: the wrapper
+/// falls back to the standard full-space solver transparently. Here the block
+/// covers all-but-one index (well past the gate), so the Schur path is never
+/// activated, yet the solve still converges to the optimum.
+#[test]
+fn hs014_schur_oversized_block_falls_back() {
+    let mut app = IpoptApplication::new();
+    app.set_kkt_schur_block(vec![0, 1, 2, 3]); // 4/5 of the KKT → gate rejects
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs014));
+    let status = app.optimize_tnlp(tnlp);
+    let stats = app.statistics();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "unexpected status: {status:?}",
+    );
+    assert!(
+        (stats.final_objective - F_STAR).abs() < 1e-4,
+        "fallback final_objective = {} (expected ~{F_STAR})",
+        stats.final_objective,
+    );
+}
