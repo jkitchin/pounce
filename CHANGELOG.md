@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+### Added — structure-aware KKT hooks (#180)
+
+- **Caller-supplied KKT ordering** (item 1). A structure-aware presolve can
+  now hand pounce a precomputed fill-reducing permutation for the KKT linear
+  solver — a block-triangular / Schur ordering (Parker, Garcia & Bent,
+  arXiv:2602.17968) or a tearing ordering from equation-oriented
+  decomposition — that the built-in AMD/METIS pass cannot derive.
+  Python: `Problem.set_ordering(perm)` / `get_ordering()` / `clear_ordering()`;
+  Rust: `IpoptApplication::set_external_ordering(perm)`. `perm` is a 0-based
+  new-to-old permutation whose length equals the augmented KKT dimension;
+  FERAL validates it as a bijection and fails the factorization (never a wrong
+  answer) on a bad permutation. Maps to FERAL's new `OrderingMethod::External`
+  (feral#107); honored by the default FERAL backend only.
+- **Per-solve linear-algebra / callback timing** (item 3). `Problem.solve`'s
+  `info` dict now carries `info["wall_time"]` and an `info["timing"]`
+  breakdown (overall total, the linear-algebra factorization-vs-back-solve
+  split, and the per-callback objective / gradient / constraint / Jacobian /
+  Lagrangian-Hessian eval time); `pounce.minimize` mirrors these as
+  `res.wall_time` / `res.timing`. Lets a caller attribute a reduced-space
+  solve's runtime (e.g. densified-Hessian eval cost) directly.
+
+### Changed
+
+- **feral 0.12.0 → 0.13.0**, which adds `OrderingMethod::External(Vec<usize>)`
+  (feral#107). The enum is no longer `Copy` (the `External` arm carries a heap
+  permutation); pounce clones it where a copy was previously implicit.
+
 ## [0.7.0] - 2026-07-01
 
 ### Added — `pounce-rs` Rust facade crate (#168)

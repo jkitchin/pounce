@@ -126,6 +126,34 @@ Lagrangian-Hessian evaluation — the func/Jacobian/Hessian story becomes a
 direct measurement rather than an inference. All values are wall-clock
 seconds; unused subsystems read `0.0`.
 
+### Caller-supplied KKT ordering (`set_ordering`)
+
+A structure-aware presolve can hand pounce a fill-reducing permutation for
+the KKT linear solver that the built-in AMD/METIS pass cannot derive — a
+block-triangular / Schur ordering (Parker, Garcia & Bent, arXiv:2602.17968)
+or a tearing ordering from equation-oriented decomposition. Install it on
+the low-level `Problem` before solving:
+
+```python
+prob = pounce.Problem(n, m, problem_obj=...)
+prob.set_ordering(perm)        # 0-based new-to-old permutation (list / int array)
+x, info = prob.solve(x0=...)
+# prob.get_ordering()  -> the installed permutation, or None
+# prob.clear_ordering() -> restore the feral_ordering default
+```
+
+`perm[k]` is the original index that becomes index `k`. Its **length must
+equal the augmented KKT system dimension** (variables + slacks + constraint
+duals), *not* the problem's `n`; for an unconstrained problem that is `n`,
+but with constraints it is larger. The ordering is validated inside FERAL as
+a bijection — a wrong length or a duplicate fails the factorization and the
+solve returns a non-success status (e.g. `Error_In_Step_Computation`) rather
+than crashing or returning a wrong answer, since a permutation only affects
+fill and pivot order, never the computed solution. `set_ordering` is
+persistent config (it applies to every subsequent `solve()` until
+`clear_ordering()`) and is honored only by the default FERAL backend. This
+maps to FERAL's `OrderingMethod::External` (feral#107).
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

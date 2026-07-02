@@ -387,7 +387,11 @@ impl FeralSolverInterface {
         // default — it picks a concrete method per-matrix from cheap
         // pattern features. Override via the `feral_ordering`
         // OptionsList option or `POUNCE_FERAL_ORDERING` env var.
-        solver = solver.with_ordering(cfg.ordering);
+        // `.clone()` since FERAL 0.13's `OrderingMethod` is no longer
+        // `Copy` (the `External(Vec<usize>)` variant carries a heap
+        // permutation); the owned copy is moved into `self.ordering`
+        // below. Mirrors the `cfg.scaling.clone()` handling.
+        solver = solver.with_ordering(cfg.ordering.clone());
         // Diagonal scaling. `ScalingStrategy::Auto` is pounce's default
         // — FERAL's adaptive shape-based router. Override via the
         // `feral_scaling` OptionsList option or `POUNCE_FERAL_SCALING`
@@ -480,7 +484,11 @@ impl FeralSolverInterface {
         span.record("factor_nnz", stats.nnz_l);
         span.record("inertia_neg", stats.inertia.negative);
         span.record("fill_ratio", stats.fill_ratio);
-        span.record("ordering", tracing::field::debug(self.ordering));
+        // Borrow rather than move: `OrderingMethod` is no longer `Copy`
+        // (FERAL 0.13). FERAL's hand-written `Debug` prints the `External`
+        // arm compactly as `External { len: N }`, so this stays a
+        // one-liner even for a caller-supplied permutation.
+        span.record("ordering", tracing::field::debug(&self.ordering));
     }
 
     /// Build the lower-triangle CSC view, factor it, and stash the
@@ -1254,7 +1262,7 @@ mod tests {
         for (tag, expected) in cases {
             assert_eq!(
                 parse_ordering_method(tag),
-                Some(*expected),
+                Some(expected.clone()),
                 "tag {tag:?} should parse"
             );
         }
@@ -1269,7 +1277,9 @@ mod tests {
         use OrderingMethod::*;
         for method in [Auto, AutoRace, Amd, Amf, MetisND, ScotchND, KahipND] {
             let cfg = FeralConfig {
-                ordering: method,
+                // `.clone()` — `OrderingMethod` is no longer `Copy` (FERAL
+                // 0.13); `method` is reused in the assert messages below.
+                ordering: method.clone(),
                 ..FeralConfig::default()
             };
             let mut s = FeralSolverInterface::with_config(cfg);
@@ -1289,6 +1299,66 @@ mod tests {
             );
             assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for {method:?}");
             assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for {method:?}");
+        }
+    }
+
+    /// A caller-supplied `OrderingMethod::External` permutation (pounce#180
+    /// item 1 / FERAL#107) factors and solves correctly. Both the identity
+    /// and a swapped permutation are valid bijections, so each must recover
+    /// the same solution as every built-in ordering does above.
+    #[test]
+    fn external_ordering_solves_correctly() {
+        for perm in [vec![0usize, 1], vec![1usize, 0]] {
+            let cfg = FeralConfig {
+                ordering: OrderingMethod::External(perm.clone()),
+                ..FeralConfig::default()
+            };
+            let mut s = FeralSolverInterface::with_config(cfg);
+            // [[2,1],[1,3]] x = [3,4]  →  x = [1,1].
+            let irn: [Index; 3] = [1, 2, 2];
+            let jcn: [Index; 3] = [1, 1, 2];
+            assert_eq!(
+                s.initialize_structure(2, 3, &irn, &jcn),
+                ESymSolverStatus::Success,
+                "structure init for perm {perm:?}"
+            );
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success,
+                "solve for perm {perm:?}"
+            );
+            assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for perm {perm:?}");
+            assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for perm {perm:?}");
+        }
+    }
+
+    /// A wrong-length / non-bijection `External` permutation is rejected
+    /// by FERAL as `InvalidInput` and surfaces as a non-`Success` status —
+    /// never a panic and never a silently-wrong solve. Here a length-3
+    /// permutation is supplied for a 2×2 matrix.
+    #[test]
+    fn external_ordering_wrong_length_fails_without_panic() {
+        let cfg = FeralConfig {
+            ordering: OrderingMethod::External(vec![0, 1, 2]),
+            ..FeralConfig::default()
+        };
+        let mut s = FeralSolverInterface::with_config(cfg);
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        // The validation can fire at symbolic (structure init) or at the
+        // first factor (solve); either way the status must not be Success.
+        let init_st = s.initialize_structure(2, 3, &irn, &jcn);
+        if init_st == ESymSolverStatus::Success {
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = [3.0, 4.0];
+            let solve_st = s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0);
+            assert_ne!(
+                solve_st,
+                ESymSolverStatus::Success,
+                "wrong-length external ordering must fail the solve"
+            );
         }
     }
 

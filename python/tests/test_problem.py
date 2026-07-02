@@ -142,6 +142,69 @@ def test_unconstrained_quadratic():
 
 
 # --------------------------------------------------------------------------
+# issue #180 item 1 — caller-supplied KKT ordering (FERAL External).
+# --------------------------------------------------------------------------
+def _quad_problem(n, target):
+    class Quad:
+        def objective(self, x):
+            d = x - target
+            return float(d @ d)
+
+        def gradient(self, x):
+            return 2.0 * (x - target)
+
+    prob = pounce.Problem(n=n, m=0, problem_obj=Quad())
+    prob.add_option("tol", 1e-10)
+    prob.add_option("print_level", 0)
+    return prob
+
+
+def test_external_ordering_matches_default_and_round_trips():
+    """A caller-supplied permutation reaches the FERAL backend, solves to the
+    same optimum as the default ordering, and round-trips through
+    get_ordering / clear_ordering. For an unconstrained problem the augmented
+    KKT system is n×n, so a length-n permutation is a valid bijection — and a
+    valid ordering only changes fill/pivot order, never the solution."""
+    target = np.array([1.0, 2.0, -3.0, 4.5])
+
+    x_ref, _ = _quad_problem(4, target).solve(x0=np.zeros(4))
+
+    prob = _quad_problem(4, target)
+    assert prob.get_ordering() is None
+    prob.set_ordering([3, 2, 1, 0])  # reversed — a valid 4×4 permutation
+    np.testing.assert_array_equal(prob.get_ordering(), [3, 2, 1, 0])
+
+    x, info = prob.solve(x0=np.zeros(4))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x, x_ref, atol=1e-9)
+
+    # Persistent config: a second solve still uses it; then it clears.
+    x2, info2 = prob.solve(x0=np.ones(4))
+    assert info2["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x2, x_ref, atol=1e-9)
+    prob.clear_ordering()
+    assert prob.get_ordering() is None
+
+
+def test_external_ordering_negative_index_rejected():
+    """Negative permutation entries are rejected at set time (0-based indices);
+    the FERAL bijection check catches the rest at factorization."""
+    prob = _quad_problem(3, np.zeros(3))
+    with pytest.raises(ValueError):
+        prob.set_ordering([0, -1, 2])
+
+
+def test_external_ordering_wrong_length_fails_cleanly():
+    """A permutation whose length ≠ the KKT dimension is rejected by FERAL as
+    invalid input: the solve returns a non-success status rather than crashing
+    or silently returning a wrong answer."""
+    prob = _quad_problem(3, np.zeros(3))
+    prob.set_ordering([0, 1, 2, 3, 4, 5])  # length 6 for a 3×3 KKT system
+    _x, info = prob.solve(x0=np.ones(3))
+    assert info["status_msg"] != "Solve_Succeeded"
+
+
+# --------------------------------------------------------------------------
 # issue M32 — the `intermediate` callback return value must follow cyipopt
 # truthiness. A falsy return (False, 0, 0.0, []) requests a stop; truthy
 # continues. Pre-fix, the bridge used a strict `extract::<bool>().unwrap_or

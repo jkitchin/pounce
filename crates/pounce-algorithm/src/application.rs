@@ -182,6 +182,20 @@ pub struct IpoptApplication {
     /// re-optimize branch of `WarmStartIterateInitializer` keeps the
     /// installed iterate. Wire-set via [`Self::set_warm_start_iterate`].
     warm_start_iterate: Option<crate::debug::IterateSnapshot>,
+    /// Caller-supplied fill-reducing permutation for the KKT linear
+    /// solver (pounce#180 item 1 / FERAL#107). When `Some`, it overrides
+    /// whatever `feral_ordering` / `POUNCE_FERAL_ORDERING` resolves to,
+    /// installing [`pounce_feral::OrderingMethod::External`] on the FERAL
+    /// backend for the next solve. The vector is a **0-based, new-to-old
+    /// permutation** whose length must equal the augmented KKT system
+    /// dimension; FERAL validates it as a bijection and returns
+    /// `InvalidInput` (never panics) on a wrong length / index. Unlike the
+    /// warm-start hooks this is treated as persistent config — it is *not*
+    /// auto-cleared after a solve, so a caller sets it once for a run.
+    /// Wire-set via [`Self::set_external_ordering`]. Ignored by non-FERAL
+    /// backends and by any custom factory plugged via
+    /// [`Self::set_linear_backend_factory`].
+    external_ordering: Option<Vec<usize>>,
 }
 
 impl fmt::Debug for IpoptApplication {
@@ -228,6 +242,7 @@ impl IpoptApplication {
             sqp_warm_start: None,
             sqp_last_working_set: None,
             warm_start_iterate: None,
+            external_ordering: None,
         }
     }
 
@@ -624,6 +639,42 @@ impl IpoptApplication {
     /// Consumed once per solve, then auto-cleared.
     pub fn set_warm_start_iterate(&mut self, snap: crate::debug::IterateSnapshot) {
         self.warm_start_iterate = Some(snap);
+    }
+
+    /// Install a caller-supplied fill-reducing permutation for the KKT
+    /// linear solver (pounce#180 item 1). The next `optimize_*` builds
+    /// the FERAL backend with [`pounce_feral::OrderingMethod::External`],
+    /// overriding the `feral_ordering` string option / env var. Use this
+    /// to inject a block-triangular / Schur ordering a generic algorithm
+    /// cannot see (Parker, Garcia & Bent, arXiv:2602.17968) or a tearing
+    /// ordering from equation-oriented decomposition.
+    ///
+    /// `perm` is a **0-based, new-to-old permutation** (`perm[k]` is the
+    /// original index that becomes index `k`), and its length must equal
+    /// the augmented KKT system dimension (variables + slacks +
+    /// constraint duals), *not* the problem's `n`. A wrong length or a
+    /// non-bijection is rejected by FERAL at the first factorization with
+    /// an `InvalidInput` error (never a panic), surfacing as a solver
+    /// failure rather than a silently-wrong solve — the ordering only
+    /// affects fill/time, never the computed solution.
+    ///
+    /// Persistent config: unlike the warm-start hooks it is *not*
+    /// auto-cleared after a solve. Call [`Self::clear_external_ordering`]
+    /// to drop it. Ignored by non-FERAL backends and by any custom
+    /// factory plugged via [`Self::set_linear_backend_factory`].
+    pub fn set_external_ordering(&mut self, perm: Vec<usize>) {
+        self.external_ordering = Some(perm);
+    }
+
+    /// Drop any installed external KKT ordering, restoring the
+    /// `feral_ordering`-driven default for subsequent solves.
+    pub fn clear_external_ordering(&mut self) {
+        self.external_ordering = None;
+    }
+
+    /// The currently-installed external KKT ordering, if any.
+    pub fn external_ordering(&self) -> Option<&[usize]> {
+        self.external_ordering.as_deref()
     }
 
     /// Return the final QP working set from the most recent SQP
@@ -1309,7 +1360,16 @@ impl IpoptApplication {
         // `OptionsList` that drove the IPM-level builder above so
         // per-problem `.opt` files can flip backend knobs without
         // rebuilding pounce.
-        let feral_cfg = feral_config_from_options(&self.options);
+        let mut feral_cfg = feral_config_from_options(&self.options);
+        // A caller-supplied KKT permutation (pounce#180 item 1) overrides
+        // the string-option / env ordering: `OrderingMethod::External`
+        // can't be expressed through the OptionsList (it carries a
+        // vector), so it is injected here from the side-channel field.
+        // Only applies to the workspace-default FERAL backend below; a
+        // custom `linear_backend_factory` owns its own config.
+        if let Some(perm) = &self.external_ordering {
+            feral_cfg.ordering = pounce_feral::OrderingMethod::External(perm.clone());
+        }
         let factory = self.linear_backend_factory.take().unwrap_or_else(|| {
             default_backend_factory_with_sink(feral_cfg, Arc::clone(&self.linsol_summary_sink))
         });

@@ -64,6 +64,12 @@ pub struct PyProblem {
     /// `TNLP::get_scaling_parameters`. Only consulted by the IPM when
     /// `nlp_scaling_method=user-scaling`.
     user_scaling: Option<UserScaling>,
+    /// Caller-supplied fill-reducing KKT permutation installed via
+    /// `set_ordering` (pounce#180 item 1). Forwarded to
+    /// `IpoptApplication::set_external_ordering` in `prepare`, which
+    /// installs `OrderingMethod::External` on the FERAL backend. `None`
+    /// leaves the `feral_ordering` option / env default in charge.
+    external_ordering: Option<Vec<usize>>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -137,6 +143,7 @@ impl PyProblem {
             pending_working_set: None,
             last_working_set: None,
             user_scaling: None,
+            external_ordering: None,
         })
     }
 
@@ -424,6 +431,56 @@ impl PyProblem {
         self.user_scaling = None;
     }
 
+    /// Install a caller-supplied fill-reducing permutation for the KKT
+    /// linear solver (pounce#180 item 1 / FERAL#107). Lets a structure-
+    /// aware presolve hand pounce a block-triangular / Schur ordering the
+    /// generic AMD/METIS pass cannot see (Parker, Garcia & Bent,
+    /// arXiv:2602.17968).
+    ///
+    /// `perm` is a **0-based, new-to-old permutation** (`perm[k]` is the
+    /// original index that becomes index `k`) given as a sequence or
+    /// numpy integer array. Its length must equal the **augmented KKT
+    /// system dimension** (variables + slacks + constraint duals), *not*
+    /// the problem's `n`; supplying the wrong length or a non-bijection
+    /// makes the first factorization fail with a solver error rather than
+    /// return a wrong answer — the ordering only changes fill/time, never
+    /// the solution. Only the default FERAL backend honors it.
+    ///
+    /// Persistent config: call once before `solve()`; it applies to every
+    /// subsequent solve until `clear_ordering()`. Negative indices are
+    /// rejected here; the bijection check happens in FERAL.
+    fn set_ordering(&mut self, perm: Py<PyAny>) -> PyResult<()> {
+        let idx = extract_index_vec_inferred(&perm, "ordering")?;
+        let mut out = Vec::with_capacity(idx.len());
+        for v in idx {
+            if v < 0 {
+                return Err(PyValueError::new_err(
+                    "ordering: permutation indices must be non-negative (0-based)",
+                ));
+            }
+            out.push(v as usize);
+        }
+        self.external_ordering = Some(out);
+        Ok(())
+    }
+
+    /// Drop any installed external KKT ordering, restoring the
+    /// `feral_ordering` option / `POUNCE_FERAL_ORDERING` default.
+    fn clear_ordering(&mut self) {
+        self.external_ordering = None;
+    }
+
+    /// The currently-installed external KKT permutation as a numpy int64
+    /// array, or `None` if none is set.
+    fn get_ordering<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<i64>>> {
+        self.external_ordering.as_ref().map(|p| {
+            p.iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py)
+        })
+    }
+
     /// Solve, then run a parametric sensitivity step at the converged
     /// iterate. Returns `(x, info_dict)`; `info_dict` includes the
     /// extra keys `dx`, `dx_full`, `reduced_hessian`,
@@ -670,6 +727,15 @@ impl PyProblem {
         }
         app.initialize()
             .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
+
+        // Caller-supplied KKT ordering (pounce#180 item 1). Installed on
+        // the main-solve FERAL backend; the restoration factory built
+        // below intentionally keeps its default ordering, since the
+        // restoration KKT has extra p/n variables and a different
+        // dimension than the permutation is sized for.
+        if let Some(perm) = &self.external_ordering {
+            app.set_external_ordering(perm.clone());
+        }
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
         let bff_mint = move || -> InnerBackendFactoryFactory {
