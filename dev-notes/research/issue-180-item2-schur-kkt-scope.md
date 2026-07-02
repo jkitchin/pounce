@@ -203,10 +203,72 @@ Implications:
   request + release round-trip (as with item 1). A FERAL F3.3 (multi-supernode
   Schur tail) follow-up may be needed for larger aggregation problems.
 
+## Phase-0 spike results (RAN — green)
+
+Reproducer: `issue-180-item2-schur-spike.rs` (standalone `feral = "0.13.0"`
+crate). It builds KKT-shaped symmetric-indefinite matrices with an explicit
+F/S partition, runs the **self-formed Schur design** (factor `A_FF` standalone
+via `feral::Solver`, form `S = A_SS − A_FSᵀ A_FF⁻¹ A_FS` with `n_schur`
+backsolves, factor `S` densely, block-backsolve), and checks against a
+monolithic-factorization oracle. Sweeps `n` in both dimensions.
+
+**Q1 — correctness: PASS.** `max|x_schur − x_oracle|` is `4e-16 … 2e-15`
+(machine precision) across every case, including `n = 256 008`.
+
+**Q2 — inertia via Sylvester: PASS.** `inertia(A_FF) + inertia(S)` equals the
+oracle's full-system inertia in every case — including an **indefinite**
+eliminated block where both blocks carry negatives (`(25,29,0)`,
+`(1000,1016,0)`), not just the SPD-`A_FF` case. Haynsworth/Sylvester additivity
+holds exactly, which is the correctness core of the whole method.
+
+**Q3 — the dense trap: located precisely, and it is confined to `n_schur`.**
+- **Sweep A** (grow the sparse block `n_F` from 1k→256k, hold `n_S = 8`):
+  `nnz(L_AFF)` is exactly linear in `n_F` (≈9.5·`n_F`, tridiagonal → banded, no
+  fill blow-up); factor / form-S / backsolve times all scale ~linearly; the
+  dense-`S` cost is flat. **No n² anywhere in the sparse dimension.**
+- **Sweep B** (hold `n_F = 8000`, grow `n_S` from 2→1024): `nnz(L_AFF)` flat;
+  dense `S` storage `= n_S²`; the transient `W = A_FF⁻¹A_FS` buffer `= n_F·n_S`
+  (64 MB at `n_S=1024`); form-`S` superlinear; factor-`S` ~`n_S³` (0.055→0.262 s
+  as `n_S` 512→1024). This is the trap — **entirely a function of `n_schur`.**
+- **Crossover vs monolithic factor:** Schur is ~3.3× *faster* than the oracle
+  full factor at `n_S = 32` (`n_F=8000`) and ~15× *slower* at `n_S = 1024`. The
+  method wins iff `n_schur ≪ n_F`.
+
+**Open FERAL dependency — RESOLVED (unblocked).** The self-formed design uses
+only `feral::Solver::factor` / `solve` (proven, stable) and needs **no**
+un-exported partial-backsolve, so **item 2 is not blocked at the FERAL layer and
+needs no companion FERAL request** for a baseline. As an independent
+cross-check, feral's native `factorize_multifrontal_with_schur` produced a dense
+`S` that **matched the self-formed `S` to < 1e-9 in every case** — and it did
+**not** hit the F3.2b single-supernode limit even at `n_S = 1024` (feral's
+HALO-SCHUR amalgamation merges the tail). The native path remains attractive as
+a *memory* optimization (it forms `S` without materializing the `O(n_F·n_S)`
+`W` buffer) but would reintroduce the partial-backsolve question; **use the
+self-formed design as the baseline, revisit native as an optimization.**
+
+**Design guardrails this surfaces for Phase 1/2:**
+1. **Gate on `n_schur ≪ n_F`.** Refuse (fall back to `Std`) or warn when the
+   supplied Schur block is not small — otherwise the O(n_S³) factor + O(n_F·n_S)
+   memory make it lose to the monolithic solve. This threshold is the single
+   most important knob.
+2. **Stream the `S` formation** column-by-column (solve one `A_FS` column,
+   accumulate into `S`, discard) to keep transient memory at O(n_F) instead of
+   O(n_F·n_S).
+3. Per-IPM-iteration overhead adds `O(n_S · nnz(L_FF)) + O(n_S³)`; fine for
+   small `n_S`, and the item-3 timing breakdown already lets us measure it.
+
+**Effort revision:** Phase 0 (this spike) done. The baseline design carries **no
+FERAL round-trip** (the previously-largest risk), so the estimate tightens to the
+~2–3 week Phases 1–3 with the biggest unknown removed. Sylvester inertia — the
+remaining correctness risk — is empirically confirmed (incl. indefinite `A_FF`).
+
 ## Recommendation
 
-Worth doing, and **much cheaper than it first looked** because FERAL already
-built the primitive. But unlike item 1 it carries genuine correctness risk
-(inertia via Sylvester), one open FERAL dependency (block backsolve), and a
-scope limit (single-supernode Schur tail). **Do the Phase 0 spike first** — it is
-the cheapest way to de-risk the whole feature and decide go/no-go.
+**Green light.** Item 2 is **much cheaper and lower-risk than it first looked**:
+FERAL already ships the Schur primitive, the block backsolve + Sylvester inertia
+are proven correct to machine precision (incl. an indefinite eliminated block),
+and the design needs **no companion FERAL change** — the self-formed-`S` path
+uses only stable exported APIs. The one real hazard, the dense `n_schur²/n_schur³`
+cost, is fully understood and confined to the (intended-small) Schur block; guard
+it with an `n_schur ≪ n_F` gate + `Std` fallback. Proceed to Phase 1 (the
+pounce-feral Schur backend) when ready.
