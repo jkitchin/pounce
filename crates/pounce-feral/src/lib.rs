@@ -20,6 +20,9 @@
 
 use std::sync::{Arc, Mutex};
 
+pub mod schur;
+pub use schur::FeralSchurSolver;
+
 use feral::symbolic::SupernodeParams;
 use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, Solver};
 
@@ -268,6 +271,68 @@ pub fn parse_ordering_method(s: &str) -> Option<OrderingMethod> {
     }
 }
 
+/// Build a configured `feral::Solver` from a [`FeralConfig`]. Extracted from
+/// [`FeralSolverInterface::with_config`] so the Schur backend
+/// ([`crate::schur::FeralSchurSolver`]) configures its per-block solvers
+/// identically (same pivot threshold, cascade-break, parallelism, ordering,
+/// scaling) as the monolithic path.
+pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
+    // `POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` overrides feral's parallel-dispatch
+    // flop gate (feral#19, default 10^8). `0` fires the gate on every
+    // multi-child tree ≥ N_PAR_MIN supernodes; `u64::MAX` rejects all
+    // parallel dispatch at the tree level.
+    let mut np = NumericParams::default();
+    if let Ok(s) = std::env::var("POUNCE_FERAL_MIN_PAR_FLOPS") {
+        if let Ok(v) = s.parse::<u64>() {
+            np.min_parallel_flops = Some(v);
+        }
+    }
+    // Relative Bunch-Kaufman partial-pivoting threshold — the analog of
+    // Ipopt's `ma27_pivtol` / `ma57_pivtol` (`feral_pivtol` option /
+    // `POUNCE_FERAL_PIVTOL` env, read in `FeralConfig::from_env`).
+    np.bk.pivot_threshold = cfg.pivtol;
+    // Cascade-break (FERAL issue #55 Phase B). `NumericParams::default()`
+    // arms CB; the tri-state `cfg.cascade_break` only intervenes on an
+    // explicit set: None inherits the FERAL default (on), Some(true)
+    // re-arms explicitly, Some(false) disarms (reproduces pre-Phase-B).
+    match cfg.cascade_break {
+        None => {}
+        Some(true) => {
+            np.cascade_break_ratio = Some(0.5);
+            np.cascade_break_eps = Some(1e-10);
+        }
+        Some(false) => {
+            np.cascade_break_ratio = None;
+            np.cascade_break_eps = None;
+        }
+    }
+    let mut solver = Solver::with_params(np, SupernodeParams::default());
+    // Internal-parallelism toggle. Explicit `cfg.parallel` is the primary
+    // per-backend lever; when unset, fall back to the legacy process-wide
+    // `FERAL_PARALLEL` env var.
+    match cfg.parallel {
+        Some(p) => solver = solver.with_parallel(p),
+        None => {
+            if matches!(
+                std::env::var("FERAL_PARALLEL").as_deref(),
+                Ok("0") | Ok("false") | Ok("off")
+            ) {
+                solver = solver.with_parallel(false);
+            }
+        }
+    }
+    if cfg.fma {
+        solver = solver.with_fma(true);
+    }
+    // Fill-reducing ordering (`feral_ordering` / `POUNCE_FERAL_ORDERING`),
+    // and diagonal scaling (`feral_scaling` / `POUNCE_FERAL_SCALING`).
+    // `.clone()` since FERAL 0.13's `OrderingMethod` / `ScalingStrategy`
+    // carry heap `External` variants and are no longer `Copy`.
+    solver = solver.with_ordering(cfg.ordering.clone());
+    solver = solver.with_scaling(cfg.scaling.clone());
+    solver
+}
+
 /// Parse a case-insensitive scaling tag (the values accepted by the
 /// `feral_scaling` OptionsList option and the `POUNCE_FERAL_SCALING`
 /// env var) into the corresponding [`ScalingStrategy`]. Returns `None`
@@ -320,84 +385,7 @@ impl FeralSolverInterface {
     /// `feral_cascade_break` option is left unset. See
     /// [`FeralConfig::cascade_break`] for the tri-state semantics.
     pub fn with_config(cfg: FeralConfig) -> Self {
-        // `POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` overrides feral's parallel-
-        // dispatch flop gate (feral#19, default 10^8). `0` fires the
-        // gate on every multi-child tree ≥ N_PAR_MIN supernodes (pre-
-        // feral#19 behavior). `u64::MAX` rejects all parallel dispatch
-        // at the tree level. Useful when the per-hardware break-even
-        // is far from feral's default.
-        let mut np = NumericParams::default();
-        if let Ok(s) = std::env::var("POUNCE_FERAL_MIN_PAR_FLOPS") {
-            if let Ok(v) = s.parse::<u64>() {
-                np.min_parallel_flops = Some(v);
-            }
-        }
-        // Relative Bunch-Kaufman partial-pivoting threshold — the
-        // analog of Ipopt's `ma27_pivtol` / `ma57_pivtol`. Surfaced as
-        // the `feral_pivtol` OptionsList option (registered in
-        // pounce-algorithm's `upstream_options::register_all_options`),
-        // with the `POUNCE_FERAL_PIVTOL` env var (or its deprecated legacy
-        // alias `FERAL_PIVTOL`) as a fallback read in
-        // `FeralConfig::from_env`.
-        np.bk.pivot_threshold = cfg.pivtol;
-        // Cascade-break (FERAL issue #55 Phase B, commit 7554a78):
-        // `NumericParams::default()` now arms CB with `ratio = 0.5,
-        // eps = 1e-10` and bounds delayed-pivot catchment via a
-        // symbolic-time delay budget. Pounce no longer disables CB by
-        // default — the tri-state `cfg.cascade_break` only intervenes
-        // when the caller explicitly set the option:
-        //   None        — leave `np` alone (inherit FERAL default = on)
-        //   Some(true)  — explicit re-arm (matches the default; no-op
-        //                 in behaviour, but records caller intent)
-        //   Some(false) — explicit disarm (re-enables FERAL's
-        //                 `DelayBudgetExceeded` path on non-root
-        //                 cascade victims; only meaningful for
-        //                 reproducing pre-Phase-B behaviour)
-        match cfg.cascade_break {
-            None => {}
-            Some(true) => {
-                np.cascade_break_ratio = Some(0.5);
-                np.cascade_break_eps = Some(1e-10);
-            }
-            Some(false) => {
-                np.cascade_break_ratio = None;
-                np.cascade_break_eps = None;
-            }
-        }
-        let mut solver = Solver::with_params(np, SupernodeParams::default());
-        // Internal-parallelism toggle. An explicit `cfg.parallel` is the
-        // primary, per-backend lever (no global state); when unset, fall
-        // back to the legacy process-wide `FERAL_PARALLEL` env var for
-        // backward compatibility.
-        match cfg.parallel {
-            Some(p) => solver = solver.with_parallel(p),
-            None => {
-                if matches!(
-                    std::env::var("FERAL_PARALLEL").as_deref(),
-                    Ok("0") | Ok("false") | Ok("off")
-                ) {
-                    solver = solver.with_parallel(false);
-                }
-            }
-        }
-        if cfg.fma {
-            solver = solver.with_fma(true);
-        }
-        // Fill-reducing ordering. `OrderingMethod::Auto` is pounce's
-        // default — it picks a concrete method per-matrix from cheap
-        // pattern features. Override via the `feral_ordering`
-        // OptionsList option or `POUNCE_FERAL_ORDERING` env var.
-        // `.clone()` since FERAL 0.13's `OrderingMethod` is no longer
-        // `Copy` (the `External(Vec<usize>)` variant carries a heap
-        // permutation); the owned copy is moved into `self.ordering`
-        // below. Mirrors the `cfg.scaling.clone()` handling.
-        solver = solver.with_ordering(cfg.ordering.clone());
-        // Diagonal scaling. `ScalingStrategy::Auto` is pounce's default
-        // — FERAL's adaptive shape-based router. Override via the
-        // `feral_scaling` OptionsList option or `POUNCE_FERAL_SCALING`
-        // env var (e.g. `mc64` recovers exact inertia on some
-        // ill-conditioned KKTs where `Auto` mis-pivots — feral#65).
-        solver = solver.with_scaling(cfg.scaling.clone());
+        let solver = configure_solver(&cfg);
         Self {
             solver,
             initialized: false,

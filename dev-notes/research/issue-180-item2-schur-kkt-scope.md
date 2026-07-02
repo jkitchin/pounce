@@ -188,12 +188,15 @@ Implications:
 
 ## Effort estimate & phasing
 
-- **Phase 0 — Spike (½–1 day):** small KKT, `symbolic_factorize_with_schur` +
-  `factorize_multifrontal_with_schur`, attempt the full block backsolve, check
-  residual + inertia against `Std`. Resolves the backsolve dependency. **Gate.**
-- **Phase 1 — pounce-feral Schur backend (3–5 days):** factor/backsolve/inertia
-  wrapping the FERAL primitives; unit-tested at the pounce-feral layer
-  (identity-vs-`Std` residual + inertia on small KKTs).
+- **Phase 0 — Spike (½–1 day): DONE (green).** See § Phase-0 above.
+- **Phase 1 — pounce-feral Schur backend: DONE.** `crates/pounce-feral/src/schur.rs`
+  — `FeralSchurSolver` (init/values/factor/backsolve), self-formed-`S` design,
+  Sylvester inertia, per-block iterative refinement (`cfg.refine`), graceful
+  `FatalError` on a malformed partition. Extracted `configure_solver` so both the
+  monolithic and Schur backends configure feral identically. 7 unit tests vs a
+  `FeralSolverInterface` oracle: SPD + indefinite `A_FF`, scattered (non-tail)
+  Schur sets, multi-RHS, refactor-same-pattern, `WrongInertia` flagging,
+  malformed-partition rejection — all machine-precision solution + exact inertia.
 - **Phase 2 — `SchurAugSystemSolver` + app/Problem API (3–5 days):** trait impl,
   block-partition hook, `InvalidInput`→`Std` fallback, wire through
   `PdFullSpaceSolver`, inertia-loop integration.
