@@ -46,6 +46,53 @@ def test_minimize_rosenbrock():
     np.testing.assert_allclose(res.x, np.ones(4), atol=1e-4)
 
 
+def test_minimize_reports_timing_breakdown():
+    """pounce#180 item 3: the result exposes a per-subsystem wall-clock
+    breakdown (``res.timing`` / ``res.info["timing"]``) plus a top-level
+    ``res.wall_time``, so a caller can attribute solve runtime (func /
+    gradient / Jacobian / Hessian eval time, factorization vs back-solve)
+    without patching the solver."""
+
+    def f(x):
+        return float(x @ x)
+
+    def grad(x):
+        return 2.0 * x
+
+    res = pounce.minimize(f, x0=np.array([1.0, 2.0, 3.0]), jac=grad, print_level=0)
+    assert res.success
+
+    # Top-level convenience fields.
+    assert np.isfinite(res.wall_time)
+    assert res.wall_time >= 0.0
+    assert isinstance(res.timing, dict)
+    # Same breakdown is mirrored into the info dict.
+    assert res.info["timing"] == res.timing
+    assert res.info["wall_time"] == res.wall_time
+
+    # Advertised keys are present, non-negative, and the linear-algebra
+    # total is the exact sum of its factorization / back-solve parts.
+    expected_keys = {
+        "overall_alg",
+        "linear_system_total",
+        "linear_system_factorization",
+        "linear_system_back_solve",
+        "function_evaluations_total",
+        "eval_objective",
+        "eval_gradient",
+        "eval_constraints",
+        "eval_constraint_jacobian",
+        "eval_lagrangian_hessian",
+    }
+    assert expected_keys <= set(res.timing)
+    for key in expected_keys:
+        assert res.timing[key] >= 0.0, key
+    assert res.timing["linear_system_total"] == pytest.approx(
+        res.timing["linear_system_factorization"]
+        + res.timing["linear_system_back_solve"]
+    )
+
+
 def test_minimize_eq_constraint():
     """min  x[0]^2 + x[1]^2   s.t.   x[0] + x[1] = 1   →   x* = (.5, .5), f* = .5."""
 

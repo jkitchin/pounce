@@ -201,6 +201,28 @@ problem looks linear-solver-bound, try `feral_ordering auto_race`
 before per-variant manual sweeping — it's the safe choice when the
 per-problem winner is uncertain.
 
+#### Caller-supplied ordering (`External`)
+
+Beyond the string variants above, a structure-aware caller can inject a
+**precomputed permutation** the generic AMD/METIS pass cannot see — a
+block-triangular / Schur ordering (Parker, Garcia & Bent,
+arXiv:2602.17968) or a tearing ordering from equation-oriented
+decomposition. Because a permutation is a vector it cannot travel through
+the string `feral_ordering` option; supply it programmatically instead:
+
+- **Python:** `Problem.set_ordering(perm)` (and `get_ordering()` /
+  `clear_ordering()`) — see [the Python guide](./python.md#caller-supplied-kkt-ordering-set_ordering).
+- **Rust:** `IpoptApplication::set_external_ordering(perm)`.
+
+`perm` is a 0-based, new-to-old permutation (`perm[k]` is the original
+index that becomes index `k`) whose length must equal the **augmented KKT
+system dimension** (variables + slacks + constraint duals), not the
+problem's `n`. FERAL validates it as a bijection and fails the
+factorization with an error on a wrong length or duplicate — a valid but
+poor ordering only costs fill/time, never correctness. This maps to
+FERAL's `OrderingMethod::External` (feral#107) and honors only the default
+FERAL backend.
+
 ## Logging and colored output
 
 POUNCE emits structured logs and a colored iteration table through the

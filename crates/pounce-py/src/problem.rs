@@ -64,6 +64,17 @@ pub struct PyProblem {
     /// `TNLP::get_scaling_parameters`. Only consulted by the IPM when
     /// `nlp_scaling_method=user-scaling`.
     user_scaling: Option<UserScaling>,
+    /// Caller-supplied fill-reducing KKT permutation installed via
+    /// `set_ordering` (pounce#180 item 1). Forwarded to
+    /// `IpoptApplication::set_external_ordering` in `prepare`, which
+    /// installs `OrderingMethod::External` on the FERAL backend. `None`
+    /// leaves the `feral_ordering` option / env default in charge.
+    external_ordering: Option<Vec<usize>>,
+    /// Caller-supplied Schur KKT partition installed via
+    /// `set_kkt_schur_block` (pounce#180 item 2). Forwarded to
+    /// `IpoptApplication::set_kkt_schur_block` in `prepare`. `None` uses the
+    /// standard full-space solver.
+    kkt_schur_block: Option<Vec<usize>>,
 }
 
 /// Per-problem user scaling vector, mirroring `SetIpoptProblemScaling`
@@ -137,6 +148,8 @@ impl PyProblem {
             pending_working_set: None,
             last_working_set: None,
             user_scaling: None,
+            external_ordering: None,
+            kkt_schur_block: None,
         })
     }
 
@@ -337,6 +350,21 @@ impl PyProblem {
             None => py.None(),
         };
         info.set_item("working_set", ws_obj)?;
+        // Per-subsystem wall-clock breakdown (seconds) of this solve
+        // (pounce#180 item 3). `info["timing"]` is a dict keyed by
+        // subsystem (`overall_alg`, the linear-algebra split, and the
+        // per-callback objective/gradient/constraint/Jacobian/Hessian
+        // eval split); `info["wall_time"]` mirrors the overall total for
+        // convenience. Lets a reduced-space / variable-aggregation caller
+        // attribute runtime (e.g. densified-Hessian eval cost) directly
+        // instead of inferring it.
+        let timing = app.timing_stats();
+        let timing_dict = PyDict::new_bound(py);
+        for (label, secs) in timing.wall_time_breakdown() {
+            timing_dict.set_item(label, secs)?;
+        }
+        info.set_item("wall_time", timing.overall_alg.total_wallclock_time())?;
+        info.set_item("timing", timing_dict)?;
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))
     }
@@ -407,6 +435,107 @@ impl PyProblem {
     /// computes scales from the starting-point gradients).
     fn clear_problem_scaling(&mut self) {
         self.user_scaling = None;
+    }
+
+    /// Install a caller-supplied fill-reducing permutation for the KKT
+    /// linear solver (pounce#180 item 1 / FERAL#107). Lets a structure-
+    /// aware presolve hand pounce a block-triangular / Schur ordering the
+    /// generic AMD/METIS pass cannot see (Parker, Garcia & Bent,
+    /// arXiv:2602.17968).
+    ///
+    /// `perm` is a **0-based, new-to-old permutation** (`perm[k]` is the
+    /// original index that becomes index `k`) given as a sequence or
+    /// numpy integer array. Its length must equal the **augmented KKT
+    /// system dimension** (variables + slacks + constraint duals), *not*
+    /// the problem's `n`; supplying the wrong length or a non-bijection
+    /// makes the first factorization fail with a solver error rather than
+    /// return a wrong answer — the ordering only changes fill/time, never
+    /// the solution. Only the default FERAL backend honors it.
+    ///
+    /// Persistent config: call once before `solve()`; it applies to every
+    /// subsequent solve until `clear_ordering()`. Negative indices are
+    /// rejected here; the bijection check happens in FERAL.
+    fn set_ordering(&mut self, perm: Py<PyAny>) -> PyResult<()> {
+        let idx = extract_index_vec_inferred(&perm, "ordering")?;
+        let mut out = Vec::with_capacity(idx.len());
+        for v in idx {
+            if v < 0 {
+                return Err(PyValueError::new_err(
+                    "ordering: permutation indices must be non-negative (0-based)",
+                ));
+            }
+            out.push(v as usize);
+        }
+        self.external_ordering = Some(out);
+        Ok(())
+    }
+
+    /// Drop any installed external KKT ordering, restoring the
+    /// `feral_ordering` option / `POUNCE_FERAL_ORDERING` default.
+    fn clear_ordering(&mut self) {
+        self.external_ordering = None;
+    }
+
+    /// The currently-installed external KKT permutation as a numpy int64
+    /// array, or `None` if none is set.
+    fn get_ordering<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<i64>>> {
+        self.external_ordering.as_ref().map(|p| {
+            p.iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py)
+        })
+    }
+
+    /// Install a block-triangular / Schur KKT partition (pounce#180 item 2).
+    /// Lets a structure-aware presolve hand pounce the reducible block of the
+    /// KKT system (e.g. from a reduced-space / variable-aggregation analysis,
+    /// Parker, Garcia & Bent, arXiv:2602.17968): that block is
+    /// Schur-complemented out and only the two diagonal blocks are factorized,
+    /// with inertia recovered a priori via Sylvester's law.
+    ///
+    /// `indices` are **KKT-space indices** (`0..dim`, where
+    /// `dim = n + n_slack + n_eq + n_ineq` in the solver's internal
+    /// `x, slack, eq-dual, ineq-dual` block order) given as a sequence or numpy
+    /// integer array. The Schur block should be a **small** fraction of the
+    /// system (the method wins only when it is much smaller than the eliminated
+    /// block); when the partition is unsuitable (too large, malformed, or the
+    /// backend errors) the solver falls back to the standard full-space path
+    /// transparently, so a stray hook never breaks a solve. Honored only on the
+    /// default feral + exact-Hessian path. Negative indices are rejected.
+    ///
+    /// Persistent config: call once before `solve()`; drop with
+    /// `clear_kkt_schur_block()`.
+    fn set_kkt_schur_block(&mut self, indices: Py<PyAny>) -> PyResult<()> {
+        let idx = extract_index_vec_inferred(&indices, "kkt_schur_block")?;
+        let mut out = Vec::with_capacity(idx.len());
+        for v in idx {
+            if v < 0 {
+                return Err(PyValueError::new_err(
+                    "kkt_schur_block: indices must be non-negative (0-based KKT indices)",
+                ));
+            }
+            out.push(v as usize);
+        }
+        self.kkt_schur_block = Some(out);
+        Ok(())
+    }
+
+    /// Drop any installed Schur KKT partition, restoring the standard
+    /// full-space solver.
+    fn clear_kkt_schur_block(&mut self) {
+        self.kkt_schur_block = None;
+    }
+
+    /// The currently-installed Schur KKT partition as a numpy int64 array, or
+    /// `None` if none is set.
+    fn get_kkt_schur_block<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<i64>>> {
+        self.kkt_schur_block.as_ref().map(|p| {
+            p.iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<_>>()
+                .into_pyarray_bound(py)
+        })
     }
 
     /// Solve, then run a parametric sensitivity step at the converged
@@ -655,6 +784,22 @@ impl PyProblem {
         }
         app.initialize()
             .map_err(|e| PyRuntimeError::new_err(format!("initialize: {e}")))?;
+
+        // Caller-supplied KKT ordering (pounce#180 item 1). Installed on
+        // the main-solve FERAL backend; the restoration factory built
+        // below intentionally keeps its default ordering, since the
+        // restoration KKT has extra p/n variables and a different
+        // dimension than the permutation is sized for.
+        if let Some(perm) = &self.external_ordering {
+            app.set_external_ordering(perm.clone());
+        }
+        // Block-triangular / Schur KKT partition (pounce#180 item 2). The
+        // application routes the KKT solve through a SchurAugSystemSolver over
+        // these KKT-space indices, falling back to the standard solver when the
+        // partition is unsuitable.
+        if let Some(indices) = &self.kkt_schur_block {
+            app.set_kkt_schur_block(indices.clone());
+        }
 
         let feral_cfg = pounce_algorithm::application::feral_config_from_options(app.options());
         let bff_mint = move || -> InnerBackendFactoryFactory {

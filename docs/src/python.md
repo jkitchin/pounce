@@ -99,6 +99,91 @@ Two convenience knobs back this up:
   distinguishes those two statuses; if yours doesn't, gate on the residual
   directly as above.
 
+### Where the time went (`info["timing"]`)
+
+Every `Problem.solve` attaches a per-subsystem wall-clock breakdown so you
+can attribute a solve's runtime without patching or rebuilding the solver.
+`info["wall_time"]` is the overall-algorithm total (seconds); `info["timing"]`
+is a dict of the same total plus its components:
+
+```python
+x, info = prob.solve(x0=...)
+t = info["timing"]
+print(t["overall_alg"])                    # total solve wall time
+print(t["linear_system_factorization"],    # KKT factorization vs …
+      t["linear_system_back_solve"],        # … back-solve, and their
+      t["linear_system_total"])             # sum (total linear algebra)
+print(t["eval_objective"], t["eval_gradient"],
+      t["eval_constraints"], t["eval_constraint_jacobian"],
+      t["eval_lagrangian_hessian"])         # per-callback eval time
+```
+
+The `scipy`-style `pounce.minimize` facade mirrors these onto the result as
+`res.wall_time` and `res.timing` (also in `res.info`). The callback split is
+what lets you see, for example, that a reduced-space / variable-aggregation
+solve converges in few iterations but spends most of its time in a densified
+Lagrangian-Hessian evaluation — the func/Jacobian/Hessian story becomes a
+direct measurement rather than an inference. All values are wall-clock
+seconds; unused subsystems read `0.0`.
+
+### Caller-supplied KKT ordering (`set_ordering`)
+
+A structure-aware presolve can hand pounce a fill-reducing permutation for
+the KKT linear solver that the built-in AMD/METIS pass cannot derive — a
+block-triangular / Schur ordering (Parker, Garcia & Bent, arXiv:2602.17968)
+or a tearing ordering from equation-oriented decomposition. Install it on
+the low-level `Problem` before solving:
+
+```python
+prob = pounce.Problem(n, m, problem_obj=...)
+prob.set_ordering(perm)        # 0-based new-to-old permutation (list / int array)
+x, info = prob.solve(x0=...)
+# prob.get_ordering()  -> the installed permutation, or None
+# prob.clear_ordering() -> restore the feral_ordering default
+```
+
+`perm[k]` is the original index that becomes index `k`. Its **length must
+equal the augmented KKT system dimension** (variables + slacks + constraint
+duals), *not* the problem's `n`; for an unconstrained problem that is `n`,
+but with constraints it is larger. The ordering is validated inside FERAL as
+a bijection — a wrong length or a duplicate fails the factorization and the
+solve returns a non-success status (e.g. `Error_In_Step_Computation`) rather
+than crashing or returning a wrong answer, since a permutation only affects
+fill and pivot order, never the computed solution. `set_ordering` is
+persistent config (it applies to every subsequent `solve()` until
+`clear_ordering()`) and is honored only by the default FERAL backend. This
+maps to FERAL's `OrderingMethod::External` (feral#107).
+
+### Block-triangular / Schur KKT solve (`set_kkt_schur_block`)
+
+If a presolve can identify a **reducible block** of the KKT system — e.g. the
+nonsingular block-triangular submatrix a reduced-space / variable-aggregation
+analysis exposes (Parker, Garcia & Bent, arXiv:2602.17968) — it can hand that
+block to pounce, which Schur-complements it out and factorizes only the two
+diagonal blocks, recovering the full-system inertia a priori via Sylvester's
+law:
+
+```python
+prob = pounce.Problem(n, m, problem_obj=...)   # needs an exact Hessian
+prob.set_kkt_schur_block(indices)              # KKT-space indices of the Schur block
+x, info = prob.solve(x0=...)
+# prob.get_kkt_schur_block()  -> installed indices, or None
+# prob.clear_kkt_schur_block()
+```
+
+`indices` are **KKT-space** indices into `0..dim` where
+`dim = n + n_slack + n_eq + n_ineq`, in the solver's internal
+`x, slack, eq-dual, ineq-dual` block order (e.g. for an all-equality problem
+the constraint-dual block is `range(n, n + n_eq)`, and the primal block is the
+positive-definite eliminated block — the classic range/null-space split). The
+method wins **only when the Schur block is much smaller than the eliminated
+block** (the dense Schur complement is `O(n_schur²)` to store and `O(n_schur³)`
+to factor). When the partition is unsuitable — too large a fraction of the
+system, malformed, or a diagonal block turns out singular — the solver **falls
+back to the standard full-space path transparently**, so the hook can never
+break a solve; it only changes *how* the identical system is factored, never
+the solution. Honored on the default feral + exact-Hessian path.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one

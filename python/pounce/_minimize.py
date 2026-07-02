@@ -1175,5 +1175,12 @@ def minimize(
         nfev=int(eval_counters["nfev"]),
         njev=int(eval_counters["njev"]),
         nhev=int(eval_counters["nhev"]),
+        # Solve wall-clock total and its per-subsystem breakdown (seconds),
+        # surfaced top-level for discoverability (pounce#180 item 3). The
+        # full breakdown dict — objective / gradient / constraint /
+        # Jacobian / Lagrangian-Hessian eval time and the linear-algebra
+        # factorization-vs-back-solve split — is also in ``info["timing"]``.
+        wall_time=float(info.get("wall_time", float("nan"))),
+        timing=dict(info.get("timing", {})),
         info=dict(info),
     )
