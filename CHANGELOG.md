@@ -50,6 +50,21 @@ changes.
   (feral#107). The enum is no longer `Copy` (the `External` arm carries a heap
   permutation); pounce clones it where a copy was previously implicit.
 
+### Fixed
+
+- **`reaction_network` mode-aware dedup on flat eigenmodes (#183).** When the
+  PES has a genuine zero (flat) Hessian eigenmode — rigid translation/rotation
+  of any molecule, or an intrinsically flat coordinate — the minima dedup
+  compared full-coordinate distance, so copies of the *same* basin displaced
+  along the flat direction counted as distinct minima and exhausted the
+  `n_states` budget before flooding reached other basins (a whole basin, and
+  its connections, silently missed). `reaction_network` now deduplicates
+  minima, saddles, and saddle→basin descent matches in the **non-null subspace**
+  of the Hessian, quotienting out any eigenmode below `eig_tol`. Reduces
+  exactly to the previous scaled-Euclidean metric when no null modes are
+  present, so well-conditioned surfaces are unaffected. `find_saddles` gains an
+  optional `distance` override for the same purpose.
+
 ## [0.7.0] - 2026-07-01
 
 ### Added — `pounce-rs` Rust facade crate (#168)

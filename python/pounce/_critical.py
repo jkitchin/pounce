@@ -228,13 +228,17 @@ def find_saddles(
     eig_tol: float = 1e-8,
     max_step: float = 0.2,
     local_max_iter: int = 200,
+    distance: Callable | None = None,
     seed: int | None = None,
 ) -> CriticalPointResult:
     """Find index-``index`` saddle points by multistart eigenvector following.
 
     Each start is driven to a saddle by :func:`_eigvec_follow`; results with
     the requested Morse index, a converged gradient, and within bounds are
-    de-duplicated and collected.
+    de-duplicated and collected. ``distance`` overrides the dedup metric
+    (default: per-dimension scaled Euclidean, matching :func:`find_minima`);
+    :func:`reaction_network` passes a mode-aware metric so a flat Hessian
+    direction cannot spawn duplicate saddles (pounce#183).
     """
     x0 = np.atleast_1d(np.asarray(x0, float))
     _validate_bounds_length(bounds, x0.size)
@@ -256,7 +260,7 @@ def find_saddles(
     # Dedup in the same per-dimension scaled metric find_minima uses, so a
     # single `dedup` tolerance means the same thing across routes.
     L, _ = _scale_from_bounds(bounds, n)
-    sdist = lambda a, b: float(np.linalg.norm((a - b) / L))
+    sdist = distance or (lambda a, b: float(np.linalg.norm((a - b) / L)))
 
     def in_bounds(x):
         if bounds is None:
@@ -391,8 +395,16 @@ class ReactionNetwork:
         return len(self.minima)
 
 
-def _descend(grad, x_start, minima_x, ds, max_steps, reach):
-    """Normalized steepest-descent path; stop on reaching a known minimum."""
+def _descend(grad, x_start, minima_x, ds, max_steps, reach, distance=None):
+    """Normalized steepest-descent path; stop on reaching a known minimum.
+
+    ``distance`` overrides the reach metric (default: Euclidean). The
+    reaction-network caller passes a mode-aware metric so a descent that
+    parks at a different point along a flat Hessian direction still matches
+    the minimum in that basin instead of recording an unmapped endpoint
+    (pounce#183).
+    """
+    dist = distance or (lambda a, b: float(np.linalg.norm(a - b)))
     x = np.asarray(x_start, float).copy()
     path = [x.copy()]
     for _ in range(max_steps):
@@ -403,17 +415,71 @@ def _descend(grad, x_start, minima_x, ds, max_steps, reach):
         x = x - ds * g / ng
         path.append(x.copy())
         if minima_x:
-            d = [np.linalg.norm(x - m) for m in minima_x]
+            d = [dist(x, m) for m in minima_x]
             j = int(np.argmin(d))
             if d[j] < reach:
                 path.append(np.asarray(minima_x[j], float))
                 return np.array(path), j
     if minima_x:
-        d = [np.linalg.norm(x - m) for m in minima_x]
+        d = [dist(x, m) for m in minima_x]
         j = int(np.argmin(d))
         if d[j] < reach:
             return np.array(path), j
     return np.array(path), -1
+
+
+def _mode_aware_distance(hess, eig_tol, L):
+    """Dedup metric that ignores displacement along flat (near-null) modes.
+
+    The default minima-dedup metric is full-coordinate Euclidean distance.
+    When the PES has a genuine zero eigenmode — rigid translation/rotation
+    of any molecule, or an intrinsically flat coordinate — a minimizer can
+    halt anywhere along that direction, so two coordinates that are the
+    *same* basin land arbitrarily far apart and dedup keeps them as
+    distinct minima. On a fixed ``n_states`` budget those copies crowd out
+    genuinely different basins (pounce#183).
+
+    Measuring the displacement only in the **non-null subspace** of the
+    Hessian at the already-accepted minimum ``b`` collapses zero-mode
+    copies onto one representative while leaving stiff directions
+    untouched. When every mode is stiff the projector is the identity and
+    this reduces exactly to the ordinary per-dimension scaled metric, so
+    it is a safe always-on refinement rather than a behavior change for
+    well-conditioned surfaces.
+
+    ``dedup`` (the caller's tolerance) is still interpreted in the same
+    per-dimension scaled space ``(a - b) / L``; projection only removes
+    components, so a retained-mode separation still reads the same
+    magnitude.
+    """
+    L = np.asarray(L, float)
+    # The archive only ever compares a candidate against a *stored*
+    # minimum (the second argument), and there are at most ``n_states`` of
+    # them, so caching the projector per accepted minimum keeps this to one
+    # Hessian evaluation + eigendecomposition per basin.
+    cache: dict[bytes, np.ndarray] = {}
+
+    def projector(b):
+        key = b.tobytes()
+        P = cache.get(key)
+        if P is None:
+            H = np.asarray(hess(b), float)
+            H = 0.5 * (H + H.T)
+            w, U = np.linalg.eigh(H)
+            keep = np.abs(w) > eig_tol
+            Uk = U[:, keep]
+            # Uk @ Ukᵀ projects onto the span of the stiff modes; identity
+            # when `keep` is all-True (no null modes to quotient out).
+            P = Uk @ Uk.T
+            cache[key] = P
+        return P
+
+    def distance(a, b):
+        a = np.asarray(a, float)
+        b = np.asarray(b, float)
+        return float(np.linalg.norm(projector(b) @ ((a - b) / L)))
+
+    return distance
 
 
 def reaction_network(
@@ -469,10 +535,20 @@ def reaction_network(
     ms_min = max_solves if max_solves is not None else 40 * n_states
     ms_ts = max_solves if max_solves is not None else 40 * n_transition_states
 
+    # Mode-aware dedup: quotient out flat (near-null) Hessian directions so
+    # a zero eigenmode cannot manufacture arbitrarily many "distinct" minima
+    # that exhaust the `n_states` budget before flooding reaches other basins
+    # (pounce#183). Reduces to the ordinary scaled metric when no null modes
+    # are present.
+    n_vars = np.atleast_1d(np.asarray(x0, float)).size
+    L, _ = _scale_from_bounds(bounds, n_vars)
+    mode_distance = _mode_aware_distance(hess, eig_tol, L)
+
     mres = find_minima(
         fun, x0, method=minima_method, jac=grad, hess=hess, bounds=bounds,
         n_minima=n_states, max_solves=ms_min, patience=patience,
         dedup=dedup, options=options, strategy_kw=minima_kw, seed=seed,
+        distance=mode_distance,
     )
     minima = [_critical_point(fun, grad, hess, x, eig_tol) for x in mres.minima]
     minima_x = [m.x for m in minima]
@@ -482,7 +558,8 @@ def reaction_network(
     sres = find_saddles(
         fun, x0, grad=grad, hess=hess, bounds=bounds, index=1,
         n_saddles=n_transition_states, max_solves=ms_ts,
-        patience=patience, dedup=dedup, eig_tol=eig_tol, seed=seed, **skw,
+        patience=patience, dedup=dedup, eig_tol=eig_tol,
+        distance=mode_distance, seed=seed, **skw,
     )
 
     connections: list[Connection] = []
@@ -493,7 +570,8 @@ def reaction_network(
         segs, ends = [], []
         for sgn in (+1.0, -1.0):
             seg, j = _descend(grad, p.x + connect_offset * sgn * v, minima_x,
-                              descent_step, 3000, descent_reach)
+                              descent_step, 3000, descent_reach,
+                              distance=mode_distance)
             segs.append(seg)
             ends.append(j)
         i, j = ends

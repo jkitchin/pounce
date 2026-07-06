@@ -171,6 +171,48 @@ def test_reaction_network_muller_brown():
     assert net.path_between(0, hub) is not None
 
 
+def test_reaction_network_zero_eigenmode_basin():
+    """A flat (zero-eigenvalue) direction must not manufacture duplicate
+    minima that crowd out a genuine basin (pounce#183).
+
+    ``V = (x^2 - 1)^2 + 2 y^2`` is a double well in ``x``, harmonic in
+    ``y``, and *flat* in ``z`` — a genuine zero Hessian eigenmode. With
+    full-coordinate dedup, minimizers stopping at different ``z`` count as
+    distinct minima and exhaust ``n_states`` before flooding reaches the
+    ``x = -1`` well. Mode-aware dedup quotients the flat direction out, so
+    both wells are found and the ``x = 0`` saddle connects to both.
+    """
+    def V(v):
+        x, y, _z = v
+        return (x * x - 1.0) ** 2 + 2.0 * y * y
+
+    def gradV(v):
+        x, y, _z = v
+        return np.array([4.0 * x * (x * x - 1.0), 4.0 * y, 0.0])
+
+    def hessV(v):
+        x, y, _z = v
+        return np.array([[4.0 * (3.0 * x * x - 1.0), 0.0, 0.0],
+                         [0.0, 4.0, 0.0],
+                         [0.0, 0.0, 0.0]])
+
+    x0 = np.array([0.1, 0.2, 0.0])
+    net = pounce.reaction_network(
+        V, x0, grad=gradV, hess=hessV,
+        n_states=4, n_transition_states=4, seed=0,
+        options={"print_level": 0, "tol": 1e-10},
+    )
+
+    # Both wells (x = +1 and x = -1) are discovered rather than four
+    # z-shifted copies of a single well.
+    distinct_x = sorted({round(float(m.x[0])) for m in net.minima})
+    assert distinct_x == [-1, 1]
+
+    # The saddle at x = 0 descends to both wells: at least one connection is
+    # fully resolved (no unmapped -1 endpoint).
+    assert any(c.minima[0] >= 0 and c.minima[1] >= 0 for c in net.connections)
+
+
 def test_kind_labels():
     r = pounce.find_critical_points(
         fun, [0.3, 0.4], grad=grad, hess=hess, bounds=BOUNDS,
