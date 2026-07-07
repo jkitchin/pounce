@@ -43,6 +43,7 @@
 # Reference
 
 - [Algorithm & Workspace](algorithm.md)
+- [Initialization and Warm Starts](initialization.md)
 - [Active-Set SQP & Warm Starts](active-set-sqp.md)
   - [Design Note](active-set-sqp-warm-start.md)
 - [Scaling](scaling.md)
