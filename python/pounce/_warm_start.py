@@ -206,12 +206,22 @@ def _solve_with_warm_start(
     zu=None,
     working_set=None,
     warm_start: Optional[WarmStart] = None,
+    **kwargs,
 ):
+    # **kwargs forwards any other native solve keywords untouched
+    # (e.g. report_path / report_detail), so this wrapper never lags
+    # the native signature.
     if warm_start is None:
         if x0 is None:
             raise TypeError("Problem.solve() missing required argument: 'x0'")
         return _native_solve(
-            self, x0=x0, lagrange=lagrange, zl=zl, zu=zu, working_set=working_set
+            self,
+            x0=x0,
+            lagrange=lagrange,
+            zl=zl,
+            zu=zu,
+            working_set=working_set,
+            **kwargs,
         )
     ws = warm_start
     for k, v in ws.options().items():
@@ -226,7 +236,7 @@ def _solve_with_warm_start(
     ):
         if val is not None:
             kw[key] = val
-    return _native_solve(self, x0=ws.x if x0 is None else x0, **kw)
+    return _native_solve(self, x0=ws.x if x0 is None else x0, **kw, **kwargs)
 
 
 _solve_with_warm_start.__name__ = "solve"
