@@ -312,8 +312,7 @@ fn load_model(args: &CheckX0Args) -> Result<LoadedModel, String> {
         .nl
         .as_ref()
         .ok_or("expected a <problem.nl> argument or --builtin <name>")?;
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let sha = sha256::hex(&bytes);
     let prob = nl_reader::read_nl_file(path)?;
     let var_names = prob.var_names.clone();
@@ -379,8 +378,10 @@ pub fn check_tnlp(
     let x0_source = if let Some(path) = &args.x0_file {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let vals: Result<Vec<Number>, _> =
-            text.split_whitespace().map(|t| t.parse::<Number>()).collect();
+        let vals: Result<Vec<Number>, _> = text
+            .split_whitespace()
+            .map(|t| t.parse::<Number>())
+            .collect();
         let vals = vals.map_err(|e| format!("{}: bad value: {e}", path.display()))?;
         if vals.len() != n {
             return Err(format!(
@@ -418,8 +419,7 @@ pub fn check_tnlp(
 
     let mut g = vec![0.0; m];
     let g_ok = m == 0 || tnlp.eval_g(&x, false, &mut g);
-    let (g_nonfinite, g_nonfinite_count) =
-        scan_nonfinite(&g, con_names, 'c', args.max_list, g_ok);
+    let (g_nonfinite, g_nonfinite_count) = scan_nonfinite(&g, con_names, 'c', args.max_list, g_ok);
 
     // Jacobian: structure then values.
     let mut irow = vec![0i32; nnz];
@@ -434,7 +434,11 @@ pub fn check_tnlp(
                 irow: &mut irow,
                 jcol: &mut jcol,
             },
-        ) && tnlp.eval_jac_g(Some(&x), false, SparsityRequest::Values { values: &mut jval });
+        ) && tnlp.eval_jac_g(
+            Some(&x),
+            false,
+            SparsityRequest::Values { values: &mut jval },
+        );
     }
     let mut jac_nonfinite = Vec::new();
     let mut jac_nonfinite_count = 0usize;
@@ -800,7 +804,11 @@ fn print_report(o: &CheckX0Outcome) {
     if let Some(sha) = &o.nl_sha256 {
         println!("            sha256:{sha}");
     }
-    println!("  x0      : {}{}", o.x0_source, if o.x0_all_zero { "  (all zeros)" } else { "" });
+    println!(
+        "  x0      : {}{}",
+        o.x0_source,
+        if o.x0_all_zero { "  (all zeros)" } else { "" }
+    );
     println!();
 
     println!("  evaluation at x0:");
@@ -815,13 +823,14 @@ fn print_report(o: &CheckX0Outcome) {
         println!(
             "    Jacobian : {} non-finite entr{}",
             o.jac_nonfinite_count,
-            if o.jac_nonfinite_count == 1 { "y" } else { "ies" }
+            if o.jac_nonfinite_count == 1 {
+                "y"
+            } else {
+                "ies"
+            }
         );
         for e in &o.jac_nonfinite {
-            println!(
-                "        d{}/d{} = {}",
-                e.row_name, e.col_name, e.value
-            );
+            println!("        d{}/d{} = {}", e.row_name, e.col_name, e.value);
         }
     } else {
         println!("    Jacobian : finite");
@@ -912,7 +921,8 @@ fn report_json(o: &CheckX0Outcome) -> String {
             "lower": r.lo, "upper": r.hi, "violation": r.violation,
         })
     };
-    let nf = |e: &NonFinite| json!({"index": e.index, "name": e.name, "value": e.value.to_string()});
+    let nf =
+        |e: &NonFinite| json!({"index": e.index, "name": e.name, "value": e.value.to_string()});
     let report = json!({
         "pounce_check_x0_version": 1,
         "schema": "pounce.check-x0/v1",
@@ -1001,7 +1011,8 @@ mod tests {
         }
         fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
             b.x_l.copy_from_slice(&[0.0, NLP_LOWER_BOUND_INF]);
-            b.x_u.copy_from_slice(&[NLP_UPPER_BOUND_INF, NLP_UPPER_BOUND_INF]);
+            b.x_u
+                .copy_from_slice(&[NLP_UPPER_BOUND_INF, NLP_UPPER_BOUND_INF]);
             b.g_l[0] = 1.0;
             b.g_u[0] = 1.0;
             true
@@ -1086,7 +1097,10 @@ mod tests {
         assert!(o.n_on_bounds >= 1);
         assert!(o.n_clamp_moved >= 1);
         assert!((o.max_clamp_move - 1e-2).abs() < 1e-9);
-        assert!(o.warnings.iter().any(|w| w.contains("warm_start_bound_push")));
+        assert!(o
+            .warnings
+            .iter()
+            .any(|w| w.contains("warm_start_bound_push")));
     }
 
     #[test]
@@ -1120,8 +1134,7 @@ mod tests {
         );
         // Upper one-sided: hi=100 → push = 1e-2*100 = 1 → 100 → 99.
         assert!(
-            (clamp_to_interior(100.0, NLP_LOWER_BOUND_INF, 100.0, 1e-2, 1e-2) - 99.0).abs()
-                < 1e-12
+            (clamp_to_interior(100.0, NLP_LOWER_BOUND_INF, 100.0, 1e-2, 1e-2) - 99.0).abs() < 1e-12
         );
     }
 

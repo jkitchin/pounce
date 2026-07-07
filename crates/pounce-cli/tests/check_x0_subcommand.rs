@@ -40,7 +40,12 @@ fn healthy_nl_is_clean_and_emits_schema_json() {
         .arg("--json")
         .output()
         .expect("spawn pounce check-x0");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("stdout is a JSON report");
     assert_eq!(v["schema"], "pounce.check-x0/v1");
@@ -60,7 +65,12 @@ fn builtin_is_supported() {
         .arg("--json")
         .output()
         .expect("spawn pounce check-x0 --builtin");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
     assert_eq!(v["fatal"], false);
     assert_eq!(v["problem"]["source"], "builtin:rosenbrock");
@@ -97,7 +107,11 @@ fn x0_file_overrides_start_and_infeasibility_is_not_fatal() {
         .status()
         .expect("spawn")
         .code();
-    assert_eq!(code, Some(0), "an infeasible-but-evaluable start is not fatal");
+    assert_eq!(
+        code,
+        Some(0),
+        "an infeasible-but-evaluable start is not fatal"
+    );
     let v: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&report).unwrap()).expect("JSON");
     assert_eq!(v["fatal"], false);

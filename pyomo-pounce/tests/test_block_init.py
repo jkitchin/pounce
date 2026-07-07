@@ -9,6 +9,11 @@ import pytest
 
 import pyomo_pounce
 
+# pyomo defers optional imports, so pyomo.contrib.incidence_analysis
+# imports fine without networkx and only fails at first use — skip on
+# the real dependencies.
+pytest.importorskip("networkx", reason="block_initialize needs networkx")
+pytest.importorskip("scipy", reason="block_initialize needs scipy")
 pytest.importorskip(
     "pyomo.contrib.incidence_analysis",
     reason="block_initialize needs pyomo.contrib.incidence_analysis",

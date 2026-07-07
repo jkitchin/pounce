@@ -89,11 +89,16 @@ def block_initialize(
     import pyomo.environ as pyo
 
     try:
+        # Probe networkx explicitly: pyomo defers its optional imports, so
+        # `pyomo.contrib.incidence_analysis` imports fine without it and
+        # would only blow up (DeferredImportError) at first use.
+        import networkx  # noqa: F401
+
         from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
     except ImportError as e:  # pragma: no cover - environment-dependent
         raise ImportError(
             "block_initialize requires pyomo.contrib.incidence_analysis "
-            "(pip install networkx scipy)"
+            "and its optional dependencies (pip install networkx scipy)"
         ) from e
     from pyomo.util.calc_var_value import calculate_variable_from_constraint
     from pyomo.util.subsystems import TemporarySubsystemManager, create_subsystem_block
