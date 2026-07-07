@@ -52,6 +52,17 @@ changes.
 
 ### Fixed
 
+- **pip GAMS link honors `json_output` / `json_detail` (#187).** The pure-Python
+  GAMS link parsed those option-file keys and then discarded them, so a
+  `pounce.opt` requesting a `pounce.solve-report/v1` JSON was a silent no-op on
+  the pip route even though `docs/src/gams.md` advertises it (only the native C
+  link implemented it). `Problem.solve` now takes optional `report_path` /
+  `report_detail` (`"summary"` | `"full"`) kwargs that emit the report through
+  the **canonical Rust writer** (`pounce-solve-report`, the same schema/serializer
+  as the CLI's `--json-output`) — no report format is reimplemented in Python.
+  The GAMS link threads the two link options into that surface (Full detail
+  enables the per-iteration trace the `pounce-studio`/MCP post-mortem tools
+  consume), and the writer is now available to any Python caller.
 - **Convex QP/LP path now honors `max_iter=0` (#186).** A Pyomo/AMPL solve
   auto-routed to the `pounce-convex` interior-point path reported *Optimal
   Solution Found* even with `max_iter=0`, because the routed problem was solved

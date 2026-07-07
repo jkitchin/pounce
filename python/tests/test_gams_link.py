@@ -188,6 +188,45 @@ def test_solve_view_with_analytical_hessian_reaches_optimum():
     assert info["obj_val"] == pytest.approx(HS071_OPT, abs=1e-4)
 
 
+def test_solve_view_writes_solve_report(tmp_path):
+    """pounce#187: the pip link honors json_output/json_detail by writing a
+    canonical pounce.solve-report/v1 JSON via the Rust writer, so the report is
+    not a silent no-op on the pip route."""
+    import json
+
+    report = tmp_path / "hs071.report.json"
+    _gp, x, info = link.solve_view(
+        HS071View(with_hessian=True),
+        options={"tol": 1e-8},
+        report_path=str(report),
+        report_detail="full",
+    )
+    assert info["status_msg"] in _CONVERGED
+    assert report.exists(), "json_output must produce a report file on the pip route"
+
+    doc = json.loads(report.read_text())
+    assert doc["schema"] == "pounce.solve-report/v1"
+    assert doc["solution"]["status"] == "SolveSucceeded"
+    assert doc["problem"]["n_variables"] == 4
+    assert doc["problem"]["n_constraints"] == 2
+    # `full` detail carries the per-iteration trace the studio/MCP post-mortem
+    # tools consume; `summary` omits it.
+    assert doc["iterations"], "full detail should include the iteration history"
+    assert doc["solution"]["objective"] == pytest.approx(HS071_OPT, abs=1e-4)
+
+    # `summary` detail writes a valid report but drops the iteration history.
+    summary = tmp_path / "hs071.summary.json"
+    link.solve_view(
+        HS071View(with_hessian=True),
+        options={"tol": 1e-8},
+        report_path=str(summary),
+        report_detail="summary",
+    )
+    sdoc = json.loads(summary.read_text())
+    assert sdoc["schema"] == "pounce.solve-report/v1"
+    assert not sdoc.get("iterations")
+
+
 def test_maximize_sign_flips_objective_and_gradient():
     gp_min = problem_from_gmo(HS071View(maximize=False))
     gp_max = problem_from_gmo(HS071View(maximize=True))
