@@ -1,6 +1,6 @@
 ---
 name: pounce
-description: Inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, or pre-flight an AMPL .nl or GAMS .gms file before solving.
+description: Inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), or set up a warm start.
 ---
 
 # pounce — solver post-mortem and pre-flight
@@ -78,6 +78,22 @@ pounce-studio list-builtins                   # builtin --problem options
 The suggestion blocks are **advisory** — they are never auto-applied.
 Decide based on the user's intent whether to pass any of them to a
 fresh solve.
+
+### Starting-point pre-flight (`check-x0`, on the `pounce` binary)
+
+```sh
+pounce check-x0 <path.nl> [--json]            # evaluate the model at x0
+pounce check-x0 <path.nl> --x0-file cand.txt  # ... at a candidate point
+pounce check-x0 --builtin <name> --json
+```
+
+Evaluates the model once at its starting point (no solve) and reports
+NaN/inf evaluations (exit 21 — a solve WOULD abort with
+`Invalid_Number_Detected`), bound violations, how far the `bound_push`
+interior clamp will move the point, initial constraint violation per
+row, and derivative scale spread. Run it before the first solve of a
+new model, after any `Invalid_Number_Detected`, and whenever a warm
+start saved no iterations.
 
 ## Running a fresh solve
 
@@ -190,6 +206,41 @@ pounce-studio explain alpha_primal_char
 
 Returns a definition, typical numeric range, what abnormal values
 mean, and `see_also` citation keys.
+
+### "This model won't start / initialize" — the initialization playbook
+
+Reference: the *Initialization and Warm Starts* chapter of the docs
+(`docs/src/initialization.md`).
+
+1. **Preflight.** `pounce check-x0 model.nl --json`. `"fatal": true`
+   means the model does not evaluate at its start — fix that first
+   (in-domain values, or bounds that keep the clamp in the domain).
+   Not fatal: read the warnings in order.
+2. **Interpret.**
+   - *all-zeros x0* → the model supplies no start. Set values
+     (Pyomo `Var.value` / GAMS `x.L`), or generate them:
+     `pounce.generate_starts(...)` (Python),
+     `pyomo_pounce.initialize_missing_values(model)` /
+     `pyomo_pounce.block_initialize(model)` (Pyomo).
+   - *on-bound components + clamp moves* on a re-solve → the previous
+     solution is being discarded; use the warm-start recipe:
+     `ws = pounce.WarmStart.from_info(x, info); prob.solve(warm_start=ws)`
+     from Python, or the `warm_start_init_point=yes mu_init=1e-7
+     warm_start_*=1e-9` option set on the CLI.
+   - *very large initial infeasibility* →
+     `least_square_init_primal=yes`, or repair the point:
+     `pounce.project_to_feasible(...)`.
+   - *large derivative scale spread* → a scaling problem wearing an
+     initialization costume; go to the scaling recipes.
+3. **Re-solve with `--json-output ... --json-detail full` and
+   `pounce-studio diagnose`.** `restoration_used` findings that
+   disappear after re-initialization confirm the diagnosis; a clean
+   preflight plus a failing solve means the start is NOT the problem —
+   switch to the troubleshooting recipes.
+
+The MCP twin (`suggest_initialization` in `pounce-studio-mcp`) runs
+step 1 and emits these suggestions mechanically; treat its output as
+advisory, exactly like the `analyze-*` suggestion blocks.
 
 ### "Cite this for me"
 
