@@ -50,7 +50,9 @@ def _make_executable(path):
 def test_default_executable_prefers_bundled(monkeypatch, tmp_path):
     # A bundled binary exists at the deterministic wheel path, but PATH does
     # NOT contain `pounce`. The plugin must still resolve the bundled binary.
-    import pounce._cli as cli
+    # Needs the `pounce-solver` package (for `pounce._cli`); skip where only
+    # the CLI binary is on PATH (e.g. CI's pyomo-pounce smoke job).
+    cli = pytest.importorskip("pounce._cli")
 
     bundled = tmp_path / "bin" / "pounce"
     bundled.parent.mkdir()
@@ -65,7 +67,7 @@ def test_default_executable_prefers_bundled(monkeypatch, tmp_path):
 def test_default_executable_falls_back_to_path(monkeypatch, tmp_path):
     # No bundled binary (system install / local cargo dev build): fall back to
     # whatever `pounce` is on PATH.
-    import pounce._cli as cli
+    cli = pytest.importorskip("pounce._cli")
 
     monkeypatch.setattr(cli, "_bundled_binary", lambda: tmp_path / "absent" / "pounce")
     shim_dir = tmp_path / "pathbin"
@@ -79,7 +81,7 @@ def test_default_executable_falls_back_to_path(monkeypatch, tmp_path):
 
 def test_default_executable_none_when_nowhere(monkeypatch, tmp_path):
     # Neither bundled nor on PATH → None (the honest "unavailable" signal).
-    import pounce._cli as cli
+    cli = pytest.importorskip("pounce._cli")
 
     monkeypatch.setattr(cli, "_bundled_binary", lambda: tmp_path / "absent" / "pounce")
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
