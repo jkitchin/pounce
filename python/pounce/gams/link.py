@@ -165,12 +165,31 @@ def _coerce(val: str):
         return val
 
 
+def _resolve_json_detail(val, gev=None, gev_h=None) -> str:
+    """Validate the ``json_detail`` link option, matching the native C link.
+
+    Accepts ``"summary"`` / ``"full"``; anything else (including ``None`` when
+    ``json_output`` was given without ``json_detail``) falls back to ``"full"``,
+    logging a warning through GEV for an explicit but invalid value.
+    """
+    if val in ("summary", "full"):
+        return val
+    if val is not None and gev is not None and gev_h is not None:
+        gev.gevLogStat(
+            gev_h,
+            f"*** Warning: json_detail '{val}' not in {{summary,full}}; using 'full'",
+        )
+    return "full"
+
+
 def solve_view(
     view: "GmoView",
     *,
     options: dict | None = None,
     max_iter: int | None = None,
     max_wall_time: float | None = None,
+    report_path: str | None = None,
+    report_detail: str | None = None,
 ):
     """Translate a GMO view, build a POUNCE problem, solve, return ``(prob, x, info)``.
 
@@ -182,6 +201,10 @@ def solve_view(
     file); ``max_iter`` / ``max_wall_time`` come from the GAMS environment
     (``gevIterLim`` / ``gevResLim``) and are applied as defaults the option file
     can still override.
+
+    ``report_path`` / ``report_detail`` (the ``json_output`` / ``json_detail``
+    link options) route a ``pounce.solve-report/v1`` JSON to disk via the
+    canonical Rust writer, matching the native C link (pounce#187).
     """
     import pounce
 
@@ -214,7 +237,9 @@ def solve_view(
         except Exception as exc:  # unknown / invalid option: warn, keep going
             sys.stderr.write(f"pounce-gams: ignoring option '{key}': {exc}\n")
 
-    x, info = prob.solve(x0=gp.x0)
+    x, info = prob.solve(
+        x0=gp.x0, report_path=report_path, report_detail=report_detail
+    )
     return gp, x, info
 
 
@@ -276,16 +301,33 @@ def solve_from_control_file(
 
     # Option file (pounce.opt / .op2 ...).
     options: dict = {}
+    link_opts: dict = {}
     if gmo.gmoOptFile(gmo_h) > 0:
         optname = gmo.gmoNameOptFile(gmo_h)
         if isinstance(optname, (list, tuple)):  # some bindings return [rc, name]
             optname = optname[-1]
         gev.gevLogStat(gev_h, f"  Reading option file {optname}")
-        options, _link_opts = parse_option_file(str(optname))
+        options, link_opts = parse_option_file(str(optname))
+
+    # Link-specific keys (json_output / json_detail): route a
+    # pounce.solve-report/v1 JSON to disk through the canonical Rust writer,
+    # honoring what docs/src/gams.md advertises for the pip route (pounce#187).
+    report_path = link_opts.get("json_output") or None
+    report_detail = None
+    if report_path is not None:
+        report_detail = _resolve_json_detail(link_opts.get("json_detail"), gev, gev_h)
+        gev.gevLogStat(
+            gev_h, f"  Writing pounce.solve-report/v1 ({report_detail}) to {report_path}"
+        )
 
     view = _GmoAdapter(gmo_h, gmo)
     _gp, x, info = solve_view(
-        view, options=options, max_iter=max_iter, max_wall_time=max_wall
+        view,
+        options=options,
+        max_iter=max_iter,
+        max_wall_time=max_wall,
+        report_path=report_path,
+        report_detail=report_detail,
     )
 
     gev.gevLogStat(gev_h, f"POUNCE status: {info.get('status_msg')}")

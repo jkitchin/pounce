@@ -1060,6 +1060,7 @@ dependencies = [
  "pounce-qp",
  "pounce-restoration",
  "pounce-sensitivity",
+ "pounce-solve-report",
  "pyo3",
  "tracing",
 ]

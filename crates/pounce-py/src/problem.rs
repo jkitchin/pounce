@@ -18,7 +18,10 @@ use pounce_restoration::resto_inner_solver::{
     make_default_restoration_factory_provider, InnerBackendFactoryFactory,
 };
 use pounce_sensitivity::SensSolve;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pounce_solve_report::{
+    status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
+};
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::cell::RefCell;
@@ -203,7 +206,7 @@ impl PyProblem {
     /// previously stashed via `set_working_set`. After every SQP
     /// solve `info_dict["working_set"]` holds the final working
     /// set, and `get_working_set()` returns the same tuple.
-    #[pyo3(signature = (x0, lagrange=None, zl=None, zu=None, working_set=None))]
+    #[pyo3(signature = (x0, lagrange=None, zl=None, zu=None, working_set=None, report_path=None, report_detail=None))]
     fn solve<'py>(
         &mut self,
         py: Python<'py>,
@@ -212,8 +215,17 @@ impl PyProblem {
         zl: Option<Py<PyAny>>,
         zu: Option<Py<PyAny>>,
         working_set: Option<Py<PyAny>>,
+        report_path: Option<String>,
+        report_detail: Option<String>,
     ) -> PyResult<(Bound<'py, PyArray1<Number>>, Bound<'py, PyDict>)> {
         let (mut app, bridge) = self.prepare(py, x0, lagrange, zl, zu)?;
+        // A Full-detail solve report needs the per-iteration trace, which is
+        // only captured when explicitly enabled before the solve — mirrors the
+        // CLI's `--json-detail full` path (pounce#187).
+        let want_iter_history = report_path.is_some() && report_detail.as_deref() == Some("full");
+        if want_iter_history {
+            app.enable_iter_history();
+        }
         // Per-call working_set overrides any pending one set via
         // `set_working_set`. Either path lands as
         // `IpoptApplication::set_sqp_warm_start`.
@@ -365,6 +377,21 @@ impl PyProblem {
         }
         info.set_item("wall_time", timing.overall_alg.total_wallclock_time())?;
         info.set_item("timing", timing_dict)?;
+        // Optional `pounce.solve-report/v1` JSON, written by the canonical
+        // Rust writer (same schema as the CLI's `--json-output`), so callers
+        // like the pip GAMS link can emit a FAIR solve report without the
+        // report writer being reimplemented in Python (pounce#187).
+        if let Some(path) = report_path {
+            write_solve_report(
+                &path,
+                report_detail.as_deref(),
+                self.n,
+                self.m,
+                &stats,
+                status,
+                &bridge.borrow().state,
+            )?;
+        }
         let x_out = bridge.borrow().state.final_x.clone().into_pyarray_bound(py);
         Ok((x_out, info))
     }
@@ -925,6 +952,44 @@ impl PyProblem {
             .map(|(l, u)| l == u)
             .collect()
     }
+}
+
+/// Build and write a `pounce.solve-report/v1` JSON file from a finished
+/// solve, using the canonical Rust writer (`pounce-solve-report`) — the same
+/// schema and serializer the CLI's `--json-output` uses, so the Python path
+/// (pounce#187) never reimplements the report format. `detail` is
+/// `"summary"` (default) or `"full"`; the input is recorded as a direct TNLP
+/// solve.
+#[allow(clippy::too_many_arguments)]
+fn write_solve_report(
+    path: &str,
+    detail: Option<&str>,
+    n: Index,
+    m: Index,
+    stats: &pounce_nlp::solve_statistics::SolveStatistics,
+    status: ApplicationReturnStatus,
+    state: &PyTnlpInit,
+) -> PyResult<()> {
+    let detail = match detail {
+        Some(s) => ReportDetail::parse(s).map_err(PyValueError::new_err)?,
+        None => ReportDetail::Summary,
+    };
+    let mut builder = ReportBuilder::new(detail, InputDescriptor::TnlpDirect);
+    builder.problem.n_variables = n;
+    builder.problem.n_constraints = m;
+    builder.problem.n_objectives = 1;
+    // pounce's `Problem` always minimizes the objective callback.
+    builder.problem.minimize = true;
+    builder.ingest_stats(stats);
+    builder.solution.status = status;
+    builder.solution.solve_result_num = status_to_solve_result_num(status);
+    builder.solution.objective = state.final_obj;
+    builder.solution.x = state.final_x.clone();
+    builder.solution.lambda = state.final_lambda.clone();
+    let report = builder.finish();
+    write_report_file(std::path::Path::new(path), &report)
+        .map_err(|e| PyIOError::new_err(format!("failed to write solve report to {path}: {e}")))?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
