@@ -1,18 +1,25 @@
 """HS071 solved cold, then warm-started from the cold solution.
 
-`warm_start_init_point=yes` forwards the primal point and the dual
-seeds (`lagrange`, `zl`, `zu`) into the iterate initializer -- but on
-its own it does NOT cut iterations. Two defaults cancel the warm start:
+The one-liner is `pounce.WarmStart`: capture a solve's state with
+`WarmStart.from_info(x, info)` and pass it back as
+`solve(warm_start=ws)`. On HS071 that takes the re-solve from 11
+iterations down to 5.
+
+The rest of this example shows what that does under the hood, and why
+each piece is needed. `warm_start_init_point=yes` forwards the primal
+point and the dual seeds (`lagrange`, `zl`, `zu`) into the iterate
+initializer -- but on its own it does NOT cut iterations. Two defaults
+cancel the warm start:
 
 * `mu_init` (0.1) keeps the barrier parameter large, so the solver still
   walks mu down its full schedule even when started at x*.
-* `warm_start_bound_push` / `_frac` (1e-2) shove the initial point off
+* `warm_start_bound_push` / `_frac` (1e-3) shove the initial point off
   its bounds; HS071's x1 sits exactly on its lower bound, so the warm
   point is discarded.
 
 To actually save iterations, pair the dual seeds with a small `mu_init`
-and tight `warm_start_*_bound_push`/`_frac`. On HS071 that takes the
-re-solve from 11 iterations down to 5.
+and tight `warm_start_*_bound_push`/`_frac` -- which is exactly the
+option set `WarmStart` applies for you.
 """
 
 import numpy as np
@@ -74,6 +81,16 @@ def main():
     cold_x, cold_info = make_problem().solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
     print(f"cold:                   status={cold_info['status_msg']}, "
           f"iters={cold_info['iter_count']}")
+
+    # The one-liner: WarmStart captures x, the duals, and mu, and applies
+    # the whole tuned-option recipe below on the next solve.
+    ws = pounce.WarmStart.from_info(cold_x, cold_info)
+    ws_x, ws_info = make_problem().solve(warm_start=ws)
+    print(f"warm (WarmStart):       status={ws_info['status_msg']}, "
+          f"iters={ws_info['iter_count']}   <- {cold_info['iter_count']} "
+          f"-> {ws_info['iter_count']}")
+
+    # ----- what WarmStart does under the hood, step by step -----
 
     seeds = dict(
         lagrange=np.asarray(cold_info["mult_g"]),

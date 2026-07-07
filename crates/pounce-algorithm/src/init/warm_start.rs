@@ -18,10 +18,14 @@
 //!   apply the same multiplier clamps.
 //!
 //! Wired options today: `bound_push`, `bound_frac`,
-//! `slack_bound_push`, `slack_bound_frac`, `mult_init_max`,
-//! `target_mu`. The remaining knobs (`mult_bound_push`,
-//! `entire_iterate`, `same_structure`) are stored but not yet
-//! consumed.
+//! `slack_bound_push`, `slack_bound_frac`, `mult_bound_push`,
+//! `mult_init_max`, `target_mu`. `mult_bound_push` floors the four
+//! bound-multiplier blocks (mirroring upstream's `ElementWiseMax`
+//! with `warm_start_mult_bound_push`): a user-seeded `z = 0` would
+//! otherwise start the barrier on its boundary. The remaining knobs
+//! (`entire_iterate`, `same_structure`) are parsed for Ipopt option
+//! compatibility but not yet consumed — they require the
+//! `GetWarmStartIterate` TNLP surface, which pounce does not expose.
 
 use crate::alg_builder::WarmStartOptions;
 use crate::init::default::push_x_into_interior;
@@ -84,23 +88,32 @@ impl IterateInitializer for WarmStartIterateInitializer {
             seed_from_nlp(data, nlp, &self.opts);
         }
 
-        if self.opts.mult_init_max > 0.0 {
+        if self.opts.mult_init_max > 0.0 || self.opts.mult_bound_push > 0.0 {
             // Rebuild `curr` with clamped multipliers. Components are
             // shared via `Rc` with previous solves, so we make fresh
             // copies before mutating to avoid clobbering downstream
-            // borrowers.
+            // borrowers. Bound multipliers are additionally floored at
+            // `mult_bound_push` (upstream `warm_start_mult_bound_push`):
+            // the barrier needs them strictly positive, and a carried-in
+            // 0 (e.g. an inactive bound in the previous solution) would
+            // otherwise start on the boundary.
             let mut borrow = data.borrow_mut();
             let curr = borrow.curr.as_ref().unwrap();
-            let cap = self.opts.mult_init_max;
+            let cap = if self.opts.mult_init_max > 0.0 {
+                self.opts.mult_init_max
+            } else {
+                f64::INFINITY
+            };
+            let z_floor = self.opts.mult_bound_push.max(0.0);
             let new_curr = IteratesVector::new(
                 Rc::clone(&curr.x),
                 Rc::clone(&curr.s),
                 clone_clamped(&curr.y_c, -cap, cap),
                 clone_clamped(&curr.y_d, -cap, cap),
-                clone_clamped(&curr.z_l, 0.0, cap),
-                clone_clamped(&curr.z_u, 0.0, cap),
-                clone_clamped(&curr.v_l, 0.0, cap),
-                clone_clamped(&curr.v_u, 0.0, cap),
+                clone_clamped(&curr.z_l, z_floor, cap),
+                clone_clamped(&curr.z_u, z_floor, cap),
+                clone_clamped(&curr.v_l, z_floor, cap),
+                clone_clamped(&curr.v_u, z_floor, cap),
             );
             borrow.set_curr(new_curr);
         }
@@ -280,6 +293,20 @@ mod tests {
         let out = clone_clamped(&v, 0.0, 1.0);
         assert!((out.max() - 0.5).abs() < 1e-15);
         assert!((out.min() - 0.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn mult_bound_push_floors_zero_bound_multipliers() {
+        // A carried-in z = 0 (inactive bound in the previous solution)
+        // must be floored at warm_start_mult_bound_push, matching
+        // upstream's ElementWiseMax — the barrier needs z > 0.
+        let v = dense(3, 0.0);
+        let out = clone_clamped(&v, 1e-3, 1e6);
+        assert!((out.min() - 1e-3).abs() < 1e-18);
+        // Values already above the floor pass through.
+        let v2 = dense(3, 0.7);
+        let out2 = clone_clamped(&v2, 1e-3, 1e6);
+        assert!((out2.max() - 0.7).abs() < 1e-15);
     }
 
     #[test]

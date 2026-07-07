@@ -899,6 +899,7 @@ def minimize(
     bounds: Sequence | None = None,
     constraints: Sequence | LinearConstraint | dict | None = None,
     callback: Callable | None = None,
+    warm_start=None,
     **options: Any,
 ) -> OptimizeResult:
     """scipy.optimize.minimize-style facade over pounce.
@@ -938,6 +939,13 @@ def minimize(
     Like :func:`scipy.optimize.minimize`, this facade is **silent by default**.
     Pass ``disp=True`` for a concise log or an explicit ``print_level=N``
     (0–12) to control the NLP backend's IPM iteration table directly.
+
+    Re-solves of a related problem can pass ``warm_start=`` a
+    :class:`pounce.WarmStart` captured from a previous result
+    (``WarmStart.from_info(res.x, res.info)``): it seeds the primal and
+    dual iterates and sets the enabling warm-start options (see
+    the initialization chapter of the docs). A warm start always runs on
+    the NLP path — convex routing is skipped.
     """
     # Accept both calling conventions: scipy-style ``options={...}`` (one dict
     # argument) and the splatted ``**options`` form (kwargs absorbed by the
@@ -967,6 +975,13 @@ def minimize(
     # `"nlp"` (no probe) — opt in to `"auto"` to enable structure detection.
     selection = str(options.pop("solver_selection", "nlp")).lower()
     route_tol = float(options.pop("route_tol", 1e-5))
+    if warm_start is not None and selection != "nlp":
+        warnings.warn(
+            "pounce.minimize: warm_start= runs on the NLP path; "
+            f"solver_selection={selection!r} is ignored for this solve.",
+            stacklevel=2,
+        )
+        selection = "nlp"
     # scipy.optimize.minimize is silent unless `disp=True`; match that. pounce's
     # NLP backend otherwise prints a full IPM iteration table by default (and
     # the log is written from Rust to fd 1, so Python stdout redirection can't
@@ -1148,7 +1163,12 @@ def minimize(
         ipopt_k, ipopt_v = _translate_option(k, v)
         problem.add_option(ipopt_k, ipopt_v)
 
-    x, info = problem.solve(x0=x0)
+    # Pass warm_start only when set: test doubles (and any cyipopt-style
+    # stand-in) may not accept the keyword.
+    if warm_start is not None:
+        x, info = problem.solve(x0=x0, warm_start=warm_start)
+    else:
+        x, info = problem.solve(x0=x0)
     # (E, gh #119 / #123) Judge success on the final KKT error, not the exit
     # status enum alone. Ipopt-family solvers report a non-success status (e.g.
     # ``Search_Direction_Becomes_Too_Small``, code 3) when progress stalls — but

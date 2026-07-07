@@ -85,6 +85,21 @@ A point where a function *fails to evaluate* is not fine; see
 
 ## Warm-starting the interior-point path
 
+From Python, the packaged form is one object:
+
+```python
+x, info = prob.solve(x0=x0)                  # cold solve
+ws = pounce.WarmStart.from_info(x, info)     # captures x, duals, mu
+x2, info2 = prob.solve(warm_start=ws)        # warm re-solve
+ws.save("state.npz")                         # reuse across processes
+```
+
+`warm_start=` is accepted by `Problem.solve` and `pounce.minimize`,
+seeds the primal and dual iterates, applies the enabling options
+below, and forwards the SQP working set when the state was captured
+from that path. The rest of this section is what it does under the
+hood (and the only route from the CLI or an options file).
+
 Passing a previous solution as `x0` is **not** a warm start by
 itself. The IPM warm start is a package of three things, and skipping
 any one of them silently degrades to (roughly) a cold solve:
@@ -130,7 +145,7 @@ the `.nl` file's dual segment when present.
 | `warm_start_init_point` | `no` | Master switch: honor supplied primal *and* dual seeds. |
 | `warm_start_bound_push` / `warm_start_bound_frac` | `1e-3` | Interior clamp used instead of `bound_push` / `bound_frac`. |
 | `warm_start_slack_bound_push` / `warm_start_slack_bound_frac` | `1e-3` | Same, for slacks. |
-| `warm_start_mult_bound_push` | `1e-3` | Same, for bound multipliers. |
+| `warm_start_mult_bound_push` | `1e-3` | Floor on seeded bound multipliers (a carried-in `z = 0` must not start on the barrier's boundary). |
 | `warm_start_mult_init_max` | `1e6` | Cap on seeded equality multipliers. |
 
 Even a well-executed IPM warm start has a structural limit: the
