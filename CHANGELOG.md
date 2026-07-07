@@ -52,6 +52,17 @@ changes.
 
 ### Fixed
 
+- **Convex QP/LP path now honors `max_iter=0` (#186).** A Pyomo/AMPL solve
+  auto-routed to the `pounce-convex` interior-point path reported *Optimal
+  Solution Found* even with `max_iter=0`, because the routed problem was solved
+  by presolve or a direct step that ignored the iteration cap — violating the
+  AMPL/Ipopt contract that zero iterations cannot reach optimality (the NLP
+  path already reported `MaximumIterationsExceeded`). The convex QP and SOCP
+  dispatch now short-circuit to an iteration-limit result before any solve when
+  `max_iter=0`, and `max_iter` is forwarded to the convex driver for the `=0`
+  case (previously dropped). CI now runs `pytest pyomo-pounce/tests`
+  end-to-end (not just an import smoke test), which is how this regressed
+  silently.
 - **`reaction_network` mode-aware dedup on flat eigenmodes (#183).** When the
   PES has a genuine zero (flat) Hessian eigenmode — rigid translation/rotation
   of any molecule, or an intrinsically flat coordinate — the minima dedup
