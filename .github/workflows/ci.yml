@@ -179,11 +179,14 @@ jobs:
           which pounce
           pounce --help | head -5
 
-  # Smoke-build the pyomo-pounce wheel. Pure-Python now: the `pounce`
-  # binary comes from the `pounce-solver` dep, not bundled here. We
-  # build the wheel, install it alongside a locally-built `pounce` on
-  # PATH (since `pounce-solver` may not yet be on PyPI at PR time), and
-  # confirm the plugin resolves the executable.
+  # Smoke-build the pyomo-pounce wheel and run its test suite. Pure-Python
+  # now: the `pounce` binary comes from the `pounce-solver` dep, not bundled
+  # here. We build the wheel, install it alongside a locally-built `pounce`
+  # on PATH (since `pounce-solver` may not yet be on PyPI at PR time), confirm
+  # the plugin resolves the executable, then run `pytest pyomo-pounce/tests`
+  # end-to-end against that binary. The pytest step exercises actual solves
+  # (option forwarding, routing) that a plain import smoke test cannot —
+  # without it, routing regressions like pounce#186 ship silently.
   pyomo-pounce-smoke:
     name: wheel smoke (pyomo-pounce)
     runs-on: ubuntu-latest
@@ -212,3 +215,12 @@ jobs:
           export PATH="$PWD/target/release:$PATH"
           which pounce
           python -c "import pyomo_pounce; from pyomo.opt import SolverFactory; s = SolverFactory('pounce'); print('exe:', s.executable())"
+      - name: Run pyomo-pounce tests
+        run: |
+          python -m pip install pytest
+          # The plugin resolves `pounce` from PATH, so re-export it here
+          # (each `run:` is a fresh shell). These tests drive real solves
+          # through the AMPL/`.nl` layer — option forwarding, solver routing —
+          # which is what catches regressions the import smoke test misses.
+          export PATH="$PWD/target/release:$PATH"
+          python -m pytest pyomo-pounce/tests -q

@@ -226,6 +226,65 @@ fn auto_routes_convex_qp_to_pounce_convex() {
     );
 }
 
+/// pounce#186: `max_iter=0` on the convex-routed path must honor AMPL/Ipopt
+/// semantics — zero iterations cannot reach optimality. The convex path used
+/// to report "Optimal Solution Found" regardless (the routed QP was solved by
+/// presolve / a direct step that ignored the cap), so a Pyomo `max_iter=0`
+/// silently "succeeded". Both arms are checked on the same `auto`-routed convex
+/// QP: the plain-CLI status line reports the iteration limit (not optimal), and
+/// under `-AMPL` the `.sol` carries the non-optimal `solve_result_num` 400.
+#[test]
+fn max_iter_zero_on_convex_path_is_not_optimal() {
+    // Plain-CLI arm: the convex banner must report the iteration limit.
+    let out = Command::new(pounce_exe())
+        .arg(fixture())
+        .arg("--no-sol")
+        .arg("solver_selection=auto")
+        .arg("max_iter=0")
+        .output()
+        .expect("spawn pounce");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("pounce-convex"),
+        "the QP must still route to the convex path:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Optimal Solution Found"),
+        "max_iter=0 must not report optimal on the convex path:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Maximum iterations exceeded"),
+        "max_iter=0 must report the iteration limit:\n{stdout}"
+    );
+
+    // `-AMPL` arm: the non-optimal verdict travels in the `.sol` as
+    // solve_result_num 400, which is what Pyomo reads back.
+    let dir = std::env::temp_dir();
+    let sol = dir.join("pounce_186_max_iter_zero.sol");
+    let _ = std::fs::remove_file(&sol);
+    let ampl = Command::new(pounce_exe())
+        .arg(fixture())
+        .arg("-AMPL")
+        .arg("--sol-output")
+        .arg(&sol)
+        .arg("solver_selection=auto")
+        .arg("max_iter=0")
+        .output()
+        .expect("spawn pounce");
+    assert_eq!(
+        ampl.status.code(),
+        Some(0),
+        "-AMPL must exit 0 (verdict travels in the .sol); stdout=\n{}",
+        String::from_utf8_lossy(&ampl.stdout)
+    );
+    let text = std::fs::read_to_string(&sol).expect("verdict .sol written under -AMPL");
+    assert!(
+        text.contains("400"),
+        "the iteration-limit solve_result_num (400) must be in the .sol:\n{text}"
+    );
+    let _ = std::fs::remove_file(&sol);
+}
+
 #[test]
 fn forced_qp_ipm_solves() {
     let out = Command::new(pounce_exe())

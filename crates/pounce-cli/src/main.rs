@@ -1564,7 +1564,11 @@ fn convex_cli_opts(app: &IpoptApplication) -> pounce_convex::QpOptions {
     let mut o = pounce_convex::QpOptions::default();
     let opt = app.options();
     if let Ok((v, true)) = opt.get_integer_value("max_iter", "") {
-        if v > 0 {
+        // Forward `max_iter=0` too: AMPL/Ipopt semantics make it a
+        // "take no iterations" request that must not reach optimality
+        // (pounce#186). Only a negative value (invalid) is ignored so the
+        // usize cast can't wrap.
+        if v >= 0 {
             o.max_iter = v as usize;
         }
     }
@@ -1676,7 +1680,15 @@ fn run_convex_qp(
         collect_iterates: want_trace,
         ..convex_opts
     };
-    let sol = if let Some(hook) = debug_hook {
+    let sol = if qp_opts.max_iter == 0 {
+        // AMPL/Ipopt semantics: `max_iter=0` takes no iterations and so
+        // cannot reach optimality. Presolve can otherwise solve a trivial
+        // problem (e.g. an unconstrained quadratic) directly — or the IPM's
+        // reduced/empty solve can report Optimal — regardless of the cap, so
+        // enforce the zero-iteration stop here before any solve runs
+        // (pounce#186). Mirrors the NLP path's MaximumIterationsExceeded.
+        trivial(QpStatus::IterationLimit)
+    } else if let Some(hook) = debug_hook {
         // Interactive debug: step the IPM on the extracted QP directly.
         // Presolve is skipped so the debugger's `x`/`s`/`y`/`z` blocks
         // correspond to the user's problem rather than a reduced one.
@@ -1864,7 +1876,21 @@ fn run_convex_socp(
         ..convex_opts
     };
     let t0 = std::time::Instant::now();
-    let sol = if let Some(hook) = debug_hook {
+    let sol = if qp_opts.max_iter == 0 {
+        // `max_iter=0` cannot reach optimality — stop before any solve, the
+        // same zero-iteration contract the QP path enforces (pounce#186).
+        pounce_convex::QpSolution {
+            status: pounce_convex::QpStatus::IterationLimit,
+            x: vec![0.0; qp.n],
+            y: vec![0.0; qp.m_eq()],
+            z: vec![0.0; qp.m_ineq()],
+            z_lb: vec![0.0; qp.n],
+            z_ub: vec![0.0; qp.n],
+            obj: 0.0,
+            iters: 0,
+            iterates: Vec::new(),
+        }
+    } else if let Some(hook) = debug_hook {
         let mut h = hook.borrow_mut();
         solve_socp_ipm_debug(&qp, &cones, &qp_opts, &mut *h, backend)
     } else {
