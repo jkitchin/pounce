@@ -247,8 +247,27 @@ Exit code 0 means the model evaluates cleanly at x0 (warnings allowed);
 
 ## No good starting point at all?
 
-When the model has many local minima, or every start you try lands in
-the wrong basin, stop hand-tuning single points: the
+Three composable primitives cover the "generate or repair a point"
+workflows from Python:
+
+```python
+# N diverse starts (the sampler behind find_minima): sobol / uniform /
+# jitter / bounds midpoint. Feed them to solve_nlp_batch or race them.
+starts = pounce.generate_starts(16, bounds=bounds, seed=0)
+
+# Min-norm repair of a candidate onto the linearized constraints +
+# bounds (the standalone form of least_square_init_primal).
+x0 = pounce.project_to_feasible(problem_obj, x0, lb=lb, ub=ub, cl=cl, cu=cu)
+
+# Cheap tournament: a few iterations from each start, ranked; continue
+# the winner at full effort with a WarmStart.
+best = pounce.race_starts(fun, starts, bounds=bounds, iters=10)[0]
+res = pounce.minimize(fun, best.x,
+                      warm_start=pounce.WarmStart.from_info(best.x, best.info))
+```
+
+When the model has many local minima and you want *all* of them (or a
+managed search rather than a tournament), the
 [global search drivers](find-minima.md) (`multistart`, `mlsl`,
 `deflation`, `flooding`, `tunneling`, `basinhopping`) manage
 populations of starting points and warm-start bookkeeping for you,
