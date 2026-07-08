@@ -16,6 +16,9 @@ in JAX when it is not installed.
 from ._pounce import (
     Problem, Solver, NlProblem, read_nl, classify_working_set, __version__,
 )
+# Installs the Problem.solve(warm_start=...) wrapper as an import side
+# effect — keep this import directly after ._pounce.
+from ._warm_start import WarmStart
 from ._minimize import minimize, OptimizeResult
 from ._nlp_batch import solve_nlp_batch
 from ._curve_fit import (
@@ -25,6 +28,8 @@ from ._curve_fit import (
     CurveFitResult,
 )
 from ._minima import find_minima, MinimaResult
+from ._preflight import preflight, PreflightReport
+from ._starts import generate_starts, project_to_feasible, race_starts
 from ._critical import (
     find_critical_points, find_saddles, reaction_network,
     CriticalPoint, CriticalPointResult, Connection, ReactionNetwork,
@@ -66,6 +71,14 @@ __all__ = [
     "Connection",
     "ReactionNetwork",
     "classify_working_set",
+    # Starting-point preflight, warm starts, and generation/repair
+    # (see docs: initialization.md)
+    "preflight",
+    "PreflightReport",
+    "WarmStart",
+    "generate_starts",
+    "project_to_feasible",
+    "race_starts",
     # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
     "QpResult",
     "QpFactorization",

@@ -58,6 +58,14 @@ pub fn main() -> ExitCode {
         return pounce_cli::verify::run_from_argv(&raw_argv[2..]);
     }
 
+    // `pounce check-x0 <problem.nl>` — starting-point preflight: evaluate
+    // the model once at x0 and report NaN/inf, bound/constraint violations,
+    // interior-clamp displacement, and derivative scale spread before any
+    // solve. See `pounce_cli::check_x0` and docs/src/initialization.md.
+    if raw_argv.get(1).map(|s| s == "check-x0").unwrap_or(false) {
+        return pounce_cli::check_x0::run_from_argv(&raw_argv[2..]);
+    }
+
     let mut args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {

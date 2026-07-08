@@ -257,13 +257,21 @@ Options may also be supplied via the `pounce_options` environment
 variable (AMPL's `<solver>_options` convention): a whitespace-separated
 list of KEY=VALUE tokens. Command-line KEY=VALUE options override it.
 
-Subcommand:
+Subcommands:
   pounce verify <problem.nl> <claim.sol> [--feas-tol T] [--json-output P]
                             independently check that a .sol solution
                             satisfies the canonical .nl's constraints and
                             bounds, without trusting the solver/agent that
                             produced it. Exit 0 = feasible, 20 = violated.
                             Run `pounce verify --help` for details.
+  pounce check-x0 <problem.nl> [--json] [--json-output P]
+                            starting-point preflight: evaluate the model
+                            once at x0 and report NaN/inf, bound and
+                            constraint violations, interior-clamp
+                            displacement, and derivative scale spread
+                            before any solve. Exit 0 = evaluates cleanly,
+                            21 = NaN/inf at x0.
+                            Run `pounce check-x0 --help` for details.
 
 When the .nl declares the sIPOPT suffixes (sens_state_1,
 sens_state_value_1, sens_init_constr), pounce additionally runs the

@@ -5,6 +5,7 @@
 
 pub mod builtin;
 pub mod cbf;
+pub mod check_x0;
 pub mod citations;
 pub mod cli;
 pub mod counting_tnlp;

@@ -191,7 +191,7 @@ pub struct RowReport {
     pub violation: Number,
 }
 
-fn is_finite_bound(b: Number) -> bool {
+pub(crate) fn is_finite_bound(b: Number) -> bool {
     b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF
 }
 
@@ -202,7 +202,7 @@ fn is_finite_bound(b: Number) -> bool {
 /// through `f64::max` (which drops NaN operands) and let a fabricated `.sol`
 /// slip past the feasibility gate — the exact threat this checker defends
 /// against. An unbounded variable pinned at ±∞ is likewise not a real point.
-fn box_violation(v: Number, lo: Number, hi: Number) -> Number {
+pub(crate) fn box_violation(v: Number, lo: Number, hi: Number) -> Number {
     if !v.is_finite() {
         return Number::INFINITY;
     }
@@ -520,7 +520,7 @@ fn constraint_complementarity(
     comp
 }
 
-fn name_at(names: &[String], i: usize, kind: char) -> String {
+pub(crate) fn name_at(names: &[String], i: usize, kind: char) -> String {
     match names.get(i) {
         Some(s) if !s.is_empty() => s.clone(),
         _ => format!("{kind}[{i}]"),

@@ -355,48 +355,10 @@ def _mk_result(x, f):
 
 
 # --------------------------------------------------------------------------
-# Start-point helpers.
+# Start-point helpers — the implementations live in pounce._starts, where
+# they also power the public pounce.generate_starts.
 # --------------------------------------------------------------------------
-def _box(bounds):
-    lo = np.array([b[0] for b in bounds], dtype=float)
-    hi = np.array([b[1] for b in bounds], dtype=float)
-    return lo, hi
-
-
-def _has_box(bounds):
-    return bounds is not None and all(
-        b is not None and b[0] is not None and b[1] is not None
-        for b in bounds
-    )
-
-
-def _sample(bounds, x0, rng, jitter, sobol=None):
-    """Draw a fresh start: Sobol/uniform in the box, else jitter around x0."""
-    if _has_box(bounds):
-        lo, hi = _box(bounds)
-        if sobol is not None:
-            u = sobol.random(1)[0]
-        else:
-            u = rng.random(x0.shape)
-        return lo + (hi - lo) * u
-    return x0 + jitter * rng.standard_normal(x0.shape)
-
-
-def _make_sobol(n, seed, enabled):
-    if not enabled:
-        return None
-    try:
-        from scipy.stats import qmc
-        return qmc.Sobol(d=n, scramble=True, seed=seed)
-    except Exception:
-        return None
-
-
-def _clip(x, bounds):
-    if not _has_box(bounds):
-        return x
-    lo, hi = _box(bounds)
-    return np.clip(x, lo, hi)
+from ._starts import _box, _clip, _has_box, _make_sobol, _sample  # noqa: E402
 
 
 # --------------------------------------------------------------------------

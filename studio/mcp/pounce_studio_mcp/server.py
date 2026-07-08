@@ -538,6 +538,321 @@ def verify_solution(
     }
 
 
+# ---- check-x0 (starting-point preflight) -----------------------------
+
+
+@mcp.tool()
+def check_x0(
+    nl_file: str | None = None,
+    builtin: str | None = None,
+    x0_file: str | None = None,
+    feas_tol: float = 1e-6,
+    bound_push: float = 1e-2,
+    bound_frac: float = 1e-2,
+    max_list: int = 5,
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    """Preflight a model's starting point before any solve.
+
+    Evaluates the model once at its starting point (the `.nl` initial-guess
+    segment, or `x0_file`) and reports what iteration 0 will see: NaN/inf
+    evaluations (fatal — the solve would abort with
+    `Invalid_Number_Detected`), bound violations of x0, how far the
+    `bound_push` interior clamp will move the point, initial constraint
+    violation per row, and derivative magnitude spread (the early signal
+    for scaling trouble). Costs one evaluation of each callback: no
+    factorization, no solve.
+
+    Use this BEFORE `run_problem` when a model is new, when a previous
+    solve died with `Invalid_Number_Detected`, or when a warm start did
+    not help (on-bound components + the clamp preview explain that case).
+
+    Args:
+        nl_file: Path to the AMPL `.nl` problem. Exactly one of `nl_file`
+            or `builtin` must be given.
+        builtin: Name of a built-in problem (see `list_builtins`).
+        x0_file: Optional whitespace-separated file of n values overriding
+            the model's starting point (e.g. a candidate warm-start point).
+        feas_tol: Violations above this are counted (default 1e-6).
+        bound_push: `bound_push` used for the clamp preview (default 1e-2,
+            the solver default).
+        bound_frac: `bound_frac` used for the clamp preview (default 1e-2).
+        max_list: Max offenders listed per category.
+        timeout_seconds: Kill the check after this many seconds.
+
+    Returns:
+        Dict with `fatal` (the bottom line: True means a solve from this
+        point would abort), `verdict` (CLEAN / WARNINGS / FATAL),
+        `warnings` (human-readable findings), `exit_code` (0 clean or
+        warnings, 21 fatal), and `report` (the full parsed
+        `pounce.check-x0/v1` JSON: evaluation, bounds, interior_clamp,
+        constraint_violation, derivative_scale sections).
+    """
+    return _check_x0_impl(
+        nl_file=nl_file,
+        builtin=builtin,
+        x0_file=x0_file,
+        feas_tol=feas_tol,
+        bound_push=bound_push,
+        bound_frac=bound_frac,
+        max_list=max_list,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _check_x0_impl(
+    nl_file: str | None,
+    builtin: str | None,
+    x0_file: str | None,
+    feas_tol: float,
+    bound_push: float,
+    bound_frac: float,
+    max_list: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    if (nl_file is None) == (builtin is None):
+        raise ValueError("pass exactly one of nl_file or builtin")
+    binary = _find_pounce_bin()
+
+    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="pounce-check-x0-")
+    os.close(fd)
+    report_path = Path(tmp)
+
+    argv: list[str] = [binary, "check-x0"]
+    if nl_file is not None:
+        nl = Path(nl_file).expanduser()
+        if not nl.exists():
+            raise FileNotFoundError(f"no such .nl file: {nl}")
+        argv.append(str(nl))
+    else:
+        argv += ["--builtin", str(builtin)]
+    if x0_file is not None:
+        x0 = Path(x0_file).expanduser()
+        if not x0.exists():
+            raise FileNotFoundError(f"no such x0 file: {x0}")
+        argv += ["--x0-file", str(x0)]
+    argv += [
+        "--feas-tol", repr(feas_tol),
+        "--bound-push", repr(bound_push),
+        "--bound-frac", repr(bound_frac),
+        "--max-list", str(max_list),
+        "--json-output", str(report_path),
+    ]
+
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(
+            f"pounce check-x0 did not finish within {timeout_seconds}s"
+        ) from e
+
+    report: dict[str, Any] = {}
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+        except json.JSONDecodeError:
+            report = {}
+        finally:
+            report_path.unlink(missing_ok=True)
+
+    return {
+        "fatal": bool(report.get("fatal", proc.returncode == 21)),
+        "verdict": report.get("verdict"),
+        "warnings": report.get("warnings", []),
+        "exit_code": proc.returncode,
+        "max_constraint_violation": report.get("constraint_violation", {}).get(
+            "max_violation"
+        ),
+        "n_clamp_moved": report.get("interior_clamp", {}).get("n_moved"),
+        "stdout_tail": proc.stdout[-2000:],
+        "stderr_tail": proc.stderr[-2000:],
+        "report": report,
+    }
+
+
+# ---- suggest_initialization ------------------------------------------
+
+
+@mcp.tool()
+def suggest_initialization(
+    nl_file: str | None = None,
+    builtin: str | None = None,
+    x0_file: str | None = None,
+    prior_report: str | None = None,
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    """Preflight a model's starting point and propose concrete fixes.
+
+    Runs the `check_x0` preflight and translates its findings into an
+    ordered list of deterministic, advisory suggestions: solver options
+    to set, Python/Pyomo helper calls to make, and doc pointers. When a
+    `prior_report` (a `pounce.solve-report/v1` JSON from a previous
+    solve of this model) is supplied, its outcome sharpens the advice
+    (e.g. restoration-heavy solves point at the starting point; a clean
+    preflight with a failed solve points away from it).
+
+    Suggestions are **advisory** — never auto-applied. Present them to
+    the user in order and let them choose.
+
+    Args:
+        nl_file: Path to the AMPL `.nl` problem (or use `builtin`).
+        builtin: Name of a built-in problem.
+        x0_file: Optional candidate starting point to check instead of
+            the model's own.
+        prior_report: Optional path to a previous solve's JSON report.
+        timeout_seconds: Kill the preflight after this many seconds.
+
+    Returns:
+        Dict with `verdict`, `fatal`, `suggestions` (list of
+        `{kind, why, options?, python?, pyomo?, docs?}` in priority
+        order), and `preflight` (the underlying check-x0 result).
+    """
+    checked = _check_x0_impl(
+        nl_file=nl_file,
+        builtin=builtin,
+        x0_file=x0_file,
+        feas_tol=1e-6,
+        bound_push=1e-2,
+        bound_frac=1e-2,
+        max_list=5,
+        timeout_seconds=timeout_seconds,
+    )
+    rep = checked.get("report", {})
+    suggestions: list[dict[str, Any]] = []
+
+    ev = rep.get("evaluation", {})
+    nonfinite = (
+        ev.get("grad_nonfinite_count", 0)
+        + ev.get("constraints_nonfinite_count", 0)
+        + ev.get("jacobian_nonfinite_count", 0)
+        + (ev.get("hessian_nonfinite_count") or 0)
+        + (0 if ev.get("objective_finite", True) else 1)
+    )
+    if checked.get("fatal"):
+        suggestions.append({
+            "kind": "fix-evaluation",
+            "why": f"{nonfinite} non-finite evaluation(s) at the starting "
+                   "point; a solve would abort with Invalid_Number_Detected. "
+                   "The interior clamp only repairs bound violations, not "
+                   "domain errors on free variables.",
+            "python": "set an in-domain x0; pounce.preflight(problem_obj, x0, "
+                      "...) reproduces this check on callback problems",
+            "pyomo": "pyomo_pounce.initialize_missing_values(model) then "
+                     "pyomo_pounce.preflight(model)",
+            "docs": "initialization.md#diagnosing-a-bad-start",
+        })
+
+    if rep.get("x0", {}).get("all_zero"):
+        suggestions.append({
+            "kind": "provide-x0",
+            "why": "the starting point is all zeros: the model supplies no "
+                   "initial guess (or an explicitly zero one).",
+            "python": "pounce.generate_starts(n, bounds=..., "
+                      "strategy='midpoint') for a bounds-aware start",
+            "pyomo": "set Var .value before solve, or "
+                     "pyomo_pounce.block_initialize(model)",
+            "docs": "initialization.md#where-the-starting-point-comes-from",
+        })
+
+    clamp = rep.get("interior_clamp", {})
+    bounds_sec = rep.get("bounds", {})
+    if bounds_sec.get("n_on_bounds", 0) > 0 and clamp.get("n_moved", 0) > 0:
+        suggestions.append({
+            "kind": "warm-start-recipe",
+            "why": f"{bounds_sec['n_on_bounds']} component(s) sit exactly on a "
+                   "bound and the interior clamp will move them (max move "
+                   f"{clamp.get('max_move')}). If this x0 is a previous "
+                   "solution, a plain re-solve discards it.",
+            "options": {
+                "warm_start_init_point": "yes",
+                "mu_init": 1e-7,
+                "warm_start_bound_push": 1e-9,
+                "warm_start_bound_frac": 1e-9,
+                "warm_start_slack_bound_push": 1e-9,
+                "warm_start_slack_bound_frac": 1e-9,
+                "warm_start_mult_bound_push": 1e-9,
+            },
+            "python": "ws = pounce.WarmStart.from_info(x, info); "
+                      "prob.solve(warm_start=ws)",
+            "docs": "initialization.md#warm-starting-the-interior-point-path",
+        })
+
+    max_viol = rep.get("constraint_violation", {}).get("max_violation") or 0.0
+    if max_viol > 1e4:
+        suggestions.append({
+            "kind": "reduce-initial-infeasibility",
+            "why": f"very large initial constraint violation ({max_viol:.3e}).",
+            "options": {"least_square_init_primal": "yes"},
+            "python": "x0 = pounce.project_to_feasible(problem_obj, x0, ...)",
+            "docs": "initialization.md#what-the-solver-does-with-your-point-cold-start",
+        })
+
+    scale = rep.get("derivative_scale", {})
+    for label in ("gradient", "jacobian"):
+        s = scale.get(label, {})
+        if (s.get("ratio") or 0.0) > 1e8 or (s.get("max_abs") or 0.0) > 1e8:
+            suggestions.append({
+                "kind": "scaling",
+                "why": f"{label} magnitudes at x0 span a large range "
+                       f"(max {s.get('max_abs')}, min nonzero "
+                       f"{s.get('min_abs_nonzero')}); poor scaling mimics a "
+                       "bad starting point.",
+                "docs": "scaling.md",
+            })
+            break
+
+    # Prior-solve context, when supplied.
+    if prior_report is not None:
+        try:
+            r = R.load_report(Path(prior_report).expanduser())
+            summary = R.summarize(r)
+            findings = R.diagnose(r)
+        except Exception as e:  # noqa: BLE001 - advisory only
+            suggestions.append({
+                "kind": "prior-report-unreadable",
+                "why": f"could not read prior report: {e}",
+            })
+        else:
+            status = str(summary.get("status", ""))
+            codes = {f.get("code") for f in findings.get("findings", [])} if isinstance(
+                findings, dict
+            ) else set()
+            if {"restoration_used", "restoration_loop"} & codes:
+                suggestions.append({
+                    "kind": "restoration-points-at-x0",
+                    "why": f"the previous solve ({status}) spent time in "
+                           "feasibility restoration — a classic symptom of a "
+                           "poor starting point.",
+                    "docs": "initialization.md",
+                })
+            elif status not in ("SolveSucceeded", "SolvedToAcceptableLevel") \
+                    and not suggestions:
+                suggestions.append({
+                    "kind": "not-an-initialization-problem",
+                    "why": f"the preflight is clean but the previous solve "
+                           f"ended {status}: the starting point is probably "
+                           "not the bottleneck.",
+                    "docs": "troubleshooting.md",
+                })
+
+    if not suggestions:
+        suggestions.append({
+            "kind": "clean",
+            "why": "the starting point evaluates cleanly with no red flags; "
+                   "if the solve still struggles, look beyond initialization.",
+            "docs": "troubleshooting.md",
+        })
+
+    return {
+        "verdict": checked.get("verdict"),
+        "fatal": checked.get("fatal"),
+        "suggestions": suggestions,
+        "preflight": checked,
+    }
+
+
 # ---- explain / citations --------------------------------------------
 
 
