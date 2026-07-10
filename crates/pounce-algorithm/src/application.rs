@@ -2229,6 +2229,12 @@ impl IpoptApplication {
         if let Some(v) = read_num("obj_max_inc") {
             builder.line_search.obj_max_inc = v;
         }
+        if let Some(v) = read_int("max_filter_resets") {
+            builder.line_search.max_filter_resets = v;
+        }
+        if let Some(v) = read_int("filter_reset_trigger") {
+            builder.line_search.filter_reset_trigger = v;
+        }
         // Second-order-correction constants (#191), consumed by
         // `BacktrackingLineSearch`. `max_soc = 0` disables SOC.
         if let Some(v) = read_int("max_soc") {
@@ -2239,6 +2245,54 @@ impl IpoptApplication {
         }
         if let Some(v) = read_int("soc_method") {
             builder.line_search.soc_method = v;
+        }
+
+        // Inertia-correction / Jacobian-regularization constants (#191),
+        // consumed by `PdPerturbationHandler`. Registered but never read.
+        if let Some(v) = read_num("max_hessian_perturbation") {
+            builder.perturbation.max_hessian_perturbation = v;
+        }
+        if let Some(v) = read_num("min_hessian_perturbation") {
+            builder.perturbation.min_hessian_perturbation = v;
+        }
+        if let Some(v) = read_num("perturb_inc_fact_first") {
+            builder.perturbation.perturb_inc_fact_first = v;
+        }
+        if let Some(v) = read_num("perturb_inc_fact") {
+            builder.perturbation.perturb_inc_fact = v;
+        }
+        if let Some(v) = read_num("perturb_dec_fact") {
+            builder.perturbation.perturb_dec_fact = v;
+        }
+        if let Some(v) = read_num("first_hessian_perturbation") {
+            builder.perturbation.first_hessian_perturbation = v;
+        }
+        if let Some(v) = read_num("jacobian_regularization_value") {
+            builder.perturbation.jacobian_regularization_value = v;
+        }
+        if let Some(v) = read_num("jacobian_regularization_exponent") {
+            builder.perturbation.jacobian_regularization_exponent = v;
+        }
+        if let Ok((v, true)) = self.options.get_bool_value("perturb_always_cd", "") {
+            builder.perturbation.perturb_always_cd = v;
+        }
+
+        // Iterative-refinement constants (#191), consumed by
+        // `PdFullSpaceSolver`. Registered but never read.
+        if let Some(v) = read_int("min_refinement_steps") {
+            builder.refinement.min_refinement_steps = v;
+        }
+        if let Some(v) = read_int("max_refinement_steps") {
+            builder.refinement.max_refinement_steps = v;
+        }
+        if let Some(v) = read_num("residual_ratio_max") {
+            builder.refinement.residual_ratio_max = v;
+        }
+        if let Some(v) = read_num("residual_ratio_singular") {
+            builder.refinement.residual_ratio_singular = v;
+        }
+        if let Some(v) = read_num("residual_improvement_factor") {
+            builder.refinement.residual_improvement_factor = v;
         }
 
         // Iteration-output options — consumed by `OrigIterationOutput`.
