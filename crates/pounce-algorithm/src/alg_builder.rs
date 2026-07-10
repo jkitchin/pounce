@@ -226,9 +226,24 @@ pub struct AlgorithmBuilder {
     /// Baked onto [`crate::ipopt_cq::IpoptCalculatedQuantities`] by the
     /// solve path.
     pub kappa_d: Number,
+    /// `tiny_step_tol` — relative primal step size below which the full
+    /// step is accepted without line search; repeated tiny steps
+    /// terminate the solve. Mirrors `IpBacktrackingLineSearch.cpp`,
+    /// default `10·EPSILON`. Baked onto
+    /// [`crate::ipopt_alg::IpoptAlgorithm`] by the solve path.
+    pub tiny_step_tol: Number,
+    /// `tiny_step_y_tol` — dual-step threshold; when both primal and dual
+    /// steps are tiny in consecutive iterations the algorithm stops at the
+    /// best attainable accuracy. Default `1e-2`.
+    pub tiny_step_y_tol: Number,
+    /// `diverging_iterates_tol` — if `max_i |x_i|` exceeds this the solve
+    /// aborts as diverging. Default `1e20`.
+    pub diverging_iterates_tol: Number,
     pub conv_check: ConvCheckOptions,
     pub mu: MuOptions,
     pub line_search: LineSearchOptions,
+    pub refinement: RefinementOptions,
+    pub perturbation: PerturbationOptions,
     pub output: OutputOptions,
     pub warm: WarmStartOptions,
     /// SQP-specific options (consulted only when
@@ -505,6 +520,12 @@ pub struct LineSearchOptions {
     /// `obj_max_inc` — max acceptable increase (orders of magnitude) of
     /// the barrier objective for a trial point.
     pub obj_max_inc: Number,
+    /// `max_filter_resets` — maximum number of filter resets allowed
+    /// (`0` disables the reset heuristic).
+    pub max_filter_resets: Index,
+    /// `filter_reset_trigger` — successive filter-rejected iterations that
+    /// trigger a filter reset.
+    pub filter_reset_trigger: Index,
 
     // Second-order-correction constants baked onto the assembled
     // [`BacktrackingLineSearch`]. Registered but never read (#191);
@@ -537,9 +558,89 @@ impl Default for LineSearchOptions {
             s_theta: 1.1,
             alpha_min_frac: 0.05,
             obj_max_inc: 5.0,
+            max_filter_resets: 5,
+            filter_reset_trigger: 5,
             max_soc: 4,
             kappa_soc: 0.99,
             soc_method: 0,
+        }
+    }
+}
+
+/// Inertia-correction / regularization knobs baked onto the assembled
+/// [`crate::kkt::perturbation_handler::PdPerturbationHandler`]. Field
+/// names use the option names; they map to the handler's `delta_xs_*` /
+/// `delta_cd_*` fields. Defaults mirror
+/// `IpPDPerturbationHandler.cpp:RegisterOptions`. All were registered but
+/// never read (#191).
+#[derive(Debug, Clone)]
+pub struct PerturbationOptions {
+    /// `max_hessian_perturbation` → `delta_xs_max`.
+    pub max_hessian_perturbation: Number,
+    /// `min_hessian_perturbation` → `delta_xs_min`.
+    pub min_hessian_perturbation: Number,
+    /// `perturb_inc_fact_first` → `delta_xs_first_inc_fact`.
+    pub perturb_inc_fact_first: Number,
+    /// `perturb_inc_fact` → `delta_xs_inc_fact`.
+    pub perturb_inc_fact: Number,
+    /// `perturb_dec_fact` → `delta_xs_dec_fact`.
+    pub perturb_dec_fact: Number,
+    /// `first_hessian_perturbation` → `delta_xs_init`.
+    pub first_hessian_perturbation: Number,
+    /// `jacobian_regularization_value` → `delta_cd_val`.
+    pub jacobian_regularization_value: Number,
+    /// `jacobian_regularization_exponent` → `delta_cd_exp`.
+    pub jacobian_regularization_exponent: Number,
+    /// `perturb_always_cd` — always regularize the c/d (Jacobian) block.
+    pub perturb_always_cd: bool,
+}
+
+impl Default for PerturbationOptions {
+    fn default() -> Self {
+        Self {
+            max_hessian_perturbation: 1e20,
+            min_hessian_perturbation: 1e-20,
+            perturb_inc_fact_first: 100.0,
+            perturb_inc_fact: 8.0,
+            perturb_dec_fact: 1.0 / 3.0,
+            first_hessian_perturbation: 1e-4,
+            jacobian_regularization_value: 1e-8,
+            jacobian_regularization_exponent: 0.25,
+            perturb_always_cd: false,
+        }
+    }
+}
+
+/// Iterative-refinement knobs baked onto the assembled
+/// [`crate::kkt::pd_full_space_solver::PdFullSpaceSolver`]. Defaults
+/// mirror `IpPDFullSpaceSolver.cpp:RegisterOptions`. All were registered
+/// but never read (#191).
+#[derive(Debug, Clone)]
+pub struct RefinementOptions {
+    /// `min_refinement_steps` — minimum iterative-refinement steps per
+    /// linear solve.
+    pub min_refinement_steps: Index,
+    /// `max_refinement_steps` — maximum iterative-refinement steps.
+    pub max_refinement_steps: Index,
+    /// `residual_ratio_max` — refine until the residual test ratio drops
+    /// below this (or `max_refinement_steps` is reached).
+    pub residual_ratio_max: Number,
+    /// `residual_ratio_singular` — above this ratio after failed
+    /// refinement, the system is declared singular.
+    pub residual_ratio_singular: Number,
+    /// `residual_improvement_factor` — minimum per-step reduction of the
+    /// residual test ratio before refinement is aborted.
+    pub residual_improvement_factor: Number,
+}
+
+impl Default for RefinementOptions {
+    fn default() -> Self {
+        Self {
+            min_refinement_steps: 1,
+            max_refinement_steps: 10,
+            residual_ratio_max: 1e-10,
+            residual_ratio_singular: 1e-5,
+            residual_improvement_factor: 0.999_999_999,
         }
     }
 }
@@ -590,9 +691,14 @@ impl Default for AlgorithmBuilder {
             mehrotra_algorithm: false,
             kappa_sigma: 1e10,
             kappa_d: 1e-5,
+            tiny_step_tol: 10.0 * Number::EPSILON,
+            tiny_step_y_tol: 1e-2,
+            diverging_iterates_tol: 1e20,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
             line_search: LineSearchOptions::default(),
+            refinement: RefinementOptions::default(),
+            perturbation: PerturbationOptions::default(),
             output: OutputOptions::default(),
             warm: WarmStartOptions::default(),
             sqp: crate::sqp::SqpOptions::default(),
@@ -673,8 +779,30 @@ impl AlgorithmBuilder {
         } else {
             Box::new(inner_aug)
         };
-        let perturb = Rc::new(RefCell::new(PdPerturbationHandler::new()));
-        let pd_solver = PdFullSpaceSolver::new(aug_solver, perturb);
+        // Inertia-correction / Jacobian-regularization constants (#191):
+        // registered but previously never read. Defaults equal the
+        // registered defaults. `perturb_always_cd` goes through the setter
+        // because it also rebuilds the initial jac-degeneracy state.
+        let mut ph = PdPerturbationHandler::new();
+        ph.delta_xs_max = self.perturbation.max_hessian_perturbation;
+        ph.delta_xs_min = self.perturbation.min_hessian_perturbation;
+        ph.delta_xs_first_inc_fact = self.perturbation.perturb_inc_fact_first;
+        ph.delta_xs_inc_fact = self.perturbation.perturb_inc_fact;
+        ph.delta_xs_dec_fact = self.perturbation.perturb_dec_fact;
+        ph.delta_xs_init = self.perturbation.first_hessian_perturbation;
+        ph.delta_cd_val = self.perturbation.jacobian_regularization_value;
+        ph.delta_cd_exp = self.perturbation.jacobian_regularization_exponent;
+        ph.set_perturb_always_cd(self.perturbation.perturb_always_cd);
+        let perturb = Rc::new(RefCell::new(ph));
+        let mut pd_solver = PdFullSpaceSolver::new(aug_solver, perturb);
+        // Iterative-refinement constants (#191): registered but previously
+        // never read, so overrides were silently dropped. Defaults equal
+        // the registered defaults.
+        pd_solver.min_refinement_steps = self.refinement.min_refinement_steps;
+        pd_solver.max_refinement_steps = self.refinement.max_refinement_steps;
+        pd_solver.residual_ratio_max = self.refinement.residual_ratio_max;
+        pd_solver.residual_ratio_singular = self.refinement.residual_ratio_singular;
+        pd_solver.residual_improvement_factor = self.refinement.residual_improvement_factor;
         let mut search_dir = PdSearchDirCalc::new(pd_solver);
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
         self.build_inner(Some(search_dir))
@@ -774,6 +902,8 @@ impl AlgorithmBuilder {
                 f.s_theta = self.line_search.s_theta;
                 f.alpha_min_frac = self.line_search.alpha_min_frac;
                 f.obj_max_inc = self.line_search.obj_max_inc;
+                f.max_filter_resets = self.line_search.max_filter_resets;
+                f.filter_reset_trigger = self.line_search.filter_reset_trigger;
                 Box::new(f)
             }
             LineSearchChoice::Penalty => Box::new(PenaltyLsAcceptor::default()),
@@ -949,9 +1079,14 @@ mod tests {
                             mehrotra_algorithm: false,
                             kappa_sigma: 1e10,
                             kappa_d: 1e-5,
+                            tiny_step_tol: 10.0 * Number::EPSILON,
+                            tiny_step_y_tol: 1e-2,
+                            diverging_iterates_tol: 1e20,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),
                             line_search: LineSearchOptions::default(),
+                            refinement: RefinementOptions::default(),
+                            perturbation: PerturbationOptions::default(),
                             output: OutputOptions::default(),
                             warm: WarmStartOptions::default(),
                             sqp: crate::sqp::SqpOptions::default(),

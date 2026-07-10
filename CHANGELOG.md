@@ -70,9 +70,26 @@ changes.
     `s_phi`, `s_theta`, `alpha_min_frac`, `obj_max_inc`.
   - Second-order-correction constants: `max_soc` (incl. `0` to disable SOC),
     `kappa_soc`, `soc_method`.
+  - Filter-reset heuristic: `max_filter_resets` (incl. `0` to disable),
+    `filter_reset_trigger`.
+  - Tiny-step and divergence guards on the algorithm: `tiny_step_tol`,
+    `tiny_step_y_tol`, `diverging_iterates_tol`.
+  - Inertia-correction / Jacobian-regularization constants on the
+    perturbation handler: `max_hessian_perturbation`,
+    `min_hessian_perturbation`, `first_hessian_perturbation`,
+    `perturb_inc_fact_first`, `perturb_inc_fact`, `perturb_dec_fact`,
+    `jacobian_regularization_value`, `jacobian_regularization_exponent`,
+    `perturb_always_cd`.
+  - Iterative-refinement constants on the KKT full-space solver:
+    `min_refinement_steps`, `max_refinement_steps`, `residual_ratio_max`,
+    `residual_ratio_singular`, `residual_improvement_factor`.
 
   Every default equals the previously-hard-coded value, so runs that don't set
-  these options are unchanged. Remaining unread constants stay tracked in #191.
+  these options are unchanged. The remaining unread constants — restoration
+  reset/penalty thresholds (`bound_mult_reset_threshold`,
+  `constr_mult_reset_threshold`, `resto_penalty_parameter`,
+  `resto_proximity_weight`), which need per-frontend restoration-builder
+  plumbing — stay tracked in #191.
 - **`timing_statistics=no` no longer runs the detailed timers every iteration
   (#190).** Every `TimedTask::start`/`end` pair calls `getrusage(RUSAGE_SELF)`
   (twice — once each), and the per-subsystem / per-callback timers wrap hot

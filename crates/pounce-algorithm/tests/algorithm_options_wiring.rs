@@ -52,6 +52,32 @@ fn kappa_d_override_flows_through() {
 }
 
 #[test]
+fn tiny_step_and_divergence_defaults_match_registered() {
+    let b = builder_from(|_| {});
+    assert_eq!(b.tiny_step_tol, 10.0 * f64::EPSILON);
+    assert_eq!(b.tiny_step_y_tol, 1e-2);
+    assert_eq!(b.diverging_iterates_tol, 1e20);
+}
+
+#[test]
+fn tiny_step_and_divergence_overrides_flow_through() {
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_numeric_value("tiny_step_tol", 1e-12, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("tiny_step_y_tol", 1e-3, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("diverging_iterates_tol", 1e8, true, false)
+            .unwrap();
+    });
+    assert_eq!(b.tiny_step_tol, 1e-12);
+    assert_eq!(b.tiny_step_y_tol, 1e-3);
+    assert_eq!(b.diverging_iterates_tol, 1e8);
+}
+
+#[test]
 fn filter_constants_default_match_registered() {
     let b = builder_from(|_| {}).line_search;
     assert_eq!(b.eta_phi, 1e-8);
@@ -136,4 +162,104 @@ fn soc_constants_reach_assembled_line_search() {
     assert_eq!(bundle.line_search.max_soc, 0);
     assert_eq!(bundle.line_search.kappa_soc, 0.5);
     assert_eq!(bundle.line_search.soc_method, 1);
+}
+
+#[test]
+fn filter_reset_constants_flow_through() {
+    let d = builder_from(|_| {}).line_search;
+    assert_eq!(d.max_filter_resets, 5);
+    assert_eq!(d.filter_reset_trigger, 5);
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_integer_value("max_filter_resets", 0, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("filter_reset_trigger", 9, true, false)
+            .unwrap();
+    })
+    .line_search;
+    assert_eq!(b.max_filter_resets, 0);
+    assert_eq!(b.filter_reset_trigger, 9);
+}
+
+#[test]
+fn refinement_constants_default_match_registered() {
+    let r = builder_from(|_| {}).refinement;
+    assert_eq!(r.min_refinement_steps, 1);
+    assert_eq!(r.max_refinement_steps, 10);
+    assert_eq!(r.residual_ratio_max, 1e-10);
+    assert_eq!(r.residual_ratio_singular, 1e-5);
+    assert_eq!(r.residual_improvement_factor, 0.999_999_999);
+}
+
+#[test]
+fn refinement_constants_override_flows_through() {
+    let r = builder_from(|app| {
+        app.options_mut()
+            .set_integer_value("min_refinement_steps", 2, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("max_refinement_steps", 20, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("residual_ratio_max", 1e-9, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("residual_ratio_singular", 1e-4, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("residual_improvement_factor", 0.5, true, false)
+            .unwrap();
+    })
+    .refinement;
+    assert_eq!(r.min_refinement_steps, 2);
+    assert_eq!(r.max_refinement_steps, 20);
+    assert_eq!(r.residual_ratio_max, 1e-9);
+    assert_eq!(r.residual_ratio_singular, 1e-4);
+    assert_eq!(r.residual_improvement_factor, 0.5);
+}
+
+#[test]
+fn perturbation_constants_default_match_registered() {
+    let p = builder_from(|_| {}).perturbation;
+    assert_eq!(p.max_hessian_perturbation, 1e20);
+    assert_eq!(p.min_hessian_perturbation, 1e-20);
+    assert_eq!(p.perturb_inc_fact_first, 100.0);
+    assert_eq!(p.perturb_inc_fact, 8.0);
+    assert_eq!(p.perturb_dec_fact, 1.0 / 3.0);
+    assert_eq!(p.first_hessian_perturbation, 1e-4);
+    assert_eq!(p.jacobian_regularization_value, 1e-8);
+    assert_eq!(p.jacobian_regularization_exponent, 0.25);
+    assert!(!p.perturb_always_cd);
+}
+
+#[test]
+fn perturbation_constants_override_flows_through() {
+    let p = builder_from(|app| {
+        let o = app.options_mut();
+        for (k, v) in [
+            ("max_hessian_perturbation", 1e18),
+            ("min_hessian_perturbation", 1e-18),
+            ("perturb_inc_fact_first", 50.0),
+            ("perturb_inc_fact", 4.0),
+            ("perturb_dec_fact", 0.5),
+            ("first_hessian_perturbation", 1e-3),
+            ("jacobian_regularization_value", 1e-7),
+            ("jacobian_regularization_exponent", 0.5),
+        ] {
+            o.set_numeric_value(k, v, true, false).unwrap();
+        }
+        o.set_string_value("perturb_always_cd", "yes", true, false)
+            .unwrap();
+    })
+    .perturbation;
+    assert_eq!(p.max_hessian_perturbation, 1e18);
+    assert_eq!(p.min_hessian_perturbation, 1e-18);
+    assert_eq!(p.perturb_inc_fact_first, 50.0);
+    assert_eq!(p.perturb_inc_fact, 4.0);
+    assert_eq!(p.perturb_dec_fact, 0.5);
+    assert_eq!(p.first_hessian_perturbation, 1e-3);
+    assert_eq!(p.jacobian_regularization_value, 1e-7);
+    assert_eq!(p.jacobian_regularization_exponent, 0.5);
+    assert!(p.perturb_always_cd);
 }
