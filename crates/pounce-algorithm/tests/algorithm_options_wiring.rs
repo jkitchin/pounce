@@ -52,6 +52,32 @@ fn kappa_d_override_flows_through() {
 }
 
 #[test]
+fn tiny_step_and_divergence_defaults_match_registered() {
+    let b = builder_from(|_| {});
+    assert_eq!(b.tiny_step_tol, 10.0 * f64::EPSILON);
+    assert_eq!(b.tiny_step_y_tol, 1e-2);
+    assert_eq!(b.diverging_iterates_tol, 1e20);
+}
+
+#[test]
+fn tiny_step_and_divergence_overrides_flow_through() {
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_numeric_value("tiny_step_tol", 1e-12, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("tiny_step_y_tol", 1e-3, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("diverging_iterates_tol", 1e8, true, false)
+            .unwrap();
+    });
+    assert_eq!(b.tiny_step_tol, 1e-12);
+    assert_eq!(b.tiny_step_y_tol, 1e-3);
+    assert_eq!(b.diverging_iterates_tol, 1e8);
+}
+
+#[test]
 fn filter_constants_default_match_registered() {
     let b = builder_from(|_| {}).line_search;
     assert_eq!(b.eta_phi, 1e-8);

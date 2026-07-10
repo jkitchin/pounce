@@ -1568,6 +1568,12 @@ impl IpoptApplication {
         // default matches the registered default, so default runs are
         // unchanged.
         alg.kappa_sigma = builder.kappa_sigma;
+        // Tiny-step and divergence guards (#191): registered but
+        // previously never read. Struct defaults match the registered
+        // defaults, so default runs are unchanged.
+        alg.tiny_step_tol = builder.tiny_step_tol;
+        alg.tiny_step_y_tol = builder.tiny_step_y_tol;
+        alg.diverging_iterates_tol = builder.diverging_iterates_tol;
         // Honor `print_level == 0`: suppress the per-iteration table
         // that the algorithm writes straight to stdout. (The Phase-7
         // journalist surface respects `print_level` already; this is
@@ -2018,6 +2024,15 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("kappa_d") {
             builder.kappa_d = v;
+        }
+        if let Some(v) = read_num("tiny_step_tol") {
+            builder.tiny_step_tol = v;
+        }
+        if let Some(v) = read_num("tiny_step_y_tol") {
+            builder.tiny_step_y_tol = v;
+        }
+        if let Some(v) = read_num("diverging_iterates_tol") {
+            builder.diverging_iterates_tol = v;
         }
 
         // Barrier-parameter (μ) options — consumers in

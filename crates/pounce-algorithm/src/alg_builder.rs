@@ -226,6 +226,19 @@ pub struct AlgorithmBuilder {
     /// Baked onto [`crate::ipopt_cq::IpoptCalculatedQuantities`] by the
     /// solve path.
     pub kappa_d: Number,
+    /// `tiny_step_tol` — relative primal step size below which the full
+    /// step is accepted without line search; repeated tiny steps
+    /// terminate the solve. Mirrors `IpBacktrackingLineSearch.cpp`,
+    /// default `10·EPSILON`. Baked onto
+    /// [`crate::ipopt_alg::IpoptAlgorithm`] by the solve path.
+    pub tiny_step_tol: Number,
+    /// `tiny_step_y_tol` — dual-step threshold; when both primal and dual
+    /// steps are tiny in consecutive iterations the algorithm stops at the
+    /// best attainable accuracy. Default `1e-2`.
+    pub tiny_step_y_tol: Number,
+    /// `diverging_iterates_tol` — if `max_i |x_i|` exceeds this the solve
+    /// aborts as diverging. Default `1e20`.
+    pub diverging_iterates_tol: Number,
     pub conv_check: ConvCheckOptions,
     pub mu: MuOptions,
     pub line_search: LineSearchOptions,
@@ -590,6 +603,9 @@ impl Default for AlgorithmBuilder {
             mehrotra_algorithm: false,
             kappa_sigma: 1e10,
             kappa_d: 1e-5,
+            tiny_step_tol: 10.0 * Number::EPSILON,
+            tiny_step_y_tol: 1e-2,
+            diverging_iterates_tol: 1e20,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
             line_search: LineSearchOptions::default(),
@@ -949,6 +965,9 @@ mod tests {
                             mehrotra_algorithm: false,
                             kappa_sigma: 1e10,
                             kappa_d: 1e-5,
+                            tiny_step_tol: 10.0 * Number::EPSILON,
+                            tiny_step_y_tol: 1e-2,
+                            diverging_iterates_tol: 1e20,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),
                             line_search: LineSearchOptions::default(),

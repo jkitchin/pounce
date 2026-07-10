@@ -1060,3 +1060,30 @@ fn hs071_honors_user_kappa_d() {
         "kappa_d was ignored: both runs took {iters_default} iters",
     );
 }
+
+/// #191: `diverging_iterates_tol` was registered but never read. HS071
+/// starts at `x = (1, 5, 5, 1)` (max-norm 5), so a threshold below that
+/// must abort the solve as diverging — proving the option now reaches the
+/// running divergence guard. The default (1e20) never triggers.
+#[test]
+fn hs071_honors_diverging_iterates_tol() {
+    let solve = |tol: Option<Number>| {
+        let mut app = IpoptApplication::new();
+        if let Some(t) = tol {
+            app.options_mut()
+                .set_numeric_value("diverging_iterates_tol", t, true, false)
+                .unwrap();
+        }
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
+        app.optimize_tnlp(tnlp)
+    };
+    assert!(matches!(
+        solve(None),
+        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
+    ));
+    assert!(
+        matches!(solve(Some(1.0)), ApplicationReturnStatus::DivergingIterates),
+        "diverging_iterates_tol=1.0 should abort HS071 (max|x0|=5) as diverging",
+    );
+}
