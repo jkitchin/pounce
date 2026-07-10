@@ -803,10 +803,7 @@ fn hs071_timing_statistics_gates_detailed_timers() {
         0.0,
         "detailed eval timer accumulated despite timing_statistics=no",
     );
-    assert_eq!(
-        t.total_function_evaluation_time.total_wallclock_time(),
-        0.0,
-    );
+    assert_eq!(t.total_function_evaluation_time.total_wallclock_time(), 0.0,);
     assert_eq!(t.check_convergence.total_wallclock_time(), 0.0);
 
     // Opting in re-enables the detailed timers, so the breakdown is
