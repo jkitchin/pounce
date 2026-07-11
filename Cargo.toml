@@ -105,13 +105,25 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.8.0"
 # fill-preferred `None` path can't degrade factorization accuracy on late μ→0
 # IPM KKTs (restores cont5_2_4_l to 14 iters). Net for pounce: qap15 converges
 # (was a 300s timeout) with no regressions — full mittelmann/LP/QP suites stay
-# bit-identical. 0.12.0 is the current pin. If you ever need to develop against
-# an unreleased feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting
-# feral to the git rev — e.g.
+# bit-identical. 0.13.0 adds `OrderingMethod::External(Vec<usize>)` (#107) so a
+# caller can inject a precomputed fill-reducing permutation (Schur/tearing
+# reuse) instead of only picking an ordering *algorithm*; `OrderingMethod` is
+# now `Clone` but no longer `Copy`. 0.14.0 is a pure-perf release aimed at the
+# IPM-host warm-refactor workload (one pattern, thousands of factorizations,
+# exactly pounce): (#127) splits the symbolic pipeline so the `Auto`/`AutoRace`
+# ordering races run the expensive tail only for the winner; (#124) reuses the
+# permute cache on the default parallel driver so a warm re-factor scatters in
+# O(nnz) instead of rebuilding+re-sorting triplets every iteration; (#126)
+# fuses the D-block solve into forward substitution (~14–29% faster warm
+# solves); plus opt-in tree-parallel sparse solve (#131) and analysis-time
+# assembly maps (#125). All bit-identical numerics, no breaking API change.
+# 0.14.0 is the current pin. If you ever need to develop against an unreleased
+# feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
+# git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.13.0" }
+feral = { version = "0.14.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
@@ -145,4 +157,3 @@ expect_used = "warn"
 lto = "thin"
 codegen-units = 1
 debug = 1
-

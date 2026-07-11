@@ -15,8 +15,8 @@ identifiers:
   - type: doi
     value: "10.5281/zenodo.20387011"
     description: "Concept DOI — always resolves to the latest POUNCE release"
-version: 0.7.0
-date-released: 2026-07-01
+version: 0.8.0
+date-released: 2026-07-11
 authors:
   - family-names: Kitchin
     given-names: John R.

@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-11
+
 ### Added — declared-parameter sensitivity for Pyomo (Python / Pyomo)
 
 - **`pyomo_pounce` sensitivity interface.** Declare parameters while
@@ -68,9 +70,19 @@ changes.
 
 ### Changed
 
-- **feral 0.12.0 → 0.13.0**, which adds `OrderingMethod::External(Vec<usize>)`
-  (feral#107). The enum is no longer `Copy` (the `External` arm carries a heap
-  permutation); pounce clones it where a copy was previously implicit.
+- **feral 0.12.0 → 0.14.0.** 0.13.0 adds `OrderingMethod::External(Vec<usize>)`
+  (feral#107), which backs the caller-supplied KKT ordering hook (#180); the
+  enum is no longer `Copy` (the `External` arm carries a heap permutation), so
+  pounce clones it where a copy was previously implicit. 0.14.0 is a pure-perf
+  release targeting the IPM warm-refactor workload (one KKT pattern, thousands
+  of factorizations): it splits the symbolic ordering races so only the winning
+  candidate pays the expensive tail (feral#127), reuses the permute cache on the
+  parallel numeric driver so a warm re-factor scatters in O(nnz) instead of
+  rebuilding and re-sorting triplets every iteration (feral#124), and fuses the
+  D-block solve into forward substitution for ~14–29% faster warm solves
+  (feral#126), plus an opt-in tree-parallel sparse solve (feral#131) and
+  analysis-time assembly maps (feral#125). Numerics are bit-identical; no
+  breaking API change beyond the 0.13.0 `Copy` removal noted above.
 
 ### Fixed
 
