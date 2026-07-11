@@ -126,3 +126,40 @@ def test_resolve_and_clone_are_clean():
     assert g1 != g2                              # new factorization was used
     from pyomo_pounce.sens import has_declarations
     assert has_declarations(clone)               # declarations survive clone
+
+
+def test_declared_solve_returns_solver_results():
+    """The declared path must return the same result shape as a plain
+    Pyomo solve (review #199 item 2)."""
+    m = build()
+    declare_sens_param(m.p)
+    res = pyo.SolverFactory("pounce").solve(m)
+    assert (res.solver.termination_condition
+            == pyo.TerminationCondition.optimal)
+    assert str(res.solver.status) == "ok"
+
+
+def test_no_temp_dir_leak(tmp_path):
+    """Repeated declared solves must not accumulate pounce_sens_* temp
+    dirs (review #199 item 1)."""
+    import glob
+    import os
+    import tempfile
+
+    pattern = os.path.join(tempfile.gettempdir(), "pounce_sens_*")
+    before = set(glob.glob(pattern))
+    m = build()
+    declare_sens_param(m.p)
+    for _ in range(3):
+        pyo.SolverFactory("pounce").solve(m)
+    after = set(glob.glob(pattern))
+    assert after == before, f"leaked: {after - before}"
+
+
+def test_keyword_model_solve_uses_declared_path():
+    """solve(model=m) must hit the sensitivity path too (review #199
+    item 4)."""
+    m = build()
+    declare_sens_param(m.p)
+    pyo.SolverFactory("pounce").solve(model=m)
+    assert gradient(m.x, wrt=m.p) is not None

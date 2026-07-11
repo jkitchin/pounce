@@ -38,11 +38,13 @@ class POUNCE(ASL):
         # (pyomo_pounce.declare_sens_param), solve in-process through the
         # pounce.Solver session so the converged KKT factorization stays
         # available for gradient()/estimate(). Otherwise the ordinary
-        # ASL/CLI path runs.
+        # ASL/CLI path runs. The model may arrive positionally or as the
+        # `model` keyword.
         from pyomo_pounce.sens import has_declarations, sens_solve
 
-        if args and has_declarations(args[0]):
-            return sens_solve(args[0], tee=kwds.get("tee", False))
+        model = args[0] if args else kwds.get("model")
+        if model is not None and has_declarations(model):
+            return sens_solve(model, tee=kwds.get("tee", False))
         return super().solve(*args, **kwds)
 
     def _default_executable(self):

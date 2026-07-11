@@ -102,8 +102,8 @@ estimate(m, [(m.p, 2.5)])               # first-order solution estimate at
 `gradient` returns exact first-order derivatives (unit-perturbation
 backsolves, no finite differencing); `estimate` combines the stored
 derivative columns for arbitrary perturbed values after the fact, and
-warns when the linear step leaves the variable bounds (the clamp is
-the same single-pass projection as `--sens-boundcheck`). Multiplier
+warns when the linear step leaves the variable bounds (a single-pass
+projection analogous to the CLI's `--sens-boundcheck`). Multiplier
 sensitivities are available for equality constraints. Models without
 declarations solve through the ordinary AMPL/CLI path, unchanged. See
 [`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)

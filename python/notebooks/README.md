@@ -28,10 +28,10 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 |---|---|---|
 | 03 | [`03_implicit_differentiation.ipynb`](03_implicit_differentiation.ipynb) | Implicit differentiation of the optimum w.r.t. parameters. |
 | 04 | [`04_sensitivity.ipynb`](04_sensitivity.ipynb) | Parametric sensitivity (sIPOPT-style). |
-| 25 | [`25_pyomo_sensitivity.ipynb`](25_pyomo_sensitivity.ipynb) | Declared-parameter sensitivity from Pyomo: an optimal-control example whose first-move gradients are the NMPC feedback gains (needs `pyomo-cvp`). |
 | 09 | [`09_differentiable_layer.ipynb`](09_differentiable_layer.ipynb) | A differentiable constrained-projection layer. |
 | 13 | [`13_post_solve_jacobian.ipynb`](13_post_solve_jacobian.ipynb) | Post-solve Jacobian/sensitivities from the held KKT factor. |
 | 17 | [`17_differentiable_convex.ipynb`](17_differentiable_convex.ipynb) | Differentiable convex optimization with `pounce.jax`. |
+| 25 | [`25_pyomo_sensitivity.ipynb`](25_pyomo_sensitivity.ipynb) | Declared-parameter sensitivity from Pyomo: an optimal-control example whose first-move gradients are the NMPC feedback gains (needs `pyomo-cvp`). |
 
 ## Performance & sparsity
 

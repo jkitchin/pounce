@@ -26,14 +26,17 @@ queries from the stored factorization -- the sIPOPT computation, with no
 suffixes and no upfront perturbation values.
 """
 import os
+import shutil
 import tempfile
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pyomo.environ as pyo
 from pyomo.common.collections import ComponentMap
 from pyomo.contrib.sensitivity_toolbox.sens import SensitivityInterface
 from pyomo.core.base.constraint import Constraint
+from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
 _REG = "_pounce_sens"
 
@@ -154,7 +157,8 @@ def _iter_data(comp):
 def sens_solve(model, tee=False):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
     for gradient()/estimate(). Called automatically by
-    SolverFactory('pounce').solve() when declarations are present."""
+    SolverFactory('pounce').solve() when declarations are present.
+    Returns a Pyomo SolverResults, like an ordinary solve."""
     import pounce
 
     reg = model.__dict__[_REG]
@@ -162,13 +166,20 @@ def sens_solve(model, tee=False):
     si.setup_sensitivity(reg.params)
     clone = si.model_instance
 
+    # The .nl/.col/.row files exist only to hand the model to read_nl;
+    # everything needed later (evaluators, bounds, names) lives in memory,
+    # so the temp dir is removed as soon as they are parsed. Repeated
+    # solves (the NMPC use case) must not accumulate temp dirs.
     tmp = tempfile.mkdtemp(prefix="pounce_sens_")
-    nl_path = os.path.join(tmp, "model.nl")
-    clone.write(nl_path, io_options={"symbolic_solver_labels": True})
-    var_names = open(nl_path[:-3] + ".col").read().splitlines()
-    con_names = open(nl_path[:-3] + ".row").read().splitlines()
+    try:
+        nl_path = os.path.join(tmp, "model.nl")
+        clone.write(nl_path, io_options={"symbolic_solver_labels": True})
+        var_names = Path(nl_path[:-3] + ".col").read_text().splitlines()
+        con_names = Path(nl_path[:-3] + ".row").read_text().splitlines()
+        nl = pounce.read_nl(nl_path)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
-    nl = pounce.read_nl(nl_path)
     prob = pounce.Problem(nl.n, nl.m, _NlBridge(nl),
                           lb=nl.x_l, ub=nl.x_u, cl=nl.g_l, cu=nl.g_u)
     solver = pounce.Solver(prob)
@@ -206,7 +217,18 @@ def sens_solve(model, tee=False):
         ov = model.find_component(name)
         if ov is not None:
             ov.set_value(val, skip_validation=True)
-    return info
+
+    # Return a Pyomo SolverResults so callers see the same shape as an
+    # ordinary solve (res.solver.termination_condition etc).
+    results = SolverResults()
+    results.solver.name = "pounce (in-process sensitivity session)"
+    results.solver.status = SolverStatus.ok
+    results.solver.termination_condition = TerminationCondition.optimal
+    results.solver.message = str(info.get("status_msg", ""))
+    if info.get("obj_val") is not None:
+        results.problem.upper_bound = float(info["obj_val"])
+        results.problem.lower_bound = float(info["obj_val"])
+    return results
 
 
 # ── queries ───────────────────────────────────────────────────────────────────
@@ -327,7 +349,9 @@ def estimate(model, perturb, clamp=True):
 
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
     if clamp:
-        clipped = (x_new < lo - 1e-9) | (x_new > hi + 1e-9)
+        # scale-aware tolerance: 1e-9 relative to the variable's magnitude
+        tol = 1e-9 * np.maximum(1.0, np.abs(x_new))
+        clipped = (x_new < lo - tol) | (x_new > hi + tol)
         if clipped.any():
             names = [session.var_names[i] for i in np.where(clipped)[0]]
             warnings.warn(
