@@ -33,6 +33,20 @@ class POUNCE(ASL):
         self._metasolver = False
         self.options.solver = "pounce"
 
+    def solve(self, *args, **kwds):
+        # When the model declares sensitivity parameters
+        # (pyomo_pounce.declare_sens_param), solve in-process through the
+        # pounce.Solver session so the converged KKT factorization stays
+        # available for gradient()/estimate(). Otherwise the ordinary
+        # ASL/CLI path runs. The model may arrive positionally or as the
+        # `model` keyword.
+        from pyomo_pounce.sens import has_declarations, sens_solve
+
+        model = args[0] if args else kwds.get("model")
+        if model is not None and has_declarations(model):
+            return sens_solve(model, tee=kwds.get("tee", False))
+        return super().solve(*args, **kwds)
+
     def _default_executable(self):
         # Prefer the binary bundled in the installed ``pounce-solver`` wheel,
         # whose location is deterministic (``pounce/bin/pounce`` inside the

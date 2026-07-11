@@ -239,6 +239,49 @@ impl PySolver {
         Ok(dx.into_pyarray_bound(py))
     }
 
+    /// Full KKT-space parametric step: like `parametric_step` but
+    /// returns the whole compound vector `(x, s, y_c, y_d, z_l, z_u,
+    /// v_l, v_u)` so multiplier sensitivities are available. Use
+    /// `block_dims()` for the layout and `multiplier_rows()` to find a
+    /// constraint's row.
+    fn parametric_step_full<'py>(
+        &self,
+        py: Python<'py>,
+        pin_constraint_indices: Vec<i64>,
+        deltas: Vec<Number>,
+    ) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "parametric_step_full: no converged factor (call solve() first)",
+            )
+        })?;
+        let pins = validate_pins(&pin_constraint_indices, s.m)?;
+        if deltas.len() != pins.len() {
+            return Err(PyValueError::new_err(format!(
+                "deltas length {} must equal pin_constraint_indices length {}",
+                deltas.len(),
+                pins.len(),
+            )));
+        }
+        let dx_full = s
+            .inner
+            .parametric_step_full(&pins, &deltas)
+            .map_err(solver_error_to_py)?;
+        Ok(dx_full.into_pyarray_bound(py))
+    }
+
+    /// Rows of the compound KKT vector holding the equality
+    /// multipliers for the given 0-based constraint (`g`) indices;
+    /// `None` for inequality constraints.
+    fn multiplier_rows(&self, g_indices: Vec<i64>) -> PyResult<Vec<Option<i64>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("multiplier_rows: no converged factor (call solve() first)")
+        })?;
+        let gs = validate_pins(&g_indices, s.m)?;
+        let rows = s.inner.g_multiplier_rows(&gs).map_err(solver_error_to_py)?;
+        Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
+    }
+
     /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
     /// rows, in **natural (unscaled) units**: any NLP scaling baked
     /// into the converged factor is undone, so `-inv(H_R)` is directly

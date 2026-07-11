@@ -400,6 +400,76 @@ impl Solver {
         Ok(dx_full)
     }
 
+    /// Full KKT-space parametric step for a set of pinned equality
+    /// constraints: the same computation as [`Self::parametric_step`],
+    /// returned WITHOUT truncating to the primal block. The layout is
+    /// the compound KKT vector `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)`;
+    /// use [`Self::block_dims`] for the block sizes and
+    /// [`Self::g_multiplier_rows`] to locate a constraint's multiplier
+    /// row. This exposes the multiplier sensitivities `∂λ*/∂p`
+    /// alongside the primal step.
+    pub fn parametric_step_full(
+        &self,
+        pin_constraint_indices: &[Index],
+        deltas: &[Number],
+    ) -> Result<Vec<Number>, SolverError> {
+        if pin_constraint_indices.len() != deltas.len() {
+            return Err(SolverError::BadShape {
+                what: "deltas",
+                got: deltas.len(),
+                expected: pin_constraint_indices.len(),
+            });
+        }
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+
+        let param_rows = state
+            .backsolver
+            .map_pin_g_to_kkt_rows(pin_constraint_indices)
+            .map_err(SolverError::SensComputationFailed)?;
+        let signs = vec![1; pin_constraint_indices.len()];
+        let a_data = IndexSchurData::from_parts(param_rows, signs)
+            .map_err(|e| SolverError::SensComputationFailed(format!("{e:?}")))?;
+
+        let opts = SensOptions {
+            run_sens: true,
+            ..SensOptions::default()
+        };
+        let sens_app = SensApplication::new(a_data, state.backsolver.clone(), opts);
+        let n_full = state.backsolver.dim();
+        let mut dx_full = vec![0.0; n_full];
+        if !sens_app.parametric_step(deltas, &mut dx_full) {
+            return Err(SolverError::SensComputationFailed(
+                "SensApplication::parametric_step failed".into(),
+            ));
+        }
+        Ok(dx_full)
+    }
+
+    /// Flat rows of the compound KKT vector holding the equality
+    /// multipliers `y_c` for the given 0-based **full-g** constraint
+    /// indices. `None` for inequalities (their multipliers live in the
+    /// `y_d` block; mapping those is not exposed here). Row `r` of a
+    /// [`Self::parametric_step_full`] result is then `∂λ_g/∂p · Δp`.
+    pub fn g_multiplier_rows(
+        &self,
+        g_indices: &[Index],
+    ) -> Result<Vec<Option<Index>>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let dims = state.backsolver.block_dims();
+        let y_c_offset = (dims[0] + dims[1]) as Index;
+        Ok(g_indices
+            .iter()
+            .map(|&g| {
+                state
+                    .backsolver
+                    .full_g_to_c_block(g)
+                    .map(|pos| y_c_offset + pos)
+            })
+            .collect())
+    }
+
     /// Reduced Hessian `H_R = obj_scal · B K⁻¹ Bᵀ` over the pinned
     /// equality-constraint rows, where `B` selects the
     /// `pin_constraint_indices` rows of the y_c block and `K` is the

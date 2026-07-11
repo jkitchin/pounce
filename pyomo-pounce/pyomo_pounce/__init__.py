@@ -12,9 +12,21 @@ Initialization helpers (see the POUNCE docs' initialization chapter):
     pyomo_pounce.initialize_missing_values(model)  # fill unset Var values
     pyomo_pounce.project_to_feasible(model)        # min-norm repair onto constraints
     pyomo_pounce.block_initialize(model, decisions=[...])  # DM-ordered equality solve
+
+Parametric sensitivity (see pyomo_pounce.sens):
+    declare_sens_param(m.p)      # flag parameters when building the model
+    SolverFactory('pounce').solve(m)   # normal solve keeps the KKT factor
+    gradient(m.x, wrt=m.p)       # then sensitivities are cheap backsolves
+    estimate(m, [(m.p, 2.5)])
 """
 from pyomo_pounce.block_init import BlockInitReport, block_initialize
 from pyomo_pounce.pounce_solver import POUNCE
+from pyomo_pounce.sens import (
+    Gradient,
+    declare_sens_param,
+    estimate,
+    gradient,
+)
 from pyomo_pounce.preflight import (
     PyomoPreflightReport,
     initialize_missing_values,
@@ -24,6 +36,10 @@ from pyomo_pounce.repair import InitializeReport, initialize, project_to_feasibl
 
 __all__ = [
     "POUNCE",
+    "declare_sens_param",
+    "gradient",
+    "estimate",
+    "Gradient",
     "preflight",
     "PyomoPreflightReport",
     "initialize_missing_values",

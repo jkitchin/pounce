@@ -6,7 +6,7 @@ upstream Ipopt's `contrib/sIPOPT/` (Pirnay, López-Negrete & Biegler
 [10.1007/s12532-012-0043-2](https://doi.org/10.1007/s12532-012-0043-2)).
 It computes the first-order change in the optimal primal solution with
 respect to a problem parameter, reusing the KKT factorization from the
-converged solve. Three entry points cover the common workflows.
+converged solve. Four entry points cover the common workflows.
 
 ## AMPL CLI
 
@@ -69,6 +69,46 @@ x, info = prob.solve_with_sens(x0, pin_constraint_indices=[2, 3],
 eigendecomposition; `sens_bound_eps=…` tunes the bound projection. See
 [`python/notebooks/04_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/04_sensitivity.ipynb)
 for a walkthrough.
+
+## Pyomo
+
+`pyomo_pounce` wraps the same machinery in a declare-then-query
+interface: flag the parameters that matter while building the model
+(no perturbed values required), solve normally, then ask for
+derivatives. Parameters are declared with `declare_sens_param`
+(mutable `Param` or fixed `Var`, scalar or indexed); when declarations
+are present, `SolverFactory("pounce").solve(m)` runs in-process and
+keeps the converged KKT factorization, so every query afterwards is a
+single backsolve.
+
+```python
+import pyomo.environ as pyo
+import pyomo_pounce
+from pyomo_pounce import declare_sens_param, gradient, estimate
+
+m.p = pyo.Param(initialize=2.0, mutable=True)
+declare_sens_param(m.p)                 # a flag, not a perturbation
+
+pyo.SolverFactory("pounce").solve(m)    # ordinary solve
+
+gradient(m.x, wrt=m.p)                  # dx*/dp (float)
+gradient(m.con, wrt=m.p)                # d(multiplier of con)/dp
+G = gradient(m.z, wrt=m.r)              # containers -> Gradient object
+G[m.z[1], m.r[2]]; G.to_dataframe()     # element access / full Jacobian
+estimate(m, [(m.p, 2.5)])               # first-order solution estimate at
+                                        # new values, clamped to bounds
+```
+
+`gradient` returns exact first-order derivatives (unit-perturbation
+backsolves, no finite differencing); `estimate` combines the stored
+derivative columns for arbitrary perturbed values after the fact, and
+warns when the linear step leaves the variable bounds (a single-pass
+projection analogous to the CLI's `--sens-boundcheck`). Multiplier
+sensitivities are available for equality constraints. Models without
+declarations solve through the ordinary AMPL/CLI path, unchanged. See
+[`python/notebooks/25_pyomo_sensitivity.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/25_pyomo_sensitivity.ipynb)
+for a worked optimal-control example (initial conditions as
+parameters; the first-move gradient IS the NMPC feedback gain).
 
 ## Units and NLP scaling
 

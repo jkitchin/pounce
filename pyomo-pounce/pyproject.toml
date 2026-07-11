@@ -18,6 +18,8 @@ authors = [{name = "John Kitchin", email = "jkitchin@andrew.cmu.edu"}]
 dependencies = [
     "pyomo>=6.0",
     "pounce-solver>=0.1",
+    "numpy",
+    "pandas",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

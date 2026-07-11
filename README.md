@@ -292,7 +292,7 @@ finished solve is also available through the **pounce-studio MCP server**
 The `pounce-sensitivity` crate is a Rust port of upstream Ipopt's
 `contrib/sIPOPT/` (Pirnay, López-Negrete & Biegler 2012, [DOI
 10.1007/s12532-012-0043-2](https://doi.org/10.1007/s12532-012-0043-2)).
-Three entry points cover the common workflows:
+Four entry points cover the common workflows:
 
 * **AMPL CLI** — the main `pounce` driver auto-detects the sIPOPT
   suffixes (`sens_state_1`, `sens_state_value_1`, `sens_init_constr`)
@@ -325,6 +325,23 @@ Three entry points cover the common workflows:
   capability from the cyipopt-compatible Python wrapper. See
   [`python/notebooks/04_sensitivity.ipynb`](python/notebooks/04_sensitivity.ipynb)
   for a walkthrough.
+
+* **Pyomo (`pyomo_pounce`)** — declare the parameters that matter when
+  building the model, solve normally, then query derivatives; no
+  suffixes and no upfront perturbation values:
+
+  ```python
+  from pyomo_pounce import declare_sens_param, gradient, estimate
+  declare_sens_param(m.p)
+  SolverFactory("pounce").solve(m)     # keeps the KKT factorization
+  gradient(m.x, wrt=m.p)               # dx*/dp; constraints give dlambda/dp
+  estimate(m, [(m.p, 2.5)])            # perturbed-solution estimate
+  ```
+
+  See [`docs/src/sensitivity.md`](docs/src/sensitivity.md) and
+  [`python/notebooks/25_pyomo_sensitivity.ipynb`](python/notebooks/25_pyomo_sensitivity.ipynb)
+  (an optimal-control example where the first-move gradients are the
+  NMPC feedback gains).
 
 All three are verified against upstream sIPOPT 3.14.19's
 `parametric_cpp` golden output to 1e-8. Reduced-Hessian eigendecomposition

@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+### Added — declared-parameter sensitivity for Pyomo (Python / Pyomo)
+
+- **`pyomo_pounce` sensitivity interface.** Declare parameters while
+  building the model (`declare_sens_param(m.p)` — a flag, no perturbed
+  values), solve normally with `SolverFactory('pounce')`, then query:
+  `gradient(m.x, wrt=m.p)` (exact dx*/dp; equality constraints give
+  their multiplier's derivative), container/Jacobian access via the
+  `Gradient` object, and `estimate(m, [(m.p, value)])` for
+  first-order perturbed-solution estimates with bound clamping and an
+  active-set warning. When declarations are present the solve runs
+  in-process through the `pounce.Solver` session (`read_nl` + callback
+  bridge) and keeps the converged KKT factorization; models without
+  declarations use the CLI path unchanged.
+- **Python `Solver` session additions**: `parametric_step_full`
+  (full KKT-space step, exposing multiplier sensitivities) and
+  `multiplier_rows` (map constraint indices to their `y_c` rows), with
+  matching Rust methods `Solver::parametric_step_full` /
+  `Solver::g_multiplier_rows` in `pounce-sensitivity`.
+
 ### Added — structure-aware KKT hooks (#180)
 
 - **Caller-supplied KKT ordering** (item 1). A structure-aware presolve can
