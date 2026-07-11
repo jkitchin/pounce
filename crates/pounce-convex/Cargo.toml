@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Interior-point solvers for the convex problem classes in POUNCE: LP and convex QP today, with cone-generic scaffolding (Mehrotra + HSDE, SOCP/exp/pow/SDP) planned. Shares the pounce-linsol sparse symmetric factorization backbone with the NLP path."
+description = "Interior-point solvers for the convex problem classes in POUNCE: LP, convex QP, and conic programs (SOCP, exponential and power cones, SDP, and SOS) via a Mehrotra predictor-corrector with an HSDE embedding. Shares the pounce-linsol sparse symmetric factorization backbone with the NLP path."
 keywords = ["lp", "qp", "interior-point", "convex-optimization", "solver"]
 categories = ["mathematics", "science"]
 
