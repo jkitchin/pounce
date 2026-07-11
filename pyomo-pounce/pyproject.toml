@@ -17,7 +17,7 @@ authors = [{name = "John Kitchin", email = "jkitchin@andrew.cmu.edu"}]
 # API changes.
 dependencies = [
     "pyomo>=6.0",
-    "pounce-solver>=0.1",
+    "pounce-solver>=0.8.0",
     "numpy",
     "pandas",
 ]
