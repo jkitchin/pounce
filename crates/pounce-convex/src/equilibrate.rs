@@ -49,8 +49,8 @@
 //! it is wired only into [`crate::ipm::solve_qp_ipm`] and skipped under the
 //! HSDE/conic drivers.
 
-use crate::qp::{QpProblem, QpSolution, Triplet, BOUND_INF, NEG_INF, POS_INF};
 use crate::QpWarmStart;
+use crate::qp::{BOUND_INF, NEG_INF, POS_INF, QpProblem, QpSolution, Triplet};
 
 /// Number of Ruiz sweeps. Ruiz converges geometrically; a handful of passes
 /// brings the row/column ∞-norms to within a few percent of 1, which is all

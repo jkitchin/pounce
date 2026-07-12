@@ -23,20 +23,20 @@ use pounce_cli::nl_writer;
 use pounce_cli::print;
 use pounce_cli::sens;
 use pounce_cli::solve_report::{
-    status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
-    SolutionSuffix,
+    InputDescriptor, ReportBuilder, ReportDetail, SolutionSuffix, status_to_solve_result_num,
+    write_report_file,
 };
 use pounce_common::diagnostics::{
     DiagCategory, DiagnosticsConfig, DiagnosticsState, DumpFormat, IterSpec,
 };
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
+use pounce_nlp::SolveStatistics;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::IterRecord;
 use pounce_nlp::tnlp::TNLP;
-use pounce_nlp::SolveStatistics;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -664,7 +664,7 @@ pub fn main() -> ExitCode {
     // that does not match the detected class is rejected with a clear
     // message, instead of being silently ignored.
     {
-        use pounce_cli::dispatch::{resolve_solver, ProblemClass, SolverChoice, SolverSelection};
+        use pounce_cli::dispatch::{ProblemClass, SolverChoice, SolverSelection, resolve_solver};
         let sel_str = app
             .options()
             .get_string_value("solver_selection", "")
@@ -1069,7 +1069,7 @@ pub fn main() -> ExitCode {
         // `application.rs` does, so the banner reports the same reduced
         // problem the algorithm solves (#140).
         use pounce_nlp::tnlp_adapter::{
-            FixedVarTreatment, DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF,
+            DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF, FixedVarTreatment,
         };
         let opt = app.options();
         let lo_inf = opt
@@ -1713,8 +1713,8 @@ fn run_convex_qp(
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
 ) -> ExitCode {
-    use pounce_convex::presolve::{presolve, PresolveOutcome};
-    use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpStatus};
+    use pounce_convex::presolve::{PresolveOutcome, presolve};
+    use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
     let (qp, con_map, obj_nl_const) = match pounce_cli::qp_extract::extract_qp_with_map(prob) {
         Some(q) => q,
@@ -1930,7 +1930,7 @@ fn run_convex_socp(
     ampl: bool,
     convex_opts: pounce_convex::QpOptions,
 ) -> ExitCode {
-    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, QpOptions};
+    use pounce_convex::{QpOptions, solve_socp_ipm, solve_socp_ipm_debug};
 
     let (qp, con_map, obj_nl_const, cones) =
         match pounce_cli::qp_extract::extract_socp_with_map(prob) {
@@ -2279,7 +2279,9 @@ fn print_about() {
     #[cfg(feature = "ma57")]
     println!("  ma57            HSL MA57 via libcoinhsl       (compiled in)");
     #[cfg(not(feature = "ma57"))]
-    println!("  ma57            HSL MA57 via libcoinhsl       (not compiled; resolves to FERAL at runtime)");
+    println!(
+        "  ma57            HSL MA57 via libcoinhsl       (not compiled; resolves to FERAL at runtime)"
+    );
     println!();
 
     println!("Runtime paths:");
@@ -2374,8 +2376,8 @@ mod convex_status_tests {
 #[cfg(test)]
 mod scaling_retry_tests {
     use super::{resolve_scaling_retry_outcome, scaling_retry_promoted};
-    use pounce_nlp::return_codes::ApplicationReturnStatus;
     use pounce_nlp::SolveStatistics;
+    use pounce_nlp::return_codes::ApplicationReturnStatus;
 
     fn stats_with_iters(n: i32) -> SolveStatistics {
         SolveStatistics {

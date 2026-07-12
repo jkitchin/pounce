@@ -17,13 +17,13 @@
 //!   siblings are unaffected.
 
 use pounce_algorithm::application::{default_backend_factory, feral_config_from_options};
-use pounce_algorithm::{install_serial_feral_backend, solve_nlp_batch_parallel, IpoptApplication};
-use pounce_nl::nl_reader::{read_nl_file, NlTnlp, NlVariation};
+use pounce_algorithm::{IpoptApplication, install_serial_feral_backend, solve_nlp_batch_parallel};
+use pounce_nl::nl_reader::{NlTnlp, NlVariation, read_nl_file};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;

@@ -26,7 +26,7 @@ use pounce_nlp::tnlp::{
 use pounce_restoration::min_c_1nrm::{MinC1NormRestoration, RestoInnerSolver};
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

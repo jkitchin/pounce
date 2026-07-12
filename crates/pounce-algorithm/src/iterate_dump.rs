@@ -25,8 +25,8 @@ use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::diagnostics::{DiagCategory, DiagnosticsState, IterateVariant};
 use pounce_common::types::Number;
-use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::Vector;
+use pounce_linalg::dense_vector::DenseVector;
 use std::fmt::Write as _;
 
 /// Emit one iterate record for the current iteration if (a) the

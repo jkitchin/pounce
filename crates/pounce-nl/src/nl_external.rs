@@ -18,7 +18,7 @@
 //! All unsafe FFI is contained in this module. Public surface is safe.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_long, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
 use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -759,11 +759,7 @@ mod tests {
     fn idaes_dylib() -> Option<std::path::PathBuf> {
         let home = std::env::var_os("HOME")?;
         let p = std::path::PathBuf::from(home).join(".idaes/bin/general_helmholtz_external.dylib");
-        if p.exists() {
-            Some(p)
-        } else {
-            None
-        }
+        if p.exists() { Some(p) } else { None }
     }
 
     fn idaes_params_dir() -> Option<String> {

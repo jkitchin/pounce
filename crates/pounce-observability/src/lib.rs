@@ -302,9 +302,9 @@ pub fn init_for_tests() {
 }
 
 fn install() {
+    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::prelude::*;
-    use tracing_subscriber::EnvFilter;
 
     // Bridge the `log` crate into `tracing` so any remaining `log::*`
     // call sites — chiefly transitive dependencies — surface through

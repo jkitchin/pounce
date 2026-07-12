@@ -35,9 +35,9 @@
 use pounce_common::types::Number;
 use pounce_presolve::matching::hopcroft_karp;
 use pounce_presolve::{
-    classify_block, AuxiliaryCouplingClass, BlockEquations, BlockSolveOptions, BlockSolver,
-    BlockTriangularForm, DampedNewtonSolver, DulmageMendelsohnPartition, EqualityIncidence,
-    InequalityIncidence, ProbeView, ReductionFrame, SquareComponents,
+    AuxiliaryCouplingClass, BlockEquations, BlockSolveOptions, BlockSolver, BlockTriangularForm,
+    DampedNewtonSolver, DulmageMendelsohnPartition, EqualityIncidence, InequalityIncidence,
+    ProbeView, ReductionFrame, SquareComponents, classify_block,
 };
 
 struct LinearBlockEqs {

@@ -254,7 +254,7 @@ fn h_at(model: &crate::qps::QpsModel, irow: i32, jcol: i32) -> f64 {
         .iter()
         .zip(&model.h_jcol)
         .zip(&model.h_val)
-        .filter(|((&r, &c), _)| r == irow && c == jcol)
+        .filter(|&((&r, &c), _)| r == irow && c == jcol)
         .map(|(_, &v)| v)
         .sum()
 }

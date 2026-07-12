@@ -71,7 +71,7 @@ fn pounce_emits_summary_report_without_iterations() {
         report.statistics.iteration_count,
         report.statistics.iteration_count
     ); // sanity
-       // Summary mode: iterations dropped.
+    // Summary mode: iterations dropped.
     assert!(
         report.iterations.is_empty(),
         "summary should drop iter history, got {}",
@@ -417,8 +417,8 @@ fn lambda_is_unscaled_by_obj_scale_factor_under_gradient_scaling() {
     assert_eq!(report.solution.lambda.len(), 2, "two constraint duals");
     let g0 = report.solution.lambda[0].abs(); // x<=2 inequality
     let g1 = report.solution.lambda[1].abs(); // y==1 equality
-                                              // The decisive check: pre-fix this was ≈99.97 (= 5998/60); the unscaled
-                                              // value is 5998. Anything near 100 means the obj_scale division is missing.
+    // The decisive check: pre-fix this was ≈99.97 (= 5998/60); the unscaled
+    // value is 5998. Anything near 100 means the obj_scale division is missing.
     assert!(
         g1 > 1000.0,
         "lambda[1] (g1, y==1 equality) = {} is scaled by obj_scale_factor; \

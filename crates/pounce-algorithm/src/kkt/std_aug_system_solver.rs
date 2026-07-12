@@ -30,11 +30,11 @@ use crate::kkt::aug_system_solver::{AugSysCoeffs, AugSysRhs, AugSysSol, AugSyste
 use pounce_common::diagnostics::{DiagCategory, DiagnosticsState};
 use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
+use pounce_linalg::Vector;
 use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::diag_matrix::DiagMatrix;
 use pounce_linalg::triplet::{GenTMatrix, SymTMatrix};
-use pounce_linalg::Vector;
 use pounce_linsol::{ESymSolverStatus, FactorPattern, SymLinearSolver, TSymLinearSolver};
 use std::ops::Range;
 use std::rc::Rc;
@@ -856,7 +856,9 @@ fn flat_read(v: &dyn Vector) -> Vec<Number> {
         }
         return out;
     }
-    unreachable!("StdAugSystemSolver: D_*/rhs/sol must be DenseVector or CompoundVector of DenseVectors in v1.0")
+    unreachable!(
+        "StdAugSystemSolver: D_*/rhs/sol must be DenseVector or CompoundVector of DenseVectors in v1.0"
+    )
 }
 
 /// Inverse of [`flat_read`].
@@ -919,8 +921,8 @@ mod tests {
     use pounce_common::types::{Index, Number};
     use pounce_linalg::dense_vector::DenseVectorSpace;
     use pounce_linalg::triplet::{GenTMatrixSpace, SymTMatrixSpace};
-    use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
     use pounce_linsol::EMatrixFormat;
+    use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
 
     /// Mock backend: dense LU via tiny Gauss elimination. Used to drive
     /// `StdAugSystemSolver` end-to-end without an MA57 dependency.

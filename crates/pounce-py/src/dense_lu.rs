@@ -20,8 +20,8 @@
 //! `solve(b)`) so the Python side swaps backends with no call-site changes.
 //! Values are row-major (C-order) `n*n`, matching `numpy`'s default flatten.
 
-use faer::linalg::solvers::{PartialPivLu, Solve};
 use faer::Mat;
+use faer::linalg::solvers::{PartialPivLu, Solve};
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;

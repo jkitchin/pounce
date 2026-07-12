@@ -358,7 +358,7 @@ mod tests {
         let c = SecondOrderCone::new(3);
         let v = [2.0, 0.0, 0.0]; // interior, det = 4
         let dv = [-1.0, 1.0, 0.0]; // heads toward / out of the cone
-                                   // Step to boundary (tau = 1): det(v+αdv) = 0.
+        // Step to boundary (tau = 1): det(v+αdv) = 0.
         let alpha = c.max_step(&v, &dv, 1.0);
         let p: Vec<f64> = (0..3).map(|k| v[k] + alpha * dv[k]).collect();
         // Either on the determinant boundary or the step was capped at 1.

@@ -901,7 +901,7 @@ mod tests {
         x.set(2.0); // homogeneous 2
         let mut y = DenseVector::new(Rc::clone(&s));
         y.set(3.0); // homogeneous 3
-                    // 4 entries of 2*3 = 24
+        // 4 entries of 2*3 = 24
         assert_eq!(x.dot(&y), 24.0);
     }
 

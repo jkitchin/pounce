@@ -31,7 +31,7 @@ pub mod warm_start;
 mod tests;
 
 pub use bfgs::DampedBfgs;
-pub use filter::{filter_line_search, SqpFilter};
+pub use filter::{SqpFilter, filter_line_search};
 pub use ipopt_adapter::IpoptNlpAdapter;
 pub use iterates::SqpIterates;
 pub use lbfgs::LBfgs;

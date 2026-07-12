@@ -14,9 +14,9 @@
 
 use pounce_cli::cbf;
 use pounce_cli::solve_report::{
-    status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
+    InputDescriptor, ReportBuilder, ReportDetail, status_to_solve_result_num, write_report_file,
 };
-use pounce_convex::{solve_socp_ipm, QpOptions, QpStatus};
+use pounce_convex::{QpOptions, QpStatus, solve_socp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;

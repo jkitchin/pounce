@@ -61,19 +61,11 @@ struct ScaledPinTnlp {
 
 impl ScaledPinTnlp {
     fn m(&self) -> Index {
-        if self.with_leading_inequality {
-            2
-        } else {
-            1
-        }
+        if self.with_leading_inequality { 2 } else { 1 }
     }
     /// Row index of the pin constraint in the user's g ordering.
     fn pin_row(&self) -> Index {
-        if self.with_leading_inequality {
-            1
-        } else {
-            0
-        }
+        if self.with_leading_inequality { 1 } else { 0 }
     }
 }
 

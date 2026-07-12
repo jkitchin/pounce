@@ -759,8 +759,8 @@ mod tests {
     use super::*;
     use crate::ipopt_data::IpoptData;
     use crate::iterates_vector::IteratesVector;
-    use pounce_linalg::dense_vector::DenseVectorSpace;
     use pounce_linalg::Vector;
+    use pounce_linalg::dense_vector::DenseVectorSpace;
     use std::cell::RefCell;
     use std::rc::Rc;
 

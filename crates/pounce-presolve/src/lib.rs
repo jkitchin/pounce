@@ -72,15 +72,15 @@ pub use block_solve::{
     BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
     DampedNewtonSolver,
 };
-pub use bound_tighten::{tighten_bounds, LinearRow, TightenReport, INF_BOUND};
+pub use bound_tighten::{INF_BOUND, LinearRow, TightenReport, tighten_bounds};
 pub use btf::{BlockTriangularBlock, BlockTriangularForm};
 pub use components::{SquareComponent, SquareComponents};
-pub use coupling::{classify_block, objective_gradient_support, AuxiliaryCouplingClass};
+pub use coupling::{AuxiliaryCouplingClass, classify_block, objective_gradient_support};
 pub use diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReason};
 pub use dulmage_mendelsohn::{DMPart, DulmageMendelsohnPartition};
 pub use incidence::{EqualityIncidence, InequalityIncidence, ProbeView};
-pub use licq::{licq_check, EqRow, LicqVerdict};
-pub use options::{register_options, AuxiliaryCouplingPolicy, LicqAction, PresolveOptions};
+pub use licq::{EqRow, LicqVerdict, licq_check};
+pub use options::{AuxiliaryCouplingPolicy, LicqAction, PresolveOptions, register_options};
 pub use reduction_frame::{ReductionFrame, ReductionStack};
 pub use redundant::find_redundant_rows;
 

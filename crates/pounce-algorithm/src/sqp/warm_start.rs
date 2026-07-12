@@ -10,8 +10,8 @@
 //! will detect and correct any misclassification in the first
 //! step of the next QP, so correctness is preserved.
 
-use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::Number;
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_qp::{BoundStatus, ConsStatus, WorkingSet};
 
 /// Classify the active set at iterate `(x, λ_x, λ_g)` against the

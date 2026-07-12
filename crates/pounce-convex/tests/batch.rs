@@ -3,8 +3,8 @@
 //! corresponding single-problem solve, in order.
 
 use pounce_convex::{
-    solve_qp_batch, solve_qp_batch_parallel, solve_qp_ipm, solve_qp_multi_rhs, QpOptions,
-    QpProblem, QpStatus, Triplet,
+    QpOptions, QpProblem, QpStatus, Triplet, solve_qp_batch, solve_qp_batch_parallel, solve_qp_ipm,
+    solve_qp_multi_rhs,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;

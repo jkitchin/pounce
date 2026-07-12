@@ -12,7 +12,7 @@
 //! admit a closed-form.
 
 use pounce_algorithm::application::IpoptApplication;
-use pounce_algorithm::sqp::{classify_working_set, SqpIterates};
+use pounce_algorithm::sqp::{SqpIterates, classify_working_set};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{

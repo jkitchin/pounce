@@ -8,7 +8,7 @@
 //! handled in `python/pounce/sos.py`.
 
 use numpy::IntoPyArray;
-use pounce_convex::{sos_minimize as core_sos_minimize, PolyProblem, Polynomial, QpStatus};
+use pounce_convex::{PolyProblem, Polynomial, QpStatus, sos_minimize as core_sos_minimize};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pyo3::exceptions::PyValueError;

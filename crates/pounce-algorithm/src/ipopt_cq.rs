@@ -1111,11 +1111,7 @@ impl IpoptCalculatedQuantities {
             }
         };
         let acc = m(&cxl).min(m(&cxu)).min(m(&csl)).min(m(&csu));
-        if acc.is_infinite() {
-            0.0
-        } else {
-            acc
-        }
+        if acc.is_infinite() { 0.0 } else { acc }
     }
 
     /// Max-norm of the unbarriered complementarity blocks

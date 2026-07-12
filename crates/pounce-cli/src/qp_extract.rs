@@ -594,7 +594,7 @@ fn psd_outer_factor(mut a: Vec<f64>, n: usize) -> Vec<Vec<f64>> {
 mod tests {
     use super::*;
     use crate::nl_reader::{BinOp, Expr};
-    use pounce_convex::{solve_qp_ipm, solve_socp_ipm, QpOptions, QpStatus};
+    use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_socp_ipm};
     use pounce_feral::FeralSolverInterface;
     use pounce_linsol::SparseSymLinearSolverInterface;
 

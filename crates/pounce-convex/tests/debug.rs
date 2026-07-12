@@ -3,7 +3,7 @@
 //! the attached hook does not change the solve result.
 
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook, DebugState};
-use pounce_convex::{solve_qp_ipm, solve_qp_ipm_debug, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm, solve_qp_ipm_debug};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
@@ -164,7 +164,7 @@ fn hsde_driver_is_debuggable_and_exposes_tau_kappa() {
 #[test]
 fn nonsym_exp_cone_driver_is_debuggable() {
     use pounce_convex::hsde_nonsym::{
-        solve_conic_hsde_nonsym, solve_conic_hsde_nonsym_debug, NsBlock,
+        NsBlock, solve_conic_hsde_nonsym, solve_conic_hsde_nonsym_debug,
     };
 
     let e = std::f64::consts::E;
@@ -277,7 +277,7 @@ fn convex_debugger_supports_set_and_rewind() {
 /// exp-cone epigraph (optimum z = e) exercises the routing.
 #[test]
 fn solve_socp_ipm_debug_routes_and_fires() {
-    use pounce_convex::{solve_socp_ipm, solve_socp_ipm_debug, ConeSpec};
+    use pounce_convex::{ConeSpec, solve_socp_ipm, solve_socp_ipm_debug};
 
     let e = std::f64::consts::E;
     let prob = QpProblem {

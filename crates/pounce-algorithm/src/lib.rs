@@ -49,9 +49,9 @@ pub mod upstream_options;
 
 pub use application::IpoptApplication;
 pub use batch::{
+    FeralBackendPool, NlpBatchResult, NlpBatchSolution, NlpWarmStart,
     install_pooled_serial_feral_backend, install_serial_feral_backend, solve_nlp_batch,
     solve_nlp_batch_parallel, solve_nlp_batch_parallel_warm, solve_nlp_batch_warm,
-    FeralBackendPool, NlpBatchResult, NlpBatchSolution, NlpWarmStart,
 };
 pub use ipopt_cq::{IpoptCalculatedQuantities, IpoptCqHandle};
 pub use ipopt_data::{IpoptData, IpoptDataHandle, PdPerturbations};

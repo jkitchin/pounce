@@ -33,7 +33,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use pounce_common::types::{Index, Number};
-use pounce_nl::nl_reader::{read_nl_file, NlTnlp, NlVariation};
+use pounce_nl::nl_reader::{NlTnlp, NlVariation, read_nl_file};
 use pounce_nlp::tnlp::{SparsityRequest, TNLP};
 
 /// A `.nl` model loaded through pounce's reader, exposing its evaluators.

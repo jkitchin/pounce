@@ -43,7 +43,7 @@
 //! on its own. The `make_backend` factory is shared by reference and called
 //! once per instance, so it must be `Sync`.
 
-use crate::ipm::{solve_qp_ipm, solve_qp_ipm_warm, QpOptions, QpWarmStart};
+use crate::ipm::{QpOptions, QpWarmStart, solve_qp_ipm, solve_qp_ipm_warm};
 use crate::qp::{QpProblem, QpSolution};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use rayon::prelude::*;

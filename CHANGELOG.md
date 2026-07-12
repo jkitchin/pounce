@@ -40,6 +40,20 @@ changes.
   conditional on the bound, correlation entries reported as 0, plus the
   existing warning.
 
+### Changed
+
+- **Rust 2024 edition + resolver v3** (#204). The workspace now compiles on
+  the Rust 2024 edition with Cargo's v3 (MSRV-aware) dependency resolver.
+  This is a build-time change only: no public API, CLI, wheel, or numerical
+  behavior changes. Building pounce from source now requires Rust ≥ 1.85 (the
+  first toolchain to ship the 2024 edition); users installing the PyPI wheels
+  or crates.io releases are unaffected. The migration is the mechanical
+  `cargo fix --edition` output (`unsafe(no_mangle)` attributes, explicit
+  `unsafe {}` blocks in `unsafe fn` bodies, closure captures) plus the 2024
+  rustfmt style-edition reformatting; all `tail-expr-drop-order` sites were
+  reviewed and are behavior-preserving (`RefCell`/`Mutex` guards dropped at
+  end of scope with no observer of the relative order).
+
 ## [0.8.0] - 2026-07-11
 
 ### Added — declared-parameter sensitivity for Pyomo (Python / Pyomo)

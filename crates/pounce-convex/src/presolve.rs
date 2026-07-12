@@ -143,10 +143,10 @@
 //! (`tests/presolve_bound_tightening.rs`).
 
 use crate::cones::ConeSpec;
-use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet, BOUND_INF};
+use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
 use rayon::prelude::*;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Outcome of presolve.
@@ -1267,11 +1267,7 @@ fn pivot_divisor(row: &Row, is_equality: bool) -> f64 {
     // Empty (coupled cone) rows are never grouped/merged, so any nonzero
     // divisor is fine; guard the index to keep normalization panic-free.
     let p = row.coeffs.first().map_or(1.0, |&(_, v)| v);
-    if is_equality {
-        p
-    } else {
-        p.abs()
-    }
+    if is_equality { p } else { p.abs() }
 }
 
 /// Normalized coefficient values (parallel detection): `coeffs / divisor`.

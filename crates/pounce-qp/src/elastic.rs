@@ -29,10 +29,10 @@
 //! Reference: Gill-Murray-Saunders, *User's Guide for SQOPT
 //! 7.7*, §4 (elastic-mode formulation).
 
+use crate::QpProblem;
 use crate::problem::HessianInertia;
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
-use crate::QpProblem;
-use pounce_common::types::{Index, Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_common::types::{Index, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use std::rc::Rc;
 

@@ -18,9 +18,9 @@
 
 use numpy::IntoPyArray;
 use pounce_convex::{
-    solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_warm,
-    solve_socp_ipm, ConeSpec, QpFactorization, QpOptions, QpProblem, QpSensitivity, QpSolution,
-    QpStatus, QpWarmStart, SensError, Triplet,
+    ConeSpec, QpFactorization, QpOptions, QpProblem, QpSensitivity, QpSolution, QpStatus,
+    QpWarmStart, SensError, Triplet, solve_qp_batch_parallel, solve_qp_batch_parallel_warm,
+    solve_qp_ipm, solve_qp_ipm_warm, solve_socp_ipm,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;

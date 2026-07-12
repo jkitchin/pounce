@@ -8,7 +8,7 @@
 //!
 //! Run: `cargo run -p pounce-convex --example warm_start`
 
-use pounce_convex::{solve_qp_ipm, solve_qp_ipm_warm, QpOptions, QpProblem, QpWarmStart, Triplet};
+use pounce_convex::{QpOptions, QpProblem, QpWarmStart, Triplet, solve_qp_ipm, solve_qp_ipm_warm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

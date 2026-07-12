@@ -187,7 +187,7 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
                         return Err(format!(
                             "line {}: row sense `{other}` not recognized (need N/L/G/E)",
                             line_no + 1
-                        ))
+                        ));
                     }
                 };
                 let name = tokens[1].to_string();

@@ -23,8 +23,8 @@
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::Number;
-use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::Vector;
+use pounce_linalg::dense_vector::DenseVector;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -224,11 +224,11 @@ impl IterDumper {
         let inf_du = cq.borrow().curr_dual_infeasibility_max();
         let constr_viol = cq.borrow().curr_constraint_violation();
         let dual_inf = inf_du; // alias per FORMAT.md
-                               // FORMAT.md describes `complementarity` as
-                               // `IpCq().curr_complementarity(0.0, NORM_MAX)` — the max-norm
-                               // unbarriered complementarity. We compute it directly from the
-                               // four `curr_compl_*` blocks (the same pieces curr_nlp_error
-                               // already uses).
+        // FORMAT.md describes `complementarity` as
+        // `IpCq().curr_complementarity(0.0, NORM_MAX)` — the max-norm
+        // unbarriered complementarity. We compute it directly from the
+        // four `curr_compl_*` blocks (the same pieces curr_nlp_error
+        // already uses).
         let complementarity = {
             let cq_ref = cq.borrow();
             cq_ref
@@ -361,7 +361,8 @@ mod tests {
         // only reads/clears `ENV_DUMP_PATH` (no test sets it anymore), so
         // there is no setenv/getenv data race with concurrent tests.
         let _env = env_guard();
-        std::env::remove_var(ENV_DUMP_PATH);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(ENV_DUMP_PATH) };
         assert!(IterDumper::from_env().is_none());
     }
 

@@ -3,7 +3,7 @@
 //! Usage: see `--help`. Exit code 0 on match, 1 on divergence, 2 on
 //! parse / I/O error.
 
-use iter_diff::{compare, parse_file, CompareError, Tolerance};
+use iter_diff::{CompareError, Tolerance, compare, parse_file};
 use std::path::PathBuf;
 use std::process::ExitCode;
 

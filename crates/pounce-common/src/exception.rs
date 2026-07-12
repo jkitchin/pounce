@@ -156,7 +156,7 @@ impl std::error::Error for SolverException {}
 /// a `Result::Err(SolverException)` using `file!()`/`line!()`.
 #[macro_export]
 macro_rules! throw {
-    ($kind:expr, $msg:expr) => {
+    ($kind:expr_2021, $msg:expr_2021) => {
         return ::core::result::Result::Err($crate::exception::SolverException::new(
             $kind,
             $msg,
@@ -169,7 +169,7 @@ macro_rules! throw {
 /// Macro replacement for `ASSERT_EXCEPTION(cond, kind, msg)`.
 #[macro_export]
 macro_rules! assert_exc {
-    ($cond:expr, $kind:expr, $msg:expr) => {
+    ($cond:expr_2021, $kind:expr_2021, $msg:expr_2021) => {
         if !($cond) {
             let mut newmsg = ::std::string::String::from(stringify!($cond));
             newmsg.push_str(" evaluated false: ");

@@ -4,8 +4,8 @@
 //! [`Vector`] holding the diagonal entries. Symmetric by construction.
 
 use crate::matrix::{
-    sym_default_compute_col_amax_impl, sym_default_trans_mult_vector_impl, Matrix, MatrixCache,
-    SymMatrix,
+    Matrix, MatrixCache, SymMatrix, sym_default_compute_col_amax_impl,
+    sym_default_trans_mult_vector_impl,
 };
 use crate::vector::Vector;
 use pounce_common::tagged::{Tag, TaggedObject};
@@ -131,8 +131,8 @@ impl SymMatrix for DiagMatrix {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dense_vector::DenseVectorSpace;
     use crate::DenseVector;
+    use crate::dense_vector::DenseVectorSpace;
 
     fn dvec(values: &[Number]) -> Rc<DenseVector> {
         let space = DenseVectorSpace::new(values.len() as Index);

@@ -99,7 +99,9 @@ impl CompoundVector {
         for f in factories.iter() {
             let factory = match f.as_ref() {
                 Some(fac) => fac,
-                None => panic!("CompoundVectorSpace component not set — call set_comp on every component before constructing a CompoundVector"),
+                None => panic!(
+                    "CompoundVectorSpace component not set — call set_comp on every component before constructing a CompoundVector"
+                ),
             };
             let v = factory();
             dim_check += v.dim();
@@ -425,7 +427,7 @@ mod tests {
         let mut v = CompoundVector::new(space);
         fill_dense(v.comp_mut(0), &[3.0, 4.0]); // nrm2 = 5
         fill_dense(v.comp_mut(1), &[0.0, 0.0, 12.0]); // nrm2 = 12
-                                                      // sqrt(25 + 144) = 13
+        // sqrt(25 + 144) = 13
         assert!((v.nrm2() - 13.0).abs() < 1e-15);
     }
 
@@ -485,7 +487,7 @@ mod tests {
         let mut delta = CompoundVector::new(space);
         fill_dense(delta.comp_mut(0), &[-2.0, 0.0]); // alpha = tau/2 * 1 = 0.5
         fill_dense(delta.comp_mut(1), &[-1.5]); // alpha = tau/1.5 * 3 = 2*tau
-                                                // Min(0.5, 2*tau) for tau=1 → 0.5
+        // Min(0.5, 2*tau) for tau=1 → 0.5
         let alpha = x.frac_to_bound(&delta, 1.0);
         assert!((alpha - 0.5).abs() < 1e-15);
     }

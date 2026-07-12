@@ -141,23 +141,21 @@ unsafe extern "C" fn c_eval_f(
     obj_value: *mut Number,
     user_data: *mut c_void,
 ) -> c_int {
-    let fud = &mut *(user_data as *mut FortranUserData);
-    let mut ierr: Index = 0;
-    let n_local = n;
-    let new_x_i: Index = new_x as Index;
-    (fud.eval_f)(
-        &n_local,
-        x as *mut Number,
-        &new_x_i,
-        obj_value,
-        fud.idat,
-        fud.ddat,
-        &mut ierr,
-    );
-    if ierr == OK {
-        1
-    } else {
-        0
+    unsafe {
+        let fud = &mut *(user_data as *mut FortranUserData);
+        let mut ierr: Index = 0;
+        let n_local = n;
+        let new_x_i: Index = new_x as Index;
+        (fud.eval_f)(
+            &n_local,
+            x as *mut Number,
+            &new_x_i,
+            obj_value,
+            fud.idat,
+            fud.ddat,
+            &mut ierr,
+        );
+        if ierr == OK { 1 } else { 0 }
     }
 }
 
@@ -168,23 +166,21 @@ unsafe extern "C" fn c_eval_grad_f(
     grad_f: *mut Number,
     user_data: *mut c_void,
 ) -> c_int {
-    let fud = &mut *(user_data as *mut FortranUserData);
-    let mut ierr: Index = 0;
-    let n_local = n;
-    let new_x_i: Index = new_x as Index;
-    (fud.eval_grad_f)(
-        &n_local,
-        x as *mut Number,
-        &new_x_i,
-        grad_f,
-        fud.idat,
-        fud.ddat,
-        &mut ierr,
-    );
-    if ierr == OK {
-        1
-    } else {
-        0
+    unsafe {
+        let fud = &mut *(user_data as *mut FortranUserData);
+        let mut ierr: Index = 0;
+        let n_local = n;
+        let new_x_i: Index = new_x as Index;
+        (fud.eval_grad_f)(
+            &n_local,
+            x as *mut Number,
+            &new_x_i,
+            grad_f,
+            fud.idat,
+            fud.ddat,
+            &mut ierr,
+        );
+        if ierr == OK { 1 } else { 0 }
     }
 }
 
@@ -196,28 +192,26 @@ unsafe extern "C" fn c_eval_g(
     g: *mut Number,
     user_data: *mut c_void,
 ) -> c_int {
-    let fud = &mut *(user_data as *mut FortranUserData);
-    let Some(cb) = fud.eval_g else {
-        return 0;
-    };
-    let mut ierr: Index = 0;
-    let n_local = n;
-    let m_local = m;
-    let new_x_i: Index = new_x as Index;
-    cb(
-        &n_local,
-        x as *mut Number,
-        &new_x_i,
-        &m_local,
-        g,
-        fud.idat,
-        fud.ddat,
-        &mut ierr,
-    );
-    if ierr == OK {
-        1
-    } else {
-        0
+    unsafe {
+        let fud = &mut *(user_data as *mut FortranUserData);
+        let Some(cb) = fud.eval_g else {
+            return 0;
+        };
+        let mut ierr: Index = 0;
+        let n_local = n;
+        let m_local = m;
+        let new_x_i: Index = new_x as Index;
+        cb(
+            &n_local,
+            x as *mut Number,
+            &new_x_i,
+            &m_local,
+            g,
+            fud.idat,
+            fud.ddat,
+            &mut ierr,
+        );
+        if ierr == OK { 1 } else { 0 }
     }
 }
 
@@ -232,40 +226,38 @@ unsafe extern "C" fn c_eval_jac_g(
     values: *mut Number,
     user_data: *mut c_void,
 ) -> c_int {
-    let fud = &mut *(user_data as *mut FortranUserData);
-    let Some(cb) = fud.eval_jac_g else {
-        return 0;
-    };
-    let task: Index = if !irow.is_null() && !jcol.is_null() && values.is_null() {
-        0
-    } else if irow.is_null() && jcol.is_null() && !values.is_null() {
-        1
-    } else {
-        return 0;
-    };
-    let mut ierr: Index = 0;
-    let n_local = n;
-    let m_local = m;
-    let nele_local = nele_jac;
-    let new_x_i: Index = new_x as Index;
-    cb(
-        &task,
-        &n_local,
-        x as *mut Number,
-        &new_x_i,
-        &m_local,
-        &nele_local,
-        irow,
-        jcol,
-        values,
-        fud.idat,
-        fud.ddat,
-        &mut ierr,
-    );
-    if ierr == OK {
-        1
-    } else {
-        0
+    unsafe {
+        let fud = &mut *(user_data as *mut FortranUserData);
+        let Some(cb) = fud.eval_jac_g else {
+            return 0;
+        };
+        let task: Index = if !irow.is_null() && !jcol.is_null() && values.is_null() {
+            0
+        } else if irow.is_null() && jcol.is_null() && !values.is_null() {
+            1
+        } else {
+            return 0;
+        };
+        let mut ierr: Index = 0;
+        let n_local = n;
+        let m_local = m;
+        let nele_local = nele_jac;
+        let new_x_i: Index = new_x as Index;
+        cb(
+            &task,
+            &n_local,
+            x as *mut Number,
+            &new_x_i,
+            &m_local,
+            &nele_local,
+            irow,
+            jcol,
+            values,
+            fud.idat,
+            fud.ddat,
+            &mut ierr,
+        );
+        if ierr == OK { 1 } else { 0 }
     }
 }
 
@@ -284,44 +276,42 @@ unsafe extern "C" fn c_eval_h(
     values: *mut Number,
     user_data: *mut c_void,
 ) -> c_int {
-    let fud = &mut *(user_data as *mut FortranUserData);
-    let Some(cb) = fud.eval_hess else {
-        return 0;
-    };
-    let task: Index = if !irow.is_null() && !jcol.is_null() && values.is_null() {
-        0
-    } else if irow.is_null() && jcol.is_null() && !values.is_null() {
-        1
-    } else {
-        return 0;
-    };
-    let mut ierr: Index = 0;
-    let n_local = n;
-    let m_local = m;
-    let nele_local = nele_hess;
-    let new_x_i: Index = new_x as Index;
-    let new_lam_i: Index = new_lambda as Index;
-    cb(
-        &task,
-        &n_local,
-        x as *mut Number,
-        &new_x_i,
-        &obj_factor,
-        &m_local,
-        lambda as *mut Number,
-        &new_lam_i,
-        &nele_local,
-        irow,
-        jcol,
-        values,
-        fud.idat,
-        fud.ddat,
-        &mut ierr,
-    );
-    if ierr == OK {
-        1
-    } else {
-        0
+    unsafe {
+        let fud = &mut *(user_data as *mut FortranUserData);
+        let Some(cb) = fud.eval_hess else {
+            return 0;
+        };
+        let task: Index = if !irow.is_null() && !jcol.is_null() && values.is_null() {
+            0
+        } else if irow.is_null() && jcol.is_null() && !values.is_null() {
+            1
+        } else {
+            return 0;
+        };
+        let mut ierr: Index = 0;
+        let n_local = n;
+        let m_local = m;
+        let nele_local = nele_hess;
+        let new_x_i: Index = new_x as Index;
+        let new_lam_i: Index = new_lambda as Index;
+        cb(
+            &task,
+            &n_local,
+            x as *mut Number,
+            &new_x_i,
+            &obj_factor,
+            &m_local,
+            lambda as *mut Number,
+            &new_lam_i,
+            &nele_local,
+            irow,
+            jcol,
+            values,
+            fud.idat,
+            fud.ddat,
+            &mut ierr,
+        );
+        if ierr == OK { 1 } else { 0 }
     }
 }
 
@@ -340,31 +330,29 @@ unsafe extern "C" fn c_intermediate(
     ls_trials: Index,
     user_data: *mut c_void,
 ) -> c_int {
-    let fud = &mut *(user_data as *mut FortranUserData);
-    let Some(cb) = fud.intermediate_cb else {
-        return 1;
-    };
-    let mut istop: Index = 0;
-    cb(
-        &alg_mod,
-        &iter_count,
-        &obj_value,
-        &inf_pr,
-        &inf_du,
-        &mu,
-        &d_norm,
-        &regu_size,
-        &alpha_du,
-        &alpha_pr,
-        &ls_trials,
-        fud.idat,
-        fud.ddat,
-        &mut istop,
-    );
-    if istop == OK {
-        1
-    } else {
-        0
+    unsafe {
+        let fud = &mut *(user_data as *mut FortranUserData);
+        let Some(cb) = fud.intermediate_cb else {
+            return 1;
+        };
+        let mut istop: Index = 0;
+        cb(
+            &alg_mod,
+            &iter_count,
+            &obj_value,
+            &inf_pr,
+            &inf_du,
+            &mu,
+            &d_norm,
+            &regu_size,
+            &alpha_du,
+            &alpha_pr,
+            &ls_trials,
+            fud.idat,
+            fud.ddat,
+            &mut istop,
+        );
+        if istop == OK { 1 } else { 0 }
     }
 }
 
@@ -404,7 +392,7 @@ fn f2cstr(buf: *const c_char, slen: c_int) -> Vec<u8> {
 /// All pointer arguments must be valid for the lifetime of the
 /// returned handle. Bound arrays must hold `*N` / `*M` doubles.
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipcreate_(
     n: *const Index,
     x_l: *const Number,
@@ -421,37 +409,39 @@ pub unsafe extern "C" fn ipcreate_(
     eval_jac_g: Option<FEval_Jac_G_CB>,
     eval_hess: Option<FEval_Hess_CB>,
 ) -> *mut c_void {
-    let problem = CreateIpoptProblem(
-        *n,
-        x_l,
-        x_u,
-        *m,
-        g_l,
-        g_u,
-        *nele_jac,
-        *nele_hess,
-        *idx_sty,
-        Some(c_eval_f),
-        Some(c_eval_g),
-        Some(c_eval_grad_f),
-        Some(c_eval_jac_g),
-        Some(c_eval_h),
-    );
-    if problem.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let problem = CreateIpoptProblem(
+            *n,
+            x_l,
+            x_u,
+            *m,
+            g_l,
+            g_u,
+            *nele_jac,
+            *nele_hess,
+            *idx_sty,
+            Some(c_eval_f),
+            Some(c_eval_g),
+            Some(c_eval_grad_f),
+            Some(c_eval_jac_g),
+            Some(c_eval_h),
+        );
+        if problem.is_null() {
+            return std::ptr::null_mut();
+        }
+        let fud = Box::new(FortranUserData {
+            idat: std::ptr::null_mut(),
+            ddat: std::ptr::null_mut(),
+            eval_f,
+            eval_g,
+            eval_grad_f,
+            eval_jac_g,
+            eval_hess,
+            intermediate_cb: None,
+            problem,
+        });
+        Box::into_raw(fud) as *mut c_void
     }
-    let fud = Box::new(FortranUserData {
-        idat: std::ptr::null_mut(),
-        ddat: std::ptr::null_mut(),
-        eval_f,
-        eval_g,
-        eval_grad_f,
-        eval_jac_g,
-        eval_hess,
-        intermediate_cb: None,
-        problem,
-    });
-    Box::into_raw(fud) as *mut c_void
 }
 
 /// `ipfree_(FProblem)` — frees the handle and zeroes the user's
@@ -460,16 +450,18 @@ pub unsafe extern "C" fn ipcreate_(
 /// # Safety
 /// `fproblem` must point to a slot that holds a handle previously
 /// returned by [`ipcreate_`], or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipfree_(fproblem: *mut *mut c_void) {
-    if fproblem.is_null() || (*fproblem).is_null() {
-        return;
+    unsafe {
+        if fproblem.is_null() || (*fproblem).is_null() {
+            return;
+        }
+        let raw = *fproblem as *mut FortranUserData;
+        let fud = Box::from_raw(raw);
+        FreeIpoptProblem(fud.problem);
+        drop(fud);
+        *fproblem = std::ptr::null_mut();
     }
-    let raw = *fproblem as *mut FortranUserData;
-    let fud = Box::from_raw(raw);
-    FreeIpoptProblem(fud.problem);
-    drop(fud);
-    *fproblem = std::ptr::null_mut();
 }
 
 /// `ipsolve_(FProblem, X, G, OBJ_VAL, MULT_G, MULT_X_L, MULT_X_U, IDAT, DDAT) -> Index`.
@@ -479,7 +471,7 @@ pub unsafe extern "C" fn ipfree_(fproblem: *mut *mut c_void) {
 /// [`crate::IpoptSolve`]. `idat`/`ddat` are scratch arrays passed
 /// back to the user's Fortran callbacks.
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipsolve_(
     fproblem: *mut *mut c_void,
     x: *mut Number,
@@ -491,23 +483,25 @@ pub unsafe extern "C" fn ipsolve_(
     idat: *mut Index,
     ddat: *mut Number,
 ) -> Index {
-    if fproblem.is_null() || (*fproblem).is_null() {
-        return -199;
+    unsafe {
+        if fproblem.is_null() || (*fproblem).is_null() {
+            return -199;
+        }
+        let fud = &mut *(*fproblem as *mut FortranUserData);
+        fud.idat = idat;
+        fud.ddat = ddat;
+        let fud_ptr = (*fproblem) as *mut c_void;
+        IpoptSolve(
+            fud.problem,
+            x,
+            g,
+            obj_val,
+            mult_g,
+            mult_x_l,
+            mult_x_u,
+            fud_ptr,
+        )
     }
-    let fud = &mut *(*fproblem as *mut FortranUserData);
-    fud.idat = idat;
-    fud.ddat = ddat;
-    let fud_ptr = (*fproblem) as *mut c_void;
-    IpoptSolve(
-        fud.problem,
-        x,
-        g,
-        obj_val,
-        mult_g,
-        mult_x_l,
-        mult_x_u,
-        fud_ptr,
-    )
 }
 
 /// `ipaddstroption_(FProblem, KEYWORD, VALUE, klen, vlen) -> Index`.
@@ -516,7 +510,7 @@ pub unsafe extern "C" fn ipsolve_(
 /// # Safety
 /// `fproblem` must be valid; the `(KEYWORD, klen)` and `(VALUE, vlen)`
 /// pairs must describe valid Fortran character slices.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipaddstroption_(
     fproblem: *mut *mut c_void,
     keyword: *const c_char,
@@ -524,21 +518,19 @@ pub unsafe extern "C" fn ipaddstroption_(
     klen: c_int,
     vlen: c_int,
 ) -> Index {
-    if fproblem.is_null() || (*fproblem).is_null() {
-        return NOT_OK;
-    }
-    let fud = &mut *(*fproblem as *mut FortranUserData);
-    let k = f2cstr(keyword, klen);
-    let v = f2cstr(value, vlen);
-    let ok = AddIpoptStrOption(
-        fud.problem,
-        k.as_ptr() as *const c_char,
-        v.as_ptr() as *const c_char,
-    );
-    if ok != 0 {
-        OK
-    } else {
-        NOT_OK
+    unsafe {
+        if fproblem.is_null() || (*fproblem).is_null() {
+            return NOT_OK;
+        }
+        let fud = &mut *(*fproblem as *mut FortranUserData);
+        let k = f2cstr(keyword, klen);
+        let v = f2cstr(value, vlen);
+        let ok = AddIpoptStrOption(
+            fud.problem,
+            k.as_ptr() as *const c_char,
+            v.as_ptr() as *const c_char,
+        );
+        if ok != 0 { OK } else { NOT_OK }
     }
 }
 
@@ -547,23 +539,21 @@ pub unsafe extern "C" fn ipaddstroption_(
 /// # Safety
 /// `fproblem` must be valid; the `(KEYWORD, klen)` pair must describe
 /// a valid Fortran character slice.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipaddnumoption_(
     fproblem: *mut *mut c_void,
     keyword: *const c_char,
     value: *const Number,
     klen: c_int,
 ) -> Index {
-    if fproblem.is_null() || (*fproblem).is_null() {
-        return NOT_OK;
-    }
-    let fud = &mut *(*fproblem as *mut FortranUserData);
-    let k = f2cstr(keyword, klen);
-    let ok = AddIpoptNumOption(fud.problem, k.as_ptr() as *const c_char, *value);
-    if ok != 0 {
-        OK
-    } else {
-        NOT_OK
+    unsafe {
+        if fproblem.is_null() || (*fproblem).is_null() {
+            return NOT_OK;
+        }
+        let fud = &mut *(*fproblem as *mut FortranUserData);
+        let k = f2cstr(keyword, klen);
+        let ok = AddIpoptNumOption(fud.problem, k.as_ptr() as *const c_char, *value);
+        if ok != 0 { OK } else { NOT_OK }
     }
 }
 
@@ -572,23 +562,21 @@ pub unsafe extern "C" fn ipaddnumoption_(
 /// # Safety
 /// `fproblem` must be valid; `(KEYWORD, klen)` must describe a valid
 /// Fortran character slice.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipaddintoption_(
     fproblem: *mut *mut c_void,
     keyword: *const c_char,
     value: *const Index,
     klen: c_int,
 ) -> Index {
-    if fproblem.is_null() || (*fproblem).is_null() {
-        return NOT_OK;
-    }
-    let fud = &mut *(*fproblem as *mut FortranUserData);
-    let k = f2cstr(keyword, klen);
-    let ok = AddIpoptIntOption(fud.problem, k.as_ptr() as *const c_char, *value);
-    if ok != 0 {
-        OK
-    } else {
-        NOT_OK
+    unsafe {
+        if fproblem.is_null() || (*fproblem).is_null() {
+            return NOT_OK;
+        }
+        let fud = &mut *(*fproblem as *mut FortranUserData);
+        let k = f2cstr(keyword, klen);
+        let ok = AddIpoptIntOption(fud.problem, k.as_ptr() as *const c_char, *value);
+        if ok != 0 { OK } else { NOT_OK }
     }
 }
 
@@ -598,28 +586,33 @@ pub unsafe extern "C" fn ipaddintoption_(
 /// # Safety
 /// `fproblem` must be valid; `inter_cb` must be a valid Fortran
 /// callback for the lifetime of the problem.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipsetcallback_(fproblem: *mut *mut c_void, inter_cb: FIntermediate_CB) {
-    if fproblem.is_null() || (*fproblem).is_null() {
-        return;
+    unsafe {
+        if fproblem.is_null() || (*fproblem).is_null() {
+            return;
+        }
+        let fud = &mut *(*fproblem as *mut FortranUserData);
+        fud.intermediate_cb = Some(inter_cb);
+        let _: Index =
+            SetIntermediateCallback(fud.problem, Some(c_intermediate as Intermediate_CB));
     }
-    let fud = &mut *(*fproblem as *mut FortranUserData);
-    fud.intermediate_cb = Some(inter_cb);
-    let _: Index = SetIntermediateCallback(fud.problem, Some(c_intermediate as Intermediate_CB));
 }
 
 /// `ipunsetcallback_(FProblem)` — remove the intermediate callback.
 ///
 /// # Safety
 /// `fproblem` must be valid.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ipunsetcallback_(fproblem: *mut *mut c_void) {
-    if fproblem.is_null() || (*fproblem).is_null() {
-        return;
+    unsafe {
+        if fproblem.is_null() || (*fproblem).is_null() {
+            return;
+        }
+        let fud = &mut *(*fproblem as *mut FortranUserData);
+        fud.intermediate_cb = None;
+        let _: Index = SetIntermediateCallback(fud.problem, None);
     }
-    let fud = &mut *(*fproblem as *mut FortranUserData);
-    fud.intermediate_cb = None;
-    let _: Index = SetIntermediateCallback(fud.problem, None);
 }
 
 // Suppress unused import warning when the C ABI types aren't visible
@@ -667,9 +660,11 @@ mod tests {
         _ddat: *mut Number,
         ierr: *mut Index,
     ) {
-        let v = *x.offset(0);
-        *obj = (v - 3.0) * (v - 3.0);
-        *ierr = OK;
+        unsafe {
+            let v = *x.offset(0);
+            *obj = (v - 3.0) * (v - 3.0);
+            *ierr = OK;
+        }
     }
     unsafe extern "C" fn fquad_eval_grad_f(
         _n: *const Index,
@@ -680,9 +675,11 @@ mod tests {
         _ddat: *mut Number,
         ierr: *mut Index,
     ) {
-        let v = *x.offset(0);
-        *grad.offset(0) = 2.0 * (v - 3.0);
-        *ierr = OK;
+        unsafe {
+            let v = *x.offset(0);
+            *grad.offset(0) = 2.0 * (v - 3.0);
+            *ierr = OK;
+        }
     }
     unsafe extern "C" fn fquad_eval_hess(
         task: *const Index,
@@ -701,13 +698,15 @@ mod tests {
         _ddat: *mut Number,
         ierr: *mut Index,
     ) {
-        if *task == 0 {
-            *irow.offset(0) = 0;
-            *jcol.offset(0) = 0;
-        } else {
-            *values.offset(0) = 2.0 * *obj_factor;
+        unsafe {
+            if *task == 0 {
+                *irow.offset(0) = 0;
+                *jcol.offset(0) = 0;
+            } else {
+                *values.offset(0) = 2.0 * *obj_factor;
+            }
+            *ierr = OK;
         }
-        *ierr = OK;
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! so `⟨X,Y⟩_F = svec(X)·svec(Y)`. A program constrains the slack
 //! `s = h − G x ∈ PSD`, so `s` must equal `svec(M(x))`.
 
-use pounce_convex::{solve_socp_ipm, ConeSpec, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::{ConeSpec, QpOptions, QpProblem, QpStatus, Triplet, solve_socp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

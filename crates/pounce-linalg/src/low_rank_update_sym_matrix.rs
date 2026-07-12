@@ -16,8 +16,8 @@
 //! is preserved.
 
 use crate::matrix::{
-    sym_default_compute_col_amax_impl, sym_default_trans_mult_vector_impl, Matrix, MatrixCache,
-    SymMatrix,
+    Matrix, MatrixCache, SymMatrix, sym_default_compute_col_amax_impl,
+    sym_default_trans_mult_vector_impl,
 };
 use crate::multi_vector_matrix::MultiVectorMatrix;
 use crate::vector::Vector;
@@ -283,9 +283,9 @@ impl LowRankUpdateSymMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DenseVector;
     use crate::dense_vector::DenseVectorSpace;
     use crate::multi_vector_matrix::MultiVectorMatrixSpace;
-    use crate::DenseVector;
 
     fn dvec(values: &[Number]) -> Rc<DenseVector> {
         let space = DenseVectorSpace::new(values.len() as Index);

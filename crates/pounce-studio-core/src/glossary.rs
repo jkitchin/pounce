@@ -63,195 +63,288 @@ pub enum Explanation {
 }
 
 const COLUMNS: &[(&str, ColumnEntry)] = &[
-    ("iter", ColumnEntry {
-        definition: "Zero-based iteration index of the outer interior-point loop.",
-        typical_range: "0 to a few hundred for well-scaled problems.",
-        what_abnormal_means: "Hitting `max_iter` without converging usually points at scaling or degeneracy.",
-        see_also: &["wachter2006"],
-    }),
-    ("objective", ColumnEntry {
-        definition: "Current objective value f(x_k) at the iterate.",
-        typical_range: "Problem-dependent. For well-scaled problems on the order of 1.",
-        what_abnormal_means: "Wild swings (especially after restoration) can signal bad scaling.",
-        see_also: &[],
-    }),
-    ("inf_pr", ColumnEntry {
-        definition: "Primal infeasibility: max-norm of constraint violation c(x_k).",
-        typical_range: "Drops monotonically toward `tol` (default 1e-8) at convergence.",
-        what_abnormal_means: "Stalling at large inf_pr → likely infeasible or restoration-stuck.",
-        see_also: &["wachter2006", "byrd2010"],
-    }),
-    ("inf_du", ColumnEntry {
-        definition: "Dual infeasibility: max-norm of the gradient of the Lagrangian.",
-        typical_range: "Drops toward `tol` alongside inf_pr; sometimes lags.",
-        what_abnormal_means: "inf_du much larger than inf_pr → multipliers ill-conditioned or scaling bad.",
-        see_also: &["wachter2006"],
-    }),
-    ("mu", ColumnEntry {
-        definition: "Barrier parameter for the log-barrier homotopy.",
-        typical_range: "Starts ~0.1, decreases toward 1e-9 as iterations progress.",
-        what_abnormal_means: "Mu stuck at one value across many iterations → see finding `mu_stuck`.",
-        see_also: &["wachter2006", "hinder2018"],
-    }),
-    ("d_norm", ColumnEntry {
-        definition: "Norm of the Newton search direction d_k.",
-        typical_range: "Decreases as the iterate approaches the solution.",
-        what_abnormal_means: "d_norm growing → search direction quality degrading; check regularization.",
-        see_also: &["wachter2006"],
-    }),
-    ("regularization", ColumnEntry {
-        definition: "Diagonal Hessian regularization δ added to make the KKT matrix have the correct inertia.",
-        typical_range: "0 for convex problems; small positive values near saddle points.",
-        what_abnormal_means: "Repeated large δ → Hessian is indefinite, problem is non-convex; finding `hessian_regularized` fires.",
-        see_also: &["wachter2006"],
-    }),
-    ("alpha_dual", ColumnEntry {
-        definition: "Step length applied to the dual variables (bound multipliers).",
-        typical_range: "(0, 1]. Often 1.0 near the solution.",
-        what_abnormal_means: "Persistently tiny alpha_dual → fraction-to-boundary biting; bounds may be active.",
-        see_also: &["wachter2006"],
-    }),
-    ("alpha_primal", ColumnEntry {
-        definition: "Step length applied to the primal variables x.",
-        typical_range: "(0, 1]. Tiny values point at line-search difficulty.",
-        what_abnormal_means: "Repeated tiny alpha_primal → finding `heavy_line_search` fires.",
-        see_also: &["wachter2006"],
-    }),
-    ("alpha_primal_char", ColumnEntry {
-        definition: "Single-character tag for what the line search did this iter: `f` filter-accepted, `h` Armijo, `r` restoration, `s` second-order correction, `R` restoration entry, `-` rejected.",
-        typical_range: "Mostly `f` on a healthy solve.",
-        what_abnormal_means: "Runs of `r` are restoration windows; consecutive `R` entries = `restoration_loop`.",
-        see_also: &["wachter2006"],
-    }),
-    ("ls_trials", ColumnEntry {
-        definition: "Number of line-search trials in this iteration.",
-        typical_range: "1-3 for healthy solves.",
-        what_abnormal_means: "Persistently high → curvature mismatch; consider regularization or restart.",
-        see_also: &["wachter2006"],
-    }),
-    ("log10_mu", ColumnEntry {
-        definition: "log10(mu); convenience for plotting the barrier homotopy.",
-        typical_range: "Decreases from ~-1 to ~-9 over a typical solve.",
-        what_abnormal_means: "Flat trace → mu_stuck.",
-        see_also: &["wachter2006"],
-    }),
-    ("log10_inf_pr", ColumnEntry {
-        definition: "log10(inf_pr); convenience for spotting stalls.",
-        typical_range: "Monotone descent to ~-8.",
-        what_abnormal_means: "Plateaus over many iters → `find_stalls` will flag the window.",
-        see_also: &[],
-    }),
-    ("log10_inf_du", ColumnEntry {
-        definition: "log10(inf_du); convenience for spotting stalls.",
-        typical_range: "Monotone descent to ~-8.",
-        what_abnormal_means: "Plateaus → check Hessian regularization and step quality.",
-        see_also: &[],
-    }),
-    ("n_factors", ColumnEntry {
-        definition: "Total successful symmetric factorisations across the solve.",
-        typical_range: "≈ iteration_count for filter-line-search runs.",
-        what_abnormal_means: "Much larger than iter count → repeated regularization retries.",
-        see_also: &["n_pattern_reuse", "n_pattern_changes"],
-    }),
-    ("n_pattern_reuse", ColumnEntry {
-        definition: "Factors that reused the prior symbolic factorisation (sparsity pattern unchanged → cheap).",
-        typical_range: "Should dominate n_factors after iter 1.",
-        what_abnormal_means: "Low share → matrix structure changing per iter; analyse() runs repeatedly, hurting throughput.",
-        see_also: &["n_pattern_changes"],
-    }),
-    ("n_pattern_changes", ColumnEntry {
-        definition: "Factors that required a fresh symbolic factorisation.",
-        typical_range: "1 (the first factor) for a healthy solve.",
-        what_abnormal_means: "> 1 → KKT structure shifting; check inertia-correction regularization policy or active-set churn.",
-        see_also: &["n_pattern_reuse"],
-    }),
-    ("max_fill_ratio", ColumnEntry {
-        definition: "Max nnz(L) / nnz(A) observed across factors.",
-        typical_range: "1–10 for well-ordered KKT systems.",
-        what_abnormal_means: ">> 10 → AMD/METIS ordering struggled; expect memory + time spikes.",
-        see_also: &["last_nnz_a", "last_nnz_l"],
-    }),
-    ("min_abs_pivot", ColumnEntry {
-        definition: "Smallest absolute pivot encountered during factorisation.",
-        typical_range: "1e-8 .. 1e+6 depending on problem scaling.",
-        what_abnormal_means: "Approaching working precision floor (~1e-16) → matrix near-singular; regularization is probably kicking in.",
-        see_also: &["max_abs_pivot", "regularization"],
-    }),
-    ("max_abs_pivot", ColumnEntry {
-        definition: "Largest absolute pivot encountered during factorisation.",
-        typical_range: "Within ~6 orders of magnitude of min_abs_pivot.",
-        what_abnormal_means: "max/min >> 1e8 → catastrophic conditioning; consider nlp_scaling_method.",
-        see_also: &["min_abs_pivot"],
-    }),
-    ("last_inertia", ColumnEntry {
-        definition: "(positive, negative, zero) eigenvalue counts of the final factorisation, from the LDLᵀ pivots.",
-        typical_range: "(n, m, 0) at a converged primal-dual KKT system.",
-        what_abnormal_means: "zero > 0 → singular; positive < n → indefinite, inertia correction failed.",
-        see_also: &["regularization"],
-    }),
-    ("last_nnz_a", ColumnEntry {
-        definition: "nnz(A) at the final factorisation's input KKT matrix.",
-        typical_range: "Problem-dependent.",
-        what_abnormal_means: "n/a — informational.",
-        see_also: &["last_nnz_l", "max_fill_ratio"],
-    }),
-    ("last_nnz_l", ColumnEntry {
-        definition: "nnz(L) at the final factorisation.",
-        typical_range: "Problem-dependent.",
-        what_abnormal_means: "n/a — informational; combine with last_nnz_a for fill.",
-        see_also: &["last_nnz_a", "max_fill_ratio"],
-    }),
+    (
+        "iter",
+        ColumnEntry {
+            definition: "Zero-based iteration index of the outer interior-point loop.",
+            typical_range: "0 to a few hundred for well-scaled problems.",
+            what_abnormal_means: "Hitting `max_iter` without converging usually points at scaling or degeneracy.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "objective",
+        ColumnEntry {
+            definition: "Current objective value f(x_k) at the iterate.",
+            typical_range: "Problem-dependent. For well-scaled problems on the order of 1.",
+            what_abnormal_means: "Wild swings (especially after restoration) can signal bad scaling.",
+            see_also: &[],
+        },
+    ),
+    (
+        "inf_pr",
+        ColumnEntry {
+            definition: "Primal infeasibility: max-norm of constraint violation c(x_k).",
+            typical_range: "Drops monotonically toward `tol` (default 1e-8) at convergence.",
+            what_abnormal_means: "Stalling at large inf_pr → likely infeasible or restoration-stuck.",
+            see_also: &["wachter2006", "byrd2010"],
+        },
+    ),
+    (
+        "inf_du",
+        ColumnEntry {
+            definition: "Dual infeasibility: max-norm of the gradient of the Lagrangian.",
+            typical_range: "Drops toward `tol` alongside inf_pr; sometimes lags.",
+            what_abnormal_means: "inf_du much larger than inf_pr → multipliers ill-conditioned or scaling bad.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "mu",
+        ColumnEntry {
+            definition: "Barrier parameter for the log-barrier homotopy.",
+            typical_range: "Starts ~0.1, decreases toward 1e-9 as iterations progress.",
+            what_abnormal_means: "Mu stuck at one value across many iterations → see finding `mu_stuck`.",
+            see_also: &["wachter2006", "hinder2018"],
+        },
+    ),
+    (
+        "d_norm",
+        ColumnEntry {
+            definition: "Norm of the Newton search direction d_k.",
+            typical_range: "Decreases as the iterate approaches the solution.",
+            what_abnormal_means: "d_norm growing → search direction quality degrading; check regularization.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "regularization",
+        ColumnEntry {
+            definition: "Diagonal Hessian regularization δ added to make the KKT matrix have the correct inertia.",
+            typical_range: "0 for convex problems; small positive values near saddle points.",
+            what_abnormal_means: "Repeated large δ → Hessian is indefinite, problem is non-convex; finding `hessian_regularized` fires.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "alpha_dual",
+        ColumnEntry {
+            definition: "Step length applied to the dual variables (bound multipliers).",
+            typical_range: "(0, 1]. Often 1.0 near the solution.",
+            what_abnormal_means: "Persistently tiny alpha_dual → fraction-to-boundary biting; bounds may be active.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "alpha_primal",
+        ColumnEntry {
+            definition: "Step length applied to the primal variables x.",
+            typical_range: "(0, 1]. Tiny values point at line-search difficulty.",
+            what_abnormal_means: "Repeated tiny alpha_primal → finding `heavy_line_search` fires.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "alpha_primal_char",
+        ColumnEntry {
+            definition: "Single-character tag for what the line search did this iter: `f` filter-accepted, `h` Armijo, `r` restoration, `s` second-order correction, `R` restoration entry, `-` rejected.",
+            typical_range: "Mostly `f` on a healthy solve.",
+            what_abnormal_means: "Runs of `r` are restoration windows; consecutive `R` entries = `restoration_loop`.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "ls_trials",
+        ColumnEntry {
+            definition: "Number of line-search trials in this iteration.",
+            typical_range: "1-3 for healthy solves.",
+            what_abnormal_means: "Persistently high → curvature mismatch; consider regularization or restart.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "log10_mu",
+        ColumnEntry {
+            definition: "log10(mu); convenience for plotting the barrier homotopy.",
+            typical_range: "Decreases from ~-1 to ~-9 over a typical solve.",
+            what_abnormal_means: "Flat trace → mu_stuck.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "log10_inf_pr",
+        ColumnEntry {
+            definition: "log10(inf_pr); convenience for spotting stalls.",
+            typical_range: "Monotone descent to ~-8.",
+            what_abnormal_means: "Plateaus over many iters → `find_stalls` will flag the window.",
+            see_also: &[],
+        },
+    ),
+    (
+        "log10_inf_du",
+        ColumnEntry {
+            definition: "log10(inf_du); convenience for spotting stalls.",
+            typical_range: "Monotone descent to ~-8.",
+            what_abnormal_means: "Plateaus → check Hessian regularization and step quality.",
+            see_also: &[],
+        },
+    ),
+    (
+        "n_factors",
+        ColumnEntry {
+            definition: "Total successful symmetric factorisations across the solve.",
+            typical_range: "≈ iteration_count for filter-line-search runs.",
+            what_abnormal_means: "Much larger than iter count → repeated regularization retries.",
+            see_also: &["n_pattern_reuse", "n_pattern_changes"],
+        },
+    ),
+    (
+        "n_pattern_reuse",
+        ColumnEntry {
+            definition: "Factors that reused the prior symbolic factorisation (sparsity pattern unchanged → cheap).",
+            typical_range: "Should dominate n_factors after iter 1.",
+            what_abnormal_means: "Low share → matrix structure changing per iter; analyse() runs repeatedly, hurting throughput.",
+            see_also: &["n_pattern_changes"],
+        },
+    ),
+    (
+        "n_pattern_changes",
+        ColumnEntry {
+            definition: "Factors that required a fresh symbolic factorisation.",
+            typical_range: "1 (the first factor) for a healthy solve.",
+            what_abnormal_means: "> 1 → KKT structure shifting; check inertia-correction regularization policy or active-set churn.",
+            see_also: &["n_pattern_reuse"],
+        },
+    ),
+    (
+        "max_fill_ratio",
+        ColumnEntry {
+            definition: "Max nnz(L) / nnz(A) observed across factors.",
+            typical_range: "1–10 for well-ordered KKT systems.",
+            what_abnormal_means: ">> 10 → AMD/METIS ordering struggled; expect memory + time spikes.",
+            see_also: &["last_nnz_a", "last_nnz_l"],
+        },
+    ),
+    (
+        "min_abs_pivot",
+        ColumnEntry {
+            definition: "Smallest absolute pivot encountered during factorisation.",
+            typical_range: "1e-8 .. 1e+6 depending on problem scaling.",
+            what_abnormal_means: "Approaching working precision floor (~1e-16) → matrix near-singular; regularization is probably kicking in.",
+            see_also: &["max_abs_pivot", "regularization"],
+        },
+    ),
+    (
+        "max_abs_pivot",
+        ColumnEntry {
+            definition: "Largest absolute pivot encountered during factorisation.",
+            typical_range: "Within ~6 orders of magnitude of min_abs_pivot.",
+            what_abnormal_means: "max/min >> 1e8 → catastrophic conditioning; consider nlp_scaling_method.",
+            see_also: &["min_abs_pivot"],
+        },
+    ),
+    (
+        "last_inertia",
+        ColumnEntry {
+            definition: "(positive, negative, zero) eigenvalue counts of the final factorisation, from the LDLᵀ pivots.",
+            typical_range: "(n, m, 0) at a converged primal-dual KKT system.",
+            what_abnormal_means: "zero > 0 → singular; positive < n → indefinite, inertia correction failed.",
+            see_also: &["regularization"],
+        },
+    ),
+    (
+        "last_nnz_a",
+        ColumnEntry {
+            definition: "nnz(A) at the final factorisation's input KKT matrix.",
+            typical_range: "Problem-dependent.",
+            what_abnormal_means: "n/a — informational.",
+            see_also: &["last_nnz_l", "max_fill_ratio"],
+        },
+    ),
+    (
+        "last_nnz_l",
+        ColumnEntry {
+            definition: "nnz(L) at the final factorisation.",
+            typical_range: "Problem-dependent.",
+            what_abnormal_means: "n/a — informational; combine with last_nnz_a for fill.",
+            see_also: &["last_nnz_a", "max_fill_ratio"],
+        },
+    ),
 ];
 
 const FINDINGS: &[(&str, FindingEntry)] = &[
-    ("converged", FindingEntry {
-        severity: "info",
-        meaning: "Solver reached the convergence tolerance on both primal and dual infeasibility.",
-        what_to_try: "Nothing — this is the success path.",
-        see_also: &["wachter2006"],
-    }),
-    ("max_iter_exceeded", FindingEntry {
-        severity: "error",
-        meaning: "Solver hit `max_iter` without satisfying tolerances.",
-        what_to_try: "Inspect the convergence trace: is residual still decreasing (raise max_iter), stalled (loosen tol, improve scaling), or oscillating (regularize)?",
-        see_also: &["wachter2006"],
-    }),
-    ("restoration_used", FindingEntry {
-        severity: "info",
-        meaning: "Restoration phase was entered at least once during the solve.",
-        what_to_try: "Often benign on hard problems. Check restoration-windows; a single short entry is fine, repeated entries suggest a deeper feasibility issue.",
-        see_also: &["wachter2006", "byrd2010"],
-    }),
-    ("mu_stuck", FindingEntry {
-        severity: "warning",
-        meaning: "Barrier parameter μ failed to decrease across a window of iterations. Usually a degenerate active set or a poorly-scaled barrier.",
-        what_to_try: "Try `mu_strategy=adaptive`, tighten `bound_relax_factor`, or check that bound values are sensible (no infs masking effective bounds).",
-        see_also: &["wachter2006", "hinder2018"],
-    }),
-    ("heavy_line_search", FindingEntry {
-        severity: "warning",
-        meaning: "Line search needed many trials on average — search direction is low-quality.",
-        what_to_try: "Often Hessian-related: enable second-order-correction, or investigate regularization values.",
-        see_also: &["wachter2006"],
-    }),
-    ("hessian_regularized", FindingEntry {
-        severity: "warning",
-        meaning: "Hessian needed inertia-correction (added δ on the diagonal) frequently — the problem is non-convex or has near-singular Hessian.",
-        what_to_try: "Consider tightening tolerances on `min_hessian_perturbation`, providing an analytic Hessian if you have one, or reformulating to convexify.",
-        see_also: &["wachter2006"],
-    }),
-    ("restoration_loop", FindingEntry {
-        severity: "error",
-        meaning: "Restoration phase was entered repeatedly and never exited cleanly.",
-        what_to_try: "Strong signal of local infeasibility. Try a different start point, relax tight constraints, or run feasibility diagnostics.",
-        see_also: &["wachter2006", "byrd2010", "leyffer2003"],
-    }),
-    ("convergence_stall", FindingEntry {
-        severity: "warning",
-        meaning: "log10(inf_pr|inf_du) barely moved across a window — solver is grinding.",
-        what_to_try: "Check `find-stalls` for the window, then `get-iterate` at its midpoint to inspect μ, alpha_primal, and regularization. Common cause: bad scaling.",
-        see_also: &["wachter2006"],
-    }),
+    (
+        "converged",
+        FindingEntry {
+            severity: "info",
+            meaning: "Solver reached the convergence tolerance on both primal and dual infeasibility.",
+            what_to_try: "Nothing — this is the success path.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "max_iter_exceeded",
+        FindingEntry {
+            severity: "error",
+            meaning: "Solver hit `max_iter` without satisfying tolerances.",
+            what_to_try: "Inspect the convergence trace: is residual still decreasing (raise max_iter), stalled (loosen tol, improve scaling), or oscillating (regularize)?",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "restoration_used",
+        FindingEntry {
+            severity: "info",
+            meaning: "Restoration phase was entered at least once during the solve.",
+            what_to_try: "Often benign on hard problems. Check restoration-windows; a single short entry is fine, repeated entries suggest a deeper feasibility issue.",
+            see_also: &["wachter2006", "byrd2010"],
+        },
+    ),
+    (
+        "mu_stuck",
+        FindingEntry {
+            severity: "warning",
+            meaning: "Barrier parameter μ failed to decrease across a window of iterations. Usually a degenerate active set or a poorly-scaled barrier.",
+            what_to_try: "Try `mu_strategy=adaptive`, tighten `bound_relax_factor`, or check that bound values are sensible (no infs masking effective bounds).",
+            see_also: &["wachter2006", "hinder2018"],
+        },
+    ),
+    (
+        "heavy_line_search",
+        FindingEntry {
+            severity: "warning",
+            meaning: "Line search needed many trials on average — search direction is low-quality.",
+            what_to_try: "Often Hessian-related: enable second-order-correction, or investigate regularization values.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "hessian_regularized",
+        FindingEntry {
+            severity: "warning",
+            meaning: "Hessian needed inertia-correction (added δ on the diagonal) frequently — the problem is non-convex or has near-singular Hessian.",
+            what_to_try: "Consider tightening tolerances on `min_hessian_perturbation`, providing an analytic Hessian if you have one, or reformulating to convexify.",
+            see_also: &["wachter2006"],
+        },
+    ),
+    (
+        "restoration_loop",
+        FindingEntry {
+            severity: "error",
+            meaning: "Restoration phase was entered repeatedly and never exited cleanly.",
+            what_to_try: "Strong signal of local infeasibility. Try a different start point, relax tight constraints, or run feasibility diagnostics.",
+            see_also: &["wachter2006", "byrd2010", "leyffer2003"],
+        },
+    ),
+    (
+        "convergence_stall",
+        FindingEntry {
+            severity: "warning",
+            meaning: "log10(inf_pr|inf_du) barely moved across a window — solver is grinding.",
+            what_to_try: "Check `find-stalls` for the window, then `get-iterate` at its midpoint to inspect μ, alpha_primal, and regularization. Common cause: bad scaling.",
+            see_also: &["wachter2006"],
+        },
+    ),
 ];
 
 /// Topic → ordered list of citation keys, most-relevant first.

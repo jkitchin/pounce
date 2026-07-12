@@ -41,7 +41,7 @@
 //! residual.
 
 use crate::nl_reader;
-use pounce_common::types::{Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, SparsityRequest, TNLP};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -953,7 +953,7 @@ pub mod sha256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nl_writer::{format_sol, SolutionFile};
+    use crate::nl_writer::{SolutionFile, format_sol};
 
     #[test]
     fn sha256_known_answers() {

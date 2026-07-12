@@ -247,8 +247,8 @@ pub type IpoptDataHandle = Rc<RefCell<IpoptData>>;
 mod tests {
     use super::*;
     use crate::iterates_vector::IteratesVector;
-    use pounce_linalg::dense_vector::DenseVectorSpace;
     use pounce_linalg::Vector;
+    use pounce_linalg::dense_vector::DenseVectorSpace;
     use std::rc::Rc as StdRc;
 
     fn zero_iv() -> IteratesVector {
