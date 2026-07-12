@@ -32,6 +32,7 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 13 | [`13_post_solve_jacobian.ipynb`](13_post_solve_jacobian.ipynb) | Post-solve Jacobian/sensitivities from the held KKT factor. |
 | 17 | [`17_differentiable_convex.ipynb`](17_differentiable_convex.ipynb) | Differentiable convex optimization with `pounce.jax`. |
 | 25 | [`25_pyomo_sensitivity.ipynb`](25_pyomo_sensitivity.ipynb) | Declared-parameter sensitivity from Pyomo: an optimal-control example whose first-move gradients are the NMPC feedback gains (needs `pyomo-cvp`). |
+| 26 | [`26_parameter_covariance.ipynb`](26_parameter_covariance.ipynb) | Parameter covariance and identifiability from the reduced Hessian: standard errors, a Monte Carlo validated confidence ellipse, and a sloppy-direction diagnosis. |
 
 ## Performance & sparsity
 

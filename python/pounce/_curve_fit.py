@@ -917,6 +917,15 @@ def curve_fit(
     bound-aware, data-scale sweep scored by the objective; see
     :func:`_initial_guess`) rather than defaulting to ones.
 
+    See also ``pyomo_pounce.covariance`` (in the ``pyomo-pounce`` package),
+    the counterpart surface for an estimation model written directly in
+    Pyomo rather than a ``f(x, *params)`` callable. It uses the same
+    scale-and-invert-the-reduced-Hessian recipe from the held KKT factor,
+    but for nonlinear models reports the observed-information covariance
+    (the exact Hessian) whereas ``curve_fit`` reports the Gauss-Newton
+    ``2 s^2 (J^T J)^-1`` (the scipy convention; identical for linear models
+    and in the small-residual limit, a few percent apart otherwise).
+
     Returns
     -------
     CurveFitResult

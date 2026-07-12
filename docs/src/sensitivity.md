@@ -110,6 +110,138 @@ declarations solve through the ordinary AMPL/CLI path, unchanged. See
 for a worked optimal-control example (initial conditions as
 parameters; the first-move gradient IS the NMPC feedback gain).
 
+## Parameter covariance and identifiability
+
+For a parameter-estimation model whose objective is a **plain sum of
+squared residuals**, the factorization from ONE ordinary solve yields
+the asymptotic covariance of the fitted parameters. Declare the
+fitted variables (they stay free) and the residual container while
+building the model, solve, and ask:
+
+```python
+from pyomo_pounce import covariance, declare_fitted, declare_residual
+
+m.A = pyo.Var(); m.k = pyo.Var()        # the fitted parameters, free
+declare_fitted(m.A, m.k)
+
+m.r = pyo.Var(m.I)                      # residuals, one per data point
+m.res = pyo.Constraint(m.I, rule=...)   # r[i] == y[i] - model(A, k, t[i])
+declare_residual(m.r)
+
+m.obj = pyo.Objective(expr=sum(m.r[i]**2 for i in m.I))
+pyo.SolverFactory("pounce").solve(m)    # one solve
+
+cov = covariance(m)                     # no further information needed
+
+cov[m.A, m.k]               # covariance entry (either order)
+cov.std_err[m.k]            # standard error of one parameter
+cov.correlation[m.A, m.k]   # correlation matrix entry
+cov.matrix                  # dense numpy array, ordered like cov.params
+w, V = cov.eigen()          # eigendecomposition, for identifiability
+```
+
+The recipe: the parameter block of the inverse KKT matrix, one
+backsolve per parameter against the held factor, equals the inverse
+reduced Hessian of the eliminated problem, and for a sum-of-squares
+objective `cov = 2 sigma^2 (K^-1)_pp`. The factor 2 belongs to the
+unscaled sum of squares (a Gaussian negative log-likelihood objective,
+`SSR / (2 sigma^2)`, would drop it). The scaling is pinned by test
+against the analytical linear-regression covariance
+`sigma^2 inv(X^T X)` (`pyomo-pounce/tests/test_covariance.py`).
+
+The noise variance comes from, in order of precedence: `sigma_sq=`
+(known measurement variance); the declared residuals (estimated as
+`SSR / (n - n_params)`, with both numbers derived from the container);
+or the `n_data=` fallback for models without explicit residuals. The
+solve warns if the declared residuals do not reproduce the objective
+value (weights or regularization terms would silently corrupt the
+estimate).
+
+**Groups.** `declare_residual(m.r_conc, group="conc")` partitions
+residuals into noise groups by arbitrary user strings: containers
+sharing a group (or all ungrouped containers) pool into one estimated
+variance; distinct groups get their own (`cov.sigma_sq` becomes a
+dict), and the covariance switches to the heteroscedastic sandwich
+form, whose per-group pieces come from the same backsolves. When
+groups genuinely differ, weighting the objective itself (dividing each
+group's residuals by its sigma) is the statistically efficient fix;
+the sandwich is the truthful report on the unweighted fit.
+
+`cov.eigen()` returns ascending eigenvalues and matching eigenvectors.
+An eigenvalue much larger than the rest flags a poorly identified
+problem: its eigenvector is the parameter combination the data cannot
+pin down, and the corresponding `cov.correlation` entries approach
++/-1. `covariance` warns when the held factor carries
+inertia-correction perturbations (typically an exactly unidentifiable
+parameterization), when a fitted parameter sits on a bound at the
+optimum (its direction is projected out: zero variance, the covariance
+conditional on the active bound, correlation entries reported as 0),
+and when the covariance diagonal comes out negative (not a
+least-squares minimum).
+
+**Relation to `pounce.curve_fit`.** This uses the same
+scale-and-invert-the-reduced-Hessian recipe as
+[`pounce.curve_fit`](curve-fitting.md) — both read a reduced-Hessian
+block from the held KKT factor and scale it by `2 sigma^2` with
+`sigma^2 = SSR / (n - p)` — but with one substantive difference for
+**nonlinear** models: `curve_fit` factors the **Gauss-Newton** Hessian
+(`pcov = 2 sigma^2 (J^T J)^-1`, the expected-information / scipy /
+`pycse.nlinfit` convention, always positive semidefinite), while
+`covariance()` here feeds the **exact Lagrangian Hessian** through the
+`.nl` bridge, so it reports the **observed-information** covariance —
+the full reduced Hessian including the residual-curvature term that
+Gauss-Newton drops. The two are identical for linear models and in the
+small-residual / large-`n` limit, and differ by `O(residual x model
+curvature)` otherwise (a few percent on a strongly-curved fit). Neither
+is uniquely "correct": Gauss-Newton is the conventional, robust default
+(it cannot produce a negative variance); observed information is the
+honest local curvature of the objective you actually solved (Efron &
+Hinkley 1978) but can go indefinite — which is what the negative-variance
+warning above is telling you. `covariance()` offers both: the default
+`hessian="lagrangian"` inverts the exact reduced Hessian of the
+Lagrangian, and `covariance(m, hessian="gauss-newton")` rebuilds the
+expected-information form from the residual Jacobian, recovered from
+the same backsolves at no extra solve (declared residuals required).
+Reach for it when the numbers must match scipy/`nls`, when
+`covariance()` warns about a negative diagonal, or when the covariance
+must stay positive semidefinite by construction, e.g. feeding an
+arrival-cost update in moving horizon estimation.
+The other difference is the input surface.
+`curve_fit(f, xdata, ydata, ...)` is the batteries-included fitter for a
+callable model `f(x, *params)` and data arrays: it chooses a starting
+point, offers robust losses, per-point `sigma` weights, confidence
+intervals, prediction bands, `dpopt/ddata`, and out-of-core streaming,
+and it *projects* the covariance onto the active-constraint nullspace
+when a parameter sits on a bound. `covariance()` is the post-solve
+primitive for a model you have **already written in Pyomo** — residuals
+as constraints, arbitrary surrounding structure — where you want the
+covariance of the fit as posed without re-expressing it as
+`f(x, *params)`. Use `curve_fit` when the fit is naturally a
+model-plus-data call; use `covariance()` to interrogate an existing
+Pyomo estimation model. Both project a bound-active fitted parameter
+onto the active-constraint nullspace: `covariance()` reports the
+covariance conditional on the active bound (zero variance in the
+pinned direction, computed by inverting the free block of the
+information matrix) and still warns, since boundary asymptotics are
+nonstandard. Only variable bounds on the fitted parameters themselves
+are detected; other active constraints are not.
+
+**Relation to `pyomo.contrib.parmest`.** parmest is an estimation
+workflow: multi-experiment data management, bootstrap resampling, and
+likelihood-ratio confidence regions, at the price of restructuring the
+problem into its experiment framework, with covariance computed by
+finite differences or an ipopt re-solve. `covariance()` is a
+post-solve primitive: the model as written, one declaration per
+component, the asymptotic covariance and identifiability diagnostics
+from the factorization the solve already produced. Use parmest for
+multi-experiment campaigns and non-asymptotic intervals; use this to
+interrogate the fit you already have.
+
+See
+[`python/notebooks/26_parameter_covariance.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/26_parameter_covariance.ipynb)
+for a worked example with a Monte Carlo validated confidence ellipse
+and an identifiability diagnosis.
+
 ## Units and NLP scaling
 
 All sensitivity outputs are in **natural (unscaled) units**. The IPM

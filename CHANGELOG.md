@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+### Added — parameter covariance for estimation problems (Pyomo)
+
+- **Parameter covariance for estimation problems, from one solve
+  (Pyomo).** Declare the fitted variables (`declare_fitted(m.A, m.k)`,
+  varargs, they stay free) and the residual container (`declare_residual(m.r)`,
+  optional `group=` strings for heteroscedastic noise groups), solve
+  ordinarily with `SolverFactory('pounce')`, then
+  `pyomo_pounce.covariance(m)` returns the asymptotic covariance with
+  no further information: `cov[m.A, m.k]`, `cov.std_err[m.A]`,
+  `cov.correlation[m.A, m.k]`, `cov.matrix`, per-group `cov.sigma_sq`,
+  and `cov.eigen()` for identifiability diagnosis. Multiple noise
+  groups switch to the heteroscedastic sandwich covariance. Known
+  variance (`sigma_sq=`, scalar or per-group) and a bare data count
+  (`n_data=`) remain as alternatives to declared residuals. The
+  objective must be a plain sum of squared residuals (the solve warns
+  when the declared residuals do not reproduce it); the scaling
+  (cov = 2 sigma^2 times the parameter block of the inverse KKT
+  matrix) is pinned against the analytical linear-regression
+  covariance in `tests/test_covariance.py`. All declarations also have
+  explicit call-time forms on `solve()` (`sens_params=`, `fitted=`,
+  `residuals=`). `covariance(..., hessian="gauss-newton")` reports the
+  expected-information (Gauss-Newton) form instead of the default
+  `hessian="lagrangian"` observed-information form (the exact reduced
+  Hessian of the Lagrangian), from the same
+  backsolves; the two agree for linear fits, and Gauss-Newton is
+  structurally positive semidefinite and matches the scipy /
+  `pounce.curve_fit` convention. A fitted parameter on an active bound
+  is projected out (matching `curve_fit`): zero variance, covariance
+  conditional on the bound, correlation entries reported as 0, plus the
+  existing warning.
+
 ### Changed
 
 - **Rust 2024 edition + resolver v3** (#204). The workspace now compiles on
@@ -22,6 +53,8 @@ changes.
   rustfmt style-edition reformatting; all `tail-expr-drop-order` sites were
   reviewed and are behavior-preserving (`RefCell`/`Mutex` guards dropped at
   end of scope with no observer of the relative order).
+
+## [0.8.0] - 2026-07-11
 
 ### Added — declared-parameter sensitivity for Pyomo (Python / Pyomo)
 

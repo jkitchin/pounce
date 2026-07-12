@@ -43,8 +43,19 @@ class POUNCE(ASL):
         from pyomo_pounce.sens import has_declarations, sens_solve
 
         model = args[0] if args else kwds.get("model")
-        if model is not None and has_declarations(model):
-            return sens_solve(model, tee=kwds.get("tee", False))
+        explicit = {k: kwds.pop(k) for k in
+                    ("sens_params", "fitted", "residuals") if k in kwds}
+        if explicit and model is None:
+            # The sensitivity declarations were given with no model to solve;
+            # surface the mistake rather than silently dropping them (they
+            # have already been popped and would otherwise vanish).
+            raise ValueError(
+                "pounce solve: "
+                f"{', '.join(sorted(explicit))}= given but no model was "
+                "passed; call solve(model, ...) with the model positionally "
+                "or as the `model` keyword")
+        if model is not None and (has_declarations(model) or explicit):
+            return sens_solve(model, tee=kwds.get("tee", False), **explicit)
         return super().solve(*args, **kwds)
 
     def _default_executable(self):

@@ -163,3 +163,25 @@ def test_keyword_model_solve_uses_declared_path():
     declare_sens_param(m.p)
     pyo.SolverFactory("pounce").solve(model=m)
     assert gradient(m.x, wrt=m.p) is not None
+
+
+def test_explicit_sens_params_form_equals_declared():
+    """solve(m, sens_params=[...]) must register and behave exactly like
+    declare_sens_param."""
+    m1 = build()
+    declare_sens_param(m1.p)
+    pyo.SolverFactory("pounce").solve(m1)
+    g_declared = gradient(m1.x, wrt=m1.p)
+
+    m2 = build()                          # no declarations
+    pyo.SolverFactory("pounce").solve(m2, sens_params=[m2.p])
+    g_explicit = gradient(m2.x, wrt=m2.p)
+    assert g_explicit == pytest.approx(g_declared, rel=1e-9)
+
+
+def test_explicit_declarations_without_model_error():
+    """Passing explicit declaration kwargs with no model surfaces a clear
+    error instead of silently dropping them."""
+    m = build()
+    with pytest.raises(ValueError, match="no model was passed"):
+        pyo.SolverFactory("pounce").solve(sens_params=[m.p])
