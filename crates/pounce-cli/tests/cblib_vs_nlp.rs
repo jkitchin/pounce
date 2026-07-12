@@ -14,7 +14,7 @@
 use pounce_algorithm::application::IpoptApplication;
 use pounce_cli::cbf::{self, CbfModel, ConeKind};
 use pounce_common::types::{Index, Number};
-use pounce_convex::{solve_socp_ipm, QpOptions, QpStatus};
+use pounce_convex::{QpOptions, QpStatus, solve_socp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_nlp::return_codes::ApplicationReturnStatus;

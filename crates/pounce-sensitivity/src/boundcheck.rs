@@ -33,8 +33,8 @@
 //! Returns the number of clamped indices.
 
 use pounce_common::types::{Index, Number};
-use pounce_linalg::expansion_matrix::ExpansionMatrix;
 use pounce_linalg::Vector;
+use pounce_linalg::expansion_matrix::ExpansionMatrix;
 use std::rc::Rc;
 
 /// Clamp `dx` (length `n_x`) so that `x_curr + dx ∈ [x_l, x_u]`
@@ -153,10 +153,10 @@ pub fn _index_to_usize(i: Index) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pounce_linalg::Vector;
     use pounce_linalg::compound_vector::{CompoundVector, CompoundVectorSpace};
     use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
     use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
-    use pounce_linalg::Vector;
 
     fn make_dv(values: &[Number]) -> DenseVector {
         let space = DenseVectorSpace::new(values.len() as Index);
@@ -206,7 +206,7 @@ mod tests {
         let n_x = 2;
         let x_curr = [0.9, 1.0];
         let mut dx = [0.5, 0.0]; // trial = [1.4, 1.0]
-                                 // No lower bounds.
+        // No lower bounds.
         let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);
         let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
         let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 1, &[0], 0);
@@ -275,7 +275,7 @@ mod tests {
         let n_x = 2;
         let x_curr = [0.1, 0.2];
         let mut dx = [-0.5, -0.5]; // would deeply violate a 0 lower bound
-                                   // px_l selects both variables as lower-bounded.
+        // px_l selects both variables as lower-bounded.
         let px_l_space = ExpansionMatrixSpace::new(n_x as Index, 2, &[0, 1], 0);
         let px_l: Rc<dyn pounce_linalg::Matrix> = Rc::new(ExpansionMatrix::new(px_l_space));
         let px_u_space = ExpansionMatrixSpace::new(n_x as Index, 0, &[], 0);

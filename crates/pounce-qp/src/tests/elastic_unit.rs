@@ -130,7 +130,7 @@ fn initial_seed_absorbs_lower_bound_violation_into_v_l() {
     assert_eq!(x_aug.len(), 4);
     assert_eq!(x_aug[2], 0.0); // v_l = 0 (no violation, a·x = 0 > bl = -1)
     assert_eq!(x_aug[3], 0.0); // v_u = 0
-                               // Both slacks at their lower bound (= 0).
+    // Both slacks at their lower bound (= 0).
     assert_eq!(working.bounds[2], BoundStatus::AtLower);
     assert_eq!(working.bounds[3], BoundStatus::AtLower);
 }
@@ -167,7 +167,7 @@ fn initial_seed_pushes_violation_into_slack_and_keeps_qp_feasible() {
     let (x_aug, working) = reform.initial_seed(&qp, &[0.0, 0.0], 1e-9);
     assert_eq!(x_aug[2], 5.0); // v_l absorbs the 5-unit violation
     assert_eq!(x_aug[3], 0.0); // v_u = 0
-                               // Constraint should now be exactly at bl ⇒ AtLower in W.
+    // Constraint should now be exactly at bl ⇒ AtLower in W.
     assert_eq!(working.constraints[0], ConsStatus::AtLower);
     // v_l interior; v_u at lower.
     assert_eq!(working.bounds[2], BoundStatus::Inactive);

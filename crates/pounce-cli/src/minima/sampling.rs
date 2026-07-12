@@ -8,8 +8,8 @@
 
 use pounce_common::types::Number;
 use rand::distributions::{Distribution, Standard};
-use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use rand_chacha::rand_core::SeedableRng;
 
 /// Seeded sampler shared across a `--minima` run.
 pub struct Sampler {

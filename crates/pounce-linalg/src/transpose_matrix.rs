@@ -100,9 +100,9 @@ impl Matrix for TransposeMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DenseVector;
     use crate::dense_vector::DenseVectorSpace;
     use crate::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
-    use crate::DenseVector;
 
     fn dvec_box(values: &[Number]) -> Box<dyn Vector> {
         let space = DenseVectorSpace::new(values.len() as Index);

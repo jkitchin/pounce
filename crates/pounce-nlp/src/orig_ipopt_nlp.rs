@@ -58,7 +58,7 @@
 //!   does.
 
 use crate::ipopt_nlp::{IpoptNlp, Nlp, SplitNames};
-use crate::tnlp::{MetaData, NlpInfo, ScalingRequest, SparsityRequest, StartingPoint, IDX_NAMES};
+use crate::tnlp::{IDX_NAMES, MetaData, NlpInfo, ScalingRequest, SparsityRequest, StartingPoint};
 use crate::tnlp_adapter::{BoundClassification, TNLPAdapter};
 use pounce_common::cached::Cache;
 use pounce_common::timing::TimingStatistics;
@@ -961,11 +961,7 @@ impl OrigIpoptNlp {
                 constr_target_gradient / row_max
             } else {
                 let raw = max_gradient / row_max;
-                if raw > 1.0 {
-                    1.0
-                } else {
-                    raw
-                }
+                if raw > 1.0 { 1.0 } else { raw }
             };
             if s < min_value {
                 s = min_value;
@@ -2047,11 +2043,7 @@ impl IpoptNlp for OrigIpoptNlp {
             return None;
         }
         let v = cls.full_to_var[f];
-        if v < 0 {
-            None
-        } else {
-            Some(v)
-        }
+        if v < 0 { None } else { Some(v) }
     }
 
     fn full_g_to_c_block(&self, full_idx: Index) -> Option<Index> {

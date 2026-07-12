@@ -135,14 +135,18 @@ fn recoverable_factorization_failure_is_case_insensitive() {
     use crate::QpError;
 
     // factorize_and_solve path — lower-case keywords.
-    assert!(QpError::LinearSolverFailure(
-        "KKT matrix is singular (LICQ violation or rank-deficient Jacobian)".into()
-    )
-    .is_recoverable_factorization_failure());
-    assert!(QpError::LinearSolverFailure(
-        "KKT inertia mismatch: expected 2 negative eigenvalues, got 1".into()
-    )
-    .is_recoverable_factorization_failure());
+    assert!(
+        QpError::LinearSolverFailure(
+            "KKT matrix is singular (LICQ violation or rank-deficient Jacobian)".into()
+        )
+        .is_recoverable_factorization_failure()
+    );
+    assert!(
+        QpError::LinearSolverFailure(
+            "KKT inertia mismatch: expected 2 negative eigenvalues, got 1".into()
+        )
+        .is_recoverable_factorization_failure()
+    );
 
     // resolve path — capitalized Debug-formatted ESymSolverStatus. These
     // are exactly the strings `format!("resolve backend status: {st:?}")`
@@ -161,10 +165,12 @@ fn recoverable_factorization_failure_is_case_insensitive() {
         !QpError::LinearSolverFailure("backend reported fatal error".into())
             .is_recoverable_factorization_failure()
     );
-    assert!(!QpError::LinearSolverFailure(
-        "resolve called before a successful factorize_and_solve".into()
-    )
-    .is_recoverable_factorization_failure());
+    assert!(
+        !QpError::LinearSolverFailure(
+            "resolve called before a successful factorize_and_solve".into()
+        )
+        .is_recoverable_factorization_failure()
+    );
     assert!(
         !QpError::DimensionMismatch("g.len() != n".into()).is_recoverable_factorization_failure()
     );

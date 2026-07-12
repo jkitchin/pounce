@@ -349,11 +349,7 @@ impl QualityFunctionMuOracle {
                     .min(trial_s_x_u.min())
                     .min(trial_s_s_l.min())
                     .min(trial_s_s_u.min());
-                if avg > 0.0 {
-                    mn / avg
-                } else {
-                    1.0
-                }
+                if avg > 0.0 { mn / avg } else { 1.0 }
             };
 
             let aggr = QualityFunctionAggregates {

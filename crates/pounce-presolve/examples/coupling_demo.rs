@@ -23,7 +23,7 @@
 
 use pounce_presolve::btf::BlockTriangularBlock;
 use pounce_presolve::coupling::{
-    classify_block, objective_gradient_support, AuxiliaryCouplingClass,
+    AuxiliaryCouplingClass, classify_block, objective_gradient_support,
 };
 use pounce_presolve::incidence::{InequalityIncidence, ProbeView};
 

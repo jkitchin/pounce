@@ -80,7 +80,7 @@ mod vec_util;
 pub use algorithm_backsolver::PdSensBacksolver;
 pub use backsolver::{DenseLuBacksolver, SensBacksolver};
 pub use convenience::{SensResult, SensSolve};
-pub use diff_handoff::{DiffHandoff, DEFAULT_ACTIVE_TOL};
+pub use diff_handoff::{DEFAULT_ACTIVE_TOL, DiffHandoff};
 // Hoisted to pounce-linalg so the convex QP sensitivity path can share it;
 // re-exported here to preserve `pounce_sensitivity::symmetric_eigen`.
 pub use p_calculator::{IndexPCalculator, PCalculator};
@@ -88,6 +88,6 @@ pub use pounce_linalg::symmetric_eigen;
 pub use reduced_hessian::compute_reduced_hessian;
 pub use schur_data::{IndexSchurData, SchurData};
 pub use schur_driver::{DenseGenSchurDriver, SchurDriver};
-pub use sens_app::{register_options, SensApplication, SensOptions};
+pub use sens_app::{SensApplication, SensOptions, register_options};
 pub use solver::{ConvergedState, Solver, SolverError};
 pub use step_calc::{SensStepCalc, StdStepCalc, WithBacksolver};

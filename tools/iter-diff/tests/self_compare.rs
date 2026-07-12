@@ -11,7 +11,7 @@
 // warns are aimed at production code paths, not integration tests.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use iter_diff::{compare, parse_file, Tolerance, MAGIC};
+use iter_diff::{MAGIC, Tolerance, compare, parse_file};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -49,9 +49,9 @@ fn write_synthetic(path: &PathBuf) {
     for i in 0..3u32 {
         write_u32(&mut f, i); // iter
         write_u32(&mut f, 0); // status
-                              // 14 scalars (mu, tau, alpha_pr, alpha_du, delta_x, delta_s,
-                              // delta_c, delta_d, inf_pr, inf_du, constr_viol, dual_inf,
-                              // complementarity, f).
+        // 14 scalars (mu, tau, alpha_pr, alpha_du, delta_x, delta_s,
+        // delta_c, delta_d, inf_pr, inf_du, constr_viol, dual_inf,
+        // complementarity, f).
         for k in 0..14 {
             // Use values that are non-trivial but reproducible.
             let v = (i as f64 + 1.0) * (k as f64 + 0.5);

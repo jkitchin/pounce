@@ -531,11 +531,7 @@ impl Tape {
                 }
                 TapeOp::Sqrt(a) => {
                     let sv = vals[i];
-                    if sv > 0.0 {
-                        dot[*a] * 0.5 / sv
-                    } else {
-                        0.0
-                    }
+                    if sv > 0.0 { dot[*a] * 0.5 / sv } else { 0.0 }
                 }
                 TapeOp::Exp(a) => dot[*a] * vals[i],
                 TapeOp::Log(a) => dot[*a] / vals[*a],
@@ -758,11 +754,7 @@ impl Tape {
                 }
                 TapeOp::Sqrt(a) => {
                     let sv = vals[i];
-                    if sv > 0.0 {
-                        dot[*a] * 0.5 / sv
-                    } else {
-                        0.0
-                    }
+                    if sv > 0.0 { dot[*a] * 0.5 / sv } else { 0.0 }
                 }
                 TapeOp::Exp(a) => vals[i] * dot[*a],
                 TapeOp::Log(a) => dot[*a] / vals[*a],
@@ -3064,11 +3056,7 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
         }
         TapeOp::Sqrt(a) => {
             let sv = vals[i];
-            if sv > 0.0 {
-                dot[*a] * 0.5 / sv
-            } else {
-                0.0
-            }
+            if sv > 0.0 { dot[*a] * 0.5 / sv } else { 0.0 }
         }
         TapeOp::Exp(a) => dot[*a] * vals[i],
         TapeOp::Log(a) => dot[*a] / vals[*a],

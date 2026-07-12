@@ -15,11 +15,11 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use pounce_sensitivity::SensSolve;
 use pounce_solve_report::{
-    status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
+    InputDescriptor, ReportBuilder, ReportDetail, status_to_solve_result_num, write_report_file,
 };
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -27,7 +27,7 @@ use pyo3::types::{PyDict, PyList};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::tnlp_bridge::{call0, decode_structure, PyTnlp, PyTnlpInit};
+use crate::tnlp_bridge::{PyTnlp, PyTnlpInit, call0, decode_structure};
 
 /// One pounce problem instance. Holds the user object and bound
 /// vectors; the underlying `IpoptApplication` is rebuilt per `solve()`
@@ -1313,7 +1313,7 @@ fn decode_working_set(
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "working_set bounds[{i}] = {c} not in 0..=3"
-                )))
+                )));
             }
         });
     }
@@ -1327,7 +1327,7 @@ fn decode_working_set(
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "working_set constraints[{i}] = {c} not in 0..=3"
-                )))
+                )));
             }
         });
     }

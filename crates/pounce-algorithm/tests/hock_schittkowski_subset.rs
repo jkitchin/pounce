@@ -592,8 +592,8 @@ fn hs28(sink: Rc<RefCell<FinalSink>>) -> HsTnlp {
             v[2] = of * 4.0; // [1,1]
             v[3] = of * 0.0; // [2,0]
             v[4] = of * 2.0; // [2,2]
-                             // [2,1] not in pattern — set in next entry below if any.
-                             // We declared 5 entries, the layout above is: (0,0), (1,0), (1,1), (2,1), (2,2). Reassign:
+            // [2,1] not in pattern — set in next entry below if any.
+            // We declared 5 entries, the layout above is: (0,0), (1,0), (1,1), (2,1), (2,2). Reassign:
             v[3] = of * 2.0; // (2,1) entry
             v[4] = of * 2.0; // (2,2)
         },
@@ -851,10 +851,10 @@ fn hs76(sink: Rc<RefCell<FinalSink>>) -> HsTnlp {
             v[8] = 1.0;
             v[9] = 4.0;
             v[10] = 0.0; // x_4 not in g_3
-                         // Adjust: jac pattern declares 11 entries with row 2
-                         // having only x_2 and x_3 (and "x_4=0" placeholder).
-                         // To stay sparse we'd drop the last, but the pattern is
-                         // fixed so just zero it out.
+            // Adjust: jac pattern declares 11 entries with row 2
+            // having only x_2 and x_3 (and "x_4=0" placeholder).
+            // To stay sparse we'd drop the last, but the pattern is
+            // fixed so just zero it out.
         },
         eval_h_vals: |_x, of, _lam, v| {
             // H = diag(2, 1, 2, 1) with cross-term (2,0) = -1 and

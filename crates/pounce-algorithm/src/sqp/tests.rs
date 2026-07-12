@@ -11,7 +11,7 @@ use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::{SqpError, SqpStatus};
 use crate::sqp::sqp_alg::SqpAlgorithm;
-use pounce_common::types::{Index, Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_common::types::{Index, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::expansion_matrix::{ExpansionMatrix, ExpansionMatrixSpace};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};

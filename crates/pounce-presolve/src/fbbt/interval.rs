@@ -157,11 +157,7 @@ impl Interval {
         // `max`, which return the non-NaN operand; only the all-NaN case
         // leaked, but the guard makes every corner well-defined.)
         fn corner(a: Number, b: Number) -> Number {
-            if a == 0.0 || b == 0.0 {
-                0.0
-            } else {
-                a * b
-            }
+            if a == 0.0 || b == 0.0 { 0.0 } else { a * b }
         }
         let p1 = corner(self.lo, rhs.lo);
         let p2 = corner(self.lo, rhs.hi);
@@ -348,20 +344,12 @@ impl Interval {
 /// Outward round on the low end: nudge `x` one ULP toward `-∞`.
 /// Identity on infinities and NaN.
 pub(crate) fn round_down(x: Number) -> Number {
-    if x.is_finite() {
-        x.next_down()
-    } else {
-        x
-    }
+    if x.is_finite() { x.next_down() } else { x }
 }
 
 /// Outward round on the high end: nudge `x` one ULP toward `+∞`.
 pub(crate) fn round_up(x: Number) -> Number {
-    if x.is_finite() {
-        x.next_up()
-    } else {
-        x
-    }
+    if x.is_finite() { x.next_up() } else { x }
 }
 
 /// `x^n` for non-negative `n`, with `0^0 = 1` (Rust's `f64::powi`
@@ -619,9 +607,11 @@ mod tests {
 
     #[test]
     fn intersect_disjoint_is_empty() {
-        assert!(Interval::new(0.0, 1.0)
-            .intersect(Interval::new(2.0, 3.0))
-            .is_empty());
+        assert!(
+            Interval::new(0.0, 1.0)
+                .intersect(Interval::new(2.0, 3.0))
+                .is_empty()
+        );
     }
 
     #[test]

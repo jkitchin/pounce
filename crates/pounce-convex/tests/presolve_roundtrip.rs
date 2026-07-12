@@ -7,8 +7,8 @@
 //! (direct vs presolved), so the bar is the solvers' own convergence
 //! tolerance, not exact equality. We use 1e-5.
 
-use pounce_convex::presolve::{presolve, solve_with_presolve, PresolveOutcome};
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpStatus, Triplet, NEG_INF, POS_INF};
+use pounce_convex::presolve::{PresolveOutcome, presolve, solve_with_presolve};
+use pounce_convex::{NEG_INF, POS_INF, QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

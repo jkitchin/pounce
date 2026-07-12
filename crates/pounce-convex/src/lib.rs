@@ -43,12 +43,12 @@ pub use batch::{
 };
 pub use cones::ConeSpec;
 pub use ipm::{
-    solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm, solve_socp_ipm, solve_socp_ipm_debug,
-    solve_socp_ipm_warm, QpFactorization, QpOptions, QpWarmStart,
+    QpFactorization, QpOptions, QpWarmStart, solve_qp_ipm, solve_qp_ipm_debug, solve_qp_ipm_warm,
+    solve_socp_ipm, solve_socp_ipm_debug, solve_socp_ipm_warm,
 };
-pub use qp::{QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet, NEG_INF, POS_INF};
+pub use qp::{NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};
 pub use sos::{
-    sos_constrained_lower_bound, sos_lower_bound, sos_minimize, PolyProblem, Polynomial, SosBound,
-    SosSolution,
+    PolyProblem, Polynomial, SosBound, SosSolution, sos_constrained_lower_bound, sos_lower_bound,
+    sos_minimize,
 };

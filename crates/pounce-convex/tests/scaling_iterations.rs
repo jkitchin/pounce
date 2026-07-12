@@ -8,7 +8,7 @@
 //! three orders of magnitude; the iteration count must not drift upward
 //! with n.
 
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

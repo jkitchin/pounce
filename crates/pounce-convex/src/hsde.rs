@@ -35,11 +35,11 @@
 //! module is validated to reproduce their optima and certificates.
 
 use crate::cones::{CompositeCone, Cone};
-use crate::debug::{fire, ConvexDebugState};
+use crate::debug::{ConvexDebugState, fire};
 use crate::ipm::{
-    build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step, QpOptions,
+    QpOptions, build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step,
 };
-use crate::qp::{breakdown_status, QpIterate, QpProblem, QpSolution, QpStatus};
+use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus, breakdown_status};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::Index;
 use pounce_linsol::{Factorization, FactorizationError, SparseSymLinearSolverInterface};

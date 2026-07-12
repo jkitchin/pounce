@@ -28,8 +28,8 @@ pub mod preflight;
 pub mod report;
 
 pub use analysis::{
-    compare_runs, convergence_trace, diagnose, find_stalls, get_iterate, restoration_windows,
-    summarize, Finding, Severity, Stall, Summary,
+    Finding, Severity, Stall, Summary, compare_runs, convergence_trace, diagnose, find_stalls,
+    get_iterate, restoration_windows, summarize,
 };
 pub use iter_dump::{IterDumpHeader, IterDumpRecord, IterDumpTrace};
-pub use report::{Error, IterRecord, SolveReport, SOLVE_REPORT_SCHEMA};
+pub use report::{Error, IterRecord, SOLVE_REPORT_SCHEMA, SolveReport};

@@ -52,14 +52,14 @@ use std::rc::Rc;
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
-use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::TNLP;
+use pounce_nlp::return_codes::ApplicationReturnStatus;
 
+use crate::PdSensBacksolver;
 use crate::backsolver::SensBacksolver;
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
 use crate::vec_util::dense_to_vec;
-use crate::PdSensBacksolver;
 
 /// Errors returned by post-convergence operations on [`Solver`].
 #[derive(Debug, Clone)]

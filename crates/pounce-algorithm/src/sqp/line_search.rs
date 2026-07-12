@@ -33,7 +33,7 @@
 
 use crate::sqp::options::SqpOptions;
 use crate::sqp::problem::SqpProblemSpec;
-use pounce_common::types::{Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 
 /// l1 constraint + bound violation `‖max(bl − c, 0) + max(c − bu, 0)‖_1`
 /// (plus the same for variable bounds). Infinite bounds are treated

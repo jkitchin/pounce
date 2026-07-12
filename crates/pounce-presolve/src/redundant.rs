@@ -8,7 +8,7 @@
 //! *forcing/dominated* constraints in their stronger form, but the
 //! pure-redundancy case is what we ship here.
 
-use crate::bound_tighten::{row_activity_pub, LinearRow, INF_BOUND};
+use crate::bound_tighten::{INF_BOUND, LinearRow, row_activity_pub};
 use pounce_common::types::Number;
 
 /// Compute a boolean mask, `true` at rows that are redundant given

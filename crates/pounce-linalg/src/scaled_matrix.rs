@@ -10,8 +10,8 @@
 //! upstream `THROW_EXCEPTION(UNIMPLEMENTED_LINALG_METHOD_CALLED, ...)`.
 
 use crate::matrix::{
-    sym_default_compute_col_amax_impl, sym_default_trans_mult_vector_impl, Matrix, MatrixCache,
-    SymMatrix,
+    Matrix, MatrixCache, SymMatrix, sym_default_compute_col_amax_impl,
+    sym_default_trans_mult_vector_impl,
 };
 use crate::vector::Vector;
 use pounce_common::tagged::{Tag, TaggedObject};
@@ -211,11 +211,15 @@ impl Matrix for ScaledMatrix {
     }
 
     fn compute_row_amax_impl(&self, _rows_norms: &mut dyn Vector, _init: bool) {
-        panic!("ScaledMatrix::compute_row_amax not implemented (matches upstream UNIMPLEMENTED_LINALG_METHOD_CALLED)");
+        panic!(
+            "ScaledMatrix::compute_row_amax not implemented (matches upstream UNIMPLEMENTED_LINALG_METHOD_CALLED)"
+        );
     }
 
     fn compute_col_amax_impl(&self, _cols_norms: &mut dyn Vector, _init: bool) {
-        panic!("ScaledMatrix::compute_col_amax not implemented (matches upstream UNIMPLEMENTED_LINALG_METHOD_CALLED)");
+        panic!(
+            "ScaledMatrix::compute_col_amax not implemented (matches upstream UNIMPLEMENTED_LINALG_METHOD_CALLED)"
+        );
     }
 }
 
@@ -349,7 +353,9 @@ impl Matrix for SymScaledMatrix {
     }
 
     fn compute_row_amax_impl(&self, _rows_norms: &mut dyn Vector, _init: bool) {
-        panic!("SymScaledMatrix::compute_row_amax not implemented (matches upstream UNIMPLEMENTED_LINALG_METHOD_CALLED)");
+        panic!(
+            "SymScaledMatrix::compute_row_amax not implemented (matches upstream UNIMPLEMENTED_LINALG_METHOD_CALLED)"
+        );
     }
 
     fn compute_col_amax_impl(&self, cols_norms: &mut dyn Vector, init: bool) {
@@ -362,9 +368,9 @@ impl SymMatrix for SymScaledMatrix {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DenseVector;
     use crate::dense_vector::DenseVectorSpace;
     use crate::special_matrix::IdentityMatrix;
-    use crate::DenseVector;
 
     fn dvec_box(values: &[Number]) -> Box<dyn Vector> {
         let space = DenseVectorSpace::new(values.len() as Index);

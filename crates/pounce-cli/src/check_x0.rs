@@ -32,7 +32,7 @@
 //! User-facing background: `docs/src/initialization.md`.
 
 use crate::nl_reader;
-use crate::verify::{box_violation, is_finite_bound, name_at, sha256, RowReport};
+use crate::verify::{RowReport, box_violation, is_finite_bound, name_at, sha256};
 use pounce_common::types::Number;
 use pounce_nlp::tnlp::{BoundsInfo, SparsityRequest, StartingPoint, TNLP};
 use std::path::PathBuf;
@@ -1097,10 +1097,11 @@ mod tests {
         assert!(o.n_on_bounds >= 1);
         assert!(o.n_clamp_moved >= 1);
         assert!((o.max_clamp_move - 1e-2).abs() < 1e-9);
-        assert!(o
-            .warnings
-            .iter()
-            .any(|w| w.contains("warm_start_bound_push")));
+        assert!(
+            o.warnings
+                .iter()
+                .any(|w| w.contains("warm_start_bound_push"))
+        );
     }
 
     #[test]

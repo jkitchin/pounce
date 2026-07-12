@@ -57,12 +57,12 @@ pub use elastic::ElasticReformulation;
 pub use error::{QpError, QpStatus};
 pub use factor::LinearSolver;
 pub use kkt::{
-    a_times_x, assemble_active_set_kkt, assemble_box_with_active, assemble_equality_plus_bounds,
-    h_times_x, is_all_equality_constraints, is_pure_box, is_pure_equality_no_bounds,
-    rhs_equality_only, KktTriplet,
+    KktTriplet, a_times_x, assemble_active_set_kkt, assemble_box_with_active,
+    assemble_equality_plus_bounds, h_times_x, is_all_equality_constraints, is_pure_box,
+    is_pure_equality_no_bounds, rhs_equality_only,
 };
 pub use options::{AntiCyclingChoice, QpAlgorithm, QpOptions};
 pub use problem::{HessianInertia, QpProblem, QpSolution, QpStats, QpWarmStart};
-pub use qps::{parse_qps, QpsModel};
+pub use qps::{QpsModel, parse_qps};
 pub use solver::{ParametricActiveSetSolver, QpSolver};
 pub use working_set::{BoundStatus, ConsStatus, WorkingSet};

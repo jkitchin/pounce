@@ -21,7 +21,7 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
     TNLP,
 };
-use pounce_presolve::{wrap_with_presolve, AuxiliaryCouplingPolicy, PresolveOptions, PresolveTnlp};
+use pounce_presolve::{AuxiliaryCouplingPolicy, PresolveOptions, PresolveTnlp, wrap_with_presolve};
 
 /// `min x[0]^2 + x[1]^2  s.t.  x[0] + x[1] = 1`.
 struct Mini;

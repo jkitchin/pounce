@@ -12,7 +12,7 @@ use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
     TNLP,
 };
-use pounce_presolve::{wrap_with_presolve, PresolveOptions};
+use pounce_presolve::{PresolveOptions, wrap_with_presolve};
 use std::cell::RefCell;
 use std::rc::Rc;
 

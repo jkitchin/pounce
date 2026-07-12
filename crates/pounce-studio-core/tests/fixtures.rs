@@ -6,12 +6,12 @@
 //! travel with the test binary (no working-directory assumptions).
 
 use pounce_studio_core::analysis::{
-    compare_runs, convergence_trace, diagnose, find_stalls, get_iterate, restoration_windows,
-    summarize, Severity,
+    Severity, compare_runs, convergence_trace, diagnose, find_stalls, get_iterate,
+    restoration_windows, summarize,
 };
 use pounce_studio_core::iter_dump::IterDumpTrace;
 use pounce_studio_core::markdown::render_inspect;
-use pounce_studio_core::report::{Error, InputDescriptor, SolveReport, SOLVE_REPORT_SCHEMA};
+use pounce_studio_core::report::{Error, InputDescriptor, SOLVE_REPORT_SCHEMA, SolveReport};
 
 const ROSENBROCK: &str = include_str!("../../../studio/mcp/fixtures/rosenbrock.json");
 const STALLED: &str = include_str!("../../../studio/mcp/fixtures/rosenbrock-stalled.json");
@@ -104,9 +104,11 @@ fn diagnose_success_includes_converged() {
 fn diagnose_stalled_includes_max_iter_error() {
     let r = SolveReport::from_json_str(STALLED).unwrap();
     let findings = diagnose(&r);
-    assert!(findings
-        .iter()
-        .any(|f| { f.code == "max_iter_exceeded" && matches!(f.severity, Severity::Error) }));
+    assert!(
+        findings
+            .iter()
+            .any(|f| { f.code == "max_iter_exceeded" && matches!(f.severity, Severity::Error) })
+    );
 }
 
 #[test]

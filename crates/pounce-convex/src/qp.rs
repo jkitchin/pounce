@@ -361,7 +361,7 @@ impl QpSolution {
 #[cfg(test)]
 mod residual_tests {
     use super::*;
-    use crate::ipm::{solve_qp_ipm, QpOptions};
+    use crate::ipm::{QpOptions, solve_qp_ipm};
     use pounce_feral::FeralSolverInterface;
     use pounce_linsol::SparseSymLinearSolverInterface;
 

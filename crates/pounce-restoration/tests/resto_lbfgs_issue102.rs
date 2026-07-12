@@ -10,17 +10,17 @@
 //! lower-triangle `eval_h` sparsity with zero values + L-BFGS).
 
 use pounce_algorithm::application::{
-    default_backend_factory, feral_config_from_options, IpoptApplication,
+    IpoptApplication, default_backend_factory, feral_config_from_options,
 };
 use pounce_common::types::Number;
+use pounce_nlp::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
     TNLP,
 };
-use pounce_nlp::ApplicationReturnStatus;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

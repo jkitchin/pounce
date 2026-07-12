@@ -23,12 +23,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use pounce_common::types::Number;
+use pounce_nlp::SolverReturn;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
     StartingPoint, TNLP,
 };
-use pounce_nlp::SolverReturn;
-use pounce_presolve::{wrap_with_presolve, AuxiliaryCouplingPolicy, PresolveOptions};
+use pounce_presolve::{AuxiliaryCouplingPolicy, PresolveOptions, wrap_with_presolve};
 
 /// `x + y = 3`, `x - y = 1`. Solution (2, 1). Objective: minimise
 /// `(x - 5)^2 + (y - 6)^2` (so the gradient is non-zero at the

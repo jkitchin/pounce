@@ -61,16 +61,16 @@
 //! `pin_constraint_indices`. Perturbing `p_i → p_i + Δp_i` produces a
 //! first-order estimate of `Δx` that this module returns.
 
+use crate::PdSensBacksolver;
 use crate::backsolver::SensBacksolver;
 use crate::boundcheck::clamp_with_nlp;
 use crate::schur_data::IndexSchurData;
 use crate::sens_app::{SensApplication, SensOptions};
 use crate::vec_util::dense_to_vec;
-use crate::PdSensBacksolver;
 use pounce_algorithm::IpoptApplication;
 use pounce_common::types::{Index, Number};
-use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::TNLP;
+use pounce_nlp::return_codes::ApplicationReturnStatus;
 use std::cell::RefCell;
 use std::rc::Rc;
 

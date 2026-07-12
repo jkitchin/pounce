@@ -161,11 +161,7 @@ impl PenaltyLsAcceptor {
 
         let pred = -alpha * cache.grad_barr_t_delta - 0.5 * alpha * alpha * cache.dwd
             + self.nu * (cache.theta_ref - theta_2);
-        if pred < 0.0 {
-            0.0
-        } else {
-            pred
-        }
+        if pred < 0.0 { 0.0 } else { pred }
     }
 }
 
@@ -333,8 +329,8 @@ mod tests {
         jac_c_delta: Vec<Number>,
         jac_d_delta_minus_ds: Vec<Number>,
     ) -> RefCache {
-        use pounce_linalg::dense_vector::DenseVectorSpace;
         use pounce_linalg::Vector;
+        use pounce_linalg::dense_vector::DenseVectorSpace;
         let mkr = |v: Vec<Number>| -> Rc<dyn Vector> {
             let mut x = DenseVectorSpace::new(v.len() as i32).make_new_dense();
             x.values_mut().copy_from_slice(&v);

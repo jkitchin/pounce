@@ -34,11 +34,11 @@ use crate::hess::r#trait::HessianUpdater;
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use pounce_common::types::{Index, Number};
+use pounce_linalg::Vector;
 use pounce_linalg::compound_vector::CompoundVector;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::low_rank_update_sym_matrix::LowRankUpdateSymMatrixSpace;
 use pounce_linalg::multi_vector_matrix::{MultiVectorMatrix, MultiVectorMatrixSpace};
-use pounce_linalg::Vector;
 use std::rc::Rc;
 
 /// One curvature pair `(s, y)` plus the cached `||s||`, `||y||`, `s·y`

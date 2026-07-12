@@ -24,14 +24,14 @@ pub mod sampling;
 
 use crate::cli::{Args, MinimaArgs, MinimaMethod, ProblemSource};
 use crate::seeded_tnlp::SeededTnlp;
-use crate::solve_report::{status_to_solve_result_num, InputDescriptor, ReportBuilder};
-use archive::{scaled_distance, Archive};
+use crate::solve_report::{InputDescriptor, ReportBuilder, status_to_solve_result_num};
+use archive::{Archive, scaled_distance};
 use penalty_tnlp::{Kernel, PenaltyTnlp, TunnelTnlp};
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, SparsityRequest, StartingPoint, TNLP};
-use sampling::{clip, Sampler};
+use sampling::{Sampler, clip};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -754,11 +754,7 @@ pub fn run(
     let l_scale: Vec<Number> = (0..n)
         .map(|i| {
             let w = x_u[i] - x_l[i];
-            if has_box && w > 0.0 {
-                w
-            } else {
-                1.0
-            }
+            if has_box && w > 0.0 { w } else { 1.0 }
         })
         .collect();
 

@@ -11,7 +11,7 @@
 //! optimum on each instance.
 
 use pounce_cli::cbf;
-use pounce_convex::{solve_socp_ipm, QpOptions, QpStatus};
+use pounce_convex::{QpOptions, QpStatus, solve_socp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

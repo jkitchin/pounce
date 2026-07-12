@@ -23,23 +23,24 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use pounce_algorithm::IpoptApplication;
 use pounce_algorithm::application::{default_backend_factory, feral_config_from_options};
 use pounce_algorithm::batch::{
-    install_pooled_serial_feral_backend, install_serial_feral_backend,
-    solve_nlp_batch as solve_batch_seq, solve_nlp_batch_parallel as solve_batch_par,
+    FeralBackendPool, NlpBatchResult, NlpWarmStart, install_pooled_serial_feral_backend,
+    install_serial_feral_backend, solve_nlp_batch as solve_batch_seq,
+    solve_nlp_batch_parallel as solve_batch_par,
     solve_nlp_batch_parallel_warm as solve_batch_par_warm,
-    solve_nlp_batch_warm as solve_batch_seq_warm, FeralBackendPool, NlpBatchResult, NlpWarmStart,
+    solve_nlp_batch_warm as solve_batch_seq_warm,
 };
-use pounce_algorithm::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use std::sync::Arc;
 
 use crate::nl_problem::PyNlProblem;
-use crate::problem::{extract_f64_vec, status_message, PyProblem};
+use crate::problem::{PyProblem, extract_f64_vec, status_message};
 use crate::tnlp_bridge::PyTnlp;
 
 /// Options decoded from the user dict, in the three value classes the

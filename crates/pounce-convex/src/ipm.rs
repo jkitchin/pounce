@@ -48,7 +48,7 @@
 //! that Phases 4–6 extend rather than rewrite this driver.
 
 use crate::cones::{CompositeCone, Cone, ConeBlock, ConeSpec};
-use crate::debug::{fire, ConvexDebugState};
+use crate::debug::{ConvexDebugState, fire};
 use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
@@ -957,7 +957,7 @@ fn solve_nonsym<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    use crate::hsde_nonsym::{solve_conic_hsde_nonsym, solve_conic_hsde_nonsym_debug, NsBlock};
+    use crate::hsde_nonsym::{NsBlock, solve_conic_hsde_nonsym, solve_conic_hsde_nonsym_debug};
 
     fn blocks_of(cones: &[ConeSpec], extra_orthant: usize) -> Vec<NsBlock> {
         let mut blocks = Vec::with_capacity(cones.len() + 1);
@@ -2385,9 +2385,9 @@ mod detect_infeasibility_tests {
     //! `−Gd ∈ K`, not componentwise `Gd ≤ 0`. These call the `pub(crate)`
     //! detectors directly with crafted recession directions.
     use super::{detect_infeasibility, detect_infeasibility_cone};
+    use crate::QpOptions;
     use crate::cones::{CompositeCone, ConeSpec};
     use crate::qp::{QpProblem, QpStatus, Triplet};
-    use crate::QpOptions;
 
     /// `min −x₀` with the single SOC row block `Gx ⪯_{SOC} h`,
     /// `G = [[−0.1], [−0.5]]`. Recession direction `d = (1)` gives

@@ -30,7 +30,7 @@ mod sparse_lu;
 mod tnlp_bridge;
 mod warm_start;
 
-pub use nl_problem::{read_nl, PyNlProblem};
+pub use nl_problem::{PyNlProblem, read_nl};
 pub use problem::PyProblem;
 pub use qp::{PyQpFactorization, PyQpProblem, PyQpSensitivity};
 pub use solver::PySolver;

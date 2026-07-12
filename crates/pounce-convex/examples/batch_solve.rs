@@ -3,7 +3,7 @@
 //!
 //! Run: `cargo run -p pounce-convex --release --example batch_solve`
 
-use pounce_convex::{solve_qp_batch_parallel, solve_qp_multi_rhs, QpOptions, QpProblem, Triplet};
+use pounce_convex::{QpOptions, QpProblem, Triplet, solve_qp_batch_parallel, solve_qp_multi_rhs};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use std::time::Instant;

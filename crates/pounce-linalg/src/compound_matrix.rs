@@ -14,8 +14,8 @@
 
 use crate::compound_vector::CompoundVector;
 use crate::matrix::{
-    sym_default_compute_col_amax_impl, sym_default_trans_mult_vector_impl, Matrix, MatrixCache,
-    SymMatrix,
+    Matrix, MatrixCache, SymMatrix, sym_default_compute_col_amax_impl,
+    sym_default_trans_mult_vector_impl,
 };
 use crate::vector::Vector;
 use pounce_common::tagged::{Tag, TaggedObject};
@@ -614,11 +614,11 @@ impl SymMatrix for CompoundSymMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ZeroMatrix;
     use crate::compound_vector::{CompoundVector, CompoundVectorSpace};
     use crate::dense_vector::{DenseVector, DenseVectorSpace};
     use crate::diag_matrix::DiagMatrix;
     use crate::special_matrix::IdentityMatrix;
-    use crate::ZeroMatrix;
 
     fn dvec_box(values: &[Number]) -> Box<dyn Vector> {
         let space = DenseVectorSpace::new(values.len() as Index);

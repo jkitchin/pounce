@@ -276,7 +276,7 @@ pub fn print_logo() {
 /// `#`/`/` block characters. Shared by the solve header ([`print_logo`])
 /// and the interactive debugger's open banner (rendered to stderr).
 pub fn logo_rows(color: bool) -> Vec<String> {
-    use pounce_common::style::{downgrade, truecolor_enabled, ALPHA_HOT, BRIGHT_YEL, TIGER_ORANGE};
+    use pounce_common::style::{ALPHA_HOT, BRIGHT_YEL, TIGER_ORANGE, downgrade, truecolor_enabled};
 
     fn lerp(a: u8, b: u8, t: f64) -> u8 {
         (a as f64 + (b as f64 - a as f64) * t)

@@ -838,7 +838,7 @@ impl BacktrackingLineSearch {
                     n_steps: 0,
                     last_alpha: 0.0,
                     evaluation_error: false,
-                }
+                };
             }
         };
 

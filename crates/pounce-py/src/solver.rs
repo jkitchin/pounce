@@ -29,7 +29,7 @@ use pyo3::types::PyDict;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::problem::{build_info_dict, PyProblem};
+use crate::problem::{PyProblem, build_info_dict};
 
 /// Session-style wrapper around [`pounce_sensitivity::Solver`].
 #[pyclass(name = "Solver", module = "pounce._pounce", unsendable)]

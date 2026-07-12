@@ -320,7 +320,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipm::{solve_qp_ipm, QpOptions};
+    use crate::ipm::{QpOptions, solve_qp_ipm};
     use crate::qp::{QpProblem, Triplet};
     use pounce_feral::FeralSolverInterface;
 

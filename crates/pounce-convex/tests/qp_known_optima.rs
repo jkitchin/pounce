@@ -6,7 +6,7 @@
 //! FERAL backs the augmented-system factorization so the IPM runs
 //! end-to-end without an external linear solver.
 
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 
