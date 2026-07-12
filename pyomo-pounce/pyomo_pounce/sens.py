@@ -510,8 +510,9 @@ class _ParamMatrix(_ParamKeyed):
 class Covariance(_ParamMatrix):
     """Asymptotic parameter covariance, from covariance().
 
-    Keyed by the ORIGINAL model's Param data objects (order given by
-    `params`, the declaration order): cov[m.k1, m.k2] (either order),
+    Keyed by the estimated variables' data objects — the free `Var`s
+    flagged with `declare_estimated`, not Pyomo `Param`s — in `params`
+    (declaration) order: cov[m.k1, m.k2] (either order),
     cov[m.k1] for a variance, cov.std_err[m.k1],
     cov.correlation[m.k1, m.k2]. `matrix` is the dense numpy array
     ordered like `params`; `sigma_sq` is the residual variance that was
@@ -649,9 +650,15 @@ def covariance(model, sigma_sq=None, n_data=None):
             "with the SSR taken from the objective value)")
 
     # ── assemble ──────────────────────────────────────────────────────────
-    distinct = set(np.round(list(group_sigma.values()), 15))
-    if len(group_sigma) <= 1 or len(distinct) == 1:
-        s2 = next(iter(group_sigma.values()))
+    # Pooled covariance when there is one group or all group variances are
+    # equal to relative tolerance; otherwise the heteroscedastic sandwich.
+    sig_vals = list(group_sigma.values())
+    homoscedastic = len(sig_vals) <= 1 or (
+        max(sig_vals) - min(sig_vals)
+        <= 1e-12 * max(abs(v) for v in sig_vals)
+    )
+    if homoscedastic:
+        s2 = sig_vals[0]
         cov = 2.0 * s2 * M
     else:
         # heteroscedastic sandwich: cov = A^-1 B A^-1 with A = d2f/dp2 and
@@ -675,7 +682,6 @@ def covariance(model, sigma_sq=None, n_data=None):
         # cov = 4 M (sum_g sigma_g^2 Jg^T Jg) M; the single-group case
         # reduces to 2 sigma^2 M since J^T J = A/2.
         cov = 4.0 * M @ B @ M
-        cov = 0.5 * (cov + cov.T)
 
     cov = 0.5 * (cov + cov.T)
     if np.diag(cov).min() < 0:
