@@ -101,11 +101,53 @@ def test_explicit_form_equals_declared(linear):
     np.testing.assert_allclose(cov_expl.matrix, cov_decl.matrix, rtol=1e-9)
 
 
-def test_n_data_fallback(linear):
-    m, x, y, X = linear
+def test_n_data_fallback():
+    """The n_data= branch (SSR taken from the objective, no declared
+    residuals) must reproduce the classical sigma^2 (X^T X)^-1."""
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    declare_estimated(m.a, m.b)             # estimated, but NO residuals
+    pyo.SolverFactory("pounce").solve(m)
     cov = covariance(m, n_data=N_LIN)
-    cov_res = covariance(m)
-    np.testing.assert_allclose(cov.matrix, cov_res.matrix, rtol=1e-9)
+    beta = np.linalg.solve(X.T @ X, X.T @ y)
+    ssr = float(np.sum((y - X @ beta) ** 2))
+    assert cov.sigma_sq == pytest.approx(ssr / (N_LIN - 2), rel=1e-9)
+    cov_classical = cov.sigma_sq * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(cov.matrix, cov_classical, rtol=1e-9)
+
+
+def test_n_data_ignored_when_residuals_declared_warns(linear):
+    m, x, y, X = linear                     # fixture declares residuals
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, n_data=999)     # bogus count; must be ignored
+    assert any("n_data is ignored" in str(wi.message) for wi in w)
+    np.testing.assert_allclose(cov.matrix, covariance(m).matrix, rtol=1e-12)
+
+
+def test_explicit_form_repeated_solve_is_stable():
+    """The explicit (call-time) declarations are solve-local: re-solving
+    the same model must not accumulate residuals and drift the variance."""
+    x, y, _ = linear_data()
+    m = linear_model(x, y, declare=False)
+    sf = pyo.SolverFactory("pounce")
+    sf.solve(m, estimated=[m.a, m.b], residuals=[m.r])
+    cov1 = covariance(m)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")      # no spurious mismatch warning
+        sf.solve(m, estimated=[m.a, m.b], residuals=[m.r])
+    cov2 = covariance(m)
+    assert cov2.sigma_sq == pytest.approx(cov1.sigma_sq, rel=1e-12)
+    np.testing.assert_allclose(cov2.matrix, cov1.matrix, rtol=1e-12)
+    reg = m.__dict__["_pounce_sens"]
+    assert reg.residuals == []              # registry left clean
+
+
+def test_dict_sigma_without_groups_errors(linear):
+    m, _, _, _ = linear                     # residuals declared ungrouped
+    with pytest.raises(ValueError,
+                       match="no named residual groups were declared"):
+        covariance(m, sigma_sq={"lo": 0.1, "hi": 0.2})
 
 
 def test_error_paths():

@@ -207,22 +207,23 @@ def sens_solve(model, tee=False, sens_params=None, estimated=None,
     functions do. Returns a Pyomo SolverResults, like an ordinary solve."""
     import pounce
 
-    # explicit form: register call-time components before proceeding
-    for p in (sens_params or []):
-        declare_sens_param(p)
-    for v in (estimated or []):
-        declare_estimated(v)
-    for item in (residuals or []):
-        if isinstance(item, tuple):
-            declare_residual(*item)
-        else:
-            declare_residual(item)
+    reg = _registry(model)
 
-    reg = model.__dict__[_REG]
-    if reg.params:
+    # Effective declarations for THIS solve: the persistent declared
+    # components plus any explicit (call-time) ones. The explicit form is
+    # deliberately solve-local -- it is NOT written back into reg -- so that
+    # repeated solves of one model (the NMPC use case) do not accumulate
+    # duplicate components and silently corrupt the covariance/pins.
+    eff_params = list(reg.params) + list(sens_params or [])
+    eff_estimated = list(reg.estimated) + list(estimated or [])
+    eff_residuals = list(reg.residuals) + [
+        item if isinstance(item, tuple) else (item, None)
+        for item in (residuals or [])]
+
+    if eff_params:
         # pinned inputs need the sensitivity-toolbox surgery (on a clone)
         si = SensitivityInterface(model, clone_model=True)
-        si.setup_sensitivity(reg.params)
+        si.setup_sensitivity(eff_params)
         clone = si.model_instance
     else:
         # estimation-only: nothing to pin, solve the model as written
@@ -260,7 +261,7 @@ def sens_solve(model, tee=False, sens_params=None, estimated=None,
         for i, (var, clone_param, list_idx, comp_idx) in enumerate(
                 block._sens_data_list):
             con = block.paramConst[i + 1]
-            orig_comp = reg.params[list_idx]
+            orig_comp = eff_params[list_idx]
             orig_data = (orig_comp if not orig_comp.is_indexed()
                          else orig_comp[comp_idx])
             pins[orig_data] = con_names.index(con.name)
@@ -277,13 +278,13 @@ def sens_solve(model, tee=False, sens_params=None, estimated=None,
 
     # estimated parameters: their rows in the primal vector
     session.est_rows = ComponentMap()
-    for comp in reg.estimated:
+    for comp in eff_estimated:
         for vd in _iter_data(comp):
             session.est_rows[vd] = var_names.index(vd.name)
 
     # residual groups: member rows per group key (None = the common pool)
     session.res_rows = {}
-    for container, group in reg.residuals:
+    for container, group in eff_residuals:
         rows = [var_names.index(rd.name) for rd in _iter_data(container)]
         session.res_rows.setdefault(group, []).extend(rows)
 
@@ -570,6 +571,23 @@ def covariance(model, sigma_sq=None, n_data=None):
     data objects: cov[m.A, m.k], cov.std_err[m.A],
     cov.correlation[m.A, m.k], cov.matrix, cov.sigma_sq (float or
     per-group dict), cov.eigen().
+
+    Same scale-and-invert-the-reduced-Hessian recipe as
+    ``pounce.curve_fit``, with one difference for NONLINEAR models: this
+    feeds the exact Lagrangian Hessian (via the .nl bridge) and so reports
+    the OBSERVED-information covariance (the full reduced Hessian),
+    whereas ``curve_fit`` factors the Gauss-Newton Hessian and reports
+    ``2 sigma^2 (J^T J)^-1`` (the expected-information / scipy convention,
+    always positive semidefinite). The two agree for linear models and in
+    the small-residual limit and differ by O(residual x curvature)
+    otherwise. Gauss-Newton cannot produce a negative variance; the full
+    Hessian can go indefinite, which is what the negative-diagonal warning
+    below signals -- prefer ``curve_fit`` then, or for scipy-matching
+    numbers. Use ``curve_fit`` for the callable-model-plus-data surface
+    (starting point, robust losses, confidence intervals, prediction
+    bands, active-bound projection); use this for a model already written
+    in Pyomo. Unlike ``curve_fit``, this only WARNS on a bound-active
+    parameter rather than projecting onto the active-constraint nullspace.
     """
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None
@@ -618,9 +636,25 @@ def covariance(model, sigma_sq=None, n_data=None):
 
     # ── noise variance per group ──────────────────────────────────────────
     groups = dict(session.res_rows)
+    if n_data is not None and (sigma_sq is not None or groups):
+        warnings.warn(
+            "covariance: n_data is ignored because a higher-precedence noise "
+            "source was given (sigma_sq, or the declared residuals).")
     if sigma_sq is not None:
         if isinstance(sigma_sq, dict):
-            group_sigma = {g: float(s) for g, s in sigma_sq.items()}
+            named = [g for g in groups if g is not None]
+            if not named:
+                raise ValueError(
+                    "covariance: sigma_sq was given as a per-group dict but "
+                    "no named residual groups were declared; pass a scalar "
+                    "sigma_sq, or declare grouped residuals with "
+                    "declare_residual(..., group=...)")
+            missing = [g for g in groups if g not in sigma_sq]
+            if missing:
+                raise ValueError(
+                    "covariance: sigma_sq is missing an entry for residual "
+                    f"group(s) {sorted(map(repr, missing))}")
+            group_sigma = {g: float(sigma_sq[g]) for g in groups}
         else:
             group_sigma = {g: float(sigma_sq) for g in (groups or {None: []})}
     elif groups:

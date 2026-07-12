@@ -177,6 +177,42 @@ parameterization), when an estimated parameter sits on a bound at the
 optimum (the asymptotics are invalid there), and when the covariance
 diagonal comes out negative (not a least-squares minimum).
 
+**Relation to `pounce.curve_fit`.** This uses the same
+scale-and-invert-the-reduced-Hessian recipe as
+[`pounce.curve_fit`](curve-fitting.md) — both read a reduced-Hessian
+block from the held KKT factor and scale it by `2 sigma^2` with
+`sigma^2 = SSR / (n - p)` — but with one substantive difference for
+**nonlinear** models: `curve_fit` factors the **Gauss-Newton** Hessian
+(`pcov = 2 sigma^2 (J^T J)^-1`, the expected-information / scipy /
+`pycse.nlinfit` convention, always positive semidefinite), while
+`covariance()` here feeds the **exact Lagrangian Hessian** through the
+`.nl` bridge, so it reports the **observed-information** covariance —
+the full reduced Hessian including the residual-curvature term that
+Gauss-Newton drops. The two are identical for linear models and in the
+small-residual / large-`n` limit, and differ by `O(residual x model
+curvature)` otherwise (a few percent on a strongly-curved fit). Neither
+is uniquely "correct": Gauss-Newton is the conventional, robust default
+(it cannot produce a negative variance); observed information is the
+honest local curvature of the objective you actually solved (Efron &
+Hinkley 1978) but can go indefinite — which is what the negative-variance
+warning above is telling you. For numbers that match scipy/`nls`, or when
+`covariance()` warns about a negative diagonal, prefer `curve_fit`.
+The other difference is the input surface.
+`curve_fit(f, xdata, ydata, ...)` is the batteries-included fitter for a
+callable model `f(x, *params)` and data arrays: it chooses a starting
+point, offers robust losses, per-point `sigma` weights, confidence
+intervals, prediction bands, `dpopt/ddata`, and out-of-core streaming,
+and it *projects* the covariance onto the active-constraint nullspace
+when a parameter sits on a bound. `covariance()` is the post-solve
+primitive for a model you have **already written in Pyomo** — residuals
+as constraints, arbitrary surrounding structure — where you want the
+covariance of the fit as posed without re-expressing it as
+`f(x, *params)`. Use `curve_fit` when the fit is naturally a
+model-plus-data call; use `covariance()` to interrogate an existing
+Pyomo estimation model. Note `covariance()` only *warns* (rather than
+projecting) when an estimated parameter is bound-active — reach for
+`curve_fit` there, or read the fit off the interior.
+
 **Relation to `pyomo.contrib.parmest`.** parmest is an estimation
 workflow: multi-experiment data management, bootstrap resampling, and
 likelihood-ratio confidence regions, at the price of restructuring the

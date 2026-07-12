@@ -46,6 +46,21 @@ The statistics follow the same conventions as scipy and
 `absolute_sigma=True`, and confidence intervals use the Student-t quantile
 `popt ± t_{dof,1−α/2} · perr`.
 
+> **Already modelling in Pyomo?** `pyomo_pounce.covariance` computes the
+> parameter covariance for an estimation model written directly in Pyomo —
+> residuals as constraints, arbitrary surrounding structure — instead of a
+> `f(x, *params)` callable, using the same scale-and-invert-the-reduced-Hessian
+> recipe read from the same held KKT factor. One caveat for **nonlinear**
+> models: `curve_fit` here reports the **Gauss-Newton** covariance
+> `2·s²·(JᵀJ)⁻¹` (the scipy/`nls` convention, always ≥ 0), whereas
+> `covariance()` reports the **observed-information** covariance from the exact
+> Hessian; they match for linear models and in the small-residual limit and
+> differ by a few percent on a strongly-curved fit. See
+> [Parameter covariance and identifiability](sensitivity.md). Use
+> `curve_fit` when the fit is naturally a model-plus-data call (or when you
+> want scipy-matching numbers); use `covariance()` to interrogate a Pyomo
+> model you already have.
+
 ## Derivatives: prefer JAX
 
 Accurate derivatives are what make the covariance and sensitivity sharp — and
