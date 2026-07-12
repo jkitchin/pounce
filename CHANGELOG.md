@@ -9,6 +9,28 @@ changes.
 
 ## [Unreleased]
 
+### Added — parameter covariance for estimation problems (Pyomo)
+
+- **Parameter covariance for estimation problems, from one solve
+  (Pyomo).** Declare the fitted variables (`declare_estimated(m.A, m.k)`,
+  varargs, they stay free) and the residual container (`declare_residual(m.r)`,
+  optional `group=` strings for heteroscedastic noise groups), solve
+  ordinarily with `SolverFactory('pounce')`, then
+  `pyomo_pounce.covariance(m)` returns the asymptotic covariance with
+  no further information: `cov[m.A, m.k]`, `cov.std_err[m.A]`,
+  `cov.correlation[m.A, m.k]`, `cov.matrix`, per-group `cov.sigma_sq`,
+  and `cov.eigen()` for identifiability diagnosis. Multiple noise
+  groups switch to the heteroscedastic sandwich covariance. Known
+  variance (`sigma_sq=`, scalar or per-group) and a bare data count
+  (`n_data=`) remain as alternatives to declared residuals. The
+  objective must be a plain sum of squared residuals (the solve warns
+  when the declared residuals do not reproduce it); the scaling
+  (cov = 2 sigma^2 times the parameter block of the inverse KKT
+  matrix) is pinned against the analytical linear-regression
+  covariance in `tests/test_covariance.py`. All declarations also have
+  explicit call-time forms on `solve()` (`sens_params=`, `estimated=`,
+  `residuals=`).
+
 ## [0.8.0] - 2026-07-11
 
 ### Added — declared-parameter sensitivity for Pyomo (Python / Pyomo)
@@ -29,25 +51,6 @@ changes.
   `multiplier_rows` (map constraint indices to their `y_c` rows), with
   matching Rust methods `Solver::parametric_step_full` /
   `Solver::g_multiplier_rows` in `pounce-sensitivity`.
-- **Parameter covariance for estimation problems, from one solve
-  (Pyomo).** Declare the fitted variables (`declare_estimated(m.A, m.k)`,
-  varargs, they stay free) and the residual container (`declare_residual(m.r)`,
-  optional `group=` strings for heteroscedastic noise groups), solve
-  ordinarily with `SolverFactory('pounce')`, then
-  `pyomo_pounce.covariance(m)` returns the asymptotic covariance with
-  no further information: `cov[m.A, m.k]`, `cov.std_err[m.A]`,
-  `cov.correlation[m.A, m.k]`, `cov.matrix`, per-group `cov.sigma_sq`,
-  and `cov.eigen()` for identifiability diagnosis. Multiple noise
-  groups switch to the heteroscedastic sandwich covariance. Known
-  variance (`sigma_sq=`, scalar or per-group) and a bare data count
-  (`n_data=`) remain as alternatives to declared residuals. The
-  objective must be a plain sum of squared residuals (the solve warns
-  when the declared residuals do not reproduce it); the scaling
-  (cov = 2 sigma^2 times the parameter block of the inverse KKT
-  matrix) is pinned against the analytical linear-regression
-  covariance in `tests/test_covariance.py`. All declarations also have
-  explicit call-time forms on `solve()` (`sens_params=`, `estimated=`,
-  `residuals=`).
 
 ### Added — structure-aware KKT hooks (#180)
 
