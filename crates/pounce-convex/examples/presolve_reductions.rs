@@ -3,8 +3,8 @@
 //!
 //! Run: `cargo run -p pounce-convex --release --example presolve_reductions`
 
-use pounce_convex::presolve::{presolve, solve_with_presolve, PresolveOutcome};
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::presolve::{PresolveOutcome, presolve, solve_with_presolve};
+use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use std::time::Instant;

@@ -29,9 +29,9 @@
 //! itself live in [`crate::cones::exp`]; this module is the outer iteration.
 
 use crate::cones::{BarrierCone, Cone, ConeBlock, ExponentialCone, PowerCone, SecondOrderCone};
-use crate::debug::{fire, ConvexDebugState};
-use crate::ipm::{build_rhs, detect_infeasibility_with, dot, inf_norm, split_step, QpOptions};
-use crate::qp::{breakdown_status, QpProblem, QpSolution, QpStatus};
+use crate::debug::{ConvexDebugState, fire};
+use crate::ipm::{QpOptions, build_rhs, detect_infeasibility_with, dot, inf_norm, split_step};
+use crate::qp::{QpProblem, QpSolution, QpStatus, breakdown_status};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -50,7 +50,7 @@ pub enum NonsymCone {
 }
 
 macro_rules! ns_dispatch {
-    ($self:ident, $c:ident => $body:expr) => {
+    ($self:ident, $c:ident => $body:expr_2021) => {
         match $self {
             NonsymCone::Exp($c) => $body,
             NonsymCone::Power($c) => $body,
@@ -770,11 +770,7 @@ fn max_step(
         alpha *= 0.8;
         bt += 1;
     }
-    if bt >= 100 {
-        0.0
-    } else {
-        alpha
-    }
+    if bt >= 100 { 0.0 } else { alpha }
 }
 
 /// Cone-aware infeasibility detection for the non-symmetric driver.

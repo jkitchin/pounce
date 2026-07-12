@@ -13,7 +13,7 @@
 //! - **sparse large**: tridiagonal PSD Hessian, box bounds. n up to 1e5.
 //!   The KKT factor stays sparse, so this is where an IPM should shine.
 
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use std::time::Instant;

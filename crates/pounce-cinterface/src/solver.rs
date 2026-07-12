@@ -21,13 +21,13 @@
 //! now-null handle is safe (it null-checks).
 
 use pounce_algorithm::application::{
-    default_backend_factory, feral_config_from_options, IpoptApplication,
+    IpoptApplication, default_backend_factory, feral_config_from_options,
 };
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::TNLP;
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use pounce_sensitivity::Solver as RustSolver;
 use std::cell::RefCell;
@@ -35,7 +35,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use crate::{
-    Bool, CCallbackTnlp, Index, IpoptProblem, IpoptProblemInfo, LastSolve, Number, FALSE, TRUE,
+    Bool, CCallbackTnlp, FALSE, Index, IpoptProblem, IpoptProblemInfo, LastSolve, Number, TRUE,
 };
 
 /// Internal owned state for the session-style C handle.
@@ -71,25 +71,27 @@ pub type IpoptSolver = *mut IpoptSolverInfo;
 ///
 /// `prob_handle` must be a valid pointer to an [`IpoptProblem`]
 /// previously returned by [`crate::CreateIpoptProblem`] (or NULL).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptCreateSolver(prob_handle: *mut IpoptProblem) -> IpoptSolver {
-    if prob_handle.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        if prob_handle.is_null() {
+            return std::ptr::null_mut();
+        }
+        let prob = *prob_handle;
+        if prob.is_null() {
+            return std::ptr::null_mut();
+        }
+        // Take ownership of the Box and null out the caller's handle.
+        let problem = *Box::from_raw(prob);
+        *prob_handle = std::ptr::null_mut();
+        let m = problem.m;
+        let info = Box::new(IpoptSolverInfo {
+            session: None,
+            problem,
+            m,
+        });
+        Box::into_raw(info)
     }
-    let prob = *prob_handle;
-    if prob.is_null() {
-        return std::ptr::null_mut();
-    }
-    // Take ownership of the Box and null out the caller's handle.
-    let problem = *Box::from_raw(prob);
-    *prob_handle = std::ptr::null_mut();
-    let m = problem.m;
-    let info = Box::new(IpoptSolverInfo {
-        session: None,
-        problem,
-        m,
-    });
-    Box::into_raw(info)
 }
 
 /// Release an [`IpoptSolver`] and all owned resources, including the
@@ -99,12 +101,14 @@ pub unsafe extern "C" fn IpoptCreateSolver(prob_handle: *mut IpoptProblem) -> Ip
 ///
 /// `solver` must be a pointer returned by [`IpoptCreateSolver`] and
 /// not yet freed, or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptFreeSolver(solver: IpoptSolver) {
-    if solver.is_null() {
-        return;
+    unsafe {
+        if solver.is_null() {
+            return;
+        }
+        drop(Box::from_raw(solver));
     }
-    drop(Box::from_raw(solver));
 }
 
 /// Run the IPM. Same output buffer contract as [`crate::IpoptSolve`]:
@@ -123,7 +127,7 @@ pub unsafe extern "C" fn IpoptFreeSolver(solver: IpoptSolver) {
 /// All non-NULL output pointers must be valid for the appropriate
 /// length; the C callbacks stored on the underlying IpoptProblem must
 /// remain valid through the solve.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn IpoptSolverSolve(
     solver: IpoptSolver,
@@ -135,136 +139,138 @@ pub unsafe extern "C" fn IpoptSolverSolve(
     mult_x_U: *mut Number,
     user_data: *mut c_void,
 ) -> Index {
-    if solver.is_null() {
-        return ApplicationReturnStatus::InternalError as Index;
+    unsafe {
+        if solver.is_null() {
+            return ApplicationReturnStatus::InternalError as Index;
+        }
+        // Invalidate any prior session state up front, before this solve is
+        // attempted. The converged factor (`session`) and retained stats
+        // (`problem.last_solve`) are only repopulated when the solve below runs to
+        // completion; if the guarded body bails early or a panic is caught
+        // (returning `Internal_Error`), neither the held KKT factor nor the
+        // post-solve accessors must surface the *previous* solve's data. Clearing
+        // here makes the failure-consistent state "no data" rather than a stale
+        // factor / stale stats (F5).
+        {
+            let info = &mut *solver;
+            info.session = None;
+            info.problem.last_solve = None;
+        }
+        // Guard the whole solve: `RustSolver::solve` runs the entire pounce core
+        // and the C-callback bridge, any of which could panic on an unexpected
+        // internal state. A panic unwinding across `extern "C"` aborts the
+        // embedding process; report `Internal_Error` instead, matching
+        // `IpoptSolve` and upstream Ipopt's exception handling. (See `ffi_guard`.)
+        crate::ffi_guard(ApplicationReturnStatus::InternalError as Index, || {
+            let info = &mut *solver;
+            let n = info.problem.n;
+            let m = info.m;
+            if n < 0 || m < 0 {
+                return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+            }
+            if n > 0 && x.is_null() {
+                return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+            }
+            let n_us = n as usize;
+            let m_us = m as usize;
+            let initial_x = if n_us > 0 {
+                std::slice::from_raw_parts(x, n_us).to_vec()
+            } else {
+                Vec::new()
+            };
+
+            let bridge = Rc::new(RefCell::new(CCallbackTnlp {
+                n,
+                m,
+                nele_jac: info.problem.nele_jac,
+                nele_hess: info.problem.nele_hess,
+                index_style: info.problem.index_style,
+                x_l: info.problem.x_l.clone(),
+                x_u: info.problem.x_u.clone(),
+                g_l: info.problem.g_l.clone(),
+                g_u: info.problem.g_u.clone(),
+                initial_x,
+                eval_f: info.problem.eval_f,
+                eval_grad_f: info.problem.eval_grad_f,
+                eval_g: info.problem.eval_g,
+                eval_jac_g: info.problem.eval_jac_g,
+                eval_h: info.problem.eval_h,
+                user_data,
+                intermediate_cb: info.problem.intermediate_cb,
+                user_scaling: info.problem.user_scaling.clone(),
+                final_status: None,
+                final_x: vec![0.0; n_us],
+                final_z_l: vec![0.0; n_us],
+                final_z_u: vec![0.0; n_us],
+                final_g: vec![0.0; m_us],
+                final_lambda: vec![0.0; m_us],
+                final_obj: 0.0,
+            }));
+
+            // Re-wire restoration fresh for this solve (same pattern as
+            // IpoptSolve). Multi-pass provider so the ℓ₁ wrapper / auto-fallback
+            // don't panic on the second inner solve (pounce#10 / pounce#24).
+            let feral_cfg = feral_config_from_options(info.problem.app.options());
+            let bff_mint = move || -> InnerBackendFactoryFactory {
+                let feral_cfg = feral_cfg.clone();
+                Box::new(move || default_backend_factory(feral_cfg.clone()))
+            };
+            let resto_provider = make_default_restoration_factory_provider(
+                RestoAlgorithmBuilder::new(),
+                info.problem.app.algorithm_builder_from_options(),
+                bff_mint,
+            );
+            info.problem
+                .app
+                .set_restoration_factory_provider(resto_provider);
+
+            // Move the app out of the problem and into a fresh RustSolver. The
+            // app carries the user's options (set via AddIpopt{Str,Num,Int}Option),
+            // so we snapshot the OptionsList first and restore it into the fresh
+            // blank app left behind. Without this, a second IpoptSolverSolve on the
+            // same handle reads a default-initialised app — silently discarding the
+            // linear solver, tolerances, scaling, etc. the caller configured (and
+            // the `feral_config_from_options` snapshot above would, on that second
+            // call, read the already-blanked options). The session API's design
+            // center is repeated solves, so this must survive across them.
+            let saved_options = info.problem.app.options().clone();
+            let app = std::mem::replace(&mut info.problem.app, IpoptApplication::new());
+            *info.problem.app.options_mut() = saved_options;
+            let bridge_for_solver: Rc<RefCell<dyn TNLP>> = bridge.clone();
+            let mut rust_solver = RustSolver::new(app, bridge_for_solver);
+            let status = rust_solver.solve();
+            let bridge_ref = bridge.borrow();
+            info.problem.last_solve = Some(LastSolve {
+                stats: rust_solver.app().statistics(),
+                status,
+                linear_solver: rust_solver.app().linear_solver_summary(),
+                final_x: bridge_ref.final_x.clone(),
+                final_lambda: bridge_ref.final_lambda.clone(),
+                final_obj: bridge_ref.final_obj,
+            });
+            if !x.is_null() && n_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
+            }
+            if !g.is_null() && m_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
+            }
+            if !obj_val.is_null() {
+                *obj_val = bridge_ref.final_obj;
+            }
+            if !mult_g.is_null() && m_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
+            }
+            if !mult_x_L.is_null() && n_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
+            }
+            if !mult_x_U.is_null() && n_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
+            }
+
+            info.session = Some(rust_solver);
+            status as Index
+        })
     }
-    // Invalidate any prior session state up front, before this solve is
-    // attempted. The converged factor (`session`) and retained stats
-    // (`problem.last_solve`) are only repopulated when the solve below runs to
-    // completion; if the guarded body bails early or a panic is caught
-    // (returning `Internal_Error`), neither the held KKT factor nor the
-    // post-solve accessors must surface the *previous* solve's data. Clearing
-    // here makes the failure-consistent state "no data" rather than a stale
-    // factor / stale stats (F5).
-    {
-        let info = &mut *solver;
-        info.session = None;
-        info.problem.last_solve = None;
-    }
-    // Guard the whole solve: `RustSolver::solve` runs the entire pounce core
-    // and the C-callback bridge, any of which could panic on an unexpected
-    // internal state. A panic unwinding across `extern "C"` aborts the
-    // embedding process; report `Internal_Error` instead, matching
-    // `IpoptSolve` and upstream Ipopt's exception handling. (See `ffi_guard`.)
-    crate::ffi_guard(ApplicationReturnStatus::InternalError as Index, || unsafe {
-        let info = &mut *solver;
-        let n = info.problem.n;
-        let m = info.m;
-        if n < 0 || m < 0 {
-            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-        }
-        if n > 0 && x.is_null() {
-            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-        }
-        let n_us = n as usize;
-        let m_us = m as usize;
-        let initial_x = if n_us > 0 {
-            std::slice::from_raw_parts(x, n_us).to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let bridge = Rc::new(RefCell::new(CCallbackTnlp {
-            n,
-            m,
-            nele_jac: info.problem.nele_jac,
-            nele_hess: info.problem.nele_hess,
-            index_style: info.problem.index_style,
-            x_l: info.problem.x_l.clone(),
-            x_u: info.problem.x_u.clone(),
-            g_l: info.problem.g_l.clone(),
-            g_u: info.problem.g_u.clone(),
-            initial_x,
-            eval_f: info.problem.eval_f,
-            eval_grad_f: info.problem.eval_grad_f,
-            eval_g: info.problem.eval_g,
-            eval_jac_g: info.problem.eval_jac_g,
-            eval_h: info.problem.eval_h,
-            user_data,
-            intermediate_cb: info.problem.intermediate_cb,
-            user_scaling: info.problem.user_scaling.clone(),
-            final_status: None,
-            final_x: vec![0.0; n_us],
-            final_z_l: vec![0.0; n_us],
-            final_z_u: vec![0.0; n_us],
-            final_g: vec![0.0; m_us],
-            final_lambda: vec![0.0; m_us],
-            final_obj: 0.0,
-        }));
-
-        // Re-wire restoration fresh for this solve (same pattern as
-        // IpoptSolve). Multi-pass provider so the ℓ₁ wrapper / auto-fallback
-        // don't panic on the second inner solve (pounce#10 / pounce#24).
-        let feral_cfg = feral_config_from_options(info.problem.app.options());
-        let bff_mint = move || -> InnerBackendFactoryFactory {
-            let feral_cfg = feral_cfg.clone();
-            Box::new(move || default_backend_factory(feral_cfg.clone()))
-        };
-        let resto_provider = make_default_restoration_factory_provider(
-            RestoAlgorithmBuilder::new(),
-            info.problem.app.algorithm_builder_from_options(),
-            bff_mint,
-        );
-        info.problem
-            .app
-            .set_restoration_factory_provider(resto_provider);
-
-        // Move the app out of the problem and into a fresh RustSolver. The
-        // app carries the user's options (set via AddIpopt{Str,Num,Int}Option),
-        // so we snapshot the OptionsList first and restore it into the fresh
-        // blank app left behind. Without this, a second IpoptSolverSolve on the
-        // same handle reads a default-initialised app — silently discarding the
-        // linear solver, tolerances, scaling, etc. the caller configured (and
-        // the `feral_config_from_options` snapshot above would, on that second
-        // call, read the already-blanked options). The session API's design
-        // center is repeated solves, so this must survive across them.
-        let saved_options = info.problem.app.options().clone();
-        let app = std::mem::replace(&mut info.problem.app, IpoptApplication::new());
-        *info.problem.app.options_mut() = saved_options;
-        let bridge_for_solver: Rc<RefCell<dyn TNLP>> = bridge.clone();
-        let mut rust_solver = RustSolver::new(app, bridge_for_solver);
-        let status = rust_solver.solve();
-        let bridge_ref = bridge.borrow();
-        info.problem.last_solve = Some(LastSolve {
-            stats: rust_solver.app().statistics(),
-            status,
-            linear_solver: rust_solver.app().linear_solver_summary(),
-            final_x: bridge_ref.final_x.clone(),
-            final_lambda: bridge_ref.final_lambda.clone(),
-            final_obj: bridge_ref.final_obj,
-        });
-        if !x.is_null() && n_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
-        }
-        if !g.is_null() && m_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
-        }
-        if !obj_val.is_null() {
-            *obj_val = bridge_ref.final_obj;
-        }
-        if !mult_g.is_null() && m_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
-        }
-        if !mult_x_L.is_null() && n_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
-        }
-        if !mult_x_U.is_null() && n_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
-        }
-
-        info.session = Some(rust_solver);
-        status as Index
-    })
 }
 
 /// Total compound-KKT vector dimension. Returns -1 if no converged
@@ -273,15 +279,17 @@ pub unsafe extern "C" fn IpoptSolverSolve(
 /// # Safety
 ///
 /// `solver` must be a valid [`IpoptSolver`] or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolverGetKktDim(solver: IpoptSolver) -> Index {
-    if solver.is_null() {
-        return -1;
-    }
-    let info = &*solver;
-    match info.session.as_ref().and_then(|s| s.kkt_dim()) {
-        Some(d) => d as Index,
-        None => -1,
+    unsafe {
+        if solver.is_null() {
+            return -1;
+        }
+        let info = &*solver;
+        match info.session.as_ref().and_then(|s| s.kkt_dim()) {
+            Some(d) => d as Index,
+            None => -1,
+        }
     }
 }
 
@@ -303,13 +311,13 @@ pub unsafe extern "C" fn IpoptSolverGetKktDim(solver: IpoptSolver) -> Index {
 ///
 /// `rhs` and `lhs` must point to buffers at least
 /// [`IpoptSolverGetKktDim`] doubles long.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolverKktSolve(
     solver: IpoptSolver,
     rhs: *const Number,
     lhs: *mut Number,
 ) -> Bool {
-    kkt_solve_impl(solver, rhs, lhs, false)
+    unsafe { kkt_solve_impl(solver, rhs, lhs, false) }
 }
 
 /// [`IpoptSolverKktSolve`] without the natural-units correction: the
@@ -319,13 +327,13 @@ pub unsafe extern "C" fn IpoptSolverKktSolve(
 /// # Safety
 ///
 /// Same contract as [`IpoptSolverKktSolve`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolverKktSolveScaled(
     solver: IpoptSolver,
     rhs: *const Number,
     lhs: *mut Number,
 ) -> Bool {
-    kkt_solve_impl(solver, rhs, lhs, true)
+    unsafe { kkt_solve_impl(solver, rhs, lhs, true) }
 }
 
 unsafe fn kkt_solve_impl(
@@ -378,10 +386,12 @@ unsafe fn kkt_solve_impl(
 ///
 /// When `len > 0`, `ptr` must point to `len` valid, initialized `T`.
 unsafe fn slice_or_empty<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
-    if len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(ptr, len)
+    unsafe {
+        if len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(ptr, len)
+        }
     }
 }
 
@@ -398,7 +408,7 @@ unsafe fn slice_or_empty<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
 /// `pin_indices` and `deltas` must point to `n_pins` valid elements;
 /// `dx_out` must point to at least `n` `Number` slots (`n` from the
 /// underlying IpoptProblem).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolverParametricStep(
     solver: IpoptSolver,
     n_pins: Index,
@@ -458,7 +468,7 @@ pub unsafe extern "C" fn IpoptSolverParametricStep(
 ///
 /// `pin_indices` must point to `n_pins` valid elements; `hr_out` must
 /// point to at least `n_pins²` `Number` slots.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolverReducedHessian(
     solver: IpoptSolver,
     n_pins: Index,
@@ -513,9 +523,11 @@ mod tests {
         obj_value: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        let v = *x.offset(0);
-        *obj_value = (v - 2.0) * (v - 2.0);
-        TRUE
+        unsafe {
+            let v = *x.offset(0);
+            *obj_value = (v - 2.0) * (v - 2.0);
+            TRUE
+        }
     }
     unsafe extern "C" fn quad_eval_grad_f(
         _n: Index,
@@ -524,9 +536,11 @@ mod tests {
         grad: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        let v = *x.offset(0);
-        *grad.offset(0) = 2.0 * (v - 2.0);
-        TRUE
+        unsafe {
+            let v = *x.offset(0);
+            *grad.offset(0) = 2.0 * (v - 2.0);
+            TRUE
+        }
     }
     unsafe extern "C" fn quad_eval_h(
         _n: Index,
@@ -542,15 +556,17 @@ mod tests {
         values: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        if !irow.is_null() && !jcol.is_null() && values.is_null() {
-            *irow.offset(0) = 0;
-            *jcol.offset(0) = 0;
-        } else if irow.is_null() && jcol.is_null() && !values.is_null() {
-            *values.offset(0) = 2.0 * obj_factor;
-        } else {
-            return FALSE;
+        unsafe {
+            if !irow.is_null() && !jcol.is_null() && values.is_null() {
+                *irow.offset(0) = 0;
+                *jcol.offset(0) = 0;
+            } else if irow.is_null() && jcol.is_null() && !values.is_null() {
+                *values.offset(0) = 2.0 * obj_factor;
+            } else {
+                return FALSE;
+            }
+            TRUE
         }
-        TRUE
     }
 
     fn create_quad() -> IpoptProblem {

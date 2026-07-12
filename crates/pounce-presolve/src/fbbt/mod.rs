@@ -36,7 +36,7 @@ pub mod interval;
 pub mod orchestrator;
 pub mod reverse;
 
-pub use forward::{forward_pass, forward_result, ForwardError};
+pub use forward::{ForwardError, forward_pass, forward_result};
 pub use interval::Interval;
-pub use orchestrator::{run_fbbt, FbbtConfig, FbbtReport};
-pub use reverse::{reverse_pass, ReverseResult};
+pub use orchestrator::{FbbtConfig, FbbtReport, run_fbbt};
+pub use reverse::{ReverseResult, reverse_pass};

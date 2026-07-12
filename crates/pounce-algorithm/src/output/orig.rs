@@ -176,7 +176,7 @@ mod tests {
         // sp lg_mu(6) sp dnrm(8) sp regu(6) sp alpha_du(8) sp
         // alpha_pr(8) alpha_char(1) ls(3) = 82 chars.
         assert_eq!(OrigIterationOutput::HEADER.len(), 83); // 82 + \n
-                                                           // Spot-check the right-edges of a few labels.
+        // Spot-check the right-edges of a few labels.
         let h = OrigIterationOutput::HEADER.trim_end_matches('\n');
         assert!(h.ends_with("ls"), "h = {h:?}");
         assert_eq!(&h[10..19], "objective");

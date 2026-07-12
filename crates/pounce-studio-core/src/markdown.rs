@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 
 use crate::analysis::{
-    convergence_trace, diagnose, find_stalls, restoration_windows, summarize, Severity,
+    Severity, convergence_trace, diagnose, find_stalls, restoration_windows, summarize,
 };
 use crate::report::SolveReport;
 

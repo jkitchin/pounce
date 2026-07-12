@@ -42,7 +42,7 @@
 
 use crate::cli::DebugMode;
 use pounce_algorithm::debug::{
-    is_live_tolerance, DebugCtx, IterateSnapshot, ResidKind, Residual, BLOCK_NAMES,
+    BLOCK_NAMES, DebugCtx, IterateSnapshot, ResidKind, Residual, is_live_tolerance,
 };
 use pounce_algorithm::debug_rank::{RankReport, RankRow};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook, DebugState};
@@ -1336,7 +1336,7 @@ impl SolverDebugger {
             "step" | "s" | "n" | "next" if rest.first() == Some(&"sub") => {
                 self.sub_step = true;
                 CmdOut::ok(vec![
-                    "stepping to the next checkpoint (sub-iteration)".into()
+                    "stepping to the next checkpoint (sub-iteration)".into(),
                 ])
                 .flow(Flow::Resume)
             }
@@ -1347,7 +1347,7 @@ impl SolverDebugger {
             "stepi" | "si" => {
                 self.sub_step = true;
                 CmdOut::ok(vec![
-                    "stepping to the next checkpoint (sub-iteration)".into()
+                    "stepping to the next checkpoint (sub-iteration)".into(),
                 ])
                 .flow(Flow::Resume)
             }
@@ -1597,7 +1597,7 @@ impl SolverDebugger {
                 _ => {
                     return CmdOut::err(format!(
                         "don't know how to print `{what}` (try a block name or mu|obj|inf_pr|inf_du|err|compl|iter)"
-                    ))
+                    ));
                 }
             };
             CmdOut::ok(vec![format!("{what} = {val:.10e}")])
@@ -1669,7 +1669,7 @@ impl SolverDebugger {
                     other => {
                         return CmdOut::err(format!(
                             "usage: print residuals [primal|dual] [k] (got `{other}`)"
-                        ))
+                        ));
                     }
                 }
             }
@@ -1975,9 +1975,9 @@ impl SolverDebugger {
                 "warning",
                 "heavy_line_search",
                 format!(
-                "Line search needed {ls} trial points for the accepted step — search-direction \
+                    "Line search needed {ls} trial points for the accepted step — search-direction \
                  quality may be poor (check Hessian accuracy)."
-            ),
+                ),
             ));
         }
 
@@ -4276,7 +4276,11 @@ fn build_ask_prompt(ctx: &dyn DebugState, question: &str) -> String {
             k.n_pos,
             k.n_neg,
             k.expected_neg,
-            if k.inertia_correct { "correct" } else { "WRONG" },
+            if k.inertia_correct {
+                "correct"
+            } else {
+                "WRONG"
+            },
             k.delta_w,
             k.delta_c,
             k.status
@@ -4892,28 +4896,32 @@ mod tests {
     #[test]
     fn llm_command_defaults_and_overrides() {
         // Default is `claude -p`, prompt on stdin.
-        std::env::remove_var("POUNCE_DBG_LLM");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("POUNCE_DBG_LLM") };
         let (prog, args, on_stdin) = llm_command("hi");
         assert_eq!(prog, "claude");
         assert_eq!(args, vec!["-p".to_string()]);
         assert!(on_stdin);
 
         // `{}` substitution puts the prompt in an arg (no stdin).
-        std::env::set_var("POUNCE_DBG_LLM", "mytool --ask {}");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "mytool --ask {}") };
         let (prog, args, on_stdin) = llm_command("why");
         assert_eq!(prog, "mytool");
         assert_eq!(args, vec!["--ask".to_string(), "why".to_string()]);
         assert!(!on_stdin);
 
         // No `{}` ⇒ prompt on stdin.
-        std::env::set_var("POUNCE_DBG_LLM", "llm -m gpt");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "llm -m gpt") };
         let (_, _, on_stdin) = llm_command("q");
         assert!(on_stdin);
 
         // Bare provider keywords resolve to the right non-interactive call.
         // (All env-var assertions live in this one test so they can't race
         // a sibling that mutates the same process-global var.)
-        std::env::set_var("POUNCE_DBG_LLM", "codex");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "codex") };
         let (prog, args, on_stdin) = llm_command("why is mu stuck");
         assert_eq!(prog, "codex");
         assert_eq!(
@@ -4922,19 +4930,22 @@ mod tests {
         );
         assert!(!on_stdin); // prompt is in the argv, not stdin
 
-        std::env::set_var("POUNCE_DBG_LLM", "gemini");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "gemini") };
         let (prog, args, _) = llm_command("q");
         assert_eq!(prog, "gemini");
         assert_eq!(args, vec!["-p".to_string(), "q".to_string()]);
 
-        std::env::set_var("POUNCE_DBG_LLM", "llm");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "llm") };
         let (prog, args, _) = llm_command("q");
         assert_eq!(prog, "llm");
         assert_eq!(args, vec!["q".to_string()]);
 
         // Bare `claude` keyword goes through the preset (gains `-p`), not the
         // bare-program fallback that would hang in interactive mode.
-        std::env::set_var("POUNCE_DBG_LLM", "claude");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "claude") };
         let (prog, args, on_stdin) = llm_command("q");
         assert_eq!(prog, "claude");
         assert_eq!(args, vec!["-p".to_string()]);
@@ -4942,7 +4953,8 @@ mod tests {
 
         // An unknown bare word is NOT a preset: bare program, prompt on stdin
         // (backward-compatible).
-        std::env::set_var("POUNCE_DBG_LLM", "mytool");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "mytool") };
         let (prog, args, on_stdin) = llm_command("q");
         assert_eq!(prog, "mytool");
         assert!(args.is_empty());
@@ -4950,12 +4962,14 @@ mod tests {
 
         // A missing CLI fails gracefully: an error (never a panic) with an
         // actionable, provider-listing message.
-        std::env::set_var("POUNCE_DBG_LLM", "pounce-no-such-llm-xyz");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("POUNCE_DBG_LLM", "pounce-no-such-llm-xyz") };
         let err = run_llm("hello").unwrap_err();
         assert!(err.contains("not installed or not on PATH"), "{err}");
         assert!(err.contains("codex"), "{err}");
 
-        std::env::remove_var("POUNCE_DBG_LLM");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("POUNCE_DBG_LLM") };
     }
 
     #[test]
@@ -5403,9 +5417,11 @@ mod tests {
         // Listing a directory with an empty basename returns all entries.
         assert_eq!(path_candidates(&format!("{p}/")).len(), 4);
         // Verb-context routing: `load <file>` arg yields path candidates.
-        assert!(completion_candidates(None, "load", &format!("{p}/star"))
-            .iter()
-            .all(|c| c.contains("start")));
+        assert!(
+            completion_candidates(None, "load", &format!("{p}/star"))
+                .iter()
+                .all(|c| c.contains("start"))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

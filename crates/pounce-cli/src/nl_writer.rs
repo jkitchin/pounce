@@ -171,7 +171,7 @@ fn write_suffix(out: &mut String, s: &SolSuffix) {
             let entries: Vec<(usize, Index)> = vs
                 .iter()
                 .enumerate()
-                .filter(|(_, &v)| v != 0)
+                .filter(|&(_, &v)| v != 0)
                 .map(|(i, &v)| (i, v))
                 .collect();
             write_suffix_header(out, target_bits, entries.len(), &s.name);
@@ -183,7 +183,7 @@ fn write_suffix(out: &mut String, s: &SolSuffix) {
             let entries: Vec<(usize, Number)> = vs
                 .iter()
                 .enumerate()
-                .filter(|(_, &v)| v != 0.0)
+                .filter(|&(_, &v)| v != 0.0)
                 .map(|(i, &v)| (i, v))
                 .collect();
             write_suffix_header(out, target_bits | 0x4, entries.len(), &s.name);

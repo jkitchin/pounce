@@ -458,7 +458,7 @@ pub fn compare(
     let (rh, rr) = right;
 
     macro_rules! cmp_field {
-        ($field:expr, $l:expr, $r:expr) => {
+        ($field:expr_2021, $l:expr_2021, $r:expr_2021) => {
             if $l != $r {
                 out.push(CompareError::Header(HeaderMismatch {
                     field: $field,

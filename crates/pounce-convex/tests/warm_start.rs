@@ -12,8 +12,8 @@
 //!    iterations than cold (and typically fewer).
 
 use pounce_convex::{
-    solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_warm,
-    QpFactorization, QpOptions, QpProblem, QpStatus, QpWarmStart, Triplet,
+    QpFactorization, QpOptions, QpProblem, QpStatus, QpWarmStart, Triplet, solve_qp_batch_parallel,
+    solve_qp_batch_parallel_warm, solve_qp_ipm, solve_qp_ipm_warm,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;

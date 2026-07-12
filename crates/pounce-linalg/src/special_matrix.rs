@@ -5,8 +5,8 @@
 //! matrices used by Ipopt for KKT-system blocks that are absent.
 
 use crate::matrix::{
-    sym_default_compute_col_amax_impl, sym_default_trans_mult_vector_impl, Matrix, MatrixCache,
-    SymMatrix,
+    Matrix, MatrixCache, SymMatrix, sym_default_compute_col_amax_impl,
+    sym_default_trans_mult_vector_impl,
 };
 use crate::vector::Vector;
 use pounce_common::tagged::{Tag, TaggedObject};

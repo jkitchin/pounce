@@ -51,7 +51,7 @@
 //! `SqpGlobalization::L1Elastic` instead (Han-Powell ν dominates
 //! `|λ_qp|_∞` from iter 0 onward).
 
-use crate::sqp::line_search::{l1_violation, LineSearchResult};
+use crate::sqp::line_search::{LineSearchResult, l1_violation};
 use crate::sqp::options::SqpOptions;
 use crate::sqp::problem::SqpProblemSpec;
 use pounce_common::Number;

@@ -7,7 +7,7 @@
 //! KKT stationarity that includes the bound duals.
 
 use pounce_convex::presolve::solve_with_presolve;
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpStatus, Triplet, NEG_INF, POS_INF};
+use pounce_convex::{NEG_INF, POS_INF, QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

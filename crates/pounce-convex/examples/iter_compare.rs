@@ -4,7 +4,7 @@
 //!
 //! Run: `cargo run -p pounce-convex --example iter_compare`
 
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, Triplet};
+use pounce_convex::{QpOptions, QpProblem, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

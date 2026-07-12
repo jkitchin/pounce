@@ -7,8 +7,8 @@
 //! and the postsolved `(x, y, z, z_lb, z_ub)` is checked to be a valid KKT
 //! point of the *original* problem (and to match the direct primal).
 
-use pounce_convex::presolve::{presolve, solve_with_presolve, PresolveOutcome};
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpSolution, QpStatus, Triplet};
+use pounce_convex::presolve::{PresolveOutcome, presolve, solve_with_presolve};
+use pounce_convex::{QpOptions, QpProblem, QpSolution, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

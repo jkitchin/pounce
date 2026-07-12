@@ -3,8 +3,8 @@
 //! partition is recovered — so presolve composes with the SOCP solve and
 //! the postsolved point is KKT-valid for the original problem.
 
-use pounce_convex::presolve::{presolve_conic, PresolveOutcome};
-use pounce_convex::{solve_socp_ipm, ConeSpec, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::presolve::{PresolveOutcome, presolve_conic};
+use pounce_convex::{ConeSpec, QpOptions, QpProblem, QpStatus, Triplet, solve_socp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

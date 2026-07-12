@@ -58,12 +58,13 @@ fn add_h_diagonal_shift_appends_missing_diagonals() {
     // Existing entries incremented; missing (2,2) appended.
     assert_eq!(k.irn.len(), 3);
     // (2,2,0.5) is the appended entry.
-    assert!(k
-        .irn
-        .iter()
-        .zip(k.jcn.iter())
-        .zip(k.vals.iter())
-        .any(|((&r, &c), &v)| r == 2 && c == 2 && v == 0.5));
+    assert!(
+        k.irn
+            .iter()
+            .zip(k.jcn.iter())
+            .zip(k.vals.iter())
+            .any(|((&r, &c), &v)| r == 2 && c == 2 && v == 0.5)
+    );
 }
 
 #[test]

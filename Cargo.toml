@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/pounce-common",
     "crates/pounce-linalg",
@@ -56,7 +56,7 @@ default-members = [
 
 [workspace.package]
 version = "0.8.0"
-edition = "2021"
+edition = "2024"
 license = "EPL-2.0"
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
 repository = "https://github.com/jkitchin/pounce"

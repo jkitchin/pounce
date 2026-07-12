@@ -53,7 +53,7 @@
 //! `z_lb_j = max(0, rc_j)`, `z_ub_j = max(0, −rc_j)`.
 
 use crate::ipm::QpOptions;
-use crate::qp::{QpProblem, QpSolution, BOUND_INF};
+use crate::qp::{BOUND_INF, QpProblem, QpSolution};
 use feral::{LuParams, LuScaling, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 /// Feasibility tolerance for bound satisfaction / degenerate-step detection.
@@ -141,11 +141,7 @@ fn lo_bound(v: f64) -> f64 {
     }
 }
 fn hi_bound(v: f64) -> f64 {
-    if v >= BOUND_INF {
-        f64::INFINITY
-    } else {
-        v
-    }
+    if v >= BOUND_INF { f64::INFINITY } else { v }
 }
 
 struct Simplex {

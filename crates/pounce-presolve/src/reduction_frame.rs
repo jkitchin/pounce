@@ -21,7 +21,7 @@
 
 use pounce_common::types::Number;
 
-use crate::block_solve::{lu_factor_partial_pivot, lu_solve, BlockSolveError};
+use crate::block_solve::{BlockSolveError, lu_factor_partial_pivot, lu_solve};
 
 /// One layer of the postsolve stack. Built once per accepted block
 /// elimination by PR 8's orchestrator.

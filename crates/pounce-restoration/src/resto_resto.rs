@@ -24,8 +24,8 @@
 //! is `v = a; v = v*v; v += b; v = sqrt(v); v += a`.) Mirrors
 //! `IpRestoRestoPhase.cpp:30-109`.
 
-use crate::r#trait::{RestorationOutcome, RestorationPhase};
 use crate::resto_nlp::{BLOCK_N_C, BLOCK_N_D, BLOCK_P_C, BLOCK_P_D, BLOCK_X};
+use crate::r#trait::{RestorationOutcome, RestorationPhase};
 use pounce_algorithm::ipopt_cq::IpoptCqHandle;
 use pounce_algorithm::ipopt_data::IpoptDataHandle;
 use pounce_algorithm::ipopt_nlp::IpoptNlp;

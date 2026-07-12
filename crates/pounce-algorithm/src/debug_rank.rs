@@ -146,7 +146,7 @@ pub(crate) fn svd_rank(
     let mut culprits: Vec<RankCulprit> = weights
         .iter()
         .enumerate()
-        .filter(|(_, &w)| w > CULPRIT_WEIGHT_TOL)
+        .filter(|&(_, &w)| w > CULPRIT_WEIGHT_TOL)
         .map(|(row, &w)| RankCulprit { row, weight: w })
         .collect();
     culprits.sort_by(|a, b| {

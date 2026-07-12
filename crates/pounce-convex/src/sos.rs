@@ -24,10 +24,10 @@
 //! [`crate::ConeSpec::Psd`] block plus coefficient-matching equalities) and
 //! solved through [`crate::solve_socp_ipm`].
 
-use crate::cones::psd::svec_index;
-use crate::ipm::{solve_socp_ipm, QpOptions};
-use crate::qp::{QpProblem, QpStatus, Triplet};
 use crate::ConeSpec;
+use crate::cones::psd::svec_index;
+use crate::ipm::{QpOptions, solve_socp_ipm};
+use crate::qp::{QpProblem, QpStatus, Triplet};
 use pounce_linalg::symmetric_eigen;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use std::collections::{BTreeMap, HashMap};
@@ -176,11 +176,7 @@ impl PolyProblem {
     fn equilibrated(&self) -> (PolyProblem, f64) {
         fn nonzero_norm(p: &Polynomial) -> f64 {
             let s = p.coeff_inf_norm();
-            if s > 0.0 {
-                s
-            } else {
-                1.0
-            }
+            if s > 0.0 { s } else { 1.0 }
         }
         let s_obj = nonzero_norm(&self.objective);
         let scaled = PolyProblem {

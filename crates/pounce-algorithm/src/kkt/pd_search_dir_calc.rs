@@ -342,11 +342,7 @@ impl PdSearchDirCalc {
             false,
             false,
         );
-        if ok {
-            Some(delta_soc.freeze())
-        } else {
-            None
-        }
+        if ok { Some(delta_soc.freeze()) } else { None }
     }
 
     /// Mehrotra z-block:

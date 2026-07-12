@@ -9,8 +9,8 @@
 //! optimum is known in closed form, the primal.
 
 use pounce_convex::{
-    solve_socp_ipm, solve_socp_ipm_warm, ConeSpec, QpOptions, QpProblem, QpStatus, QpWarmStart,
-    Triplet,
+    ConeSpec, QpOptions, QpProblem, QpStatus, QpWarmStart, Triplet, solve_socp_ipm,
+    solve_socp_ipm_warm,
 };
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;

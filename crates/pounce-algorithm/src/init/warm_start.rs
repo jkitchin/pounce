@@ -35,8 +35,8 @@ use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
 use crate::iterates_vector::IteratesVector;
 use crate::kkt::aug_system_solver::AugSystemSolver;
-use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::Vector;
+use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use std::cell::RefCell;
 use std::rc::Rc;
 

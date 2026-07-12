@@ -772,7 +772,7 @@ impl IpoptAlgorithm {
                 let it = d.iter_count;
                 if let Some(delta) = d.delta.as_ref() {
                     use crate::iterates_vector::IteratesVector;
-                    use pounce_linalg::{compound_vector::CompoundVector, Vector};
+                    use pounce_linalg::{Vector, compound_vector::CompoundVector};
                     let dv: &IteratesVector = delta;
                     tracing::debug!(target: "pounce::algorithm",
                         "[PN_DELTA] iter={} mu={:.6e} dx_amax={:.6e} ds_amax={:.6e} dyc_amax={:.6e} dyd_amax={:.6e} dzL_amax={:.6e} dzU_amax={:.6e} dvL_amax={:.6e} dvU_amax={:.6e}",
@@ -1437,14 +1437,17 @@ impl IpoptAlgorithm {
                 // obj of −3.6e+33).
                 if self.restore_acceptable_point() {
                     IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
-                } else if let Some(curr) = self.data.borrow().curr.as_ref() {
-                    if curr.x.amax() > self.diverging_iterates_tol {
-                        IterateOutcome::Terminate(SolverReturn::DivergingIterates)
-                    } else {
-                        IterateOutcome::Terminate(SolverReturn::RestorationFailure)
-                    }
                 } else {
-                    IterateOutcome::Terminate(SolverReturn::RestorationFailure)
+                    match self.data.borrow().curr.as_ref() {
+                        Some(curr) => {
+                            if curr.x.amax() > self.diverging_iterates_tol {
+                                IterateOutcome::Terminate(SolverReturn::DivergingIterates)
+                            } else {
+                                IterateOutcome::Terminate(SolverReturn::RestorationFailure)
+                            }
+                        }
+                        _ => IterateOutcome::Terminate(SolverReturn::RestorationFailure),
+                    }
                 }
             }
             RestorationOutcome::LocallyInfeasible => {

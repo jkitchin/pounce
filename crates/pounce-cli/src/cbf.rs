@@ -797,7 +797,7 @@ OBJACOORD
         let cp = m.to_conic().unwrap();
         assert_eq!(cp.cones, vec![ConeSpec::Power(0.75)]);
         assert_eq!(cp.prob.m_ineq(), 3); // the power cone's 3 rows
-                                         // pounce (x,y,z) = (CBF x₂, x₀, x₁): row 0 selects var 2.
+        // pounce (x,y,z) = (CBF x₂, x₀, x₁): row 0 selects var 2.
         let row0: Vec<_> = cp.prob.g.iter().filter(|t| t.row == 0).collect();
         assert_eq!(row0[0].col, 2);
         let row1: Vec<_> = cp.prob.g.iter().filter(|t| t.row == 1).collect();

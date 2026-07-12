@@ -14,7 +14,7 @@
 //! so there is a single source of truth rather than a CLI-local copy.
 
 use crate::solve_report::SolveReport;
-use pounce_studio_core::glossary::{citation_by_key, solve_feature_keys, Citation};
+use pounce_studio_core::glossary::{Citation, citation_by_key, solve_feature_keys};
 
 /// A selected citation together with the short reason it was included,
 /// shown to the user as a "why cited" note in the human renderer.

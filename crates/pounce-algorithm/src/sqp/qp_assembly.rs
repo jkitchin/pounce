@@ -18,7 +18,7 @@
 //! `QpProblem` view; this is the analog of
 //! `pounce_qp::ElasticReformulation::as_qp`.
 
-use pounce_common::types::{Index, Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_common::types::{Index, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_qp::{HessianInertia, QpProblem};
 use std::rc::Rc;

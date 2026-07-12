@@ -41,8 +41,8 @@ use pounce_algorithm::ipopt_nlp::IpoptNlp;
 use pounce_algorithm::iterates_vector::IteratesVector;
 use pounce_algorithm::kkt::aug_system_solver::AugSystemSolver;
 use pounce_common::types::{Index, Number};
-use pounce_linalg::dense_vector::DenseVectorSpace;
 use pounce_linalg::Vector;
+use pounce_linalg::dense_vector::DenseVectorSpace;
 use std::cell::RefCell;
 use std::rc::Rc;
 

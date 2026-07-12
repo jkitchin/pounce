@@ -17,7 +17,7 @@
 //!    iterate and carry the QP's `WorkingSet` for the next solve.
 
 use crate::sqp::bfgs::DampedBfgs;
-use crate::sqp::filter::{filter_line_search, SqpFilter};
+use crate::sqp::filter::{SqpFilter, filter_line_search};
 use crate::sqp::iterates::SqpIterates;
 use crate::sqp::lbfgs::LBfgs;
 use crate::sqp::line_search::l1_merit_line_search;
@@ -25,7 +25,7 @@ use crate::sqp::options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
-use pounce_common::types::{Number, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_qp::{HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus};
 
 /// SQP-side algorithm driver.

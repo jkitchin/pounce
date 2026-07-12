@@ -29,7 +29,7 @@ use pounce_nlp::tnlp::Linearity;
 use crate::block_solve::{BlockEquations, BlockSolveOptions, BlockSolver, DampedNewtonSolver};
 use crate::btf::BlockTriangularForm;
 use crate::components::SquareComponents;
-use crate::coupling::{classify_block, objective_gradient_support, AuxiliaryCouplingClass};
+use crate::coupling::{AuxiliaryCouplingClass, classify_block, objective_gradient_support};
 use crate::diagnostics::{AuxiliaryPreprocessingDiagnostics, AuxiliaryRejectionReason};
 use crate::dulmage_mendelsohn::DulmageMendelsohnPartition;
 use crate::incidence::{EqualityIncidence, InequalityIncidence, ProbeView};
@@ -1137,11 +1137,12 @@ mod tests {
             0
         );
         assert!(plan.frame.is_none());
-        assert!(plan
-            .diagnostics
-            .rejection_reasons
-            .iter()
-            .any(|r| matches!(r, AuxiliaryRejectionReason::CouplingDisallowed)));
+        assert!(
+            plan.diagnostics
+                .rejection_reasons
+                .iter()
+                .any(|r| matches!(r, AuxiliaryRejectionReason::CouplingDisallowed))
+        );
     }
 
     #[test]
@@ -1344,11 +1345,12 @@ mod tests {
         let plan = run_auxiliary_phase0(&opts, &probe, None, None);
         assert_eq!(plan.diagnostics.blocks_eliminated, 0);
         assert!(plan.frame.is_none());
-        assert!(plan
-            .diagnostics
-            .rejection_reasons
-            .iter()
-            .any(|r| matches!(r, AuxiliaryRejectionReason::BlockSolveDiverged)));
+        assert!(
+            plan.diagnostics
+                .rejection_reasons
+                .iter()
+                .any(|r| matches!(r, AuxiliaryRejectionReason::BlockSolveDiverged))
+        );
     }
 
     /// Build a synthetic probe for an `n`-variable diagonal linear
@@ -1458,11 +1460,13 @@ mod tests {
         // Without fallback → 1 candidate, rejected as TooLarge.
         let plan_no_fb = run_auxiliary_phase0(&opts, &probe, None, None);
         assert_eq!(plan_no_fb.diagnostics.blocks_eliminated, 0);
-        assert!(plan_no_fb
-            .diagnostics
-            .rejection_reasons
-            .iter()
-            .any(|r| matches!(r, AuxiliaryRejectionReason::BlockTooLarge)));
+        assert!(
+            plan_no_fb
+                .diagnostics
+                .rejection_reasons
+                .iter()
+                .any(|r| matches!(r, AuxiliaryRejectionReason::BlockTooLarge))
+        );
 
         // With fallback → eliminated.
         let mut fb = crate::block_solve::RelaxedNewtonSolver;

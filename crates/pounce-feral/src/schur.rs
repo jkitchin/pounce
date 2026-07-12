@@ -35,7 +35,7 @@ use feral::{CscMatrix, FactorStatus, Solver};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::ESymSolverStatus;
 
-use crate::{configure_solver, FeralConfig};
+use crate::{FeralConfig, configure_solver};
 
 /// Schur-complement KKT solver over a caller-supplied F/S partition.
 ///
@@ -280,7 +280,7 @@ impl FeralSchurSolver {
             },
             FactorStatus::Singular => return self.set_status(ESymSolverStatus::Singular),
             FactorStatus::WrongInertia { .. } | FactorStatus::FatalError(_) => {
-                return self.set_status(ESymSolverStatus::FatalError)
+                return self.set_status(ESymSolverStatus::FatalError);
             }
         };
         self.ff_matrix = Some(ff_mat);
@@ -349,7 +349,7 @@ impl FeralSchurSolver {
             },
             FactorStatus::Singular => return self.set_status(ESymSolverStatus::Singular),
             FactorStatus::WrongInertia { .. } | FactorStatus::FatalError(_) => {
-                return self.set_status(ESymSolverStatus::FatalError)
+                return self.set_status(ESymSolverStatus::FatalError);
             }
         };
         self.s_matrix = Some(s_mat);

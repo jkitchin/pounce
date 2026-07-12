@@ -12,17 +12,17 @@ use std::time::Instant;
 use crate::error::{QpError, QpStatus};
 use crate::factor::LinearSolver;
 use crate::kkt::{
-    a_times_x, assemble_active_set_kkt, assemble_box_with_active, assemble_equality_plus_bounds,
-    h_times_x, is_all_equality_constraints, is_pure_box, is_pure_equality_no_bounds,
-    rhs_equality_only, KktTriplet,
+    KktTriplet, a_times_x, assemble_active_set_kkt, assemble_box_with_active,
+    assemble_equality_plus_bounds, h_times_x, is_all_equality_constraints, is_pure_box,
+    is_pure_equality_no_bounds, rhs_equality_only,
 };
 use crate::options::{AntiCyclingChoice, QpOptions};
 use crate::problem::{QpProblem, QpSolution, QpStats, QpWarmStart};
 use crate::working_set::{BoundStatus, ConsStatus, WorkingSet};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::{Index, Number};
-use pounce_linsol::status::ESymSolverStatus;
 use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_linsol::status::ESymSolverStatus;
 
 /// QP subproblem solver.
 ///
@@ -2452,7 +2452,7 @@ mod select_blocker_tests {
     //! Unit tests for the GMSW EXPAND ratio test in `select_blocker`.
     //! These live inside `solver` (not `crate::tests`) so they can reach
     //! the private `select_blocker`/`BlockerTarget` items.
-    use super::{select_blocker, BlockerTarget};
+    use super::{BlockerTarget, select_blocker};
     use crate::options::{AntiCyclingChoice, QpOptions};
     use crate::working_set::BoundStatus;
 

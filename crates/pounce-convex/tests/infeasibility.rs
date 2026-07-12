@@ -6,7 +6,7 @@
 //! feasible/optimal problems in the rest of the suite must still report
 //! `Optimal`, and a couple of those are re-checked here for contrast.
 
-use pounce_convex::{solve_qp_ipm, QpOptions, QpProblem, QpStatus, Triplet};
+use pounce_convex::{QpOptions, QpProblem, QpStatus, Triplet, solve_qp_ipm};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 

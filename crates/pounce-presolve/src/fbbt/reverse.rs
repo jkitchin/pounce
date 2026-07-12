@@ -27,7 +27,7 @@
 use pounce_common::types::Number;
 use pounce_nlp::expression_provider::{FbbtOp, FbbtTape};
 
-use crate::fbbt::interval::{round_down, round_up, Interval};
+use crate::fbbt::interval::{Interval, round_down, round_up};
 
 /// Result of [`reverse_pass`].
 #[derive(Debug, Clone, PartialEq)]
@@ -256,11 +256,7 @@ fn signed_nth_root(x: Number, n: u32) -> Number {
         return x;
     }
     let mag = x.abs().powf(1.0 / n as f64);
-    if x < 0.0 {
-        -mag
-    } else {
-        mag
-    }
+    if x < 0.0 { -mag } else { mag }
 }
 
 #[cfg(test)]

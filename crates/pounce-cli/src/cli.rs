@@ -147,7 +147,7 @@ impl MinimaMethod {
                 return Err(format!(
                     "unknown --minima method '{other}'; choose from \
                      multistart, mlsl, basinhopping, flooding, deflation, tunneling"
-                ))
+                ));
             }
         })
     }
@@ -439,7 +439,7 @@ Multistart / find-minima (search for several local minima, not one):
         let mut it = argv.into_iter().skip(1).peekable();
         // Shorthand: fetch the value for a flag that requires one.
         macro_rules! flag_val {
-            ($flag:expr) => {
+            ($flag:expr_2021) => {
                 it.next()
                     .ok_or_else(|| format!("{} requires a value", $flag))?
             };
@@ -447,7 +447,7 @@ Multistart / find-minima (search for several local minima, not one):
         // Parse a numeric value for a `--minima` knob, lazily creating the
         // config (default method = deflation, overridden by `--minima <m>`).
         macro_rules! minima_num {
-            ($flag:expr, $ty:ty, $field:ident) => {{
+            ($flag:expr_2021, $ty:ty, $field:ident) => {{
                 let v = flag_val!($flag);
                 let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
                 minima.get_or_insert_with(MinimaArgs::default).$field = parsed;
@@ -455,7 +455,7 @@ Multistart / find-minima (search for several local minima, not one):
                     minima_knob = Some($flag);
                 }
             }};
-            ($flag:expr, $ty:ty, $field:ident, opt) => {{
+            ($flag:expr_2021, $ty:ty, $field:ident, opt) => {{
                 let v = flag_val!($flag);
                 let parsed: $ty = v.parse().map_err(|e| format!("{}: {}", $flag, e))?;
                 minima.get_or_insert_with(MinimaArgs::default).$field = Some(parsed);

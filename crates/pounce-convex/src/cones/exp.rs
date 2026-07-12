@@ -72,7 +72,7 @@ impl BarrierCone for ExponentialCone {
         let (_, y, z) = (point[0], point[1], point[2]);
         let psi = Self::psi(point);
         let a = (z / y).ln() - 1.0; // ∂ψ/∂y
-                                    // g = −(1/ψ)∇ψ − (0, 1/y, 1/z),  ∇ψ = (−1, a, y/z).
+        // g = −(1/ψ)∇ψ − (0, 1/y, 1/z),  ∇ψ = (−1, a, y/z).
         out[0] = 1.0 / psi;
         out[1] = -a / psi - 1.0 / y;
         out[2] = -(y / z) / psi - 1.0 / z;

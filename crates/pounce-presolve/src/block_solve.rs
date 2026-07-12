@@ -695,8 +695,8 @@ mod tests {
         let mut tested = 0usize;
         for _ in 0..30 {
             let n = 1 + (rng.next_u64() % 6) as usize; // N ∈ [1, 6]
-                                                       // Build A with strong diagonal + small off-diag entries so
-                                                       // it's well-conditioned regardless of the random seed.
+            // Build A with strong diagonal + small off-diag entries so
+            // it's well-conditioned regardless of the random seed.
             let mut a = vec![0.0; n * n];
             for i in 0..n {
                 for j in 0..n {
@@ -786,7 +786,7 @@ mod tests {
 
         for trial in 0..20 {
             let n = 1 + (rng.next_u64() % 4) as usize; // N ∈ [1, 4]
-                                                       // Diagonally dominant A.
+            // Diagonally dominant A.
             let mut a = vec![0.0; n * n];
             for i in 0..n {
                 for j in 0..n {
