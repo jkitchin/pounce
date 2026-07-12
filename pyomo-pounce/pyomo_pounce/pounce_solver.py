@@ -44,7 +44,7 @@ class POUNCE(ASL):
 
         model = args[0] if args else kwds.get("model")
         explicit = {k: kwds.pop(k) for k in
-                    ("sens_params", "estimated", "residuals") if k in kwds}
+                    ("sens_params", "fitted", "residuals") if k in kwds}
         if model is not None and (has_declarations(model) or explicit):
             return sens_solve(model, tee=kwds.get("tee", False), **explicit)
         return super().solve(*args, **kwds)

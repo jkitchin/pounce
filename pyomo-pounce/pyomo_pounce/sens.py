@@ -22,7 +22,7 @@ Estimation models use the other two declarations: flag the FITTED
 variables and the residual container, solve once, and ask for the
 covariance with no further information:
 
-    declare_estimated(m.A); declare_estimated(m.k)
+    declare_fitted(m.A); declare_fitted(m.k)
     declare_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)     # one ordinary solve
     covariance(m)                            # std errors, correlations,
@@ -63,7 +63,7 @@ class _Registry:
 
     def __init__(self):
         self.params = []          # pinned inputs: gradient()/estimate()
-        self.estimated = []       # free fitted variables: covariance()
+        self.fitted = []       # free fitted variables: covariance()
         self.residuals = []       # (container, group) pairs: sigma^2
         self.session = None
 
@@ -72,7 +72,7 @@ class _Registry:
         new = _Registry()
         memo[id(self)] = new
         new.params = [copy.deepcopy(p, memo) for p in self.params]
-        new.estimated = [copy.deepcopy(p, memo) for p in self.estimated]
+        new.fitted = [copy.deepcopy(p, memo) for p in self.fitted]
         new.residuals = [(copy.deepcopy(r, memo), g)
                          for r, g in self.residuals]
         return new
@@ -91,13 +91,13 @@ def declare_sens_param(*params):
         _registry(param.model()).params.append(param)
 
 
-def declare_estimated(*variables):
-    """Flag one or more FREE Vars (scalar or indexed) as estimated
+def declare_fitted(*variables):
+    """Flag one or more FREE Vars (scalar or indexed) as fitted
     parameters of a least-squares problem: after one ordinary solve,
     covariance() reports their asymptotic uncertainty. The variables stay
     free in the solve; do not fix them."""
     for var in variables:
-        _registry(var.model()).estimated.append(var)
+        _registry(var.model()).fitted.append(var)
 
 
 def declare_residual(*containers, group=None):
@@ -115,7 +115,7 @@ def declare_residual(*containers, group=None):
 
 def has_declarations(model):
     reg = getattr(model, "__dict__", {}).get(_REG)
-    return bool(reg and (reg.params or reg.estimated or reg.residuals))
+    return bool(reg and (reg.params or reg.fitted or reg.residuals))
 
 
 # ── the read_nl -> callback-Problem bridge ────────────────────────────────────
@@ -197,7 +197,7 @@ def _iter_data(comp):
         yield comp
 
 
-def sens_solve(model, tee=False, sens_params=None, estimated=None,
+def sens_solve(model, tee=False, sens_params=None, fitted=None,
                residuals=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
     for gradient()/estimate()/covariance(). Called automatically by
@@ -215,7 +215,7 @@ def sens_solve(model, tee=False, sens_params=None, estimated=None,
     # repeated solves of one model (the NMPC use case) do not accumulate
     # duplicate components and silently corrupt the covariance/pins.
     eff_params = list(reg.params) + list(sens_params or [])
-    eff_estimated = list(reg.estimated) + list(estimated or [])
+    eff_fitted = list(reg.fitted) + list(fitted or [])
     eff_residuals = list(reg.residuals) + [
         item if isinstance(item, tuple) else (item, None)
         for item in (residuals or [])]
@@ -276,11 +276,11 @@ def sens_solve(model, tee=False, sens_params=None, estimated=None,
                        con_alias)
     session.base_x = np.asarray(x)
 
-    # estimated parameters: their rows in the primal vector
-    session.est_rows = ComponentMap()
-    for comp in eff_estimated:
+    # fitted parameters: their rows in the primal vector
+    session.fit_rows = ComponentMap()
+    for comp in eff_fitted:
         for vd in _iter_data(comp):
-            session.est_rows[vd] = var_names.index(vd.name)
+            session.fit_rows[vd] = var_names.index(vd.name)
 
     # residual groups: member rows per group key (None = the common pool)
     session.res_rows = {}
@@ -511,8 +511,8 @@ class _ParamMatrix(_ParamKeyed):
 class Covariance(_ParamMatrix):
     """Asymptotic parameter covariance, from covariance().
 
-    Keyed by the estimated variables' data objects — the free `Var`s
-    flagged with `declare_estimated`, not Pyomo `Param`s — in `params`
+    Keyed by the fitted variables' data objects (the free `Var`s
+    flagged with `declare_fitted`, not Pyomo `Param`s) in `params`
     (declaration) order: cov[m.k1, m.k2] (either order),
     cov[m.k1] for a variance, cov.std_err[m.k1],
     cov.correlation[m.k1, m.k2]. `matrix` is the dense numpy array
@@ -525,9 +525,12 @@ class Covariance(_ParamMatrix):
         self.sigma_sq = sigma_sq          # float, or {group: float}
         with np.errstate(invalid="ignore", divide="ignore"):
             se = np.sqrt(np.diag(self.matrix))
-            self.std_err = _ParamVector(self.params, se)
-            self.correlation = _ParamMatrix(
-                self.params, self.matrix / np.outer(se, se))
+            corr = self.matrix / np.outer(se, se)
+        # entries whose scale is undefined (a projected bound-active
+        # parameter has exactly zero variance) are reported as 0
+        corr[~np.isfinite(corr)] = 0.0
+        self.std_err = _ParamVector(self.params, se)
+        self.correlation = _ParamMatrix(self.params, corr)
 
     def eigen(self):
         """(eigenvalues, eigenvectors) of the covariance matrix,
@@ -538,11 +541,11 @@ class Covariance(_ParamMatrix):
         return np.linalg.eigh(self.matrix)
 
 
-def covariance(model, sigma_sq=None, n_data=None):
-    """Asymptotic covariance of the estimated parameters of a
+def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
+    """Asymptotic covariance of the fitted parameters of a
     least-squares problem, from ONE ordinary solve.
 
-    Workflow: declare the fitted variables with declare_estimated (they
+    Workflow: declare the fitted variables with declare_fitted (they
     stay free), optionally declare the residual container(s) with
     declare_residual, solve with SolverFactory('pounce'), then call
     covariance(model) with no further information.
@@ -567,6 +570,19 @@ def covariance(model, sigma_sq=None, n_data=None):
     objective value on trust). With multiple labeled groups the
     heteroscedastic sandwich covariance is reported.
 
+    hessian= selects the information matrix. "lagrangian" (the default)
+    inverts the exact reduced Hessian of the Lagrangian from the held
+    factorization: the observed-information form, the same object
+    sIPOPT or k_aug would factor. "gauss-newton" rebuilds
+    the expected-information form from the residual Jacobian, recovered
+    from the same backsolves at no extra solve (requires declared
+    residuals). They agree for linear models; for nonlinear fits
+    Gauss-Newton drops the residual-curvature term, matches the scipy /
+    ``pounce.curve_fit`` convention, and is structurally positive
+    semidefinite, which makes it the safe choice when the covariance
+    must stay PSD, e.g. feeding an arrival-cost update in moving
+    horizon estimation.
+
     Returns a Covariance object keyed by the declared variables'
     data objects: cov[m.A, m.k], cov.std_err[m.A],
     cov.correlation[m.A, m.k], cov.matrix, cov.sigma_sq (float or
@@ -582,26 +598,37 @@ def covariance(model, sigma_sq=None, n_data=None):
     the small-residual limit and differ by O(residual x curvature)
     otherwise. Gauss-Newton cannot produce a negative variance; the full
     Hessian can go indefinite, which is what the negative-diagonal warning
-    below signals -- prefer ``curve_fit`` then, or for scipy-matching
-    numbers. Use ``curve_fit`` for the callable-model-plus-data surface
+    below signals -- pass hessian="gauss-newton" then, or whenever
+    scipy-matching numbers are wanted. Use ``curve_fit`` for the
+    callable-model-plus-data surface
     (starting point, robust losses, confidence intervals, prediction
     bands, active-bound projection); use this for a model already written
-    in Pyomo. Unlike ``curve_fit``, this only WARNS on a bound-active
-    parameter rather than projecting onto the active-constraint nullspace.
+    in Pyomo. Like ``curve_fit``, a fitted parameter detected on its
+    bound at the optimum is projected out: the covariance is computed in
+    the remaining free directions (the covariance CONDITIONAL on the
+    active bound) and the pinned parameter reports zero variance, with
+    correlation entries involving it reported as 0. A warning still
+    fires, because boundary asymptotics are nonstandard whichever number
+    is reported. Only variable bounds ON the fitted parameters are
+    detected; other active constraints involving them are not.
     """
+    if hessian not in ("lagrangian", "gauss-newton"):
+        raise ValueError(
+            "covariance: hessian must be 'lagrangian' or 'gauss-newton', "
+            f"got {hessian!r}")
     reg = model.__dict__.get(_REG)
     session = reg.session if reg else None
     if session is None:
         raise RuntimeError(
-            "no sensitivity session: declare_estimated() (and optionally "
+            "no sensitivity session: declare_fitted() (and optionally "
             "declare_residual()) then solve with SolverFactory('pounce') "
             "first")
-    params = list(session.est_rows.keys())
+    params = list(session.fit_rows.keys())
     n_params = len(params)
     if n_params == 0:
         raise RuntimeError(
-            "covariance: no estimated parameters were declared; flag the "
-            "fitted variables with declare_estimated() before the solve")
+            "covariance: no fitted parameters were declared; flag the "
+            "fitted variables with declare_fitted() before the solve")
 
     # ── guardrails ────────────────────────────────────────────────────────
     pert = np.asarray(session.solver.kkt_perturbations)
@@ -612,19 +639,22 @@ def covariance(model, sigma_sq=None, n_data=None):
             "regularized rather than exact. Linearly dependent (structurally"
             " unidentifiable) parameters are the usual cause.")
     lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
-    for p in params:
-        r = session.est_rows[p]
+    active = []
+    for i, p in enumerate(params):
+        r = session.fit_rows[p]
         xv = float(session.base_x[r])
         tol = 1e-6 * (1.0 + abs(xv))
         if xv - lo[r] < tol or hi[r] - xv < tol:
+            active.append(i)
             warnings.warn(
-                f"covariance: estimated parameter {p.name} sits on its "
-                "bound at the optimum; the asymptotic covariance is not "
-                "valid for an active-bound parameter.")
+                f"covariance: fitted parameter {p.name} sits on its "
+                "bound at the optimum; its direction is projected out "
+                "(zero variance, conditional on the active bound) and "
+                "the boundary asymptotics are nonstandard.")
 
     # ── parameter block of the inverse KKT matrix ─────────────────────────
     dim = session.solver.kkt_dim
-    rows = [session.est_rows[p] for p in params]
+    rows = [session.fit_rows[p] for p in params]
     zcols = []
     for r in rows:
         e = np.zeros(dim)
@@ -636,6 +666,12 @@ def covariance(model, sigma_sq=None, n_data=None):
 
     # ── noise variance per group ──────────────────────────────────────────
     groups = dict(session.res_rows)
+    if hessian == "gauss-newton" and not groups:
+        raise ValueError(
+            "covariance: hessian='gauss-newton' needs declared residuals "
+            "(declare_residual()); the residual Jacobian is recovered from "
+            "their rows. Without residual variables only the "
+            "hessian='lagrangian' default is available.")
     if n_data is not None and (sigma_sq is not None or groups):
         warnings.warn(
             "covariance: n_data is ignored because a higher-precedence noise "
@@ -664,7 +700,7 @@ def covariance(model, sigma_sq=None, n_data=None):
             if n_g <= n_params:
                 raise ValueError(
                     f"covariance: residual group {g!r} has {n_g} members, "
-                    f"not more than the {n_params} estimated parameters; "
+                    f"not more than the {n_params} fitted parameters; "
                     "cannot estimate its noise variance")
             ssr_g = float(np.sum(session.base_x[rws] ** 2))
             group_sigma[g] = ssr_g / (n_g - n_params)
@@ -672,7 +708,7 @@ def covariance(model, sigma_sq=None, n_data=None):
         if n_data <= n_params:
             raise ValueError(
                 f"covariance: n_data ({n_data}) must exceed the number of "
-                f"estimated parameters ({n_params})")
+                f"fitted parameters ({n_params})")
         ssr = pyo.value(
             next(model.component_data_objects(pyo.Objective, active=True)))
         group_sigma = {None: ssr / (n_data - n_params)}
@@ -691,31 +727,92 @@ def covariance(model, sigma_sq=None, n_data=None):
         max(sig_vals) - min(sig_vals)
         <= 1e-12 * max(abs(v) for v in sig_vals)
     )
-    if homoscedastic:
-        s2 = sig_vals[0]
-        cov = 2.0 * s2 * M
-    else:
-        # heteroscedastic sandwich: cov = A^-1 B A^-1 with A = d2f/dp2 and
-        # B built from per-group residual Jacobians. The Jacobian rows are
-        # recovered from the same backsolves: the residual rows of the
-        # z-columns equal J * inv(d2f/dp2), so J = Z_r * inv(M).
+
+    def minv():
         try:
-            Minv = np.linalg.inv(M)
+            return np.linalg.inv(M)
         except np.linalg.LinAlgError as e:
             raise RuntimeError(
                 "covariance: the parameter block of the inverse KKT matrix "
-                "is singular; the estimated parameters are linearly "
+                "is singular; the fitted parameters are linearly "
                 "dependent (structurally unidentifiable)") from e
-        B = np.zeros((n_params, n_params))
+
+    def group_jacobians():
+        # The Jacobian rows are recovered from the same backsolves: the
+        # residual rows of the z-columns equal J * inv(d2f/dp2), so
+        # J = Z_r * inv(M).
+        Mi = minv()
+        out = {}
         for g, rws in groups.items():
             Zr = np.array([[zcols[j][r] for j in range(n_params)]
                            for r in rws])
-            Jg = Zr @ Minv                    # d r_g / d p
-            B += group_sigma[g] * (Jg.T @ Jg)
-        # dtheta = -A^-1 * 2 J^T eps with A = d2f/dp2 = inv(M), so
-        # cov = 4 M (sum_g sigma_g^2 Jg^T Jg) M; the single-group case
-        # reduces to 2 sigma^2 M since J^T J = A/2.
-        cov = 4.0 * M @ B @ M
+            out[g] = Zr @ Mi                  # d r_g / d p
+        return out
+
+    # Active-bound projection: the covariance is computed in the free
+    # (off-bound) directions and embedded with zero rows/cols for the
+    # pinned parameters, i.e. the covariance conditional on the active
+    # set. Restricting the INFORMATION matrix to the free block and
+    # inverting (not restricting the inverse) is the curve_fit
+    # _projected_covariance construction.
+    free = [i for i in range(n_params) if i not in active]
+
+    def embed(cov_ff):
+        if len(free) == n_params:
+            return cov_ff
+        full = np.zeros((n_params, n_params))
+        if free:
+            full[np.ix_(free, free)] = cov_ff
+        return full
+
+    if not free:
+        cov = np.zeros((n_params, n_params))
+    elif hessian == "gauss-newton":
+        # Expected information: H_GN = 2 J^T J in place of the exact
+        # reduced Hessian. Pooled: cov = 2 s^2 inv(H_GN) = s^2 inv(J^T J).
+        # Grouped: cov = inv(J^T J) (sum_g s_g^2 Jg^T Jg) inv(J^T J).
+        Js = {g: Jg[:, free] for g, Jg in group_jacobians().items()}
+        G = sum(Jg.T @ Jg for Jg in Js.values())
+        try:
+            Ginv = np.linalg.inv(G)
+        except np.linalg.LinAlgError as e:
+            raise RuntimeError(
+                "covariance: the Gauss-Newton matrix J^T J is singular; "
+                "the fitted parameters are linearly dependent in the "
+                "residual Jacobian") from e
+        if homoscedastic:
+            cov = embed(sig_vals[0] * Ginv)
+        else:
+            B = np.zeros((len(free), len(free)))
+            for g, Jg in Js.items():
+                B += group_sigma[g] * (Jg.T @ Jg)
+            cov = embed(Ginv @ B @ Ginv)
+    else:
+        if len(free) == n_params:
+            Mc = M
+        else:
+            try:
+                Mc = np.linalg.inv(minv()[np.ix_(free, free)])
+            except np.linalg.LinAlgError as e:
+                raise RuntimeError(
+                    "covariance: the reduced Hessian restricted to the "
+                    "free (off-bound) parameters is singular; the "
+                    "remaining fitted parameters are linearly dependent"
+                ) from e
+        if homoscedastic:
+            s2 = sig_vals[0]
+            cov = embed(2.0 * s2 * Mc)
+        else:
+            # heteroscedastic sandwich: cov = A^-1 B A^-1 with A = d2f/dp2
+            # and B built from per-group residual Jacobians.
+            B = np.zeros((len(free), len(free)))
+            for g, Jg in group_jacobians().items():
+                Jf = Jg[:, free]
+                B += group_sigma[g] * (Jf.T @ Jf)
+            # dtheta = -A^-1 * 2 J^T eps with A = d2f/dp2 = inv(M), so
+            # cov = 4 M (sum_g sigma_g^2 Jg^T Jg) M; the single-group case
+            # reduces to 2 sigma^2 M since J^T J = A/2.
+            cov = embed(4.0 * Mc @ B @ Mc)
 
     cov = 0.5 * (cov + cov.T)
     if np.diag(cov).min() < 0:

@@ -12,7 +12,7 @@ changes.
 ### Added — parameter covariance for estimation problems (Pyomo)
 
 - **Parameter covariance for estimation problems, from one solve
-  (Pyomo).** Declare the fitted variables (`declare_estimated(m.A, m.k)`,
+  (Pyomo).** Declare the fitted variables (`declare_fitted(m.A, m.k)`,
   varargs, they stay free) and the residual container (`declare_residual(m.r)`,
   optional `group=` strings for heteroscedastic noise groups), solve
   ordinarily with `SolverFactory('pounce')`, then
@@ -28,8 +28,17 @@ changes.
   (cov = 2 sigma^2 times the parameter block of the inverse KKT
   matrix) is pinned against the analytical linear-regression
   covariance in `tests/test_covariance.py`. All declarations also have
-  explicit call-time forms on `solve()` (`sens_params=`, `estimated=`,
-  `residuals=`).
+  explicit call-time forms on `solve()` (`sens_params=`, `fitted=`,
+  `residuals=`). `covariance(..., hessian="gauss-newton")` reports the
+  expected-information (Gauss-Newton) form instead of the default
+  `hessian="lagrangian"` observed-information form (the exact reduced
+  Hessian of the Lagrangian), from the same
+  backsolves; the two agree for linear fits, and Gauss-Newton is
+  structurally positive semidefinite and matches the scipy /
+  `pounce.curve_fit` convention. A fitted parameter on an active bound
+  is projected out (matching `curve_fit`): zero variance, covariance
+  conditional on the bound, correlation entries reported as 0, plus the
+  existing warning.
 
 ## [0.8.0] - 2026-07-11
 

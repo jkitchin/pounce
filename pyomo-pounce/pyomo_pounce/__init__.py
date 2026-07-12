@@ -26,7 +26,7 @@ from pyomo_pounce.sens import (
     Covariance,
     Gradient,
     covariance,
-    declare_estimated,
+    declare_fitted,
     declare_residual,
     declare_sens_param,
     estimate,
@@ -42,7 +42,7 @@ from pyomo_pounce.repair import InitializeReport, initialize, project_to_feasibl
 __all__ = [
     "POUNCE",
     "declare_sens_param",
-    "declare_estimated",
+    "declare_fitted",
     "declare_residual",
     "covariance",
     "Covariance",

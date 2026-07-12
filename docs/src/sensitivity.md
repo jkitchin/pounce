@@ -114,15 +114,15 @@ parameters; the first-move gradient IS the NMPC feedback gain).
 
 For a parameter-estimation model whose objective is a **plain sum of
 squared residuals**, the factorization from ONE ordinary solve yields
-the asymptotic covariance of the estimated parameters. Declare the
+the asymptotic covariance of the fitted parameters. Declare the
 fitted variables (they stay free) and the residual container while
 building the model, solve, and ask:
 
 ```python
-from pyomo_pounce import covariance, declare_estimated, declare_residual
+from pyomo_pounce import covariance, declare_fitted, declare_residual
 
 m.A = pyo.Var(); m.k = pyo.Var()        # the fitted parameters, free
-declare_estimated(m.A, m.k)
+declare_fitted(m.A, m.k)
 
 m.r = pyo.Var(m.I)                      # residuals, one per data point
 m.res = pyo.Constraint(m.I, rule=...)   # r[i] == y[i] - model(A, k, t[i])
@@ -173,9 +173,11 @@ problem: its eigenvector is the parameter combination the data cannot
 pin down, and the corresponding `cov.correlation` entries approach
 +/-1. `covariance` warns when the held factor carries
 inertia-correction perturbations (typically an exactly unidentifiable
-parameterization), when an estimated parameter sits on a bound at the
-optimum (the asymptotics are invalid there), and when the covariance
-diagonal comes out negative (not a least-squares minimum).
+parameterization), when a fitted parameter sits on a bound at the
+optimum (its direction is projected out: zero variance, the covariance
+conditional on the active bound, correlation entries reported as 0),
+and when the covariance diagonal comes out negative (not a
+least-squares minimum).
 
 **Relation to `pounce.curve_fit`.** This uses the same
 scale-and-invert-the-reduced-Hessian recipe as
@@ -195,8 +197,15 @@ is uniquely "correct": Gauss-Newton is the conventional, robust default
 (it cannot produce a negative variance); observed information is the
 honest local curvature of the objective you actually solved (Efron &
 Hinkley 1978) but can go indefinite — which is what the negative-variance
-warning above is telling you. For numbers that match scipy/`nls`, or when
-`covariance()` warns about a negative diagonal, prefer `curve_fit`.
+warning above is telling you. `covariance()` offers both: the default
+`hessian="lagrangian"` inverts the exact reduced Hessian of the
+Lagrangian, and `covariance(m, hessian="gauss-newton")` rebuilds the
+expected-information form from the residual Jacobian, recovered from
+the same backsolves at no extra solve (declared residuals required).
+Reach for it when the numbers must match scipy/`nls`, when
+`covariance()` warns about a negative diagonal, or when the covariance
+must stay positive semidefinite by construction, e.g. feeding an
+arrival-cost update in moving horizon estimation.
 The other difference is the input surface.
 `curve_fit(f, xdata, ydata, ...)` is the batteries-included fitter for a
 callable model `f(x, *params)` and data arrays: it chooses a starting
@@ -209,9 +218,13 @@ as constraints, arbitrary surrounding structure — where you want the
 covariance of the fit as posed without re-expressing it as
 `f(x, *params)`. Use `curve_fit` when the fit is naturally a
 model-plus-data call; use `covariance()` to interrogate an existing
-Pyomo estimation model. Note `covariance()` only *warns* (rather than
-projecting) when an estimated parameter is bound-active — reach for
-`curve_fit` there, or read the fit off the interior.
+Pyomo estimation model. Both project a bound-active fitted parameter
+onto the active-constraint nullspace: `covariance()` reports the
+covariance conditional on the active bound (zero variance in the
+pinned direction, computed by inverting the free block of the
+information matrix) and still warns, since boundary asymptotics are
+nonstandard. Only variable bounds on the fitted parameters themselves
+are detected; other active constraints are not.
 
 **Relation to `pyomo.contrib.parmest`.** parmest is an estimation
 workflow: multi-experiment data management, bootstrap resampling, and

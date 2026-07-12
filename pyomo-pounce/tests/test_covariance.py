@@ -2,7 +2,7 @@
 covariance from the held KKT factorization.
 
 The scaling convention is pinned empirically, not assumed: for a plain
-sum-of-squares objective with the estimated parameters FREE in the solve,
+sum-of-squares objective with the fitted parameters FREE in the solve,
 the linear-regression fixture has the exact answer
 cov = sigma^2 * inv(X^T X), and the parameter block of the inverse KKT
 matrix must reproduce it through cov = 2 * sigma_sq * (K^-1)_pp.
@@ -14,7 +14,7 @@ import pytest
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
-from pyomo_pounce import covariance, declare_estimated, declare_residual
+from pyomo_pounce import covariance, declare_fitted, declare_residual
 
 N_LIN = 25
 SIGMA_LIN = 0.3
@@ -42,8 +42,8 @@ def linear_model(x, y, declare=True):
         - mm.b * float(x[i]))
     m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
     if declare:
-        declare_estimated(m.a)
-        declare_estimated(m.b)
+        declare_fitted(m.a)
+        declare_fitted(m.b)
         declare_residual(m.r)
     return m
 
@@ -96,7 +96,7 @@ def test_explicit_form_equals_declared(linear):
     cov_decl = covariance(m_decl)
     m = linear_model(x, y, declare=False)
     pyo.SolverFactory("pounce").solve(
-        m, estimated=[m.a, m.b], residuals=[m.r])
+        m, fitted=[m.a, m.b], residuals=[m.r])
     cov_expl = covariance(m)
     np.testing.assert_allclose(cov_expl.matrix, cov_decl.matrix, rtol=1e-9)
 
@@ -106,7 +106,7 @@ def test_n_data_fallback():
     residuals) must reproduce the classical sigma^2 (X^T X)^-1."""
     x, y, X = linear_data()
     m = linear_model(x, y, declare=False)
-    declare_estimated(m.a, m.b)             # estimated, but NO residuals
+    declare_fitted(m.a, m.b)             # fitted, but NO residuals
     pyo.SolverFactory("pounce").solve(m)
     cov = covariance(m, n_data=N_LIN)
     beta = np.linalg.solve(X.T @ X, X.T @ y)
@@ -131,11 +131,11 @@ def test_explicit_form_repeated_solve_is_stable():
     x, y, _ = linear_data()
     m = linear_model(x, y, declare=False)
     sf = pyo.SolverFactory("pounce")
-    sf.solve(m, estimated=[m.a, m.b], residuals=[m.r])
+    sf.solve(m, fitted=[m.a, m.b], residuals=[m.r])
     cov1 = covariance(m)
     with warnings.catch_warnings():
         warnings.simplefilter("error")      # no spurious mismatch warning
-        sf.solve(m, estimated=[m.a, m.b], residuals=[m.r])
+        sf.solve(m, fitted=[m.a, m.b], residuals=[m.r])
     cov2 = covariance(m)
     assert cov2.sigma_sq == pytest.approx(cov1.sigma_sq, rel=1e-12)
     np.testing.assert_allclose(cov2.matrix, cov1.matrix, rtol=1e-12)
@@ -153,8 +153,8 @@ def test_dict_sigma_without_groups_errors(linear):
 def test_error_paths():
     x, y, _ = linear_data()
     m2 = linear_model(x, y, declare=False)
-    declare_estimated(m2.a)
-    declare_estimated(m2.b)             # no residuals declared
+    declare_fitted(m2.a)
+    declare_fitted(m2.b)             # no residuals declared
     pyo.SolverFactory("pounce").solve(m2)
     with pytest.raises(ValueError, match="noise variance is unknown"):
         covariance(m2)
@@ -181,8 +181,8 @@ def test_nonlinear_against_fd_hessian():
         m.I, rule=lambda mm, i: mm.r[i] == float(y[i])
         - mm.A * pyo.exp(-mm.k * float(t[i])))
     m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
-    declare_estimated(m.A)
-    declare_estimated(m.k)
+    declare_fitted(m.A)
+    declare_fitted(m.k)
     declare_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)
     cov = covariance(m, sigma_sq=0.05**2)
@@ -233,8 +233,8 @@ def test_two_group_sandwich_matches_closed_form():
     m.obj = pyo.Objective(
         expr=sum(m.r1[i] ** 2 for i in m.I1)
         + sum(m.r2[i] ** 2 for i in m.I2))
-    declare_estimated(m.a)
-    declare_estimated(m.b)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
     declare_residual(m.r1, group="lo")
     declare_residual(m.r2, group="hi")
     pyo.SolverFactory("pounce").solve(m)
@@ -251,20 +251,85 @@ def test_two_group_sandwich_matches_closed_form():
     # per-group sigma estimation route also runs and reports both keys
     cov_est = covariance(m)
     assert set(cov_est.sigma_sq.keys()) == {"lo", "hi"}
+    # linear model: the Gauss-Newton sandwich is the same closed form
+    cov_gn = covariance(m, sigma_sq={"lo": s1**2, "hi": s2**2},
+                        hessian="gauss-newton")
+    np.testing.assert_allclose(cov_gn.matrix, closed, rtol=1e-8)
 
 
-def test_bound_active_warns():
+def test_gauss_newton_linear_equals_lagrangian(linear):
+    """For a linear model the residual curvature is zero, so the two
+    information forms must agree exactly."""
+    m, _, _, X = linear
+    cov_gn = covariance(m, hessian="gauss-newton")
+    cov_obs = covariance(m)
+    np.testing.assert_allclose(cov_gn.matrix, cov_obs.matrix, rtol=1e-9)
+
+
+def test_gauss_newton_nonlinear_matches_analytic_jacobian():
+    """Exponential decay: Gauss-Newton covariance vs sigma^2 inv(J^T J)
+    with the analytic residual Jacobian at the solution."""
+    rng = np.random.default_rng(7)
+    t = np.linspace(0.0, 3.0, 20)
+    y = 2.0 * np.exp(-1.3 * t) + 0.05 * rng.standard_normal(20)
+
+    m = pyo.ConcreteModel()
+    m.I = pyo.RangeSet(0, 19)
+    m.A = pyo.Var(initialize=1.5)
+    m.k = pyo.Var(initialize=1.0)
+    m.r = pyo.Var(m.I, initialize=0.0)
+    m.res = pyo.Constraint(
+        m.I, rule=lambda mm, i: mm.r[i] == float(y[i])
+        - mm.A * pyo.exp(-mm.k * float(t[i])))
+    m.obj = pyo.Objective(expr=sum(m.r[i] ** 2 for i in m.I))
+    declare_fitted(m.A, m.k)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+
+    cov = covariance(m, sigma_sq=0.05**2, hessian="gauss-newton")
+    A0, k0 = pyo.value(m.A), pyo.value(m.k)
+    # r_i = y_i - A exp(-k t_i): dr/dA = -exp(-k t), dr/dk = A t exp(-k t)
+    J = np.column_stack([-np.exp(-k0 * t), A0 * t * np.exp(-k0 * t)])
+    cov_true = 0.05**2 * np.linalg.inv(J.T @ J)
+    np.testing.assert_allclose(cov.matrix, cov_true, rtol=1e-5)
+
+
+def test_gauss_newton_error_paths():
+    x, y, _ = linear_data()
+    m = linear_model(x, y, declare=False)
+    declare_fitted(m.a, m.b)                 # no residuals declared
+    pyo.SolverFactory("pounce").solve(m)
+    with pytest.raises(ValueError, match="gauss-newton"):
+        covariance(m, n_data=N_LIN, hessian="gauss-newton")
+    with pytest.raises(ValueError, match="hessian"):
+        covariance(m, n_data=N_LIN, hessian="expected")
+
+
+def test_bound_active_warns_and_projects():
     x, y, X = linear_data()
     m = linear_model(x, y, declare=False)
     m.a.setlb(2.0)                      # binds: true intercept ~1.44
-    declare_estimated(m.a)
-    declare_estimated(m.b)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
     declare_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        covariance(m)
+        cov = covariance(m)
     assert any("bound" in str(wi.message) for wi in w)
+    # pinned direction: exactly zero variance, correlation defined as 0
+    assert cov[m.a] == 0.0
+    assert cov.std_err[m.a] == 0.0
+    assert cov.correlation[m.a, m.b] == 0.0
+    # free direction: covariance conditional on a = 2 is the
+    # slope-only regression of (y - 2) on x
+    var_b = cov.sigma_sq / float(np.sum(x**2))
+    assert cov[m.b] == pytest.approx(var_b, rel=1e-9)
+    # Gauss-Newton agrees on this linear model, projection included
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cov_gn = covariance(m, hessian="gauss-newton")
+    np.testing.assert_allclose(cov_gn.matrix, cov.matrix, rtol=1e-9)
 
 
 def test_residual_objective_mismatch_warns():
@@ -274,8 +339,8 @@ def test_residual_objective_mismatch_warns():
     m.obj.deactivate()
     m.obj2 = pyo.Objective(
         expr=sum(m.r[i] ** 2 for i in m.I) + 10.0 * m.b ** 2)
-    declare_estimated(m.a)
-    declare_estimated(m.b)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
     declare_residual(m.r)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
@@ -295,7 +360,7 @@ def test_clone_keeps_declarations():
 def test_varargs_declarations_equal_singles():
     x, y, _ = linear_data()
     m = linear_model(x, y, declare=False)
-    declare_estimated(m.a, m.b)              # varargs form
+    declare_fitted(m.a, m.b)              # varargs form
     declare_residual(m.r)
     pyo.SolverFactory("pounce").solve(m)
     cov_va = covariance(m)
