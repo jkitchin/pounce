@@ -43,8 +43,10 @@ class POUNCE(ASL):
         from pyomo_pounce.sens import has_declarations, sens_solve
 
         model = args[0] if args else kwds.get("model")
-        if model is not None and has_declarations(model):
-            return sens_solve(model, tee=kwds.get("tee", False))
+        explicit = {k: kwds.pop(k) for k in
+                    ("sens_params", "estimated", "residuals") if k in kwds}
+        if model is not None and (has_declarations(model) or explicit):
+            return sens_solve(model, tee=kwds.get("tee", False), **explicit)
         return super().solve(*args, **kwds)
 
     def _default_executable(self):

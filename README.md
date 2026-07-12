@@ -336,6 +336,9 @@ Four entry points cover the common workflows:
   SolverFactory("pounce").solve(m)     # keeps the KKT factorization
   gradient(m.x, wrt=m.p)               # dx*/dp; constraints give dlambda/dp
   estimate(m, [(m.p, 2.5)])            # perturbed-solution estimate
+  covariance(m)                        # estimation models: declare the fitted
+                                       # vars and residuals, get the asymptotic
+                                       # parameter covariance from one solve
   ```
 
   See [`docs/src/sensitivity.md`](docs/src/sensitivity.md) and

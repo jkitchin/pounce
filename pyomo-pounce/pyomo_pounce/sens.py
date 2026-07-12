@@ -18,6 +18,16 @@ kept, and every sensitivity is a cheap backsolve afterwards:
     estimate(m, [(m.p, 2.5)])                # perturbed-solution estimate,
                                              # clamped to bounds, warns on clamp
 
+Estimation models use the other two declarations: flag the FITTED
+variables and the residual container, solve once, and ask for the
+covariance with no further information:
+
+    declare_estimated(m.A); declare_estimated(m.k)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)     # one ordinary solve
+    covariance(m)                            # std errors, correlations,
+                                             # identifiability diagnostics
+
 Mechanics: declared Params become pinned variables on a clone
 (pyomo.contrib.sensitivity_toolbox does the expression surgery), the clone
 is written to .nl and evaluated in-process via pounce.read_nl, and the
@@ -44,14 +54,17 @@ _REG = "_pounce_sens"
 # ── declaration ───────────────────────────────────────────────────────────────
 
 class _Registry:
-    """Per-model sensitivity registry. Deepcopy-aware so model.clone() (and
-    the sensitivity surgery's own clone) works cleanly: declared parameters
-    follow the clone through the memo, while the session -- which holds
-    solver handles tied to one converged factorization -- is deliberately
-    not copied (a clone has no solve of its own yet)."""
+    """Per-model registry of declared statistical roles. Deepcopy-aware so
+    model.clone() (and the sensitivity surgery's own clone) works cleanly:
+    declared components follow the clone through the memo, while the
+    session -- which holds solver handles tied to one converged
+    factorization -- is deliberately not copied (a clone has no solve of
+    its own yet)."""
 
     def __init__(self):
-        self.params = []
+        self.params = []          # pinned inputs: gradient()/estimate()
+        self.estimated = []       # free fitted variables: covariance()
+        self.residuals = []       # (container, group) pairs: sigma^2
         self.session = None
 
     def __deepcopy__(self, memo):
@@ -59,20 +72,46 @@ class _Registry:
         new = _Registry()
         memo[id(self)] = new
         new.params = [copy.deepcopy(p, memo) for p in self.params]
+        new.estimated = [copy.deepcopy(p, memo) for p in self.estimated]
+        new.residuals = [(copy.deepcopy(r, memo), g)
+                         for r, g in self.residuals]
         return new
 
 
+def _registry(model):
+    return model.__dict__.setdefault(_REG, _Registry())
+
+
 def declare_sens_param(param):
-    """Flag a mutable Param (or fixed Var), scalar or indexed, for
-    sensitivity. No perturbed value is required, or accepted."""
-    model = param.model()
-    reg = model.__dict__.setdefault(_REG, _Registry())
-    reg.params.append(param)
+    """Flag a mutable Param (or fixed Var), scalar or indexed, as a FIXED
+    INPUT for sensitivity: after a solve, gradient() and estimate() answer
+    d(solution)/d(param) questions. No perturbed value is required, or
+    accepted."""
+    _registry(param.model()).params.append(param)
+
+
+def declare_estimated(var):
+    """Flag a FREE Var (scalar or indexed) as an estimated parameter of a
+    least-squares problem: after one ordinary solve, covariance() reports
+    its asymptotic uncertainty. The variable stays free in the solve; do
+    not fix it."""
+    _registry(var.model()).estimated.append(var)
+
+
+def declare_residual(container, group=None):
+    """Flag an indexed Var holding the fit residuals, one member per data
+    point. covariance() derives the residual count and the
+    SSR from it, so no data counts need to be passed. `group` is an
+    arbitrary user string partitioning residuals into noise groups:
+    containers sharing a group (or all ungrouped containers together) pool
+    into one estimated noise variance; distinct groups get their own, and
+    the covariance switches to the heteroscedastic sandwich form."""
+    _registry(container.model()).residuals.append((container, group))
 
 
 def has_declarations(model):
     reg = getattr(model, "__dict__", {}).get(_REG)
-    return bool(reg and reg.params)
+    return bool(reg and (reg.params or reg.estimated or reg.residuals))
 
 
 # ── the read_nl -> callback-Problem bridge ────────────────────────────────────
@@ -154,17 +193,37 @@ def _iter_data(comp):
         yield comp
 
 
-def sens_solve(model, tee=False):
+def sens_solve(model, tee=False, sens_params=None, estimated=None,
+               residuals=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
-    for gradient()/estimate(). Called automatically by
-    SolverFactory('pounce').solve() when declarations are present.
-    Returns a Pyomo SolverResults, like an ordinary solve."""
+    for gradient()/estimate()/covariance(). Called automatically by
+    SolverFactory('pounce').solve() when declarations are present; the
+    keyword arguments are the explicit (call-time) form of the
+    declarations and register the components exactly as the declare_*
+    functions do. Returns a Pyomo SolverResults, like an ordinary solve."""
     import pounce
 
+    # explicit form: register call-time components before proceeding
+    for p in (sens_params or []):
+        declare_sens_param(p)
+    for v in (estimated or []):
+        declare_estimated(v)
+    for item in (residuals or []):
+        if isinstance(item, tuple):
+            declare_residual(*item)
+        else:
+            declare_residual(item)
+
     reg = model.__dict__[_REG]
-    si = SensitivityInterface(model, clone_model=True)
-    si.setup_sensitivity(reg.params)
-    clone = si.model_instance
+    if reg.params:
+        # pinned inputs need the sensitivity-toolbox surgery (on a clone)
+        si = SensitivityInterface(model, clone_model=True)
+        si.setup_sensitivity(reg.params)
+        clone = si.model_instance
+    else:
+        # estimation-only: nothing to pin, solve the model as written
+        si = None
+        clone = model
 
     # The .nl/.col/.row files exist only to hand the model to read_nl;
     # everything needed later (evaluators, bounds, names) lives in memory,
@@ -190,33 +249,64 @@ def sens_solve(model, tee=False):
         raise RuntimeError(
             f"pounce did not converge: {info.get('status_msg')}")
 
-    block = clone.component(SensitivityInterface.get_default_block_name())
     pins = ComponentMap()
-    for i, (var, clone_param, list_idx, comp_idx) in enumerate(
-            block._sens_data_list):
-        con = block.paramConst[i + 1]
-        orig_comp = reg.params[list_idx]
-        orig_data = (orig_comp if not orig_comp.is_indexed()
-                     else orig_comp[comp_idx])
-        pins[orig_data] = con_names.index(con.name)
-
-    # original-name -> clone-row-name aliases for the replaced constraints
     con_alias = {}
-    if getattr(block, "_has_replaced_expressions", False):
-        for new_comp, old_comp in block._replaced_map.items():
-            for nd, od in zip(_iter_data(new_comp), _iter_data(old_comp)):
-                con_alias[od.name] = nd.name
+    if si is not None:
+        block = clone.component(SensitivityInterface.get_default_block_name())
+        for i, (var, clone_param, list_idx, comp_idx) in enumerate(
+                block._sens_data_list):
+            con = block.paramConst[i + 1]
+            orig_comp = reg.params[list_idx]
+            orig_data = (orig_comp if not orig_comp.is_indexed()
+                         else orig_comp[comp_idx])
+            pins[orig_data] = con_names.index(con.name)
+        # original-name -> clone-row-name aliases for replaced constraints
+        if getattr(block, "_has_replaced_expressions", False):
+            for new_comp, old_comp in block._replaced_map.items():
+                for nd, od in zip(_iter_data(new_comp),
+                                  _iter_data(old_comp)):
+                    con_alias[od.name] = nd.name
 
     session = _Session(model, nl, solver, var_names, con_names, pins,
                        con_alias)
     session.base_x = np.asarray(x)
+
+    # estimated parameters: their rows in the primal vector
+    session.est_rows = ComponentMap()
+    for comp in reg.estimated:
+        for vd in _iter_data(comp):
+            session.est_rows[vd] = var_names.index(vd.name)
+
+    # residual groups: member rows per group key (None = the common pool)
+    session.res_rows = {}
+    for container, group in reg.residuals:
+        rows = [var_names.index(rd.name) for rd in _iter_data(container)]
+        session.res_rows.setdefault(group, []).extend(rows)
+
     reg.session = session
 
-    # load the solution back onto the ORIGINAL model's variables
+    # load the solution back onto the ORIGINAL model's variables (when the
+    # solve ran on a clone; in the estimation-only path clone IS model and
+    # this simply refreshes the same variables)
     for name, val in zip(var_names, session.base_x):
         ov = model.find_component(name)
         if ov is not None:
             ov.set_value(val, skip_validation=True)
+
+    # consistency check: declared residuals should reproduce the objective
+    if session.res_rows:
+        ssr = sum(float(session.base_x[r]) ** 2
+                  for rows in session.res_rows.values() for r in rows)
+        obj_val = info.get("obj_val")
+        if obj_val is not None and abs(ssr - float(obj_val)) > 1e-6 * max(
+                1.0, abs(float(obj_val))):
+            warnings.warn(
+                "sens_solve: the declared residuals give SSR = "
+                f"{ssr:.6g} but the objective value is {float(obj_val):.6g}."
+                " covariance() assumes the objective is the plain sum of "
+                "squares of the declared residuals; extra terms (weights, "
+                "regularization) will make the noise-variance estimate "
+                "wrong.")
 
     # Return a Pyomo SolverResults so callers see the same shape as an
     # ordinary solve (res.solver.termination_condition etc).
@@ -366,3 +456,229 @@ def estimate(model, perturb, clamp=True):
         if ov is not None:
             out[ov] = float(val)
     return out
+
+
+# ── parameter covariance ──────────────────────────────────────────────────────
+
+class _ParamKeyed:
+    """Lookup from a declared Param's data object to its row index.
+    Keyed by id() because Pyomo components are unhashable."""
+
+    def __init__(self, params):
+        self._params = list(params)
+        self._pos = {id(p): i for i, p in enumerate(self._params)}
+
+    def _loc(self, pd):
+        i = self._pos.get(id(pd))
+        if i is None:
+            raise KeyError(f"{getattr(pd, 'name', pd)}: not one of the "
+                           "covariance parameters")
+        return i
+
+
+class _ParamVector(_ParamKeyed):
+    """Vector keyed by param data: v[m.k1] -> float."""
+
+    def __init__(self, params, values):
+        super().__init__(params)
+        self.values = np.asarray(values, dtype=float)
+
+    def __getitem__(self, pd):
+        return float(self.values[self._loc(pd)])
+
+
+class _ParamMatrix(_ParamKeyed):
+    """Symmetric matrix keyed by param data: M[m.k1, m.k2] (either
+    order) or M[m.k1] for a diagonal entry."""
+
+    def __init__(self, params, matrix):
+        super().__init__(params)
+        self.matrix = np.asarray(matrix, dtype=float)
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            i, j = (self._loc(k) for k in key)
+        else:
+            i = j = self._loc(key)
+        return float(self.matrix[i, j])
+
+
+class Covariance(_ParamMatrix):
+    """Asymptotic parameter covariance, from covariance().
+
+    Keyed by the ORIGINAL model's Param data objects (order given by
+    `params`, the declaration order): cov[m.k1, m.k2] (either order),
+    cov[m.k1] for a variance, cov.std_err[m.k1],
+    cov.correlation[m.k1, m.k2]. `matrix` is the dense numpy array
+    ordered like `params`; `sigma_sq` is the residual variance that was
+    used. eigen() supports identifiability diagnosis."""
+
+    def __init__(self, params, matrix, sigma_sq):
+        super().__init__(params, matrix)
+        self.params = self._params
+        self.sigma_sq = sigma_sq          # float, or {group: float}
+        with np.errstate(invalid="ignore", divide="ignore"):
+            se = np.sqrt(np.diag(self.matrix))
+            self.std_err = _ParamVector(self.params, se)
+            self.correlation = _ParamMatrix(
+                self.params, self.matrix / np.outer(se, se))
+
+    def eigen(self):
+        """(eigenvalues, eigenvectors) of the covariance matrix,
+        eigenvalues ascending, eigenvectors[:, i] in `params` order.
+        An eigenvalue much larger than the rest flags a poorly
+        identified direction: its eigenvector gives the parameter
+        combination the data cannot pin down."""
+        return np.linalg.eigh(self.matrix)
+
+
+def covariance(model, sigma_sq=None, n_data=None):
+    """Asymptotic covariance of the estimated parameters of a
+    least-squares problem, from ONE ordinary solve.
+
+    Workflow: declare the fitted variables with declare_estimated (they
+    stay free), optionally declare the residual container(s) with
+    declare_residual, solve with SolverFactory('pounce'), then call
+    covariance(model) with no further information.
+
+    ASSUMES the model objective is the plain sum of squared residuals.
+    The parameter block of the inverse KKT matrix, obtained by one
+    backsolve per parameter against the held factorization, equals the
+    inverse reduced Hessian of the eliminated problem, inv(d2f*/dp2);
+    for f = SSR the asymptotic covariance is then
+
+        cov = 2 * sigma_sq * (K^-1)_pp
+
+    The factor 2 belongs to the unscaled sum of squares; it is verified
+    against the analytical linear-regression covariance
+    sigma^2 * inv(X^T X) in tests/test_covariance.py.
+
+    The noise variance sigma_sq comes from, in order of precedence:
+    sigma_sq= (known measurement variance; scalar, or {group: value}
+    when residual groups are declared); declared residuals (estimated
+    per pooled or labeled group as SSR_g / (n_g - n_params)); or the
+    n_data= fallback (count of data points, with SSR taken from the
+    objective value on trust). With multiple labeled groups the
+    heteroscedastic sandwich covariance is reported.
+
+    Returns a Covariance object keyed by the declared variables'
+    data objects: cov[m.A, m.k], cov.std_err[m.A],
+    cov.correlation[m.A, m.k], cov.matrix, cov.sigma_sq (float or
+    per-group dict), cov.eigen().
+    """
+    reg = model.__dict__.get(_REG)
+    session = reg.session if reg else None
+    if session is None:
+        raise RuntimeError(
+            "no sensitivity session: declare_estimated() (and optionally "
+            "declare_residual()) then solve with SolverFactory('pounce') "
+            "first")
+    params = list(session.est_rows.keys())
+    n_params = len(params)
+    if n_params == 0:
+        raise RuntimeError(
+            "covariance: no estimated parameters were declared; flag the "
+            "fitted variables with declare_estimated() before the solve")
+
+    # ── guardrails ────────────────────────────────────────────────────────
+    pert = np.asarray(session.solver.kkt_perturbations)
+    if pert.any():
+        warnings.warn(
+            "covariance: the held KKT factor carries inertia-correction "
+            f"perturbations {pert.tolist()}, so the covariance is "
+            "regularized rather than exact. Linearly dependent (structurally"
+            " unidentifiable) parameters are the usual cause.")
+    lo, hi = np.asarray(session.nl.x_l), np.asarray(session.nl.x_u)
+    for p in params:
+        r = session.est_rows[p]
+        xv = float(session.base_x[r])
+        tol = 1e-6 * (1.0 + abs(xv))
+        if xv - lo[r] < tol or hi[r] - xv < tol:
+            warnings.warn(
+                f"covariance: estimated parameter {p.name} sits on its "
+                "bound at the optimum; the asymptotic covariance is not "
+                "valid for an active-bound parameter.")
+
+    # ── parameter block of the inverse KKT matrix ─────────────────────────
+    dim = session.solver.kkt_dim
+    rows = [session.est_rows[p] for p in params]
+    zcols = []
+    for r in rows:
+        e = np.zeros(dim)
+        e[r] = 1.0
+        zcols.append(np.asarray(session.solver.kkt_solve(e)))
+    M = np.array([[zcols[j][rows[i]] for j in range(n_params)]
+                  for i in range(n_params)])
+    M = 0.5 * (M + M.T)
+
+    # ── noise variance per group ──────────────────────────────────────────
+    groups = dict(session.res_rows)
+    if sigma_sq is not None:
+        if isinstance(sigma_sq, dict):
+            group_sigma = {g: float(s) for g, s in sigma_sq.items()}
+        else:
+            group_sigma = {g: float(sigma_sq) for g in (groups or {None: []})}
+    elif groups:
+        group_sigma = {}
+        for g, rws in groups.items():
+            n_g = len(rws)
+            if n_g <= n_params:
+                raise ValueError(
+                    f"covariance: residual group {g!r} has {n_g} members, "
+                    f"not more than the {n_params} estimated parameters; "
+                    "cannot estimate its noise variance")
+            ssr_g = float(np.sum(session.base_x[rws] ** 2))
+            group_sigma[g] = ssr_g / (n_g - n_params)
+    elif n_data is not None:
+        if n_data <= n_params:
+            raise ValueError(
+                f"covariance: n_data ({n_data}) must exceed the number of "
+                f"estimated parameters ({n_params})")
+        ssr = pyo.value(
+            next(model.component_data_objects(pyo.Objective, active=True)))
+        group_sigma = {None: ssr / (n_data - n_params)}
+    else:
+        raise ValueError(
+            "covariance: the noise variance is unknown; declare the "
+            "residual container(s) with declare_residual(), or pass "
+            "sigma_sq= (known variance), or pass n_data= (data count, "
+            "with the SSR taken from the objective value)")
+
+    # ── assemble ──────────────────────────────────────────────────────────
+    distinct = set(np.round(list(group_sigma.values()), 15))
+    if len(group_sigma) <= 1 or len(distinct) == 1:
+        s2 = next(iter(group_sigma.values()))
+        cov = 2.0 * s2 * M
+    else:
+        # heteroscedastic sandwich: cov = A^-1 B A^-1 with A = d2f/dp2 and
+        # B built from per-group residual Jacobians. The Jacobian rows are
+        # recovered from the same backsolves: the residual rows of the
+        # z-columns equal J * inv(d2f/dp2), so J = Z_r * inv(M).
+        try:
+            Minv = np.linalg.inv(M)
+        except np.linalg.LinAlgError as e:
+            raise RuntimeError(
+                "covariance: the parameter block of the inverse KKT matrix "
+                "is singular; the estimated parameters are linearly "
+                "dependent (structurally unidentifiable)") from e
+        B = np.zeros((n_params, n_params))
+        for g, rws in groups.items():
+            Zr = np.array([[zcols[j][r] for j in range(n_params)]
+                           for r in rws])
+            Jg = Zr @ Minv                    # d r_g / d p
+            B += group_sigma[g] * (Jg.T @ Jg)
+        # dtheta = -A^-1 * 2 J^T eps with A = d2f/dp2 = inv(M), so
+        # cov = 4 M (sum_g sigma_g^2 Jg^T Jg) M; the single-group case
+        # reduces to 2 sigma^2 M since J^T J = A/2.
+        cov = 4.0 * M @ B @ M
+        cov = 0.5 * (cov + cov.T)
+
+    cov = 0.5 * (cov + cov.T)
+    if np.diag(cov).min() < 0:
+        warnings.warn(
+            "covariance: negative variance on the diagonal; the point is "
+            "probably not a least-squares minimum.")
+    sig_out = (next(iter(group_sigma.values()))
+               if len(group_sigma) == 1 and None in group_sigma
+               else group_sigma)
+    return Covariance(params, cov, sig_out)

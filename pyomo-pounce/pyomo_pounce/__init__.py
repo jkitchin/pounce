@@ -18,11 +18,16 @@ Parametric sensitivity (see pyomo_pounce.sens):
     SolverFactory('pounce').solve(m)   # normal solve keeps the KKT factor
     gradient(m.x, wrt=m.p)       # then sensitivities are cheap backsolves
     estimate(m, [(m.p, 2.5)])
+    covariance(m, n_data=len(y)) # parameter covariance for least squares
 """
 from pyomo_pounce.block_init import BlockInitReport, block_initialize
 from pyomo_pounce.pounce_solver import POUNCE
 from pyomo_pounce.sens import (
+    Covariance,
     Gradient,
+    covariance,
+    declare_estimated,
+    declare_residual,
     declare_sens_param,
     estimate,
     gradient,
@@ -37,6 +42,10 @@ from pyomo_pounce.repair import InitializeReport, initialize, project_to_feasibl
 __all__ = [
     "POUNCE",
     "declare_sens_param",
+    "declare_estimated",
+    "declare_residual",
+    "covariance",
+    "Covariance",
     "gradient",
     "estimate",
     "Gradient",
