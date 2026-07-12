@@ -122,8 +122,7 @@ building the model, solve, and ask:
 from pyomo_pounce import covariance, declare_estimated, declare_residual
 
 m.A = pyo.Var(); m.k = pyo.Var()        # the fitted parameters, free
-declare_estimated(m.A)
-declare_estimated(m.k)
+declare_estimated(m.A, m.k)
 
 m.r = pyo.Var(m.I)                      # residuals, one per data point
 m.res = pyo.Constraint(m.I, rule=...)   # r[i] == y[i] - model(A, k, t[i])

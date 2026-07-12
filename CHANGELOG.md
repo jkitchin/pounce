@@ -30,8 +30,8 @@ changes.
   matching Rust methods `Solver::parametric_step_full` /
   `Solver::g_multiplier_rows` in `pounce-sensitivity`.
 - **Parameter covariance for estimation problems, from one solve
-  (Pyomo).** Declare the fitted variables (`declare_estimated(m.A)`,
-  they stay free) and the residual container (`declare_residual(m.r)`,
+  (Pyomo).** Declare the fitted variables (`declare_estimated(m.A, m.k)`,
+  varargs, they stay free) and the residual container (`declare_residual(m.r)`,
   optional `group=` strings for heteroscedastic noise groups), solve
   ordinarily with `SolverFactory('pounce')`, then
   `pyomo_pounce.covariance(m)` returns the asymptotic covariance with
