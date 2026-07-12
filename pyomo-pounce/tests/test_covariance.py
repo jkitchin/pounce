@@ -248,3 +248,17 @@ def test_clone_keeps_declarations():
     pyo.SolverFactory("pounce").solve(c)
     cov = covariance(c)
     assert cov.std_err[c.a] > 0
+
+
+def test_varargs_declarations_equal_singles():
+    x, y, _ = linear_data()
+    m = linear_model(x, y, declare=False)
+    declare_estimated(m.a, m.b)              # varargs form
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    cov_va = covariance(m)
+
+    m2 = linear_model(x, y)                  # single-call declarations
+    pyo.SolverFactory("pounce").solve(m2)
+    cov_single = covariance(m2)
+    np.testing.assert_allclose(cov_va.matrix, cov_single.matrix, rtol=1e-9)

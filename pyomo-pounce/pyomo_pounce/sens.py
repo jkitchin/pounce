@@ -82,31 +82,35 @@ def _registry(model):
     return model.__dict__.setdefault(_REG, _Registry())
 
 
-def declare_sens_param(param):
-    """Flag a mutable Param (or fixed Var), scalar or indexed, as a FIXED
-    INPUT for sensitivity: after a solve, gradient() and estimate() answer
-    d(solution)/d(param) questions. No perturbed value is required, or
-    accepted."""
-    _registry(param.model()).params.append(param)
+def declare_sens_param(*params):
+    """Flag one or more mutable Params (or fixed Vars), scalar or indexed,
+    as FIXED INPUTS for sensitivity: after a solve, gradient() and
+    estimate() answer d(solution)/d(param) questions. No perturbed value
+    is required, or accepted."""
+    for param in params:
+        _registry(param.model()).params.append(param)
 
 
-def declare_estimated(var):
-    """Flag a FREE Var (scalar or indexed) as an estimated parameter of a
-    least-squares problem: after one ordinary solve, covariance() reports
-    its asymptotic uncertainty. The variable stays free in the solve; do
-    not fix it."""
-    _registry(var.model()).estimated.append(var)
+def declare_estimated(*variables):
+    """Flag one or more FREE Vars (scalar or indexed) as estimated
+    parameters of a least-squares problem: after one ordinary solve,
+    covariance() reports their asymptotic uncertainty. The variables stay
+    free in the solve; do not fix them."""
+    for var in variables:
+        _registry(var.model()).estimated.append(var)
 
 
-def declare_residual(container, group=None):
-    """Flag an indexed Var holding the fit residuals, one member per data
-    point. covariance() derives the residual count and the
-    SSR from it, so no data counts need to be passed. `group` is an
-    arbitrary user string partitioning residuals into noise groups:
-    containers sharing a group (or all ungrouped containers together) pool
-    into one estimated noise variance; distinct groups get their own, and
-    the covariance switches to the heteroscedastic sandwich form."""
-    _registry(container.model()).residuals.append((container, group))
+def declare_residual(*containers, group=None):
+    """Flag one or more indexed Vars holding the fit residuals, one member
+    per data point. covariance() derives the residual count and the SSR
+    from them, so no data counts need to be passed. `group` is an
+    arbitrary user string partitioning residuals into noise groups and
+    applies to every container in the call: containers sharing a group
+    (or all ungrouped containers together) pool into one estimated noise
+    variance; distinct groups get their own, and the covariance switches
+    to the heteroscedastic sandwich form."""
+    for container in containers:
+        _registry(container.model()).residuals.append((container, group))
 
 
 def has_declarations(model):
