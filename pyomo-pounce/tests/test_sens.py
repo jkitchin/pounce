@@ -177,3 +177,11 @@ def test_explicit_sens_params_form_equals_declared():
     pyo.SolverFactory("pounce").solve(m2, sens_params=[m2.p])
     g_explicit = gradient(m2.x, wrt=m2.p)
     assert g_explicit == pytest.approx(g_declared, rel=1e-9)
+
+
+def test_explicit_declarations_without_model_error():
+    """Passing explicit declaration kwargs with no model surfaces a clear
+    error instead of silently dropping them."""
+    m = build()
+    with pytest.raises(ValueError, match="no model was passed"):
+        pyo.SolverFactory("pounce").solve(sens_params=[m.p])
