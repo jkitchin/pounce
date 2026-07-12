@@ -80,8 +80,8 @@ use pounce_common::reg_options::{PrintOptionsMode, RegisteredOptions};
 use pounce_common::timing::TimingStatistics;
 use pounce_common::types::{Index, Number};
 use pounce_linalg::dense_vector::DenseVectorSpace;
-use pounce_linsol::summary::LinearSolverSummary;
 use pounce_linsol::SparseSymLinearSolverInterface;
+use pounce_linsol::summary::LinearSolverSummary;
 use pounce_nlp::alg_types::SolverReturn;
 use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -90,7 +90,7 @@ use pounce_nlp::tnlp::{
     IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, NlpInfo, Solution, TNLP,
 };
 use pounce_nlp::tnlp_adapter::{
-    FixedVarTreatment, TNLPAdapter, DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF,
+    DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF, FixedVarTreatment, TNLPAdapter,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -738,9 +738,9 @@ impl IpoptApplication {
     /// hands the final iterate to the user TNLP's
     /// `finalize_solution` callback via `finalize_via_sqp`.
     fn optimize_sqp_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        use pounce_nlp::ConstObjScaling;
         use pounce_nlp::orig_ipopt_nlp::OrigIpoptNlp;
         use pounce_nlp::tnlp_adapter::TNLPAdapter;
-        use pounce_nlp::ConstObjScaling;
 
         let adapter = match TNLPAdapter::new(Rc::clone(&tnlp)) {
             Ok(a) => Rc::new(RefCell::new(a)),
@@ -805,12 +805,12 @@ impl IpoptApplication {
             stats.final_dual_inf = res.final_stationarity;
             stats.final_constr_viol = res.final_constr_viol;
             stats.final_compl = 0.0; // SQP has no barrier — no compl term.
-                                     // Unscaled residuals (pounce#173). The SQP path does not thread
-                                     // the nlp_scaling factors through to its residuals yet, so these
-                                     // mirror the SQP-side values: correct when no scaling is active
-                                     // (the common case) and a conservative proxy otherwise. Populated
-                                     // here so the info dict's `final_unscaled_*` keys are honest
-                                     // rather than left at the 0.0 default.
+            // Unscaled residuals (pounce#173). The SQP path does not thread
+            // the nlp_scaling factors through to its residuals yet, so these
+            // mirror the SQP-side values: correct when no scaling is active
+            // (the common case) and a conservative proxy otherwise. Populated
+            // here so the info dict's `final_unscaled_*` keys are honest
+            // rather than left at the 0.0 default.
             stats.final_unscaled_dual_inf = res.final_stationarity;
             stats.final_unscaled_constr_viol = res.final_constr_viol;
             stats.final_unscaled_compl = 0.0;
@@ -1251,10 +1251,13 @@ impl IpoptApplication {
         // other. Surviving the lock failure with a debug-assert keeps
         // a poisoned mutex from sinking a release build that doesn't
         // even consume the summary.
-        if let Ok(mut guard) = self.linsol_summary_sink.lock() {
-            *guard = LinearSolverSummary::default();
-        } else {
-            debug_assert!(false, "linsol summary sink mutex poisoned");
+        match self.linsol_summary_sink.lock() {
+            Ok(mut guard) => {
+                *guard = LinearSolverSummary::default();
+            }
+            _ => {
+                debug_assert!(false, "linsol summary sink mutex poisoned");
+            }
         }
 
         // Build adapter + Nlp. Honor `fixed_variable_treatment` (default

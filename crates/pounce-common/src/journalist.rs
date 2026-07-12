@@ -197,11 +197,12 @@ impl FileJournal {
                 }
             }
         };
-        if let Ok(mut s) = self.sink.lock() {
-            *s = new_sink;
-            true
-        } else {
-            false
+        match self.sink.lock() {
+            Ok(mut s) => {
+                *s = new_sink;
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -323,17 +324,18 @@ impl Journalist {
     }
 
     pub fn add_journal(&self, j: Arc<dyn Journal>) -> bool {
-        if let Ok(journals) = self.journals.try_borrow_mut() {
-            for existing in journals.iter() {
-                if existing.name() == j.name() {
-                    return false;
+        match self.journals.try_borrow_mut() {
+            Ok(journals) => {
+                for existing in journals.iter() {
+                    if existing.name() == j.name() {
+                        return false;
+                    }
                 }
+                drop(journals);
+                self.journals.borrow_mut().push(j);
+                true
             }
-            drop(journals);
-            self.journals.borrow_mut().push(j);
-            true
-        } else {
-            false
+            _ => false,
         }
     }
 

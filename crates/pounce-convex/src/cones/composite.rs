@@ -64,7 +64,7 @@ pub enum ConeKind {
 
 /// Dispatch a `Cone` call to whichever concrete cone this variant wraps.
 macro_rules! dispatch {
-    ($self:ident, $c:ident => $body:expr) => {
+    ($self:ident, $c:ident => $body:expr_2021) => {
         match $self {
             ConeKind::Nonneg($c) => $body,
             ConeKind::SecondOrder($c) => $body,

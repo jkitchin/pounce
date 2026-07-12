@@ -11,7 +11,7 @@
 
 use pounce_common::types::{Index, Number};
 
-extern "C" {
+unsafe extern "C" {
     /// MA57AD — symbolic analysis.
     ///
     /// ```text

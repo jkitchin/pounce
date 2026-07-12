@@ -35,7 +35,7 @@ pub mod fortran;
 pub mod solver;
 
 use pounce_algorithm::application::{
-    default_backend_factory, feral_config_from_options, IpoptApplication,
+    IpoptApplication, default_backend_factory, feral_config_from_options,
 };
 use pounce_algorithm::intermediate as ip_intermediate;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -46,10 +46,10 @@ use pounce_nlp::tnlp::{
 };
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
-    make_default_restoration_factory_provider, InnerBackendFactoryFactory,
+    InnerBackendFactoryFactory, make_default_restoration_factory_provider,
 };
 use std::cell::RefCell;
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::rc::Rc;
 
 /// Mirrors C `Number` typedef in `IpStdCInterface.h`.
@@ -242,7 +242,7 @@ pub type Intermediate_CB = unsafe extern "C" fn(
 /// `g_L`, `g_U` must be valid pointers to `m` `Number`s when `m > 0`.
 /// The callback function pointers must be valid for the lifetime of
 /// the returned [`IpoptProblem`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn CreateIpoptProblem(
     n: Index,
     x_L: *const Number,
@@ -259,72 +259,74 @@ pub unsafe extern "C" fn CreateIpoptProblem(
     eval_jac_g: Option<Eval_Jac_G_CB>,
     eval_h: Option<Eval_H_CB>,
 ) -> IpoptProblem {
-    // Install the tracing subscriber on first use so C consumers
-    // (cyipopt, AMPL, …) get logging and the iteration collector that
-    // backs `IpoptEnableIterHistory` (pounce#71). Idempotent.
-    pounce_observability::init_subscriber();
+    unsafe {
+        // Install the tracing subscriber on first use so C consumers
+        // (cyipopt, AMPL, …) get logging and the iteration collector that
+        // backs `IpoptEnableIterHistory` (pounce#71). Idempotent.
+        pounce_observability::init_subscriber();
 
-    if n < 0 || m < 0 || nele_jac < 0 || nele_hess < 0 {
-        return std::ptr::null_mut();
-    }
-    if !(0..=1).contains(&index_style) {
-        return std::ptr::null_mut();
-    }
-    if eval_f.is_none() || eval_grad_f.is_none() {
-        return std::ptr::null_mut();
-    }
-    if m > 0 && (eval_g.is_none() || eval_jac_g.is_none()) {
-        return std::ptr::null_mut();
-    }
-    if n > 0 && (x_L.is_null() || x_U.is_null()) {
-        return std::ptr::null_mut();
-    }
-    if m > 0 && (g_L.is_null() || g_U.is_null()) {
-        return std::ptr::null_mut();
-    }
+        if n < 0 || m < 0 || nele_jac < 0 || nele_hess < 0 {
+            return std::ptr::null_mut();
+        }
+        if !(0..=1).contains(&index_style) {
+            return std::ptr::null_mut();
+        }
+        if eval_f.is_none() || eval_grad_f.is_none() {
+            return std::ptr::null_mut();
+        }
+        if m > 0 && (eval_g.is_none() || eval_jac_g.is_none()) {
+            return std::ptr::null_mut();
+        }
+        if n > 0 && (x_L.is_null() || x_U.is_null()) {
+            return std::ptr::null_mut();
+        }
+        if m > 0 && (g_L.is_null() || g_U.is_null()) {
+            return std::ptr::null_mut();
+        }
 
-    let x_l = if n > 0 {
-        std::slice::from_raw_parts(x_L, n as usize).to_vec()
-    } else {
-        Vec::new()
-    };
-    let x_u = if n > 0 {
-        std::slice::from_raw_parts(x_U, n as usize).to_vec()
-    } else {
-        Vec::new()
-    };
-    let g_l_vec = if m > 0 {
-        std::slice::from_raw_parts(g_L, m as usize).to_vec()
-    } else {
-        Vec::new()
-    };
-    let g_u_vec = if m > 0 {
-        std::slice::from_raw_parts(g_U, m as usize).to_vec()
-    } else {
-        Vec::new()
-    };
+        let x_l = if n > 0 {
+            std::slice::from_raw_parts(x_L, n as usize).to_vec()
+        } else {
+            Vec::new()
+        };
+        let x_u = if n > 0 {
+            std::slice::from_raw_parts(x_U, n as usize).to_vec()
+        } else {
+            Vec::new()
+        };
+        let g_l_vec = if m > 0 {
+            std::slice::from_raw_parts(g_L, m as usize).to_vec()
+        } else {
+            Vec::new()
+        };
+        let g_u_vec = if m > 0 {
+            std::slice::from_raw_parts(g_U, m as usize).to_vec()
+        } else {
+            Vec::new()
+        };
 
-    let info = Box::new(IpoptProblemInfo {
-        app: IpoptApplication::new(),
-        n,
-        m,
-        nele_jac,
-        nele_hess,
-        index_style,
-        x_l,
-        x_u,
-        g_l: g_l_vec,
-        g_u: g_u_vec,
-        eval_f,
-        eval_g,
-        eval_grad_f,
-        eval_jac_g,
-        eval_h,
-        intermediate_cb: None,
-        user_scaling: None,
-        last_solve: None,
-    });
-    Box::into_raw(info)
+        let info = Box::new(IpoptProblemInfo {
+            app: IpoptApplication::new(),
+            n,
+            m,
+            nele_jac,
+            nele_hess,
+            index_style,
+            x_l,
+            x_u,
+            g_l: g_l_vec,
+            g_u: g_u_vec,
+            eval_f,
+            eval_g,
+            eval_grad_f,
+            eval_jac_g,
+            eval_h,
+            intermediate_cb: None,
+            user_scaling: None,
+            last_solve: None,
+        });
+        Box::into_raw(info)
+    }
 }
 
 /// Port of `IpStdCInterface.cpp:FreeIpoptProblem`.
@@ -333,19 +335,23 @@ pub unsafe extern "C" fn CreateIpoptProblem(
 ///
 /// `ipopt_problem` must be a pointer previously returned by
 /// [`CreateIpoptProblem`] and not yet freed, or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn FreeIpoptProblem(ipopt_problem: IpoptProblem) {
-    if ipopt_problem.is_null() {
-        return;
+    unsafe {
+        if ipopt_problem.is_null() {
+            return;
+        }
+        drop(Box::from_raw(ipopt_problem));
     }
-    drop(Box::from_raw(ipopt_problem));
 }
 
 unsafe fn keyword_str<'a>(keyword: *const c_char) -> Option<&'a str> {
-    if keyword.is_null() {
-        return None;
+    unsafe {
+        if keyword.is_null() {
+            return None;
+        }
+        CStr::from_ptr(keyword).to_str().ok()
     }
-    CStr::from_ptr(keyword).to_str().ok()
 }
 
 /// Port of `IpStdCInterface.cpp:AddIpoptStrOption`.
@@ -354,28 +360,30 @@ unsafe fn keyword_str<'a>(keyword: *const c_char) -> Option<&'a str> {
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem`. `keyword` and `val`
 /// must be valid NUL-terminated strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn AddIpoptStrOption(
     ipopt_problem: IpoptProblem,
     keyword: *const c_char,
     val: *const c_char,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
-    }
-    let info = &mut *ipopt_problem;
-    let Some(k) = keyword_str(keyword) else {
-        return FALSE;
-    };
-    if val.is_null() {
-        return FALSE;
-    }
-    let Ok(v) = CStr::from_ptr(val).to_str() else {
-        return FALSE;
-    };
-    match info.app.options_mut().set_string_value(k, v, true, false) {
-        Ok(_) => TRUE,
-        Err(_) => FALSE,
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        let Some(k) = keyword_str(keyword) else {
+            return FALSE;
+        };
+        if val.is_null() {
+            return FALSE;
+        }
+        let Ok(v) = CStr::from_ptr(val).to_str() else {
+            return FALSE;
+        };
+        match info.app.options_mut().set_string_value(k, v, true, false) {
+            Ok(_) => TRUE,
+            Err(_) => FALSE,
+        }
     }
 }
 
@@ -385,26 +393,28 @@ pub unsafe extern "C" fn AddIpoptStrOption(
 ///
 /// `keyword` must be a valid NUL-terminated string and
 /// `ipopt_problem` must be a valid `IpoptProblem`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn AddIpoptNumOption(
     ipopt_problem: IpoptProblem,
     keyword: *const c_char,
     val: Number,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
-    }
-    let info = &mut *ipopt_problem;
-    let Some(k) = keyword_str(keyword) else {
-        return FALSE;
-    };
-    match info
-        .app
-        .options_mut()
-        .set_numeric_value(k, val, true, false)
-    {
-        Ok(_) => TRUE,
-        Err(_) => FALSE,
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        let Some(k) = keyword_str(keyword) else {
+            return FALSE;
+        };
+        match info
+            .app
+            .options_mut()
+            .set_numeric_value(k, val, true, false)
+        {
+            Ok(_) => TRUE,
+            Err(_) => FALSE,
+        }
     }
 }
 
@@ -414,27 +424,29 @@ pub unsafe extern "C" fn AddIpoptNumOption(
 ///
 /// `keyword` must be a valid NUL-terminated string and
 /// `ipopt_problem` must be a valid `IpoptProblem`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn AddIpoptIntOption(
     ipopt_problem: IpoptProblem,
     keyword: *const c_char,
     val: Index,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
-    }
-    let info = &mut *ipopt_problem;
-    let Some(k) = keyword_str(keyword) else {
-        return FALSE;
-    };
-    match info.app.options_mut().set_integer_value(
-        k,
-        val as pounce_common::types::Index,
-        true,
-        false,
-    ) {
-        Ok(_) => TRUE,
-        Err(_) => FALSE,
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        let Some(k) = keyword_str(keyword) else {
+            return FALSE;
+        };
+        match info.app.options_mut().set_integer_value(
+            k,
+            val as pounce_common::types::Index,
+            true,
+            false,
+        ) {
+            Ok(_) => TRUE,
+            Err(_) => FALSE,
+        }
     }
 }
 
@@ -451,23 +463,25 @@ pub unsafe extern "C" fn AddIpoptIntOption(
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem`. `file_name` must
 /// be a valid NUL-terminated string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn OpenIpoptOutputFile(
     ipopt_problem: IpoptProblem,
     file_name: *const c_char,
     print_level: c_int,
 ) -> Bool {
-    if ipopt_problem.is_null() || file_name.is_null() {
-        return FALSE;
-    }
-    let info = &mut *ipopt_problem;
-    let Ok(fname) = CStr::from_ptr(file_name).to_str() else {
-        return FALSE;
-    };
-    if info.app.open_output_file(fname, print_level) {
-        TRUE
-    } else {
-        FALSE
+    unsafe {
+        if ipopt_problem.is_null() || file_name.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        let Ok(fname) = CStr::from_ptr(file_name).to_str() else {
+            return FALSE;
+        };
+        if info.app.open_output_file(fname, print_level) {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 }
 
@@ -484,35 +498,37 @@ pub unsafe extern "C" fn OpenIpoptOutputFile(
 /// `ipopt_problem` must be a valid `IpoptProblem`. When non-NULL,
 /// `x_scaling` must point to `n` doubles and `g_scaling` to `m`
 /// doubles; both arrays are copied internally.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetIpoptProblemScaling(
     ipopt_problem: IpoptProblem,
     obj_scaling: Number,
     x_scaling: *const Number,
     g_scaling: *const Number,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        let n = info.n as usize;
+        let m = info.m as usize;
+        let x_vec = if !x_scaling.is_null() && n > 0 {
+            Some(std::slice::from_raw_parts(x_scaling, n).to_vec())
+        } else {
+            None
+        };
+        let g_vec = if !g_scaling.is_null() && m > 0 {
+            Some(std::slice::from_raw_parts(g_scaling, m).to_vec())
+        } else {
+            None
+        };
+        info.user_scaling = Some(UserScaling {
+            obj_scaling,
+            x_scaling: x_vec,
+            g_scaling: g_vec,
+        });
+        TRUE
     }
-    let info = &mut *ipopt_problem;
-    let n = info.n as usize;
-    let m = info.m as usize;
-    let x_vec = if !x_scaling.is_null() && n > 0 {
-        Some(std::slice::from_raw_parts(x_scaling, n).to_vec())
-    } else {
-        None
-    };
-    let g_vec = if !g_scaling.is_null() && m > 0 {
-        Some(std::slice::from_raw_parts(g_scaling, m).to_vec())
-    } else {
-        None
-    };
-    info.user_scaling = Some(UserScaling {
-        obj_scaling,
-        x_scaling: x_vec,
-        g_scaling: g_vec,
-    });
-    TRUE
 }
 
 /// Port of `IpStdCInterface.cpp:IpoptSolve`. Returns the
@@ -529,7 +545,7 @@ pub unsafe extern "C" fn SetIpoptProblemScaling(
 /// `mult_g`, `mult_x_L`, `mult_x_U` are out-only (sizes `m, m, n, n`)
 /// and may be NULL when the corresponding output is not desired.
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolve(
     ipopt_problem: IpoptProblem,
     x: *mut Number,
@@ -540,119 +556,121 @@ pub unsafe extern "C" fn IpoptSolve(
     mult_x_U: *mut Number,
     user_data: *mut c_void,
 ) -> Index {
-    if ipopt_problem.is_null() {
-        return ApplicationReturnStatus::InternalError as Index;
+    unsafe {
+        if ipopt_problem.is_null() {
+            return ApplicationReturnStatus::InternalError as Index;
+        }
+        // Invalidate the retained stats up front, before the solve is attempted.
+        // The `last_solve` snapshot is only repopulated at the *end* of a
+        // completed solve, so if the guarded body below bails early or a panic is
+        // caught (returning `Internal_Error`), the post-solve accessors
+        // (`GetIpoptIterCount`, `IpoptWriteSolveReport`, …) must not silently
+        // report the *previous* solve's stats. Clearing here makes the
+        // failure-consistent state "no data" rather than stale data (F5).
+        (*ipopt_problem).last_solve = None;
+        // Guard the whole solve: `optimize_tnlp` runs the entire pounce core and
+        // callback bridge, any of which could panic on an unexpected internal
+        // state. Without this, such a panic would unwind across `extern "C"` and
+        // abort the embedding process; instead we report `Internal_Error`,
+        // matching upstream Ipopt's exception handling. (See `ffi_guard`.)
+        ffi_guard(ApplicationReturnStatus::InternalError as Index, || {
+            let info = &mut *ipopt_problem;
+            if info.n < 0 || info.m < 0 {
+                return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+            }
+            if info.n > 0 && x.is_null() {
+                return ApplicationReturnStatus::InvalidProblemDefinition as Index;
+            }
+
+            let n_us = info.n as usize;
+            let m_us = info.m as usize;
+            let initial_x = if n_us > 0 {
+                std::slice::from_raw_parts(x, n_us).to_vec()
+            } else {
+                Vec::new()
+            };
+
+            let bridge = Rc::new(RefCell::new(CCallbackTnlp {
+                n: info.n,
+                m: info.m,
+                nele_jac: info.nele_jac,
+                nele_hess: info.nele_hess,
+                index_style: info.index_style,
+                x_l: info.x_l.clone(),
+                x_u: info.x_u.clone(),
+                g_l: info.g_l.clone(),
+                g_u: info.g_u.clone(),
+                initial_x,
+                eval_f: info.eval_f,
+                eval_grad_f: info.eval_grad_f,
+                eval_g: info.eval_g,
+                eval_jac_g: info.eval_jac_g,
+                eval_h: info.eval_h,
+                user_data,
+                intermediate_cb: info.intermediate_cb,
+                user_scaling: info.user_scaling.clone(),
+                final_status: None,
+                final_x: vec![0.0; n_us],
+                final_z_l: vec![0.0; n_us],
+                final_z_u: vec![0.0; n_us],
+                final_g: vec![0.0; m_us],
+                final_lambda: vec![0.0; m_us],
+                final_obj: 0.0,
+            }));
+
+            // Wire the restoration phase fresh for this solve. Without it, any
+            // line-search failure surfaces as `RestorationFailure` instead of
+            // falling back into the ℓ1-feasibility sub-IPM — exactly what the
+            // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
+            // repeated solves on the same `IpoptProblem`. The feral config is
+            // snapshot from the now-fully-populated options so `feral_*`
+            // overrides flow into the restoration sub-IPM too. Use the multi-pass
+            // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
+            // second inner solve (pounce#10 Phase 3 / pounce#24).
+            let feral_cfg = feral_config_from_options(info.app.options());
+            let bff_mint = move || -> InnerBackendFactoryFactory {
+                let feral_cfg = feral_cfg.clone();
+                Box::new(move || default_backend_factory(feral_cfg.clone()))
+            };
+            let resto_provider = make_default_restoration_factory_provider(
+                RestoAlgorithmBuilder::new(),
+                info.app.algorithm_builder_from_options(),
+                bff_mint,
+            );
+            info.app.set_restoration_factory_provider(resto_provider);
+
+            let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
+            let status = info.app.optimize_tnlp(bridge_for_solve);
+            let bridge_ref = bridge.borrow();
+            info.last_solve = Some(LastSolve {
+                stats: info.app.statistics(),
+                status,
+                linear_solver: info.app.linear_solver_summary(),
+                final_x: bridge_ref.final_x.clone(),
+                final_lambda: bridge_ref.final_lambda.clone(),
+                final_obj: bridge_ref.final_obj,
+            });
+            if !x.is_null() && n_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
+            }
+            if !g.is_null() && m_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
+            }
+            if !obj_val.is_null() {
+                *obj_val = bridge_ref.final_obj;
+            }
+            if !mult_g.is_null() && m_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
+            }
+            if !mult_x_L.is_null() && n_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
+            }
+            if !mult_x_U.is_null() && n_us > 0 {
+                std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
+            }
+            status as Index
+        })
     }
-    // Invalidate the retained stats up front, before the solve is attempted.
-    // The `last_solve` snapshot is only repopulated at the *end* of a
-    // completed solve, so if the guarded body below bails early or a panic is
-    // caught (returning `Internal_Error`), the post-solve accessors
-    // (`GetIpoptIterCount`, `IpoptWriteSolveReport`, …) must not silently
-    // report the *previous* solve's stats. Clearing here makes the
-    // failure-consistent state "no data" rather than stale data (F5).
-    (*ipopt_problem).last_solve = None;
-    // Guard the whole solve: `optimize_tnlp` runs the entire pounce core and
-    // callback bridge, any of which could panic on an unexpected internal
-    // state. Without this, such a panic would unwind across `extern "C"` and
-    // abort the embedding process; instead we report `Internal_Error`,
-    // matching upstream Ipopt's exception handling. (See `ffi_guard`.)
-    ffi_guard(ApplicationReturnStatus::InternalError as Index, || unsafe {
-        let info = &mut *ipopt_problem;
-        if info.n < 0 || info.m < 0 {
-            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-        }
-        if info.n > 0 && x.is_null() {
-            return ApplicationReturnStatus::InvalidProblemDefinition as Index;
-        }
-
-        let n_us = info.n as usize;
-        let m_us = info.m as usize;
-        let initial_x = if n_us > 0 {
-            std::slice::from_raw_parts(x, n_us).to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let bridge = Rc::new(RefCell::new(CCallbackTnlp {
-            n: info.n,
-            m: info.m,
-            nele_jac: info.nele_jac,
-            nele_hess: info.nele_hess,
-            index_style: info.index_style,
-            x_l: info.x_l.clone(),
-            x_u: info.x_u.clone(),
-            g_l: info.g_l.clone(),
-            g_u: info.g_u.clone(),
-            initial_x,
-            eval_f: info.eval_f,
-            eval_grad_f: info.eval_grad_f,
-            eval_g: info.eval_g,
-            eval_jac_g: info.eval_jac_g,
-            eval_h: info.eval_h,
-            user_data,
-            intermediate_cb: info.intermediate_cb,
-            user_scaling: info.user_scaling.clone(),
-            final_status: None,
-            final_x: vec![0.0; n_us],
-            final_z_l: vec![0.0; n_us],
-            final_z_u: vec![0.0; n_us],
-            final_g: vec![0.0; m_us],
-            final_lambda: vec![0.0; m_us],
-            final_obj: 0.0,
-        }));
-
-        // Wire the restoration phase fresh for this solve. Without it, any
-        // line-search failure surfaces as `RestorationFailure` instead of
-        // falling back into the ℓ1-feasibility sub-IPM — exactly what the
-        // CLI driver does. Re-wire per `IpoptSolve` to stay correct across
-        // repeated solves on the same `IpoptProblem`. The feral config is
-        // snapshot from the now-fully-populated options so `feral_*`
-        // overrides flow into the restoration sub-IPM too. Use the multi-pass
-        // provider so the ℓ₁ wrapper / auto-fallback don't panic on the
-        // second inner solve (pounce#10 Phase 3 / pounce#24).
-        let feral_cfg = feral_config_from_options(info.app.options());
-        let bff_mint = move || -> InnerBackendFactoryFactory {
-            let feral_cfg = feral_cfg.clone();
-            Box::new(move || default_backend_factory(feral_cfg.clone()))
-        };
-        let resto_provider = make_default_restoration_factory_provider(
-            RestoAlgorithmBuilder::new(),
-            info.app.algorithm_builder_from_options(),
-            bff_mint,
-        );
-        info.app.set_restoration_factory_provider(resto_provider);
-
-        let bridge_for_solve: Rc<RefCell<dyn TNLP>> = bridge.clone();
-        let status = info.app.optimize_tnlp(bridge_for_solve);
-        let bridge_ref = bridge.borrow();
-        info.last_solve = Some(LastSolve {
-            stats: info.app.statistics(),
-            status,
-            linear_solver: info.app.linear_solver_summary(),
-            final_x: bridge_ref.final_x.clone(),
-            final_lambda: bridge_ref.final_lambda.clone(),
-            final_obj: bridge_ref.final_obj,
-        });
-        if !x.is_null() && n_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_x.as_ptr(), x, n_us);
-        }
-        if !g.is_null() && m_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_g.as_ptr(), g, m_us);
-        }
-        if !obj_val.is_null() {
-            *obj_val = bridge_ref.final_obj;
-        }
-        if !mult_g.is_null() && m_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_lambda.as_ptr(), mult_g, m_us);
-        }
-        if !mult_x_L.is_null() && n_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_z_l.as_ptr(), mult_x_L, n_us);
-        }
-        if !mult_x_U.is_null() && n_us > 0 {
-            std::ptr::copy_nonoverlapping(bridge_ref.final_z_u.as_ptr(), mult_x_U, n_us);
-        }
-        status as Index
-    })
 }
 
 /// Port of `SetIntermediateCallback`.
@@ -660,17 +678,19 @@ pub unsafe extern "C" fn IpoptSolve(
 /// # Safety
 ///
 /// `ipopt_problem` must be valid.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetIntermediateCallback(
     ipopt_problem: IpoptProblem,
     intermediate_cb: Option<Intermediate_CB>,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        info.intermediate_cb = intermediate_cb;
+        TRUE
     }
-    let info = &mut *ipopt_problem;
-    info.intermediate_cb = intermediate_cb;
-    TRUE
 }
 
 /// Port of `IpStdCInterface.cpp:GetIpoptCurrentIterate` (Ipopt 3.14+).
@@ -696,7 +716,7 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 /// `ipopt_problem` must be a valid `IpoptProblem`. Each output buffer,
 /// when non-NULL, must hold at least the declared length.
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptCurrentIterate(
     ipopt_problem: IpoptProblem,
     _scaled: Bool,
@@ -708,63 +728,61 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
     g: *mut Number,
     lambda: *mut Number,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
-    }
-    let info = &*ipopt_problem;
-    if n != info.n || m != info.m {
-        return FALSE;
-    }
-    let result = ip_intermediate::with_current(|ctx| {
-        let data = ctx.data.borrow();
-        let Some(curr) = data.curr.as_ref() else {
-            return false;
-        };
-        let nlp = ctx.nlp.borrow();
-        let n_us = n as usize;
-        let m_us = m as usize;
-        if !x.is_null() && n_us > 0 {
-            let full_x = nlp.lift_x_to_full(&*curr.x);
-            if full_x.len() != n_us {
-                return false;
-            }
-            std::ptr::copy_nonoverlapping(full_x.as_ptr(), x, n_us);
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
         }
-        if !z_l.is_null() && n_us > 0 {
-            let full = nlp.pack_z_l_for_user(&*curr.z_l);
-            if full.len() != n_us {
-                return false;
-            }
-            std::ptr::copy_nonoverlapping(full.as_ptr(), z_l, n_us);
+        let info = &*ipopt_problem;
+        if n != info.n || m != info.m {
+            return FALSE;
         }
-        if !z_u.is_null() && n_us > 0 {
-            let full = nlp.pack_z_u_for_user(&*curr.z_u);
-            if full.len() != n_us {
+        let result = ip_intermediate::with_current(|ctx| {
+            let data = ctx.data.borrow();
+            let Some(curr) = data.curr.as_ref() else {
                 return false;
+            };
+            let nlp = ctx.nlp.borrow();
+            let n_us = n as usize;
+            let m_us = m as usize;
+            if !x.is_null() && n_us > 0 {
+                let full_x = nlp.lift_x_to_full(&*curr.x);
+                if full_x.len() != n_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(full_x.as_ptr(), x, n_us);
             }
-            std::ptr::copy_nonoverlapping(full.as_ptr(), z_u, n_us);
-        }
-        if !g.is_null() && m_us > 0 {
-            let cq = ctx.cq.borrow();
-            let full = nlp.pack_g_for_user(&*cq.curr_c(), &*cq.curr_d());
-            if full.len() != m_us {
-                return false;
+            if !z_l.is_null() && n_us > 0 {
+                let full = nlp.pack_z_l_for_user(&*curr.z_l);
+                if full.len() != n_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(full.as_ptr(), z_l, n_us);
             }
-            std::ptr::copy_nonoverlapping(full.as_ptr(), g, m_us);
-        }
-        if !lambda.is_null() && m_us > 0 {
-            let full = nlp.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
-            if full.len() != m_us {
-                return false;
+            if !z_u.is_null() && n_us > 0 {
+                let full = nlp.pack_z_u_for_user(&*curr.z_u);
+                if full.len() != n_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(full.as_ptr(), z_u, n_us);
             }
-            std::ptr::copy_nonoverlapping(full.as_ptr(), lambda, m_us);
-        }
-        true
-    });
-    if result.unwrap_or(false) {
-        TRUE
-    } else {
-        FALSE
+            if !g.is_null() && m_us > 0 {
+                let cq = ctx.cq.borrow();
+                let full = nlp.pack_g_for_user(&*cq.curr_c(), &*cq.curr_d());
+                if full.len() != m_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(full.as_ptr(), g, m_us);
+            }
+            if !lambda.is_null() && m_us > 0 {
+                let full = nlp.pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                if full.len() != m_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(full.as_ptr(), lambda, m_us);
+            }
+            true
+        });
+        if result.unwrap_or(false) { TRUE } else { FALSE }
     }
 }
 
@@ -783,7 +801,7 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 /// `ipopt_problem` must be a valid `IpoptProblem`. Each output buffer,
 /// when non-NULL, must hold at least the declared length.
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptCurrentViolations(
     ipopt_problem: IpoptProblem,
     _scaled: Bool,
@@ -797,106 +815,104 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
     nlp_constraint_violation: *mut Number,
     compl_g: *mut Number,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
-    }
-    let info = &*ipopt_problem;
-    if n != info.n || m != info.m {
-        return FALSE;
-    }
-    let result = ip_intermediate::with_current(|ctx| {
-        let data = ctx.data.borrow();
-        let Some(_curr) = data.curr.as_ref() else {
-            return false;
-        };
-        drop(data);
-        let nlp = ctx.nlp.borrow();
-        let cq = ctx.cq.borrow();
-        let n_us = n as usize;
-        let m_us = m as usize;
-        // x_L / x_U violations: scatter the compressed slack-shortfalls
-        // up to full-`n`. Upstream defines `x_L_violation_i = max(0, x_L_i
-        // - x_i)`; the algorithm tracks `slack_x_l = P_L^T x - x_L`
-        // (always non-negative at feasible iterates), so reverse the
-        // sign and clamp.
-        if !x_l_violation.is_null() && n_us > 0 {
-            let slack = cq.curr_slack_x_l();
-            let z_l_full = nlp.pack_z_l_for_user(&*slack);
-            // Guard the scatter length exactly like the sibling branches
-            // below: an unexpected packed length would otherwise index
-            // `v[i]` out of bounds and panic across this `extern "C"`
-            // boundary (an abort, not a recoverable error).
-            if z_l_full.len() != n_us {
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        let info = &*ipopt_problem;
+        if n != info.n || m != info.m {
+            return FALSE;
+        }
+        let result = ip_intermediate::with_current(|ctx| {
+            let data = ctx.data.borrow();
+            let Some(_curr) = data.curr.as_ref() else {
                 return false;
+            };
+            drop(data);
+            let nlp = ctx.nlp.borrow();
+            let cq = ctx.cq.borrow();
+            let n_us = n as usize;
+            let m_us = m as usize;
+            // x_L / x_U violations: scatter the compressed slack-shortfalls
+            // up to full-`n`. Upstream defines `x_L_violation_i = max(0, x_L_i
+            // - x_i)`; the algorithm tracks `slack_x_l = P_L^T x - x_L`
+            // (always non-negative at feasible iterates), so reverse the
+            // sign and clamp.
+            if !x_l_violation.is_null() && n_us > 0 {
+                let slack = cq.curr_slack_x_l();
+                let z_l_full = nlp.pack_z_l_for_user(&*slack);
+                // Guard the scatter length exactly like the sibling branches
+                // below: an unexpected packed length would otherwise index
+                // `v[i]` out of bounds and panic across this `extern "C"`
+                // boundary (an abort, not a recoverable error).
+                if z_l_full.len() != n_us {
+                    return false;
+                }
+                // pack_z_l_for_user scatters by the same x_L mapping; the
+                // returned vector at full-x positions holds `slack_x_l[i]`
+                // which is `x_i - x_L_i`. Clamp the *negative* part to get
+                // the violation `max(0, x_L_i - x_i)`.
+                let mut v = vec![0.0; n_us];
+                for (i, s) in z_l_full.iter().enumerate() {
+                    v[i] = (-s).max(0.0);
+                }
+                std::ptr::copy_nonoverlapping(v.as_ptr(), x_l_violation, n_us);
             }
-            // pack_z_l_for_user scatters by the same x_L mapping; the
-            // returned vector at full-x positions holds `slack_x_l[i]`
-            // which is `x_i - x_L_i`. Clamp the *negative* part to get
-            // the violation `max(0, x_L_i - x_i)`.
-            let mut v = vec![0.0; n_us];
-            for (i, s) in z_l_full.iter().enumerate() {
-                v[i] = (-s).max(0.0);
+            if !x_u_violation.is_null() && n_us > 0 {
+                let slack = cq.curr_slack_x_u();
+                let s_full = nlp.pack_z_u_for_user(&*slack);
+                if s_full.len() != n_us {
+                    return false;
+                }
+                let mut v = vec![0.0; n_us];
+                for (i, s) in s_full.iter().enumerate() {
+                    v[i] = (-s).max(0.0);
+                }
+                std::ptr::copy_nonoverlapping(v.as_ptr(), x_u_violation, n_us);
             }
-            std::ptr::copy_nonoverlapping(v.as_ptr(), x_l_violation, n_us);
-        }
-        if !x_u_violation.is_null() && n_us > 0 {
-            let slack = cq.curr_slack_x_u();
-            let s_full = nlp.pack_z_u_for_user(&*slack);
-            if s_full.len() != n_us {
-                return false;
+            if !compl_x_l.is_null() && n_us > 0 {
+                let v = nlp.pack_z_l_for_user(&*cq.curr_compl_x_l());
+                if v.len() != n_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_l, n_us);
             }
-            let mut v = vec![0.0; n_us];
-            for (i, s) in s_full.iter().enumerate() {
-                v[i] = (-s).max(0.0);
+            if !compl_x_u.is_null() && n_us > 0 {
+                let v = nlp.pack_z_u_for_user(&*cq.curr_compl_x_u());
+                if v.len() != n_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_u, n_us);
             }
-            std::ptr::copy_nonoverlapping(v.as_ptr(), x_u_violation, n_us);
-        }
-        if !compl_x_l.is_null() && n_us > 0 {
-            let v = nlp.pack_z_l_for_user(&*cq.curr_compl_x_l());
-            if v.len() != n_us {
-                return false;
+            if !grad_lag_x.is_null() && n_us > 0 {
+                let glx = cq.curr_grad_lag_x();
+                // Scatter compressed x-var → full-x via lift_x_to_full
+                // (treats `glx` as if it were an x-vector). Fixed-variable
+                // slots remain zero.
+                let full = nlp.lift_x_to_full(&*glx);
+                if full.len() != n_us {
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(full.as_ptr(), grad_lag_x, n_us);
             }
-            std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_l, n_us);
-        }
-        if !compl_x_u.is_null() && n_us > 0 {
-            let v = nlp.pack_z_u_for_user(&*cq.curr_compl_x_u());
-            if v.len() != n_us {
-                return false;
+            if !nlp_constraint_violation.is_null() && m_us > 0 {
+                // Per-row equality and range violation reconstruction in
+                // full-g coordinates is a follow-up. The scalar
+                // `curr_primal_infeasibility_max` (== `inf_pr` reported in
+                // `IterStats`) is the outer summary; populate per-row
+                // detail as a future refinement and zero-fill for now.
+                let zero = vec![0.0; m_us];
+                std::ptr::copy_nonoverlapping(zero.as_ptr(), nlp_constraint_violation, m_us);
             }
-            std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_u, n_us);
-        }
-        if !grad_lag_x.is_null() && n_us > 0 {
-            let glx = cq.curr_grad_lag_x();
-            // Scatter compressed x-var → full-x via lift_x_to_full
-            // (treats `glx` as if it were an x-vector). Fixed-variable
-            // slots remain zero.
-            let full = nlp.lift_x_to_full(&*glx);
-            if full.len() != n_us {
-                return false;
+            if !compl_g.is_null() && m_us > 0 {
+                // Per-row constraint complementarity (`v_L .* s_L` /
+                // `v_U .* s_U` mapped back to full-g) is also a follow-up.
+                let zero = vec![0.0; m_us];
+                std::ptr::copy_nonoverlapping(zero.as_ptr(), compl_g, m_us);
             }
-            std::ptr::copy_nonoverlapping(full.as_ptr(), grad_lag_x, n_us);
-        }
-        if !nlp_constraint_violation.is_null() && m_us > 0 {
-            // Per-row equality and range violation reconstruction in
-            // full-g coordinates is a follow-up. The scalar
-            // `curr_primal_infeasibility_max` (== `inf_pr` reported in
-            // `IterStats`) is the outer summary; populate per-row
-            // detail as a future refinement and zero-fill for now.
-            let zero = vec![0.0; m_us];
-            std::ptr::copy_nonoverlapping(zero.as_ptr(), nlp_constraint_violation, m_us);
-        }
-        if !compl_g.is_null() && m_us > 0 {
-            // Per-row constraint complementarity (`v_L .* s_L` /
-            // `v_U .* s_U` mapped back to full-g) is also a follow-up.
-            let zero = vec![0.0; m_us];
-            std::ptr::copy_nonoverlapping(zero.as_ptr(), compl_g, m_us);
-        }
-        true
-    });
-    if result.unwrap_or(false) {
-        TRUE
-    } else {
-        FALSE
+            true
+        });
+        if result.unwrap_or(false) { TRUE } else { FALSE }
     }
 }
 
@@ -907,25 +923,27 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
 /// # Safety
 ///
 /// Each non-NULL pointer must point at a writable `int`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptVersion(
     major: *mut c_int,
     minor: *mut c_int,
     release: *mut c_int,
 ) {
-    // Read from Cargo at compile time so the symbol always matches the
-    // shipped binary. `unwrap_or(0)` keeps the function infallible if a
-    // component is missing from the manifest (shouldn't happen in
-    // practice — workspace manifest requires SemVer triples).
-    let (mj, mn, pt) = parse_pkg_version(env!("CARGO_PKG_VERSION"));
-    if !major.is_null() {
-        *major = mj;
-    }
-    if !minor.is_null() {
-        *minor = mn;
-    }
-    if !release.is_null() {
-        *release = pt;
+    unsafe {
+        // Read from Cargo at compile time so the symbol always matches the
+        // shipped binary. `unwrap_or(0)` keeps the function infallible if a
+        // component is missing from the manifest (shouldn't happen in
+        // practice — workspace manifest requires SemVer triples).
+        let (mj, mn, pt) = parse_pkg_version(env!("CARGO_PKG_VERSION"));
+        if !major.is_null() {
+            *major = mj;
+        }
+        if !minor.is_null() {
+            *minor = mn;
+        }
+        if !release.is_null() {
+            *release = pt;
+        }
     }
 }
 
@@ -954,9 +972,9 @@ fn parse_pkg_version(v: &str) -> (c_int, c_int, c_int) {
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptIterCount(ipopt_problem: IpoptProblem) -> Index {
-    last_stat(ipopt_problem, |s| s.iteration_count).unwrap_or(0)
+    unsafe { last_stat(ipopt_problem, |s| s.iteration_count).unwrap_or(0) }
 }
 
 /// Wall-clock solve time in seconds for the most recent solve, or
@@ -965,9 +983,9 @@ pub unsafe extern "C" fn GetIpoptIterCount(ipopt_problem: IpoptProblem) -> Index
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptSolveTime(ipopt_problem: IpoptProblem) -> Number {
-    last_stat(ipopt_problem, |s| s.total_wallclock_time_secs).unwrap_or(0.0)
+    unsafe { last_stat(ipopt_problem, |s| s.total_wallclock_time_secs).unwrap_or(0.0) }
 }
 
 /// Final primal infeasibility (max constraint violation) for the most
@@ -976,9 +994,9 @@ pub unsafe extern "C" fn GetIpoptSolveTime(ipopt_problem: IpoptProblem) -> Numbe
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptPrimalInf(ipopt_problem: IpoptProblem) -> Number {
-    last_stat(ipopt_problem, |s| s.final_constr_viol).unwrap_or(0.0)
+    unsafe { last_stat(ipopt_problem, |s| s.final_constr_viol).unwrap_or(0.0) }
 }
 
 /// Final dual infeasibility (max gradient-of-Lagrangian norm) for the
@@ -987,9 +1005,9 @@ pub unsafe extern "C" fn GetIpoptPrimalInf(ipopt_problem: IpoptProblem) -> Numbe
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptDualInf(ipopt_problem: IpoptProblem) -> Number {
-    last_stat(ipopt_problem, |s| s.final_dual_inf).unwrap_or(0.0)
+    unsafe { last_stat(ipopt_problem, |s| s.final_dual_inf).unwrap_or(0.0) }
 }
 
 /// Final complementarity error for the most recent solve.
@@ -997,19 +1015,21 @@ pub unsafe extern "C" fn GetIpoptDualInf(ipopt_problem: IpoptProblem) -> Number 
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptComplInf(ipopt_problem: IpoptProblem) -> Number {
-    last_stat(ipopt_problem, |s| s.final_compl).unwrap_or(0.0)
+    unsafe { last_stat(ipopt_problem, |s| s.final_compl).unwrap_or(0.0) }
 }
 
 unsafe fn last_stat<T, F>(ipopt_problem: IpoptProblem, f: F) -> Option<T>
 where
     F: FnOnce(&SolveStatistics) -> T,
 {
-    if ipopt_problem.is_null() {
-        return None;
+    unsafe {
+        if ipopt_problem.is_null() {
+            return None;
+        }
+        (*ipopt_problem).last_solve.as_ref().map(|ls| f(&ls.stats))
     }
-    (*ipopt_problem).last_solve.as_ref().map(|ls| f(&ls.stats))
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1078,31 +1098,33 @@ fn int_to_cons_status(v: c_int) -> Option<pounce_qp::ConsStatus> {
 /// `ipopt_problem` must be a valid `IpoptProblem`. Output
 /// buffers (when non-NULL) must be sized at least `n` and `m`
 /// respectively.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptGetWorkingSet(
     ipopt_problem: IpoptProblem,
     bound_status_out: *mut IpoptBoundStatus,
     cons_status_out: *mut IpoptConsStatus,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
-    }
-    let info = &*ipopt_problem;
-    let ws = match info.app.last_sqp_working_set() {
-        Some(w) => w,
-        None => return FALSE,
-    };
-    if !bound_status_out.is_null() {
-        for (i, &s) in ws.bounds.iter().enumerate() {
-            *bound_status_out.add(i) = bound_status_to_int(s);
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
         }
-    }
-    if !cons_status_out.is_null() {
-        for (i, &s) in ws.constraints.iter().enumerate() {
-            *cons_status_out.add(i) = cons_status_to_int(s);
+        let info = &*ipopt_problem;
+        let ws = match info.app.last_sqp_working_set() {
+            Some(w) => w,
+            None => return FALSE,
+        };
+        if !bound_status_out.is_null() {
+            for (i, &s) in ws.bounds.iter().enumerate() {
+                *bound_status_out.add(i) = bound_status_to_int(s);
+            }
         }
+        if !cons_status_out.is_null() {
+            for (i, &s) in ws.constraints.iter().enumerate() {
+                *cons_status_out.add(i) = cons_status_to_int(s);
+            }
+        }
+        TRUE
     }
-    TRUE
 }
 
 /// Supply a warm-start working set consumed by the next
@@ -1120,59 +1142,61 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
 /// `ipopt_problem` must be valid. `bound_status_in` (when
 /// non-NULL) must be sized `n`; `cons_status_in` (when non-NULL)
 /// must be sized `m`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
     ipopt_problem: IpoptProblem,
     bound_status_in: *const IpoptBoundStatus,
     cons_status_in: *const IpoptConsStatus,
 ) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
-    }
-    if bound_status_in.is_null() && cons_status_in.is_null() {
-        return FALSE;
-    }
-    let info = &mut *ipopt_problem;
-    let n = info.n.max(0) as usize;
-    let m = info.m.max(0) as usize;
-    let mut bounds = vec![pounce_qp::BoundStatus::Inactive; n];
-    if !bound_status_in.is_null() {
-        for i in 0..n {
-            let v = *bound_status_in.add(i);
-            match int_to_bound_status(v) {
-                Some(s) => bounds[i] = s,
-                None => return FALSE,
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        if bound_status_in.is_null() && cons_status_in.is_null() {
+            return FALSE;
+        }
+        let info = &mut *ipopt_problem;
+        let n = info.n.max(0) as usize;
+        let m = info.m.max(0) as usize;
+        let mut bounds = vec![pounce_qp::BoundStatus::Inactive; n];
+        if !bound_status_in.is_null() {
+            for i in 0..n {
+                let v = *bound_status_in.add(i);
+                match int_to_bound_status(v) {
+                    Some(s) => bounds[i] = s,
+                    None => return FALSE,
+                }
             }
         }
-    }
-    let mut constraints = vec![pounce_qp::ConsStatus::Inactive; m];
-    if !cons_status_in.is_null() {
-        for i in 0..m {
-            let v = *cons_status_in.add(i);
-            match int_to_cons_status(v) {
-                Some(s) => constraints[i] = s,
-                None => return FALSE,
+        let mut constraints = vec![pounce_qp::ConsStatus::Inactive; m];
+        if !cons_status_in.is_null() {
+            for i in 0..m {
+                let v = *cons_status_in.add(i);
+                match int_to_cons_status(v) {
+                    Some(s) => constraints[i] = s,
+                    None => return FALSE,
+                }
             }
         }
+        // We do *not* know the primal/dual iterate here — the caller
+        // either left them at default zeros (cold) or already wrote
+        // them into `x` before calling `IpoptSolve`. We seed
+        // `SqpIterates` with zeros; `IpoptSolve` will use its `x`
+        // argument as the starting point (the SqpProblemSpec adapter
+        // wraps `IpoptNlp::get_starting_x`, which the C path
+        // initializes from the user-supplied `x` buffer).
+        info.app
+            .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
+                x: vec![0.0; n],
+                lambda_g: vec![0.0; m],
+                lambda_x: vec![0.0; n],
+                working: Some(pounce_qp::WorkingSet {
+                    bounds,
+                    constraints,
+                }),
+            });
+        TRUE
     }
-    // We do *not* know the primal/dual iterate here — the caller
-    // either left them at default zeros (cold) or already wrote
-    // them into `x` before calling `IpoptSolve`. We seed
-    // `SqpIterates` with zeros; `IpoptSolve` will use its `x`
-    // argument as the starting point (the SqpProblemSpec adapter
-    // wraps `IpoptNlp::get_starting_x`, which the C path
-    // initializes from the user-supplied `x` buffer).
-    info.app
-        .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
-            x: vec![0.0; n],
-            lambda_g: vec![0.0; m],
-            lambda_x: vec![0.0; n],
-            working: Some(pounce_qp::WorkingSet {
-                bounds,
-                constraints,
-            }),
-        });
-    TRUE
 }
 
 /// Drop any pending warm-start working set without solving. The
@@ -1181,13 +1205,15 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
 /// # Safety
 ///
 /// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptClearWarmStartWorkingSet(ipopt_problem: IpoptProblem) -> Bool {
-    if ipopt_problem.is_null() {
-        return FALSE;
+    unsafe {
+        if ipopt_problem.is_null() {
+            return FALSE;
+        }
+        (*ipopt_problem).app.clear_sqp_warm_start();
+        TRUE
     }
-    (*ipopt_problem).app.clear_sqp_warm_start();
-    TRUE
 }
 
 /// Convenience one-shot: equivalent to
@@ -1206,7 +1232,7 @@ pub unsafe extern "C" fn IpoptClearWarmStartWorkingSet(ipopt_problem: IpoptProbl
 /// `IpoptSolve` plus the working-set buffer sizes documented on
 /// `IpoptSetWarmStartWorkingSet` / `IpoptGetWorkingSet`.
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolveWarmStart(
     ipopt_problem: IpoptProblem,
     x: *mut Number,
@@ -1365,11 +1391,7 @@ impl TNLP for CCallbackTnlp {
                 self.user_data,
             )
         };
-        if ok != FALSE {
-            Some(obj)
-        } else {
-            None
-        }
+        if ok != FALSE { Some(obj) } else { None }
     }
 
     fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
@@ -1568,7 +1590,7 @@ impl TNLP for CCallbackTnlp {
 ///
 /// `ipopt_problem` must be a valid handle returned by
 /// [`CreateIpoptProblem`] (or `NULL`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptEnableIterHistory(ipopt_problem: IpoptProblem) -> Bool {
     if ipopt_problem.is_null() {
         return FALSE;
@@ -1598,14 +1620,14 @@ pub unsafe extern "C" fn IpoptEnableIterHistory(ipopt_problem: IpoptProblem) -> 
 /// `ipopt_problem` must be a valid handle; `path` must be a valid
 /// NUL-terminated UTF-8 string; `detail` must be NULL or a valid
 /// NUL-terminated UTF-8 string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptWriteSolveReport(
     ipopt_problem: IpoptProblem,
     path: *const c_char,
     detail: *const c_char,
 ) -> Bool {
     use pounce_solve_report::{
-        status_to_solve_result_num, write_report_file, InputDescriptor, ReportBuilder, ReportDetail,
+        InputDescriptor, ReportBuilder, ReportDetail, status_to_solve_result_num, write_report_file,
     };
 
     // Guard the report build/write: it clones the retained iterate and runs
@@ -1898,9 +1920,11 @@ mod tests {
         obj_value: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        let v = *x.offset(0);
-        *obj_value = (v - 2.0) * (v - 2.0);
-        TRUE
+        unsafe {
+            let v = *x.offset(0);
+            *obj_value = (v - 2.0) * (v - 2.0);
+            TRUE
+        }
     }
     unsafe extern "C" fn quad_eval_grad_f(
         _n: Index,
@@ -1909,9 +1933,11 @@ mod tests {
         grad: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        let v = *x.offset(0);
-        *grad.offset(0) = 2.0 * (v - 2.0);
-        TRUE
+        unsafe {
+            let v = *x.offset(0);
+            *grad.offset(0) = 2.0 * (v - 2.0);
+            TRUE
+        }
     }
     unsafe extern "C" fn quad_eval_h(
         _n: Index,
@@ -1927,15 +1953,17 @@ mod tests {
         values: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        if !irow.is_null() && !jcol.is_null() && values.is_null() {
-            *irow.offset(0) = 0;
-            *jcol.offset(0) = 0;
-        } else if irow.is_null() && jcol.is_null() && !values.is_null() {
-            *values.offset(0) = 2.0 * obj_factor;
-        } else {
-            return FALSE;
+        unsafe {
+            if !irow.is_null() && !jcol.is_null() && values.is_null() {
+                *irow.offset(0) = 0;
+                *jcol.offset(0) = 0;
+            } else if irow.is_null() && jcol.is_null() && !values.is_null() {
+                *values.offset(0) = 2.0 * obj_factor;
+            } else {
+                return FALSE;
+            }
+            TRUE
         }
-        TRUE
     }
 
     #[test]
@@ -2385,8 +2413,10 @@ mod tests {
         g: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        *g.offset(0) = *x.offset(0);
-        TRUE
+        unsafe {
+            *g.offset(0) = *x.offset(0);
+            TRUE
+        }
     }
     unsafe extern "C" fn cb_quad_eval_jac_g(
         _n: Index,
@@ -2399,15 +2429,17 @@ mod tests {
         values: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        assert_eq!(nele_jac, 1);
-        if !irow.is_null() {
-            *irow.offset(0) = 0;
-            *jcol.offset(0) = 0;
+        unsafe {
+            assert_eq!(nele_jac, 1);
+            if !irow.is_null() {
+                *irow.offset(0) = 0;
+                *jcol.offset(0) = 0;
+            }
+            if !values.is_null() {
+                *values.offset(0) = 1.0;
+            }
+            TRUE
         }
-        if !values.is_null() {
-            *values.offset(0) = 1.0;
-        }
-        TRUE
     }
     unsafe extern "C" fn cb_quad_eval_h(
         _n: Index,
@@ -2423,14 +2455,16 @@ mod tests {
         values: *mut Number,
         _user_data: *mut c_void,
     ) -> Bool {
-        if !irow.is_null() {
-            *irow.offset(0) = 0;
-            *jcol.offset(0) = 0;
+        unsafe {
+            if !irow.is_null() {
+                *irow.offset(0) = 0;
+                *jcol.offset(0) = 0;
+            }
+            if !values.is_null() {
+                *values.offset(0) = 2.0 * obj_factor;
+            }
+            TRUE
         }
-        if !values.is_null() {
-            *values.offset(0) = 2.0 * obj_factor;
-        }
-        TRUE
     }
 
     fn create_callback_test_problem() -> IpoptProblem {
@@ -2478,27 +2512,29 @@ mod tests {
         _ls_trials: Index,
         user_data: *mut c_void,
     ) -> Bool {
-        CB_ITER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        CB_LAST_ITER.store(iter_count, std::sync::atomic::Ordering::SeqCst);
-        // user_data carries the IpoptProblem so we can exercise the
-        // inspector from inside the callback.
-        let problem = user_data as IpoptProblem;
-        let mut x = [0.0_f64];
-        let rc = GetIpoptCurrentIterate(
-            problem,
-            FALSE,
-            1,
-            x.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            1,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        if rc == TRUE && x[0].is_finite() {
-            CB_INSPECTOR_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            CB_ITER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            CB_LAST_ITER.store(iter_count, std::sync::atomic::Ordering::SeqCst);
+            // user_data carries the IpoptProblem so we can exercise the
+            // inspector from inside the callback.
+            let problem = user_data as IpoptProblem;
+            let mut x = [0.0_f64];
+            let rc = GetIpoptCurrentIterate(
+                problem,
+                FALSE,
+                1,
+                x.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                1,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            if rc == TRUE && x[0].is_finite() {
+                CB_INSPECTOR_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            TRUE
         }
-        TRUE
     }
 
     #[test]
@@ -2586,35 +2622,37 @@ mod tests {
         _ls_trials: Index,
         user_data: *mut c_void,
     ) -> Bool {
-        let problem = user_data as IpoptProblem;
-        // Exercise the bound-violation branches (n=1, m=1) from inside an
-        // installed intermediate context. Pre-L51 these branches indexed
-        // `v[i]` without a length guard; the fix makes them return FALSE on
-        // a packed-length mismatch instead of panicking across `extern "C"`.
-        let mut x_l_viol = [f64::NAN];
-        let mut x_u_viol = [f64::NAN];
-        let rc = GetIpoptCurrentViolations(
-            problem,
-            FALSE,
-            1,
-            x_l_viol.as_mut_ptr(),
-            x_u_viol.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            1,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        if rc == TRUE
-            && x_l_viol[0].is_finite()
-            && x_l_viol[0] >= 0.0
-            && x_u_viol[0].is_finite()
-            && x_u_viol[0] >= 0.0
-        {
-            CB_VIOL_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            let problem = user_data as IpoptProblem;
+            // Exercise the bound-violation branches (n=1, m=1) from inside an
+            // installed intermediate context. Pre-L51 these branches indexed
+            // `v[i]` without a length guard; the fix makes them return FALSE on
+            // a packed-length mismatch instead of panicking across `extern "C"`.
+            let mut x_l_viol = [f64::NAN];
+            let mut x_u_viol = [f64::NAN];
+            let rc = GetIpoptCurrentViolations(
+                problem,
+                FALSE,
+                1,
+                x_l_viol.as_mut_ptr(),
+                x_u_viol.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                1,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            if rc == TRUE
+                && x_l_viol[0].is_finite()
+                && x_l_viol[0] >= 0.0
+                && x_u_viol[0].is_finite()
+                && x_u_viol[0] >= 0.0
+            {
+                CB_VIOL_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            TRUE
         }
-        TRUE
     }
 
     #[test]

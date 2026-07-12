@@ -35,8 +35,8 @@
 use crate::nl_tape::Tape;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, Solution,
-    SparsityRequest, StartingPoint, IDX_NAMES, TNLP,
+    BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, Solution,
+    SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1281,11 +1281,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 CmpOp::Gt => va > vb,
                 CmpOp::Ne => va != vb,
             };
-            if truth {
-                1.0
-            } else {
-                0.0
-            }
+            if truth { 1.0 } else { 0.0 }
         }
         Expr::And(a, b) => {
             if eval_expr(a, x) != 0.0 && eval_expr(b, x) != 0.0 {
@@ -2733,7 +2729,7 @@ mod tests {
     #[test]
     fn variant_overrides_bounds_and_x0() {
         let p = parse_nl_text(SIMPLE).expect("parse");
-        let mut base = NlTnlp::new(p);
+        let base = NlTnlp::new(p);
         let var = base
             .variant(&NlVariation {
                 x0: Some(vec![3.0, 4.0]),
@@ -2768,12 +2764,13 @@ mod tests {
         // Base keeps its parsed (free) bounds.
         assert!(base.problem().x_l[0] < -1.0e18);
         // Length mismatch is an error, not a panic.
-        assert!(base
-            .variant(&NlVariation {
+        assert!(
+            base.variant(&NlVariation {
                 x0: Some(vec![1.0]),
                 ..Default::default()
             })
-            .is_err());
+            .is_err()
+        );
     }
 
     /// `min (x0 - 1)^2 + (x1 - 2)^2` written in `.nl` ASCII form.
