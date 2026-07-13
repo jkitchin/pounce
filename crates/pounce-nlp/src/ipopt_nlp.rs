@@ -83,6 +83,15 @@ pub trait Nlp {
 /// bound expansion matrices `Px_L`, `Px_U`, `Pd_L`, `Pd_U`). Mirrors
 /// upstream `Ipopt::IpoptNLP`.
 pub trait IpoptNlp: Nlp {
+    /// Per-evaluation call counts accumulated over the solve, ordered
+    /// `[f, grad_f, c, d, jac_c, jac_d, h]`. Populates the end-of-run
+    /// summary's evaluation tallies (#206). Default is all zeros for
+    /// implementors that do not count; [`OrigIpoptNlp`] reports its live
+    /// counters.
+    fn eval_counts(&self) -> [Index; 7] {
+        [0; 7]
+    }
+
     fn x_l(&self) -> &dyn Vector;
     fn x_u(&self) -> &dyn Vector;
     fn d_l(&self) -> &dyn Vector;

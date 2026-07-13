@@ -774,6 +774,17 @@ impl IpoptApplication {
             None => return ApplicationReturnStatus::InternalError,
         };
 
+        // Problem statistics + end-of-run summary are emitted by the engine
+        // itself here (#206), gated on the main `print_level`, so the SQP
+        // route matches the IPM route across every frontend (CLI, Python, C).
+        // The SQP's own per-iteration rows stay gated on the separate
+        // `sqp_print_level`.
+        let console_output = match self.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        };
+        self.emit_problem_stats(&tnlp, console_output);
+
         // Phase 5c (§6): consume any stashed warm-start iterate.
         // `optimize_with_warm_start(warm=None)` is equivalent to
         // `optimize`, so cold callers see no change.
@@ -843,8 +854,12 @@ impl IpoptApplication {
         let _ = finalize_via_sqp(&nlp_rc, &res, solver_status, &tnlp);
 
         // Honor the opt-in status-fidelity gate on the SQP path too
-        // (pounce#173).
-        self.apply_kkt_fidelity_gate(app_status)
+        // (pounce#173), then emit the end-of-run summary with the final
+        // (possibly downgraded) status so the console matches the returned
+        // ApplicationReturnStatus.
+        let final_status = self.apply_kkt_fidelity_gate(app_status);
+        self.emit_end_summary(final_status, &nlp_rc, console_output);
+        final_status
     }
 
     /// Opt-in status-fidelity gate (pounce#173), shared by the IPM and
@@ -878,6 +893,84 @@ impl IpoptApplication {
             }
         }
         app_status
+    }
+
+    /// Emit the Ipopt-style problem-statistics block (#206) from the
+    /// engine's own reduced problem, gated on `console_output`
+    /// (print_level >= 1). Shared by the IPM (`optimize_tnlp`) and SQP
+    /// (`optimize_sqp_tnlp`) entry points so every algorithm and every
+    /// frontend (CLI, Python, C) gets the identical block. Built from the
+    /// same `collect_stats` inputs the CLI used, so the output is
+    /// byte-identical to the historical CLI block.
+    fn emit_problem_stats(&self, tnlp: &Rc<RefCell<dyn TNLP>>, console_output: bool) {
+        if !console_output {
+            return;
+        }
+        let lo_inf = self
+            .options
+            .get_numeric_value("nlp_lower_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
+        let up_inf = self
+            .options
+            .get_numeric_value("nlp_upper_bound_inf", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
+        let fixed_treatment = match self
+            .options
+            .get_string_value("fixed_variable_treatment", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .as_deref()
+        {
+            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
+            _ => FixedVarTreatment::MakeParameter,
+        };
+        if let Some(stats) =
+            pounce_solve_report::console::collect_stats(tnlp, lo_inf, up_inf, fixed_treatment)
+        {
+            pounce_solve_report::console::print_problem_stats(&stats);
+        }
+    }
+
+    /// Drain the NLP's per-eval counters into the shared `SolveStatistics`
+    /// and emit the Ipopt-style end-of-run summary (#206). Shared by both
+    /// solve paths. The counts are read from the NLP AFTER the solve (so the
+    /// final solution evaluation is included, matching the historical count)
+    /// and written into `SolveStatistics` so the post-solve API accessors
+    /// (`info["n_obj_evals"]`, …) report them even when the console is
+    /// silent. c/d (and jac_c/jac_d) are per-subsystem, so the max recovers
+    /// the eval_g / eval_jac_g call count. The console summary itself is
+    /// gated on `console_output` (print_level >= 1).
+    fn emit_end_summary(
+        &self,
+        app_status: ApplicationReturnStatus,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        console_output: bool,
+    ) {
+        {
+            let ec = nlp.borrow().eval_counts();
+            let mut stats = self.statistics.borrow_mut();
+            stats.num_obj_evals = ec[0];
+            stats.num_obj_grad_evals = ec[1];
+            stats.num_constr_evals = ec[2].max(ec[3]);
+            stats.num_constr_jac_evals = ec[4].max(ec[5]);
+            stats.num_hess_evals = ec[6];
+        }
+        if !console_output {
+            return;
+        }
+        let stats = self.statistics.borrow();
+        let counts = pounce_solve_report::console::EvalCounts {
+            n_obj: stats.num_obj_evals as u64,
+            n_grad_f: stats.num_obj_grad_evals as u64,
+            n_g: stats.num_constr_evals as u64,
+            n_jac_g: stats.num_constr_jac_evals as u64,
+            n_h: stats.num_hess_evals as u64,
+        };
+        pounce_solve_report::console::print_summary(app_status, &stats, &counts);
     }
 
     /// Build a *copy* of the algorithm builder configured per the
@@ -1577,21 +1670,33 @@ impl IpoptApplication {
         alg.tiny_step_tol = builder.tiny_step_tol;
         alg.tiny_step_y_tol = builder.tiny_step_y_tol;
         alg.diverging_iterates_tol = builder.diverging_iterates_tol;
-        // Honor `print_level == 0`: suppress the per-iteration table
-        // that the algorithm writes straight to stdout. (The Phase-7
-        // journalist surface respects `print_level` already; this is
-        // the legacy direct-print site that needs the same gate.)
-        if let Ok((v, found)) = self.options.get_integer_value("print_level", "") {
-            if found && v <= 0 {
-                alg.print_iter_output = false;
-                // The nested restoration IPM is built inside the
-                // restoration driver, not by `IpoptAlgorithm::new`, so
-                // it never sees this gate unless we forward it.
-                if let Some(resto) = alg.restoration.as_mut() {
-                    resto.set_print_iter_output(false);
-                }
+        // Honor `print_level == 0`: silence the algorithm's direct-to-stdout
+        // output — the per-iteration table and, new in #206, the
+        // problem-statistics and end-of-run summary blocks the engine now
+        // emits itself. Default (unset) or any positive level shows them; the
+        // CLI's JSON mode forces print_level 0, so structured output stays
+        // clean. (The Phase-7 journalist surface respects print_level already;
+        // this is the legacy direct-print site that needs the same gate.)
+        let console_output = match self.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        };
+        if !console_output {
+            alg.print_iter_output = false;
+            // The nested restoration IPM is built inside the restoration
+            // driver, not by `IpoptAlgorithm::new`, so it never sees this
+            // gate unless we forward it.
+            if let Some(resto) = alg.restoration.as_mut() {
+                resto.set_print_iter_output(false);
             }
         }
+
+        // Problem statistics, Ipopt-style, emitted before the iteration table
+        // from the engine's own reduced problem (#206). Built from the same
+        // collect_stats inputs the CLI used, so the block is byte-identical;
+        // emitting it here means every frontend (CLI, Python, C) and every
+        // algorithm (IPM, SQP) gets it.
+        self.emit_problem_stats(&tnlp, console_output);
 
         // Per-iteration history (pounce#71): when requested, capture the
         // `pounce::iteration` events emitted during the solve into an
@@ -1740,6 +1845,13 @@ impl IpoptApplication {
                 &report,
             );
         }
+
+        // End-of-run summary, Ipopt-style, emitted last (after any timing
+        // report) from the engine's own statistics (#206). Drains the eval
+        // tallies into SolveStatistics (read AFTER finalize so the final
+        // solution evaluation is included) and prints the summary, gated on
+        // the same print_level as the rest of the console.
+        self.emit_end_summary(app_status, &nlp_handle, console_output);
 
         app_status
     }

@@ -37,6 +37,33 @@ pub use solver::PySolver;
 pub use sparse_lu::PySparseLu;
 
 /// Python module entry point. The crate name (`_pounce`) and the
+/// Print the pounce logo and copyright banner to stdout, matching the CLI's
+/// header, so the Python in-process tee opens with the same banner (#206).
+/// The engine emits the rest of the log (problem statistics, iteration table,
+/// end-of-run summary) itself at `print_level >= 1`; this covers only the
+/// up-front banner, which the CLI prints before the problem is read.
+#[pyfunction]
+fn print_banner() {
+    // Derive the backend tag the same way the CLI's banner does
+    // (main.rs `backend_tag`) so the two frontends never disagree. The
+    // registered `linear_solver` default mirrors upstream Ipopt ("ma57"),
+    // but this wheel's actual backend is FERAL, so "ma57" counts as the
+    // backend only when a caller explicitly set it -- which a fresh
+    // application never does. The default wheel therefore banners "FERAL"
+    // rather than the registered-default "ma57".
+    let (solver, explicit) = pounce_algorithm::application::IpoptApplication::new()
+        .options()
+        .get_string_value("linear_solver", "")
+        .unwrap_or_else(|_| ("feral".to_string(), false));
+    let tag = if explicit && solver == "ma57" {
+        "MA57 (HSL)"
+    } else {
+        "FERAL"
+    };
+    pounce_solve_report::console::print_logo();
+    pounce_solve_report::console::print_banner(tag);
+}
+
 /// `#[pymodule]` function name must agree; maturin uses the lib name
 /// from Cargo.toml to find this symbol.
 #[pymodule]
@@ -51,6 +78,9 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sparse_lu::PySparseLu>()?;
     m.add_class::<dense_lu::PyDenseLu>()?;
     m.add_function(wrap_pyfunction!(read_nl, m)?)?;
+    // Banner for the Python in-process tee (#206); the engine emits the rest
+    // of the log (stats / iteration table / summary) itself at print_level>=1.
+    m.add_function(wrap_pyfunction!(print_banner, m)?)?;
     // Batched NLP solving (pounce#126): native `.nl` path (phase 1)
     // and callback-Problem path (phase 2).
     m.add_function(wrap_pyfunction!(nlp_batch::solve_nlp_batch, m)?)?;

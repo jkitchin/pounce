@@ -38,6 +38,13 @@ use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
 use serde::{Deserialize, Serialize};
 
+/// Ipopt-style console printers (banner, problem statistics, end-of-run
+/// summary). The single source of truth for the text log: the algorithm's
+/// output layer emits these gated on `print_level`, and the CLI reuses the
+/// banner. Moved out of `pounce-cli` so `pounce-algorithm` can emit them
+/// natively (#206).
+pub mod console;
+
 /// Verbosity knob for the JSON report. Maps onto the `--json-detail`
 /// CLI flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

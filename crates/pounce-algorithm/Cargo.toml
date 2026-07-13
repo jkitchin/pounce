@@ -20,6 +20,9 @@ pounce-presolve.workspace = true
 pounce-l1penalty.workspace = true
 pounce-qp.workspace = true
 pounce-observability.workspace = true
+# Ipopt-style console printers (banner/stats/summary): the engine emits
+# the stats and summary blocks itself, gated on print_level (#206).
+pounce-solve-report.workspace = true
 pounce-hsl = { workspace = true, optional = true }
 faer.workspace = true
 # Batched NLP solving (`batch.rs`, pounce#126): instances run on

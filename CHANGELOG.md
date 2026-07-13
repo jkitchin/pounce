@@ -9,6 +9,24 @@ changes.
 
 ## [Unreleased]
 
+### Changed — the solver core emits its own console log
+
+- **The problem-statistics and end-of-run summary blocks are now emitted by
+  the solver core (`pounce-algorithm`), gated on `print_level`,** instead of
+  by the CLI. Every frontend — the CLI, the Python bindings, and the C
+  interface — gets the identical Ipopt-style log at `print_level >= 1`
+  (`print_level 0` is silent). The console printers moved from `pounce-cli`
+  to the shared `pounce-solve-report::console` crate as the single source of
+  truth, and `IpoptNlp::eval_counts()` drains the NLP's per-evaluation
+  counters into `SolveStatistics` so the summary's tallies come from the
+  solver's own tracking. `pounce.print_banner()` is exposed for in-process
+  frontends that print the up-front banner themselves.
+- CLI stdout is byte-identical except: the summary's objective/gradient/
+  constraint/Jacobian evaluation counts now report the solver's true count
+  (one lower than before, which had included a frontend-side evaluation), and
+  `print_level 0` now suppresses the statistics/summary blocks too (it
+  previously silenced only the per-iteration table).
+
 ### Added — parameter covariance for estimation problems (Pyomo)
 
 - **Parameter covariance for estimation problems, from one solve

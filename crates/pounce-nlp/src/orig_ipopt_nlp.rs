@@ -1775,6 +1775,17 @@ impl Nlp for OrigIpoptNlp {
 }
 
 impl IpoptNlp for OrigIpoptNlp {
+    fn eval_counts(&self) -> [Index; 7] {
+        [
+            self.f_evals(),
+            self.grad_f_evals(),
+            self.c_evals(),
+            self.d_evals(),
+            self.jac_c_evals(),
+            self.jac_d_evals(),
+            self.h_evals(),
+        ]
+    }
     fn x_l(&self) -> &dyn Vector {
         &*self.x_l
     }

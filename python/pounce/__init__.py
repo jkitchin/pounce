@@ -14,7 +14,8 @@ in JAX when it is not installed.
 """
 
 from ._pounce import (
-    Problem, Solver, NlProblem, read_nl, classify_working_set, __version__,
+    Problem, Solver, NlProblem, read_nl, classify_working_set, print_banner,
+    __version__,
 )
 # Installs the Problem.solve(warm_start=...) wrapper as an import side
 # effect — keep this import directly after ._pounce.
@@ -54,6 +55,7 @@ __all__ = [
     "Solver",
     "NlProblem",
     "read_nl",
+    "print_banner",
     "solve_nlp_batch",
     "minimize",
     "OptimizeResult",

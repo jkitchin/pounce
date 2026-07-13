@@ -1061,42 +1061,10 @@ pub fn main() -> ExitCode {
     let counting = Rc::new(RefCell::new(CountingTnlp::new(Rc::clone(&post_presolve))));
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&counting) as Rc<RefCell<dyn TNLP>>;
 
-    // Problem statistics. (The branded logo + copyright banner print
-    // up-front, before the problem is read — see near the top of `run`.)
-    // Suppressed in JSON-debug mode so stdout stays a pure protocol stream.
-    if !json_dbg {
-        // Resolve `fixed_variable_treatment` + bound-infinity exactly as
-        // `application.rs` does, so the banner reports the same reduced
-        // problem the algorithm solves (#140).
-        use pounce_nlp::tnlp_adapter::{
-            DEFAULT_NLP_LOWER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF, FixedVarTreatment,
-        };
-        let opt = app.options();
-        let lo_inf = opt
-            .get_numeric_value("nlp_lower_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_LOWER_BOUND_INF);
-        let up_inf = opt
-            .get_numeric_value("nlp_upper_bound_inf", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .unwrap_or(DEFAULT_NLP_UPPER_BOUND_INF);
-        let fixed_treatment = match opt
-            .get_string_value("fixed_variable_treatment", "")
-            .ok()
-            .and_then(|(v, f)| f.then_some(v))
-            .as_deref()
-        {
-            Some("relax_bounds") => FixedVarTreatment::RelaxBounds,
-            // `make_constraint` / `make_parameter_nodual` are not yet
-            // implemented and fall back to `make_parameter` in the solve.
-            _ => FixedVarTreatment::MakeParameter,
-        };
-        if let Some(stats) = print::collect_stats(&tnlp, lo_inf, up_inf, fixed_treatment) {
-            print::print_problem_stats(&stats);
-        }
-    }
+    // Problem statistics are emitted by the engine now (application.rs),
+    // gated on print_level, so every frontend gets them identically (#206).
+    // The branded logo + copyright banner still print up-front, before the
+    // problem is read — see near the top of `run`.
 
     // Build diagnostics state from `--dump …` flags. None of these
     // flags is required, but `--dump-dir` / `--dump-format` on their
@@ -1286,9 +1254,10 @@ pub fn main() -> ExitCode {
             },
         });
         println!("{ev}");
-    } else {
-        print::print_summary(status, &solve_stats, &counters);
     }
+    // The console end-of-run summary is emitted by the engine now
+    // (application.rs), gated on print_level; the CLI only prints the JSON
+    // event variant above (#206).
     drop(counters); // release before JSON block (which re-borrows the wrapped TNLP).
 
     // Active-set SQP fallback: that solve path bypasses the IPM-only
