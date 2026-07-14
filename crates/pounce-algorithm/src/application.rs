@@ -497,6 +497,20 @@ impl IpoptApplication {
     ///   in-`pounce-nlp` Newton driver so the trivial path is
     ///   independent of the linear-solver backend.
     pub fn optimize_tnlp(&mut self, tnlp: Rc<RefCell<dyn TNLP>>) -> ApplicationReturnStatus {
+        if let Some(value) = self.unsupported_library_solver_selection() {
+            use pounce_common::journalist::JournalCategory;
+            self.journalist.print(
+                JournalLevel::J_ERROR,
+                JournalCategory::J_MAIN,
+                &format!(
+                    "pounce: solver_selection={value} routing is only available \
+                     through the pounce CLI (.nl input); library consumers can use \
+                     qp-active-set, nlp, or auto.\n"
+                ),
+            );
+            return ApplicationReturnStatus::InvalidOption;
+        }
+
         // Top-level algorithm dispatch (Phase 5b §7.1). When the
         // `algorithm` option resolves to "active-set-sqp", route
         // to the Phase 5b SQP path; otherwise fall through to the
@@ -724,11 +738,33 @@ impl IpoptApplication {
         self.sqp_last_working_set.as_ref()
     }
 
-    fn is_sqp_algorithm_selected(&self) -> bool {
-        match self.options.get_string_value("algorithm", "") {
-            Ok((v, true)) => v.eq_ignore_ascii_case("active-set-sqp"),
-            _ => false,
+    /// If `solver_selection` is explicitly set to a value whose routing lives
+    /// only in the CLI's `.nl` dispatch, return  it; otherwise `None`.
+    /// `optimize_tnlp` uses this to reject a forced convex selection a library
+    /// consumer cannot honor.
+    fn unsupported_library_solver_selection(&self) -> Option<&'static str> {
+        let (v, found) = self.options.get_string_value("solver_selection", "").ok()?;
+        if !found {
+            return None;
         }
+        ["lp-ipm", "qp-ipm", "socp"]
+            .into_iter()
+            .find(|c| v.eq_ignore_ascii_case(c))
+    }
+
+    fn is_sqp_algorithm_selected(&self) -> bool {
+        // `algorithm` is the primary selector.
+        // `solver_selection = qp-active-set` selects the
+        // same active-set SQP engine.
+        let algo_sqp = matches!(
+            self.options.get_string_value("algorithm", ""),
+            Ok((v, true)) if v.eq_ignore_ascii_case("active-set-sqp")
+        );
+        let selection_sqp = matches!(
+            self.options.get_string_value("solver_selection", ""),
+            Ok((v, true)) if v.eq_ignore_ascii_case("qp-active-set")
+        );
+        algo_sqp || selection_sqp
     }
 
     /// Phase 5b SQP entry point. Builds the same NLP chain

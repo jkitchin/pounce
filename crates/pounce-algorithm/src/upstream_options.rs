@@ -234,6 +234,79 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         ],
         "Selects between the IPM (default) and the active-set SQP driver.",
     )?;
+
+    // Pounce-extension: LP/QP/QCQP solver routing. Registered here
+    // so a `pounce-rs`/`IpoptApplication` consumer can set and read it.
+    r.add_string_option(
+        "solver_selection",
+        "Which solver to route the problem to.",
+        "auto",
+        &[
+            (
+                "auto",
+                "Most specialized solver matching the detected problem class.",
+            ),
+            (
+                "nlp",
+                "Always the filter-IPM NLP solver (current default behavior).",
+            ),
+            (
+                "lp-ipm",
+                "Force IPM-LP; errors if the problem is not an LP.",
+            ),
+            (
+                "qp-ipm",
+                "Force IPM-QP; errors if the problem is not LP/convex-QP.",
+            ),
+            (
+                "qp-active-set",
+                "Force active-set QP; errors if not LP/convex-QP.",
+            ),
+            (
+                "socp",
+                "Force the SOCP conic IPM; errors if not a convex LP/QP/QCQP.",
+            ),
+        ],
+        "Selects the solver by problem class. `auto` routes LP and convex QP to \
+         the specialized convex interior-point solver (pounce-convex), a convex \
+         QCQP to the SOCP conic IPM, and all other classes to the NLP filter-IPM. \
+         `qp-active-set` routes through the active-set SQP engine (pounce-qp QP \
+         subproblems) instead of the IPM; `socp` forces the conic IPM (a convex \
+         QCQP routes there under `auto`). \
+         Behavior differs by surface. Through the pounce CLI on `.nl` input all \
+         six values are honored: the CLI classifies the parsed problem, validates \
+         a forced value against the detected class (e.g. `lp-ipm` errors if the \
+         problem is not an LP), and routes the convex values \
+         (`lp-ipm` / `qp-ipm` / `socp`) to pounce-convex — which is also the only \
+         path where `qp_presolve` applies. A library (`IpoptApplication` / \
+         pounce-rs) solve has no problem-structure extraction, so it honors only \
+         `auto`, `nlp`, and `qp-active-set`; the convex-IPM values \
+         (`lp-ipm` / `qp-ipm` / `socp`) return Invalid_Option. \
+         On the library path `qp-active-set` does NOT class-validate: it simply \
+         selects the active-set SQP algorithm (a general NLP method) and runs it \
+         on whatever TNLP is given, whereas the CLI restricts it to LP / convex \
+         QP. `qp-active-set` and `algorithm=active-set-sqp` are equivalent \
+         selectors for the SQP engine, and either takes precedence over \
+         `algorithm=interior-point`: setting `solver_selection=qp-active-set` \
+         runs the SQP engine even when `algorithm` is left at (or explicitly set \
+         to) its `interior-point` default.",
+    )?;
+    r.add_string_option(
+        "qp_presolve",
+        "Run presolve before the convex LP/QP interior-point solve.",
+        "yes",
+        &[
+            ("yes", "Reduce the problem (and detect trivial infeasibility / unboundedness) before solving."),
+            ("no", "Solve the extracted problem directly, without presolve."),
+        ],
+        "Only affects the convex LP/QP path (`solver_selection` routing to \
+         pounce-convex), which runs only in the pounce CLI on `.nl` input; it \
+         has no effect on a library (`IpoptApplication`) solve. When on, \
+         presolve removes empty / duplicate / redundant rows, fixes and \
+         substitutes structural columns, and may report infeasible / unbounded \
+         without invoking the solver.",
+    )?;
+
     // SQP outer-loop options. Inactive when `algorithm =
     // interior-point`. Defaults mirror `SqpOptions::default()`.
     r.add_string_option(

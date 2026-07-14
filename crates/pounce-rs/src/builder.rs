@@ -215,6 +215,14 @@ impl<P: Problem + 'static> Nlp<P> {
             true,
             true,
         );
+        // The active-set SQP engine (selected by `solver_selection=qp-active-set`
+        // or `algorithm=active-set-sqp`) reads `sqp_hessian`, whose default
+        // `exact` needs the analytic Hessian this builder never supplies. Default
+        // it to limited-memory BFGS so the SQP route works Hessian-free too; a
+        // user `.option_str("sqp_hessian", ...)` below overrides it.
+        let _ = app
+            .options_mut()
+            .set_string_value("sqp_hessian", "lbfgs", true, true);
         for (k, v) in &self.string {
             let _ = app.options_mut().set_string_value(k, v, true, true);
         }
@@ -397,6 +405,31 @@ mod tests {
             .x0(&[0.0, 0.0]) // n inferred = 2
             .solve();
         assert!(sol.success);
+    }
+
+    #[test]
+    fn qp_active_set_selection_solves() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .option_str("solver_selection", "qp-active-set")
+            .solve();
+        assert!(sol.success, "status = {:?}", sol.status);
+        assert!((sol.x[0] - 1.0).abs() < 1e-4 && (sol.x[1] - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn forced_convex_selection_fails_in_builder() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .option_str("solver_selection", "qp-ipm")
+            .solve();
+        assert!(
+            !sol.success,
+            "forced qp-ipm must not silently succeed via NLP"
+        );
+        assert_eq!(sol.status, ApplicationReturnStatus::InvalidOption);
     }
 
     #[test]
