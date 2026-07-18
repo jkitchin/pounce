@@ -110,9 +110,9 @@ fn assert_sound(input: &QpInput, label: &str) {
         // Refusal is always acceptable — the emitter is allowed to give up.
         Err(_) => {}
         Ok(cert) => {
-            let x0 = cert.candidate.x[0].inner().clone();
-            let x1 = cert.candidate.x[1].inner().clone();
-            let obj = cert.candidate.objective.inner().clone();
+            let x0 = cert.candidate.as_ref().unwrap().x[0].inner().clone();
+            let x1 = cert.candidate.as_ref().unwrap().x[1].inner().clone();
+            let obj = cert.candidate.as_ref().unwrap().objective.inner().clone();
             assert_eq!(
                 x0,
                 half(1, 2),
@@ -200,8 +200,11 @@ fn zero_tolerance_still_finds_a_row_the_float_point_sits_exactly_on() {
     let input = two_constraint_qp(vec![0.5, 0.5], 0.0);
     let cert = emit_certificate(&input, &meta())
         .expect("slack is exactly 0.0 here, so c0 is still active at tol = 0");
-    assert_eq!(cert.candidate.x[0].inner().clone(), half(1, 2));
-    assert_eq!(cert.witnesses.active_set, vec![0]);
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0].inner().clone(),
+        half(1, 2)
+    );
+    assert_eq!(cert.witnesses.active_set, Some(vec![0]));
 }
 
 /// The genuine too-tight case: a float point strictly *off* the constraint, so
@@ -244,8 +247,17 @@ fn the_well_posed_case_still_succeeds() {
     let input = two_constraint_qp(vec![0.5, 0.5], 1e-7);
     let cert = emit_certificate(&input, &meta())
         .expect("the correctly-identified active set must still produce a certificate");
-    assert_eq!(cert.candidate.x[0].inner().clone(), half(1, 2));
-    assert_eq!(cert.candidate.x[1].inner().clone(), half(1, 2));
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0].inner().clone(),
+        half(1, 2)
+    );
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[1].inner().clone(),
+        half(1, 2)
+    );
     // And the dual on the active row is exactly 1.
-    assert_eq!(cert.witnesses.duals[0].inner().clone(), BigRational::one());
+    assert_eq!(
+        cert.witnesses.duals.as_ref().unwrap()[0].inner().clone(),
+        BigRational::one()
+    );
 }

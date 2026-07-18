@@ -173,7 +173,7 @@ fn measure(n: usize) -> Measured {
     let widest_digits = widest_rational_digits(&serde_json::from_str(&json).unwrap());
 
     // The optimum really is the all-ones vector.
-    for (i, xi) in cert.candidate.x.iter().enumerate() {
+    for (i, xi) in cert.candidate.as_ref().unwrap().x.iter().enumerate() {
         assert_eq!(
             xi.inner().to_string(),
             "1",

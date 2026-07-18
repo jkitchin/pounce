@@ -116,3 +116,88 @@ fn the_refined_ray_is_an_exact_certificate() {
     );
     assert!(dot(&b, &y) > BigRational::zero(), "b·y > 0");
 }
+
+// --------------------------------------------------------------------------
+// The emit path, now that refinement exists.
+// --------------------------------------------------------------------------
+
+use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput, emit_infeasible_certificate};
+
+fn meta() -> CertMeta {
+    CertMeta {
+        nl_sha256: "0".repeat(64),
+        sol_sha256: "0".repeat(64),
+        solver: "pounce 0.9.0".to_string(),
+    }
+}
+
+fn con(name: &str, coeffs: Vec<f64>, lower: f64) -> LinearConstraint {
+    LinearConstraint {
+        name: name.to_string(),
+        coeffs,
+        lower,
+        upper: f64::INFINITY,
+    }
+}
+
+/// The same infeasible system, as POUNCE would hand it over.
+fn infeasible_input() -> QpInput {
+    QpInput {
+        n: 2,
+        q_lower: vec![],
+        half_quadratic: true,
+        c: vec![1.0, 1.0],
+        constant: 0.0,
+        constraints: vec![
+            con("c0", vec![1.0, 1.0], 2.0),
+            con("c1", vec![-1.0, 0.0], 0.0),
+            con("c2", vec![0.0, -1.0], 0.0),
+        ],
+        var_lower: vec![f64::NEG_INFINITY; 2],
+        var_upper: vec![f64::INFINITY; 2],
+        x_float: vec![0.0, 0.0],
+        active_tol: 1e-7,
+    }
+}
+
+#[test]
+fn emits_an_exact_infeasible_certificate_from_the_solver_ray() {
+    let y_float = [
+        2.32274114145012817e10,
+        2.32274114148972511e10,
+        2.32274114148972511e10,
+    ];
+    let cert = emit_infeasible_certificate(&infeasible_input(), &meta(), &y_float, 1e-9)
+        .expect("the system is infeasible and the ray refines");
+
+    assert_eq!(cert.verdict, "infeasible");
+    // Not a claim about a point.
+    assert!(
+        cert.candidate.is_none(),
+        "infeasible certs carry no candidate"
+    );
+    assert!(cert.witnesses.duals.is_none());
+    assert!(cert.witnesses.hessian_psd.is_none());
+
+    let y = &cert.witnesses.farkas.as_ref().expect("farkas witness").y;
+    let got: Vec<String> = y.iter().map(|r| r.inner().to_string()).collect();
+    assert_eq!(
+        got,
+        vec!["1", "1", "1"],
+        "the exact ray, not the 2.3e10 float one"
+    );
+    assert_eq!(cert.tolerance.inner().to_string(), "0");
+}
+
+/// A feasible system must not yield an infeasibility certificate, whatever
+/// ray is handed in.
+#[test]
+fn emit_refuses_a_feasible_system() {
+    let mut input = infeasible_input();
+    // Drop the two rows that make it contradictory.
+    input.constraints.truncate(1);
+    assert!(
+        emit_infeasible_certificate(&input, &meta(), &[1.0], 1e-9).is_err(),
+        "x0 + x1 >= 2 alone is feasible; no certificate may be emitted"
+    );
+}
