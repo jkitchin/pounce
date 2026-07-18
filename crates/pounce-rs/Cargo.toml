@@ -14,6 +14,7 @@ categories = ["mathematics", "science"]
 pounce-common.workspace = true
 pounce-nlp.workspace = true
 pounce-algorithm.workspace = true
+pounce-observability.workspace = true
 
 [lints]
 workspace = true

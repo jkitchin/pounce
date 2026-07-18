@@ -126,6 +126,48 @@
 //! let obj = prob.borrow().obj.unwrap();
 //! assert!((obj - 17.014_017).abs() < 1e-4);            // known optimum
 //! ```
+//!
+//! ## Solve statistics and the iteration trajectory
+//!
+//! Every [`builder::Nlp::solve`] fills [`Solution::stats`](builder::Solution)
+//! with the solve's [`SolveStatistics`] (wall time, iteration count,
+//! evaluation counts, final infeasibilities) and the solution carries the
+//! constraint values `g` and bound multipliers `z_l`/`z_u`. Opt in to the
+//! per-iteration trajectory with `.capture_iterations()`.
+//!
+//! ```
+//! use pounce_rs::prelude::*;
+//!
+//! struct Quad; // min (x0-1)^2 + (x1-2)^2  s.t. x0 + x1 == 3
+//! impl Problem for Quad {
+//!     fn objective(&self, x: &[f64]) -> f64 {
+//!         (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2)
+//!     }
+//!     fn n_constraints(&self) -> usize {
+//!         1
+//!     }
+//!     fn constraints(&self, x: &[f64], g: &mut [f64]) {
+//!         g[0] = x[0] + x[1];
+//!     }
+//! }
+//!
+//! let sol = Nlp::new(Quad)
+//!     .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+//!     .constraint_bounds(&[3.0], &[3.0])
+//!     .capture_iterations()
+//!     .solve();
+//! assert!(sol.success);
+//! assert!(sol.stats.iteration_count > 0);
+//! assert!(sol.stats.total_wallclock_time_secs > 0.0);
+//! assert!(!sol.stats.iterations.is_empty());           // one record per iteration
+//! ```
+//!
+//! For solves outside the builder, [`with_iter_capture`] wraps any closure
+//! with capture active and returns the recorded [`IterRecord`]s alongside
+//! the closure's result. For the [`IpoptApplication`] path, install
+//! [`collector_scope`] for the duration of the solve and read the history
+//! back from `statistics()`:
+//! `let _scope = collector_scope(); app.enable_iter_history(); …`.
 
 // --- scalar types -----------------------------------------------------------
 pub use pounce_common::types::{Index, Number};
@@ -140,10 +182,20 @@ pub use pounce_nlp::tnlp::{
 // --- the solver driver ------------------------------------------------------
 pub use pounce_algorithm::application::IpoptApplication;
 
+// --- iteration capture & observability --------------------------------------
+// Thread-scoped helpers so an embedding library can record a solve's
+// trajectory (and turn on console logs) with no direct `tracing` deps.
+pub use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
+pub use pounce_observability::{
+    CollectorScope, IterCaptureGuard, ScopedIterCapture, collector_scope, init_subscriber,
+    with_iter_capture,
+};
+
 // --- the underlying crates, for anything not surfaced above -----------------
 pub use pounce_algorithm;
 pub use pounce_common;
 pub use pounce_nlp;
+pub use pounce_observability;
 
 // --- ergonomic builder API (argmin-style small trait + builder; #168) -------
 pub mod builder;
@@ -161,6 +213,8 @@ pub mod prelude {
     pub use pounce_algorithm::application::IpoptApplication;
     pub use pounce_common::types::{Index, Number};
     pub use pounce_nlp::return_codes::ApplicationReturnStatus;
+    pub use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
+    pub use pounce_observability::{collector_scope, with_iter_capture};
     pub use pounce_nlp::tnlp::{
         BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution,
         SparsityRequest, StartingPoint, TNLP,
