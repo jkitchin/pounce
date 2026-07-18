@@ -49,6 +49,7 @@ FIXTURES=(
   "certify_eq    PounceLean.CertifyEq    global_min"  # equality (free-sign μ = -1)
   "certify_lp    PounceLean.CertifyLP    global_min"  # LP: Q = 0, optimum 4/3 (not an f64)
   "certify_infeasible PounceLean.CertifyInfeasible infeasible"  # no solution; Farkas ray
+  "certify_unbounded  PounceLean.CertifyUnbounded  unbounded"   # unbounded below; recession
 )
 
 tmp="$(mktemp -d)"

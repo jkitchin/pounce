@@ -113,6 +113,22 @@ pub struct Witnesses {
     /// Farkas ray proving `A x ≥ b` has no solution — `infeasible` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub farkas: Option<Farkas>,
+    /// Recession certificate proving the objective is unbounded below —
+    /// `unbounded` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recession: Option<Recession>,
+}
+
+/// Recession certificate: a feasible `x0` together with a direction `d`
+/// satisfying `Q d = 0`, `A d ≥ 0`, `c·d < 0`.
+///
+/// Both witnesses are required. A direction alone proves nothing — a problem
+/// can be primal *and* dual infeasible, in which case such a `d` exists but
+/// there is no feasible point to travel from.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Recession {
+    pub x0: Vec<Rat>,
+    pub d: Vec<Rat>,
 }
 
 /// Farkas certificate: `y ≥ 0` with `Aᵀy = 0` and `b·y > 0`.
