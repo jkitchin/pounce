@@ -18,7 +18,8 @@ use crate::rational::{Bound, Rat, RatError};
 use crate::refine::{RefineError, refine_kkt_eq};
 use crate::schema::{
     Binding, Candidate, Certificate, Constraint, Entry, Farkas, HessianPsd, Objective, Problem,
-    SCHEMA_TAG, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, VarBounds, Witnesses,
+    Recession, SCHEMA_TAG, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, VarBounds,
+    Witnesses,
 };
 use num_rational::BigRational;
 use num_traits::Zero;
@@ -416,6 +417,108 @@ pub fn emit_infeasible_certificate(
             farkas: Some(Farkas {
                 y: y.into_iter().map(Rat).collect(),
             }),
+            recession: None,
+        },
+    })
+}
+
+/// Build an exact `verdict = "unbounded"` certificate, or refuse.
+///
+/// Unlike the Farkas path this needs **no refinement**. The recession
+/// conditions are inequalities (`A d ≥ 0`, `c·d < 0`) plus, for an LP, the
+/// vacuous `Q d = 0`; an inequality satisfied with margin survives the
+/// lossless f64→ℚ conversion intact, because the exact value is still on the
+/// correct side of zero. The equality `Aᵀy = 0` that forces `refine_farkas`
+/// has no counterpart here while `Q = 0`.
+///
+/// `x_float` is the solver's diverging primal iterate, which serves as **both**
+/// witnesses: it is feasible, and it points along the recession direction. Both
+/// roles are verified exactly below rather than assumed.
+///
+/// v1 restriction, enforced: `Q` must be zero (the LP slice). A nonzero `Q`
+/// reintroduces the equality `Q d = 0`, which the float direction will miss —
+/// that case needs a null-space refinement and is refused here rather than
+/// emitted unsoundly.
+pub fn emit_unbounded_certificate(
+    input: &QpInput,
+    meta: &CertMeta,
+    x_float: &[f64],
+) -> Result<Certificate, EmitError> {
+    let problem = problem_block(input)?;
+    let n = problem.n_vars;
+    if x_float.len() != n {
+        return Err(EmitError::SelfCheck("iterate length != n_vars"));
+    }
+    if !problem.objective.q.entries.is_empty() {
+        return Err(EmitError::SelfCheck(
+            "unbounded v1 is the LP slice (Q = 0); nonzero Q needs Q d = 0 refinement",
+        ));
+    }
+
+    // Every row must be `a·x ≥ lower`, matching the Lean feasible-set encoding.
+    let mut a_rows: Vec<Vec<BigRational>> = Vec::new();
+    let mut b_vec: Vec<BigRational> = Vec::new();
+    for con in &problem.constraints {
+        let (Some(lo), None) = (con.lower.finite(), con.upper.finite()) else {
+            return Err(EmitError::SelfCheck(
+                "unbounded v1 accepts one-sided `a·x ≥ l` rows only",
+            ));
+        };
+        a_rows.push(con.coeffs.iter().map(|r| r.inner().clone()).collect());
+        b_vec.push(lo.inner().clone());
+    }
+
+    let v: Vec<BigRational> = x_float
+        .iter()
+        .map(|&x| Rat::from_f64(x).map(|r| r.inner().clone()))
+        .collect::<Result<_, _>>()?;
+    let c: Vec<BigRational> = problem
+        .objective
+        .c
+        .iter()
+        .map(|r| r.inner().clone())
+        .collect();
+
+    // --- exact checks: the iterate is feasible AND a recession direction -----
+    for (i, row) in a_rows.iter().enumerate() {
+        let ax: BigRational = row.iter().zip(&v).map(|(a, x)| a * x).sum();
+        if ax < b_vec[i] {
+            return Err(EmitError::SelfCheck("iterate is not exactly feasible"));
+        }
+        if ax < BigRational::zero() {
+            return Err(EmitError::SelfCheck("A d ≥ 0 fails"));
+        }
+    }
+    let cd: BigRational = c.iter().zip(&v).map(|(ci, di)| ci * di).sum();
+    if cd >= BigRational::zero() {
+        return Err(EmitError::SelfCheck("c·d < 0 fails"));
+    }
+
+    Ok(Certificate {
+        schema: SCHEMA_TAG.to_string(),
+        verdict: "unbounded".to_string(),
+        problem_class: "qp-convex".to_string(),
+        tolerance: Rat(BigRational::zero()),
+        binding: Binding {
+            nl_sha256: meta.nl_sha256.clone(),
+            sol_sha256: meta.sol_sha256.clone(),
+            solver: meta.solver.clone(),
+        },
+        toolchain: Toolchain {
+            lean: VALIDATED_LEAN.to_string(),
+            mathlib: VALIDATED_MATHLIB.to_string(),
+        },
+        problem,
+        candidate: None,
+        witnesses: Witnesses {
+            duals: None,
+            hessian_psd: None,
+            active_set: None,
+            farkas: None,
+            recession: Some(Recession {
+                x0: v.iter().cloned().map(Rat).collect(),
+                d: v.into_iter().map(Rat).collect(),
+            }),
         },
     })
 }
@@ -575,6 +678,7 @@ pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate,
             }),
             active_set: Some(active_set),
             farkas: None,
+            recession: None,
         },
     };
 

@@ -14,8 +14,8 @@ use std::process::ExitCode;
 
 use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput};
 use pounce_lean_cert::{
-    Certificate, canonical_problem, emit_certificate, emit_infeasible_certificate, problem_block,
-    to_canonical_json,
+    Certificate, canonical_problem, emit_certificate, emit_infeasible_certificate,
+    emit_unbounded_certificate, problem_block, to_canonical_json,
 };
 use pounce_nl::nl_reader;
 
@@ -236,8 +236,12 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
     // not a claim about `parsed.x` at all — it is certified by a Farkas ray, so
     // it routes to a different emitter.
     let infeasible = matches!(parsed.solve_result_num, Some(k) if (200..300).contains(&k));
+    // 300-399 is AMPL's "unbounded". The diverging primal iterate is both the
+    // feasible witness and the recession direction; see emit_unbounded_certificate.
+    let unbounded = matches!(parsed.solve_result_num, Some(k) if (300..400).contains(&k));
 
     let dual_ray = parsed.lambda.clone();
+    let iterate = parsed.x.clone();
     let input = nl_to_qp_input(&prob, parsed.x, args.active_tol)?;
     let meta = CertMeta {
         nl_sha256,
@@ -260,6 +264,9 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
         // arise on this path.
         emit_infeasible_certificate(&input, &meta, &dual_ray, args.active_tol)
             .map_err(|e| format!("cannot certify this infeasible solve: {e}"))?
+    } else if unbounded {
+        emit_unbounded_certificate(&input, &meta, &iterate)
+            .map_err(|e| format!("cannot certify this unbounded solve: {e}"))?
     } else {
         emit_certificate(&input, &meta).map_err(|e| format!("cannot certify this solve: {e}"))?
     };

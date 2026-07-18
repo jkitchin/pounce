@@ -215,3 +215,34 @@ fn certify_routes_an_infeasible_solve_to_a_farkas_certificate() {
         "KKT witnesses do not belong on an infeasible certificate"
     );
 }
+
+#[test]
+fn certify_routes_an_unbounded_solve_to_a_recession_certificate() {
+    // Like the infeasible case, an unbounded solve exits nonzero while still
+    // writing its .sol, so solve_to_sol (which asserts success) cannot be used.
+    let nl = fixture("certify_unbounded.nl");
+    let _ = Command::new(pounce_exe()).arg(&nl).output();
+    let sol = fixture("certify_unbounded.sol");
+    assert!(sol.exists(), "an unbounded solve must still write its .sol");
+
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(&nl)
+        .arg(&sol)
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "certifying an unbounded solve should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    assert_eq!(cert["verdict"], "unbounded");
+    assert!(cert.get("candidate").is_none());
+    // BOTH witnesses: a direction alone cannot distinguish unbounded from
+    // an empty feasible set.
+    assert!(cert["witnesses"]["recession"]["x0"].is_array());
+    assert!(cert["witnesses"]["recession"]["d"].is_array());
+    assert!(cert["witnesses"].get("farkas").is_none());
+}
