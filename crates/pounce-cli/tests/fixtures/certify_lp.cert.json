@@ -1,0 +1,144 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "global-min",
+  "problem_class": "qp-convex",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "15188e16ab31cebcc77791bc298735867145a98f4202cedf18e3e02a67f5d482",
+    "sol_sha256": "540e625d45119f4b81f5fa5227b6163909349d2d48cfb782c33e4d8df7aca738",
+    "solver": "pounce 0.9.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": []
+      },
+      "c": [
+        {
+          "num": "1",
+          "den": "1"
+        },
+        {
+          "num": "1",
+          "den": "1"
+        }
+      ],
+      "constant": {
+        "num": "0",
+        "den": "1"
+      }
+    },
+    "var_bounds": {
+      "lower": [
+        "-inf",
+        "-inf"
+      ],
+      "upper": [
+        "+inf",
+        "+inf"
+      ]
+    },
+    "constraints": [
+      {
+        "name": "c0",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "2",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "4",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "c1",
+        "coeffs": [
+          {
+            "num": "2",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "4",
+          "den": "1"
+        },
+        "upper": "+inf"
+      }
+    ]
+  },
+  "candidate": {
+    "x": [
+      {
+        "num": "4",
+        "den": "3"
+      },
+      {
+        "num": "4",
+        "den": "3"
+      }
+    ],
+    "objective": {
+      "num": "8",
+      "den": "3"
+    }
+  },
+  "witnesses": {
+    "duals": [
+      {
+        "num": "1",
+        "den": "3"
+      },
+      {
+        "num": "1",
+        "den": "3"
+      }
+    ],
+    "hessian_psd": {
+      "of": "Q",
+      "L": {
+        "rows": 2,
+        "cols": 2,
+        "unit_lower": true,
+        "entries": []
+      },
+      "D": [
+        {
+          "num": "0",
+          "den": "1"
+        },
+        {
+          "num": "0",
+          "den": "1"
+        }
+      ]
+    },
+    "active_set": [
+      0,
+      1
+    ]
+  }
+}
