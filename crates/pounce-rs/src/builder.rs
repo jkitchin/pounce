@@ -77,13 +77,19 @@ pub trait Problem {
 }
 
 /// The outcome of [`Nlp::solve`].
+///
+/// The vector fields (`x`, `multipliers`, `g`, `z_l`, `z_u`) are filled
+/// by the solver's `finalize_solution` callback. They stay empty
+/// when the solve aborts before finalization, so check
+/// `success`/`status` before indexing.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Solution {
     /// Solver status; `success` is the convenient boolean.
     pub status: ApplicationReturnStatus,
     /// `true` for `SolveSucceeded` / `SolvedToAcceptableLevel`.
     pub success: bool,
-    /// Optimal variables.
+    /// Optimal variables (length `n`).
     pub x: Vec<f64>,
     /// Objective at the solution.
     pub objective: f64,
@@ -264,10 +270,10 @@ impl<P: Problem + 'static> Nlp<P> {
             let _ = app.options_mut().set_integer_value(k, *v, true, true);
         }
 
-        let scope = self.capture_iterations.then(crate::collector_scope);
-        if self.capture_iterations {
+        let scope = self.capture_iterations.then(|| {
             app.enable_iter_history();
-        }
+            crate::collector_scope()
+        });
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::clone(&adapter) as _;
         let status = app.optimize_tnlp(tnlp);
         drop(scope);
