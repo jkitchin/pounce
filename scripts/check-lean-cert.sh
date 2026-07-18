@@ -44,6 +44,7 @@ FIXTURES=(
   "certify_box   PounceLean.CertifyBox"    # box variable bounds (folded to rows)
   "certify_range PounceLean.CertifyRange"  # two-sided range constraint (split to rows)
   "certify_eq    PounceLean.CertifyEq"     # equality constraint (free-sign μ = -1)
+  "certify_lp    PounceLean.CertifyLP"     # LP: Q = 0, vertex optimum at 4/3 (not an f64)
 )
 
 tmp="$(mktemp -d)"
