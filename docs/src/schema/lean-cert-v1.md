@@ -41,16 +41,24 @@ reads the certificate.
 > |---|---|---|
 > | `global-min` | yes | yes |
 > | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | **no** | **yes** |
+> | `infeasible` (Farkas witness `witnesses.farkas.y`) | **no** | **yes** |
 > | `local-min-strict` | no | no |
 >
-> `emit.rs` hardcodes `verdict: "global-min"`, so **every `feasible` certificate
-> in existence is hand-written.** The consumer-side machinery for them
+> `emit.rs` hardcodes `verdict: "global-min"`, so **every `feasible` and
+> `infeasible` certificate in existence is hand-written.** The consumer-side machinery for them
 > (`candidate_eps_feasible`, `feasible_point_exists`, and the
 > `feasible_witness` field) is implemented and tested there, and is described in
 > § 9 of the consumer document — but nothing in POUNCE can produce input for it
 > yet. Teaching the emitter to emit `feasible` is tracked as planned work; until
 > then, treat § 9 of the consumer document as a specification the producer has
 > not met.
+>
+> The `infeasible` case is the closest to free. `QpStatus::PrimalInfeasible`
+> (`crates/pounce-convex/src/qp.rs`) **already carries the Farkas certificate**;
+> the consumer side is implemented and kernel-checked. Wiring it through the
+> emitter is plumbing, not new mathematics — and unlike `global-min` it needs
+> no factorization, KKT system, or exact refinement, just one nonnegative
+> vector checked by a linear identity.
 
 ## How it differs from `pounce verify`
 
