@@ -82,14 +82,27 @@ def test_iterate_trace_is_opt_in():
     assert traced.iterates[-1]["mu"] < traced.iterates[0]["mu"]
 
 
-def test_conic_solve_has_no_orthant_residuals():
-    # SOCP slack lives in a non-orthant cone: orthant residuals don't apply.
+def test_conic_solve_reports_cone_aware_residuals():
+    # A SOCP slack lives in a non-orthant cone, so its residuals must be
+    # measured against that cone. They used to be omitted entirely (the
+    # orthant reading being meaningless); reporting them is what makes a
+    # conic solve's convergence checkable at all (pounce#209).
     r = solve_socp(
         c=[1.0, 0.0, 0.0], G=-np.eye(3), h=[0.0, -2.0, 1.0], cones=[("soc", 3)]
     )
     assert r.status == "optimal"
-    assert r.residuals is None
-    assert r.kkt_error is None
+    assert r.residuals is not None
+    assert set(r.residuals) == {
+        "primal_infeasibility",
+        "dual_infeasibility",
+        "complementarity",
+        "kkt_error",
+    }
+    # Converged ⇒ every component is at tolerance. In particular the primal
+    # residual measures cone *membership*: an orthant reading of this same
+    # point is nonzero, since the SOC rows individually have `Gx > h`.
+    assert r.kkt_error < 1e-6
+    assert r.residuals["primal_infeasibility"] < 1e-6
 
 
 def test_solve_qp_multi_rhs_host_matches_individual():

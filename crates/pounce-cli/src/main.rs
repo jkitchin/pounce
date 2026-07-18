@@ -1895,7 +1895,11 @@ fn run_convex_socp(
 
     // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
     // summary block and the JSON report below.
-    let res = sol.kkt_residuals(&qp);
+    // Cone-aware: the quadratic rows became SOC blocks, whose individual rows
+    // legitimately violate `Gx ≤ h` at a perfectly feasible point, so the
+    // orthant-only `kkt_residuals` reported a large bogus constraint violation
+    // and NLP error for a solved problem (pounce#209).
+    let res = sol.kkt_residuals_conic(&qp, &cones);
     // Ipopt-style summary so the objective/iteration count are scrapable by
     // consumers that parse Ipopt's end-of-run block (see print_convex_summary).
     print::print_convex_summary(

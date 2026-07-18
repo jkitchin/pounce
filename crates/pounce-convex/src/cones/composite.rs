@@ -183,6 +183,21 @@ impl CompositeCone {
         &self.blocks
     }
 
+    /// The declarative [`ConeSpec`] partition this cone represents — the
+    /// inverse of [`Self::from_specs`]. Lets a driver that only holds the
+    /// assembled cone hand its partition to a spec-taking API such as
+    /// [`crate::QpSolution::kkt_residuals_conic`].
+    pub fn specs(&self) -> Vec<ConeSpec> {
+        self.blocks
+            .iter()
+            .map(|(_, k)| match k {
+                ConeKind::Nonneg(c) => ConeSpec::Nonneg(c.dim()),
+                ConeKind::SecondOrder(c) => ConeSpec::SecondOrder(c.dim()),
+                ConeKind::Psd(c) => ConeSpec::Psd(c.n),
+            })
+            .collect()
+    }
+
     /// True iff every block is a nonnegative orthant (the LP/QP case). The
     /// complementarity product `s ∘ z` is then elementwise, so a corrector can
     /// box-project the products directly on `(s, z)` without the Jordan-algebra

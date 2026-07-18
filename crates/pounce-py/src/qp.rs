@@ -194,26 +194,28 @@ fn status_str(s: QpStatus) -> &'static str {
 /// Build the Python result dict `{x, y, z, z_lb, z_ub, obj, iters, status,
 /// iterates, residuals}` from a `QpSolution`.
 ///
-/// When `prob` is `Some`, the final KKT `residuals` block is attached — but
-/// only for the plain-QP path, where `Gx ≤ h` is an orthant constraint and
-/// [`QpSolution::kkt_residuals`] applies. Conic (SOCP/exp/power) solves pass
-/// `None`: there the slack lives in a non-orthant cone, so those orthant
-/// residuals would be meaningless. The `iterates` trace is always attached
+/// When `prob` is `Some`, the final KKT `residuals` block is attached, measured
+/// against `cones` when the solve had any: `Gx ≤ h` is an orthant constraint
+/// only on the plain-QP path, so a conic solve needs
+/// [`QpSolution::kkt_residuals_conic`] (an orthant reading of a second-order
+/// block is meaningless — pounce#209). Conic solves used to pass `None` here
+/// and report no residuals at all. The `iterates` trace is always attached
 /// (empty unless `collect_iterates` was set, so there is no overhead off the
 /// opt-in path).
 fn solution_dict<'py>(
     py: Python<'py>,
     sol: QpSolution,
     prob: Option<&QpProblem>,
+    cones: &[ConeSpec],
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("status", status_str(sol.status))?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
 
-    // Final KKT residuals (plain QP only — see the doc comment).
+    // Final KKT residuals (see the doc comment).
     if let Some(p) = prob {
-        let r = sol.kkt_residuals(p);
+        let r = sol.kkt_residuals_conic(p, cones);
         let rd = PyDict::new_bound(py);
         rd.set_item("primal_infeasibility", r.primal_infeasibility)?;
         rd.set_item("dual_infeasibility", r.dual_infeasibility)?;
@@ -330,7 +332,7 @@ pub fn solve_qp<'py>(
         Some(w) => solve_qp_ipm_warm(&prob.inner, &o, w, backend),
         None => solve_qp_ipm(&prob.inner, &o, backend),
     });
-    solution_dict(py, sol, Some(&prob.inner))
+    solution_dict(py, sol, Some(&prob.inner), &[])
 }
 
 /// Solve a standard-form conic program (LP/QP plus second-order, exponential,
@@ -383,7 +385,7 @@ pub fn solve_socp<'py>(
     }
     let sol = py.allow_threads(|| solve_socp_ipm(&prob.inner, &specs, &o, backend));
     // Conic slack lives in a non-orthant cone: skip the orthant residuals.
-    solution_dict(py, sol, None)
+    solution_dict(py, sol, Some(&prob.inner), &specs)
 }
 
 /// Solve a batch of convex QPs in parallel (across instances). Returns a
@@ -423,7 +425,7 @@ pub fn solve_qp_batch<'py>(
     });
     sols.into_iter()
         .zip(inners.iter())
-        .map(|(s, p)| solution_dict(py, s, Some(p)))
+        .map(|(s, p)| solution_dict(py, s, Some(p), &[]))
         .collect()
 }
 
@@ -460,7 +462,7 @@ pub fn solve_qp_multi_rhs<'py>(
         .map(|(s, c)| {
             let mut prob = base_inner.clone();
             prob.c = c.clone();
-            solution_dict(py, s, Some(&prob))
+            solution_dict(py, s, Some(&prob), &[])
         })
         .collect()
 }
@@ -521,7 +523,7 @@ impl PyQpFactorization {
                 None => inner.solve(qp),
             }
         });
-        solution_dict(py, sol, Some(&prob.inner))
+        solution_dict(py, sol, Some(&prob.inner), &[])
     }
 }
 

@@ -1610,6 +1610,36 @@ fn run_ipm(
         }
     }
 
+    // Final verdict from the true KKT error of the point being returned — the
+    // same rule the HSDE driver applies (see `VERDICT` in `hsde.rs`), so the two
+    // drivers cannot drift apart on whether a solve that ended without its own
+    // verdict actually produced an answer. Strictly an upgrade.
+    if matches!(
+        status,
+        QpStatus::NumericalFailure | QpStatus::IterationLimit
+    ) {
+        let candidate = QpSolution {
+            status,
+            x: x.clone(),
+            y: y.clone(),
+            z: z.clone(),
+            z_lb: vec![0.0; n],
+            z_ub: vec![0.0; n],
+            obj: 0.0,
+            iters,
+            iterates: Vec::new(),
+        };
+        let in_dual_cone = cone.in_dual_cone(&z, 1e-9);
+        let true_res = candidate
+            .kkt_residuals_conic(prob, &cone.specs())
+            .kkt_error();
+        status = match true_res {
+            e if in_dual_cone && e < opts.tol => QpStatus::Optimal,
+            e if in_dual_cone && e < 1e3 * opts.tol => QpStatus::OptimalInaccurate,
+            _ => status,
+        };
+    }
+
     // Objective ½ xᵀP x + cᵀx.
     let mut px = vec![0.0; n];
     prob.p_mul_add(&x, &mut px);

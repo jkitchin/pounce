@@ -12,6 +12,8 @@
 //! triplets. This is the form the IPM in [`crate::ipm`] consumes, and
 //! the form the `.nl` → QP extraction (Phase 2 dispatch) will target.
 
+use crate::cones::ConeSpec;
+
 /// A sparse matrix entry `(row, col, val)`, 0-based.
 #[derive(Debug, Clone, Copy)]
 pub struct Triplet {
@@ -273,6 +275,45 @@ pub struct QpIterate {
     pub alpha_dual: f64,
 }
 
+/// How far `s` is outside the cone `spec`, in the cone's own defining
+/// inequality (`0` when `s ∈ K`). Not a Euclidean distance — a violation
+/// magnitude, which is what a convergence report wants and what vanishes
+/// exactly at a feasible point.
+///
+/// * orthant — `max(0, −sᵢ)`
+/// * second-order — `max(0, ‖s₁‖ − s₀)`
+/// * PSD — `max(0, −λ_min(smat s))`
+/// * exponential — `max(0, −ψ)` for `ψ = y·log(z/y) − x`, plus `y, z ≥ 0`
+/// * power — `max(0, |x| − y^α z^{1−α})`, plus `y, z ≥ 0`
+fn cone_violation(spec: &ConeSpec, s: &[f64]) -> f64 {
+    let neg = |v: f64| (-v).max(0.0);
+    match spec {
+        ConeSpec::Nonneg(_) => s.iter().fold(0.0_f64, |m, &si| m.max(neg(si))),
+        ConeSpec::SecondOrder(_) => {
+            let tail = s[1..].iter().map(|v| v * v).sum::<f64>().sqrt();
+            (tail - s[0]).max(0.0)
+        }
+        ConeSpec::Psd(k) => neg(crate::cones::PsdCone::new(*k).min_eig(s)),
+        ConeSpec::Exponential => {
+            let (x, y, z) = (s[0], s[1], s[2]);
+            let bounds = neg(y).max(neg(z));
+            if y <= 0.0 || z <= 0.0 {
+                // ψ is undefined here; the sign violation is the whole story.
+                return bounds.max(0.0_f64.max(x));
+            }
+            bounds.max(neg(y * (z / y).ln() - x))
+        }
+        ConeSpec::Power(alpha) => {
+            let (x, y, z) = (s[0], s[1], s[2]);
+            let bounds = neg(y).max(neg(z));
+            if y < 0.0 || z < 0.0 {
+                return bounds.max(x.abs());
+            }
+            bounds.max((x.abs() - y.powf(*alpha) * z.powf(1.0 - *alpha)).max(0.0))
+        }
+    }
+}
+
 /// Final KKT residuals of a [`QpSolution`] with respect to its [`QpProblem`]
 /// — the convergence quantities a caller (e.g. a solve report or benchmark
 /// harness) needs but that aren't otherwise carried on the solution.
@@ -306,6 +347,31 @@ impl QpSolution {
     /// `−z_lb + z_ub` matching how variable bounds expand into `G`-rows and
     /// split back into the bound multipliers.
     pub fn kkt_residuals(&self, prob: &QpProblem) -> QpResiduals {
+        self.kkt_residuals_inner(prob, None)
+    }
+
+    /// Recompute the final KKT residuals of a **conic** solve, where the
+    /// inequality block is not `Gx ≤ h` row-by-row but `h − Gx ∈ K` for the
+    /// product cone `cones` (the form [`crate::solve_socp_ipm`] consumes).
+    ///
+    /// [`Self::kkt_residuals`] assumes the nonnegative orthant, so on a solve
+    /// with second-order / PSD / exponential / power blocks it reports garbage:
+    /// individual rows of a converged SOC block legitimately have `Gx > h`
+    /// (only the *cone* membership `s₀ ≥ ‖s₁‖` must hold) and `zᵢsᵢ ≠ 0` (only
+    /// the *block* product `⟨s, z⟩` vanishes). Feeding those per-row numbers to
+    /// a convergence report made a feasible, optimal QCQP look badly infeasible
+    /// (pounce#209). This variant measures each block with its own cone:
+    /// membership violation for the primal residual, the block inner product
+    /// for complementarity. Equalities, variable bounds and stationarity are
+    /// unchanged.
+    ///
+    /// `cones` must cover `prob.m_ineq()` rows in order; any trailing rows it
+    /// does not cover are treated as orthant rows.
+    pub fn kkt_residuals_conic(&self, prob: &QpProblem, cones: &[ConeSpec]) -> QpResiduals {
+        self.kkt_residuals_inner(prob, Some(cones))
+    }
+
+    fn kkt_residuals_inner(&self, prob: &QpProblem, cones: Option<&[ConeSpec]>) -> QpResiduals {
         let n = prob.n;
 
         // Dual infeasibility (stationarity).
@@ -327,19 +393,46 @@ impl QpSolution {
         }
         let mut gx = vec![0.0; prob.m_ineq()];
         prob.g_mul(&self.x, &mut gx);
-        for (&gxi, &hi) in gx.iter().zip(&prob.h) {
-            primal_infeasibility = primal_infeasibility.max((gxi - hi).max(0.0));
+        // Inequality slack `s = h − Gx`, the vector that must lie in the cone
+        // (in the orthant `s ≥ 0`, i.e. the familiar `Gx ≤ h`).
+        let s: Vec<f64> = prob.h.iter().zip(&gx).map(|(&hi, &gxi)| hi - gxi).collect();
+        let mut complementarity = 0.0_f64;
+        let mut off = 0usize;
+        for spec in cones.unwrap_or(&[]) {
+            let dim = spec.dim().min(s.len() - off);
+            if dim == 0 {
+                break;
+            }
+            let (sb, zb) = (&s[off..off + dim], &self.z[off..off + dim]);
+            primal_infeasibility = primal_infeasibility.max(cone_violation(spec, sb));
+            complementarity = match spec {
+                // Orthant rows complement one-for-one; keep the sharper
+                // per-row measure rather than the block sum.
+                ConeSpec::Nonneg(_) => sb
+                    .iter()
+                    .zip(zb)
+                    .fold(complementarity, |m, (&si, &zi)| m.max((si * zi).abs())),
+                _ => complementarity.max(
+                    sb.iter()
+                        .zip(zb)
+                        .map(|(&si, &zi)| si * zi)
+                        .sum::<f64>()
+                        .abs(),
+                ),
+            };
+            off += dim;
+        }
+        // Rows past the cone list (all of them when `cones` is `None`) are the
+        // nonnegative orthant.
+        for i in off..s.len() {
+            primal_infeasibility = primal_infeasibility.max((-s[i]).max(0.0));
+            complementarity = complementarity.max((self.z[i] * s[i]).abs());
         }
         for i in 0..n {
             primal_infeasibility = primal_infeasibility.max((prob.lb_of(i) - self.x[i]).max(0.0));
             primal_infeasibility = primal_infeasibility.max((self.x[i] - prob.ub_of(i)).max(0.0));
         }
 
-        // Complementarity.
-        let mut complementarity = 0.0_f64;
-        for ((&zi, &hi), &gxi) in self.z.iter().zip(&prob.h).zip(&gx) {
-            complementarity = complementarity.max((zi * (hi - gxi)).abs());
-        }
         for i in 0..n {
             let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));
             if lb > -1e19 {
@@ -553,5 +646,91 @@ mod residual_tests {
         );
         // Genuine breakdown with a large residual: still a hard failure.
         assert_eq!(breakdown_status(false), QpStatus::NumericalFailure);
+    }
+}
+
+#[cfg(test)]
+mod conic_residual_tests {
+    use super::*;
+    use crate::ipm::{QpOptions, solve_socp_ipm};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linsol::SparseSymLinearSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    /// pounce#209: the residuals of a *conic* solve must be measured with the
+    /// solve's own cones. `min x₀ s.t. ‖x‖ ≤ 1` in SOC form
+    /// (`s = (1, x₀, x₁) ∈ K_soc`) has the optimum `x = (−1, 0)`, at which the
+    /// cone is satisfied exactly — but its second SOC row reads `Gx = 1 > h = 0`
+    /// and its rows are individually non-complementary. The orthant-only
+    /// [`QpSolution::kkt_residuals`] therefore reports a large violation for a
+    /// perfectly feasible point, which is what leaked into the CLI's
+    /// end-of-run summary and made a solved QCQP look infeasible.
+    #[test]
+    fn conic_residuals_vanish_where_orthant_residuals_do_not() {
+        // Rows of `s = h − Gx`: s₀ = 1 (the radius), s₁ = x₀, s₂ = x₁.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(1, 0, -1.0), Triplet::new(2, 1, -1.0)],
+            h: vec![1.0, 0.0, 0.0],
+            lb: vec![-5.0, -5.0],
+            ub: vec![5.0, 5.0],
+        };
+        let cones = [ConeSpec::SecondOrder(3)];
+        let sol = solve_socp_ipm(&prob, &cones, &QpOptions::default(), backend);
+        assert!(
+            (sol.x[0] - -1.0).abs() < 1e-6 && sol.x[1].abs() < 1e-6,
+            "expected the optimum (−1, 0), got {:?}",
+            sol.x
+        );
+
+        let conic = sol.kkt_residuals_conic(&prob, &cones);
+        assert!(
+            conic.kkt_error() < 1e-6,
+            "cone-aware residuals must vanish at the optimum: {conic:?}"
+        );
+
+        // The orthant reading of the same point is badly wrong — `s₁ = x₀ = −1`
+        // looks like a violation of ~1 even though `s` is squarely in the cone.
+        // (Pinned so the two measures cannot silently converge and make the
+        // test above vacuous.)
+        let orthant = sol.kkt_residuals(&prob);
+        assert!(
+            orthant.primal_infeasibility > 0.5,
+            "the orthant metric should misread this feasible point (that is the \
+             bug); got {orthant:?}"
+        );
+    }
+
+    /// The trailing rows a cone list does not cover fall back to the orthant, so
+    /// a plain QP's residuals are identical whether or not a (nonneg) cone list
+    /// is supplied. Guards the shared implementation against drift.
+    #[test]
+    fn conic_residuals_match_orthant_on_a_cone_free_qp() {
+        // min ½(x₀² + x₁²) − x₀ s.t. x₀ + x₁ ≤ 1, 0 ≤ x ≤ 2.
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![-1.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            h: vec![1.0],
+            lb: vec![0.0, 0.0],
+            ub: vec![2.0, 2.0],
+        };
+        let cones = [ConeSpec::Nonneg(1)];
+        let sol = solve_socp_ipm(&prob, &cones, &QpOptions::default(), backend);
+        let orthant = sol.kkt_residuals(&prob);
+        let conic = sol.kkt_residuals_conic(&prob, &cones);
+        assert_eq!(orthant, conic, "orthant rows must measure identically");
+        // And with no cone list at all: every row is orthant by default.
+        assert_eq!(orthant, sol.kkt_residuals_conic(&prob, &[]));
     }
 }

@@ -39,7 +39,7 @@ use crate::debug::{ConvexDebugState, fire};
 use crate::ipm::{
     QpOptions, build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step,
 };
-use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus, breakdown_status};
+use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
 use pounce_common::types::Index;
 use pounce_linsol::{Factorization, FactorizationError, SparseSymLinearSolverInterface};
@@ -154,6 +154,58 @@ fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
 /// under a caller-tightened/loosened tolerance.
 fn relative_stop_permitted(max_scale: f64, tol: f64) -> bool {
     max_scale * f64::EPSILON > tol
+}
+
+/// The KKT error of the **un-homogenized** iterate `(x, y, z)/τ`, measured
+/// directly against the original problem and this solve's own cones.
+///
+/// This is the definition of optimality applied to the point a caller would
+/// actually receive: cone feasibility of `h − Gx̂`, stationarity
+/// `‖Px̂ + c + Aᵀŷ + Gᵀẑ‖∞`, and per-cone-block complementarity. It is a
+/// *stronger* certificate than the driver's homogeneous residual, which also
+/// carries the consistency of the internal slack `s` (`Gx + s − hτ`) — a
+/// quantity that is pure bookkeeping (`s` is never returned) and that goes
+/// numerically noisy once `μ` reaches ~1e-16 and the NT scaling's condition
+/// number blows up. On a feasible convex QCQP the surrogate stalled at ~1e-7
+/// and drifted as high as 1e-4 while this error sat at 1e-14 (pounce#209).
+///
+/// Returns `None` when `τ ≤ 0` (an infeasibility ray, where un-homogenizing is
+/// meaningless) or when `ẑ` has left the dual cone — without `ẑ ∈ K*` the
+/// residuals below are not a KKT certificate, however small they are.
+fn true_kkt_error(
+    prob: &QpProblem,
+    cone: &CompositeCone,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    tau: f64,
+) -> Option<f64> {
+    if !(tau > 0.0) {
+        return None;
+    }
+    let inv = 1.0 / tau;
+    let z_hat: Vec<f64> = z.iter().map(|v| v * inv).collect();
+    // `in_dual_cone` is scale-free in the sense that matters here: the cones
+    // are self-dual, so this asks whether `ẑ` is (nearly) in `K` itself.
+    if !cone.in_dual_cone(&z_hat, 1e-9) {
+        return None;
+    }
+    let candidate = QpSolution {
+        status: QpStatus::Optimal,
+        x: x.iter().map(|v| v * inv).collect(),
+        y: y.iter().map(|v| v * inv).collect(),
+        z: z_hat,
+        z_lb: vec![0.0; prob.n],
+        z_ub: vec![0.0; prob.n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    };
+    Some(
+        candidate
+            .kkt_residuals_conic(prob, &cone.specs())
+            .kkt_error(),
+    )
 }
 
 /// Fraction-to-boundary step for a positive scalar ray `v + α dv > 0`,
@@ -449,18 +501,9 @@ where
         } else {
             pres.max(dres).max(gap)
         };
-        // "Acceptable level": near the cone boundary the scaling/factorization
-        // can break down a hair short of `tol`. If the (relative) KKT residuals
-        // are already tiny (within `~1e3·tol`) when that happens, the iterate
-        // is usable — report it as `OptimalInaccurate` (reduced accuracy)
-        // rather than discarding it as a spurious `NumericalFailure`. It is
-        // deliberately *not* reported as a bare `Optimal`: the residual sits
-        // above `tol`, so callers can tell it apart from a genuinely converged
-        // solve (code review 2026-06 item M20). This mirrors the non-symmetric
-        // HSDE driver (`hsde_nonsym.rs`), which already does this; the two
-        // drivers were inconsistent (the symmetric one discarded usable
-        // SOC/orthant iterates that the non-symmetric one would have accepted).
-        let near_opt = res < 1e3 * opts.tol;
+        // (`res` also feeds the debugger checkpoints below. The
+        // reduced-accuracy salvage that used to read it here now runs *after*
+        // the loop, against the true KKT residual — see `SALVAGE`.)
 
         // Debugger checkpoint: top of iteration. Blocks expose the
         // homogeneous iterate `(x, s, y, z, τ, κ)`; the objective is the
@@ -619,7 +662,7 @@ where
             break;
         }
         if !factored {
-            status = breakdown_status(near_opt);
+            status = QpStatus::NumericalFailure;
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut p_x, &mut p_y, &mut p_z);
@@ -642,7 +685,7 @@ where
         )
         .is_err()
         {
-            status = breakdown_status(near_opt);
+            status = QpStatus::NumericalFailure;
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
@@ -686,7 +729,7 @@ where
         )
         .is_err()
         {
-            status = breakdown_status(near_opt);
+            status = QpStatus::NumericalFailure;
             break;
         }
         split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
@@ -917,6 +960,48 @@ where
     let mut px = vec![0.0; n];
     prob.p_mul(&x, &mut px);
     let obj = 0.5 * dot(&x, &px) + dot(&prob.c, &x);
+
+    // VERDICT. The loop's convergence test reads the *homogeneous* residuals,
+    // which carry the internal slack's consistency `Gx + s − hτ` alongside the
+    // real KKT quantities. That term is bookkeeping — `s` is never returned —
+    // and it floors out once `μ` reaches ~1e-16 and the NT scaling's condition
+    // number explodes. So a solve can be optimal in every sense the caller can
+    // observe while the surrogate refuses to certify it: on a feasible convex
+    // QCQP `pres` bottomed at 1e-8, wandered back up to 1e-4, and the solve
+    // ground on to a factorization breakdown while the iterate itself was
+    // accurate to 1e-14 — reported as `InternalError` / exit 1 (pounce#209).
+    //
+    // So when the loop ends *without* a verdict of its own, ask the question
+    // where it is actually defined: the true KKT error of the un-homogenized
+    // point being returned, against this solve's own cones (see
+    // [`true_kkt_error`], which is strictly stronger than the surrogate — it
+    // also requires `ẑ ∈ K*`). Below `tol` that point satisfies the optimality
+    // conditions and `Optimal` is the honest verdict; within `~1e3·tol` it is
+    // usable at reduced accuracy (`OptimalInaccurate`, deliberately kept
+    // distinguishable from a clean convergence — code review 2026-06 item M20);
+    // beyond that the breakdown stands.
+    //
+    // This deliberately runs *after* the loop rather than as an extra
+    // convergence test inside it. Breaking early on the certificate would stop
+    // some solves sooner and hand back a less-polished iterate: on a degenerate
+    // tangency (`min −x₁ s.t. ‖x‖ ≤ 1, x₀ ≥ 0`) the map from KKT residual to
+    // `x`-error is a square root, so a residual of `tol` still leaves `x₀` off
+    // by ~1e-4. Judging only at the end changes the verdict and never the
+    // iterates. Costs a handful of matvecs, once, and only on a solve that
+    // would otherwise have no answer.
+    if matches!(
+        status,
+        QpStatus::NumericalFailure | QpStatus::IterationLimit
+    ) {
+        // `x`/`y`/`z` are already un-homogenized above, hence `τ = 1`. Strictly
+        // an upgrade: a point that fails both bands leaves the loop's own
+        // verdict (breakdown *or* iteration limit) untouched.
+        status = match true_kkt_error(prob, cone, &x, &y, &z, 1.0) {
+            Some(e) if e < opts.tol => QpStatus::Optimal,
+            Some(e) if e < 1e3 * opts.tol => QpStatus::OptimalInaccurate,
+            _ => status,
+        };
+    }
 
     // Debugger post-mortem at the recovered (un-homogenized) solution. `s`
     // stays in its homogeneous scaling; `dx`/… are the last step.

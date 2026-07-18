@@ -161,6 +161,38 @@ changes.
 
 ### Fixed
 
+- **A solved convex QCQP no longer reports `InternalError` / exit 1 (#209).**
+  On the `.nl` → SOCP conic path (`solver_selection=socp`, and `auto` when it
+  routes a QCQP there) POUNCE converged to the correct, feasible optimum and
+  then reported failure, with an end-of-run summary showing a large
+  `Constraint violation` for a point that is feasible to machine precision. Any
+  driver that trusts the exit code or the status — a Pyomo/AMPL wrapper, a CI
+  gate — read the solve as failed. Two independent defects:
+  - The summary measured the second-order cone rows with the nonnegative
+    orthant's per-row `Gx ≤ h` test. A converged SOC block legitimately has
+    individual rows with `Gx > h` (only the cone membership `s₀ ≥ ‖s₁‖` must
+    hold) and non-complementary rows (only the block product `⟨s, z⟩`
+    vanishes), so the reported violation measured nothing to do with the
+    quadratic constraint. Conic solves are now measured against their own
+    cones (`QpSolution::kkt_residuals_conic`).
+  - The conic driver's convergence test reads the *homogeneous* residuals,
+    which carry the consistency of the internal slack `s` (`Gx + s − hτ`)
+    alongside the real KKT quantities. That term is bookkeeping — `s` is never
+    returned — and it floors out once μ reaches ~1e-16 and the Nesterov–Todd
+    scaling's condition number explodes. On the reported QCQP it bottomed at
+    1e-8, drifted back up to 1e-4, and the solve ground on to a factorization
+    breakdown, all while the iterate itself was accurate to 1e-14. A solve
+    that ends without a verdict of its own (breakdown or iteration limit) now
+    takes one from the **true KKT error of the point it returns** — cone
+    feasibility, stationarity, complementarity and `z ∈ K*`, measured on the
+    un-homogenized iterate. Below `tol` that is `Optimal`; within `~1e3·tol`,
+    `SolvedToAcceptableLevel`; beyond it the original verdict stands. The
+    check runs only after the loop, so iterates and iteration counts are
+    unchanged — only the verdict and the exit code differ.
+- **`pounce.solve_socp` now reports final KKT `residuals`.** Conic solves
+  previously returned `residuals=None` / `kkt_error=None` because only the
+  orthant measure existed; they now carry the cone-aware residuals, so a conic
+  solve's convergence is checkable from Python.
 - **`pounce.minimize(..., args=...)` now works with convex routing.** The extra
   objective `args` were applied on the NLP path but not bound into the copies of
   `fun`/`jac`/`hess` handed to the LP/QP/SOCP routers, which probe them as bare

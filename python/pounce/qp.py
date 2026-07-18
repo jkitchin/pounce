@@ -114,9 +114,10 @@ class QpResult:
         Final KKT residuals as a dict with keys
         ``primal_infeasibility``, ``dual_infeasibility``,
         ``complementarity``, and ``kkt_error`` (the max of the three).
-        ``None`` for conic (:func:`solve_socp`) solves, where the slack
-        lives in a non-orthant cone and these orthant residuals do not
-        apply.
+        For a conic (:func:`solve_socp`) solve these are measured against
+        the solve's own cones — cone-membership violation for the primal
+        residual and the per-block inner product for complementarity —
+        not the orthant's per-row test, which is meaningless there.
     iterates:
         Per-iteration convergence trace — a list of dicts with keys
         ``iter``, ``objective``, ``primal_infeasibility``,
@@ -141,7 +142,7 @@ class QpResult:
 
     @property
     def kkt_error(self) -> Optional[float]:
-        """Overall KKT error (max residual), or ``None`` for conic solves."""
+        """Overall KKT error (the max residual), or ``None`` if unavailable."""
         return None if self.residuals is None else self.residuals["kkt_error"]
 
 
