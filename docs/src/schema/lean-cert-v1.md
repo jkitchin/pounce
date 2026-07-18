@@ -21,6 +21,38 @@ wires it to the CLI.
 > (`propext`, `Classical.choice`, `Quot.sound`; no `sorry`). Other verdicts and
 > problem classes are additive future work.
 
+## Two documents, two audiences — and one asymmetry
+
+The schema is specified in two places, deliberately:
+
+| Document | Audience | Scope |
+|---|---|---|
+| **this file** | the producer | what `pounce certify` emits, and why |
+| [`pounce-lean/docs/lean-cert-v1.md`](https://github.com/jkitchin/pounce-lean/blob/main/docs/lean-cert-v1.md) | the consumer | what `codegen/gen_lean.py` *accepts*, and the theorems each field discharges |
+
+They are not copies and neither is redundant. The consumer document is
+authoritative for what will verify, because it describes the code that actually
+reads the certificate.
+
+> **The consumer accepts strictly more than the producer emits.** This is the one
+> place the two sides do not line up, and it is load-bearing enough to state
+> here:
+>
+> | Verdict | `pounce certify` emits | `pounce-lean` verifies |
+> |---|---|---|
+> | `global-min` | yes | yes |
+> | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | **no** | **yes** |
+> | `local-min-strict` | no | no |
+>
+> `emit.rs` hardcodes `verdict: "global-min"`, so **every `feasible` certificate
+> in existence is hand-written.** The consumer-side machinery for them
+> (`candidate_eps_feasible`, `feasible_point_exists`, and the
+> `feasible_witness` field) is implemented and tested there, and is described in
+> § 9 of the consumer document — but nothing in POUNCE can produce input for it
+> yet. Teaching the emitter to emit `feasible` is tracked as planned work; until
+> then, treat § 9 of the consumer document as a specification the producer has
+> not met.
+
 ## How it differs from `pounce verify`
 
 [`pounce verify`](../verify.md) re-evaluates `g(x*)` in **f64** and makes its
