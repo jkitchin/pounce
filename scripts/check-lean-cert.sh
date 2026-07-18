@@ -204,4 +204,48 @@ for entry in "${FIXTURES[@]}"; do
   fi
 done
 
+
+# --- layer 3 (needs LAKE_BUILD): forged witnesses must NOT verify -----------
+#
+# The whole trust model rests on one claim: a wrong witness makes the proof
+# fail to typecheck, so a certificate can never prove something false. Until
+# this layer existed that claim was asserted in every document and tested
+# nowhere. A guard that only checks *good* certificates cannot tell a sound
+# pipeline from one that proves anything it is handed.
+#
+# So: each fixture below carries a deliberately corrupted witness. The codegen
+# must still ACCEPT it — codegen does not judge witnesses, that is the point —
+# and `lake build` must then REJECT it. A forged certificate that builds is a
+# soundness failure and fails this script.
+#
+# The axiom audit in layer 2 catches a `sorry`; it cannot catch "this witness
+# is wrong and we proved it anyway". That is what this layer is for.
+if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
+  # "<basename> <module> <what was corrupted>"
+  NEGATIVE_FIXTURES=(
+    "certify_qp_forged_dual       PounceLean.Generated.ForgedDual  KKT dual (breaks stationarity)"
+    "certify_qp_forged_psd        PounceLean.Generated.ForgedPsd   LDLᵀ diagonal (breaks Q ⪰ 0)"
+    "certify_infeasible_forged    PounceLean.Generated.ForgedFarkas Farkas ray (breaks Aᵀy = 0)"
+  )
+  echo "== forged witnesses must be rejected by the kernel =="
+  for entry in "${NEGATIVE_FIXTURES[@]}"; do
+    read -r base module what <<<"$entry"
+    dest="$POUNCE_LEAN_DIR/${module//.//}.lean"
+    mkdir -p "$(dirname "$dest")"
+    if ! python3 "$GEN" "$FIX/$base.cert.json" -m "$module" -o "$dest" 2>/dev/null; then
+      echo "FAIL — $base: codegen refused it, so the kernel is never exercised." >&2
+      echo "       Codegen must accept forged witnesses; only Lean may reject them." >&2
+      rm -f "$dest"
+      exit 1
+    fi
+    placed+=("$dest")
+    if ( cd "$POUNCE_LEAN_DIR" && lake build "$module" >/dev/null 2>&1 ); then
+      echo "FAIL — $base: a certificate with a corrupted $what BUILT." >&2
+      echo "       This is a soundness failure: the proof does not depend on the" >&2
+      echo "       witness being correct." >&2
+      exit 1
+    fi
+    echo "  OK — $base: rejected by the kernel (corrupted $what)"
+  done
+fi
 echo "check-lean-cert: OK"
