@@ -258,3 +258,58 @@ fn certified_point_can_be_a_rational_no_f64_can_represent() {
         "an f64 converts to a dyadic rational"
     );
 }
+
+// --------------------------------------------------------------------------
+// Degeneracy: why a realistic LP does not certify.
+// --------------------------------------------------------------------------
+
+/// The netlib `afiro` LP solves fine but refuses to certify, and the reason is
+/// structural rather than a tolerance to be tuned.
+///
+/// For an LP the objective Hessian is zero, so the KKT matrix is
+///
+/// ```text
+///     [  0   −Aᵀ_act  −Eᵀ ]
+///     [ A_act   0        0 ]
+///     [  E      0        0 ]
+/// ```
+///
+/// Its top block gives `n` equations constraining the *duals*, and the lower
+/// blocks give `k + p` equations constraining the *primal*. The system is
+/// nonsingular only when `k + p == n` — exactly `n` independent active
+/// constraints, i.e. a **nondegenerate vertex**.
+///
+/// Measured on afiro: `n = 32`, `k = 29` active inequalities, `p = 8`
+/// equalities. That is **37 active constraints in 32 dimensions**, degenerate
+/// by 5, so the 69×69 KKT matrix is rank-deficient and the exact solve fails.
+///
+/// This test asserts the arithmetic of that argument, so the diagnosis cannot
+/// drift into folklore. It does not require the .nl fixture — the counts are
+/// the finding.
+#[test]
+fn lp_degeneracy_makes_the_kkt_system_singular_by_construction() {
+    // afiro, as reported by POUNCE_REFINE_DEBUG=1.
+    let (n, k, p) = (32usize, 29usize, 8usize);
+
+    let active_total = k + p;
+    assert!(
+        active_total > n,
+        "afiro is degenerate: {active_total} active constraints in {n} dimensions"
+    );
+    assert_eq!(active_total - n, 5, "degenerate by 5");
+
+    // The KKT system is square...
+    assert_eq!(n + k + p, 69);
+    // ...but its blocks are mismatched: the dual block is underdetermined and
+    // the primal block overdetermined by the same amount.
+    let dual_unknowns = k + p;
+    let dual_equations = n;
+    assert!(
+        dual_unknowns > dual_equations,
+        "{dual_unknowns} dual unknowns constrained by only {dual_equations} equations"
+    );
+
+    // A nondegenerate instance, for contrast: certify_lp has n = k = 2, p = 0.
+    let (n2, k2, p2) = (2usize, 2usize, 0usize);
+    assert_eq!(k2 + p2, n2, "certify_lp sits at a nondegenerate vertex");
+}

@@ -133,6 +133,21 @@ pub fn refine_kkt_eq(
         rhs[n + k + ei] = d[ei].clone();
     }
 
+    // Diagnostic for refusals in the field. `Singular` is a catch-all, and the
+    // most common cause is a DEGENERATE active set: for an LP (`Q = 0`) the KKT
+    // matrix is nonsingular only when exactly `n` independent constraints are
+    // active, and real LPs routinely have more. Set POUNCE_REFINE_DEBUG=1 to see
+    // the counts. Example: netlib afiro reports n=32, active=29, equalities=8 —
+    // 37 active constraints in 32 dimensions, degenerate by 5.
+    if std::env::var("POUNCE_REFINE_DEBUG").is_ok() {
+        eprintln!(
+            "REFINE_DEBUG n={n} m={m} active(k)={k} equalities={} => KKT {}x{} \
+             (LP needs k + equalities == n for a nonsingular system)",
+            e.len(),
+            mat.len(),
+            mat.first().map_or(0, |r| r.len())
+        );
+    }
     let sol = solve_exact(&mat, &rhs).ok_or(RefineError::Singular)?;
     let x = sol[..n].to_vec();
 
