@@ -99,10 +99,13 @@ fn application_iter_history_fills_under_collector_scope() {
     let _scope = collector_scope();
     let mut app = IpoptApplication::new();
     let init = app.initialize();
-    assert!(init.is_ok(), "IpoptApplication::initialize failed: {init:?}");
-    let _ = app
-        .options_mut()
-        .set_string_value("hessian_approximation", "limited-memory", true, true);
+    assert!(
+        init.is_ok(),
+        "IpoptApplication::initialize failed: {init:?}"
+    );
+    let _ =
+        app.options_mut()
+            .set_string_value("hessian_approximation", "limited-memory", true, true);
     app.enable_iter_history();
 
     let prob = Rc::new(RefCell::new(Bounded2::default()));

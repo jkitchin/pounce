@@ -214,9 +214,9 @@ pub mod prelude {
     pub use pounce_common::types::{Index, Number};
     pub use pounce_nlp::return_codes::ApplicationReturnStatus;
     pub use pounce_nlp::solve_statistics::{IterRecord, SolveStatistics};
-    pub use pounce_observability::{collector_scope, with_iter_capture};
     pub use pounce_nlp::tnlp::{
         BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, ScalingRequest, Solution,
         SparsityRequest, StartingPoint, TNLP,
     };
+    pub use pounce_observability::{collector_scope, with_iter_capture};
 }
