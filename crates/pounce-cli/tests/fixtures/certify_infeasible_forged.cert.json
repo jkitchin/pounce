@@ -1,0 +1,129 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "infeasible",
+  "problem_class": "qp-convex",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "c2ce4026a4f1338b8996f8603ad6b07604125613201b1e39ac3f0ae134b45347",
+    "sol_sha256": "6ed24301b237c2ce4191e96726b53cb10fa5bb20b63c6b55a62f39364f77b20f",
+    "solver": "pounce 0.9.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": []
+      },
+      "c": [
+        {
+          "num": "1",
+          "den": "1"
+        },
+        {
+          "num": "1",
+          "den": "1"
+        }
+      ],
+      "constant": {
+        "num": "0",
+        "den": "1"
+      }
+    },
+    "var_bounds": {
+      "lower": [
+        "-inf",
+        "-inf"
+      ],
+      "upper": [
+        "+inf",
+        "+inf"
+      ]
+    },
+    "constraints": [
+      {
+        "name": "c0",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "2",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "c1",
+        "coeffs": [
+          {
+            "num": "-1",
+            "den": "1"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "0",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "c2",
+        "coeffs": [
+          {
+            "num": "0",
+            "den": "1"
+          },
+          {
+            "num": "-1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "0",
+          "den": "1"
+        },
+        "upper": "+inf"
+      }
+    ]
+  },
+  "witnesses": {
+    "farkas": {
+      "y": [
+        {
+          "num": "1",
+          "den": "1"
+        },
+        {
+          "num": "0",
+          "den": "1"
+        },
+        {
+          "num": "0",
+          "den": "1"
+        }
+      ]
+    }
+  }
+}
