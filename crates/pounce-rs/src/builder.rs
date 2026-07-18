@@ -199,6 +199,12 @@ impl<P: Problem + 'static> Nlp<P> {
     /// Record the per-iteration trajectory: one
     /// [`IterRecord`](crate::IterRecord) per Newton iteration into
     /// [`Solution::stats`]`.iterations` (empty without this call).
+    ///
+    /// Interior-point solves only, since the per-iteration event
+    /// is emitted by the IPM engine, so on the active-set SQP engine
+    /// (`solver_selection=qp-active-set`/`algorithm=active-set-sqp`)
+    /// `stats.iterations` stays empty even though
+    /// `stats.iteration_count` still reports the iterations run.
     pub fn capture_iterations(mut self) -> Self {
         self.capture_iterations = true;
         self
@@ -481,6 +487,19 @@ mod tests {
             iters.windows(2).all(|w| w[0].iter < w[1].iter),
             "iteration counter must be strictly increasing"
         );
+    }
+
+    #[test]
+    fn capture_iterations_is_empty_on_sqp_engine() {
+        let sol = Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .option_str("solver_selection", "qp-active-set")
+            .capture_iterations()
+            .solve();
+        assert!(sol.success, "status = {:?}", sol.status);
+        assert!(sol.stats.iteration_count > 0);
+        assert!(sol.stats.iterations.is_empty());
     }
 
     #[test]

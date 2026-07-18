@@ -321,6 +321,9 @@ impl ScopedIterCapture {
 /// activates an [`IterCaptureGuard`], runs `f`, and tears both
 /// down before returning.
 ///
+/// Records exist only for solver paths that emit the [`ITER_TARGET`]
+/// event. An active-set SQP solve inside `f` captures nothing.
+///
 /// ```ignore
 /// let (solution, iters) = pounce_observability::with_iter_capture(|| nlp.solve());
 /// ```

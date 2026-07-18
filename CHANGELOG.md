@@ -45,8 +45,11 @@ changes.
   the per-iteration trajectory (`stats.iterations`, one `IterRecord` per
   Newton iteration) by installing the thread-scoped collector around the
   solve — note the collector shadows a global subscriber's console output on
-  that thread for the solve's duration. The field additions are breaking
-  only for code that exhaustively destructures `Solution` (pre-1.0).
+  that thread for the solve's duration, and that only the interior-point
+  engine emits the per-iteration event (an active-set SQP solve leaves
+  `stats.iterations` empty while `iteration_count` still counts). The field
+  additions are breaking only for code that exhaustively destructures
+  `Solution` (pre-1.0).
 
 ### Changed — pyomo-pounce streams the engine's log under `tee=True`
 
