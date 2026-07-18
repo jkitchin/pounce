@@ -31,7 +31,7 @@ pub mod schema;
 
 pub use emit::{
     CertMeta, EmitError, LinearConstraint, QpInput, canonical_problem, emit_certificate,
-    problem_block,
+    emit_infeasible_certificate, problem_block,
 };
 pub use rational::{Bound, Rat, RatError};
 pub use schema::{Certificate, SCHEMA_TAG};

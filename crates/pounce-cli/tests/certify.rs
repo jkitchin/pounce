@@ -168,3 +168,50 @@ fn certify_refuses_off_slice() {
         "must refuse on slice grounds, not I/O: {err}"
     );
 }
+
+#[test]
+fn certify_routes_an_infeasible_solve_to_a_farkas_certificate() {
+    // The solve exits nonzero (the problem has no solution) but still writes a
+    // .sol; solve_to_sol asserts success, so drive the binary directly here.
+    let nl = fixture("certify_infeasible.nl");
+    let _ = Command::new(pounce_exe()).arg(&nl).output();
+    let sol = fixture("certify_infeasible.sol");
+    assert!(
+        sol.exists(),
+        "an infeasible solve must still write its .sol"
+    );
+
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(&nl)
+        .arg(&sol)
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "certifying an infeasible solve should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    assert_eq!(cert["verdict"], "infeasible");
+    // Not a claim about a point: the key is absent entirely.
+    assert!(
+        cert.get("candidate").is_none(),
+        "an infeasible certificate carries no candidate"
+    );
+    // The exact ray, not the ~2.3e10 float one the solver returned.
+    assert_eq!(
+        cert["witnesses"]["farkas"]["y"],
+        serde_json::json!([
+            {"num":"1","den":"1"},
+            {"num":"1","den":"1"},
+            {"num":"1","den":"1"}
+        ])
+    );
+    assert!(
+        cert["witnesses"].get("duals").is_none(),
+        "KKT witnesses do not belong on an infeasible certificate"
+    );
+}
