@@ -21,11 +21,18 @@ changes.
   solves that don't fit in a closure; and `collector_scope()` installs just
   the collector for the `IpoptApplication` path
   (`enable_iter_history()` + `statistics().iterations`), where the driver
-  manages its own capture guard. All three install the collector as the
-  *thread-default* subscriber (never global) and uninstall on drop; while a
-  scope is active it shadows any global subscriber on that thread, so scope
-  it tightly around the solve. Restoration sub-solve exclusion and nested /
-  sequential capture semantics are unchanged. `pounce-rs` re-exports the
+  manages its own capture guard. All three activate the collector for the
+  scope's lifetime and never touch the global subscriber: when
+  `init_subscriber` already owns the global (which carries the collector)
+  the scope is a no-op and capture composes with console/JSON logging;
+  otherwise a collector-only thread-default is installed, which shadows the
+  host's own subscriber on that thread for the duration — scope it tightly
+  around the solve. Restoration sub-solve exclusion and nested /
+  sequential capture semantics are unchanged, and the driver now propagates
+  its iteration-history records to any enclosing capture on finish (new
+  `extend_active_capture`), so wrapping a solve that has iteration history
+  enabled in `with_iter_capture` yields the trajectory in both places
+  instead of an empty outer buffer. `pounce-rs` re-exports the
   helpers plus `IterRecord`, `SolveStatistics`, `IterCaptureGuard`, and
   `init_subscriber` (and the whole `pounce_observability` crate), so the
   facade alone covers both iteration capture and console logging;
@@ -43,11 +50,12 @@ changes.
   (the driver already computed them; the builder now reads
   `app.statistics()`). A new `.capture_iterations()` builder flag opts into
   the per-iteration trajectory (`stats.iterations`, one `IterRecord` per
-  Newton iteration) by installing the thread-scoped collector around the
-  solve — note the collector shadows a global subscriber's console output on
-  that thread for the solve's duration, and that only the interior-point
-  engine emits the per-iteration event (an active-set SQP solve leaves
-  `stats.iterations` empty while `iteration_count` still counts). The field
+  Newton iteration) by activating the thread-scoped collector around the
+  solve — a no-op composing with the logs when `init_subscriber` owns the
+  global subscriber, a host-subscriber-shadowing thread-default install
+  otherwise. Only the interior-point engine emits the per-iteration event
+  (an active-set SQP solve leaves `stats.iterations` empty while
+  `iteration_count` still counts). The field
   additions are breaking only for code that exhaustively destructures
   `Solution` (pre-1.0).
 
