@@ -1,5 +1,5 @@
 use pounce_observability::{
-    IterCaptureGuard, ITER_TARGET, collector_scope, init_for_tests, with_iter_capture,
+    ITER_TARGET, IterCaptureGuard, collector_scope, init_for_tests, with_iter_capture,
 };
 
 fn emit(iter: i64) {
