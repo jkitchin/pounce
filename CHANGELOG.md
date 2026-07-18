@@ -9,6 +9,45 @@ changes.
 
 ## [Unreleased]
 
+### Added — thread-scoped iteration capture from Rust (pounce-rs)
+
+- **A Rust consumer embedding POUNCE can now record a solve's iteration
+  trajectory with no direct `tracing`/`tracing-subscriber` dependencies and
+  without touching the global subscriber.** `pounce-observability` gains
+  thread-scoped helpers that bundle the collector-layer install:
+  `with_iter_capture(|| nlp.solve())` runs a closure with capture active and
+  returns its result alongside the recorded `IterRecord`s;
+  `ScopedIterCapture::start()`/`.finish()` is the guard-shaped equivalent for
+  solves that don't fit in a closure; and `collector_scope()` installs just
+  the collector for the `IpoptApplication` path
+  (`enable_iter_history()` + `statistics().iterations`), where the driver
+  manages its own capture guard. All three install the collector as the
+  *thread-default* subscriber (never global) and uninstall on drop; while a
+  scope is active it shadows any global subscriber on that thread, so scope
+  it tightly around the solve. Restoration sub-solve exclusion and nested /
+  sequential capture semantics are unchanged. `pounce-rs` re-exports the
+  helpers plus `IterRecord`, `SolveStatistics`, `IterCaptureGuard`, and
+  `init_subscriber` (and the whole `pounce_observability` crate), so the
+  facade alone covers both iteration capture and console logging;
+  `with_iter_capture`, `collector_scope`, `IterRecord`, and
+  `SolveStatistics` join the prelude.
+
+### Changed — richer `Nlp::solve()` result (pounce-rs)
+
+- **`builder::Solution` now carries the full per-solve picture.** New fields:
+  `g` (constraint values at the solution), `z_l`/`z_u` (bound multipliers),
+  and `stats: SolveStatistics` — wall time
+  (`stats.total_wallclock_time_secs`), `iteration_count`, evaluation counts,
+  final scaled and unscaled infeasibilities, final barrier `mu`, and
+  restoration counters, all filled on every solve with no new bookkeeping
+  (the driver already computed them; the builder now reads
+  `app.statistics()`). A new `.capture_iterations()` builder flag opts into
+  the per-iteration trajectory (`stats.iterations`, one `IterRecord` per
+  Newton iteration) by installing the thread-scoped collector around the
+  solve — note the collector shadows a global subscriber's console output on
+  that thread for the solve's duration. The field additions are breaking
+  only for code that exhaustively destructures `Solution` (pre-1.0).
+
 ### Changed — pyomo-pounce streams the engine's log under `tee=True`
 
 - **`SolverFactory('pounce').solve(m, tee=True)` now streams the engine's own
