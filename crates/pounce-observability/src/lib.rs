@@ -138,6 +138,23 @@ fn push_record(rec: IterRecord) {
     });
 }
 
+/// Append copies of `records` to the active capture slot, if any.
+///
+/// Called by the solver driver after it drains its own iteration-history
+/// capture, so an enclosing [`IterCaptureGuard`] still receives the
+/// trajectory instead of finding its buffer emptied by the driver's
+/// inner guard. No-op when no capture is active on this thread.
+pub fn extend_active_capture(records: &[IterRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.extend_from_slice(records);
+        }
+    });
+}
+
 // ---- Event → IterRecord visitor ----
 
 #[derive(Default)]
@@ -282,8 +299,8 @@ pub fn collector_scope() -> CollectorScope {
 /// on this thread, with no `tracing` wiring on the caller's side.
 ///
 /// For solves that don't fit inside a closure; otherwise prefer
-/// [`with_iter_capture`]. Do not combine with the driver's own
-/// iteration-history capture (`enable_iter_history`) on the same solve.
+/// [`with_iter_capture`]. Combining with the driver's own
+/// iteration-history capture (`enable_iter_history`) is safe.
 #[must_use = "call finish() to retrieve the captured iteration history"]
 pub struct ScopedIterCapture {
     capture: IterCaptureGuard,
@@ -656,6 +673,23 @@ mod tests {
             alpha_primal = 1.0,
             alpha_char = s.as_str(),
         );
+    }
+
+    #[test]
+    fn extend_active_capture_appends_to_enclosing_buffer() {
+        let outer = IterCaptureGuard::start();
+        push_record(sample_record(0, 1.0, ' '));
+        let inner = IterCaptureGuard::start();
+        push_record(sample_record(1, 0.5, ' '));
+        let inner_got = inner.finish();
+        extend_active_capture(&inner_got);
+        let outer_got = outer.finish();
+        let iters: Vec<i32> = outer_got.iter().map(|r| r.iter).collect();
+        assert_eq!(iters, vec![0, 1]);
+
+        extend_active_capture(&inner_got);
+        let fresh = IterCaptureGuard::start();
+        assert!(fresh.finish().is_empty());
     }
 
     #[test]

@@ -51,6 +51,25 @@ fn builder_capture_iterations_flag_fills_stats() {
     assert_eq!(sol.z_l.len(), 2);
 }
 
+#[test]
+fn with_iter_capture_around_capture_iterations_gets_records_too() {
+    let (sol, iters) = with_iter_capture(|| {
+        Nlp::new(Quad)
+            .var_bounds(&[0.0, 0.0], &[5.0, 5.0])
+            .constraint_bounds(&[3.0], &[3.0])
+            .capture_iterations()
+            .solve()
+    });
+    assert!(sol.success, "status = {:?}", sol.status);
+    assert!(!sol.stats.iterations.is_empty());
+    assert_eq!(
+        iters.len(),
+        sol.stats.iterations.len(),
+        "outer capture must see the same trajectory the driver recorded"
+    );
+    assert_eq!(iters[0].iter, sol.stats.iterations[0].iter);
+}
+
 /// min (x0-1)^2 + (x1+2)^2, bounds only (m = 0), L-BFGS Hessian.
 #[derive(Default)]
 struct Bounded2 {

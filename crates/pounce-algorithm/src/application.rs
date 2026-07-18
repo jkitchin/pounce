@@ -1751,6 +1751,10 @@ impl IpoptApplication {
         let solver_status = alg.optimize();
 
         let captured_iters = iter_capture.map(|g| g.finish()).unwrap_or_default();
+        // Propagate to any enclosing capture (e.g. `with_iter_capture`
+        // wrapped around a solve with iteration history enabled), whose
+        // buffer this inner guard would otherwise leave empty.
+        pounce_observability::extend_active_capture(&captured_iters);
         // Close the overall-algorithm timer on the success path. The
         // early-return arms above end it themselves before bailing out;
         // this one matches upstream `IpoptApplication::call_optimize`
