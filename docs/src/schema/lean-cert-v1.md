@@ -4,10 +4,9 @@
 
 This document is the canonical reference for the exact-rational certificate
 emitted by `pounce certify <problem.nl> <claim.sol>`. The certificate lets the
-external [`pounce-lean`](https://github.com/jkitchin/pounce-lean) repository
-produce a **kernel-checked Lean 4 proof** that the returned `x*` is feasible and
-a **global** minimizer — over exact rational arithmetic, with no floating point
-in the trusted path.
+external `pounce-lean` repository (not yet public) produce a **kernel-checked
+Lean 4 proof** that the returned `x*` is feasible and a **global** minimizer —
+over exact rational arithmetic, with no floating point in the trusted path.
 
 Implementation: the serde structs and the exact-rational emitter live in
 [`crates/pounce-lean-cert/src/`](https://github.com/jkitchin/pounce/blob/main/crates/pounce-lean-cert/src/lib.rs)
@@ -28,7 +27,7 @@ The schema is specified in two places, deliberately:
 | Document | Audience | Scope |
 |---|---|---|
 | **this file** | the producer | what `pounce certify` emits, and why |
-| [`pounce-lean/docs/lean-cert-v1.md`](https://github.com/jkitchin/pounce-lean/blob/main/docs/lean-cert-v1.md) | the consumer | what `codegen/gen_lean.py` *accepts*, and the theorems each field discharges |
+| `pounce-lean/docs/lean-cert-v1.md` (not yet public) | the consumer | what `codegen/gen_lean.py` *accepts*, and the theorems each field discharges |
 
 They are not copies and neither is redundant. The consumer document is
 authoritative for what will verify, because it describes the code that actually
