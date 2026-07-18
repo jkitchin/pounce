@@ -1,0 +1,99 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "unbounded",
+  "problem_class": "qp-convex",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "3a6c933d79c231c566f3efa5c634fef6583ec27b3dcadb52b100769745ecc75b",
+    "sol_sha256": "4870cf3f245456cdf6503925e075fcd21fd879aa4f132c9e1970f105f01c4d5a",
+    "solver": "pounce 0.9.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": []
+      },
+      "c": [
+        {
+          "num": "-1",
+          "den": "1"
+        },
+        {
+          "num": "-1",
+          "den": "1"
+        }
+      ],
+      "constant": {
+        "num": "0",
+        "den": "1"
+      }
+    },
+    "var_bounds": {
+      "lower": [
+        "-inf",
+        "-inf"
+      ],
+      "upper": [
+        "+inf",
+        "+inf"
+      ]
+    },
+    "constraints": [
+      {
+        "name": "c0",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "1",
+          "den": "1"
+        },
+        "upper": "+inf"
+      }
+    ]
+  },
+  "witnesses": {
+    "recession": {
+      "x0": [
+        {
+          "num": "1755237233921853",
+          "den": "8796093022208"
+        },
+        {
+          "num": "438809890021405",
+          "den": "2199023255552"
+        }
+      ],
+      "d": [
+        {
+          "num": "1755237233921853",
+          "den": "8796093022208"
+        },
+        {
+          "num": "438809890021405",
+          "den": "2199023255552"
+        }
+      ]
+    }
+  }
+}
