@@ -53,12 +53,23 @@ reads the certificate.
 > then, treat § 9 of the consumer document as a specification the producer has
 > not met.
 >
-> The `infeasible` case is the closest to free. `QpStatus::PrimalInfeasible`
-> (`crates/pounce-convex/src/qp.rs`) **already carries the Farkas certificate**;
-> the consumer side is implemented and kernel-checked. Wiring it through the
-> emitter is plumbing, not new mathematics — and unlike `global-min` it needs
-> no factorization, KKT system, or exact refinement, just one nonnegative
-> vector checked by a linear identity.
+> The `infeasible` case is cheap **to check** but not free **to emit**, and the
+> difference is easy to get backwards. `QpStatus::PrimalInfeasible` is a unit
+> variant carrying no payload; the Farkas certificate is the diverging dual
+> iterate, which reaches a consumer as ordinary `.sol` duals.
+>
+> More importantly, that ray satisfies `Aᵀy = 0` only to a *relative*
+> tolerance. On the `certify_infeasible` fixture `‖y‖ ≈ 2.3e10` with a residual
+> of ~1.7e-11 relative — but converted losslessly to ℚ that residual is
+> `−103801/262144`, which is not zero, so the Lean hypothesis is
+> undischargeable. Copying the solver's duals would produce a certificate that
+> can never verify.
+>
+> So emitting `infeasible` needs a `refine_farkas` analogous to `refine_kkt`:
+> take the float ray as a hint for the certificate's support, then solve for an
+> exact rational ray (here, `y = (1,1,1)`). New code, not a field copy. What
+> remains true is that *checking* the result is trivial — one nonnegative vector
+> and a linear identity, with no factorization or KKT system.
 
 ## How it differs from `pounce verify`
 
