@@ -5,7 +5,7 @@
 //! pivot only to dodge a zero pivot. Everything stays in [`BigRational`].
 
 use num_rational::BigRational;
-use num_traits::Zero;
+use num_traits::{One, Zero};
 
 /// Exact dot product `row · x`.
 pub fn dot(row: &[BigRational], x: &[BigRational]) -> BigRational {
@@ -61,6 +61,64 @@ pub fn solve_exact(a: &[Vec<BigRational>], b: &[BigRational]) -> Option<Vec<BigR
         x[i] = &s / &m[i][i];
     }
     Some(x)
+}
+
+/// Exact basis of the null space of an `rows × cols` matrix, by reduced row
+/// echelon form over ℚ.
+///
+/// Returns one basis vector per free column; an empty result means the null
+/// space is trivial. Exactness means there is no rank-tolerance question — a
+/// pivot is zero or it is not.
+#[allow(clippy::needless_range_loop)]
+pub fn nullspace_exact(m_in: &[Vec<BigRational>], cols: usize) -> Vec<Vec<BigRational>> {
+    let rows = m_in.len();
+    if rows == 0 || cols == 0 {
+        return Vec::new();
+    }
+    let mut m: Vec<Vec<BigRational>> = m_in.to_vec();
+    let mut pivot_of_col: Vec<Option<usize>> = vec![None; cols];
+    let mut r = 0usize;
+
+    for c in 0..cols {
+        if r >= rows {
+            break;
+        }
+        let Some(p) = (r..rows).find(|&i| !m[i][c].is_zero()) else {
+            continue;
+        };
+        m.swap(r, p);
+        let piv = m[r][c].clone();
+        for k in 0..cols {
+            m[r][k] = &m[r][k] / &piv;
+        }
+        for i in 0..rows {
+            if i != r && !m[i][c].is_zero() {
+                let f = m[i][c].clone();
+                for k in 0..cols {
+                    let sub = &f * &m[r][k];
+                    m[i][k] -= sub;
+                }
+            }
+        }
+        pivot_of_col[c] = Some(r);
+        r += 1;
+    }
+
+    let mut basis = Vec::new();
+    for c in 0..cols {
+        if pivot_of_col[c].is_some() {
+            continue;
+        }
+        let mut v = vec![BigRational::zero(); cols];
+        v[c] = BigRational::one();
+        for (cp, piv) in pivot_of_col.iter().enumerate() {
+            if let Some(rp) = piv {
+                v[cp] = -m[*rp][c].clone();
+            }
+        }
+        basis.push(v);
+    }
+    basis
 }
 
 #[cfg(test)]
