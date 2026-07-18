@@ -122,18 +122,36 @@ for entry in "${FIXTURES[@]}"; do
     echo "== $base: lake build + axiom audit ($module) =="
     dest="$POUNCE_LEAN_DIR/${module//.//}.lean"   # PounceLean.CertifyQP -> PounceLean/CertifyQP.lean
     if [[ -e "$dest" ]]; then
-      echo "FAIL — $dest already exists; refusing to overwrite" >&2
-      exit 1
+      # pounce-lean now commits these modules as its own regressions (they are
+      # byte-identical to our goldens — same cert, same codegen, same -m). Do
+      # not overwrite a tracked file; verify it instead. A mismatch here is a
+      # genuine cross-repo drift and the whole point of this guard.
+      if ! diff -u "$golden_lean" "$dest"; then
+        echo "FAIL — $base: pounce-lean's committed $module drifted from our golden" >&2
+        exit 1
+      fi
+      echo "  OK — $base: pounce-lean's committed module matches our golden"
+    else
+      mkdir -p "$(dirname "$dest")"
+      cp "$golden_lean" "$dest"
+      placed+=("$dest")
     fi
-    mkdir -p "$(dirname "$dest")"
-    cp "$golden_lean" "$dest"
     # Audit the trust base of the verdict: print the axioms `global_min` rests
     # on. `lake build` exits 0 even on a `sorry` (it only warns), so the exit
     # code alone is NOT sufficient — the axiom set is the real gate.
-    printf '\n#print axioms %s.global_min\n' "$module" >> "$dest"
-    placed+=("$dest")
+    #
+    # The audit lives in a throwaway module rather than being appended to
+    # `$dest`, so a committed module is never mutated. PounceLean/Generated/
+    # gitignores *.lean precisely for this.
+    audit_mod="PounceLean.Generated.Audit_$base"
+    audit_dest="$POUNCE_LEAN_DIR/${audit_mod//.//}.lean"
+    mkdir -p "$(dirname "$audit_dest")"
+    printf 'import %s\n\n#print axioms %s.global_min\n' "$module" "$module" > "$audit_dest"
+    placed+=("$audit_dest")
 
-    out="$( cd "$POUNCE_LEAN_DIR" && lake build "$module" 2>&1 )" || {
+    # Build the audit module, not `$module` — the `#print axioms` line lives
+    # there, and building it pulls in `$module` as a dependency anyway.
+    out="$( cd "$POUNCE_LEAN_DIR" && lake build "$audit_mod" 2>&1 )" || {
       printf '%s\n' "$out" | grep -iE "error" | head -5 >&2
       echo "FAIL — $base: lake build failed" >&2
       exit 1
