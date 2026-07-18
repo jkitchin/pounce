@@ -69,6 +69,12 @@ thread_local! {
 /// in-process capture is active.
 static JSON_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set when [`install`] successfully claimed the global subscriber, whose
+/// layers include the collector. [`collector_scope`] then skips its
+/// shadowing thread-default install, so capture composes with the
+/// global console/JSON output instead of silencing it.
+static GLOBAL_COLLECTOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Whether the per-iteration `pounce::iteration` event has a consumer
 /// right now, so the algorithm can skip emitting it (and the field
 /// evaluation it entails) when nothing would observe it.
@@ -256,15 +262,15 @@ fn collector_admits(m: &tracing::Metadata<'_>) -> bool {
 
 // ---- Scoped capture helpers ----
 
-/// Opaque RAII scope holding [`IterCollectorLayer`] installed as this
-/// thread's default subscriber.
+/// Opaque RAII scope guaranteeing [`IterCollectorLayer`] is active on
+/// this thread until drop.
 #[must_use = "the collector uninstalls as soon as this guard drops"]
 pub struct CollectorScope {
-    _default: tracing::subscriber::DefaultGuard,
+    _default: Option<tracing::subscriber::DefaultGuard>,
 }
 
-/// Install [`IterCollectorLayer`] as this thread's default subscriber
-/// until the returned guard drops.
+/// Ensure [`IterCollectorLayer`] is active on this thread until the
+/// returned guard drops.
 ///
 /// For the [`IterCaptureGuard`]-managed application path: with iteration
 /// history enabled the solver driver runs its own capture guard around
@@ -278,19 +284,22 @@ pub struct CollectorScope {
 /// let iters = app.statistics().iterations;
 /// ```
 ///
-/// While the scope is active, the thread-default subscriber shadows any
-/// global subscriber (e.g. one installed by [`init_subscriber`]) on
-/// this thread. Scope it tightly around the solve. Hosts that want
-/// both console logs and capture should instead install the global
-/// subscriber via [`init_subscriber`].
+/// When [`init_subscriber`] has claimed the global subscriber, its
+/// collector already covers this thread and the scope is a no-op.
+/// Otherwise a collector-only registry is installed as the thread-default
+/// subscriber, which shadows the host's own subscriber (its log output
+/// from this thread is dropped) for the scope's lifetime.
 pub fn collector_scope() -> CollectorScope {
     use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::prelude::*;
 
+    if GLOBAL_COLLECTOR.load(std::sync::atomic::Ordering::Relaxed) {
+        return CollectorScope { _default: None };
+    }
     let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
     let subscriber = tracing_subscriber::registry().with(collector);
     CollectorScope {
-        _default: tracing::subscriber::set_default(subscriber),
+        _default: Some(tracing::subscriber::set_default(subscriber)),
     }
 }
 
@@ -447,16 +456,17 @@ fn install() {
     // subject to the console's `pounce::iteration=off` suppression, so
     // it carries its own target filter. It is constructed inside each
     // branch so its subscriber type parameter is inferred per-branch.
-    if want_json {
+    let claimed = if want_json {
         let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let json_layer = tracing_subscriber::fmt::layer()
             .json()
             .with_writer(std::io::stderr)
             .with_filter(env_filter());
-        let _ = tracing_subscriber::registry()
+        tracing_subscriber::registry()
             .with(json_layer)
             .with(collector)
-            .try_init();
+            .try_init()
+            .is_ok()
     } else {
         let collector = IterCollectorLayer.with_filter(filter_fn(collector_admits));
         let ansi = ansi_enabled();
@@ -465,10 +475,14 @@ fn install() {
             .with_ansi(ansi)
             .with_writer(std::io::stderr)
             .with_filter(console_filter());
-        let _ = tracing_subscriber::registry()
+        tracing_subscriber::registry()
             .with(text_layer)
             .with(collector)
-            .try_init();
+            .try_init()
+            .is_ok()
+    };
+    if claimed {
+        GLOBAL_COLLECTOR.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// `RUST_LOG` filter, defaulting to `info`.
