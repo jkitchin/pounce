@@ -39,12 +39,16 @@ FIX="crates/pounce-cli/tests/fixtures"
 # `$FIX/.gitignore` excludes `*.sol` because they are solver byproducts — so we
 # solve each `.nl` below to produce it. That also makes this a true end-to-end
 # check: f64 solve, then exact certification of the refined point.
+# Third field: the theorem the axiom audit targets. It is NOT always
+# `global_min` — an `infeasible` certificate proves `infeasible` instead, and
+# hardcoding the optimality name silently skipped that fixture's real check.
 FIXTURES=(
-  "certify_qp    PounceLean.CertifyQP"     # free variables, one general constraint
-  "certify_box   PounceLean.CertifyBox"    # box variable bounds (folded to rows)
-  "certify_range PounceLean.CertifyRange"  # two-sided range constraint (split to rows)
-  "certify_eq    PounceLean.CertifyEq"     # equality constraint (free-sign μ = -1)
-  "certify_lp    PounceLean.CertifyLP"     # LP: Q = 0, vertex optimum at 4/3 (not an f64)
+  "certify_qp    PounceLean.CertifyQP    global_min"  # free vars, one general constraint
+  "certify_box   PounceLean.CertifyBox   global_min"  # box variable bounds (folded to rows)
+  "certify_range PounceLean.CertifyRange global_min"  # two-sided range (split to rows)
+  "certify_eq    PounceLean.CertifyEq    global_min"  # equality (free-sign μ = -1)
+  "certify_lp    PounceLean.CertifyLP    global_min"  # LP: Q = 0, optimum 4/3 (not an f64)
+  "certify_infeasible PounceLean.CertifyInfeasible infeasible"  # no solution; Farkas ray
 )
 
 tmp="$(mktemp -d)"
@@ -81,13 +85,13 @@ else
 fi
 
 for entry in "${FIXTURES[@]}"; do
-  read -r base module <<<"$entry"
+  read -r base module thm <<<"$entry"
   golden_cert="$FIX/$base.cert.json"
   # Produce the (gitignored) .sol by actually solving; see FIXTURES comment.
-  if ! "${PNC[@]}" "$FIX/$base.nl" >/dev/null 2>&1; then
-    echo "FAIL — $base: solve of $FIX/$base.nl failed" >&2
-    exit 1
-  fi
+  # The exit code is deliberately ignored: an INFEASIBLE solve exits 1 while
+  # still writing a perfectly good .sol, and that .sol is exactly what the
+  # `infeasible` fixture certifies. What matters is that the file appears.
+  "${PNC[@]}" "$FIX/$base.nl" >/dev/null 2>&1 || true
   if [[ ! -f "$FIX/$base.sol" ]]; then
     echo "FAIL — $base: solve did not write $FIX/$base.sol" >&2
     exit 1
@@ -127,7 +131,7 @@ cleanup() { rm -rf "$tmp"; for f in "${placed[@]}"; do rm -f "$f"; done; }
 trap cleanup EXIT
 
 for entry in "${FIXTURES[@]}"; do
-  read -r base module <<<"$entry"
+  read -r base module thm <<<"$entry"
   golden_lean="$FIX/$base.expected.lean"
 
   echo "== $base: codegen reproduces the golden .lean =="
@@ -167,7 +171,7 @@ for entry in "${FIXTURES[@]}"; do
     audit_mod="PounceLean.Generated.Audit_$base"
     audit_dest="$POUNCE_LEAN_DIR/${audit_mod//.//}.lean"
     mkdir -p "$(dirname "$audit_dest")"
-    printf 'import %s\n\n#print axioms %s.global_min\n' "$module" "$module" > "$audit_dest"
+    printf 'import %s\n\n#print axioms %s.%s\n' "$module" "$module" "$thm" > "$audit_dest"
     placed+=("$audit_dest")
 
     # Build the audit module, not `$module` — the `#print axioms` line lives
@@ -178,9 +182,9 @@ for entry in "${FIXTURES[@]}"; do
       exit 1
     }
     # The `#print axioms` info line for global_min.
-    axline="$(printf '%s\n' "$out" | grep "global_min' depends on axioms" || true)"
+    axline="$(printf '%s\n' "$out" | grep "$thm' depends on axioms" || true)"
     if [[ -z "$axline" ]]; then
-      echo "FAIL — $base: no axiom report for $module.global_min (did the theorem build?)" >&2
+      echo "FAIL — $base: no axiom report for $module.$thm (did the theorem build?)" >&2
       exit 1
     fi
     if printf '%s' "$axline" | grep -q "sorryAx"; then

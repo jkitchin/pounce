@@ -14,7 +14,8 @@ use std::process::ExitCode;
 
 use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput};
 use pounce_lean_cert::{
-    Certificate, canonical_problem, emit_certificate, problem_block, to_canonical_json,
+    Certificate, canonical_problem, emit_certificate, emit_infeasible_certificate, problem_block,
+    to_canonical_json,
 };
 use pounce_nl::nl_reader;
 
@@ -231,6 +232,12 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
         ));
     }
 
+    // AMPL reserves solve_result_num 200-299 for "infeasible". That verdict is
+    // not a claim about `parsed.x` at all — it is certified by a Farkas ray, so
+    // it routes to a different emitter.
+    let infeasible = matches!(parsed.solve_result_num, Some(k) if (200..300).contains(&k));
+
+    let dual_ray = parsed.lambda.clone();
     let input = nl_to_qp_input(&prob, parsed.x, args.active_tol)?;
     let meta = CertMeta {
         nl_sha256,
@@ -238,8 +245,24 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
         solver: format!("pounce {}", env!("CARGO_PKG_VERSION")),
     };
 
-    let cert =
-        emit_certificate(&input, &meta).map_err(|e| format!("cannot certify this solve: {e}"))?;
+    let cert = if infeasible {
+        if dual_ray.len() != input.constraints.len() {
+            return Err(format!(
+                "infeasible solve carries {} duals but the problem has {} constraints                  (is this the right .sol for this .nl?)",
+                dual_ray.len(),
+                input.constraints.len()
+            ));
+        }
+        // The ray's sign convention does not matter here. `refine_farkas` reads
+        // only the support (via magnitudes) and then orients the exact ray
+        // itself so that `b·y > 0` — so the AMPL-vs-pounce dual sign ambiguity
+        // that `pounce verify` has to resolve by trying both simply does not
+        // arise on this path.
+        emit_infeasible_certificate(&input, &meta, &dual_ray, args.active_tol)
+            .map_err(|e| format!("cannot certify this infeasible solve: {e}"))?
+    } else {
+        emit_certificate(&input, &meta).map_err(|e| format!("cannot certify this solve: {e}"))?
+    };
     to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"))
 }
 
