@@ -9,7 +9,7 @@
   "binding": {
     "nl_sha256": "f83c4a3fbbfe2f9340754a00c93ec86b328627c6e8dd762f7765d3a4374fd5d3",
     "sol_sha256": "21403dab89a496897b301b9059ce4256a4fd3911249c742d4fb616921d8fb8ca",
-    "solver": "pounce 0.5.0"
+    "solver": "pounce 0.9.0"
   },
   "toolchain": {
     "lean": "leanprover/lean4:v4.31.0",

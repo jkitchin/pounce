@@ -35,7 +35,10 @@ cd "$(git rev-parse --show-toplevel)"
 FIX="crates/pounce-cli/tests/fixtures"
 
 # Each fixture: "<basename> <Lean module>". The basename names the committed
-# <basename>.{nl,sol,cert.json,expected.lean} quadruple.
+# <basename>.{nl,cert.json,expected.lean} triple. The `.sol` is NOT committed —
+# `$FIX/.gitignore` excludes `*.sol` because they are solver byproducts — so we
+# solve each `.nl` below to produce it. That also makes this a true end-to-end
+# check: f64 solve, then exact certification of the refined point.
 FIXTURES=(
   "certify_qp    PounceLean.CertifyQP"     # free variables, one general constraint
   "certify_box   PounceLean.CertifyBox"    # box variable bounds (folded to rows)
@@ -59,6 +62,15 @@ fi
 for entry in "${FIXTURES[@]}"; do
   read -r base module <<<"$entry"
   golden_cert="$FIX/$base.cert.json"
+  # Produce the (gitignored) .sol by actually solving; see FIXTURES comment.
+  if ! "${PNC[@]}" "$FIX/$base.nl" >/dev/null 2>&1; then
+    echo "FAIL — $base: solve of $FIX/$base.nl failed" >&2
+    exit 1
+  fi
+  if [[ ! -f "$FIX/$base.sol" ]]; then
+    echo "FAIL — $base: solve did not write $FIX/$base.sol" >&2
+    exit 1
+  fi
   "${PNC[@]}" certify "$FIX/$base.nl" "$FIX/$base.sol" -o "$tmp/$base.cert.json"
   if ! diff -u "$golden_cert" "$tmp/$base.cert.json"; then
     echo "FAIL — emitted certificate drifted from $golden_cert" >&2

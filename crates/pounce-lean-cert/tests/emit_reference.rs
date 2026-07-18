@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use pounce_lean_cert::emit::{emit_certificate, CertMeta, LinearConstraint, QpInput};
+use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput, emit_certificate};
 use pounce_lean_cert::{Certificate, EmitError};
 
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -36,7 +36,7 @@ fn reference_meta() -> CertMeta {
     CertMeta {
         nl_sha256: ZERO_HASH.to_string(),
         sol_sha256: ZERO_HASH.to_string(),
-        solver: "pounce 0.5.0".to_string(),
+        solver: "pounce 0.9.0".to_string(),
     }
 }
 

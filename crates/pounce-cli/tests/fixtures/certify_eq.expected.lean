@@ -6,7 +6,7 @@
 
   verdict       = global-min
   problem_class = qp-convex
-  solver        = pounce 0.5.0
+  solver        = pounce 0.9.0
   toolchain     = leanprover/lean4:v4.31.0 / fabf563a7c95a166b8d7b6efca11c8b4dc9d911f
 
       minimize    f(x) = ½ xᵀQx + cᵀx + k   over  ℚ

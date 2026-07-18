@@ -1,7 +1,8 @@
 //! End-to-end integration test for `pounce certify`.
 //!
-//! Runs the real binary against a committed convex-QP `.nl`/`.sol` pair
-//! (min x₀²+x₁² s.t. x₀+x₁ ≥ 1, free variables) and checks that the emitted
+//! Runs the real binary against a convex-QP `.nl` (min x₀²+x₁² s.t. x₀+x₁ ≥ 1,
+//! free variables), solving it first to produce the `.sol`, and checks that the
+//! emitted
 //! `pounce.lean-cert/v1` certificate:
 //!
 //! * is the supported slice (`qp-convex` / `global-min`),
@@ -26,12 +27,36 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
+/// Solve `<stem>.nl` to produce `<stem>.sol` beside it, and return that path.
+///
+/// `.sol` files are solver byproducts, not fixtures — `tests/fixtures/.gitignore`
+/// excludes `*.sol`, so one can never be committed and any test naming a
+/// committed `.sol` fails (or, worse, passes for the wrong reason: a missing
+/// file also exits 2). Generating it here makes this a genuine end-to-end run:
+/// solve in f64, then certify exactly. The float `x*` lands ~4e-9 off the true
+/// optimum, which is exactly the input Mode B refinement has to snap.
+fn solve_to_sol(stem: &str) -> PathBuf {
+    let out = Command::new(pounce_exe())
+        .arg(fixture(&format!("{stem}.nl")))
+        .output()
+        .expect("run pounce solve");
+    assert!(
+        out.status.success(),
+        "solve of {stem}.nl failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let sol = fixture(&format!("{stem}.sol"));
+    assert!(sol.exists(), "solve did not write {}", sol.display());
+    sol
+}
+
 #[test]
 fn certify_emits_exact_certificate() {
+    let sol = solve_to_sol("certify_qp");
     let out = Command::new(pounce_exe())
         .arg("certify")
         .arg(fixture("certify_qp.nl"))
-        .arg(fixture("certify_qp.sol"))
+        .arg(&sol)
         .output()
         .expect("run pounce certify");
     assert!(
@@ -125,12 +150,21 @@ fn cert_verify_rejects_wrong_nl() {
 #[test]
 fn certify_refuses_off_slice() {
     // A maximize objective is outside the v1 slice (global-min verdict only).
+    // The .sol must be generated, not named: a missing file ALSO exits 2, so
+    // naming an uncommittable `.sol` here would make this assertion vacuous.
+    let sol = solve_to_sol("certify_maximize");
     let out = Command::new(pounce_exe())
         .arg("certify")
         .arg(fixture("certify_maximize.nl"))
-        .arg(fixture("certify_maximize.sol"))
+        .arg(&sol)
         .output()
         .expect("run pounce certify");
     assert!(!out.status.success(), "off-slice input should be refused");
     assert_eq!(out.status.code(), Some(2), "refusal should exit 2");
+    // Distinguish a real refusal from an I/O failure.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("cannot read"),
+        "must refuse on slice grounds, not I/O: {err}"
+    );
 }
