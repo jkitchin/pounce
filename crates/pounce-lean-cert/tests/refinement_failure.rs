@@ -196,9 +196,23 @@ fn psd_singular_q_succeeds() {
         vec![0.5, 0.5],
     );
     let cert = emit_certificate(&input, &meta()).expect("PSD-singular Q is convex and must verify");
-    assert_eq!(cert.candidate.x[0].inner().to_string(), "1");
-    assert_eq!(cert.candidate.x[1].inner().to_string(), "0");
-    assert_eq!(cert.candidate.objective.inner().to_string(), "0");
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0].inner().to_string(),
+        "1"
+    );
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[1].inner().to_string(),
+        "0"
+    );
+    assert_eq!(
+        cert.candidate
+            .as_ref()
+            .unwrap()
+            .objective
+            .inner()
+            .to_string(),
+        "0"
+    );
 }
 
 /// The refinement's whole point, in one test: the certified `x*` is a rational
@@ -218,7 +232,7 @@ fn certified_point_can_be_a_rational_no_f64_can_represent() {
     );
     let cert = emit_certificate(&input, &meta()).expect("exactly solvable over ℚ");
     assert_eq!(
-        cert.candidate.x[0].inner().to_string(),
+        cert.candidate.as_ref().unwrap().x[0].inner().to_string(),
         "1/3",
         "the exact solve must recover 1/3, not the f64 approximation it was hinted with"
     );

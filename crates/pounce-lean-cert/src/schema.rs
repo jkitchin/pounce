@@ -30,7 +30,10 @@ pub struct Certificate {
     pub binding: Binding,
     pub toolchain: Toolchain,
     pub problem: Problem,
-    pub candidate: Candidate,
+    /// Absent for `verdict = "infeasible"`, which is not a claim about a point.
+    /// `skip_serializing_if` keeps existing certificates byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<Candidate>,
     pub witnesses: Witnesses,
 }
 
@@ -98,9 +101,24 @@ pub struct Candidate {
 /// Untrusted proof hints. Wrong data only makes the proof fail to typecheck.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Witnesses {
-    pub duals: Vec<Rat>,
-    pub hessian_psd: HessianPsd,
-    pub active_set: Vec<usize>,
+    /// KKT multipliers — present for `global-min`, absent for `infeasible`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duals: Option<Vec<Rat>>,
+    /// PSD factorization of `Q` — `global-min` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hessian_psd: Option<HessianPsd>,
+    /// Active constraint indices (informational) — `global-min` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_set: Option<Vec<usize>>,
+    /// Farkas ray proving `A x ≥ b` has no solution — `infeasible` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub farkas: Option<Farkas>,
+}
+
+/// Farkas certificate: `y ≥ 0` with `Aᵀy = 0` and `b·y > 0`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Farkas {
+    pub y: Vec<Rat>,
 }
 
 /// `LDLᵀ` factorization of the cert's `Q`: unit-lower `L`, nonnegative diagonal

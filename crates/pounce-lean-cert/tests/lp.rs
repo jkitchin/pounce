@@ -73,14 +73,38 @@ fn lp_certifies_through_the_quadratic_path() {
     );
 
     // The vertex is recovered exactly, from a float that was ~7e-10 away.
-    assert_eq!(cert.candidate.x[0].inner().to_string(), "4/3");
-    assert_eq!(cert.candidate.x[1].inner().to_string(), "4/3");
-    assert_eq!(cert.candidate.objective.inner().to_string(), "8/3");
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0].inner().to_string(),
+        "4/3"
+    );
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[1].inner().to_string(),
+        "4/3"
+    );
+    assert_eq!(
+        cert.candidate
+            .as_ref()
+            .unwrap()
+            .objective
+            .inner()
+            .to_string(),
+        "8/3"
+    );
 
     // Both rows active, both multipliers 1/3 ≥ 0.
-    assert_eq!(cert.witnesses.duals[0].inner().to_string(), "1/3");
-    assert_eq!(cert.witnesses.duals[1].inner().to_string(), "1/3");
-    assert_eq!(cert.witnesses.active_set, vec![0, 1]);
+    assert_eq!(
+        cert.witnesses.duals.as_ref().unwrap()[0]
+            .inner()
+            .to_string(),
+        "1/3"
+    );
+    assert_eq!(
+        cert.witnesses.duals.as_ref().unwrap()[1]
+            .inner()
+            .to_string(),
+        "1/3"
+    );
+    assert_eq!(cert.witnesses.active_set, Some(vec![0, 1]));
 
     // Exact: no tolerance is claimed.
     assert_eq!(cert.tolerance.inner().to_string(), "0");
@@ -92,7 +116,7 @@ fn lp_certifies_through_the_quadratic_path() {
 fn zero_hessian_yields_a_valid_psd_witness() {
     let cert =
         emit_certificate(&vertex_lp(vec![4.0 / 3.0, 4.0 / 3.0]), &meta()).expect("must certify");
-    let psd = &cert.witnesses.hessian_psd;
+    let psd = &cert.witnesses.hessian_psd.as_ref().unwrap();
     assert_eq!(psd.d.len(), 2, "one pivot per variable");
     for (i, di) in psd.d.iter().enumerate() {
         assert_eq!(di.inner().to_string(), "0", "D[{i}] should be 0 for an LP");

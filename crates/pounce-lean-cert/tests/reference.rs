@@ -45,14 +45,48 @@ fn reference_cert_key_values() {
     );
 
     // Candidate x* = (1/2, 1/2), objective 1/2 — all lossless from f64.
-    assert_eq!(cert.candidate.x[0], Rat::from_f64(0.5).unwrap());
-    assert_eq!(cert.candidate.x[1], Rat::from_f64(0.5).unwrap());
-    assert_eq!(cert.candidate.objective, Rat::from_f64(0.5).unwrap());
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0],
+        Rat::from_f64(0.5).unwrap()
+    );
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[1],
+        Rat::from_f64(0.5).unwrap()
+    );
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().objective,
+        Rat::from_f64(0.5).unwrap()
+    );
 
     // Witnesses: one dual per constraint; LDLᵀ of Q is L = I (no entries), D = (2,2).
-    assert_eq!(cert.witnesses.duals.len(), cert.problem.constraints.len());
-    assert_eq!(cert.witnesses.duals[0], Rat::from_f64(1.0).unwrap());
-    assert!(cert.witnesses.hessian_psd.l.unit_lower.unwrap());
-    assert!(cert.witnesses.hessian_psd.l.entries.is_empty());
-    assert_eq!(cert.witnesses.hessian_psd.d[0], Rat::from_f64(2.0).unwrap());
+    assert_eq!(
+        cert.witnesses.duals.as_ref().unwrap().len(),
+        cert.problem.constraints.len()
+    );
+    assert_eq!(
+        cert.witnesses.duals.as_ref().unwrap()[0],
+        Rat::from_f64(1.0).unwrap()
+    );
+    assert!(
+        cert.witnesses
+            .hessian_psd
+            .as_ref()
+            .unwrap()
+            .l
+            .unit_lower
+            .unwrap()
+    );
+    assert!(
+        cert.witnesses
+            .hessian_psd
+            .as_ref()
+            .unwrap()
+            .l
+            .entries
+            .is_empty()
+    );
+    assert_eq!(
+        cert.witnesses.hessian_psd.as_ref().unwrap().d[0],
+        Rat::from_f64(2.0).unwrap()
+    );
 }

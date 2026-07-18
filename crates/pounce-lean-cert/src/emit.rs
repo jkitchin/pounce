@@ -17,8 +17,8 @@ use crate::linalg::dot;
 use crate::rational::{Bound, Rat, RatError};
 use crate::refine::{RefineError, refine_kkt_eq};
 use crate::schema::{
-    Binding, Candidate, Certificate, Constraint, Entry, HessianPsd, Objective, Problem, SCHEMA_TAG,
-    SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, VarBounds, Witnesses,
+    Binding, Candidate, Certificate, Constraint, Entry, Farkas, HessianPsd, Objective, Problem,
+    SCHEMA_TAG, SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, VarBounds, Witnesses,
 };
 use num_rational::BigRational;
 use num_traits::Zero;
@@ -76,6 +76,8 @@ pub enum EmitError {
     Ldl(LdlError),
     /// The exact active-set KKT refinement failed.
     Refine(RefineError),
+    /// The exact Farkas refinement failed (infeasible verdict).
+    Farkas(crate::refine_farkas::FarkasError),
     /// Defensive: an assembled cert failed its own exact recheck.
     SelfCheck(&'static str),
 }
@@ -346,6 +348,78 @@ fn build_problem_view(input: &QpInput) -> Result<ProblemView, EmitError> {
     })
 }
 
+/// Build an exact `verdict = "infeasible"` certificate from a solve that
+/// terminated primal-infeasible, or refuse.
+///
+/// `y_float` is the solver's dual ray, already in the `λ ≥ 0` convention (AMPL
+/// duals are negated by the caller). It is used **only to identify the
+/// certificate's support** — the ray itself is recomputed exactly by
+/// [`crate::refine_farkas::refine_farkas`], because a diverging float ray
+/// satisfies `Aᵀy = 0` only relative to its own magnitude and so is not a
+/// certificate over ℚ at all.
+///
+/// v1 restriction, enforced rather than assumed: every constraint must be a
+/// one-sided `a·x ≥ l` row, and the row count must match `y_float`. Bound
+/// folding and range splitting change the row set, which would break the
+/// correspondence between `y_float` and the emitted rows; rather than guess a
+/// mapping, those inputs are refused.
+pub fn emit_infeasible_certificate(
+    input: &QpInput,
+    meta: &CertMeta,
+    y_float: &[f64],
+    support_tol: f64,
+) -> Result<Certificate, EmitError> {
+    let problem = problem_block(input)?;
+
+    // Every emitted row must be `a·x ≥ lower`, so the cert's constraint order is
+    // exactly the order the Farkas ray indexes.
+    let mut a_rows: Vec<Vec<BigRational>> = Vec::with_capacity(problem.constraints.len());
+    let mut b_vec: Vec<BigRational> = Vec::with_capacity(problem.constraints.len());
+    for con in &problem.constraints {
+        let (Some(lo), None) = (con.lower.finite(), con.upper.finite()) else {
+            return Err(EmitError::SelfCheck(
+                "infeasible v1 accepts one-sided `a·x ≥ l` rows only",
+            ));
+        };
+        a_rows.push(con.coeffs.iter().map(|r| r.inner().clone()).collect());
+        b_vec.push(lo.inner().clone());
+    }
+    if a_rows.len() != y_float.len() {
+        return Err(EmitError::SelfCheck(
+            "dual ray length does not match the emitted row count",
+        ));
+    }
+
+    let y = crate::refine_farkas::refine_farkas(&a_rows, &b_vec, y_float, support_tol)
+        .map_err(EmitError::Farkas)?;
+
+    Ok(Certificate {
+        schema: SCHEMA_TAG.to_string(),
+        verdict: "infeasible".to_string(),
+        problem_class: "qp-convex".to_string(),
+        tolerance: Rat(BigRational::zero()),
+        binding: Binding {
+            nl_sha256: meta.nl_sha256.clone(),
+            sol_sha256: meta.sol_sha256.clone(),
+            solver: meta.solver.clone(),
+        },
+        toolchain: Toolchain {
+            lean: VALIDATED_LEAN.to_string(),
+            mathlib: VALIDATED_MATHLIB.to_string(),
+        },
+        problem,
+        candidate: None,
+        witnesses: Witnesses {
+            duals: None,
+            hessian_psd: None,
+            active_set: None,
+            farkas: Some(Farkas {
+                y: y.into_iter().map(Rat).collect(),
+            }),
+        },
+    })
+}
+
 /// Build an exact certificate from a neutral QP solve, or refuse.
 pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate, EmitError> {
     let n = input.n;
@@ -488,18 +562,19 @@ pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate,
             mathlib: VALIDATED_MATHLIB.to_string(),
         },
         problem,
-        candidate: Candidate {
+        candidate: Some(Candidate {
             x: refined.x.iter().map(|v| Rat(v.clone())).collect(),
             objective: Rat(objective.clone()),
-        },
+        }),
         witnesses: Witnesses {
-            duals: duals_cert.iter().map(|v| Rat(v.clone())).collect(),
-            hessian_psd: HessianPsd {
+            duals: Some(duals_cert.iter().map(|v| Rat(v.clone())).collect()),
+            hessian_psd: Some(HessianPsd {
                 of: "Q".to_string(),
                 l: SparseMatrix::unit_lower(n, n, l_entries),
                 d: factor.d.iter().map(|v| Rat(v.clone())).collect(),
-            },
-            active_set,
+            }),
+            active_set: Some(active_set),
+            farkas: None,
         },
     };
 
