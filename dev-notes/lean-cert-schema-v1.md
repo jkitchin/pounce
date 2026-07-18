@@ -1,3 +1,22 @@
+> ## SUPERSEDED — draft schema
+>
+> Replaced by [`docs/src/schema/lean-cert-v1.md`](../docs/src/schema/lean-cert-v1.md),
+> which describes what `pounce certify` actually emits and what the codegen
+> actually reads. Kept only as a record of the first cut.
+>
+> The draft's three main gaps, all resolved differently than it anticipated:
+>
+> * **Dual sign convention** was unspecified. Implemented: `λ ≥ 0` for `A x ≥ b`
+>   rows, free-sign `μ` for equalities, enforced by a self-check gate.
+> * **Bound multipliers** were assumed necessary and are not. Variable bounds
+>   fold into ordinary constraint rows, so the ordinary multipliers suffice.
+> * **Tolerance** was scoped to equalities, leaving no home for an inequality
+>   violated by ~1e-9. Resolved instead by exact active-set refinement: the
+>   float `x*` is not certified at all, so `tolerance = 0`.
+>
+> The one draft gap that remains open is the **null-space basis `Z`** for
+> `local-min-strict`; that verdict is still unimplemented on both sides.
+
 # POUNCE Lean-certificate schema, v1 (DRAFT)
 
 **Schema tag:** `pounce.lean-cert/v1`

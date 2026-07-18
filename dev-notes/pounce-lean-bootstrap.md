@@ -1,3 +1,14 @@
+> ## SUPERSEDED — historical bootstrap guide
+>
+> The `pounce-lean` repository exists and is well past every milestone below:
+> the reusable lemmas, the codegen, the fixtures, and the drift guard are all
+> implemented, and the whole path is kernel-checked end to end by
+> `scripts/check-lean-cert.sh`. Kept for its milestone reasoning.
+>
+> Note the module namespace here (`PounceLean.Examples.QP`) is not the one the
+> emitter's fixtures use (`PounceLean.CertifyQP`); both sides now share the
+> latter so the generated proofs are byte-identical artifacts.
+
 # pounce-lean — bootstrap spec
 
 **Purpose.** A self-contained guide to stand up the `pounce-lean` repository

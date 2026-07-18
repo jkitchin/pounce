@@ -1,3 +1,13 @@
+> ## SUPERSEDED — hand-authored example
+>
+> This was written before the emitter existed. Real, machine-generated
+> certificate/proof pairs now live in `crates/pounce-cli/tests/fixtures/`
+> (`certify_qp`, `certify_box`, `certify_range`, `certify_eq`) and are
+> regenerated and kernel-checked by `scripts/check-lean-cert.sh`.
+>
+> The maths here is correct — the SOS identity checks out — but `qp.lean` was
+> never compiled, and its namespace differs from the shipped convention.
+
 # Lean certificate — worked example
 
 End-to-end reference for the `pounce-lean` codegen. Design-stage; see

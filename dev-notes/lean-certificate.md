@@ -1,3 +1,33 @@
+> ## SUPERSEDED — historical design note
+>
+> This was the original brainstorm. It is kept for the design rationale (why a
+> separate repo, why witnesses need not be trusted, why the tiers are what they
+> are), all of which survived contact with the implementation. **Do not use it
+> as a specification.** The implemented contract is
+> [`docs/src/schema/lean-cert-v1.md`](../docs/src/schema/lean-cert-v1.md);
+> the emitter is `crates/pounce-lean-cert/`.
+>
+> Known errors below, left in place rather than quietly rewritten:
+>
+> * The schema tag is **`pounce.lean-cert/v1`**, not `pounce-cert/v1` (used in
+>   four places here, including the section titled "The contract").
+> * The binding-fields list names `statement_sha256` as part of the certificate;
+>   a later section of this same document correctly retracts that. It is not in
+>   the cert — it belongs to the post-codegen receipt.
+> * "Unforgeable two ways: SHA-256 content-addressing and an optional HMAC" is
+>   **wrong**. A content hash is a *binding*, not authentication — anyone can
+>   compute a correct hash over any bytes. `docs/src/verify.md` attributes
+>   unforgeability to HMAC alone, and otherwise to recomputation.
+> * The emitter cannot "reuse the SOS plumbing in `sos.py`" — it is Rust and
+>   that is Python. The Rust SOS engine is `crates/pounce-convex/src/sos.rs`,
+>   which this note never mentions, and it does not currently expose the Gram
+>   matrices a certificate would need.
+> * POUNCE emits `.sol` only; there is no `.nl` writer in the workspace.
+> * The diagram gives `lake build` exit code 20. That is `pounce verify`'s
+>   infeasible code; `lake build` has no such convention.
+> * The problem encoding shipped as matrix/vector form, not expression trees.
+>   Trees are deferred to a future `nlp-poly` slice.
+
 # Lean-verified solution certificates
 
 **Status: design note / brainstorm.** Nothing here is implemented yet. This
