@@ -5,9 +5,9 @@ certificate emitter for convex-QP / `global-min` solves.
 
 POUNCE solves in `f64`; this crate converts a solve into an **exact-rational**
 certificate (`{num, den}` integer strings, no floats) that the external
-[`pounce-lean`](https://github.com/jkitchin/pounce-lean) repo turns into a
-kernel-checked Lean 4 proof that the returned `x*` is the global minimizer — with
-no floating point in the trusted path.
+`pounce-lean` repo (not yet public) turns into a kernel-checked Lean 4 proof
+that the returned `x*` is the global minimizer — with no floating point in the
+trusted path.
 
 The emitted witnesses (KKT duals, the `LDLᵀ` PSD factorization) are *untrusted*:
 wrong data only makes the Lean proof fail to typecheck, never pass falsely. The
