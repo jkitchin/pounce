@@ -49,6 +49,26 @@ FIXTURES=(
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# `pounce certify` stamps the live crate version into `binding.solver`
+# (certify.rs: format!("pounce {}", env!("CARGO_PKG_VERSION"))), and the codegen
+# copies it into the generated .lean header. That is correct for a real
+# certificate -- it is provenance -- but it means a freshly emitted cert differs
+# from a committed golden on every release version bump, failing this guard for
+# a reason that has nothing to do with drift.
+#
+# So normalize just that one token before diffing. Deliberately narrow: only
+# `pounce <semver>` is rewritten, so every other byte is still compared exactly.
+# This is safe because `solver` is pure metadata -- it is not part of the
+# problem re-derivation `cert-verify` performs, and no theorem mentions it.
+nv() { sed -E 's/pounce [0-9]+\.[0-9]+\.[0-9]+/pounce <version>/g' "$1" >"$2"; }
+
+# Diff two files with the solver version normalized. Args: label, expected, actual
+diff_nv() {
+  nv "$2" "$tmp/.exp.nv"
+  nv "$3" "$tmp/.act.nv"
+  diff -u --label "$2" --label "$3" "$tmp/.exp.nv" "$tmp/.act.nv"
+}
+
 # --- layer 1: emitter reproduces the golden certificate ---------------------
 echo "== certificate regeneration (pounce certify) =="
 if [[ -n "${POUNCE_BIN:-}" ]]; then
@@ -72,7 +92,7 @@ for entry in "${FIXTURES[@]}"; do
     exit 1
   fi
   "${PNC[@]}" certify "$FIX/$base.nl" "$FIX/$base.sol" -o "$tmp/$base.cert.json"
-  if ! diff -u "$golden_cert" "$tmp/$base.cert.json"; then
+  if ! diff_nv "$base" "$golden_cert" "$tmp/$base.cert.json"; then
     echo "FAIL — emitted certificate drifted from $golden_cert" >&2
     echo "       (intentional? regenerate: pounce certify $FIX/$base.nl $FIX/$base.sol -o $golden_cert)" >&2
     exit 1
@@ -111,7 +131,7 @@ for entry in "${FIXTURES[@]}"; do
 
   echo "== $base: codegen reproduces the golden .lean =="
   python3 "$GEN" "$FIX/$base.cert.json" -m "$module" -o "$tmp/$base.lean"
-  if ! diff -u "$golden_lean" "$tmp/$base.lean"; then
+  if ! diff_nv "$base" "$golden_lean" "$tmp/$base.lean"; then
     echo "FAIL — codegen drifted from $golden_lean" >&2
     echo "       (regenerate: python3 $GEN $FIX/$base.cert.json -m $module -o $golden_lean)" >&2
     exit 1
@@ -126,7 +146,7 @@ for entry in "${FIXTURES[@]}"; do
       # byte-identical to our goldens — same cert, same codegen, same -m). Do
       # not overwrite a tracked file; verify it instead. A mismatch here is a
       # genuine cross-repo drift and the whole point of this guard.
-      if ! diff -u "$golden_lean" "$dest"; then
+      if ! diff_nv "$base" "$golden_lean" "$dest"; then
         echo "FAIL — $base: pounce-lean's committed $module drifted from our golden" >&2
         exit 1
       fi
