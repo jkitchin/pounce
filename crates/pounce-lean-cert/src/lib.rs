@@ -17,6 +17,7 @@
 //! * [`linalg`] — exact dense rational solve (the KKT system).
 //! * [`ldlt`] — exact `LDLᵀ` PSD factorization of `Q`.
 //! * [`refine`] — exact rational active-set KKT solve (Mode B).
+//! * [`refine_farkas`] — exact rational Farkas ray for the `infeasible` verdict.
 //!
 //! * [`emit`] — the neutral-`f64` QP → certificate driver + exact self-check gate.
 
@@ -25,6 +26,7 @@ pub mod ldlt;
 pub mod linalg;
 pub mod rational;
 pub mod refine;
+pub mod refine_farkas;
 pub mod schema;
 
 pub use emit::{
