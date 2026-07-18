@@ -91,7 +91,7 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
   "verdict": "global-min",
   "problem_class": "qp-convex",
   "tolerance": { "num": "0", "den": "1" },
-  "binding":   { "nl_sha256": "…64 hex…", "sol_sha256": "…64 hex…", "solver": "pounce 0.5.0" },
+  "binding":   { "nl_sha256": "…64 hex…", "sol_sha256": "…64 hex…", "solver": "pounce 0.9.0" },
   "toolchain": { "lean": "leanprover/lean4:v4.31.0", "mathlib": "<git rev>" },
   "problem":   { … },
   "candidate": { … },

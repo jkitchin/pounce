@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput};
 use pounce_lean_cert::{
-    canonical_problem, emit_certificate, problem_block, to_canonical_json, Certificate,
+    Certificate, canonical_problem, emit_certificate, problem_block, to_canonical_json,
 };
 use pounce_nl::nl_reader;
 

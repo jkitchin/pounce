@@ -12,13 +12,13 @@
 //! → assemble → **exact self-check gate**. Any off-slice input or failed exact
 //! check returns [`EmitError`] instead of an unsound certificate.
 
-use crate::ldlt::{ldlt, LdlError};
+use crate::ldlt::{LdlError, ldlt};
 use crate::linalg::dot;
 use crate::rational::{Bound, Rat, RatError};
-use crate::refine::{refine_kkt_eq, RefineError};
+use crate::refine::{RefineError, refine_kkt_eq};
 use crate::schema::{
-    Binding, Candidate, Certificate, Constraint, Entry, HessianPsd, Objective, Problem,
-    SparseMatrix, Toolchain, VarBounds, Witnesses, SCHEMA_TAG, VALIDATED_LEAN, VALIDATED_MATHLIB,
+    Binding, Candidate, Certificate, Constraint, Entry, HessianPsd, Objective, Problem, SCHEMA_TAG,
+    SparseMatrix, Toolchain, VALIDATED_LEAN, VALIDATED_MATHLIB, VarBounds, Witnesses,
 };
 use num_rational::BigRational;
 use num_traits::Zero;
