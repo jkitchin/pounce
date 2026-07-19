@@ -203,8 +203,45 @@ Per `verdict` / `problem_class`. For `global-min` on `qp-convex`:
 | `active_set` | complementarity | Indices of constraints treated as active (informational; the proof derives feasibility + complementarity directly). |
 
 `local-min-strict` uses the same shape but `hessian_psd.of` is the **reduced**
-Lagrangian Hessian on the active-constraint null space, with `D` strictly
-positive. `sos-poly` adds `sos: [ { gram, multiplier_poly } … ]` — Gram matrices
+Lagrangian Hessian `ZᵀHZ` on the active-constraint null space, with `D` strictly
+positive. Naming the reduction is not enough: witnesses are untrusted, so the
+consumer has to *verify* it, and therefore needs `Z` itself.
+
+```json
+"nullspace": {
+  "Z": { "rows": 3, "cols": 2, "entries": [ … ] },
+  "identity_rows": [ 1, 2 ]
+}
+```
+
+| Field | Lean checks |
+|---|---|
+| `Z` | `A_active · Z = 0` — exact rational matrix product. Columns really lie in the null space. |
+| `identity_rows` | `Z[identity_rows, :] = I`, the `cols` row indices where `Z` restricts to the identity. |
+
+The second field is what makes the first sufficient. `A_active · Z = 0` alone is
+satisfied by a `Z` with a duplicated or dropped column — one that spans a
+*smaller* space than it claims — and under-reporting the null space is precisely
+how a saddle point could be dressed up as a strict local minimum. So full column
+rank must be checked too.
+
+The obvious route to rank is a determinant or an elimination, which is exactly
+the `O(n³)` rational-matrix decision procedure that already proved too slow in
+the kernel for dense Hessians (see the scaling results). `identity_rows` avoids
+it: the RREF null-space basis assigns each column a distinct *free* variable,
+set to 1 there and 0 in the other free positions, so those rows of `Z` are the
+identity. Given that, `Z v = 0` restricted to those rows reads off `v = 0`
+immediately — full rank in `O(k)` index lookups with no arithmetic.
+
+`identity_rows` is a hint, not an added trust assumption: the consumer checks
+the identity claim itself and a forged list simply fails. It plays the same role
+`hessian_psd.L`/`D` play for positive-semidefiniteness — turning an expensive
+proof obligation into a cheap one by shipping the search result.
+
+Produced by `pounce-lean-cert`'s `nullspace` module, which runs both consumer
+checks before emitting, so a certificate that would not verify is never written.
+
+`sos-poly` adds `sos: [ { gram, multiplier_poly } … ]` — Gram matrices
 (PSD, same `LDLᵀ` form) and the multiplier polynomials of the Positivstellensatz
 identity.
 

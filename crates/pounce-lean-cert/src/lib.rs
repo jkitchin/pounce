@@ -16,6 +16,7 @@
 //! * [`schema`] — serde structs for the on-disk `pounce.lean-cert/v1` shape.
 //! * [`linalg`] — exact dense rational solve (the KKT system).
 //! * [`ldlt`] — exact `LDLᵀ` PSD factorization of `Q`.
+//! * [`nullspace`] — verifiable null-space basis `Z` of the active Jacobian.
 //! * [`refine`] — exact rational active-set KKT solve (Mode B).
 //! * [`refine_farkas`] — exact rational Farkas ray for the `infeasible` verdict.
 //! * [`round_gram`] — exact rational SOS Gram matrix from the SDP's float one.
@@ -25,6 +26,7 @@
 pub mod emit;
 pub mod ldlt;
 pub mod linalg;
+pub mod nullspace;
 pub mod rational;
 pub mod refine;
 pub mod refine_farkas;

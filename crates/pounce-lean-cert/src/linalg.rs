@@ -72,9 +72,14 @@ pub fn solve_exact(a: &[Vec<BigRational>], b: &[BigRational]) -> Option<Vec<BigR
 #[allow(clippy::needless_range_loop)]
 pub fn nullspace_exact(m_in: &[Vec<BigRational>], cols: usize) -> Vec<Vec<BigRational>> {
     let rows = m_in.len();
-    if rows == 0 || cols == 0 {
+    if cols == 0 {
         return Vec::new();
     }
+    // NB: `rows == 0` is *not* an early return. A matrix with no rows constrains
+    // nothing, so its null space is all of ℝ^cols and the basis is the identity
+    // — which is exactly what the loop below produces (no pivots, every column
+    // free). Returning an empty basis here would claim the opposite.
+
     let mut m: Vec<Vec<BigRational>> = m_in.to_vec();
     let mut pivot_of_col: Vec<Option<usize>> = vec![None; cols];
     let mut r = 0usize;
