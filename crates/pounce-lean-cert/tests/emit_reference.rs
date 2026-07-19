@@ -311,3 +311,68 @@ fn upper_sided_constraint_is_normalized() {
         serde_json::json!({"num":"1","den":"2"})
     );
 }
+
+/// **Design decision, pinned: no bound-multiplier witness is needed.**
+///
+/// The schema was twice suspected of needing explicit `z_L` / `z_U` fields to
+/// carry variable-bound multipliers. It does not, and this test is here so a
+/// later refactor cannot quietly reintroduce the need.
+///
+/// A variable bound `xᵢ ≥ lᵢ` *is* the linear row `eᵢᵀx ≥ lᵢ`. The emitter
+/// folds it into `constraints`, and its multiplier is then an ordinary
+/// constraint dual — the Lean side, which is stated over an arbitrary
+/// `A x ≥ b`, never learns that the row came from a bound.
+///
+/// The problem below has an **active** upper bound at the optimum, so a bound
+/// multiplier genuinely exists and must be nonzero: minimize `(x₀−3)² + x₁²`
+/// over `x₀ ≤ 1`, `x₀, x₁ ≥ 0`. The unconstrained minimum is `(3, 0)`; the
+/// bound `x₀ ≤ 1` binds, giving `x₀ = 1` with a nonzero dual on that row.
+#[test]
+fn an_active_variable_bound_yields_an_ordinary_constraint_dual() {
+    let input = QpInput {
+        n: 2,
+        // f = (x₀−3)² + x₁² = ½·(4x₀² + 2x₁²)/… — use half_quadratic with
+        // Q = diag(2, 2) and c = (−6, 0), constant 9.
+        q_lower: vec![(0, 0, 2.0), (1, 1, 2.0)],
+        half_quadratic: true,
+        c: vec![-6.0, 0.0],
+        constant: 9.0,
+        constraints: vec![],
+        var_lower: vec![0.0, 0.0],
+        var_upper: vec![1.0, f64::INFINITY],
+        x_float: vec![1.0, 0.0],
+        active_tol: 1e-7,
+    };
+    let cert = emit_certificate(&input, &reference_meta()).unwrap();
+
+    // Bounds became rows; `var_bounds` is all-infinite.
+    let names: Vec<&str> = cert
+        .problem
+        .constraints
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"var0_ub"),
+        "the active upper bound must appear as a row, got {names:?}"
+    );
+
+    // The active bound's multiplier is a plain entry of `duals`, nonzero.
+    let idx = names.iter().position(|&n| n == "var0_ub").unwrap();
+    let dual = &cert.witnesses.duals.as_ref().expect("duals")[idx];
+    use num_traits::Zero;
+    assert!(
+        !dual.0.is_zero(),
+        "an active bound must carry a nonzero multiplier, else the test proves nothing"
+    );
+
+    // And there is no separate bound-multiplier witness anywhere in the schema.
+    let json = serde_json::to_string(&cert).unwrap();
+    for forbidden in ["z_L", "z_U", "z_l", "z_u", "bound_multipliers"] {
+        assert!(
+            !json.contains(forbidden),
+            "schema grew a bound-multiplier field ({forbidden}); \
+             revisit the folding decision before adding one"
+        );
+    }
+}

@@ -228,6 +228,33 @@ rational active-set refinement**: it takes the float active set, solves the KKT
 system exactly over ℚ for the true rational `(x*, λ)`, and verifies dual
 feasibility and that the inactive rows hold — refusing if the guess was wrong.
 
+## Why there is no bound-multiplier witness
+
+The schema carries no `z_L` / `z_U`. This is deliberate and has been re-examined
+three times; recording the reasoning here so it is not re-litigated a fourth.
+
+A variable bound `xᵢ ≥ lᵢ` **is** the linear row `eᵢᵀx ≥ lᵢ`. The emitter folds
+every finite bound into `constraints` (`var{i}_lb`, `var{i}_ub`, or an equality
+`var{i}_fix` when fixed) and emits `var_bounds` as all-infinite sentinels. A
+bound's multiplier is then an ordinary entry of `witnesses.duals`, and the Lean
+theorem — stated over an arbitrary `A x ≥ b` — never learns the row came from a
+bound.
+
+The recurring doubt is whether this survives *nonlinear* constraints. It does:
+bounds are linear rows unconditionally, whatever the rest of the problem looks
+like. What genuinely does not survive is the encoding of the other rows
+`gⱼ(x) ≥ 0`, which is the `nlp-poly` problem-encoding gap — a different issue
+that has been mistaken for this one.
+
+Second-order certificates do not need multipliers at all: the consumer takes
+stationarity in the reduced form `Zᵀ(Hx* + c) = 0`, which mentions neither `λ`
+nor `z_L`, `z_U`.
+
+Pinned by `an_active_variable_bound_yields_an_ordinary_constraint_dual` in
+`crates/pounce-lean-cert/tests/emit_reference.rs`, which certifies a problem
+whose optimum lies *on* a bound (so the multiplier is provably nonzero) and
+asserts no bound-multiplier field appears.
+
 ## `nullspace` — the `local-min-strict` witness (emitted, not yet consumed)
 
 Tier 2 asserts positive-definiteness of the **reduced** Hessian `ZᵀHZ` on the
