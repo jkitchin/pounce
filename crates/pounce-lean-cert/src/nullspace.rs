@@ -28,11 +28,47 @@
 //! itself, and a forged list simply fails that check. It is a *hint* that turns
 //! an expensive proof obligation into a cheap one, which is the same trick the
 //! `LDLᵀ` witness plays for positive-semidefiniteness.
+//!
+//! ## (3) `Z` must span the *whole* null space
+//!
+//! Checks (1) and (2) are necessary and read naturally as sufficient. They are
+//! not, and the first version of this module shipped without noticing — the gap
+//! surfaced only when the consumer-side Lean proof of second-order sufficiency
+//! would not close without a spanning hypothesis.
+//!
+//! Together they give `range(Z) ⊆ ker(A_active)` with `dim range(Z) = k`: they
+//! bound the spanned dimension from *below*. Soundness needs it bounded from
+//! *above*. A `Z` spanning a strict subspace of the null space satisfies both
+//! checks, and if the subspace it omits is a direction of negative curvature,
+//! then `ZᵀHZ ≻ 0` holds at a genuine saddle point and the `local-min-strict`
+//! verdict is wrong. Under-reporting the null space is the dangerous direction;
+//! over-reporting merely fails check (1).
+//!
+//! The fix follows the same principle as `identity_rows`: convert a decision
+//! into a check. We ship `n − k` row indices, `n − k` column indices, and the
+//! exact inverse `M` of the square submatrix they select. The consumer verifies
+//! `A[rows, cols] · M = I` — one matrix product, no determinant — which gives
+//! `rank(A_active) ≥ n − k`, hence `dim ker(A_active) ≤ k`, hence
+//! `range(Z) = ker(A_active)` exactly. The inverse is a byproduct the emitter's
+//! elimination already computed.
 
 use num_rational::BigRational;
 use num_traits::{One, Zero};
 
-use crate::linalg::nullspace_exact;
+use crate::linalg::{invert_exact, nullspace_exact, pivot_columns, select_independent_rows};
+
+/// Witness that `A_active` has rank at least `n − k`, which caps the null space
+/// at dimension `k` and so forces `Z` to span *all* of it.
+///
+/// `rows` and `cols` select an `(n−k) × (n−k)` submatrix of `A_active`;
+/// `inverse` is its exact inverse. The consumer checks the single product
+/// `A[rows, cols] · inverse = I`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankWitness {
+    pub rows: Vec<usize>,
+    pub cols: Vec<usize>,
+    pub inverse: Vec<Vec<BigRational>>,
+}
 
 /// A null-space basis together with the data that makes its rank checkable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +77,14 @@ pub struct NullspaceBasis {
     pub z: Vec<Vec<BigRational>>,
     /// The `k` row indices on which `Z` restricts to the identity.
     pub identity_rows: Vec<usize>,
+    /// Witness that `Z` spans the *whole* null space, not merely a subspace.
+    ///
+    /// A required field, not an option. The first version of this struct
+    /// shipped without it and looked complete: `A·Z = 0` and full column rank
+    /// are both necessary, read naturally as sufficient, and are not. Making
+    /// the field mandatory means no construction path can omit the check
+    /// again.
+    pub spanning: RankWitness,
 }
 
 impl NullspaceBasis {
@@ -67,6 +111,11 @@ pub enum NullspaceError {
     NotInNullspace { row: usize, col: usize },
     /// `Z[identity_rows, :] ≠ I`, so full column rank is not witnessed.
     NotIdentity { row: usize, col: usize },
+    /// `A[rows, cols] · inverse ≠ I`, so the rank lower bound is not witnessed
+    /// and `Z` might span only part of the null space.
+    NotSpanning { row: usize, col: usize },
+    /// The rank witness is not `(n−k) × (n−k)`, or indexes out of range.
+    BadRankWitness,
 }
 
 /// Compute the null-space basis of `a_active` (an `m × n` matrix) in the form
@@ -114,11 +163,65 @@ pub fn nullspace_basis(
         z: (0..n)
             .map(|i| vectors.iter().map(|v| v[i].clone()).collect())
             .collect(),
+        spanning: rank_witness(a_active, n, vectors.len())?,
         identity_rows,
     };
 
     check(a_active, &basis)?;
     Ok(basis)
+}
+
+/// Build the rank witness: an invertible `(n−k) × (n−k)` submatrix of
+/// `A_active`, together with its exact inverse.
+///
+/// The pivot columns of the RREF index a maximal independent set of columns, so
+/// there are exactly `rank(A) = n − k` of them and `A[:, cols]` has full column
+/// rank. Picking `n − k` independent *rows* of that tall matrix yields a square
+/// nonsingular block.
+pub fn rank_witness(
+    a_active: &[Vec<BigRational>],
+    n: usize,
+    k: usize,
+) -> Result<RankWitness, NullspaceError> {
+    let r = n.checked_sub(k).ok_or(NullspaceError::BadRankWitness)?;
+    if r == 0 {
+        // Rank 0: `A_active` constrains nothing, the null space is all of ℝⁿ,
+        // and `Z = I` already spans it. The empty product check is vacuous.
+        return Ok(RankWitness {
+            rows: Vec::new(),
+            cols: Vec::new(),
+            inverse: Vec::new(),
+        });
+    }
+
+    let cols = pivot_columns(a_active, n);
+    if cols.len() != r {
+        // rank(A) disagrees with n − dim(null space) — impossible by
+        // rank-nullity unless a caller passed mismatched data.
+        return Err(NullspaceError::BadRankWitness);
+    }
+
+    // Restrict to the pivot columns, then choose independent rows of that block.
+    let narrowed: Vec<Vec<BigRational>> = a_active
+        .iter()
+        .map(|row| cols.iter().map(|&c| row[c].clone()).collect())
+        .collect();
+    let rows = select_independent_rows(&narrowed);
+    if rows.len() != r {
+        return Err(NullspaceError::BadRankWitness);
+    }
+
+    let square: Vec<Vec<BigRational>> = rows
+        .iter()
+        .map(|&i| cols.iter().map(|&c| a_active[i][c].clone()).collect())
+        .collect();
+    let inverse = invert_exact(&square).ok_or(NullspaceError::BadRankWitness)?;
+
+    Ok(RankWitness {
+        rows,
+        cols,
+        inverse,
+    })
 }
 
 /// Run exactly the two checks the consumer will run. Public so the negative
@@ -171,6 +274,63 @@ pub fn check(a_active: &[Vec<BigRational>], basis: &NullspaceBasis) -> Result<()
         return Err(NullspaceError::Shape);
     }
 
+    // (3) A[rows, cols] · inverse = I, which caps dim ker(A) at k and so forces
+    // range(Z) to be the *whole* null space rather than a subspace of it.
+    check_spanning(a_active, &basis.spanning, n, k)?;
+
+    Ok(())
+}
+
+/// The spanning check, separated so the negative tests can target it directly.
+///
+/// Establishes `rank(A_active) ≥ n − k`. Combined with `A·Z = 0` (so
+/// `range(Z) ⊆ ker A`) and full column rank of `Z` (so `dim range(Z) = k`),
+/// rank-nullity gives `dim ker(A) ≤ k` and hence `range(Z) = ker(A)` exactly.
+///
+/// Without this, checks (1) and (2) bound the spanned dimension only from
+/// *below*. Soundness needs it bounded from above: a `Z` spanning a strict
+/// subspace of the null space passes both while omitting a direction the
+/// second-order test must see.
+pub fn check_spanning(
+    a_active: &[Vec<BigRational>],
+    w: &RankWitness,
+    n: usize,
+    k: usize,
+) -> Result<(), NullspaceError> {
+    let r = n.checked_sub(k).ok_or(NullspaceError::BadRankWitness)?;
+    if w.rows.len() != r || w.cols.len() != r || w.inverse.len() != r {
+        return Err(NullspaceError::BadRankWitness);
+    }
+    if w.inverse.iter().any(|row| row.len() != r) {
+        return Err(NullspaceError::BadRankWitness);
+    }
+    if w.rows.iter().any(|&i| i >= a_active.len()) || w.cols.iter().any(|&c| c >= n) {
+        return Err(NullspaceError::BadRankWitness);
+    }
+    // Repeated indices would let a single row or column stand in for several,
+    // faking a rank the matrix does not have.
+    let distinct = |v: &[usize]| {
+        let mut t = v.to_vec();
+        t.sort_unstable();
+        t.dedup();
+        t.len() == v.len()
+    };
+    if !distinct(&w.rows) || !distinct(&w.cols) {
+        return Err(NullspaceError::BadRankWitness);
+    }
+
+    for i in 0..r {
+        for j in 0..r {
+            let mut acc = BigRational::zero();
+            for t in 0..r {
+                acc += &a_active[w.rows[i]][w.cols[t]] * &w.inverse[t][j];
+            }
+            let want_one = i == j;
+            if want_one != acc.is_one() || (!want_one && !acc.is_zero()) {
+                return Err(NullspaceError::NotSpanning { row: i, col: j });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -277,6 +437,7 @@ mod tests {
                 .map(|row| vec![row[0].clone(), row[0].clone()])
                 .collect(),
             identity_rows: b.identity_rows.clone(),
+            spanning: b.spanning.clone(),
         };
 
         // The forged basis passes the null-space product...
@@ -314,6 +475,100 @@ mod tests {
         let mut b = nullspace_basis(&a, 3).unwrap();
         b.identity_rows[0] = 99;
         assert_eq!(check(&a, &b), Err(NullspaceError::Shape));
+    }
+
+    /// **The regression this whole field exists for.**
+    ///
+    /// One constraint in 3 variables leaves a 2-dimensional null space. Hand a
+    /// `Z` with only *one* of those two columns: it satisfies `A·Z = 0`, it has
+    /// full column rank, and its `identity_rows` are genuinely the identity —
+    /// every check the module originally shipped passes. But it spans a line
+    /// inside a plane, so a reduced Hessian computed against it is blind to the
+    /// missing direction. Only the spanning witness rejects it.
+    #[test]
+    fn a_z_spanning_a_strict_subspace_passes_the_old_checks_and_fails_the_new_one() {
+        let a = mat(&[&[1, 1, 1]]);
+        let full = nullspace_basis(&a, 3).unwrap();
+        assert_eq!(full.n_cols(), 2, "the true null space is 2-dimensional");
+
+        // Keep only column 0.
+        let truncated_z: Vec<Vec<BigRational>> =
+            full.z.iter().map(|row| vec![row[0].clone()]).collect();
+        let id_row = full.identity_rows[0];
+
+        // It genuinely lies in the null space...
+        for arow in &a {
+            let acc: BigRational = arow
+                .iter()
+                .enumerate()
+                .map(|(t, av)| av * &truncated_z[t][0])
+                .sum();
+            assert!(acc.is_zero(), "the retained column is in ker A");
+        }
+        // ...and is genuinely the identity on its row, so full column rank holds.
+        assert!(truncated_z[id_row][0].is_one());
+
+        // The rank witness for the *claimed* k = 1 would need rank(A) >= 2,
+        // but A has rank 1, so no such witness can be built.
+        assert_eq!(
+            rank_witness(&a, 3, 1),
+            Err(NullspaceError::BadRankWitness),
+            "a 1-column Z in a 2-dimensional null space must not be witnessable"
+        );
+
+        // And splicing in the real (k = 2) witness does not rescue it either:
+        // the shapes no longer agree with the claimed dimension.
+        let forged = NullspaceBasis {
+            z: truncated_z,
+            identity_rows: vec![id_row],
+            spanning: full.spanning.clone(),
+        };
+        assert!(matches!(
+            check(&a, &forged),
+            Err(NullspaceError::BadRankWitness)
+        ));
+    }
+
+    /// The spanning witness must reject a forged inverse.
+    #[test]
+    fn a_forged_inverse_is_rejected() {
+        let a = mat(&[&[1, 1, 1]]);
+        let mut b = nullspace_basis(&a, 3).unwrap();
+        b.spanning.inverse[0][0] += r(1);
+        assert!(matches!(
+            check(&a, &b),
+            Err(NullspaceError::NotSpanning { .. })
+        ));
+    }
+
+    /// Repeated indices must not let one row stand in for several and fake rank.
+    #[test]
+    fn repeated_rank_witness_indices_are_rejected() {
+        // Rank 2 in 3 variables, so the witness is 2x2 and has room to repeat.
+        let a = mat(&[&[1, 0, 1], &[0, 1, 1]]);
+        let b = nullspace_basis(&a, 3).unwrap();
+        assert_eq!(b.spanning.rows.len(), 2);
+
+        let mut forged = b.clone();
+        forged.spanning.cols[1] = forged.spanning.cols[0];
+        assert_eq!(
+            check_spanning(&a, &forged.spanning, 3, 1),
+            Err(NullspaceError::BadRankWitness)
+        );
+    }
+
+    /// The honest witness verifies, at every size exercised here.
+    #[test]
+    fn the_emitted_spanning_witness_verifies() {
+        for a in [
+            mat(&[&[1, 1, 1]]),
+            mat(&[&[1, 0, 1], &[0, 1, 1]]),
+            mat(&[&[1, 0, 1], &[0, 1, 1], &[1, 1, 2]]),
+            mat(&[&[2, -3, 5]]),
+        ] {
+            let b = nullspace_basis(&a, 3).unwrap();
+            check_spanning(&a, &b.spanning, 3, b.n_cols()).unwrap();
+        }
     }
 
     /// Ragged input is refused rather than silently mis-shaped.

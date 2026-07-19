@@ -126,6 +126,67 @@ pub fn nullspace_exact(m_in: &[Vec<BigRational>], cols: usize) -> Vec<Vec<BigRat
     basis
 }
 
+/// Pivot columns of `m_in` (an `rows × cols` matrix) under exact RREF.
+///
+/// These index a maximal linearly independent set of *columns*, so their count
+/// is `rank(m_in)`. Used to locate an invertible square submatrix; see
+/// `nullspace::rank_witness`.
+#[allow(clippy::needless_range_loop)]
+pub fn pivot_columns(m_in: &[Vec<BigRational>], cols: usize) -> Vec<usize> {
+    let rows = m_in.len();
+    let mut m: Vec<Vec<BigRational>> = m_in.to_vec();
+    let mut pivots = Vec::new();
+    let mut r = 0usize;
+
+    for c in 0..cols {
+        if r >= rows {
+            break;
+        }
+        let Some(p) = (r..rows).find(|&i| !m[i][c].is_zero()) else {
+            continue;
+        };
+        m.swap(r, p);
+        let piv = m[r][c].clone();
+        for k in 0..cols {
+            m[r][k] = &m[r][k] / &piv;
+        }
+        for i in 0..rows {
+            if i != r && !m[i][c].is_zero() {
+                let f = m[i][c].clone();
+                for k in 0..cols {
+                    let sub = &f * &m[r][k];
+                    m[i][k] -= sub;
+                }
+            }
+        }
+        pivots.push(c);
+        r += 1;
+    }
+    pivots
+}
+
+/// Exact inverse of a square rational matrix, column by column via
+/// [`solve_exact`]. `None` if singular or not square.
+pub fn invert_exact(a: &[Vec<BigRational>]) -> Option<Vec<Vec<BigRational>>> {
+    let n = a.len();
+    if a.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    // Column `j` of the inverse solves `A y = e_j`.
+    let mut cols_out: Vec<Vec<BigRational>> = Vec::with_capacity(n);
+    for j in 0..n {
+        let mut e = vec![BigRational::zero(); n];
+        e[j] = BigRational::one();
+        cols_out.push(solve_exact(a, &e)?);
+    }
+    // Transpose back into row-major.
+    Some(
+        (0..n)
+            .map(|i| cols_out.iter().map(|c| c[i].clone()).collect())
+            .collect(),
+    )
+}
+
 /// Indices of a maximal linearly independent subset of `rows`, chosen greedily
 /// in the order given, by exact forward elimination over ℚ.
 ///

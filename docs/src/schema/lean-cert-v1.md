@@ -228,6 +228,56 @@ rational active-set refinement**: it takes the float active set, solves the KKT
 system exactly over ℚ for the true rational `(x*, λ)`, and verifies dual
 feasibility and that the inactive rows hold — refusing if the guess was wrong.
 
+## `nullspace` — the `local-min-strict` witness (emitted, not yet consumed)
+
+Tier 2 asserts positive-definiteness of the **reduced** Hessian `ZᵀHZ` on the
+active-constraint null space. Witnesses are untrusted, so the consumer must
+verify the reduction rather than take it on faith, and that needs `Z` plus two
+pieces of auxiliary data.
+
+```json
+"nullspace": {
+  "Z": { "rows": 3, "cols": 2, "entries": [ … ] },
+  "identity_rows": [ 1, 2 ],
+  "spanning": {
+    "rows": [ 0 ],
+    "cols": [ 0 ],
+    "inverse": { "rows": 1, "cols": 1, "entries": [ … ] }
+  }
+}
+```
+
+| Field | Consumer checks | Establishes |
+|---|---|---|
+| `Z` | `A_active · Z = 0` | `range(Z) ⊆ ker(A_active)` |
+| `identity_rows` | `Z[identity_rows, :] = I` | `Z` has full column rank, so `dim range(Z) = k` |
+| `spanning` | `A_active[rows, cols] · inverse = I`, `\|rows\| = \|cols\| = n − k` | `rank(A_active) ≥ n − k`, so `dim ker(A_active) ≤ k` |
+
+**All three are required, and the third is the one that is easy to miss.** The
+first two are necessary and read naturally as sufficient. They are not: together
+they bound the spanned dimension only from *below*. A `Z` spanning a strict
+subspace of the null space passes both, and if the direction it omits carries
+negative curvature, then `ZᵀHZ ≻ 0` holds at a genuine **saddle point** and the
+verdict is wrong. Under-reporting the null space is the dangerous direction;
+over-reporting merely fails the first check. Adding `spanning` closes it —
+`dim ker ≤ k` with `dim range(Z) = k` forces `range(Z) = ker(A_active)` exactly.
+
+This was not caught by inspection. It surfaced when the consumer-side Lean proof
+of second-order sufficiency would not close without a spanning hypothesis.
+
+Both rank facts could be had from a determinant or an elimination — precisely
+the `O(n³)` rational-matrix decision procedure that is already too slow in the
+kernel for dense Hessians. Both are instead reduced to one matrix product by
+shipping a byproduct the emitter's elimination already computed. Neither field
+adds trust: the consumer verifies each claim, and forged data fails.
+
+Produced by `pounce-lean-cert`'s `nullspace` module, which runs all three checks
+before emitting, so a certificate that would not verify is never written.
+
+> **Status.** The producer computes this block; the codegen does **not** read it
+> yet and `local-min-strict` still exits 2. Documented here so the shape is
+> settled before anything depends on it — not as a live capability.
+
 ## Supported slice (v1)
 
 `problem_class = qp-convex`, `verdict = global-min`, quadratic objective
