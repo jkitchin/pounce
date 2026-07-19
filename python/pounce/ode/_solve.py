@@ -49,6 +49,31 @@ class OdeResult(ResultMixin):
     info: dict = field(default_factory=dict, repr=False)
 
 
+def _project_output_points(res, prob, t0, y0, t_eval):
+    """gh #216: Newton-polish the algebraic components of the requested output
+    (``res['sol']`` and, when ``t_eval`` is given, ``res['y']``) onto the
+    constraint manifold, in place. No-op when there are no algebraic variables
+    or the algebraic rows are affine (exact under the cubic dense output)."""
+    from . import _dae
+
+    sol = res.get("sol")
+    if sol is None:
+        return
+    y0 = np.asarray(y0, dtype=float)
+    zp = np.zeros(y0.size)
+    _, Fyp = prob.jacs(t0, y0, zp, prob.F(t0, y0, zp))
+    alg_var = _dae._algebraic_mask(Fyp)
+    if not alg_var.any():
+        return
+    alg_eq = _dae._algebraic_equation_mask(Fyp)
+    if _dae._algebraic_rows_affine(prob, t0, y0, alg_eq):
+        return
+    psol = _dae.project_output(sol, prob, alg_eq, alg_var)
+    res["sol"] = psol
+    if t_eval is not None:
+        res["y"] = psol(np.asarray(t_eval, dtype=float))
+
+
 def _wrap_events_args(events, args):
     """Bind ``*args`` into each event ``g(t, y)`` (SciPy passes args to events
     too), preserving ``terminal`` / ``direction`` attributes."""
@@ -96,6 +121,8 @@ def solve_ivp(
     args=None,
     *,
     mass=None,
+    consistent="project",
+    project_output=False,
     rtol=1e-3,
     atol=1e-6,
     jac=None,
@@ -138,6 +165,27 @@ def solve_ivp(
         state/time-dependent mass. A singular ``M`` makes this an index-1 DAE
         solve (a pounce extension beyond SciPy); a callable ``M`` is routed
         through the fully-implicit DAE engine (:func:`solve_dae`).
+    consistent : {"project", "assume"}
+        Only meaningful for a singular (DAE) ``mass``. ``"project"`` (default)
+        projects ``y0`` onto the algebraic manifold ``0 = f`` before
+        integrating — matching :func:`solve_dae` — so ``res.y[:, 0]`` is a
+        point the model admits even when the given algebraic components are
+        only a rough guess. ``"assume"`` trusts ``y0`` verbatim (the pre-0.x
+        behavior); use it if you rely on ``res.y[:, 0]`` echoing your input and
+        know it is already consistent. Ignored for a non-singular ``mass``
+        (a plain ODE has no algebraic manifold to project onto).
+    project_output : bool
+        Only meaningful for a singular (DAE) ``mass``. When ``True``, the
+        algebraic components of every *requested output* point (``res.sol(t)``
+        and ``res.y`` at ``t_eval``) are Newton-polished onto ``0 = f`` before
+        being returned. Radau IIA is stiffly accurate, so the constraint holds
+        at the solver's own accepted steps, but the dense-output polynomial
+        only *interpolates* it between them. For a **linear** conservation law
+        (mass / atom / charge / site balance, ``sum(x) = 1``) the cubic
+        satisfies it exactly and this is skipped automatically; it matters only
+        for a **nonlinear** algebraic constraint whose interpolated residual is
+        large enough to care about (gh #216). Off by default; does not change
+        the trajectory, step sequence, or error control — only what you read.
     rtol, atol : float
         Relative / absolute error tolerances.
     jac : callable or None
@@ -186,6 +234,9 @@ def solve_ivp(
         if events is not None:
             events = _wrap_events_args(events, args)
 
+    if consistent not in ("project", "assume"):
+        raise ValueError("consistent must be 'project' or 'assume'.")
+
     if callable(mass):
         # State/time-dependent mass M(t, y) y' = f(t, y): route through the
         # fully-implicit DAE engine as F(t, y, y') = M(t, y) y' - f(t, y).
@@ -195,18 +246,46 @@ def solve_ivp(
             return np.asarray(mass(t, y), dtype=float) @ yp - np.asarray(fun(t, y), dtype=float)
 
         prob = _dae._DaeProblem(_F, y0.size)
-        y0c, yp0 = _dae.consistent_initial_conditions(prob, t0, y0, None)
+        if consistent == "project":
+            y0, yp0 = _dae.consistent_initial_conditions(prob, t0, y0, None)
+        else:
+            # 'assume': trust y0; derive y'0 with y0 held fixed (min-norm solve
+            # of M(t0, y0) y'0 = f(t0, y0)). Correct when y0 is consistent.
+            M0 = np.asarray(mass(t0, y0), dtype=float)
+            f0 = np.asarray(fun(t0, y0), dtype=float)
+            yp0 = np.linalg.lstsq(M0, f0, rcond=None)[0]
         res = _dae.integrate_dae(
-            _F, t0, t1, y0c, yp0, rtol=rtol, atol=atol, first_step=first_step,
+            _F, t0, t1, y0, yp0, rtol=rtol, atol=atol, first_step=first_step,
             max_step=max_step, t_eval=t_eval,
             dense_output=dense_output or t_eval is not None, events=events,
         )
+        if project_output:
+            _project_output_points(res, prob, t0, y0, t_eval)
     else:
+        dae_prob = None
+        if mass is not None and (consistent == "project" or project_output):
+            # A singular constant mass is an index-1 DAE: 0 = f on the algebraic
+            # rows. The fast mass path never projected the IC (gh #215) nor the
+            # requested output points (gh #216); build the residual form once
+            # and reuse it for both.
+            from . import _dae
+
+            M = np.asarray(mass, dtype=float)
+            if M.ndim == 2 and _dae._algebraic_mask(M).any():
+                dae_jac = None if jac is None else (
+                    lambda t, y, yp: (-np.asarray(jac(t, y), dtype=float), M))
+                _F = lambda t, y, yp: M @ yp - np.asarray(fun(t, y), dtype=float)
+                dae_prob = _dae._DaeProblem(_F, y0.size, jac=dae_jac)
+                if consistent == "project":
+                    y0, _ = _dae.consistent_initial_conditions(
+                        dae_prob, t0, y0, None)
         res = _radau.integrate(
             fun, t0, t1, y0, rtol=rtol, atol=atol, first_step=first_step,
             max_step=max_step, mass=mass, jac=jac, t_eval=t_eval,
             dense_output=dense_output or t_eval is not None, events=events,
         )
+        if project_output and dae_prob is not None:
+            _project_output_points(res, dae_prob, t0, y0, t_eval)
     # Like SciPy's solve_ivp, a numerical failure (step underflow, step cap)
     # is reported as status < 0 / success = False with the partial trajectory
     # accumulated so far — never raised.
@@ -234,6 +313,7 @@ def solve_dae(
     yp0=None,
     *,
     consistent="project",
+    project_output=False,
     rtol=1e-3,
     atol=1e-6,
     jac=None,
@@ -266,6 +346,13 @@ def solve_dae(
     jac : callable or None
         ``jac(t, y, yp)`` returning ``(dF/dy, dF/dy')``; finite-differenced
         (``2n`` evals) if omitted.
+    project_output : bool
+        When ``True``, Newton-polish the algebraic components of every
+        requested output point (``res.sol(t)`` and ``res.y`` at ``t_eval``)
+        onto ``0 = F_alg`` — the constraint holds at the solver's accepted
+        steps but the dense output only interpolates it between them (gh #216).
+        Skipped automatically for affine constraints (exact under the cubic).
+        Off by default; does not affect the trajectory or step control.
 
     Returns
     -------
@@ -287,8 +374,8 @@ def solve_dae(
         if events is not None:
             events = _wrap_events_args(events, args)
 
+    prob = _dae._DaeProblem(F, y0.size, jac=jac)
     if consistent == "project":
-        prob = _dae._DaeProblem(F, y0.size, jac=jac)
         y0, yp0 = _dae.consistent_initial_conditions(prob, t0, y0, yp0)
     elif consistent == "assume":
         if yp0 is None:
@@ -301,6 +388,8 @@ def solve_dae(
         first_step=first_step, max_step=max_step, t_eval=t_eval,
         dense_output=dense_output or t_eval is not None, events=events,
     )
+    if project_output:
+        _project_output_points(res, prob, t0, y0, t_eval)
     return OdeResult(
         t=res["t"], y=res["y"], sol=res.get("sol"),
         nfev=res["nfev"], njev=res["njev"], nlu=res["nlu"],

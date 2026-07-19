@@ -245,6 +245,70 @@ def test_simple_dae():
     assert np.max(np.abs(y[1] - np.exp(-2 * tt))) < 1e-6
 
 
+def test_singular_mass_projects_inconsistent_ic():
+    """gh #215: a rough algebraic guess in y0 (y1=5, manifold wants y1=y0**2=1)
+    is projected onto 0 = y1 - y0**2 by default, matching solve_dae — the mass
+    path used to echo it back off-manifold and silently."""
+    def f(t, y):
+        return [-y[0], y[1] - y[0] ** 2]
+
+    M = np.diag([1.0, 0.0])
+    r = po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M, rtol=1e-8, atol=1e-10)
+    assert r.success
+    # res.y[:, 0] is on the manifold, not the user's inconsistent input.
+    assert abs(r.y[1, 0] - r.y[0, 0] ** 2) < 1e-9
+    assert abs(r.y[1, 0] - 1.0) < 1e-9
+
+    # opt out: consistent="assume" trusts the input verbatim (old behavior).
+    ra = po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M, consistent="assume",
+                      rtol=1e-8, atol=1e-10)
+    assert ra.y[1, 0] == 5.0
+
+    with pytest.raises(ValueError):
+        po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M, consistent="bogus")
+
+
+def test_project_output_nonlinear_constraint():
+    """gh #216: project_output Newton-polishes interpolated output points onto a
+    nonlinear algebraic manifold; the interpolated residual drops sharply and
+    the trajectory itself is unchanged."""
+    def f(t, y):
+        return [-y[0], y[1] - y[0] ** 2]
+
+    M = np.diag([1.0, 0.0])
+    te = np.linspace(0.0, 2.0, 100)
+    r = po.solve_ivp(f, (0.0, 2.0), [1.0, 1.0], mass=M, rtol=1e-8, atol=1e-10,
+                     t_eval=te)
+    rp = po.solve_ivp(f, (0.0, 2.0), [1.0, 1.0], mass=M, rtol=1e-8, atol=1e-10,
+                      t_eval=te, project_output=True)
+
+    resid = np.abs(r.y[1] - r.y[0] ** 2).max()
+    residp = np.abs(rp.y[1] - rp.y[0] ** 2).max()
+    assert residp < resid / 10          # interpolation gap closed by an order+
+    assert residp < 1e-9
+    # differential component (and hence the physical trajectory) is untouched.
+    assert np.max(np.abs(rp.y[0] - np.exp(-te))) < 1e-7
+
+
+def test_project_output_linear_constraint_is_noop():
+    """A linear conservation law (Robertson's sum=1) is exact under the cubic
+    dense output, so project_output is auto-skipped and returns identical y."""
+    k1, k2, k3 = 0.04, 3e7, 1e4
+
+    def f(t, y):
+        return [-k1 * y[0] + k3 * y[1] * y[2],
+                k1 * y[0] - k3 * y[1] * y[2] - k2 * y[1] ** 2,
+                y[0] + y[1] + y[2] - 1.0]
+
+    M = np.diag([1.0, 1.0, 0.0])
+    te = np.logspace(-3, 4, 60)
+    base = po.solve_ivp(f, (0.0, 1e4), [1.0, 0.0, 0.0], mass=M,
+                        rtol=1e-6, atol=1e-8, t_eval=te)
+    proj = po.solve_ivp(f, (0.0, 1e4), [1.0, 0.0, 0.0], mass=M,
+                        rtol=1e-6, atol=1e-8, t_eval=te, project_output=True)
+    assert np.array_equal(base.y, proj.y)     # skipped: bit-for-bit identical
+
+
 # --- SciPy-signature plumbing ------------------------------------------------
 
 def test_t_eval_and_args():

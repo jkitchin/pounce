@@ -134,6 +134,45 @@ changes.
   reviewed and are behavior-preserving (`RefCell`/`Mutex` guards dropped at
   end of scope with no observer of the relative order).
 
+### Fixed — `solve_ivp(mass=M)` now projects inconsistent initial conditions (#215)
+
+- **`pounce.ode.solve_ivp` with a singular mass matrix now projects `y0` onto
+  the algebraic manifold before integrating, matching `solve_dae`.** Given a
+  singular `M`, the mass path is an index-1 DAE, but it previously returned the
+  user's `y0` verbatim in `res.y[:, 0]` even when its algebraic components
+  violated `0 = f` — silently, with `res.success == True`. Since the whole
+  point of the algebraic variables is that they are *determined* by the
+  differential ones, a rough guess for them is the normal case, and the first
+  column of the trajectory was left off the solution manifold. It now runs the
+  same `consistent_initial_conditions` projection (the IDA `IDA_YA_YDP_INIT`
+  computation) that `solve_dae(consistent="project")` already used, so both
+  entry points to the index-1 DAE math agree. A new `consistent=` keyword
+  (`"project"`, the default, or `"assume"`) opts out for callers relying on
+  `res.y[:, 0]` echoing an already-consistent input. Non-singular (plain ODE)
+  masses are unaffected.
+
+### Added — opt-in on-manifold output projection for DAEs (#216)
+
+- **`pounce.ode.solve_ivp` and `solve_dae` gain `project_output=False`.** Radau
+  IIA is stiffly accurate, so a singular-mass DAE satisfies its algebraic
+  constraints to round-off at every accepted step — but the dense-output
+  polynomial only *interpolates* the constraint between steps, so intermediate
+  `res.sol(t)` / `t_eval` points can sit slightly off the manifold. With
+  `project_output=True` the algebraic components of each requested output point
+  are Newton-polished back onto `0 = f_alg` (differential components held
+  fixed), reusing the index-1 differential/algebraic split. It changes only
+  what the caller reads — never the trajectory, step sequence, or error
+  control. **Off by default, and skipped automatically when the algebraic rows
+  are affine:** a linear conservation law (`sum(x) = 1`, atom / charge / site
+  balance) is reproduced *exactly* by the degree-3 collocation output — the
+  constraint cubic has four roots and is identically zero — so projection buys
+  nothing there and the output is returned bit-for-bit unchanged. It matters
+  only for a nonlinear algebraic constraint whose absolute interpolated
+  residual is large enough to care about. New diagnostic
+  `python/examples/dae_manifold_gap.py` (`manifold_gap()`) measures the gap on
+  an arbitrary DAE, and notebook `27_dae_manifold_projection.ipynb` walks
+  through both knobs.
+
 ## [0.8.0] - 2026-07-11
 
 ### Added — declared-parameter sensitivity for Pyomo (Python / Pyomo)

@@ -46,6 +46,26 @@ solve_dae(F, (0.0, 1e4), y0=[1.0, 0.0, 0.5], yp0=None)
 Pass `consistent="assume"` with an explicit `yp0` to skip the projection (you
 guarantee `F(t0, y0, yp0) == 0`).
 
+## On-manifold output points
+
+Radau IIA is stiffly accurate, so `F_alg = 0` holds at every accepted step, but
+the dense output only *interpolates* the constraint between steps. For an affine
+constraint the cubic satisfies it exactly; for a **nonlinear** one the
+interpolated residual is small but nonzero at intermediate `res.sol(t)` /
+`t_eval` points. Pass `project_output=True` to Newton-polish the algebraic
+components of each requested output point back onto `0 = F_alg`, holding the
+differential components fixed:
+
+```python
+te = np.linspace(0.0, 2.0, 100)
+res = solve_dae(F, (0.0, 2.0), y0=[1.0, 1.0], t_eval=te, project_output=True)
+```
+
+Off by default; skipped automatically when the algebraic rows are affine (it
+buys nothing there — see [`solve_ivp`](./ode.md)'s DAE section and gh #216). It
+changes only what you read from `res.sol` / `res.y`, not the trajectory or step
+control.
+
 ## Jacobians
 
 `jac(t, y, yp) -> (∂F/∂y, ∂F/∂y')` is optional; both blocks are
