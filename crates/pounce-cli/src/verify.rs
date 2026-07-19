@@ -730,16 +730,27 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
     let worst_con = o.worst_con.as_ref().map(row_json);
     let worst_bound = o.worst_bound.as_ref().map(row_json);
     let optimality = if o.duals_present {
+        // Optimality is a property of a FEASIBLE point, so this must not report
+        // `true` for one that violates the constraints. The stationarity
+        // residual of an infeasible point can be legitimately zero, which
+        // previously surfaced as `optimality.optimal: true` inside a receipt
+        // whose verdict was REJECTED — the top-level fields were correct, but a
+        // consumer reading this nested field alone was told the opposite.
+        // The raw residuals are still reported unconditioned: they are useful
+        // for diagnosing *why* a point failed.
+        let optimal = o.optimal.map(|opt| opt && o.feasible);
         json!({
             "available": true,
             "objective": o.objective,
             "stationarity_residual": o.stationarity,
             "dual_sign": o.dual_sign,
             "complementarity_residual": o.complementarity,
-            "optimal": o.optimal,
+            "optimal": optimal,
             "note": "bound-projected stationarity (dual infeasibility) using the .sol's \
                      constraint duals; bound multipliers inferred from activity. Sign chosen \
-                     to match the supplied dual convention. Feasibility is the rigorous gate."
+                     to match the supplied dual convention. Feasibility is the rigorous gate, \
+                     and `optimal` is reported false for an infeasible point regardless of \
+                     its stationarity residual."
         })
     } else {
         json!({ "available": false })

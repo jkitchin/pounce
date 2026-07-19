@@ -967,6 +967,15 @@ def minimize(
     # signature, as scipy's ``_custom`` dispatch sends them). Explicit kwargs
     # win over the legacy dict if both are supplied.
     legacy_options = options.pop("options", None)
+    if legacy_options is not None and not isinstance(legacy_options, Mapping):
+        # Silently discarding it would drop EVERY option the caller passed --
+        # tolerances, iteration limits, solver_selection -- and still return a
+        # plausible answer from the defaults. That is the gh #213 failure mode
+        # one level up: the mistake is invisible because the solve succeeds.
+        raise TypeError(
+            f"options= must be a mapping, got {type(legacy_options).__name__}; "
+            "all options would otherwise be silently ignored"
+        )
     if isinstance(legacy_options, Mapping):
         options = {**dict(legacy_options), **options}
 

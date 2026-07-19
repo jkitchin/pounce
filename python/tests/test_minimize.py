@@ -1288,3 +1288,26 @@ def test_user_requested_stop_is_not_success_despite_small_kkt(monkeypatch):
     )
     assert res2.status == 3
     assert res2.success is True, "an acceptable-KKT numerical stall stays a success"
+
+
+def test_non_mapping_options_is_rejected_not_silently_dropped():
+    """A non-Mapping ``options=`` must raise, not be discarded.
+
+    Found by an adversary probe following gh #213. ``options=`` was popped and
+    merged only when it was a ``Mapping``; anything else fell through and the
+    solve ran on defaults. That drops *every* option the caller passed --
+    tolerances, iteration limits, ``solver_selection`` -- and still returns a
+    plausible answer, so the mistake is invisible. Same failure mode as #213,
+    one level up.
+    """
+    import pounce._minimize as M
+
+    fun = lambda x: float(x @ x)
+    jac = lambda x: 2.0 * x
+    for bad in ([("tol", 1e-9)], ("tol", 1e-9), "tol=1e-9", 42):
+        with pytest.raises(TypeError, match="must be a mapping"):
+            M.minimize(fun, np.ones(2), jac=jac, options=bad)
+
+    # The supported forms are untouched.
+    assert M.minimize(fun, np.ones(2), jac=jac, options={"tol": 1e-9}).success
+    assert M.minimize(fun, np.ones(2), jac=jac).success

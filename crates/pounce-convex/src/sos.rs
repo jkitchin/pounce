@@ -495,6 +495,13 @@ pub struct SosSolution {
     /// relaxation is then exact, so `lower_bound` is the global minimum.
     pub is_exact: bool,
     /// Number of global minimizers (the flat moment-matrix rank) when exact.
+    ///
+    /// **May under-report.** When the relaxation is not flat at the analytic
+    /// center, the low-rank re-solve can collapse a multi-atom optimal measure
+    /// onto fewer atoms; the survivors are validated against the certified
+    /// bound (so they are genuine minimizers) but siblings can be missed.
+    /// Himmelblau's function at order 2 reports 1 of its 4. Treat this as a
+    /// lower bound on the number of global minimizers, not a count.
     pub num_minimizers: usize,
     /// The extracted global minimizers (all `num_minimizers` atoms) when the
     /// moment matrix is flat; recovered via the self-adjoint multiplication
@@ -530,7 +537,7 @@ where
         };
     }
 
-    let mut rec = recover_from_moments(prob, &mi, &sol.y);
+    let mut rec = recover_from_moments(prob, &mi, &sol.y, lower_bound / s_obj);
 
     // Facial reduction. The interior-point solver lands on the analytic-center
     // (maximum-rank) optimal moment matrix, which is flat only when the optimum
@@ -545,7 +552,9 @@ where
         let (qp2, cones2, mi2) = build_sos_sdp(prob, order, Some(TRACE_EPS));
         let sol2 = solve_socp_ipm(&qp2, &cones2, &opts, &mut make_backend);
         if sol2.status == QpStatus::Optimal {
-            let rec2 = recover_from_moments(prob, &mi2, &sol2.y);
+            // Validate the re-solve's atoms against the UNPERTURBED bound: the
+            // trace penalty changes the moment matrix, not the value being certified.
+            let rec2 = recover_from_moments(prob, &mi2, &sol2.y, lower_bound / s_obj);
             if rec2.is_exact {
                 rec = rec2;
             }
@@ -581,7 +590,15 @@ struct Recovery {
 /// `M_d` can yield atoms outside `K` (M21). We therefore validate the extracted
 /// atoms against `prob`'s constraints and withdraw the exactness certificate if
 /// any atom is infeasible — `lower_bound` remains a valid lower bound.
-fn recover_from_moments(prob: &PolyProblem, mi: &MomentInfo, y: &[f64]) -> Recovery {
+fn recover_from_moments(
+    prob: &PolyProblem,
+    mi: &MomentInfo,
+    y: &[f64],
+    // `bound_scaled` is the certified bound in the EQUILIBRATED space: `prob`
+    // here is the scaled problem, so the user-units bound must be divided by
+    // `s_obj` before it can be compared against `prob.objective.eval`.
+    bound_scaled: f64,
+) -> Recovery {
     let moment = |alpha: &[usize]| -> f64 { y[mi.row_of[alpha]] };
     let zero = vec![0usize; mi.n_vars];
     let sign = if moment(&zero) < 0.0 { -1.0 } else { 1.0 };
@@ -635,7 +652,36 @@ fn recover_from_moments(prob: &PolyProblem, mi: &MomentInfo, y: &[f64]) -> Recov
     let atoms_feasible = (mi.d >= 1)
         && !minimizers.is_empty()
         && minimizers.iter().all(|x| prob.is_feasible(x, FEAS_TOL));
-    let is_exact = is_exact && (minimizers.is_empty() || atoms_feasible);
+    let mut is_exact = is_exact && (minimizers.is_empty() || atoms_feasible);
+
+    // Atom-objective guard. Feasibility is not enough: an extracted atom must
+    // also *attain* the certified bound, i.e. `p(atom) ≈ γ*`. When it does not,
+    // the moment matrix we read is not the optimal measure and the exactness
+    // certificate is unsound.
+    //
+    // This is not hypothetical. The low-rank (min-trace) re-solve above exists
+    // to collapse rank inflated by spurious pseudo-moments, but it selects the
+    // *lowest-rank* near-optimal moment matrix — and when the true optimal
+    // measure has several atoms, a rank-1 matrix concentrated on a single
+    // non-minimizing point can be near-optimal too. The relaxation then reports
+    // `is_exact = true` with `num_minimizers = 1` and hands back the measure's
+    // mean rather than a minimizer. Himmelblau's function (four global
+    // minimizers) is the reference case: it returned one "minimizer" whose
+    // objective drifted from 4e-2 to 3e+1 as the order rose, while the bound
+    // stayed correct at ~0.
+    //
+    // The bound is a valid lower bound regardless, so withdrawing exactness
+    // costs nothing that was sound to begin with.
+    if is_exact && !minimizers.is_empty() {
+        let attains = minimizers.iter().all(|x| {
+            let mag = prob.objective.eval_magnitude(x).max(1.0);
+            (prob.objective.eval(x) - bound_scaled).abs() <= ATOM_OBJ_TOL * mag
+        });
+        if !attains {
+            is_exact = false;
+        }
+    }
+
     if !is_exact {
         minimizers.clear();
     }
@@ -783,6 +829,18 @@ fn extract_atoms(mi: &MomentInfo, r: usize, moment: impl Fn(&[usize]) -> f64) ->
 /// only within the plausible band `(1e-9, 1e-2)·λ_max` — above the band an
 /// eigenvalue is certainly real, below it is certainly numerical zero. With no
 /// gap in the band the matrix is effectively full rank over that band.
+/// Tolerance for the atom-objective guard, relative to the objective's
+/// magnitude at the atom (`eval_magnitude`, the cancellation scale — a bare
+/// absolute test is meaningless for a polynomial whose terms cancel to ~0).
+///
+/// Chosen from measurement, not taste. Across every extraction-exercising test
+/// the relative residual of a genuine minimizer is `4e-10 … 2e-8`, with one
+/// outlier at `2.5e-5` (`goldstein_price_wide_coefficient_range`, whose
+/// coefficients span 144..23616 — gh #124 conditioning, still a correct
+/// recovery). Non-minimizing atoms measured `7.6e-3` and `7.3e-2`. `1e-3` sits
+/// ~40x above the worst legitimate case and ~7x below the worst bogus one.
+const ATOM_OBJ_TOL: f64 = 1e-3;
+
 fn psd_rank(mat: &[f64], n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -831,6 +889,87 @@ mod tests {
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())
+    }
+
+    #[test]
+    fn himmelblau_never_returns_a_non_minimizing_atom() {
+        // Himmelblau's function: f = (x²+y−11)² + (x+y²−7)², four global
+        // minimizers with f* = 0. The moment relaxation is not flat at the
+        // analytic center here, so the low-rank re-solve collapses it to rank 1
+        // — and the resulting single "minimizer" drifted further from a true one
+        // as the order ROSE: f(atom) = 4e-2, 4.2, then 30. `is_exact` was true
+        // throughout, so a caller reading `minimizers[0]` got a non-minimizer
+        // with no signal. The bound stayed correct (~0) the whole time.
+        //
+        // The guarantee asserted here is the one that matters: whatever comes
+        // back is validated against the certified bound, so a reported
+        // minimizer really is one. Under-reporting the COUNT is a known
+        // remaining limitation (see `SosSolution::num_minimizers`).
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 0], 1.0),
+                (vec![0, 4], 1.0),
+                (vec![2, 1], 2.0),
+                (vec![1, 2], 2.0),
+                (vec![2, 0], -21.0),
+                (vec![0, 2], -13.0),
+                (vec![1, 0], -14.0),
+                (vec![0, 1], -22.0),
+                (vec![0, 0], 170.0),
+            ],
+        );
+        let prob = PolyProblem::new(p);
+        let himmelblau = |x: f64, y: f64| (x * x + y - 11.0).powi(2) + (x + y * y - 7.0).powi(2);
+
+        for order in [2usize, 3, 4] {
+            let r = sos_minimize(&prob, Some(order), backend);
+            assert_eq!(r.status, QpStatus::Optimal, "order {order}: {:?}", r.status);
+
+            // The bound stays a valid lower bound at every order — this never
+            // regressed, and the fix must not cost it.
+            assert!(
+                r.lower_bound <= 1e-4,
+                "order {order}: bound {} exceeds the true global minimum of 0",
+                r.lower_bound
+            );
+
+            // Every returned minimizer must be near a TRUE one. Distance is the
+            // meaningful test rather than f alone: Himmelblau is steep near its
+            // minima, so a legitimately approximate atom at a low relaxation
+            // order still carries a visible objective value (order 2 lands
+            // 0.033 away, f = 4e-2). The failure being guarded against is not
+            // imprecision but a point that is nowhere near any minimizer —
+            // orders 3 and 4 previously returned atoms 1.0 and 2.0 away.
+            const TRUE_MINIMIZERS: [(f64, f64); 4] = [
+                (3.0, 2.0),
+                (-2.805118, 3.131312),
+                (-3.779310, -3.283186),
+                (3.584428, -1.848126),
+            ];
+            for m in &r.minimizers {
+                let nearest = TRUE_MINIMIZERS
+                    .iter()
+                    .map(|(a, b)| ((m[0] - a).powi(2) + (m[1] - b).powi(2)).sqrt())
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    nearest < 0.1,
+                    "order {order}: reported minimizer ({}, {}) is {nearest:.3} from the \
+                     nearest true minimizer (f = {:.3e})",
+                    m[0],
+                    m[1],
+                    himmelblau(m[0], m[1])
+                );
+            }
+            // And exactness must not be claimed with an unvalidated set.
+            if r.is_exact {
+                assert_eq!(
+                    r.num_minimizers,
+                    r.minimizers.len(),
+                    "order {order}: num_minimizers disagrees with the returned atoms"
+                );
+            }
+        }
     }
 
     #[test]
