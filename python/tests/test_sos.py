@@ -101,3 +101,133 @@ def test_explicit_n_vars_and_order():
 def test_mismatched_exponent_length_raises():
     with pytest.raises(ValueError):
         sos_minimize({(2, 0): 1.0, (1,): -2.0})  # inconsistent tuple lengths
+
+
+# --- constrained quartic hierarchy (gh #218) --------------------------------
+
+
+def _lasserre_ex5():
+    """Lasserre, SIAM J. Optim. 11(3):796-817 (2001), Example 5.
+
+    min -x1 - x2 over two quartic constraints and the box [0,3]x[0,4].
+    Known global minimum -5.50801 at (2.3295, 3.1783).
+    """
+    obj = {(1, 0): -1.0, (0, 1): -1.0}
+    g = [
+        {(4, 0): 2.0, (3, 0): -8.0, (2, 0): 8.0, (0, 0): 2.0, (0, 1): -1.0},
+        {(4, 0): 4.0, (3, 0): -32.0, (2, 0): 88.0, (1, 0): -96.0, (0, 0): 36.0,
+         (0, 1): -1.0},
+        {(1, 0): 1.0},
+        {(0, 0): 3.0, (1, 0): -1.0},
+        {(0, 1): 1.0},
+        {(0, 0): 4.0, (0, 1): -1.0},
+    ]
+    return obj, g
+
+
+TRUE_MIN = -5.508013271595  # independently verified, 400-start SLSQP
+
+
+def test_constrained_quartic_hierarchy_tightens_to_the_global_minimum():
+    # The acceptance criterion from gh #218, verbatim: "a finite bound
+    # <= -5.50801, tightening toward it as the order rises." Previously
+    # order 2 returned the trivial box bound -7 and orders 3/4 returned nan.
+    obj, g = _lasserre_ex5()
+    bounds = []
+    for order in (2, 3, 4):
+        r = sos_minimize(obj, inequalities=g, order=order)
+        assert r.success, f"order {order}: status {r.status}"
+        assert np.isfinite(r.lower_bound), f"order {order}: bound is not finite"
+        # Soundness, asserted strictly: the bound is certified, so it must
+        # genuinely lie below the true minimum -- no tolerance slack.
+        assert r.certified, f"order {order}: a boxed problem must certify"
+        assert r.lower_bound <= TRUE_MIN, f"order {order}: {r.lower_bound}"
+        bounds.append(r.lower_bound)
+    # Monotone and genuinely tightening, not stuck at the trivial box bound.
+    assert bounds[0] < bounds[1] < bounds[2], bounds
+    assert abs(bounds[0] + 7.0) < 1e-4, "order 2 is the trivial box bound"
+    assert abs(bounds[2] - TRUE_MIN) < 1e-4, f"order 4 should be exact: {bounds[2]}"
+    assert bounds[0] <= TRUE_MIN and bounds[1] <= TRUE_MIN
+
+
+def test_constrained_quartic_order_four_extracts_the_minimizer():
+    # At order 4 the relaxation is exact, so the global minimizer comes back too.
+    obj, g = _lasserre_ex5()
+    r = sos_minimize(obj, inequalities=g, order=4)
+    assert r.success and r.is_exact
+    assert r.num_minimizers >= 1
+    x = r.minimizers[0]
+    np.testing.assert_allclose(x, [2.3295, 3.1783], atol=1e-3)
+
+
+def test_reported_order_identifies_the_relaxation_that_produced_the_bound():
+    # A bound from a coarser order is still valid, so sos_minimize falls back
+    # rather than discarding one it already proved -- and `order` says which
+    # relaxation the reported bound actually came from.
+    obj, g = _lasserre_ex5()
+    for requested in (2, 3, 4):
+        r = sos_minimize(obj, inequalities=g, order=requested)
+        assert r.order <= requested
+        assert r.lower_bound <= TRUE_MIN
+    # Below the minimum admissible order (the quartics force d >= 2), the
+    # request is raised rather than rejected.
+    r = sos_minimize(obj, inequalities=g, order=1)
+    assert r.success and r.order == 2
+
+
+# --- certification and solver controls (gh #218 caveats) --------------------
+
+
+def test_certified_bound_is_below_the_true_minimum():
+    # A converged SDP reports a value that is accurate but not necessarily a
+    # lower *bound*: the raw order-4 value landed 2.2e-7 ABOVE the true
+    # minimum. The certified value subtracts the SOS identity's measured miss,
+    # so it is valid regardless of how the solve went.
+    obj, g = _lasserre_ex5()
+    r = sos_minimize(obj, inequalities=g, order=4)
+    assert r.certified
+    assert r.lower_bound <= TRUE_MIN, r.lower_bound
+    # Valid, and not uselessly loose.
+    assert r.lower_bound >= TRUE_MIN - 1e-4, r.lower_bound
+
+
+def test_certification_withheld_on_an_unbounded_domain():
+    # Certification needs the feasible set inside a box; without one the
+    # residual cannot be bounded, so the flag must report the truth rather
+    # than the bound silently pretending.
+    r = sos_minimize({(4,): 1.0, (2,): -2.0, (0,): 3.0})
+    assert r.success
+    assert not r.certified
+
+
+def test_square_box_idiom_is_certified():
+    # min -x s.t. 1 - x**2 >= 0  =>  min = -1. The quadratic form is the
+    # idiomatic way to write a box in an SOS model.
+    r = sos_minimize({(1,): -1.0}, inequalities=[{(0,): 1.0, (2,): -1.0}])
+    assert r.success and r.certified
+    assert r.lower_bound <= -1.0 <= r.lower_bound + 1e-6
+
+
+def test_tol_and_max_iter_are_accepted_and_never_cost_validity():
+    # The escape hatch gh #218 asked for. A looser tol buys a weaker bound,
+    # never an invalid one, because certification measures the actual miss.
+    obj, g = _lasserre_ex5()
+    gaps = []
+    for tol in (1e-10, 1e-8, 1e-6):
+        r = sos_minimize(obj, inequalities=g, order=4, tol=tol)
+        assert r.success and r.certified, tol
+        assert r.lower_bound <= TRUE_MIN, (tol, r.lower_bound)
+        gaps.append(TRUE_MIN - r.lower_bound)
+    assert gaps == sorted(gaps), f"looser tol should not tighten the bound: {gaps}"
+    # max_iter is plumbed through and accepted.
+    assert sos_minimize(obj, inequalities=g, order=2, max_iter=500).success
+
+
+@pytest.mark.parametrize(
+    "kwargs, msg",
+    [({"tol": 0.0}, "tol"), ({"tol": -1e-8}, "tol"), ({"max_iter": 0}, "max_iter")],
+)
+def test_invalid_solver_controls_raise(kwargs, msg):
+    obj, g = _lasserre_ex5()
+    with pytest.raises(ValueError, match=msg):
+        sos_minimize(obj, inequalities=g, order=2, **kwargs)

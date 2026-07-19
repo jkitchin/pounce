@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 import pounce
-from pounce.qp import QpSensitivity, ReducedHessian, solve_qp
+from pounce.qp import ActiveSet, QpSensitivity, ReducedHessian, solve_qp
 
 
 def test_top_level_export():
@@ -247,3 +247,98 @@ def _timed(fn):
     t0 = time.perf_counter()
     fn()
     return time.perf_counter() - t0
+
+
+# --- weak activity / non-strict complementarity (gh #219) -------------------
+
+
+def _degenerate_qp(h, **kw):
+    """min ½‖x‖² s.t. x0 + x1 = 1, x0 − 2x1 ≤ h.
+
+    At h = −½ the equality-only optimum (½, ½) hits the inequality exactly,
+    so strict complementarity fails and dx/db is one-sided.
+    """
+    return QpSensitivity(
+        P=np.eye(2),
+        c=[0.0, 0.0],
+        A=[[1.0, 1.0]],
+        b=[1.0],
+        G=[[1.0, -2.0]],
+        h=[h],
+        **kw,
+    )
+
+
+def test_active_set_exports():
+    assert pounce.ActiveSet is ActiveSet
+
+
+def test_active_indices_reports_membership_by_identity():
+    # h = −0.9: the inequality binds strictly (multiplier ~8.9e-2).
+    s = _degenerate_qp(-0.9)
+    assert s.active_indices.inequalities == (0,)
+    assert s.active_indices.bounds == ()
+    # And the count still agrees with what kkt_dim encodes: n + m_eq + n_active.
+    assert s.kkt_dim == 2 + 1 + len(s.active_indices)
+
+
+def test_inactive_constraint_is_not_in_the_active_set():
+    # h = 0.5: slack at the optimum.
+    s = _degenerate_qp(0.5)
+    assert s.active_indices.inequalities == ()
+    assert not s.active_indices
+
+
+def test_weakly_active_detected_regardless_of_tol():
+    # The gh #219 gap. dx/db is two-valued here — (2/3, 1/3) vs (1/2, 1/2),
+    # 33% apart — and which branch parametric_step reports depends on `tol`,
+    # an unrelated setting. kkt_dim flips 4 -> 3 across the sweep; the weak
+    # flag must stay on throughout, since the geometry never changed.
+    seen_dims = set()
+    for tol in (None, 1e-12, 1e-14):
+        s = _degenerate_qp(-0.5, tol=tol)
+        assert s.weakly_active_indices.inequalities == (0,), f"missed at tol={tol}"
+        seen_dims.add(s.kkt_dim)
+    # Guards the premise: if the sweep stopped straddling the active-set
+    # boundary this test would pass while demonstrating nothing.
+    assert seen_dims == {3, 4}, f"sweep no longer straddles the boundary: {seen_dims}"
+
+
+@pytest.mark.parametrize("h", [-0.9, 0.5])
+def test_strictly_complementary_is_not_flagged_weak(h):
+    # False-positive guard: a screen that fired on every active constraint,
+    # or on every small multiplier, would pass the test above and be useless.
+    s = _degenerate_qp(h)
+    assert s.weakly_active_indices.inequalities == ()
+    assert not s.weakly_active_indices
+
+
+def test_weakly_active_matches_the_one_sided_branches():
+    # Ground the flag in the behaviour it warns about: the predictor really
+    # does disagree with the two sides of a finite difference here.
+    s = _degenerate_qp(-0.5, tol=1e-12)
+    assert s.weakly_active_indices.inequalities == (0,)
+    dx = s.parametric_step([0], [1.0])
+
+    # A finite difference at a degenerate optimum needs care: too small a step
+    # and the solve error swamps the perturbation, returning the *average* of
+    # the two branches (~(0.583, 0.417)) — an artifact, not a third branch. Use
+    # a tight solve tol and a step no smaller than 1e-3.
+    delta = 1e-3
+
+    def at(b):
+        return solve_qp(
+            P=np.eye(2), c=[0.0, 0.0], A=[[1.0, 1.0]], b=[b],
+            G=[[1.0, -2.0]], h=[-0.5], tol=1e-12,
+        ).x
+
+    fwd = (at(1.0 + delta) - s.x) / delta
+    bwd = (s.x - at(1.0 - delta)) / delta
+    # The two one-sided derivatives are genuinely different: (½,½) vs (⅔,⅓).
+    np.testing.assert_allclose(fwd, [0.5, 0.5], atol=5e-3)
+    np.testing.assert_allclose(bwd, [2 / 3, 1 / 3], atol=5e-3)
+    # The predictor matches exactly one of them — it is one-sided, and it is
+    # not the average of the two.
+    matches_fwd = np.allclose(dx, fwd, atol=5e-3)
+    matches_bwd = np.allclose(dx, bwd, atol=5e-3)
+    assert matches_fwd != matches_bwd, f"dx={dx} fwd={fwd} bwd={bwd}"

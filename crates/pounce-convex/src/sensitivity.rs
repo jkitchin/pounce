@@ -31,7 +31,7 @@
 //! stable; the induced error in the step is `O(δ)`.
 
 use crate::ipm::QpOptions;
-use crate::qp::{QpProblem, QpSolution, QpStatus, Triplet};
+use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
 use pounce_common::types::{Index, Number};
 use pounce_linalg::symmetric_eigen;
 use pounce_linsol::{Factorization, SparseSymLinearSolverInterface};
@@ -85,7 +85,29 @@ pub struct QpSensitivity {
     active_ineq: Vec<usize>,
     /// Variables whose bound is active (one `eⱼᵀ` row each).
     active_bound_vars: Vec<usize>,
+    /// Inequality rows at which strict complementarity fails (gh #219).
+    weakly_active_ineq: Vec<usize>,
+    /// Variables whose bound is weakly active.
+    weakly_active_bound_vars: Vec<usize>,
 }
+
+/// Relative threshold below which a slack or a multiplier counts as zero for
+/// the weak-activity screen (see [`QpSensitivity::weakly_active_ineq`]).
+///
+/// Deliberately loose, because it is the *conjunction* that carries the signal:
+/// a constraint must be binding in the primal **and** carry a negligible dual
+/// at the same time. Either alone is ordinary — every active constraint has
+/// zero slack, every inactive one has zero multiplier — while both at once is
+/// exactly the non-strict complementarity that makes `dx/db` one-sided.
+///
+/// The magnitude is set by how these quantities actually behave. At a
+/// degenerate optimum both collapse together at roughly `√tol`: on gh #219's
+/// QP the multiplier and slack measure `(3.8e-5, 1.7e-4)` at `tol = 1e-8`,
+/// `(2.0e-7, 9.0e-7)` at `1e-12`, and `(2.9e-8, 1.3e-7)` at `1e-14` — their
+/// ratio pinned near 0.22 across six orders of magnitude. A threshold tight
+/// enough to look precise would simply miss the default-tolerance case, which
+/// is the one users hit.
+const WEAK_ACTIVE_REL: f64 = 1e-3;
 
 impl QpSensitivity {
     /// Build the active-set sensitivity for `sol` (a solution of `prob`).
@@ -126,6 +148,47 @@ impl QpSensitivity {
             .collect();
         let n_active = active_ineq.len() + active_bound_vars.len();
         let dim = n + m_eq + n_active;
+
+        // Weak activity (gh #219): binding in the primal *and* negligible in
+        // the dual, i.e. non-strict complementarity. Classical post-optimal
+        // sensitivity (Fiacco) assumes this never happens; where it does, the
+        // perturbation changes the active set and `dx/db` is a one-sided
+        // derivative with another, equally valid, value on the other side.
+        //
+        // Both tests are relative to the natural scale of their own quantity,
+        // so the screen is invariant to a rescaling of the problem data.
+        let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let dual_scale = inf_norm(&sol.y)
+            .max(inf_norm(&sol.z))
+            .max(inf_norm(&sol.z_lb))
+            .max(inf_norm(&sol.z_ub))
+            .max(1.0);
+        let mut gx = vec![0.0; prob.m_ineq()];
+        prob.g_mul(&sol.x, &mut gx);
+        let primal_scale = inf_norm(&prob.h).max(inf_norm(&gx)).max(1.0);
+        let dual_zero = WEAK_ACTIVE_REL * dual_scale;
+        let primal_zero = WEAK_ACTIVE_REL * primal_scale;
+
+        let weakly_active_ineq: Vec<usize> = (0..prob.m_ineq())
+            .filter(|&i| (prob.h[i] - gx[i]).abs() <= primal_zero && sol.z[i] <= dual_zero)
+            .collect();
+        let x_scale = inf_norm(&sol.x).max(1.0);
+        let bound_zero = WEAK_ACTIVE_REL * x_scale;
+        let weakly_active_bound_vars: Vec<usize> = (0..n)
+            .filter(|&j| {
+                // `lb`/`ub` may be empty (= unbounded), and a "present" bound
+                // is one inside the `BOUND_INF` sentinel band, matching
+                // `QpProblem::has_bounds`.
+                let (lb, ub) = (prob.lb_of(j), prob.ub_of(j));
+                let lb_weak = lb > -BOUND_INF
+                    && (sol.x[j] - lb).abs() <= bound_zero
+                    && sol.z_lb[j] <= dual_zero;
+                let ub_weak = ub < BOUND_INF
+                    && (ub - sol.x[j]).abs() <= bound_zero
+                    && sol.z_ub[j] <= dual_zero;
+                lb_weak || ub_weak
+            })
+            .collect();
 
         // Assemble the lower triangle of the symmetric KKT matrix.
         let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
@@ -187,6 +250,8 @@ impl QpSensitivity {
             prob: prob.clone(),
             active_ineq,
             active_bound_vars,
+            weakly_active_ineq,
+            weakly_active_bound_vars,
         })
     }
 
@@ -259,6 +324,43 @@ impl QpSensitivity {
     /// The active-set KKT dimension `n + m_eq + n_active`.
     pub fn kkt_dim(&self) -> usize {
         self.dim
+    }
+
+    /// Inequality rows (indices into `G`) in the active set.
+    pub fn active_ineq(&self) -> &[usize] {
+        &self.active_ineq
+    }
+
+    /// Variables whose bound is in the active set.
+    pub fn active_bound_vars(&self) -> &[usize] {
+        &self.active_bound_vars
+    }
+
+    /// Inequality rows at which **strict complementarity fails**: binding in
+    /// the primal while carrying a negligible multiplier (gh #219).
+    ///
+    /// This is the precondition check for
+    /// [`parametric_step`](Self::parametric_step). That predictor is exact only
+    /// while the active set is unchanged; at a weakly active constraint the
+    /// perturbation changes it, so `dx/db` is a genuine one-sided derivative
+    /// and the opposite direction has a different — equally correct — value.
+    /// On gh #219's QP the two branches differ by 33%, and which one is
+    /// reported turns on the solver's `tol`.
+    ///
+    /// A non-empty result does not invalidate anything already returned: both
+    /// branches are real derivatives. It means the caller should not assume the
+    /// predictor extrapolates in both directions, and should probe the
+    /// direction it actually cares about. The screen is deliberately
+    /// conservative (see `WEAK_ACTIVE_REL`) — a near-degenerate constraint is
+    /// flagged too, which is the useful behaviour for a diagnostic.
+    pub fn weakly_active_ineq(&self) -> &[usize] {
+        &self.weakly_active_ineq
+    }
+
+    /// Variables whose bound is weakly active — the bound analog of
+    /// [`weakly_active_ineq`](Self::weakly_active_ineq).
+    pub fn weakly_active_bound_vars(&self) -> &[usize] {
+        &self.weakly_active_bound_vars
     }
 
     /// Reduced Hessian of the QP at the optimum: the objective Hessian `P`
@@ -422,6 +524,96 @@ mod tests {
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())
+    }
+
+    /// gh #219's degenerate QP: `min ½‖x‖² s.t. x₀ + x₁ = 1, x₀ − 2x₁ ≤ h`.
+    /// At `h = −½` the equality-only optimum `(½, ½)` hits the inequality
+    /// *exactly*, so strict complementarity fails; other `h` give a strictly
+    /// active (`h = −0.9`) or strictly inactive (`h = 0.5`) constraint.
+    fn weakly_active_qp(h: f64) -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+            c: vec![0.0, 0.0],
+            a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+            b: vec![1.0],
+            g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, -2.0)],
+            h: vec![h],
+            lb: vec![f64::NEG_INFINITY; 2],
+            ub: vec![f64::INFINITY; 2],
+        }
+    }
+
+    #[test]
+    fn weak_activity_is_detected_independently_of_solver_tol() {
+        // The point of the flag (gh #219). At this optimum `dx/db` is
+        // two-valued — (2/3, 1/3) on the minus side, (1/2, 1/2) on the plus
+        // side, 33% apart — and *which* one `parametric_step` reports turns on
+        // `tol`, an otherwise unrelated setting: the multiplier and the slack
+        // both collapse at ~√tol, so `active_tol` slices the pair differently
+        // at different `tol`.
+        //
+        // `kkt_dim` therefore flips 4 → 3 across this sweep while the geometry
+        // does not change at all. The weak-activity flag is the stable signal:
+        // it must fire at every tolerance, including the ones where the
+        // constraint *is* in the active set.
+        let prob = weakly_active_qp(-0.5);
+        let mut saw_in_active_set = false;
+        let mut saw_out_of_active_set = false;
+        for tol in [1e-8, 1e-12, 1e-14] {
+            let opts = QpOptions {
+                tol,
+                ..QpOptions::default()
+            };
+            let sol = solve_qp_ipm(&prob, &opts, backend);
+            assert_eq!(sol.status, QpStatus::Optimal);
+            let sens = QpSensitivity::build(&prob, &sol, &opts, 1e-7, backend).unwrap();
+            assert_eq!(
+                sens.weakly_active_ineq(),
+                &[0],
+                "tol {tol:e}: weak activity missed (kkt_dim {})",
+                sens.kkt_dim()
+            );
+            match sens.active_ineq() {
+                [] => saw_out_of_active_set = true,
+                [0] => saw_in_active_set = true,
+                other => panic!("tol {tol:e}: unexpected active set {other:?}"),
+            }
+        }
+        // Guards the premise: if the sweep stopped straddling the active-set
+        // boundary the test would still pass while no longer testing anything.
+        assert!(
+            saw_in_active_set && saw_out_of_active_set,
+            "sweep no longer straddles the active-set boundary, so this test \
+             no longer demonstrates tol-independence"
+        );
+    }
+
+    #[test]
+    fn strictly_complementary_constraints_are_not_flagged_weak() {
+        // The false-positive guard. A screen that fired on every active
+        // constraint, or on every constraint with a small multiplier, would
+        // pass the test above while being useless.
+        //
+        // `h = −0.9`: the constraint binds with multiplier ~8.9e-2 — strictly
+        // active, `dx/db` two-sided. `h = 0.5`: the constraint is slack at the
+        // optimum — strictly inactive. Neither is degenerate.
+        for (h, expect_active) in [(-0.9, true), (0.5, false)] {
+            let prob = weakly_active_qp(h);
+            let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+            assert_eq!(sol.status, QpStatus::Optimal);
+            let sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+            assert!(
+                sens.weakly_active_ineq().is_empty(),
+                "h = {h}: strictly complementary constraint flagged as weakly active"
+            );
+            assert_eq!(
+                !sens.active_ineq().is_empty(),
+                expect_active,
+                "h = {h}: active set {:?}",
+                sens.active_ineq()
+            );
+        }
     }
 
     /// `min ½‖x‖²  s.t.  x₀ + x₁ = b` (b = 2). The optimum is the projection

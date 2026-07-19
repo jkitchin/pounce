@@ -49,6 +49,7 @@ pub use ipm::{
 pub use qp::{NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet};
 pub use sensitivity::{QpSensitivity, ReducedHessian, SensError};
 pub use sos::{
-    PolyProblem, Polynomial, SosBound, SosSolution, sos_constrained_lower_bound, sos_lower_bound,
-    sos_minimize,
+    PolyProblem, Polynomial, SosBound, SosSolution, sos_constrained_lower_bound,
+    sos_constrained_lower_bound_opts, sos_lower_bound, sos_lower_bound_opts, sos_minimize,
+    sos_minimize_opts, sos_opts,
 };

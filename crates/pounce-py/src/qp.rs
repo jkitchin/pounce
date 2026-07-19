@@ -684,4 +684,28 @@ impl PyQpSensitivity {
     fn kkt_dim(&self) -> usize {
         self.inner.kkt_dim()
     }
+
+    /// Inequality rows (indices into `G`) in the active set.
+    #[getter]
+    fn active_inequalities(&self) -> Vec<usize> {
+        self.inner.active_ineq().to_vec()
+    }
+
+    /// Variables whose bound is in the active set.
+    #[getter]
+    fn active_bounds(&self) -> Vec<usize> {
+        self.inner.active_bound_vars().to_vec()
+    }
+
+    /// Inequality rows at which strict complementarity fails.
+    #[getter]
+    fn weakly_active_inequalities(&self) -> Vec<usize> {
+        self.inner.weakly_active_ineq().to_vec()
+    }
+
+    /// Variables whose bound is weakly active.
+    #[getter]
+    fn weakly_active_bounds(&self) -> Vec<usize> {
+        self.inner.weakly_active_bound_vars().to_vec()
+    }
 }

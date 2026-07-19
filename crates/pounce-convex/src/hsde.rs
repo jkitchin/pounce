@@ -121,6 +121,38 @@ const GONDZIO_GAMMA: f64 = 0.1;
 const GONDZIO_BETA_LO: f64 = 0.1;
 const GONDZIO_BETA_HI: f64 = 10.0;
 
+/// Centering fallback for a collapsing step (gh #218).
+///
+/// Mehrotra's centering parameter `σ = (μ_aff/μ)³` is inferred from how far the
+/// *affine* (σ = 0) direction could travel. On a degenerate face that inference
+/// inverts: the affine direction looks excellent while actually pointing almost
+/// straight out of the cone, so σ comes back near zero — almost no centering —
+/// exactly when centering is the only thing that helps. The step length then
+/// collapses geometrically and the solve freezes with `μ` still far from zero.
+///
+/// Observed on gh #218's order-4 moment SDP: `σ` pinned at 0.0218 while the
+/// step fell 4.0e-1 → 2.1e-2 → 9.7e-4 → 4.8e-5 → … → 1e-281, throttled by the
+/// PSD slack block alone (`z`, `τ`, `κ` all stayed healthy), with `μ` stuck at
+/// 2.6e-3 and the residuals frozen at 4.2e-4. Nothing was near convergence; the
+/// iterate had simply run into the boundary and could not get off it.
+///
+/// So when the corrector's step comes back below `CENTERING_MIN_STEP`, redo it
+/// with a larger σ — a more centered target pulls the direction back inside the
+/// cone, where a usable step exists. Each retry costs one back-solve through
+/// the factorization already computed. The ladder is bounded by
+/// `CENTERING_MAX_TRIES`, and the last (most centered) attempt is kept if none
+/// clears the bar, since a near-pure centering direction is the one most likely
+/// to admit a step.
+///
+/// This is the PSD-cone counterpart of what the Gondzio correctors below do on
+/// the orthant — they lengthen the step by re-centering — and it is deliberately
+/// step-length-triggered so that a healthy iteration never pays for it.
+const CENTERING_MIN_STEP: f64 = 1e-2;
+const CENTERING_MAX_TRIES: usize = 3;
+const CENTERING_FACTOR: f64 = 10.0;
+const CENTERING_SIGMA_FLOOR: f64 = 0.1;
+const CENTERING_SIGMA_MAX: f64 = 0.9;
+
 /// HSDE infeasibility-ray discriminant: is the homogenizing pair `(τ, κ)` on
 /// the Farkas/recession ray (`κ ≫ τ`), as opposed to converging to a solution
 /// (`τ → τ* > 0`) or merely degenerating on a feasible-but-ill-scaled problem
@@ -652,8 +684,24 @@ where
                 Ok(res) => res,
                 Err(_) => break, // factored stays false → breakdown below
             };
-            if res_p > DYN_REG_RES_TOL && budget {
-                delta_c = (delta_c.max(DELTA_C_INIT) * DELTA_C_FACTOR).min(DELTA_C_MAX);
+            // An un-refinable solve means the *scaling* has gone ill-conditioned,
+            // so bump the `(z,z)` dynamic regularization — and deliberately NOT
+            // `δ_c`. `δ_c` regularizes the equality block; escalating it here
+            // treats a cone-conditioning symptom as an equality-Jacobian rank
+            // defect, and it is actively harmful. The KKT is inherently
+            // ill-conditioned in the μ→0 endgame (the NT scaling's condition
+            // number blows up by design), so this branch fires there on healthy
+            // solves and used to ratchet `δ_c` all the way to `DELTA_C_MAX`
+            // = 1e-1. That biases the equality residual by ~`δ_c·‖dy‖`, which
+            // floors `pres` permanently.
+            //
+            // gh #218 order 3: at the iteration before the escalation the solve
+            // stood at `pres` 8.6e-9 ✓, `dres` 1.2e-10 ✓, `gap` 1.7e-8 — one
+            // step from converging. The escalation pushed `pres` to 2.7e-8 and
+            // it never recovered, ending `OptimalInaccurate` instead of
+            // `Optimal`. Inertia was correct at every single try throughout, so
+            // nothing here was a rank defect.
+            if res_p > DYN_REG_RES_TOL && tries < INERTIA_MAX_TRIES && reg_eff < DYN_REG_MAX {
                 reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
                 tries += 1;
                 continue;
@@ -717,55 +765,81 @@ where
             dot_aff += (s[i] + alpha_aff * ds_aff[i]) * (z[i] + alpha_aff * dz_aff[i]);
         }
         let mu_aff = dot_aff / (degree as f64 + 1.0);
-        let sigma = if mu > 0.0 { (mu_aff / mu).powi(3) } else { 0.0 };
-        let sigma_mu = sigma * mu;
+        let mut sigma = if mu > 0.0 { (mu_aff / mu).powi(3) } else { 0.0 };
 
         // === Corrector (centered target + second-order term) ===
-        cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
-        cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
-        build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
-        if solve_refined(
-            &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
-        )
-        .is_err()
-        {
+        // Recomputed under an escalating σ when the resulting step collapses —
+        // see `CENTERING_MIN_STEP`. Each retry is one extra back-solve through
+        // the factorization already in hand, and a healthy iteration (the
+        // overwhelming majority) clears the threshold on the first pass and
+        // never enters the ladder.
+        let mut dtau = 0.0;
+        let mut dkappa = 0.0;
+        let mut alpha = 0.0;
+        let mut centering_tries = 0usize;
+        let mut solve_failed = false;
+        loop {
+            let sigma_mu = sigma * mu;
+            cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
+            cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
+            build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
+            if solve_refined(
+                &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
+                &mut ir_d,
+            )
+            .is_err()
+            {
+                solve_failed = true;
+                break;
+            }
+            split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
+            let gtq = dot(&prob.c, &dx)
+                + two_over_tau * dot(&px_vec, &dx)
+                + dot(&prob.b, &dy)
+                + dot(&prob.h, &dz);
+            // τκ corrector residual: τκ + Δτ_aff·Δκ_aff (target σμ).
+            let r_tk = tau * kappa + dtau_aff * dkappa_aff;
+            dtau = (-rho_tau - gtq - (sigma_mu - r_tk) / tau) / denom;
+            // Combine: dw = q + Δτ·p.
+            for i in 0..n {
+                dx[i] += dtau * p_x[i];
+            }
+            for i in 0..m_eq {
+                dy[i] += dtau * p_y[i];
+            }
+            for i in 0..m_ineq {
+                dz[i] += dtau * p_z[i];
+            }
+            dkappa = (sigma_mu - r_tk - kappa * dtau) / tau;
+            cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
+
+            // Single fraction-to-boundary step (HSDE is primal/dual-symmetric).
+            // A *separate* primal/dual step is unsound here: τ couples both
+            // residuals (ρ_x carries `cτ` + `Px`, ρ_y carries `bτ`), so stepping
+            // the primal block (x, s, τ) and dual block (y, z, κ) by different
+            // amounts leaves a dual-infeasibility residual ∝ (α_p − α_d) — on the
+            // degenerate NETLIB GEN family (α_p ≫ α_d) that blows ρ_x up from
+            // ~1e-8 to ~5e-2. The symmetric step keeps the embedding's clean
+            // (1−α) residual decrease.
+            alpha = ray_step(tau, dtau, opts.tau).min(ray_step(kappa, dkappa, opts.tau));
+            if m_ineq > 0 {
+                alpha = alpha
+                    .min(cone.max_step(&s, &ds, opts.tau))
+                    .min(cone.max_step(&z, &dz, opts.tau));
+            }
+
+            if alpha >= CENTERING_MIN_STEP
+                || centering_tries >= CENTERING_MAX_TRIES
+                || sigma >= CENTERING_SIGMA_MAX
+            {
+                break;
+            }
+            centering_tries += 1;
+            sigma = (sigma * CENTERING_FACTOR).clamp(CENTERING_SIGMA_FLOOR, CENTERING_SIGMA_MAX);
+        }
+        if solve_failed {
             status = QpStatus::NumericalFailure;
             break;
-        }
-        split_step(&rhs, n, m_eq, m_ineq, &mut dx, &mut dy, &mut dz);
-        let gtq = dot(&prob.c, &dx)
-            + two_over_tau * dot(&px_vec, &dx)
-            + dot(&prob.b, &dy)
-            + dot(&prob.h, &dz);
-        // τκ corrector residual: τκ + Δτ_aff·Δκ_aff (target σμ).
-        let r_tk = tau * kappa + dtau_aff * dkappa_aff;
-        let mut dtau = (-rho_tau - gtq - (sigma_mu - r_tk) / tau) / denom;
-        // Combine: dw = q + Δτ·p.
-        for i in 0..n {
-            dx[i] += dtau * p_x[i];
-        }
-        for i in 0..m_eq {
-            dy[i] += dtau * p_y[i];
-        }
-        for i in 0..m_ineq {
-            dz[i] += dtau * p_z[i];
-        }
-        let mut dkappa = (sigma_mu - r_tk - kappa * dtau) / tau;
-        cone.recover_ds(&s, &z, &r_c, &dz, &mut ds);
-
-        // Single fraction-to-boundary step (HSDE is primal/dual-symmetric).
-        // A *separate* primal/dual step is unsound here: τ couples both
-        // residuals (ρ_x carries `cτ` + `Px`, ρ_y carries `bτ`), so stepping
-        // the primal block (x, s, τ) and dual block (y, z, κ) by different
-        // amounts leaves a dual-infeasibility residual ∝ (α_p − α_d) — on the
-        // degenerate NETLIB GEN family (α_p ≫ α_d) that blows ρ_x up from
-        // ~1e-8 to ~5e-2. The symmetric step keeps the embedding's clean
-        // (1−α) residual decrease.
-        let mut alpha = ray_step(tau, dtau, opts.tau).min(ray_step(kappa, dkappa, opts.tau));
-        if m_ineq > 0 {
-            alpha = alpha
-                .min(cone.max_step(&s, &ds, opts.tau))
-                .min(cone.max_step(&z, &dz, opts.tau));
         }
 
         // === Gondzio multiple centrality correctors ===

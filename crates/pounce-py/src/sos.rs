@@ -8,7 +8,9 @@
 //! handled in `python/pounce/sos.py`.
 
 use numpy::IntoPyArray;
-use pounce_convex::{PolyProblem, Polynomial, QpStatus, sos_minimize as core_sos_minimize};
+use pounce_convex::{
+    PolyProblem, Polynomial, QpStatus, sos_minimize_opts as core_sos_minimize, sos_opts,
+};
 use pounce_feral::FeralSolverInterface;
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pyo3::exceptions::PyValueError;
@@ -45,11 +47,12 @@ fn poly(n_vars: usize, terms: Vec<(Vec<usize>, f64)>, what: &str) -> PyResult<Po
 }
 
 /// Globally minimize a polynomial via the SOS/Lasserre relaxation. Returns a
-/// dict with `lower_bound`, `status`, `is_exact`, `num_minimizers`, and
+/// dict with `lower_bound`, `status`, `is_exact`, `num_minimizers`,
 /// `minimizers` (a list of length-`n_vars` arrays — the global optimizers,
-/// populated when the moment matrix is flat).
+/// populated when the moment matrix is flat), `certified`, and `order`.
 #[pyfunction]
-#[pyo3(signature = (n_vars, objective, inequalities=vec![], equalities=vec![], order=None))]
+#[pyo3(signature = (n_vars, objective, inequalities=vec![], equalities=vec![], order=None, tol=None, max_iter=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn sos_minimize<'py>(
     py: Python<'py>,
     n_vars: usize,
@@ -57,6 +60,8 @@ pub fn sos_minimize<'py>(
     inequalities: Vec<Vec<(Vec<usize>, f64)>>,
     equalities: Vec<Vec<(Vec<usize>, f64)>>,
     order: Option<usize>,
+    tol: Option<f64>,
+    max_iter: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let mut prob = PolyProblem::new(poly(n_vars, objective, "objective")?);
     prob.inequalities = inequalities
@@ -68,13 +73,32 @@ pub fn sos_minimize<'py>(
         .map(|t| poly(n_vars, t, "equality"))
         .collect::<PyResult<_>>()?;
 
-    let sol = py.allow_threads(|| core_sos_minimize(&prob, order, backend));
+    let mut opts = sos_opts();
+    if let Some(t) = tol {
+        if !t.is_finite() || t <= 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "sos_minimize: `tol` must be positive",
+            ));
+        }
+        opts.tol = t;
+    }
+    if let Some(m) = max_iter {
+        if m == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "sos_minimize: `max_iter` must be at least 1",
+            ));
+        }
+        opts.max_iter = m;
+    }
+    let sol = py.allow_threads(|| core_sos_minimize(&prob, order, &opts, backend));
 
     let d = PyDict::new_bound(py);
     d.set_item("lower_bound", sol.lower_bound)?;
     d.set_item("status", status_str(sol.status))?;
     d.set_item("is_exact", sol.is_exact)?;
     d.set_item("num_minimizers", sol.num_minimizers)?;
+    d.set_item("order", sol.order)?;
+    d.set_item("certified", sol.certified)?;
     let mins = PyList::empty_bound(py);
     for m in sol.minimizers {
         mins.append(m.into_pyarray_bound(py))?;

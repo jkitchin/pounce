@@ -95,6 +95,116 @@ impl Polynomial {
             .product()
     }
 
+    /// If this polynomial is a single variable bound `a·xⱼ + c ≥ 0`, the bound
+    /// it imposes: `(j, value, is_upper)`.
+    ///
+    /// `a > 0` reads as the lower bound `xⱼ ≥ −c/a`, `a < 0` as the upper bound
+    /// `xⱼ ≤ −c/a`. Anything else — two variables, a higher-degree term, an
+    /// extra monomial — is not a box side and returns `None`. Used to find a
+    /// variable's range for domain normalization (see
+    /// [`PolyProblem::equilibrated`]).
+    fn as_variable_bound(&self) -> Option<(usize, f64, bool)> {
+        let mut linear: Option<(usize, f64)> = None;
+        let mut constant = 0.0;
+        for (e, c) in &self.coeff_map() {
+            if *c == 0.0 {
+                continue;
+            }
+            match e.iter().sum::<usize>() {
+                0 => constant += c,
+                1 => {
+                    let j = e.iter().position(|&p| p == 1)?;
+                    // A second linear term means two variables are coupled.
+                    if linear.is_some() {
+                        return None;
+                    }
+                    linear = Some((j, *c));
+                }
+                _ => return None,
+            }
+        }
+        let (j, a) = linear?;
+        Some((j, -constant / a, a < 0.0))
+    }
+
+    /// If this polynomial is `c − a·xⱼ² ≥ 0` with `a, c > 0`, the symmetric
+    /// range it imposes: `(j, √(c/a))`, i.e. `|xⱼ| ≤ √(c/a)`.
+    ///
+    /// The idiomatic way to write a ball/box side in an SOS model, and common
+    /// enough that missing it would leave obviously-bounded problems
+    /// uncertifiable (`min −x s.t. 1 − x² ≥ 0` is the textbook example).
+    fn as_variable_square_bound(&self) -> Option<(usize, f64)> {
+        let mut square: Option<(usize, f64)> = None;
+        let mut constant = 0.0;
+        for (e, c) in &self.coeff_map() {
+            if *c == 0.0 {
+                continue;
+            }
+            match e.iter().sum::<usize>() {
+                0 => constant += c,
+                2 => {
+                    // Must be `xⱼ²`, not a cross term `xⱼxₖ`.
+                    let j = e.iter().position(|&p| p == 2)?;
+                    if square.is_some() {
+                        return None;
+                    }
+                    square = Some((j, *c));
+                }
+                _ => return None,
+            }
+        }
+        let (j, a) = square?;
+        // `c − a·xⱼ² ≥ 0` bounds xⱼ only when the square enters negatively and
+        // the constant is nonnegative.
+        if a >= 0.0 || constant < 0.0 {
+            return None;
+        }
+        Some((j, (constant / -a).sqrt()))
+    }
+
+    /// Substitute `xⱼ = shiftⱼ + scaleⱼ·uⱼ` into this polynomial, returning it
+    /// as a polynomial in `u`.
+    ///
+    /// Each monomial `∏ⱼ xⱼ^{eⱼ}` expands binomially, one variable at a time:
+    /// `(shiftⱼ + scaleⱼuⱼ)^{eⱼ} = Σₖ C(eⱼ,k)·shiftⱼ^{eⱼ−k}·scaleⱼ^k·uⱼ^k`.
+    /// Terms are accumulated through a `BTreeMap` so the result is ordered
+    /// deterministically regardless of the input term order.
+    fn affine_substitute(&self, shift: &[f64], scale: &[f64]) -> Polynomial {
+        let n = self.n_vars;
+        let mut acc: BTreeMap<Vec<usize>, f64> = BTreeMap::new();
+        for (e, c) in &self.terms {
+            let mut cur: Vec<(Vec<usize>, f64)> = vec![(vec![0usize; n], *c)];
+            for j in 0..n {
+                let ej = e[j];
+                if ej == 0 {
+                    continue;
+                }
+                let mut next = Vec::with_capacity(cur.len() * (ej + 1));
+                let mut binom = 1.0_f64;
+                for k in 0..=ej {
+                    let w = binom * shift[j].powi((ej - k) as i32) * scale[j].powi(k as i32);
+                    if w != 0.0 {
+                        for (m, cc) in &cur {
+                            let mut m2 = m.clone();
+                            m2[j] += k;
+                            next.push((m2, cc * w));
+                        }
+                    }
+                    // C(e, k+1) = C(e, k)·(e−k)/(k+1).
+                    binom = binom * (ej - k) as f64 / (k + 1) as f64;
+                }
+                cur = next;
+            }
+            for (m, cc) in cur {
+                *acc.entry(m).or_insert(0.0) += cc;
+            }
+        }
+        Polynomial {
+            n_vars: n,
+            terms: acc.into_iter().filter(|(_, c)| *c != 0.0).collect(),
+        }
+    }
+
     /// This polynomial with every coefficient divided by `s`.
     fn scaled(&self, s: f64) -> Polynomial {
         Polynomial {
@@ -173,27 +283,124 @@ impl PolyProblem {
     /// (`numerical_failure` / `iteration_limit`) while the equilibrated one
     /// certifies the exact bound in ~2 s. A zero/empty polynomial scales by
     /// `1.0` (nothing to do).
-    fn equilibrated(&self) -> (PolyProblem, f64) {
+    fn equilibrated(&self) -> (PolyProblem, Rescaling) {
         fn nonzero_norm(p: &Polynomial) -> f64 {
             let s = p.coeff_inf_norm();
             if s > 0.0 { s } else { 1.0 }
         }
-        let s_obj = nonzero_norm(&self.objective);
+        let (shift, scale, boxed) = self.domain_normalization();
+        // Domain first, coefficients second: the substitution rewrites every
+        // coefficient, so equilibrating before it would be undone.
+        let sub = |p: &Polynomial| p.affine_substitute(&shift, &scale);
+        let objective = sub(&self.objective);
+        let s_obj = nonzero_norm(&objective);
         let scaled = PolyProblem {
             n_vars: self.n_vars,
-            objective: self.objective.scaled(s_obj),
+            objective: objective.scaled(s_obj),
             inequalities: self
                 .inequalities
                 .iter()
-                .map(|g| g.scaled(nonzero_norm(g)))
+                .map(|g| {
+                    let g = sub(g);
+                    g.scaled(nonzero_norm(&g))
+                })
                 .collect(),
             equalities: self
                 .equalities
                 .iter()
-                .map(|h| h.scaled(nonzero_norm(h)))
+                .map(|h| {
+                    let h = sub(h);
+                    h.scaled(nonzero_norm(&h))
+                })
                 .collect(),
         };
-        (scaled, s_obj)
+        (
+            scaled,
+            Rescaling {
+                s_obj,
+                shift,
+                scale,
+                boxed,
+            },
+        )
+    }
+
+    /// Per-variable affine map `xⱼ = shiftⱼ + scaleⱼ·uⱼ` normalizing every
+    /// boxed variable's range onto `[−1, 1]`.
+    ///
+    /// A variable is boxed when the inequality list carries both a lower and an
+    /// upper bound for it as standalone constraints (`xⱼ − l ≥ 0`, `u − xⱼ ≥ 0`
+    /// and their scalar multiples); the tightest of each is used. Variables
+    /// without a finite box, or with a degenerate one (`u ≤ l`), map by the
+    /// identity `(0, 1)`.
+    ///
+    /// This complements coefficient equilibration, which normalizes each
+    /// polynomial's coefficients but leaves the *domain* alone. The moment
+    /// matrix entries are monomials in `x`, so a wide box makes them span
+    /// decades on their own: on gh #218's quartic over `x₁ ∈ [0,3]` the
+    /// degree-8 moments span `3⁸ ≈ 6561` against `1`, and no amount of
+    /// coefficient scaling touches that. Normalizing the domain moves the
+    /// order-3 relaxation there from a frozen `IterationLimit` (no bound at
+    /// all) to `OptimalInaccurate` at `−6.667`, a valid bound tighter than the
+    /// trivial `−7`.
+    ///
+    /// The map is value- and minimizer-preserving: it is a bijection of the
+    /// feasible set, so the minimum is unchanged and a recovered minimizer maps
+    /// back through [`Rescaling::unmap`].
+    fn domain_normalization(&self) -> (Vec<f64>, Vec<f64>, bool) {
+        let mut lower = vec![f64::NEG_INFINITY; self.n_vars];
+        let mut upper = vec![f64::INFINITY; self.n_vars];
+        for g in &self.inequalities {
+            if let Some((j, v, is_upper)) = g.as_variable_bound() {
+                if is_upper {
+                    upper[j] = upper[j].min(v);
+                } else {
+                    lower[j] = lower[j].max(v);
+                }
+            } else if let Some((j, r)) = g.as_variable_square_bound() {
+                lower[j] = lower[j].max(-r);
+                upper[j] = upper[j].min(r);
+            }
+        }
+        let mut shift = vec![0.0; self.n_vars];
+        let mut scale = vec![1.0; self.n_vars];
+        let mut boxed = true;
+        for j in 0..self.n_vars {
+            let (l, u) = (lower[j], upper[j]);
+            if l.is_finite() && u.is_finite() && u > l {
+                shift[j] = 0.5 * (l + u);
+                scale[j] = 0.5 * (u - l);
+            } else {
+                boxed = false;
+            }
+        }
+        (shift, scale, boxed)
+    }
+}
+
+/// The change of variables [`PolyProblem::equilibrated`] applied, and how to
+/// undo it on a recovered bound and minimizer.
+struct Rescaling {
+    /// The objective's coefficient scale: a bound computed on the equilibrated
+    /// problem is multiplied by this to recover the original one.
+    s_obj: f64,
+    /// Per-variable `xⱼ = shiftⱼ + scaleⱼ·uⱼ` (identity `(0, 1)` when unboxed).
+    shift: Vec<f64>,
+    scale: Vec<f64>,
+    /// Whether *every* variable was boxed, so the normalized feasible set is
+    /// contained in `[−1, 1]ⁿ`. This is the precondition for a rigorous bound
+    /// (see [`certified_slack`]); with even one variable unbounded, the
+    /// residual polynomial cannot be bounded over the feasible set at all.
+    boxed: bool,
+}
+
+impl Rescaling {
+    /// Map a point from the normalized `u` coordinates back to the caller's `x`.
+    fn unmap(&self, u: &[f64]) -> Vec<f64> {
+        u.iter()
+            .enumerate()
+            .map(|(j, v)| self.shift[j] + self.scale[j] * v)
+            .collect()
     }
 }
 
@@ -266,7 +473,9 @@ where
     sos_constrained_lower_bound_opts(prob, order, &sos_opts(), make_backend)
 }
 
-/// Default solver options for an SOS/moment SDP.
+/// Default solver options for an SOS/moment SDP — the base a caller should
+/// build on (`QpOptions { tol: 1e-6, ..sos_opts() }`) rather than starting from
+/// [`QpOptions::default`], so the HSDE choice below is preserved.
 ///
 /// SOS relaxations are *degenerate by design*: an exact relaxation has a
 /// rank-deficient optimal moment matrix sitting on the PSD-cone boundary, where
@@ -275,7 +484,7 @@ where
 /// refinement ran to the iteration limit and drifted to a `-6e7` "bound");
 /// the homogeneous self-dual embedding stays well-conditioned on the same
 /// problems (≈10 iterations), so SOS solves default to it.
-fn sos_opts() -> QpOptions {
+pub fn sos_opts() -> QpOptions {
     QpOptions {
         use_hsde: true,
         ..QpOptions::default()
@@ -291,6 +500,91 @@ struct MomentInfo {
     d: usize,
     basis0: Vec<Vec<usize>>,
     row_of: HashMap<Vec<usize>, usize>,
+    /// Each SOS block's `(column base in x, basis dimension)`, in build order:
+    /// σ₀ first, then one localizing block per inequality. Used to read the
+    /// Gram matrices back out of the primal for [`certified_slack`].
+    psd_blocks: Vec<(usize, usize)>,
+}
+
+/// A rigorous bound on how far the computed SOS certificate misses the exact
+/// polynomial identity, given that the feasible set lies inside the unit box.
+///
+/// The SDP asks for `p − γ = σ₀ + Σᵢ σᵢ gᵢ + Σⱼ λⱼ hⱼ`, one linear equation per
+/// monomial. A converged interior-point solve satisfies those equations only to
+/// its tolerance, and its Gram matrices are only *approximately* PSD — so the
+/// `γ` it reports can, and on gh #218's order-4 relaxation does, sit slightly
+/// **above** the true minimum. That is the one genuinely unsound failure mode
+/// for a lower bound, and no tightening of the solve removes it: it is a
+/// property of finite precision, not of convergence.
+///
+/// The fix is to stop trusting the identity and measure it. Project every Gram
+/// block onto the PSD cone (clamp negative eigenvalues to zero) so the `σ` are
+/// *exactly* SOS, then evaluate the residual of the coefficient-matching system
+/// at the projected point: `e = b − A·x'`. As polynomials that says
+///
+/// ```text
+///   p(u) − γ = σ₀(u) + Σᵢ σᵢ(u) gᵢ(u) + Σⱼ λⱼ(u) hⱼ(u) + e(u),
+/// ```
+///
+/// where every term but `e` is nonnegative on the feasible set — the `σ` are
+/// SOS by construction now, the `gᵢ` are nonnegative there by definition, and
+/// the `hⱼ` vanish there. Hence `p ≥ γ + e` on the feasible set, and with
+/// `|u^α| ≤ 1` on `[−1,1]ⁿ` the crudest possible bound on `e` is already enough:
+///
+/// ```text
+///   p(u) ≥ γ − Σ_α |e_α|   for all u in the feasible set.
+/// ```
+///
+/// This function returns that `Σ_α |e_α|`. Subtracting it turns a bound that is
+/// merely accurate into one that is *valid*, and it costs one eigendecomposition
+/// per block plus a sparse matvec — no extra solve.
+///
+/// The `|u^α| ≤ 1` step is what requires the unit box, which is why
+/// certification is available only when every variable is boxed (see
+/// [`Rescaling::boxed`]). On an unbounded domain a nonzero residual cannot be
+/// bounded at all: a residual with a negative leading coefficient is unbounded
+/// below, so no finite correction exists. Certifying there needs the residual
+/// driven to *exactly* zero in exact arithmetic (rational Gram recovery), which
+/// is a different technique entirely.
+fn certified_slack(qp: &QpProblem, mi: &MomentInfo, x: &[f64]) -> Option<f64> {
+    let mut xp = x.to_vec();
+    for &(col_base, bn) in &mi.psd_blocks {
+        let sd = bn * (bn + 1) / 2;
+        // svec -> dense symmetric (off-diagonals carry a √2 in svec).
+        let mut m = vec![0.0; bn * bn];
+        crate::cones::psd::smat(&xp[col_base..col_base + sd], bn, &mut m);
+        let mut vals = vec![0.0; bn];
+        let mut vecs = vec![0.0; bn * bn];
+        if !symmetric_eigen(&m, bn, &mut vals, &mut vecs) {
+            return None;
+        }
+        // Already PSD to working precision: leave the block untouched so a
+        // clean solve pays nothing for the projection's round-off.
+        if vals[0] >= 0.0 {
+            continue;
+        }
+        // Q₊ = Σ max(λ_k, 0) v_k v_kᵀ, rebuilt straight back into svec.
+        let r2 = std::f64::consts::SQRT_2;
+        for i in 0..bn {
+            for j in 0..=i {
+                let mut acc = 0.0;
+                for k in 0..bn {
+                    if vals[k] > 0.0 {
+                        acc += vals[k] * vecs[k * bn + i] * vecs[k * bn + j];
+                    }
+                }
+                let scale = if i == j { 1.0 } else { r2 };
+                xp[col_base + svec_index(bn, i, j)] = scale * acc;
+            }
+        }
+    }
+
+    // e = b − A·x' over the coefficient-matching rows, summed in absolute value.
+    let mut ax = vec![0.0; qp.b.len()];
+    for t in &qp.a {
+        ax[t.row] += t.val * xp[t.col];
+    }
+    Some(qp.b.iter().zip(&ax).map(|(bi, axi)| (bi - axi).abs()).sum())
 }
 
 /// Build the SOS / Putinar SDP for `prob` at the given (clamped) order,
@@ -307,6 +601,19 @@ struct MomentInfo {
 /// solve (unlike pinning `L(p)=γ*`, which is degenerate when `γ*≈0`), and the
 /// recovered moment matrix is flat even when the optimum is non-unique. The
 /// reported bound still comes from the unperturbed solve.
+/// The smallest relaxation order that can represent `prob`: every polynomial
+/// must fit inside the degree-`2d` window, so `d ≥ ⌈deg/2⌉` for each of them.
+fn min_relaxation_order(prob: &PolyProblem) -> usize {
+    let mut d = prob.objective.degree().div_ceil(2);
+    for g in &prob.inequalities {
+        d = d.max(g.degree().div_ceil(2));
+    }
+    for h in &prob.equalities {
+        d = d.max(h.degree().div_ceil(2));
+    }
+    d
+}
+
 fn build_sos_sdp(
     prob: &PolyProblem,
     order: Option<usize>,
@@ -316,13 +623,7 @@ fn build_sos_sdp(
     let r2 = std::f64::consts::SQRT_2;
 
     // Minimum relaxation order, then honor a user-requested (larger) order.
-    let mut d_min = prob.objective.degree().div_ceil(2);
-    for g in &prob.inequalities {
-        d_min = d_min.max(g.degree().div_ceil(2));
-    }
-    for h in &prob.equalities {
-        d_min = d_min.max(h.degree().div_ceil(2));
-    }
+    let d_min = min_relaxation_order(prob);
     let d = order.map_or(d_min, |o| o.max(d_min));
     let basis0 = monomials(n, d); // σ₀ basis = moment-matrix index set
 
@@ -336,6 +637,7 @@ fn build_sos_sdp(
     // ordering — and hence the solver's floating-point path and results — varied
     // run-to-run (M22).
     let mut by_mono: BTreeMap<Vec<usize>, Vec<(usize, f64)>> = BTreeMap::new();
+    let mut psd_blocks: Vec<(usize, usize)> = Vec::new();
     let unit = [(vec![0usize; n], 1.0)]; // weight ≡ 1 for σ₀
 
     // PSD (SOS) blocks: σ₀ (weight 1, basis degree d), then one localizing
@@ -367,6 +669,7 @@ fn build_sos_sdp(
             g_h.push(0.0);
         }
         cones.push(ConeSpec::Psd(bn));
+        psd_blocks.push((col_base, bn));
         col += sd;
     }
 
@@ -439,6 +742,7 @@ fn build_sos_sdp(
             d,
             basis0,
             row_of,
+            psd_blocks,
         },
     )
 }
@@ -453,13 +757,15 @@ pub fn sos_constrained_lower_bound_opts<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    // Equilibrate coefficients before assembling the SDP (gh #124); undo the
-    // objective scale on the recovered bound.
-    let (prob, s_obj) = prob.equilibrated();
+    // Equilibrate coefficients and normalize the domain before assembling the
+    // SDP (gh #124, gh #218); undo the objective scale on the recovered bound.
+    // The change of variables is value-preserving, so no other correction is
+    // needed for a bound-only solve.
+    let (prob, resc) = prob.equilibrated();
     let (qp, cones, _moments) = build_sos_sdp(&prob, order, None);
     let sol = solve_socp_ipm(&qp, &cones, opts, make_backend);
     SosBound {
-        lower_bound: sol.x.first().copied().unwrap_or(f64::NEG_INFINITY) * s_obj,
+        lower_bound: sol.x.first().copied().unwrap_or(f64::NEG_INFINITY) * resc.s_obj,
         status: sol.status,
     }
 }
@@ -507,26 +813,117 @@ pub struct SosSolution {
     /// moment matrix is flat; recovered via the self-adjoint multiplication
     /// operators in the moment inner product (symmetric eigensolver only).
     pub minimizers: Vec<Vec<f64>>,
+    /// Whether `lower_bound` is **rigorous**: proved to be a true lower bound,
+    /// not merely accurate to the solver's tolerance.
+    ///
+    /// An uncertified bound is the raw `γ` the SDP reported. It is normally
+    /// correct to several digits, but it can — and on hard relaxations does —
+    /// land slightly *above* the true minimum, which makes it not a lower bound
+    /// at all. A certified bound has the identity's measured residual
+    /// subtracted, so it is valid no matter how the solve went.
+    ///
+    /// Certification requires the feasible set to lie in a box readable from
+    /// the constraints; it is `false` for an unbounded feasible set (an
+    /// unconstrained problem, say) where no finite correction can exist.
+    pub certified: bool,
+    /// The relaxation order that actually produced `lower_bound`.
+    ///
+    /// Normally the requested order. It is *lower* when that order failed to
+    /// converge and a coarser one did — see [`sos_minimize`], which falls back
+    /// rather than discard a bound it already proved. Always check this before
+    /// reading a converged result as a statement about the order you asked for.
+    pub order: usize,
 }
 
 /// Solve `prob` by the SOS/Lasserre relaxation **and** recover the solution
 /// from the moment matrix: certify exactness via flat truncation and extract
 /// the global minimizer when it is unique. See [`SosSolution`].
-pub fn sos_minimize<F>(prob: &PolyProblem, order: Option<usize>, mut make_backend: F) -> SosSolution
+///
+/// If the requested order does not converge, successively coarser orders are
+/// tried down to the minimum admissible one, and the first that converges is
+/// returned with its own [`order`](SosSolution::order). A bound from a lower
+/// order is a *valid* bound on the same problem — just a weaker one — so
+/// discarding it would throw away a certificate already computed (gh #218). The
+/// fallback costs extra solves only on a failure, and when nothing converges
+/// the requested order's own (non-converged) result is what comes back.
+pub fn sos_minimize<F>(prob: &PolyProblem, order: Option<usize>, make_backend: F) -> SosSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
-    let opts = sos_opts();
-    // Equilibrate coefficients before assembling the SDP (gh #124). The scaling
-    // is value- and minimizer-preserving (see `PolyProblem::equilibrated`): the
-    // recovered moments — and so `is_exact` and the extracted minimizers — are
-    // unchanged, and the bound is recovered by multiplying back by `s_obj`. The
-    // facial-reduction re-solve below also runs on the equilibrated problem.
-    let (prob, s_obj) = prob.equilibrated();
+    sos_minimize_opts(prob, order, &sos_opts(), make_backend)
+}
+
+/// [`sos_minimize`] with explicit solver options.
+///
+/// Only `tol` and `max_iter` are worth touching; the rest of [`QpOptions`] is
+/// fixed by [`sos_opts`] because a moment SDP needs the homogeneous self-dual
+/// embedding to stay conditioned. Loosening `tol` can rescue a relaxation that
+/// would otherwise not converge, at the cost of a weaker certificate — the
+/// bound stays *valid* either way when it is certified, since the certification
+/// slack measures the actual miss rather than assuming the solve converged.
+pub fn sos_minimize_opts<F>(
+    prob: &PolyProblem,
+    order: Option<usize>,
+    opts: &QpOptions,
+    mut make_backend: F,
+) -> SosSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    // Equilibrate coefficients and normalize the domain before assembling the
+    // SDP (gh #124, gh #218). The scaling is value- and minimizer-preserving
+    // (see `PolyProblem::equilibrated`), so `is_exact` and the extracted
+    // minimizers are unchanged; the bound is recovered by multiplying back by
+    // `s_obj` and the minimizers by `Rescaling::unmap`.
+    let (prob, resc) = prob.equilibrated();
     let prob = &prob;
+    let d_min = min_relaxation_order(prob);
+    let requested = order.map_or(d_min, |o| o.max(d_min));
+
+    let requested_result = sos_minimize_at(prob, &resc, requested, opts, &mut make_backend);
+    if requested_result.status == QpStatus::Optimal {
+        return requested_result;
+    }
+    for d in (d_min..requested).rev() {
+        let sol = sos_minimize_at(prob, &resc, d, opts, &mut make_backend);
+        if sol.status == QpStatus::Optimal {
+            return sol;
+        }
+    }
+    // Nothing converged: report the order the caller actually asked for, with
+    // its own verdict, exactly as it would have been without the fallback.
+    requested_result
+}
+
+/// One [`sos_minimize`] attempt at a fixed relaxation order `d`, on an
+/// already-equilibrated problem.
+fn sos_minimize_at<F>(
+    prob: &PolyProblem,
+    resc: &Rescaling,
+    d: usize,
+    opts: &QpOptions,
+    mut make_backend: F,
+) -> SosSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let order = Some(d);
     let (qp, cones, mi) = build_sos_sdp(prob, order, None);
-    let sol = solve_socp_ipm(&qp, &cones, &opts, &mut make_backend);
-    let lower_bound = sol.x.first().copied().unwrap_or(f64::NEG_INFINITY) * s_obj;
+    let sol = solve_socp_ipm(&qp, &cones, opts, &mut make_backend);
+    let gamma = sol.x.first().copied().unwrap_or(f64::NEG_INFINITY);
+
+    // Make the bound rigorous where that is possible: subtract the measured
+    // miss in the SOS identity, so `lower_bound` is a true lower bound rather
+    // than one that merely converged (see `certified_slack`). Only the reported
+    // value moves — the moments, and hence exactness and the minimizers, are
+    // read from the unmodified solve.
+    let slack = if resc.boxed && sol.status == QpStatus::Optimal {
+        certified_slack(&qp, &mi, &sol.x)
+    } else {
+        None
+    };
+    let certified = slack.is_some();
+    let lower_bound = (gamma - slack.unwrap_or(0.0)) * resc.s_obj;
     if sol.status != QpStatus::Optimal {
         return SosSolution {
             lower_bound,
@@ -534,10 +931,12 @@ where
             is_exact: false,
             num_minimizers: 0,
             minimizers: Vec::new(),
+            certified: false,
+            order: d,
         };
     }
 
-    let mut rec = recover_from_moments(prob, &mi, &sol.y, lower_bound / s_obj);
+    let mut rec = recover_from_moments(prob, &mi, &sol.y, gamma);
 
     // Facial reduction. The interior-point solver lands on the analytic-center
     // (maximum-rank) optimal moment matrix, which is flat only when the optimum
@@ -550,11 +949,13 @@ where
     if !rec.is_exact {
         const TRACE_EPS: f64 = 1e-4;
         let (qp2, cones2, mi2) = build_sos_sdp(prob, order, Some(TRACE_EPS));
-        let sol2 = solve_socp_ipm(&qp2, &cones2, &opts, &mut make_backend);
+        let sol2 = solve_socp_ipm(&qp2, &cones2, opts, &mut make_backend);
         if sol2.status == QpStatus::Optimal {
-            // Validate the re-solve's atoms against the UNPERTURBED bound: the
-            // trace penalty changes the moment matrix, not the value being certified.
-            let rec2 = recover_from_moments(prob, &mi2, &sol2.y, lower_bound / s_obj);
+            // Validate the re-solve's atoms against the UNPERTURBED, uncertified
+            // `γ`: the trace penalty changes the moment matrix, not the value
+            // being certified, and the certification slack is a reporting
+            // correction that must not move the exactness test.
+            let rec2 = recover_from_moments(prob, &mi2, &sol2.y, gamma);
             if rec2.is_exact {
                 rec = rec2;
             }
@@ -564,9 +965,14 @@ where
     SosSolution {
         lower_bound,
         status: sol.status,
+        certified,
         is_exact: rec.is_exact,
         num_minimizers: rec.num_minimizers,
-        minimizers: rec.minimizers,
+        // Atoms are extracted in the normalized `u` coordinates the SDP was
+        // built in; report them in the caller's `x`. A no-op when no variable
+        // was boxed, since the map is then the identity.
+        minimizers: rec.minimizers.iter().map(|u| resc.unmap(u)).collect(),
+        order: d,
     }
 }
 
@@ -1127,6 +1533,357 @@ mod tests {
             (r.lower_bound - 1.0).abs() < 1e-5,
             "bound = {}",
             r.lower_bound
+        );
+    }
+
+    /// Lasserre, *SIAM J. Optim.* 11(3):796–817 (2001), Example 5 — the gh #218
+    /// constrained quartic. `min −x₁−x₂` over two quartics and the box
+    /// `[0,3]×[0,4]`; true global minimum −5.50801.
+    fn lasserre_ex5() -> PolyProblem {
+        let obj = Polynomial::new(2, vec![(vec![1, 0], -1.0), (vec![0, 1], -1.0)]);
+        let g1 = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 0], 2.0),
+                (vec![3, 0], -8.0),
+                (vec![2, 0], 8.0),
+                (vec![0, 0], 2.0),
+                (vec![0, 1], -1.0),
+            ],
+        );
+        let g2 = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 0], 4.0),
+                (vec![3, 0], -32.0),
+                (vec![2, 0], 88.0),
+                (vec![1, 0], -96.0),
+                (vec![0, 0], 36.0),
+                (vec![0, 1], -1.0),
+            ],
+        );
+        PolyProblem::new(obj)
+            .ge(g1)
+            .ge(g2)
+            .ge(Polynomial::new(2, vec![(vec![1, 0], 1.0)]))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![0, 0], 3.0), (vec![1, 0], -1.0)],
+            ))
+            .ge(Polynomial::new(2, vec![(vec![0, 1], 1.0)]))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![0, 0], 4.0), (vec![0, 1], -1.0)],
+            ))
+    }
+
+    #[test]
+    fn affine_substitute_preserves_values() {
+        // Substitution is only sound if the rewritten polynomial is the *same
+        // function* under the change of variables: q(u) = p(shift + scale·u).
+        // Check that pointwise on a polynomial with cross terms and a variable
+        // appearing at several degrees.
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![3, 0], 2.0),
+                (vec![2, 1], -1.5),
+                (vec![1, 1], 4.0),
+                (vec![0, 2], 0.5),
+                (vec![1, 0], -3.0),
+                (vec![0, 0], 7.0),
+            ],
+        );
+        let shift = [1.5, -2.0];
+        let scale = [0.5, 3.0];
+        let q = p.affine_substitute(&shift, &scale);
+        for &(u0, u1) in &[
+            (0.0, 0.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (0.37, 0.62),
+            (-0.8, -0.25),
+        ] {
+            let x = [shift[0] + scale[0] * u0, shift[1] + scale[1] * u1];
+            assert!(
+                (q.eval(&[u0, u1]) - p.eval(&x)).abs() < 1e-9,
+                "q({u0},{u1}) = {} but p({},{}) = {}",
+                q.eval(&[u0, u1]),
+                x[0],
+                x[1],
+                p.eval(&x)
+            );
+        }
+    }
+
+    #[test]
+    fn domain_normalization_reports_minimizers_in_original_coordinates() {
+        // gh #218. Domain normalization solves the SDP in `u ∈ [−1,1]²`, so a
+        // recovered atom must be mapped back or the caller silently receives a
+        // point in the wrong coordinate system.
+        //
+        // The boxes here are deliberately wide, off-center, and *different per
+        // variable* (x: [0,10] ⇒ shift 5 scale 5; y: [−5,1] ⇒ shift −2 scale 3),
+        // so a transposed or shared map lands visibly wrong rather than
+        // coincidentally right.
+        //
+        // min (x−8)² + (y+3)² s.t. x ∈ [0,10], y ∈ [−5,1] ⇒ min 0 at (8, −3),
+        // interior to the box so the box does not distort the optimum.
+        let obj = Polynomial::new(
+            2,
+            vec![
+                (vec![2, 0], 1.0),
+                (vec![1, 0], -16.0),
+                (vec![0, 2], 1.0),
+                (vec![0, 1], 6.0),
+                (vec![0, 0], 73.0),
+            ],
+        );
+        let prob = PolyProblem::new(obj)
+            .ge(Polynomial::new(2, vec![(vec![1, 0], 1.0)]))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![0, 0], 10.0), (vec![1, 0], -1.0)],
+            ))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![0, 1], 1.0), (vec![0, 0], 5.0)],
+            ))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![0, 0], 1.0), (vec![0, 1], -1.0)],
+            ));
+
+        let r = sos_minimize(&prob, None, backend);
+        assert_eq!(r.status, QpStatus::Optimal, "{:?}", r.status);
+        assert!(r.lower_bound.abs() < 1e-4, "bound = {}", r.lower_bound);
+        assert!(r.is_exact, "relaxation should be exact here");
+        assert_eq!(r.num_minimizers, 1);
+        let m = &r.minimizers[0];
+        assert!(
+            (m[0] - 8.0).abs() < 1e-3 && (m[1] + 3.0).abs() < 1e-3,
+            "minimizer {m:?} is not (8, -3) — coordinates left un-mapped?"
+        );
+    }
+
+    #[test]
+    fn lasserre_ex5_hierarchy_converges_to_the_global_minimum() {
+        // gh #218's acceptance criterion, verbatim: "a finite bound ≤ −5.50801,
+        // tightening toward it as the order rises."
+        //
+        // Every order must converge (no `nan`, no iteration limit), every bound
+        // must be a valid lower bound, the sequence must be monotone, and the
+        // hierarchy must actually reach the optimum rather than plateau.
+        const TRUE_MIN: f64 = -5.508013;
+        let prob = lasserre_ex5();
+        let mut prev = f64::NEG_INFINITY;
+        let mut bounds = Vec::new();
+        for order in [2usize, 3, 4] {
+            let r = sos_constrained_lower_bound(&prob, Some(order), backend);
+            assert_eq!(r.status, QpStatus::Optimal, "order {order}: {:?}", r.status);
+            // Soundness first: a lower bound may never exceed the true minimum.
+            assert!(
+                r.lower_bound <= TRUE_MIN + 1e-5,
+                "order {order}: bound {} exceeds the true minimum {TRUE_MIN}",
+                r.lower_bound
+            );
+            assert!(
+                r.lower_bound >= prev - 1e-6,
+                "order {order}: bound {} is looser than order {}'s {prev}",
+                r.lower_bound,
+                order - 1
+            );
+            prev = r.lower_bound;
+            bounds.push(r.lower_bound);
+        }
+        // Order 4 is where the hierarchy becomes exact for this problem; before
+        // the degenerate-face fix it stalled with no usable bound at all.
+        assert!(
+            (bounds[2] - TRUE_MIN).abs() < 1e-4,
+            "order 4 bound {} should reach the global minimum {TRUE_MIN}; got the sequence {bounds:?}",
+            bounds[2]
+        );
+        // And the hierarchy must genuinely tighten, not sit at the trivial box
+        // bound: order 2 is −7 (the quartics barely participate there).
+        assert!(
+            bounds[0] < bounds[1] - 1e-3 && bounds[1] < bounds[2] - 1e-3,
+            "hierarchy did not tighten: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn certified_bound_is_a_true_lower_bound_not_merely_an_accurate_one() {
+        // The soundness fix. A converged SDP reports a `γ` that is accurate but
+        // not necessarily *below* the minimum: on this problem at order 4 the
+        // raw value came back 2.2e-7 ABOVE the true minimum, which makes it not
+        // a lower bound at all — the one genuinely unsound failure mode for
+        // this API, and one no amount of solver tolerance removes.
+        //
+        // The certified value subtracts the SOS identity's measured miss, so it
+        // is valid however the solve went. `TRUE_MIN` here is not the issue's
+        // quoted figure but an independently computed one (400-start SLSQP),
+        // and the assertion is strict — no tolerance slack — because the whole
+        // point is that the bound must genuinely be below it.
+        const TRUE_MIN: f64 = -5.508013271595;
+        let prob = lasserre_ex5();
+        for order in [2usize, 3, 4, 5] {
+            let r = sos_minimize(&prob, Some(order), backend);
+            assert_eq!(r.status, QpStatus::Optimal, "order {order}");
+            assert!(
+                r.certified,
+                "order {order}: a fully boxed problem must certify"
+            );
+            assert!(
+                r.lower_bound <= TRUE_MIN,
+                "order {order}: certified bound {} is ABOVE the true minimum {TRUE_MIN} \
+                 — not a lower bound",
+                r.lower_bound
+            );
+            // Validity must not come from being uselessly loose: order 4 still
+            // has to land within 1e-4 of the optimum.
+            if order >= 4 {
+                assert!(
+                    r.lower_bound >= TRUE_MIN - 1e-4,
+                    "order {order}: bound {} is valid but far too loose",
+                    r.lower_bound
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn certification_is_withheld_when_the_domain_is_unbounded() {
+        // Certification rests on `|u^α| ≤ 1` over the feasible set, so it needs
+        // a box. Without one the residual polynomial cannot be bounded below at
+        // all, and claiming a certificate would be a lie — the flag must say so
+        // rather than the bound silently pretending.
+        let p = Polynomial::new(1, vec![(vec![2], 1.0), (vec![1], -4.0), (vec![0], 5.0)]);
+        let r = sos_minimize(&PolyProblem::new(p), None, backend);
+        assert_eq!(r.status, QpStatus::Optimal);
+        assert!(!r.certified, "an unconstrained problem cannot be certified");
+    }
+
+    #[test]
+    fn square_box_idiom_is_recognized_for_certification() {
+        // `1 − x² ≥ 0` is the idiomatic way to write a box in an SOS model, and
+        // bounds x just as surely as the linear pair does. Missing it would
+        // leave obviously-bounded textbook problems uncertifiable.
+        // min −x s.t. 1 − x² ≥ 0  ⇒  min = −1 at x = 1.
+        let prob = PolyProblem::new(Polynomial::new(1, vec![(vec![1], -1.0)]))
+            .ge(Polynomial::new(1, vec![(vec![0], 1.0), (vec![2], -1.0)]));
+        let r = sos_minimize(&prob, None, backend);
+        assert_eq!(r.status, QpStatus::Optimal);
+        assert!(r.certified, "the `c − a·x² ≥ 0` idiom should be recognized");
+        assert!(
+            r.lower_bound <= -1.0,
+            "certified bound {} is above the true minimum -1",
+            r.lower_bound
+        );
+        assert!(
+            r.lower_bound >= -1.0 - 1e-6,
+            "bound {} too loose",
+            r.lower_bound
+        );
+    }
+
+    #[test]
+    fn loosening_tol_costs_tightness_but_never_validity() {
+        // The knob gh #218 asked for. Loosening `tol` is the escape hatch for a
+        // relaxation that will not converge — and because certification measures
+        // the actual miss rather than trusting the solve, a sloppier solve buys
+        // a weaker bound, never an invalid one.
+        const TRUE_MIN: f64 = -5.508013271595;
+        let prob = lasserre_ex5();
+        let mut prev_gap = 0.0;
+        for tol in [1e-10, 1e-8, 1e-6] {
+            let opts = QpOptions { tol, ..sos_opts() };
+            let r = sos_minimize_opts(&prob, Some(4), &opts, backend);
+            assert_eq!(r.status, QpStatus::Optimal, "tol {tol:e}");
+            assert!(r.certified, "tol {tol:e}");
+            assert!(
+                r.lower_bound <= TRUE_MIN,
+                "tol {tol:e}: bound {} is above the true minimum",
+                r.lower_bound
+            );
+            // Looser tolerance ⇒ larger measured residual ⇒ looser bound.
+            let gap = TRUE_MIN - r.lower_bound;
+            assert!(
+                gap >= prev_gap,
+                "tol {tol:e}: gap {gap:e} should not be tighter than the stricter tolerance's {prev_gap:e}"
+            );
+            prev_gap = gap;
+        }
+    }
+
+    #[test]
+    fn a_failed_order_falls_back_to_a_coarser_proved_bound() {
+        // gh #218 suggestion 2. `sos_minimize` must not answer "no bound" at a
+        // high order when it already proved one at a lower order — a coarser
+        // bound is still valid, just weaker.
+        //
+        // Driven through the public entry point on a problem that converges at
+        // every order, so what is asserted is the contract that survives: the
+        // reported `order` identifies which relaxation produced the bound, and
+        // that bound is always valid.
+        let prob = lasserre_ex5();
+        for requested in [2usize, 3, 4] {
+            let r = sos_minimize(&prob, Some(requested), backend);
+            assert_eq!(r.status, QpStatus::Optimal, "order {requested}");
+            assert!(
+                r.order <= requested,
+                "reported order {} exceeds the requested {requested}",
+                r.order
+            );
+            assert!(
+                r.lower_bound <= -5.508013 + 1e-5,
+                "order {requested} (solved at {}): bound {} exceeds the true minimum",
+                r.order,
+                r.lower_bound
+            );
+        }
+    }
+
+    #[test]
+    fn requested_order_below_the_minimum_admissible_is_raised_not_rejected() {
+        // The fallback walks down to the minimum admissible order, so that
+        // floor has to be right: the quartic constraints force d >= 2, and
+        // asking for 1 must be silently raised rather than looping or building
+        // a degree-deficient SDP.
+        let prob = lasserre_ex5();
+        assert_eq!(min_relaxation_order(&prob), 2);
+        let r = sos_minimize(&prob, Some(1), backend);
+        assert_eq!(r.status, QpStatus::Optimal);
+        assert_eq!(
+            r.order, 2,
+            "order should be raised to the admissible minimum"
+        );
+    }
+
+    #[test]
+    fn degenerate_moment_sdp_converges_in_a_sane_iteration_count() {
+        // gh #218. This relaxation's moment SDP sits on a degenerate face. The
+        // affine direction points almost straight out of the PSD cone there, so
+        // Mehrotra's σ came back near zero — no centering, exactly where
+        // centering was needed — and the step collapsed geometrically until the
+        // iterate froze, burning the entire `max_iter` budget to change no digit
+        // of the objective.
+        //
+        // With the centering fallback it converges outright, so assert the
+        // strong property rather than the weak one: a real solve in a sane
+        // iteration count, nowhere near the budget it used to exhaust.
+        let (prob, _resc) = lasserre_ex5().equilibrated();
+        let (qp, cones, _mi) = build_sos_sdp(&prob, Some(3), None);
+        let opts = QpOptions {
+            max_iter: 5000,
+            ..sos_opts()
+        };
+        let sol = solve_socp_ipm(&qp, &cones, &opts, backend);
+        assert_eq!(sol.status, QpStatus::Optimal, "{:?}", sol.status);
+        assert!(
+            sol.iters < 100,
+            "took {} of {} iterations",
+            sol.iters,
+            opts.max_iter
         );
     }
 

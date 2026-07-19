@@ -36,6 +36,7 @@ from ._critical import (
     CriticalPoint, CriticalPointResult, Connection, ReactionNetwork,
 )
 from .qp import (
+    ActiveSet,
     QpResult,
     QpFactorization,
     QpSensitivity,
@@ -82,6 +83,7 @@ __all__ = [
     "project_to_feasible",
     "race_starts",
     # Convex QP / SOCP (the same solvers also live under ``pounce.qp``)
+    "ActiveSet",
     "QpResult",
     "QpFactorization",
     "QpSensitivity",

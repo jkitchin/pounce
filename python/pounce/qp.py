@@ -39,13 +39,14 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
 from . import _pounce
 
 __all__ = [
+    "ActiveSet",
     "QpResult",
     "QpFactorization",
     "QpSensitivity",
@@ -176,6 +177,31 @@ class ReducedHessian:
     def is_positive_definite(self) -> bool:
         """Whether every eigenvalue is positive (strict second-order min)."""
         return self.n_dof == 0 or bool(self.eigenvalues[0] > 0.0)
+
+
+@dataclass(frozen=True)
+class ActiveSet:
+    """Which constraints of a QP are active at the optimum.
+
+    The two index spaces are distinct and are kept separate deliberately:
+    ``inequalities`` indexes rows of ``G``, ``bounds`` indexes *variables*.
+
+    Attributes
+    ----------
+    inequalities:
+        Row indices of ``G`` whose constraint is active.
+    bounds:
+        Indices of variables whose lower or upper bound is active.
+    """
+
+    inequalities: Tuple[int, ...]
+    bounds: Tuple[int, ...]
+
+    def __len__(self) -> int:
+        return len(self.inequalities) + len(self.bounds)
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
 
 
 def _coo(mat, n_cols: int, what: str):
@@ -775,8 +801,65 @@ class QpSensitivity:
 
     @property
     def kkt_dim(self) -> int:
-        """Active-set KKT dimension ``n + m_eq + n_active``."""
+        """Active-set KKT dimension ``n + m_eq + n_active``.
+
+        Since ``n_active = kkt_dim − n − m_eq``, a change in this value across
+        a parameter sweep signals that the active set changed — and so that the
+        :meth:`parametric_step` predictor's precondition was crossed somewhere
+        in the sweep. :attr:`active_indices` reports the same thing by identity
+        rather than by count, and :attr:`weakly_active_indices` catches the
+        harder case where the count does not move at all.
+        """
         return int(self._inner.kkt_dim)
+
+    @property
+    def active_indices(self) -> ActiveSet:
+        """Which constraints are in the active set at the optimum.
+
+        The active set is read from the dual certificate, using the
+        ``active_tol`` passed to the constructor.
+        """
+        return ActiveSet(
+            inequalities=tuple(self._inner.active_inequalities),
+            bounds=tuple(self._inner.active_bounds),
+        )
+
+    @property
+    def weakly_active_indices(self) -> ActiveSet:
+        """Constraints at which **strict complementarity fails**.
+
+        A weakly active constraint is binding in the primal while carrying a
+        negligible multiplier. Classical post-optimal sensitivity (Fiacco)
+        assumes this does not happen; where it does, the perturbation changes
+        the active set and :meth:`parametric_step` returns a genuine *one-sided*
+        derivative — the other direction has a different, equally correct value.
+
+        Nothing returned by :meth:`parametric_step` is wrong when this is
+        non-empty; both branches are real derivatives. What it means is that the
+        predictor should not be assumed to extrapolate in both directions. Probe
+        the direction you actually care about.
+
+        This is the check :attr:`kkt_dim` cannot provide. On the QP below the
+        two branches of ``dx/db`` differ by 33%, and which one is reported turns
+        on the solver's ``tol`` — an unrelated setting. ``kkt_dim`` flips 4 → 3
+        across that change while this flag stays on throughout.
+
+        Example
+        -------
+        >>> import numpy as np
+        >>> from pounce.qp import QpSensitivity
+        >>> # min ½‖x‖² s.t. x0 + x1 = 1, x0 − 2x1 ≤ −½.
+        >>> # The equality-only optimum (½, ½) hits the inequality exactly.
+        >>> s = QpSensitivity(P=np.eye(2), c=[0.0, 0.0],
+        ...                   A=[[1.0, 1.0]], b=[1.0],
+        ...                   G=[[1.0, -2.0]], h=[-0.5])
+        >>> s.weakly_active_indices.inequalities
+        (0,)
+        """
+        return ActiveSet(
+            inequalities=tuple(self._inner.weakly_active_inequalities),
+            bounds=tuple(self._inner.weakly_active_bounds),
+        )
 
     def parametric_step(self, pin_constraint_indices, deltas) -> np.ndarray:
         """First-order primal step ``dx ≈ x*(b + Δb) − x*(b)``.
@@ -787,6 +870,11 @@ class QpSensitivity:
         the perturbed solution (exact to first order while the active set is
         unchanged). The factorization is reused, so a continuation sweep
         costs one back-substitution per query.
+
+        The "while the active set is unchanged" precondition is checkable:
+        :attr:`weakly_active_indices` reports where it fails at this optimum,
+        which is where ``dx`` is a one-sided derivative rather than the
+        derivative. See that property for what to do about it.
         """
         pins = [int(i) for i in pin_constraint_indices]
         ds = [float(d) for d in deltas]

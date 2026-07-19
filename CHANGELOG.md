@@ -9,6 +9,138 @@ changes.
 
 ## [Unreleased]
 
+### Added — weak-activity detection for QP sensitivity (#219)
+
+- **`QpSensitivity` can now report whether its own precondition holds.** The
+  first-order predictor `parametric_step` is exact only while the active set is
+  unchanged, but nothing on the object let a caller check that. Two new
+  properties expose what the object already knew: `active_indices` — which
+  inequality rows and variable bounds are in the active set, by identity rather
+  than the count implied by `kkt_dim` — and `weakly_active_indices`, the
+  constraints at which **strict complementarity fails**. Both return an
+  `ActiveSet` (`.inequalities` indexes rows of `G`, `.bounds` indexes
+  variables), also exported at the package root.
+- A weakly active constraint is binding in the primal while carrying a
+  negligible multiplier. Classical post-optimal sensitivity (Fiacco) assumes
+  this away; where it happens the perturbation changes the active set, so
+  `dx/db` is a genuine *one-sided* derivative and the other direction has a
+  different, equally valid value. Nothing previously returned was wrong — both
+  branches are real derivatives — but a caller could not tell the situation
+  apart from an ordinary one.
+- The screen is deliberately tolerance-invariant, which `kkt_dim` is not. On the
+  reported QP the two branches of `dx/db` are 33% apart and which one is
+  reported turns on the solver's `tol`, an unrelated setting; `kkt_dim` flips
+  4 → 3 across that sweep while the geometry never changes. The new flag stays
+  on throughout, because it tests the multiplier and the slack *together* —
+  at a degenerate optimum both collapse at ~`√tol`, while strict
+  complementarity keeps one of them bounded away from zero.
+
+### Fixed — the Lasserre/SOS hierarchy now converges on constrained programs (#218)
+
+- **`sos_minimize` returns a real bound where it used to return `nan`.** On the
+  reported benchmark (Lasserre, *SIAM J. Optim.* 11(3):796–817, Example 5) the
+  hierarchy now tightens to the global optimum instead of stalling:
+
+  | order | before | after |
+  |---|---|---|
+  | 2 | `optimal` `−7.000` (trivial box bound) | `optimal` `−7.000` |
+  | 3 | `iteration_limit` `nan` | `optimal` `−6.667` |
+  | 4 | `iteration_limit` `nan` | `optimal` `−5.5080139` (certified), **exact**, minimizer `(2.3295, 3.1785)` |
+
+  True global minimum `−5.5080132716` at `(2.3295, 3.1783)`, verified
+  independently here by a 400-start SLSQP sweep. Order 4 is certified exact by
+  flat truncation, so the minimizer comes back with the bound, and the reported
+  value is a *rigorous* lower bound (see below) rather than merely an accurate
+  one.
+
+- **Root cause: Mehrotra's centering parameter inverts on a degenerate face.**
+  `σ = (μ_aff/μ)³` infers centering from how far the affine direction could
+  travel. On a degenerate face that direction looks excellent while pointing
+  almost straight out of the cone, so `σ` collapses toward zero — nearly no
+  centering — exactly where centering is the only thing that helps. Order 4 of
+  the reported problem pinned `σ` at 0.0218 while the step fell
+  `4.0e-1 → 2.1e-2 → 9.7e-4 → … → 1e-281`, throttled by the PSD slack block
+  alone, with `μ` frozen at 2.6e-3 and residuals at 4.2e-4 — nowhere near
+  converged, simply stuck on the boundary. The corrector is now recomputed under
+  an escalating `σ` when its step collapses, each retry one extra back-solve
+  through the factorization already in hand. This is the PSD-cone counterpart of
+  what the Gondzio correctors do on the orthant, where they are confined because
+  a PSD block's complementarity product needs Jordan-algebra machinery.
+
+  The same fix carries the **NETLIB GEN family** (`gen`, `gen1`, `gen4`) and
+  `pilot87` from `Maximum_Iterations_Exceeded` to `Solved_To_Acceptable_Level`.
+
+- **Regularization no longer ratchets on a conditioning symptom.** When
+  iterative refinement could not reach its tolerance, the driver escalated both
+  the `(z,z)` dynamic regularization *and* `δ_c`, the equality-block
+  regularization — treating a cone-conditioning symptom as an
+  equality-Jacobian rank defect. The KKT is inherently ill-conditioned in the
+  `μ→0` endgame (the NT scaling's condition number blows up by design), so this
+  fired there on healthy solves and drove `δ_c` to its `1e-1` ceiling, biasing
+  the equality residual by `~δ_c·‖dy‖` and flooring `pres` permanently. Order 3
+  of the reported problem stood at `pres` 8.6e-9 ✓, `dres` 1.2e-10 ✓, `gap`
+  1.7e-8 — one step from converging — when the escalation pushed `pres` to
+  2.7e-8, where it stayed. Inertia was correct at every try throughout, so no
+  rank defect was ever present. Only the `(z,z)` regularization escalates on
+  this signal now.
+
+- **The bound is now certified, not merely converged.** A converged SDP reports
+  a `γ` that is *accurate* but need not be a lower **bound**: on the reported
+  problem at order 4 the raw value came back `2.2e-7` **above** the true
+  minimum, which is the one genuinely unsound failure mode for this API and one
+  no solver tolerance removes. `sos_minimize` now measures the miss instead of
+  trusting the solve — it projects each Gram block onto the PSD cone, evaluates
+  the residual `e` of the coefficient-matching system there, and reports
+  `γ − Σ_α|e_α|`. Since every other term of the Putinar identity is nonnegative
+  on the feasible set and `|u^α| ≤ 1` on the normalized box, that value is a
+  true lower bound however the solve went. Order 4 moves from `−5.508013056`
+  (invalid) to `−5.508013930` (valid, and within 1e-6 of the optimum). Costs one
+  eigendecomposition per block — no extra solve.
+
+  A new `certified` flag (Rust `SosSolution::certified`, Python
+  `SosResult.certified`) reports whether this held. It requires the feasible set
+  to lie in a box readable off the constraints — either `x ≥ l` / `x ≤ u` pairs
+  or the `c − a·x² ≥ 0` idiom — and is `false` on an unbounded domain, where no
+  finite correction exists (a residual with a negative leading coefficient is
+  unbounded below). Adding explicit box constraints upgrades such a problem.
+
+- **`tol` and `max_iter` are exposed** on `sos_minimize` (Python) and via
+  `sos_minimize_opts` / the now-public `sos_opts` (Rust) — the escape hatch the
+  report asked for, for a relaxation that will not converge. Loosening `tol`
+  buys a weaker bound, never an invalid one: certification measures the actual
+  residual rather than assuming convergence, so validity is preserved across
+  the whole range.
+
+- **A coarser bound is no longer discarded.** If the requested order does not
+  converge, `sos_minimize` falls back through successively coarser orders and
+  reports the first that does, via a new `order` field on the result (Rust
+  `SosSolution::order`, Python `SosResult.order`) identifying which relaxation
+  produced the bound. A lower-order bound is a valid bound on the same problem,
+  so returning nothing in its place threw away a certificate already computed.
+
+- **`PolyProblem::equilibrated` now normalizes the domain, not just the
+  coefficients.** When box constraints pin a variable's range it is mapped onto
+  `[−1, 1]` before the SDP is assembled. Coefficient equilibration (#124) left
+  the domain alone, so a wide box made the moment matrix span decades by itself
+  — over `x₁ ∈ [0,3]` the degree-8 moments span `3⁸ ≈ 6561` against 1, which no
+  coefficient scaling touches. The change of variables is value- and
+  minimizer-preserving, and recovered minimizers are mapped back to the caller's
+  coordinates.
+
+- Verified against the committed benchmark baselines: **371 NETLIB LPs** (4
+  improvements above, no regressions — the three objective deltas are all on
+  runs whose status is unchanged and non-converged or infeasible, where the
+  objective is not a meaningful output) and **138 Maros–Mészáros QPs**
+  (byte-identical statuses and objectives). The changed driver serves the
+  symmetric cones only — exponential/power route to the separate non-symmetric
+  driver, and the CBLIB tier is bit-identical to an unmodified tree — so SOC and
+  PSD are covered by a new randomized differential suite
+  (`tests/conic_hsde_vs_direct.rs`) that checks the HSDE driver against the
+  untouched direct driver over **318 generated instances** with planted Slater
+  points and compact feasible sets: no disagreement on any optimal value, no
+  instance solved by the direct driver that HSDE failed, and 36 that only HSDE
+  solved.
+
 ### Added — thread-scoped iteration capture from Rust (pounce-rs)
 
 - **A Rust consumer embedding POUNCE can now record a solve's iteration

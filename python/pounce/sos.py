@@ -91,6 +91,27 @@ class SosResult:
     minimizers:
         The extracted global minimizers, each a length-``n_vars`` array.
         Populated when ``is_exact``.
+    certified:
+        Whether ``lower_bound`` is **rigorous** — proved to be a true lower
+        bound, not merely accurate to the solver's tolerance. An uncertified
+        bound is the raw value the SDP reported; it is normally correct to
+        several digits but can land slightly *above* the true minimum, which
+        would make it not a lower bound at all. A certified bound has the
+        measured miss in the SOS identity subtracted, so it is valid however
+        the solve went.
+
+        Certification needs the feasible set to lie in a box readable off the
+        constraints (``x >= l`` / ``x <= u`` pairs, or the ``c - a*x**2 >= 0``
+        idiom). It is ``False`` on an unbounded feasible set — an
+        unconstrained problem, say — where no finite correction exists. Adding
+        explicit box constraints you know contain the minimizer upgrades such
+        a problem to a certified bound.
+    order:
+        The relaxation order that produced ``lower_bound``. Normally the order
+        requested, but *lower* when that order failed to converge and a coarser
+        one did — a coarser bound is still a valid bound, so it is reported
+        rather than discarded. Check this before reading a converged result as
+        a statement about the order you asked for.
     """
 
     lower_bound: float
@@ -98,6 +119,8 @@ class SosResult:
     is_exact: bool
     num_minimizers: int
     minimizers: list
+    certified: bool
+    order: int
 
     @property
     def success(self) -> bool:
@@ -135,6 +158,8 @@ def sos_minimize(
     equalities: Sequence = (),
     n_vars: Optional[int] = None,
     order: Optional[int] = None,
+    tol: Optional[float] = None,
+    max_iter: Optional[int] = None,
 ) -> SosResult:
     """Globally minimize ``objective`` subject to ``gᵢ ≥ 0`` (``inequalities``)
     and ``hⱼ = 0`` (``equalities``) via the SOS/Lasserre relaxation.
@@ -143,6 +168,13 @@ def sos_minimize(
     docstring). ``n_vars`` is inferred from the exponent tuples if omitted.
     ``order`` raises the relaxation order above the minimum to tighten the
     bound (the Lasserre hierarchy). Returns an :class:`SosResult`.
+
+    ``tol`` and ``max_iter`` override the underlying SDP solver's convergence
+    tolerance (default ``1e-8``) and iteration cap (default ``200``). They are
+    an escape hatch for a relaxation that will not converge: loosening ``tol``
+    trades certificate strength for convergence. Loosening it cannot make the
+    answer *unsound* when ``certified`` is set, because the certification
+    subtracts the identity's measured miss rather than trusting the solve.
     """
     _check_poly(objective, "objective")
     for g in inequalities:
@@ -156,7 +188,9 @@ def sos_minimize(
     obj = _terms(objective, n_vars, "objective")
     ineq = [_terms(g, n_vars, "inequality") for g in inequalities]
     eq = [_terms(h, n_vars, "equality") for h in equalities]
-    d = _pounce.sos_minimize(n_vars, obj, ineq, eq, order=order)
+    d = _pounce.sos_minimize(
+        n_vars, obj, ineq, eq, order=order, tol=tol, max_iter=max_iter
+    )
     status = d["status"]
     # On a failed/non-optimal relaxation the raw bound is meaningless (it can be
     # ~5e9 for a problem whose minimum is 1.0); report NaN so a garbage bound
@@ -168,4 +202,6 @@ def sos_minimize(
         is_exact=bool(d["is_exact"]),
         num_minimizers=int(d["num_minimizers"]),
         minimizers=[np.asarray(m) for m in d["minimizers"]],
+        certified=bool(d["certified"]),
+        order=int(d["order"]),
     )
