@@ -115,6 +115,11 @@ pub struct QpOptions {
     /// into the direct solver, which they require. Their callers are doing
     /// *nearby reoptimization* (a known-solvable neighborhood), where the
     /// direct path's fragility is not a concern.
+    ///
+    /// With `false` on a PSD-carrying problem, [`solve_socp_ipm`] retries a
+    /// direct solve that ends without a full answer through HSDE once (gh
+    /// #226) — the direct driver is known-weak on boundary-degenerate PSD
+    /// optima, where the embedding stays well-conditioned.
     pub use_hsde: bool,
     /// Collect a per-iteration convergence trace into
     /// [`crate::QpSolution::iterates`]. Off by default so a normal solve has
@@ -445,11 +450,58 @@ where
         // variables); then chordal range-space decomposition of any still
         // connected-but-sparse PSD cone (introduces clique blocks + overlap
         // consistency equalities). Reconstruct the dual through both layers.
+        let mut make_backend = make_backend;
         let (prob1, cones1, row_map) = decompose_psd(prob, cones);
         let (prob2, cones2, recon) = chordal_decompose(&prob1, &cones1);
-        let sol2 = solve_socp_symmetric(&prob2, &cones2, opts, make_backend);
-        let sol1 = chordal_reconstruct(sol2, &recon, &prob1);
-        return remap_decomposed_z(sol1, &row_map, prob.m_ineq());
+        let run = |o: &QpOptions, mk: &mut F| {
+            let sol2 = solve_socp_symmetric(&prob2, &cones2, o, mk);
+            let sol1 = chordal_reconstruct(sol2, &recon, &prob1);
+            remap_decomposed_z(sol1, &row_map, prob.m_ineq())
+        };
+        let sol = run(opts, &mut make_backend);
+        // gh #226: the direct symmetric driver is known-weak on PSD programs
+        // whose optimum sits on the cone boundary (a rank-deficient slack,
+        // where the NT scaling's condition number blows up) — a small
+        // fraction of well-posed instances stall or break down there while
+        // the HSDE embedding solves them cleanly. When a caller opted out of
+        // HSDE and the direct solve ended without a full answer, retry once
+        // with the embedding, mirroring the reverse-direction fallback in
+        // `solve_qp_ipm_core`. Sound for the same reason: the direct solve
+        // already failed, so there is nothing left to regress — the retry is
+        // kept only when it is a strict upgrade. Verified infeasibility /
+        // unboundedness certificates are proofs, not failures, and are never
+        // second-guessed.
+        if !opts.use_hsde
+            && matches!(
+                sol.status,
+                QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
+            )
+        {
+            let hsde_opts = QpOptions {
+                use_hsde: true,
+                ..*opts
+            };
+            let retry = run(&hsde_opts, &mut make_backend);
+            let upgraded = match (sol.status, retry.status) {
+                // A clean optimum always wins.
+                (_, QpStatus::Optimal) => true,
+                // A failed solve carries no usable answer, so any verdict
+                // with information beats it. An `OptimalInaccurate` original
+                // is a usable answer, so only the clean arm above replaces it
+                // (in particular a contradictory infeasibility claim does not).
+                (
+                    QpStatus::NumericalFailure | QpStatus::IterationLimit,
+                    QpStatus::OptimalInaccurate
+                    | QpStatus::PrimalInfeasible
+                    | QpStatus::DualInfeasible,
+                ) => true,
+                _ => false,
+            };
+            if upgraded {
+                return retry;
+            }
+        }
+        return sol;
     }
     solve_socp_symmetric(prob, cones, opts, make_backend)
 }
@@ -1434,6 +1486,18 @@ fn run_ipm(
             break;
         }
 
+        // Breakdown: the cones are self-dual, so `⟨s,z⟩ ≥ 0` for any iterate
+        // genuinely inside them — a clearly negative μ means the iterate has
+        // left the cone (a fraction-to-boundary failure) and every Newton
+        // step from here is computed on meaningless data. Fail fast instead
+        // of diverging to a non-finite iterate (gh #226). The threshold sits
+        // orders of magnitude above the tiny negative values ordinary
+        // round-off can produce as μ → 0 near convergence (|μ| ≲ ε·‖s‖‖z‖).
+        if mu < -1e-10 * (1.0 + inf_norm(&s) * inf_norm(&z)) {
+            status = QpStatus::NumericalFailure;
+            break;
+        }
+
         if res < opts.tol {
             status = QpStatus::Optimal;
             // Record the converged iterate so the trace *ends* at the
@@ -1533,6 +1597,22 @@ fn run_ipm(
             let (alpha_p, alpha_d) = step_lengths(cone, &s, &ds, &z, &dz, opts.tau, m_ineq);
             step_p = alpha_p;
             step_d = alpha_d;
+
+            // Breakdown: an exactly zero step (both lengths — the PSD
+            // fraction-to-boundary returns 0 when the block has numerically
+            // left the cone, gh #226) leaves the iterate bit-for-bit
+            // unchanged, so every later pass recomputes the same direction
+            // and the same zero step until the iteration cap. Stop now
+            // instead; the final verdict below still salvages a near-optimal
+            // iterate, and the PSD entry point falls back to HSDE on this
+            // status. A *tiny but nonzero* step is deliberately not treated
+            // as a stall: near a breakdown the direction can be huge, so
+            // even a ~1e-15 step moves the iterate materially and some such
+            // solves do recover.
+            if step_p.max(step_d) <= 0.0 {
+                status = QpStatus::NumericalFailure;
+                break;
+            }
         }
 
         // Debugger checkpoint: the Newton step and its fraction-to-boundary

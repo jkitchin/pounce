@@ -192,6 +192,7 @@ fn solve(prob: &QpProblem, cones: &[ConeSpec], use_hsde: bool) -> pounce_convex:
 fn agree_on(name: &str, seed: u64, count: usize, mut shape: impl FnMut(&mut Rng) -> Vec<ConeSpec>) {
     let mut rng = Rng(seed);
     let (mut compared, mut hsde_only, mut direct_only) = (0usize, 0usize, 0usize);
+    let mut hsde_only_psd = 0usize;
     for case in 0..count {
         let blocks = shape(&mut rng);
         let n = rng.range(3, 8);
@@ -230,7 +231,12 @@ fn agree_on(name: &str, seed: u64, count: usize, mut shape: impl FnMut(&mut Rng)
             // A driver that solves one the other cannot is an improvement, not
             // a regression — but count them so a shape that silently stopped
             // solving anything cannot masquerade as agreement.
-            (QpStatus::Optimal, _) => hsde_only += 1,
+            (QpStatus::Optimal, _) => {
+                hsde_only += 1;
+                if cones.iter().any(|c| matches!(c, ConeSpec::Psd(_))) {
+                    hsde_only_psd += 1;
+                }
+            }
             (_, QpStatus::Optimal) => direct_only += 1,
             _ => {}
         }
@@ -241,6 +247,18 @@ fn agree_on(name: &str, seed: u64, count: usize, mut shape: impl FnMut(&mut Rng)
         compared * 4 >= count * 3,
         "{name}: only {compared}/{count} instances were solved by both drivers \
          (hsde-only {hsde_only}, direct-only {direct_only}) — too few to be evidence"
+    );
+    // gh #226: on PSD-carrying instances, the hsde-only column was the
+    // population the direct driver diverged on (~0.2% of a 15,960-instance
+    // sweep — every divergence involved a PSD block). With the hardened PSD
+    // fraction-to-boundary step and the direct→HSDE breakdown fallback it
+    // must be empty: any PSD instance HSDE solves, the direct entry point
+    // now solves. SOC-only instances are outside the fallback's scope (they
+    // never diverged; the residual hsde-only there is plain stalling), so
+    // they keep the informational count above.
+    assert_eq!(
+        hsde_only_psd, 0,
+        "{name}: {hsde_only_psd} PSD instances solved by HSDE but not the direct entry point"
     );
     println!(
         "{name}: {compared}/{count} compared, hsde-only {hsde_only}, direct-only {direct_only}"
@@ -331,16 +349,21 @@ fn boundary_hugging_instances_agree_across_drivers() {
 
 /// The gh #222 instance, verbatim.
 ///
-/// The direct driver diverges here — which is expected of it on a degenerate
-/// face, and precisely why the HSDE embedding is the default (see `sos_opts`).
-/// The defect was that it reported the divergence as `Optimal`, handing back
-/// `x = [NaN, NaN]` under a status that says the answer is usable.
+/// History: the direct driver used to diverge here (the optimum sits on the
+/// PSD boundary, where its NT scaling breaks down) and report the divergence
+/// as `Optimal` with `x = [NaN, NaN]`. gh #222 made the failure honest
+/// (`NumericalFailure`, via a NaN-proof `inf_norm` and an explicit exit
+/// guard). gh #226 then made the solve *succeed*: the PSD fraction-to-
+/// boundary step is verified (so the iterate can no longer be ejected from
+/// the cone), breakdowns fail fast, and the direct entry point falls back to
+/// HSDE — which solves this instance — when the direct iteration ends
+/// without a full answer.
 ///
-/// The mechanism was `inf_norm`: `f64::max` ignores `NaN`, so the ∞-norm of an
-/// all-`NaN` iterate came out `0.0` and `res < tol` passed. Both the norm and
-/// an explicit exit guard now prevent that.
+/// So the pinned behavior is now: the direct entry point returns the same
+/// finite, correct optimum HSDE does. The gh #222 invariant is subsumed — a
+/// success verdict with a non-finite answer would fail the value assertions.
 #[test]
-fn a_diverged_solve_is_never_reported_as_optimal() {
+fn the_gh222_instance_solves_through_the_direct_entry_point() {
     let prob = QpProblem {
         n: 2,
         p_lower: vec![],
@@ -380,19 +403,22 @@ fn a_diverged_solve_is_never_reported_as_optimal() {
     let cones = [ConeSpec::Nonneg(4), ConeSpec::Psd(3)];
 
     let direct = solve(&prob, &cones, false);
-    assert!(
-        !matches!(
-            direct.status,
-            QpStatus::Optimal | QpStatus::OptimalInaccurate
-        ),
-        "direct driver claimed {:?} with x = {:?}",
+    assert_eq!(
+        direct.status,
+        QpStatus::Optimal,
+        "direct entry point returned {:?} with x = {:?}",
         direct.status,
         direct.x
     );
+    assert!(direct.x.iter().all(|v| v.is_finite()), "{:?}", direct.x);
+    assert!(
+        (direct.obj - -3.0311688992249475).abs() < 1e-6,
+        "{}",
+        direct.obj
+    );
 
-    // The instance itself is solvable, and HSDE solves it — so the honest
-    // failure above is a property of that driver, not of the problem. Pin the
-    // answer so a future change cannot quietly break the case that works.
+    // Pin the HSDE answer too, so a future change cannot quietly break the
+    // driver the fallback (and the default path) relies on.
     let hsde = solve(&prob, &cones, true);
     assert_eq!(hsde.status, QpStatus::Optimal, "{:?}", hsde.status);
     assert!(
