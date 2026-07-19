@@ -12,6 +12,8 @@ Initialization helpers (see the POUNCE docs' initialization chapter):
     pyomo_pounce.initialize_missing_values(model)  # fill unset Var values
     pyomo_pounce.project_to_feasible(model)        # min-norm repair onto constraints
     pyomo_pounce.block_initialize(model, decisions=[...])  # DM-ordered equality solve
+    pyomo_pounce.block_analyze(model, decisions=[...])     # the DM partition only:
+    #     full component lists, nothing solved, no values needed or written
 
 Parametric sensitivity (see pyomo_pounce.sens):
     declare_sens_param(m.p)      # flag parameters when building the model
@@ -20,7 +22,12 @@ Parametric sensitivity (see pyomo_pounce.sens):
     estimate(m, [(m.p, 2.5)])
     covariance(m, n_data=len(y)) # parameter covariance for least squares
 """
-from pyomo_pounce.block_init import BlockInitReport, block_initialize
+from pyomo_pounce.block_init import (
+    BlockAnalysisReport,
+    BlockInitReport,
+    block_analyze,
+    block_initialize,
+)
 from pyomo_pounce.pounce_solver import POUNCE
 from pyomo_pounce.sens import (
     Covariance,
@@ -57,4 +64,6 @@ __all__ = [
     "InitializeReport",
     "block_initialize",
     "BlockInitReport",
+    "block_analyze",
+    "BlockAnalysisReport",
 ]

@@ -30,6 +30,13 @@ reported **by name** — pair with
 :func:`pyomo_pounce.project_to_feasible` to handle the remainder (or
 use the :func:`pyomo_pounce.initialize` pipeline).
 
+:func:`block_analyze` is the analysis-only sibling: the same decision
+handling and the same Dulmage-Mendelsohn partition, but nothing is
+seeded, projected, or solved, and the full partition is returned as
+**component objects with nothing capped** — for diagnosing a large
+model, and for tooling that builds on the partition (automated
+specification repair) rather than on a display-sized name list.
+
 Requires ``pyomo.contrib.incidence_analysis`` (needs ``networkx`` and
 ``scipy``); raises ``ImportError`` with instructions otherwise.
 """
@@ -39,7 +46,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-__all__ = ["block_initialize", "BlockInitReport"]
+__all__ = [
+    "block_analyze",
+    "block_initialize",
+    "BlockAnalysisReport",
+    "BlockInitReport",
+]
 
 
 @dataclass
@@ -95,6 +107,110 @@ class BlockInitReport:
         return "\n".join(lines)
 
 
+def _preview(components, cap: int = 10) -> str:
+    """Display-sized name list; the underlying data is never capped."""
+    names = [c.name for c in components[:cap]]
+    extra = len(components) - len(names)
+    return ", ".join(names) + (f", ... and {extra} more" if extra > 0 else "")
+
+
+@dataclass
+class BlockAnalysisReport:
+    """The full Dulmage-Mendelsohn partition from :func:`block_analyze`.
+
+    Every list holds the Pyomo **component data objects** themselves
+    (``VarData`` / ``ConstraintData``), in DM order, with nothing
+    capped; ``str(report)`` shows a display-sized preview.
+    """
+
+    #: True when the equality system (after fixing decisions) is exactly
+    #: square: no underconstrained part and no overconstrained part.
+    square: bool = True
+    n_decisions_fixed: int = 0
+    #: Size of the analyzed system: active equality constraints and the
+    #: unfixed variables appearing in them.
+    n_constraints: int = 0
+    n_variables: int = 0
+    #: The underconstrained subsystem: variables the equalities cannot
+    #: determine (the things to specify or flag as decisions), and the
+    #: constraints entangled with them.
+    underconstrained_variables: List = field(default_factory=list)
+    underconstrained_constraints: List = field(default_factory=list)
+    #: The overconstrained subsystem: redundant or conflicting
+    #: specifications, and the variables they fight over.
+    overconstrained_constraints: List = field(default_factory=list)
+    overconstrained_variables: List = field(default_factory=list)
+    #: The square (well-determined) part, and its block-triangular
+    #: calculation order: ``variable_blocks[k]`` is solved from
+    #: ``constraint_blocks[k]``, in sequence.
+    square_variables: List = field(default_factory=list)
+    square_constraints: List = field(default_factory=list)
+    variable_blocks: List = field(default_factory=list)
+    constraint_blocks: List = field(default_factory=list)
+
+    @property
+    def n_extra_degrees_of_freedom(self) -> int:
+        """How many more specifications would square the under part."""
+        return len(self.underconstrained_variables) - len(
+            self.underconstrained_constraints
+        )
+
+    @property
+    def n_extra_specifications(self) -> int:
+        """How many redundant/conflicting rows the over part carries."""
+        return len(self.overconstrained_constraints) - len(
+            self.overconstrained_variables
+        )
+
+    @property
+    def n_blocks(self) -> int:
+        return len(self.variable_blocks)
+
+    @property
+    def n_1x1(self) -> int:
+        return sum(1 for blk in self.variable_blocks if len(blk) == 1)
+
+    def __str__(self) -> str:
+        lines = [
+            "pyomo-pounce block_analyze",
+            f"  decisions fixed   : {self.n_decisions_fixed}",
+            f"  equality system   : {self.n_constraints} constraints, "
+            f"{self.n_variables} variables",
+            f"  system square     : {self.square}",
+            f"  square part       : {len(self.square_variables)} variables in "
+            f"{self.n_blocks} blocks ({self.n_1x1} 1x1)",
+        ]
+        if self.underconstrained_variables:
+            lines.append(
+                f"  underconstrained  : {len(self.underconstrained_variables)} "
+                f"variables, {len(self.underconstrained_constraints)} constraints "
+                f"({self.n_extra_degrees_of_freedom} more specifications needed)"
+            )
+            lines.append(
+                "    vars (specify or flag as decisions): "
+                + _preview(self.underconstrained_variables)
+            )
+            if self.underconstrained_constraints:
+                lines.append(
+                    "    cons: " + _preview(self.underconstrained_constraints)
+                )
+        if self.overconstrained_constraints:
+            lines.append(
+                f"  overconstrained   : {len(self.overconstrained_constraints)} "
+                f"constraints, {len(self.overconstrained_variables)} variables "
+                f"({self.n_extra_specifications} redundant/conflicting)"
+            )
+            lines.append(
+                "    cons (redundant/conflicting specs): "
+                + _preview(self.overconstrained_constraints)
+            )
+            if self.overconstrained_variables:
+                lines.append(
+                    "    vars: " + _preview(self.overconstrained_variables)
+                )
+        return "\n".join(lines)
+
+
 def _flatten_vars(vars_like):
     """Accept VarData, indexed Var containers, or iterables of either."""
     out = []
@@ -104,6 +220,88 @@ def _flatten_vars(vars_like):
         else:
             out.append(v)
     return out
+
+
+def block_analyze(model, decisions=None) -> BlockAnalysisReport:
+    """Partition the equality system; touch nothing, solve nothing.
+
+    The analysis half of :func:`block_initialize` on its own: hold the
+    decisions fixed, decompose the active equality constraints
+    (Dulmage-Mendelsohn), and return the **full** partition — the
+    underconstrained, overconstrained, and square parts as component
+    objects, plus the square part's block-triangular calculation order —
+    with nothing capped for display and no values read or written.
+
+    Args:
+        model: A Pyomo model (Block). Only active equality constraints
+            and unfixed variables participate.
+        decisions: Variables (VarData or indexed Var containers) to hold
+            fixed during the analysis, then release. Purely structural,
+            so unlike :func:`block_initialize` they do **not** need
+            values. Already-fixed variables may be listed and stay
+            fixed.
+
+    Returns a :class:`BlockAnalysisReport`.
+    """
+    try:
+        # Probe networkx explicitly: pyomo defers its optional imports, so
+        # `pyomo.contrib.incidence_analysis` imports fine without it and
+        # would only blow up (DeferredImportError) at first use.
+        import networkx  # noqa: F401
+
+        from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+    except ImportError as e:  # pragma: no cover - environment-dependent
+        raise ImportError(
+            "block_analyze requires pyomo.contrib.incidence_analysis "
+            "and its optional dependencies (pip install networkx scipy)"
+        ) from e
+
+    report = BlockAnalysisReport()
+
+    fixed_by_us = []
+    if decisions is not None:
+        for vd in _flatten_vars(decisions):
+            if vd.fixed:
+                continue  # already an input; leave as the user set it
+            vd.fix()
+            fixed_by_us.append(vd)
+    report.n_decisions_fixed = len(fixed_by_us)
+
+    try:
+        igraph = IncidenceGraphInterface(model, include_inequality=False)
+        if not igraph.constraints:
+            return report
+        report.n_constraints = len(igraph.constraints)
+        report.n_variables = len(igraph.variables)
+
+        var_dm, con_dm = igraph.dulmage_mendelsohn()
+        report.underconstrained_variables = list(var_dm.unmatched) + list(
+            var_dm.underconstrained
+        )
+        report.underconstrained_constraints = list(con_dm.underconstrained)
+        report.overconstrained_constraints = list(con_dm.unmatched) + list(
+            con_dm.overconstrained
+        )
+        report.overconstrained_variables = list(var_dm.overconstrained)
+        report.square_variables = list(var_dm.square)
+        report.square_constraints = list(con_dm.square)
+        report.square = (
+            not report.underconstrained_variables
+            and not report.overconstrained_constraints
+        )
+
+        if report.square_variables:
+            var_blocks, con_blocks = igraph.block_triangularize(
+                variables=report.square_variables,
+                constraints=report.square_constraints,
+            )
+            report.variable_blocks = [list(blk) for blk in var_blocks]
+            report.constraint_blocks = [list(blk) for blk in con_blocks]
+    finally:
+        for vd in fixed_by_us:
+            vd.unfix()
+
+    return report
 
 
 def block_initialize(
@@ -149,7 +347,6 @@ def block_initialize(
         import networkx  # noqa: F401
 
         from pyomo.contrib.incidence_analysis import (
-            IncidenceGraphInterface,
             solve_strongly_connected_components,
         )
     except ImportError as e:  # pragma: no cover - environment-dependent
@@ -177,34 +374,28 @@ def block_initialize(
     report.n_decisions_fixed = len(fixed_by_us)
 
     try:
-        igraph = IncidenceGraphInterface(model, include_inequality=False)
-        if not igraph.constraints:
-            return report
-
         # The square (well-determined) part of the equality system: the
         # DM decomposition separates it from remaining degrees of
-        # freedom and redundant specifications — and names them.
-        var_dm, con_dm = igraph.dulmage_mendelsohn()
-        under_vars = list(var_dm.unmatched) + list(var_dm.underconstrained)
-        over_cons = list(con_dm.unmatched) + list(con_dm.overconstrained)
+        # freedom and redundant specifications — and names them. The
+        # decisions are already fixed above, so none are passed on.
+        analysis = block_analyze(model)
+        under_vars = analysis.underconstrained_variables
+        over_cons = analysis.overconstrained_constraints
         report.skipped_underdetermined = len(under_vars)
         report.skipped_overdetermined = len(over_cons)
         report.underconstrained_variables = [v.name for v in under_vars[:max_list]]
         report.overconstrained_constraints = [c.name for c in over_cons[:max_list]]
-        report.square = not under_vars and not over_cons
+        report.square = analysis.square
 
-        square_vars = list(var_dm.square)
-        square_cons = list(con_dm.square)
+        square_vars = analysis.square_variables
+        square_cons = analysis.square_constraints
         if not square_vars:
             return report
 
         # Solve-plan statistics (the SCC solve below follows exactly
-        # this block structure).
-        var_blocks, _con_blocks = igraph.block_triangularize(
-            variables=square_vars, constraints=square_cons
-        )
-        report.n_blocks = len(var_blocks)
-        report.n_1x1 = sum(1 for blk in var_blocks if len(blk) == 1)
+        # the analysis' block structure).
+        report.n_blocks = analysis.n_blocks
+        report.n_1x1 = analysis.n_1x1
         n_large = report.n_blocks - report.n_1x1
 
         for v in square_vars:

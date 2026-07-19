@@ -98,3 +98,25 @@ variables and constraints are reported **by name** —
 specify or flag as decisions, `overconstrained_constraints` the
 redundant or conflicting specifications. Permanently-known inputs can
 simply be `fix()`ed instead of listed as decisions.
+
+The analysis half is also available on its own:
+
+```python
+rep = pyomo_pounce.block_analyze(               # the DM partition only:
+    model, decisions=[m.feed, m.reflux])        # nothing seeded or solved
+rep.underconstrained_variables                  # VarData objects, uncapped
+rep.n_extra_degrees_of_freedom                  # how many specs are missing
+rep.variable_blocks                             # the calculation order
+```
+
+`block_analyze` runs the same decision handling and the same
+Dulmage-Mendelsohn decomposition, but touches nothing: no values are
+read or written (so, unlike `block_initialize`, the decisions do not
+need values), and no solve happens. Where the initialization reports
+cap their name lists for display, `block_analyze` returns the **full**
+partition as the component objects themselves: the underconstrained
+and overconstrained subsystems, the square part, and its
+block-triangular calculation order. Use it to diagnose a large model's
+specification, or as the structural front end for tooling that decides
+*what* to specify before calling `initialize` /
+`block_initialize` to do the work.

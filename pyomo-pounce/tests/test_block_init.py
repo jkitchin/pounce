@@ -194,6 +194,108 @@ def test_coupled_block_uses_subsystem_solve(solver):
     assert m.z.value == pytest.approx(2.0, abs=1e-6)
 
 
+def test_block_analyze_touches_nothing():
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var()
+    m.y = pyo.Var()
+    m.c1 = pyo.Constraint(expr=m.x == 2.0)
+    m.c2 = pyo.Constraint(expr=m.y == m.x + 1.0)
+    m.obj = pyo.Objective(expr=m.y)
+
+    report = pyomo_pounce.block_analyze(m)
+    assert report.square
+    assert report.n_constraints == 2 and report.n_variables == 2
+    assert report.n_blocks == 2 and report.n_1x1 == 2
+    # analysis only: nothing seeded, nothing solved
+    assert m.x.value is None and m.y.value is None
+
+
+def test_block_analyze_returns_components_uncapped():
+    # 15 loose variables in one equation: more than block_initialize's
+    # display cap, and block_analyze must return every one, as objects.
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(range(15))
+    m.c = pyo.Constraint(expr=sum(m.x[i] for i in range(15)) == 1.0)
+    m.obj = pyo.Objective(expr=m.x[0])
+
+    report = pyomo_pounce.block_analyze(m)
+    assert not report.square
+    assert len(report.underconstrained_variables) == 15
+    assert report.underconstrained_constraints == [m.c]
+    assert report.n_extra_degrees_of_freedom == 14
+    assert any(v is m.x[3] for v in report.underconstrained_variables)
+    # the display preview is capped, the data is not
+    assert "and 5 more" in str(report)
+    # contrast: block_initialize's name list is display-sized
+    init_report = pyomo_pounce.block_initialize(m)
+    assert len(init_report.underconstrained_variables) == 10
+
+
+def test_block_analyze_overconstrained_part():
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var()
+    m.c1 = pyo.Constraint(expr=m.x == 1.0)
+    m.c2 = pyo.Constraint(expr=2.0 * m.x == 2.0)  # redundant spec
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.block_analyze(m)
+    assert not report.square
+    assert set(report.overconstrained_constraints) == {m.c1, m.c2}
+    assert report.overconstrained_variables == [m.x]
+    assert report.n_extra_specifications == 1
+    assert "overconstrained" in str(report)
+
+
+def test_block_analyze_decisions_need_no_values():
+    # Purely structural: a valueless decision is fine here (it is a
+    # ValueError in block_initialize), and its fixed flag is restored.
+    m = pyo.ConcreteModel()
+    m.feed = pyo.Var()  # no value
+    m.split = pyo.Var(bounds=(0.0, 1.0))  # no value
+    m.out1 = pyo.Var()
+    m.out2 = pyo.Var()
+    m.c1 = pyo.Constraint(expr=m.out1 == m.split * m.feed)
+    m.c2 = pyo.Constraint(expr=m.out2 == (1.0 - m.split) * m.feed)
+    m.obj = pyo.Objective(expr=m.out1)
+
+    report = pyomo_pounce.block_analyze(m, decisions=[m.feed, m.split])
+    assert report.square
+    assert report.n_decisions_fixed == 2
+    assert not m.feed.fixed and not m.split.fixed
+    assert m.feed.value is None  # still untouched
+
+
+def test_block_analyze_calculation_order():
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var()
+    m.y = pyo.Var()
+    m.z = pyo.Var()
+    # 2x2 coupled block feeding a downstream 1x1.
+    m.c1 = pyo.Constraint(expr=m.x + m.y == 3.0)
+    m.c2 = pyo.Constraint(expr=m.x - m.y == 1.0)
+    m.c3 = pyo.Constraint(expr=m.z == m.x * m.y)
+    m.obj = pyo.Objective(expr=m.z)
+
+    report = pyomo_pounce.block_analyze(m)
+    assert report.square
+    assert report.n_blocks == 2 and report.n_1x1 == 1
+    assert sorted(v.name for v in report.variable_blocks[0]) == ["x", "y"]
+    assert report.variable_blocks[1] == [m.z]
+    assert report.constraint_blocks[1] == [m.c3]
+
+
+def test_block_analyze_no_equalities():
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var()
+    m.c = pyo.Constraint(expr=m.x <= 1.0)  # inequalities do not participate
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.block_analyze(m)
+    assert report.square
+    assert report.n_constraints == 0 and report.n_variables == 0
+    assert report.variable_blocks == []
+
+
 def test_failure_is_reported_not_raised():
     m = pyo.ConcreteModel()
     m.x = pyo.Var(bounds=(0.0, 1.0))

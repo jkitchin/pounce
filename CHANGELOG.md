@@ -9,6 +9,28 @@ changes.
 
 ## [Unreleased]
 
+### Added — `pyomo_pounce.block_analyze`, the analysis half of `block_initialize` on its own (Pyomo, #224)
+
+- **The Dulmage-Mendelsohn partition is now available without solving
+  anything.** `block_initialize` already computes the full partition of the
+  equality system, but a caller could only see it through the initialization
+  report, where the underconstrained/overconstrained lists are capped,
+  name-only, and bundled behind the fill and block solves. `block_analyze(model,
+  decisions=[...])` runs the same decision handling and the same decomposition
+  and returns a `BlockAnalysisReport` carrying the **full** partition as the
+  component objects themselves: the underconstrained and overconstrained
+  subsystems (variables and constraints on both sides), the square part, and
+  its block-triangular calculation order, with nothing capped. Convenience
+  counts (`n_extra_degrees_of_freedom`, `n_extra_specifications`) say how far
+  from square the system is.
+- Analysis is purely structural, so decisions do not need values here (they do
+  in `block_initialize`, whose solve must hold them at a concrete point), no
+  values are read or written, and fixed flags are restored on the way out.
+  This makes it a safe first pass on a badly specified model: diagnose, decide
+  what to specify, then call `initialize`/`block_initialize` to do the work.
+- `block_initialize` now delegates its partition step to `block_analyze`; its
+  behavior and report are unchanged.
+
 ### Fixed — a diverged conic solve could report `Optimal` with a `NaN` solution (#222)
 
 - **`solve_socp_ipm` could return `QpStatus::Optimal` alongside `x = [NaN, NaN]`.**
