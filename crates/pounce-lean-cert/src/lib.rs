@@ -18,6 +18,7 @@
 //! * [`ldlt`] — exact `LDLᵀ` PSD factorization of `Q`.
 //! * [`refine`] — exact rational active-set KKT solve (Mode B).
 //! * [`refine_farkas`] — exact rational Farkas ray for the `infeasible` verdict.
+//! * [`round_gram`] — exact rational SOS Gram matrix from the SDP's float one.
 //!
 //! * [`emit`] — the neutral-`f64` QP → certificate driver + exact self-check gate.
 
@@ -27,6 +28,7 @@ pub mod linalg;
 pub mod rational;
 pub mod refine;
 pub mod refine_farkas;
+pub mod round_gram;
 pub mod schema;
 
 pub use emit::{

@@ -80,5 +80,9 @@ default = []
 # `linear_solver = ma57` resolves to MA57 instead of falling back to FERAL.
 ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
 
+[dev-dependencies]
+# Exact rationals for the SOS end-to-end test (tests/sos_exact.rs).
+num-rational = { version = "0.4", default-features = false, features = ["std", "num-bigint"] }
+
 [lints]
 workspace = true

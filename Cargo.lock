@@ -933,6 +933,7 @@ dependencies = [
  "anstyle",
  "feral",
  "nix",
+ "num-rational",
  "pounce-algorithm",
  "pounce-common",
  "pounce-convex",
