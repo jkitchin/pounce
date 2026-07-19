@@ -177,7 +177,12 @@ for entry in "${FIXTURES[@]}"; do
 
     # Build the audit module, not `$module` — the `#print axioms` line lives
     # there, and building it pulls in `$module` as a dependency anyway.
-    out="$( cd "$POUNCE_LEAN_DIR" && lake build "$audit_mod" 2>&1 )" || {
+    # Generated proofs run with an unlimited heartbeat budget (see gen_lean.py:
+    # no constant is right for every problem size). Wall clock is bounded
+    # HERE instead, which is what actually keeps CI from hanging. afiro-sized
+    # instances take ~8 minutes, so the default is generous.
+    out="$( cd "$POUNCE_LEAN_DIR" && timeout "${LEAN_BUILD_TIMEOUT:-1800}" \
+        lake build "$audit_mod" 2>&1 )" || {
       printf '%s\n' "$out" | grep -iE "error" | head -5 >&2
       echo "FAIL — $base: lake build failed" >&2
       exit 1
@@ -239,7 +244,8 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
       exit 1
     fi
     placed+=("$dest")
-    if ( cd "$POUNCE_LEAN_DIR" && lake build "$module" >/dev/null 2>&1 ); then
+    if ( cd "$POUNCE_LEAN_DIR" && timeout "${LEAN_BUILD_TIMEOUT:-1800}" \
+         lake build "$module" >/dev/null 2>&1 ); then
       echo "FAIL — $base: a certificate with a corrupted $what BUILT." >&2
       echo "       This is a soundness failure: the proof does not depend on the" >&2
       echo "       witness being correct." >&2
