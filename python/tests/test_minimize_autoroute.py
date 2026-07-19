@@ -271,3 +271,93 @@ def test_unbounded_lp_reports_unbounded_not_iteration_limit():
     assert "unbounded" in res.message.lower()    # distinct, not "max iterations"
     # Raw HSDE certificate still available for programmatic callers.
     assert res.info["status"] == "dual_infeasible"
+
+
+# --- gh #213: solver_selection must be validated, not silently dropped -------
+
+def _qp_problem():
+    """min ½xᵀPx + cᵀx  s.t.  x0 + x1 >= 1  — a convex QP with an active
+    constraint at the optimum, so the SQP and IPM engines take visibly
+    different iteration counts."""
+    P = np.array([[2.0, 0.0], [0.0, 2.0]])
+    c = np.array([-2.0, -2.0])
+    con = [{"type": "ineq",
+            "fun": lambda x: 1.0 - (x[0] + x[1]),
+            "jac": lambda x: np.array([-1.0, -1.0])}]
+    return (lambda x: 0.5 * x @ P @ x + c @ x,
+            lambda x: P @ x + c,
+            con)
+
+
+@pytest.mark.parametrize("bad", ["qp_ipm", "totally-bogus-solver", "", "QP_IPM"])
+def test_invalid_solver_selection_raises(bad):
+    """An unrecognized selector must raise, not fall through to the NLP path.
+
+    This is the gh #213 defect. Silent fallback is the dangerous failure mode
+    precisely because it still returns a *correct* answer on easy problems: a
+    typo (`qp_ipm` for `qp-ipm`) benchmarks or ships an engine the caller never
+    asked for, with nothing in the result to reveal it.
+    """
+    fun, jac, con = _qp_problem()
+    with pytest.raises(ValueError, match="not a valid selector"):
+        minimize(fun, np.zeros(2), jac=jac, constraints=con,
+                 options={"solver_selection": bad})
+
+
+def test_qp_active_set_reaches_the_sqp_engine():
+    """`qp-active-set` is a valid CLI/library selector and must actually
+    dispatch, not be swallowed.
+
+    Before the fix it was indistinguishable from a bogus value: both fell
+    through to the filter-IPM. The backend treats it as equivalent to
+    `algorithm=active-set-sqp`, so pinning it against that spelling proves the
+    option reached the Rust side rather than merely being accepted by Python.
+    """
+    fun, jac, con = _qp_problem()
+    kw = dict(jac=jac, constraints=con)
+
+    sel = minimize(fun, np.zeros(2), options={"solver_selection": "qp-active-set"}, **kw)
+    algo = minimize(fun, np.zeros(2), options={"algorithm": "active-set-sqp"}, **kw)
+    nlp = minimize(fun, np.zeros(2), options={"solver_selection": "nlp"}, **kw)
+
+    assert sel.nit == algo.nit, "qp-active-set must select the same engine as algorithm=active-set-sqp"
+    assert np.allclose(sel.x, algo.x)
+    assert sel.nit != nlp.nit, "qp-active-set must be distinguishable from the NLP path"
+    assert np.allclose(sel.x, nlp.x, atol=1e-6), "both engines must still solve it"
+
+
+def test_solver_selection_is_case_insensitive():
+    """The Rust side compares with `eq_ignore_ascii_case`; match it, so a
+    selector that works on the CLI is not rejected here on casing alone."""
+    fun, jac, con = _qp_problem()
+    res = minimize(fun, np.zeros(2), jac=jac, constraints=con,
+                   options={"solver_selection": "QP-Active-Set"})
+    assert res.success
+
+
+def test_solver_selection_values_match_rust():
+    """Drift guard: the Python whitelist must equal the Rust registry.
+
+    A hardcoded list would silently diverge the moment a selector is added on
+    the Rust side — and the failure would be exactly the bug this test suite
+    exists to prevent, a valid selector rejected (or a dropped one accepted) by
+    the facade alone. Parse the registration instead.
+    """
+    import re
+    from pathlib import Path
+
+    from pounce._minimize import _SOLVER_SELECTION_VALUES
+
+    src = (Path(__file__).resolve().parents[2]
+           / "crates/pounce-algorithm/src/upstream_options.rs").read_text()
+    block = re.search(
+        r'add_string_option\(\s*"solver_selection".*?\n        \],', src, re.S
+    )
+    assert block, "could not locate the solver_selection registration in Rust"
+    rust_values = set(re.findall(r'^\s*\(\s*\n?\s*"([a-z-]+)",', block.group(0), re.M))
+
+    assert rust_values, "parsed no values; the registration format changed"
+    assert rust_values == set(_SOLVER_SELECTION_VALUES), (
+        f"Python whitelist {sorted(_SOLVER_SELECTION_VALUES)} != "
+        f"Rust registry {sorted(rust_values)}"
+    )

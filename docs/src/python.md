@@ -365,6 +365,20 @@ choice — mirroring the CLI option of the same name:
 | `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
 | `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
 | `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |
+| `"qp-active-set"` | Run the active-set SQP engine instead of the filter-IPM. Equivalent to `algorithm="active-set-sqp"`. |
+
+Any other value raises `ValueError`. These are the same six selectors the CLI
+accepts, and matching is case-insensitive, as on the CLI.
+
+Two differences from the CLI are worth knowing, both because `minimize` is a
+*library* consumer with no `.nl` file to classify:
+
+* `"qp-active-set"` is **not** class-validated here. The CLI restricts it to
+  LP/convex QP; the library path simply runs the SQP engine on whatever problem
+  it is given, since it has no extracted problem class to check against.
+* The convex selectors (`"lp-ipm"`, `"qp-ipm"`, `"socp"`) work because
+  `minimize` does its own Python-side structure detection. The equivalent Rust
+  library API rejects them with `Invalid_Option`.
 
 ```python
 # Default: the general NLP solver, no probing.

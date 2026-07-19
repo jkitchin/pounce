@@ -128,6 +128,21 @@ _QP_STATUS_MESSAGE = {
 # (``jax/_path.py`` / ``torch/_path.py`` ``_OK_STATUS``). Excluding it (gh #119)
 # made HS071 and similar problems report ``success=False`` at a verified
 # optimum. Codes 2..6 (infeasible, tiny step, diverging, …) stay failures.
+# The `solver_selection` values the Rust option registry accepts
+# (`upstream_options.rs`, `add_string_option("solver_selection", ...)`). Kept in
+# sync by `test_solver_selection_values_match_rust`, which parses that file --
+# a hardcoded list here would drift the moment a selector is added.
+#
+# Behaviour differs by surface, and `pounce.minimize` is a *library* consumer
+# (no `.nl` problem-structure extraction), so the split is:
+#   auto / lp-ipm / qp-ipm / socp  -- handled here by Python-side extraction
+#   nlp                            -- the default; straight to the NLP backend
+#   qp-active-set                  -- forwarded to the backend, which selects the
+#                                     active-set SQP engine
+_SOLVER_SELECTION_VALUES = frozenset(
+    {"auto", "nlp", "lp-ipm", "qp-ipm", "qp-active-set", "socp"}
+)
+
 _NLP_SUCCESS_STATUS = frozenset({0, 1})
 
 # Statuses for which the KKT-error fallback below must NOT upgrade the solve to
@@ -974,6 +989,18 @@ def minimize(
     # so the remainder of `options` flows to the NLP backend. The default is
     # `"nlp"` (no probe) — opt in to `"auto"` to enable structure detection.
     selection = str(options.pop("solver_selection", "nlp")).lower()
+    # Validate against the registry rather than letting an unrecognized value
+    # fall through to the NLP path. Silently substituting a different engine
+    # than the caller named is the worst failure mode here: it still returns a
+    # correct answer on easy problems, so a typo (`qp_ipm`) or a selector this
+    # facade does not implement is invisible until someone benchmarks or ships
+    # the wrong solver. The CLI rejects these with OPTION_INVALID; match it.
+    # (gh #213)
+    if selection not in _SOLVER_SELECTION_VALUES:
+        raise ValueError(
+            f"solver_selection={selection!r} is not a valid selector; "
+            f"expected one of {sorted(_SOLVER_SELECTION_VALUES)}"
+        )
     route_tol = float(options.pop("route_tol", 1e-5))
     if warm_start is not None and selection != "nlp":
         warnings.warn(
@@ -982,6 +1009,13 @@ def minimize(
             stacklevel=2,
         )
         selection = "nlp"
+    if selection == "qp-active-set":
+        # Not a Python-side route: hand it back to the backend, whose
+        # `is_sqp_algorithm_selected` treats it as equivalent to
+        # `algorithm=active-set-sqp`. Note the library path does *not*
+        # class-validate this selector (the CLI restricts it to LP/convex QP);
+        # it simply runs the SQP engine on whatever problem it is given.
+        options["solver_selection"] = "qp-active-set"
     # scipy.optimize.minimize is silent unless `disp=True`; match that. pounce's
     # NLP backend otherwise prints a full IPM iteration table by default (and
     # the log is written from Rust to fd 1, so Python stdout redirection can't
