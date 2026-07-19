@@ -229,7 +229,7 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
   # "<basename> <module> <what was corrupted>"
   NEGATIVE_FIXTURES=(
     "certify_qp_forged_dual       PounceLean.Generated.ForgedDual  KKT dual (breaks stationarity)"
-    "certify_qp_forged_psd        PounceLean.Generated.ForgedPsd   LDLᵀ diagonal (breaks Q ⪰ 0)"
+    "certify_qp_forged_psd        PounceLean.Generated.ForgedPsd   objective Hessian (Q indefinite)"
     "certify_infeasible_forged    PounceLean.Generated.ForgedFarkas Farkas ray (breaks Aᵀy = 0)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
