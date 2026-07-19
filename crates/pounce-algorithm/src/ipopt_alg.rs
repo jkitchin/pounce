@@ -292,6 +292,37 @@ impl IpoptAlgorithm {
     /// optimum, then destabilizes on the ill-conditioned vertex and
     /// cycles in restoration instead of stopping at the acceptable
     /// iterate it already passed through.
+    /// [`Self::terminate_acceptable_or`], but only when a masked-certificate
+    /// veto held this run back from stopping (gh #200).
+    ///
+    /// The veto's bargain is "never worse off": it refuses an early stop on
+    /// the argument that the iterates continue to the true minimum. When that
+    /// does not pan out and the run instead stalls, the point the solver would
+    /// have certified is still stored — restoring it yields today's answer
+    /// under an honest `Solved_To_Acceptable_Level` label rather than a bare
+    /// failure. Runs that never vetoed are untouched, so this cannot change
+    /// any existing failure verdict.
+    fn terminate_vetoed_or(&mut self, fallback: SolverReturn) -> IterateOutcome {
+        if !self.bundle.conv_check.certificate_vetoed() {
+            return IterateOutcome::Terminate(fallback);
+        }
+        // The veto refused a point that had *already passed the strict test*,
+        // on the hypothesis that continuing would reach a better one. This exit
+        // means it did not. The hypothesis was wrong, so honour the certificate
+        // that was refused: restore the stored point and report success, which
+        // is exactly what would have been returned without the veto.
+        //
+        // This is what makes the mechanism safe without needing to predict, in
+        // advance, whether a given stop is false — a prediction that cannot be
+        // made from the residuals (see `certificate_masked`). Trying and
+        // failing costs iterations, never correctness.
+        if self.restore_acceptable_point() && self.cq.borrow().curr_f().is_finite() {
+            IterateOutcome::Terminate(SolverReturn::Success)
+        } else {
+            IterateOutcome::Terminate(fallback)
+        }
+    }
+
     fn terminate_acceptable_or(&mut self, fallback: SolverReturn) -> IterateOutcome {
         if self.restore_acceptable_point() && self.cq.borrow().curr_f().is_finite() {
             IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
@@ -592,7 +623,7 @@ impl IpoptAlgorithm {
             }
             ConvergenceStatus::MaxIterExceeded => {
                 timing.check_convergence.end();
-                return IterateOutcome::Terminate(SolverReturn::MaxiterExceeded);
+                return self.terminate_vetoed_or(SolverReturn::MaxiterExceeded);
             }
             ConvergenceStatus::CpuTimeExceeded => {
                 timing.check_convergence.end();
@@ -670,7 +701,7 @@ impl IpoptAlgorithm {
         self.data.borrow_mut().curr_mu = next_mu;
         timing.update_barrier_parameter.end();
         if tiny_at_entry && mu_terminates_on_tiny && (next_mu - mu_before).abs() < Number::EPSILON {
-            return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
+            return self.terminate_vetoed_or(SolverReturn::StopAtTinyStep);
         }
 
         // pounce#58 — iterate-quality guard for the probing oracle.

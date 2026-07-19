@@ -31,6 +31,52 @@ changes.
 - `block_initialize` now delegates its partition step to `block_analyze`; its
   behavior and report are unchanged.
 
+### Fixed — false `Solve_Succeeded` behind an extreme objective scale (#200)
+
+- **POUNCE no longer certifies optimality at a point that is not a minimum.**
+  Gradient-based objective scaling picks `df = nlp_scaling_max_gradient /
+  max‖∇f‖`, floored at `nlp_scaling_min_value = 1e-8`. On a flat quartic the
+  initial gradient is enormous, `df` pins at that floor, and — because a
+  quartic's gradient vanishes *cubically* toward its minimum while `df` stays
+  fixed — the scaled convergence test trips roughly 30% of the way in. The
+  solver reported `Solve_Succeeded` at objective **248.88** (`quartc`) and
+  **39.36** (`dqrtic`) when the true minimum of each is ~0, with an unscaled
+  dual infeasibility of 0.84.
+
+  | problem | before | after |
+  |---|---|---|
+  | `quartc` | `Solve_Succeeded`, obj 248.88 | `Solve_Succeeded`, obj **8.8e-07** |
+  | `dqrtic` | `Solve_Succeeded`, obj 39.36 | `Solve_Succeeded`, obj **7.0e-07** |
+  | `penalty1` | `Solve_Succeeded`, obj 6.44 | `Solve_Succeeded`, obj **0.0097** (true) |
+
+- **This is a deliberate deviation from upstream Ipopt**, which was verified
+  here to have the identical failure (`ipopt quartc.nl` → `Optimal Solution
+  Found` at 248.88). The new `obj_scale_certificate_threshold` option (default
+  `1e-4`, set `0` to disable) restores bit-for-bit upstream behaviour.
+
+- **The mechanism tests the stop rather than predicting it.** When the objective
+  scale is below the threshold and the unscaled KKT error is still above
+  `acceptable_tol`, POUNCE refuses to terminate and keeps iterating: a constant
+  objective scale cancels out of the Newton step and the line-search tests are
+  scale-invariant, so the run follows the trajectory an unscaled run would take.
+  If that reaches a better point, the stop was false. If it achieves nothing,
+  the refused point is restored and reported with the status it would originally
+  have had — so the mechanism is **never worse than not having it, by
+  construction**, and no benchmark-fitted constant is needed to tell the two
+  cases apart. Whether a stop is genuinely false cannot be read off the
+  residuals: `meyer3` sits at the same 1e-8 scale floor as `quartc` while being
+  genuinely converged. Measured across the 733-problem Vanderbei suite, all 16
+  problems eligible for the veto keep their original status.
+
+- **Fixed alongside: the console report hid the discrepancy.** The NLP summary
+  passed the *scaled* residual to both the `(scaled)` and `(unscaled)` columns,
+  so `quartc` printed dual infeasibility `8.38e-09` twice when the unscaled
+  value is `8.38e-01` — a user auditing the suspicious certificate was shown a
+  report that agreed with it. The unscaled statistics were already computed and
+  already surfaced through the Python bindings; only the console dropped them.
+  Upstream Ipopt prints these correctly, so this was a porting defect rather
+  than a deviation.
+
 ### Fixed — a diverged conic solve could report `Optimal` with a `NaN` solution (#222)
 
 - **`solve_socp_ipm` could return `QpStatus::Optimal` alongside `x = [NaN, NaN]`.**

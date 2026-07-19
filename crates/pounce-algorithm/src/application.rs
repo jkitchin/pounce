@@ -2123,6 +2123,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("tol") {
             builder.conv_check.tol = v;
         }
+        if let Some(v) = read_num("obj_scale_certificate_threshold") {
+            builder.conv_check.obj_scale_certificate_threshold = v;
+        }
         if let Some(v) = read_num("dual_inf_tol") {
             builder.conv_check.dual_inf_tol = v;
         }

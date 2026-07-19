@@ -1,7 +1,7 @@
 # Issue #200 — plan: stop certifying optimality behind an extreme objective scale
 
-Status: **plan, ready to implement** (no code changes yet on this branch).
-Target branch: `claude/pounce-issue-200-2qnm9q`.
+Status: **implemented**, with two corrections to the plan below that were
+forced by measurement. See §8 — read it before §3, which is superseded in part.
 
 ## 1. Problem recap (verified against current code)
 
@@ -166,3 +166,93 @@ Acceptance criteria:
   criteria hold.
 - If the benchmark pass forces a threshold change, record the measured
   `obj_scale` distribution in this file for posterity.
+
+
+## 8. Corrections found during implementation (2026-07-19)
+
+Two things in §3 did not survive contact with the data. Both are recorded here
+so they are not re-derived.
+
+### 8.1 The `obj_scale` gate does **not** separate the collateral — §3's premise is wrong
+
+§3 asserts the false certificates sit at the 1e-8 scale floor while the
+collateral sits around 1e-2, and prescribes "lower the threshold to 1e-6" if a
+canary trips. Measured objective scales on the Vanderbei suite:
+
+| problem | obj_scale | baseline status |
+|---|---|---|
+| quartc, dqrtic, penalty1 | **1e-8** | falsely `Optimal` |
+| **meyer3** | **1e-8** | correctly `Optimal` |
+| lakes | 1.8e-4 | correctly `Optimal` |
+| avion2, dallasm | ~1e-3 | correctly `Optimal` |
+
+`meyer3` sits at *exactly* the same floor as the problems being fixed, so **no
+`obj_scale` threshold can separate them** and §3's prescribed remedy cannot
+work. A scale-only veto downgrades `meyer3` and `hs084` from `Solve_Succeeded`,
+violating §6's zero-strict-loss criterion.
+
+### 8.2 A second threshold on the unscaled error was tried and rejected
+
+The obvious repair is a second bar on the unscaled KKT error, since the two
+groups do separate on it (a 36x gap: `dqrtic` 3.5e-1 … `vardim` 9.9e-3), and a
+cutoff at the gap's geometric centre (5e-2) does give zero status losses.
+
+**Rejected, for two reasons:**
+
+1. `unscaled_err` is a **dimensional** quantity — it carries the units of the
+   objective gradient. The same problem with its objective multiplied by 100
+   moves across any absolute cutoff. A scale-sensitive threshold is the wrong
+   shape of fix for a bug that is about scaling.
+2. The cutoff would be fitted to 16 problems from one suite, 5 on one side and
+   11 on the other. Nothing predicts where a new problem lands.
+
+It also failed on its own terms: one bar cannot serve both roles. Engaging at
+5e-2 is what spares `meyer3`, but *releasing* at 5e-2 stops the rescued run far
+too early — `quartc` halted at objective 1.92 instead of 8.8e-7, because a
+quartic's unscaled error drops under 5e-2 long before its objective reaches the
+minimum. A hysteresis band (engage at 5e-2, release at `acceptable_tol`) fixes
+that but keeps both objections above.
+
+### 8.3 What was implemented instead: test the hypothesis, don't predict it
+
+Whether a stop is genuinely false **cannot be read off the residuals**. So the
+veto does not try. It fires on the scale condition alone (§3's original
+predicate), refuses to stop, and *continues*:
+
+- If the iterates go somewhere, the stop was false — the run reaches the true
+  minimum and issues an honest certificate.
+- If they do not, the refused point is restored and returned **with the status
+  it would originally have had** (`Solve_Succeeded`, via `terminate_vetoed_or`),
+  because that point had already passed the strict test.
+
+The second branch is what makes this safe without any fitted constant: trying
+and failing costs iterations, never correctness, so the mechanism is
+**never worse than not having it, by construction**. `meyer3` and `hs084` come
+back byte-identical in status without any threshold tuned to them.
+
+Measured outcome (baseline = `obj_scale_certificate_threshold=0`):
+
+| problem | baseline | after | status |
+|---|---|---|---|
+| quartc | 248.88 | **8.78e-07** | unchanged (`Optimal`) |
+| dqrtic | 39.36 | **7.03e-07** | unchanged |
+| penalty1 | 6.44 | **0.0097** (true) | unchanged |
+| denschnd | 2.22e-04 | 3.18e-10 | unchanged |
+| vardim | 2.46e-09 | 8.06e-30 | unchanged |
+| porous1 | 1.43e-08 | 7.04e-17 | unchanged |
+| meyer3, hs084, avion2, dallasl, dallasm, lakes, sawpath, steenbrc, … | — | — | unchanged |
+
+Zero status changes across all 16 gate-eligible problems and the full §6 canary
+list. The only surviving threshold is `obj_scale_certificate_threshold` on the
+scale factor itself, which is dimensionless and whose 1e-8 floor is a
+documented clamp (`nlp_scaling_min_value`), not a fitted value.
+
+### 8.4 Also fixed in passing: the console hid the discrepancy
+
+`print_solve_summary` passed the *scaled* residual to both the "(scaled)" and
+"(unscaled)" columns, so `quartc` reported dual infeasibility `8.38e-09` twice
+when the unscaled value is `8.38e-01`. A user auditing the suspicious
+certificate was shown a report that agreed with it. The unscaled statistics
+were already computed and already surfaced through the Python bindings; only
+the console dropped them. Upstream Ipopt prints the unscaled value correctly,
+so this was a porting defect, not a deviation.

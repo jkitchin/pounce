@@ -824,6 +824,16 @@ impl IpoptCalculatedQuantities {
         c_max.max(dms_max)
     }
 
+    /// The objective scaling factor `df` currently in force (`1.0` when no
+    /// objective scaling is active).
+    ///
+    /// Exposed because the termination logic must be able to tell an honest
+    /// certificate from one an extreme scale has masked (gh #200): the scale
+    /// factor itself is the discriminating signal, not the error.
+    pub fn obj_scaling_factor(&self) -> Number {
+        self.nlp.borrow().obj_scaling_factor()
+    }
+
     /// Overall **unscaled** max-norm KKT error — `max` of the unscaled dual
     /// infeasibility, primal infeasibility, and complementarity. This is the
     /// honest "distance from a KKT point in the user's own units", as

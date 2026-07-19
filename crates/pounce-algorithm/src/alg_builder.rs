@@ -145,6 +145,10 @@ pub struct ConvCheckOptions {
     pub infeas_stationarity_tol: Number,
     pub infeas_viol_kappa: Number,
     pub infeas_max_streak: Index,
+    /// Objective-scale floor below which a strict termination certificate is
+    /// refused while the unscaled KKT error is still above `acceptable_tol`
+    /// (gh #200). `0` disables the mechanism.
+    pub obj_scale_certificate_threshold: Number,
 }
 
 impl Default for ConvCheckOptions {
@@ -166,6 +170,7 @@ impl Default for ConvCheckOptions {
             infeas_stationarity_tol: 1e-8,
             infeas_viol_kappa: 1e2,
             infeas_max_streak: 5,
+            obj_scale_certificate_threshold: 1e-4,
         }
     }
 }
@@ -985,6 +990,8 @@ impl AlgorithmBuilder {
                 infeas_viol_kappa: self.conv_check.infeas_viol_kappa,
                 infeas_max_streak: self.conv_check.infeas_max_streak,
                 infeas_streak: 0,
+                obj_scale_certificate_threshold: self.conv_check.obj_scale_certificate_threshold,
+                veto_fired: false,
             });
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point
