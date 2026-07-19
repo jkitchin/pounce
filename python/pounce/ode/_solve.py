@@ -96,6 +96,7 @@ def solve_ivp(
     args=None,
     *,
     mass=None,
+    consistent="project",
     rtol=1e-3,
     atol=1e-6,
     jac=None,
@@ -138,6 +139,15 @@ def solve_ivp(
         state/time-dependent mass. A singular ``M`` makes this an index-1 DAE
         solve (a pounce extension beyond SciPy); a callable ``M`` is routed
         through the fully-implicit DAE engine (:func:`solve_dae`).
+    consistent : {"project", "assume"}
+        Only meaningful for a singular (DAE) ``mass``. ``"project"`` (default)
+        projects ``y0`` onto the algebraic manifold ``0 = f`` before
+        integrating — matching :func:`solve_dae` — so ``res.y[:, 0]`` is a
+        point the model admits even when the given algebraic components are
+        only a rough guess. ``"assume"`` trusts ``y0`` verbatim (the pre-0.x
+        behavior); use it if you rely on ``res.y[:, 0]`` echoing your input and
+        know it is already consistent. Ignored for a non-singular ``mass``
+        (a plain ODE has no algebraic manifold to project onto).
     rtol, atol : float
         Relative / absolute error tolerances.
     jac : callable or None
@@ -186,6 +196,9 @@ def solve_ivp(
         if events is not None:
             events = _wrap_events_args(events, args)
 
+    if consistent not in ("project", "assume"):
+        raise ValueError("consistent must be 'project' or 'assume'.")
+
     if callable(mass):
         # State/time-dependent mass M(t, y) y' = f(t, y): route through the
         # fully-implicit DAE engine as F(t, y, y') = M(t, y) y' - f(t, y).
@@ -195,13 +208,34 @@ def solve_ivp(
             return np.asarray(mass(t, y), dtype=float) @ yp - np.asarray(fun(t, y), dtype=float)
 
         prob = _dae._DaeProblem(_F, y0.size)
-        y0c, yp0 = _dae.consistent_initial_conditions(prob, t0, y0, None)
+        if consistent == "project":
+            y0, yp0 = _dae.consistent_initial_conditions(prob, t0, y0, None)
+        else:
+            # 'assume': trust y0; derive y'0 with y0 held fixed (min-norm solve
+            # of M(t0, y0) y'0 = f(t0, y0)). Correct when y0 is consistent.
+            M0 = np.asarray(mass(t0, y0), dtype=float)
+            f0 = np.asarray(fun(t0, y0), dtype=float)
+            yp0 = np.linalg.lstsq(M0, f0, rcond=None)[0]
         res = _dae.integrate_dae(
-            _F, t0, t1, y0c, yp0, rtol=rtol, atol=atol, first_step=first_step,
+            _F, t0, t1, y0, yp0, rtol=rtol, atol=atol, first_step=first_step,
             max_step=max_step, t_eval=t_eval,
             dense_output=dense_output or t_eval is not None, events=events,
         )
     else:
+        if mass is not None and consistent == "project":
+            # A singular constant mass is an index-1 DAE: 0 = f on the algebraic
+            # rows. Unlike solve_dae, the fast mass path never projected the IC
+            # (gh #215), so a rough algebraic guess in y0 left res.y[:, 0] off
+            # the manifold, silently. Project it here to match solve_dae.
+            from . import _dae
+
+            M = np.asarray(mass, dtype=float)
+            if M.ndim == 2 and _dae._algebraic_mask(M).any():
+                dae_jac = None if jac is None else (
+                    lambda t, y, yp: (-np.asarray(jac(t, y), dtype=float), M))
+                _F = lambda t, y, yp: M @ yp - np.asarray(fun(t, y), dtype=float)
+                prob = _dae._DaeProblem(_F, y0.size, jac=dae_jac)
+                y0, _ = _dae.consistent_initial_conditions(prob, t0, y0, None)
         res = _radau.integrate(
             fun, t0, t1, y0, rtol=rtol, atol=atol, first_step=first_step,
             max_step=max_step, mass=mass, jac=jac, t_eval=t_eval,

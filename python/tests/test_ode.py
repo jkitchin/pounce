@@ -245,6 +245,29 @@ def test_simple_dae():
     assert np.max(np.abs(y[1] - np.exp(-2 * tt))) < 1e-6
 
 
+def test_singular_mass_projects_inconsistent_ic():
+    """gh #215: a rough algebraic guess in y0 (y1=5, manifold wants y1=y0**2=1)
+    is projected onto 0 = y1 - y0**2 by default, matching solve_dae — the mass
+    path used to echo it back off-manifold and silently."""
+    def f(t, y):
+        return [-y[0], y[1] - y[0] ** 2]
+
+    M = np.diag([1.0, 0.0])
+    r = po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M, rtol=1e-8, atol=1e-10)
+    assert r.success
+    # res.y[:, 0] is on the manifold, not the user's inconsistent input.
+    assert abs(r.y[1, 0] - r.y[0, 0] ** 2) < 1e-9
+    assert abs(r.y[1, 0] - 1.0) < 1e-9
+
+    # opt out: consistent="assume" trusts the input verbatim (old behavior).
+    ra = po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M, consistent="assume",
+                      rtol=1e-8, atol=1e-10)
+    assert ra.y[1, 0] == 5.0
+
+    with pytest.raises(ValueError):
+        po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M, consistent="bogus")
+
+
 # --- SciPy-signature plumbing ------------------------------------------------
 
 def test_t_eval_and_args():

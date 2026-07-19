@@ -134,6 +134,23 @@ changes.
   reviewed and are behavior-preserving (`RefCell`/`Mutex` guards dropped at
   end of scope with no observer of the relative order).
 
+### Fixed — `solve_ivp(mass=M)` now projects inconsistent initial conditions (#215)
+
+- **`pounce.ode.solve_ivp` with a singular mass matrix now projects `y0` onto
+  the algebraic manifold before integrating, matching `solve_dae`.** Given a
+  singular `M`, the mass path is an index-1 DAE, but it previously returned the
+  user's `y0` verbatim in `res.y[:, 0]` even when its algebraic components
+  violated `0 = f` — silently, with `res.success == True`. Since the whole
+  point of the algebraic variables is that they are *determined* by the
+  differential ones, a rough guess for them is the normal case, and the first
+  column of the trajectory was left off the solution manifold. It now runs the
+  same `consistent_initial_conditions` projection (the IDA `IDA_YA_YDP_INIT`
+  computation) that `solve_dae(consistent="project")` already used, so both
+  entry points to the index-1 DAE math agree. A new `consistent=` keyword
+  (`"project"`, the default, or `"assume"`) opts out for callers relying on
+  `res.y[:, 0]` echoing an already-consistent input. Non-singular (plain ODE)
+  masses are unaffected.
+
 ## [0.8.0] - 2026-07-11
 
 ### Added — declared-parameter sensitivity for Pyomo (Python / Pyomo)
