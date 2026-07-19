@@ -65,9 +65,12 @@ def Dvec : Fin 2 → ℚ := ![2, 2]
 /-- `Q ⪰ 0` from the LDLᵀ witness (reusable `posSemidef_of_LDL`). -/
 theorem hQ_psd : Q.PosSemidef := by
   apply PounceLean.PSD.posSemidef_of_LDL Q Lmat Dvec
-  · intro i; fin_cases i <;> simp [Dvec]
+  -- `norm_num` is required, not decoration: with a nontrivial LDLᵀ the
+  -- goals are ordinary rational facts like `0 ≤ 149/10` and
+  -- `9 = 10 * (9/10)`, which bare `simp` does not close.
+  · intro i; fin_cases i <;> simp [Dvec] <;> norm_num
   · ext i j; fin_cases i <;> fin_cases j <;>
-      simp [Q, Lmat, Dvec, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one]
+      simp [Q, Lmat, Dvec, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one] <;> norm_num
 
 /-- Stationarity `Q x* + c = Aᵀ λ + Eᵀ μ`. -/
 theorem hstat : Q *ᵥ xstar + cvec = Amatᵀ *ᵥ lamv + Ematᵀ *ᵥ muv := by
