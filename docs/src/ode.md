@@ -86,6 +86,51 @@ res = po.solve_ivp(f, (0, 1e4), [1.0, 0.0, 0.0], mass=M,
 
 The algebraic constraint is satisfied to round-off at every accepted step.
 
+### Inconsistent initial conditions
+
+The algebraic components of `y0` are **determined** by the differential ones,
+so passing a rough guess for them is the normal case. When `M` is singular,
+`solve_ivp` projects `y0` onto the algebraic manifold `0 = f` before
+integrating — the same `IDA_YA_YDP_INIT` projection `solve_dae` uses — so
+`res.y[:, 0]` is always a state the model admits:
+
+```python
+# 0 = y1 - y0**2  =>  a consistent IC with y0 = 1 needs y1 = 1. Pass y1 = 5.
+f = lambda t, y: [-y[0], y[1] - y[0] ** 2]
+M = np.diag([1.0, 0.0])
+r = po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M)
+print(r.y[:, 0])                 # [1. 1.]  — projected onto the manifold
+```
+
+Pass `consistent="assume"` to opt out and use `y0` verbatim (the old
+behavior) when you know it is already consistent and rely on `res.y[:, 0]`
+echoing your input. `consistent` is ignored for a non-singular `mass` (a plain
+ODE has no manifold to project onto).
+
+### On-manifold output points
+
+Radau IIA is stiffly accurate, so the constraint holds exactly at the solver's
+own accepted steps — but the dense-output polynomial only *interpolates* it
+between them. For a **linear** conservation law (mass, atom, charge, or site
+balance, `sum(x) = 1`) the interpolant satisfies the constraint exactly, so
+there is nothing to fix. For a **nonlinear** algebraic constraint the
+interpolated residual is small but nonzero. Pass `project_output=True` to
+Newton-polish the algebraic components of every requested output point
+(`res.sol(t)` and `res.y` at `t_eval`) back onto the manifold:
+
+```python
+te = np.linspace(0, 2, 100)
+r = po.solve_ivp(f, (0, 2), [1.0, 1.0], mass=M, t_eval=te,
+                 project_output=True)      # nonlinear 0 = y1 - y0**2
+# max|y1 - y0**2| over te drops from ~5e-9 to ~1e-10
+```
+
+This is **off by default**, is skipped automatically for affine constraints
+(where it buys nothing), and changes only what you read back — never the
+trajectory, step sequence, or error control. See
+`python/examples/dae_manifold_gap.py` to measure the interpolation gap on your
+own DAE.
+
 ## Differentiable integration (JAX / PyTorch)
 
 For gradient-based work — fitting ODE parameters, neural ODEs, optimal

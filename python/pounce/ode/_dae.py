@@ -72,6 +72,71 @@ def _algebraic_mask(Fyp):
     return col <= _ALG_TOL * max(1.0, float(col.max()))
 
 
+def _algebraic_equation_mask(Fyp):
+    """Boolean ``(n,)``: equation ``i`` is algebraic iff it contains no
+    derivative (row ``i`` of ``F_y'`` is ~0), i.e. it is a pure constraint
+    ``0 = F_i(t, y)``. For a mass form ``F = M y' - f`` this is the zero rows of
+    ``M``; for a semi-explicit index-1 DAE it indexes the same slots as
+    :func:`_algebraic_mask`."""
+    row = np.max(np.abs(Fyp), axis=1)
+    return row <= _ALG_TOL * max(1.0, float(row.max()))
+
+
+def _algebraic_rows_affine(prob, t, y, alg_eq, *, rtol=1e-6):
+    """Are the algebraic constraint rows affine in ``y``?
+
+    A degree-3 collocation dense output reproduces an affine constraint
+    ``c'y = d`` *exactly* between steps (it vanishes at the three stage nodes
+    and the on-manifold step start — a cubic with four roots is identically
+    zero), so output projection buys nothing there (gh #216). Detected by
+    probing whether the algebraic-row block of ``F_y`` is constant across a few
+    deterministic perturbations of ``y``."""
+    zp = np.zeros_like(y)
+    Fy0, _ = prob.jacs(t, y, zp, prob.F(t, y, zp))
+    J0 = Fy0[alg_eq]
+    scale = 1.0 + float(np.linalg.norm(y))
+    ar = np.arange(y.size)
+    for k in (1, 2):
+        dy = scale * 0.1 * k * np.cos(ar + k)
+        Fyk, _ = prob.jacs(t, y + dy, zp, prob.F(t, y + dy, zp))
+        if np.linalg.norm(Fyk[alg_eq] - J0) > rtol * (1.0 + np.linalg.norm(J0)):
+            return False
+    return True
+
+
+def project_output(sol, prob, alg_eq, alg_var, *, tol=1e-10, max_iter=10):
+    """Wrap a dense-output callable so each queried point is Newton-polished
+    onto the algebraic manifold ``0 = F_alg(t, y)``.
+
+    Holds the differential components at their interpolated values and solves
+    the algebraic rows for the algebraic components ``y[alg_var]`` — the
+    ``(alg_eq, alg_var)`` Jacobian block is square and nonsingular for an
+    index-1 DAE (``lstsq`` fallback if it is ill-conditioned). The algebraic
+    rows of ``F`` do not depend on ``y'``, so ``F(t, y, 0)`` evaluates the
+    constraint. Does not touch the trajectory, step sequence, or error control
+    — only what the caller reads from ``res.sol`` / ``res.y`` (gh #216)."""
+    def psol(tq):
+        tq = np.atleast_1d(np.asarray(tq, dtype=float))
+        Y = np.array(sol(tq), dtype=float)
+        zp = np.zeros(Y.shape[0])
+        for q in range(Y.shape[1]):
+            y = Y[:, q]
+            for _ in range(max_iter):
+                r = prob.F(tq[q], y, zp)[alg_eq]
+                if np.linalg.norm(r) <= tol * (1.0 + np.linalg.norm(y)):
+                    break
+                Fy, _ = prob.jacs(tq[q], y, zp, prob.F(tq[q], y, zp))
+                J = Fy[np.ix_(alg_eq, alg_var)]
+                try:
+                    dy = np.linalg.solve(J, -r)
+                except np.linalg.LinAlgError:
+                    dy = np.linalg.lstsq(J, -r, rcond=None)[0]
+                y[alg_var] = y[alg_var] + dy
+            Y[:, q] = y
+        return Y
+    return psol
+
+
 def consistent_initial_conditions(prob, t0, y0, yp0=None, *, tol=1e-10,
                                   max_iter=25):
     """Project ``(y0, yp0)`` onto ``F(t0, y0, y'0) = 0`` for an index-1 DAE.

@@ -268,6 +268,47 @@ def test_singular_mass_projects_inconsistent_ic():
         po.solve_ivp(f, (0.0, 2.0), [1.0, 5.0], mass=M, consistent="bogus")
 
 
+def test_project_output_nonlinear_constraint():
+    """gh #216: project_output Newton-polishes interpolated output points onto a
+    nonlinear algebraic manifold; the interpolated residual drops sharply and
+    the trajectory itself is unchanged."""
+    def f(t, y):
+        return [-y[0], y[1] - y[0] ** 2]
+
+    M = np.diag([1.0, 0.0])
+    te = np.linspace(0.0, 2.0, 100)
+    r = po.solve_ivp(f, (0.0, 2.0), [1.0, 1.0], mass=M, rtol=1e-8, atol=1e-10,
+                     t_eval=te)
+    rp = po.solve_ivp(f, (0.0, 2.0), [1.0, 1.0], mass=M, rtol=1e-8, atol=1e-10,
+                      t_eval=te, project_output=True)
+
+    resid = np.abs(r.y[1] - r.y[0] ** 2).max()
+    residp = np.abs(rp.y[1] - rp.y[0] ** 2).max()
+    assert residp < resid / 10          # interpolation gap closed by an order+
+    assert residp < 1e-9
+    # differential component (and hence the physical trajectory) is untouched.
+    assert np.max(np.abs(rp.y[0] - np.exp(-te))) < 1e-7
+
+
+def test_project_output_linear_constraint_is_noop():
+    """A linear conservation law (Robertson's sum=1) is exact under the cubic
+    dense output, so project_output is auto-skipped and returns identical y."""
+    k1, k2, k3 = 0.04, 3e7, 1e4
+
+    def f(t, y):
+        return [-k1 * y[0] + k3 * y[1] * y[2],
+                k1 * y[0] - k3 * y[1] * y[2] - k2 * y[1] ** 2,
+                y[0] + y[1] + y[2] - 1.0]
+
+    M = np.diag([1.0, 1.0, 0.0])
+    te = np.logspace(-3, 4, 60)
+    base = po.solve_ivp(f, (0.0, 1e4), [1.0, 0.0, 0.0], mass=M,
+                        rtol=1e-6, atol=1e-8, t_eval=te)
+    proj = po.solve_ivp(f, (0.0, 1e4), [1.0, 0.0, 0.0], mass=M,
+                        rtol=1e-6, atol=1e-8, t_eval=te, project_output=True)
+    assert np.array_equal(base.y, proj.y)     # skipped: bit-for-bit identical
+
+
 # --- SciPy-signature plumbing ------------------------------------------------
 
 def test_t_eval_and_args():

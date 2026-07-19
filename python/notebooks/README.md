@@ -82,3 +82,9 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | # | Notebook | What it shows |
 |---|---|---|
 | 24 | [`24_boundary_value_problems.ipynb`](24_boundary_value_problems.ipynb) | `pounce.solve_bvp` — SciPy-compatible BVPs (fast FERAL Newton + adaptive refinement), differentiable JAX/Torch solves, and constrained / optimal-control BVPs unique to pounce. |
+
+## ODE / DAE initial value problems
+
+| # | Notebook | What it shows |
+|---|---|---|
+| 27 | [`27_dae_manifold_projection.ipynb`](27_dae_manifold_projection.ipynb) | `pounce.ode.solve_ivp` for index-1 DAEs via a singular mass matrix — keeping the reported solution on the constraint manifold with `consistent=` (project an inconsistent initial condition) and `project_output=` (Newton-polish requested output points), and why linear conservation laws need neither. |
