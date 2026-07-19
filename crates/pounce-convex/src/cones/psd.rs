@@ -209,34 +209,88 @@ impl PsdCone {
 
     /// Largest `α ∈ (0, tau]` with `smat(v) + α·smat(dv) ⪰ 0`, scaled by the
     /// fraction-to-boundary parameter `tau`. Computes the most-negative
-    /// eigenvalue of `L⁻¹ smat(dv) L⁻ᵀ` where `smat(v) = L Lᵀ` (here via the
-    /// symmetric form `V^{-1/2} smat(dv) V^{-1/2}`, `V = smat(v) ≻ 0`).
+    /// eigenvalue of `V^{-1/2} smat(dv) V^{-1/2}` (`V = smat(v) ≻ 0`), then —
+    /// because that computation loses accuracy exactly where it matters, at a
+    /// near-singular `V` (an optimum on the PSD boundary) — **verifies** the
+    /// candidate in the original coordinates and backtracks until the stepped
+    /// point is genuinely inside the cone. An unverified, optimistic α at a
+    /// rank-deficient slack ejects the iterate from the cone (`μ < 0`) and
+    /// the direct IPM never recovers (gh #226).
+    ///
+    /// `tau ≥ 1` deliberately requests the exact boundary point (`α = 1`
+    /// with `V + dV` singular is a legitimate answer there), so the strict
+    /// interiority check applies only to the drivers' `tau < 1`.
     pub fn max_step(&self, v: &[f64], dv: &[f64], tau: f64) -> f64 {
         let n = self.n;
         let mut vmat = vec![0.0; n * n];
         smat(v, n, &mut vmat);
-        let vinv_half = match sym_apply(&vmat, n, |l| 1.0 / l.max(1e-300).sqrt()) {
-            Some(m) => m,
-            None => return tau, // can't scale; let the caller's safeguard handle it
-        };
-        let mut dmat = vec![0.0; n * n];
-        smat(dv, n, &mut dmat);
-        // M = V^{-1/2} dV V^{-1/2}  (symmetric).
-        let mut tmp = vec![0.0; n * n];
-        let mut mmat = vec![0.0; n * n];
-        matmul(&vinv_half, &dmat, n, &mut tmp);
-        matmul(&tmp, &vinv_half, n, &mut mmat);
         let mut vals = vec![0.0; n];
         let mut vecs = vec![0.0; n * n];
-        if !symmetric_eigen(&mmat, n, &mut vals, &mut vecs) {
-            return tau;
-        }
-        let min_eig = vals[0]; // ascending
-        if min_eig >= 0.0 {
-            1.0 // direction keeps PSD for all α ⇒ full step
+        // Candidate from the scaled eigenvalue problem, using the true
+        // spectrum of V. This used to clamp non-positive eigenvalues to
+        // 1e-300, so a boundary slack whose λ_min rounded below zero
+        // produced a ~1e150-entry V^{-1/2} and a garbage α; a failed
+        // eigensolve returned the near-full step `tau` outright. Both now
+        // start from the τ cap and rely on the verification below.
+        let candidate = if symmetric_eigen(&vmat, n, &mut vals, &mut vecs) && vals[0] > 0.0 {
+            // V^{-1/2} = Q Λ^{-1/2} Qᵀ (vecs is column-major, vals ascending).
+            let mut vinv_half = vec![0.0; n * n];
+            for i in 0..n {
+                for k in 0..n {
+                    let mut acc = 0.0;
+                    for j in 0..n {
+                        acc += (1.0 / vals[j].sqrt()) * vecs[j * n + i] * vecs[j * n + k];
+                    }
+                    vinv_half[i * n + k] = acc;
+                }
+            }
+            let mut dmat = vec![0.0; n * n];
+            smat(dv, n, &mut dmat);
+            // M = V^{-1/2} dV V^{-1/2}  (symmetric).
+            let mut tmp = vec![0.0; n * n];
+            let mut mmat = vec![0.0; n * n];
+            matmul(&vinv_half, &dmat, n, &mut tmp);
+            matmul(&tmp, &vinv_half, n, &mut mmat);
+            let mut mvals = vec![0.0; n];
+            let mut mvecs = vec![0.0; n * n];
+            if symmetric_eigen(&mmat, n, &mut mvals, &mut mvecs) {
+                let min_eig = mvals[0]; // ascending
+                if min_eig >= 0.0 {
+                    1.0 // direction keeps PSD for all α ⇒ full step
+                } else {
+                    (tau * (-1.0 / min_eig)).min(1.0)
+                }
+            } else {
+                tau.min(1.0)
+            }
         } else {
-            (tau * (-1.0 / min_eig)).min(1.0)
+            tau.min(1.0)
+        };
+        if tau >= 1.0 {
+            return candidate;
         }
+        // Fraction-to-boundary contract (τ < 1): the returned step keeps the
+        // block *strictly* inside the cone. In exact arithmetic the candidate
+        // carries a (1 − τ) margin; near a rank-deficient slack rounding can
+        // eat it, so verify and halve until interiority holds. If no positive
+        // step is strictly interior — `v` itself has already numerically left
+        // the cone — return 0, which the driver treats as a breakdown rather
+        // than stepping onto meaningless data.
+        let mut alpha = candidate;
+        let mut trial = vec![0.0; v.len()];
+        for _ in 0..60 {
+            if alpha <= 0.0 {
+                return 0.0;
+            }
+            for (t, (a, b)) in trial.iter_mut().zip(v.iter().zip(dv)) {
+                *t = a + alpha * b;
+            }
+            if self.min_eig(&trial) > 0.0 {
+                return alpha;
+            }
+            alpha *= 0.5;
+        }
+        0.0
     }
 
     /// The Nesterov–Todd scaling matrix `W` (symmetric PD) for the
@@ -632,6 +686,97 @@ mod tests {
         // At α just below 1 the point is still PD; with τ = 0.99, step ≈ 0.99.
         let a2 = c.max_step(&v, &dv, 0.99);
         assert!((a2 - 0.99).abs() < 1e-9, "step {a2}");
+    }
+
+    /// gh #226: the fraction-to-boundary step (τ < 1) must keep the block
+    /// *strictly* inside the cone even when `v` is nearly singular — the
+    /// regime (an optimum on the PSD boundary) where the scaled eigenvalue
+    /// computation loses exactly the accuracy that matters. Sweep
+    /// boundary-hugging points against outward directions and require strict
+    /// interiority at the returned step.
+    #[test]
+    fn max_step_keeps_near_singular_blocks_inside_the_cone() {
+        let c = PsdCone::new(3);
+        // A rotation Q (Givens on axes 0-1 then 1-2) to make the test
+        // matrices dense rather than diagonal.
+        let (co, si) = (0.8, 0.6);
+        let q1 = vec![co, -si, 0.0, si, co, 0.0, 0.0, 0.0, 1.0];
+        let q2 = vec![1.0, 0.0, 0.0, 0.0, co, -si, 0.0, si, co];
+        let mut q = vec![0.0; 9];
+        matmul(&q1, &q2, 3, &mut q);
+        let rotate = |diag: [f64; 3]| {
+            let mut d = vec![0.0; 9];
+            for i in 0..3 {
+                d[i * 3 + i] = diag[i];
+            }
+            let mut tmp = vec![0.0; 9];
+            let mut out = vec![0.0; 9];
+            matmul(&q, &d, 3, &mut tmp);
+            // Q D Qᵀ: Qᵀ as the transpose of the row-major q.
+            let mut qt = vec![0.0; 9];
+            for i in 0..3 {
+                for j in 0..3 {
+                    qt[i * 3 + j] = q[j * 3 + i];
+                }
+            }
+            matmul(&tmp, &qt, 3, &mut out);
+            let mut sv = vec![0.0; 6];
+            svec(&out, 3, &mut sv);
+            sv
+        };
+        for &eps in &[1e-6, 1e-10, 1e-13] {
+            let v = rotate([1.0, 0.3, eps]);
+            for (case, dv) in [
+                rotate([-1.0, -0.3, -eps]),       // straight at the origin
+                rotate([-2.0, 0.1, -10.0 * eps]), // out through the small mode
+                rotate([0.5, -0.7, -1.0]),        // hard out of the cone
+            ]
+            .iter()
+            .enumerate()
+            {
+                let alpha = c.max_step(&v, dv, 0.95);
+                assert!(
+                    (0.0..=1.0).contains(&alpha),
+                    "eps={eps} case {case}: alpha {alpha} out of range"
+                );
+                let trial: Vec<f64> = v.iter().zip(dv).map(|(a, b)| a + alpha * b).collect();
+                assert!(
+                    c.min_eig(&trial) > 0.0,
+                    "eps={eps} case {case}: step alpha={alpha} left the cone \
+                     (min eig {})",
+                    c.min_eig(&trial)
+                );
+            }
+            // An inward direction still takes the full step.
+            let mut inward = vec![0.0; 6];
+            c.identity(&mut inward);
+            assert!(
+                (c.max_step(&v, &inward, 0.95) - 1.0).abs() < 1e-12,
+                "eps={eps}"
+            );
+        }
+    }
+
+    /// gh #226: a `v` that has already (numerically) left the cone admits no
+    /// strictly interior step along an outward direction — the answer is 0
+    /// (the driver treats it as a breakdown), never a garbage near-full step
+    /// from a clamped or failed scaling.
+    #[test]
+    fn max_step_is_zero_when_v_is_outside_and_direction_points_out() {
+        let c = PsdCone::new(2);
+        // diag(1, −1e-12): min eig negative, i.e. round-off past the boundary.
+        let v = {
+            let m = vec![1.0, 0.0, 0.0, -1e-12];
+            let mut sv = vec![0.0; 3];
+            svec(&m, 2, &mut sv);
+            sv
+        };
+        let mut dv = vec![0.0; 3];
+        c.identity(&mut dv);
+        for x in dv.iter_mut() {
+            *x = -*x;
+        }
+        assert_eq!(c.max_step(&v, &dv, 0.95), 0.0);
     }
 
     #[test]
