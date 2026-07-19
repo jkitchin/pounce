@@ -20,6 +20,22 @@ import PounceLean.Farkas
 namespace PounceLean.CertifyInfeasible
 
 open Matrix
+
+-- Resource limits, NOT soundness controls. Raising a budget cannot make a
+-- false proof pass; the kernel still checks every step. (`native_decide`
+-- WOULD cost trust — it adds an axiom — and is deliberately not used.)
+--
+-- The default 200000-heartbeat budget is far too small for a realistic
+-- problem: netlib afiro (n=32) needs ~10^7, i.e. ~50x the default and
+-- roughly 8 minutes. Measured ladder: 400k/800k/1.6M/3.2M/6.4M all fail,
+-- 12.8M passes at 461s, with time scaling linearly in the budget — the
+-- tactic consumes whatever it is given rather than converging early.
+--
+-- So no constant is right for the next problem up. Heartbeats proxy WORK;
+-- what needs bounding is WALL CLOCK, so that CI cannot hang. That is the
+-- job of an external `timeout`, which scripts/check-lean-cert.sh applies.
+set_option maxHeartbeats 0
+set_option maxRecDepth 100000
 open PounceLean.ConvexQP (Feasible)
 
 -- binding (cert.binding); embed so the verdict provably concerns these bytes
