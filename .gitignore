@@ -175,3 +175,8 @@ pyomo-pounce/pyomo_pounce.egg-info/
 
 # Jupyter notebook autosave checkpoints
 .ipynb_checkpoints/
+
+# Personal release-announcement drafts (docs/linkedin-v*.org). Written per
+# release and not part of the published book — docs/src/ holds that. Pattern
+# rather than the exact file so the next version doesn't reappear untracked.
+docs/linkedin-v*.org
