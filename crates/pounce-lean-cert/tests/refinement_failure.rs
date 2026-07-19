@@ -97,8 +97,11 @@ fn err(input: &QpInput) -> EmitError {
 
 // --- degenerate active sets all funnel to Singular -------------------------
 
+/// Basis selection resolves this. Before it, a duplicated active row made the
+/// KKT matrix rank-deficient and the emitter refused; now the redundant copy is
+/// dropped (with a zero multiplier) and the true optimum is certified.
 #[test]
-fn duplicate_active_row_is_singular() {
+fn duplicate_active_row_is_resolved_by_basis_selection() {
     let input = qp(
         2,
         convex_2d(),
@@ -108,11 +111,20 @@ fn duplicate_active_row_is_singular() {
         ],
         vec![0.5, 0.5],
     );
-    assert_eq!(err(&input), EmitError::Refine(RefineError::Singular));
+    let cert = emit_certificate(&input, &meta()).expect("basis selection drops the duplicate");
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0].inner().to_string(),
+        "1/2"
+    );
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[1].inner().to_string(),
+        "1/2"
+    );
 }
 
+/// Same, for a row that is a scalar multiple rather than a byte-duplicate.
 #[test]
-fn linearly_dependent_active_row_is_singular() {
+fn linearly_dependent_active_row_is_resolved_by_basis_selection() {
     // 2·c0 — not a byte-duplicate, but the same hyperplane.
     let input = qp(
         2,
@@ -123,11 +135,20 @@ fn linearly_dependent_active_row_is_singular() {
         ],
         vec![0.5, 0.5],
     );
-    assert_eq!(err(&input), EmitError::Refine(RefineError::Singular));
+    let cert = emit_certificate(&input, &meta()).expect("basis selection drops the dependent row");
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0].inner().to_string(),
+        "1/2"
+    );
 }
 
+/// Contradictory equalities are NOT mere redundancy, and must still be refused.
+/// Basis selection drops the second row as linearly dependent, so the solve
+/// satisfies only the first — and the exact residual check then catches that the
+/// dropped row is violated. The error is now more precise than `Singular`: it
+/// names the offending row.
 #[test]
-fn contradictory_equalities_are_singular() {
+fn contradictory_equalities_are_refused_naming_the_row() {
     let input = qp(
         2,
         convex_2d(),
@@ -137,11 +158,16 @@ fn contradictory_equalities_are_singular() {
         ],
         vec![0.0, 0.0],
     );
-    assert_eq!(err(&input), EmitError::Refine(RefineError::Singular));
+    assert_eq!(
+        err(&input),
+        EmitError::Refine(RefineError::EqualityResidual { constraint: 1 })
+    );
 }
 
+/// A redundant-but-consistent equality is fine: it is dropped from the solve
+/// and its residual still verified.
 #[test]
-fn overdetermined_equalities_are_singular() {
+fn overdetermined_but_consistent_equalities_are_resolved() {
     let input = qp(
         2,
         convex_2d(),
@@ -152,7 +178,15 @@ fn overdetermined_equalities_are_singular() {
         ],
         vec![1.0, 1.0],
     );
-    assert_eq!(err(&input), EmitError::Refine(RefineError::Singular));
+    let cert = emit_certificate(&input, &meta()).expect("e2 is implied by e0 and e1");
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[0].inner().to_string(),
+        "1"
+    );
+    assert_eq!(
+        cert.candidate.as_ref().unwrap().x[1].inner().to_string(),
+        "1"
+    );
 }
 
 // --- non-convexity is refused on one of two paths --------------------------
