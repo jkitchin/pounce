@@ -123,11 +123,26 @@ pub fn find_stalls(report: &SolveReport) -> Vec<Stall> {
     find_stalls_with(report, 5, 0.3)
 }
 
+/// Smallest meaningful stall window.
+///
+/// A stall is lack of progress *between* iterations, so it takes at least two
+/// of them to observe one. With `min_window <= 1` the window test
+/// `j - i + 1 >= min_window` is trivially true and every single iterate is
+/// reported as a stall — on a healthy monotone solve that means every
+/// iteration, each as a degenerate `start_iter == end_iter` window with
+/// `delta_log10 == 0`. Callers must reject smaller values at their boundary;
+/// see `MIN_STALL_WINDOW` uses in the pyo3 and CLI front ends.
+pub const MIN_STALL_WINDOW: usize = 2;
+
+/// `min_window` below [`MIN_STALL_WINDOW`] is meaningless; it is raised to it
+/// rather than producing degenerate single-iterate windows. Front ends reject
+/// such values outright, so this is a backstop for other Rust callers.
 pub fn find_stalls_with(
     report: &SolveReport,
     min_window: usize,
     max_log10_progress: f64,
 ) -> Vec<Stall> {
+    let min_window = min_window.max(MIN_STALL_WINDOW);
     let mut out = Vec::new();
     for (metric, series) in [
         ("inf_pr", series_log10(&report.iterations, |r| r.inf_pr)),
@@ -597,5 +612,38 @@ mod tests {
             !codes.contains(&"convergence_stall"),
             "stall shouldn't trip on healthy convergence: {codes:?}",
         );
+    }
+
+    #[test]
+    fn degenerate_min_window_cannot_report_single_iterate_stalls() {
+        // gh: an adversary probe passed `min_window = 0` to a monotonically
+        // converging solve with no stalls and got back one "stall" per
+        // iteration, 18 of 20 with `start_iter == end_iter` and
+        // `delta_log10 == 0`. A stall is an absence of progress BETWEEN
+        // iterations, so a single iterate cannot be one; the window test
+        // `j - i + 1 >= min_window` is just trivially true below 2.
+        //
+        // Front ends now reject `min_window < 2` outright. This asserts the
+        // core's backstop for other Rust callers: it must never manufacture a
+        // degenerate window, whatever it is handed.
+        let iters: Vec<IterRecord> = (0..8)
+            .map(|i| iter(i, 10f64.powi(-(i + 1)), 10f64.powi(-i)))
+            .collect();
+        let report = report_with(iters);
+
+        for bad in [0usize, 1] {
+            let windows = find_stalls_with(&report, bad, 0.3);
+            assert!(
+                windows.iter().all(|w| w.end_iter > w.start_iter),
+                "min_window={bad} produced a degenerate single-iterate window: {windows:?}"
+            );
+            assert_eq!(
+                windows,
+                find_stalls_with(&report, MIN_STALL_WINDOW, 0.3),
+                "min_window={bad} must behave as MIN_STALL_WINDOW, not as its literal value"
+            );
+        }
+        // A healthy monotone solve still reports nothing at the default.
+        assert!(find_stalls(&report).is_empty());
     }
 }

@@ -130,6 +130,17 @@ impl PyReport {
         // mirror `core::find_stalls`. Not memoised because results are
         // parameter-dependent.
         let min_window = min_window.unwrap_or(5);
+        // Reject rather than clamp: a stall spans consecutive iterations, so
+        // `min_window < 2` is not a smaller request but an ill-posed one, and
+        // silently honouring it reports every iteration of a healthy solve as
+        // a stall.
+        if min_window < core::analysis::MIN_STALL_WINDOW {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "min_window must be >= {} (a stall spans at least two \
+                 consecutive iterations); got {min_window}",
+                core::analysis::MIN_STALL_WINDOW
+            )));
+        }
         let max_log10_progress = max_log10_progress.unwrap_or(0.3);
         json_or_err(core::analysis::find_stalls_with(
             &self.inner,

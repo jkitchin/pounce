@@ -249,6 +249,13 @@ fn cmd_find_stalls(args: &[String]) -> Result<(), CliError> {
         .transpose()
         .map_err(|e| CliError::Usage(format!("--min-window: {e}")))?
         .unwrap_or(5);
+    if min_window < analysis::MIN_STALL_WINDOW {
+        return Err(CliError::Usage(format!(
+            "--min-window must be >= {} (a stall spans at least two consecutive \
+             iterations); got {min_window}",
+            analysis::MIN_STALL_WINDOW
+        )));
+    }
     let max_progress = take_flag(&mut args, "--max-progress")?
         .map(|s| s.parse::<f64>())
         .transpose()
