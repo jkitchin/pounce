@@ -1427,6 +1427,13 @@ fn run_ipm(
             }
         }
 
+        // Breakdown: a non-finite iterate carries no information, and every
+        // test below is a comparison against it. Stop and say so (gh #222).
+        if !all_finite(&[&x, &s, &y, &z]) {
+            status = QpStatus::NumericalFailure;
+            break;
+        }
+
         if res < opts.tol {
             status = QpStatus::Optimal;
             // Record the converged iterate so the trace *ends* at the
@@ -1677,6 +1684,8 @@ fn run_ipm(
     }
 
     let nn = n;
+    // Never hand back a success verdict without a usable solution (gh #222).
+    let status = demote_unusable(status, &x, obj);
     QpSolution {
         status,
         x,
@@ -2241,8 +2250,59 @@ fn block_shapes(cone: &CompositeCone) -> Vec<BlockShape> {
         .collect()
 }
 
+/// Whether every entry of every block of an iterate is finite.
+///
+/// A single non-finite entry means the iteration has broken down: there is no
+/// point continuing, and — more importantly — no verdict but a failure is
+/// honest, since the "solution" carries no information.
+pub(crate) fn all_finite(blocks: &[&[f64]]) -> bool {
+    blocks.iter().all(|b| b.iter().all(|v: &f64| v.is_finite()))
+}
+
+/// Demote a success verdict that is not backed by a usable solution (gh #222).
+///
+/// The last line of defence before a solution leaves either driver: reporting
+/// `Optimal` is a *claim*, and a caller that checks the status — the documented
+/// way to know an answer is usable — must never be handed `NaN` alongside it.
+/// Whatever went wrong upstream, `NumericalFailure` is the honest verdict.
+///
+/// Deliberately a separate final pass rather than a fix at one breakdown site:
+/// the guarantee wanted is about what comes *out*, so it belongs where the
+/// result is assembled, and it then holds no matter which internal path
+/// produced the iterate.
+pub(crate) fn demote_unusable(status: QpStatus, x: &[f64], obj: f64) -> QpStatus {
+    let claims_success = matches!(status, QpStatus::Optimal | QpStatus::OptimalInaccurate);
+    if claims_success && !(all_finite(&[x]) && obj.is_finite()) {
+        return QpStatus::NumericalFailure;
+    }
+    status
+}
+
+/// `‖v‖∞`, propagating `NaN` rather than swallowing it (gh #222).
+///
+/// The obvious `fold(0.0, |m, x| m.max(x.abs()))` is **wrong on a `NaN`
+/// input**, and silently so: `f64::max` is defined to *ignore* `NaN`, so
+/// `0.0f64.max(NaN) == 0.0` and the ∞-norm of an all-`NaN` vector comes back as
+/// a perfect `0.0`.
+///
+/// Every convergence test in both drivers is a comparison of `inf_norm`-derived
+/// residuals against `tol`, so that turned a fully diverged iterate into a
+/// declaration of optimality. On the gh #222 instance the direct driver's
+/// iterate went entirely non-finite at iteration 31 and the residuals it
+/// computed from that iterate read `pinf = dinf = res = 0`, so `res < tol`
+/// passed and the solve returned `Optimal` with `x = [NaN, NaN]`.
+///
+/// `NaN` short-circuits here so the norm is genuinely `NaN`; every `< tol`
+/// test against it is then false, which is the correct answer.
 pub(crate) fn inf_norm(v: &[f64]) -> f64 {
-    v.iter().fold(0.0_f64, |m, &x| m.max(x.abs()))
+    let mut m = 0.0_f64;
+    for &x in v {
+        if x.is_nan() {
+            return f64::NAN;
+        }
+        m = m.max(x.abs());
+    }
+    m
 }
 
 pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -2576,5 +2636,83 @@ mod detect_infeasibility_tests {
             Some(QpStatus::PrimalInfeasible),
             "residual 1e-12 ≪ FARKAS_RESID_TOL is a genuine Farkas certificate"
         );
+    }
+}
+
+#[cfg(test)]
+mod non_finite_guard_tests {
+    //! gh #222: a success verdict must never accompany an unusable solution.
+    use super::{all_finite, demote_unusable, inf_norm};
+    use crate::qp::QpStatus;
+
+    #[test]
+    fn inf_norm_propagates_nan_instead_of_swallowing_it() {
+        // The bug. `f64::max` is specified to IGNORE NaN, so the natural
+        // `fold(0.0, |m, x| m.max(x.abs()))` reports the ∞-norm of an all-NaN
+        // vector as a perfect 0.0. Every convergence test compares such a norm
+        // against `tol`, so that made a fully diverged iterate read as
+        // converged — the direct driver returned `Optimal` with `x = [NaN,NaN]`.
+        assert!(
+            0.0_f64.max(f64::NAN) == 0.0,
+            "premise: f64::max ignores NaN"
+        );
+
+        assert!(inf_norm(&[f64::NAN, f64::NAN]).is_nan());
+        assert!(inf_norm(&[1.0, f64::NAN, 2.0]).is_nan());
+        // NaN anywhere wins, including after a larger finite entry (a fold that
+        // let `max` swallow it would return 5.0 here).
+        assert!(inf_norm(&[5.0, f64::NAN]).is_nan());
+        // And the convergence test then rejects it, which is the point: the
+        // drivers all decide by comparing such a norm against `tol`.
+        let converged = |residual: f64| residual < 1e-8;
+        assert!(!converged(inf_norm(&[f64::NAN])));
+
+        // Ordinary inputs are unchanged, infinities included.
+        assert_eq!(inf_norm(&[]), 0.0);
+        assert_eq!(inf_norm(&[-3.0, 2.0]), 3.0);
+        assert_eq!(inf_norm(&[f64::INFINITY]), f64::INFINITY);
+        assert!(!converged(inf_norm(&[f64::INFINITY])));
+    }
+
+    #[test]
+    fn all_finite_spots_a_single_bad_entry_in_any_block() {
+        let good = [1.0, 2.0];
+        let nan = [1.0, f64::NAN];
+        let inf = [f64::INFINITY];
+        assert!(all_finite(&[&good, &good]));
+        assert!(!all_finite(&[&good, &nan]));
+        assert!(!all_finite(&[&inf, &good]));
+        assert!(all_finite(&[]));
+    }
+
+    #[test]
+    fn success_verdicts_are_demoted_when_the_solution_is_unusable() {
+        let bad = [f64::NAN, 1.0];
+        let good = [1.0, 2.0];
+        for claim in [QpStatus::Optimal, QpStatus::OptimalInaccurate] {
+            assert_eq!(
+                demote_unusable(claim, &bad, 1.0),
+                QpStatus::NumericalFailure,
+                "{claim:?} with a NaN x must not survive"
+            );
+            assert_eq!(
+                demote_unusable(claim, &good, f64::NAN),
+                QpStatus::NumericalFailure,
+                "{claim:?} with a NaN objective must not survive"
+            );
+            // A usable solution is left alone.
+            assert_eq!(demote_unusable(claim, &good, 1.0), claim);
+        }
+        // Failure verdicts are reported as-is; the guard only demotes, never
+        // promotes, so it cannot manufacture a success.
+        for keep in [
+            QpStatus::NumericalFailure,
+            QpStatus::IterationLimit,
+            QpStatus::PrimalInfeasible,
+            QpStatus::DualInfeasible,
+        ] {
+            assert_eq!(demote_unusable(keep, &bad, f64::NAN), keep);
+            assert_eq!(demote_unusable(keep, &good, 1.0), keep);
+        }
     }
 }
