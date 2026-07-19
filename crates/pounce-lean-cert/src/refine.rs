@@ -21,7 +21,6 @@
 use crate::linalg::{dot, solve_exact};
 use num_rational::BigRational;
 use num_traits::Zero;
-use std::collections::HashSet;
 
 /// The exact rational KKT point (inequalities only).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,8 +97,42 @@ pub fn refine_kkt_eq(
 ) -> Result<RefinedEq, RefineError> {
     let n = c.len();
     let m = a.len();
-    let p = e.len();
-    let k = active.len();
+    let p_all = e.len();
+    let k_all = active.len();
+
+    // --- basis selection -------------------------------------------------
+    //
+    // A degenerate active set (more active constraints than independent
+    // directions) makes the KKT matrix rank-deficient however large it is;
+    // netlib afiro has 37 active constraints in 32 variables. Real LPs are
+    // routinely degenerate, so refusing them outright would confine this to
+    // constructed instances.
+    //
+    // Choose a maximal independent subset instead. Equalities are offered
+    // first because they must hold regardless; active inequalities follow in
+    // their given order. Dropped rows are not dropped *constraints* — they are
+    // simply not enforced by the linear solve, and receive a zero multiplier.
+    //
+    // This is safe for exactly the reason a misidentified active set is safe:
+    // the selection only PROPOSES. The exact self-checks below verify
+    // stationarity, feasibility, complementarity and the equality residuals
+    // over every original row, so a bad basis yields a refusal, never an
+    // unsound certificate.
+    let mut cand: Vec<Vec<BigRational>> = Vec::with_capacity(p_all + k_all);
+    cand.extend(e.iter().cloned());
+    cand.extend(active.iter().map(|&ci| a[ci].clone()));
+    let keep = crate::linalg::select_independent_rows(&cand);
+
+    let sel_eq: Vec<usize> = keep.iter().copied().filter(|&i| i < p_all).collect();
+    let sel_act: Vec<usize> = keep
+        .iter()
+        .copied()
+        .filter(|&i| i >= p_all)
+        .map(|i| i - p_all)
+        .collect();
+
+    let p = sel_eq.len();
+    let k = sel_act.len();
     let size = n + k + p;
 
     let mut mat = vec![vec![BigRational::zero(); size]; size];
@@ -110,27 +143,28 @@ pub fn refine_kkt_eq(
         for j in 0..n {
             mat[i][j] = q[i][j].clone();
         }
-        for (ai, &cidx) in active.iter().enumerate() {
-            mat[i][n + ai] = -a[cidx][i].clone();
+        for (ai, &si) in sel_act.iter().enumerate() {
+            mat[i][n + ai] = -a[active[si]][i].clone();
         }
-        for (ei, erow) in e.iter().enumerate() {
-            mat[i][n + k + ei] = -erow[i].clone();
+        for (ei, &se) in sel_eq.iter().enumerate() {
+            mat[i][n + k + ei] = -e[se][i].clone();
         }
         rhs[i] = -c[i].clone();
     }
-    // Active inequality rows:  A_act x = b_act
-    for (ai, &cidx) in active.iter().enumerate() {
+    // Selected active inequality rows:  A_act x = b_act
+    for (ai, &si) in sel_act.iter().enumerate() {
+        let cidx = active[si];
         for j in 0..n {
             mat[n + ai][j] = a[cidx][j].clone();
         }
         rhs[n + ai] = b[cidx].clone();
     }
-    // Equality rows:  E x = d
-    for (ei, erow) in e.iter().enumerate() {
+    // Selected equality rows:  E x = d
+    for (ei, &se) in sel_eq.iter().enumerate() {
         for j in 0..n {
-            mat[n + k + ei][j] = erow[j].clone();
+            mat[n + k + ei][j] = e[se][j].clone();
         }
-        rhs[n + k + ei] = d[ei].clone();
+        rhs[n + k + ei] = d[se].clone();
     }
 
     // Diagnostic for refusals in the field. `Singular` is a catch-all, and the
@@ -151,24 +185,33 @@ pub fn refine_kkt_eq(
     let sol = solve_exact(&mat, &rhs).ok_or(RefineError::Singular)?;
     let x = sol[..n].to_vec();
 
-    // Inequality dual feasibility, assemble the full λ.
+    // Inequality dual feasibility, assemble the full λ. Rows the basis dropped
+    // keep a zero multiplier, which satisfies complementarity trivially.
     let mut lambda = vec![BigRational::zero(); m];
-    for (ai, &cidx) in active.iter().enumerate() {
+    for (ai, &si) in sel_act.iter().enumerate() {
+        let cidx = active[si];
         let lam = &sol[n + ai];
         if lam < &BigRational::zero() {
             return Err(RefineError::NegativeDual { constraint: cidx });
         }
         lambda[cidx] = lam.clone();
     }
-    // Equality multipliers are free-sign — no check.
-    let mu: Vec<BigRational> = (0..p).map(|ei| sol[n + k + ei].clone()).collect();
+    // Equality multipliers are free-sign — no check. Dropped (redundant)
+    // equality rows keep μ = 0; their residual is still verified below.
+    let mut mu = vec![BigRational::zero(); p_all];
+    for (ei, &se) in sel_eq.iter().enumerate() {
+        mu[se] = sol[n + k + ei].clone();
+    }
 
-    // Inactive inequalities must hold: A_i x* ≥ b_i.
-    let active_set: HashSet<usize> = active.iter().copied().collect();
+    // EVERY inequality must hold: A_i x* ≥ b_i.
+    //
+    // Note this checks all `m` rows rather than only the ones outside the
+    // active set. With basis selection an active row may have been dropped
+    // from the linear solve, so it is no longer enforced by construction — and
+    // the old "skip anything in `active`" test would have skipped exactly those
+    // rows, leaving them unverified. Checking all of them is both simpler and
+    // strictly stronger: a selected row holds with equality, which satisfies ≥.
     for (i, row) in a.iter().enumerate() {
-        if active_set.contains(&i) {
-            continue;
-        }
         if dot(row, &x) < b[i] {
             return Err(RefineError::InactiveViolated { constraint: i });
         }
