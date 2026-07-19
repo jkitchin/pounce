@@ -47,7 +47,8 @@ def solSha256 : String := "e5cf3eb55ef280a0d42c3da8a7a46c9ca89016a9c95307d84aa88
 
 /-! ### Problem data, transcribed from the certificate. -/
 
-def Q : Matrix (Fin 2) (Fin 2) ℚ := !![2, 0; 0, 2]
+def Qdiag : Fin 2 → ℚ := ![2, 2]
+def Q : Matrix (Fin 2) (Fin 2) ℚ := Matrix.diagonal Qdiag
 def cvec : Fin 2 → ℚ := ![-6, -8]
 def kconst : ℚ := 25
 def Amat : Matrix (Fin 3) (Fin 2) ℚ := !![1, 0; -1, 0; 0, 1]
@@ -61,18 +62,15 @@ def Dvec : Fin 2 → ℚ := ![2, 2]
 
 /-- `Q ⪰ 0` from the LDLᵀ witness (reusable `posSemidef_of_LDL`). -/
 theorem hQ_psd : Q.PosSemidef := by
-  apply PounceLean.PSD.posSemidef_of_LDL Q Lmat Dvec
-  -- `norm_num` is required, not decoration: with a nontrivial LDLᵀ the
-  -- goals are ordinary rational facts like `0 ≤ 149/10` and
-  -- `9 = 10 * (9/10)`, which bare `simp` does not close.
-  · intro i; fin_cases i <;> simp [Dvec] <;> norm_num
-  · ext i j; fin_cases i <;> fin_cases j <;>
-      simp [Q, Lmat, Dvec, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one] <;> norm_num
+  rw [Q]
+  refine Matrix.PosSemidef.diagonal ?_
+  intro i
+  fin_cases i <;> norm_num [Qdiag]
 
 /-- Stationarity `Q x* + c = Aᵀ λ`. -/
 theorem hstat : Q *ᵥ xstar + cvec = Amatᵀ *ᵥ lamv := by
   funext i; fin_cases i <;>
-    simp [Q, cvec, xstar, Amat, lamv, transpose, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one] <;> norm_num
+    simp [Q, Qdiag, cvec, xstar, Amat, lamv, transpose, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one] <;> norm_num
 
 /-- Dual feasibility `λ ≥ 0`. -/
 theorem hdual : ∀ i, 0 ≤ lamv i := by
@@ -87,7 +85,7 @@ theorem hcompl : ∀ i, lamv i * ((Amat *ᵥ xstar) i - bvec i) = 0 := by
 
 /-- Sanity: reported objective value (cert.candidate.objective). -/
 theorem candidate_objective : obj Q cvec kconst xstar = 4 := by
-  simp [obj, Q, cvec, kconst, xstar, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one] <;> norm_num
+  simp [obj, Q, Qdiag, cvec, kconst, xstar, mulVec, dotProduct, Matrix.mul_apply, Matrix.diagonal_apply, Matrix.transpose_apply, Matrix.vecMul_diagonal, Matrix.vecMul, Fin.sum_univ_succ, Fin.sum_univ_zero, Matrix.cons_val_zero, Matrix.cons_val_one, Matrix.cons_val_succ, Matrix.head_cons, Matrix.of_apply, Matrix.cons_val', Matrix.empty_val', Matrix.cons_val_fin_one] <;> norm_num
 
 /-- Tier 1: the candidate is feasible. -/
 theorem candidate_feasible : Feasible Amat bvec xstar := by
