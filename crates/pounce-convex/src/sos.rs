@@ -275,7 +275,7 @@ where
 /// refinement ran to the iteration limit and drifted to a `-6e7` "bound");
 /// the homogeneous self-dual embedding stays well-conditioned on the same
 /// problems (≈10 iterations), so SOS solves default to it.
-fn sos_opts() -> QpOptions {
+pub fn sos_opts() -> QpOptions {
     QpOptions {
         use_hsde: true,
         ..QpOptions::default()
