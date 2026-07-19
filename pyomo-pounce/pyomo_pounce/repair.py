@@ -22,7 +22,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from pyomo_pounce.block_init import BlockInitReport, _flatten_vars, block_initialize
+from pyomo_pounce.block_init import (
+    BlockInitReport,
+    BlockRepairPlan,
+    _flatten_vars,
+    _preview,
+    _seed_pin,
+    _seed_var,
+    block_initialize,
+    block_repair_plan,
+)
 from pyomo_pounce.preflight import initialize_missing_values
 
 __all__ = ["project_to_feasible", "initialize", "InitializeReport"]
@@ -57,7 +66,6 @@ def project_to_feasible(
     ``initialize_missing_values`` first).
     """
     import pyomo.environ as pyo
-    from pyomo_pounce.block_init import _seed_var
 
     variables = [
         v
@@ -100,11 +108,17 @@ class InitializeReport:
     """What :func:`initialize` did, stage by stage."""
 
     n_decisions_fixed: int = 0
+    #: Pinned variables held for the pipeline (repair="auto" only);
+    #: not counted in ``n_decisions_fixed``.
+    n_pinned: int = 0
     n_filled: int = 0
     #: Termination condition of the projection solve, or None when the
     #: projection stage was skipped.
     projection: Optional[str] = None
     block: Optional[BlockInitReport] = None
+    #: The :class:`BlockRepairPlan` applied, when the specification
+    #: actually needed repair; None when the decisions were used as-is.
+    repair: Optional[BlockRepairPlan] = None
     warnings: List[str] = field(default_factory=list)
 
     @property
@@ -116,6 +130,17 @@ class InitializeReport:
         lines = [
             "pyomo-pounce initialize (fill -> repair -> block-solve)",
             f"  decisions held: {self.n_decisions_fixed}",
+        ]
+        if self.n_pinned:
+            lines.append(f"  pins held     : {self.n_pinned}")
+        if self.repair is not None:
+            lines.append(
+                f"  spec repair   : {len(self.repair.pruned)} pruned "
+                f"({_preview(self.repair.pruned) or 'none'}), "
+                f"{len(self.repair.pinned)} pinned "
+                f"({_preview(self.repair.pinned) or 'none'})"
+            )
+        lines += [
             f"  values filled : {self.n_filled}",
             f"  projection    : {self.projection or 'skipped'}",
         ]
@@ -131,6 +156,7 @@ def initialize(
     decisions=None,
     solver=None,
     *,
+    repair: str = "auto",
     fill: str = "midpoint",
     project: bool = True,
     options: Optional[dict] = None,
@@ -140,7 +166,17 @@ def initialize(
 
     ``decisions`` are held (fixed) at their current values for the
     **whole** pipeline — the projection must not drift the feed or the
-    reflux you just specified — and released at the end. The three
+    reflux you just specified — and released at the end. With
+    ``repair="auto"`` (default) the specification is checked first:
+    when holding the decisions as given leaves the equality system
+    square, they are used as-is. When it does not, they become the
+    candidate pool of :func:`block_repair_plan`: conflicting decisions
+    are pruned (solved for instead of held), variables the equalities
+    provably cannot determine are pinned automatically, and
+    ``report.repair`` records the plan. The repair is call-scoped like
+    the decisions themselves. ``repair="off"`` holds the decisions
+    exactly as given — nothing pruned or pinned, every decision needs a
+    value, and a non-square system is reported, not repaired. The three
     stages, each skippable:
 
     1. **Fill** — :func:`initialize_missing_values` gives every
@@ -156,15 +192,46 @@ def initialize(
     Returns an :class:`InitializeReport`; ``report.block.square`` and
     the name lists tell you what the model is still missing.
     """
+    if repair not in ("auto", "off"):
+        raise ValueError(
+            f"initialize: repair must be 'auto' or 'off', got {repair!r}"
+        )
+
     report = InitializeReport()
 
-    # Hold the decisions across ALL stages: filling must not paper over
-    # a valueless decision, and the projection must not drift them.
+    # Check the specification first, on the untouched model, then hold
+    # it across ALL stages: filling must not paper over a valueless
+    # held decision, and the projection must not drift them. A pruned
+    # decision stays free (it gets solved for); a valueless pinned
+    # variable gets a nonzero bounds-aware seed before being held.
+    plan = None
+    if repair == "auto":
+        plan = block_repair_plan(model, decision_candidates=decisions)
+        if plan.pruned or plan.pinned:
+            report.repair = plan
+        if plan.redundant_constraints:
+            report.warnings.append(
+                f"{len(plan.redundant_constraints)} redundant/conflicting "
+                "equalities no specification can satisfy: "
+                + _preview(plan.redundant_constraints)
+            )
+        if plan.loose_variables:
+            report.warnings.append(
+                f"{len(plan.loose_variables)} variables undetermined by the "
+                "equalities and not repairable: "
+                + _preview(plan.loose_variables)
+            )
     fixed_by_us = []
-    if decisions is not None:
-        for vd in _flatten_vars(decisions):
-            if vd.fixed:
-                continue
+    try:
+        # Fixing happens inside the try so a mid-loop ValueError cannot
+        # leave earlier decisions fixed on the model.
+        if plan is not None:
+            to_hold = plan.decisions
+        else:
+            to_hold = [
+                vd for vd in _flatten_vars(decisions or []) if not vd.fixed
+            ]
+        for vd in to_hold:
             if vd.value is None:
                 raise ValueError(
                     f"decision variable {vd.name!r} has no value: a decision "
@@ -172,9 +239,15 @@ def initialize(
                 )
             vd.fix()
             fixed_by_us.append(vd)
-    report.n_decisions_fixed = len(fixed_by_us)
+        report.n_decisions_fixed = len(fixed_by_us)
+        if plan is not None:
+            for vd in plan.pinned:
+                if vd.value is None:
+                    _seed_pin(vd)
+                vd.fix()
+                fixed_by_us.append(vd)
+            report.n_pinned = len(plan.pinned)
 
-    try:
         if fill is not None:
             report.n_filled = initialize_missing_values(model, strategy=fill)
         if project:
@@ -189,10 +262,11 @@ def initialize(
                     )
             except ValueError as e:
                 report.warnings.append(str(e))
-        # Decisions are already fixed, so block_initialize sees them as
-        # plain inputs; passing them again is harmless.
+        # The held decision set is already fixed, so block_initialize
+        # sees it as plain inputs; in auto mode its own plan is then a
+        # no-op, and repair="off" passes through so nothing gets pinned.
         report.block = block_initialize(
-            model, decisions=decisions, solver=solver, tee=tee
+            model, solver=solver, tee=tee, repair=repair
         )
     finally:
         for vd in fixed_by_us:

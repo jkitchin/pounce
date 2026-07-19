@@ -9,6 +9,47 @@ changes.
 
 ## [Unreleased]
 
+### Added — automatic specification repair: `block_repair_plan`, and repair inside `initialize`/`block_initialize` (Pyomo, #228)
+
+- **A structurally broken specification now initializes anyway, and the report
+  says what was repaired.** Some specifications are wrong by structure, not by
+  starting point: hold every flow control of a distillation column at steady
+  state and the drum levels are undetermined while the holdup balances turn
+  redundant — square by count, singular in structure, unsolvable from any
+  start. `pyomo_pounce.block_repair_plan(model, decision_candidates=...)`
+  plans a valid specification from the variables you would like held: the
+  subset a square system can hold (`decisions`), the ones the equalities
+  claim and solve for instead (`pruned`, provably the minimum number), and
+  the variables nothing can determine (`pinned`) — held at values of your
+  choosing. Like `block_analyze` it is a plan, not an action: nothing fixed,
+  read, or written, no values needed, and the defect lists
+  (`loose_variables`, `redundant_constraints`) come back as uncapped
+  component objects.
+- **Pins are identified automatically, with no user input.** A variable is
+  pinned when every one of its incidence edges is provably unusable: an
+  equation `0 == f/g` cannot determine a variable appearing only in the
+  denominator `g` (its sensitivity there vanishes at every solution), which
+  is exactly the shape substituting `d/dt = 0` into a dynamic balance
+  produces. Dropping those edges makes the identification canonical — on the
+  569-equation double-column example the four drum levels come out
+  identically under every matching order, where raw-incidence matching left
+  an order-dependent (and numerically singular) choice.
+- `initialize` and `block_initialize` run the same check on their `decisions`
+  automatically (`repair="auto"`, the default). A square specification is
+  used exactly as given (the shipped behavior); a broken one is repaired,
+  with `report.repair` recording the plan (None when nothing was needed)
+  and `n_pinned` counting pins separately from decisions. The repair is
+  call-scoped like the decisions themselves, so it never alters the model's
+  own specification. A pruned decision no longer needs a value (it gets
+  solved for); a valueless pinned variable gets a bounds-aware seed that is
+  never exactly zero (a pin lives in denominators). `repair="off"` is the
+  strict path: decisions held exactly as given, non-square specifications
+  reported instead of repaired.
+- Pruning ties are deterministic and user-steerable: among candidates,
+  earlier-listed ones are preferentially kept, so the `decision_candidates`
+  listing order is an implicit priority. Fixing a variable removes it from
+  the plan entirely.
+
 ### Added — `pyomo_pounce.block_analyze`, the analysis half of `block_initialize` on its own (Pyomo, #224)
 
 - **The Dulmage-Mendelsohn partition is now available without solving

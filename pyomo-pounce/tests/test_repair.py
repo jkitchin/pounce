@@ -101,3 +101,44 @@ def test_initialize_skips_projection_when_asked():
     assert report.projection is None
     assert report.n_filled == 1
     assert m.x.value == pytest.approx(2.0)  # midpoint fill, no repair
+
+
+def test_initialize_pins_automatically(solver):
+    # A loose integrator (M appears only as the denominator of a
+    # 0 == f/M row) is identified with no user input: pinned, seeded,
+    # held for the pipeline, released after.
+    m = pyo.ConcreteModel()
+    m.u = pyo.Var(initialize=2.0)
+    m.x = pyo.Var()
+    m.M = pyo.Var(bounds=(1.0, 3.0))  # no value
+    m.c1 = pyo.Constraint(expr=0 == (m.x - m.u) / m.M)
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.initialize(m, solver=solver, decisions=[m.u])
+    assert report.ok, str(report)
+    assert report.repair is not None
+    assert report.repair.pinned == [m.M]
+    assert report.block.square
+    assert m.M.value == pytest.approx(2.0)  # bounds-aware midpoint seed
+    assert m.x.value == pytest.approx(2.0)
+    assert not m.u.fixed and not m.M.fixed
+    assert "spec repair" in str(report)
+
+
+def test_initialize_repair_off_reports_instead(solver):
+    # The strict path: nothing pruned, nothing pinned, the non-square
+    # specification is reported rather than repaired.
+    m = pyo.ConcreteModel()
+    m.u = pyo.Var(initialize=2.0)
+    m.x = pyo.Var()
+    m.M = pyo.Var(bounds=(1.0, 3.0))
+    m.c1 = pyo.Constraint(expr=0 == (m.x - m.u) / m.M)
+    m.obj = pyo.Objective(expr=m.x)
+
+    report = pyomo_pounce.initialize(
+        m, solver=solver, decisions=[m.u], repair="off"
+    )
+    assert report.repair is None
+    assert report.n_pinned == 0
+    assert not report.block.square
+    assert not m.M.fixed

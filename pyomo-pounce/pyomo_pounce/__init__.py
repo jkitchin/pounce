@@ -14,6 +14,9 @@ Initialization helpers (see the POUNCE docs' initialization chapter):
     pyomo_pounce.block_initialize(model, decisions=[...])  # DM-ordered equality solve
     pyomo_pounce.block_analyze(model, decisions=[...])     # the DM partition only:
     #     full component lists, nothing solved, no values needed or written
+    pyomo_pounce.block_repair_plan(model, decision_candidates=[...])
+    #     plan a valid specification: which candidates to hold as the
+    #     decisions, which to prune, and what gets pinned automatically
 
 Parametric sensitivity (see pyomo_pounce.sens):
     declare_sens_param(m.p)      # flag parameters when building the model
@@ -25,8 +28,10 @@ Parametric sensitivity (see pyomo_pounce.sens):
 from pyomo_pounce.block_init import (
     BlockAnalysisReport,
     BlockInitReport,
+    BlockRepairPlan,
     block_analyze,
     block_initialize,
+    block_repair_plan,
 )
 from pyomo_pounce.pounce_solver import POUNCE
 from pyomo_pounce.sens import (
@@ -66,4 +71,6 @@ __all__ = [
     "BlockInitReport",
     "block_analyze",
     "BlockAnalysisReport",
+    "block_repair_plan",
+    "BlockRepairPlan",
 ]
