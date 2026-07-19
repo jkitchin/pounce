@@ -17,6 +17,7 @@
 //! * [`linalg`] — exact dense rational solve (the KKT system).
 //! * [`ldlt`] — exact `LDLᵀ` PSD factorization of `Q`.
 //! * [`nullspace`] — verifiable null-space basis `Z` of the active Jacobian.
+//! * [`reduced`] — exact reduced Hessian `ZᵀHZ` with a strict `LDLᵀ` witness.
 //! * [`refine`] — exact rational active-set KKT solve (Mode B).
 //! * [`refine_farkas`] — exact rational Farkas ray for the `infeasible` verdict.
 //! * [`round_gram`] — exact rational SOS Gram matrix from the SDP's float one.
@@ -28,6 +29,7 @@ pub mod ldlt;
 pub mod linalg;
 pub mod nullspace;
 pub mod rational;
+pub mod reduced;
 pub mod refine;
 pub mod refine_farkas;
 pub mod round_gram;
