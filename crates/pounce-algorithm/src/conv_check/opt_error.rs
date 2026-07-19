@@ -115,7 +115,10 @@ pub fn certificate_masked(
     if threshold.is_nan() || threshold <= 0.0 {
         return false;
     }
-    obj_scale < threshold && unscaled_err > acceptable_tol
+    // Magnitude, not signed value: a negative `obj_scaling_factor` (the
+    // documented way to maximize) is trivially below any positive threshold,
+    // which would arm this on every maximization regardless of scale.
+    obj_scale.abs() < threshold && unscaled_err > acceptable_tol
 }
 
 impl Default for OptErrorConvCheck {

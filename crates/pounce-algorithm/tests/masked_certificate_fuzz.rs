@@ -835,3 +835,179 @@ fn a_blocked_acceptable_certificate_is_not_turned_into_a_failure() {
         );
     }
 }
+
+/// `g(x) = −Σ (xᵢ − aᵢ)⁴` — concave, maximum 0 at `x = a`.
+struct ConcaveQuartic {
+    a: Vec<Number>,
+}
+
+impl TNLP for ConcaveQuartic {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: self.a.len() as i32,
+            m: 0,
+            nnz_jac_g: 0,
+            nnz_h_lag: self.a.len() as i32,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        for v in b.x_l.iter_mut() {
+            *v = -2.0e19;
+        }
+        for v in b.x_u.iter_mut() {
+            *v = 2.0e19;
+        }
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        for v in sp.x.iter_mut() {
+            *v = 2.0;
+        }
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some(
+            -x.iter()
+                .zip(&self.a)
+                .map(|(xi, ai)| (xi - ai).powi(4))
+                .sum::<Number>(),
+        )
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        for (i, gi) in g.iter_mut().enumerate() {
+            *gi = -4.0 * (x[i] - self.a[i]).powi(3);
+        }
+        true
+    }
+    fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, _m: SparsityRequest<'_>) -> bool {
+        true
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                for i in 0..self.a.len() {
+                    irow[i] = i as i32;
+                    jcol[i] = i as i32;
+                }
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                for (i, v) in values.iter_mut().enumerate() {
+                    *v = obj_factor * (-12.0) * (x[i] - self.a[i]).powi(2);
+                }
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// The same flat quartic posed as a minimization and as the mathematically
+/// identical maximization (`obj_scaling_factor = -1`, Ipopt's documented way to
+/// maximize). Both have optimum 0 at `x = a`, and both are well-posed — the
+/// concave objective is what makes the maximization bounded, so a failure here
+/// cannot be blamed on the problem.
+///
+/// `obj_scaling_factor` is signed, and the unscaled residual accessors divide a
+/// max-norm by it (`ipopt_cq.rs:783-806`). Under a negative factor those
+/// "max-norms" come back negative, which makes `unscaled_err > acceptable_tol`
+/// false and silently disables the veto. The same division feeds
+/// `passes_component_tols`, so a negative value also sails under
+/// `dual_inf_tol` / `compl_inf_tol` — meaning the unscaled residual gate added
+/// for pounce#173 is defeated on maximization too, independently of this fix.
+#[test]
+fn the_veto_is_not_disabled_by_a_negative_objective_scaling_factor() {
+    let a: Vec<Number> = (0..50).map(|i| 1e3 + i as Number).collect();
+    let solve_min = |threshold: Number| {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("max_iter", 300, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("print_level", 0, true, false)
+            .unwrap();
+        app.initialize().unwrap();
+        let spec = Spec {
+            n: 50,
+            p: 4,
+            a: a.clone(),
+            c: vec![1.0; 50],
+            w: vec![0.0; 50],
+            x0: 2.0,
+            arows: Vec::new(),
+            brhs: Vec::new(),
+            eq: true,
+        };
+        let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Problem(
+            spec,
+            Rc::new(RefCell::new(Vec::new())),
+        )));
+        let st = app.optimize_tnlp(t);
+        let s = app.statistics();
+        (st, s.final_objective, s.final_unscaled_kkt_error)
+    };
+    let solve_max = |threshold: Number| {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_numeric_value("obj_scaling_factor", -1.0, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("max_iter", 300, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("print_level", 0, true, false)
+            .unwrap();
+        app.initialize().unwrap();
+        let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ConcaveQuartic { a: a.clone() }));
+        let st = app.optimize_tnlp(t);
+        let s = app.statistics();
+        (st, s.final_objective, s.final_unscaled_kkt_error)
+    };
+
+    let (min_off, min_off_obj, _) = solve_min(0.0);
+    let (min_on, min_on_obj, _) = solve_min(1e-4);
+    let (max_off, max_off_obj, max_err) = solve_max(0.0);
+    let (max_on, max_on_obj, _) = solve_max(1e-4);
+    eprintln!(
+        "min f -> 0: off {min_off:?} {min_off_obj:.6e} | on {min_on:?} {min_on_obj:.6e}\n\
+         max g -> 0: off {max_off:?} {max_off_obj:.6e} | on {max_on:?} {max_on_obj:.6e}  \
+         unscaled_err(off)={max_err:.3e}"
+    );
+
+    assert!(
+        max_err >= 0.0,
+        "unscaled KKT error came back NEGATIVE ({max_err:.3e}) under a negative objective \
+         scaling factor — a max-norm cannot be negative, and the pounce#173 unscaled gate is \
+         defeated by it, independently of this veto"
+    );
+    // Distance from the optimum (0) in each form.
+    let min_gain = min_off_obj.abs() - min_on_obj.abs();
+    let max_gain = max_off_obj.abs() - max_on_obj.abs();
+    assert!(
+        min_gain > 0.0,
+        "premise: the veto should improve the minimization ({min_off_obj:.6e} -> {min_on_obj:.6e})"
+    );
+    assert!(
+        max_gain > 0.5 * min_gain,
+        "the veto moved the minimization {min_gain:.6e} closer to the optimum but the identical \
+         maximization only {max_gain:.6e} — the mechanism is sign-dependent"
+    );
+}

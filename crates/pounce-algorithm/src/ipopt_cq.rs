@@ -783,6 +783,13 @@ impl IpoptCalculatedQuantities {
     pub fn curr_unscaled_dual_infeasibility_max(&self) -> Number {
         let df = self.nlp.borrow().obj_scaling_factor();
         let scaled = self.curr_dual_infeasibility_max();
+        // `df` is SIGNED — `obj_scaling_factor = -1` is the documented way to
+        // pose a maximization — while `scaled` is a max-norm. Dividing by the
+        // signed factor returned a NEGATIVE "max-norm", which then sailed under
+        // every `<= tol` comparison: it disabled the gh #200 veto on
+        // maximization, and defeated the unscaled residual gate added for
+        // pounce#173 there as well. Magnitude is what the unscaling means.
+        let df = df.abs();
         if df == 0.0 || df == 1.0 {
             scaled
         } else {
@@ -798,6 +805,13 @@ impl IpoptCalculatedQuantities {
     pub fn curr_unscaled_complementarity_max(&self) -> Number {
         let df = self.nlp.borrow().obj_scaling_factor();
         let scaled = self.curr_complementarity_max();
+        // `df` is SIGNED — `obj_scaling_factor = -1` is the documented way to
+        // pose a maximization — while `scaled` is a max-norm. Dividing by the
+        // signed factor returned a NEGATIVE "max-norm", which then sailed under
+        // every `<= tol` comparison: it disabled the gh #200 veto on
+        // maximization, and defeated the unscaled residual gate added for
+        // pounce#173 there as well. Magnitude is what the unscaling means.
+        let df = df.abs();
         if df == 0.0 || df == 1.0 {
             scaled
         } else {
