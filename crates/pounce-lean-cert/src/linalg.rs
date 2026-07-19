@@ -121,6 +121,45 @@ pub fn nullspace_exact(m_in: &[Vec<BigRational>], cols: usize) -> Vec<Vec<BigRat
     basis
 }
 
+/// Indices of a maximal linearly independent subset of `rows`, chosen greedily
+/// in the order given, by exact forward elimination over ℚ.
+///
+/// Used to pick a **basis** from a degenerate active set. Real LPs routinely
+/// have more constraints active than there are variables, which makes the KKT
+/// system rank-deficient; selecting an independent subset restores
+/// nonsingularity. Row order is the caller's priority — rows offered earlier
+/// win ties.
+///
+/// Being exact, "increases the rank" is decidable: a pivot is zero or it is not.
+/// There is no threshold to tune, which is precisely what makes this safe to do
+/// automatically.
+pub fn select_independent_rows(rows: &[Vec<BigRational>]) -> Vec<usize> {
+    let mut basis: Vec<Vec<BigRational>> = Vec::new();
+    let mut chosen: Vec<usize> = Vec::new();
+
+    for (idx, row) in rows.iter().enumerate() {
+        // Reduce `row` against the echelon rows accumulated so far.
+        let mut v = row.clone();
+        for br in &basis {
+            let Some(pcol) = br.iter().position(|x| !x.is_zero()) else {
+                continue;
+            };
+            if v[pcol].is_zero() {
+                continue;
+            }
+            let f = &v[pcol] / &br[pcol];
+            for (vi, bi) in v.iter_mut().zip(br.iter()) {
+                *vi -= &f * bi;
+            }
+        }
+        if v.iter().any(|x| !x.is_zero()) {
+            basis.push(v);
+            chosen.push(idx);
+        }
+    }
+    chosen
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -153,5 +192,31 @@ mod tests {
         let a = vec![vec![r(1, 1), r(2, 1)], vec![r(2, 1), r(4, 1)]];
         let b = vec![r(1, 1), r(1, 1)];
         assert!(solve_exact(&a, &b).is_none());
+    }
+
+    #[test]
+    fn selects_a_basis_from_dependent_rows() {
+        // r2 = 2*r0, so it must be dropped; r1 and r3 are independent of r0.
+        let rows = vec![
+            vec![r(1, 1), r(0, 1)],
+            vec![r(0, 1), r(1, 1)],
+            vec![r(2, 1), r(0, 1)],
+            vec![r(1, 1), r(1, 1)],
+        ];
+        // Only two independent directions exist in ℚ².
+        assert_eq!(select_independent_rows(&rows), vec![0, 1]);
+    }
+
+    #[test]
+    fn keeps_all_rows_when_independent() {
+        let rows = vec![vec![r(1, 1), r(0, 1)], vec![r(0, 1), r(1, 1)]];
+        assert_eq!(select_independent_rows(&rows), vec![0, 1]);
+    }
+
+    #[test]
+    fn earlier_rows_win_ties() {
+        // Identical rows: the first is kept, the duplicate dropped.
+        let rows = vec![vec![r(3, 1), r(1, 1)], vec![r(3, 1), r(1, 1)]];
+        assert_eq!(select_independent_rows(&rows), vec![0]);
     }
 }
