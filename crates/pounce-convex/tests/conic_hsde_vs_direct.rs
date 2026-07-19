@@ -192,7 +192,6 @@ fn solve(prob: &QpProblem, cones: &[ConeSpec], use_hsde: bool) -> pounce_convex:
 fn agree_on(name: &str, seed: u64, count: usize, mut shape: impl FnMut(&mut Rng) -> Vec<ConeSpec>) {
     let mut rng = Rng(seed);
     let (mut compared, mut hsde_only, mut direct_only) = (0usize, 0usize, 0usize);
-    let mut reference_unusable = 0usize;
     for case in 0..count {
         let blocks = shape(&mut rng);
         let n = rng.range(3, 8);
@@ -206,22 +205,19 @@ fn agree_on(name: &str, seed: u64, count: usize, mut shape: impl FnMut(&mut Rng)
 
         match (a.status, b.status) {
             (QpStatus::Optimal, QpStatus::Optimal) => {
-                // The HSDE driver — the one this change touches — must never
-                // claim optimality with a garbage value.
+                // Neither driver may claim optimality without a usable answer.
+                // This used to hold for HSDE only — the direct driver returned
+                // `Optimal` with `obj = NaN` on some PSD instances (gh #222),
+                // and the comparison had to skip those. Since that fix the
+                // guarantee is symmetric, so assert it on both.
                 assert!(
                     a.obj.is_finite(),
-                    "{name} case {case}: HSDE reported Optimal with a non-finite objective {}",
-                    a.obj
+                    "{name} case {case}: HSDE reported Optimal with a non-finite objective"
                 );
-                // The *direct* driver can (pre-existing defect, reproduced on an
-                // unmodified tree: it returns `Optimal` with `obj = NaN` on some
-                // mixed SOC+PSD instances). Where the reference is unusable there
-                // is nothing to compare against, so count it and move on rather
-                // than blame this change for it.
-                if !b.obj.is_finite() {
-                    reference_unusable += 1;
-                    continue;
-                }
+                assert!(
+                    b.obj.is_finite(),
+                    "{name} case {case}: direct driver reported Optimal with a non-finite objective"
+                );
                 compared += 1;
                 let scale = 1.0_f64.max(a.obj.abs()).max(b.obj.abs());
                 assert!(
@@ -244,12 +240,10 @@ fn agree_on(name: &str, seed: u64, count: usize, mut shape: impl FnMut(&mut Rng)
     assert!(
         compared * 4 >= count * 3,
         "{name}: only {compared}/{count} instances were solved by both drivers \
-         (hsde-only {hsde_only}, direct-only {direct_only}, reference unusable \
-         {reference_unusable}) — too few to be evidence"
+         (hsde-only {hsde_only}, direct-only {direct_only}) — too few to be evidence"
     );
     println!(
-        "{name}: {compared}/{count} compared, hsde-only {hsde_only}, \
-         direct-only {direct_only}, reference-unusable {reference_unusable}"
+        "{name}: {compared}/{count} compared, hsde-only {hsde_only}, direct-only {direct_only}"
     );
 }
 
@@ -315,12 +309,9 @@ fn boundary_hugging_instances_agree_across_drivers() {
         let b = solve(&prob, &cones, false);
         if a.status == QpStatus::Optimal && b.status == QpStatus::Optimal {
             assert!(
-                a.obj.is_finite(),
-                "degenerate case {case}: HSDE reported Optimal with a non-finite objective"
+                a.obj.is_finite() && b.obj.is_finite(),
+                "degenerate case {case}: a driver reported Optimal with a non-finite objective"
             );
-            if !b.obj.is_finite() {
-                continue;
-            }
             compared += 1;
             let scale = 1.0_f64.max(a.obj.abs()).max(b.obj.abs());
             assert!(
@@ -336,4 +327,78 @@ fn boundary_hugging_instances_agree_across_drivers() {
         "only {compared}/80 degenerate instances solved by both — too few to be evidence"
     );
     println!("degenerate: {compared}/80 compared");
+}
+
+/// The gh #222 instance, verbatim.
+///
+/// The direct driver diverges here — which is expected of it on a degenerate
+/// face, and precisely why the HSDE embedding is the default (see `sos_opts`).
+/// The defect was that it reported the divergence as `Optimal`, handing back
+/// `x = [NaN, NaN]` under a status that says the answer is usable.
+///
+/// The mechanism was `inf_norm`: `f64::max` ignores `NaN`, so the ∞-norm of an
+/// all-`NaN` iterate came out `0.0` and `res < tol` passed. Both the norm and
+/// an explicit exit guard now prevent that.
+#[test]
+fn a_diverged_solve_is_never_reported_as_optimal() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![],
+        c: vec![-0.4587520836280501, -0.28511097640465644],
+        a: vec![],
+        b: vec![],
+        g: vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(1, 0, -1.0),
+            Triplet::new(2, 1, 1.0),
+            Triplet::new(3, 1, -1.0),
+            Triplet::new(4, 1, 0.9144362258975529),
+            Triplet::new(5, 0, 0.5271709449981303),
+            Triplet::new(5, 1, -0.6408278339462257),
+            Triplet::new(6, 0, -0.9444454430308236),
+            Triplet::new(6, 1, -0.9246001786463665),
+            Triplet::new(8, 0, -0.7591854473470727),
+            Triplet::new(8, 1, -0.533518750473565),
+            Triplet::new(9, 0, -0.7290269156600226),
+            Triplet::new(9, 1, 0.6420378359547312),
+        ],
+        h: vec![
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            2.3063630770492667,
+            2.5412241108987312,
+            -2.3996656180605522,
+            2.6724192569915712,
+            -2.0785098897371794,
+            -0.09460366494727701,
+        ],
+        lb: vec![],
+        ub: vec![],
+    };
+    let cones = [ConeSpec::Nonneg(4), ConeSpec::Psd(3)];
+
+    let direct = solve(&prob, &cones, false);
+    assert!(
+        !matches!(
+            direct.status,
+            QpStatus::Optimal | QpStatus::OptimalInaccurate
+        ),
+        "direct driver claimed {:?} with x = {:?}",
+        direct.status,
+        direct.x
+    );
+
+    // The instance itself is solvable, and HSDE solves it — so the honest
+    // failure above is a property of that driver, not of the problem. Pin the
+    // answer so a future change cannot quietly break the case that works.
+    let hsde = solve(&prob, &cones, true);
+    assert_eq!(hsde.status, QpStatus::Optimal, "{:?}", hsde.status);
+    assert!(
+        (hsde.obj - -3.0311688992249475).abs() < 1e-9,
+        "{}",
+        hsde.obj
+    );
+    assert!(hsde.x.iter().all(|v| v.is_finite()));
 }

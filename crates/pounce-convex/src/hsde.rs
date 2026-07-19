@@ -567,6 +567,13 @@ where
             }
         }
 
+        // Breakdown: a non-finite iterate carries no information, and every
+        // test below is a comparison against it. Stop and say so (gh #222).
+        if !crate::ipm::all_finite(&[&x, &s, &y, &z]) || !tau.is_finite() || !kappa.is_finite() {
+            status = QpStatus::NumericalFailure;
+            break;
+        }
+
         // Absolute test always governs; the scale-relative test only relaxes
         // it for genuinely large-data problems (`large_scale`, gated above).
         let converged = (pres < opts.tol && dres < opts.tol && gap < opts.tol)
@@ -1105,6 +1112,8 @@ where
         let _ = fire(&mut hook, &mut st);
     }
 
+    // Never hand back a success verdict without a usable solution (gh #222).
+    let status = crate::ipm::demote_unusable(status, &x, obj);
     QpSolution {
         status,
         x,

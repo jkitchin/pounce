@@ -9,6 +9,40 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — a diverged conic solve could report `Optimal` with a `NaN` solution (#222)
+
+- **`solve_socp_ipm` could return `QpStatus::Optimal` alongside `x = [NaN, NaN]`.**
+  A caller checking the status — the documented way to know an answer is usable
+  — was handed a garbage solution with no indication anything had gone wrong.
+  Observed on the direct symmetric driver (`use_hsde: false`) on PSD programs;
+  the underlying flaw was shared by both drivers.
+
+- **Cause: `inf_norm` swallowed `NaN`.** `f64::max` is specified to *ignore*
+  `NaN`, so the natural `fold(0.0, |m, x| m.max(x.abs()))` reports the ∞-norm of
+  an all-`NaN` vector as a perfect `0.0`. Every convergence test in both drivers
+  compares such a norm against `tol`, so a fully diverged iterate read as
+  converged: on the reported instance the iterate went non-finite at iteration
+  31 and the residuals computed from it came back `pinf = dinf = res = 0`, so
+  `res < tol` passed and the solve declared success. `inf_norm` now
+  short-circuits on `NaN`, making every such comparison correctly false.
+
+- Two further guards, so the guarantee does not rest on one primitive: each
+  driver now breaks with `NumericalFailure` as soon as its iterate goes
+  non-finite, and a final pass demotes any `Optimal` / `OptimalInaccurate`
+  verdict that is not backed by a finite solution and objective. Across a
+  31,920-solve randomized sweep over both drivers, **no solve now reports
+  success with a non-finite solution** (previously 32).
+
+- The divergence itself is left as-is: the direct driver stalling or diverging
+  on a degenerate face is known behaviour and precisely why the homogeneous
+  self-dual embedding is the default (`use_hsde: true`, see `sos_opts`). HSDE
+  solves the reported instance correctly. What was wrong was reporting that
+  divergence as success, not the divergence.
+
+- The randomized differential suite added in #221 asserted this property of the
+  HSDE driver only, and had to skip the direct driver's cases as
+  `reference-unusable`; the skip is gone and both drivers are now asserted.
+
 ### Added — weak-activity detection for QP sensitivity (#219)
 
 - **`QpSensitivity` can now report whether its own precondition holds.** The
