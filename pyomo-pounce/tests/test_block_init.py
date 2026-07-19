@@ -284,6 +284,26 @@ def test_block_analyze_calculation_order():
     assert report.constraint_blocks[1] == [m.c3]
 
 
+def test_block_analyze_unfixes_decisions_on_exception(monkeypatch):
+    # The finally must release our fixes even when the analysis dies
+    # before producing anything.
+    import pyomo.contrib.incidence_analysis as ia
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("igraph construction failed")
+
+    monkeypatch.setattr(ia, "IncidenceGraphInterface", boom)
+    m = pyo.ConcreteModel()
+    m.u = pyo.Var()
+    m.x = pyo.Var()
+    m.c = pyo.Constraint(expr=m.x == m.u)
+    m.obj = pyo.Objective(expr=m.x)
+
+    with pytest.raises(RuntimeError, match="igraph construction failed"):
+        pyomo_pounce.block_analyze(m, decisions=[m.u])
+    assert not m.u.fixed
+
+
 def test_block_analyze_no_equalities():
     m = pyo.ConcreteModel()
     m.x = pyo.Var()

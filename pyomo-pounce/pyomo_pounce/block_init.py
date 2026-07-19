@@ -44,7 +44,11 @@ Requires ``pyomo.contrib.incidence_analysis`` (needs ``networkx`` and
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pyomo.core.base.constraint import ConstraintData
+    from pyomo.core.base.var import VarData
 
 __all__ = [
     "block_analyze",
@@ -134,19 +138,19 @@ class BlockAnalysisReport:
     #: The underconstrained subsystem: variables the equalities cannot
     #: determine (the things to specify or flag as decisions), and the
     #: constraints entangled with them.
-    underconstrained_variables: List = field(default_factory=list)
-    underconstrained_constraints: List = field(default_factory=list)
+    underconstrained_variables: List[VarData] = field(default_factory=list)
+    underconstrained_constraints: List[ConstraintData] = field(default_factory=list)
     #: The overconstrained subsystem: redundant or conflicting
     #: specifications, and the variables they fight over.
-    overconstrained_constraints: List = field(default_factory=list)
-    overconstrained_variables: List = field(default_factory=list)
+    overconstrained_constraints: List[ConstraintData] = field(default_factory=list)
+    overconstrained_variables: List[VarData] = field(default_factory=list)
     #: The square (well-determined) part, and its block-triangular
     #: calculation order: ``variable_blocks[k]`` is solved from
     #: ``constraint_blocks[k]``, in sequence.
-    square_variables: List = field(default_factory=list)
-    square_constraints: List = field(default_factory=list)
-    variable_blocks: List = field(default_factory=list)
-    constraint_blocks: List = field(default_factory=list)
+    square_variables: List[VarData] = field(default_factory=list)
+    square_constraints: List[ConstraintData] = field(default_factory=list)
+    variable_blocks: List[List[VarData]] = field(default_factory=list)
+    constraint_blocks: List[List[ConstraintData]] = field(default_factory=list)
 
     @property
     def n_extra_degrees_of_freedom(self) -> int:
