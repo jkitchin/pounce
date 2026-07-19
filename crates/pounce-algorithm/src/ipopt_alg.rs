@@ -168,6 +168,11 @@ pub struct IpoptAlgorithm {
     /// `RestorationFailure`. Cleared/refreshed on every iteration that
     /// satisfies the acceptable predicate.
     acceptable_iterate: Option<crate::iterates_vector::IteratesVector>,
+    /// The first iterate whose *strict* certificate the masked-scale veto
+    /// refused (gh #200), kept so the refusal can be undone verbatim if the
+    /// continued run does not do better. Deliberately not the acceptable
+    /// snapshot: that one is overwritten unconditionally and drifts.
+    vetoed_iterate: Option<crate::iterates_vector::IteratesVector>,
     acceptable_iter_number: Index,
     /// Shared per-solve diagnostics state. `None` unless the CLI
     /// requested `--dump <cat>:<spec>`. When set, the outer loop
@@ -237,6 +242,7 @@ impl IpoptAlgorithm {
             resto_no_outer_progress_count: 0,
             resto_near_feasible_count: 0,
             acceptable_iterate: None,
+            vetoed_iterate: None,
             acceptable_iter_number: 0,
             diagnostics: None,
             debug: None,
@@ -292,34 +298,42 @@ impl IpoptAlgorithm {
     /// optimum, then destabilizes on the ill-conditioned vertex and
     /// cycles in restoration instead of stopping at the acceptable
     /// iterate it already passed through.
-    /// [`Self::terminate_acceptable_or`], but only when a masked-certificate
-    /// veto held this run back from stopping (gh #200).
+    /// Honour a certificate the masked-scale veto refused, when the run that
+    /// was allowed to continue did not end in one of its own (gh #200).
     ///
-    /// The veto's bargain is "never worse off": it refuses an early stop on
-    /// the argument that the iterates continue to the true minimum. When that
-    /// does not pan out and the run instead stalls, the point the solver would
-    /// have certified is still stored — restoring it yields today's answer
-    /// under an honest `Solved_To_Acceptable_Level` label rather than a bare
-    /// failure. Runs that never vetoed are untouched, so this cannot change
-    /// any existing failure verdict.
-    fn terminate_vetoed_or(&mut self, fallback: SolverReturn) -> IterateOutcome {
-        if !self.bundle.conv_check.certificate_vetoed() {
-            return IterateOutcome::Terminate(fallback);
+    /// The veto's bargain is "never worse off": it refuses a point that had
+    /// *already passed the strict test*, betting that continuing reaches a
+    /// better one. This is the losing side of that bet — so hand back exactly
+    /// what would have been returned without the veto, point and status both.
+    ///
+    /// Two details make that guarantee real rather than approximate:
+    ///
+    /// - It runs on **every** non-success exit, applied once where the driver
+    ///   loop's result is finalized. Wiring individual termination sites was
+    ///   tried and is not safe: there are sixteen, and the ones easiest to
+    ///   overlook are the ones most likely to fire here — the veto's extra
+    ///   iterations are exactly what pushes a run past `max_cpu_time`.
+    /// - It restores the **refused iterate itself** (`vetoed_iterate`), not the
+    ///   last acceptable snapshot. `store_acceptable_point` overwrites
+    ///   unconditionally, so after the veto the stored point drifts to whatever
+    ///   the continued run last touched — which may be worse than the point
+    ///   that was refused.
+    fn honour_refused_certificate(&mut self, result: SolverReturn) -> SolverReturn {
+        if matches!(result, SolverReturn::Success) {
+            return result;
         }
-        // The veto refused a point that had *already passed the strict test*,
-        // on the hypothesis that continuing would reach a better one. This exit
-        // means it did not. The hypothesis was wrong, so honour the certificate
-        // that was refused: restore the stored point and report success, which
-        // is exactly what would have been returned without the veto.
-        //
-        // This is what makes the mechanism safe without needing to predict, in
-        // advance, whether a given stop is false — a prediction that cannot be
-        // made from the residuals (see `certificate_masked`). Trying and
-        // failing costs iterations, never correctness.
-        if self.restore_acceptable_point() && self.cq.borrow().curr_f().is_finite() {
-            IterateOutcome::Terminate(SolverReturn::Success)
+        let Some(refused) = self.vetoed_iterate.clone() else {
+            return result;
+        };
+        {
+            let mut d = self.data.borrow_mut();
+            d.set_trial(refused);
+            d.accept_trial_point();
+        }
+        if self.cq.borrow().curr_f().is_finite() {
+            SolverReturn::Success
         } else {
-            IterateOutcome::Terminate(fallback)
+            result
         }
     }
 
@@ -611,6 +625,14 @@ impl IpoptAlgorithm {
             .bundle
             .conv_check
             .check_convergence_with_state(nlp_err, iter_count, &self.data, &self.cq);
+        // Snapshot the *first* refused certificate. Baseline would have stopped
+        // and returned exactly this point, so keeping it — and only it — is what
+        // makes the "never worse" guarantee exact rather than approximate. A
+        // later refusal is also a valid certificate but not necessarily a
+        // better one, so it must not overwrite this.
+        if self.vetoed_iterate.is_none() && self.bundle.conv_check.certificate_vetoed() {
+            self.vetoed_iterate = self.data.borrow().curr.as_ref().cloned();
+        }
         match conv_status {
             ConvergenceStatus::Continue => {}
             ConvergenceStatus::Converged => {
@@ -623,7 +645,7 @@ impl IpoptAlgorithm {
             }
             ConvergenceStatus::MaxIterExceeded => {
                 timing.check_convergence.end();
-                return self.terminate_vetoed_or(SolverReturn::MaxiterExceeded);
+                return IterateOutcome::Terminate(SolverReturn::MaxiterExceeded);
             }
             ConvergenceStatus::CpuTimeExceeded => {
                 timing.check_convergence.end();
@@ -701,7 +723,7 @@ impl IpoptAlgorithm {
         self.data.borrow_mut().curr_mu = next_mu;
         timing.update_barrier_parameter.end();
         if tiny_at_entry && mu_terminates_on_tiny && (next_mu - mu_before).abs() < Number::EPSILON {
-            return self.terminate_vetoed_or(SolverReturn::StopAtTinyStep);
+            return IterateOutcome::Terminate(SolverReturn::StopAtTinyStep);
         }
 
         // pounce#58 — iterate-quality guard for the probing oracle.
@@ -1733,6 +1755,11 @@ impl IpoptAlgorithm {
                 }
             }
         };
+
+        // gh #200: a refused certificate outranks any non-success verdict the
+        // continued run reached. Applied here, once, so no termination path can
+        // bypass it.
+        let result = self.honour_refused_certificate(result);
 
         // Terminal post-mortem checkpoint. Skipped when the user already
         // asked to stop (they were just at a prompt); otherwise the

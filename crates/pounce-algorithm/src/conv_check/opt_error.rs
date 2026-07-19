@@ -308,7 +308,14 @@ impl ConvCheck for OptErrorConvCheck {
             self.obj_scale_certificate_threshold,
             self.acceptable_tol,
         );
-        if masked && !self.veto_fired {
+        // Record a refusal only when a strict certificate was genuinely on the
+        // table. `masked` alone is far broader — it holds on ordinary iterates
+        // long before convergence — and using it would arm the fallback (and
+        // snapshot an arbitrary mid-solve iterate) on runs that were never
+        // about to stop.
+        let refusing_strict =
+            masked && self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf);
+        if refusing_strict && !self.veto_fired {
             self.veto_fired = true;
             tracing::info!(
                 obj_scale,
