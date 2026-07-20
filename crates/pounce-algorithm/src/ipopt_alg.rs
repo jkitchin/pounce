@@ -172,28 +172,33 @@ pub struct IpoptAlgorithm {
     /// refused (gh #200), kept so the refusal can be undone verbatim if the
     /// continued run does not do better. Deliberately not the acceptable
     /// snapshot: that one is overwritten unconditionally and drifts.
-    vetoed_iterate: Option<crate::iterates_vector::IteratesVector>,
-    /// Objective at `vetoed_iterate`, so the refused point can be compared
-    /// against whatever the continued run reached without re-evaluating it.
-    vetoed_obj: Option<Number>,
-    /// Barrier parameter at `vetoed_iterate`.
-    ///
-    /// `curr_mu` lives on `IpoptData` rather than in the `IteratesVector`, so
-    /// restoring the iterate does not rewind it, and `stats.final_mu` is read
-    /// after the restore — leaving the continued run's barrier parameter
-    /// reported next to the refused run's `x`. That pair feeds a warm-started
-    /// corrector's `mu_init` and reaches callers as `info["mu"]`, so it must
-    /// describe the point actually returned. (Not currently observable: `mu`
-    /// has bottomed out at its floor in every fallback case reachable so far,
-    /// making the two values coincide. Kept correct rather than left to depend
-    /// on that.)
-    vetoed_mu: Option<Number>,
-    /// Barrier parameter at `vetoed_acceptable_iterate`, for the same reason.
-    vetoed_acceptable_mu: Option<Number>,
+    vetoed: Option<VetoSnapshot>,
     /// The iterate at which a refused *acceptable-level* termination would have
-    /// fired. Held separately from `vetoed_iterate` because it restores under a
-    /// weaker status, and claiming `Success` for it would over-report.
-    vetoed_acceptable_iterate: Option<crate::iterates_vector::IteratesVector>,
+    /// fired. Held separately from `vetoed` because it restores under a weaker
+    /// status, and claiming `Success` for it would over-report.
+    vetoed_acceptable: Option<VetoSnapshot>,
+    /// Whether a strict refusal has already been *seen*, independent of whether
+    /// a snapshot was successfully captured for it.
+    ///
+    /// This is the first-only latch, held apart from `vetoed` on purpose.
+    /// Testing `vetoed.is_none()` instead would let a refusal whose capture
+    /// failed be "completed" at a later iterate — the veto flag on the
+    /// convergence check is sticky, so it still reads true next pass, and the
+    /// fallback would then restore a point that never passed the strict test.
+    /// With the latch, a failed capture stays failed and the fallback declines.
+    ///
+    /// Declining is *not* the baseline outcome — the baseline stopped and
+    /// reported a certificate at the uncaptured iterate, and declining fails to
+    /// reproduce it. It is the least-bad handling of an unidentifiable baseline,
+    /// not a faithful one.
+    vetoed_seen: bool,
+    /// Same latch for the acceptable-level refusal.
+    vetoed_acceptable_seen: bool,
+    /// `kkt_fidelity_tol` (pounce#173), needed here — not just at termination —
+    /// because the fallback's tiebreak has to predict the post-solve status
+    /// gate. See [`Self::honour_refused_certificate`]. Zero (the default)
+    /// disables the gate, and with it every tiebreak effect it has.
+    pub kkt_fidelity_tol: Number,
     acceptable_iter_number: Index,
     /// Shared per-solve diagnostics state. `None` unless the CLI
     /// requested `--dump <cat>:<spec>`. When set, the outer loop
@@ -263,11 +268,11 @@ impl IpoptAlgorithm {
             resto_no_outer_progress_count: 0,
             resto_near_feasible_count: 0,
             acceptable_iterate: None,
-            vetoed_iterate: None,
-            vetoed_obj: None,
-            vetoed_mu: None,
-            vetoed_acceptable_mu: None,
-            vetoed_acceptable_iterate: None,
+            vetoed: None,
+            vetoed_acceptable: None,
+            vetoed_seen: false,
+            vetoed_acceptable_seen: false,
+            kkt_fidelity_tol: 0.0,
             acceptable_iter_number: 0,
             diagnostics: None,
             debug: None,
@@ -339,74 +344,211 @@ impl IpoptAlgorithm {
     ///   tried and is not safe: there are sixteen, and the ones easiest to
     ///   overlook are the ones most likely to fire here — the veto's extra
     ///   iterations are exactly what pushes a run past `max_cpu_time`.
-    /// - It restores the **refused iterate itself** (`vetoed_iterate`), not the
-    ///   last acceptable snapshot. `store_acceptable_point` overwrites
+    /// - It restores the **refused iterate itself** (`vetoed`), not the last
+    ///   acceptable snapshot. `store_acceptable_point` overwrites
     ///   unconditionally, so after the veto the stored point drifts to whatever
     ///   the continued run last touched — which may be worse than the point
     ///   that was refused.
+    ///
+    /// "Better" is **status-dominant lexicographic**: the reported status first,
+    /// and the objective only to break a tie *within equal status*. Both halves
+    /// matter and the order between them is not cosmetic — see the `Success`
+    /// branch, where reading it as a plain objective comparison costs a status.
     fn honour_refused_certificate(&mut self, result: SolverReturn) -> SolverReturn {
         if matches!(result, SolverReturn::Success) {
             // The continued run produced a certificate of its own — but not
-            // necessarily a better *point*. Both it and the refused iterate
-            // passed the strict test, so both are feasible to tolerance and
-            // comparing objectives is legitimate; keep whichever is lower.
+            // necessarily a better *outcome*.
             //
-            // This is what makes "never worse" hold even when the bet loses in
-            // a way that still converges: on a non-convex problem the extra
-            // travel can reach a different, worse stationary point, and the
-            // budget cap (`VETO_MAX_EXTRA_ITERS`) can also hand back a
-            // late-but-converged point. Neither may silently replace a better
-            // answer the solver already had in hand.
-            let Some(refused_obj) = self.vetoed_obj else {
+            // This is what makes "never worse" hold even when the bet loses in a
+            // way that still converges: on a non-convex problem the extra travel
+            // can reach a different, worse stationary point, and the budget cap
+            // (`VETO_MAX_EXTRA_ITERS`) can also hand back a late-but-converged
+            // one. Neither may silently replace a better answer the solver
+            // already had in hand.
+            //
+            // The comparison is NOT objective-only. That was the original bug
+            // here: both points passed `passes_component_tols`, which looked
+            // like a licence to treat them as equally valid certificates and
+            // just take the lower objective. They are not equally valid when
+            // `kkt_fidelity_tol` is set — `apply_kkt_fidelity_gate` re-grades a
+            // `Success` on the unscaled KKT error afterwards, on a strictly
+            // finer criterion than the convergence test. Taking a 3-ulp
+            // objective win at a point whose unscaled error is 5x worse traded
+            // `Solve_Succeeded` for `Solved_To_Acceptable_Level`: a status
+            // regression against baseline, which is the strongest form of the
+            // guarantee breaking. So rank by the status each point will actually
+            // be *reported* under, and only then by objective.
+            let Some((refused, refused_status)) = self.baseline_outcome() else {
                 return result;
             };
-            let Some(refused) = self.vetoed_iterate.clone() else {
-                return result;
+            self.assert_comparable_scale(&refused);
+            let (curr_f, curr_kkt) = self.curr_obj_and_unscaled_kkt();
+            // Rank each candidate by the status it will actually be *reported*
+            // under, which for a `Success` means after the fidelity gate has had
+            // its say.
+            let continued_success = self.survives_fidelity_gate(curr_kkt);
+            let refused_success = matches!(refused_status, SolverReturn::Success)
+                && self.survives_fidelity_gate(refused.unscaled_kkt);
+            let keep_refused = match (continued_success, refused_success) {
+                // Equal reported status: the objective breaks the tie, which is
+                // legitimate because both points are feasible to tolerance.
+                //
+                // Negated `<=`, not `>`: they differ at NaN, and the difference
+                // matters. A `Converged` exit at an iterate whose objective is
+                // NaN but whose residuals are finite and tiny is reachable (the
+                // convergence test never inspects `f`), and `NaN > x` is false,
+                // which would keep the NaN point over a finite refused one.
+                // Phrased as a negated `<=`, an incomparable objective fails to
+                // justify keeping the continued point and the refused one wins.
+                (true, true) | (false, false) => !(curr_f <= refused.obj),
+                // The refused point keeps a status the continued one loses.
+                (false, true) => true,
+                (true, false) => false,
             };
-            if self.cq.borrow().curr_f() <= refused_obj {
+            if !keep_refused {
                 return result;
             }
-            {
-                let mut d = self.data.borrow_mut();
-                d.set_trial(refused);
-                d.accept_trial_point();
-                if let Some(mu) = self.vetoed_mu {
-                    d.curr_mu = mu;
-                }
-            }
+            self.restore_snapshot(&refused);
+            // The restored point's own status, which is what the baseline
+            // reported for it. For a strict refusal that is `Success` even when
+            // it fails the fidelity gate — the gate re-grades the restored point
+            // downstream, exactly as it would have re-graded the baseline's. For
+            // an acceptable-level refusal it is `StopAtAcceptablePoint`, since
+            // claiming `Success` for a point that only ever qualified at the
+            // acceptable level would over-report.
+            return refused_status;
+        }
+        // The continued run failed outright, so any restored certificate
+        // dominates it on status and the tie-break never applies.
+        let Some((refused, restored_status)) = self.baseline_outcome() else {
             return result;
-        }
-        // A strict refusal outranks an acceptable-level one: it restores under
-        // the stronger status, which is what the baseline would have reported.
-        // When only an acceptable-level termination was refused, restoring it as
-        // `Success` would over-claim, so it comes back as what it was.
-        let (refused, restored_status, restored_mu) = match (
-            self.vetoed_iterate.clone(),
-            self.vetoed_acceptable_iterate.clone(),
-        ) {
-            (Some(strict), _) => (strict, SolverReturn::Success, self.vetoed_mu),
-            (None, Some(acc)) => (
-                acc,
-                SolverReturn::StopAtAcceptablePoint,
-                self.vetoed_acceptable_mu,
-            ),
-            (None, None) => return result,
         };
-        {
-            let mut d = self.data.borrow_mut();
-            d.set_trial(refused);
-            d.accept_trial_point();
-            // The restored point's own barrier parameter, not the continued
-            // run's — see `vetoed_mu`.
-            if let Some(mu) = restored_mu {
-                d.curr_mu = mu;
-            }
-        }
+        self.restore_snapshot(&refused);
         if self.cq.borrow().curr_f().is_finite() {
             restored_status
         } else {
             result
         }
+    }
+
+    /// What the baseline — the same solve with the veto disabled — would have
+    /// returned, as (point, status), or `None` if nothing was ever refused.
+    ///
+    /// The **chronologically first** refusal, not the strictest one. Both arms
+    /// follow the same trajectory until the first refusal, so that iterate is
+    /// where the baseline stopped and what it reported. A refusal recorded later
+    /// sits on the continued trajectory, which the baseline never walked — its
+    /// point was never on offer, and restoring it would neither reproduce the
+    /// baseline nor be comparable to it.
+    ///
+    /// Both kinds do occur, and in either order: an acceptable-level refusal
+    /// needs `acceptable_iter` consecutive qualifying iterates, so a strict
+    /// refusal can precede it, while a run that first drifts through the
+    /// acceptable band can refuse there and only later pass the strict test.
+    /// Preferring `Success` unconditionally was wrong for exactly the second
+    /// case — it compared against a strict point from iteration 50-odd when the
+    /// baseline had already stopped and reported acceptable at iteration 43.
+    fn baseline_outcome(&self) -> Option<(VetoSnapshot, SolverReturn)> {
+        // A refusal that was seen but not captured makes the baseline
+        // unidentifiable, so decline rather than guess. Without this, a failed
+        // strict capture alongside a successful acceptable one would present the
+        // acceptable snapshot as the baseline outcome — but that snapshot sits
+        // on the continued trajectory, so this would silently reintroduce the
+        // very misidentification the chronological rule exists to prevent.
+        // Declining loses the restore; misidentifying reports a wrong point
+        // under a confident status.
+        //
+        // Unreachable today (`data.curr` is always `Some` inside `iterate()`, so
+        // `snapshot_current` cannot fail), but the latches make the state
+        // representable, and it must not be handled by accident.
+        if (self.vetoed_seen && self.vetoed.is_none())
+            || (self.vetoed_acceptable_seen && self.vetoed_acceptable.is_none())
+        {
+            return None;
+        }
+        match (&self.vetoed, &self.vetoed_acceptable) {
+            // Ties go to the strict refusal, and the tie is reachable: both can
+            // arm in the same call when the acceptable streak crosses on the
+            // same iterate a strict certificate is refused. Strict is correct
+            // there because of the baseline's own branch order — the `Converged`
+            // gate (`opt_error.rs`, in `check_convergence_with_state`) precedes
+            // `note_acceptable`, so the baseline returned `Converged` at that
+            // iterate. Reordering those two branches would invert this.
+            (Some(strict), Some(acc)) => Some(if strict.iter <= acc.iter {
+                (strict.clone(), SolverReturn::Success)
+            } else {
+                (acc.clone(), SolverReturn::StopAtAcceptablePoint)
+            }),
+            (Some(strict), None) => Some((strict.clone(), SolverReturn::Success)),
+            (None, Some(acc)) => Some((acc.clone(), SolverReturn::StopAtAcceptablePoint)),
+            (None, None) => None,
+        }
+    }
+
+    /// Capture the current iterate as a veto snapshot, or `None` if there is no
+    /// current iterate to capture.
+    ///
+    /// All-or-nothing by construction — see [`VetoSnapshot`].
+    fn snapshot_current(&self, iter: Index) -> Option<VetoSnapshot> {
+        let iterate = self.data.borrow().curr.as_ref().cloned()?;
+        let cq = self.cq.borrow();
+        Some(VetoSnapshot {
+            iterate,
+            iter,
+            obj: cq.curr_f(),
+            mu: self.data.borrow().curr_mu,
+            unscaled_kkt: cq.curr_unscaled_nlp_error(),
+            obj_scale: cq.obj_scaling_factor(),
+        })
+    }
+
+    /// Current objective and max-norm unscaled KKT error, read together so the
+    /// pair cannot describe different iterates.
+    fn curr_obj_and_unscaled_kkt(&self) -> (Number, Number) {
+        let cq = self.cq.borrow();
+        (cq.curr_f(), cq.curr_unscaled_nlp_error())
+    }
+
+    /// Guard the precondition of every scaled-objective comparison in
+    /// [`Self::honour_refused_certificate`]: the factor must not have moved
+    /// between the refusal and now, or the two numbers are not comparable.
+    fn assert_comparable_scale(&self, snap: &VetoSnapshot) {
+        debug_assert_eq!(
+            snap.obj_scale,
+            self.cq.borrow().obj_scaling_factor(),
+            "objective scaling factor moved during the solve; the refused and \
+             continued objectives are scaled differently and cannot be compared \
+             (gh #200)"
+        );
+    }
+
+    /// Whether a point with this unscaled KKT error would keep `Solve_Succeeded`
+    /// through [`IpoptApplication::apply_kkt_fidelity_gate`].
+    ///
+    /// Mirrors that gate rather than approximating it: same quantity
+    /// (`final_unscaled_kkt_error`), same strict comparison, same "non-positive
+    /// tolerance disables". With the default `kkt_fidelity_tol = 0` this is
+    /// always `true`, so every caller collapses to the plain objective
+    /// comparison and the mechanism's behaviour is unchanged.
+    fn survives_fidelity_gate(&self, unscaled_kkt: Number) -> bool {
+        // Phrased as the negation of the gate's own `> tol` test rather than as
+        // `<= tol`, because the two disagree at NaN and the gate is the
+        // authority: it demotes only on `> tol`, so a NaN error keeps `Success`
+        // there and must keep it here. Written as `<= tol` this mirror said the
+        // opposite, which would rank a NaN-error continued point below a refused
+        // one. Benign in that direction — it restores the baseline point — but a
+        // mirror that disagrees with the thing it mirrors is a latent trap.
+        !(self.kkt_fidelity_tol > 0.0) || !(unscaled_kkt > self.kkt_fidelity_tol)
+    }
+
+    /// Make a refused snapshot the current iterate again.
+    fn restore_snapshot(&mut self, snap: &VetoSnapshot) {
+        let mut d = self.data.borrow_mut();
+        d.set_trial(snap.iterate.clone());
+        d.accept_trial_point();
+        // The restored point's own barrier parameter, not the continued run's —
+        // see `VetoSnapshot::mu`.
+        d.curr_mu = snap.mu;
     }
 
     fn terminate_acceptable_or(&mut self, fallback: SolverReturn) -> IterateOutcome {
@@ -702,16 +844,17 @@ impl IpoptAlgorithm {
         // makes the "never worse" guarantee exact rather than approximate. A
         // later refusal is also a valid certificate but not necessarily a
         // better one, so it must not overwrite this.
-        if self.vetoed_iterate.is_none() && self.bundle.conv_check.certificate_vetoed() {
-            self.vetoed_iterate = self.data.borrow().curr.as_ref().cloned();
-            self.vetoed_obj = Some(self.cq.borrow().curr_f());
-            self.vetoed_mu = Some(self.data.borrow().curr_mu);
+        if !self.vetoed_seen && self.bundle.conv_check.certificate_vetoed() {
+            // Latch on *seeing* the refusal, not on the snapshot being present:
+            // the veto flag is sticky, so keying off `vetoed.is_none()` would
+            // let a failed capture be completed at a later, arbitrary iterate.
+            // See `IpoptAlgorithm::vetoed_seen`.
+            self.vetoed_seen = true;
+            self.vetoed = self.snapshot_current(iter_count);
         }
-        if self.vetoed_acceptable_iterate.is_none()
-            && self.bundle.conv_check.acceptable_certificate_vetoed()
-        {
-            self.vetoed_acceptable_iterate = self.data.borrow().curr.as_ref().cloned();
-            self.vetoed_acceptable_mu = Some(self.data.borrow().curr_mu);
+        if !self.vetoed_acceptable_seen && self.bundle.conv_check.acceptable_certificate_vetoed() {
+            self.vetoed_acceptable_seen = true;
+            self.vetoed_acceptable = self.snapshot_current(iter_count);
         }
         match conv_status {
             ConvergenceStatus::Continue => {}
@@ -1670,7 +1813,38 @@ impl IpoptAlgorithm {
     /// (TINY_STEP_DETECTED → STEP_BECOMES_TINY,
     /// RESTORATION_FAILED → RESTORATION_FAILURE, etc.) lands in
     /// Phase 9 alongside the restoration phase.
+    /// Run the solve and finalize its result.
+    ///
+    /// A thin wrapper on purpose. The gh #200 fallback must see **every** exit
+    /// of the driver loop, and wiring it into individual termination sites was
+    /// tried and failed — there are sixteen, and the ones easiest to overlook
+    /// are the ones most likely to matter. Keeping the loop in a separate
+    /// function means every `return` inside it, present or future, flows through
+    /// [`Self::honour_refused_certificate`] by construction rather than by the
+    /// author remembering to.
+    ///
+    /// This got more important once the fallback started changing the status in
+    /// *both* directions: it can now hand back `StopAtAcceptablePoint` for a
+    /// `Success` it was given. Anything reading `result` before the hook is
+    /// reading a status that is not the one reported.
     pub fn optimize(&mut self) -> SolverReturn {
+        let result = self.optimize_inner();
+
+        // gh #200: a refused certificate outranks any non-success verdict the
+        // continued run reached, and an earlier refusal can outrank the
+        // continued run's own certificate. Applied here, once.
+        let result = self.honour_refused_certificate(result);
+
+        // Terminal post-mortem checkpoint. Skipped when the user already
+        // asked to stop (they were just at a prompt); otherwise the
+        // debugger gets a last look at the final/failing iterate.
+        if !matches!(result, SolverReturn::UserRequestedStop) {
+            self.fire_debug_terminal(result);
+        }
+        result
+    }
+
+    fn optimize_inner(&mut self) -> SolverReturn {
         // Top-level span for the whole solve; every iteration / linear
         // solve / restoration event nests under it (pounce#71).
         let _solve_span = tracing::info_span!("solve").entered();
@@ -1836,19 +2010,60 @@ impl IpoptAlgorithm {
             }
         };
 
-        // gh #200: a refused certificate outranks any non-success verdict the
-        // continued run reached. Applied here, once, so no termination path can
-        // bypass it.
-        let result = self.honour_refused_certificate(result);
-
-        // Terminal post-mortem checkpoint. Skipped when the user already
-        // asked to stop (they were just at a prompt); otherwise the
-        // debugger gets a last look at the final/failing iterate.
-        if !matches!(result, SolverReturn::UserRequestedStop) {
-            self.fire_debug_terminal(result);
-        }
         result
     }
+}
+
+/// A termination certificate the masked-scale veto refused (gh #200), with
+/// everything the fallback needs to undo the refusal verbatim.
+///
+/// One struct rather than a field per component. The fallback is only correct if
+/// these all describe *the same iterate*, and parallel `Option`s make
+/// "objective recorded, iterate missing" representable — which was reachable:
+/// the iterate is cloned out of `data.curr` and can come back `None`, while the
+/// objective and barrier parameter were written unconditionally. Capture is now
+/// all-or-nothing, so the disagreement cannot be constructed.
+#[derive(Clone)]
+struct VetoSnapshot {
+    /// The refused iterate itself.
+    iterate: crate::iterates_vector::IteratesVector,
+    /// Iteration at which the refusal happened.
+    ///
+    /// Needed to identify which refusal is the *baseline-equivalent* one. The
+    /// baseline stops at the first iterate where it would terminate, so when
+    /// both a strict and an acceptable-level refusal are on record it is the
+    /// chronologically earlier one that says what the baseline returned — not
+    /// the stricter one. The later refusal sits on the continued trajectory,
+    /// which the baseline never walked, so comparing against it compares
+    /// against a point that was never on offer.
+    iter: Index,
+    /// Scaled objective there, so the refused point can be compared against
+    /// whatever the continued run reached without re-evaluating it.
+    obj: Number,
+    /// Barrier parameter there.
+    ///
+    /// `curr_mu` lives on `IpoptData` rather than in the `IteratesVector`, so
+    /// restoring the iterate does not rewind it, and `stats.final_mu` is read
+    /// after the restore — leaving the continued run's barrier parameter
+    /// reported next to the refused run's `x`. That pair feeds a warm-started
+    /// corrector's `mu_init` and reaches callers as `info["mu"]`, so it must
+    /// describe the point actually returned. (Not currently observable: `mu` has
+    /// bottomed out at its floor in every fallback case reachable so far, making
+    /// the two values coincide. Kept correct rather than left to depend on that.)
+    mu: Number,
+    /// Max-norm unscaled KKT error there, so the tiebreak can see what
+    /// `apply_kkt_fidelity_gate` will see. Recorded at refusal time because the
+    /// gate runs post-solve, long after this iterate is gone.
+    unscaled_kkt: Number,
+    /// Objective scaling factor in force when `obj` was recorded.
+    ///
+    /// `obj` is a *scaled* objective, so comparing it against the continued
+    /// run's is only meaningful under the same factor, sign included. Held so
+    /// that assumption is asserted rather than trusted: periodic or adaptive
+    /// rescaling is a natural thing to add for exactly the ill-scaled problems
+    /// this mechanism targets, and it would silently turn the comparison into
+    /// noise.
+    obj_scale: Number,
 }
 
 /// Internal result of one [`IpoptAlgorithm::iterate`] call. Mirrors the

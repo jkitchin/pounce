@@ -244,6 +244,11 @@ pub struct AlgorithmBuilder {
     /// `diverging_iterates_tol` — if `max_i |x_i|` exceeds this the solve
     /// aborts as diverging. Default `1e20`.
     pub diverging_iterates_tol: Number,
+    /// `kkt_fidelity_tol` (pounce#173). Read by the algorithm as well as by the
+    /// post-solve gate, because the #200 fallback's tiebreak has to rank the two
+    /// candidate points by the status each will be *reported* under. Default
+    /// `0.0` (gate disabled).
+    pub kkt_fidelity_tol: Number,
     pub conv_check: ConvCheckOptions,
     pub mu: MuOptions,
     pub line_search: LineSearchOptions,
@@ -734,6 +739,7 @@ impl Default for AlgorithmBuilder {
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
             diverging_iterates_tol: 1e20,
+            kkt_fidelity_tol: 0.0,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
             line_search: LineSearchOptions::default(),
@@ -1127,6 +1133,7 @@ mod tests {
                             tiny_step_tol: 10.0 * Number::EPSILON,
                             tiny_step_y_tol: 1e-2,
                             diverging_iterates_tol: 1e20,
+                            kkt_fidelity_tol: 0.0,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),
                             line_search: LineSearchOptions::default(),

@@ -1740,3 +1740,196 @@ fn a_warm_start_chain_is_unaffected_by_the_veto() {
     );
     eprintln!("warm-start chain: {cases} cases, veto changed leg 1 on {engaged}");
 }
+
+/// Degenerate sextic with a rank-deficient constraint block, tuned so that an
+/// *acceptable-level* refusal fires strictly before a *strict* one.
+///
+/// `min sum (x_i - a_i)^6 - w_i x_i^2` subject to three equalities: a sphere
+/// row duplicated exactly (Jacobian rank 1 across those two, so the KKT system
+/// is singular and needs regularization) plus a tangent row `(x_0 - a_0)^2 = 0`
+/// whose gradient vanishes at its own solution.
+struct ChronologyCase;
+
+const CHRONO_A: [Number; 3] = [-0.6562098709158892, -6.6421858042642175, -2.598669849860882];
+const CHRONO_W: [Number; 3] = [9682.539592993013, 5145.503368047705, 6220.696295926191];
+const CHRONO_B: Number = 12.825582160408128;
+
+impl TNLP for ChronologyCase {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 3,
+            m: 3,
+            nnz_jac_g: 9,
+            nnz_h_lag: 3,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        for v in b.x_l.iter_mut() {
+            *v = -2.0e19;
+        }
+        for v in b.x_u.iter_mut() {
+            *v = 2.0e19;
+        }
+        for v in b.g_l.iter_mut() {
+            *v = 0.0;
+        }
+        for v in b.g_u.iter_mut() {
+            *v = 0.0;
+        }
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        for v in sp.x.iter_mut() {
+            *v = -50.0;
+        }
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some(
+            (0..3)
+                .map(|i| (x[i] - CHRONO_A[i]).powi(6) - CHRONO_W[i] * x[i] * x[i])
+                .sum::<Number>(),
+        )
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        for i in 0..3 {
+            g[i] = 6.0 * (x[i] - CHRONO_A[i]).powi(5) - 2.0 * CHRONO_W[i] * x[i];
+        }
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        let v: Number = x.iter().map(|v| v * v).sum::<Number>() - CHRONO_B;
+        g[0] = v;
+        g[1] = v;
+        g[2] = (x[0] - CHRONO_A[0]) * (x[0] - CHRONO_A[0]);
+        true
+    }
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, _n: bool, mode: SparsityRequest<'_>) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                for i in 0..3 {
+                    for j in 0..3 {
+                        irow[i * 3 + j] = i as i32;
+                        jcol[i * 3 + j] = j as i32;
+                    }
+                }
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                for j in 0..3 {
+                    values[j] = 2.0 * x[j];
+                    values[3 + j] = 2.0 * x[j];
+                    values[6 + j] = 0.0;
+                }
+                values[6] = 2.0 * (x[0] - CHRONO_A[0]);
+            }
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                for i in 0..3 {
+                    irow[i] = i as i32;
+                    jcol[i] = i as i32;
+                }
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                let lam = l.expect("no lambda");
+                for i in 0..3 {
+                    values[i] = obj_factor
+                        * (30.0 * (x[i] - CHRONO_A[i]).powi(4) - 2.0 * CHRONO_W[i])
+                        + 2.0 * (lam[0] + lam[1]);
+                }
+                values[0] += 2.0 * lam[2];
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// When both a strict and an acceptable-level refusal are on record, the
+/// fallback must restore the **chronologically first** one — not the stricter
+/// one.
+///
+/// Both arms follow the same trajectory only up to the first refusal, so that
+/// iterate is where the baseline stopped and what it reported. Here the
+/// acceptable-level refusal fires at iteration 43, which is exactly where the
+/// baseline terminates with `Solved_To_Acceptable_Level`; the strict refusal
+/// fires later, on the continued trajectory the baseline never walked.
+/// Preferring the strict snapshot therefore compared against — and restored —
+/// a point that was never on offer, and the run came back with an objective
+/// worse than baseline's at the same reported status.
+///
+/// `kkt_fidelity_tol` is what makes the regression observable rather than
+/// merely latent: without it the continued run's own `Solve_Succeeded`
+/// outranks the baseline's acceptable stop and the lexicographic order is
+/// satisfied whatever the objective does. With it, that `Success` is demoted
+/// back to `Solved_To_Acceptable_Level`, the two outcomes tie on status, and
+/// the objective comparison becomes load-bearing.
+#[test]
+fn the_earliest_refusal_is_the_one_restored_not_the_strictest() {
+    let solve = |threshold: Number| {
+        let mut app = IpoptApplication::new();
+        app.options_mut()
+            .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("kkt_fidelity_tol", 1e-4, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("max_iter", 250, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("print_level", 0, true, false)
+            .unwrap();
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ChronologyCase));
+        let status = app.optimize_tnlp(tnlp);
+        let s = app.statistics();
+        (status, s.final_objective, s.iteration_count)
+    };
+
+    let (base_status, base_obj, base_iters) = solve(0.0);
+    let (veto_status, veto_obj, veto_iters) = solve(1e-4);
+
+    // Premise guard: if the veto never engaged on this problem the assertions
+    // below would hold vacuously and the regression would sail through.
+    assert_ne!(
+        base_iters, veto_iters,
+        "premise broken: the veto did not engage, so this test proves nothing \
+         (base {base_iters} iters, veto {veto_iters})"
+    );
+    assert_eq!(
+        base_status,
+        ApplicationReturnStatus::SolvedToAcceptableLevel,
+        "premise broken: the baseline is supposed to stop at the acceptable \
+         level here; got {base_status:?}"
+    );
+
+    // The guarantee: never worse on status, and within equal status never worse
+    // on objective. Restoring the later strict point instead of the earlier
+    // acceptable one lands here with an objective ~8.6e-3 above baseline.
+    assert_eq!(
+        veto_status, base_status,
+        "status regressed: base {base_status:?} -> veto {veto_status:?}"
+    );
+    assert!(
+        veto_obj <= base_obj + 1e-9 * base_obj.abs().max(1.0),
+        "equal status but the veto returned a worse objective: base {base_obj:.15e} \
+         -> veto {veto_obj:.15e} (worse by {:.3e}) — the fallback restored the \
+         later strict refusal instead of the earlier acceptable one",
+        veto_obj - base_obj
+    );
+}

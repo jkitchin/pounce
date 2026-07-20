@@ -1706,6 +1706,7 @@ impl IpoptApplication {
         alg.tiny_step_tol = builder.tiny_step_tol;
         alg.tiny_step_y_tol = builder.tiny_step_y_tol;
         alg.diverging_iterates_tol = builder.diverging_iterates_tol;
+        alg.kkt_fidelity_tol = builder.kkt_fidelity_tol;
         // Honor `print_level == 0`: silence the algorithm's direct-to-stdout
         // output — the per-iteration table and, new in #206, the
         // problem-statistics and end-of-run summary blocks the engine now
@@ -2125,6 +2126,9 @@ impl IpoptApplication {
         }
         if let Some(v) = read_num("obj_scale_certificate_threshold") {
             builder.conv_check.obj_scale_certificate_threshold = v;
+        }
+        if let Some(v) = read_num("kkt_fidelity_tol") {
+            builder.kkt_fidelity_tol = v;
         }
         if let Some(v) = read_num("dual_inf_tol") {
             builder.conv_check.dual_inf_tol = v;
