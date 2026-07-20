@@ -312,23 +312,6 @@ impl IpoptAlgorithm {
         true
     }
 
-    /// Terminal fallback for a near-feasible numerical breakdown (a
-    /// restoration cycle or a failed step computation). If a finite
-    /// acceptable iterate was recorded earlier in the solve, roll back
-    /// to it and stop at [`SolverReturn::StopAtAcceptablePoint`] (mapped
-    /// by the application layer to `Solved_To_Acceptable_Level`) rather
-    /// than surfacing the hard `fallback` error. This mirrors upstream
-    /// `IpBacktrackingLineSearch`'s `ACCEPTABLE_POINT_REACHED`
-    /// precedence: when the line search exhausts but an acceptable point
-    /// was stored, that point is returned instead of the failure. With
-    /// no snapshot — or if the restored objective is non-finite — the
-    /// original `fallback` status is surfaced unchanged, so genuinely
-    /// failed/infeasible solves keep their honest status. Catches
-    /// degenerate LPs (kleemin8, nsir2) whose μ-endgame reaches the
-    /// optimum, then destabilizes on the ill-conditioned vertex and
-    /// cycles in restoration instead of stopping at the acceptable
-    /// iterate it already passed through.
-
     /// Honour a certificate the masked-scale veto refused, when the run that
     /// was allowed to continue did not end in one of its own (gh #200).
     ///
@@ -551,6 +534,22 @@ impl IpoptAlgorithm {
         d.curr_mu = snap.mu;
     }
 
+    /// Terminal fallback for a near-feasible numerical breakdown (a
+    /// restoration cycle or a failed step computation). If a finite
+    /// acceptable iterate was recorded earlier in the solve, roll back
+    /// to it and stop at [`SolverReturn::StopAtAcceptablePoint`] (mapped
+    /// by the application layer to `Solved_To_Acceptable_Level`) rather
+    /// than surfacing the hard `fallback` error. This mirrors upstream
+    /// `IpBacktrackingLineSearch`'s `ACCEPTABLE_POINT_REACHED`
+    /// precedence: when the line search exhausts but an acceptable point
+    /// was stored, that point is returned instead of the failure. With
+    /// no snapshot — or if the restored objective is non-finite — the
+    /// original `fallback` status is surfaced unchanged, so genuinely
+    /// failed/infeasible solves keep their honest status. Catches
+    /// degenerate LPs (kleemin8, nsir2) whose μ-endgame reaches the
+    /// optimum, then destabilizes on the ill-conditioned vertex and
+    /// cycles in restoration instead of stopping at the acceptable
+    /// iterate it already passed through.
     fn terminate_acceptable_or(&mut self, fallback: SolverReturn) -> IterateOutcome {
         if self.restore_acceptable_point() && self.cq.borrow().curr_f().is_finite() {
             IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
