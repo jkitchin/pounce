@@ -391,7 +391,17 @@ impl ConvCheck for OptErrorConvCheck {
         // certificate is restored regardless, so this bounds cost, not
         // correctness.
         let budget_spent = self.veto_extra_iters > VETO_MAX_EXTRA_ITERS;
-        let masked = !budget_spent
+        // A non-finite objective disqualifies the veto outright. `passes_component_tols`
+        // never inspects `f`, so a strict certificate can pass at an iterate whose
+        // objective is NaN while its residuals are finite and tiny — and the unvetoed
+        // run returns exactly that, NaN objective and all. Refusing it would arm a
+        // snapshot the restore then declines (`honour_refused_certificate` requires a
+        // finite objective), surfacing a failure where the baseline reported success.
+        // Declining to engage keeps that case bit-identical to the baseline instead.
+        // The acceptable-level side already had this property: finite `f` is a
+        // precondition of qualifying there.
+        let masked = curr_f.is_finite()
+            && !budget_spent
             && certificate_masked(
                 obj_scale,
                 unscaled_err,
@@ -629,6 +639,39 @@ mod tests {
         assert!(c.last_acceptable_obj.is_none());
         ConvCheck::set_curr_acceptable_obj(&mut c, 4.2);
         assert_eq!(c.last_acceptable_obj, Some(4.2));
+    }
+
+    #[test]
+    fn a_non_finite_objective_disqualifies_the_veto() {
+        // `passes_component_tols` never inspects `f`, so a strict certificate can
+        // pass at an iterate whose objective is NaN while its residuals are finite
+        // and tiny — and the unvetoed run returns exactly that. Refusing it would
+        // arm a snapshot that the restore then declines (it requires a finite
+        // objective), surfacing a failure where the baseline reported success:
+        // a never-worse violation, on the one path where the objective is not
+        // usable as a tiebreak.
+        let c = OptErrorConvCheck {
+            tol: 1e-8,
+            dual_inf_tol: 1.0,
+            constr_viol_tol: 1e-4,
+            compl_inf_tol: 1e-4,
+            ..Default::default()
+        };
+        // The residuals alone say "converged"; the objective says nothing usable.
+        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0));
+        // The masked predicate itself is unchanged — the finiteness gate lives at
+        // the call site, where `curr_f` is in hand.
+        assert!(certificate_masked(
+            1e-8,
+            8.4e-1,
+            c.obj_scale_certificate_threshold,
+            c.acceptable_tol
+        ));
+        // Both the guard's inputs behave as the call site composes them.
+        for bad in [Number::NAN, Number::INFINITY, Number::NEG_INFINITY] {
+            assert!(!bad.is_finite(), "{bad} should disqualify the veto");
+        }
+        assert!((1.0_f64).is_finite());
     }
 
     #[test]

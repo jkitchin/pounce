@@ -45,6 +45,15 @@ true minimum when the stop is refused, the chosen design is:
 
 **Masked-certificate veto with continuation, plus a relabel backstop.**
 
+> **Correction (see §10.1).** The "never worse" guarantee below is stated
+> conjunctively ("status no worse AND objective no worse"). That reading is not
+> satisfiable and never was: on the cross-status upgrade paths the mechanism
+> returns a *better status at a higher raw objective*, and the two objectives sit
+> at different constraint violations, where raw comparison is not meaningful. The
+> guarantee holds under a **lexicographic, status-dominant** reading, with the
+> objective clause claimed only within an equal-status pair. Read §10 before
+> relying on anything in this section.
+
 Define, at the convergence check:
 
 ```
@@ -506,3 +515,47 @@ two-counter behaviour is restored.
   restore, so they describe the returned point. The restoration inner IPM is
   immune — its adapter delegates to the *scalar* `check_convergence`, which has
   no veto logic.
+
+
+### 10.5 Re-analysis of the fixed machine
+
+The formal analysis was re-run against the single-counter version, since the
+analysis that found the defect had been performed on code that no longer existed.
+
+**Verdict: the fix is correct**, and correct *by the structure of the machine*
+rather than by tuning. The three properties that carry it:
+
+1. The mechanism's termination decisions are a strict **subset** of the
+   baseline's — `Converged` and `ConvergedToAcceptable` each require the
+   baseline's own condition plus `!masked`, and no other exit is suppressed.
+   So the first difference is always a suppression, never a different or earlier
+   exit, and the first-deviation iterate `k*` stays well defined.
+2. **Every suppression is flagged in the call it happens**, and the first flag of
+   each kind is snapshotted at that same iterate with `curr` unmoved. There is no
+   third suppression, hence no unflagged deviation — the hole that produced the
+   original counterexamples is closed by construction.
+3. The counter is now bit-identical to the baseline's on every shared iterate,
+   because it breaks on exactly one condition (`!acceptable_now`) and `masked`
+   plays no part in advancement. The old masked-phase reset was an *extra* break
+   the baseline never had.
+
+Two new post-deviation behaviours were checked and are harmless: the count now
+stays at or above threshold through a suppressed phase, so `ConvergedToAcceptable`
+can fire immediately once the veto lifts (that result is then overwritten by the
+snapshot, i.e. baseline-exact); and the acceptable counter advances on iterates
+after a strict refusal where the baseline never ran — unreachable, since every
+fallback from that state prefers the strict snapshot.
+
+**One violation was found and is fixed here:** a strict certificate can pass at an
+iterate whose objective is non-finite (`passes_component_tols` never inspects
+`f`), and the baseline returns exactly that. Refusing it armed a snapshot the
+restore then declined, surfacing a failure where the baseline reported success.
+The veto now declines to engage at a non-finite objective, which keeps that case
+bit-identical to the baseline. The acceptable-level side already had the property,
+finite `f` being a precondition of qualifying there.
+
+**Preconditions the guarantee rests on**, all verified: the convergence check is
+trajectory-inert; the computed objective scale is constant per solve; the snapshot
+code stays adjacent to the check with `curr` unmoved and keeps its first-only
+guards; `honour_refused_certificate` remains the single post-loop chokepoint with
+strict-over-acceptable preference; and "no worse" is read lexicographically.
