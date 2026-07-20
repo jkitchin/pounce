@@ -320,14 +320,80 @@ predicate that fires on `quartc` also fires on `meyer3`, so a relabel would
 reintroduce precisely the collateral §8.1 removed. Pinned by
 `sqp_path_behaviour_on_a_masked_objective_is_pinned`.
 
+### 9.5 Post-optimal sensitivity after a fallback restore — OPEN DEFECT
+
+Verified present, cause not found, **not fixed**. Filed rather than hidden.
+
+On the gh #200 masked problem both arms return the *identical* point and status,
+and the sensitivity object differs by nine orders of magnitude:
+
+```
+baseline (threshold=0)  Solved_To_Acceptable_Level  f=-6.833859e14
+                        x=[99999.99095622574, 68338588703875.97]
+                        solve_scaled_space(e0) = [4.5283e10, 0]
+veto (falls back)       Solved_To_Acceptable_Level  f=-6.833859e14
+                        x=[99999.99095622574, 68338588703875.97]   <- byte-identical
+                        solve_scaled_space(e0) = [9.6844e19, 0]     <- 2.1e9 relative
+```
+
+Baseline does not have this problem: it stops at the point it factorized, so its
+held factor and its returned iterate agree. The fallback restores an earlier
+iterate after the run travelled on, so `PdSensBacksolver` — which explicitly
+reuses the **held factor** — solves against state belonging to a different
+point. A consumer receives a `dx/dp` that does not correspond to the solution it
+was handed, silently.
+
+Three hypotheses were tried and all three were wrong, which is why this is
+reported rather than patched:
+
+1. **Refresh the factorization** at the restored point via
+   `PdSearchDirCalc::compute_search_direction` (clearing `delta` first, since it
+   short-circuits when a regularization delta is pending). It ran (`ok=true`)
+   and changed nothing.
+2. **Restore `curr_mu`** with the iterate. Correct on its own merits and kept
+   (see 9.6), but it did not change the sensitivity either.
+3. **A malformed probe** — `solve_scaled_space` rejects a mismatched length and
+   it returned `true`, so the compound dimension really is 2 here and the probe
+   is valid.
+
+Whatever carries the discrepancy is therefore neither the factor as refreshed by
+that entry point, nor `mu`, nor the returned iterate. Likely candidates not yet
+eliminated: cached `IpoptCq` quantities that `set_trial`/`accept_trial_point`
+outside the main loop does not invalidate, or a `pd` solver instance distinct
+from the one `compute_search_direction` refreshes.
+
+Scope: runs that fall back **and** have an `on_converged` sensitivity consumer
+attached. Correctness of the returned point, objective and status is unaffected.
+
+### 9.6 Barrier parameter restored with the iterate
+
+`curr_mu` lives on `IpoptData`, not in the `IteratesVector`, so a restore
+rewound `x` but not `mu` while `stats.final_mu` is read afterwards — reporting
+the continued run's barrier parameter beside the refused run's point. Fixed for
+both the strict and acceptable-level snapshots. Latent rather than observable:
+in every reachable fallback case `mu` has bottomed out at its floor, making the
+two coincide (2.506e-9 measured in both arms).
+
 ### 9.4 Still open
 
-- **Wall time.** The 9.1 case still runs 300 iterations where the baseline used
-  40. The §6 criterion (~5%) is unmeasured and this is the mechanism that
-  threatens it.
-- `nlp_scaling_method=user-scaling` with a deliberately small user
-  `obj_scaling_factor` would trip the veto on every solve of a well-conditioned
-  problem.
-- `mu_strategy_fallback` / `l1_auto_fallback` trigger on exactly the statuses the
-  fallback now converts, so the veto may suppress a retry.
-- The §6 benchmark sweep has not been run.
+All three items listed here previously have since been closed, and one new
+defect (9.5) was opened by the same pass:
+
+- **Wall time — CLOSED.** Bounded by `VETO_MAX_EXTRA_ITERS`; the 9.1 case went
+  300 → 115 iterations. Same-code A/B spot check: controls (3000-iteration and
+  large-dimension problems that never veto) show −1.0% … +1.3%, mean +0.26% —
+  no detectable per-iteration cost. The affected set totals 11.7s of a 4413s
+  suite, so whole-suite impact is well under 1%.
+- **User scaling — CLOSED (was a real defect).** The gate read the *product*
+  `df * user_obj_factor`, so a user who deliberately scaled a well-conditioned
+  objective down was second-guessed: 13 → 18 iterations for no benefit. Now
+  gates on the solver-computed `df` alone.
+- **Fallback retry suppression — CLOSED, was never real.** `mu_strategy_fallback`
+  and `l1_fallback_on_restoration_failure` give identical status and objective in
+  both arms. A refused strict certificate is exactly what the baseline returns as
+  `Success`, so neither arm retries; a refused acceptable-level one restores as
+  `StopAtAcceptablePoint`, which still triggers the retry.
+- **The §6 benchmark sweep — DONE.** 780 problems across both suites: zero
+  strict-status losses, zero objective changes among still-strict runs, all
+  targets met.
+- **9.5 is open** and is the one item that should not be forgotten.

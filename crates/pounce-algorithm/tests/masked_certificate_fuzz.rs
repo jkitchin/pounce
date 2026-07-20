@@ -1258,3 +1258,63 @@ fn user_scaled_well_conditioned_problems_do_not_pay_a_veto_tax() {
         );
     }
 }
+
+/// The veto must not suppress a retry the fallback drivers would have made.
+///
+/// `mu_strategy_fallback` and `l1_auto_fallback` re-run the solve when the first
+/// attempt lands in `Solved_To_Acceptable_Level` or
+/// `Maximum_Iterations_Exceeded`. The veto converts non-success verdicts, so on
+/// paper it could turn a status that *would* have triggered a retry into one
+/// that does not — silently costing the caller a recovery attempt that finds a
+/// genuinely converged point.
+///
+/// The case analysis says it cannot: the fallback restores under `Success` only
+/// when a *strict* certificate was refused, and a refused strict certificate is
+/// exactly what the baseline would have returned as `Success` — so neither arm
+/// retries. A refused acceptable-level termination restores as
+/// `StopAtAcceptablePoint`, which still triggers the retry. But the same kind of
+/// case analysis has been wrong twice in this work, so it is measured.
+#[test]
+fn the_veto_does_not_suppress_a_fallback_retry() {
+    for (flag, a, k) in [
+        ("mu_strategy_fallback", 1e5, 10.0),
+        ("mu_strategy_fallback", 1e3, 10.0),
+        ("l1_fallback_on_restoration_failure", 1e5, 10.0),
+        ("l1_fallback_on_restoration_failure", 1e3, 10.0),
+    ] {
+        let solve = |threshold: Number| {
+            let mut app = IpoptApplication::new();
+            app.options_mut()
+                .set_string_value(flag, "yes", true, false)
+                .unwrap();
+            app.options_mut()
+                .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("max_iter", 300, true, false)
+                .unwrap();
+            app.options_mut()
+                .set_integer_value("print_level", 0, true, false)
+                .unwrap();
+            app.initialize().unwrap();
+            let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(AcceptableOnly { a, amp: 1.0, k }));
+            let st = app.optimize_tnlp(t);
+            (st, app.statistics().final_objective)
+        };
+        let (bs, bo) = solve(0.0);
+        let (vs, vo) = solve(1e-4);
+        eprintln!("{flag} a={a:e}: baseline {bs:?} f={bo:.6e} | veto {vs:?} f={vo:.6e}");
+        // The retry promotes only on Solve_Succeeded, so the observable
+        // guarantee is the same one as everywhere else: never a worse status,
+        // never a worse point.
+        assert!(
+            !(succeeded(bs) && !succeeded(vs)),
+            "{flag} a={a:e}: baseline ended {bs:?} but the veto gave {vs:?} — a retry was \
+             suppressed or a status lost"
+        );
+        assert!(
+            vo <= bo + 1e-9 * bo.abs().max(1.0),
+            "{flag} a={a:e}: veto objective {vo:.6e} worse than baseline {bo:.6e}"
+        );
+    }
+}
