@@ -828,9 +828,18 @@ impl IpoptApplication {
         let res = match alg.optimize_with_warm_start(&mut sqp_adapter, warm) {
             Ok(r) => r,
             Err(e) => {
-                if std::env::var_os("POUNCE_DBG_SQP").is_some() {
-                    tracing::warn!(target: "pounce::sqp", "[SQP] optimize_with_warm_start error: {e:?}");
-                }
+                // Always surface this. It used to be gated on the
+                // undocumented `POUNCE_DBG_SQP`, so the only thing a user saw
+                // was a bare `Internal_Error` with no indication of what went
+                // wrong -- the underlying message here was
+                // `QpFailure(LinearSolverFailure("QP subproblem returned
+                // status unbounded"))`, which points straight at the cause.
+                // A solve that is about to fail is exactly when the reason
+                // should be cheapest to obtain.
+                tracing::warn!(
+                    target: "pounce::sqp",
+                    "SQP solve failed: {e:?}"
+                );
                 return ApplicationReturnStatus::InternalError;
             }
         };
@@ -2879,6 +2888,28 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
             "l1-elastic" => SqpGlobalization::L1Elastic,
             _ => opts.globalization,
         };
+    }
+    // `hessian_approximation` is the upstream Ipopt option a frontend sets
+    // when the caller supplies no second derivatives -- `pounce.minimize` does
+    // it automatically, and warns that it is doing so. It was only ever read
+    // on the IPM path, so an SQP solve ignored it and fell back to the
+    // `Exact` default, asking the NLP for a Lagrangian Hessian that was never
+    // provided. A zero Hessian turns the QP subproblem into an LP, which is
+    // unbounded whenever the objective gradient has a component in the null
+    // space of the active constraints -- so the solve died with
+    // `Internal_Error` on problems the IPM handles without complaint:
+    //
+    //     min (x0-3)^2 + (x1-2)^2  s.t.  4 - x0 - x1 >= 0
+    //
+    // (IPM: x = [2.5, 1.5]. Active-set SQP before this: Internal_Error, or
+    // with variable bounds, a run to the box corner along the null-space
+    // direction.)
+    //
+    // Read it before `sqp_hessian` so an explicit setting still wins.
+    if let Ok((s, true)) = options.get_string_value("hessian_approximation", "") {
+        if s == "limited-memory" {
+            opts.hessian = SqpHessianSource::Lbfgs;
+        }
     }
     if let Ok((s, true)) = options.get_string_value("sqp_hessian", "") {
         opts.hessian = match s.as_str() {
