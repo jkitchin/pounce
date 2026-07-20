@@ -783,6 +783,13 @@ impl IpoptCalculatedQuantities {
     pub fn curr_unscaled_dual_infeasibility_max(&self) -> Number {
         let df = self.nlp.borrow().obj_scaling_factor();
         let scaled = self.curr_dual_infeasibility_max();
+        // `df` is SIGNED — `obj_scaling_factor = -1` is the documented way to
+        // pose a maximization — while `scaled` is a max-norm. Dividing by the
+        // signed factor returned a NEGATIVE "max-norm", which then sailed under
+        // every `<= tol` comparison: it disabled the gh #200 veto on
+        // maximization, and defeated the unscaled residual gate added for
+        // pounce#173 there as well. Magnitude is what the unscaling means.
+        let df = df.abs();
         if df == 0.0 || df == 1.0 {
             scaled
         } else {
@@ -798,6 +805,13 @@ impl IpoptCalculatedQuantities {
     pub fn curr_unscaled_complementarity_max(&self) -> Number {
         let df = self.nlp.borrow().obj_scaling_factor();
         let scaled = self.curr_complementarity_max();
+        // `df` is SIGNED — `obj_scaling_factor = -1` is the documented way to
+        // pose a maximization — while `scaled` is a max-norm. Dividing by the
+        // signed factor returned a NEGATIVE "max-norm", which then sailed under
+        // every `<= tol` comparison: it disabled the gh #200 veto on
+        // maximization, and defeated the unscaled residual gate added for
+        // pounce#173 there as well. Magnitude is what the unscaling means.
+        let df = df.abs();
         if df == 0.0 || df == 1.0 {
             scaled
         } else {
@@ -822,6 +836,24 @@ impl IpoptCalculatedQuantities {
         let c_max = unscaled_block_amax(&*self.curr_c(), dc.as_deref());
         let dms_max = unscaled_block_amax(&*self.curr_d_minus_s(), dd.as_deref());
         c_max.max(dms_max)
+    }
+
+    /// The objective scaling factor `df` currently in force (`1.0` when no
+    /// objective scaling is active).
+    ///
+    /// Exposed because the termination logic must be able to tell an honest
+    /// certificate from one an extreme scale has masked (gh #200): the scale
+    /// factor itself is the discriminating signal, not the error.
+    pub fn obj_scaling_factor(&self) -> Number {
+        self.nlp.borrow().obj_scaling_factor()
+    }
+
+    /// The solver-computed part of the objective scale — see
+    /// [`IpoptNlp::computed_obj_scaling_factor`]. The masked-certificate test
+    /// keys on this, not on the product, so a user who deliberately scales a
+    /// well-conditioned objective down is not second-guessed.
+    pub fn computed_obj_scaling_factor(&self) -> Number {
+        self.nlp.borrow().computed_obj_scaling_factor()
     }
 
     /// Overall **unscaled** max-norm KKT error — `max` of the unscaled dual

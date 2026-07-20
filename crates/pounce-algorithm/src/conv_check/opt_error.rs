@@ -52,6 +52,85 @@ pub struct OptErrorConvCheck {
     pub infeas_max_streak: Index,
     /// Running count of consecutive infeasible-stationary iterations.
     pub infeas_streak: Index,
+    /// Objective-scale floor below which a strict certificate is refused
+    /// while the *unscaled* KKT error is still above `acceptable_tol`
+    /// (gh #200). See [`certificate_masked`]. `0` disables the mechanism
+    /// entirely, restoring bit-for-bit upstream-Ipopt behaviour.
+    pub obj_scale_certificate_threshold: Number,
+    /// Whether a masked **strict** certificate was ever refused this solve.
+    pub veto_fired: bool,
+    /// Whether a masked **acceptable-level** termination was ever refused.
+    ///
+    /// Tracked separately because the two refusals must be undone differently:
+    /// a refused strict certificate restores as `Success`, a refused
+    /// acceptable-level one as `StopAtAcceptablePoint`. Conflating them would
+    /// either over-claim a status or, as originally written, leave the
+    /// acceptable-level refusal with no safety net at all.
+    pub acceptable_veto_fired: bool,
+    /// Iterations spent since the veto first refused a certificate.
+    ///
+    /// The veto is a bet that continuing reaches a better point. Some problems
+    /// never let it pay off — an unscaled error pinned above `acceptable_tol`
+    /// by an unbounded direction keeps the veto engaged until `max_iter`,
+    /// turning a 40-iteration solve into a 300-iteration one for nothing. Past
+    /// [`VETO_MAX_EXTRA_ITERS`] the bet is called off and the run is allowed to
+    /// terminate normally; correctness does not depend on the cap, because the
+    /// refused certificate is restored either way.
+    pub veto_extra_iters: Index,
+}
+
+/// How many iterations the veto may spend before its bet is called off.
+///
+/// Generous relative to what a successful rescue costs — the reported quartics
+/// reach the true minimum in 11-15 extra iterations — but bounded, so a veto
+/// that can never lift (an unscaled error pinned above `acceptable_tol` by an
+/// unbounded direction) cannot run to `max_iter`. Correctness does not rest on
+/// this number: whatever happens after the budget is spent, the refused
+/// certificate is still restored if the run ends without a better one.
+const VETO_MAX_EXTRA_ITERS: Index = 60;
+
+/// Is a passing strict certificate *masked* by an extreme objective scale
+/// (gh #200)?
+///
+/// Gradient-based scaling picks `df = nlp_scaling_max_gradient / max‖∇f‖`,
+/// floored at `nlp_scaling_min_value = 1e-8`. On a flat quartic the initial
+/// gradient is enormous (`quartc`: ~4e12 → `df` pinned at the floor), and the
+/// strict test then runs on the *scaled* aggregate. Because a quartic's
+/// gradient vanishes cubically toward its minimum while `df` stays fixed at its
+/// initial value, the scaled error crosses `tol` roughly 30% of the way in: the
+/// solver certifies optimality at `quartc` objective 248.88 when the true
+/// minimum is ~0, with an unscaled dual infeasibility of 0.84.
+///
+/// This predicate deliberately does **not** try to decide whether the stop is
+/// genuinely false — it only asks whether the conditions that make a false stop
+/// *possible* are present. Distinguishing a masked certificate from an honest
+/// one at a small scale cannot be done from the residual magnitude: `meyer3`
+/// sits at the same 1e-8 scale floor as `quartc` while being genuinely
+/// converged, and the unscaled error is a *dimensional* quantity, so any
+/// absolute cutoff separating them would move if the objective were rescaled —
+/// precisely the sensitivity this bug is about. An earlier revision of this
+/// work did exactly that (a 5e-2 bar fitted to the gap in one benchmark suite);
+/// it is not defensible and was removed.
+///
+/// Instead the caller *tests* the hypothesis: it refuses to stop, continues,
+/// and sees whether the iterates actually go anywhere. If they do, the stop was
+/// false. If they do not, the certificate is honoured unchanged — so the
+/// mechanism is never worse than not having it (see `terminate_vetoed_or`).
+pub fn certificate_masked(
+    obj_scale: Number,
+    unscaled_err: Number,
+    threshold: Number,
+    acceptable_tol: Number,
+) -> bool {
+    // A non-positive threshold is the documented opt-out; NaN is treated the
+    // same way rather than silently enabling the mechanism.
+    if threshold.is_nan() || threshold <= 0.0 {
+        return false;
+    }
+    // Magnitude, not signed value: a negative `obj_scaling_factor` (the
+    // documented way to maximize) is trivially below any positive threshold,
+    // which would arm this on every maximization regardless of scale.
+    obj_scale.abs() < threshold && unscaled_err > acceptable_tol
 }
 
 impl Default for OptErrorConvCheck {
@@ -77,6 +156,14 @@ impl Default for OptErrorConvCheck {
             infeas_viol_kappa: 1e2,
             infeas_max_streak: 5,
             infeas_streak: 0,
+            // 1e-4 separates the falsely-certified problems (objective scale
+            // pinned at the 1e-8 floor) from every recorded collateral case
+            // (`hs1`/`hs38` at ~4e-2, the 19-problem list at ~1e-2). See
+            // [`certificate_masked`].
+            obj_scale_certificate_threshold: 1e-4,
+            veto_fired: false,
+            acceptable_veto_fired: false,
+            veto_extra_iters: 0,
         }
     }
 }
@@ -149,6 +236,50 @@ impl OptErrorConvCheck {
         true
     }
 
+    /// Advance the acceptable-level streak, returning whether the run should
+    /// terminate with `ConvergedToAcceptable`.
+    ///
+    /// Acceptable-level termination is **count-based**: it needs
+    /// `acceptable_iter` *consecutive* qualifying iterates. The masked-scale
+    /// veto (gh #200) suppresses that termination, so the count has to keep
+    /// running underneath the suppression — otherwise the mechanism cannot know
+    /// where the unvetoed run would have stopped.
+    ///
+    /// The subtle part, and an earlier bug: `masked` is **not constant over a
+    /// run**. `obj_scale` is fixed, but the veto's other condition is
+    /// `unscaled_err > acceptable_tol`, and that quantity crosses the bar
+    /// during the endgame — the crossing *is* the veto lifting. A streak can
+    /// therefore straddle the boundary. Keeping two disjoint counters (a real
+    /// one and a shadow), each reset by the other's phase, silently discarded a
+    /// streak the unvetoed run would have kept: fourteen unmasked qualifying
+    /// iterates followed by one masked qualifying iterate left the real count at
+    /// zero, where the baseline would have reached fifteen and stopped. The run
+    /// then fell through to `max_iter` — with no snapshot armed, because the
+    /// shadow had only just started — and returned a bare failure where the
+    /// baseline returned `Solved_To_Acceptable_Level`. That is precisely the
+    /// "never worse" guarantee failing.
+    ///
+    /// So there is **one** counter, advanced on `acceptable_now` regardless of
+    /// `masked`. `masked` decides only what happens when it crosses the
+    /// threshold: terminate, or record that a termination was refused here —
+    /// which is exactly the iterate the unvetoed run would have returned.
+    fn note_acceptable(&mut self, acceptable_now: bool, masked: bool) -> bool {
+        if !acceptable_now {
+            self.acceptable_count = 0;
+            return false;
+        }
+        self.acceptable_count += 1;
+        if self.acceptable_count < self.acceptable_iter {
+            return false;
+        }
+        if masked {
+            self.acceptable_veto_fired = true;
+            false
+        } else {
+            true
+        }
+    }
+
     /// Pure predicate for a single infeasible-stationary iterate: the
     /// constraint violation is bounded away from zero
     /// (`constr_viol > infeas_viol_kappa · constr_viol_tol`) and the
@@ -182,6 +313,14 @@ impl OptErrorConvCheck {
 }
 
 impl ConvCheck for OptErrorConvCheck {
+    fn certificate_vetoed(&self) -> bool {
+        self.veto_fired
+    }
+
+    fn acceptable_certificate_vetoed(&self) -> bool {
+        self.acceptable_veto_fired
+    }
+
     fn check_convergence(&mut self, nlp_err: Number, iter_count: Index) -> ConvergenceStatus {
         if nlp_err <= self.tol {
             return ConvergenceStatus::Converged;
@@ -230,22 +369,77 @@ impl ConvCheck for OptErrorConvCheck {
         let constr_viol = cq_ref.curr_unscaled_primal_infeasibility_max();
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
         let curr_f = cq_ref.curr_f();
+        let unscaled_err = cq_ref.curr_unscaled_nlp_error();
+        // The gate asks whether *our* scaling clamped, not how the user chose
+        // to scale their objective — see `certificate_masked`.
+        let obj_scale = cq_ref.computed_obj_scaling_factor();
         drop(cq_ref);
 
-        if self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf) {
+        // gh #200: refuse a certificate the objective scaling has masked, and
+        // keep iterating. A constant objective scale cancels out of the Newton
+        // step and every line-search test is scale-invariant, so the continued
+        // run follows exactly the trajectory an unscaled run would and reaches
+        // the true minimum — at which point the unscaled error falls under
+        // `acceptable_tol`, the veto lifts, and an honest strict certificate is
+        // issued. Refusing to stop early is the whole intervention; the strict
+        // tolerance in scaled space is untouched.
+        if self.veto_fired || self.acceptable_veto_fired {
+            self.veto_extra_iters += 1;
+        }
+        // Call the bet off once it has plainly not paid off, so a veto that can
+        // never lift cannot cost an unbounded number of iterations. The refused
+        // certificate is restored regardless, so this bounds cost, not
+        // correctness.
+        let budget_spent = self.veto_extra_iters > VETO_MAX_EXTRA_ITERS;
+        // A non-finite objective disqualifies the veto outright. `passes_component_tols`
+        // never inspects `f`, so a strict certificate can pass at an iterate whose
+        // objective is NaN while its residuals are finite and tiny — and the unvetoed
+        // run returns exactly that, NaN objective and all. Refusing it would arm a
+        // snapshot the restore then declines (`honour_refused_certificate` requires a
+        // finite objective), surfacing a failure where the baseline reported success.
+        // Declining to engage keeps that case bit-identical to the baseline instead.
+        // The acceptable-level side already had this property: finite `f` is a
+        // precondition of qualifying there.
+        let masked = curr_f.is_finite()
+            && !budget_spent
+            && certificate_masked(
+                obj_scale,
+                unscaled_err,
+                self.obj_scale_certificate_threshold,
+                self.acceptable_tol,
+            );
+        // Record a refusal only when a strict certificate was genuinely on the
+        // table. `masked` alone is far broader — it holds on ordinary iterates
+        // long before convergence — and using it would arm the fallback (and
+        // snapshot an arbitrary mid-solve iterate) on runs that were never
+        // about to stop.
+        let refusing_strict =
+            masked && self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf);
+        if refusing_strict && !self.veto_fired {
+            self.veto_fired = true;
+            tracing::info!(
+                obj_scale,
+                unscaled_kkt_error = unscaled_err,
+                scaled_nlp_error = nlp_err,
+                threshold = self.obj_scale_certificate_threshold,
+                "refusing a termination certificate masked by an extreme objective scale; \
+                 continuing toward the true minimum (obj_scale_certificate_threshold=0 disables)"
+            );
+        }
+
+        if !masked && self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf) {
             return ConvergenceStatus::Converged;
         }
         // `acceptable_iter == 0` disables acceptable-level termination
         // (upstream `IpOptErrorConvCheck.cpp:241`). See `check_convergence`.
-        if self.acceptable_iter > 0
-            && self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f)
-        {
-            self.acceptable_count += 1;
-            if self.acceptable_count >= self.acceptable_iter {
-                return ConvergenceStatus::ConvergedToAcceptable;
-            }
-        } else {
-            self.acceptable_count = 0;
+        // The veto covers this branch too, so a refused strict certificate is
+        // not merely swapped for an acceptable-level one at the same wrong
+        // point. Acceptable-point *storage* is deliberately left un-vetoed —
+        // that stashed point is the rollback target if the run later stalls.
+        let acceptable_now = self.acceptable_iter > 0
+            && self.passes_acceptable_tols(nlp_err, dual_inf, constr_viol, compl_inf, curr_f);
+        if self.note_acceptable(acceptable_now, masked) {
+            return ConvergenceStatus::ConvergedToAcceptable;
         }
         if iter_count >= self.max_iter {
             return ConvergenceStatus::MaxIterExceeded;
@@ -445,6 +639,169 @@ mod tests {
         assert!(c.last_acceptable_obj.is_none());
         ConvCheck::set_curr_acceptable_obj(&mut c, 4.2);
         assert_eq!(c.last_acceptable_obj, Some(4.2));
+    }
+
+    #[test]
+    fn a_non_finite_objective_disqualifies_the_veto() {
+        // `passes_component_tols` never inspects `f`, so a strict certificate can
+        // pass at an iterate whose objective is NaN while its residuals are finite
+        // and tiny — and the unvetoed run returns exactly that. Refusing it would
+        // arm a snapshot that the restore then declines (it requires a finite
+        // objective), surfacing a failure where the baseline reported success:
+        // a never-worse violation, on the one path where the objective is not
+        // usable as a tiebreak.
+        let c = OptErrorConvCheck {
+            tol: 1e-8,
+            dual_inf_tol: 1.0,
+            constr_viol_tol: 1e-4,
+            compl_inf_tol: 1e-4,
+            ..Default::default()
+        };
+        // The residuals alone say "converged"; the objective says nothing usable.
+        assert!(c.passes_component_tols(1e-12, 1e-9, 0.0, 0.0));
+        // The masked predicate itself is unchanged — the finiteness gate lives at
+        // the call site, where `curr_f` is in hand.
+        assert!(certificate_masked(
+            1e-8,
+            8.4e-1,
+            c.obj_scale_certificate_threshold,
+            c.acceptable_tol
+        ));
+        // Both the guard's inputs behave as the call site composes them.
+        for bad in [Number::NAN, Number::INFINITY, Number::NEG_INFINITY] {
+            assert!(!bad.is_finite(), "{bad} should disqualify the veto");
+        }
+        assert!((1.0_f64).is_finite());
+    }
+
+    #[test]
+    fn acceptable_streak_survives_a_masked_boundary_mid_streak() {
+        // gh #200. `masked` is not constant over a run: it also depends on the
+        // unscaled error crossing `acceptable_tol`, and that crossing is exactly
+        // what happens during the endgame. So an acceptable-level streak can
+        // straddle the boundary.
+        //
+        // The earlier implementation kept two disjoint counters, each reset by
+        // the other's phase. Fourteen unmasked qualifying iterates followed by
+        // one masked qualifying iterate left the real count at 0 while the
+        // unvetoed run would have reached 15 and stopped — so the run fell
+        // through to `max_iter` and returned a bare failure where the baseline
+        // returned `Solved_To_Acceptable_Level`, with no snapshot armed to roll
+        // back to. Never-worse, violated.
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 15,
+            ..Default::default()
+        };
+        // 14 qualifying iterates while unmasked: no termination yet.
+        for i in 0..14 {
+            assert!(!c.note_acceptable(true, false), "terminated early at {i}");
+        }
+        // The 15th qualifies too, but the veto is now engaged. The streak must
+        // be honoured — recorded as a refused termination, not discarded.
+        assert!(
+            !c.note_acceptable(true, true),
+            "a masked iterate must not terminate the run"
+        );
+        assert!(
+            c.acceptable_veto_fired,
+            "the streak crossed `acceptable_iter` while masked, so a termination was \
+             refused here and must be recorded — otherwise the fallback has nothing to \
+             restore and the run returns a bare failure"
+        );
+
+        // The mirror direction: a streak that begins masked and finishes
+        // unmasked must terminate on the same iterate the baseline would.
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 15,
+            ..Default::default()
+        };
+        for _ in 0..14 {
+            assert!(!c.note_acceptable(true, true));
+        }
+        assert!(
+            c.note_acceptable(true, false),
+            "the veto lifted with the streak already at 14; the 15th qualifying iterate \
+             must terminate exactly as it would without the mechanism"
+        );
+
+        // And a non-qualifying iterate still breaks the streak, in either phase.
+        let mut c = OptErrorConvCheck {
+            acceptable_iter: 3,
+            ..Default::default()
+        };
+        assert!(!c.note_acceptable(true, false));
+        assert!(!c.note_acceptable(false, true));
+        assert_eq!(
+            c.acceptable_count, 0,
+            "a non-qualifying iterate resets the streak"
+        );
+        assert!(!c.note_acceptable(true, false));
+        assert!(!c.note_acceptable(true, false));
+        assert!(
+            c.note_acceptable(true, false),
+            "3 consecutive qualifying iterates terminate"
+        );
+    }
+
+    #[test]
+    fn certificate_masked_needs_both_an_extreme_scale_and_a_non_stationary_point() {
+        // gh #200. Both conditions are load-bearing, and each was independently
+        // shown to be insufficient on the benchmark suite.
+        let (th, atol) = (1e-4, 1e-6);
+
+        // The reported failure: scale pinned at the 1e-8 floor, unscaled error
+        // 0.84 — the strict test passed in scaled space at `quartc` obj 248.88.
+        assert!(certificate_masked(1e-8, 8.4e-1, th, atol));
+
+        // An ordinary objective scale is never second-guessed, however large
+        // the unscaled error. Keying on the error alone effectively tightens
+        // `tol` by `1/df` and regressed hs1/hs38 (scale ~4e-2).
+        assert!(!certificate_masked(4e-2, 8.4e-1, th, atol));
+        assert!(!certificate_masked(1.0, 1e3, th, atol));
+
+        // An extreme scale at a point that really is stationary is fine — this
+        // is what lifts the veto once the continued run reaches the minimum.
+        assert!(!certificate_masked(1e-8, 1e-9, th, atol));
+
+        // Boundaries: strictly below the scale threshold, strictly above the
+        // error tolerance.
+        assert!(!certificate_masked(th, 1.0, th, atol));
+        assert!(!certificate_masked(1e-8, atol, th, atol));
+
+        // `0` disables the mechanism outright (the documented opt-out) — the
+        // most extreme possible inputs must not trip it.
+        assert!(!certificate_masked(1e-30, 1e30, 0.0, atol));
+        // A negative threshold is treated as disabled rather than as "always".
+        assert!(!certificate_masked(1e-30, 1e30, -1.0, atol));
+    }
+
+    #[test]
+    fn veto_blocks_both_strict_and_acceptable_termination() {
+        // A refused strict certificate must not simply reappear as an
+        // acceptable-level one at the same wrong point, so the veto covers both
+        // branches. Exercised through the pure predicates the two branches
+        // share, since a full `check_convergence_with_state` needs a live cq.
+        let c = OptErrorConvCheck {
+            tol: 1e-8,
+            acceptable_tol: 1e-6,
+            dual_inf_tol: 1.0,
+            constr_viol_tol: 1e-4,
+            compl_inf_tol: 1e-4,
+            ..Default::default()
+        };
+        // The gh #200 iterate: passes the strict test in scaled space...
+        assert!(c.passes_component_tols(1e-9, 8.4e-1, 0.0, 0.0));
+        // ...and the veto is what withholds it.
+        assert!(certificate_masked(
+            1e-8,
+            8.4e-1,
+            c.obj_scale_certificate_threshold,
+            c.acceptable_tol
+        ));
+        // Default threshold is the documented 1e-4, and the veto starts clear.
+        assert_eq!(c.obj_scale_certificate_threshold, 1e-4);
+        assert!(!c.veto_fired);
+        assert!(!ConvCheck::certificate_vetoed(&c));
     }
 
     #[test]

@@ -50,6 +50,25 @@ pub trait ConvCheck {
     /// the cq layer. Default impl delegates to
     /// [`Self::check_convergence`], so scalar-only policies don't
     /// need to override.
+    /// Whether this policy ever refused a termination certificate it judged
+    /// masked by an extreme objective scale (gh #200).
+    ///
+    /// The main loop reads it on the failure exits: a run that was held back
+    /// from stopping must not end up *worse off* than it would have been, so
+    /// when it later stalls the stored acceptable point is restored rather
+    /// than a bare failure surfaced. Policies that never veto keep the
+    /// default `false` and the failure paths behave exactly as before.
+    fn certificate_vetoed(&self) -> bool {
+        false
+    }
+
+    /// Whether this policy ever refused an *acceptable-level* termination it
+    /// judged masked (gh #200). Undone differently from a strict refusal — see
+    /// `OptErrorConvCheck::acceptable_veto_fired`.
+    fn acceptable_certificate_vetoed(&self) -> bool {
+        false
+    }
+
     fn check_convergence_with_state(
         &mut self,
         nlp_err: Number,

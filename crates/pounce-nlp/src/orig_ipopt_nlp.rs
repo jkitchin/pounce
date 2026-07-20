@@ -140,6 +140,9 @@ pub struct OrigIpoptNlp {
     // ----- gradient-based scaling state (port of `IpGradientScaling.cpp`) -----
     /// Effective objective scaling factor `df_` (1.0 when no scaling).
     obj_scale_factor: Cell<Number>,
+    /// The gradient-based factor alone (`df`), without the user's constant.
+    /// See `IpoptNlp::computed_obj_scaling_factor`.
+    computed_obj_scale: Cell<Number>,
     /// Per-row scaling for equality constraints (`dc_`). `None` ↔
     /// `IsValid(dc) == false` — i.e. row-max gradient is below the
     /// `nlp_scaling_max_gradient` cutoff so no scaling is applied.
@@ -516,6 +519,7 @@ impl OrigIpoptNlp {
             adapter,
             scaling,
             obj_scale_factor: Cell::new(initial_obj_scal),
+            computed_obj_scale: Cell::new(1.0),
             c_scale: RefCell::new(None),
             d_scale: RefCell::new(None),
             x_space,
@@ -872,6 +876,7 @@ impl OrigIpoptNlp {
                 df = min_value;
             }
         }
+        self.computed_obj_scale.set(df);
         self.obj_scale_factor.set(df * user_obj_factor);
 
         // ---- Constraint Jacobian row-max scaling ----
@@ -1841,6 +1846,10 @@ impl IpoptNlp for OrigIpoptNlp {
 
     fn obj_scaling_factor(&self) -> Number {
         self.obj_scale_factor.get()
+    }
+
+    fn computed_obj_scaling_factor(&self) -> Number {
+        self.computed_obj_scale.get()
     }
 
     fn c_scale_vec(&self) -> Option<Vec<Number>> {

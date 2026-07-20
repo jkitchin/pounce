@@ -273,6 +273,20 @@ pub trait IpoptNlp: Nlp {
         1.0
     }
 
+    /// The **solver-computed** part of the objective scale, before the user's
+    /// constant `obj_scaling_factor` is multiplied in.
+    ///
+    /// [`Self::obj_scaling_factor`] returns the product `df * user_factor`,
+    /// which is the right thing for unscaling a residual but the wrong thing
+    /// for asking *why* the scale is small. `df` is what gradient-based scaling
+    /// computed and clamped at `nlp_scaling_min_value`; the user factor is a
+    /// deliberate choice. Only the former can mask a certificate (gh #200), so
+    /// the termination logic keys on this rather than on the product.
+    /// Default `1.0`; `OrigIpoptNlp` overrides.
+    fn computed_obj_scaling_factor(&self) -> Number {
+        1.0
+    }
+
     /// Per-row scaling vector for the equality block (`dc_` upstream):
     /// the factor each `c` row is multiplied by inside [`Self::eval_c`]
     /// / [`Self::eval_jac_c`]. `None` ⇔ no row scaling (all 1.0);

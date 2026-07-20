@@ -477,26 +477,35 @@ pub fn print_summary(
         stats.final_scaled_objective,
         stats.final_objective,
     );
+    // The residual rows carry genuinely different values in the two columns
+    // whenever `nlp_scaling` is active, and printing the scaled number twice
+    // hid exactly the discrepancy that matters: on gh #200's `quartc` the
+    // objective row correctly showed `2.49e-06` / `2.49e+02` while dual
+    // infeasibility read `8.38e-09` in *both* columns — when the unscaled value
+    // is `0.84`, eight orders above it. A user auditing a suspicious
+    // certificate was shown a report that agreed with the certificate. The
+    // unscaled statistics were already computed and already surfaced through
+    // the Python bindings; only the console dropped them.
     row(
         "Dual infeasibility......",
         stats.final_dual_inf,
-        stats.final_dual_inf,
+        stats.final_unscaled_dual_inf,
     );
     row(
         "Constraint violation....",
         stats.final_constr_viol,
-        stats.final_constr_viol,
+        stats.final_unscaled_constr_viol,
     );
     row("Variable bound violation", 0.0, 0.0);
     row(
         "Complementarity.........",
         stats.final_compl,
-        stats.final_compl,
+        stats.final_unscaled_compl,
     );
     row(
         "Overall NLP error.......",
         stats.final_kkt_error,
-        stats.final_kkt_error,
+        stats.final_unscaled_kkt_error,
     );
     println!();
     println!();
