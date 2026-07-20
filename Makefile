@@ -70,7 +70,7 @@ endif
 
 .PHONY: all build debug test check clippy fmt fmt-check doc book screencast install uninstall clean help \
         install-mcp uninstall-mcp install-skill uninstall-skill pounce-ma57 \
-        python-ext python-test \
+        python-ext python-cli-bin python-test \
         benchmark benchmark-rerun benchmark-report benchmark-gams
 
 all: build
@@ -146,7 +146,25 @@ help:
 # `python/tests/conftest.py` additionally guards against running pytest
 # against a stale artifact. Requires `maturin` and the test extras in the
 # active environment (`pip install -e 'python[dev]'`).
-python-ext:
+#
+# `python-ext` also stages the CLI binary into `python/pounce/bin/`, because
+# `maturin develop` does not. The wheel ships the Rust `pounce` executable
+# there and installs a console-script shim that execs it (see
+# `python/pounce/_cli.py`); `maturin develop` installs that same shim but
+# builds only the extension module, so in a dev install the shim always points
+# at a file nothing ever created. The visible symptom is not an error: the
+# broken shim sits later on `PATH` than `~/.local/bin`, so `pounce` silently
+# resolves to whatever older binary was installed there — and anything driving
+# the CLI (Pyomo via NL/SOL, the benchmark harness) quietly runs that instead.
+# A stale binary that still works is far worse than one that fails.
+#
+# `python/pounce/bin/` is already gitignored for exactly this artifact.
+python-cli-bin:
+	$(CARGO) build -p pounce-cli $(CARGO_PROFILE_FLAG) $(CARGO_FLAGS)
+	install -d python/pounce/bin
+	install -m 0755 "$(CLI_BIN)" python/pounce/bin/pounce
+
+python-ext: python-cli-bin
 	cd python && maturin develop
 
 python-test: python-ext
