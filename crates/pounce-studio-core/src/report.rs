@@ -224,7 +224,9 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatisticsInfo {
     pub iteration_count: i32,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_objective: f64,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_scaled_objective: f64,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_dual_inf: f64,

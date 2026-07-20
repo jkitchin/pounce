@@ -1398,3 +1398,51 @@ def test_active_set_sqp_honors_hessian_approximation():
         )
         assert r.success
         np.testing.assert_allclose(r.x, expected, atol=1e-6)
+
+
+def test_uncomputed_objective_is_nan_not_zero():
+    """An objective that was never evaluated must not be reported as ``0.0``.
+
+    Same sentinel problem the residuals had: ``0.0`` is a perfectly ordinary
+    objective value, so it cannot signal "never computed". A refused solve
+    never reaches ``finalize_solution``, so ``obj_val`` used to come back as a
+    fabricated zero.
+
+    Lower stakes than the residual case -- nothing *decides* anything from the
+    objective, it is only reported -- but one rule ("uncomputed is NaN") beats
+    remembering which fields lie.
+    """
+    # 2 variables, 3 equality constraints -> refused.
+    res = pounce.minimize(
+        lambda v: (v[1] - 1.0) ** 2 + v[0] ** 2,
+        [0.5, 0.0],
+        jac=lambda v: np.array([2 * v[0], 2 * (v[1] - 1.0)]),
+        bounds=[(0.3, 0.7), (-1e20, 1e20)],
+        constraints=[
+            {
+                "type": "eq",
+                "fun": lambda v: np.array([v[0] - 5.0, v[0] + 5.0]),
+                "jac": lambda v: np.array([[1.0, 0.0], [1.0, 0.0]]),
+            },
+            {
+                "type": "eq",
+                "fun": lambda v: np.array([v[1] - v[0] + 0.5]),
+                "jac": lambda v: np.array([[-1.0, 1.0]]),
+            },
+        ],
+    )
+    assert not res.success
+    assert np.isnan(res.info["obj_val"]), (
+        "a solve that evaluated nothing must not report an objective of 0.0"
+    )
+
+    # ...and a solve whose objective genuinely *is* zero still reports zero.
+    ok = pounce.minimize(
+        lambda v: float(v @ v),
+        [1.0, 1.0],
+        jac=lambda v: 2.0 * v,
+        bounds=[(-5, 5), (-5, 5)],
+    )
+    assert ok.success
+    assert not np.isnan(ok.info["obj_val"])
+    assert ok.info["obj_val"] == pytest.approx(0.0, abs=1e-12)

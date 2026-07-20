@@ -137,6 +137,16 @@ pub struct SolveStatistics {
 ///   as `null` rather than `0.0` in a solve report for an aborted solve. See
 ///   `docs/src/schema/solve-report-v1.md`.
 ///
+/// The two objective fields are in the set for the same reason, though the
+/// stakes are lower: nothing *decides* anything from them, they are only
+/// reported (console summary, studio markdown, the JSON report). But `0.0` is
+/// a perfectly ordinary objective value, so a reader cannot tell a solve that
+/// legitimately reached zero from one that never evaluated anything. One rule
+/// -- uncomputed is NaN -- is easier to reason about than "residuals are NaN,
+/// objectives are zero, and you have to remember which is which". Note they
+/// are seeded best-effort from the current iterate whenever one exists, so
+/// they are only NaN when the solve died before producing any point at all.
+///
 /// `final_mu` is deliberately *not* in this set: `0.0` is its documented value
 /// on the barrier-free SQP path, where mu has no meaning.
 impl Default for SolveStatistics {
@@ -151,8 +161,8 @@ impl Default for SolveStatistics {
             num_obj_grad_evals: 0,
             num_constr_jac_evals: 0,
             num_hess_evals: 0,
-            final_objective: 0.0,
-            final_scaled_objective: 0.0,
+            final_objective: Number::NAN,
+            final_scaled_objective: Number::NAN,
             final_dual_inf: Number::NAN,
             final_constr_viol: Number::NAN,
             final_compl: Number::NAN,

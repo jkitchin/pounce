@@ -292,7 +292,9 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatisticsInfo {
     pub iteration_count: Index,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_objective: Number,
+    #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_scaled_objective: Number,
     #[serde(default = "uncomputed", deserialize_with = "null_as_nan")]
     pub final_dual_inf: Number,

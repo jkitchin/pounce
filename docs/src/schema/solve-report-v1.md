@@ -168,14 +168,14 @@ the per-iteration history (which lives at the top level when present).
 | Field | Type | Notes |
 |---|---|---|
 | `iteration_count` | integer | Number of accepted outer iterations. |
-| `final_objective` | float | Unscaled. Matches `solution.objective`. |
-| `final_scaled_objective` | float | Scaled by the IPM's internal NLP scaling. Equal to `final_objective` when no scaling is in effect. |
+| `final_objective` | float \| null | Unscaled. Matches `solution.objective`. `null` if never computed — see below. |
+| `final_scaled_objective` | float \| null | Scaled by the IPM's internal NLP scaling. Equal to `final_objective` when no scaling is in effect. `null` if never computed. |
 | `final_dual_inf` | float \| null | `||∇L||∞` at termination. `null` if never computed — see below. |
 | `final_constr_viol` | float \| null | `||c(x)||∞` (primal infeasibility). `null` if never computed. |
 | `final_compl` | float \| null | Max complementarity over the four bound blocks. `null` if never computed. |
 | `final_kkt_error` | float \| null | Overall KKT error reported by the convergence check. `null` if never computed. |
 
-> **`null` residuals.** These four are produced by the convergence check at the
+> **`null` values.** The four residuals are produced by the convergence check at the
 > end of a solve. A solve the solver *refused* — rejected during setup
 > (`NotEnoughDegreesOfFreedom`, `InvalidProblemDefinition`), aborted, or caught
 > by the batch panic handler — never reaches it, and these slots are emitted as
@@ -183,8 +183,13 @@ the per-iteration history (which lives at the top level when present).
 > solve, and consumers acted on it: it was enough to make `pounce.minimize`
 > report `success=True` for a problem the solver had declined to attempt.
 >
+> The two objective fields follow the same rule for the same reason: `0.0` is
+> an ordinary objective value, so it cannot signal "never evaluated". They are
+> seeded from the current iterate whenever one exists, so they are `null` only
+> when the solve produced no point at all.
+>
 > Consumers should treat `null` as "not computed", not as zero. pounce's own
-> readers map it to NaN, which fails closed against any `residual <= tol` test.
+> readers map it to NaN, which fails closed against any `value <= tol` test.
 | `num_obj_evals` | integer | `eval_f` call count. |
 | `num_constr_evals` | integer | `eval_g` call count. |
 | `num_obj_grad_evals` | integer | `eval_grad_f` count. |

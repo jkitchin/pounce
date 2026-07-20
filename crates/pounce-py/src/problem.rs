@@ -929,7 +929,14 @@ impl PyProblem {
             final_z_u: vec![0.0; n],
             final_g: vec![0.0; m],
             final_lambda: vec![0.0; m],
-            final_obj: 0.0,
+            // NaN, not 0.0. This is only overwritten in `finalize_solution`,
+            // which a refused solve never reaches -- so a zero here surfaces
+            // in `info["obj_val"]` as a fabricated objective for a solve that
+            // evaluated nothing. `0.0` is an ordinary objective value and
+            // cannot signal "never computed". Matches the NaN the batch path
+            // already reports for its failure case (`nlp_batch.rs`) and the
+            // `SolveStatistics` residual/objective defaults.
+            final_obj: Number::NAN,
             final_status_code: 0,
         })
     }
