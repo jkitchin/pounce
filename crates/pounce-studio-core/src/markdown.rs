@@ -206,7 +206,6 @@ mod tests {
                 input: InputDescriptor::Builtin {
                     name: "test".into(),
                 },
-                environment: Vec::new(),
             },
             problem: ProblemInfo {
                 n_variables: 2,
