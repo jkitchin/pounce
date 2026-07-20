@@ -1311,3 +1311,51 @@ def test_non_mapping_options_is_rejected_not_silently_dropped():
     # The supported forms are untouched.
     assert M.minimize(fun, np.ones(2), jac=jac, options={"tol": 1e-9}).success
     assert M.minimize(fun, np.ones(2), jac=jac).success
+
+
+def test_active_set_sqp_honors_hessian_approximation():
+    """An SQP solve must not demand a Hessian the caller never supplied.
+
+    ``hessian_approximation=limited-memory`` is what a frontend sets when no
+    second derivatives are available -- ``minimize`` does it automatically and
+    warns that it has. That option was only read on the IPM path, so an
+    active-set SQP solve fell back to its ``Exact`` default and asked the NLP
+    for a Lagrangian Hessian nobody provided. The resulting zero Hessian turns
+    the QP subproblem into an LP, unbounded along any null-space direction of
+    the active constraints, and the solve died with ``Internal_Error`` on a
+    problem the IPM solves without complaint.
+    """
+    fun = lambda v: (v[0] - 3.0) ** 2 + (v[1] - 2.0) ** 2
+    jac = lambda v: np.array([2 * (v[0] - 3.0), 2 * (v[1] - 2.0)])
+    con = [
+        {
+            "type": "ineq",
+            "fun": lambda v: np.array([4.0 - v[0] - v[1]]),
+            "jac": lambda v: np.array([[-1.0, -1.0]]),
+        }
+    ]
+    # Constrained minimum: project (3, 2) onto x0 + x1 = 4.
+    expected = np.array([2.5, 1.5])
+
+    sqp = pounce.minimize(
+        fun, [0.0, 0.0], jac=jac, constraints=con, solver_selection="qp-active-set"
+    )
+    assert sqp.success, f"active-set SQP failed: {sqp.message}"
+    np.testing.assert_allclose(sqp.x, expected, atol=1e-6)
+
+    # Same answer as the interior-point path.
+    ipm = pounce.minimize(fun, [0.0, 0.0], jac=jac, constraints=con)
+    np.testing.assert_allclose(sqp.x, ipm.x, atol=1e-6)
+
+    # An explicit sqp_hessian still overrides the inferred default.
+    for source in ("lbfgs", "damped-bfgs"):
+        r = pounce.minimize(
+            fun,
+            [0.0, 0.0],
+            jac=jac,
+            constraints=con,
+            solver_selection="qp-active-set",
+            sqp_hessian=source,
+        )
+        assert r.success
+        np.testing.assert_allclose(r.x, expected, atol=1e-6)
