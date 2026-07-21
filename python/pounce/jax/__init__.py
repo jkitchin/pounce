@@ -19,6 +19,12 @@ Three layers, each independently useful:
    batch rather than literal ``vmap`` (which would lift the impure
    callback in unsupported ways).
 
+Built on top of those: :class:`JaxProblem` (build-once, solve-many, with
+a factor-reuse backward), the differentiable conic layers
+(:func:`solve_qp` / :func:`solve_socp` / :class:`QpLayer`), and
+:class:`PathFollower` / :func:`inverse_map_rhs` for predictor–corrector
+path following and inverse mapping over a :class:`JaxProblem`.
+
 JAX is an optional dependency. Importing this module without JAX
 installed raises a useful error.
 """

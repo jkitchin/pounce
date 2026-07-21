@@ -306,3 +306,17 @@ All three entry points are verified against upstream sIPOPT 3.14.19's
 The bound projection is a single-pass clamp; upstream's iterative
 Schur refinement (re-factorize on each violation) is intentionally not
 ported.
+
+## Beyond one perturbation
+
+Everything above answers "how does `x*` move for *this* \\(\Delta\theta\\)"
+— a first-order step off one converged factor. Repeat it and you are
+tracing a path, at which point the questions become where the linear
+prediction stops being good enough, when the active set changes under
+you, and what to do where \\(\partial x^*/\partial\theta\\) goes singular.
+
+The Python frontend answers those with `PathFollower`, which turns the
+same held factor into a predictor–corrector continuation loop (and a
+pseudo-arclength mode that traces through folds), plus `inverse_map_rhs`
+for running the map backwards as an ODE. See
+[Path Following & Inverse Mapping](path-following.md).

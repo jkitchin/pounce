@@ -29,6 +29,7 @@
 - [Pyomo](pyomo.md)
 - [GAMS](gams.md)
 - [Python API](python.md)
+  - [Path Following & Inverse Mapping](path-following.md)
 - [Curve Fitting](curve-fitting.md)
 - [Boundary Value Problems](bvp.md)
 - [ODE / DAE Initial Value Problems](ode.md)
