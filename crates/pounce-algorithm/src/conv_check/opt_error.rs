@@ -458,18 +458,36 @@ impl ConvCheck for OptErrorConvCheck {
                 return ConvergenceStatus::LocallyInfeasible;
             }
         }
-        // Time-budget gates. Upstream
+        // Time-budget gates. When the application installed a shared
+        // [`Deadline`] (pounce#242) it is authoritative: it measures
+        // global elapsed time from a fixed start instant, so it fires
+        // correctly even inside the restoration inner IPM, whose fresh
+        // `timing.overall_alg` is never started. Absent a deadline (the
+        // direct-driver / unit-test path), fall back to the `overall_alg`
+        // timer, which `IpoptApplication` starts at the top of
+        // `optimize_constrained`; `live_*` returns the running elapsed
+        // without forcing a `start/end` cycle. Upstream
         // `IpOptErrorConvCheck.cpp::CheckConvergence` reads the
-        // application-level start time; pounce piggybacks on
-        // `data.timing.overall_alg`, which `IpoptApplication` starts
-        // at the top of `optimize_constrained`. `live_*` returns the
-        // running elapsed without forcing a `start/end` cycle.
-        let timing = &data.borrow().timing;
-        if timing.overall_alg.live_cpu_time() >= self.max_cpu_time {
-            return ConvergenceStatus::CpuTimeExceeded;
-        }
-        if timing.overall_alg.live_wallclock_time() >= self.max_wall_time {
-            return ConvergenceStatus::WallTimeExceeded;
+        // application-level start time similarly.
+        let d = data.borrow();
+        if let Some(deadline) = d.deadline.as_ref() {
+            match deadline.exceeded() {
+                Some(pounce_common::timing::DeadlineKind::Cpu) => {
+                    return ConvergenceStatus::CpuTimeExceeded;
+                }
+                Some(pounce_common::timing::DeadlineKind::Wall) => {
+                    return ConvergenceStatus::WallTimeExceeded;
+                }
+                None => {}
+            }
+        } else {
+            let timing = &d.timing;
+            if timing.overall_alg.live_cpu_time() >= self.max_cpu_time {
+                return ConvergenceStatus::CpuTimeExceeded;
+            }
+            if timing.overall_alg.live_wallclock_time() >= self.max_wall_time {
+                return ConvergenceStatus::WallTimeExceeded;
+            }
         }
         ConvergenceStatus::Continue
     }

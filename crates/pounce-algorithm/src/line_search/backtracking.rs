@@ -43,6 +43,11 @@ pub enum Outcome {
     TinyStep,
     /// All α reductions rejected; the caller hands off to restoration.
     Failed,
+    /// The shared wall/CPU-time deadline was crossed mid-search
+    /// (pounce#242). The caller terminates the solve with the
+    /// corresponding time-limit status, returning the current best
+    /// iterate (`data.curr`, left untouched — no trial was promoted).
+    Deadline,
 }
 
 /// Policy for the step length applied to the equality multipliers
@@ -212,6 +217,9 @@ enum AlphaResult {
         last_alpha: Number,
         evaluation_error: bool,
     },
+    /// The shared wall/CPU-time deadline was crossed before a trial was
+    /// accepted (pounce#242). Propagated up as [`Outcome::Deadline`].
+    Deadline,
 }
 
 impl BacktrackingLineSearch {
@@ -358,6 +366,12 @@ impl BacktrackingLineSearch {
             self.run_filter_line_search(data, cq, delta, alpha_init, alpha_dual, nlp, search_dir);
         if outcome == Outcome::Accepted {
             return Outcome::Accepted;
+        }
+        // Time budget crossed (pounce#242): the caller is stopping the
+        // solve, so skip the soft-restoration attempt and hand the
+        // terminal outcome straight back.
+        if outcome == Outcome::Deadline {
+            return Outcome::Deadline;
         }
 
         // ---- Regular line search failed. Before the (expensive) full
@@ -625,6 +639,10 @@ impl BacktrackingLineSearch {
                     Outcome::Failed
                 }
             }
+            // Time budget crossed mid-loop (pounce#242) — terminal, and it
+            // pre-empts the watchdog: there is no point reverting to a
+            // snapshot when the caller is about to stop the solve.
+            AlphaResult::Deadline => Outcome::Deadline,
         }
     }
 
@@ -789,6 +807,9 @@ impl BacktrackingLineSearch {
                     d.info_ls_count = ns2 + 1;
                     Outcome::Failed
                 }
+                // Deadline crossed during the StopWatchDog retry sweep
+                // (pounce#242) — propagate the terminal outcome.
+                AlphaResult::Deadline => Outcome::Deadline,
             }
         } else {
             // Accept the last attempted trial despite filter rejection
@@ -891,6 +912,20 @@ impl BacktrackingLineSearch {
         };
 
         for trial in 0..self.max_trials {
+            // Fine-grained time-budget gate (pounce#242): each trial
+            // evaluates the constraints / barrier objective, which on a
+            // large problem is not cheap, so honor the deadline at
+            // per-trial granularity rather than letting a full backtracking
+            // sweep run past it. Bail before staging another trial; no
+            // trial is promoted, so `data.curr` stays the best iterate.
+            if data
+                .borrow()
+                .deadline
+                .as_ref()
+                .is_some_and(|dl| dl.exceeded().is_some())
+            {
+                return AlphaResult::Deadline;
+            }
             if alpha < alpha_min_eff {
                 return AlphaResult::TinyStep {
                     n_steps,
@@ -1369,6 +1404,62 @@ mod tests {
             (a - 0.25).abs() < 1e-12,
             "retry first alpha = {a}, expected 0.25 (snapshot FTB cap 0.5 × red 0.5)"
         );
+    }
+
+    /// pounce#242: an already-crossed shared [`Deadline`] on `data` makes
+    /// the alpha loop bail on its very first trial with `Outcome::Deadline`
+    /// — before staging or evaluating any trial point — so the main loop
+    /// can stop the solve at per-trial granularity while `data.curr`
+    /// (untouched) remains the best iterate.
+    #[test]
+    fn deadline_short_circuits_the_alpha_loop() {
+        let nlp: Rc<RefCell<dyn IpoptNlp>> = Rc::new(RefCell::new(F4MockNlp::new()));
+        let data: IpoptDataHandle = Rc::new(RefCell::new(IpoptData::new()));
+        let curr = IteratesVector::new(
+            dense(1, &[2.0]),
+            empty(),
+            empty(),
+            empty(),
+            dense(1, &[0.5]),
+            empty(),
+            empty(),
+            empty(),
+        );
+        {
+            let mut d = data.borrow_mut();
+            d.curr_mu = 0.1;
+            d.curr_tau = 1.0;
+            d.set_curr(curr.clone());
+            // Zero wall budget — already crossed by the time the loop runs.
+            d.deadline = Some(pounce_common::timing::Deadline::new(0.0, 1e6));
+        }
+        let cq: IpoptCqHandle = Rc::new(RefCell::new(IpoptCalculatedQuantities::new(
+            data.clone(),
+            nlp.clone(),
+        )));
+        let delta = IteratesVector::new(
+            dense(1, &[-1.0]),
+            empty(),
+            empty(),
+            empty(),
+            dense(1, &[0.0]),
+            empty(),
+            empty(),
+            empty(),
+        );
+        let mut bls = BacktrackingLineSearch::new(Box::new(FilterLsAcceptor::new()));
+        let outcome = bls.find_acceptable_trial_point(
+            &data,
+            &cq,
+            &delta,
+            /*alpha_init*/ 1.0,
+            /*alpha_dual*/ 1.0,
+            Some(&nlp),
+            None,
+        );
+        assert_eq!(outcome, Outcome::Deadline);
+        // No trial was staged/promoted — curr is still the best iterate.
+        assert!(data.borrow().trial.is_none());
     }
 
     fn iv_from(x: &[Number], s: &[Number]) -> IteratesVector {

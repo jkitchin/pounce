@@ -722,6 +722,23 @@ impl IpoptAlgorithm {
         let _ = hook.borrow_mut().at_checkpoint(&mut ctx);
     }
 
+    /// Cheap mid-iteration time-budget check (pounce#242). Returns the
+    /// terminal [`SolverReturn`] when the shared [`Deadline`] has been
+    /// crossed, so the caller can bail *within* an iteration — after the
+    /// KKT factorization, before the line search — rather than only at the
+    /// next outer-iteration convergence check. Returns `None` (never
+    /// terminating) when no deadline is installed, keeping the
+    /// direct-driver / unit-test paths on their `overall_alg`-based gate.
+    /// A `None` here is not "no budget" but "check it at the coarse site".
+    fn deadline_status(&self) -> Option<SolverReturn> {
+        let d = self.data.borrow();
+        let kind = d.deadline.as_ref()?.exceeded()?;
+        Some(match kind {
+            pounce_common::timing::DeadlineKind::Cpu => SolverReturn::CpuTimeExceeded,
+            pounce_common::timing::DeadlineKind::Wall => SolverReturn::WallTimeExceeded,
+        })
+    }
+
     /// One iteration body — port of `Optimize()`'s inner loop.
     /// Returns either `Continue` to keep iterating or a terminal
     /// [`SolverReturn`] mirroring upstream's exception → return-code
@@ -1261,6 +1278,20 @@ impl IpoptAlgorithm {
             return o;
         }
 
+        // Fine-grained time-budget gate (pounce#242). The KKT
+        // factorization (and any inertia-correction / quality-escalation
+        // refactorizations) is the single most expensive step of a large
+        // solve, and it has just finished. Check the deadline here so an
+        // over-budget solve returns its current best iterate *before*
+        // spending a line search and another whole iteration — bounding
+        // the overshoot to roughly one search-direction computation
+        // instead of a full outer iteration. `data.curr` is untouched by
+        // the step computation (the trial lives in `data.trial`), so it
+        // still holds the last accepted iterate.
+        if let Some(ret) = self.deadline_status() {
+            return IterateOutcome::Terminate(ret);
+        }
+
         // 6. Acceptable trial point — run the line search if we have a
         //    primal/dual step on `data.delta`. Wrap in a guard so all
         //    early-return paths (ErrorInStepComputation, InternalError,
@@ -1368,6 +1399,18 @@ impl IpoptAlgorithm {
                         // turn triggers `ActivateLineSearch` →
                         // restoration.
                         return self.invoke_restoration_debugged();
+                    }
+                    Outcome::Deadline => {
+                        // The time budget was crossed inside the line
+                        // search (pounce#242). No trial was promoted, so
+                        // `data.curr` still holds the best iterate; stop
+                        // with the matching time-limit status. Re-derive
+                        // wall vs CPU from the deadline (it can only still
+                        // be exceeded — time is monotonic).
+                        return IterateOutcome::Terminate(
+                            self.deadline_status()
+                                .unwrap_or(SolverReturn::WallTimeExceeded),
+                        );
                     }
                 }
             }

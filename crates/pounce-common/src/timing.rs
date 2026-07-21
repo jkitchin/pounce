@@ -6,6 +6,93 @@
 use crate::types::Number;
 use crate::utils::{cpu_time, sys_time, wallclock_time};
 use std::cell::Cell;
+use std::rc::Rc;
+
+/// Which time budget a [`Deadline`] check found crossed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadlineKind {
+    /// Wall-clock budget (`max_wall_time`) exceeded.
+    Wall,
+    /// CPU-time budget (`max_cpu_time`) exceeded.
+    Cpu,
+}
+
+/// A monotonic wall/CPU-clock deadline for a single solve (pounce#242).
+///
+/// Cheaply clonable (`Rc`-backed) so the outer loop, the KKT solver, the
+/// line search, and the *restoration inner IPM* can all check the same
+/// global budget — not just the outer-iteration convergence check. The
+/// motivating bug: `max_wall_time` was only tested between outer
+/// iterations (in `OptErrorConvCheck`), so a solve whose per-iteration
+/// cost is dominated by a single expensive step — a slow KKT
+/// factorization, or a restoration sub-solve that runs an entire nested
+/// IPM under one outer "iteration" — overshot the requested budget by up
+/// to a full iteration (~7x on the reported 1611-variable NLP). Checking
+/// this deadline at the granularity of the expensive inner steps bounds
+/// the overshoot to roughly one such step.
+///
+/// The elapsed time is measured from the instant the `Deadline` is
+/// constructed, using the same process clocks the timing subsystem uses.
+/// Unlike [`TimedTask::live_wallclock_time`] it does **not** depend on a
+/// `start()`/`end()` cycle, so it works inside the nested restoration
+/// solve — whose fresh [`TimingStatistics`] has an `overall_alg` timer
+/// that is never started, which is exactly why the inner loop used to run
+/// unbounded by wall time.
+#[derive(Debug, Clone)]
+pub struct Deadline {
+    inner: Rc<DeadlineInner>,
+}
+
+#[derive(Debug)]
+struct DeadlineInner {
+    wall_start: Number,
+    cpu_start: Number,
+    max_wall: Number,
+    max_cpu: Number,
+}
+
+impl Deadline {
+    /// Create a deadline that fires once `max_wall` wall seconds or
+    /// `max_cpu` CPU seconds have elapsed from *now*. The pounce defaults
+    /// for both budgets are `1e6`, i.e. effectively unbounded; a caller
+    /// that passes those gets a deadline that never trips in practice.
+    pub fn new(max_wall: Number, max_cpu: Number) -> Self {
+        Self {
+            inner: Rc::new(DeadlineInner {
+                wall_start: wallclock_time(),
+                cpu_start: cpu_time(),
+                max_wall,
+                max_cpu,
+            }),
+        }
+    }
+
+    /// Return `Some(kind)` if either budget has been crossed, else
+    /// `None`. CPU is tested before wall to match the branch order of
+    /// upstream `OptimalityErrorConvergenceCheck::CheckConvergence` (and
+    /// pounce's `OptErrorConvCheck`), so a solve that trips both in the
+    /// same check reports `MaximumCpuTimeExceeded` identically to the
+    /// coarse path.
+    pub fn exceeded(&self) -> Option<DeadlineKind> {
+        if cpu_time() - self.inner.cpu_start >= self.inner.max_cpu {
+            return Some(DeadlineKind::Cpu);
+        }
+        if wallclock_time() - self.inner.wall_start >= self.inner.max_wall {
+            return Some(DeadlineKind::Wall);
+        }
+        None
+    }
+
+    /// The wall-clock budget this deadline was built with.
+    pub fn max_wall(&self) -> Number {
+        self.inner.max_wall
+    }
+
+    /// The CPU-time budget this deadline was built with.
+    pub fn max_cpu(&self) -> Number {
+        self.inner.max_cpu
+    }
+}
 
 /// Equivalent to `Ipopt::TimedTask`. Use [`TimedTask::start`] /
 /// [`TimedTask::end`] around a section to accumulate cpu/system/wall
@@ -444,6 +531,61 @@ impl TimingStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadline_unbounded_never_trips() {
+        // The pounce "no budget" defaults (1e6 seconds each) must never
+        // fire in any realistic test runtime.
+        let d = Deadline::new(1e6, 1e6);
+        assert!(d.exceeded().is_none());
+        assert_eq!(d.max_wall(), 1e6);
+        assert_eq!(d.max_cpu(), 1e6);
+    }
+
+    #[test]
+    fn deadline_zero_wall_trips_wall() {
+        // Zero wall budget, effectively-unbounded CPU budget: after any
+        // wall time elapses the check reports `Wall` (CPU is tested first
+        // but its budget is not crossed).
+        let d = Deadline::new(0.0, 1e6);
+        // Busy-spin until the monotonic wall clock has advanced past the
+        // start instant, so the assertion is not racing a zero-duration
+        // `elapsed()` on a coarse clock.
+        for _ in 0..10_000 {
+            if d.exceeded().is_some() {
+                break;
+            }
+            std::hint::black_box(0u64);
+        }
+        assert_eq!(d.exceeded(), Some(DeadlineKind::Wall));
+    }
+
+    #[test]
+    fn deadline_zero_cpu_takes_priority() {
+        // Both budgets at zero: CPU is checked first, so a solve that
+        // crosses both in the same check reports `Cpu` — matching the
+        // convergence check's branch order.
+        let d = Deadline::new(0.0, 0.0);
+        for _ in 0..10_000 {
+            if d.exceeded().is_some() {
+                break;
+            }
+            std::hint::black_box(0u64);
+        }
+        assert_eq!(d.exceeded(), Some(DeadlineKind::Cpu));
+    }
+
+    #[test]
+    fn deadline_is_cheaply_clonable_and_shares_start() {
+        // Cloning shares the same start instant / budgets (the restoration
+        // inner IPM relies on this to be bounded by the outer solve's
+        // elapsed time, not its own).
+        let d = Deadline::new(1e6, 1e6);
+        let d2 = d.clone();
+        assert_eq!(d2.max_wall(), d.max_wall());
+        assert_eq!(d2.max_cpu(), d.max_cpu());
+        assert!(d2.exceeded().is_none());
+    }
 
     #[test]
     fn start_end_accumulates_nonneg() {
