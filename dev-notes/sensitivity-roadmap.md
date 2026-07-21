@@ -1,6 +1,6 @@
 # Active-set-aware parametric sensitivity — roadmap proposal
 
-**Status: proposal, for discussion.** This note scopes extending
+**Status: roadmap proposal, targeting v0.10.** This note scopes extending
 `estimate()` to handle active-set changes, reaching parity with sIPOPT and
 then past it, on a clean mechanism/policy boundary. Nothing here is
 implemented yet; the intent is to agree the shape before any PR.
@@ -102,17 +102,22 @@ which variables crossed, the residual, the `mu` used. Cheap, needed by
 everything below, and useful on its own — it turns the current silent
 clamp into "here is what happened" (sIPOPT exposes no such report).
 
-**1. Single-crossing fix-relax → sIPOPT parity (active-set axis).**
-Upgrade `boundcheck.rs` from the single-pass clamp to the Schur-refinement
-loop:
+**1. Fix-relax + `mu`-correction → sIPOPT parity.** Two changes together
+constitute full parity. **(a) Fix-relax** (the substantial one): upgrade
+`boundcheck.rs` from the single-pass clamp to the Schur-refinement loop —
 augment the held factorization with a row pinning the first crossing
 variable, re-solve so the non-violating coordinates absorb the pin, via
 the `IndexSchurData` path that already does the augmented backsolve
 (`solver.rs:360`,`:384`). The `sens_boundcheck` option and the module
-already exist, so this is a scoped change to one module, not greenfield.
-Low-rank Schur update, no refactor. It has a reference to validate
-against (upstream `SensStdStepCalc.cpp`) and, since pounce#7 no longer
-covers it, should get its own issue.
+already exist, so this is a scoped change to one module, not greenfield;
+low-rank Schur update, no refactor; validate against upstream
+`SensStdStepCalc.cpp`. Since pounce#7 no longer covers it, it should get
+its own issue. **(b) `mu`-correction** (minor): apply the eq. 10 term that
+corrects the predictor for the factorization sitting at `mu` > 0 rather
+than `mu` = 0. Automatic, inside the predictor, negligible at tight
+tolerance — the small remaining formal gap. Fix-relax carries the active
+set, the `mu`-correction finishes the predictor, and the two are full
+sIPOPT parity.
 
 **2. Multi-crossing path-following → past sIPOPT (crossing axis).** Iterate
 the fix-relax across successive breakpoints toward the target
@@ -134,21 +139,18 @@ what an advanced-step controller's corrector loop calls. Composes with
 path-following (path-following gets the active set, the corrector polishes
 the point).
 
-**5. `mu`-correction term → sIPOPT parity (minor).** The remaining small
-gap to sIPOPT's
-predictor (eq. 10): correct for the factorization sitting at `mu` > 0
-rather than `mu` = 0. Applied automatically inside the predictor, not a
-user option, and negligible at tight convergence tolerance, so listed
-separately from the parity milestone rather than bundled into it.
-
 ## API surface
 
 A single ordered `mode` on `estimate`, each level a correctness-superset of
-the one below:
+the one below. The cost unit is a **backsolve** against the held
+factorization (microseconds; the cheap operation the whole feature exists
+to exploit); a **re-solve** is the expensive bound.
 
-- `linear` — pure predictor, clamp, warn (today's behaviour).
-- `fix_relax` — single-crossing correction.
-- `path` — multi-step path-following.
+| mode | choose when | cost |
+|------|-------------|------|
+| `linear` (default) | small perturbations that stay interior, or hot real-time loops where a clamp at a bound is acceptable | 1 backsolve |
+| `fix_relax` | the perturbation crosses a bound and you want the whole solution to bend around the pin rather than truncate one coordinate | ~2 backsolves (predictor + one Schur-augmented solve); low-rank update, no refactor |
+| `path` | large perturbations that cross several bounds, when the estimate must track the exact re-solve | `k` crossings × (backsolve + Schur update), bounded above by one re-solve |
 
 The report is always returned; base-point degeneracy is handled
 automatically rather than as a mode. One knob, ordered — not a matrix of
@@ -157,8 +159,8 @@ independent flags.
 The default is `linear`, matching today's behaviour and the reference:
 sIPOPT ships with `sens_boundcheck` off, i.e. it defaults to the plain
 predictor and makes the active-set correction opt-in. The `mu`-correction
-of item 5 is separate from this knob — it is always applied inside the
-predictor, so every mode is `mu`-corrected.
+folded into the parity milestone (item 1) is separate from this knob — it
+is always applied inside the predictor, so every mode is `mu`-corrected.
 
 ## Scope boundary: mechanism in pounce, policy in the caller
 
