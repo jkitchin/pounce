@@ -1061,12 +1061,17 @@ fn hs071_honors_user_kappa_d() {
     );
 }
 
-/// #191: `diverging_iterates_tol` was registered but never read. HS071
-/// starts at `x = (1, 5, 5, 1)` (max-norm 5), so a threshold below that
-/// must abort the solve as diverging — proving the option now reaches the
-/// running divergence guard. The default (1e20) never triggers.
+/// #191 / #248: `diverging_iterates_tol` reaches the running divergence
+/// guard, but the guard is now structurally gated. HS071 is fully boxed
+/// (`1 ≤ xᵢ ≤ 5`), so its feasible region is bounded and unboundedness is
+/// impossible. Even with a threshold below the iterates (`max|x0|=5`), the
+/// solve must NOT abort as `DivergingIterates` — a bounded box can never be
+/// unbounded (issue #248). It simply solves to the known optimum. The
+/// companion guarantee (the option still triggers when a variable is
+/// genuinely free to diverge) is covered by
+/// `tests/repro_issue248.rs::unbounded_variable_still_triggers_diverging`.
 #[test]
-fn hs071_honors_diverging_iterates_tol() {
+fn hs071_boxed_is_not_reported_diverging() {
     let solve = |tol: Option<Number>| {
         let mut app = IpoptApplication::new();
         if let Some(t) = tol {
@@ -1078,12 +1083,16 @@ fn hs071_honors_diverging_iterates_tol() {
         let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Hs071::default()));
         app.optimize_tnlp(tnlp)
     };
-    assert!(matches!(
-        solve(None),
-        ApplicationReturnStatus::SolveSucceeded | ApplicationReturnStatus::SolvedToAcceptableLevel
-    ));
-    assert!(
-        matches!(solve(Some(1.0)), ApplicationReturnStatus::DivergingIterates),
-        "diverging_iterates_tol=1.0 should abort HS071 (max|x0|=5) as diverging",
-    );
+    for tol in [None, Some(1.0)] {
+        let status = solve(tol);
+        assert!(
+            matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+            ),
+            "HS071 is fully boxed and must never report DivergingIterates \
+             (diverging_iterates_tol={tol:?}); got {status:?}",
+        );
+    }
 }
