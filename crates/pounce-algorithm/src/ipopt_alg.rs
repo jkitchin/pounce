@@ -312,6 +312,73 @@ impl IpoptAlgorithm {
         true
     }
 
+    /// Whether a diverging primal iterate is consistent with the feasible
+    /// region actually being *unbounded* (issue #248).
+    ///
+    /// `DivergingIterates` is Ipopt's unboundedness verdict, but a large
+    /// `|x_i|` only proves unboundedness if variable `i` is free to escape
+    /// to infinity in the direction it is heading — i.e. it has no finite
+    /// bound on that side. This lifts a vector of ones from the compressed
+    /// lower/upper bound spaces through the `Px_L` / `Px_U` expansion
+    /// matrices to obtain full-length indicators of which variables carry a
+    /// finite bound, then returns `true` only when some component whose
+    /// magnitude exceeds `diverging_iterates_tol` is heading toward a side
+    /// with no finite bound.
+    ///
+    /// When every large component is pinned by a finite bound — in
+    /// particular when all variables are boxed, so the feasible region is a
+    /// bounded box and unboundedness is structurally impossible — this
+    /// returns `false`, and the caller reports the best iterate via the
+    /// normal convergence / restoration path instead of a spurious
+    /// `Unbounded`.
+    fn divergence_is_true_unboundedness(&self, x: &dyn Vector) -> bool {
+        use pounce_linalg::DenseVector;
+
+        let tol = self.diverging_iterates_tol;
+        let cq = self.cq.borrow();
+        let nlp = cq.nlp().borrow();
+
+        // Full-length 0/1 indicators of finite lower / upper bounds,
+        // built by scattering ones through the bound expansion matrices.
+        let mut ones_l = nlp.x_l().make_new();
+        ones_l.set(1.0);
+        let mut has_lb = x.make_new();
+        nlp.px_l().mult_vector(1.0, &*ones_l, 0.0, &mut *has_lb);
+
+        let mut ones_u = nlp.x_u().make_new();
+        ones_u.set(1.0);
+        let mut has_ub = x.make_new();
+        nlp.px_u().mult_vector(1.0, &*ones_u, 0.0, &mut *has_ub);
+
+        let downcast = |v: &dyn Vector| -> Option<Vec<Number>> {
+            v.as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|d| d.expanded_values())
+        };
+
+        // POUNCE is dense-only; if a backing is unexpectedly non-dense we
+        // cannot prove the divergence is spurious, so fall back to the
+        // original (magnitude-only) verdict to avoid changing behaviour.
+        let (Some(xv), Some(lb), Some(ub)) = (downcast(x), downcast(&*has_lb), downcast(&*has_ub))
+        else {
+            return true;
+        };
+
+        for i in 0..xv.len() {
+            if xv[i].abs() > tol {
+                let free_to_diverge = if xv[i] > 0.0 {
+                    ub[i] == 0.0
+                } else {
+                    lb[i] == 0.0
+                };
+                if free_to_diverge {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Honour a certificate the masked-scale veto refused, when the run that
     /// was allowed to continue did not end in one of its own (gh #200).
     ///
@@ -845,11 +912,33 @@ impl IpoptAlgorithm {
         // a degenerate restoration whose inner sub-NLP can't recover
         // (MESH: orig `f` already at -3.6e33 by iter 90, restoration
         // entered too late to bound `x`).
-        if let Some(curr) = self.data.borrow().curr.as_ref() {
-            if curr.x.amax() > self.diverging_iterates_tol {
-                timing.check_convergence.end();
-                return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
+        //
+        // A large `|x|` alone does not prove unboundedness, though:
+        // `DivergingIterates` is Ipopt's *unboundedness* signal (it maps
+        // to the AMPL 300 "unbounded" range), and under severe objective
+        // ill-scaling the normal-mode IPM can take a large but transient
+        // excursion on a problem that is bounded below with a finite
+        // optimum (issue #248: MINLPLib `jit1`). Only conclude divergence
+        // when the growth is *structurally* consistent with an unbounded
+        // feasible region — some over-threshold component heading toward a
+        // side with no finite bound. If every large component is pinned by
+        // a finite bound (in particular, all variables boxed), the growth
+        // is a scaling artifact, so let the normal convergence / iteration
+        // machinery return the best iterate instead of a spurious
+        // `Unbounded`.
+        let diverging = {
+            let data = self.data.borrow();
+            match data.curr.as_ref() {
+                Some(curr) => {
+                    curr.x.amax() > self.diverging_iterates_tol
+                        && self.divergence_is_true_unboundedness(&*curr.x)
+                }
+                None => false,
             }
+        };
+        if diverging {
+            timing.check_convergence.end();
+            return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
         }
         let conv_status = self
             .bundle
@@ -1779,19 +1868,28 @@ impl IpoptAlgorithm {
                 // outcome upstream produces on pathological problems like
                 // MESH (where ipopt reports `Diverging_Iterates` and
                 // pounce previously reported `Restoration_Failed` with an
-                // obj of −3.6e+33).
+                // obj of −3.6e+33). As in the running guard above, a large
+                // `|x|` is only reported as unbounded when it is
+                // structurally consistent with an unbounded feasible region
+                // (issue #248); otherwise the failure is a plain
+                // `RestorationFailure`, never a spurious `Unbounded`.
                 if self.restore_acceptable_point() {
                     IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
                 } else {
-                    match self.data.borrow().curr.as_ref() {
-                        Some(curr) => {
-                            if curr.x.amax() > self.diverging_iterates_tol {
-                                IterateOutcome::Terminate(SolverReturn::DivergingIterates)
-                            } else {
-                                IterateOutcome::Terminate(SolverReturn::RestorationFailure)
+                    let diverging = {
+                        let data = self.data.borrow();
+                        match data.curr.as_ref() {
+                            Some(curr) => {
+                                curr.x.amax() > self.diverging_iterates_tol
+                                    && self.divergence_is_true_unboundedness(&*curr.x)
                             }
+                            None => false,
                         }
-                        _ => IterateOutcome::Terminate(SolverReturn::RestorationFailure),
+                    };
+                    if diverging {
+                        IterateOutcome::Terminate(SolverReturn::DivergingIterates)
+                    } else {
+                        IterateOutcome::Terminate(SolverReturn::RestorationFailure)
                     }
                 }
             }

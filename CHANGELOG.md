@@ -9,6 +9,25 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — no spurious `Unbounded` on a bounded, ill-scaled NLP (#248)
+
+- **The divergence guard no longer reports `DivergingIterates` (Ipopt's
+  unboundedness verdict) purely on iterate magnitude.** `DivergingIterates`
+  maps to the AMPL 300 "unbounded" range, but a large `max_i |x_i|` does not
+  by itself prove unboundedness: under severe objective ill-scaling the
+  normal-mode IPM can take a large excursion on a problem that is bounded
+  below with a finite optimum (MINLPLib `jit1`), and if every variable is
+  boxed the feasible region is bounded so unboundedness is structurally
+  impossible. Both divergence guards (the running post-accept check and the
+  restoration-failure fallback) now surface `DivergingIterates` only when the
+  growth is consistent with an unbounded feasible region — some component
+  past `diverging_iterates_tol` heading toward a side with no finite bound.
+  When every large component is pinned by a finite bound (in particular, all
+  variables boxed), the solve continues to its best iterate and returns a
+  non-unbounded status (optimal / iteration limit) instead of a spurious
+  `Unbounded`. This removes a non-rigorous fathom in discopt's branch-and-
+  bound, which uses POUNCE as its per-node NLP backend.
+
 ### Added — the last FERAL numerics env knob is now a registered option (#235)
 
 - **`POUNCE_FERAL_MIN_PAR_FLOPS` is now the `feral_min_par_flops` option**,
