@@ -93,6 +93,19 @@ fn jit1_default_is_not_unbounded() {
     assert_not_unbounded_at_optimum(&report, "jit1 (default)");
 }
 
+/// The published model has *free* / unbounded-above variables, so the
+/// structural guard alone cannot rule out unboundedness. With a low
+/// `diverging_iterates_tol` (the kind a branch-and-bound driver sets to
+/// abort runaway nodes) `jit1`'s iterate briefly climbs past the threshold —
+/// `|x|` peaks around 16 — before receding to the finite optimum near 2.9.
+/// The growth-persistence check recognises the excursion is transient and
+/// lets the solve converge instead of reporting a spurious UNBOUNDED.
+#[test]
+fn jit1_free_vars_low_diverging_tol_is_not_unbounded() {
+    let report = solve("jit1.nl", &["diverging_iterates_tol=2"]);
+    assert_not_unbounded_at_optimum(&report, "jit1 (free vars, diverging_iterates_tol=2)");
+}
+
 /// The reporter's strengthened case: every variable boxed to ±100. A bounded
 /// feasible region cannot be unbounded, so even with a divergence threshold
 /// low enough to trip on the (finite) iterates, the solve must return the

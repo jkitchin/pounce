@@ -25,8 +25,22 @@ changes.
   When every large component is pinned by a finite bound (in particular, all
   variables boxed), the solve continues to its best iterate and returns a
   non-unbounded status (optimal / iteration limit) instead of a spurious
-  `Unbounded`. This removes a non-rigorous fathom in discopt's branch-and-
-  bound, which uses POUNCE as its per-node NLP backend.
+  `Unbounded`.
+- **The verdict now also requires the divergence to *persist*.** For a
+  genuinely free variable a low `diverging_iterates_tol` (the kind a branch-
+  and-bound driver sets to abort runaway nodes) could still trip on `jit1`'s
+  transient excursion — `max_i |x_i|` climbs to ~16 then recedes to the
+  finite optimum near ~2.9. `DivergingIterates` is now surfaced only once a
+  free, over-threshold iterate has kept *growing* for several consecutive
+  iterations (a real recession ray grows geometrically; a settling iterate
+  does not), or has blown past an absolute runaway backstop (`1e18`, at or
+  below the default `1e20` threshold, so the default "fire the instant
+  `|x|` crosses the threshold" behaviour is preserved). Verified end-to-end
+  on the MINLPLib `jit1` `.nl`: at `diverging_iterates_tol=2` the published
+  model (free variables) and a ±100-boxed variant both now reach the finite
+  optimum (`obj ≈ 173345`), while a genuinely unbounded-below problem still
+  reports `DivergingIterates`. Together these remove a non-rigorous fathom in
+  discopt's branch-and-bound, which uses POUNCE as its per-node NLP backend.
 
 ### Added — the last FERAL numerics env knob is now a registered option (#235)
 

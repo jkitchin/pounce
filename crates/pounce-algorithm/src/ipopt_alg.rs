@@ -96,6 +96,17 @@ pub struct IpoptAlgorithm {
     /// (orig `f` to ±1e33 by iter 90) before line-search failure forces
     /// a degenerate restoration entry.
     pub diverging_iterates_tol: Number,
+    /// #248 divergence persistence — consecutive iterations the primal
+    /// iterate has kept *growing* while past `diverging_iterates_tol` on a
+    /// structurally unbounded side. A genuine recession ray sustains this;
+    /// a transient ill-scaling excursion on a bounded-below problem peaks
+    /// and recedes (MINLPLib `jit1`: `|x|` climbs to ~16 then falls back to
+    /// ~2.9 at the finite optimum). Reset to zero whenever the iterate is
+    /// within the threshold or is not growing.
+    divergence_streak: u32,
+    /// Largest `|x|` seen in the current growth run (companion to
+    /// [`Self::divergence_streak`]). Zero when no run is active.
+    divergence_prev_amax: Number,
     /// Companion threshold on the dual step — when both primal and dual
     /// steps are tiny in two consecutive iterations the algorithm
     /// declares convergence at the best attainable accuracy. Default
@@ -259,6 +270,8 @@ impl IpoptAlgorithm {
             alpha_init: 1.0,
             tiny_step_tol: 10.0 * Number::EPSILON,
             diverging_iterates_tol: 1e20,
+            divergence_streak: 0,
+            divergence_prev_amax: 0.0,
             tiny_step_y_tol: 1e-2,
             tiny_step_last_iteration: false,
             last_resto_entry_x: None,
@@ -331,6 +344,57 @@ impl IpoptAlgorithm {
     /// returns `false`, and the caller reports the best iterate via the
     /// normal convergence / restoration path instead of a spurious
     /// `Unbounded`.
+    /// #248: consecutive growing, over-threshold iterations required before
+    /// a structurally-free divergence is reported as `DivergingIterates`.
+    /// `jit1`'s transient excursion lasts ~2 growing steps and then
+    /// recedes, so a small persistence requirement clears it without
+    /// materially delaying a genuine ray.
+    const DIVERGENCE_PERSIST_ITERS: u32 = 4;
+    /// #248: an iterate counts as "still growing" toward divergence when it
+    /// grows at least this factor over the previous over-threshold iterate.
+    /// A recession ray in an interior-point method grows geometrically; an
+    /// iterate settling onto a finite optimum above the threshold does not.
+    const DIVERGENCE_GROWTH_FACTOR: Number = 2.0;
+    /// #248: absolute runaway backstop. An iterate this large is reported
+    /// unbounded regardless of persistence. It sits at or below the default
+    /// `diverging_iterates_tol = 1e20`, so the default behaviour (fire the
+    /// instant `|x|` crosses the threshold) is preserved, while a low
+    /// user threshold no longer fires on the way to a finite optimum.
+    const DIVERGENCE_ABS_RUNAWAY: Number = 1e18;
+
+    /// Update the divergence-persistence state for the current iterate and
+    /// return whether `DivergingIterates` should be reported now (issue
+    /// #248). `amax` is `max_i |x_i|`; `structural_free` is the result of
+    /// [`Self::divergence_is_true_unboundedness`] (already gated on
+    /// `amax > diverging_iterates_tol`).
+    ///
+    /// A large `|x|` is reported as unbounded only when it is heading to an
+    /// unbounded side (`structural_free`) *and* the growth persists —
+    /// either the iterate has kept growing for
+    /// [`Self::DIVERGENCE_PERSIST_ITERS`] consecutive iterations, or it has
+    /// blown past the absolute runaway backstop. A transient ill-scaling
+    /// excursion that peaks and recedes never accumulates the streak, so it
+    /// is left to the normal convergence machinery.
+    fn update_divergence_verdict(&mut self, amax: Option<Number>, structural_free: bool) -> bool {
+        let over = matches!(amax, Some(a) if a > self.diverging_iterates_tol) && structural_free;
+        if !over {
+            self.divergence_streak = 0;
+            self.divergence_prev_amax = 0.0;
+            return false;
+        }
+        let a = amax.expect("over implies amax is Some");
+        if a >= self.divergence_prev_amax * Self::DIVERGENCE_GROWTH_FACTOR {
+            self.divergence_streak += 1;
+        } else {
+            // Still past the threshold but no longer growing — restart the
+            // run at this level rather than dropping it entirely.
+            self.divergence_streak = 1;
+        }
+        self.divergence_prev_amax = a;
+        a >= Self::DIVERGENCE_ABS_RUNAWAY
+            || self.divergence_streak >= Self::DIVERGENCE_PERSIST_ITERS
+    }
+
     fn divergence_is_true_unboundedness(&self, x: &dyn Vector) -> bool {
         use pounce_linalg::DenseVector;
 
@@ -926,17 +990,22 @@ impl IpoptAlgorithm {
         // is a scaling artifact, so let the normal convergence / iteration
         // machinery return the best iterate instead of a spurious
         // `Unbounded`.
-        let diverging = {
+        // Evaluate the structural check under an immutable borrow, then
+        // update the persistence state and take the verdict separately so
+        // the mutable field updates don't clash with the `data` borrow.
+        let (amax, structural_free) = {
             let data = self.data.borrow();
             match data.curr.as_ref() {
                 Some(curr) => {
-                    curr.x.amax() > self.diverging_iterates_tol
-                        && self.divergence_is_true_unboundedness(&*curr.x)
+                    let amax = curr.x.amax();
+                    let structural = amax > self.diverging_iterates_tol
+                        && self.divergence_is_true_unboundedness(&*curr.x);
+                    (Some(amax), structural)
                 }
-                None => false,
+                None => (None, false),
             }
         };
-        if diverging {
+        if self.update_divergence_verdict(amax, structural_free) {
             timing.check_convergence.end();
             return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
         }
@@ -1871,8 +1940,11 @@ impl IpoptAlgorithm {
                 // obj of −3.6e+33). As in the running guard above, a large
                 // `|x|` is only reported as unbounded when it is
                 // structurally consistent with an unbounded feasible region
-                // (issue #248); otherwise the failure is a plain
-                // `RestorationFailure`, never a spurious `Unbounded`.
+                // and the divergence is genuine — either it has persisted
+                // (the running guard's growth streak) or blown past the
+                // absolute runaway backstop (issue #248); otherwise the
+                // failure is a plain `RestorationFailure`, never a spurious
+                // `Unbounded`.
                 if self.restore_acceptable_point() {
                     IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
                 } else {
@@ -1880,8 +1952,11 @@ impl IpoptAlgorithm {
                         let data = self.data.borrow();
                         match data.curr.as_ref() {
                             Some(curr) => {
-                                curr.x.amax() > self.diverging_iterates_tol
+                                let amax = curr.x.amax();
+                                amax > self.diverging_iterates_tol
                                     && self.divergence_is_true_unboundedness(&*curr.x)
+                                    && (amax >= Self::DIVERGENCE_ABS_RUNAWAY
+                                        || self.divergence_streak >= Self::DIVERGENCE_PERSIST_ITERS)
                             }
                             None => false,
                         }

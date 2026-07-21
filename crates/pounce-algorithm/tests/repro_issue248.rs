@@ -170,18 +170,40 @@ fn boxed_illscaled_is_not_reported_unbounded() {
     );
 }
 
-/// The companion guarantee (#191): the option is still wired and still
-/// triggers when a variable is genuinely free to diverge. Here the variables
-/// have no finite upper bound, so a large iterate on the unbounded side is a
-/// legitimate divergence signal.
+/// A free variable whose objective has a *finite* optimum above the
+/// threshold must not be reported unbounded either — this is the raw `jit1`
+/// case (free variables, low `diverging_iterates_tol`). The magnitude-only
+/// guard, and even the structural guard alone, tag it unbounded; the growth-
+/// persistence check recognises the iterate settles (like `jit1`, whose
+/// `|x|` peaks then recedes) and lets it converge.
 #[test]
-fn unbounded_variable_still_triggers_diverging() {
-    // Unbounded above (ub sentinel ≥ 1e19 ⇒ treated as +∞), lower bound only.
-    let inst = IllScaled::new(4, 1e-3, 2e19, 1.0);
+fn free_variable_with_finite_optimum_is_not_reported_unbounded() {
+    // `min Σ cᵢ/xᵢ + dᵢ·xᵢ` with dᵢ > 0 has the finite minimiser
+    // xᵢ* = √(cᵢ/dᵢ); variables are unbounded above (free upper side). Drop
+    // the threshold well below x* so the guard would trip on magnitude.
+    let inst = IllScaled::new(6, 1e-3, 2e19, 1.0);
+    let (status, _iters, obj) = solve(inst, 1e-2);
+    assert!(
+        !matches!(status, ApplicationReturnStatus::DivergingIterates),
+        "a free variable with a finite optimum must not report DivergingIterates \
+         (issue #248); got {status:?} obj={obj}",
+    );
+}
+
+/// The companion guarantee (#191): the option is still wired and a genuinely
+/// unbounded problem is still reported `DivergingIterates`. Here the linear
+/// term is negative and the variables are unbounded above, so the objective
+/// decreases without bound (`Σ cᵢ/xᵢ − |dᵢ|·xᵢ → −∞`) and the iterate rides a
+/// real recession ray — the persistence streak accumulates and fires.
+#[test]
+fn genuinely_unbounded_still_triggers_diverging() {
+    let mut inst = IllScaled::new(4, 1e-3, 2e19, 1.0);
+    // Negative linear coefficients ⇒ objective unbounded below as x → +∞.
+    inst.d = vec![-1e3; inst.n];
     let (status, _iters, _obj) = solve(inst, 1e-2);
     assert!(
         matches!(status, ApplicationReturnStatus::DivergingIterates),
-        "an unbounded-above variable past diverging_iterates_tol must report \
+        "a genuinely unbounded problem past diverging_iterates_tol must report \
          DivergingIterates; got {status:?}",
     );
 }
