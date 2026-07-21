@@ -152,9 +152,17 @@ to exploit); a **re-solve** is the expensive bound.
 | `fix_relax` | the perturbation crosses a bound and you want the whole solution to bend around the pin rather than truncate one coordinate | ~2 backsolves (predictor + one Schur-augmented solve); low-rank update, no refactor |
 | `path` | large perturbations that cross several bounds, when the estimate must track the exact re-solve | `k` crossings × (backsolve + Schur update), bounded above by one re-solve |
 
-The report is always returned; base-point degeneracy is handled
-automatically rather than as a mode. One knob, ordered — not a matrix of
+The report is always returned. One knob, ordered — not a matrix of
 independent flags.
+
+Not every roadmap item is a mode; the ladder covers only the `estimate()`
+accuracy axis. `linear` is the baseline, `fix_relax` is item 1, `path` is
+item 2. The other two items are deliberately off the axis. **Item 3 (QP
+directional)** is auto-triggered rather than selectable, because
+base-point degeneracy is a property of the converged solution the caller
+cannot know in advance. **Item 4 (corrector-step)** is a primitive the
+caller invokes in a loop and composes with any mode, so it is not a mode
+of `estimate()` either.
 
 The default is `linear`, matching today's behaviour and the reference:
 sIPOPT ships with `sens_boundcheck` off, i.e. it defaults to the plain
