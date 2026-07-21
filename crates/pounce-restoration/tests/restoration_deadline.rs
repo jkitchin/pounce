@@ -161,18 +161,17 @@ fn solve_with_budget(budget: f64, n: usize) -> (ApplicationReturnStatus, i32, i3
     app.initialize().unwrap();
 
     let bff: InnerBackendFactoryFactory = Box::new(feral_backend);
-    let factory =
-        make_default_restoration_factory(RestoAlgorithmBuilder::new(), AlgorithmBuilder::new(), bff);
+    let factory = make_default_restoration_factory(
+        RestoAlgorithmBuilder::new(),
+        AlgorithmBuilder::new(),
+        bff,
+    );
     app.set_restoration_factory(factory);
 
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(InfeasibleVec { n }));
     let status = app.optimize_tnlp(tnlp);
     let stats = app.statistics();
-    (
-        status,
-        stats.iteration_count,
-        stats.restoration_inner_iters,
-    )
+    (status, stats.iteration_count, stats.restoration_inner_iters)
 }
 
 #[test]
@@ -205,7 +204,10 @@ fn restoration_grind_honors_wall_deadline() {
     // machine reaches even a third of the unbounded inner-iteration count.
     let (tight_status, _tight_outer, tight_inner) = solve_with_budget(0.05, n);
     assert!(
-        matches!(tight_status, ApplicationReturnStatus::MaximumWallTimeExceeded),
+        matches!(
+            tight_status,
+            ApplicationReturnStatus::MaximumWallTimeExceeded
+        ),
         "tight-budget solve did not terminate on the wall-time limit: {tight_status:?}",
     );
     assert!(
