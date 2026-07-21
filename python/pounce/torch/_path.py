@@ -139,7 +139,31 @@ def inverse_map_rhs(tp, dy_ds, *, output=None, x0=None, warm=False):
 
 @dataclass
 class PathTrace:
-    """Result of a path-following run (mirror of the JAX dataclass)."""
+    """Result of a path-following run (mirror of the JAX dataclass).
+
+    Attributes
+    ----------
+    s : (K,)
+        Path parameter at each recorded point (arclength in the
+        arclength mode).
+    theta : (K,) + p_shape
+        Parameter value at each point.
+    x : (K, n)
+        Primal solution at each point.
+    lam : (K, m)
+        Equality/inequality multipliers at each point.
+    n_steps, n_correctors, n_accepts : int
+        Total steps taken, of which corrected (a solve) vs. accepted on
+        the predictor alone (no solve). ``n_correctors`` is the solve
+        count beyond the initial anchor.
+    active_set_changes : list[float]
+        Path-parameter values at which the active set changed (parameter
+        mode).
+    turning_points : list[float]
+        θ values at detected folds (arclength mode).
+    status : str
+        ``"ok"`` on a full traverse, or a reason string on early stop.
+    """
 
     s: np.ndarray
     theta: np.ndarray
@@ -155,7 +179,30 @@ class PathTrace:
 
 class PathFollower:
     """Predictor–corrector path follower over a :class:`TorchProblem`
-    (pounce#90). Mirror of :class:`pounce.jax.PathFollower`."""
+    (pounce#90). Mirror of :class:`pounce.jax.PathFollower` — same
+    semantics, same defaults; only the array namespace differs.
+
+    Parameters
+    ----------
+    tp : TorchProblem
+        The parametric NLP to trace.
+    monitor_tol : float
+        KKT-residual threshold at the predicted point; above it the step
+        is corrected (a warm re-solve), below it accepted on the
+        predictor alone. This is the accuracy-for-solves lever: loosening
+        it accepts more predictor steps between re-solves.
+    active_margin_tol : float
+        Active-set margin (pounce#89) threshold; a predicted point closer
+        than this to a critical-region boundary forces a correction so
+        the predictor never extrapolates across a discontinuity.
+    ds0, ds_min, ds_max : float
+        Initial / minimum / maximum step in the path parameter.
+    grow, shrink : float
+        Step-size adaptation factors (on accept / easy correction vs.
+        hard or failed correction).
+    max_steps : int
+        Safety cap on the number of steps.
+    """
 
     def __init__(
         self,
@@ -226,7 +273,34 @@ class PathFollower:
     # ----- parameter continuation -----
 
     def follow(self, theta_of_s, s_span, x0) -> PathTrace:
-        """Trace ``x*(θ(s))`` for a prescribed path ``θ(s)`` (pounce#90)."""
+        """Trace ``x*(θ(s))`` for a prescribed path ``θ(s)``,
+        ``s ∈ [s0, s1]`` (pounce#90).
+
+        Anchors once with a cold solve at ``θ(s0)``, then steps: predict
+        with the held-factor sensitivity, monitor (KKT residual +
+        active-set margin) with no solve, and correct (warm-μ re-solve +
+        re-anchor) only when the monitor trips. The step size adapts to
+        the corrector effort and backs off near active-set boundaries.
+
+        Restricted to equality constraints (``cl == cu``) and variable
+        bounds; two-sided inequalities raise (the monitor's constraint
+        residual is not valid for them).
+
+        Parameters
+        ----------
+        theta_of_s : callable
+            ``s (float) -> θ`` (shape ``p_shape``).
+        s_span : (float, float)
+            ``(s0, s1)`` with ``s1 > s0``.
+        x0 : (n,)
+            Primal initial guess for the anchor solve.
+
+        Returns
+        -------
+        PathTrace
+            ``n_correctors`` vs ``n_steps`` is the headline number: how
+            many NLP solves the predictor avoided.
+        """
         tp = self._tp
         _require_equality_constraints(tp, "PathFollower.follow")
         s0, s1 = float(s_span[0]), float(s_span[1])
@@ -331,7 +405,41 @@ class PathFollower:
         direction: float = 1.0, newton_tol: float = 1e-9, newton_max: int = 40,
     ) -> PathTrace:
         """Pseudo-arclength continuation of the solution curve for a
-        **scalar** parameter ``θ``, tracing *past folds* (pounce#90)."""
+        **scalar** parameter ``θ``, tracing *past folds* (pounce#90).
+
+        Solves the stationarity / feasibility system ``R(x, λ, θ) = 0``
+        — ``R = [∇_x f + J_gᵀλ ; g]`` — along the arclength of its
+        solution curve in ``(x, λ, θ)`` space, with a tangent predictor
+        and a Newton corrector on the augmented system ``[R ; arclength]``.
+        Because the curve is parametrised by arclength rather than ``θ``,
+        it passes through turning points where ``∂x*/∂θ`` is singular
+        (the fold), which parameter continuation cannot.
+
+        Restricted to equality / unconstrained problems (the active set
+        is fixed along the traced branch). Bounds / inequality-active
+        folds are out of scope for v1.
+
+        Parameters
+        ----------
+        x0 : (n,)
+            Primal guess near a point on the curve; projected onto
+            ``R = 0`` at ``θ0`` before tracing.
+        theta0 : float
+            Starting (scalar) parameter value.
+        ds : float
+            Arclength step. Folds are located to this resolution.
+        n_steps : int
+            Number of arclength steps.
+        direction : float
+            Sign of the initial step in ``θ`` (+1 increasing).
+        newton_tol, newton_max : float, int
+            Corrector Newton tolerance and iteration cap.
+
+        Returns
+        -------
+        PathTrace  (``turning_points`` lists the θ values at detected folds,
+        in the order the trace reaches them)
+        """
         tp = self._tp
         n, m = tp._n, tp._m
         if len(tp._p_shape) != 0 and tp._p_shape != (1,):

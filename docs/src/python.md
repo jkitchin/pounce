@@ -917,6 +917,11 @@ projection layer, full Jacobian, JVP/VJP-from-state, and the lifetime
 patterns — is in
 [`notebooks/13_post_solve_jacobian.ipynb`](https://github.com/jkitchin/pounce/blob/main/python/notebooks/13_post_solve_jacobian.ipynb).
 
+Building on that held factor, `PathFollower` traces a whole solution
+path \\(x^*(\theta(s))\\) while *predicting* most steps off the factor
+instead of re-solving, and `inverse_map_rhs` runs the map backwards as an
+ODE — see [Path Following & Inverse Mapping](path-following.md).
+
 ## PyTorch integration
 
 The `pounce.torch` subpackage is a PyTorch frontend mirroring
@@ -946,7 +951,7 @@ precision and the layers validate it).
 | `vmap_solve` / `vmap_solve_parallel` | `vmap_solve` / `vmap_solve_parallel` |
 | `JaxProblem(…)` | `TorchProblem(…)` (build-once, factor-reuse backward) |
 | `solve_qp` / `solve_qp_batch` / `solve_socp` / `QpLayer` | same names |
-| `PathFollower` / `inverse_map_rhs` | same names |
+| [`PathFollower` / `inverse_map_rhs`](path-following.md) | same names |
 
 ```python
 import torch
