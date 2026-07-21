@@ -165,7 +165,7 @@ python-cli-bin:
 	install -m 0755 "$(CLI_BIN)" python/pounce/bin/pounce
 
 python-ext: python-cli-bin
-	cd python && maturin develop
+	cd python && maturin develop --release
 
 python-test: python-ext
 	cd python && python -m pytest tests -q
