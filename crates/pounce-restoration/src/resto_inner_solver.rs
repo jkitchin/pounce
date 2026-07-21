@@ -251,6 +251,17 @@ pub fn run_inner_resto(
     // which `f(x)` reads via `ip_data_->curr_mu()`
     // (`IpRestoIpoptNLP.cpp:485`).
     let inner_data: IpoptDataHandle = Rc::new(RefCell::new(IpoptData::new()));
+    // Share the outer solve's wall/CPU-time deadline (pounce#242) so the
+    // nested IPM is bounded by the caller's *global* budget. Without this
+    // the inner solve ran effectively unbounded by wall time: it builds a
+    // fresh `IpoptData` whose `timing.overall_alg` is never started, so
+    // the coarse `overall_alg`-based check read 0 elapsed and never
+    // tripped — a single restoration entry could then grind for many
+    // iterations under one outer "iteration", the dominant source of the
+    // observed budget overshoot. The shared `Deadline` measures elapsed
+    // time from the outer solve's start, so the inner convergence check
+    // trips at the correct global wall time.
+    inner_data.borrow_mut().deadline = outer_data.borrow().deadline.clone();
     resto_bundle.nlp.set_inner_data(Rc::clone(&inner_data));
 
     // Wrap the resto NLP in an Rc<RefCell<dyn IpoptNlp>> for the inner

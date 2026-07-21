@@ -1599,6 +1599,19 @@ impl IpoptApplication {
         // the application exposes via `timing_stats()`.
         let data: crate::ipopt_data::IpoptDataHandle = Rc::new(RefCell::new(AlgIpoptData::new()));
         data.borrow_mut().timing = Rc::clone(&timing);
+        // Install a shared wall/CPU-time deadline (pounce#242) so the time
+        // budget is honored at the granularity of the expensive inner
+        // steps — the main loop's KKT factorization / line search and the
+        // restoration inner IPM — instead of only between outer iterations.
+        // The `Deadline` starts its clock now (right after `overall_alg`),
+        // and the restoration sub-solve reuses this same instance, so the
+        // caller's budget bounds the whole solve rather than each nested
+        // level independently. The convergence check treats it as
+        // authoritative when present (see `conv_check::opt_error`).
+        data.borrow_mut().deadline = Some(pounce_common::timing::Deadline::new(
+            builder.conv_check.max_wall_time,
+            builder.conv_check.max_cpu_time,
+        ));
         let cq: crate::ipopt_cq::IpoptCqHandle = Rc::new(RefCell::new(
             IpoptCalculatedQuantities::new(Rc::clone(&data), Rc::clone(&nlp_handle)),
         ));

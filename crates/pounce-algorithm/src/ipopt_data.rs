@@ -11,7 +11,7 @@
 //! and outputs.
 
 use crate::iterates_vector::IteratesVector;
-use pounce_common::timing::TimingStatistics;
+use pounce_common::timing::{Deadline, TimingStatistics};
 use pounce_common::types::{Index, Number};
 use pounce_linalg::SymMatrix;
 use std::cell::RefCell;
@@ -145,6 +145,19 @@ pub struct IpoptData {
     /// Defaults to a fresh empty instance for the structural unit tests
     /// that don't go through `IpoptApplication`.
     pub timing: Rc<TimingStatistics>,
+
+    /// Shared wall/CPU-time deadline for the whole solve (pounce#242).
+    /// `IpoptApplication` installs one at solve start from the
+    /// `max_wall_time` / `max_cpu_time` options, and the restoration inner
+    /// IPM copies the *same* deadline onto its own `IpoptData` so the
+    /// nested solve is bounded by the caller's global budget rather than
+    /// running unbounded (its fresh `timing.overall_alg` is never
+    /// started). When present it is the authoritative time gate — checked
+    /// at the granularity of the expensive inner steps (KKT factorization,
+    /// each line-search trial), not only between outer iterations. `None`
+    /// for direct-driver / unit-test paths, which fall back to the
+    /// `overall_alg` timer in [`crate::conv_check`].
+    pub deadline: Option<Deadline>,
 }
 
 impl Default for IpoptData {
@@ -180,6 +193,7 @@ impl IpoptData {
             info_last_output: -1.0,
             info_iters_since_header: 0,
             timing: Rc::new(TimingStatistics::new()),
+            deadline: None,
         }
     }
 
