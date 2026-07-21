@@ -77,6 +77,29 @@ fn tiny_step_and_divergence_overrides_flow_through() {
     assert_eq!(b.diverging_iterates_tol, 1e8);
 }
 
+/// pounce#246: the dual-divergence guard streak defaults to the registered
+/// value (15, i.e. enabled) and an explicit override — including `0` to
+/// disable — flows through to the builder.
+#[test]
+fn dual_diverging_streak_default_and_override_flow_through() {
+    let b = builder_from(|_| {});
+    assert_eq!(b.dual_diverging_streak, 15, "default must match registered");
+
+    let off = builder_from(|app| {
+        app.options_mut()
+            .set_integer_value("dual_diverging_streak", 0, true, false)
+            .unwrap();
+    });
+    assert_eq!(off.dual_diverging_streak, 0, "0 disables the guard");
+
+    let custom = builder_from(|app| {
+        app.options_mut()
+            .set_integer_value("dual_diverging_streak", 40, true, false)
+            .unwrap();
+    });
+    assert_eq!(custom.dual_diverging_streak, 40);
+}
+
 #[test]
 fn filter_constants_default_match_registered() {
     let b = builder_from(|_| {}).line_search;

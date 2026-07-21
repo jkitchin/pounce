@@ -1,16 +1,21 @@
-//! pounce#246 regression: a restoration-heavy solve must honor the shared
-//! wall-time `Deadline` promptly, rather than grinding to a multiple of the
-//! budget in the initialization / restoration-entry phase.
+//! Restoration wall-time-deadline guard (pounce#246, complementary check).
+//!
+//! A restoration-heavy solve must honor the shared wall-time `Deadline`
+//! promptly at the initialization / restoration-entry boundary — the window
+//! #242/#244/#245 left un-checked (they bounded the outer-iteration and
+//! between-KKT-factorization boundaries). This guards the two small deadline
+//! checks added alongside the #246 fix: the pre-loop init check in
+//! `IpoptAlgorithm::optimize_inner` and the per-inner-iteration check in
+//! `RestoConvCheckAdapter`. (The primary #246 fix — the dual-divergence
+//! guard that prevents the emfl050 warm-start factorization stall — is
+//! exercised separately.)
 //!
 //! The fixture is per-variable infeasible (`x_i = 1` AND `x_i >= 3`), so the
 //! outer IPM cannot make progress and repeatedly enters the nested
 //! restoration IPM. With a generous budget the solve runs restoration to
 //! completion (hundreds of inner iterations); with a tight budget it must be
 //! cut short — far fewer inner iterations and a `MaximumWallTimeExceeded`
-//! status — proving the deadline is consulted inside the
-//! initialization / restoration entry (#242/#244/#245 bounded the
-//! outer-iteration / KKT-factorization boundaries; this closes the
-//! init/entry gap).
+//! status.
 
 use pounce_algorithm::alg_builder::{AlgorithmBuilder, LinearBackendFactory, LinearSolverChoice};
 use pounce_algorithm::application::IpoptApplication;
