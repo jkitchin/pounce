@@ -96,14 +96,15 @@ the rest.
 
 Staged by dependency and by "parity vs past it".
 
-**0. Diagnostics foundation.** Breakpoint detection (the ratio test to the
-first crossing) and a report the estimate returns: which variables
-crossed, the residual, the `mu` used. Cheap, needed by everything below,
-and useful on its own — it turns the current silent clamp into "here is
-what happened". *Beyond sIPOPT (it exposes no such report).*
+**0. Diagnostics foundation → past sIPOPT.** Breakpoint detection (the
+ratio test to the first crossing) and a report the estimate returns:
+which variables crossed, the residual, the `mu` used. Cheap, needed by
+everything below, and useful on its own — it turns the current silent
+clamp into "here is what happened" (sIPOPT exposes no such report).
 
-**1. Single-crossing fix-relax → sIPOPT parity.** Upgrade
-`boundcheck.rs` from the single-pass clamp to the Schur-refinement loop:
+**1. Single-crossing fix-relax → sIPOPT parity (active-set axis).**
+Upgrade `boundcheck.rs` from the single-pass clamp to the Schur-refinement
+loop:
 augment the held factorization with a row pinning the first crossing
 variable, re-solve so the non-violating coordinates absorb the pin, via
 the `IndexSchurData` path that already does the augmented backsolve
@@ -111,8 +112,7 @@ the `IndexSchurData` path that already does the augmented backsolve
 already exist, so this is a scoped change to one module, not greenfield.
 Low-rank Schur update, no refactor. It has a reference to validate
 against (upstream `SensStdStepCalc.cpp`) and, since pounce#7 no longer
-covers it, should get its own issue. *Reaches parity on the active-set
-axis.*
+covers it, should get its own issue.
 
 **2. Multi-crossing path-following → past sIPOPT (crossing axis).** Iterate
 the fix-relax across successive breakpoints toward the target
@@ -127,13 +127,15 @@ set for the correct one-sided derivative, through the QP already in
 `pounce-convex` (`crates/pounce-convex/src/ipm.rs`). Independent of 1–2;
 auto-triggered when the solve detects weak activity, not a user knob.
 
-**4. Corrector-step primitive.** One Newton/primal-dual iteration reusing
+**4. Corrector-step primitive → past sIPOPT.** One Newton/primal-dual
+iteration reusing
 the held factorization, returning the residual. Small and general; it is
 what an advanced-step controller's corrector loop calls. Composes with
 path-following (path-following gets the active set, the corrector polishes
 the point).
 
-**5. `mu`-correction term (minor).** The remaining small gap to sIPOPT's
+**5. `mu`-correction term → sIPOPT parity (minor).** The remaining small
+gap to sIPOPT's
 predictor (eq. 10): correct for the factorization sitting at `mu` > 0
 rather than `mu` = 0. Applied automatically inside the predictor, not a
 user option, and negligible at tight convergence tolerance, so listed
