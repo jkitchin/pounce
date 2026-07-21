@@ -19,16 +19,40 @@ x_new = np.clip(x_new, lo, hi)                            # sens.py:636 (warns)
 
 The step itself is one Schur-complement backsolve against the held KKT
 factorization (`crates/pounce-sensitivity/src/solver.rs:360`,
-`parametric_step`, via `IndexSchurData`). Two properties matter for this
-roadmap:
+`parametric_step`, via `IndexSchurData`). The sIPOPT port itself is done
+(pounce#7 and its spun-out pieces #16, #17 are closed): the predictor runs
+on real problems. Two properties matter for this roadmap:
 
-1. **On a bound crossing it clamps.** When the linear step leaves the
-   variable bounds, `estimate` projects back onto them and warns. That is
-   the crude treatment: the active set has changed and the first-order
-   prediction is no longer valid there.
+1. **On a bound crossing it does a single-pass clamp.** The offending
+   variable is clipped to its bound and the other coordinates keep their
+   linear-predictor values, frozen. This holds at both layers: the
+   pyomo-pounce `np.clip` above (`sens.py:636`) and the Rust
+   `crates/pounce-sensitivity/src/boundcheck.rs`, which is gated by the
+   `sens_boundcheck` option and is itself only a single-pass clamp, "a
+   simpler single-pass clamp rather than upstream's iterative
+   Schur-refinement loop" in its own words.
 2. **The predictor is `base_x + dx`, with no barrier-parameter
    correction.** It is evaluated against the factorization at the final
    `mu` but carries no explicit `mu`-correction term.
+
+### The precise gap versus sIPOPT
+
+sIPOPT's bound handling is also an option, `sens_boundcheck`, and it
+defaults **off** (pounce mirrors this: `sens_app.rs` registers
+`sens_boundcheck` default `false`, "Mirrors upstream ...
+SensApplication.cpp:63"). The difference is what that option *does* when
+on. sIPOPT runs the **iterative Schur-refinement fix-relax**: each
+violation adds a row to the augmented system pinning that variable, then
+re-solves, so the non-violating coordinates **shift** to stay consistent
+with the implicit-function-theorem relations under the pin. pounce pins
+the offender and **freezes** the rest.
+
+So the gap is not "no bound handling" and not "no scaffolding". It is the
+re-solve: pounce clamps one coordinate, sIPOPT lets the whole solution
+bend to absorb the pin. That is exactly what matters on a deep violation,
+where the estimate flattens against a bound. The `boundcheck.rs` pointer
+to pounce#7 for "the full refinement" is stale (that umbrella issue is
+closed); no open issue currently tracks this.
 
 ## The reference: what sIPOPT actually implements
 
@@ -52,8 +76,10 @@ directional method (eq. 14, "the current version of sIPOPT does not
 include an implementation of (14)"), multi-step path-following, and any
 predictor-corrector loop.
 
-So today pounce is *behind* sIPOPT by one item: sIPOPT fix-relaxes the
-first crossing where pounce clamps.
+So today pounce is *behind* sIPOPT by exactly one step, detailed under
+"Where we are" below: sIPOPT's `sens_boundcheck` re-solves so the
+solution bends around the pinned variable, where pounce's clamp freezes
+the rest.
 
 ## Two failure modes (they want different treatments)
 
@@ -76,13 +102,17 @@ crossed, the residual, the `mu` used. Cheap, needed by everything below,
 and useful on its own — it turns the current silent clamp into "here is
 what happened". *Beyond sIPOPT (it exposes no such report).*
 
-**1. Single-crossing fix-relax → sIPOPT parity.** Augment the held
-factorization to pin the first crossing variable at its bound and relax its
-complementarity, via the existing `IndexSchurData` path
-(`solver.rs:360`,`:384`). Low-rank Schur update, no refactor. This is the
-one capability sIPOPT has and pounce lacks, so it is the parity milestone,
-and it has a reference to validate against. *Reaches parity on the
-active-set axis.*
+**1. Single-crossing fix-relax → sIPOPT parity.** Upgrade
+`boundcheck.rs` from the single-pass clamp to the Schur-refinement loop:
+augment the held factorization with a row pinning the first crossing
+variable, re-solve so the non-violating coordinates absorb the pin, via
+the `IndexSchurData` path that already does the augmented backsolve
+(`solver.rs:360`,`:384`). The `sens_boundcheck` option and the module
+already exist, so this is a scoped change to one module, not greenfield.
+Low-rank Schur update, no refactor. It has a reference to validate
+against (upstream `SensStdStepCalc.cpp`) and, since pounce#7 no longer
+covers it, should get its own issue. *Reaches parity on the active-set
+axis.*
 
 **2. Multi-crossing path-following → past sIPOPT (crossing axis).** Iterate
 the fix-relax across successive breakpoints toward the target
@@ -151,7 +181,9 @@ primitive repeatedly.
    or diagnostics + fix-relax as one "active-set-aware estimate" PR?
 2. **Default mode.** `linear` keeps today's behaviour and suits hot loops
    but is silently wrong across a crossing; `fix_relax` is correct-by-
-   default at a small cost. This is the main philosophical call.
+   default at a small cost. This is the main philosophical call. Note the
+   precedent: sIPOPT defaults `sens_boundcheck` **off**, i.e. it ships
+   `linear` as the default and makes the correction opt-in.
 3. **`mu`-correction.** Fold into the predictor, or keep it a separate
    small item, or expose the barrier smoothing as a knob at all?
 4. **Sequencing the novel milestones.** Path-following and QP directional
