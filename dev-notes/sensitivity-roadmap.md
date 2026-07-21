@@ -115,19 +115,24 @@ the one below:
 - `linear` — pure predictor, clamp, warn (today's behaviour).
 - `fix_relax` — single-crossing correction.
 - `path` — multi-step path-following.
-- `exact` — re-solve (ground truth, and the honest cap when path-following
-  would cost as much anyway).
 
 The report is always returned; base-point degeneracy is handled
 automatically rather than as a mode. One knob, ordered, obvious default —
 not a matrix of independent flags.
+
+There is deliberately no `exact` mode. `estimate` is the
+factorization-reuse path; the exact answer is a full `solve()`, which the
+caller already has. Falling back to a re-solve when path-following would
+cost as much is a budget-driven **caller** decision (see the scope
+boundary below), not a solver mode.
 
 ## Scope boundary: mechanism in pounce, policy in the caller
 
 Everything above is a **mechanism**: a stateless operation on the held
 factorization (a step, a corrector iteration, a fix-relax solve, a
 breakpoint test) plus the diagnostics to decide. The **policy** — how many
-correctors, when to stop, which mode per cycle, the advanced-step
+correctors, when to stop, which mode per cycle, whether to abandon the
+estimate and call a full `solve()` instead, the advanced-step
 solve-ahead-then-update orchestration — belongs to the application layer
 (e.g. an advanced-step NMPC controller such as
 [drto](https://github.com/devin-griff/drto)), because those decisions
