@@ -5,6 +5,51 @@
 then past it, on a clean mechanism/policy boundary. Nothing here is
 implemented yet; the intent is to agree the shape before any PR.
 
+## State of the art
+
+Two paradigms address parametric NLP sensitivity. The
+**held-factorization** family computes `dx*/dp` from the converged KKT
+factor and updates from there (sIPOPT, k_aug, WORHP Zen, CasADi's
+sensitivity); this is the paradigm here. The **SQP/QP real-time** family
+re-solves a QP subproblem each step (acados' real-time iteration; the
+warm-starting of SNOPT, KNITRO). The individual techniques the roadmap
+uses are all in the literature: Fiacco's stability theory and the
+directional-derivative QP; the Büskens/Maurer active-set-change
+sensitivity for real-time control; and the sIPOPT paper itself, which
+derives multi-step path-following and the eq. 14 QP but leaves them
+unimplemented. A light survey of where the boxes are checked
+(base predictor, fix-relax, path-following, degeneracy QP, corrector):
+
+| solver / module | base | fix-relax | path | degen | corr |
+|---|:--:|:--:|:--:|:--:|:--:|
+| IPOPT + sIPOPT / k_aug (open) | ✓ | ✓ | ✗ | ✗ | ✗ |
+| WORHP Zen (commercial) | ✓ | ~ | ~ | ? | ~ |
+| KNITRO | ~ | ✗ | ✗ | ✗ | ✗ |
+| SNOPT | ✗ | ✗ | ✗ | ✗ | ✗ |
+| acados RTI (SQP paradigm) | ✗ | ~ | ~ | ✗ | ✓ |
+| CasADi sensitivity | ✓ | ✗ | ✗ | ✗ | ✗ |
+
+No single solver checks the full menu in the held-factorization paradigm.
+sIPOPT, the open reference, checks two boxes; WORHP Zen is the strongest
+but is closed and its full coverage is unconfirmed; acados checks the
+corrector box in a different paradigm. The techniques exist scattered
+across the literature and these tools, but the full integrated set in one
+open solver does not.
+
+## Benefit hypothesis
+
+The contribution is not new sensitivity mathematics: every method here is
+established (see State of the art above). Its value is assembling the
+known menu into one coherent, open, cleanly-layered implementation — an
+explicit ordered-mode plus diagnostics API, automatic degeneracy handling,
+and the mechanism/policy split that keeps the primitives in pounce and the
+control policy in the caller — which no open package offers today, and
+which the one commercial package that might (WORHP Zen) keeps closed. The
+payoff is that pounce becomes the open reference for full active-set-aware
+parametric sensitivity, so advanced-step NMPC, RTO, and estimation can be
+built on an auditable open stack instead of half-measures (a clamp) or a
+closed one.
+
 ## Where we are
 
 `estimate()` (`pyomo-pounce/pyomo_pounce/sens.py:598`) computes the
@@ -77,54 +122,9 @@ include an implementation of (14)"), multi-step path-following, and any
 predictor-corrector loop.
 
 So today pounce is *behind* sIPOPT by exactly one step, detailed under
-"Where we are" below: sIPOPT's `sens_boundcheck` re-solves so the
+"Where we are" above: sIPOPT's `sens_boundcheck` re-solves so the
 solution bends around the pinned variable, where pounce's clamp freezes
 the rest.
-
-## State of the art
-
-Two paradigms address parametric NLP sensitivity. The
-**held-factorization** family computes `dx*/dp` from the converged KKT
-factor and updates from there (sIPOPT, k_aug, WORHP Zen, CasADi's
-sensitivity); this is the paradigm here. The **SQP/QP real-time** family
-re-solves a QP subproblem each step (acados' real-time iteration; the
-warm-starting of SNOPT, KNITRO). The individual techniques the roadmap
-uses are all in the literature: Fiacco's stability theory and the
-directional-derivative QP; the Büskens/Maurer active-set-change
-sensitivity for real-time control; and the sIPOPT paper itself, which
-derives multi-step path-following and the eq. 14 QP but leaves them
-unimplemented. A light survey of where the boxes are checked
-(base predictor, fix-relax, path-following, degeneracy QP, corrector):
-
-| solver / module | base | fix-relax | path | degen | corr |
-|---|:--:|:--:|:--:|:--:|:--:|
-| IPOPT + sIPOPT / k_aug (open) | ✓ | ✓ | ✗ | ✗ | ✗ |
-| WORHP Zen (commercial) | ✓ | ~ | ~ | ? | ~ |
-| KNITRO | ~ | ✗ | ✗ | ✗ | ✗ |
-| SNOPT | ✗ | ✗ | ✗ | ✗ | ✗ |
-| acados RTI (SQP paradigm) | ✗ | ~ | ~ | ✗ | ✓ |
-| CasADi sensitivity | ✓ | ✗ | ✗ | ✗ | ✗ |
-
-No single solver checks the full menu in the held-factorization paradigm.
-sIPOPT, the open reference, checks two boxes; WORHP Zen is the strongest
-but is closed and its full coverage is unconfirmed; acados checks the
-corrector box in a different paradigm. The techniques exist scattered
-across the literature and these tools, but the full integrated set in one
-open solver does not.
-
-## Benefit hypothesis
-
-The contribution is not new sensitivity mathematics: every method here is
-established (see State of the art above). Its value is assembling the
-known menu into one coherent, open, cleanly-layered implementation — an
-explicit ordered-mode plus diagnostics API, automatic degeneracy handling,
-and the mechanism/policy split that keeps the primitives in pounce and the
-control policy in the caller — which no open package offers today, and
-which the one commercial package that might (WORHP Zen) keeps closed. The
-payoff is that pounce becomes the open reference for full active-set-aware
-parametric sensitivity, so advanced-step NMPC, RTO, and estimation can be
-built on an auditable open stack instead of half-measures (a clamp) or a
-closed one.
 
 ## Two failure modes (they want different treatments)
 
