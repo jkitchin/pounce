@@ -134,7 +134,9 @@ path-following (path-following gets the active set, the corrector polishes
 the point).
 
 **5. `mu`-correction term (minor).** The remaining small gap to sIPOPT's
-predictor (eq. 10). Negligible at tight convergence tolerance, so listed
+predictor (eq. 10): correct for the factorization sitting at `mu` > 0
+rather than `mu` = 0. Applied automatically inside the predictor, not a
+user option, and negligible at tight convergence tolerance, so listed
 separately from the parity milestone rather than bundled into it.
 
 ## API surface
@@ -147,8 +149,14 @@ the one below:
 - `path` — multi-step path-following.
 
 The report is always returned; base-point degeneracy is handled
-automatically rather than as a mode. One knob, ordered, obvious default —
-not a matrix of independent flags.
+automatically rather than as a mode. One knob, ordered — not a matrix of
+independent flags.
+
+The default is `linear`, matching today's behaviour and the reference:
+sIPOPT ships with `sens_boundcheck` off, i.e. it defaults to the plain
+predictor and makes the active-set correction opt-in. The `mu`-correction
+of item 5 is separate from this knob — it is always applied inside the
+predictor, so every mode is `mu`-corrected.
 
 ## Scope boundary: mechanism in pounce, policy in the caller
 
@@ -168,21 +176,6 @@ controller. Concretely: path-following runs to completion inside pounce
 (its size is fixed by the problem), while a corrector *loop* lives in the
 caller (its size is fixed by an external deadline), calling the corrector
 primitive repeatedly.
-
-## Open decisions (for discussion)
-
-1. **First PR scope.** Diagnostics alone (a clean standalone contribution),
-   or diagnostics + fix-relax as one "active-set-aware estimate" PR?
-2. **Default mode.** `linear` keeps today's behaviour and suits hot loops
-   but is silently wrong across a crossing; `fix_relax` is correct-by-
-   default at a small cost. This is the main philosophical call. Note the
-   precedent: sIPOPT defaults `sens_boundcheck` **off**, i.e. it ships
-   `linear` as the default and makes the correction opt-in.
-3. **`mu`-correction.** Fold into the predictor, or keep it a separate
-   small item, or expose the barrier smoothing as a knob at all?
-4. **Sequencing the novel milestones.** Path-following and QP directional
-   have no reference to point at, unlike fix-relax; worth a short design
-   note each before code?
 
 ## Validation
 
