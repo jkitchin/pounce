@@ -41,6 +41,17 @@ use pounce_nlp::tnlp::{IpoptCq as TnlpIpoptCq, IpoptData as TnlpIpoptData, IterS
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Dual-divergence guard (pounce#246): only dual-infeasibility growth in the
+/// *elevated* regime (`inf_du` above this) counts toward the streak, so the
+/// noisy early iterations of a normal solve never build one.
+const DUAL_DIV_COUNT_FLOOR: Number = 1e2;
+/// Dual-divergence guard: the guard fires only once `inf_du` is this large in
+/// absolute terms — well above the transient peaks a converging solve reaches
+/// (e.g. the least-square-init path recovers from ~6e9 on emfl050), and below
+/// the ~1e10 where the KKT factorizations begin to choke, so the diversion to
+/// restoration happens *before* the seconds-long factorizations start.
+const DUAL_DIV_FIRE_TOL: Number = 1e8;
+
 pub struct IpoptAlgorithm {
     pub data: IpoptDataHandle,
     pub cq: IpoptCqHandle,
@@ -112,6 +123,19 @@ pub struct IpoptAlgorithm {
     /// declares convergence at the best attainable accuracy. Default
     /// `1e-2` matches upstream.
     pub tiny_step_y_tol: Number,
+    /// `dual_diverging_streak` (pounce#246) — number of consecutive
+    /// iterations of *growing* dual infeasibility (in the elevated regime,
+    /// `inf_du > `[`DUAL_DIV_COUNT_FLOOR`]) that must accumulate before the
+    /// dual-divergence guard fires. `0` disables it. Default `15`, set from
+    /// the option of the same name (`application.rs`). When the streak
+    /// reaches the limit and `inf_du > `[`DUAL_DIV_FIRE_TOL`], the outer
+    /// routes to restoration — the recovery the least-square-multiplier init
+    /// path reaches on its own — rather than grinding into the
+    /// ever-more-ill-conditioned KKT factorizations a dual runaway produces
+    /// (each of which can take seconds). See the guard in [`Self::iterate`].
+    pub dual_diverging_streak: usize,
+    dual_inf_prev: Number,
+    dual_growth_streak: usize,
     /// Set true when the previous iterate was tagged tiny; on the
     /// second consecutive tiny step the loop sets `data.tiny_step_flag`
     /// so the mu update can attempt to terminate. Mirrors
@@ -273,6 +297,9 @@ impl IpoptAlgorithm {
             divergence_streak: 0,
             divergence_prev_amax: 0.0,
             tiny_step_y_tol: 1e-2,
+            dual_diverging_streak: 15,
+            dual_inf_prev: 0.0,
+            dual_growth_streak: 0,
             tiny_step_last_iteration: false,
             last_resto_entry_x: None,
             last_resto_entry_s: None,
@@ -1008,6 +1035,46 @@ impl IpoptAlgorithm {
         if self.update_divergence_verdict(amax, structural_free) {
             timing.check_convergence.end();
             return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
+        }
+        // Dual-divergence guard (pounce#246). The primal guard above only
+        // catches `|x|` blowing up; a bad warm start can instead send the
+        // *dual* infeasibility diverging — `inf_du` 1 -> 1e14, the inertia
+        // regularization -> 1e14, the barrier parameter frozen, full steps
+        // still accepted by the filter because primal feasibility inches
+        // down — while `|x|` stays bounded. `diverging_iterates_tol` never
+        // trips, restoration is never entered, and the solve grinds in
+        // ever-more-ill-conditioned KKT factorizations that each take
+        // seconds (the emfl050 warm-start overshoot: one 3.8 s factorization
+        // per iteration, forever). Detect a sustained streak of growing dual
+        // infeasibility in the elevated regime and route to restoration —
+        // the same recovery the least-square-multiplier init path reaches on
+        // its own — before the factorizations start choking. Gated on a
+        // large absolute `inf_du` so a well-behaved solve whose dual
+        // residual transiently rises (then falls) is never diverted:
+        // restoration is a heavier hammer than the guard should swing at a
+        // merely-bumpy-but-converging iterate.
+        if self.dual_diverging_streak > 0 {
+            let inf_du = self.cq.borrow().curr_dual_infeasibility_max();
+            if inf_du.is_finite() && inf_du > self.dual_inf_prev && inf_du > DUAL_DIV_COUNT_FLOOR {
+                self.dual_growth_streak += 1;
+            } else {
+                self.dual_growth_streak = 0;
+            }
+            self.dual_inf_prev = inf_du;
+            if self.dual_growth_streak >= self.dual_diverging_streak && inf_du > DUAL_DIV_FIRE_TOL {
+                self.dual_growth_streak = 0;
+                self.dual_inf_prev = 0.0;
+                timing.check_convergence.end();
+                tracing::debug!(target: "pounce::algorithm",
+                    "[POUNCE] dual-divergence guard fired at iter {} (inf_du={:.2e}); \
+                     routing to restoration (pounce#246).",
+                    self.data.borrow().iter_count, inf_du,
+                );
+                if self.restoration.is_some() {
+                    return self.invoke_restoration_debugged();
+                }
+                return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
+            }
         }
         let conv_status = self
             .bundle
@@ -2184,6 +2251,27 @@ impl IpoptAlgorithm {
         }
         if self.fire_debug(crate::debug::Checkpoint::IterStart) == crate::debug::DebugAction::Stop {
             return SolverReturn::UserRequestedStop;
+        }
+
+        // pounce#246: bound the initialization / restoration-entry window.
+        // Everything above — `mu_update.initialize`, `set_initial_iterates`
+        // (which for a bad warm start can grind in its least-square /
+        // feasibility setup), and the initial `update_hessian` — runs
+        // *before* the first `iterate()`, whose convergence check and
+        // post-`compute_search_direction` gate are the earliest deadline
+        // checks (#242/#244/#245). A solve handed a poor warm start could
+        // therefore spend the whole budget here and only consult the
+        // deadline once it reached the first outer-iteration /
+        // KKT-factorization boundary. Consult it now, before the loop, so a
+        // bad-start init stall returns promptly with the time-limit status
+        // (best-so-far being the initialised iterate) instead of running to
+        // a multiple of the budget. This also bounds the *restoration
+        // entry*: the nested restoration IPM shares this `Deadline` and runs
+        // the same `optimize_inner`, so a budget already crossed by the time
+        // the inner solve starts up terminates it here rather than after its
+        // own first iterate.
+        if let Some(ret) = self.deadline_status() {
+            return ret;
         }
 
         let result = loop {
