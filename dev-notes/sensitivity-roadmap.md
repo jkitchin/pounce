@@ -246,12 +246,19 @@ the caller knows the deadline.
 
 ## Validation
 
+- **diagnostics** — breakpoint detection (which variable crosses first,
+  and the step fraction) against a brute-force ratio-test scan; the report
+  fields (crossed set, residual, `mu`) against ground truth.
 - **fix-relax** against sIPOPT's own worked example (the paper's §2.8
   parametric QP with a documented active-set change) and against a full
   re-solve.
 - **path-following** against re-solve across several crossings.
 - **QP directional** against finite differences and a constructed
   weakly-active case.
+- **corrector** — the residual decreases monotonically per iteration and
+  the corrected point converges to the exact re-solve; the convenience
+  loop terminates correctly on the residual tolerance, the iteration cap,
+  and a stagnation case.
 - End-to-end: the [cstr-sensitivity](https://cstr-sensitivity.griffith-pse.com)
   demo, where the estimate visibly flattens against a bound today and
   should bend correctly under `fix_relax`.
