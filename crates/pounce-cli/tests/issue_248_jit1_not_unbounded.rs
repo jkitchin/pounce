@@ -21,6 +21,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use pounce_cli::solve_report::SolveReport;
 
@@ -36,9 +37,18 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
+/// Unique temp path per call. Tests run in parallel in one process and
+/// several reuse the same fixture, so the path must not collide on
+/// `pid + fixture` alone — a global counter keeps each output file distinct.
 fn tmp_path(suffix: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
-    p.push(format!("pounce_issue248_{}_{suffix}", std::process::id()));
+    p.push(format!(
+        "pounce_issue248_{}_{}_{suffix}",
+        std::process::id(),
+        n
+    ));
     p
 }
 
