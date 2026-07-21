@@ -1043,6 +1043,21 @@ impl IpoptAlgorithm {
             tracing::debug!(target: "pounce::linsol", "kkt solve complete");
             drop(ls_enter);
             timing.compute_search_direction.end();
+            // Fine-grained time-budget gate (pounce#244). The KKT solve now
+            // checks the shared deadline *between* its major factorization
+            // steps (inertia correction / iterative refinement) and aborts
+            // cooperatively when the budget is crossed — bounding the
+            // overshoot to roughly one factorization instead of the whole
+            // multi-factorization sweep that #242's post-solve check let run
+            // to completion. Whether the solve returned a completed step or
+            // bailed mid-escalation, if the deadline tripped, stop here with
+            // the time-limit status *before* the `!ok` branch below would
+            // otherwise route a deadline-aborted solve into restoration.
+            // `data.curr` is untouched by the step computation, so it still
+            // holds the last accepted iterate.
+            if let Some(ret) = self.deadline_status() {
+                return IterateOutcome::Terminate(ret);
+            }
             if !ok {
                 // Mirror upstream `IpIpoptAlg.cpp:417-430`: a failed
                 // step computation puts the algorithm in emergency
@@ -1702,6 +1717,18 @@ impl IpoptAlgorithm {
         self.resto_inner_iters = self
             .resto_inner_iters
             .saturating_add(resto.last_inner_iter_count());
+        // pounce#244: the restoration inner IPM shares the outer solve's
+        // `Deadline` (both its convergence check and — post-#244 — its KKT
+        // solves consult it), so a budget crossing inside restoration
+        // terminates the inner solve with a time-limit status. Surface that
+        // as the time limit directly instead of letting the `Failed` arm map
+        // it onto `RestorationFailure` / `StopAtAcceptablePoint`. `data.curr`
+        // is the last accepted outer iterate — restoration stages its
+        // recovered point onto `trial`, not `curr`, and we return before
+        // promoting it — so this hands back a valid iterate.
+        if let Some(ret) = self.deadline_status() {
+            return IterateOutcome::Terminate(ret);
+        }
         match outcome {
             RestorationOutcome::Recovered => {
                 // The driver has staged the recovered point on

@@ -254,6 +254,14 @@ impl PdFullSpaceSolver {
         let mut improve = improve_solution;
 
         while !done {
+            // pounce#244: bail between major KKT steps when the shared time
+            // budget is crossed (see `deadline_exceeded`). Returning `false`
+            // routes through the caller's post-KKT deadline check, which
+            // terminates the solve with the time-limit status rather than
+            // treating the abort as a step-computation failure.
+            if deadline_exceeded(data) {
+                return false;
+            }
             let solve_ok = if improve {
                 true
             } else {
@@ -294,6 +302,12 @@ impl PdFullSpaceSolver {
                 && (num_iter_ref < self.min_refinement_steps
                     || residual_ratio > self.residual_ratio_max)
             {
+                // pounce#244: each refinement step drives another back-solve
+                // (and may refactor via the escalation path in `solve_once`);
+                // check the budget before spending one.
+                if deadline_exceeded(data) {
+                    return false;
+                }
                 let frozen_resid = resid.freeze();
                 let solve_ok = self.solve_once(
                     data,
@@ -969,6 +983,20 @@ impl PdFullSpaceSolver {
         let mut count = 0_i32;
         let mut retval;
         loop {
+            // pounce#244: the body of this loop is a full KKT factorization
+            // — the escalation path retries with a larger perturbation until
+            // the augmented system has the right inertia, and on a hard,
+            // ill-conditioned system that can be many refactorizations under
+            // one outer iteration. Abort between factorizations when the
+            // shared deadline is crossed so the solve cannot overshoot the
+            // budget by that whole sweep. `data`'s deadline is the caller's
+            // global budget; `false` unwinds to the outer loop's post-KKT
+            // time-limit check. A deadline already crossed on entry returns
+            // before the first factorization; otherwise overshoot is bounded
+            // to one.
+            if deadline_exceeded(data) {
+                return false;
+            }
             if pretend_singular {
                 retval = ESymSolverStatus::Singular;
                 pretend_singular = false;
@@ -1196,6 +1224,40 @@ impl PdSystemSolver for PdFullSpaceSolver {
     fn solve_status(&self) -> ESymSolverStatus {
         self.last_status.unwrap_or(ESymSolverStatus::FatalError)
     }
+}
+
+/// Cooperative time-budget check for the KKT solve (pounce#244).
+///
+/// Reads the shared per-solve [`Deadline`](pounce_common::timing::Deadline)
+/// off [`IpoptData`](crate::ipopt_data::IpoptData) — the same instance the
+/// outer loop, the line search, and the restoration inner IPM consult —
+/// and reports whether either the wall or CPU budget has been crossed.
+/// [`PdFullSpaceSolver::solve`] / [`PdFullSpaceSolver::solve_once`] call it
+/// between their major factorization steps so an over-budget solve aborts
+/// promptly instead of running a whole inertia-correction /
+/// iterative-refinement sweep to completion.
+///
+/// A single outer iteration of a large, ill-conditioned NLP is dominated
+/// by the KKT factorization, and the inertia-correction loop can refactor
+/// several times before the augmented system has the right inertia. #242
+/// only checked the deadline *after* the search direction was fully
+/// computed, so that whole multi-factorization sweep overshot the requested
+/// budget (the reported 2 s → 12.7 s single-NLP probe, "unchanged by #242").
+/// Checking here bounds the overshoot to roughly one factorization.
+///
+/// Returns `false` when no deadline is installed (the direct-driver /
+/// unit-test paths), leaving those on the coarse `overall_alg`-timer gate
+/// in [`crate::conv_check`]. Aborting with `false` is safe: `solve` only
+/// promotes the computed `delta` onto `IpoptData` on a `true` return, so a
+/// deadline abort leaves `data.curr` / `data.delta` untouched, and the
+/// caller's post-KKT deadline check then terminates with the time-limit
+/// status (returning the last accepted iterate) rather than treating the
+/// abort as a step-computation failure that would enter restoration.
+fn deadline_exceeded(data: &IpoptDataHandle) -> bool {
+    data.borrow()
+        .deadline
+        .as_ref()
+        .is_some_and(|d| d.exceeded().is_some())
 }
 
 /// Bag of borrowed blocks used by both `solve_once` and
@@ -1463,5 +1525,49 @@ impl AugSystemSolver for NoopAugSolver {
         _num_neg_evals: Index,
     ) -> ESymSolverStatus {
         unreachable!("NoopAugSolver is a transient placeholder")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deadline_exceeded;
+    use crate::ipopt_data::IpoptData;
+    use pounce_common::timing::Deadline;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn deadline_exceeded_is_false_without_a_deadline() {
+        // Direct-driver / unit-test path: no deadline installed, so the KKT
+        // solve never short-circuits and stays on the coarse timer gate.
+        let data = Rc::new(RefCell::new(IpoptData::new()));
+        assert!(!deadline_exceeded(&data));
+    }
+
+    #[test]
+    fn deadline_exceeded_is_false_when_budget_is_unbounded() {
+        // The pounce "no budget" defaults (1e6 s each) must never trip inside
+        // any realistic solve, so the fine-grained KKT check is a no-op.
+        let data = Rc::new(RefCell::new(IpoptData::new()));
+        data.borrow_mut().deadline = Some(Deadline::new(1e6, 1e6));
+        assert!(!deadline_exceeded(&data));
+    }
+
+    #[test]
+    fn deadline_exceeded_true_once_the_budget_is_crossed() {
+        // Zero wall budget: once any wall time elapses the KKT loops must see
+        // the deadline and abort between factorizations (pounce#244). Busy-spin
+        // until the monotonic clock advances past the start instant so the
+        // assertion is not racing a coarse-clock zero-duration read — matching
+        // the `Deadline` unit tests' pattern.
+        let data = Rc::new(RefCell::new(IpoptData::new()));
+        data.borrow_mut().deadline = Some(Deadline::new(0.0, 1e6));
+        for _ in 0..10_000 {
+            if deadline_exceeded(&data) {
+                break;
+            }
+            std::hint::black_box(0u64);
+        }
+        assert!(deadline_exceeded(&data));
     }
 }
