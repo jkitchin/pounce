@@ -368,6 +368,33 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
         }
         self.successive_resto_iter += 1;
 
+        // 1b. Time-budget gate at each inner restoration iteration
+        //     (pounce#246). The stationarity fallback below delegates to
+        //     the wrapped *scalar* `OptErrorConvCheck::check_convergence`,
+        //     which cannot see `data` and so never consulted the shared
+        //     [`Deadline`] the regular-phase
+        //     `OptErrorConvCheck::check_convergence_with_state` honors.
+        //     Without this the restoration inner IPM's convergence check
+        //     ignored the wall/CPU budget — a bad-start restoration grind
+        //     only tripped it one iteration later at `IpoptAlgorithm::
+        //     iterate`'s post-`compute_search_direction` gate, and the
+        //     per-iteration orig-NLP evaluation in the kappa-reduction
+        //     step below ran needlessly while over budget. Checked before
+        //     that evaluation, and ordered CPU-before-wall to match the
+        //     regular-phase check so an inner solve reports the identical
+        //     time-limit status.
+        if let Some(deadline) = data.borrow().deadline.as_ref() {
+            match deadline.exceeded() {
+                Some(pounce_common::timing::DeadlineKind::Cpu) => {
+                    return ConvergenceStatus::CpuTimeExceeded;
+                }
+                Some(pounce_common::timing::DeadlineKind::Wall) => {
+                    return ConvergenceStatus::WallTimeExceeded;
+                }
+                None => {}
+            }
+        }
+
         // 2. Kappa-reduction early-exit on orig-NLP `inf_pr`. Mirrors
         //    upstream `IpRestoConvCheck.cpp:175` — when the inner
         //    iterate's orig `(theta_trial)` is below

@@ -2013,6 +2013,27 @@ impl IpoptAlgorithm {
             return SolverReturn::UserRequestedStop;
         }
 
+        // pounce#246: bound the initialization / restoration-entry window.
+        // Everything above — `mu_update.initialize`, `set_initial_iterates`
+        // (which for a bad warm start can grind in its least-square /
+        // feasibility setup), and the initial `update_hessian` — runs
+        // *before* the first `iterate()`, whose convergence check and
+        // post-`compute_search_direction` gate are the earliest deadline
+        // checks (#242/#244/#245). A solve handed a poor warm start could
+        // therefore spend the whole budget here and only consult the
+        // deadline once it reached the first outer-iteration /
+        // KKT-factorization boundary. Consult it now, before the loop, so a
+        // bad-start init stall returns promptly with the time-limit status
+        // (best-so-far being the initialised iterate) instead of running to
+        // a multiple of the budget. This also bounds the *restoration
+        // entry*: the nested restoration IPM shares this `Deadline` and runs
+        // the same `optimize_inner`, so a budget already crossed by the time
+        // the inner solve starts up terminates it here rather than after its
+        // own first iterate.
+        if let Some(ret) = self.deadline_status() {
+            return ret;
+        }
+
         let result = loop {
             match self.iterate() {
                 IterateOutcome::Terminate(ret) => break ret,
