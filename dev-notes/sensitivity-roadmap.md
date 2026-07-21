@@ -132,8 +132,11 @@ set for the correct one-sided derivative, through the QP already in
 `pounce-convex` (`crates/pounce-convex/src/ipm.rs`). Independent of 1–2;
 auto-triggered when the solve detects weak activity, not a user knob. Cost
 is conditional: the detection is a negligible threshold scan over the
-converged multipliers, always paid, while the QP itself fires only on a
-degenerate base point.
+converged multipliers, always paid; the QP fires only on a degenerate base
+point, and when it does it is small — over the weakly-active set
+(dimension = the number of weakly-active constraints, usually a handful),
+solved against the held factorization at roughly a backsolve per
+weakly-active constraint, no refactor and well short of a re-solve.
 
 **4. Corrector-step primitive → past sIPOPT.** One Newton/primal-dual
 iteration reusing
