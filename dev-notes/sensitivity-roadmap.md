@@ -97,13 +97,13 @@ set for the correct one-sided derivative, through the QP already in
 `pounce-convex` (`crates/pounce-convex/src/ipm.rs`). Independent of 1–2;
 auto-triggered when the solve detects weak activity, not a user knob.
 
-**+ Corrector-step primitive.** One Newton/primal-dual iteration reusing
+**4. Corrector-step primitive.** One Newton/primal-dual iteration reusing
 the held factorization, returning the residual. Small and general; it is
 what an advanced-step controller's corrector loop calls. Composes with
 path-following (path-following gets the active set, the corrector polishes
 the point).
 
-**+ (minor) `mu`-correction term.** The remaining small gap to sIPOPT's
+**5. `mu`-correction term (minor).** The remaining small gap to sIPOPT's
 predictor (eq. 10). Negligible at tight convergence tolerance, so listed
 separately from the parity milestone rather than bundled into it.
 
