@@ -139,11 +139,15 @@ solved against the held factorization at roughly a backsolve per
 weakly-active constraint, no refactor and well short of a re-solve.
 
 **4. Corrector-step primitive → past sIPOPT.** One Newton/primal-dual
-iteration reusing
-the held factorization, returning the residual. Small and general; it is
-what an advanced-step controller's corrector loop calls. Composes with
-path-following (path-following gets the active set, the corrector polishes
-the point).
+iteration reusing the held factorization, returning the residual. Small
+and general; it composes with path-following (path-following gets the
+active set, the corrector polishes the point). Expose two surfaces: the
+raw single step, for callers that drive their own loop (e.g. a
+deadline-bounded one in an advanced-step controller), and a convenience
+wrapper that loops to a residual tolerance with an iteration cap and a
+stagnation guard. The residual tolerance is a numerical stopping criterion
+the solver owns; a budget or deadline stop stays with the caller and uses
+the raw step. Cost is ~1 backsolve per iteration.
 
 ## API surface
 
@@ -186,10 +190,12 @@ depend on a real-time budget the solver has no business knowing.
 
 Keeping the split means the primitives serve estimation, RTO, and control
 alike, and pounce stays a general solver rather than absorbing a
-controller. Concretely: path-following runs to completion inside pounce
-(its size is fixed by the problem), while a corrector *loop* lives in the
-caller (its size is fixed by an external deadline), calling the corrector
-primitive repeatedly.
+controller. Concretely: a loop whose size is fixed by the problem or by
+numerical convergence runs to completion inside pounce — path-following
+across its crossings, or a corrector loop to a residual tolerance. A loop
+whose size is fixed by an external budget — a deadline-bounded corrector
+loop — lives in the caller and drives the raw single step, because only
+the caller knows the deadline.
 
 ## Validation
 
