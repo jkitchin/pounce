@@ -28,8 +28,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// `min Σ cᵢ/xᵢ + Σ dᵢ·xᵢ` — badly-scaled convex objective (the shape of
-/// MINLPLib `jit1`'s continuous relaxation). `finite_ub` controls whether the
-/// variables carry a finite upper bound (a bounded box) or run to `+∞`.
+/// MINLPLib `jit1`'s continuous relaxation). `ub` controls whether the
+/// variables carry a finite upper bound (a bounded box) or run to `+∞` (an
+/// upper bound at or beyond the `1e19` infinity sentinel).
 struct IllScaled {
     n: usize,
     c: Vec<Number>,
