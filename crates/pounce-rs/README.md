@@ -29,7 +29,7 @@ Implement `Problem` (only `objective` is required), then configure and solve
 with the `Nlp` builder:
 
 ```rust
-use pounce_rs::builder::{Problem, Nlp};
+use pounce_rs::prelude::*;
 
 // min (x0-1)^2 + (x1-2)^2  s.t.  x0 + x1 == 3,  0 <= xi <= 5
 struct P;
@@ -70,8 +70,12 @@ Solver options use the same names as upstream Ipopt
 - constraint multipliers (`multipliers`)
 - constraint values (`g`)
 - bound multipliers (`z_l` and `z_u`)
+- solve statistics (`stats`): wall time, iteration count, evaluation counts,
+  and final infeasibilities
 
-The vector fields remain empty if the solve aborts before finalization.
+The vector fields remain empty if the solve aborts before finalization. Opt in
+to the full per-iteration trajectory (`stats.iterations`) with
+`.capture_iterations()` on the builder.
 
 ## Full control: the `TNLP` trait
 
