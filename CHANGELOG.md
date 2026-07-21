@@ -42,6 +42,29 @@ changes.
   reports `DivergingIterates`. Together these remove a non-rigorous fathom in
   discopt's branch-and-bound, which uses POUNCE as its per-node NLP backend.
 
+### Fixed — no spurious `Unbounded` on an unbounded-box subproblem with a finite optimum (#252)
+
+- **The divergence guard now also checks the objective trajectory, not just
+  iterate growth.** #248's structural + growth-persistence gates cleared
+  `jit1`'s boxed / free-variable *root* relaxation, but its spatial-B&B *node*
+  subproblems carry variables with `ub = +∞` (integer-tightened boxes). Those
+  pass the structural "heads toward an unbounded side" check, and under the
+  linear tail's `1e7`-scale ill-scaling the transient excursion climbs past
+  enough doublings to satisfy the growth streak too — so every one of jit1's
+  59 nodes was reported `DivergingIterates` (an UNBOUNDED false negative;
+  cyipopt/Ipopt find each node's finite optimum). A large, still-growing
+  `max_i |x_i|` toward an open box side is *not* enough: the guard now requires
+  the divergence to look like a genuine recession ray, whose per-step objective
+  drop *keeps up* as `|x|` grows geometrically. An excursion converging to a
+  finite optimum lowers `f` for a few steps but with a per-step drop that
+  *decelerates* toward zero (settling onto the finite floor); it therefore no
+  longer accumulates the streak and the solve converges to the optimum instead
+  of reporting `Unbounded`. A genuinely unbounded-below objective
+  (`f → −∞`), whose per-step drop grows without bound, still reports
+  `DivergingIterates`, and the absolute runaway backstop (`1e18`) is unchanged.
+  This lets discopt's branch-and-bound retire the load-bearing
+  cyipopt-retry-on-UNBOUNDED guard it kept for jit1's nodes.
+
 ### Documentation — `PathFollower` gets a book page, figures, and torch docstrings
 
 - **New book page `docs/src/path-following.md`**, linked from the Python API
