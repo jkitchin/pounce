@@ -118,6 +118,26 @@ pub struct IpoptAlgorithm {
     /// Largest `|x|` seen in the current growth run (companion to
     /// [`Self::divergence_streak`]). Zero when no run is active.
     divergence_prev_amax: Number,
+    /// #252 objective at the previous over-threshold iterate of the current
+    /// growth run (companion to [`Self::divergence_streak`]). A genuine
+    /// recession ray drives the (minimized) objective toward `−∞`, so a
+    /// diverging iterate only counts toward the streak when the objective is
+    /// *still descending* against this reference. A transient ill-scaling
+    /// excursion past a finite optimum grows `|x|` while the objective
+    /// *worsens* (the linear tail dominates), so it never accumulates the
+    /// streak — this is the fix for the unbounded-box (`ub = +∞`) B&B node
+    /// subproblems of jit1 that #248's growth-only check still mislabelled
+    /// `UNBOUNDED`. `+∞` when no run is active.
+    divergence_prev_f: Number,
+    /// #252 objective *decrease* at the previous step of the current growth
+    /// run (`prev_prev_f − prev_f`), the companion that lets the streak
+    /// require the descent to be *non-decelerating*. A recession ray's
+    /// per-step objective drop keeps up or accelerates as `|x|` grows
+    /// geometrically (`f` is at least linear along the ray); an excursion
+    /// converging to a finite optimum has a per-step drop that shrinks
+    /// toward zero. `NaN` (non-finite) until the run has a first finite
+    /// decrease to compare against, which bootstraps the check.
+    divergence_prev_decrease: Number,
     /// Companion threshold on the dual step — when both primal and dual
     /// steps are tiny in two consecutive iterations the algorithm
     /// declares convergence at the best attainable accuracy. Default
@@ -296,6 +316,8 @@ impl IpoptAlgorithm {
             diverging_iterates_tol: 1e20,
             divergence_streak: 0,
             divergence_prev_amax: 0.0,
+            divergence_prev_f: Number::INFINITY,
+            divergence_prev_decrease: Number::NAN,
             tiny_step_y_tol: 1e-2,
             dual_diverging_streak: 15,
             dual_inf_prev: 0.0,
@@ -382,6 +404,15 @@ impl IpoptAlgorithm {
     /// A recession ray in an interior-point method grows geometrically; an
     /// iterate settling onto a finite optimum above the threshold does not.
     const DIVERGENCE_GROWTH_FACTOR: Number = 2.0;
+    /// #252: the objective descent must *keep up* — each step's drop must be
+    /// at least this fraction of the previous step's drop for the iterate to
+    /// count toward the divergence streak. A recession ray descends `f` to
+    /// `−∞` with per-step drops that grow (ratio ≥ 1) as `|x|` grows
+    /// geometrically; an excursion converging to a finite optimum decelerates
+    /// (ratio → 0). The slack below 1 tolerates ordinary interior-point noise
+    /// on a genuine ray without admitting a decelerating excursion — jit1's
+    /// node subproblems shrink the drop by 3–15× per step, far past this bar.
+    const DIVERGENCE_DESCENT_KEEPUP: Number = 0.9;
     /// #248: absolute runaway backstop. An iterate this large is reported
     /// unbounded regardless of persistence. It sits at or below the default
     /// `diverging_iterates_tol = 1e20`, so the default behaviour (fire the
@@ -390,34 +421,86 @@ impl IpoptAlgorithm {
     const DIVERGENCE_ABS_RUNAWAY: Number = 1e18;
 
     /// Update the divergence-persistence state for the current iterate and
-    /// return whether `DivergingIterates` should be reported now (issue
-    /// #248). `amax` is `max_i |x_i|`; `structural_free` is the result of
-    /// [`Self::divergence_is_true_unboundedness`] (already gated on
-    /// `amax > diverging_iterates_tol`).
+    /// return whether `DivergingIterates` should be reported now (issues
+    /// #248 / #252). `amax` is `max_i |x_i|`; `structural_free` is the result
+    /// of [`Self::divergence_is_true_unboundedness`] (already gated on
+    /// `amax > diverging_iterates_tol`); `f` is the (minimized, internally
+    /// scaled) objective at the current iterate, supplied only while
+    /// `structural_free` holds.
     ///
     /// A large `|x|` is reported as unbounded only when it is heading to an
-    /// unbounded side (`structural_free`) *and* the growth persists —
-    /// either the iterate has kept growing for
-    /// [`Self::DIVERGENCE_PERSIST_ITERS`] consecutive iterations, or it has
-    /// blown past the absolute runaway backstop. A transient ill-scaling
-    /// excursion that peaks and recedes never accumulates the streak, so it
-    /// is left to the normal convergence machinery.
-    fn update_divergence_verdict(&mut self, amax: Option<Number>, structural_free: bool) -> bool {
+    /// unbounded side (`structural_free`) *and* the divergence looks like a
+    /// genuine recession ray: the iterate keeps *growing* while the objective
+    /// keeps *descending toward `−∞` without decelerating* — the per-step drop
+    /// holds up as `|x|` grows geometrically — for
+    /// [`Self::DIVERGENCE_PERSIST_ITERS`] consecutive iterations (or it has
+    /// blown past the absolute runaway backstop). Two failure modes are thereby
+    /// left to the normal convergence machinery instead of being mislabelled
+    /// `UNBOUNDED`:
+    ///
+    /// * #248 — a transient ill-scaling excursion that peaks in `|x|` and
+    ///   recedes never sustains the growth streak.
+    /// * #252 — an excursion that *keeps* growing in `|x|` toward an unbounded
+    ///   box side (a jit1 B&B node subproblem with `ub = +∞`), lowering `f` as
+    ///   it goes, but with a per-step objective drop that *decelerates* toward
+    ///   zero: it is settling onto a finite optimum, not riding a recession
+    ///   ray. The descent must keep up (not merely exist), so this no longer
+    ///   accumulates the streak.
+    fn update_divergence_verdict(
+        &mut self,
+        amax: Option<Number>,
+        structural_free: bool,
+        f: Option<Number>,
+    ) -> bool {
         let over = matches!(amax, Some(a) if a > self.diverging_iterates_tol) && structural_free;
         if !over {
             self.divergence_streak = 0;
             self.divergence_prev_amax = 0.0;
+            self.divergence_prev_f = Number::INFINITY;
+            self.divergence_prev_decrease = Number::NAN;
             return false;
         }
         let a = amax.expect("over implies amax is Some");
-        if a >= self.divergence_prev_amax * Self::DIVERGENCE_GROWTH_FACTOR {
+        // A recession ray in an interior-point method grows the iterate
+        // geometrically *and* drives the objective down without bound, with a
+        // per-step drop that keeps up as `|x|` grows. A finite-optimum
+        // excursion may grow `|x|` and even lower `f` for a few steps, but its
+        // per-step objective drop decelerates toward zero as it settles onto
+        // the finite floor. Require all three — growth, descent, and
+        // non-decelerating descent — before a step counts toward the streak.
+        let growing = a >= self.divergence_prev_amax * Self::DIVERGENCE_GROWTH_FACTOR;
+        // `f` is `None` only when `structural_free` is false, already handled
+        // by the `!over` branch; treat a missing value as non-descending so a
+        // run can never accumulate without objective evidence.
+        let fv = f.unwrap_or(Number::INFINITY);
+        let decrease = self.divergence_prev_f - fv;
+        let descending = decrease > 0.0;
+        // Non-decelerating: the drop must be at least a fixed fraction of the
+        // previous step's drop. Bootstrapped `true` until a first finite
+        // decrease has been recorded (`divergence_prev_decrease` non-finite),
+        // so the run's opening steps are admitted on growth + descent alone.
+        let keeping_up = !self.divergence_prev_decrease.is_finite()
+            || decrease >= self.divergence_prev_decrease * Self::DIVERGENCE_DESCENT_KEEPUP;
+        if growing && descending && keeping_up {
             self.divergence_streak += 1;
         } else {
-            // Still past the threshold but no longer growing — restart the
-            // run at this level rather than dropping it entirely.
-            self.divergence_streak = 1;
+            // Over the threshold on an unbounded side, but the divergence is
+            // not sustaining a recession ray's growth-and-accelerating-descent
+            // profile — the hallmark of a scaling excursion toward a finite
+            // optimum. Drop the streak; a genuine ray re-accumulates it on its
+            // next qualifying step (or trips the absolute runaway backstop).
+            self.divergence_streak = 0;
         }
         self.divergence_prev_amax = a;
+        self.divergence_prev_f = fv;
+        // Record the baseline for the next step's keep-up comparison only from
+        // a finite, real decrease; skip the `+∞` opening step and reset the
+        // baseline whenever the objective stops descending.
+        self.divergence_prev_decrease = if decrease.is_finite() && descending {
+            decrease
+        } else {
+            Number::NAN
+        };
         a >= Self::DIVERGENCE_ABS_RUNAWAY
             || self.divergence_streak >= Self::DIVERGENCE_PERSIST_ITERS
     }
@@ -1032,7 +1115,11 @@ impl IpoptAlgorithm {
                 None => (None, false),
             }
         };
-        if self.update_divergence_verdict(amax, structural_free) {
+        // Evaluate the (scaled) objective only while a structural divergence
+        // is live — the streak's descent gate needs it, and it costs an
+        // objective evaluation, so skip it on the common non-diverging path.
+        let curr_f = structural_free.then(|| self.cq.borrow().curr_f());
+        if self.update_divergence_verdict(amax, structural_free, curr_f) {
             timing.check_convergence.end();
             return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
         }
@@ -2008,8 +2095,9 @@ impl IpoptAlgorithm {
                 // `|x|` is only reported as unbounded when it is
                 // structurally consistent with an unbounded feasible region
                 // and the divergence is genuine — either it has persisted
-                // (the running guard's growth streak) or blown past the
-                // absolute runaway backstop (issue #248); otherwise the
+                // (the running guard's growth-and-descent streak, which only
+                // accumulates on a real recession ray; issues #248 / #252) or
+                // blown past the absolute runaway backstop; otherwise the
                 // failure is a plain `RestorationFailure`, never a spurious
                 // `Unbounded`.
                 if self.restore_acceptable_point() {
