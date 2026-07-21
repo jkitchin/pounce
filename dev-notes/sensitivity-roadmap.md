@@ -130,7 +130,10 @@ re-solve.
 base point, solve the small QP (the paper's eq. 14) over the weakly-active
 set for the correct one-sided derivative, through the QP already in
 `pounce-convex` (`crates/pounce-convex/src/ipm.rs`). Independent of 1–2;
-auto-triggered when the solve detects weak activity, not a user knob.
+auto-triggered when the solve detects weak activity, not a user knob. Cost
+is conditional: the detection is a negligible threshold scan over the
+converged multipliers, always paid, while the QP itself fires only on a
+degenerate base point.
 
 **4. Corrector-step primitive → past sIPOPT.** One Newton/primal-dual
 iteration reusing
@@ -141,22 +144,22 @@ the point).
 
 ## API surface
 
-The `estimate()` surface has five elements of three types. The three
-**modes** form an ordered ladder chosen by a single `mode` argument
+The sensitivity API surface is four elements of two types. Three are
+**modes** of `estimate()`, an ordered ladder on a single `mode` argument
 (`linear` the baseline, `fix_relax` item 1, `path` item 2), each a
-correctness-superset of the one below. The other two are not modes: the
-**QP directional** (item 3) is applied automatically, and the
-**corrector step** (item 4) is a primitive the caller drives in a loop.
-The cost unit is a **backsolve** against the held factorization
-(microseconds; the cheap operation the feature exists to exploit); a
-**re-solve** is the expensive bound.
+correctness-superset of the one below. The fourth is the **corrector
+step** (item 4), a separate primitive the caller drives in a loop. Item 3
+(QP directional) is not part of the surface: it is applied automatically
+inside `estimate()` when the base point is degenerate, so the caller
+neither selects nor calls it. The cost unit is a **backsolve** against the
+held factorization (microseconds; the cheap operation the feature exists
+to exploit); a **re-solve** is the expensive bound.
 
 | element | choose when | cost | type |
 |---------|-------------|------|------|
 | `linear` (default) | small perturbations that stay interior, or hot loops where a clamp at a bound is acceptable | 1 backsolve | mode |
 | `fix_relax` | the perturbation crosses a bound and you want the whole solution to bend around the pin rather than truncate one coordinate | ~2 backsolves (predictor + one Schur-augmented solve); low-rank update, no refactor | mode |
 | `path` | large perturbations that cross several bounds, when the estimate must track the exact re-solve | `k` crossings × (backsolve + Schur update), bounded above by one re-solve | mode |
-| QP directional | not selected; auto-applied when the base point is degenerate | detection always (a negligible threshold scan); the QP itself only when degenerate, and small (weakly-active set) | automatic |
 | corrector step | the caller polishes the estimate toward feasibility / optimality, in a loop | ~1 backsolve per iteration | primitive |
 
 The report is always returned; the modes are one ordered knob, not a
