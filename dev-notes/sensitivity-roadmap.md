@@ -121,10 +121,11 @@ directional method (eq. 14, "the current version of sIPOPT does not
 include an implementation of (14)"), multi-step path-following, and any
 predictor-corrector loop.
 
-So today pounce is *behind* sIPOPT by exactly one step, detailed under
+So today pounce is *behind* sIPOPT by one material step, detailed under
 "Where we are" above: sIPOPT's `sens_boundcheck` re-solves so the
 solution bends around the pinned variable, where pounce's clamp freezes
-the rest.
+the rest. (It also omits sIPOPT's minor eq. 10 `mu`-correction; both are
+closed by roadmap item 1.)
 
 ## Two failure modes (they want different treatments)
 
@@ -139,7 +140,8 @@ the rest.
 
 ## Roadmap
 
-Staged by dependency and by "parity vs past it".
+Staged by dependency: the diagnostics foundation, then parity (item 1),
+then past sIPOPT (items 2–4).
 
 **0. Diagnostics foundation → past sIPOPT.** Breakpoint detection (the
 ratio test to the first crossing) and a report the estimate returns:
@@ -268,8 +270,9 @@ the caller knows the deadline.
   parametric nonlinear programming problems*, in Online Optimization of
   Large Scale Systems, Springer, 2001 (active-set-change sensitivity for
   real-time control; the WORHP Zen lineage).
-- Nikolayzik, Büskens et al., *WORHP Zen: Parametric Sensitivity Analysis
-  for the NLP Solver WORHP*, 2018.
+- Kuhlmann, Geffken, Büskens, *WORHP Zen: Parametric Sensitivity Analysis
+  for the Nonlinear Programming Solver WORHP*, Operations Research
+  Proceedings 2017, Springer, 2018.
   [link](https://link.springer.com/chapter/10.1007/978-3-319-89920-6_86)
 - Gros, Zanon, Quirynen, Bemporad, Diehl, *From linear to nonlinear MPC:
   bridging the gap via the real-time iteration*, Int. J. Control 93 (2020)
