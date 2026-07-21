@@ -150,12 +150,6 @@ The report is always returned; base-point degeneracy is handled
 automatically rather than as a mode. One knob, ordered, obvious default —
 not a matrix of independent flags.
 
-There is deliberately no `exact` mode. `estimate` is the
-factorization-reuse path; the exact answer is a full `solve()`, which the
-caller already has. Falling back to a re-solve when path-following would
-cost as much is a budget-driven **caller** decision (see the scope
-boundary below), not a solver mode.
-
 ## Scope boundary: mechanism in pounce, policy in the caller
 
 Everything above is a **mechanism**: a stateless operation on the held
