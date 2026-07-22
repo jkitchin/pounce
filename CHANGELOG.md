@@ -113,6 +113,48 @@ changes.
   acceptable iterate, off already-computed quantities, and clones only on an
   improvement.
 
+### Fixed — the best-acceptable fallback no longer trades feasibility for objective (#267)
+
+- **The fallback now ranks by `(feasibility, objective)`, not objective alone.**
+  The #250 fallback above chose among recorded acceptable points by scaled
+  objective. Every candidate is *bounded* by `acceptable_constr_viol_tol`, but
+  being bounded by the band is not the same as not trading feasibility *within*
+  it, and the band is a user option. Widen it and a pure-objective argmax has no
+  lower bound on the feasibility it will spend: it discards a nearly-feasible
+  point for a lower-objective one that is grossly infeasible, then hands it back
+  under a `Solved_To_Acceptable_Level` status.
+- **Symptom it fixes.** On `autocorr_bern55-06` at
+  `dual_diverging_streak=15 acceptable_constr_viol_tol=1e1 acceptable_tol=1e10
+  acceptable_dual_inf_tol=1e30 acceptable_compl_inf_tol=1e10`, the guard-on solve
+  returned objective `-2307.32` at a constraint violation of **9.94** — below the
+  true optimum `-2304.0` precisely because the point is infeasible, and rejected
+  by `pounce verify`. At the same tolerances the guard-*off* control returns a
+  feasible point (`-2298.57`, violation `1.06e-4`), so the loose band alone is not
+  the cause — it only widens what the fallback can exploit. The fix returns a
+  feasible point in the guard-on case too.
+- **How the ranking works.** Each recorded/returned point carries its unscaled
+  max-norm constraint violation — the same quantity the `acceptable_constr_viol_tol`
+  gate is defined against. The key is `(feasible_enough, objective)`: a point
+  inside the feasibility band beats one outside it outright, and objective decides
+  *only among points already inside the band*. `feasible_enough` uses the
+  acceptable feasibility band **capped at its upstream default** (`1e-2`), so it
+  never gets looser than a normal solve's — a grossly-infeasible low-objective
+  iterate is simply not a candidate. At default or tighter tolerances this is
+  behaviour-neutral: every recorded point already passed the
+  `acceptable_constr_viol_tol` gate, so with that band at or below the cap every
+  candidate is feasible-enough and objective alone decides, exactly as before. The
+  cap only bites once the user loosens `acceptable_constr_viol_tol` past its
+  default.
+- **Symptom, resolved.** With the fix the guard-on solve above returns the
+  diverted run's own near-optimal endpoint — objective `-2303.9999` at violation
+  `1.13e-4`, which `pounce verify` accepts — instead of the infeasible `9.94`
+  point a pure-objective ranking restored.
+- **Scope.** Latent and config-gated, not a live default-path bug: the guard is
+  off by default, and the trade needs `acceptable_constr_viol_tol` widened past
+  its default. Every solve the guard never fires on is still bit-identical — the
+  read stays gated on `dual_guard_fired`; only the recording cost grows by one
+  already-computed norm per acceptable iterate.
+
 ### Fixed — false `Infeasible_Problem_Detected` on a feasible, aggressively scaled NLP
 
 - **Rapid infeasibility detection now confirms its own claim before issuing it.**

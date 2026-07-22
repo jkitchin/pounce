@@ -519,6 +519,10 @@ impl ConvCheck for OptErrorConvCheck {
         self.tol
     }
 
+    fn acceptable_constr_viol_tol_or_default(&self) -> Number {
+        self.acceptable_constr_viol_tol
+    }
+
     fn set_tolerance(&mut self, name: &str, value: Number) -> bool {
         match name {
             "tol" => self.tol = value,
