@@ -26,6 +26,25 @@ changes.
   rejected the iterate — so the loop fell through to "converged". `minimize`
   now rejects a non-finite `x0`.
 
+### Fixed — unbounded NLP reported in the AMPL "solved" family (#274)
+
+- An unbounded NLP could be written to the `.sol` as
+  `Solved_To_Acceptable_Level` with `solve_result_num = 100`, which lands in
+  AMPL's *solved* range — so Pyomo reported `TerminationCondition.optimal` and
+  **loaded the diverging iterate as an optimal solution**. `min -exp(x) s.t.
+  x >= 0` returned `x ≈ 110.4`, `obj ≈ -8.8e47` under that label.
+- Cause: the near-feasible restoration re-entry detector claimed acceptability
+  from the *primal* residual alone. A feasible iterate can still be
+  arbitrarily far from stationary, which is exactly what an unbounded
+  objective looks like — the constraints stay satisfied (`inf_pr ≈ 1.7e-10`)
+  while the iterates run off (`inf_du ≈ 8.8e+47`). The only guard was a
+  non-finite check, and `-8.8e47` is finite.
+- The detector now requires the point to pass the full acceptable-level
+  triplet — including `acceptable_dual_inf_tol` — before reporting
+  `Solved_To_Acceptable_Level`; otherwise it surfaces the same honest
+  restoration-cycle status its sibling exits use. The CLI and the library API
+  now agree on this model (`Error_In_Step_Computation`), where previously the
+  library reported failure and the CLI reported success.
 ### Fixed — strictly convex QP falsely reported unbounded (#273)
 
 - The convex IPM's dual-infeasibility (unboundedness) certificate tested
