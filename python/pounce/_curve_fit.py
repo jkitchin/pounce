@@ -882,6 +882,16 @@ def _minima_bounds(bounds, n):
             out.append(None)
             continue
         lo, hi = bd
+        # Reject NaN explicitly rather than laundering it into ``None``
+        # (unbounded) via the ``not np.isfinite`` map below — that would be
+        # inconsistent with the minimize path (see ``_normalize_bounds``). ±inf
+        # still maps to ``None``. ``lo``/``hi`` may be ``None``; guard first.
+        for side, v in (("lower", lo), ("upper", hi)):
+            if v is not None and np.isnan(v):
+                raise ValueError(
+                    f"bounds {side} is NaN; use -inf/inf or None for an "
+                    f"unbounded side, not NaN"
+                )
         lo = None if (lo is None or not np.isfinite(lo)) else float(lo)
         hi = None if (hi is None or not np.isfinite(hi)) else float(hi)
         out.append((lo, hi))

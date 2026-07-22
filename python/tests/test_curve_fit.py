@@ -698,6 +698,17 @@ def test_curve_fit_minima_ambiguous_tuple_raises_and_list_fits():
     assert np.any(fits[0].perr > 0)
 
 
+def test_curve_fit_minima_rejects_nan_pair_bound():
+    """A NaN inside a pair-list entry is rejected (not laundered to 'unbounded'),
+    consistent with the minimize path (§3.4)."""
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x)
+    with pytest.raises(ValueError, match="NaN"):
+        pounce.curve_fit_minima(expdecay_2p, x, y, p0=[1.0, 2.0],
+                                bounds=[(float("nan"), 10.0), (0.0, 10.0)],
+                                jac="fd", seed=0)
+
+
 def test_curve_fit_streaming_ambiguous_tuple_raises_and_scipy_box_fits():
     """``curve_fit_streaming`` inherits the raise; the scipy tuple-of-arrays box
     still fits to (2, 1)."""

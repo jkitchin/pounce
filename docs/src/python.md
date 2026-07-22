@@ -294,7 +294,7 @@ minimize(fun, x0, args=(), jac=None, hess=None, bounds=None,
 | `args` | ✅ | tuple of extra positional arguments forwarded to `fun` / `jac` |
 | `jac` | ✅ | callable, **or `jac=True`** (then `fun` returns `(value, gradient)`, cached so the gradient is not recomputed); **omitted → central finite differences** (`eps^(1/3)` step) and a one-time `UserWarning`. Provide one (or use `pounce.jax` / `pounce.torch`) for production. |
 | `hess` | ⚠️ | used when there are no constraints **or all constraints are linear** (the constraint curvature is then zero, so the objective Hessian is the Lagrangian Hessian); with nonlinear constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
-| `bounds` | ✅ | a sequence of `(lo, hi)` pairs **or a scipy `Bounds` object**; a `None` element or endpoint means ±∞ |
+| `bounds` | ✅ | a sequence of `(lo, hi)` pairs **or a scipy `Bounds` object**; a `None` element or endpoint means ±∞. A `NaN` bound is rejected (previously it slipped past the reversed-bound check and behaved as "no bound"); use ±∞ / `None` for an unbounded side |
 | `constraints` | ✅ | scipy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}` **or scipy `LinearConstraint` object(s)** (dense or sparse `A`); multiple are concatenated; dict `"jac"` optional (finite-diff fallback) |
 | `callback` | ✅ | called each iteration; both scipy signatures supported — `callback(xk)` and `callback(intermediate_result)` |
 | `tol` | ✅ | accepted directly (scipy `gtol` / `ftol` / `xtol` are synonyms) |

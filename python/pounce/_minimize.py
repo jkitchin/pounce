@@ -363,8 +363,19 @@ def _normalize_bounds(bounds, n: int):
                 lb[i] = lo
             if hi is not None:
                 ub[i] = hi
-    # Both paths share the reversed-bound check (the ``Bounds`` path silently
-    # produced an infeasible box before).
+    # Both paths share NaN rejection and the reversed-bound check (the
+    # ``Bounds`` path silently produced an infeasible box before). NaN must be
+    # rejected first: ``lb > ub`` is False against NaN, so a malformed box would
+    # sail through. Use ``np.isnan`` (not ``~np.isfinite``) so ±inf — the
+    # one-sided encoding produced above — stays legal.
+    for side, arr in (("lower", lb), ("upper", ub)):
+        bad = np.where(np.isnan(arr))[0]
+        if bad.size:
+            i = int(bad[0])
+            raise ValueError(
+                f"bounds[{i}] has a NaN {side} bound; use -inf/inf "
+                f"(or None in the pair-list form) for an unbounded side"
+            )
     bad = np.where(lb > ub)[0]
     if bad.size:
         i = int(bad[0])

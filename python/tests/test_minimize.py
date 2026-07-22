@@ -654,6 +654,42 @@ def test_minimize_rejects_reversed_bounds():
     np.testing.assert_allclose(res.x[0], 0.5, atol=1e-6)
 
 
+def test_normalize_bounds_rejects_nan():
+    """#265: a NaN bound used to sail through the reversed-bound check (``lb >
+    ub`` is False against NaN) and behave as a silent 'no bound'. It now raises,
+    on both the pair-list and ``scipy.optimize.Bounds`` paths. ±inf/None — the
+    real unbounded spellings — must still pass."""
+    from pounce._minimize import _normalize_bounds
+
+    # pair-list path
+    with pytest.raises(ValueError, match="NaN"):
+        _normalize_bounds([(float("nan"), 10.0)], 1)
+    # scipy Bounds path
+    with pytest.raises(ValueError, match="NaN"):
+        _normalize_bounds(opt.Bounds(np.nan, 10.0), 1)
+
+    # ±inf and None stay legal (they are the one-sided encoding this function
+    # itself produces); use np.isnan, never ~np.isfinite.
+    lb, ub = _normalize_bounds([(-np.inf, np.inf)], 1)
+    np.testing.assert_array_equal(lb, [-np.inf])
+    np.testing.assert_array_equal(ub, [np.inf])
+    lb, ub = _normalize_bounds([(None, None)], 1)
+    np.testing.assert_array_equal(lb, [-np.inf])
+    np.testing.assert_array_equal(ub, [np.inf])
+
+
+def test_minimize_rejects_nan_bounds_end_to_end():
+    """A NaN bound reaches the public ``minimize`` API and now raises instead of
+    silently returning a 'successful' solve (#265)."""
+    with pytest.raises(ValueError, match="NaN"):
+        pounce.minimize(
+            lambda v: (v[0] - 3.0) ** 2,
+            x0=[0.0],
+            bounds=[(float("nan"), 10.0)],
+            options={"print_level": 0},
+        )
+
+
 def test_nlp_success_status_includes_acceptable_level():
     """gh #119 regression (mapping). ``success`` for the NLP path must count
     ``Solved_To_Acceptable_Level`` (status 1) as a success, not only
