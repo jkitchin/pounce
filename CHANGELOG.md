@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the dual-divergence guard's diversion can no longer return a worse point (#250 follow-up)
+
+- **The guard's bet is now non-destructive.** `dual_diverging_streak` (added for
+  the emfl050 warm-start stall) routes a solve into restoration once the dual
+  infeasibility has grown for 15 consecutive iterations in an elevated regime.
+  That is a bet, and on the MINLPLib corpus it is usually a good one — it
+  rescues twice as many models as it harms — but nothing made *losing* it safe.
+  POUNCE now records the best acceptable-quality iterate seen after the guard
+  fires, and hands it back if the diverted run ends up worse.
+- **Symptom it fixes.** On `autocorr_bern55-06` the guard fires at iteration 23;
+  the diverted run reaches the true optimum (`-2304.0000278`, which Ipopt also
+  finds) and holds it from iteration 57 to 86, but the dual residual sawtooths
+  between `1e-8` and `2e-1` there, so it never strings together the
+  `acceptable_iter` consecutive qualifying iterates that would stop the solve.
+  It then entered restoration a second time, wandered into a worse basin, and
+  returned `-2263.46` — 1.8 % worse, with an overall NLP error of **1.0**
+  (feasible, but nowhere near a KKT point) under a "solved to acceptable level"
+  status. The better point had already passed the acceptable test; it was
+  overwritten only because `store_acceptable_point` keeps the latest rather than
+  the best.
+- **The trigger is deliberately unchanged.** Retuning it was tried first and
+  rejected: every streak setting that spares this model (>= 25) also loses the
+  `deb7` / `deb9` / `deb8` rescues, which need exactly the default 15. Fixing
+  the consequence keeps both, and a new test pins the rescue so a future retune
+  cannot quietly trade it away.
+- **Statuses that carry a fact of their own are preserved.** A restored point
+  never relabels `MaxiterExceeded` / `CpuTimeExceeded` / `WallTimeExceeded` /
+  `UserRequestedStop` — a caller polling for "did I run out of time" is not told
+  "solved to acceptable level" merely because a better point was recoverable.
+- Bookkeeping is gated on the guard having actually fired (3 of 500 corpus
+  models), so every solve it never touches is bit-identical.
+
 ### Fixed — unreachable termination certificate on a strongly objective-scaled NLP (#257)
 
 - **The dynamic barrier floor now expresses `compl_inf_tol` in the space μ

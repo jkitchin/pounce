@@ -246,6 +246,14 @@ pub struct IpoptAlgorithm {
     /// reported a certificate at the uncaptured iterate, and declining fails to
     /// reproduce it. It is the least-bad handling of an unidentifiable baseline,
     /// not a faithful one.
+    /// Whether the dual-divergence guard (pounce#246) actually fired this
+    /// solve. Gates the best-acceptable bookkeeping so solves the guard never
+    /// touches are bit-identical — see
+    /// [`Self::honour_best_acceptable_after_dual_guard`].
+    dual_guard_fired: bool,
+    /// Best (lowest scaled objective) acceptable-quality iterate seen since the
+    /// dual-divergence guard fired. `None` until then.
+    best_acceptable: Option<VetoSnapshot>,
     vetoed_seen: bool,
     /// Same latch for the acceptable-level refusal.
     vetoed_acceptable_seen: bool,
@@ -332,6 +340,8 @@ impl IpoptAlgorithm {
             acceptable_iterate: None,
             vetoed: None,
             vetoed_acceptable: None,
+            dual_guard_fired: false,
+            best_acceptable: None,
             vetoed_seen: false,
             vetoed_acceptable_seen: false,
             kkt_fidelity_tol: 0.0,
@@ -766,6 +776,114 @@ impl IpoptAlgorithm {
     }
 
     /// Make a refused snapshot the current iterate again.
+    /// Record the current iterate as the best acceptable-quality point seen so
+    /// far, but only once the dual-divergence guard has fired (pounce#250
+    /// follow-up).
+    ///
+    /// Gated on the guard having fired for two reasons. It keeps the cost at
+    /// exactly zero on the overwhelming majority of solves — the guard fires on
+    /// 3 of 500 corpus models — and, more importantly, it keeps the *behaviour*
+    /// bit-identical on every solve the guard never touches, so this cannot
+    /// regress a path it has no business affecting.
+    ///
+    /// "Best" is the lower scaled objective among points that already passed
+    /// `current_is_acceptable_with_state`, so feasibility is not being traded
+    /// away for objective: every candidate is acceptable-quality by the same
+    /// per-component test that gates `store_acceptable_point`.
+    fn record_best_acceptable(&mut self) {
+        if !self.dual_guard_fired {
+            return;
+        }
+        let iter = self.data.borrow().iter_count;
+        let Some(snap) = self.snapshot_current(iter) else {
+            return;
+        };
+        if !snap.obj.is_finite() {
+            return;
+        }
+        let replace = match self.best_acceptable.as_ref() {
+            // Scaled objectives are only comparable under an unchanged factor;
+            // if it ever moved, keep the earlier point rather than compare noise.
+            Some(best) => snap.obj_scale == best.obj_scale && snap.obj < best.obj,
+            None => true,
+        };
+        if replace {
+            self.best_acceptable = Some(snap);
+        }
+    }
+
+    /// Make the dual-divergence guard's diversion non-destructive (pounce#250
+    /// follow-up).
+    ///
+    /// The guard bets that routing to restoration beats grinding on. That bet
+    /// is usually right — on the MINLPLib corpus it rescues twice as many
+    /// models as it harms — but nothing made it *safe*: a lost bet could return
+    /// a materially worse point than the solve already had, under a status that
+    /// does not admit it.
+    ///
+    /// The observed case is `autocorr_bern55-06`. The guard fires at iteration
+    /// 23, the diverted run reaches the true optimum (-2304.0000278, matching
+    /// Ipopt to 12 significant figures) and holds it from iteration 57 to 86 —
+    /// but the dual residual sawtooths between 1e-8 and 2e-1 there, so it never
+    /// strings together the `acceptable_iter` consecutive qualifying iterates
+    /// that would stop the solve. It then enters restoration a second time,
+    /// wanders into a worse basin, and terminates `StopAtAcceptablePoint` at
+    /// -2263.46 — 1.8 % worse, with an overall NLP error of 1.0. The better
+    /// point was *visited and passed the acceptable test*; it was simply
+    /// overwritten, because `store_acceptable_point` keeps the latest rather
+    /// than the best.
+    ///
+    /// So: on a non-`Success` exit, if the best acceptable-quality iterate seen
+    /// since the guard fired beats the point being returned, hand that back
+    /// instead. This is the same "never worse off" bargain the gh #200 veto
+    /// makes, applied to the other bet in the algorithm.
+    ///
+    /// A strict `Success` is never overridden — that point carries a real
+    /// certificate, and a lower objective at a merely-acceptable point must not
+    /// displace it. Tuning the guard's firing threshold was tried first and
+    /// rejected: every setting that spares this model also loses the `deb7` /
+    /// `deb9` rescues, because the guard's default streak of 15 sits between
+    /// them. Fixing the consequence rather than the trigger keeps both.
+    fn honour_best_acceptable_after_dual_guard(&mut self, result: SolverReturn) -> SolverReturn {
+        if !self.dual_guard_fired || matches!(result, SolverReturn::Success) {
+            return result;
+        }
+        let Some(best) = self.best_acceptable.clone() else {
+            return result;
+        };
+        let (curr_f, _) = self.curr_obj_and_unscaled_kkt();
+        let curr_scale = self.cq.borrow().obj_scaling_factor();
+        // Only comparable under the same factor, sign included.
+        if curr_scale != best.obj_scale {
+            return result;
+        }
+        // Negated `<=`, not `>`: they differ at NaN, and a non-finite objective
+        // at the returned point must lose to a finite recorded one rather than
+        // silently winning the comparison.
+        if !(curr_f <= best.obj) {
+            tracing::debug!(target: "pounce::algorithm",
+                "[POUNCE] dual-divergence diversion ended worse than a point already \
+                 in hand (obj {:.10e} -> {:.10e}, iter {}); restoring it (pounce#250).",
+                curr_f, best.obj, best.iter,
+            );
+            self.restore_snapshot(&best);
+            // Swap the *point*, but never let the swap erase why the solve
+            // stopped. A budget that was exhausted stays reported as exhausted:
+            // a caller polling for "did I run out of time" must not be told
+            // "solved to acceptable level" merely because a better point was
+            // recoverable. Only the outcomes that carry no such fact of their
+            // own are relabelled to describe what is now being returned.
+            return match result {
+                SolverReturn::MaxiterExceeded
+                | SolverReturn::CpuTimeExceeded
+                | SolverReturn::WallTimeExceeded
+                | SolverReturn::UserRequestedStop => result,
+                _ => SolverReturn::StopAtAcceptablePoint,
+            };
+        }
+        result
+    }
+
     fn restore_snapshot(&mut self, snap: &VetoSnapshot) {
         let mut d = self.data.borrow_mut();
         d.set_trial(snap.iterate.clone());
@@ -1151,6 +1269,9 @@ impl IpoptAlgorithm {
             if self.dual_growth_streak >= self.dual_diverging_streak && inf_du > DUAL_DIV_FIRE_TOL {
                 self.dual_growth_streak = 0;
                 self.dual_inf_prev = 0.0;
+                // Arm the "never worse off" bookkeeping for the bet about to be
+                // placed (pounce#250 follow-up).
+                self.dual_guard_fired = true;
                 timing.check_convergence.end();
                 tracing::debug!(target: "pounce::algorithm",
                     "[POUNCE] dual-divergence guard fired at iter {} (inf_du={:.2e}); \
@@ -1232,6 +1353,13 @@ impl IpoptAlgorithm {
             self.store_acceptable_point();
             let curr_f = self.cq.borrow().curr_f();
             self.bundle.conv_check.set_curr_acceptable_obj(curr_f);
+            // pounce#257-followup: keep the *best* acceptable iterate, not just
+            // the latest, once the dual-divergence guard has bet on restoration.
+            // `store_acceptable_point` overwrites unconditionally, so after a
+            // diversion the rollback target drifts to whatever the diverted run
+            // last touched — which may be far worse than a point the solve
+            // already had in hand. See `honour_best_acceptable_after_dual_guard`.
+            self.record_best_acceptable();
         }
         timing.check_convergence.end();
 
@@ -2231,6 +2359,13 @@ impl IpoptAlgorithm {
         // continued run reached, and an earlier refusal can outrank the
         // continued run's own certificate. Applied here, once.
         let result = self.honour_refused_certificate(result);
+
+        // pounce#250 follow-up: the dual-divergence guard's diversion to
+        // restoration is a bet, and a lost bet must not return a worse point
+        // than the solve already had in hand. Applied here, once, for the same
+        // reason the #200 hook is — every `return` in the loop flows through
+        // this point by construction.
+        let result = self.honour_best_acceptable_after_dual_guard(result);
 
         // Terminal post-mortem checkpoint. Skipped when the user already
         // asked to stop (they were just at a prompt); otherwise the
