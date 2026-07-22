@@ -92,7 +92,7 @@ fn solve(fixture_name: &str, extra: &[&str]) -> SolveReport {
 
 /// Ipopt's answer on the identical `.nl`: -2304.0000278027342, reached in 72
 /// iterations with an overall NLP error of 3.7e-9.
-const AUTOCORR_OPTIMUM: f64 = -2304.000_027_802_734_2;
+const AUTOCORR_OPTIMUM: f64 = -2_304.000_027_802_734_2;
 
 /// The guard is opt-in as of the pounce#250 follow-up (`dual_diverging_streak`
 /// defaults to 0). Every test below must therefore enable it explicitly — at the
@@ -129,32 +129,32 @@ fn dual_guard_diversion_returns_a_stationary_point() {
     );
 }
 
-/// `deb7` carries NO absolute assertion, deliberately, and the reason is the
-/// single most decisive measurement in this investigation.
-///
-/// The guard's effect on this model differs by host **in sign**:
-///
-/// | host              | guard off | guard on (streak 15) |
-/// |-------------------|-----------|----------------------|
-/// | macOS / FERAL     |    104.95 |            **97.56** |
-/// | Linux CI runner   |     97.56 |           **127.87** |
-///
-/// It helps on one platform and hurts on the other, from the same source, on the
-/// same fixture. Two earlier versions of this test tried to pin a value here —
-/// first "the guard rescues deb7 to 97.56", then the weaker "enabling the guard
-/// still reaches ~97.56" — and CI falsified both. There is no cross-platform
-/// claim to make.
-///
-/// That is the finding, not an obstacle to testing it. A heuristic whose sign
-/// depends on the host is not a property of the algorithm, and it is why
-/// `dual_diverging_streak` is off by default. It also bounds what the
-/// best-acceptable fallback can promise: on Linux the guard costs deb7 30 % of
-/// its objective and the fallback cannot recover it, because 127.87 is the best
-/// acceptable point the diverted run ever reached — see
-/// `honour_best_acceptable_after_dual_guard`.
-///
-/// deb7 is still exercised below, by the relative hair-trigger comparison, which
-/// is host-independent by construction.
+// `deb7` carries NO absolute assertion, deliberately, and the reason is the
+// single most decisive measurement in this investigation.
+//
+// The guard's effect on this model differs by host **in sign**:
+//
+// | host              | guard off | guard on (streak 15) |
+// |-------------------|-----------|----------------------|
+// | macOS / FERAL     |    104.95 |            **97.56** |
+// | Linux CI runner   |     97.56 |           **127.87** |
+//
+// It helps on one platform and hurts on the other, from the same source, on the
+// same fixture. Two earlier versions of this test tried to pin a value here —
+// first "the guard rescues deb7 to 97.56", then the weaker "enabling the guard
+// still reaches ~97.56" — and CI falsified both. There is no cross-platform
+// claim to make.
+//
+// That is the finding, not an obstacle to testing it. A heuristic whose sign
+// depends on the host is not a property of the algorithm, and it is why
+// `dual_diverging_streak` is off by default. It also bounds what the
+// best-acceptable fallback can promise: on Linux the guard costs deb7 30 % of
+// its objective and the fallback cannot recover it, because 127.87 is the best
+// acceptable point the diverted run ever reached — see
+// `honour_best_acceptable_after_dual_guard`.
+//
+// deb7 is still exercised below, by the relative hair-trigger comparison, which
+// is host-independent by construction.
 
 /// The guard must stay off unless asked for. This is the model that decided it:
 /// `pooling_rt2stp` solves cleanly with the guard disabled and at streaks 5, 25
@@ -170,7 +170,7 @@ fn dual_guard_diversion_returns_a_stationary_point() {
 #[test]
 fn pooling_rt2stp_solves_at_default_settings() {
     // Ipopt on the identical .nl: -3273.9549927585640, NLP error ~1e-8.
-    const EXPECTED: f64 = -3273.954_991_374_754_6;
+    const EXPECTED: f64 = -3_273.954_991_374_754_6;
     let report = solve("pooling_rt2stp.nl", &["max_wall_time=10"]);
     let code = report.solution.solve_result_num;
     assert!(
