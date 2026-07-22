@@ -2245,6 +2245,41 @@ impl IpoptAlgorithm {
                 if !self.cq.borrow().curr_f().is_finite() {
                     return IterateOutcome::Terminate(SolverReturn::InvalidNumberDetected);
                 }
+                // Constraint feasibility alone does not make a point
+                // acceptable. `reference_theta` measures only the *primal*
+                // residual, so a perfectly feasible iterate can still be
+                // arbitrarily far from stationary — which is exactly what an
+                // unbounded objective looks like from here: the constraints
+                // stay satisfied while the iterates run off toward -inf.
+                //
+                // `min -exp(x) s.t. x >= 0` re-enters restoration with
+                // `inf_pr = 1.7e-10` and `inf_du = 8.8e+47`; before gh #274
+                // the finiteness check was the only gate, `-8.8e47` is
+                // finite, and the solve was reported as
+                // `Solved_To_Acceptable_Level` with `solve_result_num = 100`.
+                // Pyomo maps that into the *solved* family and loads the
+                // diverging iterate as an optimal solution.
+                //
+                // So require the point to pass the full acceptable-level
+                // triplet (which includes `acceptable_dual_inf_tol`) before
+                // claiming acceptability. When it does not, surface
+                // `cycle_exit` — the same honest status the other two
+                // restoration-cycle exits in this function use.
+                let nlp_err = self.cq.borrow().curr_nlp_error();
+                if !self
+                    .bundle
+                    .conv_check
+                    .current_is_acceptable_with_state(nlp_err, &self.data, &self.cq)
+                {
+                    tracing::debug!(target: "pounce::algorithm",
+                        "[POUNCE] near-feasible restoration re-entry at theta {:.3e} \
+                         but the point fails the acceptable-level tolerances \
+                         (nlp_err {:.3e}); reporting {:?} rather than \
+                         Solved_To_Acceptable_Level (gh#274).",
+                        reference_theta, nlp_err, cycle_exit,
+                    );
+                    return IterateOutcome::Terminate(cycle_exit);
+                }
                 return IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint);
             }
         } else {
