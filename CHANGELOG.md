@@ -9,6 +9,44 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — false `Infeasible_Problem_Detected` on a feasible, aggressively scaled NLP
+
+- **Rapid infeasibility detection now confirms its own claim before issuing it.**
+  The detector fired on a violation gate plus a stationarity *surrogate*,
+  `‖Jᵀc‖ / max(1, ‖c‖)`, against an absolute tolerance. That surrogate is not
+  scale-invariant: under a row scaling `dc` the numerator carries `dc²` while the
+  denominator clamps at 1, so an aggressive scaling drives it toward zero
+  regardless of where the iterate actually is.
+- **Symptom it fixes.** On Hock–Schittkowski 13 from `x₀ = (1e4, 1e4)` the
+  starting Jacobian is ~3e8, gradient-based scaling picks `dc ≈ 3.3e-7`, and the
+  surrogate read `5e-14` — far under the `1e-8` tolerance — at a point whose
+  constraint violation was **0.51**, whose `‖∇θ‖` was 1.40, and where neither
+  bound was active to block descent. POUNCE reported
+  `Infeasible_Problem_Detected` on a *feasible* problem with `f* = 1`. It now
+  converges to `0.98492872` in 29 iterations, matching Ipopt from the same start
+  to 9 significant figures.
+- **No tolerance fixes this, so the fix is not a retune.** Measured over 800
+  corpus models plus targeted infeasible problems: the scaled surrogate is not
+  separable on the targeted cases; measuring it *unscaled* needs a tolerance
+  ≥ 1e-2 to fire at all, which introduces new false infeasibility on 3+ corpus
+  models while still losing 2 correct detections; and a scale-invariant
+  `‖Jᵀc‖ / ‖c‖²` is not separable either. A single absolute threshold on a
+  surrogate cannot separate these cases.
+- **What it does instead.** The surrogate is kept as a cheap pre-filter, and
+  before the verdict is issued POUNCE probes for a materially less-violating
+  point nearby — a few bound-clamped steps along `−∇θ`, comparing `θ` to `θ`.
+  That is scale-free by construction and needs no calibration. The two regimes
+  are far apart: near a genuine infeasible stationary point only ~0.07 % further
+  descent exists, whereas at HS13's false verdict one step takes `θ` from 0.51 to
+  zero.
+- **Why it matters more than a wrong number.** A false *unbounded* verdict is
+  loud and a driver can retry it; a false *infeasible* silently prunes a
+  branch-and-bound node that may contain the optimum.
+- Costs a handful of constraint evaluations, and only on solves that were about
+  to terminate anyway. Genuine detection is preserved: across 1284 MINLPLib
+  models the infeasible-verdict count is unchanged at 37, with **0** new false
+  positives and **0** lost detections, and the sweep is otherwise bit-identical.
+
 ### Fixed — unreachable termination certificate on a strongly objective-scaled NLP (#257)
 
 - **The dynamic barrier floor now expresses `compl_inf_tol` in the space μ
