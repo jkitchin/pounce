@@ -112,6 +112,43 @@ impl MonotoneMuUpdate {
         self.tau_min.max(1.0 - mu)
     }
 
+    /// `compl_inf_tol` expressed in the **internally scaled** space that μ
+    /// lives in (pounce#257).
+    ///
+    /// The dynamic μ floor exists so the barrier stops just below the accuracy
+    /// the convergence test demands, and its two terms are enforced in
+    /// *different spaces*. `tol` is compared against the scaled NLP error, so
+    /// it needs no conversion. `compl_inf_tol` is compared against the
+    /// **unscaled** complementarity (`IpOptErrorConvCheck.cpp`; pounce#173),
+    /// which is the scaled complementarity divided by the objective scaling
+    /// factor — so `compl_inf_tol` in *scaled* units is
+    /// `compl_inf_tol · |obj_scaling_factor|`.
+    ///
+    /// Taking the raw value put the floor `1/|df|` too high whenever the
+    /// objective was scaled down. On jit1's branch-and-bound node subproblems
+    /// (`df = 1e-5`, `tol = 1e-7`) μ bottomed out at `9.09e-9`, leaving an
+    /// unscaled complementarity of `9.09e-4` — a hard 9× over `compl_inf_tol`
+    /// that no further iteration could clear, since μ was already at its floor.
+    /// The iterate sat *at* the optimum with a scaled NLP error 10× under
+    /// `tol`, yet the strict certificate was unreachable; μ-at-floor plus the
+    /// vanishing step then exited `STOP_AT_TINY_STEP`
+    /// (`Search_Direction_Becomes_Too_Small`), which callers read as
+    /// unboundedness. Converting the tolerance into μ's own space lets the
+    /// barrier descend far enough for the certificate to be issued.
+    ///
+    /// The factor is signed (`obj_scaling_factor = -1` poses a maximization),
+    /// so take its magnitude, and fall back to the unconverted tolerance when
+    /// it is absent or degenerate — a floor that is too low only costs
+    /// iterations, whereas one that is too high costs the certificate.
+    pub fn scaled_compl_inf_tol(&self, obj_scaling_factor: Number) -> Number {
+        let df = obj_scaling_factor.abs();
+        if df.is_finite() && df > 0.0 {
+            self.compl_inf_tol * df
+        } else {
+            self.compl_inf_tol
+        }
+    }
+
     /// Pure scalar reduction used by the trait impl. Exposed so unit
     /// tests can drive the formula without standing up an
     /// `IpoptData`/`IpoptCq` fixture.
@@ -179,7 +216,9 @@ impl MuUpdate for MonotoneMuUpdate {
         // We also `max` with `mu_min` so the restoration sub-builder's
         // `with_mu_min(100 * outer_mu_min)` safeguard still applies.
         let tol = data.borrow().tol;
-        let dynamic_floor = tol.min(self.compl_inf_tol) / (self.barrier_tol_factor + 1.0);
+        let df = cq.borrow().obj_scaling_factor();
+        let dynamic_floor =
+            tol.min(self.scaled_compl_inf_tol(df)) / (self.barrier_tol_factor + 1.0);
         let floor = self.mu_target.max(self.mu_min).max(dynamic_floor);
 
         // The barrier error depends on μ via the relaxed
@@ -289,5 +328,30 @@ mod tests {
         // with default tols — the runtime `floor = max(...)` picks the
         // dynamic one. (Verified in `update_barrier_parameter`.)
         assert!(m.mu_min < expected_floor);
+    }
+
+    /// pounce#257: `compl_inf_tol` is enforced on the *unscaled*
+    /// complementarity, so the floor must convert it into μ's scaled space.
+    #[test]
+    fn dynamic_floor_converts_compl_inf_tol_into_scaled_space() {
+        let m = MonotoneMuUpdate::default();
+        // Unscaled problem: nothing to convert.
+        assert_eq!(m.scaled_compl_inf_tol(1.0), m.compl_inf_tol);
+        // jit1's B&B node: df = 1e-5 deflates the objective, so a `1e-4`
+        // unscaled tolerance is `1e-9` in the space μ lives in. Taking the raw
+        // value left the floor at 9.09e-10 — an unscaled complementarity of
+        // 9.09e-5 at best, and 9.09e-4 at the `tol=1e-7` the driver requested.
+        let floor = |ct: Number| (1e-7 as Number).min(ct) / (m.barrier_tol_factor + 1.0);
+        assert!((m.scaled_compl_inf_tol(1e-5) - 1e-9).abs() < 1e-24);
+        assert!(floor(m.scaled_compl_inf_tol(1e-5)) < floor(m.compl_inf_tol));
+        // Signed factor: `obj_scaling_factor = -1` poses a maximization, and
+        // magnitude is what the unscaling means. A negative floor would sail
+        // under every comparison.
+        assert_eq!(m.scaled_compl_inf_tol(-1e-5), m.scaled_compl_inf_tol(1e-5));
+        // Degenerate factors fall back to the unconverted tolerance rather
+        // than producing a zero or NaN floor.
+        for df in [0.0, Number::NAN, Number::INFINITY] {
+            assert_eq!(m.scaled_compl_inf_tol(df), m.compl_inf_tol);
+        }
     }
 }

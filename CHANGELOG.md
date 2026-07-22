@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — unreachable termination certificate on a strongly objective-scaled NLP (#257)
+
+- **The dynamic barrier floor now expresses `compl_inf_tol` in the space μ
+  actually lives in.** The floor is
+  `min(tol, compl_inf_tol) / (barrier_tol_factor + 1)`, but its two terms are
+  enforced in different spaces: `tol` is compared against the *scaled* NLP
+  error, while `compl_inf_tol` is compared against the *unscaled*
+  complementarity (pounce#173). Feeding the raw `compl_inf_tol` into a
+  scaled-space floor put it `1/|obj_scaling_factor|` too high whenever the
+  objective was scaled down, so on a strongly deflated objective μ bottomed out
+  *above* the level the convergence test required and the strict certificate
+  became unreachable — no matter how long the solve ran. The floor now uses
+  `compl_inf_tol · |obj_scaling_factor|` (magnitude, so a maximization posed
+  via `obj_scaling_factor = -1` is unaffected), falling back to the
+  unconverted tolerance if the factor is absent or degenerate.
+- **This removes a tolerance inversion**: because a smaller `tol` incidentally
+  dragged the floor down, the failure appeared at *looser* tolerances and not
+  at the default `1e-8`. Loosening `tol` could cost a user their certificate.
+- **Symptom it fixes.** POUNCE would sit exactly on the optimum, with a scaled
+  NLP error well under `tol`, unable to certify it; μ-at-floor plus the
+  resulting vanishing step then exited
+  `Search_Direction_Becomes_Too_Small`, which drivers commonly map onto
+  unboundedness. On the branch-and-bound node subproblems discopt generates for
+  MINLPLib `jit1` (`obj_scaling_factor = 1e-5`, `tol = 1e-7`) this hit **59 of
+  59 node solves**, leaving the MINLP with no incumbent (`status=unknown`)
+  unless the driver retried every node with Ipopt. Post-fix all nodes certify,
+  POUNCE reproduces Ipopt's node optimum to the last digit
+  (`173345.37683089852`), and `jit1` solves to `obj = 173982.61006345798`,
+  `gap = 0` in 9 nodes — node-for-node identical to an Ipopt-driven search.
+  Pinned by `crates/pounce-cli/tests/issue_257_jit1_node_certificate.rs`
+  against `jit1_node.nl`, the failing node captured verbatim.
+
 ### Fixed — no spurious `Unbounded` on a bounded, ill-scaled NLP (#248)
 
 - **The divergence guard no longer reports `DivergingIterates` (Ipopt's
