@@ -133,6 +133,15 @@ default.
 The columns show `covariance()` for concreteness; `information()` follows the
 same rows, since factor retention and the default block are accessor-agnostic.
 
+Any declaration keeps the factor, not only `declare_fitted`, so `retain_kkt()`
+is needed only when nothing at all is declared. In particular
+`declare_sens_param` alone (no `declare_fitted`, no `retain_kkt()`) does
+support `covariance(model, wrt=T)` and `information(model, wrt=T)` off the same
+solve. It just carries no default block, so a bare `covariance(model)` errors,
+exactly the `retain_kkt()`-only row. The block `T` then comes out conditional
+on the pinned parameter, since fixing an input conditions rather than
+marginalizes.
+
 ## Marginal versus conditional: the one semantic to get right
 
 Each call reduces onto its argument, and that yields the block's
