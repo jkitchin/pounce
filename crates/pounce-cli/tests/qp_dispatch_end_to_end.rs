@@ -325,8 +325,14 @@ fn forced_qp_active_set_solves_convex_qp() {
 /// The active-set route's `.sol` must carry the *real* primal and dual — not
 /// the zero fallback. Its solve bypasses the IPM-only `on_converged` capture,
 /// so the CLI backfills the solution from `finalize_solution`; this test pins
-/// that the captured `x ≈ (1,1)` and the equality dual `≈ −2` match the IPM /
+/// that the captured `x ≈ (1,1)` and the equality dual `≈ +2` match the IPM /
 /// NLP convention on the same `min x0²+x1² s.t. x0+x1=2` fixture.
+///
+/// The dual is `+2`, not `−2`: for `min x0²+x1² s.t. x0+x1=b` the optimum is
+/// `b²/2`, so the AMPL marginal `d obj / d b = b = 2`. Ipopt, glpk and cbc all
+/// report `+2` on this model. Until gh #271 this assertion read `−2`, pinning
+/// pounce's internal multiplier sign into the `.sol` contract and masking the
+/// defect.
 #[test]
 fn qp_active_set_sol_matches_known_optimum_and_dual() {
     let dir = std::env::temp_dir();
@@ -351,15 +357,15 @@ fn qp_active_set_sol_matches_known_optimum_and_dual() {
         near_one >= 2,
         "active-set .sol must carry the real primal x ≈ (1,1), not zeros:\n{text}"
     );
-    // The equality multiplier is −2 in the same convention as the IPM/NLP path.
+    // The equality marginal is +2 in the same convention as the IPM/NLP path.
     let dual_near = floats
         .iter()
         .copied()
-        .min_by(|a, b| (a + 2.0).abs().partial_cmp(&(b + 2.0).abs()).unwrap())
+        .min_by(|a, b| (a - 2.0).abs().partial_cmp(&(b - 2.0).abs()).unwrap())
         .expect("a float in .sol");
     assert!(
-        (dual_near + 2.0).abs() < 1e-5,
-        "active-set equality dual {dual_near} != −2:\n{text}"
+        (dual_near - 2.0).abs() < 1e-5,
+        "active-set equality dual {dual_near} != +2:\n{text}"
     );
 }
 
@@ -408,8 +414,15 @@ fn sol_primal_matches_known_optimum() {
 }
 
 /// The convex QP path's recovered constraint dual must match the NLP
-/// path's dual on the same `.nl` file (the reference convention). For
-/// `min x0²+x1² s.t. x0+x1=2` the equality multiplier is −2.
+/// path's dual on the same `.nl` file, **and** both must match the
+/// externally-correct AMPL marginal. For `min x0²+x1² s.t. x0+x1=b` the
+/// optimum is `b²/2`, so `d obj / d b = b = +2` — the value Ipopt, glpk
+/// and cbc report.
+///
+/// Pinning the absolute value matters: before gh #271 this test asserted
+/// only that the two pounce paths agreed with each other (at `−2`), which
+/// a uniform sign error satisfies trivially. Cross-path agreement alone
+/// cannot detect a convention defect shared by both paths.
 #[test]
 fn qp_and_nlp_duals_agree() {
     let dir = std::env::temp_dir();
@@ -427,12 +440,12 @@ fn qp_and_nlp_duals_agree() {
         std::fs::read_to_string(out).expect("read .sol")
     };
 
-    // The single constraint dual is the value closest to −2 in each
+    // The single constraint dual is the value closest to +2 in each
     // `.sol`'s float block.
     let dual_near = |text: &str| -> f64 {
         text.lines()
             .filter_map(|l| l.trim().parse::<f64>().ok())
-            .min_by(|a, b| (a - (-2.0)).abs().partial_cmp(&(b - (-2.0)).abs()).unwrap())
+            .min_by(|a, b| (a - 2.0).abs().partial_cmp(&(b - 2.0).abs()).unwrap())
             .expect("a float in .sol")
     };
 
@@ -441,7 +454,7 @@ fn qp_and_nlp_duals_agree() {
 
     let qp_dual = dual_near(&qp_sol);
     let nlp_dual = dual_near(&nlp_sol);
-    assert!((qp_dual - (-2.0)).abs() < 1e-5, "QP dual {qp_dual} != −2");
+    assert!((qp_dual - 2.0).abs() < 1e-5, "QP dual {qp_dual} != +2");
     assert!(
         (qp_dual - nlp_dual).abs() < 1e-5,
         "QP dual {qp_dual} disagrees with NLP dual {nlp_dual}"

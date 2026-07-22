@@ -545,9 +545,27 @@ class Gradient:
             return self._session.mult_entry(td.name)
         return self._session.var_entry(td.name)
 
+    @staticmethod
+    def _convention_sign(td):
+        """Sign taking a raw sensitivity row into the convention of the
+        quantity the user reads off the model.
+
+        Variable targets need no conversion: `var_entry` rows are
+        derivatives of primal values, which is what `m.x.value` holds.
+
+        Constraint targets do. `mult_entry` rows come from
+        `parametric_step_full`'s y_c block, i.e. derivatives of POUNCE's
+        internal Lagrange multiplier, whereas `m.dual[con]` holds the AMPL
+        *marginal* `d obj / d b = -lambda` (gh #271). So d(dual)/d(param)
+        is the negation of the raw row -- without this, `gradient(m.con,
+        wrt=m.p)` disagrees in sign with a finite difference of
+        `m.dual[m.con]` taken across a re-solve.
+        """
+        return -1.0 if td.ctype is Constraint else 1.0
+
     def _value(self, td, pd):
         col = self._session.column(_param_pin(self._session, pd))
-        return float(col[self._entry(td)])
+        return self._convention_sign(td) * float(col[self._entry(td)])
 
     def __getitem__(self, key):
         if isinstance(key, tuple):

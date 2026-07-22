@@ -898,7 +898,7 @@ fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize) {
         let payload = crate::nl_writer::SolutionFile {
             message: &message,
             x: &mn.x,
-            lambda,
+            mult_g: lambda,
             solve_result_num: status_to_solve_result_num(ApplicationReturnStatus::SolveSucceeded),
             suffixes: &[],
         };

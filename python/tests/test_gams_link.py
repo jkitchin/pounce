@@ -428,3 +428,48 @@ def test_run_script_variants():
     win = register.run_script(python_executable="C:/py/python.exe", windows=True)
     assert "%*" in win
     assert "pounce.gams.link" in win
+
+
+# --- gh #272: equation marginal sign convention -------------------------
+
+
+def test_gams_pi_minimizing_negates_lambda():
+    """For a minimizing model, pi = -lambda (the historical behavior)."""
+    pi = link.gams_pi([1.5, -0.25, 0.0], obj_sign=1.0)
+    assert pi == pytest.approx([-1.5, 0.25, 0.0])
+
+
+def test_gams_pi_maximizing_preserves_lambda_sign():
+    """For a maximizing model, pi = +lambda.
+
+    Regression guard for gh #272: the link applied ``-lambda``
+    unconditionally, so every equation marginal on a ``maximizing`` model
+    came back inverted. Verified live against GAMS 53.2.0/CPLEX, which
+    reports +2.25 / +0.25 on the test LP; POUNCE's internal multipliers
+    there are +2.25 / +0.25, and the old ``pi = -lambda`` turned them into
+    the -2.25 / -0.25 that GAMS displayed.
+    """
+    pi = link.gams_pi([2.25, 0.25], obj_sign=-1.0)
+    assert pi == pytest.approx([2.25, 0.25])
+
+
+def test_gams_pi_sign_flips_between_senses():
+    """The two senses must be exact negations of one another."""
+    lam = [3.0, -1.0, 0.5]
+    assert link.gams_pi(lam, obj_sign=1.0) == pytest.approx(
+        -link.gams_pi(lam, obj_sign=-1.0)
+    )
+
+
+def test_gams_pi_matches_analytic_shadow_price_maximizing():
+    """End-to-end sign check against an analytic marginal.
+
+    ``max 2x s.t. x <= 3`` has ``obj* = 6`` and ``d obj / d b = +2``.
+
+    POUNCE minimizes ``-2x`` subject to ``x - 3 <= 0``, whose Lagrangian
+    ``L = -2x + lambda (x - 3)`` gives stationarity ``-2 + lambda = 0``,
+    i.e. ``lambda = +2``. With ``obj_sign = -1`` the GAMS marginal is
+    ``-(-1) * 2 = +2`` -- the sign GAMS's own solvers report. The old
+    unconditional negation returned ``-2``.
+    """
+    assert link.gams_pi([2.0], obj_sign=-1.0) == pytest.approx([2.0])

@@ -28,6 +28,29 @@ changes.
   restoration-cycle status its sibling exits use. The CLI and the library API
   now agree on this model (`Error_In_Step_Computation`), where previously the
   library reported failure and the CLI reported success.
+### Fixed — constraint dual sign convention (#271, #272)
+
+- **`.sol` / Pyomo `model.dual`** carried pounce's internal Lagrange
+  multiplier instead of the AMPL *marginal* `d obj / d b`, so every dual came
+  back negated relative to Ipopt, glpk, CBC and CONOPT (#271). Objectives and
+  primal solutions were never affected. The `.sol` writer now performs the
+  conversion. **This flips the sign of duals read through Pyomo and AMPL** —
+  if you compensated for the old behavior in downstream code, remove that
+  workaround.
+- The Python API's `mult_g` and the JSON report's `solution.lambda` are
+  unchanged: they keep the Lagrange-multiplier convention, which matches
+  cyipopt. `marginal = −λ`; both conventions are now documented side by side
+  in [Running Solves](docs/src/cli.md).
+- **GAMS equation marginals on `maximizing` models** were inverted in both the
+  pip link and the native C link (#272): the `obj_sign` factor already applied
+  to the objective value and the variable marginals was missing from the
+  multiplier conversion, which is now `pi = −obj_sign · λ`. `minimizing`
+  models, objective values, variable marginals and status mapping were never
+  affected, and the two links behaved identically, so install method made no
+  difference.
+- `pyomo_pounce.gradient()` on a `Constraint` target returned
+  `d(λ)/d(param)`, which no longer matched `model.dual` once duals were
+  converted; it now reports `d(dual)/d(param)`.
 
 ### Fixed — ambiguous 2-parameter tuple bounds and NaN bounds (#265)
 

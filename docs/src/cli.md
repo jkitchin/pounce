@@ -91,6 +91,32 @@ the AMPL exit-code contract (see below), so the driver reads the
 termination from the `.sol` file rather than the exit status. The
 [`pyomo-pounce`](pyomo.md) package builds on top of this mode.
 
+### Dual sign conventions
+
+Two different quantities are in play, and they differ by a sign. Getting
+them confused is easy, so pounce names them differently:
+
+| Surface | Quantity | Meaning |
+|---|---|---|
+| `.sol` dual block, Pyomo `model.dual` | **marginal** | `d obj / d b` — the shadow price |
+| `mult_g` (Python API, JSON `solution.lambda`) | **Lagrange multiplier** | the `λ` of `L = f + λ'g − z_L(x−x_L) + z_U(x−x_U)` |
+
+They are related by `marginal = −λ`. The `.sol` writer performs this
+negation, so a `.sol` (and therefore Pyomo's `model.dual`) carries shadow
+prices with the same sign Ipopt, glpk, CBC and CONOPT report. For
+`min x₀²+x₁² s.t. x₀+x₁ = b` the optimum is `b²/2`, so a `.sol` written at
+`b = 2` reports `+2`.
+
+The Python API's `mult_g` keeps the Lagrange-multiplier convention, which
+matches cyipopt and satisfies the stationarity identity above directly.
+If you are comparing a `mult_g` against a `model.dual` for the same solve,
+expect them to differ by a sign — that is by design, not a bug.
+
+> Before v0.9.1 the `.sol` writer emitted the Lagrange multiplier without
+> converting it, so every AMPL/Pyomo dual came back negated relative to
+> every other solver ([#271](https://github.com/jkitchin/pounce/issues/271)).
+> Objectives and primal solutions were never affected.
+
 ## Exit codes
 
 - `0` — `Solve_Succeeded` (or `Solved_To_Acceptable_Level`).
