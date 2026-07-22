@@ -5,6 +5,10 @@ a multi-solver, multi-registry project from drifting. The release mechanics
 live in `dev-notes/cargo-release.md` and `dev-notes/pypi-release.md`; this file
 is about getting a change *merge-ready*.
 
+Opening a PR fills in `.github/pull_request_template.md`, which scaffolds the
+narrative these PRs are expected to carry — problem with numbers, cause, fix,
+blast radius, tests — and checklists the definition of done below.
+
 ## Enable the git hooks (one-time)
 
 ```sh
