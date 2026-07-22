@@ -230,10 +230,10 @@ factorization (a step, a corrector iteration, a fix-relax solve, a
 breakpoint test) plus the diagnostics to decide. The **policy** — how many
 correctors, when to stop, which mode per cycle, whether to abandon the
 estimate and call a full `solve()` instead, the advanced-step
-solve-ahead-then-update orchestration — belongs to the application layer
-(e.g. an advanced-step NMPC controller such as
-[drto](https://github.com/devin-griff/drto)), because those decisions
-depend on a real-time budget the solver has no business knowing.
+solve-ahead-then-update orchestration — belongs to the downstream consumer
+(an advanced-step NMPC controller, an RTO or estimation loop), because
+those decisions depend on a real-time budget the solver has no business
+knowing.
 
 Keeping the split means the primitives serve estimation, RTO, and control
 alike, and pounce stays a general solver rather than absorbing a
@@ -259,9 +259,9 @@ the caller knows the deadline.
   the corrected point converges to the exact re-solve; the convenience
   loop terminates correctly on the residual tolerance, the iteration cap,
   and a stagnation case.
-- End-to-end: the [cstr-sensitivity](https://cstr-sensitivity.griffith-pse.com)
-  demo, where the estimate visibly flattens against a bound today and
-  should bend correctly under `fix_relax`.
+- End-to-end: a constrained optimal-control example (e.g. a CSTR whose
+  controls hit their bounds), where the estimate visibly flattens against
+  a bound today and should bend correctly under `fix_relax`.
 
 ## References
 
