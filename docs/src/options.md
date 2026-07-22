@@ -181,6 +181,7 @@ environment variable when left unset on the OptionsList (see
 | `feral_fma`                  | `no`    | Dispatch dense kernels through fused multiply-add intrinsics. Roughly 2× throughput on aarch64 / x86_v3, at the cost of per-pivot rounding drift that trips more `WrongInertia` checks. Turn on when kernel throughput dominates and the IPM tolerates a noisier inertia signal. |
 | `feral_singular_pivot_floor` | `1e-20` | Pounce's analog of MA57's `CNTL(2)`. After a successful factor, the smallest accepted `D`-block pivot magnitude (scaled space) is compared against this absolute floor; if it falls below, the factor is reported `Singular` so the IPM bumps `δ_w`. `0` disables. |
 | `feral_min_par_flops`        | `1e8`   | Flop threshold above which a supernode subtree is dispatched to a parallel worker (feral#19). Lower → dispatch more aggressively (`0` fires on every multi-child tree at/above `N_PAR_MIN` supernodes); a very large value rejects all tree-level parallelism. Only matters when feral's internal parallelism is active; no effect on a serial factor. |
+| `feral_static_pivoting`      | (unset) | Tri-state. Factor with static pivoting (SSIDS-style delayed pivots disabled). Unset → inherit feral's delayed-pivot default. `yes` runs every supernode as the root does — a failing pivot is force-accepted in place with iterative refinement recovering the residual — breaking the delayed-pivot cascade that can turn one factorization into tens of seconds (feral#8; the emfl050 case in #254). feral's analog of MA57's `cntl[4]`. `no` keeps delayed pivoting on. Deliberately **not** coupled to `max_wall_time` — the accuracy/speed trade is the caller's to set per solve. |
 
 ### `feral_ordering` variants
 
@@ -253,6 +254,7 @@ embeddings).
 | `POUNCE_FERAL_FMA`                  | `feral_fma`                  |
 | `POUNCE_FERAL_SINGULAR_PIVOT_FLOOR` | `feral_singular_pivot_floor` |
 | `POUNCE_FERAL_MIN_PAR_FLOPS`        | `feral_min_par_flops`        |
+| `POUNCE_FERAL_STATIC_PIVOTING`      | `feral_static_pivoting`      |
 
 `FERAL_PARALLEL=0` (legacy, no `POUNCE_` prefix) forces feral's internal
 factor serial process-wide; the first-class per-backend lever is the
