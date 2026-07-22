@@ -26,6 +26,23 @@ changes.
   rejected the iterate — so the loop fell through to "converged". `minimize`
   now rejects a non-finite `x0`.
 
+### Fixed — strictly convex QP falsely reported unbounded (#273)
+
+- The convex IPM's dual-infeasibility (unboundedness) certificate tested
+  `‖Pd‖ ≤ rtol·‖d‖` for the candidate recession direction `d`. Because `‖Pd‖`
+  is itself proportional to `‖P‖·‖d‖`, the `‖d‖` cancelled and the test
+  collapsed to `‖P‖ ≤ rtol` — a bare comparison of the Hessian's magnitude
+  against the absolute constant `1e-10`, with no reference to `d` at all.
+- Consequence: **any** strictly convex QP with a small enough Hessian was
+  certified unbounded despite having a finite minimizer. `min -x + x²/(2M)
+  s.t. x >= 0` (unique minimum `x* = M`) was reported unbounded for every
+  `M >= 1e10`, terminating after 2 iterations twelve orders of magnitude short
+  of the optimum, on a problem Ipopt and pounce's own NLP path both solve
+  exactly.
+- The residual bound is now scaled by `‖P‖`, restoring the intended meaning:
+  a relative test for `d ∈ null(P)`. LPs (`P` empty, `Pd` exactly zero) and
+  genuinely singular Hessians with `d` in the nullspace are unaffected, so
+  real unboundedness is still detected.
 ### Fixed — `check_psd` validated a different matrix than the solver used (#279)
 
 - With a `scipy.sparse` COO `P` containing **duplicate `(row, col)` entries**,
