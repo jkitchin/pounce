@@ -183,8 +183,14 @@ fn solve_with_budget(budget: f64, n: usize) -> (ApplicationReturnStatus, i32, i3
 fn restoration_grind_honors_wall_deadline() {
     let n = 40;
 
-    // Baseline: a generous budget lets restoration run to completion.
+    // Baseline: a generous budget lets restoration run to completion. Timed,
+    // because the tight budget below is derived from this measurement — a
+    // hard-coded budget cannot be right on every machine (the original
+    // 0.05 s covered ~40% of the grind on a runner that finishes the whole
+    // baseline in ~0.13 s, and the 3× margin assertion flaked).
+    let t0 = std::time::Instant::now();
     let (base_status, _base_outer, base_inner) = solve_with_budget(60.0, n);
+    let base_elapsed = t0.elapsed().as_secs_f64();
     // Sanity: the fixture is genuinely restoration-heavy (many inner iters)
     // and does not spuriously "succeed" on an infeasible problem.
     assert!(
@@ -202,12 +208,16 @@ fn restoration_grind_honors_wall_deadline() {
         "fixture claimed success on an infeasible NLP: {base_status:?}",
     );
 
-    // Tight budget: the solve must stop on the wall-time limit having done
-    // dramatically fewer restoration inner iterations. Comparing the inner
-    // iteration count (rather than raw wall time) keeps the assertion robust
-    // across machine speeds: the budget is short enough that no realistic
-    // machine reaches even a third of the unbounded inner-iteration count.
-    let (tight_status, _tight_outer, tight_inner) = solve_with_budget(0.05, n);
+    // Tight budget: 1/20 of the measured baseline duration. The solve must
+    // stop on the wall-time limit having done dramatically fewer restoration
+    // inner iterations. Deriving the budget from the baseline (instead of
+    // hard-coding one) makes the 3× margin below machine-independent — it
+    // only fails if machine load drifts by more than ~6× between the two
+    // runs, or if the deadline genuinely stops being honored. Landing at
+    // 1/20 may cut the solve anywhere, including before restoration entry
+    // (tight_inner = 0): that is still correct behaviour, exercising the
+    // pre-loop init check rather than the per-inner-iteration check.
+    let (tight_status, _tight_outer, tight_inner) = solve_with_budget(base_elapsed / 20.0, n);
     assert!(
         matches!(
             tight_status,
