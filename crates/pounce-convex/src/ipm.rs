@@ -2537,8 +2537,32 @@ pub(crate) fn detect_infeasibility_with(
         // SOC/PSD ⇒ true cone membership). Checked, not componentwise, so a
         // direction that merely has `Gd ≤ 0` but `−Gd ∉ K` is rejected.
         let gd_ok = primal_recession_ok(&gd, ctol * x_norm);
+        // `d` is a recession direction of the *quadratic* only if `Pd = 0`,
+        // i.e. `d ∈ null(P)`. Testing `‖Pd‖ ≤ rtol·‖d‖` cannot express that:
+        // `‖Pd‖` is itself proportional to `‖P‖·‖d‖`, so `‖d‖` cancels and the
+        // test collapses to `‖P‖ ≤ rtol` — a bare comparison of the Hessian's
+        // magnitude against an absolute constant, with no reference to `d` at
+        // all. Every strictly convex QP whose Hessian happens to be smaller
+        // than `rtol` then reads as unbounded regardless of having a finite
+        // minimizer: `min -x + x²/(2M)  s.t.  x ≥ 0` (unique minimum at
+        // `x* = M`) was reported unbounded for `M ≥ 1e10`, i.e. exactly when
+        // `P = 1/M` crossed `FARKAS_RESID_TOL`. See gh #273.
+        //
+        // Scaling the bound by `‖P‖` restores the intended meaning — a
+        // *relative* residual, "is `d` in the nullspace of `P` to `rtol`
+        // relative to `P`'s own scale". Both sides then carry the same
+        // `‖P‖·‖d‖` units and nothing cancels.
+        //
+        // For an LP (`P` empty) `p_scale` is 0 and `pd` is exactly 0, so the
+        // test reads `0 ≤ 0` and genuine LP unboundedness is unaffected. For a
+        // genuinely singular `P` with `d ∈ null(P)`, `pd` is 0 to round-off —
+        // on the order of `ε·‖P‖·‖d‖`, comfortably inside `rtol·‖P‖·‖d‖`.
+        let p_scale = prob
+            .p_lower
+            .iter()
+            .fold(0.0_f64, |acc, t| acc.max(t.val.abs()));
         if cd < -ctol * x_norm
-            && inf_norm(&pd) <= rtol * x_norm
+            && inf_norm(&pd) <= rtol * x_norm * p_scale
             && inf_norm(&ad) <= rtol * x_norm
             && gd_ok
         {
@@ -2581,6 +2605,103 @@ mod detect_infeasibility_tests {
             lb: vec![],
             ub: vec![],
         }
+    }
+
+    /// gh #273 — a strictly convex QP must never be certified unbounded just
+    /// because its Hessian is numerically small.
+    ///
+    /// `min -x + x²/(2M)  s.t.  x ≥ 0` has the unique minimum `x* = M`,
+    /// `f* = -M/2`, for every finite `M > 0`. The old recession test compared
+    /// `‖Pd‖ ≤ rtol·‖d‖`; since `‖Pd‖ = ‖P‖·‖d‖` for a scalar `P`, `‖d‖`
+    /// cancelled and the test reduced to `‖P‖ ≤ rtol`. So every `M ≥ 1/rtol`
+    /// (i.e. `P ≤ 1e-10`) read as unbounded. The bound is now scaled by `‖P‖`,
+    /// making it a genuine relative nullspace test.
+    #[test]
+    fn tiny_hessian_is_not_a_recession_direction() {
+        let opts = QpOptions::default();
+        let y: [f64; 0] = [];
+        let z: [f64; 0] = [];
+        // P far below FARKAS_RESID_TOL (1e-10) in every case.
+        for p_val in [1e-10, 1e-12, 1e-16] {
+            let prob = QpProblem {
+                n: 1,
+                p_lower: vec![Triplet::new(0, 0, p_val)],
+                c: vec![-1.0],
+                a: vec![],
+                b: vec![],
+                g: vec![],
+                h: vec![],
+                lb: vec![0.0],
+                ub: vec![f64::INFINITY],
+            };
+            let x = [1.0]; // candidate recession direction
+            assert_eq!(
+                detect_infeasibility(&prob, &x, &y, &z, &opts),
+                None,
+                "P = {p_val:e} is strictly positive, so d = 1 is NOT a recession \
+                 direction and the QP is bounded below; certifying unboundedness \
+                 here returns a wrong answer for a problem with a finite optimum"
+            );
+        }
+    }
+
+    /// The complement of the test above: a genuinely singular `P` with the
+    /// direction lying in its nullspace must still certify unboundedness, so
+    /// the #273 fix introduces no false negative.
+    ///
+    /// `min ½x₀² - x₁  s.t.  x ≥ 0` with `P = diag(1, 0)`: `d = (0, 1)` has
+    /// `Pd = 0` exactly and `cᵀd = -1 < 0`.
+    #[test]
+    fn singular_hessian_nullspace_direction_is_still_dual_infeasible() {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, 1.0)], // P = diag(1, 0)
+            c: vec![0.0, -1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0, 0.0],
+            ub: vec![f64::INFINITY, f64::INFINITY],
+        };
+        let opts = QpOptions::default();
+        let x = [0.0, 1.0]; // in null(P)
+        let y: [f64; 0] = [];
+        let z: [f64; 0] = [];
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &z, &opts),
+            Some(QpStatus::DualInfeasible),
+            "d = (0,1) is exactly in null(P) with c'd < 0 — a genuine recession \
+             ray that must still be detected"
+        );
+    }
+
+    /// An LP (`P` empty, so `p_scale = 0`) must be unaffected: `Pd` is exactly
+    /// zero, so the scaled bound reads `0 ≤ 0` and genuine LP unboundedness is
+    /// still certified.
+    #[test]
+    fn empty_hessian_lp_unboundedness_unaffected() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![-1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0],
+            ub: vec![f64::INFINITY],
+        };
+        let opts = QpOptions::default();
+        let x = [1.0];
+        let y: [f64; 0] = [];
+        let z: [f64; 0] = [];
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &y, &z, &opts),
+            Some(QpStatus::DualInfeasible),
+            "an LP with no Hessian is unbounded along d = 1; p_scale = 0 must \
+             not break this"
+        );
     }
 
     #[test]
