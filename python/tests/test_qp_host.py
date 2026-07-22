@@ -201,3 +201,85 @@ def test_psd_p_still_solves_on_all_entry_points():
     QpFactorization(P=P, c=_C2, lb=_LB, ub=_UB)  # constructs, no raise
     s = QpSensitivity(P=P, c=_C2, A=[[1.0, 1.0]], b=[2.0])
     np.testing.assert_allclose(s.x, [1.0, 1.0], atol=1e-6)
+
+
+# --- gh #279: duplicate COO entries must be summed by the PSD guard ------
+
+
+def _dup_indefinite_coo():
+    """P whose PSD-ness depends on the duplicate convention.
+
+    Entries (1,0) appear twice at 1.5 each. Under the COO **sum** convention
+    — which is what scipy documents and what the solver applies — the
+    symmetric matrix is [[2, 3], [3, 2]], eigenvalues [-1, 5]: indefinite.
+    Under last-duplicate-wins it would be [[2, 1.5], [1.5, 2]], eigenvalues
+    [0.5, 3.5]: positive definite.
+    """
+    from scipy.sparse import coo_matrix
+
+    return coo_matrix(
+        ([2.0, 2.0, 1.5, 1.5], ([0, 1, 1, 1], [0, 1, 0, 0])), shape=(2, 2)
+    )
+
+
+def test_check_psd_sums_duplicate_coo_entries():
+    """The guard must validate the matrix the solver actually solves.
+
+    Before #279 ``_min_eig_lower_coo`` assigned rather than accumulated, so
+    it validated a *different* matrix: this indefinite P passed the guard and
+    ``solve_qp`` returned ``status="optimal"`` at a saddle point with
+    objective ~0, while the true minimum over the box is -100.
+    """
+    P = _dup_indefinite_coo()
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        solve_qp(
+            P=P,
+            c=np.zeros(2),
+            lb=np.full(2, -10.0),
+            ub=np.full(2, 10.0),
+            check_psd=True,
+        )
+
+
+def test_check_psd_duplicate_coo_matches_dense_verdict():
+    """Sparse-with-duplicates and its dense equivalent must agree.
+
+    The dense form of the same matrix was always rejected correctly; the
+    sparse form was not. Same mathematical input, same verdict.
+    """
+    P = _dup_indefinite_coo()
+    dense = P.toarray()
+    dense = np.tril(dense) + np.tril(dense, -1).T  # solver's lower-triangle read
+
+    for form in (P, dense):
+        with pytest.raises(ValueError, match="positive semidefinite"):
+            solve_qp(
+                P=form,
+                c=np.zeros(2),
+                lb=np.full(2, -10.0),
+                ub=np.full(2, 10.0),
+                check_psd=True,
+            )
+
+
+def test_check_psd_does_not_double_count_duplicate_diagonal():
+    """Accumulating must not double the diagonal.
+
+    The mirror write ``M[ci, ri]`` has to be skipped when ``ri == ci``, or a
+    diagonal entry is counted twice — which would inflate the spectrum and
+    could mask a genuine indefiniteness. Here two 1.0 entries on (0,0) sum to
+    2.0, so the solve is ``min x0^2 - 2 x0 + 0.25 x1^2 - x1`` with optimum
+    (1, 2); a doubled diagonal would move it to (0.5, 2).
+    """
+    from scipy.sparse import coo_matrix
+
+    P = coo_matrix(([1.0, 1.0, 0.5], ([0, 0, 1], [0, 0, 1])), shape=(2, 2))
+    r = solve_qp(
+        P=P,
+        c=np.array([-2.0, -1.0]),
+        lb=np.full(2, -10.0),
+        ub=np.full(2, 10.0),
+        check_psd=True,
+    )
+    assert r.status == "optimal"
+    np.testing.assert_allclose(r.x, [1.0, 2.0], atol=1e-6)
