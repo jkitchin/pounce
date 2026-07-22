@@ -23,6 +23,15 @@ changes.
   (previously they slipped past the reversed-bound check — `lb > ub` is `False`
   against `NaN` — and behaved as a silent "no bound"). `None` / ±inf remain the
   supported unbounded spellings.
+- A degenerate covariance is no longer silent. A zero-width bound (`lo == hi`,
+  pounce's "hold a parameter constant" idiom) fixes a parameter and reports its
+  `perr` as `0`; a corner solution with every parameter on an active bound
+  reports `pcov = 0` throughout. Both are intended, but previously came back
+  with no signal — "infinite confidence in a wrong answer" in #265's words.
+  `curve_fit` / `curve_fit_minima` / `curve_fit_streaming` now emit a
+  `UserWarning` in each case (naming the pinned parameters for the zero-width
+  case), so the perr of 0 reads as the constraint it is, not an estimated
+  uncertainty. No numbers change.
 
 ### Changed — `dual_diverging_streak` is now **off by default** (#250 follow-up)
 

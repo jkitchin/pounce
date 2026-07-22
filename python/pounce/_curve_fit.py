@@ -825,6 +825,46 @@ def _solve_fit(
     tval = _t_ppf(1.0 - alpha / 2.0, max(dof, 1))
     ci = np.column_stack([popt - tval * perr, popt + tval * perr])
 
+    # --- degenerate-covariance warnings --------------------------------
+    # A zero variance in `perr` is a legitimate, intended output here: a
+    # zero-width bound (lo == hi) fixes a parameter, and `_projected_covariance`
+    # zeros variance along every actively-constrained direction. Both are
+    # correct, but a reported perr of 0 reads as "infinite confidence" and was
+    # previously handed back with no signal (see #265). Warn — at the single
+    # shared assembly site so every public surface inherits it — without
+    # changing any number: the pcov / perr / ci above stand.
+    pinned = None
+    if pr.lb is not None and pr.ub is not None:
+        lb_arr = np.asarray(pr.lb, dtype=float)
+        ub_arr = np.asarray(pr.ub, dtype=float)
+        pinned = np.isfinite(lb_arr) & (lb_arr == ub_arr)
+    if pinned is not None and pinned.any():
+        import warnings
+
+        idx = np.nonzero(pinned)[0]
+        if pr.param_names is not None:
+            names = ", ".join(str(pr.param_names[i]) for i in idx)
+        else:
+            names = ", ".join(str(int(i)) for i in idx)
+        warnings.warn(
+            f"pounce.curve_fit: zero-width bound(s) on parameter(s) {names} "
+            f"(lower == upper) pin each of those parameters to a fixed value; "
+            f"the reported perr of 0 for them is the constraint itself, not an "
+            f"estimated uncertainty. Give a parameter a non-degenerate bound "
+            f"(lo < hi) to obtain an uncertainty for it.",
+            stacklevel=2,
+        )
+    elif active_mask is not None and pr.n > 0 and active_mask.all():
+        import warnings
+
+        warnings.warn(
+            f"pounce.curve_fit: all {pr.n} parameter(s) sit on active bounds "
+            f"at the solution, so the covariance is fully degenerate "
+            f"(pcov = 0) and the reported standard errors and confidence "
+            f"intervals are not meaningful.",
+            stacklevel=2,
+        )
+
     # --- sensitivity dpopt/ddata --------------------------------------
     # dpopt/ddata is (n_params x n_data) -- the size of the data -- so it is not
     # offered in streaming mode (see ``curve_fit_streaming``).
@@ -941,6 +981,13 @@ def curve_fit(
     directions), so it now **raises**; pass a list ``[(l0, u0), (l1, u1)]`` for
     the pair-list reading or lists/arrays ``([l0, l1], [u0, u1])`` for the scipy
     reading. NaN bounds are rejected.
+
+    A **zero-width** bound (``lo == hi``) is honored and fixes that parameter to
+    the value: pounce supports it as the "hold a parameter constant" idiom
+    (unlike scipy, which forbids ``lb == ub``). The parameter's reported
+    ``perr`` of ``0`` is then the constraint, not an estimated uncertainty, so a
+    :class:`UserWarning` is emitted naming the pinned parameters; give a
+    parameter a non-degenerate bound to obtain an uncertainty for it.
 
     See also ``pyomo_pounce.covariance`` (in the ``pyomo-pounce`` package),
     the counterpart surface for an estimation model written directly in

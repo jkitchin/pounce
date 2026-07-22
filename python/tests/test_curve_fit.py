@@ -7,6 +7,8 @@ object's UX. Models are written with ``jax.numpy`` where the exact-derivative
 (reduced-Hessian) path is being exercised.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -1068,3 +1070,72 @@ def test_curve_fit_constraint_probed_at_p0_not_origin():
         [{"type": "ineq", "fun": s_con}], "sse", 1.0, "fd", None,
     )
     np.testing.assert_allclose(s_probes[0], p0)  # streaming builder too
+
+
+# --------------------------------------------------------------------------
+# Degenerate-covariance warnings (#265): a zero-width bound or an all-active
+# corner reports perr = 0 legitimately, but that must no longer be silent.
+# --------------------------------------------------------------------------
+
+def test_zero_width_bounds_warn_and_are_not_an_estimate():
+    """A zero-width bound (lo == hi) pins a parameter; its perr of 0 is the
+    constraint, and pounce warns while the free parameter keeps a real perr."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 3.0, 60)
+    y = expdecay_2p(x, 2.0, 1.0) + 0.01 * rng.standard_normal(x.size)
+
+    with pytest.warns(UserWarning, match="zero-width"):
+        r = pounce.curve_fit(expdecay_2p, x, y, p0=[2.0, 1.0],
+                             bounds=[(2.0, 2.0), (0.0, 10.0)], jac="fd")
+
+    np.testing.assert_allclose(r.popt[0], 2.0, atol=1e-9)  # pinned exactly
+    assert r.perr[0] == 0.0                                 # constraint, not estimate
+    assert r.perr[1] > 0.0                                  # free param has real uncertainty
+
+
+def test_all_params_on_active_bounds_warn_fully_degenerate():
+    """A box that excludes the optimum pins every parameter on a bound; the
+    covariance is then fully degenerate (pcov = 0) and pounce warns."""
+    x = np.linspace(-1.0, 1.0, 41)  # sum(x) == 0 => SSE separable in a and b
+    y = x.copy()                    # unconstrained optimum a=1, b=0
+    # Box excludes the optimum; separability pins the corner (a=2, b=1).
+    with pytest.warns(UserWarning, match="fully degenerate"):
+        r = pounce.curve_fit(line, x, y, p0=[2.5, 1.5],
+                             bounds=[(2.0, 3.0), (1.0, 2.0)], jac="fd")
+
+    assert r.active_mask is not None and r.active_mask.all()
+    np.testing.assert_array_equal(r.pcov, np.zeros_like(r.pcov))
+    np.testing.assert_array_equal(r.perr, np.zeros_like(r.perr))
+
+
+def test_ordinary_bounded_fit_does_not_warn_degenerate():
+    """A normal fit with wide bounds and an interior optimum emits neither of
+    the degenerate-covariance warnings."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 3.0, 60)
+    y = expdecay_2p(x, 2.0, 1.0) + 0.02 * rng.standard_normal(x.size)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pounce.curve_fit(expdecay_2p, x, y, p0=[2.0, 1.0],
+                         bounds=[(0.0, 10.0), (0.0, 10.0)], jac="fd")
+
+    msgs = [str(w.message) for w in caught]
+    assert not any("zero-width" in m for m in msgs), msgs
+    assert not any("fully degenerate" in m for m in msgs), msgs
+
+
+def test_curve_fit_minima_zero_width_box_warns():
+    """The #265 scenario (minus the transposition): a fully zero-width box via
+    curve_fit_minima still yields perr = 0 everywhere, but no longer silently."""
+    x = np.linspace(0.0, 3.0, 60)
+    y = 2.0 * np.exp(-1.0 * x)
+
+    with pytest.warns(UserWarning, match="zero-width"):
+        fits = pounce.curve_fit_minima(expdecay_2p, x, y, p0=[1.0, 2.0],
+                                       bounds=[(0.0, 0.0), (10.0, 10.0)],
+                                       jac="fd", seed=0)
+
+    assert fits, "expected at least one result"
+    for r in fits:
+        np.testing.assert_array_equal(r.perr, np.zeros_like(r.perr))

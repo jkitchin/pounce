@@ -344,11 +344,19 @@ else under the other reading, and did we silently pick?" The invariant to
 hold: **every accepted input has exactly one valid reading; every input with
 two valid readings at n=2 raises.**
 
-## 9. Explicitly out of scope (file separately, don't fix here)
+## 9. Scope notes
 
 - `curve_fit_minima` reporting `pcov = 0`, `perr = [0, 0]` for a degenerate
-  (zero-width) box — "infinite confidence in a wrong answer". Real, but
-  independent of how the box got degenerate; the issue's comment flags it as
-  possibly its own issue. Recommend opening one and linking #265.
+  (zero-width) box — "infinite confidence in a wrong answer". Originally
+  deferred here as possibly its own issue, but **pulled into this PR** (owner
+  decision, PR #269). Fixed by warning — not by changing any number — at the
+  single shared result-assembly site in `_solve_fit` (`_curve_fit.py`), which
+  all three surfaces route through. The covariance projection is correct,
+  intentional, documented behavior (`_projected_covariance` zeros variance
+  along active directions; `_active_constraint_jac` supports `lo == hi` as the
+  fix-a-parameter idiom); the only defect was that a resulting `perr = 0` was
+  silent. Two warnings: a zero-width-bound case (naming the pinned params) and
+  an all-params-on-active-bounds fully-degenerate case. Docstring, changelog,
+  and tests updated alongside.
 - Any change to `pounce.minimize`'s pair-list API itself — it was never
-  ambiguous (no scipy tuple form there).
+  ambiguous (no scipy tuple form there). Still out of scope.
