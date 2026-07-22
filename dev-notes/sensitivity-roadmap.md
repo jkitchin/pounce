@@ -1,9 +1,12 @@
-# Active-set-aware parametric sensitivity — roadmap proposal
+# Active-set-aware parametric sensitivity: roadmap proposal
 
-**Status: roadmap proposal, targeting v0.10.** This note scopes extending
-`estimate()` to handle active-set changes, reaching parity with sIPOPT and
-then past it, on a clean mechanism/policy boundary. Nothing here is
-implemented yet; the intent is to agree the shape before any PR.
+**Status: roadmap proposal for pyomo-pounce, targeting v0.10.** This note
+scopes extending pyomo-pounce's `estimate()` to handle active-set changes,
+reaching parity with sIPOPT and then past it, on a clean mechanism/policy
+boundary. That is the pyomo / held-factorization sensitivity path
+specifically; the jax/torch and convex-QP frontends have their own
+sensitivity surfaces (see Related work). Nothing here is implemented yet;
+the intent is to agree the shape before any PR.
 
 ## State of the art
 
