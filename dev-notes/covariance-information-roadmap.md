@@ -66,7 +66,10 @@ solution covers every free variable, so the block is a call argument, not a
 fixed declaration. `declare_fitted` becomes the default block when `wrt=` is
 omitted, which keeps `covariance(model)` behaving exactly as in v0.9. Each
 call reduces onto its own argument, so one solve serves as many blocks as
-you ask about.
+you ask about. The block, whether declared or passed to `wrt=`, accepts a
+slice (`m.x[t, :]`) or a `(Var, time)` pair, not just a hand-listed VarData
+set, so an MHE arrival state at one time point is one call rather than an
+enumeration.
 
 **3. Sensitivity as a solve-time switch, decoupled from `declare_fitted`.**
 Retaining the factorization for post-solve use is currently triggered by the
@@ -75,11 +78,6 @@ caller may want no declaration at all. Add an explicit switch to enable
 sensitivity (retain the factor) at solve time. `declare_fitted` still
 enables it as before and now also serves as the default block; the switch
 lets a declaration-free `information(model, wrt=...)` flow work.
-
-**4. Block declaration for time slices.** The MHE arrival block is a state
-at one time point, `[m.x[t, c] for c in comp]`, a slice of an indexed Var.
-Accept the slice or a `(Var, time)` pair directly, so "the state block at t"
-is one call, not a VarData enumeration.
 
 ## Marginal versus conditional: the one semantic to get right
 
@@ -123,10 +121,10 @@ is a modeling choice, set by whether the parameters are in the arrival block.
 
 ## Scope and compatibility
 
-pyomo-pounce only. All four items are additive to v0.9: `information()` is a
-new function, `wrt=` is a new optional keyword, the sensitivity switch and
-the slice declaration are new surface. Nothing changes an existing
-signature. v0.9 `covariance(model)` with no `wrt=` reduces onto the declared
+pyomo-pounce only. All three items are additive to v0.9: `information()` is
+a new function, `wrt=` (with its slice and `(Var, time)` block forms) is a
+new optional keyword, and the sensitivity switch is new surface. Nothing
+changes an existing signature. v0.9 `covariance(model)` with no `wrt=` reduces onto the declared
 set, which is exactly the v0.10 no-argument default, so the v0.9 surface is
 a forward-compatible subset. Nothing here needs to be rushed into v0.9.
 
