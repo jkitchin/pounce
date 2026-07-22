@@ -96,15 +96,31 @@ fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
 /// [`IpoptCalculatedQuantities::curr_unscaled_infeasibility_stationarity`] for
 /// the derivation. A zero factor is treated as the identity, matching
 /// [`unscaled_block_amax`], so a degenerate scale never produces infinities.
-/// Falls back to a clone for a non-dense backing (POUNCE is dense-only, so that
-/// branch is defensive).
+///
+/// The non-dense branch is defensive — POUNCE is dense-only — but it is
+/// deliberately `debug_assert`ed rather than left silent. Returning the input
+/// unchanged when a scale *is* present hands back the **scaled** residual under
+/// a function that promises the unscaled one, which would silently reinstate the
+/// exact bug this exists to fix (a stationarity measure carrying a stray `dc²`).
+/// A silent no-op here is far worse than a panic in a debug build.
 fn divided_by_scale_squared(v: &dyn Vector, scale: Option<&[Number]>) -> Box<dyn Vector> {
     let mut out = v.make_new();
     out.copy(v);
     let Some(s) = scale else {
         return out;
     };
-    if let Some(d) = out.as_any_mut().downcast_mut::<DenseVector>() {
+    let dense = out.as_any_mut().downcast_mut::<DenseVector>();
+    debug_assert!(
+        dense.is_some(),
+        "divided_by_scale_squared: non-dense backing with an active row scale — \
+         the caller would silently receive the scaled residual",
+    );
+    if let Some(d) = dense {
+        debug_assert_eq!(
+            d.values().len(),
+            s.len(),
+            "divided_by_scale_squared: scale length must match the block",
+        );
         for (x, &f) in d.values_mut().iter_mut().zip(s.iter()) {
             if f != 0.0 {
                 *x /= f * f;
@@ -1134,8 +1150,14 @@ impl IpoptCalculatedQuantities {
     /// feasible point. POUNCE reported `Infeasible_Problem_Detected` on a
     /// feasible problem that Ipopt solves.
     ///
-    /// Only rows are scaled (`c_scaled = dc ⊙ c_user`, and POUNCE applies no
-    /// variable scaling), so the unscaled product needs no unscaled Jacobian:
+    /// Only rows are scaled (`c_scaled = dc ⊙ c_user`), so the unscaled product
+    /// needs no unscaled Jacobian. That POUNCE applies **no variable-side
+    /// rescale** is load-bearing for the identity below and is a deliberate
+    /// design property, not an accident — see `OrigIpoptNlp`'s `UserScaling`
+    /// note (`pounce-nlp/src/orig_ipopt_nlp.rs`), which records that a TNLP's
+    /// `x_scaling` request is honoured only insofar as the NLP models
+    /// constraint+objective scaling (issue #61). If variable scaling is ever
+    /// added, this derivation gains a `diag(dx)` factor and must be revisited:
     ///
     /// ```text
     ///   J_user   = diag(dc)⁻¹ J_scaled
