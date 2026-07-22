@@ -51,11 +51,12 @@ changes.
 
 - **The guard's bet is now non-destructive.** `dual_diverging_streak` (added for
   the emfl050 warm-start stall) routes a solve into restoration once the dual
-  infeasibility has grown for 15 consecutive iterations in an elevated regime.
-  That is a bet, and on the MINLPLib corpus it is usually a good one — it
+  infeasibility has grown for that many consecutive iterations in an elevated
+  regime. That is a bet, and on the MINLPLib corpus it is usually a good one — it
   rescues twice as many models as it harms — but nothing made *losing* it safe.
-  POUNCE now records the best acceptable-quality iterate seen after the guard
-  fires, and hands it back if the diverted run ends up worse.
+  POUNCE now records the best acceptable-quality iterate seen anywhere in the
+  solve, and hands it back if a diverted run ends up worse. Applies whenever the
+  guard is enabled; since the entry above it is no longer enabled by default.
 - **Symptom it fixes.** On `autocorr_bern55-06` the guard fires at iteration 23;
   the diverted run reaches the true optimum (`-2304.0000278`, which Ipopt also
   finds) and holds it from iteration 57 to 86, but the dual residual sawtooths
@@ -67,17 +68,26 @@ changes.
   status. The better point had already passed the acceptable test; it was
   overwritten only because `store_acceptable_point` keeps the latest rather than
   the best.
-- **The trigger is deliberately unchanged.** Retuning it was tried first and
-  rejected: every streak setting that spares this model (>= 25) also loses the
-  `deb7` / `deb9` / `deb8` rescues, which need exactly the default 15. Fixing
-  the consequence keeps both, and a new test pins the rescue so a future retune
-  cannot quietly trade it away.
+- **The firing threshold's meaning is unchanged** (only its default moved, per
+  the entry above). Retuning it to spare this model was tried first and rejected:
+  every setting that does so (>= 25) also loses the `deb7` / `deb9` / `deb8`
+  rescues, which need exactly 15. No value separates the two classes, so the fix
+  addresses the consequence rather than the trigger. Note that the rescues
+  themselves are not regression-pinned and deliberately so — `deb7`'s response to
+  the guard differs by host in sign (see above), so there is no cross-platform
+  assertion to make about it.
 - **Statuses that carry a fact of their own are preserved.** A restored point
   never relabels `MaxiterExceeded` / `CpuTimeExceeded` / `WallTimeExceeded` /
   `UserRequestedStop` — a caller polling for "did I run out of time" is not told
   "solved to acceptable level" merely because a better point was recoverable.
-- Bookkeeping is gated on the guard having actually fired (3 of 500 corpus
-  models), so every solve it never touches is bit-identical.
+- The *use* of this bookkeeping is gated on the guard having actually fired (3 of
+  500 corpus models), so every solve it never touches is bit-identical. The
+  recording itself is deliberately not gated: the guard returns to the driver
+  before the recording site on the iteration it fires, so gating the recording
+  too would capture nothing at or before the diversion — exactly the case where a
+  diversion wrecks a solve immediately. Recording costs one `f64` comparison per
+  acceptable iterate, off already-computed quantities, and clones only on an
+  improvement.
 
 ### Fixed — unreachable termination certificate on a strongly objective-scaled NLP (#257)
 

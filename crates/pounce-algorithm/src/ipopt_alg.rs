@@ -247,6 +247,9 @@ pub struct IpoptAlgorithm {
     /// reported a certificate at the uncaptured iterate, and declining fails to
     /// reproduce it. It is the least-bad handling of an unidentifiable baseline,
     /// not a faithful one.
+    vetoed_seen: bool,
+    /// Same latch for the acceptable-level refusal.
+    vetoed_acceptable_seen: bool,
     /// Whether the dual-divergence guard (pounce#246) actually fired this
     /// solve. Gates the *use* of [`Self::best_acceptable`], so solves the guard
     /// never touches behave identically — see
@@ -259,9 +262,6 @@ pub struct IpoptAlgorithm {
     /// `dual_guard_fired` would miss everything up to and including the
     /// diversion. Only read when `dual_guard_fired`.
     best_acceptable: Option<VetoSnapshot>,
-    vetoed_seen: bool,
-    /// Same latch for the acceptable-level refusal.
-    vetoed_acceptable_seen: bool,
     /// `kkt_fidelity_tol` (pounce#173), needed here — not just at termination —
     /// because the fallback's tiebreak has to predict the post-solve status
     /// gate. See [`Self::honour_refused_certificate`]. Zero (the default)
@@ -780,7 +780,6 @@ impl IpoptAlgorithm {
         !(self.kkt_fidelity_tol > 0.0) || !(unscaled_kkt > self.kkt_fidelity_tol)
     }
 
-    /// Make a refused snapshot the current iterate again.
     /// Record the current iterate as the best acceptable-quality point seen so
     /// far in this solve (pounce#250 follow-up).
     ///
@@ -868,9 +867,15 @@ impl IpoptAlgorithm {
     /// than the best.
     ///
     /// So: on a non-`Success` exit, if the best acceptable-quality iterate seen
-    /// since the guard fired beats the point being returned, hand that back
+    /// anywhere in the solve beats the point being returned, hand that back
     /// instead. This is the same "never worse off" bargain the gh #200 veto
     /// makes, applied to the other bet in the algorithm.
+    ///
+    /// Note "anywhere in the solve", not "since the guard fired":
+    /// [`Self::record_best_acceptable`] runs unconditionally and explains why —
+    /// points at or before the diversion have to be on offer, or a diversion that
+    /// wrecks the solve immediately has nothing to hand back. Only this *read* is
+    /// gated on `dual_guard_fired`.
     ///
     /// A strict `Success` is never overridden — that point carries a real
     /// certificate, and a lower objective at a merely-acceptable point must not
@@ -920,6 +925,7 @@ impl IpoptAlgorithm {
         result
     }
 
+    /// Make a refused snapshot the current iterate again.
     fn restore_snapshot(&mut self, snap: &VetoSnapshot) {
         let mut d = self.data.borrow_mut();
         d.set_trial(snap.iterate.clone());
