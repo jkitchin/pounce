@@ -16,6 +16,7 @@ use crate::kkt::pd_system_solver::PdSystemSolver;
 use crate::kkt::perturbation_handler::PdPerturbationHandler;
 use pounce_common::tagged::Tag;
 use pounce_common::types::{Index, Number};
+use pounce_common::utils::{cpu_time, wallclock_time};
 use pounce_linalg::dense_vector::DenseVector;
 use pounce_linalg::expansion_matrix::ExpansionMatrix;
 use pounce_linalg::{Matrix, SymMatrix, Vector};
@@ -56,7 +57,28 @@ pub struct PdFullSpaceSolver {
     /// any tag changes.
     last_dep_tags: Option<[Tag; 13]>,
     last_status: Option<ESymSolverStatus>,
+    /// Worst-case wall / CPU seconds observed for a single augmented-
+    /// system *factorization* over this solver's lifetime (pounce#254).
+    /// `0` until the first factorization completes. Consumed by
+    /// [`Self::predict_factor_overshoot`] to refuse starting a
+    /// factorization the remaining time budget cannot cover — the
+    /// proactive complement to [`deadline_exceeded`]'s reactive abort.
+    /// Only the true factorization path (`aug_solver.solve`) updates
+    /// these; the cheap cached back-solve / iterative-refinement
+    /// re-solves are excluded so a refinement sweep never inflates the
+    /// estimate.
+    max_factor_wall: Number,
+    max_factor_cpu: Number,
 }
+
+/// Fraction of the total time budget a single factorization must reach
+/// before the predictive guard ([`PdFullSpaceSolver::predict_factor_overshoot`])
+/// will refuse to start another (pounce#254). Below this the guard is a
+/// no-op, so a solve whose factorizations are a small slice of the budget
+/// — and might be one iteration from converging — is never cut short; the
+/// guard engages only in the "one factorization is a large chunk of the
+/// whole budget" regime the issue is about.
+const FACTOR_OVERSHOOT_BUDGET_FRACTION: Number = 0.5;
 
 impl PdFullSpaceSolver {
     pub fn new(
@@ -77,6 +99,8 @@ impl PdFullSpaceSolver {
             matrix_considered: false,
             last_dep_tags: None,
             last_status: None,
+            max_factor_wall: 0.0,
+            max_factor_cpu: 0.0,
         }
     }
 
@@ -259,7 +283,12 @@ impl PdFullSpaceSolver {
             // routes through the caller's post-KKT deadline check, which
             // terminates the solve with the time-limit status rather than
             // treating the abort as a step-computation failure.
-            if deadline_exceeded(data) {
+            //
+            // pounce#254: also bail *before* a factorization the remaining
+            // budget cannot afford (see `predict_factor_overshoot`), so a
+            // large single factorization does not overshoot before the next
+            // reactive check catches it.
+            if deadline_exceeded(data) || self.predict_factor_overshoot(data) {
                 return false;
             }
             let solve_ok = if improve {
@@ -304,8 +333,10 @@ impl PdFullSpaceSolver {
             {
                 // pounce#244: each refinement step drives another back-solve
                 // (and may refactor via the escalation path in `solve_once`);
-                // check the budget before spending one.
-                if deadline_exceeded(data) {
+                // check the budget before spending one. pounce#254: the
+                // predictive guard additionally refuses a step whose worst-
+                // case factorization would not fit the remaining budget.
+                if deadline_exceeded(data) || self.predict_factor_overshoot(data) {
                     return false;
                 }
                 let frozen_resid = resid.freeze();
@@ -378,6 +409,46 @@ impl PdFullSpaceSolver {
 
         self.last_status = Some(ESymSolverStatus::Success);
         true
+    }
+
+    /// Predictive time-budget guard for the KKT factorization (pounce#254).
+    ///
+    /// [`deadline_exceeded`] is *reactive*: it aborts only after the shared
+    /// budget has already been crossed. Because a single feral factorization
+    /// is uninterruptible (feral 0.14 exposes no in-factor cancel hook — see
+    /// `dev-notes/feral-factor-interrupt.md`), that reactive check still lets
+    /// one whole factorization overshoot — it passes while still under budget,
+    /// the factorization runs, and only the *next* check trips. #245/#246
+    /// accepted that "bounded to one factorization" overshoot for the
+    /// between-op gaps.
+    ///
+    /// This guard tightens it *proactively*: once a factorization has been
+    /// observed (via [`Self::max_factor_wall`] / [`Self::max_factor_cpu`]) to
+    /// cost at least [`FACTOR_OVERSHOOT_BUDGET_FRACTION`] of the whole budget,
+    /// refuse to *start* another one whose worst observed cost the remaining
+    /// budget cannot cover. On the "large factor, several-factor budget"
+    /// regime (e.g. discopt's ~10 s per-node budgets over multi-second
+    /// factorizations) this bounds the overshoot before the doomed final
+    /// factorization begins, rather than running it to completion first.
+    ///
+    /// It deliberately does nothing until such a large factorization has been
+    /// seen, so an ordinary solve whose factorizations are a small slice of
+    /// the budget — and may be one iteration from converging — is never cut
+    /// short. Returns `false` when no deadline is installed.
+    ///
+    /// Residual gap (#254): a *single* factorization already larger than the
+    /// entire budget — e.g. the first one on a 5 k-variable NLP — cannot be
+    /// bounded here. No estimate exists before it runs, and it cannot be
+    /// interrupted mid-flight. Closing that needs the feral-side cooperative
+    /// cancellation hook specified in `dev-notes/feral-factor-interrupt.md`.
+    fn predict_factor_overshoot(&self, data: &IpoptDataHandle) -> bool {
+        let d = data.borrow();
+        match d.deadline.as_ref() {
+            Some(deadline) => {
+                factor_overshoot_predicted(self.max_factor_wall, self.max_factor_cpu, deadline)
+            }
+            None => false,
+        }
     }
 
     /// Batched back-substitution against the cached KKT factor for
@@ -994,7 +1065,18 @@ impl PdFullSpaceSolver {
             // time-limit check. A deadline already crossed on entry returns
             // before the first factorization; otherwise overshoot is bounded
             // to one.
-            if deadline_exceeded(data) {
+            //
+            // pounce#254: `deadline_exceeded` is reactive — it fires only
+            // once a factorization has already run the clock past the budget.
+            // Because a single feral factorization is uninterruptible (feral
+            // 0.14 exposes no in-factor cancel hook; see
+            // `dev-notes/feral-factor-interrupt.md`), that still lets one
+            // whole factorization overshoot. `predict_factor_overshoot` is the
+            // proactive complement: once a factorization has been observed to
+            // cost a large fraction of the budget, refuse to start another the
+            // remaining budget cannot cover, so the doomed factorization never
+            // begins.
+            if deadline_exceeded(data) || self.predict_factor_overshoot(data) {
                 return false;
             }
             if pretend_singular {
@@ -1029,6 +1111,13 @@ impl PdFullSpaceSolver {
                     sol_c: &mut *sol.y_c,
                     sol_d: &mut *sol.y_d,
                 };
+                // pounce#254: time this factorization and remember the worst
+                // single-factorization cost seen so far, which feeds the
+                // predictive guard above. Only the true factorization path is
+                // measured — the cheap cached back-solve / iterative-refinement
+                // re-solves never widen the estimate.
+                let t_wall = wallclock_time();
+                let t_cpu = cpu_time();
                 retval = self.aug_solver.solve(
                     &coeffs,
                     &aug_rhs,
@@ -1036,6 +1125,14 @@ impl PdFullSpaceSolver {
                     check_inertia,
                     num_neg_evals,
                 );
+                let d_wall = wallclock_time() - t_wall;
+                let d_cpu = cpu_time() - t_cpu;
+                if d_wall > self.max_factor_wall {
+                    self.max_factor_wall = d_wall;
+                }
+                if d_cpu > self.max_factor_cpu {
+                    self.max_factor_cpu = d_cpu;
+                }
             }
 
             if retval == ESymSolverStatus::FatalError {
@@ -1258,6 +1355,32 @@ fn deadline_exceeded(data: &IpoptDataHandle) -> bool {
         .deadline
         .as_ref()
         .is_some_and(|d| d.exceeded().is_some())
+}
+
+/// Core decision of [`PdFullSpaceSolver::predict_factor_overshoot`], split
+/// out as a free function so the guard logic is unit-testable against a
+/// hand-built [`Deadline`] and synthetic factorization-cost estimates
+/// without standing up a whole solver (pounce#254).
+///
+/// Fires when the worst single factorization observed so far is both a
+/// large-enough fraction of the whole budget (`>= FACTOR_OVERSHOOT_BUDGET_FRACTION`)
+/// *and* larger than the budget still remaining on either the wall or the
+/// CPU clock — i.e. starting one more factorization of that size would
+/// overshoot. The fraction gate keeps the guard dormant on ordinary solves
+/// whose factorizations are a small slice of the budget. Zero estimates
+/// (no factorization measured yet) never fire.
+fn factor_overshoot_predicted(
+    max_factor_wall: Number,
+    max_factor_cpu: Number,
+    deadline: &pounce_common::timing::Deadline,
+) -> bool {
+    let wall_gate = max_factor_wall > 0.0
+        && max_factor_wall >= FACTOR_OVERSHOOT_BUDGET_FRACTION * deadline.max_wall()
+        && deadline.remaining_wall() < max_factor_wall;
+    let cpu_gate = max_factor_cpu > 0.0
+        && max_factor_cpu >= FACTOR_OVERSHOOT_BUDGET_FRACTION * deadline.max_cpu()
+        && deadline.remaining_cpu() < max_factor_cpu;
+    wall_gate || cpu_gate
 }
 
 /// Bag of borrowed blocks used by both `solve_once` and
@@ -1530,7 +1653,7 @@ impl AugSystemSolver for NoopAugSolver {
 
 #[cfg(test)]
 mod tests {
-    use super::deadline_exceeded;
+    use super::{deadline_exceeded, factor_overshoot_predicted};
     use crate::ipopt_data::IpoptData;
     use pounce_common::timing::Deadline;
     use std::cell::RefCell;
@@ -1569,5 +1692,63 @@ mod tests {
             std::hint::black_box(0u64);
         }
         assert!(deadline_exceeded(&data));
+    }
+
+    #[test]
+    fn predict_no_estimate_never_fires() {
+        // Before any factorization has been measured (zero estimates) the
+        // predictive guard must be a no-op, even with a fully-spent budget —
+        // there is nothing to predict from. The reactive `deadline_exceeded`
+        // check owns the already-crossed case.
+        let deadline = Deadline::new(0.0, 0.0);
+        assert!(!factor_overshoot_predicted(0.0, 0.0, &deadline));
+    }
+
+    #[test]
+    fn predict_small_factor_relative_to_budget_never_fires() {
+        // A factorization that is a small slice of the budget must not trip
+        // the guard even when little budget remains: an ordinary solve one
+        // iteration from converging is never cut short. Budget 100 s wall,
+        // observed factor 1 s (1% << the 50% gate).
+        let deadline = Deadline::new(100.0, 100.0);
+        assert!(!factor_overshoot_predicted(1.0, 1.0, &deadline));
+    }
+
+    #[test]
+    fn predict_large_factor_with_insufficient_remaining_fires() {
+        // A factorization costing more than the whole (tiny) budget, with a
+        // fresh deadline whose full budget still "remains", must fire: the
+        // next factorization of that size cannot fit. max_wall budget 0.001 s,
+        // observed factor 10 s (>= 50% of budget and > remaining).
+        let deadline = Deadline::new(0.001, 1e6);
+        // Let a hair of wall time pass so remaining_wall is unambiguously
+        // below the 10 s estimate (it already is, but keep parity with the
+        // other clock-sensitive tests).
+        for _ in 0..1_000 {
+            std::hint::black_box(0u64);
+        }
+        assert!(factor_overshoot_predicted(10.0, 0.0, &deadline));
+    }
+
+    #[test]
+    fn predict_large_factor_with_ample_remaining_does_not_fire() {
+        // Even a factor that is a large fraction of the budget must be allowed
+        // to start while the remaining budget can still cover it — the guard
+        // bounds overshoot, it does not forbid using the budget. Budget 100 s,
+        // observed worst factor 60 s (>= 50% gate) but ~100 s still remains.
+        let deadline = Deadline::new(100.0, 100.0);
+        assert!(!factor_overshoot_predicted(60.0, 60.0, &deadline));
+    }
+
+    #[test]
+    fn predict_fires_on_cpu_budget_independently() {
+        // The CPU clock gates independently of wall: a spent CPU budget with
+        // a large observed CPU factor cost fires even though the wall estimate
+        // is zero. Tiny CPU budget, generous wall budget.
+        let deadline = Deadline::new(1e6, 0.001);
+        for _ in 0..1_000 {
+            std::hint::black_box(0u64);
+        }
+        assert!(factor_overshoot_predicted(0.0, 10.0, &deadline));
     }
 }

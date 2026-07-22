@@ -179,6 +179,28 @@ pub struct FeralConfig {
     /// `feral_min_par_flops` OptionsList option or the
     /// `POUNCE_FERAL_MIN_PAR_FLOPS` env var.
     pub min_par_flops: Option<u64>,
+    /// FERAL static-pivoting toggle (tri-state), i.e.
+    /// `NumericParams::allow_delayed_pivots = false` via
+    /// [`feral::Solver::with_static_pivoting`]. `None` (default) inherits
+    /// feral's SSIDS-style delayed pivoting. `Some(true)` runs every
+    /// supernode as the root does — a pivot that fails the threshold is
+    /// force-accepted in place (`ZeroPivotAction::ForceAccept`) with
+    /// iterative refinement recovering the residual, instead of being
+    /// delayed up the elimination tree. This is feral's analogue of
+    /// MA57's `cntl[4]` static-pivoting fallback and the fast path out of
+    /// the delayed-pivot cascade of feral#8 (pinene_3200: an 87 s factor
+    /// on an otherwise sub-second problem). `Some(false)` explicitly keeps
+    /// delayed pivoting on.
+    ///
+    /// Deliberately an **explicit, opt-in** knob (`feral_static_pivoting`
+    /// OptionsList option / `POUNCE_FERAL_STATIC_PIVOTING` env var), never
+    /// triggered implicitly by a tight `max_wall_time`: a budget-coupled
+    /// numeric switch would make a solve's result — and, for a
+    /// branch-and-bound host, a node's dual bound — depend on the clock,
+    /// so the accuracy/speed trade is the caller's to make deliberately.
+    /// The empirical motivation is pounce#254 (emfl050's ~44 s single
+    /// factorization); see `dev-notes/feral-factor-interrupt.md`.
+    pub static_pivoting: Option<bool>,
 }
 
 impl Default for FeralConfig {
@@ -196,6 +218,7 @@ impl Default for FeralConfig {
             scaling: ScalingStrategy::Auto,
             parallel: None,
             min_par_flops: None,
+            static_pivoting: None,
         }
     }
 }
@@ -269,6 +292,15 @@ impl FeralConfig {
             min_par_flops: std::env::var("POUNCE_FERAL_MIN_PAR_FLOPS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok()),
+            // Tri-state, mirroring `cascade_break`: an unset or
+            // unrecognized value leaves `None` (inherit feral's
+            // delayed-pivot default); only an explicit on/off token forces
+            // the override.
+            static_pivoting: match std::env::var("POUNCE_FERAL_STATIC_PIVOTING").as_deref() {
+                Ok("1") | Ok("on") | Ok("true") | Ok("yes") => Some(true),
+                Ok("0") | Ok("off") | Ok("false") | Ok("no") => Some(false),
+                _ => None,
+            },
         }
     }
 }
@@ -341,6 +373,16 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
     }
     if cfg.fma {
         solver = solver.with_fma(true);
+    }
+    // Static pivoting (feral#8 delayed-pivot-cascade breaker;
+    // `feral_static_pivoting` option / `POUNCE_FERAL_STATIC_PIVOTING` env).
+    // Only intervene on an explicit set — `None` inherits feral's
+    // delayed-pivot default. `Some(true)` disables delayed pivoting
+    // (`allow_delayed_pivots = false`) so a failing pivot is force-accepted
+    // in place with refinement recovering the residual, keeping a
+    // pathological factorization cheap. See pounce#254.
+    if let Some(on) = cfg.static_pivoting {
+        solver = solver.with_static_pivoting(on);
     }
     // Fill-reducing ordering (`feral_ordering` / `POUNCE_FERAL_ORDERING`),
     // and diagonal scaling (`feral_scaling` / `POUNCE_FERAL_SCALING`).
@@ -1242,6 +1284,47 @@ mod tests {
             );
             assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for {strategy:?}");
             assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for {strategy:?}");
+        }
+    }
+
+    /// The pounce default leaves static pivoting unset (`None`), so the
+    /// backend inherits feral's SSIDS-style delayed-pivot default and the
+    /// numeric path is unchanged unless a caller opts in.
+    #[test]
+    fn default_static_pivoting_is_none() {
+        assert_eq!(FeralConfig::default().static_pivoting, None);
+    }
+
+    /// Both explicit static-pivoting settings still construct, factor, and
+    /// solve a tiny SPD system exactly — the `with_static_pivoting` builder
+    /// call is wired through `configure_solver` and does not break solving.
+    /// (feral exposes no public getter for `allow_delayed_pivots`, so the
+    /// propagation is exercised through an end-to-end solve rather than a
+    /// state assertion.)
+    #[test]
+    fn static_pivoting_settings_propagate_and_factor() {
+        for on in [true, false] {
+            let cfg = FeralConfig {
+                static_pivoting: Some(on),
+                ..FeralConfig::default()
+            };
+            let mut s = FeralSolverInterface::with_config(cfg);
+            let irn: [Index; 3] = [1, 2, 2];
+            let jcn: [Index; 3] = [1, 1, 2];
+            assert_eq!(
+                s.initialize_structure(2, 3, &irn, &jcn),
+                ESymSolverStatus::Success,
+                "structure init for static_pivoting={on}"
+            );
+            s.values_array_mut().copy_from_slice(&[2.0, 1.0, 3.0]);
+            let mut rhs = [3.0, 4.0];
+            assert_eq!(
+                s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0),
+                ESymSolverStatus::Success,
+                "solve for static_pivoting={on}"
+            );
+            assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for static_pivoting={on}");
+            assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for static_pivoting={on}");
         }
     }
 

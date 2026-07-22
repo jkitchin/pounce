@@ -92,6 +92,21 @@ impl Deadline {
     pub fn max_cpu(&self) -> Number {
         self.inner.max_cpu
     }
+
+    /// Wall-clock seconds remaining before the wall budget trips.
+    /// Negative once the budget is already crossed. Unlike
+    /// [`Self::exceeded`] this exposes *how much* budget is left, which
+    /// the KKT solver's predictive time guard (pounce#254) compares
+    /// against the observed cost of one factorization to decide whether
+    /// starting another would overshoot.
+    pub fn remaining_wall(&self) -> Number {
+        self.inner.max_wall - (wallclock_time() - self.inner.wall_start)
+    }
+
+    /// CPU-time counterpart of [`Self::remaining_wall`].
+    pub fn remaining_cpu(&self) -> Number {
+        self.inner.max_cpu - (cpu_time() - self.inner.cpu_start)
+    }
 }
 
 /// Equivalent to `Ipopt::TimedTask`. Use [`TimedTask::start`] /
@@ -573,6 +588,35 @@ mod tests {
             std::hint::black_box(0u64);
         }
         assert_eq!(d.exceeded(), Some(DeadlineKind::Cpu));
+    }
+
+    #[test]
+    fn deadline_remaining_reports_budget_left() {
+        // A large budget leaves ~the whole budget remaining right after
+        // construction (a hair less, since a moment has elapsed), and it
+        // is strictly positive.
+        let d = Deadline::new(1e6, 1e6);
+        let rw = d.remaining_wall();
+        let rc = d.remaining_cpu();
+        assert!(rw > 0.0 && rw <= 1e6, "remaining_wall out of range: {rw}");
+        assert!(rc > 0.0 && rc <= 1e6, "remaining_cpu out of range: {rc}");
+    }
+
+    #[test]
+    fn deadline_remaining_goes_nonpositive_once_crossed() {
+        // A zero wall budget is crossed after any elapsed time, so the
+        // remaining wall budget must be <= 0 (mirrors `exceeded`).
+        let d = Deadline::new(0.0, 1e6);
+        for _ in 0..10_000 {
+            if d.exceeded().is_some() {
+                break;
+            }
+            std::hint::black_box(0u64);
+        }
+        assert!(
+            d.remaining_wall() <= 0.0,
+            "remaining_wall should be non-positive once the budget is crossed"
+        );
     }
 
     #[test]

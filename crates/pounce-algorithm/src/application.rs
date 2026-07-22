@@ -2741,6 +2741,13 @@ pub fn feral_config_from_options(
     if let Ok((v, true)) = options.get_bool_value("feral_refine", "") {
         cfg.refine = v;
     }
+    // Explicit static-pivoting opt-in (feral#8 cascade breaker, pounce#254).
+    // Same tri-state discipline: unset leaves `cfg.static_pivoting` at
+    // whatever `from_env` resolved (`None` → inherit feral's delayed-pivot
+    // default), so the default numeric path is unchanged.
+    if let Ok((v, true)) = options.get_bool_value("feral_static_pivoting", "") {
+        cfg.static_pivoting = Some(v);
+    }
     if let Ok((v, true)) = options.get_numeric_value("feral_singular_pivot_floor", "") {
         cfg.singular_pivot_floor = v;
     }
@@ -3221,6 +3228,37 @@ mod tests {
         assert_eq!(
             feral_config_from_options(app.options()).min_par_flops,
             Some(500_000_000)
+        );
+    }
+
+    #[test]
+    fn feral_static_pivoting_option_reaches_config() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        // Unset on the OptionsList: falls through to FeralConfig::from_env,
+        // which leaves it None (inherit feral's delayed-pivot default) when
+        // the POUNCE_FERAL_STATIC_PIVOTING env var is also absent — so the
+        // default numeric path is unchanged.
+        assert_eq!(
+            feral_config_from_options(app.options()).static_pivoting,
+            None,
+            "unset feral_static_pivoting must not force a numeric override"
+        );
+        // Explicit `yes` maps to Some(true): every supernode factors with
+        // delayed pivoting disabled (feral#8 cascade breaker).
+        app.initialize_with_options_str("feral_static_pivoting yes\n")
+            .unwrap();
+        assert_eq!(
+            feral_config_from_options(app.options()).static_pivoting,
+            Some(true)
+        );
+        // Explicit `no` maps to Some(false): keep delayed pivoting on
+        // (distinct from unset, which merely inherits the default).
+        app.initialize_with_options_str("feral_static_pivoting no\n")
+            .unwrap();
+        assert_eq!(
+            feral_config_from_options(app.options()).static_pivoting,
+            Some(false)
         );
     }
 
