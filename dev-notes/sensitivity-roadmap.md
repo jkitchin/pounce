@@ -52,6 +52,19 @@ closed one.
 
 ## Where we are
 
+Path-following is not new to pounce. The jax and torch frontends already
+ship a predictor-corrector follower (`PathFollower`, pounce#90): a
+held-factor predictor, an active-set-margin monitor (pounce#89), and a
+warm-anchor corrector (pounce#86). But it is a frontend implementation
+(`python/pounce/jax/_path.py`, mirrored in `torch/`), it traces only
+problems defined through those autodiff frontends, and at a crossing it
+corrects by a warm re-solve rather than a fix-relax update. The
+held-factor path that `estimate()` exposes to Pyomo models, the one a
+downstream consumer drives (an advanced-step NMPC controller, an RTO or
+estimation loop), has only the linear predictor below. This roadmap is
+that path's counterpart, and also covers what the jax follower leaves
+out: fix-relax without a re-solve, and degeneracy.
+
 `estimate()` (in `pyomo-pounce/pyomo_pounce/sens.py`) computes the
 first-order parametric step and returns the updated solution:
 
