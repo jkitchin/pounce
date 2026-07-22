@@ -146,13 +146,14 @@ pub struct IpoptAlgorithm {
     /// `dual_diverging_streak` (pounce#246) — number of consecutive
     /// iterations of *growing* dual infeasibility (in the elevated regime,
     /// `inf_du > `[`DUAL_DIV_COUNT_FLOOR`]) that must accumulate before the
-    /// dual-divergence guard fires. `0` disables it. Default `15`, set from
-    /// the option of the same name (`application.rs`). When the streak
-    /// reaches the limit and `inf_du > `[`DUAL_DIV_FIRE_TOL`], the outer
-    /// routes to restoration — the recovery the least-square-multiplier init
-    /// path reaches on its own — rather than grinding into the
-    /// ever-more-ill-conditioned KKT factorizations a dual runaway produces
-    /// (each of which can take seconds). See the guard in [`Self::iterate`].
+    /// dual-divergence guard fires. When the streak reaches the limit and
+    /// `inf_du > `[`DUAL_DIV_FIRE_TOL`], the outer routes to restoration.
+    ///
+    /// **`0` (off) is the default**, set from the option of the same name
+    /// (`application.rs`). It defaulted to `15` when introduced; see the option
+    /// help in `upstream_options.rs` for why that changed, and
+    /// [`Self::honour_best_acceptable_after_dual_guard`] for what protects a
+    /// solve when it is enabled. See the guard itself in [`Self::iterate`].
     pub dual_diverging_streak: usize,
     dual_inf_prev: Number,
     dual_growth_streak: usize,
@@ -1281,6 +1282,31 @@ impl IpoptAlgorithm {
         // residual transiently rises (then falls) is never diverted:
         // restoration is a heavier hammer than the guard should swing at a
         // merely-bumpy-but-converging iterate.
+        //
+        // OFF BY DEFAULT (pounce#250 follow-up). The emfl050 overshoot above is
+        // how this was justified, and it did not reproduce: that measurement was
+        // caller-side JAX compilation, and the build predating the guard solves
+        // both emfl050 instances to the same optimum in the same time. What is
+        // left is an effect on four of 1284 MINLPLib models that is knife-edge
+        // and non-monotone in `dual_diverging_streak` — a better local optimum on
+        // deb7/deb9 at exactly 15, and pooling_rt2stp turning Solve_Succeeded
+        // into Maximum_Iterations_Exceeded at 10 and 15 only. Kept because it
+        // does help when it helps, but not imposed. Full account in the option
+        // help (`upstream_options.rs`).
+        //
+        // Two things to know before changing this:
+        //
+        // * `curr_dual_infeasibility_max` is the RAW ‖∇L‖∞, not divided by the
+        //   `s_d` optimality scaling the convergence check applies, and this runs
+        //   *before* `conv_check`. So the thresholds below are not on the same
+        //   quantity the solver's own tolerances are on, and the claim that they
+        //   are scale-robust holds only while `nlp_scaling_method != none`. No
+        //   exploit is known; the margin is thinner than it looks.
+        // * The `DivergingIterates` fallback at the end is unreachable from every
+        //   shipped front end — CLI, pounce-py and cinterface all wire a
+        //   restoration provider, so the guard can only ever route to
+        //   restoration. Do not assume it is dead code and delete the provider
+        //   check; do not assume it is live and rely on the status either.
         if self.dual_diverging_streak > 0 {
             let inf_du = self.cq.borrow().curr_dual_infeasibility_max();
             if inf_du.is_finite() && inf_du > self.dual_inf_prev && inf_du > DUAL_DIV_COUNT_FLOOR {
