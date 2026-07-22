@@ -67,24 +67,14 @@ Two limits matter for what comes next:
    reports over the whole `declare_fitted` set. Asking about a different
    block means re-declaring and re-solving.
 
-## Why v0.10 needs more
+## The MHE arrival cost
 
-The motivating consumer is moving horizon estimation. The information-form
-arrival cost is `Gamma(x0) = 0.5 (x0 - xhat)^T Pi^{-1} (x0 - xhat)`, and the
+The motivating consumer is moving horizon estimation. Its information-form
+arrival cost is `Gamma(x0) = 0.5 (x0 - xhat)^T Pi^{-1} (x0 - xhat)`, where the
 weighting `Pi^{-1}` is the reduced Hessian marginalized onto the arrival
-state, the Lagrangian information, not the covariance. Two things the v0.9
-surface makes awkward:
-
-- Getting `Pi^{-1}` through `covariance()` means `inv(covariance(...))`.
-  Since the covariance was already `inv(reduced Hessian)` from a backsolve,
-  that is invert-then-reinvert. The reduced Hessian was available before the
-  inversion; the round trip loses conditioning exactly where MHE lives, the
-  weakly-observable direction where the covariance entry is large and
-  near-singular to invert back.
-- MHE wants two blocks off one solve: the information about the arrival
-  state (for the arrival cost) and, when parameters are estimated, their
-  covariance. The fixed-declaration surface cannot select two different
-  blocks from one factorization.
+state, the Lagrangian information, not the covariance. That un-inverted,
+per-block object is what the roadmap below adds; the concrete per-window loop
+is in the MHE section.
 
 ## Roadmap
 
