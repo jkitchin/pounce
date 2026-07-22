@@ -149,6 +149,39 @@ impl MonotoneMuUpdate {
         }
     }
 
+    /// `mu_min` capped so it can never block the termination certificate
+    /// (pounce#266) — the companion of [`Self::scaled_compl_inf_tol`].
+    ///
+    /// #258 converted the *dynamic* term of the barrier floor into μ's scaled
+    /// space, but the floor has a second, independent term: `mu_min`, a raw
+    /// absolute constant (default `1e-11`) that also lives in scaled space.
+    /// Once `compl_inf_tol·|df|/(barrier_tol_factor+1) < mu_min` — i.e.
+    /// `|df|` below `≈ mu_min·(barrier_tol_factor+1)/compl_inf_tol` — the
+    /// converted term stops mattering, μ bottoms out at `mu_min`, and the
+    /// unscaled complementarity is pinned at `mu_min/|df| > compl_inf_tol`:
+    /// the certificate is unreachable no matter how long the solve runs, and
+    /// μ-at-floor plus the vanishing step exits `STOP_AT_TINY_STEP` on an
+    /// iterate that is *at* the optimum (HS71 × 1e8, `df = 8.3e-8`).
+    ///
+    /// Upstream's monotone floor (`IpMonotoneMuUpdate.cpp:CalcNewMuAndTau`)
+    /// has no `mu_min` term at all — pounce added it so the restoration
+    /// sub-builder's `with_mu_min(100 * outer_mu_min)` safeguard applies —
+    /// which is why Ipopt certifies these files even with `mu_min=1e-11`
+    /// forced. Capping at `scaled_compl_inf_tol / (barrier_tol_factor + 1)`
+    /// keeps `mu_min` inert exactly when it would cost the certificate, with
+    /// the same headroom the dynamic floor reserves (μ then bottoms out where
+    /// Ipopt's does: `7.58e-13` on HS71 × 1e8). A floor that is too low only
+    /// costs iterations; one that is too high costs the certificate.
+    ///
+    /// The restoration safeguard is unaffected: `RestoIpoptNlp` does not
+    /// override `obj_scaling_factor`, so the inner IPM sees `df = 1` and the
+    /// cap (`compl_inf_tol/(barrier_tol_factor+1) ≈ 9e-6` at defaults) sits
+    /// far above `100 · mu_min`.
+    pub fn certificate_safe_mu_min(&self, obj_scaling_factor: Number) -> Number {
+        self.mu_min
+            .min(self.scaled_compl_inf_tol(obj_scaling_factor) / (self.barrier_tol_factor + 1.0))
+    }
+
     /// Pure scalar reduction used by the trait impl. Exposed so unit
     /// tests can drive the formula without standing up an
     /// `IpoptData`/`IpoptCq` fixture.
@@ -214,12 +247,21 @@ impl MuUpdate for MonotoneMuUpdate {
         // where the next direction is dominated by ill-conditioned
         // barrier terms and the line search stalls.
         // We also `max` with `mu_min` so the restoration sub-builder's
-        // `with_mu_min(100 * outer_mu_min)` safeguard still applies.
+        // `with_mu_min(100 * outer_mu_min)` safeguard still applies —
+        // but capped by `certificate_safe_mu_min` (pounce#266): both
+        // floor terms live in μ's scaled space, and an uncapped
+        // absolute `mu_min` re-creates exactly the unreachable
+        // certificate that `scaled_compl_inf_tol` (pounce#257) removed
+        // from the dynamic term, once |df| drops below
+        // `mu_min·(barrier_tol_factor+1)/compl_inf_tol ≈ 1e-7`.
         let tol = data.borrow().tol;
         let df = cq.borrow().obj_scaling_factor();
         let dynamic_floor =
             tol.min(self.scaled_compl_inf_tol(df)) / (self.barrier_tol_factor + 1.0);
-        let floor = self.mu_target.max(self.mu_min).max(dynamic_floor);
+        let floor = self
+            .mu_target
+            .max(self.certificate_safe_mu_min(df))
+            .max(dynamic_floor);
 
         // The barrier error depends on μ via the relaxed
         // complementarity. Read it once per μ value.
@@ -353,5 +395,52 @@ mod tests {
         for df in [0.0, Number::NAN, Number::INFINITY] {
             assert_eq!(m.scaled_compl_inf_tol(df), m.compl_inf_tol);
         }
+    }
+
+    /// pounce#266: `mu_min` is the *other* floor term in scaled space, and
+    /// unconverted it blocks the certificate below `df ≈ 1e-7` exactly as the
+    /// raw `compl_inf_tol` did in #257.
+    #[test]
+    fn mu_min_is_capped_so_certificate_stays_reachable() {
+        let m = MonotoneMuUpdate::default();
+        // The cap engages once `compl_inf_tol·df/(barrier_tol_factor+1)`
+        // drops under `mu_min`, i.e. below
+        // `df* = mu_min·(barrier_tol_factor+1)/compl_inf_tol = 1.1e-6`.
+        // Unscaled and mildly scaled problems are untouched.
+        let df_star = m.mu_min * (m.barrier_tol_factor + 1.0) / m.compl_inf_tol;
+        assert!((df_star - 1.1e-6).abs() < 1e-21);
+        for df in [1.0, -1.0, 1e-3, 1e-5, df_star] {
+            assert_eq!(m.certificate_safe_mu_min(df), m.mu_min);
+        }
+        // HS71 × 1e8 computes df = 8.3e-8. The certificate needs
+        // μ ≤ compl_inf_tol·df ≈ 8.3e-12 < mu_min, so the cap must engage —
+        // with the dynamic floor's own headroom, landing at ≈ 7.55e-13
+        // (which is where Ipopt's μ bottoms out on the same file).
+        let df = 8.3e-8;
+        let capped = m.certificate_safe_mu_min(df);
+        assert!(capped < m.mu_min);
+        assert!(
+            capped <= m.scaled_compl_inf_tol(df),
+            "floor {capped} still exceeds the scaled certificate bound",
+        );
+        assert!((capped - 1e-4 * 8.3e-8 / 11.0).abs() < 1e-27);
+        // Signed factor, same as `scaled_compl_inf_tol`.
+        assert_eq!(m.certificate_safe_mu_min(-df), capped);
+        // Degenerate factors fall back to the unconverted tolerance inside
+        // `scaled_compl_inf_tol`, whose cap (9.09e-6) leaves mu_min alone.
+        for df in [0.0, Number::NAN, Number::INFINITY] {
+            assert_eq!(m.certificate_safe_mu_min(df), m.mu_min);
+        }
+    }
+
+    /// The restoration sub-builder raises the floor to `100 · outer_mu_min`
+    /// (DECONVBNE safeguard). `RestoIpoptNlp` does not override
+    /// `obj_scaling_factor`, so the resto inner IPM sees `df = 1` — the cap
+    /// must leave that safeguard fully intact.
+    #[test]
+    fn resto_mu_min_safeguard_survives_the_cap() {
+        let outer = MonotoneMuUpdate::default();
+        let resto = MonotoneMuUpdate::new().with_mu_min(100.0 * outer.mu_min);
+        assert_eq!(resto.certificate_safe_mu_min(1.0), 100.0 * outer.mu_min);
     }
 }

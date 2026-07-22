@@ -56,7 +56,7 @@ current iterate's complementarity). See
 | `mu_strategy`                           | `monotone`         | `monotone` (Fiacco–McCormick schedule) or `adaptive` (oracle-driven).                         |
 | `mu_oracle`                             | `quality-function` | Adaptive oracle: `quality-function` / `loqo` / `probing`.                                     |
 | `mu_init`                               | `0.1`              | Seed value for μ at the first iterate.                                                        |
-| `mu_min`                                | `1e-11`            | Floor on μ; the solver stops decreasing past this.                                            |
+| `mu_min`                                | `1e-11`            | Floor on μ; the solver stops decreasing past this. In monotone mode the effective floor is capped at `compl_inf_tol·|df|/(barrier_tol_factor+1)` (df = objective scaling factor) so a strongly scaled-down objective can still certify. |
 | `mu_max`                                | `1e5`              | Cap on μ (adaptive mode). When set explicitly it overrides the `mu_max_fact` initialization.  |
 | `mu_max_fact`                           | `1e3`              | Initializes `mu_max` as `mu_max_fact · curr_avrg_compl` at the first iterate (adaptive mode). |
 | `mu_target`                             | `0.0`              | Stop target for μ in monotone mode.                                                           |
