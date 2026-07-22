@@ -52,20 +52,8 @@ closed one.
 
 ## Where we are
 
-Path-following is not new to pounce. The jax and torch frontends already
-ship a predictor-corrector follower (`PathFollower`, pounce#90): a
-held-factor predictor, an active-set-margin monitor (pounce#89), and a
-warm-anchor corrector (pounce#86). But it is a frontend implementation
-(`python/pounce/jax/_path.py`, mirrored in `torch/`), it traces only
-problems defined through those autodiff frontends, and at a crossing it
-corrects by a warm re-solve rather than a fix-relax update. The
-held-factor path that `estimate()` exposes to Pyomo models, the one a
-downstream consumer drives (an advanced-step NMPC controller, an RTO or
-estimation loop), has only the linear predictor below. This roadmap is
-that path's counterpart, and also covers what the jax follower leaves
-out: fix-relax without a re-solve, and degeneracy.
-
-`estimate()` (in `pyomo-pounce/pyomo_pounce/sens.py`) computes the
+In pyomo-pounce, the held-factor sensitivity is just the linear predictor
+today. `estimate()` (in `pyomo-pounce/pyomo_pounce/sens.py`) computes the
 first-order parametric step and returns the updated solution:
 
 ```
@@ -113,6 +101,32 @@ where the estimate flattens against a bound. The `boundcheck.rs` pointer
 to pounce#7 for "the full refinement" is stale (that umbrella issue is
 closed); no open issue currently tracks this.
 
+## Related sensitivity work in other pounce frontends
+
+pyomo-pounce is not the only pounce frontend with sensitivity machinery,
+and this roadmap should reuse the others' vocabulary and shared core
+primitives rather than reinvent them.
+
+- The jax and torch frontends ship a predictor-corrector path follower
+  (`PathFollower`, pounce#90): a held-factor predictor, an
+  active-set-margin monitor (pounce#89), and a warm re-solve corrector
+  built on the barrier-`mu` warm start (pounce#86). It traces problems
+  defined through those autodiff frontends and crosses active-set changes
+  by re-solving, not by fix-relax.
+- The convex-QP frontend ships `QpSensitivity` (`python/pounce/qp.py`,
+  backed by `crates/pounce-convex/src/sensitivity.rs`), described in its
+  own docstring as the sIPOPT analog. It already exposes `parametric_step`,
+  weak-activity detection (`weakly_active_indices`), and active-set-change
+  diagnostics (`kkt_dim`, `active_indices`). Its predictor is still linear,
+  so it detects degeneracy but does not correct for it.
+
+Neither lives on the held-factorization / pyomo path that `estimate()`
+exposes to Pyomo models, so neither delivers the pyomo-pounce capability
+below. But item 0's diagnostics and item 3's weak-activity scan should
+reuse `QpSensitivity`'s vocabulary and detection primitive, and the pyomo
+path should share the same core Schur backsolve the jax follower already
+leans on.
+
 ## The reference: what sIPOPT actually implements
 
 From Pirnay, López-Negrete & Biegler, *Optimal sensitivity based on
@@ -154,8 +168,9 @@ closed by roadmap item 1.)
 
 ## Roadmap
 
-Staged by dependency: the diagnostics foundation, then parity (item 1),
-then past sIPOPT (items 2–4).
+Staged by dependency: the diagnostics foundation (item 0), parity (item 1),
+then items 2–4. Everything except item 1 reaches past sIPOPT; item 1 is
+the parity step.
 
 **0. Diagnostics foundation → past sIPOPT.** Breakpoint detection (the
 ratio test to the first crossing) and a report the estimate returns:
@@ -189,15 +204,19 @@ re-solve.
 
 **3. QP directional → past sIPOPT (degeneracy axis).** For a weakly-active
 base point, solve the small QP (the paper's eq. 14) over the weakly-active
-set for the correct one-sided derivative, through the QP already in
-`pounce-convex` (`crates/pounce-convex/src/ipm.rs`). Independent of 1–2;
-auto-triggered when the solve detects weak activity, not a user knob. Cost
-is conditional: the detection is a negligible threshold scan over the
-converged multipliers, always paid; the QP fires only on a degenerate base
-point, and when it does it is small — over the weakly-active set
-(dimension = the number of weakly-active constraints, usually a handful),
-solved against the held factorization at roughly a backsolve per
-weakly-active constraint, no refactor and well short of a re-solve.
+set for the correct one-sided derivative. Those constraints are already
+rows in the held factorization, so this is an active-set search over them
+on that factor, the same held-factor Schur primitive fix-relax uses
+(`IndexSchurData`), not a fresh QP solve. Detection reuses the
+weak-activity screen the convex-QP frontend already ships
+(`QpSensitivity`, `sensitivity.rs`); the correction is what pyomo-pounce
+adds. Independent of items 1 and 2, auto-triggered when the solve detects
+weak activity, not a user knob. Cost is conditional: the detection is a
+negligible threshold scan over the converged multipliers, always paid; the
+QP fires only on a degenerate base point, and when it does it is small, over
+the weakly-active set (dimension = the number of weakly-active constraints,
+usually a handful), at roughly a backsolve per weakly-active constraint
+against the held factorization, no refactor and well short of a re-solve.
 
 **4. Corrector-step primitive → past sIPOPT.** One Newton/primal-dual
 iteration reusing the held factorization, returning the residual. Small
@@ -233,9 +252,10 @@ to exploit); a **re-solve** is the expensive bound.
 The report is always returned; the modes are one ordered knob, not a
 matrix of independent flags. The `mu`-correction folded into item 1 is
 always applied inside the predictor, so every mode is `mu`-corrected. The
-default is `linear`, matching today's behaviour and the reference: sIPOPT
-ships with `sens_boundcheck` off, i.e. it defaults to the plain predictor
-and makes the active-set correction opt-in.
+default is `linear`, which matches today's active-set semantics up to that
+negligible `mu`-correction, and matches the reference: sIPOPT ships with
+`sens_boundcheck` off, i.e. it defaults to the plain predictor and makes
+the active-set correction opt-in.
 
 ## Scope boundary: mechanism in pounce, policy in the caller
 
