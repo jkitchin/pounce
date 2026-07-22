@@ -9,6 +9,23 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — non-finite inputs silently reported success (#275)
+
+- **`lb = +inf` / `ub = -inf` were dropped as if the bound were absent.** The
+  solver's presence test (`lb > -BOUND_INF`, `ub < BOUND_INF`) is
+  sign-agnostic, so a bound no finite value can satisfy was discarded and
+  `solve_qp` returned `status="optimal"` at a point violating it by an
+  infinite margin. `solve_qp` / `solve_qp_batch` / `solve_qp_multi_rhs` and
+  `minimize` now reject these spellings with a message naming the index.
+  `±inf` on the *absent* side (lower `-inf`, upper `+inf`) remains the
+  documented one-sided encoding, and a finite reversed box (`lb=1 > ub=0`) is
+  still reported as `primal_infeasible` rather than raising.
+- **A NaN or infinite `x0` reported `Solve_Succeeded` with `fun=nan` at
+  iteration 0.** Every convergence test is a comparison against a tolerance
+  and comparisons against NaN are False — including the ones that would have
+  rejected the iterate — so the loop fell through to "converged". `minimize`
+  now rejects a non-finite `x0`.
+
 ### Fixed — unbounded NLP reported in the AMPL "solved" family (#274)
 
 - An unbounded NLP could be written to the `.sol` as

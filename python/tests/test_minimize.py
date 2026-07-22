@@ -1482,3 +1482,58 @@ def test_uncomputed_objective_is_nan_not_zero():
     assert ok.success
     assert not np.isnan(ok.info["obj_val"])
     assert ok.info["obj_val"] == pytest.approx(0.0, abs=1e-12)
+
+
+# --- gh #275: non-finite inputs must not report success ------------------
+
+
+def test_minimize_rejects_nonfinite_x0():
+    """A NaN/inf x0 must raise, not report a successful solve.
+
+    Every convergence test is a comparison against a tolerance, and
+    comparisons against NaN are False — including the ones that would have
+    rejected the iterate. Before #275 the loop fell straight through to
+    "converged" at iteration zero and returned ``success=True, status=0,
+    message="Solve_Succeeded", fun=nan, nit=0``.
+    """
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+
+    for bad in (np.nan, np.inf, -np.inf):
+        with pytest.raises(ValueError, match=r"x0\[0\] is .*must be finite"):
+            pounce.minimize(f, np.array([bad, 1.0]), jac=g)
+
+    # A non-first bad entry is reported at its own index.
+    with pytest.raises(ValueError, match=r"x0\[1\] is nan"):
+        pounce.minimize(f, np.array([1.0, np.nan]), jac=g)
+
+
+def test_minimize_rejects_bounds_no_finite_value_can_satisfy():
+    """``lb = +inf`` / ``ub = -inf`` admit no finite point.
+
+    ``lb > ub`` catches the mixed spellings (``lower=+inf`` with a finite
+    upper) but not ``lb == ub == ±inf``, where the comparison is False — so
+    that box silently admitted any x.
+    """
+    f = lambda x: float(x @ x)
+    g = lambda x: 2.0 * x
+
+    with pytest.raises(ValueError, match=r"bounds\[0\] has lower bound inf"):
+        pounce.minimize(f, np.array([0.5]), jac=g, bounds=[(np.inf, np.inf)])
+
+    with pytest.raises(ValueError, match=r"bounds\[0\] has upper bound -inf"):
+        pounce.minimize(f, np.array([0.5]), jac=g, bounds=[(-np.inf, -np.inf)])
+
+
+def test_minimize_still_accepts_legitimate_infinite_bounds():
+    """±inf on the *absent* side stays legal — that is the one-sided encoding."""
+    f = lambda x: float((x[0] - 3.0) ** 2)
+    g = lambda x: np.array([2.0 * (x[0] - 3.0)])
+
+    r = pounce.minimize(f, np.array([0.5]), jac=g, bounds=[(-np.inf, np.inf)])
+    assert r.success
+    assert r.x[0] == pytest.approx(3.0, abs=1e-6)
+
+    r2 = pounce.minimize(f, np.array([0.5]), jac=g, bounds=[(0.0, np.inf)])
+    assert r2.success
+    assert r2.x[0] == pytest.approx(3.0, abs=1e-6)
