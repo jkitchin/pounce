@@ -101,6 +101,9 @@ default.
 | `retain_kkt()` only | yes | error, no default | over T |
 | `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
 
+The columns show `covariance()` for concreteness; `information()` follows the
+same rows, since factor retention and the default block are accessor-agnostic.
+
 ## Marginal versus conditional: the one semantic to get right
 
 Each call reduces onto its argument, and that yields the block's
