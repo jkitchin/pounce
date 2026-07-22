@@ -121,6 +121,17 @@ pub trait ConvCheck {
         1e-8
     }
 
+    /// Acceptable-level primal-feasibility band `acceptable_constr_viol_tol`, in
+    /// the unscaled max-norm space `curr_unscaled_primal_infeasibility_max`
+    /// reports. Read by the best-acceptable fallback's feasibility-aware ranking
+    /// (gh #267), which caps it at the upstream default so a user-widened band
+    /// cannot let the fallback spend feasibility to buy objective. Default
+    /// `1e-2` matches upstream's default `acceptable_constr_viol_tol`; policies
+    /// that track no such tolerance keep it.
+    fn acceptable_constr_viol_tol_or_default(&self) -> Number {
+        1e-2
+    }
+
     /// Live-update a named convergence tolerance mid-solve, for the
     /// debugger's in-place option hot-swap. Returns `true` if `name`
     /// matched a tolerance this policy owns (so the caller can report

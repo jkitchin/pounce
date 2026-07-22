@@ -99,8 +99,9 @@ const AUTOCORR_OPTIMUM: f64 = -2_304.000_027_802_734_2;
 /// former default of 15 — or it would exercise nothing and pass vacuously.
 const GUARD_ON: [&str; 2] = ["max_wall_time=10", "dual_diverging_streak=15"];
 
-/// With the guard at its default the diversion must not cost the objective.
-/// Pre-fix this returned -2263.4612448099933.
+/// With the guard enabled (streak 15 — its former default; it is now off by
+/// default) the diversion must not cost the objective. Pre-fix this returned
+/// -2263.4612448099933.
 #[test]
 fn dual_guard_diversion_does_not_return_a_worse_point() {
     let report = solve("autocorr_bern55-06.nl", &GUARD_ON);
@@ -241,4 +242,90 @@ fn hair_trigger_guard_never_degrades_the_answer() {
              the best-acceptable fallback exists to prevent (pounce#250 follow-up)",
         );
     }
+}
+
+/// The best-acceptable fallback must not spend feasibility to buy objective
+/// (gh #267 — a pounce#259 / PR #259 follow-up).
+///
+/// The fallback originally ranked recorded acceptable points by scaled
+/// objective alone. Being *bounded* by `acceptable_constr_viol_tol` is not the
+/// same as *not trading* feasibility within that band, and the band is a user
+/// option: widen it and a pure-objective argmax will discard a nearly-feasible
+/// point for a lower-objective one that is grossly infeasible, then hand it back
+/// under a `Solved_To_Acceptable_Level` status.
+///
+/// The control is the point of this test. At the same widened tolerances the
+/// guard-*off* solve returns a feasible point, so the loose band alone does not
+/// cause the infeasible return — it only widens what the fallback can exploit.
+/// The fix ranks by `(feasibility, objective)`, so the guard-on solve must also
+/// return a feasible point.
+///
+/// Pre-fix numbers (dev host): guard on returned objective -2307.32 at a
+/// constraint violation of **9.94** — below the true optimum -2304.0 precisely
+/// because the point is infeasible — while guard off returned -2298.57 at
+/// violation 1.06e-4. Both reported `solve_result_num` 100.
+#[test]
+fn best_acceptable_fallback_does_not_trade_feasibility_for_objective() {
+    // A widened acceptable band. `acceptable_constr_viol_tol` alone is not
+    // enough — the other acceptable criteria gate first — so the whole triplet
+    // is loosened, which is unusual but entirely legal on hard or badly-scaled
+    // models. `constr_viol_tol` (the strict feasibility band the fix keys on) is
+    // left at its 1e-4 default.
+    const BAND: [&str; 5] = [
+        "acceptable_constr_viol_tol=1e1",
+        "acceptable_tol=1e10",
+        "acceptable_dual_inf_tol=1e30",
+        "acceptable_compl_inf_tol=1e10",
+        "max_wall_time=20",
+    ];
+
+    let off = solve(
+        "autocorr_bern55-06.nl",
+        &[BAND.as_slice(), &["dual_diverging_streak=0"]].concat(),
+    );
+    let on = solve(
+        "autocorr_bern55-06.nl",
+        &[BAND.as_slice(), &["dual_diverging_streak=15"]].concat(),
+    );
+
+    // The control: the loose band on its own must not produce an infeasible
+    // return, or this fixture no longer isolates the fallback's behaviour.
+    assert!(
+        off.statistics.final_constr_viol < 1e-2,
+        "control invalid: guard-off solve is itself infeasible at these \
+         tolerances (constr_viol {}) — the fixture no longer isolates the \
+         fallback (gh #267)",
+        off.statistics.final_constr_viol,
+    );
+
+    // The fix: the guard-on solve must hand back a feasible point, not the
+    // grossly-infeasible lower-objective one a pure-objective ranking chose.
+    // Pre-fix this was 9.94; the threshold sits far below that and far above the
+    // ~1e-4 the recovered point actually reaches.
+    assert!(
+        on.statistics.final_constr_viol < 1e-2,
+        "best-acceptable fallback traded feasibility for objective: guard-on \
+         solve returned objective {} at constraint violation {} (pre-fix 9.94), \
+         while the guard-off control at the same tolerances is feasible at {}. \
+         The fallback ranked by objective alone and handed back an infeasible \
+         point under a success status (gh #267).",
+        on.solution.objective,
+        on.statistics.final_constr_viol,
+        off.statistics.final_constr_viol,
+    );
+
+    // The fix must not over-correct into feasibility-first ranking, which would
+    // hand back a trivially-feasible but useless point — the starting iterate
+    // sits at objective 0 and violation 0 and would win a feasibility-primary
+    // key. Among feasible-enough points objective still decides, so the returned
+    // point is the diverted run's own near-optimal endpoint (~-2304), the point
+    // gh #267 says should have been kept, not the starting point.
+    assert!(
+        on.solution.objective < -2000.0,
+        "best-acceptable fallback over-corrected: guard-on solve returned \
+         objective {} — a feasibility-first ranking handed back a trivially \
+         feasible but far-from-optimal point instead of the near-optimal \
+         endpoint the diverted run reached (gh #267).",
+        on.solution.objective,
+    );
 }

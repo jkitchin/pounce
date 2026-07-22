@@ -737,6 +737,7 @@ impl IpoptAlgorithm {
             obj: cq.curr_f(),
             mu: self.data.borrow().curr_mu,
             unscaled_kkt: cq.curr_unscaled_nlp_error(),
+            constr_viol: cq.curr_unscaled_primal_infeasibility_max(),
             obj_scale: cq.obj_scaling_factor(),
         })
     }
@@ -804,20 +805,30 @@ impl IpoptAlgorithm {
     /// cloned only on an actual improvement, so this does not double the
     /// per-iteration clone `store_acceptable_point` already pays.
     ///
-    /// "Best" is the lower scaled objective among points that already passed
-    /// `current_is_acceptable_with_state`, so feasibility is not being traded
-    /// away for objective: every candidate is bounded by the same
-    /// `acceptable_constr_viol_tol` that gates `store_acceptable_point`. (This
-    /// matters — early `autocorr_bern55-06` iterates sit at objective -1.2e4,
-    /// far below the -2304 optimum, but at a constraint violation of 3.65e3;
-    /// they are not acceptable, so they can never be recorded.)
+    /// "Best" is a feasibility-aware ranking, **not** the lowest objective:
+    /// candidates are ordered by [`Self::ranks_better`]'s `(feasible_enough,
+    /// objective)` key, so objective only decides among points already inside a
+    /// capped feasibility band. Being *bounded* by `acceptable_constr_viol_tol`
+    /// is not the same as *not trading* feasibility within it — that band is a
+    /// user option and can be widened to `1e1` or beyond. A pure-objective argmax
+    /// over it has no lower bound on the feasibility it will spend, and one
+    /// option-value away it returns a point `pounce verify` rejects under a
+    /// `Solved_To_Acceptable_Level` status (gh #267). Whether an early
+    /// low-objective iterate is even a candidate is the user's
+    /// `acceptable_constr_viol_tol`; the capped feasibility key is what keeps a
+    /// grossly-infeasible one from winning even when the band admits it.
     fn record_best_acceptable(&mut self, curr_f: Number) {
         if !curr_f.is_finite() {
             return;
         }
-        // Reject before cloning: only an improvement is worth a snapshot.
+        // Same quantity the acceptable-point gate keys on, so the recorded
+        // feasibility matches the band the candidate just passed.
+        let curr_viol = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
+        // Reject before cloning: only a strictly better candidate — by the
+        // feasibility-aware key, not objective alone — is worth a snapshot.
         if let Some(best) = self.best_acceptable.as_ref() {
-            if !(curr_f < best.obj) {
+            let (b_obj, b_viol) = (best.obj, best.constr_viol);
+            if !self.ranks_better(curr_f, curr_viol, b_obj, b_viol) {
                 return;
             }
         }
@@ -833,6 +844,62 @@ impl IpoptAlgorithm {
             }
         }
         self.best_acceptable = Some(snap);
+    }
+
+    /// Cap on the feasibility band [`Self::ranks_better`] admits, matching the
+    /// upstream default `acceptable_constr_viol_tol`. The fallback treats a point
+    /// as "feasible enough to win on objective" only within this band, *however
+    /// loose the user made `acceptable_constr_viol_tol`*, so widening that option
+    /// cannot let the fallback trade feasibility for objective (gh #267).
+    const FEASIBLE_ENOUGH_CAP: Number = 1e-2;
+
+    /// Whether candidate `(a_obj, a_viol)` ranks strictly better than
+    /// `(b_obj, b_viol)` for the best-acceptable fallback (gh #267).
+    ///
+    /// The key is `(feasible_enough, objective)` compared lexicographically: a
+    /// point within the feasibility band beats one outside it outright, and
+    /// objective decides *only among points already inside the band*. A point is
+    /// `feasible_enough` when its unscaled max-norm constraint violation is
+    /// within `min(acceptable_constr_viol_tol, FEASIBLE_ENOUGH_CAP)` — the
+    /// acceptable feasibility band the solve is using, but never looser than its
+    /// upstream default. The cap is the whole fix: `acceptable_constr_viol_tol`
+    /// is user-widenable, and ranking by objective across a widened band spends
+    /// feasibility to buy objective, handing back a `pounce verify`-rejected
+    /// point under a success status. Capping the admission band bounds that — a
+    /// grossly-infeasible low-objective iterate is simply not a candidate.
+    ///
+    /// At default (or tighter) tolerances this is behaviour-neutral: every
+    /// recorded point already passed the `acceptable_constr_viol_tol` gate, so
+    /// with that band at or below the cap every candidate is `feasible_enough`
+    /// and objective alone decides, exactly as before. The band only bites once
+    /// the user loosens `acceptable_constr_viol_tol` past its default.
+    ///
+    /// A non-finite objective ranks worst and can never win — feasibility never
+    /// rescues a `NaN`/`Inf` `f`. This mirrors the `NaN`-loses convention the
+    /// gh #200 comparisons already rely on, and it keeps a `NaN`-objective
+    /// returned point losing to a finite recorded one in
+    /// [`Self::honour_best_acceptable_after_dual_guard`].
+    fn ranks_better(&self, a_obj: Number, a_viol: Number, b_obj: Number, b_viol: Number) -> bool {
+        if !a_obj.is_finite() {
+            return false;
+        }
+        if !b_obj.is_finite() {
+            return true;
+        }
+        let band = self
+            .bundle
+            .conv_check
+            .acceptable_constr_viol_tol_or_default()
+            .min(Self::FEASIBLE_ENOUGH_CAP);
+        // A non-finite violation is never feasible_enough.
+        let feasible = |v: Number| v.is_finite() && v <= band;
+        let (a_ok, b_ok) = (feasible(a_viol), feasible(b_viol));
+        if a_ok != b_ok {
+            // The feasible_enough point wins outright.
+            return a_ok;
+        }
+        // Same feasibility class: lower objective wins (original behaviour).
+        a_obj < b_obj
     }
 
     /// Make the dual-divergence guard's diversion non-destructive (pounce#250
@@ -871,6 +938,16 @@ impl IpoptAlgorithm {
     /// instead. This is the same "never worse off" bargain the gh #200 veto
     /// makes, applied to the other bet in the algorithm.
     ///
+    /// "Beats" is the feasibility-aware ranking in [`Self::ranks_better`], not a
+    /// bare objective comparison: the recorded point wins only if it is
+    /// feasible-enough while the returned point is not, or both are in the same
+    /// feasibility class and it has a lower objective. Ranking by objective alone
+    /// let a widened `acceptable_constr_viol_tol` band trade feasibility for
+    /// objective here — restoring a lower-objective point that `pounce verify`
+    /// rejects, under a success-mapped status (gh #267). The key prevents that:
+    /// objective can only win among points already inside the capped acceptable
+    /// feasibility band.
+    ///
     /// Note "anywhere in the solve", not "since the guard fired":
     /// [`Self::record_best_acceptable`] runs unconditionally and explains why —
     /// points at or before the diversion have to be on offer, or a diversion that
@@ -893,19 +970,23 @@ impl IpoptAlgorithm {
             return result;
         };
         let (curr_f, _) = self.curr_obj_and_unscaled_kkt();
+        let curr_viol = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
         let curr_scale = self.cq.borrow().obj_scaling_factor();
         // Only comparable under the same factor, sign included.
         if curr_scale != best.obj_scale {
             return result;
         }
-        // Negated `<=`, not `>`: they differ at NaN, and a non-finite objective
-        // at the returned point must lose to a finite recorded one rather than
-        // silently winning the comparison.
-        if !(curr_f <= best.obj) {
+        // Restore only when the recorded point ranks strictly better under the
+        // feasibility-aware key — more feasible, or equally feasible at a lower
+        // objective. `ranks_better` also handles the `NaN` case the previous
+        // bare `!(curr_f <= best.obj)` did: a non-finite returned objective
+        // ranks worst, so a finite recorded point wins and is restored.
+        if self.ranks_better(best.obj, best.constr_viol, curr_f, curr_viol) {
             tracing::debug!(target: "pounce::algorithm",
                 "[POUNCE] dual-divergence diversion ended worse than a point already \
-                 in hand (obj {:.10e} -> {:.10e}, iter {}); restoring it (pounce#250).",
-                curr_f, best.obj, best.iter,
+                 in hand (obj {:.10e} viol {:.3e} -> obj {:.10e} viol {:.3e}, iter {}); \
+                 restoring it (pounce#250, gh#267).",
+                curr_f, curr_viol, best.obj, best.constr_viol, best.iter,
             );
             self.restore_snapshot(&best);
             // Swap the *point*, but never let the swap erase why the solve
@@ -2676,6 +2757,18 @@ struct VetoSnapshot {
     /// `apply_kkt_fidelity_gate` will see. Recorded at refusal time because the
     /// gate runs post-solve, long after this iterate is gone.
     unscaled_kkt: Number,
+    /// Unscaled max-norm constraint violation there — the same quantity the
+    /// `acceptable_constr_viol_tol` gate is defined against
+    /// (`curr_unscaled_primal_infeasibility_max`, cf. gh #261). The
+    /// best-acceptable fallback ranks candidates by `(feasible_enough,
+    /// objective)` rather than objective alone, so a point outside a capped
+    /// feasibility band can never displace one inside it on objective grounds;
+    /// without this field the ranking has no feasibility term and, under a
+    /// user-widened `acceptable_constr_viol_tol`, will trade feasibility for
+    /// objective and hand back a verifiably infeasible point under a success
+    /// status (gh #267). Unused by the gh #200 masked-scale paths, which key on
+    /// objective only.
+    constr_viol: Number,
     /// Objective scaling factor in force when `obj` was recorded.
     ///
     /// `obj` is a *scaled* objective, so comparing it against the continued
