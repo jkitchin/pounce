@@ -3,13 +3,12 @@
 //! measure.
 //!
 //! The detector fires when two conditions hold together: the constraint
-//! violation is bounded away from zero, and the infeasibility stationarity
-//! `‖Jᵀc‖ / max(1, ‖c‖)` is ~zero — i.e. no local move reduces the violation.
-//! The two halves were evaluated in **different spaces**: the violation on the
-//! unscaled residual (`constr_viol_tol` is defined there, pounce#173), the
-//! stationarity on the scaled one. The scaled measure carries a factor `dc²`, so
-//! an aggressive constraint scaling drives it toward zero on its own, regardless
-//! of where the iterate is.
+//! violation is bounded away from zero, and a stationarity surrogate
+//! `‖Jᵀc‖ / max(1, ‖c‖)` falls under an absolute tolerance — i.e. supposedly no
+//! local move reduces the violation. That surrogate is not scale-invariant:
+//! under a row scaling `dc` the numerator carries `dc²` while the denominator
+//! clamps at 1, so an aggressive scaling drives it toward zero regardless of
+//! where the iterate is.
 //!
 //! Hock–Schittkowski 13 makes it concrete:
 //!
@@ -18,20 +17,28 @@
 //! ```
 //!
 //! From `x₀ = (1e4, 1e4)` the starting Jacobian is ~3e8, so gradient-based
-//! scaling picks `dc ≈ 3.3e-7`. At the point POUNCE stopped, the scaled
-//! stationarity read ~5e-14 — comfortably under `infeas_stationarity_tol=1e-8` —
-//! while in the user's own units the violation was **0.51**, `‖∇θ‖ = 1.40`, and
-//! neither bound was active to block descent. One step downhill from that point
-//! reaches a feasible point. POUNCE reported
-//! `Infeasible_Problem_Detected` (AMPL band 200) on a problem Ipopt solves.
+//! scaling picks `dc ≈ 3.3e-7` and the surrogate reads `5e-14` — far under the
+//! `1e-8` tolerance — at a point whose violation is **0.51**, whose `‖∇θ‖` is
+//! 1.40, and where neither bound is active to block descent. One step downhill
+//! reaches a feasible point. POUNCE reported `Infeasible_Problem_Detected` (AMPL
+//! band 200) on a problem Ipopt solves.
 //!
 //! That verdict is the dangerous kind for a branch-and-bound driver: a false
 //! *unbounded* is loud and retryable, but a false *infeasible* silently prunes a
 //! node that may contain the optimum.
 //!
-//! Measuring the stationarity in the unscaled space fixes it — the two halves
-//! then describe the same problem. See
-//! `IpoptCalculatedQuantities::curr_unscaled_infeasibility_stationarity`.
+//! NO THRESHOLD FIXES THIS, which is why the fix is not a retune. Measured over
+//! 800 corpus models: the scaled surrogate is not separable on the targeted
+//! cases; an unscaled surrogate needs a tolerance ≥ 1e-2 to fire at all, which
+//! introduces new false infeasibility on 3+ corpus models while still losing 2
+//! correct detections; and a scale-invariant `‖Jᵀc‖ / ‖c‖²` is not separable
+//! either. A single absolute threshold on a surrogate cannot separate these.
+//!
+//! So the surrogate is kept as a cheap pre-filter and the claim the status
+//! actually makes is confirmed directly: probe for a materially less-violating
+//! point nearby, and withhold the verdict if one exists. Comparing `θ` to `θ` is
+//! scale-free and needs no calibration. See
+//! `IpoptCalculatedQuantities::infeasibility_descent_available`.
 //!
 //! Note this is HS13's *hard* start, not its published one: it is deliberately
 //! remote so that gradient-based scaling picks an extreme `dc`. The ordinary
@@ -185,4 +192,35 @@ fn hs13_neither_scaling_path_reports_infeasible() {
              f* = {HS13_STAR}",
         );
     }
+}
+
+/// The other direction, and the test whose absence caused two wrong fixes.
+///
+/// The probe withholds the verdict when a materially less-violating point sits
+/// nearby, so it can only make the detector fire LESS. Genuine infeasibility
+/// must therefore still be detected — otherwise the cure is worse than the
+/// disease, since a solve that would have reported infeasibility in ~25
+/// iterations instead grinds to `max_iter`.
+///
+/// `x³ + y³ == 1` and `x³ + y³ == 2` cannot both hold. From `x₀ = (1e4, 1e4)`
+/// the Jacobian is steep, which is exactly the regime where the scaling games
+/// above bite. Near the least-squares point the residuals are `±0.5` and only
+/// ~0.07 % further descent exists — well under the probe's material-descent
+/// margin — so the verdict is correctly issued.
+///
+/// Two earlier attempts at this fix passed every other test here and failed
+/// this one: measuring the surrogate unscaled at the shipped `1e-8` tolerance
+/// turned this into `Maximum_Iterations_Exceeded` at 3000 iterations.
+#[test]
+fn genuinely_infeasible_problem_is_still_detected() {
+    let report = solve("infeasible_equalities.nl", &[]);
+    let code = report.solution.solve_result_num;
+    assert!(
+        (200..300).contains(&code),
+        "genuinely infeasible problem was NOT detected (solve_result_num={code}, \
+         status={:?}). The descent probe must not suppress correct verdicts — \
+         before this fix POUNCE reported local infeasibility here in ~25 \
+         iterations",
+        report.solution.status,
+    );
 }

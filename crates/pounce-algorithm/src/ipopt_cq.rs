@@ -89,47 +89,6 @@ fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
     }
 }
 
-/// `v ⊘ scale²`, as a new vector. `scale == None` returns a plain clone.
-///
-/// Used to lift a scaled residual into the product `Jᵀ_user · c_user` without
-/// materialising the unscaled Jacobian — see
-/// [`IpoptCalculatedQuantities::curr_unscaled_infeasibility_stationarity`] for
-/// the derivation. A zero factor is treated as the identity, matching
-/// [`unscaled_block_amax`], so a degenerate scale never produces infinities.
-///
-/// The non-dense branch is defensive — POUNCE is dense-only — but it is
-/// deliberately `debug_assert`ed rather than left silent. Returning the input
-/// unchanged when a scale *is* present hands back the **scaled** residual under
-/// a function that promises the unscaled one, which would silently reinstate the
-/// exact bug this exists to fix (a stationarity measure carrying a stray `dc²`).
-/// A silent no-op here is far worse than a panic in a debug build.
-fn divided_by_scale_squared(v: &dyn Vector, scale: Option<&[Number]>) -> Box<dyn Vector> {
-    let mut out = v.make_new();
-    out.copy(v);
-    let Some(s) = scale else {
-        return out;
-    };
-    let dense = out.as_any_mut().downcast_mut::<DenseVector>();
-    debug_assert!(
-        dense.is_some(),
-        "divided_by_scale_squared: non-dense backing with an active row scale — \
-         the caller would silently receive the scaled residual",
-    );
-    if let Some(d) = dense {
-        debug_assert_eq!(
-            d.values().len(),
-            s.len(),
-            "divided_by_scale_squared: scale length must match the block",
-        );
-        for (x, &f) in d.values_mut().iter_mut().zip(s.iter()) {
-            if f != 0.0 {
-                *x /= f * f;
-            }
-        }
-    }
-    out
-}
-
 /// Result of [`IpoptCalculatedQuantities::adjusted_trial_bounds`]: the
 /// new `x_L / x_U / d_L / d_U` to install on the NLP when one or more
 /// trial slacks were corrected by the safe-slack mechanism.
@@ -1130,61 +1089,163 @@ impl IpoptCalculatedQuantities {
     /// No linear solve: two transpose-products. Mirrors the gradient
     /// term behind Ipopt's `IpRestoConvCheck.cpp` `LOCALLY_INFEASIBLE`
     /// test, applied here in the main loop.
-    /// [`Self::curr_infeasibility_stationarity`] measured in the **unscaled**
-    /// (user-original) space (pounce#250 follow-up).
+    /// Does a short step along `−∇θ` actually reduce the constraint violation?
     ///
-    /// Rapid infeasibility detection is a two-part test: the constraint
-    /// violation must be bounded away from zero *and* the infeasibility
-    /// stationarity must be ~zero. The violation half is gated on the unscaled
-    /// residual (`constr_viol_tol` is defined there — pounce#173), so the
-    /// stationarity half must be too, or the two halves describe different
-    /// problems.
+    /// `LocalInfeasibility` asserts the iterate has converged to a **stationary
+    /// point of the constraint violation** — that no local move reduces it. That
+    /// is a checkable claim, and this checks it directly instead of trusting a
+    /// threshold on a proxy.
     ///
-    /// They did. The scaled measure carries a factor `dc²`, so an aggressive
-    /// constraint scaling drives it toward zero independently of where the
-    /// iterate actually is. On HS13 from `x0 = (1e4, 1e4)` the starting
-    /// Jacobian is ~3e8, gradient-based scaling picks `dc ≈ 3.3e-7`, and at the
-    /// point POUNCE stopped the scaled stationarity reads ~5e-14 — under the
-    /// `1e-8` tolerance — while the unscaled violation is 0.51 and `‖∇θ‖ = 1.4`
-    /// with no active bound blocking descent. A single step downhill reaches a
-    /// feasible point. POUNCE reported `Infeasible_Problem_Detected` on a
-    /// feasible problem that Ipopt solves.
+    /// Why a probe rather than a better proxy: the detector's surrogate is
+    /// `‖Jᵀc‖ / max(1, ‖c‖)` against an absolute tolerance, and no variant of it
+    /// separates the cases. Measured over 800 MINLPLib models plus targeted
+    /// infeasible problems, the scaled form produces a confirmed false verdict
+    /// (HS13 from `x₀ = (1e4, 1e4)`, where the constraint scaling `dc ≈ 3.3e-7`
+    /// drives the surrogate to `5e-14` at a point whose violation is 0.51); the
+    /// unscaled form needs a tolerance ≥ 1e-2 to fire at all, which introduces
+    /// new false infeasibility on 3+ corpus models while still losing 2 correct
+    /// detections; and a scale-invariant `‖Jᵀc‖ / ‖c‖²` is not separable even on
+    /// the targeted set. A single absolute threshold on a surrogate cannot do
+    /// this job.
     ///
-    /// Only rows are scaled (`c_scaled = dc ⊙ c_user`), so the unscaled product
-    /// needs no unscaled Jacobian. That POUNCE applies **no variable-side
-    /// rescale** is load-bearing for the identity below and is a deliberate
-    /// design property, not an accident — see `OrigIpoptNlp`'s `UserScaling`
-    /// note (`pounce-nlp/src/orig_ipopt_nlp.rs`), which records that a TNLP's
-    /// `x_scaling` request is honoured only insofar as the NLP models
-    /// constraint+objective scaling (issue #61). If variable scaling is ever
-    /// added, this derivation gains a `diag(dx)` factor and must be revisited:
+    /// Comparing `θ` at two points is scale-free by construction — the row
+    /// scaling cancels out of the ratio — so this needs no calibration at all.
     ///
-    /// ```text
-    ///   J_user   = diag(dc)⁻¹ J_scaled
-    ///   c_user   = dc⁻¹ ⊙ c_scaled
-    ///   J_userᵀ c_user = J_scaledᵀ (c_scaled ⊘ dc²)
-    /// ```
+    /// Costs one `eval_c`/`eval_d` pair per probed step, and runs only where the
+    /// detector was about to fire (both gates already passed for a full streak),
+    /// which is rare. Steps are clamped to the variable bounds, so descent that
+    /// only exists outside the box is correctly not counted — that direction
+    /// would suppress a *correct* infeasibility verdict.
     ///
-    /// so dividing the residual by `dc²` before the existing transpose-product
-    /// gives the unscaled gradient exactly. The denominator uses the unscaled
-    /// violation for the same reason. With no scaling active this is identical
-    /// to [`Self::curr_infeasibility_stationarity`].
-    pub fn curr_unscaled_infeasibility_stationarity(&self) -> Number {
-        let (dc, dd) = {
-            let nlp = self.nlp.borrow();
-            (nlp.c_scale_vec(), nlp.d_scale_vec())
-        };
-        if dc.is_none() && dd.is_none() {
-            return self.curr_infeasibility_stationarity();
+    /// Returns `true` when descent is available, i.e. the iterate is **not**
+    /// stationary and `LocalInfeasibility` must not be declared.
+    pub fn infeasibility_descent_available(&self) -> bool {
+        use pounce_linalg::DenseVector;
+
+        let theta_curr = self.curr_primal_infeasibility_max();
+        if theta_curr <= 0.0 {
+            return false;
         }
-        let c_adj = divided_by_scale_squared(&*self.curr_c(), dc.as_deref());
-        let dms_adj = divided_by_scale_squared(&*self.curr_d_minus_s(), dd.as_deref());
-        let jc_t_c = self.curr_jac_c_t_times_vec(&*c_adj);
-        let jd_t_dms = self.curr_jac_d_t_times_vec(&*dms_adj);
+        // -grad of 1/2||(c, d-s)||^2 w.r.t. x.
+        let c = self.curr_c();
+        let dms = self.curr_d_minus_s();
+        let jc_t_c = self.curr_jac_c_t_times_vec(&*c);
+        let jd_t_dms = self.curr_jac_d_t_times_vec(&*dms);
         let mut grad = jc_t_c.make_new();
         grad.add_two_vectors(1.0, &*jc_t_c, 1.0, &*jd_t_dms, 0.0);
-        let viol = self.curr_unscaled_primal_infeasibility_max();
-        grad.amax() / viol.max(1.0)
+        let gnorm = grad.amax();
+        if !(gnorm > 0.0) || !gnorm.is_finite() {
+            // A vanishing gradient is the stationary case this exists to
+            // confirm; a non-finite one gives us nothing to probe with.
+            return false;
+        }
+
+        let x = self.curr_iv().x.clone();
+        let nlp = self.nlp.borrow();
+
+        // Full-length bound values and finite-bound indicators, lifted through
+        // the expansion matrices (same pattern as the divergence guard).
+        let mut ones_l = nlp.x_l().make_new();
+        ones_l.set(1.0);
+        let mut has_lb = x.make_new();
+        nlp.px_l().mult_vector(1.0, &*ones_l, 0.0, &mut *has_lb);
+        let mut lb = x.make_new();
+        nlp.px_l().mult_vector(1.0, nlp.x_l(), 0.0, &mut *lb);
+
+        let mut ones_u = nlp.x_u().make_new();
+        ones_u.set(1.0);
+        let mut has_ub = x.make_new();
+        nlp.px_u().mult_vector(1.0, &*ones_u, 0.0, &mut *has_ub);
+        let mut ub = x.make_new();
+        nlp.px_u().mult_vector(1.0, nlp.x_u(), 0.0, &mut *ub);
+        drop(nlp);
+
+        let dense = |v: &dyn Vector| -> Option<Vec<Number>> {
+            v.as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|d| d.expanded_values())
+        };
+        let (Some(xv), Some(gv), Some(lbv), Some(ubv), Some(hl), Some(hu)) = (
+            dense(&*x),
+            dense(&*grad),
+            dense(&*lb),
+            dense(&*ub),
+            dense(&*has_lb),
+            dense(&*has_ub),
+        ) else {
+            // Non-dense backing: no probe possible. Report "no descent" so the
+            // caller falls back to the surrogate's verdict rather than silently
+            // suppressing every infeasibility conclusion.
+            return false;
+        };
+
+        // Relative step lengths, so the probe is independent of problem scale.
+        let xnorm = xv.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
+        let base = xnorm / gnorm;
+
+        let mut trial = x.make_new();
+        for k in 0..Self::INFEAS_PROBE_STEPS {
+            let alpha = base * 10f64.powi(-(k as i32));
+            {
+                let Some(t) = trial.as_any_mut().downcast_mut::<DenseVector>() else {
+                    return false;
+                };
+                for (i, slot) in t.values_mut().iter_mut().enumerate() {
+                    let mut xi = xv[i] - alpha * gv[i];
+                    if hl[i] != 0.0 {
+                        xi = xi.max(lbv[i]);
+                    }
+                    if hu[i] != 0.0 {
+                        xi = xi.min(ubv[i]);
+                    }
+                    *slot = xi;
+                }
+            }
+            if let Some(theta) = self.theta_at(&*trial) {
+                if theta.is_finite() && theta < theta_curr * (1.0 - Self::INFEAS_PROBE_MARGIN) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Number of geometrically decreasing step lengths the descent probe tries.
+    const INFEAS_PROBE_STEPS: usize = 6;
+    /// Relative reduction in `θ` a probe step must achieve before it counts as
+    /// descent and vetoes the verdict.
+    ///
+    /// Deliberately coarse. The question is not "is this the exact minimiser of
+    /// the violation" — an interior-point iterate converging toward one always
+    /// has some infinitesimal descent left, and a tight margin would veto
+    /// forever and never let a genuine infeasibility be declared. The question
+    /// is whether a *materially* less-violating point sits nearby, which is what
+    /// distinguishes "converging to an infeasible stationary point" from
+    /// "nowhere near stationary".
+    ///
+    /// The two regimes are far apart, so the exact value is not delicate. On the
+    /// genuinely infeasible `x³+y³ == 1 ∧ == 2`, iterates near the least-squares
+    /// point have only ~0.07 % descent available. On HS13's false verdict, one
+    /// step takes `θ` from 0.51 to **zero** — a 100 % reduction. Anything between
+    /// a few percent and most of the way separates them; 10 % sits in the middle.
+    const INFEAS_PROBE_MARGIN: Number = 0.1;
+
+    /// Max-norm constraint violation at an arbitrary `x`, evaluated on scratch
+    /// vectors so the algorithm's `curr`/`trial` state is untouched. `None` if
+    /// the evaluation is unusable.
+    fn theta_at(&self, x: &dyn Vector) -> Option<Number> {
+        let iv = self.curr_iv();
+        let mut nlp = self.nlp.borrow_mut();
+        let mut c = iv.y_c.make_new();
+        nlp.eval_c(x, &mut *c);
+        let mut d = iv.s.make_new();
+        nlp.eval_d(x, &mut *d);
+        // `d - s` against the CURRENT slacks, matching how `curr_d_minus_s`
+        // measures the violation: the probe moves x only.
+        let mut dms = iv.s.make_new();
+        dms.add_two_vectors(1.0, &*d, -1.0, &*iv.s, 0.0);
+        let t = c.amax().max(dms.amax());
+        t.is_finite().then_some(t)
     }
 
     pub fn curr_infeasibility_stationarity(&self) -> Number {
