@@ -7,10 +7,13 @@ object's UX. Models are written with ``jax.numpy`` where the exact-derivative
 (reduced-Hessian) path is being exercised.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
 import pounce
+from pounce._curve_fit import _normalize_bound_arg
 
 scipy_optimize = pytest.importorskip("scipy.optimize")
 jnp = pytest.importorskip("jax.numpy")
@@ -591,6 +594,138 @@ def test_scipy_tuple_bounds_reversed_looking_box_is_valid():
     assert 0.1 <= r.popt[1] <= 0.2 + 1e-9
 
 
+# --------------------------------------------------------------------------
+# issue #265: the mirror of #260 -- an n=2 tuple *of pairs* is ambiguous and
+# must raise rather than silently transpose; NaN bounds are rejected.
+# --------------------------------------------------------------------------
+
+def test_normalize_bound_arg_unit_matrix():
+    """Pin the disambiguation table directly on the bounds normaliser (#265):
+    the ambiguous n=2 tuple-of-pairs raises, every unambiguous spelling maps to
+    exactly one reading, and the n!=2 / scalar / None-side cases are unchanged.
+    """
+    inf = np.inf
+
+    # ambiguous n=2 shapes -> raise (tuple-of-pairs, and None inside either side)
+    with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
+        _normalize_bound_arg(((0.0, 10.0), (0.0, 10.0)), 2)
+    with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
+        _normalize_bound_arg(((None, 10.0), (0.0, None)), 2)
+    with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
+        _normalize_bound_arg(([None, 10.0], [0.0, None]), 2)   # None inside a list
+    with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
+        _normalize_bound_arg(((0.0, 10.0), None), 2)           # element 0 pair-shaped
+
+    # literal NaN in the scipy branch -> raise
+    with pytest.raises(ValueError, match="NaN"):
+        _normalize_bound_arg((float("nan"), 10.0), 2)
+
+    # pair *lists* pass through untouched (the unambiguous pair-list spelling)
+    assert _normalize_bound_arg([(0.0, 10.0), (0.0, 10.0)], 2) == [(0.0, 10.0), (0.0, 10.0)]
+    assert _normalize_bound_arg([(None, 10.0), (0.0, None)], 2) == [(None, 10.0), (0.0, None)]
+
+    # scipy tuple of lists/arrays -> per-parameter pairs (param i in [l_i, u_i])
+    assert _normalize_bound_arg(([0.0, 1.6], [10.0, 10.0]), 2) == [(0.0, 10.0), (1.6, 10.0)]
+    assert _normalize_bound_arg(
+        (np.array([0.0, 1.6]), np.array([10.0, 10.0])), 2
+    ) == [(0.0, 10.0), (1.6, 10.0)]
+    assert _normalize_bound_arg(([0, 0, 0], [10, 10, 10]), 3) == [
+        (0.0, 10.0), (0.0, 10.0), (0.0, 10.0)]
+
+    # scalar scipy form broadcasts at every n
+    assert _normalize_bound_arg((0, 10), 1) == [(0.0, 10.0)]
+    assert _normalize_bound_arg((0, 10), 2) == [(0.0, 10.0), (0.0, 10.0)]
+    assert _normalize_bound_arg((0, 10), 3) == [(0.0, 10.0)] * 3
+
+    # a bare None side takes the scipy reading, None -> ∓inf (no raise). The n=1
+    # case is the regression guard for §3.2 (was NaN-as-unbounded-below before).
+    assert _normalize_bound_arg((None, 10.0), 1) == [(-inf, 10.0)]
+    assert _normalize_bound_arg((None, 10.0), 2) == [(-inf, 10.0), (-inf, 10.0)]
+    assert _normalize_bound_arg((None, None), 2) == [(-inf, inf), (-inf, inf)]
+
+    # n != 2 tuple pair list never enters the scipy branch (len != 2) -> unchanged
+    assert _normalize_bound_arg(((0, 10), (0, 10), (0, 10)), 3) == ((0, 10), (0, 10), (0, 10))
+    assert _normalize_bound_arg(((0, 10),), 1) == ((0, 10),)
+
+    # None passes through as None
+    assert _normalize_bound_arg(None, 2) is None
+
+
+def test_curve_fit_ambiguous_tuple_bounds_raise():
+    """#265: the n=2 tuple-of-pairs box now raises on the single-fit surface
+    instead of silently transposing to a pinned box that still 'succeeds'."""
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x)  # noiseless: A=2, k=1
+    with pytest.raises(ValueError, match="ambiguous"):
+        pounce.curve_fit(expdecay_2p, x, y, p0=[1.0, 2.0],
+                         bounds=((0.0, 10.0), (0.0, 10.0)), jac="fd")
+    with pytest.raises(ValueError, match="ambiguous"):
+        pounce.curve_fit(expdecay_2p, x, y, p0=[1.0, 2.0],
+                         bounds=((None, 10.0), (0.0, None)), jac="fd")
+
+
+def test_curve_fit_list_spelling_fits_and_matches_scipy():
+    """The unambiguous pair-*list* spelling of the same box fits correctly and
+    agrees with scipy's equivalent (lower, upper) call."""
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x)
+    r = pounce.curve_fit(expdecay_2p, x, y, p0=[1.0, 2.0],
+                         bounds=[(None, 10.0), (0.0, None)], jac="fd")
+    np.testing.assert_allclose(r.popt, [2.0, 1.0], rtol=1e-4)
+    rs, _ = scipy_optimize.curve_fit(
+        expdecay_2p, x, y, p0=[1.0, 2.0],
+        bounds=([-np.inf, 0.0], [10.0, np.inf]))
+    np.testing.assert_allclose(r.popt, rs, rtol=1e-4)
+
+
+def test_curve_fit_minima_ambiguous_tuple_raises_and_list_fits():
+    """``curve_fit_minima`` inherits the raise (covers ``_minima_bounds``); the
+    finite pair-*list* box enumerates the correct minimum near (2, 1)."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x) + 0.01 * rng.standard_normal(x.size)
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        pounce.curve_fit_minima(expdecay_2p, x, y, p0=[1.0, 2.0],
+                                bounds=((0.0, 10.0), (0.0, 10.0)),
+                                jac="fd", seed=0)
+
+    fits = pounce.curve_fit_minima(expdecay_2p, x, y, p0=[1.0, 2.0],
+                                   bounds=[(0.0, 10.0), (0.0, 10.0)],
+                                   jac="fd", seed=0)
+    assert fits, "expected at least one minimum"
+    np.testing.assert_allclose(fits[0].popt, [2.0, 1.0], rtol=5e-2)
+    # not the degenerate zero-width-box state: a real box gives a real perr
+    assert np.all(np.isfinite(fits[0].perr))
+    assert np.any(fits[0].perr > 0)
+
+
+def test_curve_fit_minima_rejects_nan_pair_bound():
+    """A NaN inside a pair-list entry is rejected (not laundered to 'unbounded'),
+    consistent with the minimize path (§3.4)."""
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x)
+    with pytest.raises(ValueError, match="NaN"):
+        pounce.curve_fit_minima(expdecay_2p, x, y, p0=[1.0, 2.0],
+                                bounds=[(float("nan"), 10.0), (0.0, 10.0)],
+                                jac="fd", seed=0)
+
+
+def test_curve_fit_streaming_ambiguous_tuple_raises_and_scipy_box_fits():
+    """``curve_fit_streaming`` inherits the raise; the scipy tuple-of-arrays box
+    still fits to (2, 1)."""
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x)
+    with pytest.raises(ValueError, match="ambiguous"):
+        pounce.curve_fit_streaming(expdecay_2p, _batched_source(x, y),
+                                   p0=[1.0, 2.0],
+                                   bounds=((0.0, 10.0), (0.0, 10.0)), jac="fd")
+    r = pounce.curve_fit_streaming(expdecay_2p, _batched_source(x, y),
+                                   p0=[1.0, 2.0],
+                                   bounds=([0.0, 0.0], [10.0, 10.0]), jac="fd")
+    np.testing.assert_allclose(r.popt, [2.0, 1.0], rtol=1e-4)
+
+
 def test_curve_fit_validates_data_sigma_fscale_p0():
     """Imperfect-but-plausible inputs that used to fail cryptically (LinAlgError,
     ZeroDivisionError, broadcast errors, a silent garbage fit) now raise clear
@@ -935,3 +1070,72 @@ def test_curve_fit_constraint_probed_at_p0_not_origin():
         [{"type": "ineq", "fun": s_con}], "sse", 1.0, "fd", None,
     )
     np.testing.assert_allclose(s_probes[0], p0)  # streaming builder too
+
+
+# --------------------------------------------------------------------------
+# Degenerate-covariance warnings (#265): a zero-width bound or an all-active
+# corner reports perr = 0 legitimately, but that must no longer be silent.
+# --------------------------------------------------------------------------
+
+def test_zero_width_bounds_warn_and_are_not_an_estimate():
+    """A zero-width bound (lo == hi) pins a parameter; its perr of 0 is the
+    constraint, and pounce warns while the free parameter keeps a real perr."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 3.0, 60)
+    y = expdecay_2p(x, 2.0, 1.0) + 0.01 * rng.standard_normal(x.size)
+
+    with pytest.warns(UserWarning, match="zero-width"):
+        r = pounce.curve_fit(expdecay_2p, x, y, p0=[2.0, 1.0],
+                             bounds=[(2.0, 2.0), (0.0, 10.0)], jac="fd")
+
+    np.testing.assert_allclose(r.popt[0], 2.0, atol=1e-9)  # pinned exactly
+    assert r.perr[0] == 0.0                                 # constraint, not estimate
+    assert r.perr[1] > 0.0                                  # free param has real uncertainty
+
+
+def test_all_params_on_active_bounds_warn_fully_degenerate():
+    """A box that excludes the optimum pins every parameter on a bound; the
+    covariance is then fully degenerate (pcov = 0) and pounce warns."""
+    x = np.linspace(-1.0, 1.0, 41)  # sum(x) == 0 => SSE separable in a and b
+    y = x.copy()                    # unconstrained optimum a=1, b=0
+    # Box excludes the optimum; separability pins the corner (a=2, b=1).
+    with pytest.warns(UserWarning, match="fully degenerate"):
+        r = pounce.curve_fit(line, x, y, p0=[2.5, 1.5],
+                             bounds=[(2.0, 3.0), (1.0, 2.0)], jac="fd")
+
+    assert r.active_mask is not None and r.active_mask.all()
+    np.testing.assert_array_equal(r.pcov, np.zeros_like(r.pcov))
+    np.testing.assert_array_equal(r.perr, np.zeros_like(r.perr))
+
+
+def test_ordinary_bounded_fit_does_not_warn_degenerate():
+    """A normal fit with wide bounds and an interior optimum emits neither of
+    the degenerate-covariance warnings."""
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 3.0, 60)
+    y = expdecay_2p(x, 2.0, 1.0) + 0.02 * rng.standard_normal(x.size)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pounce.curve_fit(expdecay_2p, x, y, p0=[2.0, 1.0],
+                         bounds=[(0.0, 10.0), (0.0, 10.0)], jac="fd")
+
+    msgs = [str(w.message) for w in caught]
+    assert not any("zero-width" in m for m in msgs), msgs
+    assert not any("fully degenerate" in m for m in msgs), msgs
+
+
+def test_curve_fit_minima_zero_width_box_warns():
+    """The #265 scenario (minus the transposition): a fully zero-width box via
+    curve_fit_minima still yields perr = 0 everywhere, but no longer silently."""
+    x = np.linspace(0.0, 3.0, 60)
+    y = 2.0 * np.exp(-1.0 * x)
+
+    with pytest.warns(UserWarning, match="zero-width"):
+        fits = pounce.curve_fit_minima(expdecay_2p, x, y, p0=[1.0, 2.0],
+                                       bounds=[(0.0, 0.0), (10.0, 10.0)],
+                                       jac="fd", seed=0)
+
+    assert fits, "expected at least one result"
+    for r in fits:
+        np.testing.assert_array_equal(r.perr, np.zeros_like(r.perr))

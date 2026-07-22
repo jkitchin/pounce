@@ -9,6 +9,30 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — ambiguous 2-parameter tuple bounds and NaN bounds (#265)
+
+- `curve_fit` / `curve_fit_minima` / `curve_fit_streaming`: at `n == 2`, a
+  length-2 **tuple** of `(lo, hi)` pairs (e.g. `((0, 10), (0, 10))`) was
+  silently read as scipy's `(lower, upper)` — the transposed box pinned both
+  parameters and still reported `Solve_Succeeded` (#265, the mirror of #260).
+  That shape is genuinely ambiguous and now **raises**, naming both unambiguous
+  spellings; the list-of-pairs form `[(l0, u0), (l1, u1)]` and the
+  tuple-of-arrays form `([l0, l1], [u0, u1])` are unchanged. A bare `None` side
+  (`(None, 10.0)`) still means unbounded on that side.
+- NaN bounds are now rejected in `minimize` and every `curve_fit` surface
+  (previously they slipped past the reversed-bound check — `lb > ub` is `False`
+  against `NaN` — and behaved as a silent "no bound"). `None` / ±inf remain the
+  supported unbounded spellings.
+- A degenerate covariance is no longer silent. A zero-width bound (`lo == hi`,
+  pounce's "hold a parameter constant" idiom) fixes a parameter and reports its
+  `perr` as `0`; a corner solution with every parameter on an active bound
+  reports `pcov = 0` throughout. Both are intended, but previously came back
+  with no signal — "infinite confidence in a wrong answer" in #265's words.
+  `curve_fit` / `curve_fit_minima` / `curve_fit_streaming` now emit a
+  `UserWarning` in each case (naming the pinned parameters for the zero-width
+  case), so the perr of 0 reads as the constraint it is, not an estimated
+  uncertainty. No numbers change.
+
 ### Changed — `dual_diverging_streak` is now **off by default** (#250 follow-up)
 
 - **The dual-divergence guard is opt-in.** It shipped default-on at `15` to bound

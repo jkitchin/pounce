@@ -825,6 +825,46 @@ def _solve_fit(
     tval = _t_ppf(1.0 - alpha / 2.0, max(dof, 1))
     ci = np.column_stack([popt - tval * perr, popt + tval * perr])
 
+    # --- degenerate-covariance warnings --------------------------------
+    # A zero variance in `perr` is a legitimate, intended output here: a
+    # zero-width bound (lo == hi) fixes a parameter, and `_projected_covariance`
+    # zeros variance along every actively-constrained direction. Both are
+    # correct, but a reported perr of 0 reads as "infinite confidence" and was
+    # previously handed back with no signal (see #265). Warn — at the single
+    # shared assembly site so every public surface inherits it — without
+    # changing any number: the pcov / perr / ci above stand.
+    pinned = None
+    if pr.lb is not None and pr.ub is not None:
+        lb_arr = np.asarray(pr.lb, dtype=float)
+        ub_arr = np.asarray(pr.ub, dtype=float)
+        pinned = np.isfinite(lb_arr) & (lb_arr == ub_arr)
+    if pinned is not None and pinned.any():
+        import warnings
+
+        idx = np.nonzero(pinned)[0]
+        if pr.param_names is not None:
+            names = ", ".join(str(pr.param_names[i]) for i in idx)
+        else:
+            names = ", ".join(str(int(i)) for i in idx)
+        warnings.warn(
+            f"pounce.curve_fit: zero-width bound(s) on parameter(s) {names} "
+            f"(lower == upper) pin each of those parameters to a fixed value; "
+            f"the reported perr of 0 for them is the constraint itself, not an "
+            f"estimated uncertainty. Give a parameter a non-degenerate bound "
+            f"(lo < hi) to obtain an uncertainty for it.",
+            stacklevel=2,
+        )
+    elif active_mask is not None and pr.n > 0 and active_mask.all():
+        import warnings
+
+        warnings.warn(
+            f"pounce.curve_fit: all {pr.n} parameter(s) sit on active bounds "
+            f"at the solution, so the covariance is fully degenerate "
+            f"(pcov = 0) and the reported standard errors and confidence "
+            f"intervals are not meaningful.",
+            stacklevel=2,
+        )
+
     # --- sensitivity dpopt/ddata --------------------------------------
     # dpopt/ddata is (n_params x n_data) -- the size of the data -- so it is not
     # offered in streaming mode (see ``curve_fit_streaming``).
@@ -882,6 +922,16 @@ def _minima_bounds(bounds, n):
             out.append(None)
             continue
         lo, hi = bd
+        # Reject NaN explicitly rather than laundering it into ``None``
+        # (unbounded) via the ``not np.isfinite`` map below — that would be
+        # inconsistent with the minimize path (see ``_normalize_bounds``). ±inf
+        # still maps to ``None``. ``lo``/``hi`` may be ``None``; guard first.
+        for side, v in (("lower", lo), ("upper", hi)):
+            if v is not None and np.isnan(v):
+                raise ValueError(
+                    f"bounds {side} is NaN; use -inf/inf or None for an "
+                    f"unbounded side, not NaN"
+                )
         lo = None if (lo is None or not np.isfinite(lo)) else float(lo)
         hi = None if (hi is None or not np.isfinite(hi)) else float(hi)
         out.append((lo, hi))
@@ -919,13 +969,25 @@ def curve_fit(
 
     ``bounds`` follows scipy's convention: the ``(lower, upper)`` 2-tuple, where
     each side is a scalar or a length-``n_params`` array. So
-    ``bounds=([l0, l1], [u0, u1])`` bounds param ``i`` to ``[l_i, u_i]`` — a
-    length-2 tuple is *always* read this scipy way, including the 2-parameter
-    case where it could otherwise be mistaken for a list of ``(lo, hi)`` pairs
-    (issue #260). pounce also accepts a per-parameter pair **list**,
-    ``bounds=[(l0, u0), (l1, u1)]`` (as :func:`pounce.minimize` does), which is
-    never reinterpreted as the scipy 2-tuple; entries may be ``None`` for a
-    one-sided bound.
+    ``bounds=([l0, l1], [u0, u1])`` bounds param ``i`` to ``[l_i, u_i]``; a
+    length-2 **tuple** is read this scipy way, and a bare ``None`` on either
+    side means unbounded there. pounce also accepts a per-parameter pair
+    **list**, ``bounds=[(l0, u0), (l1, u1)]`` (as :func:`pounce.minimize` does),
+    which is never reinterpreted as the scipy 2-tuple; entries may be ``None``
+    for a one-sided bound. For a 2-parameter model the two spellings collide
+    when written as a tuple of ``(lo, hi)`` pairs — ``bounds=((0, 10), (0, 10))``
+    is both scipy's ``(lower, upper)`` and a pair list. That shape is genuinely
+    ambiguous (silently guessing it misfit issues #260 and #265, in opposite
+    directions), so it now **raises**; pass a list ``[(l0, u0), (l1, u1)]`` for
+    the pair-list reading or lists/arrays ``([l0, l1], [u0, u1])`` for the scipy
+    reading. NaN bounds are rejected.
+
+    A **zero-width** bound (``lo == hi``) is honored and fixes that parameter to
+    the value: pounce supports it as the "hold a parameter constant" idiom
+    (unlike scipy, which forbids ``lb == ub``). The parameter's reported
+    ``perr`` of ``0`` is then the constraint, not an estimated uncertainty, so a
+    :class:`UserWarning` is emitted naming the pinned parameters; give a
+    parameter a non-degenerate bound to obtain an uncertainty for it.
 
     See also ``pyomo_pounce.covariance`` (in the ``pyomo-pounce`` package),
     the counterpart surface for an estimation model written directly in
@@ -1465,34 +1527,75 @@ def _normalize_bound_arg(bounds, n):
     scipy's ``curve_fit`` has exactly one ``bounds`` form — the ``(lower,
     upper)`` 2-tuple, each side a scalar or length-``n`` array — and
     :func:`curve_fit` documents that it mirrors scipy, so a length-2 **tuple**
-    is always read as that scipy form. This is load-bearing only for a
-    2-parameter model, where ``([l0, l1], [u0, u1])`` is *also* structurally a
-    list of two ``(lo, hi)`` pairs. That collision is genuinely ambiguous, and
-    resolving it the pair-list way silently applied the wrong box (param 0 in
-    ``[l0, l1]``, param 1 in ``[u0, u1]``) while still reporting
-    ``Solve_Succeeded`` — see issue #260. scipy's convention wins: param ``i``
-    is bounded to ``[l_i, u_i]``.
+    is normally read as that scipy form; a **list** ``[(l0, u0), (l1, u1)]`` is
+    pounce's per-parameter pair list (never reinterpreted as the scipy tuple).
 
-    To pass pounce's per-parameter pair list — its extension over scipy — use a
-    **list**, ``[(l0, u0), (l1, u1)]`` (as :func:`pounce.minimize` does). A list
-    is never reinterpreted as the scipy 2-tuple form, so the two APIs stay
-    distinct even for ``n == 2``.
+    At ``n == 2`` a length-2 tuple whose elements are themselves ``(lo, hi)``
+    *pairs* is genuinely ambiguous — ``([l0, l1], [u0, u1])`` (scipy) and
+    ``[(l0, u0), (l1, u1)]`` written as a tuple are the same shape. Resolving it
+    silently applied the wrong box in one direction each time (the pair-list
+    reading broke issue #260; the scipy reading broke its mirror, issue #265),
+    so that shape now **raises** and the caller must pick an unambiguous
+    spelling. Only *pair-shaped* elements trigger the raise: a length-2 tuple,
+    or a list/tuple containing ``None`` (a scipy array uses ±inf for an
+    unbounded side, never ``None``). Inner **lists/arrays** of scalars stay the
+    scipy reading — ``([l0, l1], [u0, u1])`` is scipy's canonical spelling and
+    must remain a drop-in (issue #260's regression tests pin it).
+
+    A bare ``None`` on either side (``(None, 10.0)``, ``(None, None)``) is *not*
+    pair-shaped and takes the scipy reading with ``None`` → ∓inf (unbounded on
+    that side); both readings coincide there anyway.
     """
     if bounds is None:
         return None
-    # scipy form: a 2-tuple of (lower, upper), each scalar or length-n array. A
-    # length-2 tuple can only double as a pair list when n == 2 (a pair list
-    # needs one pair per parameter); we deliberately resolve that lone ambiguous
-    # case to the scipy convention curve_fit mirrors, rather than the pair-list
-    # reading, so the returned box matches scipy's (issue #260).
+    # scipy form: a 2-tuple of (lower, upper), each scalar or length-n array.
     if isinstance(bounds, tuple) and len(bounds) == 2:
         lo, hi = bounds
+
+        def _pair_shaped(el):
+            # An element that reads as a pair-list entry rather than a scipy
+            # lower/upper array: a length-2 tuple, or a sequence containing
+            # None (scipy arrays cannot contain None; pair entries can).
+            if isinstance(el, tuple) and len(el) == 2:
+                return True
+            if isinstance(el, (list, tuple)) and any(e is None for e in el):
+                return True
+            return False
+
+        # The one shape no silent resolution can get right (issue #265).
+        if n == 2 and (_pair_shaped(lo) or _pair_shaped(hi)):
+            raise ValueError(
+                f"bounds={bounds!r} is ambiguous for a 2-parameter model: it "
+                f"reads either as scipy's (lower, upper) — param 0 in "
+                f"(lo[0], hi[0]), param 1 in (lo[1], hi[1]) — or as a "
+                f"per-parameter pair list — param 0 in the first pair, param 1 "
+                f"in the second. Pass a list [(l0, u0), (l1, u1)] for the "
+                f"pair-list reading, or lists/arrays ([l0, l1], [u0, u1]) for "
+                f"the scipy reading."
+            )
+
+        # A bare None side means "no bound" -> scipy's ±inf. Do this before array
+        # conversion so it never becomes NaN (preserves the n==1 (None, 10.0) =
+        # unbounded-below call, and matches pounce's None convention elsewhere).
+        if lo is None:
+            lo = -np.inf
+        if hi is None:
+            hi = np.inf
+
         lo_a, hi_a = _to_array(lo), _to_array(hi)
         for side, arr in (("lower", lo_a), ("upper", hi_a)):
             if arr.ndim > 1 or (arr.ndim == 1 and arr.size not in (1, n)):
                 raise ValueError(
                     f"bounds {side} has length {arr.size} but the problem has "
                     f"{n} parameter(s); pass a scalar or a length-{n} array"
+                )
+            # None inside an array becomes NaN under float conversion; a literal
+            # NaN is equally malformed. Reject both with a targeted message.
+            if np.isnan(arr).any():
+                raise ValueError(
+                    f"bounds {side} contains NaN (or None inside an array); "
+                    f"use -inf/inf for an unbounded side, or pass a "
+                    f"per-parameter list of (lo, hi) pairs"
                 )
         lo = np.broadcast_to(lo_a, (n,))
         hi = np.broadcast_to(hi_a, (n,))
