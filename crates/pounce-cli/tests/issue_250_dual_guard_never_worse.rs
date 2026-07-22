@@ -1,31 +1,44 @@
-//! Regression: the dual-divergence guard's diversion must never leave the
-//! solve worse off than a point it already had in hand (pounce#250 follow-up).
+//! The dual-divergence guard (`dual_diverging_streak`, pounce#246) is **opt-in**,
+//! and when opted into its diversion must never leave the solve worse off than a
+//! point it already had in hand (pounce#250 follow-up).
 //!
-//! The guard (`dual_diverging_streak`, added for the emfl050 warm-start stall)
-//! routes a solve into restoration once the dual infeasibility has grown for 15
-//! consecutive iterations in an elevated regime. That is a *bet*: usually a good
-//! one — on the MINLPLib corpus it rescues twice as many models as it harms —
-//! but nothing made losing it safe.
+//! WHY IT IS OPT-IN. The guard routes a solve into restoration once the dual
+//! infeasibility has grown for N consecutive iterations in an elevated regime. It
+//! shipped default-on at N=15 to bound a reported emfl050 bad-warm-start grind,
+//! but that justification did not survive being reproduced: the reported
+//! measurement was caller-side JAX compilation, and the build predating the guard
+//! solves both emfl050 instances to the same optimum in the same time. What
+//! remained was an effect on four of 1284 MINLPLib models that is knife-edge and
+//! non-monotone in the threshold:
 //!
-//! On `autocorr_bern55-06` the bet loses. The guard fires at iteration 23; the
-//! diverted run then reaches the true optimum (-2304.0000278, which Ipopt also
-//! finds) and holds it from iteration 57 to 86, but the dual residual sawtooths
-//! between 1e-8 and 2e-1 there, so it never strings together the
-//! `acceptable_iter` consecutive qualifying iterates that would stop the solve.
-//! It enters restoration a second time, wanders into a worse basin, and stops at
-//! -2263.46 — 1.8 % worse, with an overall NLP error of **1.0**, reported as
-//! "solved to acceptable level".
+//!   * `deb7`/`deb9` reach a better local optimum (104.95 -> 97.56) at *exactly*
+//!     15, and at no other value tried (0, 5, 25, 32, 40, 60).
+//!   * `pooling_rt2stp` turns from `Solve_Succeeded` into
+//!     `Maximum_Iterations_Exceeded` at 10 and 15 only — solving cleanly at 0, 5,
+//!     25 and 40.
 //!
-//! The better point had already passed the acceptable test; it was simply
-//! overwritten, because `store_acceptable_point` keeps the latest rather than
-//! the best. The fix records the best acceptable iterate once the guard has
-//! fired and hands it back if the diverted run ends worse.
+//! That is basin luck on nonconvex problems, not a property, and the two sides
+//! are not commensurate: the upside is a better local optimum on an
+//! already-solved problem, the downside is a clean solve becoming a failure. So
+//! the guard stays available but is no longer imposed. `pooling_rt2stp_solves_at_default_settings`
+//! pins that decision.
 //!
-//! Tuning the guard's trigger instead was tried and rejected: every streak
-//! setting that spares this model (>= 25) also loses the `deb7`/`deb9`/`deb8`
-//! rescues, which need exactly the default 15. Hence fixing the consequence,
-//! not the trigger — and hence `dual_guard_rescue_is_preserved` below, which
-//! pins one of those rescues so a future retune cannot quietly trade it away.
+//! THE NEVER-WORSE-OFF PROPERTY, for anyone who does opt in. On
+//! `autocorr_bern55-06` at N=15 the guard fires at iteration 23; the diverted run
+//! reaches the true optimum (-2304.0000278, which Ipopt also finds) and holds it
+//! from iteration 57 to 86, but the dual residual sawtooths between 1e-8 and 2e-1
+//! there, so it never strings together the `acceptable_iter` consecutive
+//! qualifying iterates that would stop the solve. It then entered restoration a
+//! second time, wandered into a worse basin, and stopped at -2263.46 — 1.8 %
+//! worse, with an overall NLP error of **1.0**, reported as "solved to acceptable
+//! level". The better point had already passed the acceptable test; it was simply
+//! overwritten, because `store_acceptable_point` keeps the latest rather than the
+//! best. POUNCE now records the best acceptable iterate and hands it back if the
+//! diverted run ends worse.
+//!
+//! That fallback bounds the *objective* downside but cannot manufacture a point
+//! the solve never reached — which is exactly why `pooling_rt2stp` still needed
+//! the default change rather than more machinery.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -79,11 +92,16 @@ fn solve(fixture_name: &str, extra: &[&str]) -> SolveReport {
 /// iterations with an overall NLP error of 3.7e-9.
 const AUTOCORR_OPTIMUM: f64 = -2304.000_027_802_734_2;
 
+/// The guard is opt-in as of the pounce#250 follow-up (`dual_diverging_streak`
+/// defaults to 0). Every test below must therefore enable it explicitly — at the
+/// former default of 15 — or it would exercise nothing and pass vacuously.
+const GUARD_ON: [&str; 2] = ["max_wall_time=10", "dual_diverging_streak=15"];
+
 /// With the guard at its default the diversion must not cost the objective.
 /// Pre-fix this returned -2263.4612448099933.
 #[test]
 fn dual_guard_diversion_does_not_return_a_worse_point() {
-    let report = solve("autocorr_bern55-06.nl", &["max_wall_time=10"]);
+    let report = solve("autocorr_bern55-06.nl", &GUARD_ON);
     let obj = report.solution.objective;
     let rel = (obj - AUTOCORR_OPTIMUM).abs() / AUTOCORR_OPTIMUM.abs();
     assert!(
@@ -100,7 +118,7 @@ fn dual_guard_diversion_does_not_return_a_worse_point() {
 /// regression that returned a different feasible-but-not-KKT point.
 #[test]
 fn dual_guard_diversion_returns_a_stationary_point() {
-    let report = solve("autocorr_bern55-06.nl", &["max_wall_time=10"]);
+    let report = solve("autocorr_bern55-06.nl", &GUARD_ON);
     let err = report.statistics.final_kkt_error;
     assert!(
         err < 1e-4,
@@ -120,7 +138,7 @@ fn dual_guard_diversion_returns_a_stationary_point() {
 #[test]
 fn dual_guard_rescue_is_preserved() {
     let expected = 97.559_934_894_163_59;
-    let report = solve("deb7.nl", &["max_wall_time=10"]);
+    let report = solve("deb7.nl", &GUARD_ON);
     let obj = report.solution.objective;
     let rel = (obj - expected).abs() / expected.abs();
     assert!(
@@ -128,6 +146,39 @@ fn dual_guard_rescue_is_preserved() {
         "deb7: lost the dual-divergence guard's rescue — got {obj}, expected \
          {expected}. Disabling the guard (or raising its streak past ~25) \
          returns ~104.95 here (pounce#250 follow-up)",
+    );
+}
+
+/// The guard must stay off unless asked for. This is the model that decided it:
+/// `pooling_rt2stp` solves cleanly with the guard disabled and at streaks 5, 25
+/// and 40, but at 10 and 15 the diversion turns `Solve_Succeeded` into
+/// `Maximum_Iterations_Exceeded` with an unscaled NLP error of ~18 and a 0.26 %
+/// worse objective.
+///
+/// The best-acceptable fallback cannot rescue this one — the diverted solve never
+/// reaches an acceptable point at all, so there is nothing to hand back. That is
+/// what makes it a defaults question rather than more machinery.
+///
+/// Fails if the default is flipped back on.
+#[test]
+fn pooling_rt2stp_solves_at_default_settings() {
+    // Ipopt on the identical .nl: -3273.9549927585640, NLP error ~1e-8.
+    const EXPECTED: f64 = -3273.954_991_374_754_6;
+    let report = solve("pooling_rt2stp.nl", &["max_wall_time=10"]);
+    let code = report.solution.solve_result_num;
+    assert!(
+        (0..100).contains(&code),
+        "pooling_rt2stp did not converge at default settings \
+         (solve_result_num={code}, status={:?}) — has dual_diverging_streak been \
+         re-enabled by default? At 15 this model returns \
+         Maximum_Iterations_Exceeded (pounce#250 follow-up)",
+        report.solution.status,
+    );
+    let obj = report.solution.objective;
+    let rel = (obj - EXPECTED).abs() / EXPECTED.abs();
+    assert!(
+        rel < 1e-6,
+        "pooling_rt2stp: got {obj}, expected {EXPECTED} (rel err {rel:.3e})",
     );
 }
 

@@ -83,7 +83,10 @@ fn tiny_step_and_divergence_overrides_flow_through() {
 #[test]
 fn dual_diverging_streak_default_and_override_flow_through() {
     let b = builder_from(|_| {});
-    assert_eq!(b.dual_diverging_streak, 15, "default must match registered");
+    assert_eq!(
+        b.dual_diverging_streak, 0,
+        "default must match registered: the guard is OFF by default (pounce#250 follow-up)"
+    );
 
     let off = builder_from(|app| {
         app.options_mut()

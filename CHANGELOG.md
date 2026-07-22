@@ -9,6 +9,32 @@ changes.
 
 ## [Unreleased]
 
+### Changed — `dual_diverging_streak` is now **off by default** (#250 follow-up)
+
+- **The dual-divergence guard is opt-in.** It shipped default-on at `15` to bound
+  a reported emfl050 bad-warm-start grind. That justification did not survive
+  being reproduced: the reported `11.7 s / iterations=0` measurement is
+  caller-side JAX compilation (it follows call order, not the guard, in both
+  orders and under both settings), and the build predating the guard solves both
+  emfl050 instances to the same optimum in the same time.
+- **What remained was basin luck, and knife-edge at that.** Across 1284 MINLPLib
+  models the guard changes four outcomes, non-monotonically in its own threshold:
+  `deb7`/`deb9` reach a better local optimum (104.95 -> 97.56) at *exactly* 15 and
+  at no other value tried, while `pooling_rt2stp` turns from `Solve_Succeeded`
+  into `Maximum_Iterations_Exceeded` at 10 and 15 only, solving cleanly at 0, 5,
+  25 and 40.
+- **The two sides are not commensurate.** The upside is a better local optimum on
+  an already-solved nonconvex problem; the downside is a clean solve becoming a
+  failure. A net-positive count on one corpus is not a reason to impose that on
+  every user's problem, so the guard stays available and is no longer default.
+- Set `dual_diverging_streak=15` to restore the previous behaviour. When enabled,
+  the never-worse-off fallback below applies.
+- Full-corpus effect of this release's changes, measured against the commit
+  preceding them (`f5aea43`) over all 1284 models: **0 regressions**, 4
+  improvements (`jit1`, `nvs04`, `heatexch_spec2`, `supplychainp1_030510` all
+  move from a limit/failure status to solved), and one objective improvement
+  (`st_e35` 21357.40 -> 21355.24, feasible to 1.8e-12).
+
 ### Fixed — the dual-divergence guard's diversion can no longer return a worse point (#250 follow-up)
 
 - **The guard's bet is now non-destructive.** `dual_diverging_streak` (added for
