@@ -383,6 +383,25 @@ def _normalize_bounds(bounds, n: int):
             f"bounds[{i}] is reversed: lower {lb[i]} > upper {ub[i]}; "
             f"each bound must be (low, high) with low <= high"
         )
+    # ±inf is legal as the *absent* side of a bound (lower = -inf, upper =
+    # +inf), but not as the *present* side: no finite x satisfies `x >= +inf`
+    # or `x <= -inf`. The `lb > ub` test above catches the mixed spellings
+    # (e.g. lower=+inf with a finite upper) but not `lb == ub == ±inf`, where
+    # the comparison is False and the box silently admitted "any x". See
+    # gh #275.
+    for side, arr, bad_val, cmp_txt in (
+        ("lower", lb, np.inf, ">= +inf"),
+        ("upper", ub, -np.inf, "<= -inf"),
+    ):
+        bad = np.where(arr == bad_val)[0]
+        if bad.size:
+            i = int(bad[0])
+            raise ValueError(
+                f"bounds[{i}] has {side} bound {arr[i]}, which no finite value "
+                f"can satisfy (it requires x[{i}] {cmp_txt}). Use "
+                f"{'-inf' if side == 'lower' else '+inf'} (or None in the "
+                f"pair-list form) to leave the {side} side unbounded"
+            )
     return lb, ub
 
 
@@ -993,6 +1012,26 @@ def minimize(
     # Promote a scalar / 0-d x0 to 1-D, matching scipy.optimize.minimize, so a
     # single-variable problem can be written ``minimize(f, 1.5)``.
     x0 = np.atleast_1d(_to_array(x0))
+    # A non-finite starting point must never reach the solver. Every
+    # convergence test is a comparison against a tolerance, and comparisons
+    # against NaN are False -- including the ones that would have rejected the
+    # iterate. The loop therefore fell straight through to "converged" at
+    # iteration zero and returned `success=True, status=0,
+    # message="Solve_Succeeded", fun=nan, nit=0`, which is the most dangerous
+    # possible response: a caller checking `success` is told the solve worked.
+    # Reproduced with analytic `jac`, with finite-difference gradients, with
+    # equality constraints, and on forced `solver_selection="nlp"`; it was
+    # masked only when `bounds` were supplied, because clipping repaired x0.
+    # See gh #275.
+    bad = np.where(~np.isfinite(x0))[0]
+    if bad.size:
+        i = int(bad[0])
+        raise ValueError(
+            f"x0[{i}] is {x0[i]}; the starting point must be finite. "
+            f"(A non-finite x0 silently defeats the convergence test -- every "
+            f"comparison against NaN is False -- so the solve would report "
+            f"success at iteration 0 with a NaN objective.)"
+        )
     n = x0.size
     lb, ub = _normalize_bounds(bounds, n)
     m, g_combined, jac_combined, cl, cu, jac_rows, jac_cols = _wrap_constraints(

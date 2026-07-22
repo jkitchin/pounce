@@ -283,3 +283,56 @@ def test_check_psd_does_not_double_count_duplicate_diagonal():
     )
     assert r.status == "optimal"
     np.testing.assert_allclose(r.x, [1.0, 2.0], atol=1e-6)
+
+
+# --- gh #275: sign-aware infinite bounds ---------------------------------
+
+
+def test_solve_qp_rejects_bounds_no_finite_value_can_satisfy():
+    """``lb = +inf`` / ``ub = -inf`` are constraints, not "absent" bounds.
+
+    The solver's presence test (``lb > -BOUND_INF``, ``ub < BOUND_INF``) is
+    sign-agnostic, so these were dropped as if unbounded and the solve
+    returned ``status="optimal"`` at a point violating the stated bound by an
+    infinite margin.
+    """
+    for lb, ub, pat in (
+        ([np.inf], [np.inf], r"`lb\[0\]` is inf"),
+        ([np.inf], [5.0], r"`lb\[0\]` is inf"),
+        ([-np.inf], [-np.inf], r"`ub\[0\]` is -inf"),
+        ([-5.0], [-np.inf], r"`ub\[0\]` is -inf"),
+    ):
+        with pytest.raises(ValueError, match=pat):
+            solve_qp(
+                P=np.eye(1), c=np.zeros(1), lb=np.array(lb), ub=np.array(ub)
+            )
+
+
+def test_solve_qp_still_accepts_legitimate_infinite_bounds():
+    """±inf on the absent side is the documented one-sided encoding."""
+    r = solve_qp(
+        P=np.eye(1),
+        c=np.array([-3.0]),
+        lb=np.array([-np.inf]),
+        ub=np.array([np.inf]),
+    )
+    assert r.status == "optimal"
+    np.testing.assert_allclose(r.x, [3.0], atol=1e-6)
+
+
+def test_solve_qp_finite_reversed_bounds_still_report_infeasible():
+    """Unchanged: a finite reversed box is a *status*, not an exception.
+
+    Only the degenerate infinite spellings — which previously produced a
+    silently wrong "optimal" — are rejected up front.
+    """
+    r = solve_qp(P=np.eye(1), c=np.zeros(1), lb=np.array([1.0]), ub=np.array([0.0]))
+    assert r.status == "primal_infeasible"
+
+
+def test_solve_qp_batch_inherits_the_bound_guard():
+    with pytest.raises(ValueError, match=r"`lb\[0\]` is inf"):
+        solve_qp_batch(
+            [{"P": np.eye(1), "c": np.zeros(1), "lb": np.array([np.inf]),
+              "ub": np.array([np.inf])}]
+        )

@@ -375,6 +375,32 @@ def _validate(P, c, A, b, G, h, lb, ub, n: int) -> None:
                     f"solve_qp: `{name}` has length {vlen} but n={n} (from `c`)"
                 )
 
+    # ±inf marks an *absent* bound (lower = -inf, upper = +inf). The opposite
+    # signs are not "absent" — they are constraints no finite value can meet.
+    # The solver's presence test (`lb > -BOUND_INF`, `ub < BOUND_INF`) is
+    # sign-agnostic, so `lb = +inf` / `ub = -inf` were dropped as if unbounded
+    # and the solve returned `status="optimal"` at a point violating the stated
+    # bound by an infinite margin. Note the *finite* analogue (`lb=1 > ub=0`)
+    # is correctly reported `primal_infeasible` by the solver, so this rejects
+    # only the degenerate spellings that silently produced a wrong answer.
+    # See gh #275.
+    for name, vec, bad_val, cmp_txt in (
+        ("lb", lb, np.inf, ">= +inf"),
+        ("ub", ub, -np.inf, "<= -inf"),
+    ):
+        if vec is None:
+            continue
+        arr = np.asarray(vec, dtype=np.float64).ravel()
+        bad = np.where(arr == bad_val)[0]
+        if bad.size:
+            i = int(bad[0])
+            raise ValueError(
+                f"solve_qp: `{name}[{i}]` is {arr[i]}, which no finite value can "
+                f"satisfy (it requires x[{i}] {cmp_txt}). Use "
+                f"{'-inf' if name == 'lb' else '+inf'} to leave that side "
+                f"unbounded, or a finite value for a real bound"
+            )
+
 
 def _build(
     P,
