@@ -52,6 +52,7 @@ CRATES=(
   pounce-cinterface
   pounce-convex
   pounce-nl
+  pounce-lean-cert
   pounce-studio-core
   pounce-cli
   pounce-rs

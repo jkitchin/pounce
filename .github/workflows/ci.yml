@@ -60,6 +60,15 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude pounce-hsl --verbose
 
+      # Lean-certificate drift guard: `pounce certify` must still reproduce the
+      # committed golden cert.json byte-for-byte (deterministic exact-rational
+      # emitter). This is the POUNCE-side half of the contract with pounce-lean;
+      # the codegen + `lake build` half runs in pounce-lean's own CI, keeping
+      # the Mathlib toolchain off POUNCE's critical path. See
+      # docs/src/schema/lean-cert-v1.md and scripts/check-lean-cert.sh.
+      - name: Lean certificate drift guard
+        run: POUNCE_BIN=target/debug/pounce scripts/check-lean-cert.sh
+
       # pounce-hsl is excluded from the build/test/clippy steps above because
       # it FFI-links libcoinhsl (HSL is licensed and absent from CI), so those
       # steps can't link it. But it IS on the crates.io publish list

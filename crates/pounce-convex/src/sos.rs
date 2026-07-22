@@ -25,7 +25,7 @@
 //! solved through [`crate::solve_socp_ipm`].
 
 use crate::ConeSpec;
-use crate::cones::psd::svec_index;
+use crate::cones::psd::{smat, svec_index};
 use crate::ipm::{QpOptions, solve_socp_ipm};
 use crate::qp::{QpProblem, QpStatus, Triplet};
 use pounce_linalg::symmetric_eigen;
@@ -504,6 +504,10 @@ struct MomentInfo {
     /// σ₀ first, then one localizing block per inequality. Used to read the
     /// Gram matrices back out of the primal for [`certified_slack`].
     psd_blocks: Vec<(usize, usize)>,
+    /// Monomial basis of each PSD (SOS) block, in the order the blocks occupy
+    /// columns of `x`. Needed to interpret a recovered Gram matrix: entry
+    /// `(i, j)` is the coefficient of `basis[i] * basis[j]`.
+    psd_bases: Vec<Vec<Vec<usize>>>,
 }
 
 /// A rigorous bound on how far the computed SOS certificate misses the exact
@@ -642,6 +646,7 @@ fn build_sos_sdp(
 
     // PSD (SOS) blocks: σ₀ (weight 1, basis degree d), then one localizing
     // multiplier per inequality (weight gᵢ, basis degree d − ⌈deg gᵢ/2⌉).
+    let mut psd_bases: Vec<Vec<Vec<usize>>> = Vec::new();
     let psd_specs = std::iter::once((d, &unit[..])).chain(
         prob.inequalities
             .iter()
@@ -650,6 +655,7 @@ fn build_sos_sdp(
     for (deg, weight) in psd_specs {
         let basis = monomials(n, deg);
         let bn = basis.len();
+        psd_bases.push(basis.clone());
         let col_base = col;
         for i in 0..bn {
             for j in 0..=i {
@@ -743,7 +749,93 @@ fn build_sos_sdp(
             basis0,
             row_of,
             psd_blocks,
+            psd_bases,
         },
+    )
+}
+
+/// One SOS block of a Putinar certificate: a PSD Gram matrix together with the
+/// monomial basis it is expressed in.
+///
+/// The represented polynomial is `m(x)ᵀ G m(x)`, where `m` lists the monomials
+/// in [`basis`](Self::basis) — so `matrix[i][j]` is the coefficient attached to
+/// `basis[i] * basis[j]`. Block 0 is `σ₀`; any further blocks are the
+/// localizing multipliers `σᵢ`, in constraint order.
+#[derive(Clone, Debug)]
+pub struct GramBlock {
+    /// Exponent vectors of the block's monomial basis.
+    pub basis: Vec<Vec<usize>>,
+    /// Dense symmetric Gram matrix, row-major.
+    pub matrix: Vec<Vec<f64>>,
+}
+
+/// Recover the Gram blocks from a solved SOS relaxation.
+///
+/// The SDP is built with the primal column layout
+/// `x = (γ, svec(Q₀), svec(Q₁), …, free λ coefficients)`, so the Gram matrices
+/// are *primal* variables the solver already computes — no dual recovery is
+/// involved. Each block occupies `bn(bn+1)/2` consecutive columns in `svec`
+/// order; [`smat`] inverts that, undoing the `√2` off-diagonal scaling.
+/// `scale` is the objective equilibration factor `s_obj`. The SDP is solved on
+/// the equilibrated problem `p' = p / s_obj`, so its Gram blocks witness
+/// `p' − γ'`; multiplying by `s_obj` gives blocks witnessing `p − γ` for the
+/// polynomial the caller actually asked about. Omitting this is silent and
+/// wrong — the matrix still looks like a Gram matrix, it just certifies a
+/// rescaled polynomial.
+fn recover_gram(x: &[f64], cones: &[ConeSpec], mi: &MomentInfo, scale: f64) -> Vec<GramBlock> {
+    let mut out = Vec::new();
+    let mut col = 1usize; // column 0 is γ
+    for (k, cone) in cones.iter().enumerate() {
+        let ConeSpec::Psd(bn) = *cone else { continue };
+        let sd = bn * (bn + 1) / 2;
+        if col + sd > x.len() {
+            break;
+        }
+        let mut flat = vec![0.0; bn * bn];
+        smat(&x[col..col + sd], bn, &mut flat);
+        let matrix = (0..bn)
+            .map(|i| {
+                flat[i * bn..(i + 1) * bn]
+                    .iter()
+                    .map(|v| v * scale)
+                    .collect()
+            })
+            .collect();
+        out.push(GramBlock {
+            basis: mi.psd_bases.get(k).cloned().unwrap_or_default(),
+            matrix,
+        });
+        col += sd;
+    }
+    out
+}
+
+/// [`sos_constrained_lower_bound_opts`], additionally returning the SOS Gram
+/// blocks that witness the bound.
+///
+/// The bound alone is a number a caller must trust. The Gram blocks are the
+/// *evidence*: with them, `p − γ = σ₀ + Σ σᵢ gᵢ` can be checked independently,
+/// which is what an exact certificate needs. They are floating point here;
+/// converting them to an exact rational identity is a separate step.
+pub fn sos_constrained_lower_bound_gram<F>(
+    prob: &PolyProblem,
+    order: Option<usize>,
+    opts: &QpOptions,
+    make_backend: F,
+) -> (SosBound, Vec<GramBlock>)
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let (prob, resc) = prob.equilibrated();
+    let (qp, cones, moments) = build_sos_sdp(&prob, order, None);
+    let sol = solve_socp_ipm(&qp, &cones, opts, make_backend);
+    let gram = recover_gram(&sol.x, &cones, &moments, resc.s_obj);
+    (
+        SosBound {
+            lower_bound: sol.x.first().copied().unwrap_or(f64::NEG_INFINITY) * resc.s_obj,
+            status: sol.status,
+        },
+        gram,
     )
 }
 
@@ -2148,5 +2240,84 @@ mod tests {
             "bound {} must not exceed the true constrained min 1",
             s.lower_bound
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod gram_tests {
+    use super::*;
+    use pounce_feral::FeralSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    /// `p(x) = x⁴ − 2x² + 2` has global minimum 1 at `x = ±1`. The SOS
+    /// relaxation should return γ ≈ 1 together with a Gram block whose
+    /// quadratic form reproduces `p − γ`.
+    ///
+    /// This is the check that matters: a Gram matrix that does not reproduce
+    /// the polynomial is not a witness of anything, and extracting one from the
+    /// wrong columns (or with the √2 scaling left on) would still *look* like a
+    /// matrix. Evaluating `m(x)ᵀ G m(x)` against `p(x) − γ` at sample points is
+    /// what distinguishes the two.
+    #[test]
+    fn recovered_gram_reproduces_the_polynomial() {
+        // x⁴ − 2x² + 2 in one variable.
+        let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 2.0)]);
+        let (bound, gram) = sos_constrained_lower_bound_gram(
+            &PolyProblem::new(p.clone()),
+            None,
+            &sos_opts(),
+            backend,
+        );
+        assert!(
+            (bound.lower_bound - 1.0).abs() < 1e-6,
+            "expected γ ≈ 1, got {}",
+            bound.lower_bound
+        );
+        assert_eq!(
+            gram.len(),
+            1,
+            "unconstrained SOS has exactly one block (σ₀)"
+        );
+
+        let g = &gram[0];
+        let bn = g.basis.len();
+        assert_eq!(g.matrix.len(), bn);
+
+        // m(x)ᵀ G m(x) must equal p(x) − γ at every sample point.
+        for &x in &[-2.0_f64, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0] {
+            let m: Vec<f64> = g.basis.iter().map(|e| x.powi(e[0] as i32)).collect();
+            let quad: f64 = (0..bn)
+                .map(|i| (0..bn).map(|j| m[i] * g.matrix[i][j] * m[j]).sum::<f64>())
+                .sum();
+            let target = x.powi(4) - 2.0 * x * x + 2.0 - bound.lower_bound;
+            assert!(
+                (quad - target).abs() < 1e-5,
+                "at x={x}: mᵀGm = {quad}, p−γ = {target}"
+            );
+        }
+    }
+
+    /// A Gram witness is only meaningful if it is PSD; check the recovered
+    /// block is (to numerical tolerance) via its diagonal and a few vectors.
+    #[test]
+    fn recovered_gram_is_positive_semidefinite() {
+        let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 2.0)]);
+        let (_b, gram) =
+            sos_constrained_lower_bound_gram(&PolyProblem::new(p), None, &sos_opts(), backend);
+        let g = &gram[0];
+        let bn = g.basis.len();
+        for i in 0..bn {
+            assert!(g.matrix[i][i] > -1e-8, "diagonal {i} is negative");
+            for j in 0..bn {
+                assert!(
+                    (g.matrix[i][j] - g.matrix[j][i]).abs() < 1e-9,
+                    "not symmetric at ({i},{j})"
+                );
+            }
+        }
     }
 }

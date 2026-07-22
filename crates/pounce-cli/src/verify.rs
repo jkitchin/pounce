@@ -532,17 +532,17 @@ pub(crate) fn name_at(names: &[String], i: usize, kind: char) -> String {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct ParsedSol {
-    x: Vec<Number>,
-    lambda: Vec<Number>,
-    solve_result_num: Option<i32>,
+pub(crate) struct ParsedSol {
+    pub(crate) x: Vec<Number>,
+    pub(crate) lambda: Vec<Number>,
+    pub(crate) solve_result_num: Option<i32>,
 }
 
 /// Parse the ASCII AMPL `.sol` form pounce writes: a free-text banner, a
 /// blank line, `Options`, an option count + that many option words, the
 /// four-integer count block `<n_dual> <m> <n_primal> <n>`, then the dual
 /// block followed by the primal block, then an optional `objno` line.
-fn parse_sol(text: &str) -> Result<ParsedSol, String> {
+pub(crate) fn parse_sol(text: &str) -> Result<ParsedSol, String> {
     // Find the "Options" delimiter line, then tokenize everything after it.
     let mut after_options = None;
     for (i, line) in text.lines().enumerate() {

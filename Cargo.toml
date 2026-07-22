@@ -16,6 +16,7 @@ members = [
     "crates/pounce-convex",
     "crates/pounce-sensitivity",
     "crates/pounce-solve-report",
+    "crates/pounce-lean-cert",
     "crates/pounce-observability",
     "crates/pounce-cinterface",
     "crates/pounce-py",
@@ -46,6 +47,7 @@ default-members = [
     "crates/pounce-convex",
     "crates/pounce-sensitivity",
     "crates/pounce-solve-report",
+    "crates/pounce-lean-cert",
     "crates/pounce-observability",
     "crates/pounce-cinterface",
     "crates/pounce-cli",
@@ -81,6 +83,7 @@ pounce-qp = { path = "crates/pounce-qp", version = "0.9.0" }
 pounce-convex = { path = "crates/pounce-convex", version = "0.9.0" }
 pounce-sensitivity = { path = "crates/pounce-sensitivity", version = "0.9.0" }
 pounce-solve-report = { path = "crates/pounce-solve-report", version = "0.9.0" }
+pounce-lean-cert = { path = "crates/pounce-lean-cert", version = "0.9.0" }
 pounce-studio-core = { path = "crates/pounce-studio-core", version = "0.9.0" }
 pounce-observability = { path = "crates/pounce-observability", version = "0.9.0" }
 # feral: pinned to the published crates.io release so the pounce crates stay

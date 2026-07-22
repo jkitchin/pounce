@@ -46,6 +46,7 @@ pounce-presolve.workspace = true
 pounce-linalg.workspace = true
 pounce-sensitivity.workspace = true
 pounce-solve-report.workspace = true
+pounce-lean-cert.workspace = true
 pounce-studio-core.workspace = true
 pounce-observability.workspace = true
 # Specialized convex LP/QP interior-point solver, dispatched to for
@@ -78,6 +79,10 @@ default = []
 # turns on the matching feature in pounce-algorithm so the option
 # `linear_solver = ma57` resolves to MA57 instead of falling back to FERAL.
 ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
+
+[dev-dependencies]
+# Exact rationals for the SOS end-to-end test (tests/sos_exact.rs).
+num-rational = { version = "0.4", default-features = false, features = ["std", "num-bigint"] }
 
 [lints]
 workspace = true
