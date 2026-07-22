@@ -26,6 +26,20 @@ changes.
   a relative test for `d ∈ null(P)`. LPs (`P` empty, `Pd` exactly zero) and
   genuinely singular Hessians with `d` in the nullspace are unaffected, so
   real unboundedness is still detected.
+### Fixed — `check_psd` validated a different matrix than the solver used (#279)
+
+- With a `scipy.sparse` COO `P` containing **duplicate `(row, col)` entries**,
+  the PSD guard reconstructed the Hessian by *assignment* (last duplicate
+  wins) while the solver *sums* them, per the COO convention. The guard
+  therefore validated a matrix that was never solved: an indefinite `P` passed
+  `check_psd=True` and `solve_qp` returned `status="optimal"` at a saddle
+  point. `coo_matrix(([2, 2, 1.5, 1.5], ([0, 1, 1, 1], [0, 1, 0, 0])))` is
+  indefinite when summed (eigenvalues `[-1, 5]`) but positive definite under
+  overwrite (`[0.5, 3.5]`); the identical **dense** matrix was always rejected
+  correctly.
+- Duplicate entries now accumulate, so sparse and dense inputs reach the same
+  verdict. The mirror write is skipped on the diagonal so a duplicated
+  diagonal entry is not counted twice.
 
 ### Fixed — constraint dual sign convention (#271, #272)
 
