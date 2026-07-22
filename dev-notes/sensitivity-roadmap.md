@@ -52,26 +52,27 @@ closed one.
 
 ## Where we are
 
-`estimate()` (`pyomo-pounce/pyomo_pounce/sens.py:598`) computes the
+`estimate()` (in `pyomo-pounce/pyomo_pounce/sens.py`) computes the
 first-order parametric step and returns the updated solution:
 
 ```
 dx    = session.solver.parametric_step(pin_idx, deltas)   # Schur backsolve
-x_new = session.base_x + dx                               # sens.py:623
+x_new = session.base_x + dx                               # linear predictor
 ...
-x_new = np.clip(x_new, lo, hi)                            # sens.py:636 (warns)
+x_new = np.clip(x_new, lo, hi)                            # clamp; warns first
 ```
 
 The step itself is one Schur-complement backsolve against the held KKT
-factorization (`crates/pounce-sensitivity/src/solver.rs:360`,
-`parametric_step`, via `IndexSchurData`). The sIPOPT port itself is done
+factorization (`parametric_step` in
+`crates/pounce-sensitivity/src/solver.rs`, via `IndexSchurData`). The
+sIPOPT port itself is done
 (pounce#7 and its spun-out pieces #16, #17 are closed): the predictor runs
 on real problems. Two properties matter for this roadmap:
 
 1. **On a bound crossing it does a single-pass clamp.** The offending
    variable is clipped to its bound and the other coordinates keep their
    linear-predictor values, frozen. This holds at both layers: the
-   pyomo-pounce `np.clip` above (`sens.py:636`) and the Rust
+   pyomo-pounce `np.clip` above and the Rust
    `crates/pounce-sensitivity/src/boundcheck.rs`, which is gated by the
    `sens_boundcheck` option and is itself only a single-pass clamp, "a
    simpler single-pass clamp rather than upstream's iterative
@@ -155,7 +156,7 @@ constitute full parity. **(a) Fix-relax** (the substantial one): upgrade
 augment the held factorization with a row pinning the first crossing
 variable, re-solve so the non-violating coordinates absorb the pin, via
 the `IndexSchurData` path that already does the augmented backsolve
-(`solver.rs:360`,`:384`). The `sens_boundcheck` option and the module
+(`parametric_step` in `solver.rs`). The `sens_boundcheck` option and the module
 already exist, so this is a scoped change to one module, not greenfield;
 low-rank Schur update, no refactor; validate against upstream
 `SensStdStepCalc.cpp`. Since pounce#7 no longer covers it, it should get
