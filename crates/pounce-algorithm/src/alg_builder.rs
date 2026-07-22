@@ -922,6 +922,7 @@ impl AlgorithmBuilder {
                 adaptive.mu_max = self.mu.mu_max;
                 adaptive.mu_max_fact = self.mu.mu_max_fact;
                 adaptive.mu_min = self.mu.mu_min;
+                adaptive.compl_inf_tol = self.conv_check.compl_inf_tol;
                 adaptive.mu_linear_decrease_factor = self.mu.mu_linear_decrease_factor;
                 adaptive.mu_superlinear_decrease_power = self.mu.mu_superlinear_decrease_power;
                 adaptive.barrier_tol_factor = self.mu.barrier_tol_factor;

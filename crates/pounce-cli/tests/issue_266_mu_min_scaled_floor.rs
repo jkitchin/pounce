@@ -170,3 +170,16 @@ fn hs71_obj1e8_certifies_with_loosened_compl_inf_tol() {
     let report = solve("hs71_obj1e8.nl", &["compl_inf_tol=1e-2"]);
     assert_solved_at_optimum(&report, "hs71×1e8 (compl_inf_tol=1e-2)");
 }
+
+/// The same unconverted `mu_min` lived in the adaptive strategy's clamps
+/// (`adaptive.rs`: the fixed-mode reduction, the fixed-mode re-seed, the
+/// oracles' internal `[mu_min, mu_max]` bands, and the final band clamp).
+/// The consequence there is milder — the acceptable-level fallback rescues
+/// the solve into `Solved_To_Acceptable_Level` — but code 100 is still
+/// outside AMPL's 0..99 solved band. Post-fix the strict certificate must be
+/// issued.
+#[test]
+fn hs71_obj1e8_certifies_under_adaptive_mu_strategy() {
+    let report = solve("hs71_obj1e8.nl", &["mu_strategy=adaptive"]);
+    assert_solved_at_optimum(&report, "hs71×1e8 (mu_strategy=adaptive)");
+}

@@ -141,12 +141,7 @@ impl MonotoneMuUpdate {
     /// it is absent or degenerate — a floor that is too low only costs
     /// iterations, whereas one that is too high costs the certificate.
     pub fn scaled_compl_inf_tol(&self, obj_scaling_factor: Number) -> Number {
-        let df = obj_scaling_factor.abs();
-        if df.is_finite() && df > 0.0 {
-            self.compl_inf_tol * df
-        } else {
-            self.compl_inf_tol
-        }
+        crate::mu::scaled_compl_inf_tol(self.compl_inf_tol, obj_scaling_factor)
     }
 
     /// `mu_min` capped so it can never block the termination certificate
@@ -178,8 +173,12 @@ impl MonotoneMuUpdate {
     /// cap (`compl_inf_tol/(barrier_tol_factor+1) ≈ 9e-6` at defaults) sits
     /// far above `100 · mu_min`.
     pub fn certificate_safe_mu_min(&self, obj_scaling_factor: Number) -> Number {
-        self.mu_min
-            .min(self.scaled_compl_inf_tol(obj_scaling_factor) / (self.barrier_tol_factor + 1.0))
+        crate::mu::certificate_safe_mu_min(
+            self.mu_min,
+            self.compl_inf_tol,
+            self.barrier_tol_factor,
+            obj_scaling_factor,
+        )
     }
 
     /// Pure scalar reduction used by the trait impl. Exposed so unit
