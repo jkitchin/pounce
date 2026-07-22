@@ -71,13 +71,35 @@ slice (`m.x[t, :]`) or a `(Var, time)` pair, not just a hand-listed VarData
 set, so an MHE arrival state at one time point is one call rather than an
 enumeration.
 
-**3. Sensitivity as a solve-time switch, decoupled from `declare_fitted`.**
-Retaining the factorization for post-solve use is currently triggered by the
-presence of a declaration. Item 2 makes the block a call argument, so a
-caller may want no declaration at all. Add an explicit switch to enable
-sensitivity (retain the factor) at solve time. `declare_fitted` still
-enables it as before and now also serves as the default block; the switch
-lets a declaration-free `information(model, wrt=...)` flow work.
+**3. `retain_kkt()`, a factor-retention switch decoupled from
+declarations.** The solve factors the KKT to solve the NLP; the only
+question is whether that factor is kept for post-solve queries. Today it is
+kept whenever a declaration is present (`declare_sens_param`,
+`declare_fitted`, or `declare_residual`). Item 2 lets the block move to a
+call argument, so a caller may want no declaration at all. `retain_kkt()`
+keeps the factor without committing to a block, param, or residual. It
+defaults off, so a solve with no sensitivity pays nothing.
+
+`retain_kkt()` is not specific to this surface. Keeping the factor is the
+substrate every sensitivity feature rests on, and `gradient()` and
+`estimate()` already get it as a side effect of the `declare_sens_param`
+they require, so they never call `retain_kkt()` and it has no user-facing
+effect on them. The only flow that needs a declaration-free retain is
+`covariance` / `information` driven purely by `wrt=`.
+
+`wrt=` itself is not gated by `retain_kkt()`. It needs the factor kept, and
+`declare_fitted` already keeps it, so `wrt=` works with `declare_fitted`
+alone. `retain_kkt()` earns its place only when you want the factor kept
+with no default block at all: the declaration-free MHE case, where the
+arrival state and the parameters are each queried by `wrt=` and neither is a
+default.
+
+| setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
+|---|---|---|---|
+| nothing | no | error | error |
+| `declare_fitted(S)` | yes | over S | over T |
+| `retain_kkt()` only | yes | error, no default | over T |
+| `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
 
 ## Marginal versus conditional: the one semantic to get right
 
@@ -102,7 +124,8 @@ slicing.
 
 ## MHE in one solve
 
-Per window: solve the MHE NLP once with sensitivity on. Then
+Per window: solve the MHE NLP once with `retain_kkt()` set, so the factor is
+kept with no default block. Then
 
 - `information(model, wrt=arrival_block)` is `Pi^{-1}` for the next window,
   Lagrangian. It comes out as the posterior, not just the data: the current
@@ -123,7 +146,7 @@ is a modeling choice, set by whether the parameters are in the arrival block.
 
 pyomo-pounce only. All three items are additive to v0.9: `information()` is
 a new function, `wrt=` (with its slice and `(Var, time)` block forms) is a
-new optional keyword, and the sensitivity switch is new surface. Nothing
+new optional keyword, and `retain_kkt()` is new surface. Nothing
 changes an existing signature. v0.9 `covariance(model)` with no `wrt=` reduces onto the declared
 set, which is exactly the v0.10 no-argument default, so the v0.9 surface is
 a forward-compatible subset. Nothing here needs to be rushed into v0.9.
