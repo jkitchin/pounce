@@ -154,8 +154,11 @@ fn dual_guard_diversion_returns_a_stationary_point() {
 // acceptable point the diverted run ever reached — see
 // `honour_best_acceptable_after_dual_guard`.
 //
-// deb7 is still exercised below, by the relative hair-trigger comparison, which
-// is host-independent by construction.
+// deb7 is still exercised below, under maximum firing pressure — but only for
+// invariants that hold on every host (a valid, honestly-labelled point), not the
+// cross-host objective comparison an earlier version tried and gh #267 retired.
+// The fallback's actual guarantee is a property of the ranking, proven
+// host-independently by the `ranks_better_*` unit tests in `ipopt_alg.rs`.
 
 /// The guard must stay off unless asked for. This is the model that decided it:
 /// `pooling_rt2stp` solves cleanly with the guard disabled and at streaks 5, 25
@@ -190,57 +193,66 @@ fn pooling_rt2stp_solves_at_default_settings() {
     );
 }
 
-/// The "never worse off" property under **maximum firing pressure**.
+/// Under **maximum firing pressure** the guard must still return a valid,
+/// honestly-labelled point — but this test does *not* assert it beats the
+/// counterfactual of never diverting, which the mechanism cannot promise
+/// (gh #267).
 ///
 /// `dual_diverging_streak=1` is a hair trigger: the guard diverts on the first
 /// growing dual-infeasibility step in the elevated regime, so it fires early and
-/// often on models that would otherwise converge untouched. If the fallback were
-/// incomplete, this is where it would show — a diversion landing somewhere the
-/// solve cannot recover from.
+/// often on models that would otherwise converge untouched. That makes it the
+/// sharpest probe of the record/read machinery — it moves the diversion as early
+/// as it can go, exercising the recorder on points at and before the diversion.
 ///
-/// This is also the test that covers the gap the first version of the fix had.
-/// Recording was originally gated on `dual_guard_fired`, but the guard returns
-/// to the driver *before* the recording site on the iteration it fires, so
-/// nothing at or before the diversion was captured. `autocorr_bern55-06` did not
-/// expose it — its better point arrives at iteration 86, long after the guard
-/// fires at 23 — so a hair trigger, which moves the diversion as early as it can
-/// go, is the sharper probe.
+/// WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. An earlier version
+/// asserted `guard_on_obj <= guard_off_obj + slack` — that a diverted run is no
+/// worse than *not diverting*. gh #267 caught that as unsound: the fallback
+/// guarantees only that a diverted run is no worse than the best acceptable
+/// point *that same run visited*, never that diverting beats the counterfactual
+/// solve that never happened. That comparison passed only by a slack ~28,000x
+/// the real gap, and on a host whose streak=1 basin flips — as `deb7`'s does at
+/// streak 15, 97.56 off vs 127.87 on — it would fail on basin luck, not on any
+/// defect. It was host-independent in form, not in outcome.
 ///
-/// DELIBERATELY RELATIVE, no absolute reference. An earlier version asserted that
-/// the guard-off arm reproduced a hard-coded objective, to stop fixture drift
-/// making the test vacuous. That assertion was itself wrong: which local optimum
-/// these nonconvex models land in is **platform-dependent**. `deb7` with the
-/// guard off returns 104.95 on macOS/FERAL and 97.56 on the Linux CI runner, so
-/// the hard-coded value failed in CI. Both are legitimate local optima; POUNCE
-/// claims neither globally.
-///
-/// That platform dependence is not noise around the property being tested — it
-/// *is* the property. A heuristic whose benefit varies by host is basin luck, and
-/// it is the reason `dual_diverging_streak` is off by default.
-///
-/// Vacuity is covered by the two tests above, which pin that the guard fires on
-/// `autocorr_bern55-06` at streak 15 and that the fallback recovers the optimum.
-/// Here the comparison is between two live solves on the same machine and build,
-/// so it cannot go stale.
+/// The mechanism's real guarantee is a property of the ranking, and it is proven
+/// host-independently, by cases, in the `ranks_better_*` unit tests in
+/// `ipopt_alg.rs`. Here we assert only what is sound under heavy firing on every
+/// host: each arm terminates with a finite objective, and — the gh #267
+/// invariant — never reports a success/acceptable status while carrying a
+/// grossly-infeasible point. Feasibility is not silently traded for a
+/// better-looking objective.
 #[test]
-fn hair_trigger_guard_never_degrades_the_answer() {
+fn hair_trigger_guard_returns_a_valid_honestly_labelled_point() {
     for name in ["autocorr_bern55-06.nl", "deb7.nl"] {
-        let off = solve(name, &["max_wall_time=20", "dual_diverging_streak=0"]);
-        let hair = solve(name, &["max_wall_time=20", "dual_diverging_streak=1"]);
-        // Minimization: the hair-trigger arm must not return a higher objective
-        // than the same build reaches with the guard disabled. A small relative
-        // slack absorbs last-digit differences between two legitimately
-        // different trajectories.
-        let off_obj = off.solution.objective;
-        let hair_obj = hair.solution.objective;
-        let slack = 1e-6 * off_obj.abs().max(1.0);
-        assert!(
-            hair_obj <= off_obj + slack,
-            "{name}: hair-trigger guard (dual_diverging_streak=1) returned \
-             {hair_obj} — worse than the {off_obj} the same build reaches with \
-             the guard disabled. The diversion left the solve worse off, which \
-             the best-acceptable fallback exists to prevent (pounce#250 follow-up)",
-        );
+        for streak in ["dual_diverging_streak=0", "dual_diverging_streak=1"] {
+            let report = solve(name, &["max_wall_time=20", streak]);
+            let obj = report.solution.objective;
+            assert!(
+                obj.is_finite(),
+                "{name} ({streak}): non-finite objective {obj} under hair-trigger \
+                 firing — the diversion produced garbage (gh #267 / pounce#250)",
+            );
+            // The gh #267 invariant: a success/acceptable status (AMPL
+            // solve_result_num 0..199) must describe a feasible point. At default
+            // tolerances the acceptable gate already bounds this; asserting it
+            // here guards the fallback + status mapping against a regression that
+            // restores an infeasible point under a success status, and it holds
+            // on every host (unlike the objective comparison it replaced). The
+            // pre-fix gh #267 failure sat at violation 9.94 under this very
+            // status; the bound is far below that and far above what a genuine
+            // acceptable point reaches.
+            let code = report.solution.solve_result_num;
+            if (0..200).contains(&code) {
+                let viol = report.statistics.final_constr_viol;
+                assert!(
+                    viol < 1e-2,
+                    "{name} ({streak}): reported a success/acceptable status \
+                     (solve_result_num={code}) at constraint violation {viol} — \
+                     the fallback handed back an infeasible point under a success \
+                     status (gh #267)",
+                );
+            }
+        }
     }
 }
 

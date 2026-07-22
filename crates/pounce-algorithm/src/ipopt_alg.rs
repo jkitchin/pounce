@@ -879,27 +879,19 @@ impl IpoptAlgorithm {
     /// gh #200 comparisons already rely on, and it keeps a `NaN`-objective
     /// returned point losing to a finite recorded one in
     /// [`Self::honour_best_acceptable_after_dual_guard`].
+    ///
+    /// The ranking itself lives in the pure [`ranks_better_within_band`] so its
+    /// never-worse-off guarantee can be proven by deterministic unit tests rather
+    /// than inferred from a host-dependent end-to-end objective comparison (see
+    /// gh #267, which flagged an earlier CLI test for measuring the wrong,
+    /// host-varying property). This method only resolves the admitted band.
     fn ranks_better(&self, a_obj: Number, a_viol: Number, b_obj: Number, b_viol: Number) -> bool {
-        if !a_obj.is_finite() {
-            return false;
-        }
-        if !b_obj.is_finite() {
-            return true;
-        }
         let band = self
             .bundle
             .conv_check
             .acceptable_constr_viol_tol_or_default()
             .min(Self::FEASIBLE_ENOUGH_CAP);
-        // A non-finite violation is never feasible_enough.
-        let feasible = |v: Number| v.is_finite() && v <= band;
-        let (a_ok, b_ok) = (feasible(a_viol), feasible(b_viol));
-        if a_ok != b_ok {
-            // The feasible_enough point wins outright.
-            return a_ok;
-        }
-        // Same feasibility class: lower objective wins (original behaviour).
-        a_obj < b_obj
+        ranks_better_within_band(a_obj, a_viol, b_obj, b_viol, band)
     }
 
     /// Make the dual-divergence guard's diversion non-destructive (pounce#250
@@ -2789,6 +2781,45 @@ enum IterateOutcome {
     Terminate(SolverReturn),
 }
 
+/// Feasibility-aware ranking core for the best-acceptable fallback (gh #267).
+///
+/// `true` iff candidate `(a_obj, a_viol)` ranks **strictly** better than
+/// `(b_obj, b_viol)` under the `(feasible_enough, objective)` key, where a point
+/// is `feasible_enough` when its unscaled max-norm constraint violation is
+/// within `band`. Lexicographic: a `feasible_enough` point beats one that is not
+/// outright; among points in the same feasibility class, the lower objective
+/// wins. A non-finite objective ranks worst (never wins, always loses to a
+/// finite one); a non-finite violation is never `feasible_enough`.
+///
+/// Pure and total, so the fallback's "never worse off" guarantee is a theorem
+/// this function's unit tests prove by cases — host-independent by construction,
+/// unlike an end-to-end objective comparison across two live nonconvex solves
+/// (the trap gh #267 caught). [`IpoptAlgorithm::ranks_better`] supplies `band`
+/// as `min(acceptable_constr_viol_tol, FEASIBLE_ENOUGH_CAP)`; both the record
+/// and the read side route through here, so they cannot disagree.
+fn ranks_better_within_band(
+    a_obj: Number,
+    a_viol: Number,
+    b_obj: Number,
+    b_viol: Number,
+    band: Number,
+) -> bool {
+    if !a_obj.is_finite() {
+        return false;
+    }
+    if !b_obj.is_finite() {
+        return true;
+    }
+    let feasible = |v: Number| v.is_finite() && v <= band;
+    let (a_ok, b_ok) = (feasible(a_viol), feasible(b_viol));
+    if a_ok != b_ok {
+        // The feasible_enough point wins outright, whatever the objectives.
+        return a_ok;
+    }
+    // Same feasibility class: lower objective wins (the original behaviour).
+    a_obj < b_obj
+}
+
 /// `||a - b||_2 / (1 + ||b||_2)`. Used by the restoration cycle
 /// detector in [`IpoptAlgorithm::invoke_restoration`] to test whether
 /// the outer iterate has moved between two consecutive restoration
@@ -3026,4 +3057,86 @@ mod tests {
     /// IPM driver.
     struct _DummyResto;
     impl RestorationPhase for _DummyResto {}
+
+    // --------------------------------------------------------------
+    // Best-acceptable fallback ranking (gh #267).
+    //
+    // These prove the "never worse off" guarantee host-independently, by
+    // cases, on the pure ranking core — the property the earlier end-to-end
+    // `hair_trigger_*` objective comparison could only *approximate* on one
+    // host's basin luck (gh #267's secondary finding). `band` here stands in
+    // for the resolved `min(acceptable_constr_viol_tol, FEASIBLE_ENOUGH_CAP)`.
+    // --------------------------------------------------------------
+
+    #[test]
+    fn ranks_better_is_a_strict_order_within_a_feasibility_class() {
+        let band = 1e-2;
+        // Both feasible: lower objective wins, strictly.
+        assert!(ranks_better_within_band(-2.0, 1e-4, -1.0, 1e-4, band));
+        assert!(!ranks_better_within_band(-1.0, 1e-4, -2.0, 1e-4, band));
+        // Ties are not "strictly better" in either direction — so an equal
+        // returned point is never displaced, matching the read side's
+        // keep-current-on-tie contract.
+        assert!(!ranks_better_within_band(-1.0, 1e-4, -1.0, 5e-3, band));
+        assert!(!ranks_better_within_band(-1.0, 5e-3, -1.0, 1e-4, band));
+        // Both infeasible: still ranked by objective (no feasible point to
+        // protect), so the fallback never *gains* infeasibility for free here.
+        assert!(ranks_better_within_band(-2.0, 5.0, -1.0, 9.0, band));
+    }
+
+    #[test]
+    fn ranks_better_puts_feasibility_first_regardless_of_objective() {
+        let band = 1e-2;
+        // The gh #267 case in miniature: a feasible point outranks an
+        // arbitrarily-lower-objective infeasible one, and vice-versa.
+        assert!(ranks_better_within_band(0.0, 1e-4, -1e9, 9.94, band));
+        assert!(!ranks_better_within_band(-1e9, 9.94, 0.0, 1e-4, band));
+        // Exactly at the band is still feasible_enough; just past it is not.
+        assert!(ranks_better_within_band(
+            1.0,
+            band,
+            -1.0,
+            band * 1.000_001,
+            band
+        ));
+    }
+
+    #[test]
+    fn ranks_better_never_lets_a_widened_band_matter_past_the_cap() {
+        // The band the method feeds is capped at FEASIBLE_ENOUGH_CAP, so a
+        // point beyond the cap is never feasible_enough however loose the
+        // user's `acceptable_constr_viol_tol`. Model that by passing the capped
+        // band: the near-optimal-but-mildly-infeasible endpoint (viol 1.13e-4,
+        // within the cap) must beat the grossly-infeasible lower-objective
+        // point (viol 9.94, past it) — the exact swap the fix forbids.
+        let band = IpoptAlgorithm::FEASIBLE_ENOUGH_CAP;
+        assert!(ranks_better_within_band(
+            -2303.99, 1.13e-4, -2307.32, 9.94, band
+        ));
+        assert!(!ranks_better_within_band(
+            -2307.32, 9.94, -2303.99, 1.13e-4, band
+        ));
+    }
+
+    #[test]
+    fn ranks_better_ranks_a_nonfinite_objective_worst() {
+        let band = 1e-2;
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            // A non-finite objective never ranks better than a finite one...
+            assert!(!ranks_better_within_band(bad, 0.0, 0.0, 9.9, band));
+            // ...and always loses to one, even on worse feasibility — so a
+            // finite recorded point is restored over a NaN-objective return,
+            // preserving the pre-fix `!(curr <= best)` NaN behaviour.
+            assert!(ranks_better_within_band(0.0, 9.9, bad, 0.0, band));
+        }
+    }
+
+    #[test]
+    fn ranks_better_treats_a_nonfinite_violation_as_infeasible() {
+        let band = 1e-2;
+        // A NaN violation is never feasible_enough, so a genuinely feasible
+        // point outranks it regardless of objective.
+        assert!(ranks_better_within_band(0.0, 0.0, -100.0, f64::NAN, band));
+        assert!(!ranks_better_within_band(-100.0, f64::NAN, 0.0, 0.0, band));
+    }
 }
