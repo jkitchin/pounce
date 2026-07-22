@@ -67,6 +67,14 @@ pub struct AdaptiveMuUpdate {
     pub filter_max_margin: Number,
     pub filter_margin_fact: Number,
     pub mu_min: Number,
+    /// Complementarity tolerance — option `compl_inf_tol`, default 1e-4 per
+    /// `IpAlgorithmRegOp.cpp`. Not used directly by the adaptive update;
+    /// enters only through [`Self::certificate_safe_mu_min`], which caps
+    /// `mu_min` so a strongly scaled-down objective can still reach the
+    /// termination certificate (pounce#266) — the μ floor lives in scaled
+    /// space while `compl_inf_tol` is enforced on the *unscaled*
+    /// complementarity.
+    pub compl_inf_tol: Number,
     /// Upper bound on μ. Sentinel `-1.0` means "not yet computed; init
     /// lazily on the first `update_barrier_parameter` call to
     /// `mu_max_fact * curr_avrg_compl()`". Mirrors
@@ -189,6 +197,7 @@ impl Default for AdaptiveMuUpdate {
             filter_max_margin: 1.0,
             filter_margin_fact: 1e-5,
             mu_min: 1e-11,
+            compl_inf_tol: 1e-4,
             // Sentinel; lazy-initialised to `mu_max_fact * avrg_compl`
             // on the first `update_barrier_parameter` call. Upstream
             // `IpAdaptiveMuUpdate.cpp:164` sets `mu_max_ = -1.` when
@@ -388,15 +397,44 @@ impl AdaptiveMuUpdate {
         }
     }
 
+    /// `mu_min` capped so it can never block the termination certificate
+    /// (pounce#266) — the adaptive twin of
+    /// [`crate::mu::monotone::MonotoneMuUpdate::certificate_safe_mu_min`],
+    /// which carries the full story. The raw absolute `mu_min` (default
+    /// `1e-11`) lives in μ's scaled space while `compl_inf_tol` is enforced
+    /// on the *unscaled* complementarity; below
+    /// `|df| ≈ mu_min·(barrier_tol_factor+1)/compl_inf_tol` an uncapped
+    /// floor pins the unscaled complementarity above `compl_inf_tol` and
+    /// the strict certificate is unreachable — in adaptive mode the solve
+    /// then degrades to `Solved_To_Acceptable_Level` (code 100, outside
+    /// AMPL's 0..99 solved band) on an iterate sitting at the optimum.
+    ///
+    /// The restoration sub-builder's `mu_min = 100 · outer_mu_min`
+    /// safeguard is unaffected for the same reason as in monotone mode:
+    /// `RestoIpoptNlp` does not override `obj_scaling_factor`, so the resto
+    /// inner IPM sees `df = 1` and the cap sits far above the safeguard.
+    pub fn certificate_safe_mu_min(&self, obj_scaling_factor: Number) -> Number {
+        crate::mu::certificate_safe_mu_min(
+            self.mu_min,
+            self.compl_inf_tol,
+            self.barrier_tol_factor,
+            obj_scaling_factor,
+        )
+    }
+
     /// Port of `AdaptiveMuUpdate::NewFixedMu`
     /// (`IpAdaptiveMuUpdate.cpp:583-627`). Selects μ when the state
     /// machine drops out of free mode. v1.0 always uses the
     /// "average complementarity" branch (no `fix_mu_oracle_` is
     /// wired; matches `fixed_mu_oracle = average_compl`).
-    fn new_fixed_mu(&self, cq: &IpoptCqHandle) -> Number {
+    ///
+    /// The lower clamp is the certificate-safe `mu_min` (pounce#266);
+    /// capped ≤ raw `mu_min`, so the `[mu_min, mu_max]` band the lazy
+    /// `mu_max` init guarantees stays valid.
+    fn new_fixed_mu(&self, cq: &IpoptCqHandle, mu_min: Number) -> Number {
         let avrg = cq.borrow().curr_avrg_compl();
         let new_mu = self.adaptive_mu_monotone_init_factor * avrg;
-        new_mu.clamp(self.mu_min, self.mu_max)
+        new_mu.clamp(mu_min, self.mu_max)
     }
 }
 
@@ -536,6 +574,16 @@ impl MuUpdate for AdaptiveMuUpdate {
         let force_no_progress = tiny_step_flag
             && self.adaptive_mu_globalization != AdaptiveMuGlobalization::NeverMonotoneMode;
 
+        // Certificate-safe μ floor (pounce#266): every place below that
+        // stops μ from descending — the fixed-mode reduction, the
+        // fixed-mode re-seed, the oracles' internal clamps, and the final
+        // band clamp — must use `mu_min` capped into the space the
+        // certificate lives in, or a strongly scaled-down objective ends
+        // `Solved_To_Acceptable_Level` on an iterate at the optimum. The
+        // `no_bounds` short-circuit above keeps the raw `mu_min`: with no
+        // bound multipliers there is no complementarity to certify.
+        let mu_min = self.certificate_safe_mu_min(cq.borrow().obj_scaling_factor());
+
         if !self.free_mu_mode {
             // Fixed-mu branch — `cpp:299-342`.
             let sufficient_progress = !force_no_progress && self.check_sufficient_progress(cq);
@@ -562,7 +610,7 @@ impl MuUpdate for AdaptiveMuUpdate {
                 if sub_problem_error <= self.barrier_tol_factor * curr_mu || tiny_step_flag {
                     let lin = self.mu_linear_decrease_factor * curr_mu;
                     let sup = curr_mu.powf(self.mu_superlinear_decrease_power);
-                    let new_mu = lin.min(sup).max(self.mu_min).min(self.mu_max);
+                    let new_mu = lin.min(sup).max(mu_min).min(self.mu_max);
                     let new_tau = self.tau_min.max(1.0 - new_mu);
                     data.borrow_mut().curr_tau = new_tau;
                     return new_mu;
@@ -617,7 +665,7 @@ impl MuUpdate for AdaptiveMuUpdate {
                         d.accept_trial_point();
                     }
                 }
-                let new_mu = self.new_fixed_mu(cq);
+                let new_mu = self.new_fixed_mu(cq, mu_min);
                 let new_tau = self.tau_min.max(1.0 - new_mu);
                 data.borrow_mut().curr_tau = new_tau;
                 return new_mu;
@@ -639,7 +687,7 @@ impl MuUpdate for AdaptiveMuUpdate {
 
         let loqo_candidate = || {
             let mut oracle = LoqoMuOracle {
-                mu_min: self.mu_min,
+                mu_min,
                 mu_max: self.mu_max,
                 avrg_compl,
                 centrality_xi,
@@ -692,7 +740,7 @@ impl MuUpdate for AdaptiveMuUpdate {
                             // was hard-coded to 100.0, so a user-set `sigma_max`
                             // reached only the quality-function oracle (L3).
                             sigma_max: self.sigma_max,
-                            mu_min: self.mu_min,
+                            mu_min,
                             mu_max: self.mu_max,
                             mu_curr: curr_mu,
                             mu_aff: curr_mu,
@@ -707,7 +755,7 @@ impl MuUpdate for AdaptiveMuUpdate {
             MuOracleKind::QualityFunction => match (nlp, pd_search_dir) {
                 (Some(nlp), Some(sd)) => {
                     let mut oracle = QualityFunctionMuOracle::new();
-                    oracle.mu_min = self.mu_min;
+                    oracle.mu_min = mu_min;
                     oracle.mu_max = self.mu_max;
                     oracle.sigma_min = self.sigma_min;
                     oracle.sigma_max = self.sigma_max;
@@ -731,7 +779,7 @@ impl MuUpdate for AdaptiveMuUpdate {
 
         // Safeguard floor + global band clamp (cpp:410-426).
         let lower = self.lower_mu_safeguard(dual_inf, primal_inf, candidate);
-        let mu = candidate.max(self.mu_min).max(lower).min(self.mu_max);
+        let mu = candidate.max(mu_min).max(lower).min(self.mu_max);
 
         // NB: upstream `IpAdaptiveMuUpdate.cpp:410-426` does NOT require
         // `mu ≤ curr_mu` in free mode — the oracle is allowed to bump
@@ -749,6 +797,37 @@ impl MuUpdate for AdaptiveMuUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pounce#266, adaptive twin of the monotone test: the raw `mu_min`
+    /// clamp must yield to `compl_inf_tol·|df|/(barrier_tol_factor+1)` once
+    /// |df| drops below `df* = mu_min·(barrier_tol_factor+1)/compl_inf_tol`,
+    /// or the strict certificate is unreachable and the solve degrades to
+    /// `Solved_To_Acceptable_Level` (code 100) at the optimum.
+    #[test]
+    fn adaptive_mu_min_is_capped_so_certificate_stays_reachable() {
+        let a = AdaptiveMuUpdate::new();
+        let df_star = a.mu_min * (a.barrier_tol_factor + 1.0) / a.compl_inf_tol;
+        assert!((df_star - 1.1e-6).abs() < 1e-21);
+        for df in [1.0, -1.0, 1e-3, 1e-5, df_star] {
+            assert_eq!(a.certificate_safe_mu_min(df), a.mu_min);
+        }
+        // HS71 × 1e8 computes df = 8.3e-8, under the cliff: the cap engages.
+        let df = 8.3e-8;
+        let capped = a.certificate_safe_mu_min(df);
+        assert!(capped < a.mu_min);
+        assert!((capped - 1e-4 * 8.3e-8 / 11.0).abs() < 1e-27);
+        assert_eq!(a.certificate_safe_mu_min(-df), capped);
+        // Degenerate factors fall back to the unconverted tolerance, whose
+        // cap (9.09e-6) leaves mu_min alone.
+        for df in [0.0, Number::NAN, Number::INFINITY] {
+            assert_eq!(a.certificate_safe_mu_min(df), a.mu_min);
+        }
+        // The restoration sub-builder's `mu_min = 100 · outer_mu_min`
+        // safeguard survives: the resto inner IPM sees df = 1.
+        let mut resto = AdaptiveMuUpdate::new();
+        resto.mu_min = 100.0 * a.mu_min;
+        assert_eq!(resto.certificate_safe_mu_min(1.0), resto.mu_min);
+    }
 
     #[test]
     fn lower_mu_safeguard_initializes_from_first_call() {
