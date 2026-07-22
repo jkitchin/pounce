@@ -9,6 +9,38 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — false `Infeasible_Problem_Detected` on a feasible, aggressively scaled NLP
+
+- **Rapid infeasibility detection now measures stationarity in the same space as
+  the violation it is paired with.** The detector fires only when the constraint
+  violation is bounded away from zero *and* the infeasibility stationarity
+  `‖Jᵀc‖ / max(1, ‖c‖)` is ~zero — no local move reduces the violation. Those two
+  halves were evaluated in different spaces: the violation on the **unscaled**
+  residual (where `constr_viol_tol` is defined, pounce#173), the stationarity on
+  the **scaled** one. The scaled measure carries a factor `dc²`, so an aggressive
+  constraint scaling collapses it toward zero on its own, independently of where
+  the iterate actually is, and both gates pass at a point that is nowhere near
+  stationary.
+- **Symptom it fixes.** On Hock–Schittkowski 13 from `x₀ = (1e4, 1e4)` the
+  starting Jacobian is ~3e8, gradient-based scaling picks `dc ≈ 3.3e-7`, and
+  POUNCE stopped after 12 iterations reporting
+  `Infeasible_Problem_Detected` — on a *feasible* problem with `f* = 1`. The
+  point it returned had a constraint violation of **0.51** in the user's units
+  (a reassuring `1.7e-7` scaled), `‖∇θ‖ = 1.40`, and no active bound blocking
+  descent; one step downhill from it reaches a feasible point. POUNCE now
+  converges to `0.98492872` in 29 iterations, matching Ipopt from the same start
+  to 9 significant figures, iteration for iteration.
+- **Why it matters more than a wrong number.** A false *unbounded* verdict is
+  loud and a driver can retry it; a false *infeasible* silently prunes a
+  branch-and-bound node that may contain the optimum.
+- Only rows are scaled and POUNCE applies no variable scaling, so the unscaled
+  gradient needs no unscaled Jacobian: `J_userᵀ c_user = J_scaledᵀ (c_scaled ⊘ dc²)`.
+  With no scaling active the measure is unchanged.
+- Bit-identical across all 1284 MINLPLib models — the corpus contains no model
+  whose infeasibility verdict this changes, because the failure needs an extreme
+  constraint scaling *and* a remote starting point.
+
+
 ### Fixed — unreachable termination certificate on a strongly objective-scaled NLP (#257)
 
 - **The dynamic barrier floor now expresses `compl_inf_tol` in the space μ

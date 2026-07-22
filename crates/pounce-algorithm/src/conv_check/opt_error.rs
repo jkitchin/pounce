@@ -453,7 +453,12 @@ impl ConvCheck for OptErrorConvCheck {
         // transient flat spot. The outer guard skips the two
         // transpose-products when detection is disabled.
         if self.infeas_stationarity_tol > 0.0 && self.infeas_max_streak > 0 {
-            let stationarity = cq.borrow().curr_infeasibility_stationarity();
+            // Unscaled, to match the space `constr_viol` above is measured in.
+            // The two halves of this test must describe the same problem; the
+            // scaled measure carries a factor `dc²` that an aggressive
+            // constraint scaling drives to zero on its own (pounce#250
+            // follow-up — see `curr_unscaled_infeasibility_stationarity`).
+            let stationarity = cq.borrow().curr_unscaled_infeasibility_stationarity();
             if self.note_infeasible_stationary(constr_viol, stationarity) {
                 return ConvergenceStatus::LocallyInfeasible;
             }

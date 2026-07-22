@@ -89,6 +89,31 @@ fn unscaled_block_amax(v: &dyn Vector, scale: Option<&[Number]>) -> Number {
     }
 }
 
+/// `v ⊘ scale²`, as a new vector. `scale == None` returns a plain clone.
+///
+/// Used to lift a scaled residual into the product `Jᵀ_user · c_user` without
+/// materialising the unscaled Jacobian — see
+/// [`IpoptCalculatedQuantities::curr_unscaled_infeasibility_stationarity`] for
+/// the derivation. A zero factor is treated as the identity, matching
+/// [`unscaled_block_amax`], so a degenerate scale never produces infinities.
+/// Falls back to a clone for a non-dense backing (POUNCE is dense-only, so that
+/// branch is defensive).
+fn divided_by_scale_squared(v: &dyn Vector, scale: Option<&[Number]>) -> Box<dyn Vector> {
+    let mut out = v.make_new();
+    out.copy(v);
+    let Some(s) = scale else {
+        return out;
+    };
+    if let Some(d) = out.as_any_mut().downcast_mut::<DenseVector>() {
+        for (x, &f) in d.values_mut().iter_mut().zip(s.iter()) {
+            if f != 0.0 {
+                *x /= f * f;
+            }
+        }
+    }
+    out
+}
+
 /// Result of [`IpoptCalculatedQuantities::adjusted_trial_bounds`]: the
 /// new `x_L / x_U / d_L / d_U` to install on the NLP when one or more
 /// trial slacks were corrected by the safe-slack mechanism.
@@ -1089,6 +1114,57 @@ impl IpoptCalculatedQuantities {
     /// No linear solve: two transpose-products. Mirrors the gradient
     /// term behind Ipopt's `IpRestoConvCheck.cpp` `LOCALLY_INFEASIBLE`
     /// test, applied here in the main loop.
+    /// [`Self::curr_infeasibility_stationarity`] measured in the **unscaled**
+    /// (user-original) space (pounce#250 follow-up).
+    ///
+    /// Rapid infeasibility detection is a two-part test: the constraint
+    /// violation must be bounded away from zero *and* the infeasibility
+    /// stationarity must be ~zero. The violation half is gated on the unscaled
+    /// residual (`constr_viol_tol` is defined there — pounce#173), so the
+    /// stationarity half must be too, or the two halves describe different
+    /// problems.
+    ///
+    /// They did. The scaled measure carries a factor `dc²`, so an aggressive
+    /// constraint scaling drives it toward zero independently of where the
+    /// iterate actually is. On HS13 from `x0 = (1e4, 1e4)` the starting
+    /// Jacobian is ~3e8, gradient-based scaling picks `dc ≈ 3.3e-7`, and at the
+    /// point POUNCE stopped the scaled stationarity reads ~5e-14 — under the
+    /// `1e-8` tolerance — while the unscaled violation is 0.51 and `‖∇θ‖ = 1.4`
+    /// with no active bound blocking descent. A single step downhill reaches a
+    /// feasible point. POUNCE reported `Infeasible_Problem_Detected` on a
+    /// feasible problem that Ipopt solves.
+    ///
+    /// Only rows are scaled (`c_scaled = dc ⊙ c_user`, and POUNCE applies no
+    /// variable scaling), so the unscaled product needs no unscaled Jacobian:
+    ///
+    /// ```text
+    ///   J_user   = diag(dc)⁻¹ J_scaled
+    ///   c_user   = dc⁻¹ ⊙ c_scaled
+    ///   J_userᵀ c_user = J_scaledᵀ (c_scaled ⊘ dc²)
+    /// ```
+    ///
+    /// so dividing the residual by `dc²` before the existing transpose-product
+    /// gives the unscaled gradient exactly. The denominator uses the unscaled
+    /// violation for the same reason. With no scaling active this is identical
+    /// to [`Self::curr_infeasibility_stationarity`].
+    pub fn curr_unscaled_infeasibility_stationarity(&self) -> Number {
+        let (dc, dd) = {
+            let nlp = self.nlp.borrow();
+            (nlp.c_scale_vec(), nlp.d_scale_vec())
+        };
+        if dc.is_none() && dd.is_none() {
+            return self.curr_infeasibility_stationarity();
+        }
+        let c_adj = divided_by_scale_squared(&*self.curr_c(), dc.as_deref());
+        let dms_adj = divided_by_scale_squared(&*self.curr_d_minus_s(), dd.as_deref());
+        let jc_t_c = self.curr_jac_c_t_times_vec(&*c_adj);
+        let jd_t_dms = self.curr_jac_d_t_times_vec(&*dms_adj);
+        let mut grad = jc_t_c.make_new();
+        grad.add_two_vectors(1.0, &*jc_t_c, 1.0, &*jd_t_dms, 0.0);
+        let viol = self.curr_unscaled_primal_infeasibility_max();
+        grad.amax() / viol.max(1.0)
+    }
+
     pub fn curr_infeasibility_stationarity(&self) -> Number {
         let c = self.curr_c();
         let dms = self.curr_d_minus_s();
