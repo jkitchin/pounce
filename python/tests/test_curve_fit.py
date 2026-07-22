@@ -36,6 +36,10 @@ def expdecay_np(x, a, b, c):
     return a * np.exp(-b * x) + c
 
 
+def expdecay_2p(x, a, b):
+    return a * np.exp(-b * x)
+
+
 # --------------------------------------------------------------------------
 # 1. OLS calibration: pins the reduced-Hessian -> covariance constant.
 # --------------------------------------------------------------------------
@@ -510,6 +514,81 @@ def test_curve_fit_rejects_wrong_length_bounds():
     r2 = pounce.curve_fit(expdecay, x, y, p0=[1, 1, 0],
                           bounds=[(-10, 10), (-10, 10), (-10, 10)])
     np.testing.assert_allclose(r1.popt, r2.popt, rtol=1e-6)
+
+
+def test_scipy_tuple_bounds_two_params_not_misread_as_pair_list():
+    """A length-2 ``(lower, upper)`` tuple follows scipy's convention even for a
+    2-parameter model, where it is *also* structurally a list of two ``(lo, hi)``
+    pairs (issue #260).
+
+    Previously pounce resolved that ambiguity the pair-list way, silently
+    applying the transposed box (param 0 in ``[l0, l1]``, param 1 in
+    ``[u0, u1]``) and returning ``Solve_Succeeded`` with a badly wrong fit. The
+    scipy oracle is the ground truth for the API pounce documents it mirrors.
+    """
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x)  # noiseless: A=2, k=1; deterministic
+    model = expdecay_2p
+
+    # scipy convention: bounds = (lower_array, upper_array) -> A in [0,10],
+    # k in [1.6,10]. k rides its lower bound, A re-fits to compensate.
+    lower, upper = [0.0, 1.6], [10.0, 10.0]
+    rp = pounce.curve_fit(model, x, y, p0=[1.0, 2.0], bounds=(lower, upper),
+                          jac="fd")
+    rs, _ = scipy_optimize.curve_fit(model, x, y, p0=[1.0, 2.0],
+                                     bounds=(lower, upper))
+    np.testing.assert_allclose(rp.popt, rs, rtol=1e-4)
+    # the true constrained optimum, not the misread box [1.6, 10.0]
+    np.testing.assert_allclose(rp.popt, [2.42445211, 1.6], rtol=1e-4)
+
+    # The equivalent per-parameter pair *list* is pounce's own API and gives the
+    # identical box (A in [0,10], k in [1.6,10]) -- the two forms agree here.
+    rl = pounce.curve_fit(model, x, y, p0=[1.0, 2.0],
+                          bounds=[(0.0, 10.0), (1.6, 10.0)], jac="fd")
+    np.testing.assert_allclose(rl.popt, rs, rtol=1e-4)
+
+
+def test_scipy_tuple_bounds_match_scipy_across_param_counts():
+    """The scipy ``(lower, upper)`` 2-tuple maps to the same box as scipy for
+    n=2 (the formerly-broken ambiguous case) and n=3, and the scalar form keeps
+    working."""
+    x = np.linspace(0.0, 3.0, 80)
+
+    # n=2
+    y2 = 2.0 * np.exp(-1.0 * x)
+    b2 = ([0.0, 1.6], [10.0, 10.0])
+    p2 = pounce.curve_fit(expdecay_2p, x, y2, p0=[1.0, 2.0], bounds=b2,
+                          jac="fd").popt
+    s2, _ = scipy_optimize.curve_fit(expdecay_2p, x, y2, p0=[1.0, 2.0], bounds=b2)
+    np.testing.assert_allclose(p2, s2, rtol=1e-4)
+
+    # n=3 (already matched scipy; guard against regression)
+    y3 = expdecay_np(x, 3.0, 0.9, 0.5)
+    b3 = ([0.0, 0.0, -5.0], [10.0, 5.0, 5.0])
+    p3 = pounce.curve_fit(expdecay_np, x, y3, p0=[1.0, 1.0, 0.0], bounds=b3,
+                          jac="fd").popt
+    s3, _ = scipy_optimize.curve_fit(expdecay_np, x, y3, p0=[1.0, 1.0, 0.0],
+                                     bounds=b3)
+    np.testing.assert_allclose(p3, s3, rtol=1e-3)
+
+    # scalar scipy form
+    ps = pounce.curve_fit(expdecay_2p, x, y2, p0=[1.0, 2.0], bounds=(0, 10),
+                          jac="fd").popt
+    ss, _ = scipy_optimize.curve_fit(expdecay_2p, x, y2, p0=[1.0, 2.0],
+                                     bounds=(0, 10))
+    np.testing.assert_allclose(ps, ss, rtol=1e-4)
+
+
+def test_scipy_tuple_bounds_reversed_looking_box_is_valid():
+    """``bounds=([0.5, 0.1], [0.6, 0.2])`` is valid scipy semantics (param 0 in
+    ``[0.5, 0.6]``, param 1 in ``[0.1, 0.2]``) and must not raise the
+    reversed-bound error it produced when misread as pairs (issue #260)."""
+    x = np.linspace(0, 3, 60)
+    y = 0.55 * np.exp(-0.15 * x)
+    r = pounce.curve_fit(expdecay_2p, x, y, p0=[0.55, 0.15],
+                         bounds=([0.5, 0.1], [0.6, 0.2]), jac="fd")
+    assert 0.5 <= r.popt[0] <= 0.6 + 1e-9
+    assert 0.1 <= r.popt[1] <= 0.2 + 1e-9
 
 
 def test_curve_fit_validates_data_sigma_fscale_p0():

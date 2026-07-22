@@ -917,6 +917,16 @@ def curve_fit(
     bound-aware, data-scale sweep scored by the objective; see
     :func:`_initial_guess`) rather than defaulting to ones.
 
+    ``bounds`` follows scipy's convention: the ``(lower, upper)`` 2-tuple, where
+    each side is a scalar or a length-``n_params`` array. So
+    ``bounds=([l0, l1], [u0, u1])`` bounds param ``i`` to ``[l_i, u_i]`` — a
+    length-2 tuple is *always* read this scipy way, including the 2-parameter
+    case where it could otherwise be mistaken for a list of ``(lo, hi)`` pairs
+    (issue #260). pounce also accepts a per-parameter pair **list**,
+    ``bounds=[(l0, u0), (l1, u1)]`` (as :func:`pounce.minimize` does), which is
+    never reinterpreted as the scipy 2-tuple; entries may be ``None`` for a
+    one-sided bound.
+
     See also ``pyomo_pounce.covariance`` (in the ``pyomo-pounce`` package),
     the counterpart surface for an estimation model written directly in
     Pyomo rather than a ``f(x, *params)`` callable. It uses the same
@@ -1448,17 +1458,34 @@ f_scale, jac, alpha, sensitivity, options
 # --------------------------------------------------------------------------
 
 def _normalize_bound_arg(bounds, n):
-    """Accept scipy's ``(lo, hi)`` scalar/array form OR a per-parameter list
-    of ``(lo, hi)`` pairs, and normalise to the per-parameter pair list that
-    :func:`pounce._minimize._normalize_bounds` expects."""
+    """Accept scipy's ``(lower, upper)`` 2-tuple form OR pounce's per-parameter
+    list of ``(lo, hi)`` pairs, and normalise to the per-parameter pair list
+    that :func:`pounce._minimize._normalize_bounds` expects.
+
+    scipy's ``curve_fit`` has exactly one ``bounds`` form — the ``(lower,
+    upper)`` 2-tuple, each side a scalar or length-``n`` array — and
+    :func:`curve_fit` documents that it mirrors scipy, so a length-2 **tuple**
+    is always read as that scipy form. This is load-bearing only for a
+    2-parameter model, where ``([l0, l1], [u0, u1])`` is *also* structurally a
+    list of two ``(lo, hi)`` pairs. That collision is genuinely ambiguous, and
+    resolving it the pair-list way silently applied the wrong box (param 0 in
+    ``[l0, l1]``, param 1 in ``[u0, u1]``) while still reporting
+    ``Solve_Succeeded`` — see issue #260. scipy's convention wins: param ``i``
+    is bounded to ``[l_i, u_i]``.
+
+    To pass pounce's per-parameter pair list — its extension over scipy — use a
+    **list**, ``[(l0, u0), (l1, u1)]`` (as :func:`pounce.minimize` does). A list
+    is never reinterpreted as the scipy 2-tuple form, so the two APIs stay
+    distinct even for ``n == 2``.
+    """
     if bounds is None:
         return None
-    # scipy form: a 2-tuple of (lower, upper), each scalar or length-n array
-    if (
-        isinstance(bounds, tuple)
-        and len(bounds) == 2
-        and not _is_pair_list(bounds, n)
-    ):
+    # scipy form: a 2-tuple of (lower, upper), each scalar or length-n array. A
+    # length-2 tuple can only double as a pair list when n == 2 (a pair list
+    # needs one pair per parameter); we deliberately resolve that lone ambiguous
+    # case to the scipy convention curve_fit mirrors, rather than the pair-list
+    # reading, so the returned box matches scipy's (issue #260).
+    if isinstance(bounds, tuple) and len(bounds) == 2:
         lo, hi = bounds
         lo_a, hi_a = _to_array(lo), _to_array(hi)
         for side, arr in (("lower", lo_a), ("upper", hi_a)):
@@ -1471,14 +1498,6 @@ def _normalize_bound_arg(bounds, n):
         hi = np.broadcast_to(hi_a, (n,))
         return list(zip(lo.tolist(), hi.tolist()))
     return bounds  # already a per-parameter list of pairs (validated downstream)
-
-
-def _is_pair_list(bounds, n):
-    if len(bounds) != n:
-        return False
-    return all(
-        (isinstance(b, (tuple, list)) and len(b) == 2) or b is None for b in bounds
-    )
 
 
 def _make_problem_obj(objective, gradient, hess, n, m, g, jac_g):
