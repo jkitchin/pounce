@@ -839,11 +839,21 @@ impl IpoptAlgorithm {
     /// Make the dual-divergence guard's diversion non-destructive (pounce#250
     /// follow-up).
     ///
-    /// The guard bets that routing to restoration beats grinding on. That bet
-    /// is usually right — on the MINLPLib corpus it rescues twice as many
-    /// models as it harms — but nothing made it *safe*: a lost bet could return
-    /// a materially worse point than the solve already had, under a status that
-    /// does not admit it.
+    /// The guard bets that routing to restoration beats grinding on, and nothing
+    /// made losing that bet safe: it could return a materially worse point than
+    /// the solve already had, under a status that does not admit it.
+    ///
+    /// WHAT THIS DOES AND DOES NOT GUARANTEE. It guarantees the diverted run
+    /// never returns worse than the best acceptable-quality point **that same
+    /// run visited**. It does *not* guarantee the diverted run is no worse than
+    /// not diverting at all — that counterfactual solve never happened, and its
+    /// points were never on offer to compare against. The distinction is not
+    /// academic: on the Linux CI host `deb7` returns 97.56 with the guard off and
+    /// 127.87 with it on at streak 15, and this fallback cannot close that gap,
+    /// because 127.87 is the best acceptable point the diverted run ever reached.
+    /// Bounding the diversion's damage is a weaker property than making the
+    /// diversion harmless, and only the weaker one is available from inside a
+    /// single solve. It is a large part of why the guard is off by default.
     ///
     /// The observed case is `autocorr_bern55-06`. The guard fires at iteration
     /// 23, the diverted run reaches the true optimum (-2304.0000278, matching
@@ -864,10 +874,12 @@ impl IpoptAlgorithm {
     ///
     /// A strict `Success` is never overridden — that point carries a real
     /// certificate, and a lower objective at a merely-acceptable point must not
-    /// displace it. Tuning the guard's firing threshold was tried first and
-    /// rejected: every setting that spares this model also loses the `deb7` /
-    /// `deb9` rescues, because the guard's default streak of 15 sits between
-    /// them. Fixing the consequence rather than the trigger keeps both.
+    /// displace it.
+    ///
+    /// Tuning the guard's firing threshold was tried first and rejected: no
+    /// setting separates the models it helps from the ones it harms, and the
+    /// effect turned out to differ by host anyway (see the option help in
+    /// `upstream_options.rs`). Fixing the consequence is what remained available.
     fn honour_best_acceptable_after_dual_guard(&mut self, result: SolverReturn) -> SolverReturn {
         if !self.dual_guard_fired || matches!(result, SolverReturn::Success) {
             return result;

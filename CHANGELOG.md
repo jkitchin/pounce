@@ -23,11 +23,18 @@ changes.
   at no other value tried, while `pooling_rt2stp` turns from `Solve_Succeeded`
   into `Maximum_Iterations_Exceeded` at 10 and 15 only, solving cleanly at 0, 5,
   25 and 40.
-- **The upside is also host-dependent.** Those `deb7`/`deb9` numbers are
-  macOS/FERAL; on the Linux CI runner both models reach 97.56 with the guard
-  *disabled*, so there is no rescue to attribute to it there. A benefit that
-  appears on one host and not another is not a property of the algorithm, which
-  settles the question: it does not belong in the default path.
+- **The effect differs by host in _sign_.** Those `deb7`/`deb9` numbers are
+  macOS/FERAL. On the Linux CI runner the same `dual_diverging_streak=15` makes
+  `deb7` *worse*: 97.56 with the guard off, 127.87 with it on. It helps on one
+  platform and hurts on the other, same source, same fixture. A heuristic whose
+  sign depends on the host is not a property of the algorithm, which settles the
+  question: it does not belong in the default path.
+- **This also bounds what the fallback below can promise.** It guarantees a
+  diverted run never returns worse than the best acceptable point *that run
+  visited*; it cannot make the diversion no worse than not diverting, because
+  that counterfactual solve never happened. On Linux the guard costs `deb7` 30 %
+  of its objective and the fallback cannot recover it — 127.87 *is* the best
+  acceptable point the diverted run reached.
 - **The two sides are not commensurate.** The upside is a better local optimum on
   an already-solved nonconvex problem; the downside is a clean solve becoming a
   failure. A net-positive count on one corpus is not a reason to impose that on

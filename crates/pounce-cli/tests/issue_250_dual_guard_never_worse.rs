@@ -13,8 +13,8 @@
 //!
 //!   * `deb7`/`deb9` reach a better local optimum (104.95 -> 97.56) at *exactly*
 //!     15, and at no other value tried (0, 5, 25, 32, 40, 60) — on macOS/FERAL.
-//!     On the Linux CI runner they reach 97.56 with the guard off as well, so
-//!     even the upside is host-dependent.
+//!     On the Linux CI runner the same setting makes `deb7` *worse*: 97.56 with
+//!     the guard off, 127.87 with it on. The effect differs by host in **sign**.
 //!   * `pooling_rt2stp` turns from `Solve_Succeeded` into
 //!     `Maximum_Iterations_Exceeded` at 10 and 15 only — solving cleanly at 0, 5,
 //!     25 and 40.
@@ -129,38 +129,32 @@ fn dual_guard_diversion_returns_a_stationary_point() {
     );
 }
 
-/// With the guard enabled, `deb7` reaches the good local optimum (~97.56).
+/// `deb7` carries NO absolute assertion, deliberately, and the reason is the
+/// single most decisive measurement in this investigation.
 ///
-/// This was originally written as "the guard is load-bearing here: this model is
-/// only solved *because* it fires", on the strength of macOS/FERAL measurements
-/// where disabling it returns 104.95. That claim is **host-dependent** and does
-/// not generalise: on the Linux CI runner `deb7` reaches 97.56 with the guard off
-/// too, so there is no rescue to preserve there.
+/// The guard's effect on this model differs by host **in sign**:
 ///
-/// What survives on both platforms is the weaker, checkable statement asserted
-/// below — enabling the guard does not prevent this model reaching ~97.56. The
-/// stronger claim is deliberately not asserted, because it would pass on one host
-/// and fail on the other.
+/// | host              | guard off | guard on (streak 15) |
+/// |-------------------|-----------|----------------------|
+/// | macOS / FERAL     |    104.95 |            **97.56** |
+/// | Linux CI runner   |     97.56 |           **127.87** |
 ///
-/// The correction matters beyond this test: "the guard rescues deb7/deb9" was
-/// part of the case for keeping it default-on. A benefit that appears on one host
-/// and not another is basin luck, which is why the guard is now opt-in.
+/// It helps on one platform and hurts on the other, from the same source, on the
+/// same fixture. Two earlier versions of this test tried to pin a value here —
+/// first "the guard rescues deb7 to 97.56", then the weaker "enabling the guard
+/// still reaches ~97.56" — and CI falsified both. There is no cross-platform
+/// claim to make.
 ///
-/// `deb9` and `deb8` behave the same way on macOS (`deb9` 104.53 -> 97.56,
-/// `deb8` 4005.89 -> 1350.42); only `deb7` is vendored, since three ~150 kB
-/// fixtures buy no coverage the first does not.
-#[test]
-fn dual_guard_enabled_still_reaches_deb7_optimum() {
-    let expected = 97.559_934_894_163_59;
-    let report = solve("deb7.nl", &GUARD_ON);
-    let obj = report.solution.objective;
-    let rel = (obj - expected).abs() / expected.abs();
-    assert!(
-        rel < 1e-4,
-        "deb7 with the guard enabled: got {obj}, expected ~{expected} \
-         (rel err {rel:.3e}; pounce#250 follow-up)",
-    );
-}
+/// That is the finding, not an obstacle to testing it. A heuristic whose sign
+/// depends on the host is not a property of the algorithm, and it is why
+/// `dual_diverging_streak` is off by default. It also bounds what the
+/// best-acceptable fallback can promise: on Linux the guard costs deb7 30 % of
+/// its objective and the fallback cannot recover it, because 127.87 is the best
+/// acceptable point the diverted run ever reached — see
+/// `honour_best_acceptable_after_dual_guard`.
+///
+/// deb7 is still exercised below, by the relative hair-trigger comparison, which
+/// is host-independent by construction.
 
 /// The guard must stay off unless asked for. This is the model that decided it:
 /// `pooling_rt2stp` solves cleanly with the guard disabled and at streaks 5, 25
