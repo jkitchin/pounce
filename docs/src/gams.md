@@ -91,6 +91,25 @@ GAMS invokes the launcher with a control file; the launcher runs the Python
 link, which reads the model through GMO/GEV, solves it with POUNCE, and writes
 the primal/dual solution and GAMS model/solve status back.
 
+### Marginals
+
+Equation marginals (`.M`) follow the usual GAMS convention: they are stated
+against the objective **as you wrote it**, for both `minimizing` and
+`maximizing` models. POUNCE always minimizes internally, so for a
+`maximizing` model it solves `min(−f)` and converts its multipliers back
+via `pi = −obj_sign · λ` (see `gams_pi` in `python/pounce/gams/link.py` and
+the matching block in `gams/gams_pounce.c`).
+
+Variable marginals (`.M` on variables, i.e. reduced costs) are
+`z_L − z_U`, carrying the same `obj_sign` factor.
+
+> Before v0.9.1 the conversion omitted the `obj_sign` factor, so equation
+> marginals on `maximizing` models came back with the wrong sign
+> ([#272](https://github.com/jkitchin/pounce/issues/272)). `minimizing`
+> models, objective values, variable marginals and status mapping were
+> never affected. Both the pip link and the native C link were affected
+> identically, so the install method made no difference.
+
 ## Option files
 
 If a model sets `mymodel.optfile = 1`, POUNCE reads `pounce.opt` (`.op2`,

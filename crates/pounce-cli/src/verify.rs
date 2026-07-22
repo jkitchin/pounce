@@ -1009,7 +1009,7 @@ mod tests {
         let payload = SolutionFile {
             message: &message,
             x: &[1.0, 2.5, -0.5, 100.0],
-            lambda: &[0.1, -0.2],
+            mult_g: &[0.1, -0.2],
             solve_result_num: 0,
             suffixes: &[],
         };
@@ -1019,7 +1019,14 @@ mod tests {
         assert_eq!(parsed.lambda.len(), 2);
         assert!((parsed.x[1] - 2.5).abs() < 1e-15);
         assert!((parsed.x[3] - 100.0).abs() < 1e-12);
-        assert!((parsed.lambda[0] - 0.1).abs() < 1e-15);
+        // The primal round-trips as an identity, but the dual block does
+        // NOT: `format_sol` negates pounce's internal multipliers into the
+        // AMPL marginal convention (gh #271), and `parse_sol` reads the
+        // file back verbatim. So a `mult_g` of +0.1 must come back as a
+        // parsed dual of -0.1. Asserting identity here is what previously
+        // let the sign defect pass unnoticed.
+        assert!((parsed.lambda[0] + 0.1).abs() < 1e-15);
+        assert!((parsed.lambda[1] - 0.2).abs() < 1e-15);
         assert_eq!(parsed.solve_result_num, Some(0));
     }
 
@@ -1028,7 +1035,7 @@ mod tests {
         let payload = SolutionFile {
             message: "msg",
             x: &[3.0, 4.0],
-            lambda: &[],
+            mult_g: &[],
             solve_result_num: 200,
             suffixes: &[],
         };

@@ -1093,10 +1093,24 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
             gmoSetHeadnTail(gmo, gmoHiterused, (double)iters_now);
         }
 
-        /* Negate constraint multipliers: POUNCE lambda -> GAMS pi */
+        /* Constraint multipliers: POUNCE lambda -> GAMS pi.
+         *
+         * POUNCE always minimizes, so for a `maximizing` model it solves
+         * min(-f) and its lambda refers to that negated objective. GAMS
+         * marginals are stated against the ORIGINAL objective, so the
+         * conversion carries the same obj_sign factor already applied to
+         * the objective value (line ~1081) and to the variable marginals
+         * (below):
+         *
+         *     pi = -obj_sign * lambda
+         *
+         * which reduces to the historical `-lambda` for minimizing models
+         * and flips it for maximizing ones. Omitting obj_sign here — while
+         * applying it everywhere else — inverted every equation marginal on
+         * max models. See gh #272. */
         if (mult_g) {
             for (int i = 0; i < m; i++)
-                mult_g[i] = -mult_g[i];
+                mult_g[i] = -data->obj_sign * mult_g[i];
         }
 
         /* Set primal + dual solution */
