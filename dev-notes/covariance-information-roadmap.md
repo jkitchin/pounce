@@ -8,6 +8,43 @@ existing signature. Companion to the active-set sensitivity roadmap
 (`sensitivity-roadmap.md`), which extends `estimate()`; this note extends
 `covariance()`.
 
+## State of the art
+
+Parameter covariance from the reduced Hessian is standard: at an estimation
+optimum the covariance is the scaled inverse of the reduced Hessian of the
+Lagrangian. sIPOPT computes it (its section 4), k_aug computes it, and
+scipy's `curve_fit` reports it in the Gauss-Newton form.
+
+pounce already ships the object in several of its own interfaces. The core
+`Problem.solve_with_sens` returns the reduced Hessian in natural (unscaled)
+units, so `-inv(reduced_hessian)` is directly the covariance, with an
+eigendecomposition (pounce#128, mirroring sIPOPT's `rh_eigendecomp`).
+`QpSensitivity.reduced_hessian` mirrors it on the convex-QP side, and
+`pounce.curve_fit` is the scipy-style covariance frontend for callable
+models, of which `covariance()` is the Pyomo-model sibling.
+
+The pyomo-pounce interface is the exception: it exposes only `covariance()`,
+the inverse, over a fixed declared set, with no reduced-Hessian accessor and
+no per-call block.
+
+## Benefit hypothesis
+
+The contribution is not the reduced Hessian or the covariance recipe. Both
+are established, and pounce already ships them in its core, QP, and
+`curve_fit` interfaces (see State of the art). It is two things the
+pyomo-pounce interface lacks and that no pounce interface offers together:
+
+- an `information()` accessor consistent with `covariance()` and the core's
+  natural-units reduced Hessian, so a Pyomo model gets the un-inverted
+  object without the invert-then-reinvert round trip; and
+- post-solve `wrt=` block selection off one retained factor, reducing onto
+  arbitrary free-variable blocks from a single solve, the
+  one-solve-two-blocks flow the MHE arrival cost needs, with `retain_kkt()`
+  as the declaration-free enabler.
+
+So this is an interface and ergonomics contribution on the pyomo side,
+layered on the core's existing reduced Hessian, not new numerics.
+
 ## Where we are
 
 v0.9 ships `covariance()` (in `pyomo-pounce/pyomo_pounce/sens.py`). You
@@ -23,7 +60,9 @@ Two limits matter for what comes next:
 
 1. **There is no un-inverted accessor.** `covariance()` returns the inverse
    reduced Hessian. A caller who wants the reduced Hessian itself, the
-   information matrix, has to invert the covariance back.
+   information matrix, has to invert the covariance back. This is a
+   pyomo-interface gap, not a pounce one: the core and QP interfaces already
+   expose the reduced Hessian directly (see State of the art).
 2. **The reduce-onto block is fixed at declaration time.** `covariance()`
    reports over the whole `declare_fitted` set. Asking about a different
    block means re-declaring and re-solving.
