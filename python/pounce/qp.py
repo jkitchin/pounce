@@ -254,11 +254,25 @@ _PSD_CHECK_AUTO_MAX_N = 1500
 
 def _min_eig_lower_coo(pr, pc, pv, n: int) -> float:
     """Smallest eigenvalue of the symmetric Hessian reconstructed from its
-    lower-triangle COO — i.e. exactly the matrix the solver sees."""
+    lower-triangle COO — i.e. exactly the matrix the solver sees.
+
+    Duplicate ``(row, col)`` entries **accumulate**, matching both the COO
+    convention and what the solver does with them. Assigning instead of
+    accumulating (last-duplicate-wins) made this guard validate a different
+    matrix than the one being solved: ``coo_matrix(([2, 2, 1.5, 1.5],
+    ([0, 1, 1, 1], [0, 1, 0, 0])))`` is indefinite once summed
+    (eigenvalues ``[-1, 5]``) but positive definite under overwrite
+    (``[0.5, 3.5]``), so an indefinite ``P`` sailed past ``check_psd`` and
+    ``solve_qp`` returned ``status="optimal"`` at a saddle point. See gh #279.
+
+    The diagonal is written once per entry — accumulating into both
+    ``(ri, ci)`` and ``(ci, ri)`` would double it when ``ri == ci``.
+    """
     M = np.zeros((n, n), dtype=np.float64)
     for ri, ci, vi in zip(pr, pc, pv):
-        M[ri, ci] = vi
-        M[ci, ri] = vi
+        M[ri, ci] += vi
+        if ri != ci:
+            M[ci, ri] += vi
     return float(np.linalg.eigvalsh(M)[0]) if n else 0.0
 
 
