@@ -246,7 +246,16 @@ pub struct AlgorithmBuilder {
     pub diverging_iterates_tol: Number,
     /// `dual_diverging_streak` (pounce#246) — consecutive growing-dual-
     /// infeasibility iterations before the dual-divergence guard routes to
-    /// restoration. Default `15`; `0` disables.
+    /// restoration. **Default `0` (off).**
+    ///
+    /// It defaulted to `15` when introduced, on the strength of a reported
+    /// emfl050 bad-warm-start grind. That justification did not survive being
+    /// reproduced: the measurement was caller-side JAX compilation, and the
+    /// build predating the guard solves both emfl050 instances to the same
+    /// optimum in the same time (pounce#246 / pounce#250). What remained was a
+    /// knife-edge, non-monotone effect on four of 1284 MINLPLib models — so it
+    /// is opt-in rather than imposed. See `upstream_options.rs` for the full
+    /// account.
     pub dual_diverging_streak: Index,
     /// `kkt_fidelity_tol` (pounce#173). Read by the algorithm as well as by the
     /// post-solve gate, because the #200 fallback's tiebreak has to rank the two
@@ -743,7 +752,7 @@ impl Default for AlgorithmBuilder {
             tiny_step_tol: 10.0 * Number::EPSILON,
             tiny_step_y_tol: 1e-2,
             diverging_iterates_tol: 1e20,
-            dual_diverging_streak: 15,
+            dual_diverging_streak: 0,
             kkt_fidelity_tol: 0.0,
             conv_check: ConvCheckOptions::default(),
             mu: MuOptions::default(),
@@ -1138,7 +1147,7 @@ mod tests {
                             tiny_step_tol: 10.0 * Number::EPSILON,
                             tiny_step_y_tol: 1e-2,
                             diverging_iterates_tol: 1e20,
-                            dual_diverging_streak: 15,
+                            dual_diverging_streak: 0,
                             kkt_fidelity_tol: 0.0,
                             conv_check: ConvCheckOptions::default(),
                             mu: MuOptions::default(),

@@ -9,6 +9,86 @@ changes.
 
 ## [Unreleased]
 
+### Changed — `dual_diverging_streak` is now **off by default** (#250 follow-up)
+
+- **The dual-divergence guard is opt-in.** It shipped default-on at `15` to bound
+  a reported emfl050 bad-warm-start grind. That justification did not survive
+  being reproduced: the reported `11.7 s / iterations=0` measurement is
+  caller-side JAX compilation (it follows call order, not the guard, in both
+  orders and under both settings), and the build predating the guard solves both
+  emfl050 instances to the same optimum in the same time.
+- **What remained was basin luck, and knife-edge at that.** Across 1284 MINLPLib
+  models the guard changes four outcomes, non-monotonically in its own threshold:
+  `deb7`/`deb9` reach a better local optimum (104.95 -> 97.56) at *exactly* 15 and
+  at no other value tried, while `pooling_rt2stp` turns from `Solve_Succeeded`
+  into `Maximum_Iterations_Exceeded` at 10 and 15 only, solving cleanly at 0, 5,
+  25 and 40.
+- **The effect differs by host in _sign_.** Those `deb7`/`deb9` numbers are
+  macOS/FERAL. On the Linux CI runner the same `dual_diverging_streak=15` makes
+  `deb7` *worse*: 97.56 with the guard off, 127.87 with it on. It helps on one
+  platform and hurts on the other, same source, same fixture. A heuristic whose
+  sign depends on the host is not a property of the algorithm, which settles the
+  question: it does not belong in the default path.
+- **This also bounds what the fallback below can promise.** It guarantees a
+  diverted run never returns worse than the best acceptable point *that run
+  visited*; it cannot make the diversion no worse than not diverting, because
+  that counterfactual solve never happened. On Linux the guard costs `deb7` 30 %
+  of its objective and the fallback cannot recover it — 127.87 *is* the best
+  acceptable point the diverted run reached.
+- **The two sides are not commensurate.** The upside is a better local optimum on
+  an already-solved nonconvex problem; the downside is a clean solve becoming a
+  failure. A net-positive count on one corpus is not a reason to impose that on
+  every user's problem, so the guard stays available and is no longer default.
+- Set `dual_diverging_streak=15` to restore the previous behaviour. When enabled,
+  the never-worse-off fallback below applies.
+- Full-corpus effect of this release's changes, measured against the commit
+  preceding them (`f5aea43`) over all 1284 models: **0 regressions**, 4
+  improvements (`jit1`, `nvs04`, `heatexch_spec2`, `supplychainp1_030510` all
+  move from a limit/failure status to solved), and one objective improvement
+  (`st_e35` 21357.40 -> 21355.24, feasible to 1.8e-12).
+
+### Fixed — the dual-divergence guard's diversion can no longer return a worse point (#250 follow-up)
+
+- **The guard's bet is now non-destructive.** `dual_diverging_streak` (added for
+  the emfl050 warm-start stall) routes a solve into restoration once the dual
+  infeasibility has grown for that many consecutive iterations in an elevated
+  regime. That is a bet, and on the MINLPLib corpus it is usually a good one — it
+  rescues twice as many models as it harms — but nothing made *losing* it safe.
+  POUNCE now records the best acceptable-quality iterate seen anywhere in the
+  solve, and hands it back if a diverted run ends up worse. Applies whenever the
+  guard is enabled; since the entry above it is no longer enabled by default.
+- **Symptom it fixes.** On `autocorr_bern55-06` the guard fires at iteration 23;
+  the diverted run reaches the true optimum (`-2304.0000278`, which Ipopt also
+  finds) and holds it from iteration 57 to 86, but the dual residual sawtooths
+  between `1e-8` and `2e-1` there, so it never strings together the
+  `acceptable_iter` consecutive qualifying iterates that would stop the solve.
+  It then entered restoration a second time, wandered into a worse basin, and
+  returned `-2263.46` — 1.8 % worse, with an overall NLP error of **1.0**
+  (feasible, but nowhere near a KKT point) under a "solved to acceptable level"
+  status. The better point had already passed the acceptable test; it was
+  overwritten only because `store_acceptable_point` keeps the latest rather than
+  the best.
+- **The firing threshold's meaning is unchanged** (only its default moved, per
+  the entry above). Retuning it to spare this model was tried first and rejected:
+  every setting that does so (>= 25) also loses the `deb7` / `deb9` / `deb8`
+  rescues, which need exactly 15. No value separates the two classes, so the fix
+  addresses the consequence rather than the trigger. Note that the rescues
+  themselves are not regression-pinned and deliberately so — `deb7`'s response to
+  the guard differs by host in sign (see above), so there is no cross-platform
+  assertion to make about it.
+- **Statuses that carry a fact of their own are preserved.** A restored point
+  never relabels `MaxiterExceeded` / `CpuTimeExceeded` / `WallTimeExceeded` /
+  `UserRequestedStop` — a caller polling for "did I run out of time" is not told
+  "solved to acceptable level" merely because a better point was recoverable.
+- The *use* of this bookkeeping is gated on the guard having actually fired (3 of
+  500 corpus models), so every solve it never touches is bit-identical. The
+  recording itself is deliberately not gated: the guard returns to the driver
+  before the recording site on the iteration it fires, so gating the recording
+  too would capture nothing at or before the diversion — exactly the case where a
+  diversion wrecks a solve immediately. Recording costs one `f64` comparison per
+  acceptable iterate, off already-computed quantities, and clones only on an
+  improvement.
+
 ### Fixed — false `Infeasible_Problem_Detected` on a feasible, aggressively scaled NLP
 
 - **Rapid infeasibility detection now confirms its own claim before issuing it.**
