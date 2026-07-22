@@ -130,3 +130,56 @@ fn dual_guard_rescue_is_preserved() {
          returns ~104.95 here (pounce#250 follow-up)",
     );
 }
+
+/// The "never worse off" property under **maximum firing pressure**.
+///
+/// `dual_diverging_streak=1` is a hair trigger: the guard diverts on the first
+/// growing dual-infeasibility step in the elevated regime, so it fires early and
+/// often on models that would otherwise converge untouched. If the fallback were
+/// incomplete, this is where it would show — a diversion landing somewhere the
+/// solve cannot recover from.
+///
+/// This is also the test that covers the gap the first version of the fix had.
+/// Recording was originally gated on `dual_guard_fired`, but the guard returns
+/// to the driver *before* the recording site on the iteration it fires, so
+/// nothing at or before the diversion was captured. `autocorr_bern55-06` did not
+/// expose it — its better point arrives at iteration 86, long after the guard
+/// fires at 23 — so a hair trigger, which moves the diversion as early as it can
+/// go, is the sharper probe.
+///
+/// Measured with the guard fully disabled, for reference:
+///   `autocorr_bern55-06` -2304.0000278, `deb7` 104.95 (scaled 1.0495e2).
+/// Under the hair trigger neither may come back worse; `deb7` in fact improves
+/// to 97.56, and `deb8`/`deb9` behave the same way.
+#[test]
+fn hair_trigger_guard_never_degrades_the_answer() {
+    for (name, guard_off_obj) in [
+        ("autocorr_bern55-06.nl", -2304.000_027_802_732_8),
+        ("deb7.nl", 104.954_788_805_407_22),
+    ] {
+        let off = solve(name, &["max_wall_time=20", "dual_diverging_streak=0"]);
+        let hair = solve(name, &["max_wall_time=20", "dual_diverging_streak=1"]);
+        // Sanity: the disabled arm still reproduces the reference value, so a
+        // drift in the fixture cannot make this test vacuously pass.
+        let drift = (off.solution.objective - guard_off_obj).abs() / guard_off_obj.abs();
+        assert!(
+            drift < 1e-6,
+            "{name}: guard-off baseline drifted ({} vs {guard_off_obj}); the \
+             comparison below is no longer meaningful",
+            off.solution.objective,
+        );
+        // Minimization: the hair-trigger arm must not return a higher objective.
+        // A small tolerance absorbs the last-digit differences between two
+        // legitimately different trajectories.
+        let slack = 1e-6 * guard_off_obj.abs().max(1.0);
+        assert!(
+            hair.solution.objective <= off.solution.objective + slack,
+            "{name}: hair-trigger guard (dual_diverging_streak=1) returned {} — \
+             worse than the {} the same build reaches with the guard disabled. \
+             The diversion left the solve worse off, which the best-acceptable \
+             fallback exists to prevent (pounce#250 follow-up)",
+            hair.solution.objective,
+            off.solution.objective,
+        );
+    }
+}
