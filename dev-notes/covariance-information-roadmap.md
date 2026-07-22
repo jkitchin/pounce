@@ -12,7 +12,7 @@ existing signature. Companion to the active-set sensitivity roadmap
 
 Parameter covariance from the reduced Hessian is standard: at an estimation
 optimum the covariance is the scaled inverse of the reduced Hessian of the
-Lagrangian. sIPOPT computes it (its section 4), k_aug computes it for Pyomo
+Lagrangian. sIPOPT computes it, k_aug computes it for Pyomo
 parameter estimation, and scipy's `curve_fit` reports it in the Gauss-Newton
 form. What these tools usually hand back is the covariance, the inverted
 object; the raw reduced Hessian, the information matrix, is less commonly a
