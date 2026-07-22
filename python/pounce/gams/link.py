@@ -340,6 +340,29 @@ def solve_from_control_file(
     return 0
 
 
+def gams_pi(mult_g, obj_sign: float):
+    """Convert POUNCE constraint multipliers to GAMS equation marginals.
+
+    POUNCE always minimizes, so for a ``maximizing`` model it solves
+    ``min(-f)`` and its ``lambda`` refers to that negated objective. GAMS
+    marginals are stated against the ORIGINAL objective, so the conversion
+    carries the same ``obj_sign`` factor already applied to the objective
+    value and to the variable marginals::
+
+        pi = -obj_sign * lambda
+
+    This reduces to ``-lambda`` for minimizing models (``obj_sign = +1``),
+    which is what the link has always done, and flips it for maximizing
+    models (``obj_sign = -1``).
+
+    Omitting the ``obj_sign`` factor here -- while applying it to the
+    objective and to the variable marginals -- inverted every equation
+    marginal on ``maximizing`` models. See gh #272. Mirrors the same
+    conversion in ``gams/gams_pounce.c``.
+    """
+    return -obj_sign * np.asarray(mult_g, dtype=float)
+
+
 def _write_solution(gmo_h, gmo, view, x, info) -> None:  # pragma: no cover - needs GAMS
     """Write primal/dual solution and GAMS model/solve status back into GMO."""
     status_msg = str(info.get("status_msg", ""))
@@ -358,11 +381,11 @@ def _write_solution(gmo_h, gmo, view, x, info) -> None:  # pragma: no cover - ne
         gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHiterused, float(iters))
 
     m = int(view.num_cons())
-    # Constraint multipliers: POUNCE lambda -> GAMS pi (negate).
+    # Constraint multipliers: POUNCE lambda -> GAMS pi. See `gams_pi`.
     mult_g = info.get("mult_g")
     pi = None
     if m and mult_g is not None:
-        pi = _to_double_array(gmo, -np.asarray(mult_g, dtype=float))
+        pi = _to_double_array(gmo, gams_pi(mult_g, obj_sign))
 
     if x is not None:
         gmo.gmoSetSolution2(gmo_h, _to_double_array(gmo, x), pi)

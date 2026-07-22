@@ -1376,7 +1376,7 @@ pub fn main() -> ExitCode {
         let payload = nl_writer::SolutionFile {
             message: &message,
             x: &x,
-            lambda: &lambda,
+            mult_g: &lambda,
             solve_result_num: status_to_solve_result_num(status),
             suffixes: &sol_suffixes,
         };
@@ -1747,7 +1747,7 @@ fn run_convex_qp(
         let payload = nl_writer::SolutionFile {
             message: &format!("POUNCE {} IPM (pounce-convex): {msg}", class.name()),
             x: &sol.x,
-            lambda: &lambda,
+            mult_g: &lambda,
             solve_result_num: srn,
             suffixes: &[],
         };
@@ -1920,7 +1920,7 @@ fn run_convex_socp(
         let payload = nl_writer::SolutionFile {
             message: &format!("POUNCE {} conic IPM (pounce-convex): {msg}", class.name()),
             x: &sol.x,
-            lambda: &lambda,
+            mult_g: &lambda,
             solve_result_num: srn,
             suffixes: &[],
         };

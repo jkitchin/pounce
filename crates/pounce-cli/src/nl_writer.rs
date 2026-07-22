@@ -101,8 +101,19 @@ pub struct SolutionFile<'a> {
     pub message: &'a str,
     /// Primal variable values, length `n`.
     pub x: &'a [Number],
-    /// Constraint dual values, length `m`.
-    pub lambda: &'a [Number],
+    /// Constraint multipliers in **pounce's internal (cyipopt)
+    /// convention**, length `m`: the `lambda` of
+    /// `L = f + lambda' g - z_L (x - x_L) + z_U (x - x_U)`, so
+    /// `d obj / d b = -lambda`.
+    ///
+    /// [`format_sol`] negates these on the way out, because the AMPL
+    /// `.sol` dual block carries *marginal values* (`d obj / d b`),
+    /// not Lagrange multipliers. Pass the internal multipliers here
+    /// and let the writer do the translation — do not pre-negate at
+    /// the call site.
+    ///
+    /// See [Gay, "Hooking Your Solver to AMPL" §5](https://ampl.com/REFS/hooking2.pdf).
+    pub mult_g: &'a [Number],
     /// AMPL solver return code. Convention: 0 = solved, 100..199 =
     /// "solved with warning", 200..299 = "infeasible", 300..399 =
     /// "unbounded", 400..499 = "limit reached", 500..599 = "failure".
@@ -132,7 +143,7 @@ pub fn format_sol(payload: &SolutionFile<'_>) -> String {
     // `.nl`. We write every dual and primal, so the pairs collapse to
     // (m, m) and (n, n). Emitting only `m` and `n` (the two-integer
     // short form) makes AMPL's and Pyomo's `.sol` readers fail.
-    let m = payload.lambda.len();
+    let m = payload.mult_g.len();
     let n = payload.x.len();
     let _ = writeln!(out, "{m}");
     let _ = writeln!(out, "{m}");
@@ -142,8 +153,14 @@ pub fn format_sol(payload: &SolutionFile<'_>) -> String {
     // Dual block, then primal block. AMPL writes doubles with at least
     // 16 significant digits to round-trip through IEEE-754; we use
     // Rust's `{:.17e}` to match.
-    for &v in payload.lambda {
-        let _ = writeln!(out, "{v:.17e}");
+    // AMPL's dual block is the *marginal value* `d obj / d b`, while
+    // pounce carries the Lagrange multiplier of
+    // `L = f + lambda' g`, for which `d obj / d b = -lambda`. Negate
+    // on the way out so `.sol` consumers (AMPL, Pyomo `model.dual`,
+    // and anything reading the file directly) see shadow prices with
+    // the sign the rest of the ecosystem uses. See gh #271.
+    for &v in payload.mult_g {
+        let _ = writeln!(out, "{:.17e}", -v);
     }
     for &v in payload.x {
         let _ = writeln!(out, "{v:.17e}");
@@ -233,7 +250,7 @@ mod tests {
         let payload = SolutionFile {
             message: "POUNCE: SolveSucceeded",
             x: &[1.0, 2.5, -0.5],
-            lambda: &[0.1, -0.2],
+            mult_g: &[0.1, -0.2],
             solve_result_num: 0,
             suffixes: &[],
         };
@@ -257,7 +274,7 @@ mod tests {
         let payload = SolutionFile {
             message: "POUNCE-SENS",
             x: &[0.0, 0.0],
-            lambda: &[],
+            mult_g: &[],
             solve_result_num: 0,
             suffixes: &[SolSuffix {
                 name: "sens_sol_state_1".into(),
@@ -288,7 +305,7 @@ mod tests {
         let payload = SolutionFile {
             message: "msg",
             x: &[],
-            lambda: &[],
+            mult_g: &[],
             solve_result_num: 0,
             suffixes: &[SolSuffix {
                 name: "sens_init_constr".into(),
@@ -308,7 +325,7 @@ mod tests {
         let payload = SolutionFile {
             message: "msg",
             x: &[],
-            lambda: &[],
+            mult_g: &[],
             solve_result_num: 0,
             suffixes: &[SolSuffix {
                 name: "wall_time".into(),
@@ -334,7 +351,7 @@ mod tests {
         let payload = SolutionFile {
             message: "m",
             x: &[],
-            lambda: &[],
+            mult_g: &[],
             solve_result_num: 0,
             suffixes: &[SolSuffix {
                 name: "foo".into(),
