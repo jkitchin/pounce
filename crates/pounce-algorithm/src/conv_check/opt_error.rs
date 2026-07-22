@@ -453,9 +453,32 @@ impl ConvCheck for OptErrorConvCheck {
         // transient flat spot. The outer guard skips the two
         // transpose-products when detection is disabled.
         if self.infeas_stationarity_tol > 0.0 && self.infeas_max_streak > 0 {
+            // The surrogate here is a cheap PRE-FILTER, not the verdict. It is
+            // a threshold on `||J^T c|| / max(1, ||c||)`, which is not
+            // scale-invariant: under a row scaling `dc` the numerator carries
+            // `dc^2` while the denominator clamps at 1, so an aggressive scaling
+            // drives it to zero regardless of where the iterate is. That is how
+            // HS13 from x0 = (1e4, 1e4) reached `5e-14` at a point whose
+            // constraint violation was 0.51, and got reported infeasible.
+            //
+            // Retuning does not fix it. Measured over 800 corpus models, every
+            // tolerance that fires on genuinely infeasible problems also
+            // introduces new false infeasibility (>= 3 models at the smallest
+            // viable value), and measuring the surrogate unscaled or
+            // scale-invariantly does not separate the cases either. So the
+            // surrogate stays as-is, and the claim the status actually makes --
+            // that no local move reduces the violation -- is confirmed directly
+            // before the verdict is issued.
             let stationarity = cq.borrow().curr_infeasibility_stationarity();
             if self.note_infeasible_stationary(constr_viol, stationarity) {
-                return ConvergenceStatus::LocallyInfeasible;
+                if cq.borrow().infeasibility_descent_available() {
+                    // Descent exists: not a stationary point of the violation,
+                    // so the surrogate was wrong here. Drop the streak and keep
+                    // solving.
+                    self.infeas_streak = 0;
+                } else {
+                    return ConvergenceStatus::LocallyInfeasible;
+                }
             }
         }
         // Time-budget gates. When the application installed a shared
