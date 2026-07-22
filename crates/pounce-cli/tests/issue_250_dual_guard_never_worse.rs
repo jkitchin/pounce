@@ -12,7 +12,9 @@
 //! non-monotone in the threshold:
 //!
 //!   * `deb7`/`deb9` reach a better local optimum (104.95 -> 97.56) at *exactly*
-//!     15, and at no other value tried (0, 5, 25, 32, 40, 60).
+//!     15, and at no other value tried (0, 5, 25, 32, 40, 60) — on macOS/FERAL.
+//!     On the Linux CI runner they reach 97.56 with the guard off as well, so
+//!     even the upside is host-dependent.
 //!   * `pooling_rt2stp` turns from `Solve_Succeeded` into
 //!     `Maximum_Iterations_Exceeded` at 10 and 15 only — solving cleanly at 0, 5,
 //!     25 and 40.
@@ -127,25 +129,36 @@ fn dual_guard_diversion_returns_a_stationary_point() {
     );
 }
 
-/// The guard is load-bearing at its default streak of 15: this model is only
-/// solved *because* it fires. That is the reason the fix targets the guard's
-/// consequence rather than its trigger, so pin it — a future retune that raises
-/// the streak past ~25 to "fix" autocorr would silently trade this away.
+/// With the guard enabled, `deb7` reaches the good local optimum (~97.56).
 ///
-/// `deb9` and `deb8` in the same corpus family exercise the identical mechanism
-/// (`deb9` 104.53 -> 97.56, `deb8` 4005.89 -> 1350.42); only `deb7` is vendored,
-/// since three ~150 kB fixtures would buy no coverage the first does not.
+/// This was originally written as "the guard is load-bearing here: this model is
+/// only solved *because* it fires", on the strength of macOS/FERAL measurements
+/// where disabling it returns 104.95. That claim is **host-dependent** and does
+/// not generalise: on the Linux CI runner `deb7` reaches 97.56 with the guard off
+/// too, so there is no rescue to preserve there.
+///
+/// What survives on both platforms is the weaker, checkable statement asserted
+/// below — enabling the guard does not prevent this model reaching ~97.56. The
+/// stronger claim is deliberately not asserted, because it would pass on one host
+/// and fail on the other.
+///
+/// The correction matters beyond this test: "the guard rescues deb7/deb9" was
+/// part of the case for keeping it default-on. A benefit that appears on one host
+/// and not another is basin luck, which is why the guard is now opt-in.
+///
+/// `deb9` and `deb8` behave the same way on macOS (`deb9` 104.53 -> 97.56,
+/// `deb8` 4005.89 -> 1350.42); only `deb7` is vendored, since three ~150 kB
+/// fixtures buy no coverage the first does not.
 #[test]
-fn dual_guard_rescue_is_preserved() {
+fn dual_guard_enabled_still_reaches_deb7_optimum() {
     let expected = 97.559_934_894_163_59;
     let report = solve("deb7.nl", &GUARD_ON);
     let obj = report.solution.objective;
     let rel = (obj - expected).abs() / expected.abs();
     assert!(
-        rel < 1e-6,
-        "deb7: lost the dual-divergence guard's rescue — got {obj}, expected \
-         {expected}. Disabling the guard (or raising its streak past ~25) \
-         returns ~104.95 here (pounce#250 follow-up)",
+        rel < 1e-4,
+        "deb7 with the guard enabled: got {obj}, expected ~{expected} \
+         (rel err {rel:.3e}; pounce#250 follow-up)",
     );
 }
 
@@ -198,39 +211,40 @@ fn pooling_rt2stp_solves_at_default_settings() {
 /// fires at 23 — so a hair trigger, which moves the diversion as early as it can
 /// go, is the sharper probe.
 ///
-/// Measured with the guard fully disabled, for reference:
-///   `autocorr_bern55-06` -2304.0000278, `deb7` 104.95 (scaled 1.0495e2).
-/// Under the hair trigger neither may come back worse; `deb7` in fact improves
-/// to 97.56, and `deb8`/`deb9` behave the same way.
+/// DELIBERATELY RELATIVE, no absolute reference. An earlier version asserted that
+/// the guard-off arm reproduced a hard-coded objective, to stop fixture drift
+/// making the test vacuous. That assertion was itself wrong: which local optimum
+/// these nonconvex models land in is **platform-dependent**. `deb7` with the
+/// guard off returns 104.95 on macOS/FERAL and 97.56 on the Linux CI runner, so
+/// the hard-coded value failed in CI. Both are legitimate local optima; POUNCE
+/// claims neither globally.
+///
+/// That platform dependence is not noise around the property being tested — it
+/// *is* the property. A heuristic whose benefit varies by host is basin luck, and
+/// it is the reason `dual_diverging_streak` is off by default.
+///
+/// Vacuity is covered by the two tests above, which pin that the guard fires on
+/// `autocorr_bern55-06` at streak 15 and that the fallback recovers the optimum.
+/// Here the comparison is between two live solves on the same machine and build,
+/// so it cannot go stale.
 #[test]
 fn hair_trigger_guard_never_degrades_the_answer() {
-    for (name, guard_off_obj) in [
-        ("autocorr_bern55-06.nl", -2304.000_027_802_732_8),
-        ("deb7.nl", 104.954_788_805_407_22),
-    ] {
+    for name in ["autocorr_bern55-06.nl", "deb7.nl"] {
         let off = solve(name, &["max_wall_time=20", "dual_diverging_streak=0"]);
         let hair = solve(name, &["max_wall_time=20", "dual_diverging_streak=1"]);
-        // Sanity: the disabled arm still reproduces the reference value, so a
-        // drift in the fixture cannot make this test vacuously pass.
-        let drift = (off.solution.objective - guard_off_obj).abs() / guard_off_obj.abs();
+        // Minimization: the hair-trigger arm must not return a higher objective
+        // than the same build reaches with the guard disabled. A small relative
+        // slack absorbs last-digit differences between two legitimately
+        // different trajectories.
+        let off_obj = off.solution.objective;
+        let hair_obj = hair.solution.objective;
+        let slack = 1e-6 * off_obj.abs().max(1.0);
         assert!(
-            drift < 1e-6,
-            "{name}: guard-off baseline drifted ({} vs {guard_off_obj}); the \
-             comparison below is no longer meaningful",
-            off.solution.objective,
-        );
-        // Minimization: the hair-trigger arm must not return a higher objective.
-        // A small tolerance absorbs the last-digit differences between two
-        // legitimately different trajectories.
-        let slack = 1e-6 * guard_off_obj.abs().max(1.0);
-        assert!(
-            hair.solution.objective <= off.solution.objective + slack,
-            "{name}: hair-trigger guard (dual_diverging_streak=1) returned {} — \
-             worse than the {} the same build reaches with the guard disabled. \
-             The diversion left the solve worse off, which the best-acceptable \
-             fallback exists to prevent (pounce#250 follow-up)",
-            hair.solution.objective,
-            off.solution.objective,
+            hair_obj <= off_obj + slack,
+            "{name}: hair-trigger guard (dual_diverging_streak=1) returned \
+             {hair_obj} — worse than the {off_obj} the same build reaches with \
+             the guard disabled. The diversion left the solve worse off, which \
+             the best-acceptable fallback exists to prevent (pounce#250 follow-up)",
         );
     }
 }

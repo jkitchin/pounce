@@ -23,6 +23,11 @@ changes.
   at no other value tried, while `pooling_rt2stp` turns from `Solve_Succeeded`
   into `Maximum_Iterations_Exceeded` at 10 and 15 only, solving cleanly at 0, 5,
   25 and 40.
+- **The upside is also host-dependent.** Those `deb7`/`deb9` numbers are
+  macOS/FERAL; on the Linux CI runner both models reach 97.56 with the guard
+  *disabled*, so there is no rescue to attribute to it there. A benefit that
+  appears on one host and not another is not a property of the algorithm, which
+  settles the question: it does not belong in the default path.
 - **The two sides are not commensurate.** The upside is a better local optimum on
   an already-solved nonconvex problem; the downside is a clean solve becoming a
   failure. A net-positive count on one corpus is not a reason to impose that on
