@@ -9,6 +9,41 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — HSDE exp/power driver reported `numerical_failure` (with a wrong iterate) when one cone-triple coordinate was pinned extreme (#339)
+
+- **The non-symmetric (exp/power) HSDE conic driver could stall on, and
+  discard, an essentially trivial exponential-cone problem where one
+  cone-triple coordinate is pinned to a large-magnitude value (by an equality
+  constraint elsewhere in the problem) while its companion slack should land
+  near `0`.** Unlike #336 (mislabeling an already-correct point), this stalled
+  the *iteration itself*: `max_step`'s backtracking line search for the
+  exp/power blocks (no closed-form fraction-to-boundary, so it backtracks on
+  cone membership) tested membership with a **fixed absolute** tolerance
+  (`1e-12`). A non-symmetric cone coordinate that legitimately tracks the
+  barrier parameter `μ` down the central path — e.g. the dual coordinate
+  conjugate to the pinned argument, driven to `0` as `μ → 0` because that
+  triple's cone-membership slack is comfortably non-tight — shrinks *with*
+  `μ`. Once its magnitude neared the fixed floor, the backtracking started
+  rejecting any further legitimate shrinkage as if the point were leaving the
+  cone, collapsing the step length geometrically, iteration over iteration,
+  until it hit exactly `0` well short of convergence — stranding the run on a
+  stalled, badly wrong iterate/objective (not merely an under-labelled correct
+  one) and reporting `numerical_failure`.
+  - Fix: the interior-membership floor used by `max_step`'s exp/power
+    backtracking (`nscone_mem_tol` in `hsde_nonsym.rs`) is now scaled by the
+    current barrier parameter `μ`, capped at the legacy `1e-12` constant — bit-
+    identical to before while `μ` is not yet tiny (any well-scaled solve), and
+    shrinking in lockstep with `μ` once the central path has driven it far
+    below that, instead of running into a fixed wall. This is a general fix,
+    not a repro-specific one: it applies to any of the three exp/power cone
+    coordinates, in either the primal or the dual block.
+  - Regression: `crates/pounce-convex/tests/issue339_pinned_cone_arg.rs` pins
+    one cone-argument variable via an equality constraint (distinct from
+    #336's construction, which scales a GP's overall objective) across a scale
+    sweep and a pinned-value sweep, asserting `numerical_failure` never fires
+    and the objective stays correct (`~0`, the underflowed-`exp()` optimum)
+    once scale is large enough to underflow.
+
 ### Fixed — HSDE exp/power driver reported `numerical_failure` on correct answers under extreme scaling (#336)
 
 - **The non-symmetric (exp/power) HSDE conic driver no longer discards a
