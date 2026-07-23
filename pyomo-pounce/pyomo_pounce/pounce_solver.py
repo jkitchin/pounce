@@ -6,21 +6,94 @@ interface exactly as it drives IPOPT.
 
 The `pounce` binary is provided by the `pounce-solver` dependency,
 which ships a per-platform wheel that drops the executable into the
-active environment under `<venv>/bin/pounce`. Falls back to any
-`pounce` already on PATH for system installs or local dev builds
-(`cargo install --path crates/pounce-cli`).
+active environment under `<venv>/bin/pounce`. The plugin resolves that
+**bundled** binary deterministically (independent of PATH). Only when no
+bundled binary is present (a source/dev checkout without the wheel) does
+it fall back to whatever `pounce` is first on `PATH`.
+
+**You must** ``import pyomo_pounce`` before ``SolverFactory('pounce')``:
+without it Pyomo does not know the solver and raises a clear
+``UnknownSolver`` / "plugin not registered" error (it does **not** silently
+run some other `pounce`). If the plugin has to fall back to a PATH binary,
+it warns — and :func:`check_binary` reports exactly which executable will
+run, its build, and whether a different `pounce` earlier on PATH would
+shadow it (version strings alone cannot tell two builds apart — e.g. a
+binary from before and after a fix can both report the same ``X.Y.Z`` — so
+the check compares the git *commit* embedded in ``pounce --about``).
 
 Usage:
     import pyomo_pounce
     from pyomo.environ import *
     solver = SolverFactory('pounce')
     result = solver.solve(model)
+
+Diagnose which binary will run:
+    import pyomo_pounce
+    pyomo_pounce.check_binary()          # prints a report; returns a dict
 """
 
+import re
 import shutil
+import subprocess
+import warnings
 
 from pyomo.opt import SolverFactory
 from pyomo.solvers.plugins.solvers.ASL import ASL
+
+
+def _bundled_path():
+    """Path to the wheel-bundled `pounce` binary, or None if not present."""
+    try:
+        from pounce._cli import _bundled_binary
+
+        b = _bundled_binary()
+        return str(b) if b.is_file() else None
+    except Exception:
+        return None
+
+
+def _build_id(exe):
+    """Best-effort build identifier of a `pounce` executable: the short git
+    commit embedded in ``pounce --about``. Returns None if the executable is
+    missing, too old to support ``--about``, or otherwise unqueryable.
+
+    This is the discriminator a version string cannot provide: two builds
+    straddling a bug fix can share the same ``X.Y.Z`` while differing in
+    commit — see the pounce dual-sign fix (gh #271/#272), where a stale
+    0.9.0 binary returned flipped duals that a version check would miss.
+    """
+    if not exe:
+        return None
+    try:
+        out = subprocess.run(
+            [exe, "--about"], capture_output=True, text=True, timeout=15
+        ).stdout
+    except Exception:
+        return None
+    m = re.search(r"commit\s+([0-9a-f]+)", out)
+    return m.group(1) if m else None
+
+
+_fallback_warned = False
+
+
+def _warn_path_fallback(resolved):
+    """One-time warning that the plugin fell back to a PATH binary rather than
+    the wheel-bundled one, naming the resolved executable and its build."""
+    global _fallback_warned
+    if _fallback_warned:
+        return
+    _fallback_warned = True
+    bid = _build_id(resolved)
+    warnings.warn(
+        f"pyomo-pounce: no wheel-bundled `pounce` binary found; using the "
+        f"PATH executable {resolved!r} (build {bid or 'unknown'}). This may "
+        f"be a stale or unrelated `pounce` — version strings do not "
+        f"distinguish builds. Run `pyomo_pounce.check_binary()` to verify, "
+        f"or `pip install -U pounce-solver` to get the bundled binary.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 @SolverFactory.register("pounce", doc="The POUNCE interior-point NLP solver")
@@ -66,13 +139,99 @@ class POUNCE(ASL):
         # invisible to non-activated-environment runs (cron, IDE runners,
         # Jupyter kernels) and can be shadowed by a stale system binary. Fall
         # back to PATH for system installs and local cargo dev builds where
-        # ``pounce-solver`` is not installed.
-        try:
-            from pounce._cli import _bundled_binary
+        # ``pounce-solver`` is not installed — and WARN when we do, since a
+        # PATH binary may be stale/unrelated and version strings cannot tell
+        # builds apart (gh #315).
+        bundled = _bundled_path()
+        if bundled is not None:
+            return bundled
+        resolved = shutil.which("pounce")
+        if resolved is not None:
+            _warn_path_fallback(resolved)
+        return resolved
 
-            bundled = _bundled_binary()
-            if bundled.is_file():
-                return str(bundled)
-        except Exception:
-            pass
-        return shutil.which("pounce")
+
+def _all_path_pounce():
+    """Every `pounce` executable resolvable via PATH, in PATH order — the
+    candidates Pyomo's ASL fallback *would* pick from if the bundled binary
+    were absent. Used to flag a binary that shadows the intended one."""
+    import os
+
+    seen, found = set(), []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        cand = os.path.join(d, "pounce")
+        real = os.path.realpath(cand)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK) and real not in seen:
+            seen.add(real)
+            found.append(cand)
+    return found
+
+
+def check_binary(verbose=True):
+    """Report which `pounce` executable ``SolverFactory('pounce')`` will run,
+    its build, and whether it matches the wheel-bundled binary — and flag any
+    *different* `pounce` earlier on PATH that would shadow it under Pyomo's
+    ASL fallback (the case that silently ran a stale, dual-sign-flipped binary
+    before gh #315).
+
+    Returns a dict; when ``verbose`` also prints a human-readable report.
+    Because two builds can share a version string, the comparison is on the
+    git *commit* embedded in ``pounce --about``, not the version.
+    """
+    resolved = SolverFactory("pounce")._default_executable()
+    bundled = _bundled_path()
+    resolved_id = _build_id(resolved)
+    bundled_id = _build_id(bundled)
+
+    path_bins = []
+    for p in _all_path_pounce():
+        path_bins.append({"path": p, "build_id": _build_id(p)})
+
+    # A PATH binary shadows the intended one if it is NOT the resolved binary
+    # and its build differs — i.e. a bare SolverFactory ASL fallback (or a
+    # forgotten `import pyomo_pounce`) could run a different build.
+    import os
+
+    resolved_real = os.path.realpath(resolved) if resolved else None
+    shadowing = [
+        b
+        for b in path_bins
+        if os.path.realpath(b["path"]) != resolved_real
+        and b["build_id"] != resolved_id
+    ]
+
+    info = {
+        "resolved_executable": resolved,
+        "resolved_build_id": resolved_id,
+        "bundled_executable": bundled,
+        "bundled_build_id": bundled_id,
+        "using_bundled": bool(bundled) and resolved == bundled,
+        "matches_bundled": (
+            bundled_id is not None and resolved_id == bundled_id
+        ),
+        "path_pounce_binaries": path_bins,
+        "shadowing_path_binaries": shadowing,
+    }
+
+    if verbose:
+        print("pyomo-pounce binary check")
+        print(f"  will run : {resolved}  (build {resolved_id or 'unknown'})")
+        if bundled:
+            match = "MATCHES" if info["matches_bundled"] else "DIFFERS from"
+            print(f"  bundled  : {bundled}  (build {bundled_id or 'unknown'})"
+                  f"  [{match} the binary that will run]")
+        else:
+            print("  bundled  : none found (source/dev install without the "
+                  "pounce-solver wheel)")
+        if shadowing:
+            print("  WARNING  : a different `pounce` is earlier on PATH; "
+                  "without `import pyomo_pounce` (or on the ASL fallback "
+                  "path) it could be run instead:")
+            for b in shadowing:
+                bid = b["build_id"] or "unknown"
+                print(f"             {b['path']}  (build {bid})")
+        else:
+            print("  PATH     : no shadowing `pounce` detected")
+    return info

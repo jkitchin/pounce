@@ -29,6 +29,27 @@ Under the hood, Pyomo writes the model to an AMPL `.nl` file, invokes
 `pounce problem.nl -AMPL`, and reads the result back from the `.sol`
 file. See [Running Solves](cli.md) for the `-AMPL` solver mode.
 
+### Which `pounce` binary runs
+
+`import pyomo_pounce` is **required** before `SolverFactory('pounce')`.
+Without it Pyomo does not know the solver and raises a clear
+`UnknownSolver` / "plugin not registered" error — it does not silently run
+some other `pounce`. With it imported, the plugin runs the binary **bundled
+in the `pounce-solver` wheel**, independent of `PATH`; only a source/dev
+install lacking that wheel falls back to a `pounce` on `PATH` (and the plugin
+warns when it does).
+
+Because two builds can report the same version string (`X.Y.Z`) while
+behaving differently — a binary from before and after a fix does — a stale
+`pounce` on `PATH` is otherwise hard to notice. To see exactly which
+executable will run, its build (the git commit from `pounce --about`), and
+whether a different `pounce` earlier on `PATH` would shadow it:
+
+```python
+import pyomo_pounce
+pyomo_pounce.check_binary()   # prints a report; returns a dict
+```
+
 ## Preflight and initialization
 
 A `Var` whose `.value` was never set is written as **0** into the

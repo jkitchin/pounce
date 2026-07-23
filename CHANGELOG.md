@@ -9,6 +9,21 @@ changes.
 
 ## [Unreleased]
 
+### Added — pyomo-pounce: detect a stale/shadowing `pounce` binary (#315)
+
+- `pyomo_pounce.check_binary()` reports which `pounce` executable
+  `SolverFactory('pounce')` will run, its build, whether it matches the
+  wheel-bundled binary, and — critically — whether a *different* `pounce`
+  earlier on `PATH` would shadow it. The comparison is on the git **commit**
+  embedded in `pounce --about`, not the version string, because two builds can
+  share the same `X.Y.Z` while behaving differently (a binary from before and
+  after the #271/#272 dual-sign fix both report `0.9.0`).
+- The plugin now **warns** when it falls back to a `PATH` binary (only reachable
+  on a source/dev install without the `pounce-solver` wheel; a normal install
+  runs the bundled binary). Note: with `pyomo_pounce` un-imported,
+  `SolverFactory('pounce')` raises a clear `UnknownSolver` error — it never
+  silently runs an unrelated binary. Docs updated to state the import
+  requirement and point at `check_binary()`.
 ### Fixed — `curve_fit` two-parameter bounds: the last silently-transposing spellings now raise (#260)
 
 - **`pounce.curve_fit` no longer silently transposes a 2-parameter box when the
