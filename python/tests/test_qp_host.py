@@ -498,3 +498,66 @@ def test_minimize_qp_route_rejects_bad_tol():
                 solver_selection="qp-ipm",
                 tol=bad,
             )
+
+
+# --- gh #325: the guard must also reach the NLP route -----------------------
+
+# The default `minimize` route (`solver_selection="nlp"`) bypassed the shared
+# convex guard: the Ipopt backend rejects `tol <= 0` / NaN and a negative
+# `max_iter`, but silently ACCEPTS `tol = inf` and any `tol >= 1`, returning
+# `success=True, status=0` at the non-stationary starting-band iterate (Rosenbrock
+# stalls at f=0.199 instead of reaching x*=(1,1), f=0). Same `tol >= 1` failure
+# mode as #277, now on the NLP surface. Reuse the Rosenbrock repro from the issue.
+def _rosenbrock():
+    def f(x):
+        return (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2
+
+    def j(x):
+        return np.array(
+            [
+                -2 * (1 - x[0]) - 400 * x[0] * (x[1] - x[0] ** 2),
+                200 * (x[1] - x[0] ** 2),
+            ]
+        )
+
+    return f, j, np.array([-1.2, 1.0])
+
+
+@pytest.mark.parametrize("bad", _BAD_TOLS)
+def test_minimize_nlp_route_rejects_bad_tol(bad):
+    """The NLP route must reject the same unsatisfiable `tol` values the convex
+    entry points do (gh #325); `tol=inf` / `tol>=1` used to return
+    `success=True` at a non-stationary point."""
+    f, j, x0 = _rosenbrock()
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        pounce.minimize(f, x0, jac=j, solver_selection="nlp", tol=bad)
+
+
+@pytest.mark.parametrize("bad", [-5, -1, 0])
+def test_minimize_nlp_route_rejects_bad_max_iter(bad):
+    """Non-positive `max_iter` must raise on the NLP route, matching the convex
+    surfaces (gh #325)."""
+    f, j, x0 = _rosenbrock()
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        pounce.minimize(f, x0, jac=j, solver_selection="nlp", max_iter=bad)
+
+
+def test_minimize_nlp_route_rejects_bad_tol_alias():
+    """scipy tolerance aliases (`gtol`/`ftol`/`xtol` -> Ipopt `tol`) and the
+    `maxiter` alias reach the NLP backend too, so the guard must see the
+    translated value, not only the canonical key (gh #325)."""
+    f, j, x0 = _rosenbrock()
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        pounce.minimize(f, x0, jac=j, solver_selection="nlp", gtol=float("inf"))
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        pounce.minimize(f, x0, jac=j, solver_selection="nlp", maxiter=0)
+
+
+def test_minimize_nlp_route_valid_tol_still_solves():
+    """A legitimate tight `tol` on the NLP route is untouched: Rosenbrock still
+    converges to x*=(1, 1), f=0 (gh #325)."""
+    f, j, x0 = _rosenbrock()
+    r = pounce.minimize(f, x0, jac=j, solver_selection="nlp", tol=1e-8, max_iter=200)
+    assert r.success
+    np.testing.assert_allclose(r.x, [1.0, 1.0], atol=1e-5)
+    assert r.fun < 1e-8
