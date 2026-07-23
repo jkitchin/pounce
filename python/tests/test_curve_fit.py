@@ -616,13 +616,31 @@ def test_normalize_bound_arg_unit_matrix():
     with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
         _normalize_bound_arg(((0.0, 10.0), None), 2)           # element 0 pair-shaped
 
+    # #260 (remaining spellings): the same n=2 collision reached WITHOUT an outer
+    # tuple -- a list of two lists, a 2x2 ndarray, or a mixed tuple/list of two
+    # pairs -- silently transposed the box before; each now raises too.
+    with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
+        _normalize_bound_arg([[0.0, 2.0], [1.0, 4.0]], 2)      # list of two lists
+    with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
+        _normalize_bound_arg(np.array([[0.0, 2.0], [1.0, 4.0]]), 2)  # 2x2 ndarray
+    with pytest.raises(ValueError, match="ambiguous for a 2-parameter model"):
+        _normalize_bound_arg([(0.0, 2.0), [1.0, 4.0]], 2)      # mixed tuple/list
+
     # literal NaN in the scipy branch -> raise
     with pytest.raises(ValueError, match="NaN"):
         _normalize_bound_arg((float("nan"), 10.0), 2)
 
-    # pair *lists* pass through untouched (the unambiguous pair-list spelling)
+    # pair *lists* pass through untouched (the unambiguous pair-list spelling
+    # uses (lo, hi) *tuples*, so it is never confused with scipy's array rows)
     assert _normalize_bound_arg([(0.0, 10.0), (0.0, 10.0)], 2) == [(0.0, 10.0), (0.0, 10.0)]
     assert _normalize_bound_arg([(None, 10.0), (0.0, None)], 2) == [(None, 10.0), (0.0, None)]
+
+    # the n=2 raise is specific to the ambiguous 2x2 shape: n!=2 list-of-lists /
+    # ndarrays stay a pair list (there the (2, n) scipy shape cannot collide),
+    # and a bare-None pair-list entry is not pair-shaped, so it passes through.
+    assert _normalize_bound_arg([[0.0, 1.0], [2.0, 4.0], [0.0, 1.0]], 3) == [
+        [0.0, 1.0], [2.0, 4.0], [0.0, 1.0]]
+    assert _normalize_bound_arg([None, (0.0, 10.0)], 2) == [None, (0.0, 10.0)]
 
     # scipy tuple of lists/arrays -> per-parameter pairs (param i in [l_i, u_i])
     assert _normalize_bound_arg(([0.0, 1.6], [10.0, 10.0]), 2) == [(0.0, 10.0), (1.6, 10.0)]
@@ -676,6 +694,39 @@ def test_curve_fit_list_spelling_fits_and_matches_scipy():
         expdecay_2p, x, y, p0=[1.0, 2.0],
         bounds=([-np.inf, 0.0], [10.0, np.inf]))
     np.testing.assert_allclose(r.popt, rs, rtol=1e-4)
+
+
+def test_curve_fit_two_param_nontuple_bounds_never_silently_transpose():
+    """#260 (remaining spellings): for a 2-parameter model every way of writing
+    the box as *two length-2 sequences* is handled without a silent out-of-box
+    fit -- the scipy tuple follows scipy, the pair-list-of-tuples fits its box,
+    and the genuinely ambiguous list-of-lists / 2x2 ndarray spellings raise
+    rather than transpose the box and report ``Solve_Succeeded``.
+    """
+    x = np.linspace(0, 3, 60)
+    y = 2.0 * np.exp(-1.0 * x)  # noiseless: A=2, k=1
+
+    # scipy contract: A in [0, 10], k in [1.6, 10] -> k rides its lower bound.
+    lower, upper = [0.0, 1.6], [10.0, 10.0]
+    expected, _ = scipy_optimize.curve_fit(
+        expdecay_2p, x, y, p0=[1.0, 2.0], bounds=(lower, upper))
+
+    # (a) scipy tuple-of-lists follows scipy exactly.
+    rp = pounce.curve_fit(expdecay_2p, x, y, p0=[1.0, 2.0],
+                          bounds=(lower, upper), jac="fd")
+    np.testing.assert_allclose(rp.popt, expected, rtol=1e-4)
+
+    # (b) the equivalent pair list *of tuples* fits inside its (transposed-
+    #     looking but explicitly requested) box and stays there.
+    rl = pounce.curve_fit(expdecay_2p, x, y, p0=[1.0, 2.0],
+                          bounds=[(0.0, 10.0), (1.6, 10.0)], jac="fd")
+    np.testing.assert_allclose(rl.popt, expected, rtol=1e-4)
+
+    # (c)/(d) the ambiguous non-tuple spellings raise instead of guessing.
+    for amb in ([lower, upper], np.array([lower, upper])):
+        with pytest.raises(ValueError, match="ambiguous"):
+            pounce.curve_fit(expdecay_2p, x, y, p0=[1.0, 2.0],
+                             bounds=amb, jac="fd")
 
 
 def test_curve_fit_minima_ambiguous_tuple_raises_and_list_fits():
