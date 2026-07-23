@@ -858,6 +858,13 @@ impl IpoptApplication {
             let mut stats = self.statistics.borrow_mut();
             stats.iteration_count = res.n_iter as Index;
             stats.final_objective = res.obj;
+            // `final_scaled_objective` defaults to NaN; the SQP path does not
+            // thread nlp_scaling through the objective (same as the residuals
+            // mirrored below), so the scaled objective equals the unscaled
+            // one. Without this it stayed NaN and the console printed
+            // "Objective ...: nan  <unscaled>" on every active-set solve
+            // (gh #313), even on a clean optimal solve.
+            stats.final_scaled_objective = res.obj;
             stats.final_dual_inf = res.final_stationarity;
             stats.final_constr_viol = res.final_constr_viol;
             stats.final_compl = 0.0; // SQP has no barrier — no compl term.
