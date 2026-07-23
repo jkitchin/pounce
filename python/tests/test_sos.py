@@ -73,6 +73,52 @@ def test_unique_minimizer_2d():
     assert abs(r.lower_bound) < 1e-5
 
 
+def _boxed_rosenbrock(lo=-2.0, hi=2.0):
+    # f = (1-x)^2 + 100(y - x^2)^2, unique global min (1,1), f* = 0.
+    f = {(0, 0): 1.0, (1, 0): -2.0, (2, 0): 1.0, (0, 2): 100.0, (2, 1): -200.0, (4, 0): 100.0}
+    box = []
+    for j in range(2):
+        e = lambda s: tuple(s if k == j else 0 for k in range(2))  # noqa: E731
+        box.append({e(1): 1.0, (0, 0): -lo})
+        box.append({e(1): -1.0, (0, 0): hi})
+    return f, box
+
+
+def _eval_poly(f, x):
+    return sum(c * x[0] ** a * x[1] ** b for (a, b), c in f.items())
+
+
+@pytest.mark.parametrize("order", [2, 3, 4])
+def test_boxed_rosenbrock_never_certifies_a_non_minimizing_atom(order):
+    # gh #281. On boxed Rosenbrock the moment relaxation is not flat at the true
+    # measure: the first moments the SDP returns lie in the flat "banana" valley
+    # (~(0.86, 0.74)), a point 0.26 from the true minimizer (1,1) whose objective
+    # (~0.02) still reads close to the correct bound (~0). It used to come back as
+    # is_exact=True, num_minimizers=1 -- a confidently wrong minimizer.
+    #
+    # The invariant that must always hold: is_exact => every reported minimizer
+    # attains the lower bound. Either the tight, correct (1,1) with is_exact=True,
+    # or the safe failure (is_exact=False, no minimizers) -- never a wrong point
+    # claimed exact.
+    f, box = _boxed_rosenbrock()
+    r = sos_minimize(f, inequalities=box, n_vars=2, order=order)
+    assert r.success, f"order {order}: status {r.status}"
+    # The lower bound stays sound regardless.
+    assert r.lower_bound <= 1e-4, f"order {order}: bound {r.lower_bound} exceeds 0"
+    if r.is_exact:
+        assert r.num_minimizers == len(r.minimizers)
+        for m in r.minimizers:
+            fx = _eval_poly(f, m)
+            assert abs(fx - r.lower_bound) <= 1e-3, (
+                f"order {order}: is_exact but minimizer {m} has f={fx:.3e}, "
+                f"missing the bound {r.lower_bound:.3e}"
+            )
+            np.testing.assert_allclose(m, [1.0, 1.0], atol=1e-2)
+    else:
+        assert r.num_minimizers == 0
+        assert len(r.minimizers) == 0
+
+
 def test_constrained_box_nonconvex():
     # min −x  s.t.  1 − x² ≥ 0  (x ∈ [−1,1])  →  −1 at x = 1.
     r = sos_minimize({(1,): -1.0}, inequalities=[{(0,): 1.0, (2,): -1.0}])

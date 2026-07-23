@@ -9,6 +9,28 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `sos_minimize` certified a wrong minimizer as exact on Rosenbrock (#281)
+
+- **`sos_minimize` reported `is_exact=True, num_minimizers=1` while returning a
+  point that does not attain the certified bound.** On boxed Rosenbrock-2D
+  (`f = (1-x)² + 100(y-x²)²`, unique global minimizer `(1,1)`, `f* = 0`) the
+  moment relaxation is not flat at the true measure, so the SDP's first moments
+  land in the flat "banana" valley at `≈(0.86, 0.74)` — `0.26` from `(1,1)` yet
+  with `f ≈ 0.017–0.020`, close to the (correct) lower bound `≈0`. That point was
+  handed back as an exact minimizer. The lower bound itself was always sound; the
+  defect was the atom-objective consistency guard in `recover_from_moments`
+  (`crates/pounce-convex/src/sos.rs`), whose tolerance `ATOM_OBJ_TOL = 1e-3` was
+  too loose: Rosenbrock's flat valley makes a far-off point still read `f ≈ bound`,
+  so the guard admitted it. The threshold is tightened to `1e-6` — measured to sit
+  ~4× above the worst genuine extraction that asserts exactness (the rank-4
+  `facial_reduction_four` case at `2.35e-7`) and ~10× below Rosenbrock's residual
+  (`1.05e-5`), both deterministic. When it fires, `is_exact` is withdrawn and the
+  still-valid lower bound is returned with **no** minimizers (the safe failure),
+  rather than a confidently wrong point. Known-good extractions are unaffected:
+  boxed Booth `(1,3)`, Dixon-Price n=2, the three-/six-hump camels, and the
+  facial-reduction multi-atom cases all still certify and extract correctly. The
+  enforced invariant is now `is_exact ⇒ f(extracted) ≈ lower_bound`.
+
 ### Fixed — best-acceptable fallback ranking degenerated to objective-only outside the feasibility band (#280)
 
 - **The NLP best-acceptable fallback could prefer a *strictly more infeasible*
