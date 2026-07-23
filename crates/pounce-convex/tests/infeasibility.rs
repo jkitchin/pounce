@@ -148,6 +148,48 @@ fn feasible_bounded_still_optimal() {
     assert!((sol.x[1] - 1.0).abs() < 1e-6);
 }
 
+/// gh #293 — a mixed-scale Hessian must NOT be falsely certified unbounded.
+/// `min ½(1e6·x0² + 1e-12·x1²) − x1  s.t.  x ≥ 0` is *bounded*: the unique
+/// optimum is `x1* = 1e12`, `f* = −5e11`. The descent ray `x1` has genuine
+/// (if tiny) curvature `1e-12 > 0`, so it is not a recession ray. Before #293
+/// the `‖Pd‖ ≤ rtol·‖d‖·max|P|` test read the `1e-12` curvature as null
+/// relative to the `1e6` block and returned a wrong `DualInfeasible`.
+#[test]
+fn mixed_scale_hessian_is_bounded_not_dual_infeasible() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 1e6), Triplet::new(1, 1, 1e-12)],
+        c: vec![0.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0, 0.0],
+        ub: vec![f64::INFINITY, f64::INFINITY],
+    };
+    let sol = solve(&prob);
+    assert_ne!(
+        sol.status,
+        QpStatus::DualInfeasible,
+        "bounded problem (f* = -5e11) must never get an unboundedness \
+         certificate; got a wrong DualInfeasible after {} iters",
+        sol.iters
+    );
+    // The certificate fix also lets it converge to the true optimum.
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "expected Optimal (x1* = 1e12, f* = -5e11), got {:?} after {} iters",
+        sol.status,
+        sol.iters
+    );
+    assert!(
+        (sol.obj - (-5e11)).abs() <= 1e-3 * 5e11,
+        "obj = {} should be ≈ -5e11",
+        sol.obj
+    );
+}
+
 // --- Status / edge-case honesty (PR70 item C) -----------------------------
 //
 // A solver that stops early for *any* reason must say so. The danger these
