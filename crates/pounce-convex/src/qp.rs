@@ -382,7 +382,66 @@ impl QpResiduals {
     }
 }
 
+/// A tiny-curvature warning fires when `‖P‖∞` is more than this many orders of
+/// magnitude below the rest of the problem data. Six orders is comfortably past
+/// where a well-scaled convex QP sits (curvature commensurate with the linear
+/// and constraint coefficients) yet well above the gh #293 regime (`‖P‖`
+/// 8–20 orders below `‖c‖`), so a healthy hard problem is never blamed on
+/// curvature and an ill-scaled one always is.
+const CURV_DATA_RATIO: f64 = 1e-6;
+
 impl QpSolution {
+    /// Diagnose whether an *unconverged or possibly-spurious* status is likely
+    /// caused by tiny objective curvature relative to the rest of the problem
+    /// data — the ill-scaling regime of gh #293. There an interior-point solve
+    /// can exhaust its budget (`IterationLimit` / `OptimalInaccurate`) short of
+    /// a far-off optimum, or, in the machine-epsilon tail, return a
+    /// scaling-artifact certificate. Returns a human-readable warning when the
+    /// status is one of those *and* the curvature is tiny relative to the data;
+    /// otherwise `None` — so a caller can surface it without ever second-guessing
+    /// a clean `Optimal` (including one the solver recovered via its own
+    /// equilibrated retry) or an exact infeasibility certificate.
+    ///
+    /// This is the naive-caller guardrail for the residual cases no driver can
+    /// converge at the default budget (e.g. a uniformly tiny Hessian coupled
+    /// through an equality constraint): the status is already honest, and this
+    /// says *why*, with an actionable remedy, instead of leaving a truncated
+    /// objective to be mistaken for the optimum.
+    pub fn scaling_diagnostic(&self, prob: &QpProblem) -> Option<String> {
+        let suspect = matches!(
+            self.status,
+            QpStatus::IterationLimit
+                | QpStatus::OptimalInaccurate
+                | QpStatus::NumericalFailure
+                | QpStatus::DualInfeasible
+        );
+        if !suspect {
+            return None;
+        }
+        let maxabs_t = |it: &[Triplet]| it.iter().fold(0.0f64, |m, t| m.max(t.val.abs()));
+        let maxabs_v = |v: &[f64]| v.iter().fold(0.0f64, |m, &x| m.max(x.abs()));
+        let p_norm = maxabs_t(&prob.p_lower);
+        if p_norm == 0.0 {
+            // A pure LP has no curvature; its unboundedness/limits are not a
+            // tiny-Hessian artifact, so this diagnostic does not apply.
+            return None;
+        }
+        let data = maxabs_v(&prob.c)
+            .max(maxabs_t(&prob.a))
+            .max(maxabs_t(&prob.g))
+            .max(1.0);
+        if p_norm >= data * CURV_DATA_RATIO {
+            return None;
+        }
+        Some(format!(
+            "scaling warning: objective curvature ‖P‖∞ = {p_norm:.1e} is tiny \
+             relative to the problem data (‖c,A,G‖∞ ≈ {data:.1e}); the {:?} \
+             result may be inaccurate. Rescale the objective (e.g. divide P and \
+             c by ‖P‖∞) or cross-check with a reference solver.",
+            self.status
+        ))
+    }
+
     /// Recompute the final KKT residuals of this solution against `prob`.
     ///
     /// Uses the convex solver's standard-form conventions —

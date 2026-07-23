@@ -261,6 +261,99 @@ fn tiny_hessian_with_binding_inequality_converges_cleanly() {
     );
 }
 
+/// gh #293 (machine-epsilon tail) — a spurious unboundedness certificate on a
+/// QP with genuine (if tiny) curvature must be refuted. `min ½·1e-20·(x0²+x1²)
+/// − x1  s.t.  x ≥ 0` is bounded (`x1* = 1e20`, `f* = −5e19`), but the raw HSDE
+/// solve reads the descent ray as a recession at `P ≈ 1e-20` (the recession
+/// curvature floor) and certifies `DualInfeasible`. The direct-driver reverify
+/// on the equilibrated problem exposes the true curvature and returns a clean
+/// finite optimum, which overrides the bogus certificate.
+#[test]
+fn extreme_tiny_hessian_not_falsely_unbounded() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 1e-20), Triplet::new(1, 1, 1e-20)],
+        c: vec![0.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0, 0.0],
+        ub: vec![f64::INFINITY, f64::INFINITY],
+    };
+    let sol = solve(&prob);
+    assert_ne!(
+        sol.status,
+        QpStatus::DualInfeasible,
+        "bounded problem (f* = -5e19) must not be certified unbounded; got \
+         DualInfeasible after {} iters",
+        sol.iters
+    );
+    assert_eq!(sol.status, QpStatus::Optimal, "expected Optimal, got {:?}", sol.status);
+    assert!(
+        (sol.obj - (-5e19)).abs() <= 1e-3 * 5e19,
+        "obj = {} should be ≈ -5e19",
+        sol.obj
+    );
+}
+
+/// gh #293 naive-caller guardrail — when no driver can converge a tiny-curvature
+/// problem at the default budget (here a uniformly tiny Hessian coupled through
+/// an equality constraint, which stays `IterationLimit`), the honest status must
+/// carry a scaling diagnostic that names tiny curvature as the cause. A
+/// well-scaled `Optimal` must carry none.
+#[test]
+fn tiny_curvature_iteration_limit_emits_scaling_warning() {
+    let n = 10;
+    let mut p_lower = Vec::new();
+    let mut c = Vec::new();
+    for i in 0..n {
+        p_lower.push(Triplet::new(i, i, 1e-13));
+        c.push(-1.0 - (i % 7) as f64);
+    }
+    let prob = QpProblem {
+        n,
+        p_lower,
+        c,
+        a: (0..n).map(|j| Triplet::new(0, j, 1.0)).collect(),
+        b: vec![1e13],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0; n],
+        ub: vec![f64::INFINITY; n],
+    };
+    let sol = solve(&prob);
+    // This case is genuinely unconvergeable at the default budget; the point is
+    // the diagnostic, not the status. Guard the premise, then the diagnostic.
+    if sol.status == QpStatus::Optimal {
+        // If a future improvement converges it, the guardrail is moot here.
+        return;
+    }
+    let warn = sol.scaling_diagnostic(&prob);
+    assert!(
+        warn.is_some(),
+        "tiny-curvature {:?} must carry a scaling diagnostic",
+        sol.status
+    );
+    assert!(warn.unwrap().contains("scaling warning"));
+
+    // A well-scaled optimal solve carries no diagnostic.
+    let good = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 2.0)],
+        c: vec![-2.0, -2.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0, 0.0],
+        ub: vec![10.0, 10.0],
+    };
+    let gsol = solve(&good);
+    assert_eq!(gsol.status, QpStatus::Optimal);
+    assert!(gsol.scaling_diagnostic(&good).is_none(), "well-scaled Optimal needs no warning");
+}
+
 // --- Status / edge-case honesty (PR70 item C) -----------------------------
 //
 // A solver that stops early for *any* reason must say so. The danger these

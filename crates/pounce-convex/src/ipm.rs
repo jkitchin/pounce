@@ -317,13 +317,7 @@ where
         QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
     );
     if opts.use_hsde && opts.equilibrate && retry_on {
-        let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
-        let inner = QpOptions {
-            equilibrate: false,
-            ..*opts
-        };
-        let mut retry = solve_qp_ipm_unscaled(&scaled, &inner, &mut make_backend);
-        scaling.unscale_solution(prob, &mut retry);
+        let retry = equilibrated_solve(prob, opts, /* use_hsde */ true, &mut make_backend);
         let accept = match sol.status {
             QpStatus::NumericalFailure => retry.status != QpStatus::NumericalFailure,
             QpStatus::IterationLimit | QpStatus::OptimalInaccurate => {
@@ -335,6 +329,58 @@ where
             return retry;
         }
     }
+    // gh #293 (extreme tail): refute a *spurious* unboundedness certificate on a
+    // QP with genuine curvature. A `DualInfeasible` verdict rests on finding a
+    // recession ray whose normalized curvature `dᵀPd/‖d‖²` is below
+    // [`RECESSION_CURV_TOL`]. When the Hessian is so tiny that a bounded descent
+    // direction's curvature sinks to that floor (`P ≈ 1e-20`, at the edge of
+    // double precision), the raw HSDE solve can read a bounded ray as a
+    // recession and wrongly certify the problem unbounded — the exact failure
+    // #290/#309 fixed for `1e-12`, resurfacing only in the machine-epsilon tail.
+    // A *genuine* recession lies in `null(P)` and survives equilibration, so
+    // re-solving the Ruiz-scaled problem with the direct driver (which lifts
+    // `P̂` to O(1), making the true curvature visible) is a decisive cross-check:
+    // if it returns a clean, finite `Optimal`, the problem was bounded and the
+    // certificate was a scaling artifact, so return the verified optimum;
+    // otherwise keep the original verdict. Gated to `P ≠ 0` — a pure LP's
+    // unboundedness is exact, never a curvature artifact — so genuine unbounded
+    // LPs never pay for the reverify.
+    if opts.use_hsde
+        && opts.equilibrate
+        && sol.status == QpStatus::DualInfeasible
+        && prob.p_lower.iter().any(|t| t.val != 0.0)
+    {
+        let verify = equilibrated_solve(prob, opts, /* use_hsde */ false, &mut make_backend);
+        if verify.status == QpStatus::Optimal {
+            return verify;
+        }
+    }
+    sol
+}
+
+/// Run an equilibrated solve: Ruiz-scale `prob`, solve the scaled problem with
+/// the driver selected by `use_hsde`, and unscale the result back to the
+/// original problem's coordinates. Shared by the HSDE convergence fallback
+/// (`use_hsde = true`) and the dual-infeasibility reverify guard
+/// (`use_hsde = false`, the direct driver, which exposes the true curvature of
+/// a tiny Hessian to the recession test).
+fn equilibrated_solve<F>(
+    prob: &QpProblem,
+    opts: &QpOptions,
+    use_hsde: bool,
+    make_backend: &mut F,
+) -> QpSolution
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
+    let inner = QpOptions {
+        equilibrate: false,
+        use_hsde,
+        ..*opts
+    };
+    let mut sol = solve_qp_ipm_unscaled(&scaled, &inner, make_backend);
+    scaling.unscale_solution(prob, &mut sol);
     sol
 }
 
