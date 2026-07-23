@@ -32,6 +32,17 @@ topological order. Run it before tagging.
    `pip install pounce-solver` does not require the crates.io publish — but the
    crates.io publish is still part of a complete release.
 
+## Working GitHub issues
+
+When opening a PR that fixes a filed issue, the PR **body** (not just the
+title) must contain an actual GitHub closing keyword tied to the issue
+number — `Fixes #123`, `Closes #123`, or `Resolves #123`. Putting the issue
+number only in the PR title (e.g. `Fix foo (#123)`) does **not** trigger
+GitHub's auto-close on merge — the issue is left open, dangling, even
+though the fix is merged. Confirmed missing on PR #342 (fixed #339, no
+closing keyword, issue had to be closed by hand after merge); PR #344 (#341)
+did it correctly.
+
 ## GitHub Release
 
 Created **by hand** (`gh release create vX.Y.Z --notes-file <file>`); no workflow
