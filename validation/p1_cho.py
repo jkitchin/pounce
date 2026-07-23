@@ -6,9 +6,11 @@ orthogonal collocation, 12 shared kinetic parameters, deterministic seed).
 Two things are validated:
 
   1. POINT ESTIMATE. pounce solves the full model; its objective and 12
-     fitted parameters are checked against the committed IPOPT (MA57)
-     benchmark and against the true parameters used to generate the data.
-     (Live IPOPT is attempted too; see the caveat about MA57 below.)
+     fitted parameters are checked against a LIVE HSL-MA57-linked IPOPT on
+     the same model, and against the true parameters used to generate the
+     data. (Default MUMPS IPOPT fails on CHO, so the live reference uses an
+     `ipopt-ma57` executable; the committed MA57 benchmark is kept as a
+     secondary cross-check.)
 
   2. SENSITIVITY / COVARIANCE -- the part that matters most. A solver can
      nail the optimum and still compute a subtly-wrong covariance. We check
@@ -163,19 +165,63 @@ def main():
     theta_p = {nm: float(pyo.value(getattr(m, nm))) for nm in cho.THETA_NAMES}
     theta_true = {nm: float(getattr(p_true, nm)) for nm in cho.THETA_NAMES}
 
-    # committed IPOPT (MA57) benchmark for the same model
+    # committed IPOPT (MA57) benchmark for the same model, kept as a
+    # secondary cross-check alongside the live solve below.
     bench = json.loads((MAIN / "benchmarks/cho/ipopt_ma57.json").read_text())[0]
 
-    # live IPOPT attempt (this box's IPOPT lacks MA57; MUMPS fails on CHO)
+    # LIVE IPOPT reference. CHO is a large, badly-conditioned collocation NLP:
+    # IPOPT's *default* (MUMPS) linear solver fails on it (restoration /
+    # "Error in step computation"), so the honest live reference uses an
+    # HSL-MA57-linked IPOPT. We discover an `ipopt-ma57` executable on PATH;
+    # if absent, we fall back to the committed MA57 benchmark. We ALSO record
+    # that default MUMPS IPOPT fails, as an explicit contrast (pounce's own
+    # FERAL linear solver handles CHO with no HSL dependency).
+    def _find_ma57_ipopt():
+        import shutil
+        for name in ("ipopt-ma57", "ipopt_ma57"):
+            p = shutil.which(name)
+            if p:
+                return p
+        return None
+
     live_ipopt = {}
+    ma57_exe = _find_ma57_ipopt()
+    if ma57_exe is not None:
+        try:
+            mi = cho.build_full_model(batches, nfe=cho.NFE, ncp=cho.NCP)
+            ri = SolverFactory("ipopt", executable=ma57_exe).solve(
+                mi, load_solutions=True,
+                options={"linear_solver": "ma57", "tol": 1e-8})
+            obj_i = float(pyo.value(mi.obj))
+            iters_i = None
+            try:  # best-effort iteration count from the results object
+                iters_i = int(ri.solver.statistics.iterations)
+            except Exception:  # noqa: BLE001
+                pass
+            live_ipopt = {
+                "executable": ma57_exe,
+                "linear_solver": "ma57",
+                "termination": str(ri.solver.termination_condition),
+                "objective": obj_i,
+                "iterations": iters_i,
+                "obj_relerr_pounce_vs_live": rel_err(obj_p, obj_i),
+            }
+        except Exception as e:  # noqa: BLE001
+            live_ipopt = {"executable": ma57_exe, "error": str(e)[:200]}
+    else:
+        live_ipopt = {"note": "no ipopt-ma57 on PATH; see committed MA57 "
+                              "benchmark (benchmarks/cho/ipopt_ma57.json)"}
+
+    # Explicit contrast: default (MUMPS) IPOPT genuinely fails on CHO.
+    mumps_ipopt = {}
     try:
-        mi = cho.build_full_model(batches, nfe=cho.NFE, ncp=cho.NCP)
-        ri = SolverFactory("ipopt").solve(mi, load_solutions=False,
+        mm = cho.build_full_model(batches, nfe=cho.NFE, ncp=cho.NCP)
+        rm = SolverFactory("ipopt").solve(mm, load_solutions=False,
                                           options={"tol": 1e-8})
-        live_ipopt = {"termination": str(ri.solver.termination_condition),
-                      "message": str(ri.solver.message)}
+        mumps_ipopt = {"termination": str(rm.solver.termination_condition),
+                       "message": str(rm.solver.message)}
     except Exception as e:  # noqa: BLE001
-        live_ipopt = {"error": str(e)[:200]}
+        mumps_ipopt = {"error": str(e)[:200]}
 
     # (2) covariance via pounce
     ndata = count_ndata(cho, m, batches)
@@ -220,7 +266,8 @@ def main():
                 abs_err(obj_p, bench["objective"]),
             "obj_relerr_pounce_vs_benchmark":
                 rel_err(obj_p, bench["objective"]),
-            "live_ipopt": live_ipopt,
+            "live_ipopt_ma57": live_ipopt,
+            "default_mumps_ipopt": mumps_ipopt,
             "theta_pounce": theta_p,
             "theta_true": theta_true,
             "theta_max_relerr_vs_true": max(
