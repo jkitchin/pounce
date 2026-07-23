@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+### Tests — external/analytic dual-SIGN regression guard (#294, hardening after #271/#272/#287)
+
+- **A durable guard so a constraint-dual sign inversion cannot ship silently
+  again.** The #271/#272 flip inverted every AMPL/Pyomo/GAMS marginal for an
+  unknown span of releases and no automated check caught it: the benchmark
+  suite compares objectives/status/iterations/wall-time but never duals, and
+  `pounce verify` keeps the better KKT residual of `+λ`/`−λ` so it certifies
+  either sign. Agreement *between pounce surfaces* is not a guard (a uniform
+  flip satisfies it); each new assertion pins a dual against an **external**
+  reference (IPOPT via pyomo) or an **analytic** value with an explicit
+  expected sign, on every dual-bearing surface:
+  - `crates/pounce-cli/tests/issue_294_dual_sign_regression.rs` — the `.sol`
+    marginal block (AMPL `d obj/d b`) and JSON `solution.lambda` (internal
+    Lagrange convention), pinned to the equality QP `min x0²+x1² s.t. x0+x1=2`
+    (marginal `+2`, lambda `−2`) and the Wyndor Glass LP (active-inequality
+    marginals `[0,−1.5,−1]`, lambda `[0,1.5,1]`). New fixture
+    `tests/fixtures/wyndor_min.nl`.
+  - `python/tests/test_dual_sign_regression.py` — `pyomo-pounce` `model.dual`
+    (cross-asserted equal to IPOPT's on the same model, both senses),
+    `minimize(...).info["mult_g"]`, and `solve_qp` `y`/`z`, pinned to the
+    Wyndor shadow prices `(0, 1.5, 1)` and the equality multiplier `y=−2`.
+  - `python/tests/test_gams_link.py` — extends the `gams_pi` cases with the
+    Wyndor shadow prices for both minimizing and maximizing senses.
+  The guard was confirmed to have teeth by momentarily flipping the sign in the
+  `.sol` writer and in `gams_pi` and observing the exact-value asserts fail
+  (reverted).
+
 ### Fixed — convex QP IPM falsely certified a mixed-scale Hessian unbounded (#293, completes #273/#290)
 
 - **A bounded QP with a mixed-scale Hessian was returned as `dual_infeasible`
