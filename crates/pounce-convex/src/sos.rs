@@ -1240,12 +1240,22 @@ fn extract_atoms(mi: &MomentInfo, r: usize, moment: impl Fn(&[usize]) -> f64) ->
 /// absolute test is meaningless for a polynomial whose terms cancel to ~0).
 ///
 /// Chosen from measurement, not taste. Across every extraction-exercising test
-/// the relative residual of a genuine minimizer is `4e-10 … 2e-8`, with one
-/// outlier at `2.5e-5` (`goldstein_price_wide_coefficient_range`, whose
-/// coefficients span 144..23616 — gh #124 conditioning, still a correct
-/// recovery). Non-minimizing atoms measured `7.6e-3` and `7.3e-2`. `1e-3` sits
-/// ~40x above the worst legitimate case and ~7x below the worst bogus one.
-const ATOM_OBJ_TOL: f64 = 1e-3;
+/// that *asserts* exactness, the relative residual of a genuine minimizer is
+/// `4e-10 … 2.3e-7`, the worst being the rank-4 `facial_reduction_four_
+/// minimizers_2d_order_three` at `2.35e-7`. Non-minimizing atoms that were
+/// wrongly certified exact measure far higher: boxed Rosenbrock-2D
+/// (gh #281) lands at `1.05e-5 … 1.26e-5`, Himmelblau at `6.4e-5 … 7.3e-2`,
+/// Goldstein-Price's conditioning-limited atom at `2.5e-5`.
+///
+/// An earlier `1e-3` was ~7x below the worst *far* bogus atom but sat far
+/// ABOVE Rosenbrock's, whose flat "banana" valley makes a point `0.26` from
+/// the true minimizer `(1, 1)` still read `f ≈ 0` — precisely the case the
+/// objective test must catch. `1e-6` is ~4x above the worst genuine case and
+/// ~10x below Rosenbrock's, cleanly separating them (both are deterministic
+/// for the test backend). When it fires, `is_exact` is withdrawn and the
+/// (still valid) lower bound is returned with no minimizers — the safe
+/// failure — rather than a confidently wrong point.
+const ATOM_OBJ_TOL: f64 = 1e-6;
 
 fn psd_rank(mat: &[f64], n: usize) -> usize {
     if n == 0 {
@@ -2148,5 +2158,98 @@ mod tests {
             "bound {} must not exceed the true constrained min 1",
             s.lower_bound
         );
+    }
+
+    #[test]
+    fn boxed_rosenbrock_never_certifies_a_non_minimizing_atom() {
+        // gh #281. Boxed Rosenbrock-2D  f = (1−x)² + 100(y−x²)²  over [−2, 2]²
+        // has a unique global minimizer (1, 1) with f* = 0. At orders 2–4 the
+        // moment relaxation is not flat at the true measure: the first moments
+        // the SDP returns are ≈ (0.86, 0.74), a point that lies in the flat
+        // "banana" valley — 0.26 from (1, 1) yet with f ≈ 0.017–0.020, close to
+        // the (correct) lower bound of ~0. The relaxation used to report this
+        // point with is_exact = true, num_minimizers = 1: a confidently wrong
+        // minimizer. The objective residual there (≈1e-5 in equilibrated units)
+        // is ~45x the worst genuine extraction, so the tightened atom-objective
+        // guard now withdraws exactness and returns the (still valid) bound with
+        // no minimizers — the safe failure.
+        let f = Polynomial::new(
+            2,
+            vec![
+                (vec![0, 0], 1.0),
+                (vec![1, 0], -2.0),
+                (vec![2, 0], 1.0),
+                (vec![0, 2], 100.0),
+                (vec![2, 1], -200.0),
+                (vec![4, 0], 100.0),
+            ],
+        );
+        let rosen = |x: &[f64]| (1.0 - x[0]).powi(2) + 100.0 * (x[1] - x[0] * x[0]).powi(2);
+        // Box [−2, 2]² as standalone variable bounds.
+        let prob = PolyProblem::new(f.clone())
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![1, 0], 1.0), (vec![0, 0], 2.0)],
+            ))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![1, 0], -1.0), (vec![0, 0], 2.0)],
+            ))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![0, 1], 1.0), (vec![0, 0], 2.0)],
+            ))
+            .ge(Polynomial::new(
+                2,
+                vec![(vec![0, 1], -1.0), (vec![0, 0], 2.0)],
+            ));
+
+        for order in [2usize, 3, 4] {
+            let r = sos_minimize(&prob, Some(order), backend);
+            assert_eq!(r.status, QpStatus::Optimal, "order {order}: {:?}", r.status);
+
+            // The lower bound must remain sound (≤ the true minimum of 0).
+            assert!(
+                r.lower_bound <= 1e-4,
+                "order {order}: bound {} exceeds the true global minimum 0",
+                r.lower_bound
+            );
+
+            // The core invariant (gh #281): is_exact ⇒ every reported minimizer
+            // attains the lower bound. A point with f ≈ 0.02 while the bound is
+            // ~0 must NEVER be handed back as an exact minimizer.
+            if r.is_exact {
+                for m in &r.minimizers {
+                    let fx = rosen(m);
+                    assert!(
+                        (fx - r.lower_bound).abs() <= 1e-3,
+                        "order {order}: is_exact=true but minimizer {m:?} has \
+                         f = {fx:e}, missing the lower bound {} — a confidently \
+                         wrong point",
+                        r.lower_bound
+                    );
+                    // If it truly attains the bound it must also be near (1, 1).
+                    assert!(
+                        (m[0] - 1.0).hypot(m[1] - 1.0) < 1e-2,
+                        "order {order}: exact minimizer {m:?} is not (1, 1)",
+                    );
+                }
+                assert_eq!(
+                    r.num_minimizers,
+                    r.minimizers.len(),
+                    "order {order}: num_minimizers disagrees with the returned atoms",
+                );
+            } else {
+                // The safe failure: no exactness claim ⇒ no minimizers reported.
+                assert_eq!(
+                    r.num_minimizers, 0,
+                    "order {order}: num_minimizers must be 0 when not exact",
+                );
+                assert!(
+                    r.minimizers.is_empty(),
+                    "order {order}: minimizers must be empty when not exact",
+                );
+            }
+        }
     }
 }
