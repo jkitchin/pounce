@@ -226,6 +226,41 @@ fn uniform_tiny_hessian_converges_not_iteration_limit() {
     );
 }
 
+/// gh #293 (symptom 2, constrained) — the tiny-curvature pathology also
+/// surfaces as `OptimalInaccurate` (not `IterationLimit`) when a constraint
+/// binds near the far-off optimum: HSDE returns a usable-but-loose iterate at
+/// the cap instead of running fully dry. The equilibrated retry must rescue
+/// this manifestation too, so the fix is keyed on the *regime* rather than a
+/// single status symbol. `min ½·1e-12·(x0²+x1²) − x1  s.t.  x1 ≤ 1e6, x ≥ 0`
+/// has optimum `x1* = 1e6`, `f* ≈ −1e6`.
+#[test]
+fn tiny_hessian_with_binding_inequality_converges_cleanly() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 1e-12), Triplet::new(1, 1, 1e-12)],
+        c: vec![0.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![Triplet::new(0, 1, 1.0)],
+        h: vec![1e6],
+        lb: vec![0.0, 0.0],
+        ub: vec![f64::INFINITY, f64::INFINITY],
+    };
+    let sol = solve(&prob);
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "expected clean Optimal (x1* = 1e6), got {:?} after {} iters",
+        sol.status,
+        sol.iters
+    );
+    assert!(
+        (sol.obj - (-1e6)).abs() <= 1e-3 * 1e6,
+        "obj = {} should be ≈ -1e6",
+        sol.obj
+    );
+}
+
 // --- Status / edge-case honesty (PR70 item C) -----------------------------
 //
 // A solver that stops early for *any* reason must say so. The danger these

@@ -288,24 +288,33 @@ where
     // left to regress — equilibration can only recover a usable solve or fail
     // the same way (in which case we keep the original result).
     //
-    // gh #293: the same retry also rescues an HSDE solve that merely *ran out
-    // of iterations* (`IterationLimit`) on a badly-scaled QP whose Hessian is
-    // uniformly tiny — e.g. `P = diag(1e-12, 1e-12)`, where the optimum sits at
-    // `‖x*‖ ≈ 1e12`. There HSDE's per-cone NT scaling never sees the objective
-    // curvature (the `P` block is 12 orders below O(1)), so the iterates crawl
-    // and the budget is exhausted short of the optimum; Ruiz pre-scaling lifts
-    // `P̂` to O(1) and the same driver then converges. This does not contradict
-    // the "Ruiz composes badly with HSDE" note either: we only reach here
-    // because the un-equilibrated solve failed to converge, so there is nothing
-    // left to regress. Unlike the `NumericalFailure` case (where any non-failing
-    // status is an improvement), an `IterationLimit` is an *honest* status, so
-    // the equilibrated retry is accepted **only when it converges to `Optimal`**
-    // — never when it merely returns a different non-converged/certificate
-    // status, so a genuinely hard problem keeps its truthful `IterationLimit`
-    // and no infeasibility/unboundedness verdict can be introduced by the retry.
+    // gh #293: the same retry also rescues an HSDE solve that failed to reach a
+    // clean `Optimal` on a badly-scaled QP whose Hessian curvature is tiny. The
+    // canonical case is a uniformly tiny Hessian — `P = diag(1e-12, 1e-12)`,
+    // optimum at `‖x*‖ ≈ 1e12` — where HSDE's per-cone NT scaling never sees the
+    // objective curvature (the `P` block is 12 orders below O(1)), so the
+    // iterates crawl and the budget is exhausted short of the optimum. Ruiz
+    // pre-scaling lifts `P̂` to O(1) and the same driver then converges. The same
+    // pathology surfaces through either non-converged status depending on the
+    // geometry: as `IterationLimit` when the optimum is unconstrained (the
+    // iterates never arrive), and as `OptimalInaccurate` when a constraint binds
+    // near it (a usable-but-loose iterate is returned at the cap). Both are keyed
+    // on the same retry, so the fix covers the *regime*, not one status symbol.
+    // This does not contradict the "Ruiz composes badly with HSDE" note either:
+    // we only reach here because the un-equilibrated solve did not cleanly
+    // converge, so there is nothing left to regress. Unlike the
+    // `NumericalFailure` case (where any non-failing status is an improvement),
+    // `IterationLimit` and `OptimalInaccurate` are *honest* statuses, so the
+    // equilibrated retry is accepted **only when it converges to a clean
+    // `Optimal`** — never when it merely returns a different non-converged or
+    // certificate status. A genuinely hard problem thus keeps its truthful
+    // status, and no infeasibility/unboundedness verdict can be introduced by
+    // the retry. (Cone-carrying problems never reach this branch: exp/power/SOC
+    // solve through `solve_socp_ipm`, and Ruiz — an orthant-only row scaling —
+    // is confined to this LP/QP entry point.)
     let retry_on = matches!(
         sol.status,
-        QpStatus::NumericalFailure | QpStatus::IterationLimit
+        QpStatus::NumericalFailure | QpStatus::IterationLimit | QpStatus::OptimalInaccurate
     );
     if opts.use_hsde && opts.equilibrate && retry_on {
         let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
@@ -317,7 +326,9 @@ where
         scaling.unscale_solution(prob, &mut retry);
         let accept = match sol.status {
             QpStatus::NumericalFailure => retry.status != QpStatus::NumericalFailure,
-            QpStatus::IterationLimit => retry.status == QpStatus::Optimal,
+            QpStatus::IterationLimit | QpStatus::OptimalInaccurate => {
+                retry.status == QpStatus::Optimal
+            }
             _ => false,
         };
         if accept {
