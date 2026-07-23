@@ -124,6 +124,13 @@ class QpResult:
         ``iter``, ``objective``, ``primal_infeasibility``,
         ``dual_infeasibility``, ``mu``, ``alpha_primal``, ``alpha_dual``.
         Empty unless the solve was called with ``collect_iterates=True``.
+    scaling_warning:
+        ``None`` on a cleanly-solved, well-scaled problem. Otherwise a
+        human-readable warning that the objective curvature ``‖P‖`` is tiny
+        relative to the problem data and the (non-``optimal``) result may be
+        inaccurate — set only when the solve did not converge cleanly *and* the
+        problem is in that ill-scaled regime, with an actionable remedy
+        (rescale the objective, or cross-check with a reference solver).
     """
 
     status: str
@@ -136,6 +143,7 @@ class QpResult:
     iters: int
     residuals: Optional[dict] = None
     iterates: list = field(default_factory=list)
+    scaling_warning: Optional[str] = None
 
     @property
     def success(self) -> bool:
@@ -449,6 +457,7 @@ def _to_result(d: dict) -> QpResult:
         iters=int(d["iters"]),
         residuals=d.get("residuals"),
         iterates=list(d.get("iterates", [])),
+        scaling_warning=d.get("scaling_warning"),
     )
 
 
