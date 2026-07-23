@@ -1348,11 +1348,10 @@ impl ParametricActiveSetSolver {
         // rule is provably finite; use it for the recovery solve.
         let mut opts_p1 = opts.clone();
         opts_p1.anti_cycling = AntiCyclingChoice::Bland;
-        let opts = &opts_p1;
-        let sol_aug = if opts.use_schur_updates {
-            self.solve_general_schur(&qp_aug, Some(&ws), opts)?
+        let sol_aug = if opts_p1.use_schur_updates {
+            self.solve_general_schur(&qp_aug, Some(&ws), &opts_p1)?
         } else {
-            self.solve_general(&qp_aug, Some(&ws), opts)?
+            self.solve_general(&qp_aug, Some(&ws), &opts_p1)?
         };
 
         // Pack the original-space solution.
@@ -1366,15 +1365,98 @@ impl ParametricActiveSetSolver {
         working.bounds.copy_from_slice(&sol_aug.working.bounds[..n]);
 
         let feasible = reform.is_feasible(&sol_aug.x, opts.feas_tol);
-        let status = if feasible {
-            QpStatus::Optimal
-        } else {
-            QpStatus::Infeasible
-        };
+        if feasible {
+            // Elastic drove every slack to zero ⇒ the recovered `x` is
+            // feasible for the original QP and (barring a non-converged
+            // phase-1) optimal. Preserve the historical fast path.
+            let obj = quad_objective(qp, &x);
+            return Ok(QpSolution {
+                x,
+                lambda_g,
+                lambda_x,
+                working,
+                obj,
+                status: QpStatus::Optimal,
+                stats: QpStats {
+                    n_working_set_changes: sol_aug.stats.n_working_set_changes,
+                    n_refactor: sol_aug.stats.n_refactor,
+                    n_schur_updates: sol_aug.stats.n_schur_updates,
+                    used_phase1: true,
+                    time: started.elapsed(),
+                },
+            });
+        }
 
-        // Objective uses the ORIGINAL `H`, `g`, not the augmented
-        // (penalty-inflated) values.
+        // Residual elastic slacks remain. This is *not* automatically an
+        // infeasibility certificate: a phase-1 active-set solve can stall
+        // at an extremely degenerate vertex — many more active rows than
+        // variables and no interior (Slater fails), the m/n ≫ 1 collapsed-
+        // cone geometry of #282 — and leave sub-feas_tol residual slacks
+        // even though a feasible point plainly exists (e.g. the QP whose
+        // feasible set is exactly {0}). Emitting `Infeasible` there is a
+        // FALSE certificate: a feasible problem has no Farkas proof.
+        //
+        // Recovery: an active-set phase-2 solve started from a feasible
+        // point of this geometry converges in a handful of pivots (it is
+        // the *phase-1 feasibility hunt* that is degenerate, not the
+        // phase-2 optimization). Re-solve the ORIGINAL QP, warm-started
+        // (via `solve_general`, which bypasses the `solve` feasibility
+        // audit and so cannot re-enter elastic) from the near-feasible
+        // points phase-1 produced. If any converges to a genuinely
+        // feasible optimum, return it — this turns the #282 family from a
+        // false `Infeasible` into the correct `x* = 0` solution.
+        //
+        // Candidate seeds, cheapest-first: the recovered `x`, and the
+        // elastic seed `x_orig` (0 projected into the box — feasible
+        // whenever the origin is, which is the exact #282 optimum).
+        let candidates = [x.clone(), x_orig.clone()];
+        for seed in candidates {
+            if !self.recovery_seed_usable(qp, &seed) {
+                continue;
+            }
+            let ws_rec = QpWarmStart {
+                x: seed,
+                lambda_g: vec![0.0; m],
+                lambda_x: vec![0.0; n],
+                working: WorkingSet::cold(n, m),
+            };
+            // A recovery re-solve that itself fails (a warm-started active-
+            // set solve on this degenerate geometry can hit a non-recoverable
+            // factorization) is NON-fatal: this is a best-effort attempt to
+            // improve on the phase-1 outcome, so a failure just means "this
+            // seed did not pan out" — skip it and fall through to the
+            // certificate/honest-status logic. Never let it turn a
+            // (correctly) infeasible or honest result into a hard error.
+            let rec = if opts.use_schur_updates {
+                self.solve_general_schur(qp, Some(&ws_rec), opts)
+            } else {
+                self.solve_general(qp, Some(&ws_rec), opts)
+            };
+            let rec = match rec {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if rec.status == QpStatus::Optimal
+                && self.original_qp_feasible(qp, &rec.x, opts.feas_tol)
+            {
+                let mut rec = rec;
+                rec.stats.used_phase1 = true;
+                rec.stats.time = started.elapsed();
+                return Ok(rec);
+            }
+        }
+
+        // Recovery found no feasible point. Only now may we speak to
+        // infeasibility — and only when phase-1 actually CONVERGED to its
+        // minimal-l1 optimum (a genuine certificate). If phase-1 itself
+        // stalled (MaxIter / numerical breakdown) we have no certificate;
+        // report that honest, non-committal status instead of asserting a
+        // confident `Infeasible` we cannot back up.
         let obj = quad_objective(qp, &x);
+        let status = match sol_aug.status {
+            QpStatus::Optimal => QpStatus::Infeasible,
+            other => other,
+        };
 
         Ok(QpSolution {
             x,
@@ -1391,6 +1473,52 @@ impl ParametricActiveSetSolver {
                 time: started.elapsed(),
             },
         })
+    }
+
+    /// True when `seed` is a sane warm-start point for the phase-2
+    /// recovery re-solve in [`Self::solve_elastic`]: every entry is
+    /// finite and inside the variable box (with a small feas_tol slack).
+    /// A seed carrying a NaN/inf or grossly out-of-box coordinate would
+    /// just send `solve_general` off into its own failure path, so skip
+    /// it rather than burn a recovery solve on it.
+    fn recovery_seed_usable(&self, qp: &QpProblem, seed: &[Number]) -> bool {
+        for (i, &xi) in seed.iter().enumerate() {
+            if !xi.is_finite() {
+                return false;
+            }
+            if qp.xl[i] > NLP_LOWER_BOUND_INF && xi < qp.xl[i] - 1e-6 {
+                return false;
+            }
+            if qp.xu[i] < NLP_UPPER_BOUND_INF && xi > qp.xu[i] + 1e-6 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// True when `x` satisfies every original general-constraint row and
+    /// variable bound to within `feas_tol`. Used to confirm a phase-2
+    /// recovery re-solve landed on a genuinely feasible point before its
+    /// `Optimal` status is trusted over a false `Infeasible`.
+    fn original_qp_feasible(&self, qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
+        let ax = a_times_x(qp.a, x, qp.m);
+        for i in 0..qp.m {
+            if qp.bl[i] > NLP_LOWER_BOUND_INF && ax[i] < qp.bl[i] - feas_tol {
+                return false;
+            }
+            if qp.bu[i] < NLP_UPPER_BOUND_INF && ax[i] > qp.bu[i] + feas_tol {
+                return false;
+            }
+        }
+        for (i, &xi) in x.iter().enumerate() {
+            if qp.xl[i] > NLP_LOWER_BOUND_INF && xi < qp.xl[i] - feas_tol {
+                return false;
+            }
+            if qp.xu[i] < NLP_UPPER_BOUND_INF && xi > qp.xu[i] + feas_tol {
+                return false;
+            }
+        }
+        true
     }
 
     /// Schur-based variant of [`Self::solve_general`]. Opt-in via

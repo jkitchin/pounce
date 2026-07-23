@@ -286,6 +286,33 @@ impl SqpAlgorithm {
                         working_set: iter.working,
                     });
                 }
+                // The QP subproblem neither solved nor certified
+                // infeasibility. `MaxIter` / `NumericalError` mean the
+                // active-set QP could not resolve the (typically extremely
+                // degenerate) step subproblem — the m/n ≫ 1 collapsed-cone
+                // geometry of #282. Terminate the SQP with an HONEST
+                // non-committal status rather than a hard error, and — the
+                // point of #282 — WITHOUT ever asserting infeasibility on a
+                // problem we have not certified infeasible.
+                QpStatus::MaxIter | QpStatus::NumericalError => {
+                    let obj = nlp.eval_f(&iter.x);
+                    self.iterates = Some(iter.clone());
+                    return Ok(SqpResult {
+                        x: iter.x,
+                        lambda_g: iter.lambda_g,
+                        lambda_x: iter.lambda_x,
+                        obj,
+                        status: SqpStatus::QpStepFailed,
+                        n_iter: outer,
+                        n_qp_solves,
+                        final_stationarity,
+                        final_constr_viol,
+                        working_set: iter.working,
+                    });
+                }
+                // `Unbounded` on a step QP is a genuine pathology (an
+                // indefinite/negative-curvature ray); keep the historical
+                // hard-error behavior.
                 other => {
                     return Err(SqpError::QpFailure(
                         pounce_qp::QpError::LinearSolverFailure(format!(
