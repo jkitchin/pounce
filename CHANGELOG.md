@@ -77,6 +77,14 @@ changes.
   `SolverFactory('pounce')` raises a clear `UnknownSolver` error — it never
   silently runs an unrelated binary. Docs updated to state the import
   requirement and point at `check_binary()`.
+- Follow-up hardening of the above: the PATH scan now resolves each entry
+  through `shutil.which`, so it looks for `pounce.exe` on Windows — previously
+  the bare-`pounce` filename test found nothing there, and `check_binary()`
+  reported no shadowing on Windows even when a stale `pounce.exe` was earlier on
+  `PATH`. The build id also keeps a `+dirty` marker (`96fc5890+dirty`), so a
+  build with uncommitted changes is distinguished from the clean build at the
+  same commit; a `commit unknown` build (made outside a git checkout) still
+  reads as unqueryable so two independent such builds never compare equal.
 
 ### Fixed — `curve_fit` two-parameter bounds: the last silently-transposing spellings now raise (#260)
 
