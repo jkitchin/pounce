@@ -80,6 +80,27 @@ def _build_id(exe):
     return m.group(1) if m else None
 
 
+def _discrete_vars(model, max_list=5):
+    """Names of active, non-fixed Binary/Integer variables in ``model``
+    (capped at ``max_list``), plus the true total count.
+
+    A *fixed* discrete variable is not a decision POUNCE has to relax — its
+    value is already pinned by the user, so it is excluded.
+    """
+    from pyomo.core.base.var import Var
+
+    names = []
+    total = 0
+    for v in model.component_data_objects(Var, active=True, descend_into=True):
+        if v.fixed:
+            continue
+        if v.is_binary() or v.is_integer():
+            total += 1
+            if len(names) < max_list:
+                names.append(v.name)
+    return names, total
+
+
 _fallback_warned = False
 
 
@@ -111,6 +132,14 @@ class POUNCE(ASL):
         super().__init__(**kwds)
         self._metasolver = False
         self.options.solver = "pounce"
+        # POUNCE is a continuous NLP solver: no branch-and-bound, no SOS
+        # handling. The generic `ASL` base class defaults these capabilities
+        # to True (valid for many .nl-driven solvers), which is simply wrong
+        # here and would let Pyomo's own solver-selection logic recommend
+        # `pounce` for a MINLP (gh #341).
+        self._capabilities.integer = False
+        self._capabilities.sos1 = False
+        self._capabilities.sos2 = False
 
     def solve(self, *args, **kwds):
         # When the model declares sensitivity parameters
@@ -133,6 +162,31 @@ class POUNCE(ASL):
                 f"{', '.join(sorted(explicit))}= given but no model was "
                 "passed; call solve(model, ...) with the model positionally "
                 "or as the `model` keyword")
+        if model is not None:
+            # POUNCE has no branch-and-bound: handing it a model with a live
+            # (non-fixed) Binary/Integer variable does not fail -- it silently
+            # solves the continuous relaxation and reports a fractional value
+            # as `optimal` for a variable you declared discrete (gh #341).
+            # Ipopt-via-ASL has this same gap, but pyomo_pounce already fails
+            # loudly elsewhere for comparable silent-wrongness risks (the
+            # ambiguous curve_fit bounds shape, gh #260/#265; the stale-binary
+            # check, gh #315), so it does here too rather than matching the
+            # generic ASL/Ipopt behavior.
+            names, total = _discrete_vars(model)
+            if names:
+                shown = ", ".join(names)
+                more = f" (+{total - len(names)} more)" if total > len(names) else ""
+                raise ValueError(
+                    "pounce solve: model has "
+                    f"{total} active, non-fixed integer/binary variable(s) "
+                    f"(e.g. {shown}{more}), but POUNCE is a continuous NLP "
+                    "solver with no branch-and-bound or SOS handling -- it "
+                    "would silently solve the continuous relaxation and "
+                    "report a fractional value as 'optimal' for a variable "
+                    "declared discrete. Fix the variable's domain (or set "
+                    "var.domain = pyomo.environ.Reals / relax it explicitly) "
+                    "if a continuous relaxation is what you intend, or use a "
+                    "MINLP-capable solver.")
         if model is not None and (has_declarations(model) or explicit):
             return sens_solve(model, tee=kwds.get("tee", False), **explicit)
         return super().solve(*args, **kwds)

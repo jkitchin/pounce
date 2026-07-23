@@ -10,6 +10,7 @@ import pytest
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce' with SolverFactory)
 from pyomo.environ import (
+    Binary,
     ConcreteModel,
     Constraint,
     NonNegativeReals,
@@ -162,3 +163,41 @@ def test_options_forwarded(solver):
         del solver.options["max_iter"]
 
     assert str(result.solver.termination_condition) != "optimal"
+
+
+# --------------------------------------------------------------------------
+# issue #341 — POUNCE has no branch-and-bound / SOS handling; solving a model
+# with a live Binary/Integer variable must fail loudly, not silently return a
+# fractional "optimal" value for a variable declared discrete.
+# --------------------------------------------------------------------------
+
+
+def test_binary_variable_rejected(solver):
+    m = ConcreteModel()
+    m.b = Var(domain=Binary)
+    m.obj = Objective(expr=(m.b - 0.3) ** 2)
+
+    with pytest.raises(ValueError, match="integer/binary variable"):
+        solver.solve(m)
+
+
+def test_fixed_binary_variable_is_allowed(solver):
+    """A *fixed* discrete variable is not a live decision -- it must solve."""
+    m = ConcreteModel()
+    m.b = Var(domain=Binary, initialize=1)
+    m.b.fix(1)
+    m.x = Var(bounds=(0, 10), initialize=1.0)
+    m.obj = Objective(expr=(m.x - 7) ** 2 + m.b)
+
+    result = solver.solve(m)
+
+    assert str(result.solver.termination_condition) == "optimal"
+    assert value(m.x) == pytest.approx(7.0, abs=1e-5)
+
+
+def test_has_capability_integer_is_false():
+    """The plugin must not inherit ASL's generic `integer=True` default."""
+    solver = SolverFactory("pounce")
+    assert solver.has_capability("integer") is False
+    assert solver.has_capability("sos1") is False
+    assert solver.has_capability("sos2") is False
