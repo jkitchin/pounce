@@ -89,6 +89,32 @@ impl QpProblem {
         self.lb.iter().any(|&v| v > -BOUND_INF) || self.ub.iter().any(|&v| v < BOUND_INF)
     }
 
+    /// A copy of this problem with the **objective** data scaled by `factor`
+    /// (`P ← factor·P`, `c ← factor·c`); constraints, bounds, and the feasible
+    /// set are untouched. Scaling the objective by a positive constant leaves
+    /// the minimizer `x*` unchanged, so this is used to renormalize a
+    /// badly-scaled objective before an interior-point solve and map the result
+    /// back afterward (the dual multipliers and objective value scale by the
+    /// same `factor`). See the HSDE cost-normalization in
+    /// [`crate::ipm`] (gh #286).
+    pub(crate) fn scaled_objective(&self, factor: f64) -> QpProblem {
+        QpProblem {
+            n: self.n,
+            p_lower: self
+                .p_lower
+                .iter()
+                .map(|t| Triplet::new(t.row, t.col, t.val * factor))
+                .collect(),
+            c: self.c.iter().map(|v| v * factor).collect(),
+            a: self.a.clone(),
+            b: self.b.clone(),
+            g: self.g.clone(),
+            h: self.h.clone(),
+            lb: self.lb.clone(),
+            ub: self.ub.clone(),
+        }
+    }
+
     /// Public `y += P x` (full symmetric product from the stored lower
     /// triangle). Exposed so external callers — e.g. a TNLP adapter
     /// reusing the same problem data — can evaluate the objective
