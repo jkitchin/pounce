@@ -1643,17 +1643,40 @@ where
         status,
         QpStatus::OptimalInaccurate | QpStatus::NumericalFailure | QpStatus::IterationLimit
     ) {
-        // Restore the lowest-residual iterate we saw (τ > 0) — the point we
-        // actually adjudicate. For a `near_opt` breakdown this is at least as
-        // good as the breakdown iterate; it also carries the prior NF/IL →
-        // reduced-accuracy salvage.
         let reduced_acc = opts.tol.sqrt();
-        let restore = best_res < reduced_acc;
+
+        // Score both candidate iterates — the loop's final one and the best
+        // (lowest in-loop-residual) snapshot — on the *scale-relative* conic KKT
+        // residual, the scale-invariant optimality certificate. gh #336: the
+        // in-loop residual carries the raw, *unnormalized* complementarity gap
+        // `s·z`, whose absolute floor grows with the optimal cone magnitudes, so
+        // on extreme-but-legitimate data scaling it stalls well above `tol` even
+        // at a point that is primal-feasible, dual-feasible, and objective-
+        // correct. The absolute residual therefore must not gate the salvage;
+        // `true_kkt_scale_rel` (each residual normalized by its own term
+        // magnitudes) can. Adjudicate on whichever iterate certifies tighter.
+        let final_rel = true_kkt_scale_rel(prob, &cone, &x, &y, &z, tau);
+        let best_rel = best
+            .as_ref()
+            .and_then(|(bx, by, bz, _bs, bt, _)| true_kkt_scale_rel(prob, &cone, bx, by, bz, *bt));
+        let use_best = match (best_rel, final_rel) {
+            (Some(b), Some(f)) => b < f,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        // Absolute reduced-accuracy fallback (the prior salvage path): a
+        // well-scaled solve that stalled a hair short of `tol` still salvages,
+        // even when its scale-relative certificate is unavailable (e.g. the
+        // recovered dual sits just outside `K*`).
+        let abs_salvage = best_res < reduced_acc;
+        // Restore the best snapshot when it is the point we adjudicate — either it
+        // certifies tighter than the final iterate, or the absolute fallback fires
+        // on it. κ is not read downstream (the recovery un-homogenizes by 1/τ);
+        // restoring x/y/z/s/τ is what the solution recovery and post-mortem hook
+        // consume.
+        let restore = use_best || abs_salvage;
         if restore {
             if let Some((bx, by, bz, bs, btau, _bkappa)) = best.take() {
-                // κ is not read downstream (the recovery un-homogenizes by
-                // 1/τ); restoring x/y/z/s/τ is what the solution recovery and
-                // the post-mortem hook consume.
                 x = bx;
                 y = by;
                 z = bz;
@@ -1661,14 +1684,23 @@ where
                 tau = btau;
             }
         }
-        let promoted = true_kkt_scale_rel(prob, &cone, &x, &y, &z, tau)
-            .is_some_and(|e| e < PROMOTE_REL_TOL_FACTOR * opts.tol);
-        status = if promoted {
-            QpStatus::Optimal
-        } else if restore {
-            QpStatus::OptimalInaccurate
-        } else {
-            status
+        // Certificate of the point we actually return.
+        let rel = if restore { best_rel } else { final_rel };
+        status = match rel {
+            // Genuinely tight scale-relative certificate at a dual-feasible point
+            // (the `ẑ ∈ K*` gate lives in `true_kkt_scale_rel`): a clean
+            // `Optimal`.
+            Some(e) if e < PROMOTE_REL_TOL_FACTOR * opts.tol => QpStatus::Optimal,
+            // Primal- and dual-feasible with a *normalized* gap only moderately
+            // above `tol` — the accuracy plateau of a boundary-riding
+            // non-symmetric cone under extreme scaling. Usable at reduced
+            // accuracy: report `OptimalInaccurate` (matching the symmetric SOC
+            // driver) rather than discarding a correct answer as a spurious
+            // `NumericalFailure` (gh #336).
+            Some(e) if e < reduced_acc => QpStatus::OptimalInaccurate,
+            // Absolute-residual salvage for the well-scaled near-`tol` stall.
+            _ if abs_salvage => QpStatus::OptimalInaccurate,
+            _ => status,
         };
     }
 
