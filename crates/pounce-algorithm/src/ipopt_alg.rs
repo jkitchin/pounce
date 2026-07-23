@@ -138,6 +138,20 @@ pub struct IpoptAlgorithm {
     /// toward zero. `NaN` (non-finite) until the run has a first finite
     /// decrease to compare against, which bootstraps the check.
     divergence_prev_decrease: Number,
+    /// #285 recession-ray persistence — consecutive iterations for which the
+    /// *checked recession-ray proof* ([`Self::curr_is_recession_ray`]) held
+    /// while the primal iterate kept growing. This is a second, independent
+    /// unboundedness path that catches a genuine recession ray in
+    /// `null(A_eq)` over free variables whose `|x|` grows only *linearly*
+    /// (the regularized zero-Hessian step in an equality null space marches
+    /// out at a bounded rate), so it never crosses `diverging_iterates_tol`
+    /// (`1e20`) within `max_iter` and the geometric-growth
+    /// [`Self::divergence_streak`] never accumulates. Reset to zero whenever
+    /// the proof fails or the iterate stops growing.
+    recession_streak: u32,
+    /// Largest `|x|` seen in the current recession-ray run (companion to
+    /// [`Self::recession_streak`]). Zero when no run is active.
+    recession_prev_amax: Number,
     /// Companion threshold on the dual step — when both primal and dual
     /// steps are tiny in two consecutive iterations the algorithm
     /// declares convergence at the best attainable accuracy. Default
@@ -331,6 +345,8 @@ impl IpoptAlgorithm {
             divergence_prev_amax: 0.0,
             divergence_prev_f: Number::INFINITY,
             divergence_prev_decrease: Number::NAN,
+            recession_streak: 0,
+            recession_prev_amax: 0.0,
             tiny_step_y_tol: 1e-2,
             dual_diverging_streak: 15,
             dual_inf_prev: 0.0,
@@ -435,6 +451,40 @@ impl IpoptAlgorithm {
     /// user threshold no longer fires on the way to a finite optimum.
     const DIVERGENCE_ABS_RUNAWAY: Number = 1e18;
 
+    /// #285: magnitude floor for the checked recession-ray unboundedness path.
+    /// Below this the (slightly more expensive) recession proof is not even
+    /// attempted, so it is inert on every normal, well-scaled solve. Above it,
+    /// unboundedness is only ever concluded through the full checked proof in
+    /// [`Self::curr_is_recession_ray`] — a genuinely *feasible* iterate of this
+    /// magnitude already witnesses an unbounded feasible region, and the proof
+    /// additionally certifies the escape direction. Sits far below the
+    /// `diverging_iterates_tol` (`1e20`) magnitude guard so a linearly-growing
+    /// ray (which never reaches `1e20` within `max_iter`) is still caught.
+    const RECESSION_MIN_NORM: Number = 1e10;
+    /// #285: consecutive growing, proof-passing iterations required before the
+    /// recession-ray path reports `DivergingIterates`. A bounded feasible
+    /// region cannot supply a *growing* sequence of feasible over-floor
+    /// iterates, so persistence is defense-in-depth against a lone numerical
+    /// fluke rather than a soundness requirement.
+    const RECESSION_PERSIST_ITERS: u32 = 4;
+    /// #285: relative feasibility bar for the recession proof. The current
+    /// iterate counts as feasible (hence a witness that the feasible region
+    /// reaches its magnitude) when its unscaled max-norm primal infeasibility
+    /// is at most this fraction of `|x|_∞`. The check is *relative* on purpose:
+    /// evaluating `A_eq x − b` at `|x| ~ 1e17` carries floating-point roundoff
+    /// that scales with `|x|`, while a genuinely infeasible excursion (e.g.
+    /// mid-restoration) has a residual comparable to `|x|` itself.
+    const RECESSION_FEAS_REL: Number = 1e-6;
+    /// #285: relative bar for "the escape direction lies in `null(A_eq)`".
+    /// `‖J_c x‖_∞ ≤ this · |x|_∞` certifies that moving along `d ≈ x` preserves
+    /// the (linearized) equality constraints — `A_eq d ≈ 0`.
+    const RECESSION_DIR_TOL: Number = 1e-6;
+    /// #285: relative descent bar. The objective must strictly decrease along
+    /// the escape direction with a real margin — `∇f·x ≤ −this · ‖∇f‖ ‖x‖` —
+    /// so a variable drifting orthogonally to the objective (`∇f·x ≈ 0`) can
+    /// never be mistaken for a recession ray driving `f → −∞`.
+    const RECESSION_DESC_REL: Number = 1e-6;
+
     /// Update the divergence-persistence state for the current iterate and
     /// return whether `DivergingIterates` should be reported now (issues
     /// #248 / #252). `amax` is `max_i |x_i|`; `structural_free` is the result
@@ -521,9 +571,19 @@ impl IpoptAlgorithm {
     }
 
     fn divergence_is_true_unboundedness(&self, x: &dyn Vector) -> bool {
+        self.free_to_escape_over(x, self.diverging_iterates_tol)
+    }
+
+    /// Shared core of the free-variable structural check: returns `true` when
+    /// some component of `x` with magnitude exceeding `thresh` is heading
+    /// toward a side (positive → upper, negative → lower) that carries *no*
+    /// finite bound, so it is free to escape to infinity. Parameterized on the
+    /// magnitude threshold so both the `diverging_iterates_tol` (`1e20`)
+    /// divergence guard and the lower `RECESSION_MIN_NORM` recession-ray path
+    /// (#285) share one implementation.
+    fn free_to_escape_over(&self, x: &dyn Vector, thresh: Number) -> bool {
         use pounce_linalg::DenseVector;
 
-        let tol = self.diverging_iterates_tol;
         let cq = self.cq.borrow();
         let nlp = cq.nlp().borrow();
 
@@ -554,7 +614,7 @@ impl IpoptAlgorithm {
         };
 
         for i in 0..xv.len() {
-            if xv[i].abs() > tol {
+            if xv[i].abs() > thresh {
                 let free_to_diverge = if xv[i] > 0.0 {
                     ub[i] == 0.0
                 } else {
@@ -566,6 +626,145 @@ impl IpoptAlgorithm {
             }
         }
         false
+    }
+
+    /// #285: checked recession-ray unboundedness proof at the current iterate.
+    ///
+    /// Returns `true` only when the current iterate `x` (with `|x|_∞ = amax`,
+    /// already known `> RECESSION_MIN_NORM` by the caller) *proves* the
+    /// problem is unbounded below via a genuine recession ray — the same
+    /// standard the LP/symmetric path holds itself to, not a magnitude
+    /// heuristic. All of the following must hold:
+    ///
+    /// 1. **Feasible witness.** The iterate's unscaled primal infeasibility is
+    ///    at most `RECESSION_FEAS_REL · amax`. A genuinely feasible iterate of
+    ///    norm `≥ 1e10` witnesses that the feasible region reaches that far —
+    ///    a *bounded* region cannot contain it. (Relative bar: the residual of
+    ///    `A_eq x − b` carries roundoff that scales with `|x|`.)
+    /// 2. **Free to escape.** Some over-floor component heads toward a side
+    ///    with no finite variable bound ([`Self::free_to_escape_over`] at
+    ///    `RECESSION_MIN_NORM`).
+    /// 3. **Direction in `null(A_eq)`.** `‖J_c x‖_∞ ≤ RECESSION_DIR_TOL · amax`
+    ///    — moving along `d ≈ x` preserves the equality constraints.
+    /// 4. **Inequalities not blocking.** No finitely-bounded inequality row is
+    ///    driven toward its bound along `d ≈ x`
+    ///    ([`Self::recession_blocked_by_inequality`]).
+    /// 5. **Objective descending.** `∇f·x ≤ −RECESSION_DESC_REL · ‖∇f‖ ‖x‖` —
+    ///    the objective strictly decreases along the escape direction with a
+    ///    real (non-orthogonal) margin, so `f → −∞` along the ray.
+    ///
+    /// On a *bounded* problem at least one of (1)/(2)/(3)/(4)/(5) fails, so
+    /// this can never manufacture a spurious `DivergingIterates`.
+    fn curr_is_recession_ray(&self, x: &dyn Vector, amax: Number) -> bool {
+        // (1) Feasible witness (relative bar).
+        let primal_inf = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
+        if !(primal_inf.is_finite() && primal_inf <= Self::RECESSION_FEAS_REL * amax) {
+            return false;
+        }
+        // (2) Some over-floor component free to escape to infinity.
+        if !self.free_to_escape_over(x, Self::RECESSION_MIN_NORM) {
+            return false;
+        }
+        // (3) Escape direction lies in the equality null space. A non-finite
+        // (NaN) residual is treated as failing, so the direction is only
+        // accepted on a genuinely small, finite `‖J_c x‖∞`.
+        let jc_x_amax = self.cq.borrow().curr_jac_c_times_vec(x).amax();
+        if !jc_x_amax.is_finite() || jc_x_amax > Self::RECESSION_DIR_TOL * amax {
+            return false;
+        }
+        // (4) No finitely-bounded inequality blocks the direction.
+        if self.recession_blocked_by_inequality(x, amax) {
+            return false;
+        }
+        // (5) Objective strictly descending along the escape direction.
+        let (dot, gnorm, xnorm) = {
+            let cq = self.cq.borrow();
+            let g = cq.curr_grad_f();
+            (g.dot(x), g.nrm2(), x.nrm2())
+        };
+        if !(dot < 0.0 && dot <= -Self::RECESSION_DESC_REL * gnorm * xnorm) {
+            return false;
+        }
+        true
+    }
+
+    /// #285: does any *finitely-bounded* inequality constraint block motion
+    /// along the escape direction `d ≈ x`? For each inequality row the
+    /// constraint value `d(x)` changes at rate `(J_d x)_j` per unit of the
+    /// direction; if that row has a finite upper bound and the rate is
+    /// positive (or a finite lower bound and the rate is negative) beyond a
+    /// relative tolerance, moving out along `d` would eventually violate it,
+    /// so it is not a feasible recession direction. Bounds are detected via
+    /// the `Pd_L / Pd_U` expansion matrices exactly as the variable-bound
+    /// check uses `Px_L / Px_U`.
+    fn recession_blocked_by_inequality(&self, x: &dyn Vector, amax: Number) -> bool {
+        use pounce_linalg::DenseVector;
+
+        let cq = self.cq.borrow();
+        // Rate of change of each inequality value along d ≈ x (length m_ineq).
+        // Compute first so the internal `nlp.borrow_mut()` is released before
+        // the immutable borrow below.
+        let jd_x = cq.curr_jac_d_times_vec(x);
+        let (has_dlb, has_dub) = {
+            let nlp = cq.nlp().borrow();
+            let mut ones_dl = nlp.d_l().make_new();
+            ones_dl.set(1.0);
+            let mut has_dlb = jd_x.make_new();
+            nlp.pd_l().mult_vector(1.0, &*ones_dl, 0.0, &mut *has_dlb);
+
+            let mut ones_du = nlp.d_u().make_new();
+            ones_du.set(1.0);
+            let mut has_dub = jd_x.make_new();
+            nlp.pd_u().mult_vector(1.0, &*ones_du, 0.0, &mut *has_dub);
+            (has_dub, has_dlb)
+        };
+
+        let downcast = |v: &dyn Vector| -> Option<Vec<Number>> {
+            v.as_any()
+                .downcast_ref::<DenseVector>()
+                .map(|d| d.expanded_values())
+        };
+        // Dense-only fallback: if we cannot inspect the rows, conservatively
+        // treat the direction as blocked (no spurious unbounded verdict).
+        let (Some(jd), Some(dlb), Some(dub)) =
+            (downcast(&*jd_x), downcast(&*has_dlb), downcast(&*has_dub))
+        else {
+            return true;
+        };
+        let tol = Self::RECESSION_DIR_TOL * amax;
+        for j in 0..jd.len() {
+            // Increasing a row that has a finite upper bound, or decreasing a
+            // row that has a finite lower bound, would leave the feasible set.
+            if (jd[j] > tol && dub[j] != 0.0) || (jd[j] < -tol && dlb[j] != 0.0) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// #285: update the recession-ray persistence state and return whether
+    /// `DivergingIterates` should be reported now. `amax` is `|x|_∞`;
+    /// `is_ray` is the result of [`Self::curr_is_recession_ray`]. The verdict
+    /// fires once the checked proof has held for
+    /// [`Self::RECESSION_PERSIST_ITERS`] consecutive *growing* iterations — a
+    /// bounded region cannot supply a growing sequence of feasible over-floor
+    /// iterates, so this is impossible to satisfy on a bounded problem.
+    fn update_recession_verdict(&mut self, amax: Number, is_ray: bool) -> bool {
+        if !is_ray {
+            self.recession_streak = 0;
+            self.recession_prev_amax = 0.0;
+            return false;
+        }
+        if amax > self.recession_prev_amax {
+            self.recession_streak += 1;
+        } else {
+            // Proof holds but the iterate is not growing (a stalled or rejected
+            // step). Restart the run at the current witness rather than firing
+            // on a plateau; a genuine ray resumes growing next step.
+            self.recession_streak = 1;
+        }
+        self.recession_prev_amax = amax;
+        self.recession_streak >= Self::RECESSION_PERSIST_ITERS
     }
 
     /// Honour a certificate the masked-scale veto refused, when the run that
@@ -1339,23 +1538,45 @@ impl IpoptAlgorithm {
         // Evaluate the structural check under an immutable borrow, then
         // update the persistence state and take the verdict separately so
         // the mutable field updates don't clash with the `data` borrow.
-        let (amax, structural_free) = {
+        // Two independent unboundedness paths share this block:
+        //   * the `diverging_iterates_tol` (`1e20`) magnitude guard, gated on
+        //     the free-variable structural check + geometric-growth streak
+        //     (issues #248 / #252); and
+        //   * the #285 recession-ray path — a *checked proof*, active from a
+        //     far lower magnitude floor, that catches a genuine recession ray
+        //     in `null(A_eq)` over free variables whose `|x|` grows only
+        //     linearly and so never reaches `1e20` within `max_iter`.
+        let (amax, structural_free, is_ray) = {
             let data = self.data.borrow();
             match data.curr.as_ref() {
                 Some(curr) => {
                     let amax = curr.x.amax();
                     let structural = amax > self.diverging_iterates_tol
                         && self.divergence_is_true_unboundedness(&*curr.x);
-                    (Some(amax), structural)
+                    let is_ray = amax > Self::RECESSION_MIN_NORM
+                        && self.curr_is_recession_ray(&*curr.x, amax);
+                    (Some(amax), structural, is_ray)
                 }
-                None => (None, false),
+                None => (None, false, false),
             }
         };
         // Evaluate the (scaled) objective only while a structural divergence
         // is live — the streak's descent gate needs it, and it costs an
         // objective evaluation, so skip it on the common non-diverging path.
         let curr_f = structural_free.then(|| self.cq.borrow().curr_f());
-        if self.update_divergence_verdict(amax, structural_free, curr_f) {
+        // Evaluate both streak updates (no short-circuit) so each keeps its
+        // state current, then fire if either concludes divergence.
+        let fire_magnitude = self.update_divergence_verdict(amax, structural_free, curr_f);
+        let fire_recession = self.update_recession_verdict(amax.unwrap_or(0.0), is_ray);
+        if fire_magnitude || fire_recession {
+            if fire_recession && !fire_magnitude {
+                tracing::debug!(target: "pounce::algorithm",
+                    "[POUNCE] recession-ray guard fired at iter {} (|x|_inf={:.2e}); \
+                     reporting DivergingIterates (pounce#285).",
+                    self.data.borrow().iter_count,
+                    amax.unwrap_or(f64::NAN),
+                );
+            }
             timing.check_convergence.end();
             return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
         }

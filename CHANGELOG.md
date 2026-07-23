@@ -36,6 +36,40 @@ changes.
     the ones the diagnostic flags. Well-conditioned solves are unaffected (their
     first residual is already at round-off, so refinement is a no-op).
 
+### Fixed — NLP-path divergence detector missed an unbounded LP whose recession ray lies in `null(A_eq)` over free variables (#285)
+
+- **On the forced-NLP path, an unbounded LP whose recession ray lives in the
+  equality null space over *free* variables (e.g. `min −x0 s.t. x0 − x1 = 0`,
+  ray `d = (1, 1)`) reported `Maximum_Iterations_Exceeded` instead of the
+  unbounded verdict `Diverging_Iterates`** that Ipopt, scipy/HiGHS and Clarabel
+  all return on the identical model. The existing `diverging_iterates_tol`
+  (`1e20`) magnitude guard only fires once `|x|_∞` crosses `1e20` and only
+  accumulates its streak on geometric growth; a recession ray in an equality
+  null space is walked out by regularized zero-Hessian Newton steps whose
+  growth decelerates so hard that `|x|` never reaches `1e20` within `max_iter`
+  (it stalls around `5e17` even at `max_iter = 3000`), so the guard never
+  fired. No wrong answer was ever certified — both statuses are non-success —
+  but the conservative fallback hid a definite certificate. The fix adds a
+  second, independent **checked recession-ray proof** to the running divergence
+  guard (`crates/pounce-algorithm/src/ipopt_alg.rs`), active from a far lower
+  magnitude floor (`1e10`): a genuinely *feasible* iterate of large norm
+  already witnesses that the feasible region is unbounded, and the proof
+  additionally certifies the escape direction lies in `null(A_eq)`
+  (`‖J_c x‖∞ ≪ |x|∞`), is not blocked by any finitely-bounded inequality
+  (`Pd_L`/`Pd_U` expansion), heads toward a variable side with no finite bound
+  (the existing free-to-escape check), and strictly lowers the objective
+  (`∇f·x ≤ −ε‖∇f‖‖x‖`) — for several consecutive *growing* iterations. Because
+  a bounded feasible region cannot supply a growing sequence of feasible
+  over-floor iterates, this remains a proof rather than a heuristic and cannot
+  manufacture a false `Diverging_Iterates` on a bounded problem. The existing
+  `1e20` magnitude guard is unchanged (new path is a pure `OR` branch), so the
+  unbounded shapes that already worked — unconstrained rays,
+  bounded-inequality rays — still report unbounded, and the #248 / #252
+  bounded / finite-optimum controls stay green. Regression tests in
+  `crates/pounce-algorithm/tests/repro_issue285.rs` pin the fixed shape as
+  `DivergingIterates` alongside four bounded controls (variable-bounded,
+  fully-pinned by equalities, and inequality-capped free variable) as optimal.
+
 ### Fixed — non-symmetric HSDE driver returned bare `numerical_failure` on infeasible/unbounded exp/power programs (#283)
 
 - **The exponential/power-cone (non-symmetric HSDE) driver degraded genuinely
