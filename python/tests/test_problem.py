@@ -479,3 +479,64 @@ def test_negative_obj_scaling_factor_maximizes():
     np.testing.assert_allclose(x, [1.0], atol=1e-6)
     # The reported objective is the user's (unscaled) value at the max.
     np.testing.assert_allclose(info["obj_val"], 0.0, atol=1e-8)
+
+
+# --------------------------------------------------------------------------
+# issue #276 — integer options outside the signed-32-bit Index range were
+# silently *wrapped* by an `i as i32` cast, so e.g. `max_iter = 2**32 + 3`
+# quietly ran 3 iterations instead of erroring. They must now raise, quoting
+# the value the user passed and naming the option, matching the CLI / Pyomo.
+# --------------------------------------------------------------------------
+def _quad2():
+    class Quad:
+        def objective(self, x):
+            return float(x @ x)
+
+        def gradient(self, x):
+            return 2.0 * x
+
+    return pounce.Problem(n=2, m=0, problem_obj=Quad())
+
+
+@pytest.mark.parametrize("bad", [2**31, 2**32 + 3, 2**32 + 1, 10**12, -(2**31) - 1])
+def test_add_option_integer_out_of_range_rejected(bad):
+    """Over-range integer options raise instead of silently truncating."""
+    prob = _quad2()
+    with pytest.raises(ValueError) as exc:
+        prob.add_option("max_iter", bad)
+    msg = str(exc.value)
+    # Error names the option and quotes the *user's* value, not a wrapped one.
+    assert "max_iter" in msg
+    assert str(bad) in msg
+
+
+def test_add_option_integer_out_of_range_via_minimize():
+    """The high-level minimize() surface rejects the same value the CLI does."""
+    with pytest.raises(ValueError) as exc:
+        pounce.minimize(
+            lambda x: float(x @ x),
+            np.array([1.0, 1.0]),
+            jac=lambda x: 2.0 * x,
+            max_iter=2**32 + 3,
+        )
+    msg = str(exc.value)
+    assert "max_iter" in msg
+    assert str(2**32 + 3) in msg
+
+
+@pytest.mark.parametrize("good", [2**31 - 1, -(2**31), 0, 5, 500])
+def test_add_option_integer_in_range_accepted(good):
+    """Legitimate in-range integers (incl. i32::MIN/MAX boundaries) still work."""
+    prob = _quad2()
+    # Must not raise; boundary values i32::MAX and i32::MIN are valid.
+    prob.add_option("max_iter", good)
+
+
+def test_add_option_large_but_in_range_solves():
+    """A large-but-in-range max_iter still drives a real solve."""
+    prob = _quad2()
+    prob.add_option("max_iter", 2**31 - 1)
+    prob.add_option("print_level", 0)
+    x, info = prob.solve(x0=np.array([1.0, 1.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(x, [0.0, 0.0], atol=1e-6)

@@ -176,7 +176,21 @@ impl PyProblem {
             }
         }
         if let Ok(i) = value.extract::<i64>() {
-            self.int_opts.push((name.to_string(), i as Index));
+            // Convert with a checked cast: a bare `i as Index` silently
+            // *wraps* values outside the signed-32-bit range, so e.g.
+            // `max_iter = 2**32 + 3` would truncate to `3` and run without
+            // complaint (pounce#276). Reject out-of-range integers instead,
+            // quoting the value the *user* passed (not the truncated one),
+            // matching how the CLI / Pyomo surfaces reject the same input.
+            let converted = Index::try_from(i).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "add_option({name}): integer value {i} is out of range for \
+                     this option (must be between {} and {})",
+                    Index::MIN,
+                    Index::MAX
+                ))
+            })?;
+            self.int_opts.push((name.to_string(), converted));
             return Ok(());
         }
         if let Ok(f) = value.extract::<f64>() {
