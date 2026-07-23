@@ -515,6 +515,24 @@ impl ConvCheck for OptErrorConvCheck {
         ConvergenceStatus::Continue
     }
 
+    fn current_passes_strict(
+        &self,
+        nlp_err: Number,
+        _data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+    ) -> bool {
+        // The strict per-component gate of `check_convergence_with_state`, minus
+        // the masking veto — see the trait doc. Unscaled per-component residuals,
+        // matching that method (the `*_tol` triplet is defined on the
+        // user-original residuals).
+        let cq_ref = cq.borrow();
+        let dual_inf = cq_ref.curr_unscaled_dual_infeasibility_max();
+        let constr_viol = cq_ref.curr_unscaled_primal_infeasibility_max();
+        let compl_inf = cq_ref.curr_unscaled_complementarity_max();
+        drop(cq_ref);
+        self.passes_component_tols(nlp_err, dual_inf, constr_viol, compl_inf)
+    }
+
     fn tol_or_default(&self) -> Number {
         self.tol
     }

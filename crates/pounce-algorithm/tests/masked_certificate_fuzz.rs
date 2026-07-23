@@ -1933,3 +1933,131 @@ fn the_earliest_refusal_is_the_one_restored_not_the_strictest() {
         veto_obj - base_obj
     );
 }
+
+/// gh #327: `min 1/x` over `x ∈ [1e-12, 10]` from x0 = 1e-12, under the default
+/// quasi-Newton (limited-memory) Hessian — the common scipy-style `minimize`
+/// call.
+///
+/// The objective is monotone decreasing, so the true optimum is the upper bound
+/// x = 10, f = 0.1. The enormous initial gradient (−1/x² = −1e24 at x0) pins the
+/// gradient scaling at its 1e-8 floor, deflating the scaled KKT error below `tol`
+/// all along the trajectory — the masking pathology. With the veto disabled the
+/// solver certifies `Solve_Succeeded` at the first masked strict point, a
+/// non-stationary interior iterate x ≈ 2.84 (f ≈ 0.35). With the veto enabled the
+/// run continues and actually reaches the bound, x ≈ 10 (f ≈ 0.1) — but the veto
+/// refuses to certify there too (its unscaled error stays above `acceptable_tol`),
+/// so it exits non-`Success` on a tiny step. The bug was that the fallback then
+/// rolled all the way back to the first refusal at x ≈ 2.84 and reported success
+/// there; the fix keeps the settled would-be certificate at the bound.
+struct MonotoneToBound;
+
+impl TNLP for MonotoneToBound {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 1,
+            m: 0,
+            nnz_jac_g: 0,
+            nnz_h_lag: 1,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[1e-12]);
+        b.x_u.copy_from_slice(&[10.0]);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[1e-12]);
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
+        Some(1.0 / x[0])
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
+        g[0] = -1.0 / (x[0] * x[0]);
+        true
+    }
+    fn eval_g(&mut self, _x: &[Number], _n: bool, _g: &mut [Number]) -> bool {
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, _m: SparsityRequest<'_>) -> bool {
+        true
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        _n: bool,
+        obj_factor: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        // Unused under limited-memory, but a well-formed TNLP supplies it.
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0]);
+                jcol.copy_from_slice(&[0]);
+            }
+            SparsityRequest::Values { values } => {
+                let x = x.expect("no x");
+                values[0] = obj_factor * 2.0 / (x[0] * x[0] * x[0]);
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+#[test]
+fn a_masked_monotone_bound_optimum_is_reached_not_a_false_interior_success() {
+    let solve = |threshold: Number| {
+        let mut app = IpoptApplication::new();
+        // The default quasi-Newton path the issue is about.
+        app.options_mut()
+            .set_string_value("hessian_approximation", "limited-memory", true, false)
+            .unwrap();
+        app.options_mut()
+            .set_numeric_value("obj_scale_certificate_threshold", threshold, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("max_iter", 300, true, false)
+            .unwrap();
+        app.options_mut()
+            .set_integer_value("print_level", 0, true, false)
+            .unwrap();
+        app.initialize().unwrap();
+        let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(MonotoneToBound));
+        let status = app.optimize_tnlp(tnlp);
+        let s = app.statistics();
+        (status, s.final_objective, s.iteration_count)
+    };
+
+    // Veto disabled: the pre-fix baseline. It exhibits the reported pathology —
+    // a `Solve_Succeeded` certificate at the non-stationary interior point
+    // x ≈ 2.84 (f ≈ 0.35). This guards the premise: if the baseline ever stopped
+    // reproducing the masked false success, the assertion below would prove
+    // nothing.
+    let (base_status, base_obj, _base_iters) = solve(0.0);
+    assert!(
+        succeeded(base_status) && base_obj > 0.2,
+        "premise broken: the veto-off baseline is supposed to reproduce the gh #327 \
+         false interior success (f ≈ 0.35); got {base_status:?} f={base_obj:.6e}"
+    );
+
+    // Veto enabled (the default): the solve must reach the true bound optimum
+    // f = 0.1, not roll back to the interior point. Anything materially above 0.1
+    // means the fallback discarded the point the continuation actually reached.
+    let (veto_status, veto_obj, _veto_iters) = solve(1e-4);
+    assert!(
+        veto_obj <= 0.1 + 1e-3,
+        "gh #327: the masked monotone problem must converge to the bound optimum \
+         f = 0.1, but the veto returned {veto_status:?} f={veto_obj:.6e} — the fallback \
+         rolled back to the non-stationary interior point instead of keeping the \
+         would-be certificate at the bound"
+    );
+    // And that better point is a legitimate outcome, never a bare failure.
+    assert!(
+        succeeded(veto_status),
+        "gh #327: reached the bound optimum but reported {veto_status:?}"
+    );
+}
