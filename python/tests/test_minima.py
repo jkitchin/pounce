@@ -223,3 +223,30 @@ def test_find_minima_rejects_nonsensical_budget():
         pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, patience=-1, options=opts)
     with pytest.raises(ValueError, match="max_solves must be >= 1"):
         pounce.find_minima(f, np.zeros(2), jac=g, bounds=box, max_solves=0, options=opts)
+
+
+def test_result_repr_survives_seed_recorded_without_solve():
+    """A seed ``x0`` accepted straight into the archive is recorded with a stub
+    ``OptimizeResult`` carrying ``info={}``. scipy's shared result repr aligns
+    keys via ``max(map(len, d.keys()))`` and so raises ``ValueError`` on that
+    empty nested dict — the very first ``print(res)`` in a REPL used to crash
+    (gh #340). Printing the result (and the stub itself) must now just work."""
+    def f(x):
+        return x[0] ** 2 + x[1] ** 2
+
+    res = pounce.find_minima(
+        f, x0=[0.0, 0.0], bounds=[(-5, 5), (-5, 5)], n_minima=3,
+        options={"print_level": 0},
+    )
+
+    # The seed sits at the global minimum, so it is recorded with the empty-info
+    # stub; repr/str of the container and that stub must not raise.
+    stub = res.results[0]
+    assert stub.info == {}
+    text = repr(stub)
+    assert "info: {}" in text
+    assert "recorded" in text
+    # The MinimaResult dataclass repr recurses into results[0]; this is what the
+    # issue's `print(res)` exercised.
+    assert repr(res)
+    assert str(res)
