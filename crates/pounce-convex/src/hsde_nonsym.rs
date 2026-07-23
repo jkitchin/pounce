@@ -58,6 +58,52 @@ macro_rules! ns_dispatch {
     };
 }
 
+impl NonsymCone {
+    /// Whether `p` lies in the **closure** of the primal cone `cl(K)` (to a
+    /// relative tolerance `tol`). Unlike [`BarrierCone::in_primal_cone`], which
+    /// tests the strict *interior* (`y > tol`), this accepts the boundary /
+    /// recession faces of the cone — the points a genuine recession ray lands
+    /// on. It is used only by the dual-infeasibility (unboundedness) detector,
+    /// where the recession direction `−Gd` must satisfy `−Gd ∈ cl(K)`; a
+    /// recession ray legitimately lies on `∂K`, so the strict-interior test
+    /// wrongly rejects it (e.g. the exp cone's `y = 0` face, gh #283).
+    fn in_primal_closure(&self, p: &[f64], tol: f64) -> bool {
+        let (x, y, z) = (p[0], p[1], p[2]);
+        let scale = 1.0 + x.abs() + y.abs() + z.abs();
+        let t = tol * scale;
+        match self {
+            NonsymCone::Exp(_) => {
+                // cl(K_exp) = { y>0, z>0, y·log(z/y) ≥ x } ∪ { x≤0, y=0, z≥0 }.
+                if z < -t {
+                    return false;
+                }
+                if y > t {
+                    // Interior/main region: need z > 0 to evaluate ψ.
+                    if z <= 0.0 {
+                        return false;
+                    }
+                    y * (z / y).ln() - x >= -t
+                } else if y >= -t {
+                    // Recession face y ≈ 0: x ≤ 0 and z ≥ 0.
+                    x <= t && z >= -t
+                } else {
+                    false
+                }
+            }
+            NonsymCone::Power(c) => {
+                // K_α = { |x| ≤ y^α z^{1−α}, y ≥ 0, z ≥ 0 } is already closed;
+                // its boundary (y = 0, z = 0, or |x| = y^α z^{1−α}) is included.
+                if y < -t || z < -t {
+                    return false;
+                }
+                let (yc, zc) = (y.max(0.0), z.max(0.0));
+                let bound = yc.powf(c.alpha) * zc.powf(1.0 - c.alpha);
+                bound - x.abs() >= -t
+            }
+        }
+    }
+}
+
 impl BarrierCone for NonsymCone {
     fn barrier_degree(&self) -> f64 {
         ns_dispatch!(self, c => c.barrier_degree())
@@ -122,6 +168,191 @@ impl NsBlock {
     }
 }
 
+/// Provably-infeasible cone-domain detection at setup, before the HSDE solve.
+///
+/// A power/exponential cone requires two of its three coordinates to be
+/// nonnegative (`y ≥ 0` and `z ≥ 0`) at *every* feasible point — this is the
+/// cone's *domain*, independent of the barrier. If the data pin such a
+/// coordinate strictly below its domain (e.g. the power cone's `y`-slack is a
+/// constant `−1`, or is forced `≤ −1` by another row), the problem is primal
+/// infeasible at every point. The HSDE driver's Farkas detector needs the
+/// iterate's certificate residual to fall below `FARKAS_RESID_TOL` (~1e-10);
+/// on these cone-domain violations the embedding stalls with a small-but-finite
+/// residual and never certifies, degrading to `NumericalFailure` (gh #283).
+/// This *exact* setup check reports `PrimalInfeasible` directly.
+///
+/// It is a proof by contradiction: assume a feasible point exists, propagate
+/// the resulting variable bounds through the `≥ 0` rows (nonnegative-orthant
+/// rows, the leading second-order-cone row, and each exp/power cone's `y`/`z`
+/// domain rows) and equality rows by sound interval arithmetic (FBBT), then if
+/// any domain row's slack has a **strictly negative upper bound** — or any
+/// variable's derived range is empty — feasibility is impossible. Every bound
+/// derived is a valid implication of feasibility, so a contradiction proves
+/// infeasibility and **no feasible/bounded problem is ever flagged**.
+pub(crate) fn detect_cone_domain_infeasible(prob: &QpProblem, blocks: &[NsBlock]) -> bool {
+    let n = prob.n;
+    let inf = crate::qp::BOUND_INF;
+    // Variable ranges, seeded from the problem's own bounds.
+    let mut lo = vec![-inf; n];
+    let mut hi = vec![inf; n];
+    for j in 0..n {
+        lo[j] = prob.lb_of(j);
+        hi[j] = prob.ub_of(j);
+        if lo[j] > hi[j] + 1e-12 {
+            return true; // empty variable range
+        }
+    }
+
+    // Row expressions grouped by inequality-row index: (col, coeff) of G.
+    // Slack is `s_r = h_r − Σ g·x`.
+    let m_ineq = prob.m_ineq();
+    let mut g_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m_ineq];
+    for t in &prob.g {
+        g_rows[t.row].push((t.col, t.val));
+    }
+    // Equality rows of A: `Σ a·x = b`.
+    let m_eq = prob.m_eq();
+    let mut a_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m_eq];
+    for t in &prob.a {
+        a_rows[t.row].push((t.col, t.val));
+    }
+
+    // Inequality rows whose slack is provably `≥ 0` at every feasible point,
+    // plus the subset that are *cone-domain* rows we will test for violation.
+    let mut nonneg_rows: Vec<usize> = Vec::new();
+    let mut domain_rows: Vec<usize> = Vec::new();
+    let mut off = 0usize;
+    for b in blocks {
+        match b {
+            NsBlock::Orthant(d) => {
+                for r in off..off + d {
+                    nonneg_rows.push(r);
+                }
+            }
+            NsBlock::SecondOrder(m) => {
+                // `s₀ ≥ ‖s₁..‖ ≥ 0` is a sound `≥ 0` fact for the leading row.
+                nonneg_rows.push(off);
+                let _ = m;
+            }
+            NsBlock::Nonsym(_) => {
+                // Both the `y` (off+1) and `z` (off+2) coordinates must be ≥ 0.
+                nonneg_rows.push(off + 1);
+                nonneg_rows.push(off + 2);
+                domain_rows.push(off + 1);
+                domain_rows.push(off + 2);
+            }
+        }
+        off += b.dim();
+    }
+
+    // Min/max of `Σ coeff·x` over the current variable ranges (±inf when a
+    // needed bound is absent).
+    let expr_bounds = |row: &[(usize, f64)], lo: &[f64], hi: &[f64]| -> (f64, f64) {
+        let (mut emin, mut emax) = (0.0_f64, 0.0_f64);
+        for &(j, g) in row {
+            let (l, u) = (lo[j], hi[j]);
+            if g > 0.0 {
+                emin += if l <= -inf { -inf } else { g * l };
+                emax += if u >= inf { inf } else { g * u };
+            } else {
+                emin += if u >= inf { -inf } else { g * u };
+                emax += if l <= -inf { inf } else { g * l };
+            }
+        }
+        (emin, emax)
+    };
+
+    // Sound FBBT: tighten variable ranges from the `≥ 0` and equality rows.
+    // Each pass is a valid implication of feasibility; a fixpoint or a small
+    // pass cap suffices for the local structure these certificates carry.
+    for _ in 0..8 {
+        let mut changed = false;
+        // Constraints of the form `Σ g·x ≤ rhs` (nonneg rows: `Σ g·x ≤ h_r`;
+        // equality rows contribute both `≤ b` and `≥ b`, added below).
+        let mut tighten_upper = |row: &[(usize, f64)], rhs: f64, lo: &mut [f64], hi: &mut [f64]| {
+            if rhs >= inf {
+                return;
+            }
+            // Min contribution of a single `coeff·x` term over `[lo,hi]`.
+            let contrib_min = |j: usize, g: f64, lo: &[f64], hi: &[f64]| -> f64 {
+                if g > 0.0 {
+                    if lo[j] <= -inf { -inf } else { g * lo[j] }
+                } else if hi[j] >= inf {
+                    -inf
+                } else {
+                    g * hi[j]
+                }
+            };
+            for &(j, g) in row {
+                // rest_min = Σ_{k≠j} min(g_k·x_k); computed directly (not by
+                // subtracting the possibly-infinite own term from the total).
+                let mut rest_min = 0.0_f64;
+                let mut finite = true;
+                for &(k, gk) in row {
+                    if k == j {
+                        continue;
+                    }
+                    let c = contrib_min(k, gk, lo, hi);
+                    if c <= -inf {
+                        finite = false;
+                        break;
+                    }
+                    rest_min += c;
+                }
+                if !finite {
+                    continue;
+                }
+                // g·x_j ≤ rhs − rest_min.
+                let bound = (rhs - rest_min) / g; // g ≠ 0 for stored triplets
+                if g > 0.0 {
+                    if bound < hi[j] - 1e-12 {
+                        hi[j] = bound;
+                        changed = true;
+                    }
+                } else if bound > lo[j] + 1e-12 {
+                    lo[j] = bound;
+                    changed = true;
+                }
+            }
+        };
+        for &r in &nonneg_rows {
+            // `s_r = h_r − Σ g·x ≥ 0` ⟺ `Σ g·x ≤ h_r`.
+            tighten_upper(&g_rows[r], prob.h[r], &mut lo, &mut hi);
+        }
+        for r in 0..m_eq {
+            // `Σ a·x = b` ⟺ `Σ a·x ≤ b` and `Σ (−a)·x ≤ −b`.
+            let b = prob.b[r];
+            tighten_upper(&a_rows[r], b, &mut lo, &mut hi);
+            let neg: Vec<(usize, f64)> = a_rows[r].iter().map(|&(j, a)| (j, -a)).collect();
+            tighten_upper(&neg, -b, &mut lo, &mut hi);
+        }
+        // Empty variable range ⇒ infeasible.
+        for j in 0..n {
+            if lo[j] > hi[j] + 1e-9 * (1.0 + lo[j].abs() + hi[j].abs()) {
+                return true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Cone-domain violation: a domain row whose slack's *upper* bound is
+    // strictly negative. `max s_r = h_r − min(Σ g·x)`.
+    for &r in &domain_rows {
+        let (emin, _) = expr_bounds(&g_rows[r], &lo, &hi);
+        if emin <= -inf {
+            continue; // unbounded above ⇒ no violation provable
+        }
+        let s_max = prob.h[r] - emin;
+        let margin = 1e-7 * (1.0 + prob.h[r].abs() + emin.abs());
+        if s_max < -margin {
+            return true;
+        }
+    }
+    false
+}
+
 /// The cone product with each block's row offset precomputed.
 pub(crate) struct NsCone {
     blocks: Vec<(usize, NsBlock)>,
@@ -167,10 +398,14 @@ impl NsCone {
         true
     }
 
-    /// Whether `s` lies in the **primal** cone `K` (to tolerance `tol`),
-    /// block by block. For exp/power this is distinct from `in_dual_cone`
-    /// (the cones are not self-dual). Used to validate the recession
-    /// direction `−Gd ∈ K` for the dual-infeasibility certificate.
+    /// Whether `s` lies in the strict interior of the **primal** cone `K` (to
+    /// tolerance `tol`), block by block. For exp/power this is distinct from
+    /// `in_dual_cone` (the cones are not self-dual). The recession-membership
+    /// test for the dual-infeasibility certificate uses the *closure* variant
+    /// [`in_primal_closure`](Self::in_primal_closure) instead, since a
+    /// recession ray lands on `∂K` (gh #283); this strict-interior form is
+    /// retained as a cone-membership oracle in the unit tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn in_primal_cone(&self, s: &[f64], tol: f64) -> bool {
         for &(off, b) in &self.blocks {
             let ok = match b {
@@ -180,6 +415,29 @@ impl NsCone {
                     SecondOrderCone::new(m).in_dual_cone(&s[off..off + m], tol)
                 }
                 NsBlock::Nonsym(c) => c.in_primal_cone(&s[off..off + 3], tol),
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `s` lies in the **closure** of the primal cone `cl(K)` (to
+    /// tolerance `tol`), block by block. This is the recession-membership test
+    /// for the dual-infeasibility certificate: a recession ray `−Gd` genuinely
+    /// lies on the boundary of `K` (e.g. the exp cone's `y = 0` face), so the
+    /// strict-interior [`in_primal_cone`](Self::in_primal_cone) rejects it. The
+    /// orthant and second-order cones are already closed, so their closure test
+    /// coincides with membership; exp/power use their `cl(K)` face conditions.
+    pub(crate) fn in_primal_closure(&self, s: &[f64], tol: f64) -> bool {
+        for &(off, b) in &self.blocks {
+            let ok = match b {
+                NsBlock::Orthant(d) => s[off..off + d].iter().all(|&v| v >= -tol),
+                NsBlock::SecondOrder(m) => {
+                    SecondOrderCone::new(m).in_dual_cone(&s[off..off + m], tol)
+                }
+                NsBlock::Nonsym(c) => c.in_primal_closure(&s[off..off + 3], tol),
             };
             if !ok {
                 return false;
@@ -800,8 +1058,11 @@ fn detect_infeasibility_nscone(
         |gd, tol| {
             // `−Gd ∈ K`; the non-symmetric cone is NOT self-dual, so this
             // is the *primal* membership test (distinct from `in_dual_cone`).
+            // Use the **closure** test: a recession ray lands on the boundary
+            // of `K` (e.g. the exp cone's `y = 0` face), which the strict
+            // interior test would reject (gh #283).
             let neg: Vec<f64> = gd.iter().map(|&v| -v).collect();
-            cone.in_primal_cone(&neg, tol)
+            cone.in_primal_closure(&neg, tol)
         },
     )
 }
@@ -1945,5 +2206,206 @@ mod tests {
             None,
             "cone-aware test must reject z=(1,1,1): not in K_exp*"
         );
+    }
+
+    // ---- gh #283: cone-domain infeasibility and recession/unboundedness ----
+
+    /// **Case 1 (unbounded).** `min u s.t. (u, 1, t) ∈ K_exp` is unbounded
+    /// below: the cone forces `t ≥ e^u`, so `u → −∞` (with `t → 0⁺`) stays
+    /// feasible while the objective diverges. The recession ray `−Gd = (u<0,
+    /// 0, t≥0)` lands on the exp cone's `y = 0` face; the strict-interior
+    /// membership test rejected it (→ `NumericalFailure`), the **closure**
+    /// test accepts it → `DualInfeasible`.
+    #[test]
+    fn unbounded_exp_cone_reports_dual_infeasible() {
+        use crate::cones::ConeSpec;
+        use crate::ipm::solve_socp_ipm;
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 0.0], // min u
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0), Triplet::new(2, 1, -1.0)],
+            h: vec![0.0, 1.0, 0.0], // slack = (u, 1, t)
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_socp_ipm(&prob, &[ConeSpec::Exponential], &opts(), backend);
+        assert_eq!(
+            sol.status,
+            QpStatus::DualInfeasible,
+            "unbounded exp program must certify DualInfeasible, got {:?}",
+            sol.status
+        );
+    }
+
+    /// The **closure** recession test accepts the exp cone's `y = 0` boundary
+    /// face (where a recession ray lands) that the strict-interior test rejects.
+    #[test]
+    fn exp_closure_accepts_recession_face_interior_rejects() {
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        // (x ≤ 0, y = 0, z ≥ 0) is in cl(K_exp) but not its interior.
+        let face = [-2.1, 0.0, 0.49];
+        assert!(
+            cone.in_primal_closure(&face, 1e-7),
+            "recession face must be in cl(K_exp)"
+        );
+        assert!(
+            !cone.in_primal_cone(&face, 1e-9),
+            "recession face must NOT be in the strict interior"
+        );
+        // A point genuinely outside the closure (x > 0 on the y = 0 face) is
+        // still rejected — the closure test is not a blanket accept.
+        assert!(!cone.in_primal_closure(&[2.0, 0.0, 1.0], 1e-7));
+    }
+
+    /// **Cases 2/3 (power-cone domain violation).** `K_0.5` on `(w, t−2, 1)`
+    /// with `t ≤ T < 2` forces the cone's `y`-slack `t − 2 ≤ T − 2 < 0`,
+    /// violating the `y ≥ 0` domain at every point ⇒ primal infeasible. The
+    /// residual-gated Farkas detector stalls short of certifying; the setup
+    /// cone-domain screen reports it directly.
+    #[test]
+    fn power_cone_domain_violation_reports_primal_infeasible() {
+        use crate::cones::ConeSpec;
+        use crate::ipm::solve_socp_ipm;
+        for t_cap in [1.0_f64, 1.999] {
+            let prob = QpProblem {
+                n: 2,
+                p_lower: vec![],
+                c: vec![1.0, 0.0], // min w
+                a: vec![],
+                b: vec![],
+                g: vec![
+                    Triplet::new(0, 0, -1.0), // s0 = w
+                    Triplet::new(1, 1, -1.0), // s1 = t − 2
+                    Triplet::new(3, 1, 1.0),  // s3 = T − t ≥ 0
+                ],
+                h: vec![0.0, -2.0, 1.0, t_cap], // s2 = 1 (const)
+                lb: vec![],
+                ub: vec![],
+            };
+            let specs = [ConeSpec::Power(0.5), ConeSpec::Nonneg(1)];
+            let sol = solve_socp_ipm(&prob, &specs, &opts(), backend);
+            assert_eq!(
+                sol.status,
+                QpStatus::PrimalInfeasible,
+                "power domain violation (T={t_cap}) must be PrimalInfeasible, got {:?}",
+                sol.status
+            );
+        }
+    }
+
+    /// A cone-domain coordinate pinned to a **constant** outside the domain
+    /// (visible in `h` alone: `(w, −1, 1)` for power, likewise for exp) is
+    /// primal infeasible and caught by the setup screen with no solve.
+    #[test]
+    fn constant_domain_coordinate_reports_primal_infeasible() {
+        use crate::cones::ConeSpec;
+        use crate::ipm::solve_socp_ipm;
+        for spec in [ConeSpec::Power(0.5), ConeSpec::Exponential] {
+            let prob = QpProblem {
+                n: 1,
+                p_lower: vec![],
+                c: vec![1.0],
+                a: vec![],
+                b: vec![],
+                g: vec![Triplet::new(0, 0, -1.0)],
+                h: vec![0.0, -1.0, 1.0], // slack = (w, −1, 1); y = −1 < 0
+                lb: vec![],
+                ub: vec![],
+            };
+            let sol = solve_socp_ipm(&prob, &[spec], &opts(), backend);
+            assert_eq!(
+                sol.status,
+                QpStatus::PrimalInfeasible,
+                "constant domain violation ({spec:?}) must be PrimalInfeasible, got {:?}",
+                sol.status
+            );
+        }
+    }
+
+    /// **No false positive.** A power program whose cone `y`-slack reaches
+    /// `+0.05` (`T = 2.05`, just off the domain boundary) is *feasible* and
+    /// bounded — the cone-domain screen must NOT flag it, and it solves to the
+    /// known optimum `min w = −√(0.05) ≈ −0.2236`.
+    #[test]
+    fn feasible_power_near_domain_boundary_stays_optimal() {
+        use crate::cones::ConeSpec;
+        use crate::ipm::solve_socp_ipm;
+        let blocks = [NsBlock::power(0.5), NsBlock::Orthant(1)];
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, -1.0),
+                Triplet::new(1, 1, -1.0),
+                Triplet::new(3, 1, 1.0),
+            ],
+            h: vec![0.0, -2.0, 1.0, 2.05],
+            lb: vec![],
+            ub: vec![],
+        };
+        assert!(
+            !detect_cone_domain_infeasible(&prob, &blocks),
+            "feasible near-boundary power program must NOT be flagged infeasible"
+        );
+        let specs = [ConeSpec::Power(0.5), ConeSpec::Nonneg(1)];
+        let sol = solve_socp_ipm(&prob, &specs, &opts(), backend);
+        assert!(
+            matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
+            "feasible power program must solve, got {:?}",
+            sol.status
+        );
+        let want = -(0.05_f64).sqrt();
+        assert!((sol.obj - want).abs() < 1e-5, "obj = {} vs {want}", sol.obj);
+    }
+
+    /// The cone-domain screen must not flag well-posed feasible programs: a
+    /// geometric program (`min e^u + e^{−u} = 2`, all exp cones, feasible) and
+    /// a feasible power instance both return `false`.
+    #[test]
+    fn cone_domain_screen_passes_feasible_programs() {
+        // GP min e^u + e^{−u} (two exp cones), feasible & bounded.
+        let gp = QpProblem {
+            n: 3,
+            p_lower: vec![],
+            c: vec![0.0, 1.0, 1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, -1.0),
+                Triplet::new(2, 1, -1.0),
+                Triplet::new(3, 0, 1.0),
+                Triplet::new(5, 2, -1.0),
+            ],
+            h: vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        assert!(!detect_cone_domain_infeasible(
+            &gp,
+            &[NsBlock::exp(), NsBlock::exp()]
+        ));
+        // Feasible power: (x, 2, 0.5) ∈ K_α, domain slacks constant & positive.
+        let pw = QpProblem {
+            n: 3,
+            p_lower: vec![],
+            c: vec![-1.0, 0.0, 0.0],
+            a: vec![Triplet::new(0, 1, 1.0), Triplet::new(1, 2, 1.0)],
+            b: vec![2.0, 0.5],
+            g: vec![
+                Triplet::new(0, 0, -1.0),
+                Triplet::new(1, 1, -1.0),
+                Triplet::new(2, 2, -1.0),
+            ],
+            h: vec![0.0, 0.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        assert!(!detect_cone_domain_infeasible(&pw, &[NsBlock::power(0.5)]));
     }
 }

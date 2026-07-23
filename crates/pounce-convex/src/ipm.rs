@@ -1035,6 +1035,12 @@ where
 
     if !prob.has_bounds() {
         let blocks = blocks_of(cones, 0);
+        // Exact cone-domain infeasibility screen (gh #283): a power/exp cone
+        // coordinate pinned strictly outside its `≥ 0` domain proves primal
+        // infeasibility, which the HSDE's residual-gated Farkas detector misses.
+        if crate::hsde_nonsym::detect_cone_domain_infeasible(prob, &blocks) {
+            return cone_domain_infeasible_solution(prob);
+        }
         return match hook {
             Some(h) => solve_conic_hsde_nonsym_debug(prob, &blocks, opts, h, make_backend),
             None => solve_conic_hsde_nonsym(prob, &blocks, opts, make_backend),
@@ -1042,6 +1048,9 @@ where
     }
     let (expanded, bound_rows) = expand_bounds(prob);
     let blocks = blocks_of(cones, bound_rows.len());
+    if crate::hsde_nonsym::detect_cone_domain_infeasible(&expanded, &blocks) {
+        return cone_domain_infeasible_solution(prob);
+    }
     let sol = match hook {
         Some(h) => solve_conic_hsde_nonsym_debug(&expanded, &blocks, opts, h, make_backend),
         None => solve_conic_hsde_nonsym(&expanded, &blocks, opts, make_backend),
@@ -1935,6 +1944,23 @@ fn failed_solution(
         z_ub: vec![0.0; prob.n],
         obj,
         iters,
+        iterates: Vec::new(),
+    }
+}
+
+/// Build a `PrimalInfeasible` solution reported by the setup-time cone-domain
+/// screen (gh #283). Carries the trivial iterate; the status is the certified
+/// result. `z = 0` (the cone apex) is dual-cone-feasible in every cone.
+fn cone_domain_infeasible_solution(prob: &QpProblem) -> QpSolution {
+    QpSolution {
+        status: QpStatus::PrimalInfeasible,
+        x: vec![0.0; prob.n],
+        y: vec![0.0; prob.m_eq()],
+        z: vec![0.0; prob.m_ineq()],
+        z_lb: vec![0.0; prob.n],
+        z_ub: vec![0.0; prob.n],
+        obj: 0.0,
+        iters: 0,
         iterates: Vec::new(),
     }
 }
