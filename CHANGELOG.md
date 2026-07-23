@@ -9,6 +9,40 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — non-symmetric HSDE driver returned bare `numerical_failure` on infeasible/unbounded exp/power programs (#283)
+
+- **The exponential/power-cone (non-symmetric HSDE) driver degraded genuinely
+  infeasible and unbounded programs to `numerical_failure`** instead of the
+  definite `primal_infeasible` / `dual_infeasible` its symmetric (LP/SOC)
+  counterpart and the ECOS/SCS/CLARABEL oracles all report. No wrong answer was
+  ever certified — the cost was diagnostic quality — but callers could not tell
+  "the model is infeasible/unbounded" from "the solver hit numerical trouble".
+  Two exact, certificate-backed detectors close the gap
+  (`crates/pounce-convex/src/hsde_nonsym.rs`, `ipm.rs`):
+  - **Recession / unboundedness (`dual_infeasible`).** A recession ray lands on
+    the *boundary* of the cone (e.g. the exp cone's `y = 0` face), but the
+    recession-membership test used the strict-**interior** oracle `in_primal_cone`
+    (`y > tol`), which rejected the genuine ray and let the iterate diverge to
+    `numerical_failure`. A new **closure**-membership test `in_primal_closure`
+    accepts the boundary/recession faces of `cl(K_exp)` and `K_α`, so
+    `min u s.t. (u,1,t) ∈ K_exp` now certifies `dual_infeasible`. It cannot
+    false-positive: the certificate still requires a meaningfully negative
+    directional cost with near-zero `A`/`P` residuals, i.e. a true recession ray.
+  - **Cone-domain infeasibility (`primal_infeasible`).** A power/exp cone requires
+    two of its coordinates `≥ 0` at every feasible point; when the data pin such a
+    coordinate strictly negative (a constant `y = −1` slack, or `y = t−2` forced
+    `≤ −1` by another row), the embedding stalls with a small-but-finite Farkas
+    residual that never clears `FARKAS_RESID_TOL` (~1e-10). A new exact setup-time
+    screen, `detect_cone_domain_infeasible`, propagates variable ranges through the
+    `≥ 0` and equality rows by sound interval arithmetic (FBBT) and reports
+    `primal_infeasible` when any cone-domain slack has a strictly negative upper
+    bound (or a variable range goes empty). Every derived bound is a valid
+    implication of feasibility, so a contradiction proves infeasibility — no
+    feasible/bounded problem is ever flagged. The barely-feasible controls
+    (`y`-slack reaching `+0.05` just off the boundary) still solve to `optimal`.
+  All ten analytically-certified adversary instances now match the oracles
+  (previously 3 mismatches), and the hunted false `primal_infeasible` on a
+  barely-feasible control does not occur.
 ### Fixed — active-set path certified a feasible problem infeasible when m/n ≫ 1 (#282)
 
 - **The active-set QP path (`solver_selection="qp-active-set"` and
