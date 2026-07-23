@@ -9,6 +9,29 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `curve_fit` two-parameter bounds: the last silently-transposing spellings now raise (#260)
+
+- **`pounce.curve_fit` no longer silently transposes a 2-parameter box when the
+  bounds are written as a *list of two lists* (`[[l0, l1], [u0, u1]]`) or a
+  `2 x 2` ndarray.** #263/#265 fixed the outer-*tuple* spellings — the scipy
+  `(lower, upper)` tuple is read scipy's way and the ambiguous tuple-of-pairs
+  raises — but the same `n == 2` collision reached through a non-tuple container
+  slipped past the guard: it fell through to the per-parameter pair-list reading,
+  applied the transposed box, and returned `Solve_Succeeded` with a badly wrong
+  fit (e.g. the reported optimum sitting on the *misread* box while the requested
+  upper bound was violated, with no warning). This was the remaining half of
+  issue #260 (its first comment enumerated all four spellings).
+  - **All three fit surfaces are covered** — `curve_fit`, `curve_fit_minima`, and
+    `curve_fit_streaming` share `_normalize_bound_arg`, so the guard applies
+    uniformly.
+  - **The unambiguous spellings are unchanged.** scipy's tuple of lists/arrays
+    `([l0, l1], [u0, u1])` still follows scipy; pounce's per-parameter pair list
+    spelled with `(lo, hi)` **tuples**, `[(l0, u0), (l1, u1)]`, still fits its
+    box. Only the genuinely ambiguous 2×2 shapes (matching-container list-of-lists
+    or ndarray, and mixed tuple/list pairs) now raise with a message naming both
+    unambiguous spellings — consistent with the #265 decision that the ambiguous
+    `n == 2` shape must be an error rather than a silent guess.
+
 ### Added — bound-multiplier `.sol` suffixes for Ipopt-parity reduced costs (#296)
 
 - **The `.sol` writer now emits `ipopt_zL_out` / `ipopt_zU_out` variable-suffix
