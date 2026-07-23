@@ -17,6 +17,14 @@ pub enum SqpStatus {
     /// Line search failed to find an acceptable step (Phase 5b
     /// commit 5+; not produced by the c3 always-full-step loop).
     LineSearchFailed,
+    /// The QP subproblem solver neither produced a usable step nor
+    /// certified infeasibility — it hit its own iteration limit or a
+    /// numerical breakdown (e.g. the extreme m/n ≫ 1 degenerate phase-1
+    /// of #282). This is an HONEST non-committal failure: the SQP could
+    /// not compute a search direction, but — unlike `InfeasibleSubproblem`
+    /// — it makes no infeasibility claim it cannot back with a
+    /// certificate. Maps to `Search_Direction_Becomes_Too_Small`.
+    QpStepFailed,
 }
 
 impl fmt::Display for SqpStatus {
@@ -26,6 +34,7 @@ impl fmt::Display for SqpStatus {
             SqpStatus::MaxIter => write!(f, "max-iter"),
             SqpStatus::InfeasibleSubproblem => write!(f, "infeasible-subproblem"),
             SqpStatus::LineSearchFailed => write!(f, "line-search-failed"),
+            SqpStatus::QpStepFailed => write!(f, "qp-step-failed"),
         }
     }
 }

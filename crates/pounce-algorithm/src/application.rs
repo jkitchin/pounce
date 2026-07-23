@@ -898,6 +898,14 @@ impl IpoptApplication {
                 ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
                 pounce_nlp::SolverReturn::ErrorInStepComputation,
             ),
+            // Honest non-committal QP-subproblem failure (#282): the QP
+            // solver could not compute a step and did NOT certify
+            // infeasibility. Never report Infeasible_Problem_Detected here
+            // — a feasible problem has no infeasibility certificate.
+            crate::sqp::SqpStatus::QpStepFailed => (
+                ApplicationReturnStatus::SearchDirectionBecomesTooSmall,
+                pounce_nlp::SolverReturn::ErrorInStepComputation,
+            ),
         };
 
         // Forward to the user TNLP's finalize_solution. We pass
