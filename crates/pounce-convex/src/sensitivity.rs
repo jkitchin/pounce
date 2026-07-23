@@ -28,7 +28,32 @@
 //! solve per query (the build-once / solve-many idiom of the NLP
 //! `Solver`). A tiny static regularization `δ` (the QP solver's own `reg`,
 //! default `1e-10`) is placed on the diagonal so the indefinite factor is
-//! stable; the induced error in the step is `O(δ)`.
+//! stable.
+//!
+//! # Near-singular (near-LICQ) KKT: refinement + a conditioning diagnostic
+//!
+//! When the active-constraint gradients are *nearly* rank-deficient (LICQ
+//! almost fails — e.g. two nearly-parallel equality rows) the KKT matrix is
+//! near-singular. A single regularized back-solve then **over-damps**
+//! `dx/db` toward a smooth but badly wrong value, silently, because the
+//! static `δ` floors the smallest KKT singular value (gh #284). Two
+//! defenses close that gap:
+//!
+//! 1. **Iterative refinement against the *unregularized* KKT.** Each solve
+//!    refines its back-substitution against the true (`δ`-free) KKT matrix,
+//!    so the `O(δ)` regularization bias is removed wherever the information
+//!    is still present in double precision — recovering LU-quality `dx/db`.
+//!    On a well-conditioned KKT the first residual is already at round-off
+//!    and refinement is a no-op, so this never perturbs the good cases.
+//! 2. **A condition-number diagnostic.** [`QpSensitivity::kkt_cond_estimate`]
+//!    is a cheap Hager 1-norm estimate of `κ₁` of the factored KKT, and
+//!    [`QpSensitivity::ill_conditioned`] thresholds it. When the system is
+//!    so near-singular that even refinement cannot recover the step (the
+//!    information is below the double-precision floor), the estimate is
+//!    huge and the flag fires — so a caller can *detect* that `dx/db` is
+//!    untrustworthy instead of consuming a silently-damped value. The
+//!    per-step [`QpSensitivity::last_step_residual`] is the companion
+//!    signal: the relative KKT residual the refinement actually achieved.
 
 use crate::ipm::QpOptions;
 use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
@@ -89,6 +114,18 @@ pub struct QpSensitivity {
     weakly_active_ineq: Vec<usize>,
     /// Variables whose bound is weakly active.
     weakly_active_bound_vars: Vec<usize>,
+    /// Lower-triangle KKT pattern (1-based), shared by the factored
+    /// (regularized) matrix and the unregularized values below.
+    kkt_airn: Vec<Index>,
+    kkt_ajcn: Vec<Index>,
+    /// Unregularized KKT values (the `δ`-free matrix) for the refinement
+    /// residual — see [`solve_refined`] (gh #284).
+    kkt_vals_true: Vec<f64>,
+    /// Hager 1-norm estimate of `κ₁` of the factored KKT (gh #284).
+    kkt_cond_estimate: f64,
+    /// Relative KKT residual of the most recent parametric step, or `None`
+    /// before any step has been taken (gh #284).
+    last_residual: Option<f64>,
 }
 
 /// Relative threshold below which a slack or a multiplier counts as zero for
@@ -108,6 +145,161 @@ pub struct QpSensitivity {
 /// enough to look precise would simply miss the default-tolerance case, which
 /// is the one users hit.
 const WEAK_ACTIVE_REL: f64 = 1e-3;
+
+/// Above this 1-norm condition estimate of the factored KKT the parametric
+/// step is reported [`ill_conditioned`](QpSensitivity::ill_conditioned).
+///
+/// Calibrated against gh #284's near-LICQ sweep. With the static `δ = 1e-10`
+/// flooring the smallest KKT singular value, `κ₁` saturates near `1e16` on a
+/// numerically singular KKT while the genuinely well-conditioned sensitivity
+/// cases sit at `κ₁ ≈ 3–8e9`. Iterative refinement (see the module doc)
+/// recovers a correct `dx/db` up to `κ₁ ≈ 6e13`; past that the information is
+/// below the double-precision floor and refinement cannot help. The threshold
+/// sits in the wide gap between those regimes, so it fires exactly on the
+/// unrecoverable cases and stays quiet on every case refinement rescues — no
+/// false alarm on the well-conditioned equality-only or active-set paths.
+const KKT_ILL_CONDITIONED_THRESHOLD: f64 = 1e14;
+
+/// Iterative-refinement passes for a parametric step (mirrors the HSDE
+/// solve's `IR_MAX_PASSES`). A handful suffices: refinement against the
+/// unregularized KKT converges geometrically until it hits the near-singular
+/// floor, where it stagnates and stops.
+const IR_MAX_PASSES: usize = 5;
+
+/// Relative-residual target below which refinement stops early (the KKT step
+/// is solved to working precision).
+const IR_RELTOL: f64 = 1e-12;
+
+/// Hager/Higham 1-norm power iterations for the `‖K⁻¹‖₁` estimate. Five is
+/// LAPACK's `dlacon` default and is more than enough here (the estimate
+/// matched the exact 1-norm condition on gh #284's sweep).
+const HAGER_ITERS: usize = 5;
+
+fn inf_norm(v: &[f64]) -> f64 {
+    v.iter().fold(0.0_f64, |m, x| m.max(x.abs()))
+}
+
+/// Symmetric matvec `y ← K x` for lower-triangle KKT triplets (`airn`/`ajcn`
+/// 1-based, `row ≥ col`). Each strictly-lower entry hits both `y[i]` and
+/// `y[j]`; the diagonal once. Mirrors the HSDE solver's `kkt_matvec` — used
+/// to form the residual `rhs − K u` that drives refinement.
+fn kkt_matvec(airn: &[Index], ajcn: &[Index], vals: &[f64], x: &[f64], y: &mut [f64]) {
+    for v in y.iter_mut() {
+        *v = 0.0;
+    }
+    for k in 0..vals.len() {
+        let i = (airn[k] - 1) as usize;
+        let j = (ajcn[k] - 1) as usize;
+        let v = vals[k];
+        y[i] += v * x[j];
+        if i != j {
+            y[j] += v * x[i];
+        }
+    }
+}
+
+/// 1-norm `‖K‖₁ = maxⱼ Σᵢ |Kᵢⱼ|` of a symmetric matrix from its lower-triangle
+/// triplets (equal to `‖K‖∞`). Each off-diagonal entry contributes to both its
+/// row and column absolute sums.
+fn one_norm_sym(dim: usize, airn: &[Index], ajcn: &[Index], vals: &[f64]) -> f64 {
+    let mut colsum = vec![0.0_f64; dim];
+    for k in 0..vals.len() {
+        let i = (airn[k] - 1) as usize;
+        let j = (ajcn[k] - 1) as usize;
+        let a = vals[k].abs();
+        colsum[i] += a;
+        if i != j {
+            colsum[j] += a;
+        }
+    }
+    colsum.into_iter().fold(0.0_f64, f64::max)
+}
+
+/// Hager/Higham lower-bound estimate of `‖K⁻¹‖₁` using only back-solves
+/// against the cached factor. `K` is symmetric, so `K⁻ᵀ = K⁻¹` and a single
+/// factor drives both half-steps. Returns `∞` if a back-solve fails (the
+/// caller then reports an infinite condition estimate — the safe direction).
+fn estimate_inv_norm1(fact: &mut Factorization, dim: usize) -> f64 {
+    if dim == 0 {
+        return 0.0;
+    }
+    let mut x = vec![1.0 / dim as f64; dim];
+    let mut est = 0.0_f64;
+    let mut prev_j = usize::MAX;
+    for _ in 0..HAGER_ITERS {
+        // y = K⁻¹ x; the 1-norm of y is the running estimate of ‖K⁻¹‖₁.
+        let mut y = x.clone();
+        if fact.solve_one(&mut y).is_err() {
+            return f64::INFINITY;
+        }
+        est = y.iter().map(|v| v.abs()).sum();
+        // z = K⁻¹ sign(y)  (K symmetric ⇒ K⁻ᵀ = K⁻¹).
+        let mut z: Vec<f64> = y
+            .iter()
+            .map(|v| if *v >= 0.0 { 1.0 } else { -1.0 })
+            .collect();
+        if fact.solve_one(&mut z).is_err() {
+            return f64::INFINITY;
+        }
+        let (j, zmax) = z
+            .iter()
+            .enumerate()
+            .fold((0usize, 0.0_f64), |(bi, bm), (i, v)| {
+                if v.abs() > bm { (i, v.abs()) } else { (bi, bm) }
+            });
+        let ztx: f64 = z.iter().zip(&x).map(|(a, b)| a * b).sum();
+        // Higham's stopping test: no coordinate of z beats the current
+        // direction, or we would revisit a unit vector (a cycle).
+        if zmax <= ztx || j == prev_j {
+            break;
+        }
+        prev_j = j;
+        x = vec![0.0; dim];
+        x[j] = 1.0;
+    }
+    est
+}
+
+/// Solve `K u = rhs` against the cached (regularized) factor, then refine `u`
+/// against the **unregularized** KKT triplets `(airn, ajcn, vals_true)` to
+/// strip the `O(δ)` regularization bias. Overwrites `rhs` with `u` and returns
+/// the final relative residual `‖rhs₀ − K u‖∞ / (1 + ‖rhs₀‖∞)` — the
+/// reliability signal a caller reads back as
+/// [`last_step_residual`](QpSensitivity::last_step_residual).
+fn solve_refined(
+    fact: &mut Factorization,
+    airn: &[Index],
+    ajcn: &[Index],
+    vals_true: &[f64],
+    rhs: &mut [f64],
+) -> Result<f64, ()> {
+    let dim = rhs.len();
+    let b: Vec<f64> = rhs.to_vec();
+    fact.solve_one(rhs).map_err(|_| ())?;
+    let bnorm = 1.0 + inf_norm(&b);
+    let mut r = vec![0.0; dim];
+    let mut res = f64::INFINITY;
+    for _ in 0..IR_MAX_PASSES {
+        kkt_matvec(airn, ajcn, vals_true, rhs, &mut r);
+        for k in 0..dim {
+            r[k] = b[k] - r[k];
+        }
+        let new_res = inf_norm(&r) / bnorm;
+        // Stop when solved to working precision, or when refinement stops
+        // making progress — the latter is the near-singular floor and its
+        // residual is exactly the "step is unreliable" signal.
+        if new_res <= IR_RELTOL || new_res >= res {
+            res = new_res;
+            break;
+        }
+        res = new_res;
+        fact.solve_one(&mut r).map_err(|_| ())?;
+        for k in 0..dim {
+            rhs[k] += r[k];
+        }
+    }
+    Ok(res)
+}
 
 impl QpSensitivity {
     /// Build the active-set sensitivity for `sol` (a solution of `prob`).
@@ -190,57 +382,83 @@ impl QpSensitivity {
             })
             .collect();
 
-        // Assemble the lower triangle of the symmetric KKT matrix.
-        let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-        let mut add = |r: usize, c: usize, v: f64| {
+        // Assemble the lower triangle of the symmetric KKT matrix. We keep the
+        // *unregularized* value and the regularization offset per entry
+        // separately: the factor sees `value + reg_offset` (the stabilized,
+        // indefinite matrix) while iterative refinement in `step_from_db`
+        // measures the residual against the `δ`-free `value` (gh #284). Every
+        // diagonal slot `(i, i)` is materialized (even where `P` is zero) so
+        // the two value arrays share one sparsity pattern.
+        let mut entries: BTreeMap<(usize, usize), (f64, f64)> = BTreeMap::new();
+        let mut add = |r: usize, c: usize, v: f64, reg_off: f64| {
             let (r, c) = if r >= c { (r, c) } else { (c, r) };
-            *entries.entry((r, c)).or_insert(0.0) += v;
+            let e = entries.entry((r, c)).or_insert((0.0, 0.0));
+            e.0 += v;
+            e.1 += reg_off;
         };
 
-        // (x,x): P + δI.
+        // (x,x): P, with +δ on the diagonal for the factor only.
         for t in &prob.p_lower {
-            add(t.row, t.col, t.val);
+            add(t.row, t.col, t.val, 0.0);
         }
         for i in 0..n {
-            add(i, i, reg);
+            add(i, i, 0.0, reg);
         }
-        // (y,x): A; (y,y): −δI.
+        // (y,x): A; (y,y): −δI (factor only).
         for t in &prob.a {
-            add(n + t.row, t.col, t.val);
+            add(n + t.row, t.col, t.val, 0.0);
         }
         for i in 0..m_eq {
-            add(n + i, n + i, -reg);
+            add(n + i, n + i, 0.0, -reg);
         }
         // Active-row block `B_a` after the equality rows, in order:
-        // active inequality rows, then active bound rows. (·,·): −δI diagonal.
+        // active inequality rows, then active bound rows. (·,·): −δI diagonal
+        // (factor only).
         let abase = n + m_eq;
         let g_rows = group_rows_by_index(&prob.g, prob.m_ineq());
         for (k, &i) in active_ineq.iter().enumerate() {
             // The k-th active row holds G's row i.
             for &(col, val) in &g_rows[i] {
-                add(abase + k, col, val);
+                add(abase + k, col, val, 0.0);
             }
         }
         for (k, &j) in active_bound_vars.iter().enumerate() {
-            add(abase + active_ineq.len() + k, j, 1.0);
+            add(abase + active_ineq.len() + k, j, 1.0, 0.0);
         }
         for k in 0..n_active {
-            add(abase + k, abase + k, -reg);
+            add(abase + k, abase + k, 0.0, -reg);
         }
 
-        // Triplets → 1-based lower-triangle arrays for the factorization.
+        // Triplets → 1-based lower-triangle arrays. `values_reg` (true + reg
+        // offset) is factored; `kkt_vals_true` (δ-free) drives refinement.
         let nnz = entries.len();
-        let mut airn = Vec::with_capacity(nnz);
-        let mut ajcn = Vec::with_capacity(nnz);
-        let mut values = Vec::with_capacity(nnz);
-        for ((r, c), v) in entries {
-            airn.push((r + 1) as Index);
-            ajcn.push((c + 1) as Index);
-            values.push(v);
+        let mut kkt_airn = Vec::with_capacity(nnz);
+        let mut kkt_ajcn = Vec::with_capacity(nnz);
+        let mut kkt_vals_true = Vec::with_capacity(nnz);
+        let mut values_reg = Vec::with_capacity(nnz);
+        for ((r, c), (v_true, v_reg_off)) in entries {
+            kkt_airn.push((r + 1) as Index);
+            kkt_ajcn.push((c + 1) as Index);
+            kkt_vals_true.push(v_true);
+            values_reg.push(v_true + v_reg_off);
         }
 
-        let fact = Factorization::new(dim as Index, airn, ajcn, values, make_backend())
-            .map_err(|_| SensError::FactorizationFailed)?;
+        // 1-norm of the factored (regularized) KKT, for the condition estimate.
+        let kkt_norm1 = one_norm_sym(dim, &kkt_airn, &kkt_ajcn, &values_reg);
+
+        let mut fact = Factorization::new(
+            dim as Index,
+            kkt_airn.clone(),
+            kkt_ajcn.clone(),
+            values_reg,
+            make_backend(),
+        )
+        .map_err(|_| SensError::FactorizationFailed)?;
+
+        // Hager estimate of κ₁ = ‖K‖₁·‖K⁻¹‖₁ (gh #284). Reuses the factor, so
+        // it costs only a handful of back-solves.
+        let inv_norm1 = estimate_inv_norm1(&mut fact, dim);
+        let kkt_cond_estimate = kkt_norm1 * inv_norm1;
 
         Ok(QpSensitivity {
             n,
@@ -252,6 +470,11 @@ impl QpSensitivity {
             active_bound_vars,
             weakly_active_ineq,
             weakly_active_bound_vars,
+            kkt_airn,
+            kkt_ajcn,
+            kkt_vals_true,
+            kkt_cond_estimate,
+            last_residual: None,
         })
     }
 
@@ -308,17 +531,70 @@ impl QpSensitivity {
     /// Primal sensitivity for a full equality-RHS perturbation `db` (length
     /// `m_eq`): solves the active-set KKT with right-hand side `[0; db; 0]`
     /// and returns `dx = step[0..n]`.
+    ///
+    /// The back-solve is refined against the **unregularized** KKT
+    /// ([`solve_refined`]) so the `O(δ)` regularization bias is stripped
+    /// wherever the information survives in double precision; the achieved
+    /// relative residual is recorded for
+    /// [`last_step_residual`](Self::last_step_residual) (gh #284).
     pub fn step_from_db(&mut self, db: &[f64]) -> Vec<f64> {
         assert_eq!(db.len(), self.m_eq, "db must have length m_eq");
         let mut rhs = vec![0.0 as Number; self.dim];
         rhs[self.n..self.n + self.m_eq].copy_from_slice(db);
         // A singular factor would have been caught at build; a back-solve
         // failure here is not recoverable, so surface a zero step.
-        if self.fact.solve_one(&mut rhs).is_err() {
-            return vec![0.0; self.n];
+        match solve_refined(
+            &mut self.fact,
+            &self.kkt_airn,
+            &self.kkt_ajcn,
+            &self.kkt_vals_true,
+            &mut rhs,
+        ) {
+            Ok(res) => self.last_residual = Some(res),
+            Err(()) => return vec![0.0; self.n],
         }
         rhs.truncate(self.n);
         rhs
+    }
+
+    /// Hager 1-norm estimate of the condition number `κ₁` of the (factored,
+    /// regularized) active-set KKT.
+    ///
+    /// A large value warns that the sensitivity system is near-singular — the
+    /// active-constraint gradients are nearly rank-deficient (near-LICQ) — so
+    /// the parametric step may be untrustworthy even though the solve reports
+    /// success (gh #284). This is the quantitative companion to the boolean
+    /// [`ill_conditioned`](Self::ill_conditioned); see also the per-step
+    /// [`last_step_residual`](Self::last_step_residual). Well-conditioned
+    /// sensitivities report a modest `κ₁` (a few `×10⁹` on the badly-scaled
+    /// gh #284 QPs); a numerically singular one saturates near `1e16`.
+    pub fn kkt_cond_estimate(&self) -> f64 {
+        self.kkt_cond_estimate
+    }
+
+    /// Whether the KKT/sensitivity system is ill-conditioned enough that
+    /// [`parametric_step`](Self::parametric_step) may be unreliable even after
+    /// refinement — `true` when [`kkt_cond_estimate`](Self::kkt_cond_estimate)
+    /// exceeds [`KKT_ILL_CONDITIONED_THRESHOLD`] (gh #284).
+    ///
+    /// On a near-LICQ sweep this fires precisely where refinement can no
+    /// longer recover `dx/db` from double precision; on the well-conditioned
+    /// equality-only and active-set cases it stays quiet.
+    pub fn ill_conditioned(&self) -> bool {
+        self.kkt_cond_estimate > KKT_ILL_CONDITIONED_THRESHOLD
+    }
+
+    /// Relative KKT residual `‖rhs − K·step‖∞ / (1 + ‖rhs‖∞)` achieved by the
+    /// most recent [`parametric_step`](Self::parametric_step) /
+    /// [`step_from_db`](Self::step_from_db), or `None` before any step.
+    ///
+    /// Measured against the **unregularized** KKT, so it reflects how well the
+    /// returned step actually satisfies the true sensitivity system. A tiny
+    /// value (round-off level) means the step is trustworthy; a large one
+    /// means refinement could not solve the near-singular system and the step
+    /// is unreliable (gh #284).
+    pub fn last_step_residual(&self) -> Option<f64> {
+        self.last_residual
     }
 
     /// The active-set KKT dimension `n + m_eq + n_active`.
@@ -676,6 +952,261 @@ mod tests {
         let dx = sens.parametric_step(&[0], &[0.5]);
         assert!(dx[0].abs() < 1e-6, "dx0 = {} (should stay on x₀=1)", dx[0]);
         assert!((dx[1] - 0.5).abs() < 1e-6, "dx1 = {}", dx[1]);
+    }
+
+    // ---- gh #284: near-LICQ conditioning diagnostic + refinement ----------
+
+    /// The gh #284 Hessian `P = D·H₆·D` (Hilbert matrix `H₆`, `D =
+    /// diag(1e3,…,1e-2)`; `cond(P) ≈ 7e15`) and its linear term. Shared by the
+    /// conditioning tests below.
+    fn hilbert_p_and_c() -> (Vec<Triplet>, Vec<f64>) {
+        let d = [1e3, 1e2, 1e1, 1.0, 1e-1, 1e-2];
+        let mut p_lower = Vec::new();
+        for i in 0..6 {
+            for j in 0..=i {
+                let hij = 1.0 / ((i + j + 1) as f64);
+                p_lower.push(Triplet::new(i, j, d[i] * hij * d[j]));
+            }
+        }
+        (p_lower, vec![1.0, -2.0, 3.0, -1.0, 0.5, -0.25])
+    }
+
+    /// Two equality rows that are all-ones except the last entry of row 1,
+    /// which differs by `eps` — nearly parallel, so LICQ nearly fails.
+    fn near_parallel_rows(eps: f64) -> Vec<Triplet> {
+        let mut a = Vec::new();
+        for j in 0..6 {
+            a.push(Triplet::new(0, j, 1.0));
+            a.push(Triplet::new(1, j, if j == 5 { 1.0 + eps } else { 1.0 }));
+        }
+        a
+    }
+
+    /// Dense LU with partial pivoting — the float64 reference the gh #284 issue
+    /// uses (`numpy.linalg.solve`) to show `dx/db` survives in double precision.
+    /// `a` is row-major `n×n`; solves `a x = b`.
+    fn dense_lu_solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
+        let n = b.len();
+        for k in 0..n {
+            let mut piv = k;
+            for i in (k + 1)..n {
+                if a[i][k].abs() > a[piv][k].abs() {
+                    piv = i;
+                }
+            }
+            a.swap(k, piv);
+            b.swap(k, piv);
+            for i in (k + 1)..n {
+                let f = a[i][k] / a[k][k];
+                for j in k..n {
+                    a[i][j] -= f * a[k][j];
+                }
+                b[i] -= f * b[k];
+            }
+        }
+        let mut x = vec![0.0; n];
+        for k in (0..n).rev() {
+            let mut s = b[k];
+            for j in (k + 1)..n {
+                s -= a[k][j] * x[j];
+            }
+            x[k] = s / a[k][k];
+        }
+        x
+    }
+
+    /// Dense true (δ-free) equality KKT `[[P, Aᵀ], [A, 0]]`, row-major.
+    fn dense_eq_kkt(p_lower: &[Triplet], a: &[Triplet], n: usize, m: usize) -> Vec<Vec<f64>> {
+        let dim = n + m;
+        let mut k = vec![vec![0.0; dim]; dim];
+        for t in p_lower {
+            k[t.row][t.col] += t.val;
+            if t.row != t.col {
+                k[t.col][t.row] += t.val;
+            }
+        }
+        for t in a {
+            k[n + t.row][t.col] += t.val;
+            k[t.col][n + t.row] += t.val;
+        }
+        k
+    }
+
+    /// dx/db reference for the equality-only KKT: the x-block of the true-KKT
+    /// solve with rhs `[0; e_{pin}]`, by dense float64 LU (independent of the
+    /// factored/regularized path).
+    fn dxdb_reference(prob: &QpProblem, pin: usize) -> Vec<f64> {
+        let (n, m) = (prob.n, prob.m_eq());
+        let kkt = dense_eq_kkt(&prob.p_lower, &prob.a, n, m);
+        let mut rhs = vec![0.0; n + m];
+        rhs[n + pin] = 1.0;
+        dense_lu_solve(kkt, rhs)[..n].to_vec()
+    }
+
+    fn rel_err(a: &[f64], b: &[f64]) -> f64 {
+        let scale = b.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+        a.iter()
+            .zip(b)
+            .fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()))
+            / scale
+    }
+
+    /// A near-LICQ sensitivity (two equality rows differing by `1e-9`) is
+    /// **detectably** untrustworthy (gh #284). Before the fix, `dx/db`
+    /// collapsed to a smoothly over-damped, ~98%-wrong value while every
+    /// existing signal (`weakly_active`, `kkt_dim`, status) looked ordinary and
+    /// no exception was raised — the caller had no way to know. The
+    /// conditioning diagnostic must fire, and the refinement residual must
+    /// expose that the near-singular step was not solved.
+    #[test]
+    fn near_licq_sensitivity_is_flagged_ill_conditioned() {
+        let (p_lower, c) = hilbert_p_and_c();
+        let prob = QpProblem {
+            n: 6,
+            p_lower,
+            c,
+            a: near_parallel_rows(1e-10),
+            b: vec![1.0, 1.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let mut sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+
+        // The old signals stay silent: nothing weakly active, full KKT dim.
+        assert!(sens.weakly_active_ineq().is_empty());
+        assert!(sens.weakly_active_bound_vars().is_empty());
+        // The new diagnostic fires.
+        assert!(
+            sens.ill_conditioned(),
+            "near-LICQ KKT must be flagged (κ₁ = {:.3e})",
+            sens.kkt_cond_estimate()
+        );
+        assert!(
+            sens.kkt_cond_estimate() > KKT_ILL_CONDITIONED_THRESHOLD,
+            "κ₁ = {:.3e}",
+            sens.kkt_cond_estimate()
+        );
+
+        // The step's residual against the true KKT is large: refinement could
+        // not solve the near-singular system, so the step is unreliable.
+        let _ = sens.parametric_step(&[0], &[1.0]);
+        let res = sens.last_step_residual().expect("a step was taken");
+        assert!(
+            res > 1e-6,
+            "expected a large refinement residual, got {res:.3e}"
+        );
+    }
+
+    /// The false-alarm guard: the gh #284 *well-conditioned* case — the same
+    /// badly-scaled `P = D·H₆·D` with a full-rank (if badly scaled) `A` whose
+    /// rows differ by orders of magnitude, `cond(KKT) ≈ 5e9`. The diagnostic
+    /// must stay quiet, and `dx/db` must match a dense float64 LU reference to
+    /// ~1e-7 (the regularization introduces no detectable bias here).
+    #[test]
+    fn well_conditioned_sensitivity_not_flagged_and_accurate() {
+        let (p_lower, c) = hilbert_p_and_c();
+        // Rows: [1,1,1,1,1,1] and [1e4,1,1,1,1,1e-4] — badly scaled, full rank.
+        let a = vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(0, 2, 1.0),
+            Triplet::new(0, 3, 1.0),
+            Triplet::new(0, 4, 1.0),
+            Triplet::new(0, 5, 1.0),
+            Triplet::new(1, 0, 1e4),
+            Triplet::new(1, 1, 1.0),
+            Triplet::new(1, 2, 1.0),
+            Triplet::new(1, 3, 1.0),
+            Triplet::new(1, 4, 1.0),
+            Triplet::new(1, 5, 1e-4),
+        ];
+        let prob = QpProblem {
+            n: 6,
+            p_lower,
+            c,
+            a,
+            b: vec![1.0, 2.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let mut sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+
+        assert!(
+            !sens.ill_conditioned(),
+            "well-conditioned KKT must NOT be flagged (κ₁ = {:.3e})",
+            sens.kkt_cond_estimate()
+        );
+        assert!(
+            sens.kkt_cond_estimate() < 1e12,
+            "κ₁ = {:.3e}",
+            sens.kkt_cond_estimate()
+        );
+
+        let dx = sens.parametric_step(&[0], &[1.0]);
+        let reference = dxdb_reference(&prob, 0);
+        let err = rel_err(&dx, &reference);
+        assert!(err < 1e-7, "dx/db rel err vs float64 LU = {err:.3e}");
+        assert!(
+            sens.last_step_residual().unwrap() < 1e-8,
+            "residual = {:?}",
+            sens.last_step_residual()
+        );
+    }
+
+    /// Refinement recovers accuracy where the information survives in double
+    /// precision (gh #284). At `eps = 1e-6` the KKT is near-LICQ enough that a
+    /// single regularized back-solve over-damps `dx/db` to ~4e-5 relative
+    /// error, yet a plain float64 LU recovers it. Refinement against the
+    /// unregularized KKT must close that gap — matching the LU reference far
+    /// better than the un-refined solve could — while the conditioning flag
+    /// stays quiet (the step *is* reliable here).
+    #[test]
+    fn refinement_recovers_dxdb_where_information_survives() {
+        let (p_lower, c) = hilbert_p_and_c();
+        let prob = QpProblem {
+            n: 6,
+            p_lower,
+            c,
+            a: near_parallel_rows(1e-6),
+            b: vec![1.0, 1.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        let mut sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+
+        // Recoverable, so not flagged.
+        assert!(
+            !sens.ill_conditioned(),
+            "κ₁ = {:.3e}",
+            sens.kkt_cond_estimate()
+        );
+
+        let dx = sens.parametric_step(&[0], &[1.0]);
+        let reference = dxdb_reference(&prob, 0);
+        let err = rel_err(&dx, &reference);
+        // Comfortably better than the ~4e-5 an un-refined regularized solve
+        // yields here: refinement did its job.
+        assert!(
+            err < 1e-6,
+            "refined dx/db rel err vs float64 LU = {err:.3e}"
+        );
+        assert!(
+            sens.last_step_residual().unwrap() < 1e-6,
+            "residual = {:?}",
+            sens.last_step_residual()
+        );
     }
 
     /// A non-optimal solution has no well-defined active set.

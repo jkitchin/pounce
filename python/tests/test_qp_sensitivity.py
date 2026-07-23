@@ -342,3 +342,93 @@ def test_weakly_active_matches_the_one_sided_branches():
     matches_fwd = np.allclose(dx, fwd, atol=5e-3)
     matches_bwd = np.allclose(dx, bwd, atol=5e-3)
     assert matches_fwd != matches_bwd, f"dx={dx} fwd={fwd} bwd={bwd}"
+
+
+# ---- gh #284: near-LICQ conditioning diagnostic + refinement --------------
+
+
+def _hilbert_qp_data():
+    """The gh #284 family: P = D·H6·D (Hilbert, cond ≈ 7e15), badly scaled."""
+    d = np.array([1e3, 1e2, 1e1, 1.0, 1e-1, 1e-2])
+    H = np.array([[1.0 / (i + j + 1) for j in range(6)] for i in range(6)])
+    P = np.outer(d, d) * H
+    c = np.array([1.0, -2.0, 3.0, -1.0, 0.5, -0.25])
+    return P, c
+
+
+def _near_parallel_A(eps):
+    """Two nearly-parallel equality rows differing by ``eps`` (near-LICQ)."""
+    return np.array([[1.0] * 6, [1.0] * 5 + [1.0 + eps]])
+
+
+def _dxdb_lu_reference(P, A, pin):
+    """dx/db = x-block of the true (unregularized) KKT solve with rhs [0; e_pin],
+    by plain float64 LU — the reference the issue shows recovers the info."""
+    n, m = P.shape[0], A.shape[0]
+    K = np.zeros((n + m, n + m))
+    K[:n, :n] = P
+    K[:n, n:] = A.T
+    K[n:, :n] = A
+    rhs = np.zeros(n + m)
+    rhs[n + pin] = 1.0
+    return np.linalg.solve(K, rhs)[:n]
+
+
+def test_near_licq_sensitivity_is_flagged_ill_conditioned():
+    # The heart of gh #284: on a near-LICQ QP, dx/db silently over-damps to a
+    # ~100%-wrong value while every existing signal looks ordinary. The new
+    # diagnostic must let a caller DETECT that.
+    P, c = _hilbert_qp_data()
+    s = QpSensitivity(P=P, c=c, A=_near_parallel_A(1e-10), b=[1.0, 1.0])
+    # The old signals stay silent.
+    assert not s.weakly_active_indices
+    # The new diagnostic fires.
+    assert s.ill_conditioned
+    assert s.kkt_cond_estimate > 1e14
+    # And the per-step residual confirms the near-singular step was not solved.
+    s.parametric_step([0], [1.0])
+    assert s.last_step_residual > 1e-6
+
+
+def test_well_conditioned_sensitivity_not_flagged_and_accurate():
+    # The false-alarm guard: the badly-scaled but full-rank equality case
+    # (cond(KKT) ≈ 5e9). The diagnostic must stay quiet and dx/db must match a
+    # plain float64 LU reference to ~1e-7.
+    P, c = _hilbert_qp_data()
+    A = np.array([[1.0] * 6, [1e4, 1.0, 1.0, 1.0, 1.0, 1e-4]])
+    s = QpSensitivity(P=P, c=c, A=A, b=[1.0, 2.0])
+    assert not s.ill_conditioned
+    assert s.kkt_cond_estimate < 1e12
+    dx = s.parametric_step([0], [1.0])
+    ref = _dxdb_lu_reference(P, A, 0)
+    scale = max(1.0, np.abs(ref).max())
+    assert np.abs(dx - ref).max() / scale < 1e-7
+    assert s.last_step_residual < 1e-8
+
+
+def test_refinement_recovers_dxdb_where_information_survives():
+    # At eps = 1e-6 a single regularized back-solve over-damps dx/db to ~4e-5
+    # rel err, but float64 LU recovers it. Internal refinement must close that
+    # gap, and the flag must stay quiet (the step IS reliable here).
+    P, c = _hilbert_qp_data()
+    A = _near_parallel_A(1e-6)
+    s = QpSensitivity(P=P, c=c, A=A, b=[1.0, 1.0])
+    assert not s.ill_conditioned
+    dx = s.parametric_step([0], [1.0])
+    ref = _dxdb_lu_reference(P, A, 0)
+    scale = np.abs(ref).max()
+    # Comfortably better than the ~4e-5 an un-refined solve yields here.
+    assert np.abs(dx - ref).max() / scale < 1e-6
+    assert s.last_step_residual < 1e-6
+
+
+def test_diagnostic_attributes_before_any_step():
+    # kkt_cond_estimate / ill_conditioned are build-time (no step needed);
+    # last_step_residual is None until a step is taken.
+    P, c = _hilbert_qp_data()
+    s = QpSensitivity(P=P, c=c, A=_near_parallel_A(1e-6), b=[1.0, 1.0])
+    assert s.last_step_residual is None
+    assert isinstance(s.kkt_cond_estimate, float)
+    assert isinstance(s.ill_conditioned, bool)
+    s.parametric_step([0], [1.0])
+    assert s.last_step_residual is not None

@@ -725,6 +725,26 @@ impl PyQpSensitivity {
         self.inner.kkt_dim()
     }
 
+    /// Hager 1-norm estimate of the KKT condition number `κ₁` (gh #284).
+    #[getter]
+    fn kkt_cond_estimate(&self) -> f64 {
+        self.inner.kkt_cond_estimate()
+    }
+
+    /// Whether the sensitivity system is near-singular enough that the
+    /// parametric step may be unreliable even after refinement (gh #284).
+    #[getter]
+    fn ill_conditioned(&self) -> bool {
+        self.inner.ill_conditioned()
+    }
+
+    /// Relative KKT residual of the most recent parametric step, or `None`
+    /// before any step has been taken (gh #284).
+    #[getter]
+    fn last_step_residual(&self) -> Option<f64> {
+        self.inner.last_step_residual()
+    }
+
     /// Inequality rows (indices into `G`) in the active set.
     #[getter]
     fn active_inequalities(&self) -> Vec<usize> {
