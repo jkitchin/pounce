@@ -859,12 +859,15 @@ class QpSensitivity:
 
     On a *near*-LICQ problem (active-constraint gradients nearly, but not
     exactly, rank-deficient) the sensitivity KKT is near-singular and
-    ``parametric_step`` can silently over-damp ``dx/db`` (issue #284). Two
-    guards address this: the solve is internally refined against the
+    ``parametric_step`` can silently over-damp ``dx/db`` (issues #284, #328).
+    Two guards address this: the solve is internally refined against the
     unregularized KKT to recover ``dx/db`` wherever the information survives in
     double precision, and :attr:`ill_conditioned` / :attr:`kkt_cond_estimate`
     (build-time) and :attr:`last_step_residual` (per-step) let a caller
-    *detect* when a step is untrustworthy.
+    *detect* when a step is untrustworthy. :attr:`ill_conditioned` fires on
+    either a numerically singular KKT (condition estimate) or a step that
+    refinement could not solve (residual), so it stays honest even when a
+    well-scaled ``P`` hides the near-singularity from the condition estimate.
 
     Example
     -------
@@ -950,16 +953,24 @@ class QpSensitivity:
     def ill_conditioned(self) -> bool:
         """Whether ``dx/db`` may be unreliable because the KKT is near-singular.
 
-        ``True`` when :attr:`kkt_cond_estimate` exceeds an internal threshold
-        (``1e14``) — the regime where the sensitivity system is so near-LICQ
-        that even the internal iterative refinement cannot recover ``dx/db``
-        from double precision (issue #284). It stays ``False`` on
-        well-conditioned problems, including the badly-scaled equality-only and
-        active-set cases, so it does not false-alarm.
+        ``True`` when **either** the build-time :attr:`kkt_cond_estimate`
+        exceeds an internal threshold (``1e14``) — a numerically singular KKT,
+        detectable before any step (issue #284) — **or** the most recent
+        :meth:`parametric_step` refined to a large relative KKT residual (issue
+        #328). The second clause covers the blind spot of the first: on a
+        well-scaled ``P`` with a near-parallel *constraint* Jacobian the
+        condition estimate saturates below its threshold, so before #328 a step
+        over-damped by ~3300x still reported ``ill_conditioned == False``; the
+        stalled refinement residual now fires the flag instead. It stays
+        ``False`` on well-conditioned problems, including the badly-scaled
+        equality-only and active-set cases, so it does not false-alarm.
 
-        Use it as a guard: if ``ill_conditioned`` is ``True``, treat the
-        :meth:`parametric_step` result as untrustworthy (or cross-check it),
-        rather than consuming the silently-damped value.
+        Because the residual clause depends on the most recent step, read this
+        **after** calling :meth:`parametric_step` for the perturbation you care
+        about. Use it as a guard: if ``ill_conditioned`` is ``True``, treat the
+        :meth:`parametric_step` result as untrustworthy (or cross-check it,
+        e.g. by a finite-difference re-solve), rather than consuming the
+        silently-damped value.
         """
         return bool(self._inner.ill_conditioned)
 
@@ -967,13 +978,17 @@ class QpSensitivity:
     def last_step_residual(self) -> Optional[float]:
         """Relative KKT residual of the most recent :meth:`parametric_step`.
 
-        ``‖rhs − K·step‖∞ / (1 + ‖rhs‖∞)`` measured against the *unregularized*
-        KKT, or ``None`` before any step has been taken. It reports how well the
+        ``‖rhs − K·step‖∞ / ‖rhs‖∞`` measured against the *unregularized* KKT,
+        or ``None`` before any step has been taken. It reports how well the
         returned step actually satisfies the true sensitivity system (issue
         #284): a round-off-level value means the step is trustworthy; a large
         one means the refinement could not solve the near-singular system and
-        the step is unreliable. This is the per-query companion to the
-        build-time :attr:`ill_conditioned` / :attr:`kkt_cond_estimate`.
+        the step is unreliable. Being a true *relative* residual, it is
+        invariant to the magnitude of the perturbation, so it exposes a stalled
+        solve even for a small ``db`` — the case the earlier ``1 + ‖rhs‖`` floor
+        masked (issue #328). This is the per-query companion to the build-time
+        :attr:`ill_conditioned` / :attr:`kkt_cond_estimate`, and a value above
+        the internal threshold makes :attr:`ill_conditioned` fire.
         """
         r = self._inner.last_step_residual
         return None if r is None else float(r)
