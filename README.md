@@ -396,6 +396,19 @@ The Ipopt comparison side runs against a locally-built Ipopt-MA57
 `make -C benchmarks build-ipopt-ma57`. See `benchmarks/README.md` for
 the full list and per-suite details.
 
+## pounce in the wild
+
+[Opyrability](https://github.com/CODES-group/opyrability#installation) now uses pounce as its default solver.
+
+Devin Griffith has been creating a series of interactive optimization examples that use pounce:
+- https://quadtank.griffith-pse.com/
+- https://cstr-sensitivity.griffith-pse.com/
+- https://circle-packing.griffith-pse.com/
+
+@GermanHeim is integrating pounce into oximo a Rust algebraic modeling library for mathematical optimization (https://github.com/oximo-rs/oximo/tree/main/crates/oximo-pounce)
+
+Are you using pounce for something and want it listed here? Let me know!
+
 ## Acknowledgments
 
 POUNCE's nonlinear-programming core is a Rust port of
