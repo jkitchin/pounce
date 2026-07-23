@@ -67,6 +67,46 @@ def test_solve_bvp_adaptive_matches_scipy():
     assert ra.rms_residuals.max() < 1e-6
 
 
+def test_solve_bvp_tight_tolerance_no_residual_floor():
+    """Adaptive refinement must reach tight tolerances, not plateau (gh #345).
+
+    The residual estimator uses ``r_mid = 1.5 * col_res / h``. A fixed absolute
+    Newton stop left ``col_res`` frozen at the warm-start interpolation level
+    after each refinement (Newton took zero steps), so the estimate plateaued
+    at ~1.5e-8 and any ``tol`` below that exhausted the whole node budget with
+    ``success=False`` — while SciPy converged in ~160 nodes. The mesh-scaled
+    Newton criterion drives ``col_res`` to round-off at every mesh, so the
+    hierarchy converges node-for-node with SciPy again.
+    """
+    scipy_integrate = pytest.importorskip("scipy.integrate")
+
+    def fun(x, y):
+        return np.vstack((y[1], -y[0]))  # y'' = -y  ->  y = sin(x)
+
+    def bc(ya, yb):
+        return np.array([ya[0], yb[0] - 1.0])  # y(0)=0, y(pi/2)=1
+
+    b = np.pi / 2
+    for tol in (1e-8, 1e-9, 1e-10):
+        x = np.linspace(0, b, 11)
+        y0 = np.zeros((2, x.size))
+        y0[0] = x / b
+        res = pounce.solve_bvp(fun, bc, x, y0, tol=tol)
+        ref = scipy_integrate.solve_bvp(fun, bc, x, y0, tol=tol)
+
+        # Converges (no node-budget blow-up) and meets the requested tol.
+        assert res.success, f"tol={tol:e}: did not converge ({res.message})"
+        assert res.rms_residuals.max() < tol
+        assert res.x.size < 1000, f"tol={tol:e}: used {res.x.size} nodes (floor?)"
+        # Reproduces SciPy's mesh sequence node-for-node, as documented.
+        assert res.x.size == ref.x.size, (
+            f"tol={tol:e}: {res.x.size} nodes vs SciPy {ref.x.size}"
+        )
+        # And the solution is genuinely accurate against the analytic sin.
+        xt = np.linspace(0, b, 200)
+        assert np.max(np.abs(res.sol(xt)[0] - np.sin(xt))) < 10 * tol
+
+
 def test_solve_bvp_unknown_parameter_eigenvalue():
     """y'' + k^2 y = 0, y(0)=y(1)=0, y'(0)=k recovers the first eigenvalue."""
 
