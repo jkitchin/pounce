@@ -61,6 +61,12 @@ def _build_id(exe):
     straddling a bug fix can share the same ``X.Y.Z`` while differing in
     commit — see the pounce dual-sign fix (gh #271/#272), where a stale
     0.9.0 binary returned flipped duals that a version check would miss.
+
+    A dirty working tree is kept in the identifier (``96fc5890+dirty``), so a
+    build with uncommitted changes is distinguished from the clean build at
+    the same commit — that is exactly a "same commit, different bits" case.
+    ``unknown`` (a build made outside a git checkout) is still treated as
+    unqueryable so two independent such builds never compare equal.
     """
     if not exe:
         return None
@@ -70,7 +76,7 @@ def _build_id(exe):
         ).stdout
     except Exception:
         return None
-    m = re.search(r"commit\s+([0-9a-f]+)", out)
+    m = re.search(r"commit\s+([0-9a-f]+(?:\+dirty)?)", out)
     return m.group(1) if m else None
 
 
@@ -154,16 +160,24 @@ class POUNCE(ASL):
 def _all_path_pounce():
     """Every `pounce` executable resolvable via PATH, in PATH order — the
     candidates Pyomo's ASL fallback *would* pick from if the bundled binary
-    were absent. Used to flag a binary that shadows the intended one."""
+    were absent. Used to flag a binary that shadows the intended one.
+
+    The executable is named ``pounce.exe`` on Windows; resolving it through
+    ``shutil.which`` (rather than a bare ``pounce`` filename test) applies the
+    platform's own name/extension and executable-bit rules, so the shadowing
+    scan works on Windows too."""
     import os
 
+    name = "pounce.exe" if os.name == "nt" else "pounce"
     seen, found = set(), []
     for d in os.environ.get("PATH", "").split(os.pathsep):
         if not d:
             continue
-        cand = os.path.join(d, "pounce")
+        cand = shutil.which(name, path=d)
+        if cand is None:
+            continue
         real = os.path.realpath(cand)
-        if os.path.isfile(cand) and os.access(cand, os.X_OK) and real not in seen:
+        if real not in seen:
             seen.add(real)
             found.append(cand)
     return found

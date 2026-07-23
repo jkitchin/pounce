@@ -10,12 +10,20 @@ duals). The plugin therefore discriminates on the git *commit* embedded in
 different one shadows it on PATH.
 """
 
+import os
 import warnings
 
 import pytest
 
 import pyomo_pounce
 from pyomo_pounce import pounce_solver as ps
+
+
+def _write_fake_pounce(path, about_first_line):
+    """A minimal `pounce` whose `--about` prints the given first line."""
+    path.write_text("#!/bin/sh\n" f'echo "{about_first_line}"\n')
+    path.chmod(0o755)
+    return path
 
 
 # ── build-id discrimination (the mechanism version strings can't provide) ──
@@ -28,13 +36,73 @@ def test_build_id_parses_commit_from_about():
         pytest.skip("no bundled pounce binary in this environment")
     bid = ps._build_id(bundled)
     assert bid is not None and len(bid) >= 6
-    # It is a hex commit, not a version string.
-    int(bid, 16)
+    # It is a hex commit (optionally carrying a `+dirty` marker for a build
+    # with uncommitted changes), not a version string.
+    int(bid.split("+")[0], 16)
 
 
 def test_build_id_none_on_missing_or_bad_executable():
     assert ps._build_id(None) is None
     assert ps._build_id("/definitely/no/such/pounce/binary") is None
+
+
+def test_build_id_keeps_dirty_suffix(tmp_path):
+    """A build with uncommitted changes reports ``<commit>+dirty``; that
+    marker is kept, so it is distinguished from the clean build at the same
+    commit — a genuine "same commit, different bits" case."""
+    clean = _write_fake_pounce(
+        tmp_path / "clean",
+        "pounce 0.9.0 (commit 96fc5890, built 2026-01-01T00:00:00Z)",
+    )
+    dirty = _write_fake_pounce(
+        tmp_path / "dirty",
+        "pounce 0.9.0 (commit 96fc5890+dirty, built 2026-01-01T00:00:00Z)",
+    )
+    assert ps._build_id(str(clean)) == "96fc5890"
+    assert ps._build_id(str(dirty)) == "96fc5890+dirty"
+    assert ps._build_id(str(clean)) != ps._build_id(str(dirty))
+
+
+def test_build_id_treats_unknown_commit_as_unqueryable(tmp_path):
+    """A binary built outside a git checkout reports ``commit unknown``. That
+    must read as None, so two independent such builds never compare equal
+    (and never look like a match to the bundled binary)."""
+    exe = _write_fake_pounce(
+        tmp_path / "pounce",
+        "pounce 0.9.0 (commit unknown, built 2026-01-01T00:00:00Z)",
+    )
+    assert ps._build_id(str(exe)) is None
+
+
+# ── PATH scan (the candidates ASL fallback would pick from) ─────────────────
+
+
+def test_all_path_pounce_finds_binary(tmp_path, monkeypatch):
+    exe = _write_fake_pounce(
+        tmp_path / "pounce", "pounce 0.9.0 (commit abc123, built x)"
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    found = ps._all_path_pounce()
+    assert any(os.path.realpath(f) == os.path.realpath(str(exe)) for f in found)
+
+
+def test_all_path_pounce_resolves_via_which(monkeypatch):
+    """The scan resolves each PATH entry through ``shutil.which`` with the
+    platform's executable name, rather than a bare-``pounce`` filename test.
+    The pre-fix code used ``os.path.join(d, "pounce")`` directly, so it never
+    called ``which`` — and on Windows (name ``pounce.exe``) found nothing,
+    silently reporting no shadowing."""
+    calls = []
+    monkeypatch.setattr(
+        ps.shutil, "which", lambda name, path=None: calls.append(name) or None
+    )
+    monkeypatch.setenv("PATH", "/nonexistent-dir-xyz")
+    ps._all_path_pounce()
+    assert calls, "the scan must resolve PATH entries through shutil.which"
+    # The name carries the platform's executable extension (`pounce.exe` on
+    # Windows), so the shadowing scan is not silently empty there.
+    expected = "pounce.exe" if os.name == "nt" else "pounce"
+    assert all(c == expected for c in calls)
 
 
 # ── check_binary() ─────────────────────────────────────────────────────────

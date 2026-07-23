@@ -32,6 +32,28 @@ changes.
     `null(A_eq)` direction, strict objective descent, and no finitely-bounded
     inequality actually driven toward its bound — so a bounded feasible region
     can never manufacture a false unbounded verdict.
+### Fixed — `qp-active-set` internal error / churn on rank-deficient equality blocks (#313)
+
+- **`solver_selection=qp-active-set` now solves a QP whose equality block is
+  exactly rank-deficient but consistent** (one row an exact scalar multiple of
+  another — routine when a constraint is written twice or a generator emits a
+  scaled duplicate). Such a model with finite variable bounds and no inequality
+  row previously aborted with `INTERNAL ERROR: Unknown SolverReturn value.` and
+  exit 1 (zero iterations, `objective = 0.0`), while `qp-ipm` and `nlp` solved
+  it correctly. The issue's reproduction now returns the exact optimum
+  `x* = (0.5, 1.5, 3.0)`, `objective = -6.75`.
+  - **Cause.** The equality+bounds path pins every equality row in each KKT and
+    cannot prune a redundant one itself. The shared rank-repair guard is keyed
+    off a *reported* recoverable factorization failure, but the inertia-control
+    δ·I shift grows until the backend stops flagging the singular constraint
+    block (masking the null direction) and returns a garbage solution instead of
+    failing — so the guard never fired.
+  - **Fix.** `factor_pinned_primal` now treats a nonzero inertia shift on a
+    pinned KKT as a red flag: it rank-reveals the pinned rows and, if any is
+    redundant, reports the recoverable failure the existing callers already
+    prune on. The equality+bounds path factors its initial point through that
+    helper and, on such a failure, delegates to the rank-deficiency-aware
+    general path. Full-rank problems (the `δ == 0` common case) are unaffected.
 
 ### Fixed — convex QP convergence and honesty on tiny-curvature objectives (#293)
 
@@ -78,6 +100,15 @@ changes.
   `SolverFactory('pounce')` raises a clear `UnknownSolver` error — it never
   silently runs an unrelated binary. Docs updated to state the import
   requirement and point at `check_binary()`.
+- Follow-up hardening of the above: the PATH scan now resolves each entry
+  through `shutil.which`, so it looks for `pounce.exe` on Windows — previously
+  the bare-`pounce` filename test found nothing there, and `check_binary()`
+  reported no shadowing on Windows even when a stale `pounce.exe` was earlier on
+  `PATH`. The build id also keeps a `+dirty` marker (`96fc5890+dirty`), so a
+  build with uncommitted changes is distinguished from the clean build at the
+  same commit; a `commit unknown` build (made outside a git checkout) still
+  reads as unqueryable so two independent such builds never compare equal.
+
 ### Fixed — `curve_fit` two-parameter bounds: the last silently-transposing spellings now raise (#260)
 
 - **`pounce.curve_fit` no longer silently transposes a 2-parameter box when the
