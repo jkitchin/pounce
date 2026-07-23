@@ -102,6 +102,25 @@ def solve_ipopt():
     return x, y, float(pyo.value(m.obj)), "ipopt"
 
 
+def _pounce_tol_sweep(xc):
+    """Solve the P4 QP at a range of tolerances, reporting primal residual,
+    dual stationarity, and distance-to-vertex — to show pounce reaches machine
+    precision when asked (the default tol is a stopping choice)."""
+    from pounce.qp import solve_qp
+    rows = []
+    for tol in (1e-8, 1e-10, 1e-12, 1e-14):
+        r = solve_qp(P=P, c=c, A=A, b=b, tol=tol)
+        x = np.asarray(r.x)
+        y = np.asarray(r.y)
+        rows.append({
+            "tol": tol,
+            "primal_Ax_minus_b_inf": float(np.max(np.abs(A @ x - b))),
+            "dual_stationarity_inf": float(np.max(np.abs(P @ x + c + A.T @ y))),
+            "x_maxabs_vs_closed_form": float(np.max(np.abs(x - xc))),
+        })
+    return rows
+
+
 def main():
     xc, yc = closed_form()
     xp, yp, op, sp = solve_pounce()
@@ -147,6 +166,12 @@ def main():
                 np.allclose(np.sign(yc), np.sign(yv)) and
                 np.allclose(np.sign(yc), np.sign(yi))),
         },
+        # pounce's distance-to-vertex is set by the primal residual, which the
+        # IPM drives to ~tol; the dual stationarity is already machine-precision
+        # at the default tol. Tightening tol walks |dx| to machine precision,
+        # showing the default (1e-8) is a stopping choice, not an accuracy
+        # ceiling. Substantiates the tolerance note in the P4 doc section.
+        "pounce_tolerance_sweep": _pounce_tol_sweep(xc),
     }
     import json
     print(json.dumps(payload, indent=2))

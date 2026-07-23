@@ -3,7 +3,7 @@
     "pounce_version": "0.9.0",
     "pounce_executable": "/Users/jkitchin/projects/pounce/python/pounce/bin/pounce",
     "ipopt_version": "Ipopt 3.14.19 (Darwin arm64), ASL(20241202)",
-    "date": "2026-07-22"
+    "date": "2026-07-23"
   },
   "problems": {
     "p1_cho": {
@@ -23,7 +23,15 @@
         "benchmark_ipopt_ma57_iters": 33,
         "obj_absdiff_pounce_vs_benchmark": 1.0040821507573128e-09,
         "obj_relerr_pounce_vs_benchmark": 1.4837292802815455e-14,
-        "live_ipopt": {
+        "live_ipopt_ma57": {
+          "executable": "/Users/jkitchin/.local/bin/ipopt-ma57",
+          "linear_solver": "ma57",
+          "termination": "optimal",
+          "objective": 67672.86755753601,
+          "iterations": null,
+          "obj_relerr_pounce_vs_live": 1.462225957378915e-14
+        },
+        "default_mumps_ipopt": {
           "termination": "internalSolverError",
           "message": "Ipopt 3.14.19\\x3a Error in step computation."
         },
@@ -509,7 +517,33 @@
           1.0
         ],
         "all_agree": true
-      }
+      },
+      "pounce_tolerance_sweep": [
+        {
+          "tol": 1e-08,
+          "primal_Ax_minus_b_inf": 5.65884450409726e-10,
+          "dual_stationarity_inf": 3.0097452308197603e-15,
+          "x_maxabs_vs_closed_form": 1.3640649720869646e-10
+        },
+        {
+          "tol": 1e-10,
+          "primal_Ax_minus_b_inf": 2.8289592890473614e-11,
+          "dual_stationarity_inf": 2.942091015256665e-15,
+          "x_maxabs_vs_closed_form": 6.815881192778761e-12
+        },
+        {
+          "tol": 1e-12,
+          "primal_Ax_minus_b_inf": 7.049916206369744e-14,
+          "dual_stationarity_inf": 3.5388358909926865e-16,
+          "x_maxabs_vs_closed_form": 1.6930901125533637e-14
+        },
+        {
+          "tol": 1e-14,
+          "primal_Ax_minus_b_inf": 3.4416913763379853e-15,
+          "dual_stationarity_inf": 3.2959746043559335e-17,
+          "x_maxabs_vs_closed_form": 9.71445146547012e-16
+        }
+      ]
     },
     "p5_parametric": {
       "problem": "parametric_NLP",

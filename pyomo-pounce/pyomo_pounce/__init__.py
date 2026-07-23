@@ -33,7 +33,7 @@ from pyomo_pounce.block_init import (
     block_initialize,
     block_repair_plan,
 )
-from pyomo_pounce.pounce_solver import POUNCE
+from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
     Covariance,
     Gradient,
@@ -53,6 +53,7 @@ from pyomo_pounce.repair import InitializeReport, initialize, project_to_feasibl
 
 __all__ = [
     "POUNCE",
+    "check_binary",
     "declare_sens_param",
     "declare_fitted",
     "declare_residual",

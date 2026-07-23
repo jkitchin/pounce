@@ -972,15 +972,17 @@ def curve_fit(
     ``bounds=([l0, l1], [u0, u1])`` bounds param ``i`` to ``[l_i, u_i]``; a
     length-2 **tuple** is read this scipy way, and a bare ``None`` on either
     side means unbounded there. pounce also accepts a per-parameter pair
-    **list**, ``bounds=[(l0, u0), (l1, u1)]`` (as :func:`pounce.minimize` does),
-    which is never reinterpreted as the scipy 2-tuple; entries may be ``None``
-    for a one-sided bound. For a 2-parameter model the two spellings collide
-    when written as a tuple of ``(lo, hi)`` pairs — ``bounds=((0, 10), (0, 10))``
-    is both scipy's ``(lower, upper)`` and a pair list. That shape is genuinely
-    ambiguous (silently guessing it misfit issues #260 and #265, in opposite
-    directions), so it now **raises**; pass a list ``[(l0, u0), (l1, u1)]`` for
-    the pair-list reading or lists/arrays ``([l0, l1], [u0, u1])`` for the scipy
-    reading. NaN bounds are rejected.
+    **list** of ``(lo, hi)`` *tuples*, ``bounds=[(l0, u0), (l1, u1)]`` (as
+    :func:`pounce.minimize` does), which is never reinterpreted as the scipy
+    2-tuple; entries may be ``None`` for a one-sided bound. For a 2-parameter
+    model the two spellings collide whenever the box is written as *two
+    length-2 sequences* — ``bounds=((0, 10), (0, 10))``, ``[[0, 10], [0, 10]]``,
+    or a ``2 x 2`` ndarray are each both scipy's ``(lower, upper)`` and a pair
+    list. That shape is genuinely ambiguous (silently guessing it misfit issues
+    #260 and #265, in opposite directions), so it now **raises**; pass a list of
+    ``(lo, hi)`` tuples ``[(l0, u0), (l1, u1)]`` for the pair-list reading or a
+    tuple of lists/arrays ``([l0, l1], [u0, u1])`` for the scipy reading. NaN
+    bounds are rejected.
 
     A **zero-width** bound (``lo == hi``) is honored and fixes that parameter to
     the value: pounce supports it as the "hold a parameter constant" idiom
@@ -1519,6 +1521,41 @@ f_scale, jac, alpha, sensitivity, options
 # helpers
 # --------------------------------------------------------------------------
 
+def _is_ambiguous_two_by_two(bounds) -> bool:
+    """True if ``bounds`` is a non-tuple length-2 container whose two elements
+    are both length-2 sequences and *not* both ``(lo, hi)`` tuples.
+
+    At ``n == 2`` such a value — a list of two lists, or a ``2 x 2`` ndarray —
+    reads either as scipy's ``(lower, upper)`` (two length-2 rows) or as
+    pounce's per-parameter pair list (two ``(lo, hi)`` pairs); the two readings
+    transpose the box relative to each other. Only the pair list spelled with
+    ``(lo, hi)`` **tuples** is unambiguous (tuples spell pairs; plain
+    lists/arrays spell scipy's lower/upper rows), so a value that is not
+    all-tuples is the ambiguous one. Silently resolving it applied the wrong box
+    (issue #260's list-of-lists and ndarray spellings), so it now raises like
+    the length-2 *tuple* form does (that spelling is handled earlier, in the
+    scipy branch of :func:`_normalize_bound_arg`).
+    """
+    def _pair_like(el):
+        if isinstance(el, np.ndarray):
+            return el.ndim == 1 and el.size == 2
+        return isinstance(el, (list, tuple)) and len(el) == 2
+
+    if isinstance(bounds, tuple):
+        return False  # length-2 tuple form is resolved in the scipy branch
+    if isinstance(bounds, np.ndarray):
+        if bounds.ndim != 2 or bounds.shape[0] != 2:
+            return False
+        elems = list(bounds)
+    elif isinstance(bounds, list):
+        elems = bounds
+    else:
+        return False
+    if len(elems) != 2 or not all(_pair_like(e) for e in elems):
+        return False
+    return not all(isinstance(e, tuple) for e in elems)
+
+
 def _normalize_bound_arg(bounds, n):
     """Accept scipy's ``(lower, upper)`` 2-tuple form OR pounce's per-parameter
     list of ``(lo, hi)`` pairs, and normalise to the per-parameter pair list
@@ -1545,6 +1582,13 @@ def _normalize_bound_arg(bounds, n):
     A bare ``None`` on either side (``(None, 10.0)``, ``(None, None)``) is *not*
     pair-shaped and takes the scipy reading with ``None`` → ∓inf (unbounded on
     that side); both readings coincide there anyway.
+
+    The same ``n == 2`` ambiguity is reachable *without* an outer tuple — a
+    list of two length-2 lists ``[[l0, l1], [u0, u1]]`` or a ``2 x 2`` ndarray
+    is likewise readable both ways and transposed the box silently (issue #260's
+    remaining spellings). Those now raise too (see
+    :func:`_is_ambiguous_two_by_two`); the unambiguous pair-list spelling uses
+    ``(lo, hi)`` **tuples**, ``[(l0, u0), (l1, u1)]``.
     """
     if bounds is None:
         return None
@@ -1600,6 +1644,24 @@ def _normalize_bound_arg(bounds, n):
         lo = np.broadcast_to(lo_a, (n,))
         hi = np.broadcast_to(hi_a, (n,))
         return list(zip(lo.tolist(), hi.tolist()))
+
+    # Non-tuple container: normally pounce's per-parameter list of (lo, hi)
+    # pairs, validated downstream. But at n == 2 a length-2 sequence whose two
+    # elements are themselves length-2 sequences is *also* readable as scipy's
+    # (lower, upper) — the same collision the tuple branch guards above, reached
+    # here through a list-of-lists or a 2x2 ndarray. Only the pair list spelled
+    # with (lo, hi) tuples is unambiguous, so every other 2x2 spelling (which
+    # silently transposed the box, issue #260) now raises like the tuple form.
+    if n == 2 and _is_ambiguous_two_by_two(bounds):
+        raise ValueError(
+            f"bounds={bounds!r} is ambiguous for a 2-parameter model: written "
+            f"as two length-2 sequences it reads either as scipy's "
+            f"(lower, upper) — param 0 in (lo[0], hi[0]), param 1 in "
+            f"(lo[1], hi[1]) — or as a per-parameter pair list — param 0 in the "
+            f"first pair, param 1 in the second. Pass a list of (lo, hi) tuples "
+            f"[(l0, u0), (l1, u1)] for the pair-list reading, or a tuple of "
+            f"lists/arrays ([l0, l1], [u0, u1]) for the scipy reading."
+        )
     return bounds  # already a per-parameter list of pairs (validated downstream)
 
 
