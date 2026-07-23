@@ -46,6 +46,23 @@ from ._pounce import Problem
 from ._route import _point_cache, classify_and_extract, classify_and_extract_socp
 
 
+class _EmptyMapRepr:
+    """Stand-in for an empty nested mapping in ``OptimizeResult.__repr__``.
+
+    scipy's result formatter cannot align a dict with no keys, so an empty
+    ``info={}`` is swapped for this object before formatting; its ``repr`` is
+    the literal ``{}`` a reader expects to see.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return "{}"
+
+
+_EMPTY_MAP = _EmptyMapRepr()
+
+
 class OptimizeResult(_ScipyOptimizeResult):
     """SciPy ``OptimizeResult`` with a pounce back-compat shim.
 
@@ -67,6 +84,28 @@ class OptimizeResult(_ScipyOptimizeResult):
             if isinstance(info, Mapping) and key in info:
                 return info[key]
             raise
+
+    def __repr__(self):
+        # scipy's ``OptimizeResult.__repr__`` delegates to ``_dict_formatter``,
+        # which recurses into every nested mapping and computes
+        # ``max(map(len, d.keys()))`` to align the keys — so it raises
+        # ``ValueError: max() arg is an empty sequence`` on any *empty* nested
+        # dict. pounce nests solver extras under ``info``, and find_minima
+        # records a stub result with ``info={}`` for a seed point accepted
+        # without a solve, so a plain ``print(res)`` would crash (gh #340).
+        # Render such empties as ``{}`` and defer to scipy for everything else,
+        # keeping the output byte-for-byte identical when no dict is empty.
+        def _safe(value):
+            if isinstance(value, Mapping):
+                if not value:
+                    return _EMPTY_MAP
+                return {k: _safe(v) for k, v in value.items()}
+            return value
+
+        safe = _ScipyOptimizeResult(
+            (k, _safe(v)) for k, v in self.items()
+        )
+        return _ScipyOptimizeResult.__repr__(safe)
 
 
 # Central-difference step. The optimal step for a central difference is
