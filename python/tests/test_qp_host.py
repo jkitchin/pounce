@@ -336,3 +336,129 @@ def test_solve_qp_batch_inherits_the_bound_guard():
             [{"P": np.eye(1), "c": np.zeros(1), "lb": np.array([np.inf]),
               "ub": np.array([np.inf])}]
         )
+
+
+# --- tol / max_iter option validation (gh #277) -----------------------------
+
+# The convex entry points used to apply *no* validation to `tol` while every
+# other pounce surface (NLP `minimize`, the CLI, `sos_minimize`) rejects a
+# non-positive / non-finite tolerance with OPTION_INVALID. An unsatisfiable
+# `tol` (<= 0, NaN, Inf) silently burned every iteration; a huge finite `tol`
+# (1e300) short-circuited at the non-stationary starting iterate and returned a
+# wrong point labeled "optimal". `max_iter=-5` leaked a raw PyO3 OverflowError.
+
+# A small bound-constrained QP: min 1/2 x'x - 1'x, optimum x* = (1, 1).
+_QP277 = dict(
+    P=np.eye(2),
+    c=np.array([-1.0, -1.0]),
+    lb=np.array([-10.0, -10.0]),
+    ub=np.array([10.0, 10.0]),
+)
+_BAD_TOLS = [0.0, -1.0, float("nan"), float("inf"), 1e300, 1.0]
+
+
+@pytest.mark.parametrize("bad", _BAD_TOLS)
+def test_solve_qp_rejects_bad_tol(bad):
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        solve_qp(**_QP277, tol=bad)
+
+
+@pytest.mark.parametrize("bad", _BAD_TOLS)
+def test_solve_socp_rejects_bad_tol(bad):
+    # min t s.t. (t, x - x*) in SOC — a well-formed conic problem.
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        solve_socp(
+            c=[1.0, 0.0, 0.0],
+            G=-np.eye(3),
+            h=[0.0, -2.0, 1.0],
+            cones=[("soc", 3)],
+            tol=bad,
+        )
+
+
+@pytest.mark.parametrize("bad", _BAD_TOLS)
+def test_solve_qp_batch_rejects_bad_tol(bad):
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        solve_qp_batch([_QP277], tol=bad)
+
+
+@pytest.mark.parametrize("bad", _BAD_TOLS)
+def test_solve_qp_multi_rhs_rejects_bad_tol(bad):
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        solve_qp_multi_rhs(**_QP277, cs=[_QP277["c"]], tol=bad)
+
+
+@pytest.mark.parametrize("bad", _BAD_TOLS)
+def test_qp_factorization_rejects_bad_tol(bad):
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        QpFactorization(**_QP277, tol=bad)
+
+
+@pytest.mark.parametrize("bad", _BAD_TOLS)
+def test_qp_sensitivity_rejects_bad_tol(bad):
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        QpSensitivity(P=np.eye(2), c=[0.0, 0.0], A=[[1.0, 1.0]], b=[2.0], tol=bad)
+
+
+def test_huge_tol_never_returns_a_wrong_optimal():
+    """The exact repro from gh #277: `tol=1e300` used to return
+    `status="optimal"` at x=(0,0) (a non-stationary point, kkt_error=1.0)
+    after 0 iterations. It must now be rejected outright, so no wrong
+    "optimal" can escape."""
+    with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+        solve_qp(**_QP277, tol=1e300)
+
+
+@pytest.mark.parametrize("bad", [-5, -1, 0, 2.5])
+def test_solve_qp_rejects_bad_max_iter(bad):
+    # A negative int previously leaked a raw PyO3 OverflowError from the usize
+    # binding; every invalid value must now be a clear, named ValueError.
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        solve_qp(**_QP277, max_iter=bad)
+
+
+def test_all_convex_entry_points_reject_negative_max_iter():
+    """The raw-OverflowError leak must be closed on *every* convex surface that
+    accepts `max_iter`, not only `solve_qp`."""
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        solve_socp(
+            c=[1.0, 0.0, 0.0], G=-np.eye(3), h=[0.0, -2.0, 1.0],
+            cones=[("soc", 3)], max_iter=-5,
+        )
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        solve_qp_batch([_QP277], max_iter=-5)
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        solve_qp_multi_rhs(**_QP277, cs=[_QP277["c"]], max_iter=-5)
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        QpFactorization(**_QP277, max_iter=-5)
+    with pytest.raises(ValueError, match=r"`max_iter` must be a positive integer"):
+        QpSensitivity(P=np.eye(2), c=[0.0, 0.0], A=[[1.0, 1.0]], b=[2.0], max_iter=-5)
+
+
+def test_valid_tol_and_max_iter_still_solve_to_optimum():
+    """A legitimate tight `tol` and finite `max_iter` are untouched: the QP
+    still solves to the known optimum x* = (1, 1)."""
+    r = solve_qp(**_QP277, tol=1e-8, max_iter=100)
+    assert r.status == "optimal"
+    np.testing.assert_allclose(r.x, [1.0, 1.0], atol=1e-6)
+    assert r.kkt_error is not None and r.kkt_error <= 1e-6
+
+
+def test_minimize_qp_route_rejects_bad_tol():
+    """The convex facade (`minimize(solver_selection="qp-ipm")`) inherits the
+    guard, so the `tol=1e300` mislabel no longer propagates to a
+    `success=True, nit=0` OptimizeResult (gh #277)."""
+    import pounce
+
+    def f(x):
+        return 0.5 * (x @ x) - x.sum()
+
+    for bad in (0.0, 1e300, float("nan")):
+        with pytest.raises(ValueError, match=r"`tol` must be a finite positive number"):
+            pounce.minimize(
+                f,
+                x0=np.array([5.0, 5.0]),
+                jac=lambda x: x - 1.0,
+                solver_selection="qp-ipm",
+                tol=bad,
+            )
