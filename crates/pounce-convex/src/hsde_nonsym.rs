@@ -1099,6 +1099,50 @@ fn recover_ds(cone: &NsCone, scalings: &[BlockScaling], comp: &[f64], dz: &[f64]
     }
 }
 
+/// Legacy fixed interior-membership floor for the exp/power backtracking
+/// below — the upper bound `nscone_mem_tol` is capped at, so a well-scaled
+/// solve (`μ` not yet tiny) sees exactly today's behavior.
+const NSCONE_MEM_TOL_CAP: f64 = 1e-12;
+
+/// How far below `μ` the exp/power interior-membership floor sits once `μ`
+/// has shrunk past `NSCONE_MEM_TOL_CAP`. Chosen so the floor stays several
+/// orders of magnitude under a cone coordinate's own natural central-path
+/// scale (empirically `O(μ)`, gh #339's traced repro), while never
+/// approaching machine epsilon before `μ` itself does.
+const NSCONE_MEM_TOL_MU_FACTOR: f64 = 1e-6;
+
+/// Interior-membership tolerance for [`max_step`]'s exp/power-cone
+/// backtracking, scaled by the current barrier parameter `μ` rather than a
+/// fixed constant (gh #339).
+///
+/// A non-symmetric cone coordinate that legitimately tracks `μ` down the
+/// central path — e.g. the dual component conjugate to a slack that must
+/// vanish at the optimum, which is driven to `0` as `μ → 0` — shrinks *with*
+/// `μ`, not independently of it. A fixed absolute floor (the original
+/// `1e-12`) is blind to that: once such a coordinate's magnitude drops near
+/// the floor, the backtracking line search in `max_step` starts rejecting
+/// *any* further legitimate shrinkage as if the point were leaving the cone,
+/// collapsing the step length geometrically iteration over iteration until
+/// it hits `0` well short of convergence — even though the point remains
+/// comfortably interior in a scale-relative sense (its cone-membership slack
+/// `ψ`/`ψ*`, tested separately with its own magnitude-relative tolerance, is
+/// nowhere near its own zero boundary). This reproduces whenever one
+/// cone-triple coordinate is pinned to an extreme value (by data elsewhere in
+/// the problem) while a companion coordinate must shrink toward `0`, in any
+/// of the three cone positions — not just the `x`-large/`z`-small repro this
+/// was diagnosed from.
+///
+/// Scaling the floor by `μ` (and capping it at the legacy constant) tracks
+/// that natural decay rate instead: unaffected while `μ` is not yet tiny
+/// (bit-identical to the old fixed `1e-12` for any well-scaled solve), and
+/// shrinking in lockstep with `μ` once the central path has driven it far
+/// below that — which is exactly the regime where a fixed floor turns into
+/// an artificial wall.
+#[inline]
+fn nscone_mem_tol(mu: f64) -> f64 {
+    (mu.max(0.0) * NSCONE_MEM_TOL_MU_FACTOR).min(NSCONE_MEM_TOL_CAP)
+}
+
 /// Largest `α ∈ (0, α_cap]` keeping `s + α ds ∈ int K` and `z + α dz ∈ int K*`
 /// for every block, by closed form on orthant blocks and backtracking on exp
 /// blocks (no closed-form boundary root). Returns a strictly interior step.
@@ -1110,6 +1154,7 @@ fn max_step(
     dz: &[f64],
     tau: f64,
     alpha_cap: f64,
+    mu: f64,
 ) -> f64 {
     let mut alpha = alpha_cap;
     // Orthant + second-order cone closed forms first.
@@ -1129,7 +1174,10 @@ fn max_step(
         }
     }
     // Backtrack on each non-symmetric block's membership (primal s ∈ K, dual
-    // z ∈ K*), using that block's own cone.
+    // z ∈ K*), using that block's own cone. The interior-membership floor is
+    // μ-relative (gh #339), not the fixed `1e-12` this used to be — see
+    // `nscone_mem_tol`.
+    let mem_tol = nscone_mem_tol(mu);
     let interior = |alpha: f64| -> bool {
         for &(off, b) in &cone.blocks {
             if let NsBlock::Nonsym(nscone) = b {
@@ -1143,7 +1191,7 @@ fn max_step(
                     z[off + 1] + alpha * dz[off + 1],
                     z[off + 2] + alpha * dz[off + 2],
                 ];
-                if !nscone.in_primal_cone(&sp, 1e-12) || !nscone.in_dual_cone(&zp, 1e-12) {
+                if !nscone.in_primal_cone(&sp, mem_tol) || !nscone.in_dual_cone(&zp, mem_tol) {
                     return false;
                 }
             }
@@ -1439,7 +1487,7 @@ where
         // Affine step (closed form on τ/κ + orthant, backtracking on exp).
         let cap = ray_step(tau, dtau_aff, opts.tau).min(ray_step(kappa, dkappa_aff, opts.tau));
         let alpha_aff = if m_ineq > 0 {
-            max_step(&cone, &s, &ds_aff, &z, &dz_aff, opts.tau, cap)
+            max_step(&cone, &s, &ds_aff, &z, &dz_aff, opts.tau, cap, mu)
         } else {
             cap
         };
@@ -1508,7 +1556,7 @@ where
 
             let cap = ray_step(tau, dtau, opts.tau).min(ray_step(kappa, dkappa, opts.tau));
             alpha = if m_ineq > 0 {
-                max_step(&cone, &s, &ds, &z, &dz, opts.tau, cap)
+                max_step(&cone, &s, &ds, &z, &dz, opts.tau, cap, mu)
             } else {
                 cap
             };
