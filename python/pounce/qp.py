@@ -452,6 +452,56 @@ def _to_result(d: dict) -> QpResult:
     )
 
 
+# A convergence tolerance here bounds the max KKT residual / duality measure,
+# and the convex IPM tests it at *every* iterate — including the interior-point
+# self-dual starting point. Unlike the NLP line search (which makes progress and
+# still returns the right answer for a loose tol), the convex solver therefore
+# *short-circuits* at a non-stationary point whenever `tol` is loose enough to
+# admit the starting iterate: with `tol >= 1` the O(1) KKT residual at the start
+# already "passes", so the solve returns after 0 iterations at a wildly wrong
+# point still labeled ``status="optimal"`` (gh #277). A meaningful KKT tolerance
+# is well below 1, so reject `tol >= 1`; this guarantees that an accepted `tol`
+# with an ``"optimal"`` result carries `kkt_error <= tol < 1` — a genuinely
+# near-stationary point, never the 0-iteration wrong point. The unsatisfiable
+# `tol <= 0` / non-finite values are rejected the same way every other pounce
+# surface already does (NLP ``minimize``, the CLI, and ``sos_minimize`` all
+# raise ``OPTION_INVALID``).
+_TOL_MAX = 1.0
+
+
+def _validate_solver_opts(tol, max_iter, func: str) -> None:
+    """Validate the shared ``tol`` / ``max_iter`` options for every convex
+    entry point, matching the NLP / CLI / ``sos_minimize`` surfaces (which all
+    reject ``tol <= 0`` and non-finite ``tol`` and a non-positive iteration
+    count with ``OPTION_INVALID``).
+
+    Both are optional (``None`` keeps the solver default). ``max_iter`` is
+    checked here — *before* it reaches the PyO3 ``usize`` binding — so a
+    negative value raises a clear named error instead of leaking a raw
+    ``OverflowError: can't convert negative int to unsigned`` (gh #277)."""
+    if tol is not None:
+        t = float(tol)
+        if not np.isfinite(t) or t <= 0.0 or t >= _TOL_MAX:
+            raise ValueError(
+                f"{func}: `tol` must be a finite positive number below "
+                f"{_TOL_MAX} (it bounds the KKT-residual convergence measure); "
+                f"got {tol!r}. A value <= 0, NaN, or Inf is unsatisfiable, and "
+                f"tol >= {_TOL_MAX} would accept the non-stationary starting "
+                f"iterate and return a wrong point labeled 'optimal'."
+            )
+    if max_iter is not None:
+        # bool is an int subclass; treat True/False as a type error, not 1/0.
+        if isinstance(max_iter, bool) or not isinstance(max_iter, (int, np.integer)):
+            raise ValueError(
+                f"{func}: `max_iter` must be a positive integer, got {max_iter!r}"
+            )
+        if max_iter < 1:
+            raise ValueError(
+                f"{func}: `max_iter` must be a positive integer (at least 1), "
+                f"got {max_iter}"
+            )
+
+
 def _warm_dict(warm):
     """Coerce a warm start (a :class:`QpResult` or a mapping) into the
     ``{x, y, z, z_lb, z_ub}`` dict the binding expects, or ``None``."""
@@ -515,6 +565,7 @@ def solve_qp(
     """
     if c is None:
         raise ValueError("solve_qp: `c` is required")
+    _validate_solver_opts(tol, max_iter, "solve_qp")
     _maybe_check_psd(P, c, check_psd)
     prob = _build(P, c, A, b, G, h, lb, ub)
     return _to_result(
@@ -617,6 +668,7 @@ def solve_socp(
     """
     if c is None:
         raise ValueError("solve_socp: `c` is required")
+    _validate_solver_opts(tol, max_iter, "solve_socp")
     _maybe_check_psd(P, c, check_psd)
     prob = _build(P, c, A, b, G, h, None, None)
     specs = _normalize_cones(cones)
@@ -650,6 +702,7 @@ def solve_qp_batch(
     :func:`solve_qp`; an offending problem raises ``ValueError`` before any
     solve runs.
     """
+    _validate_solver_opts(tol, max_iter, "solve_qp_batch")
     for pr in problems:
         _maybe_check_psd(pr.get("P"), pr["c"], check_psd)
     built = [
@@ -706,6 +759,7 @@ def solve_qp_multi_rhs(
     """
     if cs is None or len(cs) == 0:
         raise ValueError("solve_qp_multi_rhs: `cs` must be a non-empty sequence")
+    _validate_solver_opts(tol, max_iter, "solve_qp_multi_rhs")
     n = len(np.asarray(cs[0], dtype=np.float64).ravel())
     # `c` only fixes `n` for the base structure; the real objectives are `cs`.
     base_c = c if c is not None else np.zeros(n)
@@ -745,6 +799,7 @@ class QpFactorization:
             raise ValueError(
                 "QpFactorization: `c` is required (representative problem)"
             )
+        _validate_solver_opts(tol, max_iter, "QpFactorization")
         # `P` is fixed for the lifetime of the handle, so one check at build
         # time covers every same-structure `solve` (issue #112).
         _maybe_check_psd(P, c, check_psd)
@@ -823,6 +878,7 @@ class QpSensitivity:
     ):
         if c is None:
             raise ValueError("QpSensitivity: `c` is required")
+        _validate_solver_opts(tol, max_iter, "QpSensitivity")
         _maybe_check_psd(P, c, check_psd)
         prob = _build(P, c, A, b, G, h, lb, ub)
         self._inner = _pounce.QpSensitivity(

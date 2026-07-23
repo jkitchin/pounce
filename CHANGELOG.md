@@ -9,6 +9,32 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — convex `tol` / `max_iter` options were unvalidated (#277)
+
+- **`solve_qp` / `solve_socp` (and the batch, multi-RHS, factorization, and
+  sensitivity entry points) applied no validation to `tol`,** while every
+  other pounce surface (`minimize`, the CLI, `sos_minimize`) rejects a
+  non-positive or non-finite tolerance with `OPTION_INVALID`. Consequences: an
+  unsatisfiable `tol` (`0`, `-1`, `NaN`, `Inf`) silently burned every
+  iteration, and a huge finite `tol` (`1e300`) short-circuited at the
+  interior-point *starting* iterate — the convex IPM tests `max KKT residual
+  <= tol` at every iterate, so an O(1) tolerance "passes" immediately —
+  returning `status="optimal"` after **0 iterations at a wrong point**
+  (`x=(0,0)`, `kkt_error=1.0` on the issue's repro). That mislabel propagated
+  through the facade: `minimize(solver_selection="qp-ipm", tol=1e300)` reported
+  `success=True, nit=0`. Every convex entry point now rejects `tol <= 0`,
+  non-finite `tol`, and `tol >= 1` with a clear `ValueError` naming the option
+  and value. Capping at `1.0` (rather than accepting any positive `tol`)
+  guarantees an accepted tolerance with an `"optimal"` result carries
+  `kkt_error <= tol < 1`, i.e. a genuinely near-stationary point — a wrong
+  point can never again be labeled `optimal`. A legitimate tight `tol` (e.g.
+  `1e-8`) is untouched.
+- **`solve_qp(max_iter=-5)` leaked a raw PyO3
+  `OverflowError: can't convert negative int to unsigned`** from the `usize`
+  binding. `max_iter` is now validated in Python — before it reaches the
+  binding — on every convex entry point, so a negative, zero, or non-integer
+  value raises a named `ValueError` instead.
+
 ### Fixed — integer options above `i32::MAX` silently truncated (#276)
 
 - **`Problem.add_option` / `minimize(...)` wrapped out-of-range integer
