@@ -1204,6 +1204,46 @@ fn split_bound_duals(
     sol
 }
 
+/// Objective-normalization factor `σ ≥ 1` for the HSDE driver (see the call
+/// site in [`solve_qp_core`]). Returns the magnitude of the objective data
+/// `max(‖P‖∞, ‖c‖∞)`, rounded **up to a power of two** so that dividing the
+/// data by `σ` and multiplying the recovered duals/objective back by `σ` is
+/// exact in floating point — but only once that magnitude is large enough to
+/// genuinely destabilize the embedding's `τ`. The threshold is the same
+/// crossover the scale-relative stop uses (`σ·ε > tol`): below it, `tol`-level
+/// *absolute* KKT accuracy is still reachable and the embedding is healthy, so
+/// the wrapper returns `1.0` and the solve is byte-for-byte the historical one.
+///
+/// Crucially this keys on the objective **coefficient** magnitude, not the
+/// objective *value* at the solution: the large-data QP cluster
+/// (POWELL20/BOYD/QSHELL) owes its large objective to a large `‖x*‖` with
+/// modest `(P, c)` coefficients, so `σ = 1` there and its finely-tuned
+/// `τ`/`κ` iterates are untouched. Only data whose coefficients themselves are
+/// astronomically large (gh #286: `‖P‖ ~ 1e21`) is rescaled.
+fn hsde_cost_scale(prob: &QpProblem, tol: f64) -> f64 {
+    let mag = prob
+        .p_lower
+        .iter()
+        .map(|t| t.val.abs())
+        .chain(prob.c.iter().map(|v| v.abs()))
+        .fold(0.0_f64, f64::max);
+    // Only normalize once the coefficient magnitude is large enough that a
+    // `tol`-level absolute residual is below the finite-precision floor
+    // (`mag·ε > tol`) — the regime where the embedding's `τ` collapses. Below
+    // it the historical (un-normalized) solve is preserved exactly.
+    if !(mag.is_finite() && mag * f64::EPSILON > tol) {
+        return 1.0;
+    }
+    // Round up to a power of two: the scale/unscale round-trip is then exact.
+    let e = mag.log2().ceil();
+    let sigma = 2.0_f64.powf(e);
+    if sigma.is_finite() && sigma >= 1.0 {
+        sigma
+    } else {
+        1.0
+    }
+}
+
 /// Bounds-agnostic Mehrotra predictor-corrector core. `prob.lb`/`ub` are
 /// ignored here; the public [`solve_qp_ipm`] handles bound expansion.
 fn solve_qp_core<F>(
@@ -1221,6 +1261,39 @@ where
     // factor-reuse plumbing below (warm is ignored — it cannot change the
     // solution, only the iteration count, which HSDE does not exploit yet).
     if opts.use_hsde {
+        // Objective (cost) normalization for the embedding. HSDE deliberately
+        // skips Ruiz row/column equilibration (its per-cone NT scaling
+        // conditions the *constraint* system internally), but the NT scaling
+        // does nothing about the sheer *magnitude* of the objective data
+        // `(P, c)`. When those coefficients are enormous — e.g. a badly-scaled
+        // QP with `‖P‖ ~ 1e21` (gh #286) — the homogeneous embedding's `τ`
+        // collapses toward the `τ → 0` certificate boundary: the dual residual
+        // scale swamps the `τ`-row, primal feasibility then crawls, and the
+        // solve grinds to its iteration cap at a box-violating iterate even
+        // though the dual/gap converged in a few dozen steps. Dividing the
+        // objective by a scalar `σ ≥ 1` (argmin-invariant: the minimizer of
+        // `½xᵀPx+cᵀx` and of `½xᵀ(P/σ)x+(c/σ)ᵀx` coincide) restores an O(1)
+        // objective so `τ` stays healthy and the embedding converges in a
+        // handful of iterations — the cost scaling Clarabel/OSQP apply as a
+        // matter of course. The recovered dual multipliers and objective are
+        // in the scaled metric and are mapped back below (`y,z ← σ·y,σ·z`,
+        // `obj ← σ·obj`); the primal `x` needs no correction.
+        //
+        // Gated on `σ` being large enough to actually threaten the embedding
+        // (see [`hsde_cost_scale`]) and rounded to a power of two, so ordinary
+        // and moderately-scaled data — including the large-data QP cluster
+        // whose magnitude lives in `‖x*‖`, not the coefficients — are left
+        // **bit-for-bit unchanged** (`σ = 1`, the wrapper is a no-op).
+        let sigma = hsde_cost_scale(prob, opts.tol);
+        if sigma != 1.0 {
+            let scaled = prob.scaled_objective(1.0 / sigma);
+            let mut sol = crate::hsde::solve_conic_hsde(&scaled, cone, opts, make_backend, None);
+            for v in sol.y.iter_mut().chain(sol.z.iter_mut()) {
+                *v *= sigma;
+            }
+            sol.obj *= sigma;
+            return sol;
+        }
         return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend, None);
     }
 

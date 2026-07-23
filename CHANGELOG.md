@@ -9,6 +9,39 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — convex QP IPM stalled on huge-magnitude objectives, never labeling the optimum `Optimal` (#286)
+
+- **A badly-scaled convex QP (`cond(P) = 1e10` with objective coefficients of
+  magnitude `O(1e22)`) exhausted the default iteration budget and returned
+  `IterationLimit` at a point violating the box by ~0.88 — a problem
+  CLARABEL/OSQP/ECOS/SCS all solve at their defaults.** Even at `max_iter = 5000`
+  the status stayed `IterationLimit` at a tightened tolerance despite the iterate
+  being accurate to ~5e-9. Root cause (`crates/pounce-convex/src/ipm.rs`,
+  `solve_qp_core`): the default HSDE driver deliberately skips Ruiz
+  equilibration — its per-cone NT scaling conditions the *constraint* system —
+  but nothing normalized the sheer *magnitude* of the objective data `(P, c)`.
+  With `‖P‖ ~ 1e22` the homogeneous embedding's `τ` collapsed toward the `τ → 0`
+  certificate boundary: the dual residual scale swamped the `τ`-row, primal
+  feasibility then crawled, and the solve ground to its cap even though the dual
+  and gap had converged in a few dozen steps.
+  - **Fix.** The HSDE QP/LP path now normalizes the objective by a scalar
+    `σ = max(‖P‖∞, ‖c‖∞)` — argmin-invariant, so the minimizer is unchanged —
+    before the solve, and maps the recovered dual multipliers and objective back
+    (`y, z ← σ·y, σ·z`, `obj ← σ·obj`; the primal `x` needs no correction). With
+    an `O(1)` objective the embedding's `τ` stays healthy and the badly-scaled QP
+    now converges to `Optimal` **in 9 iterations** at the correct optimum
+    (objective matched to CLARABEL / exact active-set enumeration to ~1e-7
+    relative), the cost scaling Clarabel/OSQP apply as a matter of course.
+  - **Normal problems are untouched.** The normalization is a no-op (`σ = 1`,
+    rounded to a power of two so the round-trip is exact) unless the coefficient
+    magnitude is large enough to genuinely destabilize the embedding
+    (`σ·ε > tol`, the same crossover the scale-relative stop already uses). It
+    keys on the objective *coefficient* magnitude, not the objective *value*, so
+    the large-data QP cluster (POWELL20/BOYD, whose large objective comes from a
+    large `‖x*‖` with modest coefficients) is left bit-for-bit unchanged. The
+    full `.nl` benchmark corpus (44 problems) is identical before/after in both
+    `solve_result_num` and objective, and the convex QP/LP suites are unchanged.
+
 ### Added — near-LICQ conditioning diagnostic for `QpSensitivity` (#284)
 
 - **`QpSensitivity.parametric_step` no longer silently over-damps `dx/db` on a
