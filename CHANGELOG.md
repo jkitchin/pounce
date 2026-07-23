@@ -9,6 +9,21 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — integer options above `i32::MAX` silently truncated (#276)
+
+- **`Problem.add_option` / `minimize(...)` wrapped out-of-range integer
+  options instead of rejecting them.** The PyO3 binding converted an
+  extracted `i64` with a bare `i as Index` (`Index = i32`) cast, which
+  *wraps* rather than checks. So `max_iter = 2**32 + 3` silently truncated to
+  `3` and ran exactly three iterations with no error or warning, while the CLI
+  and Pyomo plugin rejected the same input — the surfaces disagreed. The cast
+  is now a checked `i32::try_from`, so any integer option (`max_iter`,
+  `acceptable_iter`, `print_level`, `max_soc`, … all share this one path)
+  outside the signed-32-bit range raises a clear `ValueError` naming the
+  option and quoting the value the user actually passed (not the truncated
+  one). In-range values — including the `i32::MIN`/`i32::MAX` boundaries and
+  legitimate negatives — still work unchanged.
+
 ### Fixed — non-finite inputs silently reported success (#275)
 
 - **`lb = +inf` / `ub = -inf` were dropped as if the bound were absent.** The
