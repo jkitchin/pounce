@@ -15,6 +15,7 @@ from pyomo.environ import (
     NonNegativeReals,
     Objective,
     SolverFactory,
+    Suffix,
     Var,
     value,
 )
@@ -112,6 +113,40 @@ def test_constrained(solver):
 
     assert value(m.x) == pytest.approx(1.5, abs=1e-5)
     assert value(m.y) == pytest.approx(2.5, abs=1e-5)
+
+
+def test_bound_multipliers_populate_ipopt_zL_zU(solver):
+    """`model.ipopt_zL_out` / `ipopt_zU_out` are populated with the reduced
+    costs, matching Ipopt's convention (issue #296).
+
+    min (x-3)^2 + (y+2)^2  s.t.  0<=x<=1, -1<=y<=1  ->  x*=1, y*=-1.
+    The unconstrained minimum (3, -2) is outside the box, so both bounds bind:
+      * x=1 upper-active:  d f/d x = 2(x-3) = -4  =>  ipopt_zU_out[x] = -4
+      * y=-1 lower-active:  d f/d y = 2(y+2) = +2  =>  ipopt_zL_out[y] = +2
+    Ipopt writes zL_out = +z_l (>= 0) and zU_out = -z_u (<= 0); before #296
+    pounce wrote no suffix blocks at all and these came back as ``None``.
+    """
+    m = ConcreteModel()
+    m.x = Var(bounds=(0, 1), initialize=0.5)
+    m.y = Var(bounds=(-1, 1), initialize=0.0)
+    m.obj = Objective(expr=(m.x - 3) ** 2 + (m.y + 2) ** 2)
+    m.ipopt_zL_out = Suffix(direction=Suffix.IMPORT)
+    m.ipopt_zU_out = Suffix(direction=Suffix.IMPORT)
+
+    solver.solve(m)
+
+    assert value(m.x) == pytest.approx(1.0, abs=1e-5)
+    assert value(m.y) == pytest.approx(-1.0, abs=1e-5)
+
+    # The blocks must actually be populated (the #296 gap was silent Nones).
+    zU_x = m.ipopt_zU_out.get(m.x)
+    zL_y = m.ipopt_zL_out.get(m.y)
+    assert zU_x is not None, "ipopt_zU_out[x] must be populated"
+    assert zL_y is not None, "ipopt_zL_out[y] must be populated"
+
+    # Analytic reduced costs, with Ipopt's sign convention.
+    assert zU_x == pytest.approx(-4.0, abs=1e-4)
+    assert zL_y == pytest.approx(2.0, abs=1e-4)
 
 
 def test_options_forwarded(solver):
