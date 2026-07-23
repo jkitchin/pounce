@@ -690,6 +690,93 @@ def test_minimize_rejects_nan_bounds_end_to_end():
         )
 
 
+def test_minimize_nan_gradient_reports_honest_failure():
+    """#292: a ``jac`` that returns NaN used to be laundered into a
+    ``Solve_Succeeded`` at ``x0`` with a *finite* ``fun`` — the most dangerous
+    silent-success shape, since the caller gets no signal. The max-norm behind
+    the dual-infeasibility measure silently drops NaN (``NaN > m`` is False), so
+    the KKT error read 0.0 and the solve declared itself optimal. It must now
+    surface an honest non-success status."""
+    res = pounce.minimize(
+        lambda x: float(x[0] ** 2),
+        np.array([0.5]),
+        jac=lambda x: np.array([np.nan]),
+        options={"print_level": 0},
+    )
+    assert not res.success
+    assert res.message != "Solve_Succeeded"
+    assert res.status != 0
+
+
+def test_minimize_inf_gradient_reports_honest_failure():
+    """#292 sibling: an Inf gradient (Inf is *not* laundered by the max-norm,
+    but verify it still fails honestly and did not regress)."""
+    for bad in (np.inf, -np.inf):
+        res = pounce.minimize(
+            lambda x: float(x[0] ** 2),
+            np.array([0.5]),
+            jac=lambda x, bad=bad: np.array([bad]),
+            options={"print_level": 0},
+        )
+        assert not res.success, f"Inf gradient ({bad}) reported success"
+        assert res.status != 0
+
+
+def test_minimize_nan_constraint_jacobian_reports_honest_failure():
+    """#292: a NaN in the *constraint* Jacobian enters the Lagrangian gradient
+    through the Jᵀy term and was laundered by the same max-norm, again yielding
+    a bogus ``Solve_Succeeded``. It must now fail honestly."""
+
+    def f(x):
+        return float(x @ x)
+
+    res = pounce.minimize(
+        f,
+        x0=np.array([0.5, 0.5]),
+        jac=lambda x: 2.0 * x,
+        constraints=[
+            {
+                "type": "eq",
+                "fun": lambda x: np.array([x[0] + x[1] - 1.0]),
+                "jac": lambda x: np.array([[np.nan, 1.0]]),
+            }
+        ],
+        options={"print_level": 0},
+    )
+    assert not res.success
+    assert res.status != 0
+
+
+def test_minimize_nan_objective_stays_honest():
+    """#292 contrast (guard against over-correction): a ``fun`` that returns NaN
+    already failed honestly (the objective value reaches a finiteness check the
+    gradient norm bypassed). The fix must not change that — it must still report
+    a non-success status, not ``Solve_Succeeded``."""
+    res = pounce.minimize(
+        lambda x: float(np.nan),
+        np.array([0.5]),
+        jac=lambda x: np.array([2.0 * x[0]]),
+        options={"print_level": 0},
+    )
+    assert not res.success
+    assert res.status != 0
+
+
+def test_minimize_finite_solve_still_succeeds_to_optimum():
+    """#292 no-regression: with everything finite, a normal unconstrained solve
+    still converges to the known optimum with ``Solve_Succeeded``."""
+    res = pounce.minimize(
+        lambda x: float((x[0] - 3.0) ** 2),
+        np.array([0.5]),
+        jac=lambda x: np.array([2.0 * (x[0] - 3.0)]),
+        tol=1e-10,
+        options={"print_level": 0},
+    )
+    assert res.success
+    assert res.message == "Solve_Succeeded"
+    np.testing.assert_allclose(res.x, [3.0], atol=1e-6)
+
+
 def test_nlp_success_status_includes_acceptable_level():
     """gh #119 regression (mapping). ``success`` for the NLP path must count
     ``Solved_To_Acceptable_Level`` (status 1) as a success, not only
