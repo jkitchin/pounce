@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+### Added — near-LICQ conditioning diagnostic for `QpSensitivity` (#284)
+
+- **`QpSensitivity.parametric_step` no longer silently over-damps `dx/db` on a
+  near-rank-deficient (near-LICQ) KKT.** When the active-constraint gradients are
+  *nearly* — not exactly — rank-deficient (e.g. two almost-parallel equality
+  rows), the static regularization `δ` floored the smallest KKT singular value
+  and a single back-solve returned a smooth but badly wrong sensitivity (up to
+  ~100% relative error), with `weakly_active_indices` empty, `kkt_dim` full, no
+  status change, and no exception — so a caller had no way to know. Two changes
+  close the gap (`crates/pounce-convex/src/sensitivity.rs`, the PyO3 getters in
+  `crates/pounce-py/src/qp.rs`, and the `pounce.qp.QpSensitivity` wrapper):
+  - **Diagnostic.** New `QpSensitivity.kkt_cond_estimate` (a cheap Hager 1-norm
+    estimate of the KKT condition number `κ₁`), the boolean
+    `QpSensitivity.ill_conditioned` (fires when `κ₁ > 1e14`), and
+    `QpSensitivity.last_step_residual` (the relative KKT residual the most
+    recent step achieved, measured against the *unregularized* system). On the
+    near-LICQ sweep the flag fires and the residual is large; on the
+    well-conditioned equality-only and active-set cases (κ₁ ≈ 3–8e9) it stays
+    quiet — no false alarm. All three are new, backward-compatible attributes.
+  - **Accuracy.** Each parametric step is now refined against the unregularized
+    KKT, stripping the `O(δ)` regularization bias wherever the information
+    survives in double precision. `dx/db` now tracks a plain float64 LU solve
+    (e.g. the badly-scaled equality-only case improved from ~1.6e-7 to ~7e-14
+    relative error); genuinely singular cases that refinement cannot recover are
+    the ones the diagnostic flags. Well-conditioned solves are unaffected (their
+    first residual is already at round-off, so refinement is a no-op).
+
 ### Fixed — non-symmetric HSDE driver returned bare `numerical_failure` on infeasible/unbounded exp/power programs (#283)
 
 - **The exponential/power-cone (non-symmetric HSDE) driver degraded genuinely

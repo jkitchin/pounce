@@ -848,6 +848,15 @@ class QpSensitivity:
     first-order predictor of the perturbed solution — exact while the
     active set is unchanged.
 
+    On a *near*-LICQ problem (active-constraint gradients nearly, but not
+    exactly, rank-deficient) the sensitivity KKT is near-singular and
+    ``parametric_step`` can silently over-damp ``dx/db`` (issue #284). Two
+    guards address this: the solve is internally refined against the
+    unregularized KKT to recover ``dx/db`` wherever the information survives in
+    double precision, and :attr:`ill_conditioned` / :attr:`kkt_cond_estimate`
+    (build-time) and :attr:`last_step_residual` (per-step) let a caller
+    *detect* when a step is untrustworthy.
+
     Example
     -------
     >>> import numpy as np
@@ -907,6 +916,58 @@ class QpSensitivity:
         harder case where the count does not move at all.
         """
         return int(self._inner.kkt_dim)
+
+    @property
+    def kkt_cond_estimate(self) -> float:
+        """Estimated condition number ``κ₁`` of the active-set KKT system.
+
+        A cheap Hager 1-norm estimate of the conditioning of the (factored)
+        sensitivity system. It is the quantitative early-warning that
+        :attr:`kkt_dim` and :attr:`weakly_active_indices` cannot give: on a
+        *near*-LICQ problem — where the active-constraint gradients are nearly
+        (not exactly) rank-deficient — the KKT is near-singular and
+        :meth:`parametric_step` can silently over-damp ``dx/db`` toward a
+        smooth but badly wrong value (issue #284). A large estimate flags that
+        risk.
+
+        Well-conditioned sensitivities report a modest value (a few ``×10⁹``
+        even on badly-scaled data); a numerically singular one saturates near
+        ``1e16``. See :attr:`ill_conditioned` for the thresholded boolean and
+        :attr:`last_step_residual` for the achieved per-step residual.
+        """
+        return float(self._inner.kkt_cond_estimate)
+
+    @property
+    def ill_conditioned(self) -> bool:
+        """Whether ``dx/db`` may be unreliable because the KKT is near-singular.
+
+        ``True`` when :attr:`kkt_cond_estimate` exceeds an internal threshold
+        (``1e14``) — the regime where the sensitivity system is so near-LICQ
+        that even the internal iterative refinement cannot recover ``dx/db``
+        from double precision (issue #284). It stays ``False`` on
+        well-conditioned problems, including the badly-scaled equality-only and
+        active-set cases, so it does not false-alarm.
+
+        Use it as a guard: if ``ill_conditioned`` is ``True``, treat the
+        :meth:`parametric_step` result as untrustworthy (or cross-check it),
+        rather than consuming the silently-damped value.
+        """
+        return bool(self._inner.ill_conditioned)
+
+    @property
+    def last_step_residual(self) -> Optional[float]:
+        """Relative KKT residual of the most recent :meth:`parametric_step`.
+
+        ``‖rhs − K·step‖∞ / (1 + ‖rhs‖∞)`` measured against the *unregularized*
+        KKT, or ``None`` before any step has been taken. It reports how well the
+        returned step actually satisfies the true sensitivity system (issue
+        #284): a round-off-level value means the step is trustworthy; a large
+        one means the refinement could not solve the near-singular system and
+        the step is unreliable. This is the per-query companion to the
+        build-time :attr:`ill_conditioned` / :attr:`kkt_cond_estimate`.
+        """
+        r = self._inner.last_step_residual
+        return None if r is None else float(r)
 
     @property
     def active_indices(self) -> ActiveSet:
