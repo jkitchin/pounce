@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# per-problem intermediate payloads; run_all.py aggregates these into results.json
+results.p*.json
