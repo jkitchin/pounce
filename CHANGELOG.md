@@ -9,6 +9,30 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — unbounded NLP with an inequality-slack recession ray reported as unbounded (#314)
+
+- **An unbounded-below NLP whose recession ray increases an inequality
+  constraint's slack is now correctly reported as `DivergingIterates`
+  (unbounded) instead of a generic `ErrorInStepComputation`.** Completes the
+  #274 family for the inequality-slack recession shape:
+  `min -(x1³ + x2³)  s.t.  x1 + x2 ≥ 1`, `x1, x2` free is unbounded below along
+  the feasible ray `x1 = t, x2 = 0`. The core "reported as solved"
+  defect (`solve_result_num = 100`, exit 0) the adversary bot filed against
+  was already fixed on `main` (the bot ran a stale pre-fix binary); this makes
+  the CLI's verdict *correct* and consistent with the library, which already
+  reported `Diverging_Iterates`.
+  - Root cause: the #285 checked recession-ray proof already handled a ray in
+    `null(A_eq)`, but a variable-swap bug in its
+    `recession_blocked_by_inequality` gate returned the lower/upper finite-bound
+    indicator vectors transposed, inverting the bound semantics. A ray that
+    *increases* an inequality's slack (moves deeper into the feasible region)
+    was spuriously treated as blocked, so the proof never fired and the KKT step
+    broke down first. The proof is otherwise unchanged: it still requires a
+    feasible large-norm witness, an unbounded free-variable escape side, a
+    `null(A_eq)` direction, strict objective descent, and no finitely-bounded
+    inequality actually driven toward its bound — so a bounded feasible region
+    can never manufacture a false unbounded verdict.
+
 ### Fixed — convex QP convergence and honesty on tiny-curvature objectives (#293)
 
 - **A convex QP whose Hessian curvature is tiny relative to its linear/constraint

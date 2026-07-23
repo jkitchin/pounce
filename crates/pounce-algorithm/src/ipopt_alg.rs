@@ -716,7 +716,14 @@ impl IpoptAlgorithm {
             ones_du.set(1.0);
             let mut has_dub = jd_x.make_new();
             nlp.pd_u().mult_vector(1.0, &*ones_du, 0.0, &mut *has_dub);
-            (has_dub, has_dlb)
+            // Order matters: bind `(has_dlb, has_dub)` in that exact order so
+            // the finite-lower / finite-upper indicators are not transposed.
+            // #314: this pair was returned swapped, inverting the bound
+            // semantics below — a ray *increasing* a lower-bounded row (moving
+            // deeper into the feasible set, slack growing) was wrongly treated
+            // as blocked, so a genuine inequality-slack recession ray was never
+            // proven unbounded.
+            (has_dlb, has_dub)
         };
 
         let downcast = |v: &dyn Vector| -> Option<Vec<Number>> {
