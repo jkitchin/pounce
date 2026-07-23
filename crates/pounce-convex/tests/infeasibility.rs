@@ -289,7 +289,12 @@ fn extreme_tiny_hessian_not_falsely_unbounded() {
          DualInfeasible after {} iters",
         sol.iters
     );
-    assert_eq!(sol.status, QpStatus::Optimal, "expected Optimal, got {:?}", sol.status);
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "expected Optimal, got {:?}",
+        sol.status
+    );
     assert!(
         (sol.obj - (-5e19)).abs() <= 1e-3 * 5e19,
         "obj = {} should be ≈ -5e19",
@@ -351,7 +356,10 @@ fn tiny_curvature_iteration_limit_emits_scaling_warning() {
     };
     let gsol = solve(&good);
     assert_eq!(gsol.status, QpStatus::Optimal);
-    assert!(gsol.scaling_diagnostic(&good).is_none(), "well-scaled Optimal needs no warning");
+    assert!(
+        gsol.scaling_diagnostic(&good).is_none(),
+        "well-scaled Optimal needs no warning"
+    );
 }
 
 // --- Status / edge-case honesty (PR70 item C) -----------------------------

@@ -29,14 +29,19 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
 fn objective(prob: &QpProblem, x: &[f64]) -> f64 {
     let mut px = vec![0.0; prob.n];
     prob.p_mul_add_pub(x, &mut px);
-    (0..prob.n).map(|i| 0.5 * x[i] * px[i] + prob.c[i] * x[i]).sum()
+    (0..prob.n)
+        .map(|i| 0.5 * x[i] * px[i] + prob.c[i] * x[i])
+        .sum()
 }
 
 /// Deterministic LCG so the corpus is reproducible without an external rng.
 struct Lcg(u64);
 impl Lcg {
     fn next_f64(&mut self) -> f64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
     }
     fn sym(&mut self) -> f64 {
@@ -76,7 +81,11 @@ fn diag_box(name: &str, scale: f64, cond: f64, tgt: &[f64], lb: f64, ub: f64) ->
         ub: vec![ub; n],
     };
     let oracle = objective(&prob, &xopt);
-    Case { name: name.to_string(), prob, oracle_obj: Some(oracle) }
+    Case {
+        name: name.to_string(),
+        prob,
+        oracle_obj: Some(oracle),
+    }
 }
 
 /// Dense random SPD QP (P = MᵀM + εI) with a box; no oracle.
@@ -108,7 +117,11 @@ fn rand_spd_box(name: &str, n: usize, seed: u64, pscale: f64, cscale: f64) -> Ca
         lb: vec![-1.0; n],
         ub: vec![1.0; n],
     };
-    Case { name: name.to_string(), prob, oracle_obj: None }
+    Case {
+        name: name.to_string(),
+        prob,
+        oracle_obj: None,
+    }
 }
 
 /// Random SPD QP with an equality constraint sum(x)=s and x>=0.
@@ -136,7 +149,11 @@ fn lp_box(name: &str, n: usize, seed: u64, cscale: f64) -> Case {
         lb: vec![-1.0; n],
         ub: vec![1.0; n],
     };
-    Case { name: name.to_string(), prob, oracle_obj: None }
+    Case {
+        name: name.to_string(),
+        prob,
+        oracle_obj: None,
+    }
 }
 
 fn corpus() -> Vec<Case> {
@@ -145,28 +162,74 @@ fn corpus() -> Vec<Case> {
     let tgt3 = [1e11, -0.5, 2.0];
 
     for &cond in &[1.0, 1e2, 1e4, 1e6] {
-        v.push(diag_box(&format!("diag_well_cond{cond:e}"), 1.0, cond, &tgt6, -1.0, 1.0));
+        v.push(diag_box(
+            &format!("diag_well_cond{cond:e}"),
+            1.0,
+            cond,
+            &tgt6,
+            -1.0,
+            1.0,
+        ));
     }
     for &sc in &[1e6, 1e12, 1e18] {
-        v.push(diag_box(&format!("diag_huge_{sc:e}"), sc, 1.0, &tgt6, -1.0, 1.0));
+        v.push(diag_box(
+            &format!("diag_huge_{sc:e}"),
+            sc,
+            1.0,
+            &tgt6,
+            -1.0,
+            1.0,
+        ));
     }
     for &sc in &[1e-6, 1e-9, 1e-12, 1e-14, 1e-16] {
-        v.push(diag_box(&format!("diag_tiny_{sc:e}"), sc, 1.0, &tgt3, 0.0, f64::INFINITY));
+        v.push(diag_box(
+            &format!("diag_tiny_{sc:e}"),
+            sc,
+            1.0,
+            &tgt3,
+            0.0,
+            f64::INFINITY,
+        ));
     }
     for &cond in &[1e12, 1e18] {
-        v.push(diag_box(&format!("diag_mixed_cond{cond:e}"), 1e-6, cond, &tgt3, 0.0, f64::INFINITY));
+        v.push(diag_box(
+            &format!("diag_mixed_cond{cond:e}"),
+            1e-6,
+            cond,
+            &tgt3,
+            0.0,
+            f64::INFINITY,
+        ));
     }
-    v.push(diag_box("diag_tiny_boundbox", 1e-12, 1.0, &[1e11, 1e11], 0.0, 1e6));
+    v.push(diag_box(
+        "diag_tiny_boundbox",
+        1e-12,
+        1.0,
+        &[1e11, 1e11],
+        0.0,
+        1e6,
+    ));
 
     for (i, &n) in [5usize, 10, 25, 50].iter().enumerate() {
-        v.push(rand_spd_box(&format!("rand_box_n{n}"), n, 1000 + i as u64, 1.0, 1.0));
+        v.push(rand_spd_box(
+            &format!("rand_box_n{n}"),
+            n,
+            1000 + i as u64,
+            1.0,
+            1.0,
+        ));
     }
     v.push(rand_spd_box("rand_box_pbig", 20, 7, 1e6, 1.0));
     v.push(rand_spd_box("rand_box_cbig", 20, 8, 1.0, 1e6));
     v.push(rand_spd_box("rand_box_ptiny", 20, 9, 1e-8, 1.0));
 
     for (i, &n) in [10usize, 30].iter().enumerate() {
-        v.push(rand_spd_eq(&format!("rand_eq_n{n}"), n, 2000 + i as u64, 3.0));
+        v.push(rand_spd_eq(
+            &format!("rand_eq_n{n}"),
+            n,
+            2000 + i as u64,
+            3.0,
+        ));
     }
 
     v.push(lp_box("lp_small", 10, 11, 1.0));
@@ -194,7 +257,10 @@ fn scaling_corpus_reaches_every_oracle_optimum() {
     let mut iters_tot = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
-    println!("\n{:<26} {:>3} {:>6} {:>10} {:>6}", "case", "n", "status", "obj", "iters");
+    println!(
+        "\n{:<26} {:>3} {:>6} {:>10} {:>6}",
+        "case", "n", "status", "obj", "iters"
+    );
     for c in &cases {
         let sol = solve_qp_ipm(&c.prob, &QpOptions::default(), backend);
         iters_tot += sol.iters;
@@ -203,7 +269,11 @@ fn scaling_corpus_reaches_every_oracle_optimum() {
         }
         println!(
             "{:<26} {:>3} {:>6} {:>10.3e} {:>6}",
-            c.name, c.prob.n, short(sol.status), sol.obj, sol.iters
+            c.name,
+            c.prob.n,
+            short(sol.status),
+            sol.obj,
+            sol.iters
         );
         if let Some(o) = c.oracle_obj {
             oracle_n += 1;
@@ -231,5 +301,8 @@ fn scaling_corpus_reaches_every_oracle_optimum() {
         "{} oracle instance(s) missed their known optimum",
         failures.len()
     );
-    assert_eq!(oracle_ok, oracle_n, "every oracle instance must be solved exactly");
+    assert_eq!(
+        oracle_ok, oracle_n,
+        "every oracle instance must be solved exactly"
+    );
 }
