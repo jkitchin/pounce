@@ -109,8 +109,12 @@ class SosResult:
     order:
         The relaxation order that produced ``lower_bound``. Normally the order
         requested, but *lower* when that order failed to converge and a coarser
-        one did — a coarser bound is still a valid bound, so it is reported
-        rather than discarded. Check this before reading a converged result as
+        one produced a **certified** bound — a rigorous coarser bound is still
+        valid, so it is reported rather than discarded. A coarser *uncertified*
+        bound is never substituted for a failed request (issue #345): the
+        requested order's own non-``optimal`` status is reported instead (so
+        ``lower_bound`` is ``nan``), rather than a loose coarser value disguised
+        as a converged result. Check this before reading a converged result as
         a statement about the order you asked for.
     """
 

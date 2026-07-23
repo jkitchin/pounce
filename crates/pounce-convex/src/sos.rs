@@ -829,9 +829,12 @@ pub struct SosSolution {
     /// The relaxation order that actually produced `lower_bound`.
     ///
     /// Normally the requested order. It is *lower* when that order failed to
-    /// converge and a coarser one did — see [`sos_minimize`], which falls back
-    /// rather than discard a bound it already proved. Always check this before
-    /// reading a converged result as a statement about the order you asked for.
+    /// converge and a coarser one produced a **certified** bound — see
+    /// [`sos_minimize`], which falls back rather than discard a rigorous bound
+    /// it already proved. A coarser *uncertified* bound is never substituted
+    /// (gh #345), so when this is below the requested order the returned bound
+    /// is certified. Always check this before reading a converged result as a
+    /// statement about the order you asked for.
     pub order: usize,
 }
 
@@ -840,12 +843,23 @@ pub struct SosSolution {
 /// the global minimizer when it is unique. See [`SosSolution`].
 ///
 /// If the requested order does not converge, successively coarser orders are
-/// tried down to the minimum admissible one, and the first that converges is
-/// returned with its own [`order`](SosSolution::order). A bound from a lower
-/// order is a *valid* bound on the same problem — just a weaker one — so
-/// discarding it would throw away a certificate already computed (gh #218). The
-/// fallback costs extra solves only on a failure, and when nothing converges
-/// the requested order's own (non-converged) result is what comes back.
+/// tried down to the minimum admissible one, and the first that converges to a
+/// **certified** bound is returned with its own [`order`](SosSolution::order). A
+/// certified bound from a lower order is a *rigorous* bound on the same problem
+/// — just a weaker one — so discarding it would throw away a certificate already
+/// computed (gh #218).
+///
+/// The fallback is gated on certification (gh #345). A coarser *uncertified*
+/// bound is **not** substituted for a requested order that failed to converge:
+/// for an unbounded feasible set the reported value is only accurate to the
+/// solve, and a coarser one can be arbitrarily loose (the unconstrained Motzkin
+/// polynomial converges at its minimal order to a bound three orders of
+/// magnitude below the truth while higher orders stall). Silently returning that
+/// under `status = Optimal` would present a plausible-looking number as a clean
+/// success while hiding that the requested relaxation never converged — so when
+/// no coarser order yields a *certified* bound, the requested order's own
+/// (non-converged) verdict is what comes back, exactly as without the fallback.
+/// The fallback costs extra solves only on a failure.
 pub fn sos_minimize<F>(prob: &PolyProblem, order: Option<usize>, make_backend: F) -> SosSolution
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
@@ -886,12 +900,17 @@ where
     }
     for d in (d_min..requested).rev() {
         let sol = sos_minimize_at(prob, &resc, d, opts, &mut make_backend);
-        if sol.status == QpStatus::Optimal {
+        // Only substitute a coarser order's bound for the failed request when it
+        // is *certified* (rigorous). An uncertified coarser bound can be
+        // arbitrarily loose, and handing it back as `Optimal` would disguise the
+        // requested order's non-convergence as a clean success (gh #345).
+        if sol.status == QpStatus::Optimal && sol.certified {
             return sol;
         }
     }
-    // Nothing converged: report the order the caller actually asked for, with
-    // its own verdict, exactly as it would have been without the fallback.
+    // Nothing converged to a certified bound: report the order the caller
+    // actually asked for, with its own verdict, exactly as it would have been
+    // without the fallback.
     requested_result
 }
 
@@ -1386,6 +1405,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn motzkin_uncertified_fallback_is_not_disguised_as_optimal() {
+        // gh #345. The Motzkin polynomial x⁴y² + x²y⁴ − 3x²y² + 1 is the textbook
+        // nonnegative-but-not-SOS polynomial (min 0 at (±1, ±1)), so the
+        // *unconstrained* SOS relaxation legitimately gives only a very loose
+        // bound. It converges at its minimal order (3) to ≈ −2097 — three orders
+        // of magnitude below the truth but a genuinely valid lower bound — while
+        // higher orders build rank-deficient, non-strictly-feasible SDPs that the
+        // interior-point method cannot converge (IterationLimit, the bound
+        // wandering rather than tightening).
+        //
+        // The bug: `sos_minimize` at order 4/5/6 fell back to the order-3 bound
+        // and returned it under `status = Optimal`, so every order reported a
+        // bit-identical −2097 that *looked* like a clean converged result. The
+        // fallback is now gated on certification — an uncertified coarser bound
+        // is never substituted for a failed request — so the requested order's
+        // own (honest, non-Optimal) verdict comes back instead.
+        let p = Polynomial::new(
+            2,
+            vec![
+                (vec![4, 2], 1.0),
+                (vec![2, 4], 1.0),
+                (vec![2, 2], -3.0),
+                (vec![0, 0], 1.0),
+            ],
+        );
+        let prob = PolyProblem::new(p);
+
+        // The minimal order converges to a valid (if loose) lower bound. It is an
+        // unconstrained problem, so nothing is certified.
+        let r3 = sos_minimize(&prob, Some(3), backend);
+        assert_eq!(r3.status, QpStatus::Optimal, "order 3 should converge");
+        assert_eq!(r3.order, 3);
+        assert!(!r3.certified, "an unconstrained problem cannot be certified");
+        assert!(r3.lower_bound.is_finite(), "bound = {}", r3.lower_bound);
+        assert!(
+            r3.lower_bound <= 1e-6,
+            "order 3 bound {} must be a valid lower bound (≤ the true minimum 0)",
+            r3.lower_bound
+        );
+
+        // Order 4 does not converge. The core invariant of the fix: a coarser,
+        // *uncertified* bound is never handed back disguised as a converged
+        // (`Optimal`) result. Either order 4 converged on its own (order == 4),
+        // or a certified fallback was found, or the reported status is honestly
+        // non-Optimal — but never a silent uncertified `Optimal` fallback.
+        let r4 = sos_minimize(&prob, Some(4), backend);
+        assert!(
+            !(r4.status == QpStatus::Optimal && r4.order < 4 && !r4.certified),
+            "an uncertified order-{} fallback was disguised as an Optimal order-4 \
+             result (bound {})",
+            r4.order,
+            r4.lower_bound
+        );
+        // Concretely, on this problem order 4 stalls and no certified fallback
+        // exists, so the honest non-converged verdict is what surfaces.
+        assert_ne!(
+            r4.status,
+            QpStatus::Optimal,
+            "order 4 does not converge for the Motzkin polynomial; it must not be \
+             reported as Optimal via an uncertified fallback"
+        );
+        assert_eq!(r4.order, 4, "no fallback should be reported when uncertified");
     }
 
     #[test]
