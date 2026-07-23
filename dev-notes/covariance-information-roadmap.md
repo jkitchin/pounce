@@ -12,12 +12,17 @@ existing signature. Companion to the active-set sensitivity roadmap
 
 Parameter covariance from the reduced Hessian is standard: at an estimation
 optimum the covariance is the scaled inverse of the reduced Hessian of the
-Lagrangian. sIPOPT computes it, k_aug computes it for Pyomo
-parameter estimation, and scipy's `curve_fit` reports it in the Gauss-Newton
-form. What these tools usually hand back is the covariance, the inverted
-object; the raw reduced Hessian, the information matrix, is less commonly a
-first-class result, though it is the natural quantity for an information-form
-arrival cost.
+Lagrangian. The reduced Hessian is the object the sensitivity engines form
+first. sIPOPT and k_aug both compute it, the information matrix, and hand it
+back directly: k_aug writes the reduced Hessian to a file, and sIPOPT exposes
+it through `rh_eigendecomp`. The parameter covariance is a downstream step on
+top of it, invert and scale. The covariance-first tools sit a level up, at the
+estimation frontend: Pyomo's `parmest` inverts the reduced Hessian to report a
+covariance, and scipy's `curve_fit` returns the covariance (`pcov`) in the
+Gauss-Newton form. So across the field the un-inverted information matrix is
+not the rare quantity but the native engine output, with the covariance
+derived from it. The information form is the natural one for an
+information-form arrival cost.
 
 ## Benefit hypothesis
 
