@@ -574,6 +574,60 @@ impl IpoptAlgorithm {
         self.free_to_escape_over(x, self.diverging_iterates_tol)
     }
 
+    /// True when the current outer iterate has run off toward an unbounded side:
+    /// its max magnitude is past the recession floor ([`Self::RECESSION_MIN_NORM`],
+    /// `1e10`) and some over-floor component is structurally free to escape to
+    /// infinity. Used to reject a restoration `LocallyInfeasible` certificate
+    /// declared at a diverged iterate (gh #314) — a genuine local-infeasibility
+    /// point on a well-scaled problem does not sit at `|x| ~ 1e16`, and at that
+    /// scale the infeasibility descent probe is defeated by floating point. This
+    /// is intentionally a *weaker* bar than the `DivergingIterates` guards
+    /// (which require `1e20`, a runaway backstop, or a sustained growth streak):
+    /// it does not itself conclude unboundedness, only that the *infeasibility*
+    /// claim is not credible here, leaving the honest status to
+    /// [`Self::diverging_or_restoration_failure`].
+    fn iterate_ran_away(&self) -> bool {
+        let data = self.data.borrow();
+        match data.curr.as_ref() {
+            Some(curr) => {
+                curr.x.amax() > Self::RECESSION_MIN_NORM
+                    && self.free_to_escape_over(&*curr.x, Self::RECESSION_MIN_NORM)
+            }
+            None => false,
+        }
+    }
+
+    /// Classify a restoration exit that has no acceptable rollback point:
+    /// `DivergingIterates` when the current iterate is a genuine recession ray
+    /// (magnitude past `diverging_iterates_tol`, structurally free to escape to
+    /// infinity, and either past the absolute runaway backstop or on a sustained
+    /// growth streak), else `RestorationFailure`. Shared by the restoration
+    /// `Failed` arm and — post gh #314 — the `LocallyInfeasible` arm when its
+    /// infeasibility certificate is found to be spurious. A large `|x|` is only
+    /// ever reported as unbounded when it is structurally consistent with an
+    /// unbounded feasible region and the divergence is genuine, never as a
+    /// spurious `Unbounded`.
+    fn diverging_or_restoration_failure(&self) -> SolverReturn {
+        let diverging = {
+            let data = self.data.borrow();
+            match data.curr.as_ref() {
+                Some(curr) => {
+                    let amax = curr.x.amax();
+                    amax > self.diverging_iterates_tol
+                        && self.divergence_is_true_unboundedness(&*curr.x)
+                        && (amax >= Self::DIVERGENCE_ABS_RUNAWAY
+                            || self.divergence_streak >= Self::DIVERGENCE_PERSIST_ITERS)
+                }
+                None => false,
+            }
+        };
+        if diverging {
+            SolverReturn::DivergingIterates
+        } else {
+            SolverReturn::RestorationFailure
+        }
+    }
+
     /// Shared core of the free-variable structural check: returns `true` when
     /// some component of `x` with magnitude exceeding `thresh` is heading
     /// toward a side (positive → upper, negative → lower) that carries *no*
@@ -2631,24 +2685,7 @@ impl IpoptAlgorithm {
                 if self.restore_acceptable_point() {
                     IterateOutcome::Terminate(SolverReturn::StopAtAcceptablePoint)
                 } else {
-                    let diverging = {
-                        let data = self.data.borrow();
-                        match data.curr.as_ref() {
-                            Some(curr) => {
-                                let amax = curr.x.amax();
-                                amax > self.diverging_iterates_tol
-                                    && self.divergence_is_true_unboundedness(&*curr.x)
-                                    && (amax >= Self::DIVERGENCE_ABS_RUNAWAY
-                                        || self.divergence_streak >= Self::DIVERGENCE_PERSIST_ITERS)
-                            }
-                            None => false,
-                        }
-                    };
-                    if diverging {
-                        IterateOutcome::Terminate(SolverReturn::DivergingIterates)
-                    } else {
-                        IterateOutcome::Terminate(SolverReturn::RestorationFailure)
-                    }
+                    IterateOutcome::Terminate(self.diverging_or_restoration_failure())
                 }
             }
             RestorationOutcome::LocallyInfeasible => {
@@ -2658,7 +2695,46 @@ impl IpoptAlgorithm {
                 // residual is still well above `tol`. Without this
                 // detection the outer would re-enter restoration on the
                 // unchanged iterate forever.
-                IterateOutcome::Terminate(SolverReturn::LocalInfeasibility)
+                //
+                // But `Infeasible_Problem_Detected` is a *certificate* — it
+                // asserts the problem admits no feasible point near this iterate
+                // — so it must not be issued from a diverged one (gh #314). On
+                // an unbounded-below but trivially feasible problem such as
+                // `min -Σxᵢ³  s.t.  Σxᵢ ≥ 1` the unbounded objective drags the
+                // iterate out to `|x| ~ 1e16..1e19` with mixed signs, where the
+                // resto sub-IPM stalls and reports local infeasibility even
+                // though the problem has the feasible point `x = (1, 0, …, 0)`
+                // and is unbounded below. Two independent checks reject the
+                // spurious verdict:
+                //
+                //   * the main-loop's descent probe — a materially
+                //     less-violating point sits a short step away, so the
+                //     iterate is not a stationary point of the violation; and
+                //   * a runaway check — the iterate has escaped to a magnitude
+                //     no genuine local-infeasibility point on a well-scaled
+                //     problem occupies, with an over-floor component structurally
+                //     free to run to infinity. (At `|x| ~ 1e19` the descent probe
+                //     alone is defeated by floating point: a relative step cannot
+                //     resolve a `θ ~ 1e2` reduction against a `1e19` iterate.)
+                //
+                // When either fires, fall back to the same honest classification
+                // the `Failed` arm uses — `DivergingIterates` on a genuine
+                // recession ray, else `RestorationFailure` — never a false
+                // `Infeasible_Problem_Detected`.
+                let descent = self.cq.borrow().infeasibility_descent_available();
+                let ran_away = self.iterate_ran_away();
+                if descent || ran_away {
+                    tracing::debug!(target: "pounce::algorithm",
+                        "[POUNCE] restoration reported local infeasibility, but the \
+                         outer iterate is not a credible infeasibility certificate \
+                         (descent_available={descent}, ran_away={ran_away}); \
+                         reclassifying rather than reporting \
+                         Infeasible_Problem_Detected (gh#314).",
+                    );
+                    IterateOutcome::Terminate(self.diverging_or_restoration_failure())
+                } else {
+                    IterateOutcome::Terminate(SolverReturn::LocalInfeasibility)
+                }
             }
         }
     }

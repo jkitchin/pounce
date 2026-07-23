@@ -9,6 +9,34 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — unbounded-below NLP no longer reported infeasible from a diverged iterate (#314)
+
+- **`min -Σxᵢ³  s.t.  Σxᵢ ≥ 1` (unbounded below, but trivially feasible at
+  `x = (1, 0, …, 0)`) is no longer reported as `Infeasible_Problem_Detected`
+  (`solve_result_num = 200`).** On this summed-cubes shape the unbounded
+  objective drags the iterate out to `|x| ~ 1e16..1e19` with mixed signs, where
+  the restoration sub-IPM stalls and throws a `LOCALLY_INFEASIBLE` verdict. The
+  outer loop trusted that verdict verbatim and surfaced a false infeasibility
+  certificate — telling an AMPL/Pyomo caller the problem has no feasible point
+  when it plainly does. (Same failure *family* as #274, a different trigger:
+  #274's own repro is already fixed, so this was an uncovered path.)
+  - **`Infeasible_Problem_Detected` is now withheld from a diverged iterate.**
+    A restoration `LocallyInfeasible` verdict is rejected when the outer iterate
+    is not a credible infeasibility certificate — either a materially
+    less-violating point sits a short step away (the main loop's descent probe,
+    now shared with this path), or the iterate has run off to a magnitude past
+    the recession floor (`1e10`) with an over-floor component structurally free
+    to escape to infinity. At `|x| ~ 1e19` the relative descent probe alone is
+    defeated by floating point, so the runaway check is what catches these.
+  - **Reclassified to the honest failure family**, not silently accepted: the
+    reclassified exit uses the same `DivergingIterates`-or-`RestorationFailure`
+    logic the restoration `Failed` arm already applies, so the result lands in
+    the failure range (`500..599`) with a non-zero exit — never the solved
+    (`0..199`) or infeasible (`200..299`) range.
+  - **Genuine infeasibility is unaffected.** The guard fires only at a diverged
+    or non-stationary iterate; a bounded least-infeasible point (the normal
+    `Infeasible_Problem_Detected` case) still reports infeasible.
+
 ### Fixed — `curve_fit` two-parameter bounds: the last silently-transposing spellings now raise (#260)
 
 - **`pounce.curve_fit` no longer silently transposes a 2-parameter box when the
