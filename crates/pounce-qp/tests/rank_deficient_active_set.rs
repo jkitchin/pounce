@@ -100,6 +100,69 @@ fn warm_start_prunes_redundant_equality_rows() {
     );
 }
 
+/// Equality+bounds path (#313): a strictly convex QP whose ONLY general
+/// constraints are equalities, one row an exact scalar multiple of another,
+/// with finite variable bounds and no inequality row. This routes through
+/// `solve_equality_plus_bounds`, which pins every equality row in each KKT and
+/// (before the fix) propagated the rank-deficient factor's failure straight to
+/// the user as `InternalError` / exit 1. The path now delegates to the
+/// rank-deficiency-aware `solve_general` and reaches the exact optimum.
+///
+/// Fixture (the issue's reproduction, n = 3):
+///   min  ½(x₀² + x₁² + x₂²) − x₀ − 2x₁ − 3x₂
+///   s.t.   x₀ +  x₁       = 2          (row 1)
+///         2x₀ + 2x₁       = 4          (row 2 — exactly 2× row 1, redundant)
+///         −10 ≤ x ≤ 10
+/// Closed form: x* = (0.5, 1.5, 3.0), f* = −6.75 (all bounds inactive).
+#[test]
+fn equality_plus_bounds_prunes_exact_rank_deficient_rows() {
+    // H = I₃ (strictly convex): three unit diagonal entries.
+    let h_space = SymTMatrixSpace::new(3, vec![1, 2, 3], vec![1, 2, 3]);
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&[1.0, 1.0, 1.0]);
+
+    // Rows 1,2: x₀+x₁ (=2) and 2x₀+2x₁ (=4) — exactly 2× row 1 (rank 1).
+    let a_space = GenTMatrixSpace::new(2, 3, vec![1, 1, 2, 2], vec![1, 2, 1, 2]);
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&[1.0, 1.0, 2.0, 2.0]);
+
+    let g = [-1.0, -2.0, -3.0];
+    let bl = [2.0, 4.0];
+    let bu = [2.0, 4.0];
+    let xl = [-10.0, -10.0, -10.0];
+    let xu = [10.0, 10.0, 10.0];
+
+    let qp = QpProblem {
+        n: 3,
+        m: 2,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let sol = solver
+        .solve(&qp, None, &opts())
+        .expect("exact rank-deficient equality+bounds QP must solve, not error (#313)");
+
+    assert_eq!(sol.status, QpStatus::Optimal, "status = {:?}", sol.status);
+    assert!((sol.x[0] - 0.5).abs() < 1e-8, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 1.5).abs() < 1e-8, "x[1] = {}", sol.x[1]);
+    assert!((sol.x[2] - 3.0).abs() < 1e-8, "x[2] = {}", sol.x[2]);
+    assert!((sol.obj - (-6.75)).abs() < 1e-8, "obj = {}", sol.obj);
+    // The dropped redundant equality is still satisfied: 2·(x₀+x₁) = 4.
+    assert!(
+        (2.0 * (sol.x[0] + sol.x[1]) - 4.0).abs() < 1e-7,
+        "redundant row violated"
+    );
+}
+
 /// Cold path: `solve(qp, None, ..)` routes through `cold_general_initial`,
 /// which pins ALL equality rows up front. With redundant equalities that
 /// factor is singular; the guard prunes the redundant row so the cold start

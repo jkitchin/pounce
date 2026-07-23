@@ -181,7 +181,36 @@ impl ParametricActiveSetSolver {
         }
         rhs[n..n + k_c].copy_from_slice(cons_targets);
         rhs[n + k_c..n + k_c + k_b].copy_from_slice(bound_targets);
-        self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, n, opts)?;
+        let delta =
+            self.factorize_with_inertia_control(kkt, &mut rhs, (k_c + k_b) as i32, n, opts)?;
+
+        // Masked-rank-deficiency guard. No H-block δ·I shift can repair a
+        // rank-deficient *constraint* block — but a large enough δ can grow
+        // the H diagonal until the backend stops flagging the singular block
+        // and returns a garbage solution instead of a failure (feral masks
+        // the null direction around δ≈1e8). The pinned callers
+        // (`cold_general_initial`, `solve_with_working_set`, and the #313
+        // equality+bounds path) rely on a *reported* recoverable failure to
+        // trigger their linear-independence prune; a masked deficiency slips
+        // past silently and the solve churns to `MaxIter` (or worse, reports a
+        // wrong `Optimal`). A nonzero δ on a pinned KKT is the tell: only then
+        // do we rank-reveal the pinned rows, and if any is redundant we
+        // convert the spurious success into the recoverable failure the
+        // callers already know how to prune. A δ > 0 with a full-rank
+        // constraint block is a legitimate indefinite-reduced-Hessian shift
+        // and passes through untouched (the common case is δ == 0, which skips
+        // the probe entirely).
+        if delta > 0.0 {
+            let (kc, kb) =
+                independent_active_subset(&mut self.linsol, qp, active_cons, active_bounds);
+            if kc.len() < k_c || kb.len() < k_b {
+                return Err(QpError::LinearSolverFailure(
+                    "pinned KKT constraint block is rank-deficient (inertia shift masked a \
+                     singular constraint block); prune to a linearly-independent subset"
+                        .into(),
+                ));
+            }
+        }
         Ok(rhs[..n].to_vec())
     }
 
@@ -409,13 +438,34 @@ impl ParametricActiveSetSolver {
         let m = qp.m;
 
         // ---- 1. Equality-relaxed initial point ----
-        let kkt0 = KktTriplet::assemble_equality_only(qp);
-        let mut rhs0 = rhs_equality_only(qp);
-        self.factorize_with_inertia_control(kkt0, &mut rhs0, m as i32, qp.n, opts)?;
+        // A rank-deficient equality block — redundant / linearly dependent
+        // rows, e.g. one row an exact scalar multiple of another — makes the
+        // saddle KKT singular, and no §4.5 H-block shift can rescue a
+        // rank-deficient *constraint* block. This path pins ALL `m` equality
+        // rows in every inner-loop KKT (`assemble_equality_plus_bounds` has no
+        // per-row selection), so it cannot prune the dependent rows itself.
+        // Factor through `factor_pinned_primal`, which reports a recoverable
+        // failure on such a block (whether the backend exhausted the inertia
+        // loop or a large shift masked the singular block — see its
+        // masked-rank-deficiency guard); on that signal, delegate to
+        // `solve_general`, whose `cold_general_initial` + inner-loop
+        // linear-independence guard prune the equalities to a maximal
+        // independent subset (a dropped row is a linear combination of the
+        // kept ones, hence satisfied at any constraint-consistent point) and
+        // reach the exact vertex. Without this the solve surfaced to the user
+        // as `InternalError` / exit 1, or churned to `MaxIter` (#313).
+        let eq_rows: Vec<usize> = (0..m).collect();
+        let eq_targets: Vec<Number> = eq_rows.iter().map(|&r| qp.bl[r]).collect();
+        let mut x: Vec<Number> =
+            match self.factor_pinned_primal(qp, &eq_rows, &eq_targets, &[], &[], opts) {
+                Ok(x) => x,
+                Err(ref e) if e.is_recoverable_factorization_failure() => {
+                    return self.solve_general(qp, None, opts);
+                }
+                Err(e) => return Err(e),
+            };
         let mut n_refactor: u32 = 1;
         let mut n_changes: u32 = 0;
-
-        let mut x: Vec<Number> = rhs0[..n].to_vec();
 
         // ---- 2. Bound-feasibility check ----
         // The cheap equality-relaxed cold start may land outside
