@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — HSDE exp/power driver reported `numerical_failure` on correct answers under extreme scaling (#336)
+
+- **The non-symmetric (exp/power) HSDE conic driver no longer discards a
+  correct solution as `numerical_failure` when the data are extremely (but
+  legitimately) scaled.** Its post-loop status test keyed the reduced-accuracy
+  salvage off the *absolute* KKT residual, which carries the raw, unnormalized
+  complementarity gap `s·z`. When the optimal cone variables are large (e.g. a
+  geometric program with `K = 1e12`, whose optimal cone values are `~1e6`), that
+  absolute floor scales with them and can never reach the absolute tolerance —
+  so a point that is primal-feasible, dual-feasible, and objective-correct was
+  labelled a failure and `success=False`, and the answer was thrown away.
+  - Fix: the adjudication now scores the recovered point on the *scale-relative*
+    conic KKT residual (each residual normalized by its own term magnitudes, as
+    ECOS/Clarabel do) at whichever of the final and best-snapshot iterates
+    certifies tighter. A genuinely tight certificate at a dual-feasible point is
+    still promoted to `Optimal`; a primal/dual-feasible point whose *normalized*
+    gap is only moderately above `tol` (the accuracy plateau of a
+    boundary-riding non-symmetric cone) is reported `OptimalInaccurate` —
+    matching the symmetric SOC driver and ECOS/Clarabel's `*_inacc` — instead of
+    a spurious `NumericalFailure`. The prior absolute reduced-accuracy fallback
+    is retained, so a well-scaled near-`tol` stall salvages exactly as before.
+  - Extends the scale-relative adjudication of #329 to the reduced-accuracy
+    salvage; the conic analogue of the scale-normalization work in #286/#293.
+    Infeasible / unbounded conic solves are unchanged (they terminate with a
+    certificate status before the adjudication and are never falsely promoted).
+  - Regression: `crates/pounce-convex/tests/issue336_scale_status.rs` reproduces
+    both cases — the `K`-swept exponential GP (`Optimal` while the certificate
+    is tight, then `OptimalInaccurate` on the plateau, never `NumericalFailure`)
+    and the large-budget power cone — and pins the well-scaled end at `Optimal`.
+
 ### Fixed — active-set path printed a `nan` scaled objective (#313)
 
 - On the active-set (`qp-active-set` / SQP) path, `final_scaled_objective` was
