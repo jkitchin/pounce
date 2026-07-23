@@ -854,25 +854,28 @@ impl IpoptAlgorithm {
     const FEASIBLE_ENOUGH_CAP: Number = 1e-2;
 
     /// Whether candidate `(a_obj, a_viol)` ranks strictly better than
-    /// `(b_obj, b_viol)` for the best-acceptable fallback (gh #267).
+    /// `(b_obj, b_viol)` for the best-acceptable fallback (gh #267, gh #280).
     ///
-    /// The key is `(feasible_enough, objective)` compared lexicographically: a
-    /// point within the feasibility band beats one outside it outright, and
-    /// objective decides *only among points already inside the band*. A point is
-    /// `feasible_enough` when its unscaled max-norm constraint violation is
-    /// within `min(acceptable_constr_viol_tol, FEASIBLE_ENOUGH_CAP)` — the
-    /// acceptable feasibility band the solve is using, but never looser than its
-    /// upstream default. The cap is the whole fix: `acceptable_constr_viol_tol`
-    /// is user-widenable, and ranking by objective across a widened band spends
-    /// feasibility to buy objective, handing back a `pounce verify`-rejected
-    /// point under a success status. Capping the admission band bounds that — a
-    /// grossly-infeasible low-objective iterate is simply not a candidate.
+    /// The key is `(band_clamped_viol, objective)` compared lexicographically,
+    /// where each violation is clamped *up* to
+    /// `band = min(acceptable_constr_viol_tol, FEASIBLE_ENOUGH_CAP)` before it is
+    /// compared. Inside the band every point clamps to `band`, so they tie on
+    /// feasibility and objective decides — objective still rules *only among
+    /// points already feasible-enough*. Outside the band the actual violation
+    /// decides, so the less-infeasible point always wins and a
+    /// strictly-more-infeasible point can never rank better (gh #280 — the
+    /// earlier `feasible_enough` partition fell through to objective-only once
+    /// both points were outside the band). The cap keeps the band no looser than
+    /// the upstream default: `acceptable_constr_viol_tol` is user-widenable, and
+    /// admitting a wide band into the *objective-decides* region would let a
+    /// grossly-infeasible low-objective iterate win. Capping the band bounds that.
     ///
     /// At default (or tighter) tolerances this is behaviour-neutral: every
     /// recorded point already passed the `acceptable_constr_viol_tol` gate, so
-    /// with that band at or below the cap every candidate is `feasible_enough`
-    /// and objective alone decides, exactly as before. The band only bites once
-    /// the user loosens `acceptable_constr_viol_tol` past its default.
+    /// with that band at or below the cap every candidate clamps to `band` and
+    /// objective alone decides, exactly as before. The feasibility ordering only
+    /// bites once the user loosens `acceptable_constr_viol_tol` past its default
+    /// and two candidates both sit outside the cap.
     ///
     /// A non-finite objective ranks worst and can never win — feasibility never
     /// rescues a `NaN`/`Inf` `f`. This mirrors the `NaN`-loses convention the
@@ -2819,12 +2822,25 @@ enum IterateOutcome {
 /// Feasibility-aware ranking core for the best-acceptable fallback (gh #267).
 ///
 /// `true` iff candidate `(a_obj, a_viol)` ranks **strictly** better than
-/// `(b_obj, b_viol)` under the `(feasible_enough, objective)` key, where a point
-/// is `feasible_enough` when its unscaled max-norm constraint violation is
-/// within `band`. Lexicographic: a `feasible_enough` point beats one that is not
-/// outright; among points in the same feasibility class, the lower objective
-/// wins. A non-finite objective ranks worst (never wins, always loses to a
-/// finite one); a non-finite violation is never `feasible_enough`.
+/// `(b_obj, b_viol)` under the `(band_clamped_viol, objective)` key, where each
+/// violation is clamped up to `band` before it is compared. Lexicographic: the
+/// point with the smaller clamped violation wins outright; only when the clamped
+/// violations tie does the lower objective decide. A non-finite objective ranks
+/// worst (never wins, always loses to a finite one); a non-finite violation is
+/// treated as infinitely infeasible.
+///
+/// The clamp is what makes this a **total order** rather than a two-class
+/// partition, and it is the whole gh #280 fix. Clamping the violation *up* to
+/// `band` collapses every point inside the feasibility band to the single value
+/// `band`, so within the band those points tie on feasibility and objective
+/// decides — the intended, gh #267-preserving behaviour. Outside the band the
+/// clamp is the identity, so the *actual* violation decides and the
+/// less-infeasible point always wins. The earlier `(feasible_enough, objective)`
+/// key was a two-class partition: once **both** points sat outside the band it
+/// fell through to a bare `a_obj < b_obj`, reading neither violation — the exact
+/// pre-#267 objective-only rule, which lets a strictly-more-infeasible point win
+/// on objective (gh #280). Under the clamped key a strictly-more-infeasible
+/// point can never rank better, at any band.
 ///
 /// Pure and total, so the fallback's "never worse off" guarantee is a theorem
 /// this function's unit tests prove by cases — host-independent by construction,
@@ -2845,13 +2861,25 @@ fn ranks_better_within_band(
     if !b_obj.is_finite() {
         return true;
     }
-    let feasible = |v: Number| v.is_finite() && v <= band;
-    let (a_ok, b_ok) = (feasible(a_viol), feasible(b_viol));
-    if a_ok != b_ok {
-        // The feasible_enough point wins outright, whatever the objectives.
-        return a_ok;
+    // Clamp each violation up to `band`: everything inside the feasibility band
+    // maps to the single value `band` (so objective decides there), while outside
+    // it the actual violation is kept (so the less-infeasible point strictly
+    // wins). A non-finite violation is infinitely infeasible. This is a total
+    // order — a strictly-more-infeasible point can never rank better (gh #280).
+    let clamped = |v: Number| {
+        if v.is_finite() {
+            v.max(band)
+        } else {
+            Number::INFINITY
+        }
+    };
+    let (a_key, b_key) = (clamped(a_viol), clamped(b_viol));
+    if a_key != b_key {
+        // The less-infeasible point wins outright, whatever the objectives.
+        return a_key < b_key;
     }
-    // Same feasibility class: lower objective wins (the original behaviour).
+    // Same clamped feasibility (both inside the band, or an exact tie outside it):
+    // lower objective wins (the original within-band behaviour).
     a_obj < b_obj
 }
 
@@ -3114,9 +3142,36 @@ mod tests {
         // keep-current-on-tie contract.
         assert!(!ranks_better_within_band(-1.0, 1e-4, -1.0, 5e-3, band));
         assert!(!ranks_better_within_band(-1.0, 5e-3, -1.0, 1e-4, band));
-        // Both infeasible: still ranked by objective (no feasible point to
-        // protect), so the fallback never *gains* infeasibility for free here.
+        // Both infeasible: the less-infeasible point wins. Here it also has the
+        // lower objective, so this held under the old objective-only fall-through
+        // too — `ranks_better_puts_feasibility_first_among_two_infeasibles` is the
+        // case that separates the two rules (gh #280).
         assert!(ranks_better_within_band(-2.0, 5.0, -1.0, 9.0, band));
+    }
+
+    #[test]
+    fn ranks_better_puts_feasibility_first_among_two_infeasibles() {
+        // The gh #280 hole: once BOTH points sit outside the (capped) band the
+        // old `(feasible_enough, objective)` partition read a_ok == b_ok == false
+        // and fell through to `a_obj < b_obj` — objective alone, the exact
+        // pre-#267 rule — so a strictly-MORE-infeasible point could win by having
+        // a better objective. This is the deb7 swap the fallback made: incumbent
+        // at viol 5.292e-1, recorded point at viol 9.951e-1 with a 36%-better
+        // objective. The less-infeasible point must win regardless of objective.
+        let band = 1e-2;
+        // Less-infeasible incumbent, WORSE objective — must still win.
+        assert!(ranks_better_within_band(
+            89.0, 5.292e-1, 56.9, 9.951e-1, band
+        ));
+        // The more-infeasible, better-objective point must NOT win — the swap
+        // gh #280 forbids.
+        assert!(!ranks_better_within_band(
+            56.9, 9.951e-1, 89.0, 5.292e-1, band
+        ));
+        // A strictly-more-infeasible point never replaces the incumbent even with
+        // an arbitrarily better objective.
+        assert!(!ranks_better_within_band(-1e12, 9.0, 0.0, 5.0, band));
+        assert!(ranks_better_within_band(0.0, 5.0, -1e12, 9.0, band));
     }
 
     #[test]
