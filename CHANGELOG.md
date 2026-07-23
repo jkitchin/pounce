@@ -9,6 +9,20 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — active-set path printed a `nan` scaled objective (#313)
+
+- On the active-set (`qp-active-set` / SQP) path, `final_scaled_objective` was
+  left at its `NaN` default — the result block populated the unscaled objective
+  and mirrored the residuals but never the scaled objective — so even a clean
+  optimal solve printed `Objective ...: nan  <unscaled>`. It now mirrors the
+  unscaled value (the SQP path does not thread `nlp_scaling`, so the two are
+  equal). The rank-deficient-but-consistent equality QP from #313 (`x0+x1==2`
+  with a redundant `2x0+2x1==4`) solves correctly on the active-set path
+  (objective −6.75, the same value `qp-ipm`/`nlp` find); the "INTERNAL ERROR:
+  Unknown SolverReturn value" the issue reported was from a stale pre-fix
+  binary and does not occur on a current build. A regression test pins both the
+  correct solve and the finite objective.
+
 ### Fixed — unbounded NLP with an inequality-slack recession ray reported as unbounded (#314)
 
 - **An unbounded-below NLP whose recession ray increases an inequality
