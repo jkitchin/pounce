@@ -1270,10 +1270,28 @@ def minimize(
     # always sends ``hessp=None``, ``bounds=None``, etc.; absorbed here when
     # undeclared on the signature). Real Ipopt option misses still surface as
     # ``RuntimeError`` from ``problem.solve()`` — by design.
+    translated = {}
     for k, v in options.items():
         if v is None:
             continue
         ipopt_k, ipopt_v = _translate_option(k, v)
+        translated[ipopt_k] = ipopt_v
+    # Validate ``tol`` / ``max_iter`` with the SAME shared guard the convex
+    # entry points use (``solve_qp`` / ``solve_socp`` via
+    # ``qp._validate_solver_opts``), so every route into the solver rejects an
+    # unsatisfiable tolerance identically. The Ipopt backend already rejects
+    # ``tol <= 0`` / NaN and a negative ``max_iter`` (OPTION_INVALID), but it
+    # silently *accepts* a non-finite ``tol=inf`` and any ``tol >= 1`` and then
+    # returns ``success=True`` at the non-stationary starting-band iterate
+    # (gh #325) — the exact ``tol >= 1`` failure mode #277 closed on the convex
+    # surfaces. Validating the translated values also covers the scipy aliases
+    # (``gtol`` / ``ftol`` / ``xtol`` → ``tol``, ``maxiter`` → ``max_iter``).
+    from .qp import _validate_solver_opts
+
+    _validate_solver_opts(
+        translated.get("tol"), translated.get("max_iter"), "pounce.minimize"
+    )
+    for ipopt_k, ipopt_v in translated.items():
         problem.add_option(ipopt_k, ipopt_v)
 
     # Pass warm_start only when set: test doubles (and any cyipopt-style
