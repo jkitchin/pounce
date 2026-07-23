@@ -1383,21 +1383,40 @@ impl IpoptCalculatedQuantities {
         // dual infeasibility (max-norm of grad_lag_x and grad_lag_s)
         let glx = self.curr_grad_lag_x();
         let gls = self.curr_grad_lag_s();
-        let dual = glx.amax().max(gls.amax()) / s_d;
 
         // primal: max(||c||, ||d-s||)
         let c = self.curr_c();
         let dms = self.curr_d_minus_s();
-        let primal = c.amax().max(dms.amax());
 
         // unbarriered complementarity (mu_target = 0 → just ||compl||)
-        let compl = self
-            .curr_compl_x_l()
-            .amax()
-            .max(self.curr_compl_x_u().amax())
-            .max(self.curr_compl_s_l().amax())
-            .max(self.curr_compl_s_u().amax())
-            / s_c;
+        let cxl = self.curr_compl_x_l();
+        let cxu = self.curr_compl_x_u();
+        let csl = self.curr_compl_s_l();
+        let csu = self.curr_compl_s_u();
+
+        // #292: the max-norm (`amax`/BLAS `iamax`) behind every term below
+        // silently *drops* NaN — `NaN > m` is `false`, so a NaN component
+        // leaves the running max untouched and is laundered into a finite
+        // (typically `0.0`) KKT error. A NaN gradient, NaN constraint Jacobian
+        // (via `∇_x L`'s `Jᵀy` term), or NaN residual would then read as an
+        // *optimal* solve and return `Solve_Succeeded`. Detect any non-finite
+        // component here — through the NaN-propagating `asum` behind
+        // `has_valid_numbers`, not `amax` — and surface it as a non-finite KKT
+        // error so the caller's existing `!nlp_err.is_finite()` guard fires
+        // `Invalid_Number_Detected`. This is confined to the convergence/error
+        // measure; the general `amax` semantics that step-size selection, the
+        // line search, and the divergence detectors rely on are untouched.
+        // (Inf is *not* laundered — `Inf > m` is true — so it already
+        // propagated; this closes only the NaN hole, and Inf for free.)
+        for v in [&glx, &gls, &c, &dms, &cxl, &cxu, &csl, &csu] {
+            if !v.has_valid_numbers() {
+                return Number::NAN;
+            }
+        }
+
+        let dual = glx.amax().max(gls.amax()) / s_d;
+        let primal = c.amax().max(dms.amax());
+        let compl = cxl.amax().max(cxu.amax()).max(csl.amax()).max(csu.amax()) / s_c;
 
         dual.max(primal).max(compl)
     }
@@ -1887,9 +1906,23 @@ mod tests {
         obj_scale: Number,
         c_scale: Option<Vec<Number>>,
         d_scale: Option<Vec<Number>>,
+        // #292: inject a non-finite component into the gradient / constraint
+        // Jacobian to exercise the finiteness guard in `curr_nlp_error`.
+        nan_grad: bool,
+        nan_jac_c: bool,
     }
 
     impl MockNlp {
+        fn with_nan_grad(mut self) -> Self {
+            self.nan_grad = true;
+            self
+        }
+
+        fn with_nan_jac_c(mut self) -> Self {
+            self.nan_jac_c = true;
+            self
+        }
+
         fn with_scaling(
             mut self,
             obj_scale: Number,
@@ -1928,6 +1961,8 @@ mod tests {
                 obj_scale: 1.0,
                 c_scale: None,
                 d_scale: None,
+                nan_grad: false,
+                nan_jac_c: false,
             }
         }
     }
@@ -1953,6 +1988,9 @@ mod tests {
             let gg = g.as_any_mut().downcast_mut::<DenseVector>().unwrap();
             gg.values_mut()[0] = 2.0 * xx.values()[0];
             gg.values_mut()[1] = 2.0 * xx.values()[1];
+            if self.nan_grad {
+                gg.values_mut()[0] = Number::NAN;
+            }
         }
         fn eval_c(&mut self, x: &dyn Vector, c: &mut dyn Vector) {
             let xx = x.as_any().downcast_ref::<DenseVector>().unwrap();
@@ -1968,7 +2006,11 @@ mod tests {
             // c(x) = x0 + x1 - 1 → Jc = [1, 1] (1×2), nonzeros (1,1),(1,2).
             let space = GenTMatrixSpace::new(1, 2, vec![1, 1], vec![1, 2]);
             let mut jac = GenTMatrix::new(space);
-            jac.set_values(&[1.0, 1.0]);
+            if self.nan_jac_c {
+                jac.set_values(&[Number::NAN, 1.0]);
+            } else {
+                jac.set_values(&[1.0, 1.0]);
+            }
             StdRc::new(jac)
         }
         fn eval_jac_d(&mut self, _x: &dyn Vector) -> Rc<dyn Matrix> {
@@ -2301,6 +2343,46 @@ mod tests {
         let ds = dvec(&[3.0]);
         let r = cq.curr_dwd(&dx, &ds);
         assert!((r - 7.00).abs() < 1e-13, "r = {r}");
+    }
+
+    // ---- #292: NaN gradient / Jacobian must not launder to a finite KKT error
+
+    #[test]
+    fn nlp_error_is_finite_for_a_finite_iterate() {
+        // Baseline: the well-formed fixture produces a finite, positive KKT
+        // error (this iterate is not a KKT point). The finiteness guard added
+        // for #292 must not perturb this normal path.
+        let cq = fixture();
+        let err = cq.curr_nlp_error();
+        assert!(err.is_finite() && err > 0.0, "err = {err}");
+    }
+
+    #[test]
+    fn nlp_error_is_non_finite_when_gradient_has_nan() {
+        // A NaN gradient component reaches ∇_x L, whose max-norm (`amax`)
+        // silently drops NaN and would launder the dual infeasibility to a
+        // finite value → bogus `Solve_Succeeded` (#292). `curr_nlp_error` must
+        // instead surface a non-finite error so the caller's
+        // `!nlp_err.is_finite()` guard fires `Invalid_Number_Detected`.
+        let cq = fixture_with(MockNlp::new().with_nan_grad());
+        assert!(
+            !cq.curr_nlp_error().is_finite(),
+            "NaN gradient laundered to finite KKT error: {}",
+            cq.curr_nlp_error()
+        );
+    }
+
+    #[test]
+    fn nlp_error_is_non_finite_when_constraint_jacobian_has_nan() {
+        // A NaN in the constraint Jacobian enters ∇_x L through the Jᵀy term
+        // and is likewise laundered by `amax` on the fixture's nonzero
+        // multipliers. Must read as a non-finite KKT error, not `Optimal`.
+        let cq = fixture_with(MockNlp::new().with_nan_jac_c());
+        assert!(
+            !cq.curr_nlp_error().is_finite(),
+            "NaN constraint Jacobian laundered to finite KKT error: {}",
+            cq.curr_nlp_error()
+        );
     }
 
     // ---- Unscaled (user-space) KKT residuals — pounce#173 -------------

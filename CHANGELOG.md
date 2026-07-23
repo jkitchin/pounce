@@ -9,6 +9,32 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — NaN gradient / constraint Jacobian silently reported `Solve_Succeeded` (#292)
+
+- **An objective gradient or constraint Jacobian that returns `NaN` was laundered
+  into a successful solve.** `pounce.minimize(lambda x: float(x[0]**2),
+  np.array([0.5]), jac=lambda x: np.array([np.nan]))` returned `success=True`,
+  `message='Solve_Succeeded'`, `fun=0.25`, `nit=0` — the most dangerous shape,
+  because `fun` is finite (the value at `x0`) so the caller got no signal at all.
+  Root cause: the max-norm behind the dual-infeasibility measure
+  (`crates/pounce-linalg` `amax` / BLAS `iamax`) silently *drops* `NaN` — `NaN >
+  m` is `false`, so a `NaN` component leaves the running max untouched and the
+  KKT error read `0.0`. The existing finiteness guard
+  (`ipopt_alg.rs`, `!nlp_err.is_finite()` → `Invalid_Number_Detected`) never
+  fired because the value it checks had already been laundered to zero.
+  - **Fix.** `curr_nlp_error` (`crates/pounce-algorithm/src/ipopt_cq.rs`) now
+    detects any non-finite component of the Lagrangian gradients, constraint
+    residuals, and complementarity blocks — via the `NaN`-propagating `asum`
+    behind `has_valid_numbers`, *not* `amax` — and surfaces a non-finite KKT
+    error, so the guard fires `Invalid_Number_Detected` honestly. This covers a
+    `NaN` gradient, a `NaN` constraint Jacobian (through `∇_x L`'s `Jᵀy` term),
+    and `NaN`/`Inf` residuals. The check is confined to the convergence/error
+    measure; the general `amax` semantics that step-size selection, the line
+    search, and the divergence detectors depend on are deliberately left
+    unchanged. A `fun` that returns `NaN` already failed honestly and still
+    does; normal all-finite solves are bit-for-bit unchanged (the finiteness
+    check is a no-op when every component is finite).
+
 ### Fixed — convex QP IPM stalled on huge-magnitude objectives, never labeling the optimum `Optimal` (#286)
 
 - **A badly-scaled convex QP (`cond(P) = 1e10` with objective coefficients of
