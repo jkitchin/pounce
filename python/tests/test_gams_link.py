@@ -473,3 +473,28 @@ def test_gams_pi_matches_analytic_shadow_price_maximizing():
     unconditional negation returned ``-2``.
     """
     assert link.gams_pi([2.0], obj_sign=-1.0) == pytest.approx([2.0])
+
+
+# --- gh #294: analytic dual-sign regression guard, BOTH senses ---------------
+
+
+def test_gams_pi_wyndor_shadow_prices_both_senses():
+    """Pin the GAMS marginal against the textbook Wyndor Glass shadow prices
+    for BOTH a maximizing and a minimizing model (gh #294 hardening).
+
+    The Wyndor LP ``max 3x1+5x2 s.t. x1<=4, 2x2<=12, 3x1+2x2<=18`` has optimum
+    36 at (2, 6) with shadow prices ``(0, 1.5, 1)``. POUNCE's internal
+    constraint multipliers there are ``lambda = [0, 1.5, 1]`` (the ``+lambda``
+    Lagrange convention; verified live and against IPOPT).
+
+    * Maximizing (``obj_sign = -1``): ``pi = -(-1)*lambda = +lambda`` = the
+      shadow prices ``[0, 1.5, 1]`` GAMS's own solvers report.
+    * Minimizing the equivalent ``min -3x1-5x2`` (``obj_sign = +1``):
+      ``pi = -lambda`` = ``[0, -1.5, -1]``.
+
+    A uniform sign flip (the #271/#272 defect) would negate both; the explicit
+    signed expectations below fail loudly if that recurs.
+    """
+    lam = [0.0, 1.5, 1.0]  # POUNCE internal multipliers for the Wyndor optimum
+    assert link.gams_pi(lam, obj_sign=-1.0) == pytest.approx([0.0, 1.5, 1.0])
+    assert link.gams_pi(lam, obj_sign=1.0) == pytest.approx([0.0, -1.5, -1.0])
