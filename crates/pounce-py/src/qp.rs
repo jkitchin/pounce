@@ -222,6 +222,18 @@ fn solution_dict<'py>(
         rd.set_item("complementarity", r.complementarity)?;
         rd.set_item("kkt_error", r.kkt_error())?;
         d.set_item("residuals", rd)?;
+
+        // gh #293 naive-caller guardrail: attach a tiny-curvature scaling
+        // warning when the solve did not cleanly converge (or returned a
+        // machine-epsilon-tail certificate) on an ill-scaled objective, so a
+        // caller inspecting `result["obj"]` is told *why* it may be off. Only
+        // for the orthant QP/LP path — the ratio test reads `G` as inequality
+        // rows, which is meaningless for second-order/exp/power cone blocks.
+        if cones.is_empty() {
+            if let Some(warn) = sol.scaling_diagnostic(p) {
+                d.set_item("scaling_warning", warn)?;
+            }
+        }
     }
 
     // Per-iteration convergence trace (empty unless `collect_iterates` set).

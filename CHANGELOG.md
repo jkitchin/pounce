@@ -9,6 +9,36 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — convex QP convergence and honesty on tiny-curvature objectives (#293)
+
+- **A convex QP whose Hessian curvature is tiny relative to its linear/constraint
+  data now converges to the true optimum instead of silently truncating or
+  returning a wrong unboundedness verdict.** These are the shapes a
+  portfolio/least-squares user hits when a regularizer or a near-linear
+  objective makes the curvature small; the answer was previously silently wrong
+  or silently short of the optimum, with nothing in the status to flag it.
+  - **Uniformly tiny Hessian converges.** `min ½·1e-12·(x0²+x1²) − x1 s.t. x ≥ 0`
+    (optimum `x1*=1e12`, `f*=−5e11`) returned `iteration_limit` at `≈−4.95e11`;
+    it now returns `optimal` at `−5e11`. The default HSDE driver's per-cone NT
+    scaling never sees a Hessian 12+ orders below O(1), so on any non-clean
+    status the solver now retries once with Ruiz equilibration (which lifts the
+    scaled Hessian to O(1)) and accepts the retry only when it reaches a clean
+    `optimal` — a genuinely hard problem keeps its truthful status. Covers both
+    the unconstrained (`iteration_limit`) and constrained (`optimal_inaccurate`)
+    manifestations.
+  - **Spurious unboundedness refuted (machine-epsilon tail).** At `P ≈ 1e-20`
+    a bounded problem could be wrongly certified `dual_infeasible`; a
+    direct-driver reverify on the equilibrated problem now refutes the bogus
+    certificate and returns the verified finite optimum (gated to `P ≠ 0`, so
+    genuinely unbounded problems are unaffected).
+  - **Scaling warning for the unconvergeable residue.** When no driver can
+    converge a tiny-curvature problem at the default budget (e.g. a uniformly
+    tiny Hessian coupled through an equality), the honest non-`optimal` status
+    now carries an actionable scaling diagnostic naming tiny curvature as the
+    cause. Surfaced on the CLI (stderr) and in the Python `solve_qp` result as a
+    `scaling_warning` key. A clean `optimal` or a well-scaled hard problem emits
+    nothing.
+
 ### Added — pyomo-pounce: detect a stale/shadowing `pounce` binary (#315)
 
 - `pyomo_pounce.check_binary()` reports which `pounce` executable
