@@ -225,6 +225,13 @@ where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
     let mut make_backend = make_backend;
+    // gh #295: reject a box that admits no finite point (a *present* `+∞`
+    // lower / `−∞` upper bound) before bound expansion — `expand_bounds` is
+    // sign-agnostic and would otherwise mishandle it and report a violating
+    // point `Optimal`.
+    if prob.bounds_admit_no_point() {
+        return trivial_primal_infeasible_solution(prob);
+    }
     // Interior-point solve in the original problem's coordinates (the core
     // already unscales any internal Ruiz equilibration before returning).
     let sol = solve_qp_ipm_core(prob, opts, &mut make_backend);
@@ -331,6 +338,11 @@ pub fn solve_qp_ipm_debug<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
+    // bound) before bound expansion, as the non-debug path does.
+    if prob.bounds_admit_no_point() {
+        return trivial_primal_infeasible_solution(prob);
+    }
     // Build the factorization and run the core loop directly with the hook
     // (mirrors `solve_qp_core`'s non-HSDE path; `solve_qp_core` itself can't
     // carry the borrowed hook through its generic plumbing). When the HSDE
@@ -384,6 +396,11 @@ where
     // otherwise the warm start would silently do nothing. A caller that
     // warm-starts is doing nearby reoptimization (a known-solvable
     // neighborhood), where the direct path's fragility is not a concern.
+    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
+    // bound) before equilibration and bound expansion.
+    if prob.bounds_admit_no_point() {
+        return trivial_primal_infeasible_solution(prob);
+    }
     let direct = QpOptions {
         use_hsde: false,
         equilibrate: false,
@@ -434,6 +451,11 @@ pub fn solve_socp_ipm<F>(
 where
     F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
 {
+    // gh #295: reject an impossible box (present `+∞` lower / `−∞` upper
+    // bound) before bound expansion; `expand_bounds` is sign-agnostic.
+    if prob.bounds_admit_no_point() {
+        return trivial_primal_infeasible_solution(prob);
+    }
     // The cones must partition the inequality rows exactly; otherwise the
     // cone vectors and the `m_ineq` slack disagree and the driver would read
     // out of bounds (an exp/power cone is always 3 rows). Fail cleanly here.
@@ -1063,7 +1085,7 @@ where
         // coordinate pinned strictly outside its `≥ 0` domain proves primal
         // infeasibility, which the HSDE's residual-gated Farkas detector misses.
         if crate::hsde_nonsym::detect_cone_domain_infeasible(prob, &blocks) {
-            return cone_domain_infeasible_solution(prob);
+            return trivial_primal_infeasible_solution(prob);
         }
         return match hook {
             Some(h) => solve_conic_hsde_nonsym_debug(prob, &blocks, opts, h, make_backend),
@@ -1073,7 +1095,7 @@ where
     let (expanded, bound_rows) = expand_bounds(prob);
     let blocks = blocks_of(cones, bound_rows.len());
     if crate::hsde_nonsym::detect_cone_domain_infeasible(&expanded, &blocks) {
-        return cone_domain_infeasible_solution(prob);
+        return trivial_primal_infeasible_solution(prob);
     }
     let sol = match hook {
         Some(h) => solve_conic_hsde_nonsym_debug(&expanded, &blocks, opts, h, make_backend),
@@ -2045,10 +2067,12 @@ fn failed_solution(
     }
 }
 
-/// Build a `PrimalInfeasible` solution reported by the setup-time cone-domain
-/// screen (gh #283). Carries the trivial iterate; the status is the certified
-/// result. `z = 0` (the cone apex) is dual-cone-feasible in every cone.
-fn cone_domain_infeasible_solution(prob: &QpProblem) -> QpSolution {
+/// Build a `PrimalInfeasible` solution reported by a **setup-time** screen —
+/// the cone-domain screen (gh #283) and the impossible-bound screen (gh #295,
+/// a *present* `+∞` lower / `−∞` upper bound). Carries the trivial iterate; the
+/// status is the certified result. `z = 0` (the cone apex) is dual-cone-feasible
+/// in every cone.
+fn trivial_primal_infeasible_solution(prob: &QpProblem) -> QpSolution {
     QpSolution {
         status: QpStatus::PrimalInfeasible,
         x: vec![0.0; prob.n],

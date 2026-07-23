@@ -338,6 +338,42 @@ def test_solve_qp_batch_inherits_the_bound_guard():
         )
 
 
+# --- gh #295: the core defends even when the Python _validate guard is bypassed
+
+
+def test_raw_binding_rejects_impossible_bounds():
+    """Defense in depth (gh #295): the ``pounce-convex`` core itself must map a
+    box that admits no finite point to ``primal_infeasible``, even on the raw
+    ``_pounce`` binding that never runs ``qp.py::_validate``.
+
+    Before #295 the sign-agnostic ``expand_bounds`` dropped a ``+inf`` lower /
+    ``-inf`` upper bound as "absent" and returned ``optimal`` at a violating
+    point. This exercises the actual exposed surface (the raw binding), not the
+    guarded ``solve_qp`` wrapper.
+    """
+    import pounce._pounce as _pounce  # the raw, unvalidated PyO3 surface
+
+    def raw_status(lb, ub):
+        prob = _pounce.QpProblem(
+            1, [0.0],
+            [0], [0], [1.0],           # P = [[1]]
+            [], [], [], [],            # A, b
+            [], [], [], [],            # G, h
+            lb, ub,
+        )
+        return _pounce.solve_qp(prob)["status"]
+
+    # Present +inf lower / -inf upper bound → impossible → primal_infeasible.
+    assert raw_status([np.inf], [np.inf]) == "primal_infeasible"
+    assert raw_status([-np.inf], [-np.inf]) == "primal_infeasible"
+    # Absent one-sided ±inf is the normal encoding and must still solve.
+    assert raw_status([-np.inf], [np.inf]) == "optimal"
+    # A fixed variable (lb == ub) is feasible and must still solve.
+    assert raw_status([2.0], [2.0]) == "optimal"
+    # A finite reversed box remains primal_infeasible.
+    assert raw_status([5.0], [3.0]) == "primal_infeasible"
+
+
 # --- tol / max_iter option validation (gh #277) -----------------------------
 
 # The convex entry points used to apply *no* validation to `tol` while every

@@ -81,6 +81,130 @@ fn lower_bound_binds() {
     assert_stationarity(&prob, &sol, 1e-5);
 }
 
+/// gh #295 (defense-in-depth for #275): a box that admits **no finite point**
+/// — a *present* `+∞` lower bound or a *present* `−∞` upper bound — must be
+/// certified `PrimalInfeasible` by the core itself, on the raw solve path
+/// (bypassing the Python-layer `_validate` guard). Before this fix
+/// `expand_bounds` was sign-agnostic and silently dropped such a bound as
+/// "absent", returning `Optimal` at a violating point.
+#[test]
+fn present_infinite_lower_bound_is_primal_infeasible() {
+    // min ½x²  s.t.  x ≥ +∞ : impossible.
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 1.0)],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![POS_INF],
+        ub: vec![POS_INF],
+    };
+    let sol = solve(&prob);
+    assert_eq!(sol.status, QpStatus::PrimalInfeasible);
+}
+
+#[test]
+fn present_infinite_upper_bound_is_primal_infeasible() {
+    // min ½x²  s.t.  x ≤ −∞ : impossible.
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 1.0)],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![NEG_INF],
+        ub: vec![NEG_INF],
+    };
+    let sol = solve(&prob);
+    assert_eq!(sol.status, QpStatus::PrimalInfeasible);
+}
+
+/// The impossible-bound screen must NOT regress the *absent* one-sided `±∞`
+/// encoding: `lb = −∞` / `ub = +∞` is the normal way to say "unbounded on
+/// that side" and must still solve. `min ½(x+3)²` with `x ∈ (−∞, +∞)` → −3.
+#[test]
+fn absent_infinite_bounds_still_solve() {
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 1.0)],
+        c: vec![3.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![NEG_INF],
+        ub: vec![POS_INF],
+    };
+    let sol = solve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!((sol.x[0] - (-3.0)).abs() < 1e-6, "x0={}", sol.x[0]);
+}
+
+/// A finite reversed box (`lb > ub`) is the same infeasible class and must
+/// still map to `PrimalInfeasible` (regression guard for the pre-existing
+/// behavior the #295 screen sits beside).
+#[test]
+fn finite_reversed_box_is_primal_infeasible() {
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 1.0)],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![5.0],
+        ub: vec![3.0],
+    };
+    let sol = solve(&prob);
+    assert_eq!(sol.status, QpStatus::PrimalInfeasible);
+}
+
+/// A fixed variable (`lb == ub`) is feasible and must still solve to that
+/// value — the screen must not over-reject the degenerate-but-valid box.
+#[test]
+fn fixed_variable_still_solves() {
+    // min ½(x−10)²  s.t.  x = 2  → x* = 2.
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 1.0)],
+        c: vec![-10.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![2.0],
+        ub: vec![2.0],
+    };
+    let sol = solve(&prob);
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!((sol.x[0] - 2.0).abs() < 1e-6, "x0={}", sol.x[0]);
+}
+
+/// Presolve is the other core entry that must certify an impossible bound
+/// infeasible (the fixpoint's first pass), so a presolve-then-solve caller
+/// inherits the same rejection.
+#[test]
+fn presolve_rejects_present_infinite_bound() {
+    use pounce_convex::presolve::{PresolveOutcome, presolve};
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![Triplet::new(0, 0, 1.0)],
+        c: vec![0.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![POS_INF],
+        ub: vec![POS_INF],
+    };
+    assert!(matches!(presolve(&prob), PresolveOutcome::Infeasible));
+}
+
 /// Box-constrained LP: min −x0 − x1 with 0 ≤ x ≤ 1. Optimum (1, 1).
 #[test]
 fn box_constrained_lp() {
