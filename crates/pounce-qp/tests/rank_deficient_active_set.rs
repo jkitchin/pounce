@@ -163,6 +163,111 @@ fn equality_plus_bounds_prunes_exact_rank_deficient_rows() {
     );
 }
 
+/// Pure-equality, no-bounds path (#326): a strictly convex QP whose ONLY
+/// general constraints are equalities and whose variables are unbounded
+/// (`xl = -inf`, `xu = +inf`) routes to the `solve_equality_only` fast path,
+/// which pins ALL `m` equality rows in one shot and — before this fix — had no
+/// rank-deficiency guard at all (unlike the #313 equality+bounds path). With
+/// THREE exactly identical rows the pinned KKT is singular; no H-block inertia
+/// shift can rescue a rank-deficient constraint block, so the loop exhausted
+/// and surfaced to the user as `InternalError` / exit 1. The path now delegates
+/// to the rank-deficiency-aware `solve_general` and reaches the exact optimum.
+///
+/// Fixture (the issue's reproduction, n = 3, unbounded):
+///   min  ½(x₀² + x₁² + x₂²) − x₀ − 2x₁ − 3x₂
+///   s.t.  x₀ + x₁ = 2   (×3, three identical rows — rank 1)
+/// Closed form: x* = (0.5, 1.5, 3.0), f* = −6.75.
+#[test]
+fn equality_only_prunes_three_exact_duplicate_rows() {
+    let h_space = SymTMatrixSpace::new(3, vec![1, 2, 3], vec![1, 2, 3]);
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&[1.0, 1.0, 1.0]);
+
+    // Three identical rows x₀+x₁ (= 2) over 3 variables (rank 1).
+    let a_space = GenTMatrixSpace::new(3, 3, vec![1, 1, 2, 2, 3, 3], vec![1, 2, 1, 2, 1, 2]);
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+
+    let g = [-1.0, -2.0, -3.0];
+    let bl = [2.0, 2.0, 2.0];
+    let bu = [2.0, 2.0, 2.0];
+    let xl = [NEG_INF, NEG_INF, NEG_INF];
+    let xu = [POS_INF, POS_INF, POS_INF];
+
+    let qp = QpProblem {
+        n: 3,
+        m: 3,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let sol = solver
+        .solve(&qp, None, &opts())
+        .expect("3 exact-duplicate equality rows must solve, not error (#326)");
+
+    assert_eq!(sol.status, QpStatus::Optimal, "status = {:?}", sol.status);
+    assert!((sol.x[0] - 0.5).abs() < 1e-8, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 1.5).abs() < 1e-8, "x[1] = {}", sol.x[1]);
+    assert!((sol.x[2] - 3.0).abs() < 1e-8, "x[2] = {}", sol.x[2]);
+    assert!((sol.obj - (-6.75)).abs() < 1e-8, "obj = {}", sol.obj);
+}
+
+/// Pure-equality, no-bounds path (#326): same fixture, but the redundant rows
+/// are an INTEGER COMBINATION rather than exact duplicates — row 3 = row 1 +
+/// row 2 as coefficient vectors: `[x+y=2 ; 3x+3y=6 ; 4x+4y=8]`. Still rank 1,
+/// still consistent; must reach the same optimum. (The #313 fix handled 2 exact
+/// duplicates and the scaled triple but not this integer-combination triple.)
+#[test]
+fn equality_only_prunes_integer_combination_rows() {
+    let h_space = SymTMatrixSpace::new(3, vec![1, 2, 3], vec![1, 2, 3]);
+    let mut h = SymTMatrix::new(Rc::clone(&h_space));
+    h.set_values(&[1.0, 1.0, 1.0]);
+
+    // Rows: x₀+x₁ (=2), 3x₀+3x₁ (=6), 4x₀+4x₁ (=8). Row3 = row1+row2 (rank 1).
+    let a_space = GenTMatrixSpace::new(3, 3, vec![1, 1, 2, 2, 3, 3], vec![1, 2, 1, 2, 1, 2]);
+    let mut a = GenTMatrix::new(Rc::clone(&a_space));
+    a.set_values(&[1.0, 1.0, 3.0, 3.0, 4.0, 4.0]);
+
+    let g = [-1.0, -2.0, -3.0];
+    let bl = [2.0, 6.0, 8.0];
+    let bu = [2.0, 6.0, 8.0];
+    let xl = [NEG_INF, NEG_INF, NEG_INF];
+    let xu = [POS_INF, POS_INF, POS_INF];
+
+    let qp = QpProblem {
+        n: 3,
+        m: 3,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let sol = solver
+        .solve(&qp, None, &opts())
+        .expect("integer-combination redundant equality rows must solve, not error (#326)");
+
+    assert_eq!(sol.status, QpStatus::Optimal, "status = {:?}", sol.status);
+    assert!((sol.x[0] - 0.5).abs() < 1e-8, "x[0] = {}", sol.x[0]);
+    assert!((sol.x[1] - 1.5).abs() < 1e-8, "x[1] = {}", sol.x[1]);
+    assert!((sol.x[2] - 3.0).abs() < 1e-8, "x[2] = {}", sol.x[2]);
+    assert!((sol.obj - (-6.75)).abs() < 1e-8, "obj = {}", sol.obj);
+}
+
 /// Cold path: `solve(qp, None, ..)` routes through `cold_general_initial`,
 /// which pins ALL equality rows up front. With redundant equalities that
 /// factor is singular; the guard prunes the redundant row so the cold start

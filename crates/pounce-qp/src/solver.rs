@@ -643,7 +643,49 @@ impl ParametricActiveSetSolver {
         // eigenvalues (Gould-Hribar-Nocedal 2001 §3.2). The
         // inertia-control retry handles indefinite reduced H via
         // §4.5.
-        let delta = self.factorize_with_inertia_control(kkt, &mut rhs, qp.m as i32, qp.n, opts)?;
+        //
+        // A rank-deficient equality block — redundant / linearly
+        // dependent rows, e.g. three identical rows or one row an
+        // integer combination of the others (#326) — makes the saddle
+        // KKT singular, and no §4.5 H-block shift can rescue a
+        // rank-deficient *constraint* block: the inertia loop exhausts
+        // and reports a recoverable failure. This fast path pins ALL `m`
+        // equality rows in one shot and has no per-row selection, so it
+        // cannot prune the dependent rows itself. On that signal,
+        // delegate to the rank-deficiency-aware `solve_general`, whose
+        // `cold_general_initial` prunes the equalities to a maximal
+        // independent subset (a dropped row is a linear combination of
+        // the kept ones, hence satisfied at any constraint-consistent
+        // point) and reaches the exact vertex. Without this the solve
+        // surfaced to the user as `InternalError` / exit 1 (#326).
+        let delta =
+            match self.factorize_with_inertia_control(kkt, &mut rhs, qp.m as i32, qp.n, opts) {
+                Ok(d) => d,
+                Err(ref e) if e.is_recoverable_factorization_failure() => {
+                    return self.solve_general(qp, None, opts);
+                }
+                Err(e) => return Err(e),
+            };
+
+        // Masked-rank-deficiency guard (companion to the one in
+        // `factor_pinned_primal`). A large enough δ can grow the H
+        // diagonal until the backend stops flagging the singular
+        // constraint block and returns a solution instead of a failure
+        // (feral masks the null direction around δ≈1e8), which would slip
+        // a redundant — or worse, *inconsistent* — equality block past the
+        // check above. A nonzero δ on this pinned equality KKT is the tell:
+        // only then rank-reveal the rows, and if any is redundant delegate
+        // to `solve_general` (same recovery as the exact-failure branch).
+        // A δ > 0 with a full-rank block is a legitimate indefinite /
+        // unbounded reduced-Hessian shift and falls through to the
+        // recession-ray test below unchanged (#326).
+        if delta > 0.0 {
+            let eq_rows: Vec<usize> = (0..qp.m).collect();
+            let (kept, _) = independent_active_subset(&mut self.linsol, qp, &eq_rows, &[]);
+            if kept.len() < qp.m {
+                return self.solve_general(qp, None, opts);
+            }
+        }
 
         // RHS now holds [x*; λ*].
         let mut x = vec![0.0; qp.n];
