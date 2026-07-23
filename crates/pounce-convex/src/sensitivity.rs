@@ -45,15 +45,22 @@
 //!    is still present in double precision — recovering LU-quality `dx/db`.
 //!    On a well-conditioned KKT the first residual is already at round-off
 //!    and refinement is a no-op, so this never perturbs the good cases.
-//! 2. **A condition-number diagnostic.** [`QpSensitivity::kkt_cond_estimate`]
-//!    is a cheap Hager 1-norm estimate of `κ₁` of the factored KKT, and
-//!    [`QpSensitivity::ill_conditioned`] thresholds it. When the system is
-//!    so near-singular that even refinement cannot recover the step (the
-//!    information is below the double-precision floor), the estimate is
-//!    huge and the flag fires — so a caller can *detect* that `dx/db` is
-//!    untrustworthy instead of consuming a silently-damped value. The
-//!    per-step [`QpSensitivity::last_step_residual`] is the companion
-//!    signal: the relative KKT residual the refinement actually achieved.
+//! 2. **A two-part conditioning diagnostic.**
+//!    [`QpSensitivity::kkt_cond_estimate`] is a cheap Hager 1-norm estimate of
+//!    `κ₁` of the factored KKT; [`QpSensitivity::ill_conditioned`] fires when it
+//!    is huge **or** when the most recent step's refinement residual is large.
+//!    The condition estimate alone has a blind spot: it measures the
+//!    *regularized* factor, whose smallest singular value is floored at `δ`, so
+//!    on a well-scaled `P` (e.g. `P = I`, `‖K‖₁ ≈ O(1)`) it saturates near
+//!    `‖K‖₁ / δ` and never reaches its threshold, even when the true KKT is
+//!    numerically singular — so a purely near-parallel *constraint* Jacobian
+//!    slips past it (gh #328). The per-step residual closes that gap: refinement
+//!    against the true KKT *cannot* solve an unrecoverable step, so it stalls at
+//!    a large relative residual ([`QpSensitivity::last_step_residual`]), which
+//!    fires the flag. Between the two, a caller can always *detect* that `dx/db`
+//!    is untrustworthy instead of consuming a silently-damped value — whether
+//!    the near-singularity shows up in the condition estimate (badly-scaled `P`)
+//!    or only in the stalled residual (well-scaled `P`, near-LICQ constraints).
 
 use crate::ipm::QpOptions;
 use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus, Triplet};
@@ -158,7 +165,31 @@ const WEAK_ACTIVE_REL: f64 = 1e-3;
 /// sits in the wide gap between those regimes, so it fires exactly on the
 /// unrecoverable cases and stays quiet on every case refinement rescues — no
 /// false alarm on the well-conditioned equality-only or active-set paths.
+///
+/// This condition estimate is a *build-time* screen, and by itself it has a
+/// blind spot: it is the `κ₁` of the **regularized** factor, whose smallest
+/// singular value is floored at `δ`, so on a *well-scaled* `P` (e.g. `P = I`,
+/// `‖K‖₁ ≈ O(1)`) it saturates near `‖K‖₁ / δ ≈ 3e10` no matter how nearly
+/// parallel the active rows become — never reaching this threshold even when
+/// the true KKT is numerically singular (gh #328). The per-step residual gate
+/// below closes that gap.
 const KKT_ILL_CONDITIONED_THRESHOLD: f64 = 1e14;
+
+/// Relative KKT residual above which the most recent parametric step is treated
+/// as *unreliable*, so [`ill_conditioned`](QpSensitivity::ill_conditioned)
+/// fires on it (gh #328).
+///
+/// This is the companion signal to the build-time condition estimate and covers
+/// its blind spot. When the active-constraint Jacobian is near-LICQ but `P` is
+/// well scaled, the saturating [`KKT_ILL_CONDITIONED_THRESHOLD`] never trips,
+/// yet iterative refinement against the true (`δ`-free) KKT *cannot* solve the
+/// step — it stalls at a large relative residual (`≈ 3e-2` at `κ(A) ≈ 2e5`,
+/// `≈ 0.25` at `κ(A) ≈ 2e7`). A well-solved step, by contrast, refines to
+/// round-off (`≲ 1e-8`). The two regimes are separated by many orders of
+/// magnitude, so this threshold sits comfortably in the gap: it flags exactly
+/// the steps whose returned `dx/db` does not satisfy the true KKT, and stays
+/// quiet on every accurately recovered step.
+const STEP_UNRELIABLE_RESIDUAL: f64 = 1e-6;
 
 /// Iterative-refinement passes for a parametric step (mirrors the HSDE
 /// solve's `IR_MAX_PASSES`). A handful suffices: refinement against the
@@ -263,9 +294,17 @@ fn estimate_inv_norm1(fact: &mut Factorization, dim: usize) -> f64 {
 /// Solve `K u = rhs` against the cached (regularized) factor, then refine `u`
 /// against the **unregularized** KKT triplets `(airn, ajcn, vals_true)` to
 /// strip the `O(δ)` regularization bias. Overwrites `rhs` with `u` and returns
-/// the final relative residual `‖rhs₀ − K u‖∞ / (1 + ‖rhs₀‖∞)` — the
-/// reliability signal a caller reads back as
+/// the final **relative** residual `‖rhs₀ − K u‖∞ / ‖rhs₀‖∞` — the reliability
+/// signal a caller reads back as
 /// [`last_step_residual`](QpSensitivity::last_step_residual).
+///
+/// The residual is normalized by `‖rhs₀‖∞` (not `1 + ‖rhs₀‖∞`) so it is a true
+/// *relative* residual, invariant to the magnitude of the perturbation. The
+/// `1 +` floor of the earlier form (gh #284) silently masked a failed solve
+/// whenever the perturbation was small: a step scaled by e.g. `1e-6` shrank
+/// both `‖r‖` and `‖rhs₀‖` by `1e-6`, but the `1 +` left the denominator at
+/// `≈ 1`, so a fully over-damped step (true relative residual `≈ 0.25`) read
+/// back as `≈ 2.5e-7` — small enough to look solved (gh #328).
 fn solve_refined(
     fact: &mut Factorization,
     airn: &[Index],
@@ -276,7 +315,12 @@ fn solve_refined(
     let dim = rhs.len();
     let b: Vec<f64> = rhs.to_vec();
     fact.solve_one(rhs).map_err(|_| ())?;
-    let bnorm = 1.0 + inf_norm(&b);
+    // True relative residual: divide by ‖rhs₀‖, flooring only a genuinely zero
+    // RHS (whose exact solution is the zero step, residual zero) to avoid 0/0.
+    let bnorm = {
+        let bn = inf_norm(&b);
+        if bn > 0.0 { bn } else { 1.0 }
+    };
     let mut r = vec![0.0; dim];
     let mut res = f64::INFINITY;
     for _ in 0..IR_MAX_PASSES {
@@ -574,25 +618,46 @@ impl QpSensitivity {
 
     /// Whether the KKT/sensitivity system is ill-conditioned enough that
     /// [`parametric_step`](Self::parametric_step) may be unreliable even after
-    /// refinement — `true` when [`kkt_cond_estimate`](Self::kkt_cond_estimate)
-    /// exceeds [`KKT_ILL_CONDITIONED_THRESHOLD`] (gh #284).
+    /// refinement.
     ///
-    /// On a near-LICQ sweep this fires precisely where refinement can no
-    /// longer recover `dx/db` from double precision; on the well-conditioned
-    /// equality-only and active-set cases it stays quiet.
+    /// `true` when **either**
+    ///
+    /// * the build-time [`kkt_cond_estimate`](Self::kkt_cond_estimate) exceeds
+    ///   [`KKT_ILL_CONDITIONED_THRESHOLD`] (gh #284) — catches a numerically
+    ///   singular KKT before any step is taken; **or**
+    /// * the most recent [`parametric_step`](Self::parametric_step) refined to a
+    ///   relative KKT residual above [`STEP_UNRELIABLE_RESIDUAL`] (gh #328) —
+    ///   catches the near-LICQ case the saturating condition estimate misses
+    ///   (well-scaled `P`, near-parallel active rows), where the returned
+    ///   `dx/db` does not actually satisfy the true sensitivity system.
+    ///
+    /// The second clause is what makes the diagnostic honest across the whole
+    /// near-LICQ family: on a well-scaled `P` the condition estimate saturates
+    /// below its threshold (see [`KKT_ILL_CONDITIONED_THRESHOLD`]), so before
+    /// gh #328 an over-damped, ~3300×-wrong step reported `ill_conditioned =
+    /// false`. Now the stalled refinement residual fires the flag instead of
+    /// letting a silently-damped value pass. On the well-conditioned
+    /// equality-only and active-set cases both clauses stay quiet.
     pub fn ill_conditioned(&self) -> bool {
         self.kkt_cond_estimate > KKT_ILL_CONDITIONED_THRESHOLD
+            || self
+                .last_residual
+                .is_some_and(|r| r > STEP_UNRELIABLE_RESIDUAL)
     }
 
-    /// Relative KKT residual `‖rhs − K·step‖∞ / (1 + ‖rhs‖∞)` achieved by the
-    /// most recent [`parametric_step`](Self::parametric_step) /
+    /// Relative KKT residual `‖rhs − K·step‖∞ / ‖rhs‖∞` achieved by the most
+    /// recent [`parametric_step`](Self::parametric_step) /
     /// [`step_from_db`](Self::step_from_db), or `None` before any step.
     ///
     /// Measured against the **unregularized** KKT, so it reflects how well the
     /// returned step actually satisfies the true sensitivity system. A tiny
     /// value (round-off level) means the step is trustworthy; a large one
     /// means refinement could not solve the near-singular system and the step
-    /// is unreliable (gh #284).
+    /// is unreliable (gh #284). Because it is a true *relative* residual it is
+    /// invariant to the magnitude of the perturbation, so it exposes a stalled
+    /// solve even for a small `db` — the case the earlier `1 + ‖rhs‖` floor
+    /// masked (gh #328). A value above [`STEP_UNRELIABLE_RESIDUAL`] fires
+    /// [`ill_conditioned`](Self::ill_conditioned).
     pub fn last_step_residual(&self) -> Option<f64> {
         self.last_residual
     }
@@ -1206,6 +1271,99 @@ mod tests {
             sens.last_step_residual().unwrap() < 1e-6,
             "residual = {:?}",
             sens.last_step_residual()
+        );
+    }
+
+    /// gh #328: a **well-scaled** `P` (`P = I`) with a near-LICQ *constraint*
+    /// Jacobian must never return a silently-wrong `dx/db`. `A = [[1,0],[1,ε]]`
+    /// fully pins `x`, so the exact sensitivity is `dx/db = A⁻¹` with no
+    /// truncation — `dx/db[:,0] = [1, −1/ε]`. As `ε → 0` the two equality rows
+    /// become parallel and the KKT goes numerically singular, but because `P`
+    /// is well scaled the build-time condition estimate saturates (`κ₁ ≈ 3e10`)
+    /// and never reaches its threshold — the blind spot the old
+    /// `ill_conditioned` had. The regression bar: for **every** `ε` the step is
+    /// either accurate to a reasonable relative tolerance **or**
+    /// `ill_conditioned` is `true`; a catastrophically over-damped step with
+    /// `ill_conditioned == false` (the gh #328 failure — `−2999` where the truth
+    /// is `−1e7`) must never happen. The well-conditioned `ε = 1e-3` end must
+    /// stay accurate *and* unflagged.
+    #[test]
+    fn near_licq_constraint_jacobian_never_silently_wrong() {
+        // Perturbing b0 by a small δb, then dividing out δb, is exactly how a
+        // caller reads dx/db — and the small δb is what the old (1 + ‖rhs‖)
+        // residual floor masked, so exercise that path here (δb = 1e-6).
+        let db = 1e-6;
+        let mut saw_flagged = false;
+        for eps in [1e-3, 1e-5, 1e-7, 1e-9] {
+            let prob = QpProblem {
+                n: 2,
+                p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+                c: vec![0.0, 0.0],
+                // Rows [1,0] and [1,ε]: near-parallel as ε → 0.
+                a: vec![
+                    Triplet::new(0, 0, 1.0),
+                    Triplet::new(1, 0, 1.0),
+                    Triplet::new(1, 1, eps),
+                ],
+                b: vec![1.0, 1.0],
+                g: vec![],
+                h: vec![],
+                lb: vec![],
+                ub: vec![],
+            };
+            let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+            assert_eq!(sol.status, QpStatus::Optimal, "eps {eps:e}");
+            let mut sens = QpSensitivity::build_default(&prob, &sol, backend).unwrap();
+
+            // dx/db[:,0] via a pinned step, divided back out.
+            let step = sens.parametric_step(&[0], &[db]);
+            let dxdb = [step[0] / db, step[1] / db];
+            // Exact reference: A⁻¹[:,0] = [1, −1/ε].
+            let exact = [1.0, -1.0 / eps];
+            let rel = rel_err(&dxdb, &exact);
+            let accurate = rel < 1e-3;
+
+            // The acceptance bar: accurate OR honestly flagged. The forbidden
+            // state is exactly the gh #328 bug — wrong AND unflagged.
+            assert!(
+                accurate || sens.ill_conditioned(),
+                "eps {eps:e}: silently wrong dx/db = {dxdb:?} (exact {exact:?}, \
+                 rel err {rel:.3e}) with ill_conditioned = false, \
+                 kkt_cond = {:.3e}, residual = {:?}",
+                sens.kkt_cond_estimate(),
+                sens.last_step_residual(),
+            );
+
+            if eps == 1e-3 {
+                // The well-conditioned end must be accurate *and* trusted.
+                assert!(accurate, "eps {eps:e}: dx/db = {dxdb:?} rel err {rel:.3e}");
+                assert!(
+                    !sens.ill_conditioned(),
+                    "eps {eps:e}: well-conditioned case falsely flagged \
+                     (kkt_cond = {:.3e}, residual = {:?})",
+                    sens.kkt_cond_estimate(),
+                    sens.last_step_residual(),
+                );
+            } else {
+                // Whenever the step is *not* accurate here, the flag must fire —
+                // this is the clause that was silently false before the fix.
+                if !accurate {
+                    assert!(
+                        sens.ill_conditioned(),
+                        "eps {eps:e}: over-damped dx/db = {dxdb:?} (rel err \
+                         {rel:.3e}) not flagged; residual = {:?}",
+                        sens.last_step_residual(),
+                    );
+                    saw_flagged = true;
+                }
+            }
+        }
+        // Guards the premise: the sweep must actually reach the unrecoverable
+        // regime, otherwise it no longer exercises the #328 flag path.
+        assert!(
+            saw_flagged,
+            "sweep never hit an over-damped step, so the ill-conditioned flag \
+             path was not exercised"
         );
     }
 
