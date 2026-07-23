@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — best-acceptable fallback ranking degenerated to objective-only outside the feasibility band (#280)
+
+- **The NLP best-acceptable fallback could prefer a *strictly more infeasible*
+  point**, completing the #267/#270 fix. That fix ranked recorded acceptable
+  points by a `(feasible_enough, objective)` key, but the key was a two-class
+  *partition*, not an ordering: once **both** the incumbent and a recorded
+  candidate sat outside `FEASIBLE_ENOUGH_CAP = 1e-2`, `a_ok == b_ok` and
+  `ranks_better_within_band` fell through to a bare `a_obj < b_obj` — reading
+  neither point's constraint violation, exactly the pre-#267 objective-only rule.
+  Among two infeasible points it again picked the better *objective*, which can
+  be *more* infeasible. With the opt-in dual-divergence guard on
+  (`dual_diverging_streak=2`) and a widened `acceptable_constr_viol_tol=1e0`, the
+  fallback on `deb7` discarded the incumbent at violation `5.292e-1` for a
+  recorded point at `9.951e-1` (worse) to gain 36 % of objective, returning it
+  under `solve_result_num=100`; `pounce verify` rejected that point. The ranking
+  is now a **total order**: each violation is clamped *up* to the band before
+  comparison (`viol.max(band)`), so points inside the band tie on feasibility and
+  objective decides (unchanged), while outside the band the actual violation
+  decides and a strictly-more-infeasible point can never win. Both the record and
+  read sides (`record_best_acceptable`,
+  `honour_best_acceptable_after_dual_guard`) route through the same
+  `ranks_better_within_band` helper, so they cannot disagree. #270's headline
+  (`autocorr_bern55-06` at obj `-2303.9999305`, viol `4.149e-5`) and stock-default
+  behaviour (honest `MaximumIterationsExceeded` on non-convergence, no fallback
+  under a success status) are unchanged. Config-gated: the guard is off by
+  default, so stock-tolerance solves never hit this.
+
 ### Fixed — `solve_socp` panicked across the FFI boundary on a zero-dimension cone block (#278)
 
 - **A zero-dimension cone block made `solve_socp` raise
