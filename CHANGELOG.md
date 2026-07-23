@@ -43,6 +43,50 @@ changes.
   All ten analytically-certified adversary instances now match the oracles
   (previously 3 mismatches), and the hunted false `primal_infeasible` on a
   barely-feasible control does not occur.
+### Fixed — active-set path certified a feasible problem infeasible when m/n ≫ 1 (#282)
+
+- **The active-set QP path (`solver_selection="qp-active-set"` and
+  `algorithm="active-set-sqp"`) returned a confident `Infeasible_Problem_Detected`
+  on a genuinely feasible problem** whenever constraints were grossly
+  over-multiplied and there was no interior (Slater fails). The adversary repro is
+  `min ½‖x−e‖² s.t. a_iᵀx ≤ 0, i=1..40` with `a_i` random unit vectors in R⁵: the
+  positive hull of `{a_i}` spans R⁵, so the feasible set collapses to exactly `{0}`
+  (all 40 rows active at a 5-D point, LICQ fails, multipliers non-unique). The true
+  optimum is `x* = 0`, and `0` is trivially feasible (`G·0 = 0 ≤ 0` exactly), yet at
+  `m/n ≥ 5` the solver reported infeasible — even when *started at the exact
+  optimum* `x0 = 0`.
+- **Root cause** (`crates/pounce-qp/src/solver.rs`, `solve_elastic`): the l1-elastic
+  phase-1 minimizes the constraint violation via an augmented QP. On this extreme
+  degeneracy the augmented active-set solve **stalls at `MaxIter`** (churning the
+  working set from an already-optimal seed — many more active rows than variables,
+  a rank-deficient active Jacobian), leaving sub-`feas_tol` residual elastic slacks.
+  `solve_elastic` then declared `Infeasible` **purely from the residual slacks,
+  ignoring whether phase-1 had actually converged** — a false certificate, since a
+  feasible problem has no Farkas proof.
+- **Fix.** Two parts. (1) *Recovery to the correct answer:* when residual slacks
+  remain, re-solve the original QP with a warm-started **phase-2** active-set solve
+  (which bypasses the elastic audit and cannot re-enter phase-1) from the
+  near-feasible points phase-1 produced; phase-2 from a feasible seed of this
+  geometry converges in a handful of pivots, recovering `x* = 0`. (2) *Honest
+  status when recovery fails:* only emit `QpStatus::Infeasible` when phase-1 itself
+  **converged** to its minimal-l1 optimum (a genuine certificate); if phase-1
+  stalled (`MaxIter` / numerical breakdown), report that non-committal status
+  instead. The SQP driver
+  (`crates/pounce-algorithm/src/sqp/sqp_alg.rs`) now maps a QP `MaxIter` /
+  `NumericalError` subproblem outcome to the new honest
+  `SqpStatus::QpStepFailed` → `Search_Direction_Becomes_Too_Small` rather than a
+  hard error or a false infeasible.
+- **Result.** Across the reported m-sweep started at the exact optimum `x0 = 0`
+  (`m = 12..40`), the path now returns `Solve_Succeeded` at `x* = 0` everywhere
+  (previously `m = 30, 40` reported `Infeasible_Problem_Detected`). From an interior
+  start `x0 = 0.1·e` where recovery cannot find the feasible point, it returns the
+  honest `Search_Direction_Becomes_Too_Small` (`success=False`) — **never**
+  `Infeasible_Problem_Detected`. The classic anti-cycling geometries that already
+  worked are unchanged: the duplicated `[0,1]⁸` hypercube (128 rows, 64 active,
+  1 iter), Beale's regularized cycling LP, the LICQ-degenerate vertex in R², and the
+  everyday convex QPs all still solve. Regression:
+  `collapsed_cone_no_interior_not_false_infeasible` in
+  `crates/pounce-qp/src/tests/analytical.rs`.
 
 ### Fixed — `sos_minimize` certified a wrong minimizer as exact on Rosenbrock (#281)
 
