@@ -277,20 +277,60 @@ fn warm_from_dict(warm: &Bound<'_, PyDict>) -> PyResult<QpWarmStart> {
 fn parse_cones(specs: Vec<(String, f64)>) -> PyResult<Vec<ConeSpec>> {
     specs
         .into_iter()
-        .map(|(kind, v)| match kind.to_ascii_lowercase().as_str() {
-            "nonneg" | "nn" | "+" => Ok(ConeSpec::Nonneg(v.round() as usize)),
-            "soc" | "q" | "secondorder" => Ok(ConeSpec::SecondOrder(v.round() as usize)),
+        .enumerate()
+        .map(|(i, (kind, v))| match kind.to_ascii_lowercase().as_str() {
+            // The nonnegative orthant is empty-safe (all its ops iterate), so a
+            // 0-row block is harmless and permitted (`min = 0`).
+            "nonneg" | "nn" | "+" => Ok(ConeSpec::Nonneg(cone_dim(&kind, i, v, 0)?)),
+            // A second-order cone needs `≥ 1` row (`m = 1` is a nonneg); `m = 0`
+            // would panic in `SecondOrderCone::new`, so reject it here (gh #278).
+            "soc" | "q" | "secondorder" => Ok(ConeSpec::SecondOrder(cone_dim(&kind, i, v, 1)?)),
             "exp" | "exponential" | "e" => Ok(ConeSpec::Exponential),
             "pow" | "power" | "p" if v > 0.0 && v < 1.0 => Ok(ConeSpec::Power(v)),
             "pow" | "power" | "p" => Err(PyValueError::new_err(format!(
-                "power-cone exponent α must be in (0, 1), got {v}"
+                "cones[{i}] ('{kind}'): power-cone exponent α must be in (0, 1), got {v}"
             ))),
-            "psd" | "sdp" | "s" => Ok(ConeSpec::Psd(v.round() as usize)),
+            // A PSD cone of size `n ≥ 1` spans `n(n+1)/2` svec rows; `n = 0`
+            // would index an empty eigenvalue vector (gh #278).
+            "psd" | "sdp" | "s" => Ok(ConeSpec::Psd(cone_dim(&kind, i, v, 1)?)),
             other => Err(PyValueError::new_err(format!(
-                "unknown cone kind '{other}' (use 'nonneg', 'soc', 'exp', 'pow', or 'psd')"
+                "cones[{i}]: unknown cone kind '{other}' \
+                 (use 'nonneg', 'soc', 'exp', 'pow', or 'psd')"
             ))),
         })
         .collect()
+}
+
+/// Validate a cone `value` that denotes an integer dimension (`nonneg`/`soc`)
+/// or matrix size (`psd`) and convert it to `usize`. Rejects non-finite,
+/// non-integer, and below-`min` values with a clear, catchable `ValueError`
+/// naming the offending cone's index, kind, and value.
+///
+/// This is the front-line guard for gh #278: a degenerate dimension (an
+/// explicit `0`, a **negative** value — which would otherwise saturate to `0`
+/// in `v.round() as usize` — or a **fractional** value below `0.5` that rounds
+/// to `0`) must never reach a cone constructor, where it panics across the FFI
+/// boundary (`SecondOrderCone::new`'s assert, `PsdCone`'s empty-vector index).
+/// `min` is `0` for the empty-safe nonnegative orthant and `1` for the
+/// second-order and PSD cones.
+fn cone_dim(kind: &str, index: usize, v: f64, min: usize) -> PyResult<usize> {
+    if !v.is_finite() {
+        return Err(PyValueError::new_err(format!(
+            "cones[{index}] ('{kind}'): dimension must be a finite integer, got {v}"
+        )));
+    }
+    let rounded = v.round();
+    if (v - rounded).abs() > 1e-9 {
+        return Err(PyValueError::new_err(format!(
+            "cones[{index}] ('{kind}'): dimension must be a whole number, got {v}"
+        )));
+    }
+    if rounded < min as f64 {
+        return Err(PyValueError::new_err(format!(
+            "cones[{index}] ('{kind}'): dimension must be ≥ {min}, got {rounded}"
+        )));
+    }
+    Ok(rounded as usize)
 }
 
 fn opts(tol: Option<f64>, max_iter: Option<usize>, collect_iterates: bool) -> QpOptions {

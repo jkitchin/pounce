@@ -166,3 +166,58 @@ def test_psd_cannot_mix_with_exp():
     with pytest.raises(ValueError):
         solve_socp(c=[1.0, 0.0, 0.0, 0.0], G=-np.eye(4), h=[0.0] * 4,
                    cones=[("psd", 2), ("exp", 3)])
+
+
+# --- gh #278: zero-dimension cone blocks must raise a clean ValueError, not
+# panic across the FFI boundary (pyo3_runtime.PanicException). ---
+
+
+def test_zero_dim_soc_raises_value_error():
+    # An explicit ("soc", 0) block used to hit SecondOrderCone::new's assert.
+    import pytest
+
+    with pytest.raises(ValueError) as exc:
+        solve_socp(c=[1.0, 1.0], G=-np.eye(2), h=[0.0, 0.0],
+                   cones=[("soc", 0), ("soc", 2)])
+    msg = str(exc.value)
+    assert "cones[0]" in msg and "soc" in msg  # names the offending cone
+
+
+def test_negative_dim_soc_raises_value_error():
+    # A negative dim must be rejected, not silently saturated to 0 by
+    # `v.round() as usize`.
+    import pytest
+
+    with pytest.raises(ValueError) as exc:
+        solve_socp(c=[1.0, 1.0], G=-np.eye(2), h=[0.0, 0.0],
+                   cones=[("soc", -1), ("soc", 2)])
+    assert "cones[0]" in str(exc.value)
+
+
+def test_fractional_dim_soc_raises_value_error():
+    # A fractional dim below 0.5 rounds to 0; reject non-integer dims outright.
+    import pytest
+
+    with pytest.raises(ValueError) as exc:
+        solve_socp(c=[1.0, 1.0], G=-np.eye(2), h=[0.0, 0.0],
+                   cones=[("soc", 0.3), ("soc", 2)])
+    assert "whole number" in str(exc.value)
+
+
+def test_zero_size_psd_raises_value_error():
+    import pytest
+
+    with pytest.raises(ValueError) as exc:
+        solve_socp(c=[1.0], G=[[1.0]], h=[0.0], cones=[("psd", 0)])
+    assert "cones[0]" in str(exc.value) and "psd" in str(exc.value)
+
+
+def test_zero_dim_nonneg_still_solves():
+    # gh #278: nonneg is empty-safe, so a leading 0-row block is permitted and
+    # the problem still solves to the same optimum as without it.
+    #   max x0 + x1  s.t.  x0 <= 1 (nonneg), |x1| <= 1 (soc)  -> (1, 1).
+    G = np.array([[1.0, 0.0], [0.0, 0.0], [0.0, -1.0]])
+    r = solve_socp(c=[-1.0, -1.0], G=G, h=[1.0, 1.0, 0.0],
+                   cones=[("nonneg", 0), ("nonneg", 1), ("soc", 2)])
+    assert r.status == "optimal"
+    np.testing.assert_allclose(r.x, [1.0, 1.0], atol=1e-5)
