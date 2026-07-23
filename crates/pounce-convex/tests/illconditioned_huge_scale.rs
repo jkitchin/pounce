@@ -64,6 +64,65 @@ fn objective(prob: &QpProblem, x: &[f64]) -> f64 {
         .sum()
 }
 
+/// Regression for gh #324: a huge Hessian coefficient paired with a *modest*
+/// gradient (`‖c‖ ≪ ‖P‖`) must not falsely certify `Optimal` at the cold start.
+///
+/// `min ½ xᵀP x + cᵀx` with `P = diag(a, b)`, `c = [-1, -1]`, no constraints —
+/// unique optimum `x* = [1/a, 1/b]`, `f* = -½(1/a + 1/b)`. The cost
+/// normalization (gh #286) divides the objective by `σ ~ max(‖P‖, ‖c‖) ~ ‖P‖`;
+/// once `‖P‖ ≳ 1/ε` the scaled cold-start dual residual `‖c/σ‖` underflows below
+/// `tol` and the embedding used to report `Optimal` at the untouched start
+/// `x = 0` (objective 0 vs the true `-½(1/a+1/b)`), its own `kkt_error` sitting
+/// at `‖c‖ = 1`. The relative-KKT re-check now rejects that certificate and the
+/// un-normalized solve recovers the true optimum.
+#[test]
+fn issue_324_huge_hessian_modest_gradient_is_not_false_optimal_at_cold_start() {
+    for (a, b) in [(1e-8, 1e8), (1e-10, 1e10), (1e8, 1e8), (1e10, 1e10)] {
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![Triplet::new(0, 0, a), Triplet::new(1, 1, b)],
+            c: vec![-1.0, -1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![],
+            ub: vec![],
+        };
+        let sol = solve_qp_ipm(&prob, &QpOptions::default(), backend);
+        assert_eq!(
+            sol.status,
+            QpStatus::Optimal,
+            "P=diag({a:.0e},{b:.0e}) must solve, got {:?}",
+            sol.status
+        );
+        // The bug terminated at iteration 0 (the untouched cold start); a
+        // genuine solve always steps.
+        assert!(
+            sol.iters > 0,
+            "P=diag({a:.0e},{b:.0e}) certified Optimal at iteration 0 (cold-start \
+             false optimum), x={:?}",
+            sol.x
+        );
+        // True optimum x* = [1/a, 1/b]; check the recovered point's own KKT
+        // residual is genuinely small (solver-independent oracle).
+        let res = sol.kkt_residuals(&prob);
+        assert!(
+            res.kkt_error() < 1e-6,
+            "P=diag({a:.0e},{b:.0e}) kkt_error {:.2e} — not a true optimum (x={:?})",
+            res.kkt_error(),
+            sol.x
+        );
+        let obj_exact = -0.5 * (1.0 / a + 1.0 / b);
+        let rel = (sol.obj - obj_exact).abs() / obj_exact.abs().max(1.0);
+        assert!(
+            rel < 1e-6,
+            "P=diag({a:.0e},{b:.0e}) objective rel error {rel} (got {}, exact {obj_exact})",
+            sol.obj
+        );
+    }
+}
+
 /// A well-conditioned but astronomically-scaled QP (`‖P‖ ~ 1e18`): the pure
 /// magnitude drives the `τ` collapse. With the objective normalization it
 /// recovers the *exact* clamped optimum in a handful of iterations.

@@ -1372,6 +1372,32 @@ fn hsde_cost_scale(prob: &QpProblem, tol: f64) -> f64 {
     }
 }
 
+/// Whether a solution the cost-normalized HSDE path certified `Optimal` is a
+/// *genuine* optimum of `prob` (the original, un-normalized problem), rather
+/// than a false certificate manufactured by the objective scaling (gh #324).
+///
+/// The test is the solution's **relative** KKT residual: each residual divided
+/// by the natural magnitude of its own terms (the stationarity residual by the
+/// objective-gradient scale `‖Px‖∞ ∨ ‖c‖∞`, the primal by the rhs scale). That
+/// ratio is invariant to the objective scaling σ, so a true optimum sits at
+/// `tol`-level relative accuracy regardless of σ, while the spurious cold-start
+/// certificate — accepted only because `‖c/σ‖ < tol` in the scaled metric —
+/// shows an `O(1)` relative residual. The `1e-3` cut sits three orders below
+/// that `O(1)` failure and three orders above a genuine solve's relative
+/// accuracy (the #286 huge-magnitude regression converges to ≲ 1e-6), so it
+/// separates the two cleanly without second-guessing a real large-scale solve.
+fn normalized_optimum_is_genuine(prob: &QpProblem, sol: &QpSolution) -> bool {
+    let res = sol.kkt_residuals(prob);
+    let mut px = vec![0.0; prob.n];
+    prob.p_mul(&sol.x, &mut px);
+    let gscale = inf_norm(&px).max(inf_norm(&prob.c)).max(1.0);
+    let pscale = inf_norm(&prob.b).max(inf_norm(&prob.h)).max(1.0);
+    let rel = (res.dual_infeasibility / gscale)
+        .max(res.primal_infeasibility / pscale)
+        .max(res.complementarity / gscale.max(pscale));
+    rel <= 1e-3
+}
+
 /// Bounds-agnostic Mehrotra predictor-corrector core. `prob.lb`/`ub` are
 /// ignored here; the public [`solve_qp_ipm`] handles bound expansion.
 fn solve_qp_core<F>(
@@ -1415,11 +1441,27 @@ where
         let sigma = hsde_cost_scale(prob, opts.tol);
         if sigma != 1.0 {
             let scaled = prob.scaled_objective(1.0 / sigma);
-            let mut sol = crate::hsde::solve_conic_hsde(&scaled, cone, opts, make_backend, None);
+            let mut sol =
+                crate::hsde::solve_conic_hsde(&scaled, cone, opts, &mut make_backend, None);
             for v in sol.y.iter_mut().chain(sol.z.iter_mut()) {
                 *v *= sigma;
             }
             sol.obj *= sigma;
+            // gh #324: the cost normalization divides the objective by σ (sized
+            // to ‖P‖∞). When ‖c‖ ≪ σ — a huge Hessian coefficient paired with a
+            // modest gradient, e.g. `P = diag(1e-10, 1e10)`, `c = [-1, -1]` — the
+            // *scaled* cold-start dual residual ‖c/σ‖ underflows below `tol`, so
+            // the embedding certifies `Optimal` at the untouched start (x = 0),
+            // nowhere near stationary in the original metric (kkt_error ≈ ‖c‖).
+            // A normalized `Optimal` must therefore be re-checked against the
+            // true, un-normalized *relative* KKT residual. When it is spurious
+            // the un-normalized solve — well-conditioned whenever σ has not
+            // actually collapsed τ, which is exactly the ‖c‖ ≪ σ regime — reaches
+            // the real optimum; if that solve cannot converge either, its honest
+            // non-`Optimal` status stands (never a false `Optimal`).
+            if sol.status == QpStatus::Optimal && !normalized_optimum_is_genuine(prob, &sol) {
+                return crate::hsde::solve_conic_hsde(prob, cone, opts, &mut make_backend, None);
+            }
             return sol;
         }
         return crate::hsde::solve_conic_hsde(prob, cone, opts, make_backend, None);
