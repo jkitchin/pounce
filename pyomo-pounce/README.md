@@ -19,7 +19,7 @@ install, `pounce` is on your `PATH` and Pyomo finds it automatically.
 ## Usage
 
 ```python
-import pyomo_pounce  # registers the solver
+import pyomo_pounce  # registers the solver — REQUIRED before SolverFactory('pounce')
 from pyomo.environ import *
 
 model = ConcreteModel()
@@ -30,6 +30,25 @@ solver = SolverFactory('pounce')
 result = solver.solve(model, tee=True)
 print(f"x* = {value(model.x)}")  # 2.0
 ```
+
+> **`import pyomo_pounce` is required.** Without it, `SolverFactory('pounce')`
+> raises a clear `UnknownSolver` / "plugin not registered" error — it does not
+> silently run some other `pounce`. With it imported, the plugin runs the
+> `pounce` binary **bundled in the `pounce-solver` wheel**, independent of
+> `PATH`. Only a source/dev install without that wheel falls back to a `pounce`
+> on `PATH`, in which case the plugin warns.
+>
+> To see exactly which binary will run (and whether a stale or unrelated
+> `pounce` earlier on `PATH` would shadow it), call:
+>
+> ```python
+> import pyomo_pounce
+> pyomo_pounce.check_binary()
+> ```
+>
+> The check compares the git **commit** embedded in `pounce --about`, not the
+> version string — two builds can share the same `X.Y.Z` while differing in
+> behavior (as a binary from before/after a fix does).
 
 ## Solver Options
 
