@@ -9,6 +9,42 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the impossible-bound guard now lives in the convex core (#295, completes #275)
+
+- **A `QpProblem` with a box that admits no finite point — a *present* `+∞`
+  lower bound (`lb ≥ BOUND_INF`) or a *present* `−∞` upper bound
+  (`ub ≤ −BOUND_INF`) — was silently mishandled by the `pounce-convex` core and
+  could be reported `Optimal` at a point violating the bound by an infinite
+  margin.** #275 (fixed in #291) rejected these sign-inconsistent infinite
+  bounds, but the fix lived *entirely* in the Python layer
+  (`python/pounce/qp.py::_validate`, `python/pounce/_minimize.py`). The core's
+  bound-presence test (`expand_bounds` in `crates/pounce-convex/src/ipm.rs`) is
+  sign-agnostic — it keys only on magnitude (`ub < BOUND_INF`,
+  `lb > -BOUND_INF`) — so any surface reaching the core without
+  `_validate` (the raw `_pounce` PyO3 bindings, `pounce-convex` used directly as
+  a Rust crate) got the pre-#275 wrong `optimal`.
+  - **Fix (defense in depth).** The invariant now lives in the core, so every
+    surface inherits it. A new `QpProblem::bounds_admit_no_point` screen maps an
+    impossible box to `QpStatus::PrimalInfeasible` — the same class the finite
+    reversed box (`lb > ub`) already produces — at the earliest point of every
+    bound-accepting solve entry (`solve_qp_ipm`, `_warm`, `_debug`;
+    `solve_socp_ipm`, `_debug`) *before* the sign-agnostic bound expansion, and
+    at the top of `presolve` (`presolve.rs`, beside the existing reversed-bound
+    detection) so a presolve-then-solve caller is covered even when the solver
+    is otherwise reached directly.
+  - **Absent vs. impossible preserved.** An *absent* one-sided bound
+    (`lb ≤ −BOUND_INF` / `ub ≥ +BOUND_INF`, the normal `±∞` encoding for
+    "unbounded on that side") is untouched and still solves; a fixed variable
+    (`lb == ub`) still solves; a finite reversed box (`lb > ub`) still reports
+    `PrimalInfeasible`.
+  - The Python-layer `_validate` guard is retained as the first line of defense
+    (it raises a `ValueError` with an index-named message earlier, before the
+    solve). This change makes the core a certified second line.
+  - Verified by reproducing the wrong `optimal` on the raw `_pounce` binding on
+    `main` and confirming it now returns `primal_infeasible`
+    (`python/tests/test_qp_host.py::test_raw_binding_rejects_impossible_bounds`,
+    plus Rust unit tests in `crates/pounce-convex/tests/bounded_form.rs`).
+
 ### Tests — external/analytic dual-SIGN regression guard (#294, hardening after #271/#272/#287)
 
 - **A durable guard so a constraint-dual sign inversion cannot ship silently

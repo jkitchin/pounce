@@ -427,6 +427,15 @@ fn presolve_once(prob: &QpProblem, soc_row: &[bool]) -> PresolveOutcome {
     let n = prob.n;
     let m_eq = prob.m_eq();
     let m_ineq = prob.m_ineq();
+    // gh #295: a *present* lower bound at `+∞` or upper bound at `−∞` admits no
+    // finite point — the same primal-infeasible class as a finite reversed box
+    // (`tlb[k] > tub[k]`, detected during bound tightening below). Catch it up
+    // front so an impossible bound is never mistaken for an *absent* one (the
+    // normal one-sided `±∞` encoding, which stays feasible). See
+    // [`QpProblem::bounds_admit_no_point`].
+    if prob.bounds_admit_no_point() {
+        return PresolveOutcome::Infeasible;
+    }
     let is_soc_row = |i: usize| soc_row.get(i).copied().unwrap_or(false);
     // A column is conic-coupled if it appears in any SOC inequality row.
     let mut soc_col = vec![false; n];

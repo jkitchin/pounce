@@ -89,6 +89,25 @@ impl QpProblem {
         self.lb.iter().any(|&v| v > -BOUND_INF) || self.ub.iter().any(|&v| v < BOUND_INF)
     }
 
+    /// True when the variable box admits **no finite point**: a *present*
+    /// lower bound at `+∞` (`lb ≥ BOUND_INF`) or a *present* upper bound at
+    /// `−∞` (`ub ≤ −BOUND_INF`). Such a bound is genuinely primal-infeasible
+    /// (gh #295) — the same class as a finite reversed box (`lb > ub`).
+    ///
+    /// Deliberately distinct from an *absent* bound (`lb ≤ −BOUND_INF` /
+    /// `ub ≥ +BOUND_INF`, the normal one-sided `±∞` encoding), which is
+    /// feasible and left to the solver. The interior-point setup
+    /// ([`crate::ipm`]'s `expand_bounds`) is sign-agnostic — it tests only a
+    /// bound's *presence* by magnitude (`ub < BOUND_INF`, `lb > -BOUND_INF`)
+    /// — so without this screen a `+∞` lower / `−∞` upper bound is silently
+    /// mishandled and a point violating it can be reported `Optimal`. Every
+    /// solve entry point (and presolve) consults this so the rejection holds
+    /// on every surface — the raw `_pounce` bindings and direct Rust callers
+    /// included — mirroring the Python-layer `_validate` guard (#275 / #291).
+    pub(crate) fn bounds_admit_no_point(&self) -> bool {
+        (0..self.n).any(|i| self.lb_of(i) >= BOUND_INF || self.ub_of(i) <= -BOUND_INF)
+    }
+
     /// A copy of this problem with the **objective** data scaled by `factor`
     /// (`P ← factor·P`, `c ← factor·c`); constraints, bounds, and the feasible
     /// set are untouched. Scaling the objective by a positive constant leaves
