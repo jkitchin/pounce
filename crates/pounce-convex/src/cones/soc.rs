@@ -35,7 +35,13 @@ pub struct SecondOrderCone {
 
 impl SecondOrderCone {
     pub fn new(m: usize) -> Self {
-        assert!(m >= 1, "second-order cone needs dimension ≥ 1");
+        // A meaningful second-order cone has `m ≥ 1` (`m = 1` degenerates to a
+        // single nonnegative coordinate); callers must validate the dimension
+        // first (the Python binding does, in `parse_cones` — gh #278). We no
+        // longer `assert!` here: a stray `m = 0` yields a trivial, panic-free
+        // block instead of aborting across the FFI boundary. Its Jordan/step
+        // methods assume `m ≥ 1` and must not be *stepped* at `m = 0`, but
+        // constructing and querying such a block never panics.
         SecondOrderCone { m }
     }
 
@@ -112,7 +118,9 @@ impl Cone for SecondOrderCone {
 
     fn identity(&self, out: &mut [f64]) {
         out.iter_mut().for_each(|v| *v = 0.0);
-        out[0] = 1.0; // e = (1, 0, …, 0)
+        if let Some(first) = out.first_mut() {
+            *first = 1.0; // e = (1, 0, …, 0); no-op on a degenerate m = 0 block
+        }
     }
 
     fn dim(&self) -> usize {
@@ -284,6 +292,22 @@ mod tests {
         w.iter()
             .map(|row| row.iter().zip(x).map(|(a, b)| a * b).sum())
             .collect()
+    }
+
+    /// gh #278: a degenerate `m = 0` cone (which a Python caller could reach
+    /// via `("soc", 0)`, a negative dim, or a fractional dim rounding to 0)
+    /// must *construct and query* without panicking — the raw `assert!` that
+    /// used to live in `new` aborted across the FFI boundary. The Python
+    /// binding rejects such a dim in `parse_cones`; this is defense in depth.
+    #[test]
+    fn zero_dimension_cone_does_not_panic() {
+        let c = SecondOrderCone::new(0);
+        assert_eq!(c.dim(), 0);
+        assert_eq!(c.degree(), 2);
+        // `identity` on an empty slice is a no-op, not an out-of-bounds write.
+        let mut e: Vec<f64> = Vec::new();
+        c.identity(&mut e);
+        assert!(e.is_empty());
     }
 
     #[test]

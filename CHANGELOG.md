@@ -9,6 +9,28 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `solve_socp` panicked across the FFI boundary on a zero-dimension cone block (#278)
+
+- **A zero-dimension cone block made `solve_socp` raise
+  `pyo3_runtime.PanicException`** (a Rust panic crossing the FFI boundary,
+  which Python cannot catch as a normal error) instead of a clean, catchable
+  `ValueError`. The validator only checked that the cone dimensions *sum* to
+  `rows(G)`, so a 0-dim block — contributing 0 rows — passed every documented
+  check and then aborted inside a cone constructor: `SecondOrderCone::new(0)`
+  hit an `assert!`, and `PsdCone` indexed `vals[0]` on an empty eigenvalue
+  vector. It was reachable three ways, all ordinary user input: an explicit
+  `("soc", 0)` / `("psd", 0)`; a **negative** dimension (silently saturated to
+  `0` by `v.round() as usize`); and a **fractional** dimension below `0.5`
+  (rounded to `0`). `parse_cones` now validates each cone's dimension at the
+  Python boundary — rejecting non-finite, non-integer, negative, and
+  below-minimum values (`soc`/`psd` need `≥ 1`; the empty-safe nonnegative
+  orthant still permits `0`) — with a clear `ValueError` naming the offending
+  cone's index, kind, and value. As defense in depth, the constructors no
+  longer panic on a `0` reaching them from any path: `SecondOrderCone::new`
+  drops its `assert!`, and `PsdCone::min_eig` / `max_step` short-circuit the
+  degenerate `n = 0` block. A valid `("nonneg", 0)` block still solves
+  unchanged, and every well-posed SOCP/SDP/exp/pow solve is unaffected.
+
 ### Fixed — convex `tol` / `max_iter` options were unvalidated (#277)
 
 - **`solve_qp` / `solve_socp` (and the batch, multi-RHS, factorization, and

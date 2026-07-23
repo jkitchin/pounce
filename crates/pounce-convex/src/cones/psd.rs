@@ -138,6 +138,12 @@ impl PsdCone {
     /// Smallest eigenvalue of `smat(point)` — `> 0` iff strictly interior.
     pub fn min_eig(&self, point: &[f64]) -> f64 {
         let n = self.n;
+        if n == 0 {
+            // A degenerate 0×0 block has an empty spectrum: vacuously PD, so
+            // report +∞ rather than indexing an empty eigenvalue vector
+            // (gh #278). Callers must validate `n ≥ 1` (`parse_cones` does).
+            return f64::INFINITY;
+        }
         let mut m = vec![0.0; n * n];
         smat(point, n, &mut m);
         let mut vals = vec![0.0; n];
@@ -222,6 +228,12 @@ impl PsdCone {
     /// interiority check applies only to the drivers' `tau < 1`.
     pub fn max_step(&self, v: &[f64], dv: &[f64], tau: f64) -> f64 {
         let n = self.n;
+        if n == 0 {
+            // No constraint from an empty 0×0 block — take the full (capped)
+            // step instead of indexing `vals[0]` on an empty spectrum
+            // (gh #278). Callers must validate `n ≥ 1` (`parse_cones` does).
+            return tau.min(1.0);
+        }
         let mut vmat = vec![0.0; n * n];
         smat(v, n, &mut vmat);
         let mut vals = vec![0.0; n];
@@ -557,6 +569,20 @@ mod tests {
         let mut c = vec![0.0; n * n];
         matmul(a, b, n, &mut c);
         c
+    }
+
+    /// gh #278: a degenerate `n = 0` PSD cone must not panic. `PsdCone::new`
+    /// never asserted, but `min_eig`/`max_step` used to index `vals[0]` on an
+    /// empty eigenvalue vector, aborting across the FFI boundary. The Python
+    /// binding rejects such a size in `parse_cones`; this is defense in depth.
+    #[test]
+    fn zero_size_cone_does_not_panic() {
+        let c = PsdCone::new(0);
+        assert_eq!(c.dim(), 0); // n(n+1)/2 = 0
+        let empty: Vec<f64> = Vec::new();
+        assert_eq!(c.min_eig(&empty), f64::INFINITY);
+        assert_eq!(c.max_step(&empty, &empty, 0.95), 0.95);
+        assert!(c.in_cone(&empty, 1e-9));
     }
 
     #[test]
