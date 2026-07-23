@@ -1777,6 +1777,13 @@ fn run_convex_qp(
         class.name(),
         sol.iters,
     );
+    // gh #293 naive-caller guardrail: if the solve did not cleanly converge and
+    // the objective curvature is tiny relative to the data, say so — the status
+    // is honest but a naive caller might otherwise treat a truncated objective
+    // as the optimum.
+    if let Some(warn) = sol.scaling_diagnostic(&qp) {
+        eprintln!("pounce: {warn}");
+    }
 
     // Final KKT residuals from pounce-convex; reused for both the Ipopt-style
     // summary block and the JSON report below.
