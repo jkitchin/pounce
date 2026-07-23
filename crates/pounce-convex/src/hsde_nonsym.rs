@@ -28,7 +28,9 @@
 //! The barrier oracles, conjugate-gradient shadow iterate, and the scaling
 //! itself live in [`crate::cones::exp`]; this module is the outer iteration.
 
-use crate::cones::{BarrierCone, Cone, ConeBlock, ExponentialCone, PowerCone, SecondOrderCone};
+use crate::cones::{
+    BarrierCone, Cone, ConeBlock, ConeSpec, ExponentialCone, PowerCone, SecondOrderCone,
+};
 use crate::debug::{ConvexDebugState, fire};
 use crate::ipm::{QpOptions, build_rhs, detect_infeasibility_with, dot, inf_norm, split_step};
 use crate::qp::{QpProblem, QpSolution, QpStatus, breakdown_status};
@@ -446,6 +448,21 @@ impl NsCone {
         true
     }
 
+    /// This cone product as the [`ConeSpec`] list consumed by
+    /// [`QpSolution::kkt_residuals_conic`], so the recovered point can be scored
+    /// against the same conic optimality measure the direct/symmetric paths use.
+    fn cone_specs(&self) -> Vec<ConeSpec> {
+        self.blocks
+            .iter()
+            .map(|&(_, b)| match b {
+                NsBlock::Orthant(n) => ConeSpec::Nonneg(n),
+                NsBlock::SecondOrder(m) => ConeSpec::SecondOrder(m),
+                NsBlock::Nonsym(NonsymCone::Exp(_)) => ConeSpec::Exponential,
+                NsBlock::Nonsym(NonsymCone::Power(pc)) => ConeSpec::Power(pc.alpha),
+            })
+            .collect()
+    }
+
     /// Self-dual starting iterate `e` (orthant: ones; non-symmetric cone: the
     /// cone's `interior_reference`, which lies in both `K` and `K*`). The
     /// corrector recenters from here, so an exact central point is not needed.
@@ -507,6 +524,116 @@ enum BlockScaling {
 /// representation. Above this, the aux form avoids the dense `O(m²)` fill that
 /// the review (L41) flagged for large SOCs mixed with exp cones.
 const SOC_DENSE_MAX_DIM: usize = 3;
+
+/// Multiple of `tol` at which a *scale-relative* true conic KKT residual is
+/// tight enough to promote a `near_opt` breakdown / iteration-limit iterate from
+/// `OptimalInaccurate` to `Optimal` (see the post-loop adjudication in
+/// [`run_nonsym`]). At the default `tol = 1e-8` this is `1e-6`: two orders below
+/// the reduced-accuracy salvage band (`√tol = 1e-4`) and one order below the
+/// in-loop `near_opt` band (`1e3·tol = 1e-5`), so a genuinely reduced-accuracy
+/// point stays `OptimalInaccurate` while a point solved to the exp/power cone's
+/// achievable floor (empirically ~1e-7 scale-relative) is certified `Optimal`.
+/// Because it multiplies `tol`, a caller-tightened tolerance tightens the
+/// promotion gate in lock-step.
+const PROMOTE_REL_TOL_FACTOR: f64 = 1e2;
+
+/// Relative slack by which the promotion's dual-feasibility check tolerates the
+/// recovered dual `ẑ` lying *outside* `K*`. At a true conic optimum complementary
+/// slackness puts `ẑ` on the boundary of `K*` (dual-slack margin → 0), so the
+/// membership test must accept the closure `cl(K*)` up to numerical noise rather
+/// than demand a strict interior. Kept far below `PROMOTE_REL_TOL_FACTOR·tol` so
+/// dual feasibility is verified far more tightly than the overall KKT budget.
+const DUAL_CLOSURE_SLACK: f64 = 1e-9;
+
+/// Scale-relative true conic KKT residual of the **un-homogenized** iterate
+/// `(x, y, z)/τ`, or `None` when it is not a valid optimality certificate.
+///
+/// Returns `None` when `τ ≤ 0` (an infeasibility ray, where un-homogenizing is
+/// meaningless) or when `ẑ = z/τ` has left the dual cone `K*` — without
+/// `ẑ ∈ K*` the residuals below are not a KKT certificate however small they
+/// are (this is the safety gate that keeps the promotion off infeasible /
+/// unbounded solves). Otherwise it scores the recovered point with
+/// [`QpSolution::kkt_residuals_conic`] (each block measured against *its own*
+/// cone) and normalizes each residual by the magnitude of its own constituent
+/// terms (Clarabel-style), so the certificate is invariant to problem scaling.
+fn true_kkt_scale_rel(
+    prob: &QpProblem,
+    cone: &NsCone,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    tau: f64,
+) -> Option<f64> {
+    if !(tau > 0.0) {
+        return None;
+    }
+    let inv = 1.0 / tau;
+    let z_hat: Vec<f64> = z.iter().map(|v| v * inv).collect();
+    // Dual feasibility `ẑ ∈ K*` is required for the residuals below to be a KKT
+    // certificate. But at a true optimum complementary slackness places `ẑ` on
+    // the *boundary* of `K*` (its dual-slack margin → 0), so the strict-interior
+    // `in_dual_cone(·, +tol)` test is the wrong one here — it rejects exactly the
+    // duals optimality produces (the p=4 power ball's dual sits ~1e-11 inside the
+    // boundary, well under a 1e-9 interior margin). Test membership in the
+    // *closure* instead, tolerating a small numerical slack outside: a negative
+    // tolerance turns `in_dual_cone`'s interior margin (`margin > tol·(1+‖·‖)`)
+    // into the relaxed-closure test `margin > −slack·(1+‖·‖)`, so `ẑ` may lie up
+    // to `DUAL_CLOSURE_SLACK` (relative) outside `K*`. That slack is far tighter
+    // than the scale-relative promotion budget, so it never admits a dual that
+    // is not, to numerical precision, feasible.
+    if !cone.in_dual_cone(&z_hat, -DUAL_CLOSURE_SLACK) {
+        return None;
+    }
+    let x_hat: Vec<f64> = x.iter().map(|v| v * inv).collect();
+    let y_hat: Vec<f64> = y.iter().map(|v| v * inv).collect();
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
+
+    // True conic KKT residuals (primal cone-membership, stationarity,
+    // per-block complementarity) at the recovered point.
+    let candidate = QpSolution {
+        status: QpStatus::Optimal,
+        x: x_hat.clone(),
+        y: y_hat.clone(),
+        z: z_hat.clone(),
+        z_lb: vec![0.0; n],
+        z_ub: vec![0.0; n],
+        obj: 0.0,
+        iters: 0,
+        iterates: Vec::new(),
+    };
+    let res = candidate.kkt_residuals_conic(prob, &cone.cone_specs());
+
+    // Scale normalizers: each residual by the magnitude of the terms that
+    // compose it, so a large-data problem is not held to an unreachable
+    // absolute floor and a well-scaled one is not judged loosely.
+    let inf = |v: &[f64]| v.iter().fold(0.0f64, |m, &a| m.max(a.abs()));
+    let mut px = vec![0.0; n];
+    prob.p_mul(&x_hat, &mut px);
+    let mut aty = vec![0.0; n];
+    prob.at_mul(&y_hat, &mut aty);
+    let mut gtz = vec![0.0; n];
+    prob.gt_mul(&z_hat, &mut gtz);
+    let scale_d = inf(&px).max(inf(&aty)).max(inf(&gtz)).max(inf(&prob.c));
+    let mut ax = vec![0.0; m_eq];
+    prob.a_mul(&x_hat, &mut ax);
+    let mut gx = vec![0.0; m_ineq];
+    prob.g_mul(&x_hat, &mut gx);
+    let s_hat: Vec<f64> = (0..m_ineq).map(|i| prob.h[i] - gx[i]).collect();
+    let scale_p = inf(&ax)
+        .max(inf(&gx))
+        .max(inf(&s_hat))
+        .max(inf(&prob.b))
+        .max(inf(&prob.h));
+    let obj = 0.5 * dot(&x_hat, &px) + dot(&prob.c, &x_hat);
+    let scale_g = obj.abs();
+
+    let pres_rel = res.primal_infeasibility / (1.0 + scale_p);
+    let dres_rel = res.dual_infeasibility / (1.0 + scale_d);
+    let gap_rel = res.complementarity / (1.0 + scale_g);
+    Some(pres_rel.max(dres_rel).max(gap_rel))
+}
 
 /// KKT value-array positions for one cone block.
 enum ZPos {
@@ -1488,12 +1615,41 @@ where
     // fires for infeasible/unbounded problems (their residuals never get this
     // small — the embedding drives τ → 0 and the certificate path triggers
     // first) and never relaxes the clean convergence test above (still `tol`).
+    // Post-loop optimality adjudication. The in-loop test certifies `Optimal`
+    // only on an *absolute* KKT residual below `tol`. On a non-symmetric cone
+    // (exp/power) the barrier Hessian's conditioning worsens near the boundary
+    // (ψ → 0), so that absolute residual can floor a little above `tol` at a
+    // genuinely optimal point; the driver then breaks down `near_opt` (labelling
+    // the iterate `OptimalInaccurate`) or exhausts its budget. Re-adjudicate the
+    // recovered point against the *true, scale-relative* conic KKT residual —
+    // the scale-invariant optimality measure for a convex conic program — and
+    // promote to `Optimal` only when that certificate is genuinely tight *and*
+    // the recovered dual is in `K*`:
+    //   * `ẑ ∈ K*` and scale-relative KKT error < `PROMOTE_REL_TOL_FACTOR·tol`
+    //       → `Optimal`
+    //   * best iterate within the reduced-accuracy band (`√tol`)
+    //       → `OptimalInaccurate`
+    //   * otherwise the loop's own verdict stands.
+    //
+    // This never *relaxes* the in-loop `tol` test (that already returned) and is
+    // strictly safe: the promotion is gated on `ẑ ∈ K*` (dual feasibility) plus
+    // a scale-relative residency two orders below the reduced-accuracy band, so
+    // for a convex program — where KKT is sufficient for global optimality — it
+    // can only fire at a genuine optimum. Infeasible / unbounded solves
+    // terminate with a certificate status (`PrimalInfeasible` / `DualInfeasible`)
+    // and never reach here; a τ → 0 ray or an out-of-`K*` dual returns `None`
+    // from the certificate and is never promoted.
     if matches!(
         status,
-        QpStatus::NumericalFailure | QpStatus::IterationLimit
+        QpStatus::OptimalInaccurate | QpStatus::NumericalFailure | QpStatus::IterationLimit
     ) {
+        // Restore the lowest-residual iterate we saw (τ > 0) — the point we
+        // actually adjudicate. For a `near_opt` breakdown this is at least as
+        // good as the breakdown iterate; it also carries the prior NF/IL →
+        // reduced-accuracy salvage.
         let reduced_acc = opts.tol.sqrt();
-        if best_res < reduced_acc {
+        let restore = best_res < reduced_acc;
+        if restore {
             if let Some((bx, by, bz, bs, btau, _bkappa)) = best.take() {
                 // κ is not read downstream (the recovery un-homogenizes by
                 // 1/τ); restoring x/y/z/s/τ is what the solution recovery and
@@ -1503,9 +1659,17 @@ where
                 z = bz;
                 s = bs;
                 tau = btau;
-                status = QpStatus::OptimalInaccurate;
             }
         }
+        let promoted = true_kkt_scale_rel(prob, &cone, &x, &y, &z, tau)
+            .is_some_and(|e| e < PROMOTE_REL_TOL_FACTOR * opts.tol);
+        status = if promoted {
+            QpStatus::Optimal
+        } else if restore {
+            QpStatus::OptimalInaccurate
+        } else {
+            status
+        };
     }
 
     let inv = if tau.abs() > 0.0 { 1.0 / tau } else { 1.0 };
@@ -2407,5 +2571,93 @@ mod tests {
             ub: vec![],
         };
         assert!(!detect_cone_domain_infeasible(&pw, &[NsBlock::power(0.5)]));
+    }
+
+    // ---- gh #329: the scale-relative optimality certificate that gates the
+    // OptimalInaccurate → Optimal promotion. Its safety rests on two hard gates
+    // (`τ > 0` and `ẑ ∈ cl(K*)`); these pin them directly. ----
+
+    /// An infeasibility ray (`τ ≤ 0`) has no meaningful un-homogenized point, so
+    /// the certificate returns `None` and can never promote a ray to `Optimal`.
+    #[test]
+    fn scale_rel_cert_rejects_tau_nonpositive() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0)],
+            h: vec![0.0, 1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        let z = [0.0, 0.0, 0.0];
+        assert_eq!(
+            true_kkt_scale_rel(&prob, &cone, &[0.0], &[], &z, 0.0),
+            None,
+            "τ = 0 must yield no certificate"
+        );
+        assert_eq!(
+            true_kkt_scale_rel(&prob, &cone, &[0.0], &[], &z, -1.0),
+            None,
+            "τ < 0 must yield no certificate"
+        );
+    }
+
+    /// A dual `ẑ` well outside `K*` is not a KKT certificate however small the
+    /// other residuals; the `ẑ ∈ cl(K*)` gate returns `None` (never promoted).
+    /// The exp dual `K_exp*` requires `u < 0`, so `(1, 1, 1)` is firmly outside.
+    #[test]
+    fn scale_rel_cert_rejects_dual_outside_cone() {
+        let prob = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![Triplet::new(0, 0, -1.0)],
+            h: vec![0.0, 1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let cone = NsCone::new(&[NsBlock::exp()]);
+        let z_bad = [1.0, 1.0, 1.0]; // u = 1 > 0 ⇒ not in K_exp*
+        assert!(
+            !cone.in_dual_cone(&z_bad, -DUAL_CLOSURE_SLACK),
+            "sanity: (1,1,1) is outside cl(K_exp*)"
+        );
+        assert_eq!(
+            true_kkt_scale_rel(&prob, &cone, &[0.0], &[], &z_bad, 1.0),
+            None,
+            "a dual outside K* must yield no certificate"
+        );
+    }
+
+    /// The closure gate accepts a dual *on* the boundary of `K*` (where a true
+    /// conic optimum's dual sits by complementary slackness) that the old
+    /// strict-interior `+1e-9` test rejected — this is exactly what unblocks the
+    /// gh #329 promotion — while a dual a finite distance outside stays rejected.
+    #[test]
+    fn dual_closure_gate_accepts_boundary_rejects_exterior() {
+        let cone = NsCone::new(&[NsBlock::power(0.5)]);
+        // Boundary of K_{0.5}*: |u| = (v/α)^α (w/(1−α))^(1−α) = sqrt(v·w)·2.
+        // Take v = w = 0.5 ⇒ bound = sqrt(0.25)·2 = 1.0; u = 1.0 is on ∂K*.
+        let on_boundary = [1.0, 0.5, 0.5];
+        assert!(
+            !cone.in_dual_cone(&on_boundary, 1e-9),
+            "strict-interior test rejects the boundary dual (the gh #329 defect)"
+        );
+        assert!(
+            cone.in_dual_cone(&on_boundary, -DUAL_CLOSURE_SLACK),
+            "closure gate must accept the boundary dual"
+        );
+        // A dual well outside (u = 1.5 > bound = 1.0) is still rejected.
+        let exterior = [1.5, 0.5, 0.5];
+        assert!(
+            !cone.in_dual_cone(&exterior, -DUAL_CLOSURE_SLACK),
+            "closure gate must still reject an exterior dual"
+        );
     }
 }
