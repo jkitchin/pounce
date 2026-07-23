@@ -9,6 +9,37 @@ changes.
 
 ## [Unreleased]
 
+### Added — bound-multiplier `.sol` suffixes for Ipopt-parity reduced costs (#296)
+
+- **The `.sol` writer now emits `ipopt_zL_out` / `ipopt_zU_out` variable-suffix
+  blocks — the reduced costs / bound sensitivities Ipopt writes and Pyomo
+  surfaces as `model.ipopt_zL_out[var]` / `model.ipopt_zU_out[var]` (AMPL's
+  variable `.rc`).** pounce emitted the constraint duals (correctly signed
+  since #287) but *no* bound multipliers, so a user migrating from Ipopt read
+  `None` back with no error — a silent parity gap surfaced in the #271/#272
+  dual audit. The underlying multipliers already existed internally
+  (`mult_x_L`/`mult_x_U`, confirmed correct against Ipopt in the #271 audit);
+  they are now written out.
+  - **Sign convention, verified numerically against Ipopt 3.14** on
+    bound-active models: Ipopt writes `ipopt_zL_out = +z_l` (≥ 0 at an active
+    lower bound) and `ipopt_zU_out = −z_u` (≤ 0 at an active upper bound) —
+    both equal to the objective-gradient component at the bound. pounce now
+    matches to solver tolerance (e.g. `min (x−3)² s.t. 0 ≤ x ≤ 1`: `x*=1`,
+    `ipopt_zU_out[x] = −4`, matching Ipopt's `−3.99999998…`).
+  - **All three `.sol`-producing paths covered.** The NLP interior-point path
+    lifts the converged bound multipliers through
+    `OrigIpoptNlp::finalize_solution_z_l`/`_z_u` (fixed-var + scaling maps
+    unwound, `obj_scale_factor` divided out); the convex QP and SOCP paths fold
+    variable bounds into `G` rows, so a new
+    `qp_extract::recover_bound_mults` reads the multipliers back out of the
+    inequality-multiplier vector and applies the maximize `sign`.
+  - **Pyomo populated automatically.** Pyomo's ASL `.sol` reader maps the suffix
+    blocks straight onto the model suffixes, so `model.ipopt_zL_out` /
+    `model.ipopt_zU_out` now come back populated after
+    `SolverFactory('pounce').solve(model)` — matching Ipopt exactly (both
+    leave the derived `rc` suffix `None`; AMPL, not the reader, derives `.rc`).
+    No `pyomo-pounce` changes were needed.
+
 ### Fixed — the impossible-bound guard now lives in the convex core (#295, completes #275)
 
 - **A `QpProblem` with a box that admits no finite point — a *present* `+∞`

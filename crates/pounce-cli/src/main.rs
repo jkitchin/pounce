@@ -822,11 +822,25 @@ pub fn main() -> ExitCode {
     > = Rc::new(RefCell::new(None));
     let sens_capture: Rc<RefCell<Option<Vec<pounce_common::types::Number>>>> =
         Rc::new(RefCell::new(None));
+    // Converged bound multipliers, lifted to full-x order and the user's
+    // unscaled-Lagrangian convention (Ipopt `ipopt_zL_out`/`ipopt_zU_out`).
+    // Both are `≥ 0` at an active bound; zero elsewhere. Written as `.sol`
+    // suffix blocks so Pyomo's `model.ipopt_zL_out` / AMPL `.rc` are
+    // populated for reduced-cost / sensitivity work (gh #296).
+    let bound_mult_capture: Rc<
+        RefCell<
+            Option<(
+                Vec<pounce_common::types::Number>,
+                Vec<pounce_common::types::Number>,
+            )>,
+        >,
+    > = Rc::new(RefCell::new(None));
     let red_hessian_capture: Rc<RefCell<Option<sens::RedHessianResult>>> =
         Rc::new(RefCell::new(None));
     if args.json_output.is_some() || sol_path.is_some() || sens_active || args.compute_red_hessian {
         let cap = Rc::clone(&nominal_capture);
         let sens_cap = Rc::clone(&sens_capture);
+        let bmult_cap = Rc::clone(&bound_mult_capture);
         let rh_cap = Rc::clone(&red_hessian_capture);
         let suffixes_cb = nl_suffixes.clone();
         let dims_cb = nl_dims;
@@ -883,6 +897,20 @@ pub fn main() -> ExitCode {
                 }
             }
             *cap.borrow_mut() = Some((x.clone(), lambda));
+
+            // Lift the algorithm-side compressed bound multipliers to
+            // full-x order in the user's convention. `finalize_solution_z_l`
+            // /`_z_u` unwind the fixed-var/scaling maps and divide out
+            // `obj_scale_factor`, yielding Ipopt-convention duals
+            // (`z_l ≥ 0` at an active lower bound, `z_u ≥ 0` at an active
+            // upper bound) — exactly Ipopt's `ipopt_zL_out`/`ipopt_zU_out`
+            // (gh #296). A non-`OrigIpoptNlp` returns empty here and no
+            // bound-multiplier suffixes are written.
+            let z_l_full = nlp.borrow().finalize_solution_z_l(&*curr.z_l);
+            let z_u_full = nlp.borrow().finalize_solution_z_u(&*curr.z_u);
+            if !z_l_full.is_empty() || !z_u_full.is_empty() {
+                *bmult_cap.borrow_mut() = Some((z_l_full, z_u_full));
+            }
 
             // Suffix-driven post-processing on the converged KKT
             // system: the parametric sensitivity step and (on request)
@@ -1248,6 +1276,34 @@ pub fn main() -> ExitCode {
             name: "sens_sol_state_1".to_string(),
             target: nl_writer::SolSuffixTarget::Var,
             values: nl_writer::SolSuffixValues::Real(xp),
+        });
+    }
+    // Bound-multiplier suffixes (`ipopt_zL_out` / `ipopt_zU_out`): the
+    // reduced costs / bound sensitivities. Pyomo maps these `.sol` suffix
+    // blocks straight onto `model.ipopt_zL_out` / `model.ipopt_zU_out` and
+    // AMPL onto variable `.rc` (gh #296).
+    //
+    // Sign convention — verified numerically against Ipopt 3.14 on
+    // bound-active models (gh #296): Ipopt's AMPL `.sol` writes
+    //   `ipopt_zL_out = +z_l`  (≥ 0 at an active lower bound), and
+    //   `ipopt_zU_out = −z_u`  (≤ 0 at an active upper bound),
+    // i.e. both equal the objective-gradient component at the bound
+    // (`∂f/∂x_i`). `finalize_solution_z_l`/`_z_u` return the internal
+    // multipliers with `z_l, z_u ≥ 0` (Ipopt's internal convention), so
+    // the lower block is emitted as-is and the upper block is negated to
+    // match Ipopt's output. (`min (x−3)² s.t. x≤1`: x*=1, ∂f/∂x=−4, so
+    // Ipopt writes `ipopt_zU_out = −4`; pounce now matches.)
+    if let Some((z_l_full, z_u_full)) = bound_mult_capture.borrow().clone() {
+        let z_u_neg: Vec<pounce_common::types::Number> = z_u_full.iter().map(|&z| -z).collect();
+        sol_suffixes.push(nl_writer::SolSuffix {
+            name: "ipopt_zL_out".to_string(),
+            target: nl_writer::SolSuffixTarget::Var,
+            values: nl_writer::SolSuffixValues::Real(z_l_full),
+        });
+        sol_suffixes.push(nl_writer::SolSuffix {
+            name: "ipopt_zU_out".to_string(),
+            target: nl_writer::SolSuffixTarget::Var,
+            values: nl_writer::SolSuffixValues::Real(z_u_neg),
         });
     }
 
@@ -1741,6 +1797,35 @@ fn run_convex_qp(
     // report.
     let lambda = pounce_cli::qp_extract::recover_duals(prob, &con_map, &sol.y, &sol.z);
 
+    // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`). The QP extractor
+    // folds each finite variable bound into a nonnegative `G` row (so
+    // `sol.z_lb`/`z_ub` stay empty); `recover_bound_mults` reads the raw
+    // non-negative multipliers back out of `sol.z`. They are for the
+    // *internal* minimize form (`½xᵀPx + cᵀx`, a maximize objective
+    // negated), so `sign` restores the user's objective sense — the same
+    // conversion `recover_duals` applies to the constraint duals. The
+    // Ipopt output convention (verified numerically, gh #296) is
+    // `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u`, both equal to the
+    // objective-gradient component at the bound. QP variables are 1:1 with
+    // the `.nl` variables, so no remap is needed.
+    let n_con_ineq = pounce_cli::qp_extract::count_constraint_ineq_rows(&con_map);
+    let (z_lb_raw, z_ub_raw) =
+        pounce_cli::qp_extract::recover_bound_mults(prob, n_con_ineq, &sol.z);
+    let z_l_suffix: Vec<f64> = z_lb_raw.iter().map(|&z| sign * z).collect();
+    let z_u_suffix: Vec<f64> = z_ub_raw.iter().map(|&z| -sign * z).collect();
+    let qp_bound_suffixes = [
+        nl_writer::SolSuffix {
+            name: "ipopt_zL_out".to_string(),
+            target: nl_writer::SolSuffixTarget::Var,
+            values: nl_writer::SolSuffixValues::Real(z_l_suffix),
+        },
+        nl_writer::SolSuffix {
+            name: "ipopt_zU_out".to_string(),
+            target: nl_writer::SolSuffixTarget::Var,
+            values: nl_writer::SolSuffixValues::Real(z_u_suffix),
+        },
+    ];
+
     // Write a `.sol` if requested: primal x and recovered constraint duals in
     // the AMPL `.sol` convention.
     if let Some(path) = sol_path {
@@ -1749,7 +1834,7 @@ fn run_convex_qp(
             x: &sol.x,
             mult_g: &lambda,
             solve_result_num: srn,
-            suffixes: &[],
+            suffixes: &qp_bound_suffixes,
         };
         // Log a `.sol` write failure but do not early-return a distinct exit
         // code: the NLP path (main.rs:1091-1093) only logs, and under `-AMPL`
@@ -1916,13 +2001,37 @@ fn run_convex_socp(
     // `recover_socp_duals`).
     let lambda = pounce_cli::qp_extract::recover_socp_duals(prob, &con_map, &sol.y, &sol.z);
 
+    // Bound multipliers (`ipopt_zL_out`/`ipopt_zU_out`), recovered from the
+    // nonnegative-block multipliers `sol.z` (variable bounds are `G` rows
+    // appended right after the linear-inequality rows and before the SOC
+    // cones). `sign` restores the user objective sense and the Ipopt output
+    // convention is `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u` — same
+    // treatment as the QP path (gh #296).
+    let n_con_ineq = pounce_cli::qp_extract::count_socp_constraint_ineq_rows(&con_map);
+    let (z_lb_raw, z_ub_raw) =
+        pounce_cli::qp_extract::recover_bound_mults(prob, n_con_ineq, &sol.z);
+    let z_l_suffix: Vec<f64> = z_lb_raw.iter().map(|&z| sign * z).collect();
+    let z_u_suffix: Vec<f64> = z_ub_raw.iter().map(|&z| -sign * z).collect();
+    let socp_bound_suffixes = [
+        nl_writer::SolSuffix {
+            name: "ipopt_zL_out".to_string(),
+            target: nl_writer::SolSuffixTarget::Var,
+            values: nl_writer::SolSuffixValues::Real(z_l_suffix),
+        },
+        nl_writer::SolSuffix {
+            name: "ipopt_zU_out".to_string(),
+            target: nl_writer::SolSuffixTarget::Var,
+            values: nl_writer::SolSuffixValues::Real(z_u_suffix),
+        },
+    ];
+
     if let Some(path) = sol_path {
         let payload = nl_writer::SolutionFile {
             message: &format!("POUNCE {} conic IPM (pounce-convex): {msg}", class.name()),
             x: &sol.x,
             mult_g: &lambda,
             solve_result_num: srn,
-            suffixes: &[],
+            suffixes: &socp_bound_suffixes,
         };
         // Log a `.sol` write failure but do not early-return a distinct exit
         // code: the NLP path (main.rs:1091-1093) only logs, and under `-AMPL`

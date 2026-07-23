@@ -239,6 +239,76 @@ fn next_row(rhs: &[f64]) -> usize {
     rhs.len()
 }
 
+/// Count the nonnegative (`G`) rows the *constraints* contributed, so the
+/// appended variable-bound rows can be located. Both extractors emit each
+/// linear inequality / range constraint as up to two `G` rows (an upper
+/// `row ≤ g_u` and/or a lower `−row ≤ −g_l`) and place the per-variable
+/// bound rows immediately after them (equalities go to `A`, and the SOCP
+/// cones are appended *after* the bound rows). This count is that offset.
+pub fn count_constraint_ineq_rows(con_map: &[ConRowMap]) -> usize {
+    con_map
+        .iter()
+        .map(|m| match m {
+            ConRowMap::Eq { .. } => 0,
+            ConRowMap::Ineq { upper, lower } => upper.is_some() as usize + lower.is_some() as usize,
+        })
+        .sum()
+}
+
+/// SOCP analogue of [`count_constraint_ineq_rows`]: only the linear
+/// inequality rows land in the nonnegative block *before* the variable
+/// bounds (equalities → `A`; quadratics → cones appended afterwards).
+pub fn count_socp_constraint_ineq_rows(con_map: &[ConSocpMap]) -> usize {
+    con_map
+        .iter()
+        .map(|m| match m {
+            ConSocpMap::Ineq { upper, lower } => {
+                upper.is_some() as usize + lower.is_some() as usize
+            }
+            ConSocpMap::Eq { .. } | ConSocpMap::Quad { .. } => 0,
+        })
+        .sum()
+}
+
+/// Recover the per-variable **bound multipliers** from the inequality
+/// multiplier vector `z`. Both extractors fold each finite variable bound
+/// into a nonnegative `G` row (`x_i ≤ x_u` and/or `−x_i ≤ −x_l`), appended
+/// right after the `n_con_ineq_rows` constraint-derived rows, in variable
+/// order with the upper row before the lower row. The `G`-row multiplier of
+/// `x_i ≤ x_u` is the (non-negative) upper-bound multiplier `z_ub[i]`; that
+/// of `−x_i ≤ −x_l` is the lower-bound multiplier `z_lb[i]`. Slots without a
+/// finite bound stay `0.0`.
+///
+/// The returned `z_lb` / `z_ub` are the raw non-negative multipliers of the
+/// *internal minimize* problem (a maximize objective was negated during
+/// extraction); the caller applies the maximize `sign` and the Ipopt
+/// `ipopt_zL_out = +z_l`, `ipopt_zU_out = −z_u` output convention.
+pub fn recover_bound_mults(
+    prob: &NlProblem,
+    n_con_ineq_rows: usize,
+    z: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let n = prob.n;
+    let mut z_lb = vec![0.0; n];
+    let mut z_ub = vec![0.0; n];
+    let mut row = n_con_ineq_rows;
+    for i in 0..n {
+        if is_finite_bound(prob.x_u[i]) {
+            if let Some(&zv) = z.get(row) {
+                z_ub[i] = zv;
+            }
+            row += 1;
+        }
+        if is_finite_bound(prob.x_l[i]) {
+            if let Some(&zv) = z.get(row) {
+                z_lb[i] = zv;
+            }
+            row += 1;
+        }
+    }
+    (z_lb, z_ub)
+}
+
 // ===========================================================================
 // QCQP → SOCP extraction
 // ===========================================================================
