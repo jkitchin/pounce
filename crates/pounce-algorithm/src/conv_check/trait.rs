@@ -79,6 +79,28 @@ pub trait ConvCheck {
         self.check_convergence(nlp_err, iter_count)
     }
 
+    /// Whether the current iterate passes the *strict* per-component convergence
+    /// tolerances — the [`Self::check_convergence_with_state`] strict test with
+    /// the masked-certificate veto (gh #200) removed. In other words: would this
+    /// iterate have certified `Success` were it not for the objective-scale
+    /// masking?
+    ///
+    /// gh #327 reads it on the veto's fallback path to distinguish a point the
+    /// veto refused *only because of masking* — a would-be strict certificate,
+    /// e.g. the true optimum a continued run reached but could never certify
+    /// there — from one that never converged at all (an unbounded / diverging
+    /// iterate whose gradient never vanishes). Only the former may displace the
+    /// point the baseline stopped at. Default `false` for policies that expose no
+    /// strict test.
+    fn current_passes_strict(
+        &self,
+        _nlp_err: Number,
+        _data: &IpoptDataHandle,
+        _cq: &IpoptCqHandle,
+    ) -> bool {
+        false
+    }
+
     /// Whether the supplied `nlp_err` is at or below the acceptable
     /// tolerance — port of upstream
     /// `OptimalityErrorConvergenceCheck::CurrentIsAcceptable`. Used by

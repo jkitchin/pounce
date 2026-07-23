@@ -1624,3 +1624,34 @@ def test_minimize_still_accepts_legitimate_infinite_bounds():
     r2 = pounce.minimize(f, np.array([0.5]), jac=g, bounds=[(0.0, np.inf)])
     assert r2.success
     assert r2.x[0] == pytest.approx(3.0, abs=1e-6)
+
+def test_minimize_extreme_objective_scale_monotone_reaches_bound_not_false_success():
+    """gh #327: ``min 1/x`` over ``x in [1e-12, 10]`` from x0 = 1e-12.
+
+    The objective is monotone decreasing, so the true optimum is the upper bound
+    x = 10, f = 0.1. The enormous initial gradient (``-1/x**2 = -1e24`` at x0)
+    pins pounce's gradient scaling at its 1e-8 floor, which deflates the scaled
+    KKT error below ``tol`` all along the trajectory. Previously the default
+    quasi-Newton path stopped at a non-stationary interior point x ≈ 2.84
+    (f ≈ 0.35, |grad| = 0.124, neither bound active) and reported
+    ``success=True, status=0`` — a false certificate. The masked-certificate veto
+    now keeps the point the continuation actually reaches (the bound optimum),
+    matching every independent oracle (ipopt MA57 / L-BFGS, scipy L-BFGS-B).
+    """
+    f = lambda z: 1.0 / z[0]
+    g = lambda z: np.array([-1.0 / z[0] ** 2])
+
+    r = pounce.minimize(
+        f,
+        np.array([1e-12]),
+        jac=g,
+        bounds=[(1e-12, 10.0)],
+        solver_selection="nlp",
+    )
+    # Must reach the true bound optimum, not the interior false success.
+    assert r.x[0] == pytest.approx(10.0, abs=1e-2)
+    assert r.fun == pytest.approx(0.1, abs=1e-3)
+    # And never report success at the non-stationary interior point x ≈ 2.84.
+    assert r.x[0] > 5.0, (
+        f"regressed to the gh #327 interior false optimum: x={r.x[0]}, f={r.fun}"
+    )

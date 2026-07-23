@@ -863,12 +863,54 @@ impl IpoptAlgorithm {
             // acceptable level would over-report.
             return refused_status;
         }
-        // The continued run failed outright, so any restored certificate
-        // dominates it on status and the tie-break never applies.
+        // The continued run did not certify — but its final point can still be a
+        // *better* would-be certificate than the one the baseline stopped at, and
+        // restoring the chronologically-first refusal unconditionally throws it
+        // away (gh #327). The masking veto keeps refusing at the true optimum too
+        // (its unscaled error stays above `acceptable_tol` under an extreme
+        // objective scale), so a run that actually reaches the optimum never gets
+        // to certify there and instead exits non-`Success` — typically on a tiny
+        // step once it settles. Rolling straight back to the first refusal then
+        // hands back the point the baseline stopped at, which can be far worse:
+        // on `min 1/x` over `[1e-12, 10]` the solve reaches x≈10 (f≈0.1) but was
+        // rolled back to the first refusal at x≈2.84 (f≈0.35) and reported
+        // success there.
+        //
+        // The extra candidate is admitted *narrowly*, and the gate is
+        // load-bearing: the continued point may displace the refused snapshot
+        // only if it itself passes the strict per-component tolerances — i.e. it
+        // is a would-be strict certificate the veto refused solely because of
+        // masking. That is precisely what tells the settled true optimum apart
+        // from a merely lower objective reached on an unbounded ray (e.g.
+        // `A(x−a)⁴ − K·√(1+y²)`, unbounded below in y): the diverging iterate
+        // never passes the strict test, so it can never win here, and those runs
+        // stay bit-for-bit as before. When the gate does open, keep whichever
+        // point ranks better under the same feasibility-aware key the dual-guard
+        // fallback uses, and report the baseline's restored status either way —
+        // never worse than baseline on status, never worse (often better) on the
+        // point.
         let Some((refused, restored_status)) = self.baseline_outcome() else {
             return result;
         };
-        self.restore_snapshot(&refused);
+        self.assert_comparable_scale(&refused);
+        let curr_nlp_err = self.cq.borrow().curr_nlp_error();
+        let curr_passes_strict =
+            self.bundle
+                .conv_check
+                .current_passes_strict(curr_nlp_err, &self.data, &self.cq);
+        let curr_f = self.cq.borrow().curr_f();
+        let curr_viol = self.cq.borrow().curr_unscaled_primal_infeasibility_max();
+        // Keep the continued point in place only when it is a would-be strict
+        // certificate that also ranks strictly better; otherwise restore the
+        // refused snapshot exactly as before. `ranks_better` treats a non-finite
+        // continued objective as worst, so a NaN-objective continuation never
+        // displaces a finite refused point (the NaN-loses convention the
+        // `Success` branch relies on).
+        let keep_continued = curr_passes_strict
+            && self.ranks_better(curr_f, curr_viol, refused.obj, refused.constr_viol);
+        if !keep_continued {
+            self.restore_snapshot(&refused);
+        }
         if self.cq.borrow().curr_f().is_finite() {
             restored_status
         } else {
