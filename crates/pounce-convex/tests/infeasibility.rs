@@ -190,6 +190,42 @@ fn mixed_scale_hessian_is_bounded_not_dual_infeasible() {
     );
 }
 
+/// gh #293 (symptom 2) — a *uniformly* tiny Hessian must converge, not exhaust
+/// the iteration budget. `min ½·1e-12·(x0² + x1²) − x1  s.t.  x ≥ 0` is bounded
+/// with the same optimum as above (`x1* = 1e12`, `f* = −5e11`). #290 stopped
+/// this from being falsely certified unbounded, but the default HSDE driver
+/// then merely ran out of iterations (obj ≈ −4.95e11 at `IterationLimit`)
+/// because its per-cone NT scaling never sees the 12-orders-below-O(1)
+/// curvature. The fix Ruiz-equilibrates and retries when HSDE hits the cap, so
+/// the solve now reports `Optimal` at the true optimum.
+#[test]
+fn uniform_tiny_hessian_converges_not_iteration_limit() {
+    let prob = QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 1e-12), Triplet::new(1, 1, 1e-12)],
+        c: vec![0.0, -1.0],
+        a: vec![],
+        b: vec![],
+        g: vec![],
+        h: vec![],
+        lb: vec![0.0, 0.0],
+        ub: vec![f64::INFINITY, f64::INFINITY],
+    };
+    let sol = solve(&prob);
+    assert_eq!(
+        sol.status,
+        QpStatus::Optimal,
+        "expected Optimal (x1* = 1e12, f* = -5e11), got {:?} after {} iters",
+        sol.status,
+        sol.iters
+    );
+    assert!(
+        (sol.obj - (-5e11)).abs() <= 1e-3 * 5e11,
+        "obj = {} should be ≈ -5e11",
+        sol.obj
+    );
+}
+
 // --- Status / edge-case honesty (PR70 item C) -----------------------------
 //
 // A solver that stops early for *any* reason must say so. The danger these

@@ -287,7 +287,27 @@ where
     // here because the un-equilibrated solve already failed, so there is nothing
     // left to regress — equilibration can only recover a usable solve or fail
     // the same way (in which case we keep the original result).
-    if opts.use_hsde && opts.equilibrate && sol.status == QpStatus::NumericalFailure {
+    //
+    // gh #293: the same retry also rescues an HSDE solve that merely *ran out
+    // of iterations* (`IterationLimit`) on a badly-scaled QP whose Hessian is
+    // uniformly tiny — e.g. `P = diag(1e-12, 1e-12)`, where the optimum sits at
+    // `‖x*‖ ≈ 1e12`. There HSDE's per-cone NT scaling never sees the objective
+    // curvature (the `P` block is 12 orders below O(1)), so the iterates crawl
+    // and the budget is exhausted short of the optimum; Ruiz pre-scaling lifts
+    // `P̂` to O(1) and the same driver then converges. This does not contradict
+    // the "Ruiz composes badly with HSDE" note either: we only reach here
+    // because the un-equilibrated solve failed to converge, so there is nothing
+    // left to regress. Unlike the `NumericalFailure` case (where any non-failing
+    // status is an improvement), an `IterationLimit` is an *honest* status, so
+    // the equilibrated retry is accepted **only when it converges to `Optimal`**
+    // — never when it merely returns a different non-converged/certificate
+    // status, so a genuinely hard problem keeps its truthful `IterationLimit`
+    // and no infeasibility/unboundedness verdict can be introduced by the retry.
+    let retry_on = matches!(
+        sol.status,
+        QpStatus::NumericalFailure | QpStatus::IterationLimit
+    );
+    if opts.use_hsde && opts.equilibrate && retry_on {
         let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
         let inner = QpOptions {
             equilibrate: false,
@@ -295,7 +315,12 @@ where
         };
         let mut retry = solve_qp_ipm_unscaled(&scaled, &inner, &mut make_backend);
         scaling.unscale_solution(prob, &mut retry);
-        if retry.status != QpStatus::NumericalFailure {
+        let accept = match sol.status {
+            QpStatus::NumericalFailure => retry.status != QpStatus::NumericalFailure,
+            QpStatus::IterationLimit => retry.status == QpStatus::Optimal,
+            _ => false,
+        };
+        if accept {
             return retry;
         }
     }
