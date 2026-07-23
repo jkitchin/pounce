@@ -67,6 +67,30 @@ use std::collections::BTreeMap;
 /// this shared `infeas_tol`).
 const FARKAS_RESID_TOL: f64 = 1e-10;
 
+/// Tolerance on the **normalized directional curvature** `dᵀPd / ‖d‖²` of a
+/// candidate recession ray `d`. A convex QP recedes along `d` (objective
+/// `−∞`) iff the curvature along `d` is exactly zero *and* `cᵀd < 0`; the
+/// dual-infeasibility certificate accepts `d` only when the per-unit curvature
+/// `dᵀPd/‖d‖²` (an eigenvalue-scale, `‖d‖`-invariant quantity — a diverging
+/// iterate cannot inflate it) is below this floor.
+///
+/// The floor separates two regimes that a genuine unbounded solve and a bounded
+/// tiny-curvature solve fall cleanly on either side of. A **bounded** problem
+/// floors the normalized curvature at its smallest genuine directional
+/// eigenvalue: `1e-12` for `P = diag(1e6, 1e-12)` (gh #293), `1e-16` for the
+/// gh #273 unit case `P = 1e-16`. A **genuine recession** drives it toward zero
+/// — exactly `0` for an LP or an axis-aligned null block, and, for a singular
+/// `P` whose curved variable is pinned to a bound as the null variable
+/// diverges, `~1e-140` and shrinking (the curved component decays like the
+/// barrier parameter while `‖d‖` grows). The threshold sits many orders below
+/// every real eigenvalue that must be rejected (`< 1e-16`) yet enormously above
+/// the vanishing curvature of a true recession, so the two never collide.
+/// Deliberately below machine epsilon: any direction this flat is
+/// indistinguishable from `null(P)` at double precision, and — per gh #293 P0 —
+/// a missed certification degrades to a safe `IterationLimit`, never a wrong
+/// `DualInfeasible` on a bounded problem. See [`detect_infeasibility_with`].
+const RECESSION_CURV_TOL: f64 = 1e-20;
+
 /// Options for the QP interior-point solve.
 #[derive(Debug, Clone, Copy)]
 pub struct QpOptions {
@@ -2636,35 +2660,42 @@ pub(crate) fn detect_infeasibility_with(
         // SOC/PSD ⇒ true cone membership). Checked, not componentwise, so a
         // direction that merely has `Gd ≤ 0` but `−Gd ∉ K` is rejected.
         let gd_ok = primal_recession_ok(&gd, ctol * x_norm);
-        // `d` is a recession direction of the *quadratic* only if `Pd = 0`,
-        // i.e. `d ∈ null(P)`. Testing `‖Pd‖ ≤ rtol·‖d‖` cannot express that:
-        // `‖Pd‖` is itself proportional to `‖P‖·‖d‖`, so `‖d‖` cancels and the
-        // test collapses to `‖P‖ ≤ rtol` — a bare comparison of the Hessian's
-        // magnitude against an absolute constant, with no reference to `d` at
-        // all. Every strictly convex QP whose Hessian happens to be smaller
-        // than `rtol` then reads as unbounded regardless of having a finite
-        // minimizer: `min -x + x²/(2M)  s.t.  x ≥ 0` (unique minimum at
-        // `x* = M`) was reported unbounded for `M ≥ 1e10`, i.e. exactly when
-        // `P = 1/M` crossed `FARKAS_RESID_TOL`. See gh #273.
+        // `d` is a recession direction of the *quadratic* iff the objective
+        // stays downhill along it forever: `f(x+td) = f + t·cᵀd + ½t²·dᵀPd →
+        // −∞`. Since a convex QP has `P ⪰ 0`, that requires **zero directional
+        // curvature** `dᵀPd = 0` (any `dᵀPd > 0` makes the quadratic term
+        // dominate, so the objective has a finite minimum along `d` and the
+        // problem is bounded there) together with `cᵀd < 0`.
         //
-        // Scaling the bound by `‖P‖` restores the intended meaning — a
-        // *relative* residual, "is `d` in the nullspace of `P` to `rtol`
-        // relative to `P`'s own scale". Both sides then carry the same
-        // `‖P‖·‖d‖` units and nothing cancels.
+        // The quantity to test is the *normalized* directional curvature
+        // `dᵀPd/‖d‖²` — the curvature per unit length along `d`, an
+        // eigenvalue-scale number that a diverging iterate (`‖d‖ → ∞`) cannot
+        // inflate. Two earlier residual tests were both wrong on a mixed-scale
+        // Hessian:
+        //   * `‖Pd‖ ≤ rtol·‖d‖` collapses to `‖P‖ ≤ rtol` (‖d‖ cancels), so any
+        //     strictly-convex QP with `‖P‖ < rtol` read as unbounded (gh #273).
+        //   * `‖Pd‖ ≤ rtol·‖d‖·‖P‖` (gh #290) fixes the *uniform* small case but
+        //     still fails when `P`'s eigenvalues span many orders: normalizing
+        //     by the single global scale `‖P‖ = max|P|` cannot express
+        //     `d ∈ null(P)`. For `P = diag(1e6, 1e-12)` the descent ray `d = e₁`
+        //     has genuine per-unit curvature `dᵀPd/‖d‖² = 1e-12 > 0` (bounded,
+        //     `f* = −5e11`), yet `‖Pd‖ = 1e-12 ≪ rtol·‖P‖ = 1e-16·1e6`, so it
+        //     was falsely certified `DualInfeasible` — a wrong unboundedness
+        //     certificate on a bounded problem. See gh #293.
         //
-        // For an LP (`P` empty) `p_scale` is 0 and `pd` is exactly 0, so the
-        // test reads `0 ≤ 0` and genuine LP unboundedness is unaffected. For a
-        // genuinely singular `P` with `d ∈ null(P)`, `pd` is 0 to round-off —
-        // on the order of `ε·‖P‖·‖d‖`, comfortably inside `rtol·‖P‖·‖d‖`.
-        let p_scale = prob
-            .p_lower
-            .iter()
-            .fold(0.0_f64, |acc, t| acc.max(t.val.abs()));
-        if cd < -ctol * x_norm
-            && inf_norm(&pd) <= rtol * x_norm * p_scale
-            && inf_norm(&ad) <= rtol * x_norm
-            && gd_ok
-        {
+        // Testing `dᵀPd/‖d‖²` against an absolute floor separates the two
+        // regimes cleanly: a *bounded* problem floors the normalized curvature
+        // at its smallest real directional eigenvalue (`1e-12` here, `1e-16` for
+        // the #273 `P = 1e-16` case), while a *genuine* recession drives it to
+        // zero — exactly `0` for an LP or an axis-aligned null block, and, for a
+        // singular `P` whose curved variable is pinned to a bound while the null
+        // variable diverges, `~1e-140` and shrinking. `RECESSION_CURV_TOL` sits
+        // far below every eigenvalue that must be rejected yet vastly above a
+        // true recession's vanishing curvature. See gh #293 (P0/P1/P2).
+        let curv = dot(x, &pd); // dᵀPd (pd = P·d)
+        let d_norm_sq = dot(x, x); // ‖d‖² > 0 (guarded by x_norm > 0)
+        let curv_ok = curv <= RECESSION_CURV_TOL * d_norm_sq;
+        if cd < -ctol * x_norm && curv_ok && inf_norm(&ad) <= rtol * x_norm && gd_ok {
             return Some(QpStatus::DualInfeasible);
         }
     }
@@ -2775,9 +2806,49 @@ mod detect_infeasibility_tests {
         );
     }
 
-    /// An LP (`P` empty, so `p_scale = 0`) must be unaffected: `Pd` is exactly
-    /// zero, so the scaled bound reads `0 ≤ 0` and genuine LP unboundedness is
-    /// still certified.
+    /// gh #293 — the mixed-scale regression the normalized-curvature test
+    /// exists for. `P = diag(1e6, 1e-12)`, and the tiny-curvature descent ray
+    /// `d = (0, 1)` has genuine curvature `dᵀPd = 1e-12 > 0`, so per-unit
+    /// curvature `dᵀPd/‖d‖² = 1e-12` — a bounded direction (`f* = −5e11`), NOT a
+    /// recession. The pre-#293 `‖Pd‖ ≤ rtol·‖d‖·max|P|` test read `1e-12 ≤
+    /// 1e-16·1e6 = 1e-10` and falsely certified `DualInfeasible`; the
+    /// normalized-curvature test rejects it because `1e-12 ≫ RECESSION_CURV_TOL`.
+    #[test]
+    fn mixed_scale_tiny_curvature_direction_is_not_a_recession() {
+        let opts = QpOptions::default();
+        let y: [f64; 0] = [];
+        let z: [f64; 0] = [];
+        // Vary the *small* eigenvalue across the whole "looks tiny relative to
+        // ‖P‖ = 1e6" band. Every one has positive curvature along d, so none is
+        // a recession ray; all must return None. The genuine null block (0.0)
+        // is covered by `singular_hessian_nullspace_direction_is_still_dual…`.
+        for small in [1e-8, 1e-12, 1e-16, 1e-19] {
+            let prob = QpProblem {
+                n: 2,
+                p_lower: vec![Triplet::new(0, 0, 1e6), Triplet::new(1, 1, small)],
+                c: vec![0.0, -1.0],
+                a: vec![],
+                b: vec![],
+                g: vec![],
+                h: vec![],
+                lb: vec![0.0, 0.0],
+                ub: vec![f64::INFINITY, f64::INFINITY],
+            };
+            let x = [0.0, 1.0]; // descent ray; dᵀPd = small > 0
+            assert_eq!(
+                detect_infeasibility(&prob, &x, &y, &z, &opts),
+                None,
+                "P = diag(1e6, {small:e}): d = (0,1) has positive curvature \
+                 dᵀPd = {small:e} (bounded below), certifying it unbounded is a \
+                 wrong answer regardless of how small that curvature is next to \
+                 max|P| = 1e6"
+            );
+        }
+    }
+
+    /// An LP (`P` empty) must be unaffected: `dᵀPd` is exactly zero, so the
+    /// normalized curvature is `0 ≤ RECESSION_CURV_TOL` and genuine LP
+    /// unboundedness is still certified.
     #[test]
     fn empty_hessian_lp_unboundedness_unaffected() {
         let prob = QpProblem {
@@ -2798,8 +2869,8 @@ mod detect_infeasibility_tests {
         assert_eq!(
             detect_infeasibility(&prob, &x, &y, &z, &opts),
             Some(QpStatus::DualInfeasible),
-            "an LP with no Hessian is unbounded along d = 1; p_scale = 0 must \
-             not break this"
+            "an LP with no Hessian is unbounded along d = 1; dᵀPd = 0 must \
+             certify (normalized curvature 0 ≤ RECESSION_CURV_TOL)"
         );
     }
 

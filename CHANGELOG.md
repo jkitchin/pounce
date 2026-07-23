@@ -9,6 +9,43 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — convex QP IPM falsely certified a mixed-scale Hessian unbounded (#293, completes #273/#290)
+
+- **A bounded QP with a mixed-scale Hessian was returned as `dual_infeasible`
+  — a confident but wrong unboundedness certificate.** `pounce.solve_qp` on
+  `min ½(1e6·x0² + 1e-12·x1²) − x1  s.t.  x ≥ 0` (`P = diag(1e6, 1e-12)`) is
+  bounded with a unique optimum `x1* = 1e12`, `f* = −5e11`, yet it reported
+  `status='dual_infeasible'`. Returning a wrong answer with a certificate
+  attached is the worst outcome the solver can produce.
+  - **Root cause.** The dual-infeasibility (unboundedness) certificate accepts a
+    direction `d` as a recession ray of the quadratic when its curvature
+    vanishes. #290 tested the *residual* `‖Pd‖ ≤ rtol·‖d‖·max|P|` — a global
+    scale that cannot express `d ∈ null(P)` when `P`'s eigenvalues span many
+    orders. The descent ray `x1` has genuine curvature `dᵀPd = 1e-12 > 0`
+    (so the objective has a finite minimum along it), but `1e-12` is `18` orders
+    below `max|P| = 1e6`, so it read as "null relative to `‖P‖`" and was falsely
+    certified unbounded.
+  - **Fix.** The certificate now tests the **normalized directional curvature**
+    `dᵀPd/‖d‖²` — the curvature per unit length along `d`, an eigenvalue-scale
+    quantity a diverging iterate cannot inflate — against an absolute floor
+    (`RECESSION_CURV_TOL = 1e-20`, in `crates/pounce-convex/src/ipm.rs`). A
+    convex QP recedes along `d` iff that curvature is zero *and* `cᵀd < 0`. A
+    bounded problem floors the normalized curvature at its smallest real
+    directional eigenvalue (`1e-12` here, `1e-16` for the #273 `P = 1e-16`
+    case), which stays far above the floor and is correctly *not* certified; a
+    genuine recession drives it to zero (exactly `0` for an LP or an axis-aligned
+    null block; `~1e-140` and shrinking when a singular `P`'s curved variable is
+    pinned to a bound as the null variable diverges), so genuine unboundedness —
+    LPs, singular-`P` nullspace rays, exp/SOC-cone recessions — is still
+    certified. The mixed-scale case now converges to `Optimal` at `x1* = 1e12`.
+  - **Preserved.** The #273/#290 tiny-Hessian cases (`P = 1e-10…1e-16` strictly
+    convex) stay `Optimal`; true recession rays stay `dual_infeasible`; the
+    normal-problem benchmark corpus is unchanged. A *uniformly* tiny Hessian
+    (`P = diag(1e-12, 1e-12)`, the #293 second symptom) still reaches its
+    iteration limit rather than the optimum — an honest, non-wrong status,
+    unchanged from before; the curvature fix removes only the wrong certificate,
+    not that conditioning-limited convergence.
+
 ### Fixed — NaN gradient / constraint Jacobian silently reported `Solve_Succeeded` (#292)
 
 - **An objective gradient or constraint Jacobian that returns `NaN` was laundered
