@@ -9,6 +9,26 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `pyomo_pounce` silently solved models with Binary/Integer variables as a continuous relaxation (#341)
+
+- **`SolverFactory('pounce').solve(model)` now raises a clear `ValueError`
+  when the model has an active, non-fixed `Binary`/`Integer` variable**,
+  instead of silently handing POUNCE (a continuous NLP solver with no
+  branch-and-bound or SOS handling) a MINLP and reporting `optimal` with a
+  fractional value for a variable declared discrete (e.g. `b = 0.3` for a
+  `Var(domain=Binary)`). A *fixed* discrete variable is unaffected — its value
+  is already pinned, not a live decision.
+  - The plugin also corrected its declared solver capabilities
+    (`integer`/`sos1`/`sos2` are now `False`, not the generic `ASL` base
+    class's default `True`), so `has_capability('integer')` no longer
+    misreports support Pyomo's own solver-selection logic could act on.
+  - This gap is inherited AMPL/ASL-ecosystem behavior (Ipopt-via-ASL does the
+    same continuous relaxation on the identical model), not a pounce-specific
+    numerical regression — but `pyomo_pounce` already fails loudly for
+    comparable silent-wrongness risks elsewhere (the ambiguous `curve_fit`
+    bounds shape, #260/#265; the stale-binary check, #315), so it now does
+    here too.
+
 ### Fixed — HSDE exp/power driver reported `numerical_failure` (with a wrong iterate) when one cone-triple coordinate was pinned extreme (#339)
 
 - **The non-symmetric (exp/power) HSDE conic driver could stall on, and
