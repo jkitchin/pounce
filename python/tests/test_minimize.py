@@ -1523,6 +1523,89 @@ def test_active_set_sqp_honors_hessian_approximation():
         np.testing.assert_allclose(r.x, expected, atol=1e-6)
 
 
+def test_active_set_sqp_exact_without_hessian_downgrades_not_internal_error():
+    """Explicit ``sqp_hessian=exact`` with no available Hessian must fall back
+    to L-BFGS, not die with ``Internal_Error`` (issue #348).
+
+    The automatic ``hessian_approximation=limited-memory`` downgrade is applied
+    first, but an explicit ``sqp_hessian=exact`` in the user options is applied
+    *after* it and re-enabled the ``Exact`` source with no Hessian behind it:
+    the driver evaluated a zero Lagrangian Hessian, so the QP subproblem went
+    unbounded and the solve died with ``Internal_Error``. The fix downgrades an
+    exact request to L-BFGS (with a warning) whenever the problem exposes no
+    ``hessian`` / ``hessianstructure``.
+    """
+    fun = lambda v: (v[0] - 3.0) ** 2 + (v[1] - 2.0) ** 2
+    jac = lambda v: np.array([2 * (v[0] - 3.0), 2 * (v[1] - 2.0)])
+    hess = lambda v: 2.0 * np.eye(2)
+    expected = np.array([2.5, 1.5])  # project (3, 2) onto x0 + x1 = 4
+
+    # (a) dict constraint (nonlinear-by-policy) — previously Internal_Error,
+    #     whether or not a hess is supplied (the facade attaches no Hessian).
+    dict_con = [
+        {
+            "type": "ineq",
+            "fun": lambda v: np.array([4.0 - v[0] - v[1]]),
+            "jac": lambda v: np.array([[-1.0, -1.0]]),
+        }
+    ]
+    for hh in (hess, None):
+        with pytest.warns(UserWarning, match="exact Hessian was requested"):
+            r = pounce.minimize(
+                fun,
+                [0.0, 0.0],
+                jac=jac,
+                hess=hh,
+                constraints=dict_con,
+                solver_selection="qp-active-set",
+                sqp_hessian="exact",
+            )
+        assert r.success, f"exact-without-hessian must not fail: {r.message}"
+        np.testing.assert_allclose(r.x, expected, atol=1e-6)
+        assert r.nhev == 0, "downgrade to L-BFGS means the exact Hessian is unused"
+
+    # (b) genuinely nonlinear constraint + hess: same downgrade, still solves.
+    nl_con = [
+        {
+            "type": "eq",
+            "fun": lambda v: v[0] ** 2 + v[1] ** 2 - 2.0,
+            "jac": lambda v: np.array([[2 * v[0], 2 * v[1]]]),
+        }
+    ]
+    with pytest.warns(UserWarning, match="exact Hessian was requested"):
+        r = pounce.minimize(
+            fun,
+            [1.0, 1.0],
+            jac=jac,
+            hess=hess,
+            constraints=nl_con,
+            solver_selection="qp-active-set",
+            sqp_hessian="exact",
+        )
+    assert r.success, f"exact-without-hessian (nonlinear) must not fail: {r.message}"
+
+    # (c) control: an explicit LinearConstraint keeps the exact Hessian — no
+    #     downgrade, no #348 warning, and the Hessian is actually used.
+    lc = opt.LinearConstraint(np.array([[1.0, 1.0]]), lb=-np.inf, ub=4.0)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        r = pounce.minimize(
+            fun,
+            [0.0, 0.0],
+            jac=jac,
+            hess=hess,
+            constraints=lc,
+            solver_selection="qp-active-set",
+            sqp_hessian="exact",
+        )
+    assert r.success
+    np.testing.assert_allclose(r.x, expected, atol=1e-6)
+    assert not any(
+        "exact Hessian was requested" in str(w.message) for w in rec
+    ), "exact must be honored (not downgraded) when a Hessian is available"
+    assert r.nhev > 0, "the exact Hessian should actually be used here"
+
+
 def test_uncomputed_objective_is_nan_not_zero():
     """An objective that was never evaluated must not be reported as ``0.0``.
 

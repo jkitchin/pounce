@@ -42,6 +42,27 @@ changes.
     curved case (HS6 from `(-1.2, 1)`) can still stall at a blocked line search;
     a full feasibility-restoration phase remains future work.
 
+### Fixed — `sqp_hessian=exact` with no Hessian gave `Internal_Error` (#348)
+
+- Explicitly requesting an exact Lagrangian Hessian (`sqp_hessian="exact"` or
+  `hessian_approximation="exact"`) on a problem that supplies no second
+  derivatives died with `Internal_Error` (the QP subproblem reported
+  "unbounded"). The automatic `hessian_approximation=limited-memory` downgrade
+  runs first, but an explicit exact request was applied *after* it, re-enabling
+  the `Exact` source with no Hessian behind it — the driver then evaluated a
+  zero Lagrangian Hessian, so the QP lost its curvature term and went unbounded.
+  This hit the Python `minimize`/`Problem` path whenever a `hess` was absent, or
+  present but not usable as the Lagrangian Hessian (dict constraints, which are
+  nonlinear-by-policy, or any genuinely nonlinear constraint). It affected only
+  those callers: it worked unconstrained and bounds-only, and the exact Hessian
+  is still honored when it *is* available (all-linear `LinearConstraint` blocks,
+  or unconstrained, with a `hess`). Now, when the problem exposes no
+  `hessian`/`hessianstructure`, an explicit exact request is downgraded to the
+  limited-memory (L-BFGS) approximation with a warning instead of failing. The
+  CLI `.nl` path (which always carries an exact Hessian) is unaffected. A
+  regression test pins the downgrade-and-solve behavior and the still-honored
+  exact path.
+
 ### Fixed — `solve_bvp` could not reach tolerances tighter than ~1.5e-8, exhausting the node budget instead (#345)
 
 - **`pounce.solve_bvp` with a tolerance below ~1.5e-8 now converges** (in the
