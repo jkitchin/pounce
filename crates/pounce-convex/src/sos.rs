@@ -1440,7 +1440,10 @@ mod tests {
         let r3 = sos_minimize(&prob, Some(3), backend);
         assert_eq!(r3.status, QpStatus::Optimal, "order 3 should converge");
         assert_eq!(r3.order, 3);
-        assert!(!r3.certified, "an unconstrained problem cannot be certified");
+        assert!(
+            !r3.certified,
+            "an unconstrained problem cannot be certified"
+        );
         assert!(r3.lower_bound.is_finite(), "bound = {}", r3.lower_bound);
         assert!(
             r3.lower_bound <= 1e-6,
@@ -1469,7 +1472,10 @@ mod tests {
             "order 4 does not converge for the Motzkin polynomial; it must not be \
              reported as Optimal via an uncertified fallback"
         );
-        assert_eq!(r4.order, 4, "no fallback should be reported when uncertified");
+        assert_eq!(
+            r4.order, 4,
+            "no fallback should be reported when uncertified"
+        );
     }
 
     #[test]
