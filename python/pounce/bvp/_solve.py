@@ -282,6 +282,7 @@ def solve_bvp(
     method="newton",
     adaptive=True,
     args=None,
+    _mesh_scaled_newton=False,
 ):
     """Solve a boundary value problem with pounce (SciPy-compatible).
 
@@ -393,14 +394,40 @@ def solve_bvp(
     if method == "newton":
         from ._newton import newton_solve
 
-        # The collocation system is solved to (near) round-off, NOT to the
-        # mesh ``tol``: the residual estimate that drives adaptive refinement
-        # divides the collocation residual by the interval width, so a
-        # loosely-solved system reads as a huge residual on fine meshes.
-        # ``tol`` controls refinement, not the Newton stop.
-        newton_tol = min(float(tol), 1e-10)
+        # Convergence must scale with the mesh when driving the adaptive
+        # refinement loop (gh #345). The residual estimator that decides where
+        # to add nodes uses ``r_mid = 1.5 * col_res / h``, so a *fixed*
+        # absolute Newton stop leaves the collocation residual (hence the
+        # estimate) floored once ``h`` is small: after a refinement the
+        # warm-started iterate already sits below the fixed threshold, Newton
+        # takes zero steps, ``col_res`` stays at the interpolation level rather
+        # than round-off, and the estimate plateaus — so the solve fails
+        # tolerances it should meet. SciPy avoids this with an ``h``-scaled
+        # collocation criterion ``|col_res| < tol_r``,
+        # ``tol_r = 2/3 * h * 5e-2 * tol`` (per interval), which keeps the
+        # estimate proportional to the true discretization error at every mesh.
+        # We reproduce it (dropping SciPy's ``1 + |f_mid|`` slackening, i.e.
+        # solving marginally tighter). A *standalone* ``adaptive=False`` solve
+        # has no refinement loop and should instead extract the best solution
+        # the given mesh allows, so it drives the collocation system to
+        # round-off (the fixed absolute stop below).
+        if _mesh_scaled_newton:
+            h_iv = x[1:] - x[:-1]
+            tol_r = (2.0 / 3.0) * h_iv * 5e-2 * float(tol)  # (m-1,), per interval
+            bc_tol_eff = float(tol) if bc_tol is None else float(bc_tol)
+            n_col = n * (m - 1)
+
+            def _converged(R):
+                col = R[:n_col].reshape(n, m - 1)
+                bc = R[n_col:]
+                return bool(np.all(np.abs(col) < tol_r)
+                            and np.all(np.abs(bc) < bc_tol_eff))
+        else:
+            _converged = None  # round-off stop (||R||_inf < newton_tol)
+
         z_star, niter, status, _rn = newton_solve(
-            residual_fn, jac, z0, n, m, k, tol=newton_tol,
+            residual_fn, jac, z0, n, m, k, tol=min(float(tol), 1e-10),
+            converged=_converged,
         )  # status: 0 converged / 2 singular / 4 not converged
         info = {}
     elif method == "ipm":
@@ -562,6 +589,7 @@ def _solve_bvp_adaptive(
             fun, bc, x, y, p=(p_cur if uses_p else None),
             fun_jac=fun_jac, bc_jac=bc_jac, tol=tol, max_nodes=max_nodes,
             verbose=0, method=method, adaptive=False,
+            _mesh_scaled_newton=True,
         )
         p_eval = res.p if uses_p else np.zeros(0)
         rms = _estimate_rms_residuals(nfun, res.x, res.y, res.yp, p_eval)

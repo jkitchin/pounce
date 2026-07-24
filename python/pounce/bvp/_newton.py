@@ -39,7 +39,8 @@ STATUS_SINGULAR = 2
 STATUS_NOT_CONVERGED = 4
 
 
-def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
+def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50,
+                 converged=None):
     """Solve ``R(z) = 0`` from ``z0`` by modified (frozen-Jacobian) Newton.
 
     Parameters
@@ -53,6 +54,16 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
         Initial guess.
     n, m, k : int
         States, mesh nodes, unknown parameters.
+    converged : callable, optional
+        ``converged(R) -> bool`` — a custom convergence test on the residual
+        vector, overriding the default ``||R||_inf < tol``. The adaptive BVP
+        driver uses this to reproduce SciPy's *mesh-scaled* criterion, in
+        which the collocation residual must fall below a threshold that
+        shrinks with the interval width ``h`` (gh #345): the residual
+        estimator divides the collocation residual by ``h``, so a fixed
+        absolute stop leaves the estimate floored on fine meshes — Newton
+        must be driven proportionally harder as the mesh refines. When
+        ``None`` (jax/torch layers), the scalar-``tol`` test is used.
 
     Returns
     -------
@@ -60,6 +71,9 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
         ``status`` is one of :data:`STATUS_CONVERGED` (0),
         :data:`STATUS_SINGULAR` (2), :data:`STATUS_NOT_CONVERGED` (4).
     """
+    def _is_ok(R_vec, rn):
+        return bool(converged(R_vec)) if converged is not None else (rn < tol)
+
     N = n * m + k
     rows, cols = jac.structure()
     lu = SparseLU(N, np.asarray(rows, dtype=np.int64), np.asarray(cols, dtype=np.int64))
@@ -73,7 +87,7 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
     status = STATUS_NOT_CONVERGED
     it = 0
     for it in range(1, max_iter + 1):
-        if rnorm < tol:
+        if _is_ok(R, rnorm):
             status = STATUS_CONVERGED
             break
         if need_factor:
@@ -107,10 +121,10 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
             if fresh:
                 # A fresh factor still can't reduce the residual: the iterate
                 # has stalled (typically at round-off, but possibly short of
-                # `tol`). Judge success against the requested `tol` rather
-                # than a hardcoded threshold so a loose stall is reported as
-                # non-convergence.
-                status = STATUS_CONVERGED if rnorm < tol else STATUS_NOT_CONVERGED
+                # the target). Judge success against the requested criterion
+                # rather than a hardcoded threshold so a loose stall is
+                # reported as non-convergence.
+                status = STATUS_CONVERGED if _is_ok(R, rnorm) else STATUS_NOT_CONVERGED
                 break
             # The frozen factor gave a poor direction; refresh it at the
             # current z and retry this step (no move taken).
@@ -126,7 +140,7 @@ def newton_solve(residual_fn, jac, z0, n, m, k, *, tol=1e-8, max_iter=50):
         if ratio > _REFACTOR_RATIO or alpha < 1.0:
             need_factor = True
     else:
-        # Loop ran to max_iter without the top-of-loop tol test firing.
-        status = STATUS_CONVERGED if rnorm < tol else STATUS_NOT_CONVERGED
+        # Loop ran to max_iter without the top-of-loop convergence test firing.
+        status = STATUS_CONVERGED if _is_ok(R, rnorm) else STATUS_NOT_CONVERGED
 
     return z, it, status, rnorm
