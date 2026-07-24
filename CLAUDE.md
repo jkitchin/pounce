@@ -16,7 +16,7 @@ topological order. Run it before tagging.
    publishes to PyPI. Version: `python/pyproject.toml`.
 2. **PyPI `pyomo-pounce`** — `.github/workflows/release-pyomo-pounce.yml`,
    triggered by a `pyomo-pounce-vX.Y.Z` tag. Version: `pyomo-pounce/pyproject.toml`.
-3. **crates.io — 19 workspace crates** — automated by
+3. **crates.io — 20 workspace crates** — automated by
    `.github/workflows/release-crates.yml`, triggered by a `vX.Y.Z` tag push
    (or run manually via `workflow_dispatch`, which defaults to a dry run). It
    runs `scripts/publish-crates.sh`, which publishes in topological order and
