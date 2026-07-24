@@ -765,3 +765,227 @@ fn qp_assembly_preserves_inf_bounds_in_shift() {
     // Ignore unused-but-clippy-cared-about warning by touching m.
     let _ = m;
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Maratos-effect fixture (issue #349, FINDING B).
+//
+//     min 2(x₁² + x₂² − 1) − x₁   s.t.  x₁² + x₂² = 1,   x* = (1, 0).
+// ─────────────────────────────────────────────────────────────────
+struct MaratosNlp {
+    x0: [f64; 2],
+}
+impl SqpProblemSpec for MaratosNlp {
+    fn n(&self) -> usize {
+        2
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        self.x0.to_vec()
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF; 2], vec![NLP_UPPER_BOUND_INF; 2])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0], vec![0.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        2.0 * (x[0] * x[0] + x[1] * x[1] - 1.0) - x[0]
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![4.0 * x[0] - 1.0, 4.0 * x[1]]
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x[0] * x[0] + x[1] * x[1] - 1.0]
+    }
+    fn eval_jac_c(&mut self, x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 2,
+            irow: vec![1, 1],
+            jcol: vec![1, 2],
+            vals: vec![2.0 * x[0], 2.0 * x[1]],
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], lambda_g: &[f64]) -> Triplet {
+        // ∇²f = 4I; ∇²c = 2I. ∇²L = (4 + 2λ) I.
+        let diag = 4.0 + 2.0 * lambda_g[0];
+        Triplet {
+            n_rows: 2,
+            n_cols: 2,
+            irow: vec![1, 2],
+            jcol: vec![1, 2],
+            vals: vec![diag, diag],
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// HS6 fixture (issue #349, FINDING B).
+//
+//     min (1 − x₁)²   s.t.  10(x₂ − x₁²) = 0,   x* = (1, 1).
+// ─────────────────────────────────────────────────────────────────
+struct Hs6Nlp {
+    x0: [f64; 2],
+}
+impl SqpProblemSpec for Hs6Nlp {
+    fn n(&self) -> usize {
+        2
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        self.x0.to_vec()
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF; 2], vec![NLP_UPPER_BOUND_INF; 2])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0], vec![0.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        (1.0 - x[0]).powi(2)
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![-2.0 * (1.0 - x[0]), 0.0]
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![10.0 * (x[1] - x[0] * x[0])]
+    }
+    fn eval_jac_c(&mut self, x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 2,
+            irow: vec![1, 1],
+            jcol: vec![1, 2],
+            vals: vec![-20.0 * x[0], 10.0],
+        }
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], lambda_g: &[f64]) -> Triplet {
+        // ∇²f = diag(2, 0); ∇²c = diag(−20, 0).
+        Triplet {
+            n_rows: 2,
+            n_cols: 2,
+            irow: vec![1, 2],
+            jcol: vec![1, 2],
+            vals: vec![2.0 - 20.0 * lambda_g[0], 0.0],
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Issue #349 regression tests: the second-order correction (SOC)
+// added to both globalizations must defeat the Maratos effect.
+// Before SOC, the filter/l1 line searches stalled
+// (`Search_Direction_Becomes_Too_Small`) or hit the iteration cap on
+// these standard curved-constraint NLPs; Ipopt converges from every
+// start. See `sqp/filter.rs` / `sqp/line_search.rs`.
+// ─────────────────────────────────────────────────────────────────
+
+/// The Maratos problem must converge from every starting angle on the
+/// unit circle, under every Hessian source and both globalizations —
+/// and quickly, since SOC restores the unit-step (superlinear) rate
+/// that the Maratos effect otherwise destroys.
+#[test]
+fn issue_349_maratos_converges_from_all_starts() {
+    for hess in [
+        SqpHessianSource::Exact,
+        SqpHessianSource::DampedBfgs,
+        SqpHessianSource::Lbfgs,
+    ] {
+        for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+            for &t in &[0.05_f64, 0.10, 0.30, 0.50, 0.80] {
+                let qp_solver = ParametricActiveSetSolver::new(Box::new(
+                    pounce_feral::FeralSolverInterface::new(),
+                ));
+                let mut opts = SqpOptions::default();
+                opts.hessian = hess;
+                opts.globalization = glob;
+                let mut alg = SqpAlgorithm::new(qp_solver, opts);
+                let mut nlp = MaratosNlp {
+                    x0: [t.cos(), t.sin()],
+                };
+                let res = alg.optimize(&mut nlp).unwrap();
+                let xerr = ((res.x[0] - 1.0).powi(2) + res.x[1].powi(2)).sqrt();
+                assert_eq!(
+                    res.status,
+                    SqpStatus::Optimal,
+                    "Maratos t={t} hess={hess:?} glob={glob:?}: {:?} after {} iters (xerr={xerr:.2e})",
+                    res.status,
+                    res.n_iter,
+                );
+                assert!(
+                    xerr < 1e-4,
+                    "Maratos t={t} hess={hess:?} glob={glob:?}: xerr={xerr:.2e} too large",
+                );
+            }
+        }
+    }
+}
+
+/// HS6 (singular objective Hessian, strongly curved equality) must
+/// converge from `(0.5, 0.5)` under *every* Hessian source and both
+/// globalizations. This bites on the parent commit: pre-SOC, the
+/// filter globalization with the L-BFGS Hessian stalled here
+/// (`QpStepFailed`, `Search_Direction_Becomes_Too_Small`, xerr≈3e-4);
+/// the SOC plus the cold-start QP fallback carry it to x* = (1,1).
+/// The canonical `(-1.2, 1)` start is additionally checked under the
+/// exact Hessian (Ipopt reaches x* in ~5 iters).
+#[test]
+fn issue_349_hs6_converges() {
+    for hess in [
+        SqpHessianSource::Exact,
+        SqpHessianSource::DampedBfgs,
+        SqpHessianSource::Lbfgs,
+    ] {
+        for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+            let qp_solver =
+                ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+            let mut opts = SqpOptions::default();
+            opts.hessian = hess;
+            opts.globalization = glob;
+            let mut alg = SqpAlgorithm::new(qp_solver, opts);
+            let mut nlp = Hs6Nlp { x0: [0.5, 0.5] };
+            let res = alg.optimize(&mut nlp).unwrap();
+            let xerr = ((res.x[0] - 1.0).powi(2) + (res.x[1] - 1.0).powi(2)).sqrt();
+            assert_eq!(
+                res.status,
+                SqpStatus::Optimal,
+                "HS6 (0.5,0.5) hess={hess:?} glob={glob:?}: {:?} after {} iters (f={:.4}, xerr={xerr:.2e})",
+                res.status,
+                res.n_iter,
+                res.obj,
+            );
+            assert!(
+                xerr < 1e-4,
+                "HS6 (0.5,0.5) hess={hess:?} glob={glob:?}: xerr={xerr:.2e} too large",
+            );
+        }
+    }
+
+    // Canonical HS6 start, exact Hessian, both globalizations.
+    for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+        let qp_solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let mut opts = SqpOptions::default();
+        opts.hessian = SqpHessianSource::Exact;
+        opts.globalization = glob;
+        let mut alg = SqpAlgorithm::new(qp_solver, opts);
+        let mut nlp = Hs6Nlp { x0: [-1.2, 1.0] };
+        let res = alg.optimize(&mut nlp).unwrap();
+        let xerr = ((res.x[0] - 1.0).powi(2) + (res.x[1] - 1.0).powi(2)).sqrt();
+        assert_eq!(
+            res.status,
+            SqpStatus::Optimal,
+            "HS6 (-1.2,1) exact glob={glob:?}: {:?} after {} iters (xerr={xerr:.2e})",
+            res.status,
+            res.n_iter,
+        );
+        assert!(
+            xerr < 1e-5,
+            "HS6 (-1.2,1) exact glob={glob:?}: xerr={xerr:.2e}"
+        );
+    }
+}

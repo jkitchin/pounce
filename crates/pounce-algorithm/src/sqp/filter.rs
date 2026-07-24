@@ -51,7 +51,9 @@
 //! `SqpGlobalization::L1Elastic` instead (Han-Powell ν dominates
 //! `|λ_qp|_∞` from iter 0 onward).
 
-use crate::sqp::line_search::{LineSearchResult, l1_violation};
+use crate::sqp::line_search::{
+    KAPPA_SOC, LineSearchResult, SOC_MAX_STEP_GROWTH, SocProvider, inf_norm, l1_violation,
+};
 use crate::sqp::options::SqpOptions;
 use crate::sqp::problem::SqpProblemSpec;
 use pounce_common::Number;
@@ -126,6 +128,7 @@ pub fn filter_line_search<N: SqpProblemSpec>(
     xu: &[Number],
     current_nu: Number,
     opts: &SqpOptions,
+    mut soc: Option<SocProvider<'_>>,
 ) -> LineSearchResult {
     let theta_curr = l1_violation(x, c_curr, bl, bu, xl, xu);
     let phi_curr = f_curr;
@@ -134,6 +137,7 @@ pub fn filter_line_search<N: SqpProblemSpec>(
     let mut x_trial = vec![0.0; x.len()];
     let mut last_f = f_curr;
     let mut last_c = c_curr.to_vec();
+    let mut first_trial = true;
 
     while alpha > opts.bt_min_alpha {
         for (xt, (&xi, &pi)) in x_trial.iter_mut().zip(x.iter().zip(p.iter())) {
@@ -165,8 +169,63 @@ pub fn filter_line_search<N: SqpProblemSpec>(
                 f_new: f_trial,
                 c_new: c_trial,
                 success: true,
+                soc_duals: None,
             };
         }
+
+        // Second-order correction (Maratos remedy — see
+        // [`SocProvider`]). Attempted once, on the full step
+        // (α = 1), and only when that step *increased* the
+        // constraint violation: the full Newton step is a good step
+        // that the filter rejects because the linearized constraints
+        // under-predict the curved violation. The corrected full
+        // step `x + p_soc` is subjected to the same progress +
+        // filter-acceptance test; on rejection we discard it and
+        // resume backtracking on the original direction `p`.
+        if first_trial {
+            first_trial = false;
+            if theta_trial > theta_curr {
+                if let Some(soc_fn) = soc.as_deref_mut() {
+                    if let Some(step) = soc_fn(&c_trial) {
+                        // Reject an overshooting "correction" (see
+                        // [`SOC_MAX_STEP_GROWTH`]) before evaluating it.
+                        if inf_norm(&step.p) <= SOC_MAX_STEP_GROWTH * inf_norm(p) {
+                            let mut x_soc = vec![0.0; x.len()];
+                            for (xt, (&xi, &pi)) in
+                                x_soc.iter_mut().zip(x.iter().zip(step.p.iter()))
+                            {
+                                *xt = xi + pi;
+                            }
+                            let f_soc = nlp.eval_f(&x_soc);
+                            let c_soc = nlp.eval_c(&x_soc);
+                            let theta_soc = l1_violation(&x_soc, &c_soc, bl, bu, xl, xu);
+                            let phi_soc = f_soc;
+                            let tp = theta_soc <= (1.0 - filter.gamma_theta) * theta_curr;
+                            let pp = phi_soc <= phi_curr - filter.gamma_phi * theta_curr;
+                            // Feasibility safeguard (Wächter-Biegler
+                            // 2006 §3.3): the correction must actually
+                            // reduce the violation below the
+                            // uncorrected full step's, else fall back
+                            // to backtracking.
+                            let soc_feasible = theta_soc <= KAPPA_SOC * theta_trial;
+                            if soc_feasible && (tp || pp) && filter.accepts(theta_soc, phi_soc) {
+                                filter.add(theta_curr, phi_curr);
+                                return LineSearchResult {
+                                    alpha: 1.0,
+                                    nu: current_nu,
+                                    x_new: x_soc,
+                                    f_new: f_soc,
+                                    c_new: c_soc,
+                                    success: true,
+                                    soc_duals: Some((step.lambda_g, step.lambda_x)),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         alpha *= opts.bt_reduction;
     }
 
@@ -177,5 +236,6 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         f_new: last_f,
         c_new: last_c,
         success: false,
+        soc_duals: None,
     }
 }
