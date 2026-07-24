@@ -9,6 +9,39 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — active-set-SQP stalled on curved-constraint NLPs via the Maratos effect (#349)
+
+- **The active-set-SQP driver now defeats the Maratos effect** with a
+  second-order correction (SOC) step in both globalizations (filter and
+  l1-elastic). Previously the filter/l1 line searches rejected good unit SQP
+  steps whenever the linearized constraints under-predicted the true (curved)
+  constraint violation, so the solver either stalled
+  (`Search_Direction_Becomes_Too_Small`) or exhausted its iteration cap on
+  standard problems that Ipopt solves to machine precision. On the Maratos
+  problem (`min 2(x₁²+x₂²−1) − x₁ s.t. x₁²+x₂²=1`) the solver now converges from
+  every tested start under the exact, damped-BFGS, and L-BFGS Hessians — in a
+  handful of iterations rather than 17–200 (or failing outright) — restoring the
+  superlinear rate the Maratos effect destroys. HS6 now converges from its
+  canonical `(-1.2, 1)` start under the exact Hessian, and from `(0.5, 0.5)`
+  under all Hessians.
+  - Fix: when the full step (α = 1) is rejected because it *increased* the
+    constraint violation, the line search re-solves the QP with its
+    general-constraint RHS re-centered on the trial-point constraint values
+    (`c(x_k) → c(x_k + p) − A p`, Nocedal-Wright §18.11) to obtain a corrected
+    full step. The correction is accepted only if it genuinely reduces the
+    violation (Wächter-Biegler 2006 §3.3 `κ_soc` guard) and does not overshoot
+    the QP step; a taken SOC step carries its own consistent multipliers and
+    working set so the quasi-Newton Hessian update and next warm start stay
+    well-conditioned.
+  - The SQP driver also gained a **cold-start fallback**: when a warm-started QP
+    subproblem stalls at its iteration limit (or hits a numerical breakdown) on
+    a QP that is solvable from a clean start, the driver re-solves once from
+    cold instead of surrendering with `QpStepFailed` — which additionally
+    rescues several of the issue's `Search_Direction_Becomes_Too_Small` cases.
+  - Not yet addressed: from far starts under a quasi-Newton Hessian, the hardest
+    curved case (HS6 from `(-1.2, 1)`) can still stall at a blocked line search;
+    a full feasibility-restoration phase remains future work.
+
 ### Fixed — `sqp_hessian=exact` with no Hessian gave `Internal_Error` (#348)
 
 - Explicitly requesting an exact Lagrangian Hessian (`sqp_hessian="exact"` or

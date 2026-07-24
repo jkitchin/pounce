@@ -26,7 +26,10 @@ use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
-use pounce_qp::{HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus};
+use pounce_linalg::triplet::GenTMatrix;
+use pounce_qp::{
+    HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem, QpSolver, QpStatus, WorkingSet,
+};
 
 /// SQP-side algorithm driver.
 pub struct SqpAlgorithm {
@@ -260,13 +263,33 @@ impl SqpAlgorithm {
             // linearization shifts the QP's constraint RHS by
             // `-c(x_k)`, so the previous QP's *primal* doesn't
             // carry over even when the active set does.
-            let sol = if let Some(prev_w) = iter.working.as_ref() {
+            let warm_started = iter.working.is_some();
+            let mut sol = if let Some(prev_w) = iter.working.as_ref() {
                 self.qp_solver
                     .solve_with_working_set(&qp, prev_w, &self.qp_opts)?
             } else {
                 self.qp_solver.solve(&qp, None, &self.qp_opts)?
             };
             n_qp_solves += 1;
+
+            // Cold-start fallback: a warm start seeds the QP with the
+            // previous iterate's working set, which is usually a big
+            // win but can occasionally strand the active-set solver at
+            // its iteration limit (or a numerical breakdown) on a QP
+            // that is perfectly solvable from a clean start — e.g.
+            // when a quasi-Newton Hessian has drifted enough that the
+            // carried-over active set is a poor guess. Rather than
+            // give up with `QpStepFailed`, re-solve once from cold;
+            // this is what rescues the curved-constraint SQP runs of
+            // issue #349 that previously reported
+            // `Search_Direction_Becomes_Too_Small`.
+            if warm_started && matches!(sol.status, QpStatus::MaxIter | QpStatus::NumericalError) {
+                let cold = self.qp_solver.solve(&qp, None, &self.qp_opts)?;
+                n_qp_solves += 1;
+                if cold.status == QpStatus::Optimal {
+                    sol = cold;
+                }
+            }
 
             match sol.status {
                 QpStatus::Optimal => {}
@@ -336,37 +359,122 @@ impl SqpAlgorithm {
             // the same backtracking shell + acceptance API; the
             // filter keeps state across iterations on
             // `self.filter`.
-            let ls = match self.opts.globalization {
-                SqpGlobalization::L1Elastic => l1_merit_line_search(
-                    nlp,
-                    &iter.x,
-                    &sol.x,
-                    &sol.lambda_g,
-                    &grad_f,
-                    f_curr,
-                    &c_vals,
-                    &bl_c,
-                    &bu_c,
-                    &xl,
-                    &xu,
-                    nu,
-                    &self.opts,
-                ),
-                SqpGlobalization::Filter => filter_line_search(
-                    nlp,
-                    &mut self.filter,
-                    &iter.x,
-                    &sol.x,
-                    f_curr,
-                    &c_vals,
-                    &bl_c,
-                    &bu_c,
-                    &xl,
-                    &xu,
-                    nu,
-                    &self.opts,
-                ),
+            //
+            // Both are handed a second-order-correction (SOC)
+            // provider (the Maratos remedy). When the full step
+            // (α = 1) is rejected because it increased the
+            // constraint violation, the line search calls this
+            // closure with `c(x_k + p)` to obtain a corrected full
+            // step. We build that step by re-solving the SAME QP
+            // with the general-constraint RHS re-centered on the
+            // trial-point constraint values: the original QP models
+            // `c(x_k) + A p`, and the SOC replaces `c(x_k)` by
+            // `c(x_k + p) − A p`, so the correction subproblem
+            // targets the true (curved) violation at the trial
+            // point (Nocedal-Wright §18.11). The just-solved working
+            // set warm-starts the correction. Only meaningful with
+            // general constraints (`m > 0`).
+            //
+            // Pre-computed `A p` for the RHS re-centering:
+            let a_p = if m > 0 {
+                mat_vec_gen(&qp_data.a, &sol.x, m)
+            } else {
+                Vec::new()
             };
+            let mut n_soc_solves: u32 = 0;
+            // Working set from the SOC subproblem, kept so that a
+            // taken SOC step warm-starts the next iteration from the
+            // active set that actually describes `x + p_soc` (not the
+            // original QP's set, which belongs to the rejected step).
+            let mut soc_working: Option<WorkingSet> = None;
+            let ls = {
+                let qp_solver = &mut self.qp_solver;
+                let qp_opts = &self.qp_opts;
+                let qp_data_ref = &qp_data;
+                let c_curr_ref = &c_vals;
+                let a_p_ref = &a_p;
+                let sol_working = &sol.working;
+                let n_soc = &mut n_soc_solves;
+                let soc_working_slot = &mut soc_working;
+                let mut soc = |c_trial: &[Number]| -> Option<crate::sqp::line_search::SocStep> {
+                    let mm = qp_data_ref.m;
+                    // Re-center the general-constraint RHS on the
+                    // trial-point violation, preserving ±∞ sentinels.
+                    let mut bl_soc = qp_data_ref.bl.clone();
+                    let mut bu_soc = qp_data_ref.bu.clone();
+                    for i in 0..mm {
+                        let delta = c_curr_ref[i] - c_trial[i] + a_p_ref[i];
+                        if qp_data_ref.bl[i] > NLP_LOWER_BOUND_INF {
+                            bl_soc[i] = qp_data_ref.bl[i] + delta;
+                        }
+                        if qp_data_ref.bu[i] < NLP_UPPER_BOUND_INF {
+                            bu_soc[i] = qp_data_ref.bu[i] + delta;
+                        }
+                    }
+                    let qp_soc = QpProblem {
+                        n: qp_data_ref.n,
+                        m: qp_data_ref.m,
+                        h: &qp_data_ref.h,
+                        g: &qp_data_ref.g,
+                        a: &qp_data_ref.a,
+                        bl: &bl_soc,
+                        bu: &bu_soc,
+                        xl: &qp_data_ref.xl,
+                        xu: &qp_data_ref.xu,
+                        hessian_inertia: qp_data_ref.hessian_inertia,
+                    };
+                    let sol_soc = qp_solver
+                        .solve_with_working_set(&qp_soc, sol_working, qp_opts)
+                        .ok()?;
+                    *n_soc += 1;
+                    if sol_soc.status == QpStatus::Optimal {
+                        *soc_working_slot = Some(sol_soc.working);
+                        Some(crate::sqp::line_search::SocStep {
+                            p: sol_soc.x,
+                            lambda_g: sol_soc.lambda_g,
+                            lambda_x: sol_soc.lambda_x,
+                        })
+                    } else {
+                        None
+                    }
+                };
+                let soc_ref: Option<crate::sqp::line_search::SocProvider<'_>> =
+                    if m > 0 { Some(&mut soc) } else { None };
+                match self.opts.globalization {
+                    SqpGlobalization::L1Elastic => l1_merit_line_search(
+                        nlp,
+                        &iter.x,
+                        &sol.x,
+                        &sol.lambda_g,
+                        &grad_f,
+                        f_curr,
+                        &c_vals,
+                        &bl_c,
+                        &bu_c,
+                        &xl,
+                        &xu,
+                        nu,
+                        &self.opts,
+                        soc_ref,
+                    ),
+                    SqpGlobalization::Filter => filter_line_search(
+                        nlp,
+                        &mut self.filter,
+                        &iter.x,
+                        &sol.x,
+                        f_curr,
+                        &c_vals,
+                        &bl_c,
+                        &bu_c,
+                        &xl,
+                        &xu,
+                        nu,
+                        &self.opts,
+                        soc_ref,
+                    ),
+                }
+            };
+            n_qp_solves += n_soc_solves;
             #[cfg(test)]
             if self.opts.print_level >= 1 {
                 tracing::debug!(target: "pounce::sqp",
@@ -390,13 +498,29 @@ impl SqpAlgorithm {
                 });
             }
             iter.x = ls.x_new;
-            for (l, &lq) in iter.lambda_g.iter_mut().zip(sol.lambda_g.iter()) {
-                *l = (1.0 - ls.alpha) * *l + ls.alpha * lq;
+            match ls.soc_duals {
+                Some((soc_lg, soc_lx)) => {
+                    // A second-order-correction step was taken (α = 1
+                    // on the SOC subproblem). Adopt the SOC
+                    // subproblem's own multipliers and working set so
+                    // `(step, multipliers, active set)` stay a
+                    // consistent triple — required for the quasi-
+                    // Newton Hessian update to stay well-conditioned
+                    // and for the next QP to warm-start correctly.
+                    iter.lambda_g = soc_lg;
+                    iter.lambda_x = soc_lx;
+                    iter.working = soc_working.take().or(Some(sol.working));
+                }
+                None => {
+                    for (l, &lq) in iter.lambda_g.iter_mut().zip(sol.lambda_g.iter()) {
+                        *l = (1.0 - ls.alpha) * *l + ls.alpha * lq;
+                    }
+                    for (l, &lq) in iter.lambda_x.iter_mut().zip(sol.lambda_x.iter()) {
+                        *l = (1.0 - ls.alpha) * *l + ls.alpha * lq;
+                    }
+                    iter.working = Some(sol.working);
+                }
             }
-            for (l, &lq) in iter.lambda_x.iter_mut().zip(sol.lambda_x.iter()) {
-                *l = (1.0 - ls.alpha) * *l + ls.alpha * lq;
-            }
-            iter.working = Some(sol.working);
             nu = ls.nu;
             f_cached = Some(ls.f_new);
             c_cached = Some(ls.c_new);
@@ -434,6 +558,22 @@ impl SqpAlgorithm {
 struct KktError {
     pub stationarity: Number,
     pub constr_viol: Number,
+}
+
+/// Sparse `A · p` for an `m × n` general-constraint Jacobian stored
+/// as a `GenTMatrix` (1-based triplet indices). Used to re-center
+/// the second-order-correction QP's RHS on the trial point.
+fn mat_vec_gen(a: &GenTMatrix, p: &[Number], m: usize) -> Vec<Number> {
+    let mut out = vec![0.0; m];
+    let irows = a.irows();
+    let jcols = a.jcols();
+    let vals = a.values();
+    for k in 0..vals.len() {
+        let i = (irows[k] - 1) as usize;
+        let j = (jcols[k] - 1) as usize;
+        out[i] += vals[k] * p[j];
+    }
+    out
 }
 
 /// Lagrangian gradient `∇L(x, λ_g) = ∇f(x) + J_c(x)ᵀ λ_g` at the
