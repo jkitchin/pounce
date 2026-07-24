@@ -9,6 +9,28 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — `solve_bvp` could not reach tolerances tighter than ~1.5e-8, exhausting the node budget instead (#345)
+
+- **`pounce.solve_bvp` with a tolerance below ~1.5e-8 now converges** (in the
+  same node count as `scipy.integrate.solve_bvp`) instead of refining to the
+  `max_nodes` cap and returning `success=False`. On a textbook linear BVP
+  (`y'' = -y`) at `tol=1e-8`, the adaptive solver previously used the entire
+  node budget (100 000+ nodes) with its estimated RMS residual stuck at
+  `1.47e-8`, while SciPy converged in 161 nodes; it now also converges in 161.
+  The returned *solution* was already accurate, so this was a
+  tolerance/`success`-reporting defect, not a wrong answer.
+  - Cause: the mesh-refinement residual estimate scores each interval by
+    `1.5 · col_res / h`, but the inner Newton solve stopped at a *fixed*
+    absolute residual. After each refinement the warm-started iterate already
+    sat below that stop, so Newton took zero steps and left `col_res` frozen at
+    the interpolation level instead of driving it to round-off — so the
+    estimate could not fall below a floor as `h` shrank.
+  - Fix: when driving adaptive refinement, the Newton stop now scales with the
+    mesh (`|col_res| < 2/3 · h · 5e-2 · tol` per interval), reproducing SciPy's
+    criterion, so the collocation system is solved proportionally tighter as
+    the mesh refines. A standalone `adaptive=False` solve is unchanged (it
+    still drives the given mesh to round-off).
+
 ### Fixed — `pyomo_pounce` silently solved models with Binary/Integer variables as a continuous relaxation (#341)
 
 - **`SolverFactory('pounce').solve(model)` now raises a clear `ValueError`
