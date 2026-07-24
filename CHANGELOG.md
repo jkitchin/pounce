@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-24
+
 ### Fixed — active-set-SQP stalled on curved-constraint NLPs via the Maratos effect (#349)
 
 - **The active-set-SQP driver now defeats the Maratos effect** with a
