@@ -817,10 +817,50 @@ impl PyProblem {
                 false,
             );
         }
+        // Issue #348: when the problem object exposes no exact Lagrangian
+        // Hessian (`has_hessian == false`), an explicit request for the exact
+        // Hessian cannot be honored — the driver would evaluate a *zero*
+        // Hessian, so the SQP QP subproblem gets a null curvature term and
+        // reports "unbounded" (surfacing as `Internal_Error`), and the IPM
+        // loses its curvature. The `hessian_approximation = limited-memory`
+        // default set above already fixes the implicit case, but an explicit
+        // `sqp_hessian = "exact"` / `hessian_approximation = "exact"` in the
+        // user options is applied below and would re-enable the broken path.
+        // Downgrade any such request to the limited-memory fallback and warn
+        // once so the override is visible.
+        let mut downgraded_exact = false;
         for (k, v) in &self.str_opts {
+            let effective = if !self.has_hessian && v.eq_ignore_ascii_case("exact") {
+                match k.as_str() {
+                    "sqp_hessian" => {
+                        downgraded_exact = true;
+                        Some("lbfgs")
+                    }
+                    "hessian_approximation" => {
+                        downgraded_exact = true;
+                        Some("limited-memory")
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let v_eff = effective.unwrap_or(v.as_str());
             app.options_mut()
-                .set_string_value(k, v, true, false)
-                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v}: {e}")))?;
+                .set_string_value(k, v_eff, true, false)
+                .map_err(|e| PyRuntimeError::new_err(format!("option {k}={v_eff}: {e}")))?;
+        }
+        if downgraded_exact {
+            let warnings = py.import_bound("warnings")?;
+            let _ = warnings.call_method1(
+                "warn",
+                ("an exact Hessian was requested (sqp_hessian / \
+                  hessian_approximation = \"exact\") but the problem provides no \
+                  Lagrangian Hessian (no `hessian` / `hessianstructure` methods); \
+                  falling back to a limited-memory (L-BFGS) approximation. Supply \
+                  a `hess` for an unconstrained or all-linear-constraint problem \
+                  to use the exact Hessian.",),
+            );
         }
         for (k, v) in &self.num_opts {
             app.options_mut()
