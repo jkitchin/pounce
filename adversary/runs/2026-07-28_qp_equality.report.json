@@ -1,0 +1,61 @@
+{
+  "schema": "pounce.solve-report/v1",
+  "fair_metadata": {
+    "result_id": "1785241025787731499-19617",
+    "created_at_iso": "2026-07-28T12:17:05.787Z",
+    "created_at_unix_nanos": 1785241025787731499,
+    "elapsed_seconds": 8.28e-7,
+    "solver": {
+      "name": "pounce",
+      "version": "0.9.0",
+      "target_triple": "x86_64-unknown-linux-gnu"
+    },
+    "license": "EPL-2.0",
+    "input": {
+      "kind": "nl-file",
+      "path": "/home/user/pounce/adversary/runs/2026-07-28_qp_equality.nl",
+      "size_bytes": 1111
+    }
+  },
+  "problem": {
+    "n_variables": 6,
+    "n_constraints": 1,
+    "n_objectives": 1,
+    "minimize": true
+  },
+  "solution": {
+    "status": "SolveSucceeded",
+    "solve_result_num": 0,
+    "objective": -2.3337160736049447,
+    "x": [
+      -0.4140842920048886,
+      0.5094664570539378,
+      -0.3343625435819238,
+      0.2724957710425514,
+      0.6462825883834263,
+      1.9467070522093926
+    ],
+    "lambda": [
+      -0.5263138112170198
+    ]
+  },
+  "statistics": {
+    "iteration_count": 1,
+    "final_objective": -2.3337160736049447,
+    "final_scaled_objective": 0.0,
+    "final_dual_inf": 1.9467166767483945e-10,
+    "final_constr_viol": 5.2631397018387815e-9,
+    "final_compl": 0.0,
+    "final_kkt_error": 5.2631397018387815e-9,
+    "num_obj_evals": 0,
+    "num_constr_evals": 0,
+    "num_obj_grad_evals": 0,
+    "num_constr_jac_evals": 0,
+    "num_hess_evals": 0,
+    "total_wallclock_time_secs": 0.001567669,
+    "restoration_calls": 0,
+    "restoration_inner_iters": 0,
+    "restoration_outer_iters": 0,
+    "restoration_wall_secs": 0.0
+  }
+}

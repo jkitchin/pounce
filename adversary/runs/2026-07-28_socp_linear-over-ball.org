@@ -1,0 +1,42 @@
+#+TITLE: Adversary run — conic (SOCP) family — linear objective over a ball
+#+DATE: 2026-07-28
+
+* Family / solver
+  Convex QCQP -> conic interior-point (=pounce-convex=), forced via
+  =solver_selection=socp=. Confirmed by banner: "Problem class: convex
+  QCQP. Selected solver: convex QCQP conic interior-point (pounce-convex)."
+
+* Problem
+  min c'x s.t. ||x||_2^2 <= r^2 (r=3), 4 variables, seed 4224. A convex QCQP
+  (single quadratic <=-upper-bound constraint, PSD quadratic form) that
+  pounce's classifier routes to the conic (SOC) solver rather than the
+  filter-IPM.
+
+* Formulation skepticism
+  - Checked the constraint is written as a one-sided upper bound
+    (sum x_i^2 <= r^2), which is the only sense the classifier treats as
+    convex/SOC-representable per =dispatch.rs= (an equality or lower-bound
+    quadratic constraint would be nonconvex and should fall back to NLP —
+    not tested here, but worth a future adversary run).
+  - Box bounds [-10,10] are loose enough not to bind at the true optimum
+    (||x*||=3 < 10 per coordinate is impossible to violate since the ball
+    itself caps each |x_i| <= 3), confirmed the closed-form solution
+    respects them.
+
+* Oracles (independent of pounce and of each other)
+  1. *Closed form (pure vector geometry, no solver)*: minimizing a linear
+     functional over a ball puts the minimizer on the boundary opposite
+     the gradient: x* = -r c/||c||, f* = -r||c||.
+  2. *cvxpy (Clarabel)*, expressing the same constraint via =cp.norm(x,2)
+     <= R= — a different conic formulation path within an independent
+     solver stack.
+
+* Result
+  max objective error vs 2 oracles: 2.4e-8
+  max x error vs 2 oracles: 1.0e-8
+
+  =pounce verify=: VERIFIED — max constraint violation 6.0e-14, KKT
+  stationarity residual 8.2e-8, complementarity 4.4e-14.
+
+* Verdict
+  OK — matches both independent oracles to ~1e-8.

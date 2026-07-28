@@ -1,0 +1,52 @@
+#+TITLE: Adversary run — NLP family — max-volume box under fixed surface area
+#+DATE: 2026-07-28
+
+* Family / solver
+  NLP filter line-search interior-point (=pounce-nlp= + =pounce-algorithm=),
+  forced via =solver_selection=nlp=. Problem class confirmed by pounce's own
+  banner: "Problem class: NLP."
+
+* Problem
+  min  -x*y*z
+  s.t. x*y + y*z + z*x = 3
+       0.1 <= x, y, z <= 10
+
+  Classical isoperimetric-type result: for fixed surface area, the cube
+  maximizes enclosed volume. Nonconvex (bilinear terms in both objective and
+  constraint) — exercises the filter-IPM's restoration/line-search machinery,
+  not just a convex fast path.
+
+* Formulation skepticism
+  - Bounds [0.1, 10] keep the problem away from x=0 (where the bilinear
+    constraint gradient degenerates) without constraining the true optimum,
+    which sits comfortably in the interior at (1,1,1).
+  - Verified the unique fully-symmetric positive critical point is a genuine
+    local (in fact global, by AM-GM) max of volume for this class of
+    problem — not a saddle — via the sign of the bordered Hessian
+    informally (all three oracles below independently converge to the same
+    point from different starts, which is itself evidence against a saddle).
+
+* Oracles (independent of pounce and of each other)
+  1. *sympy exact KKT certificate*: derived the multiplier by symmetry
+     (lambda = -1/2) and verified — symbolically, in exact rational
+     arithmetic — that all four stationarity/constraint equations vanish at
+     (1,1,1). This is an algebraic proof, not a numerical solve.
+  2. *scipy.optimize.minimize(SLSQP)* from start (2.0, 0.5, 3.0).
+  3. *scipy.optimize.minimize(trust-constr)* from start (0.2, 5.0, 1.0).
+
+* Result
+  | oracle              |        x |        y |        z |        f |
+  |----------------------+----------+----------+----------+----------|
+  | pounce (nlp)         | 1.000000 | 1.000000 | 1.000000 | -1.000000 |
+  | sympy KKT (exact)    | 1        | 1        | 1        | -1        |
+  | scipy SLSQP          | 1.000000 | 1.000000 | 1.000000 | -1.000000 |
+  | scipy trust-constr   | 1.000000 | 1.000000 | 1.000000 | -1.000000 |
+
+  max objective error vs 3 oracles: 8.3e-11
+  max x error vs 3 oracles: 6.5e-07
+
+  =pounce verify= on the emitted =.sol=: VERIFIED — max constraint violation
+  2.3e-14, KKT stationarity residual 2.5e-9, complementarity 0.
+
+* Verdict
+  OK — matches all three independent oracles to solver-tolerance precision.

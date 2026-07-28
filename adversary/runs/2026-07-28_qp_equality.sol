@@ -1,0 +1,20 @@
+POUNCE convex QP IPM (pounce-convex): Optimal Solution Found.
+
+Options
+0
+1
+1
+6
+6
+5.26313811217019811e-1
+-4.14084292004888610e-1
+5.09466457053937782e-1
+-3.34362543581923799e-1
+2.72495771042551405e-1
+6.46282588383426337e-1
+1.94670705220939255e0
+objno 0 0
+suffix 4 0 13 0 0
+ipopt_zL_out
+suffix 4 0 13 0 0
+ipopt_zU_out

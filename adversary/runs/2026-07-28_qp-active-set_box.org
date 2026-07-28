@@ -1,0 +1,43 @@
+#+TITLE: Adversary run — active-set QP family — box-only diagonal QP
+#+DATE: 2026-07-28
+
+* Family / solver
+  Active-set QP (=pounce-qp=), forced via
+  =solver_selection=qp-active-set=. Confirmed by banner: "Problem class:
+  convex QP. Selected solver: active-set QP (pounce-qp)."
+
+* Problem
+  8-variable diagonal (separable) convex QP with ONLY box bounds
+  [-2, 2], no general constraints. Seed 80808, costs drawn from a wide
+  U(-10,10) range specifically so several unconstrained per-coordinate
+  optima c_i/q_i land outside the box, forcing a genuine (nontrivial)
+  active set at the solution — the exact behavior this solver family
+  exists to handle.
+
+* Formulation skepticism
+  Diagonal Hessian + box-only constraints means the problem is fully
+  separable: no coordinate's optimum depends on any other, so the
+  constrained solution is EXACTLY the per-coordinate clip of the
+  unconstrained optimum into its bound — provable from single-variable
+  calculus, no QP theory or solver needed. Checked the closed form gives a
+  nontrivial active set (4 of 8 bounds active) rather than an all-interior
+  or all-active degenerate case.
+
+* Oracles (independent of pounce and of each other)
+  1. *Closed-form per-coordinate clip*: x_i* = clip(c_i/q_i, -2, 2).
+  2. *cvxpy (Clarabel)* — independent convex solver stack.
+
+* Result
+  4 of 8 bounds active in the closed-form solution (both a real interior
+  subset and a real active subset are exercised).
+  max objective error vs 2 oracles: 2.9e-8
+  max x error vs 2 oracles: 7.5e-8
+
+  =pounce verify=: VERIFIED — max bound/constraint violation 0 (no duals
+  reported in the .sol for this path, so optimality wasn't separately
+  KKT-checked by =verify=; the closed-form and cvxpy agreement above
+  already gives two independent optimality checks).
+
+* Verdict
+  OK — matches both independent oracles to ~1e-7, correct nontrivial
+  active set.

@@ -1,0 +1,65 @@
+#+TITLE: POUNCE adversary testing log
+#+STARTUP: overview
+
+* Environment notes
+  This log starts 2026-07-28. =.claude/commands/adversary.md= (the
+  procedure this routine is meant to follow) and the =adversary/= tree
+  itself were both absent from this fresh cloud-sandbox checkout — =.claude/=
+  is gitignored, so the command file is apparently local-only on the
+  maintainer's machine and was never committed. No prior =adversary-runs=
+  branch and no "Adversary daily reports" GitHub issue existed either, so
+  this reads as a true first run rather than a dropped continuation.
+  Procedure below (family taxonomy, artifact format, oracle discipline) was
+  reconstructed from the scheduled task's own description plus
+  =docs/src/choosing-a-solver.md= and the existing =validation/= directory's
+  oracle-discipline conventions. Recommend committing
+  =.claude/commands/adversary.md= to the repo (or documenting the intended
+  procedure in =adversary/README.org=) so future sandbox runs don't have to
+  reconstruct it.
+
+* Family taxonomy (from docs/src/choosing-a-solver.md + pounce-cli dispatch.rs)
+  - nlp              — NLP filter-IPM (pounce-nlp/pounce-algorithm), general smooth NLP
+  - active-set-sqp   — NLP active-set SQP (algorithm=active-set-sqp)
+  - lp-ipm           — LP convex interior-point (pounce-convex)
+  - qp-ipm           — convex QP interior-point (pounce-convex)
+  - socp             — conic IPM: SOCP/exp/power/PSD, incl. convex QCQP (pounce-convex)
+  - qp-active-set    — active-set QP, convex or indefinite (pounce-qp)
+  - sos              — SOS/Lasserre polynomial global (pounce-convex), Python-only entry point
+
+* Rotation (least-recently-tested first)
+  Tested 2026-07-28: nlp, lp-ipm, qp-ipm, qp-active-set, socp.
+  NOT YET TESTED (first-run backlog): active-set-sqp, sos.
+  Next run should prioritize active-set-sqp and sos, then one of
+  {nlp, lp-ipm, qp-ipm, qp-active-set, socp} again (least-recent = all tied
+  at 2026-07-28; pick by alphabetical or random tiebreak).
+
+* 2026-07-28
+  Environment: Linux cloud sandbox (not the maintainer's Mac). No Homebrew
+  Ipopt available. Skipped the Python extension build (maturin) — all 5
+  problems driven through the CLI on hand-generated AMPL =.nl= files
+  (via pyomo's standalone =.nl= writer, no external solver needed for that
+  step), which was sufficient to reach all 5 families since none of them
+  require the SOS/Python-only path. Total wall time ~1h including a ~2.5min
+  release build of pounce-cli.
+
+  | family        | problem                    | verdict | max err  | oracles                                  |
+  |---------------+-----------------------------+---------+----------+-------------------------------------------|
+  | nlp           | box-max-volume (cube)      | OK      | 8.3e-11  | sympy exact KKT, scipy SLSQP, trust-constr |
+  | lp-ipm        | transport (mixed-sign c)   | OK      | 7.3e-10  | scipy HiGHS, from-scratch LP duality cert  |
+  | qp-ipm        | diagonal QP + 1 equality   | OK      | 2.8e-9   | closed-form KKT, cvxpy Clarabel            |
+  | qp-active-set | diagonal QP, box-only      | OK      | 2.9e-8   | closed-form clip, cvxpy Clarabel           |
+  | socp          | linear obj over ball       | OK      | 2.4e-8   | closed-form ball geometry, cvxpy Clarabel  |
+
+  No SUSPECTED BUG. All 5 pounce solves independently verified via
+  =pounce verify= (feasibility + KKT) AND at least one solver-independent
+  numeric or closed-form oracle; 4 of 5 had two independent oracles.
+
+  One near-miss worth recording: the first LP draft (all-positive costs)
+  produced a trivial all-zero-corner optimum that never exercised the row
+  constraints, and a first cut at the from-scratch duality certificate had
+  a sign bug (solved for the wrong-signed KKT target) that briefly looked
+  like "dual infeasible" — traced to the oracle script, not pounce, before
+  the LP problem was strengthened to a nontrivial vertex. See
+  =2026-07-28_lp_transport.org= "Formulation skepticism" for the full
+  account; kept as a reminder that a mismatch first implicates the oracle,
+  not the solver under test.

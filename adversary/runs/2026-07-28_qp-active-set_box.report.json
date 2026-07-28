@@ -1,0 +1,62 @@
+{
+  "schema": "pounce.solve-report/v1",
+  "fair_metadata": {
+    "result_id": "1785241046052416895-19990",
+    "created_at_iso": "2026-07-28T12:17:26.052Z",
+    "created_at_unix_nanos": 1785241046052416895,
+    "elapsed_seconds": 8.96e-6,
+    "solver": {
+      "name": "pounce",
+      "version": "0.9.0",
+      "target_triple": "x86_64-unknown-linux-gnu"
+    },
+    "license": "EPL-2.0",
+    "input": {
+      "kind": "nl-file",
+      "path": "/home/user/pounce/adversary/runs/2026-07-28_qp-active-set_box.nl",
+      "size_bytes": 1234
+    }
+  },
+  "problem": {
+    "n_variables": 8,
+    "n_constraints": 0,
+    "n_objectives": 1,
+    "minimize": true,
+    "nnz_jac_g": 0,
+    "nnz_h_lag": 8
+  },
+  "solution": {
+    "status": "SolveSucceeded",
+    "solve_result_num": 0,
+    "objective": -40.40572371094321,
+    "x": [
+      0.05932203389830508,
+      -2.0,
+      1.200224971878515,
+      1.5102171136653895,
+      -2.0,
+      -2.0,
+      -2.0,
+      1.6076726342710996
+    ]
+  },
+  "statistics": {
+    "iteration_count": 1,
+    "final_objective": -40.40572371094321,
+    "final_scaled_objective": -40.40572371094321,
+    "final_dual_inf": 2.220446049250313e-16,
+    "final_constr_viol": 0.0,
+    "final_compl": 0.0,
+    "final_kkt_error": 2.220446049250313e-16,
+    "num_obj_evals": 2,
+    "num_constr_evals": 0,
+    "num_obj_grad_evals": 2,
+    "num_constr_jac_evals": 0,
+    "num_hess_evals": 2,
+    "total_wallclock_time_secs": 0.0,
+    "restoration_calls": 0,
+    "restoration_inner_iters": 0,
+    "restoration_outer_iters": 0,
+    "restoration_wall_secs": 0.0
+  }
+}

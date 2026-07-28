@@ -1,0 +1,36 @@
+#+TITLE: Adversary run — convex QP family — diagonal QP with linear equality
+#+DATE: 2026-07-28
+
+* Family / solver
+  Convex QP interior-point (=pounce-convex=), forced via
+  =solver_selection=qp-ipm=. Confirmed by banner: "Problem class: convex QP.
+  Selected solver: convex QP interior-point (pounce-convex)."
+
+* Problem
+  6-variable diagonal (separable) strictly convex QP with one linear
+  equality constraint a'x = 4. Seed 7182026.
+
+* Formulation skepticism
+  Diagonal Hessian was chosen deliberately so the KKT system collapses to a
+  single scalar equation for the multiplier — giving an oracle that needs
+  no linear-algebra package at all, only per-coordinate arithmetic. Checked
+  that q_i > 0 for all i (strict convexity, unique minimizer) and that a
+  has no zero entries (so the equality genuinely couples all 6
+  coordinates, not a subset).
+
+* Oracles (independent of pounce and of each other)
+  1. *Closed form*: for diagonal Q, x_i(lambda) = (c_i + lambda a_i)/q_i;
+     substituting into a'x=r gives one scalar linear equation for lambda,
+     solved by hand-derived arithmetic (numpy used only for the sum, not
+     for any solve).
+  2. *cvxpy (Clarabel)* — independent convex solver stack.
+
+* Result
+  max objective error vs 2 oracles: 2.8e-9
+  max x error vs 2 oracles: 6.8e-10
+
+  =pounce verify=: VERIFIED — max constraint violation 5.3e-9, KKT
+  stationarity residual 1.9e-10, complementarity 0.
+
+* Verdict
+  OK — matches both independent oracles to ~1e-9.

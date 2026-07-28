@@ -1,0 +1,54 @@
+#+TITLE: Adversary run — LP family — mixed-sign-cost box/row LP
+#+DATE: 2026-07-28
+
+* Family / solver
+  LP interior-point (=pounce-convex=), forced via =solver_selection=lp-ipm=.
+  Confirmed by banner: "Problem class: LP. Selected solver: LP
+  interior-point (pounce-convex)."
+
+* Problem
+  6 variables, 5 inequality rows, box bounds [0,8]. Seed 20260728. Costs
+  drawn from U(-6,6) (mixed sign) specifically so the optimum is a genuine
+  interior vertex — an all-positive cost vector would trivially optimize at
+  x=0 without exercising the row constraints at all (caught this on a first
+  pass; see below).
+
+* Formulation skepticism
+  - First draft used c ~ U(1,10) (all positive): pounce, scipy, and the
+    duality certificate all agreed, but the optimum was the trivial
+    all-zero corner (only bound constraints active, no row constraint ever
+    binding) — a weak test that wouldn't have caught a bug in the
+    interior-point handling of the A x <= b rows. Regenerated with mixed-
+    sign costs so 3 of 5 rows and 3 of 6 bounds end up active.
+  - Caught a *sign bug in my own oracle*, not in pounce: the first version
+    of the from-scratch duality certificate solved
+    M @ duals = c instead of the KKT-correct
+    M @ duals = -c (from c + A'y - zl + zu = 0), which made the recovered
+    duals come out negative (spuriously "dual infeasible"). Re-derived the
+    stationarity condition from the Lagrangian by hand and fixed the sign;
+    the corrected certificate is dual-feasible with a ~0 stationarity
+    residual. Recorded here per the oracle-discipline principle that a
+    solver-family "mismatch" is not evidence of a pounce bug until the
+    oracle itself is double-checked.
+
+* Oracles (independent of pounce and of each other)
+  1. =scipy.optimize.linprog(method="highs")= — different LP code
+     (HiGHS simplex/IPM) entirely unrelated to pounce.
+  2. From-scratch LP strong-duality certificate: identify pounce's active
+     rows/bounds at x*, solve the stationarity equations
+     A'y - zl + zu = -c for the multipliers via numpy least-squares (no LP
+     solver of any kind), then check dual feasibility (y,zl,zu >= 0) and
+     the stationarity residual.
+
+* Result
+  objective error vs scipy HiGHS: 7.3e-10
+  max x error vs scipy HiGHS: 1.5e-10
+  duality certificate: active rows {0,1,2}, active lower bounds {0,3,4},
+  stationarity residual 2.3e-15, all duals >= 0 (dual feasible).
+
+  =pounce verify= on the emitted =.sol=: VERIFIED — max bound violation
+  5.6e-11, KKT stationarity residual 3.4e-11, complementarity 9.0e-11.
+
+* Verdict
+  OK — matches scipy HiGHS to ~1e-9 and independently satisfies LP strong
+  duality (dual feasible, ~0 stationarity residual, ~0 gap).

@@ -1,0 +1,65 @@
+{
+  "schema": "pounce.solve-report/v1",
+  "fair_metadata": {
+    "result_id": "1785241004870575265-19243",
+    "created_at_iso": "2026-07-28T12:16:44.870Z",
+    "created_at_unix_nanos": 1785241004870575265,
+    "elapsed_seconds": 1.322e-6,
+    "solver": {
+      "name": "pounce",
+      "version": "0.9.0",
+      "target_triple": "x86_64-unknown-linux-gnu"
+    },
+    "license": "EPL-2.0",
+    "input": {
+      "kind": "nl-file",
+      "path": "/home/user/pounce/adversary/runs/2026-07-28_lp_transport.nl",
+      "size_bytes": 1345
+    }
+  },
+  "problem": {
+    "n_variables": 6,
+    "n_constraints": 5,
+    "n_objectives": 1,
+    "minimize": true
+  },
+  "solution": {
+    "status": "SolveSucceeded",
+    "solve_result_num": 0,
+    "objective": -50.19609471730616,
+    "x": [
+      -5.062887064456819e-11,
+      2.7884432033353272,
+      4.043463923053313,
+      -5.5826175667308053e-11,
+      -2.3834470995777953e-11,
+      4.092410894659804
+    ],
+    "lambda": [
+      0.1179820618262409,
+      0.5130562607033906,
+      1.002132286925741,
+      8.097822208294326e-11,
+      6.005377963094367e-12
+    ]
+  },
+  "statistics": {
+    "iteration_count": 10,
+    "final_objective": -50.19609471730616,
+    "final_scaled_objective": 0.0,
+    "final_dual_inf": 3.274194888689787e-11,
+    "final_constr_viol": 5.5826175667308053e-11,
+    "final_compl": 4.6302071914815035e-10,
+    "final_kkt_error": 4.6302071914815035e-10,
+    "num_obj_evals": 0,
+    "num_constr_evals": 0,
+    "num_obj_grad_evals": 0,
+    "num_constr_jac_evals": 0,
+    "num_hess_evals": 0,
+    "total_wallclock_time_secs": 0.010569732,
+    "restoration_calls": 0,
+    "restoration_inner_iters": 0,
+    "restoration_outer_iters": 0,
+    "restoration_wall_secs": 0.0
+  }
+}
