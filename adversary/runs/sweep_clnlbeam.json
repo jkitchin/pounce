@@ -1,0 +1,74 @@
+[
+  {
+    "limit": 0.5,
+    "wall": 0.7013037499273196,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 350.2464047436131,
+    "iters": 4,
+    "rc": 1
+  },
+  {
+    "limit": 1.0,
+    "wall": 1.178084542043507,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 350.00201462160913,
+    "iters": 7,
+    "rc": 1
+  },
+  {
+    "limit": 2.0,
+    "wall": 2.1645924999611452,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 348.24062884159827,
+    "iters": 13,
+    "rc": 1
+  },
+  {
+    "limit": 5.0,
+    "wall": 5.160372457932681,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 347.10740709932793,
+    "iters": 32,
+    "rc": 1
+  },
+  {
+    "limit": 10.0,
+    "wall": 10.177113709039986,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 345.0906873957296,
+    "iters": 90,
+    "rc": 1
+  },
+  {
+    "limit": 20.0,
+    "wall": 20.158743417006917,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 344.9680487602668,
+    "iters": 229,
+    "rc": 1
+  },
+  {
+    "limit": 30.0,
+    "wall": 30.167108583031222,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 344.8934207203361,
+    "iters": 382,
+    "rc": 1
+  },
+  {
+    "limit": 45.0,
+    "wall": 37.54323387495242,
+    "status": "SolveSucceeded",
+    "obj": 344.8761314083454,
+    "iters": 483,
+    "rc": 0
+  },
+  {
+    "limit": 60.0,
+    "wall": 36.99424312496558,
+    "status": "SolveSucceeded",
+    "obj": 344.8761314083454,
+    "iters": 483,
+    "rc": 0
+  }
+]

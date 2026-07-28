@@ -1,0 +1,140 @@
+#+TITLE: Adversary Run: Status Survival Across the Auto-Routing Boundary
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: infeasibility / unboundedness / status-reporting correctness
+:SOURCE: Constructed instances with exact Farkas / recession certificates
+:         (LP duality, Boyd & Vandenberghe *Convex Optimization* §5.8;
+:         Nocedal & Wright §13 for the equality-form Farkas lemma).
+:KNOWN_OPTIMAL: n/a — every instance is infeasible or unbounded by construction
+:N_VARIABLES: 1–3
+:N_CONSTRAINTS: 1–2 rows plus bounds
+:END:
+
+Eleven instances spanning every structure the router can detect (LP, LP with
+equalities, bound-derived, convex QP with PD and with singular-PSD Hessian,
+convex QCQP/SOCP) plus one nonlinear fall-through case. Each is *infeasible* or
+*unbounded* by construction, and each carries an analytic certificate that the
+script re-verifies numerically before trusting it:
+
+- *Infeasible* cases carry a Farkas vector \(y \ge 0\) with \(A^\top y = 0\),
+  \(b^\top y < 0\) (inequality form) or \(A^\top y = 0\), \(b^\top y \ne 0\)
+  (equality form).
+- *Unbounded* cases carry a recession direction \(d\) with \(Ad \le 0\) and
+  \(c^\top d < 0\) from an explicitly feasible \(x_0\).
+
+The sharpest instance is case 8, the *ambiguity trap*:
+
+\[
+\min_{x} \; -x_0 - x_1 \quad \text{s.t.} \quad x_0 + x_1 \ge 3, \;\; x_0 + x_1 \le 1
+\]
+
+This is simultaneously primal infeasible (Farkas \(y=(1,1)\), \(b^\top y = -2\))
+and dual infeasible (ray \(d=(1,1)\), \(c^\top d = -2\)). An HSDE can surface
+either certificate, so it is exactly where a merged =infeasible_or_unbounded=
+would get flattened into the wrong definite status. The correct verdict is
+INFEASIBLE: the feasible set is empty, so "unbounded below over the feasible
+region" is vacuously false.
+
+Comparison is on *semantic bucket*, not the raw integer — the routed path uses
+scipy-style codes (2 = infeasible, 3 = unbounded) while the NLP path uses Ipopt
+=ApplicationReturnStatus= (2 = infeasible, 4 = diverging iterates). Comparing
+integers directly would have produced a spurious finding on every unbounded case.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS (routing boundary) with one NLP-path SOLVER_LIMITATION
+:END:
+
+| # | Structure       | Truth      | auto       | forced nlp | scipy      | cvxpy      | Verdict     |
+|---+-----------------+------------+------------+------------+------------+------------+-------------|
+| 1 | LP              | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | PASS        |
+| 2 | LP              | UNBOUNDED  | UNBOUNDED  | UNBOUNDED  | UNBOUNDED  | UNBOUNDED  | PASS        |
+| 3 | QP (PD)         | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | PASS        |
+| 4 | QP (sing. PSD)  | UNBOUNDED  | UNBOUNDED  | UNBOUNDED  | n/a        | UNBOUNDED  | PASS        |
+| 5 | QCQP            | INFEASIBLE | INFEASIBLE | INFEASIBLE | n/a        | INFEASIBLE | PASS        |
+| 6 | QCQP            | UNBOUNDED  | UNBOUNDED  | maxiter    | n/a        | UNBOUNDED  | NLP weaker* |
+| 7 | NLP fall-through| INFEASIBLE | INFEASIBLE | INFEASIBLE | n/a        | n/a        | PASS        |
+| 8 | LP (ambiguity)  | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | PASS        |
+| 9 | LP equality     | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | PASS        |
+|10 | LP bound-derived| INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE | PASS        |
+|11 | LP equality     | UNBOUNDED  | UNBOUNDED  | maxiter    | UNBOUNDED  | UNBOUNDED  | LIMITATION  |
+
+\* case 6 is a general NLP limitation, not pounce-specific — see below.
+
+Routed-path wall times were 0.001–0.004 s throughout; the NLP path 0.002–0.039 s.
+
+*The assigned question — does the STATUS survive routing? — answers cleanly YES.*
+In all 11 cases =solver_selection="auto"= reported exactly the analytically
+correct status. No certificate was flipped (never "infeasible" reported as
+"unbounded" or vice versa), and no merged =infeasible_or_unbounded= was flattened
+into a wrong definite status. The ambiguity trap (case 8) correctly prioritized
+the primal-infeasibility certificate, matching scipy/HiGHS and Clarabel.
+
+The reverse test (case 7) also passes: an infeasible problem with a genuinely
+nonlinear constraint, \(e^{x_0} + x_1^4 \le -1\), falls through the router to the
+NLP path under =auto= and still reports =Infeasible_Problem_Detected=, identical
+to forced =nlp=. Infeasibility is not lost by the fall-through.
+
+The two cells where =auto= and forced =nlp= differ are both cases where =auto= is
+*right* and the NLP path is *inconclusive* (=Maximum_Iterations_Exceeded=), never
+a case where the two give conflicting definite answers. That is the routed path
+being strictly stronger, which is the expected direction.
+
+* Cross-check / Verification
+
+Every analytic certificate is re-verified numerically in the script before the
+solver is trusted, and the run asserts on a failed self-check — this guards
+against my own algebra, the dominant false-positive source. Independent oracles:
+=scipy.optimize.linprog= (HiGHS) on all LP-representable cases and cvxpy/Clarabel
+on all convex cases. All agreed with the analytic truth and with =auto=.
+
+Case 6 (\(\min -x_1\) s.t. \(x_0^2 \le x_1\)) was cross-checked against Ipopt
+3.14.19 via Pyomo: Ipopt *also* returns =Maximum Number of Iterations Exceeded=.
+Certifying unboundedness of this parabola epigraph is beyond a general NLP
+filter-IPM, so pounce's NLP path is at parity with Ipopt here. Not a finding.
+
+Case 11 (\(\min -x_0\) s.t. \(x_0 - x_1 = 0\), \(x\) free) is different. Ipopt on
+the identical model returns =Iterates diverging; problem might be unbounded=
+(termination condition =unbounded=), whereas pounce's forced-NLP path returns
+=Maximum_Iterations_Exceeded= (status -1). This was checked to be independent of
+the iteration budget — =max_iter= of 300, 3000, and 10000 all give the same
+result — and independent of the constraint encoding (both =LinearConstraint= and a
+scipy-style =eq= constraint dict reproduce it). A narrowing probe shows the
+divergence detector *does* fire on neighbouring problems:
+
+| Variant                                      | pounce nlp status    |
+|----------------------------------------------+----------------------|
+| unconstrained \(\min -x_0\)                  | 4 Diverging_Iterates |
+| equality-constrained ray (case 11)           | -1 Maximum_Iterations|
+| bounded + inequality ray (case 2)            | 4 Diverging_Iterates |
+
+So the gap is specific to an unbounded ray lying in the null space of an
+equality constraint with free variables.
+
+* Verdict
+
+SOLVER_LIMITATION — narrow, on the forced-NLP path only; the routing boundary
+itself is clean.
+
+The assigned hypothesis, that a specialized engine's infeasibility or
+unboundedness certificate is mistranslated at the routing boundary, is *not*
+supported. Across 11 instances covering every detectable structure and both
+failure modes, =auto= reported the analytically correct status every time,
+including on a deliberately constructed primal-and-dual-infeasible instance where
+a flattened merged status would have shown up. Message text is also correct and
+distinct for the two certificates, so a caller keying on =message= rather than the
+integer code is not misled. The =_QP_STATUS_CODE= / =_QP_STATUS_MESSAGE= mapping in
+=python/pounce/_minimize.py= faithfully carries =primal_infeasible= → infeasible
+and =dual_infeasible= → unbounded-below.
+
+The one genuine finding is unrelated to routing: on an unbounded LP whose
+recession ray lies in the null space of an equality constraint over free
+variables, pounce's NLP path exhausts its iteration limit instead of declaring
+divergence, where Ipopt reports unbounded. Impact is limited — a user hitting this
+must have forced =solver_selection="nlp"= on a problem =auto= would have routed to
+the LP-IPM and answered correctly in 1 ms — but the reported status is
+misleading (a resource-exhaustion message for a structurally unbounded problem),
+so a user might reasonably raise =max_iter= and wait rather than inspect the model.

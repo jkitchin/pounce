@@ -1,0 +1,60 @@
+#+TITLE: SDP adversary: Goemans-Williamson Max-Cut SDP relaxation on K3
+#+DATE: 2026-06-09
+
+* Problem properties
+- Family: sdp
+- Class: small dense semidefinite program (3x3 SDP relaxation of max-cut)
+- SOURCE: Goemans & Williamson, JACM 42(6):1115-1145, 1995. Classic SDP
+  relaxation of max-cut; the unit-weight triangle K3 has SDP value 9/4.
+- KNOWN_OPTIMAL: 2.25  (= 9/4, the relaxed/maximization value)
+- Matrix size: n = 3  (svec length n(n+1)/2 = 6)
+- svec layout: lower triangle, column-major, off-diagonals * sqrt(2);
+  3x3 -> svec(M) = [M00, s2*M10, s2*M20, M11, s2*M21, M22], s2=sqrt(2).
+
+* Formulation
+  maximize   (1/2) * sum_{i<j} w_ij (1 - X_ij)
+  subject to X >= 0  (3x3 PSD), X_ii = 1
+for the unit-weight triangle (edges (0,1),(0,2),(1,2), w=1).
+
+Closed-form optimum: optimal Gram matrix is the "Mercedes-Benz" config
+  X* = [[1,-1/2,-1/2],[-1/2,1,-1/2],[-1/2,-1/2,1]], eigenvalues {0, 3/2, 3/2},
+each (1 - X_ij) = 3/2, sum over 3 edges = 9/2, times 1/2 = 9/4 = 2.25.
+
+pounce encoding (minimization): v=[X00,X10,X20,X11,X21,X22];
+  minimize (1/2)(X10+X20+X21) via c=[0,.5,.5,0,.5,0];
+  objective_max = 3/2 - (min part).
+  A pins X00=X11=X22=1; PSD slack s=h-Gv (h=0) maps v -> svec(X) with the
+  three off-diagonal rows scaled by sqrt(2).
+
+* Results
+| solver           | objective_max     | status  | time (s) |
+|------------------+-------------------+---------+----------|
+| pounce (PSD IPM) | 2.2499999966e+00  | optimal |   0.0035 |
+| cvxpy / SCS      | 2.2500000002e+00  | optimal |   0.0042 |
+| cvxpy / CLARABEL | 2.2499999966e+00  | optimal |   0.0026 |
+| known optimal    | 2.2500000000e+00  | --      |       -- |
+
+Recovered X_pounce = [[1,-.5,-.5],[-.5,1,-.5],[-.5,-.5,1]] (Mercedes-Benz);
+diag = [1,1,1]; min eigenvalue = 2.52e-09 (PSD to tol).
+
+* Cross-check
+- rel_err pounce vs known     = 1.52e-09
+- rel_err pounce vs SCS       = 1.61e-09
+- rel_err pounce vs CLARABEL  = 2.46e-11
+- BOTH cvxpy solvers (SCS, CLARABEL) reproduce 2.25 and agree with pounce.
+- svec derivation verified by the RECOVERED matrix: all three off-diagonals
+  came back at exactly -0.5 and all three diagonals at 1.0. This exercises
+  the full 6-entry column-major lower-triangle ordering with sqrt(2) scaling
+  on M10, M20, M21 simultaneously; the exact Mercedes-Benz matrix proves the
+  ordering AND the off-diagonal scaling are applied correctly (a wrong order
+  or missing sqrt(2) would have produced a different, non-symmetric or
+  wrong-value solution).
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: pounce matches the closed-form 9/4 to ~1.5e-9 and agrees with both
+independent cvxpy backends. The recovered optimal Gram matrix is the exact
+analytic Mercedes-Benz configuration, confirming correct handling of the 3x3
+svec layout (column-major lower triangle, sqrt(2)-scaled off-diagonals).
+No discrepancy.

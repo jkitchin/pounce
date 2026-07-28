@@ -1,0 +1,29 @@
+#+TITLE: Adversary Run: Ill-conditioned least squares via SOC epigraph
+#+DATE: 2026-07-23
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: ill-conditioned (cond(A)=1e8)
+:SOURCE: SOC epigraph of min ||Ax-b||; reference = numpy SVD lstsq (float64)
+:KNOWN_OPTIMAL: residual 1.7748854e-2
+:N_VARIABLES: 5 (x[4], t)
+:N_CONSTRAINTS: one 7-D second-order cone
+:END:
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver        | Status  | Residual       | Rel Err vs ref | Wall Time |
+|---------------+---------+----------------+----------------+-----------|
+| pounce (soc)  | optimal | 1.7748854e-2   | 1.3e-10        | 0.0015 s  |
+| cvxpy CLARABEL| optimal | 1.7748854e-2   | 1.3e-10        | 0.0025 s  |
+| SVD lstsq     | —       | 1.7748854e-2   | —              | —         |
+
+* Verdict
+PASS — at cond(A)=1e8 the SOC (symmetric) driver matches the SVD reference to
+1.3e-10 in objective. Notably pounce's x is CLOSER to the SVD reference
+(x_inf_err 4.8e-5) than cvxpy's (8.3e-3) along the ill-determined directions.
+Symmetric SOC driver is robust to this conditioning.

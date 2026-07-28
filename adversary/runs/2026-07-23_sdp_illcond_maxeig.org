@@ -1,0 +1,28 @@
+#+TITLE: Adversary Run: Max-eigenvalue SDP with extreme spectrum
+#+DATE: 2026-07-23
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: ill-conditioned (eigenvalues 1e-8..1e8, cond=1e16)
+:SOURCE: Boyd & Vandenberghe: min t s.t. tI-M PSD => t*=lambda_max(M); ref=eigh
+:KNOWN_OPTIMAL: 1.0e8
+:N_VARIABLES: 1 (t)
+:N_CONSTRAINTS: one 4x4 PSD cone
+:END:
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver         | Status  | t*            | Rel Err vs ref | Wall Time |
+|----------------+---------+---------------+----------------+-----------|
+| pounce (psd)   | optimal | 1.00000000e8  | 3.68e-9        | 0.0017 s  |
+| cvxpy CLARABEL | optimal | 9.99999999e7  | 3.70e-9        | 0.0031 s  |
+| numpy eigh     | —       | 1.00000000e8  | —              | —         |
+
+* Verdict
+PASS — the symmetric PSD driver recovers lambda_max to 3.7e-9 relative even with
+a spectrum spanning 16 orders of magnitude (cond=1e16). Robust to extreme
+spectral scaling.

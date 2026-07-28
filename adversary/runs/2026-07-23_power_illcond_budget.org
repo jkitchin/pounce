@@ -1,0 +1,42 @@
+#+TITLE: Adversary Run: Geometric-mean maximization under a budget (power cone), extreme scale
+#+DATE: 2026-07-23
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: extreme-scale power cone
+:SOURCE: max x s.t. |x|<=y^.5 w^.5, y+w<=S, y,w>=0. alpha=.5 => y=w=S/2, x*=S/2.
+:KNOWN_OPTIMAL: 1.0e8 (S=2e8)
+:N_VARIABLES: 3 (x,y,w)
+:N_CONSTRAINTS: one 3-D power cone + one nonneg (budget)
+:END:
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver          | Status            | x (=obj)      | Rel Err vs x* | Wall Time |
+|-----------------+-------------------+---------------+---------------+-----------|
+| pounce (pow)    | numerical_failure | 9.999533e7    | 4.67e-5       | 0.003 s   |
+| cvxpy SCS       | optimal           | 9.999991e7    | 9.3e-6        | 0.003 s   |
+
+Known optimal: x* = 1.0e8.
+
+* Cross-check / Verification
+Residuals at the returned point (S=2e8):
+- primal_infeasibility = 0.0    (exactly feasible)
+- dual_infeasibility   = 3.9e-5
+- complementarity      = 7011   (= reported kkt_error)
+- scaling_warning      = None
+
+Same signature as the exp case: feasible + near-dual-feasible, but the raw
+(unnormalized) complementarity gap ~7e3 on a problem of scale 1e8 (relative
+~7e-5) cannot reach the absolute tol ⇒ =numerical_failure=. Rescaled control
+(budget S=2, x*=1): status =optimal=, x=0.99999999, kkt=6.6e-9.
+
+* Verdict
+SOLVER_LIMITATION — identical root cause to the exp-cone run (shared
+non-symmetric HSDE driver): unnormalized complementarity gap in the
+convergence/status test. Answer is correct to 4.67e-5 (within standard
+tolerance) but reported as failure. Filed jointly with the exp case.

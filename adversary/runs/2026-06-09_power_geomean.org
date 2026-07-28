@@ -1,0 +1,40 @@
+#+TITLE: Adversary Run: Power-cone geometric mean
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: 3-D power-cone program
+:SOURCE: standard power-cone model of the geometric mean.
+:KNOWN_OPTIMAL: 1.0
+:N_VARIABLES: x, y, epigraph t
+:N_CONSTRAINTS: one ("pow", 0.5) cone + nonneg
+:END:
+
+maximize (x y)^{1/2}  s.t.  x + y <= 2, x, y >= 0. By AM-GM the optimum is
+x = y = 1, value 1. Encoded with ("pow", 0.5): {(s0,s1,s2): |s0| <= s1^a s2^(1-a)}
+— the FIRST slack is the bounded one, so the slack order is (t, x, y).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver             | Status  | max value      | Rel Err   | Wall Time |
+|--------------------+---------+----------------+-----------+-----------|
+| pounce (pow IPM)   | optimal | 0.9999999955   | 4.47e-09  | 0.0021 s  |
+| cvxpy (SCS)        | optimal | 0.9999987600   | (ref)     | 0.0029 s  |
+
+Known optimal: 1.0
+
+* Cross-check / Verification
+The first run gave garbage (numerical_failure) because the power-cone slack
+ordering was wrong: pounce's ("pow", a) bounds the FIRST slack, not the third.
+Re-ordering the G rows so the bounded slack is t fixed it — this was a
+*formulation* error in the adversary script, not a solver bug. After the fix,
+pounce returns 0.9999999955 (rel err 4.5e-9 vs the known optimum 1.0), in fact
+*more* accurate than cvxpy/SCS (which stopped at 0.99999876, rel err 1.2e-6).
+
+* Verdict
+PASS — once the cone slack ordering matched pounce's documented convention, the
+power-cone path matched the analytic optimum to 4.5e-9, beating SCS's accuracy.

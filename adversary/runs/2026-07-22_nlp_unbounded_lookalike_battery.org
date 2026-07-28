@@ -1,0 +1,214 @@
+#+TITLE: Adversary Run: Unboundedness detection — bounded look-alike controls
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   nlp (auto-routed; one instance class lands on the convex QP IPM)
+:CLASS:    unboundedness / status-reporting correctness
+:SOURCE:   constructed; analytic truth proved per-instance and re-verified with scipy
+:KNOWN_OPTIMAL: per instance (Group C closed form); Group A/B unbounded below
+:N_VARIABLES:  1–10
+:N_CONSTRAINTS: 1
+:END:
+
+Iteration dimension: infeasibility / unboundedness / status-reporting
+correctness, following PRs #250 / #253 which narrowed the dual-divergence
+guard. Prior runs on this axis
+(=2026-07-22_nlp_pr253_{decelerating_recession,missed_unboundedness}.py=)
+probed only the *false-negative* direction — linear and sub-linear recession
+rays that the guard might MISS. This run probes the *false-positive*
+direction, which nothing had covered:
+
+#+begin_quote
+Problems that display every signal a divergence guard watches for — iterates
+growing geometrically, objective descending monotonically, per-step drops
+*not* decelerating — over many orders of magnitude, and which are nevertheless
+**BOUNDED**, with a finite optimum far from the start.
+#+end_quote
+
+** Group A — genuinely UNBOUNDED, clean recession ray
+
+| instance | formulation | proof |
+|----------+-------------+-------|
+| A1 | $\min -x_1-2x_2$ s.t. $x_1-x_2\le 1,\ x\ge 0$ | $d=(1,1)$ feasible ray, $f=-3-3t$ |
+| A2 | $\min -x+1/y$ s.t. $y\ge 1,\ x\le 3y,\ x\ge 0$ | $x=3t,y=t$: $f=-3t+1/t$ |
+| A3 | $\min -x^2+y$ s.t. $x\le 10+y,\ x\ge1,\ y\ge0$ | $y=t,x=10+t$: $f=-(10+t)^2+t$ |
+
+** Group B — genuinely UNBOUNDED, very slow descent along the ray
+
+$\min -x^{0.1}$, $\min -\log\log x$, $\min -x/(1+\log x)$. All $\to-\infty$;
+$-\log\log x$ needs $x=e^{e^{3}}\approx 5\times10^{8}$ merely to reach $f=-3$.
+
+** Group C — CRITICAL CONTROLS, provably BOUNDED
+
+| instance | formulation | $x^*$ | $f^*$ |
+|----------+-------------+-------+-------|
+| C1 | $\min -\log x + x/M,\ x\ge1$ | $M$ | $1-\log M$ |
+| C2 | $\min -\sqrt{x} + x/M,\ x\ge1$ | $M^2/4$ | $-M/4$ |
+| C3 | $\min -x + x^2/(2M),\ x\ge0$ | $M$ | $-M/2$ |
+| C4 | $\min -x + (x/M)^8,\ x\ge0$ | $M^{8/7}/8^{1/7}$ | $-x^*+(x^*/M)^8$ |
+| C5 | $\min \sum_i(-x_i+x_i^2/(2M))$, $\sum x_i\ge1$, $x\ge0$ | $M\mathbf{1}$ | $-nM/2$ |
+
+Each is strictly convex in the relevant region with $f''>0$ and coercive
+($f\to+\infty$), so the stationary point is the *unique global* minimum. C3 is
+the sharpest control: for $x\ll M$ the objective is essentially $-x$, so the
+drop per doubling of $x$ grows **linearly** — the strongest possible
+"non-decelerating descent along a growing ray" signal — yet the answer is the
+finite $-M/2$.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+Truths independently re-verified by scipy =minimize_scalar= before any solve
+(=truths verified: True=).
+
+| case                   | grp | truth     | POUNCE(auto) | p_obj       | POUNCE(nlp) | n_obj      | Ipopt     | f* (truth) |
+|------------------------+-----+-----------+--------------+-------------+-------------+------------+-----------+------------|
+| A1_linear_ray          | A   | UNBOUNDED | UNBOUNDED    | -4.64e+02   | UNBOUNDED   | -7.65e+22  | UNBOUNDED | -inf       |
+| A2_nonlinear_ray       | A   | UNBOUNDED | UNBOUNDED    | -6.49e+29   | UNBOUNDED   | -6.49e+29  | UNBOUNDED | -inf       |
+| A3_quadratic_ray       | A   | UNBOUNDED | UNBOUNDED    | -1.06e+40   | UNBOUNDED   | -1.06e+40  | UNBOUNDED | -inf       |
+| B1_negx^0.1            | B   | UNBOUNDED | SOLVED       | -6.33e+00   | SOLVED      | -6.33e+00  | SOLVED    | -inf       |
+| B2_neg_loglog          | B   | UNBOUNDED | SOLVED       | -2.76e+00   | SOLVED      | -2.76e+00  | SOLVED    | -inf       |
+| B3_neg_x_over_log      | B   | UNBOUNDED | UNBOUNDED    | -3.07e+18   | UNBOUNDED   | -3.07e+18  | UNBOUNDED | -inf       |
+| C1_neglog+lin M=1e6    | C   | BOUNDED   | SOLVED       | -1.28155e+1 | SOLVED      | -1.28155e1 | SOLVED    | -1.28155e1 |
+| C1_neglog+lin M=1e9    | C   | BOUNDED   | SOLVED       | -1.86133e+1 | SOLVED      | -1.86133e1 | SOLVED    | -1.97233e1 |
+| C1_neglog+lin M=1e12   | C   | BOUNDED   | SOLVED       | -1.88265e+1 | SOLVED      | -1.88265e1 | SOLVED    | -2.66310e1 |
+| C2_negsqrt+lin M=1e3   | C   | BOUNDED   | SOLVED       | -2.50000e+2 | SOLVED      | -2.50000e2 | SOLVED    | -2.50000e2 |
+| C2_negsqrt+lin M=1e5   | C   | BOUNDED   | SOLVED       | -2.50000e+4 | SOLVED      | -2.50000e4 | SOLVED    | -2.50000e4 |
+| C2_negsqrt+lin M=1e6   | C   | BOUNDED   | SOLVED       | -2.49996e+5 | SOLVED      | -2.49996e5 | SOLVED    | -2.50000e5 |
+| C3_neglin+quad M=1e4   | C   | BOUNDED   | SOLVED       | -5.00000e+3 | SOLVED      | -5.00000e3 | SOLVED    | -5.00000e3 |
+| C3_neglin+quad M=1e8   | C   | BOUNDED   | SOLVED       | -5.00000e+7 | SOLVED      | -5.00000e7 | SOLVED    | -5.00000e7 |
+| *C3_neglin+quad M=1e12* | C  | *BOUNDED* | *UNBOUNDED*  | *-3.99e+02* | SOLVED      | -5.000e+11 | SOLVED    | -5.000e+11 |
+| C4_flat_wall M=1e2     | C   | BOUNDED   | SOLVED       | -1.25519e+2 | SOLVED      | -1.25519e2 | SOLVED    | -1.25519e2 |
+| C4_flat_wall M=1e4     | C   | BOUNDED   | SOLVED       | -2.42339e+4 | SOLVED      | -2.42339e4 | SOLVED    | -2.42339e4 |
+| C4_flat_wall M=1e6     | C   | BOUNDED   | SOLVED       | -4.67884e+6 | SOLVED      | -4.67884e6 | SOLVED    | -4.67884e6 |
+| C5_multivar M=1e6      | C   | BOUNDED   | SOLVED       | -2.50000e+6 | SOLVED      | -2.50000e6 | SOLVED    | -2.50000e6 |
+| *C5_multivar M=1e10*   | C   | *BOUNDED* | *UNBOUNDED*  | *-5.89e+02* | SOLVED      | -2.500e+10 | SOLVED    | -2.500e+10 |
+
+** The finding
+
+Two provably bounded instances are reported **UNBOUNDED** by the default
+(auto) route. Minimal reproducer:
+
+#+begin_src
+min  -x + x^2/(2M)      s.t.  x >= 0,     M = 1e12
+#+end_src
+
+$P=1/M=10^{-12}>0$, strictly convex and coercive, unique global minimum
+$x^*=10^{12}$, $f^*=-5\times10^{11}$. POUNCE:
+
+#+begin_src
+Problem class: convex QP. Selected solver: convex QP interior-point (pounce-convex) [solver_selection=auto].
+POUNCE (convex QP IPM, pounce-convex): Problem is unbounded (dual infeasible).  obj=-399.09500549  iters=2
+...
+objno 0 300          <-- AMPL solve_result_num 300 = UNBOUNDED band
+#+end_src
+
+It fires after **2 iterations**, at $x=399$ — twelve orders of magnitude short
+of the optimum. Meanwhile the *same binary on the same .nl* with
+=solver_selection=nlp= returns =EXIT: Optimal Solution Found.=,
+$f=-5.0000\times10^{11}$, =objno 0 0=; and Ipopt returns the same correct
+value.
+
+** Sweep — the threshold is a hard cut on $|P|$
+
+=2026-07-22_nlp_unbounded_falsepositive_qp.py=, $M=10^2\ldots10^{16}$:
+
+| $M$ (=$x^*$) | pounce auto | pounce nlp | Ipopt |
+|--------------+-------------+------------+-------|
+| $10^2..10^9$ | SOLVED, exact | SOLVED | SOLVED |
+| $10^{10}..10^{16}$ | *UNBOUNDED* | SOLVED, exact | SOLVED |
+
+Fine sweep localizes the cut to exactly $P=1.0\times10^{-10}$:
+$P=1.111\times10^{-10}$ → =optimal=; $P=1.000\times10^{-10}$ →
+=dual_infeasible=. Confirmed identically through the Python =solve_qp= entry
+point, so it is the QP core, not the =.nl= path. Not affected by =tol=1e-12=
+or =max_iter=500=.
+
+*** It is not scale-invariant
+
+Multiplying the whole objective by a positive constant $s$ — a mathematically
+identical problem with the same minimizer — flips the verdict:
+
+| $s$ | $P=s/M$ | $c=-s$ | status | obj/$s$ |
+|-----+---------+--------+--------+---------|
+| $1$ | 1e-12 | -1 | *dual_infeasible* | -3.99e+02 |
+| $10^3$ | 1e-09 | -1e3 | optimal | -5.000e+11 |
+| $10^6$ | 1e-06 | -1e6 | optimal | -5.000e+11 |
+| $10^{10}$ | 1e-02 | -1e10 | optimal | -5.000e+11 |
+
+So the trigger is the *absolute* magnitude of $P$, not the $P/c$ ratio: the
+unboundedness certificate is not invariant under objective scaling.
+
+* Cross-check / Verification
+
+- *Analytic*: closed-form $x^*,f^*$ derived per instance, $f''>0$ and
+  coercivity checked.
+- *scipy*: =minimize_scalar= reproduces every Group C $x^*$ to $\le5\times
+  10^{-9}$ relative, and confirms $f(10^{10}),f(10^{12}),f(10^{14})>f(x^*)$.
+- *Ipopt 3.14.19* on byte-identical =.nl=: correct finite optimum on all of
+  Group C, including both false-unbounded cases.
+- *POUNCE's own NLP route* (=solver_selection=nlp=) on the same =.nl=: correct.
+- *cvxpy oracles*: Clarabel, SCS and OSQP **all also report =unbounded=** on
+  $P=10^{-12},c=-1$. This is important and is why the finding is scoped as a
+  routing/system defect rather than a defect in the QP core: pounce's convex QP
+  IPM behaves exactly like the state of the art for this input.
+
+** Non-findings, recorded for completeness
+
+- *B1, B2* ($-x^{0.1}$, $-\log\log x$): both POUNCE and Ipopt return
+  =Optimal=. Since $\nabla f\to0$ along the ray, the KKT residual test is met
+  asymptotically and *any* gradient-based solver stops. Shared, pre-existing,
+  solver-independent blind spot — not a POUNCE finding. (Consistent with the
+  earlier =-log/-sqrt= result.)
+- *C1 at $M=10^9,10^{12}$*: both solvers stop at $f=-18.6/-18.8$ vs the true
+  $-19.7/-26.6$ (5%/29% off). Identical values from both — again a shared
+  flat-gradient termination effect, not a POUNCE finding.
+- *Group A, B3*: 4/4 genuine unboundedness detected by both. No regression
+  from #250/#253 in the false-negative direction.
+
+* Verdict
+
+=SOLVER_BUG= — a **false "unbounded" status on a provably bounded problem**,
+reachable through POUNCE's default entry point.
+
+The QP core's behaviour matches Clarabel/SCS/OSQP, so the component is not
+individually at fault. The defect is at the *system* level: POUNCE's
+auto-router classifies $\min -x+x^2/(2M)$, $x\ge0$ as a convex QP and hands it
+to a solver whose dual-infeasibility certificate is unreliable when
+$\|P\|_\infty<10^{-10}$, with no fallback or cross-check — while POUNCE's own
+NLP solver, sitting in the same binary, solves it exactly. A user running
+=pounce model.nl= as a drop-in Ipopt replacement gets =objno 0 300=
+(UNBOUNDED) where Ipopt gets the correct $-5\times10^{11}$.
+
+This matters beyond the toy: a nearly-linear objective carrying a small
+quadratic regularization or loss term (economic dispatch, large-scale LP with
+a tiny proximal term, ridge terms with small $\lambda$ on large-magnitude
+variables) lands in exactly this regime. Because the guard fires at iteration
+2 with no diagnostic, a branch-and-bound or trust-region driver consuming the
+status would fathom a node that has a perfectly good finite bound.
+
+Suggested remedies (not implemented — adversary does not modify source):
+normalize the unboundedness test by $\|c\|$ rather than testing $\|P\|$
+absolutely; or, when the convex QP route returns dual-infeasible, re-solve
+through the NLP route before emitting an UNBOUNDED status.
+
+* Reproduce
+
+#+begin_src sh
+source .venv-qa/bin/activate
+python adversary/runs/2026-07-22_nlp_unbounded_lookalike_battery.py      # full 20-instance battery
+python adversary/runs/2026-07-22_nlp_unbounded_falsepositive_qp.py       # minimal repro + M sweep
+#+end_src
+
+One-line reproduction:
+
+#+begin_src python
+import numpy as np
+from pounce import solve_qp
+r = solve_qp(P=np.array([[1e-12]]), c=np.array([-1.0]),
+             G=np.array([[-1.0]]), h=np.array([0.0]))
+print(r.status, r.obj)   # dual_infeasible -399.095   (true: optimal, -5e11 at x=1e12)
+#+end_src

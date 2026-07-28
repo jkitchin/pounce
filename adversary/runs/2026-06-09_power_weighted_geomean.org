@@ -1,0 +1,47 @@
+#+TITLE: Power-cone adversary: weighted geometric-mean maximization (unequal weights)
+
+* Problem properties
+- FAMILY: power
+- NAME: power-weighted-geomean
+- CLASS: 3-D power-cone program (Cobb-Douglas under a budget)
+- SOURCE: Cobb-Douglas / weighted AM-GM closed form. For
+  max x^w1 y^w2 s.t. x + y <= c, x,y>=0, w1+w2=1, the optimum is
+  x* = w1 c, y* = w2 c, value = (w1 c)^w1 (w2 c)^w2.
+- KNOWN_OPTIMAL: w1=0.6, w2=0.4, c=2 -> x*=1.2, y*=0.8,
+  value = 1.2^0.6 * 0.8^0.4 = 1.0203396005.
+- N_VARIABLES: 3   (x, y, t)
+- CONE LAYOUT: 1 x ("pow", 0.6) on slack (s0,s1,s2)=(t,x,y) +
+  1 x ("nonneg", 1) on slack c-(x+y).
+- DISTINCTNESS: uses UNEQUAL weights (0.6/0.4), explicitly different from
+  the already-tested equal-weight (0.5) geometric-mean problem.
+
+* Formulation
+maximize t  s.t.  t <= x^w1 y^w2,  x + y <= c,  x,y >= 0.
+pounce power cone {(s0,s1,s2): |s0| <= s1^a s2^{1-a}} with s0=t, s1=x,
+s2=y, a = w1 = 0.6 encodes |t| <= x^0.6 y^0.4 exactly. Minimize -t.
+
+* Results
+| solver         | status  | max value (x^0.6 y^0.4) | time (s) |
+|----------------+---------+-------------------------+----------|
+| pounce         | optimal |        1.0203395867e+00 |   0.0027 |
+| cvxpy/SCS      | optimal |        1.0203399485e+00 |   0.0055 |
+| cvxpy/CLARABEL | optimal |        1.0203395959e+00 |   0.0035 |
+| known (CD)     | --      |        1.0203396005e+00 |       -- |
+
+pounce minimizer: x=1.19999155, y=0.80000841 (x* = 1.2, y* = 0.8).
+
+* Cross-check
+- rel_err vs known closed form: 1.35e-08
+- rel_err vs cvxpy/SCS:        3.55e-07
+- rel_err vs cvxpy/CLARABEL:   8.99e-09
+- minimizer errors: |x-x*| = 8.4e-06, |y-y*| = 8.4e-06.
+All three references agree with pounce; SCS is the loosest (3.5e-7) which is
+expected for a first-order solver. CLARABEL and the analytic value confirm
+pounce to ~1e-8.
+
+* Verdict
+VERDICT: PASS
+Reasoning: pounce reaches optimal status and matches the Cobb-Douglas
+closed-form optimum (value and both coordinates) and both independent cvxpy
+solvers to <=1e-8 (SCS to 3.6e-7). The unequal-weight a=0.6 power-cone
+orientation is handled correctly. No discrepancy.

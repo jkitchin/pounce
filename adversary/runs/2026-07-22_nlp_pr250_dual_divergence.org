@@ -1,0 +1,341 @@
+#+TITLE: Adversary Run: PR #250 dual-divergence guard — false-positive hunt
+#+DATE: <2026-07-22>
+
+* Target
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: guard / termination-criterion regression hunt
+:TARGET_PR: #250 "Guard against dual-infeasibility divergence (emfl050 warm-start stall, #246)"
+:TARGET_COMMIT: ba29b53
+:CODE: =crates/pounce-algorithm/src/ipopt_alg.rs= (=dual_growth_streak=, =DUAL_DIV_COUNT_FLOOR=, =DUAL_DIV_FIRE_TOL=)
+:END:
+
+PR #250 adds a *dual*-divergence guard next to the existing primal
+=diverging_iterates_tol= check. Each outer iteration:
+
+#+begin_src rust
+if self.dual_diverging_streak > 0 {
+    let inf_du = self.cq.borrow().curr_dual_infeasibility_max();
+    if inf_du.is_finite() && inf_du > self.dual_inf_prev && inf_du > DUAL_DIV_COUNT_FLOOR {
+        self.dual_growth_streak += 1;
+    } else {
+        self.dual_growth_streak = 0;
+    }
+    self.dual_inf_prev = inf_du;
+    if self.dual_growth_streak >= self.dual_diverging_streak && inf_du > DUAL_DIV_FIRE_TOL {
+        ...
+        if self.restoration.is_some() { return self.invoke_restoration_debugged(); }
+        return IterateOutcome::Terminate(SolverReturn::DivergingIterates);
+    }
+}
+#+end_src
+
+with =DUAL_DIV_COUNT_FLOOR = 1e2=, =DUAL_DIV_FIRE_TOL = 1e8=, and the option
+=dual_diverging_streak= defaulting to 15.
+
+** Adversarial hypothesis
+=SolverReturn::DivergingIterates= maps to =solve_result_num = 300= — AMPL's
+*UNBOUNDED* band (=crates/pounce-solve-report/src/lib.rs:558=), which downstream
+drivers read as "the problem is unbounded". Dual infeasibility legitimately
+spikes and grows for many consecutive iterations on hard-but-solvable NLPs
+(during/after restoration, on LICQ/MFCQ-violating or MPEC-like problems, on
+badly-conditioned Hessians, from poor initial multipliers). If =inf_du= can grow
+15 iterations in a row on a problem Ipopt solves, POUNCE now reports
+unboundedness on a bounded problem. That would be a =SOLVER_BUG=.
+
+* Method
+
+Every case is written to a =.nl= file and the *identical* file is handed to:
+
+| run                | invocation                                             |
+|--------------------+--------------------------------------------------------|
+| oracle             | =ipopt <stub> -AMPL print_level=5=                     |
+| pounce, default    | =pounce <stub>.nl <stub>.sol print_level=5=            |
+| pounce, guard off  | =... dual_diverging_streak=0=                          |
+| pounce, hair-trigger | =... dual_diverging_streak=2= and =...=1=            |
+
+Comparing *default* against *=dual_diverging_streak=0=* isolates the guard
+exactly: any difference in status, objective, iteration count or evaluation
+count is the guard and nothing else. Ipopt 3.14.19 is the oracle for "is this
+problem actually solvable".
+
+Scripts:
+- =adversary/runs/2026-07-22_nlp_pr250_dual_divergence.py= — the main battery
+- =adversary/runs/pr250_work/probe.py=, =sweep.py=, =sweep2.py= — engineering
+  a problem that actually trips the guard
+- =adversary/runs/pr250_work/warm.py= — the emfl050 scenario (garbage warm-start
+  multipliers on an easy NLP)
+- =adversary/runs/pr250_work/huge_mult.py= — attack on the =s_d= scaling gap
+- =adversary/runs/pr250_work/noscale.py= — =nlp_scaling_method=none= probe
+- =adversary/runs/pr250_work/random_stress.py= — 200 random degenerate NLPs
+- =adversary/runs/pr250_work/corpus.py= — the repo's own =.nl= benchmark corpus
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:VERDICT: PASS (no false unboundedness found); one design note recorded
+:END:
+
+** Case battery — small degenerate / ill-conditioned NLPs (all <50 vars)
+
+=max_inf_du= and =max_growth_streak= are scraped from the printed =inf_du=
+column of the default run; the streak is counted the way the guard counts it
+(consecutive growth while above the 1e2 floor).
+
+| # | problem            | stressor                                  | Ipopt                    | pounce default           | default == guard-off? | max inf_du | max streak | verdict |
+|---+--------------------+-------------------------------------------+--------------------------+--------------------------+-----------------------+------------+------------+---------|
+| 1 | =hs13=             | LICQ+MFCQ fail at $x^*$                   | Optimal, 0.99457853931   | Optimal, 0.99457853931   | yes (bit-identical)   | *4.40e+09* |          2 | PASS    |
+| 2 | =hs55=             | degenerate/redundant linear equalities    | Optimal, 6.66666666496   | Optimal, 6.66666666496   | yes                   | 3.38e+00   |          0 | PASS    |
+| 3 | =mpec_comp=        | MPCC, MFCQ fails on the whole feasible set| Optimal, 0.99999998095   | Optimal, 0.99999998006   | yes                   | 3.68e+04   |          2 | PASS    |
+| 4 | =mpec_chain=       | 8 stacked complementarities               | Optimal, 7.99999989651   | Optimal, 7.99999989649   | yes                   | 3.56e+07   |          7 | PASS    |
+| 5 | =redundant_active= | 10 identical active rows (rank-1 Jacobian)| Optimal, 36.8578643406   | 36.8578643819 (QP route) | yes                   | —          |          0 | PASS    |
+| 6 | =badscale_hess=    | Hilbert Hessian, 1e6 obj scale            | Optimal, -619224.99685   | -619224.99388 (QP route) | yes                   | —          |          0 | PASS    |
+| 7 | =deg_eq_ineq=      | coincident eq/ineq, weakly active, $\lambda=0$ | Optimal, -13.2307754904 | Optimal, -13.2307754904 | yes                  | 1.42e+01   |          0 | PASS    |
+| 8 | =hs112=            | log objective, poor start                 | Optimal, -47.7610908594  | Optimal, -47.7610908594  | yes                   | 3.35e+01   |          0 | PASS    |
+| 9 | =near_parallel=    | active constraints at angle 1e-8          | Optimal, 0.99999999419   | 1.00000000008 (QP route) | yes                   | —          |          0 | PASS    |
+|10 | =hs13_bigstart=    | HS13 from $x_0=(10^4,10^4)$               | Optimal, 0.98492871534   | *Local infeasibility*, 0.28583750995 | yes       | 5.91e+03   |          1 | see §Note 2 |
+|11 | =steep_exp_K200=   | engineered monotone dual ramp             | MaxIter, 1.7926e+86      | MaxIter, 1.9265e+86      | *NO — guard fires*    | 1.93e+86   |     *15*   | PASS (§Note 1) |
+
+*The guard did not change the outcome on any solvable problem in the battery.*
+Rows 1–10 are bit-identical between =default= and =dual_diverging_streak=0=,
+including iteration and function-evaluation counts, i.e. the guard never fired.
+
+** Sensitivity: lowering =dual_diverging_streak=
+
+On =hs13= — the closest call in the battery, whose =inf_du= peaks at 4.40e+09,
+*44x above the 1e8 fire tolerance*:
+
+| =dual_diverging_streak= | status  | objective      | iters | ineq evals |
+|-------------------------+---------+----------------+-------+------------|
+| 15 (default)            | Optimal | 0.994578539305 |    55 |         83 |
+| 3                       | Optimal | 0.994578539305 |    55 |         83 |
+| 2                       | Optimal | 0.994578539305 |    55 |         83 |
+| *1*                     | Optimal | 0.994578537842 |    50 |         64 |
+
+At =dual_diverging_streak=1= the guard *does* fire on HS13 (evaluation counts
+diverge) — and the diversion to restoration still converges, slightly faster.
+Even at the most aggressive possible setting, no false unboundedness.
+
+** Attempts that failed to trip the guard
+
+*** Warm start with garbage multipliers (the emfl050 scenario)
+HS71 ($f^*=17.0140173$) warm-started via the AMPL =ipopt_zL_in= / =ipopt_zU_in=
+/ =dual= suffixes with =warm_start_init_point=yes= and multipliers of magnitude
+$10^2,10^6,10^{10},10^{14},10^{18}$: pounce reaches =Optimal Solution Found.=,
+$f=17.01401714517$, 9 iterations at *every* multiplier scale, bit-identical with
+the guard off. Ipopt needs 11 iterations. The guard never fired.
+
+*** The =s_d= gap (the most promising theoretical attack)
+=cq.curr_dual_infeasibility_max()= is the *raw* $\|\nabla L\|_\infty$; it is
+*not* divided by the =s_d= optimality scaling that
+=optimality_error_scaling()= applies inside the convergence test
+(=ipopt_cq.rs:1190=, =1227=). So on a problem with enormous optimal multipliers
+a *converged* iterate can carry $\|\nabla L\|_\infty \gg 10^8$ while its scaled
+NLP error is at =tol=. The guard is evaluated *before* =conv_check=, so in
+principle it could preempt a legitimate convergence declaration.
+
+Three families were built to exploit this — near-dependent nonlinear equalities,
+$\epsilon$-scaled constraint rows, and degenerating active-set geometry, each
+with $\epsilon \in \{10^{-4} \dots 10^{-16}\}$ so the optimal multipliers reach
+$10^{16}$ (=huge_mult.py=, 18 instances). *Zero guard firings*; observed streaks
+0–2. POUNCE's default gradient-based NLP scaling absorbs the multiplier scale
+before the guard sees it, which is exactly the robustness the PR claims.
+
+*** Disabling NLP scaling
+The PR's safety argument is explicitly "the fire thresholds are internal
+constants on the NLP-*scaled* dual residual, so the absolute gate is
+scale-robust". With the supported option =nlp_scaling_method=none= that argument
+lapses. Swept a strictly convex, boxed, uniquely-solvable NLP with objective
+scale $S \in \{10^0 \dots 10^{16}\}$ and scaling off (=noscale.py=): raw =inf_du=
+reached *1.0e+15* and *9.4e+16*, yet the longest growth streak was *2*. All 7
+instances: default == guard-off == Ipopt. No firing.
+
+*** 200 randomized degenerate NLPs
+=random_stress.py= — 200 instances, 3–20 variables, drawn from five families
+(redundant identical active rows; $10^{-10}$-perturbed near-dependent rows;
+MPCC complementarity; coincident nonlinear eq/ineq; constraint rows scaled over
+$10^{\pm 8}$), each with a $10^{\pm 6}$ gradient scale spread and a random
+start:
+
+#+begin_example
+200 random degenerate NLPs
+guard changed the outcome: 0
+#+end_example
+
+*Zero* instances where =default= differed from =dual_diverging_streak=0=.
+
+*** The repo's own =.nl= benchmark corpus
+=corpus.py= — all 53 =.nl= files under =benchmarks/*/nl/= and
+=research/powerflow_nl/= (Mittelmann NLP set, QP set, power-flow set; these are
+*large* models, far past the <50-var brief, included as a realism check), each
+run with =max_cpu_time=20= under default vs =dual_diverging_streak=0=:
+
+#+begin_example
+53 .nl files
+default status histogram: 10 Optimal Solution Found. / 17 Maximum CPU time exceeded. / 26 no status line
+
+=== OUTCOME DIFFERENCES (guard changed the result) ===
+none
+#+end_example
+
+*Zero* outcome differences. (The 17 CPU-time exits reflect the deliberately tight
+20 s budget on models sized for minutes, not solver failures; the 26 without a
+status line are the QP-routed models noted in §Note 2.)
+
+* Note 1 — the one case that does fire the guard (and why it is not a bug)
+
+=steep_exp_K200= is the only family found that trips the guard at *default*
+settings:
+
+\begin{align*}
+\min_{x,y}\;& e^{x} \\
+\text{s.t.}\;& x y \ge 1,\quad 0 \le y \le 1/200,\quad 0 \le x \le 1000
+\end{align*}
+
+The constraint forces $x \ge 200$, so $\nabla f = e^{x}$ ramps monotonically
+toward $e^{200}\approx 10^{86}$ as the iterates creep up the central path. This
+manufactures the sustained monotone dual growth the guard looks for.
+
+| run                     | status   | objective | iters | ineq evals | longest growth streak |
+|-------------------------+----------+-----------+-------+------------+-----------------------|
+| ipopt                   | MaxIter  | 1.793e+86 |  3000 |       3025 |                     — |
+| pounce default          | MaxIter  | 1.927e+86 |  3000 |       8937 |                    15 |
+| pounce =...streak=0=    | MaxIter  | 1.793e+86 |  3000 |       7624 |                 *229* |
+
+The guard-off run shows *229 consecutive iterations of growing =inf_du=* — this
+is a genuine dual runaway, precisely the pathology the PR targets, and the guard
+correctly interrupts it. Critically:
+
+- *no solver solves this problem* — Ipopt also exhausts 3000 iterations, so the
+  guard cannot be said to have destroyed a solve;
+- the status is =Maximum Number of Iterations Exceeded=, *not* =DivergingIterates=;
+  no unboundedness is reported;
+- the only cost is extra restoration work (8937 vs 7624 constraint evaluations).
+
+The same firing was reproduced across $K \in \{140,160,200,240\}$ and
+$n \in \{1,2,3,5,10\}$ (20 instances, =sweep2.py=) — in every one, Ipopt also
+fails to converge, and pounce's status is never in the UNBOUNDED band.
+
+** Why =DivergingIterates= was never observed
+The guard terminates with =DivergingIterates= only on the =self.restoration.is_none()=
+branch. Every shipped front end wires a restoration factory —
+=pounce-cli/src/main.rs:381,1147=, =pounce-py/src/problem.rs:850=,
+=pounce-py/src/nlp_batch.rs:152=, =pounce-cinterface/src/solver.rs:225=,
+=pounce-cinterface/src/lib.rs:640= — so from the CLI, the Python facade,
+pyomo-pounce and the C interface the guard can only *route to restoration*, never
+terminate. The nested restoration IPM does have =restoration == None=, but its
+inner =SolverReturn= is consumed by =min_c_1nrm.rs= and collapses to
+=RestorationOutcome::Failed=, whose handler
+(=ipopt_alg.rs:2082-2124=) reports =DivergingIterates= only after re-checking the
+*primal* $\|x\|_\infty$ divergence conditions from #248/#252. The new guard has
+no path of its own to the UNBOUNDED band through any shipped entry point.
+
+The string =Diverging= does not appear in any of the ~500 solver logs produced
+by this run.
+
+* Note 2 — unrelated observation (NOT PR #250)
+
+=hs13_bigstart= — HS13 from $x_0 = (10^4, 10^4)$, a feasible, bounded problem
+with $f^*=1$:
+
+| solver                        | status                                 | objective   | iters |
+|-------------------------------+----------------------------------------+-------------+-------|
+| ipopt                         | Optimal Solution Found.                | 0.98492872  |    29 |
+| pounce (default and guard-off)| *Converged to a point of local infeasibility* | 0.28583751 |    12 |
+
+POUNCE reports local infeasibility on a feasible problem where Ipopt converges.
+This is *bit-identical with =dual_diverging_streak=0=*, so it is *not* caused by
+PR #250 — it is pre-existing behaviour, recorded here only because the run
+surfaced it. The same signature appears on =hm_neardep_1e-08= (pounce runs to
+=max_iter=2000= where Ipopt stops at 24 iterations) and on the =logbar= probe.
+Worth a separate investigation; out of scope for this run.
+
+Also cosmetic: problems auto-routed to the convex-QP solver (rows 5, 6, 9) print
+no =EXIT:= / status line at all on the console, only the objective. Objectives
+agree with Ipopt to 8–10 digits.
+
+* Formulation self-checks
+
+Per the "be skeptical of your own formulations" rule:
+
+- All models are built in Pyomo, which emits *exact* first and second
+  derivatives into the =.nl=; both solvers read the *same file*, so a wrong
+  derivative would corrupt the oracle identically and could not manufacture a
+  pounce-only discrepancy.
+- Known optima confirmed where published: HS13 $f^*=1$ (both solvers land at
+  0.99457854, the documented barrier-relaxation artifact — see the 2026-07-19
+  HS013 run), HS112 $f^*=-47.7076$ (both reach -47.7611, a slightly better local
+  point, identically), HS71 $f^*=17.0140173$ (exact).
+- =redundant_active= has a closed-form optimum $2(5-1/\sqrt2)^2 = 36.85786438$;
+  both solvers match to 8 digits.
+- =hs55= reaches 6.66667 rather than the published 6.33333 in *both* solvers
+  identically — a known alternative local minimum of HS55, not a solver defect.
+
+* Reproduction
+
+#+begin_src sh
+cd /Users/jkitchin/projects/pounce
+source .venv-qa/bin/activate
+
+# main battery (11 problems x {ipopt, default, guard-off, streak=2, streak=1})
+python adversary/runs/2026-07-22_nlp_pr250_dual_divergence.py
+
+# the single guard-firing case, by hand
+cd adversary/runs/pr250_work
+../../../target/release/pounce steep_exp_K200.nl /tmp/a.sol \
+    print_level=5 max_iter=3000                        # 8937 ineq evals
+../../../target/release/pounce steep_exp_K200.nl /tmp/a.sol \
+    print_level=5 max_iter=3000 dual_diverging_streak=0  # 7624 ineq evals
+ipopt steep_exp_K200 -AMPL print_level=5 max_iter=3000   # also MaxIter
+
+# HS13 sensitivity sweep
+for s in 15 3 2 1; do
+  ../../../target/release/pounce hs13.nl /tmp/h.sol print_level=5 \
+      dual_diverging_streak=$s | grep -E '^EXIT|Number of Iterations'
+done
+
+# the wider sweeps
+python adversary/runs/pr250_work/warm.py
+python adversary/runs/pr250_work/huge_mult.py
+python adversary/runs/pr250_work/noscale.py
+python adversary/runs/pr250_work/random_stress.py 200
+python adversary/runs/pr250_work/corpus.py
+#+end_src
+
+* Verdict
+
+*PASS.* The adversarial hypothesis is *not* supported.
+
+Across 11 hand-built degenerate NLPs, 20 engineered dual-ramp instances, 18
+huge-multiplier instances, 10 garbage-warm-start instances, 7 unscaled
+badly-conditioned instances, 200 randomized degenerate NLPs and the repo's own
+=.nl= benchmark corpus, *no case was found where PR #250's guard causes POUNCE to
+report =DivergingIterates= / an UNBOUNDED-band status on a problem with a finite
+optimum.* The guard fired at default settings on exactly one family, where no
+solver converges and the reported status is =Maximum Number of Iterations
+Exceeded=.
+
+Two properties do the protective work, and both are load-bearing:
+
+1. *The streak requirement, not the magnitude gate.* =inf_du= exceeding the
+   =DUAL_DIV_FIRE_TOL= of 1e8 is *common* on legitimate solves — HS13 hits
+   4.4e+09 (44x over) and the unscaled sweep hits 9.4e+16 (9e8x over). What no
+   converging solve produced was *15 consecutive growing iterations*: the
+   observed maximum over every solvable instance tested was *7* (=mpec_chain=),
+   less than half the default. The margin is real but it lives entirely in the
+   streak counter; the absolute gate contributes almost nothing.
+2. *Restoration routing.* From every shipped entry point the guard diverts to
+   restoration rather than terminating, so even a misfire costs iterations, not
+   correctness.
+
+** Recommendations (non-blocking)
+- Consider dividing by =s_d= (or comparing against the same scaled residual the
+  convergence check uses) in the fire gate, so the "large in absolute terms"
+  condition means the same thing the solver's own optimality measure means. As
+  written, the gate's stated scale-robustness depends on
+  =nlp_scaling_method != none=, and the constant is already exceeded by 44x on a
+  textbook HS problem.
+- The =DivergingIterates= fallback branch is unreachable from every shipped front
+  end. If it is only meant for embeddings without a restoration factory, saying
+  so in the doc comment would prevent a future refactor from quietly exposing an
+  unbounded verdict.

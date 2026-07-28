@@ -1,0 +1,140 @@
+#+TITLE: Adversary Run: Cone Specification Contract of solve_socp(cones=[...])
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   socp (api-contract)
+:CLASS:    API contracts, option handling, input edge cases
+:SOURCE:   pounce =solve_socp= docstring (cone spec contract);
+:SOURCE+:  Boyd & Vandenberghe, /Convex Optimization/, S4.4 (SOCP standard form);
+:SOURCE+:  closed-form projection onto the nonnegative orthant
+:KNOWN_OPTIMAL: (g) t* = 1 at x* = (0,2);  (h) sum t_i = 10
+:N_VARIABLES: 1-400
+:N_CONSTRAINTS: cone layouts as listed below
+:END:
+
+Not one problem but a contract sweep over ~45 cone specifications, malformed
+and well-posed, driven through =pounce.solve_socp(cones=[...])=.
+
+Two well-posed anchors with closed-form optima carry the correctness checks:
+
+** (g) order invariance
+\[
+\min_{x,t} \; t \quad \text{s.t.} \quad (t,\; x_1+1,\; x_2-2) \in \mathcal{K}_{soc}^3, \quad x \ge 0
+\]
+i.e. \(\min_{x \ge 0} \|x - (-1,2)\|_2\).  The projection of \((-1,2)\) onto
+\(\mathbb{R}^2_+\) is \((0,2)\), so \(t^* = 1\), \(x^* = (0,2)\).
+Solved three ways with the SAME rows, permuted between blocks:
+=[soc3, nonneg2]=, =[nonneg2, soc3]=, =[nonneg1, soc3, nonneg1]=.
+
+** (h) many tiny cones vs one big block
+\[
+\min_{t,x} \; \sum_{i=1}^{200} t_i \quad \text{s.t.} \quad t_i \ge |x_i|, \quad \sum_i x_i = 10
+\]
+\(= \min \|x\|_1\) s.t. \(\mathbf{1}^\top x = 10\), optimum \(10\).
+Form A: 200 x =("soc",2)=.  Form B: one =("nonneg",400)= block
+(\(t_i - x_i \ge 0\), \(t_i + x_i \ge 0\)).
+
+* Results
+:PROPERTIES:
+:STATUS:   FAIL (7 reachable panics)
+:END:
+
+| Case | Spec                                    | Outcome                    |
+|------+-----------------------------------------+----------------------------|
+| a1-a3| dim sum short / long / 100000 vs 5 rows  | clean ValueError - PASS    |
+| a4   | ("soc",-3) with mismatched rows         | clean ValueError - PASS    |
+| a5   | len(h) < rows(G)                        | clean ValueError - PASS    |
+| b1s  | ("soc",0), rows still sum correctly     | *PanicException*           |
+| b1p  | ("psd",0), rows still sum correctly     | *PanicException (OOB)*     |
+| b2s  | ("soc",-3) -> saturates to 0            | *PanicException*           |
+| b2p  | ("psd",-3) -> saturates to 0            | *PanicException (OOB)*     |
+| b2f  | ("soc",0.4) -> rounds to 0              | *PanicException*           |
+| b1n  | ("nonneg",0) / ("nonneg",-3)            | accepted, correct - PASS   |
+| b3/b4| ("soc",1) as a nonnegativity constraint | correct (matches nonneg)   |
+| c1-c3| ("exp",2/4/0)                           | clean ValueError - PASS    |
+| c5-c10| ("pow", 0 / 1 / -0.5 / 1.5 / NaN / inf)| clean ValueError - PASS    |
+| d1-d2| ("psd",n) with rows != n(n+1)/2         | clean ValueError - PASS    |
+| e1   | cones=[] with 5-row G                   | clean ValueError - PASS    |
+| f1   | ("banana",3)                            | clean ValueError - PASS    |
+| f2   | ("SOC",3)                               | accepted (case-insensitive by design) |
+| f3-f5| ("soc",), ("soc",3,9), None             | clean ValueError - PASS    |
+
+| Check                        | pounce                | oracle / known | Rel err |
+|------------------------------+-----------------------+----------------+---------|
+| (g) [soc3,nonneg2]           | 1.000000000235e+00    | 1              | 2.4e-10 |
+| (g) [nonneg2,soc3]           | 1.000000000235e+00    | 1              | 2.4e-10 |
+| (g) [nonneg1,soc3,nonneg1]   | 1.000000000235e+00    | 1              | 2.4e-10 |
+| (g) cvxpy CLARABEL           | 1.000000004991e+00    | 1              | 5.0e-09 |
+| (h) 200 x ("soc",2)          | 9.999999967258e+00    | 10             | 3.3e-09 |
+| (h) one ("nonneg",400)       | 9.999999993463e+00    | 10             | 6.5e-10 |
+| (h) cvxpy CLARABEL           | 1.000000000000e+01    | 10             | ~0      |
+
+Order invariance of the primal iterate: \(\|x_{g1}-x_{g2}\|_\infty = 1.4\times10^{-12}\),
+\(\|x_{g1}-x_{g3}\|_\infty = 1.3\times10^{-12}\).  Form A vs Form B in (h) differ
+by \(2.6\times10^{-8}\).  Both well within tolerance.
+
+Wall times: every well-posed case < 0.01 s; all malformed specs rejected in
+< 0.001 s.  No case approached the 10 s budget.
+
+* Cross-check / Verification
+
+- cvxpy/CLARABEL independently confirms both anchors (g) and (h).
+- Both anchors also have closed-form optima (orthant projection; \(\|x\|_1\)
+  under a sum constraint), so the oracle and the analytic value agree.
+- The panic sites were read directly (read-only) to confirm they are genuine
+  and not a deliberate error path:
+  - =crates/pounce-convex/src/cones/soc.rs:38= --
+    ~assert!(m >= 1, "second-order cone needs dimension >= 1")~
+  - =crates/pounce-convex/src/cones/psd.rs:235= -- ~vals[0]~ where
+    ~vals = vec![0.0; n]~ with ~n == 0~, a bounds-check failure
+    ("index out of bounds: the len is 0 but the index is 0").
+- The dimension validator lives in =crates/pounce-py/src/qp.rs:373-381=; it
+  checks only that the dims SUM to =rows(G)=.  A 0-dimension block contributes
+  0 rows, so the sum still matches and the spec passes every documented check
+  before reaching the panicking constructors.
+- =crates/pounce-py/src/qp.rs:277-293= (=parse_cones=) lowercases the kind, so
+  =("SOC",3)= is accepted by design -- NOT a finding.  It also casts the value
+  with ~v.round() as usize~; Rust saturates negative float->int casts to 0,
+  which is why ("soc",-3) and ("soc",0.4) both land on the dim-0 panic path.
+- Two initially-flagged cases were MY formulation errors, corrected in the
+  script and now passing: the ("exp",3) sanity check left =u= free (so
+  \(t \to 0\) correctly), and the ("pow",0.5) sanity check sat at the cone
+  apex.  Rebuilt with =u= pinned (\(t = e\), err 9e-10) and with \(y=4, z=1\)
+  (\(x^*=2\), err 8e-9).  The power case returns =optimal_inaccurate= at
+  8e-9 accuracy -- a status nit, not a correctness problem.
+
+* Verdict
+
+*SOLVER_BUG* -- for the zero-/negative-/rounds-to-zero dimension cases only.
+Everything else in the cone-spec contract is solid.
+
+The contract holds well across the board: dimension-sum mismatches (including
+an absurd 100000 against 5 rows) are caught with a precise, actionable
+=ValueError= and never truncate or read out of bounds; every malformed
+=("pow", alpha)= including NaN and inf is rejected with the exact value echoed;
+=("exp", d != 3)= and =("psd", n)= with a wrong row count are rejected;
+an empty cone list with nonempty =G= is rejected; unknown kinds, short tuples,
+long tuples, and =None= all produce clean errors.  ("soc",1) behaves exactly as
+the nonnegativity constraint it is, matching ("nonneg",1) to 1e-12 both slack
+and binding.  Cone ORDER is fully transparent -- three permutations of the same
+5 rows agree to 1.4e-12 in x and match cvxpy.  200 tiny =("soc",2)= cones and
+one 400-row nonneg block agree to 2.6e-8 and both hit the known optimum.
+
+The single defect is the *zero-dimension cone block*.  Because the validator
+only checks that dimensions SUM to =rows(G)=, a 0-dim block contributes 0 rows
+and passes; the spec then reaches =SecondOrderCone::new(0)= (debug assert) or
+=Psd= (unguarded ~vals[0]~ on an empty vector), and a Rust panic crosses the
+FFI boundary as =pyo3_runtime.PanicException= with a message on stderr.  Three
+separate user inputs reach it: an explicit ~("soc",0)~/~("psd",0)~, a NEGATIVE
+dimension (Rust saturates the ~as usize~ cast to 0), and a fractional dimension
+below 0.5 (rounds to 0).  ~("nonneg",0)~ handles all three gracefully and
+returns the correct answer, which is the right behavior and shows the fix is a
+one-line guard per cone kind -- either accept a 0-dim block as a no-op like
+nonneg does, or reject it in =parse_cones= with the same clean =ValueError=
+style used everywhere else in this API.
+
+Severity is low (a panic, not silent corruption or memory unsafety -- the PSD
+case is a checked bounds failure, and no wrong answer is ever returned), but a
+panic escaping to Python from an ordinary malformed input violates the stated
+"clear error" contract that the rest of this surface honors so consistently.

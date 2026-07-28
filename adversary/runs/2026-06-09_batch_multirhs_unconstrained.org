@@ -1,0 +1,37 @@
+#+TITLE: Batch adversary (a) — solve_qp_multi_rhs, shared SPD P, 12 unconstrained objectives
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: batch (solve_qp_multi_rhs)
+- SOURCE: synthetic; one fixed SPD P (n=6) swept against 12 distinct cost vectors c_i.
+  RNG seed 20260609 (numpy default_rng). P = M Mᵀ + nI symmetrized → SPD, well-conditioned.
+- BATCH SIZE: 12 items, each n=6, UNCONSTRAINED (no A/b/G/h/lb/ub).
+- KNOWN_OPTIMAL: unconstrained convex QP ⇒ x*_i = -P⁻¹ c_i (closed form, exact).
+- PER-ITEM DIMS: n=6 variables, 0 constraints.
+
+* Formulation
+For each i:  min_x  ½ xᵀ P x + c_iᵀ x.
+Stationarity: P x + c_i = 0 ⇒ x*_i = -P⁻¹ c_i. P shared across the batch; only c_i varies,
+which is exactly the multi-RHS use case (cs = [c_0 … c_11]).
+
+* Results
+| metric                         | value     |
+|--------------------------------+-----------|
+| batch size                     | 12        |
+| status (all items)             | optimal   |
+| max rel-err vs closed form     | 4.53e-12  |
+| max rel-err vs standalone solve| 0.00e+00  |
+| pounce_time (batch)            | 0.0012 s  |
+| oracle_time (loop of singles)  | 0.0044 s  |
+
+* Cross-check
+- Oracle 1 (closed form -P⁻¹c): max relative error 4.5e-12 — at numerical floor.
+- Oracle 2 (per-item standalone pounce.solve_qp): max relative error EXACTLY 0.0 — the
+  batched multi-RHS path produces bit-identical iterates/solutions to the single-QP path
+  for every item. No per-item disagreement.
+- Batch was ~3.7x faster than the loop of single solves (0.0012 vs 0.0044 s).
+
+* Verdict
+VERDICT: PASS
+Reasoning: All 12 items return status "optimal", match the closed-form x*=-P⁻¹c to ~1e-12,
+and match their own standalone solves exactly (0.0). No correctness or consistency issue.

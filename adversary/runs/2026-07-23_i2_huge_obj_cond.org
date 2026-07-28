@@ -1,0 +1,14 @@
+* [2026-07-23] i2 huge-obj cond(P) — minimizer coord wrong (TOLERANCE)
+:PROPERTIES:
+:FAMILY: qp
+:PR_AREA: #286/#307 (huge-magnitude objective + cond(P) normalization)
+:VERDICT: TOLERANCE
+:END:
+
+min 0.5 x'Px + c'x, P=diag(1e10,1), c=[-1e18,-1]. True x=[1e8,1.0], obj=-5e25-0.5.
+pounce: obj=-5.000000e25 (rel err 0), x=[1e8, 1.437e-7]. Objective correct to
+full precision, but the negligible-weight coordinate x1 returns 1.44e-7 instead
+of 1.0 (100% rel error on that coord). The huge-objective normalization masks
+the small-contribution variable. Objective passes 1e-4, so TOLERANCE, not a
+hard finding — noted because argmin coordinate is materially wrong.
+Oracle: cvxpy CLARABEL x=[1e8,1.0].

@@ -1,0 +1,54 @@
+#+TITLE: SDP adversary: min-trace SDP with a fixed off-diagonal
+#+DATE: 2026-06-09
+
+* Problem properties
+- Family: sdp
+- Class: small dense semidefinite program (trace minimization)
+- SOURCE: standard textbook PSD-cone reasoning (2x2 minor / Schur complement)
+- KNOWN_OPTIMAL: 2.0
+- Matrix size: n = 2  (svec length n(n+1)/2 = 3)
+- svec layout: lower triangle, column-major, off-diagonals * sqrt(2);
+  2x2 -> svec(M) = [M00, sqrt(2)*M10, M11]. <X,Y> = svec(X).svec(Y).
+
+* Formulation
+  minimize   Tr(X)
+  subject to X >= 0  (2x2 PSD)
+             X[0,0] = 1
+             X[0,1] = 1
+
+Closed-form optimum: PSD of 2x2 with X00=1, X01=1 forces
+X11 >= X01^2/X00 = 1, and Tr(X)=1+X11 is minimized at X11=1, giving Tr=2
+with X*=[[1,1],[1,1]] (rank-1, eigenvalues {0,2}).
+
+pounce encoding: variable v=[X00, X01, X11];
+  c = [1,0,1]; A=[[1,0,0],[0,1,0]], b=[1,1];
+  PSD slack s = h - G v with h=0,
+  G = -diag-ish [[1,0,0],[0,sqrt(2),0],[0,0,1]] so smat(s)=X.
+
+* Results
+| solver           | objective         | status  | time (s) |
+|------------------+-------------------+---------+----------|
+| pounce (PSD IPM) | 1.9999999930e+00  | optimal |   0.0021 |
+| cvxpy / SCS      | 2.0000021036e+00  | optimal |   0.0060 |
+| cvxpy / CLARABEL | 1.9999999689e+00  | optimal |   0.0024 |
+| known optimal    | 2.0000000000e+00  | --      |       -- |
+
+Recovered X_pounce = [[1, 1],[1, 1]]; min eigenvalue = -1.08e-09 (PSD to tol).
+
+* Cross-check
+- rel_err pounce vs known     = 3.50e-09
+- rel_err pounce vs SCS       = 1.06e-06
+- rel_err pounce vs CLARABEL  = 1.21e-08
+- BOTH cvxpy solvers agree with pounce and with the closed-form 2.0.
+- svec derivation verified: the recovered solution X=[[1,1],[1,1]] is the
+  exact analytic minimizer; the off-diagonal scale (sqrt(2) on G row 1)
+  reproduces X01=1 correctly, confirming the lower-triangle column-major
+  sqrt(2)-scaled layout was applied consistently on both the G map and the
+  cone interior.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: pounce matches the known closed-form optimum to ~3.5e-9 and agrees
+with both independent cvxpy backends (SCS, CLARABEL). The returned matrix is
+the exact analytic minimizer and is PSD within tolerance. No discrepancy.

@@ -1,0 +1,74 @@
+#+TITLE: Adversary report — qp-active-set: 2-var convex QP with two active inequalities
+#+DATE: [2026-06-15]
+
+* Problem
+2-variable convex QP whose optimum is a CONSTRAINT-DEFINED VERTEX where TWO
+general linear inequalities are simultaneously active. Chosen to exercise the
+active-set solver's working-set identification with an optimal active set of
+size 2 — distinct from the prior qp-active-set runs (box bounds, equality +
+single active inequality, N&W 16.4 routing, HS35/Beale which binds only ONE
+general inequality).
+
+#+begin_example
+min  f(x) = 1/2[(x1 - 2)^2 + (x2 - 2)^2]
+s.t. g1:  x1 + x2 <= 1
+     g2:  x1      <= 0.3
+#+end_example
+
+Standard form min 1/2 x'P x + c'x + r:
+  P = [[1,0],[0,1]] (SPD),  c = (-2,-2),  r = 4.
+
+* Known optimum (hand-derived, KKT-verified)
+Unconstrained minimizer (2,2) violates both constraints => both active.
+Intersection: x1 = 0.3 (g2 tight), x1 + x2 = 1 (g1 tight) => x2 = 0.7.
+KKT stationarity -grad f(x*) = lam1 (1,1) + lam2 (1,0), lam >= 0:
+  grad f(x*) = (-1.7, -1.3) => lam1 = 1.3, lam2 = 0.4 (both > 0).
+=> X_STAR = (0.3, 0.7), LAM* = (1.3, 0.4), f* = 2.29.
+
+- SOURCE: constructed convex QP, analytic KKT-verified vertex.
+- KNOWN_OPTIMAL: 2.29
+- N_VARIABLES: 2
+- N_CONSTRAINTS: 2 (both general inequalities, both active at optimum)
+
+* Method
+- System under test: CLI =pounce <model>.nl <out>.sol solver_selection=qp-active-set=
+  on a pyomo-emitted .nl. dispatch.rs maps "qp-active-set" ->
+  SolverChoice::QpActiveSet; main.rs realizes it via the active-set SQP engine.
+- Path confirmation: iteration-count signature vs the SAME .nl forced through
+  =solver_selection=qp-ipm=. Active-set took 1 iteration; IPM took 8 => the
+  active-set code path was genuinely exercised (no silent IPM fallthrough).
+- Internal IPM cross-check: =pounce.solve_qp(P, c, G, h)= (convex IPM).
+- External oracle: cvxpy / CLARABEL on the identical QP.
+
+* Results
+| solver                  | status        | objective        | x              | time (s) |
+|-------------------------+---------------+------------------+----------------+----------|
+| pounce active-set (CLI) | SolveSucceeded| 2.290000000000   | (0.3, 0.7)     |   0.0089 |
+| pounce convex IPM       | optimal       | 2.290000001791   | (0.3, 0.7)     |   0.0009 |
+| cvxpy / CLARABEL        | optimal       | 2.290000000205   | (0.3, 0.7)     |   0.0036 |
+
+Relative errors:
+- active-set vs known : 0.000e+00
+- active-set vs IPM   : 7.822e-10
+- active-set vs cvxpy : 8.931e-11
+- IPM vs cvxpy        : 6.929e-10
+- x_inf_err vs X_STAR : 0.000e+00
+
+Constraint activity at the active-set solution:
+- g1: x1 + x2 = 1.0000000000 (active)
+- g2: x1      = 0.3000000000 (active)
+Both inequalities binding => the size-2 optimal active set was correctly
+identified.
+
+* Verdict
+VERDICT: PASS
+
+Active-set path confirmed exercised (1 iter vs 8 for IPM on the same .nl). The
+active-set solver lands exactly on the two-constraint vertex (0.3, 0.7), matching
+the hand-derived optimum to machine precision and agreeing with the convex IPM
+and CLARABEL to ~8e-10. No discrepancy between the active-set and IPM paths; no
+solver issue.
+
+* Files
+- [[file:2026-06-15_qp-active-set_twoactive.py]]
+- [[file:2026-06-15_qp-active-set_twoactive.org]]

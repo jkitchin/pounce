@@ -1,0 +1,102 @@
+#+TITLE: Adversary Run: Polynomials with a Continuum of Global Minimizers
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: degenerate / non-unique optima (INFINITE minimizer set, positive-dimensional real variety)
+:SOURCE: Nie, Demmel & Sturmfels, "Minimizing polynomials via sum of squares over the gradient ideal", Math. Program. 106 (2006) 587-606, Sec. 5 (canonical positive-dimensional example); Henrion & Lasserre, GloptiPoly docs (flat-extension/rank test does not certify finite minimizers on a continuum)
+:KNOWN_OPTIMAL: 0.0 (circle), 3.0 (shifted circle), 0.0 (hyperbola)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 0 (unconstrained global polynomial minimization)
+:END:
+
+Three unconstrained quartics whose global minimizer set is a *curve*, not a
+finite point set:
+
+\[
+f_1(x,y) = (x^2+y^2-1)^2, \qquad \min f_1 = 0 \text{ on the whole unit circle}
+\]
+\[
+f_2(x,y) = (x^2+y^2-1)^2 + 3, \qquad \min f_2 = 3 \text{ on the same circle}
+\]
+\[
+f_3(x,y) = (xy-1)^2, \qquad \min f_3 = 0 \text{ on the NON-COMPACT hyperbola } xy=1
+\]
+
+Expanded monomial dicts fed to =sos_minimize=:
+- \(f_1 = x^4 + 2x^2y^2 + y^4 - 2x^2 - 2y^2 + 1\)
+- \(f_2 = f_1 + 3\)
+- \(f_3 = x^2y^2 - 2xy + 1\)
+
+Each is literally a single square, so the *first* Lasserre relaxation is exact
+and the correct lower bound is the known minimum. The stressor is the
+*extraction* side: the optimal moment measure may be any probability measure on
+a positive-dimensional variety, so the flat-extension / moment-matrix rank test
+has no finite atomic decomposition to find. \(f_2\) additionally checks that a
+constant shift propagates into the bound; \(f_3\) removes compactness of the
+minimizer set entirely.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| case          | order | status  | lower_bound |  is_exact | n_min | wall (s) | class                |
+|---------------+-------+---------+-------------+-----------+-------+----------+----------------------|
+| circle        |     2 | optimal |  -9.000e-10 | False     |     0 |   0.0055 | VALID_TIGHT_NOTEXACT |
+| circle        |     3 | optimal |  -7.183e-10 | True      |     4 |   0.0087 | EXACT_OK             |
+| circle_shift3 |     2 | optimal |   3.0000000 | False     |     0 |   0.0043 | VALID_TIGHT_NOTEXACT |
+| circle_shift3 |     3 | optimal |   3.0000000 | True      |     4 |   0.0078 | EXACT_OK             |
+| hyperbola     |     2 | optimal |   4.591e-08 | True      |     2 |   0.0058 | EXACT_OK             |
+| hyperbola     |     3 | optimal |   9.391e-08 | True      |     2 |   0.0111 | EXACT_OK             |
+
+Known optimal: 0.0 / 3.0 / 0.0. Oracle (dense 1601^2 grid on [-4,4]^2 + 200-start
+scipy BFGS, 1.05 s total) reproduces exactly those minima and finds nothing
+lower — no refutation.
+
+Every lower bound is correct to <= 1e-7. No bound anywhere exceeds the true
+global minimum by more than SDP convergence slack, and the two small positive
+overshoots (hyperbola, 4.6e-8 / 9.4e-8 at the default =tol=1e-8=) collapse
+monotonically when the tolerance is tightened:
+
+| tol   | order 2 bound | order 3 bound |
+|-------+---------------+---------------|
+| 1e-8  |     4.591e-08 |     9.391e-08 |
+| 1e-10 |     5.017e-10 |     2.510e-10 |
+| 1e-12 |     9.175e-14 |     7.307e-13 |
+
+so they are solver slack, not a systematically invalid certificate.
+
+* Cross-check / Verification
+- Formulation: each monomial dict was evaluated against its closed form at 3000
+  random points; max abs error 8.5e-14 / 2.8e-14. No expansion error.
+- Oracle 1 (dense grid, 1601^2): grid minima 0.0, 3.0, 0.0.
+- Oracle 2 (200-start scipy BFGS, tol 1e-14): 4.20e-20 at (-0.5685,-0.8227) on
+  the unit circle; 3.0 at (0.5548,-0.8320); 1.78e-20 at (-3.8254,-0.2614) on
+  =xy=1=. Multistart lands at *different* points of each continuum on different
+  starts, confirming the minimizer set really is infinite.
+- Minimizer extraction: at order 3 the circle cases report =is_exact=True= with
+  4 atoms at (+-0.70697, +-0.70697); at order 2/3 the hyperbola reports 2 atoms
+  at (+-0.99966, +-0.99966). Every returned point is a *genuine global
+  minimizer* (f = 1.45e-07, 3.000001, 4.48e-07 respectively — all attaining the
+  reported bound). The extraction is therefore *sound but incomplete*: it
+  returns a finite subset of an infinite optimal set, chosen by the symmetry of
+  the relaxation. It does NOT reproduce the Himmelblau failure mode
+  (=is_exact=True= with a point far off the optimum).
+- Contrast with the logged Himmelblau SOLVER_BUG: there the returned point had
+  f = 4.2e0..3.0e1 against a bound of ~1e-6. Here max |f(x*) - bound| = 4.3e-6.
+
+* Verdict
+PASS. The core SOS contract — a *valid* lower bound — holds on all three
+continuum cases at both tested orders, tight to 1e-7 and with no invalid
+(above-true-minimum) certificate. The constant shift in \(f_2\) is carried
+correctly. Minimizer extraction behaves acceptably: at order 2 on the circle it
+declines to certify (=is_exact=False=, 0 minimizers), which is the correct
+report for a positive-dimensional optimal variety; at order 3, and for the
+hyperbola, it does certify a finite atom set, which is *incomplete* as a
+description of the minimizer set but every atom it returns is a true global
+minimizer attaining the bound. That incompleteness is a documentation/semantics
+nit at most (=num_minimizers= cannot represent a continuum), not a correctness
+failure, and it is a different phenomenon from the recorded Himmelblau
+extraction bug. Total wall time 1.3 s including both oracles.

@@ -1,0 +1,40 @@
+#+TITLE: Adversary Run: Post-optimal QP sensitivity dx/db
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: parametric convex QP (equality RHS as parameter)
+:SOURCE: sIPOPT analog for QPs; analytic KKT sensitivity.
+:KNOWN_OPTIMAL: dx/db = (2/3, 1/3)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 1 equality
+:END:
+
+min 0.5 x'Px + c'x s.t. a'x = b, P=diag(2,4), c=(-1,-2), a=(1,1).
+Analytic dx/db = P^{-1}a / (a'P^{-1}a) = (2/3, 1/3). =QpSensitivity.parametric_step=
+gives dx/db from the cached KKT factor; checked vs a central finite-difference
+re-solve AND the analytic value.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Quantity                       | Value                 | Error      |
+|--------------------------------+-----------------------+------------|
+| pounce dx/db                   | (0.66666667, 0.33333) | —          |
+| vs finite-difference re-solve  | —                     | 4.33e-11   |
+| vs analytic (2/3, 1/3)         | —                     | 9.44e-11   |
+| predictor x*+dx*0.3 vs resolve | —                     | 1.11e-15   |
+
+Wall time: 0.0010 s
+
+* Cross-check / Verification
+The cached-factor sensitivity matches a central finite-difference re-solve to
+4e-11 and the closed-form KKT sensitivity to 9e-11. The first-order predictor
+x* + dx*0.3 reproduces a full re-solve at b+0.3 to machine precision.
+
+* Verdict
+PASS — =QpSensitivity= reproduces the analytic and finite-difference dx/db to
+~1e-10, and its predictor is exact to machine precision on this linear-in-b QP.

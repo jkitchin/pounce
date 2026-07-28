@@ -1,0 +1,88 @@
+#+TITLE: Adversary report — Lyapunov stability SDP (min Tr(P))
+#+DATE: 2026-06-15
+#+FAMILY: sdp
+
+* Problem
+Continuous-time Lyapunov decay-certificate SDP with TWO coupled PSD cones in the
+same matrix variable P (S^2):
+
+  minimize    Tr(P)
+  subject to  -(A^T P + P A) - I  >= 0     (2x2 PSD cone 1)
+               P                  >= 0     (2x2 PSD cone 2)
+
+with the Hurwitz system matrix
+
+  A = [[-1, 1],
+       [ 0, -2]]   (eigenvalues -1, -2; stable).
+
+This is the canonical "find a quadratic Lyapunov function V(x)=x^T P x" LMI from
+control theory. Distinct from all prior sdp runs (single-cone max-eig; min-trace
+2x2 Schur; max-cut K3; trace-1 min-eig): it is the first TWO-block PSD problem and
+the first to encode a linear matrix operator A^T P + P A in the svec basis.
+
+* Source
+Boyd, El Ghaoui, Feron, Balakrishnan, "Linear Matrix Inequalities in System and
+Control Theory", SIAM 1994, Ch. 5 (Lyapunov stability LMIs). Standard
+control-theory result on the Lyapunov equation / observability Gramian.
+
+* Known optimal (closed form)
+For a Hurwitz A, decreasing Tr(P) drives the first constraint to equality at the
+optimum, so the optimizer solves the continuous Lyapunov equation
+
+  A^T P + P A = -I,   P* = integral_0^inf exp(A^T t) exp(A t) dt  > 0.
+
+Computed independently via scipy.linalg.solve_continuous_lyapunov(A.T, -I):
+
+  P* = [[1/2, 1/6],
+        [1/6, 1/3]],     Tr(P*) = 5/6 = 0.8333333333.
+
+The Gramian is PD, so the second cone (P>=0) is inactive at the optimum but is
+kept to exercise the two-cone code path.
+
+* svec layout used
+Lower triangle, column-major, off-diagonals * sqrt(2):
+  2x2 -> svec(M) = [M00, sqrt(2)*M10, M11].
+Cone 1 encodes the linear map S = A^T P + P A:
+  S00 = 2(a p0 + c p1),  S10 = b p0 + (a+d) p1 + c p2,  S11 = 2(b p1 + d p2),
+with A=[[a,b],[c,d]], P=[[p0,p1],[p1,p2]]; then M1 = -S - I and
+svec(M1) = [-S00-1, sqrt(2)*(-S10), -S11-1] = h1 - G1 v.
+Cross-checked against cvxpy operating on the native (A^T P + P A) expression.
+
+* Variables / cones
+N_VARIABLES = 3   (P00, P10, P11; symmetric 2x2)
+cones = [("psd", 2), ("psd", 2)]   (svec dim 3 each; G is 6x3, h in R^6)
+
+* Results
+| quantity                         | value            |
+|----------------------------------+------------------|
+| KNOWN_OPTIMAL Tr(P*)             | 0.8333333333     |
+| POUNCE objective                 | 0.8333333332     |
+| POUNCE status                    | optimal          |
+| POUNCE time (s)                  | 0.0008           |
+| ORACLE cvxpy/CLARABEL obj        | 0.8333333331     |
+| ORACLE cvxpy/CLARABEL time (s)   | 0.0026           |
+| ORACLE cvxpy/SCS obj             | 0.8333333019     |
+| ORACLE cvxpy/SCS time (s)        | 0.0038           |
+| rel err pounce vs known          | 1.30e-10         |
+| rel err pounce vs CLARABEL       | 1.16e-10         |
+| rel err pounce vs SCS            | 3.13e-08         |
+| ||P_pounce - P*||_F              | 1.26e-10         |
+| min eig(-(A'P+PA)-I) at sol      | -2.1e-10 (active)|
+| min eig(P) at sol                | 0.2303 (inactive)|
+
+pounce recovers P* entrywise (P00=1/2, P10=1/6, P11=1/3) to ~1e-10. The first
+cone is tight at the optimum (its min eigenvalue -2.1e-10 is within the 1e-6
+feasibility tolerance, exactly as the active-Lyapunov-equation theory predicts);
+the second cone is strictly interior (min eig 0.23).
+
+* Speedup
+~3.2x faster than cvxpy/CLARABEL (0.0008 s vs 0.0026 s).
+
+* Verdict
+PASS. pounce solves the two-block Lyapunov SDP to the closed-form Gramian
+reference (rel err 1.3e-10), agrees with CLARABEL to 1.2e-10, and reconstructs
+the optimizer matrix to 1.3e-10. svec scaling (x sqrt(2) off-diagonal) and the
+matrix-operator encoding A^T P + P A verified against cvxpy on identical data; no
+solver issue.
+
+VERDICT: PASS

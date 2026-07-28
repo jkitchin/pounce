@@ -1,0 +1,146 @@
+#+TITLE: Adversary Run: .nl / CLI Input Surface Edge Cases
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: API contract / .nl parser / option handling / input edge cases
+:SOURCE: AMPL "Hooking Your Solver to AMPL" (Gay, 1997/2005) — .nl and .sol
+         file formats; AMPL Book (Fourer, Gay, Kernighan) ch. 18 for the
+         maximization sense convention.  Analytic optima derived in-script.
+:KNOWN_OPTIMAL: per-case, derived analytically (see table)
+:N_VARIABLES: 1-2 per case
+:N_CONSTRAINTS: 0-2 per case
+:END:
+
+This run tests the *input surface* rather than a single optimization problem.
+It is the surface GAMS, AMPL and Pyomo drive, so parser and sense-convention
+robustness is release-critical.
+
+Eight sub-tests (25 assertions), each writing one =.nl= with Pyomo's nl writer
+and running **both** binaries on the **byte-identical** file (the ipopt stub
+copy is sha256-compared against the original before each run):
+
+- (a) =.nl= with **no objective** (pure feasibility):
+  find $x,y$ with $x^2+y^2=4$, $x-y=0$, $x,y\in[-10,10]$, $x_0=(1,0.5)$.
+  Analytic: $x=y=\sqrt2$.
+- (b) **no constraints, bounds only**: $\min (x-3)^2+(y+2)^2$,
+  $x\in[0,1]$, $y\in[-5,5]$.  Analytic: $x^*=1$, $y^*=-2$, $f^*=4$.
+- (c) **maximization sign convention** (the highest-value test).  The *same*
+  objective expression $f=(x-3)^2+(y-4)^2$ on the *same* feasible set
+  $x+y=5$, $x,y\in[0,5]$, written once as =minimize= and once as =maximize=.
+  On the line $x=t,\ y=5-t$: $f(t)=2t^2-8t+10$, so
+  $\min$ at $t=2 \Rightarrow (2,3),\ f=2$ (interior), and
+  $\max$ at $t=5 \Rightarrow (5,0),\ f=20$ (corner).
+  **Different argmin/argmax and different values** — a dropped or flipped
+  sense cannot hide.  Second probe: a *negative* objective
+  $f=-(x-2)^2$, $x\in[-5,5]$: $\max \Rightarrow x=2, f=0$;
+  $\min \Rightarrow x=-5, f=-49$.
+- (d) **fixed variable** ($lb=ub=2$): $\min (x-1)^2+(y-3)^2$, $x+y\ge1$.
+  Analytic: $f^*=1$ at $(2,3)$.
+- (e) **free-floating variable** (in neither objective nor any constraint).
+  Pyomo *prunes* unreferenced columns, so the realistic writer path cannot
+  emit one; (e2) hand-builds the equivalent =.nl= with a second column =z=,
+  bounds $[-1,4]$, $z_0=3$, absent from every row and from the objective
+  gradient.
+- (f) **constant-only objective** ($f=7$) with $x^2=9$: a pure feasibility
+  problem wearing an objective.
+- (g) **domain errors at $x_0$**: $-\log x + x$ at $x_0=0$; $(\sqrt x-2)^2$ at
+  $x_0=0$ (infinite derivative); $1/x + x$ at $x_0=0$; and $x^{0.5}$ at
+  $x_0=-2$ (negative base $\Rightarrow$ NaN).
+- (h) **truncated / corrupted =.nl=**: 11 mutations of a valid file
+  (50%/90%/1-byte truncation, header-only, empty, pure garbage, wrong
+  variable count in the header, invalid opcode, wrong magic, non-numeric
+  bound, literal =nan= bound, dropped range line).  Every mutation is
+  asserted to actually differ from the original (an earlier draft silently
+  produced no-op "corruptions").
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| # | Sub-test                     | pounce                | Ipopt (same bytes)   | Expected            | Verdict |
+|---+------------------------------+-----------------------+----------------------+---------------------+---------|
+| a | no objective                 | x=y=1.41421356237310  | x=y=1.41421356237310 | sqrt(2)             | PASS    |
+| b | bounds only, no constraints  | f=4.000000003         | f=3.999999963        | f=4, x=(1,-2)       | PASS    |
+| c | max, f=(x-3)^2+(y-4)^2       | f=20.0000001 @ (5,0)  | f=20.0000001 @ (5,0) | f=20 @ (5,0)        | PASS    |
+| c | min, same expression         | f=2.0 @ (2,3)         | f=2.0 @ (2,3)        | f=2 @ (2,3)         | PASS    |
+| c | max of -(x-2)^2              | f=-4.4e-20 @ x=2      | f=-5.7e-20 @ x=2     | f=0 @ x=2           | PASS    |
+| c | min of -(x-2)^2              | f=-49.0000007 @ x=-5  | f=-49.0000007 @ x=-5 | f=-49 @ x=-5        | PASS    |
+| d | fixed var lb==ub=2           | f=0.9999999999 @(2,3) | f=1.0 @ (2,3)        | f=1                 | PASS    |
+| e | unused var (pyomo)           | pruned by writer; f=0 | f=0                  | f=0                 | PASS    |
+| e2| free-floating column (hand)  | x=1, z=1.4999987      | x=1, z=2.5035584     | x=1, z in [-1,4]    | PASS    |
+| f | constant objective f=7       | x=-3, objno=0         | x=-3                 | any x with x^2=9    | PASS    |
+| g | -log(x)+x, x0=0              | f=1.00000006          | f=1.0                | f=1 @ x=1           | PASS    |
+| g | (sqrt(x)-2)^2, x0=0          | f=1.7e-19 @ x=4       | **FAILED (rc=1)**    | f=0 @ x=4           | PASS    |
+| g | 1/x + x, x0=0                | f=2.000000002         | f=2.0                | f=2 @ x=1           | PASS    |
+| g | x**0.5, x0=-2 (NaN)          | rc=1, objno=500       | "Invalid number ..." | clear error         | PASS    |
+| h | 11 corrupt/truncated files   | rc=2, clean message   | 6/11 SIGABRT (rc=-6) | no panic            | PASS    |
+
+25/25 assertions PASS.  Total wall time for the whole suite ~4 s; every
+individual solve well under 10 s (largest single solve 0.01 s).
+
+** Sign convention (the critical result)
+
+Pounce's max/min handling is **correct**.  The two =.nl= files in (c) differ
+only in the objective-sense byte (sha256 =79a10545194d= vs =03c5fe366085=) and
+pounce lands on the *opposite corner of the feasible line* for each, matching
+Ipopt on the identical bytes to 1e-8 in both the argument and the *signed*
+objective value.  The negative-objective probe (max $\Rightarrow$ 0,
+min $\Rightarrow$ $-49$) rules out the "sense honoured but sign of the reported
+objective flipped" failure mode as well: pounce's =.sol= primals reproduce the
+reference objective with the correct sign in all four combinations.
+
+** Notable behaviours (not bugs)
+
+- (g) =(sqrt(x)-2)^2= from $x_0=0$: **pounce solves it, Ipopt fails**
+  (rc=1).  Pounce is strictly better here.  =pounce check-x0= correctly
+  returns rc=0 for this case (the function is finite at $x_0$; only the
+  derivative blows up) and rc=21 for the three cases that are genuinely
+  non-evaluable at $x_0$ (log, 1/x, negative base).
+- (g) negative base: pounce exits rc=1 with =EXIT: Error in step computation.=
+  and =objno 500=.  Ipopt's diagnostic is more specific ("Invalid number in
+  NLP function or derivative detected") but both are clear errors, no garbage.
+- (h) on 6 of the 11 corrupt files **Ipopt aborts with SIGABRT (rc=-6)** while
+  pounce exits 2 with a one-line message, e.g.
+  =pounce: failed to read h_truncated_50pct.nl: unexpected end of file in data line=.
+  Pounce's parser is markedly more robust than the ASL reference here.
+- (e) Pyomo's nl writer prunes unreferenced columns even when the model
+  declares them and even through a =0.0*exp(z)= term, so the free-floating
+  case had to be hand-built to exercise it at all.  Pounce keeps =z= strictly
+  inside its declared bounds and returns it in the =.sol= (as does Ipopt,
+  at a different in-bounds value — the column is unconstrained by the model,
+  so both are valid).
+- Option handling (spot check, outside the scripted suite):
+  =not_an_option=3=, =max_iter=abc=, =tol=-1= each exit 2 with an explicit
+  =OPTION_INVALID= message; a bare =max_iter= or =​=5= prints usage and exits 2;
+  the =pounce_options= environment variable is honoured.  No panics.
+
+* Cross-check / Verification
+
+- **Ipopt 3.14.19 (ASL 20241202)** run on byte-identical =.nl= files
+  (sha256-asserted before each run, invoked as =ipopt <stub> -AMPL=).
+  Agreement in every case where Ipopt succeeded: objective to <=1e-7 relative,
+  arguments to <=1e-8 absolute, *including sign* on all four (c) variants.
+- **=pounce verify=** run on the pounce =.sol= for (a), (d), (e2), (f):
+  exit code **0** (feasible) in all four.
+- **Analytic optima** derived in the script docstrings and reproduced above.
+- =pounce check-x0= used as a third channel for (g).
+- =.sol= files parsed by an independent minimal reader written for this run
+  (mirrors Pyomo's =pyomo/opt/plugins/sol.py= logic), so the comparison does
+  not go through either solver's own reporting.
+
+* Verdict
+
+**PASS.**  The =.nl= / CLI input surface is sound across all eight probed
+edge cases.  The maximization sign convention — the highest-risk item — is
+correct in both the argument and the reported objective sign, confirmed
+against Ipopt on byte-identical files with a problem whose argmin and argmax
+are distinct.  No-objective, bounds-only, fixed-variable, free-floating-column
+and constant-objective models are all handled and produce =pounce
+verify=-clean points.  Nonlinear domain errors at $x_0$ either solve cleanly
+(pounce beats Ipopt on =sqrt= at 0) or fail with an explicit error and
+=objno= in the 500 range — never garbage.  All 11 corrupt/truncated files
+produce exit code 2 with a one-line diagnostic and no panic or signal, where
+the ASL reference implementation SIGABRTs on 6 of them.  No issue filed.

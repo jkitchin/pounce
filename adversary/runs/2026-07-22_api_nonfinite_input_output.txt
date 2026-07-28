@@ -1,0 +1,74 @@
+=== cvxpy (CLARABEL) references ===
+  boxed  [-5,5]     obj=-3.126865671642e+00
+  free   (no bnds)  obj=-3.126865671642e+00
+  mixed  inf/finite obj=-3.126865671642e+00
+
+=== 1. LEGITIMATE +/-Inf BOUNDS (must be accepted & correct) ===
+  bounds_inf_both          status=optimal      obj=-3.126865671642e+00    relerr(cvxpy-free)=1.42e-16  ok
+  bounds_huge_both_REF     status=optimal      obj=-3.126865671642e+00    relerr(cvxpy-free)=1.42e-16  ok
+  bounds_none_REF          status=optimal      obj=-3.126865671642e+00    relerr(cvxpy-free)=1.42e-16  ok
+  bounds_inf_mixed         status=optimal      obj=-3.126865671642e+00    relerr(cvxpy-mixed)=1.42e-16  ok
+  bounds_huge_mixed_REF    status=optimal      obj=-3.126865671642e+00    relerr(cvxpy-mixed)=2.84e-16  ok
+  baseline                 status=optimal      obj=-3.126865671642e+00    relerr(cvxpy-box)=1.42e-16  ok
+  consistency bounds_inf_both vs bounds_huge_both_REF: relerr=0.00e+00
+  consistency bounds_inf_mixed vs bounds_huge_mixed_REF: relerr=1.42e-16
+
+=== 2. NaN INPUT (must raise; a returned solution is a BUG) ===
+  nan_A_01             raised ValueError: solve_qp: `A` contains NaN or Inf  [ok]
+  nan_G_13             raised ValueError: solve_qp: `G` contains NaN or Inf  [ok]
+  nan_P_00             raised LinAlgError: Eigenvalues did not converge  [ok]
+  nan_P_12             raised ValueError: solve_qp: `P` contains NaN or Inf  [ok]
+  nan_b_0              raised ValueError: solve_qp: `b` contains NaN or Inf  [ok]
+  nan_c_2              raised ValueError: solve_qp: `c` contains NaN or Inf  [ok]
+  nan_h_0              raised ValueError: solve_qp: `h` contains NaN or Inf  [ok]
+  nan_lb_2             raised ValueError: solve_qp: `lb` contains NaN  [ok]
+  nan_ub_3             raised ValueError: solve_qp: `ub` contains NaN  [ok]
+
+=== 3. +/-Inf in P/c/A/b/G/h (invalid; must raise) ===
+  infm_G_13            raised ValueError: solve_qp: `G` contains NaN or Inf  [ok]
+  infm_P_12            raised ValueError: solve_qp: `P` contains NaN or Inf  [ok]
+  infm_c_0             raised ValueError: solve_qp: `c` contains NaN or Inf  [ok]
+  infp_A_01            raised ValueError: solve_qp: `A` contains NaN or Inf  [ok]
+  infp_P_00            raised ValueError: solve_qp: `P` contains NaN or Inf  [ok]
+  infp_b_0             raised ValueError: solve_qp: `b` contains NaN or Inf  [ok]
+  infp_c_2             raised ValueError: solve_qp: `c` contains NaN or Inf  [ok]
+  infp_h_0             raised ValueError: solve_qp: `h` contains NaN or Inf  [ok]
+
+=== 4. inverted / degenerate bounds (error OR infeasible, never 'optimal') ===
+  bounds_lb_gt_ub      status=primal_infeasible obj=7.872731428236234 x_nonfinite=False ok
+  bounds_lb_plusinf    status=optimal obj=-3.126865671641791 x_nonfinite=False *** BUG
+  bounds_ub_minusinf   status=optimal obj=-3.1268656716417915 x_nonfinite=False *** BUG
+
+=== 5. dtype / memory-layout views (must match baseline answer) ===
+  dtype_float32            status=optimal    obj=-3.126865671642e+00 relerr=1.42e-16 xinf=8.33e-17 ok
+  dtype_int                status=optimal obj=-3.066666664916048 (different problem: h=[0,0]) x=[-2.387207173807035e-09, 0.3333333338507116, 1.0666666683802486, 0.600000000156246]
+  layout_fortran           status=optimal    obj=-3.126865671642e+00 relerr=0.00e+00 xinf=0.00e+00 ok
+  layout_transposed_view   status=optimal    obj=-3.126865671642e+00 relerr=0.00e+00 xinf=0.00e+00 ok
+  layout_noncontig_slice   status=optimal    obj=-3.126865671642e+00 relerr=0.00e+00 xinf=0.00e+00 ok
+  readonly_arrays          status=optimal    obj=-3.126865671642e+00 relerr=0.00e+00 xinf=0.00e+00 ok
+  negative_stride          status=optimal    obj=-3.126865671642e+00 relerr=0.00e+00 xinf=0.00e+00 ok
+
+=== 6. mismatched shapes (must raise) ===
+  shape_A_wrong_cols       raised ValueError: solve_qp: `A` has 6 columns but n=4 (from `c`) [ok]
+  shape_P_3d               raised ValueError: P: expected a 2-D matrix, got shape (2, 2, 2) [ok]
+  shape_P_nonsquare        raised ValueError: solve_qp: `P` has shape (3, 4) but must be (4, 4) [ok]
+  shape_b_too_long         raised ValueError: solve_qp: `A` has 1 rows but `b` has length 2 [ok]
+  shape_c_too_short        raised IndexError: index 3 is out of bounds for axis 0 with size 3 [ok]
+  shape_h_mismatch         raised ValueError: solve_qp: `G` has 2 rows but `h` has length 1 [ok]
+  shape_lb_too_short       raised ValueError: solve_qp: `lb` has length 2 but n=4 (from `c`) [ok]
+
+=== 7. x0 handling via pounce.minimize (min (x0-1)^2+(x1-2)^2, opt=0) ===
+  x0_nan           success=True  status=0                            obj=nan x=[1.0, nan] *** FINDING
+  x0_posinf        success=False status=-13                          obj=inf x=[inf, 1.0] ok
+  x0_neginf        success=False status=-13                          obj=inf x=[1.0, -inf] ok
+  x0_wild          success=True  status=0                            obj=0.000000e+00 x=[1.0, 2.0] ok
+  x0_wrong_len     success=True  status=0                            obj=0.000000e+00 x=[1.0, 2.0, 3.0] ok
+  x0_int           success=True  status=0                            obj=0.000000e+00 x=[1.0, 2.0] ok
+  x0_ok            success=True  status=0                            obj=0.000000e+00 x=[1.0, 2.0] ok
+
+=== SUMMARY ===
+cases run: 40 qp + 7 x0
+  FINDING DEGEN            bounds_lb_plusinf        {"status": "optimal", "obj": -3.126865671641791, "x_nonfinite": false, "raised": null, "returncode": null}
+  FINDING DEGEN            bounds_ub_minusinf       {"status": "optimal", "obj": -3.1268656716417915, "x_nonfinite": false, "raised": null, "returncode": null}
+  FINDING X0               x0_nan                   {"status": "0", "obj": NaN, "x_nonfinite": true, "raised": null, "returncode": null}
+VERDICT: SOLVER_BUG

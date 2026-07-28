@@ -1,0 +1,10 @@
+# Scratch/working directories never belong in the published history.
+# GAMS listing (.lst) and log files embed the site license banner, and
+# gamslice.dat IS the license file itself — publishing this repo is public.
+# Curated artifacts live at runs/ top level: one .py + one .org per problem,
+# plus small model/solution files (.nl/.sol/.col/.row/.json).
+__pycache__/
+runs/*/
+*.lst
+gamslice.dat
+gamscntr.dat

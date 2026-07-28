@@ -1,0 +1,99 @@
+#+TITLE: Adversary Run: Himmelblau's Function (SOS / four global minimizers)
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: unconstrained global polynomial minimization, MULTIPLE (4) global minimizers
+:SOURCE: D. M. Himmelblau, /Applied Nonlinear Programming/, McGraw-Hill 1972 — the canonical 4-minimizer quartic test function.
+:KNOWN_OPTIMAL: 0.0
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 0 (unconstrained; degree 4)
+:END:
+
+\[
+f(x,y) = (x^2 + y - 11)^2 + (x + y^2 - 7)^2
+\]
+
+Expanded (the form handed to =sos_minimize=):
+
+\[
+f = x^4 + y^4 + 2x^2y + 2xy^2 - 21x^2 - 13y^2 - 14x - 22y + 170
+\]
+
+The expansion was verified against the factored form at 2000 random points
+(max abs err 1.3e-13), so the polynomial dict is not a formulation error.
+
+Four global minimizers, all with \(f = 0\):
+(3, 2), (-2.805118, 3.131312), (-3.779310, -3.283186), (3.584428, -1.848126).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver              | Status  | lower_bound | is_exact | num_minimizers | recovered f(x*) | Wall Time |
+|---------------------+---------+-------------+----------+----------------+-----------------+-----------|
+| pounce sos order=2  | optimal |    4.066e-6 | True     |              1 |        4.153e-2 |  0.0075 s |
+| pounce sos order=3  | optimal |    5.938e-6 | True     |              1 |        4.215e+0 |  0.0229 s |
+| pounce sos order=4  | optimal |    7.701e-6 | True     |              1 |        3.019e+1 |  0.1050 s |
+| grid 1201^2         | —       |         0.0 | —        |              — |             0.0 |         — |
+| scipy BFGS x400     | —       |    4.58e-18 | —        |              4 |         ~0      |  0.7166 s |
+
+Known optimal: 0.0 (four minimizers)
+
+The **lower bound is correct and VALID** at every order: 4.1e-6 / 5.9e-6 /
+7.7e-6 against a true minimum of 0. The +4e-6…+8e-6 excess is ordinary
+interior-point SDP slack, not an invalid certificate — it is well inside the
+solver's own tolerance and does not constitute a bound above the true minimum
+in any meaningful sense.
+
+The **minimizer recovery is wrong**. =is_exact=True= is reported at all three
+orders with =num_minimizers=1=, but Himmelblau has four global minimizers, and
+the single recovered point does not attain the claimed bound:
+
+- order 2: x* = (2.974355, 1.979625), f(x*) = 4.15e-2 (bound claims ~0)
+- order 3: x* = (2.691829, 1.869265), f(x*) = 4.22e+0
+- order 4: x* = (2.074160, 1.655970), f(x*) = 3.02e+1
+
+The recovered point *degrades monotonically as the order rises*, which is the
+opposite of the expected behaviour — a higher-order relaxation should extract
+the atoms more accurately, not drift away from them. At order 4 the "global
+minimizer" has objective 30.2 while the returned certificate says the global
+minimum is 7.7e-6, a contract violation of the documented invariant that when
+=is_exact= the recovered minimizers attain =lower_bound=.
+
+* Cross-check / Verification
+- Dense grid 1201x1201 over [-6,6]^2: min 0.0.
+- scipy BFGS multistart, 400 starts: min 4.58e-18 at (3, 2); all four known
+  minimizers are recovered by the multistart. The true global minimum is 0.
+- Formulation check: expanded vs factored polynomial agree to 1.3e-13.
+- **Control experiments** (to rule out a general multi-minimizer failure):
+  - six-hump camel (order 3): lower_bound -1.03162843, =is_exact=True=,
+    =num_minimizers=2=, both recovered points attain -1.0316283 — correct.
+  - x^4 - 2x^2 + 3 (1-D, two minimizers): bound 2.0000000027,
+    =num_minimizers=2=, x* = +-1.00000489 — correct.
+  - separable (x^2-1)^2 + (y^2-1)^2 (four minimizers, order 2): bound 5.2e-8,
+    =is_exact=False=, =num_minimizers=0= — conservative and *safe*: it declines
+    to certify rather than returning a wrong minimizer.
+
+So multi-minimizer extraction works in the 2-atom cases, and the 4-atom
+separable case fails *safely*. Himmelblau (4 non-symmetric atoms) is the case
+that fails *unsafely*: it asserts exactness, under-counts the atoms 4 -> 1, and
+returns a point that is not a minimizer.
+
+* Verdict
+=SOLVER_BUG= (minimizer extraction / flatness-rank detection) — **the lower
+bound is valid; the recovered minimizer is not.** For a quartic with four
+global minimizers, =sos_minimize= sets =is_exact=True= and
+=num_minimizers=1=, contradicting the documented guarantee that "all global
+minimizers are recovered" when the moment matrix is flat, and the single point
+returned does not attain the certified bound (f = 4.2e-2 at order 2, growing to
+3.0e+1 at order 4). The most likely cause is a rank-detection threshold on the
+moment matrix that collapses the rank-4 flat extension to rank 1, after which
+the atom extraction returns a spurious point. Severity is moderate: a user who
+trusts =is_exact= and reads =minimizers[0]= gets a wrong answer with no warning,
+even though =lower_bound= itself is trustworthy. No invalid lower bound was
+observed.
+
+Reproduce: =python adversary/runs/2026-07-19_sos_himmelblau.py=

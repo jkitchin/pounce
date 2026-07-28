@@ -1,0 +1,137 @@
+#+TITLE: Targeted Probe: solver_selection validation (gh #213 / PR #214)
+#+DATE: <2026-07-19>
+
+* Scope
+:PROPERTIES:
+:FAMILY: probe (qp-active-set / autoroute dispatch)
+:SOURCE: gh #213, fixed by PR #214 (commit 7ea548d, merged ef20545)
+:ORACLE: the CLI (=crates/pounce-cli/src/dispatch.rs= =SolverSelection::parse=) for the value set; fd-level capture of the Rust engine log for the engine actually run
+:END:
+
+Contract asserted by the fix:
+1. an unrecognized =solver_selection= raises =ValueError= (previously: silently
+   fell through to the NLP path);
+2. =qp-active-set= actually dispatches to the active-set SQP engine (previously
+   dropped) and agrees with =options={"algorithm":"active-set-sqp"}=;
+3. matching is case-insensitive;
+4. =auto= / =nlp= / =lp-ipm= / =qp-ipm= / =socp= are unchanged.
+
+Script: =adversary/runs/2026-07-19_probe_solver-selection-213.py= (55 assertions,
+0 failures).
+
+** Engine oracle
+The claim "actually dispatches to the SQP engine" cannot be checked from the
+=OptimizeResult= (the NLP path exposes no =info["solver"]=). The Rust log at
+=print_level=5= is the discriminator: the filter-IPM prints the iteration-table
+header =iter      objective   inf_pr=, the active-set SQP driver does not. The
+log is written from Rust to fd 1, so it must be captured with =os.dup2=, not
+=contextlib.redirect_stdout=.
+
+* Findings
+
+** 1. Rejection of bad values — all rejected
+19 malformed strings: =qp_ipm= (the motivating typo), =qp-activeset=,
+=qpactiveset=, =active-set-sqp= (the /algorithm/ name, not a selector),
+=QP_ACTIVE_SET=, leading/trailing/both-side ASCII space, trailing =\n=,
+trailing =\t=, leading NBSP =\xa0=, fullwidth =ｎｌｐ= and =ｑｐ－ｉｐｍ=,
+trailing zero-width space =U+200B=, the Latin lookalike =nłp=, empty string,
+=ipopt=, =socp;nlp=, =auto,nlp=. Every one raises
+=ValueError: ... is not a valid selector=. No normalization beyond =.lower()=
+happens, which is the conservative choice.
+
+11 non-string types: =None=, =0=, =1=, =True=, =False=, =3.5=, =b"nlp"=,
+=["nlp"]=, =("nlp",)=, ={"nlp":1}=, bare =object()= — all raise =ValueError=
+(they are =str()=-coerced to =none= / =0= / =b'nlp'= / … and then fail the
+membership test). =b"nlp"= in particular does *not* sneak through.
+
+Str-coercible lookalikes that *do* reach a selector (documented here, not a bug):
+- =numpy.str_("QP-Active-Set")= → accepted, SQP engine ran (correct: it *is* a
+  =str= subclass);
+- an arbitrary object whose =__str__= returns ="qp-active-set"= → accepted, SQP
+  engine ran. This follows from =str(...)= coercion in =_minimize.py:991=. It
+  cannot produce a *wrong* engine — the coerced text is what dispatches — so it
+  is a liberal-input choice, not a correctness hole;
+- a =class Sel(str, Enum)= member is *rejected*, because =str(Sel.QPAS)= is
+  ="Sel.QPAS"=. Slightly surprising for a =str=-enum (its ===-to-"qp-active-set"=
+  comparison is True), but a loud error, not a silent misroute.
+
+** 2. qp-active-set really runs the SQP engine — confirmed
+On a convex QP (=Q=[[2,.5],[.5,3]]=, =c=(-2,-3)=, analytic
+=x*=Q^{-1}(-c)=, =f*=-2.0869565217391304=):
+
+| invocation                                          | engine (log oracle) | objective            |
+|-----------------------------------------------------+---------------------+----------------------|
+| default (no selector)                                | IPM                 | (baseline)           |
+| =solver_selection="qp-active-set"=                   | **SQP**             | -2.0869565217391304  |
+| =algorithm="active-set-sqp"=                         | **SQP**             | -2.0869565217391304  |
+| =solver_selection="qp-active-set", algorithm="interior-point"= | **SQP**  | (documented precedence) |
+
+The two spellings agree to 0.0e+00 in objective and =np.allclose(atol=1e-12)= in
+x, and both hit the analytic optimum to <1e-8. The pre-#213 failure mode (the
+selector silently dropped, IPM running instead) is gone.
+
+** 3. Case-insensitivity — holds on both surfaces
+=QP-ACTIVE-SET=, =Qp-Active-Set=, =qP-aCtIvE-sEt= all reach the SQP engine;
+=AUTO=, =Nlp=, =NLP= are accepted. The CLI was checked directly and is *also*
+case-insensitive despite =SolverSelection::parse= matching lowercase literals —
+the option registry normalizes the value before dispatch
+(=pounce solver_selection=NLP= and =solver_selection=QP-ACTIVE-SET= both parse;
+the latter then fails the *class* check, proving it parsed). So no
+library-vs-CLI divergence here.
+
+** 4. Other valid selectors — unchanged
+=auto= took the specialized route (=info["solver"] == "qp-ipm"=) and hit
+=f*=; =qp-ipm= and =nlp= both hit =f*=; =lp-ipm= correctly refuses a non-LP
+with a clear =ValueError=; =socp= solved a convex QCQP
+(=min -x1-x2 s.t. ||x||<=1=) to -1.4142135616 vs the analytic -√2.
+
+** 5. warm_start interaction — consistent
+=warm_start= + =solver_selection="qp-active-set"= warns
+("warm_start= runs on the NLP path; … is ignored") **and the engine log confirms
+the IPM actually ran** — the warning is truthful, not cosmetic. Validation
+happens *before* the warm-start downgrade, so an invalid selector combined with
+=warm_start= still raises rather than being masked by the forced-=nlp= path.
+
+** 6. kwarg vs =options=…= dict
+- an invalid selector inside =options={...}= is rejected identically;
+- the documented "explicit kwarg wins over the legacy dict" precedence was
+  verified in *both* directions with the engine oracle
+  (=options={"solver_selection":"qp-active-set"}, solver_selection="nlp"= → IPM;
+  the reverse → SQP). The loser is silently discarded, but the winner is the
+  documented one.
+
+** 7. qp-active-set on a non-QP — documented, works
+=solver_selection="qp-active-set"= on Rosenbrock from (-1.2, 1): the SQP engine
+runs (log oracle) and converges to x=(0.9999957, 0.99999139), f=1.85e-11,
+status 0. The library path deliberately does *not* class-validate the selector
+(=upstream_options.rs= says so explicitly); the CLI *does*
+(=pounce … solver_selection=qp-active-set= on an NLP =.nl= prints
+"problem class NLP does not match forced solver qp-active-set"). This is an
+intentional, documented surface difference and it produces a correct answer.
+
+* Minor CLI-vs-library differences noted (not filed)
+1. **Whitespace tolerance.** The CLI accepts ="nlp "= / =" nlp"= (its
+   =key=value= handling trims) and solves; =pounce.minimize= rejects them.
+   Library is *stricter* — direction-safe, a loud error rather than a silent
+   engine swap.
+2. **=socp= on a plain convex QP.** The CLI documents =socp= as valid for a
+   convex LP/QP/QCQP; the library router rejects an (unconstrained) convex QP
+   with "not detected as a convex QCQP". Pre-existing, orthogonal to #213, and
+   again a loud =ValueError=.
+3. **Non-Mapping =options===.** =minimize(f, x0, options=[("solver_selection",
+   "qp-active-set")])= silently discards the entire =options= payload
+   (=_minimize.py:969-971= pops it and only merges it when it is a =Mapping=),
+   so the IPM runs with no error and no warning. This is a pre-existing hole in
+   the =options== plumbing that pre-dates and is independent of #213 (it drops
+   *all* options equally, not just the selector), and scipy likewise requires a
+   dict. Noted, not filed.
+
+* Verdict
+=PASS= — the #213 fix holds under every angle attempted. **No way was found to
+obtain a silently-wrong engine through =solver_selection=**: every value that
+does not name a real selector raises, every value that names one dispatches to
+the engine the log oracle confirms, and the two paths that override the
+selector (=warm_start=, the kwarg-over-dict precedence) both do what they
+document and were verified against the engine log rather than the docstring.
+The only silent-drop path found (#3 above) is in the generic =options==
+plumbing, not in selector handling.

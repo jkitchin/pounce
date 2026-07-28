@@ -1,0 +1,76 @@
+#+TITLE: Adversary Iteration 2 — diff-family gradient correctness in hard regimes
+#+DATE: 2026-07-23
+
+Direction: the logged diff tests cover forward + first-order gradients in easy
+(single strongly-active) regions. This iteration stresses second-order (double
+backward), multi-active vertices, cone boundaries, batched/vmapped
+differentiation, and near-LICQ degeneracy. Oracle stack per test: central
+finite-difference re-solve (cvxpy CLARABEL, float64) + JAX<->Torch parity +
+torch.autograd.gradcheck/gradgradcheck where applicable.
+
+* D1 — second-order (gradcheck + gradgradcheck) through a QP layer  [PASS]
+:PROPERTIES:
+:FAMILY: diff
+:REPORT: [[file:runs/2026-07-23_diff_gradgrad_qp.py]]
+:END:
+Double backward w.r.t. P (routed through the symmetric parametrization P=S+S^T,
+the established convention from 2026-06-15_diff_qp_wrt_P.org), c, and h. All
+three pass gradcheck AND gradgradcheck (float64, atol 1e-4). JAX<->Torch dL/dP
+parity 0.0. Confirms the Hessian of the solution map is correct, not just the
+Jacobian.
+NOTE (methodology): feeding P entrywise to gradcheck (without the S+S^T param)
+"fails" — that is the KNOWN symmetric-gradient convention, already verified in
+the 2026-06-15 run (off-diagonals differ by a factor of 2 under a naive
+entrywise FD). NOT a bug; the initial FAIL was a formulation error on my part.
+
+* D2 — dx*/dh at a two-active vertex  [PASS]
+:PROPERTIES:
+:FAMILY: diff
+:REPORT: [[file:runs/2026-07-23_diff_multiactive_dh.py]]
+:END:
+Both inequalities active (slack ~1e-9). Analytic dL/dh vs central FD err
+1.2e-9; JAX<->Torch parity 0.0.
+
+* D3 — SOCP layer dx*/dc on the cone boundary  [PASS]
+:PROPERTIES:
+:FAMILY: diff
+:REPORT: [[file:runs/2026-07-23_diff_socp_dc_boundary.py]]
+:END:
+Solution exactly on the SOC boundary (||x[1:]||=x0=1). Analytic dL/dc vs FD err
+6.8e-9; JAX<->Torch parity 0.0.
+MINOR API NOTE: jax pj.solve_socp rejects P=None (does jnp.asarray(P)); torch
+pt.solve_socp accepts P=None. Backend API asymmetry — pass an explicit zero P
+to the jax path. Not a correctness issue; not filed.
+
+* D4 — vmap/batched differentiation vs per-item  [PASS]
+:PROPERTIES:
+:FAMILY: diff
+:REPORT: [[file:runs/2026-07-23_diff_vmap_batch_grad.py]]
+:END:
+jax.vmap(jax.grad(single)) equals stacked per-item jax.grad to 0.0 (bit-exact);
+per-item grad vs FD err 6.5e-8. Batching introduces no coupling / no dropped term.
+
+* D5 — near-degenerate (LICQ-borderline) active constraints  [PASS, expected degradation]
+:PROPERTIES:
+:FAMILY: diff
+:REPORT: [[file:runs/2026-07-23_diff_near_degenerate_licq.py]]
+:END:
+Two nearly-parallel active normals [1,0],[1,eps]; sweep eps. Analytic dL/dh
+tracks FD as long as the active KKT matrix is reasonably conditioned:
+| eps  | cond(KKT) | grad err vs FD |
+| 1e-1 | 1.1e3     | 3.0e-8         |
+| 1e-3 | 1.1e7     | 4.6e-7         |
+| 1e-5 | 1.1e11    | 4.0e-4         |
+| 1e-7 | 1.1e15    | 2.3e-1         |
+Error scales ~cond*eps_machine — textbook conditioning-limited accuracy. At
+eps=1e-7 the active KKT system is numerically singular (LICQ fails), so dx*/dh
+is genuinely ill-defined and BOTH the analytic gradient and the cvxpy FD are
+unreliable. Graceful degradation, not a gradient bug. Consistent with the
+already-noted sensitivity-family degenerate behavior (not filed).
+
+* Verdict
+No findings. The differentiable-layer stack (QP + SOCP, jax + torch) is correct
+across first-order, second-order, multi-active, cone-boundary, and batched
+regimes. The only accuracy loss is at genuine LICQ breakdown, which is expected
+and shared by the finite-difference oracle. Two non-correctness notes recorded
+(jax P=None ergonomics; the P-gradient symmetric convention).

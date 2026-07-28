@@ -1,0 +1,64 @@
+#+TITLE: SOS Adversary Test — Six-Hump Camel Function
+#+DATE: 2026-06-09
+#+AUTHOR: pounce adversary agent (sos family)
+
+* Problem properties
+- NAME: Six-hump camel function (unconstrained polynomial global minimization)
+- SOURCE: Molga & Smutnicki, "Test functions for optimization needs" (2005);
+  Dixon-Szegő standard global-optimization test set.
+- OBJECTIVE:
+  f(x,y) = (4 − 2.1 x² + x⁴/3) x² + x y + (−4 + 4 y²) y²
+         = 4 x² − 2.1 x⁴ + (1/3) x⁶ + x y − 4 y² + 4 y⁴
+- DEGREE: 6 (leading term x⁶/3)
+- KNOWN_OPTIMAL: f* = −1.0316284534898774, attained at the two symmetric points
+  (x,y) = (+0.0898420131, −0.7126564030) and (−0.0898420131, +0.7126564030).
+- RELAXATION ORDER tested: 0, 1, 2 (order = extra Lasserre levels above the
+  degree-induced minimum of 3).
+- Coercive (x⁶, y⁴ leading) ⇒ bounded below ⇒ unconstrained SOS valid.
+
+* Formulation (pounce input)
+Objective as exponent-tuple → coefficient dict over (x, y):
+#+begin_src python
+OBJ = {
+    (2, 0): 4.0,
+    (4, 0): -2.1,
+    (6, 0): 1.0/3.0,
+    (1, 1): 1.0,
+    (0, 2): -4.0,
+    (0, 4): 4.0,
+}
+r = pounce.sos_minimize(OBJ, n_vars=2, order=order)
+#+end_src
+
+* Results
+| order | lower_bound  | is_exact | status  | num_min | time (s) |
+|-------+--------------+----------+---------+---------+----------|
+|     0 | −1.03162845  | True     | optimal |       2 |   0.196  |
+|     1 | −1.03162845  | True     | optimal |       2 |   0.199  |
+|     2 | −1.03162845  | True     | optimal |       2 |   0.198  |
+
+- Tightest lower bound: −1.03162845 (order 0 already exact).
+- Gap f* − lower_bound = −8.86e−10 (bound equals f* to float precision; the
+  tiny negative is rounding, the bound does NOT exceed f*).
+- Recovered minimizers (is_exact=True): [+0.089826, −0.71264] and
+  [−0.089826, +0.71264]; both evaluate to f = −1.03162845.
+
+* Cross-check (oracle / refutation)
+- Known optimum: f* = −1.0316284534898774 (verified: both stated argmins
+  reproduce f* to < 1e−6).
+- Dense grid [−3,3]×[−2,2], 1201×801: min = −1.03158360 at (0.0900,−0.7150)
+  (grid coarseness only; consistent with f*).
+- scipy Nelder-Mead multistart (400 starts, seed 0): best = −1.0316284535 at
+  (0.089842, −0.712656) — matches f* to 1e−10.
+- Refutation min (best point found over all methods) = −1.0316284535.
+- No point beats the SOS lower bound: lower_bound (−1.03162845) ≤ refutation
+  min (−1.0316284535) within tolerance. Bound is VALID.
+
+* Verdict
+- VERDICT: PASS
+- CLASS: PASS
+- REASONING: The SOS/Lasserre relaxation is exact at the minimum order
+  (order 0), returns a certified lower bound equal to the known global minimum
+  −1.0316284535 to ~1e−9, flags is_exact=True, and recovers both true global
+  minimizers whose objective values match f*. Dense grid and 400-start scipy
+  refutation find no point below the bound. No invalid (over-)bound. Correct.

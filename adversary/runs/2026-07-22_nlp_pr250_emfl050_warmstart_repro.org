@@ -1,0 +1,114 @@
+#+TITLE: Adversary Run: the emfl050 warm-start stall behind PR #250 does not reproduce
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   nlp
+:CLASS:    termination-guard justification / cost control
+:SOURCE:   pounce issue #246 and PR #250 (commit ba29b53); MINLPLib emfl050_3_3, emfl050_5_5
+:KNOWN_OPTIMAL: emfl050_3_3 = 10.401628831310953; emfl050_5_5 = 18.91165738385523 (both reached by every build tested)
+:N_VARIABLES:  1611 / 5675 (all with ub = +inf)
+:N_CONSTRAINTS: 1593 / 5625
+:END:
+
+PR #250 added the =dual_diverging_streak= guard, which routes a solve into
+restoration after 15 consecutive iterations of growing dual infeasibility. It
+was justified by two claims:
+
+- Issue #246: =emfl050_3_3=, warm-started via =solve_nlp(evaluator, x0, ...)=
+  with =x0 = 10= on unbounded-above variables at a 2 s budget, ran **11.7 s with
+  =status=TIME_LIMIT= and =iterations=0=**, concluded to be "inside POUNCE's own
+  initialization/restoration linear algebra, not the caller."
+- PR #250: on =emfl050_5_5= the guard "converts a permanent stall (diverges
+  forever) into =Solve_Succeeded= in ~4 s, and at a 2 s budget the overshoot
+  drops from 2.6x to 1.0x."
+
+Neither is pinned by any test in the repo — only option-wiring tests exist — so
+neither could be checked before now.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (neither claim reproduces)
+:END:
+
+** The reported "stall" is caller-side JAX compilation
+
+The first solve on a freshly built =NLPEvaluator= pays JAX tracing and
+compilation for every callback. That cost lands inside the callbacks POUNCE
+invokes, so POUNCE correctly reports =TIME_LIMIT= with =iterations=0= — the exact
+signature issue #246 attributed to POUNCE's own linear algebra.
+
+Cost belonging to compilation follows *call order*. Cost belonging to the guard
+follows the *guard*. Running the identical pair in both orders on cold
+evaluators separates them:
+
+| Model        | order        | 1st call            | 2nd call          |
+|--------------+--------------+---------------------+-------------------|
+| emfl050_3_3  | guard off 1st | 12.72 s, TIME_LIMIT, iters=0 | 0.20 s, OPTIMAL, 91 |
+| emfl050_3_3  | guard on 1st  | 13.90 s, TIME_LIMIT, iters=0 | 0.19 s, OPTIMAL, 91 |
+| emfl050_5_5  | guard off 1st | 55.72 s, TIME_LIMIT, iters=0 | 1.50 s, OPTIMAL, 162 |
+| emfl050_5_5  | guard on 1st  | 58.08 s, TIME_LIMIT, iters=0 | 1.57 s, OPTIMAL, 162 |
+
+The slow, zero-iteration run is **always the first call**, in both orders and
+under both guard settings. 12.7–13.9 s on =emfl050_3_3= brackets the 11.7 s
+originally reported.
+
+** With the evaluator warm, there is no stall on any build
+
+| Build                         | guard   | emfl050_3_3        | emfl050_5_5         |
+|-------------------------------+---------+--------------------+---------------------|
+| HEAD (846ca7a)                | on (15) | 0.20 s, OPTIMAL, 91 | 1.52 s, OPTIMAL, 162 |
+| HEAD (846ca7a)                | off (0) | 0.20 s, OPTIMAL, 91 | 1.51 s, OPTIMAL, 162 |
+| **pre-#250 (0706981)**        | **absent** | **0.19 s, OPTIMAL, 91** | **1.55 s, OPTIMAL, 162** |
+
+The pre-#250 row is the decisive one: on the build that predates the guard
+entirely, where the option does not exist and setting it is a hard
+=OPTION_INVALID=, both instances solve to the same optimum in the same time. So
+this is not "something since made the guard redundant" — the stall it was built
+for does not reproduce on the build it was built against.
+
+Worst overshoot ratio observed on a warm evaluator, any build, any setting:
+**0.78x** — i.e. always inside budget.
+
+* Cross-check / Verification
+
+- Both emfl050 instances reach the same objective to 15 significant figures on
+  all three configurations, so the comparison is not confounded by different
+  basins.
+- The pre-#250 extension was built from a clean worktree at =0706981= via
+  =maturin build --release=, its =_pounce.abi3.so= swapped in, and HEAD's
+  restored and re-verified afterwards.
+- The order-swap experiment uses a *fresh* evaluator per order, since
+  compilation is cached on the evaluator.
+
+* Verdict
+
+=REFERENCE_ERROR= — the evidence behind the guard, not the guard's code, is what
+fails. Issue #246's measurement attributed caller-side JAX compilation to
+POUNCE's initialization phase, and PR #250's "diverges forever" claim for
+=emfl050_5_5= does not reproduce on the build that predates the guard.
+
+This is **not** an argument to delete the guard on its own. Whatever its origin,
+it currently changes the outcome on 3 of 500 corpus models — landing =deb7= and
+=deb9= on Ipopt's optimum (104.95 -> 97.56) and improving =deb8= (4005.89 ->
+1350.42) — and, with the pounce#250 follow-up in PR #259, harms none. But that
+benefit is basin luck on nonconvex problems, not the cost-control property the
+guard is named and documented for, and the doc comments should say so.
+
+Caveat: =solve_nlp= exposes no multiplier warm start, so =x0= is the only
+warm-start channel through the API issue #246 names, and =x0 = 10= on
+unbounded-above variables is what it specifies. A different starting point or a
+different discopt version could still trigger a genuine stall; what is
+established is that the documented repro does not.
+
+* Reproduce
+
+#+begin_src sh
+cd /Users/jkitchin/projects/pounce
+python3 adversary/runs/2026-07-22_nlp_pr250_jit_vs_stall.py emfl050_3_3
+python3 adversary/runs/2026-07-22_nlp_pr250_jit_vs_stall.py emfl050_5_5
+python3 adversary/runs/2026-07-22_nlp_pr250_emfl050_warmstart_repro.py
+# against a pre-#250 build, with the option absent:
+PR250_NO_GUARD_OPTION=1 POUNCE_SKIP_EXT_STALE_CHECK=1 \
+  python3 adversary/runs/2026-07-22_nlp_pr250_emfl050_warmstart_repro.py
+#+end_src

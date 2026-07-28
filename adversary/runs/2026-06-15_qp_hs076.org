@@ -1,0 +1,52 @@
+#+TITLE: Adversary QP cross-check: HS076
+#+DATE: 2026-06-15
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: inequality + bound constrained convex QP (interior-point)
+:SOURCE: Hock & Schittkowski (1981), "Test Examples for Nonlinear Programming Codes", LNEMS 187, Springer, Problem 76 (p. 95)
+:KNOWN_OPTIMAL: -4.681818181818...
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 3 general inequalities + 4 lower bounds (x>=0)
+:END:
+
+* Problem
+min f(x) = x1^2 + 0.5 x2^2 + x3^2 + 0.5 x4^2 - x1 x3 + x3 x4 - x1 - 3 x2 + x3 - x4
+s.t.
+  x1 + 2 x2 +   x3 +   x4 <= 5
+  3 x1 +   x2 + 2 x3 -   x4 <= 4
+        x2 + 4 x3          >= 1.5   (entered as -x2 -4x3 <= -1.5)
+  x >= 0
+
+Known optimum: x* = (0.2727273, 2.090909, 0.0, 0.5454545), f* = -4.681818...
+
+Mapping to 0.5 x'Px + c'x:
+  P = [[ 2, 0,-1, 0],
+       [ 0, 1, 0, 0],
+       [-1, 0, 2, 1],
+       [ 0, 0, 1, 1]]   (symmetric, PSD; min eig ~ 0.38)
+  c = (-1, -3, 1, -1)
+No additive constant (CONST = 0). Verified P symmetric and PSD before solving.
+
+* Results
+| solver           | objective         | status  | time (s) | iters |
+|------------------+-------------------+---------+----------+-------|
+| pounce solve_qp  | -4.6818181816e+00 | optimal |  0.0009  |     9 |
+| cvxpy CLARABEL   | -4.6818181739e+00 | optimal |  0.0041  |     - |
+| cvxpy OSQP       | -4.6818181818e+00 | optimal |     -    |     - |
+| known (HS book)  | -4.6818181818e+00 | -       |     -    |     - |
+
+x_pounce = (0.27272727, 2.09090909, 3.5e-11, 0.54545455)
+
+* Cross-check
+- rel obj err vs known optimum:   3.74e-11
+- x* inf-norm err vs known:       9.07e-08
+- rel obj err vs oracle CLARABEL: 1.66e-09
+- two-oracle agreement CLARABEL vs OSQP: < 1e-9
+
+* Verdict
+VERDICT: PASS
+
+pounce reproduces the HS076 known optimum and matches both independent
+oracle solvers (CLARABEL, OSQP) to within solver tolerance. The active
+constraints at the solution (x3 = 0 bound and the x2+4x3>=1.5 / first <=5
+rows) are resolved correctly. No discrepancy.

@@ -1,0 +1,70 @@
+#+TITLE: Adversary report — Hock-Schittkowski 15 (nlp)
+#+DATE: [2026-06-15]
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: inequality + upper-bounded variable, nonconvex (Rosenbrock-like) objective
+:SOURCE: Hock & Schittkowski, "Test Examples for Nonlinear Programming Codes", Lecture Notes in Economics and Mathematical Systems 187, Springer (1981), problem 15, p. 38.
+:KNOWN_OPTIMAL: 306.5 at x* = (0.5, 2.0)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 2 general inequalities + 1 variable upper bound
+:END:
+
+Minimize
+:   f(x) = 100 (x2 - x1^2)^2 + (1 - x1)^2
+subject to
+:   x1 * x2 - 1 >= 0     (active at optimum: x1*x2 = 1)
+:   x1 + x2^2  >= 0      (inactive at optimum)
+:   x1 <= 0.5            (active at optimum)
+
+Start point x0 = (-2, 1).  Nonconvex objective; the published optimum is a
+constrained vertex where the first inequality and the upper bound x1 = 0.5 are
+both active (KKT multiplier on c1 ~ -700, on x1<=0.5 ~ 1751).
+
+* Results
+| solver                          |     objective | x1, x2            |  time (s) | status              |
+|---------------------------------+---------------+-------------------+-----------+---------------------|
+| pounce.minimize (nlp, anlt jac) | 306.499975611 | 0.50000001, 1.999.. |    0.0062 | 0 Solve_Succeeded   |
+| Ipopt 3.14.19 (Pyomo, same model) | 306.499975611 | 0.50000001, 1.999.. |    0.0175 | optimal             |
+| pounce CLI on .nl (exact deriv) | 306.499975610 | (from .sol)       |  ~0.01    | returncode 0        |
+
+Reference: f* = 306.5, x* = (0.5, 2.0).
+
+Error summary:
+| quantity                          |   value |
+|-----------------------------------+---------|
+| oracle rel-err vs known           | 7.96e-08 |
+| pounce rel-err vs known           | 7.96e-08 |
+| pounce rel-err vs Ipopt           | 2.52e-14 |
+| pounce x inf-err vs known         | 5.97e-08 |
+| pounce x inf-err vs Ipopt         | 1.75e-14 |
+
+The ~8e-8 residual vs the published value is shared by BOTH pounce and Ipopt
+(they agree to 2.5e-14), so it is the IPM convergence tolerance approaching the
+exact vertex (mu ~ 2.5e-9 at termination), not a discrepancy between solvers.
+KKT diagnostics from pounce: final_dual_inf 3.4e-13, final_constr_viol 5.7e-18,
+final_compl 2.5e-9, 13 iterations.
+
+* Cross-check
+- *Ipopt (Pyomo, identical ConcreteModel):* obj 306.499975611, agrees with
+  pounce to 2.5e-14 in objective and 1.7e-14 in x.
+- *pounce CLI on emitted .nl (exact derivatives, AMPL path):* returncode 0,
+  objective 306.49997561, x*=(0.5,2.0).
+- *pounce verify <nl> <sol> (solver-independent oracle):* *exit code 0*
+  (VERIFIED — feasible). max constraint violation 9.9e-9 at c1; max bound
+  violation 9.97e-9 at x1<=0.5; KKT stationarity residual 3.07e-12;
+  complementarity residual 6.94e-6 (consistent with mu at termination).
+- *pounce via SolverFactory('pounce'):* unavailable in this venv — the Pyomo
+  plugin looks for a bundled CLI binary at python/pounce/bin/pounce that a
+  =maturin develop= install does not produce. This is an install artifact of
+  the dev venv, NOT a pounce defect; the .nl path above exercises the same
+  CLI binary directly and succeeds.
+
+* Verdict
+*PASS.*  pounce reaches the published HS15 optimum (rel-err 7.96e-8 vs the
+exact f*=306.5, the same residual Ipopt shows), matches Ipopt to 2.5e-14,
+reports status 0 Solve_Succeeded with success=True, and the independent
+=pounce verify= oracle returns exit 0 (feasible, KKT-stationary). Correctly
+identifies the active set {c1, x1<=0.5} with sane multipliers. Faster than
+Ipopt on this instance (0.0062 s vs 0.0175 s).

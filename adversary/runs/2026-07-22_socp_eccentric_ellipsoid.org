@@ -1,0 +1,140 @@
+#+TITLE: Adversary Run: Linear Objective over an Extremely Eccentric Ellipsoid (ill-conditioned SOCP)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: ill-conditioned / bad scaling -- axis ratio 1e4..1e10, active cone at a near-zero-curvature point
+:SOURCE: Boyd & Vandenberghe, /Convex Optimization/ (CUP 2004), Sec. 4.4.2 and Ex. 4.21 -- minimizing a linear function over an ellipsoid; support function of an ellipsoid
+:KNOWN_OPTIMAL: -||D^{-T}c||_2, exact closed form; -1.0128011052e+02 / -1.0019964990e+03 / -1.0003156280e+04 / -1.0000500038e+05 for axis ratio 1e4/1e6/1e8/1e10
+:N_VARIABLES: 6
+:N_CONSTRAINTS: one SOC of dimension 7, no equalities
+:END:
+
+\begin{align*}
+\text{minimize} \quad & c^\top x \\
+\text{subject to} \quad & \| D x \|_2 \le 1
+\end{align*}
+
+with \(D = \operatorname{diag}(d)\,Q\), \(Q\) a fixed orthogonal matrix
+(sign-normalized QR of a seeded random matrix), and
+\(d = \operatorname{logspace}(k/2, -k/2, 6)\), so the ellipsoid semi-axes are
+\(1/d\) and \(\operatorname{cond}(D) = 10^{k}\). The sweep is \(k = 4, 6, 8, 10\).
+
+** Why this is the ill-conditioning stress case
+\(c = Q^\top \mathbf 1\) is \(O(1)\), while \(D^{-T}c = 1/d\) spans \(10^{k}\).
+So the optimal value and \(\|x^\star\|\) are both \(\sim 10^{k/2}\) whereas the
+data \(c\) is \(O(1)\) and the cone bound is \(1\): objective row, primal iterate
+and cone slacks sit on wildly different scales at once. The minimizer is the
+contact point at the tip of the *longest* semi-axis, where the cone boundary has
+normal curvature \(\sim 10^{-k}\) of the ambient scale -- a nearly flat boundary
+that an IPM can mistake for a recession direction.
+
+** Closed-form optimum (no solver involved)
+By Cauchy-Schwarz, \(c^\top x = (D^{-T}c)^\top (Dx) \ge -\|D^{-T}c\|\,\|Dx\| \ge -\|D^{-T}c\|\),
+with equality iff \(Dx = -D^{-T}c/\|D^{-T}c\|\). Hence
+\[
+\text{OPT} = -\|D^{-T}c\|_2, \qquad
+x^\star = -D^{-1}D^{-T}c\,/\,\|D^{-T}c\|_2 ,
+\]
+and the SOC is *tight* at \(x^\star\).
+
+*** Numerical stability of the reference itself
+This matters at \(\operatorname{cond}(D)=10^{10}\) and cost one iteration of this
+run. The natural construction -- pick \(w\), set \(c = D^\top w\), recover
+\(w = D^{-T}c\) -- has round-trip error \(\varepsilon\cdot\operatorname{cond}(D)\),
+which is \(\approx 10^{-8}\) at \(k=8\); an assertion in the first draft caught
+exactly this, so that route is *not* a trustworthy reference. Instead
+\(c = Q^\top\mathbf 1\) is chosen so that
+\(D^{-T}c = \operatorname{diag}(1/d)\,Qc = \operatorname{diag}(1/d)\mathbf 1 = 1/d\),
+where \(Qc = \mathbf 1\) holds to \(\varepsilon\) *absolute* and every entry of
+\(\mathbf 1\) is \(O(1)\) -- so each \(w_i = 1/d_i\) carries only \(\varepsilon\)
+*relative* error. The script asserts this (\(<10^{-12}\)) before any solver runs.
+The remaining conditioning-aware tolerance is used only for residuals of an
+explicitly formed \(D D^{-1}\) product, never for the reference values.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Axis ratio | Solver         | Status                | Objective          | Rel err vs closed form | x rel err | Wall time |
+|------------+----------------+-----------------------+--------------------+------------------------+-----------+-----------|
+|       1e04 | pounce         | optimal               | -1.0128011051e+02  |               9.14e-11 |  9.14e-11 | 0.0013 s  |
+|       1e04 | cvxpy/CLARABEL | optimal               | -1.0128010949e+02  |               1.02e-08 |  1.02e-08 | 0.0026 s  |
+|       1e04 | cvxpy/ECOS     | optimal               | -1.0128011032e+02  |               1.93e-09 |  1.03e-05 | 0.0015 s  |
+|       1e04 | cvxpy/SCS      | optimal               | -1.0128011052e+02  |               1.61e-12 | --        | 0.0016 s  |
+|       1e06 | pounce         | optimal               | -1.0019964990e+03  |               2.00e-12 |  1.99e-12 | 0.0022 s  |
+|       1e06 | cvxpy/CLARABEL | optimal               | -1.0019964976e+03  |               1.43e-09 |  1.43e-09 | 0.0016 s  |
+|       1e06 | cvxpy/ECOS     | optimal               | -1.0019964987e+03  |               2.52e-10 |  2.08e-08 | 0.0012 s  |
+|       1e06 | cvxpy/SCS      | optimal               | -1.0019964990e+03  |               7.94e-16 | --        | 0.0086 s  |
+|       1e08 | pounce         | optimal               | -1.0003156280e+04  |               3.21e-13 |  7.72e-12 | 0.0032 s  |
+|       1e08 | cvxpy/CLARABEL | optimal               | -1.0003156279e+04  |               1.26e-10 |  8.33e-09 | 0.0014 s  |
+|       1e08 | cvxpy/ECOS     | *optimal_inaccurate*  | -1.3040313836e+04  |             *3.04e-01* |  3.26e-01 | 0.0017 s  |
+|       1e08 | cvxpy/SCS      | optimal               | -1.0003156280e+04  |               3.75e-13 | --        | 0.0091 s  |
+|       1e10 | pounce         | optimal               | -1.0000500038e+05  |               1.46e-16 |  2.83e-14 | 0.0084 s  |
+|       1e10 | cvxpy/CLARABEL | optimal               | -1.0000500035e+05  |               2.76e-10 |  4.99e-07 | 0.0011 s  |
+|       1e10 | cvxpy/ECOS     | *unbounded*           | -inf               |                    inf | inf       | 0.0010 s  |
+|       1e10 | cvxpy/SCS      | *unbounded_inaccurate*| -inf               |                    inf | --        | 0.0328 s  |
+
+Known optimal: exact closed form per row (see PROPERTIES).
+
+pounce returns =optimal= at every conditioning level and matches the analytic
+optimum to between 9e-11 and 1.5e-16 relative, with the minimizer matching to
+2.8e-14 componentwise at axis ratio 1e10. It lands exactly on the cone boundary
+throughout: \(\|Dx\| = 0.999999999909,\ 0.999999999998,\ 1.000000000000,\
+1.000000000000\) for \(k=4,6,8,10\) -- i.e. the active constraint is satisfied to
+1e-10 or better and never violated.
+
+*Honest caveat on the error trend:* the objective relative errors improve with
+\(k\) partly as an artifact -- \(\mathrm{rel}(u,v)=|u-v|/\max(1,|v|)\) and
+\(|{\rm OPT}|\) grows like \(10^{k/2}\), so the denominator inflates. The
+scale-free check is the componentwise minimizer error, which is also excellent
+(9.1e-11 -> 2.8e-14) and confirms the conclusion independently of that
+normalization.
+
+*Degradation of the oracles, not of pounce:* ECOS loses all but half a digit at
+axis ratio 1e8 (=optimal_inaccurate=, 30% off) and at 1e10 declares the problem
+=unbounded=; SCS at 1e10 returns =unbounded_inaccurate=. Both are false -- the
+feasible set is a bounded ellipsoid, so the problem is provably bounded, and the
+closed form plus CLARABEL both give a finite optimum. This is the failure mode
+the problem was constructed to provoke (a nearly flat cone boundary read as a
+recession direction), and pounce does *not* exhibit it.
+
+*Timing:* pounce grows 1.3 ms -> 8.4 ms across the sweep while CLARABEL stays
+~1.3 ms, so at axis ratio 1e10 pounce is ~7x CLARABEL's wall time. The absolute
+gap is ~7 ms, far below the 0.1 s threshold in the workflow, so this is *not* a
+PERFORMANCE_REGRESSION -- but the iteration-count growth with conditioning is
+worth noting as an observation.
+
+* Cross-check / Verification
+- *Cone encoding re-derived* from the documented convention \(s = h - Gx \in K\):
+  for =("soc", 7)= the block is \((s_0, s_{1:6})\) with \(s_0 \ge \|s_{1:6}\|_2\).
+  Set \(h_0 = 1,\ G_{0,:} = 0\) so \(s_0 = 1\); and \(G_{1:,:} = -D,\ h_{1:} = 0\)
+  so \(s_{1:6} = Dx\), giving \(\|Dx\| \le 1\). No equality constraints
+  (=A = b = None=). Verified independently of any solver by checking that the
+  returned \(x\) satisfies \(\|Dx\| \le 1\) directly.
+- *Closed form self-checked* by two assertions per level before any solver runs:
+  \(\|Dx^\star\| = 1\) (SOC tight) and \(c^\top x^\star = \) KNOWN_OPTIMAL, plus
+  the stability assertion \(D^{-T}c = 1/d\) to 1e-12.
+- *Reference-agreement rule:* the run requires two independent references to
+  agree (<1e-6) before trusting any of them, counting the solver-free closed form
+  as one. Agreeing pairs found: at \(k=4,6,8\) all of
+  {closed form, CLARABEL, ECOS, SCS} except ECOS at \(k=8\); at \(k=10\) the
+  surviving pair is {closed form, CLARABEL}, which still pins the answer to
+  2.8e-10. pounce agrees with the pinned value at every level.
+- Three independent cvxpy solvers (CLARABEL, ECOS, SCS at =eps=1e-10=) on a DCP
+  model built directly from the mathematical statement
+  (=cp.norm(D @ x, 2) <= 1=), i.e. not sharing pounce's cone encoding.
+
+* Verdict
+PASS -- on the canonical B&V "linear objective over an ellipsoid" SOCP made
+deliberately ill-conditioned (semi-axis ratio up to 1e10, active constraint at a
+near-zero-curvature boundary point, objective and iterate scales separated by
+five orders of magnitude), pounce reproduces the exact closed-form optimum to
+between 9e-11 and 1.5e-16 relative and the analytic minimizer to 2.8e-14, while
+sitting exactly on the cone boundary. It is the *most* accurate of the four
+solvers tested at every level from axis ratio 1e6 up. The notable result is
+comparative robustness: ECOS degrades to 30% error at 1e8 and falsely reports
+=unbounded= at 1e10, and SCS falsely reports =unbounded_inaccurate= at 1e10,
+where pounce and CLARABEL both remain exact. No finding; no issue filed.

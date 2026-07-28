@@ -1,0 +1,51 @@
+#+TITLE: Autoroute transparency — convex QCQP (linear obj over a ball) -> socp
+#+DATE: 2026-06-09
+
+* Problem properties
+- Family ............ autoroute (pounce.minimize, default solver_selection="auto")
+- Class ............. convex QCQP — linear objective + one convex quadratic
+  (Euclidean-ball) inequality constraint. The quadratic *constraint* is what
+  routes this to the conic (SOCP) path rather than the LP/QP path.
+- SOURCE ............ classic "minimize a linear functional over a Euclidean
+  ball": closed-form optimum, also re-verified with cvxpy.
+- Expected route .... socp (convex QCQP reformulated to SOCP, pounce.solve_socp).
+- KNOWN_OPTIMAL ..... -9.0  at x* = -R c/||c|| = (-1, 2, -2)
+  (R=3, c=[1,-2,2], ||c||=3, obj* = -R||c|| = -9).
+
+* Formulation
+  minimize    c.x,                 c = [1, -2, 2]
+  subject to  x0^2 + x1^2 + x2^2 <= R^2,   R = 3
+  no bounds, no other constraints.  x0 = (0,0,0) (strictly interior).
+  scipy-style ineq: g(x) = R^2 - x.x >= 0,  jac = -2x.
+
+* Results
+| quantity                    | value                            |
+|-----------------------------+----------------------------------|
+| oracle (cvxpy)              | -8.9999999836  x=(-1,2,-2)       |
+| auto objective              | -8.9999999928                    |
+| auto x                      | (-1, 2, -2)                      |
+| auto solver (info["solver"])| 'socp'   <- SPECIALIZED          |
+| forced-nlp objective        | -9.0000000025                    |
+| forced-nlp solver           | None (true NLP backend; mu set)  |
+| auto rel-err vs known       | 8.05e-10                         |
+| auto rel-err vs oracle      | 1.02e-09                         |
+| auto-vs-forced-nlp disagree | 1.08e-09 (obj), 2.16e-09 (x_inf) |
+| auto time                   | ~0.0024 s                        |
+| forced-nlp time             | ~0.0071 s                        |
+
+* Detection of which solver auto chose
+  pounce._minimize._solve_via_socp stamps info["solver"]="socp" on the routed
+  OptimizeResult; the NLP fallthrough has no "solver" key (has "mu").
+  res_auto.info["solver"] == 'socp' and res_nlp.info has no "solver" (has "mu")
+  — auto used the specialized conic solver, forced-nlp used the general NLP.
+
+* Cross-check
+  Three independent agreements at -9.0: closed-form -R||c||, cvxpy oracle,
+  auto (socp), forced-nlp (filter-IPM). Minimizer points anti-parallel to c
+  and sits on the ball boundary (||x*|| = 3), as required.
+
+* Verdict
+  VERDICT: PASS
+  Reasoning: auto correctly routed to the specialized socp solver; its answer
+  matches forced-nlp (1.1e-9), cvxpy (1e-9), and the closed form (8e-10).
+  Routing is transparent. No routing fallthrough; no bug.

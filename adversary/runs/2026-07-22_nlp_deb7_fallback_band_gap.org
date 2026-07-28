@@ -1,0 +1,182 @@
+#+TITLE: Adversary Run: best-acceptable fallback ranking outside the feasibility cap (deb7)
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: infeasibility / unboundedness / status-reporting correctness
+:SOURCE: MINLPLib =deb7= continuous relaxation, shipped as crates/pounce-cli/tests/fixtures/deb7.nl (813 vars, 897 cons)
+:KNOWN_OPTIMAL: no published global value; Ipopt 3.14.19 feasible local optimum 97.55994 at constr_viol 1.0e-8
+:N_VARIABLES: 813
+:N_CONSTRAINTS: 897
+:TARGET_COMMIT: ba6d5b3 "Rank best-acceptable fallback by feasibility, not objective alone (#267, #270)"
+:END:
+
+Target under test is not the model but the code path commit ba6d5b3 introduced:
+=record_best_acceptable= / =honour_best_acceptable_after_dual_guard= /
+=ranks_better_within_band= in =crates/pounce-algorithm/src/ipopt_alg.rs=.
+
+** The contract ba6d5b3 states
+
+From the commit message and PR #270:
+
+#+begin_quote
+Rank by (feasible_enough, objective): a point inside the feasibility band beats
+one outside it outright, objective decides only among points already inside the
+band, and the band is capped at the upstream-default acceptable_constr_viol_tol
+(1e-2) *so a user-widened value cannot admit gross infeasibility*.
+#+end_quote
+
+** The ranking as implemented
+
+#+begin_src rust
+let feasible = |v: Number| v.is_finite() && v <= band;   // band = min(acv_tol, 1e-2)
+let (a_ok, b_ok) = (feasible(a_viol), feasible(b_viol));
+if a_ok != b_ok { return a_ok; }
+a_obj < b_obj                       // <-- both outside the band lands here
+#+end_src
+
+The cap makes =feasible_enough= a *predicate*, not an ordering. It separates
+"inside 1e-2" from "outside 1e-2" and nothing else. Once **both** the incumbent
+and the recorded candidate sit outside the cap, =a_ok == b_ok == false=, the
+feasibility term drops out entirely and the rule reverts to =a_obj < b_obj= --
+bit-for-bit the pre-fix rule that #267 was filed against. The fix protects a
+feasible incumbent; it does not bound the trade among infeasible ones.
+
+The commit's own unit test asserts this branch as intended behaviour:
+
+#+begin_src rust
+// Both infeasible: still ranked by objective (no feasible point to
+// protect), so the fallback never *gains* infeasibility for free here.
+assert!(ranks_better_within_band(-2.0, 5.0, -1.0, 9.0, band));
+#+end_src
+
+The comment does not follow from the code. That case improves feasibility
+(5.0 < 9.0) only by coincidence of the chosen numbers; the branch it exercises
+ignores =a_viol= and =b_viol= completely, so it equally admits 9.0 replacing 5.0.
+The run below is that admitted case, live.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+Trap configuration: =dual_diverging_streak=2 acceptable_constr_viol_tol=1e0
+acceptable_tol=1e10 acceptable_dual_inf_tol=1e30 acceptable_compl_inf_tol=1e10
+max_iter=200=. Note =acceptable_constr_viol_tol=1e0= -- one decade looser than
+upstream's default, and a full decade *tighter* than the =1e1= issue #267 needed.
+
+| Run                                  | Status                    | num | Objective |  constr_viol | pounce verify |
+|--------------------------------------+---------------------------+-----+-----------+--------------+---------------|
+| Ipopt 3.14.19 (oracle)               | Solved To Acceptable      | --  |  97.55994 |      1.0e-08 | feasible      |
+| pounce guard OFF (control)           | SolvedToAcceptableLevel   | 100 | 101.86814 |    3.228e-04 | REJECTED      |
+| *pounce guard ON (fallback fires)*   | SolvedToAcceptableLevel   | 100 | *56.90979* | *9.951e-01* | *REJECTED*    |
+| pounce guard ON, band at cap 1e-2    | SolvedToAcceptableLevel   | 100 | 149.27242 |      1.0e-02 | REJECTED      |
+| pounce guard OFF, all defaults       | SolvedToAcceptableLevel   | 100 | 104.95479 |    3.608e-11 | *VERIFIED*    |
+| pounce guard ON, all defaults        | MaximumIterationsExceeded | 400 |  97.45583 |    2.805e-03 | REJECTED      |
+
+Wall time: entire six-solve suite + Ipopt reference in 1.9 s.
+
+* Cross-check / Verification
+
+** The fallback's own decision, from its debug log
+
+#+begin_example
+[POUNCE] dual-divergence guard fired at iter 14 (inf_du=1.33e8); routing to restoration (pounce#246).
+[POUNCE] dual-divergence diversion ended worse than a point already in hand
+         (obj 8.9012095479e1 viol 5.292e-1 -> obj 5.6909788057e1 viol 9.951e-1, iter 82);
+         restoring it (pounce#250, gh#267).
+#+end_example
+
+Per the format string, the first pair is =curr= and the second is =best=:
+
+- incumbent the solve was about to return : obj *89.012*, viol *5.292e-1*
+- recorded point the fallback restored    : obj *56.910*, viol *9.951e-1*
+
+Both violations exceed =FEASIBLE_ENOUGH_CAP = 1e-2=, so the ranking fell through
+to objective alone and the fallback **discarded the more feasible point**. It
+paid 1.88x the constraint violation to buy 36 % of objective. That is the trade
+ba6d5b3 exists to prevent, executed by the post-fix code, and the log line
+announcing it cites gh#267 as its authority.
+
+Attribution is exact and does not depend on basin luck: the incumbent at
+viol 5.292e-1 is what this same guard-on solve would have returned had the
+fallback declined. The fallback alone moved feasibility from 5.29e-1 to 9.95e-1.
+
+** Independent oracle
+
+Ipopt reaches a feasible local optimum at *97.560* (viol 1e-8). The returned
+point's objective *56.910* is *41.7 % below* it, and below every feasible point
+either solver found. It is not a better basin -- it is unattainable at any
+feasible point, and reachable only because a constraint is violated by 0.995.
+This is the #267 signature verbatim: "the reported objective is below the true
+optimum precisely because the point is infeasible."
+
+=pounce verify= (solver-independent) rejects the returned point, exit 20:
+
+#+begin_example
+max constraint violation: 9.951e-1  at c[420] (value 9.950430e-1, bounds [-1.000000e-4, -1.000000e-4])
+objective at x*: 5.6909788057e1
+VERDICT: REJECTED -- solution VIOLATES the canonical constraints
+#+end_example
+
+Reported status: =SolvedToAcceptableLevel=, =solve_result_num = 100= -- the
+success band, the same mis-signalling #267 reported.
+
+** Controls that isolate the cap
+
+- *Band at the cap* (=acceptable_constr_viol_tol=1e-2=): guard-on returns
+  viol exactly 1.0e-2, no trade. The hole opens precisely when band > cap.
+- *Guard off at the same loose tolerances*: viol 3.228e-4, three orders of
+  magnitude more feasible than guard-on. The loose band alone does not produce
+  the gross infeasibility -- consistent with #267's own control design.
+
+** The four assigned checks
+
+| # | Check                                                    | Result                                                                                   |
+|---+----------------------------------------------------------+------------------------------------------------------------------------------------------|
+| a | returned point is the feasibility-ranked one             | *PASS at/below the cap.* #270's autocorr_bern55-06 headline reproduces exactly: obj -2303.9999305 at viol 4.149e-5, Solved To Acceptable Level. *FAILS above the cap* (this run). |
+| b | returned point is best available by the documented criterion | *Mixed.* It is best under the criterion as *implemented*. It is not best under the criterion as *documented* -- "a user-widened value cannot admit gross infeasibility" is false. |
+| c | status honestly reflects non-convergence                  | *PASS at defaults* (MaximumIterationsExceeded / 400). *FAIL in the trap*: num=100 success band for a verify-rejected point at viol 0.995. |
+| d | no regression on problems that do converge                | *PASS.* At full default tolerances guard-off solves deb7 to viol 3.608e-11 and =pounce verify= accepts it (exit 0). The fallback does not fire and does not perturb converging solves. |
+
+** Scope, stated fairly
+
+- *Config-gated.* =dual_diverging_streak= is 0 (off) by default; the trap needs
+  it on plus a loosened acceptable band. Real-world default-path exposure: none.
+- *Milder trigger than #267.* This needs =acceptable_constr_viol_tol=1e0=, a
+  decade tighter than the =1e1= #267 required -- so ba6d5b3 raised the bar but
+  did not remove it.
+- *Guard-off control is also verify-rejected* here (viol 3.228e-4 at feas-tol
+  1e-6), so this is not a feasible-to-infeasible flip. The finding is the
+  *3000x feasibility degradation* the fallback chose, and the fact that it made
+  feasibility strictly worse than the incumbent it replaced.
+- *Broader sweep.* 13 CLI fixtures x streak {1,2,15} x acv {1e1,1e0,1e-1} x
+  max_iter {10,20,30,50,200} x {loose, default} tolerances produced 33
+  guard-attributable feasibility regressions. deb7 at streak=2 / acv=1e0 is the
+  largest and cleanest; a second at acv=1e1 / max_iter=20 shows the same trade
+  (viol 3.680e0 incumbent discarded for viol 4.933e0 at a lower objective).
+- *No default-path finding.* As with #267, at stock tolerances the sweep found
+  no feasibility regression attributable to the fallback.
+
+* Verdict
+
+*SOLVER_BUG* (incomplete fix of gh #267) -- ba6d5b3's =(feasible_enough,
+objective)= key is a two-class partition, not an ordering, so it constrains the
+fallback only while one of the two points is inside =FEASIBLE_ENOUGH_CAP=1e-2=.
+Above the cap the feasibility term vanishes and the ranking reverts exactly to
+the pre-fix =a_obj < b_obj=, which is the rule #267 was filed against. On deb7
+with =dual_diverging_streak=2= and a one-decade-widened acceptable band, the
+post-fix fallback discards an incumbent at viol 5.292e-1 in favour of a recorded
+point at viol 9.951e-1 to gain 36 % of objective, and returns it under
+=solve_result_num = 100=; =pounce verify= rejects it (exit 20) and its objective
+sits 41.7 % below Ipopt's feasible local optimum. The commit's specific claim
+that "a user-widened value cannot admit gross infeasibility" does not hold, and
+the unit test comment asserting the both-infeasible branch "never *gains*
+infeasibility for free" is contradicted by the branch's own code, which reads
+neither violation. Behaviour at and below the cap is correct and #270's headline
+autocorr_bern55-06 result reproduces; the no-regression property on converging
+solves holds. The natural repair is to make the key an ordering rather than a
+partition -- e.g. rank on =(min(viol, band), obj)= or require
+=a_viol <= b_viol= before letting objective decide among infeasible points --
+so the fallback can never return a point less feasible than the one it replaces.

@@ -1,0 +1,95 @@
+#+TITLE: Adversary Run: L2-regularized logistic regression (exp cone)
+#+DATE: <2026-07-19>
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: logistic regression / softplus epigraph via exponential cone, closed-form optimum
+:SOURCE: Boyd & Vandenberghe, /Convex Optimization/ (2004), sec. 7.1.1 (logistic regression MLE); MOSEK Modeling Cookbook v3.3 sec. 5.2.5 (log-sum-exp) and 5.3 (logistic regression) for the exp-cone epigraph. Instance constructed so the optimum is analytic.
+:KNOWN_OPTIMAL: 1.9353361793e+00
+:N_VARIABLES: 8 (w0, w1, ta, tb, z1..z4)
+:N_CONSTRAINTS: 4 x ("exp",3) + ("nonneg",2) = 14 rows, no equalities
+:END:
+
+Minimize over $w \in \mathbb{R}^2$
+
+\[
+ f(w) = \sum_i \log\!\left(1 + e^{-y_i w^\top x_i}\right) + \tfrac{\lambda}{2}\|w\|_2^2 .
+\]
+
+The data are $m=2$ copies of $a$ and $k=3$ copies of $b$ (all $y_i=+1$), with
+$a \perp b$ and both rotated by $R(30^\circ)$ so the solver sees a coupled 2-D
+problem. Orthogonality separates the objective in $u_a=a^\top w$, $u_b=b^\top w$:
+
+\[
+ g(u) = n_g \log(1+e^{-u}) + \tfrac{\lambda}{2}\frac{u^2}{\|a\|^2},
+ \qquad g'(u)=0 \iff \|a\|^2 = \frac{(1+e^{u^\star})\lambda u^\star}{n_g}.
+\]
+
+Choosing $\|a\|^2 = 2\log 3$, $\|b\|^2 = \tfrac{5}{3}\log 4$, $\lambda=1$ pins
+$u_a^\star=\log 3$, $u_b^\star=\log 4$ exactly, giving
+
+\[
+ f^\star = 2\log\tfrac43 + 3\log\tfrac54
+ + \tfrac12\left[\frac{(\log 3)^2}{2\log 3} + \frac{(\log 4)^2}{\tfrac53\log 4}\right]
+ = 1.9353361793\ldots
+\]
+
+Exp-cone epigraph used: $\log(1+e^{-u}) \le t \iff e^{-u-t} + e^{-t} \le 1$,
+i.e. $(-u-t,1,z_1)\in K_{\exp}$, $(-t,1,z_2)\in K_{\exp}$, $z_1+z_2\le 1$.
+The quadratic regularizer is carried in ~P~ (quadratic objective on the
+non-symmetric HSDE path).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                 | Status             | Objective       |  Rel Err | Iters | Wall Time |
+|------------------------+--------------------+-----------------+----------+-------+-----------|
+| pounce (solve_socp)    | optimal_inaccurate | 1.9353362040e+0 | 1.27e-08 |    11 |  0.0037 s |
+| cvxpy SCS              | optimal            | 1.9353361793e+0 | 1.6e-11  |     - |  0.0044 s |
+| cvxpy CLARABEL         | optimal            | 1.9353361794e+0 | 5.2e-11  |     - |  0.0029 s |
+
+Known optimal: 1.9353361793e+00; $w^\star = (0.18584744, 1.16040661)$.
+
+pounce's objective is correct to 1.27e-8 relative and its $w$ to 2.4e-5 in the
+inf-norm, matching both cvxpy solvers to the same order. Wall times are within
+noise of the oracles (0.0037 s vs 0.0029--0.0044 s), so no performance concern.
+
+* Cross-check / Verification
+- Two independent cvxpy solvers (SCS and CLARABEL) agree with each other to
+  1e-10 and with the analytic $f^\star$ to 1e-11; pounce agrees with both to
+  1.3e-8.
+- *Cone encoding verified read-only.* ~crates/pounce-convex/src/cones/exp.rs~
+  defines $K_{\exp}=\mathrm{cl}\{(x,y,z): y e^{x/y}\le z,\ y>0\}$ (Clarabel/MOSEK
+  orientation), and ~solve_socp~ requires the slack $s = h - Gx$ to lie in each
+  cone block. cvxpy's ~ExpCone(x,y,z)~ uses the *same* ordering, so no
+  permutation is involved here (unlike the power cone). The rows were built as
+  $s = (-u-t,\,1,\,z_1)$ etc. and checked against the doctest GP in
+  ~python/pounce/qp.py~ (min $x + 1/x = 2$), which reproduces 2.0 with status
+  ~optimal~.
+- Alternative formulation cross-check: moving the quadratic regularizer out of
+  ~P~ into an explicit rotated-SOC epigraph (mixing ~soc~ with ~exp~ on the
+  non-symmetric driver) gives 1.935336105, rel err 3.8e-8 vs known -- the same
+  answer, so the ~P~-on-nonsym path is not the source of the residual floor.
+- Tolerance sweep: ~tol~ in {default, 1e-8, 1e-10, 1e-12} x ~max_iter~ in
+  {200, 1000} all return ~optimal_inaccurate~; ~tol=1e-10~ improves the answer
+  to rel err 1.45e-9. The status never becomes ~optimal~.
+
+* Verdict
+*PASS* (with a ~TOLERANCE~/status note). pounce's answer is correct: 1.27e-8
+relative on the objective against an analytic optimum and two independent
+cvxpy solvers, four orders of magnitude inside the 1e-4 protocol tolerance.
+
+The only wrinkle is the reported status, ~optimal_inaccurate~ rather than
+~optimal~. Reading ~crates/pounce-convex/src/hsde_nonsym.rs~ (lines 1218--1247)
+this is *documented, deliberate behaviour*: the non-symmetric driver ended in
+~NumericalFailure~/~IterationLimit~ (a near-boundary stall), and because the
+best iterate's KKT residual (3.67e-8, complementarity-dominated) is below
+$\sqrt{\mathrm{tol}} = 10^{-4}$ it is restored and labelled
+~OptimalInaccurate~ -- explicitly "not a bare ~Optimal~" so callers can tell it
+apart. The clean convergence test at ~tol~=1e-8 is missed by roughly 4x on the
+complementarity residual. That is a mild conservatism in the stopping test, not
+a wrong answer, and it is not filed as a bug. Callers must therefore accept
+~optimal_inaccurate~ as a usable solve on the exp-cone path.

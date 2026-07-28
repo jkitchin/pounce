@@ -1,0 +1,123 @@
+#+TITLE: Adversary Run: Vandermonde box-constrained least-squares QP (cond(P) ~ 3.6e10)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: box-constrained convex QP, extremely ill-conditioned PD Hessian (cond_2 = 3.60e10)
+:SOURCE: Vandermonde-on-equispaced-nodes as the canonical exponentially ill-conditioned matrix -- N. J. Higham, /Accuracy and Stability of Numerical Algorithms/, 2nd ed., SIAM 2002, S22.1 "Vandermonde systems"; W. Gautschi, "How (un)stable are Vandermonde systems?", in /Asymptotic and Computational Analysis/, Dekker 1990, pp. 193-210. Bounded-variable least squares (BVLS) form: P. B. Stark & R. L. Parker, /BIT/ 35 (1995) 186-196. Optimum derived here in closed form by exact rational KKT.
+:KNOWN_OPTIMAL: -4.0698991600041623 (0.5 x'Px + c'x; full LS residual ||Va-y||^2 = 4.1333999583770265e-04)
+:N_VARIABLES: 7
+:N_CONSTRAINTS: 14 bound constraints (-10 <= x_j <= 10); 2 active at the optimum
+:END:
+
+Fit the coefficients \(a \in \mathbb{R}^7\) of a degree-6 polynomial
+\(p(s) = \sum_{j=0}^{6} a_j s^j\) to data at the 7 dyadic nodes
+\(t_i = i/8,\; i=1..7\), with bounded coefficients:
+
+\[
+\min_{a}\; \lVert V a - y \rVert_2^2
+\quad\text{s.t.}\quad -10 \le a_j \le 10,
+\qquad V_{ij} = t_i^{\,j}.
+\]
+
+In pounce's =solve_qp= form (objective \(\tfrac12 x'Px + c'x\)):
+
+\[
+P = 2V'V,\qquad c = -2V'y,\qquad lb = -10,\; ub = +10,
+\]
+
+with the constant \(\lVert y\rVert^2 = 4.0703125\) dropped by both pounce and the
+cvxpy model (so the two objectives are directly comparable).
+Data: \(y_i = \mathrm{round}(16\sin 3t_i)/16\).
+
+*Conditioning.* \(\mathrm{cond}_2(V) \approx 1.9\times10^5\); the normal-equation
+Hessian squares it: \(\mathrm{cond}_2(P) = 3.6012\times10^{10}\), eigenvalues
+spanning \(5.94\times10^{-10} \ldots 2.14\times10^{1}\). \(P\) is still SPD, so the
+problem is strictly convex with a *unique* optimum. The unconstrained minimizer
+has coefficients up to \(\sim 784\) in magnitude, so the box binds hard and the
+optimal active set is nontrivial.
+
+*Exact active set* (certified in rational arithmetic): \(x_3 = +10\) (at ub),
+\(x_5 = -10\) (at lb), the other five free. Strict complementarity holds.
+
+** Why the data is exactly representable (the crux for an ill-conditioned test)
+Comparing against the optimum of a *nearby* problem would be meaningless here: a
+1-ulp change in \(c\) moves \(x^*\) by \(O(\kappa\varepsilon)\approx 10^{-5}\). So
+every datum is chosen dyadic: \(t_i = i/8 \Rightarrow t_i^j = i^j/8^j\) exact
+(\(i^6 \le 117649\)); \(y_i = m_i/16\) exact; all numerators of \(P = 2V'V\) and
+\(c = -2V'y\) fit far inside \(2^{53}\). The script *asserts* that the float64
+=P=, =c= equal their exact =Fraction= counterparts. Hence the exact optimum below
+is the optimum of *precisely* the bits pounce is handed.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                    | Status  | Objective              |  Rel Err vs exact | x inf-err vs exact | Iters | Wall Time |
+|---------------------------+---------+------------------------+-------------------+--------------------+-------+-----------|
+| pounce solve_qp (default) | optimal | -4.0698991597861678e+0 |          5.36e-11 |           3.57e-05 |    11 |  0.0019 s |
+| pounce (tol=1e-12)        | optimal | -4.0698991600024117e+0 |          4.30e-13 |           3.41e-07 |     - |  0.0017 s |
+| pounce (tol=1e-14)        | optimal | -4.0698991600041561e+0 |          1.53e-15 |           3.41e-11 |     - |  0.0021 s |
+| exact rational KKT        | exact   | -4.0698991600041623e+0 |                 0 |                  0 |   n/a |  0.097 s  |
+| cvxpy CLARABEL            | optimal | -4.0698991593658533e+0 |          1.57e-10 |           9.72e-05 |     - |  0.0029 s |
+| cvxpy SCS (eps=1e-11)     | optimal | -4.0698991600041374e+0 |          6.11e-15 |           4.38e-08 |     - |  0.0018 s |
+
+Known optimal (exact): =-4.0698991600041623e+00=; primal box violation of the
+pounce point: =0.000e+00=.
+
+At default tolerance pounce is *more accurate than CLARABEL* on both objective
+(5.36e-11 vs 1.57e-10) and solution (3.57e-05 vs 9.72e-05), and ~1.5x faster.
+The 3.6e-5 solution error is not solver error in any meaningful sense: it is
+below the intrinsic conditioning floor of the problem
+(\(\kappa\varepsilon \approx 8\times10^{-6}\) for the data, and the objective is
+flat to \(\sqrt{2\delta f/\lambda_{\min}} \approx 0.8\) along the smallest
+eigendirection). The decisive result is the tolerance sweep: as =tol= is
+tightened pounce keeps converging cleanly, reaching =x_inf_err = 3.4e-11= and a
+*relative objective error of 1.5e-15 (one ulp)* at =tol=1e-14= in 2.1 ms -- i.e.
+the IPM is not conditioning-limited at all on this problem, it simply stops
+early at the default tolerance, exactly as it should.
+
+* Cross-check / Verification
+1. *Primary oracle -- exact rational KKT, zero floating point.* For a
+   box-constrained strictly convex QP the KKT conditions are necessary and
+   sufficient. All \(3^7 = 2187\) active-set assignments (each variable at lb /
+   free / at ub) were enumerated in exact =Fraction= arithmetic: for each, the
+   reduced stationarity system \(P_{FF}x_F = -(c_F + P_{FB}x_B)\) was solved by
+   exact Gaussian elimination, then primal feasibility on the free block and the
+   multiplier signs (\(g_i \ge 0\) at lb, \(g_i \le 0\) at ub) were checked. The
+   script asserts that *exactly one* assignment survives -- consistent with
+   uniqueness under strict convexity -- so the optimum is certified, not
+   estimated. This oracle cannot inherit any conditioning error.
+2. *Second oracle -- cvxpy/CLARABEL*: agrees, objective rel err 1.57e-10
+   (worse than pounce).
+3. *Third oracle -- cvxpy/SCS at eps=1e-11*: objective rel err 6.11e-15,
+   x inf-err 4.38e-08 -- independently confirms the exact rational answer to
+   near machine precision from a completely different algorithm (ADMM vs IPM).
+4. *Formulation skepticism.* Checked before suspecting the solver: (a) =P= is
+   asserted symmetric and its smallest eigenvalue asserted positive (5.94e-10 >
+   0), so the QP really is strictly convex and =psd_wrap= in the cvxpy model is
+   safe rather than papering over an indefinite matrix; (b) the float64 =P= and
+   =c= are asserted bit-identical to the exact rational construction, so pounce,
+   cvxpy and the rational oracle all solve literally the same problem; (c) the
+   cvxpy model uses the identical \(\tfrac12 x'Px + c'x\) objective with the same
+   dropped constant, so no offset can masquerade as agreement; (d) the exact
+   enumeration returns a unique hit, ruling out a mis-specified active set.
+5. pounce's returned point is exactly feasible (box violation 0.0); note that as
+   an interior-point method it approaches the two active bounds from inside
+   (\(x_3 = 9.999976\) rather than exactly 10 at default tol), which is expected
+   IPM behaviour and is what the residual x-error consists of.
+
+* Verdict
+*PASS.* On a strictly convex QP whose Hessian has condition number
+\(3.6\times10^{10}\) (eigenvalues spanning ten orders of magnitude) and a
+nontrivial two-bound active set, pounce's convex QP IPM returns the correct
+optimum: relative objective error 5.4e-11 against an exact rational KKT
+certificate at default tolerance, improving monotonically to one ulp (1.5e-15)
+at =tol=1e-14=, all in ~2 ms. It is more accurate *and* faster than
+cvxpy/CLARABEL on the same data, and agrees with cvxpy/SCS at eps=1e-11. The
+solution-vector error at default tolerance (3.6e-5) sits below the problem's
+intrinsic \(\kappa\varepsilon\) sensitivity and shrinks to 3.4e-11 when the
+tolerance is tightened, so it reflects early termination, not a conditioning
+failure in the linear algebra. No bug, no limitation, no tolerance concern.

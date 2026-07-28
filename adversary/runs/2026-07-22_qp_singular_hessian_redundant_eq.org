@@ -1,0 +1,134 @@
+#+TITLE: Adversary Run: Singular (PSD) Hessian + Redundant Equality Rows
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: degeneracy / constraint-qualification failure / non-unique optimum
+:SOURCE: Constructed. Nocedal & Wright, /Numerical Optimization/ 2e, Ch. 16.1-16.2 (equality QP, null-space method, singular reduced Hessian) + Ch. 16.8 (rank-deficient/redundant constraint Jacobian); Boyd & Vandenberghe, /Convex Optimization/, Sec. 4.4 (PSD-P QP: optimal set is affine).
+:KNOWN_OPTIMAL: p* = -13 (singular-P cases), p* = -1.9479166666667 (SPD control case) -- exact, by the reduced null-space method
+:N_VARIABLES: 5
+:N_CONSTRAINTS: 2 / 4 / 8 equality rows, all of rank 2
+:END:
+
+\begin{align*}
+\min_{x\in\mathbb{R}^5}\quad & \tfrac12 x^\top P x + c^\top x, \qquad
+P = M^\top M,\; M=\begin{bmatrix}1&1&0&0&0\\0&0&1&1&0\end{bmatrix}\\
+\text{s.t.}\quad & Ax=b
+\end{align*}
+
+with \(c=(1,2,3,4,-1)\). \(\operatorname{rank}(P)=2\), nullity 3 — \(P\) is
+positive *semi*-definite and structurally singular.
+
+Base equality rows:
+\[
+a_1=(1,0,1,0,1),\;b_1=3 \qquad a_2=(0,1,0,1,1),\;b_2=2
+\]
+Redundant rows appended: \(a_3=a_1\) (exact duplicate), \(a_4=2a_1-a_2\), and in
+the stress case also \(10^6 a_1\), \(-3a_2\), \(a_1+a_2\), \(10^{-6}a_2\) — so
+\(A\) is up to \(8\times5\) with \(\operatorname{rank}(A)=2\). LICQ fails
+everywhere on the feasible set; the multiplier \(y\) is non-unique.
+
+** The optimal set
+\[
+\mathcal N(P)\cap\mathcal N(A)=\operatorname{span}\{d\},\quad d=(1,-1,-1,1,0),
+\qquad c^\top d = 1-2-3+4 = 0,
+\]
+so the QP is bounded below and its solution set is a **line**
+\(X^\star = x_{\mathrm{ref}} + t\,d\), not a point. Grading is therefore on
+objective + feasibility + *membership*, never on \(x\) equality:
+
+1. \(|f(x)-p^\star|/\max(1,|p^\star|) < 10^{-6}\)
+2. \(\|Ax-b\|_\infty < 10^{-6}\)
+3. \(\|Z^\top(Px+c)\|_\infty < 10^{-6}\), \(Z\) an SVD basis of \(\mathcal N(A)\)
+   (vanishing reduced gradient \(\iff\) \(x\in X^\star\), since the reduced
+   problem is convex)
+
+Three attribution cases isolate the two defects, plus one stress case:
+| case        | P          | A                        |
+|-------------+------------+--------------------------|
+| =semidef_P= | singular   | 2x5, full row rank       |
+| =dup_rows=  | SPD (P+I)  | 4x5, rank 2              |
+| =both=      | singular   | 4x5, rank 2              |
+| =stress8x5= | singular   | 8x5, rank 2, scaled 1e±6 |
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+All values from =adversary/runs/2026-07-22_qp_singular_hessian_redundant_eq.py=.
+
+** case =semidef_P= (singular P, full-rank A), p* = -13, dim X* = 1
+| Solver   | Status  |       Objective | Obj rel err | Feas inf | Reduced grad inf | Wall time |
+|----------+---------+-----------------+-------------+----------+------------------+-----------|
+| pounce   | optimal | -1.299999999982e+01 |    1.41e-11 | 1.83e-10 |         2.04e-10 |   0.0016s |
+| CLARABEL | optimal | -1.300000000000e+01 |    1.37e-16 | 8.88e-16 |         8.44e-15 |   0.0037s |
+| OSQP     | optimal | -1.300000000000e+01 |    5.47e-16 | 4.44e-16 |         1.11e-16 |   0.0023s |
+
+** case =dup_rows= (SPD P, rank-deficient A), p* = -1.947916666667, dim X* = 0
+| Solver   | Status  |          Objective | Obj rel err | Feas inf | Reduced grad inf | Wall time |
+|----------+---------+--------------------+-------------+----------+------------------+-----------|
+| pounce   | optimal | -1.947916667890e+00 |    6.28e-10 | 6.57e-10 |         1.38e-11 |   0.0005s |
+| CLARABEL | optimal | -1.947916666667e+00 |    2.28e-15 | 1.33e-15 |         1.35e-14 |   0.0016s |
+| OSQP     | optimal | -1.947916666667e+00 |    1.82e-15 | 0.00e+00 |         5.69e-16 |   0.0018s |
+
+** case =both= (singular P AND rank-deficient A), p* = -13, dim X* = 1
+| Solver   | Status  |          Objective | Obj rel err | Feas inf | Reduced grad inf | Wall time |
+|----------+---------+--------------------+-------------+----------+------------------+-----------|
+| pounce   | optimal | -1.299999999982e+01 |    1.41e-11 | 2.44e-10 |         2.72e-10 |   0.0011s |
+| CLARABEL | optimal | -1.300000000000e+01 |    5.47e-16 | 8.88e-16 |         9.38e-15 |   0.0015s |
+| OSQP     | optimal | -1.300000000000e+01 |    2.73e-16 | 4.44e-16 |         1.11e-16 |   0.0016s |
+
+** case =stress8x5= (singular P, 8x5 rank-2 A, rows scaled 1e6 and 1e-6), p* = -13
+| Solver   | Status  |          Objective | Obj rel err | Feas inf | Reduced grad inf | Wall time |
+|----------+---------+--------------------+-------------+----------+------------------+-----------|
+| pounce   | optimal | -1.300000000000e+01 |    1.37e-16 | 9.31e-10 |         1.33e-15 |   0.0016s |
+| CLARABEL | optimal | -1.300000000000e+01 |    4.10e-16 | 4.24e-22 |         3.29e-10 |   0.0015s |
+| OSQP     | optimal | -1.300000000000e+01 |    5.01e-14 | 6.45e-07 |         7.34e-10 |   0.0016s |
+
+Note the =stress8x5= feasibility residual of 9.31e-10 is measured on rows scaled
+by \(10^6\); relative to the row norm it is ~1e-16. In that case pounce is the
+*most* accurate of the three on the reduced gradient (1.33e-15 vs 3.29e-10 /
+7.34e-10) and beats OSQP on absolute feasibility by three orders of magnitude.
+
+* Cross-check / Verification
+- *Analytic oracle.* \(x_{\mathrm{ref}}\), \(p^\star\) computed by the exact
+  null-space method: min-norm particular point \(x_p = A^{+}b\), \(Z\) from the
+  SVD of \(A\), reduced Hessian \(Z^\top P Z\) (rank 2 of 3 — itself singular),
+  reduced step by =lstsq= (min-norm). Independent of every solver.
+- *cvxpy CLARABEL and OSQP* both agree with the analytic \(p^\star\) to ~1e-15
+  in all four cases; =cp.psd_wrap= is used so cvxpy does not reject the
+  numerically-singular \(P\) as non-PSD.
+- *Optimal-set membership.* Beyond matching the objective, the pounce point's
+  reduced gradient \(Z^\top(Px+c)\) vanishes to 2.7e-10 or better, so pounce
+  lands *on* \(X^\star\), not merely near it in objective.
+- *Direction decomposition.* \(x_{\mathrm{pounce}}-x_{\mathrm{ref}}\) was split
+  along vs. orthogonal to the optimal-set direction \(d\). The orthogonal
+  component is 3.9e-10 (=semidef_P=, =both=) and 4.8e-15 (=stress8x5=) while the
+  total displacement is 1.6e-7 to 1.6e-6 — i.e. pounce's answer differs from the
+  analytic reference *only by a slide along the optimal line*, exactly as a
+  correct solver on a non-unique optimum should. This is the check that would
+  have caught a solver silently drifting off the optimal set.
+- *Attribution.* The =semidef_P= and =dup_rows= cases isolate the two defects
+  separately; both pass, so neither the singular KKT (2,2)-block nor the
+  rank-deficient \(A\) alone is a failure mode, and the combined =both= case
+  passes too. No case needed non-default =tol= or =max_iter=.
+- No spurious =infeasible= / =unbounded= status, no NaN, no iteration-limit hit.
+  Total script runtime 0.81 s wall (all 4 cases + 8 oracle solves).
+
+* Verdict
+*PASS.* pounce's convex QP IPM handles a structurally singular KKT system — a
+positive-*semi*-definite rank-2 Hessian in a 5-variable problem combined with an
+equality Jacobian of up to 8 rows and rank 2 (exact duplicates, linear
+combinations, and rows scaled by \(10^{\pm6}\)) — without any regularization
+artifact, spurious infeasibility, or status error. It returns a point that is
+genuinely a member of the one-dimensional optimal set: objective matches the
+exact \(p^\star=-13\) to 1.4e-11 or better, feasibility to ~1e-10, and the
+reduced gradient (the membership certificate) to 2.7e-10. The residual
+displacement from the analytic reference point lies almost entirely along the
+optimal-set direction \(d=(1,-1,-1,1,0)\), with an orthogonal component of only
+3.9e-10, confirming the solver is picking a legitimate alternative optimum
+rather than drifting. LICQ fails throughout (the multipliers are non-unique) and
+this causes no observable trouble. pounce is also the fastest of the three
+solvers on every case, and the most accurate on the badly-scaled stress case.

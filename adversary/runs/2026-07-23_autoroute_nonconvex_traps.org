@@ -1,0 +1,45 @@
+#+TITLE: Adversary Iteration 5 — autoroute transparency on nonconvex/indefinite traps
+#+DATE: 2026-07-23
+
+* Direction
+Test that =solver_selection="auto"= does NOT misroute a subtly nonconvex problem
+to a convex specialized solver (qp-ipm / socp) that would return a spuriously
+wrong answer, and that the routing-transparency contract holds (auto vs forced
+=nlp= answers agree). Only disagreeing ANSWERS are a ROUTING_ERROR; a conservative
+NLP fall-through that still gets the right answer is logged, not filed. Shapes are
+fresh vs the logged autoroute tests (indefinite-BOX refusal, ill-scaled, non-unique
+face, convex QP/LP/QCQP, Rosenbrock).
+
+* Results
+:PROPERTIES:
+:FAMILY: autoroute
+:STATUS: PASS (5/5)
+:REPORT: [[file:runs/2026-07-23_autoroute_nonconvex_traps.py]]
+:END:
+
+| # | problem | route taken | ref f* | auto vs nlp | verdict |
+|---+---------+-------------+--------+-------------+---------|
+| 1 | indefinite obj (eig +3,-1) + linear box | nlp (fall-through) | 0.0 | 0.0 | PASS |
+| 2 | concave/nonconvex QCQP (outside unit ball) | nlp (fall-through) | -2.0 | 0.0 | PASS |
+| 3 | convex ball via nonlinear fun | socp | -sqrt(2) | 3.8e-9 | PASS |
+| 4 | degenerate LP (duplicate constraint row) | lp-ipm | -1.0 | 5.8e-9 | PASS |
+| 5 | PSD-singular QP, eq-constrained | qp-ipm | 0.0 | 1.3e-12 | PASS |
+
+* Key confirmations
+- *Misrouting resistance.* For the two nonconvex traps (indefinite objective with
+  LINEAR inequalities; concave QCQP with a nonconvex feasible region) the router
+  CONSERVATIVELY fell through to the general NLP backend rather than sending them
+  to a convex qp/socp solver. Both reached the correct global optimum (0 and -2).
+  No convex-relaxation artifact.
+- *Correct specialization.* Genuinely convex shapes were specialized correctly:
+  the ball to =socp=, the degenerate (redundant-row) LP to =lp-ipm=, and the
+  rank-deficient PSD QP to =qp-ipm= — each matching the known optimum to 1e-9 or
+  better.
+- *Routing transparency.* =auto= and forced =nlp= agree in objective (<=5.8e-9)
+  and solution (<=2.9e-9) in every case. No ROUTING_ERROR.
+
+* Verdict
+PASS — the router neither misroutes nonconvex problems to convex solvers nor
+disagrees with the general NLP path. Degenerate (duplicate-constraint) and
+rank-deficient (PSD-singular) convex cases are specialized and solved correctly.
+No finding to file.

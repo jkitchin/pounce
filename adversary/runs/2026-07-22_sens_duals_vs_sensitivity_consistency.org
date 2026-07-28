@@ -1,0 +1,173 @@
+#+TITLE: Adversary Run: Duals vs Sensitivities — Internal Consistency
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: duals / multipliers / envelope theorem / predictor order / CLI-library parity
+:SOURCE: Fiacco, /Introduction to Sensitivity and Stability Analysis in NLP/, Academic Press 1983, Thm 2.1 & Sec. 3.2; Nocedal & Wright 2e, Thm 12.9 & Sec. 16.5; Milgrom & Segal, Econometrica 70 (2002) 583, Thm 1 (envelope); Pirnay, Lopez-Negrete & Biegler, Math. Prog. Comp. 4 (2012) 307-331 (sIPOPT suffix protocol)
+:KNOWN_OPTIMAL: analytic (closed-form KKT), per case
+:N_VARIABLES: 2-6
+:N_CONSTRAINTS: 1-4 equalities + 0-1 active inequality
+:END:
+
+The hypothesis under test is not "is the answer right" but "do pounce's two
+views of the same KKT factorization agree with each other". For
+
+\[
+\min_x \tfrac12 x^\top P x + c^\top x \quad\text{s.t.}\quad A x = b,
+\]
+
+pounce's reported multiplier satisfies (verified, case 0) the stationarity
+\(P x^\star + c + A^\top y = 0\), i.e. \(L = f + y^\top(Ax-b)\), hence the
+documented sign is \(\partial\phi/\partial b_i = -y_i\). The consistency loop
+that must close is
+
+\[
+\frac{d\phi}{db_i} \;=\; -y_i \;=\; (P x^\star + c)^\top \frac{dx}{db_i}
+ \;=\; -y^\top A \frac{dx}{db_i} \;=\; -y^\top e_i .
+\]
+
+A break anywhere in that loop means one of \(\{y,\ dx/db,\ \phi\}\) is wrong.
+
+Cases:
+- (a) 5-var QP, 3 equalities + one *strictly* active inequality
+  (\(z_0 = 6.37\), slack \(2\cdot10^{-14}\), strict complementarity confirmed
+  via ~weakly_active_indices~ = empty).
+- (b) 3-var QP with a scalar parameter \(p\) entering the objective only
+  (\(c + p d\)), a constraint only (\(b + p e\)), and *both*.
+- (c) predictor-error scaling in \(\delta\).
+- (d) sIPOPT CLI ~sens_sol_state_1~ vs library ~QpSensitivity~ on an
+  equivalent 2-var QP, plus a genuinely nonlinear parametric NLP
+  (\(\min (x_0-p)^2 + (x_1-1)^2 + e^p x_1^2\) s.t. \(x_0+2x_1+\tfrac12 p x_1 = 1+p\))
+  for the true \(O(\delta^2)\) test.
+- (e) 6-var QP whose 6th variable \(w\) is separable and pinned by its own
+  equality \(w = b_3\); \(dx_{0..4}/db_3\) is *identically* zero.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+All oracles are independent of pounce: closed-form float64 KKT solves, central
+finite differences with a step-size plateau sweep (\(\delta = 10^{-2}\ldots10^{-8}\),
+plateau taken over \(10^{-6}\ldots10^{-3}\), spreads all \(< 5\cdot10^{-10}\)), and
+Ipopt 3.14.19 on the identical ~.nl~.
+
+| Check                                              | Quantity                 |    Error |
+|----------------------------------------------------+--------------------------+----------|
+| (a1) \(y_i = -d\phi/db_i\) (FD)                    | 3 equalities             |  1.1e-10 |
+| (a2) ~dx/db~ vs exact active-set KKT back-solve    | 5x3                      |  9.5e-10 |
+| (a3) \((Px+c)^\top dx/db\) vs FD \(d\phi/db\)      | chain rule               |  5.5e-09 |
+| (a4) \((Px+c)^\top dx/db\) vs \(-y\)               | loop closes              |  5.6e-09 |
+| (a5) \(A\, dx/db = I\)                             | feasibility of direction |  4.2e-10 |
+| (a6) \(G\, dx/db = 0\)                             | active ineq. stays tight |  6.7e-10 |
+| (b) envelope, \(p\) in objective                   | \(d^\top x^\star\)       |  1.3e-12 |
+| (b) envelope, \(p\) in constraint                  | \(-y^\top e\)            |  1.3e-10 |
+| (b) envelope, \(p\) in BOTH                        | \(d^\top x - y^\top e\)  |  6.1e-11 |
+| (b) total derivative via ~QpSensitivity~           | \(f_p + \nabla f\!\cdot\! dx/dp\) |  1.5e-09 |
+| (c) affine predictor, \(\delta=10^{-1},10^{-2},10^{-3}\) | rel. err flat      | ~4e-10 rel |
+| (d) CLI ~sens_sol_state_1~ vs ~QpSensitivity~      | equivalent problem       |  2.5e-12 |
+| (d) CLI ~sens_sol_state_1~ vs exact re-solve       | equivalent problem       |  1.1e-16 |
+| (d) nonlinear NLP gap ratio, \(\delta_p\) 0.2 vs 0.02 | 98.1 (\(O(\delta^2)\Rightarrow\)100) | — |
+| (e) \(dx_{0..4}/db_{\rm dummy}\)                   | dummy parameter          | **exactly 0.0** |
+| (e) \(dw/db_{\rm dummy}\)                          | should be 1              |  1.0e-10 |
+
+Wall time for the whole battery, including two CLI invocations and an Ipopt
+run: *0.54 s*.
+
+** (b) envelope theorem, values
+| \(p\) enters   | \(d\phi/dp\) (FD, plateau) | \(dL/dp\) from pounce's own \(x^\star,y\) |
+|----------------+----------------------------+-------------------------------------------|
+| objective only |             +0.51918604651 |                             +0.51918604651 |
+| constraint only |             +8.02790697687 |                             +8.02790697674 |
+| both           |             +7.38313953494 |                             +7.38313953488 |
+
+The "both" row is the discriminating one: it is *not* the sum of a
+naive re-derivation, and a sensitivity implementation that dropped either the
+\(\partial_p \nabla_x f\) term or the constraint-Jacobian \(p\) term would miss
+it. It agrees to 6e-11.
+
+** (c) predictor order
+For a QP at a *fixed* active set \(x^\star(b)\) is affine in \(b\), so the
+first-order predictor is not merely \(O(\delta^2)\) — it is *exact*. The
+observed error is \(3.8\cdot10^{-11}\), \(3.8\cdot10^{-12}\), \(3.7\cdot10^{-13}\)
+for \(\delta = 10^{-1},10^{-2},10^{-3}\): strictly proportional to \(\delta\),
+i.e. a constant \(4\cdot10^{-10}\) *relative* error in \(dx/db\), which is the
+IPM solve tolerance and not a truncation term. The active set was confirmed
+unchanged at every \(\delta\) (\(z_0 = 6.04, 6.34, 6.37\)).
+
+The genuine \(O(\delta^2)\) test therefore had to move to a problem where
+\(x^\star(p)\) is nonlinear — the exp-objective NLP in (d). There the
+predictor/re-solve gap goes \(1.317\cdot10^{-3} \to 1.342\cdot10^{-5}\) as
+\(\delta_p\) goes \(0.2 \to 0.02\), a ratio of *98.1* against 100 predicted for
+\(O(\delta^2)\) and 10 for \(O(\delta)\). This is the strongest single piece of
+evidence that what pounce returns is a true first derivative and not a
+re-solve or a scaled artifact.
+
+** (e) exact zero
+~parametric_step([3],[1.0])~ returns
+=[0. 0. 0. 0. 0. 0.9999999999]=. The five \(x\) components are *exact
+IEEE zeros*, not \(10^{-12}\) noise — the back-solve preserves the structural
+sparsity rather than smearing it. The \(w\) component is 1 to \(10^{-10}\),
+which is the IPM tolerance, not a sign or scaling error.
+
+* Cross-check / Verification
+- FD plateau sweeps: every reported FD value was taken from a plateau whose
+  spread over \(\delta \in [10^{-6},10^{-3}]\) was \(< 5\cdot10^{-10}\). No FD
+  number was trusted without one.
+- Exact active-set KKT: with the inequality active, the problem is an
+  equality-constrained QP; its \(4\times4\)-augmented KKT was solved in closed
+  form. Primal matched to 2.4e-14, \(y\) to 4.2e-14.
+- Ipopt 3.14.19 was run on the *byte-identical* ~.nl~ used for the pounce CLI leg.
+
+** The .sol dual sign (separate finding, corroborated here)
+Independently confirmed on the identical ~.nl~:
+
+| source                            | dual for =c1=   |
+|-----------------------------------+-----------------|
+| FD \(d\phi/db\) (closed form)     | *+0.744791667* |
+| Ipopt 3.14.19 ~.sol~              | *+0.744791667* |
+| pounce ~.sol~                     | *-0.744791667* |
+| pounce library ~QpResult.y~       | -0.744791667    |
+
+So pounce's *library* dual is self-consistent and correctly documented
+(\(Px+c+A^\top y=0 \Rightarrow d\phi/db = -y\)); the ~.sol~ writer emits that
+same library-convention number *without* flipping it into AMPL's shadow-price
+convention, where the dual is \(+d\phi/db\). Ipopt gets the sign right; pounce
+does not. This reproduces today's separate finding from a completely
+independent direction (an FD value function, not a code read).
+
+*Does it affect the sensitivity suffixes? No — and this is now checked, not
+assumed.* ~sens_sol_state_1~ carries *primal variable values* at the perturbed
+parameter, which have no sign convention to get wrong. The suffix matched the
+exact closed-form re-solve to *1.1e-16* and the library ~QpSensitivity~
+predictor to 2.5e-12. Any sign flip applied to the dual block of the ~.sol~
+therefore leaves the sensitivity suffix untouched. Concretely: a user reading
+~sens_sol_state_1~ is unaffected by the dual bug; a user reading the ~.sol~
+dual block, or a Pyomo ~m.dual~ suffix populated from it, gets the wrong sign.
+
+One incidental observation, not a defect: the CLI emits a routing note that
+this convex QP is deliberately routed away from ~pounce-convex~ to the general
+NLP interior-point path because the convex solver does not provide sIPOPT
+sensitivity. The two paths nevertheless agree to 2.5e-12, which is exactly the
+CLI-vs-library parity the assignment asked for.
+
+* Verdict
+*PASS.* Every link in the duals/sensitivity consistency loop closes: the
+multiplier equals \(-d\phi/db\) against an FD plateau oracle (1.1e-10), the
+~QpSensitivity~ ~dx/db~ equals the exact active-set KKT back-solve (9.5e-10)
+and reproduces the same \(d\phi/db\) through the chain rule (5.5e-09), the
+envelope theorem holds for a parameter in the objective, in a constraint, and
+in both (worst 1.3e-10), the predictor is exact on the affine QP and provably
+\(O(\delta_p^2)\) on a nonlinear parametric NLP (ratio 98.1 vs 100), the CLI
+~sens_sol_state_1~ path agrees with the library path to 2.5e-12, and a dummy
+parameter returns *exact IEEE zeros*. No internal inconsistency between the
+reported duals and the reported sensitivities was found.
+
+The one genuine defect touched by this run — the ~.sol~ writer emitting duals
+in pounce's library convention rather than AMPL's, i.e. negated relative to
+Ipopt — is the already-established separate finding of today and is not
+re-filed here. This run adds two things to it: an independent FD-value-function
+confirmation of which sign is correct, and a positive determination that the
+*sensitivity suffixes are not affected by it*.

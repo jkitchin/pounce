@@ -1,0 +1,61 @@
+#+TITLE: Adversary cross-check: Fermat-Weber / minimize-sum-of-norms (facility location) as SOCP
+#+DATE: 2026-06-15
+
+* PROPERTIES
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: PASS
+:PROBLEM: Fermat-Weber single-facility location (minimize sum of 2-norms)
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization" (2004), Sec. 8.7 / 4.3.1 (minimize sum of norms); MOSEK Modeling Cookbook (facility location)
+:N_VARS: 5  (x1, x2, t0, t1, t2)
+:N_CONSTRAINTS: 9 rows = 3 SOC cones, each dim 3
+:CONE_LAYOUT: cones=[("soc",3)]*3; per point p_i, s=(t_i, x1-p_ix, x2-p_iy) in K_soc^3, s=h-Gv with rows: [t_i col -1]/h=0, [x1 col -1]/h=-p_ix, [x2 col -1]/h=-p_iy
+:KNOWN_OPTIMAL: 1.7320508075688772  (= sqrt(3)), minimizer x* = (0, 0)
+:END:
+
+** Problem
+Single-facility Fermat-Weber (geometric median, unit weights):
+   minimize   sum_i ||x - p_i||_2
+over the facility location x in R^2. Closed form via an EQUILATERAL triangle:
+all interior angles are 60 deg < 120 deg, so the Fermat point is the centroid,
+which sees each pair of vertices at 120 deg, and f* = s*sqrt(3) for side s.
+
+We use an equilateral triangle of side s = 1 centered at the origin:
+  p0 = (0, 1/sqrt(3)), p1 = (-1/2, -1/(2 sqrt(3))), p2 = (1/2, -1/(2 sqrt(3))).
+(circumradius 1/sqrt(3); all three side lengths asserted = 1.0.) The Fermat
+point is (0,0) and f* = sqrt(3) = 1.7320508076.
+
+** Cone encoding (the trap)
+pounce: s = h - G x in the listed cones; soc dim d => s0 >= ||s_{1:}||_2.
+Epigraph: minimize sum t_i with each ||x - p_i|| <= t_i as one dim-3 soc cone:
+  s0 = t_i        -> G row -1 in col (2+i),  h  0
+  s1 = x1 - p_ix  -> G row -1 in col 0,      h -p_ix
+  s2 = x2 - p_iy  -> G row -1 in col 1,      h -p_iy
+=> t_i >= ||x - p_i||_2. Verified per-row sign, column, and dim before running.
+Independent epigraph-tightness check: true f(x_pounce) == sum t_i to 4.5e-9.
+
+** Results
+| solver            | obj               | x                       | time (s) |
+|-------------------+-------------------+-------------------------+----------|
+| pounce            | 1.7320507998e+00  | (-6.5e-17, -9.9e-17)    | 0.0011   |
+| cvxpy / CLARABEL  | 1.7320507963e+00  | (-1.0e-16, -6.0e-18)    | 0.0035   |
+| cvxpy / ECOS      | 1.7320508072e+00  | --                      | --       |
+| known optimal     | 1.7320508076e+00  | (0, 0)                  | --       |
+
+** Cross-check
+- rel_err_vs_known        = 4.51e-09
+- x_inf_err_vs_known      = 9.86e-17  (recovers the centroid exactly)
+- obj_err_vs_CLARABEL     = 2.01e-09
+- obj_err_vs_ECOS         = 4.30e-09
+- CLARABEL_vs_ECOS        = 6.31e-09
+- epigraph-tightness err  = 4.51e-09  (true f(x_pounce) == sum t_i)
+Two independent oracle solvers agree with each other, with pounce, and with the
+closed-form optimum sqrt(3) to ~1e-9; the recovered facility location is the
+centroid to machine precision.
+
+** Verdict
+VERDICT: PASS
+pounce solves the Fermat-Weber sum-of-norms facility-location SOCP to optimality
+(status=optimal), matching the analytic optimum sqrt(3), both cvxpy oracles, and
+the closed-form minimizer (the centroid) to ~1e-9 (location to ~1e-16). The
+epigraph is independently confirmed tight.

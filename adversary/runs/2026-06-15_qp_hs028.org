@@ -1,0 +1,52 @@
+#+TITLE: Adversary report — Hock-Schittkowski 28 (qp/equality-constrained convex QP)
+#+DATE: 2026-06-15
+
+* Problem
+HS28: pure equality-constrained convex QP with a rank-deficient PSD Hessian.
+
+  min  f(x) = (x1 + x2)^2 + (x2 + x3)^2
+  s.t.  x1 + 2 x2 + 3 x3 = 1
+
+- SOURCE: Hock & Schittkowski 1981, problem 28 (p. 51).
+- KNOWN_OPTIMAL: f* = 0.0 at x* = (0.5, -0.5, 0.5).
+- N_VARIABLES: 3
+- N_CONSTRAINTS: 1 equality (no inequalities, no bounds).
+
+* Why adversarial
+- P = [[2,2,0],[2,4,2],[0,2,2]] is symmetric PSD but RANK-DEFICIENT (rank 2,
+  eigenvalues {0, 2, 6}). The quadratic has a null direction, so the unreduced
+  KKT system [[P, A'],[A, 0]] is the only thing keeping the problem well posed;
+  this stresses the IPM's KKT factorization on a singular Hessian.
+- Optimal objective is exactly 0, so any positive objective is a clean,
+  absolute error signal (relative error is meaningless near 0; the script uses
+  an absolute objective tolerance of 1e-6).
+
+* Method
+pounce.solve_qp(P, c=0, A, b) vs two independent oracles:
+  1. cvxpy / CLARABEL.
+  2. Closed-form KKT solve [[P, A'],[A, 0]] [x; lam] = [-c; b].
+Pre-flight asserts confirm P symmetric, PSD, rank 2, and that the documented
+x* is feasible with f=0 before any solver is run.
+
+* Results
+| solver            | objective         | time (s) |
+|-------------------+-------------------+----------|
+| pounce solve_qp   | 1.21e-28          | 0.0007   |
+| cvxpy / CLARABEL  | 3.94e-30          | 0.0034   |
+| closed-form KKT   | 0.0 (exact)       | —        |
+
+- pounce status = optimal, iters = 7.
+- x_pounce = (0.5, -0.5, 0.5); |x - x*|_inf = 3.9e-10.
+- equality residual |Ax - b|_inf = 7.8e-10.
+- |obj_pounce - known| = 1.2e-28 (machine zero).
+- obj diff vs CLARABEL = 1.2e-28; x diff vs CLARABEL = 3.9e-10.
+- KKT vs CLARABEL: obj diff 3.9e-30, x diff 2.6e-15 (oracles agree to machine
+  precision, cross-validating the reference).
+- speedup: ~4.9x faster than CLARABEL (both sub-millisecond; not meaningful).
+
+* Classification
+VERDICT: PASS
+
+pounce recovers the exact minimizer of a rank-deficient PSD equality-constrained
+QP to ~4e-10 with the objective at the machine-zero floor, in agreement with
+both CLARABEL and the closed-form KKT solution. No finding.

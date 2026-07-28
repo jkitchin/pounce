@@ -1,0 +1,171 @@
+#+TITLE: Adversary Run: SOS/Moment Duality Invariants
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: mathematical invariants (lower-bound validity, order monotonicity, is_exact consistency)
+:SOURCE: Lasserre, SIAM J. Optim. 11(3):796-817 (2001) (hierarchy monotonicity); Choi & Lam, Math. Ann. 231:1-18 (1977) (psd-not-SOS quartic); Jamil & Yang, Int. J. Math. Model. Numer. Optim. 4(2) (2013) f14/f48/f105 (Booth, Dixon-Price, Rosenbrock)
+:KNOWN_OPTIMAL: 0.0 for all four polynomials
+:N_VARIABLES: 2 (Booth, Rosenbrock, Dixon-Price), 3 (Choi-Lam)
+:N_CONSTRAINTS: 2n box inequalities (g >= 0), orders 1-4
+:END:
+
+This run tests the *contract* of the Lasserre/Putinar hierarchy rather than one
+polynomial against one reference number.
+
+Polynomials (none previously in =adversary/log.org=), each minimized over a box:
+
+- Booth: $(x+2y-7)^2+(2x+y-5)^2$, min $0$ at $(1,3)$, box $[-10,10]^2$
+- Rosenbrock-2D: $100(y-x^2)^2+(1-x)^2$, min $0$ at $(1,1)$, box $[-2,2]^2$
+- Dixon-Price $n{=}2$: $(x-1)^2+2(2y^2-x)^2$, min $0$ at $(1,\pm 1/\sqrt2)$, box $[-2,2]^2$
+- Choi-Lam dehomogenized: $x^2y^2+y^2z^2+z^2x^2-4xyz+1$, min $0$ at the four
+  sign patterns with $xyz=1$, box $[-2,2]^3$. This is the $w{=}1$ slice of the
+  Choi-Lam quaternary quartic $w^4+x^2y^2+y^2z^2+z^2x^2-4xyzw$: nonnegative but
+  *not* a sum of squares (a different psd-not-SOS witness from Motzkin, which
+  is already logged).
+
+Sub-tests:
+
+- (a) VALIDITY: =lower_bound= $\le$ true global minimum.
+- (b) MONOTONICITY: the bound must be non-decreasing in the relaxation order
+  (a theorem; needs no external oracle).
+- (c) SOS CERTIFICATE / Gram matrix: *N/A* — =SosResult= exposes only
+  =lower_bound, status, is_exact, num_minimizers, minimizers, certified, order=.
+  No Gram matrix is available through the public API or the raw
+  =_pounce.sos_minimize= dict, so the self-contained certificate check could not
+  be performed.
+- (d) MOMENT MATRIX / flat extension: *N/A* for the same reason. Substituted a
+  weaker observable check: when =is_exact=True=, every reported minimizer must
+  be feasible and attain =lower_bound=.
+- (e) psd-not-SOS at increasing order (Choi-Lam).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (sub-test d'); PASS (a, b, e)
+:END:
+
+** (a) Lower-bound validity — PASS everywhere
+
+| Problem     | order | lower_bound | true min | valid? |
+|-------------+-------+-------------+----------+--------|
+| booth       |     1 |  -5.313e-06 |      0.0 | yes    |
+| booth       |     2 |  -2.826e-05 |      0.0 | yes    |
+| booth       |     3 |  -1.975e-05 |      0.0 | yes    |
+| rosenbrock  |     2 |  -8.962e-05 |      0.0 | yes    |
+| rosenbrock  |     3 |  -4.977e-05 |      0.0 | yes    |
+| rosenbrock  |     4 |  -3.293e-04 |      0.0 | yes    |
+| dixon_price |     2 |  -5.617e-06 |      0.0 | yes    |
+| dixon_price |     3 |  -3.875e-06 |      0.0 | yes    |
+| dixon_price |     4 |  -1.708e-06 |      0.0 | yes    |
+| choi_lam    |     2 |  -4.333e+00 |      0.0 | yes    |
+| choi_lam    |     3 |  -9.880e-07 |      0.0 | yes    |
+
+No bound anywhere exceeded the true global minimum. =certified=True= on every
+boxed run. The core contract holds.
+
+** (b) Monotonicity in order — holds to solver tolerance (TOLERANCE, not a bug)
+
+At the default =tol=1e-8= three drops appeared: Booth $o1{\to}o2$
+($-5.31\mathrm{e}{-6}\to-2.83\mathrm{e}{-5}$, drop $2.29\mathrm{e}{-5}$) and
+Rosenbrock $o3{\to}o4$ ($-4.98\mathrm{e}{-5}\to-3.29\mathrm{e}{-4}$, drop
+$2.80\mathrm{e}{-4}$).
+
+A =tol= sweep (=2026-07-22_sos_duality_diag.py=, probe P2) shows the drop
+magnitude tracks =tol= essentially proportionally:
+
+| Problem     | tol=1e-8 max drop | tol=1e-10 | tol=1e-12 |
+|-------------+-------------------+-----------+-----------|
+| booth       |         2.294e-05 | 2.336e-08 | 3.030e-10 |
+| rosenbrock  |         2.795e-04 | 1.593e-06 | 1.016e-08 |
+| dixon_price |         0.000e+00 | 3.849e-08 | 4.361e-11 |
+
+Probe P1 (same objectives *without* the box, so =certified=False= and the raw
+SDP value is returned) shows near-monotone raw sequences, the only dip being
+Booth $o1{\to}o2$ at $-5.96\mathrm{e}{-7}$ — again tolerance-scale.
+
+Conclusion: the theorem is not violated. The =certified= bound is the SDP value
+minus a *measured* miss in the SOS identity, and that correction grows with the
+moment-matrix size, so the certified sequence can dip by $O(\mathrm{tol})$ even
+when the underlying relaxation is monotone. Classified TOLERANCE, not
+SOLVER_BUG. (Worth noting the correction is ~30x larger than =tol= itself at
+order 4.)
+
+** (e) psd-not-SOS (Choi-Lam) — PASS, textbook behaviour
+
+Order 2: $-4.3333$ (strictly, grossly below 0; =is_exact=False=,
+0 minimizers — a *safe* failure). Order 3: $-9.88\mathrm{e}{-7}\approx 0$,
+=is_exact=True=, and all **four** global minimizers recovered correctly:
+$(1,1,1)$, $(1,-1,-1)$, $(-1,1,-1)$, $(-1,-1,1)$ (each to ~1e-3, $f\approx
+6.5\mathrm{e}{-6}$). Exactly the predicted "strictly below 0 at low order,
+approaching 0 as order rises" profile. 0.71 s at order 3.
+
+** (d') is_exact consistency — FAIL on Rosenbrock
+
+| tol   | order | status             | lower_bound | is_exact | n_min | returned minimizer | f(x*)   |
+|-------+-------+--------------------+-------------+----------+-------+--------------------+---------|
+| 1e-8  |     2 | optimal            |  -8.962e-05 | True     |     1 | (0.87003, 0.75632) | 1.69e-2 |
+| 1e-8  |     3 | optimal            |  -4.977e-05 | True     |     1 | (0.85984, 0.73870) | 1.97e-2 |
+| 1e-8  |     4 | optimal            |  -3.293e-04 | True     |     1 | (0.85811, 0.73587) | 2.02e-2 |
+| 1e-10 |     4 | optimal            |  -1.876e-06 | True     |     1 | (0.85828, 0.73616) | 2.01e-2 |
+| 1e-12 |     3 | optimal            |  -2.723e-10 | True     |     1 | (0.86062, 0.74019) | 1.94e-2 |
+| 1e-12 |     4 | optimal            |  -1.043e-08 | True     |     1 | (0.85843, 0.73642) | 2.01e-2 |
+
+Rosenbrock-2D has exactly **one** global minimizer, $(1,1)$, with $f=0$. pounce
+sets =is_exact=True= and =num_minimizers=1= — the right *count* — but returns a
+point ~$(0.86, 0.74)$, off by $\|\cdot\|_\infty \approx 0.26$, with
+$f(x^*)=2.0\mathrm{e}{-2}$ against a reported bound of $\approx 0$. The gap
+$|f(x^*)-\gamma^*|\approx 2\mathrm{e}{-2}$ is four orders of magnitude above any
+tolerance in play and is **independent of =tol=**: tightening from 1e-8 to 1e-12
+moves the bound by 7 orders of magnitude while the returned point barely moves.
+It also *degrades* with order (1.69e-2 -> 1.97e-2 -> 2.02e-2), the opposite of
+the expected direction.
+
+Booth, Dixon-Price and Choi-Lam all extract correctly ($|f(x^*)-\gamma^*| \le
+6\mathrm{e}{-5}$, correct multiplicity 1/2/4 respectively), so this is not a
+general extraction failure.
+
+* Cross-check / Verification
+
+- Known minima independently refuted by a dense grid ($61^2$ / $21^3$) plus a
+  41-start L-BFGS-B multistart over the same box; the best point found matched
+  the published minimum to $\le 4.4\mathrm{e}{-16}$ in every case. No polynomial
+  had a lower value than claimed, so no REFERENCE_ERROR.
+- Monotonicity was checked against the theorem itself (no oracle), and localized
+  to the certification correction by two independent probes (drop the box ->
+  uncertified raw bound; sweep =tol=).
+- The Rosenbrock extraction defect was checked at three tolerances and three
+  orders; it is stable under all of them.
+- Runtime: full invariant sweep 1.8 s wall for 11 solves; diagnostics 14.8 s for
+  36 solves. Well inside budget.
+
+* Verdict
+
+**SOLVER_BUG** — on the =is_exact= / minimizer-extraction contract only; the
+lower bound itself was valid and (to tolerance) monotone throughout.
+
+The headline positive result is that the two invariants that matter most both
+hold: no relaxation ever returned a bound above the true global minimum, and the
+order-monotonicity theorem is respected up to $O(\mathrm{tol})$ slack introduced
+by the certification correction (drops shrink ~100x per 100x tolerance
+tightening, so they are numerical, not structural). The psd-not-SOS Choi-Lam
+form behaves exactly as Lasserre theory predicts, including correct recovery of
+all four minimizers at order 3.
+
+The defect is that =is_exact=True= is an unsound claim on Rosenbrock-2D: pounce
+asserts the relaxation is exact and hands back a single "global minimizer" that
+is 0.26 away from the true one and whose objective misses the reported bound by
+2e-2. Because =is_exact= is documented as "a *sufficient* certificate that
+=lower_bound= is the global minimum", a caller has no signal that the returned
+point is junk. This is the same failure class already logged for Himmelblau
+(2026-07-19, SOLVER_BUG, minimizer extraction), but a cleaner instance: with a
+unique global minimizer the "rank-4-collapsed-to-1" explanation offered there
+does not apply — =num_minimizers=1= is correct and the *location* is simply
+wrong — which narrows the suspect from rank detection to the atom-extraction
+step itself. Per instructions, no GitHub issue was filed.
+
+Secondary observations, not filed: (i) no Gram / moment matrix is exposed by
+=SosResult=, so a caller cannot independently verify a bound the way sub-tests
+(c) and (d) intended; (ii) at =tol=1e-12= the boxed Rosenbrock order-2
+relaxation returns =optimal_inaccurate/nan= — tightening tolerance can *lose* a
+bound that a looser tolerance obtains.

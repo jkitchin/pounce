@@ -1,0 +1,64 @@
+#+TITLE: Adversary LP cross-check: Chebyshev center of a polytope
+#+DATE: 2026-06-15
+
+* PROPERTIES
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: Chebyshev-center LP (largest inscribed ball), closed-form incenter/inradius
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization", S4.3.1 (Chebyshev center of a polyhedron).
+:KNOWN_OPTIMAL: r* = 1 (inradius); -1 in minimization form (min -r)
+:N_VARIABLES: 3  (center x, y and radius r)
+:N_CONSTRAINTS: 3 inequality (one per edge) + 1 lower bound (r >= 0)
+:END:
+
+* Problem
+
+Chebyshev center: center of the largest Euclidean ball inscribed in the
+polytope P = { x : a_i^T x <= b_i }.  LP form (variables x, r):
+
+  maximize   r
+  subject to a_i^T x + ||a_i||_2 * r <= b_i,   i = 1..m
+             r >= 0
+
+Concrete polytope: the 3-4-5 right triangle with vertices (0,0), (4,0), (0,3).
+Edges (interior = triangle):
+
+   -x        <= 0     (x >= 0),        ||a|| = 1
+       -y    <= 0     (y >= 0),        ||a|| = 1
+   3x + 4y   <= 12    (hypotenuse),    ||a|| = 5
+
+For a triangle the Chebyshev center is the incenter and r is the inradius.
+3-4-5 right triangle: inradius r = (3 + 4 - 5)/2 = 1; right angle at the origin
+with legs on the axes => incenter = (r, r) = (1, 1).
+
+Closed-form optimum: r* = 1, center* = (1, 1).
+pounce minimizes c'z (P=None) over z=[x,y,r] with c=[0,0,-1] => min = -1.
+
+* Results
+
+| solver          | status  | objective       | center  | r          | time (s) |
+|-----------------+---------+-----------------+---------+------------+----------|
+| pounce solve_qp | optimal | -9.9999999982e-1 | [1, 1] | 0.99999999 |   0.0010 |
+| scipy linprog   | 0 (opt) | -1.0000000000e+0 | [1, 1] | 1.00000000 |   0.0078 |
+| cvxpy CLARABEL  | optimal | -9.9999999998e-1 | ~[1,1] | ~1         |        - |
+
+KNOWN_OPTIMAL (min form) = -1.
+
+* Cross-check
+
+- rel_err vs known optimal    = 1.84e-10
+- obj_err vs oracle (linprog) = 1.84e-10
+- z inf-norm err vs oracle    = 1.84e-10
+- center err vs (1,1)         = 1.49e-10
+- inradius err vs 1           = 1.84e-10
+- min feasibility (>=0 ok)    = 3.51e-11  (all edge half-planes + r>=0 satisfied)
+- cvxpy (CLARABEL) agrees to ~1e-9.
+
+pounce recovers the exact incenter (1, 1) and inradius 1 of the 3-4-5 triangle,
+and the objective -1; both independent oracles (HiGHS and CLARABEL) confirm.
+pounce wall time (1.0 ms) is below the linprog oracle's (7.8 ms), so no
+performance concern.
+
+* VERDICT
+
+VERDICT: PASS

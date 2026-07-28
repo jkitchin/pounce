@@ -1,0 +1,51 @@
+#+TITLE: Adversary cross-check — exp cone: log-sum-exp minimization over a hyperplane
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: exp (exponential cone)
+- CLASS: log-sum-exp epigraph minimization
+- SOURCE: Standard convex analysis. log-sum-exp is convex and Schur-convex;
+  minimizing it over the hyperplane {sum_i x_i = c0} is solved at the
+  symmetric point x_i = c0/n (softmax(x) ∝ constraint normal 1 only when all
+  components equal). Then min LSE = log(n*exp(c0/n)) = log(n) + c0/n. Exact
+  closed form.
+- KNOWN_OPTIMAL: log(n) + c0/n. For n = 4, c0 = 4: log(4) + 1 =
+  2.386294361119891, with x* = (1,1,1,1).
+- N_VARIABLES (pounce): 2n+1 = 9 (x_0..x_3, epigraph t, u_0..u_3).
+- CONE LAYOUT: n = 4 exp cones (3 rows each, 12 G rows) + one nonneg row
+  (sum u <= 1) + one equality row (sum x = c0).
+
+* Formulation
+Epigraph trick: log(sum_i exp(x_i)) <= t  <=>  exists u_i >= 0 with
+sum_i u_i <= 1 and exp(x_i - t) <= u_i. Each exp(x_i - t) <= u_i is encoded as
+
+    (x = x_i - t, y = 1, z = u_i) in Kexp
+
+since Kexp = {(x,y,z): y*exp(x/y) <= z} gives 1*exp(x_i - t) <= u_i. Cone slack
+ordering s = h - G x = (x_i - t, 1, u_i). Objective minimizes t; sum_i u_i <= 1
+is a nonneg slack block; sum_i x_i = c0 is in A,b.
+
+* Results
+| solver         | status  | LSE            | time (s) |
+|----------------+---------+----------------+----------|
+| pounce         | optimal | 2.3862943590   |   0.0068 |
+| cvxpy/ECOS     | optimal | 2.3862943603   |   0.0030 |
+| cvxpy/SCS      | optimal | 2.3862943613   |   0.0017 |
+| known          | --      | 2.3862943611   |     --   |
+
+Recovered x* = (0.99999, 1.00003, 0.99995, 1.00003) ~ (1,1,1,1), as predicted.
+
+* Cross-check
+- rel_err pounce vs known = 8.68e-10
+- rel_err pounce vs ECOS  = 5.44e-10
+- rel_err pounce vs SCS   = 9.51e-10
+Both independent cvxpy oracles (ECOS and SCS) agree with pounce and with the
+closed-form log(4)+1 to ~1e-9.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: pounce's exp-cone driver recovers the exact log-sum-exp minimum
+log(4)+1 and the symmetric optimizer to ~1e-9 relative error, matching both
+ECOS and SCS. The multi-cone epigraph encoding (exp cones + nonneg block +
+equality) is handled correctly. No discrepancy.

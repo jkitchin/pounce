@@ -1,0 +1,17 @@
+* [2026-07-23] i2 lb>ub tiny gap — impossible-bound guard (TOLERANCE)
+:PROPERTIES:
+:FAMILY: qp
+:PR_AREA: #275/#295/#311 (impossible-bound guard)
+:VERDICT: TOLERANCE
+:END:
+
+min 0.5 x^2, lb=1.0, ub=1.0-gap (lb>ub ⇒ feasible set empty). cvxpy: infeasible
+for all gaps. pounce:
+  gap>=1e-6  -> primal_infeasible (correct)
+  gap=1e-8   -> numerical_failure, x=nan (ungraceful non-answer, but NOT success)
+  gap<=1e-10 -> status='optimal', x=[1.0] (violates ub by 1e-10)
+The silent-optimal cases violate ub by <= 1e-10, below the ~1e-8 feasibility
+tolerance, so treating lb~=ub as a fixed variable is numerically defensible ⇒
+borderline TOLERANCE, reported as an observation, not a hard finding. Worth a
+glance: the 1e-8 -> numerical_failure/nan transition is a small ungraceful band
+between the silent-optimal and correctly-infeasible regimes.

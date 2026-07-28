@@ -1,0 +1,92 @@
+#+TITLE: Adversary Run: Constrained Polynomial Program (Lasserre 2001, Example 5)
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: constrained global polynomial minimization (quartic inequalities, Putinar)
+:SOURCE: J. B. Lasserre, "Global Optimization with Polynomials and the Problem of Moments", SIAM J. Optim. 11(3):796-817, 2001, Example 5. Originally Floudas & Pardalos, /A Collection of Test Problems for Constrained Global Optimization Algorithms/, Problem 2.5.
+:KNOWN_OPTIMAL: -5.5080 at (x1, x2) = (2.3295, 3.1783)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 6 inequalities (2 quartic + 4 linear box)
+:END:
+
+\[
+\begin{aligned}
+\min\ & -x_1 - x_2 \\
+\text{s.t. } & x_2 \le 2x_1^4 - 8x_1^3 + 8x_1^2 + 2 \\
+             & x_2 \le 4x_1^4 - 32x_1^3 + 88x_1^2 - 96x_1 + 36 \\
+             & 0 \le x_1 \le 3,\quad 0 \le x_2 \le 4
+\end{aligned}
+\]
+
+Encoded for =sos_minimize= as \(g_i(x) \ge 0\): the two quartics moved to the
+\(g \ge 0\) side, plus \(x_1 \ge 0\), \(3 - x_1 \ge 0\), \(x_2 \ge 0\),
+\(4 - x_2 \ge 0\).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver                | Status          | lower_bound | is_exact | Wall Time |
+|-----------------------+-----------------+-------------+----------+-----------|
+| pounce sos order=2    | optimal         |   -7.000000 | False    |  0.0849 s |
+| pounce sos order=3    | iteration_limit |         nan | False    |  0.2859 s |
+| pounce sos order=4    | iteration_limit |         nan | False    |  1.4487 s |
+| grid 3001^2 (feas.)   | —               |   -5.506000 | —        |         — |
+| scipy SLSQP x300      | —               |   -5.508013 | —        |  0.7544 s |
+
+Known optimal: -5.5080
+
+The order-2 bound of **-7.000000 is a VALID lower bound** (true min
+-5.508013; gap 1.492). It is, however, exactly the trivial box bound
+\(-\max x_1 - \max x_2 = -3 - 4 = -7\): the order-2 relaxation extracts no
+information at all from the two quartic constraints.
+
+The natural response is to raise the order — and that is where it fails.
+Orders 3 and 4 both return =status="iteration_limit"= with =lower_bound=nan=,
+i.e. **no bound at all**. The Lasserre hierarchy is therefore inaccessible on
+this problem: the user is stuck at the trivial bound with no way to tighten it.
+Lasserre's own Example 5 reports the hierarchy converging to -5.5080 at a low
+relaxation order, so the moment SDP is not intrinsically pathological.
+
+Returning =nan= rather than a bogus number on a non-converged solve is
+*correct* behaviour (issue #117, guard F7) — the failure is the SDP not
+converging, not the reporting.
+
+* Cross-check / Verification
+- Dense feasible grid 3001x3001 over [0,3]x[0,4] with both quartic constraints
+  enforced: -5.5060 at (2.330, 3.176).
+- scipy SLSQP multistart, 300 feasible-checked starts: -5.5080132716 at
+  (2.3295202, 3.1784931), matching the published -5.5080 to 4 decimals. Used as
+  the true global minimum.
+- **Encoding sensitivity check** — the iteration-limit failure is not an
+  artifact of how the box was written. Three encodings were tried:
+  | box encoding                              | order 2                   | order 3         |
+  |-------------------------------------------+---------------------------+-----------------|
+  | 4 linear (x1>=0, 3-x1>=0, x2>=0, 4-x2>=0) | optimal, -7.000000        | iteration_limit |
+  | 2 quadratic (x1(3-x1)>=0, x2(4-x2)>=0)    | optimal, -6.666667        | iteration_limit |
+  | linear + redundant ball 25-x1^2-x2^2>=0   | optimal_inaccurate, nan   | iteration_limit |
+  All three stall at order 3. The redundant-ball variant (the standard
+  Archimedean-certificate trick) makes order 2 *worse*, degrading it to
+  =optimal_inaccurate= with no bound.
+- No tolerance / iteration-limit knob is exposed: =sos_minimize= accepts only
+  =order=, so there is no user-side workaround.
+- Every finite bound observed was <= the true minimum. **No invalid lower bound.**
+
+* Verdict
+=SOLVER_LIMITATION= — the underlying SDP hits its iteration limit at relaxation
+order >= 3 on a 2-variable, degree-4 constrained problem, so the Lasserre
+hierarchy cannot be advanced past the trivial order-2 bound (-7.0 vs a true
+minimum of -5.508013, a 27% gap). This is exactly the failure mode the protocol
+tells users to fix by "raising the order", and here raising the order destroys
+the bound instead of tightening it. Robustness is the issue, not correctness:
+every finite bound pounce returned was a genuine lower bound, and non-converged
+solves correctly report =nan= rather than a fabricated certificate. This is the
+same shape as the previously-logged Goldstein-Price finding (issue #124), now
+reproduced on a *constrained* instance with published reference values, which
+suggests the moment-SDP conditioning at higher order is a systemic weak spot
+rather than a one-off.
+
+Reproduce: =python adversary/runs/2026-07-19_sos_lasserre_constrained.py=

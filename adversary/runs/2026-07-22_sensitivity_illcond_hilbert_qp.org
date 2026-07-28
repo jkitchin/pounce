@@ -1,0 +1,137 @@
+#+TITLE: Adversary Run: Ill-Conditioned Parametric QP Sensitivity (Hilbert/near-LICQ)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: ill-conditioning / bad scaling (near-singular KKT, near-LICQ failure)
+:SOURCE: Hilbert matrix as the canonical ill-conditioned SPD test matrix (Higham, /Accuracy and Stability of Numerical Algorithms/ 2e, Sec. 28.1); sensitivity theory from Fiacco (1983) and Nocedal & Wright 2e Sec. 16.5
+:KNOWN_OPTIMAL: exact rational KKT solve (sympy) — dx/db computed in closed form
+:N_VARIABLES: 6
+:N_CONSTRAINTS: 2 equalities (+1 active inequality in case 2)
+:END:
+
+Convex QP with a deliberately wrecked spectrum and scaling:
+
+\[
+\min_x \tfrac12 x^\top P x + c^\top x \quad\text{s.t.}\quad A x = b,\; g^\top x \le h
+\]
+
+with \(P = D H_6 D\), \(H_6\) the \(6\times6\) Hilbert matrix
+(\(H_{ij} = 1/(i+j-1)\), \(\mathrm{cond}(H_6)\approx1.5\times10^7\)) and
+\(D = \mathrm{diag}(10^3,10^2,10^1,1,10^{-1},10^{-2})\), giving
+\(\mathrm{cond}(P) = 7.4\times10^{15}\). \(A\) is also badly scaled (row
+entries spanning \(10^4\) to \(10^{-4}\)). All data are exact rationals by
+construction.
+
+Because \(x^*(b)\) is *affine* in \(b\) for a fixed active set, the exact
+sensitivity is the \(x\)-block of
+
+\[
+\begin{bmatrix} P & A^\top \\ A & 0\end{bmatrix}
+\begin{bmatrix} \mathrm{d}x/\mathrm{d}b_0 \\ \cdot \end{bmatrix}
+= \begin{bmatrix} 0 \\ e_0 \end{bmatrix}
+\]
+
+with *no truncation error*, which is what makes this a sharp oracle.
+
+Three cases:
+1. equality-only ill-conditioned QP;
+2. same + an active, strictly complementary inequality (active-set KKT);
+3. *near-LICQ failure*: \(A\) rows \((1,1,1,1,1,1)\) and
+   \((1,1,1,1,1,1+\varepsilon)\), swept over \(\varepsilon = 10^{-3}\ldots10^{-10}\).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (case 3)
+:END:
+
+| Case                        | cond(KKT) | rel err pounce dx/db | FD plateau spread | Verdict |
+|-----------------------------+-----------+----------------------+-------------------+---------|
+| 1 equality-only             |   4.8e+09 |              1.6e-07 |           4.3e-19 | PASS    |
+| 2 + active inequality       |   3.2e+09 |              2.1e-07 |           2.2e-16 | PASS    |
+| 3 near-LICQ (eps=1e-9)      |   4.1e+17 |          *9.8e-01*   |           2.3e-13 | FAIL    |
+
+Cases 1 and 2 land at \(\sim2\times10^{-7}\), which is exactly
+\(\epsilon_{\mathrm{mach}}\cdot\mathrm{cond(KKT)}\) — the expected, honest
+floating-point loss. No regularization bias is detectable. The forward
+solve \(x^*\) is accurate to 3e-14 / 3e-8 respectively.
+
+Case 3 is the finding. Sweeping the near-singularity:
+
+| eps_par | cond(KKT) | \|dx\|exact | rel err *numpy LU* | rel err *pounce* | \|dx_p\|/\|dx_ex\| | rel err x* |
+|---------+-----------+-------------+--------------------+------------------+--------------------+------------|
+|   1e-03 |   7.55e09 |     1.20e03 |            1.22e-13 |          4.30e-07 |           1.000e00 |    3.2e-14 |
+|   1e-05 |   2.24e11 |     1.20e05 |            6.54e-12 |          7.83e-07 |           1.000e00 |    7.6e-12 |
+|   1e-06 |   2.45e12 |     1.20e06 |            8.24e-11 |          4.13e-05 |           1.000e00 |    1.8e-11 |
+|   1e-07 |   5.08e13 |     1.20e07 |            2.21e-09 |          4.08e-03 |           9.959e-01 |    2.1e-09 |
+|   1e-08 |   4.11e15 |     1.20e08 |            3.81e-09 |          2.90e-01 |           7.096e-01 |    1.5e-08 |
+|   1e-09 |   4.10e17 |     1.20e09 |            8.50e-08 |          9.76e-01 |           2.385e-02 |    1.5e-08 |
+|   1e-10 |   4.12e19 |     1.20e10 |            1.37e-06 |          9.998e-01 |           2.443e-04 |    1.4e-06 |
+
+Two things make this a real finding rather than an inherent precision limit:
+
+1. *The information is present in float64.* A plain dense LAPACK LU
+   (=numpy.linalg.solve=) handed the *same float64 KKT matrix and rhs*
+   recovers the exact dx/db to 1.4e-6 or better across the entire sweep,
+   including at cond = 4e19. So double precision is sufficient here (the
+   KKT is graded/structured, and LU with partial pivoting is both backward
+   stable and forward accurate on it). pounce's error is algorithmic, not
+   a precision wall.
+2. *The failure is a damping, not noise.* The ratio
+   \(\|\mathrm{d}x_{\text{pounce}}\|/\|\mathrm{d}x_{\text{exact}}\|\) decays
+   monotonically 1.00 → 0.71 → 0.024 → 0.00024. That is the signature of an
+   over-regularized (Tikhonov-damped) back-solve, not of round-off. It is
+   perfectly smooth and would never be mistaken for FD noise.
+
+Crucially the *forward* solve stays good throughout (rel err on \(x^*\)
+1.5e-8 at eps=1e-9, primal residual exactly 0), so the defect is isolated to
+the sensitivity back-solve, not to the QP solve feeding it.
+
+And it is *silent*: =active_indices= is empty, =weakly_active_indices= is
+empty, =kkt_dim= is the full 8, no exception, no status downgrade. A user
+gets a confidently-reported dx/db that is 97.6% wrong.
+
+* Cross-check / Verification
+
+- *Oracle A (exact):* KKT solved in exact rational arithmetic with sympy
+  =LUsolve=. Fully independent of pounce.
+- *Oracle B (FD re-solve, step-size sweep):* central difference
+  \((x^*(b+\delta)-x^*(b-\delta))/2\delta\) computed by 60-digit mpmath LU
+  re-solve at \(\delta = 10^{-1}\ldots10^{-9}\). Because \(x^*(b)\) is affine
+  in \(b\), the plateau is exact: spread across the whole sweep is 4e-19
+  (case 1), 2e-16 (case 2), 2e-13 (case 3). The plateau is *stable*, so the
+  disagreement in case 3 cannot be attributed to FD truncation or FD noise —
+  which was the discriminator this run was built to provide.
+- *Control:* float64 =numpy.linalg.solve= on the identical KKT data (above).
+- Oracles A and B agree with each other to 1e-19..1e-22 relative.
+
+Secondary observation (not the finding): in case 2 the active inequality has
+exact multiplier 2.28e-5 — strictly complementary — yet pounce reports it in
+=weakly_active_indices=. With data scaled over 10 orders of magnitude an
+absolute multiplier threshold trips spuriously. This is *conservative* (it
+over-warns rather than under-warns), so it is noted, not filed.
+
+* Verdict
+
+*SOLVER_LIMITATION.* pounce's =QpSensitivity.parametric_step= silently returns
+a heavily damped, badly wrong dx/db once the equality constraints approach
+rank deficiency (cond(KKT) beyond ~1e13), while a plain float64 LAPACK LU on
+identical data stays accurate to 1e-6 and while pounce's own forward solve
+\(x^*\) remains accurate to 1e-8. The error is a smooth monotone damping
+(97.6% at eps=1e-9, 99.98% at eps=1e-10), not round-off, and it is reported
+with no warning: empty =weakly_active_indices=, full =kkt_dim=, no status
+change.
+
+Classified as a LIMITATION rather than a BUG because damping the sensitivity
+of a near-LICQ-violating problem is a *defensible* numerical choice — the true
+dx/db is a knife-edge quantity of magnitude 1e9 that a user arguably should
+not trust. The defect is that the choice is invisible. The documented contract
+("exact to first order while the active set is unchanged") holds here — the
+active set never changes — so a user has no way to detect that the returned
+value is regularized. A diagnostic (constraint-rank / KKT-conditioning
+estimate surfaced alongside =weakly_active_indices=) would close the gap.
+
+Well-conditioned-to-moderately-ill-conditioned sensitivity (cond up to ~1e12,
+cases 1 and 2, including the active-set path) is *correct* and loses only the
+theoretically expected \(\epsilon\cdot\kappa\).

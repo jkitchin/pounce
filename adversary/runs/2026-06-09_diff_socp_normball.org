@@ -1,0 +1,59 @@
+#+TITLE: Adversary: differentiable SOCP layer (norm-ball constrained QP)
+#+DATE: 2026-06-09
+
+* Problem properties
+- SOURCE: Euclidean projection onto a ball, posed as a second-order-cone
+  program; canonical SOCP differentiable-layer example (cf. cvxpylayers /
+  Agrawal et al., "Differentiable Convex Optimization Layers", NeurIPS
+  2019; conic OptNet).
+- Layer type: =pounce.jax.solve_socp= / =pounce.torch.solve_socp=
+  (cone-aware OptNet implicit differentiation; arrow-operator path).
+- Dims: n=3 variables; one second-order cone of dim n+1=4; no equalities.
+- Distinct from box QP and from the equality QP above: a genuine conic
+  (second-order-cone) constraint that is ACTIVE at the optimum, so the
+  cone arrow-operator gradient path is exercised, not a polyhedral KKT.
+
+* Formulation
+#+begin_example
+  min   1/2 ||x||^2 + c^T x
+  s.t.  || x - center || <= r          (one SOC, dim 4)
+#+end_example
+Standard form  min 1/2 x^T P x + c^T x  s.t. Gx <=_K h, with P=I and slack
+s = h - G x in SOC(4):
+  s0  = r            -> G row 0 = 0,  h0 = r
+  s1: = center - x   -> G rows  = I,  h1: = center
+Differentiable w.r.t. (c, h); h carries the radius r and the center.
+Loss for gradient tests: L = w . x*. Reference = cvxpy/CLARABEL re-solve.
+
+* Results
+| check                      | metric              | value     | tol   | pass |
+|----------------------------+---------------------+-----------+-------+------|
+| forward jax vs cvxpy       | max\vert dx\vert    | 1.5e-10   | 1e-6  | yes  |
+| forward torch vs cvxpy     | max\vert dx\vert    | 1.5e-10   | 1e-6  | yes  |
+| cone active check          | s0 vs \vert\vert s_rest\vert\vert | 0.80 = 0.80 | -- | active |
+| grad vs FD  d/dc           | max err             | 3.9e-10   | 5e-5  | yes  |
+| grad vs FD  d/dh           | max err             | 1.2e-09   | 5e-5  | yes  |
+| JAX<->Torch parity         | max grad diff       | 0.0e+00   | 1e-6  | yes  |
+| torch.autograd.gradcheck   | (c, h) f64          | PASS      | --    | yes  |
+| torch gradgradcheck        | double-backward     | unsupported | --  | n/a  |
+
+pounce wall time (both backends, full script): ~2.2 s.
+
+* Cross-check
+- Forward matches cvxpy/CLARABEL to ~1.5e-10 in both backends; the cone
+  is genuinely active (slack s0 equals ||s_rest|| at 0.80), so the test
+  is not a degenerate inactive-constraint case.
+- jax.grad matches float64 central FD of an independent cvxpy re-solve to
+  ~1e-9 for both c and h (radius + center).
+- JAX and Torch gradients are bit-identical (0.0 diff).
+- gradcheck passes in float64. gradgradcheck reports double-backward not
+  implemented (same as the QP layer) -- a capability limit.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: forward conic solve correct against cvxpy with the cone active;
+analytic gradient matches finite differences and is identical across
+backends; gradcheck passes in float64. gradgradcheck is unsupported
+(SOLVER_LIMITATION: no second-order differentiation), which does not
+affect the correctness of the first-order gradient under test.

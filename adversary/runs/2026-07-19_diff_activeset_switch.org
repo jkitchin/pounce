@@ -1,0 +1,150 @@
+#+TITLE: Adversary Run: Differentiable QP layer across an ACTIVE-SET CHANGE
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: nondifferentiable point (active-set switch) + LICQ-failing degenerate active set + second derivatives
+:SOURCE: OptNet implicit-function rule (Amos & Kolter, ICML 2017, §3); closed-form parametric solution derived exactly below
+:KNOWN_OPTIMAL: x*(θ) = (θ/2, θ/2) for θ<2; (1,1) for θ≥2. dL/dθ = 1 (θ<2), 0 (θ>2)
+:N_VARIABLES: 2 (kink test), 2 (degenerate test), 3 (Jacobian test)
+:N_CONSTRAINTS: 1-2 inequalities
+:END:
+
+** Test 1 — a genuine kink with an exact closed form
+
+\[
+\min_{x\in\mathbb R^2} \tfrac12\|x\|^2 - \mathbf 1^\top x
+\quad\text{s.t.}\quad \mathbf 1^\top x \le \theta .
+\]
+
+The unconstrained optimum is $x=(1,1)$ with $\mathbf 1^\top x = 2$, so the
+constraint is *active iff* $\theta < 2$:
+
+\[
+\theta<2:\; x^*=(\tfrac\theta2,\tfrac\theta2),\;\lambda=\tfrac{2-\theta}2>0,\;
+\frac{dx^*}{d\theta}=(\tfrac12,\tfrac12);
+\qquad
+\theta>2:\; x^*=(1,1),\; \lambda = 0,\; \frac{dx^*}{d\theta}=0 .
+\]
+
+With $L=\mathbf 1^\top x^*$, $dL/d\theta = 1$ for $\theta<2$ and $0$ for
+$\theta>2$ — a *genuine discontinuity of the derivative* at $\theta=2$, where the
+active set changes and the problem is degenerate ($\lambda \to 0$ with the
+constraint tight). The Clarke subdifferential there is $[0,1]$.
+
+** Test 2 — degenerate active set, LICQ fails
+
+\[
+\min_{x\in\mathbb R^2}\tfrac12\|x\|^2 \quad\text{s.t.}\quad
+x_1+x_2 \le -t,\qquad 2x_1+2x_2 \le -2t
+\]
+
+The two rows are the *same constraint scaled*, both active at
+$x^*=(-t/2,-t/2)$. LICQ fails, so the multipliers are non-unique and the OptNet
+KKT matrix is singular — but the directional derivative
+$d x^*/dt = (-\tfrac12,-\tfrac12)$ is well defined.
+
+** Test 3 — 3-var QP, mixed active set, full Jacobian + second derivatives
+
+$P$ SPD $3\times3$, two inequality rows with row 0 active and row 1 slack;
+full $dx/d(c,h)$ Jacobian ($3\times5$), ~gradcheck~ and ~gradgradcheck~.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Quantity                                    | Value                       |
+|---------------------------------------------+-----------------------------|
+| forward vs exact, away from kink             | ≤ 1.3e-08                   |
+| forward vs exact, at kink θ=2 (default tol)  | 5.5e-05 (→3.8e-08 at tol 1e-14) |
+| dL/dθ vs exact, away from kink               | ≤ 3.1e-07                   |
+| worst \vert grad − central FD \vert over sweep | 1.23e-04 (at θ=1.99, default tol) |
+| full Jacobian dx/d(c,h) vs central FD         | 2.08e-08                    |
+| JAX ↔ Torch parity (values and Jacobians)     | **0.0e+00 — bit-identical** |
+| ~gradcheck~ (θ=1, θ=3, 3-var mixed)           | PASS (3/3)                  |
+| ~gradgradcheck~ (θ=1, θ=3, 3-var mixed)       | PASS (3/3)                  |
+| degenerate/LICQ-failing dx/dt vs exact         | ≤ 3.1e-08                   |
+| wall time (whole script, 2 frameworks)         | 2.4 s                       |
+
+All 40 checks passed.
+
+* Cross-check / Verification
+
+** The near-kink deviation is IPM tolerance, not a gradient bug
+
+The first run of this script "failed" seven checks, all clustered as
+$\theta \to 2$: e.g. at $\theta=1.99$ the layer returned
+$dL/d\theta = 0.99992$ against the exact $1.0$. The decisive discriminator is
+the ~tol~ sweep (T4) — *a real gradient bug would not shrink with ~tol~*:
+
+| θ     | tol   | fwd err  | dL/dθ         | err vs exact |
+|-------+-------+----------+---------------+--------------|
+| 1.99  | 1e-8  | 3.81e-07 | +0.9999239002 | 7.61e-05     |
+| 1.99  | 1e-10 | 8.70e-10 | +0.9999998260 | 1.74e-07     |
+| 1.99  | 1e-12 | 8.73e-11 | +0.9999999825 | 1.75e-08     |
+| 1.99  | 1e-14 | 8.56e-13 | +0.9999999998 | 1.71e-10     |
+| 1.999 | 1e-8  | 5.17e-07 | +0.9989675300 | 1.03e-03     |
+| 1.999 | 1e-14 | 1.60e-12 | +0.9999999968 | 3.19e-09     |
+| 2.001 | 1e-8  | 5.18e-07 | +0.0010340032 | 1.03e-03     |
+| 2.001 | 1e-14 | 1.60e-12 | +0.0000000032 | 3.19e-09     |
+
+The error falls ~$10^6$× monotonically as ~tol~ tightens $10^{-8}\to10^{-14}$,
+on *both* sides of the kink and in *both* the forward solve and the gradient.
+This is the barrier smoothing the kink over a width set by the central-path
+parameter — expected, textbook interior-point behaviour when a constraint is
+*weakly* active ($\lambda\to0$), not a defect in the differentiation rule.
+
+Two further pieces of evidence point the same way:
+1. The gradient agrees with the central finite difference of a **re-solve at the
+   same tolerance** at least as well as it agrees with the exact derivative —
+   i.e. the layer is correctly differentiating *the QP it actually solved*.
+2. The forward error and the gradient error track each other in magnitude at
+   every $\theta$ and every ~tol~.
+
+** Behaviour at and around the kink is sane, not silently wrong
+
+- *At* $\theta = 2$ exactly, both backends return $dL/d\theta = 0.5000001$ —
+  the midpoint of the valid subdifferential $[0,1]$ (the barrier-smoothed
+  derivative). Finite, in-range, and identical across JAX and Torch. No NaN, no
+  ~inf~, no spurious huge value from the near-singular KKT solve.
+- *Approaching* the kink from both sides at $\delta = 10^{-2} \ldots 10^{-10}$,
+  the gradient moves smoothly $1.0 \to 0.5$ (from below) and $0.0 \to 0.5$ (from
+  above), always summing to $\approx 1$ and never leaving $[0,1]$. The smoothing
+  width is $\sim\!10^{-4}$ at default ~tol~, i.e. the layer transitions between
+  the two one-sided derivatives instead of blowing up.
+
+** Degenerate active set (LICQ failure)
+
+With duplicated constraint rows both active — a singular OptNet KKT system —
+the forward solve matched the exact $x^*$ to $\le 7.8\text{e-}9$ and
+$d(\mathbf 1^\top x)/dt$ matched the exact $-1$ to $\le 3.1\text{e-}8$ and the
+FD re-solve to $\le 2.8\text{e-}8$, at $t = 0.5, 1.0, 2.0$. No NaN, no
+multiplier-ambiguity artefact leaking into the well-defined directional
+derivative.
+
+** Second derivatives and parity
+
+~gradgradcheck~ passed at $\theta=1$ (constraint active), $\theta=3$ (inactive),
+and on the 3-var mixed-active-set QP w.r.t. both $c$ and $h$ — so the layer's
+backward pass is itself correctly differentiable. JAX and Torch agreed to
+**exactly 0.0** on every forward value, every gradient, and the full $3\times5$
+Jacobian; the two frontends are not independently implemented drifts but the
+same numerics.
+
+* Verdict
+
+*PASS* (with a ~TOLERANCE~ note, not filed). The OptNet gradient is correct
+wherever the derivative exists: full Jacobian within $2.1\text{e-}8$ of central
+finite differences, ~gradcheck~ and ~gradgradcheck~ clean on both sides of the
+active-set switch, and exact JAX↔Torch parity. At the active-set change itself
+the derivative is genuinely discontinuous, and pounce behaves sanely rather than
+silently wrongly — it returns the barrier-smoothed value inside the valid
+subdifferential $[0,1]$, transitions smoothly between the one-sided limits, and
+never produces NaN or a blow-up from the near-singular KKT system. The
+$\sim\!10^{-4}$-wide deviation band around the kink at default ~tol~ collapses by
+six orders of magnitude when ~tol~ is tightened, confirming it as interior-point
+kink smoothing rather than a ~GRADIENT_ERROR~. Users differentiating near a
+weakly-active constraint should tighten ~tol~; that is a documentation point, not
+a bug.

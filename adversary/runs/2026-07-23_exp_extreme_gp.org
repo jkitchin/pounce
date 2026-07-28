@@ -1,0 +1,66 @@
+#+TITLE: Adversary Run: Extreme-coefficient geometric program (exp cone)
+#+DATE: 2026-07-23
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: extreme-scale GP
+:SOURCE: min x + K/x (x>0); AM-GM optimum x*=sqrt(K), f*=2 sqrt(K). K=1e12 => f*=2e6.
+:KNOWN_OPTIMAL: 2.0e6
+:N_VARIABLES: 3 (u,t1,t2)
+:N_CONSTRAINTS: two 3-D exponential cones
+:END:
+
+min x + K/x, modeled with x=e^u:  min t1+t2 s.t. (u,1,t1)∈Kexp, (lnK−u,1,t2)∈Kexp.
+Optimal cone variables t1=t2=sqrt(K)=1e6.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver          | Status            | Objective      | Rel Err vs f* | Wall Time |
+|-----------------+-------------------+----------------+---------------+-----------|
+| pounce (exp)    | numerical_failure | 1.99999025e6   | 4.87e-6       | 0.009 s   |
+| cvxpy ECOS      | optimal           | 2.00000000e6   | 9.7e-10       | 0.003 s   |
+| cvxpy SCS       | inaccurate        | 7.286e5        | 6.4e-1 (fail) | —         |
+
+Known optimal: 2.0e6.
+
+pounce returns an objective correct to 4.87e-6 but reports =numerical_failure=
+(success=False). ECOS solves the identical model to 9.7e-10; SCS diverges (bad
+oracle here — ECOS is the reliable one).
+
+* Cross-check / Verification
+Residuals at the returned point (K=1e12):
+- primal_infeasibility = 4.9e-6  (feasible)
+- dual_infeasibility   = 5.4e-8  (dual-feasible)
+- complementarity      = 3.84    (= reported kkt_error)
+- scaling_warning      = None
+
+The reported =kkt_error= is the raw complementarity gap s·z, measured in
+ABSOLUTE units. The optimal cone variables are ~1e6, so the complementarity
+floor is ~1e6 × (relative tol) ≈ 1, which never reaches the absolute default
+tolerance ⇒ =numerical_failure=. Normalizing the gap (÷(1+|obj|)) gives
+1.9e-6, well inside tol.
+
+Controls confirming root cause:
+- =tol=1e-6= ⇒ status flips to =optimal= at the *same* iterate (no re-solve).
+- =max_iter= up to 50000 ⇒ no change (it is an accuracy plateau, not an iter cap).
+- Hand-rescaled equivalent (substitute x=sqrt(K)·w so optimal cone vars are O(1),
+  obj = sqrt(K)(t1+t2)) ⇒ =optimal=, rel err 2.5e-7.
+- K sweep: optimal for K≤1e10; numerical_failure for K≥1e12 (obj still correct;
+  rel err grows 5e-6 → 8.7e-5 as K:1e12→1e14).
+
+* Verdict
+SOLVER_LIMITATION — pounce's non-symmetric HSDE (exp/power) driver uses an
+unnormalized complementarity gap as its convergence/status criterion. On a
+well-posed GP whose optimal cone variables are large (extreme-but-legitimate
+coefficient scaling), the absolute complementarity cannot reach the absolute
+tolerance, so the solver reports =numerical_failure= / success=False at a point
+that is primal-feasible (4.9e-6), dual-feasible (5.4e-8), and objective-correct
+(4.87e-6). ECOS solves it to 1e-9; a hand-rescaled equivalent and =tol=1e-6=
+both recover =optimal=. =scaling_warning= is not raised. Same defect confirmed
+in the power cone (see companion run). Analogous in spirit to the scale-
+normalization issues #324 (QP) / #327 (NLP), here in the HSDE conic driver.
+Filed jointly with the power case.

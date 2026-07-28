@@ -1,0 +1,87 @@
+#+TITLE: Adversary Run: auto-routing must refuse an indefinite (nonconvex) box QP
+#+DATE: <2026-07-19>
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: nonconvex (indefinite) quadratic objective + box bounds
+:SOURCE: Classic indefinite BoxQP; Nocedal & Wright, /Numerical Optimization/ 2e, Ch. 16.1 (an indefinite quadratic on a box has its minimizers on the boundary; the interior stationary point is a saddle)
+:KNOWN_OPTIMAL: A: -1.0 at (1,-1)/(-1,1);  B: -5e-4 at (0,±1)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 4 bounds (box), no general constraints
+:END:
+
+Case A (clearly indefinite, eigenvalues 3 and -1):
+\begin{align*}
+\min\quad & \tfrac12(x_1^2+x_2^2) + 2x_1x_2, \qquad -1\le x\le 1
+\end{align*}
+The interior stationary point $(0,0)$ is a *saddle* ($f=0$). Vertex values:
+$(1,1)\to3$, $(-1,-1)\to3$, $(1,-1)\to-1$, $(-1,1)\to-1$, so $f^\*=-1$.
+
+Case B (barely indefinite, $\lambda_{\min}=-10^{-3}$):
+\begin{align*}
+\min\quad & \tfrac12 x_1^2 - \tfrac12\cdot 10^{-3}\, x_2^2, \qquad -1\le x\le 1
+\end{align*}
+$f^\* = -5\times10^{-4}$ at $(0,\pm1)$. This is the tolerance trap: a convexity
+test with a sloppy threshold would classify this as a convex QP and return
+$x=(0,0)$, $f=0$ — a *wrong answer*, not merely a slower route.
+
+The routing contract under test: =solver_selection="auto"= must agree with
+forced =solver_selection="nlp"=, and must **not** hand either problem to the
+convex LP/QP or SOCP fast path (both assume a PSD Hessian).
+
+Run: =adversary/runs/2026-07-19_autoroute_indefinite-box-qp.py=
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+Case A (x0 = (0.3,-0.6)):
+
+| Solver                | Status | Objective         | Rel Err | Iters | Wall Time |
+|-----------------------+--------+-------------------+---------+-------+-----------|
+| pounce =auto=         | 0      | -1.0000000150e+00 | 1.5e-08 |     6 |  0.0021 s |
+| pounce =nlp= (forced) | 0      | -1.0000000150e+00 | 1.5e-08 |     - |  0.0012 s |
+| scipy L-BFGS-B        | ok     | -1.0000000000e+00 |       - |     - |  0.0006 s |
+| dense grid (401²)     | -      | -1.0000000000e+00 |       - |     - |         - |
+
+Case B (x0 = (0.2,0.4)):
+
+| Solver                | Status | Objective         | Rel Err | Iters | Wall Time |
+|-----------------------+--------+-------------------+---------+-------+-----------|
+| pounce =auto=         | 0      | -4.9999750480e-04 | 2.5e-09 |     9 |  0.0020 s |
+| pounce =nlp= (forced) | 0      | -4.9999750480e-04 | 2.5e-09 |     - |  0.0016 s |
+| scipy L-BFGS-B        | ok     | -5.0000000000e-04 |       - |     - |  0.0002 s |
+| dense grid (401²)     | -      | -5.0000000000e-04 |       - |     - |         - |
+
+=auto= vs forced =nlp= objective gap: **0.0e+00 in both cases** (bit-identical
+x as well). In both cases =res.info.get("solver")= is =None=, i.e. no
+specialized convex route was taken — the correct outcome, since a PSD-assuming
+route on an indefinite Hessian would be a genuine wrong answer, not a
+conservative fall-through.
+
+Both cases land on a *global* minimizer (A: (1,-1); B: (≈0, ≈1)), matching the
+brute-force grid and scipy from the same x0. The small residual (1e-8 in A,
+2.5e-9 in B) is the interior-point solver's bound-relaxation distance from the
+box boundary, not a routing effect.
+
+* Cross-check / Verification
+- Gradient finite-differenced against the analytic =gf= before every solve
+  (assert in the script).
+- Global oracle: 401×401 dense grid over the box for both cases — reproduces
+  f* = -1 at (1,-1) and f* = -5e-4 at (0,-1).
+- Local oracle from the same x0: =scipy.optimize.minimize(method="L-BFGS-B",
+  tol=1e-12)= — agrees to 1.5e-08 (A) and 2.5e-09 (B).
+- cvxpy is deliberately *not* used: the problems are nonconvex and would be
+  rejected as non-DCP; using it would be a formulation error.
+- Routing transparency: =auto= and forced =nlp= produced identical objectives
+  and identical x to all printed digits.
+
+* Verdict
+=PASS= — the auto-router correctly declines to specialize on an indefinite
+quadratic, including the barely-indefinite case B where the min eigenvalue is
+only -1e-3 and a loose PSD tolerance would have produced x=(0,0), f=0 instead
+of f=-5e-4. Answers under =auto= and forced =nlp= agree exactly, so the
+routing-transparency contract holds. No =ROUTING_ERROR=; the fall-through to
+the NLP solver is the correct (and here the only sound) route.

@@ -1,0 +1,51 @@
+#+TITLE: Adversary Run: Auto-routing transparency on unconstrained Rosenbrock
+#+DATE: 2026-06-15
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: unconstrained nonlinear least-squares / Rosenbrock
+:SOURCE: H. H. Rosenbrock, Computer Journal 3(3):175-184 (1960). f(x)=100*(y-x^2)^2+(1-x)^2; f*=0 at x*=(1,1).
+:KNOWN_OPTIMAL: 0.0
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 0 (unconstrained, no bounds)
+:START: x0 = (-1.2, 1.0)  (Rosenbrock's classic hard start)
+:END:
+
+The routing-transparency contract: =minimize(auto)= must agree with
+=minimize(solver_selection="nlp")= to tolerance. This is a smooth, nonconvex,
+unconstrained problem with no specialized convex structure, so the auto router
+is expected to route to the general NLP solver. A different problem shape from
+the previously tested convex-QP, LP eq+ineq, and QCQP-ball routes.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status            | Objective      | Rel Err vs known | Wall Time |
+|---------------------+-------------------+----------------+------------------+-----------|
+| pounce (auto)       | 0 Solve_Succeeded | 5.568517e-17   | 5.57e-17         | 0.0163 s  |
+| pounce (forced nlp) | 0 Solve_Succeeded | 5.568517e-17   | 5.57e-17         | 0.0153 s  |
+
+Known optimal: 0.0 at x* = (1, 1).
+Auto solution x = (0.99999999, 0.99999999), inf-norm error vs x* = 1.49e-08.
+
+auto vs nlp objective disagreement: 0.00e+00; x infinity disagreement: 0.00e+00.
+
+* Cross-check / Verification
+The auto and forced-nlp solves agree to machine zero on both objective and x, so
+the routing-transparency contract holds. The =info= block from the auto solve
+shows iter_count=39, mu=2.5e-09, final_kkt_error=6.6e-09, empty g/active
+constraints — consistent with the general interior-point NLP solver on a smooth
+unconstrained problem (no convex/QP specialization engaged, as expected for the
+banana function). Both paths recover f=0 at (1,1) from the hard (-1.2, 1.0) start.
+
+Wall times are within noise of each other (auto 0.0163 s vs nlp 0.0153 s, ratio
+~1.07x), so no performance regression: the auto router effectively used the same
+general NLP path the forced option selects.
+
+* Verdict
+PASS — auto and forced-nlp answers are identical (disagreement 0.00e+00) and both
+reach the correct global optimum f*=0 at x*=(1,1). The auto router transparently
+routed an unconstrained nonconvex problem to the general NLP solver.

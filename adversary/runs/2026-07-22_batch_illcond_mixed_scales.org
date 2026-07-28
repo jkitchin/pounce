@@ -1,0 +1,120 @@
+#+TITLE: Adversary Run: Batch of QPs with Mixed Conditioning and Objective Scales
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: ill-conditioning & bad scaling (per-item heterogeneous)
+:SOURCE: internal-consistency contract (batch == per-item single solve_qp) + cvxpy/CLARABEL,SCS,OSQP,ECOS per item + EXACT exhaustive active-set enumeration over the box (3^6 = 729 patterns)
+:KNOWN_OPTIMAL: per item, from exact enumeration; hard item k=5: -6.8510532741e+19
+:N_VARIABLES: 6 per item x 6 items = 36
+:N_CONSTRAINTS: box lb=-1, ub=+1 on every variable (12 bounds per item)
+:END:
+
+Six box-constrained convex QPs solved as one batch:
+
+\[
+\min_x\ \tfrac12 x^\top P_k x + c_k^\top x \quad \text{s.t.}\quad -1 \le x \le 1,
+\qquad k = 0,\dots,5
+\]
+
+with \(P_k = s_k\, Q_k \operatorname{diag}(\lambda)\, Q_k^\top\), \(Q_k\) random
+orthogonal, \(\lambda\) log-spaced over \([1, 10^{2k}]\), and objective scale
+\(s_k = 10^{2.4k}\). So item 0 has \(\kappa(P)=10^0\) and objective \(O(1)\),
+while item 5 has \(\kappa(P)=10^{10}\) and objective \(O(10^{19})\) --- a
+\(10^{10}\) conditioning spread and a \(\sim 10^{19}\) objective-magnitude
+spread inside a single =solve_qp_batch= call sharing one =tol=.
+
+Each \(c_k = -P_k x^{\text{target}}_k\) with \(x^{\text{target}}\) outside the
+box, so the active set is nontrivial (several bounds active at the optimum).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (item 5 only)
+:END:
+
+| k | cond(P) | scale | pounce status   | pounce obj     | exact obj      | rel-x vs exact | box viol |
+|---+---------+-------+-----------------+----------------+----------------+----------------+----------|
+| 0 |   1e+00 | 1e+00 | optimal         | -4.367158e+00  | -4.367158e+00  |       2.22e-09 | 0.00e+00 |
+| 1 |   1e+02 | 3e+02 | optimal         | -1.317890e+04  | -1.317890e+04  |       2.85e-11 | 1.27e-11 |
+| 2 |   1e+04 | 6e+04 | optimal         | -4.692470e+09  | -4.692470e+09  |       1.03e-08 | 1.03e-08 |
+| 3 |   1e+06 | 2e+07 | optimal         | -1.676109e+13  | -1.676109e+13  |       9.77e-09 | 9.77e-09 |
+| 4 |   1e+08 | 4e+09 | optimal         | -4.296605e+16  | -4.296605e+16  |       2.97e-08 | 2.97e-08 |
+| 5 |   1e+10 | 1e+12 | iteration_limit | -6.860539e+19  | -6.851053e+19  |   *8.84e-01*   | *8.84e-01* |
+
+Wall time: batch 0.0048 s, per-item singles 0.0525 s (batch ~11x faster),
+cvxpy/CLARABEL 0.0099 s.
+
+*PER-ITEM MAX relative error vs exact enumeration: 8.841e-01 (item k=5).*
+Items 0-4 are all <= 3e-8. The mean would have been ~0.15 and the median
+~1e-8; only the per-item max exposes the failure.
+
+* Cross-check / Verification
+
+** The assigned hypothesis is REFUTED
+The specific risk under test --- a batch-level *shared* tolerance or shared
+scaling that is right for one item and silently wrong for another --- does not
+occur:
+
+- =batch vs per-item single solve_qp=: per-item max rel-x = *0.00e+00*, bit-for-bit
+  identical on all six items, including the ill-conditioned one.
+- =mixed batch vs batch-of-1 (solo)=: per-item drift = *0.00e+00* on all six.
+  Putting a \(10^{12}\)-scaled item next to a \(10^0\)-scaled item does not
+  perturb either. There is no cross-item contamination and no batch-global
+  scaling.
+- The shared =tol= propagates per item correctly: =tol=1e-12, max_iter=500=
+  moves items 0-4 by <= 3e-8 (already converged) and moves item 5 by 5.85e-01
+  (still converging), which is the expected per-item behavior.
+- Statuses are attributed to the right index: =['optimal' x5, 'iteration_limit']=
+  in both the batch and the per-item single path.
+
+** Independent oracles agree with each other, not with pounce, on item 5
+| solver              | obj (item 5)     | box viol | rel-x vs exact |
+|---------------------+------------------+----------+----------------|
+| exact enumeration   | -6.8510532741e+19 | 0        | 0              |
+| cvxpy CLARABEL      | -6.8510530999e+19 | 0        | 3.21e-06       |
+| cvxpy OSQP          | -6.8510532741e+19 | 0        | ~1e-11         |
+| cvxpy ECOS          | -6.8510531406e+19 | 0        | ~1e-6          |
+| cvxpy SCS           | -6.8510532546e+19 | 1.17e-06 | ~1e-6          |
+| pounce (default)    | -6.8605389255e+19 | *8.84e-01* | 8.84e-01     |
+
+pounce's objective is *lower* than the true optimum only because its returned
+iterate is grossly *infeasible*: it violates the box by 0.884 on at least one
+coordinate. It is not a better solution, it is an unconverged interior-point
+iterate.
+
+** pounce does reach the right answer with a larger budget
+| max_iter (tol=1e-10) | status          | rel-x vs exact | box viol |
+|----------------------+-----------------+----------------+----------|
+|                  200 | iteration_limit |       5.72e-01 | 5.72e-01 |
+|                 1000 | iteration_limit |       5.75e-01 | 5.75e-01 |
+|                 5000 | iteration_limit |     *5.04e-09* | 5.04e-09 |
+
+At =max_iter=5000= pounce lands on the exact enumeration optimum to 5e-9 ---
+so the algorithm is correct, it just needs ~1000x the iterations CLARABEL/OSQP
+need at \(\kappa = 10^{10}\). Note that even at 5000 iterations the status is
+still reported as =iteration_limit= despite the point being converged to 5e-9,
+i.e. the termination test never fires at this conditioning.
+
+* Verdict
+
+*SOLVER_LIMITATION.* The batch machinery itself is clean --- this run found no
+shared-tolerance or shared-scaling defect, and that was the hypothesis being
+tested. Batch results are bit-for-bit identical to per-item single solves and
+to batch-of-1 solves, so batching neither degrades nor contaminates a
+badly-scaled item.
+
+The finding is in the underlying convex QP IPM, and it surfaces at
+\(\kappa(P) \approx 10^{10}\) with \(O(10^{19})\) objective magnitude: pounce
+exhausts its default iteration budget and returns a point that violates the box
+constraints by 0.884 (rel-x error 8.8e-1 vs the exact optimum), on a problem
+that CLARABEL, OSQP, ECOS and SCS all solve at default settings in milliseconds.
+Two mitigating facts keep this a limitation rather than a bug: (1) the status is
+honestly reported as =iteration_limit=, never =optimal=, so a caller checking
+status is not misled by a silently wrong answer --- which is exactly the failure
+mode this iteration was hunting; and (2) =max_iter=5000= recovers the exact
+optimum to 5e-9, so the iteration is convergent, merely slow. The secondary
+observation --- that the =optimal= termination test still does not fire even
+once the iterate is accurate to 5e-9 --- suggests the convergence test is
+measured in unscaled units and becomes unsatisfiable when the objective is
+\(O(10^{19})\); that is the more likely root cause and the more actionable one.

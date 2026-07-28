@@ -1,0 +1,39 @@
+#+TITLE: Adversary Run: SOS global minimization of a quartic
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: univariate/low-degree polynomial global minimization (Lasserre)
+:SOURCE: known global minimum of a double-well quartic.
+:KNOWN_OPTIMAL: -1.25
+:N_VARIABLES: polynomial in 1 var (2 symmetric minimizers)
+:N_CONSTRAINTS: SOS / moment relaxation
+:END:
+
+Global minimization of a double-well quartic whose global minimum is -1.25,
+attained at two symmetric minimizers. =sos_minimize= returns a lower bound that
+is exact (=is_exact=True=) at the chosen relaxation order, and recovers both
+minimizers.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver           | Status  | lower_bound    | Rel Err   | is_exact | n_min | Wall Time |
+|------------------+---------+----------------+-----------+----------+-------+-----------|
+| pounce (SOS)     | optimal | -1.2499999996  | 3.36e-10  | True     | 2     | 0.0041 s  |
+| dense grid       | —       | -1.25          | (ref)     | —        | 2     | —         |
+
+Known optimal: -1.25
+
+* Cross-check / Verification
+A dense grid search confirms the global minimum is -1.25 with two symmetric
+minimizers. pounce's lower bound matches to 3.4e-10 and is flagged exact, and
+the recovered minimizer count (2) matches the grid. The bound does not exceed
+the true global minimum (which would be the only SOS-specific bug mode).
+
+* Verdict
+PASS — the SOS lower bound is tight (exact) and matches the known global minimum
+-1.25 to ~1e-10, with the correct number of recovered minimizers.

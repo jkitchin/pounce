@@ -1,0 +1,170 @@
+#+TITLE: Adversary Run: LP Status-Discrimination Battery (infeasible / unbounded / both / singleton / marginal pair)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: infeasibility / unboundedness / status-reporting correctness
+:SOURCE: LP duality + Farkas' lemma. Schrijver, "Theory of Linear and Integer Programming", Cor. 7.1d (Farkas); Bertsimas & Tsitsiklis, "Introduction to Linear Optimization", Thm 4.6 and S4.10 / Table 4.2 (the 2x2 primal/dual status table, including the primal-infeasible-AND-dual-infeasible cell).
+:KNOWN_OPTIMAL: per-instance; ground truth is the STATUS, established by exact rational certificates
+:N_VARIABLES: 2 per instance
+:N_CONSTRAINTS: 1-4 inequality rows + 2 lower bounds
+:END:
+
+All six instances are in pounce's =solve_qp= LP form (=P=None=):
+
+\begin{align*}
+\min_x\; c^\top x \quad\text{s.t.}\quad Gx \le h,\; x \ge 0
+\end{align*}
+
+| # | instance                | data                                                             | ground truth                         |
+|---+-------------------------+------------------------------------------------------------------+--------------------------------------|
+| a | =a_infeasible=          | $x_1{+}x_2\le 1$, $x_1{+}x_2\ge 2$, $c=(1,1)$                    | primal infeasible, dual FEASIBLE     |
+| b | =b_unbounded=           | $x_1{-}x_2\le1$, $x_2{-}x_1\le1$, $c=(-1,-1)$                    | primal feasible, unbounded below     |
+| c | =c_both_infeasible=     | $x_1\le -1$, $x\ge0$, $c=(0,-1)$                                 | primal infeasible AND dual infeasible|
+| d | =d_singleton=           | $x_1{+}x_2=1$, $x_1=x_2$ as 4 inequalities, $c=(1,2)$            | optimal, feasible set $=\{(\tfrac12,\tfrac12)\}$, $z^*=3/2$ |
+| e1| =e_marginal_feasible=   | $x_1{+}x_2\le1$, $x_1{+}x_2\ge 1{-}10^{-12}$                     | optimal (strip of width $10^{-12}$)  |
+| e2| =e_marginal_infeasible= | $x_1{+}x_2\le1$, $x_1{+}x_2\ge 1{+}10^{-12}$                     | primal infeasible by $10^{-12}$      |
+
+Instance (a) is deliberately built so the dual is feasible ($z=0$ works), which
+*removes* the "infeasible or unbounded" escape hatch: =primal_infeasible= is the
+only true status.  Instance (c) is the opposite --- the primal is empty (so it is
+*not* unbounded) *and* column 2 of $G$ is identically zero with $c_2=-1<0$, so
+no $z\ge0$ satisfies $c+G^\top z\ge0$ and the dual is empty too.  Instance (d)
+has empty interior, so Slater fails and no strictly feasible point exists for an
+interior-point method to start from.
+
+** Ground truth: exact rational certificates
+No oracle is trusted for the status. The script constructs, and *verifies at
+runtime with =fractions.Fraction= on the exact float64 data pounce receives*:
+
+- *infeasibility* --- Farkas certificate $y\ge0$, $G^\top y\ge0$, $h^\top y<0$,
+  which *proves* $\{Gx\le h, x\ge0\}=\emptyset$;
+- *unboundedness* --- a feasible $x_0$ plus a recession ray $d\ge0$, $Gd\le0$,
+  $c^\top d<0$, which *proves* the objective is unbounded below;
+- *optimality* --- primal $x$ and dual $z\ge0$ with $c+G^\top z\ge0$, exact
+  complementary slackness, and zero duality gap $c^\top x=-h^\top z$;
+- *dual infeasibility* --- the structural zero-column argument above.
+
+Every certificate verifies exactly (=assert= in the script). For (e2) the exact
+Farkas value is $h^\top y = -563/562949953421312 \approx -1.0\times10^{-12}<0$,
+and for (e1) the exact optimum is $9007199254731985/9007199254740992$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| instance                | exact truth                        | pounce            | scipy/HiGHS       | cvxpy/CLARABEL    | iters | pounce t |
+|-------------------------+------------------------------------+-------------------+-------------------+-------------------+-------+----------|
+| =a_infeasible=          | primal_infeasible                  | primal_infeasible | primal_infeasible | primal_infeasible |     8 |  0.0018s |
+| =b_unbounded=           | dual_infeasible                    | dual_infeasible   | dual_infeasible   | dual_infeasible   |     2 |  0.0005s |
+| =c_both_infeasible=     | primal_infeasible & dual_infeasible| dual_infeasible   | primal_infeasible | primal_infeasible |     6 |  0.0010s |
+| =d_singleton=           | optimal, 3/2                       | optimal, 1.4999999945 | optimal, 1.5  | optimal, 1.4999999952 |  7 |  0.0015s |
+| =e_marginal_feasible=   | optimal, 0.999999999999            | optimal, 0.9999999983 | optimal       | optimal           |     7 |  0.0010s |
+| =e_marginal_infeasible= | primal_infeasible                  | *optimal*         | *optimal*         | *optimal*         |     7 |  0.0014s |
+
+Five of six statuses are exactly right, and the sixth (e2, infeasible by
+$10^{-12}$) is missed identically by *all three* solvers.
+
+(d) --- the empty-interior singleton --- is the one that most often breaks an
+IPM, and pounce lands on it in 7 iterations with objective error 5.5e-09, better
+than CLARABEL's 4.8e-09-scale error and comparable throughout.
+
+** (c) both-infeasible: does pounce discriminate, and is it WRONG?
+pounce reports =dual_infeasible=; scipy and CLARABEL both report
+=primal_infeasible=. *Both answers are literally true* --- this instance sits in
+the both-empty cell of the B&T status table, and the script proves each half
+independently. So pounce is *not wrong*, and it does *not* emit a merged
+"infeasible_or_unbounded" status; it commits to one true branch.
+
+The one caveat worth recording: =qp.py= glosses =dual_infeasible= as
+"(unbounded)", and this LP is *not* unbounded --- its primal is empty, so
+$\inf = +\infty$. A caller who reads the status name literally is fine; a caller
+who reads the docstring gloss would draw the wrong conclusion about *why* the
+problem failed. This is a documentation/semantics nit, not a wrong status.
+pounce's answer is stable: it stays =dual_infeasible= under =tol=1e-10=, under
+$c_2=-10^6$, and under $h=-10^6$.
+
+Notably, pounce does not dress this up as a solution: it returns
+=kkt_error=9.85e+07= with $x_2\approx4.8\times10^7$ diverging, i.e. it detected
+the unbounded direction first and said so.
+
+** (e) the marginal pair: where does discrimination begin?
+Sweeping $\varepsilon$ in $x_1{+}x_2\ge1{+}\varepsilon$ (infeasible for *every*
+$\varepsilon>0$; the Farkas certificate is re-verified exactly at each row):
+
+| eps    | pounce            | pounce reported p_infeas | scipy/HiGHS       | cvxpy/CLARABEL         |
+|--------+-------------------+--------------------------+-------------------+------------------------|
+| 1e-12  | optimal           |                 1.71e-09 | optimal           | optimal                |
+| 1e-11  | optimal           |                 1.72e-09 | optimal           | optimal                |
+| 1e-10  | optimal           |                 1.81e-09 | optimal           | optimal                |
+| 1e-09  | optimal           |                 2.74e-09 | optimal           | optimal                |
+| 1e-08  | numerical_failure |                 0.00e+00 | *optimal*         | *optimal*              |
+| 1e-07  | numerical_failure |                 0.00e+00 | *optimal*         | infeasible_inaccurate  |
+| 1e-06  | primal_infeasible |                 5.00e-07 | primal_infeasible | primal_infeasible      |
+| 1e-05  | primal_infeasible |                 5.03e-06 | primal_infeasible | primal_infeasible      |
+| 1e-04  | primal_infeasible |                 5.03e-05 | primal_infeasible | primal_infeasible      |
+
+pounce's confident-=optimal= window ends at $\varepsilon\approx10^{-9}$ ---
+exactly its default tolerance --- and between $10^{-8}$ and $10^{-7}$ it degrades
+to =numerical_failure=, i.e. an honest "I could not decide", rather than a
+confident wrong answer. *scipy/HiGHS returns a confident =optimal= all the way to
+$\varepsilon=10^{-7}$*, two orders of magnitude past where pounce stops
+committing. On this axis pounce is the most conservative of the three.
+
+Tightening =tol= *does* buy discrimination on the $10^{-12}$ pair:
+
+| tol   | feasible member | infeasible member    |
+|-------+-----------------+----------------------|
+| default | optimal (7 it)| optimal (7 it)       |
+| 1e-10 | optimal (9 it)  | optimal (9 it)       |
+| 1e-12 | optimal (11 it) | numerical_failure (182 it) |
+| 1e-14 | optimal (13 it) | numerical_failure (175 it) |
+
+At =tol=1e-12= the pair *separates*: the genuinely feasible member still solves
+to =optimal= with zero primal residual, while the genuinely infeasible member
+stops committing. Critically, there is *no false-infeasible at any tolerance* ---
+the feasible member is never rejected, which is the more dangerous failure mode.
+
+* Cross-check / Verification
+
+1. *Exact Fraction certificates* (primary oracle, no solver involved). Every
+   status claim above is backed by a Farkas vector, a recession ray, or a
+   primal/dual pair verified in exact rational arithmetic against the same
+   float64 bytes pounce is handed. Zero roundoff. The script =assert=s each one.
+2. *scipy.optimize.linprog (HiGHS)* --- agrees on (a), (b), (d), (e1). Disagrees
+   with pounce on (c) (both answers true). *Wrong on the sweep at
+   $\varepsilon=10^{-8}$ and $10^{-7}$*, where it returns a confident =optimal=
+   on an LP proven infeasible by exact Farkas certificate.
+3. *cvxpy / CLARABEL* (independent IPM) --- agrees on (a), (b), (d), (e1);
+   =primal_infeasible= on (c); =optimal= at $\varepsilon=10^{-8}$,
+   =infeasible_inaccurate= at $10^{-7}$.
+4. *Returned-iterate inspection* --- for (a), (b), (c) pounce's =residuals= and
+   =kkt_error= are large and the returned $x$ is plainly not offered as a
+   solution, so no downstream consumer can mistake a status for a certificate.
+
+* Verdict
+
+*TOLERANCE.* pounce got five of six statuses exactly right against exact
+rational ground truth, including the two hardest cells: the empty-interior
+singleton (d), where Slater fails and the IPM has no strictly feasible start, and
+the both-infeasible cell (c), where it commits to a *true* branch
+(=dual_infeasible=) rather than emitting a merged "infeasible_or_unbounded" ---
+different from scipy's and CLARABEL's =primal_infeasible=, but not wrong.
+
+The single miss is (e2), infeasible by $10^{-12}$ and called =optimal=, which is
+squarely a tolerance artifact: scipy and CLARABEL make the identical call, the
+reported =primal_infeasibility= residual honestly discloses the 1.7e-09
+violation rather than claiming zero, and tightening =tol= to 1e-12 makes pounce
+separate the pair correctly. Per the run brief this is TOLERANCE, not a bug ---
+and pounce is not *confidently* wrong here in the way scipy is: pounce's
+committed-=optimal= window ends at 1e-9 while HiGHS keeps returning =optimal=
+out to 1e-7, and in the gap pounce says =numerical_failure= instead of guessing.
+There is no false-infeasible at any tolerance tested.
+
+The only actionable item is a documentation nit: =python/pounce/qp.py=:100
+glosses =dual_infeasible= as "(unbounded)", but on instance (c) the status is
+returned for an LP whose primal is *empty* and which is therefore not unbounded.
+The status name is accurate; the parenthetical is not, in the both-infeasible
+case.

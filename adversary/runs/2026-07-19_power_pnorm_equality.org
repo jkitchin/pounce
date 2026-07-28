@@ -1,0 +1,90 @@
+#+TITLE: Adversary Run: min sum |x_i|^p s.t. a'x = b, p = 2.5 (power cone, boundary probe)
+#+DATE: <2026-07-19>
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: non-integer p-th-power minimization with one component driven exactly to the cone boundary
+:SOURCE: Analytic Lagrange/Hoelder solution -- Boyd & Vandenberghe, /Convex Optimization/ (2004), Ex. 4.7 and App. A.1.6 (dual-norm characterization); MOSEK Modeling Cookbook v3.3 sec. 4.2 (power cone) for the |x|^p <= s epigraph.
+:KNOWN_OPTIMAL: 2.5546116173e-01
+:N_VARIABLES: 10 (x_0..x_4, s_0..s_4)
+:N_CONSTRAINTS: 1 equality + 5 x ("pow", 1/2.5) = 15 cone rows
+:END:
+
+\[
+ \min_{x\in\mathbb{R}^5} \ \sum_{i} |x_i|^{p}
+ \quad \text{s.t.}\quad a^\top x = b,
+ \qquad p = 2.5,\; a = (2,-3,0,1,5),\; b = 4 .
+\]
+
+With $q = p/(p-1) = 5/3$ and $S=\sum_i |a_i|^q$, stationarity
+$p|x_i|^{p-1}\mathrm{sgn}(x_i) = \lambda a_i$ plus $a^\top x=b$ gives the
+closed form
+
+\[
+ x_i^\star = \mathrm{sgn}(a_i)\,|a_i|^{q-1}\,\frac{b}{S},
+ \qquad f^\star = \left(\frac{b}{S}\right)^{p} S = 0.25546116173\ldots
+\]
+
+*Boundary probe:* $a_3 = 0$ forces $x_3^\star = 0$ and $s_3^\star = 0$ exactly,
+so that power-cone block converges to $(0,0,1)$ -- the boundary of $K_\alpha$,
+where the barrier $-\log(y^{2\alpha}z^{2-2\alpha}-x^2)-(1-\alpha)\log y
+-\alpha\log z$ blows up.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                            | Status             |     Objective |  Rel Err | Iters | Wall Time |
+|-----------------------------------+--------------------+---------------+----------+-------+-----------|
+| pounce (solve_socp, 5x pow cones) | optimal_inaccurate | 2.5546115360e-1 | 8.13e-09 |    11 |  0.0041 s |
+| cvxpy CLARABEL (cp.power)         | optimal            | 2.5546116173e-1 |  <1e-11  |     - |  0.0057 s |
+| cvxpy SCS (cp.power)              | optimal            | 2.5546116325e-1 | 1.5e-09  |     - |  0.0034 s |
+| cvxpy CLARABEL (PowCone3D)        | optimal            | 2.5546116205e-1 | 3.2e-10  |     - |  0.0018 s |
+
+Known optimal: 2.5546116173e-01;
+$x^\star = (0.25362765, -0.33234624, 0, 0.15977541, 0.46718612)$.
+
+pounce matches the analytic optimum to 8.13e-9 relative and $x^\star$ to
+8.8e-6 in the inf-norm. The equality residual is 1.7e-8. Critically, the
+boundary component comes back as *exactly* 0.0 -- no negative leakage, no
+NaN from the barrier, and the remaining components are unperturbed.
+
+* Cross-check / Verification
+- *Three* independent oracle runs: cvxpy CLARABEL and SCS on the DCP model
+  ~cp.sum(cp.power(cp.abs(x), 2.5))~, plus a fourth model built from the
+  explicit ~PowCone3D~ constraint. All four agree with each other and with the
+  closed form to <= 1.5e-9; pounce agrees with all of them to 8.1e-9.
+- *Cone encoding verified read-only.*
+  ~crates/pounce-convex/src/cones/power.rs~ defines
+  $K_\alpha=\{(x,y,z): |x| \le y^{\alpha} z^{1-\alpha},\ y,z\ge 0\}$ with
+  $\alpha\in(0,1)$, and ~python/pounce/qp.py::solve_socp~ documents that the
+  second element of ~("pow", alpha)~ is the *exponent, not a dimension*, with
+  slack $s = h - Gx$ in the cone. Hence
+  $|x_i|^p \le s_i \iff |x_i| \le s_i^{1/p}\cdot 1^{1-1/p}
+  \iff (x_i, s_i, 1)\in K_{1/p}$, so $\alpha = 1/p = 0.4$.
+- *The permutation trap was checked explicitly.* cvxpy's
+  ~PowCone3D(u,v,w,alpha)~ means $u^{\alpha}v^{1-\alpha} \ge |w|$ -- the triple
+  order is *permuted* relative to pounce: pounce $(x,y,z)$ = cvxpy $(w,u,v)$.
+  The oracle was therefore built as ~PowCone3D(s, 1, x, 1/p)~ and independently
+  as the DCP ~cp.power~ atom; both give the same optimum, confirming the pounce
+  encoding used here is the correct one and not a coincidence of a matching
+  wrong convention.
+- Feasibility: $|a^\top x - b| = 1.7\times10^{-8}$; $x_3 = 0$ exactly.
+
+* Verdict
+*PASS* (with the same ~TOLERANCE~/status note as the exp run). pounce's
+objective is correct to 8.1e-9 against a closed-form optimum corroborated by
+three independent cvxpy runs, and it handles the deliberately degenerate
+power-cone block (converging to the cone vertex $(0,0,1)$) without leakage,
+NaN, or contaminating the other components. Timing is on par with the oracles.
+
+The reported status is ~optimal_inaccurate~ (KKT residual 1.69e-8). Per
+~crates/pounce-convex/src/hsde_nonsym.rs~ lines 1218--1247 this is the
+documented reduced-accuracy acceptance: the non-symmetric driver stalled near
+the boundary, and the best iterate -- residual well inside
+$\sqrt{\mathrm{tol}}$ -- is restored and deliberately labelled
+~OptimalInaccurate~ rather than ~Optimal~. Given the problem was *designed* to
+sit on the power-cone boundary, a near-boundary stall at 1e-8 is expected
+behaviour, not a defect. Not filed.

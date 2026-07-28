@@ -1,0 +1,40 @@
+#+TITLE: Adversary Run: Nocedal & Wright Example 16.4 (convex QP)
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: inequality-constrained convex QP
+:SOURCE: Nocedal & Wright, Numerical Optimization (2nd ed.), Example 16.4.
+:KNOWN_OPTIMAL: 0.8
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 3 linear inequalities + nonneg bounds
+:END:
+
+minimize  (x0-1)^2 + (x1-2.5)^2
+s.t.      x0 - 2 x1 + 2 >= 0
+         -x0 - 2 x1 + 6 >= 0
+         -x0 + 2 x1 + 2 >= 0
+          x0, x1 >= 0
+
+Known optimum x* = (1.4, 1.7), q* = 0.8.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver             | Status  | Objective      | Rel Err   | Iters | Wall Time |
+|--------------------+---------+----------------+-----------+-------+-----------|
+| pounce (QP IPM)    | optimal | 0.8000000019   | 1.92e-10  | 9     | 0.0015 s  |
+| cvxpy (CLARABEL)   | optimal | 0.8000000051   | (ref)     | —     | 0.0030 s  |
+
+Known optimal: 0.8
+
+* Cross-check / Verification
+cvxpy/CLARABEL reaches the same optimum; x matches the known x* = (1.4, 1.7) to
+1.7e-10 and the oracle to 3.75e-10. Objective rel err 1.92e-10 vs known.
+
+* Verdict
+PASS — pounce's convex QP IPM matches cvxpy and the textbook optimum to ~1e-10,
+and is 2x faster than CLARABEL on this instance.

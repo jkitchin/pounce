@@ -1,0 +1,102 @@
+#+TITLE: Adversary Run: Conic status reporting — infeasible / unbounded / weakly-infeasible SOCP
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: status reporting (infeasibility / unboundedness certificates, incl. weak infeasibility)
+:SOURCE: Ben-Tal & Nemirovski, /Lectures on Modern Convex Optimization/ (SIAM 2001), Thm 1.4.1 (conic Farkas); Lourenço, Muramatsu & Tsuchiya, "Weak infeasibility in second order cone programming", Optim. Lett. 10 (2016) 1743–1755; Pataki, "Bad semidefinite programs: they all look the same"
+:KNOWN_OPTIMAL: (a) infeasible; (b) -inf (unbounded); (c) infeasible (weakly — no improving ray)
+:N_VARIABLES: 2, 3, 3
+:N_CONSTRAINTS: one SOC_3 cone + 1, 1, 2 equalities respectively
+:END:
+
+pounce standard form: \(\min c^Tx \ \ \text{s.t.}\ Ax=b,\ s=h-Gx \in K\).
+
+** (a) Strongly primal-infeasible
+\[
+\min\; x_1+x_2 \quad \text{s.t.}\quad \|x\|_2 \le 1,\quad x_1+x_2 = 3
+\]
+Infeasible: \(x_1+x_2 \le \sqrt2\,\|x\|_2 \le \sqrt2 < 3\). Encoded with
+\(h=(1,0,0)\), \(G=[[0,0],[-1,0],[0,-1]]\), cone =SOC_3=, \(A=[1,1]\), \(b=3\).
+
+*Farkas / improving-ray certificate* (verified numerically in the script):
+\(y=-1\), \(z=(\sqrt2,-1,-1)\in\mathrm{SOC}_3\) (boundary),
+\(A^Ty+G^Tz=0\) exactly, \(b^Ty+h^Tz = -3+\sqrt2 = -1.585786 < 0\).
+
+** (b) Unbounded (primal feasible, dual infeasible)
+\[
+\min\; -x_1 \quad \text{s.t.}\quad (x_1,x_2,x_3)\in \mathrm{SOC}_3,\quad x_2-x_3 = 1
+\]
+Feasible point \((1,1,0)\). Recession direction \(d=(\sqrt2,1,1)\) lies on the
+cone boundary, \(Ad=0\), \(c^Td=-\sqrt2<0\) ⇒ objective \(\to-\infty\).
+
+** (c) Weakly infeasible (the pathology)
+\[
+\min\; 0 \quad \text{s.t.}\quad (x_1,x_2,x_3)\in \mathrm{SOC}_3,\quad x_1-x_3=0,\quad x_2=1
+\]
+Infeasible: the constraints force \(x_1 \ge \sqrt{1+x_1^2} > x_1\).
+But the infeasibility measure along \(x=(T,1,T)\) is
+\(\sqrt{1+T^2}-T \to 0\) (5.0e-4 at \(T=10^3\), 5.0e-7 at \(T=10^6\)) — the
+infimum is 0 and is *not attained*.
+
+*No improving ray exists*: \(A^Ty+G^Tz=0\) forces \(z=(y_1,y_2,-y_1)\); \(z\in
+\mathrm{SOC}_3\) then forces \(y_2=0\); hence \(b^Ty+h^Tz=y_2=0\), never
+\(<0\). A numerical maximization of the ray value over \(\|y\|\le1\) returns
+\(-2.8\times10^{-8}\) (i.e. 0 to solver tolerance), corroborating the algebra.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Case                      | pounce status       | pounce obj / x       | Iters | Wall     | CLARABEL      | SCS                | ECOS          | Truth      |
+|---------------------------+---------------------+----------------------+-------+----------+---------------+--------------------+---------------+------------|
+| (a) strongly infeasible   | =primal_infeasible= | (success=False)      |     8 | 0.0014 s | infeasible    | infeasible         | infeasible    | infeasible |
+| (b) unbounded             | =dual_infeasible=   | (success=False)      |     2 | 0.0005 s | unbounded     | unbounded          | unbounded     | unbounded  |
+| (c) weakly infeasible     | =numerical_failure= | x≈(9.9e7, 1, 9.9e7)  |    25 | 0.0088 s | SolverError   | optimal_inaccurate | SolverError   | infeasible |
+
+All three pounce results carry =success=False=; the =obj= field is populated
+with a meaningless iterate value on (a)/(b), but it is never presented as an
+optimum.
+
+* Cross-check / Verification
+
+- *(a)* Analytic Farkas certificate exhibited and verified to machine precision
+  (\(\|A^Ty+G^Tz\|=0\), \(z\) in the cone, ray value \(-1.5858\)). All three
+  cvxpy solvers agree: =infeasible=. pounce: =primal_infeasible=. Exact match.
+- *(b)* Analytic recession direction exhibited (in cone, in the null space of
+  \(A\), strictly decreasing the objective) plus an explicit feasible point, so
+  the problem is primal-feasible-and-unbounded, not merely "infeasible or
+  unbounded". All three cvxpy solvers: =unbounded=. pounce: =dual_infeasible=,
+  which is the correct HSDE-language synonym (dual infeasibility certificate =
+  primal unbounded ray). Exact match.
+- *(c)* The hard case. pounce returns =numerical_failure= — an explicitly
+  uncertain status, which is the honest answer for a problem with no
+  certificate of any kind. Its returned iterate \(x\approx(9.89\times10^7, 1,
+  9.89\times10^7)\) is precisely a point of the weakly-infeasible minimizing
+  sequence \((T,1,T)\): cone violation 0 to double precision, equality residual
+  4.1e-10. That is exactly the behaviour theory predicts (the iterates diverge
+  along the ray). Behaviour is stable under =tol=1e-10= and =max_iter=500=
+  (24–25 iterations, same status). The oracles do *worse*: CLARABEL and ECOS
+  both raise =SolverError=, and SCS returns =optimal_inaccurate= with value 0 —
+  the closest thing to a confidently wrong answer in the set, and it came from
+  the oracle, not pounce.
+
+* Verdict
+
+=PASS=. pounce gets both certifiable statuses exactly right — strong primal
+infeasibility (matching an analytic Farkas ray) and unboundedness (matching an
+analytic recession direction) — agreeing with all three cvxpy backends, and in
+under 1.5 ms each. On the weakly-infeasible SOCP, where no certificate exists
+and every solver is expected to struggle, pounce reports =numerical_failure=
+with =success=False=: an uncertain, non-committal status, which is the graded
+acceptable outcome. It never claims =optimal= with a finite value. Two of the
+three oracles hard-error on that case and the third returns
+=optimal_inaccurate=, so pounce is at least as good as the gold standard here.
+
+Minor, non-filed observation: on (a) and (b) the =obj= field of the result
+holds a stale iterate objective (0.678 and −399.06) rather than =+inf= / =−inf=
+or =None=. =success=False= and the status string both make the result
+unusable-as-an-optimum, so this is cosmetic, but a caller who reads =.obj=
+without checking =.status= would be misled.

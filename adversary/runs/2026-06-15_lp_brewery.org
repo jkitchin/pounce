@@ -1,0 +1,53 @@
+#+TITLE: Adversary LP cross-check: Vanderbei "brewery" production-planning LP
+#+DATE: 2026-06-15
+
+* PROPERTIES
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: bounded inequality-constrained production-planning LP
+:SOURCE: R. J. Vanderbei, "Linear Programming: Foundations and Extensions"; classic "brewer's problem" teaching example (Sedgewick-Wayne, Princeton).
+:KNOWN_OPTIMAL: 800 (max profit); -800 in minimization form
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 3 inequality (corn/hops/malt) + 2 lower bounds (x>=0)
+:END:
+
+* Problem
+
+  maximize  13 A + 23 B
+  subject to
+     5 A + 15 B <= 480   (corn)
+     4 A +  4 B <= 160   (hops)
+    35 A + 20 B <= 1190  (malt)
+     A, B >= 0
+
+Closed-form optimum at intersection of corn & malt constraints:
+  5A + 15B = 480, 35A + 20B = 1190  =>  A = 12, B = 28.
+  profit = 13*12 + 23*28 = 156 + 644 = 800.  (hops also binding: 4*12+4*28=160.)
+
+pounce minimizes c'x with P=None; use c = [-13, -23], so min = -800.
+
+* Results
+
+| solver          | status  | objective       | x          | time (s) |
+|-----------------+---------+-----------------+------------+----------|
+| pounce solve_qp | optimal | -8.0000000000e2 | [12, 28]   |   0.0008 |
+| scipy linprog   | 0 (opt) | -8.0000000000e2 | [12, 28]   |   0.0050 |
+| cvxpy CLARABEL  | optimal | -7.9999999880e2 | (~[12,28]) |        - |
+
+KNOWN_OPTIMAL (min form) = -800.
+
+* Cross-check
+
+- rel_err vs known optimal   = 2.76e-12
+- obj_err vs oracle (linprog)= 2.76e-12
+- x inf-norm err vs oracle   = 6.75e-11
+- min feasibility (>=0 ok)   = 4.72e-10  (all constraints satisfied)
+- cvxpy agrees to ~1e-8.
+
+pounce recovers the exact known vertex (12, 28) and objective -800; both
+independent oracles (HiGHS and CLARABEL) confirm. pounce wall time is below
+the oracle's, so no performance concern.
+
+* VERDICT
+
+VERDICT: PASS

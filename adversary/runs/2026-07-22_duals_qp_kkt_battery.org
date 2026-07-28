@@ -1,0 +1,156 @@
+#+TITLE: Adversary Run: Convex QP Dual Correctness Battery (Python API)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY:   qp
+:CLASS:    duals / multipliers / sensitivity / KKT invariants
+:SOURCE:   Nocedal & Wright, /Numerical Optimization/ 2e, Example 16.4 (p. 475); Boyd & Vandenberghe §5 (Lagrange duality / shadow prices); closed-form KKT for the remaining cases
+:KNOWN_OPTIMAL: NW 16.4: x* = (1.4, 1.7), q* = 0.8, lambda* = (0.8, 0, 0, 0, 0)
+:N_VARIABLES: 2-4 per case (8 cases)
+:N_CONSTRAINTS: 0-5 equalities/inequalities + boxes
+:SURFACE:  Python API =pounce.qp.solve_qp= -> =QpResult(y, z, z_lb, z_ub)= (NOT the .sol/AMPL writer)
+:END:
+
+Standard form under test:
+
+\begin{align*}
+\min_x \quad & \tfrac12 x^\top P x + c^\top x \\
+\text{s.t.} \quad & A x = b \\
+                  & G x \le h \\
+                  & lb \le x \le ub
+\end{align*}
+
+Eight cases: equality-only (closed-form KKT), inequality-only (NW 16.4),
+non-degenerate LP, bounds-only with mixed active lower/upper/interior,
+mixed equality+inequality+active bounds, duplicate inequality rows
+(non-unique dual), least-squares with equality+active inequality, and a
+*dual-degenerate* LP vertex (3 constraints active in 2 dimensions).
+
+* The convention, pinned
+
+The docstrings state only that ~y~ are equality multipliers and
+~z, z_lb, z_ub >= 0~. The exact stationarity identity is stated
+in the Rust source, =crates/pounce-convex/src/crossover.rs:29-30=:
+
+#+begin_quote
+=y= (free), inequality dual =z >= 0=, and bound duals =z_lb, z_ub >= 0=;
+stationarity =Px + c + A'y + G'z - z_lb + z_ub = 0=.
+#+end_quote
+
+=docs/src/differentiable-solves.md= names it the *OptNet / Amos & Kolter
+(2017)* convention. To avoid assuming, the script tests all eight sign
+combinations $(s_y, s_z, s_b)$ of
+
+$$ Px + c + s_y A^\top y + s_z G^\top z + s_b(-z_{lb} + z_{ub}) = 0 $$
+
+and intersects the surviving sets across cases. Individual cases are
+under-determined (a zero multiplier block leaves its sign free), but the
+*intersection over all 8 cases is the single combination $(+1,+1,+1)$* —
+exactly the documented identity, with residual as low as 2e-14.
+
+The implied Lagrangian is
+
+$$ L = \tfrac12 x^\top Px + c^\top x + y^\top(Ax-b) + z^\top(Gx-h)
+       + z_{lb}^\top(lb-x) + z_{ub}^\top(x-ub) $$
+
+giving the shadow prices
+
+| quantity          | value    | monotonicity of $p^*$ |
+|-------------------+----------+-----------------------|
+| $dp^*/db$         | $-y$     | neither               |
+| $dp^*/dh$         | $-z$     | non-increasing        |
+| $dp^*/dlb$        | $+z_{lb}$| non-decreasing        |
+| $dp^*/dub$        | $-z_{ub}$| non-increasing        |
+
+All four verified by re-solve finite differences (see below).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+Every check passed on all 8 cases; total wall time for the whole battery
+(including ~200 re-solves for finite differences and 8 cvxpy solves) was
+*0.79 s*. Worst residual over the battery, by invariant:
+
+| Invariant                                                | Worst over 8 cases |
+|----------------------------------------------------------+--------------------|
+| (a) stationarity $\|Px+c+A'y+G'z-z_{lb}+z_{ub}\|_\infty$ | 5.0e-09            |
+| (b) dual feasibility $\min(z, z_{lb}, z_{ub})$           | -0.0 (never < -1e-10) |
+| (c) complementarity $\max_i z_i (h-Gx)_i$ etc.           | 3.7e-09            |
+| (d) duality gap $\|p^* - d^*\|$                          | 9.8e-09            |
+| (e) FD shadow price, smooth coordinates                  | 6.9e-08            |
+| (e') subgradient bracket, kinked coordinates             | 0.0 (never violated) |
+| (f) cvxpy CLARABEL dual difference (unique-dual cases)   | 1.3e-08            |
+| (g) analytic $\lambda^*$ (NW 16.4)                       | 1.6e-09 (x), 6e-10 (z) |
+
+Dual objective used for (d):
+$d^* = -\tfrac12 x^\top Px - b^\top y - h^\top z + lb^\top z_{lb} - ub^\top z_{ub}$.
+
+* Cross-check / Verification
+
+*Primary, convention-free oracle — finite-difference re-solve.* For every
+rhs coordinate the script computes the *one-sided* derivatives $D^-$ and
+$D^+$ of $p^*$ by re-solving at $\theta \pm 10^{-5}$. Where they agree
+(differentiable point) they must equal the predicted shadow price; where
+they differ (a kink, i.e. a non-unique dual) the correct test is the
+*subgradient bracket* $D^- \le g \le D^+$. Both held everywhere. This is
+the strongest evidence here because it never touches pounce's sign
+convention at all — it only asks whether the returned number is the rate
+of change of the optimal value.
+
+*cvxpy (CLARABEL).* Duals agree sign-for-sign with **no remapping**: cvxpy's
+dual for ~A@x == b~ equals pounce's ~y~, for ~G@x <= h~ equals ~z~, for
+~x >= lb~ equals ~z_lb~, for ~x <= ub~ equals ~z_ub~, to ~1e-8. Note the
+equality duals are genuinely *negative* in two cases (y = -0.288, -0.75 and
+y = -3.102) and pounce and cvxpy agree on that sign, so the agreement is
+not a sign-blind coincidence.
+
+*Analytic.* NW Ex 16.4 reproduced exactly: x* = (1.4, 1.7), q* = 0.8000000019,
+z = (0.8, 0, 0, 0, 0). (Note: N&W's "{3,5}" in that example is the
+algorithm's *starting* working set, not the solution's active set — at x*
+only c1 is active, with slack 4 on c3. My first pass encoded the recalled
+lambda* = (0.8, 0, 0.6, 0, 0) and it was *my* recall that was wrong;
+gradient q = (0.8, -1.6) = 0.8 * grad c1 confirms pounce.)
+
+*Two of my own formulations were wrong before pounce was:*
+1. The first ~ineq_only~ case was *genuinely primal infeasible* (rows 1 and 3
+   asserted $x_1-2x_2 \le -2$ and $\ge 2$). pounce returned
+   ~primal_infeasible~; cvxpy independently confirmed ~infeasible~. pounce
+   was correct.
+2. The dual-degenerate LP vertex (3 active constraints in 2-D) initially
+   "failed" a *central* difference test by 2.3e-01. That was a bad test, not
+   a bad dual: the dual there is non-unique, $p^*$ has a kink in $h$, and a
+   central difference averages two different one-sided slopes. pounce returns
+   $z = (0.268, 0.244, 0.244)$ and cvxpy returns $(0.375, 0.208, 0.208)$ —
+   *both* are valid points of the dual optimal face ($G^\top z = -c$, $z \ge 0$,
+   zero gap), and pounce's satisfies the subgradient bracket exactly. This is
+   the expected behaviour of an interior-point method (it converges to the
+   analytic center of the optimal face); it is not a defect.
+
+*Surface note.* A separate finding today established that the *.sol/AMPL
+writer* negates duals. That negation does **not** appear on this surface:
+the Python =solve_qp= API returns duals in the documented un-negated
+=Px + c + A'y + G'z - z_lb + z_ub = 0= convention, which is also cvxpy's.
+The two surfaces therefore disagree with each other, but the Python API is
+self-consistent and matches its own documentation.
+
+* Verdict
+
+*PASS.* Across 8 convex QP/LP cases spanning equality-only, inequality-only,
+bounds-only, fully mixed, duplicate-row-degenerate, and dual-degenerate
+geometries, the ~solve_qp~ multipliers ~(y, z, z_lb, z_ub)~ satisfy
+stationarity, dual feasibility, complementary slackness, and zero duality
+gap to ~1e-8, match analytic multipliers where published, match cvxpy's
+duals sign-for-sign with no remapping, and reproduce finite-difference
+shadow prices $dp^*/d(\text{rhs})$ — including passing the subgradient
+bracket at points where the dual is non-unique and a pointwise derivative
+does not exist. The exact convention is
+$Px + c + A^\top y + G^\top z - z_{lb} + z_{ub} = 0$, uniquely determined
+by intersecting the sign hypotheses that survive across all cases. No
+internal inconsistency was found. The only documentation gap is that this
+identity currently lives in a Rust source comment
+(=crates/pounce-convex/src/crossover.rs:29-30=) rather than in the
+=QpResult= docstring or =docs/src/convex-solver.md=, where a user reading
+the Python API would look for it.

@@ -1,0 +1,86 @@
+#+TITLE: SDP adversary run: smallest-eigenvalue via trace-1 PSD constraint
+#+DATE: 2026-06-15
+#+AUTHOR: adversary worker
+
+* PROPERTIES
+:PROPERTIES:
+:FAMILY:   sdp
+:CLASS:    PASS
+:PROBLEM:  min_eig_trace1
+:N:        3
+:CONE:     ("psd", 3)  -- one 3x3 PSD block
+:SVEC:     lower triangle, column-major, off-diagonals * sqrt(2)
+:          svec(M) = [M00, s2*M10, s2*M20, M11, s2*M21, M22], s2=sqrt(2)
+:          <X,Y> = svec(X).svec(Y)
+:VARS:     v = [X00, X10, X20, X11, X21, X22] (6 free symmetric entries)
+:EQUALITY: Tr(X) = X00 + X11 + X22 = 1
+:OBJECTIVE: Tr(C X) = svec(C).svec(X); off-diagonals carry factor 2 in v-basis
+:END:
+
+* Problem
+
+  minimize   Tr(C X)
+  subject to X >= 0   (3x3 PSD)
+             Tr(X) = 1
+
+with
+
+  C = [[ 2, -1,  0],
+       [-1,  2, -1],
+       [ 0, -1,  2]]   (tridiagonal Toeplitz / path-graph stiffness).
+
+** Known optimum (closed form)
+
+The Rayleigh-Ritz / Ky Fan (k=1) variational identity gives
+
+  lambda_min(C) = min { Tr(C X) : X >= 0, Tr(X) = 1 },
+
+with optimizer X* = v v^T, v the unit eigenvector for lambda_min (a rank-1
+density matrix). Eigenvalues of C are {2 - sqrt(2), 2, 2 + sqrt(2)}, so
+
+  KNOWN_OPTIMAL = 2 - sqrt(2) = 0.5857864376269050.
+
+SOURCE: Vandenberghe & Boyd, "Semidefinite Programming", SIAM Review 38(1),
+1996, sec. 2 (spectrahedron / trace-normalized PSD set); standard Rayleigh-Ritz.
+
+** Distinctness from prior runs
+
+Distinct from the existing max-eigenvalue run (2026-06-09_sdp_max_eig.py:
+min t s.t. tI - A >= 0, recovering lambda_max, no matrix variable). Here the
+decision variable IS the matrix X with an explicit Tr(X)=1 equality, recovering
+lambda_min. Also distinct from min-trace (no objective trace) and max-cut.
+
+* Results
+
+| solver           |        objective | time (s) | rel_err vs known |
+|------------------+------------------+----------+------------------|
+| pounce (PSD IPM) | 5.8578643710e-01 |   0.0010 |         5.27e-10 |
+| cvxpy / SCS      | 5.8579613758e-01 |   0.0059 |    ~1.7e-05 (SCS)|
+| cvxpy / CLARABEL | 5.8578643988e-01 |   0.0023 |         ~3.8e-09 |
+| known (closed)   | 5.8578643763e-01 |        - |                0 |
+
+Cross-check rel errors:
+  pounce vs known     = 5.27e-10
+  pounce vs CLARABEL  = 2.78e-09
+  pounce vs SCS       = 9.70e-06   (SCS first-order, looser; CLARABEL is the
+                                    tight oracle and agrees to 3e-9)
+
+Recovered solution:
+  X_pounce =
+    [[0.25      0.35355339 0.25     ]
+     [0.35355339 0.5       0.35355339]
+     [0.25      0.35355339 0.25     ]]
+  min eigenvalue of X_pounce = -1.50e-10  (PSD to numerical tol)
+  trace(X_pounce)            = 1.000000   (equality honored)
+  X is rank-1 = v v^T with v = (1, sqrt2, 1)/2, the bottom eigenvector. check.
+
+* Cross-check / verdict reasoning
+
+pounce status = optimal, objective matches the closed-form lambda_min to 5e-10
+and the tight oracle (CLARABEL) to 3e-9. The recovered X is PSD (min eig ~0),
+satisfies Tr(X)=1, and is the expected rank-1 minimizer. svec encoding
+re-derived from the three proven 2026-06-09 scripts (lower-tri, column-major,
+off-diag * sqrt(2)); objective uses the factor-2 off-diagonal accounting for
+the v-basis, verified by the matching numbers.
+
+VERDICT: PASS

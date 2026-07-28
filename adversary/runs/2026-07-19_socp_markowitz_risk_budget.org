@@ -1,0 +1,92 @@
+#+TITLE: Adversary Run: Markowitz Portfolio with a Hard Risk (SOC) Budget
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: SOC constraint active/tight at the optimum, coupled with a linear equality
+:SOURCE: MOSEK Modeling Cookbook v3.3, Sec. 3.3.3 "Markowitz portfolio optimization"; Boyd & Vandenberghe, /Convex Optimization/, Sec. 4.4.1 and Ex. 4.52 (maximize return subject to a risk bound)
+:KNOWN_OPTIMAL: -0.20918477976 (min form); max return 0.20918477976 -- exact closed form
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 1 equality + one SOC of dimension 4
+:END:
+
+\begin{align*}
+\text{maximize} \quad & \mu^\top x \\
+\text{subject to} \quad & \mathbf{1}^\top x = 1 \\
+& \| \Sigma^{1/2} x \|_2 \le s
+\end{align*}
+
+with
+\[
+\Sigma = \begin{bmatrix} 0.10 & 0.02 & 0.01 \\ 0.02 & 0.08 & 0.03 \\ 0.01 & 0.03 & 0.12 \end{bmatrix},\quad
+\mu = (0.10,\ 0.20,\ 0.15),\quad s = 0.30 .
+\]
+pounce minimizes, so the run solves \(\min -\mu^\top x\) with the same constraints.
+
+** Closed-form optimum (no solver involved)
+With \(L = \operatorname{chol}(\Sigma)\) and \(y = L^\top x\) the problem becomes
+\(\max \tilde\mu^\top y\) s.t. \(a^\top y = 1,\ \|y\|_2 \le s\), where
+\(\tilde\mu = L^{-1}\mu\), \(a = L^{-1}\mathbf 1\). Splitting
+\(y = a/\|a\|^2 + y_\perp\) with \(y_\perp \perp a\) gives
+\(\|y\|^2 = 1/\|a\|^2 + \|y_\perp\|^2\), hence
+\[
+\text{OPT} = \frac{\tilde\mu^\top a}{\|a\|^2} + r\,\Big\|\Big(I - \tfrac{aa^\top}{\|a\|^2}\Big)\tilde\mu\Big\|,\qquad
+r = \sqrt{s^2 - 1/\|a\|^2},
+\]
+and \(x^\star = L^{-\top}\big(a/\|a\|^2 + r\,P_\perp\tilde\mu/\|P_\perp\tilde\mu\|\big)\).
+Note \(1/\|a\|^2 = 1/(\mathbf 1^\top\Sigma^{-1}\mathbf 1) = 0.0458889\) is the
+classic minimum-variance portfolio variance (std 0.2142169), so \(s = 0.30\)
+leaves \(r > 0\): strictly feasible, and the SOC constraint is *tight* at the
+optimum. Exact values:
+\(x^\star = (-0.15571656,\ 1.02797903,\ 0.12773753)\), OPT (max) \(= 0.20918477976\).
+
+This is the deliberate contrast with all five prior =socp= runs (least squares,
+Chebyshev minimax, robust LS, min enclosing ball, Fermat-Weber): there the cone
+was an epigraph of the objective, here it is a hard *active* constraint on the
+cone boundary interacting with an equality.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective (min form) | Rel Err vs known | Wall Time |
+|-----------------+---------+----------------------+------------------+-----------|
+| pounce          | optimal | -2.0918478048e-01    |         7.19e-10 | 0.0014 s  |
+| cvxpy/CLARABEL  | optimal | -2.0918478191e-01    |         2.15e-09 | 0.0033 s  |
+| cvxpy/SCS       | optimal | -2.0918136226e-01    |         3.42e-06 | 0.0019 s  |
+| cvxpy/ECOS      | optimal | -2.0918477973e-01    |         3.1e-11  | 0.0019 s  |
+
+Known optimal: -0.20918477976 (exact closed form).
+
+pounce matches the analytic optimum to 7.2e-10 relative and the analytic
+minimizer to 1.6e-08 in the infinity norm. Feasibility at the returned point:
+\(\sum x = 0.999999994\) and \(\|L^\top x\| = 0.300000003\) -- i.e. the SOC is
+tight to 3e-9, confirming the constraint is genuinely active and pounce lands on
+the cone boundary rather than in the interior. pounce is ~2.4x faster than
+CLARABEL, though the absolute gap (2 ms) is far below the 0.1 s performance
+threshold, so no performance claim either way.
+
+* Cross-check / Verification
+- Cone encoding re-derived from the documented convention \(s = h - Gx \in K\):
+  for =("soc", 4)= the block is \((s_0, s_{1:3})\) with \(s_0 \ge \|s_{1:3}\|\).
+  Set \(h_0 = s\), \(G_{0,:} = 0\) so \(s_0 = 0.30\); and \(G_{1:,:} = -L^\top\),
+  \(h_{1:} = 0\) so \(s_{1:3} = L^\top x\), giving \(\|L^\top x\| \le 0.30\),
+  i.e. \(\|\Sigma^{1/2}x\| \le s\) since \(\Sigma = LL^\top\). The equality
+  \(\mathbf 1^\top x = 1\) is passed via =(A, b)=, not as a cone row.
+- The closed form is self-checked in the script by three assertions before any
+  solver runs: \(\mathbf 1^\top x^\star = 1\), \(\|L^\top x^\star\| = s\)
+  (to 1e-12), and \(-\mu^\top x^\star = \) KNOWN_OPTIMAL.
+- Three independent cvxpy solvers (CLARABEL, SCS, ECOS) on a DCP model built
+  directly from the mathematical statement (=cp.norm(L.T @ x, 2) <= s=), all
+  agreeing with pounce and with the closed form. SCS's 3.4e-06 deviation is its
+  own first-order accuracy, not a pounce discrepancy -- CLARABEL and ECOS both
+  agree with pounce to ~1e-9.
+
+* Verdict
+PASS -- pounce reproduces the exact closed-form optimum of a Markowitz SOCP with
+a binding risk budget to 7.2e-10 relative error in the objective and 1.6e-08 in
+the minimizer, while satisfying the equality to 6e-9 and sitting on the SOC
+boundary to 3e-9. Two high-accuracy interior-point oracles (CLARABEL, ECOS)
+independently confirm. No finding.

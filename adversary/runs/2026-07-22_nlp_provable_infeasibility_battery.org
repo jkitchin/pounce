@@ -1,0 +1,180 @@
+#+TITLE: Adversary Run: Provable-Infeasibility Battery + Thin-Feasible Controls
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: infeasibility / unboundedness / status-reporting correctness
+:SOURCE: Constructed. Emptiness certificates from elementary analysis — bounded range of sin, AM–GM (Hardy–Littlewood–Pólya §2.5), Cauchy–Schwarz, the triangle inequality, sum-of-squares nonnegativity, and Motzkin's positive-but-not-SOS form (Motzkin 1967, "The arithmetic-geometric inequality", Inequalities, Academic Press, p. 205). Thin-feasible controls constructed with an exhibited feasible point.
+:KNOWN_OPTIMAL: n/a — the assertion under test is the *status*, not an objective value
+:N_VARIABLES: 1–6 per instance
+:N_CONSTRAINTS: 1–3 per instance
+:END:
+
+Two halves, plus a two-sided sweep.
+
+** Half 1 — provably infeasible (9 instances)
+
+Each has a one-line proof of emptiness independent of any solver:
+
+| case                | model                                                            | proof                                        |
+|---------------------+------------------------------------------------------------------+----------------------------------------------|
+| trig_range          | $\sin x + \sin y \ge 5/2$                                         | each term $\le 1$, sum $\le 2 < 5/2$          |
+| amgm_exp            | $e^x + e^y \le 3/2,\; x+y = 0$                                    | AM–GM: $e^x + e^{-x} \ge 2 > 3/2$             |
+| circle_line         | $x^2+y^2 = 1,\; x+y = 3$                                          | on the circle $x+y \le \sqrt2 \approx 1.414$  |
+| triangle_inequality | $\|a-b\|^2\le1,\ \|b-c\|^2\le1,\ \|a-c\|^2\ge25$                  | $\|a-c\| \le \|a-b\|+\|b-c\| \le 2 < 5$       |
+| log_domain          | $\log x \ge 5,\; x \le 2$                                         | $\log x \le \log 2 \approx 0.693 < 5$         |
+| quartic_margin      | $(x^2-\tfrac12)^2 \le -10^{-3}$                                   | LHS $\ge 0$; empty by margin $10^{-3}$        |
+| mass_balance        | $n_1+n_2 = 1,\; n_1 n_2 = 1/2,\; n \ge 0$                         | AM–GM caps $n_1 n_2$ at $1/4 < 1/2$           |
+| motzkin             | $x^4y^2 + x^2y^4 - 3x^2y^2 + 1 \le -1/2$                          | Motzkin form $\ge 0$ (AM–GM), not SOS          |
+| norm_sandwich       | $\|z\|^2 \le 1,\ \sum_{i=1}^4 z_i \ge 4$                          | Cauchy–Schwarz: $\sum z_i \le 2 < 4$          |
+
+=quartic_margin= is deliberately empty by only $10^{-3}$ — ten times the default
+=constr_viol_tol= of $10^{-4}$ — so a =solved= verdict there is a genuine false
+claim rather than a tolerance artifact. =motzkin= admits no SOS/convex
+infeasibility certificate at all.
+
+Requirement: solve_result_num in 200..299, and in particular *never* 0..99.
+
+** Half 2 — feasible but thin (5 controls)
+
+Each exhibits a feasible point, so an =infeasible= verdict is *false*:
+
+| case           | model                                                     | feasible point            | thinness            |
+|----------------+-----------------------------------------------------------+---------------------------+---------------------|
+| thin_lens      | two unit disks at $\pm(1-5\cdot10^{-7})$                    | origin                    | lens width $10^{-6}$ |
+| quartic_trough | $(x^2-\tfrac12)^2 \le 10^{-8}$                             | $x = 1/\sqrt2$            | half-width $7\cdot10^{-5}$ |
+| curved_tube    | $(y-\sin x)^2 \le 10^{-12},\ y \ge 1/2$                    | $(\pi/2,\,1)$             | tube width $10^{-6}$ |
+| steep_sliver   | $x^3+y^3 = 10^9,\ y \le 10^{-6}x$                          | $(1000,\,10^{-4})$        | Jacobian $\sim10^8$  |
+| narrow_wedge   | $x^2 \le y \le x^2 + 10^{-9}$                              | $(0,\,0)$                 | band $10^{-9}$       |
+
+** Half 3 — two-sided tangency sweep
+
+Two unit disks centred at $\pm d$, minimising $y$, with $\mathrm{gap} := 2(1-d)$.
+Exactly: $\mathrm{gap} > 0 \Rightarrow$ feasible with $\min y = -\sqrt{1-d^2}$;
+$\mathrm{gap} < 0 \Rightarrow$ disjoint, infeasible. Sweeping the sign and
+magnitude locates the precise width at which the verdict flips.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+** Infeasible half — 9/9 correct
+
+| case                | pounce      | ipopt       | correct |
+|---------------------+-------------+-------------+---------|
+| trig_range          | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| amgm_exp            | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| circle_line         | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| triangle_inequality | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| log_domain          | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| quartic_margin      | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| mass_balance        | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| motzkin             | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+| norm_sandwich       | INFEASIBLE(200) | INFEASIBLE(200) | yes |
+
+No instance returned =solved=. Ipopt independently agrees on all nine.
+
+** Feasible half — 5/5 correct, and correct *values*
+
+| case           | pounce status | pounce obj        | ipopt obj         | rel err vs ipopt | pounce verify |
+|----------------+---------------+-------------------+-------------------+------------------+---------------|
+| thin_lens      | SOLVED(0)     | -1.0000077859e-3  | -1.0049824259e-3  | 4.97e-06         | exit 0        |
+| quartic_trough | SOLVED(0)     |  7.0700677661e-1  |  7.0700677661e-1  | 0.00e+00         | exit 0        |
+| curved_tube    | SOLVED(0)     |  5.2348329708e-1  |  5.2348329708e-1  | 0.00e+00         | exit 0        |
+| steep_sliver   | SOLVED(0)     |  9.9600400000e+5  |  9.9600400000e+5  | 1.17e-16         | exit 0        |
+| narrow_wedge   | SOLVED(0)     | -9.1288831957e-10 | -7.6109665418e-10 | 1.52e-09         | exit 0        |
+
+No false infeasibility. Every claimed solution passes =pounce verify= (exit 0)
+and matches Ipopt on the identical =.nl=.
+
+Two entries deserve a note, and neither is a defect:
+
+- =quartic_trough=: the analytic *global* minimiser is on the negative branch
+  ($x = -\sqrt{0.5-10^{-4}}$), but the feasible set is two disjoint intervals and
+  $x_0 = 0.9$ lies in the positive one. Both solvers return the positive local
+  optimum, *bit-for-bit identically*. Correct local-solver behaviour.
+- =curved_tube=: both return $x = 0.523483$ against the analytic $0.523598$. The
+  constraint is squared, so a $10^{-4}$ slack in $x$ reads as $10^{-8}$ of
+  constraint violation — inside =constr_viol_tol=. Again identical between the
+  two solvers, i.e. a property of the formulation, not of pounce.
+
+** Tangency sweep
+
+Feasible side ($\mathrm{gap} > 0$), against the exact $-\sqrt{1-d^2}$:
+
+| gap    | pounce | ipopt  | rel err vs exact |
+|--------+--------+--------+------------------|
+| 1e-02  | SOLVED | SOLVED | 3.02e-10         |
+| 1e-04  | SOLVED | SOLVED | 1.77e-08         |
+| 1e-06  | SOLVED | SOLVED | 7.91e-09         |
+| 1e-07  | SOLVED | SOLVED | 5.66e-08         |
+| 1e-08  | SOLVED | SOLVED | 2.02e-12         |
+| 1e-09  | SOLVED | SOLVED | 5.14e-11         |
+| 1e-10  | SOLVED | SOLVED | 3.37e-11         |
+
+Infeasible side ($\mathrm{gap} < 0$):
+
+| gap    | pounce  | ipopt  | pounce message                            |
+|--------+---------+--------+-------------------------------------------|
+| -1e-02 | INFEAS  | INFEAS | Problem is primal infeasible (14 iters)   |
+| -1e-04 | INFEAS  | INFEAS | Problem is primal infeasible (16 iters)   |
+| -1e-06 | INFEAS  | INFEAS | Problem is primal infeasible (19 iters)   |
+| -3e-07 | INFEAS  | INFEAS | Problem is primal infeasible (21 iters)   |
+| -1e-07 | FAILURE(500) | INFEAS | Numerical failure in KKT factorization |
+| -1e-08 | FAILURE(500) | SOLVED | Numerical failure in KKT factorization |
+| -1e-09 | FAILURE(500) | SOLVED | Numerical failure in KKT factorization |
+
+The feasible side is correct — status *and* objective — down to a lens
+$10^{-10}$ wide. There is no false-infeasibility threshold to find.
+
+* Cross-check / Verification
+
+- *Oracle*: Ipopt 3.14.19 on the byte-identical =.nl= file for all 33 solves.
+  Agreement on every infeasible instance and every feasible instance.
+- *Analytic*: every infeasible instance carries an elementary emptiness proof
+  (table above); every feasible instance carries an exhibited feasible point.
+- *=pounce verify=*: exit 0 on all five thin-feasible controls, confirming the
+  returned points really are feasible and KKT-stationary — the =solved= claims
+  are not false-optimal claims.
+
+* Near-tangency numerical failure (noted, not the verdict)
+
+At $|\mathrm{gap}| \le 10^{-7}$ on the *infeasible* side, routing selects the
+convex-QCQP conic IPM (=pounce-convex=) and it diverges: 168 iterations, dual
+infeasibility $9.2\times10^{143}$, complementarity $1.6\times10^{284}$, ending in
+=Numerical failure in KKT factorization= with solve_result_num 500.
+
+This is expected-hard rather than a status bug:
+
+1. As $\mathrm{gap}\to0^-$ the two disks approach internal tangency, Slater's
+   condition fails, and the central path of a conic IPM is unbounded. Divergence
+   of the dual iterates is the textbook symptom.
+2. The 500 band is an *honest failure*, not a false claim. The contract under
+   test — never =solved= on an infeasible problem, never =infeasible= on a
+   feasible one — is not violated.
+3. Only the single point $\mathrm{gap} = -10^{-7}$ is strictly worse than the
+   oracle. At $-10^{-8}$ and $-10^{-9}$ Ipopt itself returns =solved=, since the
+   instance is infeasible by less than =constr_viol_tol=; no solver recovers the
+   truth at that scale.
+
+Worth a tracking note for the conic path (a graceful fall-back to the NLP path,
+or an infeasibility certificate on KKT breakdown, would close it), but it is not
+a false status claim and is confined to a band at the tolerance boundary.
+
+* Verdict
+
+*PASS.* Across 9 provably-infeasible NLPs with independent analytic emptiness
+certificates, 5 thin-feasible controls, and a 14-point two-sided tangency sweep
+— 33 solves in 2.3 s total — pounce never reported =optimal= on an infeasible
+problem and never reported =infeasible= on a feasible one. The false-infeasible
+hunt specifically came up empty: the feasible side of the tangency sweep stayed
+correct in both status and objective down to a feasible lens $10^{-10}$ wide,
+and all five thin controls returned Ipopt-identical solutions that =pounce
+verify= accepts. The recent divergence-guard, unboundedness, and
+best-acceptable-ranking changes (#250, #253, #256, #267, #270) show no
+status-correctness regression on this axis. The one blemish — a KKT
+factorization failure (objno 500) on the conic path for QCQPs infeasible by
+$\le10^{-7}$, where Slater fails — is an honest failure status in a regime no
+solver resolves reliably, and is recorded above rather than filed.

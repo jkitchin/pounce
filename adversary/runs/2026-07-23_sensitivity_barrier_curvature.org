@@ -1,0 +1,59 @@
+#+TITLE: Adversary Iteration 4 — QpSensitivity vs the barrier-curvature traps
+#+DATE: 2026-07-23
+
+* Direction
+The companion notebook =notebooks/barrier_curvature_sensitivity.ipynb= formalizes
+four notions of sensitivity (A exact map, B finite-mu central path, C inverse
+barrier Hessian, D active-set KKT) and the traps an IPM falls into near an active
+bound: reporting the finite-mu central-path derivative as exact, over-damping via
+the inverse barrier Hessian, and the one-sided / set-valued derivative at a weakly
+active bound. QpSensitivity holds the ACTIVE-SET KKT factorization, i.e. it is
+*designed* to compute notion D. This iteration checks it actually does — using the
+notebook's prescribed oracle (ONE-SIDED FD re-solve) — and that no barrier
+curvature leaks in.
+
+* Results
+:PROPERTIES:
+:FAMILY: sensitivity
+:STATUS: PASS (5/5)
+:REPORT: [[file:runs/2026-07-23_sensitivity_barrier_curvature.py]]
+:END:
+
+| # | scenario | dx/db | oracle | verdict |
+|---+----------+-------+--------+---------|
+| 1 | inactive bound | [0.5,0.5] | FD [0.5,0.5] | PASS (5.5e-9) |
+| 2 | strongly-active (scalar) | [0,1] | FD [0,1] | PASS (2e-7); normal motion 2e-20 |
+| 3 | weakly-active (kink) | [0,1] | exact L-branch | one-sided (see below) |
+| 4 | coupled 3-var strongly-active | [0,0.381,0.619] | FD (7.8e-10) | PASS; reduced Hessian = W, NOT barrier |
+| 5 | active-set-stable finite steps | — | re-solve (4.6e-8) | PASS across whole stable range |
+
+* Key confirmations (the notebook's "good" behavior)
+- *No barrier-curvature inflation.* For strongly-active and inactive bounds,
+  =dx/db= matches the one-sided FD re-solve to 1e-7..1e-9. The tangential
+  sensitivity in the coupled 3-var case uses the REDUCED Hessian =W[1:,1:]= (the
+  objective's own curvature), confirmed by the 7.8e-10 FD match — it is notion D,
+  not the barrier-blended notion B/C. An active bound REMOVES a direction
+  (=dx1/db= = 3e-21 ~ 0, zero motion normal to the bound); it adds no curvature.
+- *Active-set-stable steps are exact.* While the active set does not change,
+  =parametric_step= is exact across arbitrarily large finite steps (err 4.6e-8),
+  as an active-set predictor should be.
+
+* The weakly-active limitation (scenario 3) — known, intrinsic, not filed
+At a weakly active bound (=x1>=0.5=, solution exactly at the bound, multiplier ~0)
+the exact one-sided derivatives DIFFER: releasing the bound gives [0.5,0.5],
+holding it gives [0,1]. QpSensitivity returns [0,1] — a VALID subgradient element
+(the active branch), accurate for bound-holding perturbations (err 6.6e-5) but
+O(delta) wrong for bound-releasing perturbations (err 5.0e-2 at delta=0.1), with
+=ill_conditioned=False= and =last_step_residual~1e-20= (the linear solve is clean;
+the active set changed, which a linear residual cannot detect). This is the
+fundamental active-set-transition one-sidedness — the two-sided derivative does
+not exist (notebook Section 1/6), and sIPOPT shares it. Already observed and
+noted-not-filed in the sensitivity family (2026-07-19). CANDIDATE ENHANCEMENT
+(not filed): expose a weak-activity flag (slack small AND multiplier small), as
+the notebook's =diagnose_bounds= does, so a caller knows =dx/db= is one-sided.
+
+* Verdict
+PASS — QpSensitivity computes the exact active-set (notion D) sensitivity with no
+barrier-curvature inflation, matching one-sided FD to machine precision in every
+non-degenerate case. The weakly-active one-sidedness is intrinsic and known. No
+new finding to file. (This is a positive validation directly tied to the notebook.)

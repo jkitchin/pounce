@@ -1,0 +1,78 @@
+#+TITLE: Adversary Run: LICQ-degenerate QP vertex (3 active constraints in R^2)
+#+DATE: <2026-07-19>
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: primal/dual degenerate convex QP (LICQ failure at the optimum)
+:SOURCE: Standard degenerate-QP construction; Nocedal & Wright, /Numerical Optimization/ 2e, Ch. 16.5 ("Degeneracy"/cycling in active-set QP) and Ch. 12.6 (LICQ)
+:KNOWN_OPTIMAL: 1.0 at x* = (1,1)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 3 inequalities (all active at x*)
+:END:
+
+\begin{align*}
+\min_{x\in\mathbb{R}^2}\quad & \tfrac12\big((x_1-2)^2 + (x_2-2)^2\big)\\
+\text{s.t.}\quad & x_1 + x_2 \le 2\\
+& x_1 \le 1\\
+& x_2 \le 1
+\end{align*}
+
+The unconstrained minimizer $(2,2)$ is cut off. The feasible region lies inside
+$\{x_1\le 1\}\cap\{x_2\le 1\}$, so the closest feasible point to $(2,2)$ is the
+componentwise maximum $(1,1)$, giving $f^\* = 1$. All *three* inequalities are
+active there, so in $\mathbb{R}^2$ the active constraint gradients
+$(1,1),(1,0),(0,1)$ are linearly dependent: **LICQ fails**. The multipliers form
+a one-parameter family $\lambda = (\lambda_1, 1-\lambda_1, 1-\lambda_1)$,
+$\lambda_1\in[0,1]$ — dual degeneracy, exactly the configuration that makes a
+naive active-set method cycle or settle on a wrong working set.
+
+Run: =adversary/runs/2026-07-19_qp-active-set_licq-degenerate-vertex.py=
+(x0 = (-1,-1), i.e. deep inside the region, so the method must *add* all three
+constraints).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                                    | Status     | Objective        | Rel Err vs known | Iters | Wall Time |
+|-------------------------------------------+------------+------------------+------------------+-------+-----------|
+| pounce =solver_selection="qp-active-set"=  | 0 (success) | 1.0000000000e+00 |          0.0e+00 |     1 |   0.0024 s |
+| pounce =algorithm="active-set-sqp"=        | 0          | 1.0000000000e+00 |          0.0e+00 |     1 |   0.0007 s |
+| pounce =solve_qp= (convex IPM)             | optimal    | 1.0000000014e+00 |          1.4e-09 |     - |   0.0012 s |
+| pounce =solver_selection="nlp"=            | 0          | 9.9999998754e-01 |          1.2e-08 |     - |   0.0017 s |
+| cvxpy CLARABEL                             | optimal    | 1.0000000007e+00 |          7.1e-10 |     - |   0.0034 s |
+| cvxpy OSQP (eps 1e-10)                     | optimal    | 1.0000000000e+00 |          <1e-10  |     - |         - |
+
+Known optimal: f* = 1.0 at x* = (1,1).
+
+The active-set SQP engine returns x = (1,1) *exactly* (inf-norm error 0.0) in a
+single iteration, with zero constraint violation. No cycling, no wrong working
+set, no multiplier-degeneracy failure. The two selectors for the SQP engine
+(=solver_selection="qp-active-set"= and =algorithm="active-set-sqp"=) agree to
+0.0e+00 in objective and in x — confirming the #213 fix routes the library
+selector to the same engine.
+
+Note the SQP path is *more* accurate here than either interior-point path: both
+IPMs approach the degenerate vertex from the interior and stop ~1e-8 short,
+while the active-set method identifies the vertex exactly.
+
+* Cross-check / Verification
+- Own derivatives finite-differenced against =gf= before solving (assert in the script).
+- Two independent oracles: cvxpy/CLARABEL (7.1e-10) and cvxpy/OSQP at
+  eps_abs=eps_rel=1e-10 (<1e-10) both reproduce f* = 1 at (1,1).
+- Two independent *pounce* engines (convex QP IPM via =solve_qp=, general NLP
+  filter-IPM) agree to 1.4e-09 and 1.2e-08.
+- Analytic check: x* = projection of (2,2) onto the region; multiplier family
+  derived in the script docstring is nonnegative and satisfies stationarity, so
+  the point is KKT (under a weaker CQ than LICQ — the constraints are affine, so
+  Abadie's CQ holds and KKT is still necessary).
+- Feasibility of the returned point: max violation 0.0e+00.
+
+* Verdict
+=PASS= — pounce's active-set SQP engine solves a deliberately LICQ-degenerate
+convex QP exactly (0.0 error in both x and f), agrees bit-for-bit with the
+=algorithm="active-set-sqp"= spelling, and is corroborated by two cvxpy solvers
+and two other pounce engines. Degeneracy, which is the classic failure mode for
+active-set methods, produced no cycling or misidentified working set.

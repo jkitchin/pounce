@@ -1,0 +1,57 @@
+#+TITLE: Adversary QP cross-check: Markowitz mean-variance portfolio QP
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: qp (convex QP via interior-point method)
+- CLASS: equality-constrained convex QP (budget) + no-short box bounds
+- SOURCE: Markowitz mean-variance portfolio optimization (Markowitz, 1952,
+  "Portfolio Selection", J. Finance). Closed-form KKT for the equality-only
+  relaxation, with the no-short bounds verified inactive by construction.
+- KNOWN_OPTIMAL: analytic via KKT of the equality-only problem.
+  Let a = Sigma^{-1} 1, b = Sigma^{-1} mu,
+      lam = (gamma (1'b) - 1)/(1'a),  x* = gamma b - lam a.
+  Construction (seed=3, gamma=0.1) yields x* strictly > 0 (min weight 0.0718),
+  so the no-short constraint is inactive and x* is the full-problem optimum.
+  obj* = -3.9343566048e-03.
+- N_VARIABLES: 8 (asset weights)
+- N_CONSTRAINTS: 1 equality (sum x = 1) + 8 lower bounds (x >= 0)
+
+* Formulation
+  min  0.5 x' Sigma x - gamma mu' x
+  s.t. sum(x) = 1,   x >= 0
+Sigma = F F' + diag(d), F ~ N(0,0.15) [8x3], d ~ U(0.05,0.15) -> SPD;
+mu ~ U(0.05,0.20); gamma = 0.1 (seed=3).
+
+pounce form (minimize 0.5 x'Px + c'x):
+  P = Sigma,  c = -gamma*mu,  A = ones(1,8),  b = [1],  lb = 0.
+pounce.obj already equals the full objective (no missing constant).
+
+Sigma PD: min eigenvalue = 7.684e-02 > 0.
+cvxpy oracle uses cp.psd_wrap(Sigma) to assert PSD; constraints sum==1, x>=0
+match A x = b and lb sign conventions.
+
+* Results
+| quantity            | pounce            | oracle (CLARABEL) | known (analytic)  |
+|---------------------+-------------------+-------------------+-------------------|
+| objective           | -3.9343566113e-03 | -3.9343566048e-03 | -3.9343566048e-03 |
+| status              | optimal           | optimal           | -                 |
+| iters               | 7                 | -                 | -                 |
+| time (s)            | 0.0024            | 0.0032            | -                 |
+| budget |sum x - 1|  | 1.94e-09          | -                 | 0                 |
+| min weight          | 7.177e-02         | -                 | 0.0718            |
+
+* Cross-check
+- rel_err obj vs known   : 6.51e-12
+- x inf-err vs known      : 1.57e-07
+- rel_err obj vs oracle   : 6.51e-12
+- x inf-err vs oracle     : 1.54e-07
+- Budget equality satisfied to 1.9e-9; all weights strictly positive
+  (no-short bounds inactive, as designed), confirming the closed form applies.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: pounce reports status=optimal, satisfies the budget equality to
+~2e-9, and matches both the analytic equality-KKT optimum and the cvxpy
+CLARABEL oracle to ~6.5e-12 relative objective error (1.6e-7 in x). Solve
+time 2.4 ms << 10 s and faster than the oracle. No correctness issue.

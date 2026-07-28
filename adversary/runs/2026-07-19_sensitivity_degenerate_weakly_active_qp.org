@@ -1,0 +1,144 @@
+#+TITLE: Adversary Run: Degenerate Parametric QP — Weakly Active Inequality (Strict Complementarity Fails)
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: degenerate / weakly-active-inequality parametric QP (active set changes with the parameter)
+:SOURCE: Fiacco (1983) "Introduction to Sensitivity and Stability Analysis in Nonlinear Programming", Ch. 2-3 (dx/dp theorem requires LICQ + STRICT COMPLEMENTARITY + SOSC); Nocedal & Wright 2e Sec. 12.5 / 16.5; Boyd & Vandenberghe Sec. 5.6
+:KNOWN_OPTIMAL: x*(b0=1) = (1/2, 1/2), f* = 1/4; derivative dx/db DOES NOT EXIST at b0
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 1 equality (the parameter) + 1 inequality (weakly active)
+:END:
+
+\begin{align*}
+\min_{x\in\mathbb{R}^2}\quad & \tfrac12 (x_0^2 + x_1^2) \\
+\text{s.t.}\quad & x_0 + x_1 = b \qquad \text{(parameter, } b_0 = 1) \\
+                 & x_0 - 2x_1 \le h = -\tfrac12
+\end{align*}
+
+At $b_0 = 1$ the equality-only optimum is $x = (b/2, b/2) = (0.5, 0.5)$ and
+$g^\top x = -b/2 = -0.5 = h$ *exactly*. The inequality is therefore **active
+with multiplier exactly zero** — strict complementarity fails, and the classical
+Fiacco sensitivity theorem does not apply. $x^*(b)$ is only *directionally*
+differentiable at $b_0$:
+
+- $b > b_0$: $g^\top x_{eq} < h$, inequality inactive, $x = (b/2, b/2)$,
+  $\;dx/db_+ = (1/2,\, 1/2)$.
+- $b < b_0$: inequality violated hence active; solve
+  $\begin{bmatrix}1&1\\1&-2\end{bmatrix} x = \begin{bmatrix}b\\-1/2\end{bmatrix}$,
+  giving $x = (2b/3 - 1/6,\; b/3 + 1/6)$, $\;dx/db_- = (2/3,\, 1/3)$.
+
+The two one-sided derivatives differ by 33%. A central finite difference that
+*straddles* $b_0$ returns their average $(7/12, 5/12)$, which is not a
+derivative of anything — that is the trap this run is built around.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS (with a documented degeneracy caveat)
+:END:
+
+| Quantity                            | Value                    | Err vs closed form |
+|-------------------------------------+--------------------------+--------------------|
+| pounce x* (default tol)             | (0.49994315, 0.50005685) | 5.68e-05           |
+| scipy SLSQP x* (oracle)             | (0.5, 0.5)               | —                  |
+| inequality slack at x*              | 0.000e+00 (ACTIVE)       | —                  |
+| inequality multiplier mu            | 2.62e-17 (weakly active) | —                  |
+| pounce dx/db                        | (0.66666667, 0.33333333) | 4.07e-11 vs dx/db_- |
+| closed form dx/db_- (b<b0)          | (2/3, 1/3)               | —                  |
+| closed form dx/db_+ (b>b0)          | (1/2, 1/2)               | 1.67e-01 from pounce |
+| naive straddling central FD         | (7/12, 5/12)             | 8.33e-02 from pounce |
+
+pounce wall time: 0.0021 s (construct + one =parametric_step=). Total script
+runtime 0.28 s.
+
+** One-sided FD plateau sweep (oracle: independent scipy SLSQP re-solve)
+
+Every step stays entirely on one side of $b_0$, so each column is a genuine
+one-sided derivative.
+
+| delta | forward (b>b0)       | backward (b<b0)          | central (straddles b0)   |
+|-------+----------------------+--------------------------+--------------------------|
+| 1e-03 | (0.5, 0.5)           | (0.66666667, 0.33333333) | (0.58333333, 0.41666667) |
+| 1e-04 | (0.5, 0.5)           | (0.66666667, 0.33333333) | (0.58333333, 0.41666667) |
+| 1e-05 | (0.5, 0.5)           | (0.66666667, 0.33333333) | (0.58333333, 0.41666667) |
+| 1e-06 | (0.5, 0.5)           | (0.66666667, 0.33333333) | (0.58333333, 0.41666667) |
+| 1e-07 | (0.5, 0.5)           | (0.66666667, 0.33333333) | (0.58333333, 0.41666667) |
+| 1e-08 | (0.5, 0.5)           | (0.66666667, 0.33333334) | (0.58333333, 0.41666667) |
+| 1e-09 | (0.50000004, ...)    | (0.66666667, 0.33333331) | (0.58333335, 0.41666667) |
+
+Plateau is flat over five orders of magnitude (1e-3 .. 1e-7):
+max deviation from the closed forms is 2.92e-10 (forward) and 3.51e-10
+(backward). Roundoff only appears at delta = 1e-9. **The FD step is firmly in
+the plateau**, so nothing below can be attributed to FD noise.
+
+* Cross-check / Verification
+
+1. *Forward solve.* pounce's $x^*$ agrees with an independent scipy SLSQP
+   re-solve to 5.68e-05 at default tolerance (see the accuracy note below); the
+   inequality slack is exactly 0 and the recovered multiplier is 2.6e-17, so the
+   degeneracy is real and not an artifact of the formulation.
+2. *Which branch?* pounce returns $(2/3, 1/3)$, matching the **b < b0
+   (active-set) one-sided derivative to 4.07e-11**. It does not return the
+   straddling average, and it does not return anything unrecognizable. This is a
+   defensible answer at a point where the derivative does not exist.
+3. *Predictor honesty* at $\Delta b = \pm 0.05$:
+   - down ($b = 0.95$): predicted (0.46660982, 0.48339018) vs re-solve
+     (0.46666667, 0.48333333), error **5.68e-05** — correct branch.
+   - up ($b = 1.05$): predicted (0.53327649, 0.51672351) vs re-solve
+     (0.525, 0.525), error **8.28e-03** — 146x worse. The predictor is silently
+     wrong on the other side of $b_0$, exactly as the theory predicts.
+4. *Tolerance sweep — the branch choice is NOT stable.* Re-running the same
+   problem varying only the solver =tol=:
+
+   | tol     | \vert x*-x_exact \vert | ineq slack | dx/db          | branch |
+   |---------+------------------------+------------+----------------+--------|
+   | default | 5.685e-05              | 1.705e-04  | (0.6667, 0.3333) | MINUS |
+   | 1e-10   | 4.952e-06              | 1.486e-05  | (0.6667, 0.3333) | MINUS |
+   | 1e-12   | 3.007e-07              | 9.019e-07  | (0.6667, 0.3333) | MINUS |
+   | 1e-14   | 4.339e-08              | 1.302e-07  | (0.5, 0.5)       | PLUS  |
+
+   Tightening the tolerance flips the reported sensitivity from $(2/3,1/3)$ to
+   $(1/2,1/2)$ — a 33% jump — with no warning and no change in the reported
+   status. The weakly active constraint sits on the =active_tol= knife edge, so
+   which one-sided derivative you get is decided by how far the IPM happened to
+   converge.
+
+* Verdict
+
+**PASS** (with a documented degeneracy caveat; *not* filed as a bug).
+
+pounce's forward solve is correct, and =QpSensitivity.parametric_step= returns
+one of the two legitimate one-sided derivatives to 4e-11 — the only defensible
+class of answers at a point where $dx/db$ does not exist. It notably does *not*
+return the straddling-FD average, which is the wrong thing a naive
+implementation would produce. On the mathematics, pounce is not wrong.
+
+Two observations worth recording, neither rising to =SOLVER_BUG=:
+
+1. *Silent one-sidedness.* The API reports no degeneracy signal. The docstring
+   says the predictor is "exact while the active set is unchanged", but there is
+   no way for a caller to learn that strict complementarity failed and that the
+   returned value is valid in only one direction. Here the wrong-direction
+   predictor is 146x less accurate.
+2. *Branch instability under =tol=.* Because the choice hinges on the
+   =active_tol= threshold applied to a quantity that is exactly zero in exact
+   arithmetic, the answer flips between two 33%-different values as =tol= is
+   tightened. Any downstream continuation or gradient consumer would see a
+   discontinuous jump caused purely by a solver setting.
+
+A useful enhancement (not a correctness fix) would be an exposed flag when an
+active constraint's multiplier is within tolerance of zero, so callers can
+detect that they are on a kink.
+
+Secondary note: at default tolerance the primal accuracy on this degenerate QP
+is only ~5.7e-05 (vs ~1e-8 expected on well-posed instances); it improves
+monotonically to 4.3e-08 at =tol=1e-14=. This is normal IPM behavior at a
+degenerate vertex, recorded for context.
+
+* Reproduce
+
+#+begin_src sh
+source /Users/jkitchin/projects/pounce/.venv-qa/bin/activate
+python /Users/jkitchin/projects/pounce/adversary/runs/2026-07-19_sensitivity_degenerate_weakly_active_qp.py
+#+end_src

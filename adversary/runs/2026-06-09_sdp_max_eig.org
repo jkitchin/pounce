@@ -1,0 +1,37 @@
+#+TITLE: Adversary Run: Maximum-eigenvalue SDP
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: small dense semidefinite program
+:SOURCE: Boyd & Vandenberghe — minimize t s.t. tI - A >= 0 (max eigenvalue).
+:KNOWN_OPTIMAL: 3.0
+:N_VARIABLES: epigraph t
+:N_CONSTRAINTS: one ("psd", n) cone
+:END:
+
+minimize t s.t. tI - A is PSD, for a fixed symmetric A with lambda_max(A) = 3.
+The optimum t* equals the largest eigenvalue of A. Encoded with ("psd", n) using
+the svec layout (lower triangle, column-major, off-diagonals x sqrt 2).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver             | Status  | t* (lambda_max) | Rel Err   | Wall Time |
+|--------------------+---------+-----------------+-----------+-----------|
+| pounce (PSD IPM)   | optimal | 2.9999999996    | 1.17e-10  | 0.0017 s  |
+| cvxpy (CLARABEL)   | optimal | 3.0000000000    | (ref)     | —         |
+
+Known optimal: 3.0
+
+* Cross-check / Verification
+cvxpy/CLARABEL agrees to 5e-10. The svec scaling (off-diagonals x sqrt 2) was
+re-derived before comparing, since that is the usual SDP encoding trap. pounce's
+t* matches lambda_max(A) = 3 to 1.2e-10.
+
+* Verdict
+PASS — pounce's PSD-cone path matches cvxpy and the analytic max eigenvalue to
+~1e-10.

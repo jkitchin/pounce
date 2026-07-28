@@ -1,0 +1,157 @@
+#+TITLE: Adversary Probe: LEAN CERTIFICATE pipeline (research/lean-cert)
+#+DATE: 2026-07-19
+
+* Scope
+:PROPERTIES:
+:BRANCH: research/lean-cert (worktree .../scratchpad/lc)
+:CONSUMER: /Users/jkitchin/projects/pounce-lean @ 245f796
+:CLAIM_UNDER_TEST: witnesses are untrusted -- wrong data must FAIL TO TYPECHECK
+:END:
+
+Existing coverage read first (so this attacks new ground):
+- =crates/pounce-cli/tests/certify.rs= -- emit shape, off-slice refusal
+  (maximize), wrong-.nl binding, fake-easier forgery, infeasible/unbounded routing.
+- =scripts/check-lean-cert.sh= layer 3 -- 3 forged witnesses
+  (KKT dual, objective Hessian, Farkas ray) must fail =lake build=.
+
+NEW ground attacked here: forged *objective value* and forged *minimizer*
+(not witness-internal), forged *recession direction*, forged *SOS bound*,
+hash-patched binding, nonconvex/off-slice emitter refusals, verdict
+relabeling, malformed rationals, and sparse-matrix representation ambiguity.
+
+* Headline
+*NO forged certificate built.* All four new forgeries were rejected by the
+Lean kernel with =unsolved goals=. *NO binding check was bypassable.* The
+untrusted-witness claim HELD on every attack.
+
+Secondary findings are trust-boundary / hygiene issues in =cert-verify= and
+=gen_lean.py=, none of which produce a false proof.
+
+* Attack 1 -- Forgery (the core claim)
+Four forged certs, each asserting something FALSE, run through
+=codegen/gen_lean.py= then =lake build=.
+
+| # | Cert | What was forged | codegen | lake build |
+|---+------+-----------------+---------+------------|
+| F1 | certify_qp | candidate.objective 1/2 -> 1/4 (better than true optimum) | ACCEPT | *REJECT* ForgeF1.lean:87 unsolved goals |
+| F2 | certify_qp | candidate.x (1/2,1/2) -> (1,0), objective -> 1 (feasible but not optimal, self-consistent) | ACCEPT | *REJECT* ForgeF2.lean:71 unsolved goals |
+| F3 | certify_unbounded | recession d sign-flipped (no longer a recession direction) | ACCEPT | *REJECT* ForgeF3.lean:68 and :72 unsolved goals |
+| F4 | sos-quartic | bound 1 -> 3/2, above the true global min of x^4-2x^2+2 | ACCEPT | *REJECT* ForgeF4.lean:51 unsolved goals |
+
+This is exactly the designed behavior: codegen does not judge witnesses; the
+kernel does. Note F1/F2/F4 attack the *claim* rather than a witness -- a class
+=check-lean-cert.sh= layer 3 did not previously cover -- and F3 covers the
+=unbounded= verdict, which had no negative fixture at all.
+
+* Attack 2 -- Binding
+- Real cert vs subtly modified =.nl= (constraint rhs 1 -> 2, identical shape):
+  REJECT, exit 2, =binding.nl_sha256 does not match=.
+- *Hash-patched* cert (=binding.nl_sha256= recomputed over the modified =.nl=,
+  =problem= block left stale) vs that modified =.nl=: REJECT, exit 2,
+  ="certificate describes a different problem than this .nl"=. The
+  re-derivation is a real second gate, not a hash rubber-stamp.
+- Duplicate / upper-triangle / out-of-range Q entries (see Attack 5): all
+  REJECTED by =cert-verify= re-derivation.
+
+Binding held on every attempt.
+
+* Attack 3 -- Silent acceptance (issue #213 defect class)
+| Input | Solver | =certify= |
+|-------+--------+-----------|
+| quartic objective x0^4 + x1^2 | solves | exit 2, "objective is not a polynomial of degree <= 2" |
+| indefinite Q, unbounded (x0^2 - x1^2) | unbounded | exit 2, "unbounded v1 is the LP slice (Q = 0)" |
+| indefinite Q, *bounded* box QP | "Optimal Solution Found" | exit 2, =Ldl(Indefinite { col: 1 })= |
+
+No silent acceptance found. *Minor:* the bounded-nonconvex refusal surfaces a
+Debug-formatted internal error (=Ldl(Indefinite { col: 1 })=) rather than a
+user-facing "objective Hessian is not PSD; certify supports convex QP only".
+Correct behavior, poor message.
+
+* Attack 4 -- Refusal honesty
+- Emitter: =emit.rs= constructs only ="global-min"=, ="infeasible"=,
+  ="unbounded"=. No code path emits =feasible= or =local-min-strict=. Honest.
+- Codegen: =local-min-strict= is refused cleanly (exit 2, clear message).
+  =feasible= is *not* refused -- =gen_lean.py= has =generate_feasible= and
+  pounce-lean ships =certs/qp-feasible.cert.json= / =certs/qp-gap.cert.json=.
+  So the "feasible is deliberately refused" statement is stale on the consumer
+  side; only the *emitter* refuses it. (Relabeling a global-min cert as
+  =feasible= is accepted -- a strictly weaker claim, so sound.)
+
+* Attack 5 -- Malformed certificates
+| Input | codegen | cert-verify |
+|-------+---------+-------------|
+| denominator 0 | refuse, clean msg | reject (2) |
+| denominator -2 | refuse, clean msg | *accept (0)* |
+| unreduced 50/100 | accept (value correct) | accept |
+| 4000-digit num/den | accept | accept |
+| leading zeros "01"/"02" | accept | accept |
+| "+1"/"+2" | accept | accept |
+| schema tag =v2= | refuse, clean msg | *accept (0)* |
+| =schema= key missing | refuse, clean msg | reject (2) |
+| verdict =local-min-strict= | refuse, clean msg | *accept (0)* |
+| =witnesses.duals= removed | refuse, *raw KeyError, exit 1* | accept (0) |
+| =witnesses= removed | refuse, *raw KeyError, exit 1* | reject (2) |
+| truncated JSON | refuse, *raw JSONDecodeError, exit 1* | reject (2) |
+| Lean injection via num ="1)  -- "= | refuse (int() ValueError) | -- |
+| Lean injection via den ="1 + 1"= | refuse (int() ValueError) | -- |
+
+Nothing unsound. Three hygiene gaps:
+1. =cert-verify= validates neither =schema= *value* nor =verdict=. A cert
+   tagged =pounce.lean-cert/v2= or =verdict: local-min-strict= exits 0. Since
+   =cert-verify= is the advertised "bind cert to problem" gate, a user can get
+   exit 0 on a certificate the rest of the pipeline would refuse. Recommend
+   rejecting unknown schema versions and unsupported verdicts.
+2. =gen_lean.py= raises bare =KeyError=/=JSONDecodeError= (exit 1 + traceback)
+   for missing fields and truncated JSON, instead of =Unsupported= (exit 2).
+   Inconsistent with its own refusal contract.
+3. Rationals are not canonicalized (=50/100=, =01=, =+1= all accepted). Values
+   are still correct, but it undercuts the "deterministic, content-addressed
+   bytes" story.
+
+* Attack 6 -- Sparse-matrix representation ambiguity (new)
+Duplicate entry for Q(0,0) (=2= then =100=): =gen_lean.py= is *last-wins* and
+emits =Qdiag := ![100, 2]=, i.e. a proof about a different matrix than the
+certificate's first entry describes. =cert-verify= catches it (exit 2).
+Upper-triangle entry contradicting =symmetric: true=: same -- codegen accepts,
+=cert-verify= rejects. Out-of-range index (7,7) on a 2x2: codegen raw
+=IndexError=, =cert-verify= rejects.
+
+Not a soundness hole (the generated proof is self-contained about the matrix it
+embeds, and binding is the gate), but it means the *only* thing standing
+between a duplicate-entry cert and a proof-about-the-wrong-problem is running
+=cert-verify=. Worth noting that pounce-lean's own =certs/*.json= carry
+all-zero =nl_sha256=/=sol_sha256=, so they cannot be bound to any problem at
+all, and nothing in the =lake build= path enforces binding. The schema should
+either forbid duplicate/upper-triangle entries or codegen should reject them.
+
+* Attack 7 -- codegen module-name injection (defense-in-depth only)
+=gen_lean.py -m 'PounceLean.X\naxiom bad : False'= is accepted and the injected
+text lands verbatim in the generated Lean. The =-m= flag is operator-supplied,
+not certificate data, so this is outside the untrusted-witness boundary --
+noting only because it would become live if a module name were ever derived
+from cert content.
+
+* Verdict
+*The untrusted-witness claim HELD.* Every forged certificate that asserted a
+false statement failed to typecheck; every binding attack was rejected; the
+emitter refused every off-slice input tried, with exit 2. No critical finding.
+
+Recommended follow-ups, in priority order:
+1. =cert-verify= should reject unknown =schema= values and unsupported
+   =verdict= values (currently exit 0). [correctness of the advertised gate]
+2. Reject duplicate / upper-triangle / out-of-range sparse entries in codegen,
+   or forbid them in the schema.
+3. Promote F1/F2/F3/F4 (forged objective, forged minimizer, forged recession,
+   forged SOS bound) into =check-lean-cert.sh= layer 3 -- they cover claim-level
+   and verdict-level forgery that the existing three witness-level fixtures do
+   not.
+4. =gen_lean.py=: raise =Unsupported= (exit 2) instead of bare KeyError /
+   JSONDecodeError; clean up the bounded-nonconvex =Ldl(Indefinite {..})=
+   message in =certify=.
+5. Reconcile docs: =crates/pounce-lean-cert/README.md= says =feasible= is future
+   work, but =gen_lean.py= implements it and pounce-lean ships feasible certs.
+
+* Hygiene
+No source modified in either repo. All scratch under =/tmp/advlc=; generated
+Lean modules removed from =pounce-lean/PounceLean/Generated/=. =git status=
+clean in both worktrees at exit. =adversary/log.org= not touched, per instruction.

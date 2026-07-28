@@ -1,0 +1,109 @@
+#+TITLE: Adversary Run: Dual-divergence guard false positive (autocorr_bern55-06)
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   nlp
+:CLASS:    termination-guard false positive (differential / regression sweep)
+:SOURCE:   MINLPLib =autocorr_bern55-06.nl= (continuous relaxation), via the local corpus at ~/.cache/discopt/minlplib/current/nl
+:KNOWN_OPTIMAL: -2304.0000278027342 (Ipopt 3.x, confirmed stationary: NLP error 3.7e-9)
+:N_VARIABLES:  (corpus model, < 200 kB .nl)
+:N_CONSTRAINTS: n/a
+:END:
+
+Target: **PR #250** / commit =ba29b53=, "Guard against dual-infeasibility
+divergence (emfl050 warm-start stall, #246)", which added the option
+=dual_diverging_streak= (default 15, 0 disables).
+
+The guard watches the NLP-scaled dual infeasibility and, once it has grown for
+15 consecutive iterations in an elevated regime, diverts the solve into the
+restoration phase (or terminates =DivergingIterates=). It was added to convert a
+permanent stall on =emfl050_5_5= into a solve.
+
+Adversarial hypothesis under test: dual infeasibility legitimately grows for
+many consecutive iterations on hard-but-solvable problems, so a fixed
+15-iteration streak will fire on solves that would have converged.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (confirmed false positive, narrow)
+:END:
+
+| Configuration                | Status                    | Objective    | NLP error | Iters |
+|------------------------------+---------------------------+--------------+-----------+-------|
+| POUNCE head, guard default   | Solved To Acceptable Level | -2263.461245 |   1.0e+00 |   111 |
+| POUNCE head, =dual_diverging_streak=0= | Optimal Solution Found | -2304.000028 |   3.7e-09 |    72 |
+| POUNCE pre-#250 (=f5aea43=)  | Optimal Solution Found    | -2304.000028 |   3.7e-09 |    72 |
+| Ipopt 3.x (oracle)           | Optimal Solution Found    | -2304.000028 |   3.7e-09 |    72 |
+
+Guard-disabled POUNCE matches Ipopt iteration-for-iteration (72) and to 12
+significant figures. With the guard at its default the solve is diverted into
+restoration and ends at a **non-stationary** point: the objective is 40.5 worse
+(1.8 %), and the overall NLP error is **1.0** — nine orders of magnitude above
+the converged value.
+
+The reported status is =Solved To Acceptable Level= (AMPL =objno 100=). That is
+technically defensible, because =acceptable_dual_inf_tol= defaults to 1e10 and
+so admits an enormous dual residual, but it overstates the result: a caller
+reading "acceptable" gets a point that is feasible (constraint violation 9e-12)
+yet not remotely KKT.
+
+* Cross-check / Verification
+
+Attribution is by bisection over the five merged PRs, running the identical
+model and options at each commit:
+
+| Commit    | PR              | Status                     | Objective    | NLP error | Iters |
+|-----------+-----------------+----------------------------+--------------+-----------+-------|
+| =f5aea43= | baseline (#249) | Optimal                    | -2304.000028 |   3.7e-09 |    72 |
+| =0706981= | #251 (docs)     | Optimal                    | -2304.000028 |   3.7e-09 |    72 |
+| =ba29b53= | **#250**        | Solved To Acceptable Level | -2263.461245 |   1.0e+00 |   111 |
+| =ecb6f82= | #253            | Solved To Acceptable Level | -2263.461245 |   1.0e+00 |   111 |
+| =16524f8= | #256/#255       | Solved To Acceptable Level | -2263.461245 |   1.0e+00 |   111 |
+| =aa9abb6= | #258            | Solved To Acceptable Level | -2263.461245 |   1.0e+00 |   111 |
+
+The change appears exactly at =ba29b53= and is fully reverted by setting
+=dual_diverging_streak=0= on the head binary — same binary, one option — so the
+guard, and not any other change in that commit, is the cause.
+
+* Prevalence
+
+A 500-model corpus sweep of the head binary with the guard at default vs
+disabled (same binary both sides):
+
+- guard degrades the outcome: **1 / 500** (=autocorr_bern55-06=)
+- guard rescues the outcome:  **2 / 500** (=deb7=, =deb9= — both go
+  =objno 100= -> =objno 0=, objective 104.95 -> 97.56 and 104.53 -> 97.56)
+
+So the guard is **net positive** on this corpus and should not be reverted. The
+finding is a narrow false-positive case, not a broad regression.
+
+* Verdict
+
+=SOLVER_BUG= (low severity, narrow). The dual-divergence guard fires on a solve
+that both Ipopt and pre-#250 POUNCE converge cleanly, and the diverted solve
+returns a materially worse, non-stationary point under an "acceptable" status.
+The 15-iteration streak plus the internal absolute thresholds are evidently not
+quite selective enough to distinguish this model's legitimate dual-infeasibility
+transient from =emfl050='s runaway.
+
+Because the guard rescues twice as many models as it breaks, the right response
+is to sharpen the firing condition rather than to disable or revert it — for
+example by additionally requiring that primal feasibility is *not* improving
+(=emfl050='s stall is characterised by the filter admitting steps because primal
+feasibility inches down while inf_du runs away), or by re-checking after the
+diversion whether the restored point actually improved on the pre-diversion
+iterate and rolling back if it did not.
+
+* Reproduce
+
+#+begin_src sh
+NL=~/.cache/discopt/minlplib/current/nl/autocorr_bern55-06.nl
+./target/release/pounce $NL /tmp/a.sol -AMPL max_wall_time=10                        # acceptable, -2263.46, err 1.0
+./target/release/pounce $NL /tmp/a.sol -AMPL max_wall_time=10 dual_diverging_streak=0 # optimal,    -2304.00, err 3.7e-9
+/opt/homebrew/bin/ipopt $NL -AMPL                                                     # optimal,    -2304.00, err 3.7e-9
+#+end_src
+
+Sweeps:
+- =adversary/runs/2026-07-22_corpus_last5prs_regression.py= (baseline vs head, 400 models)
+- =adversary/runs/2026-07-22_nlp_pr250_guard_falsepositive_sweep.py= (guard on vs off, 500 models)

@@ -1,0 +1,44 @@
+#+TITLE: Adversary LP cross-check — small diet/blending LP (>= floors)
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: lp
+- CLASS: bounded LP with >= (floor) inequality constraints, unique vertex optimum
+- SOURCE: Classic diet/blending LP (Dantzig diet problem, textbook 3-food/2-nutrient variant). Optimum derivable in closed form and confirmed by two oracles.
+- KNOWN_OPTIMAL: min cost = 66/7 = 9.4285714286 at x* = (15/7, 0, 24/7)
+- N_VARIABLES: 3 (food amounts, x >= 0)
+- N_CONSTRAINTS: 2 nutrient floors (>=) + 3 lower bounds
+
+* Formulation
+minimize  c.x,  c = [2, 3, 1.5]
+subject to N x >= r,
+  N = [[4,2,1],[1,3,2]], r = [12, 9]
+  x >= 0
+
+pounce convention is G x <= h, so the >= floors are encoded as G = -N, h = -r.
+Active set at optimum: both nutrient floors and x1 = 0 (vertex with food 1 unused).
+
+* Results (pounce vs oracle)
+| metric            | pounce            | scipy linprog     | cvxpy CLARABEL |
+|-------------------+-------------------+-------------------+----------------|
+| status            | optimal           | 0 (optimal)       | optimal        |
+| objective         | 9.4285714280e+00  | 9.4285714286e+00  | 9.4285714340e0 |
+| x                 | (2.1429, ~0, 3.4286) | (2.1429, 0, 3.4286) | --          |
+| time (s)          | 0.0021            | 0.0044            | --             |
+
+x* numerically: 15/7 = 2.142857..., 24/7 = 3.428571... — matches.
+
+* Cross-check
+- rel_err_vs_known      = 6.29e-11
+- obj_err_vs_oracle     = 6.29e-11
+- x_inf_err vs oracle   = 1.87e-10
+- min feasibility       = -6.70e-10 (within IPM tolerance; floors satisfied)
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: pounce returns status=optimal with objective matching both the
+closed-form known optimum (66/7) and two independent oracles to ~1e-10, and
+the returned x matches the oracle vertex. Sign-convention encoding (>= floors
+as -N x <= -r) verified by feasibility check (N x* >= r holds within IPM
+tolerance). Faster than scipy linprog here. No discrepancy.

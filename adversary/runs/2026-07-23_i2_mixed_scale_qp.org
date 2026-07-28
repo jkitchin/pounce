@@ -1,0 +1,49 @@
+* [2026-07-23] i2 mixed-scale QP diag(1e-10,1e10) — SOLVER_BUG
+:PROPERTIES:
+:FAMILY: qp
+:PR_AREA: #293/#309/#320 (tiny/mixed-scale Hessian curvature)
+:VERDICT: SOLVER_BUG
+:END:
+
+** Problem
+min 0.5 x'Px + c'x, P = diag(a,b), c = [-1,-1].  Unconstrained, P PD ⇒ unique
+minimizer x = [1/a, 1/b], obj = -0.5(1/a + 1/b).
+
+** Result
+| a,b            | cond   | pounce status | pounce x  | pounce obj | pounce kkt | true obj |
+|----------------+--------+---------------+-----------+------------+------------+----------|
+| 1e-6, 1e6      | 1e12   | optimal       | [1e6,1e-6]| -5.0e5     | 1.1e-15    | -5.0e5   |
+| 1e-8, 1e8      | 1e16   | optimal       | [0,0]     | 0.0        | 1.0        | -5.0e7   |
+| 1e-10, 1e10    | 1e20   | optimal       | [0,0]     | 0.0        | 1.0        | -5.0e9   |
+| 1e-12, 1e12    | 1e24   | optimal       | [0,0]     | 0.0        | 1.0        | -5.0e11  |
+
+For cond(P) >= ~1e16 pounce returns the STARTING point x=[0,0], status="optimal",
+success=True, while its OWN reported kkt_error = dual_infeasibility = 1.0 (the
+true gradient at x=0 is c=[-1,-1], norm 1.414 — nowhere near stationary).
+Silent wrong answer. cvxpy CLARABEL solves all four correctly.
+
+Neighbor of the #293/#309 fix: single flat direction diag(eps,1) and uniform
+tiny P=eps*I both solve correctly for eps down to 1e-14; only the SIMULTANEOUS
+tiny+huge diagonal (cond > ~1e12) breaks. #286/#307 normalization targeted
+cond 1e8-1e12; cond > 1e12 mixed still mislabels.
+
+** Termination at iteration 0 (not a budget issue)
+solve_qp(diag(1e-10,1e10)) returns iters=0, status=optimal, kkt=1.0 for
+max_iter in {200, 5000, 100000} AND tol in {1e-6, 1e-10}. The convergence test
+declares optimality at the STARTING point x=0; more iterations / tighter tol do
+not help. This is a termination-logic mislabel, not exhaustion.
+
+** Distinct from existing log entry [2026-07-22] "Mixed-conditioning ... QP batch"
+That entry (cond 1e10, obj O(1e19)) reported an HONEST status=iteration_limit and
+was classified SOLVER_LIMITATION ("Not a BUG because the status is honestly
+iteration_limit"; max_iter=5000 recovered the optimum). THIS case is strictly
+worse and different: higher cond ratio (~1e16-1e24), MODEST objective (~5e9), and
+a FALSE status="optimal"/success=True at iteration 0 that no max_iter fixes. A
+silent wrong success, not an honest limit.
+
+** Oracle
+cvxpy 1.x CLARABEL; closed-form KKT (grad = 0).
+
+** Repro
+source .venv-qa/bin/activate
+python adversary/runs/2026-07-23_i2_mixed_scale_qp.py

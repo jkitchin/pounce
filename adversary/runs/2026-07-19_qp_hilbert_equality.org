@@ -1,0 +1,101 @@
+#+TITLE: Adversary Run: Equality-Constrained QP with Near-Singular (Hilbert) Hessian
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: equality-heavy convex QP, ill-conditioned PD Hessian, exact rational KKT oracle
+:SOURCE: Hilbert matrix as canonical ill-conditioned SPD test matrix — N. J. Higham, "Accuracy and Stability of Numerical Algorithms" 2e, SIAM 2002, Sec. 28.1; Golub & Van Loan, "Matrix Computations" 4e, Sec. 3.5. Equality-QP KKT system: Nocedal & Wright 2e, Sec. 16.1 (eq. 16.4).
+:KNOWN_OPTIMAL: -237004690553/242227130880 = -0.9784399034574405 (exact rational)
+:N_VARIABLES: 8
+:N_CONSTRAINTS: 3 equalities (no inequalities, no bounds)
+:END:
+
+\[
+\begin{aligned}
+\min_{x \in \mathbb{R}^8} \quad & \tfrac12 x^\top H x + c^\top x \\
+\text{s.t.} \quad & A x = b
+\end{aligned}
+\]
+
+with $H_{ij} = 1/(i+j-1)$ the $8\times8$ Hilbert matrix, $c = -\mathbf{1}$, and
+
+\[
+A = \begin{bmatrix}
+1&1&1&1&1&1&1&1\\
+1&-1&1&-1&1&-1&1&-1\\
+1&2&3&4&5&6&7&8
+\end{bmatrix}, \qquad b = (1,\,0,\,10)^\top .
+\]
+
+Measured conditioning: $\kappa_2(H) = 1.5258\text{e}{+}10$, $\lambda_{\min}(H) =
+1.1115\text{e}{-}10$. $H$ is positive definite (so KKT is necessary *and*
+sufficient) but only barely so — the reduced Hessian is near-singular, which is
+exactly the regime where an IPM's Newton system can lose all its digits. The
+constraint block is equality-heavy: 3 of 8 degrees of freedom are removed by
+equalities, with no inequality or bound activity to regularize the system.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                      | Status  | Objective          | Rel Err vs exact | eq feas (inf) | ‖x−x*‖_inf | Wall Time |
+|-----------------------------+---------+--------------------+------------------+---------------+------------+-----------|
+| pounce =solve_qp=           | optimal | -9.784399032846e-01 | 1.73e-10        | 1.80e-09      | 3.75e-07   | 0.0011 s  |
+| exact rational KKT (sympy)  | exact   | -9.784399034574e-01 | 0 (definition)  | 0             | 0          | 0.0033 s  |
+| cvxpy / CLARABEL            | optimal | -9.784399034568e-01 | 5.5e-13         | 5.68e-14      | 1.91e-05   | 0.0040 s  |
+
+Known optimal: $-237004690553/242227130880 = -0.9784399034574405$ (exact).
+
+Exact minimizer
+$x^\star = (-0.126224765,\ 4.88250438,\ -42.6112858,\ 132.869599,\ -137.300585,\
+-58.7348799,\ 180.538096,\ -78.5172235)$.
+
+pounce reproduces the objective to 1.73e-10 relative and the minimizer to
+3.75e-07 in the infinity norm — noteworthy because the components are $O(10^2)$
+and the Hessian condition number is $1.5\text{e}{+}10$, so a naive solve would be
+expected to lose ~10 digits. The stationarity residual
+$\|Hx + c + A^\top\lambda\|_\infty$ at pounce's point is *1.29e-14*, i.e. at
+machine precision.
+
+* Cross-check / Verification
+
+The primary oracle involves *no floating point and no iterative solver at all*.
+Every entry of $H$, $A$, $b$, $c$ is rational, $A$ has full row rank 3, and $H$
+is PD, so the KKT matrix
+
+\[
+\begin{bmatrix} H & A^\top \\ A & 0 \end{bmatrix}
+\begin{bmatrix} x \\ \lambda \end{bmatrix}
+= \begin{bmatrix} -c \\ b \end{bmatrix}
+\]
+
+is nonsingular and was solved exactly in rational arithmetic with sympy, giving
+the closed-form optimum $-237004690553/242227130880$. This oracle cannot inherit
+any conditioning error, which is the whole point of choosing it for a problem
+with $\kappa_2 = 1.5\text{e}{+}10$.
+
+Independent confirmations:
+- *cvxpy / CLARABEL* agrees with the exact rational objective to 5.5e-13.
+- *KKT residual check on pounce's returned point*: primal feasibility
+  $\|Ax-b\|_\infty = 1.80$e-09; stationarity residual with $\lambda$ recovered by
+  least squares $= 1.29$e-14.
+
+An incidental observation, reported for completeness and *not* a finding against
+either solver: pounce's *minimizer* is roughly 50x closer to the exact rational
+$x^\star$ than CLARABEL's (3.75e-07 vs 1.91e-05 inf-norm), while CLARABEL's
+*objective* is closer (5.5e-13 vs 1.73e-10). Both behaviours are consistent —
+near a singular Hessian the objective is flat, so objective accuracy and
+argument accuracy decouple; neither solver is wrong.
+
+* Verdict
+
+*PASS.* On an equality-heavy convex QP whose Hessian has condition number
+$1.5\times10^{10}$ and smallest eigenvalue $1.1\times10^{-10}$, pounce returns
+=status=optimal= with a relative objective error of 1.73e-10 against an *exact
+rational closed-form* KKT solution, primal feasibility 1.8e-09, and a
+machine-precision stationarity residual (1.29e-14). CLARABEL independently
+confirms the same optimum. Wall time 1.1 ms, faster than both oracles. No
+=SOLVER_BUG=, =SOLVER_LIMITATION=, =TOLERANCE= issue, or
+=PERFORMANCE_REGRESSION=.

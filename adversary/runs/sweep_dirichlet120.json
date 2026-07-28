@@ -1,0 +1,98 @@
+[
+  {
+    "limit": 0.5,
+    "wall": 2.2946342499926686,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.2631332709500958,
+    "iters": 0,
+    "rc": 1
+  },
+  {
+    "limit": 0.8,
+    "wall": 2.358653625007719,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.2631332709500958,
+    "iters": 0,
+    "rc": 1
+  },
+  {
+    "limit": 1.0,
+    "wall": 2.768450625007972,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.2631332709500958,
+    "iters": 0,
+    "rc": 1
+  },
+  {
+    "limit": 1.2,
+    "wall": 2.70692704198882,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.2631332709500958,
+    "iters": 0,
+    "rc": 1
+  },
+  {
+    "limit": 1.5,
+    "wall": 3.2839145839679986,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.27908471717235445,
+    "iters": 1,
+    "rc": 1
+  },
+  {
+    "limit": 2.0,
+    "wall": 3.5756897090468556,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.27908471717235445,
+    "iters": 1,
+    "rc": 1
+  },
+  {
+    "limit": 3.0,
+    "wall": 4.882947083096951,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.27908471717235445,
+    "iters": 1,
+    "rc": 1
+  },
+  {
+    "limit": 5.0,
+    "wall": 6.731611583963968,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.8829051732424542,
+    "iters": 4,
+    "rc": 1
+  },
+  {
+    "limit": 10.0,
+    "wall": 11.786337832920253,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.1800888777317542,
+    "iters": 7,
+    "rc": 1
+  },
+  {
+    "limit": 20.0,
+    "wall": 21.612607832998037,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.10250422642343865,
+    "iters": 14,
+    "rc": 1
+  },
+  {
+    "limit": 40.0,
+    "wall": 41.59200870792847,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.04064455263718236,
+    "iters": 28,
+    "rc": 1
+  },
+  {
+    "limit": 100.0,
+    "wall": 101.63932533294428,
+    "status": "MaximumWallTimeExceeded",
+    "obj": 0.03504170699484568,
+    "iters": 51,
+    "rc": 1
+  }
+]

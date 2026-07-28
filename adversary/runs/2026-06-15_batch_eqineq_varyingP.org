@@ -1,0 +1,52 @@
+#+TITLE: Batch adversary — equality+inequality QPs with varying P (solve_qp_batch)
+#+DATE: 2026-06-15
+
+* Problem
+A 16-item batch solved with =pounce.solve_qp_batch=. Every item carries BOTH an
+equality block (A x = b) AND an inequality block (G x <= h), and each item has a
+DISTINCT SPD Hessian P_i (not merely a swept RHS). n=4 variables per item.
+
+  min 1/2 x'P_i x + c_i' x   s.t.  A_i x = b_i ,  G_i x <= h_i
+
+- A_i: single equality row sum(x) = target_i (target in [-0.5, 0.5]).
+- G_i,h_i: box |x_j| <= 1 written as G x <= h (8 rows).
+- 4 of the 16 items (k = 3,7,11,15) get c_0 = -50 to drive x_0 onto the
+  box face so an inequality row is ACTIVE at the optimum; the other 12 stay
+  in the box interior (inequalities inactive).
+
+This is distinct from the four already-logged batch scenarios (8 SPD bound-
+constrained, multi-RHS unconstrained, equality-constrained, multi-RHS shared-
+G,h inequality): here all of P, c, A, b, G, h vary per item, exercising the
+per-instance factorization path with a mixed equality+inequality KKT system.
+
+* Contract / oracles
+1. Internal consistency: batch[k] vs standalone =pounce.solve_qp= on the same
+   item — expect bit-for-bit / very tight.
+2. KNOWN closed form (inactive items): equality-only KKT linear system
+       [P  A'][x]   [-c]
+       [A  0 ][y] = [ b]
+   gives the exact minimizer when the inequalities do not bind. Used only for
+   items verified box-feasible & inactive (12 of 16).
+3. KKT stationarity residual ||P x + c + A'y + G'z||_inf using the batch's
+   returned multipliers.
+4. Speedup: batch vs per-item loop.
+
+* Result
+- POUNCE(batch) status: optimal (all 16); time 0.0027 s.
+- max |x_batch - x_single|_inf = 0.00e+00 (bit-for-bit).
+- max relative obj error batch vs single = 0.00e+00.
+- max closed-form error (12 inactive items) = 4.37e-10.
+- max KKT stationarity residual = 5.01e-09.
+- max inequality violation = 1.68e-10; max equality error = 2.27e-10
+  (both well within 1e-6 tolerance).
+- items with active inequality = 4 (k=3,7,11,15), as designed.
+- ORACLE per-item single-solve loop time = 0.0067 s.
+- speedup = 2.48x.
+
+* Verdict
+VERDICT: PASS
+
+Batch results are identical to the per-item single solves (0 error), match the
+equality-only closed form on all interior items to ~4e-10, satisfy KKT
+stationarity to ~5e-9, and the active-constraint items land on the box face
+exactly. Batch is 2.48x faster than the loop. No discrepancy found.

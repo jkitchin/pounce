@@ -1,0 +1,168 @@
+#+TITLE: Adversary Run: LP Duality as a Self-Consistency Invariant (self-dual round-trips)
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: duality / multipliers / mathematical invariants
+:SOURCE: Bertsimas & Tsitsiklis, /Introduction to Linear Optimization/, Table 4.2, p.142 (general-form duality rules); Chvatal, /Linear Programming/, ch.5 (textbook primal/dual pair with known solution)
+:KNOWN_OPTIMAL: textbook pair = 24 (primal and dual); others verified by strong duality + scipy/HiGHS
+:N_VARIABLES: 2-8 per LP, 6 feasible LPs + 3 status-table LPs
+:N_CONSTRAINTS: 1-8 rows per LP
+:END:
+
+** What this tests
+
+Not "does pounce match another solver" but "is pounce internally consistent
+with LP duality theory". Every LP is solved by pounce, its *dual* is
+constructed by hand from the standard transformation rules and solved by
+pounce too, and the theorems are checked as identities. A shared sign-
+convention error cannot satisfy these identities, which is what makes this a
+complement to the =.sol= dual-sign finding from earlier today.
+
+** Transformation rules used (stated explicitly)
+
+Primal a min:
+\[ \min c^Tx \quad \text{s.t.}\quad a_i^Tx \{\ge,\le,=\} b_i,\quad x_j\{\ge 0,\le 0,\text{free}\} \]
+Dual a max:
+\[ \max b^T\lambda \quad \text{s.t.}\quad (A^T\lambda)_j \{\le,\ge,=\} c_j,\quad \lambda_i\{\ge 0,\le 0,\text{free}\} \]
+
+| primal row | dual var  |   | primal var | dual row      |
+|------------+-----------+---+------------+---------------|
+| $\ge b_i$  | $\ge 0$   |   | $x_j\ge0$  | $\le c_j$     |
+| $\le b_i$  | $\le 0$   |   | $x_j\le0$  | $\ge c_j$     |
+| $= b_i$    | free      |   | $x_j$ free | $= c_j$       |
+
+The mirrored map is implemented for a =max= primal so that =dual(dual(P))= is
+=P= *exactly*, as an array-equality identity, not merely up to sign.
+
+** Multiplier recovery (derived, not guessed)
+
+pounce solves $\min \tfrac12 x^TPx + c^Tx$ s.t. $Ax=b$, $Gx\le h$, $lb\le x\le ub$
+with stationarity $c + A^Ty + G^Tz - z_{lb} + z_{ub} = 0$, $z,z_{lb},z_{ub}\ge0$.
+Matching against dual feasibility gives
+
+- primal =·=·=  row (pounce eq row, mult $y_i$) $\Rightarrow \lambda_i = -y_i$
+- primal $\le$ row (pounce G row as-is, $z_i$) $\Rightarrow \lambda_i = -z_i$
+- primal $\ge$ row (pounce G row negated, $z_i$) $\Rightarrow \lambda_i = +z_i$
+
+These are re-checked numerically by the dual-feasibility residual test, so a
+wrong recovery would show up as a nonzero residual rather than pass silently.
+
+** LP instances
+
+| # | name             | form                                              |
+|---+------------------+---------------------------------------------------|
+| 1 | textbook_max     | max, all $\le$, $x\ge0$ — known primal AND dual   |
+| 2 | standard_eq      | standard form $Ax=b$, $x\ge0$ (3x5)               |
+| 3 | canonical_diet   | canonical $Ax\ge b$, $x\ge0$ (3x3)                |
+| 4 | mixed            | =,$\le$,$\ge$ rows; free var, nonpositive var     |
+| 5 | boxed_rows       | two-sided bounds written as explicit rows, free x |
+| 6 | degenerate       | duplicated active rows => non-unique dual face    |
+| A | both_infeasible  | primal infeasible AND dual infeasible             |
+| B | infeas/unbounded | primal infeasible, dual unbounded                 |
+| C | unbounded/infeas | primal unbounded, dual infeasible                 |
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+100/100 invariant checks passed. Total wall time for the whole suite (all 21
+LP solves plus scipy) 0.27 s, well inside the 10 s budget. Per-solve pounce
+time was 1.0–2.0 ms at 9–10 IPM iterations.
+
+| LP             | P status | val(P)        | D status | val(D)        | strong-duality gap | max CS residual |
+|----------------+----------+---------------+----------+---------------+--------------------+-----------------|
+| textbook_max   | optimal  |  23.999999999925 | optimal |  23.999999999997 | 3.0e-12          | 8.7e-11         |
+| standard_eq    | optimal  |  16.999999999928 | optimal |  16.999999999997 | 4.1e-12          | 6.4e-11         |
+| canonical_diet | optimal  |  16.400000000022 | optimal |  16.400000000019 | 1.8e-13          | 2.8e-11         |
+| mixed          | optimal  | -16.000000000   | optimal  | -16.000000000   | <1e-11             | <1e-10          |
+| boxed_rows     | optimal  | -16.999999999988 | optimal | -16.999999999987 | 6.7e-14          | 3.9e-11         |
+| degenerate     | optimal  |  -3.999999999973 | optimal |  -3.999999999971 | 4.4e-13          | 1.7e-11         |
+
+** (a) Strong duality
+Held on all six feasible bounded LPs, worst relative gap =6.7e-14 … 4.1e-12=.
+=dual(dual(P))= also reproduced =val(P)= to gap =0.000e+00= in every case
+(exact, since it is literally the same LP).
+
+** (b) Primal duals vs dual primals
+For each LP: pounce's *primal* multipliers, mapped through the recovery above,
+are feasible for the dual LP (residual $\le$ 2.2e-11) and achieve
+$b^T\lambda = \text{val}(P)$; symmetrically the *dual* problem's multipliers are
+primal-feasible and achieve $c^Tx=\text{val}(P)$. On the textbook pair the
+multipliers came out numerically equal to the *published* dual solution
+$(9/5, 2/5)$ to 1e-5, and the primal solution equal to the published $(3,4)$.
+
+** (c) Dual of the dual
+Checked as a *structural* identity, not just a value: =dual(dual(P))= compared
+element-wise against =P= (sense, objective, matrix, rhs, relops, variable sign
+restrictions) — exact array equality for all six.
+
+** (d) Complementary slackness
+Both halves checked at the reported pair: $\max_i|\lambda_i(a_i^Tx-b_i)|$ and
+$\max_j|x_j(c_j-(A^T\lambda)_j)|$, all $\le$ 8.7e-11, i.e. at the level of the
+requested =tol=1e-10=. Also checked *cross-pair*, using $x$ from the primal
+solve and $\lambda$ from the *dual problem's own* primal solution — same
+result, so the two independent solves land on a genuinely complementary pair.
+
+** (e) Status table
+
+| LP | truth                          | pounce P           | pounce D           | consistent |
+|----+--------------------------------+--------------------+--------------------+------------|
+| A  | primal infeasible, dual infeas | =dual_infeasible=  | =primal_infeasible= | yes       |
+| B  | primal infeasible, dual unbdd  | =primal_infeasible= | =dual_infeasible=  | yes        |
+| C  | primal unbounded, dual infeas  | =dual_infeasible=  | =primal_infeasible= | yes        |
+
+Case A deserves comment. Its primal $\min -x_1-x_2$ s.t. $x_1-x_2=1$,
+$-x_1+x_2=1$, $x\ge0$ is infeasible (rows sum to $0=2$), and HiGHS calls it
+infeasible. pounce returns =dual_infeasible=. That is *not* a wrong answer: the
+recession cone contains the improving ray $d=(1,1)$ with $Ad=0$, $d\ge0$,
+$c^Td=-2<0$, so the *dual* of that primal is genuinely infeasible and
+=dual_infeasible= is a true certificate. This is the both-infeasible cell of
+the status table where either certificate is correct. The script verifies the
+ray exactly before grading the status. Only "both optimal" would be a
+violation, and that never occurred.
+
+** Extra: bounds through =lb=/=ub= rather than as rows
+=boxed_rows= was re-solved with the box handed to pounce as =lb=/=ub= instead of
+explicit rows. Same objective to 1e-12, and the dual objective assembled from
+the bound multipliers, $-h^Tz - u^Tz_{ub}$, reproduced the primal objective to
+6e-12 — so the bound multipliers carry the correct dual contribution and sign.
+
+* Cross-check / Verification
+- *Primary oracle: duality theory itself.* No external solver value is trusted
+  anywhere in (a)–(d); the identities are pounce-vs-pounce through a
+  hand-derived transformation.
+- *Transformation validated first*, per instruction: the auto-generated dual of
+  the textbook LP was compared element-wise against the hand-written textbook
+  dual (=min 10y1+15y2 s.t. 2y1+y2>=4, y1+3y2>=3, y>=0=) — exact match — and
+  both the known primal $(3,4)$/24 and known dual $(9/5,2/5)$/24 were recovered.
+- *Exact rational check* (=fractions.Fraction=): $c^Tx = b^Ty = 24$ exactly, and
+  exact dual feasibility of $(9/5,2/5)$.
+- *Secondary (weak): scipy.optimize.linprog / HiGHS* agreed with pounce on all
+  six primal values to 1e-10, and independently confirmed the infeasibility of
+  case A and the unboundedness that led me to repair instance 4.
+
+** Two self-inflicted errors caught and fixed (worth recording)
+1. The first version of =mixed= was genuinely *unbounded* (free $x_2$ with
+   $c_2=-2$ runs to $+\infty$); pounce correctly reported =dual_infeasible= and
+   its dual correctly =primal_infeasible= — a consistent pair. Confirmed
+   unbounded by HiGHS, then a row $x_4\ge-2$ was added to bound it.
+2. The first status expectation for case A was too narrow (see above).
+Both were FORMULATION errors on my side, not solver behaviour.
+
+* Verdict
+*PASS.* pounce's LP duals are internally consistent with LP duality theory
+across standard, canonical, mixed, boxed, and primal-degenerate forms: strong
+duality, primal-dual multiplier correspondence, dual-of-dual recovery, and
+complementary slackness all hold to 1e-10 or better, and the
+infeasible/unbounded status combinations are consistent with the LP status
+table (including the ambiguous both-infeasible cell, where pounce returns a
+certificate that is verifiably true rather than a guess). Because these are
+self-consistency identities rather than comparisons against another solver, a
+uniform sign-convention error in the in-memory Python multipliers would have
+broken them — it did not, so the =solve_qp= multiplier convention
+($\lambda=-y$ for equalities, $-z$ for $\le$, $+z$ for negated $\ge$) is sound,
+and any dual-sign problem found earlier today is confined to the =.sol= writer,
+not to the solver's multipliers themselves.

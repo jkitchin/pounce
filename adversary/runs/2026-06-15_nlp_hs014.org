@@ -1,0 +1,69 @@
+#+TITLE: Adversary Run: Hock-Schittkowski 14 (HS014)
+#+DATE: 2026-06-15
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: equality + inequality constrained, unbounded variables (small QP-like NLP)
+:SOURCE: Hock & Schittkowski, "Test Examples for Nonlinear Programming Codes" (1981), problem 14.
+:KNOWN_OPTIMAL: 1.3934649806893021
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 1 equality + 1 inequality (both active at the optimum)
+:END:
+
+minimize  (x1 - 2)^2 + (x2 - 1)^2
+s.t.      x1 - 2 x2 + 1   = 0         (equality)
+          -0.25 x1^2 - x2^2 + 1 >= 0  (inequality)
+
+Known optimum:
+  x* = ((sqrt(7)-1)/2, (sqrt(7)+1)/4) = (0.8228756555, 0.9114378278)
+  f* = 9 - 2.875*sqrt(7) = 1.3934649806893021
+Both constraints are active at x*. Closed-form value verified symbolically:
+the published "1.3934649994" digits in the prompt are slightly off; the exact
+value 9 - 2.875*sqrt(7) = 1.39346498069..., which Ipopt independently confirms.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver               | Status           | Objective       | Rel Err vs known | Iters | Wall Time |
+|----------------------+------------------+-----------------+------------------+-------+-----------|
+| pounce (nlp, an. jac)| 0 Solve_Succeeded| 1.3934649647313 | 1.15e-08         | 7     | 0.0045 s  |
+| Ipopt (Pyomo)        | Solve_Succeeded  | 1.3934649647313 | 1.15e-08         | -     | 0.0224 s  |
+
+Known optimal: 1.3934649806893021
+
+pounce reached x = (0.82287566, 0.91143783), matching Ipopt to 2.6e-14 in the
+objective and 1.5e-14 in x (inf-norm), and the published closed-form optimum to
+1.15e-8 (both solvers land at the same KKT point; the ~1e-8 gap to the exact
+closed form is the shared interior-point convergence tolerance, identical for
+both). success=True, no FD-fallback / tiny-step issue (analytic jac supplied;
+even so the central-difference fallback per #123 would have converged here).
+
+* Cross-check / Verification
+Three independent sources agree:
+1. =pounce.minimize= (forced solver_selection="nlp", analytic objective and
+   constraint Jacobians) -> 1.393464964731.
+2. Ipopt 3.14.19 via Pyomo on the identical single ConcreteModel ->
+   1.393464964731 (matches pounce to 2.6e-14).
+3. Published HS014 closed form 9 - 2.875*sqrt(7) = 1.3934649806893021 (rel err
+   1.15e-08 from both solvers).
+
+pounce KKT diagnostics at the returned point: final_kkt_error 2.5e-9,
+final_dual_inf 1.9e-12, final_constr_viol 2.9e-13, both constraints flagged
+active (active_constraints=[True, True]) — consistent with the analytic fact
+that both constraints bind at x*.
+
+Pyomo SolverFactory('pounce') path: NOT exercisable in this environment. It
+shells out to the bundled CLI at python/pounce/bin/pounce, which is absent in
+this =maturin develop= install ("bundled CLI binary not found"). This is an
+install-layout artifact of the dev venv, not a solver defect; the in-process
+=pounce.minimize= path and the CLI binary at target/release/pounce both exist
+and the former solves correctly. No issue warranted.
+
+* Verdict
+PASS. pounce solves HS014 to the oracle-confirmed and published optimum
+(rel err 1.15e-8 vs known, 2.6e-14 vs Ipopt) with success=True and clean KKT
+residuals, faster than Ipopt wall-clock. No bug, no limitation, no formulation
+error.

@@ -1,0 +1,29 @@
+#+TITLE: i3 — QpSensitivity dx/db over-damped on near-parallel active equalities
+#+DATE: 2026-07-23
+
+* Verdict: FAIL (GRADIENT_ERROR) — #284/#305 residual
+* DEDUP NOTE: likely SAME root cause as the existing 2026-07-22 "Ill-conditioned
+  parametric QP sensitivity, Hilbert + near-LICQ" FAIL. This isolates a DIFFERENT
+  trigger and adds a diagnostic-miss observation; parent should merge if that
+  #284 finding is already tracked rather than file a second issue.
+
+QP: min 0.5||x||^2 s.t. A x = b,  A=[[1,0],[1,eps]], b=[1,1].
+Rows nearly parallel -> near-LICQ. Solution x=A^{-1}b, so EXACT dx/db = A^{-1}.
+
+| eps  | exact dx/db[1,0] | pounce parametric_step | central-FD re-solve | ill_conditioned |
+|------+------------------+------------------------+---------------------+-----------------|
+| 1e-3 | -1.000e3         | -1.000e3  (rel 1e-15)  | -1.000e3            | False           |
+| 1e-5 | -1.000e5         | -9.122e4  (rel 9e-2)   | -1.000e5            | False           |
+| 1e-7 | -1.000e7         | -2.999e3  (rel 1.0)    | -1.000e7            | False           |
+
+Two INDEPENDENT oracles agree (closed-form A^{-1} and a central finite-difference
+re-solve done with independent solve_qp calls): the true sensitivity is A^{-1}.
+pounce's parametric_step matches at eps=1e-3 but is over-damped by ~9% at 1e-5 and
+by ~3300x at 1e-7. The #284/#305 near-LICQ diagnostic ~sens.ill_conditioned~
+returns False in EVERY case, so the guard never flags the degradation.
+
+Distinct trigger from the Hilbert entry: here the Hessian is perfectly
+conditioned (P=I, cond=1); the ill-conditioning is purely constraint-Jacobian
+near-parallelism (near-LICQ), the exact #284 geometry.
+
+Repro: python adversary/runs/2026-07-23_i3_sensitivity_nearparallel_licq_fd.py

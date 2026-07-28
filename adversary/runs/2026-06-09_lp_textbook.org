@@ -1,0 +1,35 @@
+#+TITLE: Adversary Run: Textbook LP
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: bounded 2-variable linear program
+:SOURCE: standard textbook LP with closed-form vertex optimum.
+:KNOWN_OPTIMAL: -3.3333333333
+:N_VARIABLES: 2
+:N_CONSTRAINTS: linear inequalities + bounds
+:END:
+
+A small linear program whose optimum sits at a vertex with a closed-form value
+of -10/3. Solved via the LP path of =solve_qp(P=None, ...)= / minimize auto.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver            | Status  | Objective       | Rel Err   | Wall Time |
+|-------------------+---------+-----------------+-----------+-----------|
+| pounce (LP IPM)   | optimal | -3.3333333311   | 6.67e-10  | 0.0016 s  |
+| scipy linprog     | optimal | -3.3333333333   | (ref)     | 0.0010 s  |
+
+Known optimal: -3.3333333333
+
+* Cross-check / Verification
+scipy.optimize.linprog reaches the identical vertex; x matches to 1.3e-9.
+Objective rel err vs both the oracle and the closed-form optimum is 6.67e-10.
+
+* Verdict
+PASS — pounce's LP path matches scipy linprog and the closed-form optimum to
+~1e-9.

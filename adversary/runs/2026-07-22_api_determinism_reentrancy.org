@@ -1,0 +1,156 @@
+#+TITLE: Adversary Run: Determinism, Reentrancy and Resource Contracts
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: api (contracts) / qp
+:CLASS: bit-reproducibility, thread safety, parallel-answer-invariance, memory growth, post-exception usability, same-instance repeatability
+:SOURCE: contract test — no published optimum. Oracle = self-consistency (the sequential, single-threaded result is ground truth) + cvxpy CLARABEL for absolute correctness of the base instance.
+:KNOWN_OPTIMAL: n/a (anchor instance obj = -8.550917471444e-02, confirmed by cvxpy)
+:N_VARIABLES: 6-65 (per subtest)
+:N_CONSTRAINTS: 1-10 equalities, 3-40 inequalities, plus box bounds
+:END:
+
+The base instance is a strictly convex, strictly feasible random QP with a
+fixed seed:
+
+\begin{align*}
+\min_x \quad & \tfrac12 x^\top P x + c^\top x \\
+\text{s.t.}\quad & A x = b,\quad G x \le h,\quad -5 \le x \le 5
+\end{align*}
+
+with \(P = MM^\top + nI \succ 0\) (\(n = 12\), 3 equalities, 8 inequalities),
+\(M, c, A, G\) drawn from =np.random.default_rng(1234)= and \(b, h\) built
+from a strictly interior point so Slater holds. Larger variants (\(n\) up to
+65, 10 equalities, 40 inequalities) are used for the thread-race stress, and a
+small variant (\(n = 6\)) for the 2000-solve memory loop.
+
+The quantity under test is not the optimum but the *contract*: identical
+inputs must produce bit-identical outputs, regardless of how many times, in
+which thread, in which process, or after what prior failure the solve is
+issued.
+
+Results are compared by a SHA-256 *fingerprint* over the full numeric payload
+(=status=, =x=, =y=, =z=, =z_lb=, =z_ub=, =obj=, =iters=) taken as raw float64
+bytes — so a difference in the last ULP of any multiplier registers as a
+mismatch. This is deliberately stricter than a tolerance comparison.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Subtest | Contract                                                  | Measured                         | Result |
+|---------+-----------------------------------------------------------+----------------------------------+--------|
+| 0       | base QP matches an independent oracle                     | obj rel err 4.5e-12, x 1.2e-10   | PASS   |
+| a       | 50 in-process solves bit-identical                        | 1 distinct fingerprint / 50      | PASS   |
+| b       | 5 separate processes bit-identical                        | 1 distinct fingerprint / 5       | PASS   |
+| b       | cross-process == in-process                               | identical                        | PASS   |
+| c       | 24 threads, different problems, barrier-synced            | 0 mismatches, 0 exceptions       | PASS   |
+| c2      | ThreadPoolExecutor, 8 workers, 6 rounds                   | 0 / 144 mismatches               | PASS   |
+| c3      | 2 threads hammering different problems, 60 solves each    | 0 mismatches                     | PASS   |
+| c-big   | 32 threads, n≈60, 4 rounds (3.8-4.3x real speedup)        | 0 / 128 mismatches               | PASS   |
+| d       | =solve_qp_batch= (Rayon-parallel) vs sequential           | 0 objective and 0 bit mismatches | PASS   |
+| d       | =solve_qp_batch= deterministic across repeats             | identical over 3 calls           | PASS   |
+| d       | =solve_qp_multi_rhs= vs per-item =solve_qp=               | 0 / 6 mismatches                 | PASS   |
+| e       | RSS plateaus over 2000 solves                             | +0.03 MB over 2nd half           | PASS   |
+| e       | total RSS growth bounded                                  | +0.11 MB over 2000 solves        | PASS   |
+| f       | usable & bit-identical after 10 invalid-input failures    | 10 / 10 recovered                | PASS   |
+| f2      | exception in one thread does not corrupt a concurrent one | 0 / 40 mismatches                | PASS   |
+| g       | repeated solves of the SAME arrays                        | 1 distinct fingerprint / 50      | PASS   |
+
+Anchor timings: 1.09 ms/solve on the small QP; =solve_qp_batch= 0.003 s vs
+0.031 s sequential for 24 items.
+
+** Narrative
+
+*Determinism (a, b, g).* All 50 in-process solves, all 50 solves reusing the
+same numpy arrays without rebuilding them, and all 5 subprocess solves produce
+the *same* SHA-256 fingerprint =5b3c9a97b8f5ea61…= and the same objective
+=-0.08550917471444452= down to the last printed digit. In-process and
+cross-process fingerprints are equal to each other, so the IPM carries no
+hidden entropy — no address-dependent ordering, no uninitialised-memory
+dependence, no time- or ASLR-seeded tie-breaking. Iteration counts match too
+(9 iterations every time). This also settles (g): no state leaks from one
+solve into the next, and solving the identical arrays repeatedly is
+indistinguishable from solving freshly built ones.
+
+*Thread safety (c).* The critical detail is that the threads genuinely run
+concurrently rather than serialising on the GIL: the barrier-synced 24-thread
+run took 0.009 s against a 0.031 s sequential baseline, and the larger
+follow-up stress (32 threads, n≈60) ran 3.8-4.3x faster than sequential over
+four rounds. So the GIL is released across the native solve and the workers
+truly overlap — the test has real race-detection power rather than accidentally
+testing serialised execution. Under that genuine concurrency, every one of the
+272 threaded solves reproduced its sequential fingerprint exactly. Three
+independent shapes of concurrency were exercised (all-at-once =threading.Thread=
+with a barrier, a re-used =ThreadPoolExecutor= over repeated rounds, and two
+threads interleaving hot loops on different problems), which covers both
+"many workers touch shared state at once" and "one worker's state persists
+across dispatches". No shared mutable state is observable.
+
+*Parallelism does not change the answer (d).* =solve_qp= takes no thread-count
+or parallelism option — the API was inspected read-only and exposes only
+=tol=, =max_iter=, =warm_start=, =collect_iterates=, =check_psd=. The
+parallelism knobs that do exist are the batch entry points, and they are the
+right target for this clause. =solve_qp_batch= (documented as Rayon-parallel
+across instances) returned results bit-identical to per-item =solve_qp= on all
+24 problems — not merely equal to 1e-9, but byte-for-byte — and was itself
+bit-deterministic across three repeated calls. =solve_qp_multi_rhs= likewise
+matched per-item solves. Parallelism here buys ~10x throughput and costs
+nothing in the answer.
+
+*Memory (e).* RSS over 2000 solves (after a 200-solve warm-up to let the
+allocator settle) moves from 195.52 MB to 195.62 MB — +0.11 MB total, and
++0.03 MB across the entire second half, i.e. flat within sampling noise. The
+curve plateaus rather than climbing, which is the signature of no leak. A
+per-solve leak of even one small matrix would have shown tens of MB over this
+loop.
+
+*Post-exception usability (f).* Ten distinct invalid inputs were fired at
+=solve_qp= — shape mismatches, wrong dimensions, non-square =P=, NaN in =c=,
+inf in =P=, ragged =G=, negative =max_iter=, contradictory bounds, and an empty
+problem. Eight raised, two returned a status (=lb > ub= correctly reports
+=primal_infeasible=; the 0x0 problem trivially reports =optimal=). After every
+single one, re-solving the base problem returned the *bit-identical*
+fingerprint from before the failure. The failure paths therefore unwind
+cleanly without leaving partial state behind. The same holds across threads:
+a thread looping on a shape error 40 times did not perturb a concurrent
+thread's 40 solves.
+
+* Cross-check / Verification
+
+- *Absolute correctness anchor:* cvxpy 1.9.1 / CLARABEL on the base instance
+  agrees with pounce to 4.5e-12 relative in objective and 1.2e-10 in
+  \(\|x\|_\infty\). The thing being repeated deterministically is the *right*
+  answer, not a reproducible wrong one — worth stating explicitly, since a
+  determinism test in isolation would pass just as happily on a solver that
+  consistently returned garbage.
+- *Self-consistency oracle:* the sequential single-threaded fingerprint is
+  ground truth for every threading and batching comparison, per the assignment.
+- *Comparison strictness:* raw float64 bytes, not a tolerance. Any reordering
+  of floating-point accumulation inside a parallel path would have surfaced as
+  a mismatch even if numerically harmless. None did.
+- *Race-window widening:* the thread test was re-run at 32 threads on n≈60
+  problems (script in the scratchpad, results in the table above) specifically
+  to lengthen the native critical section and give a data race room to appear.
+  Four rounds, 128 concurrent solves, zero mismatches.
+
+* Verdict
+
+*PASS* — every determinism, reentrancy and resource contract in the assignment
+holds, verified against a stricter oracle than required (bit-exact fingerprints
+rather than tolerances). pounce's convex QP path is bit-reproducible within a
+process, across processes, and under genuine multi-threaded concurrency; the
+parallel batch entry points return byte-identical answers to their sequential
+equivalents; 2000 solves leak no measurable memory; and ten distinct
+invalid-input failure modes all leave the library in a bit-for-bit usable
+state, including when the failures occur concurrently with live solves.
+
+One cosmetic API-polish observation, *not* a bug and not filed: =max_iter=-5=
+surfaces as an =OverflowError= from the usize conversion in the bindings rather
+than a =ValueError= with a message naming the offending argument, and =P= with
+a wrong leading dimension surfaces as =IndexError=. Both correctly reject the
+input and both leave the solver clean — the contract under test is fully
+satisfied; only the exception type is less self-explanatory than the
+=ValueError=\s raised by the neighbouring validation paths.

@@ -1,0 +1,96 @@
+#+TITLE: Adversary: inequality-constrained differentiable QP layer, d/d{c,h}
+#+DATE: 2026-06-15
+:PROPERTIES:
+:FAMILY:    diff
+:CLASS:     differentiable convex QP w.r.t. RHS h (and cost c)
+:SCENARIO:  general inequality-constrained QP, G x <= h, nontrivial active set
+:LAYERS:    pounce.jax.solve_qp, pounce.torch.solve_qp
+:N:         3 vars, 5 general half-space inequalities
+:SEED:      np.random.seed(3) (fixed P, c, G, h)
+:END:
+
+* Problem
+
+  min  1/2 x^T P x + c^T x
+  s.t. G x <= h                  (n = 3, m = 5 general half-spaces)
+
+This is distinct from the previously tested scenarios (plain box QP,
+equality-constrained QP, SOC norm-ball): the constraints are *general*
+half-spaces and the gradient is taken w.r.t. the RHS =h= (and =c=). =h=
+is tuned so TWO inequalities bind at the optimum, so the active-set
+structure genuinely drives dx*/dh (an inactive row must yield exactly
+zero sensitivity; an active row a nonzero one).
+
+P = [[2.0,0.2,0.0],[0.2,1.5,0.1],[0.0,0.1,1.0]] (SPD)
+c = [-1.0, 0.5, 0.8]
+G = [[1,0,0],[0,1,0],[0,0,1],[1,1,1],[-1,0.5,0]]
+h = [0.3, 0.4, 1.0, 0.6, -0.85]
+loss = w . x*,  w = [1.0, -0.5, 0.7]
+
+* Oracles
+
+1. Forward: =pounce.jax/torch.solve_qp= vs =pounce.solve_qp= (numpy) and
+   vs an independent cvxpy CLARABEL solve.
+2. Gradient: analytic d(loss)/d{c,h} via JAX =jax.grad= and Torch
+   =backward=, compared to central finite differences (eps=1e-6,
+   float64) of an independent cvxpy re-solve.
+3. Cross-framework parity: JAX grad vs Torch grad.
+4. =torch.autograd.gradcheck= on a float64 layer (eps=1e-6, atol=1e-4,
+   rtol=1e-3).
+
+* Forward check
+
+| x*        | x0  | x1    | x2    |
+|-----------+-----+-------+-------|
+| pounce np | 0.3 | -1.10 | -0.69 |
+| jax       | 0.3 | -1.10 | -0.69 |
+| torch     | 0.3 | -1.10 | -0.69 |
+| cvxpy     | 0.3 | -1.10 | -0.69 |
+
+| forward error            | value    |
+|--------------------------+----------|
+| jax vs cvxpy   max\|dx\| | 4.95e-10 |
+| torch vs cvxpy max\|dx\| | 4.95e-10 |
+| jax vs pounce  max\|dx\| | 0.00e+00 |
+
+Constraint slack h - Gx = [1.0e-10, 1.50, 1.69, 2.09, 1.8e-10].
+Active set = rows {0, 4} (2 active) -> nontrivial active-set gradient.
+
+* Gradient: analytic vs finite difference vs cross-framework
+
+| dL/dc  | jax            | fd             |
+|--------+----------------+----------------|
+| [0]    |  4.9e-12       | -1.9e-10       |
+| [1]    |  1.9e-10       |  8.3e-11       |
+| [2]    | -0.700000      | -0.700000      |
+
+| dL/dh  | jax            | fd             |
+|--------+----------------+----------------|
+| [0]    | -0.140000      | -0.140000      |
+| [1]    | -6.5e-20       | -2.8e-11       |
+| [2]    |  1.9e-10       |  1.1e-10       |
+| [3]    |  7.9e-11       | -4.2e-10       |
+| [4]    | -1.140000      | -1.140000      |
+
+Note: dL/dh is nonzero ONLY on the active rows {0,4} and ~0 on the slack
+rows {1,2,3} -- exactly the active-set behavior expected.
+
+| comparison                       | max error |
+|----------------------------------+-----------|
+| analytic vs FD, d/dc             | 4.10e-10  |
+| analytic vs FD, d/dh             | 4.95e-10  |
+| JAX vs Torch parity, d/dc        | 0.00e+00  |
+| JAX vs Torch parity, d/dh        | 0.00e+00  |
+| FD gradient magnitude (scale)    | 1.14e+00  |
+
+gradcheck (float64): PASS
+
+* Verdict
+
+Forward solve matches pounce and cvxpy to ~5e-10. Analytic dx*/d{c,h}
+matches central finite differences to ~5e-10, JAX and Torch gradients
+agree to machine zero, and torch.autograd.gradcheck passes. The gradient
+correctly reflects the 2-element active set (zero sensitivity on slack
+rows). No discrepancy found.
+
+VERDICT: PASS

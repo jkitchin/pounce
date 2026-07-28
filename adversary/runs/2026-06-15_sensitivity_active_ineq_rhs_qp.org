@@ -1,0 +1,93 @@
+#+TITLE: Sensitivity cross-check: dx/dh of an ACTIVE inequality (coupled QP)
+#+DATE: 2026-06-15
+#+PROPERTY: family sensitivity
+#+PROPERTY: class parametric convex QP, perturb RHS of a BINDING inequality
+#+PROPERTY: api pounce.qp.QpSensitivity.parametric_step
+#+PROPERTY: pounce_status solved
+#+PROPERTY: verdict PASS
+
+* Problem
+Convex QP with a binding inequality; the PARAMETER is the inequality RHS =h=.
+#+begin_example
+  min  1/2 x'P x + c'x
+  s.t. Aeq x = beq
+       g . x <= h          (BINDING at the optimum)
+
+  P   = [[3,1],[1,2]]   (SPD, COUPLED / off-diagonal)
+  c   = (-1,-1)
+  Aeq = [[1,2]]   beq = 1.0
+  g   = (2,-1)    h0  = -0.3
+#+end_example
+The equality-only optimum has g.x ~= 0 > h0 = -0.3, so the inequality is
+restrictive and binds (verified at runtime: =binding=True=, g.x = -0.300000).
+
+** Distinct from prior runs (required)
+- =2026-06-09_sensitivity_parametric_qp.py= : pure-equality dx/db, diagonal P.
+- =2026-06-09_sensitivity_active_inequality_qp.py= : perturbed the EQUALITY rhs b
+  while an inequality sat in the active set, diagonal P.
+- THIS run: the parameter is the RHS =h= of the BINDING INEQUALITY itself, with a
+  COUPLED Hessian. Different data, different perturbed quantity.
+
+* Source / derivation
+Active-set KKT sensitivity (parametric optimization):
+- Fiacco, /Introduction to Sensitivity and Stability Analysis in NLP/ (1983).
+- Boyd & Vandenberghe, /Convex Optimization/ §5.6 (perturbation & sensitivity).
+- Nocedal & Wright, /Numerical Optimization/ 2e §16.5 (QP / active set).
+
+At the optimum the binding inequality satisfies g.x = h, so it enters the KKT
+active set exactly as an equality. With active set C = [Aeq; g], rhs r=[beq; h]:
+#+begin_example
+  [ P  C' ] [ x  ]   [ -c ]
+  [ C  0  ] [ mu ] = [  r ]
+  d[x;mu]/dr = [P C'; C 0]^{-1} [0; I]
+  dx/dh      = x-block of the column for the g-row of r.
+#+end_example
+Numerically dx/dh = (0.4, -0.2).
+
+** Why QpSensitivity (equality-rhs API) is valid here
+=parametric_step= perturbs only an equality rhs (index into b). We hand pounce
+the active set as equalities A = [Aeq; g], b = [beq; h] and perturb the g-row.
+Because the g-multiplier is strictly positive (strict complementarity) and LICQ
+holds, the active set is unchanged under a small move, so dx/db[g-row] == dx/dh.
+The predictor check below confirms the active set persists at h0+0.05.
+
+* Results
+| quantity                         | pounce        | FD re-solve   | analytic KKT  |
+|----------------------------------+---------------+---------------+---------------|
+| x* (nominal)                     | (0.08, 0.46)  | (0.08, 0.46)  | --            |
+| dx/dh                            | (0.4, -0.2)   | (0.4, -0.2)   | (0.4, -0.2)   |
+
+| check                                  | value     | tol    |
+|----------------------------------------+-----------+--------|
+| nominal x  inf-err  pounce vs scipy    | 6.0e-12   | 1e-6   |
+| dx/dh      inf-err  pounce vs FD        | 2.2e-11   | 1e-5   |
+| dx/dh      inf-err  pounce vs analytic  | 2.0e-11   | 1e-6   |
+| predictor  inf-err  x*+dx*0.05 vs re-solve | 5.0e-12 | 1e-5  |
+
+** Predictor (first-order) check
+At Db = +0.05: x* + dx*Db = (0.10, 0.45); true re-solve of the inequality QP =
+(0.10, 0.45); active set still binding. Exact to machine precision (the QP
+solution is piecewise-affine in h while the active set is fixed).
+
+* FD step (delta) skepticism
+delta = 1e-6 central difference on an exactly piecewise-affine map => the FD
+truncation error is ~0 inside the active region; result is stable and matches
+analytic to ~2e-11, so neither delta nor the analytic derivation is in doubt.
+
+* Verdict
+=VERDICT: PASS= -- pounce's QpSensitivity reproduces the active-inequality
+sensitivity dx/dh of a coupled QP, matching both a finite-difference re-solve of
+the true inequality QP and the analytic active-set KKT formula to ~1e-11
+(machine precision), and the first-order predictor tracks a finite re-solve
+exactly. No solver defect.
+
+* CLASS: PASS
+#+begin_example
+PROBLEM: sensitivity_active_ineq_rhs_qp
+CLASS: PASS
+KNOWN_OPTIMAL dx/dh: (0.4, -0.2)
+POUNCE dx/dh: (0.4, -0.2)
+ORACLE dx/dh (FD + analytic): (0.4, -0.2)
+max err vs FD: 2.2e-11   max err vs analytic: 2.0e-11
+VERDICT: PASS
+#+end_example

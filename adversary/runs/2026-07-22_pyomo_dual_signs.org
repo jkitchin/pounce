@@ -1,0 +1,130 @@
+#+TITLE: Adversary Run: pyomo-pounce plugin contract — dual/suffix sign convention
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp (pyomo-pounce plugin / AMPL .sol contract)
+:CLASS: duals & suffixes, status mapping, options, API edge cases
+:SOURCE: Hillier & Lieberman, /Introduction to Operations Research/, Wyndor Glass Co. LP; plus closed-form KKT QPs
+:KNOWN_OPTIMAL: LP z*=36 at (2,6), shadow prices (0, 1.5, 1); QPs analytic
+:N_VARIABLES: 1-20
+:N_CONSTRAINTS: 1-3
+:END:
+
+Six models, each with analytically known optimal objective *and* known
+marginal value \(dz/db\):
+
+1. LP (Wyndor, minimize form): \(\min -3x_1-5x_2\) s.t. \(x_1\le 4,\;
+   2x_2\le 12,\; 3x_1+2x_2\le 18,\; x\ge 0\). \(z^*=-36\) at \((2,6)\);
+   \(dz/db = (0,\,-1.5,\,-1)\).
+2. QP with `<=`: \(\min (x-3)^2+(y-2)^2\) s.t. \(x+y\le b\), \(b=3\).
+   \(z^*=2\), \(dz/db=-2\).
+3. QP with `>=`: \(\min x^2+y^2\) s.t. \(x+y\ge b\), \(b=2\). \(z^*=2\), \(dz/db=+2\).
+4. QP with `==`: \(\min x^2+y^2\) s.t. \(x+y=b\), \(b=2\). \(z^*=2\), \(dz/db=+2\).
+5. Bound only: \(\min (x-3)^2\) s.t. \(x\le u=1\). \(z^*=4\), \(dz/du=-4\).
+6. LP maximize (same Wyndor): \(z^*=+36\), \(dz/db=(0,\,+1.5,\,+1)\).
+7. True NLP: \(\min x\) s.t. \(e^x \ge b\), \(b=3\). \(x^*=\ln 3\), \(dz/db=1/b=+1/3\).
+
+The sign question is settled *analytically*, not by majority vote: for a
+minimization, relaxing a `<=` constraint can never increase the optimum, so
+\(dz/db \le 0\); tightening a `>=` can never decrease it, so \(dz/db \ge 0\).
+Pyomo/AMPL document the `dual` suffix as exactly this marginal value.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+Objectives: pounce matches the known optimum to ~1e-8 in *every* case. Only
+the dual *sign* is wrong.
+
+| Case             | analytic dz/db | pounce dual | ipopt | glpk | cbc  |
+|------------------+----------------+-------------+-------+------+------|
+| 1 LP c2 (`<=`)   |           -1.5 |        +1.5 |  -1.5 | -1.5 | -1.5 |
+| 1 LP c3 (`<=`)   |           -1.0 |        +1.0 |  -1.0 | -1.0 | -1.0 |
+| 2 QP `<=`        |           -2.0 |        +2.0 |  -2.0 | n/a  | n/a  |
+| 3 QP `>=`        |           +2.0 |        -2.0 |  +2.0 | n/a  | n/a  |
+| 4 QP `==`        |           +2.0 |        -2.0 |  +2.0 | n/a  | n/a  |
+| 6 LP max c2      |           +1.5 |        -1.5 |  +1.5 | +1.5 | +1.5 |
+| 7 NLP `>=`       |         +0.3333 |     -0.3333 | +0.3333 | n/a | n/a |
+
+The negation is *uniform*: `dual_pounce == -dual_ampl` in all seven cases,
+across LP and QP and true NLP, across `<=`/`>=`/`==`, and under both
+`minimize` and `maximize`. Magnitudes are always correct.
+
+Wall times (case 1): pounce 0.352 s cold / 0.011 s warm, ipopt 0.014 s,
+glpk 0.007 s, cbc 0.045 s. No performance concern.
+
+** Rest of the plugin contract — all PASS
+
+| Check                                                | Result |
+|------------------------------------------------------+--------|
+| TerminationCondition: optimal                         | ok, matches ipopt |
+| TerminationCondition: infeasible                      | ok (`status=warning`, `tc=infeasible`) |
+| TerminationCondition: unbounded                       | ok (`status=warning`, `tc=unbounded`) |
+| TerminationCondition: iteration limit                 | ok (`tc=maxIterations`) |
+| `options={"max_iter": 2}` honored                     | ok (`maxIterations`) |
+| `options={"max_iter": 5000}` honored                  | ok (`optimal`) |
+| `options={"tol": 1e-12}` honored                      | ok |
+| bogus option rejected loudly                          | ok — nonzero exit + `OPTION_INVALID`, Pyomo raises `ApplicationError` |
+| `load_solutions=False` leaves Var values untouched    | ok (stayed at 99.0), solution still attached to the result |
+| `tee=True` streams the solver log                     | ok (34 lines, contains the iteration table) |
+| re-solving the same model twice                       | ok — objective and dual bit-stable, no drift |
+| third solve with different `options=`                 | ok |
+
+* Cross-check / Verification
+
+Three independent checks, each sufficient on its own:
+
+1. *Self-contained finite difference.* Re-solving with \(b\pm 10^{-3}\)
+   **using pounce itself** and differencing pounce's own optimal objective
+   gives \(dz/db=-2.0\) for the `<=` case while pounce's `dual` suffix reports
+   \(+2.0\); \(dz/db=+2.0\) for the `>=` case while the suffix reports
+   \(-2.0\). This settles the question with no other solver involved.
+2. *Analytic convexity argument* (above): a `<=` dual in a minimization
+   cannot be positive under the marginal-value convention. Pounce reports it
+   positive.
+3. *Three independent solvers on the identical Pyomo model* — ipopt, glpk,
+   cbc — all agree with the analytic value and all disagree with pounce.
+
+** Where the flip originates
+
+Not in the Pyomo plugin. `pyomo_pounce.POUNCE` is a thin `ASL` subclass and
+passes the `.sol` dual block through verbatim. Reading the raw `.sol` for
+case 2 confirms the flip is in pounce's writer:
+
+: pounce .sol dual block:  2.00000000251804577e0
+: ipopt  .sol dual block: -1.9999999712533834
+
+Both `.sol` write sites hand pounce's internal multipliers straight to
+`nl_writer::format_sol` with no AMPL-convention negation:
+`crates/pounce-cli/src/main.rs:1379` (general NLP path) and
+`crates/pounce-cli/src/main.rs:1750` (convex QP/LP path, via
+`pounce_cli::qp_extract::recover_duals`). The comment at
+`crates/pounce-cli/src/qp_extract.rs:216` notes the inequality sign was
+"validated in the crate tests" — pounce's convention is internally
+self-consistent, but it is globally negated relative to AMPL's, and no test
+compares a `.sol` dual against Ipopt's on the same `.nl`, which is why this
+survived. A single global negation of the `lambda` block at both write sites
+fixes all seven cases including `maximize`.
+
+** Secondary observation (not the verdict)
+
+The `rc` suffix (variable-bound reduced costs) comes back `None` from pounce.
+Ipopt is the same via `rc`; it instead writes `ipopt_zL_out` / `ipopt_zU_out`
+suffix blocks. Pounce writes no suffix block at all, so a Pyomo user has no
+route to bound multipliers. That is a parity gap, not a correctness bug.
+
+* Verdict
+
+*SOLVER_BUG* — pounce reports constraint duals in its `.sol` output with the
+sign opposite to the AMPL/Pyomo marginal-value convention, uniformly across
+constraint types, problem classes, and objective senses. Magnitudes are
+correct and primal solutions are correct, so the failure is silent: every
+Pyomo user reading `m.dual[...]` for sensitivity analysis, pricing, or
+economic interpretation gets shadow prices with the wrong sign, and any code
+that switches on the sign of a dual (e.g. identifying which side of a range
+constraint is active, or feeding duals to a decomposition/column-generation
+master) will behave backwards. The scope is wider than the Pyomo plugin: the
+defect is in the shared `.sol` writer, so the AMPL CLI path and every other
+NL/SOL consumer of pounce inherit it. This is release-relevant.

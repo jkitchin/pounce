@@ -1,0 +1,189 @@
+#+TITLE: Adversary Run: The Options Dictionary Contract
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   api
+:CLASS:    option handling / input edge cases / cross-surface contract
+:SOURCE:   docs/src/options.md; docstrings of pounce.minimize / solve_qp / solve_socp; crates/pounce-common/src/options_list.rs
+:KNOWN_OPTIMAL: HS071 f* = 17.01401724556958; toy QP min ½xᵀx − 1ᵀx has x* = (1,1), f* = −1
+:N_VARIABLES: 4 (HS071), 2 (toy QP)
+:N_CONSTRAINTS: 1 ineq + 1 eq (HS071); unconstrained / nonneg-cone (toy QP)
+:END:
+
+Oracle is the *documented contract*, not a competing solver. Probed surfaces:
+=pounce.minimize=, =pounce.solve_qp=, =pounce.solve_socp=, the CLI =KEY=VALUE=
+surface, and =SolverFactory('pounce')= (Pyomo/ASL).
+
+Driver problems:
+- HS071 (Hock–Schittkowski 71), \(f^*=17.014017245\), for the NLP surfaces.
+- \(\min \tfrac12 x^\top x - \mathbf{1}^\top x\), \(x^*=(1,1)\), \(f^*=-1\),
+  for the convex QP/SOCP surfaces.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+** (a) Unknown option keys — PASS on every surface
+
+| Surface                          | Input                    | Behavior                                    |
+|----------------------------------+--------------------------+---------------------------------------------|
+| =minimize(max_iters=1)=          | typo of =max_iter=       | =RuntimeError= OPTION_INVALID               |
+| =minimize(tolerance=1e-12)=      | typo of =tol=            | =RuntimeError= OPTION_INVALID               |
+| =minimize(options={'max_iters':1})= | legacy dict form      | =RuntimeError= OPTION_INVALID               |
+| =solve_qp(max_iters=1)=          | typo                     | =TypeError= unexpected keyword argument     |
+| =solve_socp(max_iters=1)=        | typo                     | =TypeError= unexpected keyword argument     |
+| CLI =max_iters=1=                | typo                     | rc=2, "It is not a valid option"            |
+| Pyomo =options['max_iters']=1=   | typo                     | =ApplicationError=, rc=2, same message      |
+
+No silent ignoring anywhere. The routed convex path additionally emits an
+explicit =UserWarning= listing options it drops (=_warn_convex_dropped_opts=,
+L48). This dimension is clean.
+
+** (b) Documented options take effect — PASS
+
+| =tol=  | nit | final KKT error | f            |
+|--------+-----+-----------------+--------------|
+| 1e-4   |   8 | 4.188e-05       | 17.014035281 |
+| 1e-8   |  11 | 2.506e-09       | 17.014017278 |
+| 1e-12  |  15 | 1.000e-11       | 17.014017273 |
+
+Monotone in the right direction. =max_iter=1= → =nit=1=, status −1
+=Maximum_Iterations_Exceeded=, =success=False=; the scipy alias =maxiter=1=
+behaves identically. =solver_selection= routes as claimed
+(=nlp= → NLP backend, =auto= / =qp-ipm= → =info['solver']='qp-ipm'=), all
+agreeing on \(x^*=(0.5,1)\).
+
+** (c) Out-of-range values — TWO DEFECTS
+
+*** F1. Silent int32 truncation of integer options (=pounce.minimize= only)
+
+| Input                       | int32 wrap | Result                                        |
+|-----------------------------+------------+-----------------------------------------------|
+| =max_iter=3=                | —          | nit=3, f=16.97674722 (reference)              |
+| =max_iter=2**32+3= (4294967299) | 3      | *NO ERROR*, nit=3, f=16.97674722              |
+| =max_iter=2**32+1=          | 1          | *NO ERROR*, nit=1, f=16.96877086              |
+| =max_iter=2**33+7=          | 7          | *NO ERROR*, nit=7, f=17.01431805              |
+| =max_iter=2**32=            | 0          | *NO ERROR*, nit=0, f=16.10969292              |
+| =max_iter=10**12=           | −727379968 | rejected, but message quotes =max_iter=-727379968= |
+
+The same values through the other surfaces:
+
+| Surface | =max_iter=4294967299=                                                   |
+|---------+-------------------------------------------------------------------------|
+| CLI     | rc=2 — "Integer value expected, but non-integer option value ... found." |
+| Pyomo   | rc=2 — same rejection                                                   |
+| Python  | *silently applied as 3*                                                 |
+
+Root cause is an unchecked cast in the PyO3 binding,
+=crates/pounce-py/src/problem.rs:179=:
+
+#+begin_src rust
+if let Ok(i) = value.extract::<i64>() {
+    self.int_opts.push((name.to_string(), i as Index));   // Index = i32: `as` truncates
+    return Ok(());
+}
+#+end_src
+
+=i as Index= is a wrapping conversion in Rust. Every integer-typed option set
+through =Problem.add_option= (and therefore =pounce.minimize=) inherits this.
+The failure is silent: no exception, no warning, and the solve returns a
+plausible =OptimizeResult= — just one whose iteration budget is a number the
+user never supplied. The =max_iter=10**12= case shows the same truncation
+leaking into a diagnostic, which reports a negative limit the caller never typed.
+
+*** F2. =solve_qp= / =solve_socp= perform no validation of =tol=
+
+| =tol=   | =solve_qp= status | iters | obj | x        | verdict                          |
+|---------+-------------------+-------+-----+----------+----------------------------------|
+| =None=  | optimal           |     1 |  −1 | (1,1)    | correct                          |
+| =1e-9=  | optimal           |     1 |  −1 | (1,1)    | correct                          |
+| =0.0=   | iteration_limit   |   199 |  −1 | (1,1)    | unsatisfiable → burns 199 iters  |
+| =-1.0=  | iteration_limit   |   199 |  −1 | (1,1)    | unsatisfiable → burns 199 iters  |
+| =nan=   | iteration_limit   |   199 |  −1 | (1,1)    | unsatisfiable → burns 199 iters  |
+| =1e300= | *optimal*         |     0 |   0 | *(0,0)*  | *"optimal" at a wrong point*     |
+| =inf=   | *optimal*         |     0 |   0 | *(0,0)*  | *"optimal" at a wrong point*     |
+
+=solve_socp= behaves identically on all seven. At =tol=1e300= the reported
+residuals are =kkt_error = 1.0=, =dual_infeasibility = 1.0= — the solver knows
+it is not optimal and labels the point =optimal= anyway.
+
+This leaks into the facade: =minimize(f, x0, jac=g, solver_selection="qp-ipm",
+tol=1e300)= returns =success=True, nit=0, f=0= with =x_err=1.0=.
+
+The same values on the NLP surfaces are rejected:
+
+| Value    | =minimize= (NLP)         | CLI                      | Pyomo                    | =solve_qp= |
+|----------+--------------------------+--------------------------+--------------------------+------------|
+| =tol=0=  | OPTION_INVALID           | OPTION_INVALID           | OPTION_INVALID           | *accepted* |
+| =tol=-1= | OPTION_INVALID           | OPTION_INVALID           | OPTION_INVALID           | *accepted* |
+| =tol=nan=| OPTION_INVALID           | —                        | —                        | *accepted* |
+| =max_iter=-5= | OPTION_INVALID      | OPTION_INVALID           | OPTION_INVALID           | =OverflowError= (raw PyO3) |
+
+Everything else in (c) is sane: =max_iter=0= → =nit=0=, =Maximum_Iterations_Exceeded=;
+=print_level=99= / =-3= → OPTION_INVALID; no hang, no panic, all cases < 0.05 s.
+
+** (d) Option type errors — PASS
+
+=tol='tight'=, =print_level='loud'=, =max_iter='many'=, =max_iter=3.7=,
+=mu_strategy=3= → OPTION_INVALID; list values → =ValueError("add_option(tol):
+expected str / int / float / bool, got list")=; =solver_selection=None= /
+=['auto']= → =ValueError= naming the valid selectors (gh #213 hardening holding).
+=solve_qp= gets clean PyO3 =TypeError=s. =tol=None= / =max_iter=None= are
+accepted and ignored — documented behavior (scipy's =_custom= dispatch always
+sends =None= kwargs).
+
+The only blemish is cosmetic: Python-surface option errors lead with
+=Exception of type: OPTION_INVALID in file "crates/.../options_list.rs" at line
+163:= and the actionable sentence ("Numeric value −1 for option \"tol\" out of
+range") is on a later line. The CLI and Pyomo surface the same text.
+
+** (e) Cross-surface agreement — ONE DISAGREEMENT
+
+| Input                    | =minimize=        | =solve_qp=        | CLI      | Pyomo    | agree? |
+|--------------------------+-------------------+-------------------+----------+----------+--------|
+| unknown key              | reject            | reject            | reject   | reject   | yes    |
+| =max_iter=1=             | nit=1, maxIter    | n/a               | maxIter  | maxIter  | yes    |
+| =max_iter=0=             | nit=0, maxIter    | iteration_limit   | maxIter  | maxIter  | yes    |
+| =max_iter=-5=            | reject            | =OverflowError=   | reject   | reject   | yes    |
+| =tol=0= / =tol=-1=       | reject            | *accept*          | reject   | reject   | *no*   |
+| =max_iter=2**32+3=       | *silently → 3*    | n/a               | reject   | reject   | *no*   |
+
+* Cross-check / Verification
+
+- F1 is confirmed behaviorally (=nit= exactly equals the int32-wrapped value for
+  four independent inputs, matching the =max_iter=3= reference run to the last
+  digit of the objective) and by source inspection of the unchecked =as= cast at
+  =crates/pounce-py/src/problem.rs:179=. Not a formulation artifact: the CLI and
+  Pyomo reject the identical option string.
+- F2 is confirmed by the returned residual dictionary itself
+  (=kkt_error=1.0= alongside =status='optimal'=) and by the known closed-form
+  optimum \(x^*=(1,1)\), \(f^*=-1\), which the same call reproduces exactly at
+  any sane =tol=. Reproduced identically on =solve_socp=.
+- No pounce source was modified. Scripts:
+  =adversary/runs/2026-07-22_api_options_contract.py= (probes a–e) and
+  =adversary/runs/2026-07-22_api_options_followup.py= (F1/F2 isolation).
+
+* Verdict
+
+*SOLVER_BUG* — for F1. =pounce.minimize= silently substitutes a different value
+for any integer option exceeding 2^31: =max_iter=2**32+3= is applied as
+=max_iter=3=, the solve stops after three iterations at a non-optimal point, and
+nothing — no exception, no warning, no field of the result — records that the
+caller's request was altered. The CLI and the Pyomo plugin reject the same input,
+so this is also a cross-surface contract violation, exactly the class of silent
+option mishandling gh #213 / PR #214 set out to close, one layer lower in the
+PyO3 binding. The fix is a checked conversion (=i32::try_from(i)=) in place of
+the =as= cast.
+
+Secondary, *SOLVER_LIMITATION* — for F2. =solve_qp= and =solve_socp= validate
+=tol= not at all, while every other pounce surface rejects the same values.
+=tol<=0= and =tol=nan= silently burn the full 199-iteration budget on a problem
+that solves in one iteration; =tol=1e300= / =inf= return =status="optimal"= at
+\(x=0\) for a problem whose optimum is \((1,1)\), with =kkt_error=1.0= in the
+residuals it hands back, and that mislabel propagates up to
+=minimize(solver_selection="qp-ipm")= as =success=True=.
+
+Dimensions (a), (b) and (d) — unknown-key rejection, option efficacy, and type
+errors — pass cleanly and are notably well hardened.

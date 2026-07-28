@@ -1,0 +1,61 @@
+#+TITLE: Adversary Run: Robust Least-Squares (Norm-Bounded Uncertainty)
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: robust least-squares (worst-case residual, two summed SOC terms)
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization" (2004), sec. 6.4.2, eq. (6.15): worst-case residual = ||A_bar x - b||_2 + rho ||x||_2.
+:KNOWN_OPTIMAL: 3.0529974893 (cvxpy CLARABEL reference; confirmed by ECOS and by the worst-case-residual identity)
+:N_VARIABLES: 5 (t1, t2, x0, x1, x2); 3 model unknowns x in R^3
+:N_CONSTRAINTS: two SOC cone blocks -- ("soc", 1+m=7) and ("soc", 1+n=4)
+:END:
+
+With A = A_bar + u and norm-bounded perturbation ||u||_2 <= rho, the worst-case
+residual is (B&V 6.15)
+
+  sup_{||u||<=rho} ||(A_bar+u) x - b||_2 = ||A_bar x - b||_2 + rho ||x||_2,
+
+so robust LS is the SOCP
+
+  minimize   t1 + rho t2
+  s.t.       ||A_bar x - b||_2 <= t1     (SOC, dim 1+m)
+             ||x||_2          <= t2     (SOC, dim 1+n)
+
+Data: m=6, n=3, rho=0.5 (explicit A_bar, b in the script). This is distinct from
+the previously tested single-SOC "least squares (0.5773)": here two SOC blocks
+are summed in the objective (a robust/regularized formulation).
+
+pounce cone encoding, z = [t1, t2, x0, x1, x2]:
+  block 1 (soc 1+m): s1 = (t1, A_bar x - b)  -> G[0,0]=-1; G[1:,2:]=-A_bar; h[1:]=-b
+  block 2 (soc 1+n): s2 = (t2, x)            -> G[n1,1]=-1; G[n1+1:,2:]=-I
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver         | Status  | Objective       | Rel Err  | Wall Time |
+|----------------+---------+-----------------+----------+-----------|
+| pounce         | optimal | 3.0529974751e+0 | 2.95e-9  | 0.0037 s  |
+| cvxpy ECOS     | optimal | 3.0529974841e+0 | (ref)    | 0.0026 s  |
+| cvxpy CLARABEL | optimal | 3.0529974893e+0 | 4.65e-9  | 0.0016 s  |
+
+Optimal x (pounce) = (0.49339, -0.21961, 0.71581); x_inf err vs ECOS = 8.16e-5.
+
+* Cross-check / Verification
+Two independent conic solvers (ECOS, CLARABEL) agree with pounce to ~3e-9 on the
+objective. The small x_inf difference (8e-5) reflects the mild flatness of the
+objective near the optimum; objective agreement is what matters and is excellent.
+
+Independent formulation check via the worst-case-residual identity (B&V 6.15) at
+the pounce solution x*:
+  - analytic ||A_bar x* - b|| + rho||x*|| = 3.052997 (equals the objective);
+  - Monte-Carlo sampled sup over ||u||_2<=rho of ||(A_bar+u)x*-b|| = 3.023396,
+    which is <= the analytic value (as it must be; sampling underestimates the
+    sup). This confirms the SOCP is the correct robust-LS reformulation.
+
+* Verdict
+PASS -- pounce solves the two-SOC robust least-squares SOCP correctly, matching
+ECOS and CLARABEL to ~3e-9 and consistent with the analytic worst-case-residual
+identity. No solver defect.

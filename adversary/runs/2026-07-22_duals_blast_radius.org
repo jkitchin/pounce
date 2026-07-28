@@ -1,0 +1,241 @@
+#+TITLE: Adversary Run: Blast Radius of the .sol Dual Sign Defect
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity (duals / multipliers)
+:CLASS: multiplier sign convention, cross-surface audit
+:SOURCE: Hillier & Lieberman, /Introduction to Operations Research/, Wyndor Glass Co. LP (Sec. 3.1); shadow prices Sec. 4.7. Plus a bound-active LP with closed-form reduced cost.
+:KNOWN_OPTIMAL: -36 (Wyndor, min form); 5 (bound-active LP)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 3 (Wyndor) / 1 + bounds (bound-active LP)
+:END:
+
+** Convention used (stated explicitly, since equalities are convention-dependent)
+
+Throughout this report the *AMPL / Pyomo / GAMS marginal-value convention*:
+
+\[ \text{dual}_i \;:=\; \frac{\partial\, f(x^*)}{\partial\, b_i} \]
+
+where \(b_i\) is the right-hand side of constraint \(i\) and \(f\) is the
+objective *as stated*.  This definition is identical for equalities and
+inequalities, which removes the usual equality ambiguity: an active
+\(g_i(x)\le b_i\) row and the corresponding \(g_i(x)=b_i\) row have the
+*same* shadow price.  Pyomo's ~model.dual[c]~ from ipopt, GAMS's ~EQU.M~
+from CONOPT, and a finite-difference re-solve all realize this
+convention, and they were confirmed to agree with each other and with
+the analytic values before any pounce surface was examined.
+
+** Problem 1 (Wyndor, min form)
+
+\[
+\min\; -3x_1 - 5x_2 \quad\text{s.t.}\quad
+c_1: x_1 \le 4,\;\; c_2: 2x_2 \le 12,\;\; c_3: 3x_1+2x_2 \le 18,\;\; x\ge 0
+\]
+
+\(x^\* = (2,6)\), \(f^\* = -36\), analytic duals \((0,\,-3/2,\,-1)\).
+An equality variant replaces \(c_3\) by \(3x_1+2x_2 = 18\) (same
+\(x^\*\), same shadow price \(-1\)).
+
+** Problem 2 (bound-active, to probe reduced costs and a =>== row)
+
+\[
+\min\; x_1 + 2x_2 \quad\text{s.t.}\quad c_1: x_1+x_2 \ge 3,\;\; 0\le x_1\le 1,\; x_2\ge0
+\]
+
+\(x^\*=(1,2)\), \(f^\*=5\), analytic \( \partial f/\partial b_{c_1} = +2 \),
+reduced cost of \(x_1\) at its upper bound \( \partial f/\partial u_1 = -1 \).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (confirmed sign defect, wider than the .sol writer)
+:END:
+
+** Oracle agreement (established before touching pounce's duals)
+
+| Oracle                              | c1 |    c2 |    c3 |
+|-------------------------------------+----+-------+-------|
+| analytic                            |  0 |  -1.5 |  -1.0 |
+| pounce's own FD re-solve d(obj)/d(b) |  0 |  -1.5 |  -1.0 |
+| ipopt (Pyomo, ~model.dual~)         | ~0 |  -1.5 |  -1.0 |
+| CONOPT (GAMS, ~EQU.M~)              |  0 |  -1.5 |  -1.0 |
+
+All four agree. The reference value is not in doubt.
+
+** Wyndor: pounce, every surface
+
+| Surface                                        |     c1 |    c2 |    c3 | correct? |
+|------------------------------------------------+--------+-------+-------+----------|
+| analytic / FD / ipopt / CONOPT                 |      0 |  -1.5 |  -1.0 | —        |
+| pounce ~.sol~ bytes (CLI ~-AMPL~)              |      0 | *1.5* | *1.0* | NO       |
+| pounce via ~pyomo-pounce~ ~model.dual~          |      0 | *1.5* | *1.0* | NO       |
+| pounce Python lib ~info["mult_g"]~ (same .nl)  |      0 | *1.5* | *1.0* | NO       |
+| pounce JSON report ~solution.lambda~            |      0 | *1.5* | *1.0* | NO       |
+| pounce via *GAMS* ~EQU.M~ (C link)             |     ~0 |  -1.5 |  -1.0 | *YES*    |
+| pounce via GAMS, ~=e=~ equality variant        |     ~0 |  -1.5 |  -1.0 | *YES*    |
+
+The equality variant behaves identically to the inequality variant on
+every surface: *the flip is uniform across equalities and inequalities.*
+
+** Bound-active LP: a =>== row and the reduced costs
+
+| Quantity                                  | correct | pounce  | verdict |
+|-------------------------------------------+---------+---------+---------|
+| dual of ~c1: x1+x2 >= 3~ (.sol / mult_g)  |      +2 |   *-2*  | flipped |
+| ipopt's dual of the same row              |      +2 |      —  | —       |
+| ~mult_x_U[x1]~ (pounce lib)               |       1 |       1 | ok      |
+| GAMS ~var_marg = mult_x_L - mult_x_U~     |      -1 |      -1 | *ok*    |
+
+So the flip is *sign-symmetric*: a =<== row reports \(+1.5\) where
+\(-1.5\) is correct, and a =>== row reports \(-2\) where \(+2\) is
+correct. It is a pure negation of \(\lambda\), not a magnitude or an
+orientation error. *Bound multipliers are NOT affected* — they match
+Ipopt exactly and the GAMS reduced cost comes out right.
+
+* Cross-check / Verification
+
+** (a) Is the defect confined to the ~.sol~ writer? — NO.
+
+Solving the *identical* ~.nl~ through the Python library
+(~pounce.read_nl~ + ~pounce.Problem.solve~) and through the CLI gives
+~info["mult_g"] == .sol duals~ *exactly*, to the last bit, for both the
+inequality and the equality model. The ~.sol~ writer
+(~crates/pounce-cli/src/nl_writer.rs:221~ ~write_sol_file~, fed at
+~crates/pounce-cli/src/main.rs:1379~, ~:1750~ and ~:1923~ — *three*
+sites, not two) is a *pure pass-through*: it applies no sign
+transformation at all.
+
+The flip therefore lives in *pounce's internal Lagrangian convention*
+(\(L = f - \lambda^{\mathsf T} g\), i.e. \(\lambda_{\text{pounce}} =
+-\lambda_{\text{Ipopt}}\)), and every surface that exposes ~mult_g~
+inherits it. ~crates/pounce-cli/src/qp_extract.rs:221~ ~recover_duals~
+reproduces the same convention for the convex/QP path deliberately —
+its doc-comment says the inequality sign =z_upper − z_lower= is "fixed
+to match POUNCE's NLP path, which is the reference for what a POUNCE
+~.sol~ carries", i.e. the flipped convention is *codified as the house
+standard*, not a slip in one writer.
+
+Note on ~pounce.minimize~: its ~res.mult_g~ *looks* correct (\(-1.5\),
+\(-1\)) but only because ~minimize~ takes constraints in the
+\(g(x)\ge 0\) form, which negates the constraint expression relative to
+\(g(x)\le b\). Two negations cancel. Solved through the same ~.nl~ the
+convention is the flipped one. This is a trap for anyone eyeballing the
+API.
+
+** (b) GAMS — a COMPENSATING NEGATION EXISTS. GAMS is CORRECT.
+
+Both GAMS routes negate on output:
+
+- ~gams/gams_pounce.c:1096-1099~ — =/* Negate constraint multipliers:
+  POUNCE lambda -> GAMS pi */= then =mult_g[i] = -mult_g[i]= before
+  ~gmoSetSolution2~.
+- ~python/pounce/gams/link.py:361-365~ — =pi = _to_double_array(gmo,
+  -np.asarray(mult_g, dtype=float))=, same comment.
+
+Verified *live* (GAMS 53.2.0, ~option nlp = pounce~): pounce's
+~EQU.M~ values match CONOPT's and ipopt's and the analytic shadow
+prices, for both the ~=l=~ and the ~=e=~ formulation. The GAMS solve
+summary confirms ~SOLVER POUNCE~ / ~MODEL STATUS 2 Locally Optimal~, so
+this is not a silent fall-through to another solver.
+
+Variable marginals go out as ~mult_x_L - mult_x_U~ with *no* extra
+negation (~gams_pounce.c:1105-1113~, ~link.py:370-377~) and are also
+correct — consistent with bound multipliers being unflipped.
+
+*This is the single most important consequence for any fix.* Correcting
+the sign at the source (~mult_g~) or in the ~.sol~ writer, without
+simultaneously *removing* those two GAMS negations, will silently break
+the one surface that is currently right. The two GAMS negations and the
+internal flip are a matched pair.
+
+** (c) sIPOPT sensitivity suffix — NOT affected.
+
+~sens_sol_state_1~ is assembled at ~crates/pounce-cli/src/main.rs:1245-1253~
+as a ~SolSuffixTarget::Var~ / ~SolSuffixValues::Real~ block whose payload
+is ~sens_capture~ — the *perturbed primal* \(x(p+\Delta p)\), per
+~crates/pounce-cli/src/sens.rs~. It carries no multipliers, so there is
+no sign to get wrong. (The CLI does not accept ~sens_mode=~; the path is
+triggered by the ~.nl~ declaring ~sens_state_1~ / ~sens_state_value_1~ /
+~sens_init_constr~, per ~crates/pounce-cli/src/cli.rs:276-279~.)
+
+** (d) ~pounce verify~ — self-consistent, but structurally BLIND.
+
+~crates/pounce-cli/src/verify.rs:393-408~ computes the bound-projected
+stationarity residual for *both* \(\pm\lambda\) and keeps whichever is
+smaller, then reports which it picked ("dual sign +1" / "dual sign -1").
+Experimentally it returns rc=0 and =VERDICT: VERIFIED= on:
+
+- pounce's own (flipped) ~.sol~ — reports "dual sign +1";
+- ipopt's (correct) ~.sol~ on the same ~.nl~ — reports "dual sign -1";
+- a *hand-negated* copy of pounce's ~.sol~ — reports "dual sign -1",
+  with a bit-identical stationarity residual (1.177e-10).
+
+So the answer to (d) is *yes, verify would still pass on a
+correctly-signed solution* — it is agnostic by construction and cannot
+regress-guard the fix. The complementarity check is a magnitude product
+and is likewise sign-blind. ~verify~ is not itself broken, but it must
+not be relied on to catch this class of defect, and a fix should not
+assume ~verify~ will notice a regression.
+
+** (e) Equalities — flipped too, same as inequalities.
+
+Under the stated \(\partial f/\partial b\) convention, the equality
+variant of Wyndor has shadow price \(-1\), confirmed by ipopt, CONOPT,
+and a pounce finite-difference re-solve of the equality-constrained
+~minimize~ model (\(-1.000000\)). pounce's ~.sol~ / ~mult_g~ report
+\(+1\). There is no equality/inequality asymmetry: a single global
+negation of \(\lambda\) explains every observation.
+
+* Blast-radius map
+
+*AFFECTED (dual sign negated vs. the AMPL/Pyomo/GAMS convention):*
+1. ~.sol~ writer, NLP path — ~crates/pounce-cli/src/main.rs:1379~
+2. ~.sol~ writer, convex/QP path — ~crates/pounce-cli/src/main.rs:1750~
+   (+ ~crates/pounce-cli/src/qp_extract.rs:221~ ~recover_duals~, which
+   codifies the same convention on purpose)
+2b. ~.sol~ writer, *conic/SOCP path* — ~crates/pounce-cli/src/main.rs:1923~
+   (+ ~crates/pounce-cli/src/qp_extract.rs:512~ ~recover_socp_duals~,
+   line-for-line the same =sign * (zu - zl)= convention). A *third*
+   writer site not previously identified. Confirmed empirically on the
+   QCQP =min -x1-x2 s.t. x1²+x2² ≤ 1= (analytic dual
+   \(-\sqrt2/2 = -0.70710678\)): ipopt reports \(-0.70710678\), pounce's
+   conic path reports \(+0.70710678\), under both ~auto~ routing and a
+   forced ~solver_selection=convex~.
+3. Python library ~Problem.solve~ → ~info["mult_g"]~ (bit-identical to
+   the ~.sol~ — this is the *origin*, not the writer)
+4. ~pounce.minimize~ → ~res.mult_g~ (same convention; visually
+   disguised by the \(g\ge0\) constraint form)
+5. ~solve_qp~ → ~r.y~ / ~r.z~ as composed into a per-constraint dual
+6. JSON solve report ~solution.lambda~
+   (~crates/pounce-solve-report/src/lib.rs:307~)
+7. ~pyomo-pounce~ ~SolverFactory('pounce')~ → ~model.dual[...]~
+   (inherits via the ~.sol~)
+8. Equality *and* inequality rows alike, in both directions.
+
+*NOT AFFECTED:*
+- primal \(x\) and the objective value (verified on every surface);
+- variable bound multipliers ~mult_x_L~ / ~mult_x_U~ (match Ipopt);
+- *GAMS, both routes* — a compensating negation exists and GAMS
+  marginals are correct (verified live against CONOPT);
+- GAMS variable marginals;
+- ~sens_sol_state_1~ (primal-only payload);
+- ~pounce verify~ (sign-agnostic; passes either convention).
+
+* Verdict
+
+*SOLVER_BUG* — pounce reports constraint duals negated relative to the
+AMPL/Pyomo marginal-value convention \(\partial f/\partial b\), on
+every user-facing surface *except* GAMS. Confirmed independently by
+analytic shadow prices, a pounce-only finite-difference re-solve, ipopt
+via Pyomo, and CONOPT via GAMS, on both a \(\le\) model and a \(\ge\)
+model and on an equality variant. The earlier localization to the
+~.sol~ writer was too narrow: the writer applies no transformation at
+all, and the identical flipped vector is visible in
+~info["mult_g"]~ and in the JSON report, so the defect is pounce's
+internal Lagrangian sign convention. The scope-critical finding for any
+fix is that ~gams/gams_pounce.c:1096-1099~ and
+~python/pounce/gams/link.py:361-365~ each apply an explicit compensating
+negation, which makes GAMS currently *correct*; those two negations must
+be removed in the same change that corrects the internal sign, or the
+fix will break the one surface that works. ~pounce verify~ cannot be
+used as the regression guard — it tries both signs and accepts either.

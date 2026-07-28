@@ -1,0 +1,143 @@
+#+TITLE: Adversary Run: Degenerate Dimensions Across the Public API
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   api (contracts / option handling / input edge cases)
+:CLASS:    degenerate dimensions
+:SOURCE:   Constructed edge cases; each with a closed-form optimum, cross-checked against cvxpy (CLARABEL) and scipy.optimize.linprog
+:KNOWN_OPTIMAL: per-case closed form (see table)
+:N_VARIABLES:  0 - 3
+:N_CONSTRAINTS: 0 - 4 (incl. shape-(0,n) blocks)
+:END:
+
+Systematic sweep of *42* degenerate-dimension inputs across ~solve_qp~,
+~solve_socp~, ~minimize~, ~solve_qp_batch~, and ~solve_qp_multi_rhs~.
+Every case has either a closed-form answer or is genuinely invalid input.
+
+Acceptance rule per case:
+- *PASS* if pounce returns the mathematically correct answer, **or**
+- *PASS* if the input is genuinely invalid and pounce raises a clear,
+  informative Python exception;
+- *SOLVER_BUG* on a Rust panic (~pyo3 PanicException~), segfault, hang
+  (10 s alarm), or a silent wrong answer.
+
+Representative closed forms:
+
+\begin{align*}
+\text{n=1:}\quad & \min\ \tfrac12 x^2 - x \;\Rightarrow\; x^*=1,\ f^*=-\tfrac12\\
+\text{m=0:}\quad & \min\ \tfrac12 x^\top P x + c^\top x \;\Rightarrow\; x^*=-P^{-1}c\\
+\text{over-determined:}\quad & \min \tfrac12\|x\|^2 \ \text{s.t.}\ Ax=b,\ A\in\mathbb{R}^{4\times2},\ \mathrm{rank}(A)=2 \;\Rightarrow\; x^*=(1,2)\\
+\text{duplicate rows:}\quad & \min \tfrac12\|x-e\|^2 \ \text{s.t.}\ \mathbf{1}^\top_{(1,1,0)} x = 1\ (\times 3) \;\Rightarrow\; x^*=(\tfrac12,\tfrac12,1)
+\end{align*}
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+*42 / 42 PASS. Zero panics, zero segfaults, zero hangs, zero silent wrong
+answers.* Total sweep wall time < 0.05 s.
+
+| # | Case                                      | Outcome | Detail                                                     |
+|---+-------------------------------------------+---------+------------------------------------------------------------|
+| 1 | n=1 unconstrained QP                      | PASS    | x=1, obj=-0.5 exact                                        |
+| 2 | n=1 QP, active upper bound                | PASS    | x=0.25, obj=-0.21875                                       |
+| 3 | n=1, 3 duplicate equalities               | PASS    | x=2 (rank-1 A, 3 rows, 1 col)                              |
+| 4 | m=0 constraints, 3-var                    | PASS    | xerr=8.7e-11 vs closed form, objerr=0                      |
+| 5 | A shape (0,n)                             | PASS    | x=[1,2,3] correct                                          |
+| 6 | G shape (0,n)                             | PASS    | x=[1,1] correct                                            |
+| 7 | A and G both (0,n)                        | PASS    | x=[3,-4] correct                                           |
+| 8 | P=None (pure LP)                          | PASS    | obj=-2, matches scipy.linprog                              |
+| 9 | c=None                                    | PASS    | clear ValueError: "`c` is required" (documented)           |
+|10 | c=zeros (feasibility LP)                  | PASS    | obj=0, returned point feasible                             |
+|11 | P=None and c=None                         | PASS    | clear ValueError                                           |
+|12 | LP, no constraints, finite box            | PASS    | x=[3,-2], obj=-5                                           |
+|13 | LP, no constraints, no bounds (unbounded) | PASS    | status=dual_infeasible, success=False                      |
+|14 | 4 eq rows / 2 vars, consistent            | PASS    | x=[1,2] (unique feasible point)                            |
+|15 | 3 eq rows / 2 vars, inconsistent          | PASS    | status=primal_infeasible, success=False                    |
+|16 | duplicate identical rows in A             | PASS    | x=[0.5,0.5,1] exact                                        |
+|17 | duplicate identical rows in G (x4)        | PASS    | x=[1,1] exact                                              |
+|18 | len-0 lb/ub with n=2                      | PASS    | ValueError: "`lb` has length 0 but n=2 (from `c`)"          |
+|19 | n=0 empty problem                         | PASS    | status=optimal, x=[], obj=0                                |
+|20 | A(2,2) with b(3)                          | PASS    | ValueError: "`A` has 2 rows but `b` has length 3"           |
+|21 | A ncols=3 with n=2                        | PASS    | ValueError: "`A` has 3 columns but n=2 (from `c`)"          |
+|22 | solve_socp cones=[]                       | PASS    | degenerates to QP, x=[1,1]                                 |
+|23 | solve_socp ("soc",1)                      | PASS    | x=1 (1-D SOC == nonnegativity)                             |
+|24 | solve_socp ("psd",1)                      | PASS    | x=2 (1x1 PSD == nonnegativity)                             |
+|25 | solve_socp cone dim 5 vs 1 G row          | PASS    | ValueError naming the exact partition mismatch             |
+|26 | minimize() n=1                            | PASS    | x=3                                                        |
+|27 | minimize() n=1, active bound              | PASS    | x=1, fun=4                                                 |
+|28 | minimize() constraints=[]                 | PASS    | x=[1,-2]                                                   |
+|29 | minimize() empty x0                       | PASS    | status=-11 Invalid_Problem_Definition, success=False        |
+|30 | rank-deficient A+G vs cvxpy               | PASS    | obj matches CLARABEL to 1e-12, xerr=3.7e-9                 |
+|31 | scalar P for n=1                          | PASS    | ValueError: "P: expected a 2-D matrix, got shape ()"        |
+|32 | A (0,n) alongside a real G                | PASS    | x=[1,1] correct                                            |
+|33 | lb == ub (all vars fixed)                 | PASS    | x=[1,2], obj=11.5                                          |
+|34 | lb > ub (crossed)                         | PASS    | status=primal_infeasible, success=False                    |
+|35 | NaN in c                                  | PASS    | ValueError: "`c` contains NaN or Inf"                       |
+|36 | n=0 with (0,0) A block                    | PASS    | status=optimal, x=[], obj=0                                |
+|37 | scipy.sparse (0,n) A                      | PASS    | x=[1,1] correct                                            |
+|38 | duplicate A rows, contradictory rhs       | PASS    | status=primal_infeasible                                   |
+|39 | solve_qp_batch([])                        | PASS    | returns []                                                 |
+|40 | solve_qp_multi_rhs(cs=[])                 | PASS    | ValueError: "`cs` must be a non-empty sequence"             |
+|41 | c as (n,1) column                         | PASS    | coerced, x=[1,1]                                           |
+|42 | lb=-inf / ub=+inf everywhere              | PASS    | x=[1,1] correct                                            |
+
+* Cross-check / Verification
+
+- *Closed form* for cases 1-4, 5-7, 12, 14, 16, 17, 23, 24, 26-28, 32, 33, 42.
+- *scipy.optimize.linprog* (HiGHS) for case 8: objective agreed to 2.7e-9.
+- *cvxpy / CLARABEL* for case 30 (simultaneously rank-deficient ~A~ *and* ~G~,
+  the hardest degenerate case here): pounce obj = -1.24827823691, CLARABEL
+  obj = -1.24827823691, ~||x_pounce - x_cvxpy||_inf = 3.73e-9~.
+- All 42 cases ran under a ~SIGALRM~ 10 s budget and under ~faulthandler~ so a
+  segfault would have produced a Python traceback. Neither fired.
+- ~pyo3~ ~PanicException~ was explicitly caught and classified as ~SOLVER_BUG~;
+  it never occurred. Every rejection was a Python-level ~ValueError~ or
+  ~TypeError~ with a message naming the offending argument *and* the two
+  conflicting dimensions.
+
+** Notable positives
+
+The dimension-validation error messages are exemplary — they name the argument,
+the observed shape, the expected shape, and where the expectation came from
+(e.g. =`A` has 3 columns but n=2 (from `c`)=). The cone-partition error even
+explains the invariant. Nothing here would confuse a user.
+
+Degenerate rank is handled correctly throughout: rank-1 ~A~ with 3 identical
+rows, 4x2 over-determined-but-consistent ~A~, and 4 duplicated active
+inequality rows all converge to the exact analytic optimum rather than failing
+on a singular KKT factorization.
+
+** Cosmetic observations (NOT bugs, not filed)
+
+1. ~solve_qp~'s signature default is ~c=None~, but the docstring states "``c``
+   is required and sets ``n``" and the implementation raises. The default is
+   cosmetically misleading; the runtime error is clear, so this is safe.
+2. Empty-input contracts differ between sibling entry points:
+   ~solve_qp_batch([])~ returns ~[]~ while ~solve_qp_multi_rhs(cs=[])~ raises.
+   Both are defensible; the inconsistency is worth a glance before release.
+3. ~solve_qp~ treats n=0 as trivially optimal (obj 0), whereas
+   ~minimize(f, np.zeros(0))~ returns ~Invalid_Problem_Definition~
+   (status -11, ~fun=nan~, ~success=False~). Both are safe and neither claims
+   success falsely, but they disagree on whether an empty problem is legal.
+4. n=0 reports ~obj = -0.0~ rather than ~+0.0~.
+5. The unbounded LP (case 13) returns a large ray iterate ~x=[399.095, 0]~
+   alongside ~status=dual_infeasible~, ~success=False~. The status is correct
+   and ~success~ is False, so this is not a silent wrong answer; the ~x~ is
+   simply the last iterate along the recession direction.
+
+* Verdict
+
+*PASS* — 42 of 42 degenerate-dimension cases behaved correctly. Every valid
+degenerate input (n=1, m=0, shape-(0,n) ~A~/~G~ dense and sparse, ~P=None~,
+zero objective, over-determined consistent equalities, duplicated rows in both
+~A~ and ~G~, ~lb==ub~, infinite bounds, n=0) produced the exact closed-form or
+cvxpy-verified optimum. Every genuinely invalid input (length-0 bounds against
+n=2, ~A~/~b~ row mismatch, ~A~ column mismatch, cone dimensions exceeding ~G~
+rows, scalar ~P~, NaN in ~c~, ~c=None~) produced a clear Python ~ValueError~
+naming the argument and both conflicting dimensions. Infeasible and unbounded
+degenerate instances were classified correctly with ~success=False~. No Rust
+panic, segfault, hang, or silent wrong answer was observed. The five items
+above are cosmetic API-consistency notes, not release blockers.

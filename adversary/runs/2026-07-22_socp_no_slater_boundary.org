@@ -1,0 +1,132 @@
+#+TITLE: Adversary Run: SOCP with no Slater point (feasible set pinned to the cone boundary)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: degenerate / constraint-qualification failure (Slater fails) / non-unique optimal face
+:SOURCE: Self-constructed pathology; the "conic program with empty relative interior" construction of Ben-Tal & Nemirovski, /Lectures on Modern Convex Optimization/ (SIAM 2001), Sec. 2.4 (conic duality & the Slater condition); cf. Boyd & Vandenberghe, /Convex Optimization/ (2004), Sec. 5.2.3.
+:KNOWN_OPTIMAL: -6 (variant A, unique argmin); 3 (variant B, attained on the whole feasible segment)
+:N_VARIABLES: 4  (t, x1, x2, y)
+:N_CONSTRAINTS: 2 equalities; cones = [("soc",3), ("nonneg",1)]
+:END:
+
+Variables \(z = (t, x_1, x_2, y)\):
+
+\[
+\begin{aligned}
+\min_{z}\quad & c^\top z\\
+\text{s.t.}\quad & (t, x_1, x_2) \in \mathcal{Q}^3 \quad\Longleftrightarrow\quad t \ge \sqrt{x_1^2 + x_2^2}\\
+& t - x_1 = 0\\
+& x_1 + y = 3\\
+& y \ge 0 .
+\end{aligned}
+\]
+
+** Why Slater fails
+The equality \(t = x_1\) together with \(t \ge \|(x_1,x_2)\|_2\) forces
+\(x_2 = 0\) and \(x_1 \ge 0\), hence
+
+\[ t^2 - x_1^2 - x_2^2 \equiv 0 \quad\text{for every feasible } z. \]
+
+The SOC is active with *exactly zero slack everywhere on the feasible set*, so
+the feasible set has empty intersection with the cone's interior: **no strictly
+feasible (Slater) point exists**. The dual optimal set is therefore unbounded
+and the central path is degenerate — precisely the situation that is supposed
+to break interior-point methods.
+
+The feasible set is the segment \(\{(a, a, 0, 3-a) : a \in [0,3]\}\).
+
+** Two objectives
+- *Variant A (unique optimum)*: \(c = (0,-2,0,3)\) gives \(\mathrm{obj}(a) = 9 - 5a\),
+  minimized at \(a=3\). Optimum \(\boxed{-6}\) at \(z^\star = (3,3,0,0)\).
+  Note \(y=0\) there too, so the nonnegative block is *also* active: doubly
+  degenerate.
+- *Variant B (non-unique optimal face)*: \(c = (0,1,0,1)\) gives
+  \(\mathrm{obj}(a) = a + (3-a) = 3\) for all \(a\). Optimum \(\boxed{3}\),
+  attained on the **entire** feasible segment; the argmin is a 1-D face, so
+  no strict complementarity and no unique solution to converge to.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+Variant A (analytic optimum \(-6\)):
+
+| Solver            | Status  |        Objective | Rel err vs analytic | Wall time |
+|-------------------+---------+------------------+---------------------+-----------|
+| pounce solve_socp | optimal | -5.999999998444  |             2.6e-10 |  0.0020 s |
+| cvxpy CLARABEL    | optimal | -5.999999995178  |             8.0e-10 |  0.0102 s |
+| cvxpy SCS         | optimal | -5.999999999994  |             1.0e-12 |  0.0029 s |
+| cvxpy ECOS        | optimal | -6.000000000018  |             3.0e-12 |  0.0020 s |
+
+Variant B (analytic optimum \(3\)):
+
+| Solver            | Status  |       Objective | Rel err vs analytic | Wall time |
+|-------------------+---------+-----------------+---------------------+-----------|
+| pounce solve_socp | optimal | 2.999999992771  |             2.4e-09 |  0.0010 s |
+| cvxpy CLARABEL    | optimal | 3.000000000000  |             1.5e-15 |  0.0016 s |
+| cvxpy SCS         | optimal | 3.000000000000  |             4.4e-16 |  0.0013 s |
+| cvxpy ECOS        | optimal | 3.000000000000  |             4.4e-16 |  0.0013 s |
+
+pounce's returned point for variant A:
+=z = (2.999999999, 2.999999999, 0.0, -3.7e-10)=, i.e. \(\|z - z^\star\|_\infty = 1.3\text{e-}9\).
+Independently computed residuals of that point (not taken from pounce):
+equality \(1.7\text{e-}9\), SOC \(\|(x_1,x_2)\| - t = -1.6\text{e-}14\),
+nonneg violation \(3.7\text{e-}10\).
+
+For variant B pounce lands at \(a = 1.000000\) — an interior point of the
+optimal face, which is the expected IPM behaviour (converging to the analytic
+centre of the optimal face rather than a vertex). CLARABEL/SCS/ECOS also return
+interior-face points. Since the argmin is a whole segment, only the objective
+value and feasibility are well-defined and both are checked.
+
+** Tolerance sweep
+Loss of Slater usually shows up as stalling / early termination at tight
+tolerances. It does not here — pounce keeps converging:
+
+| tol   | variant A obj    | abs err  | variant B obj   | abs err  |
+|-------+------------------+----------+-----------------+----------|
+| 1e-8  | -5.999999998444  |  1.6e-09 | 2.999999992771  |  7.2e-09 |
+| 1e-10 | -5.999999999996  |  3.9e-12 | 2.999999999982  |  1.8e-11 |
+| 1e-12 | -6.000000000000  |  8.9e-16 | 3.000000000000  |  8.9e-16 |
+
+At =tol=1e-12= both variants are exact to machine precision, with =status=optimal=
+and no iteration-limit or restoration event.
+
+* Cross-check / Verification
+- *Cone encoding re-derived before anything else* (per the standing rule). With
+  \(s = h - Gz\) and \(G = -I_4\), \(h = 0\), the slack is \(s = (t, x_1, x_2, y)\).
+  The script asserts on a probe point that \(s_0 \ge \|(s_1,s_2)\|_2\) and
+  \(s_3 \ge 0\), i.e. that block 1 really is the SOC in
+  \((\text{head}, \text{tail})\) order and block 2 the orthant. The =soc= block
+  dimension is 3 and the =nonneg= block dimension is 1, summing to =G='s 4 rows.
+- *No-Slater property asserted numerically*: for \(a \in \{0, 0.7, 1.5, 3\}\) the
+  script checks \(|Az - b|_\infty < 10^{-14}\) **and**
+  \(|t - \|(x_1,x_2)\|| < 10^{-14}\), confirming zero cone slack across the
+  whole feasible set rather than at one point.
+- *Three independent oracles*, required to agree with each other before being
+  trusted: CLARABEL (self-dual IPM), ECOS (IPM, different implementation), and
+  SCS (ADMM — a different *algorithm class* entirely, so it is not subject to
+  the same central-path degeneracy). Oracle spread 4.8e-9 (A) and 4.4e-15 (B);
+  all three match the analytic values. The oracle set and the analytic value
+  agree, so the reference is solid.
+- *Analytic optimum* derived in closed form above (the feasible set reduces to a
+  one-parameter segment, on which the objective is affine in \(a\)).
+- Interestingly, CLARABEL is the *least* accurate solver on variant A
+  (8.0e-10 relative error, 5× slower than pounce); the Slater failure degrades
+  it slightly more than it degrades pounce. That is a point in pounce's favour,
+  not against it.
+
+* Verdict
+*PASS.* pounce's =solve_socp= handles an SOCP whose feasible set lies entirely on
+the second-order cone boundary — no strictly feasible point, Slater's condition
+violated, dual optimal set unbounded — and returns the analytically correct
+optimum in both the unique-argmin and non-unique-optimal-face variants. It does
+so at default tolerance (rel err 2.6e-10 / 2.4e-9), and drives to full machine
+precision at =tol=1e-12= without stalling, hitting an iteration limit, or
+misreporting status. The returned points are independently verified feasible
+(SOC residual -1.6e-14, equality residual 1.7e-9). Three mutually-consistent
+oracles plus the closed-form optimum confirm the values; pounce is at least as
+accurate as CLARABEL and faster than all three oracles on variant A. No finding.

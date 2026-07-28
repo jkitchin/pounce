@@ -1,0 +1,32 @@
+#+TITLE: Adversary Run: SOC projection onto a hyperplane with catastrophic cancellation
+#+DATE: 2026-07-23
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: extreme-scale / catastrophic cancellation
+:SOURCE: min ||x-a|| s.t. e'x=0; a=[1e10,1,1e-10,-1e10]; closed-form projection
+:KNOWN_OPTIMAL: residual 0.5
+:N_VARIABLES: 5 (x[4], t)
+:N_CONSTRAINTS: one 5-D SOC + one equality
+:END:
+
+* Results
+:PROPERTIES:
+:STATUS: PASS (TOLERANCE)
+:END:
+
+| Solver         | Status             | Residual     | Rel Err vs ref | eq feas  |
+|----------------+--------------------+--------------+----------------+----------|
+| pounce (soc)   | optimal_inaccurate | 0.50000062   | 6.2e-7         | 1.9e-6   |
+| cvxpy CLARABEL | optimal            | 0.49999953   | 9.4e-7         | —        |
+| closed form    | —                  | 0.50000000   | —              | —        |
+
+* Verdict
+PASS (TOLERANCE) — with a=±1e10 (e'a is a catastrophic cancellation, true value
+1.0), pounce recovers the projection to 6.2e-7 in objective and equality
+feasibility 1.9e-6. It honestly reports =optimal_inaccurate= (NOT
+=numerical_failure=) — the symmetric SOC driver degrades gracefully and labels
+the reduced accuracy correctly. Contrast with the exp/power HSDE driver, which
+reports the harsher =numerical_failure= on comparably-converged points. Not
+filed (answer within tolerance; honest status).

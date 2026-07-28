@@ -1,0 +1,60 @@
+#+TITLE: Adversary Run: Parametric QP sensitivity dx/db with a binding inequality
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: parametric QP dx/db with an ACTIVE inequality in the working set
+:SOURCE: hand-built convex QP; KKT system mixes an equality parameter constraint with active inequality rows. Analytic check vs closed-form/scipy re-solve.
+:KNOWN_OPTIMAL: x* = (0.5, 0.75, 1.75), obj = 3.875
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 1 equality (parameter) + 2 inequalities (both binding at x*)
+:END:
+
+Distinct from the already-logged pure-equality "parametric QP dx/db": here the
+active set at the optimum contains an equality *and* active inequalities, so the
+sensitivity exercises the active-inequality branch of the QpSensitivity KKT
+factorization.
+
+\[
+\min_{x}\; x_0^2 + x_1^2 + x_2^2
+\quad\text{s.t.}\quad
+x_0 + x_1 + x_2 = b\;(=3),\;\;
+x_0 \le 0.5,\;\;
+x_1 - x_2 \le -1 .
+\]
+
+P = diag(2,2,2), c = 0, A = [[1,1,1]], b = [3], G = [[1,0,0],[0,1,-1]], h = [0.5,-1].
+Parameter = b[0]. At the optimum both inequalities are active (x0 = 0.5 and
+x1 - x2 = -1).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                 | x*                  | obj    | dx/db[0]                | Wall time |
+|------------------------+---------------------+--------+-------------------------+-----------|
+| pounce QpSensitivity   | (0.5, 0.75, 1.75)   | 3.875  | (0, 0.5, 0.5)           | build 0.0020s / step 5.1e-5s |
+| scipy SLSQP (oracle)   | (0.5, 0.75, 1.75)   | 3.875  | (0, 0.5, 0.5) (FD)      | 0.0012s   |
+
+Known optimal: x* = (0.5, 0.75, 1.75), obj = 3.875.
+
+The parameter b loads onto the equality x0+x1+x2=b. With x0 pinned at its bound
+(0.5) and x1-x2 pinned at -1, the remaining freedom splits the perturbation
+equally between x1 and x2, giving dx/db = (0, 1/2, 1/2). pounce's analytic
+sensitivity reproduces this exactly.
+
+* Cross-check / Verification
+- Nominal x rel-inf err pounce vs scipy: 5.06e-10
+- dx/db analytic (pounce parametric_step) vs central-FD re-solve (delta=1e-6): 1.56e-09
+- First-order predictor x* + parametric_step(b, +0.3) vs independent re-solve at b+0.3:
+  4.50e-10  (predictor x=(0.5,0.9,1.9) = actual re-solve, exact since the active set
+  is unchanged and the QP solution is piecewise-affine in b).
+
+* Verdict
+PASS - pounce's QpSensitivity analytic dx/db matches an independent central
+finite-difference re-solve to 1.6e-9 and the first-order predictor is exact to
+4.5e-10 against a full re-solve, on a problem whose active set includes binding
+inequality constraints (not just equalities). No discrepancy; the
+active-inequality KKT sensitivity branch is correct.

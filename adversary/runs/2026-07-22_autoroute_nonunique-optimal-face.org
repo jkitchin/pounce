@@ -1,0 +1,156 @@
+#+TITLE: Adversary Run: Auto-routing transparency with a NON-UNIQUE optimal face
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: degenerate / constraint-qualification failure / non-unique optimal set
+:SOURCE: Constructed. Degenerate-LP optimal-edge and duplicated-row LICQ-failure
+         constructions per Nocedal & Wright, /Numerical Optimization/ 2e, Ch. 12.6
+         (LICQ) and Ch. 13 (LP degeneracy / optimal faces); PSD-singular QP with a
+         null direction in the Hessian per Boyd & Vandenberghe, /Convex
+         Optimization/, Sec. 4.4 (QP with singular P => non-unique minimizer set).
+:KNOWN_OPTIMAL: A, A2: f* = -1 exactly; B, C: f* = -1/2 exactly
+:N_VARIABLES: 2 (A, A2, B), 3 (C)
+:N_CONSTRAINTS: A: 1 ineq + box; A2: 2 ineq (one an exact duplicate) + box;
+                B: box only; C: 1 eq + box
+:END:
+
+The dimension under test is *degeneracy / CQ failure / non-unique optima*, applied
+to the routing-transparency contract. Four instances, each with an /analytically
+characterized optimal FACE/ rather than a single optimal point.
+
+** A -- degenerate LP with an optimal EDGE
+
+\[
+\min_{x} \; -x_0 - x_1 \quad \text{s.t.}\quad x_0 + x_1 \le 1,\; 0 \le x \le 1
+\]
+
+\(f^\* = -1\). Optimal face \(F_A = \{x : x_0 + x_1 = 1,\ x_0 \in [0,1]\}\) --
+a whole 1-D edge. Vertices \((1,0)\), \((0,1)\); analytic center \((0.5,0.5)\).
+
+** A2 -- same LP plus an exactly duplicated row
+
+Add \(2x_0 + 2x_1 \le 2\). Geometry and optimal face are unchanged, but *LICQ
+now fails at every point of the optimal face* (two parallel active gradients);
+MFCQ still holds and the multipliers form a whole ray.
+
+** B -- semidefinite-Hessian QP with an optimal LINE SEGMENT
+
+\[
+\min_x \; \tfrac12 (x_0-x_1)^2 + (x_0-x_1), \quad -5 \le x \le 5
+\]
+
+\(P = \begin{pmatrix}1&-1\\-1&1\end{pmatrix}\) has eigenvalues \(\{0,2\}\) --
+rank 1, singular, null direction \((1,1)\). With \(s = x_0-x_1\),
+\(f = \tfrac12 s^2 + s\) so \(s^\* = -1\), \(f^\* = -1/2\), *independent of*
+\(t = x_0+x_1\). Optimal face
+\(F_B = \{x : x_0-x_1 = -1,\ x_0+x_1 \in [-9,9]\}\).
+
+** C -- same singular QP plus an equality that does not pin the null space
+
+\[
+\min_x \; \tfrac12 (x_0-x_1)^2 + (x_0-x_1), \quad x_0+x_1+x_2 = 0,\; -5 \le x \le 5
+\]
+
+\(f^\* = -1/2\); \(F_C = \{x : x_0-x_1=-1,\ x_2 = -(x_0+x_1),\ x \in [-5,5]^3\}\).
+
+** Grading rule (the point of this run)
+
+When the optimum is a face, "auto and nlp agree" *cannot* mean "same \(x\)".
+An IPM converges to the analytic center of the optimal face, a vertex-seeking
+method to a vertex, and the general NLP path to wherever its trajectory stalls
+on the flat direction -- all three are correct. So:
+
+- =ROUTING_ERROR= iff the *objectives* disagree, or a returned \(x\) is not on
+  the analytic optimal face (infeasible, or feasible but suboptimal).
+- Differing-but-both-on-the-face \(x\) is a *PASS*, logged as a
+  routing-transparency nuance.
+
+Every returned point is tested for face membership *analytically*, never by
+comparison to the other path.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Instance | Route (auto) | Specialized? | auto f | nlp f | f* | auto_vs_nlp obj | x gap (inf) | auto on face | nlp on face |
+|----------+--------------+--------------+--------+-------+----+-----------------+-------------+--------------+-------------|
+| A degenerate LP, optimal edge | =lp-ipm= | yes | -9.999999995e-1 | -1.000000007e0 | -1 | 8.0e-09 | 4.0e-09 | yes | yes |
+| A2 + duplicated row (LICQ fails) | =lp-ipm= | yes | -9.999999991e-1 | -1.000000003e0 | -1 | 3.7e-09 | 1.8e-09 | yes | yes |
+| B PSD-singular QP, optimal segment | =qp-ipm= | yes | -5.000000000e-1 | -5.000000000e-1 | -1/2 | 0.0e+00 | *3.94e-02* | yes | yes |
+| C singular QP + equality | =qp-ipm= | yes | -5.000000000e-1 | -5.000000000e-1 | -1/2 | 0.0e+00 | *1.00e-04* | yes | yes |
+
+Oracle objectives (cvxpy/CLARABEL): A -1.0000000009, A2 -0.9999999994,
+B -0.5, C -0.5. =scipy.optimize.linprog= on A returned the vertex \((1,0)\) and
+on A2 the /other/ vertex \((0,1)\) -- independent confirmation that the optimal
+set really is a face and that the choice of point within it is solver-dependent.
+
+Total wall time for all four instances plus all oracles: *0.77 s*.
+
+** Narrative
+
+The auto route picked the *specialized* engine in all four cases: =lp-ipm= for
+the two LPs (including the LICQ-failing duplicated-row variant) and =qp-ipm= for
+both PSD-singular QPs. No conservative fall-through occurred.
+
+On A and A2 both paths converged to the analytic center \((0.5,0.5)\) of the
+optimal edge, so the \(x\) gap is ~1e-9 despite the non-uniqueness -- both are
+interior-point-flavored and the face's center is the natural limit. The
+duplicated row (exact rank deficiency in the active Jacobian, LICQ failure on
+the entire optimal face) changed nothing: same route, same point, same
+objective to 1e-9.
+
+On B and C the two paths landed on *genuinely different points of the same
+optimal face*: on B, =auto= returned \((-0.5, 0.5)\) (\(t=0\), the center of the
+segment, matching cvxpy) while forced =nlp= returned \((-0.4606, 0.5394)\)
+(\(t = 0.0789\)) -- an \(\ell_\infty\) gap of 3.9e-2, roughly 4e5 times larger
+than any objective discrepancy. On C the gap is 1.0e-4 with the third
+coordinate differing by 1.0e-4. In both cases the objectives agree to
+*machine zero* (0.0e+00) and both points satisfy \(x_0-x_1 = -1\) to ~1e-10
+with zero box/equality violation, i.e. both are exactly on the analytic optimal
+face. This is precisely the false-positive the run was built to expose: a naive
+\(\|x_{\text{auto}} - x_{\text{nlp}}\|\) comparison with any sane tolerance
+would have cried =ROUTING_ERROR= on B, and the correct verdict is PASS.
+
+* Cross-check / Verification
+
+- *Analytic face membership* (primary oracle): each returned \(x\) checked
+  directly against the closed-form face description -- feasibility residual and
+  the defining active equation -- with tolerance 1e-5. All eight returned points
+  (4 instances x {auto, nlp}) are on the face; worst residual 7.5e-9.
+- *cvxpy* (CLARABEL, with ECOS/SCS fallback): objective agreement 2.9e-10 (A2)
+  to 0.0 (B, C).
+- *scipy.optimize.linprog* on A and A2: \(f = -1\) exactly, landing on two
+  *different vertices* -- an independent demonstration of non-uniqueness.
+- *Gradient sanity* (guarding against the usual false positive): central finite
+  differences of the hand-written =jac= for the singular QPs B and C, asserted
+  to 1e-6 before any solve.
+- *Self-consistency*: the reported =res.fun= was recomputed from the returned
+  =res.x= for every solve; agreement was exact (0.0e+00) in all eight cases, so
+  no path is reporting an objective from a point it did not return.
+- *Route assertion*: =res.info["solver"]= is ='lp-ipm'= / ='qp-ipm'= on the auto
+  path for all four instances -- the specialized engine, not a fall-through.
+
+* Verdict
+
+*PASS.* Routing transparency holds on problems with a whole optimal face,
+including under exact LICQ failure (duplicated constraint row) and a singular
+PSD Hessian. In all four instances =auto= reached the specialized solver
+(=lp-ipm= / =qp-ipm=), the auto and forced-=nlp= objectives agreed to between
+8e-9 and exactly 0, and every returned point was verified to lie on the
+analytically characterized optimal face. The one nuance worth recording is that
+on the two singular QPs the two paths return *different points of the same
+optimal face* (\(\ell_\infty\) gaps of 3.9e-2 and 1.0e-4 against zero objective
+discrepancy); this is correct behavior, but it means any regression test that
+asserts routing transparency by comparing \(x\) rather than the objective plus a
+face/KKT check will produce false failures on degenerate problems. Not filed.
+
+** Minor observation (not a finding)
+
+The forced =solver_selection="nlp"= results carry =info["solver"] = None=,
+whereas the auto path populates it with the concrete engine name. Harmless for
+correctness -- and the auto path is the one whose route needs to be observable --
+but it does mean the =solver= field cannot be used uniformly to identify which
+engine ran. Noted only.

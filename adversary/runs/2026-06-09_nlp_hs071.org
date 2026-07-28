@@ -1,0 +1,71 @@
+#+TITLE: Adversary Run: Hock-Schittkowski 71 (HS071)
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: inequality + equality constrained, bounded
+:SOURCE: Hock & Schittkowski, "Test Examples for Nonlinear Programming Codes" (1981), problem 71; canonical Ipopt tutorial example.
+:KNOWN_OPTIMAL: 17.0140172891520078
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 1 ineq + 1 eq, all vars in [1,5]
+:END:
+
+minimize  x0 x3 (x0 + x1 + x2) + x2
+s.t.      x0 x1 x2 x3 >= 25
+          x0^2 + x1^2 + x2^2 + x3^2 = 40
+          1 <= xi <= 5
+
+Known optimum f* = 17.0140173 at x* = (1.0, 4.743, 3.821, 1.379).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Solver        | Status                        | Objective      | Rel Err   | Iters | Wall Time |
+|---------------+-------------------------------+----------------+-----------+-------+-----------|
+| pounce (nlp)  | 3 Search_Direction_Too_Small  | 17.0140172746  | 8.57e-10  | 48    | 0.071 s   |
+| Ipopt         | Solve_Succeeded               | 17.0140171450  | (ref)     | —     | 0.016 s   |
+
+Known optimal: 17.0140172892
+
+pounce reaches the correct, independently-confirmed optimum (rel err 8.6e-10 vs
+the published value, 7.6e-9 vs Ipopt) but reports =success=False=. From the
+canonical start x0 = (1,5,5,1) at default tolerance it terminates with status 3
+(Search_Direction_Becomes_Too_Small); Ipopt on the identical model returns
+Solve_Succeeded.
+
+* Cross-check / Verification
+Ipopt (via Pyomo) solves the identical model to the same optimum; the published
+HS071 optimum agrees to ~1e-9. The objective and all four coordinates match
+Ipopt to 1e-8. The point is therefore optimal beyond doubt — the disagreement is
+purely in the *reported* =success= flag, not the numerical answer.
+
+Probing the reporting across conditions:
+
+| Start / options        | info.status | status name                   | success | rel err  |
+|------------------------+-------------+-------------------------------+---------+----------|
+| (1,5,5,1), nlp, default | 3          | Search_Direction_Too_Small    | False   | 8.57e-10 |
+| (1,5,5,1), nlp, tol=1e-6| 0          | Solve_Succeeded               | True    | 9.72e-09 |
+| (2,2,2,2), nlp, default | 1          | Solved_To_Acceptable_Level    | False   | 6.69e-10 |
+| (1,5,5,1), auto         | 3          | Search_Direction_Too_Small    | False   | 8.57e-10 |
+
+Two intertwined facets:
+1. The Python facade maps =success= as =int(info["status"]) == 0= only
+   (python/pounce/_minimize.py:448), so status 1 = Solved_To_Acceptable_Level →
+   =success=False=. This contradicts pounce's *own* differentiable path, whose
+   =_OK_STATUS = ("Solve_Succeeded", "Solved_To_Acceptable_Level")=, and the
+   scipy/Ipopt convention where acceptable-level is a success.
+2. On the documented default start the NLP solver terminates with status 3 at a
+   KKT-optimal point where Ipopt returns Solve_Succeeded.
+
+Net effect: the canonical Ipopt tutorial problem, run from its documented start,
+reports failure despite converging to the verified optimum.
+
+* Verdict
+SOLVER_LIMITATION (reporting) — the answer is correct and oracle-confirmed, but
+=success=False= is returned at a verified optimum, both because
+Solved_To_Acceptable_Level is excluded from the success mapping and because the
+default-start solve halts on Search_Direction_Becomes_Too_Small where Ipopt
+succeeds. Filed as a GitHub issue (reporting/UX defect, not a wrong answer).

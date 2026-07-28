@@ -1,0 +1,103 @@
+#+TITLE: Adversary Run: Badly-scaled LP (row x1e8, column x1e-8)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: ill-conditioned / mismatched row-column scaling, unique nondegenerate vertex
+:SOURCE: Constructed instance in the style of the badly-scaled NETLIB LPs (pilot/scagr/bnl); scaling pathology per Nocedal & Wright, "Numerical Optimization" 2e, S13.5 (Presolve and Scaling), and Gill/Murray/Wright, "Practical Optimization" S8.7 (diagonal equilibration). Optimum derived in closed form by construction.
+:KNOWN_OPTIMAL: -24 (min form); x* = (1,2,1); duals = (1,2,3)
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 3 inequality rows + 3 lower bounds
+:END:
+
+Base LP (well-scaled):
+
+\begin{align*}
+\max\;& 8x_1 + 3x_2 + 10x_3\\
+\text{s.t.}\;& x_1 + x_2 + x_3 \le 4\\
+& 2x_1 + x_2 \le 4\\
+& x_1 + 3x_3 \le 4\\
+& x \ge 0
+\end{align*}
+
+$A=[[1,1,1],[2,1,0],[1,0,3]]$ is nonsingular ($\det=-4$) and $x^\*=(1,2,1)$
+satisfies $Ax^\*=b=(4,4,4)$ with all three rows active and $x^\*>0$.  The cost
+was *built* as $c=A^\top\lambda$ with $\lambda=(1,2,3)>0$, so $\lambda$ is the
+unique dual, strict complementarity holds, and $x^\*$ is the unique
+nondegenerate optimal vertex.  $z^\*_{\max}=24$, i.e. $-24$ in pounce's
+minimization form, and pounce's convention $c+G^\top z-z_{lb}=0$ requires
+$z=(1,2,3)$.
+
+Scaled variants (identical LP, invariant optimum -- that is the whole test):
+
+| # | row scaling $R$      | col scaling $S$ (via $x=Su$) | expected $u^\*$ | expected $z$          |
+|---+----------------------+------------------------------+-----------------+-----------------------|
+| 1 | $(1,1,1)$            | $(1,1,1)$                    | $(1,2,1)$       | $(1,2,3)$             |
+| 2 | $(10^8,1,1)$         | $(1,1,1)$                    | $(1,2,1)$       | $(10^{-8},2,3)$       |
+| 3 | $(10^8,1,1)$         | $(10^{-8},1,1)$              | $(10^8,2,1)$    | $(10^{-8},2,3)$       |
+| 4 | $(10^8,1,10^{-6})$   | $(10^{-8},1,1)$              | $(10^8,2,1)$    | $(10^{-8},2,3\cdot10^6)$ |
+
+Variant 4 spreads the row scaling over 14 orders of magnitude and the column
+scaling over 8, giving a matrix whose entries span $10^{-8}$ to $10^{8}$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| variant             | pounce status | objective       | obj rel err | x rel err | dual rel err | iters | pounce t | scipy t | clarabel t |
+|---------------------+---------------+-----------------+-------------+-----------+--------------+-------+----------+---------+------------|
+| base                | optimal       | -23.9999999955  |     1.9e-10 |   3.2e-10 |      1.6e-10 |     8 |  0.0016s | 0.0010s |    0.0026s |
+| row x1e8            | optimal       | -23.9999999975  |     1.0e-10 |   6.3e-10 |      1.3e-10 |     8 |  0.0013s | 0.0007s |    0.0013s |
+| row 1e8 + col 1e-8  | optimal       | -23.9999997503  |     1.0e-08 |   4.5e-08 |      2.1e-07 |    21 |  0.0035s | 0.0006s |    0.0012s |
+| + row3 x1e-6        | optimal       | -23.9999999235  |     3.2e-09 |   1.9e-08 |      7.3e-08 |    36 |  0.0058s | 0.0008s |    0.0013s |
+
+Known optimal: -24 (all four variants; relative errors above are against the
+exact-rational vertex enumeration on the same float data).
+
+Objective spread across the four scalings: 2.47e-07.  Worst relative error over
+all variants and all reported quantities (primal, dual, objective): 2.08e-07.
+
+pounce recovered the *same* optimum in all four variants, including the exact
+scaling-transformed primal ($u_1^\*=10^8$) and the exact scaling-transformed
+row duals ($z_1=10^{-8}$, $z_3=3\times10^6$).  So pounce's internal scaling is
+transparent: it does not leak into the reported objective, primal or duals.
+Cost of the pathology is iteration count (8 -> 21 -> 36), not accuracy.
+
+Reported dual sign convention is confirmed to be $c+G^\top z - z_{lb}=0$ with
+$z\ge 0$ for $Gx\le h$ (matches HiGHS's negated =ineqlin.marginals= and
+CLARABEL's constraint dual, both cross-checked componentwise).  The scaled
+stationarity residual at pounce's returned point is 1.4e-10 (base) and
+2.1e-16 (variant 4).
+
+* Cross-check / Verification
+
+1. *Exact vertex enumeration* (Fractions, all $\binom{6}{3}=20$ basis
+   candidates, run on the exact float data pounce receives) -- ground truth,
+   zero roundoff.  Returns $-24$ in every variant.  pounce agrees to <= 1.0e-8.
+2. *scipy.optimize.linprog (HiGHS)* -- agrees on variants 1-3 to <= 1e-10.
+   *On variant 4 HiGHS is wrong*: it returns obj $=-29.3333$ at
+   $u=(2\times10^8,0,4/3)$, which violates row 3 by 2.0 in unscaled units
+   (2e-6 after the $10^{-6}$ row scaling, i.e. below its internal tolerance
+   after its own presolve/equilibration).  pounce's max unscaled row violation
+   on the same instance is 0.0.  Verified by direct residual evaluation in the
+   script (=unscaled max row violation= lines).  This is an *oracle* failure,
+   not a pounce failure.
+3. *cvxpy / CLARABEL* (independent IPM) -- agrees with pounce and with the
+   exact enumeration on all four variants (worst obj deviation 2.0e-06 on
+   variant 4, i.e. CLARABEL is less accurate there than pounce).
+
+* Verdict
+
+*PASS.*  pounce solves all four scalings of the same LP to the correct
+objective, the correct scaling-transformed vertex, and the correct
+scaling-transformed duals, with worst relative error 2.1e-07 even when the
+constraint matrix entries span $10^{-8}$ to $10^{8}$.  Internal scaling is
+observably transparent -- the objective spread across scalings is 2.5e-07 and
+the duals come back in the exact $\lambda/R$ form theory predicts, in the
+documented sign convention.  The only degradation is iteration count (8 -> 36).
+Notably, on the most extreme variant the usual reference oracle
+(scipy/HiGHS) returned an infeasible point with a spuriously better objective,
+while pounce and CLARABEL both stayed correct; this is worth remembering when
+HiGHS is used as an LP oracle on badly-scaled data.

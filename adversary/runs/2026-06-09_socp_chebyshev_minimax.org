@@ -1,0 +1,63 @@
+#+TITLE: Adversary Run: Chebyshev (l-infinity / minimax) Approximation
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: minimax / l-infinity (Chebyshev) approximation
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization" (2004), sec. 6.1 "Norm approximation" (l-infinity / Chebyshev case); epigraph LP per sec. 4.3.1.
+:KNOWN_OPTIMAL: 0.75 (independent scipy linprog/HiGHS, confirmed by ECOS & CLARABEL)
+:N_VARIABLES: 3 (t, x0, x1) -- best affine fit, 2 model params + epigraph t
+:N_CONSTRAINTS: one ("nonneg", 8) cone block (2m = 8 linear inequalities)
+:END:
+
+Best affine (degree-1) l-infinity fit y = x0 + x1*t to 4 points
+(t,y) = (0,1),(1,0),(2,2),(3,1):
+
+  minimize_x  || A x - b ||_inf  =  max_i | a_i^T x - b_i |
+
+Epigraph LP form:
+
+  minimize   t
+  s.t.      -t 1 <=  A x - b  <= t 1
+
+Encoded through solve_socp using only a ("nonneg", 2m) cone block (a pure LP;
+solve_socp's nonneg cone is the nonnegative orthant). Slack s = h - G z >= 0:
+  block (i):  s = t - (A x - b) >= 0   ->  G[i,0]=-1, G[i,1:]=A_i,  h_i=+b_i
+  block (ii): s = t + (A x - b) >= 0   ->  G[i,0]=-1, G[i,1:]=-A_i, h_i=-b_i
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver           | Status  | Objective       | Rel Err   | Wall Time |
+|------------------+---------+-----------------+-----------+-----------|
+| pounce           | optimal | 7.5000000092e-1 | 9.19e-10  | 0.0024 s  |
+| scipy linprog    | optimal | 7.5000000000e-1 | (ref)     | 0.0010 s  |
+| cvxpy ECOS       | optimal | 7.5000000004e-1 | 8.78e-10  | 0.0023 s  |
+| cvxpy CLARABEL   | optimal | 7.5000000019e-1 | 7.30e-10  | 0.0015 s  |
+
+Known optimal: 0.75   Optimal x = (0.25, 0.5).
+
+pounce recovers the minimax line x = (0.25, 0.5) and optimal error 0.75 to ~1e-9
+relative error, matching all three independent oracles. x_inf error vs ECOS =
+1.87e-9.
+
+* Cross-check / Verification
+Three independent oracles agree on 0.75 and x=(0.25,0.5):
+  - scipy.optimize.linprog (HiGHS) -- a wholly independent LP solver;
+  - cvxpy ECOS;
+  - cvxpy CLARABEL.
+The equioscillation structure is consistent (residuals alternate at the
+extreme deviations). An initial FAIL (pounce returned 2.0) was traced to a sign
+error in the script's h vector for the upper-bound block (h set to -b instead of
++b), making the true optimum infeasible in the encoded program. After fixing the
+script, pounce agrees with all oracles. This was a FORMULATION_ERROR in the test
+harness, not a pounce defect.
+
+* Verdict
+PASS -- pounce's SOCP/LP path solves the l-infinity minimax (Chebyshev)
+approximation correctly, matching three independent oracles to ~1e-9. The only
+defect encountered was a sign bug in the adversary script's cone encoding, which
+was fixed (the cone-encoding trap, as warned).

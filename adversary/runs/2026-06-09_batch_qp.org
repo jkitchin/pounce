@@ -1,0 +1,38 @@
+#+TITLE: Adversary Run: Batched QP solve vs per-item single solve
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: many independent convex QPs at once
+:SOURCE: internal-consistency contract; per-item closed-form bound optima.
+:KNOWN_OPTIMAL: per item (closed-form unconstrained/clamped)
+:N_VARIABLES: 8 problems x 3 vars
+:N_CONSTRAINTS: box bounds per problem
+:END:
+
+=solve_qp_batch= over 8 random SPD QPs must return, item by item, exactly what a
+single =solve_qp= returns. Each item is also sanity-checked against its
+closed-form unconstrained/clamped optimum.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Path              | Status (all)  | max x err vs single | max obj err | Wall Time |
+|-------------------+---------------+---------------------+-------------+-----------|
+| pounce batch      | optimal       | 0.00e+00            | 0.00e+00    | 0.0020 s  |
+| pounce per-item   | optimal       | (ref)               | (ref)       | 0.0075 s  |
+
+Speedup (single / batch): 3.83x
+
+* Cross-check / Verification
+All 8 items match the per-item single solve to machine zero on both x and
+objective. Each item's optimum is consistent with its closed-form clamped
+unconstrained minimizer. The batch path is 3.8x faster than looping single
+solves.
+
+* Verdict
+PASS — batch results are bit-for-bit identical to single solves, and the batch
+path delivers a ~4x speedup on 8 small QPs.

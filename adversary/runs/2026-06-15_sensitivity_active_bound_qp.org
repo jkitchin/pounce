@@ -1,0 +1,78 @@
+#+TITLE: Adversary report — parametric QP sensitivity dx/db with an ACTIVE VARIABLE BOUND
+#+DATE: 2026-06-15
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: parametric convex QP, equality-rhs perturbation, active LOWER BOUND
+:N_VARIABLES: 2
+:N_EQ: 1
+:N_ACTIVE_BOUNDS: 1
+:PARAMETER: b0, the rhs of the equality x0 + x1 = b
+:END:
+
+Convex QP with a variable bound that BINDS at the optimum:
+
+#+begin_example
+min  1/2 x' P x + c' x          P = I,  c = (-1, -1)
+s.t. x0 + x1 = b                (equality; b is the PARAMETER, b0 = 1.0)
+     x1 >= 0.7                  (LOWER BOUND — binding)
+     x0 >= -10                  (lower bound — loose)
+#+end_example
+
+The bound-free optimum splits symmetrically (x0=x1=b/2=0.5); since the lower
+bound lb1=0.7 > 0.5 it is restrictive and binds, giving x* = (0.3, 0.7).
+
+This is the NEW element versus the four prior sensitivity runs: the binding
+constraint is a *variable bound* passed through ~lb=~, not an explicit
+inequality row or an equality-encoded inequality. The bound enters the
+active-set KKT factorization through pounce's bound branch, so
+~kkt_dim = n + m_eq + n_active_bounds = 2 + 1 + 1 = 4~.
+
+** Known / analytic dx/db
+With x1 pinned at its bound (x1 = lb1), feasibility x0 + x1 = b gives
+x0 = b - lb1, hence
+
+#+begin_example
+dx0/db = 1,   dx1/db = 0   ->   dx/db = (1, 0)
+#+end_example
+
+Perturbing b moves x0 one-for-one while x1 stays pinned to its bound.
+(Source: Fiacco 1983; Nocedal & Wright 2e Sec.16.5 — active-set KKT
+sensitivity, an active bound treated as the equality x_i = bound.)
+
+* Results (pounce QpSensitivity)
+| quantity              | value                     |
+|-----------------------+---------------------------|
+| x*                    | (0.29999999, 0.70000001)  |
+| kkt_dim               | 4 (= 2 + 1 + 1)           |
+| dx/db (pounce)        | (1.0, 1.0e-10)            |
+| t_pounce              | 0.00121 s                 |
+| status                | optimal                   |
+
+* Cross-check (oracle = central finite difference, delta = 1e-6)
+| check                                 | value    |
+|---------------------------------------+----------|
+| x*_nom (scipy SLSQP)                  | (0.3, 0.7) |
+| dx/db central-FD                      | (1, 0)   |
+| dx/db analytic                        | (1, 0)   |
+| nominal x  inf-err pounce vs scipy    | 1.40e-08 |
+| dx/db  inf-err pounce vs FD           | 2.01e-10 |
+| dx/db  inf-err pounce vs analytic     | 2.00e-10 |
+| predictor x*+dx*0.05 vs re-solve      | 1.40e-08 |
+| bound still active after +0.05 move   | True     |
+
+Active set is stable across +-delta and across the finite +0.05 predictor move
+(the lower bound on x1 stays binding), so the finite-difference oracle is valid.
+
+* Verdict
+:PROPERTIES:
+:VERDICT: PASS
+:END:
+
+PASS. pounce's QpSensitivity correctly places the active variable bound into the
+KKT active set (kkt_dim=4) and returns dx/db = (1, 0), matching both the
+central finite-difference re-solve and the closed-form active-set sensitivity to
+~2e-10. The first-order predictor reproduces the full re-solve at b0+0.05 to
+1.4e-8 with the bound still active. No discrepancy — the active-BOUND
+sensitivity path is correct.

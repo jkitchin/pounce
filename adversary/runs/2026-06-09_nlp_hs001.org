@@ -1,0 +1,51 @@
+#+TITLE: Adversary report — NLP / HS001 (bound-constrained Rosenbrock)
+#+DATE: 2026-06-09
+#+AUTHOR: pounce adversary agent (nlp family)
+
+* Problem properties
+- FAMILY: nlp
+- CLASS: bound-constrained, nonconvex (Rosenbrock banana, one lower bound)
+- SOURCE: W. Hock & K. Schittkowski, /Test Examples for Nonlinear
+  Programming Codes/, Lecture Notes in Economics and Mathematical
+  Systems 187, Springer-Verlag, 1981 — problem 1.
+- N_VARIABLES: 2
+- N_CONSTRAINTS: 0 general constraints (one variable lower bound x2 >= -1.5)
+- KNOWN_OPTIMAL: x* = (1, 1), f* = 0
+- START: x0 = (-2, 1)  (canonical HS starting point)
+
+* Formulation
+#+begin_example
+min  100 (x2 - x1^2)^2 + (1 - x1)^2
+s.t. x2 >= -1.5
+#+end_example
+The lower bound on x2 is inactive at the optimum; the difficulty is the
+narrow curved Rosenbrock valley, not the bound. Solved through ONE Pyomo
+model exported to AMPL .nl, so both solvers receive identical EXACT
+analytic first/second derivatives (no finite-difference artifact).
+
+* Results
+| solver        | status  |        objective | rel/abs err vs known | iters |   time |
+|---------------+---------+------------------+----------------------+-------+--------|
+| pounce        | optimal | 5.894625884e-16  | abs 5.89e-16         |    25 | 0.029s |
+| Ipopt 3.14.19 | optimal | 5.894625884e-16  | abs 5.89e-16         |   n/a | 0.031s |
+
+- x_pounce = (1.00000005, 1.00000002); x_inf_err vs known = 4.82e-08
+- obj_err vs oracle = 0.00e+00 (bit-identical; same .nl, same start)
+- x_inf_err vs oracle = 0.00e+00
+
+* Cross-check
+- Oracle 1 (Ipopt via Pyomo, exact derivatives): identical objective and x.
+- Oracle 2 (derivative-independent): =pounce verify hs001.nl hs001.sol=
+  exit code = 0 (feasible; all bounds satisfied). KKT residual reported by
+  pounce statistics: final_kkt_error = 5.44e-09, final_constr_viol = 0.0.
+
+* Verdict
+VERDICT: PASS
+
+pounce drives the Rosenbrock valley to the global minimizer (1,1) with
+objective at machine zero (5.9e-16), matching Ipopt bit-for-bit on the same
+exported model and agreeing with the published HS001 optimum to 5e-08 in x.
+The independent =pounce verify= feasibility check accepts the solution
+(exit 0). No discrepancy across the known optimum, the Ipopt oracle, and the
+KKT/feasibility oracle. This is a clean pass on a nonconvex bound-constrained
+problem distinct from the previously tested HS071.

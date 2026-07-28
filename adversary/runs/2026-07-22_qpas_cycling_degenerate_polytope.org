@@ -1,0 +1,159 @@
+#+TITLE: Adversary Run: Active-set cycling / stalling stress battery (degenerate polytopes)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: massive constraint multiplicity at a vertex; Beale cycling geometry; Slater-failing cone (CQ failure, non-unique multipliers)
+:SOURCE: Nocedal & Wright, /Numerical Optimization/ 2e, Sec. 16.5 ("Degeneracy" / cycling in active-set QP); E. M. L. Beale (1955), "Cycling in the dual simplex algorithm", Naval Research Logistics Quarterly 2(4):269-275; standard Slater-failure construction (Boyd & Vandenberghe Sec. 5.2.3)
+:KNOWN_OPTIMAL: A: 4.0 ; B: -0.05 (LP limit) ; C: 2.5
+:N_VARIABLES: A: 8 ; B: 7 ; C: 5
+:N_CONSTRAINTS: A: 128 ineq (64 active at x*) ; B: 3 eq + 7 bounds ; C: 40 ineq (ALL 40 active at x*)
+:END:
+
+Four instances, all engineered to break active-set pivoting by putting far more
+active constraints at the solution than the dimension of the vertex.
+
+** (A) Duplicated / perturbed hypercube
+\[
+\min_{x\in\mathbb{R}^8}\ \tfrac12\|x-2e\|^2 \quad\text{s.t.}\quad
+x_i \le 1 - j\cdot 10^{-14},\ \ -x_i \le j\cdot 10^{-14},\quad j=0..7
+\]
+Every one of the 16 cube facets is replicated 8 times and each replica shifted
+by \(j\cdot 10^{-14}\): 128 rows, of which 64 are active at \(x^*=e\).
+Replica gradients are *identical*; LICQ fails and the multiplier set is a
+56-dimensional face. \(f^*=4\).
+
+** (B) Beale's cycling LP, regularized to a QP
+\[
+\min\ -0.75x_4 + 150x_5 - 0.02x_6 + 6x_7 + \tfrac{\varepsilon}{2}\|x\|^2
+\]
+s.t. the three Beale equalities and \(x\ge 0\). Swept
+\(\varepsilon\in\{10^{-4},10^{-6},10^{-9},10^{-12}\}\) so the QP degenerates to
+the pure cycling LP (\(f^*_{LP}=-1/20\) at \(x=(0,0,0,\tfrac1{25},0,1,0)\)).
+
+** (C) Slater-failing polyhedral cone (the instance that broke it)
+\[
+\min_{x\in\mathbb{R}^5}\ \tfrac12\|x-e\|^2 \quad\text{s.t.}\quad a_i^\top x \le 0,\ i=1..m
+\]
+with \(a_i\) random unit vectors. For \(m \gtrsim 12\) the positive hull of
+\(\{a_i\}\) spans \(\mathbb{R}^5\), so the feasible set collapses to
+\(\{0\}\): *all m constraints are active*, there is no interior (Slater fails),
+and the multipliers are wildly non-unique. \(x^*=0\), \(f^*=\tfrac12\|e\|^2=2.5\).
+Feasibility of \(x=0\) is exact by inspection (\(G\cdot 0 = 0 \le 0\)); the
+collapse to \(\{0\}\) was independently verified with cvxpy by maximizing
+\(\pm x_i\) over the cone \(\cap\) unit box (extent \(\le 6\times10^{-11}\) for all
+\(m\) tested).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (instance C only)
+:END:
+
+** (A) duplicated cube — all paths agree
+| Solver                 | Status  |      Objective | Rel err vs known | Iters | Wall time |
+|------------------------+---------+----------------+------------------+-------+-----------|
+| pounce qp-active-set   | 0 / ok  | 4.000000000001 |          1.4e-13 |     1 |   0.0038s |
+| pounce active-set-sqp  | 0 / ok  | 4.000000000001 |          1.4e-13 |     1 |   0.0041s |
+| pounce solve_qp (IPM)  | optimal | 4.000000005033 |          1.3e-09 |     - |   0.0020s |
+| pounce nlp             | 0 / ok  | 4.000000084936 |          2.1e-08 |     6 |   0.0029s |
+| cvxpy CLARABEL         | optimal | 4.000000019608 |          4.9e-09 |     - |   0.0034s |
+| cvxpy OSQP             | optimal | 4.000000000000 |          0.0e+00 |     - |         - |
+
+Known optimal: 4.0. Active-set path max violation 0.0, \(\|x-e\|_\infty=7\times10^{-14}\).
+
+** (B/D) Beale, eps-sweep
+| eps   | cvxpy CLARABEL |  qp-active-set | rel err |         IPM |          nlp |
+|-------+----------------+----------------+---------+-------------+--------------|
+| 1e-4  |  -4.99498356e-2 | -4.99498750e-2 | 3.9e-08 | -4.994988e-2 | -4.995013e-2 |
+| 1e-6  |  -4.99994594e-2 | -4.99994988e-2 | 3.9e-08 | -4.999950e-2 | -4.999976e-2 |
+| 1e-9  |  -4.99999601e-2 | -4.99999995e-2 | 3.9e-08 | -5.000000e-2 | -5.000026e-2 |
+| 1e-12 |  -4.99999606e-2 | -5.00000000e-2 | 3.9e-08 | -5.000000e-2 | -5.000026e-2 |
+
+At \(\varepsilon=10^{-12}\) the active-set path lands on \(-0.0500000000\), i.e.
+Beale's exact LP optimum \(-1/20\), in 1 iteration, eq residual \(3\times10^{-18}\).
+No cycling, no stall. (cvxpy's own value drifts at small \(\varepsilon\); pounce is
+the *more* accurate of the two here.)
+
+** (C) Slater-failing cone, m = 40 — FAILURE
+| Solver                 | Status                      | Objective | Rel err | Max violation | Wall time |
+|------------------------+-----------------------------+-----------+---------+---------------+-----------|
+| pounce qp-active-set   | 2 Infeasible_Problem_Detected | 2.025000 | 1.9e-01 |      +1.67e-01 |   0.0560s |
+| pounce active-set-sqp  | 2 Infeasible_Problem_Detected | 2.025000 | 1.9e-01 |      +1.67e-01 |   0.0568s |
+| pounce solve_qp (IPM)  | optimal                     | 2.4999999996 | 1.5e-10 |      2.9e-10 |   0.0018s |
+| pounce nlp             | 0 Solve_Succeeded           | 2.4999999769 | 9.2e-09 |      6.6e-09 |   0.0062s |
+| cvxpy CLARABEL         | optimal                     | 2.4999999996 | 1.4e-10 |             - |   0.0022s |
+
+Known optimal: 2.5 at \(x^*=0\).
+
+From the interior start \(x_0=0.1e\) the active-set path returns \(x_0\)
+*completely unchanged* — it never takes a step — and reports the problem
+infeasible, leaving a point that violates the constraints by 0.167.
+
+** (C2) Threshold sweep, started AT the exact optimum \(x_0=0\)
+\(x_0=0\) is exactly feasible (violation identically 0) and is the exact
+global optimum, for every \(m\) below.
+
+| m  | cvxpy   | qp-active-set status          | obj returned | max violation | nit |
+|----+---------+-------------------------------+--------------+---------------+-----|
+| 12 | 2.50000 | 0 Solve_Succeeded             |          2.5 |           0.0 |   1 |
+| 15 | 2.50000 | 0 Solve_Succeeded             |          2.5 |           0.0 |   1 |
+| 20 | 2.50000 | 0 Solve_Succeeded             |          2.5 |           0.0 |   1 |
+| 25 | 2.50000 | 3 Search_Direction_Becomes_Too_Small |   2.5 |       8.4e-17 |  10 |
+| 30 | 2.50000 | 2 Infeasible_Problem_Detected |          2.5 |           0.0 |   - |
+| 40 | 2.50000 | 2 Infeasible_Problem_Detected |          2.5 |           0.0 |   - |
+
+The active-set path is *handed the exact optimum, exactly feasible*, and for
+\(m\ge 30\) still declares =Infeasible_Problem_Detected=. The returned iterate is
+numerically correct in every row; only the termination status is wrong. The
+breakdown threshold is between 20 and 25 simultaneously-active constraints in
+\(\mathbb{R}^5\), i.e. roughly \(m/n \gtrsim 5\).
+
+* Cross-check / Verification
+- *Formulation skepticism first.* The objective is a plain quadratic with
+  hand-checked exact gradient/Hessian (\(\nabla f = x-d\), \(\nabla^2 f=I\)).
+  Feasibility of \(x=0\) needs no solver: \(G\cdot 0 = 0 \le 0 = h\) exactly.
+  So the problem is *provably feasible*, and the claim
+  =Infeasible_Problem_Detected= is provably wrong.
+- *Independent oracle.* cvxpy/CLARABEL returns 2.4999999996 with
+  \(\|x\|_\infty=1.9\times10^{-10}\), matching \(x^*=0\), \(f^*=2.5\). OSQP used
+  as a second oracle on instances A/B.
+- *Two independent pounce engines disagree with the active-set path.* The
+  convex-QP IPM (=solve_qp=) and the general NLP path both return 2.5 with
+  \(x\approx 0\) on the identical data, so this is not a data/encoding issue —
+  it is specific to the active-set driver.
+- *Not a hang, not cycling.* Every solve ran in a child process under a 30 s
+  hard wall-clock timeout; nothing timed out. The worst active-set wall time in
+  the whole battery was 0.101 s. The two classic cycling geometries (A and
+  Beale B/D) were solved cleanly in *one* iteration each, including in the LP
+  limit \(\varepsilon=10^{-12}\). The failure mode here is *premature/incorrect
+  infeasibility certification*, not stalling.
+- *Both entry points affected identically.* =solver_selection="qp-active-set"=
+  and =algorithm="active-set-sqp"= produce bit-identical failures, confirming
+  the flag really does reach the active-set SQP driver.
+- *Performance.* Active-set on C is 0.056 s vs cvxpy 0.0022 s — 25x, but the
+  absolute gap is 0.054 s, under the 0.1 s threshold, so not a
+  PERFORMANCE_REGRESSION.
+
+* Verdict
+*SOLVER_LIMITATION* (instance C). On a convex QP whose feasible set is the
+single point \(\{0\}\) — every one of the 40 constraints active at a
+5-dimensional point, Slater's condition failing, multipliers non-unique — the
+active-set SQP driver reports =Infeasible_Problem_Detected= on a problem that is
+provably feasible by inspection and that pounce's own IPM path, pounce's NLP
+path, and cvxpy all solve to 1e-10. It does so even when started *at* the exact
+optimum with zero constraint violation, and from an interior start it returns
+the unmodified starting point (19% objective error, 0.167 constraint violation).
+Per the classification rules this is a LIMITATION and not a BUG: =success= is
+=False= and the status is never =optimal=, so no wrong answer is claimed as
+converged — a caller checking =success= is correctly warned off. The breakdown
+threshold is ~20-25 simultaneously active constraints in \(\mathbb{R}^5\)
+(\(m/n\gtrsim 5\)); below it the same construction solves correctly.
+
+The headline hypothesis under test — active-set *cycling* — was *not*
+reproduced. Instances A (64 duplicated active constraints at an 8-D vertex,
+gradients identical to 1e-14) and B/D (Beale's cycling LP down to
+\(\varepsilon=10^{-12}\), where pounce recovers \(-1/20\) more accurately than
+cvxpy) both terminate in a single iteration with 1e-13 accuracy. The
+anti-cycling machinery is sound; what is fragile is the *feasibility
+certification* under gross constraint multiplicity.

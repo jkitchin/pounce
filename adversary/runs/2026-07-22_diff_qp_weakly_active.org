@@ -1,0 +1,149 @@
+#+TITLE: Adversary Run: Differentiable QP Layer at a Weakly Active (Degenerate) Constraint
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: degeneracy / strict-complementarity failure / non-unique dx/dtheta
+:SOURCE: OptNet-style implicit-diff layer; degeneracy theory per Robinson (1980) "Strongly regular generalized equations" (Math. Oper. Res. 5(1):43-62) -- strict complementarity is required for x*(theta) to be differentiable -- and Clarke (1983) "Optimization and Nonsmooth Analysis", generalized Jacobians.
+:KNOWN_OPTIMAL: x* = (0.5, -0.2); dL/dtheta has NO classical value at coord 0; Clarke subdifferential = [-1,0] x {-1}
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 4 (box: -0.5 <= x <= 0.5)
+:END:
+
+\[
+\min_{x\in\mathbb{R}^2}\; \tfrac12\|x\|_2^2 + \theta^\top x
+\quad\text{s.t.}\quad -0.5 \le x \le 0.5 ,
+\qquad
+x_i^*(\theta) = \mathrm{clip}(-\theta_i,\,-0.5,\,0.5).
+\]
+
+Evaluated at \(\theta_0 = (-0.5,\; 0.2)\):
+
+- \(x_0^* = 0.5\) sits **exactly on** the upper bound while its multiplier is
+  \(\mu_0 = -(x_0+\theta_0) = 0\). The constraint is **weakly active**;
+  strict complementarity fails; the LICQ holds but strong regularity does not.
+- \(x_1^* = -0.2\) is strictly interior (smooth coordinate, control).
+
+With \(L(\theta)=\sum_i x_i^*(\theta)\), the map is only *directionally*
+differentiable at \(\theta_0\):
+
+\[
+\partial^+_{\theta_0} L = (-1,-1) \ (\text{interior branch}),\qquad
+\partial^-_{\theta_0} L = (0,-1)\ (\text{pinned branch}),\qquad
+\partial^{C} L = [-1,0]\times\{-1\}.
+\]
+
+A **central** difference of the exact map converges to \((-0.5,-1)\), the
+average of two *distinct* one-sided derivatives, and is therefore meaningless
+as a correctness target here.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Quantity                   | Value                        | Target                       | Verdict |
+|----------------------------+------------------------------+------------------------------+---------|
+| forward x (pounce, tol=def)| (0.49994499, -0.2)           | (0.5, -0.2)                  | ok      |
+| forward err                | 5.50e-05                     | ~sqrt(tol) at a degen vertex | ok      |
+| grad (JAX)                 | (-0.49999802, -0.99999999)   | any element of [-1,0]x{-1}   | ok      |
+| grad (Torch)               | (-0.49999802, -0.99999999)   | identical to JAX             | ok      |
+| JAX<->Torch grad parity    | 0.00e+00 (bit-identical)     | < 1e-6                       | ok      |
+| JAX<->Torch fwd parity     | 0.00e+00                     | < 1e-6                       | ok      |
+| smooth coord dL/dtheta_1   | -0.99999999 (err 6.3e-09)    | -1                           | ok      |
+| non-finite entries         | none                         | none                         | ok      |
+| wall time (JAX grad)       | 0.579 s (incl. trace)        | < 10 s                       | ok      |
+| wall time (Torch grad)     | 0.038 s                      | < 10 s                       | ok      |
+
+Total script runtime 2.0 s.
+
+* Cross-check / Verification
+
+** Oracle 1 -- one-sided and central FD of the EXACT closed-form map (independent of pounce)
+
+Step sweep h in {1e-3 ... 1e-7}, float64. Every step reproduced the analytic
+values exactly:
+
+| h     | forward (right) | backward (left) | central     |
+|-------+-----------------+-----------------+-------------|
+| 1e-03 | (-1, -1)        | (0, -1)         | (-0.5, -1)  |
+| 1e-04 | (-1, -1)        | (0, -1)         | (-0.5, -1)  |
+| 1e-05 | (-1, -1)        | (0, -1)         | (-0.5, -1)  |
+| 1e-06 | (-1, -1)        | (0, -1)         | (-0.5, -1)  |
+| 1e-07 | (-1, -1)        | (0, -1)         | (-0.5, -1)  |
+
+Oracle self-check passed: the two one-sided derivatives are confirmed distinct,
+so the point is genuinely nondifferentiable and the central difference is
+confirmed to be the invalid comparator.
+
+** Oracle 2 -- one-sided FD of the map pounce actually implements
+
+pounce's IPM does not return the exact kinked map; the log-barrier smooths the
+kink into a C^1 arc. FD of pounce's own forward map:
+
+| h     | forward         | backward        | central         |
+|-------+-----------------+-----------------+-----------------|
+| 1e-03 | (-0.9467, -1.0) | (-0.0533, -1.0) | (-0.4999979,-1) |
+| 1e-04 | (-0.6477, -1.0) | (-0.3523, -1.0) | (-0.4999847,-1) |
+| 1e-05 | (-0.5157, -1.0) | (-0.4843, -1.0) | (-0.4999800,-1) |
+
+Both one-sided differences converge to the **same** limit \(-0.5\) as
+\(h\to 0\) (they bracket it symmetrically and tighten by 10x per decade),
+confirming pounce's forward map is differentiable at \(\theta_0\) with
+derivative \(-0.5\). The returned gradient \(-0.49999802\) matches that
+one-sided limit from **both** sides to ~2e-6. Criterion (b) is satisfied
+against the map that is actually differentiated.
+
+** Oracle 3 -- Clarke membership
+
+\((-0.49999802,-0.99999999)\) lies strictly inside
+\(\partial^{C}L = [-1,0]\times\{-1\}\); it is the convex combination
+\(\tfrac12\partial^+ + \tfrac12\partial^-\), a legitimate generalized gradient,
+not garbage. The smooth control coordinate is recovered to 6.3e-09.
+
+** Oracle 4 -- tolerance sweep (robustness under degeneracy)
+
+| tol   | x                            | grad                     | finite | in Clarke |
+|-------+------------------------------+--------------------------+--------+-----------|
+| 1e-06 | (0.49936459, -0.19999984)    | (-0.49997719,-0.99999911)| yes    | yes       |
+| 1e-08 | (0.49994499, -0.2)           | (-0.49999802,-0.99999999)| yes    | yes       |
+| 1e-10 | (0.49999536, -0.2)           | (-0.49999945,-1.0)       | yes    | yes       |
+| 1e-12 | (0.49999972, -0.2)           | (-0.49999981,-1.0)       | yes    | yes       |
+
+No blow-up, no NaN/Inf, no sign flip, no oscillation. The forward iterate
+converges monotonically to the degenerate vertex and the gradient converges
+monotonically to the symmetric Clarke element. Note the forward gap to the
+bound scales like ~sqrt(tol) rather than ~tol (5.5e-5 at tol=1e-8) -- this is
+the textbook tangential approach of the central path to a degenerate vertex
+where strict complementarity fails, not a solver defect.
+
+** Notes on the near-miss false positive
+
+An earlier draft of this script used *pounce itself* as the forward map for the
+one-sided FD oracle and compared the result against the *exact* analytic
+one-sided derivatives \((-1)\) and \((0)\). That comparison "failed" by 0.5 in
+both directions and would have been reported as a GRADIENT_ERROR. It was a
+FORMULATION_ERROR in the oracle: the barrier-smoothed map has a single
+derivative \(-0.5\), and the exact-map one-sided derivatives are the wrong
+target for it. The final script runs both oracles separately and states which
+question each answers.
+
+* Verdict
+
+**PASS.** At a point where an inequality is weakly active and strict
+complementarity fails, both the JAX and the Torch QP layers return a finite,
+bit-identical gradient \((-0.5, -1)\) that is a valid Clarke subgradient
+(the exact midpoint of the one-sided Jacobians \((-1,-1)\) and \((0,-1)\)),
+matches the one-sided finite differences of the barrier-smoothed map pounce
+actually implements from both directions, recovers the smooth control
+coordinate to 6e-09, and degrades gracefully -- indeed improves monotonically
+-- as the solver tolerance is tightened from 1e-6 to 1e-12. No NaN, no Inf, no
+blow-up, no JAX/Torch divergence. This is the desired behavior: the layer
+returns a defensible generalized derivative rather than silently emitting
+garbage or failing at a degenerate point. The only caveat worth recording (not
+a bug) is that the returned element is the *symmetric* Clarke element rather
+than either exact one-sided derivative, so a downstream user doing line search
+across the kink gets a descent direction that is valid but conservative in
+both directions; documenting that IPM layers return a smoothed Clarke element
+at weakly active constraints would help users who expect the B-subdifferential.

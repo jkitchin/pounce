@@ -1,0 +1,50 @@
+#+TITLE: Adversary LP cross-check — degenerate balanced transportation LP
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: lp
+- CLASS: degenerate equality-constrained LP (balanced transportation); rank-deficient A
+- SOURCE: Classic balanced transportation problem — the canonical example of primal
+  degeneracy. A balanced m-source/n-sink problem has m+n equality rows but rank
+  m+n-1, so a basic feasible solution has m+n-1 basic cells and the rest are
+  degenerate (basic at zero). Built so the unique optimum sits at a degenerate vertex.
+- KNOWN_OPTIMAL: min cost = 25.0 at x* = [[10,0,0],[0,5,5]]
+- N_VARIABLES: 6 (flows x_ij, x >= 0)
+- N_CONSTRAINTS: 5 equality rows (2 supply + 3 demand; rank 4, one redundant) + 6 lower bounds
+
+* Formulation
+minimize  sum c_ij x_ij,  C = [[1,2,3],[4,2,1]]
+subject to  sum_j x_ij = s_i,  s = [10,10]   (supply equalities)
+            sum_i x_ij = d_j,  d = [10,5,5]   (demand equalities)
+            x >= 0
+Variables flattened row-major: [x00,x01,x02,x10,x11,x12].
+d0 = s0 = 10 forces x00 = 10 and x01 = x02 = x10 = 0, producing several zero
+basic cells -> degenerate vertex. All 5 equality rows kept (sum = 20 both sides),
+so A is rank-deficient (rank 4) -> stresses pounce presolve / IPM on redundant equalities.
+
+* Results (pounce vs oracle)
+| metric            | pounce            | scipy linprog     | cvxpy CLARABEL  |
+|-------------------+-------------------+-------------------+-----------------|
+| status            | optimal           | 0 (optimal)       | optimal         |
+| objective         | 2.4999999997e+01  | 2.5000000000e+01  | 2.5000000274e+1 |
+| time (s)          | 0.0024            | 0.0011            | --              |
+
+pounce x = [10, ~0, ~0, ~0, 5, 5] (matches oracle vertex within ~2e-9).
+
+* Cross-check
+- rel_err_vs_known        = 1.15e-10
+- obj_err_vs_oracle       = 1.15e-10
+- equality residual (inf) = 1.51e-09
+- min_x                   = 1.72e-11 (nonnegative within tolerance)
+- x_inf_err vs oracle     = 1.79e-09
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: Despite a deliberately rank-deficient equality matrix (5 rows, rank 4)
+and a degenerate optimal vertex, pounce returns status=optimal with objective =
+25.0 matching the closed-form optimum and both oracles to ~1e-10. Equality
+constraints are satisfied to 1.5e-9 and nonnegativity holds. pounce's presolve
+handles the redundant supply/demand row without spurious infeasibility. No
+solver bug, no degeneracy-induced failure. Slightly slower than scipy on this
+tiny instance but well within budget and no >3x/>0.1s regression.

@@ -1,0 +1,67 @@
+#+TITLE: SOS adversary test: three-hump camel function
+#+DATE: 2026-06-15
+#+AUTHOR: adversary worker (sos family)
+
+* PROBLEM
+Three-hump camel function, unconstrained polynomial global minimization
+via pounce.sos_minimize (Lasserre/SOS relaxation).
+
+f(x,y) = 2 x^2 - 1.05 x^4 + x^6/6 + x y + y^2
+
+Degree 6 (leading x^6 term). Coercive (x^6/6 and y^2 dominate), so bounded
+below; unconstrained SOS applies.
+
+* PROPERTIES
+- n_vars: 2
+- degree: 6
+- coercive: yes (-> +inf as |x|,|y| -> inf)
+- KNOWN global minimum f* = 0 at (x,y) = (0,0)
+- This is a NEW polynomial vs. already-tested sos cases (double-well
+  quartic, Goldstein-Price, six-hump camel).
+
+* SOURCE / REFERENCE
+- Molga & Smutnicki, "Test functions for optimization needs" (2005).
+- Jamil & Yang, "A literature survey of benchmark functions for global
+  optimization problems", Int. J. Math. Modelling and Numerical
+  Optimisation (2013), function "Three-Hump Camel".
+- Known global minimum f(0,0) = 0. Sanity-checked in-script:
+  f(0,0) = 0 exactly.
+
+* POUNCE OBJECTIVE (exponent-tuple dict)
+| (i,j) | coeff       | term        |
+|-------+-------------+-------------|
+| (2,0) |  2.0        | 2 x^2       |
+| (4,0) | -1.05       | -1.05 x^4   |
+| (6,0) |  1/6        | x^6/6       |
+| (1,1) |  1.0        | x y         |
+| (0,2) |  1.0        | y^2         |
+
+* RESULTS (pounce.sos_minimize)
+| order | lower_bound  | is_exact | status  | n_minimizers | time (s) |
+|-------+--------------+----------+---------+--------------+----------|
+|     0 | +0.00000001  | True     | optimal |            1 |    0.009 |
+|     1 | +0.00000001  | True     | optimal |            1 |    0.009 |
+|     2 | +0.00000001  | True     | optimal |            1 |    0.008 |
+|     3 | +0.00000001  | True     | optimal |            1 |    0.008 |
+
+- Tightest (highest) lower bound: +0.00000001 at order=0.
+- Gap (f* - lower_bound) = -5.06e-09 (numerically zero; bound matches f*
+  to solver tolerance, is_exact=True).
+- The relaxation is exact already at order 0 (the function is a
+  sum-of-squares plus the global min; SOS recovers it immediately).
+
+* CROSS-CHECK (independent oracles)
+- Dense grid over [-3,3]^2 (1601x1601): grid_min = 0.00000000 at (0,0).
+- scipy Nelder-Mead multistart (400 starts, seed 0): best = 0.0000000000
+  at (~0, ~0).
+- Refutation min (best point found / known) = 0.0000000000.
+- lower_bound (+1e-8) does NOT exceed the refutation min by more than
+  1e-6 slack => valid lower bound.
+
+* VERDICT
+PASS. pounce returns a valid, exact lower bound of ~0 (within 5e-9 of the
+known global minimum f*=0), and the bound never exceeds the independent
+grid/multistart minimum. SOS is exact at order 0 (is_exact=True), so no
+higher relaxation order was needed.
+
+VERDICT: PASS (lower_bound +0.00000001 matches known global min 0.00000000 to tol 0.0001, order=0)

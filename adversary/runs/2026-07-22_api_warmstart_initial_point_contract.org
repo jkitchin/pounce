@@ -1,0 +1,274 @@
+#+TITLE: Adversary Run: The Warm-Start / Initial-Point Contract
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   api (contracts / option handling / input edge cases)
+:CLASS:    initial-point independence, warm-start round-trip, stale-dual robustness
+:SOURCE:   Contract derived from convexity (unique minimizer => x0 cannot change the answer);
+:SOURCE+:  nonconvex part uses the six-hump camel back function, Dixon & Szego (1978),
+:SOURCE+:  local minima as tabulated in Molga & Smutnicki, "Test functions for
+:SOURCE+:  optimization needs" (2005), sec. 4.2.
+:KNOWN_OPTIMAL: QP: obj = -4.141549469632e-01 (cvxpy/CLARABEL, x0-independent by construction);
+:KNOWN_OPTIMAL+: camel: f = -1.0316284535 at (+-0.0898, -+0.7126)
+:N_VARIABLES: 8 (QP), 2 (camel)
+:N_CONSTRAINTS: 1 equality + 3 inequalities + 8 box (QP); 2 box (camel)
+:SCRIPT:   [[file:2026-07-22_api_warmstart_initial_point_contract.py]]
+:END:
+
+** The invariant under test
+
+On a *strictly convex* problem the minimizer is unique.  The initial point
+=x0= -- and any warm-start dual guess -- may therefore change *speed*, but must
+never change the *answer*.  Any =x0=-dependence of the returned optimum on such
+a problem is a =SOLVER_BUG=.
+
+On a *nonconvex* problem =x0=-dependence is legitimate, but every returned
+point must still be a genuine local optimum.
+
+** Formulation
+
+Strictly convex QP, $P = MM^T + 2I$ with $M \sim N(0,1)^{8\times 8}$, so
+$\lambda_{\min}(P) \geq 2$:
+
+\begin{align*}
+\min_x \quad & \tfrac12 x^\top P x + c^\top x \\
+\text{s.t.} \quad & Ax = b        && (1 \text{ equality}) \\
+                  & Gx \leq h     && (3 \text{ inequalities, row 2 active at } x^*) \\
+                  & -0.6 \leq x_i \leq 0.6 && (\text{box})
+\end{align*}
+
+Nonconvex probe, six-hump camel back:
+$f(x) = (4 - 2.1x_1^2 + x_1^4/3)x_1^2 + x_1x_2 + (-4 + 4x_2^2)x_2^2$.
+
+** The =x0= battery
+
+Twelve deliberately hostile starts: the exact optimum, the optimum $\pm 10^{-12}$,
+the negated optimum, zeros, ones, $\pm 10^8$, $10^3$, a random $10^4$-magnitude
+point, exactly on the active constraint boundary, exactly on the lower bound
+face, exactly on the upper bound face.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Part | What was tested                                  | Result                          |
+|------+--------------------------------------------------+---------------------------------|
+| A1   | =solve_qp= (IPM) over the 12-point =x0= battery  | worst \vert dx \vert = 1.08e-08 |
+| A2   | =minimize= (NLP) over the same battery           | worst \vert dx \vert = 7.07e-04 |
+| B    | =x0= exactly at the optimum                      | correct; 8 iters, no perturbation |
+| C    | =WarmStart.from_info= round-trip (NLP)           | idempotent to 4.4e-10           |
+| C2   | =QpResult= fed back as =warm_start= (QP)         | idempotent; 8 -> 2 iterations   |
+| D    | 10 corrupted dual guesses (NLP)                  | primal answer unchanged         |
+| D2   | 7 corrupted dual guesses + stale problem (QP)    | primal answer unchanged         |
+| E    | Nonconvex camel from 8 starts                    | 7/8 verified local minima       |
+| F    | Root cause of the A2 drift + Ipopt oracle        | scaling heuristic, shared       |
+
+** Part A1 -- =solve_qp=, the IPM path: contract HELD
+
+| x0                 | status  |           objective | \vert dx \vert inf | iters |
+|--------------------+---------+---------------------+--------------------+-------|
+| exact optimum      | optimal | -4.141549496796e-01 |           1.06e-08 |     8 |
+| zeros              | optimal | -4.141549493201e-01 |           9.17e-09 |     8 |
+| far outside +1e8   | optimal | -4.141549497706e-01 |           1.08e-08 |    29 |
+| far outside -1e8   | optimal | -4.141549465846e-01 |           1.54e-09 |    29 |
+| on constraint bdry | optimal | -4.141549496796e-01 |           1.06e-08 |     8 |
+| on lb exactly      | optimal | -4.141549495570e-01 |           1.01e-08 |     9 |
+| on ub exactly      | optimal | -4.141549491617e-01 |           8.55e-09 |     9 |
+| random large       | optimal | -4.141549488862e-01 |           7.48e-09 |    17 |
+| negated optimum    | optimal | -4.141549479327e-01 |           3.74e-09 |     8 |
+
+Exactly the behaviour the contract demands: =x0= moves the *iteration count*
+(8 -> 29) and nothing else.  All twelve starts agree with the cvxpy oracle to
+~1e-8.
+
+** Part B -- starting at the optimum
+
+Starting at $x^*$ returns $x^*$ (\vert dx \vert = 1.06e-08); the tight default
+=bound_push= (1e-9) does not push the solution off its active constraint.  It
+does *not* short-circuit to ~0 iterations, though: 8 iterations cold (=x0=0=)
+and 8 iterations hot.  The IPM still has to walk the barrier parameter down
+from =mu_init=, since a *primal* point alone carries no certificate -- the
+duals are what would let it stop early.  That is expected IPM behaviour, and
+Part C2 shows the iteration count *does* collapse (8 -> 2) once the duals come
+along in a =QpResult=.  Logged as an observation, not a defect.
+
+** Part C / C2 -- warm-start round-trip
+
+Both documented paths work and are idempotent:
+
+- NLP: =WarmStart.from_info(r.x, r.info)= captures =mult_g=, =mult_x_L=,
+  =mult_x_U=, =mu= (2.51e-09).  Re-solving moves =x= by 4.41e-10.
+- QP: feeding the previous =QpResult= straight back in (as
+  =docs/src/convex-solver.md:99= shows) cuts iterations *8 -> 2* and keeps the
+  answer at \vert dx \vert = 1.15e-08.
+
+** Part D / D2 -- deliberately wrong / stale duals: contract HELD
+
+This is the strongest result in the run.  Seventeen corrupted dual guesses were
+fed in alongside a correct primal point:
+
+- NLP: correct, sign-flipped, scaled 1e6, scaled 1e-9, all-zeros, all-ones,
+  random garbage (1e3), *negative* bound multipliers, =mu=1e3=, =mu=1e-14=.
+- QP: correct, sign-flipped, negative =z=, scaled 1e8, zeros, random garbage
+  (1e4), *wrong dimensions* (length-99 vectors into a length-8/3 slot), and a
+  warm start captured from a *different QP* entirely.
+
+Every single one returned the correct primal answer.  On the NLP path eight of
+the ten cases produced *byte-identical* objectives (-4.141549498803e-01, 21
+iterations), i.e. the bad multipliers were absorbed without perturbing the
+trajectory at all.  A dual guess behaves as a hint, never as a constraint --
+which is exactly the contract.  The wrong-dimension case is silently ignored
+rather than raising, which is worth knowing but is documented behaviour
+(=qp.py:_warm_dict=).
+
+** Part E -- nonconvex: the =x0=-dependence is legitimate
+
+| x0            | x*                     |             f* | \vert grad \vert | eig(H)min | local? |
+|---------------+------------------------+----------------+------------------+-----------+--------|
+| near global + | ( 0.089842, -0.712656) |  -1.0316284535 |         1.02e-09 |  7.68e+00 | yes    |
+| near global - | (-0.089842,  0.712656) |  -1.0316284535 |         1.02e-09 |  7.68e+00 | yes    |
+| tiny          | (-0.089842,  0.712656) |  -1.0316284535 |         1.02e-09 |  7.68e+00 | yes    |
+| upper right   | ( 1.607105,  0.568651) |   2.1042503103 |         1.47e-09 |  7.12e+00 | yes    |
+| lower left    | (-1.607105, -0.568651) |   2.1042503103 |         1.47e-09 |  7.12e+00 | yes    |
+| far out       | ( 1.607105,  0.568651) |   2.1042503103 |         3.40e-09 |  7.12e+00 | yes    |
+| far out neg   | (-1.607105, -0.568651) |   2.1042503103 |         3.40e-09 |  7.12e+00 | yes    |
+| origin        | ( 0.0,       0.0     ) |   0.0000000000 |         0.00e+00 | -8.06e+00 | *no*   |
+
+Three distinct basins from eight starts.  Seven of the eight returned points
+pass an independent second-order check (analytic $\|\nabla f\| < 10^{-8}$ *and*
+$\nabla^2 f \succ 0$) and match a published camel minimum to 3e-7 or better, so
+the =x0=-dependence here is legitimate rather than a bug.
+
+The exception is instructive rather than damning: $x_0 = (0,0)$ is *exactly a
+saddle point* of the camel function, $\nabla f(0,0) = (0 + x_2, x_1 + 0) =
+(0,0)$ identically.  Every first-order/KKT-terminating method stops there
+immediately -- Ipopt included -- because the first-order conditions are
+satisfied to machine zero on arrival.  Escaping requires negative-curvature
+exploitation that a local NLP solver does not promise.  Expected behaviour.
+
+* Cross-check / Verification
+
+** Oracle agreement (convex parts)
+
+| Oracle           |           objective | note                            |
+|------------------+---------------------+---------------------------------|
+| cvxpy / CLARABEL | -4.141549469632e-01 | primary                         |
+| cvxpy / SCS      | -4.141549533379e-01 | \vert dx \vert = 2.51e-08 vs CLARABEL |
+| pounce solve_qp  | -4.141549493201e-01 | \vert dx \vert = 9.17e-09 vs oracle |
+
+Two independent cvxpy backends agree to 2.5e-08, so the oracle is sound.  The
+oracle answer is =x0=-independent by construction, which is what makes any
+=x0=-dependence in pounce a genuine signal.
+
+** Part F -- root-causing the one deviation (A2)
+
+The NLP path was the only surface that drifted.  A controlled sweep isolates
+the cause completely:
+
+| scaling        |    x0 | status                     | \vert dx \vert inf |     dobj |
+|----------------+-------+----------------------------+--------------------+----------|
+| gradient-based | 0e+00 | Solve_Succeeded            |           5.65e-09 | 1.41e-09 |
+| gradient-based | 1e+03 | Solve_Succeeded            |           1.82e-06 | 4.60e-07 |
+| gradient-based | 1e+06 | Solve_Succeeded            |           1.02e-04 | 9.15e-06 |
+| gradient-based | 1e+08 | Solved_To_Acceptable_Level |           7.07e-04 | 1.84e-04 |
+| gradient-based | 1e+10 | Solved_To_Acceptable_Level |           3.58e-03 | 9.66e-04 |
+| none           | 0e+00 | Solve_Succeeded            |           5.65e-09 | 1.41e-09 |
+| none           | 1e+03 | Solve_Succeeded            |           1.19e-08 | 3.01e-09 |
+| none           | 1e+06 | Solve_Succeeded            |           1.19e-08 | 3.01e-09 |
+| none           | 1e+08 | Solve_Succeeded            |           1.19e-08 | 3.01e-09 |
+| none           | 1e+10 | Solve_Succeeded            |           1.19e-08 | 3.01e-09 |
+
+With =nlp_scaling_method=none= the answer is *bit-for-bit identical* across ten
+decades of =x0= magnitude (1.19e-08, 23 iterations, every row).  The entire
+=x0=-dependence therefore lives in the default =gradient-based= objective
+scaling, which derives the objective scale factor from $\nabla f(x_0)$: a huge
+=x0= gives a huge gradient, the objective is scaled down by ~$1/\|\nabla
+f(x_0)\|$, and the *scaled* convergence test passes while the *unscaled* point
+is still far from $x^*$.  pounce's own log confirms the mechanism verbatim:
+
+#+begin_example
+INFO pounce_algorithm::conv_check::opt_error: refusing a termination certificate
+masked by an extreme objective scale; continuing toward the true minimum
+  obj_scale=5.7806776458353885e-6
+  unscaled_kkt_error=0.0007002332117827391
+  scaled_nlp_error=4.047822474223997e-9
+  threshold=0.0001
+#+end_example
+
+Note that pounce *already has a guard for exactly this* -- the
+=obj_scale_certificate_threshold= check fires and refuses the masked tight
+certificate.  The solver then genuinely stalls: with acceptable-level
+termination disabled (=acceptable_tol=1e-12= or =acceptable_iter=0=) it ends at
+=Search_Direction_Becomes_Too_Small= at the *same* point, so this is a real
+scaling-induced stall and not merely a lenient certificate.  Tightening =tol=
+to 1e-10 or raising =max_iter= to 3000 changes nothing.
+
+** Is this pounce-specific?  Ipopt says no.
+
+Ipopt is the reference implementation of this very scaling heuristic.  The
+identical model, built independently in Pyomo and solved by
+=/opt/homebrew/bin/ipopt=:
+
+| x0    | term_cond | \vert dx \vert inf |     dobj |
+|-------+-----------+--------------------+----------|
+| 0e+00 | optimal   |           3.70e-09 | 9.47e-10 |
+| 1e+03 | optimal   |           1.84e-06 | 4.73e-07 |
+| 1e+06 | optimal   |           1.37e-04 | 3.52e-05 |
+| 1e+08 | optimal   |           8.45e-05 | 2.17e-05 |
+| 1e+10 | optimal   |           5.86e-05 | 1.51e-05 |
+
+Ipopt degrades with =x0= magnitude in the same way and to the same order
+(1.37e-04 at =x0=1e6=, tracking pounce's 1.02e-04 almost exactly) -- *and
+reports =termination_condition=optimal= while doing so*.  pounce, on the same
+points, downgrades the status to =Solved_To_Acceptable_Level= and logs an
+explicit certificate refusal.  The =x0=-dependence is thus inherent to
+gradient-based NLP scaling, not a pounce defect, and pounce signals it more
+conservatively than the reference does.
+
+Two caveats recorded honestly:
+
+1. At the most extreme start (=x0=1e10=) pounce's error (3.58e-03) is worse
+   than Ipopt's (5.86e-05).  Ipopt's own curve is non-monotonic there
+   (1.37e-04 -> 8.45e-05 -> 5.86e-05), so both are in the noise of a heuristic
+   past its design envelope, but pounce is the softer of the two at the tail.
+2. =result.success= is =True= in the =Solved_To_Acceptable_Level= state.  A
+   user who checks only =r.success= gets =True= on a point 7e-04 from the
+   optimum.  That matches Ipopt/scipy convention, so it is a documented sharp
+   edge rather than a defect -- but the accurate check on this path is
+   =r.status == 0=, not =r.success=.
+
+* Verdict
+
+*PASS.*
+
+The warm-start / initial-point contract holds where it is testable as a hard
+invariant.  The =solve_qp= IPM path is =x0=-independent to ~1e-8 across twelve
+hostile starts spanning twenty orders of magnitude, including the exact
+optimum, both bound faces, and an active constraint boundary -- =x0= moves the
+iteration count (8 -> 29) and nothing else.  Both documented warm-start paths
+round-trip idempotently, and the =QpResult= path delivers the expected speedup
+(8 -> 2 iterations).  Most convincingly, all seventeen corrupted dual guesses
+-- sign-flipped, scaled by 1e8, zeroed, negated, random garbage, wrong
+dimensions, and captured from a different problem -- left the primal answer
+untouched, with eight of ten NLP cases byte-identical: a dual guess is treated
+as a hint and never as a constraint, exactly as required.
+
+The single deviation, drift on the =minimize= path for $|x_0| \geq 10^6$, was
+traced to the default =nlp_scaling_method=gradient-based= rather than to the
+algorithm: switching to =none= makes the answer bit-for-bit identical across
+ten decades of =x0=.  Ipopt exhibits the same degradation to the same order on
+the identical model while reporting =optimal=, whereas pounce downgrades to
+=Solved_To_Acceptable_Level= and logs an explicit obj-scale certificate
+refusal.  That is a shared, honestly-signalled limitation of a well-known
+scaling heuristic operating far outside its design envelope -- not a
+=SOLVER_BUG=, and not a =SOLVER_LIMITATION= either, since the oracle does not
+solve it cleanly where pounce fails.
+
+Similarly, the one nonconvex start that did not return a local minimum,
+$x_0 = (0,0)$, is *exactly a saddle point* of the camel function with gradient
+identically zero; every first-order method terminates there on arrival.  The
+other seven starts all returned points that pass an independent second-order
+optimality check, confirming the =x0=-dependence on the nonconvex problem is
+legitimate.

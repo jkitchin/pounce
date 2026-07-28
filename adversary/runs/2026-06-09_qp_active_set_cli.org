@@ -1,0 +1,82 @@
+#+TITLE: Adversary Run: qp-active-set CLI routing
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: small convex QP (active-set routing slot)
+:SOURCE: Nocedal & Wright Example 16.4 (x* = (1.4,1.7), q* = 0.8).
+:KNOWN_OPTIMAL: 0.8
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 3 linear inequalities + nonneg bounds
+:END:
+
+This family is CLI-only: the Python =minimize= facade does not expose
+=solver_selection="qp-active-set"=. The CLI accepts it, validates the problem is
+a convex QP, then (per the documented behavior in pounce-cli/src/main.rs) falls
+through to the NLP filter-IPM — the dedicated active-set algorithm in
+=pounce-qp= is reachable only from Rust unit tests, not the public surface.
+
+Two contracts checked:
+1. CLI =solver_selection=qp-active-set= on the convex QP returns the correct
+   optimum (vs cvxpy and the known x* = (1.4,1.7), q* = 0.8);
+2. forcing =solver_selection=qp-active-set= on a NONLINEAR .nl (Rosenbrock)
+   produces a clean class-mismatch error (non-zero exit, no panic/backtrace).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Case                          | Exit | Status / message                                          | Objective    |
+|-------------------------------+------+-----------------------------------------------------------+--------------|
+| convex QP, qp-active-set      | 0    | SolveSucceeded                                            | 0.7999999865 |
+| cvxpy CLARABEL (oracle)       | —    | optimal                                                   | 0.8000000051 |
+| Rosenbrock, qp-active-set     | 2    | "problem class NLP does not match forced solver ..."      | (rejected)   |
+
+Known optimal: 0.8 (rel err vs known 1.35e-08; x infinity err 6.42e-09)
+
+* Cross-check / Verification
+On the convex QP the CLI returns the N&W 16.4 optimum, matching cvxpy and the
+known value to ~1e-8. On the nonlinear Rosenbrock model, forcing qp-active-set
+exits 2 with the legible message "pounce: problem class NLP does not match
+forced solver qp-active-set (expected an LP or convex QP)" — a clean validated
+rejection, no Rust panic or backtrace.
+
+Coverage note (CORRECTED 2026-06-09): an earlier draft of this report claimed
+the active-set *algorithm itself* is "not reachable from the public surface,
+only via Rust unit tests." That is WRONG. The =pounce-qp= active-set engine
+(=ParametricActiveSetSolver=) IS exposed through two working public Python doors:
+1. =Problem.add_option("algorithm", "active-set-sqp")= — the active-set SQP path,
+   with a =working_set= warm-start kwarg and =info["working_set"]= round-trip
+   (verified: solves N&W 16.4 from Python to x*=(1.4,1.7), f*=0.8, Solve_Succeeded);
+2. =QpSensitivity= — uses the active-set KKT factorization for parametric dx/dp
+   (the =sensitivity= family tested this run, PASS).
+The crate is also substantially implemented (70+ unit tests + published-optimum
+fixtures green), not a stub.
+
+What is genuinely NOT wired is narrower: the =solver_selection=qp-active-set=
+flag (CLI; absent from the =minimize= facade). The CLI validates it then silently
+falls through to the NLP filter-IPM — and the CLI does not even depend on
+=pounce-qp=, so it cannot dispatch there. For a one-shot cold solve the IPM is the
+right tool and active-set adds no value (its payoff is warm-start / parametric /
+SQP-inner workloads, which the =active-set-sqp= door already serves). This is a
+reserved routing slot, not a missing solver.
+
+* Verdict
+PASS — the CLI qp-active-set selection produces the correct convex-QP optimum and
+rejects a non-QP cleanly. The active-set algorithm IS publicly reachable (via
+=algorithm=active-set-sqp= and =QpSensitivity=); only the =solver_selection=
+routing flag is an unwired reserved slot (not a defect).
+
+* Follow-up (2026-06-09, post-run): routing flag now wired
+The =solver_selection=qp-active-set= slot described above as "unwired" was
+subsequently wired (outside the adversary task). On an LP / convex-QP =.nl= the
+CLI now routes the solve through the active-set SQP engine (=algorithm=
+active-set-sqp= ⇒ =optimize_sqp_tnlp=, whose step QPs are solved in =pounce-qp=)
+instead of falling through to the IPM. Verified end-to-end: N&W 16.4 →
+x*=(1.4,1.7), q*=0.8, and =min x0²+x1² s.t. x0+x1=2= → x*=(1,1), eq dual −2, the
+=.sol= matching the IPM / NLP path; nonlinear =.nl= still rejected (exit 2).
+Regression tests: =crates/pounce-cli/tests/qp_dispatch_end_to_end.rs=
+(=forced_qp_active_set_solves_convex_qp=,
+=qp_active_set_sol_matches_known_optimum_and_dual=).

@@ -1,0 +1,44 @@
+#+TITLE: Adversary Run: Differentiable QP layer dx/dtheta
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: differentiable convex QP w.r.t. the linear term c (OptNet-style)
+:SOURCE: implicit-function-theorem layer; analytic gradient on a box QP.
+:KNOWN_OPTIMAL: dL/dtheta = (0, -1)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: box -0.5 <= x <= 0.5
+:END:
+
+min 0.5||x||^2 + theta'x s.t. -0.5 <= x <= 0.5. With theta=(1.0,0.2),
+x* = (-0.5 [pinned], -0.2 [interior]); L = sum(x*) gives analytic
+dL/dtheta = (0, -1). Forward checked vs =solve_qp=; gradient vs central finite
+differences, JAX<->Torch parity, and =torch.autograd.gradcheck= (float64).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Check                          | Value                       | Error    |
+|--------------------------------+-----------------------------+----------|
+| forward x (jax) vs numpy       | —                           | 5.55e-17 |
+| forward parity jax vs torch    | —                           | 0.00e+00 |
+| grad jax vs torch (parity)     | —                           | 0.00e+00 |
+| grad jax vs finite-difference  | —                           | 5.57e-09 |
+| grad jax vs analytic (0,-1)    | —                           | 3.39e-09 |
+| torch.autograd.gradcheck       | True                        | —        |
+
+t_jax = 0.460 s (first-call trace/compile), t_torch = 0.012 s
+
+* Cross-check / Verification
+The forward solve matches numpy to machine precision and JAX/Torch agree
+exactly. The gradient dL/dtheta matches a central finite difference to 5.6e-9 and
+the analytic (0, -1) to 3.4e-9; JAX and Torch gradients are bit-identical.
+=torch.autograd.gradcheck= (float64, interior perturbation) returns True.
+
+* Verdict
+PASS — the differentiable QP layer's forward and backward are correct: gradients
+match finite differences, the analytic value, and each other (JAX<->Torch) within
+~1e-8, and gradcheck passes.

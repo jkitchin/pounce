@@ -1,0 +1,144 @@
+#+TITLE: Adversary Run: Singular-PSD-Hessian QP Status Edge Cases
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: status reporting (unbounded / bounded near-miss / infeasible)
+:SOURCE: Analytic. Convex-QP boundedness theorem — Frank & Wolfe, "An algorithm for quadratic programming", Naval Res. Logist. Quart. 3 (1956) 95–110; Nocedal & Wright, /Numerical Optimization/ 2e, Ch. 16; Boyd & Vandenberghe §4.4.
+:KNOWN_OPTIMAL: (a) -inf (unbounded); (b) -1/4 exactly; (b0) -1/4 exactly; (c1)(c2)(d) infeasible
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 3 inequalities (x >= 0), plus 0–2 equalities / bounds per case
+:END:
+
+All six cases share one skeleton:
+
+\[
+P=\begin{bmatrix}2&-2&0\\-2&2&0\\0&0&0\end{bmatrix},\qquad
+\mathrm{eig}(P)=\{4,0,0\}\ \Rightarrow\ P\succeq 0,\ \text{singular},\quad
+\mathcal{N}(P)=\mathrm{span}\{(1,1,0),(0,0,1)\}
+\]
+
+with feasible set \(F=\{x\ge 0\}\), whose recession cone is the nonnegative
+orthant. Hence
+
+\[
+\mathcal{N}(P)\cap \mathrm{rec}(F)=\mathrm{cone}\{(1,1,0),(0,0,1)\},
+\]
+
+and by the Frank–Wolfe/convex-QP boundedness theorem
+
+\[
+\min_{x\ge 0}\ \tfrac12 x^\top P x + c^\top x \ \text{is bounded below}
+\iff c_1+c_2\ge 0 \ \wedge\ c_3\ge 0,
+\]
+
+with the infimum *attained* whenever it is finite (so there is no
+"finite-but-not-attained" confound).
+
+Cases (a) and (b) differ **only in the sign of \(c_3\)** — a status confusion
+between them is the finding the run is designed to catch.
+
+| Case | \(c\) / extra constraints | Ground truth |
+|------+---------------------------+--------------|
+| (a)  | \(c=(-1,2,-1)\) | UNBOUNDED. \(d=(0,0,1)\in\mathcal N(P)\cap\mathrm{rec}(F)\), \(c^\top d=-1<0\). Ray \(x(t)=(0.5,0,t)\), \(f=-0.25-t\to-\infty\). |
+| (b)  | \(c=(-1,2,+1)\) | BOUNDED. With \(u=x_1-x_2\), \(f=u^2-u+x_2+x_3\Rightarrow x_2=x_3=0,\ u=1/2\). Unique \(x^*=(0.5,0,0)\), \(f^*=-1/4\). |
+| (b0) | \(c=(-1,1,0)\) | BOUNDED, sharpest near-miss: the null-space part of \(c\) is *exactly orthogonal* to every recession direction (\(c_1+c_2=0,\ c_3=0\)). \(f^*=-1/4\), optimal **set unbounded**. |
+| (c1) | \(x_1+x_2=1,\ x_1+x_2=2\) | INFEASIBLE (contradictory, **rank-deficient** \(A\)). |
+| (c2) | \(x_1+x_2=1,\ x_1+x_2+x_3=0,\ x\ge0\) | INFEASIBLE (full-row-rank \(A\); forces \(x_3=-1<0\)). |
+| (d)  | bounds only: \(lb=(0,0,1)\), \(ub=(10,10,0)\) | INFEASIBLE from **bounds alone** (\(x_3\in[1,0]=\emptyset\)). Must not silently swap to \([0,1]\), must not crash. |
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Case | truth      | pounce status       | pounce obj    | CLARABEL   | OSQP       | pounce t | verdict |
+|------+------------+---------------------+---------------+------------+------------+----------+---------|
+| a    | unbounded  | =dual_infeasible=   | (diverging)   | unbounded  | unbounded  | 0.0026 s | OK      |
+| b    | -0.25      | =optimal=           | -0.2500000000 | optimal    | optimal    | 0.0015 s | OK      |
+| b0   | -0.25      | =optimal=           | -0.2500000000 | optimal    | optimal    | 0.0012 s | OK      |
+| c1   | infeasible | =primal_infeasible= | n/a           | infeasible | infeasible | 0.0032 s | OK      |
+| c2   | infeasible | =primal_infeasible= | n/a           | infeasible | infeasible | 0.0013 s | OK      |
+| d    | infeasible | =primal_infeasible= | n/a           | infeasible | infeasible | 0.0015 s | OK      |
+
+Objective errors vs the analytic optimum: (b) 4.0e-10, (b0) 1.1e-16.
+All six solves complete in well under 10 ms; total run < 0.1 s.
+
+The discriminating pair works exactly as intended: flipping a single sign in
+\(c_3\) moves pounce from =dual_infeasible= to =optimal= with the correct
+\(f^*=-1/4\). There is no status confusion between the unbounded case and its
+bounded near-miss control.
+
+Case (b0) is the hardest of the bounded ones — the optimal set is an unbounded
+face, so the central path has no unique limit. pounce still returns
+=optimal= with the exact objective (error 1.1e-16), landing at
+\(x=(2.1127,1.6127,1.8277)\), an interior point of the optimal face
+(\(x_1-x_2=0.5\) to machine precision, \(x_3\) arbitrary). That is the correct
+and expected behavior for an IPM on a QP with a non-unique solution.
+
+Case (d) is clean: bounds with \(lb_3=1 > ub_3=0\) are reported
+=primal_infeasible=. No silent bound swap (the returned iterate is not a point
+of the swapped box \([0,1]\) presented as optimal) and no crash.
+
+* Cross-check / Verification
+- *Primary oracle (analytic).* Ground truth is established by null-space and
+  recession-cone analysis, not by a solver. The script re-derives it
+  numerically before judging: it asserts \(\mathrm{eig}(P)\ge 0\) with a zero
+  eigenvalue, asserts each claimed generator satisfies \(Pd=0\) and \(d\ge0\),
+  exhibits the diverging ray for (a) at \(t=10^3,10^6\) (\(f=-1.000\text{e}3,
+  -1.000\text{e}6\)), shows the *same* ray *rises* for (b), and confirms
+  \(f^*=-0.25\) for (b) by a 301x301 grid scan.
+- *Secondary oracles.* cvxpy 1.9.1 CLARABEL and OSQP agree with the analytic
+  truth on all six cases (=unbounded= / =optimal= at -0.25 / =infeasible=).
+  =cp.psd_wrap= is used so cvxpy accepts the numerically-singular \(P\) without
+  re-deriving convexity; this does not change the problem.
+- *Non-axis-aligned recession direction.* Supplementary probe with the
+  unboundedness carried by \(d=(1,1,0)\) instead of \(e_3\)
+  (\(c=(-1,-1,1)\), \((-3,2,1)\), \((2,-3,1)\), all with \(c_1+c_2<0\)):
+  pounce reports =dual_infeasible= on all three, CLARABEL =unbounded=. So the
+  detection is not an artifact of the recession direction being a coordinate
+  axis.
+- *Knife-edge sweep on \(c_3\)* (with \(c_1+c_2=1\) fixed), truth =
+  unbounded for \(c_3<0\), bounded for \(c_3\ge0\):
+
+  | \(c_3\) | truth | pounce | CLARABEL |
+  |---------+-------+--------+----------|
+  | +1e-1 … +0.0 | bounded | =optimal=, -0.25 | optimal |
+  | -1e-9 | unbounded | =optimal=, -0.25 | *optimal* |
+  | -1e-7 | unbounded | =numerical_failure=, nan | unbounded |
+  | -1e-5 … -1e-1 | unbounded | =dual_infeasible= | unbounded |
+
+  Two rows deviate from truth, and neither is a finding. At \(c_3=-10^{-9}\)
+  the unboundedness lives below the default KKT tolerance, and the independent
+  oracle CLARABEL makes the *identical* call — a shared tolerance artifact, not
+  a pounce defect (classification =TOLERANCE=, not filed). At \(c_3=-10^{-7}\)
+  pounce returns =numerical_failure= with =obj=nan= and =success=False=; that is
+  a *non-confident* status — an honest "I don't know" on a QP perturbed
+  \(10^{-7}\) from a doubly-degenerate boundary — not a confident wrong answer.
+  The bounded side of the knife edge is correct all the way down to
+  \(c_3=0\) exactly.
+
+* Notes (non-findings)
+=QpResult.obj= carries a meaningless *finite* number on non-optimal statuses
+(e.g. -8.6e9 for case (a), +1.8e10 for (c1)) rather than \(\mp\infty\) or =nan=
+— it is the objective at the last iterate. =status= and =success=False= are
+both correct, so this is not a status-reporting defect, but a caller who reads
+=.obj= without checking =.status= would silently consume a garbage finite
+value. Worth an ergonomic look; not filed under this run's charter.
+
+* Verdict
+*PASS* — On the assigned status battery, pounce's convex QP solver reports the
+correct status in all six cases, with exact ground truth established
+analytically via null-space/recession-cone analysis and independently confirmed
+by CLARABEL and OSQP. The critical discrimination — the unbounded QP (a) versus
+its bounded near-miss control (b), differing only in the sign of \(c_3\) — is
+made correctly, as is the sharper exactly-orthogonal control (b0), where pounce
+returns the analytic optimum \(-1/4\) to 1.1e-16 despite an unbounded optimal
+set. Infeasibility is detected from rank-deficient contradictory equalities,
+from full-rank equalities made infeasible by the nonnegativity constraints, and
+from crossed bounds alone (no silent bound swap, no crash). The only deviations
+appear at perturbations of \(10^{-7}\)–\(10^{-9}\) from the boundedness
+boundary, where pounce either agrees with the oracle's own tolerance-limited
+answer or honestly reports =numerical_failure=; neither is a confident wrong
+status, so neither meets the SOLVER_BUG bar.

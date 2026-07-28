@@ -1,0 +1,86 @@
+#+TITLE: Adversary Iteration 1 (i1): Primal / dual / sensitivity vs ipopt-MA57
+#+DATE: 2026-07-23
+
+* Scope
+:PROPERTIES:
+:FAMILY: sensitivity / lp / qp / nlp / socp (duals, bound-multipliers, sensitivity)
+:ORACLE: ipopt 3.14.19 linear_solver=ma57 (header confirmed "running with linear solver ma57"); ipopt_sens (sIPOPT via pyomo sensitivity_toolbox); analytic closed-form KKT; central finite-difference re-solve
+:END:
+
+Ten small problems with known/derivable optima, each cross-checking pounce's
+PRIMAL and DUAL/SENSITIVITY quantities against the ipopt-MA57 executable's .sol
+(and analytic + FD + sIPOPT where relevant). Script:
+=adversary/runs/2026-07-23_i1_primal_dual_ma57.py= (run: =python <script> all=).
+
+Every ipopt run in the harness asserts the MA57 header line, so no silent
+fall-back to mumps/ma27 is accepted as a valid cross-check.
+
+* Headline result: the 2026-07-22 constraint-dual SIGN FLIP is FIXED
+
+The 2026-07-22 round found pounce's .sol =mult_g= negated vs the
+AMPL/Pyomo/Ipopt marginal-value convention on every surface except GAMS
+(entries: "pyomo-pounce / .sol constraint dual SIGN convention",
+"Blast radius of the dual sign defect"). This run re-checks that surface
+against ipopt-MA57 and finds it CORRECTED across all four .sol writers:
+
+| path                    | test | pounce mult_g | ipopt-MA57 | analytic df/db | signed match |
+|-------------------------+------+---------------+------------+----------------+--------------|
+| LP convex IPM           | T2   | (-1.8, -0.4)  | (-1.8,-0.4)| (-1.8,-0.4)    | yes (3e-10)  |
+| QP convex IPM (eq+ineq) | T3   | (1.0, 0.5)    | (1.0,0.5)  | (1.0,0.5)      | yes (6e-9)   |
+| NLP filter-IPM (eq+ineq)| T4   | (-0.577,1.577)| same       | same           | yes (0)      |
+| ranged row (2<=g<=6)    | T5   | -4            | -4         | -4             | yes (1e-8)   |
+| QCQP conic IPM          | T9   | -0.7071       | -0.7071    | -0.7071        | yes (2e-9)   |
+
+pounce == +ipopt (signed) everywhere; pounce == -ipopt (the old flip) is
+refuted (rel_neg ~= 2.0). The QCQP .sol first line is "POUNCE convex QCQP
+conic IPM", so T9 genuinely exercises the conic writer (recover_socp_duals,
+main.rs:1923) that 2026-07-22 flagged as flipping to +0.7071 -- it now emits
+-0.7071. Sign is correct for <=, >=, equality, and ranged rows alike.
+
+* New surface: ipopt_zL_out / ipopt_zU_out bound multipliers (#296/#312)
+
+2026-07-22 noted "Pounce writes no suffix block at all" for bound
+multipliers. It now writes =ipopt_zL_out= / =ipopt_zU_out=, and they match
+ipopt-MA57 exactly:
+- T1: x at upper (zU=-4), y at lower (zL=+4), z interior (~0). zL/zU match
+  MA57 to 4.6e-9; complementarity max|zL*(x-lb)|, max|zU*(ub-x)| = 4.5e-9.
+- T6: reduced cost of a variable pinned at its upper bound while an
+  inequality is simultaneously active -- pounce zU(x1) = -1.0 = MA57 = analytic;
+  the constraint dual +2 also matches MA57.
+
+* Sensitivity (dx/db)
+
+- T7: parametric QP dx/db, simultaneous 2-parameter perturbation, three-way:
+  pounce QpSensitivity vs analytic vs central-FD vs sIPOPT(ipopt_sens) --
+  all agree to <=1e-11.
+- T8: active-set dx/db (a binding inequality x1>=2 in the active set) --
+  pounce QpSensitivity vs analytic (2e-21) / FD (3e-11) / sIPOPT (2e-8).
+
+Well-conditioned sensitivity is exact. (The 2026-07-22 ill-conditioned
+near-LICQ QpSensitivity damping LIMITATION was not re-probed here; it lives
+only at cond(KKT) >~ 1e13, outside these deliberately well-scaled cases.)
+
+* Weak activity (T10)
+
+min (x1-1)^2+(x2-1)^2 s.t. x1+x2<=2, optimum exactly on the constraint with
+multiplier 0. Both solvers report a tiny multiplier of the same magnitude
+(pounce 4.9e-5, ipopt 6.3e-5) and primal error ~2.5e-5 -- this is
+barrier/tolerance behaviour, not a bug, in both codes.
+
+* Minor observation (NOT a finding)
+
+=pounce.minimize(..., solver_selection="auto")= on a QCQP routes to the conic
+solver and returns =info["mult_g"] = None=, whereas =solver_selection="nlp"=
+returns the correct -0.7071, =solve_socp= exposes the conic dual =z=, and the
+CLI/.sol conic path writes the correct -0.7071. So the auto/conic route of the
+=minimize= facade drops the recomposed per-constraint dual. This is a
+Python-facade parity gap (a missing number, never a wrong one), the same class
+as the previously-noted =rc=-suffix gap -- reported as an observation, not a
+correctness finding.
+
+* Verdict
+
+All 10 tests PASS. No new SOLVER_BUG / SOLVER_LIMITATION findings. The run's
+substantive result is a POSITIVE confirmation that the 2026-07-22 dual-sign
+defect is fixed on all .sol writers (incl. the conic writer) and that the new
+z_L/z_U suffix surface matches MA57 with correct complementarity.

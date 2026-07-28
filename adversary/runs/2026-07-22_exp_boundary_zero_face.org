@@ -1,0 +1,139 @@
+#+TITLE: Adversary Run: Max-entropy on a degenerate face (exp-cone non-smooth boundary, Slater failure)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: exp-cone / non-smooth cone boundary / constraint-qualification failure / non-unique dual face
+:SOURCE: Cover & Thomas, "Elements of Information Theory" 2ed, Thm 2.6.4 (uniform maximizes entropy on a support); Boyd & Vandenberghe, "Convex Optimization" (2004), Sec. 3.5 (max-entropy) and Sec. 5.2.3 (Slater's condition)
+:KNOWN_OPTIMAL: log 2 = 0.6931471805599453
+:N_VARIABLES: 8 (p_0..p_3, z_0..z_3)
+:N_CONSTRAINTS: 2 equalities; 4 exponential cones (4 x ("exp",3), G is 12x8)
+:END:
+
+\[
+\begin{aligned}
+\text{maximize}\quad & H(p) = -\sum_{i=0}^{3} p_i \log p_i \\
+\text{s.t.}\quad & \sum_i p_i = 1 \\
+                 & a^\top p = 0, \qquad a = (0,\,0,\,1,\,2) \\
+                 & p \ge 0
+\end{aligned}
+\]
+
+** Why this is the assigned pathology
+
+Since $a \ge 0$ and $b = 0$, feasibility *forces* $p_2 = p_3 = 0$ exactly. The
+feasible set therefore has **empty relative interior** with respect to the
+exponential cone: there is no strictly feasible point, so **Slater's condition
+fails**.
+
+In the encoding $z_i \le -p_i\log p_i \iff (z_i, p_i, 1) \in K_{\exp}$ with
+\[
+K_{\exp} = \operatorname{cl}\{(x,y,z) : y\,e^{x/y} \le z,\ y > 0\},
+\]
+the optimal cone blocks $i = 2, 3$ are exactly $(0, 0, 1)$ — a point on the
+ray $\{(x,0,z) : x \le 0,\ z \ge 0\}$, i.e. the **non-smooth part of the exp
+cone boundary** that is not facially exposed in the usual way and where the
+IPM barrier / Nesterov–Todd scaling degenerates as $y \to 0$. There is no
+interior for the central path to follow in those two blocks.
+
+The **optimal dual face is non-unique**: any sufficiently large multiplier on
+the moment constraint certifies $p_2 = p_3 = 0$, so the dual optimal set is an
+unbounded ray rather than a point.
+
+** Known optimum (exact, closed form)
+
+$p_2 = p_3 = 0$ is forced; the remaining mass $1$ is split over the two
+zero-moment atoms, and entropy over a 2-point support with fixed total mass is
+maximized by the uniform distribution. Hence
+\[
+p^\star = (\tfrac12,\ \tfrac12,\ 0,\ 0), \qquad H^\star = \log 2 = 0.6931471805599453 .
+\]
+No numerical reference value is used anywhere.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver            | Status             |         Objective | Rel Err vs known | Wall Time |
+|-------------------+--------------------+-------------------+------------------+-----------|
+| pounce solve_socp | optimal            | 0.693147364291432 |         1.84e-07 |  0.0034 s |
+| cvxpy ECOS        | optimal            | 0.693147180974941 |         4.15e-10 |  0.0048 s |
+| cvxpy CLARABEL    | optimal            | 0.693147207652279 |         2.71e-08 |  0.0022 s |
+| cvxpy SCS         | optimal_inaccurate | 0.693157420929512 |         1.02e-05 |  0.0757 s |
+
+Known optimal: log 2 = 0.6931471805599453
+
+pounce returns =status=optimal= and matches the closed-form optimum to
+1.8e-07 relative — three orders of magnitude inside the 1e-4 bar — in 3.4 ms,
+faster than ECOS and 22x faster than SCS.
+
+Feasibility of the pounce point:
+- $|\sum p - 1| = 6.58\text{e-}09$
+- $|a^\top p - b| = 1.92\text{e-}10$
+- forced-zero coordinates: $p_2 = 9.0\text{e-}09$, $p_3 = -4.4\text{e-}09$
+- $\|p - p^\star\|_\infty = 3.37\text{e-}06$
+
+* Cross-check / Verification
+
+**Encoding orientation verified before any comparison.** The script contains a
+direct membership test =in_exp_cone= for
+$K_{\exp} = \operatorname{cl}\{(x,y,z): y e^{x/y} \le z,\ y>0\}$ and asserts
+that the analytic optimum $(z_i^\star, p_i^\star, 1)$ lies in the cone for all
+four blocks, including the two degenerate $y = 0$ blocks handled through the
+closure branch ($x \le 0$, $z \ge 0$). The slack convention $s = h - Gx$ was
+checked block by block.
+
+**Oracles agree with each other first.** ECOS and CLARABEL agree to
+2.67e-08 relative and both recover log 2 (4.2e-10 and 2.7e-08). The
+=ORACLES_AGREE= gate in the script is =True=, so the comparison against pounce
+is licensed. SCS, the third solver, *degrades* on this instance —
+=optimal_inaccurate= at 1.0e-05, worse than pounce and 22x slower — which is
+the expected shared-limitation signature of the non-smooth boundary, and
+confirms the instance really is pathological rather than trivially easy.
+
+**The residual x error is intrinsic conditioning, not a defect.** Along the one
+free direction the objective is flat to second order,
+\[
+H(t, 1-t, 0, 0) = \log 2 - 2\,(t - \tfrac12)^2 + O((t-\tfrac12)^4),
+\]
+so an objective error $\varepsilon$ only pins $x$ to $\sqrt{\varepsilon/2}$.
+At $\varepsilon = 1.8\text{e-}07$ that bound is 3.0e-04; the observed
+3.37e-06 is two orders *inside* it. The script computes and prints this bound
+explicitly rather than asserting a hand-picked x tolerance.
+
+**Tolerance sweep** (does the accuracy come from a loose default?):
+
+| options                   | status             | obj err | x err   | min p    |
+|---------------------------+--------------------+---------+---------+----------|
+| defaults                  | optimal            | 1.8e-07 | 3.4e-06 | -4.4e-09 |
+| tol=1e-10                 | optimal_inaccurate | 2.3e-08 | 8.4e-06 | -4.3e-10 |
+| tol=1e-12, max_iter=500   | optimal_inaccurate | 7.6e-09 | 2.6e-05 | -1.8e-10 |
+
+The objective converges monotonically toward log 2 (down to 7.6e-09) as the
+tolerance tightens, while x wanders within the flat region — exactly the
+signature of a correctly solved problem with a second-order-flat objective, not
+of a solver losing the solution. The =optimal_inaccurate= status at
+tol <= 1e-10 is honest self-reporting: with Slater failing there is no interior
+point to certify against, so the residual/gap criteria cannot all be met at
+that tolerance. That is correct conservative behavior, not a limitation worth
+filing — the default-tolerance solve reports =optimal= and is right.
+
+The O(1e-9) negative entry in a forced-zero coordinate is ordinary IPM closure
+slop on the non-smooth ray; CLARABEL leaves 1.3e-09 in the same coordinate.
+
+* Verdict
+
+**PASS.** On an exponential-cone instance deliberately built so that Slater's
+condition fails, two variables are driven exactly to zero, the optimal cone
+blocks sit on the non-facially-exposed ray $\{(x,0,z)\}$, and the dual optimal
+face is an unbounded ray, pounce returns =status=optimal= and reproduces the
+closed-form optimum $\log 2$ to 1.8e-07 relative in 3.4 ms, with equality
+residuals at 1e-09/1e-10 and the forced-zero coordinates at 1e-09. It agrees
+with both ECOS and CLARABEL (which agree with each other to 2.7e-08 first) and
+is markedly *more* accurate and 22x faster than SCS, which returns
+=optimal_inaccurate= here. The only imperfection — 3.4e-06 in $x$ — is fully
+accounted for by the objective's second-order flatness along the single free
+direction, whose bound at the achieved objective accuracy is 3.0e-04. No
+finding.

@@ -1,0 +1,137 @@
+#+TITLE: Adversary Run: Dual-degenerate LP with a non-unique optimal face
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: dual degeneracy (objective parallel to a facet) + primal degeneracy (duplicated row)
+:SOURCE: Bertsimas & Tsitsiklis, /Introduction to Linear Optimization/ (1997), Ch. 3.2 (degeneracy) and Ch. 4.5 / Thm 4.6 (multiplicity of optimal dual solutions <-> primal degeneracy); Chvatal, /Linear Programming/ (1983) Ch. 3. Instance constructed here so the exact rational optimal face is closed-form.
+:KNOWN_OPTIMAL: -12 (exact)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 4 inequalities + 2 lower bounds
+:END:
+
+\begin{align*}
+\min_{x\in\mathbb{R}^2}\quad & -3x_1 - 2x_2 \\
+\text{s.t.}\quad r_1:\; & 3x_1 + 2x_2 \le 12 \quad\text{(objective is \emph{parallel} to this facet)}\\
+r_2:\; & 6x_1 + 4x_2 \le 24 \quad\text{(exact duplicate of } r_1\times 2)\\
+r_3:\; & x_1 + x_2 \le 5 \\
+r_4:\; & x_1 \le 3 \\
+& x_1, x_2 \ge 0
+\end{align*}
+
+** Degeneracy structure (why this instance)
+- *Dual degeneracy*: $c = -(3,2)$ is parallel to the normal of $r_1$, so the
+  optimum is not a point but the edge
+  $\mathcal{F} = \{(x_1,(12-3x_1)/2) : 2 \le x_1 \le 3\} = \mathrm{conv}\{(2,3),\,(3,\tfrac32)\}$,
+  with $c^\top x = -12$ everywhere on $\mathcal{F}$.
+- *Primal degeneracy*: at the vertex $(2,3)$ three constraints ($r_1,r_2,r_3$)
+  are active in $\mathbb{R}^2$. Hence the *dual* optimum is also non-unique:
+  because $r_2 = 2r_1$, every $(z_1,z_2)\ge 0$ with $z_1 + 2z_2 = 1$ and
+  $z_3=z_4=z_{lb}=0$ is an optimal dual, all with dual value $-h^\top z = -12$.
+
+Deliberately distinct from the already-logged =Degenerate transportation LP=
+(2026-06-09), which is a primal-degenerate *equality* problem with a *unique*
+optimum. Here the primal optimum is a face and the dual is a ray of solutions.
+
+* Grading protocol
+Because $x^\star$ is non-unique by construction, =x= equality is *not* graded.
+Graded instead:
+1. *(a)* objective vs the exact rational optimum and vs both numeric oracles;
+2. *(b)* feasibility of the returned $x$;
+3. *(c)* $x$ genuinely lies *on the optimal face* ($3x_1+2x_2=12$ and the
+   point projects inside the segment $\mathrm{conv}\{(2,3),(3,\frac32)\}$);
+4. *(d)* *dual validity*: dual feasibility $z\ge 0$, stationarity
+   $c + G^\top z - z_{lb} + z_{ub} = 0$, complementary slackness
+   $z_i(h_i-(Gx)_i)=0$, $z_{lb,j}(x_j-l_j)=0$, and zero duality gap
+   $-h^\top z + l^\top z_{lb} = c^\top x$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                    | Status  |       Objective |  Rel Err | Iters | Wall Time |
+|---------------------------+---------+-----------------+----------+-------+-----------|
+| pounce =solve_qp(P=None)= | optimal | -11.99999999732 | 2.23e-10 |     8 |  0.0017 s |
+| exact rational (Fraction) | exact   |             -12 |        0 |   n/a |    <0.01s |
+| scipy linprog (HiGHS)     | 0       | -12.00000000000 |        0 |   n/a |  0.0047 s |
+| cvxpy CLARABEL            | optimal | -11.99999999993 | 2.17e-10 |   n/a |  0.0079 s |
+
+Known optimal: *-12* (exact).
+
+Exact vertex enumeration over =Fraction= arithmetic recovered the full feasible
+vertex set $\{(2,3),(3,\frac32),(0,5),(3,0),(0,0)\}$ and confirmed *two*
+optimal vertices $(2,3)$ and $(3,\frac32)$ — i.e. a 1-dimensional optimal face,
+exactly as designed.
+
+The three solvers return *three different points*, all optimal — the signature
+of dual degeneracy:
+- scipy/HiGHS returns the *vertex* $(3, 1.5)$ (simplex terminates at a basis);
+- pounce returns the interior point $(2.6017419, 2.0973872)$, i.e. face
+  parameter $t = 0.6017$ along the segment;
+- cvxpy/CLARABEL returns $(2.5557884, 2.1663174)$, $t \approx 0.556$.
+
+Both interior-point codes land in the *relative interior* of the optimal face,
+as IPM theory predicts (convergence to the analytic center of the optimal
+face). This is correct behaviour, not disagreement.
+
+** Grading outcome
+| Check                     | Measure                                     |    Value | Result   |
+|---------------------------+---------------------------------------------+----------+----------|
+| (a) objective             | rel err vs exact / scipy / cvxpy            | 2.2e-10 / 2.2e-10 / 2.2e-10 | PASS |
+| (b) feasibility           | $\max(Gx-h)$                                | -2.7e-09 | PASS     |
+| (b) feasibility           | $\max(l-x)$                                 | -2.10e+00 | PASS    |
+| (c) on optimal face       | $\lvert 3x_1+2x_2-12\rvert$                 |  2.7e-09 | PASS     |
+| (c) on optimal face       | distance to segment; $t$-parameter          | 7.4e-10; t=0.6017 | PASS |
+| (d) stationarity          | $\lVert c+G^\top z-z_{lb}+z_{ub}\rVert_\infty$ |  1.4e-09 | PASS  |
+| (d) dual feasibility      | $\min(z, z_{lb})$                           | +6.6e-11 | PASS     |
+| (d) complementary slack   | $\max\lvert z\odot s\rvert$                 |  1.6e-09 | PASS     |
+| (d) strong duality        | $\lvert -h^\top z - c^\top x\rvert$         |  9.0e-09 | PASS     |
+
+* Cross-check / Verification
+
+*Objective.* Three independent oracles agree on $-12$: exact rational vertex
+enumeration (zero floating point), HiGHS simplex (exactly $-12$), and CLARABEL.
+pounce is within $2.2\times10^{-10}$ relative of all of them.
+
+*Optimal face membership.* The returned $x$ satisfies the face equation
+$3x_1+2x_2=12$ to $2.7\times10^{-9}$ and its projection parameter along
+$\mathrm{conv}\{(2,3),(3,\frac32)\}$ is $t=0.6017 \in (0,1)$, with distance to
+the segment $7.4\times10^{-10}$. So pounce did not merely hit the right
+objective value at some infeasible or off-face point — the point is genuinely
+in the relative interior of the true optimal edge.
+
+*Dual validity (the sharp test).* pounce returned
+$z = (0.387052655,\ 0.306473673,\ 8.80\times10^{-10},\ 5.46\times10^{-10})$,
+$z_{lb} = (6.6\times10^{-11},\ 1.1\times10^{-10})$.
+This is *not* an arbitrary vector: the theoretical optimal dual set here is
+$\{z : z_1 + 2z_2 = 1,\ z \ge 0,\ z_3 = z_4 = 0\}$, and the returned dual has
+$\lvert z_1 + 2z_2 - 1\rvert = 2.6\times10^{-11}$ with $z_3, z_4$ at
+$\mathcal{O}(10^{-10})$. pounce split the multiplier for the duplicated row
+pair $(r_1, r_2)$ as $0.387 + 2(0.306)$ — an interior member of the non-unique
+dual family, again the IPM's analytic-center behaviour. All four KKT conditions
+(dual feasibility, stationarity, complementary slackness, zero gap) hold at
+$\le 10^{-8}$.
+
+Notably, the redundant duplicate row $r_2$ — which makes $G$ rank-deficient in
+the active set at $(2,3)$ and is exactly the structure that breaks LICQ /
+uniqueness of multipliers — did *not* destabilise the multiplier estimates:
+both $z_1$ and $z_2$ came back finite, positive, and summing correctly, rather
+than blowing up or one absorbing the whole weight with the other going
+negative. 8 iterations, 1.7 ms.
+
+* Verdict
+
+*PASS.* On an LP built to have a genuinely 1-dimensional optimal face (dual
+degeneracy) *and* a non-unique dual (primal degeneracy via a duplicated row),
+pounce returns the exact optimal value to $2.2\times10^{-10}$ relative, a
+strictly feasible point in the relative interior of the true optimal edge, and
+a dual that is a valid member of the non-unique optimal dual family — verified
+against all four KKT conditions independently of pounce's own =kkt_error=. The
+disagreement in $x$ between pounce, HiGHS, and CLARABEL is expected and correct
+(each converges to a different point of the same optimal face) and is precisely
+why the grading here is on objective + face membership + dual validity rather
+than on $x$. No degeneracy-induced failure mode surfaced: no multiplier
+blow-up on the rank-deficient active set, no false vertex, no violated
+complementary slackness.

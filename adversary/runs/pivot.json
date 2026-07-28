@@ -1,0 +1,82 @@
+{
+  "bratu": {
+    "unset": {
+      "wall": 0.0693752079969272,
+      "status": "SolveSucceeded",
+      "obj": 0.0,
+      "iters": 2
+    },
+    "yes": {
+      "wall": 0.07451975008007139,
+      "status": "SolveSucceeded",
+      "obj": 0.0,
+      "iters": 2
+    },
+    "no": {
+      "wall": 0.06415070802904665,
+      "status": "SolveSucceeded",
+      "obj": 0.0,
+      "iters": 2
+    }
+  },
+  "camshape_6400": {
+    "unset": {
+      "wall": 2.2116415000054985,
+      "status": "SolveSucceeded",
+      "obj": -4.448377697477901,
+      "iters": 87
+    },
+    "yes": {
+      "wall": 2.253191249910742,
+      "status": "SolveSucceeded",
+      "obj": -4.448377697561479,
+      "iters": 87
+    },
+    "no": {
+      "wall": 2.1535179999191314,
+      "status": "SolveSucceeded",
+      "obj": -4.448377697477901,
+      "iters": 87
+    }
+  },
+  "cont5_2_4_l": {
+    "unset": {
+      "wall": 11.637237042072229,
+      "status": "SolveSucceeded",
+      "obj": 0.06637130830389394,
+      "iters": 14
+    },
+    "yes": {
+      "wall": 11.468561582965776,
+      "status": "SolveSucceeded",
+      "obj": 0.06637130830389394,
+      "iters": 14
+    },
+    "no": {
+      "wall": 9.574952999944799,
+      "status": "SolveSucceeded",
+      "obj": 0.06637130830389394,
+      "iters": 14
+    }
+  },
+  "clnlbeam": {
+    "unset": {
+      "wall": 36.2309289999539,
+      "status": "SolveSucceeded",
+      "obj": 344.8761314083454,
+      "iters": 483
+    },
+    "yes": {
+      "wall": 53.78414512507152,
+      "status": "SolveSucceeded",
+      "obj": 344.8761314092571,
+      "iters": 697
+    },
+    "no": {
+      "wall": 38.6042529999977,
+      "status": "SolveSucceeded",
+      "obj": 344.8761314083454,
+      "iters": 483
+    }
+  }
+}

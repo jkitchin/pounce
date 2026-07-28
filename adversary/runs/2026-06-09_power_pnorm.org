@@ -1,0 +1,50 @@
+#+TITLE: Power-cone adversary: p-norm minimization (p=3) over a linear equality
+
+* Problem properties
+- FAMILY: power
+- NAME: power-pnorm
+- CLASS: p-norm minimization subject to a single linear equality
+- SOURCE: Holder-inequality closed form. For min ||x||_p s.t. a^T x = b
+  (single equality), the optimum is |b| / ||a||_q with 1/p + 1/q = 1.
+- KNOWN_OPTIMAL: |b| / ||a||_{3/2} = 1.0018223992 with p=3, q=3/2,
+  a = [1, 2, -1, 0.5], b = 3.  (Confirmed independently by scipy SLSQP:
+  1.0018223992.)
+- N_VARIABLES: 9   (x in R^4, z in R^4, t)
+- CONE LAYOUT: 4 x ("pow", 1/3), one per coordinate; slack triple
+  (s0,s1,s2) = (x_i, z_i, t).  No nonneg block; two linear equalities.
+
+* Formulation
+Minimize ||x||_p with p=3 by the standard power-cone lifting:
+  ||x||_p <= t  <=>  exists z_i >= 0, sum_i z_i = t, |x_i|^p <= z_i t^{p-1}
+              <=>  |x_i| <= z_i^{1/p} t^{1-1/p}.
+pounce power cone is {(s0,s1,s2): |s0| <= s1^a s2^{1-a}, s1,s2>=0}.
+Mapping s0=x_i, s1=z_i, s2=t with a = 1/p = 1/3 gives
+  |x_i| <= z_i^{1/3} t^{2/3} = z_i^{1/p} t^{1-1/p}.  Correct orientation.
+
+Objective: minimize t.
+Equalities: a^T x = b ;  sum_i z_i - t = 0.
+
+* Results
+| solver           | status  |        objective | time (s) |
+|------------------+---------+------------------+----------|
+| pounce           | optimal | 1.0018223982e+00 |   0.0094 |
+| cvxpy/SCS        | optimal | 1.0018224005e+00 |   0.0039 |
+| cvxpy/CLARABEL   | optimal | 1.0018224030e+00 |   0.0023 |
+| known (Holder)   | --      | 1.0018223992e+00 |       -- |
+
+Feasibility of pounce solution: a^T x - b = 6.8e-09; ||x||_3 = 1.0018223970.
+
+* Cross-check
+- rel_err vs known closed form: 9.98e-10
+- rel_err vs cvxpy/SCS:        2.31e-09
+- rel_err vs cvxpy/CLARABEL:   4.82e-09
+Both oracle solvers and the analytic Holder value agree with pounce to ~1e-9.
+The recovered x also matches the analytic minimizer componentwise.
+
+* Verdict
+VERDICT: PASS
+Reasoning: pounce reaches optimal status, matches the closed-form Holder
+optimum to 1e-9, agrees with both independent cvxpy solvers (SCS and
+CLARABEL), and the returned point is feasible (equality residual ~7e-9).
+The (x_i, z_i, t) -> a=1/p power-cone orientation is the trap here and it
+is handled correctly. No discrepancy.

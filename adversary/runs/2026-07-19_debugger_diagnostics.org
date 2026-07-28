@@ -1,0 +1,94 @@
+#+TITLE: Adversary Run: DEBUGGER & Diagnostics Surfaces (internal consistency)
+#+DATE: 2026-07-19
+
+Note: this run is NOT a numerical solver family and is deliberately NOT
+recorded in =adversary/log.org= (that index tracks solver-family problems
+with numerical oracles). There is no external oracle here; the test is
+internal consistency and contract adherence.
+
+* Method
+
+Ground truth = one =pounce --problem rosenbrock= solve captured at
+=--json-detail full= (21 iters, SolveSucceeded), plus the =qcqp_ball.nl=
+CLI fixture. Every debugger-reported quantity was compared against the
+same quantity in the solve report and against CLI stdout.
+
+Artifacts: =adversary/runs/2026-07-19_debugger/= (rosen.json, qcqp_ball.nl,
+good.sol, bad.sol).
+
+* Surfaces probed
+
+** Live debugger — CONSISTENT
+- =debug_start= parks at iter 0 with objective 24.199999999999996,
+  inf_du 100 — matches report iter 0 exactly.
+- =step= advanced *exactly* one iteration: iter 1, objective
+  4.731884325266608 == report iter 1.
+- =break if objective < 1.0= then =continue= stopped at iter 8
+  (objective 0.9224115819228836), the *first* iterate satisfying the
+  condition, with =reason="objective<1.0"=. Correct.
+- A second =continue= re-fired at iter 9 (0.5974886167899004). This is
+  correct persistent-conditional-breakpoint semantics, not a defect.
+- All streamed =progress= events matched =convergence_trace= bit-for-bit.
+- Terminal checkpoint: iter 21, objective 3.743989709996202e-21,
+  inf_du 1.7314226736190083e-10, status "Success" — matches the report
+  summary (=final_objective=, =final_kkt_error=, =iteration_count=)
+  exactly.
+
+** Solve reports — CONSISTENT
+=convergence_trace= reproduces CLI stdout for all 22 rows.
+=restoration_windows= = [] (no 'r' chars in alpha_primal_char — correct).
+=linear_solver_summary= last_inertia (2,0,0) = (n,m,0) for an
+unconstrained 2-var problem — correct.
+
+** verify_solution — CORRECT (trust anchor holds)
+- =good.sol= -> VERIFIED, max violation 2.2e-14.
+- =bad.sol= (x moved to (-10,-10)) -> REJECTED, exit 20, max constraint
+  violation 196 at c[0]. Crucially, bad.sol still carried
+  =objno 0 0= (claimed optimal) and was rejected anyway: the tool
+  re-derives feasibility rather than trusting the .sol status line.
+
+** Input validation — mostly CORRECT
+Cleanly rejected: unknown session id, closed-session reuse, iterate index
+999, non-JSON path to load_solve_report, missing .nl, builtin+nl_file
+together, unknown builtin, unknown explain term, unknown breakpoint
+metric, malformed breakpoint condition, labels/paths length mismatch.
+
+* FINDING — silent acceptance: find_stalls min_window <= 1
+
+=find_stalls(min_window=0)= and =(min_window=1)= are silently accepted and
+return 20 "stall windows" on a solve that converged monotonically with
+*zero* stalls (default min_window=5 correctly returns []).
+
+18 of the 20 windows are degenerate: =start_iter == end_iter= with
+=delta_log10 = 0.0=. A single iterate cannot stall — a stall is defined
+over consecutive iterations, so the minimum meaningful window is 2.
+
+min_window=0 and min_window=1 return *identical* output, so 0 is being
+silently coerced to 1 rather than rejected.
+
+Impact: an agent that passes min_window=0/1 gets a plausible-looking,
+well-formed answer declaring every iteration of a healthy solve a stall.
+Same defect class as issue #213 (silent acceptance of an invalid option).
+
+Suggested fix: reject min_window < 2 with a clear error, as the
+neighbouring tools already do for their bad arguments.
+
+* Minor observation (not filed)
+
+In the REJECTED bad.sol receipt, =receipt.optimality.optimal= is =true=
+on a point with constraint violation 196 (stationarity residual happened
+to be 0). The top-level =verified=false= / =verdict="REJECTED"= are
+correct and the receipt carries the note "Feasibility is the rigorous
+gate", so the bottom line is right — but a consumer reading the nested
+=optimality.optimal= field alone would be misled.
+
+Cosmetic: =find_stalls(min_window=-5)= errors with the raw PyO3 message
+"can't convert negative int to unsigned" — a correct rejection, but the
+internal leak is less helpful than the other tools' messages.
+
+* Verdict
+
+Debugger stepping, breakpoints, terminal state, and the post-mortem
+report tools are internally consistent — no disagreement found between
+any two surfaces. One genuine silent-acceptance defect in
+=find_stalls(min_window<=1)=. No crashes, hangs, or panics.

@@ -1,0 +1,93 @@
+#+TITLE: qp-active-set adversary cross-check: HS35 (Beale) convex QP
+#+DATE: 2026-06-15
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: small convex QP (active-set slot)
+:SOURCE: Hock & Schittkowski (1981), Test Examples for Nonlinear Programming Codes, LNEMS 187, Problem 35 (Beale).
+:KNOWN_OPTIMAL: 0.1111111111111111 (= 1/9)
+:X_STAR: (4/3, 7/9, 4/9)
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 1 general linear inequality + 3 nonnegativity bounds
+:ACTIVE_SET_AT_OPTIMUM: { x1 + x2 + 2 x3 = 3 } only; all 3 bounds inactive
+:END:
+
+Chosen to be DIFFERENT from the prior qp-active-set runs (avoided: box-bounds QP,
+equality+inequality QP, the generic Nocedal--Wright 16.4 CLI run). Here a single
+GENERAL linear inequality binds while every nonnegativity bound stays strictly
+interior, so the optimal active set is nontrivial for an active-set solver.
+
+* Formulation
+#+begin_example
+  min  f(x) = 9 - 8 x1 - 6 x2 - 4 x3
+              + 2 x1^2 + 2 x2^2 + x3^2 + 2 x1 x2 + 2 x1 x3
+  s.t. x1 + x2 + 2 x3 <= 3
+       x1, x2, x3 >= 0
+#+end_example
+Standard QP form min 1/2 x'P x + c'x + r with
+  P = [[4,2,2],[2,4,0],[2,0,2]] (SPD),  c = (-8,-6,-4),  r = 9.
+
+Published optimum (Hock--Schittkowski P35): x* = (4/3, 7/9, 4/9), f* = 1/9.
+At x*: x1 + x2 + 2 x3 = 4/3 + 7/9 + 8/9 = 3 -> the general inequality is ACTIVE;
+x* > 0 componentwise -> all three bounds inactive. Active set = { the inequality }.
+
+* How the active-set path was invoked (and CONFIRMED exercised)
+CLI only, identical mechanism to the proven prior runs. QP emitted as a pyomo
+=.nl= and run:
+#+begin_example
+  pounce model.nl out.sol solver_selection=qp-active-set --json-output out.json
+#+end_example
+=dispatch.rs= maps ="qp-active-set"= -> =SolverChoice::QpActiveSet=; =main.rs=
+realizes it via the active-set SQP engine (=algorithm=active-set-sqp= ->
+=optimize_sqp_tnlp=, step QPs solved in =pounce-qp=).
+
+The JSON solve-report carries no explicit "algorithm" string, so the path was
+confirmed by EXECUTION SIGNATURE instead: the same =.nl= forced through each
+selection reports
+| selection             | iteration_count |
+|-----------------------+-----------------|
+| qp-active-set (SUT)   |               1 |
+| qp-ipm                |               9 |
+| (default, no flag)    |               9 |
+The single-iteration count is the active-set engine identifying the binding set
+and solving the equality-constrained KKT system directly; it differs from the
+9-iteration interior-point count, so qp-active-set did NOT silently fall through
+to the IPM. Confirmation flag in the script: as_path_confirmed = True.
+
+IPM cross-check (internal oracle): =pounce.solve_qp= (pounce-convex IPM), with
+G x <= h, G = [1,1,2], h = 3, lb = 0. External oracle: cvxpy / CLARABEL.
+
+* Results
+| solver                          | status         | objective          |                     x | iters | time (s) |
+|---------------------------------+----------------+--------------------+-----------------------+-------+----------|
+| pounce active-set (qp-as, CLI)  | SolveSucceeded | 0.1111111111111107 | (1.333333,0.777778,0.444444) |     1 |   0.0084 |
+| pounce convex IPM (solve_qp)    | optimal        | 0.1111111117432    | (1.333333,0.777778,0.444444) |     9 |   0.0010 |
+| cvxpy / CLARABEL                | optimal        | 0.1111111182860    | (1.333333,0.777778,0.444444) |     — |   0.0046 |
+
+Reported active-set point: x1 + x2 + 2 x3 = 3.0000000000 -> the predicted
+inequality is binding; bounds inactive, as expected.
+
+* Cross-check (relative errors)
+| comparison              | rel err  |
+|-------------------------+----------|
+| active-set vs known     | 3.89e-16 |
+| active-set vs IPM       | 6.32e-10 |
+| active-set vs cvxpy     | 7.18e-09 |
+| IPM vs cvxpy            | 6.54e-09 |
+| x_inf_err vs X_STAR     | 1.11e-16 |
+
+All three solvers agree to <= 8e-9 relative; the active-set primal matches the
+published HS35 optimum (f* = 1/9, x* = (4/3,7/9,4/9)) to ~1e-16. The IPM-vs-
+active-set agreement is 6.3e-10. The correct active set (the single general
+inequality binding, all bounds slack) is recovered.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: the active-set path solves HS35 to the published global optimum and
+agrees with BOTH the convex IPM (=solve_qp=) and cvxpy/CLARABEL to < 1e-8
+relative; the optimal active set is correctly identified. The active-set path was
+positively confirmed exercised (1 iteration vs 9 for qp-ipm/default on the same
+=.nl=), so this is not a silent IPM fallthrough. No formulation, reference, or
+tolerance issue.

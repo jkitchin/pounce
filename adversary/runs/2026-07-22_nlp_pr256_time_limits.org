@@ -1,0 +1,378 @@
+#+TITLE: Adversarial probe of PR #256 (proactive factorization time guard) and PR #255 (feral_static_pivoting)
+#+DATE: 2026-07-22
+#+AUTHOR: /adversary
+
+* Scope
+
+Target commits (both already merged into ~main~ at ~3c9145c~):
+
+- ~c8a88c8~ "Proactively bound single-factorization wall-time overshoot (#254)"
+  -- adds ~PdFullSpaceSolver::predict_factor_overshoot~ /
+  ~factor_overshoot_predicted~, which refuses to *start* a KKT factorization
+  once one has been observed to cost >= ~FACTOR_OVERSHOOT_BUDGET_FRACTION~
+  (0.5) of the whole budget and the remaining budget can no longer cover it.
+- ~16524f8~ "Expose explicit feral_static_pivoting option (#254)" -- tri-state
+  ~feral_static_pivoting~ OptionsList option / ~POUNCE_FERAL_STATIC_PIVOTING~
+  env var, forwarded to ~feral::Solver::with_static_pivoting~.
+
+Predecessors read for context: ~eab27b2~ (#245, deadline between KKT
+factorizations), ~5fc1b6d~ (#246, init/restoration-entry window),
+~f02f64c~ (#242, honor max_wall_time at all).
+
+No pounce source was modified. Scripts live in this directory; a read-only
+git worktree of the parent commit was built under the session scratchpad
+for the A/B arm and removed afterwards.
+
+* Environment / caveats
+
+- Platform: darwin 25.5.0, aarch64 (Apple silicon), pounce 0.9.0, FERAL backend.
+- CLI: ~target/release/pounce~ rebuilt at HEAD ~3c9145c~.
+- Oracle: Ipopt 3.14.19 (Darwin arm64), ASL 20241202, at ~/opt/homebrew/bin/ipopt~.
+- *Build-provenance caveat*: a *different* agent session was working in this
+  same checkout throughout. At 21:33:51 it left ~crates/pounce-algorithm/src/ipopt_alg.rs~
+  dirty (+135 lines, a pounce#250 dual-guard follow-up) and at 21:34:23 it
+  replaced ~target/release/pounce~ with a binary built from that dirty tree.
+  Everything through the Hypothesis E guard probe (21:33:59) ran on the clean
+  ~3c9145c~ build; the Hypothesis D env-var table and the AMPL-band /
+  ~max_cpu_time~ checks were re-run afterwards so each table is internally
+  consistent, and *both* runs were compared: objectives and statuses are
+  identical, wall times differ only by load. The intruding change is gated on
+  ~dual_guard_fired~, which none of these solves trip. Conclusions are
+  unaffected, but the mixed provenance is recorded rather than assumed away.
+- *Timing caveat*: an unrelated pounce corpus sweep (~pounce <prob> /tmp/corpus.sol
+  max_cpu_time=60~) belonging to another session ran concurrently for most of
+  this session, at 100-700% CPU. Absolute wall times are therefore inflated
+  relative to an idle machine. All *comparative* claims (A/B arms,
+  option-on/off) were run interleaved so both arms absorb the same load, and
+  overshoot is reported as an *absolute* residual as well as a ratio.
+
+* Suite and baselines
+
+Problems were drawn from ~benchmarks/~ so the .nl fixtures are canonical.
+
+| problem      | path                       |   n_var | iters | n_factors | pounce wall (s) | avg factor (s) | ipopt wall (s) |
+|--------------+----------------------------+---------+-------+-----------+-----------------+----------------+----------------|
+| bratu        | large_scale/nl/bratu.nl    |    9998 |     2 |         2 |           0.057 |         0.0171 |          0.056 |
+| ex1_160      | mittelmann/nl/ex1_160.nl   |   50562 |    10 |        11 |           1.331 |         0.1210 |              - |
+| camshape_6400| mittelmann/nl/camshape_6400|    6400 |    87 |        88 |           1.720 |         0.0195 |              - |
+| cont5_2_4_l  | mittelmann/nl/cont5_2_4_l  |   90600 |    14 |        15 |           5.756 |         0.3837 |              - |
+| corkscrw     | mittelmann/nl/corkscrw.nl  |   44997 |   224 |       216 |          15.628 |         0.0724 |              - |
+| elec_400     | mittelmann/nl/elec_400.nl  |    1200 |   126 |       305 |          51.743 |         0.1696 |              - |
+| clnlbeam     | mittelmann/nl/clnlbeam.nl  |   29999 |   483 |         - |          37.009 |        ~0.0800 |         23.113 |
+| dirichlet120 | mittelmann/nl/dirichlet120 |   53881 |    56 |       119 |          82.928 |         0.6969 |              - |
+
+Oracle agreement (Ipopt vs pounce, unlimited budget):
+
+| problem   | pounce objective | ipopt objective | agree to |
+|-----------+------------------+-----------------+----------|
+| bratu     |                0 |               0 | exact    |
+| clnlbeam  |      344.8761314 |     344.8761314 | 10 s.f.  |
+| poisson*  |     0.0994700232 |    0.0994700232 | 10 s.f.  |
+| optcontrol*|     0.1173428132 |     0.1173428134 |  9 s.f.  |
+| sparseqp* |     -12499.81699 |    -12499.81699 | 10 s.f.  |
+
+*NOTE / incidental finding*: the three ~benchmarks/large_scale/~ problems
+marked ~*~ (~sparseqp~, ~poisson~, ~optcontrol~) are routed by the CLI to the
+*convex QP path*, not the NLP interior-point path: their solve reports have
+~num_obj_evals = 0~ and *no* ~linear_solver~ block. They therefore never
+exercise ~PdFullSpaceSolver~ and are useless as regression fixtures for
+this PR. Only ~dirichlet120~ (0.70 s/factor) and ~cont5_2_4_l~ (0.38
+s/factor) sit in the "one factorization is a large slice of the budget"
+regime that #254 targets.
+
+* Hypothesis A -- PREMATURE TERMINATION :: PASS
+
+Claim under test: the more aggressive deadline checking aborts a solve that
+would have finished, or reports a time-limit status with budget to spare.
+
+~clnlbeam~, natural solve time 37.0 s:
+
+| max_wall_time | wall (s) | ratio |                  status | objective   | iters |
+|---------------+----------+-------+-------------------------+-------------+-------|
+|           45  |   37.543 |  0.83 | *SolveSucceeded*        | 344.8761314 |   483 |
+|           60  |   36.994 |  0.62 | *SolveSucceeded*        | 344.8761314 |   483 |
+
+Both limits above the natural time complete normally, with the *full* 483
+iterations and the exact Ipopt objective (344.8761314). Not one iteration
+was lost to the guard. ~bratu~ (0.057 s) likewise completes at every
+setting tested. Across the whole session, *no* run returned a time-limit
+status while under its budget.
+
+The predictive guard's ~FACTOR_OVERSHOOT_BUDGET_FRACTION = 0.5~ dormancy
+gate does what its comment claims: on every problem whose factorizations
+are a small slice of the budget it never engages.
+
+Verdict: *PASS*.
+
+* Hypothesis B -- TIME LIMIT RESPECTED :: PASS (overshoot quantified)
+
+** clnlbeam (37.0 s natural, ~0.08 s per factorization)
+
+| max_wall_time | wall (s) | overshoot (s) | ratio |                  status | objective   | iters |
+|---------------+----------+---------------+-------+-------------------------+-------------+-------|
+|           0.5 |    0.701 |         0.201 |  1.40 | MaximumWallTimeExceeded | 350.2464047 |     4 |
+|           1   |    1.178 |         0.178 |  1.18 | MaximumWallTimeExceeded | 350.0020146 |     7 |
+|           2   |    2.165 |         0.165 |  1.08 | MaximumWallTimeExceeded | 348.2406288 |    13 |
+|           5   |    5.160 |         0.160 |  1.03 | MaximumWallTimeExceeded | 347.1074071 |    32 |
+|          10   |   10.177 |         0.177 |  1.02 | MaximumWallTimeExceeded | 345.0906874 |    90 |
+|          20   |   20.159 |         0.159 |  1.01 | MaximumWallTimeExceeded | 344.9680488 |   229 |
+|          30   |   30.167 |         0.167 |  1.01 | MaximumWallTimeExceeded | 344.8934207 |   382 |
+|          45   |   37.543 |         n/a   |  0.83 | SolveSucceeded          | 344.8761314 |   483 |
+
+Absolute overshoot is *flat at 0.16-0.20 s* across a 60x range of limits.
+That residual is process startup + .nl parse, which happens before the
+~Deadline~ is constructed -- i.e. it is not solver overshoot at all.
+
+** dirichlet120 (82.9 s natural, 53881 vars, ~0.70 s per factorization)
+
+This is the regime #254 is about.
+
+| max_wall_time | wall (s) | overshoot (s) | ratio |                  status | objective    | iters |
+|---------------+----------+---------------+-------+-------------------------+--------------+-------|
+|           0.5 |    2.295 |         1.795 |  4.59 | MaximumWallTimeExceeded | 0.2631332710 |     0 |
+|           0.8 |    2.359 |         1.559 |  2.95 | MaximumWallTimeExceeded | 0.2631332710 |     0 |
+|           1   |    2.768 |         1.768 |  2.77 | MaximumWallTimeExceeded | 0.2631332710 |     0 |
+|           1.2 |    2.707 |         1.507 |  2.26 | MaximumWallTimeExceeded | 0.2631332710 |     0 |
+|           1.5 |    3.284 |         1.784 |  2.19 | MaximumWallTimeExceeded | 0.2790847172 |     1 |
+|           2   |    3.576 |         1.576 |  1.79 | MaximumWallTimeExceeded | 0.2790847172 |     1 |
+|           3   |    4.883 |         1.883 |  1.63 | MaximumWallTimeExceeded | 0.2790847172 |     1 |
+|           5   |    6.732 |         1.732 |  1.35 | MaximumWallTimeExceeded | 0.8829051732 |     4 |
+|          10   |   11.786 |         1.786 |  1.18 | MaximumWallTimeExceeded | 0.1800888777 |     7 |
+|          20   |   21.613 |         1.613 |  1.08 | MaximumWallTimeExceeded | 0.1025042264 |    14 |
+|          40   |   41.592 |         1.592 |  1.04 | MaximumWallTimeExceeded | 0.0406445526 |    28 |
+|         100   |  101.639 |         1.639 |  1.02 | MaximumWallTimeExceeded | 0.0350417070 |    51 |
+
+Again the *absolute* overshoot is flat: 1.51-1.88 s over a 200x range of
+limits. Decomposed: ~0.4 s process startup + .nl parse of a 53881-variable
+model (before the ~Deadline~ exists), plus ~1.0-1.3 s for the first,
+uninterruptible symbolic-analysis + factorization.
+
+The *worst ratio measured is 4.59x* (limit 0.5 s), but the *worst absolute
+overshoot measured is 1.88 s*. The ratio only blows up when the requested
+budget is smaller than a single factorization -- precisely the residual
+gap ~dev-notes/feral-factor-interrupt.md~ documents as still open and
+requiring a feral-side cancellation hook.
+
+** max_cpu_time
+
+(two independent runs, on the two binaries described in the provenance
+caveat above -- statuses and bands identical, objectives differ only by
+how far the iteration got in the wall time the load allowed)
+
+| max_cpu_time | wall (s) |                 status | solve_result_num | objective (run 1 / run 2) |
+|--------------+----------+------------------------+------------------+---------------------------|
+|            2 |  1.818 / 1.664 | MaximumCpuTimeExceeded |        400 | 348.3858409 / 348.3858409 |
+|            5 |  3.878 / 3.808 | MaximumCpuTimeExceeded |        400 | 347.7955476 / 347.9334545 |
+|           20 | 15.248 / 14.839 | MaximumCpuTimeExceeded |       400 | 344.9998902 / 344.9985241 |
+
+Honored, and reported as CPU rather than wall. Wall < CPU limit because
+FERAL is multithreaded, so CPU accrues faster than wall -- correct, not a bug.
+
+Verdict: *PASS*. The limit is genuinely enforced; overshoot is bounded by a
+small additive constant, not a multiplicative factor.
+
+* Hypothesis C -- STATUS CORRECTNESS ON TIMEOUT :: PASS
+
+Across *every* over-budget run in this session (40+ runs spanning 4
+problems, 12 wall limits, 3 CPU limits, 2 builds):
+
+- status was always ~MaximumWallTimeExceeded~ or ~MaximumCpuTimeExceeded~;
+- ~solve_result_num~ was always *400* (AMPL "limit" band) -- never 200
+  (infeasible), 300 (unbounded), or 500 (failure);
+- ~restoration_calls~ was *0* in every instrumented run;
+- the ~.sol~ file was written and carries ~POUNCE 0.9.0: MaximumWallTimeExceeded~;
+- the returned point is sane: 100004 numeric entries parsed from a timed-out
+  ~clnlbeam~ ~.sol~, *0 non-finite*, ~max|x| = 59999~ (a bound value, not a blow-up).
+
+Strongest evidence that the *best* point is returned, not a garbage trial
+iterate -- the clnlbeam objective decreases monotonically toward the true
+optimum as the budget grows:
+
+: 350.2464 -> 350.0020 -> 348.2406 -> 347.1074 -> 345.0907 -> 344.9680 -> 344.8934 -> 344.8761
+: (limits 0.5, 1, 2, 5, 10, 20, 30 s; last is the converged value = Ipopt's)
+
+** Latent risk (code-read; NOT reproduced empirically)
+
+~predict_factor_overshoot~ fires *while still under budget* -- that is its
+entire purpose. It aborts by returning ~false~ from ~solve_once~ /
+~compute_search_direction~. But the caller's abort handler in
+~crates/pounce-algorithm/src/ipopt_alg.rs:1370~ is:
+
+: if let Some(ret) = self.deadline_status() { return IterateOutcome::Terminate(ret); }
+: if !ok { ... return self.invoke_restoration_debugged(); /* or ErrorInStepComputation */ }
+
+~deadline_status()~ is ~Deadline::exceeded()~, which by construction returns
+~None~ at the moment the predictive guard fires. So a guard-triggered abort
+should fall through to the ~!ok~ branch and be treated as a *step-computation
+failure* -- routed into restoration, or, absent restoration, terminating as
+~ErrorInStepComputation~ (AMPL band *500*, "failure"). The same structure
+applies at ~ipopt_alg.rs:1618~, ~:1738~ and ~:2041~, all of which key off
+~deadline_status()~.
+
+I could not make this manifest. In every case where the guard demonstrably
+fired (see Hypothesis E), the reactive ~deadline_exceeded~ check had already
+tripped by the time control returned, so the correct 400 status was
+produced anyway. The narrow window that would expose it -- a factorization
+costing between ~50% and ~95% of the budget, so the guard arms *and* fires
+before the clock crosses -- was not reachable with the fixtures available
+here. Recording it as a latent correctness risk, not a demonstrated bug.
+
+Verdict: *PASS* (empirically clean; one latent code path flagged).
+
+* Hypothesis D -- feral_static_pivoting :: PASS
+
+** Is it actually plumbed, or silently ignored?
+
+*Plumbed.* ~camshape_6400~ gives a numerically *different* answer with static
+pivoting on, which is only possible if ~with_static_pivoting~ really reaches
+the factorization:
+
+| route                                    | objective          | iters | n_factors |
+|------------------------------------------+--------------------+-------+-----------|
+| unset                                    | -4.4483776974779   |    87 |        88 |
+| ~feral_static_pivoting yes~               | -4.44837769756148  |    87 |        88 |
+| ~feral_static_pivoting no~                | -4.4483776974779   |    87 |        88 |
+| ~POUNCE_FERAL_STATIC_PIVOTING=1~          | -4.44837769756148  |    87 |        88 |
+| ~POUNCE_FERAL_STATIC_PIVOTING=0~          | -4.4483776974779   |    87 |        88 |
+| ~POUNCE_FERAL_STATIC_PIVOTING=bogus~      | -4.4483776974779   |    87 |        88 |
+
+Relative difference on/off: *1.9e-11*. The tri-state discipline is exactly
+as documented: ~no~ / ~0~ / an unrecognised token all reproduce the unset
+default bit-for-bit; only an explicit affirmative changes the numeric path.
+
+** Is it answer-neutral?
+
+Yes, to at least 10 significant figures on every well-posed problem tested:
+
+| problem       | unset        | yes          | no           | status (all three) |
+|---------------+--------------+--------------+--------------+--------------------|
+| bratu         | 0            | 0            | 0            | SolveSucceeded     |
+| camshape_6400 | -4.448377697 | -4.448377698 | -4.448377697 | SolveSucceeded     |
+| cont5_2_4_l   | 0.0663713083 | 0.0663713083 | 0.0663713083 | SolveSucceeded     |
+| clnlbeam      | 344.8761314  | 344.8761314  | 344.8761314  | SolveSucceeded     |
+
+clnlbeam's 344.8761314 matches Ipopt exactly under all three settings.
+
+** Cost
+
+Static pivoting is *not* free on these problems -- it is a pessimization:
+
+| problem       | unset (s) | yes (s) | no (s) | yes vs unset |
+|---------------+-----------+---------+--------+--------------|
+| bratu         |     0.069 |   0.075 |  0.064 |        +9%   |
+| camshape_6400 |     2.212 |   2.253 |  2.154 |        +2%   |
+| cont5_2_4_l   |    11.637 |  11.469 |  9.575 |        -1%   |
+| clnlbeam      |    36.231 |  53.784 | 38.604 |       *+48%* |
+
+clnlbeam takes 48% longer with static pivoting on, for an identical answer.
+This vindicates the PR's design decision to keep the knob explicit, opt-in,
+default-off, and deliberately *not* coupled to ~max_wall_time~. None of these
+problems is in feral#8's delayed-pivot-cascade regime, so the intended
+speedup could not be reproduced here (no emfl050 fixture is available in
+this repo).
+
+Verdict: *PASS*.
+
+* Hypothesis E (added) -- does the #254 guard measurably reduce overshoot? :: SOLVER_LIMITATION
+
+The PR's stated purpose is bounding overshoot, so it was A/B'd against its
+own parent commit ~ba29b53~ (reactive checks from #245/#246 only, no
+predictive guard), built in a throwaway worktree and run *interleaved*,
+2 reps per limit, on ~dirichlet120~.
+
+| limit | rep |  HEAD wall | HEAD over | pre254 wall | pre254 over |
+|-------+-----+------------+-----------+-------------+-------------|
+|     1 |   0 |      2.683 |     1.683 |       2.651 |       1.651 |
+|     1 |   1 |      2.585 |     1.585 |       2.567 |       1.567 |
+|     2 |   0 |      3.451 |     1.451 |       3.457 |       1.457 |
+|     2 |   1 |      3.431 |     1.431 |       3.464 |       1.464 |
+|     3 |   0 |      4.717 |     1.717 |       4.648 |       1.648 |
+|     3 |   1 |      4.667 |     1.667 |       4.640 |       1.640 |
+|     5 |   0 |      6.347 |     1.347 |       6.427 |       1.427 |
+|     5 |   1 |      6.645 |     1.645 |       6.461 |       1.461 |
+|    10 |   0 |     11.563 |     1.563 |      11.876 |       1.876 |
+|    10 |   1 |     11.799 |     1.799 |      12.707 |       2.707 |
+
+Mean absolute overshoot: *HEAD 1.589 s, pre254 1.690 s* -- a 6% reduction,
+inside the +/-0.2 s run-to-run spread. Every single run in both arms
+returned ~MaximumWallTimeExceeded~. *No regression, and no measurable
+improvement.*
+
+The guard *does* fire -- a paired probe of the solver's own internal
+counters isolates one clean firing at ~max_wall_time=1.5~:
+
+| limit | build  | internal wall (s) | n_factors | iters | restoration_calls | status                  |
+|-------+--------+-------------------+-----------+-------+-------------------+-------------------------|
+|   1.5 | HEAD   |             1.714 |         2 |     0 |                 0 | MaximumWallTimeExceeded |
+|   1.5 | pre254 |             1.924 |         2 |     1 |                 0 | MaximumWallTimeExceeded |
+|   2   | HEAD   |             2.099 |         2 |     1 |                 0 | MaximumWallTimeExceeded |
+|   2   | pre254 |             2.111 |         2 |     1 |                 0 | MaximumWallTimeExceeded |
+|   3   | HEAD   |             3.415 |         4 |     2 |                 0 | MaximumWallTimeExceeded |
+|   3   | pre254 |             3.435 |         4 |     2 |                 0 | MaximumWallTimeExceeded |
+|   5   | HEAD   |             5.353 |         7 |     4 |                 0 | MaximumWallTimeExceeded |
+|   5   | pre254 |             5.602 |         7 |     3 |                 0 | MaximumWallTimeExceeded |
+
+At limit 1.5 HEAD stops at iteration 0 having spent 1.714 s internally,
+while pre254 pushes on to iteration 1 and 1.924 s -- the guard saved 0.21 s
+and one doomed step, with ~restoration_calls = 0~ (so the latent
+mis-routing of Hypothesis C did *not* occur). At the other limits the two
+builds are indistinguishable: the guard's arming condition
+(~max_factor_wall >= 0.5 * budget~) is simply not met once the budget
+exceeds ~2x a factorization.
+
+Interpretation: the change is *correct and harmless*, but on every problem
+available in this repository the overshoot is dominated by the *first*
+factorization -- which the guard cannot predict, because it has nothing to
+measure yet. That is exactly the residual the PR itself documents in
+~dev-notes/feral-factor-interrupt.md~ and defers to a feral-side cooperative
+cancellation hook. The regime the guard actually helps (several
+large factorizations inside one budget, e.g. discopt's per-node budgets)
+is not represented here.
+
+Verdict: *SOLVER_LIMITATION* -- not a bug; a correctly-scoped partial fix
+whose benefit is unobservable on the available fixtures.
+
+* Verdicts
+
+| # | hypothesis                                   | verdict            |
+|---+----------------------------------------------+--------------------|
+| A | premature termination                        | *PASS*             |
+| B | time limit actually respected                | *PASS*             |
+| C | status correctness on timeout                | *PASS* (1 latent risk) |
+| D | feral_static_pivoting plumbed + answer-neutral | *PASS*           |
+| E | guard measurably reduces overshoot           | *SOLVER_LIMITATION* |
+
+No GitHub issue filed.
+
+* Reproduction
+
+#+begin_src sh
+cd /Users/jkitchin/projects/pounce
+cargo build --release -p pounce-cli
+source .venv-qa/bin/activate
+cd adversary/runs
+
+# baselines vs Ipopt
+python -u 2026-07-22_nlp_pr256_time_limits.py baseline
+
+# Hypothesis A + B: limit sweeps
+python -u 2026-07-22_nlp_pr256_time_limits.py sweep clnlbeam 0.5 1 2 5 10 20 30 45 60
+python -u 2026-07-22_nlp_pr256_time_limits.py sweep dirichlet120 \
+    0.5 0.8 1.0 1.2 1.5 2.0 3.0 5.0 10 20 40 100
+
+# Hypothesis D: option and env-var routes
+python -u 2026-07-22_nlp_pr256_time_limits.py pivot bratu camshape_6400 cont5_2_4_l clnlbeam
+python -u 2026-07-22_nlp_pr256_time_limits.py pivotenv camshape_6400
+
+# Hypothesis E: A/B against the parent commit
+git worktree add /tmp/pre254 c8a88c8^
+( cd /tmp/pre254 && cargo build --release -p pounce-cli )
+# point PRE254 in the script at /tmp/pre254/target/release/pounce, then:
+python -u 2026-07-22_nlp_pr256_time_limits.py ab dirichlet120 1 2 3 5 10
+git worktree remove /tmp/pre254
+
+# single-shot status / AMPL band check
+target/release/pounce benchmarks/mittelmann/nl/clnlbeam.nl /tmp/tl.sol \
+    --json-output /tmp/tl.json max_wall_time=3
+python3 -c "import json;d=json.load(open('/tmp/tl.json'));print(d['solution'])"
+#+end_src

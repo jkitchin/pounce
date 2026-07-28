@@ -1,0 +1,82 @@
+#+TITLE: Adversary Run: Klee-Minty Cube LP (n = 3..7)
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: exponentially-degenerate / badly-scaled LP, closed-form optimum
+:SOURCE: V. Klee & G. J. Minty, "How good is the simplex algorithm?", Inequalities III (Shisha ed.), Academic Press 1972, pp. 159-175. Perturbed-cube form as in Chvatal, "Linear Programming" (1983) Ch.4; discussed in Nocedal & Wright 2e Sec. 13.4.
+:KNOWN_OPTIMAL: z* = 100^(n-1) at x* = (0,...,0,100^(n-1))
+:N_VARIABLES: n = 3,4,5,6,7
+:N_CONSTRAINTS: n inequalities + n nonnegativity bounds
+:END:
+
+\[
+\begin{aligned}
+\max_{x} \quad & \sum_{j=1}^{n} 10^{\,n-j} x_j \\
+\text{s.t.} \quad & 2\sum_{j=1}^{i-1} 10^{\,i-j} x_j + x_i \le 100^{\,i-1}, \quad i=1,\dots,n \\
+& x \ge 0
+\end{aligned}
+\]
+
+The feasible set is a combinatorially perturbed $n$-cube with $2^n$ vertices;
+Dantzig-rule simplex visits all of them. For an interior-point method the
+adversarial content is not combinatorial but *scaling*: the right-hand side
+spans $1 \dots 100^{n-1}$ (up to $10^{12}$ at $n=7$) and the objective
+coefficients span $1 \dots 10^{n-1}$. The unique optimal vertex is
+$x^\star=(0,\dots,0,100^{n-1})$ with $z^\star = 100^{n-1}$ (verified directly:
+the last constraint gives $x_n \le 100^{n-1}$, attained by zeroing all other
+$x_j$; any positive $x_j$, $j<n$, costs more in the $2\cdot 10^{i-j}$ coupling
+than it gains). pounce minimizes, so $c=-(10^{n-j})_j$ and the expected
+objective is $-100^{n-1}$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| n | pounce status | pounce obj      | rel err vs known | scipy/HiGHS obj | CLARABEL status | t_pounce | t_scipy | t_clarabel |
+|---+---------------+-----------------+------------------+-----------------+-----------------+----------+---------+------------|
+| 3 | optimal       | -9.999999999996e+03 | 3.83e-13     | -1.0e+04        | optimal         | 0.0025 s | 0.0011 s | 0.0025 s  |
+| 4 | optimal       | -1.000000000000e+06 | 2.90e-14     | -1.0e+06        | optimal         | 0.0033 s | 0.0007 s | 0.0014 s  |
+| 5 | optimal       | -9.999999522668e+07 | 4.77e-08     | -1.0e+08        | optimal         | 0.0031 s | 0.0006 s | 0.0015 s  |
+| 6 | optimal       | -9.999999860739e+09 | 1.39e-08     | -1.0e+10        | *SolverError*   | 0.0030 s | 0.0007 s | 0.0015 s  |
+| 7 | optimal       | -9.999999924214e+11 | 7.58e-09     | -1.0e+12        | *unbounded* (wrong) | 0.0040 s | 0.0007 s | 0.0012 s |
+
+Known optimal: $z^\star = 100^{n-1}$ exactly (minimization form $-100^{n-1}$).
+
+Max relative error vs the closed-form optimum across all five sizes:
+*4.77e-08*. Scaled solution error $\|x-x^\star\|_\infty / z^\star \le 8.6$e-08.
+pounce reports =optimal= at every size and the wall time is essentially flat
+(2.5-4.0 ms) as the problem scales by twelve orders of magnitude — the expected
+IPM behaviour, immune to the exponential simplex path.
+
+* Cross-check / Verification
+
+Two independent oracles, neither of them pounce:
+
+1. *Closed-form optimum* $100^{n-1}$, derived from the constraint structure and
+   independently confirmed by oracle 2 at every $n$.
+2. *scipy.optimize.linprog (HiGHS)* — a simplex/vertex method using entirely
+   different arithmetic from an IPM. It returns the exact vertex value at all
+   five sizes and agrees with pounce to $\le 4.8$e-08 relative.
+3. *cvxpy / CLARABEL* — agrees at $n=3,4,5$ (to 7.1e-08). At $n=6$ CLARABEL
+   raises =SolverError= outright; at $n=7$ it returns status =unbounded= with
+   objective $-\infty$, which is *incorrect* — the problem is bounded with
+   optimum $10^{12}$, as HiGHS and the closed form both confirm.
+
+The CLARABEL failure is a limitation of the *oracle*, not evidence about
+pounce. It is worth recording in the opposite direction: on the two worst-scaled
+instances pounce returned the correct answer where the reference conic IPM
+either crashed or reported a false unboundedness certificate.
+
+* Verdict
+
+*PASS.* pounce solves the Klee-Minty cube for $n=3\dots7$ to a maximum relative
+objective error of 4.77e-08 versus the exact closed-form optimum, with
+=status=optimal= throughout and constant ~3 ms wall time across twelve orders of
+magnitude of problem scaling. scipy/HiGHS confirms every value. No
+=SOLVER_BUG=, =SOLVER_LIMITATION=, or =PERFORMANCE_REGRESSION=: the absolute
+timing gap versus HiGHS is under 3 ms everywhere, far below the 0.1 s threshold.
+The only anomaly found belongs to the CLARABEL oracle, which fails at $n=6$ and
+returns a false =unbounded= at $n=7$ on a problem pounce handles correctly.

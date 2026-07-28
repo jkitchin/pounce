@@ -1,0 +1,57 @@
+#+TITLE: Adversary report — p-norm minimization, p = 1.5 (power cone)
+#+DATE: [2026-06-15]
+
+* Summary
+Cross-check of pounce's power-cone path on an l_{1.5}-norm minimization over a
+linear equality. Distinct from the prior p=3 run: p=1.5 lies in (1,2), Holder
+conjugate q=3, and the bounded geom-mean exponent is alpha = 1/p = 2/3 (the
+p=3 run used alpha=1/3). Verdict: PASS.
+
+* Problem
+- minimize ||x||_{1.5}  s.t.  a^T x = b
+- a = [1, -2, 0.5, 3, -1.5],  b = 4,  n = 5.
+- SOURCE: Holder-inequality closed form. For fixed a^T x = b,
+  min ||x||_p = |b| / ||a||_q with 1/p + 1/q = 1. Here q = 3.
+  Minimizer (Holder tight): x_i* = (b / ||a||_q^q) * sign(a_i) * |a_i|^{q-1}.
+  Exact and solver-independent.
+- KNOWN_OPTIMAL = |b| / ||a||_3 = 1.1745214685.
+
+* Cone layout
+- Variables: x (5), z (5), t (1) -> 11 vars. Objective: minimize t.
+- Encoding of ||x||_p <= t:  exists z_i>=0, sum z_i = t,
+  |x_i| <= z_i^{1/p} t^{1-1/p}.
+- pounce power cone {(s0,s1,s2): |s0| <= s1^alpha s2^{1-alpha}, s1,s2>=0},
+  FIRST slack s0 is the BOUNDED side. Map (s0,s1,s2) = (x_i, z_i, t),
+  alpha = 1/p = 2/3, so |x_i| <= z_i^{2/3} t^{1/3} = z_i^{1/p} t^{1-1/p}. OK.
+- 5 power cones (one per coordinate), each alpha = 2/3.
+- Equalities: a^T x = b ; sum_i z_i - t = 0.
+- Cone-orientation cross-check: first-slack-bounded orientation verified —
+  swapping s0 with the geom-mean side would make the constraint nonsensical;
+  the objective/argmin matching the closed form confirms the ordering.
+
+* Results
+| solver           | objective       | status              | time (s) |
+|------------------+-----------------+---------------------+----------|
+| pounce (tol=1e-10) | 1.1745212794   | optimal_inaccurate  |   0.0030 |
+| cvxpy / SCS      | 1.1745214684    | optimal             |   0.0038 |
+| cvxpy / CLARABEL | 1.1745214686    | optimal             |   0.0024 |
+| known (Holder)   | 1.1745214685    | exact               |        — |
+
+- rel_err pounce vs known     = 1.61e-07
+- rel_err pounce vs SCS       = 1.61e-07
+- rel_err pounce vs CLARABEL  = 1.61e-07
+- max |x - x*| (argmin)       = 8.59e-05
+- equality feasibility |a^T x - b| = 3.06e-07
+
+* Classification: PASS
+- Objective matches the Holder closed form and BOTH oracles to ~1.6e-7;
+  equality feasibility ~3e-7.
+- pounce reports optimal_inaccurate (default near-optimal stop on the
+  power-cone path, same as prior power runs). The oracle-checkable quantity
+  (the objective) is correct; the slightly looser argmin (~9e-5) reflects the
+  near-flat l_p ridge, not a solver error. No SOLVER_BUG.
+
+* Notes
+- No pounce source or tests modified. Only this script was authored.
+- alpha=2/3 and the (x_i, z_i, t) slack ordering were re-derived and verified
+  before running; pounce's first-slack-bounded convention is honored.

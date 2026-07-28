@@ -1,0 +1,77 @@
+#+TITLE: Adversary Run: curve_fit one-sided tuple bounds after PR #263
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: python API / bounds normalisation
+:SOURCE: PR #263 (fixes issue #260); oracle = scipy.optimize.curve_fit + analytic optimum
+:KNOWN_OPTIMAL: popt = (2.0, 1.0) exactly (noiseless data)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: box only
+:END:
+
+Fit \( f(x; A, k) = A e^{-k x} \) to noiseless data generated at \(A = 2,\ k = 1\),
+under the one-sided box \(A \in (-\infty, 10],\ k \in [0, \infty)\), which
+contains the true optimum. Expressed as pounce's per-parameter pair list with
+=None= for the open sides:
+
+: bounds = ((None, 10.0), (0.0, None))
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Form                        | Status               | popt                        | inf err vs known |
+|-----------------------------+----------------------+-----------------------------+------------------|
+| pounce tuple pair-list      | 0 (Solve_Succeeded)  | [9.373e-09, 1.5728e+05]     |        1.573e+05 |
+| pounce list pair-list       | 0 (Solve_Succeeded)  | [2.0, 1.0]                  |        1.171e-10 |
+| scipy (oracle, same box)    | ok                   | [2.0, 1.0]                  |        2.220e-15 |
+
+Known optimal: (2.0, 1.0)
+
+PR #263 dropped the =_is_pair_list= guard so that *any* length-2 tuple is read as
+scipy's =(lower, upper)=. For =n == 2= that reinterprets the pair list above as
+=lower=(None, 10.0)=, =upper=(0.0, None)=. =_to_array(None)= is NaN, so the box
+normalises to =lb=[nan, 10.0]=, =ub=[0.0, nan]= — i.e. the *transposed* box, with
+NaN standing in for the open sides. Downstream, NaN behaves as no bound, so the
+effective box is \(A \le 0,\ k \ge 10\): the true optimum is excluded and the fit
+collapses to \(A \approx 0\) with \(k\) run off to \(1.6\times10^{5}\).
+
+Pre-fix (71a0070) =_normalize_bound_arg(((None, 10.0), (0.0, None)), 2)= returned
+the tuple unchanged — the correct one-sided pair list. Verified directly on that
+checkout.
+
+* Cross-check / Verification
+- scipy with the numerically identical box =([-inf, 0.0], [10.0, inf])= returns
+  (2.0, 1.0), matching the analytic optimum to 2.2e-15.
+- The same box written as a *list* — the form PR #263's own docstring points
+  users to — returns (2.0, 1.0) from pounce. So the discrepancy is in bound
+  parsing, not in the solver.
+- The reversed-bound guard in =_minimize._normalize_bounds= is =lb > ub=. Every
+  comparison against NaN is False, so the NaN box passes validation silently:
+  =np.float64('nan') > 0.0= is =False=.
+- Independently: =pounce.minimize(..., bounds=[(nan, 10.0)])= is also accepted
+  without complaint (NaN treated as no bound). NaN bounds are not rejected
+  anywhere on the path.
+
+* Verdict
+API_REGRESSION (silent wrong answer). PR #263 fixed a silent box transposition
+for the scipy 2-tuple form and introduced the mirror-image transposition for the
+pounce pair-list form when it is written as a tuple. The failure signature is
+identical to issue #260's — =Solve_Succeeded= with a badly wrong fit and no
+warning — so the fix traded one instance of the bug class for another rather
+than eliminating it. The =None= (one-sided) case is the sharpest instance
+because the resulting NaN bounds slip past the reversed-bound check that would
+otherwise have raised.
+
+Two independently fixable causes:
+1. A length-2 tuple whose elements are both length-2 sequences (or =None=) is
+   genuinely ambiguous at =n == 2=. Raising on that ambiguity — rather than
+   silently picking a reading — is the only outcome that cannot be silently
+   wrong. (=([0, 1.6], [10, 10])= is unambiguous under the pair-list reading only
+   if one accepts a degenerate =k in [10, 10]=; an explicit error would have
+   surfaced #260 too.)
+2. NaN bounds should be rejected at =_normalize_bounds=; the =lb > ub= guard is
+   NaN-blind and lets a malformed box reach the solver.

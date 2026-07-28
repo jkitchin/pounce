@@ -1,0 +1,42 @@
+#+TITLE: Adversary Run: Auto-routing transparency on a convex QP
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: convex QP that should auto-route to the QP IPM
+:SOURCE: Nocedal & Wright Example 16.4 (x* = (1.4,1.7), q* = 0.8).
+:KNOWN_OPTIMAL: 0.8
+:N_VARIABLES: 2
+:N_CONSTRAINTS: 3 linear inequalities + nonneg bounds
+:END:
+
+The routing-transparency contract: =minimize(auto)= must agree with
+=minimize(solver_selection="nlp")= to tolerance, AND the auto path should pick
+the specialized convex solver. Same instance as the qp family run (N&W 16.4).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver             | Status            | Objective      | Rel Err   | Wall Time |
+|--------------------+-------------------+----------------+-----------+-----------|
+| pounce (auto)      | 0 Solve_Succeeded | 0.7999999929   | 7.09e-09  | 0.0197 s  |
+| pounce (forced nlp)| 0 Solve_Succeeded | 0.7999999929   | 7.09e-09  | 0.0124 s  |
+
+Known optimal: 0.8
+
+auto vs nlp objective disagreement: 0.00e+00; x infinity disagreement: 0.00e+00.
+
+* Cross-check / Verification
+The auto and forced-nlp solves agree to machine zero on both objective and x, so
+the routing-transparency contract holds. The =info= block from the auto solve
+shows iter_count=10, mu=9.1e-10, and a populated =active_constraints= /
+=active_tol= — i.e. the auto path engaged the convex KKT machinery and returned
+the correct optimum (rel err 7.1e-9 vs the known 0.8).
+
+* Verdict
+PASS — auto and forced-nlp answers are identical, and the auto route reached the
+correct optimum. (A slower fall-through that still gets the right answer is
+"merely slower", not a ROUTING_ERROR; here the answers match exactly.)

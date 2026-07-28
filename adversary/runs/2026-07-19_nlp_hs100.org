@@ -1,0 +1,105 @@
+#+TITLE: Adversary Run: Hock-Schittkowski 100 (HS100)
+#+DATE: <2026-07-19>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: inequality-constrained, unbounded variables, high-degree polynomial
+:SOURCE: Hock & Schittkowski, /Test Examples for Nonlinear Programming Codes/, Lecture Notes in Economics and Mathematical Systems 187, Springer 1981, problem 100, p. 121 (orig. Asaadi 1973, problem 2)
+:KNOWN_OPTIMAL: 680.6300573
+:N_VARIABLES: 7
+:N_CONSTRAINTS: 4 nonlinear inequalities, no bounds
+:END:
+
+\begin{align*}
+\min_{x\in\mathbb{R}^7}\;& (x_1-10)^2 + 5(x_2-12)^2 + x_3^4 + 3(x_4-11)^2 \\
+                        &\quad + 10x_5^6 + 7x_6^2 + x_7^4 - 4x_6x_7 - 10x_6 - 8x_7 \\
+\text{s.t.}\;& g_1: 127 - 2x_1^2 - 3x_2^4 - x_3 - 4x_4^2 - 5x_5 \ge 0 \\
+             & g_2: 282 - 7x_1 - 3x_2 - 10x_3^2 - x_4 + x_5 \ge 0 \\
+             & g_3: 196 - 23x_1 - x_2^2 - 6x_6^2 + 8x_7 \ge 0 \\
+             & g_4: -4x_1^2 - x_2^2 + 3x_1x_2 - 2x_3^2 - 5x_6 + 11x_7 \ge 0
+\end{align*}
+
+with $x_0 = (1,2,0,4,0,1,1)$, $f(x_0) = 714$.
+
+Published optimum: $f^* = 680.6300573$ at
+$x^* = (2.330499,\,1.951372,\,-0.4775414,\,4.365726,\,-0.6244870,\,1.038131,\,1.594227)$.
+Constraints $g_1$ and $g_4$ are active at $x^*$; $g_2,g_3$ are slack by
+$2.5\times10^2$ and $1.4\times10^2$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                  | Status             | Objective         | Rel err vs known | Iters | Wall time |
+|-------------------------+--------------------+-------------------+------------------+-------+-----------|
+| pounce (=minimize=, NLP) | 0 Solve_Succeeded  | 680.6300573611    | 8.98e-11         |    28 | 0.0143 s  |
+| Ipopt (Pyomo)           | optimal            | 680.6300559283    | 2.02e-09         |     — | 0.0343 s  |
+| pounce CLI (.nl)        | solve_result_num 0 | 680.63005593      | 2.0e-09          |     — | —         |
+
+Known optimal: 680.6300573.  pounce vs Ipopt objective agreement: 2.11e-09.
+Solution agreement: $\|x_{\text{pounce}}-x_{\text{Ipopt}}\|_\infty = 2.2\times10^{-8}$;
+$\|x_{\text{pounce}}-x^*\|_\infty = 3.7\times10^{-7}$ (limited by the 7-digit
+precision of the published $x^*$).
+
+pounce's final KKT error was 1.63e-09, constraint violation 2.84e-14, and it
+identified the correct active set (=active_constraints = [True, False, False,
+True]= — exactly $g_1$ and $g_4$, as published). Speedup vs Ipopt: 2.4x.
+
+* Cross-check / Verification
+
+** Derivative check (guarding the #1 false positive)
+All five analytic gradients (objective and $g_1..g_4$) were checked against
+central finite differences at three points ($x_0+0.3$, $x^*$, and a random
+interior point). Max relative error 2.98e-09 — the hand-coded derivatives are
+correct, so a formulation error is ruled out.
+
+Independently, evaluating the published $x^*$ in the script's own model gives
+$f = 680.6301112$ (vs the published 680.6300573, consistent with $x^*$ being
+quoted to 7 digits) and $g = (4.5\times10^{-5},\,252.56,\,144.88,\,7\times10^{-6})$,
+confirming the transcription of both objective and constraints.
+
+** =pounce verify= on the emitted .nl
+The Pyomo model was written to =.nl=, solved with the pounce CLI, and the
+resulting =.sol= checked with =pounce verify=:
+
+#+begin_example
+max constraint violation: 1.268e-6  at g1
+objective at x*: 6.8063005593e2
+KKT stationarity residual: 4.565e-13
+VERDICT: REJECTED — solution VIOLATES the canonical constraints
+#+end_example
+
+This =REJECTED= is **not** a pounce defect. Running the *identical* =.nl=
+through the Ipopt binary and verifying *Ipopt's* =.sol= gives a byte-for-byte
+comparable outcome — the same 1.268e-6 violation at $g_1$ and the same
+=REJECTED= verdict (rc 20). Both solvers converge to the same point; the
+verifier's default =--feas-tol 1e-6= is an *absolute* threshold that does not
+scale with constraint magnitude, and $g_1$ has RHS 127, so the *relative*
+violation is $1\times10^{-8}$. With =--feas-tol 1e-5= (or 1e-4, which is
+Ipopt's own default =constr_viol_tol=) pounce's solution verifies cleanly
+(rc 0).
+
+Observation worth recording (not a finding, since it is oracle-symmetric):
+=pounce verify='s default absolute feasibility tolerance of 1e-6 is stricter
+than the acceptance criterion of any solver it is meant to audit, so it will
+routinely reject converged solutions of problems whose constraints carry
+large constants.
+
+** Pyomo =SolverFactory('pounce')=
+Unavailable in =.venv-qa=: the plugin shells out to a bundled CLI at
+=python/pounce/bin/pounce=, which does not exist under a =maturin develop=
+editable install (the error message says so explicitly and points at
+=cargo run=). This is a dev-install artifact of this QA venv, not a solver
+issue. The =.nl= route (section above) exercises the same code path with the
+release CLI and was used instead.
+
+* Verdict
+PASS. pounce reproduces the published optimum to 9.0e-11 relative error,
+agrees with Ipopt to 2.1e-09, identifies the correct active set, and does so
+2.4x faster than Ipopt (0.014 s vs 0.034 s) — the gap is below the 0.1 s
+threshold anyway. The lone red flag, =pounce verify= rejecting the CLI's
+solution, was traced to the verifier's absolute 1e-6 feasibility tolerance and
+reproduced identically on Ipopt's own solution to the same =.nl=, so it
+exonerates pounce rather than implicating it.

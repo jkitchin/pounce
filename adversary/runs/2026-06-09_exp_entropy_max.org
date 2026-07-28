@@ -1,0 +1,51 @@
+#+TITLE: Adversary cross-check — exp cone: maximum-entropy distribution on the simplex
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: exp (exponential cone)
+- CLASS: entropy maximization
+- SOURCE: Boyd & Vandenberghe, /Convex Optimization/, Sec. 3.5 / max-entropy
+  example. Maximizing H(p) = -sum_i p_i log p_i subject to ONLY the
+  normalization sum_i p_i = 1 yields the uniform distribution, H = log(n).
+  Exact closed form; no numerical reference needed.
+- KNOWN_OPTIMAL: log(n). For n = 5: log(5) = 1.6094379124341003,
+  with p* = (1/5, ..., 1/5).
+- N_VARIABLES (pounce): 2n = 10 (p_0..p_4 and epigraph z_0..z_4).
+- CONE LAYOUT: n = 5 exp cones (3 rows each, 15 G rows) + one equality row.
+
+* Formulation
+Maximize sum_i z_i (i.e. minimize -sum_i z_i) with the per-coordinate
+exp-cone relation z_i <= -p_i log p_i encoded as the triple
+
+    (x = z_i, y = p_i, z = 1) in Kexp,
+
+since Kexp = {(x,y,z): y*exp(x/y) <= z, y>0} gives
+p_i*exp(z_i/p_i) <= 1  <=>  log p_i + z_i/p_i <= 0  <=>  z_i <= -p_i log p_i.
+The slack ordering is s = h - G x = (z_i, p_i, 1). Normalization sum_i p_i = 1
+goes in A,b. Reported entropy = -res.obj.
+
+* Results
+| solver       | status  | entropy        | time (s) |
+|--------------+---------+----------------+----------|
+| pounce       | optimal | 1.6094379131   |   0.0094 |
+| cvxpy/ECOS   | optimal | 1.6094379115   |   0.0047 |
+| cvxpy/SCS    | optimal | 1.6094379127   |   0.0019 |
+| known (log5) | --      | 1.6094379124   |     --   |
+
+Recovered p* = (0.2, 0.2, 0.2, 0.2, 0.2) — the uniform distribution, as
+predicted.
+
+* Cross-check
+- rel_err pounce vs known    = 4.42e-10
+- rel_err pounce vs ECOS     = 1.03e-09
+- rel_err pounce vs SCS      = 2.80e-10
+Both independent cvxpy oracles (ECOS and SCS) agree with pounce and with the
+closed-form log(5) to ~1e-9.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: pounce's exp-cone driver recovers the exact maximum-entropy optimum
+log(5) and the uniform optimizer to ~1e-9 relative error, matching both ECOS
+and SCS. Cone orientation (x=z_i epigraph, y=p_i, z=1) is correctly handled.
+No discrepancy.

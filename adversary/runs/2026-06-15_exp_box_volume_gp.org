@@ -1,0 +1,112 @@
+#+TITLE: exp-cone adversary run: open-top box volume maximization (2-var GP)
+#+DATE: 2026-06-15
+#+FAMILY: exp
+#+CLASS: exponential-cone geometric program (box design); VERDICT=FORMULATION_ERROR
+
+* PROBLEM
+Open-top square-base box design, a classic 2-variable geometric program.
+
+  maximize  V = x^2 * y          (square base x-by-x, height y)
+  s.t.      x^2 + 4*x*y <= A     (open-top surface area: base + 4 walls)
+            x > 0, y > 0
+
+This is exp-cone territory because the GP becomes convex under the log change
+of variables u=log x, v=log y, and each posynomial monomial maps to an
+exponential cone.
+
+* SOURCE / KNOWN OPTIMUM
+Classic geometric-programming box-design problem; see Boyd, Kim, Vandenberghe &
+Hassibi, "A Tutorial on Geometric Programming", Optimization and Engineering 8
+(2007), and Boyd & Vandenberghe, "Convex Optimization" (2004), Sec. 4.5.
+
+Closed-form KKT solution (re-derived with sympy in this run):
+  x* = sqrt(A/3),  y* = x*/2,  V* = sqrt(3) * A^(3/2) / 18.
+With A = 12 this is exact and clean:
+  x* = 2,  y* = 1,  V* = 4.
+
+KNOWN_OPTIMAL = 4.0.
+
+* PROPERTIES (cone layout)
+pounce exp-cone convention:
+  Kexp = {(x,y,z): y*exp(x/y) <= z, y>0}, triple ordering (x,y,z),
+  slack s = h - G x.
+
+Decision vars X = [u, v, t1, t2]  (N = 4); u=log x, v=log y.
+Objective: maximize V = exp(2u+v)  <=>  minimize -(2u+v); recover V = exp(-c'x).
+Posynomial x^2 + 4xy <= A  <=>  exp(2u)/A + 4 exp(u+v)/A <= 1, split into terms:
+  cone 0 (exp): (s0,s1,s2) = (2u - log A,        1, t1)   const  -logA
+  cone 1 (exp): (s0,s1,s2) = (u + v + log(4/A),  1, t2)   const +log(4/A)
+  nonneg (1 row): slack = 1 - t1 - t2 >= 0
+cones = [("exp",3), ("exp",3), ("nonneg",1)].
+
+* RESULTS (after the formulation fix)
+| solver                              |          V |   x* |    y* | status              | time (s) |
+|-------------------------------------+------------+------+-------+---------------------+----------|
+| KNOWN (closed form)                 | 4.00000000 | 2.00 | 1.000 | -                   |        - |
+| pounce solve_socp                   | 3.99999996 | 2.00 | 1.000 | optimal_inaccurate  |   ~0.002 |
+| cvxpy ECOS (GP mode)                | 4.00000001 | 2.00 | 1.000 | optimal             |   ~0.004 |
+| cvxpy SCS  (GP mode)                | 4.00000011 | 2.00 | 1.000 | optimal             |   ~0.004 |
+| cvxpy ExpCone, pounce's EXACT G/h   | 4.00000001 | 2.00 | 1.000 | optimal             |        - |
+
+pounce now matches the closed form and both GP oracles to ~1e-8 in V.
+
+* ROOT CAUSE: a sign error in THIS adversary script (NOT a pounce bug)
+The first version of this script set the cone-1 constant with the wrong sign:
+
+    h[3] = -log(4/A)        # WRONG: makes s3 = u + v - log(4/A)
+    h[3] = +log(4/A)        # CORRECT: s3 = u + v + log(4/A)
+
+(Cone 0 was fine: its constant is -logA and the script wrote h[0] = -logA.
+ Cone 1's constant is +log(4/A), but the script copied the "negate it" pattern
+ and wrote -log(4/A), flipping the sign.)
+
+The mis-signed h[3] encodes a DIFFERENT geometric program whose true optimum is
+V = 4/9 (x=2, y=1/9). pounce solved THAT problem correctly: at its returned
+point primal residual = 0, dual residual ~1e-9, complementarity gap ~1e-8 — a
+bona fide KKT point of the problem it was handed.
+
+** Why the original cross-check missed it
+The original "same encoding via cvxpy ExpCone" oracle did NOT reuse G/h — it
+rebuilt the affine arguments by hand:
+
+    cp.constraints.ExpCone(u + v + log4A, 1.0, t2)   # hand-built, correct sign
+
+so it silently solved the CORRECTED problem (V=4) while pounce solved the
+mis-signed one (V=4/9). The two solvers were given different problems, which
+looked like a solver disagreement. The decisive test is to feed the EXACT same
+G/h to an independent solver:
+
+    cvxpy ECOS on pounce's exact mis-signed G/h  ->  V = 0.4444  (x=2, y=0.111)
+
+i.e. cvxpy reproduces pounce's "wrong" answer bit-for-bit on the mis-signed
+data. That conclusively vindicates pounce: it solved the problem it was given.
+
+The script now builds the cvxpy ExpCone check from s = h - G@X (the same arrays
+pounce consumes), so an encoding bug here can never again masquerade as a solver
+bug.
+
+* CROSS-CHECK / VERIFICATION
+- Corrected G/h: pounce V = 3.99999996, cvxpy ECOS/SCS V = 4.0, cvxpy ExpCone on
+  pounce's exact G/h V = 4.0; all agree to ~1e-8 with the sympy closed form.
+- Mis-signed G/h (the original): pounce V = 0.4444 AND cvxpy ECOS V = 0.4444 on
+  the identical arrays -> same answer -> not a solver discrepancy.
+
+* MINOR OBSERVATION (not filed)
+On the corrected GP, pounce returns the right answer (V=4 to ~4e-8) but reports
+status = optimal_inaccurate / success = False at tol <= 1e-8 (clean "optimal"
+only at tol ~1e-6). The answer is correct; only the accuracy certification falls
+just short at tight tol. This mirrors the documented nlp pattern (#119/#123:
+correct optimum, success=False from a tight-tol tiny-step exit) and is at most a
+SOLVER_LIMITATION nuance, not a correctness issue. Logged, not filed.
+
+* VERDICT
+CLASS: FORMULATION_ERROR. The reported SOLVER_BUG was a sign error in this
+adversary script's cone-1 constant (h[3]); pounce correctly solved the problem
+it was handed, as independently confirmed by cvxpy ECOS reproducing pounce's
+answer on the exact mis-signed G/h. With the sign corrected, pounce matches the
+closed-form optimum (V=4) and both GP oracles. GitHub issue #145 is therefore a
+false positive and should be closed.
+
+(Trail: the worker filed SOLVER_BUG; the coordinator reproduced it but did not
+initially notice the cvxpy "same encoding" oracle used hand-rebuilt affine args
+rather than G/h. Re-deriving the encoding exposed the h[3] sign flip.)

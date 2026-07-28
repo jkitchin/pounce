@@ -1,0 +1,89 @@
+#+TITLE: Adversary Run: SQP filter globalization + exact-Hessian option
+#+DATE: 2026-07-23
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: active-set-SQP filter globalization (Fletcher-Leyffer 2002)
+:TARGET: crates/pounce-algorithm/src/sqp/filter.rs ; sqp_hessian=exact path
+:SOURCE: Maratos (Maratos 1978; Nocedal & Wright S15.5), HS6, HS7; Ipopt oracle
+:COMMIT: b2aa052
+:END:
+
+Adversarial test of the =active-set-sqp= filter globalization. Reading
+=filter.rs=: the filter maintains the (theta, phi) = (l1-violation, objective)
+Pareto set; it *explicitly skips* Fletcher-Leyffer's f-mode/h-mode switching and
+has NO second-order correction (SOC). Reading =sqp_alg.rs=: on line-search
+failure it returns =LineSearchFailed= and NEVER invokes a feasibility-restoration
+phase. Both are globalization weak points. Driven end-to-end via
+=pounce.minimize(..., options={"algorithm":"active-set-sqp","sqp_globalization":"filter"})=,
+oracle = Ipopt (Pyomo) on identical models.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (two findings)
+:END:
+
+** Finding A — sqp_hessian=exact -> Internal_Error on any constrained problem  [SOLVER_BUG]
+| configuration | sqp_hessian=exact | sqp_hessian=damped-bfgs |
+|---------------+-------------------+-------------------------|
+| unconstrained | Solve_Succeeded   | Solve_Succeeded         |
+| bounds-only   | Solve_Succeeded   | Solve_Succeeded         |
+| linear-eq     | *Internal_Error*  | Solve_Succeeded         |
+| linear-ineq   | *Internal_Error*  | Solve_Succeeded         |
+| nonlinear-eq  | *Internal_Error*  | Solve_Succeeded         |
+
+=sqp_hessian=exact= works unconstrained / bounds-only but fails with
+=Internal_Error= (nit=0; underlying =QpFailure(LinearSolverFailure("QP subproblem
+returned status unbounded"))=) the moment ANY general constraint is present —
+including the linearly-constrained case the option doc explicitly supports
+("The objective Hessian is used for ... problems with only linear constraints").
+The minimal repro is a convex QP =min (x0-2)^2+(x1-1)^2 s.t. x0+x1<=1= whose
+exact objective Hessian =2I= is PD (a bounded QP), yet the subproblem is reported
+"unbounded" — i.e. the exact Hessian is not reaching the QP when constraints are
+present (a zero Hessian + linear objective is unbounded along a feasible ray).
+=damped-bfgs= / =lbfgs= work in every case. Reproduced.
+
+** Finding B — filter globalization (no SOC) fails where Ipopt succeeds  [SOLVER_LIMITATION]
+Maratos =min 2(x1^2+x2^2-1)-x1 s.t. x1^2+x2^2=1=, x*=(1,0); start (cos t, sin t).
+Ipopt reaches |x-x*| < 1e-11 from EVERY start; the filter SQP:
+| t | filter | nit | \vert x-x*\vert | status |
+| 0.05 | FAIL | 29 | 2.8e-3 | Search_Direction_Becomes_Too_Small |
+| 0.10 | ok | 17 | 1.9e-6 | Solve_Succeeded |
+| 0.20 | ok | 24 | 7.5e-5 | Solve_Succeeded |
+| 0.30 | FAIL | 44 | 1.1e-3 | Search_Direction_Becomes_Too_Small |
+| 0.50 | ok | 51 | 1.2e-5 | Solve_Succeeded |
+| 0.80 | FAIL | 200 | 8.6e-5 | Maximum_Iterations_Exceeded |
+
+HS6 =min (1-x1)^2 s.t. 10(x2-x1^2)=0=, x*=(1,1) — Ipopt from (-1.2,1): x=(1,1),
+f=0, ~5 iters. The active-set-SQP driver:
+- start (-1.2,1): *filter FAILS* (Max_Iter, f=1.587, xerr=1.6) and *l1-elastic
+  FAILS* (Max_Iter, f=1.777, xerr=1.6);
+- start (0.5,0.5): *filter FAILS* (Search_Direction_Too_Small, xerr=3.2e-4)
+  while l1-elastic succeeds in 9 iters.
+
+Signature is textbook Maratos: unit SQP steps rejected -> alpha -> 0 ->
+Search_Direction_Becomes_Too_Small short of x*, or endless small steps
+(Max_Iter). Even when it converges it needs 17-51 iters (superlinear rate lost).
+No SOC and no feasibility-restoration phase; l1-elastic is not a workaround (also
+fails HS6 from the canonical start).
+
+* Cross-check / Verification
+- Ipopt (exact Hessian + inertia correction + SOC) solves Maratos and HS6 to
+  machine precision from every tested start.
+- Finding B is independent of the Hessian option (Finding A blocks =exact=, but
+  =damped-bfgs= and default =lbfgs= both fail HS6/Maratos identically) — it is
+  the globalization, not the Hessian approximation.
+- A dropped candidate (NOT a bug): min x0+x1 on the unit circle from (3,3)
+  returns the near KKT point (0.707,0.707) — a maximizer — with Solve_Succeeded;
+  but *Ipopt returns the same point with term=optimal* (both are local
+  first-order solvers converging to the nearest stationary point), so this is not
+  pounce-specific. Not filed.
+
+* Verdict
+Finding A: SOLVER_BUG — =sqp_hessian=exact= catastrophically fails
+(=Internal_Error=) on any constrained problem, including its documented
+linear-constraint support. Filed.
+Finding B: SOLVER_LIMITATION — the filter globalization lacks second-order
+correction and a restoration phase, so it stalls/fails on the Maratos example and
+on HS6 from the canonical start, where Ipopt converges trivially. Filed.

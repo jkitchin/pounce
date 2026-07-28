@@ -1,0 +1,176 @@
+#+TITLE: Adversary Run: GAMS Link Marginal (Dual) Sign Convention
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY:   nlp (GAMS link surface)
+:CLASS:    duals / multipliers / sensitivity sign invariants
+:SOURCE:   analytic LP shadow prices + GAMS marginal convention verified live with GAMS 53.2.0 / CPLEX
+:KNOWN_OPTIMAL: 25.5 (both senses); shadow prices +2.25 / +0.25
+:N_VARIABLES: 3 (max form) / 2 (min form)
+:N_CONSTRAINTS: 2
+:END:
+
+Two mirror-image textbook LPs, one in each objective sense.
+
+MAX form
+\[
+\max\; 3x_1 + 5x_2 + x_3 \quad \text{s.t.}\quad
+x_1 + 2x_2 + x_3 \le 10\;(r_1),\;
+3x_1 + 2x_2 + x_3 \le 12\;(r_2),\; x\ge 0
+\]
+Optimum \(x^\*=(1,\,4.5,\,0)\), \(z^\*=25.5\).
+Analytic \(\partial z^\*/\partial \mathrm{rhs}\): \(r_1=+2.25\), \(r_2=+0.25\);
+reduced cost of \(x_3\) = \(1-(2.25+0.25) = -1.5\).
+
+MIN form
+\[
+\min\; 3y_1 + 5y_2 \quad \text{s.t.}\quad
+y_1 + 2y_2 \ge 10\;(s_1),\; 3y_1 + 2y_2 \ge 12\;(s_2),\; y\ge 0
+\]
+Optimum \(y^\*=(1,\,4.5)\), \(w^\*=25.5\), \(\partial w^\*/\partial\mathrm{rhs}\):
+\(s_1=+2.25\), \(s_2=+0.25\).
+
+* The GAMS convention (oracle)
+
+GAMS's =.M= is \(\partial(\text{objective})/\partial(\text{rhs})\) *in the
+model's own sense* — for BOTH senses, with no sense-dependent flip.  Verified
+live, not assumed: solving the two models above with GAMS 53.2.0's default LP
+solver gives
+
+| model     | equation | GAMS =.M= |
+|-----------+----------+-----------|
+| MAX (=l=) | r1       |    +2.250 |
+| MAX (=l=) | r2       |    +0.250 |
+| MAX, x3   | (var)    |    -1.500 |
+| MIN (=g=) | s1       |    +2.250 |
+| MIN (=g=) | s2       |    +0.250 |
+
+An equality-constrained max control (=max 4a+6b= s.t. =2a+3b =e= 12=) gives
+GAMS/CPLEX =e1.M = +2.000=, matching the analytic \(\partial p^\*/\partial b = 2\).
+
+* What each link does (source citations, read-only)
+
+** pip / pure-Python link
+- =python/pounce/gams/link.py:353-354= — objective: =obj_sign * obj_val=,
+  i.e. the max flip IS undone.  Correct.
+- =python/pounce/gams/link.py:361-365= — "Constraint multipliers: POUNCE
+  lambda -> GAMS pi (negate)": =pi = -np.asarray(mult_g)=, then
+  =gmoSetSolution2(gmo_h, x, pi)= at :368.  **Unconditional negation — no
+  =obj_sign= factor.**
+- =python/pounce/gams/link.py:370-377= — variable marginals:
+  =var_marg = mult_x_L - mult_x_U=, then =if obj_sign < 0: var_marg = -var_marg=.
+  The max flip IS applied here.
+
+** native C link
+- =gams/gams_pounce.c:1081= — =gams_obj = (obj_sign < 0) ? -obj_val : obj_val=.
+  Max flip applied.
+- =gams/gams_pounce.c:1096-1103= — "Negate constraint multipliers: POUNCE
+  lambda -> GAMS pi": =mult_g[i] = -mult_g[i]= for all i, then
+  =gmoSetSolution2(gmo, x, mult_g)=.  **Unconditional negation — no =obj_sign=.**
+- =gams/gams_pounce.c:1105-1118= — =var_marg[j] = mult_xl[j] - mult_xu[j]=,
+  then =if (obj_sign < 0.0) var_marg[j] = -var_marg[j]=.  Max flip applied.
+
+** (b) Do the two links agree?
+Yes — byte-for-byte equivalent arithmetic on all three quantities (objective,
+equation marginals, variable marginals).  There is **no divergence between
+install methods**; both are correct for =minimizing= and both are wrong the
+same way for =maximizing=.  =link.py='s =_STATUS_MAP= (:60-78) is likewise
+documented as "ported verbatim" from =map_status_to_gams()= in the C link.
+
+** The internal inconsistency
+Within each link, the =obj_sign= flip is applied to the objective and to the
+*variable* marginals but not to the *equation* marginals.  GAMS uses one and the
+same \(\partial\text{obj}/\partial\text{perturbation}\) convention for both
+kinds of marginal, so under *any* consistent GAMS convention exactly one of the
+two is wrong for max models.  The live oracle above settles which: the variable
+marginals are right, the equation marginals are wrong.
+
+** Derivation
+Ipopt/POUNCE stationarity is \(\nabla f_{\min} + \nabla c^{\!\top}\lambda - z_L + z_U = 0\),
+so \(\partial f^\*_{\min}/\partial\mathrm{rhs} = -\lambda\) and the reduced cost is
+\(z_L - z_U\).  For a =minimizing= model \(f_{\min}=f\), so
+\(\pi_{\rm GAMS} = -\lambda\) — what both links emit. Correct.
+For a =maximizing= model \(f_{\min} = -F\), so
+\(\partial F^\*/\partial\mathrm{rhs} = +\lambda\); the correct emission is
+\(\pi_{\rm GAMS} = \mathrm{obj\_sign}\cdot(-\lambda) = +\lambda\).  Both links
+still emit \(-\lambda\).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+** Live, end-to-end through real GAMS 53.2.0 (pip link)
+=option nlp = pounce;= on the models above (the pip link was the one GAMS
+resolved; the user's =~/Library/Preferences/GAMS/gamsconfig.yaml= registration
+points at =/Users/jkitchin/projects/pounce/python/pounce=, this same tree).
+
+| model         | quantity | GAMS/CPLEX (truth) | pounce GAMS link | verdict         |
+|---------------+----------+--------------------+------------------+-----------------|
+| MAX ineq      | r1.M     |             +2.250 |           -2.250 | SIGN INVERTED   |
+| MAX ineq      | r2.M     |             +0.250 |           -0.250 | SIGN INVERTED   |
+| MAX ineq      | x3.M     |             -1.500 |           -1.500 | correct         |
+| MAX ineq      | z.L      |             25.500 |           25.500 | correct         |
+| MAX equality  | e1.M     |             +2.000 |           -2.000 | SIGN INVERTED   |
+| MIN ineq      | s1.M     |             +2.250 |           +2.250 | correct         |
+| MIN ineq      | s2.M     |             +0.250 |           +0.250 | correct         |
+| MIN ineq      | y2.M     |             +3.000 |           +3.000 | correct         |
+
+** License-free reproduction (fake =GmoView=)
+=adversary/runs/2026-07-22_gams_dual_sign.py= drives =problem_from_gmo= with an
+in-memory fake view (same pattern as =python/tests/test_gams_link.py=, which was
+not modified) and then replays the exact sign arithmetic of
+=link.py:353-377=.  Output reproduces the live result exactly:
+
+: MAX: equ marginals = [-2.25 -0.25]  (expect [+2.25 +0.25])  -> False
+: MAX: var marginals = [-0. -0. -1.5] (expect [0 0 -1.5])     -> True
+: MAX: objective     = +25.5                                  -> True
+: MIN: equ marginals = [+2.25 +0.25]                          -> True
+: VERDICT: SOLVER_BUG (MAX equation marginals sign-inverted)
+
+Runtime < 0.01 s per solve.
+
+** (e) Objective and status mapping
+- Objective: correct in both senses (=obj_sign= applied, link.py:353-354 /
+  gams_pounce.c:1081).  Live: =**** OBJECTIVE VALUE 25.5000= on the max model.
+- Status: =Solve_Succeeded= -> live GAMS reported =SOLVER STATUS 1 Normal
+  Completion= / =MODEL STATUS 2 Locally Optimal=, matching =_STATUS_MAP=
+  (link.py:61) and the C link's =map_status_to_gams()=.  No defect found; the
+  LOCALLY_OPTIMAL (2) rather than OPTIMAL (1) report on an LP is conservative
+  and standard for an NLP link.
+- Variable marginals (reduced costs): correct in both senses.
+
+* Cross-check / Verification
+1. Analytic shadow prices derived by hand and confirmed against GAMS's own LP
+   solver on identical models (the =.M= values above).
+2. Live end-to-end run of the pip link inside real GAMS, three models
+   (max-inequality, max-equality, min-inequality).
+3. Offline fake-=GmoView= harness reproducing the same numbers with no GAMS in
+   the loop — isolates the defect to the link's sign arithmetic, not to GMO or
+   to POUNCE's KKT multipliers (which are correct: =pounce= itself returned
+   \(\lambda\) satisfying stationarity to 3e-14 dual infeasibility).
+4. Source-level equivalence of the two links established by direct citation, so
+   the C link carries the identical defect. (The C link could not be exercised
+   live: it is registered in =gmscmpun.txt= but shadowed by the user's
+   =gamsconfig.yaml=, and forcing it would require writing outside =adversary/=.)
+
+* Secondary consequence
+=gams/gams_pounce.c:973-1050= (§7.4(a) SQP warm-start reconstruction) reads
+=gmoGetEquM= / =gmoGetVarM= back and re-flips assuming its own output
+convention.  That is self-consistent when the previous solve was POUNCE's, but
+on a =maximizing= model whose marginals came from another GAMS solver (correct
+sign) the reconstructed constraint working set is inverted.
+
+* Verdict
+SOLVER_BUG — equation marginals are sign-inverted for =maximizing= models in
+both GAMS links.  Both links negate POUNCE's \(\lambda\) unconditionally to form
+GAMS's \(\pi\), which is correct only for =minimizing= models; for
+=maximizing= models the =obj_sign= flip that the same code applies to the
+objective and to the variable marginals is missing on the constraint duals.
+Confirmed live against GAMS 53.2.0 with an independent solver as oracle, and
+reproduced offline with a fake =GmoView=.  Minimizing models — the common case,
+and the only case the shipped tests cover — are unaffected; primal solutions,
+objective values, reduced costs and status mapping are correct in both senses.
+The one-line fix in each link is to scale the negation by =obj_sign=
+(equivalently, skip the negation when maximizing).

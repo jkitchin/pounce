@@ -1,0 +1,53 @@
+#+TITLE: Autoroute transparency — pure LP (equality + inequalities) -> lp-ipm
+#+DATE: 2026-06-09
+
+* Problem properties
+- Family ............ autoroute (pounce.minimize, default solver_selection="auto")
+- Class ............. pure linear program (linear objective + linear eq/ineq + nonneg bounds)
+- SOURCE ............ self-contained standard-form-ish LP; optimum independently
+  verified by scipy.optimize.linprog (HiGHS).
+- Expected route .... lp-ipm  (LP detected -> specialized convex LP interior-point,
+  pounce.solve_qp with P=0).
+- KNOWN_OPTIMAL ..... -5.0  at x* = (3, 1, 0)
+  (Correction note: an initial hand guess of (0,2.5,1.5)->-3.5 was a REFERENCE
+  error — feasible but not optimal; scipy oracle = -5.0 = both pounce paths.)
+
+* Formulation
+  minimize    c.x,        c = [-1, -2, 1]
+  subject to  x0 + x1 + x2 = 4          (equality)
+              x0 + 2 x1      <= 5        (inequality, active at optimum)
+              x1 + x2        <= 3        (inequality)
+              x >= 0
+  x0 = (4, 0, 0)  (feasible vertex).
+
+* Results
+| quantity                    | value                          |
+|-----------------------------+--------------------------------|
+| oracle (scipy.linprog HiGHS)| -5.0000000000  x=(3,1,0)       |
+| auto objective              | -4.9999999959                  |
+| auto x                      | (3, 1, ~0)                     |
+| auto solver (info["solver"])| 'lp-ipm'   <- SPECIALIZED      |
+| forced-nlp objective        | -5.0000000150                  |
+| forced-nlp solver           | None (true NLP backend; mu set)|
+| auto rel-err vs known       | 8.16e-10                       |
+| auto rel-err vs oracle      | 8.16e-10                       |
+| auto-vs-forced-nlp disagree | 3.81e-09 (obj), 9.29e-09 (x_inf)|
+| auto time                   | ~0.0018 s                      |
+| forced-nlp time             | ~0.0081 s                      |
+
+* Detection of which solver auto chose
+  pounce._minimize._solve_via_convex stamps info["solver"]="lp-ipm" (LP) /
+  "qp-ipm" (QP) on the returned OptimizeResult; the NLP fallthrough returns the
+  raw NLP info dict, which has NO "solver" key but DOES have "mu" (IPM barrier).
+  Here res_auto.info["solver"] == 'lp-ipm' and res_nlp.info has no "solver"
+  (has "mu") — auto used the specialized LP IPM, forced-nlp used the general NLP.
+
+* Cross-check
+  Three independent agreements at -5.0: scipy HiGHS oracle, auto (lp-ipm),
+  forced-nlp (filter-IPM). Active-set at optimum (eq + row2 active) is consistent.
+
+* Verdict
+  VERDICT: PASS
+  Reasoning: auto correctly routed to the specialized lp-ipm solver and its
+  answer matches forced-nlp (3.8e-9) and the independent oracle/known optimum
+  (8e-10). Routing is transparent. No routing fallthrough; no bug.

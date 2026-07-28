@@ -1,0 +1,43 @@
+#+TITLE: Batch adversary (b) — solve_qp_batch, 10 equality-constrained QPs (distinct P/c/A/b)
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: batch (solve_qp_batch)
+- SOURCE: synthetic; 10 independent equality-constrained convex QPs, each with its own
+  random SPD P, cost c, constraint matrix A (full row-rank) and RHS b.
+  RNG seed 424242 (numpy default_rng). P = M Mᵀ + nI symmetrized → SPD.
+- BATCH SIZE: 10 items with mixed dims.
+- KNOWN_OPTIMAL: equality-only convex QP ⇒ unique optimum from the KKT linear system
+  [[P Aᵀ],[A 0]] [x;λ] = [-c; b]  (closed form, solved with numpy.linalg.solve).
+- PER-ITEM DIMS (n vars, m eq-constraints):
+  [(4,1),(5,2),(6,1),(4,2),(5,1),(6,2),(4,1),(5,2),(6,1),(4,2)].
+
+* Formulation
+For each item:  min_x ½ xᵀP x + cᵀx  s.t. A x = b.
+KKT stationarity + primal feasibility give the (n+m)×(n+m) saddle system above; with P SPD
+and A full row-rank the system is nonsingular and yields the unique x*.
+
+* Results
+| metric                            | value     |
+|-----------------------------------+-----------|
+| batch size                        | 10        |
+| status (all items)                | optimal   |
+| max rel-err vs KKT closed form    | 3.48e-10  |
+| max rel-err vs standalone solve   | 0.00e+00  |
+| max equality feas ‖Ax-b‖          | 4.49e-10  |
+| pounce_time (batch)               | 0.0016 s  |
+| oracle_time (loop of singles)     | 0.0051 s  |
+
+* Cross-check
+- Oracle 1 (KKT closed form): max relative error 3.5e-10 across all 10 items — at the
+  expected interior-point convergence floor.
+- Oracle 2 (per-item standalone pounce.solve_qp with identical kwargs): max relative error
+  EXACTLY 0.0 — every batched item is bit-identical to its standalone solve.
+- Equality feasibility ‖Ax-b‖ ≤ 4.5e-10 for all items.
+- Batch ~3.2x faster than the loop of singles (0.0016 vs 0.0051 s).
+
+* Verdict
+VERDICT: PASS
+Reasoning: All 10 distinct equality-constrained QPs return "optimal", match their
+independent KKT closed-form optima to ~1e-10, satisfy their constraints, and reproduce
+their standalone single-solve results exactly. No SOLVER_BUG / formulation / tolerance issue.

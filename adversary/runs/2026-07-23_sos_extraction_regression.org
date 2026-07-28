@@ -1,0 +1,71 @@
+#+TITLE: Adversary Iteration 3 — SOS minimizer-extraction regression + #124 recheck
+#+DATE: 2026-07-23
+
+* Direction
+The SOS minimizer/atom-extraction bug found on Himmelblau (2026-07-19) and
+Rosenbrock-2D (2026-07-22) — =is_exact=True= but the returned minimizer does NOT
+attain the lower bound, and DEGRADES with order — was found twice but never
+filed as a GitHub issue. This iteration re-verifies it across a battery using a
+self-consistency invariant that needs no external oracle, and rechecks the
+open higher-order conditioning limitation (#124).
+
+* Battery (5 polynomials × orders 2,3,4)
+:PROPERTIES:
+:FAMILY: sos
+:REPORT: [[file:runs/2026-07-23_sos_extraction_regression.py]]
+:END:
+
+Invariants checked:
+- (A) VALIDITY: =lower_bound= must not exceed the true global min (known value or
+  200-start Nelder-Mead).
+- (B) SELF-CONSISTENCY: if =is_exact=, EVERY returned minimizer must satisfy
+  =f(minimizer) ≈ lower_bound= (internal contract, no oracle needed).
+
+| Polynomial      | true min  | result                                                        |
+|-----------------+-----------+---------------------------------------------------------------|
+| Himmelblau      | 0         | o2: 1 min (attains); o3,o4: ALL 4 minima, each f≈1e-6 (attains)|
+| DoubleWell2D    | 0         | o2 safe-fail (is_exact=False,0); o3,o4: all 4 (±1,±1) (attains)|
+| SixHumpCamel    | -1.031628 | o2,o3,o4: 2 global minima, f=-1.0316 (attains)                 |
+| RosenbrockBoxed | 0         | o2,o3,o4: (1,1), f≈1e-6 (attains)                             |
+| AsymQuartic     | -7.027810 | o2,o3,o4: (-1.301,-1.301), f=-7.0278 (attains)               |
+
+Result: no invalid bounds; every =is_exact= minimizer attains its =lower_bound=
+(worst |f−lb| ≤ 1.3e-4, = ordinary SDP slack). *VERDICT: PASS.*
+
+* Regression status of the previously-documented extraction bug
+FIXED at commit b2aa052. Direct before/after:
+- *Himmelblau* — 2026-07-19: is_exact=True, num_minimizers=1, returned point
+  f=4.15e-2 (o2) / 4.22e0 (o3) / 3.02e1 (o4), DEGRADING with order.
+  Now: o3/o4 recover all 4 minimizers, each f≈1e-6 (attaining the bound).
+- *Rosenbrock-2D* — 2026-07-22: returned ~(0.860,0.740), off 0.26, f≈2e-2,
+  order-independent. Now: recovers (1,1), f≈1e-6.
+No GitHub issue was ever filed for this bug; it is now resolved, so none is
+needed. The extraction step (rank-detection / atom-extraction) is sound across
+the battery.
+
+* Recheck of #124 (higher-order SDP conditioning; Goldstein-Price, Lasserre Ex.5)
+Substantially IMPROVED at the orders tested:
+- Constrained cubic-box problem (an as-posed variant; true min -2.0 at (2,2),
+  verified by SLSQP multistart): orders 2,3,4 all =optimal= with tight
+  =lower_bound=-2.0=. The 2026-07-19 run saw =iteration_limit= + NaN at orders
+  3,4 on its (differently-constrained) instance.
+- Goldstein-Price (degree 8, true 3.0): orders 1,2 =optimal= with a valid bound
+  2.9399 (gap 0.06). The 2026-06-09 run saw =numerical_failure=/NaN (o0) and
+  =iteration_limit= (o1).
+Not exhaustively retested at order ≥4 for Goldstein-Price (degree-8, expensive),
+so #124 is "improved, no NaN/iter-limit observed at tested orders," not
+provably closed.
+
+* Methodology note (a false positive I caught)
+My first Lasserre Ex.5 encoding used constraints =1−(x−1)²≥0= (box |x−1|≤1),
+under which the published minimizer (2.3295,3.1783) is INFEASIBLE — i.e. I had
+the wrong constraint constants. pounce's =lb=−2.0= briefly looked like an
+INVALID bound vs the published −5.508, but multistart on the AS-POSED problem
+confirmed its true min is exactly −2.0, so pounce was correct and tight. No bug;
+formulation error on my part. (Skepticism-before-accusation, as required.)
+
+* Verdict
+PASS — no new findings. The SOS minimizer-extraction bug (found 2026-07-19 and
+2026-07-22, never filed) is FIXED and confirmed across a 5-polynomial battery via
+a no-oracle self-consistency invariant; #124's higher-order conditioning is
+substantially improved. Nothing to file.

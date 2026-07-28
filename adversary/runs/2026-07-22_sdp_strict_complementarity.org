@@ -1,0 +1,176 @@
+#+TITLE: Adversary Run: Degenerate SDPs -- strict-complementarity failure and a non-unique optimal face
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: degeneracy / constraint-qualification / non-unique optima
+:SOURCE: Hand-constructed instances in the standard degeneracy taxonomy of Alizadeh, Haeberly & Overton, "Complementarity and nondegeneracy in semidefinite programming", Math. Prog. 77 (1997) 111-128 (Defs. of primal/dual nondegeneracy and strict complementarity, Sec. 2-4); see also M. J. Todd, "Semidefinite optimization", Acta Numerica 10 (2001) 515-560, Sec. 4, on the loss of superlinear IPM convergence when strict complementarity fails. Optima derived analytically in closed form (below) -- no published numeric value is relied on.
+:KNOWN_OPTIMAL: p* = 3 (variant A), p* = 1 (variant B); both exact
+:N_VARIABLES: 3x3 symmetric X (4 free vars after elimination in A, 5 in B)
+:N_CONSTRAINTS: one ("psd", 3) cone block (svec length 6); 2 linear equalities (A) / 1 (B) eliminated by parametrization
+:END:
+
+Both problems are in standard primal SDP form
+
+\[
+\min_X \; \langle C, X\rangle \quad \text{s.t.} \quad \langle A_i, X\rangle = b_i,\; X \succeq 0 ,
+\]
+
+and both are *strictly feasible in primal and dual* (Slater holds both sides,
+so strong duality holds and there is no duality gap). The only pathology is
+degeneracy -- which is precisely the regime where interior-point methods lose
+superlinear convergence.
+
+** Variant A -- strict complementarity FAILS
+
+\[
+C=\operatorname{diag}(3,0,1),\qquad
+A_1=E_{11},\; b_1=1,\qquad
+A_2=E_{22}+E_{13}+E_{31},\; b_2=0 .
+\]
+
+i.e. \(X_{11}=1\) and \(X_{22}+2X_{13}=0\).
+
+*Primal.* \(X_{22}=-2X_{13}\ge 0 \Rightarrow X_{13}\le 0\); the \(\{1,3\}\)
+minor gives \(X_{33}\ge X_{13}^2\). Hence
+\(\langle C,X\rangle = 3+X_{33}\ge 3\), with equality iff \(X_{33}=0
+\Rightarrow X_{13}=0 \Rightarrow X_{22}=0\), which (by PSD) zeroes row/column 2.
+
+\[
+p^\star = 3,\qquad X^\star=\operatorname{diag}(1,0,0)\ \text{(unique)},\qquad \operatorname{rank}X^\star=1 .
+\]
+
+*Dual.* \(S=C-y_1A_1-y_2A_2=\begin{bmatrix}3-y_1&0&-y_2\\0&-y_2&0\\-y_2&0&1\end{bmatrix}\succeq 0\)
+requires \(y_2\le 0\) and \(y_1\le 3-y_2^2\); maximizing \(b^\top y=y_1\) gives
+
+\[
+d^\star = 3,\qquad y^\star=(3,0)\ \text{(unique)},\qquad S^\star=\operatorname{diag}(0,0,1),\qquad \operatorname{rank}S^\star=1 .
+\]
+
+\[
+\operatorname{rank}X^\star+\operatorname{rank}S^\star = 1+1 = 2 \;<\; 3 = n
+\quad\Longrightarrow\quad \textbf{strict complementarity fails.}
+\]
+
+The direction \(e_2\) lies in the kernel of *both* \(X^\star\) and \(S^\star\).
+Slater points exist on both sides (primal \(X=[[1,0,-0.1],[0,0.2,0],[-0.1,0,1]]\succ0\);
+dual \(y=(-2,-1)\Rightarrow S\succ0\)), so this is a pure
+strict-complementarity failure, not a Slater/gap pathology (that case was
+covered separately on 2026-07-22).
+
+** Variant B -- non-unique optimal set (a 2-dimensional optimal face)
+
+\[
+C=I+E_{33}=\operatorname{diag}(1,1,2),\qquad A_1=I,\; b_1=1 \;(\operatorname{tr}X=1).
+\]
+
+\(\langle C,X\rangle = \operatorname{tr}X + X_{33} = 1+X_{33}\ge 1\), so
+
+\[
+p^\star = 1, \qquad
+\mathcal{F}^\star=\{X\succeq0:\operatorname{tr}X=1,\;X_{33}=0\},
+\]
+
+a whole 2-dimensional spectrahedral face (all trace-1 PSD matrices supported on
+the leading 2x2 block) -- the optimizer is emphatically *not* a point. Dual:
+\(S=C-yI\succeq0 \Rightarrow y\le1\), \(d^\star=1\), \(S^\star=\operatorname{diag}(0,0,1)\),
+rank 1; max rank over the optimal face is 2, so \(2+1=3=n\) and strict
+complementarity *does* hold here -- the pathology is pure non-uniqueness.
+Consequently X is graded on OBJECTIVE and PSD FEASIBILITY only, never on
+matrix equality.
+
+** Encoding
+
+=pounce.solve_socp= has no equality block, so in each variant X is parametrized
+by free variables that satisfy the equalities identically and
+\(\mathrm{svec}(X)=h-Gv\) forms the single =("psd",3)= block; the constant part
+of the objective is added back by hand. The svec layout (lower triangle,
+column-major, off-diagonals x sqrt(2)) is re-derived and asserted numerically in
+the script via \(\langle X,Y\rangle=\mathrm{svec}(X)\cdot\mathrm{svec}(Y)\) and
+\(\mathrm{smat}(\mathrm{svec}(M))=M\) on random symmetric matrices, and each
+variant's \(G,h,c\) is asserted against the explicit matrix and objective at a
+random test point.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+** Variant A (strict complementarity fails), p* = 3
+
+| Solver   | Status  | Objective       |  Abs Err | Iters | Wall Time |
+|----------+---------+-----------------+----------+-------+-----------|
+| pounce   | optimal | 3.0000000003    | 3.07e-10 |    14 | 0.0023 s  |
+| SCS      | optimal | 2.9999999999    | 6.6e-11  |     - | 0.0040 s  |
+| CLARABEL | optimal | 2.9999999999    | 1.5e-10  |     - | 0.0026 s  |
+
+min eig(X_pounce) = -6.55e-10 (PSD violation 6.6e-10).
+
+** Variant B (non-unique optimal face), p* = 1
+
+| Solver   | Status  | Objective       |  Abs Err | Iters | Wall Time |
+|----------+---------+-----------------+----------+-------+-----------|
+| pounce   | optimal | 1.0000000003    | 3.05e-10 |     7 | 0.0011 s  |
+| SCS      | optimal | 0.9999999711    | 2.9e-08  |     - | 0.0020 s  |
+| CLARABEL | optimal | 1.0000000006    | 5.7e-10  |     - | 0.0018 s  |
+
+min eig(X_pounce) = +3.05e-10 (exactly PSD, no violation).
+
+** Narrative
+
+pounce hits both analytic optima to ~3e-10 absolute and returns =optimal= in
+both cases, in 2.3 ms and 1.1 ms -- faster than either oracle.
+
+The interesting part is *how* variant A converges. pounce returns
+
+: X = [[1, 0, -3.10e-5], [0, 6.21e-5, 0], [-3.10e-5, 0, 3.07e-10]]
+
+The unique optimum is diag(1,0,0). The degenerate coordinates are off by
+~3e-5 -- five orders of magnitude worse than the objective error -- and they
+sit in exactly the expected relationship: \(X_{22}=-2X_{13}\) (a feasibility
+identity), and \(X_{33}\approx X_{13}^2\) (3.07e-10 vs 9.6e-10). That is the
+textbook \(O(\sqrt{\mu})\) signature of strict-complementarity failure: the
+coordinate in \(\ker X^\star\cap\ker S^\star\) converges only at the square
+root of the barrier parameter, so the objective (which sees it quadratically)
+converges quadratically faster than the iterate. Both cvxpy oracles show the
+same phenomenon. This is a property of the problem, not a defect in pounce.
+
+The iteration counts corroborate it: 14 iterations for the degenerate variant A
+versus 7 for variant B, consistent with the loss of superlinear local
+convergence predicted by Todd (2001) Sec. 4 when strict complementarity fails.
+
+Variant B's non-unique face causes pounce no trouble at all. It returns the
+"analytic-center"-like point diag(0.5, 0.5, 0) -- the maximum-rank (rank 2)
+element of the optimal face, which is exactly what a primal-dual central-path
+method should converge to. Any point on that face is equally optimal, hence
+grading on objective + PSD feasibility rather than on X.
+
+* Cross-check / Verification
+- Two independent oracles (cvxpy 1.x with SCS and CLARABEL) on the *natural*
+  matrix formulation (=cp.Variable((3,3), symmetric=True)= with =X >> 0= and the
+  equalities written directly), not on the eliminated parametrization pounce
+  sees. They agree with each other to < 1.5e-8 in both variants, and with the
+  closed-form optima.
+- Both closed-form optima are re-derived above from PSD minors alone and
+  confirmed by explicit dual certificates \((y^\star, S^\star)\) with
+  \(\langle C,X^\star\rangle = b^\top y^\star\) and \(X^\star S^\star = 0\).
+- svec layout re-derived from scratch and asserted numerically before any
+  comparison was made (5 random symmetric pairs, both
+  \(\langle X,Y\rangle=\mathrm{svec}\cdot\mathrm{svec}\) and the smat round
+  trip), plus per-variant assertions that \(h-Gv=\mathrm{svec}(X(v))\) and
+  \(c^\top v+\text{const}=\langle C,X(v)\rangle\) at a random \(v\).
+- PSD feasibility of pounce's returned X checked by =eigvalsh=: -6.6e-10
+  (variant A) and +3.1e-10 (variant B).
+
+* Verdict
+=PASS= -- pounce solves both degenerate SDPs to ~3e-10 objective accuracy, in
+agreement with SCS and CLARABEL and with the analytic optima, while returning
+numerically PSD iterates and =optimal= status, in ~1-2 ms (faster than both
+oracles). Strict-complementarity failure (variant A) shows up only as the
+expected \(O(\sqrt{\mu})\) degradation of the *iterate* in the doubly-degenerate
+coordinate (~3e-5) and a doubling of the iteration count -- both are intrinsic
+to the problem class and reproduced by both oracles, not solver defects. A
+non-unique 2-dimensional optimal face (variant B) is handled cleanly, with
+pounce returning the maximum-rank element of the face as a central-path method
+should. No issue filed.

@@ -1,0 +1,111 @@
+#+TITLE: Adversary Run: Hock-Schittkowski 110, natural + deliberately rescaled
+#+DATE: <2026-07-22>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: bound-constrained, ill-conditioned / badly scaled
+:SOURCE: W. Hock & K. Schittkowski, /Test Examples for Nonlinear Programming Codes/, Lecture Notes in Economics and Mathematical Systems 187, Springer 1981, Problem 110 (p. 118)
+:KNOWN_OPTIMAL: -45.77846971
+:N_VARIABLES: 10
+:N_CONSTRAINTS: 0 general constraints; 20 simple bounds
+:END:
+
+\[
+\min_{x\in\mathbb{R}^{10}}\; \sum_{i=1}^{10}\left[\bigl(\ln(x_i-2)\bigr)^2 + \bigl(\ln(10-x_i)\bigr)^2\right] \;-\; \left(\prod_{i=1}^{10} x_i\right)^{0.2}
+\]
+subject to \(2.001 \le x_i \le 9.999\), starting point \(x_i^0 = 9\).
+
+Published optimum: \(f^\star = -45.77846971\), \(x_i^\star = 9.35025655\) for all \(i\).
+
+** Ill-conditioning probe (the point of this run)
+HS110 is already nasty: two logarithmic barriers inside the objective whose
+arguments approach 0 at the bounds, plus a degree-10 product raised to 0.2.
+On top of that, this run applies a *diagonal rescaling* \(x_i = s_i y_i\) and
+solves in \(y\), with bounds \(2.001/s_i \le y_i \le 9.999/s_i\) and
+\(y_i^0 = 9/s_i\):
+
+- =S_MID=     \(s\) spans \(10^{-6}\) to \(10^{6}\)  (spread \(10^{12}\))
+- =S_EXTREME= \(s\) spans \(10^{-9}\) to \(10^{9}\)  (spread \(10^{18}\))
+
+This is an *exact reparameterization*: the optimal objective value is
+mathematically unchanged (\(-45.77846971\)) and \(x^\star = s \odot y^\star\)
+recovers the same point. Only the variable magnitudes, the bound magnitudes,
+the gradient entries and the Hessian entries move — by up to 18 orders of
+magnitude. Any dependence of the answer on scaling is therefore a solver
+property, not a change of problem.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+** HS110 natural (scale spread 1e0)
+| Solver               | Status  |          Objective | Rel err vs known | Wall time |
+|----------------------+---------+--------------------+------------------+-----------|
+| pounce (pyomo-pounce) | optimal | -45.77846970744629 |         5.58e-11 |   0.434 s |
+| Ipopt (pyomo)        | optimal | -45.77846970744629 |         5.58e-11 |   0.013 s |
+| pounce (bare CLI, .nl) | optimal |                 -"- |              -"- |  0.0055 s |
+| Ipopt (bare CLI, .nl) | optimal |                 -"- |              -"- |  0.0093 s |
+
+** HS110 rescaled, scale spread 1e12
+| Solver               | Status  |           Objective | Rel err vs known | Wall time |
+|----------------------+---------+---------------------+------------------+-----------|
+| pounce (pyomo-pounce) | optimal | -45.778469705984456 |         8.77e-11 |   0.434 s |
+| Ipopt (pyomo)        | optimal |  -45.77846970598447 |         8.77e-11 |   0.014 s |
+| pounce (bare CLI)    | optimal |                  -"- |              -"- |  0.0067 s |
+| Ipopt (bare CLI)     | optimal |                  -"- |              -"- |  0.0110 s |
+
+** HS110 rescaled, scale spread 1e18
+| Solver               | Status  |           Objective | Rel err vs known | Wall time |
+|----------------------+---------+---------------------+------------------+-----------|
+| pounce (pyomo-pounce) | optimal |  -45.77846970733874 |         5.81e-11 |   0.439 s |
+| Ipopt (pyomo)        | optimal | -45.778469707338736 |         5.81e-11 |   0.014 s |
+| pounce (bare CLI)    | optimal |                  -"- |              -"- |  0.0068 s |
+| Ipopt (bare CLI)     | optimal |                  -"- |              -"- |  0.0117 s |
+
+Known optimal: -45.77846971
+
+pounce agrees with the published optimum to ~1e-10 relative in *all three*
+scalings, and agrees with Ipopt on the identical model to 3e-16 (mid) and
+1.6e-16 (extreme) relative — i.e. to the last couple of bits. The recovered
+\(x^\star\) is \(9.350264\ldots\) uniformly; the max deviation from the
+published 8-digit \(x^\star = 9.35025655\) is 9.1e-6, which is the precision
+of the printed reference vector, not a solver error (both solvers land on the
+same point and the objective matches to 1e-11).
+
+Iteration counts are essentially flat across scalings (26 constraint-Jacobian
+evaluations / 25 Hessian evaluations at the 1e18 spread), so the internal
+scaling logic is absorbing the reparameterization rather than fighting it.
+
+* Cross-check / Verification
+1. *Ipopt (Pyomo, /opt/homebrew/bin/ipopt)* on the byte-identical Pyomo model —
+   converged =optimal= in every case, objective matching pounce to <=3e-16 rel.
+2. *=pounce verify <m.nl> <m.sol>=* on the .nl of each variant — exit code *0*
+   in all three, =VERDICT: VERIFIED — solution is feasible for the canonical
+   problem=, max constraint violation 0.000e0, max bound violation 0.000e0,
+   objective at \(x^\star\) = -4.5778469706e1 (independently re-evaluated from
+   the .nl, not trusting the solver).
+3. *Scale-invariance self-check* — the three variants are exact
+   reparameterizations of one another, and all three return the same objective
+   to 1e-10. A scaling-sensitivity bug would have shown up as a spread between
+   them.
+4. *Timing sanity* — the ~0.43 s "pounce" time in the Pyomo tables is
+   =pyomo-pounce= plugin overhead (subprocess spawn + .nl write + .sol parse),
+   not solve time. Measured on the bare CLI against the same .nl, pounce is
+   *faster* than the Ipopt CLI (0.0055-0.0068 s vs 0.0093-0.0117 s), and
+   pounce's own log reports =Total seconds in POUNCE = 0.003=. No performance
+   regression. (The Pyomo-path gap is >3x and >0.1 s in absolute terms, but it
+   is harness overhead common to both — the Ipopt Pyomo path benefits from
+   Pyomo's long-lived cached ASL interface; this is not a solver finding.)
+
+* Verdict
+*PASS.* pounce solves HS110 to the published optimum -45.77846971 (rel err
+5.6e-11) and holds that answer, iteration count, and status unchanged when the
+problem is diagonally rescaled so that variables, bounds, gradients and Hessian
+entries span 12 and then 18 orders of magnitude. Ipopt on the identical model
+agrees to machine precision, and =pounce verify= independently certifies
+feasibility of the returned point from the .nl in all three variants. This
+dimension (ill-conditioning / bad scaling) found no defect on this problem:
+pounce's automatic scaling is doing its job on a problem specifically
+constructed to break it.

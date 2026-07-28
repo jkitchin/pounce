@@ -1,0 +1,37 @@
+#+TITLE: Adversary Run: Exponential-cone geometric program
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: geometric program via the exponential cone
+:SOURCE: standard GP: minimize x + 1/x over x > 0; minimum 2 at x = 1.
+:KNOWN_OPTIMAL: 2.0
+:N_VARIABLES: log-variable u = log x + epigraph terms
+:N_CONSTRAINTS: two ("exp", 3) cones
+:END:
+
+minimize x + 1/x, x > 0, in log-space u = log x. By AM-GM the minimum is 2 at
+x = 1 (u = 0). Encoded with two exponential cones ("exp", 3):
+{(x,y,z): y exp(x/y) <= z, y > 0}.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver           | Status  | Objective      | Rel Err   | Wall Time |
+|------------------+---------+----------------+-----------+-----------|
+| pounce (exp IPM) | optimal | 1.9999999933   | 3.34e-09  | 0.0037 s  |
+| cvxpy (SCS)      | optimal | 2.0000000001   | (ref)     | 0.0026 s  |
+
+Known optimal: 2.0  (at x = 1, u = 0; recovered u* = 6.47e-6)
+
+* Cross-check / Verification
+cvxpy/SCS agrees to 3.4e-9. The recovered log-variable u* = 6.5e-6 corresponds
+to x = 1.000006, consistent with the optimum x = 1. Exp-cone slack ordering
+re-checked against the solve_socp docstring.
+
+* Verdict
+PASS — pounce's exponential-cone path matches cvxpy/SCS and the analytic
+minimum 2 to ~1e-9.

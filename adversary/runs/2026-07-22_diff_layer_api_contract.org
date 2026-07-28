@@ -1,0 +1,195 @@
+#+TITLE: Adversary Run: Differentiable-Layer Framework-Integration API Contract
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff
+:CLASS: API contract — batching / jit / dtype / device / failed-solve / second-order / cross-framework
+:SOURCE: OptNet implicit-diff rule (Amos & Kolter, ICML 2017, §3); layer contract as documented in python/pounce/jax/__init__.py and python/pounce/torch/__init__.py
+:KNOWN_OPTIMAL: x* = [0.25441174, -0.20441179, -0.05882353] (cvxpy/Clarabel), one active inequality
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 4 inequalities (1 active at x*) + 1 equality
+:END:
+
+This run deliberately does *not* re-test gradient values in isolation (prior
+runs cover that). It tests the **framework-integration contract** of
+=pounce.jax.solve_qp= / =solve_qp_batch= and =pounce.torch.solve_qp= /
+=solve_qp_batch=.
+
+Parametric QP, differentiable in \(\theta \in \mathbb{R}^2\):
+
+\[
+x^*(\theta) = \arg\min_x \tfrac12 x^\top P x + c(\theta)^\top x
+\quad\text{s.t.}\quad Gx \le h,\; Ax = b
+\]
+
+\[
+P=\begin{bmatrix}3&0.5&0.2\\0.5&2&0.3\\0.2&0.3&4\end{bmatrix},\quad
+G=\begin{bmatrix}1&1&0\\0&1&1\\-1&0&0.5\\-1&-1&0\end{bmatrix},\quad
+h=(0.05,\,1,\,2,\,5),\quad A=(1,-1,1),\; b=0.4
+\]
+
+\[
+c(\theta) = (-1 + 2\theta_0,\; 0.5 - \theta_1,\; 0.3\theta_0 + 0.7\theta_1)
+\]
+
+with loss \(L(\theta) = \sum_i w_i x_i^*(\theta)^2\), \(w=(1,-2,0.5)\), evaluated at
+four \(\theta\) values. \(h_0 = 0.05\) is chosen so row 0 of \(G\) is **active** at
+\(x^*\) (otherwise the whole inequality/dual path is untested and
+\(\partial x/\partial h \equiv 0\) trivially).
+
+Rows 0 and 3 of \(G\) are \(x_1+x_2\) and \(-(x_1+x_2)\), which lets a single batch
+row be made *strictly primal infeasible* (\(x_1+x_2 \le -50\) and
+\(x_1+x_2 \ge 50\)) without perturbing the shared matrices.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Check                                                   | Oracle                | Result                        |
+|---------------------------------------------------------+-----------------------+-------------------------------|
+| forward solve                                           | cvxpy / Clarabel      | inf err 2.1e-08               |
+| (a) =jax.vmap= forward                                  | loop of single solves | **bit-exact** (max\vert d\vert = 0)  |
+| (a) =jax.vmap(jax.grad)=                                | loop of single grads  | **bit-exact**                 |
+| (a) =pounce.jax.solve_qp_batch=                         | loop                  | **bit-exact**                 |
+| (a) =pounce.torch.solve_qp_batch=                       | loop                  | **bit-exact**                 |
+| (a) torch batch **gradient**                            | loop of single grads  | **bit-exact**                 |
+| (b) =jax.jit= forward                                   | eager                 | **bit-exact**                 |
+| (b) =jax.jit(jax.grad)=                                 | eager                 | **bit-exact**                 |
+| (b) =jax.jit(jax.vmap(jax.grad))=                       | loop, eager           | **bit-exact**                 |
+| (c) float32 in, torch                                   | float64 reference     | accepted, upcast, err 3.9e-09 |
+| (c) float32 in, jax                                     | float64 reference     | accepted, upcast, err 3.9e-09 |
+| (d) MPS tensor in                                       | —                     | clear =TypeError=, no result  |
+| (e) infeasible / iter-limit forward (jax, torch, batch)  | status contract       | **raises**, never NaN         |
+| (e) grad through a failed solve                         | status contract       | **raises**, never NaN         |
+| (f) =gradcheck= / =gradgradcheck= wrt c and h (float64)  | torch FD              | pass                          |
+| (g) JAX ↔ Torch forward & gradient                      | each other            | **bit-exact** (0.0e+00)       |
+| (g) gradient vs central FD (float64)                    | FD, eps 1e-6          | rel 4e-09 … 1.1e-06           |
+
+Total wall time for the whole 40-assertion suite: ≈ 8 s (well inside budget).
+
+* Cross-check / Verification
+
+** (a) Batching — PASS, and stronger than required
+Both the implicit =jax.vmap= path (via =pure_callback(..., vmap_method=
+"sequential")=) and the explicit =solve_qp_batch= entry points reproduce the
+loop-of-single-solves **bit for bit**, forward *and* backward, in both
+frameworks. Bit-exactness is the right expectation here: the batch path calls
+the same Rust =solve_qp= per instance, so any difference would signal state
+leaking across batch elements. There is none.
+
+The torch batch backward correctly *sums* cotangents into the shared
+=P=/=G=/=A= and keeps =c=/=h=/=b= per-row; the summed-gradient result matches
+summing the four independent single-solve gradients exactly.
+
+=torch.func.vmap= over the *single-instance* layer raises a clear functorch
+error ("must override the =setup_context= staticmethod") rather than producing
+a wrong answer. This is the documented, correct posture — the forward is an
+eager host call into the Rust solver and cannot be traced; users are directed
+to =solve_qp_batch= / =vmap_solve=. Noted, not a defect.
+
+** (b) JIT — PASS
+=jax.jit= of the forward, of =jax.grad=, and of =jax.vmap(jax.grad)= all give
+results identical to eager down to the last bit. The =custom_vjp= + =pure_callback=
+construction survives tracing and does not get constant-folded or reordered.
+
+** (c) dtype — accepted with a documented silent upcast (not a defect)
+Both layers coerce inputs with =jnp.asarray(..., float64)= / =Tensor.to(float64)=,
+so float32 input is *silently accepted and upcast*. This is consistent with the
+documented contract ("pounce is a double-precision solver … the adapters
+request float64 tensors explicitly"). Two things make this safe rather than a
+silent-accuracy trap:
+- the residual error (3.9e-09) is exactly the float32 *input rounding*, not
+  degraded solver accuracy — the solve itself still runs in float64;
+- torch returns the gradient back in the caller's float32 dtype (autograd
+  handles the cast), so a float32 training loop stays type-consistent.
+
+The JAX package additionally calls =jax_config.update("jax_enable_x64", True)=
+at *import* time. That is a documented, deliberate global side effect, but it
+is a **process-wide** mutation triggered by an import — worth knowing about if
+=pounce.jax= is imported into a float32 JAX codebase. Behaviour noted, no
+correctness impact observed.
+
+** (d) Device — clear error, no silent wrong result
+MPS is available on this machine. Passing float32 MPS tensors raises at the
+=.to(torch.float64)= coercion in =pounce/torch/_qp.py:_t=:
+
+: TypeError: Cannot convert a MPS Tensor to float64 dtype as the MPS
+: framework doesn't support float64. Please use float32 instead.
+
+This is the *correct* failure mode (loud, before any numerics). The message is
+torch's, not pounce's, so it does not say "move your tensors to CPU for the
+pounce QP layer" — a minor UX wart only. Critically, there is **no** path where
+a device tensor silently produces a CPU result or wrong numbers. CUDA was not
+testable on this host.
+
+** (e) Failed solves — the headline result: no silent NaN anywhere
+This was the highest-value target, and the layer is clean. =_check_status= in
+both =_qp.py= files rejects anything other than =status == "optimal"=, and it is
+called on **every** path tested:
+
+- torch single forward, primal-infeasible → =RuntimeError: ... returned status
+  'primal_infeasible', not 'optimal'; the differentiable layer cannot produce a
+  meaningful gradient for a non-optimal solve.=
+- torch single forward, =max_iter=1= → same, with ='iteration_limit'=.
+- jax single forward, both cases, **eager and under =jax.jit=** → =JaxRuntimeError=
+  wrapping the same pounce message (the callback exception propagates through
+  XLA rather than being swallowed).
+- **gradient** through a failed solve, both frameworks → raises in the forward;
+  the backward is never reached, so no NaN can enter the tape.
+- **batch with one bad row** (the subtle case — three good rows and one
+  infeasible row) → both =pounce.torch.solve_qp_batch= and
+  =pounce.jax.solve_qp_batch= raise and name the offending row:
+  ="QpLayer batch forward solve (row 2): ... 'primal_infeasible'"=. The good rows
+  are *not* returned alongside garbage.
+
+No configuration produced a finite-but-wrong result presented as success, and
+none produced NaN. A training loop cannot be silently poisoned by this layer.
+
+Note on my first attempt: my initial "infeasible" batch row was in fact
+feasible (the returned point was the true vertex optimum), which is why the
+first run flagged it. Re-derived and replaced with a strictly infeasible row —
+formulation error on my side, caught before accusing the solver.
+
+** (f) Second order — PASS
+=torch.autograd.gradcheck= and =torch.autograd.gradgradcheck= (float64) pass for
+both \(\partial x^*/\partial c\) (interior solution) and \(\partial x^*/\partial h\)
+with a genuinely **active** inequality — the case where the OptNet KKT backward
+actually exercises the \(D(\lambda)\), \(D(Gx-h)\) blocks. Second derivatives of the
+layer are therefore consistent, not just first.
+
+** (g) Cross-framework parity — PASS, bit-exact
+For all four \(\theta\), the JAX and Torch layers agree on both \(x^*\) and
+\(\nabla_\theta L\) to =0.0e+00= — identical bits, as expected since both call the
+same Rust core and implement the same KKT backward. Both agree with a central
+finite-difference of a re-solve to 4e-09 … 1.1e-06 relative. The looser
+1.1e-06 entries are the \(\theta\) values where the active constraint makes
+\(L(\theta)\) locally near-degenerate and the FD step itself is the limiting
+error, not the analytic gradient.
+
+** Minor UX wart (not a finding)
+Passing =lb= or =ub= as a tensor with =requires_grad=True= raises an opaque torch
+internal error from =_expand_bounds=:
+
+: RuntimeError: Can't call numpy() on Tensor that requires grad.
+: Use tensor.detach().numpy() instead.
+
+The documented contract is that no gradient flows to =lb=/=ub= (pass
+differentiable bound levels through =G=/=h= instead), so raising is defensible,
+but the message does not explain that. Cosmetic only; not filed.
+
+* Verdict
+**PASS.** The differentiable-layer framework-integration contract holds on every
+axis tested. Batching (=vmap=, =solve_qp_batch=) and JIT are bit-exactly
+equivalent to the loop-of-single-solves and eager references in both
+frameworks, including through the backward pass. JAX and Torch agree with each
+other bit-for-bit and with float64 central finite differences.
+=gradgradcheck= passes with an active inequality. Most importantly for the
+stated priority: **there is no silent-NaN path**. Every non-optimal forward
+solve — primal-infeasible, iteration-limit, single or one-bad-row-in-a-batch,
+eager or under =jax.jit= — raises a loud, specific error naming the status (and
+the batch row), and the gradient path is never reached. float32 is silently
+upcast rather than rejected, and MPS tensors raise a clear torch dtype error;
+both are documented/defensible behaviours, recorded here rather than filed. No
+issue filed.

@@ -1,0 +1,59 @@
+#+TITLE: SOS Adversary Test — Goldstein-Price Function
+#+DATE: 2026-06-09
+#+AUTHOR: pounce adversary agent (sos family)
+
+* Problem properties
+- NAME: Goldstein-Price function (unconstrained polynomial global minimization)
+- SOURCE: Goldstein & Price (1971); Dixon-Szegő / Molga-Smutnicki standard
+  global-optimization test set.
+- OBJECTIVE:
+  f(x,y) = [1 + (x+y+1)² (19 − 14x + 3x² − 14y + 6xy + 3y²)]
+         × [30 + (2x−3y)² (18 − 32x + 12x² + 48y − 36xy + 27y²)]
+- DEGREE: 8 (total degree of expanded polynomial)
+- COEFFICIENTS: expanded |coeff| ranges from 144 up to 23616 (poorly scaled).
+- KNOWN_OPTIMAL: f* = 3.0 at (x,y) = (0, −1).
+- RELAXATION ORDER tested: 0, 1 (order = extra Lasserre levels above the
+  degree-8-induced minimum half-degree of 4).
+- Leading degree-8 form is positive definite ⇒ bounded below ⇒ unconstrained
+  SOS valid in principle.
+
+* Formulation (pounce input)
+The product is expanded with sympy to the exact exponent-tuple → coefficient
+dict, then:
+#+begin_src python
+r = pounce.sos_minimize(OBJ, n_vars=2, order=order)
+#+end_src
+
+* Results
+| order | lower_bound | is_exact | status            | num_min | time (s) |
+|-------+-------------+----------+-------------------+---------+----------|
+|     0 | NaN         | False    | numerical_failure |       0 |   1.38   |
+|     1 | NaN         | False    | iteration_limit   |       0 |   8.82   |
+
+- No finite lower bound produced. The order-4 moment SDP for a degree-8,
+  poorly-scaled (|coeff| up to ~2.4e4) polynomial fails to converge
+  (numerical_failure at the base order, iteration_limit when raising the order).
+- Gap undefined (NaN). is_exact=False, no minimizers recovered.
+
+* Cross-check (oracle / refutation)
+- Known optimum: f* = 3.0 at (0,−1) (verified: f(0,−1) = 3.0 to < 1e−9).
+- Dense grid [−2,2]², 1601×1601: min = 3.00000000 at (0.0000,−1.0000).
+- scipy Nelder-Mead multistart (400 starts, seed 0): best = 3.0000000000 at
+  (0.000000, −1.000000).
+- Refutation min = 3.0000000000.
+- CRITICAL CHECK: a NaN / absent bound does NOT exceed the true global minimum.
+  There is therefore NO invalid lower bound — this is NOT a correctness bug.
+
+* Verdict
+- VERDICT: FAIL (script-level: pounce returned no usable bound)
+- CLASS: SOLVER_LIMITATION
+- REASONING: pounce did not return a certified lower bound for the raw
+  Goldstein-Price polynomial — the SDP relaxation hits numerical_failure
+  (order 0) and iteration_limit (order 1), yielding NaN. This is a convergence
+  / conditioning limitation driven by the function's notoriously large
+  coefficient spread (|coeff| from 144 to 23616), NOT an invalid bound: the
+  NaN result never claims a value above f* = 3.0, so it is not a SOLVER_BUG.
+  Classify as SOLVER_LIMITATION (solver cannot certify a bound for a
+  poorly-scaled degree-8 instance at the orders that stay under ~10 s).
+  A pre-scaled/normalized variant would likely converge, but that changes the
+  known optimum and was deliberately not substituted here.

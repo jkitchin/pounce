@@ -1,0 +1,223 @@
+#+TITLE: Adversary Run: status reporting on infeasible / unbounded / domain-violating exp & power cone programs
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp + power
+:CLASS: infeasibility / unboundedness / status-reporting correctness
+:SOURCE: Analytic construction. GP log transform: Boyd, Kim, Vandenberghe & Hassibi, "A tutorial on geometric programming", Optim. Eng. 8(1):67-127 (2007), sec. 2.4. Farkas' lemma / theorems of alternatives: Boyd & Vandenberghe, Convex Optimization (2004), sec. 5.8.3. Cone definitions: MOSEK Modeling Cookbook v3.3 sec. 5.2 (exp) and 4.1 (power).
+:KNOWN_OPTIMAL: status labels, not values -- primal_infeasible (A-INF, A-NEAR, C-INF, C-NEAR), dual_infeasible (B-UNB), optimal (A-FEAS 0.0, A-FEAS2 0.293147181, B-BND/B-BND2 -0.306852819440, C-FEAS -0.223606797750)
+:N_VARIABLES: 6 (family A) / 4 (family B) / 2 (family C)
+:N_CONSTRAINTS: 4x ("exp",3) + ("nonneg",2)  [A];  2x ("exp",3) + ("nonneg",1)  [B];  ("pow",alpha) + ("nonneg",1)  [C]
+:END:
+
+Ten instances in three families, each with an analytic (in)feasibility proof on
+the log-transformed linear system, plus a near-miss feasible control.
+
+** Family A -- infeasible geometric program (exp cone)
+
+With \(u = \log x\), \(v = \log y\):
+
+\[
+C_1:\; e^{u+v-1} + e^{u-v-1} \le 1, \qquad
+C_2:\; e^{-u-v+\delta-1} + e^{-u+v+\delta-1} \le 1 .
+\]
+
+Both left-hand sides equal \(2 e^{\pm u - 1}\cosh v\), minimized over \(v\) at
+\(v = 0\); so the feasible set is nonempty iff it is nonempty on \(v = 0\), where
+
+\[
+u \le 1 - \ln 2 \quad\text{and}\quad u \ge \delta - 1 + \ln 2 .
+\]
+
+Hence feasible \(\iff \delta \le \delta^* = 2 - 2\ln 2 = 0.6137056389\).
+
+*Farkas certificate for \(\delta > \delta^*\).* Multiplying the two constraints
+(the nonnegative combination \(y = (1,1)\) in log space) gives
+\(4 e^{\delta-2}\cosh^2 v \le 1\); since \(\cosh v \ge 1\) this forces
+\(4e^{\delta-2}\le 1\), i.e. \(\delta \le 2-2\ln 2\). In the log-transformed
+linear system this is exactly \(y \ge 0,\; A^\top y = 0,\; b^\top y = -(\delta -
+\delta^*) < 0\) -- a theorem-of-alternatives certificate.
+
+Instances: =A-INF= \(\delta = 4.0\) (grossly infeasible), =A-NEAR= \(\delta =
+0.63\) (infeasible by 0.0163), =A-FEAS= \(\delta = 0.60\) (feasible by 0.0137 --
+the false-rejection control), =A-FEAS2= same data with objective \(\min u\).
+
+** Family B -- unbounded exp-cone program
+
+\(\min u\) subject to \(C_1\) alone. From any feasible \((u,v)\), the ray
+\((u - t, v),\, t \ge 0\), stays feasible (both exponentials strictly decrease)
+and drives the objective to \(-\infty\): the recession cone contains a direction
+of strictly negative cost, so the primal is unbounded (dual infeasible).
+
+Controls: =B-BND= \(\min -u\) under \(C_1\), optimum \(-(1-\ln 2) =
+-0.306852819440\); =B-BND2= \(\min u\) under \(C_1 \wedge C_2\) at
+\(\delta = 0\), optimum \(\ln 2 - 1 = -0.306852819440\).
+
+** Family C -- power-cone domain violation
+
+\(K_\alpha = \{(x,y,z): |x| \le y^\alpha z^{1-\alpha},\; y,z \ge 0\}\). The cone
+triple is \((w,\, t-2,\, 1)\) with the extra linear constraint \(t \le T\). Cone
+membership requires \(t \ge 2\); with \(T < 2\) the linear system \(\{t \le T,\;
+t \ge 2\}\) has Farkas certificate \((1,1)\), giving \(0 \le T - 2 < 0\). The
+cone's domain requirement \(y \ge 0\) is violated at *every* point of the
+feasible set of the remaining constraints.
+
+Instances: =C-INF= \(T=1.0\), =C-NEAR= \(T=1.999\), control =C-FEAS= \(T=2.05\)
+with optimum \(w^* = -\sqrt{0.05} = -0.223606797750\).
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL (3/10 status mismatches; all are missing certificates, none is a wrong answer)
+:END:
+
+| Case                          | Expected           | pounce             | ECOS       | SCS        | CLARABEL   | Match |
+|-------------------------------+--------------------+--------------------+------------+------------+------------+-------|
+| A-INF   GP delta=4.0          | primal_infeasible  | primal_infeasible  | infeasible | infeasible | infeasible | yes   |
+| A-NEAR  GP delta=0.63         | primal_infeasible  | primal_infeasible  | infeasible | infeasible | infeasible | yes   |
+| A-FEAS  GP delta=0.60         | optimal            | optimal            | optimal    | optimal    | optimal    | yes   |
+| A-FEAS2 GP delta=0.60, min u  | optimal            | optimal_inaccurate | optimal    | optimal    | optimal    | yes   |
+| B-UNB   C1 only, min u        | dual_infeasible    | *numerical_failure*| unbounded  | unbounded  | unbounded  | *NO*  |
+| B-BND   C1 only, max u        | optimal            | optimal_inaccurate | optimal    | optimal    | optimal    | yes   |
+| B-BND2  C1+C2, min u          | optimal            | optimal_inaccurate | optimal    | optimal    | optimal    | yes   |
+| C-INF   pow T=1.0             | primal_infeasible  | *numerical_failure*| n/a        | infeasible | infeasible | *NO*  |
+| C-NEAR  pow T=1.999           | primal_infeasible  | *numerical_failure*| n/a        | infeasible | infeasible | *NO*  |
+| C-FEAS  pow T=2.05            | optimal            | optimal            | n/a        | optimal    | optimal    | yes   |
+
+(ECOS has no power cone, hence =n/a= on family C.)
+
+Objective values on the feasible controls:
+
+| Case    | pounce obj        | analytic optimum  | rel err  | wall time |
+|---------+-------------------+-------------------+----------+-----------|
+| A-FEAS2 |  2.93147181e-01   |  2.931471806e-01  | ~1e-09   | 0.0017 s  |
+| B-BND   | -3.06852807e-01   | -0.306852819440   | 1.2e-08  | 0.0081 s  |
+| B-BND2  | -3.06852817e-01   | -0.306852819440   | 2.4e-09  | 0.0016 s  |
+| C-FEAS  | -2.23606802e-01   | -0.223606797750   | 4.1e-09  | 0.0019 s  |
+
+Every case ran in under 10 ms; the whole script is 0.9 s wall including all
+three cvxpy oracles.
+
+** The headline non-finding: no false rejections
+
+The thing this run was built to hunt -- a false =primal_infeasible= on a
+feasible near-miss -- *did not occur*. =A-FEAS= sits only 0.0137 inside the
+feasibility threshold \(\delta^* = 0.6137056389\) and =A-NEAR= only 0.0163
+outside it, and pounce classifies both correctly. =C-FEAS= at \(T = 2.05\)
+(cone \(y\)-component \(= 0.05\), i.e. within 5e-2 of the cone's domain
+boundary) is solved to 4.1e-09 relative accuracy. pounce's infeasibility
+detector is not trigger-happy on this geometry.
+
+** Mismatch 1: unbounded exp-cone program (B-UNB)
+
+pounce returns =numerical_failure= with =obj = -1.59e+12= where all three
+oracles return =unbounded=. The returned objective is directionally correct --
+it is a large negative number produced by marching down the recession ray -- but
+no =dual_infeasible= certificate is emitted, so a caller keying on =status=
+cannot distinguish "this problem is unbounded" from "the solver broke".
+
+The minimal reduction is not GP-specific. The two-variable program
+\(\min u\) s.t. \((u, 1, t) \in K_{\exp}\) -- three cone rows, no other
+structure -- also returns =numerical_failure= (=obj = -9.21e+11=).
+
+** Mismatch 2/3: power-cone domain violation (C-INF, C-NEAR)
+
+pounce returns =numerical_failure= (=obj = 7.95e-02= at \(T=1.0\)) where both
+SCS and CLARABEL return =infeasible=. Because the status is =numerical_failure=
+and not =optimal=, no *invalid* answer is being certified -- but the returned
+objective is a small finite number that looks nothing like a divergence, so the
+status is the only signal the caller has.
+
+Invariance probes:
+
+- *tolerance / iteration limit*: 9 combinations of =tol= in {default, 1e-6,
+  1e-10} x =max_iter= in {default, 500, 2000} all give =numerical_failure= at
+  exactly 12 iterations. The solver is not iteration-limited -- it terminates
+  at the same point every time and simply has no certificate to report.
+- *alpha*: =numerical_failure= for \(\alpha \in \{0.1, 0.25, 0.5, 0.75, 0.9\}\).
+  Not an extreme-exponent effect.
+- *constant vs. variable violation*: the fully degenerate probe where the
+  \(y\)-component is the *constant* \(-1\) (slack triple \((w,-1,1)\), visible
+  in \(h\) alone with no variable involved) also returns =numerical_failure=,
+  so presolve does not catch it either.
+- *cone type*: the identical \((w,-1,1)\) shape on an =("exp",3)= cone likewise
+  returns =numerical_failure=. This is *not* power-cone-specific.
+
+* Cross-check / Verification
+
+** Cone orientation verified before accusing pounce
+
+Both encodings were confirmed against known-answer instances *inside the same
+script*, before any infeasible case was run:
+
+- exp cone: the =solve_socp= docstring GP \(\min x + 1/x\) returns =optimal=
+  with =obj = 1.9999999933= (known optimum 2).
+- power cone: \(\min w\) s.t. \((w, 4, 1) \in K_{0.5}\) returns
+  \(-1.9999999869\) (known optimum \(-2\), namely \(-\sqrt{4 \cdot 1}\)).
+
+The cvxpy power-cone oracle uses the permuted form: cvxpy
+=PowCone3D(u,v,w,alpha)= means \(u^\alpha v^{1-\alpha} \ge |w|\), so pounce
+\((x,y,z)\) = cvxpy \((w,u,v)\). The =C-FEAS= control agrees with the closed
+form \(-\sqrt{(T-2)\cdot 1}\) to 4.1e-09, confirming the permutation is right
+rather than coincidentally consistent.
+
+** Three independent oracles
+
+ECOS, SCS and CLARABEL were run on every family-A/B case through a DCP
+=cp.exp(...)= model (built independently of the pounce =G/h= matrices, not
+translated from them). All three agree with each other and with the analytic
+threshold \(\delta^* = 2-2\ln 2\) on all six cases. SCS and CLARABEL agree on
+family C. There is no oracle disagreement anywhere in this run.
+
+** Driver baseline: the symmetric path reports both certificates correctly
+
+The same two status labels *are* produced by pounce on symmetric cones:
+
+| Probe                                              | pounce status     |
+|----------------------------------------------------+-------------------|
+| LP: x1+x2<=0, -x1-x2<=-1 (Farkas (1,1))            | primal_infeasible |
+| LP: min -x s.t. x>=0 (recession ray)               | dual_infeasible   |
+| SOC: min -t s.t. t>=\|\|x\|\| (recession ray)      | dual_infeasible   |
+| EXP: min u s.t. (u,1,t) in Kexp (recession ray)    | numerical_failure |
+
+So the gap is localized to the *non-symmetric HSDE driver*
+(=crates/pounce-convex/src/hsde_nonsym.rs=), not to pounce's status machinery in
+general. That driver clearly does have a cone-aware primal-infeasibility
+detector -- it fires correctly on all of family A -- but it does not fire when
+the infeasibility is a *cone-domain* violation (the \(y\) or \(z\) component
+driven non-positive), and there is no dual-infeasibility (recession) detector
+on the exp/power path at all.
+
+* Verdict
+
+*SOLVER_LIMITATION.* On 3 of 10 instances pounce returns =numerical_failure=
+where all available oracles return a definite =infeasible= or =unbounded=
+certificate: an unbounded exp-cone program (B-UNB, reducible to a 2-variable
+3-row instance), and a power-cone program whose cone-domain requirement
+\(y \ge 0\) is violated at every feasible point (C-INF, C-NEAR). Both are
+invariant to =tol= (down to 1e-10), to =max_iter= (up to 2000, terminating at
+the same 12 iterations), and -- for family C -- to \(\alpha \in [0.1, 0.9]\) and
+to the cone type (the same shape on an =("exp",3)= cone fails identically). The
+symmetric LP/SOC path emits both =primal_infeasible= and =dual_infeasible=
+correctly on matching probes, so the gap is specific to the non-symmetric HSDE
+driver: it has a working cone-aware Farkas detector for *linear-combination*
+infeasibility (family A passes at a 0.016 margin from the threshold) but none
+for *cone-domain* infeasibility, and no recession-ray detector for
+unboundedness.
+
+This is a limitation, not a bug. In no case does pounce certify a wrong answer:
+=numerical_failure= is an honest "did not conclude", and every feasible control
+was solved correctly. Critically, the failure mode this run was designed to hunt
+-- a false =primal_infeasible= on a barely-feasible instance -- was *not* found:
+=A-FEAS= at \(\delta = 0.60\) (0.0137 inside the analytic threshold) and
+=C-FEAS= at \(T = 2.05\) (cone \(y\)-component 0.05 from the domain boundary)
+are both solved to =optimal= with 1e-09-level accuracy. The practical cost of
+the limitation is diagnostic quality rather than correctness: a caller cannot
+distinguish "your model is infeasible/unbounded -- fix the model" from "the
+solver hit numerical trouble -- try different settings", and the C-INF case is
+the worse of the two because it returns a small, innocuous-looking finite
+objective (7.95e-02) rather than the ~1e12 divergence that at least hints at
+unboundedness in B-UNB.
+
+Reproduce:
+=source .venv-qa/bin/activate && python adversary/runs/2026-07-22_expow_infeasible_unbounded_status.py=

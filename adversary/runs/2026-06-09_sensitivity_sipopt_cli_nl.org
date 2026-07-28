@@ -1,0 +1,58 @@
+#+TITLE: Adversary Run: sIPOPT CLI parametric sensitivity on a .nl (sens_sol_state_1)
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: NLP parameter perturbation via the sIPOPT CLI suffixes (sens_sol_state_1)
+:SOURCE: upstream sIPOPT parametric_cpp example (parametricTNLP.cpp; Pirnay, Lopez-Negrete, Biegler, "Optimal sensitivity based on IPOPT", Math. Prog. Comp. 2012). Fixture copied verbatim from crates/pounce-cli/tests/fixtures/parametric.nl to adversary/fixtures/parametric.nl.
+:KNOWN_OPTIMAL: nominal x* = (0.632653, 0.387755, 0.020408) at p1=5,p2=1; perturbed x*(p1=4.5) = (0.576531, 0.377551, -0.045918)
+:N_VARIABLES: 5 (x1,x2,x3 + parameters p1,p2)
+:N_CONSTRAINTS: 2 model equalities + 2 parameter-pin equalities
+:END:
+
+\[
+\min\; x_1^2 + x_2^2 + x_3^2 \quad\text{s.t.}\quad
+6x_1 + 3x_2 + 2x_3 - p_1 = 0,\;\;
+p_2 x_1 + x_2 - x_3 - 1 = 0,
+\]
+parameters pinned at nominal \(p_1=5,\ p_2=1\); perturbed value \(p_1=4.5\)
+(\(\Delta p_1=-0.5\), \(p_2\) unchanged). The .nl declares the three sIPOPT
+suffixes (=sens_state_1=, =sens_state_value_1=, =sens_init_constr=) that trigger
+the post-optimal step. The CLI writes the perturbed primal as the
+=sens_sol_state_1= real-var suffix in the emitted .sol.
+
+CLI path used: ~/Users/jkitchin/projects/pounce/target/release/pounce <nl> <sol>~
+(no flags) -> parsed =sens_sol_state_1= out of the .sol.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Quantity                          | pounce (sens_sol_state_1) | oracle (scipy FD re-solve)        |
+|-----------------------------------+---------------------------+-----------------------------------|
+| x_perturbed (p1=4.5)              | (0.576531, 0.377551, -0.045918) | re-solve (0.576531, 0.377551, -0.045918) |
+| implied dx/dp1                    | (0.112245, 0.020408, 0.132653) | central FD (0.112291, 0.020334, 0.132625) @ delta=1e-6 |
+| closed-form affine slope dx/dp1   | -                         | (0.112245, 0.020408, 0.132653)    |
+| wall time                         | 0.0098s (CLI process)     | 0.0027s                           |
+
+* Cross-check / Verification
+- pounce =sens_sol_state_1= vs full independent re-solve at p1=4.5: rel-inf err 2.33e-08.
+- pounce vs first-order FD predictor x_nom + dx/dp1*Dp1: rel-inf err 3.71e-05.
+- dx/dp1 implied-by-pounce vs central FD: rel-inf err 7.41e-05 at delta=1e-6.
+  This residual is scipy/SLSQP FD truncation noise on the ORACLE, not pounce:
+  refining the FD step (delta=1e-3) and the exact closed-form affine slope
+  (x*(6)-x*(4))/2 = (0.112245, 0.020408, 0.132653) both agree with pounce's
+  implied slope to ~6 digits. The problem is affine in p1 (linear constraints,
+  quadratic objective), so the first-order step is exact -- consistent with the
+  2.3e-8 match to the full re-solve.
+- Matches the upstream sIPOPT golden output (libsipopt-3.14.19) recorded in the
+  repo's end-to-end test to <1e-8 per component.
+
+* Verdict
+PASS - the sIPOPT CLI sensitivity path produces a =sens_sol_state_1= perturbed
+primal that matches an independent scipy re-solve at the perturbed parameter to
+2.3e-8 and the exact closed-form dx/dp1 to ~6 digits. The only larger residual
+(7.4e-5) is finite-difference noise in the oracle, not a pounce error. The CLI
+parametric-sensitivity path is correct.

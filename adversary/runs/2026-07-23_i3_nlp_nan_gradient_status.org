@@ -1,0 +1,34 @@
+#+TITLE: i3 — false Solve_Succeeded at a non-KKT point on 1/x from an extreme-scale start
+#+DATE: 2026-07-23
+
+* Verdict: FAIL (SOLVER_BUG) — #292/#308 (finiteness/scale guard) + #286/#307 residual
+
+Problem: min 1/x over the BOUND x in [1e-12, 10], x0 = 1e-12 (grad = -1e24 at
+start). True optimum x*=10, f*=0.1 (objective monotone decreasing; optimum at the
+upper bound).
+
+| solver / config                          | x       | success | KKT (dual inf) |
+|------------------------------------------+---------+---------+----------------|
+| pounce.minimize, DEFAULT quasi-Newton    | 2.837   | True    | 0.124 (NOT 0)  |
+| pounce.minimize, exact Hessian           | 10.0    | True    | ~0 (bound act) |
+| pounce CLI on pure-bound .nl (exact H)   | 10.0    | Optimal | ~0             |
+| ipopt MA57 (exact Hessian)               | 10.0    | optimal | -              |
+| ipopt L-BFGS (MATCHED approx), same x0   | 9.9953  | optimal | -              |
+| scipy L-BFGS-B                           | 10.0    | optimal | -              |
+
+The DEFAULT ~pounce.minimize(fun, x0, jac=...)~ call (no Hessian -> quasi-Newton,
+the common scipy-style usage) returns x=2.837 with success=True/status=0. That
+point is NOT stationary: |grad|=0.124 and NEITHER bound is active (dual
+infeasibility 0.124, not ~0). A false Solve_Succeeded.
+
+Mechanism (from the solver's own INFO log): the extreme objective scale
+(obj_scale=1e-8) masks the unscaled KKT error 0.124 -> scaled 1.2e-9 < tol 1e-4.
+The obj-scale certificate guard logs "refusing a termination certificate masked
+by an extreme objective scale; continuing" but the quasi-Newton path nonetheless
+terminates there claiming success. The exact-Hessian path escapes it.
+
+NOT a shared quasi-Newton blind spot: ipopt with its OWN limited-memory (L-BFGS)
+Hessian approximation, from the IDENTICAL x0=1e-12, reaches x=9.9953. So the
+false success is pounce-specific.
+
+Repro: python adversary/runs/2026-07-23_i3_nlp_nan_gradient_status.py

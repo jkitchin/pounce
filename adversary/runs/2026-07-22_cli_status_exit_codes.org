@@ -1,0 +1,211 @@
+#+TITLE: Adversary Run: CLI/.nl status reporting + `pounce verify` oracle
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp (CLI / .nl surface)
+:CLASS: infeasibility / unboundedness / status-reporting correctness
+:SOURCE: AMPL `solve_result_num` convention (0-99 solved, 100-199 solved to reduced accuracy, 200-299 infeasible, 300-399 unbounded, 400-499 limit, 500-599 failure); Ipopt 3.14.19 (/opt/homebrew/bin/ipopt) on identical .nl files as the independent oracle; analytic ground truth per instance.
+:KNOWN_OPTIMAL: per instance (see table)
+:N_VARIABLES: 1-40
+:N_CONSTRAINTS: 0-1
+:END:
+
+Six .nl instances written by Pyomo, one per intended AMPL status class, plus
+four =pounce verify= corruption cases.
+
+| instance         | model                                                   | ground truth              |
+|------------------+---------------------------------------------------------+---------------------------|
+| =optimal=        | min x²+y² s.t. x+y=1                                    | x=y=1/2, f*=1/2           |
+| =infeasible_lin= | min x²+y² s.t. x+y≥3, x+y≤1, x,y∈[-10,10]               | empty feasible set        |
+| =infeasible_nl=  | min x+y s.t. x²+y²≤1, x+y≥5                             | empty feasible set        |
+| =unbounded_lin=  | min x+y s.t. x-y=0, x,y free                            | f → -∞                    |
+| =unbounded_exp=  | min -exp(x) s.t. x≥0                                     | f → -∞ (unbounded)        |
+| =iterlimit=      | chained Rosenbrock n=40, Σx≥1, =max_iter=3=              | must stop at the limit    |
+
+Verifier cases: an equality-constrained QP (perturb each primal), a bounded
+1-D problem (push x outside its box), a nonlinear inequality (x²+y²≤1, push x
+to 3.0), plus a tolerance-boundary sweep around =--feas-tol 1e-6=.
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+** (a)+(b) CLI exit codes and .sol =solve_result_num=
+
+| instance       | expected class | pounce exit | pounce srn | ipopt srn | srn verdict |
+|----------------+----------------+-------------+------------+-----------+-------------|
+| optimal        | solved (0-99)  |           0 |          0 |         0 | OK          |
+| infeasible_lin | infeasible     |           1 |        200 |       200 | OK          |
+| infeasible_nl  | infeasible     |           1 |        200 |       200 | OK          |
+| unbounded_lin  | unbounded      |           1 |        300 |       300 | OK          |
+| unbounded_exp  | unbounded      |       *0*   |     *100*  |       502 | *WRONG*     |
+| iterlimit      | limit          |           1 |        400 |       400 | OK          |
+
+*(a)* pounce's process exit code takes only two values, 0 (=SolveSucceeded= /
+=SolvedToAcceptableLevel=) and 1 (everything else); in =-AMPL= mode it is
+always 0. It therefore does *not* discriminate infeasible / unbounded /
+iteration-limit. This is deliberate and documented in
+=crates/pounce-cli/src/main.rs::nlp_exit_code= (the status channel is the
+=.sol='s =solve_result_num=, and a non-zero exit would make Pyomo raise
+=ApplicationError= instead of parsing the =.sol=). Ipopt's AMPL driver exits 0
+for every one of these. Not a defect — but a script that branches on the exit
+code alone cannot tell infeasible from unbounded from limit; it must read
+=solve_result_num=.
+
+*(b)* Five of six =solve_result_num= codes are correct and match Ipopt exactly.
+=unbounded_exp= is wrong, and wrong in the worst direction: pounce reports
+=SolvedToAcceptableLevel=, =solve_result_num=100= (the *solved* family) and
+exit 0 on a problem with no finite optimum.
+
+** The =unbounded_exp= failure in detail
+
+Model: =min -exp(x) s.t. x ≥ 0=, x free above. Deterministic across repeats.
+
+#+begin_example
+POUNCE 0.9.0: SolvedToAcceptableLevel
+objno 0 100                       <- AMPL "solved to reduced accuracy"
+x* = 110.39591271863902
+#+end_example
+
+pounce's *own* JSON report simultaneously records:
+
+#+begin_example
+solution.status            = SolvedToAcceptableLevel
+solution.solve_result_num  = 100
+solution.objective         = -8.797022816354037e+47
+statistics.final_kkt_error = 8.797022816354037e+47
+statistics.restoration_outer_iters = 6
+#+end_example
+
+An objective of -8.8e47 with a KKT error of 8.8e47 reported under a "solved"
+status. Ipopt on the same =.nl= terminates =Error in step computation=,
+=solve_result_num=502= — a failure code, i.e. it makes no solution claim.
+
+Downstream impact through the Pyomo link (the actual consumer):
+
+#+begin_example
+pounce termination_condition = optimal        <-- !!
+x = 110.39591271863902, obj = -8.797022816354037e+47
+#+end_example
+
+Pyomo maps srn=100 to =TerminationCondition.optimal= and loads the diverging
+iterate into the model. Same channel the GAMS/AMPL links read.
+
+Nearby variants were checked to bound the scope — only the =exp= objective
+trips it:
+
+| variant                                | pounce srn                       | ipopt srn |
+|----------------------------------------+----------------------------------+-----------|
+| min -exp(x), x≥0                       | *100 SolvedToAcceptableLevel*    |       502 |
+| min -x³, x≥0                           | 500 ErrorInStepComputation       |       502 |
+| min x, x≤1e6 (LP route)                | 300 unbounded                    |       300 |
+| min -exp(x)+y², x-y≥0                  | 500 ErrorInStepComputation       |       502 |
+| min log(x), x≥1e-8                     | 500 ErrorInStepComputation       |       502 |
+| min -x-y, x²-y≤0 (QCQP route)          | 300 unbounded                    |       300 |
+
+So the specialized LP/QCQP routes detect unboundedness correctly (300, exact
+agreement with Ipopt), and the general NLP route usually returns a 500-family
+failure — which is honest and matches Ipopt. The one case that escapes into
+the *solved* family is the smooth exponential divergence.
+
+Likely mechanism (read-only inspection, not confirmed by instrumentation): the
+=StopAtAcceptablePoint= terminal fallback in
+=crates/pounce-algorithm/src/ipopt_alg.rs= rolls a numerical breakdown back to
+a recorded "acceptable" iterate. On an unbounded problem *every* iterate is
+perfectly feasible (constraint violation 1.7e-10 here), so the
+feasibility-keyed acceptable machinery has nothing to reject on, and the
+diverging iterate is relabeled as solved. =acceptable_dual_inf_tol= (default
+1e10) is nominally checked in =conv_check/opt_error.rs::passes_acceptable_tols=
+but the returned point has dual infeasibility 8.8e47, so whatever gate fired
+was not applied to the returned point.
+
+** (c)+(d) =pounce verify=
+
+| verifier case                                  | exit | expected | verdict |
+|------------------------------------------------+------+----------+---------|
+| (d) genuine eq-constrained QP                  |    0 |        0 | OK      |
+| (d) genuine bounded 1-D                        |    0 |        0 | OK      |
+| (d) genuine nonlinear inequality               |    0 |        0 | OK      |
+| (c) primal x + 1.0 (eq violated by 1.0)        |   20 |       20 | OK      |
+| (c) other primal - 5.0 (eq violated by 5.0)    |   20 |       20 | OK      |
+| (c) x=5 pushed outside box [0,1]               |   20 |       20 | OK      |
+| (c) x=3 in x²+y²≤1 (violation 8.5)             |   20 |       20 | OK      |
+
+Tolerance-boundary sweep (=--feas-tol 1e-6=), perturbing one primal by δ:
+
+| δ     | reported violation | exit | verdict |
+|-------+--------------------+------+---------|
+| 1e-9  | 4.993e-10          |    0 | accept  |
+| 1e-8  | 9.499e-9           |    0 | accept  |
+| 1e-7  | 9.950e-8           |    0 | accept  |
+| 1e-6  | 9.995e-7           |    0 | accept  |
+| 1e-5  | 9.999e-6           |   20 | REJECT  |
+| 1e-4  | 1.000e-4           |   20 | REJECT  |
+| 1e-2  | 1.000e-2           |   20 | REJECT  |
+
+The flip lands exactly at the declared tolerance, the reported violation
+magnitude matches the injected perturbation to 3 digits, and both hashes of
+=.nl= and =.sol= are printed. *The verifier is sound: no false accepts, no
+false rejects.*
+
+Independently, =pounce verify --require-optimal= on the bad =unbounded_exp=
+=.sol= *does* reject it (exit 20, "feasible but not first-order optimal", KKT
+residual 8.797e47), while plain =verify= correctly returns 0 because the point
+genuinely is feasible. The verifier is not implicated in the failure — it
+catches it.
+
+** (e) library API vs CLI statuses
+
+| instance       | library =minimize()=                        | CLI (.sol)                             | agree? |
+|----------------+---------------------------------------------+----------------------------------------+--------|
+| optimal        | success=True, =Solve_Succeeded=             | srn=0, Optimal Solution Found          | yes    |
+| infeasible_lin | success=False, =Infeasible_Problem_Detected=| srn=200, primal infeasible             | yes    |
+| unbounded_lin  | success=False, =Maximum_Iterations_Exceeded=| srn=300, unbounded (dual infeasible)   | *no*   |
+| iterlimit      | success=False, =Maximum_Iterations_Exceeded=| srn=400, MaximumIterationsExceeded     | yes    |
+| unbounded_exp  | success=False, =Error_In_Step_Computation=  | srn=100, *SolvedToAcceptableLevel*     | *no*   |
+
+Two surface disagreements. =unbounded_lin= is benign: the CLI auto-routes the
+LP to the specialized LP IPM which proves unboundedness (300), while the
+library path stays on the general NLP and honestly reports the iteration limit
+— both are non-success, neither claims a solution. =unbounded_exp= is the
+serious one, and it cuts the right way for the diagnosis: the *library* on the
+same model returns =Error_In_Step_Computation= (a 500-family failure, agreeing
+with Ipopt), while the *CLI/.nl* path returns solved. Two independent
+references (Ipopt 502, pounce's own library API) both refuse to call this
+solved.
+
+* Cross-check / Verification
+- Ipopt 3.14.19 on byte-identical =.nl= files: 0/200/200/300/*502*/400 —
+  agrees with pounce on five of six, disagrees exactly where pounce claims
+  solved.
+- =pounce verify --require-optimal= rejects the =unbounded_exp= =.sol= with
+  KKT residual 8.797e47 (exit 20).
+- =pounce.minimize= on the same model returns =Error_In_Step_Computation=.
+- Pyomo =SolverFactory('pounce')= turns srn=100 into
+  =TerminationCondition.optimal= and loads x=110.4 into the model.
+- Deterministic: three consecutive CLI runs all produce =objno 0 100=.
+- Verifier corruption battery (4 cases) + 7-point tolerance sweep: no false
+  accept, no false reject; flip lands exactly at =--feas-tol=.
+
+* Verdict
+*SOLVER_BUG* — on =min -exp(x) s.t. x ≥ 0=, an unbounded NLP, the CLI/.nl path
+writes =solve_result_num=100= ("solved to reduced accuracy"), status
+=SolvedToAcceptableLevel=, and exits 0, while its own report records objective
+-8.8e47 and KKT error 8.8e47. Two independent references refuse the claim
+(Ipopt: 502; pounce's own =minimize()=: =Error_In_Step_Computation=), and
+=pounce verify --require-optimal= rejects the resulting =.sol=. The consequence
+is a false "optimal" through Pyomo (and the same =solve_result_num= channel
+that the GAMS/AMPL links read), which is why this is release-blocking on this
+surface rather than a mere labeling nit. The correct code for this outcome is
+in the 500 family (what the other five divergent-NLP variants already return),
+or 300 if unboundedness is actually proved.
+
+Everything else on the surface passed: the other five status classes map to
+the right AMPL ranges and match Ipopt exactly; the two-valued exit code is
+documented design, not a defect (scripts must read =solve_result_num=, not
+=$?=); and =pounce verify= is sound in both directions — it rejected every
+corrupted =.sol=, accepted every genuine one, flipped exactly at its declared
+tolerance, and caught the =unbounded_exp= point under =--require-optimal=. The
+adversary methodology's reliance on =pounce verify= is well founded.

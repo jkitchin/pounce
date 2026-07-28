@@ -1,0 +1,212 @@
+#+TITLE: Adversary Run: Non-finite and Malformed Numeric Input (API contract fuzz)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY:   api
+:CLASS:    input validation / robustness (NaN, +/-Inf, dtype, layout, shape, x0)
+:SOURCE:   Contract test (no published instance). Base QP is a strictly convex
+:SOURCE+:  4-variable QP cross-checked against cvxpy/CLARABEL.
+:KNOWN_OPTIMAL: -3.126865671642e+00 (cvxpy CLARABEL, all three bound regimes)
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 1 equality, 2 inequalities, 4 box bounds
+:END:
+
+Base problem, solved by =pounce.solve_qp= and by cvxpy/CLARABEL:
+
+\[
+\min_{x\in\mathbb{R}^4}\ \tfrac12 x^\top P x + c^\top x
+\quad\text{s.t.}\quad Ax = b,\ Gx \le h,\ \ell \le x \le u
+\]
+
+\[
+P=\begin{pmatrix}4&1&0&0\\1&3&1&0\\0&1&2&1\\0&0&1&5\end{pmatrix},\
+c=\begin{pmatrix}-1\\-2\\-3\\-4\end{pmatrix},\
+A=(1\,1\,1\,1),\ b=2,\
+G=\begin{pmatrix}1&0&0&0\\0&1&-1&0\end{pmatrix},\ h=\begin{pmatrix}0.5\\0.3\end{pmatrix}
+\]
+
+The unconstrained-in-box optimum is interior to $[-5,5]^4$, so the boxed,
+free, and mixed-infinite-bound variants all share the same optimum
+$-3.126865671642$; this makes an ignored or misread bound directly visible.
+
+47 cases were run, each in its own subprocess so a crash would be detected
+rather than killing the harness:
+
+- legitimate $\pm\infty$ bounds (all-inf, mixed inf/finite) vs finite-huge
+  ($10^{12}$) and =None= references;
+- NaN injected into each of =P, c, A, b, G, h, lb, ub=;
+- $\pm\infty$ injected into each of =P, c, A, b, G, h=;
+- inverted/degenerate bounds, including =lb=+inf= and =ub=-inf=;
+- dtype float32, int64; Fortran order; transposed view; non-contiguous
+  strided slice; reversed-stride view; read-only arrays;
+- seven shape mismatches;
+- =x0= containing NaN / $+\infty$ / $-\infty$ / $10^{18}$, wrong length,
+  int dtype, through =pounce.minimize=.
+
+* Results
+:PROPERTIES:
+:STATUS:   FAIL
+:END:
+
+| Case group                         | Cases | Outcome                                  |
+|------------------------------------+-------+------------------------------------------|
+| legitimate +/-Inf bounds           |     5 | PASS, relerr vs cvxpy <= 2.8e-16         |
+| NaN in P/c/A/b/G/h/lb/ub           |     9 | PASS, clean =ValueError= (see note)      |
+| +/-Inf in P/c/A/b/G/h              |     8 | PASS, clean =ValueError=                 |
+| inverted bounds lb>ub (finite)     |     1 | PASS, =primal_infeasible=                |
+| *lb=+inf / ub=-inf*                |     2 | *FAIL - bound silently dropped*          |
+| dtype / layout / read-only views   |     7 | PASS, bit-identical to baseline          |
+| mismatched shapes                  |     7 | PASS, clean =ValueError= / =IndexError=  |
+| *x0 containing NaN*                |     1 | *FAIL - NaN returned as Solve_Succeeded* |
+| x0 +/-Inf, 1e18, wrong len, int    |     5 | PASS                                     |
+
+Reference objectives (cvxpy CLARABEL): boxed =-3.126865671642e+00=, free
+=-3.126865671642e+00=, mixed =-3.126865671642e+00=.
+
+** Finding 1 (SOLVER_BUG): =lb=+inf= / =ub=-inf= silently ignored in =solve_qp=
+
+#+begin_example
+lb=+inf (all)      status=optimal   obj=-3.126865671642   max lb violation = inf
+ub=-inf (all)      status=optimal   obj=-3.126865671642   max ub violation = inf
+lb[0]=+inf only    status=optimal   obj=-3.126865671642   max lb violation = inf
+ub[0]=-inf only    status=optimal   obj=-3.126865671642   max ub violation = inf
+lb=+1e12  (finite analogue)  status=primal_infeasible
+ub=-1e12  (finite analogue)  status=primal_infeasible
+#+end_example
+
+$x \ge +\infty$ is infeasible. =solve_qp= returns =status="optimal"= with a
+point violating the stated bound by $+\infty$. The finite analogue
+($\ell = 10^{12}$) is correctly reported =primal_infeasible=, and finite
+inverted bounds ($\ell=1 > u=0$) are also correctly =primal_infeasible= --- so
+the defect is specifically sign-agnostic filtering of infinite bounds:
+any non-finite bound appears to be dropped as "absent" without checking that
+the sign makes it the *unbounded* direction. Reproduces through
+=solve_qp_batch= as well (=optimal=, same objective).
+
+=pounce.minimize= gets this *right* --- =bounds=[(inf, 10), ...]= raises
+=ValueError: bounds[0] is reversed: lower inf > upper 10.0=, and NaN bounds
+raise a clear, well-worded error. So the validation exists in one frontend and
+not the other; the contract is inconsistent across the public API.
+
+** Finding 2 (SOLVER_BUG): NaN in =x0= returned as =Solve_Succeeded=
+
+This is exactly the hunted failure mode: a NaN silently propagating into a
+returned "optimal" solution.
+
+#+begin_example
+min (x0-1)^2 + (x1-2)^2   (analytic optimum 0 at (1,2))
+
+x0=[1, nan]       success=True  status=0  msg=Solve_Succeeded  fun=nan  x=[1., nan]  nfev=2 nit=0
+x0=[nan, nan]     success=True  status=0  msg=Solve_Succeeded  fun=nan  x=[nan, nan] nfev=2 nit=0
+x0=[nan, 2]       success=True  status=0  msg=Solve_Succeeded  fun=nan  x=[nan, 2.]  nfev=2 nit=0
+x0=[0, 0] control success=True  status=0  msg=Solve_Succeeded  fun=0.0  x=[1., 2.]   nfev=8 nit=1
+#+end_example
+
+=nit=0= is the tell: the solver evaluates once at $x_0$, every convergence
+test comparing a NaN residual against a tolerance evaluates false (i.e. "not
+violated"), and the NLP loop declares =Solve_Succeeded= at iteration zero. The
+caller receives =success=True=, =status=0=, =message="Solve_Succeeded"= and a
+solution vector containing NaN.
+
+Scope:
+- reproduces with analytic =jac= and with finite-difference gradients;
+- reproduces with equality constraints attached (=fun=nan=, =x=[1, nan]=);
+- reproduces on the forced =solver_selection="nlp"= path;
+- does *not* reproduce with =bounds= supplied (bound clipping repairs $x_0$ to
+  a finite point, and the solve then succeeds legitimately) --- so the bug is
+  masked by exactly the argument a user is least likely to pass;
+- the =auto= route happens to error out (=solve_qp: `P` contains NaN or Inf=),
+  because QP detection probes the Hessian at $x_0$ --- an accidental catch,
+  not a validation.
+
+Related, same root cause (no NaN guard on the objective path): an objective
+that *returns* NaN also yields =success=True status=0=:
+
+#+begin_example
+f(x) -> nan       success=True status=0 fun=nan  x=[0., 0.]
+jac(x) -> nan     success=True status=0 fun=5.0  x=[0., 0.]   (stops at x0, claims success)
+#+end_example
+
+The =jac->nan= case is arguably worse than the NaN case: =fun= is *finite*
+(5.0, the value at $x_0$) so a caller checking =isfinite(result.fun)= is not
+warned, yet the returned point is $x_0$, not a minimizer.
+
+** What passed (worth recording)
+
+- *Legitimate infinite bounds are correct.* =lb=-inf/ub=+inf= (all and mixed)
+  agree with both the $10^{12}$ finite-bound reference and cvxpy to
+  $\le 2.8\times10^{-16}$; inf-bound vs huge-bound relerr is =0.0= and
+  =1.4e-16=. No spurious rejection, no big-M contamination.
+- *Data validation is thorough and the messages are good*, e.g.
+  =solve_qp: `A` contains NaN or Inf=,
+  =solve_qp: `G` has 2 rows but `h` has length 1=,
+  =solve_qp: `A` has 6 columns but n=4 (from `c`)=.
+  One cosmetic wart: =nan_P_00= (NaN on the diagonal) escapes the explicit
+  guard and surfaces as =numpy.linalg.LinAlgError: Eigenvalues did not
+  converge= from the PSD check --- still a clean exception, but the message
+  does not name the offending input the way every other slot does.
+- *No crashes, no panics, no hangs* in any of the 47 cases.
+- *numpy view handling is exact.* float32, Fortran order, a transposed view, a
+  strided non-contiguous slice, a reversed-stride view, and read-only arrays
+  all returned objectives bit-identical (relerr =0.0=, float32 =1.4e-16=) to
+  the baseline. No stride-ignoring raw-buffer read.
+- *x0 = +/-Inf* returns =success=False, status=-13= --- not a clean exception,
+  but it does not claim success, so it is not a silent wrong answer.
+- *x0 = [1e18, -1e18]* recovers the exact optimum.
+
+* Cross-check / Verification
+
+- Oracle: cvxpy 1.9.1 / CLARABEL, three separate models (boxed, unbounded,
+  mixed infinite/finite bounds). All agree with pounce's *valid*-input answers
+  to $\le 2.8\times10^{-16}$, so the base formulation is sound and the
+  findings are not formulation artifacts.
+- Finding 1 is self-refuting inside pounce: the finite analogue
+  ($10^{12}$, and $\ell=1>u=0$) is correctly =primal_infeasible=, while the
+  $\infty$ version is =optimal=. Two different answers to the same question,
+  differing only in whether the infeasible bound is finite. Additionally
+  =pounce.minimize= rejects the identical bound with a clear =ValueError=, so
+  pounce's own documented contract is that this input is invalid.
+- Finding 2 is self-evident: =fun=nan= with =message="Solve_Succeeded"= and
+  =nit=0= cannot be an optimum of a function whose analytic optimum is 0 at
+  (1,2), and the control run from a finite $x_0$ finds it.
+- Every case ran in an isolated subprocess; all 47 exited 0 (no segfault, no
+  Rust abort). Total wall time well under budget; no single case exceeded 1 s.
+
+* Verdict
+
+*SOLVER_BUG* --- two confirmed silent-wrong-answer paths in the public API.
+
+(1) =solve_qp= / =solve_qp_batch= drop $\pm\infty$ bounds without checking the
+sign, so =lb=+inf= or =ub=-inf= --- an infeasible constraint --- is silently
+discarded and the solver returns =status="optimal"= at a point violating the
+stated bound by $+\infty$. The correct answer, which pounce itself gives for
+the finite analogue $\ell=10^{12}$, is =primal_infeasible=. The fix is a
+sign-aware test (=lb= is absent only when $-\infty$; =ub= only when $+\infty$)
+plus the =lb <= ub= check that =pounce.minimize= already performs.
+
+(2) =pounce.minimize= accepts a NaN-contaminated =x0= and returns
+=success=True, status=0, message="Solve_Succeeded", fun=nan= with NaN in =x=
+after zero iterations, because NaN comparisons against the convergence
+tolerances all evaluate false. The same hole makes a NaN-returning objective
+or gradient report =Solve_Succeeded=; in the NaN-gradient case =fun= is finite
+so the caller has no signal at all. The fix is a finiteness check on =x0= at
+the API boundary (raising the way the =bounds= validator already does) and a
+NaN guard in the convergence test so a non-finite residual can never satisfy
+it.
+
+Both are pre-release blockers under the stated criterion: a returned solution
+carrying NaN, or a violated-by-infinity bound, under =status="optimal"= /
+=Solve_Succeeded=.
+
+Everything else in the sweep passed cleanly, including the subtle cases the
+run was designed to break: legitimate infinite bounds are exactly right, and
+transposed / Fortran / strided / read-only numpy views are handled without a
+single stride error.
+
+Reproduce:
+#+begin_src sh
+source /Users/jkitchin/projects/pounce/.venv-qa/bin/activate
+python adversary/runs/2026-07-22_api_nonfinite_input.py     # full 47-case sweep
+python adversary/runs/2026-07-22_api_nonfinite_confirm.py   # focused confirmation
+#+end_src

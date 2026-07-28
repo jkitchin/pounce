@@ -1,0 +1,86 @@
+#+TITLE: SOS adversary — Motzkin polynomial (nonnegative but not SOS)
+#+DATE: 2026-06-15
+
+* Problem
+The Motzkin polynomial
+
+: M(x, y) = x^4 y^2 + x^2 y^4 + 1 - 3 x^2 y^2
+
+Degree 6, two variables. By AM-GM on the three monomials x^4y^2, x^2y^4, 1
+(geometric mean x^2y^2), M(x,y) >= 0 everywhere with global minimum
+
+: M* = 0  attained at the FOUR points (x, y) = (+-1, +-1).
+
+It is the canonical example of a polynomial that is *nonnegative but NOT a sum
+of squares*, and the textbook hard case for the SOS / moment (Lasserre)
+hierarchy.
+
+- SOURCE: T. S. Motzkin, "The arithmetic-geometric inequality" (1967); used as
+  the standard counterexample by Reznick, Parrilo, and Lasserre.
+- KNOWN_OPTIMAL: 0.0 at (+-1, +-1) (four global minimizers)
+- N_VARIABLES: 2
+- DEGREE: 6  (Lasserre relaxation orders 0..3 tested)
+
+* Why adversarial
+- UNCONSTRAINED: M is nonnegative-but-not-SOS *and* non-coercive
+  (M(x,0) = M(0,y) = 1, flat to infinity). There is no SOS sigma_0 with
+  M - lambda = sigma_0 for any lambda, so the unconstrained SOS/Lasserre
+  relaxation is structurally unbounded at *every* order. The correct outcome is
+  failure to return a finite bound, NOT a wrong bound.
+- CONSTRAINED to a box [-2,2]^2 (Putinar): the feasible set is compact, the
+  Archimedean condition holds, and the hierarchy converges; pounce should
+  certify M*=0 and recover all four minimizers.
+
+* Oracle (independent of pounce)
+- Dense grid 1601^2 over [-3,3]^2: min = 1.873e-05 near (-0.9975, -1.0012).
+- 400-start Nelder-Mead over [-2.5,2.5]^2: min = -4.44e-16 at (1, -1).
+- Refutation floor (lowest objective any independent search found, vs known) =
+  ~0.0 (numerically -4.4e-16). No point beats 0.
+
+* pounce result (pounce.sos_minimize)
+** Unconstrained
+| order | lower_bound | is_exact | status         | success |
+|-------+-------------+----------+----------------+---------|
+|     0 | nan         | False    | iteration_limit | False  |
+|     1 | nan         | False    | iteration_limit | False  |
+|     2 | nan         | False    | iteration_limit | False  |
+|     3 | nan         | False    | iteration_limit | False  |
+
+No finite bound at any order — exactly as the theory predicts for the
+unconstrained Motzkin relaxation. lower_bound is nan, so it never EXCEEDS M*.
+
+** Box-constrained [-2,2]^2 (Putinar; g1 = 4 - x^2 >= 0, g2 = 4 - y^2 >= 0)
+| order | lower_bound  | is_exact | status  | num_min | time   |
+|-------+--------------+----------+---------+---------+--------|
+|     0 | 1.4362e-07   | True     | optimal |       4 | 0.008s |
+|     1 | 1.4362e-07   | True     | optimal |       4 | 0.008s |
+|     2 | 1.4362e-07   | True     | optimal |       4 | 0.008s |
+|     3 | 1.4362e-07   | True     | optimal |       4 | 0.008s |
+
+- lower_bound = +1.436e-07 ~= 0 (matches M*=0 to 7 digits; rel/abs error 1.4e-7).
+- is_exact = True; all FOUR minimizers recovered: (+-1.00006, +-1.00006), each
+  with M(point) = +4.07e-08 and inside the box.
+
+* Tolerance note
+The box lower_bound (+1.436e-07) is a hair ABOVE the exact M*=0 (gap -1.44e-7).
+This is an SDP-solver tolerance overshoot at the certificate, well within the
+1e-4 match tolerance and the 1e-5 invalid-bound guard — it does NOT constitute an
+invalid lower bound (it is below every non-optimal point, and matches M*=0 to
+7 digits). Consistent with the "optimal but ~1e-7..1e-8 tolerance" behaviour seen
+in other families (cf. #119/#123, #145). Not a finding.
+
+* Verdict
+VERDICT: PASS
+
+- No invalid lower bound anywhere (the only failure mode that would be a
+  SOLVER_BUG): unconstrained returns nan (never exceeds M*); box returns
+  +1.4e-7 (matches M*=0, not an over-estimate beyond tolerance).
+- The box-constrained Putinar relaxation certifies M*=0 exactly at order 0 and
+  recovers all four global minimizers — correct, fast (8 ms), well-behaved.
+- The unconstrained relaxation's nan/iteration_limit at all orders is the
+  CORRECT, expected behaviour for the Motzkin polynomial (nonneg-but-not-SOS,
+  non-coercive => unbounded relaxation), not a solver defect.
+
+* Files
+- runs/2026-06-15_sos_motzkin.py
+- runs/2026-06-15_sos_motzkin.org

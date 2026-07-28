@@ -1,0 +1,56 @@
+#+TITLE: Adversary report — NLP / HS035 (Beale's inequality-constrained QP)
+#+DATE: 2026-06-09
+#+AUTHOR: pounce adversary agent (nlp family)
+
+* Problem properties
+- FAMILY: nlp
+- CLASS: inequality-constrained convex quadratic program
+  (one linear inequality + nonnegativity bounds)
+- SOURCE: W. Hock & K. Schittkowski, /Test Examples for Nonlinear
+  Programming Codes/, Lecture Notes in Economics and Mathematical
+  Systems 187, Springer-Verlag, 1981 — problem 35 (originally
+  E. M. L. Beale's problem).
+- N_VARIABLES: 3
+- N_CONSTRAINTS: 1 general linear inequality + 3 lower bounds (x >= 0)
+- KNOWN_OPTIMAL: x* = (4/3, 7/9, 4/9), f* = 1/9 = 0.1111111...
+- START: x0 = (0.5, 0.5, 0.5)  (canonical HS starting point)
+
+* Formulation
+#+begin_example
+min  9 - 8 x1 - 6 x2 - 4 x3
+     + 2 x1^2 + 2 x2^2 + x3^2 + 2 x1 x2 + 2 x1 x3
+s.t. x1 + x2 + 2 x3 <= 3
+     x1, x2, x3 >= 0
+#+end_example
+Convex (positive-definite Hessian); the inequality x1+x2+2x3 <= 3 is
+ACTIVE at the optimum (1.333 + 0.778 + 2*0.444 = 3). Solved through ONE
+Pyomo model exported to AMPL .nl, giving both solvers identical EXACT
+analytic derivatives.
+
+* Results
+| solver        | status  |       objective | rel err vs known | iters |   time |
+|---------------+---------+-----------------+------------------+-------+--------|
+| pounce        | optimal | 1.111111139e-01 | 2.80e-09         |     9 | 0.014s |
+| Ipopt 3.14.19 | optimal | 1.111111070e-01 | 3.7e-09          |   n/a | 0.013s |
+
+- x_pounce = (1.33333334, 0.77777777, 0.44444444)
+- x_inf_err vs known = 6.75e-09
+- obj_err vs oracle = 6.92e-09; x_inf_err vs oracle = 1.72e-08
+
+* Cross-check
+- Oracle 1 (Ipopt via Pyomo, exact derivatives): same objective/x to ~1e-8.
+- Oracle 2 (derivative-independent): =pounce verify hs035.nl hs035.sol=
+  exit code = 0 (feasible; active inequality and all bounds satisfied).
+  pounce statistics: final_kkt_error = 2.80e-09, final_constr_viol = 0.0,
+  lambda (inequality multiplier) = 0.2222 (= 2/9, the published HS035 dual).
+
+* Verdict
+VERDICT: PASS
+
+pounce reaches Beale's vertex optimum (4/3, 7/9, 4/9) with f* = 1/9 to
+within 3e-09 relative, with the binding inequality exactly active and the
+recovered multiplier 2/9 matching the published HS035 dual. It agrees with
+Ipopt to ~1e-8 on the same exported model, and the independent
+=pounce verify= feasibility oracle accepts the solution (exit 0). Clean pass
+on an active-inequality convex QP, a class distinct from both HS071 and the
+bound-only HS001.

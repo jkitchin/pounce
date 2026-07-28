@@ -1,0 +1,49 @@
+#+TITLE: Adversary QP cross-check: box-constrained least squares (separable diagonal QP)
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY: qp (convex QP via interior-point method)
+- CLASS: box-constrained least squares / separable diagonal QP
+- SOURCE: Closed-form KKT (derivable). A separable diagonal QP decouples
+  coordinate-wise; the optimum is the projection of the unconstrained
+  minimizer onto each box: x_i* = clamp(t_i, lb_i, ub_i).
+- KNOWN_OPTIMAL: analytic, x* = clip(t, lb, ub); obj* = 0.5 * sum w_i (x_i*-t_i)^2
+  (seed=7 -> obj* = 6.6514113181e+01)
+- N_VARIABLES: 50
+- N_CONSTRAINTS: 100 box bounds (50 lb + 50 ub); no equalities, no general inequalities
+- Active set at optimum: 10 at lb, 16 at ub, 24 interior (nontrivial)
+
+* Formulation
+  min  0.5 * sum_i w_i (x_i - t_i)^2   s.t.  -2 <= x_i <= 2
+Data: w_i ~ U(0.5,3.0) (so P = diag(w) is PD), t_i ~ U(-5,5) (seed=7).
+
+pounce form (minimize 0.5 x'Px + c'x):
+  P = diag(w),  c = -w*t,   lb = -2,  ub = 2.
+pounce.obj omits the constant CONST = 0.5*sum w_i t_i^2; added back in script.
+
+P is PD: min eigenvalue = 5.622e-01 > 0.
+Sign/cone convention: bounds passed via lb/ub kwargs; matches cvxpy xv>=lb, xv<=ub.
+
+* Results
+| quantity                 | pounce            | oracle (CLARABEL) | known (analytic) |
+|--------------------------+-------------------+-------------------+------------------|
+| objective                | 6.6514113181e+01  | 6.6514113209e+01  | 6.6514113181e+01 |
+| status                   | optimal           | optimal           | -                |
+| iters                    | 11                | -                 | -                |
+| time (s)                 | 0.0077            | 0.0049            | -                |
+
+* Cross-check
+- rel_err obj vs known    : 9.46e-12
+- x inf-err vs known       : 3.27e-07
+- rel_err obj vs oracle    : 4.18e-10
+- x inf-err vs oracle      : 1.34e-05
+- pounce vs oracle agree to ~1e-10 in objective; both match the closed form.
+- Active-set structure (interior + lb + ub mix) correctly recovered.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: pounce reports status=optimal and matches both the analytic
+closed-form KKT optimum (9.5e-12 rel obj err, 3.3e-7 in x) and the cvxpy
+CLARABEL oracle (4e-10 rel obj err). Solve time 7.7 ms << 10 s, ~1.6x oracle
+but absolute gap < 0.1 s so no performance flag. No correctness issue.

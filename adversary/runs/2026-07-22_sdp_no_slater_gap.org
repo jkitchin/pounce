@@ -1,0 +1,102 @@
+#+TITLE: Adversary Run: Weakly-Feasible SDP with Nonzero Duality Gap (no Slater point)
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: ill-conditioned / weakly feasible (Slater CQ fails, positive duality gap)
+:SOURCE: L. Vandenberghe & S. Boyd, "Semidefinite Programming", SIAM Review 38(1):49-95, 1996, Section 4 (Duality) -- the standard positive-duality-gap example (p*=0, d*=-1)
+:KNOWN_OPTIMAL: 0.0 (p*; dual d* = -1, gap = 1)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: one 3x3 PSD cone (+ one 1x1 PSD cone in the graded variant)
+:END:
+
+\[
+\begin{aligned}
+\min_{x\in\mathbb{R}^2}\quad & x_1\\
+\text{s.t.}\quad & F(x)=\begin{bmatrix}0 & x_1 & 0\\ x_1 & x_2 & 0\\ 0&0& x_1+1\end{bmatrix}\succeq 0
+\end{aligned}
+\]
+
+A PSD matrix with a zero diagonal entry must have that entire row/column zero,
+so the leading 2x2 block forces \(x_1=0,\ x_2\ge 0\); the (3,3) entry is then
+\(1>0\).  Hence the feasible set is the ray \(\{(0,x_2): x_2\ge 0\}\) and
+\(p^\star = 0\), attained on an unbounded optimal face.  \(F(x)\) is *singular
+at every feasible point* (rank \(\le 2\) of 3): there is **no Slater point**, no
+central path, and the dual optimum is \(d^\star=-1\), a duality gap of 1.
+
+Two variants were run:
+
+- *A (graded)*: the same problem plus \(x_2 \le 1\).  Analytically identical
+  (\(p^\star=0\), still no Slater point, still gap 1) but numerically well
+  posed, so the cvxpy oracles can actually solve it.
+- *B (informational)*: the raw unbounded instance.  In floating point the PSD
+  condition \(\det = -x_1^2 \ge 0\) is "satisfiable" to machine precision with
+  \(|x_1|\sim\sqrt{\varepsilon x_2}\), so as \(x_2\to\infty\) the instance is
+  *numerically* unbounded below.  Not gradable -- see below.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+Variant A (graded), \(p^\star = 0\):
+
+| Solver           | Status             | Objective   | Abs Err vs p* | Iters | Wall Time |
+|------------------+--------------------+-------------+---------------+-------+-----------|
+| pounce solve_socp| optimal            | -6.4379e-08 | 6.44e-08      |    33 | 0.0047 s  |
+| cvxpy CLARABEL   | optimal            | -1.1304e-07 | 1.13e-07      |     - | 0.0025 s  |
+| cvxpy SCS        | optimal_inaccurate | -2.4644e-04 | 2.46e-04      |     - | 0.1352 s  |
+
+Known optimal: 0.0
+
+pounce lands on \(x=(-6.44\times10^{-8},\,0.9488)\).  The optimal matrix is
+maximally ill-conditioned as designed: \(\mathrm{eig}(F(x^\star)) =
+(-4.4\times10^{-15},\ 0.949,\ 1.000)\), an eigenvalue spread of
+\(2.3\times10^{14}\) with the smallest eigenvalue at the negative side of
+machine epsilon -- i.e. pounce converged onto the boundary of the cone where no
+strictly feasible point exists, with a PSD violation of \(4.4\times10^{-15}\)
+(round-off, not a real violation).  It is the *most* accurate of the three on
+this instance, beating CLARABEL slightly and SCS by 3.5 orders of magnitude.
+
+Variant B (informational, not graded):
+
+| Solver           | Status          | Objective    | Note                                    |
+|------------------+-----------------+--------------+-----------------------------------------|
+| pounce           | iteration_limit | -3.4227e-01  | 199 iters, \(x_2\to 8.3\times10^{74}\)  |
+| cvxpy SCS        | optimal_inaccurate | -1.4884e+01 | \(x_2\to 1.3\times10^{6}\)           |
+| cvxpy CLARABEL   | SolverError     | n/a          | raises                                  |
+
+* Cross-check / Verification
+- *svec re-derivation*: the layout (lower triangle, column-major, off-diagonals
+  \(\times\sqrt2\)) was re-derived and asserted numerically against
+  \(\langle X,Y\rangle=\mathrm{svec}(X)\cdot\mathrm{svec}(Y)\) on 5 random
+  symmetric pairs, and the affine map \(s = h - Gv\) was checked to reproduce
+  \(\mathrm{svec}(F(x))\) exactly at a random \(x\).  Both assertions pass, so
+  the encoding is not the source of any discrepancy.
+- *Two independent oracles*: SCS and CLARABEL agree with each other (and with
+  the analytic \(p^\star=0\)) on variant A to \(<2.5\times10^{-4}\); CLARABEL
+  agrees with pounce to \(5\times10^{-8}\).
+- *Analytic optimum*: \(p^\star=0\) is provable in closed form (zero-diagonal
+  argument), so no reference-value uncertainty.
+- *Timing*: pounce 0.0047 s vs CLARABEL 0.0025 s -- a 1.9x gap, but the
+  absolute difference is 2.2 ms, far below the 0.1 s threshold, so not a
+  performance regression.  pounce is 29x faster than SCS.
+
+* Verdict
+*PASS.*  On the well-posed form of the classic Vandenberghe-Boyd
+no-Slater/positive-duality-gap SDP, pounce returns =optimal= with objective
+\(-6.4\times10^{-8}\) against the analytic \(p^\star=0\), matching CLARABEL to
+\(5\times10^{-8}\) and beating SCS by three orders of magnitude, while sitting
+on a solution whose PSD matrix has an eigenvalue spread of \(2.3\times10^{14}\).
+Slater failure alone therefore does not break pounce's SDP path -- it converges
+onto the singular boundary and reports honest status.
+
+The raw unbounded variant B is *not* a pounce finding: it is ill-posed in
+floating-point arithmetic (the constraint \(\det=-x_1^2\ge0\) is satisfiable to
+round-off for \(|x_1|\lesssim\sqrt{\varepsilon x_2}\), so any solver can drift
+to \(-\infty\)), and the oracles fail worse than pounce does -- SCS returns
+\(-14.9\) while claiming near-optimality, and CLARABEL raises =SolverError=.
+pounce at least reports =iteration_limit= rather than claiming optimality on a
+diverging iterate, which is the correct honest behavior.  Per the adversary
+rules (oracle must solve it reliably first), no verdict is claimed on B.

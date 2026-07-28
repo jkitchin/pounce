@@ -1,0 +1,89 @@
+#+TITLE: Adversary run — minimum relative entropy (KL divergence) with a moment constraint
+#+DATE: [2026-06-15]
+#+FAMILY: exp
+#+CLASS: exponential-cone (relative-entropy / I-projection)
+
+* Problem
+Minimum relative entropy (I-projection) of a uniform reference onto an affine
+moment family:
+
+  minimize   D(p || q) = sum_i p_i log(p_i / q_i)
+  subject to sum_i p_i = 1,   sum_i a_i p_i = m,   p_i >= 0
+
+Instance: n = 4, support a = [0,1,2,3], reference q uniform (= 1/4),
+target mean m = 2.0 (uniform mean is 1.5, so m pulls mass toward larger a).
+
+* Source / known optimum
+Classical minimum-discrimination-information / max-entropy problem
+(Kullback; Cover & Thomas, /Elements of Information Theory/, Ch. 11 —
+I-projection onto a moment family; Boyd & Vandenberghe, /Convex Optimization/,
+exponential-family / KL geometry).
+
+The I-projection is the Gibbs (exponentially tilted) distribution
+  p_i*(λ) = q_i exp(λ a_i) / Z(λ),   Z(λ) = Σ_j q_j exp(λ a_j),
+with the single scalar dual λ fixed by the mean constraint
+  d/dλ log Z(λ) = Σ_i a_i p_i*(λ) = m   (strictly increasing in λ).
+Minimal divergence (closed form):
+  D* = λ* m − log Z(λ*).
+
+The reference is computed INDEPENDENTLY of any conic solver: the scalar
+monotone dual equation is solved with =scipy.optimize.brentq=. Cross-checked two
+ways that agree to 5e-16:
+  - D* via λ* m − log Z(λ*)              = 0.102387546736
+  - D* via direct KL of recovered p*     = 0.102387546736
+
+  λ* = 0.4196176250,  Z* = 2.0893389065,
+  p* = [0.11965507, 0.18204080, 0.27695318, 0.42135095].
+
+KNOWN_OPTIMAL: D* = 0.102387546736.
+
+* Exp-cone encoding (the trap — re-derived from scratch)
+pounce / cvxpy convention (confirmed in =solve_socp= docstring):
+  Kexp = { (x,y,z) : y·exp(x/y) <= z, y > 0 }.
+
+Per term we want t_i >= p_i log(p_i/q_i). Algebra:
+  t_i >= p_i log(p_i/q_i)
+  <=> p_i · exp(−t_i / p_i) <= q_i
+  <=> with triple (x,y,z) = (−t_i, p_i, q_i): y·exp(x/y) = p_i·exp(−t_i/p_i) <= q_i = z.  ✓
+
+So each exp cone i (slack s = h − G x, h mostly 0):
+  s_{3i}   = −t_i  ->  G[3i,   t_i] = +1
+  s_{3i+1} =  p_i  ->  G[3i+1, p_i] = −1
+  s_{3i+2} =  q_i  ->  h[3i+2] = q_i
+Objective c[t_i] = +1 (minimize Σ t_i). Equalities (A,b): Σ p_i = 1; Σ a_i p_i = m.
+
+CONE LAYOUT (N = 2n = 8 vars: p_0..p_3, t_0..t_3):
+  4 × ("exp", 3)  +  2 equality rows (normalization + moment). No nonneg block;
+  p_i >= 0 is implied by the exp cone's y > 0 on the p_i slot.
+
+* Results
+| quantity              | value                         |
+|-----------------------+-------------------------------|
+| KNOWN_OPTIMAL (D*)    | 0.102387546736                |
+| pounce D              | 0.102387490139                |
+| pounce status         | optimal_inaccurate (success=False) |
+| pounce time           | 0.0027 s                      |
+| pounce iters          | 10                            |
+| pounce max|Δp| vs p*  | 2.87e-05                      |
+| oracle ECOS D         | 0.102387546009 (t=0.0032 s)   |
+| oracle SCS  D         | 0.102387552016 (t=0.0018 s)   |
+| rel_err vs known      | 5.66e-08                      |
+| rel_err vs ECOS       | 5.59e-08                      |
+| rel_err vs SCS        | 6.19e-08                      |
+
+* Verdict
+VERDICT: PASS (TOLERANCE note).
+
+pounce lands on the correct objective to ~6e-8 and reproduces the analytic Gibbs
+tilt p* to within 3e-5, agreeing with the closed form AND with both ECOS and SCS
+(all three within 6e-8 of each other). pounce reports =optimal_inaccurate=
+(success=False) rather than a clean =optimal=: it halts at 10 iterations on the
+non-symmetric HSDE exp-cone driver's default residual floor while already sitting
+on the right answer. This is the same benign behavior already observed and
+accepted in the box-volume GP (#145 area) and entropy-maximization runs — the
+objective is right; ECOS and SCS hit the same value, so it is NOT a solver bug,
+just the documented exp-cone accuracy/status granularity.
+
+No genuine correctness finding. No new issue warranted (status-vs-accuracy
+granularity on the exp-cone driver is already understood; would only be an
+enhancement, not a defect).

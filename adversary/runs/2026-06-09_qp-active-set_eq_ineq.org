@@ -1,0 +1,65 @@
+#+TITLE: qp-active-set adversary cross-check: equality + active-inequality convex QP
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY :: qp-active-set
+- CLASS :: small convex QP (active-set slot)
+- SOURCE :: constructed; optimum derived and verified by KKT, cross-checked vs
+  cvxpy CLARABEL and convex IPM.
+- KNOWN_OPTIMAL :: q* = 0.3125 at x* = (0.75, 0.25)
+- N_VARIABLES :: 2
+- N_CONSTRAINTS :: 2 (1 linear equality, 1 linear inequality); no bounds
+- ACTIVE_SET at optimum :: { eq: x0 + x1 = 1, ineq: x0 - x1 = 0.5 } (both active)
+
+* Formulation
+#+begin_example
+  min  q(x) = 1/2 (x0^2 + x1^2)
+  s.t. x0 + x1 = 1          (equality)
+       x0 - x1 >= 0.5       (inequality)
+#+end_example
+P = I (SPD), q = 0. On the equality line, the unconstrained min of 1/2||x||^2 is
+(0.5, 0.5), which gives x0 - x1 = 0 < 0.5 and violates the inequality; hence the
+inequality binds. Solving x0 + x1 = 1 and x0 - x1 = 0.5 gives x* = (0.75, 0.25),
+q* = 1/2(0.5625 + 0.0625) = 0.3125.
+
+KKT verification: grad q = (0.75, 0.25); a_eq = (1,1), a_ineq = (1,-1).
+(0.75, 0.25) = mu(1,1) + lam(1,-1) => mu = 0.5, lam = 0.25 >= 0, so the
+inequality multiplier is non-negative: x* is the unique strictly-convex minimizer.
+
+* How the active-set path was invoked
+Same as Problem A -- CLI only (Python =minimize= does not expose qp-active-set).
+QP emitted as a pyomo =.nl= and run:
+#+begin_example
+  pounce model.nl out.sol solver_selection=qp-active-set --json-output out.json
+#+end_example
+=dispatch.rs= maps ="qp-active-set"= -> =SolverChoice::QpActiveSet=; =main.rs=
+realizes it by setting =algorithm active-set-sqp= (active-set SQP engine, step QPs
+via =pounce-qp=). IPM cross-check: =solver_selection=qp-ipm=. Oracle 2: cvxpy/CLARABEL.
+
+* Results
+| solver                       | status         | objective        |              x | time (s) |
+|------------------------------+----------------+------------------+----------------+----------|
+| pounce active-set (qp-as)    | SolveSucceeded | 0.3125000000058  | (0.75, 0.25)   |   0.0071 |
+| pounce convex IPM (qp-ipm)   | SolveSucceeded | 0.3125000005183  | (0.75, 0.25)   |   0.0057 |
+| cvxpy / CLARABEL             | optimal        | 0.3125000079123  | (0.7500, 0.2500) |  0.0038 |
+
+* Cross-check (relative errors)
+| comparison              | rel err  |
+|-------------------------+----------|
+| active-set vs known     | 5.75e-12 |
+| active-set vs IPM       | 5.13e-10 |
+| active-set vs cvxpy     | 7.91e-09 |
+| x_inf_err vs X_STAR     | 6.00e-12 |
+
+All three solvers agree to <= 8e-9 relative; the active-set primal matches the
+KKT-derived optimum to ~6e-12. Both constraints are active at the reported point,
+as predicted.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: the active-set path solves the equality+inequality QP to the known
+global optimum (q* = 0.3125, x* = (0.75, 0.25)) and agrees with BOTH the convex
+IPM and cvxpy CLARABEL to < 1e-8 relative. The active set (equality + the binding
+x0 - x1 = 0.5) is correctly recovered. No disagreement, no formulation/reference
+issue, within tolerance.

@@ -1,0 +1,56 @@
+#+TITLE: Adversary: differentiable equality-constrained QP layer
+#+DATE: 2026-06-09
+
+* Problem properties
+- SOURCE: classic equality-constrained convex QP / KKT linear system;
+  standard differentiable-optimization layer (Amos & Kolter, OptNet,
+  ICML 2017) restricted to equality constraints only.
+- Layer type: =pounce.jax.solve_qp= / =pounce.torch.solve_qp= (OptNet
+  implicit-function differentiation), equality block only.
+- Dims: n=4 variables, m=2 equality constraints, no inequalities.
+- Distinct from the already-tested "OptNet box QP": no box/inequality
+  constraints; the active set is fixed (all equalities), so the layer
+  reduces to a KKT linear solve with a clean closed-form gradient.
+
+* Formulation
+#+begin_example
+  min   1/2 x^T P x + c^T x
+  s.t.  A x = b
+#+end_example
+P SPD (4x4), differentiable w.r.t. (P, c, A, b). Forward closed form via
+the KKT system  [[P A^T],[A 0]] [x; lambda] = [-c; b].
+Loss for gradient tests: L = w . x*.
+
+* Results
+| check                      | metric              | value     | tol   | pass |
+|----------------------------+---------------------+-----------+-------+------|
+| forward jax vs closed-form | max\vert dx\vert    | 4.8e-11   | 1e-7  | yes  |
+| forward torch vs closed-fm | max\vert dx\vert    | 4.8e-11   | 1e-7  | yes  |
+| forward jax vs cvxpy       | max\vert dx\vert    | 4.8e-11   | 1e-7  | yes  |
+| grad vs FD  d/dc           | max err             | 6.0e-11   | 1e-5  | yes  |
+| grad vs FD  d/dA           | max err             | 1.5e-10   | 1e-5  | yes  |
+| grad vs FD  d/db           | max err             | 5.7e-11   | 1e-5  | yes  |
+| JAX<->Torch parity         | max grad diff       | 0.0e+00   | 1e-7  | yes  |
+| torch.autograd.gradcheck   | (c, A, b) f64       | PASS      | --    | yes  |
+| torch gradgradcheck        | double-backward     | unsupported | --  | n/a  |
+
+pounce wall time (both backends, full script): ~1.9 s.
+
+* Cross-check
+- Forward agrees to ~1e-10 across three independent references
+  (closed-form KKT solve, cvxpy/CLARABEL, and the two pounce backends).
+- Analytic gradients (jax.grad) match float64 central finite differences
+  of an independent closed-form re-solve to ~1e-10 for c, A, and b.
+- JAX and Torch backends produce bit-identical gradients (0.0 diff).
+- gradcheck passes in float64 for c, A, b. gradgradcheck reports the
+  layer does not implement double-backward; consistent with the SOCP
+  layer too, so it is a known capability limit, not an error.
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: forward solve correct against three references; analytic
+gradient agrees with finite differences and is identical across backends;
+gradcheck passes. The only non-success is gradgradcheck, which fails only
+because second-order differentiation is not implemented (SOLVER_LIMITATION,
+not a gradient error) -- the first-order gradient is correct.

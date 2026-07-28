@@ -1,0 +1,141 @@
+#+TITLE: Adversary Run: Envelope Theorem / KKT Implicit-Diff Consistency of the Differentiable QP Layer
+#+DATE: 2026-07-22
+
+* Problem
+:PROPERTIES:
+:FAMILY: diff (+ duals / sensitivity)
+:CLASS: strictly-complementary convex QP, equality + inequality constrained
+:SOURCE: Analytic. Envelope theorem: Fiacco, /Introduction to Sensitivity and Stability Analysis in NLP/ (1983), Thm 3.2.2; Boyd & Vandenberghe, /Convex Optimization/, §5.6.3 (local sensitivity: dp*/du_i = -lambda_i*, dp*/dv_i = -nu_i*). Implicit differentiation of the KKT system: Amos & Kolter, /OptNet/, ICML 2017, eqs. 6-8.
+:KNOWN_OPTIMAL: obj* = -3.124705568267e-01 (self-consistent; the oracle here is the derivative identities, not the objective value)
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 1 equality, 4 inequalities (2 strictly active, 2 strictly inactive)
+:END:
+
+\begin{align*}
+\min_{x \in \mathbb{R}^4} \quad & \tfrac{1}{2} x^\top P x + c^\top x \\
+\text{s.t.} \quad & A x = b \quad (A = [1\,1\,1\,1],\ b = 1) \\
+                  & G x \le h
+\end{align*}
+
+with \(P = LL^\top + 1.5 I\) (SPD, seeded RNG, \(\kappa(K_{\text{KKT}}) = 1.17\times10^{2}\)),
+\(c = (-1,\,0.7,\,-2,\,0.3)\), and \(G,h\) chosen so that rows 0 and 1 are
+strictly active and rows 2 and 3 strictly inactive.
+
+The design goal was *strict complementarity*, which is what makes
+\(x^*(\theta)\) differentiable at all. Measured at the solution:
+
+| row | z_i        | slack h-Gx | state    | strict? |
+|-----+------------+------------+----------+---------|
+|   0 | 3.2945e+00 | 1.7e-14    | active   | yes     |
+|   1 | 8.3862e-01 | 5.9e-13    | active   | yes     |
+|   2 | 1.1e-13    | 4.36e+00   | inactive | yes     |
+|   3 | 1.2e-13    | 3.98e+00   | inactive | yes     |
+
+No weakly active row, margins of order 1 on both sides — so any derivative
+mismatch found here would be a genuine defect, not a kink artifact.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+Forward solve: =status=optimal=, =obj = -3.124705568267e-01=, 11 IPM
+iterations, 1.6 ms. Reported stationarity residual
+\(\|Px + c + A^\top y + G^\top z\|_\infty = 8.5\times10^{-13}\)
+(the flipped-sign variant \(-A^\top y\) gives 1.95, so pounce's =y= enters
+stationarity with a *+* sign — i.e. the Lagrangian is
+\(L = f + y^\top(Ax-b) + z^\top(Gx-h)\), and the envelope signs are
+\(\partial \mathrm{obj}^*/\partial b = -y\), \(\partial \mathrm{obj}^*/\partial h = -z\)).
+
+| Check                                       | Result | Max rel. err |
+|---------------------------------------------+--------+--------------|
+| x: host solve_qp vs JAX layer               | PASS   |            0 |
+| x: host solve_qp vs Torch layer             | PASS   |            0 |
+| (a) JAX d obj*/dh  vs  -z                   | PASS   |      7.9e-13 |
+| (a) Torch d obj*/dh vs  -z                  | PASS   |      7.9e-13 |
+| (a) FD d obj*/dh    vs  -z                  | PASS   |      1.7e-11 |
+| (b) JAX d obj*/db  vs  -y                   | PASS   |      1.3e-12 |
+| (b) Torch d obj*/db vs  -y                  | PASS   |      1.3e-12 |
+| (b) FD d obj*/db    vs  -y                  | PASS   |      6.8e-12 |
+| (c) JAX/Torch dloss/d{c,h,b,G,A} vs own IFT | PASS   |    < 2.8e-12 |
+| (c) FD dloss/d{c,h} vs own IFT              | PASS   |    < 2.3e-11 |
+| (d) JAX/Torch dloss/dP vs IFT (symmetrized) | PASS   |      4.6e-13 |
+| (d) FD dloss/dP (symmetric perturbation)    | PASS   |      1.5e-10 |
+| (d) JAX/Torch d obj*/dP vs IFT (sym)        | PASS   |      1.6e-13 |
+| (e) JAX vs Torch, all 6 grads x 2 losses    | PASS   |   0 (bitwise) |
+
+Timings: host solve 0.002 s, JAX (solve + 2 full gradients incl. trace/compile)
+0.38 s, Torch (solve + 2 full gradients) 0.013 s. Whole script 1.9 s.
+
+* Cross-check / Verification
+
+Three mutually independent oracles were used; none of them re-runs pounce's
+own differentiation code path.
+
+1. *Envelope theorem.* \(\partial \mathrm{obj}^*/\partial h = -z\) and
+   \(\partial \mathrm{obj}^*/\partial b = -y\) were compared directly against
+   the multipliers =res.z= / =res.y= returned by the *host* =pounce.qp.solve_qp=
+   — a different entry point from the layer. Agreement to ~1e-12 means the
+   layer's gradient and the solver's reported duals are the *same* quantity;
+   a sign flip or a scale error in either would have shown up immediately.
+   Note the layer correctly returns exactly zero gradient on the two inactive
+   rows, matching \(z_i = 0\).
+
+2. *Hand-built implicit differentiation.* The reduced KKT matrix
+   \(K = \begin{bmatrix} P & A^\top & G_\mathcal{A}^\top \\ A & 0 & 0 \\ G_\mathcal{A} & 0 & 0\end{bmatrix}\)
+   was assembled in the script from the reported active set and multipliers,
+   and \(dx\) obtained by =numpy.linalg.solve= for each perturbation direction
+   (dP, dc, dA, db, dG, dh), with the correct multiplier-dependent right-hand
+   sides \(-(dP\,x + dc + dA^\top y + dG^\top z)\), \(db - dA\,x\),
+   \(dh_\mathcal{A} - dG_\mathcal{A}x\). This reconstruction reproduces every
+   JAX and Torch gradient (including the full matrix gradients w.r.t. P, G, A)
+   to ~1e-12. It is the sharpest of the three checks because it uses the
+   *reported duals* as inputs — it would fail if the duals were wrong even if
+   the layer were self-consistent.
+
+3. *Central finite differences, float64, step sweep* over {1e-4, 1e-5, 1e-6}.
+   Sweep spread was 3.6e-10 or better on every parameter, confirming the FD
+   estimates sit on a clean plateau (no truncation/roundoff contamination);
+   the FD values agree with both the multipliers and the IFT reconstruction.
+   The P finite difference used a *symmetric* perturbation \(E_{ij}+E_{ji}\)
+   (halved on the diagonal) to match the documented symmetric-gradient
+   convention.
+
+4. *JAX vs Torch parity.* All twelve gradient tensors (6 parameters x 2 losses)
+   agree *bitwise* (max abs difference exactly 0.0), which is expected given
+   both front ends dispatch to the same Rust backward.
+
+5. *torch.autograd.gradcheck / gradgradcheck.*
+   - =gradcheck(c, h, b, G, A)= -> True
+   - =gradcheck(P = 0.5*(M + Mᵀ), c, h, b)= -> True
+   - =gradcheck(raw P)= -> GradcheckError, *expected and not a defect*:
+     gradcheck perturbs each \(P_{ij}\) independently (asymmetrically), whereas
+     the layer documents \(\nabla P\) as the symmetrized gradient
+     \(\tfrac12(d_x x^\top + x d_x^\top)\) because the solver reads only P's
+     lower triangle. Routing P through an explicit symmetrizer makes the chain
+     rule reconcile the two conventions and gradcheck passes. This is exactly
+     what =python/pounce/jax/_qp.py='s module docstring warns about ("perturb
+     ``P`` symmetrically when checking it against finite differences"), and the
+     hand-built symmetric-perturbation FD in check (d) confirms the symmetric
+     gradient is the numerically correct one. Documented, tested, not a bug —
+     though it is the single most likely source of a *false* GRADIENT_ERROR
+     report by anyone running gradcheck naively on this layer.
+   - =gradgradcheck(c, h, b)= -> True (second-order through the implicit VJP
+     also holds).
+
+* Verdict
+
+*PASS*. On a QP constructed to satisfy strict complementarity with order-1
+margins, the differentiable layer's gradients, the solver's reported KKT
+multipliers, an independently hand-assembled implicit-differentiation
+reconstruction, and central finite differences all agree to 1e-11 or better,
+and JAX and Torch agree bitwise. The envelope identities
+\(\partial \mathrm{obj}^*/\partial h = -z\) and
+\(\partial \mathrm{obj}^*/\partial b = -y\) hold exactly with pounce's reported
+sign convention (\(L = f + y^\top(Ax-b) + z^\top(Gx-h)\), \(z \ge 0\)), which
+means the duals and the sensitivity machinery are the same object viewed two
+ways — no localization of a defect was possible because there was no
+discrepancy to localize. The only "failure" observed, raw-P
+=torch.autograd.gradcheck=, is a mismatch between gradcheck's asymmetric
+perturbation and the layer's documented symmetric-gradient convention, and it
+disappears when P is routed through an explicit symmetrizer.

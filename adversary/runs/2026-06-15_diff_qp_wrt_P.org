@@ -1,0 +1,64 @@
+#+TITLE: Adversary report — Differentiable QP layer w.r.t. the matrix P (diff/gradient)
+#+DATE: 2026-06-15
+
+* Summary
+- *Problem*: inequality-constrained convex QP differentiated w.r.t. the
+  QUADRATIC COST MATRIX =P= (theta = P). This is the one differentiable
+  parameter not yet covered by the diff family — prior runs differentiated
+  w.r.t. =c=, =h=, =A=, =b=, and SOCP cone data. The 2026-06-09 eqcon run
+  explicitly *skipped* FD on P (deferring to gradcheck) due to the symmetry
+  projection; this run does it correctly.
+- *Layer type*: =pounce.jax.solve_qp= / =pounce.torch.solve_qp= OptNet/IFT
+  differentiable QP layer, x*(P).
+- *N_VARIABLES*: n = 3 (P is 3x3 symmetric), 4 inequality constraints, exactly
+  ONE active.
+- *VERDICT*: PASS.
+
+* Formulation
+#+begin_src
+min  1/2 x^T P x + c^T x
+s.t. G x <= h        (4 rows; row 0 active, slack ~0.7-1.1 on the rest)
+loss = w . x*(P)
+#+end_src
+P SPD (M M^T + 0.5 I), well conditioned. Active set stable under the small
+symmetric perturbations FD/gradcheck apply → no kink crossing.
+
+* The symmetry subtlety (why this test exists)
+P enters only through the quadratic form 0.5 x^T P x, so only its symmetric
+part is identifiable. Both backends return a *symmetrized* gradient dL/dP. A
+naive entrywise central FD that bumps P[i,j] alone double-counts off-diagonal
+contributions. The correct oracle is therefore
+
+    sym(FD) = 0.5 (FD_entrywise + FD_entrywise^T).
+
+This run reports BOTH:
+- analytic vs sym(FD):     1.16e-10   ← the real check (PASS)
+- analytic vs entry(FD):   1.41e-01   ← expected mismatch, demonstrates the
+                                        symmetric convention is in play.
+gradcheck routes P through a symmetric parametrization P = S + S^T so the
+perturbation directions live in the identifiable subspace.
+
+* Results
+| check                         |     value | tol     | status |
+|-------------------------------+-----------+---------+--------|
+| forward jax-vs-cvxpy          |  4.28e-10 | 1e-6    | PASS   |
+| forward torch-vs-cvxpy        |  4.28e-10 | 1e-6    | PASS   |
+| forward jax-vs-pounce         |  0.00e+00 | 1e-6    | PASS   |
+| n_active                      |         1 | ==1     | PASS   |
+| dL/dP vs sym(FD)              |  1.16e-10 | 5e-5    | PASS   |
+| jax<->torch parity dL/dP      |  0.00e+00 | 1e-9    | PASS   |
+| torch gradcheck (P=S+S^T)     |      PASS | —       | PASS   |
+| torch gradgradcheck           |      PASS | —       | PASS   |
+
+* Timings
+- pounce torch forward solve: 0.0009 s
+- jax grad (dL/dP):           0.368 s (includes JIT/trace)
+- cvxpy FD sweep (oracle):    0.028 s
+
+* Conclusion
+The differentiable QP layer computes dL/dP correctly in both jax and torch.
+The gradient matches the central finite-difference re-solve under the proper
+symmetric convention to 1.16e-10, the two backends are bit-identical, and both
+first- and second-order autograd checks pass. The large mismatch against the
+naive entrywise FD is a property of the (correct) symmetrized OptNet gradient,
+not a bug. No GRADIENT_ERROR.

@@ -1,0 +1,63 @@
+#+TITLE: qp-active-set adversary cross-check: box / bound-constrained convex QP
+#+DATE: 2026-06-09
+
+* Problem properties
+- FAMILY :: qp-active-set
+- CLASS :: small convex QP (active-set slot)
+- SOURCE :: constructed; optimum verified analytically (separable, P = I, clip of
+  unconstrained minimizer + KKT), cross-checked vs cvxpy CLARABEL and convex IPM.
+- KNOWN_OPTIMAL :: q* = -6.5 at x* = (1, 2)
+- N_VARIABLES :: 2
+- N_CONSTRAINTS :: 0 general constraints; 4 simple bounds (0 <= x0,x1 <= 2)
+- ACTIVE_SET at optimum :: { x1 = 2 (upper bound) }; x0 interior.
+
+* Formulation
+#+begin_example
+  min  q(x) = 1/2 (x0^2 + x1^2) - x0 - 4 x1
+  s.t. 0 <= x0 <= 2
+       0 <= x1 <= 2
+#+end_example
+P = I (symmetric positive definite), q = (-1, -4). The unconstrained minimizer is
+x = -P^{-1} q = (1, 4). Clipping to the box leaves x0 = 1 interior and binds the
+upper bound x1 = 2, so x* = (1, 2) and q* = 1/2(1 + 4) - 1 - 8 = -6.5. Sign
+convention: pounce / pyomo minimize; bounds are simple variable bounds in the .nl.
+
+* How the active-set path was invoked
+The Python =minimize= facade does NOT expose =solver_selection="qp-active-set"=;
+it is reachable only via the CLI. The QP is emitted as an AMPL =.nl= (pyomo) and run:
+#+begin_example
+  pounce model.nl out.sol solver_selection=qp-active-set --json-output out.json
+#+end_example
+=crates/pounce-cli/src/dispatch.rs= maps ="qp-active-set"= ->
+=SolverChoice::QpActiveSet= (validating the class is LP / convex QP), and
+=crates/pounce-cli/src/main.rs= then sets =algorithm active-set-sqp=, routing the
+solve through the active-set SQP engine (its step QPs solved by =pounce-qp=) -- a
+DISTINCT code path from the IPM. IPM cross-check: =solver_selection=qp-ipm=.
+
+* Results
+| solver                       | status         | objective         |        x | time (s) |
+|------------------------------+----------------+-------------------+----------+----------|
+| pounce active-set (qp-as)    | SolveSucceeded | -6.500000000000   | (1, 2)   |   0.0074 |
+| pounce convex IPM (qp-ipm)   | SolveSucceeded | -6.499999999504   | (1, 2)   |   0.0053 |
+| cvxpy / CLARABEL             | optimal        | -6.499999998998   | (1, 2)   |   0.0037 |
+
+* Cross-check (relative errors)
+| comparison              | rel err  |
+|-------------------------+----------|
+| active-set vs known     | 0.000e+00 |
+| active-set vs IPM       | 7.64e-11 |
+| active-set vs cvxpy     | 1.54e-10 |
+| x_inf_err vs X_STAR     | 0.000e+00 |
+
+All three solvers agree to ~1e-10 and the active-set primal matches the
+hand-computed optimum exactly. The single binding upper bound x1 = 2 is correctly
+identified (x0 interior).
+
+* Verdict
+VERDICT: PASS
+
+Reasoning: the active-set path solves the bound-constrained QP to the known global
+optimum (q* = -6.5, x* = (1,2)) and agrees with BOTH the convex IPM and cvxpy
+CLARABEL to < 2e-10 relative. No disagreement, no formulation/reference issue,
+within tolerance. Confirms the active-set slot correctly handles a separable
+strictly-convex QP whose solution is set by a binding bound.

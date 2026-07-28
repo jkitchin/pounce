@@ -1,0 +1,115 @@
+#+TITLE: Adversary Run: Mixed-status batch (infeasible + unbounded + well-posed)
+#+DATE: 2026-07-19
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: heterogeneous status / failure contamination / size-1 / size-0 / duplicates
+:SOURCE: internal-consistency contract (batch result == per-item single solve_qp); closed-form KKT for the box-constrained items
+:KNOWN_OPTIMAL: per item (closed form x* = -P^{-1}c on interior items; box-face KKT otherwise)
+:N_VARIABLES: 2-5 per item
+:N_CONSTRAINTS: mixed (box, G x <= h, A x = b)
+:END:
+
+The previous five ~batch~ runs all used *uniformly well-posed* items. This run
+attacks the failure-handling and index-attribution surface instead.
+
+Base item (well-posed, four conditionings $\kappa = 1, 10^3, 10^6, 10^{10}$):
+\[
+\min_x \tfrac12 x^\top P_\kappa x + c^\top x \quad \text{s.t.}\quad -2 \le x \le 2,
+\qquad P_\kappa = Q \operatorname{diag}(\text{logspace}(0,\log_{10}\kappa)) Q^\top .
+\]
+
+Primal-infeasible item (contradictory rows):
+\[
+\min_x \tfrac12\|x\|^2 \quad\text{s.t.}\quad x_1 \le -1,\ -x_1 \le -1 .
+\]
+
+Unbounded item (PSD-but-singular $P$, linear term along the null direction):
+\[
+\min_x \tfrac12(x_1^2 + x_2^2) + x_3, \qquad P = \operatorname{diag}(1,1,0).
+\]
+
+Batch under test (order deliberately interleaved so a misattributed status
+would land on a *good* index):
+
+| idx | item        |
+|-----+-------------|
+|   0 | good κ=1    |
+|   1 | INFEASIBLE  |
+|   2 | good κ=1e3  |
+|   3 | good κ=1e6  |
+|   4 | UNBOUNDED   |
+|   5 | good κ=1e10 |
+
+Sub-tests: (A) mixed batch vs per-item single; (A2) contamination control — the
+same good items in a *clean* batch must give bit-identical results; (B)
+closed-form KKT on the good items; (C) batch of size 1 and size 0; (D)
+duplicated elements (same dict object ×5, independent copies ×5, and duplicates
+interleaved with repeated infeasible items); (E) 24-item batch with $\kappa$
+sweeping $10^0 \ldots 10^{10}$ and mixed equality/inequality blocks.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                    | Status              | Objective         | Rel Err | Wall Time |
+|---------------------------+---------------------+-------------------+---------+-----------|
+| pounce ~solve_qp_batch~   | 4 optimal, 1 primal_infeasible, 1 dual_infeasible | see per-item below | 0 (exact) | 0.0047 s |
+| oracle: per-item ~solve_qp~ | identical           | identical         | –       | 0.0569 s  |
+
+Per-item objectives (batch vs single, mixed batch):
+
+| idx | label       | batch status      | obj (batch)      | obj (single)     | Δx      |
+|-----+-------------+-------------------+------------------+------------------+---------|
+|   0 | good κ=1    | optimal           | -2.23151659e-01  | -2.23151659e-01  | 0.0e+00 |
+|   1 | INFEAS      | primal_infeasible | 0.0              | 0.0              | 0.0e+00 |
+|   2 | good κ=1e3  | optimal           | -5.37490243e-02  | -5.37490243e-02  | 0.0e+00 |
+|   3 | good κ=1e6  | optimal           | -3.10834327e-03  | -3.10834327e-03  | 0.0e+00 |
+|   4 | UNBOUNDED   | dual_infeasible   | -3.99095020e+02  | -3.99095020e+02  | 0.0e+00 |
+|   5 | good κ=1e10 | optimal           | -3.48029232e-02  | -3.48029232e-02  | 0.0e+00 |
+
+24-item heterogeneous batch: worst $|x_\text{batch} - x_\text{single}|_\infty = 0$
+(bit-identical on all 24), $t_\text{batch} = 0.0078$ s vs
+$t_\text{single} = 0.2842$ s → **36.6× speedup**. Total script wall time 0.64 s.
+
+All 62 checks passed.
+
+* Cross-check / Verification
+
+- *Index attribution.* The non-optimal indices returned by the batch were
+  exactly ~[1, 4]~ — the infeasible and unbounded items — never a good
+  neighbour. In the duplicate-mixed batch ~[p0, infeas, p0, infeas, p0]~ the
+  bad indices were exactly ~[1, 3]~.
+- *No contamination.* Every good item's $x^*$, objective, and status in the
+  mixed batch were **bit-identical** ($\Delta = 0$, not merely within
+  tolerance) to (a) the same item solved alone by ~solve_qp~ and (b) the same
+  item in a clean all-good batch. A failing neighbour changes nothing.
+- *Status semantics are correct and per-item.* ~primal_infeasible~ for the
+  contradictory-row item, ~dual_infeasible~ for the singular-$P$ unbounded
+  item — and the single-solve oracle returns the identical status, so the batch
+  path is not inventing or swallowing statuses.
+- *Closed-form KKT.* On the interior items $x^* = -P^{-1}c$ matched to
+  $1.9\text{e-}10$, $1.0\text{e-}10$, $2.4\text{e-}11$; the $\kappa=10^{10}$
+  item matched to $6.1\text{e-}8$ (on-spec for $\text{cond} = 10^{10}$ at
+  default $\text{tol} = 10^{-8}$).
+- *Edge sizes.* Batch of size 1 matched the single solve exactly. Batch of size
+  0 returned ~[]~ cleanly rather than raising or hanging.
+- *Aliasing.* Passing the *same dict object* five times gave five identical
+  correct results — no in-place mutation of caller-supplied arrays, no shared
+  workspace bleed between duplicated items.
+- *Conditioning.* Across $\kappa = 10^0 \ldots 10^{10}$ the batch reproduced the
+  single-solve status exactly, including agreeing on ~optimal_inaccurate~ for
+  the three worst-conditioned items (indices 9, 10, 21). The batch does not
+  paper over a per-item accuracy downgrade.
+
+* Verdict
+
+*PASS.* The batch path is bit-for-bit identical to the per-item single solve
+across every adversarial angle tried: a failing element does not contaminate its
+neighbours, failure statuses are attributed to the correct indices, duplicated
+and aliased inputs are handled independently, size-0 and size-1 batches behave,
+and heterogeneous conditioning (including the ~optimal_inaccurate~ downgrade) is
+reproduced faithfully. The 36.6× speedup on the 24-item batch is achieved with
+zero numerical divergence from the sequential path.

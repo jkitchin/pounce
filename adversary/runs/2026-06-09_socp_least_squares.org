@@ -1,0 +1,36 @@
+#+TITLE: Adversary Run: SOC-constrained least squares
+#+DATE: 2026-06-09
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: second-order-cone program (epigraph of a 2-norm)
+:SOURCE: Boyd & Vandenberghe, Convex Optimization — SOCP epigraph form.
+:KNOWN_OPTIMAL: 0.5773502692
+:N_VARIABLES: 2 + epigraph t
+:N_CONSTRAINTS: one ("soc", d) cone + equality
+:END:
+
+Minimize t subject to ||Ax - b|| <= t with an equality coupling, encoded with a
+single second-order cone ("soc", d): {(t, x): t >= ||x||}. The optimum residual
+norm is 1/sqrt(3) = 0.57735.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver             | Status  | t* (objective) | Rel Err   | Wall Time |
+|--------------------+---------+----------------+-----------+-----------|
+| pounce (SOCP IPM)  | optimal | 0.5773502690   | 1.60e-10  | 0.0020 s  |
+| cvxpy (CLARABEL)   | optimal | 0.5773502692   | (ref)     | —         |
+
+Known optimal: 0.5773502692
+
+* Cross-check / Verification
+cvxpy/CLARABEL agrees to 4e-9 on the objective; x matches to 3.2e-10. The cone
+dimension and (t, x) slack ordering were re-derived against the solve_socp
+docstring convention t >= ||x||.
+
+* Verdict
+PASS — pounce's SOCP path matches cvxpy and the closed-form 1/sqrt(3) to ~1e-10.

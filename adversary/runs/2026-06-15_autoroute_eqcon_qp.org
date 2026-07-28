@@ -1,0 +1,77 @@
+#+TITLE: Autoroute transparency — equality-constrained convex QP (expected route qp)
+#+DATE: 2026-06-15
+
+* Problem properties
+- Family ............ autoroute (pounce.minimize, solver_selection="auto" — opt-in since PR #97)
+- Class ............. convex QP — strictly convex quadratic objective with
+  purely LINEAR equality constraints. A convex objective with only linear
+  equalities is the canonical "should route to the specialized QP solver" case.
+- SOURCE ............ Nocedal & Wright, "Numerical Optimization" 2e, Example 16.2
+  (the equality-constrained QP). Optimum re-derived in-script from the KKT
+  system and independently confirmed with cvxpy (no hand-quoted value relied on).
+- Expected route .... qp (convex QP solver), i.e. info["solver"] == "qp-ipm".
+- KNOWN_OPTIMAL ..... 25.25 at x* = (0.5, 2.0, 0.5), lambda* = (-13, -3).
+- N_VARIABLES ....... 3
+- N_CONSTRAINTS ..... 2 linear equalities (A x = b)
+
+* Formulation
+  q(x) = 1/2 x^T G x + c^T x,
+    G = [[6,2,2],[2,4,2],[2,2,4]],  c = [8,3,3]
+  subject to
+    x0 + x1 + x2 = 3
+    x0       - x2 = 0      (x0 = x2)
+  no bounds.  x0 = (0,0,0).
+  KKT closed form: solve [[G, A^T],[A, 0]] [x;mu] = [-c; b]
+    -> x* = (0.5, 2.0, 0.5),  mu* = (-13, -3),  q* = 25.25.
+
+* Results
+| quantity                    | value                              |
+|-----------------------------+------------------------------------|
+| closed-form KKT             | 25.25  x*=(0.5, 2.0, 0.5)          |
+| oracle (cvxpy)              | 25.2500000000  x=(0.5, 2.0, 0.5)  |
+| auto objective              | 25.2500000000                      |
+| auto x                      | (0.5, 2.0, 0.5)                    |
+| auto solver (info["solver"])| 'qp-ipm'  <- SPECIALIZED           |
+| forced-nlp objective        | 25.2500000000                      |
+| forced-nlp solver           | None (true NLP backend; mu set)    |
+| auto rel-err vs known       | 7.04e-16                           |
+| auto rel-err vs oracle      | 4.22e-16                           |
+| auto x* inf-err             | 1.11e-15                           |
+| auto-vs-forced-nlp disagree | 0.0 (obj), 0.0 (x_inf) — identical |
+| auto time                   | ~0.0019 s                          |
+| forced-nlp time             | ~0.0013 s                          |
+
+* Detection of which solver auto chose
+  Per the QCQP/LP template, a specialized route stamps info["solver"]
+  ("qp-ipm"/"lp-ipm"/"socp"); the general NLP backend leaves no "solver" key and
+  instead carries IPM telemetry (mu, iter_count, final_kkt_error, ...).
+  Here res_auto.info["solver"] == "qp-ipm" with problem_class/residuals telemetry
+  — the auto path DID specialize this convex equality-constrained QP to the
+  convex QP interior-point solver, as expected.
+
+* Cross-check
+  Four independent agreements at q* = 25.25: closed-form KKT solve, cvxpy
+  oracle, auto (qp-ipm) path, and forced-nlp path. Auto and forced-nlp agree to
+  machine precision (disagreement 0.0 in both objective and x), confirming the
+  routing-transparency contract: the specialized route returns the same answer
+  as the general NLP backend.
+
+* Note — earlier "fall-through" was a harness bug, not a pounce regression
+  An earlier version of this script called bare ``pounce.minimize(...)`` for the
+  "auto" arm. Since PR #97 (commit b9e22f6, 2026-06-12), routing is OPT-IN: the
+  default ``solver_selection`` changed from "auto" to "nlp" (scipy-compatible —
+  minimize solves what you hand it and skips the detection probe). So the bare
+  call defaulted to "nlp" and never attempted detection, reporting
+  info["solver"] == None. The same stale assumption made the 2026-06-09
+  lp_eq_ineq run look like it "lost" its lp-ipm route. Fix: pass
+  ``options={"solver_selection":"auto"}`` explicitly (now done in all autoroute
+  run scripts). With the explicit opt-in, structural detection works exactly as
+  before for callable + scipy-dict inputs — verified: this QP routes to qp-ipm,
+  the LP routes to lp-ipm, the QCQP routes to socp. No pounce bug.
+
+* Verdict
+  VERDICT: PASS
+  Reasoning: with solver_selection="auto", auto routes to the specialized
+  qp-ipm solver and its answer equals forced-nlp exactly (0.0 disagreement),
+  the closed-form KKT optimum, and cvxpy (rel-err ~7e-16). Routing is both
+  transparent AND specialized — the contract is fully satisfied.
