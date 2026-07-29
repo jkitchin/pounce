@@ -1,0 +1,58 @@
+#+TITLE: Adversary Run: p-norm minimization over an affine hyperplane
+#+DATE: 2026-07-29
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: p-norm epigraph via 3-D power cones (dual-norm / Holder-equality identity)
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization", dual-norm fact (A.1.6):
+  minimize ||x||_p s.t. a^Tx=1 has optimal value 1/||a||_q (1/p+1/q=1), attained
+  at x_i* = sign(a_i)|a_i|^{q-1}/S, S=sum|a_j|^q. Full derivation in script
+  header (verified the (q-1)p=q algebraic identity used to get the closed
+  form value from the minimizer).
+:KNOWN_OPTIMAL: 1/||a||_1.5 = 2.2486528321e-01, p=3, a=(2,-1,3,-0.5)
+:N_VARIABLES: 4 (plus 4 epigraph "r" slacks + 1 "t" = 9 total in the cone formulation)
+:N_CONSTRAINTS: 1 linear equality (a^Tx=1) + 1 linear equality (sum(r)=t) + 4 power cones (alpha=1/3)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptation; power tied for least-tested among convex-conic families, Tested=6, not exercised since the 2026-07-23 extreme-scale probe that led to closed issue #336)
+:END:
+
+$$\min_{x\in\mathbb{R}^4} \|x\|_3 \quad \text{s.t.}\quad a^\top x = 1,\; a=(2,-1,3,-0.5)$$
+
+Encoded via $n$ power cones $(x_i, r_i, t) \in K_{\text{pow}}(1/3)$ with
+$\sum_i r_i = t$, minimizing $t$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                              | Status  | Objective          | Rel Err (vs known) | Wall Time |
+|--------------------------------------+---------+---------------------+---------------------+-----------|
+| pounce solve_socp (4 pow cones)      | optimal | 2.2486528428e-01    | 1.07e-09            | 0.0093s   |
+| cvxpy CLARABEL (native cp.norm(x,3)) | optimal | 2.2486528321e-01    | -                   | 0.0078s   |
+| scipy SLSQP (direct nonlinear)       | -       | 2.2486528321e-01    | -                   | 0.0019s   |
+
+Known optimal: 1/||a||_1.5 = 2.2486528321e-01, x* = KNOWN_X (see script; verified
+a·x*=1 and ||x*||_3=known_optimal to 1e-9 as an internal sanity check before
+running any solver).
+
+pounce's power-cone HSDE driver matched the closed-form dual-norm value and
+two independent oracles (cvxpy's native ``cp.norm(x, 3)`` atom, and a direct
+scipy SLSQP solve of the nonlinear p-norm objective with a linear equality
+constraint — neither uses pounce's power-cone construction) to ~1e-9 in
+objective. Solution-vector error is ~5e-5 (inf-norm), again consistent with
+a flat objective near the optimum at fixed IPM tolerance, not a correctness
+defect.
+
+* Cross-check / Verification
+Two independent oracles (cvxpy native p-norm atom; scipy SLSQP direct
+nonlinear solve) plus the closed-form dual-norm value, all agreeing to 1e-9.
+As with the exp-family probe today, this exercises the same (non-symmetric
+HSDE) driver whose unnormalized-complementarity-gap status bug was fixed
+under issue #336 — this run, at ordinary (non-extreme) scale, converged
+cleanly to ``optimal`` with no numerical_failure, consistent with the fix.
+
+* Verdict
+PASS — pounce's power-cone HSDE driver matches two independent oracles and
+the analytic closed-form optimum. No defect found.

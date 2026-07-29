@@ -1,0 +1,54 @@
+#+TITLE: Adversary Run: Auto-routing transparency on a boxed convex QP
+#+DATE: 2026-07-29
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: QP -> qp-ipm route, forced solver_selection="nlp" must agree
+:SOURCE: minimize 0.5 x^T P x + c^T x, P=diag(2,4,1), c=(-2,-6,-1), s.t.
+  -1<=x_i<=3 (i=1,2,3), sum(x)<=3. Unconstrained minimizer (1,1.5,1) violates
+  the sum constraint (sum=3.5>3), so it is active; box bounds inactive.
+  Closed-form KKT (Lagrange multiplier mu=2/7 on the active sum constraint,
+  derived exactly in the script via fractions.Fraction) gives x*=(6/7,10/7,5/7).
+:KNOWN_OPTIMAL: x* = (6/7, 10/7, 5/7), obj = -5.9285714286e+00
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 3 box bounds + 1 linear inequality (sum(x)<=3)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptation; autoroute tied for least-tested at Tested=6 and had not been re-checked since 2026-07-23's nonconvex-misrouting-resistance probe)
+:END:
+
+$$\min_x \; \tfrac12 x^\top \mathrm{diag}(2,4,1)\, x + (-2,-6,-1)^\top x \quad
+\text{s.t.}\; -1\le x_i\le 3,\; \mathbf{1}^\top x \le 3$$
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                                   | routed_solver | Objective          | Rel Err (vs known) | x err (inf, vs known) | Wall Time |
+|-------------------------------------------+---------------+---------------------+---------------------+------------------------+-----------|
+| pounce.minimize(solver_selection="auto") | qp-ipm        | -5.9285714284e+00   | 3.39e-11            | 5.27e-10               | 0.0048s   |
+| pounce.minimize(solver_selection="nlp")  | (NLP/IPM)     | -5.9285714362e+00   | 1.29e-09            | 1.51e-08               | 0.0157s   |
+| cvxpy CLARABEL                           | -             | -5.9285714266e+00   | -                   | 3.27e-09 (vs auto)     | -         |
+
+Known optimal: x* = (6/7, 10/7, 5/7) ≈ (0.857142857, 1.428571429, 0.714285714),
+obj = -5.9285714286e+00.
+
+``info.problem_class`` reported ``"convex_qp"`` and ``info.solver`` reported
+``"qp-ipm"`` for the auto-routed solve — confirming the routing-transparency
+contract engaged the specialized convex QP path (not a silent fall-through to
+NLP). The auto and forced-``"nlp"`` routes agreed with each other (x err
+1.56e-08) and both matched the closed-form KKT solution and the independent
+cvxpy oracle to ~1e-8/1e-9.
+
+* Cross-check / Verification
+Forced ``solver_selection="nlp"`` vs ``"auto"`` (routing-transparency
+contract, per adversary.md's autoroute row) + independent cvxpy CLARABEL
+solve + closed-form KKT (exact rational arithmetic via ``fractions.Fraction``
+to avoid a floating-point reference value). All four agree to numerical
+tolerance.
+
+* Verdict
+PASS — auto-routing selected the specialized ``qp-ipm`` solver as expected,
+and its answer agrees with the forced-NLP path and two independent
+oracles/closed form. No routing error, no defect found.

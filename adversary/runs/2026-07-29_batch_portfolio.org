@@ -1,0 +1,52 @@
+#+TITLE: Adversary Run: Batch Markowitz QPs (diagonal covariance)
+#+DATE: 2026-07-29
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: solve_qp_batch vs per-item solve_qp + closed-form KKT
+:SOURCE: classic Markowitz mean-variance QP, diagonal covariance, single budget
+  equality constraint (no bounds); closed-form KKT derived in the script header.
+:KNOWN_OPTIMAL: analytic per-instance (see script; 8 instances, random seed 20260729)
+:N_VARIABLES: 6 per instance x 8 instances
+:N_CONSTRAINTS: 1 equality per instance (budget sum(x)=1)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptation; batch was the least-tested family in adversary/log.org's Family-coverage table, Tested=5, lowest of all 13)
+:END:
+
+For each instance $k$: minimize $\tfrac12 x^\top D_k x - \mu_k^\top x$ s.t.
+$\mathbf{1}^\top x = 1$, with $D_k = \mathrm{diag}(d_k)$, $d_k \sim U(0.5,20)$,
+$\mu_k \sim U(-3,3)$, $n=6$. KKT gives $x_i^* = (\mu_i+\lambda)/d_i$ with
+$\lambda = (1-\sum_i \mu_i/d_i)/\sum_i 1/d_i$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                    | Status  | Max obj err (vs closed form) | Max x err (inf-norm) | Wall Time (8 instances) |
+|---------------------------+---------+-------------------------------+-----------------------+-------------------------|
+| pounce solve_qp_batch     | optimal | 3.84e-09                       | 1.57e-09              | 0.0017s                 |
+| pounce solve_qp (per-item)| optimal | (batch_vs_single = 0.00e+00)   | 0.00e+00               | 0.0061s                 |
+| cvxpy CLARABEL (inst 0,N-1)| optimal| 2.96e-12 / 7.71e-10            | 3.98e-10 / 2.51e-10    | -                       |
+
+Known optimal: closed-form KKT value per instance (see script).
+
+All 8 batched instances returned ``status="optimal"`` and matched the
+closed-form KKT solution to ~1e-9 in objective and solution. The batched
+solve agreed **exactly** (0.00e+00, bit-for-bit) with the per-item
+``solve_qp`` calls on every instance — the batching mechanism introduces no
+discrepancy. Two instances (first and last) were independently cross-checked
+against cvxpy's CLARABEL solver and matched to ~1e-9/1e-12.
+
+* Cross-check / Verification
+Closed-form KKT (all 8 instances) + independent cvxpy CLARABEL solve
+(instances 0 and 7) + pounce's own per-item ``solve_qp`` path (batch-vs-single
+contract check, not an independent oracle by itself, but the primary
+correctness signal for the batching *mechanism* per adversary.md's family
+table). All three agree.
+
+* Verdict
+PASS — the batching mechanism is exact-equivalent to per-item solves, and
+both match the independent closed-form/cvxpy oracles to numerical-tolerance
+precision. No defect found.

@@ -1,0 +1,57 @@
+#+TITLE: Adversary Run: Maximize min-eigenvalue of a 2x2 affine matrix pencil
+#+DATE: 2026-07-29
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: eigenvalue-optimization SDP (Boyd & Vandenberghe sec 3.1.5 / 4.6.3 style)
+:SOURCE: A(x) = A0 + x*A1, A0=[[2,1],[1,3]], A1=[[1,0],[0,-1]]. lambda_min(A(x))
+  is concave in x (pointwise min of v^TA(x)v over unit v). Closed form for a
+  2x2 symmetric matrix [[a,b],[b,d]]: lambda_min=(a+d)/2 - sqrt(((a-d)/2)^2+b^2).
+  Here a+d=5 (constant), giving f(x)=2.5-sqrt((x-0.5)^2+1), maximized at x*=0.5.
+  Verified independently on a 20001-point grid via numpy.linalg.eigvalsh before
+  running any solver.
+:KNOWN_OPTIMAL: x*=0.5, t*=lambda_min(A(x*))=1.5
+:N_VARIABLES: 2 (x, t)
+:N_CONSTRAINTS: 1 psd cone, n=2 (svec dim 3)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptation; sdp was the next-least-tested family after batch/lp/qp/qp-active-set/exp/power/autoroute in adversary/log.org's Family-coverage table, Tested=7)
+:END:
+
+$$\max_{x,t} t \quad \text{s.t.} \quad A_0 + x A_1 - t I \succeq 0$$
+
+Encoded via a single 2x2 PSD cone: $s = \mathrm{svec}(A(x) - tI) =
+(2+x-t,\; \sqrt2,\; 3-x-t)$ (off-diagonal entry is constant, independent of
+$x$, so its svec row has zero coefficients on the variables).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                              | Status  | t (objective)      | Rel Err (vs known) | Wall Time |
+|--------------------------------------+---------+---------------------+---------------------+-----------|
+| pounce solve_socp (psd cone n=2)    | optimal | 1.4999999996        | 2.36e-10            | 0.0050s   |
+| cvxpy CLARABEL (native '>>' PSD)    | optimal | 1.5000000019        | -                   | 0.0073s   |
+| scipy Brent (closed-form f(x))      | -       | 1.5000000000        | -                   | 0.0002s   |
+
+Known optimal: x*=0.5, t*=1.5.
+
+Feasibility of the returned point was checked directly (not just objective
+agreement): ``eig(A(x_pounce) - t_pounce*I) = [3.54e-10, 2.0]`` — both
+eigenvalues non-negative, confirming the returned $(x,t)$ is genuinely
+PSD-feasible and not merely objective-close. All three methods (pounce,
+cvxpy's native ``>>`` PSD-cone operator, and scipy's Brent minimization of
+the closed-form eigenvalue expression) agree to ~1e-9/1e-10.
+
+* Cross-check / Verification
+Grid search via ``numpy.linalg.eigvalsh`` (20001 points, sanity check on the
+closed form before solving) + independent cvxpy CLARABEL SDP solve (uses
+cvxpy's own PSD-cone construction, not pounce's ``svec`` layout) + scipy
+Brent 1-D minimization of the analytic $\lambda_{\min}(x)$ expression. All
+three agree with pounce and the closed form.
+
+* Verdict
+PASS — pounce's PSD-cone solver matches two independent oracles, a grid
+search, and the analytic closed form, and the returned point is confirmed
+PSD-feasible. No defect found.

@@ -1,0 +1,60 @@
+#+TITLE: Adversary Run: Sum-of-exponentials unconstrained minimization
+#+DATE: 2026-07-29
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: unconstrained convex program via exponential cones (log-sum-exp family)
+:SOURCE: minimize f(x) = exp(x1) + exp(-x1+0.5) + exp(x2-0.3) + exp(-x2+0.2);
+  separable in x1, x2; each 1-D piece exp(u)+exp(c-u) is minimized where the
+  two exponents are equal (elementary calculus). See script header for full
+  derivation.
+:KNOWN_OPTIMAL: 2*exp(0.25) + 2*exp(-0.05) = 4.4705096824...
+:N_VARIABLES: 2 (plus 4 epigraph slacks for the cone formulation)
+:N_CONSTRAINTS: 4 exponential cones (3-D each)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptation; exp tied for least-tested among convex-conic families in adversary/log.org, Tested=6, and had not been exercised since the 2026-07-23 extreme-scale probe that led to closed issue #336)
+:END:
+
+$$\min_{x\in\mathbb{R}^2} \; e^{x_1} + e^{-x_1+0.5} + e^{x_2-0.3} + e^{-x_2+0.2}$$
+
+Encoded as $t_i \ge \exp(a_i^\top x + b_i)$, i.e. $(a_i^\top x+b_i,\,1,\,t_i)\in K_{\exp}$,
+minimizing $\sum_i t_i$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                          | Status  | Objective         | Rel Err (vs known) | x                        | Wall Time |
+|----------------------------------+---------+--------------------+---------------------+---------------------------+-----------|
+| pounce solve_socp (4 exp cones) | optimal | 4.4705096368e+00   | 1.02e-08            | [0.25001042, 0.25001908] | 0.0071s   |
+| scipy BFGS (direct, gtol=1e-12) | -       | 4.4705096824e+00   | -                   | [0.25, 0.25]              | 0.0012s   |
+| cvxpy SCS (native cp.exp atom)  | optimal | 4.4705096824e+00   | -                   | [0.25, 0.25]              | 0.0067s   |
+
+Known optimal: 2*exp(0.25) + 2*exp(-0.05) = 4.4705096824e+00 at x*=(0.25,0.25).
+
+pounce matched the closed-form optimum, the independent scipy BFGS solve, and
+the cvxpy SCS solve (using cvxpy's native ``cp.exp`` DCP atom — a completely
+different cone/algorithm path than pounce's exp-cone HSDE, since cvxpy's
+``cp.exp`` reduction does not require the caller to build an explicit exp
+cone) all to ~1e-8 in objective. The solution vector has a slightly looser
+error (~1.9e-5) than the objective, consistent with the objective being very
+flat near the optimum (the Hessian eigenvalues here are O(1), so this is
+unremarkable — not evidence of a solver defect, just typical IPM-vs-exact
+solution-space slack at fixed tolerance).
+
+* Cross-check / Verification
+Two independent oracles: (1) scipy BFGS on the smooth unconstrained analytic
+form (no cone construction at all), (2) cvxpy SCS via its native ``cp.exp``
+atom (independent exp-cone/algorithm implementation from pounce's own HSDE
+non-symmetric driver). Both agree with pounce and with the closed-form value
+to 1e-8. This also serves as an implicit regression check on issue #336
+(HSDE unnormalized-complementarity-gap false failures) — that issue was
+closed 2026-07-23 and this run, in a benign (non-extreme-scale) regime,
+returned ``status="optimal"`` cleanly with no numerical_failure, consistent
+with the fix holding for ordinary-scale exp-cone problems.
+
+* Verdict
+PASS — pounce's exp-cone HSDE driver matches two independent oracles and the
+analytic closed-form optimum. No defect found.

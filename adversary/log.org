@@ -15,12 +15,12 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | qp              |      6 | 2026-07-28 | —             |
 | qp-active-set   |      6 | 2026-07-28 | —             |
 | socp            |      9 | 2026-07-28 | —             |
-| exp             |      6 | 2026-07-23 | #336 (HSDE unnormalized-gap numerical_failure) |
-| power           |      6 | 2026-07-23 | #336 (HSDE unnormalized-gap numerical_failure) |
-| sdp             |      7 | 2026-07-23 | —             |
+| exp             |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| sdp             |      8 | 2026-07-29 | —             |
 | sos             |      8 | 2026-07-23 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
-| autoroute       |      6 | 2026-07-23 | — (nonconvex misrouting-resistance confirmed) |
-| batch           |      5 | 2026-06-15 | —             |
+| autoroute       |      7 | 2026-07-29 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP)  |
+| batch           |      6 | 2026-07-29 | —             |
 | diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
 | sensitivity     |      8 | 2026-07-23 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed) |
 
@@ -3953,3 +3953,49 @@ was skipped, so sos/diff (Python-only entry points) got no coverage that day —
 routine prompt now requires the maturin build before either may be called untestable.
 Two self-caught oracle bugs (trivial LP corner; sign error in the hand-rolled duality
 certificate) are recorded in the lp .org file as formulation-skepticism reminders.
+
+** [2026-07-29] Cloud routine, day 2: five families, all PASS (batch, exp, power, autoroute, sdp)
+:PROPERTIES:
+:FAMILY: batch, exp, power, autoroute, sdp
+:SOURCE: second run of the daily cloud adversary routine (gh#395); Linux sandbox,
+  maturin extension built successfully this time (sos/diff reachable but not
+  selected this run — batch/exp/power/autoroute/sdp were the 5 least-tested
+  per the seeded Family-coverage table, breaking the ties at count=6 by
+  excluding lp/qp/qp-active-set/nlp/socp since those were exercised in
+  day 1, 2026-07-28).
+:VERDICT: PASS x5
+:REPORT: [[file:runs/2026-07-29_batch_portfolio.org]], [[file:runs/2026-07-29_exp_sum-exponentials.org]], [[file:runs/2026-07-29_power_pnorm-minimization.org]], [[file:runs/2026-07-29_autoroute_boxed-qp.org]], [[file:runs/2026-07-29_sdp_eigmax-2x2.org]]
+:END:
+8 batched diagonal-covariance QPs (batch, max obj err 3.84e-09 vs closed-form
+KKT; batch-vs-per-item disagreement exactly 0.00e+00; 2 instances also
+cross-checked vs cvxpy CLARABEL); sum-of-exponentials unconstrained
+minimization (exp, obj rel err 1.02e-08 vs closed form 2e^0.25+2e^-0.05,
+cross-checked vs scipy BFGS and cvxpy's native cp.exp atom); p-norm
+minimization over a hyperplane (power, obj rel err 1.07e-09 vs the dual-norm
+closed form 1/||a||_1.5, cross-checked vs cvxpy's native cp.norm atom and
+scipy SLSQP); boxed convex QP auto-routing (autoroute, auto route correctly
+selected info.solver="qp-ipm"/info.problem_class="convex_qp"; auto vs forced
+"nlp" agree to 1.56e-08, both match closed-form KKT (exact Fraction
+arithmetic) and cvxpy); 2x2 eigenvalue-maximization SDP (sdp, t err 2.36e-10
+vs closed-form lambda_min expression, returned point independently verified
+PSD-feasible via eigvalsh, cross-checked vs cvxpy's native PSD cone and scipy
+Brent). HEAD tested: 87051c1.
+
+Notes: the exp and power runs double as regression checks of issue #336
+(HSDE non-symmetric driver's unnormalized-complementarity-gap false
+numerical_failure status), which was filed and closed same-day 2026-07-23.
+Today's problems used ordinary (non-extreme) data scales and both converged
+cleanly to "optimal" — consistent with the fix holding, though this is not a
+scale-stress re-test of the original extreme-K/S regime (K=1e12, S=2e8) and
+should not be read as re-confirming the fix at that extreme; a future run
+should re-run the original 2026-07-23 extreme-scale scripts verbatim for a
+true apples-to-apples regression check. No new SOLVER_BUG, SOLVER_LIMITATION,
+ROUTING_ERROR, or GRADIENT_ERROR found; no issues filed. Environment: Linux
+cloud sandbox, fresh venv + cargo release build + maturin release build, all
+succeeded within the ~20 min setup timebox (~5 min total for cargo+maturin
+combined, background-parallelized with the venv/pip install). No GAMS, no
+Ipopt binary available (not needed — none of today's 5 families requires
+them); scipy trust-constr/SLSQP and cvxpy (CLARABEL/SCS) served as oracles
+throughout. Family selection was log-rotation only (coverage-combined.sh
+intentionally skipped per the environment adaptation instructions, which
+favor speed over coverage-directed targeting in this sandbox).
