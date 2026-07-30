@@ -11,16 +11,16 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
 | nlp             |      9 | 2026-07-28 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
-| lp              |      6 | 2026-07-28 | —             |
-| qp              |      6 | 2026-07-28 | —             |
-| qp-active-set   |      6 | 2026-07-28 | —             |
+| lp              |      7 | 2026-07-30 | —             |
+| qp              |      7 | 2026-07-30 | —             |
+| qp-active-set   |      7 | 2026-07-30 | —             |
 | socp            |      9 | 2026-07-28 | —             |
 | exp             |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | sdp             |      8 | 2026-07-29 | —             |
 | sos             |      8 | 2026-07-23 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
-| autoroute       |      7 | 2026-07-29 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP)  |
-| batch           |      6 | 2026-07-29 | —             |
+| autoroute       |      8 | 2026-07-30 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP and quadratic-objective ball QCQP)  |
+| batch           |      7 | 2026-07-30 | —             |
 | diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
 | sensitivity     |      8 | 2026-07-23 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed) |
 
@@ -3999,3 +3999,88 @@ them); scipy trust-constr/SLSQP and cvxpy (CLARABEL/SCS) served as oracles
 throughout. Family selection was log-rotation only (coverage-combined.sh
 intentionally skipped per the environment adaptation instructions, which
 favor speed over coverage-directed targeting in this sandbox).
+
+** [2026-07-30] 5x5 Linear Assignment Problem, LP relaxation (lp/network-flow) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: standard assignment-problem LP (Bertsimas & Tsitsiklis network-flow
+  chapter); Hungarian algorithm oracle (Kuhn 1955)
+:KNOWN_OPTIMAL: 44.0
+:POUNCE_OBJECTIVE: 43.999999997
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0070
+:ORACLE: Hungarian algorithm (scipy.optimize.linear_sum_assignment) + scipy.linprog(HiGHS)
+:ORACLE_OBJECTIVE: 44.0
+:ORACLE_TIME: 0.0036
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_lp_assignment.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-30] Hard-Margin SVM Dual QP (qp/kernel-Gram-matrix) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: standard hard-margin SVM dual (Boser/Guyon/Vapnik 1992; Cortes/Vapnik
+  1995); Boyd & Vandenberghe Ch.8
+:KNOWN_OPTIMAL: -0.125
+:POUNCE_OBJECTIVE: -0.125
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0054
+:ORACLE: cvxpy (CLARABEL)
+:ORACLE_OBJECTIVE: -0.125
+:ORACLE_TIME: 0.0108
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_qp_svm-dual.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-30] Continuous Quadratic-Knapsack QP (qp-active-set/equality+bounds, sparse active set) - PASS
+:PROPERTIES:
+:FAMILY: qp-active-set
+:SOURCE: P. Brucker (1984), Operations Research Letters 3(3):163-166
+  (continuous quadratic knapsack / water-filling KKT)
+:KNOWN_OPTIMAL: -32.932003353
+:POUNCE_OBJECTIVE: -32.932003353
+:POUNCE_STATUS: SolveSucceeded
+:POUNCE_TIME: 0.0079
+:ORACLE: 1-D water-filling root-find (scipy.optimize.brentq) + cvxpy (CLARABEL) + pounce qp-ipm cross-check
+:ORACLE_OBJECTIVE: -32.932003352
+:ORACLE_TIME: 0.0100
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_qp-active-set_knapsack.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-30] 50-Instance Batch of Box-Constrained Diagonal QPs (batch/large-scale) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: separable diagonal QP, per-coordinate closed form; instance count (50)
+  chosen to stress batch-indexing faithfulness beyond prior runs' max of 8
+:KNOWN_OPTIMAL: per-instance closed form (50 instances, all checked)
+:POUNCE_OBJECTIVE: max_obj_err_vs_closed_form=1.21e-09 (50/50 optimal)
+:POUNCE_STATUS: optimal (all 50)
+:POUNCE_TIME: 0.0079
+:ORACLE: per-instance closed form (all 50) + cvxpy CLARABEL (5 spot-checks: idx 0,12,25,37,49)
+:ORACLE_OBJECTIVE: max_obj_err_vs_cvxpy=1.65e-09
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_batch_large-scale-box.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-30] Euclidean Ball-Projection QCQP Auto-Routing (autoroute/QCQP->socp, quadratic objective) - PASS
+:PROPERTIES:
+:FAMILY: autoroute
+:SOURCE: standard convex-analysis projection-onto-a-ball identity (Boyd &
+  Vandenberghe Ch.8)
+:KNOWN_OPTIMAL: 4.5
+:POUNCE_OBJECTIVE: 4.5000000000
+:POUNCE_STATUS: success (auto route info.solver=socp, confirmed)
+:POUNCE_TIME: 0.0084
+:ORACLE: forced solver_selection=nlp (4.4999999950) + cvxpy CLARABEL (4.5000000063)
+:ORACLE_OBJECTIVE: 4.5000000063
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_autoroute_ball-projection-qcqp.org]]
+:COVERAGE_TARGET: -
+:END:

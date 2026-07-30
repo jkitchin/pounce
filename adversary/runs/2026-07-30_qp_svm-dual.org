@@ -1,0 +1,55 @@
+#+TITLE: Adversary Run: Hard-Margin SVM Dual QP
+#+DATE: 2026-07-30
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: kernel Gram-matrix QP, box + single equality (SVM dual)
+:SOURCE: standard hard-margin SVM dual (Boser, Guyon & Vapnik 1992; Cortes &
+  Vapnik 1995); Boyd & Vandenberghe Ch.8 for the max-margin/QP correspondence.
+  Closed form is this run's hand derivation from the dataset's symmetry,
+  verified by an explicit KKT-gradient check in the script itself.
+:KNOWN_OPTIMAL: -0.125 (dual, minimize form); primal 0.5||w||^2 = 0.125
+:N_VARIABLES: 4 (alpha_1..alpha_4)
+:N_CONSTRAINTS: 1 equality (y^T alpha = 0), box 0<=alpha_i<=1
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (log-rotation only)
+:END:
+
+minimize 0.5 \alpha^T P \alpha - \sum \alpha_i, P_{ij}=y_iy_jK_{ij}, s.t. y^T\alpha=0, 0\le\alpha_i\le C
+
+Dataset: X=[(-2,-1),(-2,1),(2,-1),(2,1)], y=(-1,-1,1,1); C=1 (non-binding).
+By symmetry all four points are support vectors with equal alpha_i=1/16,
+separating hyperplane w=(0.5,0), b=0.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver            | Status  | Objective     | Rel Err   | Iters | Wall Time |
+|-------------------+---------+---------------+-----------+-------+-----------|
+| pounce (solve_qp) | optimal | -0.1250000000 | 2.78e-17  |   n/a |  0.0054s  |
+| cvxpy (CLARABEL)  | optimal | -0.1250000000 | 2.78e-17  |   n/a |  0.0108s  |
+
+Known optimal: -0.125
+
+pounce recovered alpha=(0.0625,0.0625,0.0625,0.0625) exactly (inf-norm error
+2.77e-10 vs the hand-derived value), and the implied separating-hyperplane
+normal w=(0.500000000, -2.8e-17) matched the known w=(0.5,0) to 2.2e-9.
+
+* Cross-check / Verification
+cvxpy/CLARABEL (a fully independent QP solver, dense non-diagonal Gram-matrix
+P) matched pounce to 5.55e-17 relative objective error and reproduced the
+identical alpha vector. The hand-derived closed form was itself verified
+in-script by checking the KKT stationarity gradient (P @ ALPHA_STAR - 1)
+vanishes exactly with equality multiplier mu=0, so KNOWN_OPTIMAL is not just
+asserted but checked before use.
+
+* Verdict
+PASS -- pounce's convex QP path exactly matches both the closed-form SVM
+dual optimum and an independent cvxpy/CLARABEL solve on a dense
+(non-diagonal) Gram-matrix QP with a coupling equality constraint, a
+structurally different case from prior qp adversary runs (Markowitz,
+HS76, HS28, Hilbert, Vandermonde, status-battery -- none used a kernel
+Gram matrix).

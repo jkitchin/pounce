@@ -1,0 +1,56 @@
+#+TITLE: Adversary Run: 5x5 Linear Assignment Problem (LP relaxation)
+#+DATE: 2026-07-30
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: network-flow / totally-unimodular LP (assignment problem)
+:SOURCE: standard OR assignment-problem LP (see e.g. Bertsimas & Tsitsiklis,
+  "Introduction to Linear Optimization", network-flow chapter); Hungarian
+  algorithm oracle: H.W. Kuhn (1955), "The Hungarian method for the
+  assignment problem", Naval Research Logistics Quarterly 2(1-2):83-97.
+:KNOWN_OPTIMAL: 44.0 (computed at runtime by scipy.optimize.linear_sum_assignment)
+:N_VARIABLES: 25 (5x5 x_ij)
+:N_CONSTRAINTS: 10 equalities (5 row-sum + 5 col-sum), x >= 0, no explicit ub
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (coverage-combined.sh skipped per environment adaptations; log-rotation only)
+:END:
+
+minimize \sum_{i,j} c_{ij} x_{ij} s.t. \sum_j x_{ij}=1 \forall i, \sum_i x_{ij}=1 \forall j, x_{ij}\ge0
+
+The assignment-problem constraint matrix is totally unimodular, so the LP
+relaxation's optimal vertex is automatically integral (Birkhoff-von Neumann);
+no explicit x_{ij}<=1 upper bound was even imposed, testing that pounce's LP
+path reaches the integral vertex from TU + nonnegativity alone.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Objective       | Rel Err    | Iters | Wall Time |
+|----------------------+---------+-----------------+------------+-------+-----------|
+| pounce (solve_qp/LP) | optimal | 43.999999997    | 6.09e-11   |   n/a |  0.0070s  |
+| scipy linprog(HiGHS) | 0       | 44.000000000    | 0.00e+00   |   n/a |  0.0036s  |
+| Hungarian (known)    | -       | 44.0            | -          |   n/a |  0.00001s |
+
+Known optimal: 44.0
+
+pounce's LP path matched both the combinatorial Hungarian-algorithm optimum
+and scipy's independent HiGHS LP solve to ~1e-10 relative error, and landed
+on the assignment matching {(0,4),(1,2),(2,1),(3,3),(4,0)} with x_ij within
+1.2e-10 of {0,1} for every entry -- confirming pounce's LP solver reaches the
+TU-guaranteed integral vertex without any integrality machinery.
+
+* Cross-check / Verification
+Two independent oracles agreed with each other (linprog vs Hungarian: 0.00e+00
+rel err) and with pounce (6.09e-11 and 6.09e-11 rel err respectively). The
+Hungarian algorithm is a combinatorial method with no relation to any LP
+solver (simplex/interior-point), making this a strong oracle for pounce's
+LP correctness.
+
+* Verdict
+PASS -- pounce's LP path exactly matches both an independent combinatorial
+oracle (Hungarian algorithm) and an independent LP solver (scipy HiGHS) to
+numerical tolerance, and correctly lands on an integral (permutation-matrix)
+vertex as TU theory predicts.

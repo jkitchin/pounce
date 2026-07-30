@@ -1,0 +1,53 @@
+#+TITLE: Adversary Run: 50-Instance Batch of Box-Constrained Diagonal QPs
+#+DATE: 2026-07-30
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: solve_qp_batch faithfulness at scale (50 independent instances, box-only)
+:SOURCE: separable diagonal QP with per-coordinate closed form (no external
+  citation needed -- pure first-order calculus); designed to stress batch
+  indexing/cross-instance-contamination at a larger instance count (50) than
+  prior batch runs (max 8 instances to date).
+:KNOWN_OPTIMAL: per-instance closed form x_i = clip(c_i/q_i, l_i, u_i)
+:N_VARIABLES: 6 per instance x 50 instances = 300 total
+:N_CONSTRAINTS: box bounds only, no A/G, no coupling between instances
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (log-rotation only)
+:END:
+
+Per instance k: minimize \sum_i 0.5 q_i x_i^2 - c_i x_i s.t. l_i \le x_i \le u_i
+
+Fully separable/diagonal, so the closed form is an exact per-coordinate clip
+with no linear algebra. 50 independent instances maximizes the chance that any
+batch-indexing bug (one instance's data leaking into a neighbor's solve)
+would surface as a per-instance mismatch.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                       | Status     | Max Obj Err  | Max x Err  | Wall Time |
+|-------------------------------+------------+--------------+------------+-----------|
+| pounce solve_qp_batch (50)    | 50/50 opt  | 1.21e-09     | 3.48e-08   |  0.0079s  |
+| pounce solve_qp (per-item x50)| -          | (batch agree: 0.00e+00 disagreement) | | 0.2087s   |
+| cvxpy CLARABEL (5 spot-checks)| optimal    | 1.65e-09     | -          |     -     |
+
+Known optimal: per-instance closed form (see above); all 50 instances checked.
+
+* Cross-check / Verification
+All 50 batch results matched their own per-instance closed form (max obj err
+1.21e-09, max x err 3.48e-08, worst instance idx=30 -- an ordinary numerical
+IPM-tolerance gap, not an outlier suggesting index contamination). The batch
+path agreed with 50 independent single-item solve_qp calls with ZERO
+disagreement (0.00e+00), and 5 instances spread across the batch (indices 0,
+12, 25, 37, 49) were independently cross-checked against cvxpy/CLARABEL,
+agreeing to 1.65e-09. Batch was ~26x faster than 50 sequential single-item
+solves (0.0079s vs 0.2087s).
+
+* Verdict
+PASS -- solve_qp_batch is faithful at 50 instances with no cross-instance
+contamination detected: every instance matches its own closed form, matches
+its own single-item solve, and (on the spot-checked subset) matches an
+independent external oracle.

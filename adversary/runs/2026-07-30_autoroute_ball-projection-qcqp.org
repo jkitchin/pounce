@@ -1,0 +1,54 @@
+#+TITLE: Adversary Run: Euclidean Ball-Projection QCQP Auto-Routing
+#+DATE: 2026-07-30
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: convex QCQP, quadratic objective + quadratic ball constraint -> socp route
+:SOURCE: standard convex-analysis projection-onto-a-ball identity (Boyd &
+  Vandenberghe, "Convex Optimization", projection examples throughout Ch.8).
+:KNOWN_OPTIMAL: 4.5
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 1 quadratic inequality (||x||^2 <= r^2)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (log-rotation only)
+:END:
+
+minimize 0.5||x-a||^2 s.t. ||x||^2 \le r^2, a=(4,-3,0), r=2
+
+Closed form: a lies outside the ball (||a||=5>r=2), so the projection is on
+the boundary along the ray from the origin through a: x* = r*a/||a|| =
+(1.6,-1.2,0), obj* = 0.5*(||a||-r)^2 = 4.5.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                    | Status  | Objective     | Rel Err   | Wall Time |
+|----------------------------+---------+---------------+-----------+-----------|
+| pounce auto (info.solver=socp) | success | 4.5000000000 | 1.67e-12 | 0.0084s |
+| pounce forced nlp          | success | 4.4999999950  | 1.11e-08 |  0.0153s  |
+| cvxpy (CLARABEL)           | optimal | 4.5000000063  | 1.4e-09  |     -     |
+
+Known optimal: 4.5, x* = (1.6, -1.2, 0.0)
+
+* Cross-check / Verification
+`auto` correctly detected the problem as a convex QCQP and routed to the
+dedicated conic solver (`res_auto.info["solver"] == "socp"`, confirmed --
+not a silent NLP fallthrough). auto vs forced-nlp agree to 1.11e-09 relative
+objective error and 1.33e-09 x_inf error (routing-transparency contract
+holds). Both independently match the closed-form known optimum (auto:
+1.67e-12, essentially machine precision since the conic path solves this
+exactly) and cvxpy/CLARABEL (1.41e-09).
+
+This is a distinct QCQP shape from the two prior autoroute QCQP-ball runs
+(2026-06-09, 2026-07-23), which both used a LINEAR objective over a ball;
+here the objective itself is quadratic (Euclidean projection), exercising a
+different branch of the auto-detector's finite-difference structure probe.
+
+* Verdict
+PASS -- auto-routing correctly identifies this quadratic-objective QCQP,
+dispatches to the conic solver, and produces an answer identical (to
+tolerance) to the forced-NLP path, the closed-form projection identity, and
+an independent cvxpy solve.

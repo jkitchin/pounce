@@ -1,0 +1,55 @@
+#+TITLE: Adversary Run: Continuous Quadratic-Knapsack QP (qp-active-set)
+#+DATE: 2026-07-30
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: separable QP, one equality (budget) + box bounds, sparse active set
+:SOURCE: P. Brucker (1984), "An O(n log n) algorithm for quadratic knapsack
+  problems", Operations Research Letters 3(3):163-166 (continuous quadratic
+  knapsack / water-filling KKT structure); Boyd & Vandenberghe Ch.5 for the
+  water-filling KKT form.
+:KNOWN_OPTIMAL: -32.932003353 (computed via 1-D scipy.optimize.brentq root-find
+  on the monotone KKT multiplier equation, N=10)
+:N_VARIABLES: 10
+:N_CONSTRAINTS: 1 equality (sum x_i = S) + 10 box bounds (2 active at optimum)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: - (log-rotation only)
+:END:
+
+minimize \sum_i 0.5 q_i x_i^2 - c_i x_i s.t. \sum_i x_i = S, l_i \le x_i \le u_i
+
+KKT stationarity gives x_i(\lambda)=clip((c_i+\lambda)/q_i, l_i, u_i); the
+equality residual g(\lambda)=\sum x_i(\lambda)-S is monotone in \lambda, so
+its root is a 1-D bisection independent of any linear-algebra QP solver.
+Only 2 of 10 bounds are active at the optimum (sparse active set), a
+different regime from the prior box-only test's denser activity.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                          | Status        | Objective       | Rel Err   | Iters | Wall Time |
+|----------------------------------+---------------+-----------------+-----------+-------+-----------|
+| pounce (CLI qp-active-set)       | SolveSucceeded| -32.932003353   | 2.16e-16  |     1 |  0.0079s  |
+| pounce (CLI qp-ipm, forced)      | -             | -32.932003352   | 7.82e-12* |     9 |    -      |
+| cvxpy (CLARABEL)                 | optimal       | -32.932003352   | 2.76e-11* |   n/a |  0.0100s  |
+(* relative to the qp-active-set answer, not to the known optimum)
+
+Known optimal: -32.932003353 (n_active_bounds = 2/10; lambda* = 0.532858)
+
+* Cross-check / Verification
+The active-set path was confirmed genuinely exercised (not a silent IPM
+fallthrough): 1 iteration for qp-active-set vs 9 for qp-ipm on the identical
+.nl model. All three of {known closed-form, forced qp-ipm, cvxpy/CLARABEL}
+agree with the active-set answer to <=2.76e-11 relative error; x_inf_err vs
+the closed-form root-find solution is 2.22e-16.
+
+* Verdict
+PASS -- the qp-active-set solver correctly identifies the sparse (2-of-10)
+active set and matches an independent 1-D water-filling closed form, the
+pounce IPM path, and cvxpy to machine/near-machine precision. This is a
+different structural stress (equality-coupled separable QP with a sparse
+active set) than prior qp-active-set runs, which used box-only,
+single-general-inequality, or degenerate/rank-deficient equality cases.
