@@ -13,7 +13,7 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | nlp             |      9 | 2026-07-28 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |      7 | 2026-07-30 | —             |
 | qp              |      7 | 2026-07-30 | —             |
-| qp-active-set   |      7 | 2026-07-30 | —             |
+| qp-active-set   |     11 | 2026-07-30 | —             |
 | socp            |      9 | 2026-07-28 | —             |
 | exp             |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
@@ -4083,4 +4083,72 @@ favor speed over coverage-directed targeting in this sandbox).
 :VERDICT: PASS
 :REPORT: [[file:runs/2026-07-30_autoroute_ball-projection-qcqp.org]]
 :COVERAGE_TARGET: -
+:END:
+
+** [2026-07-30] LICQ-Violating QP with Duplicated Equality Rows (qp-active-set/degenerate/rank-deficient) - PASS
+:PROPERTIES:
+:FAMILY: qp-active-set
+:SOURCE: Nocedal & Wright Ch.16 + duplicated-row LICQ violation
+:KNOWN_OPTIMAL: 1.5
+:POUNCE_OBJECTIVE: 1.5000000000e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0011
+:ORACLE: cvxpy/CLARABEL
+:ORACLE_OBJECTIVE: 1.5000000000e+00
+:ORACLE_TIME: 0.0084
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_qp-active-set_licq-redundant-equalities.org]]
+:COVERAGE_TARGET: -
+:NOTE: Adversarial probe of PR #412 (qp-active-set moved to the convex driver + parametric homotopy). Both engines cross-checked; active-set path exact or near-exact and 1.0-2.7x faster than the IPM on all four.
+:END:
+
+** [2026-07-30] Ill-Conditioned QP with a Large Active Set (qp-active-set/ill-conditioned, 10/18 active) - PASS
+:PROPERTIES:
+:FAMILY: qp-active-set
+:SOURCE: Eigenvalue-spread construction, Nocedal & Wright Ch.16
+:KNOWN_OPTIMAL: 9.1917135208 (oracle)
+:POUNCE_OBJECTIVE: 9.1917134819e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0021
+:ORACLE: cvxpy/CLARABEL + SCS
+:ORACLE_OBJECTIVE: 9.1917135208e+00
+:ORACLE_TIME: 0.0063
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_qp-active-set_ill-conditioned-active-set.org]]
+:COVERAGE_TARGET: -
+:NOTE: Adversarial probe of PR #412 (qp-active-set moved to the convex driver + parametric homotopy). Both engines cross-checked; active-set path exact or near-exact and 1.0-2.7x faster than the IPM on all four.
+:END:
+
+** [2026-07-30] Collapsed Cone (m>>n), Feasible Set a Single Point (qp-active-set/maximally degenerate, no interior) - PASS
+:PROPERTIES:
+:FAMILY: qp-active-set
+:SOURCE: Geometry of pounce #282, reconstructed with known optimum
+:KNOWN_OPTIMAL: 0
+:POUNCE_OBJECTIVE: -8.792850e-18
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0007
+:ORACLE: cvxpy/CLARABEL
+:ORACLE_OBJECTIVE: 2.662550e-10
+:ORACLE_TIME: 0.0030
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_qp-active-set_collapsed-cone-singleton.org]]
+:COVERAGE_TARGET: -
+:NOTE: Adversarial probe of PR #412 (qp-active-set moved to the convex driver + parametric homotopy). Both engines cross-checked; active-set path exact or near-exact and 1.0-2.7x faster than the IPM on all four.
+:END:
+
+** [2026-07-30] Degenerate LP (P=0) with a Continuum of Optima (qp-active-set/LP-as-QP degenerate, both Python surfaces) - PASS
+:PROPERTIES:
+:FAMILY: qp-active-set
+:SOURCE: Chvatal, Linear Programming Ch.3
+:KNOWN_OPTIMAL: -3
+:POUNCE_OBJECTIVE: -3.0000000000e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0015
+:ORACLE: cvxpy/CLARABEL
+:ORACLE_OBJECTIVE: -3.0000000002e+00
+:ORACLE_TIME: 0.0024
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-30_qp-active-set_degenerate-lp-multiple-optima.org]]
+:COVERAGE_TARGET: -
+:NOTE: Adversarial probe of PR #412 (qp-active-set moved to the convex driver + parametric homotopy). Both engines cross-checked; active-set path exact or near-exact and 1.0-2.7x faster than the IPM on all four.
 :END:

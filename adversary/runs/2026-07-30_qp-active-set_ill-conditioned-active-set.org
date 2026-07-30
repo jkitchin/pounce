@@ -1,0 +1,47 @@
+#+TITLE: Adversary Run: Ill-Conditioned QP with a Large Active Set
+#+DATE: <2026-07-30>
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: ill-conditioned (cond 1e8), 10 of 18 rows active at the optimum
+:SOURCE: Eigenvalue-spread construction after Nocedal & Wright Ch. 16 on ill-conditioned QP KKT systems; optimum from two independent oracles.
+:KNOWN_OPTIMAL: oracle-derived: 9.1917135208
+:N_VARIABLES: 25
+:N_CONSTRAINTS: 18 inequalities
+:SELECTED_BY: topic-guidance (PR #412 rewrites this family)
+:COVERAGE_TARGET: -
+:END:
+
+See the companion script for the exact formulation.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                   | Status   | Objective              | Rel Err    | Time (s) |
+|--------------------------+----------+------------------------+------------+----------|
+| pounce ipm               | optimal  | 9.1917134799e+00       | 4.45e-09   | 0.0040   |
+| pounce active-set        | optimal  | 9.1917134819e+00       | 4.24e-09   | 0.0021   |
+| cvxpy CLARABEL           | optimal  | 9.1917135208e+00       | -          | 0.0063   |
+| cvxpy SCS                | optimal  | 9.1916841937e+00       | 3.19e-06 (vs CLARABEL) | -        |
+
+Known optimal: oracle-derived: 9.1917135208
+
+Aimed at the homotopy's `delta` regularization: the path is traced on `H + delta*I` with delta a 1e-6 *relative* perturbation, and on a spectrum spanning 1e8 a relative perturbation is not obviously harmless -- too large and it mispredicts the active set. It does not: the active-set path matches the oracle to 4.2e-9, slightly closer than the IPM, at half the wall time. The two oracles agree only to 3.2e-6 with each other, which bounds how much can be concluded below that level.
+
+* Cross-check / Verification
+Oracle: cvxpy/CLARABEL (independent of pounce). Probe 2 adds cvxpy/SCS as a
+second oracle. Both pounce engines (`method="ipm"` and `method="active-set"`)
+are run on the identical problem so the new active-set path is cross-checked
+against the long-standing interior-point path as well as against the oracle,
+per the family's entry in the workflow table.
+
+The safety property PR #412 is built around is asserted explicitly: a solve that
+reports `optimal` with an objective off by more than tolerance is flagged
+SOLVED-BUT-WRONG and fails the probe. None occurred.
+
+* Verdict
+PASS -- pounce matches the oracle and the known optimum to tolerance on both
+engines, with no solved-but-wrong and no false infeasibility.

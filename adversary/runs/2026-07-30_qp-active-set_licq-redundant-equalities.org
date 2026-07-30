@@ -1,0 +1,46 @@
+#+TITLE: Adversary Run: LICQ-Violating QP with Duplicated Equality Rows
+#+DATE: <2026-07-30>
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp-active-set
+:CLASS: degenerate / rank-deficient constraint Jacobian
+:SOURCE: Nocedal & Wright, *Numerical Optimization* 2nd ed., Ch. 16 (equality-QP KKT); LICQ violation by an exactly duplicated row. Optimum derived in closed form.
+:KNOWN_OPTIMAL: 1.5 at x* = (1,1,1)
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 3 equalities (rank 2)
+:SELECTED_BY: topic-guidance (PR #412 rewrites this family)
+:COVERAGE_TARGET: -
+:END:
+
+See the companion script for the exact formulation.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                   | Status   | Objective              | Rel Err    | Time (s) |
+|--------------------------+----------+------------------------+------------+----------|
+| pounce ipm               | optimal  | 1.4999999980e+00       | 1.33e-09   | 0.0028   |
+| pounce active-set        | optimal  | 1.5000000000e+00       | 1.48e-16   | 0.0011   |
+| cvxpy CLARABEL           | optimal  | 1.5000000000e+00       | -          | 0.0084   |
+
+Known optimal: 1.5 at x* = (1,1,1)
+
+The active set contains an exactly dependent row, so the active-set KKT is singular and no H-block shift repairs it. This is the class that produced a hard `LinearSolverFailure` before this PR's rank repair. Both pounce paths solve it; the active-set path is exact to machine precision (1.5e-16) and 2.5x faster than the IPM.
+
+* Cross-check / Verification
+Oracle: cvxpy/CLARABEL (independent of pounce). Probe 2 adds cvxpy/SCS as a
+second oracle. Both pounce engines (`method="ipm"` and `method="active-set"`)
+are run on the identical problem so the new active-set path is cross-checked
+against the long-standing interior-point path as well as against the oracle,
+per the family's entry in the workflow table.
+
+The safety property PR #412 is built around is asserted explicitly: a solve that
+reports `optimal` with an objective off by more than tolerance is flagged
+SOLVED-BUT-WRONG and fails the probe. None occurred.
+
+* Verdict
+PASS -- pounce matches the oracle and the known optimum to tolerance on both
+engines, with no solved-but-wrong and no false infeasibility.
