@@ -1,0 +1,54 @@
+#+TITLE: Adversary Run: CLRS Shortest-Path-as-LP
+#+DATE: 2026-07-31
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: network-flow (min-cost flow LP)
+:SOURCE: Cormen, Leiserson, Rivest, Stein, "Introduction to Algorithms" 3rd ed., Figure 24.6 (Dijkstra worked example, single-source shortest paths from s)
+:KNOWN_OPTIMAL: 9
+:N_VARIABLES: 10 (one per directed edge)
+:N_CONSTRAINTS: 5 equalities (flow conservation)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Vertices \(\{s,t,x,y,z\}\); directed edges/weights: s\(\to\)t:10, s\(\to\)y:5,
+t\(\to\)x:1, t\(\to\)y:2, x\(\to\)z:4, y\(\to\)t:3, y\(\to\)x:9, y\(\to\)z:2,
+z\(\to\)x:6, z\(\to\)s:7.
+
+\[
+\min_f \; c^\top f \quad \text{s.t.} \quad N f = e_s - e_x, \quad f \ge 0
+\]
+
+where \(N\) is the node-arc incidence matrix. Because the network-flow
+polytope with a unit supply/demand is totally unimodular, the LP optimum is
+guaranteed integral and equal to the shortest s\(\to\)x path length.
+CLRS's worked example publishes \(d(x)=9\) (path s\(\to\)y\(\to\)t\(\to\)x,
+weights 5+3+1).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver           | Status  | Objective     | Rel Err  | Iters | Wall Time |
+|------------------+---------+---------------+----------+-------+-----------|
+| pounce           | optimal | 8.9999999975  | 2.74e-10 |     - |   0.0051s |
+| scipy (HiGHS)    | 0       | 9.0000000000  | -        |     - |   0.0030s |
+
+Known optimal: 9.0
+
+pounce's LP driver (P=None routes through the simplex/IPM LP path) recovers
+the exact shortest-path cost and matches HiGHS to 2.7e-10.
+
+* Cross-check / Verification
+scipy.optimize.linprog(method="highs") solved the identical node-arc
+incidence-matrix LP independently and agrees to 2.7e-10 in objective and
+6.2e-10 in the solution vector (both find the flow along
+s\(\to\)y\(\to\)t\(\to\)x). The published CLRS distance (9) matches both.
+
+* Verdict
+PASS — pounce's LP path exactly reproduces the published Dijkstra distance
+and matches an independent LP oracle (scipy HiGHS) to solver tolerance. No
+defect found.

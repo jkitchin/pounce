@@ -1,0 +1,77 @@
+#+TITLE: Adversary Run: Batch Finite-Horizon LQR vs Riccati Recursion
+#+DATE: 2026-07-31
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: batch of independent equality-constrained QPs sharing structure (dynamics), differing only in the initial-state equality RHS — a standard batch-MPC pattern
+:SOURCE: Bertsekas, "Dynamic Programming and Optimal Control" Vol 1; Boyd, EE363 lecture notes ("LQR: Discrete-Time Finite Horizon")
+:KNOWN_OPTIMAL: per-instance x0'P0 x0 - x0'Q x0 from the Riccati recursion (see Results)
+:N_VARIABLES: 12 per instance (4-step horizon, state dim 2, control dim 1)
+:N_CONSTRAINTS: 8 equalities per instance; 6 instances in the batch
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Double-integrator dynamics \(A=\begin{psmallmatrix}1&1\\0&1\end{psmallmatrix}\),
+\(B=\begin{psmallmatrix}0\\1\end{psmallmatrix}\), \(Q=I_2\), \(R=1\),
+\(Q_f=10I_2\), horizon \(N=4\):
+
+\[
+\min \sum_{t=0}^{N-1} x_t^\top Q x_t + u_t^\top R u_t + x_N^\top Q_f x_N
+\quad \text{s.t.}\quad x_{t+1}=Ax_t+Bu_t,\;\; x_0 \text{ given}
+\]
+
+built as one QP per initial state \(x_0\) (6 instances, shared \(P,A\)
+structure, varying equality RHS), solved via =solve_qp_batch=. The Riccati
+recursion \(P_N=Q_f\), \(K_t=(R+B'P_{t+1}B)^{-1}B'P_{t+1}A\),
+\(P_t=Q+A'P_{t+1}A-A'P_{t+1}BK_t\) gives the exact cost-to-go
+\(x_0'P_0x_0\) — a completely independent dynamic-programming algorithm,
+touching no LP/QP/conic solver at all.
+
+** Formulation pitfall caught before filing
+The QP has no decision variable for \(x_0\) (it is fixed data), so its
+objective omits the \(x_0'Qx_0\) stage term that the Riccati cost-to-go
+includes — the known value must subtract \(x_0'Qx_0\). Separately, pounce's
+=solve_qp= objective is \(\tfrac12 z^\top Pz+c^\top z\) (per
+=qp.py='s docstring), so the block-diagonal \(P\) must be **twice** the
+\((Q,Q_f,R)\) blocks. The first draft of this script got both wrong
+(forgot the \(\tfrac12\) factor, entirely omitting the x0-term subtraction)
+and reported an 60-90% "mismatch" that a third independent check (direct
+trajectory substitution + BFGS) traced to the script, not pounce — see
+Cross-check below.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| x0            | pounce (batch) | pounce (single) | Riccati (oracle) | Rel Err  |
+|---------------+----------------+------------------+------------------+----------|
+| (1,0)         | 1.97400451e+00 | 1.97400451e+00   | 1.97400451e+00   | 2.73e-10 |
+| (0,1)         | 3.69090909e+00 | 3.69090909e+00   | 3.69090909e+00   | 2.80e-10 |
+| (2,-1)        | 1.92742298e+00 | 1.92742298e+00   | 1.92742299e+00   | 3.07e-09 |
+| (-3,2)        | 3.55116453e+00 | 3.55116453e+00   | 3.55116454e+00   | 1.75e-09 |
+| (0.5,0.5)     | 2.62366642e+00 | 2.62366642e+00   | 2.62366642e+00   | 2.87e-10 |
+| (-1,-2)       | 2.63971450e+01 | 2.63971450e+01   | 2.63971450e+01   | 3.51e-11 |
+
+Wall time: batch 0.0022s vs 6 per-item singles 0.0100s (~4.5x faster).
+
+* Cross-check / Verification
+=solve_qp_batch= and per-item =solve_qp= agree to 0.00e+00 (bitwise) on all
+6 instances, ruling out any batch-specific data contamination. Both match
+the Riccati recursion to <=3.1e-9 relative error. A third, fully
+independent method — substituting the dynamics into the cost and
+minimizing over the raw control sequence with scipy BFGS (no QP/conic
+solver, no explicit Riccati equations) — reproduced the identical corrected
+optimal cost (2.9740045078888078 total incl. x0 term, i.e.
+1.9740045078888078 excl.) for the x0=(1,0) instance, confirming the
+Riccati oracle itself was correct and the original mismatch was entirely
+the script's missing factor-of-2 and missing x0-term subtraction.
+
+* Verdict
+PASS — after correcting a FORMULATION_ERROR in this script (objective
+convention factor of 2; x0 stage-cost accounting), =solve_qp_batch= matches
+both per-item =solve_qp= and an independent Riccati-recursion oracle to
+<=3.1e-9 relative error across 6 differently-conditioned initial states. No
+solver defect found.

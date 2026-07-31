@@ -11,16 +11,16 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
 | nlp             |      9 | 2026-07-28 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
-| lp              |      7 | 2026-07-30 | —             |
-| qp              |      7 | 2026-07-30 | —             |
+| lp              |      8 | 2026-07-31 | —             |
+| qp              |      8 | 2026-07-31 | —             |
 | qp-active-set   |     11 | 2026-07-30 | —             |
 | socp            |      9 | 2026-07-28 | —             |
-| exp             |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| power           |      7 | 2026-07-29 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| exp             |      8 | 2026-07-31 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |      8 | 2026-07-31 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | sdp             |      8 | 2026-07-29 | —             |
 | sos             |      8 | 2026-07-23 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
 | autoroute       |      8 | 2026-07-30 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP and quadratic-objective ball QCQP)  |
-| batch           |      7 | 2026-07-30 | —             |
+| batch           |      8 | 2026-07-31 | —             |
 | diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
 | sensitivity     |      8 | 2026-07-23 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed) |
 
@@ -4151,4 +4151,85 @@ favor speed over coverage-directed targeting in this sandbox).
 :REPORT: [[file:runs/2026-07-30_qp-active-set_degenerate-lp-multiple-optima.org]]
 :COVERAGE_TARGET: -
 :NOTE: Adversarial probe of PR #412 (qp-active-set moved to the convex driver + parametric homotopy). Both engines cross-checked; active-set path exact or near-exact and 1.0-2.7x faster than the IPM on all four.
+:END:
+
+** [2026-07-31] CLRS Shortest-Path-as-LP (lp/network-flow) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: CLRS "Introduction to Algorithms" 3rd ed., Figure 24.6 (Dijkstra worked example)
+:KNOWN_OPTIMAL: 9
+:POUNCE_OBJECTIVE: 8.9999999975e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0051
+:ORACLE: scipy.optimize.linprog (HiGHS)
+:ORACLE_OBJECTIVE: 9.0000000000e+00
+:ORACLE_TIME: 0.0030
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-31_lp_clrs_shortest_path.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-31] Euclidean Projection onto Box-Capped Simplex (qp/equality+box, closed-form water-filling) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: Boyd & Vandenberghe Sec 5.5.3-style KKT argument; Duchi et al. ICML 2008 Sec 3
+:KNOWN_OPTIMAL: 9.125 (closed-form bisection)
+:POUNCE_OBJECTIVE: 9.1250000005e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0071
+:ORACLE: bisection water-filling (closed form) + cvxpy/CLARABEL
+:ORACLE_OBJECTIVE: 9.1250000000e+00 / 9.1250000064e+00
+:ORACLE_TIME: - / 0.0103
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-31_qp_box_simplex_projection.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-31] Log-Optimal (Kelly) Portfolio (exp/exp-cone, boundary-degenerate) - PASS
+:PROPERTIES:
+:FAMILY: exp
+:SOURCE: Kelly 1956; Cover & Thomas Ch 16; CVXPY/MOSEK log-optimal-investment cookbook pattern
+:KNOWN_OPTIMAL: 0 (boundary optimum w=(1,0,0), both risky bets have negative expected log-return)
+:POUNCE_OBJECTIVE: -1.2809968470e-07
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0143
+:ORACLE: cvxpy/CLARABEL + scipy SLSQP
+:ORACLE_OBJECTIVE: -4.6544338474e-09 / 1.1102230246e-16
+:ORACLE_TIME: 0.0084 / -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-31_exp_kelly_log_optimal_portfolio.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-31] L_p Regression p=1.5 via Power Cone (power/power-cone on affine residual) - PASS
+:PROPERTIES:
+:FAMILY: power
+:SOURCE: Boyd & Vandenberghe Sec 6.1.1 (norm approximation); MOSEK Modeling Cookbook Sec 3.2.4
+:KNOWN_OPTIMAL: none published; oracle-only
+:POUNCE_OBJECTIVE: 2.0624239685e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0142
+:ORACLE: cvxpy/CLARABEL (native pnorm atom) + scipy Nelder-Mead
+:ORACLE_OBJECTIVE: 2.0624239669e+00 / 2.0624239664e+00
+:ORACLE_TIME: 0.0107 / -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-31_power_lp_regression.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-07-31] Batch Finite-Horizon LQR vs Riccati Recursion (batch/6 shared-structure QPs, varying x0) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: Bertsekas Dynamic Programming Vol 1; Boyd EE363 (discrete-time finite-horizon LQR Riccati recursion)
+:KNOWN_OPTIMAL: per-instance x0'P0x0 - x0'Qx0 from Riccati recursion (see report)
+:POUNCE_OBJECTIVE: matches Riccati to <=3.1e-9 rel err on all 6 instances
+:POUNCE_STATUS: optimal (all 6)
+:POUNCE_TIME: 0.0022 (batch of 6)
+:ORACLE: Riccati recursion (independent DP algorithm, no LP/QP/conic solver) + direct trajectory-substitution BFGS cross-check
+:ORACLE_OBJECTIVE: see report table
+:ORACLE_TIME: 0.0100 (6 per-item singles)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-07-31_batch_lqr_riccati.org]]
+:COVERAGE_TARGET: -
+:NOTE: First draft of this script had a FORMULATION_ERROR (forgot pounce's 1/2 x'Px objective convention; omitted the x0'Qx0 constant from the Riccati cost-to-go), which produced a spurious 58-89% "mismatch" per instance. Caught via a third independent oracle (trajectory-substitution + BFGS) before filing; corrected script agrees to <=3.1e-9. batch vs per-item singles agree bitwise (0.00e+00), ruling out batch-specific contamination.
 :END:

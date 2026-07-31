@@ -1,0 +1,50 @@
+#+TITLE: Adversary Run: L_p Regression (p=1.5) via the Power Cone
+#+DATE: 2026-07-31
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: power-cone epigraph on an affine residual (regression, not a bare p-norm-of-x constraint)
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization" (2004) Sec 6.1.1 (norm approximation); MOSEK Modeling Cookbook Sec 3.2.4 ("Power cone", p-norm reduction)
+:KNOWN_OPTIMAL: none published for this instance (oracle-only)
+:N_VARIABLES: 16 (3 fit vars + 6 residuals + 6 epigraph vars + 1 shared aux)
+:N_CONSTRAINTS: 7 equalities, 6x power cone (alpha=1/1.5)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\[
+\min_x \; \|Ax-b\|_p, \qquad p=1.5,\quad A\in\mathbb{R}^{6\times3}
+\]
+
+encoded per-residual as \((r_i, u_i, w)\) in a 3-D power cone with
+\(\alpha=1/p\), \(w\equiv1\), minimizing \(\sum_i u_i\) (equivalent to
+minimizing \(\|r\|_p^p\), whose minimizer coincides with the \(p\)-norm
+minimizer for fixed \(p\)).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                     | Status  | \|\|r\|\|_p       | Rel Err  | Wall Time |
+|----------------------------+---------+------------------+----------+-----------|
+| pounce                     | optimal | 2.0624239685e+00 | -        |   0.0142s |
+| cvxpy (CLARABEL, pnorm atom)| optimal| 2.0624239669e+00 | 8.07e-10 |   0.0107s |
+| scipy (Nelder-Mead)        | success | 2.0624239664e+00 | 1.04e-09 |         - |
+
+pounce's fit \(x=(0.62420,-0.41571,1.41648)\) matches both oracles to
+<2e-5 absolute in \(x\) and <1.1e-9 relative in the objective.
+
+* Cross-check / Verification
+cvxpy's native =pnorm= atom uses a different internal power-cone
+decomposition than the hand-built one here, and scipy's Nelder-Mead solves
+the smooth (non-conic) reformulation directly with no cone machinery at
+all — a genuinely independent derivative-free method. All three agree to
+<1.1e-9 relative error.
+
+* Verdict
+PASS — pounce's power-cone driver matches two independent oracles (a
+different conic encoding via cvxpy, and a cone-free derivative-free NLP
+solve) to high precision on an L_p-regression instance distinct from prior
+bare-p-norm-of-x probes in the log. No defect found.

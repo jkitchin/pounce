@@ -1,0 +1,63 @@
+#+TITLE: Adversary Run: Log-Optimal (Kelly) Portfolio via the Exponential Cone
+#+DATE: 2026-07-31
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: exp-cone (log-utility maximization over discrete scenarios)
+:SOURCE: J.L. Kelly Jr., "A New Interpretation of Information Rate", Bell Sys. Tech. J. 35 (1956); Cover & Thomas, "Elements of Information Theory" 2nd ed., Ch 16; modeled per the CVXPY/MOSEK "log-optimal investment" exp-cone cookbook pattern
+:KNOWN_OPTIMAL: none published for this instance (oracle-only; true optimum is the boundary point w=(1,0,0), growth=0)
+:N_VARIABLES: 7 (3 weights + 4 scenario epigraph vars)
+:N_CONSTRAINTS: 1 equality, nonneg cone (3) + 4x exp cone (3 each)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\[
+\max_w \; \tfrac{1}{K}\sum_{k=1}^K \log(r_k^\top w) \quad \text{s.t.} \quad \mathbf{1}^\top w = 1,\; w \ge 0
+\]
+
+Two independent bets (asset 0 = cash, gross return 1.0 always; asset 1
+doubles/halves p=1/2; asset 2 gains 20%/loses 40% p=1/2, independent of
+asset 1) give \(K=4\) equally-likely scenarios. Each scenario's log term is
+encoded via pounce's exp-cone convention \((x,y,z)\in K_{\exp} \iff
+y\,e^{x/y}\le z\): setting \(x=t_k, y=1, z=r_k^\top w\) enforces
+\(t_k \le \log(r_k^\top w)\).
+
+Both individual risky bets have negative expected log-return
+(\(E[\log A]\approx-0.144\), \(E[\log B]\approx-0.164\)), so with a
+riskless asset available the true Kelly-optimal allocation is all-cash,
+growth = 0 — a boundary/degenerate solution, a good stress case for the
+non-symmetric HSDE driver's boundary handling.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Growth           | Rel Err  | Wall Time |
+|---------------------+---------+------------------+----------+-----------|
+| pounce              | optimal | -1.2809968470e-07| -        |   0.0143s |
+| cvxpy (CLARABEL)    | optimal | -4.6544338474e-09| 1.23e-07 |   0.0084s |
+| scipy (SLSQP)       | success |  1.1102230246e-16| 1.28e-07 |         - |
+
+Known optimal: growth = 0 (all-cash), w* = (1,0,0)
+
+pounce's weights (0.99921, 7.9e-4, 2.7e-7) sit close to the true vertex,
+with a similar order of interior-point "leakage" from the exact boundary as
+cvxpy's CLARABEL solve (1.0e-4 leakage) — consistent barrier behavior
+across two independent solvers approaching a boundary optimum, not a
+divergence.
+
+* Cross-check / Verification
+Two independent oracles: cvxpy's native exp-cone support (CLARABEL) and a
+completely cone-free smooth NLP (scipy SLSQP directly maximizing the sum of
+logs). All three agree to ~1.3e-7 in growth rate and ~8e-4 in the weight
+vector (the latter gap explained by all three IPM-style methods leaving
+similar residual mass away from the exact vertex at their respective
+default tolerances).
+
+* Verdict
+PASS — pounce's exp-cone driver matches both an independent conic solver
+and an independent smooth-NLP solver to well within tolerance, including on
+a boundary-degenerate instance. No defect found.

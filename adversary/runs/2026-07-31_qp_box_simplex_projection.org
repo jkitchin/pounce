@@ -1,0 +1,50 @@
+#+TITLE: Adversary Run: Euclidean Projection onto a Box-Capped Simplex
+#+DATE: 2026-07-31
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: equality+box convex QP (closed-form via water-filling)
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization" (2004) Sec 5.5.3-style KKT argument; Duchi, Shalev-Shwartz, Singer, Chandra, "Efficient Projections onto the l1-Ball" (ICML 2008) Sec 3, for the box-simplex generalization
+:KNOWN_OPTIMAL: 9.125 (computed by closed-form bisection, not a fixed literature constant)
+:N_VARIABLES: 5
+:N_CONSTRAINTS: 1 equality + 10 box bounds
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\[
+\min_x \; \tfrac{1}{2}\|x-a\|_2^2 \quad \text{s.t.} \quad \mathbf{1}^\top x = s,\;\; 0 \le x \le 3
+\]
+
+with \(a = (1, 4, -2, 6, 0.5)\), \(s=5\). For a fixed equality multiplier
+\(\nu\), \(x_i(\nu) = \mathrm{clip}(a_i-\nu, 0, 3)\) is monotone decreasing,
+so bisecting \(g(\nu)=\sum_i x_i(\nu) - s = 0\) gives the exact KKT point
+independent of any QP solver ("water-filling").
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Objective       | Rel Err  | Iters | Wall Time |
+|---------------------+---------+-----------------+----------+-------+-----------|
+| pounce              | optimal | 9.1250000005e+00| -        |     - |   0.0071s |
+| bisection (closed-form) | -   | 9.1250000000e+00| 5.04e-11 |     - |         - |
+| cvxpy (CLARABEL)    | optimal | 9.1250000064e+00| 6.46e-10 |     - |   0.0103s |
+
+Known optimal: 9.125
+
+pounce recovers \(x^\star=(0,2,0,3,0)\) (up to 1e-10), matching both the
+closed-form water-filling multiplier \(\nu^\star=2.0\) and cvxpy.
+
+* Cross-check / Verification
+Two independent oracles agree: (1) a hand-derived bisection on the scalar
+equality multiplier (no QP/conic solver involved at all), and (2) cvxpy's
+CLARABEL conic solver. Both match pounce's objective to <1e-9 relative error
+and the solution vector to <3e-9 in inf-norm.
+
+* Verdict
+PASS — pounce's convex QP driver matches both a solver-independent
+closed-form method and an independent conic solver to high precision. No
+defect found.
