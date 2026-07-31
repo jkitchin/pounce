@@ -245,6 +245,24 @@ fn worst_path_violation(
     worst
 }
 
+/// `rows` reordered so the entries of `first` lead, in `first`'s own order.
+///
+/// [`crate::solver::independent_active_subset`] is a greedy scan that keeps the
+/// earliest independent rows it meets, so presenting a row earlier is what makes
+/// it survive the selection. That is the whole mechanism behind the exchange
+/// pivot in [`ParametricActiveSetSolver::trace_path`]: promoting a row costs one
+/// reordering, and the scan works out for itself which row must be evicted to
+/// make space.
+fn promote_first(rows: &[usize], first: &[usize]) -> Vec<usize> {
+    if first.is_empty() {
+        return rows.to_vec();
+    }
+    let mut out: Vec<usize> = Vec::with_capacity(rows.len());
+    out.extend(first.iter().copied().filter(|i| rows.contains(i)));
+    out.extend(rows.iter().copied().filter(|i| !first.contains(i)));
+    out
+}
+
 /// Rate of change of a row bound per unit `t` (0 when the bound is infinite).
 fn bound_rate(relaxed: Number, target: Number, is_lower: bool) -> Number {
     let infinite = if is_lower {
@@ -469,24 +487,44 @@ impl ParametricActiveSetSolver {
         let mut t: Number = 0.0;
         let mut n_changes: u32 = 0;
         let mut n_refactor: u32 = 0;
-        // Rank repairs allowed on this path. Each strictly shrinks the active
-        // set so the retry loop terminates on its own; the cap bounds the case
-        // where the ratio test keeps re-adding a pruned row.
+        // Rank repairs allowed on this path. Each strictly shrinks the KKT
+        // working set so the retry loop terminates on its own; the cap bounds
+        // the pathological case.
         let mut rank_repairs: u32 = (n + m).min(1000) as u32;
-        // Rows pruned by a rank repair *at the current* `t`. Without this the
-        // repair and the primal ratio test fight each other: the repair drops a
-        // linearly dependent row, the ratio test immediately re-adds it because
-        // it is still exactly at its bound at this `t`, and the pair loops
-        // forever without advancing. Measured on QSHARE2B, which repaired
-        // 79 -> 77 constraints at t = 0.9999973 and then repeated that same
-        // repair until the budget ran out.
+
+        // ---- Active set vs KKT working set ----
         //
-        // A pruned row is a linear combination of the kept ones, so it stays
-        // satisfied and excluding it changes nothing about feasibility. The tabu
-        // is cleared the moment `t` actually advances, because at a new `t` the
-        // dependency that justified the prune no longer necessarily holds — this
-        // suppresses the cycle without permanently blinding the ratio test.
-        let mut tabu_cons = vec![false; m];
+        // These are *different sets* at a degenerate point, and conflating them
+        // is what broke this path (#413).
+        //
+        // `working` is the **active set**: the rows and bounds sitting on their
+        // boundary at the current `t`. At a degenerate point more of them can be
+        // binding than there are independent directions, and the active-set KKT
+        // is then singular — no H-block shift repairs a rank-deficient
+        // *constraint* block. So the KKT is assembled from a maximal linearly
+        // independent subset, the **working set**, tracked here.
+        //
+        // The previous code expressed the prune by marking the surplus rows
+        // `Inactive`, which threw away the fact that they are still *on their
+        // bound*, and then had to hide them from the primal ratio test (the
+        // `tabu_cons` list) to stop the repair and the ratio test from fighting.
+        // A hidden row is not capped by the ratio test, so the step walked
+        // straight through it, and since the ratio test can only prevent a
+        // violation and never repair one (`dt < 0` is discarded), that row
+        // stayed violated for the rest of the path — 10 of the 14 crossings
+        // measured on QSHARE2B.
+        //
+        // Keeping the distinction lets a pruned row stay in the active set,
+        // where the step logic can still see it and hold it.
+        let mut in_kkt_c = vec![true; m];
+        let mut in_kkt_b = vec![true; n];
+
+        // Rows the exchange pivot has promoted into the working set at the
+        // current `t`, most recent first, and the budget for doing so. Cleared
+        // whenever `t` actually advances, because the dependency that forced the
+        // exchange is a property of the current vertex.
+        let mut promoted: Vec<usize> = Vec::new();
+        let mut exchanges: u32 = (n + m).min(500) as u32;
 
         // Each iteration either advances `t` or changes the working set, and the
         // budget bounds the total.
@@ -498,18 +536,31 @@ impl ParametricActiveSetSolver {
                 eprintln!("[hom] step={_step} t={t:.6e}");
             }
 
+            // The active set: everything currently on its boundary.
             let active_cons: Vec<usize> = (0..m)
                 .filter(|&i| working.constraints[i].is_active())
                 .collect();
             let active_bounds: Vec<usize> =
                 (0..n).filter(|&i| working.bounds[i].is_active()).collect();
-            let (k_c, k_b) = (active_cons.len(), active_bounds.len());
+            // The working set: the independent subset the KKT is built from.
+            // Equal to the active set except at a degenerate vertex.
+            let kkt_cons: Vec<usize> = active_cons
+                .iter()
+                .copied()
+                .filter(|&i| in_kkt_c[i])
+                .collect();
+            let kkt_bounds: Vec<usize> = active_bounds
+                .iter()
+                .copied()
+                .filter(|&j| in_kkt_b[j])
+                .collect();
+            let (k_c, k_b) = (kkt_cons.len(), kkt_bounds.len());
 
             // ---- Direction: d/dt of (x, λ) along this segment ----
             //
             // `H` is fixed along the path; `g` moves only on the warm path (see
             // `dg` below). The active rows' bounds advance at `bound_rate`.
-            let kkt = assemble_active_set_kkt(&path_qp, &active_cons, &active_bounds);
+            let kkt = assemble_active_set_kkt(&path_qp, &kkt_cons, &kkt_bounds);
             let mut rhs = vec![0.0; n + k_c + k_b];
             // Stationarity block: `H x(t) + g(t) + A_Wᵀ λ(t) = 0` differentiated
             // in `t` gives `H dx + dg + A_Wᵀ dλ = 0`, so the primal right-hand
@@ -519,7 +570,7 @@ impl ParametricActiveSetSolver {
             for (j, r) in rhs[..n].iter_mut().enumerate() {
                 *r = -dg[j];
             }
-            for (slot, &i) in active_cons.iter().enumerate() {
+            for (slot, &i) in kkt_cons.iter().enumerate() {
                 let is_lower = matches!(working.constraints[i], ConsStatus::AtLower);
                 rhs[n + slot] = match working.constraints[i] {
                     ConsStatus::Equality => bound_rate(bu0[i], qp.bu[i], false),
@@ -554,13 +605,22 @@ impl ParametricActiveSetSolver {
                 // the path (`QSHARE2B` at t = 0.99999, `QSCAGR7` at t = 0.99986).
                 // Bailing there discards a path that was one step from done.
                 Err(e) if e.is_recoverable_factorization_failure() && rank_repairs > 0 => {
+                    // Re-select the working set out of the *whole* active set,
+                    // with any rows the exchange pivot has promoted offered
+                    // first — `independent_active_subset` is a greedy scan that
+                    // keeps the earliest independent rows, so the ordering is
+                    // how a promotion is expressed.
+                    let ordered = promote_first(&active_cons, &promoted);
                     let (kc, kb) = crate::solver::independent_active_subset(
                         &mut self.linsol,
                         &path_qp,
-                        &active_cons,
+                        &ordered,
                         &active_bounds,
                     );
-                    if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                    if kc.len() == kkt_cons.len()
+                        && kb.len() == kkt_bounds.len()
+                        && promoted.is_empty()
+                    {
                         // Already full rank ⇒ not a deficiency this can repair.
                         if trace {
                             eprintln!("[hom] KKT failure at t={t:.6e}, full rank already: {e}");
@@ -568,6 +628,9 @@ impl ParametricActiveSetSolver {
                         return Ok(None);
                     }
                     rank_repairs -= 1;
+                    // The pruned rows stay in the *active set* — they are still
+                    // on their bounds — and leave only the KKT. The step logic
+                    // below is what keeps them there.
                     let mut keep_c = vec![false; m];
                     for &i in &kc {
                         keep_c[i] = true;
@@ -577,23 +640,27 @@ impl ParametricActiveSetSolver {
                         keep_b[j] = true;
                     }
                     for &i in &active_cons {
-                        if !keep_c[i] {
-                            working.constraints[i] = ConsStatus::Inactive;
+                        if !keep_c[i] && in_kkt_c[i] {
+                            in_kkt_c[i] = false;
                             lambda_g[i] = 0.0;
-                            tabu_cons[i] = true;
-                            n_changes += 1;
                         }
                     }
                     for &j in &active_bounds {
-                        if !keep_b[j] {
-                            working.bounds[j] = BoundStatus::Inactive;
+                        if !keep_b[j] && in_kkt_b[j] {
+                            in_kkt_b[j] = false;
                             lambda_x[j] = 0.0;
-                            n_changes += 1;
                         }
+                    }
+                    for &i in &kc {
+                        in_kkt_c[i] = true;
+                    }
+                    for &j in &kb {
+                        in_kkt_b[j] = true;
                     }
                     if trace {
                         eprintln!(
-                            "[hom] rank repair at t={t:.6e}: {} -> {} cons, {} -> {} bounds",
+                            "[hom] rank repair at t={t:.6e}: {} active cons -> {} in KKT, \
+                             {} active bounds -> {} in KKT",
                             active_cons.len(),
                             kc.len(),
                             active_bounds.len(),
@@ -614,14 +681,101 @@ impl ParametricActiveSetSolver {
             let dlam_c: Vec<Number> = (0..k_c).map(|s| rhs[n + s]).collect();
             let dlam_b: Vec<Number> = (0..k_b).map(|s| rhs[n + k_c + s]).collect();
 
-            // ---- Ratio test 1 (primal): when does an inactive row bind? ----
             let a_dx = a_times_x(qp.a, &dx, m);
             let ax = a_times_x(qp.a, &x, m);
+
+            // ---- Exchange pivot at a degenerate vertex ----
+            //
+            // Rows in the active set but not the KKT are on their bounds, but
+            // the direction solve was never told to hold them: `dx` satisfies
+            // `a_j·dx = rate_j` only for `j` in the working set. A pruned row
+            // `i` is a combination of those, `a_i = Σ c_j a_j`, so its residual
+            // moves at `a_i·dx = Σ c_j rate_j` — a quantity fixed by the working
+            // set, with no reason to match row `i`'s *own* bound rate. When it
+            // exceeds that rate the row is about to be pushed off its bound, and
+            // stepping would violate it permanently.
+            //
+            // (The old comment here asserted the opposite — "a pruned row is a
+            // linear combination of the kept ones, so it stays satisfied". That
+            // is true of a *static* point and false along a path where the
+            // bounds themselves are moving, which is the whole situation.)
+            //
+            // The fix is the textbook degenerate-vertex exchange: `a_i·dx` can
+            // only be changed by changing the working set, so promote row `i`
+            // into it and let the greedy independence scan evict whichever row
+            // it now depends on. The new direction holds row `i` exactly.
+            //
+            // Promotions accumulate at this `t` and are cleared as soon as the
+            // path advances, so the exchange never permanently reorders the
+            // problem. If a row that is already promoted still gets pushed off,
+            // no working set drawn from this vertex can hold every binding row
+            // and the path genuinely cannot continue — reported and abandoned
+            // rather than papered over, which is safe because `pounce-convex`
+            // now keeps a seeded fallback for exactly this case.
+            let mut offender: Option<usize> = None;
+            for &i in &active_cons {
+                if in_kkt_c[i] {
+                    continue;
+                }
+                let (rate, own) = match working.constraints[i] {
+                    ConsStatus::AtUpper | ConsStatus::Equality => {
+                        (a_dx[i], bound_rate(bu0[i], qp.bu[i], false))
+                    }
+                    ConsStatus::AtLower => (-a_dx[i], -bound_rate(bl0[i], qp.bl[i], true)),
+                    ConsStatus::Inactive => unreachable!("filtered by active_cons"),
+                };
+                // Outward motion, scaled by the row's own magnitude so the test
+                // is not fooled by a badly scaled row.
+                if rate - own > PATH_FEAS_TOL_REL * (1.0 + a_dx[i].abs()) {
+                    offender = Some(i);
+                    break;
+                }
+            }
+            // An already-promoted row that is *still* being pushed off means the
+            // independence scan could not keep it even when offered first — it
+            // depends on rows promoted before it, so no working set drawn from
+            // this vertex holds them all. Take the step anyway rather than
+            // abandoning the path: the capture below pins the row back if the
+            // step really does violate it, which bounds the damage, and the path
+            // is only a predictor. (Abandoning here was tried and cost far more
+            // than it saved — it fired on every degenerate vertex and threw away
+            // paths that were about to complete.)
+            let stuck = offender.is_some_and(|i| promoted.contains(&i) || exchanges == 0);
+            if let Some(i) = offender.filter(|_| !stuck) {
+                exchanges -= 1;
+                promoted.insert(0, i);
+                let ordered = promote_first(&active_cons, &promoted);
+                let (kc, kb) = crate::solver::independent_active_subset(
+                    &mut self.linsol,
+                    &path_qp,
+                    &ordered,
+                    &active_bounds,
+                );
+                for &c in &active_cons {
+                    in_kkt_c[c] = false;
+                }
+                for &bnd in &active_bounds {
+                    in_kkt_b[bnd] = false;
+                }
+                for &c in &kc {
+                    in_kkt_c[c] = true;
+                }
+                for &bnd in &kb {
+                    in_kkt_b[bnd] = true;
+                }
+                n_changes += 1;
+                if trace {
+                    eprintln!("[hom] exchange at t={t:.6e}: promoted row {i} into the KKT");
+                }
+                continue;
+            }
+
+            // ---- Ratio test 1 (primal): when does an inactive row bind? ----
             let mut t_next: Number = 1.0;
             let mut event: Option<Event> = None;
 
             for i in 0..m {
-                if working.constraints[i].is_active() || tabu_cons[i] {
+                if working.constraints[i].is_active() {
                     continue;
                 }
                 // Upper: a_i·x(t) − bu_i(t) = 0.
@@ -655,7 +809,7 @@ impl ParametricActiveSetSolver {
             // An inequality's multiplier must keep its sign; reaching zero means
             // the row stops binding and has to leave the working set. Equality
             // rows are exempt — their multipliers are unrestricted.
-            for (slot, &i) in active_cons.iter().enumerate() {
+            for (slot, &i) in kkt_cons.iter().enumerate() {
                 if matches!(working.constraints[i], ConsStatus::Equality) {
                     continue;
                 }
@@ -672,7 +826,7 @@ impl ParametricActiveSetSolver {
                     }
                 }
             }
-            for (slot, &j) in active_bounds.iter().enumerate() {
+            for (slot, &j) in kkt_bounds.iter().enumerate() {
                 if matches!(working.bounds[j], BoundStatus::Fixed) {
                     continue;
                 }
@@ -691,61 +845,72 @@ impl ParametricActiveSetSolver {
             // ---- Advance to the event (or to t = 1) ----
             let dt = t_next - t;
             if dt > T_EPS {
-                // Real progress along the path: the rank-repair tabu was scoped
-                // to the parameter value it was raised at, so release it.
-                tabu_cons.iter_mut().for_each(|f| *f = false);
+                // Real progress along the path. The exchange pivot's promotions
+                // were a statement about the dependency structure *at the vertex
+                // just left*, which no longer necessarily holds, so release them.
+                promoted.clear();
             }
             for (xi, &d) in x.iter_mut().zip(dx.iter()) {
                 *xi += dt * d;
             }
-            for (slot, &i) in active_cons.iter().enumerate() {
+            for (slot, &i) in kkt_cons.iter().enumerate() {
                 lambda_g[i] += dt * dlam_c[slot];
             }
-            for (slot, &j) in active_bounds.iter().enumerate() {
+            for (slot, &j) in kkt_bounds.iter().enumerate() {
                 lambda_x[j] += dt * dlam_b[slot];
             }
             t = t_next;
 
-            // ---- Path-feasibility report ----
+            // ---- Post-step capture: the ratio test's missing repair ----
             //
-            // The module header used to claim `x(t)` is feasible for the
-            // `t`-problem at every point "by construction". It is not. The primal
-            // ratio test only ever *prevents* a violation and cannot repair one:
-            // a row whose gap has gone negative yields `dt < 0`, which the
-            // `dt >= -T_EPS` filter rejects, so the row stays inactive and
-            // violated for the rest of the path while the direction solve pushes
-            // it further out. Violation is absorbing.
+            // The ratio test can only ever *prevent* a violation. It picks the
+            // earliest crossing and caps `dt` there; a row whose gap has already
+            // gone negative yields `dt < 0`, which the `dt >= -T_EPS` filter
+            // discards, so nothing ever pulls it back. Violation is absorbing,
+            // and the direction solve keeps pushing — on QSHARE2B row 7 entered
+            // at `8e-2` and reached `22` by `t = 1`.
             //
-            // Two measured ways in (QSHARE2B, 14 crossings on one path):
+            // Rows get past the cap because `t` has finite resolution and row
+            // rates do not. Two crossings within `T_EPS` of each other in `t`
+            // lose the strict `t + dt < t_next - T_EPS` comparison, and a row
+            // moving at `a_i·dx ≈ 1e8` turns that `1e-12` of unresolved `t` into
+            // a real `1e-4` of constraint violation. Shrinking `T_EPS` cannot
+            // fix this — the rate is unbounded, and at `t ≈ 1 - 1e-5` there is
+            // no resolution left to give.
             //
-            //  * **Rank-repair tabu (10 of 14).** `tabu_cons` exists to break a
-            //    prune -> re-add cycle, but it skips the row in the *primal ratio
-            //    test*, not just in the add decision. The pruned row sits on its
-            //    bound with a large rate (`a_i·dx = 2.6e5` on row 19), the step is
-            //    computed as if it were absent, and it is crossed. The comment
-            //    justifying the tabu — "a pruned row is a linear combination of
-            //    the kept ones, so it stays satisfied" — is false: dependence
-            //    gives `a_i·dx = Σ c_j (a_j·dx)`, and nothing makes that
-            //    combination track row `i`'s *own* bound rate.
-            //
-            //  * **Coincident / sub-resolution events (4 of 14).** Two crossings
-            //    at the same `t_next`, or one below the `T_EPS` floor (row 132:
-            //    crossing at `dt = 2.9e-16`, step taken `1.1e-14`), lose the
-            //    strict `t + dt < t_next - T_EPS` comparison. The overshoot starts
-            //    tiny and compounds — QSHARE2B row 7 went 8e-2 -> 0.4 -> 7.5 ->
-            //    11 -> 22 over the rest of the path.
-            //
-            // Repairing this properly needs an exchange pivot at the degenerate
-            // vertex (add the violated row, drop a dependent one), which is a real
-            // algorithmic addition and is left to follow-up work.
-            //
-            // Deliberately a *report* and not a bail-out. Abandoning the path here
-            // was tried and measured worse: the corrector is a genuine corrector
-            // and often recovers from a path that drifted off (`QSHIP04S` reaches
-            // a violation of 7.1e4 at `t = 0.5` and still solves to the published
-            // optimum). What the caller needs is not for this path to give up, but
-            // a *fallback that exists* when its prediction turns out unusable —
-            // which is what `pounce-convex`'s seeded last-resort retry restores.
+            // So repair instead of preventing: a row the step pushed past its
+            // bound is *added to the active set*, which is what the ratio test
+            // would have done had it resolved the crossing. `x` keeps whatever
+            // small overshoot it picked up, but the row is now held by the
+            // direction solve, so the error stops compounding — and the working
+            // set, which is the only thing this path actually hands downstream,
+            // says the truth about which rows are binding.
+            for i in 0..m {
+                if working.constraints[i].is_active() {
+                    continue;
+                }
+                let axi = ax[i] + dt * a_dx[i];
+                let tol = PATH_FEAS_TOL_REL * (1.0 + axi.abs());
+                if qp.bu[i] < NLP_UPPER_BOUND_INF
+                    && axi - (bu0[i] + t * bound_rate(bu0[i], qp.bu[i], false)) > tol
+                {
+                    working.constraints[i] = ConsStatus::AtUpper;
+                    in_kkt_c[i] = true;
+                    n_changes += 1;
+                } else if qp.bl[i] > NLP_LOWER_BOUND_INF
+                    && (bl0[i] + t * bound_rate(bl0[i], qp.bl[i], true)) - axi > tol
+                {
+                    working.constraints[i] = ConsStatus::AtLower;
+                    in_kkt_c[i] = true;
+                    n_changes += 1;
+                }
+            }
+
+            // The invariant the exchange pivot and the capture above exist to
+            // hold. Kept as an assertion-shaped trace rather than a bail-out: the
+            // path is only a predictor, the corrector re-derives the primal from
+            // the working set, and a small late drift is not worth discarding a
+            // path over.
             if trace && let Some((i, v)) = worst_path_violation(qp, &x, &bl0, &bu0, t, m) {
                 eprintln!("[hom] path infeasible at t={t:.9e}: row {i} by {v:.3e}");
             }
@@ -758,20 +923,24 @@ impl ParametricActiveSetSolver {
                 }
                 Some(Event::AddRowUpper(i)) => {
                     working.constraints[i] = ConsStatus::AtUpper;
+                    in_kkt_c[i] = true;
                     n_changes += 1;
                 }
                 Some(Event::AddRowLower(i)) => {
                     working.constraints[i] = ConsStatus::AtLower;
+                    in_kkt_c[i] = true;
                     n_changes += 1;
                 }
                 Some(Event::DropRow(i)) => {
                     working.constraints[i] = ConsStatus::Inactive;
                     lambda_g[i] = 0.0;
+                    in_kkt_c[i] = true;
                     n_changes += 1;
                 }
                 Some(Event::DropBound(j)) => {
                     working.bounds[j] = BoundStatus::Inactive;
                     lambda_x[j] = 0.0;
+                    in_kkt_b[j] = true;
                     n_changes += 1;
                 }
             }
