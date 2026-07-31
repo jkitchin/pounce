@@ -215,35 +215,82 @@ where
         make_backend,
         FeasibilityProbe::Allowed,
     );
-    if !opts.equilibrate || is_conclusive(sol.status) {
+    if is_conclusive(sol.status) {
         return sol;
     }
 
-    let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
-    let mut retry = solve_translated(
-        &scaled,
-        &unscaled_opts,
-        engine,
-        make_backend,
-        FeasibilityProbe::Allowed,
-    );
-    scaling.unscale_solution(prob, &mut retry);
-    // Re-verify against the ORIGINAL problem: the verdict reached inside the
-    // scaled solve certifies a KKT point of the *scaled* QP, and unscaling
-    // moves the residuals, so it has to be re-earned here rather than carried
-    // over on the strength of the wrong problem's numbers.
-    retry.status = reverify_after_unscale(retry.status, &retry, prob, opts);
-    // Keep the original failure when the retry also fails, so the reported
-    // status describes the attempt made on the problem as the user posed it.
-    // `PrimalInfeasible` counts as a win here because `reverify_after_unscale`
-    // just re-earned its Farkas certificate against the *original* problem;
-    // `DualInfeasible` does not, because its witness (the engine's ray) is not
-    // available out here to re-check.
-    if is_solved(retry.status) || retry.status == QpStatus::PrimalInfeasible {
-        retry
-    } else {
-        sol
+    let mut best = sol;
+    if opts.equilibrate {
+        let (scaled, scaling) = crate::equilibrate::equilibrate(prob);
+        let mut retry = solve_translated(
+            &scaled,
+            &unscaled_opts,
+            engine,
+            make_backend,
+            FeasibilityProbe::Allowed,
+        );
+        scaling.unscale_solution(prob, &mut retry);
+        // Re-verify against the ORIGINAL problem: the verdict reached inside the
+        // scaled solve certifies a KKT point of the *scaled* QP, and unscaling
+        // moves the residuals, so it has to be re-earned here rather than carried
+        // over on the strength of the wrong problem's numbers.
+        retry.status = reverify_after_unscale(retry.status, &retry, prob, opts);
+        // Keep the original failure when the retry also fails, so the reported
+        // status describes the attempt made on the problem as the user posed it.
+        // `PrimalInfeasible` counts as a win here because `reverify_after_unscale`
+        // just re-earned its Farkas certificate against the *original* problem;
+        // `DualInfeasible` does not, because its witness (the engine's ray) is not
+        // available out here to re-check.
+        if is_solved(retry.status) || retry.status == QpStatus::PrimalInfeasible {
+            best = retry;
+        }
+        if is_conclusive(best.status) {
+            return best;
+        }
     }
+
+    // ---- Last resort: the simplex seed the homotopy displaced (#413) ----
+    //
+    // Turning the homotopy on also turned the simplex phase-1 vertex seed *off*
+    // (see the `seed` binding in `solve_translated`), on the stated premise that
+    // the homotopy "is feasible along the whole path" and so is itself the
+    // cold-start mechanism. That premise is false — see the path-feasibility
+    // guard in `pounce_qp::homotopy` — and when it fails the engine is left with
+    // *neither* mechanism: no usable path, and no seed, so it cold-starts the
+    // l1-elastic phase-1 that this module's own header records as not
+    // terminating on the degenerate netlib-derived QPs in Maros-Mészáros.
+    //
+    // That is the #413 timeout mode, and it is not a slow corrector. On
+    // `QSHARE2B` the seedless route spends its entire iteration budget to return
+    // `4854` against a published `11703.7`, still carrying a constraint
+    // violation of 20; the seeded route solves it in 52 iterations / 0.03 s.
+    //
+    // Ordering is load-bearing. This runs *after* the Ruiz retry, not before:
+    // both earlier attempts are then bit-identical to what they were, so nothing
+    // that used to solve can be displaced — including by the clock, which is the
+    // way an added stage can regress a benchmark even when its logic cannot.
+    // (Measured: with this stage first, `QPCBOEI1` went from 0.68 s to a 60 s
+    // timeout, because the seeded attempt consumed the budget the Ruiz retry
+    // needed.) When the caller already asked for `use_homotopy=no`, the first
+    // attempt was seeded and there is nothing new to try.
+    if engine.use_homotopy != Some(false) {
+        let seeded_engine = ActiveSetOverrides {
+            use_homotopy: Some(false),
+            ..*engine
+        };
+        let seeded = solve_translated(
+            prob,
+            &unscaled_opts,
+            &seeded_engine,
+            make_backend,
+            FeasibilityProbe::Allowed,
+        );
+        if is_solved(seeded.status) || seeded.status == QpStatus::PrimalInfeasible {
+            return seeded;
+        }
+    }
+
+    best
 }
 
 /// Did the solve produce a usable, verified KKT point?

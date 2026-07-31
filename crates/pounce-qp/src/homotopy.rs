@@ -45,9 +45,24 @@
 //! `H` and `g` are held fixed, so the `-g` block above never moves and the
 //! direction solve has a zero primal right-hand side.
 //!
-//! The consequence worth stating plainly: there is **no phase-1**. `x(t)` is
-//! feasible for the `t`-problem at every point on the path by construction, so
-//! feasibility is never searched for and cannot stall.
+//! The consequence worth stating plainly: there is **no phase-1**. `x(t)` starts
+//! feasible for the `t`-problem, and the primal ratio test is what keeps it that
+//! way, so feasibility is never *searched* for.
+//!
+//! It can still be *lost*, and this module used to claim otherwise — that
+//! feasibility held "at every point on the path by construction". That claim was
+//! wrong and it was load-bearing: `pounce-convex`'s driver switched off its
+//! simplex phase-1 seed on the strength of it, leaving nothing to fall back on
+//! when the path's prediction turned out unusable (#413). The ratio test only
+//! ever *prevents* a violation and cannot repair one, so a row it fails to cap
+//! stays violated for the rest of the path and drifts further out; see the
+//! path-feasibility report in [`ParametricActiveSetSolver::trace_path`] for the
+//! two measured ways that happens.
+//!
+//! The path is still only a **predictor** — the corrector re-derives the primal
+//! from the working set and often recovers from a path that drifted — so losing
+//! feasibility degrades the prediction rather than invalidating it, and the path
+//! reports the loss instead of abandoning itself over it.
 //!
 //! # References
 //!
@@ -192,6 +207,44 @@ fn regularized_hessian(qp: &QpProblem<'_>, delta: Number) -> SymTMatrix {
     h
 }
 
+/// How far outside its `t`-interpolated bound a row may sit before the path is
+/// reported as having lost feasibility, relative to the row's own magnitude.
+///
+/// Has to straddle two regimes measured on the same QSHARE2B path: benign
+/// accumulated round-off in the direction solves, which ran at `2e-8` for a
+/// hundred steps and never grew, versus a genuine uncapped crossing, which
+/// entered at `8e-2` and compounded to `22` by `t = 1`. Two orders of magnitude
+/// above the drift and six below the break.
+const PATH_FEAS_TOL_REL: Number = 1e-6;
+
+/// The worst `t`-problem row violation at `x`, or `None` when every row is
+/// within [`PATH_FEAS_TOL_REL`] of its interpolated bound.
+///
+/// This is the invariant the module header used to assert held by construction;
+/// see the report in [`ParametricActiveSetSolver::trace_path`] for why it does
+/// not. Row bounds interpolate `bl0 -> qp.bl` and `bu0 -> qp.bu` in `t`; variable
+/// bounds do not move along this path, so they are not checked here.
+fn worst_path_violation(
+    qp: &QpProblem<'_>,
+    x: &[Number],
+    bl0: &[Number],
+    bu0: &[Number],
+    t: Number,
+    m: usize,
+) -> Option<(usize, Number)> {
+    let ax = a_times_x(qp.a, x, m);
+    let mut worst: Option<(usize, Number)> = None;
+    for i in 0..m {
+        let blt = bl0[i] + t * bound_rate(bl0[i], qp.bl[i], true);
+        let but = bu0[i] + t * bound_rate(bu0[i], qp.bu[i], false);
+        let v = (blt - ax[i]).max(ax[i] - but);
+        if v > PATH_FEAS_TOL_REL * (1.0 + ax[i].abs()) && worst.is_none_or(|(_, prev)| v > prev) {
+            worst = Some((i, v));
+        }
+    }
+    worst
+}
+
 /// Rate of change of a row bound per unit `t` (0 when the bound is infinite).
 fn bound_rate(relaxed: Number, target: Number, is_lower: bool) -> Number {
     let infinite = if is_lower {
@@ -206,9 +259,8 @@ impl ParametricActiveSetSolver {
     /// Solve `qp` from cold by tracing the row-bound homotopy described in this
     /// module's docs.
     ///
-    /// Returns `Ok(None)` when the path cannot be started (the box relaxation is
-    /// unbounded or fails), which is a signal for the caller to fall back to the
-    /// conventional cold path — not a verdict about `qp`.
+    /// `Ok(None)` is a signal for the caller to fall back to the conventional
+    /// cold path — not a verdict about `qp`.
     pub(crate) fn solve_homotopy(
         &mut self,
         qp: &QpProblem<'_>,
@@ -654,6 +706,50 @@ impl ParametricActiveSetSolver {
             }
             t = t_next;
 
+            // ---- Path-feasibility report ----
+            //
+            // The module header used to claim `x(t)` is feasible for the
+            // `t`-problem at every point "by construction". It is not. The primal
+            // ratio test only ever *prevents* a violation and cannot repair one:
+            // a row whose gap has gone negative yields `dt < 0`, which the
+            // `dt >= -T_EPS` filter rejects, so the row stays inactive and
+            // violated for the rest of the path while the direction solve pushes
+            // it further out. Violation is absorbing.
+            //
+            // Two measured ways in (QSHARE2B, 14 crossings on one path):
+            //
+            //  * **Rank-repair tabu (10 of 14).** `tabu_cons` exists to break a
+            //    prune -> re-add cycle, but it skips the row in the *primal ratio
+            //    test*, not just in the add decision. The pruned row sits on its
+            //    bound with a large rate (`a_i·dx = 2.6e5` on row 19), the step is
+            //    computed as if it were absent, and it is crossed. The comment
+            //    justifying the tabu — "a pruned row is a linear combination of
+            //    the kept ones, so it stays satisfied" — is false: dependence
+            //    gives `a_i·dx = Σ c_j (a_j·dx)`, and nothing makes that
+            //    combination track row `i`'s *own* bound rate.
+            //
+            //  * **Coincident / sub-resolution events (4 of 14).** Two crossings
+            //    at the same `t_next`, or one below the `T_EPS` floor (row 132:
+            //    crossing at `dt = 2.9e-16`, step taken `1.1e-14`), lose the
+            //    strict `t + dt < t_next - T_EPS` comparison. The overshoot starts
+            //    tiny and compounds — QSHARE2B row 7 went 8e-2 -> 0.4 -> 7.5 ->
+            //    11 -> 22 over the rest of the path.
+            //
+            // Repairing this properly needs an exchange pivot at the degenerate
+            // vertex (add the violated row, drop a dependent one), which is a real
+            // algorithmic addition and is left to follow-up work.
+            //
+            // Deliberately a *report* and not a bail-out. Abandoning the path here
+            // was tried and measured worse: the corrector is a genuine corrector
+            // and often recovers from a path that drifted off (`QSHIP04S` reaches
+            // a violation of 7.1e4 at `t = 0.5` and still solves to the published
+            // optimum). What the caller needs is not for this path to give up, but
+            // a *fallback that exists* when its prediction turns out unusable —
+            // which is what `pounce-convex`'s seeded last-resort retry restores.
+            if trace && let Some((i, v)) = worst_path_violation(qp, &x, &bl0, &bu0, t, m) {
+                eprintln!("[hom] path infeasible at t={t:.9e}: row {i} by {v:.3e}");
+            }
+
             match event {
                 None => {
                     // Nothing binds before t = 1: the path is complete.
@@ -694,7 +790,11 @@ impl ParametricActiveSetSolver {
             return Ok(None);
         }
         if trace {
-            eprintln!("[hom] reached t=1 after {n_changes} working-set changes");
+            eprintln!(
+                "[hom] reached t=1 after {n_changes} working-set changes; handoff x has \
+                 max target violation {:.3e}",
+                crate::solver::max_violation(qp, &x)
+            );
         }
         let mut sol =
             <Self as crate::solver::QpSolver>::solve_with_working_set(self, qp, &working, opts)?;

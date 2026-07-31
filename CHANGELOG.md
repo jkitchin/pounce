@@ -9,6 +9,54 @@ changes.
 
 ## [Unreleased]
 
+### Fixed — the active-set QP driver lost its cold-start fallback when the homotopy's feasibility invariant broke (#413)
+
+- **#412's parametric homotopy does not keep `x(t)` feasible, and its own
+  documentation said it did.** The module header asserted that `x(t)` is
+  feasible for the `t`-problem "at every point on the path by construction".
+  Measured on Maros-Mészáros `QSHARE2B`, 14 rows are crossed uncapped on a
+  single path and the worst grows `8e-2 → 0.4 → 7.5 → 11 → 22` on the way to
+  `t = 1`. The path's primal ratio test only ever *prevents* a violation — a row
+  whose gap has gone negative yields `dt < 0`, which the test discards — so a
+  crossing is never repaired and compounds. Two mechanisms, both measured: the
+  rank-repair tabu hides a row from the ratio test rather than only from the add
+  decision (10 of 14), and events coincident in `t` or below the `T_EPS` floor
+  lose the strict comparison that would cap the step (4 of 14).
+- **The damage was not a slow solve, it was a *seedless* one.** That false claim
+  was load-bearing: `pounce-convex`'s driver switched off its simplex phase-1
+  vertex seed whenever the homotopy is on, "because the homotopy is itself the
+  cold-start mechanism". When the path's prediction turned out unusable, the
+  engine therefore had neither — and cold-started the l1-elastic phase-1 that
+  `pounce-qp` documents as not terminating on the degenerate netlib-derived QPs
+  in this set. On `QSHARE2B` that spent the whole iteration budget to return
+  `4854` against a published `11703.7`, still carrying a constraint violation of
+  `20`; the seeded route solves it in 52 iterations.
+- **The seed is restored as a last-resort retry**, after the existing
+  Ruiz-equilibration retry rather than before it, so both earlier attempts stay
+  bit-identical and nothing that already solved can be displaced — including by
+  the clock, which is how an added stage regresses a benchmark even when its
+  logic cannot. (Ordering was measured: placed first, it took `QPCBOEI1` from
+  `0.68 s` to a 60 s timeout.)
+- **The path reports its feasibility loss but does not abandon the path.**
+  Abandoning was implemented and measured *worse*: the corrector is a genuine
+  corrector and often recovers, so losing feasibility degrades the prediction
+  rather than invalidating it (`QSHIP04S` reaches a violation of `7.1e4` at
+  `t = 0.5` and still solves to the published optimum). Repairing the crossings
+  properly needs an exchange pivot at the degenerate vertex and is left to
+  follow-up.
+- **Also fixes a pre-existing infeasibility-reporting bug this exposed.**
+  `cold_general_initial` skipped every `bl == bu` row in its feasibility sweep,
+  on the reasoning that a pinned equality is satisfied by construction — true
+  only for the rows actually *kept*. An equality its own rank guard pruned as
+  linearly dependent but *inconsistent* (`x₀+x₁ = 1` with `x₀+x₁ = 3`) was never
+  re-checked, so the model came back `NumericalFailure` instead of routing to
+  the elastic phase-1 that certifies it `PrimalInfeasible` — a `500` where
+  callers needed a `200`.
+- Maros-Mészáros active-set column, 60 s cap: **63 → 64 solved, zero lost, zero
+  solved-but-wrong**. This addresses the mechanism behind #413's timeouts and
+  one of the instances; the bulk of the 49 remain and are not corrector-bound as
+  the issue hypothesised — see the issue for the measurement.
+
 ### Fixed — exact-Hessian SQP gave up on unconstrained nonconvex NLPs (#423)
 
 - **`algorithm = active-set-sqp` with `sqp_hessian = exact` no longer stops at

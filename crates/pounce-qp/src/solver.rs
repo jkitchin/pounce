@@ -1447,9 +1447,41 @@ impl ParametricActiveSetSolver {
             };
         *n_refactor += 1;
 
-        // Inequality-row feasibility check — any violation routes
-        // the caller to elastic mode.
+        // Row feasibility check — any violation routes the caller to
+        // elastic mode.
         let ax = a_times_x(qp.a, &x, m);
+
+        // Equality rows first. Every equality was *pinned* in the KKT
+        // above, so the kept ones are satisfied by construction and
+        // this costs nothing — but the rank guard may have PRUNED
+        // some, and a pruned equality is only satisfied if it is both
+        // linearly dependent on the kept ones *and consistent* with
+        // them. Contradictory equalities (`x₀+x₁ = 1` and `x₀+x₁ = 3`)
+        // are exactly the dependent-but-inconsistent case: the guard
+        // prunes one, `x` satisfies the survivor, and the pruned row
+        // is violated by 2.
+        //
+        // This loop used to `continue` past every `bl == bu` row, so
+        // that violation was never seen: the caller took the returned
+        // point as feasible, ran phase-2 on an infeasible iterate, and
+        // reported `NumericalError` instead of routing to the elastic
+        // phase-1 that would have certified the QP infeasible.
+        //
+        // It stayed hidden because the homotopy masked it — the path
+        // reached `t = 1`, the corrector's own warm-start pre-check
+        // caught the bad point, and elastic got its chance anyway. Only
+        // the *seedless* cold route reaches this loop with a pruned
+        // equality, and before #413 added a seeded retry nothing
+        // exercised it on an infeasible model.
+        for i in 0..m {
+            if qp.bl[i] != qp.bu[i] {
+                continue;
+            }
+            if (ax[i] - qp.bl[i]).abs() > opts.feas_tol {
+                return Ok(None);
+            }
+        }
+
         for i in 0..m {
             if qp.bl[i] == qp.bu[i] {
                 continue;
@@ -3101,7 +3133,7 @@ impl QpSolver for ParametricActiveSetSolver {
 /// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
 /// path can tell whether the point it is about to substitute is actually an
 /// improvement on the one it is discarding.
-fn max_violation(qp: &QpProblem, x: &[Number]) -> Number {
+pub(crate) fn max_violation(qp: &QpProblem, x: &[Number]) -> Number {
     let ax = a_times_x(qp.a, x, qp.m);
     let mut worst: Number = 0.0;
     for i in 0..qp.m {
