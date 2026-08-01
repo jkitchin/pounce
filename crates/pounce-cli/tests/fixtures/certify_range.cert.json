@@ -8,7 +8,7 @@
   },
   "binding": {
     "nl_sha256": "fa599febe64fd450951bd000381b0bc9e6318e9f1a17f0656a40e5ae1adadea9",
-    "sol_sha256": "029840db026267396fef3e7ca43ea846d6d9cb296e60497fd26827d61cfe9ae0",
+    "sol_sha256": "cb6c64256eb526e2d42013bb188e31e72c33d0879347d7d7c34cbf45bd7a0f45",
     "solver": "pounce 0.9.0"
   },
   "toolchain": {
