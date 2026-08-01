@@ -1,0 +1,59 @@
+#+TITLE: Adversary Run: QpSensitivity.reduced_hessian() vs Independent Null-Space Projection
+#+DATE: 2026-08-01
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: reduced-Hessian / active-manifold curvature (QpSensitivity.reduced_hessian)
+:SOURCE: Nocedal & Wright, "Numerical Optimization" (2nd ed.), Sec 16.3 /
+  18.2 (reduced Hessian and second-order sufficient conditions); the
+  independent oracle builds the null-space basis via numpy SVD.
+:KNOWN_OPTIMAL: none published (custom instance); validated by eigenvalue
+  match, n_dof match, and cvxpy agreement on x*.
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 1 equality, 1 inequality (inactive here), 4 bounds (1 active)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+minimize $0.5 x^\top P x + c^\top x$ s.t. $\mathbf{1}^\top x = 3$,
+$x_0 - x_3 \le 0.2$, $0\le x\le(\infty,1,\infty,\infty)$, dense SPD $P$.
+Tests `QpSensitivity.reduced_hessian()` — $Z^\top P Z$ on the active
+manifold, eigendecomposed — against an independently built null-space
+projection.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                          | n_dof | Eigenvalues              |
+|-----------------------------------+-------+---------------------------|
+| pounce (QpSensitivity, Rust QR)   |     2 | [2.78474956, 4.54858377]  |
+| oracle (numpy SVD null-space)     |     2 | [2.78474956, 4.54858377]  |
+
+Known optimal: n/a (custom instance); $x^*=(0.5789,\,0.4474,\,0,\,1.9737)$
+independently confirmed by cvxpy/CLARABEL to $1.0\times10^{-8}$.
+
+Active set found: equality (always active) + one bound ($x_2$'s lower
+bound). $n\_dof = 4 - \mathrm{rank}(J) = 2$, matching independently in both
+pounce and the oracle.
+
+* Cross-check / Verification
+Eigenvalues of $Z^\top P Z$ are invariant to the choice of orthonormal
+basis $Z$ for a fixed null space (any two such bases are related by an
+orthogonal $Q$, and $Z_2^\top P Z_2 = Q^\top(Z_1^\top P Z_1)Q$ is an
+orthogonal similarity transform, exactly spectrum-preserving) — so the
+eigenvalue comparison is exact, not approximate, regardless of pounce's
+internal basis choice vs numpy's SVD-derived basis. Max abs eigenvalue
+error: $4.44\times10^{-16}$ (machine epsilon). $x^*$ additionally confirmed
+against cvxpy/CLARABEL (fully independent solver) to $1.0\times10^{-8}$.
+
+* Verdict
+PASS — pounce's reduced-Hessian projection exactly matches an
+independently-derived null-space projection (SVD-based, different code
+path), and all reduced-Hessian eigenvalues are strictly positive,
+confirming a strict SOSC minimizer at a point independently verified
+optimal by cvxpy. First sensitivity probe to exercise `reduced_hessian()`
+(prior sensitivity runs all probed `parametric_step`/dx-db only). No
+defect found.

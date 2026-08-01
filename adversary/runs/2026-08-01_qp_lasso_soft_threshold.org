@@ -1,0 +1,53 @@
+#+TITLE: Adversary Run: LASSO via Variable-Splitting QP
+#+DATE: 2026-08-01
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: bound-constrained QP (L1-regularized least squares, variable-split)
+:SOURCE: standard LASSO-as-QP reformulation (Boyd & Vandenberghe, "Convex
+  Optimization", Sec 6.1 / EE364a notes); closed form for orthogonal design
+  is the soft-threshold / L1-proximal operator (Beck, "First-Order Methods
+  in Optimization", 2017, Sec 6.3-6.5).
+:KNOWN_OPTIMAL: 7.145 (exact, rational arithmetic)
+:N_VARIABLES: 10 (5 split into u,v >= 0)
+:N_CONSTRAINTS: 0 equalities, 10 bound constraints
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+minimize $0.5\|u-v-b\|_2^2 + \lambda \mathbf{1}^\top(u+v)$ s.t. $u,v \ge 0$,
+with $A=I$ (orthogonal design), $b=(3.0,-0.5,0.2,-4.0,1.5)$, $\lambda=1$.
+Closed form: $x_i^* = \mathrm{sign}(b_i)\max(|b_i|-\lambda,0)$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver              | Status  | Objective     | Rel Err  | Wall Time |
+|----------------------+---------+---------------+----------+-----------|
+| pounce (solve_qp)    | optimal | 7.1450000001  | 1.78e-11 | 0.0067s   |
+| cvxpy/CLARABEL (L1)  | optimal | 7.1450000136  | 1.88e-09 | 0.0089s   |
+
+Known optimal: 7.145 exactly, $x^*=(2.0,0.0,0.0,-3.0,0.5)$.
+
+pounce recovered $x = (2.000000000,\,-2.0\times10^{-10},\,3.3\times10^{-11},\,
+-3.000000000,\,0.500000000)$ against the variable-split QP, agreeing with
+both the closed-form soft-threshold vector and cvxpy's native (non-split)
+L1-atom formulation to $\le 5\times10^{-8}$ in $\infty$-norm. The
+complementarity diagnostic $\max_i \min(u_i,v_i)=8.5\times10^{-11}$ confirms
+$u,v$ never simultaneously active, so $x=u-v$ is the genuine $\ell_1$ norm
+(no slack in the reformulation's exactness assumption).
+
+* Cross-check / Verification
+Two independent checks: (1) exact-rational closed-form soft-threshold
+operator (orthogonal design, $A=I$), (2) cvxpy/CLARABEL solving the same
+LASSO problem via its native (non-split) $\ell_1$ atom — a structurally
+different formulation of the same problem, ruling out a variable-splitting
+artifact. All three agree to $<10^{-7}$.
+
+* Verdict
+PASS — pounce's convex QP IPM correctly solves the variable-split LASSO
+reformulation, matching the exact closed-form optimum and an independently
+(differently) formulated cvxpy solve. No defect found.

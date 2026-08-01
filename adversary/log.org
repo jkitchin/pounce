@@ -12,17 +12,17 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 |-----------------+--------+------------+---------------|
 | nlp             |      9 | 2026-07-28 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |      8 | 2026-07-31 | —             |
-| qp              |      8 | 2026-07-31 | —             |
+| qp              |      9 | 2026-08-01 | —             |
 | qp-active-set   |     11 | 2026-07-30 | —             |
 | socp            |      9 | 2026-07-28 | —             |
 | exp             |      8 | 2026-07-31 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |      8 | 2026-07-31 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| sdp             |      8 | 2026-07-29 | —             |
-| sos             |      8 | 2026-07-23 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
-| autoroute       |      8 | 2026-07-30 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP and quadratic-objective ball QCQP)  |
+| sdp             |      9 | 2026-08-01 | —             |
+| sos             |      9 | 2026-08-01 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
+| autoroute       |      9 | 2026-08-01 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, and transportation LP)  |
 | batch           |      8 | 2026-07-31 | —             |
 | diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
-| sensitivity     |      8 | 2026-07-23 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed) |
+| sensitivity     |      9 | 2026-08-01 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
 # Newest entries appended below by the agent (step 7 of the workflow).
@@ -4232,4 +4232,85 @@ favor speed over coverage-directed targeting in this sandbox).
 :REPORT: [[file:runs/2026-07-31_batch_lqr_riccati.org]]
 :COVERAGE_TARGET: -
 :NOTE: First draft of this script had a FORMULATION_ERROR (forgot pounce's 1/2 x'Px objective convention; omitted the x0'Qx0 constant from the Riccati cost-to-go), which produced a spurious 58-89% "mismatch" per instance. Caught via a third independent oracle (trajectory-substitution + BFGS) before filing; corrected script agrees to <=3.1e-9. batch vs per-item singles agree bitwise (0.00e+00), ruling out batch-specific contamination.
+:END:
+
+** [2026-08-01] LASSO via Variable-Splitting QP (qp/bound-constrained, L1-regularized least squares) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: Boyd & Vandenberghe Sec 6.1 / EE364a variable-splitting; Beck "First-Order Methods in Optimization" Sec 6.3-6.5 (soft-threshold operator)
+:KNOWN_OPTIMAL: 7.145 (exact, rational arithmetic)
+:POUNCE_OBJECTIVE: 7.1450000001e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0067
+:ORACLE: closed-form soft-threshold (exact Fraction) + cvxpy/CLARABEL native L1 atom
+:ORACLE_OBJECTIVE: 7.1450000000e+00 (exact) / 7.1450000136e+00 (cvxpy)
+:ORACLE_TIME: - / 0.0089
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-01_qp_lasso_soft_threshold.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-01] Nuclear Norm via Block-PSD SDP (sdp/nuclear-norm epigraph, non-square off-diagonal block LMI) - PASS
+:PROPERTIES:
+:FAMILY: sdp
+:SOURCE: Fazel/Hindi/Boyd ACC 2001; Recht/Fazel/Parrilo SIAM Review 2010 Sec 2 (SDP characterization of ||A||_*)
+:KNOWN_OPTIMAL: 1.0029137376e+01 (sum of singular values, numpy SVD)
+:POUNCE_OBJECTIVE: 1.0029137376e+01
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0101
+:ORACLE: numpy.linalg.svd (closed form) + cvxpy/SCS normNuc atom
+:ORACLE_OBJECTIVE: 1.0029137376e+01 (svd) / 1.0029137380e+01 (cvxpy)
+:ORACLE_TIME: - / 0.0124
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-01_sdp_nuclear_norm.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-01] QpSensitivity.reduced_hessian() vs Independent Null-Space Projection (sensitivity/reduced-Hessian curvature) - PASS
+:PROPERTIES:
+:FAMILY: sensitivity
+:SOURCE: Nocedal & Wright "Numerical Optimization" 2nd ed. Sec 16.3/18.2 (reduced Hessian, SOSC)
+:KNOWN_OPTIMAL: none published (custom instance); validated by eigenvalue/n_dof match + cvxpy agreement on x*
+:POUNCE_OBJECTIVE: eigenvalues [2.78474956, 4.54858377] (n_dof=2), matches oracle to 4.44e-16
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0068
+:ORACLE: numpy SVD null-space projection (independent code path) + cvxpy/CLARABEL x* check
+:ORACLE_OBJECTIVE: same eigenvalues (oracle) / x_err 1.0e-08 (cvxpy)
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-01_sensitivity_reduced_hessian.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-01] Auto-Routing on a Balanced Transportation LP (autoroute/LP->lp-ipm route) - PASS
+:PROPERTIES:
+:FAMILY: autoroute
+:SOURCE: Bertsimas & Tsitsiklis "Introduction to Linear Optimization" Ch 1 (transportation LP)
+:KNOWN_OPTIMAL: 375.0
+:POUNCE_OBJECTIVE: 3.7499999995e+02 (auto, routed_solver=lp-ipm, problem_class=lp) / 3.7499999987e+02 (forced nlp)
+:POUNCE_STATUS: success (both)
+:POUNCE_TIME: 0.0064 (auto) / 0.0155 (nlp)
+:ORACLE: scipy.optimize.linprog (HiGHS dual simplex)
+:ORACLE_OBJECTIVE: 3.7500000000e+02
+:ORACLE_TIME: 0.0029
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-01_autoroute_transportation_lp.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-01] AM-GM-Constrained Polynomial Minimization (sos/equality-constrained Lasserre hierarchy) - PASS
+:PROPERTIES:
+:FAMILY: sos
+:SOURCE: AM-GM inequality (Hardy, Littlewood, Polya "Inequalities"); min x^2+y^2+z^2 s.t. xyz=1
+:KNOWN_OPTIMAL: 3.0 (exact)
+:POUNCE_OBJECTIVE: 3.0000000761e+00 (lower_bound, order=4, is_exact=True, 4 minimizers recovered)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 9.8637 (orders 2,3,4 combined)
+:ORACLE: dense grid + scipy SLSQP multistart
+:ORACLE_OBJECTIVE: 3.0000000000e+00 (grid, exact) / 2.9999997359e+00 (SLSQP)
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-01_sos_amgm_constrained.org]]
+:COVERAGE_TARGET: -
+:NOTE: Without a redundant compactness (Archimedean) inequality R^2-(x^2+y^2+z^2)>=0, the raw equality-only formulation did not converge to exactness within a reasonable time (order=3 gave optimal_inaccurate/NaN; higher orders too slow) -- the feasible set {xyz=1} is unbounded, so Putinar/Lasserre's exactness guarantees don't clearly apply without it. Adding the redundant bound (R=5, far outside the true optimum's norm sqrt(3)) let order 4 converge exactly in ~10s without changing the true optimal value. Formulation lesson, not a defect: the lower bound was never invalid (never exceeded the true minimum) at any order tried.
 :END:

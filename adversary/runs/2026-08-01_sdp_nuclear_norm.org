@@ -1,0 +1,51 @@
+#+TITLE: Adversary Run: Nuclear Norm via Block-PSD SDP
+#+DATE: 2026-08-01
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: block-PSD-cone epigraph of the nuclear (trace) norm
+:SOURCE: Fazel, Hindi, Boyd, "A Rank Minimization Heuristic..." (ACC 2001);
+  Recht, Fazel, Parrilo, "Guaranteed Minimum-Rank Solutions..." (SIAM
+  Review 2010), Sec 2, for the tight SDP characterization of $\|A\|_*$.
+:KNOWN_OPTIMAL: 10.029137376... (sum of singular values, via numpy SVD)
+:N_VARIABLES: svec(Y), Y 7x7 (d=m+n=7, svec_dim=28)
+:N_CONSTRAINTS: 12 equalities (pin the off-diagonal m x n block to A); psd cone dim 7
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+$\|A\|_* = \min_{W_1,W_2} \tfrac12(\mathrm{tr}(W_1)+\mathrm{tr}(W_2))$ s.t.
+$\begin{bmatrix}W_1 & A\\A^\top & W_2\end{bmatrix} \succeq 0$, for a fixed
+$3\times4$ dense matrix $A$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                | Status  | Objective        | Rel Err  | Wall Time |
+|------------------------+---------+------------------+----------+-----------|
+| pounce (solve_socp)    | optimal | 1.0029137376e+01 | 2.18e-11 | 0.0101s   |
+| numpy SVD (closed form)| -       | 1.0029137376e+01 | -        | -         |
+| cvxpy/SCS (normNuc)    | optimal | 1.0029137380e+01 | 3.41e-10 | 0.0124s   |
+
+Known optimal: 10.029137376... ($\sigma = (4.455, 3.931, 1.643)$).
+
+Reconstructed $Y$ from pounce's svec output is PSD ($\lambda_{\min}=8.2\times
+10^{-11}$) with its fixed off-diagonal block matching $A$ to $5.5\times
+10^{-10}$, confirming the LMI encoding round-trips correctly.
+
+* Cross-check / Verification
+Objective matches both `numpy.linalg.svd`'s independent singular-value sum
+(a completely different algorithm/codebase from pounce's interior-point PSD
+solve) and cvxpy/SCS's native `normNuc` atom, to $<4\times10^{-10}$ relative
+error on both.
+
+* Verdict
+PASS — pounce's PSD-cone IPM correctly solves the block-LMI nuclear-norm
+epigraph, matching an independent closed-form (SVD) computation and a
+second independent solver. No defect found. This is the first sdp probe to
+exercise the nuclear-norm/block-LMI encoding (prior sdp runs used max-eig,
+min-trace, Lyapunov, nearest-correlation, Lovasz theta, spectral norm —
+none built a non-square off-diagonal-block LMI).

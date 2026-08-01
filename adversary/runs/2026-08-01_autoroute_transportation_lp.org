@@ -1,0 +1,52 @@
+#+TITLE: Adversary Run: Auto-Routing on a Balanced Transportation LP
+#+DATE: 2026-08-01
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: LP -> lp-ipm route (equalities + nonneg bounds, forced-nlp must agree)
+:SOURCE: classic balanced transportation LP (Bertsimas & Tsitsiklis,
+  "Introduction to Linear Optimization", Ch 1).
+:KNOWN_OPTIMAL: 375.0 (scipy.optimize.linprog / HiGHS)
+:N_VARIABLES: 6
+:N_CONSTRAINTS: 5 equalities (2 supply + 3 demand, one redundant), 6 bounds
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+2 supply nodes (20, 30), 3 demand nodes (10, 25, 15), costs
+$\begin{smallmatrix}8&6&10\\9&12&7\end{smallmatrix}$. Solved via
+`pounce.minimize(solver_selection="auto")` vs forced `"nlp"`.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                          | Status  | Objective        | Rel Err  | Wall Time |
+|-----------------------------------+---------+-------------------+----------+-----------|
+| pounce auto (routed: lp-ipm/lp)   | success | 3.7499999995e+02 | 1.30e-10 | 0.0064s   |
+| pounce forced nlp                 | success | 3.7499999987e+02 | 3.60e-10 | 0.0155s   |
+| scipy.linprog (HiGHS)             | success | 3.7500000000e+02 | -        | 0.0029s   |
+
+Known optimal: 375.0, $x^*=(0,20,0,10,5,15)$.
+
+Auto-route correctly reported `problem_class="lp"`, `routed_solver="lp-ipm"`
+— the specialized path, not a conservative NLP fallback. auto vs forced-nlp
+agree to $2.2\times10^{-8}$ ($\infty$-norm on $x$); both agree with the
+independent scipy/HiGHS LP oracle to $\le 3.6\times10^{-10}$ relative
+objective error.
+
+* Cross-check / Verification
+scipy.optimize.linprog (HiGHS dual simplex) is a fully independent LP
+codebase from pounce's interior-point LP path. Routing-transparency
+contract holds: auto and forced-nlp solutions agree to numerical tolerance,
+and the specialized route was actually engaged (not a silent fallback).
+
+* Verdict
+PASS — the auto-router correctly detects and dispatches this
+equality-constrained transportation LP to the specialized `lp-ipm` path,
+and the result matches an independent LP solver. First autoroute probe to
+exercise a genuine multi-row transportation LP and explicitly assert
+`problem_class == "lp"` (prior autoroute runs used QP/QCQP or a 2-var toy
+LP). No defect found.

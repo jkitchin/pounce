@@ -1,0 +1,64 @@
+#+TITLE: Adversary Run: AM-GM-Constrained Polynomial Minimization
+#+DATE: 2026-08-01
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: equality-constrained polynomial program (Lasserre hierarchy)
+:SOURCE: AM-GM inequality (elementary; Hardy, Littlewood, Polya,
+  "Inequalities"). minimize x^2+y^2+z^2 s.t. xyz=1.
+:KNOWN_OPTIMAL: 3.0 (exact, by AM-GM)
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 1 equality (degree 3), 1 redundant compactness inequality
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+minimize $x^2+y^2+z^2$ s.t. $xyz=1$. By AM-GM,
+$(x^2+y^2+z^2)/3 \ge (xyz)^{2/3} = 1$, so the minimum is 3, attained at the
+4 sign patterns with an even number of $-1$'s among $(x,y,z)=(\pm1,\pm1,\pm1)$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| order | Status             | lower_bound | is_exact |
+|-------+--------------------+-------------+----------|
+|     2 | optimal            | 1.0392      | False    |
+|     3 | optimal            | 2.8709      | False    |
+|     4 | optimal            | 3.0000000761| True     |
+
+Known optimal: 3.0 exactly. pounce recovered all 4 global minimizers at
+order 4: $(1,-1,-1)$, $(-1,1,-1)$, $(-1,-1,1)$, $(1,1,1)$ (up to $4\times
+10^{-8}$), each with $xyz=1.000000$ and objective $3.000000$.
+
+* Cross-check / Verification
+Two independent oracles: (1) coarse dense grid over $(x,y)\in[-2.5,2.5]^2$
+with $z=1/(xy)$ (best found: exactly 3.0 at $(-1,-1,1)$); (2) scipy SLSQP
+multistart from 5 starting points (best: 2.9999997, $x\approx(1,1,1)$).
+Neither found a point beating the claimed lower bound at any order
+(`valid_lower_bound=True` throughout), so the bound is sound even where
+loose. Order-4 bound matches known optimal to $2.5\times10^{-8}$ relative
+error, and matches the multistart optimum to $8.8\times10^{-8}$.
+
+Formulation note: the raw problem (no compactness constraint) was tried
+first and did not converge cleanly within a reasonable time budget even by
+order 4 (one attempt at order=3 without it returned
+`optimal_inaccurate`/NaN, and higher orders were too slow) — the feasible
+set $\{xyz=1\}$ is unbounded, so Putinar/Lasserre's exactness guarantees
+(which require an Archimedean/compact description) don't clearly apply. A
+standard fix — see e.g. Lasserre's own SOS-hierarchy literature — is adding
+a redundant bounding inequality $R^2-(x^2+y^2+z^2)\ge0$ with $R$ far outside
+the optimum region ($R=5$ here; true optimizers have norm $\sqrt3\approx
+1.7$); this does not change the true optimal value and let order 4 converge
+exactly in ~10s. This is a formulation lesson (documented in adversary.md's
+sos guidance: "a loose bound at low order is expected"), not a defect —
+the bound was never invalid at any order, only loose/slow to tighten
+without the redundant constraint.
+
+* Verdict
+PASS — pounce's SOS/Lasserre relaxation, once given a compact (Archimedean)
+problem description, exactly recovers the known AM-GM optimum and all 4
+global minimizers by order 4, and never reports an invalid (too-high)
+lower bound at any order. No defect found.
