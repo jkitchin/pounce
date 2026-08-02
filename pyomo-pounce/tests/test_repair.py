@@ -201,9 +201,14 @@ def test_initialize_walks_incidence_once(monkeypatch, solver):
 
 
 def test_shared_graph_matches_fresh_analysis():
-    """The filtered structural view reproduces a fresh construction's
-    analysis exactly (gh #444): same plan, same square decomposition,
-    same block order."""
+    """On a model whose incidence does not depend on the values of its
+    fixed variables, the filtered structural view reproduces a fresh
+    construction's analysis exactly (gh #444): same plan, same square
+    decomposition, same block order. Both factors of the one bilinear
+    term are held here, so no coefficient is annihilated and no term
+    changes degree — see
+    ``test_shared_graph_is_structural_where_fresh_is_numeric`` for the
+    case where those readings part ways."""
     from pyomo_pounce.block_init import (
         block_analyze,
         block_repair_plan,
@@ -233,3 +238,48 @@ def test_shared_graph_matches_fresh_analysis():
         [names(b) for b in ana_shared.variable_blocks]
     assert [names(b) for b in ana_fresh.constraint_blocks] == \
         [names(b) for b in ana_shared.constraint_blocks]
+
+
+def test_shared_graph_is_structural_where_fresh_is_numeric():
+    """The shared graph reads a row as if nothing were fixed (gh #444).
+
+    Pyomo's default incidence method substitutes a fixed variable's
+    VALUE, so a fresh graph loses ``x`` from ``y == a*x`` once ``a`` is
+    fixed at zero; ``structural_incidence`` includes the fixed
+    variables, skips the substitution, and keeps the edge. Downstream
+    that is the difference between calling the system overdetermined
+    and calling it square — a real difference in what initialize()
+    reports, pinned here so it cannot change silently.
+    """
+    from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+
+    from pyomo_pounce.block_init import (
+        _active_view,
+        block_analyze,
+        structural_incidence,
+    )
+
+    def build():
+        m = pyo.ConcreteModel()
+        m.a = pyo.Var(initialize=0.0)  # a decision, held at zero
+        m.x = pyo.Var(initialize=1.0)
+        m.y = pyo.Var(initialize=1.0)
+        m.c1 = pyo.Constraint(expr=m.y == m.a * m.x)
+        m.c2 = pyo.Constraint(expr=m.y == 1.0)
+        m.obj = pyo.Objective(expr=m.x)
+        return m
+
+    m1 = build()
+    m1.a.fix()
+    fresh = IncidenceGraphInterface(m1, include_inequality=False)
+    assert [v.name for v in fresh.get_adjacent_to(m1.c1)] == ["y"]
+
+    m2 = build()
+    g = structural_incidence(m2)
+    m2.a.fix()
+    view = _active_view(g, m2)
+    assert sorted(v.name for v in view.get_adjacent_to(m2.c1)) == ["x", "y"]
+
+    # the user-visible consequence
+    assert not block_analyze(m1).square
+    assert block_analyze(m2, igraph=g).square

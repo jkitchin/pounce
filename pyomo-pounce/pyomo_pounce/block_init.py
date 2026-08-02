@@ -452,21 +452,56 @@ def structural_incidence(model):
     stored graph instead of re-walking every constraint expression.
     Within-call sharing only: the graph reflects the model's structure
     at construction, so it must not outlive structural edits.
+
+    **Structural, not numeric.** Pyomo's default incidence method
+    substitutes a fixed variable's *value* before reading a row, so a
+    fresh ``include_fixed=False`` graph drops an edge whose coefficient
+    that value annihilates (``y == a*x`` with ``a`` fixed at 0 loses
+    ``x``) and can order a row's variables differently (a fixed factor
+    turns a bilinear term linear). Including the fixed variables skips
+    that substitution, so the shared graph is the *structural*
+    incidence: never fewer edges than a fresh build, and every row read
+    as if nothing were fixed. On models whose incidence does not depend
+    on those values the two agree exactly, node for node and in the
+    same order; where they differ, the passes see the structure rather
+    than the arithmetic of the current point.
     """
-    from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+    try:
+        # Probe networkx explicitly: pyomo defers its optional imports, so
+        # `pyomo.contrib.incidence_analysis` imports fine without it and
+        # would only blow up (DeferredImportError) at first use. The
+        # three passes probe it too; this one runs before any of them.
+        import networkx  # noqa: F401
+
+        from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+    except ImportError as e:  # pragma: no cover - environment-dependent
+        raise ImportError(
+            "structural_incidence requires pyomo.contrib.incidence_analysis "
+            "and its optional dependencies (pip install networkx scipy)"
+        ) from e
 
     return IncidenceGraphInterface(
         model, include_inequality=False, include_fixed=True
     )
 
 
-def _active_view(igraph):
-    """The shared structural graph filtered to currently-unfixed
-    variables: the same node sets, in the same order, as a fresh
-    construction at this fix-state, without the expression walk."""
+def _active_view(igraph, model):
+    """The shared structural graph filtered to the currently-unfixed
+    variables, without the expression walk: same constraints, same
+    variable order, minus the fixed nodes and their edges.
+
+    ``IncidenceGraphInterface.subgraph`` landed in Pyomo 6.7.1; on an
+    older Pyomo there is nothing to filter with, so the pass falls back
+    to the fresh construction it would have done anyway — correct, just
+    without the sharing (gh #444).
+    """
     unfixed = [v for v in igraph.variables if not v.fixed]
     if len(unfixed) == len(igraph.variables):
         return igraph
+    if not hasattr(igraph, "subgraph"):  # pragma: no cover - old Pyomo
+        from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+
+        return IncidenceGraphInterface(model, include_inequality=False)
     return igraph.subgraph(unfixed, list(igraph.constraints))
 
 
@@ -505,7 +540,11 @@ def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepa
     (gh #444). It must belong to the model being passed: a graph from
     another model, or from before a structural edit, produces wrong
     answers rather than an error. Omitted, the incidence is built
-    locally exactly as before.
+    locally exactly as before. The shared graph is structural where a
+    fresh one is numeric (see :func:`structural_incidence`), so on a
+    model whose incidence depends on the values of its fixed variables
+    the two can disagree — the shared one keeping an edge the current
+    values would cancel.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -534,7 +573,7 @@ def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepa
     # to the current fix-state; omitted, the walk happens locally as
     # before (gh #444).
     if igraph is not None:
-        igraph = _active_view(igraph)
+        igraph = _active_view(igraph, model)
     else:
         igraph = IncidenceGraphInterface(model, include_inequality=False)
     eqs = list(igraph.constraints)
@@ -618,7 +657,11 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
     (gh #444). It must belong to the model being passed: a graph from
     another model, or from before a structural edit, produces wrong
     answers rather than an error. Omitted, the incidence is built
-    locally exactly as before.
+    locally exactly as before. The shared graph is structural where a
+    fresh one is numeric (see :func:`structural_incidence`), so on a
+    model whose incidence depends on the values of its fixed variables
+    the two can disagree — the shared one keeping an edge the current
+    values would cancel.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -646,9 +689,9 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
 
     try:
         # decisions were fixed above, so the filtered view (or the
-        # fresh walk) sees them excluded exactly as before (gh #444)
+        # fresh walk) sees them excluded (gh #444)
         if igraph is not None:
-            igraph = _active_view(igraph)
+            igraph = _active_view(igraph, model)
         else:
             igraph = IncidenceGraphInterface(model, include_inequality=False)
         if not igraph.constraints:
@@ -747,7 +790,11 @@ def block_initialize(
     (gh #444). It must belong to the model being passed: a graph from
     another model, or from before a structural edit, produces wrong
     answers rather than an error. Omitted, the incidence is built
-    locally exactly as before.
+    locally exactly as before. The shared graph is structural where a
+    fresh one is numeric (see :func:`structural_incidence`), so on a
+    model whose incidence depends on the values of its fixed variables
+    the two can disagree — the shared one keeping an edge the current
+    values would cancel.
     """
     import pyomo.environ as pyo
 

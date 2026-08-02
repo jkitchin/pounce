@@ -21,20 +21,34 @@ changes.
 - The call now performs one structural incidence walk
   (`structural_incidence`, fixed variables included) and each pass
   filters it to the currently-unfixed variables through
-  `IncidenceGraphInterface.subgraph`, which copies the stored graph
-  without re-inspecting constraints. The plan filters pre-fixing and
-  the analyze pass post-fixing, so each sees exactly the view a fresh
-  construction would have built, in the same order; and `initialize`
+  `IncidenceGraphInterface.subgraph` (Pyomo >= 6.7.1, now the declared
+  floor; older Pyomo falls back to the fresh construction), which
+  copies the stored graph without re-inspecting constraints. The plan
+  filters pre-fixing and the analyze pass post-fixing; and `initialize`
   passes `repair="off"` downstream since its own plan already ran.
   `block_repair_plan`, `block_analyze`, and `block_initialize` accept
   the shared graph as an optional `igraph=` argument and behave as
   before when it is omitted.
-- Regressions: a fresh-versus-shared analysis identity test (same
-  plan, same square decomposition, same block order), and a counter
-  test pinning exactly one model-walking incidence construction per
-  `initialize()` call so the redundancy cannot quietly return
-  (`subgraph` re-enters `__init__` with a prebuilt graph tuple and is
-  not counted).
+- The shared graph is **structural where a fresh one is numeric**.
+  Pyomo's default incidence method substitutes a fixed variable's
+  value before reading a row, so a fresh `include_fixed=False` graph
+  drops an edge that value annihilates (`y == a*x` with `a` fixed at 0
+  loses `x`) and can order a row's variables differently (a fixed
+  factor turns a bilinear term linear). Including the fixed variables
+  skips that substitution. On models whose incidence does not depend
+  on those values the two agree exactly, node for node and in order;
+  where they differ, `initialize()` now sees the structure rather than
+  the arithmetic of the current point — it can call a system square
+  that the numeric reading called overdetermined, and report the
+  failed block instead.
+- Regressions: a fresh-versus-shared analysis identity test on a
+  values-independent model (same plan, same square decomposition, same
+  block order), a test pinning the structural/numeric difference above
+  on a model where it bites, and a counter test pinning exactly one
+  model-walking incidence construction per `initialize()` call so the
+  redundancy cannot quietly return (`subgraph` re-enters `__init__`
+  with a prebuilt graph tuple and is not counted). CI now installs
+  `networkx`/`scipy`, without which the whole suite skipped itself.
 
 ### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
 

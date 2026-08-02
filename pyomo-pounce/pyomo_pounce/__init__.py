@@ -32,6 +32,7 @@ from pyomo_pounce.block_init import (
     block_analyze,
     block_initialize,
     block_repair_plan,
+    structural_incidence,
 )
 from pyomo_pounce.pounce_solver import POUNCE, check_binary
 from pyomo_pounce.sens import (
@@ -74,4 +75,5 @@ __all__ = [
     "BlockAnalysisReport",
     "block_repair_plan",
     "BlockRepairPlan",
+    "structural_incidence",
 ]

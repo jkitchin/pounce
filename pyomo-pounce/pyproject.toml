@@ -16,7 +16,11 @@ authors = [{name = "John Kitchin", email = "jkitchin@andrew.cmu.edu"}]
 # point releases; tighten if we ever need to coordinate Pyomo/POUNCE
 # API changes.
 dependencies = [
-    "pyomo>=6.0",
+    # 6.7.1 is where IncidenceGraphInterface.subgraph landed, which the
+    # shared-incidence path of initialize() filters with (gh #444). The
+    # code falls back to a fresh construction without it, so an older
+    # Pyomo still works — this floor is what we test and support.
+    "pyomo>=6.7.1",
     "pounce-solver>=0.9.0",
     "numpy",
     "pandas",
