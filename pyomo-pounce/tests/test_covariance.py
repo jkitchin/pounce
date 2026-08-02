@@ -14,7 +14,8 @@ import pytest
 import pyomo.environ as pyo
 
 import pyomo_pounce  # noqa: F401  (registers 'pounce')
-from pyomo_pounce import covariance, declare_fitted, declare_residual
+from pyomo_pounce import (covariance, declare_fitted, declare_residual,
+                          declare_sens_param)
 
 N_LIN = 25
 SIGMA_LIN = 0.3
@@ -591,7 +592,7 @@ def test_mixed_normal_binding_row_warns_not_projects():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         cov = covariance(m, sigma_sq=SIGMA_LIN**2)
-    assert any("involves non-fitted variables" in str(wi.message)
+    assert any("non-fitted variables alongside fitted ones" in str(wi.message)
                for wi in w)
     # unprojected: full rank, no zero direction
     ev = np.linalg.eigvalsh(cov.matrix)
@@ -703,3 +704,59 @@ def test_inactive_row_spelling_agrees_to_o_mu():
         covA = covariance(mA, sigma_sq=SIGMA_LIN**2)
         covB = covariance(mB, sigma_sq=SIGMA_LIN**2)
     np.testing.assert_allclose(covB.matrix, covA.matrix, rtol=1e-7)
+
+
+def test_unrelated_binding_rows_warn_once_and_change_nothing():
+    # six binding rows over a block that shares nothing with the fit.
+    # They cannot be projected (a row off the fitted block may still
+    # reach it through the elimination, which the restricted normal
+    # cannot see), so they are reported -- but as ONE summarized
+    # warning rather than one per row, and they must not move the
+    # numbers.
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    m.J = pyo.RangeSet(0, 5)
+    m.u = pyo.Var(m.J, initialize=0.0)
+    m.ucon = pyo.Constraint(m.J, rule=lambda mm, j: mm.u[j] <= 1.0)
+    # separable pull that binds every ucon; the (a, b) block is
+    # untouched by it. It does make the objective more than the
+    # declared residuals' SSR, so sens_solve emits its own SSR notice
+    # at solve time -- filtered below, and harmless here because
+    # sigma_sq is passed explicitly.
+    m.obj.deactivate()
+    m.obj2 = pyo.Objective(
+        expr=sum(m.r[i] ** 2 for i in m.I) - sum(m.u[j] for j in m.J))
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+    msgs = [str(wi.message) for wi in w if "covariance:" in str(wi.message)]
+    assert len(msgs) == 1, msgs
+    assert "do not touch the fitted parameters" in msgs[0]
+    assert "and 1 more" in msgs[0]        # 6 rows, 5 named + a count
+    cov_true = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(cov.matrix, cov_true, rtol=1e-6)
+
+
+def test_row_supported_only_on_pin_columns_is_silent():
+    # a row over a declared sensitivity parameter's pin column alone
+    # cannot move (the pin holds it), so it constrains nothing about
+    # the fitted block and must not warn at all
+    x, y, X = linear_data()
+    m = linear_model(x, y, declare=False)
+    m.k = pyo.Param(initialize=1.0, mutable=True)
+    m.kcon = pyo.Constraint(expr=m.k <= 1.0)
+    declare_fitted(m.a)
+    declare_fitted(m.b)
+    declare_residual(m.r)
+    declare_sens_param(m.k)
+    pyo.SolverFactory("pounce").solve(m)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cov = covariance(m, sigma_sq=SIGMA_LIN**2)
+    assert not [str(wi.message) for wi in w if "covariance:" in str(wi.message)]
+    cov_true = SIGMA_LIN**2 * np.linalg.inv(X.T @ X)
+    np.testing.assert_allclose(cov.matrix, cov_true, rtol=1e-6)

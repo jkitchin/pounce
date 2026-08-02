@@ -1044,6 +1044,15 @@ def _nullspace(A):
     return vh[rank:].T
 
 
+def _name_list(entries, limit=5):
+    """`name (status)` for each collected row, truncated with a count
+    so one warning stays readable however many rows it covers."""
+    names = [f"{c} ({s})" for c, s in entries]
+    if len(names) > limit:
+        return ", ".join(names[:limit]) + f", and {len(names) - limit} more"
+    return ", ".join(names)
+
+
 def _minv(M):
     try:
         return np.linalg.inv(M)
@@ -1265,6 +1274,8 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
     fit_cols = set(int(r) for r in rows)
     bind_normals = []                  # unit normals over the fitted block
     row_corrections = []               # (weight, unit normal), applied after
+    mixed_rows = []                    # (name, status): fitted AND outside
+    outside_rows = []                  # (name, status): no fitted support
     for j, rst in enumerate(act["row_status"]):
         if rst in ("equality", "unbounded", "inactive"):
             # inactive rows carry O(mu) geometric weight (the invariant
@@ -1290,38 +1301,28 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
         nf = float(np.linalg.norm(a_full))
         outside = [i for i in np.nonzero(a_full)[0]
                    if int(i) not in fit_cols and int(i) not in pin_cols]
-        mixed = bool(outside) and (
+        touches_outside = bool(outside) and (
             float(np.linalg.norm(a_full[outside])) > 1e-8 * max(1.0, nf))
-        if na <= 1e-12 * max(1.0, nf):
-            # entirely outside the fitted block: the extreme mixed case
-            # (relative tolerance, matching the mixed test above)
-            mixed = True
         cname = (session.con_names[j] if j < len(session.con_names)
                  else f"row {j}")
-        if mixed:
-            # the reduced-level rule is also unreliable here: the row's
-            # barrier weight lands through elimination on a direction
-            # the restricted normal cannot see, so re-classifying
-            # against it manufactures a wrong ratio. Item 0's raw
-            # classification (scale-invariant along the full normal) is
-            # the honest status for a mixed row.
-            if rst == "strongly_active":
-                warnings.warn(
-                    f"covariance: constraint {cname} is strongly active "
-                    "and involves non-fitted variables; the direction "
-                    "it pins reaches the fitted parameters through the "
-                    "eliminated variables and cannot be represented by "
-                    "a restricted normal, so it is NOT projected. Treat "
-                    "the returned variances as not conditioned on this "
-                    "constraint.")
-            elif rst in ("weakly_active", "ambiguous", "unidentified"):
-                warnings.warn(
-                    f"covariance: constraint {cname} is {rst} and "
-                    "involves non-fitted variables; it is kept "
-                    "unprojected and its barrier weight is not "
-                    "corrected for (the restricted direction would be "
-                    "the wrong one). Boundary asymptotics are "
-                    "nonstandard.")
+        # the reduced-level rule is unreliable on any row the restricted
+        # normal misrepresents: the row's barrier weight lands through
+        # elimination on a direction that normal cannot see, so
+        # re-classifying against it manufactures a wrong ratio. Item 0's
+        # raw classification (scale-invariant along the full normal) is
+        # the honest status, and the row stays unprojected. Warnings are
+        # collected and summarized once at the end of the loop: a wide
+        # model can carry many such rows, and one warning per row buries
+        # the dispositions that ARE about the fitted parameters.
+        if na <= 1e-12 * max(1.0, nf):
+            if not touches_outside:
+                # support lies entirely on pinned columns, which cannot
+                # move: the row is a constant and constrains nothing
+                continue
+            outside_rows.append((cname, rst))
+            continue
+        if touches_outside:
+            mixed_rows.append((cname, rst))
             continue
         a = a / na
         # the row's slack elimination contributes Sigma_j * (raw normal
@@ -1381,6 +1382,25 @@ def covariance(model, sigma_sq=None, n_data=None, hessian="lagrangian"):
         # the row analog of the variable value correction: remove a
         # kept row's own barrier weight from the reduced block
         R_corr = R_corr - _w * np.outer(_a, _a)
+    if mixed_rows:
+        warnings.warn(
+            "covariance: active constraint(s) " + _name_list(mixed_rows) +
+            " involve non-fitted variables alongside fitted ones. The "
+            "direction each pins reaches the fitted parameters through "
+            "the eliminated variables and cannot be represented by a "
+            "restricted normal, so they are NOT projected and their "
+            "barrier weight is not corrected for. Treat the returned "
+            "variances as not conditioned on them.")
+    if outside_rows:
+        warnings.warn(
+            "covariance: active constraint(s) " + _name_list(outside_rows) +
+            " do not touch the fitted parameters directly, and are not "
+            "projected. If such a row reaches the fitted block through "
+            "eliminated variables, the returned variances are NOT "
+            "conditioned on it; if it acts on an unrelated part of the "
+            "model it is irrelevant here. Telling the two apart needs "
+            "the row's reduced normal through the elimination "
+            "(covariance roadmap item 2).")
 
     # ── noise variance per group ──────────────────────────────────────────
     groups = dict(session.res_rows)

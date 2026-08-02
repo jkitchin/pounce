@@ -422,7 +422,10 @@ impl PySolver {
     /// - `"var_sigma"`, `"row_sigma"`: ndarray of the barrier
     ///   diagonal `Σ` itself (both sides summed; 0 where nothing was
     ///   classified), the quantity item 1 of the covariance roadmap
-    ///   subtracts from the factor's reduced Hessian.
+    ///   subtracts from the factor's reduced Hessian. In **natural
+    ///   (unscaled) units** like every other sensitivity output:
+    ///   classification runs on the solver's scaled quantities (the
+    ///   ratio is scale-invariant), the report does not.
     ///
     /// Requires the **held solve** to have run with
     /// `bound_relax_factor=0` (raises `ValueError` otherwise; the
@@ -484,12 +487,15 @@ impl PySolver {
     }
 
     /// The gradient of user constraint row `j` at the converged
-    /// iterate, as an ndarray in user variable order (length n).
-    /// Equality and inequality rows alike; entries for fixed
-    /// (`lb == ub`) variables are 0 because the solve removed their
-    /// columns. A binding row's normal restricted to the fitted
-    /// columns is the projection direction of the covariance
-    /// roadmap's item 1.
+    /// iterate, as an ndarray in user variable order (length n) and in
+    /// **natural (unscaled) units**: the internal Jacobian row carries
+    /// the solver's per-row scale, which is divided out here, so
+    /// `row_normal` returns your own coefficients whatever
+    /// `nlp_scaling_method` did. Equality and inequality rows alike;
+    /// entries for fixed (`lb == ub`) variables are 0 because the
+    /// solve removed their columns. A binding row's normal restricted
+    /// to the fitted columns is the projection direction of the
+    /// covariance roadmap's item 1.
     fn row_normal<'py>(&self, py: Python<'py>, j: i64) -> PyResult<Bound<'py, PyArray1<Number>>> {
         let s = self.state.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("row_normal: no converged factor (call solve() first)")

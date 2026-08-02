@@ -55,7 +55,19 @@ changes.
   ratio is scale-invariant), the exported values are unscaled at the
   boundary. Tested by pinning the weak scalar row's `Σ = 1/c²` under
   both scaling modes and `row_normal` returning the user's own
-  coefficient.
+  coefficient. The convention is stated on every surface that exports
+  it: the `ActivityReport` fields, `Solver.row_normal`, and the
+  Python-facing `classify_activity` / `row_normal` docstrings.
+- Binding rows that the restricted normal cannot represent are
+  reported once per `covariance()` call rather than once per row, and
+  the two cases are separated: a row touching fitted AND non-fitted
+  variables, and a row with no fitted support at all (which may still
+  reach the fitted block through the elimination, or may be about an
+  unrelated part of the model — telling those apart is item 2). A wide
+  model can carry many such rows, and one warning each buried the
+  dispositions that are about the fitted parameters. A row supported
+  only on declared-parameter pin columns cannot move at all, so it now
+  says nothing instead of warning.
 - Declaration-triggered solves set `bound_relax_factor=0`: the
   classifier reads slacks as distances to the user's own bounds.
 - `Solver.row_normal(j)`: a constraint row's gradient at the converged

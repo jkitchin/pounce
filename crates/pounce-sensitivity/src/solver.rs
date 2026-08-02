@@ -289,10 +289,13 @@ impl Solver {
     }
 
     /// The gradient of user constraint row `user_row` at the converged
-    /// iterate, in user variable order (length `n_full_x`). Equality
-    /// and inequality rows alike; entries for fixed
-    /// (`make_parameter`-removed) variables are 0 because the solve
-    /// dropped their columns. Errors on an out-of-range row.
+    /// iterate, in user variable order (length `n_full_x`) and in
+    /// **natural (unscaled) units** like every other sensitivity
+    /// output: the internal Jacobian row carries the solver's per-row
+    /// scale, which is divided out here. Equality and inequality rows
+    /// alike; entries for fixed (`make_parameter`-removed) variables
+    /// are 0 because the solve dropped their columns. Errors on an
+    /// out-of-range row.
     ///
     /// Serves the covariance roadmap's item 1: a binding row's normal
     /// restricted to the fitted block is the projection direction.
