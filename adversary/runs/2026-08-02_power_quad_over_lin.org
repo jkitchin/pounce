@@ -1,0 +1,95 @@
+#+TITLE: Adversary Run: Quadratic-over-linear (Cauchy-Schwarz) minimization
+#+DATE: 2026-08-02
+
+* Problem
+:PROPERTIES:
+:FAMILY: power
+:CLASS: power-cone, quadratic-over-linear / hyperbolic constraint, fixed-constant coordinate
+:SOURCE: classical weighted Cauchy-Schwarz minimization (quad-over-linear atom, cf. Boyd & Vandenberghe Sec 3.1.5); closed form via Lagrange multipliers, derived below
+:KNOWN_OPTIMAL: 24.0
+:N_VARIABLES: 6 (3 x_i, 3 epigraph t_i)
+:N_CONSTRAINTS: 1 equality (budget) + 3 power cones (alpha=0.5)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\min\quad & \sum_i x_i^2 / y_i \\
+\text{s.t.}\quad & \sum_i x_i = C
+\end{align}
+
+with \(y=(1,2,3)\) FIXED constants, \(C=12\). By Lagrange multipliers,
+\(x_i^* = C y_i / \sum_j y_j = (2,4,6)\), \(f^* = C^2/\sum y_j = 24\)
+(equivalently, the equality case of weighted Cauchy-Schwarz).
+
+Encoded via the power cone \(\{(u,v,w): |u|\le v^{0.5}w^{0.5}\}\), one triple
+per \(i\): \((x_i, y_i, t_i)\), where \(y_i\) is a *constant* plugged
+directly into \(h\) (its row of \(G\) is zero) rather than a free variable —
+distinct from every previously-tested power/exp-cone problem in this log,
+which always put a decision variable or the literal constant "1" in that
+slot.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver           | Status  | Objective     | Rel Err  | Wall Time |
+|-------------------+---------+---------------+----------+-----------|
+| pounce            | optimal | 23.9999984393 | 6.50e-08 | 0.0116s   |
+| cvxpy/CLARABEL    | optimal | 24.0000000000 | -        | 0.0149s   |
+| cvxpy/SCS         | optimal | 23.9999989026 | 1.93e-08 | 0.0082s   |
+
+Known optimal: 24.0 at x* = (2, 4, 6)
+
+Objective matches the closed form and both cvxpy backends to ~1e-7. Status
+is honestly `optimal` (not falsely over-claiming). This is a genuine PASS by
+the adversary.md criterion (objective agreement < 1e-4).
+
+* Cross-check / Verification
+
+A secondary observation, investigated but *not* filed: `x_inf_err` is
+1.51e-4 versus the closed form, notably worse than the objective's 6.5e-8,
+and CLARABEL's own `x` is exact to displayed precision on the identical
+problem. Follow-up probes (in-session, not committed — reproducible from the
+script above by varying `y`/`C`/`tol`):
+
+1. Sweeping `tol` from 1e-8 down to 1e-11 changes *nothing* — identical
+   `iters=8`, identical `x`, identical `kkt_error=1.803e-6`. The IPM
+   genuinely stalls at that point; it isn't a case of "ask for more and get
+   more," so a false-`optimal_inaccurate` explanation doesn't apply here
+   (the status is `optimal`, not `_inaccurate`, at these tols).
+2. Homogeneous `y=(1,1,1)` gets much better x-precision (2.18e-7) than
+   `y=(1,2,3)` or `y=(2,2,2)` (both ~1.5-1.7e-4) at similar `kkt_error` —
+   consistent with curvature: \(d^2/dx_i^2 [x_i^2/y_i] = 2/y_i\), so larger
+   `y_i` flattens the objective near the optimum and the same
+   ~1e-6 complementarity residual maps to a larger x-space error. This is a
+   plausible, self-consistent *non-bug* explanation for most of the effect.
+3. However, re-encoding the SAME problem with `y_i` as a free variable
+   pinned via an extra equality constraint (`y_i = target`) instead of a
+   constant baked into `h` recovers `x_inf_err = 6.1e-6` — roughly 25x
+   better — at a comparable `kkt_error` (1.3e-6). Curvature alone (point 2)
+   doesn't obviously explain a 25x gap between two encodings of an
+   identical mathematical problem; this suggests the nonsymmetric nature
+   or preconditioning path for a power-cone row whose coordinate is a pure
+   constant (zero row of `G`) may be mildly under-conditioned relative to
+   the same coordinate as a variable.
+
+This is worth keeping an eye on (a coverage-style precision gap, not a
+wrong-answer), but does not meet the SOLVER_BUG bar: status is honest, the
+objective is correct to 1e-4 by a wide margin, and there is a plausible
+partial explanation (curvature) even if it doesn't fully account for the
+constant-vs-variable gap. Filing a full issue would need a sweep across
+`y`-scales and cone dimensions to separate "expected curvature effect" from
+"encoding-path precision gap" cleanly, which is out of scope for a single
+adversary probe run.
+
+* Verdict
+PASS — objective matches the closed-form Cauchy-Schwarz optimum and cvxpy
+(CLARABEL/SCS) to ~1e-7, well within the 1e-4 tolerance, with an honest
+`optimal` status. Not filed: a secondary x-space precision observation
+(constant-coordinate power-cone rows achieving less x-precision than the
+same coordinate posed as a pinned variable, at matched kkt_error) is noted
+above for a future, more targeted probe — it is a precision characteristic,
+not a wrong answer, and current evidence doesn't yet isolate it from benign
+curvature effects.

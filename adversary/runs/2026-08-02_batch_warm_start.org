@@ -1,0 +1,66 @@
+#+TITLE: Adversary Run: solve_qp_batch warm_starts correctness
+#+DATE: 2026-08-02
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: solve_qp_batch, warm_starts= parameter
+:SOURCE: constructed problem; closed-form KKT linear system (equality-constrained QP)
+:KNOWN_OPTIMAL: per-item, via closed-form KKT solve (see script)
+:N_VARIABLES: 4 per item, K=6 items
+:N_CONSTRAINTS: 1 equality per item, shared P and A across the batch
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Batch of K=6 equality-constrained QPs sharing \(P\) (fixed SPD, from a
+seeded random \(M M^T + 2I\)) and \(A = \mathbf{1}^T\) (budget \(\sum x=1\)),
+differing only in the linear term \(c_k\):
+
+\[
+\min_x\ \tfrac12 x^TPx + c_k^Tx \quad \text{s.t.}\quad \mathbf{1}^Tx = 1
+\]
+
+Closed form via the KKT linear system
+\(\begin{bmatrix}P & A^T\\A & 0\end{bmatrix}\begin{bmatrix}x\\\lambda\end{bmatrix}=\begin{bmatrix}-c_k\\b\end{bmatrix}\),
+solved directly with `numpy.linalg.solve` — independent of both pounce and
+cvxpy.
+
+"Day 1" batch (\(c_k\)) is solved cold. "Day 2" (\(c_k\) perturbed by small
+Gaussian noise) is solved twice: cold, and warm-started from day 1's
+per-item `QpResult`s via `warm_starts=`. A correct warm start must not
+change the *answer*, only the iteration count.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Run                | Status(es)      | Err vs KKT | Wall Time | Iters (per item)   |
+|--------------------+------------------+------------+-----------+---------------------|
+| day1 (cold)        | optimal x6       | 3.70e-09   | 0.0024s   | -                   |
+| day2 (cold)        | optimal x6       | 3.68e-09   | 0.0014s   | [1,2,1,1,1,2]       |
+| day2 (warm)        | optimal x6       | 2.89e-12   | 0.0014s   | [1,1,1,1,1,1]       |
+
+`cold_vs_warm` max-abs x-difference: 3.68e-09. Single-item `solve_qp` on
+item 0 of day 2 matches the batch exactly (`batch_vs_single = 0.00e+00`) and
+the closed-form KKT solve to 3.04e-09.
+
+* Cross-check / Verification
+Three independent checks all agree:
+1. `solve_qp_batch` (cold, both days) matches the closed-form KKT solve to
+   ~4e-9.
+2. Warm-started day 2 matches cold day 2 to 3.68e-09 (i.e. the warm start
+   does not perturb the answer) and is *more* accurate against the KKT
+   closed form (2.89e-12) while using fewer iterations (mean 1.00 vs 1.33)
+   — the expected direction for a good warm start.
+3. `solve_qp_batch`'s per-item result for item 0 is bit-identical to a
+   standalone `solve_qp` call on the same problem (`batch_vs_single = 0.0`),
+   confirming no cross-item contamination in the batch path.
+
+* Verdict
+PASS — `solve_qp_batch`'s `warm_starts=` parameter is correctly wired: it
+changes iteration count (and, if anything, improves accuracy) without
+changing the solution, batch results agree with per-item `solve_qp` exactly,
+and both match an independent closed-form KKT oracle to ~1e-9. No defect
+found.

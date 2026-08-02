@@ -1,0 +1,65 @@
+#+TITLE: Adversary Run: Hock-Schittkowski Problem 71
+#+DATE: 2026-08-02
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: bound- + equality- + inequality-constrained NLP
+:SOURCE: Hock & Schittkowski, "Test Examples for Nonlinear Programming Codes", Springer LNEMS 187 (1981), Problem 71; also the canonical Ipopt/COIN-OR tutorial example
+:KNOWN_OPTIMAL: 17.0140173
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 1 inequality, 1 equality, box bounds [1,5]^4
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\min\quad & x_1 x_4(x_1+x_2+x_3) + x_3 \\
+\text{s.t.}\quad & x_1x_2x_3x_4 \ge 25 \\
+& x_1^2+x_2^2+x_3^2+x_4^2 = 40 \\
+& 1 \le x_i \le 5
+\end{align}
+
+Starting point \(x_0=(1,5,5,1)\). Known optimum \(f^*=17.0140173\) at
+\(x^*\approx(1.0,\ 4.7429994,\ 3.8211503,\ 1.3794082)\).
+
+Solved via Pyomo, on one shared model, with two independent paths:
+`SolverFactory('pounce')` (the `pyomo-pounce` ASL/.nl plugin) and
+`scipy.optimize.minimize(method="trust-constr")` — no Linux Ipopt is
+available in this sandbox, so scipy is the environment-adapted oracle per
+the adversary run's environment adaptations.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                  | Status  | Objective     | Rel Err  | Wall Time |
+|--------------------------+---------+---------------+----------+-----------|
+| pounce (pyomo-pounce)    | optimal | 17.0140171452 | 9.10e-09 | 0.0194s   |
+| scipy trust-constr       | success | 17.0140172933 | -        | 0.1984s   |
+
+Known optimal: 17.0140173 at x* = (1, 4.7429996, 3.8211500, 1.3794083)
+
+pounce: x = (0.99999999, 4.74299964, 3.82114998, 1.37940829). Matches both
+the published optimum and the scipy oracle to ~1e-8 in objective and
+~2.2e-8 in x (inf-norm).
+
+* Cross-check / Verification
+Three independent checks agree:
+1. Published HS71 optimum: rel err 9.10e-09.
+2. scipy.optimize.minimize (trust-constr, tight gtol/xtol): obj_err
+   8.70e-09, x_inf_err 2.23e-08.
+3. `pounce verify` on the actual `.nl`/`.sol` pair pyomo-pounce wrote (a
+   solver-independent KKT/feasibility oracle, not touching pounce's own
+   solve internals): **VERIFIED**. Max constraint violation 2.46e-7 (c1,
+   active inequality), max bound violation 7.68e-9 (x1 at its lower bound),
+   KKT stationarity residual 9.11e-9, complementarity residual 1.36e-7 —
+   all comfortably inside the 1e-6 verify tolerance.
+
+* Verdict
+PASS — pounce solves the classic HS71 test problem correctly: objective and
+solution agree with the published optimum and an independent scipy
+trust-constr solve to ~1e-8, and `pounce verify` independently confirms
+KKT-stationarity + feasibility + complementarity on the actual `.nl`/`.sol`
+artifacts. No defect found.

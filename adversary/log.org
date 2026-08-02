@@ -10,17 +10,17 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
-| nlp             |      9 | 2026-07-28 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
-| lp              |      8 | 2026-07-31 | —             |
+| nlp             |     10 | 2026-08-02 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
+| lp              |      9 | 2026-08-02 | —             |
 | qp              |      9 | 2026-08-01 | —             |
 | qp-active-set   |     11 | 2026-07-30 | —             |
 | socp            |      9 | 2026-07-28 | —             |
-| exp             |      8 | 2026-07-31 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| power           |      8 | 2026-07-31 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| exp             |      9 | 2026-08-02 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |      9 | 2026-08-02 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02 (not filed, see report) |
 | sdp             |      9 | 2026-08-01 | —             |
 | sos             |      9 | 2026-08-01 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
 | autoroute       |      9 | 2026-08-01 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, and transportation LP)  |
-| batch           |      8 | 2026-07-31 | —             |
+| batch           |      9 | 2026-08-02 | —             |
 | diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
 | sensitivity     |      9 | 2026-08-01 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
@@ -4313,4 +4313,86 @@ favor speed over coverage-directed targeting in this sandbox).
 :REPORT: [[file:runs/2026-08-01_sos_amgm_constrained.org]]
 :COVERAGE_TARGET: -
 :NOTE: Without a redundant compactness (Archimedean) inequality R^2-(x^2+y^2+z^2)>=0, the raw equality-only formulation did not converge to exactness within a reasonable time (order=3 gave optimal_inaccurate/NaN; higher orders too slow) -- the feasible set {xyz=1} is unbounded, so Putinar/Lasserre's exactness guarantees don't clearly apply without it. Adding the redundant bound (R=5, far outside the true optimum's norm sqrt(3)) let order 4 converge exactly in ~10s without changing the true optimal value. Formulation lesson, not a defect: the lower bound was never invalid (never exceeded the true minimum) at any order tried.
+:END:
+
+** [2026-08-02] LP with a free (unrestricted-sign) variable (lp/free-variable) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: constructed problem, closed-form derivation (see report)
+:KNOWN_OPTIMAL: 7.0
+:POUNCE_OBJECTIVE: 6.9999999981e+00
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0051s
+:ORACLE: scipy.optimize.linprog (HiGHS)
+:ORACLE_OBJECTIVE: 7.0000000000e+00
+:ORACLE_TIME: 0.0037s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-02_lp_free_variable.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-02] Parallel Gaussian channel capacity / water-filling (exp/exp-cone) - PASS
+:PROPERTIES:
+:FAMILY: exp
+:SOURCE: Boyd & Vandenberghe Sec 4.6.2/5.5.4; closed-form KKT water-filling
+:KNOWN_OPTIMAL: 3.1243616245
+:POUNCE_OBJECTIVE: 3.1243616114 (tol=1e-9; default tol gives optimal_inaccurate, obj 3.1243616057)
+:POUNCE_STATUS: optimal (tol=1e-9)
+:POUNCE_TIME: 0.0181s
+:ORACLE: cvxpy CLARABEL + SCS
+:ORACLE_OBJECTIVE: 3.1243616233 (CLARABEL)
+:ORACLE_TIME: 0.0125s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-02_exp_waterfilling.org]]
+:COVERAGE_TARGET: -
+:NOTE: default tol gives optimal_inaccurate + x_err 2.2e-4 (obj still correct to 6e-9); CLARABEL default-tol x is similarly off (~1.6e-4) from closed form -- flat-objective sensitivity, not a bug. tol=1e-9 resolves cleanly (x_err 2.7e-5). Not filed.
+:END:
+
+** [2026-08-02] Quadratic-over-linear / Cauchy-Schwarz minimization (power/pow-cone, fixed-constant coordinate) - PASS
+:PROPERTIES:
+:FAMILY: power
+:SOURCE: weighted Cauchy-Schwarz closed form (Lagrange multipliers, see report)
+:KNOWN_OPTIMAL: 24.0
+:POUNCE_OBJECTIVE: 23.9999984393
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0116s
+:ORACLE: cvxpy CLARABEL + SCS
+:ORACLE_OBJECTIVE: 24.0000000000 (CLARABEL)
+:ORACLE_TIME: 0.0149s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-02_power_quad_over_lin.org]]
+:COVERAGE_TARGET: -
+:NOTE: obj correct to 6.5e-8 (PASS) but x_inf_err=1.5e-4 vs CLARABEL's exact x on same problem; tol sweep 1e-8..1e-11 changes nothing (genuine IPM stall at kkt_error=1.803e-6, not under-requested tol). Partly explained by curvature (2/y_i, worse for larger y_i) but re-encoding y_i as a pinned variable instead of a constant-in-h recovers 25x better x-precision (6.1e-6) at similar kkt_error -- possible mild under-conditioning of constant-coordinate pow-cone rows. Not filed: status honest, obj well within tolerance, effect not yet isolated from curvature. Worth a targeted follow-up probe.
+:END:
+
+** [2026-08-02] solve_qp_batch warm_starts correctness (batch/warm-starts) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: constructed problem, closed-form KKT linear system (equality QP)
+:KNOWN_OPTIMAL: per-item closed-form KKT solve
+:POUNCE_OBJECTIVE: n/a (x-error reported; see report)
+:POUNCE_STATUS: optimal (all 18 solves across day1/day2-cold/day2-warm)
+:POUNCE_TIME: 0.0014s (day2 batch, either cold or warm)
+:ORACLE: closed-form KKT linear system (numpy) + solve_qp single-item cross-check
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-02_batch_warm_start.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-02] Hock-Schittkowski 71 (nlp/bound+eq+ineq NLP) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: Hock & Schittkowski LNEMS 187 (1981), Problem 71; classic Ipopt tutorial example
+:KNOWN_OPTIMAL: 17.0140173
+:POUNCE_OBJECTIVE: 17.0140171452
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0194s
+:ORACLE: scipy trust-constr + pounce verify (KKT/feasibility)
+:ORACLE_OBJECTIVE: 17.0140172933
+:ORACLE_TIME: 0.1984s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-02_nlp_hs71.org]]
+:COVERAGE_TARGET: -
 :END:

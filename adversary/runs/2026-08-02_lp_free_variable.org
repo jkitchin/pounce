@@ -1,0 +1,57 @@
+#+TITLE: Adversary Run: LP with a free (unrestricted-sign) variable
+#+DATE: 2026-08-02
+
+* Problem
+:PROPERTIES:
+:FAMILY: lp
+:CLASS: free-variable, equality-constrained, unique bounded optimum
+:SOURCE: constructed problem, optimum derived analytically (see script docstring); cross-checked with scipy.optimize.linprog (HiGHS)
+:KNOWN_OPTIMAL: 7.0
+:N_VARIABLES: 3 (1 free, 2 nonnegative)
+:N_CONSTRAINTS: 2 equalities, 0 inequalities
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\min\quad & 2x + 3y + z \\
+\text{s.t.}\quad & x + y + z = 6 \\
+& x - y = 1 \\
+& y \ge 0,\ z \ge 0,\ x \ \text{free}
+\end{align}
+
+Substituting the equalities collapses the feasible set to a segment
+parametrized by \(y \in [0, 2.5]\), with objective \(3y + 7\) — strictly
+increasing in \(y\), so the unique minimizer is at \(y=0\): \(x^*=1, y^*=0,
+z^*=5\), \(f^*=7\).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver               | Status  | Objective | Rel Err  | Iters | Wall Time |
+|----------------------+---------+-----------+----------+-------+-----------|
+| pounce (solve_qp)    | optimal | 6.9999999981e+00 | 2.75e-10 | -     | 0.0051s   |
+| scipy linprog/HiGHS  | success | 7.0000000000e+00 | -        | -     | 0.0037s   |
+
+Known optimal: 7.0 at x* = (1, 0, 5)
+
+pounce's `solve_qp` (P=None, i.e. LP mode) was given `lb=[-inf, 0, 0]` to mark
+the first variable free. It returned x = (1.0, -5.6e-11, 5.0), obj =
+6.9999999981, matching both the closed-form optimum and the scipy/HiGHS
+oracle to ~1e-9 in objective and solution. No sign or bound-handling issue
+with the free variable.
+
+* Cross-check / Verification
+Two independent checks agree with pounce to <1e-9:
+1. Closed-form KKT / substitution derivation (see Problem section) — f* = 7,
+   x* = (1, 0, 5).
+2. scipy.optimize.linprog with method="highs", bounds=[(None,None),(0,None),(0,None)]
+   — obj = 7.0 exactly (to printed precision), x = (1, 0, 5) exactly.
+
+* Verdict
+PASS — pounce's LP path correctly handles an unrestricted-sign (free)
+variable via `lb=-inf`; objective and solution vector agree with both the
+closed-form optimum and the scipy/HiGHS oracle to ~1e-9, well within the
+1e-4 tolerance. No defect found.

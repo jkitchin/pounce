@@ -1,0 +1,66 @@
+#+TITLE: Adversary Run: Parallel Gaussian channel capacity (water-filling)
+#+DATE: 2026-08-02
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: exponential-cone (channel-capacity / water-filling)
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization", Sec 4.6.2 / 5.5.4 (water-filling); closed form derived independently below
+:KNOWN_OPTIMAL: 3.1243616245
+:N_VARIABLES: 6 (3 power vars P_i, 3 epigraph vars t_i)
+:N_CONSTRAINTS: 1 nonneg (budget) + 3 nonneg (P_i>=0) + 3 exp cones
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\begin{align}
+\max\quad & \sum_i \log(1 + P_i/N_i) \\
+\text{s.t.}\quad & \sum_i P_i \le P_{\text{total}},\ P_i \ge 0
+\end{align}
+
+with \(N=(1,2,4)\), \(P_{\text{total}}=10\).
+
+Water-filling KKT solution: \(P_i^* = \max(0, \mu - N_i)\), \(\mu\) chosen so
+\(\sum P_i^* = P_{\text{total}}\). With all channels active,
+\(\mu = (P_{\text{total}}+\sum N_i)/n = 17/3 \approx 5.6667 > \max(N)=4\)
+(confirms all-active assumption), giving \(P^*=(4.6667,3.6667,1.6667)\) and
+\(f^* = n\log\mu - \log\prod N_i = 3.1243616245\).
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                   | Status            | Objective     | Rel Err  | Wall Time |
+|--------------------------+-------------------+---------------+----------+-----------|
+| pounce (default tol)     | optimal_inaccurate| 3.1243616057  | 6.0e-09  | 0.0162s   |
+| pounce (tol=1e-9)        | optimal           | 3.1243616114  | 4.2e-09  | 0.0181s   |
+| cvxpy/CLARABEL           | optimal            | 3.1243616233  | 3.8e-09  | 0.0125s   |
+| cvxpy/SCS                | optimal            | 3.1243616624  | 1.6e-08  | 0.0072s   |
+
+Known optimal: 3.1243616245 at P* = (4.66667, 3.66667, 1.66667)
+
+* Cross-check / Verification
+Objective agrees with the closed-form water-filling optimum and with both
+cvxpy backends to ~1e-8 at default tolerance already. The solution vector
+`P`, however, showed a larger discrepancy at pounce's default tol
+(x_inf_err = 2.17e-4, and status flagged `optimal_inaccurate`). This is
+consistent with an ill-conditioned mapping from residual complementarity
+gap to x-space here — CLARABEL's own default-tol solution is off from the
+closed form by a comparable ~1.6e-4 in x, even though its objective is
+essentially exact. Tightening pounce's `tol` to 1e-9 (`max_iter=200`)
+resolved both symptoms: status flips to `optimal`, x_inf_err drops to
+2.71e-5. This is ordinary interior-point tolerance behavior (flat objective
+near the optimum => amplified x-sensitivity), not a solver defect — the
+same shape of finding as the previously-fixed #336 (loose default tol
+flagging a correct point as inaccurate), but this instance resolves via the
+standard user-facing `tol` knob rather than indicating a stale threshold
+bug, so no new issue is warranted.
+
+* Verdict
+PASS — pounce's exp-cone water-filling solve matches the closed-form KKT
+optimum and both cvxpy backends to ~1e-8 in objective, and to ~3e-5 in x
+once `tol` is tightened past the default. Not filed: this is expected
+interior-point behavior on an objective with a flat direction near the
+optimum, and default-tol `optimal_inaccurate` is an honest self-report, not
+a wrong answer.
