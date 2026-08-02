@@ -67,6 +67,7 @@ __all__ = [
     "block_analyze",
     "block_initialize",
     "block_repair_plan",
+    "structural_incidence",
     "BlockAnalysisReport",
     "BlockInitReport",
     "BlockRepairPlan",
@@ -496,6 +497,15 @@ def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepa
     Returns a :class:`BlockRepairPlan`; fix ``plan.decisions`` and
     ``plan.pinned`` (and leave ``plan.pruned`` free) to define a square
     system.
+
+    ``igraph``, when given, is the structural incidence graph from
+    :func:`structural_incidence`, built over THIS model with fixed
+    variables included; the pass filters it to the currently-unfixed
+    variables instead of re-walking every constraint expression
+    (gh #444). It must belong to the model being passed: a graph from
+    another model, or from before a structural edit, produces wrong
+    answers rather than an error. Omitted, the incidence is built
+    locally exactly as before.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -600,6 +610,15 @@ def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
             fixed.
 
     Returns a :class:`BlockAnalysisReport`.
+
+    ``igraph``, when given, is the structural incidence graph from
+    :func:`structural_incidence`, built over THIS model with fixed
+    variables included; the pass filters it to the currently-unfixed
+    variables instead of re-walking every constraint expression
+    (gh #444). It must belong to the model being passed: a graph from
+    another model, or from before a structural edit, produces wrong
+    answers rather than an error. Omitted, the incidence is built
+    locally exactly as before.
     """
     try:
         # Probe networkx explicitly: pyomo defers its optional imports, so
@@ -720,6 +739,15 @@ def block_initialize(
     are restored to their seed values, the loop stops there, and the
     downstream blocks keep their seeds — a failed solve never writes
     its values into the model.
+
+    ``igraph``, when given, is the structural incidence graph from
+    :func:`structural_incidence`, built over THIS model with fixed
+    variables included; the pass filters it to the currently-unfixed
+    variables instead of re-walking every constraint expression
+    (gh #444). It must belong to the model being passed: a graph from
+    another model, or from before a structural edit, produces wrong
+    answers rather than an error. Omitted, the incidence is built
+    locally exactly as before.
     """
     import pyomo.environ as pyo
 
