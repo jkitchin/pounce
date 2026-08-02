@@ -419,6 +419,18 @@ impl PySolver {
     /// - `"var_contaminated"`, `"row_contaminated"`: list of bool,
     ///   true where classified inactive yet carrying non-negligible
     ///   barrier curvature.
+    /// - `"var_sigma"`, `"row_sigma"`: ndarray of the barrier
+    ///   diagonal `Σ` itself (both sides summed; 0 where nothing was
+    ///   classified), the quantity item 1 of the covariance roadmap
+    ///   subtracts from the factor's reduced Hessian. In **natural
+    ///   (unscaled) units** like every other sensitivity output:
+    ///   classification runs on the solver's scaled quantities (the
+    ///   ratios above are scale-invariant), and the exported `Σ` is
+    ///   unscaled at the boundary, so it composes directly with a
+    ///   natural-units reduced Hessian. `row_sigma` is additionally
+    ///   the RAW diagonal, not the geometric weight `Σ‖∇d‖²` the
+    ///   classification uses, so a consumer applies whichever `‖a‖²`
+    ///   its own restriction of the normal calls for.
     ///
     /// Requires the **held solve** to have run with
     /// `bound_relax_factor=0` (raises `ValueError` otherwise; the
@@ -462,6 +474,7 @@ impl PySolver {
         )?;
         out.set_item("var_off_central_path", rep.var_off_central_path)?;
         out.set_item("var_contaminated", rep.var_contaminated)?;
+        out.set_item("var_sigma", rep.var_sigma.into_pyarray_bound(py))?;
         out.set_item("row_status", status_str(&rep.row_status))?;
         out.set_item("row_ratio", rep.row_ratio.into_pyarray_bound(py))?;
         out.set_item(
@@ -474,7 +487,32 @@ impl PySolver {
         )?;
         out.set_item("row_off_central_path", rep.row_off_central_path)?;
         out.set_item("row_contaminated", rep.row_contaminated)?;
+        out.set_item("row_sigma", rep.row_sigma.into_pyarray_bound(py))?;
         Ok(out)
+    }
+
+    /// The gradient of user constraint row `j` at the converged
+    /// iterate, as an ndarray in user variable order (length n), in
+    /// **natural (unscaled) units**: the solver's internal Jacobian
+    /// row carries its per-row `d_scale`/`c_scale`, which is divided
+    /// out here, so this is the gradient of the row the user wrote.
+    /// Equality and inequality rows alike; entries for fixed
+    /// (`lb == ub`) variables are 0 because the solve removed their
+    /// columns. A binding row's normal restricted to the fitted
+    /// columns is the projection direction of the covariance
+    /// roadmap's item 1.
+    fn row_normal<'py>(&self, py: Python<'py>, j: i64) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("row_normal: no converged factor (call solve() first)")
+        })?;
+        if j < 0 || (j as usize) >= s.m {
+            return Err(PyValueError::new_err(format!(
+                "row_normal: constraint index {j} out of range [0, m={})",
+                s.m
+            )));
+        }
+        let g = s.inner.row_normal(j as usize).map_err(solver_error_to_py)?;
+        Ok(g.into_pyarray_bound(py))
     }
 }
 

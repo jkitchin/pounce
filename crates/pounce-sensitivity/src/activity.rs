@@ -111,6 +111,14 @@ pub struct ActivityReport {
     /// Classified inactive yet `r` non-negligible: barrier curvature
     /// where none should be.
     pub var_contaminated: Vec<bool>,
+    /// The barrier diagonal `Σ_i = z/s` itself per user variable, both
+    /// sides summed; 0 where not classified. In **natural (unscaled)
+    /// units**, the repo's sensitivity-output contract: classification
+    /// runs on the solver's scaled quantities (the ratio is
+    /// scale-invariant), the report does not. The covariance roadmap's
+    /// item 1 subtracts exactly this from the factor's natural-units
+    /// reduced Hessian.
+    pub var_sigma: Vec<Number>,
     /// Status per user constraint row.
     pub row_status: Vec<i8>,
     /// `Σ_j / q_j` per user row; `NaN` where not classified.
@@ -122,6 +130,12 @@ pub struct ActivityReport {
     pub row_off_central_path: Vec<bool>,
     /// Contamination check per row, as for variables.
     pub row_contaminated: Vec<bool>,
+    /// The row barrier diagonal `Σ_j = v/s` per user row, both sides
+    /// summed; 0 where not classified. In **natural (unscaled) units**
+    /// like [`Self::var_sigma`], and RAW rather than the geometric
+    /// weight the classification uses: item 1 restricts the normal to
+    /// its own fitted block and applies its own `‖a‖²` factor there.
+    pub row_sigma: Vec<Number>,
 }
 
 /// The classification rule of the roadmap's item 0.
@@ -235,6 +249,7 @@ fn zero_gradient_row(sigma: Number, floor: Number) -> Entry {
         q_sign: 0,
         off_path: false,
         contaminated: false,
+        sigma,
     }
 }
 
@@ -262,6 +277,8 @@ struct Entry {
     q_sign: i8,
     off_path: bool,
     contaminated: bool,
+    /// The RAW barrier diagonal, whatever weight classification used.
+    sigma: Number,
 }
 
 const NOT_CLASSIFIED: Entry = Entry {
@@ -270,6 +287,7 @@ const NOT_CLASSIFIED: Entry = Entry {
     q_sign: 0,
     off_path: false,
     contaminated: false,
+    sigma: 0.0,
 };
 
 /// Classify one bounded variable or row from its `Σ` and signed `q`.
@@ -285,6 +303,7 @@ fn classify_entry(sigma: Number, q_signed: Number, floor: Number, mu: Number) ->
             q_sign,
             off_path: false,
             contaminated: false,
+            sigma,
         };
     }
     let r = sigma / q;
@@ -295,6 +314,7 @@ fn classify_entry(sigma: Number, q_signed: Number, floor: Number, mu: Number) ->
         q_sign,
         off_path: false,
         contaminated: contaminated(status, r, mu),
+        sigma,
     }
 }
 
@@ -317,9 +337,16 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
             curr.s.dim() as usize,
         )
     };
-    let (px_l, px_u, pd_l, pd_u) = {
+    let (px_l, px_u, pd_l, pd_u, obj_scale, d_scale) = {
         let nl = nlp.borrow();
-        (nl.px_l(), nl.px_u(), nl.pd_l(), nl.pd_u())
+        (
+            nl.px_l(),
+            nl.px_u(),
+            nl.pd_l(),
+            nl.pd_u(),
+            nl.obj_scaling_factor(),
+            nl.d_scale_vec(),
+        )
     };
     let cq = cq.borrow();
 
@@ -348,6 +375,11 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
         let mut e = classify_entry(sigma_x[i], diag[i], floor, mu);
         e.off_path = (has_l[i] && off_path(s_l[i], z_l[i], mu))
             || (has_u[i] && off_path(s_u[i], z_u[i], mu));
+        // the ratio is scale-invariant, so classification ran in the
+        // solver's scaled space; the REPORTED sigma follows the repo's
+        // natural-units contract: internal z carries the objective
+        // scale (x is never scaled), so Sigma_nat = Sigma / df
+        e.sigma /= obj_scale;
         vars[i] = e;
     }
 
@@ -423,8 +455,11 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
                         scratch[k] = 0.0;
                     }
                     // Σ·‖∇d‖² against curvature along the unit
-                    // normal: invariant to rescaling the row
-                    classify_entry(sigma_s[j] * norm2, ghg / norm2, floor, mu)
+                    // normal: invariant to rescaling the row; the
+                    // report keeps the raw Σ
+                    let mut e = classify_entry(sigma_s[j] * norm2, ghg / norm2, floor, mu);
+                    e.sigma = sigma_s[j];
+                    e
                 };
             }
             true
@@ -462,7 +497,9 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
                         .map(|(g, h)| g * h)
                         .sum()
                 };
-                classify_entry(sigma_s[j] * norm2, ghg / norm2, floor, mu)
+                let mut e = classify_entry(sigma_s[j] * norm2, ghg / norm2, floor, mu);
+                e.sigma = sigma_s[j];
+                e
             };
         }
     }
@@ -472,6 +509,11 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
         }
         rows[j].off_path = (rhas_l[j] && off_path(rs_l[j], v_l[j], mu))
             || (rhas_u[j] && off_path(rs_u[j], v_u[j], mu));
+        // natural-units report, as for variables: the scaled row
+        // multiplier carries df/dg and the scaled slack dg, so
+        // Sigma_nat = Sigma * dg^2 / df
+        let dg = d_scale.as_ref().map_or(1.0, |v| v[j]);
+        rows[j].sigma *= dg * dg / obj_scale;
     }
 
     // --- scatter to user space --------------------------------------------
@@ -513,12 +555,85 @@ pub(crate) fn compute(bs: &PdSensBacksolver) -> ActivityReport {
         var_q_sign: var_full.iter().map(|e| e.q_sign).collect(),
         var_off_central_path: var_full.iter().map(|e| e.off_path).collect(),
         var_contaminated: var_full.iter().map(|e| e.contaminated).collect(),
+        var_sigma: var_full.iter().map(|e| e.sigma).collect(),
         row_status: row_full.iter().map(|e| e.status).collect(),
         row_ratio: row_full.iter().map(|e| e.ratio).collect(),
         row_q_sign: row_full.iter().map(|e| e.q_sign).collect(),
         row_off_central_path: row_full.iter().map(|e| e.off_path).collect(),
         row_contaminated: row_full.iter().map(|e| e.contaminated).collect(),
+        row_sigma: row_full.iter().map(|e| e.sigma).collect(),
     }
+}
+
+/// The gradient of one user constraint row at the converged iterate,
+/// in user variable order (length `n_full_x`) and **natural (unscaled)
+/// units**: the internal Jacobian row carries the solver's per-row
+/// scale, which is divided out here per the sensitivity-output
+/// contract. Works for equality and inequality rows alike; entries for
+/// `make_parameter`-removed fixed variables are 0 because the solve
+/// dropped their columns.
+pub(crate) fn row_normal(bs: &PdSensBacksolver, user_row: usize) -> Result<Vec<Number>, usize> {
+    let (data, cq, nlp) = bs.activity_handles();
+    let n = {
+        let d = data.borrow();
+        d.curr
+            .as_ref()
+            .expect("converged state has an iterate")
+            .x
+            .dim() as usize
+    };
+    // position of the row within its own c/d block, by the same
+    // ascending scan the report's scatter uses
+    let c_pos = {
+        let nl = nlp.borrow();
+        if user_row >= nl.n_full_g() as usize {
+            return Err(nl.n_full_g() as usize);
+        }
+        nl.full_g_to_c_block(user_row as Index)
+    };
+    let block_pos = match c_pos {
+        Some(p) => p as usize,
+        None => {
+            let nl = nlp.borrow();
+            (0..user_row)
+                .filter(|&g| nl.full_g_to_c_block(g as Index).is_none())
+                .count()
+        }
+    };
+
+    let row_scale = {
+        let nl = nlp.borrow();
+        let sv = if c_pos.is_some() {
+            nl.c_scale_vec()
+        } else {
+            nl.d_scale_vec()
+        };
+        sv.map_or(1.0, |v| v[block_pos])
+    };
+    let cq = cq.borrow();
+    let jac = if c_pos.is_some() {
+        cq.curr_jac_c()
+    } else {
+        cq.curr_jac_d()
+    };
+    let m_block = jac.n_rows() as usize;
+    let mspace = DenseVectorSpace::new(m_block as i32);
+    let mut e_row = DenseVector::new(mspace);
+    let nspace = DenseVectorSpace::new(n as i32);
+    let mut grad = DenseVector::new(nspace);
+    e_row.values_mut().fill(0.0);
+    e_row.values_mut()[block_pos] = 1.0;
+    grad.values_mut().fill(0.0);
+    jac.trans_mult_vector(1.0, &e_row, 0.0, &mut grad);
+
+    let nl = nlp.borrow();
+    let n_full_x = nl.n_full_x() as usize;
+    let mut full = vec![0.0; n_full_x];
+    let g = grad.values_mut();
+    for (i, slot) in g.iter().enumerate() {
+        full[nl.var_x_to_full_x(i as Index) as usize] = *slot / row_scale;
+    }
+    Ok(full)
 }
 
 #[cfg(test)]

@@ -101,7 +101,29 @@ pub fn resto_orig_verdict(
         orig_trial_inf_pr <= 1e2 * tol && orig_trial_rel_inf_pr <= rel_viol_threshold;
     // `IpRestoConvCheck.cpp:212` — nearly feasible for the orig NLP, and
     // there is tolerance budget left to spend chasing the rest.
-    if nearly_feasible && tol > 1e-1 * orig_tol {
+    //
+    // Upstream states the arm's premise in its own comment: it tightens
+    // "in case the problem is only very slightly infeasible". *In*feasible
+    // is the operative word — the arm spends the tolerance budget chasing
+    // a residual violation down to zero. Once the recovered point is
+    // feasible to the original NLP's own `tol` there is no residual left
+    // to chase, and tightening only drives the sub-solve past the point
+    // the outer asked for: eigmaxa/eigmina reach `inf_pr = 7.5e-15`, get
+    // tightened anyway, and run on into a tiny-step restoration failure
+    // where handing the point straight back solves the problem. dallasm
+    // is the same story at `1.5e-10`.
+    //
+    // Upstream never has to make this distinction, because it cannot
+    // arrive here at a feasible point: `IpBacktrackingLineSearch.cpp:578`
+    // refuses to enter restoration once the violation is under
+    // `1e-2 · tol`, and layer 1's reduction target is floored at
+    // `min(tol, constr_viol_tol)` so a feasible trial is released before
+    // layer 2 is consulted. Pounce reaches it by both routes, so the
+    // premise has to be checked rather than assumed. A point at or under
+    // `orig_tol` falls through to the feasible-point arm below, which is
+    // the verdict that describes it.
+    let slightly_infeasible = orig_trial_inf_pr > orig_tol;
+    if nearly_feasible && slightly_infeasible && tol > 1e-1 * orig_tol {
         return RestoOrigVerdict::TightenAndContinue;
     }
     // `IpRestoConvCheck.cpp:222` — a square problem has nothing to
@@ -234,6 +256,15 @@ impl RestoConvCheck {
 
         // kappa_resto reduction guard (line 175). When kappa_resto == 0
         // upstream disables this guard entirely.
+        //
+        // NOTE: upstream floors this target at `min(tol, constr_viol_tol)`
+        // (`IpRestoConvCheck.cpp:162`); pounce does not, so a restoration
+        // entered near-feasible can never satisfy the guard and exits via
+        // the sub-problem's own stationarity instead. Adding the floor is
+        // upstream-faithful but measurably worse here — it releases the
+        // sub-solve earlier, at points far from its own KKT point, and
+        // regresses dallasl (Optimal → Error_In_Step_Computation). Left
+        // as-is deliberately; it is a separate question from #438.
         let reduction_sufficient =
             self.kappa_resto <= 0.0 || orig_trial_inf_pr <= self.kappa_resto * orig_curr_inf_pr;
 
@@ -702,7 +733,9 @@ impl pounce_algorithm::conv_check::r#trait::ConvCheck for RestoConvCheckAdapter 
         //    upstream `IpRestoConvCheck.cpp:175` — when the inner
         //    iterate's orig `(theta_trial)` is below
         //    `kappa_resto · orig_curr_inf_pr`, restoration has done
-        //    enough. Upstream then runs `TestOrigProgress` (filter +
+        //    enough. (Upstream floors that target — see the note in
+        //    `RestoConvCheck::check_convergence`; pounce deliberately
+        //    does not.) Upstream then runs `TestOrigProgress` (filter +
         //    iterate acceptance) before declaring `Converged`; we mirror
         //    that gate via [`Self::orig_progress_callback`]. The first
         //    inner iter is skipped (no prior reduction reference yet)
@@ -1070,9 +1103,9 @@ mod tests {
         let orig_tol = 1e-8;
         let mut tol = orig_tol;
         let mut fired = 0;
-        // Near-feasible for the orig NLP: `inf_pr` well inside `1e2 · tol`
-        // at every tolerance the loop can reach.
-        let inf_pr = 1e-12;
+        // Slightly *infeasible* — above `orig_tol`, so the arm's premise
+        // holds — and inside `1e2 · tol` so it is near-feasible too.
+        let inf_pr = 1e-7;
         while resto_orig_verdict(inf_pr, 0.0, tol, orig_tol, 1e-4, 1e-2, false)
             == RestoOrigVerdict::TightenAndContinue
         {
@@ -1147,11 +1180,13 @@ mod tests {
     /// never manufacture it. A point tiny on both measures still tightens.
     #[test]
     fn layer2_relative_gate_blocks_but_never_creates_near_feasibility() {
-        // Tiny absolutely, but 14% of the row: not nearly feasible.
-        let v = resto_orig_verdict(1e-9, 1.4e-1, 1e-8, 1e-8, 1e-4, 1e-2, false);
+        // Small absolutely, but 14% of the row: not nearly feasible.
+        // (Above `orig_tol`, so only the relative measure can block it —
+        // which is what this test isolates.)
+        let v = resto_orig_verdict(1e-7, 1.4e-1, 1e-8, 1e-8, 1e-4, 1e-2, false);
         assert_eq!(v, RestoOrigVerdict::LocallyInfeasible);
-        // Tiny on both: unchanged from the absolute-only behaviour.
-        let v = resto_orig_verdict(1e-9, 1e-6, 1e-8, 1e-8, 1e-4, 1e-2, false);
+        // Small on both: unchanged from the absolute-only behaviour.
+        let v = resto_orig_verdict(1e-7, 1e-6, 1e-8, 1e-8, 1e-4, 1e-2, false);
         assert_eq!(v, RestoOrigVerdict::TightenAndContinue);
         // Large absolutely but small relatively is still not nearly feasible:
         // both tests must pass, so neither can override the other.
@@ -1240,13 +1275,18 @@ mod tests {
         let mut cc = RestoConvCheck::new();
         cc.kappa_resto = 0.9;
         cc.tol = 1e-8;
-        cc.check_convergence(0, false, 1.0, 1e-12, 0.0, 1e-8, || false, || true);
-        let s = cc.check_convergence(1, false, 1.0, 1e-12, 0.0, 1e-8, || false, || true);
+        // Slightly infeasible (above `orig_tol = 1e-8`), so the arm applies.
+        cc.check_convergence(0, false, 1.0, 1e-7, 0.0, 1e-8, || false, || true);
+        let s = cc.check_convergence(1, false, 1.0, 1e-7, 0.0, 1e-8, || false, || true);
         assert_eq!(s, RestoConvergenceStatus::Continue);
         assert_eq!(cc.tol, 1e-10);
-        // Second visit: budget spent, so the verdict is now terminal.
-        let s = cc.check_convergence(2, false, 1.0, 1e-12, 0.0, 1e-8, || false, || true);
-        assert_eq!(s, RestoConvergenceStatus::Converged);
+        // Second visit: budget spent, so the verdict is now terminal. At
+        // `tol = 1e-10` the point no longer clears `1e2 · tol`, so the
+        // terminal verdict for this still-infeasible point is a local
+        // infeasibility. (The feasible-point counterpart is covered by
+        // `layer2_feasible_point_when_tolerance_budget_is_spent`.)
+        let s = cc.check_convergence(2, false, 1.0, 1e-7, 0.0, 1e-8, || false, || true);
+        assert_eq!(s, RestoConvergenceStatus::LocallyInfeasible);
         assert_eq!(cc.tol, 1e-10, "no further tightening");
     }
 
@@ -1356,6 +1396,31 @@ mod tests {
         assert_eq!(a.orig_constr_viol_tol, 1e-3);
         assert!(a.is_square_problem);
         assert_eq!(a.resto_tol_tightenings, 0);
+    }
+
+    /// The tightening arm chases a *residual violation*. Once the
+    /// recovered point is feasible to the orig NLP's own `tol` there is
+    /// nothing left to chase, and tightening drives the sub-solve past
+    /// the point the outer wanted: eigmaxa/eigmina (7.5e-15) regressed
+    /// Optimal → Restoration_Failed, dallasm (1.5e-10) Optimal →
+    /// Error_In_Step_Computation. Such a point is the feasible-point arm's.
+    #[test]
+    fn layer2_does_not_tighten_at_an_already_feasible_point() {
+        let orig_tol = 1e-8;
+        // eigmaxa's number: feasible by seven orders. Not the tightening
+        // arm's business — hand it back.
+        let v = resto_orig_verdict(7.5e-15, 0.0, 1e-8, orig_tol, 1e-4, 1e-2, false);
+        assert_eq!(v, RestoOrigVerdict::ConvergedToFeasiblePoint);
+        // dallasm's number, same verdict.
+        let v = resto_orig_verdict(1.53e-10, 0.0, 1e-8, orig_tol, 1e-4, 1e-2, false);
+        assert_eq!(v, RestoOrigVerdict::ConvergedToFeasiblePoint);
+        // Exactly at `orig_tol` is feasible — the premise is a strict `>`.
+        let v = resto_orig_verdict(orig_tol, 0.0, 1e-8, orig_tol, 1e-4, 1e-2, false);
+        assert_eq!(v, RestoOrigVerdict::ConvergedToFeasiblePoint);
+        // Genuinely *slightly infeasible* — above `tol`, inside `1e2 · tol`
+        // — is what the arm was ported for, and it still fires there.
+        let v = resto_orig_verdict(1e-7, 0.0, 1e-8, orig_tol, 1e-4, 1e-2, false);
+        assert_eq!(v, RestoOrigVerdict::TightenAndContinue);
     }
 
     /// `new` must leave the verdict's scalars self-consistent for callers

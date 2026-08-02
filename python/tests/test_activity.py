@@ -356,3 +356,75 @@ def test_mixed_model_reports_in_user_space():
     assert rep["var_q_sign"][0] == 1 and rep["var_q_sign"][3] == 1
     assert rep["row_q_sign"][1] == 1
     assert not any(rep["var_contaminated"]) and not any(rep["row_contaminated"])
+
+
+def test_sigma_is_natural_units():
+    # the weak scalar row g = c*x >= 0 has natural geometric weight
+    # Sigma*||grad||^2 = q = 1, so Sigma_nat = 1/c^2 exactly. At
+    # c = 1000 the default gradient-based scaling engages a per-row
+    # d_scale, and a scaled-space report would differ by df/dg^2;
+    # asserting 1/c^2 under both scaling modes pins the natural-units
+    # contract at the boundary.
+    for scaling in ("gradient-based", "none"):
+        c = 1000.0
+        prob = pounce.Problem(
+            n=1, m=1, problem_obj=ScalarRow(0.0, c),
+            lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
+        )
+        prob.add_option("tol", 1e-10)
+        prob.add_option("bound_relax_factor", 0.0)
+        prob.add_option("nlp_scaling_method", scaling)
+        prob.add_option("print_level", 0)
+        prob.add_option("sb", "yes")
+        solver = pounce.Solver(prob)
+        _, info = solver.solve(x0=np.array([0.5]))
+        assert info["status_msg"] == "Solve_Succeeded"
+        rep = solver.classify_activity()
+        assert rep["row_status"] == ["weakly_active"], scaling
+        assert rep["row_sigma"][0] == pytest.approx(1.0 / c**2, rel=0.5), scaling
+        # row_normal is natural too: the user's coefficient, not dg*c
+        np.testing.assert_allclose(solver.row_normal(0), [c], rtol=1e-9)
+
+
+def test_sigma_is_reported_raw():
+    # with unit curvature the ratio IS Σ/1, so the reported sigma must
+    # reproduce it; Σ ≈ 1 at weak activity and ≈ μ when inactive
+    rep = _solve_bound(0.0)
+    assert rep["var_sigma"][0] == pytest.approx(rep["var_ratio"][0], rel=1e-12)
+    assert rep["var_sigma"][0] == pytest.approx(1.0, rel=0.5)
+    rep = _solve_bound(1.0)
+    assert rep["var_sigma"][0] == pytest.approx(rep["mu"], rel=10.0)
+    rep = _solve_row(0.0)
+    assert rep["row_sigma"][0] == pytest.approx(rep["row_ratio"][0], rel=1e-12)
+    assert rep["var_sigma"][0] == 0.0  # unbounded: nothing classified
+
+
+def _mixed_solver():
+    prob = _options(pounce.Problem(
+        n=4, m=2, problem_obj=MixedModel(),
+        lb=[0.0, -1e19, 2.0, 0.0], ub=[10.0, 1e19, 2.0, 1e19],
+        cl=[7.0, 0.0], cu=[7.0, 1e19],
+    ))
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([4.0, 0.5, 2.0, 0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    return solver
+
+
+def test_row_normal_in_user_space():
+    solver = _mixed_solver()
+    # g0 = x0 + x2 (equality; the fixed x2's column was removed from
+    # the solve, so its entry reports 0), g1 = x1
+    np.testing.assert_allclose(solver.row_normal(0), [1.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(solver.row_normal(1), [0.0, 1.0, 0.0, 0.0])
+    with pytest.raises(ValueError, match="out of range"):
+        solver.row_normal(2)
+
+
+def test_row_normal_before_solve_raises():
+    prob = _options(pounce.Problem(
+        n=1, m=1, problem_obj=ScalarRow(1.0),
+        lb=[-1e19], ub=[1e19], cl=[0.0], cu=[1e19],
+    ))
+    with pytest.raises(RuntimeError, match="no converged factor"):
+        pounce.Solver(prob).row_normal(0)

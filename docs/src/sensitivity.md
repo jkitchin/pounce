@@ -269,11 +269,33 @@ problem: its eigenvector is the parameter combination the data cannot
 pin down, and the corresponding `cov.correlation` entries approach
 +/-1. `covariance` warns when the held factor carries
 inertia-correction perturbations (typically an exactly unidentifiable
-parameterization), when a fitted parameter sits on a bound at the
-optimum (its direction is projected out: zero variance, the covariance
-conditional on the active bound, correlation entries reported as 0),
-and when the covariance diagonal comes out negative (not a
-least-squares minimum).
+parameterization) and when the covariance diagonal comes out negative
+(not a least-squares minimum).
+
+Bound and constraint activity is classified from the solve's own
+barrier geometry, not a slack threshold. A STRONGLY ACTIVE bound pins
+its parameter: zero variance, correlations 0, conditional on the
+bound, warned. A WEAKLY ACTIVE bound (slack and multiplier vanish
+together) is KEPT at its full finite variance, corrected for the
+barrier weight the held factor carries; AMBIGUOUS (loosely converged)
+and UNIDENTIFIED (curvature below the model's own noise scale) stay
+in the free block, each with a warning. A strongly active inequality
+CONSTRAINT over the fitted parameters pins a combination rather than
+a coordinate: the matrix is projected on the constraint's null space,
+going singular by one per binding row, and the warning names the
+constraint, the pinned combination, and its conditional information.
+The same limit written as a bound or as a row returns the same matrix.
+A binding row that reaches the fitted parameters through free
+eliminated variables cannot be represented by a restricted normal and
+is kept unprojected with an explicit warning.
+
+To classify honestly, the declaration-triggered solve sets
+`bound_relax_factor = 0` (slacks must measure distance to your own
+bounds). This applies to every solve routed through the sensitivity
+session, not only ones that end in `covariance()`. If you need the
+relaxation, pass `bound_relax_factor` explicitly in `options=`: your
+value wins, and `covariance()` then refuses with a clear error rather
+than classifying against shifted slacks.
 
 **Relation to `pounce.curve_fit`.** This uses the same
 scale-and-invert-the-reduced-Hessian recipe as
@@ -415,7 +437,12 @@ construction rather than by undoing anything: its ratios are formed so
 that rescaling a variable, a constraint row, or the objective leaves
 them fixed. Writing a constraint as `1000·x ≥ 0` instead of `x ≥ 0`
 does not move a status, and neither does the solver's own per-row
-`d_scale`.
+`d_scale`. The values the report exports follow the natural-units
+contract like everything else: `var_sigma` and `row_sigma` are the
+barrier diagonals in the model's own units, and `row_normal(j)` is the
+constraint gradient with the solver's per-row scale divided out;
+classification happens on the scaled quantities internally, the report
+never shows them.
 
 In particular, for a parameter-estimation NLP with the parameters
 pinned by equality constraints, `-inv(info["reduced_hessian"])` is

@@ -491,7 +491,7 @@ def test_rewritten_bound_still_projects_in_covariance():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         covariance(m)
-    assert any("sits on its bound" in str(x.message) for x in w)
+    assert any("strongly active" in str(x.message) for x in w)
     # and the projected answer, not just the warning: identical to what the
     # same model gives with the bound left alone
     assert covariance(m).std_err[m.A] == 0.0

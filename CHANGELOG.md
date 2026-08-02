@@ -36,6 +36,135 @@ changes.
   (`subgraph` re-enters `__init__` with a prebuilt graph tuple and is
   not counted).
 
+### Changed — pyomo-pounce: `covariance()` membership from the solve's barrier geometry (#362, covariance roadmap item 1)
+
+- Bound and constraint activity on the fitted parameters now classifies
+  through the item-0 rule applied at the reduced fitted block, where a
+  fitted parameter's curvature actually lives (its raw Lagrangian diagonal
+  is zero in the residual-variable idiom, so the per-coordinate report
+  alone cannot decide membership there). The slack-only test
+  (`tol = 1e-6 * (1 + |x|)`) and its moved-bounds re-injection are gone.
+- Dispositions per the item-1 table: strongly active projects (zero
+  variance, conditional, warned); weakly active is KEPT at its full
+  finite variance, where the slack test deleted it and the raw factor
+  would have halved it; ambiguous and unidentified are kept and warned.
+- The value correction subtracts the fitted rows' retained barrier
+  diagonal (`var_sigma`, new in the activity report along with
+  `row_sigma`) from the factor's reduced Hessian: a weakly active kept
+  parameter reports its true curvature `q`, not the factor's `2q`, and
+  inactive rows shed an O(μ) drift. On kept rows Σ is at most the
+  curvature's own size, so nothing cancels; pinned coordinates and
+  binding directions never enter (excluded by the free restriction and
+  annihilated by the projection, which also annihilates the binding
+  rows' huge barrier weight exactly).
+- A strongly active inequality row whose normal touches the fitted
+  block pins a combination, not a coordinate: both accessor paths
+  (Lagrangian and Gauss-Newton) project on the null space of the
+  binding normals, the matrix goes singular by one per binding row,
+  and the warning names the constraint, the pinned combination, and
+  its conditional information. A bound moved onto a row
+  (jkitchin/pounce#357) is the single-coordinate case and returns
+  exactly the variable-bound disposition, so the two spellings of one
+  limit agree in the matrices (#362), not only in the classification.
+- The restricted normal is honest only when the row's support outside
+  the fitted block is pinned (declared-parameter pin columns do not
+  count as outside: they cannot move). A binding row reaching the
+  fitted parameters through FREE eliminated variables pins a
+  direction the restricted normal cannot represent (`a + r_1 <= cap`
+  with `r_1 = y_1 - a - b x_1` pins a `b`-direction while the
+  restricted normal reads `e_a`), and the reduced-level ratio is
+  equally blind, so such a row takes item 0's raw classification, is
+  kept unprojected, and warns explicitly. The general treatment is
+  the row's reduced normal through the elimination, item 2 territory.
+- The report's `var_sigma`/`row_sigma` and `row_normal` follow the
+  documented natural-units contract like every other sensitivity
+  output: classification runs on the solver's scaled quantities (the
+  ratio is scale-invariant), the exported values are unscaled at the
+  boundary. Tested by pinning the weak scalar row's `Σ = 1/c²` under
+  both scaling modes and `row_normal` returning the user's own
+  coefficient.
+- Declaration-triggered solves set `bound_relax_factor=0`: the
+  classifier reads slacks as distances to the user's own bounds.
+- `Solver.row_normal(j)`: a constraint row's gradient at the converged
+  iterate in user variable order, serving the projection direction.
+- Tests pin the analytics: the weakly active kept variance equals the
+  unconstrained `σ²(XᵀX)⁻¹` entry; a binding `a + b <= cap` matches
+  restricted least squares with corr −1 and a rank drop; bound and row
+  spellings agree to 1e-6; an inactive far bound changes nothing to
+  1e-7; Gauss-Newton matches on the linear model, projection included.
+- `_classify_ratio` mirrors the Rust rule in Python, so a drift test
+  checks the two against each other on real solves: every classified
+  entry of a `classify_activity()` report must re-derive its own
+  status from the reported `(ratio, mu)` through the Python rule.
+
+### Fixed — feasible convex QPs reported locally infeasible on the NLP path
+
+- With `solver_selection=nlp`, POUNCE reported `Converged to a point of
+  local infeasibility` on 15 Maros-Mészáros convex QPs that are feasible
+  and that POUNCE's own `qp-ipm` path solves to optimality (#446). A
+  confident wrong answer, not a failure: Pyomo maps
+  `Infeasible_Problem_Detected` into the infeasible family, so a caller
+  reads it as a modelling error. QSCSD1 is the clearest case — the verdict
+  was rendered at a converged KKT point whose constraint violation was
+  `9.2e-15` and dual infeasibility `2.8e-14`, with an objective agreeing
+  with the `qp-ipm` optimum to six figures.
+- One cause for all 15, in the scale-relative feasibility measure added by
+  #385 and extended to equality rows by #390. It divides a row's violation
+  by that row's *declared* magnitude — the pre-fold RHS, or the declared
+  bounds — and abstained only when that magnitude was **exactly** zero.
+  Every one of the 15 carries rows whose declared magnitude is `1e-17` to
+  `1e-16`: rounding residue from the netlib→`.nl` conversion, `2^-53`
+  written where the model says `0`. The row's residual cannot be driven
+  below its own floating-point noise floor either, so the ratio was noise
+  over noise. QSCSD1 read 81× violated, which vetoed its success
+  certificate at iteration 15, kept the solver grinding to iteration 77
+  past a solution it already had, and then armed the rapid-infeasibility
+  pre-filter that issued the verdict.
+- "Zero" is now read numerically. A row abstains once its declared
+  magnitude sinks under its own noise floor, `κ · eps · max_j |∂g_i/∂x_j| ·
+  ‖x‖_∞` — the finest residual the solver could drive that row to, which is
+  what makes a declared magnitude below it residue rather than data. The
+  comparison keeps the scale invariance that is the whole point of the
+  measure: under a row scaling both the floor and the magnitude carry
+  `dc_i`, so the verdict is the same however the row is written. An
+  absolute cutoff on the magnitude would have thrown that away.
+- The floor models **how finely the solver can place `x`**, not how
+  accurately a row evaluates. A Newton step comes from a linear solve with
+  norm-wise backward error, so every component of `x` is positioned to
+  about `eps · ‖x‖_∞`: a variable at `1e-8` inside a vector of norm `2.7`
+  is still only resolved to `~6e-16`. The dependence on the *global*
+  `‖x‖_∞` is therefore deliberate — `x` is one vector solved for jointly.
+  The seemingly sharper per-row alternative, the exact term sum
+  `Σ_j |a_ij x_j|`, was implemented and measured: it models the row's
+  evaluation error, which is not what limits the residual, and it regressed
+  QETAMACR, QSCORPIO and QPILOTNO. QSCORPIO's row 93 parks its variables
+  near a zero bound at `~1e-8`, so the term sum drops its floor to `8.5e-22`
+  and `−5.6e-17` of rounding residue reads as real data again, at an iterate
+  resolved only to `~6e-16`. A unit test pins the `‖x‖_∞` dependence.
+- A row whose Jacobian is empty abstains outright. Every variable it
+  mentions has been fixed and substituted out, leaving a constant `0 = b`
+  that no iterate can move — a statement about the model, which presolve
+  certifies up front, rather than a residual to judge an iterate by.
+  QPILOTNO's row 150 reduces to `0 = −2.22e-16` this way and pinned the
+  relative measure at 100% for all 375 iterations.
+- Both blocks are fixed, not just the equality one: QPILOTNO also carries
+  43 inequality bounds at `1e-17`–`1e-15`, and one of them — a row sitting
+  at exactly `d(x) = 0` against a declared bound of `1.1e-16` — drove the
+  verdict from the inequality side.
+- Measured on the `qp_convex` head-to-head (`make benchmark-qp-convex`),
+  the NLP arm goes from **113/138 solved in 525.7 s to 137/138 in 504.4 s**
+  — more problems solved, in less total time. All 15 wrong
+  infeasibility verdicts are gone, and so are nine further failures with
+  the same origin — five `Search_Direction_Becomes_Too_Small` and four
+  `Solver_Error`, all cases of the veto pushing the solver past a solution
+  it had already reached until the step computation broke down. No problem
+  regressed, and the iteration counts of the newly-solved problems mostly
+  fall (QSCSD1 77→15, QSCSD8 121→20). The one remaining failure, BOYD2's
+  300 s CPU-limit timeout, is pre-existing and unrelated.
+- Masked in default use, because `solver_selection=auto` routes convex QPs
+  to `qp-ipm`. Anyone driving POUNCE as a general NLP solver on a convex QP
+  hit it.
+
 ### Fixed — restoration had no verdict when its sub-problem converged
 
 - `IpRestoConvCheck::CheckConvergence` is two layers, and pounce ported
@@ -68,6 +197,44 @@ changes.
   `resto_inner_solver` already made for them.
 - Set `POUNCE_DBG_RESTO_LAYER2=1` with `RUST_LOG=pounce::restoration=debug`
   to trace the verdict.
+
+### Fixed — layer 2 tightened at points that were already feasible
+
+- The layer-2 port above regressed four Vanderbei problems from `Optimal`:
+  `dallasm` and `dallasl` to `Error_In_Step_Computation`, `eigmaxa` and
+  `eigmina` to `Restoration_Failed`.
+- One cause for all four. Upstream states the tightening arm's premise in
+  its own comment — it tightens "in case the problem is only very
+  slightly infeasible" — and the arm exists to spend the tolerance budget
+  chasing a residual constraint violation down to zero. It was firing on
+  points that had no violation left to chase: `eigmaxa`/`eigmina` reach
+  `inf_pr = 7.5e-15` against an outer `tol` of `1e-8`, `dallasm` reaches
+  `1.5e-10`. Tightening there drives the restoration sub-solve *past* the
+  point the outer asked for, into a tiny-step or step-computation failure
+  where handing the point straight back solves the problem.
+- The arm now checks its own premise (`orig_trial_inf_pr > orig_tol`). A
+  point at or under the original NLP's `tol` falls through to the
+  converged-to-a-feasible-point arm, which is the verdict that describes
+  it. Restorations that are genuinely slightly infeasible — #438's own
+  case, `qcqp1000-1nc`, sits at ~5e-3, five orders above the gate — are
+  untouched.
+- Upstream never has to make this distinction, because it cannot reach
+  layer 2 at a feasible point: `IpBacktrackingLineSearch.cpp:578` refuses
+  to enter restoration once the violation is under `1e-2 · tol`, and
+  layer 1's reduction target is floored at `min(tol, constr_viol_tol)`
+  (`IpRestoConvCheck.cpp:162`) so a feasible trial is released before
+  layer 2 is consulted. Pounce has neither guard, so it arrives by both
+  routes and the premise has to be tested rather than assumed.
+- Adding upstream's layer-1 floor was tried and rejected: it is faithful,
+  but it releases the sub-solve earlier at points far from the
+  sub-problem's own KKT point (`dallasl` exits at `inner_kkt_err = 4.5e-1`
+  where it previously ran one iteration further to `4.2e-9`) and regresses
+  `dallasl` on its own. Left unfloored deliberately, with a note at the
+  call site; it is a separate question from #438.
+- Verified against a same-machine `8c81cf4a` baseline: Vanderbei returns
+  to 697 optimal with identical statuses on all 733 problems and no
+  objective changes.
+
 ### Fixed — port gap: no `ACCEPTABLE_POINT_REACHED` at the restoration doorway
 
 - **Upstream refuses to enter restoration from an acceptable point; pounce did

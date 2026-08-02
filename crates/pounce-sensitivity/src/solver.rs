@@ -288,6 +288,29 @@ impl Solver {
         Ok(crate::activity::compute(&state.backsolver))
     }
 
+    /// The gradient of user constraint row `user_row` at the converged
+    /// iterate, in user variable order (length `n_full_x`) and in
+    /// **natural (unscaled) units**: the internal Jacobian row carries
+    /// the solver's per-row `c_scale`/`d_scale`, which is divided out
+    /// here, so this is the gradient of the row as the user wrote it.
+    /// Equality and inequality rows alike; entries for fixed
+    /// (`make_parameter`-removed) variables are 0 because the solve
+    /// dropped their columns. Errors on an out-of-range row.
+    ///
+    /// Serves the covariance roadmap's item 1: a binding row's normal
+    /// restricted to the fitted block is the projection direction.
+    pub fn row_normal(&self, user_row: usize) -> Result<Vec<Number>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        crate::activity::row_normal(&state.backsolver, user_row).map_err(|m| {
+            SolverError::BadShape {
+                what: "row_normal constraint index",
+                got: user_row,
+                expected: m,
+            }
+        })
+    }
+
     /// Solve `K · lhs = rhs` against the converged KKT factor. Both
     /// slices must have length `kkt_dim()`; the layout is the flat
     /// `x || s || y_c || y_d || z_l || z_u || v_l || v_u` packing.
