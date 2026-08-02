@@ -31,6 +31,7 @@ from pyomo_pounce.block_init import (
     _seed_pin,
     _seed_var,
     block_initialize,
+    structural_incidence,
     block_repair_plan,
 )
 from pyomo_pounce.preflight import initialize_missing_values
@@ -215,9 +216,14 @@ def initialize(
     # held decision, and the projection must not drift them. A pruned
     # decision stays free (it gets solved for); a valueless pinned
     # variable gets a nonzero bounds-aware seed before being held.
+    # One structural incidence walk serves the whole call: the plan
+    # filters it pre-fixing, the analyze pass post-fixing (gh #444).
+    igraph = structural_incidence(model)
     plan = None
     if repair == "auto":
-        plan = block_repair_plan(model, decision_candidates=decisions)
+        plan = block_repair_plan(
+            model, decision_candidates=decisions, igraph=igraph
+        )
         if plan.pruned or plan.pinned:
             report.repair = plan
         if plan.redundant_constraints:
@@ -276,8 +282,16 @@ def initialize(
         # The held decision set is already fixed, so block_initialize
         # sees it as plain inputs; in auto mode its own plan is then a
         # no-op, and repair="off" passes through so nothing gets pinned.
+        # repair="off": the plan above already ran (and its holds and
+        # pins are fixed), so re-planning inside block_initialize would
+        # be a structurally guaranteed no-op that still pays a full
+        # incidence construction and denominator sweep (gh #444)
         report.block = block_initialize(
-            model, solver=solver, tee=tee, repair=repair
+            model,
+            solver=solver,
+            tee=tee,
+            repair="off",
+            igraph=igraph,
         )
     finally:
         for vd in fixed_by_us:

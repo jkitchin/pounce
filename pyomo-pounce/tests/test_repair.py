@@ -157,3 +157,79 @@ def test_projection_failure_restores_values(solver):
     cond = pyomo_pounce.project_to_feasible(m, solver=solver)
     assert cond not in ("optimal", "locallyOptimal")
     assert m.x.value == 5.0
+
+
+def _split_model():
+    m = pyo.ConcreteModel()
+    m.feed = pyo.Var(initialize=10.0)
+    m.split = pyo.Var(bounds=(0.0, 1.0), initialize=0.3)
+    m.out1 = pyo.Var(bounds=(0.0, None))
+    m.out2 = pyo.Var(bounds=(0.0, None))
+    m.x = pyo.Var([1, 2], bounds=(0.0, 1.0))
+    m.bal1 = pyo.Constraint(expr=m.out1 == m.split * m.feed)
+    m.bal2 = pyo.Constraint(expr=m.out2 == (1.0 - m.split) * m.feed)
+    m.sum_x = pyo.Constraint(expr=m.x[1] + m.x[2] == 1.0)
+    m.obj = pyo.Objective(expr=m.out1 + m.x[1])
+    return m
+
+
+def test_initialize_walks_incidence_once(monkeypatch, solver):
+    """One structural incidence walk per initialize() call (gh #444):
+    the plan, analyze, and block passes filter the same graph, and
+    block_initialize no longer re-plans. Counted on model-walking
+    constructions only; subgraph() re-enters __init__ with a prebuilt
+    graph tuple and never re-inspects constraints."""
+    import pyomo.core.base.block as _block
+    import pyomo.contrib.incidence_analysis.interface as _iface
+
+    walks = []
+    orig = _iface.IncidenceGraphInterface.__init__
+
+    def counting(self, model=None, *args, **kwargs):
+        if isinstance(model, _block.Block) or isinstance(
+                model, _block.BlockData):
+            walks.append(model)
+        return orig(self, model, *args, **kwargs)
+
+    monkeypatch.setattr(_iface.IncidenceGraphInterface, "__init__", counting)
+    m = _split_model()
+    report = pyomo_pounce.initialize(
+        m, decisions=[m.feed, m.split], solver=solver
+    )
+    assert report.ok, str(report)
+    assert len(walks) == 1
+
+
+def test_shared_graph_matches_fresh_analysis():
+    """The filtered structural view reproduces a fresh construction's
+    analysis exactly (gh #444): same plan, same square decomposition,
+    same block order."""
+    from pyomo_pounce.block_init import (
+        block_analyze,
+        block_repair_plan,
+        structural_incidence,
+    )
+
+    def names(comps):
+        return [c.name for c in comps]
+
+    m1 = _split_model()
+    plan_fresh = block_repair_plan(
+        m1, decision_candidates=[m1.feed, m1.split])
+    ana_fresh = block_analyze(m1, decisions=[m1.feed, m1.split])
+
+    m2 = _split_model()
+    g = structural_incidence(m2)
+    plan_shared = block_repair_plan(
+        m2, decision_candidates=[m2.feed, m2.split], igraph=g)
+    ana_shared = block_analyze(
+        m2, decisions=[m2.feed, m2.split], igraph=g)
+
+    assert names(plan_fresh.decisions) == names(plan_shared.decisions)
+    assert names(plan_fresh.pinned) == names(plan_shared.pinned)
+    assert names(plan_fresh.pruned) == names(plan_shared.pruned)
+    assert ana_fresh.square == ana_shared.square
+    assert [names(b) for b in ana_fresh.variable_blocks] == \
+        [names(b) for b in ana_shared.variable_blocks]
+    assert [names(b) for b in ana_fresh.constraint_blocks] == \
+        [names(b) for b in ana_shared.constraint_blocks]

@@ -9,6 +9,33 @@ changes.
 
 ## [Unreleased]
 
+### Performance — pyomo-pounce: `initialize()` walked the same incidence three times per call (#444)
+
+- One `initialize()` call built whole-model incidence three times and
+  re-derived each constraint's incident variables six times over: the
+  plan pass, a re-plan inside `block_initialize(repair="auto")` that
+  was structurally a no-op (every candidate already fixed) yet paid a
+  full graph construction and denominator sweep, and the analyze
+  pass. On a 25,276-constraint collocation model that was 345.7 s of
+  almost purely symbolic work (fill and projection off).
+- The call now performs one structural incidence walk
+  (`structural_incidence`, fixed variables included) and each pass
+  filters it to the currently-unfixed variables through
+  `IncidenceGraphInterface.subgraph`, which copies the stored graph
+  without re-inspecting constraints. The plan filters pre-fixing and
+  the analyze pass post-fixing, so each sees exactly the view a fresh
+  construction would have built, in the same order; and `initialize`
+  passes `repair="off"` downstream since its own plan already ran.
+  `block_repair_plan`, `block_analyze`, and `block_initialize` accept
+  the shared graph as an optional `igraph=` argument and behave as
+  before when it is omitted.
+- Regressions: a fresh-versus-shared analysis identity test (same
+  plan, same square decomposition, same block order), and a counter
+  test pinning exactly one model-walking incidence construction per
+  `initialize()` call so the redundancy cannot quietly return
+  (`subgraph` re-enters `__init__` with a prebuilt graph tuple and is
+  not counted).
+
 ### Fixed — restoration had no verdict when its sub-problem converged
 
 - `IpRestoConvCheck::CheckConvergence` is two layers, and pounce ported

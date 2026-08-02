@@ -441,7 +441,35 @@ def _tiered_matching(var_adj, tiers):
     return eq_match, var_match
 
 
-def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
+def structural_incidence(model):
+    """One whole-model incidence walk, shareable across the analyze,
+    repair-plan, and block-solve passes of a single initialize() call.
+
+    Built over the active equalities with FIXED VARIABLES INCLUDED, so
+    it is independent of fix-state; each pass filters it down to the
+    currently-unfixed variables (`_active_view`), which reuses the
+    stored graph instead of re-walking every constraint expression.
+    Within-call sharing only: the graph reflects the model's structure
+    at construction, so it must not outlive structural edits.
+    """
+    from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
+
+    return IncidenceGraphInterface(
+        model, include_inequality=False, include_fixed=True
+    )
+
+
+def _active_view(igraph):
+    """The shared structural graph filtered to currently-unfixed
+    variables: the same node sets, in the same order, as a fresh
+    construction at this fix-state, without the expression walk."""
+    unfixed = [v for v in igraph.variables if not v.fixed]
+    if len(unfixed) == len(igraph.variables):
+        return igraph
+    return igraph.subgraph(unfixed, list(igraph.constraints))
+
+
+def block_repair_plan(model, decision_candidates=None, igraph=None) -> BlockRepairPlan:
     """Plan a valid specification; touch nothing, solve nothing.
 
     ``decision_candidates`` are the variables you would like to hold
@@ -491,10 +519,14 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
             candidate_ids.add(id(vd))
             candidates.append(vd)
 
-    # TODO: block_repair_plan, block_analyze, and the initialize pipeline
-    # each build their own IncidenceGraphInterface; on very large models
-    # a single shared graph would remove the repeated structural pass.
-    igraph = IncidenceGraphInterface(model, include_inequality=False)
+    # A supplied igraph is the structural graph of
+    # `structural_incidence` (fixed variables included), filtered here
+    # to the current fix-state; omitted, the walk happens locally as
+    # before (gh #444).
+    if igraph is not None:
+        igraph = _active_view(igraph)
+    else:
+        igraph = IncidenceGraphInterface(model, include_inequality=False)
     eqs = list(igraph.constraints)
     gvars = list(igraph.variables)
     plan.n_constraints = len(eqs)
@@ -548,7 +580,7 @@ def block_repair_plan(model, decision_candidates=None) -> BlockRepairPlan:
     return plan
 
 
-def block_analyze(model, decisions=None) -> BlockAnalysisReport:
+def block_analyze(model, decisions=None, igraph=None) -> BlockAnalysisReport:
     """Partition the equality system; touch nothing, solve nothing.
 
     The analysis half of :func:`block_initialize` on its own: hold the
@@ -594,7 +626,12 @@ def block_analyze(model, decisions=None) -> BlockAnalysisReport:
     report.n_decisions_fixed = len(fixed_by_us)
 
     try:
-        igraph = IncidenceGraphInterface(model, include_inequality=False)
+        # decisions were fixed above, so the filtered view (or the
+        # fresh walk) sees them excluded exactly as before (gh #444)
+        if igraph is not None:
+            igraph = _active_view(igraph)
+        else:
+            igraph = IncidenceGraphInterface(model, include_inequality=False)
         if not igraph.constraints:
             return report
         report.n_constraints = len(igraph.constraints)
@@ -638,6 +675,7 @@ def block_initialize(
     repair: str = "auto",
     max_list: int = 10,
     tee: bool = False,
+    igraph=None,
 ) -> BlockInitReport:
     """Fill ``Var.value`` by solving equality blocks in calculation order.
 
@@ -717,7 +755,9 @@ def block_initialize(
     # decisions exactly as given and reports instead of repairing.
     plan = None
     if repair == "auto":
-        plan = block_repair_plan(model, decision_candidates=decisions)
+        plan = block_repair_plan(
+            model, decision_candidates=decisions, igraph=igraph
+        )
         if plan.pruned or plan.pinned:
             report.repair = plan
     fixed_by_us = []
@@ -751,7 +791,7 @@ def block_initialize(
         # DM decomposition separates it from remaining degrees of
         # freedom and redundant specifications — and names them. The
         # decisions are already fixed above, so none are passed on.
-        analysis = block_analyze(model)
+        analysis = block_analyze(model, igraph=igraph)
         under_vars = analysis.underconstrained_variables
         over_cons = analysis.overconstrained_constraints
         report.skipped_underdetermined = len(under_vars)
