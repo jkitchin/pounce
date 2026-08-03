@@ -1,0 +1,73 @@
+#+TITLE: Adversary Run: Robust Linear Programming with Ellipsoidal Uncertainty
+#+DATE: 2026-08-03
+
+* Problem
+:PROPERTIES:
+:FAMILY: socp
+:CLASS: SOC-constrained LP (robust optimization -> SOCP)
+:SOURCE: Boyd & Vandenberghe, Convex Optimization, Sec 4.4.2 "robust linear programming"
+:KNOWN_OPTIMAL: none published; certified via KKT stationarity re-derivation (see below)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: cones=[("nonneg",2), ("soc",3), ("soc",3)]
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+A firm chooses production levels $x=(x_1,x_2)\ge 0$ to maximize profit
+$c^Tx = x_1+2x_2$ subject to two resource constraints whose consumption
+coefficients are only known to lie in a Euclidean ball around a nominal
+value $a_i$ (radius $\rho_i$). The worst case over the ellipsoid gives the
+robust reformulation, a genuine SOCP:
+
+\[
+\begin{aligned}
+\text{maximize} \quad & x_1 + 2x_2 \\
+\text{subject to} \quad & a_1^Tx + \rho_1\|x\|_2 \le b_1, \quad a_1=[1,1],\ \rho_1=0.3,\ b_1=10\\
+& a_2^Tx + \rho_2\|x\|_2 \le b_2, \quad a_2=[1,3],\ \rho_2=0.2,\ b_2=15\\
+& x \ge 0
+\end{aligned}
+\]
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective (max) | Rel Err     | Wall Time |
+|-----------------+---------+------------------+-------------+-----------|
+| pounce          | optimal | 10.983929284     | -           | 0.0051s   |
+| cvxpy/CLARABEL  | optimal | 10.983929284     | 3.59e-11    | 0.0081s   |
+| cvxpy/SCS       | optimal | 10.983929286     | (matches)   | -         |
+
+Known optimal: none published (constructed instance); certified via
+independent KKT re-derivation below.
+
+Both robust constraints bind at the optimum ($g_1(x)\approx 0$,
+$g_2(x)\approx 0$), with no bound active ($x>0$ componentwise). pounce's
+solution $x^*=[5.377501,\ 2.803214]$ matches cvxpy/CLARABEL to
+$x_\infty\text{-err}=1.19\times 10^{-9}$ and cvxpy/SCS to the same order.
+
+* Cross-check / Verification
+
+Two independent cvxpy conic solvers (CLARABEL, SCS at eps=1e-9) build the
+identical SOCP from cvxpy's native SOC-representable norm constraints
+(no re-derivation of pounce's cone encoding is trusted here — cvxpy handles
+its own norm-to-cone lowering). Both agree with pounce to ~1e-9 or better.
+
+Beyond solver-vs-solver agreement, the script re-derives the KKT
+stationarity conditions directly from pounce's returned $x^*$ using the
+analytic gradients $\nabla g_i(x) = a_i + \rho_i x/\|x\|$ (independent of
+any solver's internal dual variables): with both robust constraints active
+and no bound active, solving the (2-equation) stationarity system for
+$(\mu_1,\mu_2)$ by least squares gives $\mu=[0.2866, 0.5412]$, both
+non-negative (dual feasible), and the resulting stationarity residual on
+the free coordinates is exactly 0 to machine precision. Since the problem
+is convex and Slater's condition holds trivially ($x=0$ is strictly
+feasible, as $b_1,b_2>0$), KKT satisfaction here is both necessary and
+sufficient for global optimality — a certification independent of pounce,
+cvxpy, or any other solver's internal machinery.
+
+* Verdict
+PASS — pounce's SOCP solve matches two independent cvxpy backends to
+~1e-9-1e-11 and independently satisfies the KKT optimality conditions
+re-derived from first principles. No discrepancy found.

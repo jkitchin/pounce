@@ -1,0 +1,74 @@
+#+TITLE: Adversary Run: Rosenbrock Function Global Minimization via SOS/Lasserre
+#+DATE: 2026-08-03
+
+* Problem
+:PROPERTIES:
+:FAMILY: sos
+:CLASS: unconstrained quartic polynomial, global min via SOS (Lasserre order 2)
+:SOURCE: Rosenbrock (1960), Computer J. 3(3):175-184; Hilbert 1888 (nonneg polys in <=2 vars, degree <=4, are always SOS)
+:KNOWN_OPTIMAL: 0.0 at (1,1)
+:N_VARIABLES: 2
+:N_CONSTRAINTS: unconstrained (order-2 Lasserre relaxation)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+The classic Rosenbrock test function:
+
+\[
+f(x,y) = (1-x)^2 + 100(y-x^2)^2 = 1 - 2x + x^2 + 100y^2 - 200x^2y + 100x^4
+\]
+
+has a unique global minimum $f^*=0$ at $(1,1)$ (both squared terms vanish
+only there). By Hilbert's theorem every nonnegative polynomial in $\le 2$
+variables of degree $\le 4$ is a sum of squares, so the minimal (order-2)
+Lasserre relaxation of this quartic is, in principle, exact.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                          | lower_bound    | is_exact | Wall Time |
+|---------------------------------+----------------+----------+-----------|
+| pounce (order=2, tol=1e-10)     | 8.6712e-10     | False    | 0.0726s   |
+| multistart scipy BFGS (200 pts) | 3.7328e-13     | -        | -         |
+| dense grid (601x601 on [-3,3]^2)| 0.0            | -        | -         |
+
+Known optimal: 0.0.
+
+* Cross-check / Verification
+
+- **Multistart scipy BFGS**: 200 random starts on $[-3,3]^2$ all converge
+  to $\approx(1,1)$ with $f\approx 3.7\times10^{-13}$, confirming no lower
+  value exists in the search region and matching the known minimizer.
+- **Dense grid refutation** (601x601 points on $[-3,3]^2$): minimum value
+  0.0 exactly at grid resolution, refuting the existence of any point
+  scoring below pounce's bound (a lower bound must never be *invalid*, i.e.
+  exceed the true minimum by more than solver tolerance).
+
+At the default tolerance the relaxation returned `lower_bound=3.86e-6`,
+`is_exact=False` — a small positive excess over the true optimum 0. This is
+**not** classified as a `SOLVER_BUG`: tightening `tol` from the default to
+`1e-10` shrinks the excess to `8.67e-10`, i.e. it scales with the requested
+solve tolerance, and matches the previously logged precedent
+(`2026-07-23`, Beale degree-8 SOS probe: `lower_bound=+5.31e-7,
+is_exact=False`, filed as "within SDP tolerance of 0, not a finding").
+Rosenbrock's famously ill-conditioned valley near $(1,1)$ plausibly also
+makes the flat-extension rank-1 certificate ($\mathtt{is\_exact}$) hard to
+detect numerically even though the relaxation is theoretically exact by
+Hilbert's theorem — a conditioning artifact, not a soundness defect.
+`is_exact=False` means `minimizers` is empty, so no minimizer-recovery
+check applies (correctly skipped per the family's verdict rule).
+
+* Verdict
+PASS — the SOS/Lasserre lower bound matches the known global minimum (0)
+to $8.67\times10^{-10}$ at `tol=1e-10`, well within the family's PASS
+threshold ($<10^{-4}$), and is corroborated by both a 200-start scipy
+multistart and a 601x601 dense-grid refutation search. The small positive
+excess over the true minimum scales with solver tolerance and is
+consistent with prior logged precedent — not a soundness violation.
+
+* Coverage effect
+Not coverage-driven (selected by log rotation); no coverage measurement
+taken.

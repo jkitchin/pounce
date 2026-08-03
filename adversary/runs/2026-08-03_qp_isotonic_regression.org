@@ -1,0 +1,64 @@
+#+TITLE: Adversary Run: Isotonic Regression via QP with Monotonicity Constraints
+#+DATE: 2026-08-03
+
+* Problem
+:PROPERTIES:
+:FAMILY: qp
+:CLASS: chain-inequality-constrained convex QP
+:SOURCE: Barlow, Bartholomew, Bremner & Brunk 1972 (PAVA); Best & Chakravarti, Math. Programming 47 (1990) 425-439 (QP/active-set equivalence)
+:KNOWN_OPTIMAL: 37.833333333 (via Pool-Adjacent-Violators Algorithm, closed form)
+:N_VARIABLES: 8
+:N_CONSTRAINTS: 7 (chain inequalities x_i <= x_{i+1})
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Given $y = [4,3,5,6,2,7,8,1]$, find the closest (least-squares) monotone
+nondecreasing sequence:
+
+\[
+\text{minimize} \quad \sum_i (x_i-y_i)^2 \qquad
+\text{subject to} \quad x_i \le x_{i+1},\ i=1,\dots,7
+\]
+
+encoded as a QP with $P=2I$, $c=-2y$, and $G$ the first-difference matrix.
+The non-monotone data forces several pooled blocks in the exact solution.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver         | Status  | Objective     | Rel Err  | Wall Time |
+|----------------+---------+---------------+----------+-----------|
+| pounce         | optimal | 37.8333333335 | -        | 0.0060s   |
+| PAVA (closed form) | -   | 37.8333333333 | 5.45e-11 | -         |
+| cvxpy/CLARABEL | optimal | 37.8333333385 | 1.30e-09 | 0.0173s   |
+
+Known optimal: 37.833333333 (PAVA).
+
+pounce recovers the exact pooled-block solution
+$x^*=[3.5,3.5,4.\overline{3},4.\overline{3},4.\overline{3},5.\overline{3},5.\overline{3},5.\overline{3}]$
+(three blocks: $\{1,2\}$, $\{3,4,5\}$, $\{6,7,8\}$), matching PAVA to
+$x_\infty\text{-err}=4.49\times10^{-10}$ and monotonicity holds
+throughout ($\min\Delta x_i \ge -10^{-6}$).
+
+* Cross-check / Verification
+
+- **PAVA** (Pool-Adjacent-Violators): a from-scratch, textbook exact
+  algorithm implemented directly in the script (weighted block-merging on
+  violating adjacent pairs) — genuinely independent of both pounce and any
+  QP/conic solver, since it never forms or solves a linear system.
+- **cvxpy/CLARABEL**: builds the identical QP via `cp.sum_squares` and
+  chain inequality constraints; agrees with pounce to 1.30e-09.
+
+Both oracles agree with pounce to <1e-8 relative error and the recovered
+solution is exactly the PAVA block structure, so this is a clean pass with
+no formulation ambiguity (the QP-vs-PAVA equivalence for isotonic
+regression is itself a well-known and exact correspondence).
+
+* Verdict
+PASS — pounce's QP solve matches the closed-form PAVA algorithm to
+5.45e-11 relative objective error and cvxpy/CLARABEL to 1.30e-09, with the
+exact pooled-block structure recovered and monotonicity satisfied
+throughout. No discrepancy found.

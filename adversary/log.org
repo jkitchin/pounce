@@ -12,17 +12,17 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 |-----------------+--------+------------+---------------|
 | nlp             |     10 | 2026-08-02 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
 | lp              |      9 | 2026-08-02 | —             |
-| qp              |      9 | 2026-08-01 | —             |
+| qp              |     10 | 2026-08-03 | —             |
 | qp-active-set   |     11 | 2026-07-30 | —             |
-| socp            |      9 | 2026-07-28 | —             |
+| socp            |     10 | 2026-08-03 | —             |
 | exp             |      9 | 2026-08-02 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
 | power           |      9 | 2026-08-02 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02 (not filed, see report) |
-| sdp             |      9 | 2026-08-01 | —             |
-| sos             |      9 | 2026-08-01 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
+| sdp             |     10 | 2026-08-03 | —             |
+| sos             |     10 | 2026-08-03 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
 | autoroute       |      9 | 2026-08-01 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, and transportation LP)  |
 | batch           |      9 | 2026-08-02 | —             |
 | diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
-| sensitivity     |      9 | 2026-08-01 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
+| sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
 # Newest entries appended below by the agent (step 7 of the workflow).
@@ -4396,3 +4396,97 @@ favor speed over coverage-directed targeting in this sandbox).
 :REPORT: [[file:runs/2026-08-02_nlp_hs71.org]]
 :COVERAGE_TARGET: -
 :END:
+
+** [2026-08-03] Trust-region subproblem via SDP relaxation (sdp/PSD cone, S-lemma tightness) - PASS
+:PROPERTIES:
+:FAMILY: sdp
+:SOURCE: Moré & Sorensen 1983 secular equation; S-lemma tightness (B&V App. B)
+:KNOWN_OPTIMAL: -2.1245040322
+:POUNCE_OBJECTIVE: -2.1245040185
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0042s
+:ORACLE: cvxpy CLARABEL + Moré-Sorensen secular equation (closed form)
+:ORACLE_OBJECTIVE: -2.1245040181 (CLARABEL)
+:ORACLE_TIME: 0.0116s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-03_sdp_trust_region_subproblem.org]]
+:COVERAGE_TARGET: -
+:END:
+Indefinite-Hessian (nonconvex) TRS; Shor relaxation recovered rank-1 face
+(rank1_gap=1.17e-8), confirming S-lemma tightness numerically, not just
+objective match.
+
+** [2026-08-03] Robust linear programming, ellipsoidal uncertainty (socp/SOC-constrained LP) - PASS
+:PROPERTIES:
+:FAMILY: socp
+:SOURCE: Boyd & Vandenberghe Sec 4.4.2, robust LP as SOCP
+:KNOWN_OPTIMAL: none published; KKT stationarity re-derivation used instead
+:POUNCE_OBJECTIVE: 10.983929284
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0051s
+:ORACLE: cvxpy CLARABEL + SCS
+:ORACLE_OBJECTIVE: 10.983929284 (CLARABEL)
+:ORACLE_TIME: 0.0081s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-03_socp_robust_lp_ellipsoidal.org]]
+:COVERAGE_TARGET: -
+:END:
+Both robust constraints active at optimum; independently re-derived KKT
+stationarity (numpy, not solver duals) gives dual-feasible multipliers and
+zero residual on free coordinates.
+
+** [2026-08-03] Isotonic regression via QP (qp/chain-inequality-constrained, PAVA cross-check) - PASS
+:PROPERTIES:
+:FAMILY: qp
+:SOURCE: Barlow/Bartholomew/Bremner/Brunk 1972 (PAVA); Best & Chakravarti 1990
+:KNOWN_OPTIMAL: 37.833333333
+:POUNCE_OBJECTIVE: 37.8333333335
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0060s
+:ORACLE: PAVA (closed-form exact algorithm) + cvxpy CLARABEL
+:ORACLE_OBJECTIVE: 37.8333333333 (PAVA)
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-03_qp_isotonic_regression.org]]
+:COVERAGE_TARGET: -
+:END:
+
+** [2026-08-03] Rosenbrock function global min (sos/unconstrained quartic, Lasserre order 2) - PASS
+:PROPERTIES:
+:FAMILY: sos
+:SOURCE: Rosenbrock 1960; Hilbert 1888 (nonneg polys, <=2 vars deg<=4, always SOS)
+:KNOWN_OPTIMAL: 0.0
+:POUNCE_OBJECTIVE: lower_bound +8.67e-10 (tol=1e-10; certified=False)
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0726s
+:ORACLE: multistart scipy BFGS (200 starts) + dense 601x601 grid refutation
+:ORACLE_OBJECTIVE: ~0 (grid exact 0.0, multistart 3.7e-13)
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-03_sos_rosenbrock.org]]
+:COVERAGE_TARGET: -
+:END:
+Default-tol bound had +3.86e-6 excess; tol=1e-10 shrinks it to +8.67e-10,
+scaling with requested tolerance -- consistent with logged Beale-degree-8
+precedent (2026-07-23, "within SDP tolerance of 0, not a finding"). Not a
+soundness violation.
+
+** [2026-08-03] Simultaneous multi-parameter QP sensitivity dx/db (sensitivity/exact linear KKT) - PASS
+:PROPERTIES:
+:FAMILY: sensitivity
+:SOURCE: Nocedal & Wright Sec 16.1 eq 16.4-16.5, KKT block-elimination
+:KNOWN_OPTIMAL: closed-form dx/db = P^-1 A'(A P^-1 A')^-1 (exact, equality-only QP)
+:POUNCE_OBJECTIVE: n/a (dx vector; see report)
+:POUNCE_STATUS: optimal (base solve); parametric_step exact
+:POUNCE_TIME: 0.0001s (parametric_step)
+:ORACLE: closed-form KKT block-elimination + exact re-solve + central FD
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-03_sensitivity_simultaneous_multiparam.org]]
+:COVERAGE_TARGET: -
+:END:
+Two RHS parameters perturbed simultaneously in one parametric_step call
+(prior probes did one at a time); matches closed form to 1.11e-16 (machine
+precision), exact re-solve to 8.05e-10, central FD to 3.06e-08.
+kkt_cond_estimate=38.5, ill_conditioned=False.

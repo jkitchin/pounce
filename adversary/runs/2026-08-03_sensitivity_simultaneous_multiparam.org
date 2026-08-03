@@ -1,0 +1,72 @@
+#+TITLE: Adversary Run: Simultaneous Multi-Parameter QP Sensitivity (dx/db)
+#+DATE: 2026-08-03
+
+* Problem
+:PROPERTIES:
+:FAMILY: sensitivity
+:CLASS: equality-constrained convex QP, simultaneous two-parameter dx/db
+:SOURCE: Nocedal & Wright, Numerical Optimization 2nd ed., Sec 16.1 eq. 16.4-16.5 (KKT block-elimination for equality-constrained QP)
+:KNOWN_OPTIMAL: dx/db = P^-1 A' (A P^-1 A')^-1 (exact closed form; equality-only QP is globally linear in b)
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 2 equalities, both perturbed simultaneously
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+\[
+\text{minimize} \ \tfrac12x^TPx+c^Tx \quad \text{s.t.} \ Ax=b,\qquad
+P=\mathrm{diag}(2,4,6),\ c=[1,-2,0.5],\ A=\begin{bmatrix}1&1&0\\0&1&1\end{bmatrix},\ b_0=[2,3]
+\]
+
+Both RHS parameters are perturbed at once, $\delta b=[0.7,-0.4]$, in a
+*single* `QpSensitivity.parametric_step([0,1], db)` call — prior sensitivity
+probes in the log perturbed one parameter at a time. Because this QP has
+only equality constraints, the active set can never change under any
+perturbation, so the KKT system is exactly linear in $b$: the closed-form
+sensitivity matrix $dx/db = P^{-1}A^T(AP^{-1}A^T)^{-1}$ is *exact for any
+perturbation size*, not merely a first-order approximation — a stronger
+cross-check than the usual small-$\delta$ Taylor comparison.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Check                                              | Value      |
+|-----------------------------------------------------+------------|
+| pounce dx (simultaneous 2-param step)               | [0.78333, -0.08333, -0.31667] |
+| closed-form dx/db @ db (exact)                      | [0.78333, -0.08333, -0.31667] |
+| exact re-solve at b0+db, minus x0                   | [0.78333, -0.08333, -0.31667] |
+| kkt_cond_estimate                                   | 38.5       |
+| ill_conditioned                                     | False      |
+
+Known optimal: the closed-form $dx/db$ matrix (exact, see Problem).
+
+* Cross-check / Verification
+
+Three independent checks, none of which is pounce validating pounce:
+
+1. **Closed-form KKT block-elimination** (`numpy`): direct matrix inverse
+   of $P^{-1}$, the $2\times2$ Schur complement $AP^{-1}A^T$, giving the
+   exact $3\times2$ sensitivity matrix. `parametric_step`'s simultaneous
+   two-parameter output matches this to $1.11\times10^{-16}$ (machine
+   precision).
+2. **Exact re-solve** at $b_0+\delta b$ (a second, independent
+   `solve_qp` call, not a Taylor approximation — exact since the QP is
+   equality-only and hence globally linear in $b$): predicted
+   $x_0+dx=[0.65833,2.04167,0.55833]$ matches the re-solved $x$ to
+   $8.05\times10^{-10}$.
+3. **Central finite difference** (`eps=1e-5`, classic small-perturbation
+   check per the family's standard protocol): the FD-estimated $dx/db$
+   matrix matches the closed form to $3.06\times10^{-8}$.
+
+`kkt_cond_estimate=38.5` is modest (well below the `1e14` ill-conditioning
+threshold) and `ill_conditioned=False`, consistent with this being a
+well-scaled, non-degenerate instance — so no over-damping concern (cf.
+issues #284/#328) applies here.
+
+* Verdict
+PASS — pounce's `QpSensitivity.parametric_step` correctly handles a
+*simultaneous* two-parameter perturbation, matching the closed-form KKT
+sensitivity to machine precision (1.11e-16), an exact re-solve to 8.05e-10,
+and a central finite difference to 3.06e-08. No discrepancy found.

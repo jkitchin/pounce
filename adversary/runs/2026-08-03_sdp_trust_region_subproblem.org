@@ -1,0 +1,83 @@
+#+TITLE: Adversary Run: Trust-Region Subproblem via SDP Relaxation
+#+DATE: 2026-08-03
+
+* Problem
+:PROPERTIES:
+:FAMILY: sdp
+:CLASS: single dense PSD cone (Shor/moment relaxation) of a nonconvex quadratic program
+:SOURCE: Moré & Sorensen (1983) secular-equation TRS algorithm; SDP-relaxation tightness is the classical S-lemma result (Boyd & Vandenberghe App. B; Fortin & Wolkowicz 2004)
+:KNOWN_OPTIMAL: -2.1245040322 (via Moré-Sorensen secular equation, closed form)
+:N_VARIABLES: 5 (v = [x1, x2, X11, X21, X22])
+:N_CONSTRAINTS: cones=[("psd",3), ("nonneg",1)]
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+The trust-region subproblem (TRS) with an *indefinite* Hessian $B$ is a
+genuinely nonconvex quadratic program:
+
+\[
+\begin{aligned}
+\text{minimize} \quad & \tfrac12 x^TBx + g^Tx \\
+\text{subject to} \quad & \|x\|_2 \le \Delta
+\end{aligned}
+\qquad B=\mathrm{diag}(1,-2),\quad g=[1,1],\quad \Delta=1
+\]
+
+Despite $B$'s indefiniteness, the S-lemma guarantees the Shor/moment SDP
+relaxation (lift $x\mapsto(x,X)$ with $X\succeq xx^T$) is *exactly tight*
+for a single ball constraint — this probe tests whether pounce's PSD-cone
+solver recovers that exact nonconvex optimum via the convex relaxation:
+
+\[
+\begin{aligned}
+\text{minimize} \quad & \tfrac12\langle B,X\rangle + g^Tx \\
+\text{subject to} \quad & \operatorname{tr}(X)\le\Delta^2,\quad
+\begin{bmatrix}1 & x^T\\ x & X\end{bmatrix}\succeq 0
+\end{aligned}
+\]
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver               | Status  | Objective     | Rel Err   | Wall Time |
+|----------------------+---------+---------------+-----------+-----------|
+| pounce               | optimal | -2.1245040185 | -         | 0.0042s   |
+| cvxpy/CLARABEL       | optimal | -2.1245040181 | 1.66e-10  | 0.0116s   |
+| Moré-Sorensen (closed form) | -   | -2.1245040322 | 6.46e-09  | -         |
+
+Known optimal: -2.1245040322 (secular equation root $\lambda^*=3.0322476$,
+$x^*=[-0.24800065,-0.96875987]$).
+
+pounce's recovered $x^*=[-0.24802919,-0.96875255]$ matches the closed-form
+minimizer to $x_\infty\text{-err}=2.85\times 10^{-5}$. The recovered
+moment matrix $X_p$ is nearly rank-1
+($\|X_p - x_px_p^T\|_F = 1.17\times10^{-8}$), confirming the relaxation was
+solved to the tight (rank-1) face, not merely to a loose SDP bound.
+
+* Cross-check / Verification
+
+- **cvxpy/CLARABEL** solves the byte-for-byte identical SDP (same moment
+  matrix, same trace constraint) via an independent conic solver: agrees
+  with pounce to 1.66e-10 relative objective error.
+- **Moré-Sorensen secular equation**: for diagonal $B$, $x(\lambda) =
+  -(B+\lambda I)^{-1}g$ and $\|x(\lambda)\|=\Delta$ is solved by
+  `scipy.optimize.brentq` over $\lambda > -\lambda_{\min}(B) = 2$ (the
+  standard, non-hard case, since $g$ has nonzero component along both
+  eigenvectors of $B$). This is a closed-form numerical procedure
+  independent of any SDP/conic solver.
+- The recovered moment matrix's minimum eigenvalue is
+  $-1.69\times10^{-9}$ (PSD to solver tolerance) and $\operatorname{rank1\_gap}=1.17\times10^{-8}$,
+  directly confirming the S-lemma's tightness guarantee held numerically,
+  not just that the objective happened to match.
+
+* Verdict
+PASS — pounce's PSD-cone solve of the Shor SDP relaxation recovers the
+exact global optimum of the underlying *nonconvex* (indefinite-Hessian)
+trust-region subproblem, verified against an independent conic solver
+(cvxpy/CLARABEL, 1.66e-10) and an independent closed-form root-finding
+oracle (Moré-Sorensen secular equation, 6.46e-09), with the relaxation
+confirmed numerically tight (rank-1 recovery, PSD certificate). No
+discrepancy found.
