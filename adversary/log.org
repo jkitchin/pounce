@@ -25,6 +25,22 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
 * Problem Index
+** [2026-08-04] Shared-CSE (.nl V-segment) constraint evaluation (nlp/defined-variables) - PASS
+:PROPERTIES:
+:FAMILY: nlp
+:SOURCE: Hand-built adversarial models targeting PR #480/#481; analytic optima + ipopt 3.14.19 on the identical .nl
+:KNOWN_OPTIMAL: 0.5 / 0.25 / 0.5 / 0.25 (five models)
+:POUNCE_OBJECTIVE: 0.4999999975 / 0.2499999999 / 0.4999999975 / 0.2500000012
+:POUNCE_STATUS: SolveSucceeded (4), InvalidNumberDetected (1, by construction)
+:POUNCE_TIME: <0.05s each
+:ORACLE: ipopt 3.14.19 on the identical .nl + pounce verify + analytic optima
+:ORACLE_OBJECTIVE: 0.49999999749608903 (converged on 1 of 5; diverged on the 3 deliberately rank-deficient models)
+:ORACLE_TIME: <0.05s each
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-04_nlp_cse_prelude.org]]
+:COVERAGE_TARGET: crates/pounce-nl/src/nl_tape.rs, nl_reader.rs - first adversary probe ever to drive the .nl tape path (0 of 231 prior entries)
+:END:
+
 # Newest entries appended below by the agent (step 7 of the workflow).
 
 ** [2026-06-09] Hock-Schittkowski 71 (nlp/ineq+eq+bounded) - FAIL

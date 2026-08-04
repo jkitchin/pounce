@@ -1,0 +1,130 @@
+#+TITLE: Adversary Run: Shared-CSE (.nl V-segment) Constraint Evaluation
+#+DATE: <2026-08-04>
+
+* Problem
+:PROPERTIES:
+:FAMILY: nlp
+:CLASS: defined variables / common subexpressions, via .nl + CLI
+:SOURCE: Hand-built adversarial models targeting PR #480 / #481 (merged 3930e91e, 53c8f19b). Analytic optima derived below; `ipopt` 3.14.19 reading the identical .nl as independent oracle.
+:KNOWN_OPTIMAL: per-model, see table
+:N_VARIABLES: 3 each
+:N_CONSTRAINTS: 3 each
+:SELECTED_BY: topic-guidance (the two changes merged this session)
+:COVERAGE_TARGET: crates/pounce-nl/src/nl_tape.rs, nl_reader.rs — the .nl tape path, which 0 of the log's 231 prior entries had ever exercised
+:END:
+
+Five models, each a 3-variable NLP whose constraints reference `.nl` *defined
+variables* (`V` segments), chosen so that a specific branch of the new
+shared-CSE prelude decides the answer.
+
+| model | what it attacks |
+|-------+-----------------|
+| =nested_cse= | =V4 = V3^2= where =V3 = x0+x1=; both shared. Wrong prelude ordering silently produces garbage. |
+| =promotion_boundary= | A CSE referenced by exactly *two* summands (promoted, the `>=2` threshold) against the same mathematics referenced *once* (inlined). |
+| =minlist_in_shared_cse= | =o11= min-list buried inside a *shared* CSE body — an opcode the hybrid builder *panics* on. `hybrid_supported` must descend through the `Cse` payload. |
+| =range_and_equality= | PR #481's new loop: a range row (both bounds) and an equality row. |
+| =domain_error_in_shared_cse= | =log(V3)= with =V3 < 0= at x0 — NaN reached *through* the prelude. |
+
+** Oracle strategy
+
+A hand-written =.nl= is at least as likely to be wrong as the solver, so three
+independent signals:
+
+1. =ipopt= 3.14.19 reads the *identical* =.nl=.
+2. Every model is emitted *twice* — once with =V= segments (hybrid path), once
+   with the bodies inlined (flat path), mathematically identical. pounce must
+   agree with itself across the two encodings. *This is the discriminator*: a
+   disagreement here indicts PR #480 specifically; a disagreement with ipopt on
+   *both* encodings indicts the probe.
+3. =pounce verify= re-checks the claimed solution against the canonical =.nl=.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| model                      | pounce   | obj          | known  | verify   | CSE==inlined |
+|----------------------------+----------+--------------+--------+----------+--------------|
+| nested_cse                 | Succeeded| 0.4999999975 | 0.5    | VERIFIED | exact        |
+| promotion_boundary         | Succeeded| 0.2499999999 | 0.25   | VERIFIED | exact        |
+| minlist_in_shared_cse      | Succeeded| 0.4999999975 | 0.5    | VERIFIED | n/a          |
+| range_and_equality         | Succeeded| 0.2500000012 | 0.25   | VERIFIED | n/a          |
+| domain_error_in_shared_cse | InvalidNumberDetected | — | (abort) | n/a | identical status |
+
+Analytic optima:
+- =promotion_boundary=: min x2 s.t. x2 >= 0.25 → *0.25*.
+- =minlist_in_shared_cse=: min x2 s.t. 0.5 <= x2 <= 3, min(x0,x1)^2 >= 0.25 → *0.5*.
+- =range_and_equality=: min x2 s.t. (x0+x1)·x2 = 0.5, 1 <= (x0+x1)^2 <= 4, x2 >= 0.2;
+  largest feasible t = x0+x1 = 2 → x2 = *0.25*.
+- =nested_cse=: cross-checked against a *converged* ipopt on the same file.
+
+*pounce solved every model. On three of the five, =ipopt= did not converge* —
+they are deliberately degenerate (two rows that are functions of the same
+linear form, so the constraint Jacobian is rank-deficient), which is what makes
+them adversarial. pounce reached the analytic optimum on all of them and
+=pounce verify= accepted every point.
+
+* Cross-check / Verification
+
+- =pounce verify=: exit 0 (VERIFIED) on all four solvable models, checked against
+  pounce's own =.sol= (see the probe-bug note below).
+- =nested_cse= is the sharpest result: pounce(CSE) = pounce(inlined) =
+  ipopt(CSE) = ipopt(inlined) = 0.49999999749608903, *all four identical to
+  full precision*, and the =inf_pr= column matched ipopt's on *8/8* iterations
+  — direct confirmation of PR #481 on a converging model.
+- =minlist_in_shared_cse= *did not panic*. The gate descends through nested
+  =Cse= payloads and disables the hybrid path for the whole constraint block,
+  which is the crash this probe was built to provoke.
+- =domain_error_in_shared_cse=: both encodings abort with the same
+  =InvalidNumberDetected=. The prelude neither swallows nor reorders the NaN.
+
+** Four bugs found — all four in this probe, none in pounce
+
+Recorded because they are the interesting part of the run:
+
+1. *Header under-declared ranges/equalities.* Line 2 of the =.nl= hard-coded
+   `0 ranges, 0 eqns` while the =r= segment emitted `0 lo hi` / `4 v` rows. ASL
+   sizes its arrays from the header. Fixed → =range_and_equality= and
+   =minlist= went from garbage to correct.
+2. *=run_ipopt= clobbered pounce's =.sol=.* Both write =<stub>.sol=; ipopt ran
+   second, so =verify= was checking *ipopt's* non-converged point. The tell was
+   in verify's own output — `claimed solve_result_num: 400` (max-iterations)
+   and an objective exactly equal to ipopt's. Every "REJECTED" was this.
+3. *Scoring against a diverged oracle.* Comparing objectives to an ipopt run
+   that returned `EXIT: Maximum Iterations` is meaningless; switched to the
+   analytic optimum with the oracle's non-convergence reported explicitly.
+4. *Contradictory assertions on the NaN probe.* It starts where `log(-1)` is
+   NaN by construction, then asserted convergence. The real contract is
+   *parity of the abort* across encodings.
+
+* Verdict
+
+*PASS* — no defect found in PR #480 or #481. The shared-CSE prelude produces
+bit-identical results to the flat tape on nested CSEs, at the promotion
+threshold, and on NaN propagation; the opcode gate correctly disables the path
+for an unsupported opcode buried in a shared body rather than panicking; and
+the new =inf_pr= measure matched ipopt on every iteration of the one model
+where both solvers converge. The four failures this run surfaced were all in
+the probe, which is the expected ratio.
+
+* Observability gap (not a defect, worth recording)
+
+=con_hybrid= is a *transparent fallback*: when it is disabled the answers are
+unchanged, only slower. There is no user-visible signal — no log line, no
+statistic, no JSON field — saying whether a given solve used the prelude or the
+flat tapes. These probes can prove the two paths *agree*; they cannot prove the
+hybrid path *engaged*.
+
+That is the exact shape of the =set_kkt_schur_block()= no-op this skill cites:
+a feature that silently falls back, with tests that pass either way. On
+=robot_a= engagement is inferable from the 22% speedup, but on any small model
+it is unobservable. A counter or a =[tape stats]=-style line reporting prelude
+size would make it assertable.
+
+* Coverage effect
+
+Not coverage-driven selection (topic guidance pinned the target), but worth
+noting: =crates/pounce-nl/src/nl_tape.rs= and =nl_reader.rs= had *zero* prior
+adversary coverage — none of the 231 logged entries drove the =.nl= tape path
+at all, because the family's usual entry point (=pounce.minimize=) uses Python
+callbacks and never builds a tape. These five probes are the first.
