@@ -1,0 +1,53 @@
+#+TITLE: Adversary Run: Auto-Routing on a Separable Box QP
+#+DATE: 2026-08-04
+
+* Problem
+:PROPERTIES:
+:FAMILY: autoroute
+:CLASS: pure box-constrained (diagonal) QP, no general linear constraints
+:SOURCE: constructed problem, separable per-coordinate closed form
+:KNOWN_OPTIMAL: -45.0
+:N_VARIABLES: 5
+:N_CONSTRAINTS: 0 general (bounds only: lb=-1, ub=5 each coordinate)
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Diagonal QP with only box bounds (no ``A``/``G`` rows at all):
+$\min \sum_i \tfrac12 d_i x_i^2 + c_i x_i$ s.t. $-1 \le x_i \le 5$,
+$d=(2,3,1,4,2)$, $c=(-6,3,-1,20,-8)$. Separable closed form:
+$x_i^\star = \mathrm{clip}(-c_i/d_i, -1, 5)$, giving $x^\star=(3,-1,1,-1,4)$
+(2 of 5 coordinates bound-active at lb), $f^\star=-45.0$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                       | Status  | Objective      | Rel Err  | Wall Time |
+|-------------------------------+---------+----------------+----------+-----------|
+| pounce.minimize (auto)        | success | -44.9999999996 | 8.02e-11 | 0.0074s   |
+| pounce.minimize (forced nlp)  | success | -45.0000000159 | 3.53e-09 | 0.0621s   |
+| pounce.solve_qp (independent) | optimal | -44.9999999997 | -        | -         |
+
+Known optimal: -45.0
+
+``routed_solver=qp-ipm``, ``problem_class=convex_qp`` -- auto-routing
+correctly identified this as a QP and used the specialized IPM path rather
+than falling through to the general NLP path.
+
+* Cross-check / Verification
+
+- ``auto`` vs. forced ``nlp``: x inf-norm diff 9.69e-06 (routing-transparency
+  contract holds).
+- ``auto`` vs. closed form: x inf-norm diff 2.71e-05.
+- ``auto`` vs. independent ``solve_qp`` entry point: x inf-norm diff 9.42e-11.
+- Objective vs. known optimal: auto 8.02e-11, forced-nlp 3.53e-09.
+
+* Verdict
+
+PASS. The auto-router selects the specialized QP path (not a conservative
+NLP fallback) for a bounds-only box QP, and the forced-NLP path agrees to
+tolerance -- routing-transparency contract confirmed on a problem shape
+(zero general constraint rows, mixed bound-active/inactive coordinates) not
+previously exercised in this family's log.

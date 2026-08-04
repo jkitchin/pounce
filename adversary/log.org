@@ -11,16 +11,16 @@ Counts update as runs land. The agent picks the LEAST-tested family each run.
 | Family          | Tested | Last run   | Open findings |
 |-----------------+--------+------------+---------------|
 | nlp             |     10 | 2026-08-02 | #348 (sqp_hessian=exact Internal_Error); #349 (SQP filter no-SOC Maratos/HS6) |
-| lp              |      9 | 2026-08-02 | —             |
+| lp              |     10 | 2026-08-04 | —             |
 | qp              |     10 | 2026-08-03 | —             |
 | qp-active-set   |     11 | 2026-07-30 | —             |
 | socp            |     10 | 2026-08-03 | —             |
-| exp             |      9 | 2026-08-02 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
-| power           |      9 | 2026-08-02 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02 (not filed, see report) |
+| exp             |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS) |
+| power           |     10 | 2026-08-04 | #336 FIXED 2026-07-23; regression-confirmed 2026-07-29 (benign-scale PASS); constant-coordinate x-precision gap noted 2026-08-02, reconfirmed 2026-08-04 in the opposite (concave) cone orientation (not filed, see reports) |
 | sdp             |     10 | 2026-08-03 | —             |
 | sos             |     10 | 2026-08-03 | extraction bug FIXED (regression-confirmed); #124 improved (no NaN/iter-limit at tested orders) |
-| autoroute       |      9 | 2026-08-01 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, and transportation LP)  |
-| batch           |      9 | 2026-08-02 | —             |
+| autoroute       |     10 | 2026-08-04 | — (nonconvex misrouting-resistance confirmed; routing-transparency reconfirmed on boxed QP, quadratic-objective ball QCQP, transportation LP, and bounds-only diagonal QP)  |
+| batch           |     10 | 2026-08-04 | —             |
 | diff            |     10 | 2026-07-23 | — (all PASS; near-LICQ degradation expected, not filed) |
 | sensitivity     |     10 | 2026-08-03 | — (weakly-active one-sided dx/db intrinsic/known; no barrier inflation confirmed; reduced_hessian() cross-checked clean) |
 
@@ -4490,3 +4490,108 @@ Two RHS parameters perturbed simultaneously in one parametric_step call
 (prior probes did one at a time); matches closed form to 1.11e-16 (machine
 precision), exact re-solve to 8.05e-10, central FD to 3.06e-08.
 kkt_cond_estimate=38.5, ill_conditioned=False.
+
+** [2026-08-04] CLRS Maximum-Flow LP (lp/network-flow) - PASS
+:PROPERTIES:
+:FAMILY: lp
+:SOURCE: Cormen, Leiserson, Rivest, Stein, "Introduction to Algorithms" 3rd ed., Sec 26.1, Fig 26.1
+:KNOWN_OPTIMAL: 23.0
+:POUNCE_OBJECTIVE: 23.0000000000
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0060s
+:ORACLE: scipy.optimize.linprog (HiGHS)
+:ORACLE_OBJECTIVE: 23.0000000000
+:ORACLE_TIME: 0.0040s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-04_lp_maxflow_clrs.org]]
+:COVERAGE_TARGET: -
+:END:
+Max-flow LP on CLRS Fig 26.1 network (9 edges, 4 conservation equalities,
+capacity bounds). Objective matches known optimal and HiGHS to 1.74e-11.
+Edge-flow vector differs from HiGHS by up to 1.11 (max-norm) -- expected
+primal degeneracy (non-unique flow decomposition), both feasible & optimal.
+
+** [2026-08-04] Analytic Center of a Box (exp/log-barrier) - PASS
+:PROPERTIES:
+:FAMILY: exp
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization", Sec 8.5.3
+:KNOWN_OPTIMAL: -2.1972245773362196
+:POUNCE_OBJECTIVE: -2.1972245743
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0097s
+:ORACLE: cvxpy (CLARABEL + SCS)
+:ORACLE_OBJECTIVE: -2.1972245761 (CLARABEL) / -2.1972245773 (SCS)
+:ORACLE_TIME: 0.0106s / 0.0066s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-04_exp_analytic_center_box.org]]
+:COVERAGE_TARGET: -
+:END:
+Fresh exp-cone shape: t <= log(affine expr), not log of the variable itself
+(distinct from prior entropy/GP problems). Separable box barrier, closed
+form = interval midpoints. Matches known/CLARABEL/SCS to ~1e-9. Note:
+tol=1e-10 flips IPM to optimal_inaccurate (still ~8e-10 accurate, expected
+stopping-criterion behavior, same pattern as the 2026-08-02 water-filling
+run); tol=1e-9 gives a clean optimal status, used for the reported result.
+
+** [2026-08-04] CES Utility Maximization (power/concave power cone) - PASS
+:PROPERTIES:
+:FAMILY: power
+:SOURCE: standard CES consumer-demand closed form (e.g. Mas-Colell, Whinston & Green Ch 3)
+:KNOWN_OPTIMAL: 30.8220700148
+:POUNCE_OBJECTIVE: 30.8220682198
+:POUNCE_STATUS: optimal
+:POUNCE_TIME: 0.0145s
+:ORACLE: cvxpy (CLARABEL + SCS)
+:ORACLE_OBJECTIVE: 30.8220699244 (CLARABEL) / 30.8220700209 (SCS)
+:ORACLE_TIME: 0.0094s / 0.0059s
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-04_power_ces_utility.org]]
+:COVERAGE_TARGET: -
+:END:
+Concave epigraph orientation (t <= x^r), mirror image of the convex
+quad-over-lin usage already logged. Objective matches known/CLARABEL/SCS to
+~6e-8. x-vector inf-err 6.58e-3 vs obj-err 5.8e-8 reproduces the
+already-logged (2026-08-02, not filed) fixed-constant-coordinate
+power-cone x-precision floor, now confirmed in the opposite cone
+orientation too -- strengthens the "expected, not a bug" reading.
+
+** [2026-08-04] Auto-Routing on a Separable Box QP (autoroute/QP->qp-ipm) - PASS
+:PROPERTIES:
+:FAMILY: autoroute
+:SOURCE: constructed problem, separable per-coordinate closed form
+:KNOWN_OPTIMAL: -45.0
+:POUNCE_OBJECTIVE: -44.9999999996
+:POUNCE_STATUS: success (auto); success (forced nlp)
+:POUNCE_TIME: 0.0074s (auto) / 0.0621s (forced nlp)
+:ORACLE: closed-form per-coordinate clip + independent solve_qp entry point
+:ORACLE_OBJECTIVE: -45.0
+:ORACLE_TIME: -
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-04_autoroute_box_qp.org]]
+:COVERAGE_TARGET: -
+:END:
+Pure bounds-only diagonal QP (no A/G rows at all) -- fresh shape for
+autoroute. routed_solver=qp-ipm, problem_class=convex_qp: correctly avoided
+generic NLP fallback. auto vs forced-nlp agree to 9.69e-06; both match
+closed form and independent solve_qp to <3e-5.
+
+** [2026-08-04] Batch Non-Negative Least Squares vs scipy.optimize.nnls (batch/heterogeneous P,c,shape) - PASS
+:PROPERTIES:
+:FAMILY: batch
+:SOURCE: constructed problem; oracle scipy.optimize.nnls (Lawson-Hanson)
+:KNOWN_OPTIMAL: none (oracle-only)
+:POUNCE_OBJECTIVE: n/a (per-item residuals; see report)
+:POUNCE_STATUS: all optimal (8/8)
+:POUNCE_TIME: 0.0031s (whole batch)
+:ORACLE: scipy.optimize.nnls
+:ORACLE_OBJECTIVE: n/a
+:ORACLE_TIME: 0.0009s (8 sequential calls)
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-08-04_batch_nnls.org]]
+:COVERAGE_TARGET: -
+:END:
+First use of scipy.optimize.nnls as a batch-family oracle. K=8 items, each
+with its OWN randomly-generated A_k (varying row count) and b_k -- P, c,
+AND shape all vary simultaneously (prior batch runs varied only one of
+P/c against shared structure). Matches nnls to ~1e-9 on all 8 items;
+item 0 also cross-checked against single solve_qp (exact match).

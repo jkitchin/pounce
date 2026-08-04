@@ -1,0 +1,49 @@
+#+TITLE: Adversary Run: Batch Non-Negative Least Squares vs scipy.optimize.nnls
+#+DATE: 2026-08-04
+
+* Problem
+:PROPERTIES:
+:FAMILY: batch
+:CLASS: solve_qp_batch, box-constrained (nonneg) least squares, heterogeneous items
+:SOURCE: constructed problem; oracle is scipy.optimize.nnls (Lawson-Hanson active-set NNLS)
+:KNOWN_OPTIMAL: none (oracle-only; no closed form for random dense NNLS)
+:N_VARIABLES: 4 per item, K=8 items
+:N_CONSTRAINTS: lb=0 per item; each item has its own randomly-generated A_k (5-8 rows) and b_k
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Batch of $K=8$ NNLS problems, $\min_x \|A_k x - b_k\|_2^2$ s.t. $x\ge0$,
+posed as QPs ($P_k = 2A_k^\top A_k$, $c_k=-2A_k^\top b_k$). Each item has its
+own independently-drawn $A_k$ (varying row count 5-8) and $b_k$ -- i.e. both
+$P$ and $c$ vary across the batch, and shapes are heterogeneous.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver                    | Status         | Max resid err vs oracle | Max x inf-err | Wall Time |
+|----------------------------+----------------+--------------------------+----------------+-----------|
+| pounce (solve_qp_batch)    | all optimal    | 3.09e-10                 | 7.92e-09       | 0.0031s   |
+| scipy.optimize.nnls (x8)   | -              | -                        | -              | 0.0009s   |
+
+All 8 items' residuals and solution vectors match scipy's Lawson-Hanson NNLS
+solver to numerical precision.
+
+* Cross-check / Verification
+
+- Per-item residual $\|A_kx-b_k\|_2^2$: pounce vs. scipy.optimize.nnls,
+  max relative error 3.09e-10 across all 8 items.
+- Per-item $x$ vector: max inf-norm error 7.92e-09 across all 8 items.
+- Item 0 additionally cross-checked against the single ``solve_qp`` entry
+  point: batch-vs-single x inf-norm error 0.00e+00.
+
+* Verdict
+
+PASS. This is the first use of ``scipy.optimize.nnls`` as an oracle for the
+``batch`` family, and the first batch test with fully heterogeneous
+per-item $P$, $c$, AND shape (varying row counts) simultaneously (prior
+batch runs varied $c$ alone or $P$ alone against a shared constraint
+structure). ``solve_qp_batch`` matches the independent NNLS algorithm to
+~1e-9 across all items.

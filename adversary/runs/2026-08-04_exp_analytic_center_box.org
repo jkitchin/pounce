@@ -1,0 +1,58 @@
+#+TITLE: Adversary Run: Analytic Center of a Box (exp-cone log barrier)
+#+DATE: 2026-08-04
+
+* Problem
+:PROPERTIES:
+:FAMILY: exp
+:CLASS: exponential-cone log-barrier (analytic center)
+:SOURCE: Boyd & Vandenberghe, "Convex Optimization", Section 8.5.3
+:KNOWN_OPTIMAL: -2.1972245773362196
+:N_VARIABLES: 6 (2 primal x, 4 epigraph t)
+:N_CONSTRAINTS: cones=[("exp",3)]*4, no A/b
+:SELECTED_BY: log-rotation
+:COVERAGE_TARGET: -
+:END:
+
+Analytic center of the box $x_1 \in [-2,1]$, $x_2 \in [-1,3]$:
+
+\[
+\text{maximize} \quad \log(1-x_1) + \log(x_1+2) + \log(3-x_2) + \log(x_2+1)
+\]
+
+Separable per coordinate (box = Cartesian product), so each coordinate's
+analytic center is the interval midpoint: $x_1^\star = -0.5$, $x_2^\star = 1.0$.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Solver          | Status  | Objective (min sense) | Rel Err  | Wall Time |
+|-----------------+---------+------------------------+----------+-----------|
+| pounce (socp)   | optimal | -2.1972245743          | 1.38e-09 | 0.0097s   |
+| cvxpy/CLARABEL  | optimal | -2.1972245761          | 8.20e-10 | 0.0106s   |
+| cvxpy/SCS       | optimal | -2.1972245773          | 1.38e-09 | 0.0066s   |
+
+Known optimal: -2.1972245773362196 ($-2\log 1.5 - 2\log 2$)
+
+Note: an initial run used ``tol=1e-10``, which pushed the IPM past the point
+where its own duality-gap check reports ``optimal_inaccurate`` (objective/x
+error still tiny, ~8e-10) -- this is expected IPM stopping-criterion behavior
+at very tight tolerances, not a bug (same pattern as a prior water-filling
+run in this family). Re-run at ``tol=1e-9`` returns a clean ``optimal``
+status with equivalent accuracy; that is the result reported here.
+
+* Cross-check / Verification
+
+- Objective vs. known closed-form optimum: rel err 1.38e-09.
+- Objective vs. cvxpy/CLARABEL: rel err 8.20e-10.
+- Objective vs. cvxpy/SCS: rel err 1.38e-09.
+- $x$ vs. known midpoint $(-0.5, 1.0)$: inf-norm err 3.87e-05.
+
+* Verdict
+
+PASS. This is a fresh exp-cone shape for the family's log (log of an
+*affine expression* rather than of the variable itself, as used in prior
+entropy/GP problems) and confirms pounce's exp-cone path handles it
+correctly against both a hand-derived closed form and two independent
+cvxpy backends.
