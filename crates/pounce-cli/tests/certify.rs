@@ -246,3 +246,76 @@ fn certify_routes_an_unbounded_solve_to_a_recession_certificate() {
     assert!(cert["witnesses"]["recession"]["d"].is_array());
     assert!(cert["witnesses"].get("farkas").is_none());
 }
+
+#[test]
+fn certify_routes_a_nonconvex_polynomial_to_an_sos_lower_bound() {
+    // x⁴ − 2x² + 2 has two global minima at x = ±1 and a local max at 0, so
+    // the f64 solve lands on ONE of them and can say nothing global. The SOS
+    // route proves 1 ≤ p(x) for every real x — a weaker claim than global-min,
+    // but one that holds without trusting the solver's basin.
+    let sol = solve_to_sol("certify_sos");
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_sos.nl"))
+        .arg(&sol)
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "certify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    assert_eq!(cert["verdict"], "global-lower-bound");
+    assert_eq!(cert["problem_class"], "sos-poly");
+    // The SDP's float bound is ~1 − 1e-9; the emitted γ is exactly 1.
+    assert_eq!(cert["bound"], serde_json::json!({"num":"1","den":"1"}));
+    assert_eq!(cert["tolerance"], serde_json::json!({"num":"0","den":"1"}));
+    // A bound is not a claim about any point, and the QP half is absent.
+    assert!(
+        cert.get("candidate").is_none(),
+        "a lower-bound certificate names no minimizer"
+    );
+    assert!(cert["problem"].get("objective").is_none());
+    assert!(cert["witnesses"].get("duals").is_none());
+
+    // p − γ = m(x)ᵀ G m(x) over the basis {1, x, x²}, with G = LDLᵀ exact.
+    let sos = &cert["witnesses"]["sos"][0];
+    assert_eq!(sos["monomials"], serde_json::json!([[0], [1], [2]]));
+    assert!(sos["gram"]["symmetric"].as_bool().unwrap());
+    assert!(sos["L"]["unit_lower"].as_bool().unwrap());
+    // p − 1 = (x² − 1)², so G has rank one: D = (1, 0, 0). Nonneg, exactly.
+    assert_eq!(
+        sos["D"],
+        serde_json::json!([
+            {"num":"1","den":"1"},
+            {"num":"0","den":"1"},
+            {"num":"0","den":"1"}
+        ])
+    );
+}
+
+#[test]
+fn cert_verify_accepts_the_sos_certificate() {
+    // Same re-derivation path as the QP case, but through sos_problem_block:
+    // the consumer rebuilds the polynomial from the .nl and must land on the
+    // identical canonical problem the producer signed.
+    let out = cert_verify("certify_sos.nl", "certify_sos.cert.json");
+    assert!(
+        out.status.success(),
+        "real SOS cert should verify against its .nl: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cert_verify_rejects_an_sos_certificate_against_the_wrong_nl() {
+    let out = cert_verify("certify_qp.nl", "certify_sos.cert.json");
+    assert!(
+        !out.status.success(),
+        "SOS cert for a different .nl must be rejected"
+    );
+    assert_eq!(out.status.code(), Some(2));
+}

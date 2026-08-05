@@ -50,6 +50,7 @@ FIXTURES=(
   "certify_lp    PounceLean.CertifyLP    global_min"  # LP: Q = 0, optimum 4/3 (not an f64)
   "certify_infeasible PounceLean.CertifyInfeasible infeasible"  # no solution; Farkas ray
   "certify_unbounded  PounceLean.CertifyUnbounded  unbounded"   # unbounded below; recession
+  "certify_sos        PounceLean.CertifySOS        global_lb"   # nonconvex quartic; SOS bound
 )
 
 tmp="$(mktemp -d)"
@@ -231,6 +232,10 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
     "certify_qp_forged_dual       PounceLean.Generated.ForgedDual  KKT dual (breaks stationarity)"
     "certify_qp_forged_psd        PounceLean.Generated.ForgedPsd   objective Hessian (Q indefinite)"
     "certify_infeasible_forged    PounceLean.Generated.ForgedFarkas Farkas ray (breaks Aᵀy = 0)"
+    # The SOS verdict rests on TWO obligations, so it needs two forgeries: one
+    # each must be able to reject on its own.
+    "certify_sos_forged_bound     PounceLean.Generated.ForgedSosBound bound γ (identity no longer closes)"
+    "certify_sos_forged_psd       PounceLean.Generated.ForgedSosPsd   Gram (satisfies the identity but is indefinite)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
   for entry in "${NEGATIVE_FIXTURES[@]}"; do

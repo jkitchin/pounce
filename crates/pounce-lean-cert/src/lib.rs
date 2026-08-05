@@ -23,6 +23,7 @@
 //! * [`emit`] — the neutral-`f64` QP → certificate driver + exact self-check gate.
 
 pub mod emit;
+pub mod emit_sos;
 pub mod ldlt;
 pub mod linalg;
 pub mod rational;
@@ -35,6 +36,7 @@ pub use emit::{
     CertMeta, EmitError, LinearConstraint, QpInput, canonical_problem, emit_certificate,
     emit_infeasible_certificate, emit_unbounded_certificate, problem_block,
 };
+pub use emit_sos::{SosEmitError, SosInput, emit_sos_certificate, sos_problem_block};
 pub use rational::{Bound, Rat, RatError};
 pub use schema::{Certificate, SCHEMA_TAG};
 

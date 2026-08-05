@@ -36,13 +36,11 @@ fn reference_cert_key_values() {
     assert_eq!(cert.tolerance, Rat::zero());
 
     // Objective: ½xᵀQx with Q = diag(2,2), so half_quadratic and Q[0,0]=Q[1,1]=2.
-    assert!(cert.problem.objective.half_quadratic);
-    assert_eq!(cert.problem.objective.q.symmetric, Some(true));
-    assert_eq!(cert.problem.objective.q.entries.len(), 2);
-    assert_eq!(
-        cert.problem.objective.q.entries[0].val,
-        Rat::from_f64(2.0).unwrap()
-    );
+    let obj = cert.problem.objective.as_ref().unwrap();
+    assert!(obj.half_quadratic);
+    assert_eq!(obj.q.symmetric, Some(true));
+    assert_eq!(obj.q.entries.len(), 2);
+    assert_eq!(obj.q.entries[0].val, Rat::from_f64(2.0).unwrap());
 
     // Candidate x* = (1/2, 1/2), objective 1/2 — all lossless from f64.
     assert_eq!(
@@ -61,7 +59,7 @@ fn reference_cert_key_values() {
     // Witnesses: one dual per constraint; LDLᵀ of Q is L = I (no entries), D = (2,2).
     assert_eq!(
         cert.witnesses.duals.as_ref().unwrap().len(),
-        cert.problem.constraints.len()
+        cert.problem.constraint_rows().len()
     );
     assert_eq!(
         cert.witnesses.duals.as_ref().unwrap()[0],

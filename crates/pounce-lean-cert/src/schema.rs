@@ -27,6 +27,10 @@ pub struct Certificate {
     pub verdict: String,
     pub problem_class: String,
     pub tolerance: Rat,
+    /// The certified bound `γ` — `global-lower-bound` only, where the claim is
+    /// `γ ≤ p(x)` for every `x` rather than anything about a point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<Rat>,
     pub binding: Binding,
     pub toolchain: Toolchain,
     pub problem: Problem,
@@ -56,12 +60,58 @@ pub struct Toolchain {
 }
 
 /// The problem over ℚ.
+///
+/// Two mutually exclusive shapes share this block, distinguished by
+/// `problem_class`:
+///
+/// * `qp-convex` — `objective` / `var_bounds` / `constraints`, all present.
+/// * `sos-poly` — `polynomial` alone: a term list for a possibly nonconvex
+///   polynomial over free variables.
+///
+/// The unused half is *absent*, not zero-filled. A zeroed `Q` would not be a
+/// harmless placeholder: [`crate::canonical_problem`] compares problem blocks to
+/// decide whether two certificates concern the same problem, so a quartic
+/// carrying `Q = 0` would assert it is a linear program. Absence is the only
+/// encoding that says nothing rather than something false.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Problem {
     pub n_vars: usize,
-    pub objective: Objective,
-    pub var_bounds: VarBounds,
-    pub constraints: Vec<Constraint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<Objective>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var_bounds: Option<VarBounds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<Vec<Constraint>>,
+    /// The objective as an exact term list — `sos-poly` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polynomial: Option<PolynomialSpec>,
+}
+
+impl Problem {
+    /// Constraint rows of a `qp-convex` problem. An `sos-poly` problem carries
+    /// none — it is a statement about all of `ℝⁿ` — so it reads as empty here
+    /// rather than being a case every caller must handle.
+    pub fn constraint_rows(&self) -> &[Constraint] {
+        self.constraints.as_deref().unwrap_or(&[])
+    }
+}
+
+/// A polynomial as `Σ coeff · x^exponents`, exactly over ℚ.
+///
+/// A *term list*, not an expression tree: it is what the producer already has
+/// (`pounce_convex::sos::Polynomial`), what [`crate::round_gram`] consumes, and
+/// what renders directly to a Lean `def`. An expression tree buys nothing for a
+/// polynomial.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PolynomialSpec {
+    pub terms: Vec<PolyTerm>,
+}
+
+/// One monomial: `coeff · Π xᵢ^exponents[i]`. `exponents` has length `n_vars`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PolyTerm {
+    pub exponents: Vec<usize>,
+    pub coeff: Rat,
 }
 
 /// `f(x) = ½·xᵀQx + cᵀx + constant` when `half_quadratic`, else `xᵀQx + …`.
@@ -117,6 +167,27 @@ pub struct Witnesses {
     /// `unbounded` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recession: Option<Recession>,
+    /// Sum-of-squares blocks witnessing `p(x) − γ = Σ σᵢ(x)` —
+    /// `global-lower-bound` only. v1 emits exactly one (the unconstrained case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sos: Option<Vec<SosBlock>>,
+}
+
+/// One SOS block: `σ(x) = m(x)ᵀ G m(x)` with `G = L·diag(D)·Lᵀ ⪰ 0`.
+///
+/// `gram` is redundant given `L` and `D` — deliberately. The Lean side checks
+/// the polynomial identity against `gram` and PSD-ness against `L`/`D`, and
+/// their agreement is itself a proof obligation, so shipping both lets a
+/// transcription error fail loudly instead of propagating.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SosBlock {
+    /// The monomial lift `m(x)`, as exponent vectors of length `n_vars`.
+    pub monomials: Vec<Vec<usize>>,
+    pub gram: SparseMatrix,
+    #[serde(rename = "L")]
+    pub l: SparseMatrix,
+    #[serde(rename = "D")]
+    pub d: Vec<Rat>,
 }
 
 /// Recession certificate: a feasible `x0` together with a direction `d`

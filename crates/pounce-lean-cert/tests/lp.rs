@@ -68,7 +68,13 @@ fn lp_certifies_through_the_quadratic_path() {
 
     // Q is present but empty: the all-zero matrix.
     assert!(
-        cert.problem.objective.q.entries.is_empty(),
+        cert.problem
+            .objective
+            .as_ref()
+            .unwrap()
+            .q
+            .entries
+            .is_empty(),
         "Q should have no entries for an LP"
     );
 

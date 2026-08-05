@@ -182,12 +182,21 @@ pub fn problem_block(input: &QpInput) -> Result<Problem, EmitError> {
 /// name-insensitive, value-exact over ℚ.
 pub fn canonical_problem(p: &Problem) -> serde_json::Value {
     let mut p = p.clone();
-    p.objective.q.entries.sort_by_key(|e| (e.i, e.j));
-    for c in p.constraints.iter_mut() {
-        c.name = String::new();
+    if let Some(obj) = p.objective.as_mut() {
+        obj.q.entries.sort_by_key(|e| (e.i, e.j));
     }
-    p.constraints
-        .sort_by_cached_key(|c| serde_json::to_string(c).unwrap_or_default());
+    if let Some(cons) = p.constraints.as_mut() {
+        for c in cons.iter_mut() {
+            c.name = String::new();
+        }
+        cons.sort_by_cached_key(|c| serde_json::to_string(c).unwrap_or_default());
+    }
+    // `sos-poly`: a polynomial is its term *set*, so order must not distinguish
+    // two spellings of the same objective. Exponent vectors are unique per term
+    // (the extractor merges like monomials), so they alone are a total key.
+    if let Some(poly) = p.polynomial.as_mut() {
+        poly.terms.sort_by_key(|t| t.exponents.clone());
+    }
     serde_json::to_value(&p).unwrap_or(serde_json::Value::Null)
 }
 
@@ -328,15 +337,16 @@ fn build_problem_view(input: &QpInput) -> Result<ProblemView, EmitError> {
 
     let problem = Problem {
         n_vars: n,
-        objective: Objective {
+        objective: Some(Objective {
             kind: "quadratic".to_string(),
             half_quadratic: input.half_quadratic,
             q: SparseMatrix::symmetric(n, n, q_entries),
             c: c_rat.iter().map(|v| Rat(v.clone())).collect(),
             constant: Rat(constant_rat.clone()),
-        },
-        var_bounds,
-        constraints,
+        }),
+        var_bounds: Some(var_bounds),
+        constraints: Some(constraints),
+        polynomial: None,
     };
 
     Ok(ProblemView {
@@ -374,9 +384,10 @@ pub fn emit_infeasible_certificate(
 
     // Every emitted row must be `a·x ≥ lower`, so the cert's constraint order is
     // exactly the order the Farkas ray indexes.
-    let mut a_rows: Vec<Vec<BigRational>> = Vec::with_capacity(problem.constraints.len());
-    let mut b_vec: Vec<BigRational> = Vec::with_capacity(problem.constraints.len());
-    for con in &problem.constraints {
+    let rows = problem.constraint_rows();
+    let mut a_rows: Vec<Vec<BigRational>> = Vec::with_capacity(rows.len());
+    let mut b_vec: Vec<BigRational> = Vec::with_capacity(rows.len());
+    for con in rows {
         let (Some(lo), None) = (con.lower.finite(), con.upper.finite()) else {
             return Err(EmitError::SelfCheck(
                 "infeasible v1 accepts one-sided `a·x ≥ l` rows only",
@@ -399,6 +410,7 @@ pub fn emit_infeasible_certificate(
         verdict: "infeasible".to_string(),
         problem_class: "qp-convex".to_string(),
         tolerance: Rat(BigRational::zero()),
+        bound: None,
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),
@@ -418,6 +430,7 @@ pub fn emit_infeasible_certificate(
                 y: y.into_iter().map(Rat).collect(),
             }),
             recession: None,
+            sos: None,
         },
     })
 }
@@ -449,7 +462,13 @@ pub fn emit_unbounded_certificate(
     if x_float.len() != n {
         return Err(EmitError::SelfCheck("iterate length != n_vars"));
     }
-    if !problem.objective.q.entries.is_empty() {
+    // `objective` is absent only for `sos-poly`, which never reaches this path
+    // (it has no candidate point and no constraint rows to recess along).
+    let obj = problem
+        .objective
+        .as_ref()
+        .ok_or(EmitError::SelfCheck("unbounded requires a QP objective"))?;
+    if !obj.q.entries.is_empty() {
         return Err(EmitError::SelfCheck(
             "unbounded v1 is the LP slice (Q = 0); nonzero Q needs Q d = 0 refinement",
         ));
@@ -458,7 +477,7 @@ pub fn emit_unbounded_certificate(
     // Every row must be `a·x ≥ lower`, matching the Lean feasible-set encoding.
     let mut a_rows: Vec<Vec<BigRational>> = Vec::new();
     let mut b_vec: Vec<BigRational> = Vec::new();
-    for con in &problem.constraints {
+    for con in problem.constraint_rows() {
         let (Some(lo), None) = (con.lower.finite(), con.upper.finite()) else {
             return Err(EmitError::SelfCheck(
                 "unbounded v1 accepts one-sided `a·x ≥ l` rows only",
@@ -472,12 +491,7 @@ pub fn emit_unbounded_certificate(
         .iter()
         .map(|&x| Rat::from_f64(x).map(|r| r.inner().clone()))
         .collect::<Result<_, _>>()?;
-    let c: Vec<BigRational> = problem
-        .objective
-        .c
-        .iter()
-        .map(|r| r.inner().clone())
-        .collect();
+    let c: Vec<BigRational> = obj.c.iter().map(|r| r.inner().clone()).collect();
 
     // --- exact checks: the iterate is feasible AND a recession direction -----
     for (i, row) in a_rows.iter().enumerate() {
@@ -499,6 +513,7 @@ pub fn emit_unbounded_certificate(
         verdict: "unbounded".to_string(),
         problem_class: "qp-convex".to_string(),
         tolerance: Rat(BigRational::zero()),
+        bound: None,
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),
@@ -519,6 +534,7 @@ pub fn emit_unbounded_certificate(
                 x0: v.iter().cloned().map(Rat).collect(),
                 d: v.into_iter().map(Rat).collect(),
             }),
+            sos: None,
         },
     })
 }
@@ -655,6 +671,7 @@ pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate,
         problem_class: "qp-convex".to_string(),
         // Exact slice: feasibility holds with zero residual.
         tolerance: Rat::zero(),
+        bound: None,
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),
@@ -679,6 +696,7 @@ pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate,
             active_set: Some(active_set),
             farkas: None,
             recession: None,
+            sos: None,
         },
     };
 

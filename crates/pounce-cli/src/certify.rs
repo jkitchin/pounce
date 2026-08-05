@@ -12,7 +12,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use pounce_convex::sos::{PolyProblem, Polynomial, sos_constrained_lower_bound_gram, sos_opts};
 use pounce_lean_cert::emit::{CertMeta, LinearConstraint, QpInput};
+use pounce_lean_cert::emit_sos::{SosInput, emit_sos_certificate, sos_problem_block};
 use pounce_lean_cert::{
     Certificate, canonical_problem, emit_certificate, emit_infeasible_certificate,
     emit_unbounded_certificate, problem_block, to_canonical_json,
@@ -20,6 +22,7 @@ use pounce_lean_cert::{
 use pounce_nl::nl_reader;
 
 use crate::dispatch::analyze_quadratic_full;
+use crate::poly_extract::{PolyObjective, extract_poly_objective};
 use crate::verify::{parse_sol, sha256};
 
 /// `nl_reader` encodes "no bound" as the AMPL sentinel `±1e19` (see
@@ -42,10 +45,20 @@ usage: pounce certify <problem.nl> <claim.sol> [options]
 Emit an exact-rational pounce.lean-cert/v1 certificate that the pounce-lean
 repo can turn into a kernel-checked Lean proof of global optimality.
 
-Supported slice (v1): convex QP (quadratic objective, PSD Hessian),
-minimize, linear constraints (one-sided, two-sided ranges, or equalities),
-and variable bounds (one-sided, box, or fixed). Nonconvex / maximize /
-nonlinear inputs are refused (exit 2).
+Supported slices (v1), chosen automatically from the .nl:
+
+  * convex QP -> verdict `global-min`: quadratic objective (PSD Hessian),
+    minimize, linear constraints (one-sided, two-sided ranges, or
+    equalities), and variable bounds (one-sided, box, or fixed).
+
+  * unconstrained polynomial -> verdict `global-lower-bound`: an objective
+    of degree > 2 over free variables. POUNCE solves an SOS relaxation and
+    certifies an exact rational bound `g <= p(x)` for every x -- with no
+    convexity assumed, which is the point: a KKT argument cannot establish
+    global optimality for a nonconvex polynomial.
+
+Maximize, non-polynomial objectives, and constrained higher-degree problems
+are refused (exit 2).
 
 options:
   -o, --output <path>     write the certificate JSON here (default: stdout)
@@ -210,6 +223,67 @@ fn nl_to_qp_input(
     })
 }
 
+/// Decide whether this `.nl` belongs on the SOS slice rather than the QP one.
+///
+/// The test is degree, not failure-to-be-a-QP: a degree ≤ 2 objective stays on
+/// the QP path even though the SOS machinery could also handle it. That path
+/// proves strictly more — it exhibits a minimizer and certifies it *is* the
+/// minimum, where SOS only bounds it — so falling back to SOS would silently
+/// downgrade the claim for every convex QP whose emitter happened to hiccup.
+/// Routing on a property of the problem keeps which theorem you get
+/// predictable.
+///
+/// Returns `None` (rather than an error) whenever the problem is not on the SOS
+/// slice, so the caller can fall through to the QP path and report *its*
+/// diagnosis — which is the relevant one for, say, a nonlinear constraint.
+fn sos_slice(prob: &nl_reader::NlProblem) -> Option<PolyObjective> {
+    let po = extract_poly_objective(prob).ok()?;
+    (po.degree() > 2).then_some(po)
+}
+
+fn backend() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
+    Box::new(pounce_feral::FeralSolverInterface::new())
+}
+
+/// Run the SOS relaxation and turn its float output into an exact certificate.
+///
+/// The solver's bound and Gram matrix are hints only — [`emit_sos_certificate`]
+/// re-derives an exact `γ` and an exact `G` and refuses if it cannot. So a
+/// relaxation that is loose, or a solve that fails outright, costs a
+/// certificate; it cannot produce a wrong one.
+fn certify_sos(po: &PolyObjective, meta: &CertMeta) -> Result<Certificate, String> {
+    let poly = Polynomial::new(po.n, po.terms.clone());
+    let (bound, gram) =
+        sos_constrained_lower_bound_gram(&PolyProblem::new(poly), None, &sos_opts(), backend);
+    if !bound.lower_bound.is_finite() {
+        return Err(format!(
+            "the SOS relaxation did not produce a finite bound (status {:?}); \
+             nothing to certify",
+            bound.status
+        ));
+    }
+    // The unconstrained relaxation has exactly one PSD block (σ₀). More would
+    // mean localizing blocks from constraints, which `poly_extract` refuses, so
+    // this is a shape check on our own pipeline rather than on user input.
+    let [block] = &gram[..] else {
+        return Err(format!(
+            "expected one SOS block for an unconstrained problem, got {}",
+            gram.len()
+        ));
+    };
+    emit_sos_certificate(
+        &SosInput {
+            n: po.n,
+            terms: po.terms.clone(),
+            basis: block.basis.clone(),
+            gram_float: block.matrix.clone(),
+            bound_float: bound.lower_bound,
+        },
+        meta,
+    )
+    .map_err(|e| format!("cannot certify a bound for this polynomial: {e}"))
+}
+
 fn run(args: &CertifyArgs) -> Result<String, String> {
     // --- read + content-address the two inputs ---
     let nl_bytes =
@@ -242,12 +316,30 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
 
     let dual_ray = parsed.lambda.clone();
     let iterate = parsed.x.clone();
-    let input = nl_to_qp_input(&prob, parsed.x, args.active_tol)?;
     let meta = CertMeta {
         nl_sha256,
         sol_sha256,
         solver: format!("pounce {}", env!("CARGO_PKG_VERSION")),
     };
+
+    // A higher-degree unconstrained polynomial gets a *bound*, not a claim about
+    // `parsed.x`. Checked before the QP extraction, which would reject it for
+    // being degree > 2 — and reject it with the wrong diagnosis, since such a
+    // problem is certifiable, just by a different theorem.
+    //
+    // The infeasible/unbounded verdicts take precedence: they are statements
+    // about the solve, and neither has an SOS reading (an unconstrained
+    // polynomial is never infeasible, and an unbounded one has no lower bound
+    // to certify).
+    if !infeasible
+        && !unbounded
+        && let Some(po) = sos_slice(&prob)
+    {
+        let cert = certify_sos(&po, &meta)?;
+        return to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"));
+    }
+
+    let input = nl_to_qp_input(&prob, parsed.x, args.active_tol)?;
 
     let cert = if infeasible {
         if dual_ray.len() != input.constraints.len() {
@@ -341,8 +433,23 @@ fn verify(nl: &PathBuf, cert_path: &PathBuf) -> Result<(), String> {
     //     certificate that proves an easier problem under the real hash fails here.
     let prob = nl_reader::read_nl_file(nl)?;
     let n = prob.n;
-    let input = nl_to_qp_input(&prob, vec![0.0; n], 0.0)?; // x_float unused by problem_block
-    let p_nl = problem_block(&input).map_err(|e| format!("cannot re-derive problem: {e}"))?;
+
+    // Which half of the `problem` block to re-derive follows from the cert's own
+    // `problem_class`. Trusting that field is safe *because* of what follows: a
+    // cert claiming `sos-poly` for a QP re-derives a polynomial that will not
+    // match, so the class is checked by the comparison rather than assumed.
+    let p_nl = match cert.problem_class.as_str() {
+        "sos-poly" => {
+            let po = extract_poly_objective(&prob)
+                .map_err(|e| format!("cannot re-derive the polynomial from this .nl: {e}"))?;
+            sos_problem_block(po.n, &po.terms)
+                .map_err(|e| format!("cannot re-derive problem: {e}"))?
+        }
+        _ => {
+            let input = nl_to_qp_input(&prob, vec![0.0; n], 0.0)?; // x_float unused
+            problem_block(&input).map_err(|e| format!("cannot re-derive problem: {e}"))?
+        }
+    };
     if canonical_problem(&p_nl) != canonical_problem(&cert.problem) {
         return Err("certificate describes a different problem than this .nl \
              (objective/constraints/bounds mismatch)"

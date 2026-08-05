@@ -1,0 +1,133 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "global-lower-bound",
+  "problem_class": "sos-poly",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "bound": {
+    "num": "2",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "69ee731038777d1c5b26b0ada4191a93d11dd91b10d427a0e7a16d2da01946d8",
+    "sol_sha256": "ff379f9e3437895a5af918b6e01e71a6c7742795bc710689f10a05ee4bb9ff49",
+    "solver": "pounce 0.9.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 1,
+    "polynomial": {
+      "terms": [
+        {
+          "exponents": [
+            0
+          ],
+          "coeff": {
+            "num": "2",
+            "den": "1"
+          }
+        },
+        {
+          "exponents": [
+            2
+          ],
+          "coeff": {
+            "num": "-2",
+            "den": "1"
+          }
+        },
+        {
+          "exponents": [
+            4
+          ],
+          "coeff": {
+            "num": "1",
+            "den": "1"
+          }
+        }
+      ]
+    }
+  },
+  "witnesses": {
+    "sos": [
+      {
+        "monomials": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        "gram": {
+          "rows": 3,
+          "cols": 3,
+          "symmetric": true,
+          "entries": [
+            {
+              "i": 0,
+              "j": 0,
+              "val": {
+                "num": "1",
+                "den": "1"
+              }
+            },
+            {
+              "i": 2,
+              "j": 0,
+              "val": {
+                "num": "-1",
+                "den": "1"
+              }
+            },
+            {
+              "i": 2,
+              "j": 2,
+              "val": {
+                "num": "1",
+                "den": "1"
+              }
+            }
+          ]
+        },
+        "L": {
+          "rows": 3,
+          "cols": 3,
+          "unit_lower": true,
+          "entries": [
+            {
+              "i": 2,
+              "j": 0,
+              "val": {
+                "num": "-1",
+                "den": "1"
+              }
+            }
+          ]
+        },
+        "D": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ]
+      }
+    ]
+  }
+}

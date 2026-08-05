@@ -5,8 +5,10 @@
 This document is the canonical reference for the exact-rational certificate
 emitted by `pounce certify <problem.nl> <claim.sol>`. The certificate lets the
 external `pounce-lean` repository (not yet public) produce a **kernel-checked
-Lean 4 proof** that the returned `x*` is feasible and a **global** minimizer —
-over exact rational arithmetic, with no floating point in the trusted path.
+Lean 4 proof** of what the solve actually established — that `x*` is feasible
+and a **global** minimizer, that the problem is infeasible or unbounded, or that
+a nonconvex objective is bounded below by an exact `γ` — over rational
+arithmetic, with no floating point in the trusted path.
 
 Implementation: the serde structs and the exact-rational emitter live in
 [`crates/pounce-lean-cert/src/`](https://github.com/jkitchin/pounce/blob/main/crates/pounce-lean-cert/src/lib.rs)
@@ -14,11 +16,14 @@ Implementation: the serde structs and the exact-rational emitter live in
 [`crates/pounce-cli/src/certify.rs`](https://github.com/jkitchin/pounce/blob/main/crates/pounce-cli/src/certify.rs)
 wires it to the CLI.
 
-> **Status.** The `qp-convex` / `global-min` slice is **validated end-to-end**:
-> `pounce certify` emits it, and `pounce-lean` kernel-checks it (reusable lemmas
-> → codegen → `lake build`) with proofs resting only on Lean's standard axioms
-> (`propext`, `Classical.choice`, `Quot.sound`; no `sorry`). Other verdicts and
-> problem classes are additive future work.
+> **Status.** Four verdicts are **validated end-to-end** — `global-min`
+> (`qp-convex`), `infeasible`, `unbounded`, and `global-lower-bound`
+> (`sos-poly`): `pounce certify` emits each, and `pounce-lean` kernel-checks it
+> (reusable lemmas → codegen → `lake build`) with proofs resting only on Lean's
+> standard axioms (`propext`, `Classical.choice`, `Quot.sound`; no `sorry`).
+> Each has a fixture in `crates/pounce-cli/tests/fixtures/` that
+> `scripts/check-lean-cert.sh` regenerates, rebuilds, and audits. The `feasible`
+> verdict is the one the consumer accepts and the producer still cannot emit.
 
 ## Two documents, two audiences — and one asymmetry
 
@@ -39,37 +44,30 @@ reads the certificate.
 >
 > | Verdict | `pounce certify` emits | `pounce-lean` verifies |
 > |---|---|---|
-> | `global-min` | yes | yes |
+> | `global-min` (KKT + PSD Hessian) | yes | yes |
+> | `infeasible` (Farkas witness `witnesses.farkas.y`) | yes | yes |
+> | `unbounded` (recession witness `witnesses.recession`) | yes | yes |
+> | `global-lower-bound` (SOS witness `witnesses.sos`) | yes | yes |
 > | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | **no** | **yes** |
-> | `infeasible` (Farkas witness `witnesses.farkas.y`) | **no** | **yes** |
 > | `local-min-strict` | no | no |
 >
-> `emit.rs` hardcodes `verdict: "global-min"`, so **every `feasible` and
-> `infeasible` certificate in existence is hand-written.** The consumer-side machinery for them
-> (`candidate_eps_feasible`, `feasible_point_exists`, and the
-> `feasible_witness` field) is implemented and tested there, and is described in
-> § 9 of the consumer document — but nothing in POUNCE can produce input for it
-> yet. Teaching the emitter to emit `feasible` is tracked as planned work; until
-> then, treat § 9 of the consumer document as a specification the producer has
-> not met.
+> `feasible` is the residual gap: **every `feasible` certificate in existence is
+> hand-written.** The consumer-side machinery for it (`candidate_eps_feasible`,
+> `feasible_point_exists`, and the `feasible_witness` field) is implemented and
+> tested there, and is described in § 9 of the consumer document — but nothing
+> in POUNCE can produce input for it yet. Until that changes, treat § 9 of the
+> consumer document as a specification the producer has not met.
 >
-> The `infeasible` case is cheap **to check** but not free **to emit**, and the
-> difference is easy to get backwards. `QpStatus::PrimalInfeasible` is a unit
-> variant carrying no payload; the Farkas certificate is the diverging dual
-> iterate, which reaches a consumer as ordinary `.sol` duals.
->
-> More importantly, that ray satisfies `Aᵀy = 0` only to a *relative*
-> tolerance. On the `certify_infeasible` fixture `‖y‖ ≈ 2.3e10` with a residual
-> of ~1.7e-11 relative — but converted losslessly to ℚ that residual is
-> `−103801/262144`, which is not zero, so the Lean hypothesis is
-> undischargeable. Copying the solver's duals would produce a certificate that
-> can never verify.
->
-> So emitting `infeasible` needs a `refine_farkas` analogous to `refine_kkt`:
-> take the float ray as a hint for the certificate's support, then solve for an
-> exact rational ray (here, `y = (1,1,1)`). New code, not a field copy. What
-> remains true is that *checking* the result is trivial — one nonnegative vector
-> and a linear identity, with no factorization or KKT system.
+> None of the closed rows was a field copy, and it is easy to assume otherwise.
+> `QpStatus::PrimalInfeasible` is a unit variant carrying no payload, and the
+> float Farkas ray satisfies `Aᵀy = 0` only to a *relative* tolerance: on the
+> `certify_infeasible` fixture `‖y‖ ≈ 2.3e10` with a ~1.7e-11 relative residual,
+> which converted losslessly to ℚ is `−103801/262144` — not zero, so the Lean
+> hypothesis would be undischargeable. Each verdict therefore needed a
+> refinement step that treats the float object as a *hint* for the exact one's
+> support: `refine_kkt` for `global-min`, `refine_farkas` for `infeasible`
+> (which recovers `y = (1,1,1)` on that fixture), and `round_gram` for the SOS
+> Gram matrix. Float proposes; exact arithmetic decides.
 
 ## How it differs from `pounce verify`
 
@@ -152,13 +150,14 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema` | string | `"pounce.lean-cert/v1"`. |
-| `verdict` | enum | The single proven claim. v1 codegen: `"global-min"`. |
-| `problem_class` | enum | v1 codegen: `"qp-convex"`. |
-| `tolerance` | rational | Feasibility ε. `0` for the exact QP slice. |
+| `verdict` | enum | The single proven claim: `"global-min"`, `"infeasible"`, `"unbounded"`, or `"global-lower-bound"`. |
+| `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. |
+| `tolerance` | rational | Feasibility ε. Always `0` — every emitted slice is exact. |
+| `bound` | rational | `global-lower-bound` only: the γ proven to satisfy `γ ≤ p(x)` for all `x`. |
 | `binding` | object | `nl_sha256`, `sol_sha256` (content-address the canonical problem and claimed solution, exactly as `pounce verify` does), and the producing `solver`. |
 | `toolchain` | object | The Lean toolchain + Mathlib revision the cert is authored against (a proof reproduces only under the same pin). |
 | `problem` | object | The problem over ℚ — see below. |
-| `candidate` | object | `x*` and its objective over ℚ. |
+| `candidate` | object | `x*` and its objective over ℚ. **Absent** whenever the verdict names no point (`infeasible`, `unbounded`, `global-lower-bound`) — the key is omitted, not nulled, so a consumer cannot mistake a bound for a claimed minimizer. |
 | `witnesses` | object | Untrusted proof hints — see below. |
 
 ## Problem encoding
@@ -228,6 +227,66 @@ rational active-set refinement**: it takes the float active set, solves the KKT
 system exactly over ℚ for the true rational `(x*, λ)`, and verifies dual
 feasibility and that the inactive rows hold — refusing if the guess was wrong.
 
+## The SOS slice: `global-lower-bound`
+
+A nonconvex polynomial has no KKT-based global argument — a local solve returns
+one basin and can say nothing about the others. What it *can* support is a
+**bound**, via a sum-of-squares identity: exhibit a monomial basis `m(x)`, a
+rational `γ`, and a PSD Gram matrix `G` with
+
+    p(x) − γ = m(x)ᵀ G m(x)
+
+Since the right side is a nonnegative quadratic form, `γ ≤ p(x)` for **every**
+real `x`. The certificate carries a polynomial objective instead of a quadratic
+one, and the bound in place of a candidate:
+
+```json
+"problem": {
+  "n_vars": 1,
+  "polynomial": { "terms": [ { "exponents": [0], "coeff": {"num":"2","den":"1"} },
+                             { "exponents": [2], "coeff": {"num":"-2","den":"1"} },
+                             { "exponents": [4], "coeff": {"num":"1","den":"1"} } ] }
+},
+"bound": {"num":"1","den":"1"},
+"witnesses": {
+  "sos": [ { "monomials": [[0],[1],[2]],
+             "gram": { "rows": 3, "cols": 3, "symmetric": true, "entries": [ … ] },
+             "L": { "rows": 3, "cols": 3, "unit_lower": true, "entries": [ … ] },
+             "D": [ {"num":"1","den":"1"}, {"num":"0","den":"1"}, {"num":"0","den":"1"} ] } ]
+}
+```
+
+Each `monomials[k]` is an **exponent vector** of length `n_vars`, matching
+`polynomial.terms[*].exponents`; `witnesses.sos[b]` is one PSD block. There is
+no `objective`, `var_bounds`, or `constraints` key — the keys are absent, since
+the slice admits no constraints and the objective is the polynomial. Lean
+discharges two independent obligations, and both must hold:
+
+| Witness | Lean checks |
+|---|---|
+| `gram` + `monomials` | the identity `p − γ = m(x)ᵀ G m(x)`, closed by `ring` — a polynomial identity, so no `n²` case split |
+| `L`, `D` | `G ⪰ 0` via the exact `LDLᵀ`: `G = L·diag(D)·Lᵀ` **and** `Dᵢ ≥ 0` entrywise |
+
+Two obligations means two ways to forge, so the drift guard carries two negative
+fixtures: `certify_sos_forged_bound` inflates γ (the identity stops closing) and
+`certify_sos_forged_psd` swaps in an indefinite `G` that still satisfies the
+identity (the nonnegativity goal fails). Both must fail `lake build`.
+
+The SDP that finds `G` runs in f64 and returns a bound like `1 − 1e-9`, which is
+not a rational the identity can close on. `round_gram` searches a small ladder
+of candidate `γ` values and denominator grids, solving the coefficient-matching
+system exactly over ℚ at each; the emitter then factors the result, serializes
+it, and **re-derives both obligations from the serialized sparse form** before
+writing. A polynomial that is nonnegative but not SOS (Motzkin's
+`x⁴y² + x²y⁴ − 3x²y² + 1` at its tight bound) is refused rather than
+approximated.
+
+This slice is deliberately narrow: **unconstrained, minimize, no variable
+bounds**, objective degree > 2. The theorem quantifies over all of ℝⁿ, so any
+constraint would make the proven statement true but about the wrong problem.
+Routing is on **degree**, not on QP-extraction failure — a convex QP must never
+silently downgrade from `global-min` to a mere bound.
+
 ## Supported slice (v1)
 
 `problem_class = qp-convex`, `verdict = global-min`, quadratic objective
@@ -252,8 +311,10 @@ Variable bounds fold the same way: `xᵢ ≥ lᵢ` → `var{i}_lb`, `xᵢ ≤ u�
 is always emitted as the infinite sentinels in v1; bounds live in `constraints`.
 
 Outside this slice `pounce certify` **exits 2** rather than emit an unsound
-certificate: non-quadratic objectives, indefinite `Q`, maximize objectives, and
-the `feasible` / `local-min-strict` verdicts are additive future work.
+certificate — except that a higher-degree unconstrained polynomial objective is
+routed to the SOS slice above instead of refused. Indefinite `Q`, maximize
+objectives, constrained nonconvex problems, and the `feasible` /
+`local-min-strict` verdicts remain additive future work.
 
 ## Consumer acceptance
 
