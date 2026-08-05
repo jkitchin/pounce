@@ -30,6 +30,13 @@ selected by the ``sparse`` flag on :func:`from_torch`:
   taken per color (``k ≪ n`` colors), ``vmap``'d over the seeds, and the
   result scattered back to the known nonzeros.
 
+Detecting the sparsity pattern never materializes the full matrix
+(issue #464): the probe sweeps a *block* of rows (VJPs) or columns
+(JVPs/HVPs) at a time under a fixed byte budget, reducing each block to
+index pairs before the next is allocated. Callers who know the structure
+in closed form skip detection entirely with ``jac_pattern=`` /
+``hess_pattern=``.
+
 dtype. pounce is a double-precision solver, and the Newton / KKT solves
 need float64 throughout (convergence stalls in float32). Every traced
 evaluation runs on ``torch.float64`` tensors; :func:`from_torch`
@@ -49,14 +56,14 @@ from typing import Callable
 
 import numpy as np
 import torch
-from torch.func import grad, hessian, jacfwd, jacrev, jvp, vmap
+from torch.func import grad, hessian, jacfwd, jacrev, jvp, vjp, vmap
 
 from .._pounce import Problem
 # Framework-neutral sparsity helpers shared with the JAX frontend.
 from .._ad_common import (
     _color_columns,
-    _detect_pattern_2d_multi,
-    _detect_pattern_lower_multi,
+    _detect_pattern_blocked,
+    _normalize_user_pattern,
 )
 
 # Real (CPU, float64) tensor dtype used throughout the frontend.
@@ -100,6 +107,14 @@ def _seed_matrix(colors: np.ndarray, num_colors: int, n: int) -> torch.Tensor:
     return torch.as_tensor(S, dtype=_DT)
 
 
+def _basis_block(start: int, stop: int, size: int) -> torch.Tensor:
+    """``(stop - start, size)`` slice of the identity — the seeds that
+    sweep basis directions ``start:stop`` in one vmapped AD pass."""
+    E = np.zeros((int(stop) - int(start), int(size)), dtype=np.float64)
+    E[np.arange(int(stop) - int(start)), np.arange(int(start), int(stop))] = 1.0
+    return torch.as_tensor(E, dtype=_DT)
+
+
 class _TorchProblem:
     """Cyipopt-shaped problem object backed by ``torch.func``-AD callables."""
 
@@ -112,6 +127,8 @@ class _TorchProblem:
         seed: int = 0,
         sparse: bool = False,
         n_probes: int = 1,
+        jac_pattern=None,
+        hess_pattern=None,
     ):
         self._f = f
         self._grad_f = grad(f)
@@ -142,7 +159,11 @@ class _TorchProblem:
             self._lagrangian = lagrangian_unc
             self._hess_lag_dense = hessian(lagrangian_unc, argnums=0)
 
-        # --- detect sparsity from a union of random probes ---
+        # Gradient of the Lagrangian: the HVP used both by the blocked
+        # Hessian probe and by the compressed per-eval path.
+        self._grad_lag = grad(self._lagrangian, argnums=0)
+
+        # --- sparsity pattern: caller-supplied, else blocked probes ---
         # The probe evaluates torch.func transforms, which share a
         # process-global layer stack — guard with _FUNC_LOCK so workers
         # building _TorchProblems concurrently (vmap_solve_parallel) don't
@@ -150,26 +171,93 @@ class _TorchProblem:
         rng = np.random.default_rng(seed)
         n_probes = max(1, int(n_probes))
         x_probes = [_t(rng.standard_normal(n)) for _ in range(n_probes)]
+        lam_probes = (
+            [_t(rng.standard_normal(m)) for _ in range(n_probes)] if m > 0 else []
+        )
         with _FUNC_LOCK:
-            if m > 0:
-                lam_probes = [_t(rng.standard_normal(m)) for _ in range(n_probes)]
-                jac_denses = [_to_np(self._jac_g_dense(xp)) for xp in x_probes]
-                self._jac_rows, self._jac_cols = _detect_pattern_2d_multi(jac_denses)
-                hess_denses = [
-                    _to_np(self._hess_lag_dense(xp, lp, _t(1.0)))
-                    for xp, lp in zip(x_probes, lam_probes)
-                ]
+            if jac_pattern is not None:
+                self._jac_rows, self._jac_cols = _normalize_user_pattern(
+                    jac_pattern, "jac_pattern", m, n,
+                )
+            elif m > 0:
+                self._jac_rows, self._jac_cols = self._probe_jac(x_probes)
             else:
                 self._jac_rows = np.zeros(0, dtype=np.int64)
                 self._jac_cols = np.zeros(0, dtype=np.int64)
-                hess_denses = [
-                    _to_np(self._hess_lag_dense(xp, _t(1.0))) for xp in x_probes
-                ]
-        self._hess_rows, self._hess_cols = _detect_pattern_lower_multi(hess_denses)
+
+            if hess_pattern is not None:
+                self._hess_rows, self._hess_cols = _normalize_user_pattern(
+                    hess_pattern, "hess_pattern", n, n, lower=True,
+                )
+            else:
+                self._hess_rows, self._hess_cols = self._probe_hess(
+                    x_probes, lam_probes,
+                )
 
         # --- compressed (colored) AD callables, when requested ---
         if sparse:
             self._build_compressed()
+
+    # --- blocked sparsity probes (issue #464) ---
+
+    def _probe_jac(self, x_probes) -> tuple[np.ndarray, np.ndarray]:
+        """Jacobian pattern, swept a block of rows (VJP) or columns (JVP)
+        at a time, so the full ``(m, n)`` matrix is never materialized.
+        The direction mirrors the dense path's ``jacfwd`` when ``n < m``
+        else ``jacrev`` choice, so the AD pass count is unchanged."""
+        n, m, g = self._n, self._m, self._g
+        if n < m:
+            def block(x, E):  # (b, n) seeds -> (b, m) columns of J
+                return vmap(lambda s: jvp(g, (x,), (s,))[1])(E)
+
+            return _detect_pattern_blocked(
+                n, m,
+                lambda a, b: [
+                    _to_np(block(xp, _basis_block(a, b, n))) for xp in x_probes
+                ],
+                by_row=False,
+            )
+
+        def block(x, E):  # (b, m) cotangents -> (b, n) rows of J
+            _, vjp_fn = vjp(g, x)
+            return vmap(lambda ct: vjp_fn(ct)[0])(E)
+
+        return _detect_pattern_blocked(
+            m, n,
+            lambda a, b: [
+                _to_np(block(xp, _basis_block(a, b, m))) for xp in x_probes
+            ],
+            by_row=True,
+        )
+
+    def _probe_hess(self, x_probes, lam_probes) -> tuple[np.ndarray, np.ndarray]:
+        """Lower-triangle Lagrangian-Hessian pattern, swept a block of
+        columns at a time via HVPs. ``H`` is symmetric, so columns give
+        the triangle."""
+        n, grad_L = self._n, self._grad_lag
+        one = _t(1.0)
+        if self._m > 0:
+            def blocks(a, b):
+                E = _basis_block(a, b, n)
+                return [
+                    _to_np(vmap(
+                        lambda s: jvp(
+                            lambda xx: grad_L(xx, lp, one), (xp,), (s,)
+                        )[1]
+                    )(E))
+                    for xp, lp in zip(x_probes, lam_probes)
+                ]
+        else:
+            def blocks(a, b):
+                E = _basis_block(a, b, n)
+                return [
+                    _to_np(vmap(
+                        lambda s: jvp(lambda xx: grad_L(xx, one), (xp,), (s,))[1]
+                    )(E))
+                    for xp in x_probes
+                ]
+
+        return _detect_pattern_blocked(n, n, blocks, by_row=False, lower=True)
 
     def _build_compressed(self) -> None:
         """Build the colored JVP (Jacobian) and HVP (Hessian) callables
@@ -205,8 +293,7 @@ class _TorchProblem:
         self._hess_seed_cols = hess_colors[self._hess_cols]
 
         # HVP via jvp of the Lagrangian gradient: H @ s. (k, n).
-        lag = self._lagrangian
-        grad_L = grad(lag, argnums=0)
+        grad_L = self._grad_lag
         if self._m > 0:
             def hess_compressed(x, lam, sigma):
                 return vmap(
@@ -280,6 +367,8 @@ def from_torch(
     seed: int = 0,
     sparse: bool = False,
     n_probes: int | None = None,
+    jac_pattern=None,
+    hess_pattern=None,
 ) -> Problem:
     """Build a pounce :class:`Problem` from PyTorch-traced functions.
 
@@ -304,11 +393,32 @@ def from_torch(
         When ``True``, compute the Jacobian and Lagrangian Hessian with
         CPR-style colored AD (one JVP/HVP per color) instead of forming
         the dense matrix and slicing (issue #83). The reported structure
-        is identical either way. Defaults to ``False``.
+        is identical either way. Defaults to ``False``. This governs
+        *per-eval* cost only; detecting the pattern at build time costs
+        ``O(n)`` AD passes either way (blocked, so memory stays bounded).
     n_probes : int or None
         Number of random probes whose nonzero patterns are unioned to
         detect sparsity. ``None`` (default) uses 1 probe for the dense
-        path and 3 for ``sparse=True``.
+        path and 3 for ``sparse=True``. Ignored for a matrix whose
+        pattern you supply below.
+    jac_pattern, hess_pattern : (rows, cols) or None
+        Known sparsity patterns in cyipopt ``(row_indices, col_indices)``
+        form — ``jac_pattern`` for the ``(m, n)`` constraint Jacobian,
+        ``hess_pattern`` for the lower triangle of the ``(n, n)``
+        Lagrangian Hessian. Supplying one skips detection for that matrix
+        entirely: no probe evaluations, no build memory, no
+        probabilistic-detection risk (issue #464). Either may be given
+        alone. Upper-triangle entries in ``hess_pattern`` are folded onto
+        their mirror, since ``H`` is symmetric.
+
+        The pattern must be a **superset** of the true structure. Extra
+        entries are harmless; a *missing* entry is silently wrong — the
+        dense path drops that derivative and ``sparse=True`` aliases it
+        into a same-colored reported entry. Nothing here evaluates the
+        model to check, so this is the caller's contract to keep. It is
+        the right tool for structure known in closed form (collocation,
+        PDE discretizations) and the only safe one for genuinely
+        value-dependent sparsity.
 
     Returns
     -------
@@ -322,6 +432,7 @@ def from_torch(
         n_probes = 3 if sparse else 1
     obj = _TorchProblem(
         f=f, g=g, n=n, m=m, seed=seed, sparse=sparse, n_probes=n_probes,
+        jac_pattern=jac_pattern, hess_pattern=hess_pattern,
     )
     return Problem(
         n=n, m=m, problem_obj=obj, lb=lb, ub=ub, cl=cl, cu=cu,

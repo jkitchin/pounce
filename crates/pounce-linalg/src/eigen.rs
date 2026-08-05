@@ -27,7 +27,13 @@ use pounce_common::types::Number;
 ///   ascending order.
 /// - `eigenvectors` (length `n²`, column-major) contains the
 ///   corresponding unit eigenvectors as columns. Column `j` is the
-///   eigenvector for `eigenvalues[j]`.
+///   eigenvector for `eigenvalues[j]`. Each column's sign is pinned so
+///   that its largest-magnitude component is positive (ties broken by
+///   the earliest row): `v` and `-v` are both eigenvectors, so without
+///   a convention the direction a caller reads back would not be
+///   reproducible. The sign is all this fixes — a repeated eigenvalue
+///   leaves the basis within its eigenspace arbitrary, so read a
+///   degenerate block as a subspace rather than column by column.
 ///
 /// Returns `true` on convergence (the off-diagonal Frobenius norm
 /// drops below `tol = 1e-14 · ||A||_F` within `max_sweeps`),
@@ -184,6 +190,34 @@ fn symmetric_eigen_impl(
         eigenvalues[new_pos] = diag[old_pos];
         for row in 0..n {
             eigenvectors[row + n * new_pos] = v_in[row + n * old_pos];
+        }
+    }
+
+    // Pin each column's sign. `v` and `-v` are equally valid
+    // eigenvectors, and which one the rotation accumulation lands on
+    // is a function of the input's bit pattern, not of the matrix — so
+    // a caller reading a column as a *direction* would not get a
+    // reproducible answer across builds or across a harmless
+    // reordering upstream. Convention, shared with pyomo-pounce's
+    // `eigen()`: the largest-magnitude component is positive, ties
+    // broken by the earliest row. This fixes the sign only; a repeated
+    // eigenvalue still leaves the basis WITHIN its eigenspace
+    // arbitrary, so a degenerate block is reproducible as a subspace
+    // and not column by column.
+    for j in 0..n {
+        let mut lead = 0usize;
+        let mut best = eigenvectors[n * j].abs();
+        for row in 1..n {
+            let mag = eigenvectors[row + n * j].abs();
+            if mag > best {
+                best = mag;
+                lead = row;
+            }
+        }
+        if eigenvectors[lead + n * j] < 0.0 {
+            for row in 0..n {
+                eigenvectors[row + n * j] = -eigenvectors[row + n * j];
+            }
         }
     }
     converged
@@ -349,5 +383,71 @@ mod tests {
         let mut dw = vec![0.0; 3];
         let mut dv = vec![0.0; 9];
         assert!(symmetric_eigen_impl(&d, 3, &mut dw, &mut dv, 1));
+    }
+
+    // #471: which of `v` / `-v` the rotation accumulation lands on is a
+    // function of the input's bit pattern, so every column's sign is
+    // pinned before return — largest-magnitude component positive, ties
+    // broken by the earliest row. Without it a caller reading a column
+    // as a direction gets an answer that does not reproduce.
+    #[test]
+    fn eigen_pins_column_signs() {
+        let a = vec![
+            4.0, 1.0, 2.0, 0.5, 1.0, 3.0, 0.7, 1.5, 2.0, 0.7, 5.0, 0.3, 0.5, 1.5, 0.3, 2.0,
+        ];
+        let n = 4;
+        let mut w = vec![0.0; n];
+        let mut v = vec![0.0; n * n];
+        assert!(symmetric_eigen(&a, n, &mut w, &mut v));
+
+        for j in 0..n {
+            let mut lead = 0usize;
+            for row in 1..n {
+                if v[row + n * j].abs() > v[lead + n * j].abs() {
+                    lead = row;
+                }
+            }
+            assert!(
+                v[lead + n * j] > 0.0,
+                "column {j}: leading component {} is not positive",
+                v[lead + n * j]
+            );
+        }
+
+        // Negating the input matrix reverses the eigenvalue order and
+        // hands the rotations a different bit pattern, but each
+        // eigenvector must come back with the same pinned sign.
+        let neg: Vec<Number> = a.iter().map(|x| -x).collect();
+        let mut nw = vec![0.0; n];
+        let mut nv = vec![0.0; n * n];
+        assert!(symmetric_eigen(&neg, n, &mut nw, &mut nv));
+        for j in 0..n {
+            let mirror = n - 1 - j; // -A's eigenvalues are A's, reversed
+            assert_close(nw[mirror], -w[j], 1e-9, &format!("eigenvalue {j}"));
+            for row in 0..n {
+                assert_close(
+                    nv[row + n * mirror],
+                    v[row + n * j],
+                    1e-9,
+                    &format!("column {j} row {row}"),
+                );
+            }
+        }
+    }
+
+    // A 2×2 whose eigenvector components tie in magnitude: the earliest
+    // row breaks the tie, so both columns lead with a positive first
+    // component rather than one of each.
+    #[test]
+    fn eigen_pins_sign_on_magnitude_tie() {
+        let a = vec![2.0, 1.0, 1.0, 2.0]; // eigenvectors ±[1,-1]/√2, ±[1,1]/√2
+        let mut w = vec![0.0; 2];
+        let mut v = vec![0.0; 4];
+        assert!(symmetric_eigen(&a, 2, &mut w, &mut v));
+        let s = 1.0 / 2f64.sqrt();
+        assert_close(v[0], s, 1e-10, "col0 row0");
+        assert_close(v[1], -s, 1e-10, "col0 row1");
+        assert_close(v[2], s, 1e-10, "col1 row0");
+        assert_close(v[3], s, 1e-10, "col1 row1");
     }
 }

@@ -28,28 +28,54 @@
 
 use std::cell::RefCell;
 
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
+use numpy::ndarray::Array2;
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use pounce_common::types::{Index, Number};
-use pounce_nl::nl_reader::{NlTnlp, NlVariation, read_nl_file};
+use pounce_nl::nl_reader::{
+    Expr, NlProblem, NlTnlp, NlVariation, parse_nl_text as parse_nl_text_rs, read_nl_file,
+};
 use pounce_nlp::tnlp::{SparsityRequest, TNLP};
 
+use crate::nl_expr::{INLINE_DEPTH, MAX_DEPTH, expr_depth, on_deep_stack, on_worker_stack};
+
 /// A `.nl` model loaded through pounce's reader, exposing its evaluators.
-// `NlTnlp` itself is `Send` (its CSE nodes went `Arc` for pounce#126's
-// batched solving), but the pyclass stays `unsendable`: per-object
-// thread affinity is the conservative default under the GIL, and the
-// batch path never moves the pyclass — `solve_nlp_batch` clones the
-// owned `NlTnlp` out (see `clone_tnlp`) and moves the clone to the
-// rayon worker.
-#[pyclass(unsendable, module = "pounce", name = "NlProblem")]
+//
+// **Sendable.** `NlTnlp` is `Send` (its CSE nodes went `Arc` for
+// pounce#126's batched solving) and nothing else here is thread-affine,
+// so this pyclass carries no `unsendable` marker: one `NlProblem` can be
+// built on one thread and evaluated — or dropped — on another, which is
+// what a threaded host (a branch-and-bound worker pool) needs of a shared
+// evaluator.
+//
+// It stayed `unsendable` for a while as a conservative default, and that
+// default was actively harmful (pounce#477): pyo3's thread check raises
+// `PanicException`, which derives from `BaseException` and so slips past
+// every `except Exception` in the host — a cross-thread call surfaced not
+// as an error but as a wrong answer, and the *drop* path tripped it even
+// for code that never used an instance cross-thread (whichever thread
+// runs the GC inherits the object).
+//
+// Concurrency is still the GIL's: every `&self` method below borrows
+// `tnlp` and evaluates without releasing the GIL, so the `RefCell`
+// borrows of two threads can never overlap. Any future method that wants
+// to release the GIL around an evaluation must first take the `NlTnlp`
+// out of the `RefCell` (as `clone_tnlp` does for the batch path) rather
+// than hold a borrow across the release.
+#[pyclass(module = "pounce", name = "NlProblem")]
 pub struct PyNlProblem {
     tnlp: RefCell<NlTnlp>,
     n: usize,
     m: usize,
     nnz_jac: usize,
     nnz_h: usize,
+    /// Nesting depth of the expressions inside `tnlp`. `NlTnlp` keeps the
+    /// `Expr` trees it taped, so copying or dropping this pyclass recurses
+    /// once per level — the same hazard `NlExpr` guards, reached through
+    /// the problem instead (pounce#472).
+    expr_depth: u32,
     // Metadata captured before `prob` was moved into `NlTnlp`.
     minimize: bool,
     obj_constant: Number,
@@ -72,7 +98,17 @@ fn decode_vec(val: &Bound<'_, PyAny>, expected: usize, what: &str) -> PyResult<V
                 "{what}: expected length {expected}, got {len}"
             )));
         }
-        return Ok(unsafe { arr.as_slice()? }.to_vec());
+        // `as_slice` requires C-contiguity, but a strided view (`x[::2]`,
+        // a column of a 2-D array) is still a `PyArray1<f64>` and reaches
+        // this branch. Falling back to the strided view keeps such an `x`
+        // working, and — more to the point — keeps the failure mode of a
+        // bad input a named `{what}` error rather than numpy's bare
+        // "The given array is not contiguous", which says nothing about
+        // which argument was at fault.
+        return Ok(match unsafe { arr.as_slice() } {
+            Ok(s) => s.to_vec(),
+            Err(_) => arr.readonly().as_array().iter().copied().collect(),
+        });
     }
     let mut out = Vec::with_capacity(expected);
     for item in val.iter()? {
@@ -85,6 +121,107 @@ fn decode_vec(val: &Bound<'_, PyAny>, expected: usize, what: &str) -> PyResult<V
         )));
     }
     Ok(out)
+}
+
+/// One or more Hessian-vector-product directions, decoded into the
+/// column-major `n × k` layout [`NlTnlp::hessian_vector_products`] wants.
+struct Directions {
+    /// `n * k` values; direction `c` occupies `data[c*n .. (c+1)*n]`.
+    data: Vec<Number>,
+    k: usize,
+    /// `true` when the caller passed a single 1-D vector, so the result
+    /// should come back 1-D rather than as an `(n, 1)` column.
+    single: bool,
+}
+
+/// Decode `v` into [`Directions`], accepting a dense vector, a dense
+/// `(n, k)` array, or any SciPy sparse vector / matrix.
+///
+/// SciPy sparse is recognized by duck-typing `.toarray()` rather than by
+/// importing scipy: this crate must build and run without it, and any
+/// object that can hand back a dense array is a legitimate input anyway.
+/// Densifying is the honest move — `v` is only `n × k`, and the sparsity
+/// worth exploiting (the model's) lives in the tapes, not here.
+///
+/// The shape rule is deliberately strict: `(n,)` or `(n, k)`. A SciPy row
+/// vector densifies to `(1, n)`, which is *not* accepted, because for a
+/// square-ish block it would be indistinguishable from `k` directions of
+/// the wrong length. The error says what to pass instead.
+fn decode_directions(v: &Bound<'_, PyAny>, n: usize, what: &str) -> PyResult<Directions> {
+    let py = v.py();
+
+    let dense = if v.hasattr("toarray")? {
+        v.call_method0("toarray")?
+    } else {
+        v.clone()
+    };
+
+    // Route everything through `numpy.asarray(..., float64)` so lists,
+    // tuples, integer arrays, and strided views (a column `V[:, 0]`, a
+    // slice `w[::2]`) all arrive as a plain float64 array. numpy is a hard
+    // dependency of the package and already linked by this extension.
+    let np = py.import_bound("numpy")?;
+    let arr = np
+        .getattr("asarray")?
+        .call1((&dense, np.getattr("float64")?))
+        .map_err(|e| {
+            PyValueError::new_err(format!("{what}: could not read as a float array ({e})"))
+        })?;
+
+    let ndim: usize = arr.getattr("ndim")?.extract()?;
+    match ndim {
+        1 => {
+            let a = arr
+                .downcast::<PyArray1<Number>>()
+                .map_err(|_| PyValueError::new_err(format!("{what}: expected a float64 array")))?;
+            let got = a.len();
+            if got != n {
+                return Err(PyValueError::new_err(format!(
+                    "{what}: expected length {n}, got {got}"
+                )));
+            }
+            // `as_slice` needs C-contiguity; a strided view is still a
+            // valid `PyArray1<f64>`, so copy through the strided view
+            // rather than erroring on it.
+            let data = match unsafe { a.as_slice() } {
+                Ok(s) => s.to_vec(),
+                Err(_) => a.readonly().as_array().iter().copied().collect(),
+            };
+            Ok(Directions {
+                data,
+                k: 1,
+                single: true,
+            })
+        }
+        2 => {
+            let a = arr
+                .downcast::<PyArray2<Number>>()
+                .map_err(|_| PyValueError::new_err(format!("{what}: expected a float64 array")))?;
+            let ro = a.readonly();
+            let view = ro.as_array();
+            let (rows, k) = (view.shape()[0], view.shape()[1]);
+            if rows != n {
+                return Err(PyValueError::new_err(format!(
+                    "{what}: expected shape ({n},) or ({n}, k), got ({rows}, {k}); \
+                     a row-vector direction needs transposing"
+                )));
+            }
+            let mut data = Vec::with_capacity(n * k);
+            for c in 0..k {
+                for i in 0..n {
+                    data.push(view[[i, c]]);
+                }
+            }
+            Ok(Directions {
+                data,
+                k,
+                single: false,
+            })
+        }
+        other => Err(PyValueError::new_err(format!(
+            "{what}: expected a 1-D or 2-D array, got {other} dimensions"
+        ))),
+    }
 }
 
 #[pymethods]
@@ -311,6 +448,86 @@ impl PyNlProblem {
         Ok(values.into_pyarray_bound(py))
     }
 
+    /// Hessian-vector product of the Lagrangian:
+    /// `(obj_factor·∇²f + Σ_i lam_i·∇²g_i) · v`.
+    ///
+    /// Matrix-free: one forward-over-reverse AD pass per tape, seeded with
+    /// `v` directly. [`Self::hessian`] instead runs one such pass *per
+    /// Hessian color* and decodes the compressed columns into the sparse
+    /// lower triangle, so on a model where materializing `∇²L` is
+    /// impractical — the case a Newton–Krylov / truncated-CG step is built
+    /// for — this is the cheaper call by the chromatic number of the
+    /// coloring.
+    ///
+    /// `v` may be:
+    ///
+    /// * a dense length-`n` vector — NumPy array (any dtype or stride),
+    ///   list, or other sequence — giving a length-`n` result;
+    /// * a dense `(n, k)` array of `k` directions, giving an `(n, k)`
+    ///   result;
+    /// * a SciPy sparse `(n,)` vector, `(n, 1)` column, or `(n, k)` matrix.
+    ///
+    /// The shape rule is the same for dense and sparse: `(n,)` or
+    /// `(n, k)`. A `(1, n)` *row* raises — for a square-ish block it is
+    /// indistinguishable from `k` directions of the wrong length, so it is
+    /// reported rather than guessed at. Note this catches
+    /// `csr_matrix(v_1d)`, which SciPy shapes as `(1, n)`; pass
+    /// `v_1d[:, None]`, or use the 1-D sparse *array* API
+    /// (`coo_array(v_1d)`, SciPy >= 1.14), which is genuinely `(n,)`.
+    ///
+    /// A sparse `v` is densified on the way in and an all-zero direction is
+    /// skipped, so a mostly-empty block costs only the columns that carry
+    /// signal. The sparsity that actually pays is the *model's*, and the
+    /// tapes exploit that regardless of how `v` arrives: each pass is
+    /// O(tape ops), never O(n²).
+    ///
+    /// The result is always dense. `∇²L · v` is dense in general even when
+    /// both `∇²L` and `v` are sparse — a sparse return type would promise
+    /// an economy this product does not have. Callers who want the sparse
+    /// Hessian itself already have [`Self::hessian`] +
+    /// [`Self::hessian_structure`].
+    ///
+    /// `lam` defaults to zeros (the objective Hessian alone); `obj_factor`
+    /// defaults to 1.0. Sign convention matches [`Self::hessian`].
+    #[pyo3(signature = (x, v, lam=None, obj_factor=1.0))]
+    fn hessian_vector_product<'py>(
+        &self,
+        py: Python<'py>,
+        x: &Bound<'_, PyAny>,
+        v: &Bound<'_, PyAny>,
+        lam: Option<&Bound<'_, PyAny>>,
+        obj_factor: Number,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let xv = decode_vec(x, self.n, "hessian_vector_product: x")?;
+        let dirs = decode_directions(v, self.n, "hessian_vector_product: v")?;
+        let lamv = match lam {
+            Some(l) => Some(decode_vec(l, self.m, "hessian_vector_product: lam")?),
+            None => None,
+        };
+        let mut out = vec![0.0; self.n * dirs.k];
+        self.tnlp
+            .borrow_mut()
+            .hessian_vector_products(
+                &xv,
+                &dirs.data,
+                dirs.k,
+                obj_factor,
+                lamv.as_deref(),
+                &mut out,
+            )
+            .map_err(PyValueError::new_err)?;
+
+        if dirs.single {
+            // A 1-D `v` in, a 1-D result out — the Krylov-callback shape.
+            Ok(out.into_pyarray_bound(py).into_any())
+        } else {
+            // `out` is column-major (direction `c` at `c*n`); `Array2`
+            // wants row-major, so index rather than reshape.
+            let arr = Array2::from_shape_fn((self.n, dirs.k), |(i, c)| out[c * self.n + i]);
+            Ok(arr.into_pyarray_bound(py).into_any())
+        }
+    }
+
     /// Clone this model with per-instance overrides applied — the
     /// "one structure, many bound / starting-point variations" case of
     /// batched solving (pounce#126): parametric sweeps, multi-start,
@@ -337,12 +554,15 @@ impl PyNlProblem {
             g_l: dec(g_l, self.m, "variant: g_l")?,
             g_u: dec(g_u, self.m, "variant: g_u")?,
         };
-        let tnlp = self
-            .tnlp
-            .borrow()
-            .variant(&variation)
-            .map_err(PyValueError::new_err)?;
-        PyNlProblem::from_tnlp(tnlp, "variant")
+        // `variant` copies the model, expressions included, so it carries
+        // the same recursion depth (pounce#472).
+        let tnlp = {
+            let held = self.tnlp.borrow();
+            let src: &NlTnlp = &held;
+            on_deep_stack(self.expr_depth, move || src.variant(&variation))
+                .map_err(PyValueError::new_err)?
+        };
+        PyNlProblem::from_tnlp(tnlp, "variant", self.expr_depth)
     }
 
     fn __repr__(&self) -> String {
@@ -356,7 +576,11 @@ impl PyNlProblem {
 impl PyNlProblem {
     /// Build the pyclass around an owned `NlTnlp`, capturing the
     /// metadata the getters serve. `what` labels error messages.
-    pub(crate) fn from_tnlp(mut tnlp: NlTnlp, what: &str) -> PyResult<PyNlProblem> {
+    pub(crate) fn from_tnlp(
+        mut tnlp: NlTnlp,
+        what: &str,
+        expr_depth: u32,
+    ) -> PyResult<PyNlProblem> {
         let info = tnlp
             .get_nlp_info()
             .ok_or_else(|| PyValueError::new_err(format!("{what}: get_nlp_info returned None")))?;
@@ -377,6 +601,7 @@ impl PyNlProblem {
             m,
             nnz_jac: info.nnz_jac_g as usize,
             nnz_h: info.nnz_h_lag as usize,
+            expr_depth,
             minimize,
             obj_constant,
             x0,
@@ -393,7 +618,11 @@ impl PyNlProblem {
     /// the pyclass) moves to a rayon worker. Cheap relative to a
     /// solve — tapes are flat `Vec`s of ops.
     pub(crate) fn clone_tnlp(&self) -> NlTnlp {
-        self.tnlp.borrow().clone()
+        let held = self.tnlp.borrow();
+        let tnlp: &NlTnlp = &held;
+        // The clone copies the `Expr` trees along with the tapes, so it
+        // recurses once per level of nesting (pounce#472).
+        on_deep_stack(self.expr_depth, move || tnlp.clone())
     }
 
     pub(crate) fn dims(&self) -> (usize, usize) {
@@ -412,6 +641,53 @@ impl PyNlProblem {
     }
 }
 
+/// Tear the expression trees down on a stack sized for them, for a
+/// problem deep enough that the recursive drop could overrun the
+/// collecting thread's (pounce#472). The tapes the evaluators actually
+/// use are flat `Vec`s and drop normally.
+impl Drop for PyNlProblem {
+    fn drop(&mut self) {
+        if self.expr_depth <= INLINE_DEPTH {
+            return;
+        }
+        let prob = self.tnlp.get_mut().problem_mut();
+        let mut doomed = Vec::with_capacity(prob.con_nonlinear.len() + 1);
+        doomed.push(std::mem::replace(&mut prob.obj_nonlinear, Expr::Const(0.0)));
+        for c in &mut prob.con_nonlinear {
+            doomed.push(std::mem::replace(c, Expr::Const(0.0)));
+        }
+        on_deep_stack(self.expr_depth, move || drop(doomed));
+    }
+}
+
+/// Depth of the deepest expression in `prob`, and a `ValueError`-shaped
+/// message when that is past what the machinery will carry.
+///
+/// A parsed model arrives already built, so the construction-time cap
+/// `NlExpr` enforces cannot cover it — this is the same limit applied at
+/// the only point on this path where it can be: after the parse, before
+/// anything else walks the result (pounce#472).
+fn checked_depth(prob: &NlProblem) -> Result<u32, String> {
+    let mut memo = std::collections::HashMap::new();
+    let depth = prob
+        .con_nonlinear
+        .iter()
+        .fold(expr_depth(&prob.obj_nonlinear, &mut memo), |acc, c| {
+            acc.max(expr_depth(c, &mut memo))
+        });
+    if depth > MAX_DEPTH {
+        return Err(format!(
+            "the model nests an expression {depth} levels deep, past the \
+             limit of {MAX_DEPTH}. Deeper trees overflow the stack when the model \
+             is taped, walked, or freed — a hard crash rather than an exception — \
+             so they are refused here. A `.nl` writer that emits `o0` (binary +) \
+             chains for a long sum will do this; `o54` (n-ary sum) is one level \
+             whatever the term count."
+        ));
+    }
+    Ok(depth)
+}
+
 /// Parse an AMPL `.nl` file and return its evaluable [`PyNlProblem`].
 ///
 /// Sibling `.col` / `.row` files (if present) supply variable / constraint
@@ -419,12 +695,90 @@ impl PyNlProblem {
 /// as the CLI does.
 #[pyfunction]
 pub fn read_nl(path: &str) -> PyResult<PyNlProblem> {
-    let prob = read_nl_file(std::path::Path::new(path))
-        .map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
+    // The parser recurses once per level of nesting in the file, and so
+    // does everything downstream of it, so the whole load runs on a stack
+    // sized for that rather than on whatever the caller has — the depth is
+    // whatever the file says, and there is no way to know it beforehand
+    // (pounce#472).
+    let path = std::path::Path::new(path);
+    let (tnlp, depth) = on_worker_stack(move || {
+        let prob = read_nl_file(path)?;
+        let depth = checked_depth(&prob)?;
+        // `try_new` (not `new`): a model that names an AMPL imported function
+        // with no resolvable `$AMPLFUNC` library must raise a catchable Python
+        // error, not panic across the pyo3 boundary as an uncatchable
+        // PanicException.
+        Ok::<_, String>((NlTnlp::try_new(prob)?, depth))
+    })
+    .map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
+    PyNlProblem::from_tnlp(tnlp, "read_nl", depth)
+}
 
-    // `try_new` (not `new`): a model that names an AMPL imported function with
-    // no resolvable `$AMPLFUNC` library must raise a catchable Python error,
-    // not panic across the pyo3 boundary as an uncatchable PanicException.
-    let tnlp = NlTnlp::try_new(prob).map_err(|e| PyValueError::new_err(format!("read_nl: {e}")))?;
-    PyNlProblem::from_tnlp(tnlp, "read_nl")
+/// Parse `.nl` *text* — the same content [`read_nl`] would read off disk —
+/// and return its evaluable [`PyNlProblem`] (issue #469).
+///
+/// This is the no-filesystem route for a frontend that generates `.nl`
+/// in memory: no temp file, no cleanup, no `.nl`-writer-dialect surprises
+/// from a path that never existed. There are no sibling `.col` / `.row`
+/// files to read, so pass `var_names` / `con_names` explicitly if the
+/// model has names worth reporting in diagnostics.
+///
+/// For a frontend that has its own expression DAG, `build_nl_problem` is
+/// the better door still: `.nl` cannot spell `atan2`, `min`/`max`, or
+/// `erf`, all of which the tape evaluates natively.
+#[pyfunction]
+#[pyo3(signature = (text, var_names=None, con_names=None))]
+pub fn parse_nl_text(
+    text: &str,
+    var_names: Option<Vec<String>>,
+    con_names: Option<Vec<String>>,
+) -> PyResult<PyNlProblem> {
+    // On a stack sized for the parse, for the reason `read_nl` gives:
+    // the text says how deep the recursion goes (pounce#472).
+    let (tnlp, depth) = on_worker_stack(move || {
+        let mut prob = parse_nl_text_rs(text)?;
+        let depth = checked_depth(&prob)?;
+
+        let check = |what: &str, names: &[String], want: usize| -> Result<(), String> {
+            if names.len() == want {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{what} has length {}, expected {want}",
+                    names.len()
+                ))
+            }
+        };
+        if let Some(names) = var_names {
+            check("var_names", &names, prob.n)?;
+            prob.var_names = names;
+        }
+        if let Some(names) = con_names {
+            check("con_names", &names, prob.m)?;
+            prob.con_names = names;
+        }
+
+        // `try_new` for the same reason `read_nl` uses it: an unresolvable
+        // AMPL imported function must be a catchable Python error, not a panic.
+        Ok::<_, String>((NlTnlp::try_new(prob)?, depth))
+    })
+    .map_err(|e| PyValueError::new_err(format!("parse_nl_text: {e}")))?;
+    PyNlProblem::from_tnlp(tnlp, "parse_nl_text", depth)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `NlProblem` must stay movable across threads (pounce#477): a
+    /// threaded host shares one evaluator across a worker pool, and the
+    /// alternative — pyo3's `unsendable` marker — reports a violation as
+    /// a `PanicException`, which derives from `BaseException` and so
+    /// escapes the host's `except Exception`. A cross-thread call then
+    /// reads as a wrong answer rather than an error. Regresses the
+    /// moment a `!Send` field (an `Rc`, a non-`Send` trait object)
+    /// lands in `PyNlProblem` or in `NlTnlp` beneath it.
+    #[test]
+    fn py_nl_problem_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::PyNlProblem>();
+    }
 }

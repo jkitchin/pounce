@@ -100,34 +100,54 @@ impl ExternalResolver {
 /// through CSEs). Used to build an `ExternalResolver` covering exactly the
 /// functions a problem actually uses.
 pub fn collect_funcall_ids(e: &Expr, out: &mut std::collections::BTreeSet<usize>) {
+    // Shared `Cse` bodies are visited once, memoized on `Arc` pointer
+    // identity: without it this is Θ(2^depth) on a subexpression-sharing
+    // DAG, and `NlTnlp::try_new` runs it over every objective and
+    // constraint. Safe because `out` is a set — a repeat walk of the same
+    // body inserts exactly the ids the first one did. `HashSet::new` does
+    // not allocate until the first insert, so a CSE-free expression pays
+    // nothing.
+    let mut seen: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
+    collect_funcall_ids_memo(e, out, &mut seen);
+}
+
+fn collect_funcall_ids_memo(
+    e: &Expr,
+    out: &mut std::collections::BTreeSet<usize>,
+    seen: &mut std::collections::HashSet<*const Expr>,
+) {
     match e {
         Expr::Const(_) | Expr::Var(_) => {}
         Expr::Binary(_, a, b) => {
-            collect_funcall_ids(a, out);
-            collect_funcall_ids(b, out);
+            collect_funcall_ids_memo(a, out, seen);
+            collect_funcall_ids_memo(b, out, seen);
         }
-        Expr::Unary(_, a) => collect_funcall_ids(a, out),
+        Expr::Unary(_, a) => collect_funcall_ids_memo(a, out, seen),
         Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
             for a in args {
-                collect_funcall_ids(a, out);
+                collect_funcall_ids_memo(a, out, seen);
             }
         }
         Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
-            collect_funcall_ids(a, out);
-            collect_funcall_ids(b, out);
+            collect_funcall_ids_memo(a, out, seen);
+            collect_funcall_ids_memo(b, out, seen);
         }
-        Expr::Not(a) => collect_funcall_ids(a, out),
+        Expr::Not(a) => collect_funcall_ids_memo(a, out, seen),
         Expr::Cond { cond, then_, else_ } => {
-            collect_funcall_ids(cond, out);
-            collect_funcall_ids(then_, out);
-            collect_funcall_ids(else_, out);
+            collect_funcall_ids_memo(cond, out, seen);
+            collect_funcall_ids_memo(then_, out, seen);
+            collect_funcall_ids_memo(else_, out, seen);
         }
-        Expr::Cse(body) => collect_funcall_ids(body, out),
+        Expr::Cse(body) => {
+            if seen.insert(std::sync::Arc::as_ptr(body)) {
+                collect_funcall_ids_memo(body, out, seen);
+            }
+        }
         Expr::Funcall { id, args } => {
             out.insert(*id);
             for arg in args {
                 if let FuncallArg::Real(e) = arg {
-                    collect_funcall_ids(e, out);
+                    collect_funcall_ids_memo(e, out, seen);
                 }
             }
         }

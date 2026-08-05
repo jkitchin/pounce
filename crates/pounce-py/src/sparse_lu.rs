@@ -19,7 +19,11 @@ use numpy::{IntoPyArray, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-#[pyclass(name = "SparseLU", module = "pounce._pounce", unsendable)]
+/// Sendable, for the reason [`crate::dense_lu::PyDenseLu`] gives: FERAL's
+/// symbolic and numeric factors are owned data with no thread affinity,
+/// and `unsendable` bought only pyo3's uncatchable thread check
+/// (pounce#477).
+#[pyclass(name = "SparseLU", module = "pounce._pounce")]
 pub struct PySparseLu {
     n: usize,
     nnz: usize,
@@ -206,5 +210,16 @@ impl PySparseLu {
             out[r * nn..(r + 1) * nn].copy_from_slice(&rhs);
         }
         Ok(out.into_pyarray_bound(py))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The factor must stay movable across threads (pounce#477); see
+    /// [`super::PySparseLu`] for why `unsendable` is the worse default.
+    #[test]
+    fn py_sparse_lu_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::PySparseLu>();
     }
 }

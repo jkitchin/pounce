@@ -1158,6 +1158,14 @@ and `structural_diagnose` are `true` only when the solve came from an
 `.nl` file (which carries the source algebra and structural metadata) and
 `false` for a built-in problem, as shown above.
 
+The handshake above is the NLP filter-IPM's. Capabilities are answered for
+the backend that is actually running, so they agree with what the REPL will
+do: on the convex / conic IPM the backend-conditional entries
+(`kkt_inspect`, `diagnose`, `mutate_mu`, `resolve`, `sweep`, `load`,
+`structural_diagnose`) are `false`, `viz` is `["block","delta"]`, and
+`blocks` names *that* solver's iterate blocks (`x`/`s`/`y`/`z`, plus
+`tau`/`kappa` on the HSDE drivers) — see the capability matrix below.
+
 ### `pause`
 
 ```json

@@ -81,10 +81,7 @@ impl IterationOutput for OrigIterationOutput {
         let unscaled_f = c.unscaled_curr_f();
         let inf_pr = match self.inf_pr_output {
             InfPrTag::Internal => c.curr_primal_infeasibility_max(),
-            // The "original" mode wants the unscaled NLP constraint
-            // violation; until NLP-side scaling lands we feed the
-            // (already unscaled) internal violation.
-            InfPrTag::Original => c.curr_primal_infeasibility_max(),
+            InfPrTag::Original => c.curr_unscaled_nlp_constraint_violation_max(),
         };
         let inf_du = c.curr_dual_infeasibility_max();
         let mu = d.curr_mu;

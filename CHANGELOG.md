@@ -57,6 +57,435 @@ changes.
   obligation a verdict rests on, including an indefinite Gram matrix that still
   satisfies the SOS identity, so the identity check alone cannot catch it.
 
+### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
+
+- The `inf_pr` iteration column printed `max(‖c‖∞, ‖d − s‖∞)` — the
+  violation of Ipopt's internal *slack* reformulation — in **both**
+  `inf_pr_output` modes. Upstream's default, `original`, prints the true
+  violation of the user's own rows. POUNCE registered the option and then
+  ignored it.
+- The two diverge exactly when the slack drifts from `d(x)`: `s` is
+  confined to `[d_l, d_u]`, so `d = s + (d − s)` clears a lower bound
+  however large the gap grows. On a model that is all inequalities the gap
+  *is* the whole number. On Mittelmann's `robot_a` POUNCE reported a
+  constraint violation of `2.79e+04` at iterates where every original row
+  was satisfied and Ipopt printed `0.00e+00` — a feasible point that read
+  as badly infeasible.
+- The column now matches `ipopt` 3.14.19 digit for digit on `robot_a`,
+  including the two spikes (`7.15e+04`, `2.40e+04`) where the rows really
+  are violated. `inf_pr_output=internal` still selects the old quantity.
+- Display only. The filter's `theta`, the barrier-parameter strategies and
+  the convergence test keep the internal measure — that split is upstream's.
+  The end-of-run "Constraint violation" summary line is **deliberately not
+  changed**: it is bound to "Overall NLP error", which *is* the convergence
+  gate, so reconciling it means deciding whether convergence should be
+  judged on the original NLP — a behaviour change for every model rather
+  than a reporting fix. Tracked in #476.
+
+### Added — pyomo-pounce: `release_kkt()`, the exit of the retention story (#475)
+
+- The held KKT factorization can now be dropped on demand:
+  `release_kkt(model)` frees the factor's memory immediately and
+  returns whether anything was held. Declarations and a prior
+  `retain_kkt()` are untouched, so the next solve keeps its factor
+  again; after release the accessors raise their no-session error.
+  Release drops the model's hold, not a result's: a `Covariance` or
+  `Information` with a pending `conditioned_on`, and a `Gradient`,
+  each hold their own reference and keep working across the release.
+  The retention policy (three ways to keep, one way to release) is
+  stated in one place in the docs.
+
+### Performance — shared `.nl` subexpressions are evaluated once per sweep (#476)
+
+- Constraint values (`eval_g`) now go through a problem-wide tape with a
+  **shared prelude**: every `.nl` defined variable (`V` segment) referenced
+  by two or more summands is evaluated once per sweep instead of once per
+  reference. Previously each summand got an independent flat tape, so a
+  defined variable feeding many rows was re-evaluated for each of them.
+- Invisible on most models, dominant on constraint-heavy ones. Mittelmann's
+  `robot_a` (n = 1001, m = 52013, 12003 defined variables each feeding 13
+  rows) went from 3.6M to 894k tape ops per constraint sweep — 4.0x less
+  arithmetic, on the line search's inner loop. End to end: **22 % faster**
+  on `robot_a`/`robot_c`, with a bit-identical iteration trajectory.
+- `eval_g` / `eval_f` also stopped allocating a `Vec` per summand (~148k
+  allocations per call on `robot_a`, ~20 % of `eval_g`); they reuse the
+  scratch arena `eval_jac_g` / `eval_grad_f` already used.
+- Both are transparent: models using opcodes the shared-prelude path does
+  not support (comparisons, AND/OR/NOT, if-then-else, min/max lists,
+  external functions), and models with nothing shared to hoist, keep the
+  previous path. All 42 `.nl` fixtures in the tree produce identical
+  status, objective and iteration counts.
+- `benchmarks/mittelmann/gen_robot_nl.py` reproduces `robot_a`/`b`/`c` as
+  `.nl` without an AMPL licence. Full investigation, including why the
+  iteration count is inherited from Ipopt rather than a POUNCE weakness:
+  `dev-notes/research/robot-abc-per-iteration-cost.md`.
+
+### Fixed — `NlProblem` can be shared across threads (#477)
+
+- `NlProblem`, `DenseLU` and `SparseLU` were `#[pyclass(unsendable)]`,
+  which gave each instance pyo3's per-object thread affinity. Touching
+  one from a thread other than its creator raised a Rust
+  `PanicException`, and merely *collecting* one on another thread wrote
+  an unraisable `RuntimeError` and leaked the payload — the latter fires
+  for code that never used an instance cross-thread at all, since
+  whichever thread runs the GC inherits every object it frees.
+- `PanicException` derives from `BaseException`, not `Exception`, so it
+  slipped past every ordinary `except Exception` in a host application.
+  In a threaded branch-and-bound host this did not surface as an error:
+  it surfaced as a **wrong answer** — a shared `NlProblem`-backed
+  evaluator reported `infeasible` on a model the reference evaluator
+  solved to optimality, and a false `infeasible` from a global optimizer
+  is a wrong certificate.
+- The marker was a conservative default, not a physical constraint:
+  `NlTnlp` is `Send` (its CSE nodes went `Arc` for #126's batched
+  solving) and the LU factors are owned matrix data. All three classes
+  are now sendable, so one evaluator can be built on one thread and used
+  or dropped on any other. Concurrency is still the GIL's — these calls
+  serialize rather than overlap — so the win is one shared tape instead
+  of one per worker, and the end of the `threading.local` ceremony hosts
+  needed to work around it. `#[test]`s pin `Send` on all three, and the
+  Python suite covers cross-thread evaluation, `variant`, batch solving,
+  and foreign-thread collection.
+- `Solver`, `QpFactorization` and `QpSensitivity` stay `unsendable`:
+  those hold `Rc`-based Ipopt state and non-`Send` linear-solver trait
+  objects, so their affinity is real rather than defensive. Each class
+  now says so at its definition, and `docs/src/python.md` documents which
+  objects cross threads and which do not.
+
+### Fixed — every eigendecomposition now returns sign-pinned eigenvectors (#471)
+
+- An eigenvector's sign is arbitrary: `v` and `-v` are equally valid,
+  and which one came back was decided by the arithmetic that produced
+  it — LAPACK's build convention in `pyomo-pounce`, the Jacobi rotation
+  order in the Rust kernel. The same model, data, and POUNCE version
+  could report `v` on one machine and `-v` on another. Since the
+  documented use is reading the eigenvector as a *direction* ("the
+  parameter combination the data cannot pin down"), the reported
+  direction — and anything that steps along it on a nonlinear model —
+  was not reproducible.
+- One convention now holds everywhere: **the largest-magnitude
+  component of each eigenvector is positive**, ties broken by the
+  earliest row. Applied at both sources — `pounce_linalg::symmetric_eigen`
+  (the single Rust eigensolver, so every surface fed by it inherits it:
+  `SensResult::reduced_hessian_eigenvectors`,
+  `info["reduced_hessian_eigenvectors"]`, the CLI's
+  `_red_hessian_eigenvectors` JSON block, `ReducedHessian.eigenvectors`
+  from both the Rust and Python QP sensitivity APIs) and
+  `pyomo-pounce`'s `Covariance.eigen()` / `Information.eigen()`.
+- Eigenvalues, spans, and any use of the eigenvectors as a subspace are
+  unchanged; internal uses (matrix reconstruction, projectors, Rayleigh
+  quotients, null-space bases) were already sign-invariant. The sign is
+  all this fixes — a repeated eigenvalue still leaves the basis within
+  its eigenspace arbitrary, which the API docs and
+  `docs/src/sensitivity.md` now say.
+- Notebook 31 pinned the sign by hand to keep its committed output
+  stable; that workaround is gone, since the library now guarantees it.
+
+### Added — pyomo-pounce: `retain_kkt()`, factor retention without declarations (covariance roadmap item 4, #262)
+
+- `retain_kkt(model)` keeps the solve's KKT factorization with nothing
+  declared, so `covariance(model, wrt=block)` and
+  `information(model, wrt=block)` work on any block without a declared
+  default: the MHE case, where the arrival state and the parameters
+  are each queried by `wrt=` and neither is THE fitted set.
+  `covariance(model)` with no block stays an error (no default to
+  reduce onto), an undeclared solve without the call pays nothing
+  exactly as before, and retain beside declarations changes nothing
+  (all four rows of the roadmap's table are tested). The retain intent
+  follows `model.clone()` through the registry's deepcopy.
+- The retention policy is now stated in one place (docs and the
+  `retain_kkt` docstring): declarations keep the factor, `retain_kkt()`
+  keeps it without them, and a result object's unread lazy
+  `conditioned_on` keeps the session alive until first access.
+- The no-session errors from both accessors name `retain_kkt()` as the
+  declaration-free route.
+- Demo notebooks for the whole roadmap, written for a reader new to
+  NLP: 31 (information and identifiability: the poorly identified
+  fit, `eigen()` naming the combination the data cannot determine,
+  and zero variance versus finite information at a bound) and 32 (one
+  solve, many questions: `wrt=` marginals, confidence and prediction
+  bands on undeclared prediction variables, `conditioned_on`, and
+  `retain_kkt()` with
+  nothing declared), both committed executed.
+
+### Added — Python: in-memory model construction, Hessian-vector products, and an `erf` tape op (#469)
+
+Everything below already existed in the Rust core; the gap was that none
+of it was reachable from Python, which forced a frontend with its own
+expression DAG (discopt) to round-trip through a temporary `.nl` file.
+
+- **`pounce.build_nl_problem(...)` + `pounce.NlExpr`** — build the
+  expression DAG directly and hand it to the AD tape, with no `.nl` file
+  anywhere in the loop. `NlExpr` supports the Python arithmetic operators
+  (numbers accepted on either side) plus method-form transcendentals
+  (`sqrt exp log log10 sin cos tan asin acos atan sinh cosh tanh asinh
+  acosh atanh erf`) and static-method nodes for the multi-argument /
+  control-flow cases (`sum`, `atan2`, `min`, `max`, `compare`, `select`,
+  `logical_and` / `logical_or` / `logical_not`). The result is the same
+  `NlProblem` class `read_nl` returns, with the same evaluator surface,
+  and it feeds `solve_nlp_batch`.
+  The round trip this replaces was not just slower but *lossy*: `.nl`
+  writers commonly refuse `atan2` (no two-argument funcall path) and
+  `min`/`max` (they force a DNLP model type), and AMPL has no `erf`
+  opcode at all — yet the tape differentiates all three natively.
+- **`pounce.parse_nl_text(text, var_names=None, con_names=None)`** — the
+  same parser `read_nl` uses, fed a string instead of a path, for a
+  frontend that generates `.nl` in memory. Names are passed explicitly
+  since there are no sibling `.col` / `.row` files to read.
+- **`NlProblem.hessian_vector_product(x, v, lam=None, obj_factor=1.0)`**
+  — matrix-free `(obj_factor·∇²f + Σᵢ lamᵢ·∇²gᵢ)·v`, one
+  forward-over-reverse AD pass per tape seeded with `v` directly.
+  `hessian(...)` runs one such pass *per Hessian color* and decodes the
+  compressed columns, so the matrix-free call is cheaper by roughly the
+  chromatic number of the coloring — the operator a Newton–Krylov /
+  truncated-CG step wants on a model where `∇²L` is impractical to form.
+  Available on every `NlProblem` regardless of how it was built.
+  `v` may be a dense length-`n` vector (ndarray of any dtype or stride,
+  list, sequence), a dense `(n, k)` block of directions, or any SciPy
+  sparse vector / `(n, k)` matrix; the result matches the input's shape.
+  A sparse `v` is densified on the way in and all-zero directions are
+  skipped, so a mostly-empty block costs only the live columns — the
+  sparsity that pays is the model's, and every pass is O(tape ops), never
+  O(n²), whichever way `v` arrives. The block form shares one forward
+  sweep per tape across all `k` directions rather than repeating it, which
+  is what makes `p.hessian_vector_product(x, np.eye(n))` a reasonable way
+  to densify the Hessian. The result is always dense: `∇²L·v` is dense in
+  general even when both factors are sparse, and the sparse Hessian itself
+  is already available as `hessian_structure()` + `hessian(x)`.
+  Backed by `NlTnlp::hessian_vector_products` on the Rust side.
+- **`Erf` tape op** (`TapeOp::Erf` / `UnaryOp::Erf`), the one operator in
+  the gap analysis that is not decomposable into ops pounce already had.
+  Value via `libm` (the rust-lang port of musl's libm — the classic
+  Abramowitz–Stegun series is only ~1e-7 accurate, which would cap the
+  achievable KKT residual), derivatives closed-form:
+  `erf'(u) = 2/√π·exp(-u²)`, `erf''(u) = -2u·erf'(u)`, evaluated as
+  `-2·(u·erf'(u))` so the Hessian arms stay finite at magnitudes where
+  `-2u` would overflow while `erf'` has already underflowed. Reachable
+  only through the in-memory path, since no `.nl` opcode maps to it.
+  `HessianProgram`'s `program_supports_op` allowlist does not include it,
+  as it does not include the other transcendentals.
+
+New Rust API alongside the bindings: `NlProblem::from_expressions` /
+`NlProblemParts`, `NlTnlp::hessian_vector_product` /
+`hessian_vector_products`, and `nl_reader::render_expression`.
+
+### Changed — `TapeOp` / `UnaryOp` gained an `Erf` variant (#469)
+
+Source-breaking for any crate outside this workspace that matches on
+either enum exhaustively; nothing in-repo is affected, and no existing
+API changed behavior. Called out under its own heading because a reader
+scanning for breakage should not have to find it inside an `Added` entry.
+
+### Fixed — expression-DAG walks that were exponential in sharing depth (#469)
+
+`collect_vars` and `collect_funcall_ids` re-entered a shared `Expr::Cse`
+body once per reference rather than once per body, making them Θ(2^depth)
+on a subexpression-sharing DAG. Both now memoize on `Arc` pointer
+identity, which cannot change the answer (each collects into a set). This
+was reachable before — `get_variables_linearity` calls `collect_vars`, and
+presolve calls that on every solve — but `build_nl_problem` is a new door
+that makes such a DAG trivially constructible from a frontend. Measured
+on a balanced share-DAG: depth 26 took 3.0 s through
+`get_variables_linearity` and now completes at depth 30 instantly.
+
+### Fixed — a deeply nested expression no longer kills the interpreter (#472)
+
+Every consumer of an `Expr` recurses once per level of nesting — the tape
+builder, the problem assembler, freeing one, and the `.nl` parser that
+produces one — so a deep enough model overran the thread's stack. The
+result was a SIGSEGV rather than an exception: no traceback, nothing to
+catch, and an interactive session lost with it. Both doors reached it, and
+one of them predates the `NlExpr` surface entirely: `read_nl` on a
+generated `.nl` file whose objective is a long `o0` chain died at ~4 000
+levels, inside the parser, before any tape existed.
+
+- **The walks now run on a worker thread with a 64 MB stack**, so what is
+  survivable no longer depends on the calling thread — 8 MB on a
+  macOS/Linux main thread, 1 MB on Windows, less on a `threading.Thread`.
+  That covers the tape build, the assembly, the parse, and the teardown of
+  a problem that holds deep trees.
+- **One depth limit, enforced at both doors.** `NlExpr.max_depth` is now
+  10 000 and `read_nl` / `parse_nl_text` enforce the same number on what
+  they parsed — a model that arrives already built cannot be capped as it
+  is constructed. Past it, a `ValueError` naming the flat alternative
+  (`NlExpr.sum`, or `.nl`'s `o54`). Previously `NlExpr` refused depth
+  1 001 while the parser accepted 3 000 and crashed on 4 000; the limit is
+  now a property of the machinery rather than of the door, and it sits
+  ~3x inside what the worker stack holds even in a debug build.
+- Wide models are unaffected either way: an n-ary sum is one level however
+  many terms it has.
+
+**Building an expression is no longer quadratic.** Every operator used to
+deep-copy both operands, so accumulating in a Python loop copied the whole
+chain on every iteration: 5 000 terms took over five seconds, 40 000 over
+forty. Operands are now *referenced* rather than copied, making an
+operator O(1) whatever it is applied to — that same 5 000-term loop is
+about three milliseconds.
+
+- Reusing a Python name now reuses the subexpression rather than
+  duplicating it. `t = x[0] * x[1]` used ten times is one shared body on
+  the tape — evaluated once per sweep, with its adjoint summing the ten
+  contributions, which is the same value and the same derivatives off a
+  tape a tenth the size. Expressions that are only tractable *because* of
+  the sharing now work at all: `for _ in range(40): e = e * e` describes
+  `x ** 2**40` in 40 nodes and builds, tapes, and differentiates in under
+  a millisecond, where copying would have needed a trillion nodes.
+- What reaches the solver is unchanged for anything not genuinely shared.
+  References that exist only to hand an operand to an operator are inlined
+  when the model is assembled, so `from_expressions` sees the same plain
+  tree it always did — which is what keeps each term of a sum its own
+  tape, and each tape its own small set of Hessian colors.
+
+New Rust API: `NlTnlp::problem_mut`, which is how the Python binding takes
+the expression trees out of a problem to tear them down on a stack sized
+for them.
+
+### Added — pyomo-pounce: `wrt=` block selection on both accessors (covariance roadmap item 3, #262)
+
+- `covariance(m, wrt=...)` and `information(m, wrt=...)` reduce onto
+  any block of the solve's variables off the held factor, post-solve:
+  a Var, an indexed slice, a `(Var, iterable)` pair, data objects, or
+  a mixed list. The declared fitted block is the default, so the
+  no-wrt behavior is untouched (existing suites pass unchanged). Each
+  call re-reduces onto its own argument: one solve, many blocks, each
+  getting that block's marginal.
+- Sigma estimation divides by the FIT's degrees of freedom, a
+  property of the solve, not the block, so sub-block marginals agree
+  exactly with the corresponding entries of the default answer.
+- A rank-deficient block (more coordinates than the fit's degrees of
+  freedom: the prediction-band case, e.g. `wrt=m.r` giving
+  `sigma^2 X(X'X)^-1 X'`) returns the homoscedastic Lagrangian
+  marginal with membership handling bypassed; `information()` refuses
+  it toward `covariance()`. Gated by the count plus a rank test on the
+  block (a within-count but linearly dependent block, e.g. a
+  duplicated design point, takes the same routes with its own
+  message), not by LAPACK, which does not reliably raise on
+  structurally singular blocks; a dedicated `_SingularBlock` exception
+  stands as the last resort. The rank test runs on the diagonally
+  scaled block, so the verdict tracks collinearity and not the unit
+  spread between coordinates: a covariance block carries the square
+  of that spread, and numpy's default tolerance is relative to the
+  largest singular value, so two well-determined parameters far apart
+  in magnitude would otherwise be refused for their units alone.
+- `information()` routes: a manifold-parameterizing block (size equal
+  to the degrees of freedom) gets the exact tangent construction; a
+  sub-block of the fitted set gets its marginal by Schur complement
+  of the exact tangent R over the fitted block, never inverting a
+  covariance, so a pinned member costs no digits; any other block
+  reduces off the held factor with the item-1 corrections, benign for
+  free coordinates (no barrier term in the slice).
+- Strongly active variables OUTSIDE the block come back on the result
+  as `.conditioned_on` (both accessors): the matrix is conditional on
+  those bounds, not marginal over them. Identification is item 1's
+  reduced-level rule applied per candidate as a singleton block (one
+  backsolve gives `(K^-1)_ii`, effective curvature
+  `|1/(K^-1)_ii - Sigma|`, the shipped ratio edges call it):
+  scale-invariant, same theory as the block members, after a cheap
+  `Sigma > sqrt(mu)` prefilter only near-bound variables pay. Computed
+  lazily on first access, so calls that never read it cost nothing
+  extra. Diagnostics stay "fitted parameter"-worded on the default
+  path and speak block-relative only under an explicit wrt=.
+
+### Changed — pyomo-pounce: `information()` rank-gates the free block before the conditional-information solve
+
+- Computing `S`, the information a bound-pinned parameter carries
+  conditional on the rest of the pinned set, takes a Schur complement
+  through the free block. That step previously relied on
+  `np.linalg.solve` raising on a singular free block, which is
+  BLAS- and machine-dependent: the same refusal test flipped
+  pass/fail across adjacent CI runs on the same numpy with no numeric
+  change, because whether the pivot lands on exact zero varies by
+  build. The free block is now rank-tested first (diagonally scaled,
+  as the `wrt=` gates are), so the verdict is deterministic; the
+  exception clause stays as the last resort.
+- This applies on the DEFAULT path, not only under `wrt=`: a
+  numerically dependent free block now raises where it could
+  previously return a large-but-meaningless `S`. Well-conditioned and
+  merely ill-scaled blocks are unaffected — that is what the diagonal
+  scaling buys.
+
+### Fixed — `sparse=True` no longer materializes a dense Jacobian/Hessian to detect the pattern (#464)
+
+- Sparsity detection ran *before* the `if sparse:` branch and evaluated
+  the dense `(m, n)` Jacobian and `(n, n)` Lagrangian Hessian at each
+  probe point, so building a sparse problem was `O(n²)` in memory no
+  matter what `sparse` was set to — and `n_probes` defaults to 3 under
+  `sparse=True`, so the sparse path allocated *more* dense matrices than
+  the dense one. A collocation system at `n = 18144` was killed at ten
+  minutes and 5.5 GB; the pattern for the size actually wanted
+  (`n = 91584`) would have been a 67 TB matrix.
+- Detection now sweeps a *block* of rows (VJPs) or columns (JVPs/HVPs)
+  at a time under a fixed byte budget, reducing each block to index
+  pairs before allocating the next. The AD pass count is unchanged —
+  `jacfwd`/`jacrev` are themselves vmapped JVPs/VJPs over the identity
+  basis — but peak memory drops from `O(n²)` to `O(block·n + nnz)`. The
+  detected pattern is bit-identical to the dense probe's, including
+  row-major ordering. On the banded family above: `n = 18144` now builds
+  in 3.3 s at flat RSS, and every size from 2268 up holds the same peak.
+- **New: `jac_pattern=(rows, cols)` / `hess_pattern=(rows, cols)`** on
+  `from_jax`, `JaxProblem`, `from_torch`, and `TorchProblem`. Supplying
+  either skips detection for that matrix entirely — no probe
+  evaluations, and no probabilistic-detection risk. For a
+  full-discretization method the structure is known in closed form
+  before any numbers exist, so rediscovering it by probing inverts the
+  method's main structural advantage. `n = 91584` with supplied patterns
+  builds in 0.9 s and 0.21 GB. Either may be given alone; the other is
+  still probed. The pattern must be a superset of the true structure —
+  extra entries only report zeros, but a missing entry is silently
+  wrong, and nothing evaluates the model to check. Upper-triangle
+  entries in `hess_pattern` are folded onto their mirror, since `H` is
+  symmetric.
+- The CPR column coloring (`_color_columns`), the other half of the
+  build cost, is now vectorized over CSR/CSC gathers instead of
+  per-column Python dict/set loops: 52 s → 2.5 s on a banded `n = 9072`
+  pattern, with entry-for-entry identical output (tested against the
+  previous implementation as an oracle).
+
+### Added — pyomo-pounce: `information()`, the un-inverted sibling of `covariance()` (covariance roadmap item 2, #262)
+
+- The reduced Hessian over the declared fitted block from the same
+  single solve, natural units, no `sigma^2`: for a homoscedastic
+  Lagrangian fit, `covariance()` equals `2*sigma^2*inv(information())`
+  on the free block (tested). Same `hessian=` selector as
+  `covariance()`.
+- The Lagrangian form is built by TANGENT RECOVERY, not by inverting
+  the covariance back or subtracting the barrier off the factor: the
+  K-inverse columns' x-blocks are `T*M`, so `T = Zx*inv(M)` exactly
+  and `R = T'HT` with the exact Lagrangian Hessian. The barrier
+  weight cancels multiplicatively; measured on a pinned model with
+  `Sigma/q ~ 3e10`, the route is exact to machine precision where the
+  subtraction route loses ten digits. A new session primitive,
+  `Solver.hessian_vec(v)` (user-space, natural units), supplies the
+  products.
+- Dispositions per item 1's table, with the sign of one flipped by
+  design: a strongly active parameter returns `S`, the reduction onto
+  the pinned set, NOT a zero row (zero information is the opposite of
+  what a pinned parameter carries), conditional on the rest of the
+  pinned set, zero cross blocks. Binding rows project the free block
+  on both sides, the pseudo-inverse of the projected covariance
+  (tested against `pinv`). The Gauss-Newton product is formed over
+  ALL fitted parameters and sliced last, so the pinned rows exist to
+  build `S` from. An indefinite Lagrangian block returns as computed
+  with a warning naming Gauss-Newton; the detector is unit-pinned
+  since a genuine minimum is PSD by necessity.
+- `covariance()`'s binding-row conditional-information scalar now
+  comes from the same tangent construction (lazily, only solves with
+  a binding row pay the Hessian products): accurate to ~1e-6 where
+  the factor subtraction lost ten digits, the residue being the
+  binding row's own finite slack-barrier weight in the recovery.
+  Bound and equality activity stays machine-exact; the residue is
+  specific to binding inequality rows, which couple through the
+  slack block.
+- Membership, row handling, and their warnings are shared with
+  `covariance()` (`_classify_fitted_block`), so the two accessors
+  cannot drift.
+- Factor indexing follows the full-x vs var-x discipline of gh #450
+  throughout: fitted and residual rows route through `primal_row`,
+  and the tangent recovery slices the factor's var-x block and
+  scatters back to full-x for `hessian_vec`. Regression: one inert
+  fixed variable ahead of the fitted block changes nothing, both
+  forms.
+
 ### Added — POUNCE runs in the browser (WebAssembly)
 
 - The default build has no C or Fortran dependency, so the whole solver —
@@ -127,6 +556,30 @@ changes.
   became a `cfg(any(unix, windows))` dependency and `ExternalLibrary::load`
   reports that AMPL imported functions are unavailable there rather than
   failing to compile. No change on unix/windows.
+### Fixed — debugger: convex backend answered `print kkt` with a self-referential hint (#462)
+
+- On the convex / conic IPM, `print kkt` replied *"no KKT factorization yet —
+  stop at `after_search_dir`"* — and repeated it verbatim once you were
+  stopped at `after_search_dir`. The advice could never pay off: that backend
+  has no augmented system to report inertia for at any checkpoint, so the
+  suggestion sent a user (or an agent driving `--debug-json`) round a loop
+  with no exit. Diagnostics only; no numerical result was affected.
+- The backend-conditional commands now reject on a **capability** basis
+  before any timing check, matching the documented contract and their
+  siblings (`print rank`, `diagnose`, `resolve`): `print kkt`, `print
+  residuals`, `print active` / `inactive`, `viz kkt`, and `viz L` answer
+  *"only available for the NLP solver (not the convex/conic solver)"*.
+  `print active` previously reported "no bounded variables or inequality
+  slacks" there — a silent no-op the docs explicitly rule out. The NLP
+  filter-IPM is unchanged, including the genuine "not factored yet" hint at
+  a pre-factorization checkpoint.
+- The `hello` handshake is now answered for the backend that is running, so
+  a JSON client feature-detecting off `capabilities` is told the truth:
+  `kkt_inspect`, `diagnose`, `mutate_mu`, `resolve`, `sweep`, `load`, and
+  `structural_diagnose` are `false` on the convex path, `viz` drops to
+  `["block","delta"]`, and `blocks` lists that solver's own iterate blocks
+  (`x`/`s`/`y`/`z`, plus `tau`/`kappa` on HSDE) instead of the NLP names.
+
 ### Fixed — Linux wheels shipped a CLI that could not start on most clusters (#452)
 
 - The published Linux wheels were tagged `manylinux2014` (glibc 2.17) but

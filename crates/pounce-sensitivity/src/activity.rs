@@ -636,6 +636,57 @@ pub(crate) fn row_normal(bs: &PdSensBacksolver, user_row: usize) -> Result<Vec<N
     Ok(full)
 }
 
+/// The exact Lagrangian Hessian times a user-space vector, in user
+/// variable order and **natural (unscaled) units**: the internal
+/// Hessian carries the objective scale, divided out here per the
+/// sensitivity-output contract. Entries for `make_parameter`-removed
+/// fixed variables are 0 in and out (their columns left the solve).
+/// Serves the covariance roadmap's item 2: the tangent-recovered
+/// reduced Hessian is `T^T (H T)`, one product per fitted column.
+pub(crate) fn hessian_vec(bs: &PdSensBacksolver, v_full: &[Number]) -> Result<Vec<Number>, usize> {
+    let (data, cq, nlp) = bs.activity_handles();
+    let n = {
+        let d = data.borrow();
+        d.curr
+            .as_ref()
+            .expect("converged state has an iterate")
+            .x
+            .dim() as usize
+    };
+    let (n_full_x, obj_scale) = {
+        let nl = nlp.borrow();
+        (nl.n_full_x() as usize, nl.obj_scaling_factor())
+    };
+    if v_full.len() != n_full_x {
+        return Err(n_full_x);
+    }
+
+    let nspace = DenseVectorSpace::new(n as i32);
+    let mut v_int = DenseVector::new(nspace.clone());
+    let mut hv = DenseVector::new(nspace);
+    {
+        let nl = nlp.borrow();
+        let vals = v_int.values_mut();
+        vals.fill(0.0);
+        for i in 0..n {
+            vals[i] = v_full[nl.var_x_to_full_x(i as Index) as usize];
+        }
+    }
+    let hess = {
+        let cq = cq.borrow();
+        cq.curr_exact_hessian()
+    };
+    hess.mult_vector(1.0, &v_int, 0.0, &mut hv);
+
+    let nl = nlp.borrow();
+    let mut out = vec![0.0; n_full_x];
+    let h = hv.values_mut();
+    for (i, slot) in h.iter().enumerate() {
+        out[nl.var_x_to_full_x(i as Index) as usize] = *slot / obj_scale;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

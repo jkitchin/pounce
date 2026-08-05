@@ -184,6 +184,239 @@ back to the standard full-space path transparently**, so the hook can never
 break a solve; it only changes *how* the identical system is factored, never
 the solution. Honored on the default feral + exact-Hessian path.
 
+## Building a model in memory (`NlExpr` / `build_nl_problem`)
+
+`pounce.read_nl("model.nl")` gives you pounce's native reverse-mode-AD
+evaluators for an AMPL `.nl` file on disk. Two sibling entry points reach
+the same machinery without a file:
+
+* **`pounce.parse_nl_text(text, var_names=None, con_names=None)`** — the
+  same parser, fed a string. For a frontend that already generates `.nl`,
+  this drops the temp file and its cleanup. There are no sibling
+  `.col` / `.row` files to read, so names are passed explicitly.
+* **`pounce.build_nl_problem(...)`** — skip `.nl` entirely and hand over
+  expression trees built from `pounce.NlExpr`.
+
+Both return the same `NlProblem` class `read_nl` does, with the same
+surface: `objective`, `gradient`, `constraints`, `jacobian` /
+`jacobian_structure`, `hessian` / `hessian_structure`,
+`hessian_vector_product`, and `variant`. They also feed `solve_nlp_batch`.
+
+```python
+import pounce
+
+x = pounce.NlExpr.vars(2)                      # [Var(0), Var(1)]
+rosen = (1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2
+
+p = pounce.build_nl_problem(
+    n=2,
+    objective=rosen,
+    constraints=[x[0] ** 2 + x[1] ** 2],
+    g_l=[0.0], g_u=[2.0],
+    x0=[-1.2, 1.0],
+)
+
+p.objective(p.x0)          # float
+p.gradient(p.x0)           # ndarray[n]
+(x_star, info), = pounce.solve_nlp_batch([p])
+```
+
+Bounds default to unbounded (`±1e19`, the `.nl` sentinel) and `x0` to
+zeros. `minimize=False` maximizes; as with a parsed `maximize` model, the
+returned objective/gradient/Hessian are negated so that minimizing them
+solves the model, and `p.minimize` records the original sense.
+
+`NlExpr` supports the Python arithmetic operators (`+ - * / ** -`, `abs`,
+with plain numbers accepted on either side) plus method-form
+transcendentals: `sqrt exp log log10 sin cos tan asin acos atan sinh cosh
+tanh asinh acosh atanh erf`. Multi-argument and control-flow nodes are
+static methods: `NlExpr.sum(iterable)`, `NlExpr.atan2(y, x)`,
+`NlExpr.min(*args)`, `NlExpr.max(*args)`, `NlExpr.compare(op, a, b)`,
+`NlExpr.select(cond, then_, else_)`, and `NlExpr.logical_and` /
+`logical_or` / `logical_not`.
+
+Comparison is spelled `NlExpr.compare("<", a, b)` rather than `a < b`:
+overloading Python's comparison operators would break every ordinary use
+of an expression in a container. The result is piecewise constant (zero
+derivative), and pairs with `NlExpr.select`.
+
+**Why not just write `.nl`?** Because the round trip is lossy. `.nl`
+writers commonly refuse `atan2` (no two-argument funcall path) and
+`min`/`max` (they force a DNLP model type), and AMPL has no `erf` opcode
+at all — yet pounce's tape differentiates all three natively. Built here,
+they survive:
+
+```python
+x = pounce.NlExpr.vars(2)
+p = pounce.build_nl_problem(n=2, objective=pounce.NlExpr.sum([
+    pounce.NlExpr.atan2(x[0], x[1]),
+    pounce.NlExpr.min(x[0], x[1]),
+    x[0].erf(),
+]))
+```
+
+**Operands are shared, not copied.** `a * b` references its operands
+rather than deep-copying them, so building an expression costs the same
+whether the pieces are two variables or two half-million-node models. Two
+consequences worth knowing:
+
+* Accumulating in a Python loop is linear in the number of terms. It still
+  nests one level deeper per term, though, and nesting is capped (below) —
+  so a many-term sum still belongs in one flat `NlExpr.sum(terms)` node,
+  which tapes better and is one level whatever its length. The same goes
+  for `min` / `max`, flat in their argument count too.
+* Reusing a Python name reuses the subexpression. `t = x[0] * x[1]` used
+  in ten places is one shared body on the tape, evaluated once per sweep,
+  with its adjoint summing the ten contributions — the same value and the
+  same derivatives as writing it out ten times, off a tape a tenth the
+  size. Expressions that are *only* tractable as a DAG work too: `for _ in
+  range(40): e = e * e` is 40 nodes describing `x ** 2**40`, and it builds,
+  tapes, and differentiates in under a millisecond.
+
+```python
+e = pounce.NlExpr.const_(0.0)
+for t in terms:                    # linear, but len(terms) levels deep
+    e = e + t
+
+e = pounce.NlExpr.sum(terms)       # linear and one level — prefer this
+```
+
+**Nesting is capped at `NlExpr.max_depth` (10 000)**, and exceeding it
+raises `ValueError`. Every consumer of an expression — the tape builder,
+the problem assembler, freeing it, and the `.nl` parser that produces one
+— recurses once per level, so a deep enough tree overflows the stack,
+which is a hard crash rather than an exception. Two things keep that
+unreachable: those walks run on a worker thread with a 64 MB stack, so
+what is survivable does not depend on the calling thread (8 MB on a
+macOS/Linux main thread, 1 MB on Windows, less on a `threading.Thread`),
+and the cap then keeps the depth well inside it.
+
+**The same limit applies to `read_nl` and `parse_nl_text`,** which enforce
+it on what they parsed rather than as it is built — a model that arrives
+already built cannot be capped during construction. A `.nl` file that
+spells a long sum as an `o0` (binary `+`) chain rather than `o54` (n-ary
+sum) is the way to hit it. The cap bounds *nesting*, not size: `NlExpr.sum`
+and `o54` are one level regardless of term count, so wide models are
+unaffected. Each expression's `.depth` is readable.
+
+For checking a subexpression before wiring it into a model, `NlExpr` has
+`.eval(x)`, `.gradient(x)`, and `.variables()`, which build a one-off tape
+for that expression alone.
+
+Two things `NlExpr` does not do: it cannot carry AMPL imported (external)
+functions — `build_nl_problem` has nowhere to put the `F`-segment
+declarations that bind them, so use `read_nl` / `parse_nl_text` for a
+model that needs them — and it cannot be pickled. `copy.copy` and
+`copy.deepcopy` do work.
+
+### Hessian-vector products
+
+`NlProblem.hessian_vector_product(x, v, lam=None, obj_factor=1.0)` returns
+`(obj_factor·∇²f + Σᵢ lamᵢ·∇²gᵢ) · v` without ever forming the Hessian —
+one forward-over-reverse AD pass per tape, seeded with `v` directly.
+`hessian(...)` instead runs one such pass *per Hessian color* and decodes
+the compressed columns into the sparse lower triangle, so on a large model
+the matrix-free call is cheaper by roughly the chromatic number of the
+coloring. It is the operator a Newton–Krylov / truncated-CG step wants.
+
+```python
+Hv = p.hessian_vector_product(x, v)                 # objective block only
+Hv = p.hessian_vector_product(x, v, lam, 1.0)       # full Lagrangian
+```
+
+Available on every `NlProblem`, however it was built — `read_nl`,
+`parse_nl_text`, `build_nl_problem`, or `variant`.
+
+**Dense and sparse directions.** `v` may be any of:
+
+| `v` | result |
+|---|---|
+| dense length-`n` vector (ndarray of any dtype or stride, list, sequence) | `(n,)` |
+| dense `(n, k)` array of `k` directions | `(n, k)` |
+| SciPy sparse `(n,)` vector, `(n, 1)` column, or `(n, k)` matrix | matching its shape |
+
+The shape rule is the same dense or sparse: `(n,)` or `(n, k)`. A `(1, n)`
+**row** vector raises rather than being guessed at — for a square-ish
+block it is indistinguishable from `k` directions of the wrong length.
+Watch for this with SciPy sparse *matrices*, which shape a 1-D input as a
+row: `csr_matrix(v)` on a length-`n` `v` is `(1, n)` and will be refused.
+Pass `v[:, None]`, or use the 1-D sparse *array* API — `coo_array(v)` is
+genuinely `(n,)`, on SciPy >= 1.14.
+
+```python
+import scipy.sparse as sp
+
+p.hessian_vector_product(x, sp.csc_matrix(V))   # sparse block of directions
+p.hessian_vector_product(x, np.eye(n))          # densify: H, in one call
+```
+
+A sparse `v` is densified on the way in, and an all-zero direction is
+skipped, so a mostly-empty block costs only the columns that carry signal.
+The sparsity that actually pays here is the *model's*, not `v`'s: every
+pass is `O(tape ops)`, never `O(n²)`, whichever way `v` arrives. On a
+model with a tridiagonal Hessian — the usual IPM shape — that is the whole
+game.
+
+The block form is not just a loop: the forward sweep depends only on `x`,
+so `k` directions share one sweep per tape where `k` separate calls would
+repeat it. Only the forward-tangent and reverse-over-tangent passes are
+per-direction.
+
+**The result is always dense**, including for sparse input. `∇²L · v` is
+dense in general even when both `∇²L` and `v` are sparse, so a sparse
+return type would advertise an economy the product does not have. When you
+want the sparse Hessian itself, `hessian_structure()` + `hessian(x)` give
+it directly as a COO lower triangle:
+
+```python
+hr, hc = p.hessian_structure()
+lower = sp.coo_matrix((p.hessian(x), (hr, hc)), shape=(p.n, p.n)).tocsr()
+H = lower + lower.T - sp.diags(lower.diagonal())    # full symmetric matrix
+```
+
+**NaN and Inf do not spread through structural zeros.** AD never
+multiplies by an entry that is not in the tape, so a NaN in one component
+of `v` stays confined to the variables actually coupled to it. A dense
+`H @ v` computes `0 * nan` and smears NaN across every row. On a
+block-diagonal Hessian with `v = [nan, 0, 1, 0]`, the dense product is
+`[nan nan nan nan]` while the HVP is `[nan nan 2.42 3.08]`. Arguably the
+better semantics, but it does mean the HVP is not bit-equivalent to a
+dense product on non-finite input.
+
+### Sharing one `NlProblem` across threads
+
+An `NlProblem` may be built on one thread and evaluated — or garbage
+collected — on any other. Threaded hosts (a branch-and-bound worker pool,
+a `ThreadPoolExecutor`) can hold **one** shared evaluator rather than one
+tape per worker:
+
+```python
+p = pounce.read_nl("model.nl")
+
+with ThreadPoolExecutor(max_workers=8) as pool:
+    values = list(pool.map(p.objective, points))   # one tape, N workers
+```
+
+The evaluators do not release the GIL, so concurrent calls serialize
+rather than overlap — the win is memory (one copy of the tapes) and the
+absence of thread-affinity ceremony, not parallel throughput. For actual
+parallelism across instances, use
+[`solve_nlp_batch`](#batched-nlp-solving-solve_nlp_batch), which releases
+the GIL and runs the whole batch on a Rayon pool.
+
+`DenseLU` and `SparseLU` carry the same guarantee: factor on one thread,
+back-solve on another.
+
+`Solver`, `QpFactorization` and `QpSensitivity` are the exceptions —
+their held Ipopt / KKT factorizations are genuinely thread-affine, so
+each must be used and released on the thread that created it. Keep them
+in a `threading.local` (not a dict keyed by thread id: CPython clears a
+`threading.local` on the owning thread as it exits, so the object is both
+built and dropped where it belongs), which is what `pounce.jax`'s
+`JaxProblem` does internally. Using one from another thread raises a
+`PanicException` — note that this derives from `BaseException`, so an
+`except Exception` will *not* catch it.
+
 ## Batched NLP solving (`solve_nlp_batch`)
 
 `pounce.solve_nlp_batch` solves N **independent** NLPs and returns one
@@ -564,13 +797,46 @@ on a banded family (`python/benchmarks/bench_sparse_ad_83.py`):
 The color count stays constant in `n` while the dense path grows
 linearly, so the gap widens without bound as the problem scales.
 
-**Pattern detection.** Sparsity is found by probing the dense derivative
-at random points and recording where entries are nonzero. Under
+**Pattern detection.** Sparsity is found by probing the derivative at
+random points and recording where entries are nonzero. Under
 `sparse=True` a mis-probe is costlier — it corrupts the compression
 seed, not just a reported nonzero — so detection unions **3 probes** by
-default (vs 1 for the dense path). Override with `n_probes=`. Truly
-value-dependent structure (branchy `where`/`abs`) should still be
-hand-rolled via the `Problem` API.
+default (vs 1 for the dense path). Override with `n_probes=`.
+
+The probe never materializes the full matrix. It sweeps a *block* of
+rows (VJPs) or columns (JVPs/HVPs) at a time under a fixed byte budget
+and reduces each block to index pairs before allocating the next, so
+build memory is bounded by that budget plus the nonzeros found —
+not `O(n²)` (pounce#464). The AD pass count is unchanged: it is still
+`O(n)` passes, which is what `jacfwd`/`jacrev` would have cost anyway.
+
+**Supplying a known pattern.** For a full-discretization method the
+structure is known in closed form before any numbers exist — element `i`
+couples only to element `i-1`, so the Jacobian is block-banded by
+construction. Rediscovering that by probing is `O(n)` AD passes you
+don't need. Hand it over instead:
+
+```python
+prob = from_jax(
+    f, g, n=n, m=m, cl=cl, cu=cu, sparse=True,
+    jac_pattern=(jac_rows, jac_cols),    # (m, n), cyipopt convention
+    hess_pattern=(hess_rows, hess_cols), # lower triangle of the (n, n) Hessian
+)
+```
+
+Detection is skipped entirely for whichever of the two you supply — the
+other is still probed. `JaxProblem`, `from_torch`, and `TorchProblem`
+take the same two arguments. Upper-triangle entries in `hess_pattern`
+are folded onto their mirror, since `H` is symmetric.
+
+The pattern must be a **superset** of the true structure. Extra entries
+are harmless — they report a zero and may cost an extra color. A
+*missing* entry is silently wrong: the dense path drops that derivative,
+and `sparse=True` aliases it into a same-colored reported entry,
+corrupting the others. Nothing validates this against the model, so the
+contract is yours to keep. This is also the only reliable route for
+truly value-dependent structure (branchy `where`/`abs`), which no random
+probe can detect.
 
 ### Differentiable solve
 

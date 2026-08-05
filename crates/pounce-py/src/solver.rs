@@ -33,6 +33,22 @@ use std::rc::Rc;
 use crate::problem::{PyProblem, build_info_dict};
 
 /// Session-style wrapper around [`pounce_sensitivity::Solver`].
+//
+// Still `unsendable`, unlike `NlProblem` / `DenseLU` / `SparseLU`
+// (pounce#477). This one is not a policy default: `RustSolver` is
+// genuinely `!Send` — the ported Ipopt object graph is `Rc`-based
+// (`Rc<RefCell<dyn TNLP>>`, `Rc<RegisteredOptions>`, `Rc<Journalist>`,
+// …) and holds non-`Send` linear-solver and restoration trait objects,
+// so there is nothing to drop the marker in favor of.
+//
+// The cost is the one #477 describes: a cross-thread call raises
+// `PanicException` (a `BaseException`, so `except Exception` misses it)
+// and a foreign-thread collection writes an unraisable and leaks. The
+// Python layer keeps `Solver` instances on their creating thread via
+// `threading.local` for exactly this reason — see
+// `pounce/jax/_problem.py`. Trading the panic for a catchable error
+// would mean an `unsafe impl Send` wrapper doing the affinity check by
+// hand; not worth it while the callers are already thread-pinned.
 #[pyclass(name = "Solver", module = "pounce._pounce", unsendable)]
 pub struct PySolver {
     /// Reference to the owning Python `Problem`. Used to re-prepare an
@@ -519,6 +535,25 @@ impl PySolver {
         out.set_item("row_contaminated", rep.row_contaminated)?;
         out.set_item("row_sigma", rep.row_sigma.into_pyarray_bound(py))?;
         Ok(out)
+    }
+
+    /// The exact Lagrangian Hessian times a user-space vector, as an
+    /// ndarray in user variable order and natural units (the internal
+    /// Hessian's objective scale is divided out, matching the
+    /// sensitivity-output contract). Entries for fixed (`lb == ub`)
+    /// variables are 0 in and out. One product per call; the
+    /// covariance roadmap's item 2 builds the tangent-recovered
+    /// reduced Hessian from these.
+    fn hessian_vec<'py>(
+        &self,
+        py: Python<'py>,
+        v: Vec<Number>,
+    ) -> PyResult<Bound<'py, PyArray1<Number>>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("hessian_vec: no converged factor (call solve() first)")
+        })?;
+        let out = s.inner.hessian_vec(&v).map_err(solver_error_to_py)?;
+        Ok(out.into_pyarray_bound(py))
     }
 
     /// The gradient of user constraint row `j` at the converged

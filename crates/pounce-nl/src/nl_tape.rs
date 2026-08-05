@@ -58,6 +58,14 @@ pub enum TapeOp {
     Acosh(usize),
     Asinh(usize),
     Atanh(usize),
+    /// Gauss error function `erf(vals[a])` (issue #469). Unlike the other
+    /// transcendentals here it has no AMPL `.nl` opcode — AMPL has no `erf`
+    /// — so it is reachable only through the in-memory `Expr` path
+    /// (`UnaryOp::Erf`), which is exactly the case it was added for:
+    /// modeling frontends that build a tape directly instead of round-
+    /// tripping through `.nl`. Smooth everywhere, with closed-form
+    /// derivatives `erf'(u) = 2/√π·exp(-u²)` and `erf''(u) = -2u·erf'(u)`.
+    Erf(usize),
     /// Two-argument arctangent `atan2(vals[a], vals[b])` (operands are
     /// `(y, x)`, matching AMPL's `atan2(y, x)` / `.nl` opcode o48).
     Atan2(usize, usize),
@@ -113,6 +121,41 @@ pub struct FuncallData {
 pub enum TapeFuncallArg {
     Tape(usize),
     Str(String),
+}
+
+/// Gauss error function, the value arm of [`TapeOp::Erf`].
+///
+/// Delegates to `libm` (the rust-lang port of musl's libm) rather than a
+/// series approximation: `erf` shows up inside residuals, so a 1e-7-accurate
+/// Abramowitz–Stegun fit would cap the achievable KKT error well above what
+/// the IPM asks for.
+#[inline]
+pub(crate) fn erf(u: f64) -> f64 {
+    libm::erf(u)
+}
+
+/// `erf'(u) = 2/√π · exp(-u²)`.
+///
+/// The AD sweeps all call this (rather than each inlining the constant) so
+/// the tangent and adjoint arms of [`TapeOp::Erf`] cannot drift apart.
+#[inline]
+pub(crate) fn erf_d1(u: f64) -> f64 {
+    std::f64::consts::FRAC_2_SQRT_PI * (-u * u).exp()
+}
+
+/// `erf''(u) = -2u · erf'(u)`.
+///
+/// Parenthesized as `-2·(u·erf'(u))`, not `(-2·u)·erf'(u)`. The two differ
+/// at the top of the range: `erf_d1` underflows to `0.0` around `|u| > 27`,
+/// while `-2.0 * u` overflows to `±inf` for `|u| > f64::MAX/2`, and
+/// `inf * 0.0` is `NaN` where the true limit is `0`. Multiplying `u` into
+/// the already-underflowed derivative first keeps every finite magnitude
+/// finite. (`u = ±inf` is `NaN` either way, correctly — the model has
+/// already left the reals by then.) Only the Hessian arms read this; the
+/// value and gradient arms are unaffected.
+#[inline]
+pub(crate) fn erf_d2(u: f64) -> f64 {
+    -2.0 * (u * erf_d1(u))
 }
 
 /// Evaluate a relational opcode on two scalar values, returning the
@@ -223,6 +266,7 @@ impl Tape {
                 TapeOp::Acosh(a) => vals[*a].acosh(),
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Erf(a) => erf(vals[*a]),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
                 TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
                 TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
@@ -415,6 +459,9 @@ impl Tape {
                     let u = vals[*j];
                     adj[*j] += a / (1.0 - u * u);
                 }
+                TapeOp::Erf(j) => {
+                    adj[*j] += a * erf_d1(vals[*j]);
+                }
                 TapeOp::Atan2(l, r) => {
                     let y = vals[*l];
                     let x = vals[*r];
@@ -572,6 +619,7 @@ impl Tape {
                     let u = vals[*a];
                     dot[*a] / (1.0 - u * u)
                 }
+                TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
@@ -653,6 +701,7 @@ impl Tape {
                 TapeOp::Acosh(a) => vals[*a].acosh(),
                 TapeOp::Asinh(a) => vals[*a].asinh(),
                 TapeOp::Atanh(a) => vals[*a].atanh(),
+                TapeOp::Erf(a) => erf(vals[*a]),
                 TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
                 TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
                 TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
@@ -675,6 +724,25 @@ impl Tape {
                 }
             };
         }
+    }
+
+    /// Scalar tape value, reusing a caller-supplied scratch buffer
+    /// (`vals.len() >= self.ops.len()`) instead of allocating a fresh
+    /// forward-value `Vec` per call like [`eval`]. The `.nl` design emits
+    /// one tiny tape per summand — 10⁵–10⁶ on large models — so a single
+    /// `eval_f` / `eval_g` drives this once per summand and the per-call
+    /// allocation dominated the sweep itself (same motivation as
+    /// [`gradient_seed_into`], M18).
+    ///
+    /// [`eval`]: Tape::eval
+    /// [`gradient_seed_into`]: Tape::gradient_seed_into
+    pub fn eval_into(&self, x: &[f64], vals: &mut [f64]) -> f64 {
+        let n = self.ops.len();
+        if n == 0 {
+            return 0.0;
+        }
+        self.forward_into(x, vals);
+        vals[n - 1]
     }
 
     /// Directional Hessian-vector product: emits
@@ -795,6 +863,7 @@ impl Tape {
                     let u = vals[*a];
                     dot[*a] / (1.0 - u * u)
                 }
+                TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
                 TapeOp::Atan2(a, b) => {
                     let y = vals[*a];
                     let x = vals[*b];
@@ -1053,6 +1122,13 @@ impl Tape {
                     let d = 1.0 - u * u;
                     let gp = 1.0 / d;
                     let gpp = 2.0 * u / (d * d);
+                    adj[*a] += w * gp;
+                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                }
+                TapeOp::Erf(a) => {
+                    let u = vals[*a];
+                    let gp = erf_d1(u);
+                    let gpp = erf_d2(u);
                     adj[*a] += w * gp;
                     adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                 }
@@ -1367,6 +1443,13 @@ impl Tape {
                         adj[*a] += w * gp;
                         adj_dot[*a] += wd * gp + w * gpp * dot[*a];
                     }
+                    TapeOp::Erf(a) => {
+                        let u = v[*a];
+                        let gp = erf_d1(u);
+                        let gpp = erf_d2(u);
+                        adj[*a] += w * gp;
+                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    }
                     TapeOp::Atan2(a, b) => {
                         let y = v[*a];
                         let x = v[*b];
@@ -1506,6 +1589,7 @@ impl Tape {
                 | TapeOp::Asin(a)
                 | TapeOp::Acosh(a)
                 | TapeOp::Asinh(a)
+                | TapeOp::Erf(a)
                 | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], &mut pairs);
                     var_sets[*a].clone()
@@ -1630,6 +1714,7 @@ fn build_recursive(
                 UnaryOp::Acosh => TapeOp::Acosh(v),
                 UnaryOp::Asinh => TapeOp::Asinh(v),
                 UnaryOp::Atanh => TapeOp::Atanh(v),
+                UnaryOp::Erf => TapeOp::Erf(v),
             });
             idx
         }
@@ -1894,7 +1979,7 @@ pub struct Summand {
     pub all_vars: Vec<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HybridTape {
     /// Shared CSE bodies. Slot indices in `SummandOp::Shared`
     /// point here; this Vec is built bottom-up by `build_recursive`,
@@ -2219,6 +2304,46 @@ impl HybridTape {
 /// summand path raises. Pre-scanning makes both paths report the same
 /// reason. (Funcalls are unsupported on the hybrid path regardless of
 /// whether the id would resolve, so this never rejects a buildable tape.)
+/// Whether [`HybridTape::build_multi`] can build `exprs`, i.e. none of
+/// them uses an opcode the hybrid (partial-separability) path rejects:
+/// comparisons, AND/OR/NOT, if-then-else, min/max lists, or AMPL external
+/// function calls. `build_into_summand` *panics* on those, so a caller
+/// choosing between the hybrid path and the flat [`Tape`] path has to ask
+/// first — there is nothing to catch.
+///
+/// Walks with an explicit stack (expression DAGs from `.nl` files can be
+/// deeper than the default thread stack) and visits each shared CSE body
+/// once, so the cost is linear in the DAG rather than in its unfolding.
+pub fn hybrid_supported(exprs: &[Expr]) -> bool {
+    let mut stack: Vec<&Expr> = exprs.iter().collect();
+    let mut seen_cse: HashSet<*const Expr> = HashSet::new();
+    while let Some(e) = stack.pop() {
+        match e {
+            Expr::Const(_) | Expr::Var(_) => {}
+            Expr::Binary(_, a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            Expr::Unary(_, a) => stack.push(a),
+            Expr::Sum(args) => stack.extend(args.iter()),
+            Expr::Cse(body) => {
+                if seen_cse.insert(Arc::as_ptr(body)) {
+                    stack.push(body);
+                }
+            }
+            Expr::Compare(..)
+            | Expr::And(..)
+            | Expr::Or(..)
+            | Expr::Not(_)
+            | Expr::Cond { .. }
+            | Expr::MinList(_)
+            | Expr::MaxList(_)
+            | Expr::Funcall { .. } => return false,
+        }
+    }
+    true
+}
+
 fn cse_contains_funcall(expr: &Expr) -> bool {
     match expr {
         Expr::Funcall { .. } => true,
@@ -2358,6 +2483,7 @@ fn build_into_summand(
                 UnaryOp::Acosh => TapeOp::Acosh(v),
                 UnaryOp::Asinh => TapeOp::Asinh(v),
                 UnaryOp::Atanh => TapeOp::Atanh(v),
+                UnaryOp::Erf => TapeOp::Erf(v),
             }));
             i
         }
@@ -2640,6 +2766,7 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Asin(a)
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
+            | TapeOp::Erf(a)
             | TapeOp::Atanh(a) => out[*a].clone(),
             TapeOp::Cmp(_, _, _)
             | TapeOp::And(_, _)
@@ -2733,6 +2860,7 @@ fn summand_sparsity(
                 | TapeOp::Asin(a)
                 | TapeOp::Acosh(a)
                 | TapeOp::Asinh(a)
+                | TapeOp::Erf(a)
                 | TapeOp::Atanh(a) => {
                     emit_self(&var_sets[*a], pairs);
                     var_sets[*a].clone()
@@ -2786,6 +2914,7 @@ fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Asin(a)
         | TapeOp::Acosh(a)
         | TapeOp::Asinh(a)
+        | TapeOp::Erf(a)
         | TapeOp::Atanh(a) => (Some(*a), None),
         // Conditional / logical TapeOps never reach the HybridTape
         // operand-walk (build_into_summand rejects them). Cmp/And/Or
@@ -2846,6 +2975,7 @@ fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
         TapeOp::Acosh(a) => vals[*a].acosh(),
         TapeOp::Asinh(a) => vals[*a].asinh(),
         TapeOp::Atanh(a) => vals[*a].atanh(),
+        TapeOp::Erf(a) => erf(vals[*a]),
         TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -2972,6 +3102,9 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
             let u = vals[*j];
             adj[*j] += a / (1.0 - u * u);
         }
+        TapeOp::Erf(j) => {
+            adj[*j] += a * erf_d1(vals[*j]);
+        }
         TapeOp::Atan2(l, r) => {
             let y = vals[*l];
             let x = vals[*r];
@@ -3097,6 +3230,7 @@ fn fwd_tan_step(op: &TapeOp, seed_var: usize, vals: &[f64], dot: &[f64], i: usiz
             let u = vals[*a];
             dot[*a] / (1.0 - u * u)
         }
+        TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
@@ -3350,6 +3484,13 @@ fn ror_step(
             adj[*a] += w * gp;
             adj_dot[*a] += wd * gp + w * gpp * dot[*a];
         }
+        TapeOp::Erf(a) => {
+            let u = vals[*a];
+            let gp = erf_d1(u);
+            let gpp = erf_d2(u);
+            adj[*a] += w * gp;
+            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+        }
         TapeOp::Atan2(a, b) => {
             let y = vals[*a];
             let x = vals[*b];
@@ -3479,6 +3620,7 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             | TapeOp::Asin(a)
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
+            | TapeOp::Erf(a)
             | TapeOp::Atanh(a) => {
                 emit_self(&var_sets[*a], &mut pairs);
                 var_sets[*a].clone()
@@ -3770,6 +3912,120 @@ mod tests {
             mul(var(0), var(2)),
         ]);
         grad_and_hess_match_fd(&e, &[0.4, 1.8, 0.3], 1e-5);
+    }
+
+    #[test]
+    fn erf_value_matches_reference() {
+        // Reference values from the standard erf (musl / C99), to full
+        // double precision. Pinning these guards the `libm` delegation:
+        // a swap to a series approximation would fail here long before it
+        // showed up as a mysteriously loose KKT residual.
+        let t = Tape::build(&unary(UnaryOp::Erf, var(0)));
+        for (x, want) in [
+            (0.0, 0.0),
+            (0.5, 0.520_499_877_813_046_5),
+            (1.0, 0.842_700_792_949_714_9),
+            (-1.0, -0.842_700_792_949_714_9),
+            (2.0, 0.995_322_265_018_952_7),
+            (3.0, 0.999_977_909_503_001_4),
+        ] {
+            let got = t.eval(&[x]);
+            assert!(
+                (got - want).abs() < 1e-15,
+                "erf({x}): got {got:.17e}, want {want:.17e}"
+            );
+        }
+        // Odd and saturating: the two properties a wrong implementation
+        // most often breaks.
+        assert!((t.eval(&[-0.3]) + t.eval(&[0.3])).abs() < 1e-16);
+        assert!((t.eval(&[10.0]) - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn erf_second_derivative_stays_finite_at_extreme_magnitudes() {
+        // `erf_d1` underflows to 0 around |u| > 27, and `-2.0 * u`
+        // overflows to ±inf past f64::MAX/2. Written as `(-2u)·erf'(u)`
+        // the two meet as `inf * 0.0 = NaN`, where the true limit is 0.
+        // Parenthesizing as `-2·(u·erf'(u))` keeps every finite input
+        // finite. Nothing in a well-posed model reaches 1e308 — `.nl`'s
+        // unbounded sentinel is 1e19 — but the Python binding now takes an
+        // unguarded `x`, and a NaN Hessian entry poisons a whole factorization.
+        for u in [1e19, 1e150, 1e300, f64::MAX, f64::MAX / 2.0] {
+            for signed in [u, -u] {
+                let d2 = erf_d2(signed);
+                assert!(
+                    d2.is_finite(),
+                    "erf_d2({signed:e}) = {d2} — must be finite (the limit is 0)"
+                );
+            }
+        }
+        // Still correct where it matters: -2u·erf'(u) at a normal point.
+        let u = 0.7;
+        let want = -2.0 * u * (2.0 / std::f64::consts::PI.sqrt()) * (-u * u).exp();
+        assert!((erf_d2(u) - want).abs() < 1e-15, "{}", erf_d2(u));
+    }
+
+    #[test]
+    fn erf_grad_and_hessian_match_fd() {
+        // f = erf(x0) + erf(2*x1) + x0*x1. The inner `2*x1` makes the
+        // chain rule non-trivial, so a missing factor in the tangent or
+        // adjoint arm shows up rather than cancelling.
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Erf, var(0)),
+            unary(UnaryOp::Erf, mul(cnst(2.0), var(1))),
+            mul(var(0), var(1)),
+        ]);
+        grad_and_hess_match_fd(&e, &[0.4, -0.7], 1e-5);
+    }
+
+    #[test]
+    fn erf_directional_hessian_matches_accumulated() {
+        // `hessian_directional` (the HVP / coloring sweep) and
+        // `hessian_accumulate` (the sparse-entry sweep) are separate
+        // match arms over the same op — the easiest place for an erf
+        // second derivative to be right in one and wrong in the other.
+        let e = Expr::Sum(vec![
+            unary(UnaryOp::Erf, var(0)),
+            unary(UnaryOp::Erf, mul(var(0), var(1))),
+        ]);
+        let tape = Tape::build(&e);
+        let x = [0.6, -0.9];
+        let n = x.len();
+
+        let pairs: Vec<(usize, usize)> = tape.hessian_sparsity().into_iter().collect();
+        let hess_map: HashMap<(usize, usize), usize> =
+            pairs.iter().enumerate().map(|(k, p)| (*p, k)).collect();
+        let mut acc = vec![0.0; pairs.len()];
+        tape.hessian_accumulate(&x, 1.0, &hess_map, &mut acc);
+
+        // One directional product per unit seed reproduces column j.
+        let ops = tape.ops.len();
+        let mut vals = vec![0.0; ops];
+        tape.forward_into(&x, &mut vals);
+        for j in 0..n {
+            let mut seed = vec![0.0; n];
+            seed[j] = 1.0;
+            let mut col = vec![0.0; n];
+            let (mut dot, mut adj, mut adj_dot) = (vec![0.0; ops], vec![0.0; ops], vec![0.0; ops]);
+            tape.hessian_directional(
+                &vals,
+                &seed,
+                1.0,
+                &mut col,
+                &mut dot,
+                &mut adj,
+                &mut adj_dot,
+            );
+            for i in 0..n {
+                let (r, c) = if i >= j { (i, j) } else { (j, i) };
+                let want = hess_map.get(&(r, c)).map_or(0.0, |&k| acc[k]);
+                assert!(
+                    (col[i] - want).abs() < 1e-12,
+                    "H[{i},{j}]: directional={:.6e} accumulated={want:.6e}",
+                    col[i]
+                );
+            }
+        }
     }
 
     #[test]

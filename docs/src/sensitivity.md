@@ -51,6 +51,23 @@ let result = SensSolve::new(vec![2, 3])
 `with_reduced_hessian_eigen()` adds the eigendecomposition;
 `with_boundcheck(eps)` enables the bound projection.
 
+### Eigenvector sign convention
+
+Every eigendecomposition POUNCE hands back — the reduced Hessian's
+here and through the CLI and Python wrappers, the QP one from
+`QpSensitivity.reduced_hessian`, and `covariance().eigen()` /
+`information().eigen()` in `pyomo-pounce` — returns **sign-pinned**
+eigenvectors: the largest-magnitude component of each column is
+positive, ties broken by the earliest row. `v` and `-v` are equally
+valid eigenvectors, so without a convention the direction you read
+back depends on the arithmetic that produced it and is not
+reproducible across builds or machines.
+
+The sign is all that is pinned. A repeated eigenvalue leaves the basis
+*within* its eigenspace arbitrary — any rotation of those columns
+diagonalizes equally well — so read a degenerate block as a subspace,
+not column by column.
+
 ## Python
 
 `solve_with_sens` exposes the same capability from the
@@ -267,7 +284,13 @@ the sandwich is the truthful report on the unweighted fit.
 An eigenvalue much larger than the rest flags a poorly identified
 problem: its eigenvector is the parameter combination the data cannot
 pin down, and the corresponding `cov.correlation` entries approach
-+/-1. `covariance` warns when the held factor carries
++/-1. The returned signs follow the project-wide
+[eigenvector sign convention](#eigenvector-sign-convention) —
+**the largest-magnitude component of each eigenvector is positive**,
+ties broken by the earliest position in `cov.params` — so the
+direction reproduces across machines instead of coming back as
+whatever LAPACK's build chose. `information().eigen()` is the same.
+`covariance` warns when the held factor carries
 inertia-correction perturbations (typically an exactly unidentifiable
 parameterization) and when the covariance diagonal comes out negative
 (not a least-squares minimum).
@@ -420,6 +443,138 @@ tests the value that solve ran under, so setting the option after the
 fact does not change the answer — set it on the `Problem` and solve
 again.
 
+## The information matrix
+
+`information(model)` is the un-inverted sibling of `covariance()`: the
+reduced Hessian over the declared fitted block, from the same single
+solve, in natural units with no `sigma^2` anywhere. For a homoscedastic
+Lagrangian fit, `covariance()` equals `2*sigma^2*inv(information())` on
+the free block. `hessian=` selects the observed (`"lagrangian"`,
+default) or expected (`"gauss-newton"`) form exactly as in
+`covariance()`.
+
+The Lagrangian form is built by tangent recovery against the held
+factorization rather than by inverting the covariance back: the
+K-inverse columns' x-blocks are `T*M`, so `T = Zx*inv(M)` exactly and
+`R = T'HT` with the exact Lagrangian Hessian. The barrier weight
+cancels multiplicatively, so equality and variable-bound activity
+carries machine precision at any barrier parameter, including on
+pinned parameters where a subtract-the-barrier route loses
+`log10(Sigma/q)` digits. A binding inequality row is the one
+exception: it couples through its slack barrier and leaves ~1e-6
+relative residue at practical barrier parameters.
+
+Membership and warnings follow `covariance()`. One disposition is
+opposite by design: a strongly active (pinned) parameter's entry is
+`S`, the reduction onto the pinned set, NOT a zero row — zero
+information is the opposite of what a pinned parameter carries —
+conditional on the rest of the pinned set, with zero cross blocks to
+the free parameters. Binding constraint rows project the free block on
+both sides (the pseudo-inverse of the projected covariance). An
+indefinite Lagrangian block is returned as computed with a warning
+naming Gauss-Newton as the PSD alternative: refusing would withhold
+the finding that the point is not a minimum or the model is
+over-parameterized. `eigen()` reads identifiability directly: a
+near-zero eigenvalue is a direction the data does not inform; its
+eigenvector's sign follows the project-wide
+[convention](#eigenvector-sign-convention).
+
+## Choosing the block: wrt=
+
+Both accessors take `wrt=` to reduce onto any block of the solve's
+variables off the held factor, post-solve; the declared fitted block is
+the default, so omitting it is exactly the prior behavior. Accepted
+forms: a Var (scalar or indexed, every member), an indexed slice
+(`m.x[2, :]`), a `(Var, iterable)` pair, data objects, or a list mixing
+these.
+
+```python
+cov = covariance(m)                      # the fitted block, as before
+cov_a = covariance(m, wrt=[m.a])         # one parameter's marginal
+band = covariance(m, wrt=m.r)            # a predicted trajectory
+info_a = information(m, wrt=[m.a])
+```
+
+Each call re-reduces onto its own argument, so one solve serves as many
+blocks as are asked about, and each block gets its MARGINAL: everything
+outside it is profiled out, not held fixed. Sigma estimation always
+divides by the fit's own degrees of freedom (a property of the solve,
+not of the question being asked), so a sub-block's numbers agree
+exactly with the corresponding entries of the default answer.
+
+A rank-deficient block, one with more coordinates than the fit has
+degrees of freedom or with linearly dependent coordinates (a
+duplicated design point), is the trajectory-band case: `covariance()`
+returns its (rank-deficient) marginal, `2 sigma^2 M`, the confidence
+band on the fitted trajectory (add the observation noise for a
+prediction band), with the membership handling bypassed, and
+`information()` raises an error pointing to `covariance()`, since such
+a block carries no information matrix. For `information()`,
+a block that parameterizes the constraint manifold (size equal to the
+degrees of freedom) gets the exact tangent construction; a sub-block of
+the fitted set gets its marginal as a Schur complement of the exact
+tangent R over the fitted block (never inverting a covariance, so a
+pinned member costs no digits); other blocks reduce off the held factor
+with the item-1 corrections, which is benign for free coordinates.
+
+One exception is returned rather than hidden: a strongly active
+variable OUTSIDE the block is not deleted from the factor, so the
+block's numbers are the values conditional on that bound, not the
+marginal over it. The result carries the list as `.conditioned_on`
+(empty when there is none); inside-block activity is membership, not
+conditioning, and is handled as before. The list is decided by the
+same classification the block members get, applied per candidate as a
+singleton block, so it is scale-invariant; only near-bound variables
+pay the extra backsolve.
+
+## Keeping and releasing the factor: retain_kkt(), release_kkt()
+
+The solve factors the KKT matrix to solve the NLP; the only question is
+whether that factor is kept for post-solve queries. Any declaration
+keeps it. `retain_kkt(model)` keeps it with no declaration at all,
+which is what `wrt=` queries with nothing declared need: the MHE case,
+where the arrival state and the parameters are each queried by `wrt=`
+and neither is THE fitted set. It defaults off, so a solve with no
+sensitivity pays nothing.
+
+```python
+retain_kkt(m)
+SolverFactory("pounce").solve(m)
+arrival = covariance(m, sigma_sq=s2, wrt=m.x[:, t0])
+params = information(m, wrt=[m.k1, m.k2])
+release_kkt(m)          # done asking: give the memory back now
+```
+
+| setup | factor kept | `covariance(model)` | `covariance(model, wrt=T)` |
+|---|---|---|---|
+| nothing | no | error | error |
+| `declare_fitted(S)` | yes | over S | over T |
+| `retain_kkt()` only | yes | error, no default | over T |
+| `retain_kkt()` + `declare_fitted(S)` | yes | over S | over T |
+
+The retention policy in one place: the factor is kept if anything is
+declared or `retain_kkt()` was called, and a `Covariance` or
+`Information` result whose lazy `conditioned_on` has not been read
+keeps the session alive through its pending computation until first
+access. `release_kkt(model)` is the exit: it drops the model's hold
+on the factor immediately, freeing the memory, while declarations and
+the retain flag still apply to the next solve. Release drops the
+model's hold, not a result's: a `Covariance` or `Information` with a
+pending `conditioned_on`, and a `Gradient` (which reads the factor on
+every lookup), each hold their own reference, so they keep working
+across the release and keep the factor in memory until they are
+discarded. Noise is a separate question: `retain_kkt()` keeps the
+factor, not a noise model, and with nothing declared fitted the
+degrees of freedom for a noise ESTIMATE are unknown, so
+`covariance()` under retain-only needs `sigma_sq=`; the estimation
+routes (declared residuals, `n_data=`) raise an error saying so.
+
+Like any declaration, `retain_kkt()` routes the solve through the
+in-process sensitivity path, whose `solve()` surface is not
+keyword-identical to the ordinary subprocess path (for example,
+`load_solutions=False` is not honored there). Adding it to an
+existing script changes how the solve runs, not just what is kept.
+
 ## Units and NLP scaling
 
 All sensitivity outputs are in **natural (unscaled) units**. The IPM
@@ -439,10 +594,11 @@ them fixed. Writing a constraint as `1000·x ≥ 0` instead of `x ≥ 0`
 does not move a status, and neither does the solver's own per-row
 `d_scale`. The values the report exports follow the natural-units
 contract like everything else: `var_sigma` and `row_sigma` are the
-barrier diagonals in the model's own units, and `row_normal(j)` is the
-constraint gradient with the solver's per-row scale divided out;
-classification happens on the scaled quantities internally, the report
-never shows them.
+barrier diagonals in the model's own units, `row_normal(j)` is the
+constraint gradient with the solver's per-row scale divided out, and
+`hessian_vec(v)` is the exact Lagrangian Hessian times a user-space
+vector with the objective scale divided out; classification happens on
+the scaled quantities internally, the report never shows them.
 
 **Variable indices are user-space, factor rows are not.** Everything
 the sensitivity API reports or accepts — the `.col` file's order, the

@@ -481,6 +481,7 @@ impl HessianProgram {
                 | TapeOp::Asin(_)
                 | TapeOp::Acosh(_)
                 | TapeOp::Asinh(_)
+                | TapeOp::Erf(_)
                 | TapeOp::Atanh(_)
                 | TapeOp::Atan2(_, _)
                 | TapeOp::Cmp(_, _, _)
@@ -491,7 +492,7 @@ impl HessianProgram {
                 | TapeOp::Min(_, _)
                 | TapeOp::Max(_, _) => unreachable!(
                     "HessianProgram path does not yet support tan/atan/acos, the \
-                     other transcendental opcodes, atan2, min/max, or \
+                     other transcendental opcodes including erf, atan2, min/max, or \
                      conditional / logical opcodes; use the Tape \
                      (build_with_externals) interpreter path instead."
                 ),
@@ -619,6 +620,7 @@ impl HessianProgram {
                     | TapeOp::Asin(_)
                     | TapeOp::Acosh(_)
                     | TapeOp::Asinh(_)
+                    | TapeOp::Erf(_)
                     | TapeOp::Atanh(_)
                     | TapeOp::Atan2(_, _)
                     | TapeOp::Cmp(_, _, _)
@@ -629,7 +631,7 @@ impl HessianProgram {
                     | TapeOp::Min(_, _)
                     | TapeOp::Max(_, _) => unreachable!(
                         "HessianProgram path does not yet support tan/atan/acos, the \
-                         other transcendental opcodes, atan2, min/max, or \
+                         other transcendental opcodes including erf, atan2, min/max, or \
                          conditional / logical opcodes; use the Tape \
                          (build_with_externals) interpreter path instead."
                     ),
@@ -791,6 +793,7 @@ impl HessianProgram {
                     | TapeOp::Asin(_)
                     | TapeOp::Acosh(_)
                     | TapeOp::Asinh(_)
+                    | TapeOp::Erf(_)
                     | TapeOp::Atanh(_)
                     | TapeOp::Atan2(_, _)
                     | TapeOp::Cmp(_, _, _)
@@ -801,7 +804,7 @@ impl HessianProgram {
                     | TapeOp::Min(_, _)
                     | TapeOp::Max(_, _) => unreachable!(
                         "HessianProgram path does not yet support tan/atan/acos, the \
-                         other transcendental opcodes, atan2, min/max, or \
+                         other transcendental opcodes including erf, atan2, min/max, or \
                          conditional / logical opcodes; use the Tape \
                          (build_with_externals) interpreter path instead."
                     ),
@@ -1245,7 +1248,7 @@ impl HessianProgram {
 /// Whether [`HessianProgram::compile`] can lower a single opcode. The
 /// program path covers smooth arithmetic plus `sin`/`cos`; every other
 /// opcode — AMPL external `Funcall`, the remaining transcendentals
-/// (`tan`/`atan`/`acos`/the hyperbolics/`asin`…) and `atan2`, and the
+/// (`tan`/`atan`/`acos`/the hyperbolics/`asin`/`erf`…) and `atan2`, and the
 /// `min`/`max`/conditional/logical family — is unsupported, so `compile`
 /// returns `None` and the caller falls back to the `Tape`
 /// (`build_with_externals`) interpreter path rather than panicking on user
@@ -1316,6 +1319,7 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Asin(a)
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
+            | TapeOp::Erf(a)
             | TapeOp::Atanh(a) => {
                 r[a] = true;
             }
@@ -1372,6 +1376,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Asin(a)
             | TapeOp::Acosh(a)
             | TapeOp::Asinh(a)
+            | TapeOp::Erf(a)
             | TapeOp::Atanh(a) => d[a],
             TapeOp::Funcall(_) => unreachable!(
                 "HessianProgram path does not support AMPL external functions; \

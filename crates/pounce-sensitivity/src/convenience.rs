@@ -162,6 +162,9 @@ pub struct SensResult {
     pub reduced_hessian_eigenvalues: Option<Vec<Number>>,
     /// Eigenvectors of `H_R`, length `n_params²`, column-major (column
     /// `j` is the eigenvector for `reduced_hessian_eigenvalues[j]`).
+    /// Sign-pinned by [`pounce_linalg::symmetric_eigen`]: the
+    /// largest-magnitude component of each column is positive, so a
+    /// column read as a direction reproduces across builds.
     /// Present only when [`SensSolve::with_reduced_hessian_eigen`] was
     /// called and the solve converged.
     pub reduced_hessian_eigenvectors: Option<Vec<Number>>,

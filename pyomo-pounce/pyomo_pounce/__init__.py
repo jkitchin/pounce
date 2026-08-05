@@ -44,6 +44,10 @@ from pyomo_pounce.sens import (
     declare_sens_param,
     estimate,
     gradient,
+    information,
+    Information,
+    release_kkt,
+    retain_kkt,
 )
 from pyomo_pounce.preflight import (
     PyomoPreflightReport,
@@ -58,6 +62,8 @@ __all__ = [
     "declare_sens_param",
     "declare_fitted",
     "declare_residual",
+    "release_kkt",
+    "retain_kkt",
     "covariance",
     "Covariance",
     "gradient",
@@ -75,5 +81,7 @@ __all__ = [
     "BlockAnalysisReport",
     "block_repair_plan",
     "BlockRepairPlan",
+    "information",
+    "Information",
     "structural_incidence",
 ]

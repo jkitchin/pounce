@@ -34,6 +34,8 @@ jupyter lab python/notebooks/01_getting_started.ipynb
 | 17 | [`17_differentiable_convex.ipynb`](17_differentiable_convex.ipynb) | Differentiable convex optimization with `pounce.jax`. |
 | 25 | [`25_pyomo_sensitivity.ipynb`](25_pyomo_sensitivity.ipynb) | Declared-parameter sensitivity from Pyomo: an optimal-control example whose first-move gradients are the NMPC feedback gains (needs `pyomo-cvp`). |
 | 26 | [`26_parameter_covariance.ipynb`](26_parameter_covariance.ipynb) | Parameter covariance and identifiability from the reduced Hessian: standard errors, a Monte Carlo validated confidence ellipse, and a sloppy-direction diagnosis. |
+| 31 | [`31_information_identifiability.ipynb`](31_information_identifiability.ipynb) | The information matrix as the un-inverted view of the covariance: eigen() naming a poorly identified combination, the duality check, and zero variance versus finite information at a bound. |
+| 32 | [`32_wrt_blocks_and_retain_kkt.ipynb`](32_wrt_blocks_and_retain_kkt.ipynb) | One solve, many questions: wrt= sub-block marginals, confidence and prediction bands on undeclared prediction variables, conditioned_on, retain_kkt() with nothing declared, and release_kkt() to give the factor's memory back. |
 
 ## Performance & sparsity
 

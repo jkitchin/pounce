@@ -866,6 +866,129 @@ impl IpoptCalculatedQuantities {
         c_max.max(dms_max)
     }
 
+    /// Max-norm constraint violation of the **original** NLP, in user units:
+    /// `|c_i|` over the equality block and `max(0, d_l_i − d_i, d_i − d_u_i)`
+    /// over the inequality block. This is what upstream's
+    /// `inf_pr_output = original` — its *default* — prints in the `inf_pr`
+    /// column, and what its end-of-run "Constraint violation" line reports.
+    /// Mirrors `IpIpoptCalculatedQuantities.cpp:unscaled_curr_nlp_constraint_violation`.
+    ///
+    /// Deliberately **not** [`Self::curr_primal_infeasibility_max`], which is
+    /// `max(‖c‖_∞, ‖d − s‖_∞)` — the violation of the *internal* slack
+    /// reformulation. The two diverge whenever the slack drifts from `d(x)`:
+    /// `s` is confined to `[d_l, d_u]`, so `d = s + (d − s)` with `d − s > 0`
+    /// clears a lower bound however large that gap grows. On a model that is
+    /// all inequalities the gap *is* the whole number — on Mittelmann's
+    /// `robot_a` POUNCE reported 2.79e4 at an iterate where Ipopt reported
+    /// `0.00e+00` and every original row was in fact satisfied (pounce#476).
+    ///
+    /// Display only. The filter's `theta`, the barrier-parameter strategies
+    /// and the convergence test all stay on the internal measure — that split
+    /// is upstream's, not a shortcut.
+    ///
+    /// Judged against the **declared** bounds where the NLP tracks them, so
+    /// the `bound_relax_factor` widening cannot forgive a violation the user
+    /// would still see (same reasoning as
+    /// [`Self::relative_d_infeasibility_max`]).
+    pub fn curr_unscaled_nlp_constraint_violation_max(&self) -> Number {
+        let (dc, dd) = {
+            let nlp = self.nlp.borrow();
+            (nlp.c_scale_vec(), nlp.d_scale_vec())
+        };
+        let c_max = unscaled_block_amax(&*self.curr_c(), dc.as_deref());
+
+        let d = self.curr_d();
+        if d.dim() == 0 {
+            return c_max;
+        }
+        let (lo, hi, mask_l, mask_u) = {
+            let nlp = self.nlp.borrow();
+            let (mut cl, mut cu) = (nlp.d_l().make_new(), nlp.d_u().make_new());
+            match nlp.declared_d_bounds() {
+                Some((dl, du)) => {
+                    let (Some(cld), Some(cud)) = (
+                        cl.as_any_mut().downcast_mut::<DenseVector>(),
+                        cu.as_any_mut().downcast_mut::<DenseVector>(),
+                    ) else {
+                        return c_max;
+                    };
+                    cld.set_values(&dl);
+                    cud.set_values(&du);
+                }
+                None => {
+                    cl.copy(nlp.d_l());
+                    cu.copy(nlp.d_u());
+                }
+            }
+            let mut lo = d.make_new();
+            lo.set(0.0);
+            nlp.pd_l().mult_vector(1.0, &*cl, 0.0, &mut *lo);
+            let mut hi = d.make_new();
+            hi.set(0.0);
+            nlp.pd_u().mult_vector(1.0, &*cu, 0.0, &mut *hi);
+            // A projected 0 is ambiguous — "no bound on this side" and "a
+            // declared zero bound" both read 0 — so project an all-ones
+            // vector through the same expansion to get presence masks.
+            let mut ones_l = nlp.d_l().make_new();
+            ones_l.set(1.0);
+            let mut mask_l = d.make_new();
+            mask_l.set(0.0);
+            nlp.pd_l().mult_vector(1.0, &*ones_l, 0.0, &mut *mask_l);
+            let mut ones_u = nlp.d_u().make_new();
+            ones_u.set(1.0);
+            let mut mask_u = d.make_new();
+            mask_u.set(0.0);
+            nlp.pd_u().mult_vector(1.0, &*ones_u, 0.0, &mut *mask_u);
+            (lo, hi, mask_l, mask_u)
+        };
+        let (Some(dv), Some(lo), Some(hi), Some(ml), Some(mu)) = (
+            d.as_any().downcast_ref::<DenseVector>(),
+            lo.as_any().downcast_ref::<DenseVector>(),
+            hi.as_any().downcast_ref::<DenseVector>(),
+            mask_l.as_any().downcast_ref::<DenseVector>(),
+            mask_u.as_any().downcast_ref::<DenseVector>(),
+        ) else {
+            return c_max;
+        };
+        if !(dv.is_initialized()
+            && lo.is_initialized()
+            && hi.is_initialized()
+            && ml.is_initialized()
+            && mu.is_initialized())
+        {
+            return c_max;
+        }
+        let (dv, lov, hiv, mlv, muv) = (
+            dv.expanded_values(),
+            lo.expanded_values(),
+            hi.expanded_values(),
+            ml.expanded_values(),
+            mu.expanded_values(),
+        );
+        let mut worst = c_max;
+        for i in 0..dv.len() {
+            let mut viol = 0.0_f64;
+            if mlv[i] > 0.5 {
+                viol = viol.max(lov[i] - dv[i]);
+            }
+            if muv[i] > 0.5 {
+                viol = viol.max(dv[i] - hiv[i]);
+            }
+            if viol <= 0.0 || !viol.is_finite() {
+                continue;
+            }
+            // Row scaling is per-row (`d_scaled = dd ⊙ d_user`), so the
+            // violation unscales by the same factor. A zero factor is treated
+            // as the identity, matching `unscaled_block_amax`.
+            let viol = match dd.as_deref() {
+                Some(s) if s[i] != 0.0 => viol / s[i],
+                _ => viol,
+            };
+            worst = worst.max(viol);
+        }
+        worst
+    }
+
     /// Largest primal infeasibility of a constraint row **relative to that
     /// row's own magnitude** — `|c_i| / |b_i|` over the equality block and
     /// `dist(d_i, [d_l_i, d_u_i]) / max(|d_l_i|, |d_u_i|)` over the
@@ -2260,9 +2383,18 @@ mod tests {
         // gh#390: the declared equality RHS the c-block relative measure
         // divides by. `None` (the default) is the "not tracked" contract.
         c_rhs: Option<Vec<Number>>,
+        // pounce#476: force `c(x)` to a fixed value so a test can isolate the
+        // inequality block (the default `x0 + x1 - 1` is 4 at the fixture's
+        // point, which dominates any d-block difference under a max-norm).
+        c_override: Option<Number>,
     }
 
     impl MockNlp {
+        fn with_c(mut self, v: Number) -> Self {
+            self.c_override = Some(v);
+            self
+        }
+
         fn with_c_rhs(mut self, rhs: Option<Vec<Number>>) -> Self {
             self.c_rhs = rhs;
             self
@@ -2345,6 +2477,7 @@ mod tests {
                 nan_jac_c: false,
                 empty_jac_c: false,
                 c_rhs: None,
+                c_override: None,
             }
         }
     }
@@ -2377,7 +2510,10 @@ mod tests {
         fn eval_c(&mut self, x: &dyn Vector, c: &mut dyn Vector) {
             let xx = x.as_any().downcast_ref::<DenseVector>().unwrap();
             let cc = c.as_any_mut().downcast_mut::<DenseVector>().unwrap();
-            cc.values_mut()[0] = xx.values()[0] + xx.values()[1] - 1.0;
+            cc.values_mut()[0] = match self.c_override {
+                Some(v) => v,
+                None => xx.values()[0] + xx.values()[1] - 1.0,
+            };
         }
         fn eval_d(&mut self, x: &dyn Vector, d: &mut dyn Vector) {
             let xx = x.as_any().downcast_ref::<DenseVector>().unwrap();
@@ -2601,6 +2737,67 @@ mod tests {
         let cq = fixture();
         let expected = 13.0 - 0.1 * (2.0 * 2.0_f64.ln() + 3.0_f64.ln());
         assert!((cq.curr_barrier_obj() - expected).abs() < 1e-13);
+    }
+
+    /// pounce#476. `inf_pr_output = original` (upstream's default) must report
+    /// the violation of the **original** rows, not of the internal slack
+    /// reformulation. The fixture is exactly the case that made the two
+    /// diverge on Mittelmann's `robot_a`: `d(x) = 2` against `d >= 1` — the
+    /// original row is *satisfied*, so the original-NLP violation is 0 — while
+    /// the slack has drifted to `s = 4`, so `|d − s| = 2` and the internal
+    /// measure reads 2. Reporting the internal number made feasible iterates
+    /// look badly infeasible (2.79e4 where Ipopt printed 0.00e+00).
+    ///
+    /// The equality row is genuinely violated (`c = 4`), and both measures
+    /// must still see it — the fix must not swallow real infeasibility.
+    #[test]
+    fn original_nlp_violation_ignores_slack_drift_but_not_a_violated_row() {
+        let cq = fixture();
+        // Internal: max(|c|, |d − s|) = max(4, 2) = 4.
+        assert_eq!(cq.curr_primal_infeasibility_max(), 4.0);
+        // Original: max(|c|, dist(d, [d_l, d_u])) = max(4, 0) = 4 — the
+        // equality violation survives, the slack drift does not contribute.
+        assert_eq!(cq.curr_unscaled_nlp_constraint_violation_max(), 4.0);
+    }
+
+    /// The other half of pounce#476: with the equality block satisfied, the
+    /// two measures disagree outright — internal still sees the slack drift,
+    /// original sees a feasible point.
+    #[test]
+    fn original_nlp_violation_is_zero_when_only_the_slack_has_drifted() {
+        let cq = fixture_with(MockNlp::new().with_c(0.0));
+        assert_eq!(cq.curr_primal_infeasibility_max(), 2.0);
+        assert_eq!(cq.curr_unscaled_nlp_constraint_violation_max(), 0.0);
+    }
+
+    /// …and the `inf_pr` column must actually be *wired* to the right one.
+    /// The two tests above pass whichever accessor `OrigIterationOutput`
+    /// picks, so without this the exact regression — a one-line match arm
+    /// reaching for `curr_primal_infeasibility_max` — goes unnoticed.
+    /// `InfPrTag::Original` is upstream's default, so this is what the column
+    /// prints unless the user asks for `internal`.
+    #[test]
+    fn inf_pr_column_prints_the_original_violation_under_the_default_tag() {
+        use crate::ipopt_data::IpoptData;
+        use crate::output::orig::{InfPrTag, OrigIterationOutput};
+        use crate::output::r#trait::IterationOutput;
+
+        // Slack drift only: internal reads 2, original reads 0.
+        let cq: IpoptCqHandle = Rc::new(RefCell::new(fixture_with(MockNlp::new().with_c(0.0))));
+        let data: IpoptDataHandle = Rc::new(RefCell::new(IpoptData::default()));
+
+        let field = |tag| {
+            let mut out = OrigIterationOutput::new();
+            out.inf_pr_output = tag;
+            // Column 2 of the row is `inf_pr` (iter, objective, inf_pr, …).
+            out.format_row(&data, &cq)
+                .split_whitespace()
+                .nth(2)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(field(InfPrTag::Original), "0.00e+00");
+        assert_eq!(field(InfPrTag::Internal), "2.00e+00");
     }
 
     #[test]

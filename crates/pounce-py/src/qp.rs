@@ -607,6 +607,13 @@ pub fn solve_qp_multi_rhs<'py>(
 /// bounds), then reuses it across `solve()` calls that vary only the
 /// numeric data. Mirrors `pounce.jax.JaxProblem`'s build-once ergonomics
 /// for the convex QP solver.
+//
+// Genuinely `!Send`, so `unsendable` stays (pounce#477): the captured
+// KKT factor holds `dyn SparseSymLinearSolverInterface` /
+// `dyn TSymScalingMethod` trait objects, neither of which is `Send`.
+// This is why `solve` below has to reach for `SendGuard` to cross its
+// own `allow_threads` boundary. Same reasoning as `PySolver`; contrast
+// `NlProblem`, whose marker was a policy default and is gone.
 #[pyclass(name = "QpFactorization", module = "pounce._pounce", unsendable)]
 pub struct PyQpFactorization {
     inner: QpFactorization,
@@ -667,6 +674,10 @@ impl PyQpFactorization {
 /// each `parametric_step` is a single back-substitution. Mirrors the NLP
 /// `Solver` session (which caches the converged factor for
 /// `parametric_step` / `reduced_hessian`), specialized to a QP.
+//
+// `!Send` for the same reason [`PyQpFactorization`] is (pounce#477):
+// the held active-set KKT factorization owns non-`Send` linear-solver
+// trait objects.
 #[pyclass(name = "QpSensitivity", module = "pounce._pounce", unsendable)]
 pub struct PyQpSensitivity {
     inner: QpSensitivity,
@@ -778,8 +789,10 @@ impl PyQpSensitivity {
     /// Reduced Hessian of the QP on its active manifold (`Zᵀ P Z`) with its
     /// eigendecomposition. Returns a dict with `n_dof` (degrees of freedom),
     /// `matrix` and `eigenvectors` (flat, column-major `n_dof × n_dof`), and
-    /// `eigenvalues` (ascending). `rank_tol` (default `1e-9`) is the relative
-    /// threshold for the rank of the active Jacobian.
+    /// `eigenvalues` (ascending). Each eigenvector column's sign is pinned
+    /// (largest-magnitude component positive), so a column read as a
+    /// direction reproduces across builds. `rank_tol` (default `1e-9`) is
+    /// the relative threshold for the rank of the active Jacobian.
     #[pyo3(signature = (rank_tol = 1e-9))]
     fn reduced_hessian<'py>(&self, py: Python<'py>, rank_tol: f64) -> PyResult<Bound<'py, PyDict>> {
         let rh = self.inner.reduced_hessian(rank_tol).map_err(|e| match e {

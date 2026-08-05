@@ -32,7 +32,7 @@
 //! * `ref/Ipopt/test/mytoy.nl` — annotated example used for the unit
 //!   tests in this module.
 
-use crate::nl_tape::Tape;
+use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
 use pounce_common::types::{Index, Number};
 use pounce_nlp::tnlp::{
     BoundsInfo, IDX_NAMES, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, Solution,
@@ -173,6 +173,11 @@ pub enum UnaryOp {
     Acosh,
     Asinh,
     Atanh,
+    /// Gauss error function. No `.nl` opcode maps here — AMPL has no `erf`,
+    /// so the parser never emits it — but the in-memory builder (issue #469)
+    /// does, which is the whole point: a frontend that constructs an `Expr`
+    /// directly is not limited to what `.nl` can spell.
+    Erf,
 }
 
 /// Parsed `.nl` problem in the form needed by `NlTnlp`.
@@ -222,6 +227,206 @@ pub struct NlProblem {
     /// (one name per line, row order). Empty when no `.row` file was found.
     /// See [`NlProblem::var_names`] for why names are captured.
     pub con_names: Vec<String>,
+}
+
+/// The pieces of a model built in memory, as handed to
+/// [`NlProblem::from_expressions`].
+///
+/// Everything is expressed as [`Expr`] trees — there is no linear/nonlinear
+/// split to fill in, because the AD tape treats a linear term exactly like
+/// any other subexpression (`.nl`'s `J`/`G` segments are a file-format
+/// optimization, not an evaluator requirement). `n` is taken from the length
+/// of `x_l`; `m` from the length of `constraints`.
+///
+/// One cost to that simplification, in *metadata* rather than values: with
+/// `con_linear` empty, `get_constraints_linearity` tags a row `Linear` only
+/// when its expression is literally `Const(0.0)`, so a genuinely linear row
+/// built here reports `NonLinear`. Presolve consumes that tag, and the
+/// direction is the safe one — it loses tightening it could have done, and
+/// never asserts linearity that does not hold — but a frontend that cares
+/// about presolve strength on linear rows should know the tag is
+/// pessimistic on this path.
+#[derive(Debug, Clone)]
+pub struct NlProblemParts {
+    /// `true` to minimize `objective`, `false` to maximize it. Matches
+    /// [`NlProblem::minimize`]: the evaluator negates a maximize objective
+    /// so callers always see the minimization form.
+    pub minimize: bool,
+    /// Objective expression.
+    pub objective: Expr,
+    /// Constant offset added to the objective.
+    pub obj_constant: Number,
+    /// One expression per constraint row; row `i` is bounded by
+    /// `g_l[i] <= constraints[i](x) <= g_u[i]`.
+    pub constraints: Vec<Expr>,
+    /// Variable bounds and starting point, each length `n`. Use `±1e19`
+    /// for "unbounded", the same sentinel the `.nl` reader emits.
+    pub x_l: Vec<Number>,
+    pub x_u: Vec<Number>,
+    pub x0: Vec<Number>,
+    /// Constraint bounds, each length `m`. `g_l[i] == g_u[i]` is an
+    /// equality row.
+    pub g_l: Vec<Number>,
+    pub g_u: Vec<Number>,
+    /// Optional names, index-aligned to `x` / `g`. Empty is fine — every
+    /// consumer falls back to indices (see [`NlProblem::var_names`]).
+    pub var_names: Vec<String>,
+    pub con_names: Vec<String>,
+}
+
+impl NlProblem {
+    /// Assemble a problem from expression trees, with no `.nl` file
+    /// anywhere in the loop (issue #469).
+    ///
+    /// A modeling frontend that already has its own expression DAG should
+    /// come in here rather than serialize to `.nl` and re-parse: the round
+    /// trip is not only slower, it is *lossy*, because `.nl` writers
+    /// routinely refuse operators this tape supports natively (`atan2`,
+    /// `min`/`max`, and — with no `.nl` opcode at all — [`UnaryOp::Erf`]).
+    ///
+    /// The result is an ordinary [`NlProblem`], so it feeds
+    /// [`NlTnlp::try_new`] and gets exactly the evaluators a parsed model
+    /// does: objective, gradient, constraints, Jacobian + structure,
+    /// Lagrangian Hessian + structure, and
+    /// [`NlTnlp::hessian_vector_product`].
+    ///
+    /// Errors on a length mismatch or on a `Var(i)` index at or beyond `n`
+    /// — the latter would otherwise be an out-of-bounds read in the tape's
+    /// forward sweep, so it must be caught while it is still a diagnosable
+    /// user error.
+    pub fn from_expressions(parts: NlProblemParts) -> Result<NlProblem, String> {
+        let NlProblemParts {
+            minimize,
+            objective,
+            obj_constant,
+            constraints,
+            x_l,
+            x_u,
+            x0,
+            g_l,
+            g_u,
+            var_names,
+            con_names,
+        } = parts;
+
+        let n = x_l.len();
+        let m = constraints.len();
+        let check = |name: &str, got: usize, want: usize| -> Result<(), String> {
+            if got == want {
+                Ok(())
+            } else {
+                Err(format!(
+                    "from_expressions: {name} has length {got}, expected {want}"
+                ))
+            }
+        };
+        check("x_u", x_u.len(), n)?;
+        check("x0", x0.len(), n)?;
+        check("g_l", g_l.len(), m)?;
+        check("g_u", g_u.len(), m)?;
+        if !var_names.is_empty() {
+            check("var_names", var_names.len(), n)?;
+        }
+        if !con_names.is_empty() {
+            check("con_names", con_names.len(), m)?;
+        }
+
+        // Structural validation. Memoized on `Cse` pointer identity so a
+        // heavily-shared DAG costs O(nodes) rather than O(inlined tree).
+        let mut seen: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
+        validate_expr(&objective, n, &mut seen).map_err(|e| format!("objective {e}"))?;
+        for (i, c) in constraints.iter().enumerate() {
+            validate_expr(c, n, &mut seen).map_err(|e| format!("constraint {i} {e}"))?;
+        }
+
+        Ok(NlProblem {
+            n,
+            m,
+            num_obj: 1,
+            minimize,
+            obj_nonlinear: objective,
+            obj_linear: Vec::new(),
+            obj_constant,
+            con_nonlinear: constraints,
+            con_linear: vec![Vec::new(); m],
+            x_l,
+            x_u,
+            g_l,
+            g_u,
+            x0,
+            lambda0: vec![0.0; m],
+            suffixes: NlSuffixes::default(),
+            imported_funcs: Vec::new(),
+            var_names,
+            con_names,
+        })
+    }
+}
+
+/// Structural check on an expression bound for [`NlProblem::from_expressions`]:
+/// every `Var(i)` must satisfy `i < n`, and no `Expr::Funcall` may appear.
+///
+/// Both are things the tape cannot recover from later. An out-of-range
+/// `Var` is an out-of-bounds read in the forward sweep. A `Funcall` is
+/// worse-looking than it is fatal: `from_expressions` has nowhere to put
+/// the `F`-segment declarations an AMPL imported function needs
+/// (`NlProblemParts` has no field for them, and the built problem's
+/// `imported_funcs` is necessarily empty), so *any* funcall on this path is
+/// unresolvable. Accepting it would surface as "AMPLFUNC is not set" —
+/// advice the user cannot act on, because setting `AMPLFUNC` just moves the
+/// failure to "funcall id N has no F<N> declaration". Rejecting it here
+/// says the true thing: this door does not carry external functions; go
+/// through `read_nl` / `parse_nl_text` for a model that needs them.
+///
+/// `seen` memoizes `Cse` bodies by pointer identity across calls, so
+/// passing one set through a whole problem keeps the walk linear in
+/// distinct DAG nodes rather than exponential in sharing depth. Skipping a
+/// repeat visit is sound because the caller aborts on the first violation:
+/// reaching a body a second time proves the first visit found none.
+fn validate_expr(
+    e: &Expr,
+    n: usize,
+    seen: &mut std::collections::HashSet<*const Expr>,
+) -> Result<(), String> {
+    match e {
+        Expr::Const(_) => Ok(()),
+        Expr::Var(i) => {
+            if *i < n {
+                Ok(())
+            } else {
+                Err(format!("references Var({i}) but n = {n}"))
+            }
+        }
+        Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            validate_expr(a, n, seen)?;
+            validate_expr(b, n, seen)
+        }
+        Expr::Unary(_, a) | Expr::Not(a) => validate_expr(a, n, seen),
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
+            for a in args {
+                validate_expr(a, n, seen)?;
+            }
+            Ok(())
+        }
+        Expr::Cond { cond, then_, else_ } => {
+            validate_expr(cond, n, seen)?;
+            validate_expr(then_, n, seen)?;
+            validate_expr(else_, n, seen)
+        }
+        Expr::Cse(body) => {
+            if seen.insert(Arc::as_ptr(body)) {
+                validate_expr(body, n, seen)
+            } else {
+                Ok(())
+            }
+        }
+        Expr::Funcall { id, .. } => Err(format!(
+            "references AMPL imported function id {id}, which this path cannot \
+             resolve: a problem built from expressions has no F-segment \
+             declarations to bind it to. Load such a model with read_nl or \
+             parse_nl_text instead."
+        )),
+    }
 }
 
 /// Suffix data parsed out of `S`-segments. Sparse entries are scattered
@@ -1259,6 +1464,7 @@ pub fn eval_expr(e: &Expr, x: &[Number]) -> Number {
                 UnaryOp::Acosh => va.acosh(),
                 UnaryOp::Asinh => va.asinh(),
                 UnaryOp::Atanh => va.atanh(),
+                UnaryOp::Erf => crate::nl_tape::erf(va),
             }
         }
         Expr::Sum(args) => args.iter().map(|a| eval_expr(a, x)).sum(),
@@ -1420,6 +1626,7 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
                 UnaryOp::Acosh => 1.0 / (va * va - 1.0).sqrt(),
                 UnaryOp::Asinh => 1.0 / (va * va + 1.0).sqrt(),
                 UnaryOp::Atanh => 1.0 / (1.0 - va * va),
+                UnaryOp::Erf => crate::nl_tape::erf_d1(va),
             };
             grad_expr(a, x, seed * d, grad);
         }
@@ -1462,20 +1669,38 @@ pub fn grad_expr(e: &Expr, x: &[Number], seed: Number, grad: &mut [Number]) {
 }
 
 /// Walk `e` and insert every `Var(i)` index into `out`.
+///
+/// Shared `Cse` bodies are visited once per call, memoized on `Arc` pointer
+/// identity. Without that this is Θ(2^depth) on a DAG that shares
+/// subexpressions — each reference re-walks the whole body — and presolve
+/// calls this on every solve (`get_variables_linearity`). Skipping a
+/// repeat visit cannot change the answer: `out` is a set, and a second
+/// walk of the same body inserts exactly the indices the first already did.
 pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
+    // `HashSet::new` does not allocate until the first insert, so an
+    // expression with no CSEs pays nothing for the memo.
+    let mut seen: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
+    collect_vars_memo(e, out, &mut seen);
+}
+
+fn collect_vars_memo(
+    e: &Expr,
+    out: &mut BTreeSet<usize>,
+    seen: &mut std::collections::HashSet<*const Expr>,
+) {
     match e {
         Expr::Const(_) => {}
         Expr::Var(i) => {
             out.insert(*i);
         }
         Expr::Binary(_, a, b) => {
-            collect_vars(a, out);
-            collect_vars(b, out);
+            collect_vars_memo(a, out, seen);
+            collect_vars_memo(b, out, seen);
         }
-        Expr::Unary(_, a) => collect_vars(a, out),
+        Expr::Unary(_, a) => collect_vars_memo(a, out, seen),
         Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
             for a in args {
-                collect_vars(a, out);
+                collect_vars_memo(a, out, seen);
             }
         }
         // Collect from every child, including the condition: even
@@ -1484,20 +1709,24 @@ pub fn collect_vars(e: &Expr, out: &mut BTreeSet<usize>) {
         // and being conservative here only ever adds structural zeros
         // to the Jacobian/Hessian (never drops a real nonzero).
         Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
-            collect_vars(a, out);
-            collect_vars(b, out);
+            collect_vars_memo(a, out, seen);
+            collect_vars_memo(b, out, seen);
         }
-        Expr::Not(a) => collect_vars(a, out),
+        Expr::Not(a) => collect_vars_memo(a, out, seen),
         Expr::Cond { cond, then_, else_ } => {
-            collect_vars(cond, out);
-            collect_vars(then_, out);
-            collect_vars(else_, out);
+            collect_vars_memo(cond, out, seen);
+            collect_vars_memo(then_, out, seen);
+            collect_vars_memo(else_, out, seen);
         }
-        Expr::Cse(body) => collect_vars(body, out),
+        Expr::Cse(body) => {
+            if seen.insert(Arc::as_ptr(body)) {
+                collect_vars_memo(body, out, seen);
+            }
+        }
         Expr::Funcall { args, .. } => {
             for a in args {
                 if let FuncallArg::Real(e) = a {
-                    collect_vars(e, out);
+                    collect_vars_memo(e, out, seen);
                 }
             }
         }
@@ -1521,6 +1750,35 @@ struct ColorWrite {
     hess_idx: u32,
 }
 
+/// Constraint-block [`HybridTape`]: one local op list per summand plus a
+/// **shared prelude** holding every CSE body referenced by two or more
+/// summands, evaluated once per sweep.
+///
+/// `con_tapes` builds an independent flat `Tape` per summand, so a `.nl`
+/// defined variable (`V` segment) referenced from many rows is re-emitted —
+/// and re-evaluated — once per reference. That is invisible on most models
+/// but quadratic-ish in the wrong shape: on Mittelmann's `robot_a`
+/// (n = 1001, m = 52013, 12003 defined variables each feeding 13 rows) the
+/// flat tapes total 3.6M ops per `eval_g` against 894k for the shared
+/// prelude — 4.0x the arithmetic, paid ~10x per iteration inside the line
+/// search. See pounce#476.
+///
+/// Only `eval_g` reads this; `eval_jac_g` / `eval_h` stay on `con_tapes`
+/// (their reverse / forward-over-reverse sweeps run once per iteration, not
+/// once per line-search trial, and `HybridTape`'s Hessian entry point uses a
+/// different seeding strategy than the coloring machinery here).
+#[derive(Debug, Clone)]
+struct ConHybrid {
+    tape: HybridTape,
+    /// `row_start[i]..row_start[i + 1]` are the summands of constraint `i`.
+    /// Length `m + 1`.
+    row_start: Vec<usize>,
+    /// Prelude forward values, sized to `tape.n_prelude_ops()`.
+    prelude_vals: Vec<f64>,
+    /// Per-summand local forward values, sized to `tape.max_summand_ops()`.
+    local_vals: Vec<f64>,
+}
+
 // `Clone` supports the batched-solve path (pounce#126): one parsed
 // model is cloned per batch instance (tapes are flat `Vec`s of ops, so
 // the clone is cheap relative to a solve) and each clone gets its own
@@ -1534,6 +1792,10 @@ pub struct NlTnlp {
     /// Per-constraint, per-summand tapes. Length `m`; row `i` holds
     /// one `Tape` per summand of constraint `i`.
     con_tapes: Vec<Vec<Tape>>,
+    /// Constraint-block tape with a **shared** CSE prelude, used by
+    /// `eval_g` when the model benefits (see [`ConHybrid`]). `None` keeps
+    /// `eval_g` on the per-summand `con_tapes` above.
+    con_hybrid: Option<ConHybrid>,
     /// Lower-triangle Hessian sparsity (row >= col), one entry per
     /// structurally nonzero second derivative in the Lagrangian.
     h_irow: Vec<i32>,
@@ -1583,6 +1845,13 @@ pub struct NlTnlp {
     /// Per-color compressed Hessian-vector results, sized to
     /// `prob.n`. Reused across `eval_h` calls but allocated once.
     compressed: Vec<Vec<f64>>,
+    /// Per-direction "carries signal" mask for `hessian_vector_products`,
+    /// kept here rather than allocated per call. This crate holds an
+    /// explicit no-per-call-allocation line on the tape sweeps (see
+    /// `tests/tape_gradient_no_alloc.rs`), and the headline Newton-Krylov
+    /// use is `k = 1`, where a fresh `Vec` would be pure overhead on every
+    /// Krylov iteration.
+    hvp_live: Vec<bool>,
 }
 
 // ---------------------------------------------------------------------
@@ -1639,6 +1908,22 @@ fn expr_prec(e: &Expr) -> u8 {
     }
 }
 
+/// Render an expression as infix text, using `var_names` for variable
+/// labels where available (`x[i]` otherwise).
+///
+/// The debugger reaches the renderer through the constraint/objective
+/// walkers; this is the bare entry point for a caller that holds an [`Expr`]
+/// directly — notably the Python `NlExpr.__repr__` (issue #469), where being
+/// able to *see* the expression you just built is most of the debugging
+/// story.
+///
+/// `Cse` bodies are inlined at every occurrence, so the output of a
+/// heavily-shared DAG can be far larger than the DAG itself. Callers
+/// rendering user-built expressions should bound the input first.
+pub fn render_expression(e: &Expr, var_names: &[String]) -> String {
+    render_expr(e, var_names, &[])
+}
+
 /// Render `e`, wrapping in parentheses iff its precedence is looser than
 /// `min_prec`.
 fn render_prec(e: &Expr, min_prec: u8, vn: &[String], funcs: &[ImportedFunc]) -> String {
@@ -1670,6 +1955,7 @@ fn unary_name(op: UnaryOp) -> &'static str {
         UnaryOp::Acosh => "acosh",
         UnaryOp::Asinh => "asinh",
         UnaryOp::Atanh => "atanh",
+        UnaryOp::Erf => "erf",
     }
 }
 
@@ -2120,15 +2406,42 @@ impl NlTnlp {
             .collect();
 
         let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
+        let mut con_roots: Vec<Expr> = Vec::new();
+        let mut row_start: Vec<usize> = Vec::with_capacity(prob.m + 1);
         for k in 0..prob.m {
             let summands = split_top_sums(&prob.con_nonlinear[k]);
+            row_start.push(con_roots.len());
             con_tapes.push(
                 summands
                     .iter()
                     .map(|e| Tape::build_with_externals(e, &resolver))
                     .collect(),
             );
+            // Move (not clone) the split summands into the root list: their
+            // `Expr::Cse` payloads are `Arc`s, and `build_multi` keys CSE
+            // sharing on `Arc` pointer identity, so the roots must be the
+            // same allocations the parse produced.
+            con_roots.extend(summands);
         }
+        row_start.push(con_roots.len());
+
+        // Shared-CSE constraint tape for `eval_g` (pounce#476). Worth
+        // building only when some CSE body is actually referenced from two
+        // or more summands — otherwise the prelude comes out empty and the
+        // hybrid tape is the flat tape plus an indirection. `hybrid_supported`
+        // gates the opcodes `build_multi` would panic on.
+        let con_hybrid = if hybrid_supported(&con_roots) {
+            let tape = HybridTape::build_multi(&con_roots);
+            (tape.n_prelude_ops() > 0).then(|| ConHybrid {
+                prelude_vals: vec![0.0; tape.n_prelude_ops()],
+                local_vals: vec![0.0; tape.max_summand_ops()],
+                row_start,
+                tape,
+            })
+        } else {
+            None
+        };
+        drop(con_roots);
 
         // Hessian-of-Lagrangian sparsity: union of each tape's own
         // structural Hessian sparsity.
@@ -2263,6 +2576,7 @@ impl NlTnlp {
             prob,
             obj_tapes,
             con_tapes,
+            con_hybrid,
             h_irow,
             h_jcol,
             jac_cols,
@@ -2282,6 +2596,7 @@ impl NlTnlp {
             adj_scratch: vec![0.0; max_tape_n],
             adj_dot_scratch: vec![0.0; max_tape_n],
             compressed,
+            hvp_live: Vec::new(),
         })
     }
 
@@ -2312,6 +2627,174 @@ impl NlTnlp {
     /// [`Self::variant`].
     pub fn problem(&self) -> &NlProblem {
         &self.prob
+    }
+
+    /// Mutable access to that same problem, for a caller that owns this
+    /// TNLP outright.
+    ///
+    /// The tapes were built from the expressions in [`Self::problem`] and
+    /// are not rebuilt, so editing an expression here does **not** change
+    /// what this TNLP evaluates. It exists for teardown: the Python
+    /// binding takes the expression trees out through here so a deeply
+    /// nested one is dropped on a stack chosen for it rather than
+    /// recursively on whatever thread collected the object (pounce#472).
+    pub fn problem_mut(&mut self) -> &mut NlProblem {
+        &mut self.prob
+    }
+
+    /// Hessian-vector product of the Lagrangian:
+    /// `out = (obj_factor·∇²f(x) + Σ_i λ_i·∇²g_i(x)) · v`.
+    ///
+    /// This is the matrix-free counterpart of `eval_h`. `eval_h` runs one
+    /// [`Tape::hessian_directional`] pass *per color* and then decodes the
+    /// compressed columns into the sparse lower triangle; here the seed is
+    /// the caller's `v` directly, so it is a single forward-over-reverse
+    /// pass per tape — O(tape ops), independent of `n` and of the coloring's
+    /// chromatic number. That is what makes it usable on models where
+    /// materializing `∇²L` is impractical (issue #469): a Newton–Krylov /
+    /// truncated-CG step only ever needs `∇²L · v`.
+    ///
+    /// Sign convention matches `eval_h` and the rest of this evaluator: a
+    /// `maximize` model's objective is negated so the returned operator is
+    /// the one that minimizing solves. `lambda` is `None` for the objective
+    /// block alone.
+    ///
+    /// `out` is overwritten (not accumulated into). Errors on any length
+    /// mismatch rather than panicking, since the Python binding hands this
+    /// arbitrary user arrays.
+    pub fn hessian_vector_product(
+        &mut self,
+        x: &[Number],
+        v: &[Number],
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        out: &mut [Number],
+    ) -> Result<(), String> {
+        self.hessian_vector_products(x, v, 1, obj_factor, lambda, out)
+    }
+
+    /// Block form of [`Self::hessian_vector_product`]: `k` directions at
+    /// once, `out[:, c] = ∇²L · v[:, c]`.
+    ///
+    /// `v` and `out` are `n × k` in **column-major** order — direction `c`
+    /// occupies `v[c*n .. (c+1)*n]`. `out` is overwritten.
+    ///
+    /// Worth having as its own entry point rather than a loop over the
+    /// single-vector call: the forward sweep depends only on `x`, so a block
+    /// runs it *once per tape* and reuses `vals` across all `k` directions,
+    /// where `k` separate calls would redo it `k` times. Only the
+    /// forward-tangent + reverse-over-tangent passes are per-direction. That
+    /// is the shape a block-Krylov solve, a directional-derivative probe, or
+    /// a densify-the-Hessian loop wants.
+    ///
+    /// An all-zero direction is skipped, so passing a sparse block whose
+    /// columns are mostly empty costs only the columns that carry signal.
+    /// (The sparsity that dominates is the model's own: each tape touches
+    /// only its own variables, and `hessian_directional` is O(tape ops), not
+    /// O(n).)
+    pub fn hessian_vector_products(
+        &mut self,
+        x: &[Number],
+        v: &[Number],
+        k: usize,
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        out: &mut [Number],
+    ) -> Result<(), String> {
+        let (n, m) = (self.prob.n, self.prob.m);
+        let check = |name: &str, got: usize, want: usize| -> Result<(), String> {
+            if got == want {
+                Ok(())
+            } else {
+                Err(format!(
+                    "hessian_vector_product: {name} has length {got}, expected {want}"
+                ))
+            }
+        };
+        check("x", x.len(), n)?;
+        check("v", v.len(), n * k)?;
+        check("out", out.len(), n * k)?;
+        if let Some(lam) = lambda {
+            check("lambda", lam.len(), m)?;
+        }
+
+        out.fill(0.0);
+        if k == 0 || n == 0 {
+            return Ok(());
+        }
+
+        // Which directions carry signal. Computed once, not per (tape,
+        // direction) pair — with many small summand tapes the scan would
+        // otherwise dominate the work it is meant to save. Reuses the
+        // persistent mask so a Krylov loop allocates nothing per iteration.
+        self.hvp_live.clear();
+        self.hvp_live
+            .extend((0..k).map(|c| v[c * n..(c + 1) * n].iter().any(|&s| s != 0.0)));
+        if !self.hvp_live.iter().any(|&l| l) {
+            return Ok(());
+        }
+
+        let obj_seed = if self.prob.minimize {
+            obj_factor
+        } else {
+            -obj_factor
+        };
+        if obj_seed != 0.0 {
+            for t in &self.obj_tapes {
+                if t.ops.is_empty() {
+                    continue;
+                }
+                // Once per tape, not once per direction — the whole point
+                // of the block form.
+                t.forward_into(x, &mut self.vals_scratch);
+                for (c, out_col) in out.chunks_mut(n).enumerate() {
+                    if !self.hvp_live[c] {
+                        continue;
+                    }
+                    t.hessian_directional(
+                        &self.vals_scratch,
+                        &v[c * n..(c + 1) * n],
+                        obj_seed,
+                        out_col,
+                        &mut self.dot_scratch,
+                        &mut self.adj_scratch,
+                        &mut self.adj_dot_scratch,
+                    );
+                }
+            }
+        }
+
+        if let Some(lam) = lambda {
+            // `lam.len() == m` was checked above, so `con_tapes[k]` is in
+            // range for every k.
+            for (i, &w) in lam.iter().enumerate() {
+                if w == 0.0 {
+                    continue;
+                }
+                for t in &self.con_tapes[i] {
+                    if t.ops.is_empty() {
+                        continue;
+                    }
+                    t.forward_into(x, &mut self.vals_scratch);
+                    for (c, out_col) in out.chunks_mut(n).enumerate() {
+                        if !self.hvp_live[c] {
+                            continue;
+                        }
+                        t.hessian_directional(
+                            &self.vals_scratch,
+                            &v[c * n..(c + 1) * n],
+                            w,
+                            out_col,
+                            &mut self.dot_scratch,
+                            &mut self.adj_scratch,
+                            &mut self.adj_dot_scratch,
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Clone this TNLP with per-instance overrides applied — the
@@ -2454,9 +2937,12 @@ impl TNLP for NlTnlp {
     }
 
     fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        // Reuse the shared forward-value arena (sized to `max_tape_n`) so
+        // each summand sweep allocates nothing — see `Tape::eval_into`.
+        let (obj_tapes, vals) = (&self.obj_tapes, &mut self.vals_scratch);
         let mut nl: Number = 0.0;
-        for t in &self.obj_tapes {
-            nl += t.eval(x);
+        for t in obj_tapes {
+            nl += t.eval_into(x, vals);
         }
         let lin: Number = self.prob.obj_linear.iter().map(|(i, c)| c * x[*i]).sum();
         let v = self.prob.obj_constant + nl + lin;
@@ -2484,12 +2970,43 @@ impl TNLP for NlTnlp {
     }
 
     fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-        for i in 0..self.prob.m {
-            let mut nl: Number = 0.0;
-            for t in &self.con_tapes[i] {
-                nl += t.eval(x);
+        // Constraint values are the line search's inner loop: on a
+        // constraint-heavy model (m >> n) this runs ~10x per iteration over
+        // every summand tape in the problem. Reuse the shared forward-value
+        // arena so the sweep allocates nothing — the per-summand `Vec` the
+        // allocating `Tape::eval` used to build was ~20% of `eval_g` on
+        // Mittelmann's `robot_a` (52013 rows / 148037 summands). See
+        // `Tape::eval_into`.
+        let m = self.prob.m;
+        let con_linear = &self.prob.con_linear;
+        if let Some(h) = &mut self.con_hybrid {
+            // Shared CSE bodies once for the whole constraint block, then one
+            // local sweep per summand (pounce#476).
+            let ConHybrid {
+                tape,
+                row_start,
+                prelude_vals,
+                local_vals,
+            } = h;
+            tape.forward_prelude(x, prelude_vals);
+            for i in 0..m {
+                let mut nl: Number = 0.0;
+                for s in &tape.summands[row_start[i]..row_start[i + 1]] {
+                    tape.forward_summand(s, x, prelude_vals, local_vals);
+                    nl += tape.root_value(s, local_vals);
+                }
+                let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+                g[i] = nl + lin;
             }
-            let lin: Number = self.prob.con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+            return true;
+        }
+        let (con_tapes, vals) = (&self.con_tapes, &mut self.vals_scratch);
+        for i in 0..m {
+            let mut nl: Number = 0.0;
+            for t in &con_tapes[i] {
+                nl += t.eval_into(x, vals);
+            }
+            let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
             g[i] = nl + lin;
         }
         true
@@ -3853,5 +4370,687 @@ S1 2 sens_init_constr
         assert!(tnlp.eval_grad_f(&[-2.0, 1.0], true, &mut g));
         assert!((g[0] - 12.0).abs() < 1e-9, "df/dx0 = {}", g[0]);
         assert!((g[1] - 3.0).abs() < 1e-9, "df/dx1 = {}", g[1]);
+    }
+
+    // ---- Shared-CSE constraint tape (issue #476) ----------------------
+
+    /// Three constraints over one `V` segment (a `.nl` *defined variable*),
+    /// `V3 = 2*x0 + 3*x1`, referenced by all three:
+    ///   C0: V3^2        C1: V3^3 + x2        C2: V3*x2
+    /// `{BODY2}` is a substitution point so a variant can drop an opcode the
+    /// hybrid path rejects into C2.
+    const SHARED_CSE: &str = "g3 1 1 0
+ 3 3 1 0 0
+ 3 0
+ 0 0
+ 3 0 0
+ 0 0 0 1
+ 0 0 0 0 0
+ 8 3
+ 0 0
+ 0 1 0 0 0
+V3 2 0
+0 2.0
+1 3.0
+n0
+C0
+o5
+v3
+n2
+C1
+o0
+o5
+v3
+n3
+v2
+C2
+{BODY2}
+O0 0
+n0
+r
+2 0
+2 0
+2 0
+b
+3
+3
+3
+k2
+3
+6
+J0 2
+0 0
+1 0
+J1 3
+0 0
+1 0
+2 0
+J2 3
+0 0
+1 0
+2 0
+G0 3
+0 1.0
+1 1.0
+2 1.0
+";
+
+    fn shared_cse_nl(body2: &str) -> String {
+        SHARED_CSE.replace("{BODY2}", body2)
+    }
+
+    /// A CSE referenced from several constraints is evaluated once per
+    /// `eval_g` via the shared prelude instead of once per reference. The
+    /// values must be bit-identical to the flat per-summand `Tape` path,
+    /// which is what makes the optimization safe to apply unconditionally.
+    #[test]
+    fn shared_cse_constraint_tape_matches_flat_tape_bit_for_bit() {
+        let nl = shared_cse_nl("o2\nv3\nv2");
+        let p = parse_nl_text(&nl).expect("parse shared-CSE model");
+        let mut hybrid = NlTnlp::new(p.clone());
+        hybrid.get_nlp_info().unwrap();
+        let h = hybrid
+            .con_hybrid
+            .as_ref()
+            .expect("CSE shared by 3 constraints must take the hybrid path");
+        assert!(
+            h.tape.n_prelude_ops() > 0,
+            "shared CSE body must land in the prelude"
+        );
+
+        // Same model with the hybrid path switched off: the reference.
+        let mut flat = NlTnlp::new(p);
+        flat.get_nlp_info().unwrap();
+        flat.con_hybrid = None;
+
+        for x in [[1.0, 1.0, 1.0], [-2.0, 0.5, 3.0], [0.0, -1.5, -0.25]] {
+            let mut gh = [0.0_f64; 3];
+            let mut gf = [0.0_f64; 3];
+            assert!(hybrid.eval_g(&x, true, &mut gh));
+            assert!(flat.eval_g(&x, true, &mut gf));
+            // V3 = 2 x0 + 3 x1.
+            let s = 2.0 * x[0] + 3.0 * x[1];
+            let want = [s * s, s * s * s + x[2], s * x[2]];
+            for i in 0..3 {
+                assert_eq!(gh[i], gf[i], "row {i} differs from the flat tape at {x:?}");
+                assert!(
+                    (gh[i] - want[i]).abs() < 1e-9,
+                    "row {i}: got {}, want {}",
+                    gh[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    /// `HybridTape::build_multi` *panics* on comparisons, AND/OR/NOT,
+    /// if-then-else, min/max lists and external funcalls, so `eval_g` may only
+    /// take that path after `hybrid_supported` clears the model. Here a
+    /// min-list in one constraint has to disable it for the whole block —
+    /// falling back, not panicking.
+    #[test]
+    fn unsupported_opcode_falls_back_to_the_flat_tape() {
+        let nl = shared_cse_nl("o11\n2\nv3\nv2");
+        let p = parse_nl_text(&nl).expect("parse min-list model");
+        let mut tnlp = NlTnlp::new(p);
+        tnlp.get_nlp_info().unwrap();
+        assert!(
+            tnlp.con_hybrid.is_none(),
+            "a min-list anywhere in the constraint block must disable the hybrid path"
+        );
+        let mut g = [0.0_f64; 3];
+        assert!(tnlp.eval_g(&[-2.0, 0.5, 3.0], true, &mut g));
+        let s = 2.0 * -2.0 + 3.0 * 0.5; // -2.5
+        assert!((g[0] - s * s).abs() < 1e-9);
+        assert!((g[2] - s.min(3.0)).abs() < 1e-9, "min(V3, x2) = {}", g[2]);
+    }
+
+    // ---- In-memory construction + HVP (issue #469) --------------------
+
+    fn v(i: usize) -> Expr {
+        Expr::Var(i)
+    }
+
+    fn c(x: Number) -> Expr {
+        Expr::Const(x)
+    }
+
+    fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
+        Expr::Binary(op, Box::new(a), Box::new(b))
+    }
+
+    fn un(op: UnaryOp, a: Expr) -> Expr {
+        Expr::Unary(op, Box::new(a))
+    }
+
+    /// `NlProblemParts` for an `n`-variable, unbounded model.
+    fn parts(n: usize, objective: Expr, constraints: Vec<Expr>) -> NlProblemParts {
+        let m = constraints.len();
+        NlProblemParts {
+            minimize: true,
+            objective,
+            obj_constant: 0.0,
+            constraints,
+            x_l: vec![-1e19; n],
+            x_u: vec![1e19; n],
+            x0: vec![0.0; n],
+            g_l: vec![-1e19; m],
+            g_u: vec![1e19; m],
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        }
+    }
+
+    /// A model built from expressions evaluates exactly like a parsed one:
+    /// objective, gradient, constraints, and Jacobian all come from the
+    /// same tape, with no `.nl` text in the loop.
+    #[test]
+    fn from_expressions_builds_evaluable_problem() {
+        // min (1-x0)^2 + 100*(x1 - x0^2)^2   s.t.  x0^2 + x1^2 <= 2
+        let rosen = bin(
+            BinOp::Add,
+            bin(BinOp::Pow, bin(BinOp::Sub, c(1.0), v(0)), c(2.0)),
+            bin(
+                BinOp::Mul,
+                c(100.0),
+                bin(
+                    BinOp::Pow,
+                    bin(BinOp::Sub, v(1), bin(BinOp::Pow, v(0), c(2.0))),
+                    c(2.0),
+                ),
+            ),
+        );
+        let circle = bin(
+            BinOp::Add,
+            bin(BinOp::Pow, v(0), c(2.0)),
+            bin(BinOp::Pow, v(1), c(2.0)),
+        );
+
+        let mut p = parts(2, rosen, vec![circle]);
+        p.g_l = vec![0.0];
+        p.g_u = vec![2.0];
+        p.x0 = vec![-1.2, 1.0];
+        p.var_names = names(&["x", "y"]);
+        p.con_names = names(&["circle"]);
+
+        let prob = NlProblem::from_expressions(p).expect("build");
+        assert_eq!((prob.n, prob.m), (2, 1));
+        assert_eq!(prob.var_names, names(&["x", "y"]));
+
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        // f(-1.2, 1) = (2.2)^2 + 100*(1 - 1.44)^2 = 4.84 + 19.36 = 24.2
+        let f = t.eval_f(&[-1.2, 1.0], true).unwrap();
+        assert!((f - 24.2).abs() < 1e-10, "f = {f}");
+
+        // ∇f = (-2(1-x0) - 400 x0 (x1 - x0^2), 200 (x1 - x0^2))
+        //    = (4.4 + 480*(-0.44)... ) — computed below rather than
+        //      transcribed, so the check is the formula, not an editor.
+        let (x0, x1) = (-1.2, 1.0);
+        let want = [
+            -2.0 * (1.0 - x0) - 400.0 * x0 * (x1 - x0 * x0),
+            200.0 * (x1 - x0 * x0),
+        ];
+        let mut g = [0.0_f64; 2];
+        assert!(t.eval_grad_f(&[x0, x1], true, &mut g));
+        for j in 0..2 {
+            assert!((g[j] - want[j]).abs() < 1e-8, "g[{j}] = {} ", g[j]);
+        }
+
+        // g(x) = x0^2 + x1^2 = 2.44
+        let mut gv = [0.0_f64; 1];
+        assert!(t.eval_g(&[x0, x1], true, &mut gv));
+        assert!((gv[0] - 2.44).abs() < 1e-10, "g = {}", gv[0]);
+    }
+
+    /// `min`/`max`, `atan2`, and `erf` all reach the evaluator through
+    /// this path. None of the three survives a `.nl` round trip in a
+    /// typical frontend — `atan2` has no two-argument funcall path,
+    /// `min`/`max` force a DNLP model type, and AMPL has no `erf` opcode
+    /// at all — which is the reason the in-memory door exists.
+    #[test]
+    fn from_expressions_carries_ops_nl_cannot_express() {
+        let obj = Expr::Sum(vec![
+            bin(BinOp::Atan2, v(0), v(1)),
+            Expr::MinList(vec![v(0), v(1)]),
+            Expr::MaxList(vec![v(0), v(1)]),
+            un(UnaryOp::Erf, v(0)),
+        ]);
+        let prob = NlProblem::from_expressions(parts(2, obj, Vec::new())).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        let x: [Number; 2] = [0.8, 1.5];
+        // atan2 + min + max + erf; min+max == x0+x1 for any pair.
+        let want = x[0].atan2(x[1]) + x[0] + x[1] + crate::nl_tape::erf(x[0]);
+        let f = t.eval_f(&x, true).unwrap();
+        assert!((f - want).abs() < 1e-12, "f = {f}, want {want}");
+    }
+
+    /// A `Var` index past `n` would be an out-of-bounds read in the
+    /// tape's forward sweep. It has to be caught at construction, while
+    /// it is still a diagnosable user error.
+    #[test]
+    fn from_expressions_rejects_out_of_range_var() {
+        let err = NlProblem::from_expressions(parts(2, v(5), Vec::new()))
+            .expect_err("Var(5) with n = 2 must be rejected");
+        assert!(err.contains("Var(5)"), "{err}");
+
+        let err = NlProblem::from_expressions(parts(2, c(0.0), vec![v(2)]))
+            .expect_err("constraint Var(2) with n = 2 must be rejected");
+        assert!(err.contains("constraint 0"), "{err}");
+
+        // Length mismatches are errors too, not panics.
+        let mut p = parts(2, c(0.0), Vec::new());
+        p.x0 = vec![0.0; 3];
+        let err = NlProblem::from_expressions(p).expect_err("x0 length must be checked");
+        assert!(err.contains("x0"), "{err}");
+    }
+
+    /// An out-of-range `Var` must be caught wherever it hides, not just at
+    /// the top level — inside a `Cse` body, a nested `Cse`, a `Cond`
+    /// branch, and a funcall argument all reach the same forward sweep.
+    #[test]
+    fn from_expressions_finds_out_of_range_vars_in_every_position() {
+        let inner_cse = Arc::new(v(7));
+        let cases: Vec<(&str, Expr)> = vec![
+            ("bare", v(7)),
+            ("cse", Expr::Cse(Arc::new(v(7)))),
+            ("nested cse", Expr::Cse(Arc::new(Expr::Cse(inner_cse)))),
+            (
+                "cond branch",
+                Expr::Cond {
+                    cond: Box::new(c(1.0)),
+                    then_: Box::new(v(7)),
+                    else_: Box::new(c(0.0)),
+                },
+            ),
+            ("min list", Expr::MinList(vec![c(0.0), v(7)])),
+            (
+                "sum",
+                Expr::Sum(vec![c(0.0), bin(BinOp::Mul, c(2.0), v(7))]),
+            ),
+        ];
+        for (label, e) in cases {
+            let err = NlProblem::from_expressions(parts(2, e, Vec::new()))
+                .err()
+                .unwrap_or_else(|| panic!("{label}: Var(7) with n = 2 should be rejected"));
+            assert!(err.contains("Var(7)"), "{label}: {err}");
+        }
+    }
+
+    /// A balanced share-DAG: each level is one `Cse` whose body
+    /// references the level below twice. Depth `d` is `d` distinct nodes
+    /// but `2^d` paths, so any walk that re-enters a shared body per
+    /// occurrence is Θ(2^d).
+    fn share_dag(depth: usize) -> Expr {
+        let mut e = v(0);
+        for _ in 0..depth {
+            let shared = Arc::new(e);
+            e = bin(
+                BinOp::Add,
+                Expr::Cse(Arc::clone(&shared)),
+                Expr::Cse(shared),
+            );
+        }
+        e
+    }
+
+    /// The walks over a shared DAG must be memoized, not exponential.
+    ///
+    /// At depth 30 an unmemoized walk is ~10^9 node visits — this test
+    /// does not "fail" so much as never finish, which is exactly the
+    /// signal. `from_expressions` is the door that makes such a DAG
+    /// trivially constructible, but the blowup was reachable through
+    /// `collect_vars` (which presolve calls on every solve, via
+    /// `get_variables_linearity`) and `collect_funcall_ids` (which
+    /// `NlTnlp::try_new` runs over every row).
+    #[test]
+    fn shared_dag_walks_are_memoized_not_exponential() {
+        const DEPTH: usize = 30;
+        let e = share_dag(DEPTH);
+
+        let mut vars = BTreeSet::new();
+        collect_vars(&e, &mut vars);
+        assert_eq!(vars.iter().copied().collect::<Vec<_>>(), vec![0]);
+
+        let mut ids = BTreeSet::new();
+        super::super::nl_external::collect_funcall_ids(&e, &mut ids);
+        assert!(ids.is_empty());
+
+        // The whole build path, end to end: validation, tape construction,
+        // and the linearity metadata presolve consumes.
+        let prob = NlProblem::from_expressions(parts(1, e, Vec::new())).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+        let mut lin = vec![Linearity::Linear; 1];
+        assert!(t.get_variables_linearity(&mut lin));
+    }
+
+    /// `from_expressions` cannot carry AMPL imported functions — there is
+    /// nowhere to put the `F`-segment declarations that bind a funcall id
+    /// to a library — so a `Funcall` must be refused up front. Accepting it
+    /// produces "AMPLFUNC is not set", which the user cannot act on:
+    /// setting `AMPLFUNC` only moves the failure to "no F<id> declaration".
+    #[test]
+    fn from_expressions_rejects_imported_function_calls() {
+        let call = Expr::Funcall {
+            id: 0,
+            args: vec![FuncallArg::Real(v(0))],
+        };
+        let err = NlProblem::from_expressions(parts(1, call.clone(), Vec::new()))
+            .expect_err("a Funcall must be rejected, not deferred to AMPLFUNC");
+        assert!(err.contains("imported function"), "{err}");
+        assert!(
+            err.contains("read_nl") || err.contains("parse_nl_text"),
+            "the error must point at the paths that do support externals: {err}"
+        );
+
+        // Also when buried in a constraint, behind a Cse.
+        let buried = Expr::Cse(Arc::new(Expr::Sum(vec![c(1.0), call])));
+        let err = NlProblem::from_expressions(parts(1, c(0.0), vec![buried]))
+            .expect_err("a buried Funcall must be rejected too");
+        assert!(err.contains("constraint 0"), "{err}");
+    }
+
+    /// The matrix-free HVP must reproduce `eval_h`'s Hessian exactly —
+    /// same tapes, same weights, one seed instead of a color sweep. The
+    /// objective and both constraints are chosen with cross terms so the
+    /// off-diagonal blocks actually carry signal.
+    #[test]
+    fn hessian_vector_product_matches_dense_hessian() {
+        let obj = Expr::Sum(vec![
+            bin(BinOp::Mul, v(0), bin(BinOp::Mul, v(1), v(2))),
+            un(UnaryOp::Exp, bin(BinOp::Mul, v(0), v(1))),
+            un(UnaryOp::Erf, v(2)),
+        ]);
+        let cons = vec![
+            bin(
+                BinOp::Add,
+                bin(BinOp::Pow, v(0), c(2.0)),
+                un(UnaryOp::Sin, v(2)),
+            ),
+            bin(BinOp::Mul, v(1), v(2)),
+        ];
+        let prob = NlProblem::from_expressions(parts(3, obj, cons)).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        let info = t.get_nlp_info().unwrap();
+
+        let x = [0.3, -0.7, 1.1];
+        let lam = [0.5, -1.25];
+        let obj_factor = 2.0;
+
+        // Dense Hessian from the sparse lower triangle.
+        let nnz = info.nnz_h_lag as usize;
+        let (mut irow, mut jcol) = (vec![0_i32; nnz], vec![0_i32; nnz]);
+        assert!(t.eval_h(
+            None,
+            false,
+            1.0,
+            None,
+            false,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            }
+        ));
+        let mut hvals = vec![0.0_f64; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            obj_factor,
+            Some(&lam),
+            true,
+            SparsityRequest::Values { values: &mut hvals }
+        ));
+        let mut dense = [[0.0_f64; 3]; 3];
+        for k in 0..nnz {
+            let (i, j) = (irow[k] as usize, jcol[k] as usize);
+            dense[i][j] += hvals[k];
+            if i != j {
+                dense[j][i] += hvals[k];
+            }
+        }
+
+        // Each unit seed recovers a column; a mixed seed catches an HVP
+        // that only happens to be right on the basis vectors.
+        let seeds: [[Number; 3]; 4] = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.4, -1.3, 2.0],
+        ];
+        let mut out = vec![0.0; 3];
+        for s in &seeds {
+            t.hessian_vector_product(&x, s, obj_factor, Some(&lam), &mut out)
+                .expect("hvp");
+            for i in 0..3 {
+                let want: Number = (0..3).map(|j| dense[i][j] * s[j]).sum();
+                assert!(
+                    (out[i] - want).abs() < 1e-9,
+                    "seed {s:?} row {i}: hvp={:.9e} dense={want:.9e}",
+                    out[i]
+                );
+            }
+        }
+    }
+
+    /// `lam = None` is the objective block alone, and `out` is
+    /// overwritten (not accumulated) so a reused buffer is safe.
+    #[test]
+    fn hessian_vector_product_defaults_and_validation() {
+        // f = x0^2 + 3 x0 x1  ->  ∇²f = [[2, 3], [3, 0]]
+        let obj = bin(
+            BinOp::Add,
+            bin(BinOp::Pow, v(0), c(2.0)),
+            bin(BinOp::Mul, c(3.0), bin(BinOp::Mul, v(0), v(1))),
+        );
+        let prob = NlProblem::from_expressions(parts(2, obj, Vec::new())).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        let mut out = vec![7.0, -7.0]; // dirty buffer
+        t.hessian_vector_product(&[0.5, 2.0], &[1.0, 1.0], 1.0, None, &mut out)
+            .expect("hvp");
+        assert!((out[0] - 5.0).abs() < 1e-12, "out = {out:?}");
+        assert!((out[1] - 3.0).abs() < 1e-12, "out = {out:?}");
+
+        // obj_factor scales linearly.
+        t.hessian_vector_product(&[0.5, 2.0], &[1.0, 1.0], -2.0, None, &mut out)
+            .expect("hvp");
+        assert!((out[0] + 10.0).abs() < 1e-12, "out = {out:?}");
+
+        // Length mismatches are errors, not panics or silent truncation.
+        let mut short = vec![0.0; 1];
+        assert!(
+            t.hessian_vector_product(&[0.5, 2.0], &[1.0, 1.0], 1.0, None, &mut short)
+                .is_err()
+        );
+        assert!(
+            t.hessian_vector_product(&[0.5], &[1.0, 1.0], 1.0, None, &mut out)
+                .is_err()
+        );
+        assert!(
+            t.hessian_vector_product(&[0.5, 2.0], &[1.0], 1.0, None, &mut out)
+                .is_err()
+        );
+    }
+
+    /// A chain objective `Σ (x_i·x_{i+1})² + exp(x_i)` has a tridiagonal
+    /// Hessian — the sparse shape an IPM actually meets. The block HVP has
+    /// to reproduce it column for column, including the structural zeros:
+    /// a bug that leaked coupling between non-adjacent variables would
+    /// show up here and nowhere in a small dense test.
+    #[test]
+    fn hessian_vector_products_on_a_sparse_hessian() {
+        const N: usize = 8;
+        let mut terms = Vec::new();
+        for i in 0..N - 1 {
+            terms.push(bin(BinOp::Pow, bin(BinOp::Mul, v(i), v(i + 1)), c(2.0)));
+        }
+        for i in 0..N {
+            terms.push(un(UnaryOp::Exp, v(i)));
+        }
+        let prob =
+            NlProblem::from_expressions(parts(N, Expr::Sum(terms), Vec::new())).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        let info = t.get_nlp_info().unwrap();
+
+        // Tridiagonal lower triangle: N diagonal + (N-1) sub-diagonal.
+        assert_eq!(
+            info.nnz_h_lag as usize,
+            2 * N - 1,
+            "chain objective should give a tridiagonal Hessian, not a dense one"
+        );
+
+        let x: Vec<Number> = (0..N).map(|i| 0.2 + 0.1 * i as Number).collect();
+
+        // Densify the sparse triangle for the reference.
+        let nnz = info.nnz_h_lag as usize;
+        let (mut irow, mut jcol) = (vec![0_i32; nnz], vec![0_i32; nnz]);
+        assert!(t.eval_h(
+            None,
+            false,
+            1.0,
+            None,
+            false,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol
+            }
+        ));
+        let mut hvals = vec![0.0; nnz];
+        assert!(t.eval_h(
+            Some(&x),
+            true,
+            1.0,
+            None,
+            true,
+            SparsityRequest::Values { values: &mut hvals }
+        ));
+        let mut dense = vec![vec![0.0; N]; N];
+        for k in 0..nnz {
+            let (i, j) = (irow[k] as usize, jcol[k] as usize);
+            dense[i][j] += hvals[k];
+            if i != j {
+                dense[j][i] += hvals[k];
+            }
+        }
+
+        // One block of N unit seeds recovers the whole matrix — the
+        // "densify via HVPs" path, in one call.
+        let mut seeds = vec![0.0; N * N];
+        for cc in 0..N {
+            seeds[cc * N + cc] = 1.0;
+        }
+        let mut out = vec![0.0; N * N];
+        t.hessian_vector_products(&x, &seeds, N, 1.0, None, &mut out)
+            .expect("block hvp");
+        for cc in 0..N {
+            for i in 0..N {
+                assert!(
+                    (out[cc * N + i] - dense[i][cc]).abs() < 1e-9,
+                    "H[{i},{cc}]: block={:.9e} sparse={:.9e}",
+                    out[cc * N + i],
+                    dense[i][cc]
+                );
+            }
+        }
+    }
+
+    /// The block form must agree with `k` separate single-vector calls
+    /// (it shares one forward sweep across directions, so a bug there
+    /// would show as a per-direction discrepancy), and must skip an
+    /// all-zero direction without disturbing its neighbours.
+    #[test]
+    fn hessian_vector_products_match_repeated_single_calls() {
+        let obj = Expr::Sum(vec![
+            un(UnaryOp::Exp, bin(BinOp::Mul, v(0), v(1))),
+            bin(BinOp::Pow, v(2), c(4.0)),
+            bin(BinOp::Mul, v(0), v(2)),
+        ]);
+        let cons = vec![bin(BinOp::Mul, v(1), v(2))];
+        let prob = NlProblem::from_expressions(parts(3, obj, cons)).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        let x = [0.4, -0.6, 1.3];
+        let lam = [0.75];
+        let cols: [[Number; 3]; 4] = [
+            [1.0, 2.0, -3.0],
+            [0.0, 0.0, 0.0], // the skipped direction
+            [0.5, 0.0, 0.0],
+            [-1.0, 1.0, 1.0],
+        ];
+
+        let mut block = vec![0.0; 3 * cols.len()];
+        let flat: Vec<Number> = cols.iter().flat_map(|c| c.iter().copied()).collect();
+        t.hessian_vector_products(&x, &flat, cols.len(), 1.0, Some(&lam), &mut block)
+            .expect("block hvp");
+
+        for (c, col) in cols.iter().enumerate() {
+            let mut single = vec![0.0; 3];
+            t.hessian_vector_product(&x, col, 1.0, Some(&lam), &mut single)
+                .expect("single hvp");
+            for i in 0..3 {
+                assert!(
+                    (block[c * 3 + i] - single[i]).abs() < 1e-12,
+                    "direction {c} row {i}: block={:.12e} single={:.12e}",
+                    block[c * 3 + i],
+                    single[i]
+                );
+            }
+        }
+        // The zero direction really is zero, not stale scratch.
+        assert!(block[3..6].iter().all(|&z| z == 0.0), "{block:?}");
+    }
+
+    /// `k = 0` is a legal empty block, and the length checks scale with
+    /// `k` rather than assuming a single direction.
+    #[test]
+    fn hessian_vector_products_validate_block_shape() {
+        let prob = NlProblem::from_expressions(parts(2, bin(BinOp::Pow, v(0), c(2.0)), Vec::new()))
+            .expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        let mut empty: Vec<Number> = Vec::new();
+        assert!(
+            t.hessian_vector_products(&[1.0, 1.0], &[], 0, 1.0, None, &mut empty)
+                .is_ok()
+        );
+
+        // v sized for one direction while k says two.
+        let mut out = vec![0.0; 4];
+        assert!(
+            t.hessian_vector_products(&[1.0, 1.0], &[1.0, 1.0], 2, 1.0, None, &mut out)
+                .is_err()
+        );
+        // out sized for one direction while k says two.
+        let mut short = vec![0.0; 2];
+        assert!(
+            t.hessian_vector_products(&[1.0, 1.0], &[1.0; 4], 2, 1.0, None, &mut short)
+                .is_err()
+        );
+    }
+
+    /// A `maximize` model's objective is negated by the evaluator, and
+    /// the HVP has to agree with `eval_h` about that — otherwise a
+    /// Hessian-free step would climb where the sparse path descends.
+    #[test]
+    fn hessian_vector_product_respects_maximize_sign() {
+        let obj = bin(BinOp::Pow, v(0), c(2.0));
+        let mut p = parts(1, obj, Vec::new());
+        p.minimize = false;
+        let prob = NlProblem::from_expressions(p).expect("build");
+        let mut t = NlTnlp::try_new(prob).expect("tnlp");
+        t.get_nlp_info().unwrap();
+
+        // max x0^2 is minimized as -x0^2, so ∇² = -2.
+        let mut out = vec![0.0; 1];
+        t.hessian_vector_product(&[1.0], &[1.0], 1.0, None, &mut out)
+            .expect("hvp");
+        assert!((out[0] + 2.0).abs() < 1e-12, "out = {out:?}");
     }
 }

@@ -137,7 +137,8 @@ impl<B: SensBacksolver> SensApplication<B> {
     /// (same shape as [`Self::compute_reduced_hessian`]); `eigvals_out`
     /// receives the `n` eigenvalues in ascending order; `eigvecs_out`
     /// receives the `n²` column-major eigenvector matrix (column `j`
-    /// is the eigenvector for `eigvals_out[j]`).
+    /// is the eigenvector for `eigvals_out[j]`, sign-pinned by
+    /// [`pounce_linalg::symmetric_eigen`] so the direction reproduces).
     ///
     /// Mirrors the `rh_eigendecomp=true` branch of upstream
     /// [`SensReducedHessianCalculator::ComputeReducedHessian`](../../../ref/Ipopt/contrib/sIPOPT/src/SensReducedHessianCalculator.cpp).

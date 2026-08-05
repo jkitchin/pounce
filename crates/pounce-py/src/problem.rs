@@ -631,7 +631,10 @@ impl PyProblem {
     /// Passing `rh_eigendecomp=True` implies `compute_reduced_hessian=True`
     /// and additionally returns the ascending eigenvalues plus the
     /// column-major eigenvector matrix of `H_R` (mirrors upstream
-    /// sIPOPT's `rh_eigendecomp` option).
+    /// sIPOPT's `rh_eigendecomp` option). Each eigenvector column's
+    /// sign is pinned (largest-magnitude component positive), so a
+    /// column read as a direction reproduces across builds; a repeated
+    /// eigenvalue still leaves the basis within its eigenspace free.
     ///
     /// Passing `sens_boundcheck=True` clamps the perturbed primal step
     /// against the variable bounds (single-pass projection — simpler

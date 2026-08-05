@@ -65,9 +65,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from ._build import (
+    _basis_block,
     _color_columns,
-    _detect_pattern_2d_multi,
-    _detect_pattern_lower_multi,
+    _detect_pattern_blocked,
+    _normalize_user_pattern,
     _seed_matrix,
     _to_np,
 )
@@ -1141,9 +1142,9 @@ class JaxProblem:
         (``where`` / ``abs`` / branches) a probe can miss a nonzero, and
         under compression a missed entry *aliases into a same-colored
         reported entry* — silently wrong derivatives, unlike the dense
-        path which merely drops the missed entry. Use a hand-specified
-        pattern (the :class:`pounce.Problem` API) for such models, or
-        leave ``sparse=False``. This affects only the forward derivatives
+        path which merely drops the missed entry. Pass the structure
+        explicitly via ``jac_pattern`` / ``hess_pattern`` for such
+        models, or leave ``sparse=False``. This affects only the forward derivatives
         fed to the IPM — the differentiable backward (``factor_reuse`` /
         implicit diff) is unchanged. Defaults to ``False`` (dense, with
         forward/reverse mode chosen by shape).
@@ -1152,6 +1153,17 @@ class JaxProblem:
         detect sparsity. ``None`` (default) uses 1 probe for the dense
         path and 3 for ``sparse=True`` (a mis-probe under compression
         corrupts the seed structure, not just a reported nonzero).
+        Probes sweep the matrix a block of rows/columns at a time, so
+        build memory is bounded regardless of ``n`` (issue #464).
+    jac_pattern, hess_pattern : (rows, cols) or None
+        Known sparsity patterns in cyipopt ``(row_indices, col_indices)``
+        form — ``jac_pattern`` for the ``(m, n)`` constraint Jacobian,
+        ``hess_pattern`` for the lower triangle of the ``(n, n)``
+        Lagrangian Hessian. Supplying one skips detection for that matrix
+        entirely (issue #464); either may be given alone. The pattern
+        must be a **superset** of the true structure — a missing entry is
+        silently wrong, and nothing here evaluates the model to check.
+        See :func:`pounce.jax.from_jax` for the full contract.
     factor_reuse : bool
         When ``True`` (default), the differentiable backward reuses the
         IPM's converged compound KKT factor for the implicit-function
@@ -1242,6 +1254,8 @@ class JaxProblem:
         factor_reuse: bool = True,
         sparse: bool = False,
         n_probes: int | None = None,
+        jac_pattern=None,
+        hess_pattern=None,
     ):
         if m > 0 and g is None:
             raise ValueError("g must be provided when m > 0")
@@ -1328,10 +1342,10 @@ class JaxProblem:
         self._build_jit_closures()
         self._init_runtime_state()
 
-        # One-shot sparsity probe at random (x, p). The sparsity
-        # *pattern* is assumed independent of p (true for smooth
-        # pointwise compositions); see _JaxProblem for the same
-        # assumption on the non-parametric path.
+        # One-shot sparsity probe at random (x, p), unless the caller
+        # supplied the pattern. The sparsity *pattern* is assumed
+        # independent of p (true for smooth pointwise compositions); see
+        # _JaxProblem for the same assumption on the non-parametric path.
         p_arr = np.asarray(p_example, dtype=np.float64)
         self._p_shape = p_arr.shape
         self._p_dtype = jnp.float64
@@ -1340,7 +1354,9 @@ class JaxProblem:
         # draws. One probe suffices for value-independent structure; the
         # union hardens against branchy / value-dependent sparsity, which
         # matters more under sparse=True (a mis-probe there corrupts the
-        # compression seed, not just a reported nonzero).
+        # compression seed, not just a reported nonzero). Each probe is
+        # swept a block of rows/columns at a time so the full (m, n) /
+        # (n, n) matrix is never materialized (issue #464).
         x_probes = [
             jnp.asarray(rng.standard_normal(n)) for _ in range(self._n_probes)
         ]
@@ -1348,33 +1364,109 @@ class JaxProblem:
             jnp.asarray(rng.standard_normal(p_arr.shape))
             for _ in range(self._n_probes)
         ]
-        if m > 0:
-            lam_probes = [
-                jnp.asarray(rng.standard_normal(m))
-                for _ in range(self._n_probes)
-            ]
-            jac_denses = [
-                _to_np(self._jac_g_jit(xp, pp))
-                for xp, pp in zip(x_probes, p_probes)
-            ]
-            self._jac_rows, self._jac_cols = _detect_pattern_2d_multi(jac_denses)
-            hess_denses = [
-                _to_np(self._hess_lag_jit(xp, lp, 1.0, pp))
-                for xp, lp, pp in zip(x_probes, lam_probes, p_probes)
-            ]
+        lam_probes = (
+            [jnp.asarray(rng.standard_normal(m)) for _ in range(self._n_probes)]
+            if m > 0 else []
+        )
+
+        if jac_pattern is not None:
+            self._jac_rows, self._jac_cols = _normalize_user_pattern(
+                jac_pattern, "jac_pattern", m, n,
+            )
+        elif m > 0:
+            self._jac_rows, self._jac_cols = self._probe_jac(x_probes, p_probes)
         else:
             self._jac_rows = np.zeros(0, dtype=np.int64)
             self._jac_cols = np.zeros(0, dtype=np.int64)
-            hess_denses = [
-                _to_np(self._hess_lag_jit(xp, 1.0, pp))
-                for xp, pp in zip(x_probes, p_probes)
-            ]
-        self._hess_rows, self._hess_cols = _detect_pattern_lower_multi(hess_denses)
+
+        if hess_pattern is not None:
+            self._hess_rows, self._hess_cols = _normalize_user_pattern(
+                hess_pattern, "hess_pattern", n, n, lower=True,
+            )
+        else:
+            self._hess_rows, self._hess_cols = self._probe_hess(
+                x_probes, lam_probes, p_probes,
+            )
 
         # Colored/compressed forward closures (issue #83, option B).
         # Built after the probe because coloring needs the pattern.
         if self._sparse:
             self._build_compressed_closures()
+
+    # ----- internal: blocked sparsity probes (issue #464) -----
+
+    def _probe_jac(self, x_probes, p_probes) -> tuple[np.ndarray, np.ndarray]:
+        """Jacobian pattern, swept a block of rows (VJP) or columns (JVP)
+        at a time. Direction mirrors the dense path's ``jacfwd`` when
+        ``n < m`` else ``jacrev`` choice, so the AD pass count is the
+        same — only the peak allocation is bounded."""
+        n, m, g = self._n, self._m, self._g
+        if n < m:
+            @jax.jit
+            def block(x, p, E):  # (b, n) seeds -> (b, m) columns of J
+                return jax.vmap(
+                    lambda s: jax.jvp(lambda xx: g(xx, p), (x,), (s,))[1]
+                )(E)
+
+            return _detect_pattern_blocked(
+                n, m,
+                lambda a, b: [
+                    _to_np(block(xp, pp, _basis_block(a, b, n)))
+                    for xp, pp in zip(x_probes, p_probes)
+                ],
+                by_row=False,
+            )
+
+        @jax.jit
+        def block(x, p, E):  # (b, m) cotangents -> (b, n) rows of J
+            _, vjp = jax.vjp(lambda xx: g(xx, p), x)
+            return jax.vmap(lambda ct: vjp(ct)[0])(E)
+
+        return _detect_pattern_blocked(
+            m, n,
+            lambda a, b: [
+                _to_np(block(xp, pp, _basis_block(a, b, m)))
+                for xp, pp in zip(x_probes, p_probes)
+            ],
+            by_row=True,
+        )
+
+    def _probe_hess(
+        self, x_probes, lam_probes, p_probes,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Lower-triangle Lagrangian-Hessian pattern, swept a block of
+        columns at a time via HVPs. ``H`` is symmetric, so columns give
+        the triangle."""
+        n, grad_L = self._n, self._grad_lag
+        if self._m > 0:
+            @jax.jit
+            def block(x, lam, p, E):
+                return jax.vmap(
+                    lambda s: jax.jvp(
+                        lambda xx: grad_L(xx, lam, 1.0, p), (x,), (s,)
+                    )[1]
+                )(E)
+
+            def blocks(a, b):
+                E = _basis_block(a, b, n)
+                return [
+                    _to_np(block(xp, lp, pp, E))
+                    for xp, lp, pp in zip(x_probes, lam_probes, p_probes)
+                ]
+        else:
+            @jax.jit
+            def block(x, p, E):
+                return jax.vmap(
+                    lambda s: jax.jvp(lambda xx: grad_L(xx, 1.0, p), (x,), (s,))[1]
+                )(E)
+
+            def blocks(a, b):
+                E = _basis_block(a, b, n)
+                return [
+                    _to_np(block(xp, pp, E)) for xp, pp in zip(x_probes, p_probes)
+                ]
+
+        return _detect_pattern_blocked(n, n, blocks, by_row=False, lower=True)
 
     # ----- internal: rebuildable per-process state -----
 
@@ -1402,6 +1494,7 @@ class JaxProblem:
             def lagrangian(x, lam, sigma, p):
                 return sigma * f(x, p) + jnp.dot(lam, g(x, p))
 
+            self._lagrangian = lagrangian
             self._hess_lag_jit = jax.jit(jax.hessian(lagrangian, argnums=0))
         else:
             self._g_jit = None
@@ -1410,7 +1503,10 @@ class JaxProblem:
             def lagrangian_unc(x, sigma, p):
                 return sigma * f(x, p)
 
+            self._lagrangian = lagrangian_unc
             self._hess_lag_jit = jax.jit(jax.hessian(lagrangian_unc, argnums=0))
+        # Shared by the blocked Hessian probe and the compressed HVP.
+        self._grad_lag = jax.grad(self._lagrangian, argnums=0)
 
     def _build_compressed_closures(self) -> None:
         """Build the colored JVP (Jacobian) and HVP (Hessian) closures
@@ -1423,7 +1519,7 @@ class JaxProblem:
         the pickled pattern arrays on ``__setstate__`` since coloring is
         deterministic."""
         n, m = self._n, self._m
-        f, g = self._f, self._g
+        g = self._g
 
         # Jacobian: color the (m, n) pattern, one forward-mode JVP per
         # color → (k, m). For nonzero (i, j) the value lives at
@@ -1452,12 +1548,8 @@ class JaxProblem:
         S_hess = _seed_matrix(hess_colors, k_hess, n)
         self._hess_seed_cols = hess_colors[self._hess_cols]
 
+        grad_L = self._grad_lag
         if m > 0:
-            def lagrangian(x, lam, sigma, p):
-                return sigma * f(x, p) + jnp.dot(lam, g(x, p))
-
-            grad_L = jax.grad(lagrangian, argnums=0)
-
             def hess_compressed(x, lam, sigma, p):
                 return jax.vmap(
                     lambda s: jax.jvp(
@@ -1465,11 +1557,6 @@ class JaxProblem:
                     )[1]
                 )(S_hess)
         else:
-            def lagrangian_unc(x, sigma, p):
-                return sigma * f(x, p)
-
-            grad_L = jax.grad(lagrangian_unc, argnums=0)
-
             def hess_compressed(x, sigma, p):
                 return jax.vmap(
                     lambda s: jax.jvp(
@@ -1549,6 +1636,7 @@ class JaxProblem:
     # truth so the two hooks can't drift.
     _PICKLE_DROP = (
         "_f_jit", "_grad_f_jit", "_g_jit", "_jac_g_jit", "_hess_lag_jit",
+        "_lagrangian", "_grad_lag",
         "_jac_compressed_jit", "_hess_compressed_jit",
         "_registry_lock", "_tls", "_factor_executor",
         "_solver_registry", "_pinned_solvers", "_solver_id_counter",

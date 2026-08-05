@@ -1550,17 +1550,29 @@ impl SolverDebugger {
         let Some(&what) = rest.first() else {
             return self.cmd_info(ctx);
         };
+        // The backend-conditional sub-commands are rejected on a capability
+        // basis *before* any timing check: on a backend that can never
+        // answer them (the convex/conic IPM has no augmented system, no
+        // per-component residual pool, no bound slacks), a "not yet — stop
+        // later" message would send the user round a loop that never ends
+        // in an answer. #462.
         if what == "kkt" {
-            return self.cmd_print_kkt(ctx);
+            return match as_nlp(ctx) {
+                Some(_) => self.cmd_print_kkt(ctx),
+                None => nlp_only("print kkt"),
+            };
         }
-        if what == "active" {
-            return self.cmd_print_bounds(ctx, true);
-        }
-        if what == "inactive" {
-            return self.cmd_print_bounds(ctx, false);
+        if what == "active" || what == "inactive" {
+            return match as_nlp(ctx) {
+                Some(_) => self.cmd_print_bounds(ctx, what == "active"),
+                None => nlp_only(&format!("print {what}")),
+            };
         }
         if what == "residuals" || what == "resid" {
-            return self.cmd_print_residuals(&rest[1..], ctx);
+            return match as_nlp(ctx) {
+                Some(_) => self.cmd_print_residuals(&rest[1..], ctx),
+                None => nlp_only("print residuals"),
+            };
         }
         if what == "equation" || what == "eqn" || what == "eq" {
             return self.cmd_print_equation(&rest[1..]);
@@ -3131,6 +3143,10 @@ impl SolverDebugger {
         // `viz kkt` writes the assembled augmented-system matrix (triplets
         // → heatmap) plus the inertia/regularization summary.
         if target == "kkt" {
+            // Capability first, timing second (see `print kkt`, #462).
+            if as_nlp(ctx).is_none() {
+                return nlp_only("viz kkt");
+            }
             let Some(k) = ctx.kkt() else {
                 return CmdOut::err(
                     "no KKT factorization captured yet — nothing has been factored (iter 0), \
@@ -3172,6 +3188,9 @@ impl SolverDebugger {
         // the debugger is stepping (same as the matrix), so it shows the
         // previous iteration's factorization at `iter_start`.
         if target == "L" {
+            if as_nlp(ctx).is_none() {
+                return nlp_only("viz L");
+            }
             match ctx.kkt_l_factor() {
                 Some((n, perm, l_irn, l_jcn, l_vals)) => {
                     // Iteration the factor came from (previous iter at `iter_start`).
@@ -3350,7 +3369,20 @@ impl SolverDebugger {
     /// version, advertised capabilities, and the command / metric
     /// vocabulary — everything a visual debugger needs to configure its
     /// UI before the first `pause`.
-    fn emit_hello(&self) {
+    ///
+    /// The backend-conditional entries are answered for the backend that is
+    /// actually running: a client feature-detecting off `capabilities` must
+    /// not be told the convex/conic IPM can do `print kkt` / `diagnose`
+    /// when the REPL rejects those with "not available for this solver"
+    /// (#462). Likewise `blocks` names *this* solver's iterate blocks.
+    fn emit_hello(&self, ctx: &dyn DebugState) {
+        let nlp = as_nlp(ctx).is_some();
+        // `viz kkt` / `viz L` need an augmented system to show.
+        let viz: &[&str] = if nlp {
+            &["block", "delta", "kkt", "L"]
+        } else {
+            &["block", "delta"]
+        };
         let ev = serde_json::json!({
             "event": "hello",
             "protocol": "pounce-dbg/1",
@@ -3358,25 +3390,27 @@ impl SolverDebugger {
             "capabilities": {
                 "inspect": true,
                 "mutate_iterate": true,
-                "mutate_mu": true,
+                // The convex μ is derived from ⟨s, z⟩; `set mu` is rejected
+                // there (edit the `s`/`z` blocks instead).
+                "mutate_mu": nlp,
                 "conditional_breakpoints": "compound",
                 "request_ids": true,
-                "viz": ["block", "delta", "kkt", "L"],
+                "viz": viz,
                 "save": true,
-                "load": true,
-                "sweep": self.restart.is_some(),
-                "kkt_inspect": true,
+                "load": nlp,
+                "sweep": nlp && self.restart.is_some(),
+                "kkt_inspect": nlp,
                 // `print equation <name|row>` is available when a source
                 // model (`.nl`) supplied constraint algebra to render.
                 "equations": self.equation_book.is_some(),
                 // Live `diagnose` — point-in-time named health findings.
-                "diagnose": true,
+                "diagnose": nlp,
                 // `diagnose`'s structural rank pass (Dulmage–Mendelsohn)
                 // names dependent equations; available with a `.nl` model.
-                "structural_diagnose": self.structure_book.is_some(),
+                "structural_diagnose": nlp && self.structure_book.is_some(),
                 "llm_assist": true,
                 "rewind": "primal_dual",
-                "resolve": self.restart.is_some(),
+                "resolve": nlp && self.restart.is_some(),
                 "terminal_checkpoint": true,
                 "interruptible": self.interruptible,
                 // #72 §1 / §5.
@@ -3389,7 +3423,7 @@ impl SolverDebugger {
             "checkpoints": CHECKPOINTS,
             "events": EVENTS,
             "commands": COMMANDS,
-            "blocks": BLOCK_NAMES,
+            "blocks": block_names(ctx),
             "metrics": METRICS,
         });
         emit_json(&ev);
@@ -3884,7 +3918,7 @@ impl DebugHook for SolverDebugger {
         // One-time handshake so a JSON client learns the protocol /
         // capabilities before the first pause.
         if matches!(self.mode, DebugMode::Json) && !self.hello_sent {
-            self.emit_hello();
+            self.emit_hello(&*ctx);
             self.hello_sent = true;
         }
         // Terminal post-mortem checkpoint: pause if configured (and, for

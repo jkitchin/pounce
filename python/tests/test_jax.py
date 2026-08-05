@@ -2551,3 +2551,188 @@ def test_follow_rejects_inequality_constraints_pounce_90():
     pf = PathFollower(jp)
     with pytest.raises(ValueError, match="inequality"):
         pf.follow(lambda s: jnp.array([s, s]), (0.0, 1.0), jnp.zeros(2))
+
+
+# ----- sparsity detection without a dense matrix (issue #464) -----
+
+
+def _tridiag_patterns(n):
+    """The (rows, cols) of the banded problem above, in closed form —
+    what a collocation user would build from the discretization rather
+    than rediscover by probing."""
+    r = np.arange(n - 1, dtype=np.int64)
+    jac = (np.concatenate([r, r]), np.concatenate([r, r + 1]))
+    d = np.arange(n, dtype=np.int64)
+    o = np.arange(1, n, dtype=np.int64)
+    hess = (np.concatenate([d, o]), np.concatenate([d, o - 1]))
+    return jac, hess
+
+
+def test_blocked_probe_never_materializes_the_matrix_464():
+    """Issue #464: detection sweeps a block of rows/columns at a time.
+    Shrinking the block budget to a couple of slices must not change the
+    detected pattern — the sweep is an implementation detail, not a
+    different answer."""
+    import pounce._ad_common as adc
+    from pounce.jax._build import _JaxProblem
+
+    f, g, n, m = _banded_problem(40)
+    full = _JaxProblem(f, g, n=n, m=m, sparse=True, n_probes=3)
+
+    saved = adc._PROBE_BLOCK_BYTES
+    adc._PROBE_BLOCK_BYTES = 8 * n * 2       # two slices per block
+    try:
+        chunked = _JaxProblem(f, g, n=n, m=m, sparse=True, n_probes=3)
+    finally:
+        adc._PROBE_BLOCK_BYTES = saved
+
+    for a, b in zip(full.jacobianstructure(), chunked.jacobianstructure()):
+        np.testing.assert_array_equal(a, b)
+    for a, b in zip(full.hessianstructure(), chunked.hessianstructure()):
+        np.testing.assert_array_equal(a, b)
+
+    x = np.random.default_rng(5).standard_normal(n)
+    lam = np.random.default_rng(6).standard_normal(m)
+    np.testing.assert_allclose(full.jacobian(x), chunked.jacobian(x), rtol=1e-12)
+    np.testing.assert_allclose(
+        full.hessian(x, lam, 0.7), chunked.hessian(x, lam, 0.7), rtol=1e-12,
+    )
+
+
+def test_blocked_probe_covers_the_jvp_column_sweep_464():
+    """With ``n < m`` the probe sweeps *columns* via JVPs instead of rows
+    via VJPs (mirroring the dense path's jacfwd/jacrev choice). Exercise
+    that branch against the dense-slice values."""
+    from pounce.jax._build import _JaxProblem
+
+    n = 12
+
+    def f(x):
+        return jnp.sum(x ** 2)
+
+    def g(x):  # m = 3n - 1 > n
+        return jnp.concatenate([x ** 2, x ** 3, x[:-1] * x[1:]])
+
+    m = 3 * n - 1
+    dense = _JaxProblem(f, g, n=n, m=m, sparse=False)
+    sparse = _JaxProblem(f, g, n=n, m=m, sparse=True, n_probes=3)
+    for a, b in zip(dense.jacobianstructure(), sparse.jacobianstructure()):
+        np.testing.assert_array_equal(a, b)
+
+    x = np.random.default_rng(2).standard_normal(n)
+    lam = np.random.default_rng(3).standard_normal(m)
+    np.testing.assert_allclose(dense.jacobian(x), sparse.jacobian(x), rtol=1e-12)
+    np.testing.assert_allclose(
+        dense.hessian(x, lam, 1.0), sparse.hessian(x, lam, 1.0), rtol=1e-12,
+    )
+
+
+def test_from_jax_supplied_pattern_skips_detection_464():
+    """Issue #464 request 1: a caller who knows the structure can hand it
+    over. The result must match the probed build exactly, and the probe
+    must not run — asserted by making the model explode if differentiated
+    at a probe point the build would otherwise visit."""
+    from pounce.jax._build import _JaxProblem
+
+    f, g, n, m = _banded_problem(30)
+    jac, hess = _tridiag_patterns(n)
+
+    probed = _JaxProblem(f, g, n=n, m=m, sparse=True, n_probes=3)
+    supplied = _JaxProblem(
+        f, g, n=n, m=m, sparse=True, jac_pattern=jac, hess_pattern=hess,
+    )
+    for a, b in zip(probed.jacobianstructure(), supplied.jacobianstructure()):
+        np.testing.assert_array_equal(a, b)
+    for a, b in zip(probed.hessianstructure(), supplied.hessianstructure()):
+        np.testing.assert_array_equal(a, b)
+
+    x = np.random.default_rng(7).standard_normal(n)
+    lam = np.random.default_rng(8).standard_normal(m)
+    np.testing.assert_allclose(probed.jacobian(x), supplied.jacobian(x), rtol=1e-12)
+    np.testing.assert_allclose(
+        probed.hessian(x, lam, 0.4), supplied.hessian(x, lam, 0.4), rtol=1e-12,
+    )
+
+    # Only one of the two may be supplied; the other is still probed.
+    half = _JaxProblem(f, g, n=n, m=m, sparse=True, n_probes=3, jac_pattern=jac)
+    for a, b in zip(probed.hessianstructure(), half.hessianstructure()):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_from_jax_supplied_pattern_solves_464():
+    """A supplied (here deliberately over-broad, fully dense) pattern
+    still solves hs071 — extra entries only report zeros."""
+    from pounce.jax import from_jax
+
+    def f(x):
+        return x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2]
+
+    def g(x):
+        return jnp.stack([jnp.prod(x), jnp.dot(x, x)])
+
+    n, m = 4, 2
+    jr, jc = np.meshgrid(np.arange(m), np.arange(n), indexing="ij")
+    hr, hc = np.tril_indices(n)
+    prob = from_jax(
+        f, g, n=n, m=m,
+        lb=np.array([1.0] * n), ub=np.array([5.0] * n),
+        cl=np.array([25.0, 40.0]), cu=np.array([2e19, 40.0]),
+        sparse=True,
+        jac_pattern=(jr.ravel(), jc.ravel()),
+        hess_pattern=(hr, hc),
+    )
+    prob.add_option("tol", 1e-8)
+    prob.add_option("print_level", 0)
+    _, info = prob.solve(x0=np.array([1.0, 5.0, 5.0, 1.0]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(info["obj_val"], 17.0140172, rtol=1e-5)
+
+
+def test_from_jax_rejects_out_of_range_pattern_464():
+    from pounce.jax import from_jax
+
+    def f(x):
+        return jnp.sum(x ** 2)
+
+    def g(x):
+        return jnp.array([jnp.sum(x)])
+
+    with pytest.raises(ValueError, match=r"col indices must lie in \[0, 3\)"):
+        from_jax(f, g, n=3, m=1, cl=np.zeros(1), cu=np.zeros(1),
+                 jac_pattern=(np.array([0]), np.array([7])))
+
+
+def _pattern464_f(x, p):
+    return jnp.sum(p[0] * x ** 2)
+
+
+def _pattern464_g(x, p):
+    return x[:-1] * x[1:] - p[1]
+
+
+def test_jax_problem_supplied_pattern_464():
+    """The parametric JaxProblem takes the same patterns, and they
+    survive the pickle round-trip that rebuilds its JIT closures."""
+    import pickle
+
+    from pounce.jax import JaxProblem
+
+    n = 10
+    m = n - 1
+    jac, hess = _tridiag_patterns(n)
+
+    kw = dict(
+        f=_pattern464_f, g=_pattern464_g, n=n, m=m, p_example=np.ones(2),
+        cl=np.zeros(m), cu=np.zeros(m), sparse=True,
+        options={"print_level": 0, "sb": "yes"},
+    )
+    probed = JaxProblem(n_probes=3, **kw)
+    supplied = JaxProblem(jac_pattern=jac, hess_pattern=hess, **kw)
+    np.testing.assert_array_equal(probed._jac_rows, supplied._jac_rows)
+    np.testing.assert_array_equal(probed._jac_cols, supplied._jac_cols)
+    np.testing.assert_array_equal(probed._hess_rows, supplied._hess_rows)
+    np.testing.assert_array_equal(probed._hess_cols, supplied._hess_cols)
+
+    rt = pickle.loads(pickle.dumps(supplied))
+    np.testing.assert_array_equal(rt._jac_rows, supplied._jac_rows)
+    np.testing.assert_array_equal(rt._hess_cols, supplied._hess_cols)

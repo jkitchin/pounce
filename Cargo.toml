@@ -132,6 +132,15 @@ feral = { version = "0.14.0" }
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
 faer = { version = "0.24.0", default-features = false, features = ["std"] }
+# `erf` for the AD tape's `TapeOp::Erf` (issue #469). Rust's `std` has no
+# error function, and the classic Abramowitz–Stegun series is only ~1e-7
+# accurate — not enough for a solver's residuals. `libm` is the rust-lang
+# port of musl's libm, so `erf` is the same full-double-precision routine a
+# C model would get. Tiny, no_std, no transitive deps. Licensed MIT as of
+# 0.2.16 (it was `MIT AND (MIT OR Apache-2.0)` through 0.2.11, before libm
+# moved into rust-lang/compiler-builtins) — permissive either way, but the
+# single-license form is what the lockfile resolves.
+libm = "0.2"
 
 # Observability / colored-output stack (pounce#71). `anstyle` is the
 # style/color vocabulary, `anstyle-query` detects terminal capability

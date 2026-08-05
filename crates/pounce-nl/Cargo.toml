@@ -15,6 +15,9 @@ description = "AMPL .nl reader, reverse-mode AD tape, and TNLP evaluator for pou
 pounce-common.workspace = true
 pounce-nlp = { workspace = true, features = ["serde"] }
 tracing.workspace = true
+# `erf` for `TapeOp::Erf` / `UnaryOp::Erf` — see the workspace dependency
+# comment for why this is not hand-rolled.
+libm.workspace = true
 
 # AMPL imported (external) functions are `dlopen`ed at solve time, which
 # only exists on unix/windows. Targets without a dynamic loader — notably

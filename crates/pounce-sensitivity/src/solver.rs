@@ -311,6 +311,19 @@ impl Solver {
         })
     }
 
+    /// The exact Lagrangian Hessian times a user-space vector, in
+    /// user variable order and natural units (see
+    /// [`crate::activity::hessian_vec`]). Errors on a length mismatch.
+    pub fn hessian_vec(&self, v: &[Number]) -> Result<Vec<Number>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        crate::activity::hessian_vec(&state.backsolver, v).map_err(|n| SolverError::BadShape {
+            what: "hessian_vec vector length",
+            got: v.len(),
+            expected: n,
+        })
+    }
+
     /// Solve `K · lhs = rhs` against the converged KKT factor. Both
     /// slices must have length `kkt_dim()`; the layout is the flat
     /// `x || s || y_c || y_d || z_l || z_u || v_l || v_u` packing.

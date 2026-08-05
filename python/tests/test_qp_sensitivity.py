@@ -142,6 +142,13 @@ def test_reduced_hessian_matches_numpy_nullspace():
     recon = rh.eigenvectors @ np.diag(rh.eigenvalues) @ rh.eigenvectors.T
     np.testing.assert_allclose(recon, rh.matrix, atol=1e-9)
 
+    # Signs are pinned (#471): reconstruction is sign-invariant, so it
+    # would pass either way; a caller reading a column as a direction
+    # needs the convention, largest-magnitude component positive.
+    for j in range(rh.eigenvectors.shape[1]):
+        col = rh.eigenvectors[:, j]
+        assert col[np.abs(col).argmax()] > 0
+
 
 def test_reduced_hessian_full_rank_active_set_has_zero_dof():
     # Two independent active constraints in 2 variables pin the point

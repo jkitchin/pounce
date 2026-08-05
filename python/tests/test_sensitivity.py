@@ -175,6 +175,12 @@ def test_solve_with_sens_rh_eigendecomp_diagonalizes_hr():
     np.testing.assert_allclose(Hr @ V, V * eigvals[np.newaxis, :], atol=1e-10)
     # Eigenvectors are orthonormal.
     np.testing.assert_allclose(V.T @ V, np.eye(2), atol=1e-10)
+    # Signs are pinned (#471): `v` and `-v` both diagonalize, so the
+    # kernel fixes the largest-magnitude component of each column
+    # positive, making a column read as a direction reproducible.
+    for j in range(V.shape[1]):
+        col = V[:, j]
+        assert col[np.abs(col).argmax()] > 0
 
 
 def test_solve_with_sens_boundcheck_clamps_violating_step():

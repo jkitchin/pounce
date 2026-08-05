@@ -2115,6 +2115,17 @@ impl IpoptApplication {
                 // Complementarity / Overall NLP error").
                 let cq = alg.cq.borrow();
                 stats.final_dual_inf = cq.curr_dual_infeasibility_max();
+                // Stays on the *internal* measure deliberately: the summary's
+                // "Overall NLP error" is `curr_nlp_error`, which is also the
+                // convergence gate (`ipopt_alg.rs`), and it is built from this
+                // same `max(||c||, ||d - s||)`. Switching the violation line
+                // alone to the original-NLP measure
+                // (`curr_unscaled_nlp_constraint_violation_max`, now used by the
+                // `inf_pr` column) would leave the block self-inconsistent —
+                // an error larger than the max of its own components. Making
+                // them agree means deciding whether *convergence* should be
+                // judged on the original NLP, which is a behaviour change for
+                // every model, not a reporting fix. See pounce#476.
                 stats.final_constr_viol = cq.curr_primal_infeasibility_max();
                 // Infinity-norm complementarity, max over all four bound
                 // blocks (s_xl·z_l, s_xu·z_u, s_sl·v_l, s_su·v_u). The

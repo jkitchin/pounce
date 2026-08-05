@@ -50,15 +50,15 @@ from typing import Callable
 
 import numpy as np
 import torch
-from torch.func import grad, hessian, jacfwd, jacrev, jvp, vmap
+from torch.func import grad, hessian, jacfwd, jacrev, jvp, vjp, vmap
 
 from .._pounce import Problem, Solver
 from .._ad_common import (
     _color_columns,
-    _detect_pattern_2d_multi,
-    _detect_pattern_lower_multi,
+    _detect_pattern_blocked,
+    _normalize_user_pattern,
 )
-from ._build import _DT, _seed_matrix, _t, _to_np
+from ._build import _DT, _basis_block, _seed_matrix, _t, _to_np
 from ._diff import _kkt_backward, _require_f64
 
 from .._ad_common import ACTIVE_TOL as _ACTIVE_TOL  # single source of truth (DiffHandoff contract)
@@ -542,7 +542,17 @@ class TorchProblem:
         Colored/compressed forward Jacobian & Hessian (issue #83).
     n_probes : int or None
         Probes whose nonzero patterns are unioned (default 1 dense / 3
-        sparse).
+        sparse). Probes sweep the matrix a block of rows/columns at a
+        time, so build memory is bounded regardless of ``n`` (issue #464).
+    jac_pattern, hess_pattern : (rows, cols) or None
+        Known sparsity patterns in cyipopt ``(row_indices, col_indices)``
+        form — ``jac_pattern`` for the ``(m, n)`` constraint Jacobian,
+        ``hess_pattern`` for the lower triangle of the ``(n, n)``
+        Lagrangian Hessian. Supplying one skips detection for that matrix
+        entirely (issue #464); either may be given alone. The pattern
+        must be a **superset** of the true structure — a missing entry is
+        silently wrong, and nothing here evaluates the model to check.
+        See :func:`pounce.torch.from_torch` for the full contract.
     """
 
     def __init__(
@@ -562,6 +572,8 @@ class TorchProblem:
         factor_reuse: bool = True,
         sparse: bool = False,
         n_probes: int | None = None,
+        jac_pattern=None,
+        hess_pattern=None,
     ):
         if m > 0 and g is None:
             raise ValueError("g must be provided when m > 0")
@@ -598,34 +610,107 @@ class TorchProblem:
         self._stacked_cache: dict[int, tuple] = {}
         self._stacked_warm_cache: dict[int, tuple] = {}
 
-        # One-shot sparsity probe.
+        # One-shot sparsity probe, unless the caller supplied the
+        # pattern. Each probe is swept a block of rows/columns at a time
+        # so the full (m, n) / (n, n) matrix is never built (issue #464).
         p_arr = np.asarray(p_example, dtype=np.float64)
         self._p_shape = p_arr.shape
         rng = np.random.default_rng(seed)
         x_probes = [_t(rng.standard_normal(n)) for _ in range(self._n_probes)]
         p_probes = [_t(rng.standard_normal(p_arr.shape)) for _ in range(self._n_probes)]
-        if m > 0:
-            lam_probes = [_t(rng.standard_normal(m)) for _ in range(self._n_probes)]
-            jac_denses = [
-                _to_np(self._jac_g_dense(xp, pp))
-                for xp, pp in zip(x_probes, p_probes)
-            ]
-            self._jac_rows, self._jac_cols = _detect_pattern_2d_multi(jac_denses)
-            hess_denses = [
-                _to_np(self._hess_lag(xp, lp, _t(1.0), pp))
-                for xp, lp, pp in zip(x_probes, lam_probes, p_probes)
-            ]
+        lam_probes = (
+            [_t(rng.standard_normal(m)) for _ in range(self._n_probes)]
+            if m > 0 else []
+        )
+
+        if jac_pattern is not None:
+            self._jac_rows, self._jac_cols = _normalize_user_pattern(
+                jac_pattern, "jac_pattern", m, n,
+            )
+        elif m > 0:
+            self._jac_rows, self._jac_cols = self._probe_jac(x_probes, p_probes)
         else:
             self._jac_rows = np.zeros(0, dtype=np.int64)
             self._jac_cols = np.zeros(0, dtype=np.int64)
-            hess_denses = [
-                _to_np(self._hess_lag(xp, _t(1.0), pp))
-                for xp, pp in zip(x_probes, p_probes)
-            ]
-        self._hess_rows, self._hess_cols = _detect_pattern_lower_multi(hess_denses)
+
+        if hess_pattern is not None:
+            self._hess_rows, self._hess_cols = _normalize_user_pattern(
+                hess_pattern, "hess_pattern", n, n, lower=True,
+            )
+        else:
+            self._hess_rows, self._hess_cols = self._probe_hess(
+                x_probes, lam_probes, p_probes,
+            )
 
         if self._sparse:
             self._build_compressed_closures()
+
+    # ----- blocked sparsity probes (issue #464) -----
+
+    def _probe_jac(self, x_probes, p_probes) -> tuple[np.ndarray, np.ndarray]:
+        """Jacobian pattern, swept a block of rows (VJP) or columns (JVP)
+        at a time. Direction mirrors the dense path's ``jacfwd`` when
+        ``n < m`` else ``jacrev`` choice, so the AD pass count is the
+        same — only the peak allocation is bounded."""
+        n, m, g = self._n, self._m, self._g
+        if n < m:
+            def block(x, p, E):  # (b, n) seeds -> (b, m) columns of J
+                return vmap(lambda s: jvp(lambda xx: g(xx, p), (x,), (s,))[1])(E)
+
+            return _detect_pattern_blocked(
+                n, m,
+                lambda a, b: [
+                    _to_np(block(xp, pp, _basis_block(a, b, n)))
+                    for xp, pp in zip(x_probes, p_probes)
+                ],
+                by_row=False,
+            )
+
+        def block(x, p, E):  # (b, m) cotangents -> (b, n) rows of J
+            _, vjp_fn = vjp(lambda xx: g(xx, p), x)
+            return vmap(lambda ct: vjp_fn(ct)[0])(E)
+
+        return _detect_pattern_blocked(
+            m, n,
+            lambda a, b: [
+                _to_np(block(xp, pp, _basis_block(a, b, m)))
+                for xp, pp in zip(x_probes, p_probes)
+            ],
+            by_row=True,
+        )
+
+    def _probe_hess(
+        self, x_probes, lam_probes, p_probes,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Lower-triangle Lagrangian-Hessian pattern, swept a block of
+        columns at a time via HVPs. ``H`` is symmetric, so columns give
+        the triangle."""
+        n, grad_L = self._n, self._grad_lag
+        one = _t(1.0)
+        if self._m > 0:
+            def blocks(a, b):
+                E = _basis_block(a, b, n)
+                return [
+                    _to_np(vmap(
+                        lambda s: jvp(
+                            lambda xx: grad_L(xx, lp, one, pp), (xp,), (s,)
+                        )[1]
+                    )(E))
+                    for xp, lp, pp in zip(x_probes, lam_probes, p_probes)
+                ]
+        else:
+            def blocks(a, b):
+                E = _basis_block(a, b, n)
+                return [
+                    _to_np(vmap(
+                        lambda s: jvp(
+                            lambda xx: grad_L(xx, one, pp), (xp,), (s,)
+                        )[1]
+                    )(E))
+                    for xp, pp in zip(x_probes, p_probes)
+                ]
+
+        return _detect_pattern_blocked(n, n, blocks, by_row=False, lower=True)
 
     # ----- closure building -----
 
@@ -640,6 +725,7 @@ class TorchProblem:
             def lagrangian(x, lam, sigma, p):
                 return sigma * f(x, p) + torch.dot(lam, g(x, p))
 
+            self._lagrangian = lagrangian
             self._hess_lag = hessian(lagrangian, argnums=0)
         else:
             self._jac_g_dense = None
@@ -647,11 +733,14 @@ class TorchProblem:
             def lagrangian_unc(x, sigma, p):
                 return sigma * f(x, p)
 
+            self._lagrangian = lagrangian_unc
             self._hess_lag = hessian(lagrangian_unc, argnums=0)
+        # Shared by the blocked Hessian probe and the compressed HVP.
+        self._grad_lag = grad(self._lagrangian, argnums=0)
 
     def _build_compressed_closures(self) -> None:
         n, m = self._n, self._m
-        f, g = self._f, self._g
+        g = self._g
         if m > 0:
             jac_colors, k_jac = _color_columns(self._jac_rows, self._jac_cols, n)
             S_jac = _seed_matrix(jac_colors, k_jac, n)
@@ -671,20 +760,13 @@ class TorchProblem:
         S_hess = _seed_matrix(hess_colors, k_hess, n)
         self._hess_seed_cols = hess_colors[self._hess_cols]
 
+        grad_L = self._grad_lag
         if m > 0:
-            def lagrangian(x, lam, sigma, p):
-                return sigma * f(x, p) + torch.dot(lam, g(x, p))
-            grad_L = grad(lagrangian, argnums=0)
-
             def hess_compressed(x, lam, sigma, p):
                 return vmap(
                     lambda s: jvp(lambda xx: grad_L(xx, lam, sigma, p), (x,), (s,))[1]
                 )(S_hess)
         else:
-            def lagrangian_unc(x, sigma, p):
-                return sigma * f(x, p)
-            grad_L = grad(lagrangian_unc, argnums=0)
-
             def hess_compressed(x, sigma, p):
                 return vmap(
                     lambda s: jvp(lambda xx: grad_L(xx, sigma, p), (x,), (s,))[1]

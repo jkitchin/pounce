@@ -16,10 +16,18 @@
 // lints) — the workspace lint level otherwise treats these as warnings.
 // Suppress them here so a clean `cargo check -p pounce-py` is achievable.
 #![allow(unsafe_op_in_unsafe_fn)]
+// Same family: `#[pymethods]` wraps every `PyResult`-returning function's
+// error in `.into()`, which is a no-op when the error is already `PyErr`.
+// The lint fires once per such function and points at the return type,
+// where there is nothing to remove — the conversion is in generated code.
+// Suppressed crate-wide rather than per-function so the count does not
+// creep with each new binding.
+#![allow(clippy::useless_conversion)]
 
 use pyo3::prelude::*;
 
 mod dense_lu;
+mod nl_expr;
 mod nl_problem;
 mod nlp_batch;
 mod problem;
@@ -30,7 +38,8 @@ mod sparse_lu;
 mod tnlp_bridge;
 mod warm_start;
 
-pub use nl_problem::{PyNlProblem, read_nl};
+pub use nl_expr::{PyNlExpr, build_nl_problem};
+pub use nl_problem::{PyNlProblem, parse_nl_text, read_nl};
 pub use problem::PyProblem;
 pub use qp::{PyQpFactorization, PyQpProblem, PyQpSensitivity};
 pub use solver::PySolver;
@@ -75,9 +84,14 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProblem>()?;
     m.add_class::<PySolver>()?;
     m.add_class::<PyNlProblem>()?;
+    m.add_class::<PyNlExpr>()?;
     m.add_class::<sparse_lu::PySparseLu>()?;
     m.add_class::<dense_lu::PyDenseLu>()?;
     m.add_function(wrap_pyfunction!(read_nl, m)?)?;
+    // In-memory model construction (#469): `.nl` text without a temp
+    // file, and an expression builder that bypasses `.nl` entirely.
+    m.add_function(wrap_pyfunction!(parse_nl_text, m)?)?;
+    m.add_function(wrap_pyfunction!(build_nl_problem, m)?)?;
     // Banner for the Python in-process tee (#206); the engine emits the rest
     // of the log (stats / iteration table / summary) itself at print_level>=1.
     m.add_function(wrap_pyfunction!(print_banner, m)?)?;

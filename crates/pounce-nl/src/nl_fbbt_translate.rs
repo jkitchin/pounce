@@ -129,7 +129,13 @@ impl Builder {
                     | UnaryOp::Asin
                     | UnaryOp::Acosh
                     | UnaryOp::Asinh
-                    | UnaryOp::Atanh => {
+                    | UnaryOp::Atanh
+                    // `erf` is monotone and bounded in (-1, 1), so it *could*
+                    // propagate intervals exactly — but FbbtOp has no `Erf`
+                    // kernel, and adding one is a separate concern from
+                    // making the tape differentiate it (issue #469). Opaque
+                    // is the conservative answer: no tightening, never wrong.
+                    | UnaryOp::Erf => {
                         let _ = a;
                         self.emit(FbbtOp::Opaque)
                     }
@@ -303,7 +309,11 @@ mod tests {
     fn inverse_trig_translate_to_opaque() {
         // tan/atan/acos have no interval-arithmetic FbbtOp yet, so the
         // translator emits Opaque (FBBT won't tighten through them).
-        for op in [UnaryOp::Tan, UnaryOp::Atan, UnaryOp::Acos] {
+        // `Erf` joins them (issue #469): it is monotone and bounded in
+        // (-1, 1), so it *could* propagate intervals exactly, but there is
+        // no `FbbtOp` kernel for it. Opaque yields `Interval::ENTIRE`,
+        // which contains (-1, 1) — no tightening, never a wrong bound.
+        for op in [UnaryOp::Tan, UnaryOp::Atan, UnaryOp::Acos, UnaryOp::Erf] {
             let e = Expr::Unary(op, Box::new(Expr::Var(0)));
             let tape = translate_constraint(&e, &[]).unwrap();
             assert_eq!(tape.ops.last().unwrap(), &FbbtOp::Opaque, "{op:?}");

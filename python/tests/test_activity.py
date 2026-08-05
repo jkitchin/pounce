@@ -430,6 +430,24 @@ def test_row_normal_before_solve_raises():
         pounce.Solver(prob).row_normal(0)
 
 
+def test_hessian_vec_natural_units():
+    # the scalar study model has H = 1 exactly (natural units); the
+    # session's Hessian-vector product must return it, and reject a
+    # wrong-length vector. Scaling does not engage on this fixture;
+    # the df != 1 axis of the natural-units contract is pinned at the
+    # pyomo level (test_information_exact_under_objective_scaling)
+    prob = _options(pounce.Problem(
+        n=1, m=0, problem_obj=ScalarBound(1.0),
+        lb=[0.0], ub=[1e19], cl=[], cu=[],
+    ))
+    solver = pounce.Solver(prob)
+    _, info = solver.solve(x0=np.array([0.5]))
+    assert info["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(solver.hessian_vec([1.0]), [1.0], rtol=1e-12)
+    with pytest.raises(ValueError, match="length"):
+        solver.hessian_vec([1.0, 2.0])
+
+
 def test_primal_rows_skips_the_fixed_column():
     # MixedModel fixes x2 (lb == ub == 2.0), so make_parameter removes
     # its column and every LATER user variable sits one row earlier in

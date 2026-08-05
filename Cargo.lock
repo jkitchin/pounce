@@ -1041,6 +1041,7 @@ name = "pounce-nl"
 version = "0.9.0"
 dependencies = [
  "libloading",
+ "libm",
  "pounce-common",
  "pounce-nlp",
  "tracing",

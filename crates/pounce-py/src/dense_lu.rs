@@ -26,7 +26,13 @@ use numpy::{IntoPyArray, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-#[pyclass(name = "DenseLU", module = "pounce._pounce", unsendable)]
+/// Sendable: `faer`'s `PartialPivLu` is plain owned matrix data, so a
+/// factor built on one thread may be used — or dropped — on another.
+/// It carried `unsendable` for a while; that only bought pyo3's thread
+/// check, whose cross-thread failure is a `PanicException` (a
+/// `BaseException`, invisible to `except Exception`) and whose *drop*
+/// check fires on whichever thread happens to run the GC (pounce#477).
+#[pyclass(name = "DenseLU", module = "pounce._pounce")]
 pub struct PyDenseLu {
     n: usize,
     lu: Option<PartialPivLu<f64>>,
@@ -84,5 +90,16 @@ impl PyDenseLu {
         lu.solve_in_place(rhs.as_mut());
         let out: Vec<f64> = (0..self.n).map(|i| rhs[(i, 0)]).collect();
         Ok(out.into_pyarray_bound(py))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The factor must stay movable across threads (pounce#477); see
+    /// [`super::PyDenseLu`] for why `unsendable` is the worse default.
+    #[test]
+    fn py_dense_lu_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::PyDenseLu>();
     }
 }

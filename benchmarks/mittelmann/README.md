@@ -52,6 +52,28 @@ make all         # fetch + translate + run-all + report
 Default per-instance timeout is 7200s, matching Mittelmann's published convention.
 Override with `make run-pounce TIMELIMIT=300`.
 
+## `robot_a` / `robot_b` / `robot_c` without AMPL
+
+`gen_robot_nl.py` writes those three instances straight to `.nl`, so the
+per-iteration cost work in pounce#476 is reproducible with no AMPL licence and
+no `make translate`:
+
+```
+curl -O http://plato.asu.edu/ftp/ampl-nlp-source/robot_a.mod
+python3 gen_robot_nl.py robot_a.mod robot_a.nl     # n=1001 m=52013 nzJ=196781
+pounce robot_a.nl max_iter=200 --no-sol
+ipopt  robot_a -AMPL                               # same file, for comparison
+```
+
+It emits the `V` segments for the model's `SUM`/`SUM1`/`SUM2` defined variables
+rather than inlining them, so the tape the solver builds matches what AMPL would
+hand it — which matters here, because those 12003 shared subexpressions *are* the
+performance story (see `dev-notes/research/robot-abc-per-iteration-cost.md`).
+Sizes match the published `n`/`m` exactly; see the script header for the one
+AMPL presolve step (six duplicate linear rows per collocation point collapsing to
+one) that it reproduces by hand. `--no-merge` emits the unpresolved 18-family
+form for comparison.
+
 ## Licensing & redistribution
 
 The .mod sources are fetched from Mittelmann's public mirror and **not redistributed

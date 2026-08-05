@@ -852,7 +852,10 @@ pub struct ReducedHessian {
     /// Eigenvalues of `H_R`, ascending (length `n_dof`).
     pub eigenvalues: Vec<f64>,
     /// Eigenvectors, column-major `n_dof × n_dof`; column `j` pairs with
-    /// `eigenvalues[j]`.
+    /// `eigenvalues[j]`. Signs are pinned (largest-magnitude component
+    /// positive) so a column read as a direction reproduces. Note these
+    /// live in the null-space basis `Z`, which is itself only fixed up
+    /// to a rotation within any degenerate eigenspace of `BᵀB`.
     pub eigenvectors: Vec<f64>,
 }
 

@@ -173,7 +173,13 @@ class ReducedHessian:
         manifold.
     eigenvectors:
         Eigenvectors as columns, shape ``(n_dof, n_dof)``; column ``j``
-        pairs with ``eigenvalues[j]``.
+        pairs with ``eigenvalues[j]``. Each column's sign is pinned —
+        its largest-magnitude component is positive, ties broken by the
+        earliest row — so a column read as a *direction* reproduces
+        across builds. The sign is all that is pinned: a repeated
+        eigenvalue leaves the basis within its eigenspace arbitrary, and
+        these vectors live in the null-space basis ``Z``, itself only
+        determined up to that same freedom.
     """
 
     n_dof: int
