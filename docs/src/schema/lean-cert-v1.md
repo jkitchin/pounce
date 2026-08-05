@@ -23,7 +23,8 @@ wires it to the CLI.
 > end-to-end** — `global-min` (from `qp-convex` via KKT, *and* from `sos-poly`
 > via an attained bound), `infeasible`, `unbounded`, `global-lower-bound`
 > (`sos-poly`), `local-lower-bound` and `local-min` (`sos-poly` restricted to a
-> ball), and `feasible`: `pounce certify` emits each, and `pounce-lean`
+> ball), `local-min-strict` (the same, plus a certified growth modulus), and
+> `feasible`: `pounce certify` emits each, and `pounce-lean`
 > kernel-checks it (reusable lemmas → codegen → `lake build`) with proofs
 > resting only on Lean's standard axioms (`propext`, `Classical.choice`,
 > `Quot.sound`; no `sorry`). Each has a fixture in
@@ -57,7 +58,10 @@ reads the certificate.
 > | either SOS verdict with Putinar multipliers (`problem.poly_constraints`) | yes | yes |
 > | `feasible` (ε-feasibility, and existence via `witnesses.feasible_witness.xhat`) | yes (`--feasible`) | yes |
 > | `local-min` / `local-lower-bound` (Putinar plus a ball, `problem.neighborhood`) | yes (`--local`) | yes |
-> | `local-min-strict` | no | no |
+> | `local-min-strict` (the ball, plus a growth modulus `growth_modulus`) | yes (`--local --growth`) | yes |
+>
+> **Every row now says yes/yes.** The consumer no longer runs ahead of the
+> producer anywhere.
 >
 > Local optimality closed **without** the second-order theory that row had been
 > waiting on. The plan had been KKT plus a reduced-Hessian `LDLᵀ`, which needs
@@ -67,9 +71,18 @@ reads the certificate.
 > sign argument two lines long. No constraint qualification, no Taylor
 > remainder, no implicit function theorem.
 >
-> `local-min-strict` remains open, and is now a genuinely smaller gap: what is
-> missing is only *strictness*, since nothing above rules out a tie elsewhere in
-> the ball.
+> `local-min-strict` then closed the same way, and for the same reason. The gap
+> was only *strictness* — nothing above rules out a tie elsewhere in the ball —
+> and the obvious fix, a second-order sufficient condition, was the one thing
+> this layer cannot afford: SOSC is irreducibly real-analytic (a shrinking
+> neighborhood, a Taylor remainder, a critical cone) and the trusted layer is
+> ℚ, which has no limits to take. So the certificate proves something else,
+> which happens to be stronger: a quadratic *growth* bound
+> `p(x) ≥ p(x₀) + μ‖x − x₀‖²` on the ball, for an exhibited rational `μ > 0`.
+> That is the identical Putinar problem with the objective shifted by a
+> polynomial, so it needs no new theory at all — and unlike SOSC it hands back
+> the modulus itself, exactly. Strictness follows from one ℚ lemma:
+> `‖x − x₀‖² = 0 ↔ x = x₀`.
 >
 > `feasible` was the last row where the consumer ran ahead of the producer, and
 > it closed differently from the others — it is the one verdict the emitter will
@@ -179,9 +192,10 @@ carries strictly-below-diagonal entries and omits its implied unit diagonal.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema` | string | `"pounce.lean-cert/v1"`. |
-| `verdict` | enum | The single proven claim: `"global-min"`, `"feasible"`, `"infeasible"`, `"unbounded"`, `"global-lower-bound"`, `"local-min"`, or `"local-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. The `local-` pair is the SOS pair restricted to `problem.neighborhood`, and the two must agree — a `global-` verdict carrying a neighborhood is refused. |
+| `verdict` | enum | The single proven claim: `"global-min"`, `"feasible"`, `"infeasible"`, `"unbounded"`, `"global-lower-bound"`, `"local-min"`, `"local-min-strict"`, or `"local-lower-bound"`. `global-min` is reached by two different theorems; `problem_class` says which. The `local-` verdicts are the SOS pair restricted to `problem.neighborhood`, and the two must agree — a `global-` verdict carrying a neighborhood is refused, as is `local-min-strict` without `growth_modulus` (or that field without the ball). |
 | `problem_class` | enum | `"qp-convex"` or `"sos-poly"`. A **shape** discriminator — which half of `problem` is populated, and so which theorem the codegen routes to — *not* a convexity claim. `feasible` ships `qp-convex` on an indefinite `Q`, and so does `unbounded`, because neither verdict needs convexity. Only `global-min` on the KKT path does, and there the PSD claim is carried by `witnesses.hessian_psd` and checked by Lean. |
 | `tolerance` | rational | Feasibility ε. `0` for every verdict except `feasible`, whose whole subject is a point that misses feasibility — there it is an exact rational bound on the residual, computed over ℚ and rounded **up** to one significant digit, never a solver setting copied across. |
+| `growth_modulus` | rational | `sos-poly` with `verdict = local-min-strict` only: the μ > 0 proven to satisfy `p(x₀) + μ‖x − x₀‖² ≤ p(x)` on the neighborhood. It is a **witness**, not a problem datum — the problem it describes is the same one a `local-min` cert describes — so it sits beside `bound` rather than inside `problem`, which is what `cert-verify` re-derives and compares. Absent under every other verdict; present without `problem.neighborhood`, or non-positive, is refused. |
 | `bound` | rational | `sos-poly` only: the γ proven to satisfy `γ ≤ p(x)` — for all `x`, or, when `problem.poly_constraints` is present, for all *feasible* `x`. Present under both SOS verdicts — when the verdict is `global-min` it equals `candidate.objective`, and that equality is the whole difference. |
 | `binding` | object | `nl_sha256`, `sol_sha256` (content-address the canonical problem and claimed solution, exactly as `pounce verify` does), and the producing `solver`. |
 | `toolchain` | object | The Lean toolchain + Mathlib revision the cert is authored against (a proof reproduces only under the same pin). |
@@ -476,9 +490,44 @@ Four things the encoding is deliberate about:
 The centre is `x*` snapped to a coarse rational grid chosen to keep the true
 solution well inside the ball — a certificate is about the ball it names, so
 that ball must be one a rational centre describes exactly. The verdicts are
-`local-min` and `local-lower-bound`, and the codegen refuses a certificate whose
-verdict and shape disagree (a `global-min` carrying a neighborhood would
-overclaim on read).
+`local-min`, `local-min-strict` and `local-lower-bound`, and the codegen refuses
+a certificate whose verdict and shape disagree (a `global-min` carrying a
+neighborhood would overclaim on read).
+
+### `growth_modulus`: strictness as an algebraic claim
+
+`--growth` adds one rational to the certificate and one hypothesis to the
+theorem. The identity is emitted for the **shifted** objective,
+
+    p(x) − γ − μ·‖x − x₀‖² = σ₀(x) + Σₖ σₖ(x)·gₖ(x) + σ_B(x)·(r² − ‖x − c‖²)
+
+so the generated module proves
+
+    ((∀ i, 0 ≤ g i xstar) ∧ sqdist xstar center ≤ rsq) ∧
+      ∀ x, (∀ i, 0 ≤ g i x) → sqdist x center ≤ rsq →
+        (p xstar + mu * sqdist x xstar ≤ p x) ∧ (x ≠ xstar → p xstar < p x)
+
+Three things about this are worth stating explicitly, because each is a place a
+consumer could get it wrong:
+
+* **The growth is centred at `x₀`, not at `c`.** They are different points —
+  `c` is a snapped grid point, `x₀` is the attaining candidate — and centring at
+  `c` would contradict `p(x₀) = γ` unless the two coincided.
+* **μ is a floor, not a supremum.** It comes off a fixed ladder, largest first,
+  and the first rung whose relaxation closes is shipped. A larger μ may well be
+  true and simply not certifiable at this order. The certificate claims what it
+  proves; it does not claim to be tight.
+* **The strictness is not analysis.** It is `sqdist_eq_zero_iff` — over ℚ,
+  `‖x − x₀‖² = 0 ↔ x = x₀` — which is why this route exists at all. The SOSC
+  formulation of the same conclusion would need limits, and the trusted layer
+  has none.
+
+`certify_sos_local_strict_forged_mu` is the forgery that pins it: μ inflated
+from 2 to 5 with every witness left genuine, so every PSD check, `attains`,
+`xstar_in_ball` and `growth_pos` still pass and only `ring` in `sos_identity`
+can reject it. `scripts/check-lean-cert.sh` checks that it does. The other way
+to lie about μ — a non-positive one, which proves nothing — is refused by the
+codegen instead, and covered by `pounce-lean`'s `codegen/check_refusals.py`.
 
 Routing between the QP and polynomial slices is on **degree**, not on
 QP-extraction failure — a convex QP must never silently downgrade from
@@ -518,9 +567,11 @@ certifies only where the point sits, not that it is optimal), and that
 `unbounded` likewise accepts any `Q` (it needs `Q` flat along `d`, never convex)
 as long as the constraints are all inequalities, and that `--local` narrows the
 SOS claim to a ball (`local-min` / `local-lower-bound`), which is what makes a
-certificate possible at a local minimum that is not global.
-Maximize objectives, *equality* constraints on a nonconvex polynomial, and the
-*strict* local verdict `local-min-strict` remain additive future work.
+certificate possible at a local minimum that is not global, and that
+`--local --growth` strengthens that to `local-min-strict` by certifying a
+quadratic growth modulus.
+Maximize objectives and *equality* constraints on a nonconvex polynomial remain
+additive future work.
 
 ## Consumer acceptance
 

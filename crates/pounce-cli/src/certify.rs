@@ -91,6 +91,13 @@ because a nonconvex problem usually has local minima that are not global:
 there the global claim is FALSE, so no certificate for it exists at any
 relaxation order, while the local one is both true and easier to certify.
 
+With --growth (which needs --local) the emitter additionally tries to certify
+quadratic growth, `p(x) >= p(x*) + mu*||x - x*||^2` on that ball, for an exact
+rational mu > 0. That gives the STRICT verdict `local-min-strict`: no other
+point of the ball ties. It is what the second-order sufficient conditions are
+for, obtained without them -- and it reports the modulus mu, which SOSC leaves
+existential. A minimum too flat to certify falls back to `local-min`.
+
 options:
   -o, --output <path>     write the certificate JSON here (default: stdout)
       --active-tol <eps>  active-set detection tolerance on the float
@@ -100,6 +107,8 @@ options:
       --local             certify optimality within a ball around the
                           solution instead of globally
       --radius <r>        radius of that ball (default: 1); needs --local
+      --growth            also certify quadratic growth, for the strict
+                          verdict `local-min-strict`; needs --local
   -h, --help              show this message";
 
 #[derive(Debug)]
@@ -113,6 +122,9 @@ struct CertifyArgs {
     /// Radius of the ball a *local* claim is restricted to. `None` is the
     /// unrestricted claim.
     radius: Option<f64>,
+    /// Also try for quadratic growth, upgrading `local-min` to
+    /// `local-min-strict`. Best-effort: it never weakens the verdict.
+    growth: bool,
 }
 
 /// Ball radius `--local` uses when `--radius` is not given.
@@ -163,6 +175,7 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
     let mut feasible = false;
     let mut local = false;
     let mut radius: Option<f64> = None;
+    let mut growth = false;
     let mut positionals: Vec<PathBuf> = Vec::new();
     let mut it = rest.iter();
     while let Some(arg) = it.next() {
@@ -182,6 +195,7 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
                 let v = it.next().ok_or("--radius requires a value")?;
                 radius = Some(v.parse().map_err(|e| format!("--radius: {e}"))?);
             }
+            "--growth" => growth = true,
             other if other.starts_with('-') => return Err(format!("unknown flag `{other}`")),
             _ => positionals.push(PathBuf::from(arg)),
         }
@@ -194,6 +208,11 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
     if feasible && local {
         return Err("--feasible and --local ask for different claims; pick one".to_string());
     }
+    // Growth is measured from the minimizer outward *within* a region. Without
+    // one the flag would be silently inert, for the same reason `--radius` is.
+    if growth && !local {
+        return Err("--growth has no meaning without --local".to_string());
+    }
     match positionals.len() {
         2 => Ok(Some(CertifyArgs {
             nl: positionals[0].clone(),
@@ -202,6 +221,7 @@ fn parse_argv(rest: &[String]) -> Result<Option<CertifyArgs>, String> {
             active_tol,
             feasible,
             radius: local.then(|| radius.unwrap_or(DEFAULT_RADIUS)),
+            growth,
         })),
         _ => Err("expected two positional arguments: <problem.nl> <claim.sol>".to_string()),
     }
@@ -347,11 +367,16 @@ fn backend() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
 /// unrestricted claim is simply false, so no certificate for it exists at any
 /// relaxation order. Restricted to a ball it becomes true — and easier, since a
 /// ball is a strong localizer.
+///
+/// `growth` asks the emitter to certify a quadratic modulus around the
+/// minimizer as well, which upgrades the verdict to `local-min-strict`. Also a
+/// request rather than a demand: too flat a minimum simply does not get one.
 fn certify_sos(
     po: &PolyObjective,
     g: &PolyFeasibleSet,
     x_float: &[f64],
     radius: Option<f64>,
+    growth: bool,
     meta: &CertMeta,
 ) -> Result<Certificate, String> {
     let ball = radius.map(|r| ball_around(po.n, x_float, r)).transpose()?;
@@ -416,6 +441,7 @@ fn certify_sos(
                 .collect(),
             bound_float: bound.lower_bound,
             x_float: x_float.to_vec(),
+            growth,
             neighborhood: ball.map(|(center, radius_sq)| Ball {
                 center,
                 radius_sq,
@@ -568,7 +594,7 @@ fn run(args: &CertifyArgs) -> Result<String, String> {
                     .to_string()
             });
         }
-        let cert = certify_sos(&po, &g, &iterate, args.radius, &meta)?;
+        let cert = certify_sos(&po, &g, &iterate, args.radius, args.growth, &meta)?;
         return to_canonical_json(&cert).map_err(|e| format!("serialization failed: {e}"));
     }
 

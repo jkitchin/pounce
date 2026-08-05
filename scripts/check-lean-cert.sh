@@ -81,6 +81,15 @@ FIXTURES=(
   # to the emitted ball. Note the `--local` flag in field 4 and the different
   # theorem name in field 3 — both are the check.
   "certify_sos_local  PounceLean.CertifySOSLocal   local_min --local"
+  # The same problem, the same ball, one more claim: `--growth` also certifies a
+  # quadratic modulus μ, turning `p x₀ ≤ p x` into `p x₀ + μ‖x−x₀‖² ≤ p x` and
+  # so `p x₀ < p x` away from x₀ — a STRICT local minimum, without any of the
+  # real-analytic machinery (SOSC, LICQ, Taylor) that route would need. It
+  # shares certify_sos_local's `.nl` deliberately: with the problem held fixed,
+  # any diff between the two goldens is purely the growth construction, which
+  # is what this pair is here to pin. μ comes off a fixed ladder, so a drift in
+  # the shifted-σ₀ hint shows up as a *weaker* μ rather than a failure.
+  "certify_sos_local_strict PounceLean.CertifySOSLocalStrict local_min_strict --local --growth"
   # The one verdict that is not about optimality: an indefinite Hessian, so the
   # global-min path refuses (Ldl(Indefinite)) and there is nothing to certify
   # about the solve EXCEPT that its answer is a real point of the real feasible
@@ -324,6 +333,16 @@ if [[ "${LAKE_BUILD:-0}" == "1" ]]; then
     # other check passes; without `xstar_in_ball` this would prove a minimum of
     # the neighborhood at a point the neighborhood does not contain.
     "certify_sos_local_forged_outside_ball PounceLean.Generated.ForgedLocalOutside candidate (attains γ, but outside the ball)"
+    # The strict path adds exactly one new obligation that a forgery can reach:
+    # the shifted identity. μ is inflated 2 → 5 and NOTHING else is touched —
+    # bound, Gram blocks, ball, candidate are all the genuine ones — so every
+    # PSD check, `attains`, `xstar_in_ball` and `growth_pos` still pass, and
+    # only `ring` in `sos_identity` stands between an honest modulus and an
+    # overclaimed one. (Confirmed: the build fails at `sos_identity`, nowhere
+    # else.) The other way to lie about μ — μ ≤ 0, which claims nothing — is
+    # refused by codegen and is covered by its unit tests instead; it cannot be
+    # a fixture here, because this loop requires codegen to accept.
+    "certify_sos_local_strict_forged_mu PounceLean.Generated.ForgedGrowthMu growth modulus μ (all witnesses genuine, but μ inflated 2 → 5)"
   )
   echo "== forged witnesses must be rejected by the kernel =="
   for entry in "${NEGATIVE_FIXTURES[@]}"; do

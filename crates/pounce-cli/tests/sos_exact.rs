@@ -129,6 +129,7 @@ fn the_solver_output_alone_produces_a_writable_certificate() {
             x_float: vec![],
             constraints: Vec::new(),
             neighborhood: None,
+            growth: false,
         },
         &meta(),
     )
@@ -191,6 +192,7 @@ fn a_nonnegative_but_not_sos_polynomial_is_refused_at_the_tight_bound() {
             x_float: vec![],
             constraints: Vec::new(),
             neighborhood: None,
+            growth: false,
         },
         &meta(),
     )

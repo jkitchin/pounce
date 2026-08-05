@@ -51,7 +51,7 @@
 //! So a broken SDP cannot produce a false certificate — only no certificate.
 
 use num_rational::BigRational;
-use num_traits::{Signed, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 use crate::emit::{CertMeta, EmitError};
 use crate::ldlt::ldlt;
@@ -91,6 +91,18 @@ pub struct SosInput {
     /// The ball to restrict the claim to, for a *local* certificate. `None`
     /// leaves the claim over all of `K` (or all of `ℝⁿ`, unconstrained).
     pub neighborhood: Option<Ball>,
+    /// Try to strengthen a local minimum to a *strict* one by certifying
+    /// quadratic growth around it.
+    ///
+    /// A request, not a demand: the emitter searches a ladder of moduli and
+    /// falls back to the plain `local-min` verdict if none of them certifies,
+    /// exactly as it falls back from `local-min` to `local-lower-bound` when no
+    /// rational point attains the bound. Setting it can only add strength to
+    /// the verdict, never change what the certificate is about.
+    ///
+    /// Ignored without a `neighborhood` or without an attaining point — growth
+    /// is measured from the minimizer, so there is nothing to measure from.
+    pub growth: bool,
 }
 
 /// The closed ball `‖x − center‖² ≤ radius_sq` a local claim is made on, with
@@ -150,6 +162,33 @@ const DENOMS: [i64; 8] = [1, 2, 3, 4, 8, 16, 100, 1000];
 /// more: `1/3` is a common exact optimum that no power-of-two grid can express,
 /// so the ladder is not purely binary.
 const GAMMA_DENOMS: [i64; 9] = [1, 2, 3, 4, 6, 8, 12, 100, 10000];
+
+/// Growth moduli tried when strengthening a local minimum to a strict one,
+/// **largest first** — a bigger `μ` is a strictly stronger claim, and every
+/// value in the ladder proves the same strict inequality, so the search stops
+/// at the first that certifies rather than optimizing further.
+///
+/// Geometric, and reaching well below 1, because `μ` carries the units of the
+/// objective divided by squared distance: a well-scaled problem lands near the
+/// top of the ladder and a badly scaled one still finds *something*, which is
+/// all strictness needs. The largest certifiable modulus is bounded by the
+/// smallest eigenvalue of the reduced Hessian, so a flat-bottomed minimum is
+/// expected to exhaust the ladder — a genuine "not strict enough to certify"
+/// rather than a search failure, and the plain `local-min` verdict is the
+/// honest fallback.
+const MU_LADDER: [(i64, i64); 11] = [
+    (8, 1),
+    (4, 1),
+    (2, 1),
+    (1, 1),
+    (1, 2),
+    (1, 4),
+    (1, 8),
+    (1, 16),
+    (1, 64),
+    (1, 256),
+    (1, 4096),
+];
 
 /// Why an SOS certificate could not be emitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,23 +304,53 @@ pub fn sos_problem_block(
     })
 }
 
-/// The ball `‖x − c‖² ≤ r²` as the polynomial inequality
-/// `g(x) = r² − Σⱼ(xⱼ − cⱼ)² ≥ 0`, expanded exactly:
+/// The squared distance `‖x − c‖² = Σⱼ(xⱼ − cⱼ)²` as an exact term list:
 ///
 /// ```text
-///     g(x) = (r² − Σⱼ cⱼ²)  +  Σⱼ 2cⱼ·xⱼ  −  Σⱼ xⱼ²
+///     ‖x − c‖² = (Σⱼ cⱼ²)  −  Σⱼ 2cⱼ·xⱼ  +  Σⱼ xⱼ²
 /// ```
 ///
-/// **The one place a neighborhood becomes a polynomial.** The certificate
-/// stores the ball structurally, so the Rust recheck, the exact rounder, and
-/// (mirrored) the Lean codegen all have to expand it — and if they expanded it
-/// differently the identity would be about a different region. Deriving it from
-/// one function makes that impossible on this side; on the Lean side the
-/// mismatch would surface as a failing `ring`.
+/// **The one place a squared distance becomes a polynomial.** Two different
+/// claims are built on it — the ball a *local* certificate restricts to
+/// ([`ball_terms`]) and the growth term a *strict* one subtracts
+/// ([`growth_shift`]) — and Lean's `sqdist` is a third spelling of the same
+/// thing. If any two of them expanded it differently the identity would be
+/// about a different region or a different modulus, so all of them route
+/// through here; on the Lean side a mismatch surfaces as a failing `ring`.
 ///
 /// Terms are sorted by exponent vector and exact zeros dropped, matching
 /// [`poly_spec`]'s convention: a zero coefficient is a real equation to the
 /// coefficient-matching system, not a harmless placeholder.
+pub fn sqdist_terms(center: &[BigRational]) -> Vec<(Vec<usize>, BigRational)> {
+    let n = center.len();
+    let mut terms: std::collections::BTreeMap<Vec<usize>, BigRational> =
+        std::collections::BTreeMap::new();
+
+    let two = BigRational::from_integer(2.into());
+    let mut constant = BigRational::zero();
+    for (j, cj) in center.iter().enumerate() {
+        constant += cj * cj;
+
+        let mut lin = vec![0usize; n];
+        lin[j] = 1;
+        *terms.entry(lin).or_insert_with(BigRational::zero) -= &two * cj;
+
+        let mut quad = vec![0usize; n];
+        quad[j] = 2;
+        *terms.entry(quad).or_insert_with(BigRational::zero) += BigRational::from_integer(1.into());
+    }
+    terms.insert(vec![0usize; n], constant);
+
+    terms.retain(|_, c| !c.is_zero());
+    terms.into_iter().collect()
+}
+
+/// The ball `‖x − c‖² ≤ r²` as the polynomial inequality
+/// `g(x) = r² − ‖x − c‖² ≥ 0`.
+///
+/// The certificate stores the ball structurally, so the Rust recheck, the exact
+/// rounder, and (mirrored) the Lean codegen all have to expand it. Deriving it
+/// from [`sqdist_terms`] is what keeps the three spellings one spelling.
 pub fn ball_terms(
     center: &[BigRational],
     radius_sq: &BigRational,
@@ -289,22 +358,94 @@ pub fn ball_terms(
     let n = center.len();
     let mut terms: std::collections::BTreeMap<Vec<usize>, BigRational> =
         std::collections::BTreeMap::new();
-
-    let two = BigRational::from_integer(2.into());
-    let mut constant = radius_sq.clone();
-    for (j, cj) in center.iter().enumerate() {
-        constant -= cj * cj;
-
-        let mut lin = vec![0usize; n];
-        lin[j] = 1;
-        *terms.entry(lin).or_insert_with(BigRational::zero) += &two * cj;
-
-        let mut quad = vec![0usize; n];
-        quad[j] = 2;
-        *terms.entry(quad).or_insert_with(BigRational::zero) -= BigRational::from_integer(1.into());
+    for (e, c) in sqdist_terms(center) {
+        *terms.entry(e).or_insert_with(BigRational::zero) -= c;
     }
-    terms.insert(vec![0usize; n], constant);
+    *terms
+        .entry(vec![0usize; n])
+        .or_insert_with(BigRational::zero) += radius_sq;
 
+    terms.retain(|_, c| !c.is_zero());
+    terms.into_iter().collect()
+}
+
+/// `μ·‖x − x₀‖²`, the amount a *strict* certificate subtracts from the
+/// objective before certifying a bound on what is left.
+///
+/// The whole of the growth construction is here: certify `p − γ − μ‖x − x₀‖²`
+/// nonnegative on `K ∩ B` and it reads back as `p(x) ≥ p(x₀) + μ‖x − x₀‖²`,
+/// which is strict away from `x₀` exactly when `μ > 0`.
+fn growth_shift(mu: &BigRational, x0: &[BigRational]) -> Vec<(Vec<usize>, BigRational)> {
+    sqdist_terms(x0)
+        .into_iter()
+        .map(|(e, c)| (e, c * mu))
+        .filter(|(_, c)| !c.is_zero())
+        .collect()
+}
+
+/// The σ₀ Gram hint, corrected for a growth shift of `μ` about `x₀`.
+///
+/// The float SDP proposed its Gram for `p − γ`, not for `p − γ − μ‖x − x₀‖²`,
+/// and handing the stale one to the exact rounder is what makes the growth
+/// search fail for every modulus worth having: the free parameters get snapped
+/// to values that leave σ₀ off the PSD cone, on every grid, for reasons that
+/// have nothing to do with whether the shifted certificate exists.
+///
+/// The correction is exact rather than heuristic. `‖x − x₀‖²` is *itself* a
+/// Gram form in the σ₀ basis — it is `Σⱼ(xⱼ − x₀ⱼ)²`, and each `xⱼ − x₀ⱼ` is a
+/// linear combination of the constant monomial and `xⱼ` — so subtracting that
+/// form's matrix gives a hint that is right for the shifted problem exactly to
+/// the degree the original was right for the unshifted one.
+///
+/// It is also what gives the ladder its meaning: `G₀ − μQ` stops being PSD once
+/// `μ` exceeds what σ₀ has left to give, which is the honest reason to come
+/// down a rung.
+///
+/// `None` when the basis lacks the constant monomial or one of the degree-1
+/// monomials, so the form is not representable in it. The search then runs on
+/// the uncorrected hint — worse, but a hint is never wrong, only unhelpful.
+fn shifted_sigma0_hint(
+    basis: &[Vec<usize>],
+    gram_float: &[Vec<f64>],
+    mu: f64,
+    x0: &[f64],
+) -> Option<Vec<Vec<f64>>> {
+    let n = x0.len();
+    let idx = |e: &[usize]| basis.iter().position(|b| b.as_slice() == e);
+    let konst = idx(&vec![0usize; n])?;
+    let lin: Vec<usize> = (0..n)
+        .map(|j| {
+            let mut e = vec![0usize; n];
+            e[j] = 1;
+            idx(&e)
+        })
+        .collect::<Option<_>>()?;
+
+    let mut g: Vec<Vec<f64>> = gram_float.to_vec();
+    for (j, &lj) in lin.iter().enumerate() {
+        // (xⱼ − x₀ⱼ)² puts x₀ⱼ² at (c,c), −x₀ⱼ at (c,lⱼ) and (lⱼ,c), 1 at
+        // (lⱼ,lⱼ) — and the hint subtracts μ times all of it.
+        g[konst][konst] -= mu * x0[j] * x0[j];
+        g[konst][lj] += mu * x0[j];
+        g[lj][konst] += mu * x0[j];
+        g[lj][lj] -= mu;
+    }
+    Some(g)
+}
+
+/// `p − shift` as a term list, with exact cancellations dropped.
+fn subtract_terms(
+    p: &[(Vec<usize>, BigRational)],
+    shift: &[(Vec<usize>, BigRational)],
+) -> Vec<(Vec<usize>, BigRational)> {
+    let mut terms: std::collections::BTreeMap<Vec<usize>, BigRational> =
+        std::collections::BTreeMap::new();
+    for (e, c) in p {
+        *terms.entry(e.clone()).or_insert_with(BigRational::zero) += c;
+    }
+    for (e, c) in shift {
+        *terms.entry(e.clone()).or_insert_with(BigRational::zero) -= c;
+    }
     terms.retain(|_, c| !c.is_zero());
     terms.into_iter().collect()
 }
@@ -653,6 +794,76 @@ pub fn emit_sos_certificate(
         ));
     }
 
+    // --- try to upgrade the bound to a minimum ------------------------------
+    // If some rational `x₀` hits `γ` exactly — and lies in `K`, which on a
+    // constrained problem is half the claim — the bound is attained and the
+    // stronger verdict is available; otherwise the bound stands alone. Both are
+    // sound, and the emitter never guesses between them: attainment is decided
+    // by exact evaluation, not by how close the float solve looked.
+    //
+    // This runs before the blocks are sparsified because the growth search
+    // below may replace them wholesale: a strict certificate's blocks are the
+    // ones that close the *shifted* identity, not this one.
+    let attained = attaining_point(&p_terms, &g_terms, &gamma, n, &input.x_float);
+    let local = input.neighborhood.is_some();
+
+    // --- try to upgrade the minimum to a STRICT one -------------------------
+    // Certifying `p − γ − μ‖x − x₀‖²` nonnegative on `K ∩ B` instead of `p − γ`
+    // proves quadratic growth, hence strictness away from `x₀`. It is the same
+    // Putinar machinery on a shifted objective, so the whole search is the one
+    // above with a different polynomial — no new solver, no new witness kind,
+    // and the same exact recheck.
+    //
+    // `γ` does not move: the shift vanishes at `x₀`, so `p(x₀) − γ − 0 = 0`
+    // still holds and the bound is still attained there. Only the identity gets
+    // harder, which is the entire content of the stronger claim.
+    //
+    // Restricted to the local case. Growth around a *global* minimum is equally
+    // meaningful, but it is a different verdict proved by a different theorem,
+    // and emitting `local-min-strict` for an unrestricted claim would
+    // misdescribe the region — so the unrestricted case keeps what it earns.
+    let mut growth_mu: Option<BigRational> = None;
+    let mut grams = grams;
+    if input.growth
+        && local
+        && let Some(x0) = attained.as_ref()
+    {
+        // For the hint only, so a coordinate that does not round-trip costs
+        // sharpness rather than correctness.
+        let x0f: Vec<f64> = x0.iter().map(|v| v.to_f64().unwrap_or(f64::NAN)).collect();
+        let usable_hint = x0f.iter().all(|v| v.is_finite());
+        'growth: for (num, den) in MU_LADDER {
+            let mu = BigRational::new(num.into(), den.into());
+            let shifted = subtract_terms(&p_terms, &growth_shift(&mu, x0));
+            let hint = usable_hint
+                .then(|| {
+                    shifted_sigma0_hint(
+                        &input.basis,
+                        &input.gram_float,
+                        num as f64 / den as f64,
+                        &x0f,
+                    )
+                })
+                .flatten();
+            let mut shifted_blocks = blocks.clone();
+            if let Some(h) = hint.as_ref() {
+                shifted_blocks[0].gram_float = h;
+            }
+            for denom in DENOMS {
+                if let Ok(g) = round_gram_blocks(&shifted, &gamma, &shifted_blocks, denom) {
+                    growth_mu = Some(mu);
+                    grams = g;
+                    break 'growth;
+                }
+            }
+        }
+    }
+    if grams.len() != blocks.len() {
+        return Err(SosEmitError::SelfCheck(
+            "the growth search returned the wrong block count",
+        ));
+    }
+
     // --- factor each block for its PSD witness, and sparsify -----------------
     let mut out_blocks: Vec<SosBlock> = Vec::with_capacity(grams.len());
     for (k, gram) in grams.iter().enumerate() {
@@ -699,24 +910,33 @@ pub fn emit_sos_certificate(
     }
 
     // --- exact self-check of what will be written ---------------------------
-    recheck(&problem, &gamma, &out_blocks)?;
+    // Checked against the *shifted* left side when the growth search succeeded,
+    // since that is the identity the blocks close and the one Lean will be
+    // handed. Rechecking against `p − γ` there would reject a correct strict
+    // certificate — and, worse, wave through a plain one carrying a stray `μ`.
+    let growth_check = growth_mu
+        .as_ref()
+        .zip(attained.as_ref())
+        .map(|(mu, x0)| (mu, x0.as_slice()));
+    recheck(&problem, &gamma, growth_check, &out_blocks)?;
 
-    // --- try to upgrade the bound to a minimum ------------------------------
-    // If some rational `x₀` hits `γ` exactly — and lies in `K`, which on a
-    // constrained problem is half the claim — the bound is attained and the
-    // stronger verdict is available; otherwise the bound stands alone. Both are
-    // sound, and the emitter never guesses between them: attainment is decided
-    // by exact evaluation, not by how close the float solve looked.
+    // --- the verdict this earned --------------------------------------------
+    // The emitter never guesses between the four: attainment is decided by
+    // exact evaluation and growth by whether a modulus certified, and each
+    // failure falls back exactly one step. Every step is sound.
     //
     // The `local` prefix is not cosmetic. It travels with `problem.neighborhood`
     // and says the same thing twice on purpose: a reader skimming verdicts and a
     // consumer keying off the problem block should not be able to disagree about
-    // whether the claim is restricted to a ball.
-    let attained = attaining_point(&p_terms, &g_terms, &gamma, n, &input.x_float);
-    let local = input.neighborhood.is_some();
+    // whether the claim is restricted to a ball. `-strict` travels with
+    // `growth_modulus` for the same reason.
     let (verdict, candidate) = match attained {
         Some(x) => (
-            if local { "local-min" } else { "global-min" },
+            match (local, growth_mu.is_some()) {
+                (true, true) => "local-min-strict",
+                (true, false) => "local-min",
+                (false, _) => "global-min",
+            },
             Some(Candidate {
                 x: x.into_iter().map(Rat).collect(),
                 objective: Rat(gamma.clone()),
@@ -738,6 +958,7 @@ pub fn emit_sos_certificate(
         problem_class: "sos-poly".to_string(),
         tolerance: Rat(BigRational::zero()),
         bound: Some(Rat(gamma)),
+        growth_modulus: growth_mu.map(Rat),
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),
@@ -768,6 +989,11 @@ pub fn emit_sos_certificate(
 ///    lists, with `g₀ ≡ 1`, and
 /// 2. per block, `G = L·diag(D)·Lᵀ` with `D ≥ 0`.
 ///
+/// `growth = Some((μ, x₀))` moves the left side to `p(x) − γ − μ‖x − x₀‖²`, the
+/// identity a strict certificate closes. It is the *only* difference between
+/// the two kinds here, which is the point: strictness costs a shifted objective
+/// and nothing else.
+///
 /// Checking (2) is what makes shipping both `gram` and `L`/`D` safe rather than
 /// merely redundant: they are two independent descriptions of the same matrix,
 /// and here they are forced to agree before either is written.
@@ -779,6 +1005,7 @@ pub fn emit_sos_certificate(
 fn recheck(
     problem: &Problem,
     gamma: &BigRational,
+    growth: Option<(&BigRational, &[BigRational])>,
     blocks: &[SosBlock],
 ) -> Result<(), SosEmitError> {
     let n = problem.n_vars;
@@ -899,11 +1126,28 @@ fn recheck(
             .or_insert_with(BigRational::zero) += t.coeff.inner();
     }
     *rhs.entry(vec![0usize; n]).or_insert_with(BigRational::zero) -= gamma;
+    if let Some((mu, x0)) = growth {
+        if !mu.is_positive() {
+            return Err(SosEmitError::SelfCheck("growth modulus is not positive"));
+        }
+        if x0.len() != n {
+            return Err(SosEmitError::SelfCheck(
+                "growth center is not length n_vars",
+            ));
+        }
+        for (e, c) in growth_shift(mu, x0) {
+            *rhs.entry(e).or_insert_with(BigRational::zero) -= c;
+        }
+    }
 
     lhs.retain(|_, v| !v.is_zero());
     rhs.retain(|_, v| !v.is_zero());
     if lhs != rhs {
-        return Err(SosEmitError::SelfCheck("p − γ != σ₀ + Σᵢ σᵢ·gᵢ"));
+        return Err(SosEmitError::SelfCheck(if growth.is_some() {
+            "p − γ − μ‖x − x₀‖² != σ₀ + Σᵢ σᵢ·gᵢ"
+        } else {
+            "p − γ != σ₀ + Σᵢ σᵢ·gᵢ"
+        }));
     }
     Ok(())
 }
@@ -938,6 +1182,7 @@ mod tests {
             x_float: vec![],
             constraints: Vec::new(),
             neighborhood: None,
+            growth: false,
         }
     }
 
@@ -1017,6 +1262,7 @@ mod tests {
                 x_float: vec![1.2247448713915892],
                 constraints: Vec::new(),
                 neighborhood: None,
+                growth: false,
             },
             &meta(),
         )

@@ -31,6 +31,21 @@ pub struct Certificate {
     /// `γ ≤ p(x)` for every `x` rather than anything about a point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound: Option<Rat>,
+    /// The quadratic-growth modulus `μ` — `local-min-strict` only.
+    ///
+    /// Present exactly when the certified identity is the *shifted* one,
+    /// `p(x) − γ − μ·‖x − x₀‖² = σ₀ + Σₖ σₖ·gₖ + σ_B·(r² − ‖x − c‖²)`, whose
+    /// reading is `p(x) ≥ p(x₀) + μ‖x − x₀‖²` on `K ∩ B`: not just that `x₀`
+    /// wins, but by how much. `μ > 0` is what makes the inequality strict away
+    /// from `x₀`, so a non-positive value is refused rather than published as a
+    /// weaker claim.
+    ///
+    /// It is a *witness*, not a problem datum — the certificate proposes it and
+    /// the kernel checks it, and a `μ` too large for the problem simply leaves
+    /// the identity unprovable. It therefore sits here beside `bound` rather
+    /// than inside [`Problem`], which is the part `canonical_problem` compares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub growth_modulus: Option<Rat>,
     pub binding: Binding,
     pub toolchain: Toolchain,
     pub problem: Problem,

@@ -510,6 +510,7 @@ pub fn emit_infeasible_certificate(
         problem_class: "qp-convex".to_string(),
         tolerance: Rat(BigRational::zero()),
         bound: None,
+        growth_modulus: None,
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),
@@ -612,6 +613,7 @@ pub fn emit_unbounded_certificate(
         problem_class: "qp-convex".to_string(),
         tolerance: Rat(BigRational::zero()),
         bound: None,
+        growth_modulus: None,
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),
@@ -766,6 +768,7 @@ pub fn emit_feasible_certificate(
         problem_class: "qp-convex".to_string(),
         tolerance: Rat(eps),
         bound: None,
+        growth_modulus: None,
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),
@@ -874,6 +877,7 @@ pub fn emit_certificate(input: &QpInput, meta: &CertMeta) -> Result<Certificate,
         // Exact slice: feasibility holds with zero residual.
         tolerance: Rat::zero(),
         bound: None,
+        growth_modulus: None,
         binding: Binding {
             nl_sha256: meta.nl_sha256.clone(),
             sol_sha256: meta.sol_sha256.clone(),

@@ -14,8 +14,16 @@
 >   violated by ~1e-9. Resolved instead by exact active-set refinement: the
 >   float `x*` is not certified at all, so `tolerance = 0`.
 >
-> The one draft gap that remains open is the **null-space basis `Z`** for
-> `local-min-strict`; that verdict is still unimplemented on both sides.
+> The **null-space basis `Z`** was the last draft gap, and it closed by being
+> made unnecessary rather than by being implemented. `local-min-strict` now
+> ships — but by certifying a quadratic *growth* modulus on a ball (`--local
+> --growth`, `growth_modulus`), which is the same Putinar identity on a shifted
+> objective and needs no reduced Hessian, no active set, and no null space at
+> all. The draft's route below — reduced Lagrangian Hessian on `range(Z)`,
+> `D` strictly positive — is recorded as the design it was; nothing consumes
+> `Z`. See `dev-notes/lean-certificate.md` for why the growth route is not just
+> cheaper but strictly stronger: it exhibits the modulus, which a second-order
+> sufficient condition leaves existential.
 
 # POUNCE Lean-certificate schema, v1 (DRAFT)
 

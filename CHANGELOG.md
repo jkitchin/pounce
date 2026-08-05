@@ -26,7 +26,8 @@ changes.
   maximize objectives, non-polynomial objectives, and equality constraints on a
   higher-degree problem are all refused. Three more are opt-in, because each
   states something weaker than the automatic verdict would have: `feasible`
-  (`--feasible`), and `local-min` / `local-lower-bound` (`--local`).
+  (`--feasible`), `local-min` / `local-lower-bound` (`--local`), and
+  `local-min-strict` (`--local --growth`).
 - `global-lower-bound` proves `γ ≤ p(x)` for **every** real `x` on a nonconvex
   polynomial, which is the case where a local solve is worth least: it returns
   one basin and can say nothing about the others, and no KKT argument repairs
@@ -106,7 +107,44 @@ changes.
   - Refused on the convex-QP path, where the KKT certificate already proves a
     *global* minimum, and refused alongside `--feasible`, which asks for a
     different claim. What it does **not** prove is *strictness*: nothing rules
-    out a tie elsewhere in the ball.
+    out a tie elsewhere in the ball. That is what `--growth` adds.
+- **`pounce certify --local --growth` closes strictness — and hands back an
+  exact modulus, which a second-order sufficient condition would not.** The
+  textbook route to a strict local minimum is SOSC, and SOSC is irreducibly
+  real-analytic: a neighborhood that shrinks, a Taylor remainder with Peano
+  form, and in the constrained case a critical cone, a constraint qualification
+  and an implicit function theorem. The trusted layer here is ℚ, which has no
+  limits to take, so that route's real prerequisite was porting the whole layer
+  to ℝ. `--growth` skips it entirely: certify the same Putinar identity for the
+  objective shifted by a polynomial,
+  `p − γ − μ‖x − x₀‖² = σ₀ + Σₖ σₖ·gₖ + σ_B·(r² − ‖x − c‖²)`, for a rational
+  `μ > 0`. It reads back as `p(x) ≥ p(x₀) + μ‖x − x₀‖²` on the ball, and
+  strictness is then one ℚ lemma — `‖x − x₀‖² = 0 ↔ x = x₀`. Verdict:
+  `local-min-strict`. Same solver, same rounding, same two Lean obligations; no
+  new theory.
+  - **The conclusion is stronger than SOSC's.** SOSC concludes "strict local
+    minimum"; this concludes that *and* exhibits the modulus, exactly, as a
+    rational a consumer can compute with.
+  - `μ` comes off a fixed ladder (`8, 4, 2, 1, 1/2, …`), largest first, and the
+    first rung whose relaxation closes is shipped — so it is a certified floor
+    on the true growth, not a supremum. A larger `μ` may be true and simply not
+    certifiable at that relaxation order.
+  - The modulus rides beside `bound` as `growth_modulus`, **not** inside
+    `problem`: it is a witness, and the problem is the same one a `local-min`
+    certificate describes, which is what keeps `cert-verify`'s re-derivation
+    comparing exactly what it compared before. Growth is centred at the
+    candidate `x₀`, not at the ball's centre `c` — they are different points,
+    and centring at `c` would contradict `p(x₀) = γ`.
+  - The σ₀ hint for the shifted solve is corrected *exactly* rather than
+    re-solved: `‖x − x₀‖²` is itself a Gram form in the same basis, so the hint
+    is the original minus `μ` times that form. Without this the rational
+    rounding lands off the PSD cone and every rung of the ladder fails.
+  - `--growth` requires `--local`; the unrestricted strict claim would be a
+    different theorem with a different name. New forged fixture
+    `certify_sos_local_strict_forged_mu` inflates `μ` while leaving every
+    witness genuine, so every PSD check, the attainment and the in-ball
+    obligation all still pass and only `ring` in the identity can reject it —
+    and does.
 - **Fixed: `sos_constrained_lower_bound_gram` returned Gram blocks in
   equilibrated coordinates.** The SDP is solved after a domain map
   `x = shift + scale·u` and a per-polynomial coefficient rescale, and only the

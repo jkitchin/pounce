@@ -84,7 +84,7 @@ certificate names exactly one proven claim:
 | Verdict | Means | Tractable for |
 |---|---|---|
 | `feasible` | `x*` satisfies all constraints/bounds (within a declared ε) | any algebraic (polynomial/rational) model |
-| `local-min-strict` | KKT + second-order sufficient ⟹ strict local minimizer | smooth algebraic NLP |
+| `local-min-strict` | a certified quadratic growth modulus on a ball ⟹ strict local minimizer | polynomial-via-SOS (see Tier 2) |
 | `global-min` | certified global minimizer | convex (LP/QP/convex NLP) **or** polynomial-via-SOS |
 
 ### Tier 1 — feasibility
@@ -137,8 +137,31 @@ it.
 >   at any relaxation order.
 >
 > What it does **not** prove is *strictness* — nothing rules out a tie elsewhere
-> in the ball. So `local-min-strict` stays open, and the SOSC development below
-> is still what would close it. It is now a much smaller gap than it was.
+> in the ball. That gap is now closed too, and **not** by the SOSC development
+> below, which stays unbuilt for the same reason it always was.
+>
+> `--growth` certifies the identity for the objective shifted by `−μ‖x − x₀‖²`,
+> for a rational `μ > 0` off a fixed ladder. Since `‖x − x₀‖²` is a polynomial,
+> this is the *identical* Putinar problem with a different right-hand side — no
+> new theory, no new tactic, one more SOS solve. It reads back as
+> `p(x) ≥ p(x₀) + μ‖x − x₀‖²` on the ball, and strictness follows from a single
+> ℚ lemma, `sqdist_eq_zero_iff : ‖x − x₀‖² = 0 ↔ x = x₀`. Verdict:
+> `local-min-strict`.
+>
+> Note this is *strictly stronger* than what SOSC concludes. SOSC says "strict
+> local minimum"; this says that **and** hands back the modulus, exactly, as a
+> rational you can compute with. The reason the cheaper route is also the
+> stronger one is that SOSC's machinery — a shrinking neighborhood, a Taylor
+> remainder with Peano form, a critical cone, a constraint qualification — is
+> all in service of a limit, and the growth certificate never takes one. Which
+> is what makes it expressible in ℚ at all: porting the trusted layer to ℝ was
+> the actual prerequisite for SOSC, and it is not needed here.
+>
+> The one implementation subtlety is the Gram hint. The float SDP is solved
+> once, unshifted; `‖x − x₀‖²` is itself a Gram form in the σ₀ basis, so the
+> hint for the shifted problem is the original minus `μ` times that form — an
+> exact algebraic correction. Without it the rational rounding lands off the PSD
+> cone and every rung of the ladder fails with `NotPsd { block: 0 }`.
 
 The original design, for the record — second-order *sufficient* conditions, all
 Lean-checkable over ℚ:
@@ -389,8 +412,18 @@ silently rotting.
   *not* follow from attainment: `x⁴ − 2x² + 2` attains its minimum at both
   `±1`. That is the `certify_sos_local_forged_outside_ball` negative fixture.
 
-  Still open here: `local-min-strict` (strictness), and later transcendentals
-  (where `dReal` may complement Mathlib's thin interval arithmetic).
+  Strictness followed as `--growth` / `local-min-strict`, on the same ball and
+  with the same machinery: certify the identity for `p − γ − μ‖x − x₀‖²`. The
+  modulus rides beside `bound` as `growth_modulus`, not inside `problem` — it
+  is a witness, and the problem is unchanged, which is what keeps `cert-verify`
+  comparing the same thing it did before. The growth is centred at the
+  candidate, not at the ball's centre; those are different points, and centring
+  at `c` would contradict `p(x₀) = γ`. Negative fixture:
+  `certify_sos_local_strict_forged_mu` (μ inflated, every witness genuine, so
+  only `ring` can catch it).
+
+  Still open here: transcendentals (where `dReal` may complement Mathlib's thin
+  interval arithmetic).
 
 ## Recommended first slice
 

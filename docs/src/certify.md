@@ -69,15 +69,16 @@ Four verdicts, chosen automatically from the `.nl` — you do not select one:
 | `global-lower-bound` | polynomial, degree > 2 | `γ ≤ p(x)` for **every** real `x` — or, if the problem has constraints, for every *feasible* `x` |
 | `global-min` | polynomial, degree > 2 | that bound is *attained* at an exhibited `x₀`, so `p(x₀) ≤ p(x)` (again, everywhere or on the feasible set) |
 
-plus three you *do* select, with `--feasible` or `--local`:
+plus four you *do* select, with `--feasible`, `--local` or `--local --growth`:
 
 | Verdict | Slice | The proven statement |
 |---|---|---|
 | `feasible` | any linearly-constrained QP, convex or not | `x*` violates no row by more than ε, **and** a genuinely feasible point exists within ε of it |
 | `local-lower-bound` | polynomial, degree > 2, with `--local` | `γ ≤ p(x)` for every feasible `x` **within an exhibited ball** — and nothing outside it |
 | `local-min` | polynomial, degree > 2, with `--local` | that bound is attained at an `x₀` proved to lie in the ball, so `p(x₀) ≤ p(x)` there |
+| `local-min-strict` | polynomial, degree > 2, with `--local --growth` | the same, *quantitatively*: `p(x₀) + μ‖x − x₀‖² ≤ p(x)` on the ball for an exhibited rational `μ > 0`, hence `p(x₀) < p(x)` at every other point of it |
 
-The last two rows are the interesting ones, because they cover the case where a
+The last three rows are the interesting ones, because they cover the case where a
 solver's usual answer is worth very little. A nonconvex polynomial has many
 basins; a local solve returns one and can say nothing about the others, and no
 KKT argument fixes that. What *can* be established is a bound, via a
@@ -201,6 +202,55 @@ Three practical notes:
 proves a *global* minimum: narrowing that to a ball would trade a strong claim
 for a weaker one and gain nothing. It is also refused together with
 `--feasible`, which asks for a different claim entirely.
+
+### `--growth`: strictness, without the second-order machinery
+
+`local-min` leaves one thing open — it does not rule out a *tie* somewhere else
+in the ball. The textbook fix is a second-order sufficient condition, and that
+is an expensive fix here: SOSC is irreducibly real-analytic. It quantifies over
+a neighborhood that shrinks, needs a Taylor remainder that vanishes faster than
+`‖d‖²`, and in the constrained case a critical cone, a constraint qualification
+and an implicit function theorem. None of that survives the move to ℚ, where
+this whole certificate layer lives — ℚ has no limits to take.
+
+`--growth` gets the same conclusion, and more, without leaving ℚ. Ask the SOS
+machinery for a certificate of the *shifted* objective:
+
+```text
+p(x) − γ − μ‖x − x₀‖² = σ₀(x) + Σₖ σₖ(x)·gₖ(x) + σ_B(x)·(r² − ‖x − c‖²)
+```
+
+for a rational `μ > 0`. Since `‖x − x₀‖²` is a polynomial, this is the identical
+Putinar problem with a different right-hand side — the same solver, the same
+rounding, the same two obligations in Lean. Read back, it says
+
+```text
+p(x) ≥ p(x₀) + μ‖x − x₀‖²    for every feasible x in the ball
+```
+
+and because `‖x − x₀‖² = 0` only at `x₀` (one lemma over ℚ, no analysis), the
+inequality is *strict* everywhere else in the ball. That is strict local
+minimality — plus an explicit, exact modulus, which SOSC does not give you at
+all. The growth is centred at the candidate `x₀`, not at the ball's centre `c`;
+centring it at `c` would contradict `p(x₀) = γ` unless the two coincided.
+
+Two notes on how `μ` is chosen:
+
+- **It comes off a fixed ladder**, largest first (`8, 4, 2, 1, 1/2, …`), and the
+  first value whose relaxation closes is the one shipped. So `μ` is a lower
+  bound on the true growth, not the supremum of it — a stronger `μ` may be true
+  and simply not certifiable at this relaxation order. Nothing is claimed about
+  tightness; what is claimed is exact.
+- **The σ₀ hint is corrected exactly.** The float SDP is solved once, for the
+  unshifted problem, and its Gram matrix seeds the rational rounding. `‖x−x₀‖²`
+  is itself a Gram form in the same basis, so the seed for the shifted problem
+  is the original minus `μ` times that form — an exact algebraic correction, not
+  a re-solve and not a heuristic. Without it the rounding lands off the PSD cone
+  and every rung of the ladder fails.
+
+`--growth` requires `--local` and is refused without it: the modulus is
+certified *on a region*, and the unrestricted strict claim would be a different
+theorem with a different name.
 
 ## Certifying the float itself
 
@@ -402,7 +452,8 @@ fixtures are the ones that would catch a proof that accepts too much.
   thing to be — a wider claim would be false. The ball is part of the theorem
   statement, so a consumer that ignored `problem.neighborhood` would read a
   local result as a global one. What `--local` does *not* prove is *strict*
-  local minimality: nothing rules out a tie elsewhere in the ball.
+  local minimality: nothing rules out a tie elsewhere in the ball. `--growth`
+  does, by certifying a modulus — and it too is only ever about that ball.
 * **`feasible` proves nothing about optimality.** It is a statement about where
   a point *sits*, not about whether anything better exists. On a nonconvex
   problem that is genuinely all a local solve establishes — the verdict is

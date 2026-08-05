@@ -534,6 +534,103 @@ fn the_local_flag_refuses_incoherent_combinations() {
     }
 }
 
+/// `--growth` upgrades the same ball claim from "≤" to "<", by certifying a
+/// rational modulus μ > 0 with `p(x) ≥ p(x₀) + μ‖x − x₀‖²` on the ball.
+///
+/// The point of the extra flag is that this is *strictly more* than a second-
+/// order sufficient condition would give: SOSC concludes "is a strict local
+/// minimum", while this hands back the modulus itself, exactly, as a rational.
+/// It costs one more SOS solve on the shifted objective and no new theory —
+/// the whole thing still lives in ℚ, where SOSC could not.
+#[test]
+fn the_growth_flag_certifies_a_strict_local_minimum() {
+    let sol = solve_to_sol("certify_sos_local");
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_sos_local.nl"))
+        .arg(&sol)
+        .arg("--local")
+        .arg("--growth")
+        .output()
+        .expect("run pounce certify");
+    assert!(
+        out.status.success(),
+        "certify --local --growth failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cert: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("certify stdout is JSON");
+    // A distinct verdict, because it is a distinct theorem: `local-min` proves
+    // p x₀ ≤ p x, this proves p x₀ < p x away from x₀.
+    assert_eq!(cert["verdict"], "local-min-strict");
+    assert_eq!(cert["bound"], serde_json::json!({"num":"-5","den":"1"}));
+
+    // μ is a *witness*, so it rides beside `bound` rather than inside
+    // `problem` — the problem is unchanged, and `cert-verify` compares
+    // `problem`. It must be a positive rational; a non-positive one would
+    // prove nothing strict at all.
+    let mu = &cert["growth_modulus"];
+    let (num, den): (i64, i64) = (
+        mu["num"].as_str().expect("μ num").parse().expect("integer"),
+        mu["den"].as_str().expect("μ den").parse().expect("integer"),
+    );
+    assert!(num > 0 && den > 0, "μ must be positive, got {mu}");
+
+    // And it must be *true*, not merely positive. On this fixture the honest
+    // ceiling is 5: p(x) + 5 − μ(x−1)² = (x−1)²(3x² + 10x + 3 − μ), which is
+    // nonnegative on the ball iff μ ≤ min(3x² + 10x + 3) there. A μ above that
+    // is a false claim; the search comes off a fixed ladder, so it lands at or
+    // below it rather than exactly on it, and this bound is the invariant.
+    let mu_f = num as f64 / den as f64;
+    let r: f64 = cert["problem"]["neighborhood"]["radius_sq"]["num"]
+        .as_str()
+        .expect("radius_sq num")
+        .parse()
+        .expect("integer");
+    let lo = 1.0 - r.sqrt();
+    assert!(
+        mu_f <= 3.0 * lo * lo + 10.0 * lo + 3.0 + 1e-9,
+        "μ = {mu_f} overclaims the growth this problem actually has"
+    );
+}
+
+/// `--growth` names a modulus measured from the minimizer *within a region*.
+/// Without `--local` there is no region, and the unrestricted strict claim is a
+/// different theorem — so this is refused rather than quietly promoted.
+#[test]
+fn the_growth_flag_requires_a_neighborhood() {
+    let sol = solve_to_sol("certify_sos_local");
+    let out = Command::new(pounce_exe())
+        .arg("certify")
+        .arg(fixture("certify_sos_local.nl"))
+        .arg(&sol)
+        .arg("--growth")
+        .output()
+        .expect("run pounce certify");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--growth without --local should be refused, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn cert_verify_accepts_the_strict_local_sos_certificate() {
+    // `growth_modulus` sits outside `problem`, so the re-derivation must be
+    // untouched by it: the strict cert and the plain one describe the *same*
+    // problem and differ only in what they claim about it.
+    let out = cert_verify(
+        "certify_sos_local_strict.nl",
+        "certify_sos_local_strict.cert.json",
+    );
+    assert!(
+        out.status.success(),
+        "strict local SOS cert should verify against its .nl: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A KKT certificate for a convex QP already proves a *global* minimum, so
 /// restricting it to a ball would replace a strong claim with a weaker one for
 /// no reason. Refused, with that as the explanation.
