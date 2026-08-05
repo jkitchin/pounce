@@ -1,0 +1,108 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "unbounded",
+  "problem_class": "qp-convex",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "bed641788b099304976756b031f1c2c8e03710f5dc3192226ceca1d0fdfb5bc2",
+    "sol_sha256": "27600115846ae9068bdf5614645d17f7b54956bc1cff8c80b5174277dce54137",
+    "solver": "pounce 0.9.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": [
+          {
+            "i": 0,
+            "j": 0,
+            "val": {
+              "num": "2",
+              "den": "1"
+            }
+          }
+        ]
+      },
+      "c": [
+        {
+          "num": "0",
+          "den": "1"
+        },
+        {
+          "num": "-1",
+          "den": "1"
+        }
+      ],
+      "constant": {
+        "num": "0",
+        "den": "1"
+      }
+    },
+    "var_bounds": {
+      "lower": [
+        "-inf",
+        "-inf"
+      ],
+      "upper": [
+        "+inf",
+        "+inf"
+      ]
+    },
+    "constraints": [
+      {
+        "name": "c0",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "1",
+          "den": "1"
+        },
+        "upper": "+inf"
+      }
+    ]
+  },
+  "witnesses": {
+    "recession": {
+      "x0": [
+        {
+          "num": "5199754501109941",
+          "den": "4835703278458516698824704"
+        },
+        {
+          "num": "7020953587091071",
+          "den": "17592186044416"
+        }
+      ],
+      "d": [
+        {
+          "num": "1",
+          "den": "1"
+        },
+        {
+          "num": "1",
+          "den": "1"
+        }
+      ]
+    }
+  }
+}

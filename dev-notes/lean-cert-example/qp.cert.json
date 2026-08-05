@@ -1,0 +1,58 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "global-min",
+  "problem_class": "qp-convex",
+  "tolerance": { "num": "0", "den": "1" },
+  "binding": {
+    "nl_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sol_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "solver": "pounce 0.5.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.x.0",
+    "mathlib": "<git rev>"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": [
+          { "i": 0, "j": 0, "val": { "num": "2", "den": "1" } },
+          { "i": 1, "j": 1, "val": { "num": "2", "den": "1" } }
+        ]
+      },
+      "c": [ { "num": "0", "den": "1" }, { "num": "0", "den": "1" } ],
+      "constant": { "num": "0", "den": "1" }
+    },
+    "var_bounds": {
+      "lower": [ "-inf", "-inf" ],
+      "upper": [ "+inf", "+inf" ]
+    },
+    "constraints": [
+      {
+        "name": "c0",
+        "coeffs": [ { "num": "1", "den": "1" }, { "num": "1", "den": "1" } ],
+        "lower": { "num": "1", "den": "1" },
+        "upper": "+inf"
+      }
+    ]
+  },
+  "candidate": {
+    "x": [ { "num": "1", "den": "2" }, { "num": "1", "den": "2" } ],
+    "objective": { "num": "1", "den": "2" }
+  },
+  "witnesses": {
+    "duals": [ { "num": "1", "den": "1" } ],
+    "hessian_psd": {
+      "of": "Q",
+      "L": { "rows": 2, "cols": 2, "unit_lower": true, "entries": [] },
+      "D": [ { "num": "2", "den": "1" }, { "num": "2", "den": "1" } ]
+    },
+    "active_set": [ 0 ]
+  }
+}

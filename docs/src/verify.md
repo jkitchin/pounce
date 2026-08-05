@@ -375,4 +375,6 @@ the gaps to close. None are implemented here.
   outside the agent.
 * Feasibility is fully checkable; **global optimality is not**. The
   stationarity residual certifies a first-order/KKT point, not a global
-  minimum.
+  minimum. For the narrow slices where global optimality *can* be established —
+  by machine-checked proof rather than by a residual — see
+  [Certifying Solutions (Lean)](certify.md).

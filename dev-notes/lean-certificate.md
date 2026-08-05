@@ -1,0 +1,469 @@
+> ## SUPERSEDED — historical design note
+>
+> This was the original brainstorm. It is kept for the design rationale (why a
+> separate repo, why witnesses need not be trusted, why the tiers are what they
+> are), all of which survived contact with the implementation. **Do not use it
+> as a specification.** The implemented contract is
+> [`docs/src/schema/lean-cert-v1.md`](../docs/src/schema/lean-cert-v1.md);
+> the emitter is `crates/pounce-lean-cert/`.
+>
+> Known errors below, left in place rather than quietly rewritten:
+>
+> * The schema tag is **`pounce.lean-cert/v1`**, not `pounce-cert/v1` (used in
+>   four places here, including the section titled "The contract").
+> * The binding-fields list names `statement_sha256` as part of the certificate;
+>   a later section of this same document correctly retracts that. It is not in
+>   the cert — it belongs to the post-codegen receipt.
+> * "Unforgeable two ways: SHA-256 content-addressing and an optional HMAC" is
+>   **wrong**. A content hash is a *binding*, not authentication — anyone can
+>   compute a correct hash over any bytes. `docs/src/verify.md` attributes
+>   unforgeability to HMAC alone, and otherwise to recomputation.
+> * The emitter cannot "reuse the SOS plumbing in `sos.py`" — it is Rust and
+>   that is Python. The Rust SOS engine is `crates/pounce-convex/src/sos.rs`,
+>   which this note never mentions, and it does not currently expose the Gram
+>   matrices a certificate would need.
+> * POUNCE emits `.sol` only; there is no `.nl` writer in the workspace.
+> * The diagram gives `lake build` exit code 20. That is `pounce verify`'s
+>   infeasible code; `lake build` has no such convention.
+> * The problem encoding shipped as matrix/vector form, not expression trees.
+>   Trees are deferred to a future `nlp-poly` slice.
+
+# Lean-verified solution certificates
+
+**Status: design note / brainstorm.** Nothing here is implemented yet. This
+captures the architecture for emitting a certificate from a POUNCE solve that
+the [Lean 4](https://lean-lang.org/) theorem prover can independently verify —
+proving, with a kernel-checked proof, that a returned `x*` is **feasible** and
+(for the tractable problem classes) **a minimum**, using exact rational
+arithmetic so there is no floating-point trust gap.
+
+It builds directly on the existing `pounce verify` trust model
+(`crates/pounce-cli/src/verify.rs`, `docs/src/verify.md`). Read that first: it
+is the keyless, content-addressed feasibility checker this extends.
+
+## Why Lean, on top of `pounce verify`
+
+`pounce verify` today re-evaluates `g(x*)` in **f64**, checks
+`g_l ≤ g(x*) ≤ g_u` against the canonical `.nl`, and makes the receipt
+unforgeable two ways: SHA-256 **content-addressing** (a receipt is meaningful
+only for the exact `.nl`/`.sol` bytes it names) and an optional **HMAC** so a
+keyholder can attest a receipt. `verify.md` is candid about two standing
+non-goals:
+
+> *"Feasibility is fully checkable; global optimality is not. The stationarity
+> residual certifies a first-order/KKT point, not a global minimum."*
+
+and the float-tolerance fuzz of `--feas-tol`. Lean attacks both.
+
+It also changes the **nature of the trust anchor**. HMAC's guarantee — "a party
+without the key cannot mint a receipt" — is conditional on key secrecy, and
+`verify.md` admits an agent sharing the host defeats it. **A Lean proof has no
+key.** Its unforgeability is intrinsic: a proof term either typechecks against
+the kernel or it does not, and nobody can fabricate one that checks. That is
+strictly stronger than HMAC and removes the entire "key isolation" chapter. The
+SHA-256 hash does not go away — it does a *different* job (binding the proof to
+the canonical problem; see [Trust boundaries](#trust-boundaries)).
+
+## The lossless float→rational fact
+
+The enabling observation: **every f64 is exactly a dyadic rational** `m·2^e`.
+Converting `x*` and `λ` from the `.sol` into Lean `ℚ` is therefore **lossless
+and canonical** — no rounding, no ambiguity, no float in the trusted path. The
+SHA-256 POUNCE already computes over the `.sol` bytes commits to exactly those
+rationals. Lean then reasons over ℚ exactly.
+
+So the "rational approximation to mitigate float issues" is **not** an
+approximation of `x*` — `x*` is represented exactly. The only approximation is
+that `x*` ≠ the *true* optimum, handled explicitly per claim tier below.
+
+## What "is a minimum" can mean — three claim tiers
+
+Be precise about the verdict; overselling here would be the worst outcome. The
+certificate names exactly one proven claim:
+
+| Verdict | Means | Tractable for |
+|---|---|---|
+| `feasible` | `x*` satisfies all constraints/bounds (within a declared ε) | any algebraic (polynomial/rational) model |
+| `local-min-strict` | a certified quadratic growth modulus on a ball ⟹ strict local minimizer | polynomial-via-SOS (see Tier 2) |
+| `global-min` | certified global minimizer | convex (LP/QP/convex NLP) **or** polynomial-via-SOS |
+
+### Tier 1 — feasibility
+
+Given exact-rational `x̃`, Lean proves `g_l ≤ g(x̃) ≤ g_u` and
+`x_l ≤ x̃ ≤ x_u`.
+
+* **Polynomial / rational-function constraints over ℚ:** closed by `norm_num` /
+  `polyrith` / `ring` / `decide`. Fully exact.
+* **The equality-constraint snag.** A rational `x̃` generally cannot satisfy a
+  nonlinear *equality* exactly. Two honest treatments:
+  * **(a) declared tolerance** — prove `|g(x̃) − rhs| ≤ ε` *exactly* over ℚ,
+    with ε stated in the certificate. Shippable now, and still strictly better
+    than f64 fuzz because the arithmetic is exact and the bound is a theorem.
+  * **(b) interval-Newton / Kantorovich existence** — prove a *true* zero lives
+    in a tiny box around `x̃`. The gold standard; a genuine Lean formalization
+    effort. Deferred.
+* **Transcendentals** (`exp`/`sin`/`log`): need verified interval bounds;
+  Mathlib coverage is thin. Out of scope for v1; `dReal` (δ-complete nonlinear
+  SMT) is a complementary checker for this fragment later.
+
+### Tier 2 — local minimum
+
+**Shipped, but not the way this section planned.** What follows was the design;
+read it, then read the note below, because the route actually taken skips all of
+it.
+
+> **What shipped instead: SOS on a ball (`--local`).** A neighborhood is a
+> polynomial inequality, `r² − ‖x − c‖² ≥ 0`. Adjoin it to the Putinar
+> multiplier family that Tier 3's constrained SOS path already had, and the
+> resulting certificate proves
+>
+>     ∀ x, (∀ i, gᵢ(x) ≥ 0) → ‖x − c‖² ≤ r² → p(x₀) ≤ p(x)
+>
+> which *is* local minimality. The trusted lemmas are
+> `local_lower_bound_of_sos` and `local_min_of_sos_attained`, each a four-line
+> sign argument. No KKT, no LICQ, no active-set identification, no reduced
+> Hessian, no Taylor remainder, no implicit function theorem — and, decisively,
+> **no SOSC theorem, which Mathlib does not have.** The plan below would have
+> required proving one first; that was the real cost, and it was invisible
+> until the Tier 3 SOS work made the alternative obvious.
+>
+> Two things the ball route gives that the SOSC route would not:
+>
+> * It is a *numerically easier* problem, not just an easier proof. A ball is a
+>   strong localizer, so a low-order relaxation often closes where the global
+>   problem's gap will not.
+> * It is the only route that says anything at all at a local minimum that is
+>   not global, where the global claim is false and no certificate for it exists
+>   at any relaxation order.
+>
+> What it does **not** prove is *strictness* — nothing rules out a tie elsewhere
+> in the ball. That gap is now closed too, and **not** by the SOSC development
+> below, which stays unbuilt for the same reason it always was.
+>
+> `--growth` certifies the identity for the objective shifted by `−μ‖x − x₀‖²`,
+> for a rational `μ > 0` off a fixed ladder. Since `‖x − x₀‖²` is a polynomial,
+> this is the *identical* Putinar problem with a different right-hand side — no
+> new theory, no new tactic, one more SOS solve. It reads back as
+> `p(x) ≥ p(x₀) + μ‖x − x₀‖²` on the ball, and strictness follows from a single
+> ℚ lemma, `sqdist_eq_zero_iff : ‖x − x₀‖² = 0 ↔ x = x₀`. Verdict:
+> `local-min-strict`.
+>
+> Note this is *strictly stronger* than what SOSC concludes. SOSC says "strict
+> local minimum"; this says that **and** hands back the modulus, exactly, as a
+> rational you can compute with. The reason the cheaper route is also the
+> stronger one is that SOSC's machinery — a shrinking neighborhood, a Taylor
+> remainder with Peano form, a critical cone, a constraint qualification — is
+> all in service of a limit, and the growth certificate never takes one. Which
+> is what makes it expressible in ℚ at all: porting the trusted layer to ℝ was
+> the actual prerequisite for SOSC, and it is not needed here.
+>
+> The one implementation subtlety is the Gram hint. The float SDP is solved
+> once, unshifted; `‖x − x₀‖²` is itself a Gram form in the σ₀ basis, so the
+> hint for the shifted problem is the original minus `μ` times that form — an
+> exact algebraic correction. Without it the rational rounding lands off the PSD
+> cone and every rung of the ladder fails with `NotPsd { block: 0 }`.
+
+The original design, for the record — second-order *sufficient* conditions, all
+Lean-checkable over ℚ:
+
+* KKT stationarity `∇f + Jᵀλ + (bound multipliers) = 0` — exact, given `λ` as
+  rationals.
+* Dual feasibility (sign of `λ`) and complementarity — exact.
+* **Reduced Hessian positive-definite** on the active-constraint null space.
+  The Lean-friendly PSD certificate: POUNCE emits a rational `LDLᵀ`
+  factorization of the reduced Lagrangian Hessian; Lean checks the matrix
+  identity `M = L D Lᵀ` by `norm_num`/`ring` and `Dᵢ > 0` entrywise. Certifies
+  a **strict local** minimizer. This is the honest ceiling for nonconvex NLP.
+
+### Tier 3 — global minimum (two routes only)
+
+* **Convex (LP/QP/convex NLP):** KKT ⟹ global. Global then reduces to
+  *certifying convexity* in Lean — for a QP, prove the (constant) Hessian PSD
+  once via the same `LDLᵀ` trick, plus the local KKT certificate. For an LP it
+  collapses to an exact **Farkas/dual certificate** Lean checks by arithmetic.
+* **Polynomial nonconvex → SOS duality.** POUNCE already has `python/pounce/sos.py`
+  and an SOS global-optimization notebook. An SOS certificate writes
+  `f(x) − γ = σ₀(x) + Σ λᵢ(x)·gᵢ(x)` with `σ` sums-of-squares. Lean verifies
+  exactly the two things it is good at: a **polynomial identity** (`ring`/`norm_num`
+  over ℚ coefficients) plus **PSD of the Gram matrices** (rational `LDLᵀ`). That
+  certifies a global *lower bound* `γ`; pairing it with the feasible point that
+  achieves `γ` yields **certified global optimality**, kernel-checked, no float.
+
+## Repository topology
+
+The pipeline has three pieces with three natural homes. **The Lean library
+lives in a separate repo; the emitter stays in POUNCE; a versioned schema is the
+contract between them.**
+
+```
+ .nl (canonical, hashed)
+        │
+   ┌────┴──────────────────────────┐  POUNCE's job: produce DATA, never a proof
+   │ POUNCE (Rust, THIS repo)        │
+   │  • lossless f64→ℚ of x*, λ       │
+   │  • problem as ℚ expr-trees       │──▶ problem cert  ("the statement")
+   │  • witnesses: LDLᵀ, SOS Gram     │──▶ witness data   ("the proof hints")
+   └─────────────────────────────────┘
+        │  versioned schema = wire contract (pounce-cert/v1)
+        ▼
+   ┌─────────────────────────────────┐  Lean's job: data → KERNEL-CHECKED proof
+   │ pounce-lean (Lean4 + Mathlib,    │
+   │  SEPARATE repo)                  │
+   │  • cert → .lean statement         │
+   │  • reusable lemmas/tactics:       │──▶ lake build → verdict (exit 0 / 20)
+   │    PSD-via-LDLᵀ, SOS identity,    │
+   │    convex-KKT ⟹ global            │
+   └─────────────────────────────────┘
+```
+
+### Why the Lean library wants its own repo
+
+* **Toolchain blast radius.** Lean/Mathlib is a multi-GB, `elan`/`lake`-built,
+  revision-pinned dependency with slow CI. CLAUDE.md shows POUNCE already
+  juggling 3 registries, 19 crates, and a pre-tag consistency guard. Bolting a
+  Mathlib build into that couples every POUNCE PR and release tag to Mathlib's
+  cadence.
+* **Independent versioning.** The Lean lib versions against *Mathlib revs*, not
+  POUNCE `X.Y.Z`. The only thing that must agree across the seam is the **cert
+  schema version**.
+* **Different contributor pool.** Lean+Mathlib formalization is a distinct
+  community; a Rust-optimizer monorepo is a barrier to them and vice-versa.
+* **Optional high-assurance lane.** Almost all users `pip install pounce-solver`
+  and never touch Lean. The core repo should not carry that weight.
+
+### Why the emitter stays in POUNCE
+
+The converter from a solve to a certificate reuses `pounce-nl`'s `.nl` reader,
+the `.sol` parser and `sha256` module in `verify.rs`, and the SOS plumbing in
+`sos.py`. Reimplementing `.nl` parsing on the Lean side would create a *second*
+TCB and duplicate the best reader. So: **POUNCE emits, pounce-lean verifies** —
+mirroring how POUNCE already emits `.nl`/`.sol` as the contract to external
+tools. The Lean certificate is one more emitted artifact format.
+
+### Not a git submodule
+
+Do **not** vendor pounce-lean as a submodule of POUNCE. Submodules worsen the
+toolchain coupling; the schema-contract decoupling is what keeps the slow
+Mathlib repo off POUNCE's critical path.
+
+## Trust boundaries
+
+The property that makes the repo seam *safe*: **the witnesses do not need to be
+trusted.** If POUNCE emits a wrong `λ`, a bogus `LDLᵀ`, or a bad SOS Gram
+matrix, the Lean proof simply **fails to typecheck** — bad witness data cannot
+produce a passing proof. POUNCE can be fully adversarial and forge nothing. The
+Rust→Lean boundary therefore carries only *untrusted hints + a statement*,
+exactly the kind of boundary a repo seam can sit on.
+
+The "is it even the right problem" gap closes the same way `verify.md` closes it
+— *recompute, don't trust a receipt*. The consumer's acceptance test:
+
+> accept **iff** `lake build` succeeds **∧** the proof's `nl_sha256` literal
+> equals SHA-256 of *the consumer's own canonical* `.nl` **∧** `statement_sha256`
+> equals the hash of the statement re-derived from that `.nl`.
+
+So the trusted base shrinks to **{Lean kernel} + {the deterministic
+nl→cert emitter}**, and the emitter is content-addressed so a suspicious
+consumer re-runs it and matches the hash. **No key anywhere** — a smaller,
+keyless TCB than today's HMAC + key-isolation story.
+
+The Lean theorem statement **embeds `nl_sha256` and `sol_sha256` as literals**
+(in module/def names or a documented header) so the artifact provably concerns
+those exact bytes. The danger is never a forged proof; it is a proof of the
+*wrong, easier theorem* — which the `statement_sha256` re-derivation catches.
+
+## The contract: `pounce-cert/v1`
+
+A versioned certificate schema is the linchpin that lets the two repos evolve
+independently. Precedent already exists: `docs/src/schema/solve-report-v1.md`
+(schema tag `pounce.solve-report/v1`). Mint `pounce-cert/v1` the same way and
+keep the **schema doc in this repo** (it is the producer's contract). It pins:
+
+* **exact-rational representation** — dyadic `m·2^e` (lossless from f64), or
+  general `p/q` integers in ℚ;
+* **problem encoding** — objective and constraints as expression trees over ℚ,
+  plus bounds `x_l,x_u,g_l,g_u`;
+* **witnesses per tier** — KKT duals `λ`; the reduced-Hessian `LDLᵀ` factors;
+  SOS Gram matrices + multiplier polynomials;
+* **binding fields** — `nl_sha256`, `sol_sha256`, `statement_sha256`, the
+  claimed verdict ∈ `{feasible, local-min-strict, global-min}`, tolerance ε,
+  and (for reproducibility) the intended Lean toolchain + Mathlib revision.
+
+Versioning policy mirrors the solve-report schema: adding fields is
+non-breaking; removing/renaming bumps the major; changing a field's semantics
+without a rename is forbidden.
+
+The concrete field-level schema is written up in
+[`dev-notes/lean-cert-schema-v1.md`](lean-cert-schema-v1.md), and a
+complete worked `qp-convex` / `global-min` certificate plus the `.lean` it
+should generate lives in [`dev-notes/lean-cert-example/`](lean-cert-example/).
+One refinement settled while writing those: `statement_sha256` (and any
+signature) is **not** in the certificate POUNCE emits — it belongs to the
+*verification receipt* produced after codegen, because the statement is derived
+by `pounce-lean`, not by POUNCE. The certificate carries `nl_sha256` and
+`sol_sha256` only.
+
+**Drift guard** (mirrors `scripts/check-release-consistency.sh`): POUNCE CI
+emits a golden `cert` fixture; pounce-lean CI checks committed golden fixtures
+still verify. A schema break then fails *someone's* CI loudly instead of
+silently rotting.
+
+## Phasing
+
+* **Phase 0 (this repo).** Define `pounce-cert/v1`; add a `pounce certify`
+  path emitting the certificate (problem + witnesses) for the **convex-QP**
+  slice. No Lean yet — just exact data + a golden fixture and the schema doc.
+* **Phase 1 (new `pounce-lean` repo).** PSD-via-`LDLᵀ` lemma + convex-KKT⟹global
+  theorem + `cert → .lean` codegen. End-to-end: QP → certified **global** min.
+  The smallest thing that exercises the whole architecture; global result on day
+  one; no SOS machinery; no equality-residual fuzz.
+* **Phase 2 — done.** SOS identity checker in pounce-lean + Gram-matrix
+  witnesses → certified global min for nonconvex polynomials. The bound half
+  (`global_lower_bound_of_sos`) and the attainment half
+  (`global_min_of_sos_attained`, `p x₀ = γ`) both ship; a polynomial with an
+  irrational minimizer keeps the bound verdict, which is the correct answer
+  over ℚ rather than a gap.
+* **Phase 2b — done.** Tier 1 (`feasible`) closed on the emitter side with
+  `pounce certify --feasible`, for linearly-constrained QPs of any curvature.
+  This was the last verdict the consumer accepted and the producer could not
+  emit. Note which of the two Tier-1 treatments it implements: **both**, and
+  the ε is not the equality-residual fuzz option (a) anticipated. The linear
+  equalities are satisfied *exactly* by the emitted `x̂` — the minimum-norm
+  projection of `x*` onto the affine hull of the equalities and the active
+  inequalities, over ℚ — so ε measures only the distance from the reported
+  float to that exact point, and the certificate carries option (b)'s existence
+  claim (`∃ x̂ feasible, ‖x̂ − x*‖∞ ≤ ε`) without needing interval-Newton,
+  because on a *linear* face the projection is a closed form rather than a
+  fixed-point argument. Interval-Newton is still what a nonlinear equality
+  will need.
+* **Phase 2c — done.** `unbounded` lifted from the LP slice to any `Q`. The
+  restriction had always been on the emitter: `unbounded_of_recession` takes an
+  arbitrary symmetric `Q` and asks only that `Q d = 0`. What made the LP case
+  easy is worth recording, because it is the same axis as everything else here:
+  its recession conditions are **inequalities**, which survive f64→ℚ with their
+  sign intact, so the diverging iterate was itself an exact witness. `Q ≠ 0`
+  reintroduces an equality and with it a null-space refinement of the same
+  shape as `refine_farkas` — project the iterate onto `ker Q` over ℚ. The
+  hint's contamination is `O(1/t)` after normalization (the iterate is
+  `x_finite + t·d_true`), so it is invisible to a strict row but could tip a row
+  that holds with `A_i d = 0` exactly; such a row is refused rather than
+  nudged, since a tolerance there would be a tolerance in the proof. Equality
+  constraint rows remain outside the slice.
+* **Phase 2d — done.** Positivstellensatz (Putinar) multipliers on the emitter
+  side, so the polynomial slice takes constraints:
+  `p − γ = σ₀ + Σₖ σₖ·gₖ`, discharged by `constrained_lower_bound_of_sos`,
+  which already existed in pounce-lean; the attainment half
+  (`constrained_min_of_sos_attained`) was added alongside it.
+
+  Three things are worth recording.
+
+  1. **It is not an extension of the unconstrained case, it is the general
+     case.** The unconstrained shape is the Putinar shape with one block whose
+     multiplier is the constant `1`; there is one code path, one exact rounder
+     (`round_gram_blocks`, jointly over all blocks' packed upper triangles),
+     one identity check. What differs is the *claim*, and that difference is
+     carried in the `problem` block (`poly_constraints`) rather than in the
+     witnesses — so `cert-verify` re-derives it from the consumer's `.nl` like
+     everything else, and the codegen routes on its presence rather than on the
+     verdict, which is unchanged.
+  2. **Attainment stops being sufficient.** On ℝⁿ, `p(x₀) = γ` makes `x₀` a
+     minimizer. On `K` it does not — a point outside `K` can beat every point
+     inside it — so the candidate carries feasibility as a second obligation
+     and the theorem states both halves. The asymmetry between them is the
+     reason to check both: snapping a float to a rational grid can *create*
+     feasibility (an inequality with slack absorbs the perturbation) but
+     essentially never preserves attainment (an equation does not).
+  3. **Equalities are refused, and not for want of effort.** An equality wants
+     a free multiplier, not an SOS one; splitting it into `h ≥ 0`, `−h ≥ 0`
+     gives a feasible set with empty interior, where Putinar's theorem no
+     longer guarantees a certificate exists at *any* relaxation degree. A
+     ladder search there can only fail slowly. The honest move is to refuse
+     with that reason, and to add free multipliers as their own piece of work.
+
+  A latent producer bug surfaced doing this: `sos_constrained_lower_bound_gram`
+  returned its Gram blocks in *equilibrated* coordinates. Equilibration applies
+  a domain map `x = shift + scale·u` on boxed variables plus a per-polynomial
+  coefficient scale, and only the objective's scale was being undone. The fix
+  is a congruence: with `T` the transition matrix of `u^{basisᵢ}` expanded over
+  the same basis (square, because a full monomial basis of degree ≤ d is closed
+  under the substitution), `G_x = Tᵀ G_u T`, which preserves PSD-ness; each
+  localizing block is additionally divided by its constraint's scale. Worth
+  noting *why* it was latent: nothing consumed the blocks until now. It would
+  have made the exact rounding fail on precisely the boxed problems this phase
+  exists to certify — a silent "cannot certify", not a wrong certificate, but a
+  bug that would have looked like a limitation of the method.
+* **Phase 3 — done, via a different route than planned.** Local optimality
+  ships as `--local` / `local-min` / `local-lower-bound`: the Putinar
+  certificate with the neighborhood `r² − ‖x − c‖² ≥ 0` adjoined as one more
+  multiplier. See the note under Tier 2 for why this replaced the KKT +
+  reduced-Hessian-`LDLᵀ` plan — in one line, that plan needed an SOSC theorem
+  Mathlib does not have, and this one needs no new theory at all.
+
+  The emitter stores the ball structurally in `problem.neighborhood`
+  (`center`, `radius_sq`) rather than as a `poly_constraints` entry: it would
+  otherwise appear twice in two spellings nothing forces to agree, and
+  `poly_constraints` would stop meaning *the problem's* feasible set. The
+  radius is squared because ℚ has no square roots; a non-positive `radius_sq`
+  is refused by both emitter and codegen, since the claim would be vacuous.
+  `cert-verify` carries the neighborhood across unchanged rather than
+  re-deriving it — no `.nl` determines it.
+
+  The candidate gained a third exact obligation, `‖x₀ − c‖² ≤ r²`, which does
+  *not* follow from attainment: `x⁴ − 2x² + 2` attains its minimum at both
+  `±1`. That is the `certify_sos_local_forged_outside_ball` negative fixture.
+
+  Strictness followed as `--growth` / `local-min-strict`, on the same ball and
+  with the same machinery: certify the identity for `p − γ − μ‖x − x₀‖²`. The
+  modulus rides beside `bound` as `growth_modulus`, not inside `problem` — it
+  is a witness, and the problem is unchanged, which is what keeps `cert-verify`
+  comparing the same thing it did before. The growth is centred at the
+  candidate, not at the ball's centre; those are different points, and centring
+  at `c` would contradict `p(x₀) = γ`. Negative fixture:
+  `certify_sos_local_strict_forged_mu` (μ inflated, every witness genuine, so
+  only `ring` can catch it).
+
+  Still open here: transcendentals (where `dReal` may complement Mathlib's thin
+  interval arithmetic).
+
+## Recommended first slice
+
+**Convex QP, `global-min`.** It exercises the full pipeline — lossless rational
+`x*`, exact constraint evaluation, KKT, PSD Hessian ⟹ global — on the easiest
+math, with no SOS and no equality-residual argument, and produces a genuinely
+*global* certificate immediately.
+
+## Resolved: emitter output form (was open question #2)
+
+**Decision: POUNCE emits a neutral `cert.json`; `pounce-lean` owns the
+`cert → .lean` codegen.** POUNCE never emits Lean source.
+
+Rationale:
+
+* **Keeps `.nl`→math translation in Rust**, where `pounce-nl`'s reader already
+  lives — no second `.nl` parser, no duplicated TCB.
+* **Keeps the Lean repo free of POUNCE-format knowledge** — it codes against a
+  small, versioned, language-neutral schema, not against AMPL internals.
+* **Makes the witness/statement split explicit**, which is what the whole trust
+  argument rests on: the cert carries *data* (problem + untrusted witnesses);
+  the Lean side derives the *statement* and the *proof*. Emitting `.lean`
+  directly would blur that line and drag Lean syntax into POUNCE's release
+  surface.
+* **Decouples release cadence** — a Mathlib/Lean syntax change is a `pounce-lean`
+  concern only; the cert schema (and POUNCE) are unaffected.
+
+Schema: [`dev-notes/lean-cert-schema-v1.md`](lean-cert-schema-v1.md).
+Worked example: [`dev-notes/lean-cert-example/`](lean-cert-example/).
+
+## Open questions
+
+1. ~~**Equality constraints in tier 1:** ship declared-tolerance ε now, or invest
+   in interval-Newton existence?~~ **Answered for the linear case, and the
+   dichotomy was false.** Projecting onto the affine hull satisfies the
+   equalities exactly *and* yields the existence witness in closed form, so
+   `--feasible` ships both halves without interval-Newton. The question stands
+   as posed only for *nonlinear* equalities, where no such projection exists.
+2. **Consumer ergonomics:** is requiring `lake build` acceptable, or do we also
+   ship a prebuilt/attested verdict for consumers who will not run Lean? (The
+   latter reintroduces a trust-the-attester problem the proof was meant to
+   remove.)
+3. **Naming:** `pounce-lean` vs `pounce-cert` for the verification repo.

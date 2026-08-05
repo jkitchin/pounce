@@ -475,8 +475,8 @@ pub(crate) fn analyze_quadratic_full(e: &Expr, _n: usize) -> Option<QuadForm> {
 /// multiset (the monomial) to its coefficient. `[]` is the constant
 /// term, `[i]` is `xᵢ`, `[i, i]` is `xᵢ²`, `[i, j]` is `xᵢxⱼ`.
 #[derive(Debug, Clone, Default)]
-struct Poly {
-    terms: BTreeMap<Vec<usize>, f64>,
+pub(crate) struct Poly {
+    pub(crate) terms: BTreeMap<Vec<usize>, f64>,
 }
 
 impl Poly {
@@ -531,14 +531,18 @@ impl Poly {
         self
     }
 
-    /// Multiply two polynomials, bailing (`None`) if any product
-    /// monomial would exceed total degree 2 — past that the classifier
-    /// gives up and the caller routes to NLP.
-    fn mul(&self, other: &Poly) -> Option<Poly> {
+    /// Multiply two polynomials, bailing (`None`) if any product monomial
+    /// would exceed total degree `max_deg`.
+    ///
+    /// The cap is not decoration: an unbounded walker expands `(x+y+z)^50`
+    /// into millions of monomials before anything downstream can refuse it.
+    /// The QP classifier passes 2 (past that it routes to NLP); the SOS
+    /// certifier passes [`MAX_POLY_DEGREE`].
+    fn mul(&self, other: &Poly, max_deg: usize) -> Option<Poly> {
         let mut out = Poly::default();
         for (ma, ca) in &self.terms {
             for (mb, cb) in &other.terms {
-                if ma.len() + mb.len() > 2 {
+                if ma.len() + mb.len() > max_deg {
                     return None;
                 }
                 let mut m = ma.clone();
@@ -556,10 +560,30 @@ impl Poly {
     }
 }
 
+/// Degree ceiling for the SOS certifier's polynomial recognition. Well past
+/// anything an SOS relaxation can practically handle, so the refusal a caller
+/// actually hits comes from the SDP or from `round_gram`, with a reason — not
+/// from this walker running out of memory first.
+pub(crate) const MAX_POLY_DEGREE: usize = 16;
+
 /// Lower an `Expr` to a [`Poly`] of total degree ≤ 2, or `None` if it
 /// contains anything outside that class. `Cse` nodes are inlined (they
 /// are mathematically equivalent to their body).
 fn to_poly(e: &Expr) -> Option<Poly> {
+    to_poly_bounded(e, 2)
+}
+
+/// Lower an `Expr` to a [`Poly`] of total degree ≤ `max_deg`, or `None` if it
+/// contains anything outside that class.
+///
+/// The degree bound is a parameter rather than a constant because the two
+/// consumers disagree about what "polynomial enough" means: the LP/QP
+/// classifier wants degree ≤ 2 (anything higher is not a QP and routes to the
+/// NLP solver), while the SOS certifier wants a general polynomial. They
+/// otherwise agree exactly — same `Cse` inlining, same divide-by-constant rule,
+/// same refusal on transcendentals — so they share one walker.
+pub(crate) fn to_poly_bounded(e: &Expr, max_deg: usize) -> Option<Poly> {
+    let to_poly = |e: &Expr| to_poly_bounded(e, max_deg);
     match e {
         Expr::Const(c) => Some(Poly::constant(*c)),
         Expr::Var(i) => Some(Poly::var(*i)),
@@ -593,7 +617,7 @@ fn to_poly(e: &Expr) -> Option<Poly> {
             match op {
                 BinOp::Add => Some(pa.add(&pb)),
                 BinOp::Sub => Some(pa.add(&pb.neg())),
-                BinOp::Mul => pa.mul(&pb),
+                BinOp::Mul => pa.mul(&pb, max_deg),
                 BinOp::Div => {
                     // Division is polynomial only by a nonzero constant.
                     let d = pb.as_constant()?;
@@ -604,18 +628,20 @@ fn to_poly(e: &Expr) -> Option<Poly> {
                     }
                 }
                 BinOp::Pow => {
-                    // Polynomial only for constant integer exponents in
-                    // {0, 1, 2}.
+                    // Polynomial only for a constant nonnegative integer
+                    // exponent. `x^2.5` and `x^-1` are not, and neither is
+                    // `x^y`; each fails `as_constant` or the integrality test
+                    // rather than being approximated.
                     let exp = pb.as_constant()?;
-                    if exp == 0.0 {
-                        Some(Poly::constant(1.0))
-                    } else if exp == 1.0 {
-                        Some(pa)
-                    } else if exp == 2.0 {
-                        pa.mul(&pa)
-                    } else {
-                        None
+                    if exp < 0.0 || exp.fract() != 0.0 || exp > max_deg as f64 {
+                        return None;
                     }
+                    let k = exp as usize;
+                    let mut acc = Poly::constant(1.0);
+                    for _ in 0..k {
+                        acc = acc.mul(&pa, max_deg)?;
+                    }
+                    Some(acc)
                 }
                 // atan2 and any other binary opcodes are non-polynomial.
                 _ => None,

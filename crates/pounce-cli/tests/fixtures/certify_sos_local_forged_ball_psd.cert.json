@@ -1,0 +1,270 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "local-min",
+  "problem_class": "sos-poly",
+  "tolerance": {
+    "num": "0",
+    "den": "1"
+  },
+  "bound": {
+    "num": "-5",
+    "den": "1"
+  },
+  "binding": {
+    "nl_sha256": "605303b0378b1c04bb3c6c147de48a94d520683ca626cdea3cb0a93e2d9f7f48",
+    "sol_sha256": "61dc49849efb63d47f394706e1a3002ab69d53c2b9768cf4d065b6d5b6e752d9",
+    "solver": "pounce 0.9.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 1,
+    "polynomial": {
+      "terms": [
+        {
+          "exponents": [
+            2
+          ],
+          "coeff": {
+            "num": "-12",
+            "den": "1"
+          }
+        },
+        {
+          "exponents": [
+            3
+          ],
+          "coeff": {
+            "num": "4",
+            "den": "1"
+          }
+        },
+        {
+          "exponents": [
+            4
+          ],
+          "coeff": {
+            "num": "3",
+            "den": "1"
+          }
+        }
+      ]
+    },
+    "neighborhood": {
+      "center": [
+        {
+          "num": "1",
+          "den": "1"
+        }
+      ],
+      "radius_sq": {
+        "num": "1",
+        "den": "1"
+      }
+    }
+  },
+  "candidate": {
+    "x": [
+      {
+        "num": "1",
+        "den": "1"
+      }
+    ],
+    "objective": {
+      "num": "-5",
+      "den": "1"
+    }
+  },
+  "witnesses": {
+    "sos": [
+      {
+        "monomials": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        "gram": {
+          "rows": 3,
+          "cols": 3,
+          "symmetric": true,
+          "entries": [
+            {
+              "i": 0,
+              "j": 0,
+              "val": {
+                "num": "5",
+                "den": "1"
+              }
+            },
+            {
+              "i": 1,
+              "j": 0,
+              "val": {
+                "num": "-3",
+                "den": "2"
+              }
+            },
+            {
+              "i": 1,
+              "j": 1,
+              "val": {
+                "num": "5",
+                "den": "2"
+              }
+            },
+            {
+              "i": 2,
+              "j": 0,
+              "val": {
+                "num": "-7",
+                "den": "2"
+              }
+            },
+            {
+              "i": 2,
+              "j": 1,
+              "val": {
+                "num": "-1",
+                "den": "1"
+              }
+            },
+            {
+              "i": 2,
+              "j": 2,
+              "val": {
+                "num": "9",
+                "den": "2"
+              }
+            }
+          ]
+        },
+        "L": {
+          "rows": 3,
+          "cols": 3,
+          "unit_lower": true,
+          "entries": [
+            {
+              "i": 1,
+              "j": 0,
+              "val": {
+                "num": "-3",
+                "den": "10"
+              }
+            },
+            {
+              "i": 2,
+              "j": 0,
+              "val": {
+                "num": "-7",
+                "den": "10"
+              }
+            },
+            {
+              "i": 2,
+              "j": 1,
+              "val": {
+                "num": "-1",
+                "den": "1"
+              }
+            }
+          ]
+        },
+        "D": [
+          {
+            "num": "5",
+            "den": "1"
+          },
+          {
+            "num": "41",
+            "den": "20"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ]
+      },
+      {
+        "monomials": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        "gram": {
+          "rows": 3,
+          "cols": 3,
+          "symmetric": true,
+          "entries": [
+            {
+              "i": 0,
+              "j": 0,
+              "val": {
+                "num": "3",
+                "den": "2"
+              }
+            },
+            {
+              "i": 1,
+              "j": 0,
+              "val": {
+                "num": "-3",
+                "den": "2"
+              }
+            },
+            {
+              "i": 1,
+              "j": 1,
+              "val": {
+                "num": "-3",
+                "den": "2"
+              }
+            },
+            {
+              "i": 2,
+              "j": 0,
+              "val": {
+                "num": "3",
+                "den": "2"
+              }
+            }
+          ]
+        },
+        "L": {
+          "rows": 3,
+          "cols": 3,
+          "unit_lower": true,
+          "entries": []
+        },
+        "D": [
+          {
+            "num": "3",
+            "den": "2"
+          },
+          {
+            "num": "-3",
+            "den": "2"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ],
+        "multiplier": 0
+      }
+    ]
+  }
+}

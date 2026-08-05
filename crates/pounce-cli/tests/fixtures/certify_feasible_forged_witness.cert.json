@@ -1,0 +1,212 @@
+{
+  "schema": "pounce.lean-cert/v1",
+  "verdict": "feasible",
+  "problem_class": "qp-convex",
+  "tolerance": {
+    "num": "1",
+    "den": "25000000"
+  },
+  "binding": {
+    "nl_sha256": "1c2c9a75dcb7be12561930a9cd92d8fe15895d74e63a478bea2b0c86c367e26d",
+    "sol_sha256": "e7c72ba56e5dac6e5b4473f8bd99ce1d93e7d872dd765c6f03e0b736eb97b5b0",
+    "solver": "pounce 0.9.0"
+  },
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.31.0",
+    "mathlib": "fabf563a7c95a166b8d7b6efca11c8b4dc9d911f"
+  },
+  "problem": {
+    "n_vars": 2,
+    "objective": {
+      "kind": "quadratic",
+      "half_quadratic": true,
+      "Q": {
+        "rows": 2,
+        "cols": 2,
+        "symmetric": true,
+        "entries": [
+          {
+            "i": 0,
+            "j": 0,
+            "val": {
+              "num": "-3602879701896397",
+              "den": "36028797018963968"
+            }
+          },
+          {
+            "i": 1,
+            "j": 1,
+            "val": {
+              "num": "-3602879701896397",
+              "den": "36028797018963968"
+            }
+          }
+        ]
+      },
+      "c": [
+        {
+          "num": "1",
+          "den": "1"
+        },
+        {
+          "num": "1",
+          "den": "1"
+        }
+      ],
+      "constant": {
+        "num": "0",
+        "den": "1"
+      }
+    },
+    "var_bounds": {
+      "lower": [
+        "-inf",
+        "-inf"
+      ],
+      "upper": [
+        "+inf",
+        "+inf"
+      ]
+    },
+    "constraints": [
+      {
+        "name": "c0",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "2",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "4",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "c1",
+        "coeffs": [
+          {
+            "num": "2",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "4",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "var0_lb",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "0",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "var0_ub",
+        "coeffs": [
+          {
+            "num": "1",
+            "den": "1"
+          },
+          {
+            "num": "0",
+            "den": "1"
+          }
+        ],
+        "lower": "-inf",
+        "upper": {
+          "num": "3",
+          "den": "1"
+        }
+      },
+      {
+        "name": "var1_lb",
+        "coeffs": [
+          {
+            "num": "0",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": {
+          "num": "0",
+          "den": "1"
+        },
+        "upper": "+inf"
+      },
+      {
+        "name": "var1_ub",
+        "coeffs": [
+          {
+            "num": "0",
+            "den": "1"
+          },
+          {
+            "num": "1",
+            "den": "1"
+          }
+        ],
+        "lower": "-inf",
+        "upper": {
+          "num": "3",
+          "den": "1"
+        }
+      }
+    ]
+  },
+  "candidate": {
+    "x": [
+      {
+        "num": "6004799456128869",
+        "den": "4503599627370496"
+      },
+      {
+        "num": "6004799456128871",
+        "den": "4503599627370496"
+      }
+    ],
+    "objective": {
+      "num": "1818757579895237681275258695046708774861645485023",
+      "den": "730750818665451459101842416358141509827966271488"
+    }
+  },
+  "witnesses": {
+    "feasible_witness": {
+      "xhat": [
+        {
+          "num": "6004799456128869",
+          "den": "4503599627370496"
+        },
+        {
+          "num": "6004799456128871",
+          "den": "4503599627370496"
+        }
+      ]
+    }
+  }
+}

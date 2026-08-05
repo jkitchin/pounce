@@ -25,7 +25,7 @@
 //! solved through [`crate::solve_socp_ipm`].
 
 use crate::ConeSpec;
-use crate::cones::psd::svec_index;
+use crate::cones::psd::{smat, svec_index};
 use crate::ipm::{QpOptions, solve_socp_ipm};
 use crate::qp::{QpProblem, QpStatus, Triplet};
 use pounce_linalg::symmetric_eigen;
@@ -294,6 +294,7 @@ impl PolyProblem {
         let sub = |p: &Polynomial| p.affine_substitute(&shift, &scale);
         let objective = sub(&self.objective);
         let s_obj = nonzero_norm(&objective);
+        let mut ineq_scales = Vec::with_capacity(self.inequalities.len());
         let scaled = PolyProblem {
             n_vars: self.n_vars,
             objective: objective.scaled(s_obj),
@@ -302,7 +303,9 @@ impl PolyProblem {
                 .iter()
                 .map(|g| {
                     let g = sub(g);
-                    g.scaled(nonzero_norm(&g))
+                    let s = nonzero_norm(&g);
+                    ineq_scales.push(s);
+                    g.scaled(s)
                 })
                 .collect(),
             equalities: self
@@ -318,6 +321,7 @@ impl PolyProblem {
             scaled,
             Rescaling {
                 s_obj,
+                ineq_scales,
                 shift,
                 scale,
                 boxed,
@@ -384,6 +388,9 @@ struct Rescaling {
     /// The objective's coefficient scale: a bound computed on the equilibrated
     /// problem is multiplied by this to recover the original one.
     s_obj: f64,
+    /// Each inequality's coefficient scale, in `inequalities` order: the SDP saw
+    /// `gᵢ/sᵢ`, so its localizing multiplier is `sᵢ` times too large.
+    ineq_scales: Vec<f64>,
     /// Per-variable `xⱼ = shiftⱼ + scaleⱼ·uⱼ` (identity `(0, 1)` when unboxed).
     shift: Vec<f64>,
     scale: Vec<f64>,
@@ -400,6 +407,86 @@ impl Rescaling {
         u.iter()
             .enumerate()
             .map(|(j, v)| self.shift[j] + self.scale[j] * v)
+            .collect()
+    }
+
+    /// Rewrite recovered Gram blocks so they witness the identity for the
+    /// **caller's** problem rather than the equilibrated one.
+    ///
+    /// Two corrections, and both are needed for the blocks to mean anything
+    /// outside this module. In `u` coordinates the SDP proved
+    ///
+    /// ```text
+    ///     (p∘sub)(u) − γ = σ̂₀(u) + Σₖ (σ̂ₖ(u)/sₖ) · (gₖ∘sub)(u)
+    /// ```
+    ///
+    /// (the `s_obj` factor is already undone by [`recover_gram`]). So block
+    /// `k ≥ 1` is `sₖ` times too large — a positive scalar, harmless to PSD-ness
+    /// — and every block is written in the wrong variables.
+    ///
+    /// The change of variables is a congruence. With `T` the transition matrix
+    /// of `u^{basisᵢ} = Πⱼ ((xⱼ − shiftⱼ)/scaleⱼ)^{eᵢⱼ}` expanded over the same
+    /// basis, `m_u(u(x)) = T m_x(x)`, hence `G_x = Tᵀ G_u T`. Congruence
+    /// preserves PSD-ness, so an unmapped block is still a valid witness — of
+    /// the identity the caller actually asked about.
+    ///
+    /// A full monomial basis of degree `≤ d` is closed under this substitution
+    /// (the expansion cannot raise degree), which is why `T` is square and no
+    /// coefficient is dropped.
+    fn unmap_blocks(&self, blocks: Vec<GramBlock>) -> Vec<GramBlock> {
+        let identity_domain =
+            self.shift.iter().all(|&s| s == 0.0) && self.scale.iter().all(|&s| s == 1.0);
+        if identity_domain && self.ineq_scales.iter().all(|&s| s == 1.0) {
+            return blocks;
+        }
+        // The inverse map uⱼ = (xⱼ − shiftⱼ)/scaleⱼ, in `affine_substitute`'s
+        // `shift + scale · ·` form.
+        let inv_shift: Vec<f64> = self
+            .shift
+            .iter()
+            .zip(&self.scale)
+            .map(|(s, c)| -s / c)
+            .collect();
+        let inv_scale: Vec<f64> = self.scale.iter().map(|c| 1.0 / c).collect();
+
+        blocks
+            .into_iter()
+            .enumerate()
+            .map(|(k, blk)| {
+                let s = if k == 0 { 1.0 } else { self.ineq_scales[k - 1] };
+                let bn = blk.basis.len();
+                let index: BTreeMap<&Vec<usize>, usize> =
+                    blk.basis.iter().enumerate().map(|(i, e)| (e, i)).collect();
+                // T, row i = the expansion of the i-th basis monomial in x.
+                let mut t = vec![vec![0.0; bn]; bn];
+                for (i, e) in blk.basis.iter().enumerate() {
+                    let mono = Polynomial::new(self.shift.len(), vec![(e.clone(), 1.0)]);
+                    for (alpha, c) in mono.affine_substitute(&inv_shift, &inv_scale).terms {
+                        if let Some(&j) = index.get(&alpha) {
+                            t[i][j] += c;
+                        }
+                    }
+                }
+                // Tᵀ (G/s) T.
+                let gt: Vec<Vec<f64>> = (0..bn)
+                    .map(|i| {
+                        (0..bn)
+                            .map(|j| (0..bn).map(|l| blk.matrix[i][l] / s * t[l][j]).sum())
+                            .collect()
+                    })
+                    .collect();
+                let matrix = (0..bn)
+                    .map(|i| {
+                        (0..bn)
+                            .map(|j| (0..bn).map(|l| t[l][i] * gt[l][j]).sum())
+                            .collect()
+                    })
+                    .collect();
+                GramBlock {
+                    basis: blk.basis,
+                    matrix,
+                }
+            })
             .collect()
     }
 }
@@ -504,6 +591,10 @@ struct MomentInfo {
     /// σ₀ first, then one localizing block per inequality. Used to read the
     /// Gram matrices back out of the primal for [`certified_slack`].
     psd_blocks: Vec<(usize, usize)>,
+    /// Monomial basis of each PSD (SOS) block, in the order the blocks occupy
+    /// columns of `x`. Needed to interpret a recovered Gram matrix: entry
+    /// `(i, j)` is the coefficient of `basis[i] * basis[j]`.
+    psd_bases: Vec<Vec<Vec<usize>>>,
 }
 
 /// A rigorous bound on how far the computed SOS certificate misses the exact
@@ -642,6 +733,7 @@ fn build_sos_sdp(
 
     // PSD (SOS) blocks: σ₀ (weight 1, basis degree d), then one localizing
     // multiplier per inequality (weight gᵢ, basis degree d − ⌈deg gᵢ/2⌉).
+    let mut psd_bases: Vec<Vec<Vec<usize>>> = Vec::new();
     let psd_specs = std::iter::once((d, &unit[..])).chain(
         prob.inequalities
             .iter()
@@ -650,6 +742,7 @@ fn build_sos_sdp(
     for (deg, weight) in psd_specs {
         let basis = monomials(n, deg);
         let bn = basis.len();
+        psd_bases.push(basis.clone());
         let col_base = col;
         for i in 0..bn {
             for j in 0..=i {
@@ -743,7 +836,103 @@ fn build_sos_sdp(
             basis0,
             row_of,
             psd_blocks,
+            psd_bases,
         },
+    )
+}
+
+/// One SOS block of a Putinar certificate: a PSD Gram matrix together with the
+/// monomial basis it is expressed in.
+///
+/// The represented polynomial is `m(x)ᵀ G m(x)`, where `m` lists the monomials
+/// in [`basis`](Self::basis) — so `matrix[i][j]` is the coefficient attached to
+/// `basis[i] * basis[j]`. Block 0 is `σ₀`; any further blocks are the
+/// localizing multipliers `σᵢ`, in constraint order.
+#[derive(Clone, Debug)]
+pub struct GramBlock {
+    /// Exponent vectors of the block's monomial basis.
+    pub basis: Vec<Vec<usize>>,
+    /// Dense symmetric Gram matrix, row-major.
+    pub matrix: Vec<Vec<f64>>,
+}
+
+/// Recover the Gram blocks from a solved SOS relaxation.
+///
+/// The SDP is built with the primal column layout
+/// `x = (γ, svec(Q₀), svec(Q₁), …, free λ coefficients)`, so the Gram matrices
+/// are *primal* variables the solver already computes — no dual recovery is
+/// involved. Each block occupies `bn(bn+1)/2` consecutive columns in `svec`
+/// order; [`smat`] inverts that, undoing the `√2` off-diagonal scaling.
+/// `scale` is the objective equilibration factor `s_obj`. The SDP is solved on
+/// the equilibrated problem `p' = p / s_obj`, so its Gram blocks witness
+/// `p' − γ'`; multiplying by `s_obj` gives blocks witnessing `p − γ` for the
+/// polynomial the caller actually asked about. Omitting this is silent and
+/// wrong — the matrix still looks like a Gram matrix, it just certifies a
+/// rescaled polynomial.
+fn recover_gram(x: &[f64], cones: &[ConeSpec], mi: &MomentInfo, scale: f64) -> Vec<GramBlock> {
+    let mut out = Vec::new();
+    let mut col = 1usize; // column 0 is γ
+    for (k, cone) in cones.iter().enumerate() {
+        let ConeSpec::Psd(bn) = *cone else { continue };
+        let sd = bn * (bn + 1) / 2;
+        if col + sd > x.len() {
+            break;
+        }
+        let mut flat = vec![0.0; bn * bn];
+        smat(&x[col..col + sd], bn, &mut flat);
+        let matrix = (0..bn)
+            .map(|i| {
+                flat[i * bn..(i + 1) * bn]
+                    .iter()
+                    .map(|v| v * scale)
+                    .collect()
+            })
+            .collect();
+        out.push(GramBlock {
+            basis: mi.psd_bases.get(k).cloned().unwrap_or_default(),
+            matrix,
+        });
+        col += sd;
+    }
+    out
+}
+
+/// [`sos_constrained_lower_bound_opts`], additionally returning the SOS Gram
+/// blocks that witness the bound.
+///
+/// The bound alone is a number a caller must trust. The Gram blocks are the
+/// *evidence*: with them, `p − γ = σ₀ + Σ σᵢ gᵢ` can be checked independently,
+/// which is what an exact certificate needs. They are floating point here;
+/// converting them to an exact rational identity is a separate step.
+///
+/// Block `0` is `σ₀`; block `i + 1` is the localizing multiplier of
+/// `inequalities[i]`. Equalities contribute free multipliers, not PSD blocks, so
+/// they add nothing here — a certificate covering them needs a different form.
+///
+/// The blocks are expressed in the **caller's** variables and multiply the
+/// caller's `gᵢ`, not the internally equilibrated ones (see
+/// [`Rescaling::unmap_blocks`]). Without that they would only satisfy the
+/// identity for a problem the caller never posed, which is precisely the thing
+/// the doc above promises they do not.
+pub fn sos_constrained_lower_bound_gram<F>(
+    prob: &PolyProblem,
+    order: Option<usize>,
+    opts: &QpOptions,
+    make_backend: F,
+) -> (SosBound, Vec<GramBlock>)
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let (scaled, resc) = prob.equilibrated();
+    let (qp, cones, moments) = build_sos_sdp(&scaled, order, None);
+    let sol = solve_socp_ipm(&qp, &cones, opts, make_backend);
+    let gram = resc.unmap_blocks(recover_gram(&sol.x, &cones, &moments, resc.s_obj));
+    (
+        SosBound {
+            lower_bound: sol.x.first().copied().unwrap_or(f64::NEG_INFINITY) * resc.s_obj,
+            status: sol.status,
+        },
+        gram,
     )
 }
 
@@ -2340,6 +2529,137 @@ mod tests {
                     "order {order}: minimizers must be empty when not exact",
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod gram_tests {
+    use super::*;
+    use pounce_feral::FeralSolverInterface;
+
+    fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::new())
+    }
+
+    /// `p(x) = x⁴ − 2x² + 2` has global minimum 1 at `x = ±1`. The SOS
+    /// relaxation should return γ ≈ 1 together with a Gram block whose
+    /// quadratic form reproduces `p − γ`.
+    ///
+    /// This is the check that matters: a Gram matrix that does not reproduce
+    /// the polynomial is not a witness of anything, and extracting one from the
+    /// wrong columns (or with the √2 scaling left on) would still *look* like a
+    /// matrix. Evaluating `m(x)ᵀ G m(x)` against `p(x) − γ` at sample points is
+    /// what distinguishes the two.
+    #[test]
+    fn recovered_gram_reproduces_the_polynomial() {
+        // x⁴ − 2x² + 2 in one variable.
+        let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 2.0)]);
+        let (bound, gram) = sos_constrained_lower_bound_gram(
+            &PolyProblem::new(p.clone()),
+            None,
+            &sos_opts(),
+            backend,
+        );
+        assert!(
+            (bound.lower_bound - 1.0).abs() < 1e-6,
+            "expected γ ≈ 1, got {}",
+            bound.lower_bound
+        );
+        assert_eq!(
+            gram.len(),
+            1,
+            "unconstrained SOS has exactly one block (σ₀)"
+        );
+
+        let g = &gram[0];
+        let bn = g.basis.len();
+        assert_eq!(g.matrix.len(), bn);
+
+        // m(x)ᵀ G m(x) must equal p(x) − γ at every sample point.
+        for &x in &[-2.0_f64, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0] {
+            let m: Vec<f64> = g.basis.iter().map(|e| x.powi(e[0] as i32)).collect();
+            let quad: f64 = (0..bn)
+                .map(|i| (0..bn).map(|j| m[i] * g.matrix[i][j] * m[j]).sum::<f64>())
+                .sum();
+            let target = x.powi(4) - 2.0 * x * x + 2.0 - bound.lower_bound;
+            assert!(
+                (quad - target).abs() < 1e-5,
+                "at x={x}: mᵀGm = {quad}, p−γ = {target}"
+            );
+        }
+    }
+
+    /// A Gram witness is only meaningful if it is PSD; check the recovered
+    /// block is (to numerical tolerance) via its diagonal and a few vectors.
+    #[test]
+    fn recovered_gram_is_positive_semidefinite() {
+        let p = Polynomial::new(1, vec![(vec![4], 1.0), (vec![2], -2.0), (vec![0], 2.0)]);
+        let (_b, gram) =
+            sos_constrained_lower_bound_gram(&PolyProblem::new(p), None, &sos_opts(), backend);
+        let g = &gram[0];
+        let bn = g.basis.len();
+        for i in 0..bn {
+            assert!(g.matrix[i][i] > -1e-8, "diagonal {i} is negative");
+            for j in 0..bn {
+                assert!(
+                    (g.matrix[i][j] - g.matrix[j][i]).abs() < 1e-9,
+                    "not symmetric at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    /// The **constrained** analogue, on a problem whose domain is normalized —
+    /// which is the case the recovered blocks used to get wrong.
+    ///
+    /// `min x³ − 3x s.t. x ∈ [0, 3]`. Both bounds are standalone, so `x` is
+    /// boxed and `equilibrated` substitutes `x = 1.5 + 1.5u`; the SDP's blocks
+    /// are then written in `u` and multiply the *rescaled* constraints. Checking
+    /// the Putinar identity in the caller's `x` catches either omission: a
+    /// missing change of variables shows as a gross mismatch, a missing
+    /// constraint scale as a proportional one.
+    #[test]
+    fn recovered_blocks_witness_the_identity_in_the_callers_variables() {
+        // min x³ − 3x over [0, 3]; minimum −2 at x = 1.
+        let p = Polynomial::new(1, vec![(vec![3], 1.0), (vec![1], -3.0)]);
+        let lo = Polynomial::new(1, vec![(vec![1], 1.0)]); // x ≥ 0
+        let hi = Polynomial::new(1, vec![(vec![0], 3.0), (vec![1], -1.0)]); // 3 − x ≥ 0
+        let prob = PolyProblem::new(p).ge(lo.clone()).ge(hi.clone());
+        let (bound, gram) = sos_constrained_lower_bound_gram(&prob, None, &sos_opts(), backend);
+        assert!(
+            (bound.lower_bound + 2.0).abs() < 1e-4,
+            "expected γ ≈ −2, got {}",
+            bound.lower_bound
+        );
+        assert_eq!(gram.len(), 3, "σ₀ plus one localizer per inequality");
+
+        let eval = |poly: &Polynomial, x: f64| -> f64 {
+            poly.terms
+                .iter()
+                .map(|(e, c)| c * x.powi(e[0] as i32))
+                .sum()
+        };
+        let form = |b: &GramBlock, x: f64| -> f64 {
+            let m: Vec<f64> = b.basis.iter().map(|e| x.powi(e[0] as i32)).collect();
+            (0..m.len())
+                .map(|i| {
+                    (0..m.len())
+                        .map(|j| m[i] * b.matrix[i][j] * m[j])
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        for &x in &[0.0_f64, 0.4, 1.0, 1.7, 2.5, 3.0] {
+            let rhs = form(&gram[0], x)
+                + form(&gram[1], x) * eval(&lo, x)
+                + form(&gram[2], x) * eval(&hi, x);
+            let lhs = x.powi(3) - 3.0 * x - bound.lower_bound;
+            assert!(
+                (rhs - lhs).abs() < 1e-4,
+                "at x={x}: σ₀ + Σ σᵢgᵢ = {rhs}, p − γ = {lhs}"
+            );
         }
     }
 }

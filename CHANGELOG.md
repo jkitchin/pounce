@@ -9,6 +9,270 @@ changes.
 
 ## [Unreleased]
 
+### Added — machine-checked optimality certificates (`pounce certify`)
+
+- `pounce certify <problem.nl> <claim.sol>` emits an exact-rational
+  `pounce.lean-cert/v1` certificate that an external Lean 4 development
+  (`pounce-lean`, not yet public) turns into a **kernel-checked proof**. This
+  is a different claim from `pounce verify`, which recomputes feasibility in
+  f64 and is candid that global optimality is not checkable that way. Here the
+  trust anchor is the Lean kernel: there is no key, no tolerance, and no
+  floating point in the trusted path. Documented in `docs/src/certify.md`, with
+  the field-by-field format in `docs/src/schema/lean-cert-v1.md`.
+- Four verdicts, selected automatically from the `.nl`: `global-min` (convex
+  QP — KKT point plus PSD Hessian), `infeasible` (Farkas witness), `unbounded`
+  (recession direction), and `global-lower-bound` (sum of
+  squares). Anything else exits 2 rather than emit an unsound certificate —
+  maximize objectives, non-polynomial objectives, and equality constraints on a
+  higher-degree problem are all refused. Three more are opt-in, because each
+  states something weaker than the automatic verdict would have: `feasible`
+  (`--feasible`), `local-min` / `local-lower-bound` (`--local`), and
+  `local-min-strict` (`--local --growth`).
+- `global-lower-bound` proves `γ ≤ p(x)` for **every** real `x` on a nonconvex
+  polynomial, which is the case where a local solve is worth least: it returns
+  one basin and can say nothing about the others, and no KKT argument repairs
+  that. POUNCE solves an SOS relaxation, then certifies the identity
+  `p(x) − γ = m(x)ᵀ G m(x)` with `G ⪰ 0` — Lean closes the identity with
+  `ring` and discharges positive-semidefiniteness from an exact `LDLᵀ`.
+- **A nonconvex polynomial whose bound is attained gets `global-min`**, not
+  merely a bound: if an exact rational `x₀` satisfies `p(x₀) = γ`, then `x₀`
+  minimizes `p` over all of ℝⁿ — a global claim about a problem where no KKT
+  argument applies. The emitter snaps the local solve's iterate to a short
+  ladder of rational grids and evaluates `p` exactly; equality is required, so
+  a near miss is not a minimizer. `x⁴ − 2x² + 2` certifies `global-min` at
+  `x = 1`, while `x⁴ − 3x² + 2` minimizes at `±√(3/2)` and correctly stops at
+  the bound `γ = −1/4` — a certificate over ℚ cannot exhibit an irrational
+  minimizer, and reporting the weaker true claim is the point.
+- **The polynomial slice now takes constraints**, via a Putinar
+  (Positivstellensatz) certificate. This is not a convenience: `x³ − 3x` has no
+  lower bound on ℝ at all, so for *no* γ is `p − γ` a sum of squares and the
+  unconstrained emitter has nothing to certify. On `0 ≤ x ≤ 3` it does — `p − γ`
+  need only be a sum of squares **modulo the constraints**:
+  `p − γ = σ₀ + Σₖ σₖ·gₖ`, one SOS multiplier per constraint, each with its own
+  exact `LDLᵀ`. POUNCE certifies `γ = −2` attained at `x = 1`. Finite variable
+  bounds fold into the feasible set as ordinary `xⱼ − lⱼ ≥ 0` rows, which is
+  exactly what makes a box give a bound where ℝⁿ gives none.
+  - The claim is correspondingly weaker and the certificate says so: the
+    feasible set travels in `problem.poly_constraints`, each localizing block
+    names the constraint it multiplies, and the generated theorem is guarded by
+    `∀ i, 0 ≤ g i x`. A consumer that ignored that field would read a bound on a
+    box as a bound on all of ℝⁿ, so the codegen routes on the field's presence
+    rather than on the verdict — which is the same either way.
+  - **Attainment now requires feasibility.** A point outside the feasible set
+    can beat every point inside it: `x = −2` is the other root of `p − γ` and
+    attains `−2` exactly. So `global-min` here proves `gₖ(x₀) ≥ 0` for every `k`
+    *and* `p(x₀) = γ`, and states both. The asymmetry is worth knowing —
+    snapping a float minimizer to a rational grid can *create* feasibility it
+    did not have, but essentially never preserves attainment.
+  - Equality constraints are refused, with a reason rather than a TODO: an
+    equality needs a sign-unrestricted multiplier, not an SOS one, and splitting
+    `h = 0` into two inequalities leaves the feasible set with empty interior,
+    where Putinar's theorem stops guaranteeing a certificate exists at any
+    degree.
+  - Two new forged fixtures cover the two obligations the unconstrained shape
+    does not have: a *localizing* block that goes indefinite while the identity
+    still closes exactly (mass moved into σ₀), and a candidate that attains γ
+    from outside the feasible set. Both must fail `lake build`, and do.
+- **`pounce certify --local` certifies a local minimum — with no second-order
+  theory at all.** At a local minimum that is not global, every verdict above is
+  *false*, so no certificate for one exists at any relaxation order:
+  `3x⁴ + 4x³ − 12x²` has a minimum at `x = 1` worth `−5` and another at `x = −2`
+  worth `−32`. What is true is that nothing nearby beats it, and a neighborhood
+  turns out to be a polynomial inequality like any other — `r² − ‖x − c‖² ≥ 0`.
+  Adjoining it to the Putinar multiplier family gives
+  `p − γ = σ₀ + Σₖ σₖ·gₖ + σ_B·(r² − ‖x − c‖²)` and a theorem guarded by
+  membership in the ball, which *is* local minimality: verdicts `local-min` and
+  `local-lower-bound`.
+  - This replaced the planned KKT + reduced-Hessian-`LDLᵀ` route, which needed a
+    second-order-sufficiency theorem Mathlib does not have. The trusted lemmas
+    here are four-line sign arguments — no constraint qualification, no Taylor
+    remainder, no implicit function theorem. It is also *numerically* easier: a
+    ball is a strong localizer, so a low-order relaxation often closes where the
+    global problem's gap will not.
+  - The ball is stored structurally in `problem.neighborhood` (`center`,
+    `radius_sq`) rather than as a `poly_constraints` entry, which would put it
+    in the certificate twice in two spellings nothing forces to agree.
+    `radius_sq` because ℚ has no square roots; `--radius <r>` takes an ordinary
+    radius and squares it. A non-positive `radius_sq` is refused by emitter and
+    codegen alike — the claim would be vacuous. `cert-verify` carries the
+    neighborhood across unchanged rather than re-deriving it, since no `.nl`
+    determines it.
+  - **The candidate must be inside the ball**, and that does not follow from
+    attainment — `x⁴ − 2x² + 2` attains its minimum at both `±1`. So `local-min`
+    proves `‖x₀ − c‖² ≤ r²` as a third exact obligation next to feasibility and
+    `p(x₀) = γ`. Two forged fixtures cover the new obligations: a candidate that
+    attains γ two units outside a unit ball, and a `σ_B` rewritten over a longer
+    monomial basis so it still evaluates correctly while its Gram goes
+    indefinite. Both must fail `lake build`, and do.
+  - Refused on the convex-QP path, where the KKT certificate already proves a
+    *global* minimum, and refused alongside `--feasible`, which asks for a
+    different claim. What it does **not** prove is *strictness*: nothing rules
+    out a tie elsewhere in the ball. That is what `--growth` adds.
+- **`pounce certify --local --growth` closes strictness — and hands back an
+  exact modulus, which a second-order sufficient condition would not.** The
+  textbook route to a strict local minimum is SOSC, and SOSC is irreducibly
+  real-analytic: a neighborhood that shrinks, a Taylor remainder with Peano
+  form, and in the constrained case a critical cone, a constraint qualification
+  and an implicit function theorem. The trusted layer here is ℚ, which has no
+  limits to take, so that route's real prerequisite was porting the whole layer
+  to ℝ. `--growth` skips it entirely: certify the same Putinar identity for the
+  objective shifted by a polynomial,
+  `p − γ − μ‖x − x₀‖² = σ₀ + Σₖ σₖ·gₖ + σ_B·(r² − ‖x − c‖²)`, for a rational
+  `μ > 0`. It reads back as `p(x) ≥ p(x₀) + μ‖x − x₀‖²` on the ball, and
+  strictness is then one ℚ lemma — `‖x − x₀‖² = 0 ↔ x = x₀`. Verdict:
+  `local-min-strict`. Same solver, same rounding, same two Lean obligations; no
+  new theory.
+  - **The conclusion is stronger than SOSC's.** SOSC concludes "strict local
+    minimum"; this concludes that *and* exhibits the modulus, exactly, as a
+    rational a consumer can compute with.
+  - `μ` comes off a fixed ladder (`8, 4, 2, 1, 1/2, …`), largest first, and the
+    first rung whose relaxation closes is shipped — so it is a certified floor
+    on the true growth, not a supremum. A larger `μ` may be true and simply not
+    certifiable at that relaxation order.
+  - The modulus rides beside `bound` as `growth_modulus`, **not** inside
+    `problem`: it is a witness, and the problem is the same one a `local-min`
+    certificate describes, which is what keeps `cert-verify`'s re-derivation
+    comparing exactly what it compared before. Growth is centred at the
+    candidate `x₀`, not at the ball's centre `c` — they are different points,
+    and centring at `c` would contradict `p(x₀) = γ`.
+  - The σ₀ hint for the shifted solve is corrected *exactly* rather than
+    re-solved: `‖x − x₀‖²` is itself a Gram form in the same basis, so the hint
+    is the original minus `μ` times that form. Without this the rational
+    rounding lands off the PSD cone and every rung of the ladder fails.
+  - `--growth` requires `--local`; the unrestricted strict claim would be a
+    different theorem with a different name. New forged fixture
+    `certify_sos_local_strict_forged_mu` inflates `μ` while leaving every
+    witness genuine, so every PSD check, the attainment and the in-ball
+    obligation all still pass and only `ring` in the identity can reject it —
+    and does.
+- **Fixed: `sos_constrained_lower_bound_gram` returned Gram blocks in
+  equilibrated coordinates.** The SDP is solved after a domain map
+  `x = shift + scale·u` and a per-polynomial coefficient rescale, and only the
+  objective's scale was undone — so the blocks did not satisfy
+  `p − γ = σ₀ + Σ σᵢgᵢ` in the caller's variables, contrary to the function's
+  own documentation. The change of variables is a congruence `G_x = Tᵀ G_u T`
+  (a full monomial basis is closed under the substitution, so `T` is square),
+  which preserves PSD-ness; blocks are now mapped back through it and each
+  localizing block divided by its constraint's scale. Latent until now because
+  nothing consumed the blocks; it would have made every boxed problem's exact
+  rounding fail.
+- **`pounce certify --feasible` certifies the float you were actually handed**,
+  on any linearly-constrained QP — convex or not. Every other verdict claims
+  optimality and is therefore available only where the mathematics closes; on a
+  nonconvex QP none of them are, and the honest remaining statement is about
+  where the returned point *sits*. The certificate proves two things at an
+  exact rational ε the emitter computes rather than accepts: every row is
+  violated by at most ε at `x*`, **and** a genuinely feasible `x̂` exists within
+  `‖·‖∞ ≤ ε` of it. The existence claim is the load-bearing half — ε-feasibility
+  alone is satisfiable by a point just outside an *empty* feasible region.
+  `x̂` is the minimum-norm projection of `x*` onto the affine hull of the
+  equalities and active inequalities, computed entirely over ℚ with the float
+  proposing only *which* face to project onto; if it lands outside an inactive
+  row, or the problem has no feasible point, the emitter refuses rather than
+  inflating ε. Opt-in, never a fallback: a failed optimality certificate is a
+  result worth seeing, not one to silently replace with a weaker claim, and
+  `--feasible` where it would prove nothing (an unconstrained polynomial) is
+  refused too. This closes the last verdict the Lean consumer accepted but the
+  producer could not emit.
+- **`unbounded` is no longer restricted to LPs**; any `Q` is now certifiable,
+  including an indefinite one. The recession theorem never wanted convexity —
+  it wants `Q` symmetric and *flat along `d`* — so the restriction was in the
+  emitter, not the mathematics. What it was standing in for is worth naming:
+  an LP's recession conditions (`A d ≥ 0`, `c·d < 0`) are inequalities, and an
+  inequality satisfied with margin survives the f64→ℚ conversion with its sign
+  intact, so the solver's diverging iterate was already an exact witness,
+  copied verbatim. A nonzero `Q` adds `Q d = 0`, an **equality**, which no
+  float meets — the same failure mode as the Farkas ray. So `d` is now
+  recomputed by projecting that iterate onto `ker Q` over ℚ, and normalized so
+  its largest entry is `±1` (every condition is homogeneous, so the scale is
+  free, and the witness reads `![0, 1]` instead of a 16-digit dyadic). The
+  split was never LP-vs-QP: it is equality-vs-inequality. A definite `Q` has no
+  flat direction at all and is refused with exactly that reason, rather than by
+  reporting some downstream inequality that happened to fail.
+- **`RefineError::Singular` split into `FlatFace` and `SingularUnexpected`.**
+  The old variant merged "the active set does not pin a unique point" with
+  "a solve that cannot be singular came back singular", which are a modelling
+  fact and a bug respectively. The new `FlatFace { free_dims, reduced_rank }`
+  is an *exact* diagnosis rather than a guess: with `R` of full row rank the
+  KKT matrix is nonsingular iff the reduced Hessian `Zᵀ Q Z` is, so the
+  reported rank shortfall is literally how far the active set falls short of
+  determining a point.
+- The `γ` ladder now orders candidates by **sharpness** rather than by
+  denominator grid. The two disagree: for `x⁴ − 3x² + 2` the tight `−1/4` needs
+  a denominator of 4 while the four-times-weaker `−1` sits on the coarsest
+  grid, and the old order certified `−1`.
+- **Witnesses are untrusted, and the solver's numbers are never copied.** Wrong
+  witness data makes the generated Lean fail to typecheck; it can never make a
+  false statement pass. Every optimality certificate carries `tolerance = 0`
+  (`feasible` is the one verdict where ε *is* the claim rather than slack in
+  it), so the f64
+  solve only ever *proposes* — an active set, a Gram matrix, a bound — and each
+  is recomputed exactly over ℚ (`refine_kkt`, `refine_farkas`, `round_gram`,
+  `refine_recession`),
+  with the emitter refusing rather than shipping a certificate that cannot
+  verify. This is not a formality: on the `certify_infeasible` fixture the
+  float Farkas ray satisfies `Aᵀy = 0` to a ~1.7e-11 relative residual, which
+  over ℚ is `−103801/262144` — not zero, and undischargeable. The exact ray is
+  `(1, 1, 1)`.
+- `pounce cert-verify <problem.nl> <cert.json>` is the consumer-side binding
+  check. A matching `nl_sha256` is necessary but not sufficient: a certificate
+  can carry the right hash while proving an *easier* problem, and that proof
+  would be perfectly valid. `cert-verify` re-derives the problem from the
+  consumer's own `.nl` and compares it to the certificate's `problem` block,
+  sharing the derivation code with the emitter so a mismatch is always real
+  drift rather than two implementations disagreeing.
+- `scripts/check-lean-cert.sh` guards all of it in three layers, of which the
+  third is the one that tests the soundness claim: certificates regenerate
+  byte-identically and bind to their `.nl` (no Lean needed); codegen reproduces
+  the golden `.lean`, `lake build` succeeds, and the axiom audit shows only
+  `propext`, `Classical.choice`, `Quot.sound` with no `sorry`; and
+  **deliberately corrupted certificates must fail to build** — one forgery per
+  obligation a verdict rests on, including an indefinite Gram matrix that still
+  satisfies the SOS identity (so the identity check alone cannot catch it), a
+  wrong minimizer attached to a bound that is entirely genuine (so only the
+  `p(x₀) = γ` goal can), and for `feasible` a pair that isolates its two
+  obligations against each other: an `x̂` close to `x*` but infeasible, and one
+  feasible but too far away. The recession forgery is built the same way: a
+  direction that is feasible and descending — passing every condition the LP
+  slice ever had — and fails only the new `Q d = 0`.
+- **Adversarial tests across the features, not just within them**
+  (`crates/pounce-cli/tests/certify_adversarial.rs`). Every forgery above
+  attacks one obligation of one verdict; none of them attack two features
+  *interacting*, which is where the remaining soundness risk lives. These are
+  invariants over the whole feature set rather than per-fixture assertions, so
+  they tighten as fixtures are added: the cross product of every certificate
+  against every fixture `.nl` must reject off the diagonal (a re-derivation
+  that quietly matched everything would pass every single-fixture test in the
+  suite while binding nothing); every combination of `--local`, `--growth`,
+  `--feasible` and `--radius` must be refused or deliver exactly the verdict it
+  names, never a third thing with a flag silently dropped; a certified bound
+  must hold at every sampled point of the ball the certificate itself declares,
+  across a radius ladder wide enough that the claim stops being true; the
+  neighborhood, the verdict and the modulus must never disagree about what
+  region or strength is being claimed; a refusal must leave no output file; and
+  certifying must not rewrite the `.sol` it was handed. Two documented
+  degradations are pinned as behaviour rather than left as prose: `--growth`
+  with no rational minimizer falls back to `local-lower-bound` with no
+  candidate, and `--growth` on `x⁴` — attained exactly at `0`, but too flat for
+  any modulus — falls back to `local-min` with no `growth_modulus`.
+- `certify` and `cert-verify` are now listed under **Subcommands** in
+  `pounce --help`, which they were not. `verify` and `check-x0` were, so the
+  feature was undiscoverable except by reading the docs.
+- **Documented what certification costs**, which the page did not say. The
+  solve is untouched — `certify` is a separate subcommand, not a phase, is not
+  behind a build feature, and treats the `.sol` as read-only input. On the QP,
+  LP, infeasible and unbounded slices the cost is a few milliseconds. On the
+  **SOS path it grows roughly fivefold per added variable**: for
+  `Σᵢ (xᵢ⁴ − 2xᵢ²)` the solve stays flat at ~6 ms while `certify` goes 5 ms at
+  n = 1, 204 ms at n = 6, 15 s at n = 10 and past ten minutes at n = 12 — a
+  practical ceiling of single-digit variables for a quartic. A refusal costs the
+  same as a success, since the relaxation has to run before the rounding can be
+  known to fail. Also documented: `--local` is *not* reliably the easier ask —
+  on that family the global bound certifies at every size while `--local`
+  refuses from two variables on, so a refusal from one is a reason to try the
+  other. The `certify` options table (including `--active-tol`, previously
+  undocumented) is now on the page.
+
 ### Fixed — `inf_pr` reported the internal reformulation, not the original NLP (#476)
 
 - The `inf_pr` iteration column printed `max(‖c‖∞, ‖d − s‖∞)` — the
